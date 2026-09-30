@@ -71,7 +71,7 @@ cp tools/propose-learnings.py tools/finish-port.py "$M/tools/"
 gitq -C "$M" add -A; gitq -C "$M" commit -qm "test: current tools" >/dev/null 2>&1
 before="$(git -C "$M" rev-parse HEAD)"; home="$(git -C "$M" rev-parse --abbrev-ref HEAD)"
 prop() { GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
-           python3 "$M/tools/propose-learnings.py" --modid fakeport --workspace "$WS" --env /dev/null "$@"; }
+           python3 "$M/tools/propose-learnings.py" --modid fakeport --workspace "$WS" --env /dev/null --base "$before" "$@"; }
 
 cat > "$WS/good.md" <<'EOF'
 ### new R
