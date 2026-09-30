@@ -1,0 +1,4 @@
+# Every change needs the owner's review. This repository is published under an open-source licence
+# and must contain no third-party code, so the review is the human check behind the automated gates
+# in .github/workflows/gates.yml.
+*       @jivinstev

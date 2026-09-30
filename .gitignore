@@ -1,0 +1,31 @@
+# ── The migration workspace. NEVER commit this. ────────────────────────────────────────────────
+# Decompiling a mod puts somebody else's source on disk. `MIGRATE_WORKSPACE` defaults OUTSIDE any
+# repository precisely so this cannot happen, and these entries are the second line of defence for
+# anyone who overrides it to a path inside the checkout.
+work/
+workspace/
+decompiled/
+decompiled-raw/
+original/
+mods/
+releases/
+installs/
+out/
+
+# ── Machine-local configuration ────────────────────────────────────────────────────────────────
+.env.local
+.setup-state.json
+.env.local.bak
+
+# ── Build + tooling output ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.gradle/
+build/
+bin/
+run/
+*.log
+
+# ── Things that are never ours to publish ──────────────────────────────────────────────────────
+*.jar
+*.class

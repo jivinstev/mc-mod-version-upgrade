@@ -1,0 +1,73 @@
+# The gates that stand between this repository and publishing somebody else's work.
+#
+# These run in CI rather than only as a local hook, because a hook is a courtesy the author can skip
+# and CI is the thing branch protection can require. Both are wired: the hook catches the mistake
+# before it leaves the machine, this catches it if the hook was bypassed.
+name: gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  no-ip:
+    name: no third-party IP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The check scans the COMMITTED TREE, not the diff -- a file added in an earlier commit
+          # and pushed later is still a publication. Depth 1 is therefore enough and correct.
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ONE step, and the shell decides — NOT two steps gated on `if: secrets.X != ''`.
+      # The `secrets` context is NOT available in an `if:` conditional, and using it there is a
+      # workflow-FILE error: the first push failed in 0s with zero jobs run and the only clue was
+      # "this run likely failed because of a workflow file issue". A secret reaches a step through
+      # `env`, and shell tests the env var.
+      #
+      # The forbidden-name list lives in the PRIVATE repo and arrives here as a secret, so this
+      # public repo never contains the list of names it checks for. When the secret is absent every
+      # other check still runs and the skip is announced loudly; --strict then makes an unavailable
+      # list a FAILURE rather than a silent pass.
+      - name: check-no-ip
+        env:
+          NAMES: ${{ secrets.FORBIDDEN_MOD_NAMES }}
+        run: |
+          if [ -n "$NAMES" ]; then
+            printf '%s\n' "$NAMES" > "$RUNNER_TEMP/forbidden-names.txt"
+            python3 tools/check-no-ip.py --names "$RUNNER_TEMP/forbidden-names.txt" --strict
+          else
+            echo "::warning::FORBIDDEN_MOD_NAMES is not set — the mod-name pass will not run."
+            python3 tools/check-no-ip.py
+          fi
+
+  gates-self-test:
+    name: the gates themselves still work
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # check-no-ip.py is code in this repo checking content in this repo, so "it says PASS" is weak
+      # evidence by itself. This plants a violation of every kind and requires the gate to FAIL on
+      # each -- the only thing that distinguishes a working gate from one that always says yes.
+      - run: ./tools/test-gates.sh
+
+  catalog-fidelity:
+    name: no lost migration rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 tools/check-catalog-fidelity.py
