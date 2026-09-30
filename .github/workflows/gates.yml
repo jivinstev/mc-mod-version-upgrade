@@ -85,3 +85,15 @@ jobs:
       # the manifest did not, if a vendored file lost its SPDX header, or if a non-vendored file
       # claims the vendored licence.
       - run: python3 tools/gen-vendored.py --check
+
+  setup-self-test:
+    name: setup keeps its promises
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Idempotence (a second --yes run changes nothing), hand edits winning, the install path
+      # completing with NO Java on PATH, additive path switches, explicit removal, backups.
+      - run: ./tools/test-setup.sh

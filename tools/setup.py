@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""First-run setup, and every run after it.  Usually invoked as `./setup`.
+
+    ./setup                 interactive: every question shows a recommendation; Enter accepts it
+    ./setup --yes           first run: take every recommendation.  RE-RUN: keep every decision.
+    ./setup --check         change nothing; print what setup WOULD change, and verify prerequisites
+    ./setup --path migrate  switch paths (install -> migrate adds keys; never removes any)
+    ./setup --mods-dir 26.2=/path/to/minecraft-26.2   add one more deploy target (a set, not a value)
+    ./setup --remove KEY    the ONLY way setup ever deletes a setting
+
+TWO PATHS, because most people only want the cheap one
+    install   find, resolve, verify and deploy mods.  Needs Python 3 and a network.  NO Java.
+    migrate   port a mod to a newer Minecraft.  Adds a JDK, a workspace and several GB of disk.
+    Path "install" must complete on a machine with no Java at all, and never warns about one.
+
+WHAT IT WRITES
+    .env.local          the VALUES, flat KEY=value.  Every tool reads this; edit it by hand freely.
+    .setup-state.json   PROVENANCE for each key: `user` (you chose or typed it), `detected`, or
+                        `default` -- so a re-run can tell your decisions from its own guesses.
+
+RE-RUN RULES (each one a way a re-run could otherwise quietly break something)
+    1. A hand-edited .env.local always wins; the key is promoted to `user`.
+    2. `user` values are offered back as the default and never changed without a keystroke.
+    3. Mods directories are a SET (MINECRAFT_MODS_DIR_<version>); adding one never touches another.
+    4. Path changes are additive; nothing is deleted when you switch back.
+    5. Nothing is ever destroyed by a re-run.  Removal needs --remove KEY.
+    6. Every change is shown as `KEY: old -> new` and nothing is written until you confirm.
+    7. .env.local is backed up to .env.local.bak before every write.
+    8. A newer setup adds new keys with defaults and leaves everything else alone.
+    ⚠ `--yes` means "accept recommendations" on a FIRST run and "keep what is there" on a RE-RUN.
+      Applying recommendations on a re-run would silently discard your overrides -- the classic
+      failure that looks exactly like the tool working.  tools/test-setup.sh asserts a second
+      `--yes` run reports zero changes.
+
+Standard library only.
+"""
+import argparse, datetime, json, os, pathlib, platform, re, shutil, subprocess, sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+ENV = ROOT / ".env.local"
+STATE = ROOT / ".setup-state.json"
+SCHEMA = 1
+SYS = platform.system()
+DEFAULT_WORKSPACE = "~/.mc-mod-upgrade/work"
+DEFAULT_TARGET = "1.21.1"
+SECRET_KEYS = {"CURSEFORGE_API_KEY"}
+
+INSTALL_HINTS = {  # tool -> {platform: command}
+    "git": {"Darwin": "xcode-select --install   (or: brew install git)",
+            "Windows": "winget install --id Git.Git",
+            "Linux": "sudo apt install git   (Fedora: sudo dnf install git)"},
+    "python3": {"Darwin": "brew install python",
+                "Windows": "winget install --id Python.Python.3.12",
+                "Linux": "sudo apt install python3   (Fedora: sudo dnf install python3)"},
+    "java": {"Darwin": "brew install --cask temurin@21   (MC 26.x also needs 25: temurin@25)",
+             "Windows": "winget install --id EclipseAdoptium.Temurin.21.JDK",
+             "Linux": "sudo apt install openjdk-21-jdk   (Fedora: sudo dnf install java-21-openjdk-devel)"},
+}
+
+
+# ── .env.local + state ──────────────────────────────────────────────────────────────────────
+def read_env():
+    vals = {}
+    if ENV.is_file():
+        for line in ENV.read_text().splitlines():
+            m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$', line)
+            if m and not line.lstrip().startswith("#"):
+                vals[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+    return vals
+
+
+def read_state():
+    try:
+        s = json.loads(STATE.read_text())
+        if isinstance(s, dict) and isinstance(s.get("keys"), dict):
+            return s
+    except (OSError, ValueError):
+        pass
+    return {"schema": SCHEMA, "keys": {}}
+
+
+def reconcile(env, state):
+    """Rule 1: anything in .env.local that setup did not write, or that differs from what it
+    wrote, is the user's own statement of intent."""
+    promoted = []
+    for k, v in env.items():
+        rec = state["keys"].get(k)
+        if rec is None or rec.get("value") != v:
+            if rec is None or rec.get("origin") != "user":
+                promoted.append(k)
+            state["keys"][k] = {"value": v, "origin": "user",
+                                "set_at": (rec or {}).get("set_at") or now()}
+    # A key in the state but gone from .env.local was removed by hand: forget it (rule 1 again).
+    for k in [k for k in state["keys"] if k not in env]:
+        del state["keys"][k]
+    return promoted
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def write_env(changes, removals):
+    """Update lines in place so comments and ordering the user wrote survive; append new keys."""
+    lines = ENV.read_text().splitlines() if ENV.is_file() else [
+        "# Written by ./setup. Edit freely -- a hand edit always wins over setup's own guesses.",
+        "# Provenance for each key lives in .setup-state.json."]
+    seen = set()
+    out = []
+    for line in lines:
+        m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*=', line)
+        if m and not line.lstrip().startswith("#"):
+            k = m.group(1)
+            if k in removals:
+                continue
+            if k in changes:
+                out.append(f"{k}={changes[k]}")
+                seen.add(k)
+                continue
+        out.append(line)
+    for k, v in changes.items():
+        if k not in seen:
+            out.append(f"{k}={v}")
+    if ENV.is_file():
+        shutil.copy2(ENV, ENV.with_name(".env.local.bak"))           # rule 7
+    ENV.write_text("\n".join(out) + "\n")
+
+
+# ── probes ──────────────────────────────────────────────────────────────────────────────────
+def run(cmd, timeout=15):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, str(e)
+
+
+def java_major():
+    if not shutil.which("java"):
+        return None
+    code, out = run(["java", "-version"])
+    m = re.search(r'version "(\d+)(?:\.(\d+))?', out or "")
+    if not m:
+        return None
+    major = int(m.group(1))
+    return int(m.group(2)) if major == 1 and m.group(2) else major
+
+
+def hint(tool):
+    return INSTALL_HINTS[tool].get(SYS, INSTALL_HINTS[tool]["Linux"])
+
+
+def discover_installs():
+    code, out = run([sys.executable, str(ROOT / "tools/find-minecraft.py"), "--json",
+                     "--env", str(ENV)], timeout=60)
+    try:
+        return json.loads(out).get("installs", []) if code == 0 else []
+    except ValueError:
+        return []
+
+
+def inside_git_repo(path):
+    p = pathlib.Path(path).expanduser()
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    code, _ = run(["git", "-C", str(p), "rev-parse", "--is-inside-work-tree"])
+    return code == 0
+
+
+def likely_output_repos():
+    """Sibling checkouts that look like a place finished ports live (a git repo with mods/)."""
+    out = []
+    for d in sorted(ROOT.parent.iterdir()):
+        if d != ROOT and d.is_dir() and (d / ".git").exists() and (d / "mods").is_dir():
+            out.append(os.path.relpath(d, ROOT))
+    return out
+
+
+def key_for_version(v):
+    return "MINECRAFT_MODS_DIR_" + v.replace(".", "_")
+
+
+# ── asking ──────────────────────────────────────────────────────────────────────────────────
+class Asker:
+    def __init__(self, args, state, first_run):
+        self.a, self.state, self.first = args, state, first_run
+        self.proposed = {}          # key -> (value, origin)
+        self.interactive = not (args.yes or args.check)
+
+    def existing(self, key):
+        return self.state["keys"].get(key)
+
+    def decide(self, key, recommended, question, origin="default", secret=False):
+        """Return the value to use, honouring the re-run rules. Records a proposal if it changes."""
+        rec = self.existing(key)
+        cur = rec["value"] if rec else None
+        if rec and (not self.interactive):
+            return cur                            # re-run + --yes/--check: keep every decision
+        default = cur if rec else recommended
+        if self.interactive:
+            shown = "(set)" if secret and default else (default if default != "" else "none")
+            ans = input(f"  {question} [{shown}]: ").strip()
+            if ans.lower() == "none":
+                value, origin = "", "user"
+            elif ans:
+                value, origin = ans, "user"
+            else:
+                value = default
+                origin = rec["origin"] if rec else origin
+        else:
+            value = recommended                   # first run + --yes: take the recommendation
+        if value != cur or rec is None:
+            self.proposed[key] = (value, origin)
+        return value
+
+
+# ── the steps ───────────────────────────────────────────────────────────────────────────────
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--path", choices=["install", "migrate"])
+    ap.add_argument("--mods-dir", action="append", default=[], metavar="VERSION=PATH")
+    ap.add_argument("--create-dirs", action="store_true",
+                    help="create a missing mods folder named by --mods-dir (tier 1: folder only)")
+    ap.add_argument("--remove", action="append", default=[], metavar="KEY")
+    ap.add_argument("--no-network", action="store_true", help="skip the git reachability probe")
+    a = ap.parse_args()
+
+    if not (a.yes or a.check) and not sys.stdin.isatty():
+        print("setup: not a terminal -- pass --yes (take recommendations / keep decisions) or --check.",
+              file=sys.stderr)
+        return 2
+
+    env, state = read_env(), read_state()
+    first_run = not ENV.exists() and not STATE.exists()
+    promoted = reconcile(env, state)
+    ask = Asker(a, state, first_run)
+    problems, notes = [], []
+
+    print(f"setup: {'first run' if first_run else 're-run'} on {SYS}  ({ROOT})")
+    if promoted:
+        print(f"  kept your hand edits to .env.local: {', '.join(sorted(promoted))}")
+
+    # 0. which path ---------------------------------------------------------------------------
+    print("\n0. What do you want to do?\n"
+          "   install  find, resolve and deploy mods (Python only -- recommended for most people)\n"
+          "   migrate  port a mod to a newer Minecraft (adds a JDK and several GB of disk)")
+    if a.path:
+        ask.proposed["SETUP_PATH"] = (a.path, "user")
+        path = a.path
+    else:
+        path = ask.decide("SETUP_PATH", "install", "install or migrate?")
+    if path not in ("install", "migrate"):
+        problems.append(f"SETUP_PATH must be install or migrate, not {path!r}")
+        path = "install"
+
+    # 1. prerequisites ------------------------------------------------------------------------
+    print("\n1. Prerequisites")
+    for tool in ("git",):
+        if shutil.which(tool):
+            print(f"   {tool}: ok")
+        else:
+            problems.append(f"{tool} is missing -- install it: {hint(tool)}")
+    print(f"   python3: ok ({platform.python_version()})")
+    if sys.version_info < (3, 8):
+        problems.append(f"python 3.8+ needed -- {hint('python3')}")
+    if path == "migrate":
+        jm = java_major()
+        if jm is None:
+            problems.append(f"no JDK found (migration needs Java 21; MC 26.x needs 25) -- {hint('java')}")
+        elif jm < 21:
+            problems.append(f"Java {jm} found; migration needs 21+ -- {hint('java')}")
+        else:
+            print(f"   java: ok (Java {jm}{'' if jm >= 25 else '; MC 26.x targets also need Java 25'})")
+    if SYS == "Windows":
+        notes.append("the tooling is bash + Python: on Windows run it from WSL or Git Bash")
+
+    # 2. git access ---------------------------------------------------------------------------
+    print("\n2. Git access")
+    print("   clone to USE it; FORK to contribute (main takes pull requests only):\n"
+          "     gh repo fork jivinstev/mc-mod-version-upgrade --clone\n"
+          "   A mirror is not needed.")
+    if not a.no_network:
+        code, _ = run(["git", "-C", str(ROOT), "ls-remote", "--exit-code", "origin", "HEAD"], timeout=20)
+        print("   origin: " + ("reachable" if code == 0 else "NOT reachable (offline, or no remote) -- "
+                                 "setup continues; updates and contributions need it"))
+
+    # 3. Minecraft installs + per-version deploy targets ---------------------------------------
+    print("\n3. Minecraft installs")
+    installs = discover_installs()
+    if not installs:
+        print("   none found -- fine for building; deploying needs one (add later with --mods-dir)")
+    for i, f in enumerate(installs, 1):
+        mods = "no mods/" if f.get("mods") is None else f"{f['mods']} mods"
+        vers = ", ".join(f.get("versions") or []) or "?"
+        print(f"   {i}. {f['path']}  [{f['source']}; Minecraft {vers}; {mods}]")
+    main_dir = next((f["path"] for f in installs if f.get("source") == "official launcher default"),
+                    installs[0]["path"] if installs else "")
+    ask.decide("MINECRAFT_DIR", main_dir, "your main Minecraft folder (or 'none')", origin="detected")
+
+    by_version = {}
+    for f in installs:
+        for v in f.get("versions") or []:
+            v = v.split(" ")[0]
+            if re.fullmatch(r'\d+(\.\d+)+', v):
+                by_version.setdefault(v, os.path.join(f["path"], "mods"))
+    if not by_version and first_run and not any(k.startswith("MINECRAFT_MODS_DIR_") for k in state["keys"]):
+        by_version = {}
+    for v, d in sorted(by_version.items()):
+        ask.decide(key_for_version(v), d, f"deploy target for Minecraft {v} (or 'none')", origin="detected")
+    for spec in a.mods_dir:                       # rule 3: add to the set, never touch the others
+        if "=" not in spec:
+            problems.append(f"--mods-dir wants VERSION=PATH, got {spec!r}")
+            continue
+        v, d = spec.split("=", 1)
+        d = str(pathlib.Path(d).expanduser())
+        if not pathlib.Path(d).is_dir():
+            if a.create_dirs and not a.check:
+                pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+                notes.append(f"created {d} (folder only: point a launcher profile's Game Directory at "
+                             f"its parent to play it)")
+            elif not a.check:
+                problems.append(f"{d} does not exist -- pass --create-dirs to make it (folder only)")
+                continue
+        ask.proposed[key_for_version(v)] = (d, "user")
+
+    # 4-5. migration-only settings -------------------------------------------------------------
+    if path == "migrate":
+        print("\n4. Migration workspace (decompiled mods live here -- keep it OUTSIDE any git repo)")
+        ws = ask.decide("MIGRATE_WORKSPACE", DEFAULT_WORKSPACE, "workspace directory")
+        if ws and inside_git_repo(ws):
+            problems.append(f"MIGRATE_WORKSPACE {ws} is inside a git repository: one `git add -A` would "
+                            "publish somebody's decompiled mod. Choose a path outside any checkout.")
+        if ws:
+            try:
+                free = shutil.disk_usage(pathlib.Path(ws).expanduser().anchor or "/").free / 2**30
+                if free < 10:
+                    notes.append(f"only {free:.0f} GB free; a migration wants several GB (10+ is comfortable)")
+            except OSError:
+                pass
+        print("\n5. Where finished ports go (a git repo you choose, or none)")
+        cands = likely_output_repos()
+        if cands:
+            print("   looks like a ports repo: " + ", ".join(cands))
+        ask.decide("MOD_OUTPUT_REPO", cands[0] if cands else "", "output repo path (or 'none')",
+                   origin="detected" if cands else "default")
+
+    # 6. registries ---------------------------------------------------------------------------
+    print("\n6. Mod registries\n   Modrinth needs nothing.  CurseForge is OPTIONAL: it widens search; "
+          "get a key at https://console.curseforge.com/ (Modrinth-only works fine).")
+    ask.decide("CURSEFORGE_API_KEY", "", "CurseForge API key (or Enter to skip)", secret=True)
+
+    # 7. Claude hookup ------------------------------------------------------------------------
+    print("\n7. Claude Code")
+    print("   claude: " + ("found" if shutil.which("claude") else
+                           "not found -- install from https://claude.com/claude-code, then re-run"))
+    skills = sorted(p.name for p in (ROOT / ".claude/skills").iterdir() if (p / "SKILL.md").is_file())
+    print(f"   skills in this checkout: {', '.join(skills)} (they load when Claude runs here)")
+    mode = ask.decide("SKILLS_INSTALL", "project", "project (only in this checkout) or user (everywhere)?")
+    if mode == "user" and not a.check:
+        dest = pathlib.Path.home() / ".claude/skills"
+        dest.mkdir(parents=True, exist_ok=True)
+        for s in skills:
+            link = dest / s
+            if link.exists() or link.is_symlink():
+                if link.is_symlink() and os.path.realpath(link) == str((ROOT / ".claude/skills" / s).resolve()):
+                    continue
+                notes.append(f"~/.claude/skills/{s} already exists and is not ours -- left alone")
+                continue
+            link.symlink_to(ROOT / ".claude/skills" / s)
+            notes.append(f"linked ~/.claude/skills/{s}")
+
+    # removals ---------------------------------------------------------------------------------
+    removals = set()
+    for k in a.remove:
+        if k in state["keys"]:
+            removals.add(k)
+        else:
+            notes.append(f"--remove {k}: not set, nothing to do")
+
+    # 8. diff, confirm, write ------------------------------------------------------------------
+    changes = {k: v for k, (v, _) in ask.proposed.items()
+               if state["keys"].get(k, {}).get("value") != v or k not in state["keys"]}
+    print("\n8. Summary")
+    if not changes and not removals:
+        print("   no changes")
+    for k in sorted(changes):
+        old = state["keys"].get(k, {}).get("value")
+        show = (lambda s: "(set)" if s else "(empty)") if k in SECRET_KEYS else (lambda s: s if s else "(empty)")
+        print(f"   {k}: {show(old) if old is not None else '(unset)'} -> {show(changes[k])}")
+    for k in sorted(removals):
+        print(f"   {k}: REMOVE")
+    for n in notes:
+        print(f"   note: {n}")
+    for p in problems:
+        print(f"   PROBLEM: {p}")
+
+    if a.check:
+        print("\nsetup --check: nothing written.")
+        return 1 if problems else 0
+    if changes or removals:
+        if ask.interactive and input("\n   write these changes? [Y/n]: ").strip().lower() not in ("", "y", "yes"):
+            print("   nothing written.")
+            return 0
+        write_env(changes, removals)
+        for k, v in changes.items():
+            state["keys"][k] = {"value": v, "origin": ask.proposed[k][1], "set_at": now()}
+        for k in removals:
+            state["keys"].pop(k, None)
+    state["schema"] = SCHEMA
+    STATE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+    print("\nReady." if not problems else "\nWritten, but fix the PROBLEM lines above before relying on it.")
+    if path == "install":
+        print("Try:  python3 tools/mod-registry/modreg.py search --query \"sodium\"")
+    else:
+        print("Try:  bash tools/download-tools.sh      # fetches + verifies the two decompilers")
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
