@@ -74,6 +74,9 @@ runs {
         if (project.hasProperty('battleticks')) systemProperty "${project.mod_id}.battleticks", project.property('battleticks')
     }
     server { systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id; argument '--nogui' }
+    // Gate B: `./gradlew runGameTestServer` boots a headless dedicated server, runs the @GameTests in the
+    // mod_id namespace, and exits non-zero on any failure (pipeline.md §6b).
+    gameTestServer { systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id }
     data {
         arguments.addAll '--mod', project.mod_id, '--all',
             '--output', file('src/generated/resources/').getAbsolutePath(),
@@ -85,6 +88,11 @@ configurations { runtimeClasspath.extendsFrom localRuntime }
 
 dependencies {
     implementation "net.neoforged:neoforge:${neo_version}"
+
+    // Gate A: Minecraft-free JUnit tests (test-templates/ResourceIntegrityTest, MixinConfigIntegrityTest).
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
     if (project.uses_geckolib.toBoolean()) {
         implementation "software.bernie.geckolib:geckolib-neoforge-${minecraft_version}:${geckolib_version}"
@@ -215,3 +223,13 @@ tasks.register('checkDatapackLayout', Exec) {
     commandLine 'python3', "${projectDir}/tools/fix-datapack-layout.py", projectDir.toString(), '--verify'
 }
 tasks.named('check') { dependsOn 'checkDatapackLayout' }
+
+// Gate A runs under `./gradlew build`, so `deployToMods` never ships a jar that fails it. The tests
+// are told where the project is and which Minecraft they target, rather than guessing from the
+// working directory, which differs between Gradle plugins (catalogue §W9).
+tasks.named('test', Test) {
+    useJUnitPlatform()
+    systemProperty 'migrate.projectDir', project.projectDir.absolutePath
+    systemProperty 'migrate.minecraftVersion', minecraft_version
+    testLogging { events 'passed', 'failed', 'skipped'; exceptionFormat 'full' }
+}

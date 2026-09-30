@@ -14,6 +14,9 @@ headlessly regardless. Detail + fix for each id is in repo `CATALOG.md` **§R** 
 
 ## The sweep — run from `mods/<modid>/`
 
+`bash ../../tools/run-catalog-scans.sh` (from the port directory) extracts the block below and runs
+it; you do not need to copy it out by hand.
+
 ```bash
 SRC=src/main/java; RES=src/main/resources
 hit(){ printf '\n── %s ──\n' "$1"; }
@@ -172,7 +175,8 @@ hit "§G/#59b  ITag / getReverseTag / .tags().getTag() -> HolderSet.Named + regi
 grep -rnE 'ITag<|getReverseTag\(|\.tags\(\)\.getTag\(' $SRC 2>/dev/null
 
 hit "non-fatal  #forge: data tags -> #c: (NeoForge common) convention (silently-empty tag refs)"
-grep -rhoE '#?forge:[a-z_/]+' $RES/data 2>/dev/null | sort -u
+# (anchored so it does not match inside every neoforge:add_spawns / neoforge:any id)
+grep -rhoE '(^|[^a-z])#?forge:[a-z_/]+' $RES/data 2>/dev/null | sed -E 's/^[^#f]//' | sort -u
 
 hit "non-fatal  custom core shader stuck on GLSL 110 (varying/gl_FragColor/texture2D) -> version 150"
 grep -rlnE '#version 1[012]0|varying |gl_FragColor|texture2D' $RES/assets 2>/dev/null | grep -iE 'shaders'
@@ -272,8 +276,8 @@ grep -rhoE 'method *= *\{?"[a-zA-Z_$][A-Za-z0-9_$]*"' $SRC 2>/dev/null | sort -u
 echo "  (^ every one of these must be a 1.21 MOJANG-OFFICIAL member name. Yarn tells: *ScreenHandler*,"
 echo "     *Entity(Renderer)?Mixin for a vanilla class, isAcceptableItem, getMaxUseTime, onEntityHit,"
 echo "     damage/tick/writeCustomDataToNbt. Verify each with javap against the recompile jar.)"
-grep -rn '"compatibilityLevel" *: *"JAVA_8"' $RES 2>/dev/null
-grep -rn '"refmap"' $RES 2>/dev/null
+grep -rn --include='*.json' '"compatibilityLevel" *: *"JAVA_8"' $RES 2>/dev/null
+grep -rn --include='*.json' '"refmap"' $RES 2>/dev/null   # mixin configs are JSON; a toml comment is not a hit
 
 hit "§P/#153  data/fabric/** and Fabric-only tag namespaces (silently empty on NeoForge)"
 find $RES/data -maxdepth 1 -type d \( -name fabric -o -name origins \) 2>/dev/null
@@ -297,7 +301,7 @@ grep -rnE 'applyEffectTick\(|isDurationEffectTick\(|addAttributeModifiers\(|remo
 hit "§159  ItemAttributeModifiers built from ctor args must be a STATIC helper (else 'cannot reference this before supertype ctor')"
 grep -rn 'ItemAttributeModifiers.builder()' $SRC 2>/dev/null
 
-hit "§162  MIXIN `this instanceof X` / `(X) this` — the mixin class does not extend its target (javac error)"
+hit "§162  MIXIN 'this instanceof X' / '(X) this' — the mixin class does not extend its target (javac error)"
 grep -rn 'this instanceof \|([A-Za-z]*Entity) this\|(Player) this' $SRC 2>/dev/null | grep -v '(Object) this'
 
 hit "§163  🔴 CLIENT-only import in SHARED code (I18n, Minecraft.getInstance, …) — dedicated-server class-load crash"

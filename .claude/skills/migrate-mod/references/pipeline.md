@@ -42,11 +42,16 @@ $EDITOR mods/$MODID/gradle.properties     # mod_id, mod_name, mod_version, group
 mkdir -p mods/$MODID/decompiled-raw
 java -jar tools/vineflower.jar -dgs=1 -rsy=1 -rbr=1 "$JAR" mods/$MODID/decompiled-raw
 # Java sources -> src/main/java   (the top package dir; e.g. com/)
-rsync -a --include='*/' --include='*.java' --exclude='*' \
-      mods/$MODID/decompiled-raw/ mods/$MODID/src/main/java/
+# (cp + find rather than rsync, which is not installed everywhere)
+(cd mods/$MODID/decompiled-raw && find . -name '*.java' -exec sh -c \
+      'mkdir -p "../src/main/java/$(dirname "$1")" && cp "$1" "../src/main/java/$1"' _ {} \;)
 # Resources -> src/main/resources  (assets, data, pack.mcmeta, mixin/mods metadata)
 cd mods/$MODID/decompiled-raw
-rsync -a assets data pack.mcmeta *.json META-INF ../src/main/resources/ 2>/dev/null
+for x in assets data pack.mcmeta *.json; do [ -e "$x" ] && cp -R "$x" ../src/main/resources/; done
+# META-INF: everything EXCEPT the mods.toml. Keep the TEMPLATE's neoforge.mods.toml (parameterised from
+# gradle.properties); the jar's is the old loader's, still in decompiled-raw/, and §3 converts it into the template's.
+[ -d META-INF ] && find META-INF -type f ! -name '*mods.toml' -exec sh -c \
+    'mkdir -p "../src/main/resources/$(dirname "$1")" && cp "$1" "../src/main/resources/$1"' _ {} \;
 cd -
 # Remove Forge-era metadata that Gradle regenerates or NeoForge rejects:
 rm -f mods/$MODID/src/main/resources/*.refmap.json
@@ -162,10 +167,14 @@ Step 4b** (`MIGRATION.md`; method in `references/test-targets.md`) — build aga
 most, not against the template's example cases. The mixin/baseline-load gates below are universal; the
 subsystem coverage (§6c) is churn-driven.
 
-### 6a. Mixin-config integrity test (JUnit, Minecraft-free, fast)
-Guards the invisible-to-javac crash where a mixin is added but not listed in
-`<modid>.mixins.json` (catalog R/#43 → runtime `ClassCastException`). Add JUnit + a `test`
-task to `build.gradle`:
+### 6a. Gate A — Minecraft-free JUnit (resource integrity for every port; mixin integrity if it has mixins)
+The template's `build.gradle` already declares JUnit and a `test` task that passes `migrate.projectDir` and
+`migrate.minecraftVersion` to the tests. Copy `test-templates/ResourceIntegrityTest.java.template` for EVERY
+port (plural datapack dirs, strict JSON, recipe-ingredient form for the target).
+
+The mixin half guards the invisible-to-javac crash where a mixin is added but not listed in
+`<modid>.mixins.json` (catalog R/#43 → runtime `ClassCastException`). For a build.gradle that does not
+come from the template, the wiring is:
 ```groovy
 dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.2')
@@ -185,7 +194,7 @@ Copy `templates/neoforge-mod/test-templates/MixinConfigIntegrityTest.java.templa
 Boots a dedicated server with the mod, runs `@GameTest` methods, exits non-zero on failure.
 This is the ONLY thing that catches the §R runtime crashes. Set it up once:
 ```bash
-# (i) run config — add to build.gradle's runs {} block:
+# (i) run config — the template's runs {} already has it; for another build.gradle add:
 #     gameTestServer { systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id }
 # (ii) empty test structure (NeoForge 21.1 has no @EmptyTemplate; framework needs a real .nbt):
 #      last arg is DST_DATAVERSION (1.21.1 = 3955; look up the value for any other DST_MC):
