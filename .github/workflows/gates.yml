@@ -176,3 +176,19 @@ jobs:
       # rule deleted with its census row, a widened allowlist, a CI step that cannot fail, a weakened
       # self-test) must each be blocked, and a clean control must pass.
       - run: ./tools/test-review.sh
+
+  port-tools-self-test:
+    name: port tools (override probe, sweep runner, resource test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # The probe finds methods that compile but override nothing; the sweep must be valid shell; the
+      # resource test is compiled against stub JUnit and must catch each data-layer failure it names.
+      - run: ./tools/test-port-tools.sh
