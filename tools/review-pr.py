@@ -66,7 +66,8 @@ def entry_labels(text):
     """Field labels an entry uses -- MUST match tools/propose-learnings.py's entry_labels, so a lesson the
     proposer accepts is never blocked here: **Pattern:**, **Pattern (1.21.2+):**, **Pattern → Error → Fix:**."""
     out = set()
-    for span in re.findall(r"\*\*([^*\n]{1,120})\*\*", text):
+    # a span must START with a label word: pairing every `**` breaks on a title that contains `*`
+    for span in re.findall(r"\*\*(?=(?:Pattern|Error|Runtime|Symptom|Fix)\b)([^*\n]{1,120}?)\*\*", text):
         span = re.sub(r"\s*\([^)]*\)", "", span).strip().rstrip(":").strip()
         parts = [p.strip().rstrip(":").strip() for p in re.split(r"\s*(?:→|->)\s*", span)]
         if len(parts) > 1 or span != span.rstrip(":") or parts[0] in ("Pattern", "Fix", "Error", "Runtime", "Symptom"):
