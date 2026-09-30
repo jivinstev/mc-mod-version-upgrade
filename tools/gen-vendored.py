@@ -51,7 +51,7 @@ UPSTREAM = {
 
 COMMENT = {  # suffix -> line-comment prefix
     ".py": "#", ".sh": "#", ".command": "#", ".properties": "#", ".toml": "#",
-    ".gradle": "//", ".java": "//", ".example": "//", ".template": "//", ".groovy": "//",
+    ".tsv": "#", ".gradle": "//", ".java": "//", ".example": "//", ".template": "//", ".groovy": "//",
 }
 
 
@@ -86,6 +86,12 @@ def copy_set(files):
     # Rule 2: individual files make-multiversion.sh copies or renders.
     mv = MAKE_MV.read_text()
     named = set(re.findall(r'"\$TPL/([^"$]+)"', mv)) | set(re.findall(r'\{tpl\}/([^"\s]+)', mv))
+    # A per-target path ("$TPL/versions/$T.renames.hand.tsv") names every file that fits it.
+    for pat in re.findall(r'"\$TPL/([^"]*\$T[^"]*)"', mv):
+        rx = re.compile(re.escape(pat).replace(re.escape("$T"), r"[^/]+") + "$")
+        named |= {f[len("templates/multi-version/"):] for f in files
+                  if f.startswith("templates/multi-version/")
+                  and rx.fullmatch(f[len("templates/multi-version/"):])}
     found = 0
     for rel in sorted(named):
         rel = rel.strip('"')
