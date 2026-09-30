@@ -26,8 +26,8 @@ THE ADDITIONS FILE -- one block per lesson, each opened by a `### ` line:
 
 IDENTITY IS REFUSED, NOT TRUSTED
     The public name gate knows nothing about the mod YOU just ported, so this tool learns it from the
-    workspace (mod id, display name, Java package, jar name, the workspace path) and adds those to
-    the name check.  Describe the mod ("a small MCreator food mod"), never name it.
+    workspace (mod id, display name, Java package, jar name, the workspace path) and refuses additions
+    that contain any of them.  Describe the mod ("a small MCreator food mod"), never name it.
 
 GATES (the same ones a reviewer runs): check-no-ip.py --strict, check-catalog-fidelity.py.
 Standard library only.  Exit codes: 0 done  1 refused (gate or format)  2 could not run.
@@ -150,6 +150,7 @@ def main():
     ap.add_argument("--additions", help="default: $MIGRATE_WORKSPACE/catalog-additions.md")
     ap.add_argument("--workspace", help="default: MIGRATE_WORKSPACE from .env.local")
     ap.add_argument("--title", help="PR title (default: 'Catalogue: lessons from a <date> migration')")
+    ap.add_argument("--base", help="branch point for the PR (default: origin/main, else main)")
     ap.add_argument("--push", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--env", default=str(ROOT / ".env.local"))
@@ -173,25 +174,28 @@ def main():
         print(f"propose-learnings: REFUSED -- {e}", file=sys.stderr)
         return 1
 
-    # the name gate: the owner's private list (if configured) + this port's own identity
+    # IDENTITY is checked on the text this proposal ADDS: the whole-repo gate below cannot do it,
+    # because a name that already appears in the repository (a mod named after a published library
+    # the catalogue discusses, say) would fail every proposal for a reason this one did not cause.
     names = identity_tokens(port, ws) if port.is_dir() else [a.modid]
-    extra = env.get("FORBIDDEN_NAMES_FILE", "")
-    names_file = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
-    with names_file:
-        if extra and pathlib.Path(os.path.expanduser(extra)).is_file():
-            names_file.write(pathlib.Path(os.path.expanduser(extra)).read_text().rstrip("\n") + "\n")
-        names_file.write("\n".join(names) + "\n")
     print(f"propose-learnings: {len(blocks)} lesson(s); refusing this port's identity: {', '.join(names)}")
-
-    # screen the additions text alone first: a clear message beats a whole-repo gate failure
-    # (the workspace and home paths are screened HERE only: the catalogue itself legitimately
-    #  mentions paths like /root/.gradle, so they cannot go into the whole-repo gate)
+    # (the workspace and home paths are screened here too: the catalogue itself legitimately
+    #  mentions paths like /root/.gradle, so they could never go into a whole-repo gate)
     lowered = additions.read_text().lower()
     leaked = [n for n in names + [str(ws), str(pathlib.Path.home())] if n.lower() in lowered]
     if leaked:
         print(f"propose-learnings: REFUSED -- the additions name this port: {', '.join(leaked)}.\n"
               f"  Describe it instead (e.g. 'a small MCreator food mod').", file=sys.stderr)
         return 1
+
+    # the whole-repo gate uses the owner's private list, when this machine has it
+    ip_args = []
+    extra = env.get("FORBIDDEN_NAMES_FILE", "")
+    if extra and pathlib.Path(os.path.expanduser(extra)).is_file():
+        ip_args = ["--names", os.path.expanduser(extra), "--strict"]
+    else:
+        print("propose-learnings: no FORBIDDEN_NAMES_FILE configured -- the IP gate runs without the private "
+              "name list (the reviewer and CI run it with the list).")
 
     if a.dry_run:
         tmp = pathlib.Path(tempfile.mkdtemp()) / "CATALOG.md"
@@ -205,7 +209,16 @@ def main():
         print("propose-learnings: REFUSED -- this checkout has uncommitted changes; commit or stash them first",
               file=sys.stderr)
         return 1
-    base = "origin/main" if git("fetch", "-q", "origin", "main", check=False).returncode == 0 else "main"
+    if a.base:
+        base = a.base
+    else:
+        git("fetch", "-q", "origin", "main", check=False)   # best effort; offline is fine
+        base = next((r for r in ("origin/main", "main")
+                     if git("rev-parse", "--verify", "--quiet", r, check=False).returncode == 0), None)
+    if not base or git("rev-parse", "--verify", "--quiet", base, check=False).returncode:
+        print(f"propose-learnings: no base to branch from ({base or 'neither origin/main nor main exists'}); "
+              f"pass --base <ref>", file=sys.stderr)
+        return 2
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     branch = f"learnings/{stamp}"
     start = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
@@ -220,7 +233,7 @@ def main():
 
     CATALOG.write_text(new_text)
     ip = subprocess.run([sys.executable, str(ROOT / "tools/check-no-ip.py"), "--root", str(ROOT),
-                         "--names", names_file.name, "--strict"], capture_output=True, text=True)
+                         *ip_args], capture_output=True, text=True)
     print(ip.stdout[-2000:], end="")
     if ip.returncode:
         print(ip.stderr[-2000:], file=sys.stderr, end="")
