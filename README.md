@@ -36,7 +36,9 @@ A finished migration delivers two things to two places. The port's source goes t
 destination**, any folder or git repository you name in setup (`tools/finish-port.py` commits it on a
 `port/<modid>` branch there). What the port *taught*, stated without the mod's name, goes back to this
 repository as a pull request against the catalogue (`tools/propose-learnings.py`), so the next person's
-port is faster.
+port is faster. Each delivered port also records what it cost (model, effort, tokens, time, and dollars
+where Claude Code records them) in `docs/port-costs.tsv`, so the next person can see what a mod of that
+size is likely to take.
 
 ### If you don't have the prerequisites
 

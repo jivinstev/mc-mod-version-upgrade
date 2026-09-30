@@ -6,6 +6,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+export CLAUDE_CONFIG_DIR="$T/claude"      # never read the real ~/.claude/projects: tests use fixtures only
 pass=0; fail=0
 ok()  { echo "  PASS  $1"; pass=$((pass+1)); }
 bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
@@ -23,6 +24,36 @@ echo 'keep' > "$P/src/main/resources/assets/x/out/keep.json"
 printf '# port\n**Status: DONE.** gates green\n' > "$P/MIGRATION.md"
 mkdir -p "$P/.git"; echo x > "$P/.git/HEAD"
 for f in build/libs/x.jar run/world/level.dat .gradle/c decompiled-raw/A.java run-mc26.2/x build.log; do echo x > "$P/$f"; done
+
+# fixture transcripts: session S1 ported fakeport (one request split over 2 content blocks, a subagent,
+# a running cost), S2 is unrelated work, S3 (a build that writes no cost-state) touched it too
+J="$CLAUDE_CONFIG_DIR/projects/-ws"; mkdir -p "$J/S1/subagents"
+asst() { # asst <session> <reqId> <iso time> <tool path> <out> <cache_read> [effort]
+  printf '{"type":"assistant","sessionId":"%s","requestId":"%s","timestamp":"%s","effort":"%s","version":"9.9.9","entrypoint":"cli","message":{"model":"claude-test-1","content":[{"type":"tool_use","input":{"file_path":"%s"}}],"usage":{"input_tokens":10,"output_tokens":%s,"cache_read_input_tokens":%s,"cache_creation_input_tokens":100,"cache_creation":{"ephemeral_5m_input_tokens":40,"ephemeral_1h_input_tokens":60},"output_tokens_details":{"thinking_tokens":5}}}}\n' \
+    "$1" "$2" "$3" "${7:-high}" "$4" "$5" "$6"; }
+{ asst S1 r1 2026-09-30T10:00:00Z /w/mods/fakeport/A.java 100 1000
+  asst S1 r1 2026-09-30T10:00:01Z /w/mods/fakeport/A.java 100 1000      # same request, second block
+  asst S1 r2 2026-09-30T10:05:00Z /w/mods/othermod/B.java 200 2000
+  printf '{"type":"cost-state","sessionId":"S1","totalCostUSD":1.25}\n{"type":"cost-state","sessionId":"S1","totalCostUSD":1.5}\n'; } > "$J/S1.jsonl"
+asst S1 a1 2026-09-30T10:03:00Z /w/x 50 500 medium > "$J/S1/subagents/agent-1.jsonl"
+asst S2 z1 2026-09-30T11:00:00Z /elsewhere/y 999 9999 > "$J/S2.jsonl"
+
+echo "0. port-cost.py (fixture transcripts)"
+out="$(python3 tools/port-cost.py fakeport --workspace "$WS" --print 2>&1)"; code=$?
+C="$(python3 tools/port-cost.py fakeport --workspace "$WS" --print >/dev/null 2>&1; python3 - "$WS" <<'PY2'
+import importlib.util, sys, pathlib, os
+spec = importlib.util.spec_from_file_location("pc", "tools/port-cost.py"); pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+s = pc.collect("fakeport", pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
+c = pc.summarise("fakeport", s, pathlib.Path(sys.argv[1]) / "mods/fakeport")
+t = c["totals"]
+print(c["sessions"], t["requests"], t["subagent_requests"], t["output"], t["cache_read"], t["thinking"], t["cache_write_5m"], t["cache_write_1h"], c["usd"], sorted(c["effort"].items()), list(c["contamination"].values()))
+PY2
+)"
+[ "$C" = "1 3 1 350 3500 15 120 180 1.5 [('high', 2), ('medium', 1)] [{'othermod': 1}]" ] \
+  && ok "one request split over two blocks counts ONCE; the subagent is included; unrelated sessions are not" \
+  || bad "totals: $C"
+grep -q 'these sessions also touched other mods' <<<"$out" && grep -q '\$1.50' <<<"$out" \
+  && ok "dollars come from the session's recorded total; a mixed session is flagged" || bad "print: $out"
 
 echo "1. finish-port.py"
 out="$(python3 tools/finish-port.py fakeport --workspace "$WS" --dest none --env /dev/null 2>&1)"; code=$?
@@ -45,11 +76,19 @@ git -C "$D" log -1 --format=%B | grep -q 'Status: DONE' && ok "the commit messag
 [ "$(git -C "$D" rev-parse main)" = "$(git -C "$D" rev-parse main)" ] && [ -z "$(git -C "$D" ls-tree main mods 2>/dev/null)" ] \
   && ok "main is untouched" || bad "main was changed"
 
+{ [ -f "$D/mods/fakeport/COST.json" ] && grep -q '^## Cost (recorded by tools/port-cost.py' "$D/mods/fakeport/MIGRATION.md"; } \
+  && ok "finish-port records the cost (COST.json + MIGRATION.md) and it travels with the port" || bad "cost not delivered"
 n1="$(git -C "$D" rev-list --count HEAD)"
 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
   python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
 [ "$(git -C "$D" rev-list --count HEAD)" = "$n1" ] && ok "re-run with no change makes no commit" || bad "empty re-run committed"
 
+[ "$(grep -c '^## Cost (recorded' "$P/MIGRATION.md")" = 1 ] && ok "re-running replaces the Cost section, never duplicates it" || bad "Cost section duplicated"
+asst S3 q1 2026-09-30T12:00:00Z /w/mods/fakeport/C.java 70 700 > "$J/S3.jsonl"
+out="$(python3 tools/port-cost.py fakeport --workspace "$WS" --print 2>&1)"
+grep -q 'not recorded by this Claude Code build' <<<"$out" \
+  && ok "a session from a build that records no cost makes dollars 'not recorded', never a guess" || bad "no-cost build: $out"
+rm "$J/S3.jsonl"
 echo edited >> "$P/src/main/java/org/fake/fakeport/A.java"
 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
   python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
@@ -68,7 +107,7 @@ python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$N" --env /dev/n
 
 echo "2. propose-learnings.py (on a throwaway clone of this checkout)"
 M="$T/mig"; git clone -q "$ROOT" "$M"
-cp tools/propose-learnings.py tools/finish-port.py tools/supported-versions.py SUPPORTED_VERSIONS.tsv "$M/tools/" && mv "$M/tools/SUPPORTED_VERSIONS.tsv" "$M/"
+cp tools/propose-learnings.py tools/finish-port.py tools/supported-versions.py tools/port-cost.py SUPPORTED_VERSIONS.tsv docs/port-costs.tsv "$M/tools/" && mv "$M/tools/SUPPORTED_VERSIONS.tsv" "$M/" && mv "$M/tools/port-costs.tsv" "$M/docs/"
 gitq -C "$M" add -A; gitq -C "$M" commit -qm "test: current tools" >/dev/null 2>&1
 before="$(git -C "$M" rev-parse HEAD)"; home="$(git -C "$M" rev-parse --abbrev-ref HEAD)"
 # the clone may ALREADY have a learnings/* branch: when this runs on a learnings PR's own tree, git names the
@@ -117,6 +156,11 @@ d = next(i for i, l in enumerate(L) if l.startswith("D99."))
 dsec = max(i for i, l in enumerate(L[:d]) if l.startswith("## "))
 sys.exit(0 if L[sec].startswith("## R.") and m6 < aug < nxt and L[dsec].startswith("## D.") else 1)
 PY
+row="$(git -C "$M" show HEAD:docs/port-costs.tsv | tail -1)"
+{ git -C "$M" log -1 --format=%B | grep -q '^Cost: \$1.50' && grep -q 'claude-test-1' <<<"$row" \
+  && ! grep -qi 'fake' <<<"$row" && [ "$(git -C "$M" show HEAD:docs/port-costs.tsv | grep -vc '^#')" -ge 2 ]; } \
+  && ok "the learnings PR adds the port's cost row to docs/port-costs.tsv, with no mod identity, and says it" \
+  || bad "cost row: $row / $(git -C "$M" log -1 --format=%B | grep Cost)"
 grep -q "^CATALOG.md::R99	" "$M/docs/catalog-census.tsv" && ok "the census now inventories R99 (a later PR cannot silently drop it)" \
   || bad "R99 missing from the census"
 gitq -C "$M" checkout -q "$home"

@@ -68,7 +68,7 @@ for X (read the row's evidence), after merging run
 in a follow-up PR. It becomes `tested` by itself at 10; never edit the status by hand (that is the
 owner's `override` column).
 
-**Scope.** Does the PR do one thing? A learnings PR should touch `CATALOG.md` and the census only. A
+**Scope.** Does the PR do one thing? A learnings PR should touch `CATALOG.md`, the census and (one appended row) `docs/port-costs.tsv` only; that row must carry no mod name, id or path. A
 tool PR should include its self-test. Unrelated changes get split out, not waved through.
 
 ## Step 3 — the verdict (exactly one)
