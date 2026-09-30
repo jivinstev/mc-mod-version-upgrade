@@ -55,7 +55,11 @@ INSTALL_HINTS = {  # tool -> {platform: command}
     "java": {"Darwin": "brew install --cask temurin@21   (MC 26.x also needs 25: temurin@25)",
              "Windows": "winget install --id EclipseAdoptium.Temurin.21.JDK",
              "Linux": "sudo apt install openjdk-21-jdk   (Fedora: sudo dnf install java-21-openjdk-devel)"},
+    "claude": {"Darwin": "brew install --cask claude-code   (or, with Node 18+: npm install -g @anthropic-ai/claude-code)",
+               "Windows": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)",
+               "Linux": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)"},
 }
+CLAUDE_DOCS = "https://docs.claude.com/en/docs/claude-code/setup"
 
 
 # ── .env.local + state ──────────────────────────────────────────────────────────────────────
@@ -321,6 +325,14 @@ def main():
         else:
             problems.append(f"{tool} is missing -- install it: {hint(tool)}")
     print(f"   python3: ok ({platform.python_version()})")
+    # Claude Code drives the skills (installing, migrating). Detected, never installed: a global
+    # install is the user's call, like git/python/JDK above. Not a PROBLEM -- the tools run without it.
+    has_claude = shutil.which("claude") is not None
+    if has_claude:
+        print("   claude: ok (Claude Code)")
+    else:
+        notes.append(f"Claude Code is not installed -- it is what you talk to. Install: {hint('claude')}  "
+                     f"(details: {CLAUDE_DOCS})")
     if sys.version_info < (3, 8):
         problems.append(f"python 3.8+ needed -- {hint('python3')}")
     if path == "migrate":
@@ -493,10 +505,17 @@ def main():
     STATE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
     print("\nReady." if not problems else "\nWritten, but fix the PROBLEM lines above before relying on it.")
-    if path == "install":
-        print("Try:  python3 tools/mod-registry/modreg.py search --query \"sodium\"")
+    print("\nNext:" + ("" if has_claude else "  (install Claude Code first -- see the note above)"))
+    if path == "migrate":
+        print("  bash tools/download-tools.sh     # once: fetches + verifies the two decompilers")
+    print(f"  cd {ROOT} && claude")
+    print("  then say what you want, in plain words, e.g.")
+    print('    "Install Sodium"                                   (finds the right build, deploys it)')
+    if path == "migrate":
+        print('    "Migrate <mod name> to Minecraft 1.21.1"           (ports it when no build exists;')
+        print("                                                        hours, not minutes)")
     else:
-        print("Try:  bash tools/download-tools.sh      # fetches + verifies the two decompilers")
+        print("  Porting a mod that has no build for your version needs the add-on: ./setup --migrate")
     return 1 if problems else 0
 
 

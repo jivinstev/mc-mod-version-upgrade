@@ -151,6 +151,19 @@ out="$(st --yes --migrate)"
   && ok "a sibling git repo with mods/<modid>/build.gradle is offered under any name; a bare mods/ is not" \
   || bad "detection: $(echo "$out" | grep -E 'ports repo|destination')"
 
+echo "14. setup ends by saying how to start: Claude Code, and what to ask it"
+fresh; out="$(SETUP_PATH_OVERRIDE="$NOJAVA" st --yes)"; code=$?
+{ [ $code = 0 ] && echo "$out" | grep -q "Claude Code is not installed" && echo "$out" | grep -q "&& claude" \
+  && echo "$out" | grep -q "./setup --migrate"; } \
+  && ok "no claude on PATH: a note (not a PROBLEM) with the install command, then cd + claude + the add-on hint" \
+  || bad "claude hint (exit $code): $(echo "$out" | grep -iE 'claude|next' | head -3)"
+C="$(mktemp -d)"; for f in "$NOJAVA"/*; do ln -s "$(readlink "$f")" "$C/$(basename "$f")"; done
+printf '#!/bin/sh\n' > "$C/claude"; chmod +x "$C/claude"
+fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --migrate)"
+{ echo "$out" | grep -q "claude: ok" && ! echo "$out" | grep -q "not installed" && echo "$out" | grep -q "Migrate <mod name>"; } \
+  && ok "claude present: reported ok, and the migrate path shows how to ask for a migration" || bad "claude present: $(echo "$out" | grep -iE 'claude' | head -3)"
+rm -rf "$C"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"
