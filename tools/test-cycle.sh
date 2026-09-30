@@ -70,6 +70,9 @@ M="$T/mig"; git clone -q "$ROOT" "$M"
 cp tools/propose-learnings.py tools/finish-port.py "$M/tools/"
 gitq -C "$M" add -A; gitq -C "$M" commit -qm "test: current tools" >/dev/null 2>&1
 before="$(git -C "$M" rev-parse HEAD)"; home="$(git -C "$M" rev-parse --abbrev-ref HEAD)"
+# the clone may ALREADY have a learnings/* branch: when this runs on a learnings PR's own tree, git names the
+# clone's branch after the checked-out one. Count only what the test creates.
+pre_branches="$(git -C "$M" branch --list 'learnings/*' | wc -l)"
 prop() { GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
            python3 "$M/tools/propose-learnings.py" --modid fakeport --workspace "$WS" --env /dev/null --base "$before" "$@"; }
 
@@ -124,7 +127,7 @@ printf '### augment ZZ404\n· **AUGMENT — x:** y\n' > "$WS/noent.md"
 prop --additions "$WS/noent.md" >/dev/null 2>&1
 [ $? = 1 ] && ok "augmenting an entry that does not exist is REFUSED" || bad "unknown entry accepted"
 
-branches="$(git -C "$M" branch --list 'learnings/*' | wc -l)"
+branches="$(( $(git -C "$M" branch --list 'learnings/*' | wc -l) - pre_branches ))"
 [ "$branches" = 1 ] && ok "refused proposals leave no branch behind (only the one good proposal exists)" || bad "$branches learnings branches"
 
 echo
