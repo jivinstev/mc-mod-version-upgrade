@@ -29,11 +29,10 @@ GATES = [  # (name, argv relative to the worktree, needs names file?)
     ("ip", ["python3", "tools/check-no-ip.py", "--root", "."], True),
     ("fidelity", ["python3", "tools/check-catalog-fidelity.py", "--root", "."], False),
     ("vendored", ["python3", "tools/gen-vendored.py", "--check"], False),
-    ("gates-self-test", ["bash", "tools/test-gates.sh"], False),
-    ("setup-self-test", ["bash", "tools/test-setup.sh"], False),
-    ("renames-self-test", ["bash", "tools/test-renames.sh"], False),
-    ("cycle-self-test", ["bash", "tools/test-cycle.sh"], False),
 ]
+# Every tools/test-*.sh in the PR's own tree is run too, DISCOVERED rather than listed: a hand-kept list
+# silently stopped running two self-tests the day they were added. (test-review.sh calls this script with
+# --skip-self-tests, so there is no recursion.)
 GATE_FILES = re.compile(r"^(tools/check-[\w-]+\.py|tools/test-[\w-]+\.sh|tools/gen-vendored\.py|"
                         r"tools/install-hooks\.sh|tools/review-pr\.py|\.github/workflows/.+|CODEOWNERS|"
                         r"docs/catalog-external-paths\.tsv|VENDORED\.tsv)$")
@@ -201,7 +200,9 @@ def main():
         base_census = sh("git", "show", f"{merge_base}:docs/catalog-census.tsv", check=False)
         if base_census.returncode == 0:
             (wt / "docs/catalog-census.tsv").write_text(base_census.stdout)
-        for name, argv, wants_names in GATES:
+        gates = list(GATES) + [(p.stem.replace("test-", "") + "-self-test", ["bash", f"tools/{p.name}"], False)
+                               for p in sorted((wt / "tools").glob("test-*.sh"))]
+        for name, argv, wants_names in gates:
             if a.skip_self_tests and "self-test" in name:
                 continue
             if not (wt / argv[1]).exists():
