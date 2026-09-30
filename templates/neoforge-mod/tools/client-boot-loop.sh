@@ -37,7 +37,7 @@
 #   crash.log    <- this script writes the crash digest here
 #   crash.ready  <- this script touches it to say "a crash is waiting"
 #   fix.done     <- Claude touches it to say "fixed + recompiled, relaunch"
-#   stop         <- touch this (or Ctrl-C) to end the loop
+#   stop         <- touch this (or Ctrl-C) to end the loop (exits 3, never 0: client-validate.sh reads 0 as PASS)
 #
 # Stop anytime with Ctrl-C.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ echo
 cd "$MOD_DIR"
 iter=0
 while true; do
-  [ -f "$STOP" ] && { echo "stop file present — exiting"; exit 0; }
+  [ -f "$STOP" ] && { echo "stop file present — exiting"; exit 3; }
   iter=$((iter+1))
   echo "════════════════════════════════════════════════════════════════"
   echo "[$(date '+%H:%M:%S')] iteration $iter — launching dev client (boot smoke test)…"
@@ -147,7 +147,9 @@ while true; do
   rm -f "$CRASH_READY" "$FIX_DONE" "$LAUNCH_LOG"
 
   # Launch in the background so we can enforce a watchdog timeout, then wait on it.
-  "${LAUNCH_PREFIX[@]}" $CAFFEINATE ./gradlew runClient "${GRADLE_MODE_ARGS[@]}" --no-daemon --console=plain > "$LAUNCH_LOG" 2>&1 &
+  # ${arr[@]+"${arr[@]}"}: an EMPTY array under `set -u` is an "unbound variable" error in bash 3.2,
+  # which is macOS's /bin/bash -- so the plain "${LAUNCH_PREFIX[@]}" never launched a client on a Mac.
+  ${LAUNCH_PREFIX[@]+"${LAUNCH_PREFIX[@]}"} $CAFFEINATE ./gradlew runClient "${GRADLE_MODE_ARGS[@]}" --no-daemon --console=plain > "$LAUNCH_LOG" 2>&1 &
   GRADLE_PID=$!
   ( sleep "$TIMEOUT_SECS"
     if kill -0 "$GRADLE_PID" 2>/dev/null; then
@@ -201,7 +203,7 @@ while true; do
   touch "$CRASH_READY"
   echo "   waiting for Claude to fix (will relaunch when $FIX_DONE appears; Ctrl-C to stop)…"
   while [ ! -f "$FIX_DONE" ]; do
-    [ -f "$STOP" ] && { echo "stop file present — exiting"; exit 0; }
+    [ -f "$STOP" ] && { echo "stop file present — exiting"; exit 3; }
     sleep 5
   done
   echo "   fix signalled — relaunching."

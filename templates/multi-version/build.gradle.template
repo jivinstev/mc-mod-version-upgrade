@@ -263,6 +263,12 @@ neoForge {
         client {
             client()
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            // Gate C: `./gradlew runClient -Pboottest -Ptestmode=<launch|spawn|battle|gauntlet>` drives the
+            // mod's ClientBootSmokeTest. Without these the harness never activates and the client sits at
+            // the title until the loop's watchdog fires (pipeline.md §6e anti-hang #1); the single-target
+            // template has always carried them.
+            if (project.hasProperty('boottest')) systemProperty "${project.mod_id}.boottest", 'true'
+            if (project.hasProperty('testmode')) systemProperty "${project.mod_id}.testmode", project.property('testmode')
         }
         server {
             server()

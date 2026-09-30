@@ -812,8 +812,10 @@ re:\.interactOn\((\w+), InteractionHand\.MAIN_HAND\)	.interactOn(\1, Interaction
 re:boolean (hurtAlone|hurtWithBubble) = p\.hurt\(airless, 4\.0F\);	float before\1 = p.getHealth(); p.hurtServer((net.minecraft.server.level.ServerLevel) p.level(), airless, 4.0F); boolean \1 = p.getHealth() < before\1;
 
 # Client->server payloads moved to their own client-side distributor (the server-side
-# PacketDistributor no longer has sendToServer at all, which is the honest split).
-re:PacketDistributor\.sendToServer\(	net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer(
+# PacketDistributor no longer has sendToServer at all, which is the honest split).  Anchored on the
+# left: unanchored, it also matched inside its own output and turned an already-26.2
+# ClientPacketDistributor.sendToServer( into Clientnet.neoforged...ClientPacketDistributor (X4).
+re:(?<![\w.])(?:net\.neoforged\.neoforge\.network\.)?PacketDistributor\.sendToServer\(	net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer(
 
 # DustParticleOptions takes a PACKED colour now, not a Vector3f -- so the two call sites
 # that unpacked an int into floats just to hand it over can pass the int straight through.
