@@ -68,7 +68,7 @@ python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$N" --env /dev/n
 
 echo "2. propose-learnings.py (on a throwaway clone of this checkout)"
 M="$T/mig"; git clone -q "$ROOT" "$M"
-cp tools/propose-learnings.py tools/finish-port.py "$M/tools/"
+cp tools/propose-learnings.py tools/finish-port.py tools/supported-versions.py SUPPORTED_VERSIONS.tsv "$M/tools/" && mv "$M/tools/SUPPORTED_VERSIONS.tsv" "$M/"
 gitq -C "$M" add -A; gitq -C "$M" commit -qm "test: current tools" >/dev/null 2>&1
 before="$(git -C "$M" rev-parse HEAD)"; home="$(git -C "$M" rev-parse --abbrev-ref HEAD)"
 # the clone may ALREADY have a learnings/* branch: when this runs on a learnings PR's own tree, git names the
@@ -103,7 +103,7 @@ if [ $code = 0 ] && [[ "$br" == learnings/* ]] && grep -q '^R99. \*\*A test less
    && git -C "$M" show HEAD --stat | grep -q 'catalog-census.tsv'; then
   ok "a valid lesson is committed on learnings/*, with the census updated"
 else bad "valid lesson (exit $code): $(tail -5 "$T/good.log")"; fi
-git -C "$M" log -1 --format=%B | grep -q "Port target(s): Minecraft 26.3, NeoForge 26.3.0.39-beta (UNTESTED)" \
+git -C "$M" log -1 --format=%B | grep -q "Port target(s): Minecraft 26.3, NeoForge 26.3.0.39-beta (untested). Gate C (real client): not-run" \
   && ok "the learnings commit records the port's target and its SUPPORTED_VERSIONS status" || bad "target not recorded: $(git -C "$M" log -1 --format=%B | grep -i target)"
 python3 - "$M/CATALOG.md" <<'PY' && ok "R99 lands in section R, D99 in '## D.' (not '## Deeper…'), the augment right after M6" || bad "placement wrong"
 import re, sys
@@ -140,6 +140,17 @@ prop --additions "$WS/noent.md" >/dev/null 2>&1
 
 branches="$(( $(git -C "$M" branch --list 'learnings/*' | wc -l) - pre_branches ))"
 [ "$branches" = 1 ] && ok "refused proposals leave no branch behind (only the one good proposal exists)" || bad "$branches learnings branches"
+
+echo "3. supported-versions.py: 10 mods with Gate C makes a target tested"
+S="$T/sv"; mkdir -p "$S/tools"; cp tools/supported-versions.py "$S/tools/"; cp SUPPORTED_VERSIONS.tsv "$S/"
+sv() { python3 "$S/tools/supported-versions.py" "$@"; }
+[ "$(sv status 26.3)" = untested ] && ok "an unlisted version is untested" || bad "unlisted: $(sv status 26.3)"
+for i in 1 2 3 4 5 6 7 8 9; do sv record 26.3 neoforge "PR #$i" >/dev/null; done
+[ "$(sv status 26.3)" = "reported (9 of 10 mods with Gate C)" ] && ok "9 mods: reported, and says how far from tested" || bad "9: $(sv status 26.3)"
+sv record 26.3 neoforge "PR #10" >/dev/null
+[ "$(sv status 26.3)" = tested ] && ok "the 10th mod makes it tested, with no manual step" || bad "10: $(sv status 26.3)"
+[ "$(sv status 1.21.1)" = tested ] && grep -q $'^1.21.1\tneoforge\t\ttested\t' "$S/SUPPORTED_VERSIONS.tsv" \
+  && ok "an owner override is honoured and survives a record on another row" || bad "override lost"
 
 echo
 echo "cycle self-test: $pass passed, $fail failed"

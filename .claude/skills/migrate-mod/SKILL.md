@@ -42,13 +42,12 @@ When a different target is requested, substitute the parameter. The knowledge sp
 `neo_version` / `parchment_*` for `DST_MC`; the SRG step (below) takes `SRC_MC` as an argument;
 `pack_format` and the GameTest `DataVersion` follow `DST_MC` (1.21.1 → 34/48, DataVersion 3955).
 
-**Is `DST_MC` a tested target?** Look it up in `SUPPORTED_VERSIONS.tsv` BEFORE starting. If it is not
-`tested`, say so to the user in one plain sentence first -- "Minecraft X is not a tested target yet: the
-catalogue and templates were built for 1.21.1 and 26.2, so expect to find API changes nobody has written
-down, and budget more time" -- and a beta loader (NeoForge `-beta`) is worth naming too. Then go ahead if
-they want. Such a port is also how a version becomes tested: record the exact target in MIGRATION.md
-(`minecraft_version`, NeoForge version, which gates passed), and let `propose-learnings.py` carry it into
-the learnings PR (SUPPORTED_VERSIONS.md says what the reviewer does with it).
+**Is `DST_MC` a tested target?** Run `python3 tools/supported-versions.py status $DST_MC` BEFORE starting.
+If it is not `tested`, tell the user in one plain sentence first, with what it printed -- e.g. "Minecraft X
+is reported (3 of 10 mods with Gate C): it has worked, but expect gaps and budget more time", or for
+untested, "nobody has shown a port there yet" -- name a `-beta` loader too, and offer a tested version
+instead. Then go ahead if they want: such a port is how a version becomes tested. When delivering, pass
+the Gate C result to `propose-learnings.py --gate-c passed|failed|not-run`; it records the target.
 
 **Mapping rule (three cases, decide with `unzip -p "$JAR" META-INF/MANIFEST.MF`):**
 **(1) Forge ≤1.20.x** → SRG member names → `tools/srg-remap` (Step 2b below).
