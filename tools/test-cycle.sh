@@ -12,30 +12,30 @@ bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
 gitq() { git -c user.name=t -c user.email=t@example.invalid "$@"; }
 
 # a fake finished port in a fake workspace
-WS="$T/ws"; P="$WS/mods/sushiport"
-mkdir -p "$P/src/main/java/org/fake/sushiport" "$P/src/main/resources/META-INF" "$P/build/libs" \
+WS="$T/ws"; P="$WS/mods/fakeport"
+mkdir -p "$P/src/main/java/org/fake/fakeport" "$P/src/main/resources/META-INF" "$P/build/libs" \
          "$P/run/world" "$P/.gradle" "$P/decompiled-raw" "$P/run-mc26.2" "$P/src/main/resources/assets/x/out"
 echo 'plugins {}' > "$P/build.gradle"
-echo 'class A {}' > "$P/src/main/java/org/fake/sushiport/A.java"
-printf 'modId="sushiport"\ndisplayName="Fake Sushi Port"\n' > "$P/src/main/resources/META-INF/neoforge.mods.toml"
+echo 'class A {}' > "$P/src/main/java/org/fake/fakeport/A.java"
+printf 'modId="fakeport"\ndisplayName="Fake Port Mod"\n' > "$P/src/main/resources/META-INF/neoforge.mods.toml"
 echo 'keep' > "$P/src/main/resources/assets/x/out/keep.json"
 printf '# port\n**Status: DONE.** gates green\n' > "$P/MIGRATION.md"
 mkdir -p "$P/.git"; echo x > "$P/.git/HEAD"
 for f in build/libs/x.jar run/world/level.dat .gradle/c decompiled-raw/A.java run-mc26.2/x build.log; do echo x > "$P/$f"; done
 
 echo "1. finish-port.py"
-out="$(python3 tools/finish-port.py sushiport --workspace "$WS" --dest none --env /dev/null 2>&1)"; code=$?
+out="$(python3 tools/finish-port.py fakeport --workspace "$WS" --dest none --env /dev/null 2>&1)"; code=$?
 [ $code = 0 ] && grep -q 'stays in the workspace' <<<"$out" && ok "no destination: keeps the port in the workspace, exit 0" || bad "dest none (exit $code)"
 
-python3 tools/finish-port.py sushiport --workspace "$WS" --dest "$ROOT/templates" --env /dev/null >/dev/null 2>&1
+python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$ROOT/templates" --env /dev/null >/dev/null 2>&1
 [ $? = 1 ] && ok "a destination inside the migrator checkout is REFUSED" || bad "migrator-internal destination not refused"
 
 D="$T/dest"; mkdir -p "$D"; gitq -C "$D" init -q -b main; echo r > "$D/README"; gitq -C "$D" add -A; gitq -C "$D" commit -qm init
 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
-  python3 tools/finish-port.py sushiport --workspace "$WS" --dest "$D" --env /dev/null >"$T/fp.log" 2>&1; code=$?
+  python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$D" --env /dev/null >"$T/fp.log" 2>&1; code=$?
 br="$(git -C "$D" rev-parse --abbrev-ref HEAD)"
-[ $code = 0 ] && [ "$br" = port/sushiport ] && ok "git destination: committed on branch port/sushiport" || bad "git destination (exit $code, branch $br): $(cat "$T/fp.log")"
-files="$(git -C "$D" ls-files mods/sushiport)"
+[ $code = 0 ] && [ "$br" = port/fakeport ] && ok "git destination: committed on branch port/fakeport" || bad "git destination (exit $code, branch $br): $(cat "$T/fp.log")"
+files="$(git -C "$D" ls-files mods/fakeport)"
 if grep -q 'build.gradle' <<<"$files" && grep -q 'A.java' <<<"$files" && grep -q 'assets/x/out/keep.json' <<<"$files" \
    && ! grep -qE 'build/libs|run/world|\.gradle/|\.git/|decompiled-raw|run-mc26|\.log$' <<<"$files"; then
   ok "source copied; build/run/.gradle/decompiled-raw/per-target/logs left behind; a deep 'out' dir kept"
@@ -46,24 +46,24 @@ git -C "$D" log -1 --format=%B | grep -q 'Status: DONE' && ok "the commit messag
 
 n1="$(git -C "$D" rev-list --count HEAD)"
 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
-  python3 tools/finish-port.py sushiport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
+  python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
 [ "$(git -C "$D" rev-list --count HEAD)" = "$n1" ] && ok "re-run with no change makes no commit" || bad "empty re-run committed"
 
-echo edited >> "$P/src/main/java/org/fake/sushiport/A.java"
+echo edited >> "$P/src/main/java/org/fake/fakeport/A.java"
 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
-  python3 tools/finish-port.py sushiport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
+  python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
 [ "$(git -C "$D" rev-list --count HEAD)" = "$((n1+1))" ] && ok "re-run after an edit adds one commit" || bad "edit not committed"
 
-echo dirty >> "$D/mods/sushiport/build.gradle"
-python3 tools/finish-port.py sushiport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
+echo dirty >> "$D/mods/fakeport/build.gradle"
+python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
 [ $? = 1 ] && ok "uncommitted changes under mods/<modid> in the destination are REFUSED" || bad "dirty destination overwritten"
 git -C "$D" checkout -q -- .
 
-N="$T/plain"; mkdir -p "$N/mods/sushiport"; echo old > "$N/mods/sushiport/old"
-python3 tools/finish-port.py sushiport --workspace "$WS" --dest "$N" --env /dev/null >/dev/null 2>&1
-[ $? = 1 ] && [ -f "$N/mods/sushiport/old" ] && ok "non-git destination: an existing copy is not replaced without --force" || bad "non-git overwrite"
-python3 tools/finish-port.py sushiport --workspace "$WS" --dest "$N" --env /dev/null --force >/dev/null 2>&1
-[ $? = 0 ] && [ -f "$N/mods/sushiport/build.gradle" ] && [ ! -f "$N/mods/sushiport/old" ] && ok "--force replaces it" || bad "--force"
+N="$T/plain"; mkdir -p "$N/mods/fakeport"; echo old > "$N/mods/fakeport/old"
+python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$N" --env /dev/null >/dev/null 2>&1
+[ $? = 1 ] && [ -f "$N/mods/fakeport/old" ] && ok "non-git destination: an existing copy is not replaced without --force" || bad "non-git overwrite"
+python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$N" --env /dev/null --force >/dev/null 2>&1
+[ $? = 0 ] && [ -f "$N/mods/fakeport/build.gradle" ] && [ ! -f "$N/mods/fakeport/old" ] && ok "--force replaces it" || bad "--force"
 
 echo "2. propose-learnings.py (on a throwaway clone of this checkout)"
 M="$T/mig"; git clone -q "$ROOT" "$M"
@@ -71,7 +71,7 @@ cp tools/propose-learnings.py tools/finish-port.py "$M/tools/"
 gitq -C "$M" add -A; gitq -C "$M" commit -qm "test: current tools" >/dev/null 2>&1
 before="$(git -C "$M" rev-parse HEAD)"; home="$(git -C "$M" rev-parse --abbrev-ref HEAD)"
 prop() { GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
-           python3 "$M/tools/propose-learnings.py" --modid sushiport --workspace "$WS" --env /dev/null "$@"; }
+           python3 "$M/tools/propose-learnings.py" --modid fakeport --workspace "$WS" --env /dev/null "$@"; }
 
 cat > "$WS/good.md" <<'EOF'
 ### new R
@@ -104,7 +104,7 @@ grep -q "^CATALOG.md::R99	" "$M/docs/catalog-census.tsv" && ok "the census now i
   || bad "R99 missing from the census"
 gitq -C "$M" checkout -q "$home"
 
-printf '### new R\nR98. **Seen in Fake Sushi Port** · **Pattern:** x · **Error:** y · **Fix:** z\n' > "$WS/leak.md"
+printf '### new R\nR98. **Seen in Fake Port Mod** · **Pattern:** x · **Error:** y · **Fix:** z\n' > "$WS/leak.md"
 prop --additions "$WS/leak.md" >"$T/leak.log" 2>&1; code=$?
 [ $code = 1 ] && grep -q 'name this port' "$T/leak.log" && [ -z "$(git -C "$M" status --porcelain)" ] \
   && ok "additions naming the ported mod are REFUSED, checkout left clean" || bad "identity leak not refused (exit $code)"
