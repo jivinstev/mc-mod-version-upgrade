@@ -4,7 +4,7 @@
 // NeoForge 1.21.1 mod-migration workspace — template build.gradle
 //
 // Uses NeoGradle (net.neoforged.gradle.userdev), the same toolchain proven to
-// build in the Battle of Lord repo. The migrate-mod skill copies this whole
+// build in an existing multi-target mod. The migrate-mod skill copies this whole
 // folder into mods/<modid>/, then flips the `uses_*` flags in gradle.properties
 // to switch on Mixins / JarJar / GeckoLib as a given mod requires.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -129,7 +129,7 @@ if (project.uses_jarjar.toBoolean()) {
     tasks.named('jarJar') { archiveClassifier = '' }
 }
 
-// ── Deploy helpers (ported from Battle of Lord) ──────────────────────────────
+// ── Deploy helpers (ported from an existing mod's build) ──────────────────────────────
 def readEnvLocal(String key) {
     // Look in this project dir, then walk up to the repo root for a shared .env.local
     def candidates = [file('.env.local'), rootProject.file('.env.local'),

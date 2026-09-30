@@ -160,7 +160,7 @@ if (project.uses_jarjar.toBoolean()) {
     tasks.named('jarJar') { archiveClassifier = '' }
 }
 
-// ── Deploy helpers (ported from Battle of Lord) ──────────────────────────────
+// ── Deploy helpers (ported from an existing mod's build) ──────────────────────────────
 def readEnvLocal(String key) {
     // Look in this project dir, then walk up to the repo root for a shared .env.local
     def candidates = [file('.env.local'), rootProject.file('.env.local'),

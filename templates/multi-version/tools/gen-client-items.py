@@ -9,7 +9,7 @@ item up in what `ClientItemInfoLoader` read out of `assets/<ns>/items/`, and an 
 entry gets `missingModels.item()`: the magenta cube, plus one `Missing item model for location
 <id>` line in the log.
 
-Battle of Lord shipped none of these files, so on 26.2 **every one of its 231 items rendered as
+A ~460-file builder mod shipped none of these files, so on 26.2 **every one of its 231 items rendered as
 the missing cube** while 1.21.1 was perfect. Nothing failed. Gate C's asset check passed,
 because it asked whether the MODEL resource exists — which it does; it is the item→model
 binding that was gone. Vanilla ships 1538 of these files for its own items, generated the same

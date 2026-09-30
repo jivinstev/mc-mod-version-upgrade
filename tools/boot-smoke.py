@@ -5,7 +5,7 @@ it still starts with the mods currently deployed into it.
 
 WHY THIS EXISTS, and why the Gate-C harnesses do not cover it
 -------------------------------------------------------------
-Every `tools/*-client.sh` in Battle of Lord and Modding-from-a-Mod runs `./gradlew runClient`:
+Every `tools/*-client.sh` in the two mods this was built alongside runs `./gradlew runClient`:
 a DEV client, holding one mod and its declared dependencies. That is the right tool for "does
 my feature work", and it is blind to the entire class of failure that only exists in the
 player's instance, where ~60 third-party jars sit next to ours:
@@ -14,7 +14,7 @@ player's instance, where ~60 third-party jars sit next to ours:
   * a jar built for the wrong Minecraft version,
   * a dependency another mod needed that is missing or the wrong version.
 
-The first of those is not hypothetical. Battle of Lord's jar was renamed when it gained a second
+The first of those is not hypothetical. One mod's jar was renamed when it gained a second
 Minecraft target (`examplemod-1.0.0.jar` -> `examplemod-mc1.21.1-1.0.0.jar`), so deploying
 left BOTH in the mods folder. Every gate in both repos was green; the player's game would not
 have started. Nothing caught it because nothing was looking at the folder the game reads.
@@ -286,7 +286,7 @@ def build_command(inst, version, game_dir=None):
     # The VANILLA launcher separates these two: versions/, libraries/ and assets/ live in its own
     # installation directory, while each profile's "Game Directory" holds mods/, saves/ and config/.
     # That split is exactly how a second Minecraft version is kept apart from the one being played
-    # (battle-of-lord/docs/SECOND_INSTANCE.md), so a tool whose job is booting THE PLAYER'S instance
+    # (recorded while setting up a second per-version instance), so a tool whose job is booting THE PLAYER'S instance
     # has to model it. Before this, --instance had to be both at once and the 26.2 game directory --
     # the very folder that doc tells you to check -- could not be booted at all: it has no versions/.
     # Prism/MultiMC-style layouts pass one path and keep the old behaviour.
@@ -368,7 +368,7 @@ def boot(inst, version, log_path, timeout, expect, game_dir=None):
         subprocess.run(["caffeinate", "-u", "-t", "2"], check=False)
     elif IS_LINUX and not env.get("DISPLAY"):
         if not shutil.which("xvfb-run"):
-            # Never silently skip. The same rule as tools/lib/gate-c-env.sh in battle-of-lord:
+            # Never silently skip. The same rule as a sibling mod's Gate C launcher:
             # a gate that quietly did not run reports identically to one that passed.
             die("headless Linux needs Xvfb:\n"
                 "  apt-get update && apt-get install -y xvfb mesa-utils libgl1-mesa-dri", 2)
@@ -403,7 +403,7 @@ def boot(inst, version, log_path, timeout, expect, game_dir=None):
             # forever and the deadline never fires. Measured: a client that had already printed
             # "Sound engine started" sat running for over ten minutes with no verdict written,
             # which reads exactly like a boot that never succeeded. Same shape as the
-            # phase-machine wait recorded in battle-of-lord/CLAUDE.md: a timer that only ticks
+            # phase-machine wait recorded in a sibling mod's notes: a timer that only ticks
             # on activity cannot time out an idle thing.
             import threading
             def drain():

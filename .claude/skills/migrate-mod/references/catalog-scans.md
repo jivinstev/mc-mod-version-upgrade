@@ -324,7 +324,7 @@ for f in $(grep -rlE '\./gradlew|build/libs/\*\.jar' tools deploy scripts 2>/dev
   grep -qE 'build/libs/\*\.jar' "$f" && echo "  $f  (globs build/libs directly — a non-default target builds into build-mc<t>/libs)"
 done
 echo "  (^ a hit is a CANDIDATE: a script that only ever means the default target is fine. Measured on the"
-echo "     Mod Repo's 1.21.4 port: 6 scripts, found ONE AT A TIME over three days — gate-b, deploy/build,"
+echo "     ~840-file content mod's 1.21.4 port: 6 scripts, found ONE AT A TIME over three days — gate-b, deploy/build,"
 echo "     e2e, rehearse-world-jar (an upgrade rehearsal that would have rehearsed 1.21.1 -> 1.21.1),"
 echo "     client-test (reachable only via GRADLE_ARGS) and stock-panel-gate.)"
 
@@ -334,7 +334,7 @@ grep -rnE 'pack_format["\\]*[[:space:]]*[:=][[:space:]]*[0-9]+' src/main/java to
 grep -rnE "pack_format['\"]?[[:space:]]*:[[:space:]]*[0-9]+" --include=*.py . 2>/dev/null | grep -v '/test' | head -20
 echo "  (^ a hit is a CANDIDATE: a fixture pack in a test may pin a number on purpose. Shipped writers"
 echo "     should read the running game's number (SharedConstants…getPackVersion) or take the target in."
-echo "     Measured on the Mod Repo's 1.21.4 port: two writers said 48 and an install-time rewrite hid both.)"
+echo "     Measured on a ~840-file content mod's 1.21.4 port: two writers said 48 and an install-time rewrite hid both.)"
 
 printf '\n── sweep complete — every path above is a HIT to fix-or-explain ──\n'
 ```
