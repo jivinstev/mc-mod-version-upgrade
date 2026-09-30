@@ -240,6 +240,56 @@ def neoforge_minecraft(loader):
     return f"{a}.{b}" if a >= 26 else (f"1.{a}" + (f".{b}" if b else ""))
 
 
+# Claude Code's Bash sandbox blocks the network and writes outside the current folder by default. These
+# are the hosts and folders installing and porting mods need; setup ADDS them to the user's Claude Code
+# settings (never removes or changes anything), after showing them and asking.
+REGISTRY_HOSTS = ["api.modrinth.com", "cdn.modrinth.com", "api.curseforge.com", "*.forgecdn.net"]
+BUILD_HOSTS = ["maven.neoforged.net", "*.minecraft.net", "*.mojang.com", "repo.maven.apache.org",
+               "repo1.maven.org", "maven-central.storage-download.googleapis.com", "services.gradle.org",
+               "plugins.gradle.org", "*.gradle.org", "github.com", "api.github.com",
+               "objects.githubusercontent.com"]
+
+
+def claude_settings_file():
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (pathlib.Path(base).expanduser() if base else pathlib.Path.home() / ".claude") / "settings.json"
+
+
+def claude_settings_wanted(path, write_dirs):
+    """What this setup path needs from Claude Code's sandbox + permissions."""
+    want = {"sandbox.network.allowedDomains": list(REGISTRY_HOSTS),
+            "sandbox.filesystem.allowWrite": sorted(set(d for d in write_dirs if d))}
+    if path == "migrate":
+        want["sandbox.network.allowedDomains"] += BUILD_HOSTS
+        want["sandbox.filesystem.allowWrite"] = sorted(set(want["sandbox.filesystem.allowWrite"]) | {"~/.gradle"})
+        # Java ignores the proxy variables the sandbox relies on, so Gradle's downloads cannot go through
+        # it: the build runs outside the sandbox, and is allowed without a prompt.
+        want["sandbox.excludedCommands"] = ["./gradlew"]
+        want["permissions.allow"] = ["Bash(./gradlew:*)"]
+    return want
+
+
+def claude_settings_merge(current, want):
+    """-> (merged, [(key, [added values])]). Lists are unioned; nothing present is removed or changed.
+    cleanupPeriodDays is set only when absent: port-cost.py needs transcripts until a port is delivered."""
+    import copy
+    merged, added = copy.deepcopy(current), []
+    for dotted, values in want.items():
+        node = merged
+        *parents, leaf = dotted.split(".")
+        for k in parents:
+            node = node.setdefault(k, {})
+        have = node.setdefault(leaf, [])
+        new = [v for v in values if v not in have]
+        if new:
+            have.extend(new)
+            added.append((dotted, new))
+    if "cleanupPeriodDays" not in merged:
+        merged["cleanupPeriodDays"] = 365
+        added.append(("cleanupPeriodDays", [365]))
+    return merged, added
+
+
 def confirm(question):
     return input(question).strip().lower() in ("", "y", "yes")
 
@@ -602,6 +652,47 @@ def main():
                            choices={"yes": "yes", "y": "yes", "no": "no", "n": "no"})
         if share == "yes":
             gh_setup(ask.interactive and not a.check, notes, a.no_network)
+
+    # 9. Claude Code sandbox permissions -----------------------------------------------------------
+    f = claude_settings_file()
+    write_dirs = [v for k, (v, _) in ask.proposed.items() if k.startswith("MINECRAFT_MODS_DIR_")] + \
+                 [r["value"] for k, r in state["keys"].items() if k.startswith("MINECRAFT_MODS_DIR_") and k not in ask.proposed]
+    if path == "migrate":
+        wsv = (ask.proposed.get("MIGRATE_WORKSPACE") or (ask.existing("MIGRATE_WORKSPACE") or {}).get("value", ""),)
+        wsv = wsv[0][0] if isinstance(wsv[0], tuple) else wsv[0]
+        write_dirs.append(wsv)
+    want = claude_settings_wanted(path, write_dirs)
+    try:
+        current = json.loads(f.read_text()) if f.exists() else {}
+        if not isinstance(current, dict):
+            raise ValueError("not a JSON object")
+    except ValueError as e:
+        current = None
+        problems.append(f"{f} is not valid JSON ({e}) -- left untouched; fix it, then re-run ./setup")
+    if current is not None:
+        merged, added = claude_settings_merge(current, want)
+        print(f"\n9. Claude Code permissions ({f})\n"
+              "   Claude Code's sandbox blocks the network and writes outside this folder by default, so the\n"
+              "   mod registries" + (", the build servers, the workspace and Gradle" if path == "migrate" else
+                                    " and your mods folders") + " need allowing. Setup only ADDS entries.")
+        if not added:
+            print("   already in place")
+        else:
+            for k, vals in added:
+                print(f"   + {k}: {', '.join(map(str, vals))}")
+            if path == "migrate":
+                print("   (./gradlew runs outside the sandbox: Java does not use the sandbox's proxy)")
+            ok_ = ask.decide("CLAUDE_SETTINGS", "yes", "Add these to your Claude Code settings? (yes/no)",
+                             choices={"yes": "yes", "y": "yes", "no": "no", "n": "no"})
+            if ok_ == "yes" and not a.check:
+                f.parent.mkdir(parents=True, exist_ok=True)
+                if f.exists():
+                    shutil.copy2(f, f.with_suffix(".json.bak"))
+                f.write_text(json.dumps(merged, indent=2) + "\n")
+                notes.append(f"updated {f} (backup: settings.json.bak); restart Claude Code to pick it up")
+            elif ok_ != "yes":
+                notes.append("Claude Code permissions not added: registry downloads and builds may be refused "
+                             "inside its sandbox (./setup --review to add them)")
 
     # removals ---------------------------------------------------------------------------------
     removals = set()
