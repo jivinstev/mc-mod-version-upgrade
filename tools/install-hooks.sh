@@ -22,7 +22,15 @@ while read -r local_ref _ remote_ref _; do
   esac
 done
 echo "pre-push: running the IP gate before anything leaves this machine..."
-python3 "$root/tools/check-no-ip.py" --root "$root" || {
+# The forbidden-name list lives OUTSIDE this repository (it must never be published). If .env.local
+# names a file (FORBIDDEN_NAMES_FILE=...), the name check runs in --strict mode and a missing file
+# fails the push; otherwise every other check still runs and the skip is announced.
+names=""
+[ -f "$root/.env.local" ] && names="$(sed -n 's/^FORBIDDEN_NAMES_FILE=//p' "$root/.env.local" | tail -1)"
+names="${names/#\~/$HOME}"
+set -- --root "$root"
+[ -n "$names" ] && set -- "$@" --names "$names" --strict
+python3 "$root/tools/check-no-ip.py" "$@" || {
   echo "pre-push: REFUSED — the IP gate failed. Nothing has been pushed." >&2
   exit 1
 }

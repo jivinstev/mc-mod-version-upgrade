@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# First-run setup. See tools/setup.py for what it asks, what it writes, and why re-running is safe.
+exec python3 "$(dirname "$0")/tools/setup.py" "$@"
