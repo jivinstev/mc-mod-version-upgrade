@@ -5,7 +5,7 @@
 
 THE PROBLEM THIS SOLVES
 -----------------------
-Battle of Lord builds for several Minecraft versions from one source tree. Most of the
+A ~460-file builder mod builds for several Minecraft versions from one source tree. Most of the
 code is genuinely portable (measured 1.21.1 -> 26.2: 86% of imports unchanged), but two
 kinds of difference cannot live in a single shared .java file:
 

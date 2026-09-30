@@ -51,7 +51,7 @@ def find_env_local(all_matches=False):
     Returns EVERY match in search order when all_matches is set, because the two
     repos each carry their own .env.local and they do not carry the same keys. This
     used to return the first file only, and then read just that one -- so running a
-    migrator tool from the Battle of Lord directory found BoL's .env.local (paths, no
+    migrator tool from a sibling mod's directory found that mod's .env.local (paths, no
     API key), stopped, and reported CURSEFORGE_API_KEY as "not set" while it sat in
     the migrator's own .env.local one directory over. A file that does not MENTION a
     key must not shadow a file that defines it.
