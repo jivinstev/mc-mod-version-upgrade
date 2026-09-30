@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 jivinstev
+// COPY to: src/test/java/<your/package>/MixinConfigIntegrityTest.java
+// EDIT: package line + MIXIN_CONFIG filename (<modid>.mixins.json).
+// Requires JUnit in build.gradle (see pipeline.md Stage 6). Minecraft-free; runs under `./gradlew test`.
+package PACKAGE_PLACEHOLDER;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.*;
+import java.util.regex.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Guards catalog R/#43: a mixin listed in <modid>.mixins.json with no compiled class is
+ * never woven in -> ClassCastException at runtime, invisible to javac. Asserts every mixin
+ * in the config has a compiled .class. Reads class *files* (no linking of MC types).
+ */
+public class MixinConfigIntegrityTest {
+    private static final Path DIR = Paths.get(System.getProperty("user.dir"));
+    private static final Path MIXIN_CONFIG = DIR.resolve("src/main/resources/MODID.mixins.json"); // <-- EDIT
+    private static final Path MAIN_CLASSES = DIR.resolve("build/classes/java/main");
+
+    @Test
+    void everyMixinInConfigHasACompiledClass() throws IOException {
+        String json = Files.readString(MIXIN_CONFIG);
+        String pkg = find(json, "\"package\"\\s*:\\s*\"([^\"]+)\"");
+        assertTrue(pkg != null && !pkg.isBlank(), "mixin config must declare a package");
+        Path pkgDir = MAIN_CLASSES.resolve(pkg.replace('.', '/'));
+        List<String> mixins = new ArrayList<>();
+        for (String k : new String[]{"mixins", "client", "server"}) mixins.addAll(array(json, k));
+        assertTrue(!mixins.isEmpty(), "expected at least one mixin");
+        List<String> missing = new ArrayList<>();
+        for (String n : mixins)
+            if (!Files.exists(pkgDir.resolve(n.replace('.', '/') + ".class"))) missing.add(n);
+        assertTrue(missing.isEmpty(), "mixin(s) with no compiled class (will crash at runtime):\n  " + String.join("\n  ", missing));
+    }
+    private static String find(String s, String re) { Matcher m = Pattern.compile(re).matcher(s); return m.find() ? m.group(1) : null; }
+    private static List<String> array(String s, String key) {
+        List<String> out = new ArrayList<>();
+        Matcher b = Pattern.compile("\"" + key + "\"\\s*:\\s*\\[(.*?)\\]", Pattern.DOTALL).matcher(s);
+        if (b.find()) { Matcher it = Pattern.compile("\"([^\"]+)\"").matcher(b.group(1)); while (it.find()) out.add(it.group(1)); }
+        return out;
+    }
+}

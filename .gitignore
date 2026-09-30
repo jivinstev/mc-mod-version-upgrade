@@ -29,3 +29,13 @@ run/
 # ── Things that are never ours to publish ──────────────────────────────────────────────────────
 *.jar
 *.class
+# ...except Gradle's own wrapper, which the scaffolds need. It is still allowlisted BY SHA1 in
+# tools/check-no-ip.py, so un-ignoring the path does not let a different jar through under this name.
+!**/gradle/wrapper/gradle-wrapper.jar
+
+# ── Derived from Mojang's mapping data: generated per user, never published ─────────────────────
+# (plan decision 2: ship the generators, not their output)
+*2official-*.json
+moves-*.tsv
+moves-*.ambiguous.txt
+moves-*.removed.txt

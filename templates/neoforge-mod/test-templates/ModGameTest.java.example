@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 jivinstev
+// WHAT TO TEST HERE is decided by churn, not by copying this file's cases: fill this class (and the
+// subsystems test) against the P0/P1/P2 target list Step 4b wrote into MIGRATION.md — see
+// .claude/skills/migrate-mod/references/test-targets.md. Parameterize over the whole bucket a target
+// names (every payload / serializable type / Codec), so coverage tracks what the migration rewrote most.
+package com.example.examplemod.test;
+
+import com.example.examplemod.entities.ExampleMob;
+import com.example.examplemod.init.EntityTypeInit;
+import com.example.examplemod.init.ItemInit;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.gametest.framework.GameTest;
+import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.SpawnEggItem;
+import net.minecraft.world.level.GameType;
+import net.neoforged.neoforge.gametest.GameTestHolder;
+import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
+
+/**
+ * Headless runtime integration tests for an example mod's NeoForge 1.21.1 port.
+ *
+ * A green `./gradlew build` proves the mod *compiles*; these prove it *runs*: they boot a
+ * dedicated server (`runGameTestServer`) with the mod loaded and exercise the real runtime
+ * paths that javac can't see -- entity construction (attribute suppliers + registerGoals,
+ * where much of the 1.21 pathfinding/goal rewrite lives), the spawn-egg -> entity-type link
+ * (catalog #65), and the melee/weapon combat path (where getDamageBonus was neutralized).
+ *
+ * Each test uses the shipped `examplemod:empty_test` structure (a 9x9x9 floored box,
+ * data/examplemod/structure/empty_test.nbt).
+ */
+@GameTestHolder("examplemod")
+@PrefixGameTestTemplate(false)
+public class ExampleModGameTest {
+
+    private static final BlockPos SPAWN = new BlockPos(4, 1, 4);
+
+    /** Registration sanity: the mob's EntityType actually made it into the registry. */
+    @GameTest(template = "empty_test")
+    public static void exampleMobEntityTypeRegistered(GameTestHelper helper) {
+        ResourceLocation id = ResourceLocation.fromNamespaceAndPath("examplemod", "example_mob");
+        helper.assertTrue(BuiltInRegistries.ENTITY_TYPE.containsKey(id),
+                "examplemod:example_mob entity type should be registered");
+        helper.assertTrue(EntityTypeInit.EXAMPLE_MOB.get() == BuiltInRegistries.ENTITY_TYPE.get(id),
+                "EntityTypeInit.EXAMPLE_MOB should resolve to the registered type");
+        helper.succeed();
+    }
+
+    /**
+     * Spawn a live example mob. This constructs the entity, applies its AttributeSupplier,
+     * and runs registerGoals() -- the biggest runtime crash surface after the goal/pathfinding
+     * migration (PathfindingContext override, parameterized NearestAttackableTargetGoal, etc.).
+     */
+    @GameTest(template = "empty_test")
+    public static void spawnExampleMob(GameTestHelper helper) {
+        ExampleMob mob = helper.spawnWithNoFreeWill(EntityTypeInit.EXAMPLE_MOB.get(), SPAWN);
+        helper.assertTrue(mob != null, "spawn should return an example mob");
+        helper.assertTrue(mob.isAlive(), "spawned example mob should be alive");
+        helper.assertTrue(mob.getMaxHealth() > 0.0F,
+                "The example mob should have a positive max health from its AttributeSupplier");
+        helper.assertEntityPresent(EntityTypeInit.EXAMPLE_MOB.get());
+        helper.succeed();
+    }
+
+    /**
+     * Use the example mob's spawn egg: verify it is a SpawnEggItem, that getType(stack) resolves
+     * to the mob's type (exercises DeferredSpawnEggItem.getType(ItemStack), catalog #65), and
+     * that spawning through that resolved type produces a live entity.
+     */
+    @GameTest(template = "empty_test")
+    public static void exampleMobSpawnEggResolvesAndSpawns(GameTestHelper helper) {
+        Item eggItem = ItemInit.EXAMPLE_MOB_SPAWN_EGG.get();
+        helper.assertTrue(eggItem != Items.AIR, "example_mob_spawn_egg should be registered");
+        helper.assertTrue(eggItem instanceof SpawnEggItem, "example_mob_spawn_egg should be a SpawnEggItem");
+
+        SpawnEggItem egg = (SpawnEggItem) eggItem;
+        EntityType<?> type = egg.getType(new ItemStack(egg));
+        helper.assertTrue(type == EntityTypeInit.EXAMPLE_MOB.get(),
+                "spawn egg getType() should resolve to the example mob's entity type");
+
+        // Spawn through the resolved type, exactly as the egg's useOn path does.
+        helper.spawnWithNoFreeWill(EntityTypeInit.EXAMPLE_MOB.get(), SPAWN);
+        helper.assertEntityPresent(EntityTypeInit.EXAMPLE_MOB.get());
+        helper.succeed();
+    }
+
+    /**
+     * Use the example weapon item: a mock player wielding it attacks a spawned example mob.
+     * player.attack(...) runs the full melee path -- attribute-based damage + the item's
+     * hurtEnemy(...) -- which is where combat-API changes (EnchantmentHelper.getDamageBonus
+     * neutralization) would blow up at runtime.
+     */
+    @GameTest(template = "empty_test")
+    public static void exampleWeaponAttackHurtsTarget(GameTestHelper helper) {
+        Item weapon = ItemInit.EXAMPLE_WEAPON.get();
+        helper.assertTrue(weapon != Items.AIR, "example_weapon should be registered");
+
+        ExampleMob target = helper.spawnWithNoFreeWill(EntityTypeInit.EXAMPLE_MOB.get(), SPAWN);
+        float before = target.getHealth();
+
+        Player player = helper.makeMockPlayer(GameType.SURVIVAL);
+        player.setPos(target.getX(), target.getY(), target.getZ());
+        player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, new ItemStack(weapon));
+        // Full vanilla melee: reads attack-damage attributes and fires ExampleWeaponItem.hurtEnemy.
+        player.attack(target);
+
+        helper.assertTrue(target.getHealth() < before || !target.isAlive(),
+                "attacking the example mob with the example weapon should reduce its health");
+        helper.succeed();
+    }
+}

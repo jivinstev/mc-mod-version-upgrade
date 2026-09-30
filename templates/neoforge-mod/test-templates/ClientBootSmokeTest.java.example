@@ -1,0 +1,819 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 jivinstev
+// ─── TEMPLATE (Gate C — client boot loop). Copy to src/main/java/<pkg>/test/ClientBootSmokeTest.java. ───
+// To adapt for a new mod:
+//   1. Rename the package + the "examplemod" string literals (namespace filter + system-property keys) to <modid>.
+//   2. The launch/spawn/battle modes and TOOLTIPS/RENDER_ITEMS/EQUIP_ARMOR/PLACE_BLOCKS/USE_ITEMS/APPLY_EFFECTS
+//      gauntlet steps are modid-agnostic (they iterate BuiltInRegistries.{ENTITY_TYPE,ITEM,BLOCK,MOB_EFFECT}).
+//   3. MOD-SPECIFIC: the gauntlet OPEN_GUIS step + its imports (the example opens ExampleScreen/ExampleMenuScreen) — point
+//      it at your mod's custom Screens, or DELETE the step + its enum entry + those imports if the mod has no GUIs
+//      (leaving imports for nonexistent Screen/Menu classes fails the client compile).
+//   4. build.gradle's `client` run wiring (-Pboottest/-Ptestmode/-Pbattlecount/-Pbattleticks -> systemProperty) is
+//      ALREADY in the template, parameterized by mod_id — nothing to add. Its ABSENCE is a silent hang; see pipeline.md
+//      §6e anti-hang checklist #1. (Verify it survived any build.gradle edits.)
+// Run via tools/client-boot-loop.sh <launch|spawn|battle|gauntlet>.
+package com.example.examplemod.test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.function.Function;
+
+// MOD-SPECIFIC (see step 3 above): import your mod's own Screen/Menu classes here, e.g.
+// import com.example.examplemod.gui.screen.ExampleScreen;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.client.CameraType;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
+import io.netty.buffer.Unpooled;
+import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.chat.Component;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.Difficulty;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.MobCategory;
+import net.minecraft.world.entity.MobSpawnType;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.ArmorItem;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.TooltipFlag;
+import net.minecraft.world.level.GameRules;
+import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.LevelSettings;
+import net.minecraft.world.level.WorldDataConfiguration;
+import net.minecraft.world.level.levelgen.WorldDimensions;
+import net.minecraft.world.level.levelgen.WorldOptions;
+import net.minecraft.world.level.levelgen.presets.WorldPresets;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.RenderFrameEvent;
+
+/**
+ * Client BOOT + WORLD smoke/stress test — the closest thing to a "client GameTest" this toolchain
+ * allows. GameTest (runGameTestServer) is a headless dedicated server: it can never run client
+ * mixins, renderer/layer/particle registration, model baking, or FMLClientSetupEvent. A real
+ * client boot does all of that. This harness drives one of three MODES (see {@link Mode}), picked
+ * with -Dexamplemod.testmode (wired to `./gradlew runClient -Pboottest -Ptestmode=…` and the
+ * positional arg of tools/client-boot-loop.sh):
+ *
+ *   LAUNCH  — boot to the title screen and stop. Validates the whole client-LOAD surface (mixins,
+ *             renderer/particle/layer registration, FMLClientSetupEvent, model bake).
+ *   SPAWN   — LAUNCH + create a fresh world and spawn ONE of every examplemod:* creature, tick ~10s.
+ *             Validates each custom entity's construction, AI goals, and client renderer/model.
+ *   BATTLE  — SPAWN cranked up: N of every creature (-Dexamplemod.battlecount, default 8) split into
+ *             two teams, spawned in a tight ring AROUND the player, re-targeted onto the enemy team
+ *             every tick so they actually fight; tick ~30s. Player is Creative + invulnerable +
+ *             Resistance/Fire-Resistance so they survive. Stresses high entity counts, combat, AoE
+ *             attacks, particles and death sequences — all inside the camera frustum.
+ *
+ * On success it prints a PASS marker and quits cleanly (exit 0). Any crash — on load, world gen,
+ * an entity's spawn/tick, a renderer, a packet — aborts BEFORE the marker, so the run ends with a
+ * crash report / non-zero exit and PASS never prints. That is what tools/client-boot-loop.sh watches.
+ *
+ * Inert in normal play: acts only when -Dexamplemod.boottest=true is set.
+ */
+@EventBusSubscriber(modid = "examplemod", value = {Dist.CLIENT})
+public class ClientBootSmokeTest {
+    /** The test modes. launch/spawn/battle stress the server/simulation axis; gauntlet the client/item axis. */
+    private enum Mode { LAUNCH, SPAWN, BATTLE, GAUNTLET }
+
+    // Read flags once at class-load so normal play pays zero per-tick cost.
+    private static final boolean ENABLED = "true".equals(System.getProperty("examplemod.boottest"));
+    private static final Mode MODE = resolveMode();
+    // How many of EACH creature per team-cycle in BATTLE mode (total ≈ typeCount * battlecount).
+    private static final int PER_TYPE = MODE == Mode.BATTLE ? Math.max(1, Integer.getInteger("examplemod.battlecount", 8)) : 1;
+
+    private static final int TITLE_SETTLE_TICKS = 60;                         // ~3s at the title
+    private static final int INGAME_SETTLE_TICKS = 40;                        // ~2s in-world before spawning
+    // Battle window is overridable with -Dexamplemod.battleticks (20 ticks/sec) so you can leave it
+    // running long enough to watch; default battle 30s, spawn 10s.
+    private static final int SURVIVE_TICKS = MODE == Mode.BATTLE
+        ? Math.max(60, Integer.getInteger("examplemod.battleticks", 600))
+        : 200;
+    private static final int LOAD_TIMEOUT_TICKS = 20 * 180;                   // 3 min hard ceiling to reach in-world
+
+    private enum Phase { WAIT_TITLE, WAIT_INGAME, SURVIVE, GAUNTLET, DONE }
+    private static Phase phase = Phase.WAIT_TITLE;
+    private static int ticks = 0;   // reset on each phase transition
+    private static int stuckTicks;
+    // Set by the first client tick we are handed. Frames are counted separately, because from
+    // MC 26.x the two are NOT equivalent -- see onRenderFrame below.
+    private static boolean sawTick = false;
+    private static int frames = 0;
+
+    // GAUNTLET mode step machine.
+    private static int gauntletStep = 0;         // index into STEPS
+    private static int gauntletStepTicks = 0;    // ticks elapsed within the current step
+    private static boolean gauntletEntered = false; // has the current step's one-shot action run?
+
+    // BATTLE mode: the two warring teams (populated + read only on the server thread).
+    private static final List<Mob> teamA = new ArrayList<>();
+    private static final List<Mob> teamB = new ArrayList<>();
+
+    private static Mode resolveMode() {
+        String m = System.getProperty("examplemod.testmode");
+        if (m != null) {
+            try {
+                return Mode.valueOf(m.trim().toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+                // fall through to the back-compat default
+            }
+        }
+        // Back-compat: -Dexamplemod.worldtest=false stops at the title screen (the original behaviour).
+        return "false".equals(System.getProperty("examplemod.worldtest")) ? Mode.LAUNCH : Mode.SPAWN;
+    }
+
+    /**
+     * The one hook that still fires while the client is stuck in its INITIAL RESOURCE RELOAD.
+     *
+     * <p>From MC 26.x, {@code Minecraft.tick()} fires ClientTickEvent only
+     * {@code if (this.gameLoadFinished)}, and that flag is set solely by
+     * {@code onResourceLoadFinished} -- when the initial reload completes. So a client that never
+     * finishes that reload fires NO client tick, ever, and a harness driven by
+     * {@code ClientTickEvent} goes silent in precisely the failure it exists to name: alive,
+     * rendering, never reaching the title. {@code jstack} cannot separate that from a healthy idle
+     * client (both sit in {@code FramerateLimiter.limitDisplayFPS}) and the log simply stops.
+     *
+     * <p>{@code RenderFrameEvent} is fired from {@code Minecraft.renderFrame} with no such gate and
+     * exists under the same name on 1.21.1 and 26.x, so this needs no per-version code. It reports
+     * only while no tick has arrived; once the harness is running the tick heartbeat is better.
+     * See CLAUDE.md V69 (and X16/X28 on naming the blocker).
+     */
+    @SubscribeEvent
+    public static void onRenderFrame(RenderFrameEvent.Post event) {
+        if (!ENABLED || sawTick || phase == Phase.DONE) return;
+        if (++frames % 200 != 0) return;
+        Minecraft mc = Minecraft.getInstance();
+        System.out.println("EXAMPLEMOD_BOOT_TEST: frame " + frames
+                + " and not one client tick yet - the client is still in its INITIAL RESOURCE RELOAD"
+                + " (26.x gates ClientTickEvent on gameLoadFinished); gameLoadFinished="
+                + mc.isGameLoadFinished() + " screen="
+                + (mc.screen == null ? "none" : mc.screen.getClass().getName()));
+    }
+
+    @SubscribeEvent
+    public static void onClientTick(ClientTickEvent.Post event) {
+        if (!ENABLED || phase == Phase.DONE) return;
+        sawTick = true;
+        Minecraft mc = Minecraft.getInstance();
+        try {
+            switch (phase) {
+                case WAIT_TITLE -> waitTitle(mc);
+                case WAIT_INGAME -> waitIngame(mc);
+                case SURVIVE -> survive(mc);
+                case GAUNTLET -> gauntlet(mc);
+                default -> { }
+            }
+        } catch (Throwable t) {
+            // Harness-side failure (world never loaded, server vanished, etc.). A crash INSIDE the
+            // mod usually dies on the server thread with its own crash report before we get here.
+            System.out.println("EXAMPLEMOD_BOOT_TEST: FAIL — smoke test threw in phase " + phase + ": " + t);
+            t.printStackTrace();
+            finish(mc);
+        }
+    }
+
+    private static void waitTitle(Minecraft mc) {
+        // A FRESH run/client dir has onboardAccessibility=true, so MC opens the AccessibilityOnboardingScreen
+        // BEFORE the title — it's NOT a TitleScreen, so the boot test would wait forever (600s watchdog).
+        // Dismiss it + persist the choice so later phases/launches skip straight to the title.
+        if (mc.screen instanceof net.minecraft.client.gui.screens.AccessibilityOnboardingScreen) {
+            mc.options.onboardAccessibility = false;
+            mc.options.save();
+            mc.setScreen(new TitleScreen());
+            return;
+        }
+        // The SECOND screen that blocks a fresh boot and dismisses itself for nobody: NeoForge
+        // raises its loading-error screen for WARNINGS as well as errors, and one deprecation
+        // notice from a third-party library is enough. The client then renders frames forever,
+        // which reads exactly like a hang (catalogue X16). Matched by simple NAME so this stays
+        // one line rather than an import that moves between Minecraft versions.
+        if (mc.screen != null && mc.screen.getClass().getSimpleName().equals("LoadingErrorScreen")) {
+            System.out.println("clicking past LoadingErrorScreen (mod-loading warnings, not errors)");
+            mc.setScreen(new TitleScreen());
+            return;
+        }
+        if (!(mc.screen instanceof TitleScreen)) {
+            // Say WHERE it is stuck. "The client crashed" and "the client is fine and my harness
+            // never started" are opposite findings that only the log distinguishes, and a heartbeat
+            // naming the screen turned an open-ended hunt into an immediate answer (X16).
+            if (++stuckTicks % 100 == 0) {
+                System.out.println("still waiting for the title screen, on "
+                        + (mc.screen == null ? "no screen" : mc.screen.getClass().getName()));
+            }
+            return;
+        }
+        if (++ticks < TITLE_SETTLE_TICKS) return;
+
+        if (MODE == Mode.LAUNCH) {
+            System.out.println("EXAMPLEMOD_BOOT_TEST: PASS — reached title screen, client loaded without crashing");
+            finish(mc);
+            return;
+        }
+        String levelName = "mm-boottest-" + System.currentTimeMillis();
+        System.out.println("EXAMPLEMOD_BOOT_TEST: [" + MODE + "] reached title — creating world '" + levelName + "'…");
+        createFreshWorld(mc, levelName);
+        transition(Phase.WAIT_INGAME);
+    }
+
+    private static void createFreshWorld(Minecraft mc, String levelName) {
+        LevelSettings settings = new LevelSettings(
+            levelName,
+            GameType.CREATIVE,     // player can't die / can fly — mobs are the thing under test
+            false,                 // hardcore
+            Difficulty.NORMAL,     // NOT peaceful: hostile mobs would be culled instantly
+            true,                  // allow commands
+            new GameRules(),
+            WorldDataConfiguration.DEFAULT
+        );
+        Function<RegistryAccess, WorldDimensions> dimensions = WorldPresets::createNormalWorldDimensions;
+        mc.createWorldOpenFlows().createFreshLevel(
+            levelName, settings, WorldOptions.defaultWithRandomSeed(), dimensions, new TitleScreen()
+        );
+    }
+
+    private static void waitIngame(Minecraft mc) {
+        IntegratedServer server = mc.getSingleplayerServer();
+        boolean inWorld = server != null && server.isReady() && mc.player != null && mc.level != null;
+        if (!inWorld) {
+            if (++ticks > LOAD_TIMEOUT_TICKS) {
+                throw new IllegalStateException("world did not finish loading within " + (LOAD_TIMEOUT_TICKS / 20) + "s");
+            }
+            return;
+        }
+        // In-world: let a few ticks pass for chunks/player to settle, then spawn / start.
+        if (++ticks < INGAME_SETTLE_TICKS) return;
+        if (MODE == Mode.GAUNTLET) {
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [GAUNTLET] in-world — running "
+                + GauntletStep.values().length + " item/block/use/effect steps…");
+            transition(Phase.GAUNTLET);
+            return;
+        }
+        if (MODE == Mode.BATTLE) {
+            spawnBattle(mc, server);
+        } else {
+            spawnOneOfEach(mc, server);
+        }
+        transition(Phase.SURVIVE);
+    }
+
+    /** All spawnable {@code examplemod:*} creatures (namespaced, non-MISC so projectiles/effects are skipped). */
+    private static List<EntityType<?>> modCreatureTypes() {
+        List<EntityType<?>> types = new ArrayList<>();
+        for (var entry : BuiltInRegistries.ENTITY_TYPE.entrySet()) {
+            if (!"examplemod".equals(entry.getKey().location().getNamespace())) continue;
+            EntityType<?> type = entry.getValue();
+            if (type.getCategory() == MobCategory.MISC) continue;
+            types.add(type);
+        }
+        return types;
+    }
+
+    /** SPAWN mode: one of every creature in a grid around the player (on the server thread). */
+    private static void spawnOneOfEach(Minecraft mc, IntegratedServer server) {
+        final BlockPos center = mc.player.blockPosition();
+        server.execute(() -> {
+            ServerLevel level = server.overworld();
+            List<ResourceLocation> spawned = new ArrayList<>();
+            List<ResourceLocation> failed = new ArrayList<>();
+            int i = 0;
+            for (EntityType<?> type : modCreatureTypes()) {
+                int col = i % 8, row = i / 8; // 4-block grid so big mobs don't all overlap the same block
+                i++;
+                BlockPos pos = center.offset(-14 + col * 4, 1, -8 + row * 4);
+                Entity e = type.spawn(level, pos, MobSpawnType.COMMAND);
+                (e != null ? spawned : failed).add(EntityType.getKey(type));
+            }
+            System.out.println("EXAMPLEMOD_BOOT_TEST: spawned " + spawned.size() + " creature type(s): " + spawned);
+            if (!failed.isEmpty()) {
+                System.out.println("EXAMPLEMOD_BOOT_TEST: (spawn returned null for: " + failed + ")");
+            }
+        });
+    }
+
+    /** BATTLE mode: N of every creature in a ring around the player, split into two warring teams. */
+    private static void spawnBattle(Minecraft mc, IntegratedServer server) {
+        final BlockPos center = mc.player.blockPosition();
+        server.execute(() -> {
+            ServerLevel level = server.overworld();
+            RandomSource rand = level.getRandom();
+            teamA.clear();
+            teamB.clear();
+
+            // Keep the player alive and out of the fight: Creative already makes them invulnerable AND
+            // untargetable by hostiles, but belt-and-suspenders for any mod that deals absolute/effect damage.
+            ServerPlayer sp = server.getPlayerList().getPlayer(mc.player.getUUID());
+            if (sp != null) {
+                sp.setInvulnerable(true);
+                int buff = (INGAME_SETTLE_TICKS + SURVIVE_TICKS + 200);
+                sp.addEffect(new MobEffectInstance(MobEffects.DAMAGE_RESISTANCE, buff, 4, false, false));
+                sp.addEffect(new MobEffectInstance(MobEffects.FIRE_RESISTANCE, buff, 0, false, false));
+            }
+
+            List<EntityType<?>> types = modCreatureTypes();
+            int total = 0, toggle = 0;
+            for (EntityType<?> type : types) {
+                for (int n = 0; n < PER_TYPE; n++) {
+                    // Tight ring (radius 4–10) around the player so every model + attack particle is on-screen.
+                    double ang = rand.nextDouble() * Math.PI * 2.0;
+                    double rad = 4.0 + rand.nextDouble() * 6.0;
+                    BlockPos pos = center.offset(
+                        (int) Math.round(Math.cos(ang) * rad), 1, (int) Math.round(Math.sin(ang) * rad));
+                    Entity e = type.spawn(level, pos, MobSpawnType.COMMAND);
+                    if (e instanceof Mob mob) {
+                        (toggle++ % 2 == 0 ? teamA : teamB).add(mob);
+                        total++;
+                    }
+                }
+            }
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [BATTLE] spawned " + total + " mobs — team A "
+                + teamA.size() + " vs team B " + teamB.size() + " (" + types.size() + " type(s) × " + PER_TYPE + ")");
+        });
+    }
+
+    private static void survive(Minecraft mc) {
+        // If the world/server disappears out from under us, the mod almost certainly crashed the
+        // server thread — surface it rather than silently "passing".
+        IntegratedServer server = mc.getSingleplayerServer();
+        if (server == null || mc.player == null || mc.level == null) {
+            throw new IllegalStateException("world/server vanished after spawning — likely a server-thread crash (see log above)");
+        }
+        if (MODE == Mode.BATTLE) {
+            server.execute(ClientBootSmokeTest::driveBattle); // keep the teams locked onto each other
+        }
+        if (++ticks < SURVIVE_TICKS) return;
+
+        if (MODE == Mode.BATTLE) {
+            server.execute(() -> {
+                long aliveA = teamA.stream().filter(m -> m != null && m.isAlive()).count();
+                long aliveB = teamB.stream().filter(m -> m != null && m.isAlive()).count();
+                System.out.println("EXAMPLEMOD_BOOT_TEST: PASS — battle royale ran " + SURVIVE_TICKS
+                    + " ticks with no crash (survivors: team A " + aliveA + ", team B " + aliveB + ")");
+            });
+        } else {
+            System.out.println("EXAMPLEMOD_BOOT_TEST: PASS — created world, spawned examplemod creatures, "
+                + "world ticked " + SURVIVE_TICKS + " ticks with no crash");
+        }
+        finish(mc);
+    }
+
+    /** Runs on the server thread: point each living mob at the nearest living enemy-team mob. */
+    private static void driveBattle() {
+        assignEnemies(teamA, teamB);
+        assignEnemies(teamB, teamA);
+    }
+
+    private static void assignEnemies(List<Mob> team, List<Mob> enemies) {
+        for (Mob m : team) {
+            if (m == null || !m.isAlive()) continue;
+            LivingEntity cur = m.getTarget();
+            if (cur != null && cur.isAlive() && enemies.contains(cur)) continue; // already fighting an enemy
+            LivingEntity foe = nearestAlive(enemies, m);
+            if (foe != null) {
+                m.setTarget(foe);
+                m.setLastHurtByMob(foe); // provoke retaliation-based (HurtByTarget / brain) AI too
+            }
+        }
+    }
+
+    private static LivingEntity nearestAlive(List<Mob> list, Mob from) {
+        LivingEntity best = null;
+        double bestSq = Double.MAX_VALUE;
+        for (Mob e : list) {
+            if (e == null || !e.isAlive()) continue;
+            double d = e.distanceToSqr(from);
+            if (d < bestSq) {
+                bestSq = d;
+                best = e;
+            }
+        }
+        return best;
+    }
+
+    // ─────────────────────────── GAUNTLET mode (client/item axis) ───────────────────────────
+    // A fixed-order sequence of self-contained sub-tests over the item / block / use / effect surface
+    // that the mob-combat modes never touch (this is the axis a human opening the inventory hit). Each
+    // step is independent, does a one-shot action on entry, then holds for its duration so any deferred
+    // render / block-entity / effect ticks actually run before the next step.
+    private enum GauntletStep {
+        TOOLTIPS(10),        // build every item's tooltip (client) — a common NPE surface
+        RENDER_ITEMS(40),    // render EVERY item's model + ItemProperties overrides + decorations (all, not a screenful)
+        OPEN_GUIS(50),       // open the mod's custom screens (a plain Screen, then a menu-backed one)
+        EQUIP_ARMOR(50),     // wear every armor piece + view in 3rd person so attribute modifiers AND render layers run
+        PLACE_BLOCKS(60),    // place every block — block-entity tick + block render
+        USE_ITEMS(30),       // call use() on every item — the right-click behaviour path
+        APPLY_EFFECTS(60),   // apply every mob effect to the player + a mob — effect tick/render
+        OPEN_CREATIVE(60),   // open the REAL creative inventory — fires EVERY mod's BuildCreativeModeTabContentsEvent (catalog R22)
+        CREATIVE_PICKUP(20), // encode every creative stack the way PICKING ONE UP does (catalog R24)
+        CONTENT_CENSUS(20);  // does everything the mod CLAIMS to have actually exist? (catalog S4/S5)
+        final int durationTicks;
+        GauntletStep(int d) { this.durationTicks = d; }
+    }
+
+    /** Steps that own the on-screen GUI for their whole duration (closed on exit); others clear leftovers on entry. */
+    private static boolean stepWantsScreen(GauntletStep step) {
+        return step == GauntletStep.RENDER_ITEMS || step == GauntletStep.OPEN_GUIS;
+    }
+
+    private static void gauntlet(Minecraft mc) {
+        IntegratedServer server = mc.getSingleplayerServer();
+        if (server == null || mc.player == null || mc.level == null) {
+            throw new IllegalStateException("world/server vanished during gauntlet — likely a crash (see log above)");
+        }
+        GauntletStep[] steps = GauntletStep.values();
+        if (gauntletStep >= steps.length) {
+            System.out.println("EXAMPLEMOD_BOOT_TEST: PASS — gauntlet ran " + steps.length
+                + " item/block/use/effect steps with no crash");
+            finish(mc);
+            return;
+        }
+        GauntletStep step = steps[gauntletStep];
+        if (!gauntletEntered) {
+            gauntletEntered = true;
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [GAUNTLET] step " + (gauntletStep + 1) + "/"
+                + steps.length + " — " + step);
+            // Clear any leftover screen (e.g. a container an item's use() opened) unless this step wants one.
+            if (!stepWantsScreen(step) && mc.screen != null) {
+                mc.setScreen(null);
+            }
+            enterGauntletStep(step, mc, server);
+        }
+        tickGauntletStep(step, mc, gauntletStepTicks); // per-tick work (e.g. swap which GUI is open)
+        if (++gauntletStepTicks >= step.durationTicks) {
+            exitGauntletStep(step, mc);
+            gauntletStep++;
+            gauntletStepTicks = 0;
+            gauntletEntered = false;
+        }
+    }
+
+    private static void enterGauntletStep(GauntletStep step, Minecraft mc, IntegratedServer server) {
+        switch (step) {
+            case TOOLTIPS -> buildAllTooltips(mc);
+            case RENDER_ITEMS -> {
+                giveAllItems(mc, server);                       // also exercises inventoryTick for the carried stacks
+                mc.setScreen(new AllItemsScreen(modItems())); // renders EVERY item's model + decorations each frame
+            }
+            case OPEN_GUIS -> { /* opened per-tick: a plain Screen at t=0, a menu-backed one at t=25 */ }
+            case EQUIP_ARMOR -> {
+                equipAllArmor(mc, server);
+                mc.options.setCameraType(CameraType.THIRD_PERSON_BACK); // render the player body so armor layers run
+            }
+            case PLACE_BLOCKS -> placeAllBlocks(mc, server);
+            case USE_ITEMS -> useAllItems(mc, server);
+            case APPLY_EFFECTS -> applyAllEffects(mc, server);
+            case OPEN_CREATIVE -> openCreativeInventory(mc, server);
+            case CREATIVE_PICKUP -> encodeCreativeStacks(mc);
+            case CONTENT_CENSUS -> contentCensus(mc);
+        }
+    }
+
+    private static void tickGauntletStep(GauntletStep step, Minecraft mc, int tickInStep) {
+        if (step == GauntletStep.OPEN_GUIS) {
+            // MOD-SPECIFIC. Point these at your mod's own screens, or delete the OPEN_GUIS step entirely if
+            // the mod has no GUIs. Two shapes are worth covering, and they fail in different places:
+            if (tickInStep == 0) {
+                // (a) a plain Screen with a no-arg or config-arg constructor:
+                // mc.setScreen(new ExampleScreen());
+            } else if (tickInStep == 25) {
+                // (b) a menu-backed screen that needs an entity or block entity behind it. A transient
+                //     CLIENT-SIDE instance is enough to render it; nothing has to exist on the server:
+                // ExampleMob mob = new ExampleMob(ModEntities.EXAMPLE_MOB.get(), mc.level);
+                // ExampleMenu menu = new ExampleMenu(1, mc.player.getInventory(), mob);
+                // mc.setScreen(new ExampleMenuScreen(menu, mc.player.getInventory(), mob));
+            }
+        }
+    }
+
+    private static void exitGauntletStep(GauntletStep step, Minecraft mc) {
+        if (stepWantsScreen(step) && mc.screen != null) {
+            mc.setScreen(null); // close so the next step isn't rendered behind a GUI
+        }
+        if (step == GauntletStep.EQUIP_ARMOR) {
+            mc.options.setCameraType(CameraType.FIRST_PERSON);
+        }
+    }
+
+    /** A throwaway screen that draws EVERY examplemod item's model + decorations — exhaustive render-path coverage. */
+    private static final class AllItemsScreen extends Screen {
+        private final List<Item> items;
+        AllItemsScreen(List<Item> items) {
+            super(Component.literal("mm-gauntlet-all-items"));
+            this.items = items;
+        }
+        @Override public boolean isPauseScreen() { return false; } // keep the integrated server ticking
+        @Override public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+            this.renderBackground(g, mouseX, mouseY, partialTick);
+            int perRow = Math.max(1, (this.width - 16) / 18);
+            int x = 8, y = 8, col = 0;
+            for (Item item : items) {
+                ItemStack stack = new ItemStack(item);
+                g.renderItem(stack, x, y);                          // runs the model resolve + ItemProperties overrides
+                g.renderItemDecorations(this.font, stack, x, y);    // count / durability bar / cooldown overlays
+                if (++col >= perRow) { col = 0; x = 8; y += 18; } else { x += 18; }
+            }
+            super.render(g, mouseX, mouseY, partialTick);
+        }
+    }
+
+    /** All {@code examplemod:*} items. */
+    private static List<Item> modItems() {
+        List<Item> items = new ArrayList<>();
+        for (Item item : BuiltInRegistries.ITEM) {
+            if ("examplemod".equals(BuiltInRegistries.ITEM.getKey(item).getNamespace())) items.add(item);
+        }
+        return items;
+    }
+
+    /** Build every item's tooltip (client) — catches tooltip-render NPEs across the whole item set. */
+    private static void buildAllTooltips(Minecraft mc) {
+        Item.TooltipContext ctx = Item.TooltipContext.of(mc.level);
+        int n = 0;
+        for (Item item : modItems()) {
+            new ItemStack(item).getTooltipLines(ctx, mc.player, TooltipFlag.Default.ADVANCED);
+            n++;
+        }
+        System.out.println("EXAMPLEMOD_BOOT_TEST: [GAUNTLET] built tooltips for " + n + " item(s)");
+    }
+
+    /** Put one of every item into the player's inventory (so the inventory screen renders their models). */
+    private static void giveAllItems(Minecraft mc, IntegratedServer server) {
+        final java.util.UUID uuid = mc.player.getUUID();
+        server.execute(() -> {
+            ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
+            if (sp == null) return;
+            int n = 0;
+            for (Item item : modItems()) {
+                sp.getInventory().add(new ItemStack(item)); // overflow (>36) is dropped; the screenful still renders
+                n++;
+            }
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [GAUNTLET] gave " + n + " item(s) to the player");
+        });
+    }
+
+    /** Wear every armor piece — exercises attribute modifiers + client render layers. */
+    private static void equipAllArmor(Minecraft mc, IntegratedServer server) {
+        final java.util.UUID uuid = mc.player.getUUID();
+        server.execute(() -> {
+            ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
+            if (sp == null) return;
+            int n = 0;
+            for (Item item : modItems()) {
+                if (item instanceof ArmorItem armor) {
+                    sp.setItemSlot(armor.getEquipmentSlot(), new ItemStack(item));
+                    n++;
+                }
+            }
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [GAUNTLET] equipped " + n + " armor piece(s)");
+        });
+    }
+
+    /** Place every block near the player — block-entity ticking + block render. */
+    private static void placeAllBlocks(Minecraft mc, IntegratedServer server) {
+        final BlockPos center = mc.player.blockPosition();
+        server.execute(() -> {
+            ServerLevel level = server.overworld();
+            int i = 0, n = 0;
+            for (var block : BuiltInRegistries.BLOCK) {
+                if (!"examplemod".equals(BuiltInRegistries.BLOCK.getKey(block).getNamespace())) continue;
+                BlockPos pos = center.offset(-4 + (i % 8), 0, 4 + (i / 8));
+                i++;
+                level.setBlockAndUpdate(pos, block.defaultBlockState());
+                n++;
+            }
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [GAUNTLET] placed " + n + " block(s)");
+        });
+    }
+
+    /** Call use() on every item with it in hand — the right-click behaviour path. */
+    private static void useAllItems(Minecraft mc, IntegratedServer server) {
+        final java.util.UUID uuid = mc.player.getUUID();
+        server.execute(() -> {
+            ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
+            if (sp == null) return;
+            ServerLevel level = server.overworld();
+            int n = 0;
+            for (Item item : modItems()) {
+                sp.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(item));
+                item.use(level, sp, InteractionHand.MAIN_HAND);
+                sp.stopUsingItem(); // some items startUsingItem (bow/crossbow) — don't leave the player stuck
+                n++;
+            }
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [GAUNTLET] use()'d " + n + " item(s)");
+        });
+    }
+
+    /** Apply every examplemod mob effect to the player and a test mob — effect tick/render. */
+    private static void applyAllEffects(Minecraft mc, IntegratedServer server) {
+        final BlockPos center = mc.player.blockPosition();
+        final java.util.UUID uuid = mc.player.getUUID();
+        server.execute(() -> {
+            ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
+            ServerLevel level = server.overworld();
+            Mob mob = null;
+            List<EntityType<?>> mobs = modCreatureTypes();
+            if (!mobs.isEmpty() && mobs.get(0).spawn(level, center.offset(2, 1, 2), MobSpawnType.COMMAND) instanceof Mob m) {
+                mob = m;
+            }
+            final Mob target = mob;
+            int[] n = {0};
+            BuiltInRegistries.MOB_EFFECT.holders()
+                .filter(h -> "examplemod".equals(h.key().location().getNamespace()))
+                .forEach(h -> {
+                    if (sp != null) sp.addEffect(new MobEffectInstance(h, 100, 0, false, true));
+                    if (target != null) target.addEffect(new MobEffectInstance(h, 100, 0, false, true));
+                    n[0]++;
+                });
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [GAUNTLET] applied " + n[0] + " effect(s) to player + a mob");
+        });
+    }
+
+    private static void transition(Phase next) {
+        phase = next;
+        ticks = 0;
+    }
+
+    private static void finish(Minecraft mc) {
+        phase = Phase.DONE;
+        mc.stop();
+    }
+
+    /**
+     * Catalog <b>R22</b> — open the REAL creative inventory. Constructing
+     * {@link CreativeModeInventoryScreen} is what fires every mod's
+     * {@code BuildCreativeModeTabContentsEvent} and rebuilds each tab's contents. A handler that
+     * mutates the entry sets structurally (e.g. {@code getParentEntries().removeIf(...)}) throws
+     * {@code UnsupportedOperationException} here and NOWHERE else — a headless GameTest builds no
+     * tabs, and the gauntlet's own {@code AllItemsScreen} renders items without touching the event.
+     * This step also walks every tab so each one's contents actually render.
+     */
+    private static void openCreativeInventory(Minecraft mc, IntegratedServer server) {
+        LocalPlayer p = mc.player;
+        if (p == null) return;
+        // The screen only builds tab contents for a creative-mode player.
+        ServerPlayer sp = server.getPlayerList().getPlayer(p.getUUID());
+        if (sp != null) sp.setGameMode(GameType.CREATIVE);
+        mc.setScreen(new CreativeModeInventoryScreen(p, p.connection.enabledFeatures(), true));
+        System.out.println("MODID_BOOT_TEST: [GAUNTLET] opened the real creative inventory ("
+                + BuiltInRegistries.CREATIVE_MODE_TAB.size() + " tabs built)");
+    }
+
+    /**
+     * Encode every creative stack the way PICKING ONE UP does — catches a stack the client can
+     * BUILD but cannot SEND (catalog R24).
+     *
+     * <p>OPEN_CREATIVE above only proves the tabs build. Taking an item out of one makes the client
+     * send {@code serverbound/set_creative_mode_slot}, which serialises the stack against the
+     * CLIENT's registries. In singleplayer the client and the integrated server hold SEPARATE
+     * copies of every datapack registry (enchantments, potions, trim patterns…), so a component
+     * holding a {@code Holder} borrowed from the server copy renders and tooltips perfectly and
+     * then throws {@code EncoderException: Can't find id for Reference{…}} at pick-up — Netty
+     * drops the connection mid-game with no crash report. Invisible to Gates A/B (no client
+     * registry) and to OPEN_CREATIVE (no packet). This is where a Fabric weapons-mod port was caught, on 111 of
+     * its 152 items.
+     *
+     * <p>Any mod that stamps registry objects onto a stack in {@code getDefaultInstance()} or in
+     * its {@code BuildCreativeModeTabContentsEvent} handler needs this step.
+     */
+    private static void encodeCreativeStacks(Minecraft mc) {
+        if (mc.level == null) return;
+        List<String> failures = new ArrayList<>();
+        int encoded = 0;
+        for (Item item : modItems()) {
+            ItemStack stack = item.getDefaultInstance();
+            RegistryFriendlyByteBuf buf =
+                    new RegistryFriendlyByteBuf(Unpooled.buffer(), mc.level.registryAccess());
+            try {
+                ItemStack.OPTIONAL_STREAM_CODEC.encode(buf, stack);
+                encoded++;
+            } catch (Throwable t) {
+                failures.add(BuiltInRegistries.ITEM.getKey(item) + " -> " + t);
+            } finally {
+                buf.release();
+            }
+        }
+        if (!failures.isEmpty()) {
+            throw new IllegalStateException("picking these up in creative would DISCONNECT the player ("
+                    + failures.size() + " of " + (encoded + failures.size()) + " items): "
+                    + failures.subList(0, Math.min(5, failures.size())));
+        }
+        System.out.println("MODID_BOOT_TEST: [GAUNTLET] encoded " + encoded
+                + " creative stack(s) against the CLIENT registry — creative pick-up is safe");
+    }
+
+    /**
+     * Catalog <b>S4/S5</b> — the port-completeness census: does everything this mod <i>claims</i> to
+     * have actually exist at runtime?
+     *
+     * <p><b>Why this step exists.</b> Every other gate is a <i>crash</i> gate, and content that
+     * silently failed to register does not crash — it is simply absent, which looks exactly like a mod
+     * that never had it. A space-exploration mod shipped a whole 1.21 port whose creative tab was constructed but
+     * never registered (Resourceful Lib 3.x stopped registering it inside {@code build()}, so the
+     * migration's class rename compiled clean and dropped the side effect). 423 items had nowhere to be
+     * found, and the Gate-C log for that very run said <i>"creative tabs built"</i> — because
+     * {@code OPEN_CREATIVE} prints {@code CREATIVE_MODE_TAB.size()}, a count of everyone's tabs, which
+     * cannot see the absence of ours. <b>A count is not a comparison.</b>
+     *
+     * <p><b>The oracle.</b> The mod's own {@code lang/en_us.json} is a manifest of what it thinks it
+     * has, written by its original author and carried through the port untouched — so it is an
+     * expectation the migration cannot silently edit. Every {@code item.}/{@code block.}/{@code entity.}
+     * /{@code effect.<modid>.<path>} key must resolve to a registered id, and a file declaring any
+     * {@code itemGroup.*} key must own at least one registered creative tab.
+     *
+     * <p><b>Only the TAB rule fails the run; the content list is advisory</b> — measured, not assumed.
+     * Over 17 real ports it produced 135 content flags and ZERO real findings (catalog S5b), because a
+     * lang file is a <i>display-name</i> file, not a registry manifest: it also names unimplemented
+     * content, per-colour/armour variants of one registered thing, optional-integration items and stale
+     * ids. An {@code itemGroup} key has no such ambiguity — a mod defines a tab or it does not.
+     *
+     * <p>Keys that are not exactly {@code <type>.<modid>.<path>} are skipped, not reported — tooltips,
+     * subtitles and nested paths ({@code /} becomes {@code .} in a description id) live there too.
+     */
+    private static void contentCensus(Minecraft mc) {
+        ResourceLocation langId = ResourceLocation.fromNamespaceAndPath("examplemod", "lang/en_us.json");
+        JsonObject lang;
+        try (java.io.BufferedReader reader = mc.getResourceManager().openAsReader(langId)) {
+            lang = JsonParser.parseReader(reader).getAsJsonObject();
+        } catch (Exception e) {
+            // Not a soft skip: without the manifest this step silently checks nothing, which is the
+            // exact failure mode it was written to end.
+            throw new IllegalStateException("census: cannot read assets/examplemod/lang/en_us.json, "
+                    + "so nothing can be verified against it — " + e);
+        }
+
+        List<String> missing = new ArrayList<>();
+        int declaredTabs = 0;
+        int checked = 0;
+        for (String key : lang.keySet()) {
+            if (key.startsWith("itemGroup.")) {
+                declaredTabs++;
+                continue;
+            }
+            String[] part = key.split("\\.");
+            if (part.length != 3 || !"examplemod".equals(part[1])) continue;
+            Registry<?> registry = switch (part[0]) {
+                case "item" -> BuiltInRegistries.ITEM;
+                case "block" -> BuiltInRegistries.BLOCK;
+                case "entity" -> BuiltInRegistries.ENTITY_TYPE;
+                case "effect" -> BuiltInRegistries.MOB_EFFECT;
+                default -> null;
+            };
+            if (registry == null) continue;
+            ResourceLocation id;
+            try {
+                id = ResourceLocation.fromNamespaceAndPath(part[1], part[2]);
+            } catch (Exception malformed) {
+                continue;   // not an id-shaped key — it was never a claim about content
+            }
+            checked++;
+            if (!registry.containsKey(id)) {
+                missing.add(part[0] + " " + id);
+            }
+        }
+
+        long ownTabs = BuiltInRegistries.CREATIVE_MODE_TAB.keySet().stream()
+                .filter(id -> "examplemod".equals(id.getNamespace())).count();
+        boolean tabLost = declaredTabs > 0 && ownTabs == 0;
+
+        // ONLY the tab rule fails. Measured over 17 real ports the content rule produced 135 flags and
+        // ZERO real findings (see catalog S5b): a lang file is a DISPLAY-NAME file, not a registry
+        // manifest, so it also names unimplemented content, per-colour/armour variants of one registered
+        // thing, optional-integration items, and stale ids. An itemGroup key has no such ambiguity.
+        if (!missing.isEmpty()) {
+            System.out.println("MODID_BOOT_TEST: [GAUNTLET] census ADVISORY — " + missing.size()
+                    + " declared id(s) are not registered (usually variants/unimplemented/optional-integration): "
+                    + missing.subList(0, Math.min(8, missing.size())));
+        }
+        if (tabLost) {
+            throw new IllegalStateException("census: this port declares " + declaredTabs
+                    + " creative tab(s) in lang and registers NONE — its content exists but a player"
+                    + " cannot find it (catalog S4)");
+        }
+        System.out.println("MODID_BOOT_TEST: [GAUNTLET] census — " + checked
+                + " declared id(s) checked, " + ownTabs
+                + " creative tab(s) for " + declaredTabs + " declared itemGroup key(s)");
+    }
+
+
+}

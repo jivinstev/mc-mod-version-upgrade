@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 jivinstev
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        maven { url = 'https://maven.neoforged.net/releases' }
+        maven { url = 'https://libraries.minecraft.net' }
+    }
+}
+
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+        maven { url = 'https://maven.neoforged.net/releases' }
+        maven { url = 'https://libraries.minecraft.net' }
+        // Parchment mappings
+        maven { url = 'https://maven.parchmentmc.org' }
+        // Common third-party library mods (GeckoLib, JEI, etc.) — harmless if unused
+        maven { url = 'https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/' }
+        maven { name = 'Kotlin for Forge'; url = 'https://thedarkcolour.github.io/KotlinForForge/' }
+    }
+}
+
+rootProject.name = 'MOD_ID_PLACEHOLDER'

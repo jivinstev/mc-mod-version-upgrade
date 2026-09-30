@@ -1,0 +1,21 @@
+// Print one target's REAL resolved compile classpath, for tools/quick-typecheck.sh.
+//
+// WHY: a classpath assembled by hand from ~/.gradle/caches is not Gradle's. The cache holds
+// EVERY version of every library both targets have ever resolved, so a find(1) sweep puts two
+// Guavas and two fmlloaders on the path and javac takes whichever comes first. Measured: that
+// made `FMLEnvironment.dist` (a field on 1.21.1, a method on 26.2) and Guava's
+// `buildKeepingLast` read as missing on the CANONICAL target, which compiles clean under
+// Gradle. Same family as X25b, one level down: not a missing artifact but a DUPLICATED one.
+//
+// Resolving the configuration is cheap and touches no source, so it is safe to run while
+// other work is in flight; the result is cached by the caller and reused for every javac pass.
+allprojects {
+    tasks.register('qtcClasspath') {
+        doLast {
+            def cp = project.sourceSets.main.compileClasspath
+            println "QTC_CLASSPATH_BEGIN"
+            cp.files.each { println it.absolutePath }
+            println "QTC_CLASSPATH_END"
+        }
+    }
+}

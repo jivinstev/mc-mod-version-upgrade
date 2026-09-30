@@ -1,0 +1,413 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 jivinstev
+// ─────────────────────────────────────────────────────────────────────────────
+// @MOD_NAME@ — MULTI-VERSION workspace (Minecraft 1.21.1 + 26.2, one source tree).
+//
+// Toolchain is ModDevGradle, not NeoGradle: NeoGradle 7.1.36 cannot build 26.x at
+// all, and its failure reads like a corrupt cache rather than an unsupported
+// target (§V2). The same MDG scaffold builds both lines.
+// ─────────────────────────────────────────────────────────────────────────────
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'net.neoforged.moddev' version '2.0.146'
+}
+
+// ── MULTI-VERSION SELECTOR ───────────────────────────────────────────────────
+// `-Pmc=<id>` picks a target; the id is a filename under versions/ (default 1.21.1).
+//
+//     ./gradlew build                 # 1.21.1  (what Ezra plays today)
+//     ./gradlew build -Pmc=26.2       # 26.2
+//
+// Everything that differs between versions is DATA in versions/<id>.properties.
+// This file never branches on a version number, which is the point: adding a
+// version is a new properties file plus an overlay directory, not an edit here.
+ext.mcTarget = project.findProperty('mc') ?: '1.21.1'
+def versionFile = file("versions/${ext.mcTarget}.properties")
+if (!versionFile.exists()) {
+    def known = file('versions').listFiles()?.findAll { it.name.endsWith('.properties') }
+                    ?.collect { it.name - '.properties' }?.sort()
+    throw new GradleException("Unknown -Pmc=${ext.mcTarget}. Known targets: ${known}")
+}
+def mcProps = new Properties()
+versionFile.withInputStream { mcProps.load(it) }
+mcProps.each { k, v -> ext.set(k.toString(), v.toString()) }
+logger.lifecycle("@MOD_NAME@ -> Minecraft ${minecraft_version} (NeoForge ${neo_version}, Java ${java_version})")
+
+version = mod_version
+group = mod_group_id
+
+base {
+    // The Minecraft version is part of the artifact name on purpose: two targets
+    // producing the same filename would silently overwrite each other in build/libs
+    // and in the player's mods folder.
+    archivesName = "${mod_id}-mc${minecraft_version}"
+}
+
+// Java level is a PROPERTY of the target Minecraft version, not a constant: 1.21.1
+// runs on Java 21, 26.x REQUIRES Java 25 (§V1). A multi-version workspace is
+// therefore a two-JDK machine.
+java.toolchain.languageVersion = JavaLanguageVersion.of(java_version as int)
+
+// Migrated mods decompile with the odd unreachable/dead-code artifact. Keep
+// warnings from failing the build; we fix real errors, not lint noise.
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:none'
+    // javac DISPLAYS only 100 errors by default, so a big port's real backlog reads as
+    // exactly "100 errors" and a burn-down measured against it is meaningless (§X5/§X6).
+    options.compilerArgs << '-Xmaxerrs' << '5000'
+    options.warnings = false
+}
+
+// ── THE ONLY PLACE VERSION BRANCHING LIVES ───────────────────────────────────
+//
+// src/main/java is the shared, canonical tree (written in the 1.21.1 dialect).
+// What the compiler sees is that tree PREPARED for the selected target:
+//
+//   src/main/java  --[ versions/<id>.renames.tsv ]-->  build/generated/sources/<overlay>
+//                  --[ src/<overlay>/java replaces whole files ]-->
+//
+// so a version difference is either a row in a rename table (MECHANICAL: a type or
+// package that changed name with an identical API) or a whole replacement file in
+// the overlay (a REAL difference). Nothing version-specific is ever written inside
+// a shared file — that separation is what keeps one source tree honest.
+//
+// Both targets run this identically — 1.21.1's table is empty — because a
+// mechanism only the untested version exercises is a mechanism that quietly
+// breaks (§W2).
+def preparedJava = layout.buildDirectory.dir("generated/sources/${overlay}/java")
+def renameHits = layout.buildDirectory.file("generated/sources/${overlay}/rename-hits.txt")
+
+// A mod may legitimately ship no unit tests (a pure library usually does not).
+// The test tree is the dead-rule REPORTING root, so its absence has to be a
+// decision the build makes rather than a task that fails on a missing directory.
+def hasTestTree = file('src/test/java').isDirectory()
+
+def prepareSources = tasks.register('prepareSources', Exec) {
+    description = "Materialise src/main/java for Minecraft ${minecraft_version}"
+    inputs.dir('src/main/java').withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file("versions/${mcTarget}.renames.tsv")
+    if (file("src/${overlay}/java").exists()) {
+        inputs.dir("src/${overlay}/java").withPathSensitivity(PathSensitivity.RELATIVE)
+    }
+    inputs.file('tools/prepare-sources.py')
+    inputs.file('tools/gametest_adapter.py')
+    if (file("versions/${mcTarget}.drops.txt").exists()) {
+        inputs.file("versions/${mcTarget}.drops.txt")
+    }
+    outputs.dir(preparedJava)
+    outputs.file(renameHits)
+    // 26.x has no @GameTest annotation, so that target asks for the tests to be
+    // rewired (versions/<id>.properties: gametest_adapter). 1.21.1 declares none
+    // and keeps annotation discovery untouched.
+    def gtArgs = project.hasProperty('gametest_adapter')
+            ? ['--gametest-adapter', project.property('gametest_adapter').toString(),
+               '--gametest-pkg', "${mod_group_id}.compat".toString(),
+               '--gametest-structure', 'empty_test'] : []
+    // A file this target must not compile at all (a mixin whose vanilla target class is gone,
+    // §V43). Optional: a target with nothing to drop simply has no such file.
+    def dropArgs = file("versions/${mcTarget}.drops.txt").exists()
+            ? ['--drop', "versions/${mcTarget}.drops.txt".toString()] : []
+    // The main tree COLLECTS which rules fired; the test tree merges that and does
+    // the reporting. One table, several source roots — see prepareTestSources.
+    //
+    // ...UNLESS there is no test tree. A library often ships none, and then deferring to a
+    // root that never runs makes the dead-rule report vanish entirely — the X22/X26 failure
+    // in its quietest form, because "deferred" reads like something still to come. With no
+    // test tree the main root reports for itself.
+    def hitsArgs = hasTestTree ? ['--hits-out', renameHits.get().asFile.absolutePath] : []
+    if (!hasTestTree) {
+        // Same reason prepareTestSources is never UP-TO-DATE: the product is the LINE it prints.
+        outputs.upToDateWhen { false }
+    }
+    commandLine(['python3', 'tools/prepare-sources.py',
+            '--src', 'src/main/java',
+            '--overlay', "src/${overlay}/java",
+            '--renames', "versions/${mcTarget}.renames.tsv",
+            '--out', preparedJava.get().asFile.absolutePath] + hitsArgs + dropArgs + gtArgs)
+}
+
+sourceSets.main.java.srcDirs = [preparedJava]
+sourceSets.main.resources.srcDir("src/${overlay}/resources")
+tasks.named('compileJava') { dependsOn prepareSources }
+
+// The TEST tree goes through the very same pipeline, and that is not tidiness.
+// Gate A is where a mod-load crash actually surfaces — a registration with no
+// handler compiles clean on every target — so a test tree that cannot COMPILE on
+// the new target means the new target has no such gate at all (§X14).
+//
+// It shares the main tree's rename table (the API is the same API) but takes NO
+// overlay and NO gametest adapter: a test needing per-version code is telling you
+// the thing it tests needs a compat pair.
+def preparedTestJava = layout.buildDirectory.dir("generated/sources/${overlay}/test-java")
+
+if (hasTestTree) {
+def prepareTestSources = tasks.register('prepareTestSources', Exec) {
+    description = "Materialise src/test/java for Minecraft ${minecraft_version}"
+    inputs.dir('src/test/java').withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file("versions/${mcTarget}.renames.tsv")
+    inputs.file('tools/prepare-sources.py')
+    inputs.file(renameHits)
+    outputs.dir(preparedTestJava)
+    // Deliberately never UP-TO-DATE. This task's real product is not the two prepared test
+    // files, it is the dead-rule REPORT it prints -- and a report Gradle skips because the
+    // inputs have not changed is a report nobody reads. It is a couple of files; the cost of
+    // always running it is nothing next to the cost of the check silently not happening.
+    outputs.upToDateWhen { false }
+    // Runs LAST of the two roots on purpose: it merges the main tree's hits and is
+    // the only place the dead-rule report is printed. Checked per root instead, a
+    // small test tree reports most of the table as dead on every single build —
+    // a permanently non-zero warning beside the main tree's zero, which is
+    // decoration rather than an alarm (§X22).
+    dependsOn prepareSources
+    commandLine('python3', 'tools/prepare-sources.py',
+            '--src', 'src/test/java',
+            '--renames', "versions/${mcTarget}.renames.tsv",
+            '--hits-in', renameHits.get().asFile.absolutePath,
+            '--out', preparedTestJava.get().asFile.absolutePath)
+}
+
+sourceSets.test.java.srcDirs = [preparedTestJava]
+tasks.named('compileTestJava') { dependsOn prepareTestSources }
+
+// ...and the main tree FINALIZES into it, so the dead-rule report runs whether or not the
+// compile then succeeds. Without this the report is wired to compileTestJava, which Gradle
+// never reaches while compileJava is failing -- i.e. for the entire length of a burn-down,
+// which is exactly when a rule is most likely to be dead or malformed (X22, one step on).
+// The test tree is two files here; materialising it costs nothing next to never checking.
+tasks.named('prepareSources') { finalizedBy prepareTestSources }
+}   // if (hasTestTree)
+
+// ── Mixin targets, audited per target ────────────────────────────────────────────────────
+// A mixin whose vanilla target moved is a HARD load failure javac cannot see, and the CLIENT-side
+// ones reach only Gate C -- one crash per client boot. An era jump moves plenty: 26.2's
+// SoundManager.play went void -> SoundEngine.PlayResult, killing the client at mixin apply with
+// every other gate green (catalogue R17). The auditor for this already existed in the repo and was
+// wired into no build, so it had never run on the port it would have saved: the §S2 failure, a
+// step you must remember losing to the compile loop, which has a forcing function.
+//
+// It audits the PREPARED tree against THIS target's own sources jar. Auditing src/main/java is not
+// a weaker check but a different one -- that tree is written in the canonical version's dialect and
+// says nothing about the other target's mixins. Delete this block if the mod ships no mixins.
+if (file('src/main/java').listFiles() != null) {
+    def mixinTargets = tasks.register('checkMixinTargets', Exec) {
+        description = "Check every mixin target against Minecraft ${minecraft_version}"
+        dependsOn prepareSources
+        outputs.upToDateWhen { false }
+        workingDir projectDir.parentFile.parentFile
+        commandLine('python3', 'tools/audit-mixin-targets.py',
+                "mods/${projectDir.name}", "--mc=${mcTarget}")
+    }
+    tasks.named('check') { dependsOn mixinTargets }
+
+    // The same argument one layer over, and it is NOT mixin-specific: NeoForge resolves a listener
+    // by its PARAMETER TYPE, and javac has no opinion about whether the bus will accept that type.
+    // So an event that became ABSTRACT under you -- 26.2's RenderLevelStageEvent, one subclass per
+    // stage -- compiles on both targets and dies at client load with "Cannot register listeners for
+    // abstract class ... Register a listener to one of its subclasses instead". Gate B cannot see a
+    // client-only listener either. Unlike the mixin audit this applies to EVERY mod, not only one
+    // that ships mixins, so it is deliberately outside that guard.
+    def eventListeners = tasks.register('checkEventListeners', Exec) {
+        description = "Check every event listener's parameter against Minecraft ${minecraft_version}"
+        dependsOn prepareSources
+        outputs.upToDateWhen { false }
+        workingDir projectDir.parentFile.parentFile
+        commandLine('python3', 'tools/audit-event-listeners.py',
+                "mods/${projectDir.name}", "--mc=${mcTarget}")
+    }
+    tasks.named('check') { dependsOn eventListeners }
+
+    // A §W5 pair over an OVERRIDE, written as one over a CALL, recurses forever: the override hands
+    // `this` to the pair and the pair calls the same-named vanilla method straight back. It compiles
+    // on both targets and dies on whichever half re-enters, so only a real client finds it -- the
+    // canonical target, usually, which is the one whose gates get run least. Target-independent (it
+    // reads every src/mc*/java compat half), so it is registered once.
+    def compatRecursion = tasks.register('checkCompatRecursion', Exec) {
+        description = 'Check no compat pair re-enters the override that calls it'
+        outputs.upToDateWhen { false }
+        workingDir projectDir.parentFile.parentFile
+        commandLine('python3', 'tools/audit-compat-recursion.py', "mods/${projectDir.name}")
+    }
+    tasks.named('check') { dependsOn compatRecursion }
+}
+
+repositories {
+    maven { name = 'NeoForged'; url = 'https://maven.neoforged.net/releases' }
+    maven { name = 'Minecraft Libraries'; url = 'https://libraries.minecraft.net' }
+    mavenCentral()
+}
+
+neoForge {
+    version = neo_version
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+        }
+    }
+
+    // Gate A (plain JUnit) still needs Minecraft on the TEST classpath. NeoGradle
+    // put it there implicitly; ModDevGradle requires opting in.
+    unitTest {
+        enable()
+        testedMod = mods."${mod_id}"
+    }
+
+    runs {
+        configureEach {
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            systemProperty 'forge.logging.console.level', 'debug'
+            gameDirectory = project.layout.projectDirectory.dir('run').dir(name)
+        }
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+        server {
+            server()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            programArgument '--nogui'
+        }
+        gameTestServer {
+            type = 'gameTestServer'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            // State the heap rather than inheriting the JVM's share-of-RAM default:
+            // an unstated default is not a setting, it is a variable you cannot see,
+            // and when it bites the stack trace names a chunk-save IO worker with
+            // nothing about tests in it (§X20).
+            jvmArgument '-Xmx4G'
+        }
+    }
+}
+
+configurations { runtimeClasspath.extendsFrom localRuntime }
+
+dependencies {
+    // NOTE: no explicit `net.neoforged:neoforge` dependency — ModDevGradle supplies
+    // Minecraft + NeoForge from `neoForge { version = ... }` above. Declaring it here
+    // as well puts two copies of Minecraft on the compile classpath.
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // @MOD_DEPENDENCIES@ — the scaffolder splices this mod's own dependency lines in here,
+    // carried over verbatim from its NeoGradle build. Anything referencing ${minecraft_version}
+    // resolves per target, which is usually what you want for a version-specific library jar.
+}
+
+// Mixins: NeoForge bundles the Mixin library and runs on Mojang official mappings
+// at runtime — so mixins target readable names and NO refmap is needed.
+if (project.uses_mixins.toBoolean()) {
+    tasks.withType(JavaCompile).configureEach {
+        options.compilerArgs << '-AdefaultObfuscationEnv=named:none'
+    }
+}
+
+tasks.withType(ProcessResources).configureEach {
+    var props = [
+        minecraft_version      : minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        neo_version            : neo_version,
+        loader_version_range   : loader_version_range,
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_license            : mod_license,
+        mod_version            : mod_version,
+        mod_authors            : mod_authors,
+        mod_description        : mod_description,
+    ]
+    inputs.properties props
+    filesMatching(['META-INF/neoforge.mods.toml', 'pack.mcmeta']) { expand props }
+    // src/<overlay>/resources is added AFTER src/main/resources (see sourceSets above), so a file
+    // present in both resolves to the overlay's copy. That is the resource-side twin of a Java
+    // overlay and is what lets one target drop a mixin from its config (§V45's exception).
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform()
+    testLogging { events 'passed','failed','skipped' }
+    // ModDevGradle runs the test JVM from build/minecraft-junit (NeoGradle used the
+    // project directory), so a test cannot find its own sources via user.dir. Hand it
+    // the project directory explicitly rather than depending on a working directory
+    // that a toolchain is free to change.
+    systemProperty "${mod_id}.projectDir", projectDir.absolutePath
+}
+
+// ── Deploy helper ────────────────────────────────────────────────────────────
+def readEnvLocal(String key) {
+    def candidates = [file('.env.local'), rootProject.file('.env.local'),
+                      file("${rootDir}/../../.env.local")]
+    for (envFile in candidates) {
+        if (!envFile.exists()) continue
+        def value = null
+        envFile.eachLine { line ->
+            def m = (line =~ /^\s*${key}=(.*)$/)
+            if (m) value = m[0][1].trim()
+        }
+        if (value != null) {
+            if (value.startsWith('~')) value = System.getProperty('user.home') + value.substring(1)
+            return value
+        }
+    }
+    return null
+}
+
+// Version-sensitive on purpose: MINECRAFT_MODS_DIR_1_21_1 / _26_2, so a 26.2 jar
+// can never be dropped into a 1.21.1 instance. Falls back to the plain key.
+tasks.register('deployToMods') {
+    dependsOn 'build'
+    doLast {
+        def key = 'MINECRAFT_MODS_DIR_' + minecraft_version.replace('.', '_')
+        def modsDir = readEnvLocal(key) ?: readEnvLocal('MINECRAFT_MODS_DIR')
+        if (!modsDir) { println "WARNING: neither ${key} nor MINECRAFT_MODS_DIR in .env.local — skipping deploy"; return }
+        def target = new File(modsDir)
+        if (!target.isDirectory()) { println "WARNING: not a directory: ${modsDir} — skipping deploy"; return }
+        def name = "${mod_id}-mc${minecraft_version}-${mod_version}.jar"
+        def src = file("build/libs/${name}")
+        if (!src.exists()) throw new GradleException("built jar not found: ${src}")
+        def dest = new File(target, name)
+        def tmp = new File(target, name + ".tmp-" + System.nanoTime())
+        try {
+            java.nio.file.Files.copy(src.toPath(), tmp.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            try {
+                java.nio.file.Files.move(tmp.toPath(), dest.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+                java.nio.file.Files.move(tmp.toPath(), dest.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+            println "Deployed ${name} -> ${modsDir}  (restart Minecraft to load it)"
+        } finally { if (tmp.exists()) tmp.delete() }
+    }
+}
+
+tasks.register('printTarget') {
+    doLast { println "target=${mcTarget} mc=${minecraft_version} neo=${neo_version} java=${java_version} overlay=${overlay}" }
+}
+
+// ── @OnlyIn must not survive into a 26.x prepared tree (§V79 + §W8 + §X16) ───────────────────
+// On 26.x the annotation strips nothing, and OnlyInWarningsHandler raises
+// `loadwarning.neoforge.onlyin` if a mod file carries even one. It short-circuits on
+// `FMLEnvironment.isProduction()`, so a shipped jar is inert -- but every gate here is DEV, where
+// it can kill Gate B outright and puts NeoForge's LoadingErrorScreen between the client and the
+// title screen. Our Gate C harnesses now DISMISS that screen (§X16), which is exactly why this
+// went unnoticed across a green four-target board: the guard that makes the gate robust is the
+// guard that hides the defect. It was found by reading a PASSING log, not a failing one.
+//
+// A rename row strips the shared tree and structurally cannot reach an OVERLAY (§W8 -- overlays
+// are deliberately not run through the table), so every overlay written from here on is a fresh
+// chance to reintroduce it. §S2: a step you must remember is not a control. The check reads the
+// PREPARED tree, refuses when it is absent rather than falling back to src/main/java, prints how
+// many files it looked at, and exits 2 on zero (§X27). It is silent on a pre-26 target, where the
+// annotation still strips and is doing a job.
+def onlyIn = tasks.register('checkOnlyIn', Exec) {
+    description = "Check no @OnlyIn survives into the ${mcTarget} prepared tree"
+    dependsOn tasks.named('prepareSources')
+    outputs.upToDateWhen { false }
+    workingDir projectDir.parentFile.parentFile
+    commandLine('python3', 'tools/audit-onlyin.py', "mods/${projectDir.name}", "--mc=${mcTarget}")
+}
+tasks.named('check') { dependsOn onlyIn }

@@ -71,3 +71,17 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 tools/check-catalog-fidelity.py
+
+  vendored-licence:
+    name: vendored files match the licence manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # VENDORED.tsv is the licence boundary: every file a scaffolder copies into a user's project.
+      # It is DERIVED from the scaffolders' own copy commands, so this fails if the copy set moved and
+      # the manifest did not, if a vendored file lost its SPDX header, or if a non-vendored file
+      # claims the vendored licence.
+      - run: python3 tools/gen-vendored.py --check
