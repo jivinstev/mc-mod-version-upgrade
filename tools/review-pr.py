@@ -173,8 +173,10 @@ def main():
     cat_added = [t for p, t in added_lines(diff) if p == "CATALOG.md"]
     for t in cat_added:
         if ENTRY_START.match(t):
-            miss = [k for k in ("**Pattern:**", "**Fix:**") if k not in t]
-            if not any(k in t for k in ("**Error:**", "**Runtime:**", "**Symptom:**")):
+            # a label may carry a qualifier, as existing entries do: **Pattern (1.21.2+):**, **Fix (→1.21.1):**
+            has = lambda word: re.search(r"\*\*" + word + r"(?: \([^)]*\))?:\*\*", t) is not None
+            miss = [f"**{k}:**" for k in ("Pattern", "Fix") if not has(k)]
+            if not any(has(k) for k in ("Error", "Runtime", "Symptom")):
                 miss.append("a symptom (**Error:**/**Runtime:**/**Symptom:**)")
             if miss:
                 f("BLOCKING", "catalogue", f"new entry lacks {', '.join(miss)}: it cannot be found from the symptom "
