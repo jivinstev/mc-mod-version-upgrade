@@ -47,7 +47,8 @@ SECURITY = [
     (r"\bexec\s*\(", "exec()"),
     (r"shell\s*=\s*True", "subprocess with shell=True"),
     (r"verify\s*=\s*False|--insecure\b|-k\s+https?://|CURL_CA_BUNDLE=\s*$|GIT_SSL_NO_VERIFY", "disables TLS verification"),
-    (r"\b(ssh-keygen|id_rsa|\.ssh/|\.aws/|\.netrc|GITHUB_TOKEN|ACTIONS_RUNTIME_TOKEN|secrets\.)", "touches credentials"),
+    (r"\b(ssh-keygen|id_rsa|\.ssh/|\.aws/|\.netrc|ACTIONS_RUNTIME_TOKEN)", "touches credentials"),
+    (r"\bsecrets\.|GITHUB_TOKEN|\bgh auth\b", "uses a repository secret or token (confirm it is needed and scoped)"),
     (r"\bchmod\s+(-R\s+)?[0-7]*7[0-7]{0,2}\s+/", "chmod on an absolute path"),
     (r"\brm\s+-rf?\s+(/|~|\$HOME)(\s|$)", "recursive delete of / or home"),
     (r"base64\s+(-d|--decode)|b64decode\(", "decodes an embedded blob"),
@@ -150,6 +151,8 @@ def main():
     for path, text in added_lines(diff):
         if path.endswith((".md", ".tsv")) or path in ("tools/review-pr.py", "tools/test-review.sh"):
             continue  # prose may DESCRIBE these; the reviewer's own patterns and planted fixtures name them
+        if text.strip().startswith(("#", "//")):
+            continue  # a comment cannot execute; flagging prose that DESCRIBES a risk is noise
         for rx, what in SECURITY:
             if re.search(rx, text):
                 f("BLOCKING" if what in BLOCKING_SECURITY else "ATTENTION", "security", what,
