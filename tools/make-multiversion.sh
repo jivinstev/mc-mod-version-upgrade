@@ -150,18 +150,21 @@ overlay=$OVL
 # DirectGameTest class it needs, from the annotations the shared tree already carries.
 gametest_adapter=$MODID
 EOF
-  if [ -f "$TPL/versions/$T.renames.tsv" ]; then
-    cp "$TPL/versions/$T.renames.tsv" "$D/versions/$T.renames.tsv"
+  # The table is COMPOSED: hand-written rows shipped here + two maps generated on this machine
+  # from Mojang's own names (never published). See templates/multi-version/versions/*.hand.tsv.
+  WS="${MIGRATE_WORKSPACE:-$HOME/.mc-mod-upgrade/work}/moves"
+  HAND="$TPL/versions/$T.renames.hand.tsv"
+  if [ -f "$HAND" ]; then
+    python3 "$ROOT/tools/compose-renames.py" --hand "$HAND" \
+      --generated "$WS/moves-1.21.1-to-$T.tsv" --generated "$WS/colors-1.21.1-to-$T.tsv" \
+      --out "$D/versions/$T.renames.tsv" | sed 's/^/    /'
   else
-    # No shared starting table ships for this target (a table of class-name moves is derived from
-    # Mojang's mapping data, so it is generated per user rather than published). Start from the
-    # generated move map if there is one, else an empty table the burn-down will fill.
-    MAP="${MIGRATE_WORKSPACE:-$HOME/.mc-mod-upgrade/work}/moves/moves-1.21.1-to-$T.tsv"
     { echo "# $MODID: Minecraft 1.21.1 -> $T mechanical renames (see templates/multi-version/README.md)."
-      echo "# Generate the type rows with tools/build-class-move-map.py; never from memory."
-      if [ -f "$MAP" ]; then grep -v '^#' "$MAP" || true; fi; } > "$D/versions/$T.renames.tsv"
-    if [ -f "$MAP" ]; then echo "    seeded versions/$T.renames.tsv from $MAP"
-    else echo "    !! no move map at $MAP -- versions/$T.renames.tsv starts empty"; fi
+      echo "# No hand-written starting table ships for $T; generate the type rows with"
+      echo "# tools/build-class-move-map.py and add call-shape rules as the burn-down finds them."
+      if [ -f "$WS/moves-1.21.1-to-$T.tsv" ]; then grep -v '^#' "$WS/moves-1.21.1-to-$T.tsv" || true; fi
+    } > "$D/versions/$T.renames.tsv"
+    echo "    !! no hand table for $T -- versions/$T.renames.tsv holds only the generated moves (if any)"
   fi
   printf '\n# --- %s'"'"'s own rows (CHECKED: a dead rule here is a real bug) ---\n' "$MODID" >> "$D/versions/$T.renames.tsv"
   mkdir -p "$D/src/$OVL/java" "$D/src/$OVL/resources"
@@ -169,7 +172,12 @@ EOF
 done
 
 echo
-echo "Frame built. Next:"
+echo "Frame built. If the composer said a generated map was missing, build both once per version pair:"
+echo "  python3 tools/build-class-move-map.py --from-cp <1.21.1 cp.txt> --to-cp <T cp.txt> \\"
+echo "      --out \"\$MIGRATE_WORKSPACE/moves/moves-1.21.1-to-<T>.tsv\""
+echo "  python3 tools/gen-color-renames.py  --from-cp <1.21.1 cp.txt> --to-cp <T cp.txt> \\"
+echo "      --out \"\$MIGRATE_WORKSPACE/moves/colors-1.21.1-to-<T>.tsv\""
+echo "Next:"
 echo "  1. ./gradlew build                 # the CANONICAL target must stay green (W2/X8)"
 echo "  2. ./gradlew build -Pmc=${TARGETS[0]}        # start the burn-down"
 echo "  3. Check build.gradle's carried dependencies: a libs/ jar or a version-specific"

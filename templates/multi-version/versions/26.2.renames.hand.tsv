@@ -1,0 +1,1003 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 jivinstev
+# HAND-WRITTEN rows of the Minecraft 1.21.1 -> 26.2 rename table.
+#
+# This is NOT the whole table. A mod's versions/26.2.renames.tsv is COMPOSED by
+# tools/make-multiversion.sh (via tools/compose-renames.py) from three sources:
+#   1. this file -- rules a generator cannot derive: renamed types, call-shape regexes, and
+#      the GeckoLib 4 -> 5 and NeoForge package moves;
+#   2. $MIGRATE_WORKSPACE/moves/moves-1.21.1-to-26.2.tsv -- the class-move map, built by
+#      tools/build-class-move-map.py from your two compile classpaths;
+#   3. $MIGRATE_WORKSPACE/moves/colors-1.21.1-to-26.2.tsv -- the per-colour ColorCollection
+#      rows, built by tools/gen-color-renames.py from the same classpaths.
+# (2) and (3) are derived from Mojang's own names, so they are generated on your machine rather
+# than published here. Anyone who needs them is already building both versions.
+#
+# SHARED starting table: Minecraft 1.21.1 -> 26.2 mechanical renames.
+#
+# Every rule here is a claim that the API is IDENTICAL either side -- only the NAME changed --
+# and each was verified against the real 26.2 compile classpath while porting a 458-file mod to
+# green on both targets. Copy it into <mod>/versions/26.2.renames.tsv and start from it rather
+# than rediscovering the same 800 rows: on that port these closed the large majority of a
+# 2254-error burn-down before any hand work began.
+#
+# THREE THINGS TO KNOW BEFORE EDITING (the long form is CLAUDE.md section X):
+#   * Order matters and getting it wrong is SILENT -- regex rules run before token rules, and
+#     token rules longest-key-first. A regex anchored on a name a token rule produces can never
+#     fire.
+#   * A member rename must name its OWNER unless the member name is globally unique.
+#     `MobEffects.MOVEMENT_SPEED` became SPEED; `Attributes.MOVEMENT_SPEED` did not.
+#   * `prepare-sources.py` reports every rule that matched NOTHING. Drive that to zero and keep
+#     it there, marking a genuinely-unused block `#!exhaustive` ... `#!strict` WITH A REASON.
+#     A warning that is never zero is decoration.
+#
+# Rows carrying a judgement rather than a pure rename are commented as such -- keep those notes,
+# because a compile cannot tell a faithful mapping from a merely plausible one.
+#
+# Mod-specific rows (compat-helper routing, a mod's own registry names) were stripped when this
+# was promoted from that port: 15 of them. Yours go in your own table, not here.
+# Mechanical 1.21.1 -> 26.2 renames applied to the shared tree by tools/prepare-sources.py.
+#
+# Every row is a type whose NAME or PACKAGE changed while its API stayed the same, so the
+# rewrite is safe and reviewable. Rows come from diffing the two real compile classpaths
+# (minecraft-forge-upgrade: tools/build-class-move-map.py), not from memory.
+#
+# A change that is NOT a pure rename does not belong here -- it belongs in the target's
+# overlay (src/mc26/java), which replaces a whole file.
+#
+# format: <1.21.1 name><TAB><26.2 name>
+
+# -- the type rename with the widest blast radius. Identical statics
+# -- (fromNamespaceAndPath/parse/withDefaultNamespace/tryParse/getNamespace/getPath),
+# -- so call sites are untouched. FQN first for the import line, then the bare name.
+#!exhaustive  # THE WHOLE INHERITED SWEEP IS EXEMPT, as one block.
+#             # These rows were promoted from a 458-file port, so any given mod uses a
+#             # fraction of them and the rest are dead BY DESIGN here -- a permanently
+#             # large dead-rule count would train you to ignore the number that has to
+#             # stay zero. Note there is deliberately no inner '#!strict': one would
+#             # close this block early and re-arm the noise (X11).
+#             # YOUR MOD'S OWN ROWS GO AFTER THE '#!strict' AT THE END OF THIS FILE,
+#             # where a dead rule IS a real bug.
+net.minecraft.resources.ResourceLocation	net.minecraft.resources.Identifier
+ResourceLocation	Identifier
+
+# -- sub-package reorganisation: same simple name, new home.
+net.neoforged.neoforge.client.model.data.ModelData	net.neoforged.neoforge.model.data.ModelData
+net.neoforged.neoforge.client.model.data.ModelProperty	net.neoforged.neoforge.model.data.ModelProperty
+net.neoforged.neoforge.common.util.TriState	net.minecraft.util.TriState
+
+# -- (per-colour -> ColorCollection rows: GENERATED on your machine by tools/gen-color-renames.py
+# --  from the game's own field names, and inserted by the composer -- see the header.)
+
+# -- method renames, each resolved with javap against the real 26.2 classpath.
+# ⚠ These were `member:` rules, which fire on a FIELD read too. Every one is a METHOD, so
+#   each was one same-named field away from silently rewriting it -- which is exactly what
+#   `member:location` did to a mod's own `this.location` (see the note above it). Requiring
+#   the parentheses costs a method rename nothing and removes the whole class.
+re:\.registryOrThrow\(	.lookupOrThrow(
+# Entity placement: moveTo -> snapTo.  MEASURED, and it is the OPPOSITE of what the
+# name suggests -- 26.2 renamed BOTH families in lockstep:
+#     moveTo    (5 overloads: double x3, +yaw/pitch, BlockPos, Vec3)  ->  snapTo
+#     absMoveTo (2 overloads: doubles only)                           ->  absSnapTo
+#     absRotateTo                                                     ->  absSnapRotationTo
+# 1.21.1's moveTo(x,y,z,yRot,xRot) body is byte-for-byte 26.2's snapTo(...): setPosRaw,
+# setYRot/setXRot, setOldPosAndRot, reapplyPosition.  absSnapTo is NOT that -- it clamps
+# to the +/-3e7 world border and goes through setPos().  Mapping moveTo->absSnapTo compiles
+# at every double-argument call site (33 of this mod's 35) and quietly changes behaviour;
+# only the two BlockPos sites fail, because absSnapTo has no BlockPos/Vec3 overload.
+# X7: a member rename must name its owner.  A bare member:moveTo also rewrites
+# PathNavigation.moveTo(x,y,z,speed), which is a DIFFERENT method that 26.2 did not
+# rename -- caught because the resulting snapTo(x,y,z,double) matched no overload.  A
+# navigation call that happened to have a compatible arity would have compiled.
+re:(?<!Navigation\(\))\.moveTo\(	.snapTo(
+re:\.absMoveTo\(	.absSnapTo(
+re:\.absRotateTo\(	.absSnapRotationTo(
+# ServerPlayer.serverLevel() folded into level(), which is covariant on ServerPlayer.
+re:\.serverLevel\(	.level(
+
+# -- REGEX rules: differences that are not a token swap.
+# Level.isClientSide became a private field with a public accessor. Only field reads
+# need the (); a call that is already isClientSide() must not become isClientSide()().
+re:\.isClientSide\b(?!\s*\()	.isClientSide()
+
+# -- GeckoLib 4.8.4 -> 5.5.4 (V18). The whole library moved from software.bernie.geckolib.*
+# -- to com.geckolib.*, and a good many types also changed sub-package on the way
+# -- (animation.AnimatableManager -> animatable.manager.AnimatableManager;
+# -- animation.PlayState -> animation.object.PlayState; animation.Animation ->
+# -- cache.animation.Animation). GENERATED by tools/build-class-move-map.py from the two real
+# -- jars -- 4.8.4 from the cloudsmith maven, 5.5.4 from a pinned test-mod lockfile -- and
+# -- (with --all-packages, over the two GeckoLib jars), giving 142 unambiguous moves, 2 ambiguous
+# -- and 46 removed. GeckoLib is MIT-licensed and these are its own class names, so unlike the
+# -- vanilla map they ship here; five ports needed them, which is why they are not re-derived.
+# --
+# -- ⚠ These 142 are the MECHANICAL half only. 5.5.4 also rebuilt the renderer around a
+# -- GeoRenderState (mirroring MC 26.x's own recorded-render-state shift) and replaced the
+# -- model/animation loading layer wholesale, so AnimationState, the three keyframe EVENT
+# -- classes, GeckoLibCache, util.Color and the whole loading.json.raw tree are simply gone.
+# -- Read the .removed.txt before estimating: a green rename pass is not a ported renderer.
+software.bernie.geckolib.GeckoLib	com.geckolib.GeckoLib
+software.bernie.geckolib.GeckoLibConstants	com.geckolib.GeckoLibConstants
+software.bernie.geckolib.GeckoLibServices	com.geckolib.GeckoLibServices
+software.bernie.geckolib.animatable.GeoAnimatable	com.geckolib.animatable.GeoAnimatable
+software.bernie.geckolib.animatable.GeoBlockEntity	com.geckolib.animatable.GeoBlockEntity
+software.bernie.geckolib.animatable.GeoEntity	com.geckolib.animatable.GeoEntity
+software.bernie.geckolib.animatable.GeoItem	com.geckolib.animatable.GeoItem
+software.bernie.geckolib.animatable.GeoReplacedEntity	com.geckolib.animatable.GeoReplacedEntity
+software.bernie.geckolib.animatable.SingletonGeoAnimatable	com.geckolib.animatable.SingletonGeoAnimatable
+software.bernie.geckolib.animatable.client.GeoRenderProvider	com.geckolib.animatable.client.GeoRenderProvider
+software.bernie.geckolib.animatable.instance.AnimatableInstanceCache	com.geckolib.animatable.instance.AnimatableInstanceCache
+software.bernie.geckolib.animatable.instance.InstancedAnimatableInstanceCache	com.geckolib.animatable.instance.InstancedAnimatableInstanceCache
+software.bernie.geckolib.animatable.instance.SingletonAnimatableInstanceCache	com.geckolib.animatable.instance.SingletonAnimatableInstanceCache
+software.bernie.geckolib.animatable.stateless.StatelessAnimatable	com.geckolib.animatable.stateless.StatelessAnimatable
+software.bernie.geckolib.animatable.stateless.StatelessAnimationController	com.geckolib.animatable.stateless.StatelessAnimationController
+software.bernie.geckolib.animatable.stateless.StatelessGeoBlockEntity	com.geckolib.animatable.stateless.StatelessGeoBlockEntity
+software.bernie.geckolib.animatable.stateless.StatelessGeoEntity	com.geckolib.animatable.stateless.StatelessGeoEntity
+software.bernie.geckolib.animatable.stateless.StatelessGeoObject	com.geckolib.animatable.stateless.StatelessGeoObject
+software.bernie.geckolib.animatable.stateless.StatelessGeoReplacedEntity	com.geckolib.animatable.stateless.StatelessGeoReplacedEntity
+software.bernie.geckolib.animatable.stateless.StatelessGeoSingletonAnimatable	com.geckolib.animatable.stateless.StatelessGeoSingletonAnimatable
+software.bernie.geckolib.animation.AnimatableManager	com.geckolib.animatable.manager.AnimatableManager
+software.bernie.geckolib.animation.Animation	com.geckolib.cache.animation.Animation
+software.bernie.geckolib.animation.AnimationController	com.geckolib.animation.AnimationController
+software.bernie.geckolib.animation.AnimationProcessor	com.geckolib.animation.AnimationProcessor
+software.bernie.geckolib.animation.ContextAwareAnimatableManager	com.geckolib.animatable.manager.ContextAwareAnimatableManager
+software.bernie.geckolib.animation.EasingType	com.geckolib.animation.object.EasingType
+software.bernie.geckolib.animation.PlayState	com.geckolib.animation.object.PlayState
+software.bernie.geckolib.animation.RawAnimation	com.geckolib.animation.RawAnimation
+software.bernie.geckolib.animation.keyframe.AnimationPoint	com.geckolib.animation.state.AnimationPoint
+software.bernie.geckolib.animation.keyframe.BoneAnimation	com.geckolib.cache.animation.BoneAnimation
+software.bernie.geckolib.animation.keyframe.Keyframe	com.geckolib.cache.animation.Keyframe
+software.bernie.geckolib.animation.keyframe.KeyframeStack	com.geckolib.cache.animation.KeyframeStack
+software.bernie.geckolib.animation.keyframe.event.KeyFrameEvent	com.geckolib.animation.state.KeyFrameEvent
+software.bernie.geckolib.animation.keyframe.event.builtin.AutoPlayingSoundKeyframeHandler	com.geckolib.animation.keyframehandler.AutoPlayingSoundKeyframeHandler
+software.bernie.geckolib.animation.keyframe.event.data.CustomInstructionKeyframeData	com.geckolib.cache.animation.keyframeevent.CustomInstructionKeyframeData
+software.bernie.geckolib.animation.keyframe.event.data.KeyFrameData	com.geckolib.cache.animation.keyframeevent.KeyFrameData
+software.bernie.geckolib.animation.keyframe.event.data.ParticleKeyframeData	com.geckolib.cache.animation.keyframeevent.ParticleKeyframeData
+software.bernie.geckolib.animation.keyframe.event.data.SoundKeyframeData	com.geckolib.cache.animation.keyframeevent.SoundKeyframeData
+software.bernie.geckolib.animation.state.BoneSnapshot	com.geckolib.animation.state.BoneSnapshot
+software.bernie.geckolib.cache.AnimatableIdCache	com.geckolib.cache.AnimatableIdCache
+software.bernie.geckolib.cache.object.BakedGeoModel	com.geckolib.cache.model.BakedGeoModel
+software.bernie.geckolib.cache.object.GeoBone	com.geckolib.cache.model.GeoBone
+software.bernie.geckolib.cache.object.GeoCube	com.geckolib.cache.model.cuboid.GeoCube
+software.bernie.geckolib.cache.object.GeoQuad	com.geckolib.cache.model.GeoQuad
+software.bernie.geckolib.cache.object.GeoVertex	com.geckolib.cache.model.GeoVertex
+software.bernie.geckolib.constant.DataTickets	com.geckolib.constant.DataTickets
+software.bernie.geckolib.constant.DefaultAnimations	com.geckolib.constant.DefaultAnimations
+software.bernie.geckolib.constant.dataticket.DataTicket	com.geckolib.constant.dataticket.DataTicket
+software.bernie.geckolib.event.GeckoLibEventsNeoForge	com.geckolib.event.GeckoLibEventsNeoForge
+software.bernie.geckolib.event.GeoRenderEvent	com.geckolib.event.GeoRenderEvent
+software.bernie.geckolib.loading.json.raw.ModelProperties	com.geckolib.cache.model.ModelProperties
+software.bernie.geckolib.loading.math.MathParser	com.geckolib.loading.math.MathParser
+software.bernie.geckolib.loading.math.MathValue	com.geckolib.loading.math.MathValue
+software.bernie.geckolib.loading.math.MolangQueries	com.geckolib.loading.math.MolangQueries
+software.bernie.geckolib.loading.math.Operator	com.geckolib.loading.math.Operator
+software.bernie.geckolib.loading.math.function.MathFunction	com.geckolib.loading.math.function.MathFunction
+software.bernie.geckolib.loading.math.function.generic.ACosFunction	com.geckolib.loading.math.function.generic.ACosFunction
+software.bernie.geckolib.loading.math.function.generic.ASinFunction	com.geckolib.loading.math.function.generic.ASinFunction
+software.bernie.geckolib.loading.math.function.generic.ATan2Function	com.geckolib.loading.math.function.generic.ATan2Function
+software.bernie.geckolib.loading.math.function.generic.ATanFunction	com.geckolib.loading.math.function.generic.ATanFunction
+software.bernie.geckolib.loading.math.function.generic.AbsFunction	com.geckolib.loading.math.function.generic.AbsFunction
+software.bernie.geckolib.loading.math.function.generic.CosFunction	com.geckolib.loading.math.function.generic.CosFunction
+software.bernie.geckolib.loading.math.function.generic.ExpFunction	com.geckolib.loading.math.function.generic.ExpFunction
+software.bernie.geckolib.loading.math.function.generic.LogFunction	com.geckolib.loading.math.function.generic.LogFunction
+software.bernie.geckolib.loading.math.function.generic.ModFunction	com.geckolib.loading.math.function.generic.ModFunction
+software.bernie.geckolib.loading.math.function.generic.PowFunction	com.geckolib.loading.math.function.generic.PowFunction
+software.bernie.geckolib.loading.math.function.generic.SinFunction	com.geckolib.loading.math.function.generic.SinFunction
+software.bernie.geckolib.loading.math.function.generic.SqrtFunction	com.geckolib.loading.math.function.generic.SqrtFunction
+software.bernie.geckolib.loading.math.function.limit.ClampFunction	com.geckolib.loading.math.function.limit.ClampFunction
+software.bernie.geckolib.loading.math.function.limit.MaxFunction	com.geckolib.loading.math.function.limit.MaxFunction
+software.bernie.geckolib.loading.math.function.limit.MinFunction	com.geckolib.loading.math.function.limit.MinFunction
+software.bernie.geckolib.loading.math.function.misc.PiFunction	com.geckolib.loading.math.function.misc.PiFunction
+software.bernie.geckolib.loading.math.function.misc.ToDegFunction	com.geckolib.loading.math.function.misc.ToDegFunction
+software.bernie.geckolib.loading.math.function.misc.ToRadFunction	com.geckolib.loading.math.function.misc.ToRadFunction
+software.bernie.geckolib.loading.math.function.random.DieRollFunction	com.geckolib.loading.math.function.random.DieRollFunction
+software.bernie.geckolib.loading.math.function.random.DieRollIntegerFunction	com.geckolib.loading.math.function.random.DieRollIntegerFunction
+software.bernie.geckolib.loading.math.function.random.RandomFunction	com.geckolib.loading.math.function.random.RandomFunction
+software.bernie.geckolib.loading.math.function.random.RandomIntegerFunction	com.geckolib.loading.math.function.random.RandomIntegerFunction
+software.bernie.geckolib.loading.math.function.round.CeilFunction	com.geckolib.loading.math.function.round.CeilFunction
+software.bernie.geckolib.loading.math.function.round.FloorFunction	com.geckolib.loading.math.function.round.FloorFunction
+software.bernie.geckolib.loading.math.function.round.HermiteBlendFunction	com.geckolib.loading.math.function.round.HermiteBlendFunction
+software.bernie.geckolib.loading.math.function.round.LerpFunction	com.geckolib.loading.math.function.round.LerpFunction
+software.bernie.geckolib.loading.math.function.round.LerpRotFunction	com.geckolib.loading.math.function.round.LerpRotFunction
+software.bernie.geckolib.loading.math.function.round.RoundFunction	com.geckolib.loading.math.function.round.RoundFunction
+software.bernie.geckolib.loading.math.function.round.TruncateFunction	com.geckolib.loading.math.function.round.TruncateFunction
+software.bernie.geckolib.loading.math.value.BooleanNegate	com.geckolib.loading.math.value.BooleanNegate
+software.bernie.geckolib.loading.math.value.Calculation	com.geckolib.loading.math.value.Calculation
+software.bernie.geckolib.loading.math.value.CompoundValue	com.geckolib.loading.math.value.CompoundValue
+software.bernie.geckolib.loading.math.value.Constant	com.geckolib.loading.math.value.Constant
+software.bernie.geckolib.loading.math.value.Group	com.geckolib.loading.math.value.Group
+software.bernie.geckolib.loading.math.value.Negative	com.geckolib.loading.math.value.Negative
+software.bernie.geckolib.loading.math.value.Ternary	com.geckolib.loading.math.value.Ternary
+software.bernie.geckolib.loading.math.value.Variable	com.geckolib.loading.math.value.Variable
+software.bernie.geckolib.loading.math.value.VariableAssignment	com.geckolib.loading.math.value.VariableAssignment
+software.bernie.geckolib.loading.object.BakedAnimations	com.geckolib.cache.animation.BakedAnimations
+software.bernie.geckolib.mixin.client.HumanoidArmorLayerMixin	com.geckolib.mixin.client.HumanoidArmorLayerMixin
+software.bernie.geckolib.mixin.client.TextureManagerMixin	com.geckolib.mixin.client.TextureManagerMixin
+software.bernie.geckolib.mixin.common.AbstractContainerMenuMixin	com.geckolib.mixin.common.AbstractContainerMenuMixin
+software.bernie.geckolib.mixin.common.ItemStackMixin	com.geckolib.mixin.common.ItemStackMixin
+software.bernie.geckolib.mixin.common.LivingEntityMixin	com.geckolib.mixin.common.LivingEntityMixin
+software.bernie.geckolib.model.DefaultedBlockGeoModel	com.geckolib.model.DefaultedBlockGeoModel
+software.bernie.geckolib.model.DefaultedEntityGeoModel	com.geckolib.model.DefaultedEntityGeoModel
+software.bernie.geckolib.model.DefaultedGeoModel	com.geckolib.model.DefaultedGeoModel
+software.bernie.geckolib.model.DefaultedItemGeoModel	com.geckolib.model.DefaultedItemGeoModel
+software.bernie.geckolib.model.GeoModel	com.geckolib.model.GeoModel
+software.bernie.geckolib.network.GeckoLibNetworkingNeoForge	com.geckolib.network.GeckoLibNetworkingNeoForge
+software.bernie.geckolib.network.packet.BlockEntityAnimTriggerPacket	com.geckolib.network.packet.blockentity.BlockEntityAnimTriggerPacket
+software.bernie.geckolib.network.packet.EntityAnimTriggerPacket	com.geckolib.network.packet.entity.EntityAnimTriggerPacket
+software.bernie.geckolib.network.packet.MultiloaderPacket	com.geckolib.network.packet.MultiloaderPacket
+software.bernie.geckolib.network.packet.SingletonAnimTriggerPacket	com.geckolib.network.packet.singleton.SingletonAnimTriggerPacket
+software.bernie.geckolib.network.packet.StatelessBlockEntityPlayAnimPacket	com.geckolib.network.packet.blockentity.StatelessBlockEntityPlayAnimPacket
+software.bernie.geckolib.network.packet.StatelessBlockEntityStopAnimPacket	com.geckolib.network.packet.blockentity.StatelessBlockEntityStopAnimPacket
+software.bernie.geckolib.network.packet.StatelessEntityPlayAnimPacket	com.geckolib.network.packet.entity.StatelessEntityPlayAnimPacket
+software.bernie.geckolib.network.packet.StatelessEntityStopAnimPacket	com.geckolib.network.packet.entity.StatelessEntityStopAnimPacket
+software.bernie.geckolib.network.packet.StatelessSingletonPlayAnimPacket	com.geckolib.network.packet.singleton.StatelessSingletonPlayAnimPacket
+software.bernie.geckolib.network.packet.StatelessSingletonStopAnimPacket	com.geckolib.network.packet.singleton.StatelessSingletonStopAnimPacket
+software.bernie.geckolib.network.packet.StopTriggeredBlockEntityAnimPacket	com.geckolib.network.packet.blockentity.StopTriggeredBlockEntityAnimPacket
+software.bernie.geckolib.network.packet.StopTriggeredEntityAnimPacket	com.geckolib.network.packet.entity.StopTriggeredEntityAnimPacket
+software.bernie.geckolib.network.packet.StopTriggeredSingletonAnimPacket	com.geckolib.network.packet.singleton.StopTriggeredSingletonAnimPacket
+software.bernie.geckolib.platform.GeckoLibClientNeoForge	com.geckolib.platform.GeckoLibClientNeoForge
+software.bernie.geckolib.platform.GeckoLibNeoForge	com.geckolib.platform.GeckoLibNeoForge
+software.bernie.geckolib.renderer.GeoArmorRenderer	com.geckolib.renderer.GeoArmorRenderer
+software.bernie.geckolib.renderer.GeoBlockRenderer	com.geckolib.renderer.GeoBlockRenderer
+software.bernie.geckolib.renderer.GeoEntityRenderer	com.geckolib.renderer.GeoEntityRenderer
+software.bernie.geckolib.renderer.GeoItemRenderer	com.geckolib.renderer.GeoItemRenderer
+software.bernie.geckolib.renderer.GeoObjectRenderer	com.geckolib.renderer.GeoObjectRenderer
+software.bernie.geckolib.renderer.GeoRenderer	com.geckolib.renderer.base.GeoRenderer
+software.bernie.geckolib.renderer.GeoReplacedEntityRenderer	com.geckolib.renderer.GeoReplacedEntityRenderer
+software.bernie.geckolib.renderer.layer.AutoGlowingGeoLayer	com.geckolib.renderer.layer.builtin.AutoGlowingGeoLayer
+software.bernie.geckolib.renderer.layer.BlockAndItemGeoLayer	com.geckolib.renderer.layer.builtin.BlockAndItemGeoLayer
+software.bernie.geckolib.renderer.layer.GeoRenderLayer	com.geckolib.renderer.layer.GeoRenderLayer
+software.bernie.geckolib.renderer.layer.GeoRenderLayersContainer	com.geckolib.renderer.layer.GeoRenderLayersContainer
+software.bernie.geckolib.renderer.layer.ItemArmorGeoLayer	com.geckolib.renderer.layer.builtin.ItemArmorGeoLayer
+software.bernie.geckolib.renderer.specialty.DyeableGeoArmorRenderer	com.geckolib.renderer.specialty.DyeableGeoArmorRenderer
+software.bernie.geckolib.service.GeckoLibEvents	com.geckolib.service.GeckoLibEvents
+software.bernie.geckolib.service.GeckoLibNetworking	com.geckolib.service.GeckoLibNetworking
+software.bernie.geckolib.service.GeckoLibPlatform	com.geckolib.service.GeckoLibPlatform
+software.bernie.geckolib.util.ClientUtil	com.geckolib.util.ClientUtil
+software.bernie.geckolib.util.CompoundException	com.geckolib.object.CompoundException
+software.bernie.geckolib.util.GeckoLibUtil	com.geckolib.util.GeckoLibUtil
+software.bernie.geckolib.util.JsonUtil	com.geckolib.util.JsonUtil
+software.bernie.geckolib.util.RenderUtil	com.geckolib.util.RenderUtil
+
+# -- EntityType.Builder.build(String) became build(ResourceKey<EntityType<?>>) (the
+# -- 1.21.2 change this project's migrator catalog records as M4). Written fully
+# -- qualified on purpose: a rewrite that needed three new imports per file would have
+# -- to edit import blocks, and this table only ever rewrites expressions.
+
+# -- GameRules was overhauled: constants lost the RULE_ prefix, are typed GameRule<T>,
+# -- and their serialized ids changed too (advance_time / spawn_mobs, not the old
+# -- camelCase doDaylightCycle / doMobSpawning). Verified by reading each field's
+# -- registerBoolean("<id>", ...) call out of the static initialiser, not by name
+# -- resemblance. (The mod this was measured on references no gamerule ids as strings, so only the constants move.)
+re:GameRules\.RULE_DAYLIGHT\b	GameRules.ADVANCE_TIME
+re:GameRules\.RULE_DOMOBSPAWNING\b	GameRules.SPAWN_MOBS
+re:GameRules\.RULE_WEATHER_CYCLE\b	GameRules.ADVANCE_WEATHER
+
+# -- ResourceKey.location() -> identifier(), following ResourceLocation -> Identifier.
+# ⚠ MUST require the PARENTHESES. As a bare `member:location` this eats a FIELD named
+#    `location` -- which for a Minecraft mod is a very likely field name, and one config library has
+#    exactly one (`ImageTitle.this.location`, a texture id). It compiled as `this.identifier`
+#    and failed with `cannot find symbol: variable identifier`, which reads like a missing
+#    vanilla member rather than a rule that over-reached. A space mod has two such sites and
+#    escaped only because both live in files it OVERLAYS on 26.2 -- luck, not design.
+#    This is X7 ("a member rename must name its owner") with a second clause: a rename for a
+#    METHOD must also require the call syntax, or it silently rewrites same-named fields.
+re:\.location\(\)	.identifier()
+
+# -- Minecraft.setScreen -> setScreenAndShow.
+re:\.setScreen\(	.setScreenAndShow(
+
+# -- Player.displayClientMessage(text, actionBar) split into sendOverlayMessage(text) and
+# -- sendSystemMessage(text), so the boolean now picks a METHOD and there is no rename that
+# -- works. Routed through a per-version compat helper instead; every receiver in this mod
+# -- is a simple identifier or a.b (checked), so the call site rewrite is safe. Written
+# -- fully qualified so no import has to be added.
+
+# -- so both targets route through a compat helper. The get pattern requires an ARGUMENT so
+
+# -- 26.x NBT accessors return Optional; the *Or forms preserve 1.21.1 semantics exactly
+# -- (the old getInt returned 0 when the key was absent, which is what getIntOr(k, 0) does).
+# -- Each pattern excludes any call containing a comma, so a two-argument call on a DIFFERENT
+# -- type is never touched -- Brigadier's StringArgumentType.getString(ctx, "name") being the
+# -- one that would otherwise be silently mangled. Written for the whole accessor
+# -- family defensively, so an unused member is expected rather than a bug.
+re:\.getInt\(([^,()]+)\)	.getIntOr(\1, 0)
+re:\.getString\(([^,()]+)\)	.getStringOr(\1, "")
+re:(?<!Boolean)\.getBoolean\(("[^"]*")\)	.getBooleanOr(\1, false)
+re:\.getLong\(([^,()]+)\)	.getLongOr(\1, 0L)
+re:\.getDouble\(([^,()]+)\)	.getDoubleOr(\1, 0.0)
+re:\.getFloat\(([^,()]+)\)	.getFloatOr(\1, 0.0F)
+re:\.getCompound\(([^,()]+)\)	.getCompoundOrEmpty(\1)
+# getList lost its element-type argument; both arities collapse to getListOrEmpty.
+# The single-arg form has no call site in this mod today; it is kept as coverage of the
+# documented change rather than deleted, so it is marked rather than left to look dead.
+re:\.getList\(([^,()]+),\s*[A-Za-z0-9_.]+\)	.getListOrEmpty(\1)
+re:\.getList\(([^,()]+)\)	.getListOrEmpty(\1)
+
+# -- CompoundTag.getUUID/putUUID have no 26.x equivalent (a UUID goes through a codec now),
+# -- so both targets route through a compat helper. The get pattern requires an ARGUMENT so
+# -- it cannot touch the 50 no-arg Entity.getUUID() calls, which are unrelated and fine.
+
+# -- 26.x collapsed the three interaction-result types into one InteractionResult.
+# -- The Holder forms carried a payload (the resulting ItemStack) that the new API does not
+# -- take, so the argument is dropped -- vanilla now reads the stack back from the player.
+re:InteractionResultHolder\.success\([^;]*\)	InteractionResult.SUCCESS
+re:InteractionResultHolder\.pass\([^;]*\)	InteractionResult.PASS
+re:InteractionResultHolder\.fail\([^;]*\)	InteractionResult.FAIL
+re:InteractionResultHolder\.consume\([^;]*\)	InteractionResult.CONSUME
+# NOTE, behavioural: 1.21.1's sidedSuccess(x, isClientSide) meant "SUCCESS on the client, CONSUME on the
+# server". 26.x folds that decision into SUCCESS itself, so this is the faithful mapping --
+# but it is the one rule here that is a judgement rather than a pure rename, so it is worth
+# eyeballing in-game (the arm-swing on use) rather than trusting the compile.
+re:InteractionResultHolder\.sidedSuccess\([^;]*\)	InteractionResult.SUCCESS
+net.minecraft.world.InteractionResultHolder	net.minecraft.world.InteractionResult
+re:InteractionResultHolder<[^>]*>	InteractionResult
+
+# -- ItemInteractionResult likewise folds in. PASS_TO_DEFAULT_BLOCK_INTERACTION is exactly
+# -- what TRY_WITH_EMPTY_HAND now expresses.
+ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION	InteractionResult.TRY_WITH_EMPTY_HAND
+net.minecraft.world.ItemInteractionResult	net.minecraft.world.InteractionResult
+ItemInteractionResult	InteractionResult
+
+# -- UseAnim -> ItemUseAnimation
+net.minecraft.world.item.UseAnim	net.minecraft.world.item.ItemUseAnimation
+UseAnim	ItemUseAnimation
+
+# -- 26.x replaced numeric command permission levels with named PermissionCheck constants.
+# -- LEVEL_GAMEMASTERS is the old level 2 (all 19 of this mod's OP-gated commands).
+# -- Fully qualified so no import is needed.
+re:\.requires\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*->\s*\1\.hasPermission\(2\)\s*\)	.requires(net.minecraft.commands.Commands.hasPermission(net.minecraft.commands.Commands.LEVEL_GAMEMASTERS))
+
+# -- straight renames confirmed against the 26.2 classpath
+net.minecraft.world.entity.MobSpawnType	net.minecraft.world.entity.EntitySpawnReason
+MobSpawnType	EntitySpawnReason
+net.neoforged.neoforge.event.AddReloadListenerEvent	net.neoforged.neoforge.event.AddServerReloadListenersEvent
+AddReloadListenerEvent	AddServerReloadListenersEvent
+
+# -- CLIENT RENDERING: the render-state split.
+# -- 26.x threads a render state through EntityRenderer<T, S>, and GeckoLib 5 follows with
+# -- GeoEntityRenderer<T, R>. Only the ARITY changes for this mod: GeckoLib 5 keeps the
+# -- (Context, GeoModel<T>) constructor, and it mixes GeoRenderState into vanilla's
+# -- EntityRenderState (client.EntityRenderStateMixin), so any vanilla state satisfies R.
+# -- All six of this mod's GeckoLib renderers draw living entities (Mob / PathfinderMob /
+# -- Illusioner / Rabbit), so LivingEntityRenderState is the right state for every one.
+re:extends GeoEntityRenderer<([A-Za-z0-9_]+)>	extends GeoEntityRenderer<\1, net.minecraft.client.renderer.entity.state.LivingEntityRenderState>
+
+# ─────────────────────── measured 2026-09-03, against the real 26.2 classpath ───────────────────────
+# Every row below was resolved with `javap` / tools/find-member-26.py against
+# build/moddev/artifacts/minecraft-patched-26.2.0.75-merged.jar, never from memory. §V's own history
+# is the reason: a plausible cause fitted to one observation was wrong there too.
+
+# -- EntityType's 158 constants moved to a NEW `EntityTypes` holder class, exactly as Blocks/Items
+# -- are laid out. `EntityType` itself keeps only 2 statics, so the class stays, and only the
+# -- constant references move. Written FULLY QUALIFIED (§V19): a table that rewrites expressions
+# -- cannot add the import a bare `EntityTypes.X` would need.
+re:(?<![\w.])EntityType\.([A-Z][A-Z0-9_]+)\b	net.minecraft.world.entity.EntityTypes.\1
+
+# -- MobEffects took the names players actually use. Verified: the Holder<MobEffect> constants are
+# -- SPEED / SLOWNESS / RESISTANCE, and the old names are absent from MobEffects.
+#
+# ⚠ ANCHORED ON THE OWNER, and the first cut was not, which broke 16 call sites. A bare
+# -- `member:MOVEMENT_SPEED` also rewrites `Attributes.MOVEMENT_SPEED` -- and Attributes STILL HAS
+# -- that constant in 26.2, unchanged. The rule compiled the rename it was asked for and silently
+# -- corrupted an unrelated class that happens to share a member name. It only surfaced because the
+# -- error count went the wrong way on that family; a rule that had merely made an existing error
+# -- LOOK different would have hidden it entirely.
+#
+# -- The general form, for the next row: a MEMBER rename must name its owner unless the member name
+# -- is globally unique. Check with `javap <the other likely owner>` before using a bare member rule.
+re:\bMobEffects\.MOVEMENT_SPEED\b	MobEffects.SPEED
+re:\bMobEffects\.MOVEMENT_SLOWDOWN\b	MobEffects.SLOWNESS
+re:\bMobEffects\.DAMAGE_RESISTANCE\b	MobEffects.RESISTANCE
+re:\bMobEffects\.DAMAGE_BOOST\b	MobEffects.STRENGTH
+re:\bMobEffects\.DIG_SPEED\b	MobEffects.HASTE
+re:\bMobEffects\.JUMP\b	MobEffects.JUMP_BOOST
+
+# -- §M's M2 rename, arriving here from the other direction: on 26.2 `Registry.get(rl)` returns
+# -- Optional<Holder.Reference<T>> and the plain-value lookup is `getValue`. Anchored on the ONE
+# -- registry receiver this repo actually uses, so it cannot touch Map.get/Optional.get. (A second
+# -- rule for `registryAccess().lookupOrThrow(..).get(` was written and the dead-rule detector
+# -- rejected it: that shape does not occur here. §X1 -- an unfired rule is indistinguishable from
+# -- an unneeded one unless something counts.)
+re:\b(BuiltInRegistries\.[A-Z_]+)\.get\(	\1.getValue(
+
+# -- Level.random is protected now; the accessor was always there. ANCHORED ON THE RECEIVER, and
+# -- that anchoring is the whole point (§X7): this row was `re:\.random\.next` for one tree in which
+# -- nothing declared a field of its own named `random`. In the next tree it silently rewrote
+# -- `this.random.nextInt(...)` inside an Entity/Particle subclass -- where `random` is still a
+# -- perfectly good `protected final` field -- into `this.getRandom()`, which Particle does not have.
+# -- Entity.random and Particle.random are BOTH still protected+accessible on 26.2 (checked with
+# -- javap); only Level.random needs the accessor, so only a level-shaped receiver may be rewritten.
+re:(\w*[Ll]evel(?:\(\))?)\.random\b	\1.getRandom()
+
+# ⚠ JUDGEMENT ROW, not a rename — read before trusting it (§W6).
+# getMinBuildHeight/getMaxBuildHeight became getMinY/getMaxY, and the SEMANTICS CHANGED:
+# 1.21.1's getMaxBuildHeight() was EXCLUSIVE (minY + height); 26.2's getMaxY() is INCLUSIVE
+# (bytecode: getMinY + getHeight - 1). A straight rename compiles perfectly and silently shortens
+# every loop by one block. The `+ 1` restores the old meaning; a NEW loop should prefer <= getMaxY().
+re:\.getMinBuildHeight\(	.getMinY(
+re:\.getMaxBuildHeight\(\)	.getMaxY() + 1
+
+# -- Permissions, part 2: the two shapes the LEVEL_GAMEMASTERS row above does not reach.
+#
+# (a) A COMPOUND requires-predicate. `Commands.hasPermission(check)` returns a
+#     PermissionProviderCheck, which `implements Predicate<T>` — so the extra condition composes
+#     with the ordinary `.and(...)` rather than needing a hand-written lambda.
+re:\.requires\(\s*([A-Za-z_]\w*)\s*->\s*\1\.hasPermission\(2\)\s*&&\s*(.+?)\s*\)\n	.requires(net.minecraft.commands.Commands.<net.minecraft.commands.CommandSourceStack>hasPermission(net.minecraft.commands.Commands.LEVEL_GAMEMASTERS).and(\1 -> \2))\n
+#
+# ⚠ (b) JUDGEMENT ROW — this WIDENS permissions, deliberately, and only in test harnesses (§W6).
+#     `CommandSourceStack.withPermission(int)` now takes a PermissionSet, and 26.2 exposes exactly
+#     two: NO_PERMISSIONS and ALL_PERMISSIONS. There is no public numeric-level -> set mapping
+#     (checked: Commands' LEVEL_* constants are PermissionChecks, a different type). Every one of
+#     this repo's 16 call sites is a GameTest or a Gate-C harness building a source stack to run an
+#     admin command as an operator, so ALL_PERMISSIONS is the faithful reading of the intent even
+#     though level 2 was narrower than level 4. If this rule ever starts matching PRODUCTION code,
+#     that site needs a real permission decision instead — do not let it ride.
+re:\.withPermission\([0-9]+\)	.withPermission(net.minecraft.server.permissions.PermissionSet.ALL_PERMISSIONS)
+
+# -- BlockEntity save/load moved from (CompoundTag, HolderLookup.Provider) to a single ValueOutput /
+# -- ValueInput. This is a smaller change than it looks for THIS tree, and the reason is measured
+# -- rather than hoped: ValueOutput keeps CompoundTag's own writer names (putInt/putString/...), and
+# -- ValueInput exposes exactly the `getIntOr(name, default)` shape the NBT block above already
+# -- rewrites to. So the bodies of all 14 block entities survive and only the signature moves.
+# -- Anything richer than a primitive (a nested tag, a stored ItemStack) does NOT survive and shows
+# -- up as a leftover error — which is the intended outcome: it needs a codec, not a rename.
+re:protected void saveAdditional\(CompoundTag (\w+), (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)	protected void saveAdditional(net.minecraft.world.level.storage.ValueOutput \1)
+re:protected void loadAdditional\(CompoundTag (\w+), (?:net\.minecraft\.core\.)?HolderLookup\.Provider \w+\)	protected void loadAdditional(net.minecraft.world.level.storage.ValueInput \1)
+re:super\.saveAdditional\((\w+), \w+\)	super.saveAdditional(\1)
+re:super\.loadAdditional\((\w+), \w+\)	super.loadAdditional(\1)
+
+# --- EntityType.create(Level) gained an EntitySpawnReason -------------------------------
+# 26.x: `create(Level, EntitySpawnReason)` -> `create(level, new EntitySpawnRequest(reason, false))`
+# -> `!request.ignoreChecks() && !canSpawn(level) ? null : factory.create(this, level)`.
+# READ THAT BODY BEFORE WORRYING ABOUT THE REASON: it is passed straight into the request and
+# the request's reason is never consulted, so the argument is INERT at this call and TRIGGERED
+# vs COMMAND makes no difference. (It is NOT inert in `spawn(...)`, which forwards it to
+# `finalizeSpawn` — we do not call that form.) So this is a rename, not a judgement.
+#
+# ⚠️ What DID change behaviourally, and is worth knowing: `canSpawn` now returns false on
+# PEACEFUL for anything not `allowedInPeaceful`, so `create` returns NULL there where 1.21.1
+# handed back an entity. Every call site of ours already null-guards; keep it that way.
+#
+# Anchored on the ARGUMENT NAME rather than the receiver, because a receiver pattern cannot
+# tell EntityType.create apart from ClientboundBlockEntityDataPacket.create(this) (8 sites),
+# IceCreamItem.create(s) or CoffeeDrinkItem.create(brew) — all of which must not be touched.
+re:\.create\((level|serverLevel|targetLevel|serverWorld|server|here|helper\.getLevel\(\)|\w+\.level\(\))\)	.create(\1, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
+
+# --- GameTestHelper.getBlockEntity now takes the expected class -------------------------
+# 26.x: `<T extends BlockEntity> T getBlockEntity(BlockPos, Class<T>)`. The cast the call site
+# already carries IS the class, so the first rule moves it inside; the second handles the
+# `var be = helper.getBlockEntity(pos)` sites that never cast.
+#
+# ORDER IS LOAD-BEARING (§X4) and self-protecting: the first rule's output contains a comma,
+# which the second rule's `[^(),]*` refuses, so it cannot re-match its own result.
+#
+# Anchored on the `helper.` receiver on purpose — `level.getBlockEntity(BlockPos)` is
+# UNCHANGED, and a receiver-agnostic rule would rewrite all 20-odd of those into a method
+# that does not exist.
+re:\((\w+BlockEntity)\)\s*helper\.getBlockEntity\(([^()]*)\)	helper.getBlockEntity(\2, \1.class)
+re:helper\.getBlockEntity\(([^(),]*)\)	helper.getBlockEntity(\1, net.minecraft.world.level.block.entity.BlockEntity.class)
+
+# --- Minecraft.screen moved into Gui, and Gui grew a Hud ---------------------------------
+# 26.x split the old god-object `Gui`: `Minecraft.gui` is still a `Gui`, but it now holds the
+# SCREEN stack (`screen()` / `setScreen`) and delegates the heads-up display to `Gui.hud`, a
+# separate `Hud` class. `Minecraft.screen` is gone as a field.
+re:\bmc\.screen\b	mc.gui.screen()
+re:\.gui\.getBossOverlay\(\)	.gui.hud.getBossOverlay()
+
+# --- Blocks.CHAIN -> IRON_CHAIN (26.x added copper chains) -------------------------------
+# The `\b` matters: CHAIN_COMMAND_BLOCK must not be clipped to IRON_CHAIN_COMMAND_BLOCK.
+re:\bBlocks\.CHAIN\b	Blocks.IRON_CHAIN
+
+# --- BlockEntityType.Builder is gone; the constructor takes the blocks directly ----------
+# 26.x: `BlockEntityType(BlockEntitySupplier<? extends T>, Block...)`. `.build(null)` is a
+# unique enough anchor to make the non-greedy capture safe over an argument list that itself
+# contains parentheses (`X::new, FOO.get()`).
+re:BlockEntityType\s*\.Builder\s*\.of\(([^;]*?)\)\s*\.build\(null\)	new BlockEntityType<>(\1)
+
+# --- Entity.getTags() -> entityTags() ----------------------------------------------------
+# Renamed to stop colliding with EntityType.getTags()/Registry.getTags(), which return TAG
+# KEYS rather than the entity's own string tags and both still exist. Safe as a bare member
+# rule ONLY because every one of our 12 call sites is on an entity -- verified, not assumed.
+re:\.getTags\(	.entityTags(
+
+# --- GameRules.getRule(X).set(v, server) -> set(X, v, server) ----------------------------
+# 26.x dropped the per-rule `Value` object: the rules object is read with `get(GameRule<T>)`
+# and written with `set(GameRule<T>, T, MinecraftServer)`. Written to move the argument
+# rather than name the constant, so it is unaffected by the RULE_* renames above whichever
+# order they land in.
+re:\.getRule\(([^()]*)\)\s*\.set\(	.set(\1, 
+
+# --- Item.appendHoverText: the List became a Consumer, and a TooltipDisplay was inserted --
+# 26.x: `appendHoverText(ItemStack, Item.TooltipContext, TooltipDisplay, Consumer<Component>,
+# TooltipFlag)`. Two rules, because the signature and the body both have to move.
+#
+# The body rule is safe as a bare `tooltip.` anchor for a checked reason rather than a hopeful
+# one: `tooltip` appears in this tree ONLY as this parameter, and ONLY as `tooltip.add(...)` --
+# grepped, zero other uses. If a future call site names something else `tooltip`, this rule
+# will rewrite it into `.accept(` and javac will say so immediately; it cannot fail silently.
+re:appendHoverText\(ItemStack (\w+), TooltipContext (\w+), List<Component> (\w+), TooltipFlag (\w+)\)	appendHoverText(ItemStack \1, TooltipContext \2, net.minecraft.world.item.component.TooltipDisplay tooltipDisplay, java.util.function.Consumer<Component> \3, TooltipFlag \4)
+re:\btooltip\.add\(	tooltip.accept(
+
+# --- Mob.customServerAiStep gained the ServerLevel ---------------------------------------
+# The super call has to move with it -- a signature-only rule leaves `super.customServerAiStep()`
+# calling a method that no longer exists, in the same nine files.
+# ⚠ The modifier is CAPTURED, not literal: MCreator emits `public void customServerAiStep()`
+# while a hand-written mob emits `protected`. Pinned to `protected` this row could not fire on an
+# MCreator tree while its PARTNER row below still did -- leaving `super.customServerAiStep(aiServerLevel)`
+# inside a method that has no such parameter, i.e. 10 errors naming a variable no rule ever declared.
+re:(public|protected) void customServerAiStep\(\)	\1 void customServerAiStep(net.minecraft.server.level.ServerLevel aiServerLevel)
+re:super\.customServerAiStep\(\)	super.customServerAiStep(aiServerLevel)
+
+# --- SavedData no longer declares save(CompoundTag, Provider) ----------------------------
+# 26.x moved persistence to a SavedDataType carrying a Codec, so `save` is no longer a vanilla
+# hook -- it is just our own method, called by compat.Saved's codec adapter. The method stays;
+# only the @Override has to go, because on 1.21.1 it genuinely IS the hook and dropping it from
+# the shared tree would lose the compile-time check there (the "@Override on every loader hook"
+# rule the migrator repo records after four silent 1.21 casualties).
+#
+# Six stores have exactly this signature and nothing else in the tree does.
+re:@Override\s*\n(\s*)public CompoundTag save\(CompoundTag	\1public CompoundTag save(CompoundTag
+
+# --- CompoundTag.contains(key, type) lost its type argument ------------------------------
+# 26.x has only `contains(String)`. Mapping to that alone would LOSE the type check, and every
+# one of our six sites is in a defensive load path where a key of the wrong type must be
+# skipped rather than read as a default -- which is the whole reason those paths exist. So each
+# maps to the typed getter's Optional instead, which is exactly the old semantics.
+re:\.contains\(([^,()]*), *Tag\.TAG_INT\)	.getInt(\1).isPresent()
+re:\.contains\(([^,()]*), *Tag\.TAG_STRING\)	.getString(\1).isPresent()
+re:\.contains\(([^,()]*), *Tag\.TAG_COMPOUND\)	.getCompound(\1).isPresent()
+
+# --- Entity.startRiding gained a third argument -----------------------------------------
+# 26.x: `startRiding(Entity toRide, boolean force, boolean sendEventAndTriggers)`. The 1.21.1
+# two-argument form did send events, so `true` is the faithful value -- passing false would
+# silently stop advancement triggers and the mount event firing, which nothing would report.
+re:\.startRiding\(([^,()]*), *(true|false)\)	.startRiding(\1, \2, true)
+
+# --- ServerBossEvent gained a leading UUID ----------------------------------------------
+# The id is how the client tracks one bar across updates, so a fresh random one per bar is
+# right -- these are all constructed once and held for the bar's lifetime, never rebuilt per
+# tick (which WOULD make the bar flicker as the client saw a new bar each time).
+re:new ServerBossEvent\(	new ServerBossEvent(java.util.UUID.randomUUID(), 
+
+# --- GameTestAssertException takes a Component and a tick --------------------------------
+# `super(message.getString())` on the inside, so the string is not lost; the tick only feeds
+# the "test.error.tick" message. Our sites all throw from inside a `helper.succeedWhen`
+# retry, where the helper's own tick is not reachable -- vanilla passes
+# `testInfo.getTick()`, we cannot, and 0 is the honest placeholder rather than a wrong number.
+re:new GameTestAssertException\(([^;]*?)\)	new GameTestAssertException(net.minecraft.network.chat.Component.literal(\1), 0)
+
+# -- SoundEvents is a MIX on both versions: sounds with variants are Holder.Reference, the rest are
+# -- plain SoundEvent. So a blanket ".value()" rule is wrong -- measured, it created 67 errors by
+# -- unwrapping constants that were never wrapped (X7 again). Diffing the two jars says EXACTLY TWO of
+# -- the 53 constants this mod names bare went plain -> Holder between 1.21.1 and 26.2, and this is them.
+re:SoundEvents\.(GENERIC_DRINK|GENERIC_EAT)\b(?!\.value\(\))	SoundEvents.\1.value()
+
+# -- ChunkPos(BlockPos) is gone; the record now takes the two chunk coordinates. SectionPos does the
+# -- shift, which is what the old constructor did internally, rather than open-coding >> 4 here.
+re:new ChunkPos\((\w+)\)	new ChunkPos(net.minecraft.core.SectionPos.blockToSectionCoord(\1.getX()), net.minecraft.core.SectionPos.blockToSectionCoord(\1.getZ()))
+
+# -- Inventory.items became private with a getNonEquipmentItems() accessor. Same list, same order --
+# -- the main 36 slots -- so the one caller (a mall test counting what a shopper carries) is unchanged.
+re:\.getInventory\(\)\.items\b	.getInventory().getNonEquipmentItems()
+
+# -- ServerPlayer.server became private. getServer() is inherited from Entity and returns the same
+# -- MinecraftServer; it is nullable in principle, but a ServerPlayer always has one.
+re:\bplayer\.server\.	player.level().getServer().
+
+# -- Entity save/load moved to ValueOutput/ValueInput, exactly as BlockEntity did. Unlike the block
+# -- entities (which got a compat base class, because their bodies write nested compounds) these three
+# -- bodies write only scalars, and ValueOutput/ValueInput carry putLong/putDouble/putInt and the
+# -- getXOr accessors the existing rules already rewrite to. So the SIGNATURE is all that has to move;
+# -- the parameter keeps the name `tag` so every body and super-call is untouched.
+re:void addAdditionalSaveData\(CompoundTag (\w+)\)	void addAdditionalSaveData(net.minecraft.world.level.storage.ValueOutput \1)
+re:void readAdditionalSaveData\(CompoundTag (\w+)\)	void readAdditionalSaveData(net.minecraft.world.level.storage.ValueInput \1)
+
+# -- ContainerHelper takes the ValueOutput/ValueInput and no longer needs a registry provider (the
+# -- ValueInput carries one). Anchored on registryAccess() so it cannot touch the block-entity form.
+re:ContainerHelper\.saveAllItems\((\w+), (\w+), (true|false), registryAccess\(\)\)	ContainerHelper.saveAllItems(\1, \2, \3)
+re:ContainerHelper\.loadAllItems\((\w+), (\w+), registryAccess\(\)\)	ContainerHelper.loadAllItems(\1, \2)
+
+# -- ⚠ ANCHORED ON TWO SPECIFIC KEYS, and it has to be. A bare `tag.contains(key)` cannot be rewritten
+# -- generally, because ValueInput has no `contains`: the replacement is the Optional-returning accessor
+# -- for the value's TYPE, which the regex cannot see. These two read longs (a packed BlockPos), and
+# -- "absent" genuinely differs from "0" here — BlockPos.of(0) is the world origin, a real place — so
+# -- dropping the presence check would silently turn "no station linked" into "station at 0,0,0".
+re:tag\.contains\((TAG_A|TAG_B)\)	tag.getLong(\1).isPresent()
+
+# -- GeckoLib 5 dropped the animatable from AnimationController's constructor: it is now
+# -- (name, transitionTicks, handler), the controller learning its animatable from the manager that
+# -- holds it. Verified against the shipped 5.5.4 jar -- there is no 4-arg form, which is why the
+# -- diamond reported "cannot infer type arguments" rather than an arity error. Every lambda in this
+# -- mod uses only setAnimation/setAndContinue/isMoving, none of which depend on the type parameter,
+# -- so inference to the GeoAnimatable bound is enough and no explicit witness is needed.
+re:new AnimationController<>\(this, 	new AnimationController<>(
+
+# -- Copper is V11's ColorCollection shape applied to weathering: the sixteen separate Blocks
+# -- constants collapsed into one WeatheringCopperCollection per family, picked by
+# -- weathering()/waxed() and then unaffected()/exposed()/weathered()/oxidized(). Order matters
+# -- here (X4): the WAXED_ and OXIDIZED_ forms must be rewritten before the bare COPPER_BLOCK
+# -- rule, or it clips their prefixes.
+re:\bBlocks\.WAXED_COPPER_BLOCK\b	Blocks.COPPER_BLOCK.waxed().unaffected()
+re:\bBlocks\.OXIDIZED_COPPER\b	Blocks.COPPER_BLOCK.weathering().oxidized()
+re:\bBlocks\.COPPER_BLOCK\b(?!\.(waxed|weathering)\()	Blocks.COPPER_BLOCK.weathering().unaffected()
+
+# -- I18n kept only get(String, Object...); exists() is gone. Language.getInstance().has(key) is
+# -- what I18n.exists delegated to (catalog #163), so this is the same question asked one layer down.
+re:\bI18n\.exists\(	net.minecraft.locale.Language.getInstance().has(
+
+# -- V13's collapse, seen at the other constant: InteractionResult.sidedSuccess(isClient) is gone
+# -- along with the Holder form, and 26.x folds "SUCCESS on the client, CONSUME on the server" into
+# -- SUCCESS itself. Judgement row, same as the Holder one: verify the arm swing in game.
+re:InteractionResult\.sidedSuccess\((?:[^()]|\([^()]*\))*\)	InteractionResult.SUCCESS
+
+# -- GameRules reads went the same way as writes: getRule(X).get() is now get(X).
+re:\.getGameRules\(\)\s*\.getRule\(([^()]*)\)\s*\.get\(\)	.getGameRules().get(\1)
+
+# -- Entity.getServer() is gone. A ServerPlayer's level() is covariantly a ServerLevel (V17), which
+# -- still has getServer(), so the server is one hop further away rather than absent.
+re:\bplayer\.getServer\(\)	player.level().getServer()
+
+# -- ItemCooldowns is keyed by the stack (or an explicit cooldown-group Identifier) rather than by
+# -- the Item. A fresh stack of the same item resolves to the same default group, so the cooldown
+# -- these five items apply is unchanged.
+re:\.addCooldown\(this, 	.addCooldown(new net.minecraft.world.item.ItemStack(this), 
+
+# -- Entity.isControlledByLocalInstance -> isLocalInstanceAuthoritative. Same question (is THIS
+# -- process the one driving?), and still what the vehicle input path keys off.
+re:\.isControlledByLocalInstance\(	.isLocalInstanceAuthoritative(
+
+# -- Fall distance became a double throughout: Block.fallOn and Entity.causeFallDamage both take one.
+# -- Widening a float to a double is lossless, so the bodies are unchanged.
+re:public void fallOn\(Level level, BlockState state, BlockPos pos, Entity entity, float fallDistance\)	public void fallOn(Level level, BlockState state, BlockPos pos, Entity entity, double fallDistance)
+re:public boolean causeFallDamage\(float distance,	public boolean causeFallDamage(double distance,
+
+# -- Entity.hurt is gone, split into hurtServer(ServerLevel, ...) and hurtClient(...). Both overrides
+# -- here refuse damage unless a Creative player dealt it, which is a server-side decision, so the
+# -- server half is the faithful home for them. The injected parameter is named hurtLevel rather than
+# -- `level` because both classes already have a level() and one has a `level` local -- the same
+# -- collision customServerAiStep's rule hit.
+re:public boolean hurt\(DamageSource source, float amount\)	public boolean hurtServer(net.minecraft.server.level.ServerLevel hurtLevel, DamageSource source, float amount)
+re:super\.hurt\(source, amount\)	super.hurtServer(hurtLevel, source, amount)
+
+# -- EntityType is no longer directly tag-testable; the holder it registered under is.
+re:\.getType\(\)\.is\(	.getType().builtInRegistryHolder().is(
+
+# -- V21 again, for the sites that were ALREADY written fully qualified. The (?<![\w.]) anchor that
+# -- stops the bare rule mangling its own output also stops it matching these, so they need their own.
+re:net\.minecraft\.world\.entity\.EntityType\.([A-Z][A-Z0-9_]+)\b	net.minecraft.world.entity.EntityTypes.\1
+
+# -- MobSpawnType -> EntitySpawnReason renamed its members too: SPAWN_EGG became SPAWN_ITEM_USE,
+# -- because a bucket of fish and a bottle of a mob use the same path now.
+re:MobSpawnType\.SPAWN_EGG\b	EntitySpawnReason.SPAWN_ITEM_USE
+
+# -- FMLEnvironment.dist became a method. Same value, same meaning.
+re:\bFMLEnvironment\.dist\b	FMLEnvironment.getDist()
+
+# -- UNBREAKABLE is a marker component now (Unit) rather than a record carrying showInTooltip.
+# -- The tooltip flag it used to hold moved to the item's own tooltip-display component, so passing
+# -- `true` had nothing left to say.
+
+# -- LivingEntity.kill takes the level it is being killed in (26.x moved every death path to an
+# -- explicit ServerLevel rather than reaching through the entity).
+# ⚠ THIS ROW IS TARGET-SPECIFIC AND WILL BE WRONG ON MOST MODS. It supplies the level as the
+# bare identifier `level`, which only resolves where the call site happens to have a local of
+# that name -- as the mod this table was promoted from did. Everywhere else `level` binds to
+# Entity's own FIELD, which is private on 26.2, and the five failures then read as "level has
+# private access in Entity", i.e. as an accessor change rather than as a rule writing the wrong
+# expression (measured on a large boss mod). The portable shape is a row for the override plus its
+# super, and a §W5 pair for the plain calls that TESTS the level rather than casting it.
+re:\.kill\(\)	.kill((net.minecraft.server.level.ServerLevel) level)
+
+# -- V3 sub-package move the generated map missed, because the class name is unchanged and only
+# -- appears in this mod as a superclass.
+
+# -- ThrowableItemProjectile's thrower constructor now takes the stack explicitly instead of
+# -- resolving it lazily through getDefaultItem(). Anchored per site because the stack is exactly
+# -- what each subclass's getDefaultItem() would have returned, which a regex cannot know -- and for
+# -- the noob pearl it depends on a constructor ARGUMENT (getDefaultItem reads a field that is not
+# -- assigned until after super() runs, so on 26.x it could not answer at all).
+
+# -- Level.isDay is gone; isBrightOutside asks the same question (sky brightness, not clock time),
+# -- which is what the daylight-burn check actually wanted.
+# -- X7: anchored on a level-shaped receiver. Unanchored it also renamed a MOD's own isDay()
+# -- helper (a solar panel asking whether its own sky is lit), which then called a method that
+# -- exists only on Level -- a rename that compiled the wrong class into an error.
+re:(\w*[Ll]evel(?:\(\))?)\.isDay\(\)	\1.isBrightOutside()
+
+# -- RegistryAccess.registry(key) -> lookup(key); both return Optional<Registry<E>>.
+re:\.registryAccess\(\)\.registry\(	.registryAccess().lookup(
+
+# -- isSolidRender no longer needs the level and position: 26.x computes it once per BlockState.
+re:\.isSolidRender\((?:[^()]|\([^()]*\))*\)	.isSolidRender()
+
+# -- ClickEvent became an interface with a record per action, so the Action enum is no longer an
+# -- argument -- it is the type you construct.
+re:new ClickEvent\(\s*ClickEvent\.Action\.SUGGEST_COMMAND,\s*("[^"]*")\)	new ClickEvent.SuggestCommand(\1)
+re:new ClickEvent\(\s*ClickEvent\.Action\.RUN_COMMAND,\s*("[^"]*")\s*\)	new ClickEvent.RunCommand(\1)
+re:new ClickEvent\(\s*ClickEvent\.Action\.OPEN_URL,\s*("[^"]*")\)	new ClickEvent.OpenUrl(java.net.URI.create(\1))
+
+# -- authlib's GameProfile is a record now, so getName() is gone. Player.nameAndId() is 26.x's own
+# -- accessor for the same pair and reads better than profile.name().
+re:\.getGameProfile\(\)\.getName\(\)	.nameAndId().name()
+
+# --- BlockBehaviour narrowed two visibility hooks to state-only ---------------
+# 26.2 decided occlusion and skylight cannot depend on WHERE a block is, only on
+# WHICH state it is, and dropped (BlockGetter, BlockPos) from both.  Safe as a
+# rewrite only because these bodies are constant; a body that read level/pos has
+# no 26.2 equivalent and needs a real redesign.
+re:getOcclusionShape\(BlockState state, BlockGetter level, BlockPos pos\)	getOcclusionShape(BlockState state)
+re:propagatesSkylightDown\(BlockState state, BlockGetter level, BlockPos pos\)	propagatesSkylightDown(BlockState state)
+
+# --- Reskin renderers: getTextureLocation takes the RENDER STATE (V6/M1) ------
+# Eight renderers here exist only to return a different texture for a vanilla
+# model, and none reads the parameter -- so the whole render-state migration
+# reduces to substituting the parameter TYPE.  Each base renderer has exactly one
+# state class, read off the 26.2 jar; written fully qualified (V19) so no rule has
+# to edit an import block.
+re:getTextureLocation\(IronGolem entity\)	getTextureLocation(net.minecraft.client.renderer.entity.state.IronGolemRenderState entity)
+re:getTextureLocation\(Guardian entity\)	getTextureLocation(net.minecraft.client.renderer.entity.state.GuardianRenderState entity)
+re:getTextureLocation\(Ravager entity\)	getTextureLocation(net.minecraft.client.renderer.entity.state.RavagerRenderState entity)
+re:getTextureLocation\(Blaze entity\)	getTextureLocation(net.minecraft.client.renderer.entity.state.LivingEntityRenderState entity)
+re:getTextureLocation\(Stray entity\)	getTextureLocation(net.minecraft.client.renderer.entity.state.SkeletonRenderState entity)
+re:getTextureLocation\(EnderMan entity\)	getTextureLocation(net.minecraft.client.renderer.entity.state.EndermanRenderState entity)
+
+# --- V26: registry lookups (Optional<Holder.Reference<T>> vs the plain value) -----------
+# 26.2 split them: get(id) returns Optional<Holder.Reference<T>>, getValue(id) returns the
+# value, getValueOrThrow(key) replaces getOrThrow, and getHolder is folded into get().
+# Anchor every rewrite on the RECEIVER -- a bare `.get(` rule would rewrite Map.get and
+# Optional.get across the whole tree (V26).
+re:\.getHolder\(	.get(
+re:\.getOrThrow\(\s*ResourceKey\.create\(	.getValueOrThrow(ResourceKey.create(
+re:\bsettings\.get\(id\(	settings.getValue(id(
+re:\bbiomes\.get\(id\(	biomes.getValue(id(
+re:\bstructures\.get\(key\)	structures.getValue(key)
+re:\btabs\.get\(ResourceLocation\.	tabs.getValue(ResourceLocation.
+
+# --- IBlockEntityExtension sync hooks lost their extra parameters ------------------------
+# handleUpdateTag(CompoundTag, Provider) -> handleUpdateTag(ValueInput); onDataPacket dropped
+# the packet entirely (the ValueInput IS the payload).  Safe as a rewrite only because these
+# bodies use neither -- they call super and refresh.
+re:handleUpdateTag\(CompoundTag tag, HolderLookup\.Provider registries\)	handleUpdateTag(net.minecraft.world.level.storage.ValueInput tag)
+re:super\.handleUpdateTag\(tag, registries\)	super.handleUpdateTag(tag)
+re:onDataPacket\(Connection net, ClientboundBlockEntityDataPacket pkt, HolderLookup\.Provider registries\)	onDataPacket(Connection net, net.minecraft.world.level.storage.ValueInput pkt)
+re:super\.onDataPacket\(net, pkt, registries\)	super.onDataPacket(net, pkt)
+
+# --- V7: DataComponents.UNBREAKABLE is a MARKER (Unit), not a record ---------------------
+# The 1.21.1 component carried showInTooltip; 26.2 dropped that (the tooltip is data-driven),
+# so the value is Unit.INSTANCE and the Unbreakable class is gone.  Behaviour is unchanged --
+# the item is still unbreakable; only the tooltip flag is no longer expressible here.
+re:new Unbreakable\(true\)	net.minecraft.util.Unit.INSTANCE
+re:import net\.minecraft\.world\.item\.component\.Unbreakable;	import net.minecraft.util.Unit;
+
+# --- V38 in practice: three vanilla member changes with one call shape each -------------
+# GameProfile is a record now, so Player.getGameProfile() is gone; the identity object is
+# NameAndId, which is also what PlayerList.op/deop take.
+re:\.getGameProfile\(\)	.nameAndId()
+
+# startRiding gained a second boolean (the 1.21.1 pair was (entity, force)); 26.2 is
+# (entity, force, forceDismount).  Preserve the old meaning by passing false.
+re:\.startRiding\((\w+(?:\.get\(0\))?), true\)	.startRiding(\1, true, false)
+
+# Cooldowns are keyed by the STACK, not the Item (V38).
+re:getCooldowns\(\)\.isOnCooldown\(item\)	getCooldowns().isOnCooldown(new net.minecraft.world.item.ItemStack(item))
+
+# --- Long tail, each resolved against the 26.2 jar (V27) --------------------------------
+# Tag.getAsString() became Optional-returning asString().  Anchored on the loop variable so
+# it cannot touch GameRules.getAsString(GameRule), which is a different method that survives.
+re:\be\.getAsString\(\)	e.asString().orElse("")
+
+# NeutralMob's anger target is an EntityReference now, not a bare UUID.
+re:setPersistentAngerTarget\((\w+)\.getUUID\(\)\)	setPersistentAngerTarget(new net.minecraft.world.entity.EntityReference<>(\1.getUUID()))
+
+# noCollission -> noCollision (26.2 fixed the long-standing typo).
+re:\.noCollission\(	.noCollision(
+
+# Entity.hasImpulse is gone; hurtMarked is what actually forced the position resync.
+re:this\.hasImpulse = true;	this.hurtMarked = true;
+
+# Registry.getHolderOrThrow(key) -> getOrThrow(key). NOT `get(` -- 26.2's get(ResourceKey) returns
+# Optional<Holder.Reference<T>> (V26), so a bare rename to `get` hands every caller an Optional where
+# it wanted a Holder. HolderGetter.getOrThrow is the throwing form and is what the old name meant.
+re:\.getHolderOrThrow\(	.getOrThrow(
+
+# Player.interactOn gained the hit location.
+re:\.interactOn\((\w+), InteractionHand\.MAIN_HAND\)	.interactOn(\1, InteractionHand.MAIN_HAND, net.minecraft.world.phys.Vec3.ZERO)
+
+# EntityType.Builder.build takes a ResourceKey (V19), written fully qualified so no rule has
+# to touch an import block.
+
+# V38: hurt split, and hurtServer returns void -- so a caller that read the boolean has to
+# ask a different question.  These two sites want "did the damage land", which on 26.2 is
+# observed from the health change rather than from a return value.
+re:boolean (hurtAlone|hurtWithBubble) = p\.hurt\(airless, 4\.0F\);	float before\1 = p.getHealth(); p.hurtServer((net.minecraft.server.level.ServerLevel) p.level(), airless, 4.0F); boolean \1 = p.getHealth() < before\1;
+
+# Client->server payloads moved to their own client-side distributor (the server-side
+# PacketDistributor no longer has sendToServer at all, which is the honest split).
+re:PacketDistributor\.sendToServer\(	net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer(
+
+# DustParticleOptions takes a PACKED colour now, not a Vector3f -- so the two call sites
+# that unpacked an int into floats just to hand it over can pass the int straight through.
+re:new DustParticleOptions\(color, ([\d.]+F)\)	new DustParticleOptions(rgb, \1)
+
+# --- Batch: each resolved against the 26.2 jar, anchored on its owner ---------------------
+# Mob.doHurtTarget gained the ServerLevel it needs to apply effects.
+re:super\.doHurtTarget\(target\)	super.doHurtTarget(serverLevel, target)
+
+# saveWithoutId writes into a ValueOutput now (V31).  These three sites want the TAG, so they
+# go through the same store()/read() adapter the block-entity pair uses.
+
+# PlaySoundEvent's sound is a Holder now.
+
+# Inventory's public arrays are gone; the equipment slots are the way in.
+re:for \(ItemStack stack : player\.getInventory\(\)\.offhand\) \{	for (ItemStack stack : java.util.List.of(player.getItemBySlot(net.minecraft.world.entity.EquipmentSlot.OFFHAND))) {
+
+# DyeItem.getDyeColor() is gone -- the colour is a data component on the stack.
+re:dye\.getDyeColor\(\)	stack.getOrDefault(net.minecraft.core.component.DataComponents.DYE, net.minecraft.world.item.DyeColor.WHITE)
+
+# Fully-qualified Blocks constants: the token rules carry (?<![\w.]) so they cannot fire after
+# a dot (X2), and these two sites name the class in full.
+re:net\.minecraft\.world\.level\.block\.Blocks\.GRAY_CONCRETE\b	net.minecraft.world.level.block.Blocks.CONCRETE.gray()
+re:net\.minecraft\.world\.level\.block\.Blocks\.WHITE_CONCRETE\b	net.minecraft.world.level.block.Blocks.CONCRETE.white()
+
+# A registry get() is an Optional now, so a value-typed local needs unwrapping (V26).
+re:\.get\(hazard\.damageType\(\)\)	.get(hazard.damageType()).orElseThrow()
+
+# --- Consumption sound: an override became a component (the V41 shape again) --------------
+# 26.2 deleted Item.getDrinkingSound()/getEatingSound(); consumption is a Consumable component.
+# The bodies stay as the single source of truth and simply stop overriding anything -- the
+# Consumables pair installs the value at registration.  Dropping @Override without moving the
+# value would silently lose the sound, which is why the pair exists rather than a bare deletion.
+re:@Override\n(\s*)public SoundEvent getDrinkingSound\(\)	\1public SoundEvent getDrinkingSound()
+re:@Override\n(\s*)public SoundEvent getEatingSound\(\)	\1public SoundEvent getEatingSound()
+
+# --- Another batch, jar-resolved ---------------------------------------------------------
+# EntityReference's constructors are private; of(UUID) is the factory.
+re:new net\.minecraft\.world\.entity\.EntityReference<>\((\w+)\.getUUID\(\)\)	net.minecraft.world.entity.EntityReference.<net.minecraft.world.entity.LivingEntity>of(\1.getUUID())
+
+# Block.onRemove -> affectNeighborsAfterRemoval (the name now says what it is FOR, and the
+# LevelAccessor is a ServerLevel because the work is server-side).
+re:onRemove\(BlockState state, Level level, BlockPos pos, BlockState newState, boolean moved\)	affectNeighborsAfterRemoval(BlockState state, net.minecraft.server.level.ServerLevel level, BlockPos pos, boolean moved)
+re:super\.onRemove\(state, level, pos, newState, moved\)	super.affectNeighborsAfterRemoval(state, level, pos, moved)
+
+# StructureTemplate.fillFromWorld takes a LIST of blocks to ignore, not one.
+re:new Vec3i\(box\.getXSpan\(\), box\.getYSpan\(\), box\.getZSpan\(\)\), true, Blocks\.AIR\)	new Vec3i(box.getXSpan(), box.getYSpan(), box.getZSpan()), true, java.util.List.of(Blocks.AIR))
+
+# Entity.getServer() is gone (V38) -- go through the level, which knows.
+re:event\.getEntity\(\)\.getServer\(\)	event.getEntity().level().getServer()
+re:entity\.getServer\(\)	entity.level().getServer()
+
+# The spawner list is a WeightedList.Builder now, with no clear(); an empty replacement is
+# what "no mobs here" means, and it is what the modifier was expressing.
+
+# ItemNameBlockItem is gone: a seed is just a BlockItem with a block-derived name now.
+re:net\.minecraft\.world\.item\.ItemNameBlockItem inbi	net.minecraft.world.item.BlockItem inbi
+
+# LivingEntity.kill(ServerLevel) -- the cast is already right, the arg is now required (the
+# earlier rule was a no-op because the source already had the cast).
+re:cow\.kill\(\(net\.minecraft\.server\.level\.ServerLevel\) level\)	cow.kill((net.minecraft.server.level.ServerLevel) helper.getLevel())
+
+# --- Structure.generate gained a Holder<Structure> and the destination level key ----------
+# All four call sites already hold the ServerLevel and the Structure, so both new arguments
+# are derivable in place: the holder from the live registry, the key from level.dimension().
+re:structure\.generate\(\s*\n(\s*)level\.registryAccess\(\),	structure.generate(\n\1level.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.STRUCTURE).wrapAsHolder(structure),\n\1level.dimension(),\n\1level.registryAccess(),
+
+# BlockColors no longer answers a colour directly; a state's tint sources do (V38's
+# BlockTintSources rename, seen from the query side).
+re:mc\.getBlockColors\(\)\.getColor\((mc\.level\.getBlockState\(\w+\)), mc\.level, (\w+), 0\)	mc.getBlockColors().getTintSource(\1, 0).colorInWorld(\1, mc.level, \2)
+
+# --- PhotoShoot / vehicle / misc, all jar-resolved ---------------------------------------
+# NativeImage's pixel accessor lost its RGBA suffix (and the ABGR form went private).
+re:image\.getPixelRGBA\(x, y\)	image.getPixel(x, y)
+
+# ParticleStatus moved to the server package with the rest of the per-player options.
+re:net\.minecraft\.client\.ParticleStatus\.	net.minecraft.server.level.ParticleStatus.
+
+# Day time is on the level DATA now, not the level (V25).
+re:mc\.level\.setDayTimeFraction\(([\d.f]+)\)	((net.minecraft.world.level.storage.ServerLevelData) mc.level.getLevelData()).setDayTimeFraction(\1)
+
+# isControlledByLocalInstance -> isLocalInstanceAuthoritative (V38).
+
+# The gigaillager sound-mute reads a location off a Holder now; both sites already went
+# through .value(), so only the client one still names the old accessor.
+
+# --- V24 at a SUBCLASS: SpawnEggItem's constructor takes only Properties now --------------
+# The existing SpawnEggs pair covers the FACTORY calls; these two classes extend SpawnEggItem,
+# so the change lands in their super(...).  The entity rides on the item as a component via
+# Properties.spawnEgg, and the two colours left Java entirely for the client item definition --
+# so this is a genuine (documented) loss of the per-egg tint until those JSONs are generated.
+re:super\(\(EntityType<\? extends Mob>\) resolveEntityType\(entityId\), primaryColor, secondaryColor, properties\);	super(properties.spawnEgg(resolveEntityType(entityId)));
+re:super\(\(EntityType<\? extends Mob>\) BuiltInRegistries\.ENTITY_TYPE\.getValue\(entityId\), backgroundColor, highlightColor, properties\);	super(properties.spawnEgg(BuiltInRegistries.ENTITY_TYPE.getValue(entityId)));
+
+# doHurtTarget at the Entity-typed override too (BabyDragon takes Entity, not LivingEntity).
+re:public boolean doHurtTarget\(Entity target\) \{	public boolean doHurtTarget(net.minecraft.server.level.ServerLevel serverLevel, Entity target) {
+
+# Minecart's display-block hooks are gone; a train never had one anyway.
+re:@Override\n(\s*)public boolean hasCustomDisplay\(\)	\1public boolean hasCustomDisplay()
+
+# A SpawnerData weighted entry is a record now; MushroomCow moved sub-package with the cows.
+re:cow instanceof MushroomCow	cow instanceof net.minecraft.world.entity.animal.cow.MushroomCow
+
+# FaceAttachedHorizontalDirectionalBlock.updateShape took the 26.2 8-arg form (M9 forward).
+re:protected BlockState updateShape\(BlockState state, Direction direction, BlockState neighborState,\n(\s*)LevelAccessor level, BlockPos pos, BlockPos neighborPos\) \{	protected BlockState updateShape(BlockState state, net.minecraft.world.level.LevelReader level,\n\1net.minecraft.world.level.ScheduledTickAccess ticks, BlockPos pos, Direction direction,\n\1BlockPos neighborPos, BlockState neighborState, net.minecraft.util.RandomSource random) {
+re:return super\.updateShape\(state, direction, neighborState, level, pos, neighborPos\);	return super.updateShape(state, level, ticks, pos, direction, neighborPos, neighborState, random);
+re:level\.scheduleTick\(pos, Fluids\.WATER, Fluids\.WATER\.getTickDelay\(level\)\);	ticks.scheduleTick(pos, Fluids.WATER, Fluids.WATER.getTickDelay(level));
+
+# The cloud's bounce is a coefficient now (V41) -- the GameTest drives the same shared question.
+
+# affectNeighborsAfterRemoval loses `newState` (the block IS gone by then, which is the whole
+# point of the rename) and its level is already a ServerLevel, so both guards go.
+re:if \(!state\.is\(newState\.getBlock\(\)\) && level instanceof ServerLevel server\n(\s*)&& server\.getBlockEntity\(pos\) instanceof CableStationBlockEntity station\) \{	if (level.getBlockEntity(pos) instanceof CableStationBlockEntity station) {\n\1ServerLevel server = level;
+
+# Food effects moved from the FOOD component to CONSUMABLE's consume-effects list; the pair
+# keeps the "ask a real pufferfish" behaviour, which is the point of the code.
+
+# --- V6, the survivable half: GuiGraphics -> GuiGraphicsExtractor -----------------------
+# The recorded-render rewrite renamed the drawing object (it records into a GuiRenderState
+# now rather than issuing calls), but fill/drawString kept their signatures and the NeoForge
+# HUD event still hands you one -- so a HUD that only fills rects and draws text is a rename,
+# not a rewrite.  Both of this mod's overlays are exactly that.
+net.minecraft.client.gui.GuiGraphics	net.minecraft.client.gui.GuiGraphicsExtractor
+GuiGraphics	GuiGraphicsExtractor
+
+# ...and drawString is `text` now.  Same arguments (Font, Component, x, y, colour, shadow),
+# just named for what it draws rather than for the old immediate-mode verb.
+re:\bg\.drawString\(	g.text(
+
+# --- The last families -------------------------------------------------------------------
+# 26.2 split Cow: MushroomCow is now a SIBLING under AbstractCow, not a subclass, so the milk
+# machine's `cow instanceof MushroomCow` could never hold.  Scanning AbstractCow restores what
+# the code was already trying to do -- milk cows and mooshrooms, giving stew for the latter.
+re:List<Cow> cows = level\.getEntitiesOfClass\(Cow\.class, box, Cow::isAlive\);	List<net.minecraft.world.entity.animal.cow.AbstractCow> cows = level.getEntitiesOfClass(net.minecraft.world.entity.animal.cow.AbstractCow.class, box, e -> e.isAlive());
+re:for \(Cow cow : cows\)	for (net.minecraft.world.entity.animal.cow.AbstractCow cow : cows)
+
+# SoundInstance identifies itself with getIdentifier() now (following V4's Identifier rename).
+re:event\.getSound\(\)\.getLocation\(\)	event.getSound().getIdentifier()
+
+# GuiGraphicsExtractor's centred text follows drawString -> text.
+re:\bg\.drawCenteredString\(	g.centeredText(
+
+# X2: a member: rule only fires after a dot, so an UNQUALIFIED call on `this` is invisible to
+# it -- a vehicle entity calls isControlledByLocalInstance() with no receiver.
+re:(?<![\w.])isControlledByLocalInstance\(\)	isLocalInstanceAuthoritative()
+
+# Every creative-tab lookup in the tests: getValue gives the plain tab back, so the existing
+# null checks and getDisplayItems() calls are correct as written -- only the lookup changes.
+re:CREATIVE_MODE_TAB\n(\s*)\.get\(	CREATIVE_MODE_TAB\n\1.getValue(
+
+# --- V53: the GUI hook family, render* -> extract* ------------------------------------------
+# 26.2's recorded-render model renamed every drawing hook for what it now does.  A screen that
+# still declares `render` compiles and overrides NOTHING, so it simply stops being drawn -- these
+# rows are the mechanical half.  The two that are NOT mechanical are in V53 and need a compat
+# base class: renderBg (deleted; draw in extractBackground, whose arguments are in a different
+# order) and the mouse/key handlers (which take event records now).
+re:void render\((@NotNull )?GuiGraphics (\w+, int \w+, int \w+, float \w+\))	void extractRenderState(\1GuiGraphics \2
+re:void renderWidget\((@NotNull )?GuiGraphics 	void extractWidgetRenderState(\1GuiGraphics 
+re:void renderLabels\((@NotNull )?GuiGraphics 	void extractLabels(\1GuiGraphics 
+re:void renderTooltip\((@NotNull )?GuiGraphics 	void extractTooltip(\1GuiGraphics 
+re:void renderBackground\((@NotNull )?GuiGraphics 	void extractBackground(\1GuiGraphics 
+# Call sites, anchored on the first argument being the graphics: in one real client tree the
+# four-argument .render(...) calls split 27 model/entity renders against 7 GUI ones, and this is
+# what separates them.  A bare `.render(` rule would rewrite both.
+re:\.render\((graphics, \w+, \w+, \w+)\)	.extractRenderState(\1)
+# Every blit names the pipeline it draws through now.
+re:\.blitSprite\(	.blitSprite(net.minecraft.client.renderer.RenderPipelines.GUI_TEXTURED, 
+# hasShiftDown left Screen for Minecraft (and a default on InputWithModifiers).
+re:\bScreen\.hasShiftDown\(\)	net.minecraft.client.Minecraft.getInstance().hasShiftDown()
+
+# -- §V79: @OnlyIn no longer STRIPS anything on 26.x, and its mere presence is enough.
+# Read out of OnlyInWarningsHandler's bytecode rather than assumed: it opens with
+# `if (FMLEnvironment.isProduction()) return;`, then scans the mod file's whole annotation set
+# for net.neoforged.api.distmarker.OnlyIn and raises `loadwarning.neoforge.onlyin` if it finds
+# ANY. So a SHIPPED jar is inert and a player never sees it -- but every gate here runs in DEV,
+# where it is fatal on a dedicated server (Gate B dies before a test runs) and puts NeoForge's
+# LoadingErrorScreen up on a client, which §X16 records stalling a whole Gate C run.
+#
+# In the INHERITED block on purpose: a port with no @OnlyIn should not have to carry a dead row
+# (§X23), and one with any should not have to discover this. `[^)]*` matches newlines, which is
+# needed for the four-line `_interface = ItemSupplier.class` form §V79 is named for.
+#
+# It cannot reach an OVERLAY (§W8), so `tools/audit-onlyin.py` -- wired into `check` -- is the
+# other half, and the half that keeps paying as overlays are written.
+re:\n[ \t]*@OnlyIn\([^)]*\)[ \t]*	
+
+#!strict  # ---- below here rules ARE checked: add your mod's own rows here ----

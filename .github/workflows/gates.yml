@@ -97,3 +97,19 @@ jobs:
       # Idempotence (a second --yes run changes nothing), hand edits winning, the install path
       # completing with NO Java on PATH, additive path switches, explicit removal, backups.
       - run: ./tools/test-setup.sh
+
+  renames-self-test:
+    name: rename-table generators and composer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # Composition keeps hand rows authoritative and inside the exempt block; the colour rule
+      # reads fields and record components from real compiled classes (stubs built on the fly).
+      - run: ./tools/test-renames.sh

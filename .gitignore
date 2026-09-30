@@ -39,3 +39,4 @@ run/
 moves-*.tsv
 moves-*.ambiguous.txt
 moves-*.removed.txt
+colors-*.tsv

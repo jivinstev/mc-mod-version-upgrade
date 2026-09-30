@@ -49,6 +49,13 @@ Generate the type rows from the two real compile classpaths with
 `tools/build-class-move-map.py` (repo root) — not from memory.
 Anything that is **not** a pure rename belongs in the overlay, not here.
 
+**Where a mod's table comes from.** `tools/make-multiversion.sh` composes it with
+`tools/compose-renames.py` from three sources: `versions/<target>.renames.hand.tsv` shipped here
+(renamed types, call-shape regexes, library package moves), plus two maps generated on your
+machine from Mojang's own names and therefore never published: the class moves
+(`tools/build-class-move-map.py`) and the per-colour ColorCollection rows
+(`tools/gen-color-renames.py`). Generate both once per version pair into `$MIGRATE_WORKSPACE/moves/`.
+
 A rule that matches nothing is reported as a warning. Mark deliberately-sparse generated
 blocks `#!exhaustive` so that warning stays readable.
 
