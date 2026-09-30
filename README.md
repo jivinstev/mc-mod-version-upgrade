@@ -21,7 +21,9 @@ earlier decisions and only asks about new ones. `./setup --check` changes nothin
 ### Migrate a mod to a newer Minecraft version — adds a JDK and several GB of disk
 When your favourite mod is stuck on an old version, port it: decompile, scaffold, rewrite through a
 catalogue of known API changes, build, test, deploy. It takes hours rather than seconds, and
-sometimes does not succeed. Choose `migrate` in `./setup` (or `./setup --path migrate`).
+sometimes does not succeed. Choose `migrate` in `./setup` (or `./setup --path migrate`). Setup
+creates a workspace outside this checkout (`~/.mc-mod-upgrade/work` by default) where decompiled
+mods live; the migration commands run from there.
 
 ### If you don't have the prerequisites
 

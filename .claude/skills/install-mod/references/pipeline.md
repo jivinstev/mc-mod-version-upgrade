@@ -1,6 +1,6 @@
 # install-mod — exact commands per stage
 
-All paths relative to the repo root (`minecraft-forge-upgrade/`). `REG=tools/mod-registry`.
+All paths relative to the root of this checkout. `REG=tools/mod-registry`.
 `SLUG` = a short kebab id for the request (e.g. `giant-squid`). `DIR=installs/$SLUG`.
 Target defaults: `LOADER=neoforge MC=1.21.1`. Everything under `installs/` is gitignored.
 
