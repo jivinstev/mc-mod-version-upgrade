@@ -305,12 +305,15 @@ hit "§162  MIXIN 'this instanceof X' / '(X) this' — the mixin class does not 
 grep -rn 'this instanceof \|([A-Za-z]*Entity) this\|(Player) this' $SRC 2>/dev/null | grep -v '(Object) this'
 
 hit "§163  🔴 CLIENT-only import in SHARED code (I18n, Minecraft.getInstance, …) — dedicated-server class-load crash"
-grep -rn 'import net\.minecraft\.client\.' $SRC 2>/dev/null | grep -v '/client/'
+# a file whose own class is a Dist.CLIENT subscriber/mod (e.g. the ClientBootSmokeTest harness) is client-only
+grep -rn 'import net\.minecraft\.client\.' $SRC 2>/dev/null | grep -v '/client/' | while IFS=: read -r f rest; do
+  grep -qE '@(EventBusSubscriber|Mod)\(.*Dist\.CLIENT' "$f" || echo "$f:$rest"; done
 echo "  (^ any hit OUTSIDE a Dist.CLIENT-gated package crashes runGameTestServer with"
 echo "     'Attempted to load class … for invalid dist DEDICATED_SERVER'. I18n -> net.minecraft.locale.Language)"
 
 hit "§164  Gate-B test joining ALL failures into one assert message (>1024 chars crashes chunk-save + MASKS the failures)"
-grep -rn 'String.join' $SRC/*/*/test/*.java $SRC/*/*/*/test/*.java 2>/dev/null | grep -iE 'assertTrue|fail\('
+# only GameTests: a JUnit (Gate A) message never reaches a lectern book, so the 1024 cap does not apply
+grep -rl 'GameTestHelper' $SRC 2>/dev/null | while read -r f; do grep -Hn 'String.join' "$f"; done | grep -iE 'assertTrue|fail\('   # no xargs -r: not on macOS
 
 hit "§165  MIXIN method names must be javap-verified against build/neoForm/*/steps/recompile/outputs.jar (§P #152 done-gate)"
 ls build/neoForm/*/steps/recompile/outputs.jar 2>/dev/null >/dev/null \

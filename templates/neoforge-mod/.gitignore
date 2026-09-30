@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 jivinstev
+# Build output and caches: never part of a port (tools/finish-port.py leaves these behind too)
+build/
+run/
+run-*/
+build-mc*/
+.gradle/
+out/
+bin/
+logs/
+crash-reports/
+*.log
+# the pristine decompiler dump: third-party code, local only
+decompiled-raw/
+# IDE
+.idea/
+.vscode/
+*.iml
+# a jar a port could not fetch from a maven: local only, re-download it with modreg
+libs/

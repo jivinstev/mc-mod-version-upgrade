@@ -97,6 +97,20 @@ mkdir -p "$H/ws2/tools"; sed -i.orig "s#^MIGRATE_WORKSPACE=.*#MIGRATE_WORKSPACE=
 out="$(st --yes)"; echo "$out" | grep -q "ws2/tools exists and is not a link" && [ -d "$H/ws2/tools" ] && [ ! -L "$H/ws2/tools" ] \
   && ok "an existing real directory is never replaced by a link" || bad "setup clobbered an existing directory"
 
+echo "11. --output-repo sets the destination, and setup always says where ports go"
+fresh; out="$(st --yes --path migrate)"; echo "$out" | grep -q "destination: none" && ok "no destination: setup says ports stay in the workspace" \
+  || bad "no destination line: $(echo "$out" | grep destination)"
+D="$H/ports"; mkdir -p "$D"; git -C "$D" init -q
+out="$(st --yes --path migrate --output-repo "$D")"
+{ grep -q "^MOD_OUTPUT_REPO=$D$" "$R/.env.local" && echo "$out" | grep -q "destination: $D (a git repo"; } \
+  && ok "--output-repo on a git repo is written and echoed as a git destination" || bad "--output-repo git: $(echo "$out" | grep destination)"
+mkdir -p "$H/plain"; out="$(st --yes --path migrate --output-repo "$H/plain")"
+echo "$out" | grep -q "destination: $H/plain (not a git repo" && ok "a plain folder is echoed as copy-only" || bad "plain folder not echoed"
+out="$(st --yes --path migrate --output-repo "$H/nope")"; code=$?
+{ [ $code = 1 ] && echo "$out" | grep -q "does not exist"; } && ok "a nonexistent --output-repo is a PROBLEM (exit 1)" || bad "nonexistent accepted (exit $code)"
+st --yes --path migrate --output-repo none >/dev/null
+grep -q '^MOD_OUTPUT_REPO=$' "$R/.env.local" && ok "--output-repo none clears the destination" || bad "none did not clear: $(grep MOD_OUTPUT "$R/.env.local")"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"

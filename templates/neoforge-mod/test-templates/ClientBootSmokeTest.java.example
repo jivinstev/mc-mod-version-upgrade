@@ -278,16 +278,27 @@ public class ClientBootSmokeTest {
         transition(Phase.SURVIVE);
     }
 
-    /** All spawnable {@code examplemod:*} creatures (namespaced, non-MISC so projectiles/effects are skipped). */
+    /** How many entity types the spawn phase actually created (set on the server thread). */
+    private static volatile int spawnedCount = -1;
+
+    /**
+     * All spawnable {@code examplemod:*} creatures: non-MISC first, so projectiles and effects are skipped.
+     * A library or utility mod whose ONLY entities are MISC (orbs, markers, visual effects) falls back to
+     * those instead -- otherwise the spawn phase would pass having exercised no renderer at all.
+     */
     private static List<EntityType<?>> modCreatureTypes() {
-        List<EntityType<?>> types = new ArrayList<>();
+        List<EntityType<?>> creatures = new ArrayList<>(), misc = new ArrayList<>();
         for (var entry : BuiltInRegistries.ENTITY_TYPE.entrySet()) {
             if (!"examplemod".equals(entry.getKey().location().getNamespace())) continue;
             EntityType<?> type = entry.getValue();
-            if (type.getCategory() == MobCategory.MISC) continue;
-            types.add(type);
+            (type.getCategory() == MobCategory.MISC ? misc : creatures).add(type);
         }
-        return types;
+        if (creatures.isEmpty() && !misc.isEmpty()) {
+            System.out.println("EXAMPLEMOD_BOOT_TEST: no non-MISC entities; spawning the " + misc.size()
+                + " MISC one(s) instead so their renderers run");
+            return misc;
+        }
+        return creatures;
     }
 
     /** SPAWN mode: one of every creature in a grid around the player (on the server thread). */
@@ -305,6 +316,7 @@ public class ClientBootSmokeTest {
                 Entity e = type.spawn(level, pos, MobSpawnType.COMMAND);
                 (e != null ? spawned : failed).add(EntityType.getKey(type));
             }
+            spawnedCount = spawned.size();
             System.out.println("EXAMPLEMOD_BOOT_TEST: spawned " + spawned.size() + " creature type(s): " + spawned);
             if (!failed.isEmpty()) {
                 System.out.println("EXAMPLEMOD_BOOT_TEST: (spawn returned null for: " + failed + ")");
@@ -372,6 +384,15 @@ public class ClientBootSmokeTest {
                     + " ticks with no crash (survivors: team A " + aliveA + ", team B " + aliveB + ")");
             });
         } else {
+            // A green phase that exercised nothing is not a pass: if the mod registers entities, at least one
+            // must have spawned. (A mod with no entities at all only proves world creation here -- say so.)
+            if (!modCreatureTypes().isEmpty() && spawnedCount <= 0) {
+                throw new IllegalStateException("spawn phase spawned NOTHING although the mod registers entities"
+                    + " (spawnedCount=" + spawnedCount + ") -- every spawn returned null, or the spawn task never ran");
+            }
+            if (modCreatureTypes().isEmpty()) {
+                System.out.println("EXAMPLEMOD_BOOT_TEST: the mod registers no entities; spawn proves world creation only");
+            }
             System.out.println("EXAMPLEMOD_BOOT_TEST: PASS — created world, spawned examplemod creatures, "
                 + "world ticked " + SURVIVE_TICKS + " ticks with no crash");
         }

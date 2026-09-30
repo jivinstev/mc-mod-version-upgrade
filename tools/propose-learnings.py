@@ -68,8 +68,8 @@ def parse_additions(text):
         if not b["body"].strip():
             raise ValueError(f"`### {b['kind']} {b['key']}` has no text")
         if b["kind"] == "new":
-            # labels may carry a qualifier, as existing entries do: **Pattern (1.21.2+):**
-            has = lambda w: re.search(r"\*\*" + w + r"(?: \([^)]*\))?:\*\*", b["body"]) is not None
+            labels = entry_labels(b["body"])
+            has = lambda w: w in labels
             missing = [f"**{k}:**" for k in ("Pattern", "Fix") if not has(k)]
             if not any(has(k) for k in ("Error", "Runtime", "Symptom")):
                 missing.append("**Error:** / **Runtime:** / **Symptom:**")
@@ -85,10 +85,26 @@ def parse_additions(text):
 HEADING = re.compile(r"^(#{2,3})\s")
 
 
+def entry_labels(body):
+    """The field labels an entry uses. Accepts every shape existing entries use:
+    **Pattern:**, a qualified **Pattern (1.21.2+):**, and a combined **Pattern → Error → Fix:**
+    (one bold span naming several fields). A title such as **Pattern matching breaks** is not a label."""
+    out = set()
+    for span in re.findall(r"\*\*([^*\n]{1,120})\*\*", body):
+        span = re.sub(r"\s*\([^)]*\)", "", span).strip().rstrip(":").strip()
+        parts = [p.strip().rstrip(":").strip() for p in re.split(r"\s*(?:→|->)\s*", span)]
+        if len(parts) > 1 or span != span.rstrip(":") or parts[0] in ("Pattern", "Fix", "Error", "Runtime", "Symptom"):
+            out.update(parts)
+    return out
+
+
 def section_span(lines, key):
     """-> (start, end) line indexes of the `## <key>` section; end = next level-2/3 heading."""
-    hits = [i for i, l in enumerate(lines)
-            if l.startswith("## ") and (l[3:].startswith(key + ".") or l[3:].startswith(key))]
+    # a bare section letter must match `## D.` only -- `startswith("D")` also matched `## Deeper clusters`
+    hits = [i for i, l in enumerate(lines) if l.startswith("## ") and l[3:].startswith(key + ".")]
+    if not hits:   # otherwise the key is the start of a title (`§A augment — MCreator`)
+        hits = [i for i, l in enumerate(lines)
+                if l.startswith("## ") and l[3:].startswith(key) and (len(l) == 3 + len(key) or not l[3 + len(key)].isalnum())]
     if len(hits) != 1:
         raise ValueError(f"section {key!r} matched {len(hits)} headings; use more of its title")
     s = hits[0]

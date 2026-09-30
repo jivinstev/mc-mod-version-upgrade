@@ -8,7 +8,7 @@
 # Every path it prints is a HIT to fix or explain (see that file). Exit status: 0 when the sweep
 # ran, 2 when it could not (the block is missing or is not valid shell).
 set -uo pipefail
-here="$(cd "$(dirname "$0")/.." && pwd)"
+here="$(cd -P "$(dirname "$0")/.." && pwd)"   # -P: through the workspace's tools symlink to the checkout
 doc="$here/.claude/skills/migrate-mod/references/catalog-scans.md"
 port="${1:-.}"
 [ -d "$port/src" ] || { echo "run-catalog-scans: $port has no src/ -- run it from mods/<modid>/ or pass the port dir" >&2; exit 2; }

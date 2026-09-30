@@ -140,15 +140,26 @@ cd mods/$MODID
 grep -E '\.java:[0-9]+: error' /tmp/$MODID.log | wc -l                        # error count
 grep -E '\.java:[0-9]+: error' /tmp/$MODID.log | sed -E 's/.*error: //' | sort | uniq -c | sort -rn | head -40   # buckets
 ```
-Mechanical codemod example (imports), scoped to the mod's sources only:
+**First build: Maven Central can answer HTTP 429.** A rate limit, not a policy denial; retrying rarely
+helps. Point the whole build (including NeoGradle's detached configurations, which repository order does
+not reach -- catalogue V9) at a Central mirror with the shipped init script:
+`./gradlew --init-script "$(cd -P ../../tools && pwd)/central-mirror.init.gradle" compileJava`.
+
+**A dependency whose maven this machine cannot reach** (an `EXTRA_MAVENS` host off the egress allowlist):
+fetch the jar through the registry instead -- `python3 ../../tools/mod-registry/modreg.py download ... --out libs/` -- and depend on it with `compileOnly files('libs/<jar>')` (+ `localRuntime` for the run
+configs). `libs/` is gitignored by the template: the jar is third-party and never leaves the workspace;
+MIGRATION.md records the exact modreg command so the next session can fetch it again.
+
+Mechanical codemods, run once over the mod's sources before bucketing errors (Forge sources only for
+the first; the second for any 1.20.x → 1.21 port):
 ```bash
-grep -rl 'net.minecraftforge' src/main/java | xargs perl -pi -e '
-  s/net\.minecraftforge\.api\.distmarker/net.neoforged.api.distmarker/g;
-  s/net\.minecraftforge\.fml\.common\.Mod/net.neoforged.fml.common.Mod/g;
-  s/net\.minecraftforge\.eventbus\.api/net.neoforged.bus.api/g;
-  # ...see forge-to-neoforge.md for the full table
-'
+grep -rl 'net.minecraftforge\|net/minecraftforge' src/main/java \
+  | xargs perl -pi ../../tools/srg-remap/forge_import_codemod.pl    # packages, dotted AND descriptor (L.../...;) form
+python3 ../../tools/srg-remap/mc121_codemod.py src/main/java          # 1.20 -> 1.21 renames, incl. new ResourceLocation(..)
 ```
+`mc121_codemod.py` rewrites `new ResourceLocation(a)` to `parse(a)` and `new ResourceLocation(a, b)` to
+`fromNamespaceAndPath(a, b)` by counting top-level arguments, so a comma inside a nested call is safe. Both
+are text rewrites: re-grep afterwards, and read `forge-to-neoforge.md` for what they do not cover.
 
 ## 5. Build the jar
 ```bash

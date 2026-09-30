@@ -51,7 +51,7 @@ UPSTREAM = {
 
 COMMENT = {  # suffix -> line-comment prefix
     ".py": "#", ".sh": "#", ".command": "#", ".properties": "#", ".toml": "#",
-    ".tsv": "#", ".gradle": "//", ".java": "//", ".example": "//", ".template": "//", ".groovy": "//",
+    ".tsv": "#", ".gitignore": "#", ".gradle": "//", ".java": "//", ".example": "//", ".template": "//", ".groovy": "//",
 }
 
 

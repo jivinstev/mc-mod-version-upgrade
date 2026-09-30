@@ -61,6 +61,18 @@ BLOCKING_SECURITY = {"pipes a download into a shell", "disables TLS verification
 ENTRY_START = re.compile(r"^(?:[A-Z]{1,2}\d+[a-z]?\.\s|\d{1,3}[a-z]?\.\s+\*\*|\*\*[A-Z]{1,2}\d+[a-z]?\.|- \*\*[A-Z]{1,2}\d+)")
 
 
+
+def entry_labels(text):
+    """Field labels an entry uses -- MUST match tools/propose-learnings.py's entry_labels, so a lesson the
+    proposer accepts is never blocked here: **Pattern:**, **Pattern (1.21.2+):**, **Pattern → Error → Fix:**."""
+    out = set()
+    for span in re.findall(r"\*\*([^*\n]{1,120})\*\*", text):
+        span = re.sub(r"\s*\([^)]*\)", "", span).strip().rstrip(":").strip()
+        parts = [p.strip().rstrip(":").strip() for p in re.split(r"\s*(?:→|->)\s*", span)]
+        if len(parts) > 1 or span != span.rstrip(":") or parts[0] in ("Pattern", "Fix", "Error", "Runtime", "Symptom"):
+            out.update(parts)
+    return out
+
 def sh(*args, cwd=ROOT, check=True):
     return subprocess.run(list(args), cwd=cwd, capture_output=True, text=True, check=check)
 
@@ -172,8 +184,8 @@ def main():
     cat_added = [t for p, t in added_lines(diff) if p == "CATALOG.md"]
     for t in cat_added:
         if ENTRY_START.match(t):
-            # a label may carry a qualifier, as existing entries do: **Pattern (1.21.2+):**, **Fix (→1.21.1):**
-            has = lambda word: re.search(r"\*\*" + word + r"(?: \([^)]*\))?:\*\*", t) is not None
+            labels = entry_labels(t)
+            has = lambda word: word in labels
             miss = [f"**{k}:**" for k in ("Pattern", "Fix") if not has(k)]
             if not any(has(k) for k in ("Error", "Runtime", "Symptom")):
                 miss.append("a symptom (**Error:**/**Runtime:**/**Symptom:**)")

@@ -17,3 +17,19 @@ s{net\.minecraftforge\.common\.ForgeConfigSpec}{net.neoforged.neoforge.common.Mo
 s{\bForgeConfigSpec\b}{ModConfigSpec}g;
 s{net\.minecraftforge\.common\b}{net.neoforged.neoforge.common}g;
 s{net\.minecraftforge\.server}{net.neoforged.neoforge.server}g;
+# Slash-form (JVM descriptor) references inside mixin `target = "..."` / `method = "..."` strings. The dotted
+# rules above never see these, the result still COMPILES, and the mixin then fails at APPLY time, on the
+# client only for a client mixin (catalogue §H). Specific classes first, then packages.
+s{Lnet/minecraftforge/common/ForgeHooks;}{Lnet/neoforged/neoforge/common/CommonHooks;}g;
+s{Lnet/minecraftforge/client/ForgeHooksClient;}{Lnet/neoforged/neoforge/client/ClientHooks;}g;
+s{Lnet/minecraftforge/event/ForgeEventFactory;}{Lnet/neoforged/neoforge/event/EventHooks;}g;
+s{Lnet/minecraftforge/common/MinecraftForge;}{Lnet/neoforged/neoforge/common/NeoForge;}g;
+s{net/minecraftforge/api/distmarker/}{net/neoforged/api/distmarker/}g;
+s{net/minecraftforge/eventbus/api/}{net/neoforged/bus/api/}g;
+s{net/minecraftforge/client/event/}{net/neoforged/neoforge/client/event/}g;
+s{net/minecraftforge/client/extensions/}{net/neoforged/neoforge/client/extensions/}g;
+s{net/minecraftforge/fml/}{net/neoforged/fml/}g;
+s{net/minecraftforge/registries/}{net/neoforged/neoforge/registries/}g;
+s{net/minecraftforge/event/}{net/neoforged/neoforge/event/}g;
+s{net/minecraftforge/common/}{net/neoforged/neoforge/common/}g;
+s{net/minecraftforge/(items|entity|energy|fluids|server)/}{net/neoforged/neoforge/$1/}g;

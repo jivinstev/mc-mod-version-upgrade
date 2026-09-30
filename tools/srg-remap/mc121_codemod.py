@@ -11,10 +11,36 @@ import sys
 import pathlib
 
 # (regex, replacement) applied to whole-file text
+def rewrite_resource_location(text):
+    """`new ResourceLocation(a)` -> parse(a); `new ResourceLocation(a, b)` -> fromNamespaceAndPath(a, b)."""
+    out, i, needle = [], 0, "new ResourceLocation("
+    while True:
+        j = text.find(needle, i)
+        if j < 0:
+            out.append(text[i:]); return "".join(out)
+        out.append(text[i:j])
+        k, depth, commas, in_str = j + len(needle), 1, 0, None
+        while k < len(text) and depth:
+            c = text[k]
+            if in_str:
+                if c == "\\": k += 1
+                elif c == in_str: in_str = None
+            elif c in "\"'": in_str = c
+            elif c in "([{": depth += 1
+            elif c in ")]}": depth -= 1
+            elif c == "," and depth == 1: commas += 1
+            k += 1
+        name = "fromNamespaceAndPath" if commas == 1 else "parse"
+        out.append("ResourceLocation." + name + "(")
+        i = j + len(needle)
+
+
 RULES = [
     # §G #25 ResourceLocation ctor is private
     (r'new ResourceLocation\(\s*("(?:[^"\\]|\\.)*")\s*,', r'ResourceLocation.fromNamespaceAndPath(\1,'),
-    (r'new ResourceLocation\(', 'ResourceLocation.parse('),
+    # (a non-literal `new ResourceLocation(...)` is handled by rewrite_resource_location(): it must COUNT
+    #  the arguments -- one is parse(x), two is fromNamespaceAndPath(a, b). A blind regex once produced
+    #  `ResourceLocation.parse(expr, x)`, an overload that does not exist.)
     # §G #37 BlockPathTypes -> PathType
     (r'\bnet\.minecraft\.world\.level\.pathfinder\.BlockPathTypes\b',
      'net.minecraft.world.level.pathfinder.PathType'),
@@ -84,6 +110,7 @@ DR_MAP = {
 def transform(text: str) -> str:
     for pat, rep in RULES:
         text = re.sub(pat, rep, text)
+    text = rewrite_resource_location(text)
 
     def dr(m):
         name = m.group(1)
