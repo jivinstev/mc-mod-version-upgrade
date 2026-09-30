@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: 2026 jivinstev
+# SPDX-FileCopyrightText: 2026 Jason Hendrickson
 # ─────────────────────────────────────────────────────────────────────────────
 # run-gatec.command — macOS LaunchServices launcher for Gate C.
 #

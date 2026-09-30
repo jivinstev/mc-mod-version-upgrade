@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 jivinstev
+// SPDX-FileCopyrightText: 2026 Jason Hendrickson
 pluginManagement {
     // NeoForge's own maven FIRST: Maven Central (behind the plugin portal too) rate-limits cloud and CI
     // machines with HTTP 429, so nothing Central does not have to serve should be asked of it

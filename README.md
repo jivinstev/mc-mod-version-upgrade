@@ -32,6 +32,10 @@ mods live; the migration commands run from there.
 tested once 10 different mods have been ported to it with the real-client gate passing. You can port to
 any version: setup and the tools show how proven it is, and your port counts toward it.
 
+**Ported mods are for your own machine.** This tool changes someone else's mod so it runs on your
+Minecraft. Many mods are "all rights reserved": do not publish or redistribute a ported jar without
+the original author's permission. The MIT licence below covers this tool, never the mods it ports.
+
 A finished migration delivers two things to two places. The port's source goes to your **mods
 destination**, any folder or git repository you name in setup (`tools/finish-port.py` commits it on a
 `port/<modid>` branch there). What the port *taught*, stated without the mod's name, goes back to this
@@ -105,6 +109,11 @@ workspace lives outside the repository by default; please keep it there.
 
 ## Licence
 
-Not yet chosen — deliberately. The licence boundary depends on which files the tooling copies into
-users' own projects, and that set is an output of the build rather than something to guess in
-advance. It will be settled, and stated here, before this repository is made public.
+MIT (see [`LICENSE`](LICENSE)). The files the tooling copies into your own
+mod project (listed in [`VENDORED.tsv`](VENDORED.tsv)) each carry their own MIT header, so a copied file
+stays self-describing and using it puts no obligation on your mod beyond keeping that header. The
+Gradle wrapper files are Gradle's, under its Apache-2.0 licence. The decompilers are not shipped here:
+`tools/download-tools.sh` fetches them, sha1-verified, under their own licences (Vineflower: Apache-2.0,
+CFR: MIT).
+
+By opening a pull request you agree that your contribution is licensed under the same MIT licence.

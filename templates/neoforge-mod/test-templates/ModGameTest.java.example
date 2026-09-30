@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 jivinstev
+// SPDX-FileCopyrightText: 2026 Jason Hendrickson
 // WHAT TO TEST HERE is decided by churn, not by copying this file's cases: fill this class (and the
 // subsystems test) against the P0/P1/P2 target list Step 4b wrote into MIGRATION.md — see
 // .claude/skills/migrate-mod/references/test-targets.md. Parameterize over the whole bucket a target

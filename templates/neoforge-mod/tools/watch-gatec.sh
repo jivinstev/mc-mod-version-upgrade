@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: 2026 jivinstev
+# SPDX-FileCopyrightText: 2026 Jason Hendrickson
 # ─────────────────────────────────────────────────────────────────────────────
 # watch-gatec.sh — poll the Gate C / smoke-harness signal dir until a terminal
 # state, print the outcome (+ a crash digest if any), and exit with an ACCURATE

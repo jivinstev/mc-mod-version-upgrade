@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: 2026 jivinstev
+# SPDX-FileCopyrightText: 2026 Jason Hendrickson
 """Materialise the source tree for ONE Minecraft target from the shared tree.
 
 THE PROBLEM THIS SOLVES

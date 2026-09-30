@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 jivinstev
+// SPDX-FileCopyrightText: 2026 Jason Hendrickson
 // Persistence round-trip = P0 target in every migration's churn list (all 37 serializable types in
 // one port rewrote saveAdditional for the HolderLookup.Provider). This class is namespace-driven,
 // so it already covers the whole bucket with no per-mod edits. Context:
