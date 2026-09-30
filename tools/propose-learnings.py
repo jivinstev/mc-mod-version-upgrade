@@ -68,8 +68,10 @@ def parse_additions(text):
         if not b["body"].strip():
             raise ValueError(f"`### {b['kind']} {b['key']}` has no text")
         if b["kind"] == "new":
-            missing = [k for k in ("**Pattern:**", "**Fix:**") if k not in b["body"]]
-            if not any(k in b["body"] for k in ("**Error:**", "**Runtime:**", "**Symptom:**")):
+            # labels may carry a qualifier, as existing entries do: **Pattern (1.21.2+):**
+            has = lambda w: re.search(r"\*\*" + w + r"(?: \([^)]*\))?:\*\*", b["body"]) is not None
+            missing = [f"**{k}:**" for k in ("Pattern", "Fix") if not has(k)]
+            if not any(has(k) for k in ("Error", "Runtime", "Symptom")):
                 missing.append("**Error:** / **Runtime:** / **Symptom:**")
             if missing:
                 raise ValueError(f"new entry under {b['key']} lacks {', '.join(missing)}")
