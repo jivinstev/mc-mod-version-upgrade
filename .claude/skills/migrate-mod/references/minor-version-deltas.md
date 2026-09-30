@@ -2,9 +2,9 @@
 <!-- AXIS: specialized minor-version delta (same family, e.g. 1.21.1↔1.21.4). Consult this
      ONLY for a same-family hop (up-port or down-port). The loader-transform + version-family
      files cover the big jumps; these are the SMALL, per-minor-version API deltas that don't
-     belong in either. Companion catalog section: repo-root CLAUDE.md §M. -->
+     belong in either. Companion catalog section: CATALOG.md §M. -->
 
-## ⚠️ 1.21.x → 26.x is NOT a minor hop — it is an ERA JUMP. See CLAUDE.md §V.
+## ⚠️ 1.21.x → 26.x is NOT a minor hop — it is an ERA JUMP. See CATALOG.md §V.
 Minecraft left the `1.x` scheme after **1.21.11**: the next releases are **26.1** (2026-03-24)
 and **26.2** (2026-06-16), with NeoForge tracking them as `26.1.x` / `26.2.x`. Despite the
 version numbers looking adjacent to nothing familiar, this is a *larger* break than 1.20→1.21:
@@ -18,10 +18,10 @@ state** (`net.minecraft.client.renderer.state`, 45 classes that did not exist in
 no per-backend code. §V6/V6b carry the correction and the reasoning error behind it.
 
 If the mod must keep running on the OLD version as well, the architecture decision comes first
-and is hard to retrofit: **CLAUDE.md §W** (one source tree, several targets) and **§X** (codemod
+and is hard to retrofit: **CATALOG.md §W** (one source tree, several targets) and **§X** (codemod
 hygiene), with the scaffold at `templates/multi-version/`.
 
-Measured, with the generated rename map, in **repo-root CLAUDE.md §V**. Tooling:
+Measured, with the generated rename map, in **CATALOG.md §V**. Tooling:
 `tools/build-class-move-map.py` (diff two real compile classpaths → a move map, plus
 `.ambiguous.txt` and `.removed.txt`). The maps are **not shipped** — they are derived from Mojang's
 mapping data — so generate one per version pair into `$MIGRATE_WORKSPACE/moves/`; you already have
@@ -29,7 +29,7 @@ both classpaths if you are migrating between those versions.
 
 ## Status: STUB — fill on demand
 This file is a deliberately empty scaffold. The deep, filled corpus in this repo is the
-**Forge 1.20.1 → NeoForge 1.21.1** path (loader-transform + version-family + CLAUDE.md §A–§L/§R).
+**Forge 1.20.1 → NeoForge 1.21.1** path (loader-transform + version-family + CATALOG.md §A–§L/§R).
 Minor-version deltas between 1.21.x releases are **small and situational**, so we do NOT pre-write
 them — we capture each the first time a real migration actually crosses that boundary, via the
 Step-4b retrospective (see SKILL.md). That keeps this file accurate instead of speculative.
@@ -45,7 +45,7 @@ Step-4b retrospective (see SKILL.md). That keeps this file accurate instead of s
 4. **SKIP the loader transform** if the source is already NeoForge (same `SRC_LOADER`/`DST_LOADER`).
 5. **Compile-loop** as usual. Every NEW API delta you hit for this pair → append it BELOW in the
    standard 3-line format AND (if it has a static signature) add a grep to `references/catalog-scans.md`,
-   then mirror it into CLAUDE.md **§M** so the next hop across the same boundary is one-shot.
+   then mirror it into CATALOG.md **§M** so the next hop across the same boundary is one-shot.
 
 ## Known reference points (background, not deltas)
 - `DataVersion` (GameTest empty structure) by release — **1.21.1 = 3955**. Look up the exact value for any
@@ -54,7 +54,7 @@ Step-4b retrospective (see SKILL.md). That keeps this file accurate instead of s
 
 ## Deltas (append here as they're discovered)
 **First crossing: a small MCreator food mod, NeoForge 1.21.4 → 1.21.1 downport**. Full detail +
-3-line format in repo-root CLAUDE.md **§M** (M1–M6). Summary (a **downport removes** the 1.21.2+ API and
+3-line format in CATALOG.md **§M** (M1–M6). Summary (a **downport removes** the 1.21.2+ API and
 restores the 1.21.1 one; an **up-port** applies each forward):
 
 - **M1 · Entity render-state system (1.21.2+, client — biggest bucket):** `MobRenderer<T,RenderState,M>` (3

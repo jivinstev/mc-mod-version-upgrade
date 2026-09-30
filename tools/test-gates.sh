@@ -90,6 +90,28 @@ vcase 1 "a NON-vendored file claims MIT" \
 vcase 1 "a new scaffold file lands without regenerating the manifest" \
   'import pathlib;pathlib.Path("templates/neoforge-mod/tools/new-tool.sh").write_text("# SPDX-License-Identifier: MIT\nx\n")'
 
+echo "6. the catalogue fidelity gate"
+fcase() {  # fcase <wanted-exit> <label> <python-mutation> -- over a tiny planted catalogue
+   local want="$1" label="$2" mutation="$3"
+   local C; C="$(mktemp -d)"; mkdir -p "$C/tools" "$C/docs"; : > "$C/tools/real-tool.py"
+   printf '## A. Section\n**A1. first** body uses `tools/real-tool.py`.\n**A2. second** body.\n12. **numbered** body.\n' > "$C/CATALOG.md"
+   ( cd "$C" && python3 "$ROOT/tools/check-catalog-fidelity.py" --update ) >/dev/null 2>&1
+   ( cd "$C" && python3 -c "$mutation" ) >/dev/null 2>&1
+   ( cd "$C" && python3 "$ROOT/tools/check-catalog-fidelity.py" ) >/dev/null 2>&1
+   local got=$?; rm -rf "$C"
+   if [ "$got" = "$want" ]; then echo "  PASS  $label (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $label — wanted exit $want, got $got"; fail=$((fail+1)); fi
+}
+fcase 0 "control: an unchanged catalogue passes" 'pass'
+fcase 0 "an EDITED entry is reported, not blocked" \
+  'import pathlib;p=pathlib.Path("CATALOG.md");p.write_text(p.read_text().replace("second","second, revised"))'
+fcase 1 "a bold-lettered entry (**A2.) that DISAPPEARS" \
+  'import pathlib;p=pathlib.Path("CATALOG.md");p.write_text(p.read_text().replace("**A2. second** body.\n",""))'
+fcase 1 "a numbered entry (12.) that DISAPPEARS" \
+  'import pathlib;p=pathlib.Path("CATALOG.md");p.write_text(p.read_text().replace("12. **numbered** body.\n",""))'
+fcase 1 "a tool the catalogue names is DELETED" \
+  'import os;os.remove("tools/real-tool.py")'
+
 echo
 echo "gates self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

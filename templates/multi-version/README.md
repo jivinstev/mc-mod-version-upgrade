@@ -3,7 +3,7 @@
 Use this when a mod must keep running on the **old** Minecraft while gaining the **new** one.
 The catalog sections are the reasoning; this directory is the moving parts.
 
-* **Read first:** `CLAUDE.md` §W (the architecture) and §X (codemod hygiene — a rewrite that
+* **Read first:** `CATALOG.md` §W (the architecture) and §X (codemod hygiene — a rewrite that
   matches nothing is silent, and that is how three bugs shipped in one afternoon).
 * **The era-jump API deltas** are §V.
 

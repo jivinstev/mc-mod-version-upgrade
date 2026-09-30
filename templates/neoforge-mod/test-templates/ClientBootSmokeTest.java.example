@@ -158,7 +158,7 @@ public class ClientBootSmokeTest {
      * <p>{@code RenderFrameEvent} is fired from {@code Minecraft.renderFrame} with no such gate and
      * exists under the same name on 1.21.1 and 26.x, so this needs no per-version code. It reports
      * only while no tick has arrived; once the harness is running the tick heartbeat is better.
-     * See CLAUDE.md V69 (and X16/X28 on naming the blocker).
+     * See CATALOG.md V69 (and X16/X28 on naming the blocker).
      */
     @SubscribeEvent
     public static void onRenderFrame(RenderFrameEvent.Post event) {

@@ -337,7 +337,7 @@ def generic(java_type):
     then happens is whatever you DO with it: a large boss mod's splash mixin called `add` on a field
     that 26.2 had turned into an immutable `List<Component>`, which threw from inside a reload
     listener, failed the whole initial resource reload, and left the client rendering the title
-    screen forever with no crash and no log line naming the mod (CLAUDE.md V70).
+    screen forever with no crash and no log line naming the mod (CATALOG.md V70).
 
     So the erasure check above answers "will it BIND"; this one answers "is it the same thing".
     """
@@ -1001,7 +1001,7 @@ def main():
         return 1
     if checked == 0:
         # A green over an empty scope is the failure this tool exists to stop being blind
-        # to -- see CLAUDE.md X27. Say so, and fail, rather than printing a pass.
+        # to -- see CATALOG.md X27. Say so, and fail, rather than printing a pass.
         print("\nNO TARGETS CHECKED -- this is NOT a pass.\n"
               "  Nothing under %s matched a mixin package with a vanilla @Mixin target.\n"
               "  If the mod really ships no mixins, skip this gate deliberately;\n"

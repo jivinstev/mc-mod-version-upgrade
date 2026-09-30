@@ -18,6 +18,12 @@ hours rather than seconds, and sometimes does not succeed.
 
 ---
 
+## The migration catalogue
+
+[`CATALOG.md`](CATALOG.md) is the knowledge base the migrate skill works from: ~450 entries, each a
+real migration failure written as **pattern → error → fix**, with the measurement that established
+it. The mods each lesson came from are described rather than named; the evidence is kept verbatim.
+
 ## Safety gates
 
 Three checks run on every pull request, and all must pass:
