@@ -97,8 +97,8 @@ gh repo fork jivinstev/mc-mod-version-upgrade --clone
 ```
 
 Install the hook once after cloning: `./tools/install-hooks.sh`. It refuses direct pushes to `main`
-and runs the IP gate before anything leaves your machine. The forbidden-name list is kept private,
-so the hook's name check runs only if `.env.local` names a list with `FORBIDDEN_NAMES_FILE=`.
+and runs the IP gate before anything leaves your machine. Optionally, `FORBIDDEN_NAMES_FILE=` in
+`.env.local` can name a private list of mods you have ported, and the hook then refuses those names too.
 
 **The easiest contribution is a lesson from your own migration:** the skill's retrospective collects
 them, and `python3 tools/propose-learnings.py --modid <modid> --push` opens the PR, gated, with the

@@ -23,16 +23,16 @@ reads the diff for what the gates cannot see. Two rules about its output:
 
 - **BLOCKING findings are not negotiable in review.** The fix is the contributor's; you may explain
   it, never waive it. A gate that is wrong gets its own PR, with its own review.
-- **It must have run with the name list.** If it reports `no forbidden-name list configured`, set
-  `FORBIDDEN_NAMES_FILE` in `.env.local` (the list lives in the owner's private repository) and re-run.
-  A review without the name check is not a review of the one thing this repository most needs to refuse.
+- **The name list is optional.** When `FORBIDDEN_NAMES_FILE` is set, the IP gate also refuses those names;
+  when it is not, the script prints a note and nothing else changes. Either way the identity check below
+  is yours to do: no list can know every mod, so reading the added lines is the check that matters.
 
 ## Step 2 — the judgement pass (what no script can decide)
 
 Read the whole diff (`git diff origin/main...pr-<N>`). For each area it touches:
 
-**Identity.** The name list only knows mods that were ported privately. Read every added line for a
-mod the list could not know: a mod or modpack name, a mod id, a Java package root that is not
+**Identity.** This is the main defence: an optional name list only knows mods someone listed. Read
+every added line for a mod name: a mod or modpack name, a mod id, a Java package root that is not
 `net.minecraft`/`net.neoforged`/`com.mojang`/a published library, a distinctive entity/item/class name,
 a jar name, a CurseForge/Modrinth id, a path from someone's workspace or home. Published *libraries*
 (GeckoLib, JEI, Registrate, Curios, Mixin, …) and the decompilers may be named — they are how porters

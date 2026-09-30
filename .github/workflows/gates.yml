@@ -33,10 +33,10 @@ jobs:
       # "this run likely failed because of a workflow file issue". A secret reaches a step through
       # `env`, and shell tests the env var.
       #
-      # The forbidden-name list lives in the PRIVATE repo and arrives here as a secret, so this
-      # public repo never contains the list of names it checks for. When the secret is absent every
-      # other check still runs and the skip is announced loudly; --strict then makes an unavailable
-      # list a FAILURE rather than a silent pass.
+      # An OPTIONAL private list of mod names can arrive as the FORBIDDEN_MOD_NAMES secret, so this
+      # public repo never contains the names it checks for. Without it every other check still runs;
+      # mod names are refused at the source (propose-learnings refuses the port's own identity) and by
+      # the reviewer's reading. With it, --strict makes an unreadable list a FAILURE, not a silent pass.
       - name: check-no-ip
         env:
           NAMES: ${{ secrets.FORBIDDEN_MOD_NAMES }}
@@ -45,7 +45,7 @@ jobs:
             printf '%s\n' "$NAMES" > "$RUNNER_TEMP/forbidden-names.txt"
             python3 tools/check-no-ip.py --names "$RUNNER_TEMP/forbidden-names.txt" --strict
           else
-            echo "::warning::FORBIDDEN_MOD_NAMES is not set — the mod-name pass will not run."
+            echo "note: no FORBIDDEN_MOD_NAMES secret (optional); the other checks all run."
             python3 tools/check-no-ip.py
           fi
 

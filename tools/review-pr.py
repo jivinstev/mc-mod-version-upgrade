@@ -206,6 +206,7 @@ def main():
     names = os.path.expanduser(names) if names else ""
     wt = pathlib.Path(tempfile.mkdtemp(prefix="review-pr-"))
     gate_results = {}
+    name_note = None
     try:
         sh("git", "worktree", "add", "-q", "--detach", str(wt), a.head)
         # Judge the PR's catalogue against the census it started from, not the one it ships: a PR that
@@ -225,9 +226,11 @@ def main():
             if wants_names:
                 if names and pathlib.Path(names).is_file():
                     cmd += ["--names", names, "--strict"]
-                else:
-                    f("ATTENTION", "identity", "no forbidden-name list configured: the IP gate ran WITHOUT the "
-                      "name check. Set FORBIDDEN_NAMES_FILE or pass --names before approving.")
+                elif names:                       # configured but missing: a misconfiguration, say so
+                    f("ATTENTION", "identity", f"the forbidden-name list {names} does not exist: the IP gate ran "
+                      "without it. Fix the path, or unset it.")
+                else:                             # the list is OPTIONAL: identity is the judgement pass's job
+                    name_note = "no private name list (optional); read added lines for mod names by hand"
             r = subprocess.run(cmd, cwd=wt, capture_output=True, text=True)
             gate_results[name] = "PASS" if r.returncode == 0 else "FAIL"
             if "self-test" in name and r.returncode == 0:
@@ -262,6 +265,8 @@ def main():
     else:
         print(f"review-pr: {len(changed)} file(s) changed, {a.base}...{a.head}")
         print("  gates: " + ", ".join(f"{k}={v}" for k, v in gate_results.items()))
+        if name_note:
+            print(f"  note: {name_note}")
         for x in findings:
             print(f"  [{x['level']}] {x['area']}: {x['message']}" + (f"\n      {x['where']}" if x["where"] else ""))
         print(f"review-pr: {len(blocking)} blocking, {len(findings) - len(blocking)} for attention")

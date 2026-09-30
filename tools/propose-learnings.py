@@ -244,8 +244,8 @@ def main():
     if extra and pathlib.Path(os.path.expanduser(extra)).is_file():
         ip_args = ["--names", os.path.expanduser(extra), "--strict"]
     else:
-        print("propose-learnings: no FORBIDDEN_NAMES_FILE configured -- the IP gate runs without the private "
-              "name list (the reviewer and CI run it with the list).")
+        print("propose-learnings: note -- no FORBIDDEN_NAMES_FILE (optional); this port's own names are still "
+              "refused.")
 
     if a.dry_run:
         tmp = pathlib.Path(tempfile.mkdtemp()) / "CATALOG.md"
