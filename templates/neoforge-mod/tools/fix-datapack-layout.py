@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: 2026 jivinstev
+# SPDX-FileCopyrightText: 2026 Jason Hendrickson
 """
 Move a port's data pack into the directories Minecraft 1.21 actually reads, and fix the JSON that then
 starts being parsed.

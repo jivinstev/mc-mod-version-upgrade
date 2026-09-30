@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: 2026 jivinstev
+# SPDX-FileCopyrightText: 2026 Jason Hendrickson
 # ─────────────────────────────────────────────────────────────────────────────
 # client-validate.sh — THE one command for Gate C. Runs EVERY client-validation
 # phase in sequence, each looping crash → (Claude fixes) → relaunch until it passes,

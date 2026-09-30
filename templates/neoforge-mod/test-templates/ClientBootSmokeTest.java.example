@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 jivinstev
+// SPDX-FileCopyrightText: 2026 Jason Hendrickson
 // ─── TEMPLATE (Gate C — client boot loop). Copy to src/main/java/<pkg>/test/ClientBootSmokeTest.java. ───
 // To adapt for a new mod:
 //   1. Rename the package + the "examplemod" string literals (namespace filter + system-property keys) to <modid>.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: 2026 jivinstev
+# SPDX-FileCopyrightText: 2026 Jason Hendrickson
 """Adapt annotation-driven @GameTests to Minecraft 26.x's registration model.
 
 WHAT CHANGED

@@ -85,8 +85,8 @@ vcase() {  # vcase <wanted-exit> <label> <python-mutation> -- run --check in a t
 vcase 0 "control: an unmodified copy passes" 'pass'
 vcase 1 "a vendored file LOSES its SPDX header" \
   'import pathlib;p=pathlib.Path("templates/neoforge-mod/settings.gradle");p.write_text("".join(l for l in p.read_text().splitlines(True) if "SPDX-License-Identifier" not in l))'
-vcase 1 "a NON-vendored file claims MIT" \
-  'import pathlib;p=pathlib.Path("tools/find-member.py");l=p.read_text().splitlines(True);l.insert(1,"# SPDX-License-Identifier: MIT\n");p.write_text("".join(l))'
+vcase 1 "a vendored file names the WRONG copyright holder" \
+  'import pathlib;p=pathlib.Path("templates/neoforge-mod/tools/watch-gatec.sh");import re;p.write_text(re.sub(r"(SPDX-FileCopyrightText: \d{4}) .*", r"\1 Someone Else", p.read_text(), count=1))'
 vcase 1 "a new scaffold file lands without regenerating the manifest" \
   'import pathlib;pathlib.Path("templates/neoforge-mod/tools/new-tool.sh").write_text("# SPDX-License-Identifier: MIT\nx\n")'
 

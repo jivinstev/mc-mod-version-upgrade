@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 jivinstev
+// SPDX-FileCopyrightText: 2026 Jason Hendrickson
 // COPY to: src/test/java/<your/package>/MixinConfigIntegrityTest.java
 // EDIT: package line + MIXIN_CONFIG filename (<modid>.mixins.json).
 // Requires JUnit in build.gradle (see pipeline.md Stage 6). Minecraft-free; runs under `./gradlew test`.

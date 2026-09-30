@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# SPDX-FileCopyrightText: 2026 jivinstev
+# SPDX-FileCopyrightText: 2026 Jason Hendrickson
 # ─────────────────────────────────────────────────────────────────────────────
 # client-boot-loop.sh — iterate on client-only crashes with Claude in the loop.
 #

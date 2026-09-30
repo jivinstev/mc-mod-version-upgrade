@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 jivinstev
+// SPDX-FileCopyrightText: 2026 Jason Hendrickson
 // COPY to: src/test/java/<your/package>/ResourceIntegrityTest.java  and set the package line.
 // Gate A for EVERY port, mixins or not. Minecraft-free and fast: it reads resource files only.
 // build.gradle (from the template) passes the project dir and the target Minecraft version.
