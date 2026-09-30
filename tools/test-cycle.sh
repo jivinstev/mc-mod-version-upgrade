@@ -77,6 +77,9 @@ cat > "$WS/good.md" <<'EOF'
 ### new R
 R99. **A test lesson** · **Pattern:** some old shape on Minecraft 1.21.1 and NeoForge · **Runtime:** `SomeException: a log line` · **Fix:** the new shape.
 
+### new R
+R98. **A qualified lesson** · **Pattern (1.21.2+):** old · **Error (downport):** `x` · **Fix (→1.21.1):** new.
+
 ### augment M6
 · **AUGMENT — a test case:** the symptom is `Not a JSON object`; the fix is unchanged.
 EOF
