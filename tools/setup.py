@@ -217,15 +217,13 @@ def ensure_workspace(ws, notes, problems, dry):
 
 
 def supported_versions():
-    """minecraft -> status from SUPPORTED_VERSIONS.tsv ('tested' / 'reported'); absent = untested."""
-    out, f = {}, ROOT / "SUPPORTED_VERSIONS.tsv"
-    if f.exists():
-        for line in f.read_text().splitlines():
-            cols = line.split("\t")
-            if line.startswith("#") or len(cols) < 3 or cols[0] == "minecraft":
-                continue
-            out[cols[0].strip()] = cols[2].strip()
-    return out
+    """minecraft -> 'tested' / 'reported (3 of 10 mods with Gate C)'; absent = untested.
+    Computed by tools/supported-versions.py, the only place the rule lives."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sv", ROOT / "tools/supported-versions.py")
+    sv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sv)
+    return {r["minecraft"]: sv.describe(r) for r in sv.load()[1]}
 
 
 def neoforge_minecraft(loader):
@@ -416,6 +414,8 @@ def main():
     for v in targets:
         where = ", ".join(f["path"] for f in neo.get(v, [])) or "no NeoForge install found"
         print(f"     {v:<8} {support.get(v, 'untested'):<9} {where}")
+    if any(not support.get(v, "").startswith("tested") for v in targets):
+        print("     (reported/untested: it may work, but expect gaps; you can still choose it)")
     skipped = [v for v in vanilla if v not in targets]
     if skipped:
         print(f"     skipped (vanilla only, no NeoForge installed): {', '.join(skipped)}"

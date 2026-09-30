@@ -144,13 +144,12 @@ def apply(catalog_text, blocks):
 def port_targets(port):
     """-> ['Minecraft 1.21.1, NeoForge 21.1.228 (tested)', ...] from the port's gradle.properties and any
     versions/*.properties (a multi-version port). The reviewer uses this to track SUPPORTED_VERSIONS."""
-    support = {}
-    sv = ROOT / "SUPPORTED_VERSIONS.tsv"
-    if sv.exists():
-        for line in sv.read_text().splitlines():
-            c = line.split("\t")
-            if len(c) >= 3 and not line.startswith("#") and c[0] != "minecraft":
-                support[c[0]] = c[2]
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sv", ROOT / "tools/supported-versions.py")
+    sv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sv)
+    by = {r["minecraft"]: r for r in sv.load()[1]}
+    support = {mc: sv.describe(r) for mc, r in by.items()}
     out = []
     for f in [port / "gradle.properties"] + sorted((port / "versions").glob("*.properties")):
         if not f.is_file():
@@ -158,7 +157,7 @@ def port_targets(port):
         kv = dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S+)", f.read_text(errors="replace")))
         mc, neo = kv.get("minecraft_version"), kv.get("neo_version")
         if mc:
-            t = f"Minecraft {mc}" + (f", NeoForge {neo}" if neo else "") + f" ({support.get(mc, 'UNTESTED')})"
+            t = f"Minecraft {mc}" + (f", NeoForge {neo}" if neo else "") + f" ({support.get(mc, 'untested')})"
             if t not in out:
                 out.append(t)
     return out
@@ -197,6 +196,9 @@ def main():
     ap.add_argument("--modid", required=True, help="the port the lessons came from (its identity is refused)")
     ap.add_argument("--additions", help="default: $MIGRATE_WORKSPACE/catalog-additions.md")
     ap.add_argument("--workspace", help="default: MIGRATE_WORKSPACE from .env.local")
+    ap.add_argument("--gate-c", choices=["passed", "failed", "not-run"], default="not-run",
+                    help="the port's Gate C (real client) result; a passed Gate C counts toward the target "
+                         "version becoming tested (SUPPORTED_VERSIONS.md)")
     ap.add_argument("--title", help="PR title (default: 'Catalogue: lessons from a <date> migration')")
     ap.add_argument("--base", help="branch point for the PR (default: origin/main, else main)")
     ap.add_argument("--push", action="store_true")
@@ -298,8 +300,8 @@ def main():
     title = a.title or f"Catalogue: lessons from a {datetime.date.today().isoformat()} migration"
     targets = port_targets(port) or ["unknown (no minecraft_version in the port's gradle.properties)"]
     body = (f"{title}\n\nLessons proposed by tools/propose-learnings.py: {kinds}.\n\n"
-            f"Port target(s): {'; '.join(targets)}. An UNTESTED or reported target needs the evidence in\n"
-            "SUPPORTED_VERSIONS.md (Gate A + Gate B passing on it) for the reviewer to record it.\n\n"
+            f"Port target(s): {'; '.join(targets)}. Gate C (real client): {a.gate_c}.\n"
+            "A passed Gate C counts toward that target becoming tested (SUPPORTED_VERSIONS.md).\n\n"
             "Generated from a migration's retrospective. The IP gate ran with the ported mod's own identity\n"
             "added to the forbidden names, and the fidelity gate confirmed no existing entry was lost.")
     git("add", "CATALOG.md", "docs/catalog-census.tsv")

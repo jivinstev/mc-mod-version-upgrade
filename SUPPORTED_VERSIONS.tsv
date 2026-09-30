@@ -1,8 +1,10 @@
-# Which migration TARGETS are tested. Read by ./setup and the migrate-mod skill; the rules for adding a
-# row are in SUPPORTED_VERSIONS.md. Columns: minecraft, loader, status, evidence.
-#   tested    the pipeline, templates and catalogue are verified there by several full ports (all gates)
-#   reported  someone has shipped a port there through the pipeline, but not enough to call it tested
-# A version not listed is UNTESTED: the tools may still work; nobody has shown that they do.
-minecraft	loader	status	evidence
-1.21.1	neoforge	tested	the default target: dozens of ports and two blind replays, Gates A-C
-26.2	neoforge	tested	the second target of the multi-version template: 14+ ports with Gates A-C on both targets
+# Migration TARGETS and how well each is proven. Read by ./setup, the migrate-mod skill and
+# tools/supported-versions.py; the rules are in SUPPORTED_VERSIONS.md. Do not compute the status by hand:
+#   status = override if set, else "tested" when mods_gate_c >= 10, else "reported".
+# A version not listed is UNTESTED. Columns (tab-separated):
+#   minecraft  loader  mods_gate_c  override  evidence
+#   mods_gate_c  distinct mods ported to this target whose Gate C (real client) passed
+#   override     empty, or "tested"/"reported" set by the owner by hand, with the reason in evidence
+minecraft	loader	mods_gate_c	override	evidence
+1.21.1	neoforge		tested	owner: the default target since before this policy; dozens of ports and two blind replays through Gates A-C
+26.2	neoforge		tested	owner: the multi-version template's second target since before this policy; 14+ ports through Gates A-C on both targets
