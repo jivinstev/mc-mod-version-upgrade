@@ -4,14 +4,14 @@
     ./setup                 interactive: every question shows a recommendation; Enter accepts it
     ./setup --yes           first run: take every recommendation.  RE-RUN: keep every decision.
     ./setup --check         change nothing; print what setup WOULD change, and verify prerequisites
-    ./setup --path migrate  switch paths (install -> migrate adds keys; never removes any)
+    ./setup --migrate       add the migration add-on (same as --path migrate; adds keys, never removes any)
     ./setup --mods-dir 26.2=/path/to/minecraft-26.2   add one more deploy target (a set, not a value)
     ./setup --remove KEY    the ONLY way setup ever deletes a setting
 
-TWO PATHS, because most people only want the cheap one
-    install   find, resolve, verify and deploy mods.  Needs Python 3 and a network.  NO Java.
-    migrate   port a mod to a newer Minecraft.  Adds a JDK, a workspace and several GB of disk.
-    Path "install" must complete on a machine with no Java at all, and never warns about one.
+INSTALLING IS ALWAYS SET UP; MIGRATION IS AN ADD-ON (stored as SETUP_PATH=install|migrate)
+    installing  find, resolve, verify and deploy mods.  Needs Python 3 and a network.  NO Java.
+    migration   port a mod that has no build for your version.  Adds a JDK, a workspace, several GB.
+    Without the add-on setup must complete on a machine with no Java at all, and never warn about one.
 
 WHAT IT WRITES
     .env.local          the VALUES, flat KEY=value.  Every tool reads this; edit it by hand freely.
@@ -168,11 +168,19 @@ def inside_git_repo(path):
 
 
 def likely_output_repos():
-    """Sibling checkouts that look like a place finished ports live (a git repo with mods/)."""
+    """Sibling checkouts that look like a place finished ports live. No name is assumed: a folder next
+    to this one qualifies when it is a git repo whose mods/ holds at least one port, i.e. a
+    mods/<modid>/build.gradle -- the layout tools/finish-port.py writes. A bare `mods/` is not enough
+    (plenty of unrelated projects have one), so a brand-new empty destination is typed in, not guessed."""
     out = []
     for d in sorted(ROOT.parent.iterdir()):
-        if d != ROOT and d.is_dir() and (d / ".git").exists() and (d / "mods").is_dir():
-            out.append(os.path.relpath(d, ROOT))
+        if d == ROOT or not d.is_dir() or not (d / ".git").exists() or not (d / "mods").is_dir():
+            continue
+        try:
+            if any((m / "build.gradle").is_file() for m in (d / "mods").iterdir() if m.is_dir()):
+                out.append(os.path.relpath(d, ROOT))
+        except OSError:
+            continue
     return out
 
 
@@ -218,14 +226,28 @@ class Asker:
     def existing(self, key):
         return self.state["keys"].get(key)
 
-    def decide(self, key, recommended, question, origin="default", secret=False):
-        """Return the value to use, honouring the re-run rules. Records a proposal if it changes."""
+    def decide(self, key, recommended, question, origin="default", secret=False, choices=None):
+        """Return the value to use, honouring the re-run rules. Records a proposal if it changes.
+        `choices` maps what the user may TYPE to the value stored, e.g. yes/no -> migrate/install;
+        the default is then shown as the typed form, and anything else is asked again."""
         rec = self.existing(key)
         cur = rec["value"] if rec else None
         if rec and (not self.interactive):
             return cur                            # re-run + --yes/--check: keep every decision
         default = cur if rec else recommended
-        if self.interactive:
+        if self.interactive and choices:
+            shown = next((k for k, v in choices.items() if v == default), default)
+            while True:
+                ans = input(f"  {question} [{shown}]: ").strip().lower()
+                if not ans or ans in choices:
+                    break
+                print(f"    please answer {' or '.join(dict.fromkeys(choices))}")
+            if ans:
+                value, origin = choices[ans], "user"
+            else:
+                value = default
+                origin = rec["origin"] if rec else origin
+        elif self.interactive:
             shown = "(set)" if secret and default else (default if default != "" else "none")
             ans = input(f"  {question} [{shown}]: ").strip()
             if ans.lower() == "none":
@@ -247,7 +269,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--check", action="store_true")
-    ap.add_argument("--path", choices=["install", "migrate"])
+    ap.add_argument("--path", choices=["install", "migrate"],
+                    help="install = installing only; migrate = installing plus the migration add-on")
+    ap.add_argument("--migrate", dest="path", action="store_const", const="migrate",
+                    help="shorthand for --path migrate: also set up migration")
     ap.add_argument("--mods-dir", action="append", default=[], metavar="VERSION=PATH")
     ap.add_argument("--create-dirs", action="store_true",
                     help="create a missing mods folder named by --mods-dir (tier 1: folder only)")
@@ -272,15 +297,18 @@ def main():
     if promoted:
         print(f"  kept your hand edits to .env.local: {', '.join(sorted(promoted))}")
 
-    # 0. which path ---------------------------------------------------------------------------
-    print("\n0. What do you want to do?\n"
-          "   install  find, resolve and deploy mods (Python only -- recommended for most people)\n"
-          "   migrate  port a mod to a newer Minecraft (adds a JDK and several GB of disk)")
+    # 0. installing is always set up; migration is an ADD-ON ----------------------------------
+    print("\n0. Setup always prepares INSTALLING mods: find them on Modrinth/CurseForge, resolve\n"
+          "   dependencies, deploy. That needs only Python.\n"
+          "   MIGRATION is an add-on: when a mod has NO build for your Minecraft version, port it\n"
+          "   yourself. Adds a JDK, a workspace and several GB of disk. You can add it later with\n"
+          "   `./setup --migrate`; installing always uses an existing build first either way.")
     if a.path:
         ask.proposed["SETUP_PATH"] = (a.path, "user")
         path = a.path
     else:
-        path = ask.decide("SETUP_PATH", "install", "install or migrate?")
+        path = ask.decide("SETUP_PATH", "install", "Also set up migration? (yes/no)",
+                          choices={"no": "install", "n": "install", "yes": "migrate", "y": "migrate"})
     if path not in ("install", "migrate"):
         problems.append(f"SETUP_PATH must be install or migrate, not {path!r}")
         path = "install"
@@ -374,7 +402,8 @@ def main():
         print("\n5. Where finished ports go (a git repo you choose, or none)")
         cands = likely_output_repos()
         if cands:
-            print("   looks like a ports repo: " + ", ".join(cands))
+            print("   looks like a ports repo (a git repo next to this one with mods/<modid>/build.gradle): "
+                  + ", ".join(cands))
         if a.output_repo is not None:                 # an explicit flag is the user's decision
             v = "" if a.output_repo.strip().lower() == "none" else str(pathlib.Path(a.output_repo).expanduser())
             if v and not pathlib.Path(v).is_dir():
@@ -395,8 +424,12 @@ def main():
             print(f"   destination: {out} (not a git repo: tools/finish-port.py copies only)")
 
     # 6. registries ---------------------------------------------------------------------------
-    print("\n6. Mod registries\n   Modrinth needs nothing.  CurseForge is OPTIONAL: it widens search; "
-          "get a key at https://console.curseforge.com/ (Modrinth-only works fine).")
+    print("\n6. Mod registries\n"
+          "   Modrinth works with no account and is searched first.\n"
+          "   CurseForge is OPTIONAL. Without a key, a mod published ONLY on CurseForge cannot be found\n"
+          "   or downloaded (you will be told when that happens); everything on Modrinth still works.\n"
+          "   To get a free key: sign in at https://console.curseforge.com/ and open \"API keys\".\n"
+          "   You can add it later by re-running ./setup, or by editing CURSEFORGE_API_KEY in .env.local.")
     ask.decide("CURSEFORGE_API_KEY", "", "CurseForge API key (or Enter to skip)", secret=True)
 
     # 7. Claude hookup ------------------------------------------------------------------------

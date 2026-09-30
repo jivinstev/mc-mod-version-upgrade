@@ -108,7 +108,7 @@ def main():
     ws = expand(a.workspace or env.get("MIGRATE_WORKSPACE", ""))
     dest_raw = a.dest if a.dest is not None else env.get("MOD_OUTPUT_REPO", "")
     if ws is None:
-        print("finish-port: no workspace -- run ./setup --path migrate, or pass --workspace", file=sys.stderr)
+        print("finish-port: no workspace -- run ./setup --migrate, or pass --workspace", file=sys.stderr)
         return 2
     port = ws / "mods" / a.modid
     if not (port / "build.gradle").is_file() and not (port / "build.gradle.kts").is_file():

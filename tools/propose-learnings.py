@@ -184,7 +184,7 @@ def main():
     env = read_env(pathlib.Path(a.env))
     ws_raw = a.workspace or env.get("MIGRATE_WORKSPACE", "")
     if not ws_raw:
-        print("propose-learnings: no workspace (run ./setup --path migrate, or pass --workspace)", file=sys.stderr)
+        print("propose-learnings: no workspace (run ./setup --migrate, or pass --workspace)", file=sys.stderr)
         return 2
     ws = pathlib.Path(os.path.expanduser(ws_raw)).resolve()
     port = ws / "mods" / a.modid
