@@ -40,7 +40,7 @@
 #
 # Every row is a type whose NAME or PACKAGE changed while its API stayed the same, so the
 # rewrite is safe and reviewable. Rows come from diffing the two real compile classpaths
-# (minecraft-forge-upgrade: tools/build-class-move-map.py), not from memory.
+# (tools/build-class-move-map.py), not from memory.
 #
 # A change that is NOT a pure rename does not belong here -- it belongs in the target's
 # overlay (src/mc26/java), which replaces a whole file.

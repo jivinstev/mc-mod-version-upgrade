@@ -1,7 +1,11 @@
 # Pipeline — exact commands
 
-All paths relative to the repo root (`minecraft-forge-upgrade/`). `MODID` = the
-mod's id (e.g. `examplemod`). Read machine paths from `.env.local`.
+All paths are relative to the **migration workspace**, `$MIGRATE_WORKSPACE` (default
+`~/.mc-mod-upgrade/work`): `cd "$MIGRATE_WORKSPACE"` first. `./setup --path migrate` lays it out as
+`mods/<modid>/` for ports, plus `tools/`, `templates/` and `.env.local` linked back to this
+checkout, so every command below works unchanged there. It lives outside any git repository on
+purpose: decompiled mods must never be one `git add -A` away from a commit. `MODID` = the mod's id
+(e.g. `examplemod`). Read machine paths from `.env.local`.
 
 **Target parameters** (see SKILL.md → "Target parameters"). Commands below are written for the
 default target — substitute if the caller specified otherwise:

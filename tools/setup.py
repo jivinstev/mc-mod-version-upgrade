@@ -176,6 +176,34 @@ def likely_output_repos():
     return out
 
 
+WORKSPACE_LINKS = ("tools", "templates", ".env.local")
+
+
+def ensure_workspace(ws, notes, problems, dry):
+    """Make $MIGRATE_WORKSPACE look like the root every tool expects: `mods/<modid>/` for the
+    ports, with `tools/`, `templates/` and `.env.local` beside it. The last three are SYMLINKS
+    back into this checkout, so there is one copy of the tooling and an update reaches every
+    workspace. Idempotent; never replaces anything that is not already our own link."""
+    root = pathlib.Path(ws).expanduser()
+    if dry:
+        return
+    (root / "mods").mkdir(parents=True, exist_ok=True)
+    for name in WORKSPACE_LINKS:
+        link, target = root / name, ROOT / name
+        if link.is_symlink():
+            if os.path.realpath(link) != str(target.resolve()):
+                problems.append(f"{link} links somewhere else ({os.readlink(link)}) -- left alone")
+            continue
+        if link.exists():
+            problems.append(f"{link} exists and is not a link to this checkout -- left alone")
+            continue
+        try:
+            link.symlink_to(target)
+            notes.append(f"workspace: linked {link} -> {target}")
+        except OSError as e:          # Windows without developer mode, for one
+            problems.append(f"could not link {link}: {e} (run from WSL, or copy it by hand)")
+
+
 def key_for_version(v):
     return "MINECRAFT_MODS_DIR_" + v.replace(".", "_")
 
@@ -332,6 +360,8 @@ def main():
         if ws and inside_git_repo(ws):
             problems.append(f"MIGRATE_WORKSPACE {ws} is inside a git repository: one `git add -A` would "
                             "publish somebody's decompiled mod. Choose a path outside any checkout.")
+        if ws and not inside_git_repo(ws):
+            ensure_workspace(ws, notes, problems, dry=a.check)
         if ws:
             try:
                 free = shutil.disk_usage(pathlib.Path(ws).expanduser().anchor or "/").free / 2**30

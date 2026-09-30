@@ -81,6 +81,22 @@ fresh; st --yes >/dev/null; st --yes --remove SKILLS_INSTALL >/dev/null
 { ! grep -q '^SKILLS_INSTALL=' "$R/.env.local" && grep -q '^SKILLS_INSTALL=' "$R/.env.local.bak"; } \
   && ok "--remove deletes the key; .env.local.bak holds the previous version" || bad "--remove or backup misbehaved"
 
+echo "10. the migration workspace is laid out the way the tools expect"
+fresh; st --yes >/dev/null
+WS="$H/ws"; sed -i.orig "s#^SETUP_PATH=.*#SETUP_PATH=migrate#" "$R/.env.local"; echo "MIGRATE_WORKSPACE=$WS" >> "$R/.env.local"
+st --yes >/dev/null
+{ [ -d "$WS/mods" ] && [ "$(readlink "$WS/tools")" = "$R/tools" ] && [ "$(readlink "$WS/templates")" = "$R/templates" ] \
+  && [ -L "$WS/.env.local" ]; } && ok "workspace has mods/ plus links to tools/, templates/, .env.local" \
+  || bad "workspace layout not created"
+mkdir -p "$WS/mods/demo"; printf 'mod_name=Demo\n' > "$WS/mods/demo/gradle.properties"; printf 'dependencies {\n}\n' > "$WS/mods/demo/build.gradle"
+( cd "$WS" && MIGRATE_WORKSPACE="$WS" bash tools/make-multiversion.sh demo 26.2 ) >/dev/null 2>&1
+{ [ -f "$WS/mods/demo/versions/26.2.renames.tsv" ] && [ -f "$WS/mods/demo/tools/prepare-sources.py" ]; } \
+  && ok "make-multiversion.sh runs from INSIDE the workspace and scaffolds mods/<modid>" || bad "tools do not work from the workspace"
+out="$(st --yes)"; echo "$out" | grep -q "no changes" && ok "re-running with a workspace is still a no-op" || bad "workspace re-run changed something"
+mkdir -p "$H/ws2/tools"; sed -i.orig "s#^MIGRATE_WORKSPACE=.*#MIGRATE_WORKSPACE=$H/ws2#" "$R/.env.local"
+out="$(st --yes)"; echo "$out" | grep -q "ws2/tools exists and is not a link" && [ -d "$H/ws2/tools" ] && [ ! -L "$H/ws2/tools" ] \
+  && ok "an existing real directory is never replaced by a link" || bad "setup clobbered an existing directory"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"

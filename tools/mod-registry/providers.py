@@ -23,7 +23,7 @@ import urllib.error
 MODRINTH_API = "https://api.modrinth.com/v2"
 CURSEFORGE_API = "https://api.curseforge.com/v1"
 MC_GAME_ID = 432
-USER_AGENT = "minecraft-forge-upgrade/1.0 (+github.com/ezrahpoundcake; personal mod-migration tool)"
+USER_AGENT = "mc-mod-version-upgrade/1.0 (+https://github.com/jivinstev/mc-mod-version-upgrade)"
 
 # CurseForge modLoaderType enum (search filter) and the file-level modLoader enum
 # (latestFilesIndexes / file.gameVersions) share these ids.
