@@ -1,0 +1,8 @@
+# Which migration TARGETS are tested. Read by ./setup and the migrate-mod skill; the rules for adding a
+# row are in SUPPORTED_VERSIONS.md. Columns: minecraft, loader, status, evidence.
+#   tested    the pipeline, templates and catalogue are verified there by several full ports (all gates)
+#   reported  someone has shipped a port there through the pipeline, but not enough to call it tested
+# A version not listed is UNTESTED: the tools may still work; nobody has shown that they do.
+minecraft	loader	status	evidence
+1.21.1	neoforge	tested	the default target: dozens of ports and two blind replays, Gates A-C
+26.2	neoforge	tested	the second target of the multi-version template: 14+ ports with Gates A-C on both targets

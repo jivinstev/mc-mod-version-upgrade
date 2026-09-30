@@ -27,6 +27,10 @@ whenever there is one; migration only runs for a mod that has none for your vers
 creates a workspace outside this checkout (`~/.mc-mod-upgrade/work` by default) where decompiled
 mods live; the migration commands run from there.
 
+**Tested targets: Minecraft 1.21.1 and 26.2 on NeoForge** (`SUPPORTED_VERSIONS.md`). You can port to
+another version; the tools will say it is untested, and a port there with passing gates is how a version
+joins the list.
+
 A finished migration delivers two things to two places. The port's source goes to your **mods
 destination**, any folder or git repository you name in setup (`tools/finish-port.py` commits it on a
 `port/<modid>` branch there). What the port *taught*, stated without the mod's name, goes back to this

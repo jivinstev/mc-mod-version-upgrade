@@ -141,6 +141,29 @@ def apply(catalog_text, blocks):
     return "\n".join(lines)
 
 
+def port_targets(port):
+    """-> ['Minecraft 1.21.1, NeoForge 21.1.228 (tested)', ...] from the port's gradle.properties and any
+    versions/*.properties (a multi-version port). The reviewer uses this to track SUPPORTED_VERSIONS."""
+    support = {}
+    sv = ROOT / "SUPPORTED_VERSIONS.tsv"
+    if sv.exists():
+        for line in sv.read_text().splitlines():
+            c = line.split("\t")
+            if len(c) >= 3 and not line.startswith("#") and c[0] != "minecraft":
+                support[c[0]] = c[2]
+    out = []
+    for f in [port / "gradle.properties"] + sorted((port / "versions").glob("*.properties")):
+        if not f.is_file():
+            continue
+        kv = dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S+)", f.read_text(errors="replace")))
+        mc, neo = kv.get("minecraft_version"), kv.get("neo_version")
+        if mc:
+            t = f"Minecraft {mc}" + (f", NeoForge {neo}" if neo else "") + f" ({support.get(mc, 'UNTESTED')})"
+            if t not in out:
+                out.append(t)
+    return out
+
+
 def identity_tokens(port, ws):
     toks = set()
     toks.add(port.name)
@@ -273,7 +296,10 @@ def main():
 
     kinds = ", ".join(f"{b['kind']} {b['key']}" for b in blocks)
     title = a.title or f"Catalogue: lessons from a {datetime.date.today().isoformat()} migration"
+    targets = port_targets(port) or ["unknown (no minecraft_version in the port's gradle.properties)"]
     body = (f"{title}\n\nLessons proposed by tools/propose-learnings.py: {kinds}.\n\n"
+            f"Port target(s): {'; '.join(targets)}. An UNTESTED or reported target needs the evidence in\n"
+            "SUPPORTED_VERSIONS.md (Gate A + Gate B passing on it) for the reviewer to record it.\n\n"
             "Generated from a migration's retrospective. The IP gate ran with the ported mod's own identity\n"
             "added to the forbidden names, and the fidelity gate confirmed no existing entry was lost.")
     git("add", "CATALOG.md", "docs/catalog-census.tsv")

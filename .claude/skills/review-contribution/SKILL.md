@@ -61,6 +61,12 @@ quietly narrower. Widening an allowlist needs the owner, by name, in the PR.
 - **Placed right?** In the section for its axis (loader, version family, runtime, silent-resource, …).
 - **Nothing lost.** The fidelity gate (run against the base census) settles this mechanically.
 
+**A port to a new target version.** If the PR's port (its learnings commit names it) targeted a
+Minecraft version that `SUPPORTED_VERSIONS.tsv` does not list as `tested`, check the evidence rule in
+`SUPPORTED_VERSIONS.md`: the exact target, and Gate A + Gate B passing on it. With the evidence, add (or
+extend) that version's `reported` row naming this PR, and promote it to `tested` when the bar there is
+met. Without it, ask for it in REQUEST CHANGES. Never promote a beta loader to `tested`.
+
 **Scope.** Does the PR do one thing? A learnings PR should touch `CATALOG.md` and the census only. A
 tool PR should include its self-test. Unrelated changes get split out, not waved through.
 

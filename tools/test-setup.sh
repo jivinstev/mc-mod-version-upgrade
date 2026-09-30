@@ -71,7 +71,7 @@ st --yes --mods-dir "26.2=$H/mc-26.2/mods" --create-dirs >/dev/null
   || bad "--mods-dir did not add cleanly"
 
 echo "8. discovery finds a real layout and records it as detected"
-fresh; mkdir -p "$H/.minecraft/versions/1.21.1" "$H/.minecraft/mods"; touch "$H/.minecraft/mods/a.jar"
+fresh; mkdir -p "$H/.minecraft/versions/1.21.1" "$H/.minecraft/versions/neoforge-21.1.228" "$H/.minecraft/mods"; touch "$H/.minecraft/mods/a.jar"
 st --yes >/dev/null
 { grep -q "^MINECRAFT_DIR=$H/.minecraft$" "$R/.env.local" && grep -q "^MINECRAFT_MODS_DIR_1_21_1=$H/.minecraft/mods$" "$R/.env.local"; } \
   && ok "platform default found, per-version deploy target written" || bad "discovery did not write the install"
@@ -163,6 +163,27 @@ fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --migrate)"
 { echo "$out" | grep -q "claude: ok" && ! echo "$out" | grep -q "not installed" && echo "$out" | grep -q "Migrate <mod name>"; } \
   && ok "claude present: reported ok, and the migrate path shows how to ask for a migration" || bad "claude present: $(echo "$out" | grep -iE 'claude' | head -3)"
 rm -rf "$C"
+
+echo "15. deploy targets: tested versions + NeoForge installs; vanilla-only skipped; shared folders flagged"
+fresh; B="$H/.minecraft"; mkdir -p "$B/versions/26.3" "$B/versions/1.21.1" "$B/versions/neoforge-21.1.228" "$B/mods"
+out="$(st --yes)"
+{ echo "$out" | grep -q "skipped (vanilla only, no NeoForge installed): 26.3" && ! grep -q '^MINECRAFT_MODS_DIR_26_3=' "$R/.env.local" \
+  && grep -q "^MINECRAFT_MODS_DIR_1_21_1=$B/mods$" "$R/.env.local" && grep -q '^MINECRAFT_MODS_DIR_26_2=$' "$R/.env.local"; } \
+  && ok "vanilla 26.3 is listed as skipped; 1.21.1 -> its NeoForge folder; tested 26.2 with no install -> none" \
+  || bad "targets: $(echo "$out" | sed -n '/Mod versions/,/For each/p' | tr '\n' '|')"
+fresh; B="$H/.minecraft"; mkdir -p "$B/versions/neoforge-21.1.228" "$B/versions/neoforge-26.2.0.75" "$B/mods"
+out="$(st --yes)"
+echo "$out" | grep -q "is also the mods folder of your Minecraft" && ok "one mods/ folder recommended for two versions is FLAGGED" \
+  || bad "shared folder not flagged: $(echo "$out" | grep note)"
+fresh; B="$H/.minecraft"; mkdir -p "$B/versions/neoforge-21.1.228" "$B/versions/neoforge-26.2.0.75" "$B/mods" "$B-26.2/mods"
+st --yes >/dev/null
+{ grep -q "^MINECRAFT_MODS_DIR_26_2=$B-26.2/mods$" "$R/.env.local" && grep -q "^MINECRAFT_MODS_DIR_1_21_1=$B/mods$" "$R/.env.local"; } \
+  && ok "a separate minecraft-26.2 folder wins for 26.2 over the shared main folder" \
+  || bad "per-version folder not preferred: $(grep MODS_DIR "$R/.env.local" | tr '\n' ' ')"
+rm -rf "$B-26.2"
+fresh; B="$H/.minecraft"; mkdir -p "$B/versions/neoforge-21.1.228" "$B/mods"; tty_run 'n,,,new' >/dev/null
+grep -q "^MINECRAFT_MODS_DIR_26_2=$B-26.2/mods$" "$R/.env.local" && [ -d "$B-26.2/mods" ] \
+  && ok "interactive 'new' creates a separate folder for that version and uses it" || bad "'new': $(grep MODS_DIR_26 "$R/.env.local")"
 
 rm -rf "$NOJAVA"
 echo
