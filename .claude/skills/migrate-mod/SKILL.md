@@ -42,6 +42,14 @@ When a different target is requested, substitute the parameter. The knowledge sp
 `neo_version` / `parchment_*` for `DST_MC`; the SRG step (below) takes `SRC_MC` as an argument;
 `pack_format` and the GameTest `DataVersion` follow `DST_MC` (1.21.1 → 34/48, DataVersion 3955).
 
+**Is `DST_MC` a tested target?** Look it up in `SUPPORTED_VERSIONS.tsv` BEFORE starting. If it is not
+`tested`, say so to the user in one plain sentence first -- "Minecraft X is not a tested target yet: the
+catalogue and templates were built for 1.21.1 and 26.2, so expect to find API changes nobody has written
+down, and budget more time" -- and a beta loader (NeoForge `-beta`) is worth naming too. Then go ahead if
+they want. Such a port is also how a version becomes tested: record the exact target in MIGRATION.md
+(`minecraft_version`, NeoForge version, which gates passed), and let `propose-learnings.py` carry it into
+the learnings PR (SUPPORTED_VERSIONS.md says what the reviewer does with it).
+
 **Mapping rule (three cases, decide with `unzip -p "$JAR" META-INF/MANIFEST.MF`):**
 **(1) Forge ≤1.20.x** → SRG member names → `tools/srg-remap` (Step 2b below).
 **(2) Fabric (any version)** → `Fabric-Mapping-Namespace: intermediary` → **`tools/intermediary-remap/`**

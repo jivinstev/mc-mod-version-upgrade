@@ -216,6 +216,28 @@ def ensure_workspace(ws, notes, problems, dry):
             problems.append(f"could not link {link}: {e} (run from WSL, or copy it by hand)")
 
 
+def supported_versions():
+    """minecraft -> status from SUPPORTED_VERSIONS.tsv ('tested' / 'reported'); absent = untested."""
+    out, f = {}, ROOT / "SUPPORTED_VERSIONS.tsv"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            cols = line.split("\t")
+            if line.startswith("#") or len(cols) < 3 or cols[0] == "minecraft":
+                continue
+            out[cols[0].strip()] = cols[2].strip()
+    return out
+
+
+def neoforge_minecraft(loader):
+    """The Minecraft version a NeoForge build is for: 21.1.228 -> 1.21.1, 21.0.x -> 1.21,
+    26.2.0.75 -> 26.2 (NeoForge's own numbering follows Minecraft's). None if not NeoForge."""
+    m = re.match(r'neoforged?[-_ ]?(\d+)\.(\d+)\.', loader.strip(), re.I)
+    if not m:
+        return None
+    a, b = int(m.group(1)), int(m.group(2))
+    return f"{a}.{b}" if a >= 26 else (f"1.{a}" + (f".{b}" if b else ""))
+
+
 def key_for_version(v):
     return "MINECRAFT_MODS_DIR_" + v.replace(".", "_")
 
@@ -369,16 +391,60 @@ def main():
                     installs[0]["path"] if installs else "")
     ask.decide("MINECRAFT_DIR", main_dir, "your main Minecraft folder (or 'none')", origin="detected")
 
-    by_version = {}
+    # Which versions to ask about: the TESTED ones, plus any version you have NeoForge installed for.
+    # A vanilla version with no NeoForge (the launcher downloads each new release by itself) is only
+    # listed. The recommended folder is an install that has NeoForge FOR THAT VERSION.
+    support = supported_versions()
+    neo = {}                                        # minecraft version -> [install, ...] with NeoForge for it
+    dedicated = {}                                  # install path -> the ONE version its folder is named for
     for f in installs:
-        for v in f.get("versions") or []:
-            v = v.split(" ")[0]
-            if re.fullmatch(r'\d+(\.\d+)+', v):
-                by_version.setdefault(v, os.path.join(f["path"], "mods"))
-    if not by_version and first_run and not any(k.startswith("MINECRAFT_MODS_DIR_") for k in state["keys"]):
-        by_version = {}
-    for v, d in sorted(by_version.items()):
-        ask.decide(key_for_version(v), d, f"deploy target for Minecraft {v} (or 'none')", origin="detected")
+        for l in f.get("loaders") or []:
+            v = neoforge_minecraft(l)
+            if v and f not in neo.setdefault(v, []):
+                neo[v].append(f)
+        for v in f.get("versions") or []:           # minecraft-26.2: its profile lives in the main folder
+            if v.endswith("(from the folder name)"):
+                v = v.split(" ")[0]
+                dedicated[f["path"]] = v
+                if f not in neo.setdefault(v, []):
+                    neo[v].append(f)
+    vanilla = sorted({v.split(" ")[0] for f in installs for v in (f.get("versions") or [])
+                      if re.fullmatch(r'\d+(\.\d+)+', v.split(" ")[0])})
+    targets = sorted(set(v for v, s in support.items() if s == "tested") | set(neo),
+                     key=lambda v: [int(x) for x in v.split(".")])
+    print("\n   Mod versions (tested = our migrations are verified there; see SUPPORTED_VERSIONS.md):")
+    for v in targets:
+        where = ", ".join(f["path"] for f in neo.get(v, [])) or "no NeoForge install found"
+        print(f"     {v:<8} {support.get(v, 'untested'):<9} {where}")
+    skipped = [v for v in vanilla if v not in targets]
+    if skipped:
+        print(f"     skipped (vanilla only, no NeoForge installed): {', '.join(skipped)}"
+              "  -- add one later with --mods-dir VERSION=PATH")
+    print("   For each version: the mods folder to deploy into. 'new' makes a separate folder for that\n"
+          "   version (point a launcher profile's Game Directory at it); 'none' skips it.")
+    base = pathlib.Path(main_dir or "~/minecraft").expanduser()
+    for v in targets:
+        cands = neo.get(v, [])
+        # prefer a folder that serves ONLY this version: jars for one version break another's game
+        cands = sorted(cands, key=lambda f: 0 if dedicated.get(f["path"]) == v else
+                       1 + len({neoforge_minecraft(l) for l in f.get("loaders") or []} - {None}))
+        rec = os.path.join(cands[0]["path"], "mods") if cands else ""
+        label = "" if support.get(v) == "tested" else f" [{support.get(v, 'UNTESTED')}]"
+        val = ask.decide(key_for_version(v), rec, f"deploy target for Minecraft {v}{label} (path, 'new' or 'none')",
+                         origin="detected" if rec else "default")
+        if val.strip().lower() == "new":
+            d = str(base.parent / f"{base.name}-{v}" / "mods")
+            if not a.check:
+                pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+                notes.append(f"created {d} (folder only: point a launcher profile's Game Directory at its parent)")
+            ask.proposed[key_for_version(v)] = (d, "user")
+            val = d
+        if val:
+            sharers = [w for w in targets if w != v and
+                       any(os.path.join(f["path"], "mods") == val for f in neo.get(w, []))]
+            if sharers:
+                notes.append(f"{val} is also the mods folder of your Minecraft {', '.join(sharers)} install: "
+                             f"a {v} jar there breaks that game. Prefer 'new' (a separate folder per version).")
     for spec in a.mods_dir:                       # rule 3: add to the set, never touch the others
         if "=" not in spec:
             problems.append(f"--mods-dir wants VERSION=PATH, got {spec!r}")

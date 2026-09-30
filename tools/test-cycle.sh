@@ -16,6 +16,7 @@ WS="$T/ws"; P="$WS/mods/fakeport"
 mkdir -p "$P/src/main/java/org/fake/fakeport" "$P/src/main/resources/META-INF" "$P/build/libs" \
          "$P/run/world" "$P/.gradle" "$P/decompiled-raw" "$P/run-mc26.2" "$P/src/main/resources/assets/x/out"
 echo 'plugins {}' > "$P/build.gradle"
+printf 'minecraft_version=26.3\nneo_version=26.3.0.39-beta\n' > "$P/gradle.properties"
 echo 'class A {}' > "$P/src/main/java/org/fake/fakeport/A.java"
 printf '[[mods]]\nmodId="fakeport"\ndisplayName="Fake Port Mod"\nversion="${file.jarVersion}"\n[[dependencies.fakeport]]\nmodId="neoforge"\n[[dependencies.fakeport]]\nmodId="minecraft"\n' > "$P/src/main/resources/META-INF/neoforge.mods.toml"
 echo 'keep' > "$P/src/main/resources/assets/x/out/keep.json"
@@ -102,6 +103,8 @@ if [ $code = 0 ] && [[ "$br" == learnings/* ]] && grep -q '^R99. \*\*A test less
    && git -C "$M" show HEAD --stat | grep -q 'catalog-census.tsv'; then
   ok "a valid lesson is committed on learnings/*, with the census updated"
 else bad "valid lesson (exit $code): $(tail -5 "$T/good.log")"; fi
+git -C "$M" log -1 --format=%B | grep -q "Port target(s): Minecraft 26.3, NeoForge 26.3.0.39-beta (UNTESTED)" \
+  && ok "the learnings commit records the port's target and its SUPPORTED_VERSIONS status" || bad "target not recorded: $(git -C "$M" log -1 --format=%B | grep -i target)"
 python3 - "$M/CATALOG.md" <<'PY' && ok "R99 lands in section R, D99 in '## D.' (not '## Deeper…'), the augment right after M6" || bad "placement wrong"
 import re, sys
 L = open(sys.argv[1]).read().split("\n")
