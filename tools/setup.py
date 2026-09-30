@@ -3,6 +3,7 @@
 
     ./setup                 interactive: every question shows a recommendation; Enter accepts it
     ./setup --yes           first run: take every recommendation.  RE-RUN: keep every decision.
+    ./setup --review        ask every question again (a plain re-run asks only new ones)
     ./setup --check         change nothing; print what setup WOULD change, and verify prerequisites
     ./setup --migrate       add the migration add-on (same as --path migrate; adds keys, never removes any)
     ./setup --mods-dir 26.2=/path/to/minecraft-26.2   add one more deploy target (a set, not a value)
@@ -20,7 +21,8 @@ WHAT IT WRITES
 
 RE-RUN RULES (each one a way a re-run could otherwise quietly break something)
     1. A hand-edited .env.local always wins; the key is promoted to `user`.
-    2. `user` values are offered back as the default and never changed without a keystroke.
+    2. A re-run asks only NEW questions; earlier answers are listed as `kept`. `--review` asks them all
+       again, offering each earlier answer as the default (never changed without a keystroke).
     3. Mods directories are a SET (MINECRAFT_MODS_DIR_<version>); adding one never touches another.
     4. Path changes are additive; nothing is deleted when you switch back.
     5. Nothing is ever destroyed by a re-run.  Removal needs --remove KEY.
@@ -59,6 +61,8 @@ INSTALL_HINTS = {  # tool -> {platform: command}
                "Windows": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)",
                "Linux": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)"},
 }
+INSTALL_HINTS["gh"] = {"Darwin": "brew install gh", "Windows": "winget install --id GitHub.cli",
+                       "Linux": "sudo apt install gh   (Fedora: sudo dnf install gh; or https://cli.github.com)"}
 CLAUDE_DOCS = "https://docs.claude.com/en/docs/claude-code/setup"
 
 
@@ -236,6 +240,55 @@ def neoforge_minecraft(loader):
     return f"{a}.{b}" if a >= 26 else (f"1.{a}" + (f".{b}" if b else ""))
 
 
+def confirm(question):
+    return input(question).strip().lower() in ("", "y", "yes")
+
+
+def gh_setup(interactive, notes, no_network):
+    """Make `gh` usable for lessons PRs: installed (with consent), signed in, and able to push -- to
+    this repository, or to the user's fork of it. Nothing happens without a yes, and a --yes/--check run
+    only reports."""
+    gh = shutil.which("gh")
+    if not gh:
+        cmd = {"Darwin": ["brew", "install", "gh"], "Windows": ["winget", "install", "--id", "GitHub.cli"]}.get(SYS)
+        if interactive and cmd and shutil.which(cmd[0]) and \
+                confirm(f"   gh is not installed. Install it now with `{' '.join(cmd)}`? [Y/n]: "):
+            subprocess.run(cmd)
+            gh = shutil.which("gh")
+        if not gh:
+            notes.append(f"sharing lessons needs the GitHub CLI: {hint('gh')}, then `gh auth login` "
+                         "(or re-run ./setup, which offers both)")
+            return
+    print("   gh: installed")
+    if no_network:
+        return
+    signed_in = lambda: subprocess.run([gh, "auth", "status"], capture_output=True).returncode == 0
+    if not signed_in():
+        if interactive and confirm("   gh is not signed in. Sign in now (runs `gh auth login`)? [Y/n]: "):
+            subprocess.run([gh, "auth", "login"])
+        if not signed_in():
+            notes.append("gh is not signed in: run `gh auth login` before your first lessons pull request")
+            return
+    print("   gh: signed in")
+    url = subprocess.run(["git", "-C", str(ROOT), "remote", "get-url", "origin"], capture_output=True,
+                         text=True).stdout.strip()
+    m = re.search(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?$", url)
+    if not m:
+        return
+    repo = f"{m.group(1)}/{m.group(2)}"
+    push = subprocess.run([gh, "api", f"repos/{repo}", "--jq", ".permissions.push"],
+                          capture_output=True, text=True).stdout.strip()
+    if push == "true":
+        print(f"   you can push to {repo}: lessons pull requests open from a branch there")
+        return
+    print(f"   your account cannot push to {repo}, so pull requests come from your own fork of it")
+    if interactive and confirm("   Make that fork now (runs `gh repo fork --remote`: origin becomes your fork, "
+                               "upstream stays this repository)? [Y/n]: "):
+        subprocess.run([gh, "repo", "fork", "--remote"], cwd=ROOT)
+    else:
+        notes.append(f"to share lessons, fork {repo} first: `gh repo fork --remote` in this checkout")
+
+
 def key_for_version(v):
     return "MINECRAFT_MODS_DIR_" + v.replace(".", "_")
 
@@ -246,6 +299,7 @@ class Asker:
         self.a, self.state, self.first = args, state, first_run
         self.proposed = {}          # key -> (value, origin)
         self.interactive = not (args.yes or args.check)
+        self.kept = 0               # earlier answers kept without asking (a re-run asks only new questions)
 
     def existing(self, key):
         return self.state["keys"].get(key)
@@ -258,6 +312,11 @@ class Asker:
         cur = rec["value"] if rec else None
         if rec and (not self.interactive):
             return cur                            # re-run + --yes/--check: keep every decision
+        if rec and not self.a.review:             # re-run, interactive: ask only what is NEW
+            shown = "(set)" if secret and cur else (cur if cur else "none")
+            print(f"  kept: {question.split(' (')[0].split('?')[0]} = {shown}")
+            self.kept += 1
+            return cur
         default = cur if rec else recommended
         if self.interactive and choices:
             shown = next((k for k, v in choices.items() if v == default), default)
@@ -303,6 +362,9 @@ def main():
     ap.add_argument("--remove", action="append", default=[], metavar="KEY")
     ap.add_argument("--output-repo", metavar="PATH",
                     help="where finished ports go (a git repo, any folder, or 'none'); sets MOD_OUTPUT_REPO")
+    ap.add_argument("--review", action="store_true",
+                    help="ask EVERY question again, with your earlier answers as the defaults "
+                         "(a plain re-run asks only questions it has not asked before)")
     ap.add_argument("--no-network", action="store_true", help="skip the git reachability probe")
     a = ap.parse_args()
 
@@ -507,13 +569,12 @@ def main():
           "   CurseForge is OPTIONAL. Without a key, a mod published ONLY on CurseForge cannot be found\n"
           "   or downloaded (you will be told when that happens); everything on Modrinth still works.\n"
           "   To get a free key: sign in at https://console.curseforge.com/ and open \"API keys\".\n"
-          "   You can add it later by re-running ./setup, or by editing CURSEFORGE_API_KEY in .env.local.")
+          "   You can add it later with ./setup --review, or by editing CURSEFORGE_API_KEY in .env.local.")
     ask.decide("CURSEFORGE_API_KEY", "", "CurseForge API key (or Enter to skip)", secret=True)
 
     # 7. Claude hookup ------------------------------------------------------------------------
     print("\n7. Claude Code")
-    print("   claude: " + ("found" if shutil.which("claude") else
-                           "not found -- install from https://claude.com/claude-code, then re-run"))
+    print("   claude: " + ("found" if has_claude else f"not found -- {hint('claude')}"))
     skills = sorted(p.name for p in (ROOT / ".claude/skills").iterdir() if (p / "SKILL.md").is_file())
     print(f"   skills in this checkout: {', '.join(skills)} (they load when Claude runs here)")
     mode = ask.decide("SKILLS_INSTALL", "project", "project (only in this checkout) or user (everywhere)?")
@@ -529,6 +590,18 @@ def main():
                 continue
             link.symlink_to(ROOT / ".claude/skills" / s)
             notes.append(f"linked ~/.claude/skills/{s}")
+
+    # 8. sharing what ports teach (migration add-on) ------------------------------------------
+    if path == "migrate":
+        print("\n8. Share what your ports teach\n"
+              "   Every migration ends with lessons -- an API change, a trap and its fix -- written WITHOUT\n"
+              "   the mod's name or code. Shared, they go to this repository as a pull request, so the next\n"
+              "   person's port is faster (and the pull request is reviewed before anything is merged).\n"
+              "   It needs the GitHub CLI (gh), signed in to your GitHub account. 'no' keeps them local.")
+        share = ask.decide("CONTRIBUTE_LEARNINGS", "yes", "Share your lessons as pull requests? (yes/no)",
+                           choices={"yes": "yes", "y": "yes", "no": "no", "n": "no"})
+        if share == "yes":
+            gh_setup(ask.interactive and not a.check, notes, a.no_network)
 
     # removals ---------------------------------------------------------------------------------
     removals = set()
@@ -570,6 +643,8 @@ def main():
     state["schema"] = SCHEMA
     STATE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
+    if ask.kept:
+        print(f"\nKept {ask.kept} earlier answer(s) without asking; ./setup --review goes through them all again.")
     print("\nReady." if not problems else "\nWritten, but fix the PROBLEM lines above before relying on it.")
     print("\nNext:" + ("" if has_claude else "  (install Claude Code first -- see the note above)"))
     if path == "migrate":

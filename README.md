@@ -16,7 +16,8 @@ cd mc-mod-version-upgrade && ./setup
 
 `./setup` finds your Minecraft install and says what is in it, recommends an answer to every
 question (Enter accepts it), and ends with a command to try. Re-running it is safe: it keeps your
-earlier decisions and only asks about new ones. `./setup --check` changes nothing.
+earlier decisions and only asks about new ones (`./setup --review` goes through them all again).
+`./setup --check` changes nothing.
 
 ### Migrate a mod to a newer Minecraft version — adds a JDK and several GB of disk
 When your favourite mod is stuck on an old version, port it: decompile, scaffold, rewrite through a
