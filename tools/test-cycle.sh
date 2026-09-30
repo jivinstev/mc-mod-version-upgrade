@@ -83,6 +83,9 @@ R99. **A test lesson** · **Pattern:** some old shape on Minecraft 1.21.1 and Ne
 ### new R
 R98. **A qualified lesson** · **Pattern (1.21.2+):** old · **Error (downport):** `x` · **Fix (→1.21.1):** new.
 
+### new D
+D99. **A combined label** · **Pattern → Error → Fix:** old → `SomeError` → new.
+
 ### augment M6
 · **AUGMENT — a test case:** the symptom is `Not a JSON object`; the fix is unchanged.
 EOF
@@ -96,7 +99,7 @@ if [ $code = 0 ] && [[ "$br" == learnings/* ]] && grep -q '^R99. \*\*A test less
    && git -C "$M" show HEAD --stat | grep -q 'catalog-census.tsv'; then
   ok "a valid lesson is committed on learnings/*, with the census updated"
 else bad "valid lesson (exit $code): $(tail -5 "$T/good.log")"; fi
-python3 - "$M/CATALOG.md" <<'PY' && ok "R99 lands inside section R, and the augment right after entry M6" || bad "placement wrong"
+python3 - "$M/CATALOG.md" <<'PY' && ok "R99 lands in section R, D99 in '## D.' (not '## Deeper…'), the augment right after M6" || bad "placement wrong"
 import re, sys
 L = open(sys.argv[1]).read().split("\n")
 r = next(i for i, l in enumerate(L) if l.startswith("R99."))
@@ -104,7 +107,9 @@ sec = max(i for i, l in enumerate(L[:r]) if l.startswith("## "))
 m6 = next(i for i, l in enumerate(L) if l.startswith("M6."))
 aug = next(i for i, l in enumerate(L) if "AUGMENT — a test case" in l)
 nxt = next(i for i in range(m6 + 1, len(L)) if re.match(r"^(M\d+\.|#{2,4} )", L[i]))
-sys.exit(0 if L[sec].startswith("## R.") and m6 < aug < nxt else 1)
+d = next(i for i, l in enumerate(L) if l.startswith("D99."))
+dsec = max(i for i, l in enumerate(L[:d]) if l.startswith("## "))
+sys.exit(0 if L[sec].startswith("## R.") and m6 < aug < nxt and L[dsec].startswith("## D.") else 1)
 PY
 grep -q "^CATALOG.md::R99	" "$M/docs/catalog-census.tsv" && ok "the census now inventories R99 (a later PR cannot silently drop it)" \
   || bad "R99 missing from the census"

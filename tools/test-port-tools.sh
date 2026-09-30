@@ -99,6 +99,31 @@ X
 elif [ -n "${CI:-}" ]; then bad "no javac in CI -- the resource test was NOT tested"
 else echo "  SKIP  no javac"; fi
 
+echo "4. codemods and the scan runner"
+C="$T/cm"; mkdir -p "$C/src"
+cat > "$C/src/A.java" <<'X'
+class A {
+  Object a = new ResourceLocation("mod:x");
+  Object b = new ResourceLocation("mod", name(1, 2));
+  Object c = new ResourceLocation(ns, "p" + f(a, b));
+}
+X
+python3 tools/srg-remap/mc121_codemod.py "$C/src" >/dev/null 2>&1
+{ grep -q 'a = ResourceLocation.parse("mod:x")' "$C/src/A.java" \
+  && grep -q 'b = ResourceLocation.fromNamespaceAndPath("mod", name(1, 2))' "$C/src/A.java" \
+  && grep -q 'c = ResourceLocation.fromNamespaceAndPath(ns, "p" + f(a, b))' "$C/src/A.java"; } \
+  && ok "mc121_codemod: 1 arg -> parse, 2 args -> fromNamespaceAndPath, commas inside nested calls ignored" \
+  || bad "ResourceLocation rewrite: $(cat "$C/src/A.java")"
+printf '@At(target = "Lnet/minecraftforge/common/ForgeHooks;onLivingDrops(Lnet/minecraftforge/event/ForgeEventFactory;)Z")\n' > "$C/B.txt"
+perl -p tools/srg-remap/forge_import_codemod.pl "$C/B.txt" > "$C/B.out" 2>/dev/null
+{ grep -q 'net/neoforged/neoforge/common/CommonHooks' "$C/B.out" && grep -q 'EventHooks' "$C/B.out" \
+  && ! grep -q minecraftforge "$C/B.out"; } && ok "forge_import_codemod rewrites the slash form (descriptors, mixin targets)" \
+  || bad "slash form: $(cat "$C/B.out")"
+L="$T/link"; mkdir -p "$L"; ln -s "$ROOT/tools" "$L/tools"
+out="$(bash "$L/tools/run-catalog-scans.sh" "$C" 2>&1)"; code=$?
+! grep -q "No such file" <<<"$out" && [ $code = 0 ] && ok "run-catalog-scans.sh works through a symlinked tools/ (the workspace layout)" \
+  || bad "run-catalog-scans via symlink (exit $code): $(head -3 <<<"$out")"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

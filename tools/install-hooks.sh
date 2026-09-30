@@ -6,7 +6,7 @@
 # authority, but by the time CI speaks the content is already on GitHub -- and for the one thing this
 # gate guards, that is too late.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd -P "$(dirname "$0")/.."   # -P: resolve a symlinked tools/ to the real checkout
 mkdir -p .git/hooks
 cat > .git/hooks/pre-push <<'HOOK'
 #!/usr/bin/env bash

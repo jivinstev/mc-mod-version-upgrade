@@ -47,11 +47,12 @@ Codemod the two-arg and colon forms; this appears hundreds of times in a big mod
 ## Entity data + save/load signatures
 - `defineSynchedData()` → `defineSynchedData(SynchedEntityData.Builder builder)`;
   inside, `builder.define(ACCESSOR, default)` instead of `this.entityData.define(...)`.
-- `Entity`/`BlockEntity` NBT hooks gained a `HolderLookup.Provider`:
-  `addAdditionalSaveData(CompoundTag)` → `(CompoundTag, HolderLookup.Provider)`
-  (entities) and BlockEntity `saveAdditional(CompoundTag)` →
+- **BlockEntity** NBT hooks gained a `HolderLookup.Provider`: `saveAdditional(CompoundTag)` →
   `saveAdditional(CompoundTag, HolderLookup.Provider)`, `load(CompoundTag)` →
   `loadAdditional(CompoundTag, HolderLookup.Provider)`.
+- ⚠ **Entity** hooks did NOT: `addAdditionalSaveData(CompoundTag)` / `readAdditionalSaveData(CompoundTag)`
+  are still one-argument on 1.21.1 (verify with `javap`; catalogue §G #27). Adding a Provider there makes
+  a method that overrides nothing -- it compiles, and the entity silently stops saving its fields.
 - `CompoundTag` (de)serialization of registry objects now often goes through codecs
   with the provider.
 

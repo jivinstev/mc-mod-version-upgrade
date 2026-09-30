@@ -6,6 +6,7 @@ templates/multi-version/build.gradle.template	MIT	tools/make-multiversion.sh
 templates/multi-version/tools/gametest_adapter.py	MIT	tools/make-multiversion.sh
 templates/multi-version/tools/prepare-sources.py	MIT	tools/make-multiversion.sh
 templates/multi-version/versions/26.2.renames.hand.tsv	MIT	tools/make-multiversion.sh
+templates/neoforge-mod/.gitignore	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
 templates/neoforge-mod/build.gradle	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
 templates/neoforge-mod/gradle.properties	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
 templates/neoforge-mod/gradle/wrapper/gradle-wrapper.jar	upstream:Apache-2.0 (Gradle wrapper)	cp -R templates/neoforge-mod (migrate-mod pipeline)

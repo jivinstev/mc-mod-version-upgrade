@@ -206,7 +206,9 @@ nothing calls, and vanilla's default runs instead — no error, no crash, wrong 
 `@Override` everywhere it is missing, compiles, lists every method that overrides nothing, and restores the
 files. Fix each one that was meant to override (correct its signature and keep the `@Override`); leave the
 ones that were never overrides. Measured on a blind replay of a small MCreator downport: 16 dead
-light-transparency overrides in 8 blocks, which the original port had shipped with.
+light-transparency overrides in 8 blocks, which the original port had shipped with. On a LIBRARY expect a longer
+list that is mostly legitimate: a library's base classes declare methods for dependants to call, and those
+override nothing by design. Read each hit rather than counting them.
 
 ## Step 4b — Compile-clean retrospective (MANDATORY, the moment the error count hits 0)
 The in-flight rule is "append every NEW pattern the moment you resolve it" — but under the pressure of a

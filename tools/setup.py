@@ -252,6 +252,8 @@ def main():
     ap.add_argument("--create-dirs", action="store_true",
                     help="create a missing mods folder named by --mods-dir (tier 1: folder only)")
     ap.add_argument("--remove", action="append", default=[], metavar="KEY")
+    ap.add_argument("--output-repo", metavar="PATH",
+                    help="where finished ports go (a git repo, any folder, or 'none'); sets MOD_OUTPUT_REPO")
     ap.add_argument("--no-network", action="store_true", help="skip the git reachability probe")
     a = ap.parse_args()
 
@@ -373,8 +375,24 @@ def main():
         cands = likely_output_repos()
         if cands:
             print("   looks like a ports repo: " + ", ".join(cands))
-        ask.decide("MOD_OUTPUT_REPO", cands[0] if cands else "", "output repo path (or 'none')",
-                   origin="detected" if cands else "default")
+        if a.output_repo is not None:                 # an explicit flag is the user's decision
+            v = "" if a.output_repo.strip().lower() == "none" else str(pathlib.Path(a.output_repo).expanduser())
+            if v and not pathlib.Path(v).is_dir():
+                problems.append(f"--output-repo {v} does not exist (create it, or `git init` it, first)")
+            else:
+                ask.proposed["MOD_OUTPUT_REPO"] = (v, "user")
+        else:
+            ask.decide("MOD_OUTPUT_REPO", cands[0] if cands else "", "output repo path (or 'none')",
+                       origin="detected" if cands else "default")
+        # always SAY where finished ports will go: a hand edit, a flag and a detection all end up here
+        prop = ask.proposed.get("MOD_OUTPUT_REPO")
+        out = prop[0] if prop else ((ask.existing("MOD_OUTPUT_REPO") or {}).get("value") or "")
+        if not out:
+            print("   destination: none -- finished ports stay in the workspace")
+        elif pathlib.Path(out).expanduser().joinpath(".git").exists():
+            print(f"   destination: {out} (a git repo: tools/finish-port.py commits on a port/<modid> branch)")
+        else:
+            print(f"   destination: {out} (not a git repo: tools/finish-port.py copies only)")
 
     # 6. registries ---------------------------------------------------------------------------
     print("\n6. Mod registries\n   Modrinth needs nothing.  CurseForge is OPTIONAL: it widens search; "
