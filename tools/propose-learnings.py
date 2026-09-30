@@ -32,7 +32,7 @@ IDENTITY IS REFUSED, NOT TRUSTED
 GATES (the same ones a reviewer runs): check-no-ip.py --strict, check-catalog-fidelity.py.
 Standard library only.  Exit codes: 0 done  1 refused (gate or format)  2 could not run.
 """
-import argparse, datetime, os, pathlib, re, shutil, subprocess, sys, tempfile
+import argparse, json, datetime, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "CATALOG.md"
@@ -304,6 +304,25 @@ def main():
             "A passed Gate C counts toward that target becoming tested (SUPPORTED_VERSIONS.md).\n\n"
             "Generated from a migration's retrospective. The IP gate ran with the ported mod's own identity\n"
             "added to the forbidden names, and the fidelity gate confirmed no existing entry was lost.")
+    # the port's cost joins the public corpus: one anonymised row from its COST.json (tools/port-cost.py)
+    cost_line = "Cost: not recorded (no COST.json -- tools/finish-port.py writes it; run it first)."
+    cost_file = port / "COST.json"
+    if cost_file.is_file():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("pc", ROOT / "tools/port-cost.py")
+        pc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pc)
+        rec = json.loads(cost_file.read_text())
+        row = pc.corpus_row(rec)
+        corpus = ROOT / "docs/port-costs.tsv"
+        with open(corpus, "a") as fh:
+            fh.write("\t".join(str(row[c]) for c in pc.CORPUS_COLS) + "\n")
+        git("add", "docs/port-costs.tsv")
+        cost_line = (f"Cost: {'$' + row['usd'] if row['usd'] else 'dollars not recorded by this build'}, "
+                     f"{row['active_hours']} h active / {row['wall_hours']} h wall, {row['output']:,} output tokens, "
+                     f"{row['cache_read']:,} cache reads, {row['models']} ({row['effort']} effort); "
+                     f"row added to docs/port-costs.tsv.")
+    body += "\n\n" + cost_line
     git("add", "CATALOG.md", "docs/catalog-census.tsv")
     r = git("commit", "-q", "-m", body, check=False)
     if r.returncode:

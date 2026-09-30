@@ -401,9 +401,16 @@ Two separate deliveries, to two separate places. Exact commands: `references/pip
    on the branch `port/<modid>` there; `--push` pushes it. With no destination configured it says so and
    leaves the port in the workspace. It REFUSES a destination inside this repository: ported mods are
    somebody else's code and this repository is public.
+   It first runs `tools/port-cost.py <modid>`, which reads this machine's Claude Code transcripts and
+   records what the port cost into `COST.json` and a `## Cost` section of `MIGRATION.md`: model, effort,
+   every token type, dollars where the transcript records them, wall and active time, and the port's size.
+   Do one port per session where you can: a session that also touched other mods is flagged as mixed,
+   and its whole cost is counted. Transcripts are deleted after 30 days by default, so for a port that
+   spans weeks, say so to the user and suggest `"cleanupPeriodDays": 365` in `~/.claude/settings.json`.
 2. **The lessons → this repository, as a PR.** `python3 tools/propose-learnings.py --modid <modid> --push`
    applies `catalog-additions.md` to `CATALOG.md` on a `learnings/*` branch, runs the IP and fidelity gates
-   with this port's own identity added to the forbidden names, and opens the PR. A port with no (b)/(c)
+   with this port's own identity added to the forbidden names, adds the port's cost as one row with no mod
+   identity to `docs/port-costs.tsv`, and opens the PR. A port with no (b)/(c)
    lessons skips this — say so in `MIGRATION.md`. If `.env.local` says `CONTRIBUTE_LEARNINGS=no`, run it
    WITHOUT `--push`: the lessons are committed locally and stay there; tell the user so, and that
    `./setup --review` turns sharing on.

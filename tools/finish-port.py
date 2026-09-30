@@ -162,6 +162,13 @@ def main():
                 print(f"finish-port: could not switch {dest} to {branch}:\n{r.stderr}", file=sys.stderr)
                 return 1
 
+    # record what the port cost (COST.json + MIGRATION.md) BEFORE copying, so it travels with the port.
+    # Never fatal: a missing transcript must not block delivering a finished port.
+    r = subprocess.run([sys.executable, str(ROOT / "tools/port-cost.py"), a.modid, "--workspace", str(ws)],
+                       capture_output=True, text=True)
+    print((r.stdout + r.stderr).rstrip() if r.returncode == 0 else
+          f"finish-port: cost not recorded ({(r.stderr or r.stdout).strip()})")
+
     if target.exists():
         shutil.rmtree(target)
     n = copy_tree(port, target)
