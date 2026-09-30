@@ -397,7 +397,7 @@ R19. **A `LayeredDraw.Layer` HUD overlay that relied on implicit blend renders O
 R20. **Custom core-shader `VertexBuffer` / `drawWithShader` render path draws nothing in 1.21** (a mod's own cached/instanced GPU render is invisible) · **Pattern:** the mod does its own GPU-buffered rendering — builds a `VertexBuffer` and draws it with a **custom core shader** via `buffer.drawWithShader(stack.last().pose(), RenderSystem.getProjectionMatrix(), RenderSystem.getShader())` (e.g. an instanced "render this huge mesh once, redraw the buffer" optimization). The code migrates faithfully (the call is unchanged from 1.20), the shader compiles, and the buffer builds without error — but **nothing draws** while a normal `MultiBufferSource` path of the same geometry works. It's a 1.21 render-pipeline behavior change around `drawWithShader`/core-shader uniforms/the pose-vs-camera-modelview split, **not** a migration typo. · **Runtime:** the buffered geometry is invisible; no crash, no log error (shader "could not find uniform" warnings for declared-but-unused uniforms are a red herring). · **Fix (open — see the repo issue):** likely the modelview passed to `drawWithShader` needs the camera view composed in (`new Matrix4f(RenderSystem.getModelViewMatrix()).mul(stack.last().pose())`), since 1.21's entity-render `PoseStack` is camera-relative-position only and `drawWithShader` applies solely the matrix you pass (the `MultiBufferSource` path applies `getModelViewMatrix()` automatically). **Interim workaround:** if the mod gates this behind a config (the boss mod's `vertexBufferRendering`), flip it off to fall back to the direct `MultiBufferSource` path (renders correctly; loses the caching perf). · **Why the earlier gates missed it:** custom shader + GPU buffer only render on a real client with the entity in view — Gate C `spawn`/`battle`, and only visible to a human.
 R21. **`AbstractArrow` ctor with `ItemStack.EMPTY` as `firedFromWeapon`** (`IllegalArgumentException: Invalid weapon firing an arrow`) · **Pattern:** porting a custom arrow's constructors to 1.21's new `AbstractArrow(EntityType, LivingEntity/double×3, Level, ItemStack pickupItem, ItemStack firedFromWeapon)` signatures (catalog §I), you fill the two new trailing `ItemStack` args with `ItemStack.EMPTY, ItemStack.EMPTY` — compiles clean, and the base `(EntityType,Level)` ctor path (spawn-egg/`type.spawn`) never touches them, so **Gate B stays green**. · **Runtime:** the first time the arrow is *fired by a mob's ranged attack* (`XEntity.shoot(...)` → `new XEntity(type, shooter, level, EMPTY, EMPTY)`), 1.21's `AbstractArrow` ctor runs `if (firedFromWeapon != null && firedFromWeapon.isEmpty()) throw new IllegalArgumentException("Invalid weapon firing an arrow")` — it accepts **null** (no weapon) or a **real** weapon, but not a non-null *empty* stack. Crashes the server thread ticking the attacker (MCreator "shoot projectile" procedures hit this en masse). · **Fix:** pass **`null`** for `firedFromWeapon` (the `@Nullable` "no weapon" case): `super(type, shooter, level, <pickup>, null)`. **Scan:** `grep -rn 'ItemStack.EMPTY, .*ItemStack.EMPTY)' src/main/java` in `extends AbstractArrow` files. · **Why the earlier gates missed it:** only fires on the *ranged-attack* path (a mob actually shooting), not on plain spawn — Gate C's `spawn`/`battle`. · **⚠️ AUGMENT — the `pickupItem` must ALSO be non-empty (a SECOND, save-time crash the original note got wrong):** leaving `pickupItem = ItemStack.EMPTY` (and/or `getDefaultPickupItem()` returning `ItemStack.EMPTY`) compiles + spawns + fights fine, but **crashes on SAVE** — `AbstractArrow.addAdditionalSaveData` does `pickupItemStack.save(provider)`, and `ItemStack.EMPTY.save()` throws `IllegalStateException: Cannot encode empty ItemStack`. Signature: `ReportedException: Saving entity NBT` → `EntityStorage: An Entity type <id> has thrown an exception trying to write state. It will not persist.` (a class-**R12** save crash, but specific to custom arrows). Fires on any world/chunk save while a projectile is airborne. **Fix:** give a non-empty pickup — `new ItemStack(Items.ARROW)` in both the ctor pickup arg **and** `getDefaultPickupItem()`; pickup mode is `DISALLOWED` by default so players never actually pick it up (verify no `Pickup.ALLOWED`). Caught by the **persistence round-trip GameTest** or a `battle` stress that runs long enough to hit an autosave/chunk-unload. **Scan:** `grep -rnE 'getDefaultPickupItem\(\).*ItemStack.EMPTY|ItemStack.EMPTY, null\)' src/main/java` in `extends AbstractArrow` files. (a ~380-file MCreator mob mod: 25 projectile entities.)
 
-R22. **A `BuildCreativeModeTabContentsEvent` handler that mutates the entry sets wrongly** (crash on creative-inventory open) · **Pattern (from an integration that REMOVES another mod's item from a tab):** `event.getParentEntries().removeIf(...)` / `getSearchEntries().removeIf(...)` — the natural-looking way to drop an entry. · **Runtime:** those `ObjectSortedSet<ItemStack>` are **read-only for structural edits** → `UnsupportedOperationException` → `ModLoadingException: <mod> encountered an error while dispatching BuildCreativeModeTabContentsEvent` the moment the creative inventory is opened (`CreativeModeInventoryScreen.<init>` → `tryRebuildTabContents`). Compiles clean; **also NOT caught by a headless GameTest** (creative tabs build client-side) **nor by a gauntlet that renders items via a custom screen** (only the REAL creative inventory triggers the event). · **Fix:** collect the target stacks by iterating the entry sets (reading is fine), then remove each via the event's own API: `event.remove(stack, CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS)`. (To ADD, use `event.accept(...)`.) · **Gate:** the smoke-harness gauntlet now has an **OPEN_CREATIVE** step that constructs the real `CreativeModeInventoryScreen`, firing every mod's tab handlers — that's what catches this + any tab-build/tab-render crash. (Battle of Lord's suppression of another mod's boss.) · **⚠️ AUGMENT — the MIGRATION harness needed it too:** `templates/neoforge-mod/test-templates/ClientBootSmokeTest.java.example` (and every already-migrated mod copied from it) had **no** OPEN_CREATIVE step, so a whole green Gate C could still ship an R22 crash. The step is now in the template + both Fabric gear mods' `mods/<modid>` harnesses: `mc.setScreen(new CreativeModeInventoryScreen(player, player.connection.enabledFeatures(), true))` after forcing the *server* player to `GameType.CREATIVE` (the screen only builds tab contents for a creative player), held open for the step's duration via `stepWantsScreen`. **Back-port it to any mod whose harness predates this.**
+R22. **A `BuildCreativeModeTabContentsEvent` handler that mutates the entry sets wrongly** (crash on creative-inventory open) · **Pattern (from an integration that REMOVES another mod's item from a tab):** `event.getParentEntries().removeIf(...)` / `getSearchEntries().removeIf(...)` — the natural-looking way to drop an entry. · **Runtime:** those `ObjectSortedSet<ItemStack>` are **read-only for structural edits** → `UnsupportedOperationException` → `ModLoadingException: <mod> encountered an error while dispatching BuildCreativeModeTabContentsEvent` the moment the creative inventory is opened (`CreativeModeInventoryScreen.<init>` → `tryRebuildTabContents`). Compiles clean; **also NOT caught by a headless GameTest** (creative tabs build client-side) **nor by a gauntlet that renders items via a custom screen** (only the REAL creative inventory triggers the event). · **Fix:** collect the target stacks by iterating the entry sets (reading is fine), then remove each via the event's own API: `event.remove(stack, CreativeModeTab.TabVisibility.PARENT_AND_SEARCH_TABS)`. (To ADD, use `event.accept(...)`.) · **Gate:** the smoke-harness gauntlet now has an **OPEN_CREATIVE** step that constructs the real `CreativeModeInventoryScreen`, firing every mod's tab handlers — that's what catches this + any tab-build/tab-render crash. (the builder mod's suppression of another mod's boss.) · **⚠️ AUGMENT — the MIGRATION harness needed it too:** `templates/neoforge-mod/test-templates/ClientBootSmokeTest.java.example` (and every already-migrated mod copied from it) had **no** OPEN_CREATIVE step, so a whole green Gate C could still ship an R22 crash. The step is now in the template + both Fabric gear mods' `mods/<modid>` harnesses: `mc.setScreen(new CreativeModeInventoryScreen(player, player.connection.enabledFeatures(), true))` after forcing the *server* player to `GameType.CREATIVE` (the screen only builds tab contents for a creative player), held open for the step's duration via `stepWantsScreen`. **Back-port it to any mod whose harness predates this.**
 
 R23. **`deployToMods` overwriting the jar in place while Minecraft is RUNNING** (corrupts the live session) · **Pattern:** the obvious deploy task — `copy { from("build/libs/<jar>"); into(modsDir) }` — writes the new jar directly over the old one. · **Runtime:** a running game holds its mod jars **open** and reads entries **lazily**, so overwriting mid-session makes it read a half-written zip: `java.util.zip.ZipException`, `ClassNotFoundException`/`NoClassDefFoundError` for classes that loaded fine a minute earlier, missing/purple textures. The symptoms look like a *code* bug, which is what makes it expensive — you go hunting in the mod instead of realising the jar under the running game changed. Caught by no gate (it's a deploy-time, game-is-running hazard). · **Fix:** deploy **atomically** — `Files.copy` to a temp file *in the target dir* (same filesystem, so the move can be atomic), then `Files.move(..., ATOMIC_MOVE, REPLACE_EXISTING)` with a fallback to a plain `move` on `AtomicMoveNotSupportedException`, deleting the temp in a `finally`. The game then sees either the whole old jar or the whole new one — never a partial file. Also guard: mods dir missing/not-a-directory → warn + skip; built jar absent → fail loudly. **Both templates ship this** (`templates/neoforge-mod`, `templates/smoke-harness`), so newly-migrated mods inherit it; already-migrated `mods/*/build.gradle` still carry the plain `copy`. **Still restart Minecraft** to load a new build — atomicity prevents corruption, it doesn't hot-swap.
 
@@ -414,9 +414,9 @@ for everything registered after it — the mod does not load · **Fix:** `Proper
 `setId` as the 1.21.4 → 1.21.1 *downport* step, so going up it is mandatory. · **In a §W tree it is a
 compat pair, not a rename rule**, because the argument has to be constructed per site from that
 site's own registry name: a helper that stamps the id on the new target and returns the Properties
-unchanged on the old one. (Battle of Lord: 84 block + 131 item sites over 26 files.)
+unchanged on the old one. (the builder mod: 84 block + 131 item sites over 26 files.)
 · ⚠ **AUGMENT — MCreator builds the Properties where the registry name is NOT in scope, and
-guessing it from the class name is wrong.** Battle of Lord's sites all sit in a registration file
+guessing it from the class name is wrong.** The builder mod's sites all sit in a registration file
 with the name beside them; an MCreator mod's do not. Each item is
 `REGISTRY.register("mbb", () -> new MbbItem())`, and `MbbItem`'s own no-argument constructor calls
 `super(new Properties().durability(100))` — a file that has never heard of the string `"mbb"`.
@@ -913,7 +913,7 @@ or was it never there?"
 above — *a port's first commit IS the original, so no hits means the original never registered it either* —
 holds only when that first commit is in the history you are actually searching. Claude Code on the web clones
 **shallow**: measured 2026-08-25, this repo arrived with **87 commits** and a `.git/shallow` present, and the
-sibling Mod Repo arrived with **70 of its 411**. Against a truncated history the search returns no hits for an
+sibling content mod's repo arrived with **70 of its 411**. Against a truncated history the search returns no hits for an
 id the original really did register, so the census verdict inverts — a genuine migration loss gets written off
 as one of the five benign shapes, in the one direction that looks like good news. That is strictly worse than
 the same bug in the sibling repo's wish corpus (shallow: 68 commits examined, **0** wishes mined; complete:
@@ -1071,7 +1071,7 @@ runtime is 21.1.228, so one unrelated third-party mod aborted mod loading for al
 faster and strictly more informative — anything the report then flags is *our* migration's doing rather than
 some third-party mod's own quirk.
 
-## V. THE ERA JUMP: 1.21.x → 26.x (calendar versioning) — measured on the Battle of Lord port
+## V. THE ERA JUMP: 1.21.x → 26.x (calendar versioning) — measured on a ~460-file builder mod's port
 > **Axis:** version-family, but a *bigger* one than §G's 1.20→1.21. Mojang left the `1.x`
 > scheme entirely: after **1.21.11** (2025-12-09) came **26.1** (2026-03-24), 26.1.1, 26.1.2,
 > and **26.2** (2026-06-16). NeoForge follows with a matching line (`26.2.0.75`), exactly as
@@ -1148,7 +1148,7 @@ hand-picked and is deliberately never auto-applied, and a `.removed.txt` (2636) 
 · **Fix:** `net.minecraft.resources.Identifier`, and it is a **pure type rename**: `javap`
 confirms the statics are identical — `fromNamespaceAndPath`, `parse`, `withDefaultNamespace`,
 `tryParse`, `getNamespace`, `getPath`, `CODEC`, `STREAM_CODEC`. So a whole-tree
-`ResourceLocation`→`Identifier` codemod is correct with **no call-site reshaping** (BoL: 433
+`ResourceLocation`→`Identifier` codemod is correct with **no call-site reshaping** (the builder mod: 433
 occurrences over 88 files). `ResourceKey` is unchanged and stays in `net.minecraft.resources`.
 
 **V5. 🔴 The `@GameTest` ANNOTATION is gone — tests became data-driven `GameTestInstance`s.**
@@ -1159,7 +1159,7 @@ occurrences over 88 files). `ResourceKey` is unchanged and stays in `net.minecra
 *bodies* of the tests port cleanly; what is gone is the annotation-driven discovery, replaced by
 `GameTestInstance` / `GameTestInstances` / `FunctionGameTestInstance` / `BlockBasedTestInstance`
 registered as data. **Budget this explicitly**: it is not one fix, it is a harness rewrite that
-touches every `@GameTest` file (BoL: 56), and until it is done **Gate B cannot run at all on
+touches every `@GameTest` file (the builder mod: 56), and until it is done **Gate B cannot run at all on
 26.x** — i.e. the very gate this repo leans on hardest is the one the era jump takes away first.
 Port the harness before porting the mod, or the port has no runtime gate.
 
@@ -1207,7 +1207,7 @@ run under Mesa llvmpipe (OpenGL) is therefore testing what the default user actu
 
 **V8. THE SCOPING NUMBER, and why it is the useful one.** Before estimating an era jump, diff the
 mod's own import set against the target's real classpath — it converts "10 Minecraft versions of
-change" into a count. Measured for Battle of Lord (458 main source files, ~81k LOC, **0 mixins**),
+change" into a count. Measured for a builder mod (458 main source files, ~81k LOC, **0 mixins**),
 of **362 distinct `net.minecraft`/`net.neoforged` imports**:
 
 | bucket | count | share | what it costs |
@@ -1245,7 +1245,7 @@ is published on Modrinth and returns **404 on the cloudsmith maven** the 1.21.1 
 port needs a different acquisition path for the same dependency. And note the major bump
 (4.8.4 → 5.5.4) is its own API migration on top of §138's 4.7→4.8 — see §V18.
 · **Acquisition, resolved:** the 26.2 jar is now **pinned by sha1 in
-`battle-of-lord/testmods/lockfile-26.2.tsv`** and fetched by `./tools/fetch-testmods.sh --mc 26.2`
+`<consuming-mod>/testmods/lockfile-26.2.tsv`** and fetched by `./tools/fetch-testmods.sh --mc 26.2`
 into `testmods/26.2/`. Point a port's `compileOnly`/`runtimeOnly` at that file rather than at a
 maven coordinate that does not exist. **Five of the fourteen queued ports need it** (a mob-framework library,
 a ~390-file mob mod, a ~380-file MCreator mob mod, a ~660-file GeckoLib mob mod, an aquatic mob mod), so the package map §V18 asks for
@@ -1263,7 +1263,7 @@ builder mod this is the single biggest bucket.**
 `Blocks.CONCRETE.white()`, `Blocks.TERRACOTTA.lime()`, `Items.WOOL.red()`, `Items.DYE.blue()`
 (also `DYED_BUNDLE`, `HARNESS`, `GLAZED_TERRACOTTA`, `CONCRETE_POWDER`, `SHULKER_BOX`, the wools,
 carpets, beds, candles, banners, stained glass and panes). **Generate the 16 × families rows into
-the rename table** — that is 224 block + 240 item rows for BoL, and hand-fixing them is both
+the rename table** — that is 224 block + 240 item rows for the builder mod, and hand-fixing them is both
 unreviewable and where the next bug comes from. ⚠️ **Longest-key-first matching is load-bearing**:
 without it `WHITE_TERRACOTTA` clips `WHITE_GLAZED_TERRACOTTA` and `CONCRETE` clips
 `CONCRETE_POWDER`, producing `Blocks.CONCRETE.white()_POWDER` — which does not compile, so you find
@@ -1320,7 +1320,7 @@ decompiled 26.x source; do not map by how the constant reads.
 · **Fix:** `.requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))`. The five constants live on
 `Commands`, are typed `net.minecraft.server.permissions.PermissionCheck`, and map the old levels in
 order: `LEVEL_ALL`(0) · `LEVEL_MODERATORS`(1) · `LEVEL_GAMEMASTERS`(2) · `LEVEL_ADMINS`(3) ·
-`LEVEL_OWNERS`(4). A whole-lambda regex handles it (BoL: all 19 OP-gated commands in one rule).
+`LEVEL_OWNERS`(4). A whole-lambda regex handles it (the builder mod: all 19 OP-gated commands in one rule).
 
 **V16. `Player.displayClientMessage(text, boolean)` split — the boolean now picks a METHOD, so NO
 rename can express it.**
@@ -1442,10 +1442,10 @@ not been through this is shipping invisible mobs on 26.x.
 and the evidence was in a log nobody diffed.** Only the boss mod (and a ~660-file GeckoLib mob mod)
 carried the relocation; the mob-framework library, the ~390-file mob mod and the MCreator mob mod shipped to `releases/26.2/`
 with **zero** files under `geckolib/models`, behind green gates on both targets. It surfaced from
-Battle of Lord's 26.2 Gate C logs — `Unable to find model: examplemod:geo/example_mob.geo.json` ×316,
-`othermod:geo/example_golem.geo.json` ×230 — with BoL's OWN airplane, cable car and nine vehicles
-in the same list, because BoL is a GeckoLib mod too. §S2 again: a finding recorded as a sweep result
-is not a control. **Now wired**: every `mods/*/tools/gatec.sh` (and BoL's shared
+the builder mod's 26.2 Gate C logs — `Unable to find model: examplemod:geo/example_mob.geo.json` ×316,
+`othermod:geo/example_golem.geo.json` ×230 — with the builder mod's OWN airplane, cable car and nine vehicles
+in the same list, because the builder mod is a GeckoLib mod too. §S2 again: a finding recorded as a sweep result
+is not a control. **Now wired**: every `mods/*/tools/gatec.sh` (and the builder mod's shared
 `tools/lib/gate-c-env.sh`, as an EXIT trap over every launcher) turns a PASS into a FAIL when the log
 holds any `Unable to find (model|animation)` line. · **Two traps in applying it:** an mc26 OVERLAY is
 not run through the rename rows (§W8), so a GeckoLib model class that is itself an overlay keeps its
@@ -1514,9 +1514,9 @@ free and only the wiring is missing.
 · **So do not rewrite the test files.** Keep the shared tree annotated (which is what the 1.21.1 target
 needs anyway), and run a generator over the *prepared* 26.x copy that strips the three dead annotations
 plus their imports and emits one registrar class from what those annotations said. One source of truth,
-and a test added later is wired with no extra work. (BoL: 241 tests across 56 files, `tools/gametest_adapter.py`.)
+and a test added later is wired with no extra work. (the builder mod: 241 tests across 56 files, `tools/gametest_adapter.py`.)
 · **Two guards the generator must have, both learned the hard way.** A test id must be
-`<class>/<method>`, **not** the bare method name — 9 of BoL's 241 names are reused across classes, and
+`<class>/<method>`, **not** the bare method name — 9 of the builder mod's 241 names are reused across classes, and
 a duplicate id silently shadows one test with another rather than failing. And a `Identifier` path
 accepts only `[a-z0-9_./-]`, so **camelCase method names must be snake_cased** and then asserted with
 `re.fullmatch` — an illegal id throws at registration, i.e. at mod load, long after the build was green.
@@ -1598,7 +1598,7 @@ no setter** (`Hud.toggle()` / `isHidden()`), so `mc.options.hideGui = true` has 
 single-expression equivalent and must be a compat pair — and the pair must **read before
 toggling**, because a bare `toggle()` on an already-hidden HUD turns it back *on* and the
 photograph comes back with the hotbar across it. `Minecraft.getMainRenderTarget()` is gone too:
-the target is `mc.gameRenderer.mainRenderTarget()`. Measured on Battle of Lord: 65 + 12 + 22
+the target is `mc.gameRenderer.mainRenderTarget()`. Measured on the builder mod: 65 + 12 + 22
 sites, i.e. **a quarter of the whole port's client-side error count is these four members.**
 
 **V29. 🔴 `SavedData` → `SavedDataType` + a `Codec` — and the port NOT to take.**
@@ -1617,7 +1617,7 @@ when a player's world is already damaged. Instead make the codec an **adapter ov
 CompoundTag()))`. The tag round-trips untouched, the hand-written load/save do the work, the
 on-disk format is unchanged, and there is no rewrite to get wrong. Pass `null` for the provider
 only after checking no store reads it; one that does needs the level-sensitive
-`SavedDataType.Factory` overload instead. (Battle of Lord: six stores, one ~40-line helper.)
+`SavedDataType.Factory` overload instead. (the builder mod: six stores, one ~40-line helper.)
 
 **V30. `EntityType.create(Level)` gained an `EntitySpawnReason`, and the reason is INERT — but
 `canSpawn` is not.** Read the 26.2 body before agonising over which reason to pass: `create`
@@ -1670,7 +1670,7 @@ longest-key-first ordering trap as V11: rewrite `WAXED_` and `OXIDIZED_` **befor
 symbol: calculateRGBColor` · **Fix, and read both bodies before believing the name:** 1.21.1's
 returns `0xFF000000 | blue << 16 | green << 8 | red` — **ABGR**, the byte order the map TEXTURE
 wants — while 26.x's returns `ARGB.scaleRGB(ARGB.opaque(col))`, genuinely ARGB. Callers that
-compensated for the old packing (this repo's Mod Repo had one, after a red shopfront banner rendered
+compensated for the old packing (a ~840-file content mod had one, after a red shopfront banner rendered
 blue) are left **double-swapping** by a bare rename, with every gate green, because a map full of the
 wrong colours is still a map full of colours. Put it in a §W5 pair whose method answers the QUESTION
 ("what colour is this, as 0xRRGGBB") and let each side pack it its own way. · **The general test:** a
@@ -1836,7 +1836,7 @@ ints left the constructor and live only in that JSON.
 way. The 1.21.1 side loops the table into `ItemColor` lambdas; the 26.2 side registers one
 `ItemTintSource` per layer and the JSON points at it. One table, two bindings, and the colours are
 reviewable in one place instead of scattered across a dozen client classes.
-· **Doing that found a handler that had never been subscribed to anything.** BoL's battle-egg
+· **Doing that found a handler that had never been subscribed to anything.** The builder mod's battle-egg
 `registerItemColors` had existed since the egg landed and was on no bus, so the egg had been
 rendering untinted the whole time — the §S4 shape exactly: javac checks names and types, never
 whether anything calls you.
@@ -1852,9 +1852,9 @@ nothing declared it anywhere. **From 1.21.2 it is DATA**: `ClientItemInfoLoader`
 the item up in that map. The miss path is explicit in the bytecode —
 `LOGGER.warn("Missing item model for location {}")` then `return this.missingModels.item()`. There
 is **no fallback to the same-id model.**
-· **Measured, and the shape of the number is the proof:** Battle of Lord shipped **231 item models
+· **Measured, and the shape of the number is the proof:** The builder mod shipped **231 item models
 and zero client item definitions**, and its 26.2 client logged **exactly 231** `Missing item model
-for location battleoflord:…` lines against **0** on 1.21.1, same commit. Every item in the mod was
+for location examplemod:…` lines against **0** on 1.21.1, same commit. Every item in the mod was
 the magenta cube.
 · **Why nothing caught it, and this is the reusable part.** Gate C's asset check asserted
 `models=6/6` — and it was *right*: the model resources exist. What had gone was the **binding**, and
@@ -1970,7 +1970,7 @@ parse correctly on both**. That is why a multi-version mod usually needs no per-
 TYPES on the two versions and is required on both. Measured: biome `carvers` is a **map** keyed by
 carving step on 1.21.1 and a **list** on 26.2. No value parses twice, and omitting it is not open
 either. Such files go to a per-version **resource overlay** — the resource-side twin of
-`src/mc21` vs `src/mc26` — and only those files; everything else stays shared. (Battle of Lord:
+`src/mc21` vs `src/mc26` — and only those files; everything else stays shared. (the builder mod:
 35 biomes overlaid, ~250 other data files shared.)
 
 ⚠ **There are TWO exceptions, and the second one is far bigger than the first.** The one above is a
@@ -2075,7 +2075,7 @@ override `preRemoveSideEffects` to call it, and leave the block's (now inert) 1.
 `getBlockEntity(pos)` guard is already null and makes it a no-op on 26.x, so exactly one of the two fires
 on each version with no version test in shared code. Comment the guard, or the next reader deletes it as
 redundant and breaks 26.x. · **Why no gate above Gate B can catch it:** the override is called, with the
-right arguments, and returns normally. Battle of Lord's cable car left its rope and its car in the sky
+right arguments, and returns normally. The builder mod's cable car left its rope and its car in the sky
 when a tower was mined — and because the orphan car then hung around, **two OTHER tests in neighbouring
 plots failed instead**, one reporting a car parked at the wrong station and one reporting a car it had
 just refused to create. Three red tests, one cause, and none of the three messages was about removal.
@@ -3307,8 +3307,8 @@ binds to 26.2's `Map<MemoryModuleType<?>, MemorySlot<?>>` field by descriptor, a
 sees the accessor's declared type, never vanilla's, so javac happily accepts an `Optional` put. ·
 **Fix:** retype the accessor per target (one rename row) and route the one write through a §W5 pair
 whose 26.2 half puts `MemorySlot.create()` (26.2's own "known, nothing stored"). · **The audit now
-catches the shape** — §X27 fault #22. And the gate that found it was, again, a DEPENDENT's: Battle of
-Lord's mall builds a crowd of villagers, so two of its mall tests failed as "0 of 97 shops have a
+catches the shape** — §X27 fault #22. And the gate that found it was, again, a DEPENDENT's: the builder
+mod's mall builds a crowd of villagers, so two of its mall tests failed as "0 of 97 shops have a
 shopkeeper". Nothing in either message names a brain.
 
 **V90. 🔴 `Screenshot.grab` completes ASYNCHRONOUSLY on 26.x — a photo harness that counts frames the
@@ -3323,7 +3323,7 @@ frame and hands the readback to the GPU device, so the callback fires when the c
 FLIGHT — increment before `grab`, decrement in its callback — and report busy until the count is zero,
 with a bounded wait so a lost callback fails loudly rather than hanging. That is correct on BOTH
 targets (on 1.21.1 the count simply returns to zero inside the same call), so it is shared code, not a
-compat pair. · **Measured on Battle of Lord's `PhotoShoot`**: every single-shot caller on 26.2 reported no
+compat pair. · **Measured on the builder mod's `PhotoShoot`**: every single-shot caller on 26.2 reported no
 photograph over a render that was fine. · **While you are in there:** set the time of day before
 each shot (`time set 6000` is valid on both versions). A tour through thirty-four worlds crosses night,
 and 21 of 68 frames came back black and failed the darkness gate for a reason nothing to do with the mod.
@@ -3336,7 +3336,7 @@ each `dimension_type` opting in with `"neoforge:custom_skybox": "<id>"` (clouds 
 via `neoforge:custom_clouds` / `neoforge:custom_weather_effects`) · **Runtime:** none. A dimension
 without the attribute — above all one shipped by a DEPENDENT mod whose data was written for 1.21.1,
 where the binding was the `effects` id — renders a vanilla sky disc from its biome's `SKY_COLOR`,
-which on an airless world is flat black with no stars; Battle of Lord's 34 worlds did exactly this
+which on an airless world is flat black with no stars; the builder mod's 34 worlds did exactly this
 over a space-exploration mod's (~550 files) own correctly-bound planets · **Fix:** read out of `LevelExtractor`: NeoForge resolves
 `levelRenderState.customSkyboxRenderer` / `customCloudsRenderer` / `customWeatherEffectRenderer`
 from the attributes and then posts `ExtractLevelRenderStateEvent` on the GAME bus, so a listener can
@@ -3357,7 +3357,7 @@ see-through; and do not copy vanilla's `-90 Y` / `starAngle` rotation onto a mod
 > **Axis:** build architecture. Everything above ports a mod *from* A *to* B and leaves A behind.
 > This is what to do when the mod must keep running on **both** — which is the normal case for a
 > mod someone actually plays, because the new Minecraft lands months before the mod pack does.
-> Built and measured on Battle of Lord (458 files, 1.21.1 + 26.2). **Scaffold + scripts:
+> Built and measured on a builder mod (458 files, 1.21.1 + 26.2). **Scaffold + scripts:
 > `templates/multi-version/`** — copy them rather than rewriting the pipeline per mod.
 
 **W1. The two kinds of difference are not the same kind of problem, and conflating them is what
@@ -3367,7 +3367,7 @@ produces per-version `#if`-style rot.**
   alias, so one shared `.java` cannot name both. This is **data**: a rename table per target.
 · **REAL** — a changed signature, a split method, a rewritten render call. This is **code**: an
   overlay file per target that REPLACES the shared file wholesale.
-Everything else — measured at **86% of BoL's imports** (V8) — is written once and shared.
+Everything else — measured at **86% of the builder mod's imports** (V8) — is written once and shared.
 **The pipeline:** shared tree → apply this target's rename table → let this target's overlay replace
 whole files → compile. `build/generated/sources/<overlay>/java` becomes the only `srcDirs`.
 
@@ -3382,7 +3382,7 @@ precise about rather than quietly dropping: the canonical table stops being empt
 helper's call sites must be rewritten for *both* targets. The honest form of the check is then
 **"the canonical target's diff against `src/main/java` contains nothing but compat-helper
 routing"** — which is still one grep, and still fails loudly if a 26.x-shaped rule ever leaks into
-the canonical table. BoL: 101 rewrites, all of them `Msg.tell` / `Nbt.getUuid` / `Nbt.putUuid`.
+the canonical table. The builder mod: 101 rewrites, all of them `Msg.tell` / `Nbt.getUuid` / `Nbt.putUuid`.
 
 **W3. Version data belongs in a file per target, not in `if (mc == …)` in `build.gradle`.**
 `versions/<target>.properties` carries `minecraft_version`, `minecraft_version_range`, `neo_version`,
@@ -3467,7 +3467,7 @@ comment saying so, because the compile cannot distinguish a faithful mapping fro
 and six months later nobody remembers which rows were which.
 
 **W7. 🔴 MEASURE THE DUPLICATION BEFORE YOU WRITE RULES — the cheapest errors to delete are the
-ones that are the same error N times.** Battle of Lord's 25 Gate-C client tests each carried
+ones that are the same error N times.** The builder mod's 25 Gate-C client tests each carried
 their own copy of the same seven-line world-creation block, and 26.x changes three separate
 things inside it (`LevelSettings` lost its `GameRules` argument and folded hardcore+difficulty
 into a `DifficultySettings` record; `GameRules` lost its no-arg constructor; `createFreshLevel`
@@ -3630,7 +3630,7 @@ when it finally honours it: `archivesName = "<mod>-mc<version>"` (§W3) means a 
 staged BEFORE it went multi-version now has TWO jars in `releases/<mc>/` — the legacy
 `examplelib-1.2.0.jar` and the new `examplelib-mc1.21.1-1.2.0.jar` — both declaring the same
 `modId`.
-· **That is not cosmetic:** `battle-of-lord/tools/fetch-testmods.sh` copies everything in the
+· **That is not cosmetic:** a consuming mod's `tools/fetch-testmods.sh` copies everything in the
 folder and skips only what the lockfile pins, so the test-mod directory ends up with two jars
 claiming one mod and **FML refuses to start**. The script's own comment records that failure for
 a config library; the rename manufactures it again from the other direction, and the port that causes
@@ -3660,7 +3660,7 @@ jar for each. A finding about the repository has to be read from the repository,
 own tooling has just modified — X8b's stale-tree rule pointed at artifacts instead of source.
 
 **W10d. ⚠ AUGMENT to W10: a script that uses the target for its OWN decisions has not forwarded it.**
-The Gate B wrapper in the Mod Repo's 1.21.4 port read `MC=1.21.4` to pick its label and to refuse the
+The Gate B wrapper in a ~840-file content mod's 1.21.4 port read `MC=1.21.4` to pick its label and to refuse the
 Create tiers (Create has no 1.21.4 build), and never passed `-Pmc` to Gradle. The run printed
 `1.21.4 has no Create` above a log that said `Minecraft 1.21.1`, and a test written to go red on 1.21.4
 went green, because it ran on the target where the bug does not exist. · **Two checks, and the second
@@ -3672,7 +3672,7 @@ the cheap alarm.** Before believing that a fix was unnecessary, check that the r
 on the target you meant (§W11's per-target run directory name is one command away:
 `ls run/ | grep <target>`).
 
-· ⚠ **AUGMENT — FIXING ONE SCRIPT IS FINDING ONE SCRIPT (Mod Repo 1.21.4 port, T11.6–T11.8).** After
+· ⚠ **AUGMENT — FIXING ONE SCRIPT IS FINDING ONE SCRIPT (the content mod's 1.21.4 port, T11.6–T11.8).** After
 `gate-b.sh` was fixed, five more scripts had the identical defect, and each was found separately,
 days apart, by a run that looked fine: the image builder (`deploy/build.sh` built and baked the
 default jar whatever `MC` said), the e2e harness (all three arms), the **upgrade rehearsal**
@@ -3697,7 +3697,7 @@ and removes all three.
 · ⚠ **AUGMENT — the build honouring W11 is not the rig honouring it.** Any script that WRITES into a
 run directory before the build launches (a `server.properties` with a private port, an
 `options.txt`, a whitelist) has to compute the same per-target name the build uses, or it writes
-into the directory the build no longer reads. Measured on the Mod Repo's 1.21.4 port: the
+into the directory the build no longer reads. Measured on the content mod's 1.21.4 port: the
 stock-join gate's server helper wrote `server-port=25681` into `run/server-stockjoin`, the build ran
 from `run/server-stockjoin-mc1.21.4`, the server came up on vanilla's default 25565, and the gate
 reported **"no join — deployment 1 is closed"** over a server that was fine. · **Two fixes, and the
@@ -3707,9 +3707,9 @@ retyping it. Then ask the RUN whether it took the setting: the helper now reads
 mismatch. A config file you wrote is your intention; the log line is what happened.
 
 **W15. 🔴 A COMPANION JAR BUILT FOR ANOTHER MINECRAFT IS A BOOT CRASH THAT READS AS YOUR PORT'S.**
-A dev rig that attaches companion mods automatically (an integration target, a library, the Mod
-Repo's own content mod) attaches them to EVERY target unless told otherwise, and a companion has
-exactly one Minecraft. Measured on the Mod Repo's 1.21.4 port: Gate C's launcher attached Create
+A dev rig that attaches companion mods automatically (an integration target, a library, the
+content mod's own companion) attaches them to EVERY target unless told otherwise, and a companion has
+exactly one Minecraft. Measured on the content mod's 1.21.4 port: Gate C's launcher attached Create
 (1.21.1 only) to the 1.21.4 client, which died before the title screen with
 `Error during pre-loading phase: Mod ponder requires minecraft 1.21.1` — a jar-in-jar dependency's
 name, not Create's, in a log whose last lines were about THIS mod. It reads as "the 1.21.4 client is
@@ -3741,7 +3741,7 @@ found, never what it stopped finding.
 **W17. 🔴 FLIPPING THE DEFAULT TARGET LEAVES `build/` FULL OF THE OLD TARGET'S CLASSES — A RED GATE A
 OVER CORRECT SOURCE.** Under §W the default target builds into `build/` and every other target into
 `build-mc<t>/`. Flip the default and `build/` still holds the old default's classes, and Gradle's
-up-to-date checks judge the new target's inputs against them. Measured on the Mod Repo's flip
+up-to-date checks judge the new target's inputs against them. Measured on the content mod's flip
 (1.21.1 → 1.21.4): the first Gate A on the new default went red with **3 failures** —
 `NoSuchMethodError` from classes compiled against 1.21.1 and an `IOException` from a resource the
 new build had not re-processed — on source that was correct and compiled green in a clean clone. It
@@ -3757,14 +3757,14 @@ merge gate that ran one target's full suite becomes one run per target. The comp
 
 **W18. 🔴 A VERSION FACT HARDCODED OUTSIDE THE BUILD SURVIVES THE PORT — `pack_format` 48 IN A 1.21.4
 PACK.** The port corrects everything the compiler sees. A number typed into a TOOL does not move: a
-bundled external compiler (the Mod Repo's CBScript fork, Python) and a Java pack writer both wrote
+bundled external compiler (the content mod's CBScript fork, Python) and a Java pack writer both wrote
 `"pack_format": 48` on 1.21.4, where the number is **61**. Nothing failed. A data pack with an older
-number still loads, flagged "made for an older version". The Mod Repo's install-time rewrite (which
+number still loads, flagged "made for an older version". The content mod's install-time rewrite (which
 puts every stored pack into this build's dialect) then corrected it on the way into the world, so
 every gate stayed green and no test reached the writer. · **Fix:** in Java, read the number from
 the running game: `SharedConstants.getCurrentVersion().getPackVersion(PackType.SERVER_DATA)` (the
 same for `CLIENT_RESOURCES`). An external tool cannot do that, so the caller passes the target in
-(an env var, as the Mod Repo does with `CBSCRIPT_MC`), the tool maps it through a table
+(an env var, as the content mod does with `CBSCRIPT_MC`), the tool maps it through a table
 (1.21/1.21.1 → 48, 1.21.2/1.21.3 → 57, 1.21.4 → 61), and a test drives the REAL writer rather than
 the table. The writer test is red on the old code (48 ≠ 61). **Sweep:** `catalog-scans.md` §W18. A
 rewrite at install is a backstop, and while it exists the bug stays invisible.
@@ -3773,13 +3773,13 @@ rewrite at install is a backstop, and while it exists the bug stays invisible.
 > **Axis:** instrument quality. Every large migration here is driven by mass rewrites, and this
 > section is the failure mode they share: the rewrite *runs*, reports nothing, changes nothing, and
 > the resulting compile errors look like unported API rather than a broken tool. Three distinct bugs
-> of this shape landed in one afternoon on the BoL port; the fix for all three was the same
+> of this shape landed in one afternoon on the builder mod's port; the fix for all three was the same
 > **detector**, not the same patch.
 
 **X1. 🔴 BUILD THE DEAD-RULE DETECTOR FIRST.** After a run, report every rule that matched **zero**
 times. A rename table is a set of assertions about the source; a rule that never fires is either
 (a) genuinely unused, or (b) malformed — and those are indistinguishable from the output otherwise.
-BoL's detector found bugs X2, X3 and X4 within minutes of first running, after two of them had
+The builder mod's detector found bugs X2, X3 and X4 within minutes of first running, after two of them had
 already survived a code review and a full compile. Add a marker (`#!exhaustive`) for blocks that are
 *generated* and expected to be mostly dead — 400 generated colour rows will otherwise drown the one
 warning you needed to see.
@@ -3837,7 +3837,7 @@ on a pair where both halves happen to compile is X7's silent corruption again.
   log contains no `error:` lines at all and a `grep -c 'error:'` prints **0**. Counting the absence of
   errors is not counting zero errors. Always assert the build reached compilation — check for the
   task, or for a known-nonzero baseline — before believing a drop.
-· **Gradle echoes compiler output twice**, so `grep -c 'error:'` double-counts (BoL: 4508 reported
+· **Gradle echoes compiler output twice**, so `grep -c 'error:'` double-counts (the builder mod: 4508 reported
   for 2254 real). Count **unique `file:line` locations**, not lines. A halving that comes from fixing
   the counter is indistinguishable in a progress log from a halving that comes from fixing the code.
 
@@ -3891,7 +3891,7 @@ method reference resolves to is a property of **each** version's class hierarchy
 diverge between versions far more quietly than signatures do, because no error names them.
 
 **X6. Progress on a big port is a number you must be able to trust every hour.** With the counter
-fixed and the detector in place, BoL's 1.21.1→26.2 run reads 2254 → 2020 → 1501 → 1238 → 987 → 964
+fixed and the detector in place, the builder mod's 1.21.1→26.2 run reads 2254 → 2020 → 1501 → 1238 → 987 → 964
 → 747 → 684 → 627 → 507 → 457 → 433 → 421 → 376 → 313 → 290 → 265 → 248 → 240 → 230 →
 **289** → 216 → 169 → 118 → 74 → 41 → 19 → 4 → **0**, each step naming what moved. That sequence is the
 artefact that makes a multi-thousand-error port a schedulable task instead of an open-ended one —
@@ -4186,7 +4186,7 @@ are both luck, and both stop working the moment the harness changes:
 
 - **"I build far away, at plot origin + 15000."** Every test's plot origin is *different*, so two tests
   naming the same offset are separated by however far apart the framework happened to put their plots —
-  a number neither test knows. Battle of Lord's Wither-Storm-house test and one of its landmark tests
+  a number neither test knows. The builder mod's boss-proof-house test and one of its landmark tests
   both build at `+15000, +15000`. On 1.21.1 that was fine. On 26.2 it was not, and the house test
   reported *"the storm would eat `[gravel, stone, andesite, cobblestone]`"* — a landmark's materials,
   which the house has never placed. Nothing in that message points at another test.
@@ -4204,7 +4204,7 @@ the two versions here; it was purely the ordering.)
 
 **Fix both with isolation that is structural rather than numeric:** search `helper.getBounds()` (present
 in both versions) instead of a radius, and give each big-build test its own **lane** on an axis nothing
-else uses, with the reason written above the constant. Battle of Lord's CLAUDE.md already recorded the
+else uses, with the reason written above the constant. The builder mod's own notes already recorded the
 lane rule after an earlier collision; what it had not recorded is that **a lane collision is a property
 of the pair of tests, so the rule has to be applied to every big-build test at once** — one test moving
 into a clear lane does nothing if a second later moves into it too.
@@ -4216,7 +4216,7 @@ and no compiler, gate or code review has any way to see two tests agreeing on th
 **X19. A test that leaves a PERSISTENT entity behind poisons a REUSED world forever — and the era jump
 is when you find out.** A GameTest world is reused between runs and never reset. The framework clears
 each PLOT before a test, so an entity that stays put is harmless; one that wanders a few blocks out
-survives every future run of every test. Battle of Lord's biome bosses are `setPersistenceRequired`
+survives every future run of every test. The builder mod's biome bosses are `setPersistenceRequired`
 (they must never despawn in play), four GameTests spawn one and none discarded it, and the rule they
 test has a **192-block** separation radius against ~14-block plot spacing — so a single stray poisons
 rival checks across the entire suite. It presented as one long-standing "known flaky" test asserting
@@ -4545,7 +4545,7 @@ written, not only whether it is on the path.
 like a broken build and is not:** `createMinecraftArtifacts` exited 1 with
 `java.net.ConnectException` from `downloadManifest`. The egress proxy had **restarted on a new
 port** mid-session and `/root/.gradle/gradle.properties` still pinned the old one — the trap the
-Mod Repo's own notes record, arriving here. Derive the port from `$HTTPS_PROXY`, WRITE the file
+content mod's own notes record, arriving here. Derive the port from `$HTTPS_PROXY`, WRITE the file
 (never `sed` it — on a missing file `sed` is a silent no-op), then `./gradlew --stop`. A daemon
 started while the port was right goes on working until something makes it fetch, which is why this
 surfaces on the first network-touching task rather than at the edit that broke it.
@@ -4867,7 +4867,7 @@ if everything in the frame is under the harness's control.
 - 🔴 **A SPECTATOR sees an INVISIBLE mob as a translucent ghost, so a spectator camera photographs
   every invisible carrier on every arm, and the comparison is a perfect MATCH about the ghost.** Any
   mod that dresses a vanilla mob (invisible, scaled, carrying display entities) is exposed. Measured
-  on the Mod Repo: nine creature rows across 1.21.1, 1.21.4 and 26.2 read MATCH with the margin rule
+  on the content mod: nine creature rows across 1.21.1, 1.21.4 and 26.2 read MATCH with the margin rule
   holding, and the committed crops showed a pale box where a blue dragon should be. The control arm
   had the ghost too, which is exactly why it matched: **a control that is TRUE OF THE BUG is not a
   control.** Photograph such a subject as a creative player with the HUD hidden (F1 through the
@@ -5096,7 +5096,7 @@ alternating `Screen.render` ↔ `CompatBase.extractRenderState`, the first frame
 **Fix:** exempt the super call — `re:(?<!super)\.render\(graphics, ` — because `super.render` IS the
 base's 1.21.1-shaped method, which is exactly the right target. · **Measured on a space-exploration mod (~550 files):** the planet
 screen, every machine GUI and the radio — i.e. every way to use the mod's content — crashed the 26.2
-client, found only when Battle of Lord's space Gate C opened the planet screen. · **The general form,
+client, found only when the builder mod's space Gate C opened the planet screen. · **The general form,
 and it is §W5b's from the other side:** a compat pair that adapts an OVERRIDE installs a two-way
 mapping between an old and a new name; a rename row is one-way. Any row that rewrites the old name to
 the new one at a `super.` call site closes the loop. Before writing a rename row for a method some
