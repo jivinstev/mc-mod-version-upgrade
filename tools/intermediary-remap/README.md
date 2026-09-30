@@ -40,4 +40,4 @@ Data sources:
 - Fabric intermediary: `maven.fabricmc.net/net/fabricmc/intermediary/<ver>/intermediary-<ver>-v2.jar`
   (obf <-> intermediary, tiny v2).
 
-Companion knowledge: repo `CLAUDE.md` -> **Migration Pattern Catalog §P** (Fabric -> NeoForge).
+Companion knowledge: `CATALOG.md` -> **Migration Pattern Catalog §P** (Fabric -> NeoForge).

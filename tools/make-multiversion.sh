@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Convert a mods/<modid> workspace from the single-target NeoGradle scaffold to the MULTI-VERSION
-# ModDevGradle one (CLAUDE.md section W).
+# ModDevGradle one (CATALOG.md section W).
 #
 #   ./tools/make-multiversion.sh <modid> [target ...]      # default target: 26.2
 #

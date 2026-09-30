@@ -28,7 +28,7 @@ the **policy** the skill must follow.
 ## Redistribution (mod licenses, separate from the API ToS)
 Downloaded + migrated jars are for the **user's own instance**. Porting for personal use is fine; do NOT
 publicly redistribute a ported jar without the author's permission (many mods are all-rights-reserved).
-This is already noted in the repo-root CLAUDE.md legality section and migrate-mod.
+This is already noted in the CATALOG.md legality section and migrate-mod.
 
 ## Identifiers cheat-sheet
 - **provider:** `modrinth` | `curseforge`.

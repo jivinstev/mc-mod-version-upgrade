@@ -19,24 +19,36 @@ EXIT CODES     0 clean    1 an entry disappeared, or the count fell    2 could n
 """
 import argparse, hashlib, pathlib, re, sys
 
-# An entry id is either a lettered section (## V. ... / ### V42c ...) or a numbered pattern
-# (NN. **...**) -- the two shapes the catalogue actually uses.
-SECTION_RE = re.compile(r'^#{2,4}\s+(?:§\s*)?([A-Z]{1,2}\d*[a-z]?)[.)]\s', re.M)
-PATTERN_RE = re.compile(r'^([A-Z]{1,2}\d*)\.\s+\*\*', re.M)
+# Every shape an entry id takes in the catalogue. The first version of this gate knew only two of
+# them and recognised 56 of ~450 entries -- a fidelity gate blind to nine rules in ten reports
+# "nothing lost" exactly as loudly as one that looked.
+ENTRY_RES = [
+    re.compile(r'^#{2,4}\s+(?:§\s*)?([A-Z]{1,2}\d*[a-z]?)[.)]\s', re.M),   # ## V. / ### V42c.
+    re.compile(r'^\*\*([A-Z]{1,2}\d+[a-z]?)\.', re.M),                    # **V42c. ...
+    re.compile(r'^- \*\*([A-Z]{1,2}\d+[a-z]?)\.', re.M),                  # - **M7. ...
+    re.compile(r'^([A-Z]{1,2}\d*[a-z]?)\.\s', re.M),                       # R9b. / M7. / NN.
+    re.compile(r'^(\d{1,3}[a-z]?)\.\s+\*\*', re.M),                       # 123. **...
+]
 
 
 def entries(text):
-    """-> {id: body-hash}. Body runs to the next entry, so an edit changes only its own hash."""
-    marks = []
-    for rx in (SECTION_RE, PATTERN_RE):
+    """-> {id: body-hash}. Body runs to the next entry, so an edit changes only its own hash.
+    An id that occurs more than once (the catalogue reuses a few numbers across sections) is keyed
+    `id#2`, `id#3`, ... in order, so a repeat can neither shadow nor hide its twin."""
+    marks = set()
+    for rx in ENTRY_RES:
         for m in rx.finditer(text):
-            marks.append((m.start(), m.group(1)))
-    marks.sort()
-    out = {}
+            marks.add((m.start(), m.group(1)))
+    marks = sorted(marks)
+    out, seen = {}, {}
     for i, (pos, ident) in enumerate(marks):
+        if i and marks[i - 1][0] == pos:
+            continue
         end = marks[i + 1][0] if i + 1 < len(marks) else len(text)
         body = re.sub(r'\s+', ' ', text[pos:end]).strip()
-        out[ident] = hashlib.sha1(body.encode()).hexdigest()[:16]
+        seen[ident] = seen.get(ident, 0) + 1
+        key = ident if seen[ident] == 1 else f"{ident}#{seen[ident]}"
+        out[key] = hashlib.sha1(body.encode()).hexdigest()[:16]
     return out
 
 
@@ -50,13 +62,39 @@ def collect(root, globs):
     return found
 
 
+PATH_RE = re.compile(r'(?:^|[^/A-Za-z0-9_.-])((?:tools|templates)/[A-Za-z0-9_./-]+'
+                     r'\.(?:py|sh|gradle|command|template|example|md|tsv|properties))')
+
+
+def dangling_paths(root, globs):
+    """Every tools/... or templates/... path the catalogue names must exist, unless it is listed
+    with a reason in docs/catalog-external-paths.tsv (a per-mod copy, another repo's tool)."""
+    allowed = set()
+    ext = root / "docs/catalog-external-paths.tsv"
+    if ext.is_file():
+        for line in ext.read_text().splitlines():
+            if line and not line.startswith("#") and "\t" in line and not line.startswith("path\t"):
+                allowed.add(line.split("\t", 1)[0])
+    out = {}
+    for g in globs:
+        for f in sorted(root.glob(g)):
+            if not f.is_file():
+                continue
+            for m in PATH_RE.finditer(f.read_text(errors="replace")):
+                p = m.group(1).rstrip(".")
+                if p not in allowed and not (root / p).exists():
+                    out.setdefault(p, str(f.relative_to(root)))
+    return sorted(out.items())
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=".")
     ap.add_argument("--census", default="docs/catalog-census.tsv")
     ap.add_argument("--globs", nargs="*",
-                    default=["CATALOG.md", "docs/catalog/*.md", ".claude/skills/*/references/*.md"])
+                    default=["CATALOG.md", "docs/catalog/*.md", ".claude/skills/*/SKILL.md",
+                             ".claude/skills/*/references/*.md"])
     ap.add_argument("--update", action="store_true")
     a = ap.parse_args()
 
@@ -117,7 +155,17 @@ def main():
               file=sys.stderr)
         return 1
 
-    print("check-catalog-fidelity: PASS — nothing lost.")
+    missing = dangling_paths(root, a.globs)
+    if missing:
+        print(f"\ncheck-catalog-fidelity: FAIL — the catalogue names {len(missing)} path(s) that do not exist:",
+              file=sys.stderr)
+        for p, where in missing:
+            print(f"  {p}   (named in {where})", file=sys.stderr)
+        print("  Restore the file, fix the reference, or list it with a reason in "
+              "docs/catalog-external-paths.tsv.", file=sys.stderr)
+        return 1
+
+    print("check-catalog-fidelity: PASS — nothing lost, and every tools/ and templates/ path it names exists.")
     return 0
 
 

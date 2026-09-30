@@ -56,7 +56,7 @@ downport/upport). A quick `grep -rc '\bm_[0-9]\+_' src/main/java` of the raw dec
 ⇒ remap needed; a handful/zero ⇒ skip.
 
 ## References (read these — they are the actual porting knowledge)
-- **The repo root `CLAUDE.md` → "Migration Pattern Catalog"** is the PRIMARY,
+- **The repo-root `CATALOG.md` ("Migration Pattern Catalog")** is the PRIMARY,
   authoritative reference: every issue we've hit as (Pattern → compile Error → Fix).
   **Read it first, apply its fixes proactively while reading the decompiled source
   (before compiling), and APPEND every new pattern you resolve** in the same format.
@@ -163,7 +163,7 @@ Iterate. Each pass: run the compile, bucket the errors, fix by category, repeat.
   then cached. If it fails at the *dependency/setup* stage, fix the workspace
   (gradle/neoforge versions, repos) before touching mod code.
 - Extract errors: `grep -E 'error:|\.java:[0-9]+:' /tmp/build.log`.
-- **Bucket by symptom** and fix the whole bucket at once using the CLAUDE.md
+- **Bucket by symptom** and fix the whole bucket at once using `CATALOG.md`
   **Migration Pattern Catalog** (Pattern → Error → Fix). Any error NOT already in
   the catalog: fix it, then **append the new pattern to the catalog immediately**.
   Highest-frequency, most-mechanical first:
@@ -244,7 +244,7 @@ The progression climbs the crash surface: **compile → static scan → Gate A (
 (headless server load + tick) → Gate C (real client: load → entities → combat → items/UI).** Each
 gate catches a class the one before it structurally cannot — a clean compile lies, a green GameTest
 never renders a frame, and an idle mob never lands a melee hit. The runtime-crash catalog these
-gates exist to catch is repo `CLAUDE.md` **§R (R1–R11)** — read it; every entry names the gate that
+gates exist to catch is repo `CATALOG.md` **§R (R1–R11)** — read it; every entry names the gate that
 finds it.
 
 **Build the gate tests against the churn-derived target list, not the generic template as-is.** Step 4b

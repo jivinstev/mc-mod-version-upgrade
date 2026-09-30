@@ -9,7 +9,7 @@ section is clean-or-explained.
 
 Why static scans when the gates catch these dynamically: the gates *confirm*, the sweep *mandates
 coverage*. Gate C needs a display (often unavailable); the sweep catches R6–R12's static signatures
-headlessly regardless. Detail + fix for each id is in repo `CLAUDE.md` **§R** and the API references
+headlessly regardless. Detail + fix for each id is in repo `CATALOG.md` **§R** and the API references
 (§A/§S). **Maintenance rule: every new §R/§S pattern that has a grep signature MUST be added here.**
 
 ## The sweep — run from `mods/<modid>/`

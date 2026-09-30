@@ -1,0 +1,10 @@
+# Paths the catalogue names that deliberately do NOT exist in this repository, each with its reason.
+# tools/check-catalog-fidelity.py fails on any other missing tools/... or templates/... path, because
+# a rule that names a script nobody can find is a rule nobody can follow. Add a row only with a reason.
+path	reason
+templates/multi-version/versions/26.2.renames.tsv	withheld: largely generated class moves derived from Mojang mapping data (build yours with tools/build-class-move-map.py)
+tools/build-releases.sh	lives in the private ports repo (it stages built jars into that repo's releases/ folder)
+tools/gametest_adapter.py	a copy vendored into one consuming mod; the shipped one is templates/multi-version/tools/gametest_adapter.py
+tools/gen-at.py	a per-mod tool in one consuming mod, not shipped here
+tools/lib/gate-c-env.sh	a per-mod Gate C helper in one consuming mod, not shipped here
+tools/watch-gatec.sh	the per-mod copy made by the scaffold (templates/neoforge-mod/tools/watch-gatec.sh), run from inside a mod
