@@ -113,3 +113,17 @@ jobs:
       # Composition keeps hand rows authoritative and inside the exempt block; the colour rule
       # reads fields and record components from real compiled classes (stubs built on the fly).
       - run: ./tools/test-renames.sh
+
+  cycle-self-test:
+    name: port lifecycle (finish-port, propose-learnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The port lands in the destination and never here; a lesson reaches the catalogue only
+      # through the gates, and never names the mod it came from.
+      - run: ./tools/test-cycle.sh
