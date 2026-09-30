@@ -5,3 +5,4 @@
 month	minecraft	java_files	mixin_classes	geckolib	models	effort	sessions	requests	subagent_requests	active_hours	wall_hours	input	output	thinking	cache_read	cache_write	cache_write_5m	cache_write_1h	usd	claude_code	entrypoint	mixed_session	source
 2026-09	1.21.1	46	0	no	claude-opus-5-5		1				0.34	6745	55793		17976758	267688			6.88	2.1.285	cloud	no	session record (blind replay; no per-request data)
 2026-09	1.21.1	53	6	yes	claude-opus-5-5		1				0.72	496	211895		102291635	700873			30.31	2.1.285	cloud	no	session record (blind replay; no per-request data)
+2026-09	26.2	45	0	no	claude-opus-5-5	medium	1	298	0	1.29	1.79	616	221366	61017	110117199	557103	0	557103		2.1.286	cli	yes	transcript (port-cost.py)
