@@ -115,13 +115,14 @@ echo "12. migration is a yes/no ADD-ON, asked interactively"
 fresh; st --yes --migrate >/dev/null
 grep -q '^SETUP_PATH=migrate$' "$R/.env.local" && ok "--migrate is shorthand for --path migrate" || bad "--migrate did not set SETUP_PATH"
 # drive the real prompt through a pseudo-terminal: setup refuses to be interactive without one
-tty_run() { python3 - "$R" "$H" "$1" <<'PYX'
+tty_run() { local ans="$1"; shift; python3 - "$R" "$H" "$ans" "$@" <<'PYX'
 import os, pty, sys, time
-root, home, answers = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
+root, home, answers, extra = sys.argv[1], sys.argv[2], sys.argv[3].split(","), sys.argv[4:]
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(root); os.environ["HOME"] = home
-    os.execvp("./setup", ["./setup", "--no-network"])
+    os.environ["PATH"] = os.environ.get("TTY_PATH") or os.environ["PATH"]
+    os.execvp("./setup", ["./setup", "--no-network"] + extra)
 out, pending = b"", list(answers)
 while True:
     try: chunk = os.read(fd, 4096)
@@ -184,6 +185,23 @@ rm -rf "$B-26.2"
 fresh; B="$H/.minecraft"; mkdir -p "$B/versions/neoforge-21.1.228" "$B/mods"; tty_run 'n,,,new' >/dev/null
 grep -q "^MINECRAFT_MODS_DIR_26_2=$B-26.2/mods$" "$R/.env.local" && [ -d "$B-26.2/mods" ] \
   && ok "interactive 'new' creates a separate folder for that version and uses it" || bad "'new': $(grep MODS_DIR_26 "$R/.env.local")"
+
+echo "16. a RE-RUN asks only NEW questions; --review asks them all"
+fresh; st --yes >/dev/null                                  # an earlier install-only setup
+out="$(TTY_PATH="$NOJAVA" tty_run ',,no' --migrate)"
+{ echo "$out" | grep -q "kept: your main Minecraft folder" && ! echo "$out" | grep -q "your main Minecraft folder (or 'none') \[" \
+  && echo "$out" | grep -q "Share your lessons as pull requests? (yes/no) \[yes\]" && echo "$out" | grep -q "Kept [0-9]* earlier answer" \
+  && grep -q '^CONTRIBUTE_LEARNINGS=no$' "$R/.env.local"; } \
+  && ok "earlier answers are kept and listed; only the new questions are asked (here: 'share lessons' -> no)" \
+  || bad "re-run asked old questions: $(echo "$out" | grep -E 'kept|\]: ' | head -5 | tr '\n' '|')"
+out="$(TTY_PATH="$NOJAVA" tty_run '' --review)"
+echo "$out" | grep -q "your main Minecraft folder (or 'none') \[" && ok "--review asks every question again" || bad "--review did not re-ask"
+
+echo "17. sharing lessons: yes without gh -> the install + sign-in steps are named, nothing is run"
+fresh; out="$(SETUP_PATH_OVERRIDE="$NOJAVA" st --yes --migrate)"
+{ echo "$out" | grep -q "sharing lessons needs the GitHub CLI" && grep -q '^CONTRIBUTE_LEARNINGS=yes$' "$R/.env.local"; } \
+  && ok "the default is to share; with no gh, --yes names 'gh auth login' and installs nothing" || bad "gh note: $(echo "$out" | grep -i 'gh\|share' | head -3)"
+fresh; out="$(st --yes)"; ! echo "$out" | grep -q "Share what your ports teach" && ok "install-only setup does not ask about sharing lessons" || bad "asked without the add-on"
 
 rm -rf "$NOJAVA"
 echo

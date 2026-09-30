@@ -404,7 +404,9 @@ Two separate deliveries, to two separate places. Exact commands: `references/pip
 2. **The lessons → this repository, as a PR.** `python3 tools/propose-learnings.py --modid <modid> --push`
    applies `catalog-additions.md` to `CATALOG.md` on a `learnings/*` branch, runs the IP and fidelity gates
    with this port's own identity added to the forbidden names, and opens the PR. A port with no (b)/(c)
-   lessons skips this — say so in `MIGRATION.md`.
+   lessons skips this — say so in `MIGRATION.md`. If `.env.local` says `CONTRIBUTE_LEARNINGS=no`, run it
+   WITHOUT `--push`: the lessons are committed locally and stay there; tell the user so, and that
+   `./setup --review` turns sharing on.
 
 **Why this is mandatory.** Finished ports have sat on local-only branches for weeks, including one whose
 jar the user was actively playing with, and one in a `/tmp` directory the OS purges on its own schedule. A
