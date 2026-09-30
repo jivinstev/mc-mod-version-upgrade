@@ -27,8 +27,9 @@ Measured, with the generated rename map, in **CATALOG.md §V**. Tooling:
 mapping data — so generate one per version pair into `$MIGRATE_WORKSPACE/moves/`; you already have
 both classpaths if you are migrating between those versions.
 
-## Status: STUB — fill on demand
-This file is a deliberately empty scaffold. The deep, filled corpus in this repo is the
+## Status: filled from real crossings, and still growing
+This started as an empty scaffold and now holds every delta a real port has crossed (M- and U- entries
+below). The deep corpus in this repo is still the
 **Forge 1.20.1 → NeoForge 1.21.1** path (loader-transform + version-family + CATALOG.md §A–§L/§R).
 Minor-version deltas between 1.21.x releases are **small and situational**, so we do NOT pre-write
 them — we capture each the first time a real migration actually crosses that boundary, via the

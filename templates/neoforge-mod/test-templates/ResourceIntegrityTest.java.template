@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 jivinstev
+// COPY to: src/test/java/<your/package>/ResourceIntegrityTest.java  and set the package line.
+// Gate A for EVERY port, mixins or not. Minecraft-free and fast: it reads resource files only.
+// build.gradle (from the template) passes the project dir and the target Minecraft version.
+package PACKAGE_PLACEHOLDER;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.*;
+import java.util.stream.*;
+import org.junit.jupiter.api.Test;
+
+/**
+ * Three data-layer failures that compile, load and pass GameTests while the content silently
+ * does not exist:
+ *  - catalogue §S1 / §142: 1.21 singularized every datapack directory and IGNORES the old names;
+ *  - catalogue §S8: newer Minecraft parses JSON strictly and skips a whole file on a typo;
+ *  - catalogue §M M6 / §V45: a recipe ingredient must be an OBJECT on 1.21.1 and a bare STRING
+ *    from 1.21.2 on; the wrong form makes the recipe fail to load, logged once and then forgotten.
+ */
+public class ResourceIntegrityTest {
+    private static final Path DIR = Paths.get(System.getProperty("migrate.projectDir", System.getProperty("user.dir")));
+    private static final Path RES = DIR.resolve("src/main/resources");
+    private static final String MC = System.getProperty("migrate.minecraftVersion", "1.21.1");
+
+    private static final Set<String> PLURAL = Set.of("recipes", "advancements", "loot_tables", "structures",
+            "predicates", "item_modifiers");
+    private static final Set<String> PLURAL_TAGS = Set.of("blocks", "items", "entity_types", "fluids",
+            "functions", "game_events");
+
+    @Test
+    void noPre121PluralDatapackDirectories() throws IOException {
+        List<String> bad = new ArrayList<>();
+        Path data = RES.resolve("data");
+        if (!Files.isDirectory(data)) return;
+        try (Stream<Path> s = Files.walk(data, 3)) {
+            s.filter(Files::isDirectory).forEach(p -> {
+                Path rel = data.relativize(p);
+                if (rel.getNameCount() == 2 && PLURAL.contains(rel.getName(1).toString())) bad.add(rel.toString());
+                if (rel.getNameCount() == 3 && rel.getName(1).toString().equals("tags")
+                        && PLURAL_TAGS.contains(rel.getName(2).toString())) bad.add(rel.toString());
+            });
+        }
+        assertTrue(bad.isEmpty(), "pre-1.21 plural datapack dirs are silently ignored (run tools/fix-datapack-layout.py):\n  "
+                + String.join("\n  ", bad));
+    }
+
+    @Test
+    void everyJsonFileIsStrictJson() throws IOException {
+        List<String> bad = new ArrayList<>();
+        for (Path p : jsonFiles()) {
+            String err = StrictJson.check(Files.readString(p));
+            if (err != null) bad.add(RES.relativize(p) + ": " + err);
+        }
+        assertTrue(bad.isEmpty(), "JSON a strict parser rejects (the game skips the whole file):\n  " + String.join("\n  ", bad));
+    }
+
+    @Test
+    void recipeIngredientsHaveTheTargetsForm() throws IOException {
+        boolean objectsRequired = compare(MC, "1.21.2") < 0;     // 1.21.1 and older: objects
+        List<String> bad = new ArrayList<>();
+        for (Path p : jsonFiles()) {
+            String rel = RES.relativize(p).toString().replace('\\', '/');
+            if (!rel.matches("data/[^/]+/recipe/.*")) continue;
+            String t = Files.readString(p);
+            boolean bareString = t.matches("(?s).*\"ingredient\"\\s*:\\s*\".*") || t.matches("(?s).*\"ingredients\"\\s*:\\s*\\[\\s*\".*");
+            boolean objectForm = t.matches("(?s).*\"ingredients?\"\\s*:\\s*\\[?\\s*\\{\\s*\"(item|tag)\".*");
+            if (objectsRequired && bareString) bad.add(rel + ": bare-string ingredient (1.21.2+ form) on " + MC);
+            if (!objectsRequired && objectForm) bad.add(rel + ": {\"item\": ...} ingredient (1.21.1 form) on " + MC);
+        }
+        assertTrue(bad.isEmpty(), "recipes that will not load on " + MC + ":\n  " + String.join("\n  ", bad));
+    }
+
+    private static List<Path> jsonFiles() throws IOException {
+        if (!Files.isDirectory(RES)) return List.of();
+        try (Stream<Path> s = Files.walk(RES)) {
+            return s.filter(p -> p.toString().endsWith(".json") || p.toString().endsWith(".mcmeta")).sorted().toList();
+        }
+    }
+
+    private static int compare(String a, String b) {
+        String[] x = a.split("\\."), y = b.split("\\.");
+        for (int i = 0; i < Math.max(x.length, y.length); i++) {
+            int u = i < x.length ? Integer.parseInt(x[i].replaceAll("\\D.*", "")) : 0;
+            int v = i < y.length ? Integer.parseInt(y[i].replaceAll("\\D.*", "")) : 0;
+            if (u != v) return Integer.compare(u, v);
+        }
+        return 0;
+    }
+
+    /** A minimal RFC 8259 validator: no comments, no trailing commas, no BOM, no raw control chars. */
+    static final class StrictJson {
+        private final String s; private int i;
+        private StrictJson(String s) { this.s = s; }
+        static String check(String s) {
+            if (s.startsWith("﻿")) return "starts with a UTF-8 BOM";
+            StrictJson j = new StrictJson(s);
+            try { j.ws(); j.value(); j.ws(); if (j.i != s.length()) j.fail("trailing content"); return null; }
+            catch (IllegalStateException e) { return e.getMessage(); }
+        }
+        private void fail(String m) {
+            int line = 1; for (int k = 0; k < Math.min(i, s.length()); k++) if (s.charAt(k) == '\n') line++;
+            throw new IllegalStateException(m + " at line " + line);
+        }
+        private void ws() { while (i < s.length() && " \t\r\n".indexOf(s.charAt(i)) >= 0) i++; }
+        private char peek() { if (i >= s.length()) fail("unexpected end"); return s.charAt(i); }
+        private void expect(char c) { if (peek() != c) fail("expected '" + c + "' but found '" + peek() + "'"); i++; }
+        private void value() {
+            char c = peek();
+            if (c == '{') object(); else if (c == '[') array(); else if (c == '"') string();
+            else if (c == '-' || Character.isDigit(c)) number();
+            else if (s.startsWith("true", i)) i += 4; else if (s.startsWith("false", i)) i += 5;
+            else if (s.startsWith("null", i)) i += 4;
+            else fail("unexpected '" + c + "' (a comment, NaN or unquoted value is not JSON)");
+        }
+        private void object() {
+            expect('{'); ws(); if (peek() == '}') { i++; return; }
+            while (true) { ws(); string(); ws(); expect(':'); ws(); value(); ws();
+                if (peek() == ',') { i++; ws(); if (peek() == '}') fail("trailing comma"); continue; }
+                expect('}'); return; }
+        }
+        private void array() {
+            expect('['); ws(); if (peek() == ']') { i++; return; }
+            while (true) { ws(); value(); ws();
+                if (peek() == ',') { i++; ws(); if (peek() == ']') fail("trailing comma"); continue; }
+                expect(']'); return; }
+        }
+        private void string() {
+            expect('"');
+            while (true) { char c = peek(); i++;
+                if (c == '"') return;
+                if (c < 0x20) { i--; fail("raw control character in a string"); }
+                if (c == '\\') { char e = peek(); i++;
+                    if (e == 'u') { for (int k = 0; k < 4; k++) { if (Character.digit(peek(), 16) < 0) fail("bad \\u escape"); i++; } }
+                    else if ("\"\\/bfnrt".indexOf(e) < 0) fail("bad escape \\" + e); } }
+        }
+        private void number() {
+            if (peek() == '-') i++;
+            if (peek() == '0') i++; else { if (!Character.isDigit(peek())) fail("bad number"); while (i < s.length() && Character.isDigit(s.charAt(i))) i++; }
+            if (i < s.length() && s.charAt(i) == '.') { i++; if (!Character.isDigit(peek())) fail("bad number"); while (i < s.length() && Character.isDigit(s.charAt(i))) i++; }
+            if (i < s.length() && (s.charAt(i) == 'e' || s.charAt(i) == 'E')) { i++; if (peek() == '+' || peek() == '-') i++;
+                if (!Character.isDigit(peek())) fail("bad number"); while (i < s.length() && Character.isDigit(s.charAt(i))) i++; }
+        }
+    }
+}

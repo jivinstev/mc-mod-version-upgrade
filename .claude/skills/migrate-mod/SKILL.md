@@ -85,7 +85,7 @@ only genuinely headless environments fall back to a human-run command. Three par
    - **Gate A** (`./gradlew test`) + **Gate B** (`./gradlew runGameTestServer` — load, spawn-every-mob,
      subsystems, **persistence round-trip**), the subsystem/round-trip tests built **against the Step 4b
      churn target list** (`references/test-targets.md`). Iterate BOTH to green, fixing each §R crash; `deployToMods`.
-   - Commit as you go. This whole span is autonomous — run it to green and report status.
+   - Commit as you go (in the port's local history). This whole span is autonomous — run it to green and report status.
 2. **Wire + LAUNCH Gate C:**
    - The stress-test scripts + harness are **per-mod**: `mods/<modid>/tools/{client-validate.sh,client-boot-loop.sh,
      run-gatec.command}` and `mods/<modid>/src/.../test/ClientBootSmokeTest.java` (copy from `templates/neoforge-mod/`
@@ -101,8 +101,13 @@ only genuinely headless environments fall back to a human-run command. Three par
        clicks Allow. **The only prereq is a live GUI session** (`pgrep -x WindowServer`); a **LOCKED screen and a
        SLEPT display do NOT block Gate C** — verified: GLFW boots to title with `CGSSessionScreenIsLocked=True`
        (see pipeline.md §6e for the deterministic checks + why). Don't gate on unlocked/awake.
-     - **Headless / no GUI session:** hand the human the ONE command (from the mod dir): `./tools/client-validate.sh`
-       (or `xvfb-run ./tools/client-validate.sh` on Linux CI).
+     - **Linux with no display (a cloud session, CI) — autonomous too:** install Xvfb + Mesa once
+       (`apt-get update && apt-get install -y xvfb mesa-utils libgl1-mesa-dri`; update FIRST, a bare install fails
+       silently), then run `PHASES="launch spawn" ./tools/client-validate.sh` from the mod dir; the loop wraps itself
+       in `xvfb-run` with software GL. On a rate-limited machine (HTTP 429 from Maven Central) the loop's own
+       `./gradlew runClient` cannot take `--init-script`, so install `tools/central-mirror.init.gradle` into
+       `~/.gradle/init.d/` first.
+     - **Any other headless machine:** hand the human the ONE command (from the mod dir): `./tools/client-validate.sh`.
 3. **Monitored client run (you launched it; you fix every phase):** `client-validate.sh` loops
    **launch → spawn → battle → gauntlet**, each crash → you fix → relaunch, advancing on each PASS. Your
    monitor fires on every `crash.ready` (the digest names the phase); you read the digest, fix the source,
@@ -192,7 +197,16 @@ why (a REVIEW hit like a null-guarded advancement call, or a non-melee mob flagg
 is "explain, don't fix"). The single worst offender it catches is the systematic **hoisted
 `SPEC = BUILDER.build()`** decompiler artifact (catalog §A #3b — NPE `before spec is built` on first
 config read). This sweep is the enforcement mechanism: the catalog is only useful if every entry is
-actually checked, so checking is a mandated step, not left to judgment.
+actually checked, so checking is a mandated step, not left to judgment. Run it with
+`bash ../../tools/run-catalog-scans.sh` from the port directory.
+
+**Then run the override probe: `python3 ../../tools/override-probe.py .`** A decompiler drops `@Override`,
+so when the target changed a method's parameters the old-shaped method still compiles as a NEW method that
+nothing calls, and vanilla's default runs instead — no error, no crash, wrong behaviour. The probe adds
+`@Override` everywhere it is missing, compiles, lists every method that overrides nothing, and restores the
+files. Fix each one that was meant to override (correct its signature and keep the `@Override`); leave the
+ones that were never overrides. Measured on a blind replay of a small MCreator downport: 16 dead
+light-transparency overrides in 8 blocks, which the original port had shipped with.
 
 ## Step 4b — Compile-clean retrospective (MANDATORY, the moment the error count hits 0)
 The in-flight rule is "append every NEW pattern the moment you resolve it" — but under the pressure of a
@@ -272,10 +286,14 @@ already wrote the P0/P1/P2 target list into `MIGRATION.md` (method: `references/
 subsystems you modified most, mapped to the cheapest gate + symmetry oracle. Fill the templates below so
 they **parameterize over those buckets** (all payloads, all serializable types, all `Codec`s), so coverage
 tracks what the port actually rewrote. The templates are the *shape*; `test-targets.md` decides *what goes in*.
-- **Gate A — mixin-config integrity test** (JUnit, Minecraft-free): asserts every mixin in
-  `<modid>.mixins.json` has a compiled class. Catches the invisible `ClassCastException`
-  from an unregistered mixin (catalog R/#43). Copy the template from
-  `templates/neoforge-mod/test-templates/`; it's wired into `build`. `./gradlew test`.
+- **Gate A — Minecraft-free JUnit** (`./gradlew test`, part of `build`; the template already wires JUnit):
+  - **Every port:** `ResourceIntegrityTest` — no pre-1.21 plural datapack dirs, every JSON strictly valid,
+    recipe ingredients in the target's form. These are the data-layer failures that load clean and leave the
+    content silently missing.
+  - **Mods with mixins, additionally:** `MixinConfigIntegrityTest` — every mixin in `<modid>.mixins.json` has
+    a compiled class (catalog R/#43, the invisible `ClassCastException`).
+  - Plus pure-logic tests for anything the churn list (Step 4b) flags as portable.
+  Copy the templates from `templates/neoforge-mod/test-templates/` and set their package line.
 - **Gate B — GameTest runtime load** (`./gradlew runGameTestServer`): boots a headless
   server with the mod, spawns a mob, resolves+uses a spawn egg, and drives an item via a
   mock player. This is the ONLY thing that catches the §R runtime crashes (config-at-
@@ -344,8 +362,9 @@ tracks what the port actually rewrote. The templates are the *shape*; `test-targ
   `./gradlew compileJava` (the loop's relaunch recompiles too), then `touch $SIG_DIR/fix.done` to relaunch that
   phase, and re-run the watcher. Repeat until `RESULT=ALL-DONE` (exit 0). Run it as a background watch so you're
   notified per crash, not polling.
-- Then `./gradlew deployToMods` (runs `build` ⇒ Gates A+B ⇒ copies to `$MINECRAFT_MODS_DIR`; **atomic rename, so
-  it's safe to deploy while a game is open** — MC just needs a restart to pick it up).
+- Then `./gradlew deployToMods` (runs `build`, which includes Gate A's JUnit tests — **not** Gate B, which you
+  run separately with `runGameTestServer` — then copies to `$MINECRAFT_MODS_DIR`; **atomic rename, so it's safe
+  to deploy while a game is open** — MC just needs a restart to pick it up).
 - Client-only surface (rendering, client mixins, GUIs) still needs a real client: launch
   `./gradlew runClient` or read `$MINECRAFT_LOGS_DIR/latest.log`, then tick the P0 items in
   `MANUAL_VALIDATION.md`.

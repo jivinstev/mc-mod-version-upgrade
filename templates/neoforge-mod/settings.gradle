@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 jivinstev
 pluginManagement {
+    // NeoForge's own maven FIRST: Maven Central (behind the plugin portal too) rate-limits cloud and CI
+    // machines with HTTP 429, so nothing Central does not have to serve should be asked of it
+    // (catalogue §V9; on a rate-limited machine also install tools/central-mirror.init.gradle).
     repositories {
-        gradlePluginPortal()
         maven { url = 'https://maven.neoforged.net/releases' }
         maven { url = 'https://libraries.minecraft.net' }
+        gradlePluginPortal()
     }
 }
 
@@ -14,9 +17,9 @@ plugins {
 
 dependencyResolutionManagement {
     repositories {
-        mavenCentral()
         maven { url = 'https://maven.neoforged.net/releases' }
         maven { url = 'https://libraries.minecraft.net' }
+        mavenCentral()
         // Parchment mappings
         maven { url = 'https://maven.parchmentmc.org' }
         // Common third-party library mods (GeckoLib, JEI, etc.) — harmless if unused

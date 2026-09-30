@@ -1,0 +1,44 @@
+// Route Maven Central through Google's mirror, for machines Central rate-limits (HTTP 429).
+//
+// WHY: cloud and CI IP ranges hit Central's rate limit (catalogue §V9). The symptom is a build that dies
+// at configuration with `Received status code 429` on an artifact that has nothing to do with the mod.
+//
+// USE, per build:       ./gradlew --init-script /path/to/tools/central-mirror.init.gradle build
+// USE, every build:     mkdir -p ~/.gradle/init.d && cp tools/central-mirror.init.gradle ~/.gradle/init.d/
+//   The per-build flag does NOT reach builds that other scripts start for you -- the Gate C client loop
+//   runs its own `./gradlew runClient` -- so on a rate-limited machine install it globally. Remove the
+//   file to undo it. On a machine that is not rate-limited you do not need it at all.
+//
+// HOW (both halves are needed):
+//   1. The mirror is added FIRST, before the build's own repositories, in pluginManagement,
+//      dependencyResolutionManagement, and every project's repositories and buildscript. Gradle tries
+//      repositories in order and treats a 429 as fatal, so Central must never be asked for something
+//      the mirror has. Artifacts that are not on Central (NeoForge's own maven) 404 on the mirror and
+//      fall through to their own repository as before.
+//   2. Any repository whose URL IS Central is rewritten to the mirror. Order alone does not reach the
+//      detached configurations some plugins create, nor the Gradle plugin portal's redirects to Central.
+
+def MIRROR = 'https://maven-central.storage-download.googleapis.com/maven2/'
+def isCentral = { u -> u != null && (u.toString().contains('repo.maven.apache.org') || u.toString().contains('repo1.maven.org')) }
+def rewrite = { RepositoryHandler repos ->
+    repos.configureEach { r ->
+        if (r instanceof MavenArtifactRepository && isCentral(r.url)) { r.url = MIRROR }
+    }
+}
+def mirrorFirst = { RepositoryHandler repos ->
+    repos.maven { name = 'CentralMirror'; url = MIRROR }
+    rewrite(repos)
+}
+
+beforeSettings { settings ->
+    mirrorFirst(settings.pluginManagement.repositories)
+    mirrorFirst(settings.buildscript.repositories)
+    try {
+        mirrorFirst(settings.dependencyResolutionManagement.repositories)
+    } catch (ignored) { /* very old Gradle: no dependencyResolutionManagement */ }
+}
+
+beforeProject { project ->
+    mirrorFirst(project.buildscript.repositories)
+    mirrorFirst(project.repositories)
+}
