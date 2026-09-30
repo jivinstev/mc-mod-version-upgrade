@@ -90,7 +90,8 @@ def entry_labels(body):
     **Pattern:**, a qualified **Pattern (1.21.2+):**, and a combined **Pattern → Error → Fix:**
     (one bold span naming several fields). A title such as **Pattern matching breaks** is not a label."""
     out = set()
-    for span in re.findall(r"\*\*([^*\n]{1,120})\*\*", body):
+    # a span must START with a label word: pairing every `**` breaks on a title that contains `*`
+    for span in re.findall(r"\*\*(?=(?:Pattern|Error|Runtime|Symptom|Fix)\b)([^*\n]{1,120}?)\*\*", body):
         span = re.sub(r"\s*\([^)]*\)", "", span).strip().rstrip(":").strip()
         parts = [p.strip().rstrip(":").strip() for p in re.split(r"\s*(?:→|->)\s*", span)]
         if len(parts) > 1 or span != span.rstrip(":") or parts[0] in ("Pattern", "Fix", "Error", "Runtime", "Symptom"):

@@ -83,6 +83,9 @@ R99. **A test lesson** · **Pattern:** some old shape on Minecraft 1.21.1 and Ne
 ### new R
 R98. **A qualified lesson** · **Pattern (1.21.2+):** old · **Error (downport):** `x` · **Fix (→1.21.1):** new.
 
+### new R
+R97. **A title with a star: `#minecraft:enchantable/*`** · **Pattern:** old · **Symptom:** nothing enchants · **Fix:** new.
+
 ### new D
 D99. **A combined label** · **Pattern → Error → Fix:** old → `SomeError` → new.
 
