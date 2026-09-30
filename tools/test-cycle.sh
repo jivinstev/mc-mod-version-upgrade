@@ -17,7 +17,7 @@ mkdir -p "$P/src/main/java/org/fake/fakeport" "$P/src/main/resources/META-INF" "
          "$P/run/world" "$P/.gradle" "$P/decompiled-raw" "$P/run-mc26.2" "$P/src/main/resources/assets/x/out"
 echo 'plugins {}' > "$P/build.gradle"
 echo 'class A {}' > "$P/src/main/java/org/fake/fakeport/A.java"
-printf 'modId="fakeport"\ndisplayName="Fake Port Mod"\n' > "$P/src/main/resources/META-INF/neoforge.mods.toml"
+printf '[[mods]]\nmodId="fakeport"\ndisplayName="Fake Port Mod"\nversion="${file.jarVersion}"\n[[dependencies.fakeport]]\nmodId="neoforge"\n[[dependencies.fakeport]]\nmodId="minecraft"\n' > "$P/src/main/resources/META-INF/neoforge.mods.toml"
 echo 'keep' > "$P/src/main/resources/assets/x/out/keep.json"
 printf '# port\n**Status: DONE.** gates green\n' > "$P/MIGRATION.md"
 mkdir -p "$P/.git"; echo x > "$P/.git/HEAD"
@@ -75,7 +75,7 @@ prop() { GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME
 
 cat > "$WS/good.md" <<'EOF'
 ### new R
-R99. **A test lesson** · **Pattern:** some old shape · **Runtime:** `SomeException: a log line` · **Fix:** the new shape.
+R99. **A test lesson** · **Pattern:** some old shape on Minecraft 1.21.1 and NeoForge · **Runtime:** `SomeException: a log line` · **Fix:** the new shape.
 
 ### augment M6
 · **AUGMENT — a test case:** the symptom is `Not a JSON object`; the fix is unchanged.

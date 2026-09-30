@@ -126,7 +126,11 @@ def identity_tokens(port, ws):
     toks = set()
     toks.add(port.name)
     for toml in list(port.glob("src/main/resources/META-INF/*mods.toml")) + list(port.glob("src/*/resources/META-INF/*mods.toml")):
-        for m in re.finditer(r'^\s*(modId|displayName)\s*=\s*"([^"]+)"', toml.read_text(errors="replace"), re.M):
+        # only the [[mods]] block names THIS mod; [[dependencies.x]] blocks name minecraft, neoforge, ...
+        text = toml.read_text(errors="replace")
+        mods_block = re.split(r'^\s*\[\[dependencies', re.split(r'^\s*\[\[mods\]\]', text, maxsplit=1, flags=re.M)[-1],
+                              maxsplit=1, flags=re.M)[0]
+        for m in re.finditer(r'^\s*(modId|displayName)\s*=\s*"([^"]+)"', mods_block, re.M):
             toks.add(m.group(2))
     java = port / "src" / "main" / "java"
     if java.is_dir():
@@ -141,7 +145,9 @@ def identity_tokens(port, ws):
         for m in re.finditer(r"^(mod_id|mod_name|mod_group_id)\s*=\s*(.+)$", props.read_text(errors="replace"), re.M):
             toks.add(m.group(2).strip())
     # generic words would make the check useless; the migrator's own placeholder is never an identity
-    return sorted(t for t in toks if len(t) >= 4 and t not in ("examplemod", "com.example.examplemod"))
+    platform = {"minecraft", "neoforge", "forge", "fabric", "fabricloader", "quilt", "java", "examplemod",
+                "com.example.examplemod"}
+    return sorted(t for t in toks if len(t) >= 4 and "${" not in t and t.lower() not in platform)
 
 
 def main():
