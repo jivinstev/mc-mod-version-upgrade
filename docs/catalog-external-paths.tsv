@@ -8,3 +8,4 @@ tools/gametest_adapter.py	a copy vendored into one consuming mod; the shipped on
 tools/gen-at.py	a per-mod tool in one consuming mod, not shipped here
 tools/lib/gate-c-env.sh	a per-mod Gate C helper in one consuming mod, not shipped here
 tools/watch-gatec.sh	the per-mod copy made by the scaffold (templates/neoforge-mod/tools/watch-gatec.sh), run from inside a mod
+tools/fetch-testmods.sh	a consuming mod's own test-mod fetcher (it copies ports from a releases/ folder), not shipped here
