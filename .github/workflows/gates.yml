@@ -67,9 +67,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # On a PR, judge its catalogue against the BASE branch's census, not the one it ships: a PR that
+      # deletes an entry and its census row together would otherwise pass the gate it just edited.
+      - name: use the base branch's census
+        if: github.event_name == 'pull_request'
+        run: git show "origin/${{ github.base_ref }}:docs/catalog-census.tsv" > docs/catalog-census.tsv
       - run: python3 tools/check-catalog-fidelity.py
 
   vendored-licence:
@@ -127,3 +134,45 @@ jobs:
       # The port lands in the destination and never here; a lesson reaches the catalogue only
       # through the gates, and never names the mod it came from.
       - run: ./tools/test-cycle.sh
+
+
+  review:
+    name: contribution review (security, weakened gates, catalogue form)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The mechanical half of tools/review-pr.py; the review-contribution skill does the rest. The
+      # self-tests have their own jobs, so they are skipped here, except that a CHANGED self-test is
+      # still run on base and head to catch one that now asserts less.
+      - name: review-pr
+        env:
+          NAMES: ${{ secrets.FORBIDDEN_MOD_NAMES }}
+        run: |
+          args="--base origin/${{ github.base_ref }} --head HEAD --skip-self-tests"
+          if [ -n "$NAMES" ]; then
+            printf '%s\n' "$NAMES" > "$RUNNER_TEMP/forbidden-names.txt"
+            args="$args --names $RUNNER_TEMP/forbidden-names.txt"
+          fi
+          git config --global user.name ci; git config --global user.email ci@example.invalid
+          python3 tools/review-pr.py $args
+
+  review-self-test:
+    name: the reviewer catches what it claims to
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Nine planted bad PRs (a leaked name, a jar, curl|sh, a symptom-less entry, a deleted rule, a
+      # rule deleted with its census row, a widened allowlist, a CI step that cannot fail, a weakened
+      # self-test) must each be blocked, and a clean control must pass.
+      - run: ./tools/test-review.sh
