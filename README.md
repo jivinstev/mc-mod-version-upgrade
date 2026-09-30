@@ -25,6 +25,12 @@ sometimes does not succeed. Choose `migrate` in `./setup` (or `./setup --path mi
 creates a workspace outside this checkout (`~/.mc-mod-upgrade/work` by default) where decompiled
 mods live; the migration commands run from there.
 
+A finished migration delivers two things to two places. The port's source goes to your **mods
+destination**, any folder or git repository you name in setup (`tools/finish-port.py` commits it on a
+`port/<modid>` branch there). What the port *taught*, stated without the mod's name, goes back to this
+repository as a pull request against the catalogue (`tools/propose-learnings.py`), so the next person's
+port is faster.
+
 ### If you don't have the prerequisites
 
 | | macOS | Windows | Debian / Ubuntu | Fedora |
@@ -80,6 +86,10 @@ gh repo fork jivinstev/mc-mod-version-upgrade --clone
 Install the hook once after cloning: `./tools/install-hooks.sh`. It refuses direct pushes to `main`
 and runs the IP gate before anything leaves your machine. The forbidden-name list is kept private,
 so the hook's name check runs only if `.env.local` names a list with `FORBIDDEN_NAMES_FILE=`.
+
+**The easiest contribution is a lesson from your own migration:** the skill's retrospective collects
+them, and `python3 tools/propose-learnings.py --modid <modid> --push` opens the PR, gated, with the
+ported mod's identity refused.
 
 **Never include mod source, jars, or decompiler output** — not even in a test fixture. The migration
 workspace lives outside the repository by default; please keep it there.

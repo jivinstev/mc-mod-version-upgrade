@@ -74,11 +74,13 @@ yourself** (LaunchServices — see part 2), so on a logged-in Mac the whole pipe
 only genuinely headless environments fall back to a human-run command. Three parts:
 
 1. **Autonomous (headless — no human, no display). Do all of this end-to-end without stopping:**
-   - **Branch first:** `git checkout -b feat/<modid>-neoforge` (never migrate on `main`).
+   - **Local history first:** `cd mods/<modid> && git init -q` (Step 4b reads this history). It stays
+     LOCAL: the workspace is deliberately outside every repository, and Step 7 copies the source — not
+     this history — into the mods destination.
    - Steps 0–4: locate/triage → scaffold → decompile+remap → the build-error loop to a clean compile.
    - **Run the mandated catalog sweep** (`references/catalog-scans.md`) — fix or explain every hit.
    - **Step 4b — the compile-clean retrospective** (mandatory): the instant errors hit 0, categorize every
-     fix (a/b/c/d) and augment/append the catalog + scans for each (b)/(c). This is the backstop that keeps
+     fix (a/b/c/d) and record each (b)/(c) in `$MIGRATE_WORKSPACE/catalog-additions.md`. This is the backstop that keeps
      the knowledge base comprehensive when the in-flight "append as you go" rule slips under load.
    - **Gate A** (`./gradlew test`) + **Gate B** (`./gradlew runGameTestServer` — load, spawn-every-mob,
      subsystems, **persistence round-trip**), the subsystem/round-trip tests built **against the Step 4b
@@ -165,7 +167,8 @@ Iterate. Each pass: run the compile, bucket the errors, fix by category, repeat.
 - Extract errors: `grep -E 'error:|\.java:[0-9]+:' /tmp/build.log`.
 - **Bucket by symptom** and fix the whole bucket at once using `CATALOG.md`
   **Migration Pattern Catalog** (Pattern → Error → Fix). Any error NOT already in
-  the catalog: fix it, then **append the new pattern to the catalog immediately**.
+  the catalog: fix it, then **record the new pattern in `$MIGRATE_WORKSPACE/catalog-additions.md`
+  immediately** (format in Step 4b; the catalogue itself only changes through Step 7's PR).
   Highest-frequency, most-mechanical first:
   1. Import/package renames (`net.minecraftforge.*` → `net.neoforged.*`).
   2. `new ResourceLocation(...)` → `ResourceLocation.fromNamespaceAndPath/parse`.
@@ -206,10 +209,11 @@ agent's report. Walk them end to end — do not sample.
   documented fix. No action. (Expect most fixes to be (a) — that's the catalog working.)
 - **(b) Known pattern, but you had to go beyond the docs** — the entry existed but was incomplete, subtly wrong,
   had a second overload/case, or needed a non-obvious technique the entry didn't mention. **Action: AUGMENT the
-  existing numbered entry in place** (append a `· **AUGMENT — …:**` clause), don't add a new number.
+  existing numbered entry** — write a `### augment <ENTRY-ID>` block whose text starts `· **AUGMENT — …:**`;
+  don't add a new number.
 - **(c) Net-new pattern worth documenting** — not in the catalog, and general enough that the next mod could hit
-  it. **Action: APPEND a new numbered entry** in the standard format (below), grouping tiny sibling renames into
-  one cluster entry rather than one-per-line.
+  it. **Action: a new numbered entry** — a `### new <SECTION>` block in the standard format (below), grouping
+  tiny sibling renames into one cluster entry rather than one-per-line.
 - **(d) Truly bespoke to this mod** — un-decompilable generated geometry, a mod-specific reconstructed method,
   one integration-wiring quirk. **Action: none in the catalog** (note it in `MIGRATION.md` if it matters for that
   mod's resume, but it's not general knowledge).
@@ -226,7 +230,23 @@ fix, which can reveal that the port's actual fix was only good enough to compile
 ClipContext ambiguity — §K #93 — exposed 7 `(Entity)null` casts that compiled but leave the R10 runtime NPE
 latent; the retrospective both wrote the entry and fixed the 7 sites.) When this happens, fix it now and note it.
 
-Output a short (a)/(b)/(c)/(d) tally in `MIGRATION.md` and commit the catalog + scans changes before the gates.
+Output a short (a)/(b)/(c)/(d) tally in `MIGRATION.md`. The lessons wait in `catalog-additions.md` until Step 7.
+
+**Where lessons go, and the one rule that matters.** Write them to `$MIGRATE_WORKSPACE/catalog-additions.md`,
+one block per lesson:
+
+```
+### new R
+R99. **Short title** · **Pattern:** <old code shape> · **Runtime:** <crash line> · **Fix:** <fix>
+
+### augment M6
+· **AUGMENT — <what was missing>:** <the extra case, stated by its symptom>
+```
+
+**Describe the mod, never name it** ("a small MCreator food mod", not its name or id) and state every lesson by
+its SYMPTOM (the error text a porter will search for). `tools/propose-learnings.py` refuses a lesson that names
+the port it came from. A grep that finds the pattern goes in the entry as `· **Scan:** <grep>`; the reviewer
+moves it into `references/catalog-scans.md`.
 
 **Same pass, second output — harvest the TEST TARGETS, not just the patterns.** The commit history +
 agent reports also tell you *which paths to test*: the files you changed most are where the migration
@@ -343,26 +363,33 @@ tracks what the port actually rewrote. The templates are the *shape*; `test-targ
   which gates are green, and the next concrete action. This is the resume point for the next session —
   a big port survives across many runs through this file.
 
-## Step 7 — Publish (MANDATORY — the port is NOT done until the source is on `origin`)
-Push the feature branch, merge it to `main`, push `main` (exact commands: `references/pipeline.md` §9).
+## Step 7 — Deliver (MANDATORY — the port is NOT done until both of these ran)
+Two separate deliveries, to two separate places. Exact commands: `references/pipeline.md` §9.
 
-**This is a hard requirement, not a courtesy.** It was missing from this skill, and the drift was
-real: several finished ports sat on local-only branches for weeks — including one whose jar the user
-was actively PLAYING with, and one parked in a `/private/tmp` worktree macOS purges on its own
-schedule. The user's instruction, verbatim: *"when we migrate a mod, I want to keep its migrated
-source."* A port costs hours to rebuild and cannot be recovered from a jar.
+1. **The port → the mods destination.** `python3 tools/finish-port.py <modid>` copies the port's source
+   (not build output, runs or the pristine decompile) into `$MOD_OUTPUT_REPO/mods/<modid>/` and commits it
+   on the branch `port/<modid>` there; `--push` pushes it. With no destination configured it says so and
+   leaves the port in the workspace. It REFUSES a destination inside this repository: ported mods are
+   somebody else's code and this repository is public.
+2. **The lessons → this repository, as a PR.** `python3 tools/propose-learnings.py --modid <modid> --push`
+   applies `catalog-additions.md` to `CATALOG.md` on a `learnings/*` branch, runs the IP and fidelity gates
+   with this port's own identity added to the forbidden names, and opens the PR. A port with no (b)/(c)
+   lessons skips this — say so in `MIGRATION.md`.
 
-- **A deploy is not delivery.** If the jar is in the user's `mods/` folder, its source is already on
-  `origin` — the running game must never be ahead of the remote.
-- Not ready to land on `main`? **Still push the branch.** Unpushed is the failure mode; unmerged is
-  just a queue.
+**Why this is mandatory.** Finished ports have sat on local-only branches for weeks, including one whose
+jar the user was actively playing with, and one in a `/tmp` directory the OS purges on its own schedule. A
+port costs hours to rebuild and cannot be recovered from a jar. And a lesson that never leaves the
+workspace is paid for again by the next porter.
+
+- **A deploy is not delivery.** If the jar is in the user's `mods/` folder, its source must already be in
+  the destination.
 - Never leave the only copy of a port in `/tmp`.
 
 ## Step 8 — Abandoning a path (MANDATORY ritual — abandoned ≠ deleted, ≠ left lying around)
 Stopping a port is often correct. Leaving it *indistinguishable from live work* never is. Full
 checklist in `references/pipeline.md` §10. The three required actions:
 
-1. **Merge to `main`, then DELETE the branch** (local + `origin`). Verify
+1. **In the mods destination, merge to `main`, then DELETE the branch** (local + `origin`). Verify
    `git rev-list --count origin/main..<branch>` is `0` first. Merging is what gets the source into
    history; the dangling branch is pure ambiguity.
 2. **DELETE `mods/<modid>/` from `main` too** — `git rm -r`, and record the **recovery SHA** (the

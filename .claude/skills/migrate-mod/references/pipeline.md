@@ -356,37 +356,40 @@ Update `mods/$MODID/MIGRATION.md`: compile-clean? both test gates green? which �
 were fixed? what's still client-gated? Be honest about scope — "compiles + GameTest passes +
 client unverified" is a precise, useful state.
 
-## 9. Publish — MANDATORY, the port is NOT done until this runs
+## 9. Deliver — MANDATORY, the port is NOT done until this runs
 
-**The migrated source must end up on `origin/main`.** Pushing is part of finishing a migration,
-not a follow-up someone else does later.
+Two deliveries, to two places. Run from the migrator checkout (or the workspace, whose `tools/` links
+back to it).
 
 ```bash
-git push origin HEAD                                    # the feature branch first (a safety copy)
-git checkout main && git merge --no-ff feat/$MODID-neoforge \
-  -m "Merge $MODNAME: <source loader/version> -> NeoForge 1.21.1"
-git push origin main
+# 1. the port -> the mods destination ($MOD_OUTPUT_REPO from .env.local), on branch port/$MODID
+python3 tools/finish-port.py $MODID --dry-run      # what it will copy and where
+python3 tools/finish-port.py $MODID --push          # copy, commit, push the branch
+# then merge port/$MODID in the destination the way that repository likes (a PR, or a local merge)
+
+# 2. the lessons -> a PR against this repository (skip if Step 4b/6 recorded none)
+python3 tools/propose-learnings.py --modid $MODID --dry-run   # review the catalogue diff first
+python3 tools/propose-learnings.py --modid $MODID --push
 ```
+
+`finish-port.py` leaves build output, run directories, Gradle caches, the pristine decompile and the
+port's local `.git` behind, refuses a destination inside the migrator checkout, and refuses to overwrite
+uncommitted work in the destination. With `MOD_OUTPUT_REPO=none` it keeps the port in the workspace and
+says so. `propose-learnings.py` refuses a lesson that names the port it came from, a new entry without
+**Pattern:**, **Fix:** and a symptom (**Error:**/**Runtime:**/**Symptom:**), and anything that fails the
+IP or fidelity gate — leaving no branch behind when it refuses.
 
 **Why this step exists.** It was missing, and the drift was real: several completed ports sat on
 local-only branches for weeks. One of them — **a Fabric armour mod** — was a jar the user was actively PLAYING
 with, whose only source copy was an unpushed branch; another lived in a `/private/tmp` worktree that
-macOS purges on its own schedule. A port is expensive to rebuild and impossible to recover from a
-jar. The user's instruction, verbatim: *"when we migrate a mod, I want to keep its migrated source."*
+macOS purges on its own schedule. A port is expensive to rebuild and impossible to recover from a jar.
 
 **Rules:**
-- **Never** leave a port's only copy in `/tmp` or `/private/tmp`. If you must work there, push the
-  branch the moment it compiles.
-- **A deploy is not delivery.** If `deployToMods` put a jar in the user's mods folder, the source
-  that built it must already be on `origin` — the running game must never be ahead of the remote.
-- Gates green but not ready to land on `main`? **Still push the branch.** An unpushed branch is the
-  failure mode; an unmerged one is just a queue.
-- Sweep for drift periodically:
-  ```bash
-  for b in $(git for-each-ref --format='%(refname:short)' refs/heads); do
-    echo "$b unpushed=$(git rev-list --count "$b" --not --remotes)"
-  done
-  ```
+- **Never** leave a port's only copy in `/tmp` or `/private/tmp`.
+- **A deploy is not delivery.** If `deployToMods` put a jar in the user's mods folder, the source that
+  built it must already be in the destination.
+- Gates green but not ready to merge in the destination? **Still push the branch.** An unpushed branch
+  is the failure mode; an unmerged one is just a queue.
 
 ## 10. Abandoning a path — MANDATORY ritual (abandoned ≠ deleted, and ≠ silently left lying around)
 
@@ -396,7 +399,7 @@ identical to a live one — the next session (or the next you) will mistake it f
 
 **When you stop pursuing a path, do all three:**
 
-1. **Merge the branch to `main`, then DELETE the branch** (local *and* `origin`). Never delete a
+1. **In the mods destination, merge the branch to `main`, then DELETE the branch** (local *and* `origin`). Never delete a
    branch that is not fully merged — check `git rev-list --count origin/main..<branch>` is `0`.
    Merging is what puts the source safely in history; the dangling branch is pure ambiguity.
 2. **DELETE the `mods/<modid>/` directory from `main` as well.**
