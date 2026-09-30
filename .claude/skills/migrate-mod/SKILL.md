@@ -208,7 +208,9 @@ files. Fix each one that was meant to override (correct its signature and keep t
 ones that were never overrides. Measured on a blind replay of a small MCreator downport: 16 dead
 light-transparency overrides in 8 blocks, which the original port had shipped with. On a LIBRARY expect a longer
 list that is mostly legitimate: a library's base classes declare methods for dependants to call, and those
-override nothing by design. Read each hit rather than counting them.
+override nothing by design. Read each hit rather than counting them: measured on a helper-heavy library,
+154 candidates and 2 real. A fast filter is to grep each name in the patched Minecraft/NeoForge sources
+(and any library jar the port extends); a name found nowhere there cannot be an override.
 
 ## Step 4b — Compile-clean retrospective (MANDATORY, the moment the error count hits 0)
 The in-flight rule is "append every NEW pattern the moment you resolve it" — but under the pressure of a
