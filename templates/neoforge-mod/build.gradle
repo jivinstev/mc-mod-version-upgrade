@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 jivinstev
+// ─────────────────────────────────────────────────────────────────────────────
+// NeoForge 1.21.1 mod-migration workspace — template build.gradle
+//
+// Uses NeoGradle (net.neoforged.gradle.userdev), the same toolchain proven to
+// build in the Battle of Lord repo. The migrate-mod skill copies this whole
+// folder into mods/<modid>/, then flips the `uses_*` flags in gradle.properties
+// to switch on Mixins / JarJar / GeckoLib as a given mod requires.
+// ─────────────────────────────────────────────────────────────────────────────
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'net.neoforged.gradle.userdev' version '7.1.36'
+}
+
+version = mod_version
+group = mod_group_id
+base { archivesName = mod_id }
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+// Migrated mods often decompile with the odd unreachable/dead-code artifact.
+// Keep warnings from failing the build; we fix real errors, not lint noise.
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:none'
+    options.warnings = false
+}
+
+sourceSets.main.resources { srcDir 'src/generated/resources'; exclude 'src/generated/**/.cache' }
+
+repositories {
+    maven { name = 'NeoForged'; url = 'https://maven.neoforged.net/releases' }
+    maven { name = 'Minecraft'; url = 'https://libraries.minecraft.net' }
+    maven { name = 'ParchmentMC'; url = 'https://maven.parchmentmc.org' }
+    maven { name = 'GeckoLib'; url = 'https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/' }
+    maven { name = 'Kotlin for Forge'; url = 'https://thedarkcolour.github.io/KotlinForForge/' }
+    // A mod-specific maven host (e.g. a library your target mod depends on that lives on its author's
+    // own maven) is YOUR configuration, not this template's: list them in .env.local as
+    //   EXTRA_MAVENS=https://maven.example.dev/releases,https://other.example.org/maven
+    (readEnvLocal('EXTRA_MAVENS') ?: '').split(',').collect { it.trim() }.findAll { it }.each { u ->
+        maven { url = u }
+    }
+    mavenCentral()
+}
+
+// Parchment: human-readable parameter names layered on Mojang official mappings.
+// Makes decompiled sources far easier to read and edit.
+subsystems {
+    parchment {
+        minecraftVersion = parchment_minecraft_version
+        mappingsVersion = parchment_version
+    }
+}
+
+runs {
+    configureEach {
+        systemProperty 'forge.logging.markers', 'REGISTRIES'
+        systemProperty 'forge.logging.console.level', 'debug'
+        workingDirectory project.layout.projectDirectory.dir('run').dir(name)
+        modSource project.sourceSets.main
+    }
+    client {
+        systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        // Gate C — client boot loop: `./gradlew runClient -Pboottest [-Ptestmode=MODE]` drives
+        // ClientBootSmokeTest through launch/spawn/battle/gauntlet, then auto-quits. Needs a display
+        // (or Xvfb). See tools/client-boot-loop.sh. WITHOUT this -P->systemProperty mapping the smoke
+        // test never activates and the client just sits at the title until the watchdog fires (a SILENT
+        // HANG — it compiles+launches fine, so it's easy to miss). Parameterized by mod_id, so it Just Works.
+        if (project.hasProperty('boottest'))    systemProperty "${project.mod_id}.boottest", 'true'
+        if (project.hasProperty('testmode'))    systemProperty "${project.mod_id}.testmode", project.property('testmode')
+        if (project.hasProperty('battlecount')) systemProperty "${project.mod_id}.battlecount", project.property('battlecount')
+        if (project.hasProperty('battleticks')) systemProperty "${project.mod_id}.battleticks", project.property('battleticks')
+    }
+    server { systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id; argument '--nogui' }
+    data {
+        arguments.addAll '--mod', project.mod_id, '--all',
+            '--output', file('src/generated/resources/').getAbsolutePath(),
+            '--existing', file('src/main/resources/').getAbsolutePath()
+    }
+}
+
+configurations { runtimeClasspath.extendsFrom localRuntime }
+
+dependencies {
+    implementation "net.neoforged:neoforge:${neo_version}"
+
+    if (project.uses_geckolib.toBoolean()) {
+        implementation "software.bernie.geckolib:geckolib-neoforge-${minecraft_version}:${geckolib_version}"
+        if (project.uses_jarjar.toBoolean()) {
+            jarJar("software.bernie.geckolib:geckolib-neoforge-${minecraft_version}") {
+                version { strictly "[${geckolib_version},)"; prefer "${geckolib_version}" }
+            }
+        }
+    }
+}
+
+// Mixins: NeoForge bundles the Mixin library, and (unlike Forge) runs on Mojang
+// official mappings at runtime — so mixins target readable names and NO refmap is
+// needed. We disable refmap generation and let NeoForge load the config declared
+// in neoforge.mods.toml ([[mixins]] config="<modid>.mixins.json").
+if (project.uses_mixins.toBoolean()) {
+    tasks.withType(JavaCompile).configureEach {
+        options.compilerArgs << '-AdefaultObfuscationEnv=named:none'
+    }
+}
+
+tasks.withType(ProcessResources).configureEach {
+    var props = [
+        minecraft_version      : minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        neo_version            : neo_version,
+        loader_version_range   : loader_version_range,
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_license            : mod_license,
+        mod_version            : mod_version,
+        mod_authors            : mod_authors,
+        mod_description        : mod_description,
+    ]
+    inputs.properties props
+    filesMatching(['META-INF/neoforge.mods.toml', 'pack.mcmeta']) { expand props }
+}
+
+// When bundling nested libs via JarJar, make the bundled jar the primary artifact.
+if (project.uses_jarjar.toBoolean()) {
+    jar { archiveClassifier = 'slim' }
+    tasks.named('jarJar') { archiveClassifier = '' }
+}
+
+// ── Deploy helpers (ported from Battle of Lord) ──────────────────────────────
+def readEnvLocal(String key) {
+    // Look in this project dir, then walk up to the repo root for a shared .env.local
+    def candidates = [file('.env.local'), rootProject.file('.env.local'),
+                      file("${rootDir}/../../.env.local")]
+    for (envFile in candidates) {
+        if (!envFile.exists()) continue
+        def value = null
+        envFile.eachLine { line ->
+            def m = (line =~ /^\s*${key}=(.*)$/)
+            if (m) value = m[0][1].trim()
+        }
+        if (value != null) {
+            if (value.startsWith('~')) value = System.getProperty('user.home') + value.substring(1)
+            return value
+        }
+    }
+    return null
+}
+
+def deployedJarName() {
+    // JarJar makes the primary (classifier-less) jar; otherwise the plain jar.
+    return "${mod_id}-${mod_version}.jar"
+}
+
+// ATOMIC on purpose: stage to a temp file in the target dir, then MOVE it into place.
+// Overwriting the jar in-place while Minecraft is RUNNING corrupts the live game
+// (ZipException / ClassNotFoundException / purple textures) — the game holds the jar open
+// and reads entries lazily. An atomic move means it sees either the whole old jar or the
+// whole new one, never a half-written file. (Still restart the game to load a new build.)
+tasks.register('deployToMods') {
+    dependsOn 'build'
+    doLast {
+        def modsDir = readEnvLocal('MINECRAFT_MODS_DIR')
+        if (!modsDir) {
+            println "WARNING: MINECRAFT_MODS_DIR not in .env.local — skipping deploy"
+            return
+        }
+        def target = new File(modsDir)
+        if (!target.isDirectory()) {
+            println "WARNING: MINECRAFT_MODS_DIR is not a directory: ${modsDir} — skipping deploy"
+            return
+        }
+        def src = file("build/libs/${deployedJarName()}")
+        if (!src.exists()) {
+            throw new GradleException("built jar not found: ${src}")
+        }
+        def dest = new File(target, deployedJarName())
+        def tmp = new File(target, deployedJarName() + ".tmp-" + System.nanoTime())
+        try {
+            java.nio.file.Files.copy(src.toPath(), tmp.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            try {
+                java.nio.file.Files.move(tmp.toPath(), dest.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+                java.nio.file.Files.move(tmp.toPath(), dest.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+            println "Deployed ${deployedJarName()} -> ${modsDir}"
+            println "(restart Minecraft to load it)"
+        } finally {
+            if (tmp.exists()) tmp.delete()
+        }
+    }
+}
+
+// ── datapack layout gate ─────────────────────────────────────────────────────────────────────────
+// Java has a compiler; data packs do not. 1.21 renamed every datapack registry directory to the
+// singular (`recipes`→`recipe`, `tags/blocks`→`tags/block`, …) and **silently ignores the old names**
+// — no error, no crash, no log line. A port that leaves them behind ships with its entire data layer
+// dead while compiling clean, booting clean, and passing every other gate.
+//
+// That is not hypothetical: a space-exploration mod shipped a port with 1795 data files (534 recipes, 562
+// advancements, 333 loot tables, 82 tags) never loaded. It reached a seven-year-old as "I can't work
+// out how to build a rocket", because in his game there was no recipe to find.
+//
+// The catalog already documented the rename AND said to check for it. It still didn't happen — which
+// is the real lesson: a step someone must remember loses to a 1384-error compile loop. So it's a gate.
+tasks.register('checkDatapackLayout', Exec) {
+    group = 'verification'
+    description = 'Fails if any datapack directory still uses pre-1.21 (plural) names'
+    commandLine 'python3', "${projectDir}/tools/fix-datapack-layout.py", projectDir.toString(), '--verify'
+}
+tasks.named('check') { dependsOn 'checkDatapackLayout' }

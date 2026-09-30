@@ -20,18 +20,21 @@ hours rather than seconds, and sometimes does not succeed.
 
 ## Safety gates
 
-Two checks run on every pull request, and both must pass:
+Three checks run on every pull request, and all must pass:
 
 | gate | question it answers |
 |---|---|
 | `tools/check-no-ip.py` | are we about to publish somebody else's work? |
 | `tools/check-catalog-fidelity.py` | did we quietly lose a migration rule? |
+| `tools/gen-vendored.py --check` | do the files we copy into *your* project carry the licence the manifest says? |
 
 Run them locally the same way CI does:
 
 ```bash
 python3 tools/check-no-ip.py
 python3 tools/check-catalog-fidelity.py
+python3 tools/gen-vendored.py --check
+./tools/test-gates.sh          # proves each gate FAILS on a planted violation
 ```
 
 `check-no-ip.py` scans the **committed tree** rather than the diff, because a file added in an

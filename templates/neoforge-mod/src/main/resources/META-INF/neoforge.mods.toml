@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2026 jivinstev
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+authors="${mod_authors}"
+description='''
+${mod_description}
+'''
+
+# ── Mixins ───────────────────────────────────────────────────────────────────
+# If the mod uses mixins, uncomment and point at its mixin config(s). NeoForge
+# runs on Mojang mappings, so no refmap is required — delete "refmap" keys from
+# the copied <modid>.mixins.json.
+# [[mixins]]
+# config="${mod_id}.mixins.json"
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+[[dependencies.${mod_id}]]
+    modId="neoforge"
+    type="required"
+    versionRange="[21.1,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    type="required"
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="BOTH"

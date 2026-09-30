@@ -28,7 +28,13 @@ BINARY_SUFFIXES = {".jar", ".class", ".zip", ".nbt", ".ogg", ".mca", ".dat", ".w
 # Allowlisted binaries, BY SHA1 AND NOT BY NAME. Naming a file `gradle-wrapper.jar` is one rename
 # away from smuggling a mod jar through a filename check, which is why the allowlist is content.
 ALLOWED_BINARY_SHA1 = {
-    # (populated when a gradle wrapper is actually added, with its sha1 recorded here on purpose)
+    # Gradle's own wrapper (Apache-2.0), byte-identical in both scaffolds, so one entry covers both.
+    "abf08035a417f807e3d91c559b793ad20f5638ab": "gradle-wrapper.jar (Gradle 9.3.1 wrapper)",
+    # OUR OWN empty GameTest structure: gunzipped, it is byte-for-byte what
+    # tools/gen-empty-structure.py builds for ("smokeharness", "smoke_test", size 9, DataVersion 3955)
+    # -- a polished-andesite floor and nothing else. Verified by regenerating and comparing, not by
+    # reading the name. (The .gz wrapper carries a timestamp, so the pin is on this exact file.)
+    "9b0a35fe7e08df5ca82ef8610fb8eb770a2a0cf5": "smoke-harness empty GameTest structure (generated)",
 }
 
 # --- 2. third-party package roots --------------------------------------------------------------
@@ -40,6 +46,9 @@ ALLOWED_PACKAGE_ROOTS = (
     "java.", "javax.", "jdk.", "sun.", "org.jetbrains", "org.junit", "org.gradle",
     "com.google", "org.apache", "org.slf4j", "it.unimi", "org.lwjgl", "io.netty", "com.electronwill",
     "org.objectweb", "org.joml", "oshi",
+    "mezz.jei",                                           # a published maven API (plan decision 6)
+    "com.example",                                        # the placeholder package the templates use
+    "com.forgeupgrade",                                   # our own smoke-harness package
 )
 IMPORT_RE = re.compile(r'^\s*import\s+(?:static\s+)?([a-z][A-Za-z0-9_.]*)\.[A-Z][A-Za-z0-9_]*\s*;', re.M)
 
@@ -63,7 +72,11 @@ DECOMPILER_MARKERS = [
 
 SKIP_DIRS = {".git", "__pycache__", ".gradle", "build", "node_modules", ".venv"}
 TEXT_SUFFIXES = {".py", ".sh", ".md", ".java", ".json", ".toml", ".gradle", ".tsv", ".txt", ".yml",
-                 ".yaml", ".properties", ".kts", ".cfg", ".command", ".mcmeta", ""}
+                 ".yaml", ".properties", ".kts", ".cfg", ".command", ".mcmeta", "",
+                 # Templates hide Java behind a second suffix (`X.java.example`, `build.gradle.template`).
+                 # Before these were listed, the import and decompiler checks skipped every one of them
+                 # -- the files most likely to have been derived from a real port.
+                 ".example", ".template", ".bat", ".pl", ".groovy", ".xml", ".html", ".css", ".js"}
 
 
 def sha1(path):
@@ -87,7 +100,16 @@ def tracked_files(root):
         return files, "filesystem walk (git unavailable)"
 
 
+# A name this long is matched as a SUBSTRING, not a whole word. Word boundaries let a name through
+# whenever it is glued to something else -- `-Dmymod.flag`, `mymodItems()`, `MYMOD_BOOT_TEST` -- and
+# all three shapes were found in real template code. Shorter names keep word boundaries, because as
+# substrings they would match inside ordinary words.
+SUBSTRING_MIN_LEN = 6
+
+
 def load_names(path):
+    """One name per line. `re:<regex>` lines are matched as regular expressions (case-insensitive),
+    for a mod whose id is also an ordinary English word and can only be recognised in context."""
     if not path:
         return None
     p = pathlib.Path(path)
@@ -96,8 +118,14 @@ def load_names(path):
     out = []
     for line in p.read_text(errors="replace").splitlines():
         line = line.strip()
-        if line and not line.startswith("#"):
-            out.append(line.lower())
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("re:"):
+            out.append((line, re.compile(line[3:], re.I)))
+        elif len(line) >= SUBSTRING_MIN_LEN:
+            out.append((line.lower(), re.compile(re.escape(line), re.I)))
+        else:
+            out.append((line.lower(), re.compile(r'(?<![a-z0-9])' + re.escape(line) + r'(?![a-z0-9])', re.I)))
     return out
 
 
@@ -168,11 +196,13 @@ def main():
             if f.suffix.lower() in BINARY_SUFFIXES:
                 continue
             try:
-                low = f.read_text(errors="replace").lower()
+                text = f.read_text(errors="replace")
             except OSError:
                 continue
-            for n in names:
-                if re.search(r'\b' + re.escape(n) + r'\b', low):
+            # The PATH is content too: a directory named after a mod publishes the name.
+            text = f"{f.relative_to(root)}\n{text}"
+            for n, rx in names:
+                if rx.search(text):
                     violations.append((f, f"names a third-party mod: {n!r}"))
         print(f"check-no-ip: name check ran against {len(names)} forbidden name(s)")
 

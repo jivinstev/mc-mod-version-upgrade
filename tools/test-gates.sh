@@ -34,6 +34,9 @@ plant; printf 'import com.someauthor.theirmod.Thing;\n' > "$T/A.java";   expect 
 plant; printf 'class A {} // %s: could not be decompiled\n' '$VF' > "$T/B.java"; expect 1 "a decompiler fingerprint"
 plant; mkdir -p "$T/decompiled-raw"; printf 'x\n' > "$T/decompiled-raw/C.java"; expect 1 "a migration working directory"
 plant; printf 'import net.minecraft.world.item.Item;\n' > "$T/D.java";   expect 0 "an ALLOWED import (must not false-positive)"
+plant; printf 'import com.someauthor.theirmod.Thing;\n' > "$T/T.java.example"; expect 1 "an import hidden behind a template suffix (.java.example)"
+plant; cp "$ROOT/templates/neoforge-mod/gradle/wrapper/gradle-wrapper.jar" "$T/";   expect 0 "Gradle's wrapper jar, allowlisted BY SHA1"
+plant; printf 'PK\x03\x04not-gradle' > "$T/gradle-wrapper.jar";                  expect 1 "a different jar merely NAMED gradle-wrapper.jar"
 
 echo "3. a skipped name check must FAIL under --strict, never pass"
 plant; printf 'hello\n' > "$T/E.md"
@@ -46,6 +49,46 @@ plant; printf 'we ported SomeMod last week\n' > "$T/F.md"; printf 'somemod\n' > 
 ( python3 "$ROOT/tools/check-no-ip.py" --root "$T" --names "$T/names.txt" --strict >/dev/null 2>&1 )
 [ $? = 1 ] && { echo "  PASS  a forbidden name is caught"; pass=$((pass+1)); } \
            || { echo "  FAIL  a forbidden name was not caught"; fail=$((fail+1)); }
+
+names_case() {  # names_case <wanted-exit> <label> <file-name> <content> <names-file-content>
+   local want="$1" label="$2"
+   plant; mkdir -p "$T/$(dirname "$3")"; printf '%s\n' "$4" > "$T/$3"; printf '%s\n' "$5" > "$T/../names.$$"
+   ( python3 "$ROOT/tools/check-no-ip.py" --root "$T" --names "$T/../names.$$" --strict >/dev/null 2>&1 )
+   local got=$?; rm -f "$T/../names.$$"
+   if [ "$got" = "$want" ]; then echo "  PASS  $label (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $label — wanted exit $want, got $got"; fail=$((fail+1)); fi
+}
+names_case 1 "a long name GLUED to other text (-Dsomemod.flag)"  G.java 'String k = "-Dsomemodxyz.flag";' 'somemodxyz'
+names_case 1 "a long name inside an identifier (somemodxyzItems())" H.java 'x = somemodxyzItems();' 'somemodxyz'
+names_case 0 "a SHORT name inside an ordinary word is not a hit"   I.md 'the arcade was busy' 'arc'
+names_case 1 "a name in a file PATH, not its content"             docs/somemodxyz/notes.md 'nothing to see' 'somemodxyz'
+names_case 1 "a re: entry matches its context"                     J.md 'see mods/arena/x' 're:mods/arena\b'
+names_case 0 "a re: entry does not fire on the ordinary word"      K.md 'the arena path runs' 're:mods/arena\b'
+
+echo "5. the VENDORED.tsv / SPDX gate"
+( python3 "$ROOT/tools/gen-vendored.py" --check >/dev/null 2>&1 )
+[ $? = 0 ] && { echo "  PASS  the real tree's manifest and headers are consistent"; pass=$((pass+1)); } \
+           || { echo "  FAIL  the real tree fails its own vendored gate"; fail=$((fail+1)); }
+vcase() {  # vcase <wanted-exit> <label> <python-mutation> -- run --check in a throwaway git copy
+   local want="$1" label="$2" mutation="$3"
+   local V; V="$(mktemp -d)"
+   # tar rather than `cp --parents` (GNU-only) so this also runs on macOS.
+   ( cd "$ROOT" && git ls-files -z | tar --null -T - -cf - ) | ( cd "$V" && tar -xf - )
+   ( cd "$V" && git init -q && python3 -c "$mutation" && git add -A ) >/dev/null 2>&1
+   ( cd "$V" && python3 tools/gen-vendored.py --check >/dev/null 2>&1 )
+   local got=$?; rm -rf "$V"
+   if [ "$got" = "$want" ]; then echo "  PASS  $label (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $label — wanted exit $want, got $got"; fail=$((fail+1)); fi
+}
+# The CONTROL: an unmodified copy must pass, or every "exit 1" below could be the copy failing for
+# some unrelated reason rather than the gate catching the mutation.
+vcase 0 "control: an unmodified copy passes" 'pass'
+vcase 1 "a vendored file LOSES its SPDX header" \
+  'import pathlib;p=pathlib.Path("templates/neoforge-mod/settings.gradle");p.write_text("".join(l for l in p.read_text().splitlines(True) if "SPDX-License-Identifier" not in l))'
+vcase 1 "a NON-vendored file claims MIT" \
+  'import pathlib;p=pathlib.Path("tools/find-member.py");l=p.read_text().splitlines(True);l.insert(1,"# SPDX-License-Identifier: MIT\n");p.write_text("".join(l))'
+vcase 1 "a new scaffold file lands without regenerating the manifest" \
+  'import pathlib;pathlib.Path("templates/neoforge-mod/tools/new-tool.sh").write_text("# SPDX-License-Identifier: MIT\nx\n")'
 
 echo
 echo "gates self-test: $pass passed, $fail failed"

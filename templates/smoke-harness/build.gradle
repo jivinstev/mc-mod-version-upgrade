@@ -1,0 +1,229 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// NeoForge 1.21.1 SMOKE-HARNESS — build.gradle
+//
+// A throwaway host that boots ARBITRARY prebuilt mod jars to prove they load
+// (headless server) and render (client) BEFORE they're installed into the real
+// instance. Target jars are injected on the command line, NOT compiled from source:
+//
+//   ./gradlew runGameTestServer -Psmokejars="/abs/a.jar,/abs/b.jar"      # headless load
+//   ./gradlew runServer --nogui -Psmokejars="/abs/a.jar"                 # headless load (alt)
+//   ./gradlew runClient -Pboottest -Ptestmode=spawn \                    # client boot
+//       -Psmokejars="/abs/a.jar" -Psmokens="modid1,modid2"
+//
+// NeoGradle auto-loads any jar on the runtime classpath that carries its own
+// neoforge.mods.toml, so `localRuntime files(<jar>)` is enough — no source compile.
+// Every run is isolated under run/<name>/; it never touches the real instance.
+// ─────────────────────────────────────────────────────────────────────────────
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'net.neoforged.gradle.userdev' version '7.1.36'
+}
+
+version = mod_version
+group = mod_group_id
+base { archivesName = mod_id }
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+// Migrated mods often decompile with the odd unreachable/dead-code artifact.
+// Keep warnings from failing the build; we fix real errors, not lint noise.
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-Xlint:none'
+    options.warnings = false
+}
+
+sourceSets.main.resources { srcDir 'src/generated/resources'; exclude 'src/generated/**/.cache' }
+
+repositories {
+    maven { name = 'NeoForged'; url = 'https://maven.neoforged.net/releases' }
+    maven { name = 'Minecraft'; url = 'https://libraries.minecraft.net' }
+    maven { name = 'ParchmentMC'; url = 'https://maven.parchmentmc.org' }
+    maven { name = 'GeckoLib'; url = 'https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/' }
+    maven { name = 'Kotlin for Forge'; url = 'https://thedarkcolour.github.io/KotlinForForge/' }
+    // A mod-specific maven host (e.g. a library your target mod depends on that lives on its author's
+    // own maven) is YOUR configuration, not this template's: list them in .env.local as
+    //   EXTRA_MAVENS=https://maven.example.dev/releases,https://other.example.org/maven
+    (readEnvLocal('EXTRA_MAVENS') ?: '').split(',').collect { it.trim() }.findAll { it }.each { u ->
+        maven { url = u }
+    }
+    maven { name = 'BlameJared (JEI)'; url = 'https://maven.blamejared.com' }
+    mavenCentral()
+}
+
+// Parchment: human-readable parameter names layered on Mojang official mappings.
+// Makes decompiled sources far easier to read and edit.
+subsystems {
+    parchment {
+        minecraftVersion = parchment_minecraft_version
+        mappingsVersion = parchment_version
+    }
+}
+
+runs {
+    configureEach {
+        systemProperty 'forge.logging.markers', 'REGISTRIES'
+        systemProperty 'forge.logging.console.level', 'debug'
+        workingDirectory project.layout.projectDirectory.dir('run').dir(name)
+        modSource project.sourceSets.main
+    }
+    client {
+        systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        // Gate C — client boot loop: `./gradlew runClient -Pboottest [-Ptestmode=MODE]` drives
+        // ClientBootSmokeTest through launch/spawn/battle/gauntlet, then auto-quits. Needs a display
+        // (or Xvfb). See tools/client-boot-loop.sh. WITHOUT this -P->systemProperty mapping the smoke
+        // test never activates and the client just sits at the title until the watchdog fires (a SILENT
+        // HANG — it compiles+launches fine, so it's easy to miss). Parameterized by mod_id, so it Just Works.
+        if (project.hasProperty('boottest'))    systemProperty "${project.mod_id}.boottest", 'true'
+        if (project.hasProperty('testmode'))    systemProperty "${project.mod_id}.testmode", project.property('testmode')
+        if (project.hasProperty('battlecount')) systemProperty "${project.mod_id}.battlecount", project.property('battlecount')
+        if (project.hasProperty('battleticks')) systemProperty "${project.mod_id}.battleticks", project.property('battleticks')
+        // Which namespaces the generic ClientBootSmokeTest should drive (the target mods'
+        // ids). Comma-separated, e.g. -Psmokens="examplemod,geckolib". No default —
+        // if unset the boot test just reaches the title screen (launch-only).
+        if (project.hasProperty('smokens'))     systemProperty "${project.mod_id}.namespaces", project.property('smokens')
+        // -Psmokejeirecipes="modid:recipe_uid,…" → after world load, open those JEI recipe categories so
+        // the mod's category setRecipe()/draw() render code runs (only fires when JEI is in -Psmokejars).
+        if (project.hasProperty('smokejeirecipes')) systemProperty "${project.mod_id}.jeirecipes", project.property('smokejeirecipes')
+        if (project.hasProperty('smokejeiverify'))  systemProperty "${project.mod_id}.jeiverify", project.property('smokejeiverify')
+    }
+    // Headless load gate — boots a dedicated server with all mods loaded and exits
+    // non-zero on any load crash, even with zero @GameTest methods.
+    gameTestServer {
+        // -Psmokegtns="modid1,modid2" additionally RUNS those mods' own @GameTests against the
+        // BUILT JARS passed in -Psmokejars. Without it the headless gate only proves the jars LOAD;
+        // with it, a migrated mod's real content assertions (e.g. "all 294 furniture blocks
+        // register") run against the shipped artifact, not the dev source set.
+        systemProperty 'neoforge.enabledGameTestNamespaces',
+            project.hasProperty('smokegtns') ? "${project.mod_id},${project.property('smokegtns')}" : project.mod_id
+    }
+    server { systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id; argument '--nogui' }
+    data {
+        arguments.addAll '--mod', project.mod_id, '--all',
+            '--output', file('src/generated/resources/').getAbsolutePath(),
+            '--existing', file('src/main/resources/').getAbsolutePath()
+    }
+}
+
+configurations { runtimeClasspath.extendsFrom localRuntime }
+
+dependencies {
+    implementation "net.neoforged:neoforge:${neo_version}"
+
+    // JEI API (compile-only) — lets the harness open a mod's recipe categories via the JEI runtime
+    // (JeiRecipeProbe) to actually exercise their setRecipe()/draw() render path. JEI itself is supplied
+    // at runtime only when a test adds its jar to -Psmokejars (the @JeiPlugin stays dormant otherwise).
+    compileOnly "mezz.jei:jei-1.21.1-neoforge-api:19.39.0.370"
+
+    // ── Target jars under test ──────────────────────────────────────────────
+    // -Psmokejars="/abs/a.jar,/abs/b.jar" → each added as a runtime mod. NeoGradle
+    // loads them off their own neoforge.mods.toml; no source compilation happens.
+    if (project.hasProperty('smokejars')) {
+        project.smokejars.split(',').each { j ->
+            def t = j.trim()
+            if (t) { localRuntime files(t); logger.lifecycle("smoke-harness: mod under test -> ${t}") }
+        }
+    }
+}
+
+// Mixins: NeoForge bundles the Mixin library, and (unlike Forge) runs on Mojang
+// official mappings at runtime — so mixins target readable names and NO refmap is
+// needed. We disable refmap generation and let NeoForge load the config declared
+// in neoforge.mods.toml ([[mixins]] config="<modid>.mixins.json").
+if (project.uses_mixins.toBoolean()) {
+    tasks.withType(JavaCompile).configureEach {
+        options.compilerArgs << '-AdefaultObfuscationEnv=named:none'
+    }
+}
+
+tasks.withType(ProcessResources).configureEach {
+    var props = [
+        minecraft_version      : minecraft_version,
+        minecraft_version_range: minecraft_version_range,
+        neo_version            : neo_version,
+        loader_version_range   : loader_version_range,
+        mod_id                 : mod_id,
+        mod_name               : mod_name,
+        mod_license            : mod_license,
+        mod_version            : mod_version,
+        mod_authors            : mod_authors,
+        mod_description        : mod_description,
+    ]
+    inputs.properties props
+    filesMatching(['META-INF/neoforge.mods.toml', 'pack.mcmeta']) { expand props }
+}
+
+// When bundling nested libs via JarJar, make the bundled jar the primary artifact.
+if (project.uses_jarjar.toBoolean()) {
+    jar { archiveClassifier = 'slim' }
+    tasks.named('jarJar') { archiveClassifier = '' }
+}
+
+// ── Deploy helpers (ported from Battle of Lord) ──────────────────────────────
+def readEnvLocal(String key) {
+    // Look in this project dir, then walk up to the repo root for a shared .env.local
+    def candidates = [file('.env.local'), rootProject.file('.env.local'),
+                      file("${rootDir}/../../.env.local")]
+    for (envFile in candidates) {
+        if (!envFile.exists()) continue
+        def value = null
+        envFile.eachLine { line ->
+            def m = (line =~ /^\s*${key}=(.*)$/)
+            if (m) value = m[0][1].trim()
+        }
+        if (value != null) {
+            if (value.startsWith('~')) value = System.getProperty('user.home') + value.substring(1)
+            return value
+        }
+    }
+    return null
+}
+
+def deployedJarName() {
+    // JarJar makes the primary (classifier-less) jar; otherwise the plain jar.
+    return "${mod_id}-${mod_version}.jar"
+}
+
+// ATOMIC on purpose: stage to a temp file in the target dir, then MOVE it into place.
+// Overwriting the jar in-place while Minecraft is RUNNING corrupts the live game
+// (ZipException / ClassNotFoundException / purple textures) — the game holds the jar open
+// and reads entries lazily. An atomic move means it sees either the whole old jar or the
+// whole new one, never a half-written file. (Still restart the game to load a new build.)
+tasks.register('deployToMods') {
+    dependsOn 'build'
+    doLast {
+        def modsDir = readEnvLocal('MINECRAFT_MODS_DIR')
+        if (!modsDir) {
+            println "WARNING: MINECRAFT_MODS_DIR not in .env.local — skipping deploy"
+            return
+        }
+        def target = new File(modsDir)
+        if (!target.isDirectory()) {
+            println "WARNING: MINECRAFT_MODS_DIR is not a directory: ${modsDir} — skipping deploy"
+            return
+        }
+        def src = file("build/libs/${deployedJarName()}")
+        if (!src.exists()) {
+            throw new GradleException("built jar not found: ${src}")
+        }
+        def dest = new File(target, deployedJarName())
+        def tmp = new File(target, deployedJarName() + ".tmp-" + System.nanoTime())
+        try {
+            java.nio.file.Files.copy(src.toPath(), tmp.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            try {
+                java.nio.file.Files.move(tmp.toPath(), dest.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            } catch (java.nio.file.AtomicMoveNotSupportedException ignored) {
+                java.nio.file.Files.move(tmp.toPath(), dest.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+            println "Deployed ${deployedJarName()} -> ${modsDir}"
+            println "(restart Minecraft to load it)"
+        } finally {
+            if (tmp.exists()) tmp.delete()
+        }
+    }
+}
