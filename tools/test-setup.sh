@@ -111,6 +111,46 @@ out="$(st --yes --path migrate --output-repo "$H/nope")"; code=$?
 st --yes --path migrate --output-repo none >/dev/null
 grep -q '^MOD_OUTPUT_REPO=$' "$R/.env.local" && ok "--output-repo none clears the destination" || bad "none did not clear: $(grep MOD_OUTPUT "$R/.env.local")"
 
+echo "12. migration is a yes/no ADD-ON, asked interactively"
+fresh; st --yes --migrate >/dev/null
+grep -q '^SETUP_PATH=migrate$' "$R/.env.local" && ok "--migrate is shorthand for --path migrate" || bad "--migrate did not set SETUP_PATH"
+# drive the real prompt through a pseudo-terminal: setup refuses to be interactive without one
+tty_run() { python3 - "$R" "$H" "$1" <<'PYX'
+import os, pty, sys, time
+root, home, answers = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(root); os.environ["HOME"] = home
+    os.execvp("./setup", ["./setup", "--no-network"])
+out, pending = b"", list(answers)
+while True:
+    try: chunk = os.read(fd, 4096)
+    except OSError: break
+    if not chunk: break
+    out += chunk
+    if out.rstrip().endswith(b":") or out.rstrip().endswith(b"]") or b"]: " in out[-60:]:
+        os.write(fd, ((pending.pop(0) if pending else "") + "\n").encode()); out += b"\n"
+os.waitpid(pid, 0); sys.stdout.write(out.decode(errors="replace"))
+PYX
+}
+fresh; out="$(tty_run 'maybe,y')"
+{ echo "$out" | grep -q "Also set up migration? (yes/no) \[no\]" && echo "$out" | grep -q "please answer" \
+  && grep -q '^SETUP_PATH=migrate$' "$R/.env.local"; } \
+  && ok "interactive: default shown as 'no', a bad answer is asked again, 'y' turns migration on" \
+  || bad "interactive yes/no: $(echo "$out" | grep -iE 'migration|please' | head -3)"
+fresh; tty_run '' >/dev/null
+grep -q '^SETUP_PATH=install$' "$R/.env.local" && ok "interactive: Enter keeps installing only" || bad "Enter did not default to install: $(grep SETUP_PATH "$R/.env.local")"
+
+echo "13. the ports repo is DETECTED by layout, not by name"
+fresh; P="$(dirname "$R")"
+mkdir -p "$P/any-name/mods/somemod" "$P/unrelated/mods"; git -C "$P/any-name" init -q; git -C "$P/unrelated" init -q
+touch "$P/any-name/mods/somemod/build.gradle"
+out="$(st --yes --migrate)"
+{ echo "$out" | grep -q "looks like a ports repo.*any-name" && ! echo "$out" | grep -q "unrelated" \
+  && grep -q '^MOD_OUTPUT_REPO=../any-name$' "$R/.env.local"; } \
+  && ok "a sibling git repo with mods/<modid>/build.gradle is offered under any name; a bare mods/ is not" \
+  || bad "detection: $(echo "$out" | grep -E 'ports repo|destination')"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"

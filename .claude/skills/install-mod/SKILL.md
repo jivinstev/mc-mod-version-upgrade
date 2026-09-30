@@ -73,8 +73,12 @@ Work them in order; `references/pipeline.md` has the exact commands.
 - **(d) DOWNLOAD.** For every `native`/`needs-migrate`/`needs-downport` node, `modreg.py download`
   (Modrinth preferred; CF fallback). Into `installs/<slug>/jars/`. Verify the sha1 (the CLI does).
   A CF opt-out → **cf-opt-out gate**.
-- **(e) MIGRATE (only nodes that need it), deps-first.** For each `needs-migrate`/`needs-downport`
-  node, **invoke the `migrate-mod` skill** (see handoff below). On its green build, record the output
+- **(e) MIGRATE (only nodes that need it), deps-first.** First check the migration add-on is set up:
+  `SETUP_PATH=migrate` and `MIGRATE_WORKSPACE` in `.env.local`, and `java -version` works. If not, do
+  NOT start porting: stop and tell the user plainly -- "<mod> has no build for Minecraft <version>, so
+  it would have to be ported. That needs the migration add-on (a JDK and several GB): run
+  `./setup --migrate`, then ask again." Finish the `native` nodes that do not depend on it. Otherwise,
+  for each `needs-migrate`/`needs-downport` node, **invoke the `migrate-mod` skill** (see handoff below). On its green build, record the output
   jar in the node. `native` nodes skip this stage.
 - **(g) SMOKE-TEST in isolation — BEFORE installing. Test DEPTH depends on compat (this matters):**
   Collect all final jars + their target modIds, plus **every required dep jar** (even
