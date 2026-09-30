@@ -777,6 +777,7 @@ int backgroundColor, int highlightColor, Properties)` — recover the two ARGB i
 a `models/item/<egg>.json` (`parent: minecraft:item/template_spawn_egg`)** — 1.21.1 ignores the `items/` client-item
 dir and renders eggs from `models/item/`, so a 1.21.4 egg that shipped only an `items/` def is missing-texture
 without it.
+· **AUGMENT — the same raw `(EntityType)` cast breaks spawn placements:** `RegisterSpawnPlacementsEvent.register((EntityType) X.get(), …, (t, w, r, p, rand) -> Mob.checkMobSpawnRules(t, w, r, p, rand), …)` fails with `incompatible types: EntityType<Entity> cannot be converted to EntityType<? extends Mob>`. Drop the raw cast there too, so the type argument infers as the concrete mob type (2 sites in one downport).
 M6. **Recipe ingredient bare-string shorthand (1.21.2+ data)** · **Pattern (1.21.2+ JSON):** `"ingredients":
 ["ns:id", …]` / smelting `"ingredient": "ns:id"` (bare strings; `"#ns:tag"` for tags) · **Runtime (downport, NOT a
 compile error — silently no-loads):** `Failed to parse either. First: Not a json array … Second: Not a JSON object …
@@ -785,6 +786,12 @@ No ingredients for shapeless recipe` at datapack load · **Fix (→1.21.1):** ev
 `{"id": X, "count": N}` on BOTH versions — leave them. (Same shape as catalog §J #93's ingredient note; a
 `runGameTestServer` reload surfaces it — grep the log for `JsonParseException`/`No ingredients`.) `pack.mcmeta`
 pack_format for 1.21.4 = data **61** / resources **46**; 1.21.1 = data **48** / resources **34** (§W18).
+
+M26. **Block light overrides changed shape in 1.21.2, so a DOWNPORT orphans them silently** · **Pattern:** a 1.21.2+ block overriding `public boolean propagatesSkylightDown(BlockState state)` and `public int getLightBlock(BlockState state)`, usually with no `@Override` (the decompiler drops it) · **Symptom:** none at compile, load or in a spawn test: on 1.21.1 the one-argument methods override nothing, vanilla's defaults run, and a see-through block (a plate of food, a banner) darkens what is under it · **Fix:** `propagatesSkylightDown(BlockState, BlockGetter, BlockPos)` and `getLightBlock(BlockState, BlockGetter, BlockPos)`, with `@Override` (verify with `javap` on `build/neoForm/*/steps/recompile/outputs.jar`). Measured on a blind replay of a small MCreator mod downported 1.21.4 → 1.21.1: 16 methods in 8 blocks, and a GameTest asserting light transparency fails on the old shape and passes on the new. · **Scan:** `python3 tools/override-probe.py .` finds this whole class of dead override, not only these two methods.
+
+M27. **`MoveControl.Operation` is a protected nested type on 1.21.1** · **Pattern:** 1.21.2+ MCreator mob code importing `import net.minecraft.world.entity.ai.control.MoveControl.Operation;` and using it inside a `new MoveControl(this) { … }` subclass · **Error:** `Operation has protected access in MoveControl` (at the import) · **Fix:** delete the import; inside the anonymous `MoveControl` subclass `Operation` resolves as an inherited member type (or write `MoveControl.Operation.MOVE_TO`). Measured: 2 mobs in one downport.
+
+M28. **MCreator's generic payload registration fails wildcard capture on 1.21.1** · **Pattern:** MCreator's network setup iterating a `Map<CustomPacketPayload.Type<?>, NetworkMessage<?>>` and calling `registrar.playBidirectional(id, message.reader(), message.handler())`, where the record stores a `StreamCodec<? extends FriendlyByteBuf, T>` · **Error:** `method playBidirectional in class PayloadRegistrar cannot be applied to given types` · **Fix:** 1.21.1 wants `StreamCodec<? super RegistryFriendlyByteBuf, T>` and the two wildcard captures cannot be unified, so raw-cast the three arguments: `registrar.playBidirectional((CustomPacketPayload.Type) id, (StreamCodec) reader, (IPayloadHandler) handler)` (confirm the signature with `javap` on the NeoForge universal jar). Every MCreator 1.21.2+ downport carries this boilerplate; in the measured mod the map was empty, so the fix is compile-only.
 
 ### 1.21.4 → 1.21.1 (downport) — filled from the Registrate-based framework library / furniture mod downport (M7-M25)
 Full details + the exact 1.21.1 signatures are in `references/minor-version-deltas.md`. `pack_format` 1.21.4 data=61 → 1.21.1 34/48.
@@ -1236,6 +1243,7 @@ whole build at Google's Central mirror with an init script that rewrites any rep
 (`./gradlew --init-script mirror.gradle …`, applied to settings + every project's repositories). And in
 Groovy write the exclude regex as `'net\\.neoforged.*'` — a single `\.` inside a single-quoted Groovy
 string is a settings-file COMPILE error (`Unexpected character: '\''`), which two ports shipped.
+· **AUGMENT — the init script ships as `tools/central-mirror.init.gradle`, and a per-build `--init-script` does not reach builds that other scripts start:** the Gate C loop runs its own `./gradlew runClient`, so on a rate-limited machine its first launch dies at configuration with `Could not resolve commons-io:commons-io:2.11.0 … 429` even though your own builds pass. Measured on a blind replay in a cloud session. Install the script into `~/.gradle/init.d/` (every build on the machine) and remove it to undo.
 
 **V10. A required library may simply not exist yet for the new era — check before promising parity.**
 · **Pattern:** a compile-time library bundled via JarJar (this repo's canonical case is GeckoLib) ·
