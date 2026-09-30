@@ -32,6 +32,7 @@ unzip -l "$JAR" | grep -E 'mixins\.json|jarjar/.*\.jar|shaders/'   # hard bits
 ```bash
 mkdir -p mods/$MODID
 cp -R templates/neoforge-mod/. mods/$MODID/
+rm -rf mods/$MODID/test-templates   # Step 6 copies from the checkout's templates; a copy here would ship with the port
 # personalize settings.gradle + gradle.properties
 perl -pi -e "s/MOD_ID_PLACEHOLDER/$MODID/" mods/$MODID/settings.gradle
 $EDITOR mods/$MODID/gradle.properties     # mod_id, mod_name, mod_version, group, authors, description, uses_* flags
