@@ -203,6 +203,36 @@ fresh; out="$(SETUP_PATH_OVERRIDE="$NOJAVA" st --yes --migrate)"
   && ok "the default is to share; with no gh, --yes names 'gh auth login' and installs nothing" || bad "gh note: $(echo "$out" | grep -i 'gh\|share' | head -3)"
 fresh; out="$(st --yes)"; ! echo "$out" | grep -q "Share what your ports teach" && ok "install-only setup does not ask about sharing lessons" || bad "asked without the add-on"
 
+echo "18. Claude Code permissions: added (only added), backed up, remembered"
+cs() { python3 -c "import json,sys;d=json.load(open('$H/.claude/settings.json'));print(eval(sys.argv[1]))" "$1"; }
+fresh; st --yes >/dev/null
+{ [ "$(cs "'api.modrinth.com' in d['sandbox']['network']['allowedDomains']")" = True ] \
+  && [ "$(cs "'maven.neoforged.net' in d['sandbox']['network']['allowedDomains']")" = False ] \
+  && [ "$(cs "d['cleanupPeriodDays']")" = 365 ]; } \
+  && ok "install-only: the registries are allowed, the build servers are not, transcripts are kept" || bad "install settings: $(cat "$H/.claude/settings.json")"
+fresh; mkdir -p "$H/.claude"
+printf '{"model":"x","cleanupPeriodDays":7,"permissions":{"allow":["Bash(ls:*)"]},"sandbox":{"network":{"allowedDomains":["example.org"]}}}' > "$H/.claude/settings.json"
+SETUP_PATH_OVERRIDE="$NOJAVA" st --yes --migrate >/dev/null
+{ [ "$(cs "d['model']")" = x ] && [ "$(cs "d['cleanupPeriodDays']")" = 7 ] \
+  && [ "$(cs "d['permissions']['allow']")" = "['Bash(ls:*)', 'Bash(./gradlew:*)']" ] \
+  && [ "$(cs "d['sandbox']['network']['allowedDomains'][0]")" = example.org ] \
+  && [ "$(cs "'maven.neoforged.net' in d['sandbox']['network']['allowedDomains']")" = True ] \
+  && [ "$(cs "d['sandbox']['excludedCommands']")" = "['./gradlew']" ] \
+  && [ "$(cs "'~/.gradle' in d['sandbox']['filesystem']['allowWrite']")" = True ] \
+  && grep -q '"model":"x"' "$H/.claude/settings.json.bak"; } \
+  && ok "migrate: merged into existing settings -- nothing removed or changed, lists extended, backup kept" \
+  || bad "merge: $(cat "$H/.claude/settings.json")"
+before="$(cat "$H/.claude/settings.json")"; out="$(SETUP_PATH_OVERRIDE="$NOJAVA" st --yes --migrate)"
+[ "$(cat "$H/.claude/settings.json")" = "$before" ] && echo "$out" | grep -q "already in place" \
+  && ok "a re-run adds nothing and says so" || bad "re-run changed settings"
+fresh; mkdir -p "$H/.claude"; printf '{not json' > "$H/.claude/settings.json"
+out="$(st --yes)"; [ "$(cat "$H/.claude/settings.json")" = "{not json" ] && echo "$out" | grep -q "is not valid JSON" \
+  && ok "an unparseable settings file is left untouched and reported" || bad "bad JSON touched"
+fresh; out="$(st --check)"; [ ! -e "$H/.claude/settings.json" ] && ok "--check does not write Claude Code settings" || bad "--check wrote settings"
+fresh; out="$(tty_run 'n,,,,,,no')"
+[ ! -e "$H/.claude/settings.json" ] && grep -q '^CLAUDE_SETTINGS=no$' "$R/.env.local" \
+  && ok "answering no writes nothing, and the answer is remembered" || bad "no: $(ls "$H/.claude" 2>&1; grep CLAUDE_SETTINGS "$R/.env.local")"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"
