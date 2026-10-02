@@ -36,6 +36,8 @@ asst() { # asst <session> <reqId> <iso time> <tool path> <out> <cache_read> [eff
   asst S1 r2 2026-09-30T10:05:00Z /w/mods/othermod/B.java 200 2000
   printf '{"type":"cost-state","sessionId":"S1","totalCostUSD":1.25}\n{"type":"cost-state","sessionId":"S1","totalCostUSD":1.5}\n'; } > "$J/S1.jsonl"
 asst S1 a1 2026-09-30T10:03:00Z /w/x 50 500 medium > "$J/S1/subagents/agent-1.jsonl"
+# a READ of a third mod (reference) must not mark the session mixed
+printf '{"type":"assistant","sessionId":"S1","requestId":"r3","timestamp":"2026-09-30T10:06:00Z","effort":"high","version":"9.9.9","entrypoint":"cli","message":{"model":"claude-test-1","content":[{"type":"tool_use","name":"Read","input":{"file_path":"/w/mods/refmod/X.java"}}],"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n' >> "$J/S1.jsonl"
 asst S2 z1 2026-09-30T11:00:00Z /elsewhere/y 999 9999 > "$J/S2.jsonl"
 
 echo "0. port-cost.py (fixture transcripts)"
@@ -49,8 +51,8 @@ t = c["totals"]
 print(c["sessions"], t["requests"], t["subagent_requests"], t["output"], t["cache_read"], t["thinking"], t["cache_write_5m"], t["cache_write_1h"], c["usd"], sorted(c["effort"].items()), list(c["contamination"].values()))
 PY2
 )"
-[ "$C" = "1 3 1 350 3500 15 120 180 1.5 [('high', 2), ('medium', 1)] [{'othermod': 1}]" ] \
-  && ok "one request split over two blocks counts ONCE; the subagent is included; unrelated sessions are not" \
+[ "$C" = "1 4 1 350 3500 15 120 180 1.5 [('high', 3), ('medium', 1)] [{'othermod': 1}]" ] \
+  && ok "one request split over two blocks counts ONCE; subagent included; unrelated sessions not; a READ of another mod is not 'mixed'" \
   || bad "totals: $C"
 grep -q 'these sessions also touched other mods' <<<"$out" && grep -q '\$1.50' <<<"$out" \
   && ok "dollars come from the session's recorded total; a mixed session is flagged" || bad "print: $out"

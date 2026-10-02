@@ -11,8 +11,8 @@ WHICH REQUESTS COUNT
     Every session whose tool calls touch `mods/<modid>`, WHOLE (a port session's triage and setup are
     part of the port), plus that session's subagents (<session>/subagents/*.jsonl). Each API request is
     counted ONCE: usage is repeated on every content block of a response, so counting lines doubles it.
-    A session that also touched other mods is listed under `contamination`, so a mixed session is
-    visible rather than silently inflating this port.
+    A session that also WORKED on other mods (edits, commands -- not just reading one for reference) is
+    listed under `contamination`, so a mixed session is visible rather than silently inflating this port.
 
 WHAT IS RECORDED (so costs can be normalised later)
     per model   requests, input, output (and the thinking part of it), cache reads, cache writes (5-minute
@@ -28,6 +28,7 @@ import argparse, collections, datetime, json, os, pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GAP = 600
+READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead"}
 
 
 def ts(s):
@@ -88,11 +89,14 @@ def collect(modid, projects):
                 if d.get("type") != "assistant":
                     continue
                 m = d.get("message") or {}
-                calls = json.dumps([c.get("input") for c in m.get("content") or []
-                                    if isinstance(c, dict) and c.get("type") == "tool_use"])
+                uses = [c for c in m.get("content") or [] if isinstance(c, dict) and c.get("type") == "tool_use"]
+                calls = json.dumps([c.get("input") for c in uses])
                 if rx.search(calls):
                     touches = True
-                for o in set(other_rx.findall(calls)) - {modid}:
+                # only WORK on another mod makes a session mixed: reading a finished port for reference
+                # (Read/Grep/Glob) is part of this port, not a second one
+                work = json.dumps([c.get("input") for c in uses if c.get("name") not in READ_ONLY_TOOLS])
+                for o in set(other_rx.findall(work)) - {modid}:
                     others[o] += 1
                 versions.add(d.get("version"))
                 entry.add(d.get("entrypoint"))
