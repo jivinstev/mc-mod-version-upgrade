@@ -2,17 +2,50 @@
 
 > ⚠️ **Under construction.** Not yet published; please don't rely on it until this notice goes away.
 
-Two things in one repo, and most people only want the first:
+**Install Minecraft mods, and port the ones that are stuck on an old version, by asking
+[Claude Code](https://claude.com/claude-code) in plain words.**
+
+```text
+> Install Sodium
+> Migrate <mod name> to Minecraft 26.2
+```
+
+The first finds the right build on Modrinth or CurseForge, resolves its dependencies, verifies the
+download and puts it in the right mods folder. The second is for a mod with no build for your version:
+it decompiles the old jar, rewrites it through a catalogue of ~540 known API changes, builds it, and
+only calls it done once three test gates pass, the last of them a real Minecraft client that loads the
+mod, spawns its mobs and uses its items.
+
+### Measured ports
+
+Every port here was run blind, from this repository alone, by a fresh Claude Code session:
+
+| the mod | from → to | time | cost | gates passed |
+|---|---|---|---|---|
+| a small MCreator food mod, 46 files | NeoForge 1.21.4 → 1.21.1 | 20 min | $6.88 | unit, server, client |
+| a GeckoLib library, 53 files, 6 mixins | Forge 1.20.1 → NeoForge 1.21.1 | 43 min | $30.31 | unit, server, client |
+| a shield mod, 64 items, 45 files | Forge 1.20.1 → NeoForge 26.2 | 1.8 h | not recorded¹ | unit, server, client (4 phases) |
+
+Every port also sends back what it taught, written without the mod's name, as a pull request to the
+catalogue: those three contributed 31 lessons between them (22 new entries, 9 additions). Each records its own cost in
+[`docs/port-costs.tsv`](docs/port-costs.tsv), so the next person can see what a mod of that size is
+likely to take. ¹ Claude Code on a desktop records tokens, not dollars: 221k output tokens.
+
+## Quick start
+
+```bash
+git clone https://github.com/jivinstev/mc-mod-version-upgrade
+cd mc-mod-version-upgrade && ./setup
+claude
+```
+
+`./setup` asks a few questions, each with a recommended answer, and ends by telling you what to type.
+Two kinds of use, and most people only want the first:
 
 ### Install mods — needs only Python 3 and a network
 Search Modrinth and CurseForge behind one interface, resolve dependencies recursively, check whether
 a build for your Minecraft version already exists, verify downloads by checksum, and deploy into the
 right mods folder.
-
-```bash
-git clone https://github.com/jivinstev/mc-mod-version-upgrade
-cd mc-mod-version-upgrade && ./setup
-```
 
 `./setup` finds your Minecraft install and says what is in it, recommends an answer to every
 question (Enter accepts it), and ends with a command to try. Re-running it is safe: it keeps your
@@ -59,7 +92,7 @@ it from WSL or Git Bash.
 
 ## The migration catalogue
 
-[`CATALOG.md`](CATALOG.md) is the knowledge base the migrate skill works from: ~450 entries, each a
+[`CATALOG.md`](CATALOG.md) is the knowledge base the migrate skill works from: ~540 entries, each a
 real migration failure written as **pattern → error → fix**, with the measurement that established
 it. The mods each lesson came from are described rather than named; the evidence is kept verbatim.
 
