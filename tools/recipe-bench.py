@@ -314,7 +314,7 @@ def main():
         res["recipes"] = apply_recipes(work, src, a.recipes)
         init = work / "recipe-bench-maxerrs.init.gradle"
         init.write_text(MAXERRS_INIT)
-        cmd = ["./gradlew", "compileJava", "--console=plain", "--init-script", str(init)]
+        cmd = ["./gradlew", "compileJava", "--console=plain", "--no-daemon", "--init-script", str(init)]
         for s in a.init_script:
             cmd += ["--init-script", str(pathlib.Path(s).resolve())]
         if a.mc:
