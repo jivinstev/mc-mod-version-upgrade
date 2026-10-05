@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # Runs at the start of every Claude Code session (see .claude/settings.json).
-# In a cloud session it points Gradle at Google's mirror of Maven Central: the real one
-# rate-limits cloud IPs (HTTP 429), and Gradle doesn't fall back to another repository.
+# In a cloud session it does two quick things and returns at once:
+#   1. starts cloud/ensure.sh in the BACKGROUND (installs xvfb + Java 25), so the session
+#      opens immediately and the tools are usually there by the time anything needs them;
+#   2. points Gradle at Google's mirror of Maven Central: the real one rate-limits cloud IPs
+#      (HTTP 429), and Gradle doesn't fall back to another repository.
 # On your own computer it does nothing.
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+setsid nohup bash "$here/ensure.sh" </dev/null >"${TMPDIR:-/tmp}/cloud-ensure.log" 2>&1 &
 init="${GRADLE_USER_HOME:-$HOME/.gradle}/init.d/central-mirror.gradle"
 [ -f "$init" ] && exit 0
 mkdir -p "$(dirname "$init")"

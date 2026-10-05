@@ -4,8 +4,9 @@
 
     python3 cloud/check.py
 
-Checks the tools the environment's setup script installs, and that every host in
-cloud/allowed-domains.txt is reachable. Says exactly what to fix. Exit 0 ready, 1 not.
+Checks that every host in cloud/allowed-domains.txt is reachable, then makes sure the two
+tools a cloud session lacks are installed (cloud/ensure.sh: waits for the background install
+the session-start hook began, or installs them now). Says exactly what to fix. Exit 0 ready, 1 not.
 """
 import os, pathlib, shutil, subprocess, sys
 
@@ -52,15 +53,19 @@ def main():
         return 0
     wanted = [l.strip() for l in (ROOT / 'cloud/allowed-domains.txt').read_text().splitlines() if l.strip()]
     problems = []
-    if not shutil.which('xvfb-run'):
-        problems.append('xvfb-run is missing: the environment setup script has not run (see cloud/setup.sh)')
-    jv = java_versions()
-    for v in ('21', '25'):
-        if v not in jv:
-            problems.append('Java %s is missing: the environment setup script has not run (see cloud/setup.sh)' % v)
     blocked = [d for d in wanted if d in PROBES and not reachable(PROBES[d])]
     for d in blocked:
         problems.append('cannot reach %s: add it to the environment\'s Allowed domains' % d)
+    if not blocked:
+        # Only once the hosts are reachable: the installs download from them.
+        print('cloud/check.py: making sure xvfb and Java 25 are installed (first time: a minute or two)...', flush=True)
+        subprocess.run(['bash', str(ROOT / 'cloud/ensure.sh')])
+    if not shutil.which('xvfb-run'):
+        problems.append('xvfb-run is missing: run bash cloud/ensure.sh and read its error')
+    jv = java_versions()
+    for v in ('21', '25'):
+        if v not in jv:
+            problems.append('Java %s is missing: run bash cloud/ensure.sh and read its error' % v)
     checked = len([d for d in wanted if d in PROBES])
     if problems:
         print('cloud/check.py: NOT READY (%d of %d hosts reachable)' % (checked - len(blocked), checked))
