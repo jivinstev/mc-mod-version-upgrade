@@ -627,13 +627,23 @@ def main():
             print(f"   destination: {out} (not a git repo: tools/finish-port.py copies only)")
 
     # 6. registries ---------------------------------------------------------------------------
-    print("\n" + step() + "Mod registries\n"
-          "   Modrinth works with no account and is searched first.\n"
-          "   CurseForge is OPTIONAL. Without a key, a mod published ONLY on CurseForge cannot be found\n"
-          "   or downloaded (you will be told when that happens); everything on Modrinth still works.\n"
-          "   To get a free key: sign in at https://console.curseforge.com/ and open \"API keys\".\n"
-          "   You can add it later with ./setup --review, or by editing CURSEFORGE_API_KEY in .env.local.")
-    ask.decide("CURSEFORGE_API_KEY", "", "CurseForge API key (or Enter to skip)", secret=True)
+    in_env = bool((os.environ.get("CURSEFORGE_API_KEY") or "").strip())
+    in_file = (ask.existing("CURSEFORGE_API_KEY") or {}).get("value")
+    if in_env and not in_file:
+        # The key came from the environment (a cloud environment's variables, or your shell). The
+        # registry tools read it from there, so there is nothing to ask and nothing to write: an
+        # empty line in .env.local made the summary read as if there were no key at all.
+        print("\n" + step() + "Mod registries\n"
+              "   Modrinth works with no account and is searched first.\n"
+              "   CurseForge key: found in the environment (CURSEFORGE_API_KEY). Nothing to do.")
+    else:
+        print("\n" + step() + "Mod registries\n"
+              "   Modrinth works with no account and is searched first.\n"
+              "   CurseForge is OPTIONAL. Without a key, a mod published ONLY on CurseForge cannot be found\n"
+              "   or downloaded (you will be told when that happens); everything on Modrinth still works.\n"
+              "   To get a free key: sign in at https://console.curseforge.com/ and open \"API keys\".\n"
+              "   You can add it later with ./setup --review, or by editing CURSEFORGE_API_KEY in .env.local.")
+        ask.decide("CURSEFORGE_API_KEY", "", "CurseForge API key (or Enter to skip)", secret=True)
 
     # 7. Claude hookup ------------------------------------------------------------------------
     print("\n" + step() + "Claude Code")

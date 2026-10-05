@@ -9,7 +9,7 @@ Subcommands:
   search        --query "<text>" [--loader neoforge --mc 1.21.1] [--limit N]
   versions      --provider <p> --id <projectId> [--loader neoforge --mc 1.21.1]
   deps          --provider <p> --id <projectId> --file <fileId>
-  download      --provider <p> --id <projectId> --file <fileId> --out <path>
+  download      --provider <p> --id <projectId> --file <fileId> --out <file or folder>
   resolve-modid --jar <path>
 
 Design notes:
