@@ -6,8 +6,12 @@ name: windows
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
+  # The build job takes several minutes (Gradle, NeoForm, a Minecraft server), so it runs on demand:
+  # from the Actions tab, or on a PR carrying the windows-build label.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,6 +23,8 @@ defaults:
 jobs:
   static:
     name: windows static (setup, self-tests, gates)
+    # Adding a label is not a code change; the static checks already ran on this commit.
+    if: github.event.action != 'labeled'
     runs-on: windows-latest
     steps:
       # The runner's git has core.autocrlf=true, like a fresh Git for Windows install: the checkout is
@@ -113,3 +119,74 @@ jobs:
       - run: ./tools/test-review.sh
       - run: ./tools/test-cycle.sh
       - run: ./tools/test-port-tools.sh
+
+  build:
+    name: windows build + Gate B (template mod)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'windows-build'))
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # The way a user gets here: setup --migrate makes the workspace (tools/, templates/ and
+      # .env.local linked back to the checkout), then the skill copies the template into mods/<modid>.
+      - name: setup --migrate makes the workspace
+        run: |
+          H="$(cygpath -u "$RUNNER_TEMP")/home"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          echo "H=$H" >> "$GITHUB_ENV"
+          HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
+            LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" ./setup --yes --migrate --no-network
+          WS="$H/.mc-mod-upgrade/work"; ls -la "$WS"
+          echo "WS=$WS" >> "$GITHUB_ENV"
+          # What setup gives Claude Code's environment on Windows, so ./gradlew's Exec gates find Python.
+          echo "PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          echo "PYTHONUTF8=1" >> "$GITHUB_ENV"
+
+      - name: scaffold the template mod
+        run: |
+          M="$WS/mods/examplemod"; cp -R templates/neoforge-mod "$M"
+          git ls-files --eol templates/neoforge-mod/gradlew
+          J="$M/src/main/java/com/example/examplemod"; mkdir -p "$J/test"
+          printf '%s\n' 'package com.example.examplemod;' \
+            'import net.neoforged.fml.common.Mod;' \
+            '@Mod("examplemod")' \
+            'public class ExampleMod { public ExampleMod() {} }' > "$J/ExampleMod.java"
+          printf '%s\n' 'package com.example.examplemod.test;' \
+            'import net.minecraft.core.registries.BuiltInRegistries;' \
+            'import net.minecraft.gametest.framework.GameTest;' \
+            'import net.minecraft.gametest.framework.GameTestHelper;' \
+            'import net.minecraft.resources.ResourceLocation;' \
+            'import net.neoforged.neoforge.gametest.GameTestHolder;' \
+            'import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;' \
+            '@GameTestHolder("examplemod")' \
+            '@PrefixGameTestTemplate(false)' \
+            'public class SmokeGameTest {' \
+            '    @GameTest(template = "empty_test")' \
+            '    public static void stoneIsRegistered(GameTestHelper h) {' \
+            '        h.assertTrue(BuiltInRegistries.BLOCK.containsKey(ResourceLocation.withDefaultNamespace("stone")), "stone");' \
+            '        h.succeed();' \
+            '    }' \
+            '}' > "$J/test/SmokeGameTest.java"
+          ( cd "$WS" && python3 tools/gen-empty-structure.py examplemod )
+          find "$M/src" -type f
+
+      - name: ./gradlew build (Gate A)
+        run: cd "$WS/mods/examplemod" && ./gradlew build --no-daemon --console=plain
+
+      - name: ./gradlew runGameTestServer (Gate B)
+        run: cd "$WS/mods/examplemod" && ./gradlew runGameTestServer --no-daemon --console=plain
+
+      - name: the longest path the build made
+        if: always()
+        run: |
+          for d in "$WS" "$(cygpath -u "$USERPROFILE")/.gradle"; do
+            find "$(cygpath -w "$d")" 2>/dev/null || true; done | awk '{ print length($0) "\t" $0 }' | sort -n | tail -3
