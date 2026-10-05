@@ -1,8 +1,6 @@
 # mc-mod-version-upgrade
 
-> ⚠️ **Under construction.** Not yet published; please don't rely on it until this notice goes away.
-
-**Install Minecraft mods, and port the ones stuck on an old version, by asking
+**Install Minecraft mods, and port the ones that are stuck on an old version, by asking
 [Claude Code](https://claude.com/claude-code) in plain words.**
 
 ```text
@@ -23,12 +21,13 @@ Every port here was run blind, from this repository alone, by a fresh Claude Cod
 |---|---|---|---|---|
 | a small MCreator food mod, 46 files | NeoForge 1.21.4 → 1.21.1 | 20 min | $6.88 | unit, server, client |
 | a GeckoLib library, 53 files, 6 mixins | Forge 1.20.1 → NeoForge 1.21.1 | 43 min | $30.31 | unit, server, client |
-| a shield mod, 64 items, 45 files | Forge 1.20.1 → NeoForge 26.2 | 1.8 h | not recorded¹ | unit, server, client (4 phases) |
+| a shield mod, 64 items, 45 files | Forge 1.20.1 → NeoForge 26.2 | 1.8 h | ≈ $30.91¹ | unit, server, client (4 phases) |
 
 Every port also sends back what it taught, written without the mod's name, as a pull request to the
 catalogue: those three contributed 31 lessons between them (22 new entries, 9 additions). Each records its own cost in
 [`docs/port-costs.tsv`](docs/port-costs.tsv), so the next person can see what a mod of that size is
-likely to take. ¹ Claude Code on a desktop records tokens, not dollars: 221k output tokens.
+likely to take. ¹ Estimated: Claude Code on a desktop records tokens, not dollars, so this one is
+its exact token counts at list prices ([`tools/model-prices.tsv`](tools/model-prices.tsv)).
 
 ## Quick start: on your computer
 
