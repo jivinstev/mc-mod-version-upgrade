@@ -1,0 +1,6 @@
+# Stage-1 recipe list for tools/recipe-bench.py: the deterministic codemods this repo ALREADY ships,
+# so the bench can measure "existing tools on" against the raw baseline. One `<catalogue id><TAB><command>`
+# per line; commands run in the bench's work dir with $SRC = the java root and $MIGRATOR = this repo. Order matters (§X4).
+# Scope: Forge 1.20.x source -> NeoForge 1.21.1. Not for era-jump (26.x) or Fabric starts.
+4	find "$SRC" -name '*.java' -print0 | xargs -0 perl -pi "$MIGRATOR"/tools/srg-remap/forge_import_codemod.pl
+25	python3 "$MIGRATOR"/tools/srg-remap/mc121_codemod.py "$SRC"
