@@ -5,7 +5,8 @@
     python3 tools/port-cost.py <modid> --print      # show it, write nothing
 
 tools/finish-port.py runs this for you. Numbers are read from Claude Code's own transcripts
-(~/.claude/projects, or $CLAUDE_CONFIG_DIR/projects), never estimated.
+(~/.claude/projects, or $CLAUDE_CONFIG_DIR/projects). Tokens are never estimated; dollars are
+estimated from them only when Claude Code recorded none (see `dollars` below).
 
 WHICH REQUESTS COUNT
     Every session whose tool calls touch `mods/<modid>`, WHOLE (a port session's triage and setup are
@@ -20,7 +21,10 @@ WHAT IS RECORDED (so costs can be normalised later)
     effort      requests per effort level (low/medium/high/...)
     time        wall (first to last request) and active (gaps capped at 10 minutes) hours
     dollars     the session's own recorded total (`cost-state` in the transcript) when the Claude Code
-                build writes one; otherwise null with the reason. Never computed from a price list.
+                build writes one (usd_source=recorded). A build that writes none (the desktop/CLI build
+                records tokens, not dollars) gets an ESTIMATE from the exact tokens and the dated list
+                prices in tools/model-prices.tsv (usd_source=estimated). A model with no price row leaves
+                the dollars null with the reason -- never a guess.
     size        target Minecraft + NeoForge, Java files, mixin classes, GeckoLib, from the port itself
     context     Claude Code version(s), entry point (cli / cloud / ...), session count
 """
@@ -29,6 +33,42 @@ import argparse, collections, datetime, json, os, pathlib, re, sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 GAP = 600
 READ_ONLY_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead"}
+PRICES = ROOT / "tools/model-prices.tsv"
+
+
+def load_prices(path=PRICES):
+    """model -> {column: float, 'as_of': str} from tools/model-prices.tsv ('#' lines are comments)."""
+    rows, head = {}, None
+    if not path.is_file():
+        return rows
+    for line in path.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        cells = line.split("\t")
+        if head is None:
+            head = cells
+            continue
+        r = dict(zip(head, cells))
+        rows[r["model"]] = {k: (v if k in ("model", "as_of") else float(v)) for k, v in r.items()}
+    return rows
+
+
+def estimate_usd(per_model, prices):
+    """Dollars from exact token counts at list prices, or (None, reason) if any model is unpriced.
+    Thinking is inside output. A cache write with no 5m/1h split is priced as 5-minute."""
+    total, dates = 0.0, set()
+    for model, c in per_model.items():
+        p = prices.get(model)
+        if p is None:
+            return None, f"no price for {model} in tools/model-prices.tsv"
+        unsplit = max(0, c.get("cache_write", 0) - c.get("cache_write_5m", 0) - c.get("cache_write_1h", 0))
+        total += (c.get("input", 0) * p["input"] + c.get("output", 0) * p["output"]
+                  + c.get("cache_read", 0) * p["cache_read"]
+                  + (c.get("cache_write_5m", 0) + unsplit) * p["cache_write_5m"]
+                  + c.get("cache_write_1h", 0) * p["cache_write_1h"]) / 1e6
+        total += c.get("web_search", 0) * p.get("web_search_each", 0)
+        dates.add(p["as_of"])
+    return round(total, 2), "estimated from tokens at list prices as of " + ", ".join(sorted(dates))
 
 
 def ts(s):
@@ -134,6 +174,15 @@ def summarise(modid, sessions, port):
     times.sort()
     costs = [s["cost"] for s in sessions.values()]
     usd = round(sum(costs), 2) if costs and all(c is not None for c in costs) else None
+    usd_source, usd_note = ("recorded", None) if usd is not None else (None, None)
+    if usd is None and per_model:
+        usd, why = estimate_usd(per_model, load_prices())
+        usd_source = "estimated" if usd is not None else None
+        usd_note = why if usd is not None else (
+            "not recorded: this Claude Code build writes no cost-state to its transcripts (tokens are exact), "
+            "and " + why)
+    if usd is None and usd_note is None:
+        usd_note = "not recorded: this Claude Code build writes no cost-state to its transcripts (tokens are exact)"
     totals = collections.Counter()
     for c in per_model.values():
         totals.update(c)
@@ -148,8 +197,8 @@ def summarise(modid, sessions, port):
         "wall_hours": round((times[-1] - times[0]) / 3600, 2) if times else 0,
         "active_hours": round(sum(min(b - a, GAP) for a, b in zip(times, times[1:])) / 3600, 2),
         "usd": usd,
-        "usd_note": None if usd is not None else
-            "not recorded: this Claude Code build writes no cost-state to its transcripts (tokens are exact)",
+        "usd_source": usd_source,
+        "usd_note": usd_note,
         "models": {k: dict(v) for k, v in sorted(per_model.items())},
         "totals": dict(totals),
         "effort": dict(effort),
@@ -162,7 +211,7 @@ def summarise(modid, sessions, port):
 
 CORPUS_COLS = ["month", "minecraft", "java_files", "mixin_classes", "geckolib", "models", "effort", "sessions",
                "requests", "subagent_requests", "active_hours", "wall_hours", "input", "output", "thinking",
-               "cache_read", "cache_write", "cache_write_5m", "cache_write_1h", "usd", "claude_code", "entrypoint",
+               "cache_read", "cache_write", "cache_write_5m", "cache_write_1h", "usd", "usd_source", "claude_code", "entrypoint",
                "mixed_session", "source"]
 
 
@@ -183,7 +232,8 @@ def corpus_row(c):
         "active_hours": c["active_hours"], "wall_hours": c["wall_hours"], "input": t.get("input", 0),
         "output": t.get("output", 0), "thinking": t.get("thinking", 0), "cache_read": t.get("cache_read", 0),
         "cache_write": t.get("cache_write", 0), "cache_write_5m": t.get("cache_write_5m", 0), "cache_write_1h": t.get("cache_write_1h", 0),
-        "usd": "" if c["usd"] is None else f"{c['usd']:.2f}", "claude_code": "+".join(c["claude_code"]),
+        "usd": "" if c["usd"] is None else f"{c['usd']:.2f}", "usd_source": c.get("usd_source") or "",
+        "claude_code": "+".join(c["claude_code"]),
         "entrypoint": "+".join(c["entrypoint"]), "mixed_session": "yes" if c["contamination"] else "no",
         "source": "transcript (port-cost.py)",
     }
@@ -191,13 +241,18 @@ def corpus_row(c):
 
 def migration_section(c):
     t = c["totals"]
-    usd = f"${c['usd']:.2f}" if c["usd"] is not None else "not recorded by this Claude Code build"
+    if c["usd"] is None:
+        usd = "**dollars not recorded by this Claude Code build**"
+    elif c.get("usd_source") == "estimated":
+        usd = f"**≈ ${c['usd']:.2f}** ({c['usd_note']})"
+    else:
+        usd = f"**${c['usd']:.2f}**"
     models = ", ".join(f"{m} ({v['requests']} req)" for m, v in c["models"].items())
     effort = ", ".join(f"{k} {v}" for k, v in sorted(c["effort"].items()))
     size = c["size"]
     lines = [
         "## Cost (recorded by tools/port-cost.py -- do not edit by hand)",
-        f"- **{usd}** over {c['sessions']} session(s): {c['active_hours']} h active, {c['wall_hours']} h wall "
+        f"- {usd} over {c['sessions']} session(s): {c['active_hours']} h active, {c['wall_hours']} h wall "
         f"({c['start']} to {c['end']})",
         f"- model: {models}; effort: {effort}",
         f"- tokens: output {t.get('output', 0):,} (thinking {t.get('thinking', 0):,}), input {t.get('input', 0):,}, "

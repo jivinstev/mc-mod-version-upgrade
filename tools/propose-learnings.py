@@ -318,7 +318,10 @@ def main():
         with open(corpus, "a") as fh:
             fh.write("\t".join(str(row[c]) for c in pc.CORPUS_COLS) + "\n")
         git("add", "docs/port-costs.tsv")
-        cost_line = (f"Cost: {'$' + row['usd'] if row['usd'] else 'dollars not recorded by this build'}, "
+        usd = ("dollars not recorded by this build" if not row["usd"] else
+               f"≈ ${row['usd']} (estimated from tokens at list prices)" if row["usd_source"] == "estimated" else
+               f"${row['usd']}")
+        cost_line = (f"Cost: {usd}, "
                      f"{row['active_hours']} h active / {row['wall_hours']} h wall, {row['output']:,} output tokens, "
                      f"{row['cache_read']:,} cache reads, {row['models']} ({row['effort']} effort); "
                      f"row added to docs/port-costs.tsv.")

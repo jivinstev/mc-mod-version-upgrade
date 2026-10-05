@@ -91,6 +91,21 @@ out="$(python3 tools/port-cost.py fakeport --workspace "$WS" --print 2>&1)"
 grep -q 'not recorded by this Claude Code build' <<<"$out" \
   && ok "a session from a build that records no cost makes dollars 'not recorded', never a guess" || bad "no-cost build: $out"
 rm "$J/S3.jsonl"
+# a no-cost-state build on a PRICED model gets an estimate from the exact tokens, labelled as one
+mv "$J/S1.jsonl" "$T/S1.keep"; mv "$J/S1" "$T/S1dir.keep"
+asst S4 p1 2026-09-30T12:00:00Z /w/mods/fakeport/C.java 1000000 1000000 | sed 's/claude-test-1/claude-opus-5-5/' > "$J/S4.jsonl"
+E="$(python3 - "$WS" <<'PY3'
+import importlib.util, sys, pathlib, os
+spec = importlib.util.spec_from_file_location("pc", "tools/port-cost.py"); pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
+c = pc.summarise("fakeport", pc.collect("fakeport", pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects"), pathlib.Path(sys.argv[1]) / "mods/fakeport")
+print(c["usd"], c["usd_source"], pc.corpus_row(c)["usd_source"])
+PY3
+)"
+# 10 input @4 + 1M output @20 + 1M cache read @0.20 + 40 5m-writes @5 + 60 1h-writes @8, per million
+[ "$E" = "20.2 estimated estimated" ] \
+  && grep -q '≈ \$20.20.*estimated from tokens at list prices' <<<"$(python3 tools/port-cost.py fakeport --workspace "$WS" --print 2>&1)" \
+  && ok "no recorded dollars + a priced model: an estimate from the tokens, marked usd_source=estimated" || bad "estimate: $E"
+rm "$J/S4.jsonl"; mv "$T/S1.keep" "$J/S1.jsonl"; mv "$T/S1dir.keep" "$J/S1"
 echo edited >> "$P/src/main/java/org/fake/fakeport/A.java"
 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
   python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1
@@ -109,7 +124,7 @@ python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$N" --env /dev/n
 
 echo "2. propose-learnings.py (on a throwaway clone of this checkout)"
 M="$T/mig"; git clone -q "$ROOT" "$M"
-cp tools/propose-learnings.py tools/finish-port.py tools/supported-versions.py tools/port-cost.py SUPPORTED_VERSIONS.tsv docs/port-costs.tsv "$M/tools/" && mv "$M/tools/SUPPORTED_VERSIONS.tsv" "$M/" && mv "$M/tools/port-costs.tsv" "$M/docs/"
+cp tools/propose-learnings.py tools/finish-port.py tools/supported-versions.py tools/port-cost.py tools/model-prices.tsv SUPPORTED_VERSIONS.tsv docs/port-costs.tsv "$M/tools/" && mv "$M/tools/SUPPORTED_VERSIONS.tsv" "$M/" && mv "$M/tools/port-costs.tsv" "$M/docs/"
 gitq -C "$M" add -A; gitq -C "$M" commit -qm "test: current tools" >/dev/null 2>&1
 before="$(git -C "$M" rev-parse HEAD)"; home="$(git -C "$M" rev-parse --abbrev-ref HEAD)"
 # the clone may ALREADY have a learnings/* branch: when this runs on a learnings PR's own tree, git names the
