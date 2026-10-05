@@ -42,7 +42,7 @@ to type. Installing needs Python 3. Porting is an add-on: say yes when `./setup`
 `./setup --migrate` later; it needs Java 21 (and 25 for Minecraft 26.x).
 Details: [docs/USING.md](docs/USING.md).
 
-### On Windows
+### On Windows (experimental)
 
 Native Windows, no WSL. Claude Code on Windows already needs Git for Windows, whose Git Bash runs
 everything here. Install the prerequisites, then run setup from cmd or PowerShell:
@@ -65,9 +65,9 @@ Native Windows has no Claude Code sandbox, so Claude asks before running command
 on long paths if setup says they're off, and keep the workspace on the same drive as this folder.
 The real-client test opens a Minecraft window on your desktop; nothing else is needed.
 
-> Windows support is tested on GitHub's Windows runners: setup, every check, a full mod build and the
-> real client. It has not yet been confirmed on a real Windows PC
-> ([#32](https://github.com/jivinstev/mc-mod-version-upgrade/issues/32)); please report anything that differs.
+> **Experimental.** Windows support passes on GitHub's Windows runners (setup, every check, a full
+> mod build and the real client), but it has not yet been confirmed on a real Windows PC. Please report
+> anything that differs in [#32](https://github.com/jivinstev/mc-mod-version-upgrade/issues/32).
 
 ## Quick start: in the cloud
 

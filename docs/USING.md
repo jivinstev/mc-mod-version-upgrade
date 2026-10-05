@@ -47,7 +47,7 @@ size is likely to take.
 | JDK 21 *(migrate only)* | `brew install --cask temurin@21` | `winget install --id EclipseAdoptium.Temurin.21.JDK` | `sudo apt install openjdk-21-jdk` | `sudo dnf install java-21-openjdk-devel` |
 
 Minecraft 26.x targets need Java **25** as well. On Windows, see the README's
-[Windows quick start](../README.md#on-windows): the tooling runs in Git Bash (part of Git for
+[Windows quick start](../README.md#on-windows-experimental) (experimental): the tooling runs in Git Bash (part of Git for
 Windows, which Claude Code needs anyway), and `setup.cmd` starts setup from cmd or PowerShell.
 
 ## In a Claude Code cloud session

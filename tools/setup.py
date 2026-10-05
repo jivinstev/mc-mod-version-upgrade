@@ -616,6 +616,9 @@ def main():
         else:
             print(f"   java: ok (Java {jm}{'' if jm >= 25 else '; MC 26.x targets also need Java 25'})")
     if SYS == "Windows":
+        notes.append("Windows support is EXPERIMENTAL: it passes on GitHub's Windows runners but is not yet "
+                     "confirmed on a real PC. Report anything that differs: "
+                     "https://github.com/jivinstev/mc-mod-version-upgrade/issues/32")
         windows_shims(a.check, notes, problems)
         if path == "migrate":
             long_paths(notes)
