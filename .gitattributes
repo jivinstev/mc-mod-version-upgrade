@@ -1,0 +1,15 @@
+# Line endings are pinned in the repository, not left to each checkout's core.autocrlf.
+#
+# Git for Windows defaults to core.autocrlf=true, which would check every script out with CRLF, and
+# bash then fails on the first line with `$'\r': command not found`. So everything text is LF in the
+# working tree on every OS. The files cmd.exe itself reads are CRLF, stored that way and never
+# converted (-text), so the vendored gradlew.bat stays byte-identical to Gradle's.
+* text=auto eol=lf
+
+*.bat  -text
+*.cmd  -text
+
+*.jar  binary
+*.nbt  binary
+*.png  binary
+*.zip  binary

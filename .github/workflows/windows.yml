@@ -1,0 +1,64 @@
+# Native Windows, the way a user runs it: Git for Windows' bash plus a python.org-style Python
+# (which installs `python` and `py`, NOT `python3`). Issue #32.
+#
+# Kept apart from gates.yml so the required checks on main are untouched until this is stable.
+name: windows
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  static:
+    name: windows static (setup, self-tests, gates)
+    runs-on: windows-latest
+    steps:
+      # The runner's git has core.autocrlf=true, like a fresh Git for Windows install: the checkout is
+      # the line-ending test.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: line endings survive core.autocrlf=true
+        run: |
+          echo "core.autocrlf=$(git config core.autocrlf)"
+          bad=$(git ls-files --eol | awk '$2 == "w/crlf" && $NF !~ /\.(bat|cmd)$/ {print $NF}')
+          if [ -n "$bad" ]; then echo "checked out with CRLF:"; echo "$bad"; exit 1; fi
+          echo "no CRLF outside .bat/.cmd"
+
+      - name: setup --check in an empty home
+        run: |
+          H="$RUNNER_TEMP/home"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          HOME="$H" USERPROFILE="$H" APPDATA="$H/AppData/Roaming" LOCALAPPDATA="$H/AppData/Local" \
+            ./setup --check --no-network
+
+      - name: check-no-ip
+        run: python3 tools/check-no-ip.py
+      - name: catalogue fidelity
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            git show "origin/${{ github.base_ref }}:docs/catalog-census.tsv" > docs/catalog-census.tsv
+          fi
+          python3 tools/check-catalog-fidelity.py
+      - name: vendored licence manifest
+        run: python3 tools/gen-vendored.py --check
+      - run: ./tools/test-gates.sh
+      - run: ./tools/test-renames.sh
+      - run: ./tools/test-review.sh
+      - run: ./tools/test-cycle.sh
+      - run: ./tools/test-port-tools.sh
