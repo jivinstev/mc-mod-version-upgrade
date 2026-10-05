@@ -784,11 +784,17 @@ def main():
         for s in skills:
             link = dest / s
             if link.exists() or link.is_symlink():
-                if link.is_symlink() and os.path.realpath(link) == str((ROOT / ".claude/skills" / s).resolve()):
+                if (link.is_symlink() or is_junction(link)) and \
+                        os.path.realpath(link) == os.path.realpath(ROOT / ".claude/skills" / s):
                     continue
                 notes.append(f"~/.claude/skills/{s} already exists and is not ours -- left alone")
                 continue
-            link.symlink_to(ROOT / ".claude/skills" / s)
+            try:
+                link.symlink_to(ROOT / ".claude/skills" / s)
+            except OSError as e:          # Windows without Developer Mode: a junction needs no privilege
+                if not (SYS == "Windows" and windows_link(link, ROOT / ".claude/skills" / s)):
+                    problems.append(f"could not link {link}: {e}")
+                    continue
             notes.append(f"linked ~/.claude/skills/{s}")
 
     # 8. sharing what ports teach (migration add-on) ------------------------------------------
