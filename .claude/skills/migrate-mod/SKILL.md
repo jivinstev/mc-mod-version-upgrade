@@ -127,7 +127,8 @@ only genuinely headless environments fall back to a human-run command. Three par
 1. Resolve the input jar. If given a bare name, look in `$MODS_SOURCE_DIR`
    (from `.env.local`) and the CurseForge instances under it.
 2. Inspect it WITHOUT decompiling yet (fast): `unzip -l` the jar and read
-   `META-INF/mods.toml`. Record, in the mod's `MIGRATION.md`:
+   `META-INF/mods.toml` (Git Bash on Windows has no unzip of its own: setup's `~/bin/unzip` runs
+   `tools/zipls.py`, which takes the same `-l`/`-p`/`-Z1` flags). Record, in the mod's `MIGRATION.md`:
    - modId, version, MC/loader version range, declared dependencies.
    - Class count (`unzip -l | grep -c '\.class$'`).
    - **Mixins?** presence of `*.mixins.json` — hard; each mixin targets a vanilla

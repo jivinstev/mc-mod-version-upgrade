@@ -86,6 +86,8 @@ PHASES="launch spawn battle gauntlet"   # or "launch spawn" for a native downloa
 EOT
 SIG=/tmp/smokeharness-clientloop; rm -rf "$SIG"; mkdir -p "$SIG"
 open templates/smoke-harness/tools/run-gatec.command
+#   Windows (Git Bash): no `open` and no launcher needed -- the agent's shell is in the desktop session,
+#   so run it directly, in the background:  templates/smoke-harness/tools/client-validate.sh &
 #   Each phase runs `runClient -Pboottest -Ptestmode=<phase> -Psmokejars=.. -Psmokens=..`.
 #   MONITOR with the script (do NOT hand-roll a poll loop ending in `[ -f crash.ready ]` — it exits 1
 #   on the PASS path, mislabeling a green run "failed"). It exits 0=all-done, 1=crash, 3=timeout:
