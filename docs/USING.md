@@ -48,3 +48,14 @@ size is likely to take.
 
 Minecraft 26.x targets need Java **25** as well. The tooling is bash + Python, so on Windows run
 it from WSL or Git Bash.
+
+## In a Claude Code cloud session
+
+The README's cloud quick start is the whole setup. Two notes:
+
+- **One environment serves both this repo and
+  [mc-buddy-builder](https://github.com/jivinstev/mc-buddy-builder):** its allowed-domains list is the
+  union of what both need, so make it once and use it for either.
+- **Getting the jar home.** The session is deleted when it ends, and `*.jar` is gitignored. Ask Claude
+  to send you the jar (a download in the Claude app). If that isn't available, ask it to commit the jar
+  with `git add -f` to a branch of your fork, then pull that branch at home.

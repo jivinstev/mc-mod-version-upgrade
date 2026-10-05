@@ -44,8 +44,7 @@ Details: [docs/USING.md](docs/USING.md).
 
 ## Quick start: in the cloud
 
-Nothing to install. One environment works for this repo and for
-[mc-buddy-builder](https://github.com/jivinstev/mc-buddy-builder).
+Nothing to install.
 
 1. **Make the environment (once):** at [claude.ai/code](https://claude.ai/code), open the environment
    menu → **Add environment**. Name it `Minecraft modding`, then:
@@ -77,8 +76,9 @@ Nothing to install. One environment works for this repo and for
    screen and Java 25) the first time, which takes a minute or two. It ends with **Ready.**; then
    ask for a port in plain words, as above.
 
-In the cloud you can port and test, but there's no Minecraft to install into: take the finished jar
-home.
+In the cloud you can port and test, but there's no Minecraft to play it in, and the session's files
+are deleted when it ends. So when a port finishes, **ask Claude to send you the jar**: it arrives as a
+download in the Claude app. Then put it in your Minecraft `mods` folder at home.
 
 ## Ported mods are for your own machine
 
