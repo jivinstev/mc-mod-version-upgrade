@@ -37,7 +37,7 @@ def ignored(paths):
         return set()
     try:
         r = subprocess.run(["git", "check-ignore", "--stdin"], input="\n".join(paths),
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
         return set()
     if r.returncode not in (0, 1):          # 128 = not a work tree

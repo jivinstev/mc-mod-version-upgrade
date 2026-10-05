@@ -24,7 +24,7 @@ import argparse, pathlib, sys
 
 def rows(path):
     out = []
-    for line in pathlib.Path(path).read_text().splitlines():
+    for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
         if line and not line.startswith("#") and "\t" in line:
             out.append(tuple(line.split("\t", 1)))
     return out
@@ -37,7 +37,7 @@ def main():
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    hand_text = pathlib.Path(a.hand).read_text()
+    hand_text = pathlib.Path(a.hand).read_text(encoding="utf-8")
     hand_from = {f for f, _ in rows(a.hand)}
     lines = hand_text.split("\n")
     at = next((i for i, l in enumerate(lines) if l.startswith("#!exhaustive")), None)
@@ -66,7 +66,7 @@ def main():
             kept += 1
         print(f"compose-renames: {p.name}: {kept} row(s) added, {dropped} already covered by hand")
     out = lines[:at + 1] + block + lines[at + 1:]
-    pathlib.Path(a.out).write_text("\n".join(out))
+    pathlib.Path(a.out).write_text("\n".join(out), encoding="utf-8")
     print(f"compose-renames: wrote {a.out} ({len(hand_from)} hand + {len(seen) - len(hand_from)} generated)")
     return 0
 

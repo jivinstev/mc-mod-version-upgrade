@@ -7,6 +7,7 @@
 # in a scratch directory that is deleted afterwards. A gate never verified-to-fail is decoration.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+. tools/python.sh || exit 1   # python3 on Windows too
 ROOT="$PWD"
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -111,6 +112,29 @@ fcase 1 "a numbered entry (12.) that DISAPPEARS" \
   'import pathlib;p=pathlib.Path("CATALOG.md");p.write_text(p.read_text().replace("12. **numbered** body.\n",""))'
 fcase 1 "a tool the catalogue names is DELETED" \
   'import os;os.remove("tools/real-tool.py")'
+
+echo "7. the encoding gate (Windows reads and writes cp1252 unless told otherwise)"
+( python3 "$ROOT/tools/check-encoding.py" >/dev/null 2>&1 )
+[ $? = 0 ] && { echo "  PASS  the real tree names every encoding"; pass=$((pass+1)); } \
+           || { echo "  FAIL  the real tree fails its own encoding gate"; fail=$((fail+1)); }
+ecase() {  # ecase <wanted-exit> <label> <python-line>
+   plant; printf 'import pathlib, subprocess\np = pathlib.Path("x")\n%s\n' "$3" > "$T/e.py"
+   # a crash also exits 1, so a FAIL counts only with the gate's own verdict line
+   local log; log="$(python3 "$ROOT/tools/check-encoding.py" "$T/e.py" 2>&1)"
+   local got=$?
+   [ "$got" = 1 ] && ! grep -q '^check-encoding: FAIL' <<<"$log" && got="crash"
+   if [ "$got" = "$1" ]; then echo "  PASS  $2 (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $2 — wanted exit $1, got $got"; fail=$((fail+1)); fi
+}
+ecase 1 "open() in text mode"                 'open("x").read()'
+ecase 1 "open(..., \"w\")"                    'open("x", "w").write("→")'
+ecase 1 "Path.read_text()"                    'p.read_text()'
+ecase 1 "Path.write_text()"                   'p.write_text("⚠")'
+ecase 1 "Path.open() in text mode"            'p.open("a")'
+ecase 1 "subprocess.run(text=True)"           'subprocess.run(["git"], text=True)'
+ecase 0 "binary open is fine"                 'open("x", "rb").read()'
+ecase 0 "encoding= named"                     'p.read_text(encoding="utf-8")'
+ecase 0 "a marked exception"                  'p.read_text()  # encoding-ok: test'
 
 echo
 echo "gates self-test: $pass passed, $fail failed"

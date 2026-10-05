@@ -44,7 +44,7 @@ PLATFORM_PREFIXES = ('net.minecraft.', 'com.mojang.', 'net.neoforged.', 'cpw.mod
 def classes_of(cp_file, prefixes=PLATFORM_PREFIXES):
     """Every non-inner PLATFORM class on a compile classpath, as dotted FQNs."""
     out = set()
-    for line in open(cp_file):
+    for line in open(cp_file, encoding="utf-8"):
         jar = line.strip()
         if not jar or not os.path.isfile(jar):
             continue
@@ -89,15 +89,15 @@ def build(old_cp, new_cp, out_path, prefixes=PLATFORM_PREFIXES):
         else:
             removed.append(g)
 
-    with open(out_path, 'w') as f:
+    with open(out_path, 'w', encoding="utf-8") as f:
         for x, y in moves:
             f.write(f"{x}\t{y}\n")
 
     base = os.path.splitext(out_path)[0]
-    with open(base + '.removed.txt', 'w') as f:
+    with open(base + '.removed.txt', 'w', encoding="utf-8") as f:
         f.write("# Gone with no same-named replacement: a REAL API change, port by hand.\n")
         f.write("\n".join(removed) + "\n")
-    with open(base + '.ambiguous.txt', 'w') as f:
+    with open(base + '.ambiguous.txt', 'w', encoding="utf-8") as f:
         f.write("# Same simple name landed in >1 new package -- choose by hand, never auto-apply.\n")
         for g, c in ambiguous:
             f.write(f"{g}\t{','.join(c)}\n")
@@ -110,7 +110,7 @@ def build(old_cp, new_cp, out_path, prefixes=PLATFORM_PREFIXES):
 
 def apply(map_path, src_root):
     moves = {}
-    for line in open(map_path):
+    for line in open(map_path, encoding="utf-8"):
         if '\t' in line:
             o, n = line.rstrip('\n').split('\t')
             moves[o] = n

@@ -92,7 +92,7 @@ def tracked_files(root):
     silently scanning a different set than intended is how a gate becomes theatre."""
     try:
         out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
-                             capture_output=True, text=True, timeout=60, check=True).stdout
+                             capture_output=True, text=True, timeout=60, check=True, encoding="utf-8", errors="replace").stdout
         return [root / p for p in out.split("\0") if p], "git ls-files"
     except (OSError, subprocess.SubprocessError):
         files = [p for p in root.rglob("*")
@@ -116,7 +116,7 @@ def load_names(path):
     if not p.is_file():
         return None
     out = []
-    for line in p.read_text(errors="replace").splitlines():
+    for line in p.read_text(errors="replace", encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -163,7 +163,7 @@ def main():
         if f.suffix.lower() in BINARY_SUFFIXES or f.suffix.lower() not in TEXT_SUFFIXES:
             continue
         try:
-            text = f.read_text(errors="replace")
+            text = f.read_text(errors="replace", encoding="utf-8")
         except OSError:
             continue
         for pkg in set(IMPORT_RE.findall(text)):
@@ -196,7 +196,7 @@ def main():
             if f.suffix.lower() in BINARY_SUFFIXES:
                 continue
             try:
-                text = f.read_text(errors="replace")
+                text = f.read_text(errors="replace", encoding="utf-8")
             except OSError:
                 continue
             # The PATH is content too: a directory named after a mod publishes the name.

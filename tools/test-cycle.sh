@@ -4,6 +4,7 @@
 #   propose-learnings.py only the LESSON reaches the migrator, gated, and never the mod's identity
 set -uo pipefail
 cd "$(dirname "$0")/.."
+. tools/python.sh || exit 1   # python3 on Windows too
 ROOT="$PWD"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export CLAUDE_CONFIG_DIR="$T/claude"      # never read the real ~/.claude/projects: tests use fixtures only

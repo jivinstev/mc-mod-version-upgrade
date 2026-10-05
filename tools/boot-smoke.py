@@ -78,7 +78,7 @@ def find_instance(explicit):
     here = pathlib.Path(__file__).resolve().parent.parent
     for env in list(here.parent.glob("*/.env.local")) + [here / ".env.local"]:
         try:
-            for line in env.read_text().splitlines():
+            for line in env.read_text(encoding="utf-8").splitlines():
                 if line.startswith("MINECRAFT_MODS_DIR="):
                     p = pathlib.Path(line.split("=", 1)[1].strip().strip('"')).expanduser()
                     cands.append(p.parent)
@@ -98,7 +98,7 @@ def pick_version(inst, explicit):
     prof = inst / "launcher_profiles.json"
     if prof.exists():
         try:
-            d = json.loads(prof.read_text())
+            d = json.loads(prof.read_text(encoding="utf-8"))
             for p in d.get("profiles", {}).values():
                 v = p.get("lastVersionId", "")
                 if v and (vers / v).is_dir() and "latest" not in v:
@@ -229,7 +229,7 @@ def build_command(inst, version, game_dir=None):
         f = inst / "versions" / name / f"{name}.json"
         if not f.exists():
             die(f"missing version manifest: {f}")
-        d = json.loads(f.read_text())
+        d = json.loads(f.read_text(encoding="utf-8"))
         chain.append(d)
         name = d.get("inheritsFrom")
 
@@ -333,7 +333,7 @@ def game_already_running(inst):
     strictly less evidence."""
     try:
         out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
-                             text=True, timeout=20).stdout
+                             text=True, timeout=20, encoding="utf-8", errors="replace").stdout
     except (OSError, subprocess.SubprocessError):
         return []
     me, hits = str(os.getpid()), []
@@ -377,9 +377,9 @@ def boot(inst, version, log_path, timeout, expect, game_dir=None):
 
     proc = subprocess.Popen(cmd, cwd=str(inst), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1,
-                            errors="replace", env=env)
+                            errors="replace", env=env, encoding="utf-8")
     verdict, detail, start, seen_mods = None, "", time.time(), set()
-    with open(log_path, "w") as fh:
+    with open(log_path, "w", encoding="utf-8") as fh:
         for line in proc.stdout:
             fh.write(line)
             for mid in re.findall(r"\(([a-z0-9_\-]{2,})\)\s*$", line.strip()):
@@ -421,7 +421,7 @@ def boot(inst, version, log_path, timeout, expect, game_dir=None):
         proc.kill()
 
     if verdict == "PASS":
-        text = pathlib.Path(log_path).read_text(errors="replace")
+        text = pathlib.Path(log_path).read_text(errors="replace", encoding="utf-8")
         for e in expect:
             if e not in seen_mods and f"({e})" not in text:
                 verdict, detail = "FAIL", f"booted, but '{e}' never appeared in the mod list"

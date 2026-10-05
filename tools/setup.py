@@ -71,7 +71,7 @@ CLAUDE_DOCS = "https://docs.claude.com/en/docs/claude-code/setup"
 def read_env():
     vals = {}
     if ENV.is_file():
-        for line in ENV.read_text().splitlines():
+        for line in ENV.read_text(encoding="utf-8").splitlines():
             m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$', line)
             if m and not line.lstrip().startswith("#"):
                 vals[m.group(1)] = m.group(2).strip().strip('"').strip("'")
@@ -80,7 +80,7 @@ def read_env():
 
 def read_state():
     try:
-        s = json.loads(STATE.read_text())
+        s = json.loads(STATE.read_text(encoding="utf-8"))
         if isinstance(s, dict) and isinstance(s.get("keys"), dict):
             return s
     except (OSError, ValueError):
@@ -111,7 +111,7 @@ def now():
 
 def write_env(changes, removals):
     """Update lines in place so comments and ordering the user wrote survive; append new keys."""
-    lines = ENV.read_text().splitlines() if ENV.is_file() else [
+    lines = ENV.read_text(encoding="utf-8").splitlines() if ENV.is_file() else [
         "# Written by ./setup. Edit freely -- a hand edit always wins over setup's own guesses.",
         "# Provenance for each key lives in .setup-state.json."]
     seen = set()
@@ -132,13 +132,20 @@ def write_env(changes, removals):
             out.append(f"{k}={v}")
     if ENV.is_file():
         shutil.copy2(ENV, ENV.with_name(".env.local.bak"))           # rule 7
-    ENV.write_text("\n".join(out) + "\n")
+    write_lf(ENV, "\n".join(out) + "\n")
+
+
+def write_lf(path, text):
+    """Write UTF-8 with LF endings on every OS. Text mode on Windows would write CRLF, and bash reads
+    .env.local and the python3 shim: a trailing \\r there is a broken value or `$'\\r': not found`."""
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
 
 
 # ── probes ──────────────────────────────────────────────────────────────────────────────────
 def run(cmd, timeout=15):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except (OSError, subprocess.SubprocessError) as e:
         return None, str(e)
@@ -153,6 +160,41 @@ def java_major():
         return None
     major = int(m.group(1))
     return int(m.group(2)) if major == 1 and m.group(2) else major
+
+
+SHIM_MARK = "# Written by mc-mod-version-upgrade's setup"
+
+
+def python3_shim(check, notes, problems):
+    """Windows only. The python.org installer provides `python` and `py`, not `python3`, and Windows'
+    own `python3` is a stub that opens the Microsoft Store -- yet the skills, docs and scripts all say
+    `python3`. Git Bash puts ~/bin first on PATH, so a two-line script there makes `python3` this
+    interpreter. It also sets PYTHONUTF8=1: Windows Python prints in cp1252, and the tools print UTF-8.
+    A ~/bin/python3 that setup did not write is left alone."""
+    shim = pathlib.Path.home() / "bin" / "python3"
+    exe = pathlib.Path(sys.executable).as_posix()
+    body = (f"#!/bin/sh\n{SHIM_MARK} (tools/setup.py): Windows Python has no python3 command.\n"
+            f"export PYTHONUTF8=1\nexec \"{exe}\" \"$@\"\n")
+    if shim.exists():
+        try:
+            have = shim.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            have = ""
+        if SHIM_MARK not in have:
+            print(f"   python3 (Git Bash): {shim} exists and is not setup's -- left alone")
+            return
+        if have == body:
+            print(f"   python3 (Git Bash): {shim} -> {exe}")
+            return
+    if check:
+        notes.append(f"would write {shim} so `python3` in Git Bash runs {exe}")
+        return
+    try:
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        write_lf(shim, body)
+        notes.append(f"wrote {shim}: `python3` in Git Bash now runs {exe} (open a new Git Bash window)")
+    except OSError as e:
+        problems.append(f"could not write {shim}: {e} -- in Git Bash, use `py -3` wherever the docs say python3")
 
 
 def hint(tool):
@@ -267,6 +309,10 @@ def claude_settings_wanted(path, write_dirs):
         # it: the build runs outside the sandbox, and is allowed without a prompt.
         want["sandbox.excludedCommands"] = ["./gradlew"]
         want["permissions.allow"] = ["Bash(./gradlew:*)"]
+    if SYS == "Windows":
+        # Claude Code's sandbox runs on macOS, Linux and WSL, not native Windows: entries for it would
+        # do nothing there. The permission (no prompt for ./gradlew under Git Bash) still applies.
+        want = {k: v for k, v in want.items() if not k.startswith("sandbox.")}
     return want
 
 
@@ -329,13 +375,13 @@ def gh_setup(interactive, notes, no_network):
             return
     print("   gh: signed in")
     url = subprocess.run(["git", "-C", str(ROOT), "remote", "get-url", "origin"], capture_output=True,
-                         text=True).stdout.strip()
+                         text=True, encoding="utf-8", errors="replace").stdout.strip()
     m = re.search(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?$", url)
     if not m:
         return
     repo = f"{m.group(1)}/{m.group(2)}"
     push = subprocess.run([gh, "api", f"repos/{repo}", "--jq", ".permissions.push"],
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
     if push == "true":
         print(f"   you can push to {repo}: lessons pull requests open from a branch there")
         return
@@ -489,7 +535,10 @@ def main():
         else:
             print(f"   java: ok (Java {jm}{'' if jm >= 25 else '; MC 26.x targets also need Java 25'})")
     if SYS == "Windows":
-        notes.append("the tooling is bash + Python: on Windows run it from WSL or Git Bash")
+        python3_shim(a.check, notes, problems)
+        if not shutil.which("bash"):
+            notes.append("the tooling is bash + Python: run it from Git Bash (part of Git for Windows, "
+                         "which Claude Code needs too)")
 
     # 2. git access ---------------------------------------------------------------------------
     print("\n" + step() + "Git access")
@@ -686,7 +735,7 @@ def main():
         write_dirs.append(wsv)
     want = claude_settings_wanted(path, write_dirs)
     try:
-        current = json.loads(f.read_text()) if f.exists() else {}
+        current = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
         if not isinstance(current, dict):
             raise ValueError("not a JSON object")
     except ValueError as e:
@@ -694,7 +743,10 @@ def main():
         problems.append(f"{f} is not valid JSON ({e}) -- left untouched; fix it, then re-run ./setup")
     if current is not None:
         merged, added = claude_settings_merge(current, want)
-        print("\n" + step() + f"Claude Code permissions ({f})\n"
+        print("\n" + step() + f"Claude Code permissions ({f})\n" + (
+              "   Native Windows has no Claude Code sandbox (it needs macOS, Linux or WSL), so Claude asks\n"
+              "   before commands instead; the entries below only spare it asking for ./gradlew.\n"
+              if SYS == "Windows" else "") +
               "   Claude Code's sandbox blocks the network and writes outside this folder by default, so the\n"
               "   mod registries" + (", the build servers, the workspace and Gradle" if path == "migrate" else
                                     " and your mods folders") + " need allowing. Setup only ADDS entries.")
@@ -711,7 +763,7 @@ def main():
                 f.parent.mkdir(parents=True, exist_ok=True)
                 if f.exists():
                     shutil.copy2(f, f.with_suffix(".json.bak"))
-                f.write_text(json.dumps(merged, indent=2) + "\n")
+                write_lf(f, json.dumps(merged, indent=2) + "\n")
                 notes.append(f"updated {f} (backup: settings.json.bak); restart Claude Code to pick it up")
             elif ok_ != "yes":
                 notes.append("Claude Code permissions not added: registry downloads and builds may be refused "
@@ -763,7 +815,7 @@ def main():
         for k in removals:
             state["keys"].pop(k, None)
     state["schema"] = SCHEMA
-    STATE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    write_lf(STATE, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
     if ask.kept:
         print(f"\nKept {ask.kept} earlier answer(s) without asking; ./setup --review goes through them all again.")

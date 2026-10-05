@@ -82,7 +82,7 @@ def plan_renames(data_root):
 
 def fix_recipe(path):
     """Bring one recipe's result up to the 1.21 codec. Returns a short note if it changed."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError:
@@ -109,7 +109,7 @@ def fix_recipe(path):
             changed = (changed + " + stonecutting count") if changed else "stonecutting count"
 
     if changed:
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
     return changed
@@ -154,7 +154,7 @@ def _walk_json(node, fn):
 
 def fix_loot_table(path, apply=True):
     """Bring one loot table up to the 1.21 codecs. Returns a list of notes, empty if already clean."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError:
@@ -195,7 +195,7 @@ def fix_loot_table(path, apply=True):
 
     rewrote = _walk_json(data, visit)
     if rewrote and apply:
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
     return notes

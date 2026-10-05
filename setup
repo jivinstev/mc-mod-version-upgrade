@@ -1,3 +1,6 @@
 #!/usr/bin/env bash
 # First-run setup. See tools/setup.py for what it asks, what it writes, and why re-running is safe.
-exec python3 "$(dirname "$0")/tools/setup.py" "$@"
+# tools/python.sh finds the Python 3 command (python3; on Windows python or py -3). setup.cmd is the
+# same thing for cmd.exe and PowerShell.
+. "$(dirname "$0")/tools/python.sh" || exit 1
+exec $PYTHON "$(dirname "$0")/tools/setup.py" "$@"

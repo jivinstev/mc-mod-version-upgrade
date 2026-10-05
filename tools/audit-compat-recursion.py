@@ -39,7 +39,7 @@ def pair_index(compat_dirs):
     for d in compat_dirs:
         for f in sorted(pathlib.Path(d).glob('*.java')):
             files += 1
-            src = f.read_text()
+            src = f.read_text(encoding="utf-8")
             for m in METHOD.finditer(src):
                 name, params, body = m.group(1), m.group(2), m.group(3)
                 if not params.strip():
@@ -54,7 +54,7 @@ def pair_index(compat_dirs):
 def scan(src_root, idx):
     hits = []
     for f in sorted(pathlib.Path(src_root).rglob('*.java')):
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         for m in OVERRIDE.finditer(text):
             mname, body = m.group(1), m.group(3)
             for c in CALL.finditer(body):
@@ -75,7 +75,7 @@ def self_check():
             '   public static int widthOf(Thing t) {\n'
             '      return t.probeWidth();\n'
             '   }\n'
-            '}\n')
+            '}\n', encoding="utf-8")
         bad = ('class Sub {\n'
                '   public int probeWidth() {\n'
                '      return Probe.widthOf(this) + 1;\n'
@@ -89,10 +89,10 @@ def self_check():
         idx, _ = pair_index([compat])
         if not idx:
             print('self-check FAILED: the probe pair was not indexed'); return 1
-        (shared / 'Sub.java').write_text(bad)
+        (shared / 'Sub.java').write_text(bad, encoding="utf-8")
         if not scan(shared, idx):
             print('self-check FAILED: the planted recursion was NOT caught'); return 1
-        (shared / 'Sub.java').write_text(good)
+        (shared / 'Sub.java').write_text(good, encoding="utf-8")
         if scan(shared, idx):
             print('self-check FAILED: the fixed form was reported'); return 1
     print('self-check ok: planted recursion caught, fixed form clean')

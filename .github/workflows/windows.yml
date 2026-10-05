@@ -41,11 +41,55 @@ jobs:
           if [ -n "$bad" ]; then echo "checked out with CRLF:"; echo "$bad"; exit 1; fi
           echo "no CRLF outside .bat/.cmd"
 
-      - name: setup --check in an empty home
+      # A python.org install has `python` and `py` but no `python3`, and Windows' own python3.exe is a
+      # stub that only points at the Microsoft Store. The runner's Python has a real python3, so put a
+      # stub like Windows' in front of it: from here on, `python3` works only if setup made it work.
+      - name: python3 is the Microsoft Store stub, as on a fresh Windows
+        run: |
+          S="$RUNNER_TEMP/store-stub"; mkdir -p "$S"
+          printf '#!/bin/sh\necho "Python was not found; run without arguments to install from the Microsoft Store" >&2\nexit 49\n' > "$S/python3"
+          chmod +x "$S/python3"
+          cygpath -w "$S" >> "$GITHUB_PATH"
+      - name: (the stub is in front)
+        run: |
+          if python3 -c 'print(1)' 2>/dev/null; then echo "python3 still runs: the stub is not in front"; exit 1; fi
+          python --version
+
+      - name: encoding= on every text open (Windows defaults to cp1252)
+        run: python tools/check-encoding.py
+
+      - name: setup.cmd --check, from cmd.exe, in an empty home
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\home-cmd"
+          set "HOME=%RUNNER_TEMP%\home-cmd"
+          set "APPDATA=%RUNNER_TEMP%\home-cmd\AppData\Roaming"
+          set "LOCALAPPDATA=%RUNNER_TEMP%\home-cmd\AppData\Local"
+          mkdir "%APPDATA%" "%LOCALAPPDATA%"
+          call setup.cmd --check --no-network
+
+      - name: ./setup --check, from Git Bash, in an empty home
+        run: |
+          H="$RUNNER_TEMP/home-check"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
+            LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" ./setup --check --no-network
+          [ -z "$(ls -A "$H/AppData/Roaming")" ] && [ ! -e "$H/bin" ] && [ ! -e .env.local ] \
+            || { echo "--check wrote something"; exit 1; }
+
+      - name: ./setup --yes writes the python3 shim; a login Git Bash finds it
         run: |
           H="$RUNNER_TEMP/home"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
-          HOME="$H" USERPROFILE="$H" APPDATA="$H/AppData/Roaming" LOCALAPPDATA="$H/AppData/Local" \
-            ./setup --check --no-network
+          HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
+            LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" ./setup --yes --no-network
+          cat "$H/bin/python3"
+          grep -q $'\r' "$H/bin/python3" .env.local && { echo "CRLF in a file bash reads"; exit 1; }
+          # Git for Windows' /etc/profile.d puts ~/bin first; that is what makes the shim win.
+          found="$(HOME="$H" bash -lc 'command -v python3')"; echo "login bash: python3 = $found"
+          [ "$found" = "$H/bin/python3" ] || [ "$(cygpath -u "$found")" = "$(cygpath -u "$H/bin/python3")" ] \
+            || echo "::warning::a login Git Bash did not put ~/bin first; python3 = $found"
+          "$H/bin/python3" -c 'import os, sys; print(sys.version); assert os.environ["PYTHONUTF8"] == "1"; print("→ ⚠ ≈")'
+          rm -f .env.local .env.local.bak .setup-state.json
+          cygpath -w "$H/bin" >> "$GITHUB_PATH"
 
       - name: check-no-ip
         run: python3 tools/check-no-ip.py
@@ -55,6 +99,7 @@ jobs:
             git show "origin/${{ github.base_ref }}:docs/catalog-census.tsv" > docs/catalog-census.tsv
           fi
           python3 tools/check-catalog-fidelity.py
+          git checkout -- docs/catalog-census.tsv
       - name: vendored licence manifest
         run: python3 tools/gen-vendored.py --check
       - run: ./tools/test-gates.sh

@@ -401,7 +401,7 @@ def find_sources_jar(workspace):
 
 def read_properties(path):
     out = {}
-    for line in open(path):
+    for line in open(path, encoding="utf-8"):
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
@@ -518,7 +518,7 @@ def bytecode_refs(class_jar, fqcn):
         return _BYTECODE_CACHE[key]
     try:
         out = subprocess.run(["javap", "-c", "-p", "-cp", class_jar, fqcn],
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
         _BYTECODE_CACHE[key] = {}
         return {}
@@ -630,7 +630,7 @@ def main():
         candidates.update(glob.glob(os.path.join(root, "**/%s/**/*.java" % seg), recursive=True))
         candidates.update(glob.glob(os.path.join(root, "**/%s/*.java" % seg), recursive=True))
     for path in sorted(candidates):
-        s = strip_comments(open(path).read())
+        s = strip_comments(open(path, encoding="utf-8").read())
         m = re.search(r'@Mixin\(\{?([\w.]+)\.class', s)
         if m:
             target = m.group(1)

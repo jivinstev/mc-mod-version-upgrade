@@ -126,7 +126,7 @@ def main():
             else:
                 unresolved_f += 1
 
-    json.dump({"classes": classes, "members": members}, open(out, 'w'))
+    json.dump({"classes": classes, "members": members}, open(out, 'w', encoding="utf-8"))
     print(f"[{mc}] intermediary->official: classes {len(classes)}, members {len(members)} "
           f"(unresolved m={unresolved_m} f={unresolved_f})")
     for s in ['class_1799', 'class_1887']:

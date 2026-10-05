@@ -41,7 +41,7 @@ def load_prices(path=PRICES):
     rows, head = {}, None
     if not path.is_file():
         return rows
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         cells = line.split("\t")
@@ -84,7 +84,7 @@ def read_env():
     env = {}
     f = ROOT / ".env.local"
     if f.exists():
-        for line in f.read_text().splitlines():
+        for line in f.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
@@ -96,7 +96,7 @@ def port_size(port):
     props = {}
     for f in [port / "gradle.properties"] + sorted((port / "versions").glob("*.properties")):
         if f.is_file():
-            for k, v in re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S*)", f.read_text(errors="replace")):
+            for k, v in re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S*)", f.read_text(errors="replace", encoding="utf-8")):
                 props.setdefault(k, []).append(v)
     return {
         "minecraft": sorted(set(props.get("minecraft_version", []))),
@@ -119,7 +119,7 @@ def collect(modid, projects):
         reqs, cost, touches, others = {}, None, False, collections.Counter()
         versions, entry = set(), set()
         for f in fs:
-            for line in open(f, errors="replace"):
+            for line in open(f, errors="replace", encoding="utf-8"):
                 try:
                     d = json.loads(line)
                 except ValueError:
@@ -291,11 +291,11 @@ def main():
     if not port.is_dir():
         print(f"port-cost: {port} does not exist -- printed only", file=sys.stderr)
         return 2
-    (port / "COST.json").write_text(json.dumps(c, indent=2, sort_keys=True) + "\n")
+    (port / "COST.json").write_text(json.dumps(c, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     mig = port / "MIGRATION.md"
-    text = mig.read_text() if mig.exists() else f"# {a.modid} migration\n"
+    text = mig.read_text(encoding="utf-8") if mig.exists() else f"# {a.modid} migration\n"
     text = re.sub(r"(?ms)^## Cost \(recorded by tools/port-cost\.py.*?(?=^## |\Z)", "", text).rstrip("\n")
-    mig.write_text(text + "\n\n" + sec)
+    mig.write_text(text + "\n\n" + sec, encoding="utf-8")
     print(f"port-cost: wrote {port / 'COST.json'} and the Cost section of MIGRATION.md")
     return 0
 

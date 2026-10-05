@@ -13,6 +13,7 @@
 # What it does NOT do: touch src/. The port itself is the port. This only builds the frame.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. tools/python.sh || exit 1   # python3 on Windows too
 ROOT="$PWD"
 TPL="$ROOT/templates/multi-version"
 

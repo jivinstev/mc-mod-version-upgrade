@@ -4,6 +4,7 @@
 # indistinguishable from one that was never run -- so every "caught" case has a matching control.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+. tools/python.sh || exit 1   # python3 on Windows too
 ROOT="$PWD"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
