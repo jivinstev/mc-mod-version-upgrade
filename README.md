@@ -68,9 +68,9 @@ Nothing to install. One environment works for this repo and for
      packages.adoptium.net
      ```
    - **Setup script:** leave it empty.
-   - **Environment variables (optional):** `CURSEFORGE_API_KEY=<your key>` if you have one
-     ([free from CurseForge](https://console.curseforge.com/)). Without it, mods that are only on
-     CurseForge can't be found; everything on Modrinth still works.
+   - **Environment variables (optional):** `CURSEFORGE_API_KEY=<your key>`. To get a free key,
+     sign in at [console.curseforge.com](https://console.curseforge.com/) and open **API keys**.
+     Without it, mods that are only on CurseForge can't be found; everything on Modrinth still works.
 2. **Start a session** on this repo (or your fork), in that environment. It opens straight away.
    Type `run ./setup`: it checks every host and installs the two missing tools (a virtual screen and
    Java 25) the first time, which takes a minute or two.
