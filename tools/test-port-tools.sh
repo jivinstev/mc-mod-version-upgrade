@@ -120,7 +120,13 @@ perl -p tools/srg-remap/forge_import_codemod.pl "$C/B.txt" > "$C/B.out" 2>/dev/n
 { grep -q 'net/neoforged/neoforge/common/CommonHooks' "$C/B.out" && grep -q 'EventHooks' "$C/B.out" \
   && ! grep -q minecraftforge "$C/B.out"; } && ok "forge_import_codemod rewrites the slash form (descriptors, mixin targets)" \
   || bad "slash form: $(cat "$C/B.out")"
-L="$T/link"; mkdir -p "$L"; ln -s "$ROOT/tools" "$L/tools"
+L="$T/link"; mkdir -p "$L"
+case "$(uname -s)" in
+  # Git Bash's ln -s COPIES a directory; a user's workspace has a junction (what setup makes without
+  # Developer Mode), so test through one. // keeps Git Bash from rewriting /c and /J as paths.
+  MINGW*|MSYS*) cmd //c mklink //J "$(cygpath -w "$L/tools")" "$(cygpath -w "$ROOT/tools")" >/dev/null ;;
+  *) ln -s "$ROOT/tools" "$L/tools" ;;
+esac
 out="$(bash "$L/tools/run-catalog-scans.sh" "$C" 2>&1)"; code=$?
 ! grep -q "No such file" <<<"$out" && [ $code = 0 ] && ok "run-catalog-scans.sh works through a symlinked tools/ (the workspace layout)" \
   || bad "run-catalog-scans via symlink (exit $code): $(head -3 <<<"$out")"
