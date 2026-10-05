@@ -218,11 +218,14 @@ def long_paths(notes):
 def windows_shims(check, notes, problems):
     """The python.org installer provides `python` and `py`, not `python3`, and Windows' own `python3` is
     a stub that opens the Microsoft Store -- yet the skills, docs and scripts all say `python3`. The
-    shim also sets PYTHONUTF8=1: Windows Python prints in cp1252, and the tools print UTF-8. Git for
+    shim also sets PYTHONUTF8=1 (Windows Python prints in cp1252; the tools print UTF-8) and puts
+    tools/winpy on PYTHONPATH (print() writes LF, not CRLF, for bash to read). Git for
     Windows has no `unzip` either; tools/zipls.py takes the same flags."""
     exe = pathlib.Path(sys.executable).as_posix()
+    winpy = (ROOT / "tools/winpy").as_posix()     # its sitecustomize makes print() write LF, not CRLF
     bash_shim("python3", "Windows Python has no python3 command",
-              f'export PYTHONUTF8=1\nexec "{exe}" "$@"', check, notes, problems)
+              f'export PYTHONUTF8=1\nexport PYTHONPATH="{winpy}${{PYTHONPATH:+;$PYTHONPATH}}"\nexec "{exe}" "$@"',
+              check, notes, problems)
     unzip = shutil.which("unzip")
     if not unzip or SHIM_MARK in (pathlib.Path(unzip).read_text(encoding="utf-8", errors="replace")
                                   if pathlib.Path(unzip).stat().st_size < 4096 else ""):
@@ -377,6 +380,10 @@ def claude_settings_wanted(path, write_dirs):
         # Claude Code's sandbox runs on macOS, Linux and WSL, not native Windows: entries for it would
         # do nothing there. The permission (no prompt for ./gradlew under Git Bash) still applies.
         want = {k: v for k, v in want.items() if not k.startswith("sandbox.")}
+        # Every command Claude runs gets these: the interpreter for ./gradlew's Exec gates (the
+        # templates' build.gradle reads $PYTHON on Windows) and UTF-8 output from the tools.
+        want["env.PYTHON"] = sys.executable
+        want["env.PYTHONUTF8"] = "1"
     return want
 
 
@@ -390,6 +397,11 @@ def claude_settings_merge(current, want):
         *parents, leaf = dotted.split(".")
         for k in parents:
             node = node.setdefault(k, {})
+        if isinstance(values, str):               # a single value (env.*): set only when absent
+            if leaf not in node:
+                node[leaf] = values
+                added.append((dotted, [values]))
+            continue
         have = node.setdefault(leaf, [])
         new = [v for v in values if v not in have]
         if new:
@@ -811,7 +823,8 @@ def main():
         merged, added = claude_settings_merge(current, want)
         print("\n" + step() + f"Claude Code permissions ({f})\n" + (
               "   Native Windows has no Claude Code sandbox (it needs macOS, Linux or WSL), so Claude asks\n"
-              "   before commands instead; the entries below only spare it asking for ./gradlew.\n"
+              "   before commands instead. The entries below tell its commands which Python to use (there\n"
+              "   is no python3 outside Git Bash's shim) and, for migration, let ./gradlew run unprompted.\n"
               if SYS == "Windows" else "") +
               "   Claude Code's sandbox blocks the network and writes outside this folder by default, so the\n"
               "   mod registries" + (", the build servers, the workspace and Gradle" if path == "migrate" else

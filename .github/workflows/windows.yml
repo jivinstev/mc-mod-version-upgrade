@@ -92,6 +92,8 @@ jobs:
             echo "unzip shim: $n classes"; [ "$n" -gt 10 ] || exit 1
           fi
           "$H/bin/python3" -c 'import os, sys; print(sys.version); assert os.environ["PYTHONUTF8"] == "1"; print("→ ⚠ ≈")'
+          # print() must end lines with LF for bash: $(...) and grep 'x$' break on CRLF
+          if "$H/bin/python3" -c 'print(1)' | grep -q $'\r'; then echo "the shim's python prints CRLF"; exit 1; fi
           rm -f .env.local .env.local.bak .setup-state.json
           cygpath -w "$H/bin" >> "$GITHUB_PATH"
 

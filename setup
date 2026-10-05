@@ -3,4 +3,4 @@
 # tools/python.sh finds the Python 3 command (python3; on Windows python or py -3). setup.cmd is the
 # same thing for cmd.exe and PowerShell.
 . "$(dirname "$0")/tools/python.sh" || exit 1
-exec $PYTHON "$(dirname "$0")/tools/setup.py" "$@"
+exec "$PYTHON" "$(dirname "$0")/tools/setup.py" "$@"
