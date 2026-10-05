@@ -58,7 +58,7 @@ def estimate_usd(per_model, prices):
     Thinking is inside output. A cache write with no 5m/1h split is priced as 5-minute."""
     total, dates = 0.0, set()
     for model, c in per_model.items():
-        p = prices.get(model)
+        p = prices.get(model) or prices.get(re.sub(r"-\d{8}$", "", model))   # dated ids share a price
         if p is None:
             return None, f"no price for {model} in tools/model-prices.tsv"
         unsplit = max(0, c.get("cache_write", 0) - c.get("cache_write_5m", 0) - c.get("cache_write_1h", 0))
