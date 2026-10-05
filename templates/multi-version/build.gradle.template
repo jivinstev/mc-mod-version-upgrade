@@ -16,7 +16,7 @@ plugins {
 // ── MULTI-VERSION SELECTOR ───────────────────────────────────────────────────
 // `-Pmc=<id>` picks a target; the id is a filename under versions/ (default 1.21.1).
 //
-//     ./gradlew build                 # 1.21.1  (what Ezra plays today)
+//     ./gradlew build                 # 1.21.1  (the default target)
 //     ./gradlew build -Pmc=26.2       # 26.2
 //
 // Everything that differs between versions is DATA in versions/<id>.properties.

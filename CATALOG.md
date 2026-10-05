@@ -856,7 +856,7 @@ broken.
 two shipped ports.** The directory rename above is only step one; fixing it is what *unmasks* §143
 (catalog §144), and nothing checked the second half. Measured 2026-09-03, found not by a scan but by
 finally running a Gate C with the mod actually loaded: **10 loot tables in a ~750-file boss mod and 1 in
-one other port**, i.e. every "infected"-variant mob in a mod a child plays with dropped **nothing**, for weeks,
+one other port**, i.e. every "infected"-variant mob in a widely played mod dropped **nothing**, for weeks,
 with all three gates green. The failure is a data-load ERROR line followed by silence — the table is
 logged and then ignored, so there is no crash and no test to fail.
 `tools/fix-datapack-layout.py` now rewrites `looting_enchant` → `enchanted_count_increase` (+ an
@@ -967,7 +967,7 @@ is a decision about the author's art rather than a migration step — so RECORD 
 named-known-absent shape) unless the mod is yours to change.
 · **Why it belongs here rather than in a mod's own notes:** it is invisible to a compile, to Gate
 A, to Gate B, and to a `launch`-only Gate C, and a port CARRIES it across without ever touching
-the file — so the first person to see it is a child wondering why one item is purple. It is also
+the file — so the first person to see it is a player wondering why one item is purple. It is also
 the one §S check with no judgement in it at all: `file(1)` reads magic bytes, so a hit is a fact.
 · **Measured across all 21 ports in this repo, 3 findings and 0 false positives** — two JPEGs in
 a ~380-file MCreator mob mod (one of them `layer0` for TWO items) and a WebP in an MCreator + GeckoLib mob mod (~220 files), none

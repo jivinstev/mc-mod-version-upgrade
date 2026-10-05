@@ -327,7 +327,7 @@ def game_already_running(inst):
     A second client on one gameDir shares its config, its logs and its worlds, so the run pollutes
     whatever the player is doing. Worse, the obvious cleanup afterwards is a `pkill` on something in
     the java command line -- and the player's OWN game is launched by the same bundled JRE, from the
-    same path, so `pkill -f java-runtime-delta` kills it too. That happened: a child's session died
+    same path, so `pkill -f java-runtime-delta` kills it too. That happened: a player's session died
     mid-wish with no exception and no crash report, the log simply stopped, and it was diagnosed as
     a mod bug before the timestamps were compared. SIGKILL looks exactly like a mod crash and leaves
     strictly less evidence."""
