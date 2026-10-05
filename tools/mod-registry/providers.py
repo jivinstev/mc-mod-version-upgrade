@@ -116,6 +116,20 @@ def read_env_key(key):
     return read_env_local_key(key) or _clean_env_value(os.environ.get(key) or "")
 
 
+def write_download(out_path, file_name, data):
+    """Write a downloaded file and return where it went. `--out` may be a file path, or an
+    existing folder (or one written with a trailing slash), in which case the file keeps its
+    own name inside it. Passing a folder used to end in a raw IsADirectoryError."""
+    if out_path.endswith(("/", os.sep)) or os.path.isdir(out_path):
+        if not file_name:
+            raise ValueError("--out is a folder and the registry gave no file name: pass a file path")
+        out_path = os.path.join(out_path, os.path.basename(file_name))
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(out_path, "wb") as out:
+        out.write(data)
+    return out_path
+
+
 class Provider:
     """Common interface. loader/mc are always arguments — never constants."""
     name = "base"
@@ -239,9 +253,7 @@ class ModrinthProvider(Provider):
                 req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
                 with urllib.request.urlopen(req, timeout=120) as r:
                     data = r.read()
-                os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-                with open(out_path, "wb") as out:
-                    out.write(data)
+                out_path = write_download(out_path, f.get("filename"), data)
                 sha1 = hashlib.sha1(data).hexdigest()
                 expected = f.get("hashes", {}).get("sha1")
                 return {"status": "ok", "path": out_path, "sha1": sha1,
@@ -370,9 +382,7 @@ class CurseForgeProvider(Provider):
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=120) as r:
             data = r.read()
-        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-        with open(out_path, "wb") as out:
-            out.write(data)
+        out_path = write_download(out_path, f.get("fileName"), data)
         sha1 = hashlib.sha1(data).hexdigest()
         # CF exposes hashes as [{value, algo}] where algo 1=Sha1, 2=Md5.
         expected = None

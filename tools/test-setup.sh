@@ -5,6 +5,7 @@
 # touch the real .env.local, a real Minecraft folder, or ~/.claude.
 set -uo pipefail
 unset CLAUDE_CODE_REMOTE   # a cloud session would otherwise make setup probe the network
+unset CURSEFORGE_API_KEY   # a key in this shell would change what setup says about it
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 pass=0; fail=0
@@ -233,6 +234,14 @@ fresh; out="$(st --check)"; [ ! -e "$H/.claude/settings.json" ] && ok "--check d
 fresh; out="$(tty_run 'n,,,,,,no')"
 [ ! -e "$H/.claude/settings.json" ] && grep -q '^CLAUDE_SETTINGS=no$' "$R/.env.local" \
   && ok "answering no writes nothing, and the answer is remembered" || bad "no: $(ls "$H/.claude" 2>&1; grep CLAUDE_SETTINGS "$R/.env.local")"
+
+fresh; out="$(CURSEFORGE_API_KEY=not-a-real-key st --yes)"
+echo "$out" | grep -q "found in the environment" && ! echo "$out" | grep -q "not-a-real-key" \
+  && ! grep -q '^CURSEFORGE_API_KEY' "$R/.env.local" 2>/dev/null \
+  && ok "a CurseForge key in the environment is reported as found, never printed or written" \
+  || bad "env key: $(echo "$out" | grep -A3 'Mod registries'; grep CURSEFORGE "$R/.env.local")"
+fresh; out="$(st --yes)"; echo "$out" | grep -q "CurseForge is OPTIONAL" \
+  && ok "without a key, setup still explains how to get one" || bad "no key: $(echo "$out" | grep -A3 'Mod registries')"
 
 rm -rf "$NOJAVA"
 echo

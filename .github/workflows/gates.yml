@@ -104,6 +104,7 @@ jobs:
       # Idempotence (a second --yes run changes nothing), hand edits winning, the install path
       # completing with NO Java on PATH, additive path switches, explicit removal, backups.
       - run: ./tools/test-setup.sh
+      - run: python3 tools/mod-registry/test_providers.py
       # The README's cloud steps are copies of cloud/; fail if they drift.
       - run: python3 cloud/check_readme.py
 
