@@ -1,7 +1,5 @@
 # mc-mod-version-upgrade
 
-> ⚠️ **Under construction.** Not yet published; please don't rely on it until this notice goes away.
-
 **Install Minecraft mods, and port the ones that are stuck on an old version, by asking
 [Claude Code](https://claude.com/claude-code) in plain words.**
 
