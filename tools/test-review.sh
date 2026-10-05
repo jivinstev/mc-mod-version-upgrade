@@ -41,24 +41,24 @@ plant startitle  "printf '\\n%s\\n' 'R95. **Star in title: \`enchantable/*\`** �
 plant nosymptom  "printf '\nR98. **Vague lesson** · **Pattern:** old · **Fix:** new, in 1.21.\n' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant droprule   "python3 - <<'PY'
 import re
-s = open('CATALOG.md').read()
+s = open('CATALOG.md', encoding='utf-8').read()
 s = re.sub(r'(?m)^M6\. .*\n', '', s, count=1)
-open('CATALOG.md', 'w').write(s)
+open('CATALOG.md', 'w', encoding='utf-8', newline='\n').write(s)   # LF on Windows too
 PY"
 plant dropboth   "python3 - <<'PY'
 import re
-s = open('CATALOG.md').read()
+s = open('CATALOG.md', encoding='utf-8').read()
 s = re.sub(r'(?m)^M6\. .*\n', '', s, count=1)
-open('CATALOG.md', 'w').write(s)
+open('CATALOG.md', 'w', encoding='utf-8', newline='\n').write(s)   # LF on Windows too
 PY
 python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant allowlist "sed -i '0,/ALLOWED_BINARY_SHA1 *= *{/s//&\n    \"0123456789abcdef0123456789abcdef01234567\": \"a helper\",/' tools/check-no-ip.py"
 plant cisoft     "sed -i '0,/- run: \.\/tools\/test-gates\.sh/s//&\n        continue-on-error: true/' .github/workflows/gates.yml"
 plant weaken     "python3 - <<'PY'
-s = open('tools/test-cycle.sh').read()
+s = open('tools/test-cycle.sh', encoding='utf-8').read()
 i = s.index('printf \\'### new R\\\\nR98. **No pattern**')
 j = s.index('printf \\'### augment ZZ404')
-open('tools/test-cycle.sh', 'w').write(s[:i] + s[j:])
+open('tools/test-cycle.sh', 'w', encoding='utf-8', newline='\n').write(s[:i] + s[j:])   # CRLF would break the script itself
 PY"
 
 echo "review-pr.py"
