@@ -44,6 +44,7 @@ STATE = ROOT / ".setup-state.json"
 SCHEMA = 1
 SYS = platform.system()
 DEFAULT_WORKSPACE = "~/.mc-mod-upgrade/work"
+IN_CLOUD = os.environ.get("CLAUDE_CODE_REMOTE") == "true"   # a Claude Code cloud session
 DEFAULT_TARGET = "1.21.1"
 SECRET_KEYS = {"CURSEFORGE_API_KEY"}
 
@@ -312,7 +313,14 @@ def gh_setup(interactive, notes, no_network):
     print("   gh: installed")
     if no_network:
         return
-    signed_in = lambda: subprocess.run([gh, "auth", "status"], capture_output=True).returncode == 0
+    # `gh auth status` alone is not the question: in a Claude Code cloud session gh has no stored
+    # login yet its requests are signed for it, so status fails while every real call works.
+    # Ask GitHub who we are instead, if status says no.
+    def signed_in():
+        if subprocess.run([gh, "auth", "status"], capture_output=True).returncode == 0:
+            return True
+        return subprocess.run([gh, "api", "user", "--jq", ".login"], capture_output=True,
+                              timeout=30).returncode == 0
     if not signed_in():
         if interactive and confirm("   gh is not signed in. Sign in now (runs `gh auth login`)? [Y/n]: "):
             subprocess.run([gh, "auth", "login"])
@@ -399,6 +407,10 @@ class Asker:
 
 # ── the steps ───────────────────────────────────────────────────────────────────────────────
 def main():
+    # Sections are numbered as they print: some are skipped (installing only, or no cloud),
+    # and fixed numbers then came out as 3, 6, 7, 9, 8.
+    counter = iter(range(1, 100))
+    step = lambda: f"{next(counter)}. "
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--yes", action="store_true")
     ap.add_argument("--check", action="store_true")
@@ -443,14 +455,15 @@ def main():
         ask.proposed["SETUP_PATH"] = (a.path, "user")
         path = a.path
     else:
-        path = ask.decide("SETUP_PATH", "install", "Also set up migration? (yes/no)",
+        # A cloud session has no Minecraft to install into: porting is what it is for.
+        path = ask.decide("SETUP_PATH", "migrate" if IN_CLOUD else "install", "Also set up migration? (yes/no)",
                           choices={"no": "install", "n": "install", "yes": "migrate", "y": "migrate"})
     if path not in ("install", "migrate"):
         problems.append(f"SETUP_PATH must be install or migrate, not {path!r}")
         path = "install"
 
     # 1. prerequisites ------------------------------------------------------------------------
-    print("\n1. Prerequisites")
+    print("\n" + step() + "Prerequisites")
     for tool in ("git",):
         if shutil.which(tool):
             print(f"   {tool}: ok")
@@ -479,7 +492,7 @@ def main():
         notes.append("the tooling is bash + Python: on Windows run it from WSL or Git Bash")
 
     # 2. git access ---------------------------------------------------------------------------
-    print("\n2. Git access")
+    print("\n" + step() + "Git access")
     print("   clone to USE it; FORK to contribute (main takes pull requests only):\n"
           "     gh repo fork jivinstev/mc-mod-version-upgrade --clone\n"
           "   A mirror is not needed.")
@@ -489,7 +502,7 @@ def main():
                                  "setup continues; updates and contributions need it"))
 
     # 3. Minecraft installs + per-version deploy targets ---------------------------------------
-    print("\n3. Minecraft installs")
+    print("\n" + step() + "Minecraft installs")
     installs = discover_installs()
     if not installs:
         print("   none found -- fine for building; deploying needs one (add later with --mods-dir)")
@@ -575,7 +588,7 @@ def main():
 
     # 4-5. migration-only settings -------------------------------------------------------------
     if path == "migrate":
-        print("\n4. Migration workspace (decompiled mods live here -- keep it OUTSIDE any git repo)")
+        print("\n" + step() + "Migration workspace (decompiled mods live here -- keep it OUTSIDE any git repo)")
         ws = ask.decide("MIGRATE_WORKSPACE", DEFAULT_WORKSPACE, "workspace directory")
         if ws and inside_git_repo(ws):
             problems.append(f"MIGRATE_WORKSPACE {ws} is inside a git repository: one `git add -A` would "
@@ -589,7 +602,7 @@ def main():
                     notes.append(f"only {free:.0f} GB free; a migration wants several GB (10+ is comfortable)")
             except OSError:
                 pass
-        print("\n5. Where finished ports go (a git repo you choose, or none)")
+        print("\n" + step() + "Where finished ports go (a git repo you choose, or none)")
         cands = likely_output_repos()
         if cands:
             print("   looks like a ports repo (a git repo next to this one with mods/<modid>/build.gradle): "
@@ -614,7 +627,7 @@ def main():
             print(f"   destination: {out} (not a git repo: tools/finish-port.py copies only)")
 
     # 6. registries ---------------------------------------------------------------------------
-    print("\n6. Mod registries\n"
+    print("\n" + step() + "Mod registries\n"
           "   Modrinth works with no account and is searched first.\n"
           "   CurseForge is OPTIONAL. Without a key, a mod published ONLY on CurseForge cannot be found\n"
           "   or downloaded (you will be told when that happens); everything on Modrinth still works.\n"
@@ -623,7 +636,7 @@ def main():
     ask.decide("CURSEFORGE_API_KEY", "", "CurseForge API key (or Enter to skip)", secret=True)
 
     # 7. Claude hookup ------------------------------------------------------------------------
-    print("\n7. Claude Code")
+    print("\n" + step() + "Claude Code")
     print("   claude: " + ("found" if has_claude else f"not found -- {hint('claude')}"))
     skills = sorted(p.name for p in (ROOT / ".claude/skills").iterdir() if (p / "SKILL.md").is_file())
     print(f"   skills in this checkout: {', '.join(skills)} (they load when Claude runs here)")
@@ -643,7 +656,7 @@ def main():
 
     # 8. sharing what ports teach (migration add-on) ------------------------------------------
     if path == "migrate":
-        print("\n8. Share what your ports teach\n"
+        print("\n" + step() + "Share what your ports teach\n"
               "   Every migration ends with lessons -- an API change, a trap and its fix -- written WITHOUT\n"
               "   the mod's name or code. Shared, they go to this repository as a pull request, so the next\n"
               "   person's port is faster (and the pull request is reviewed before anything is merged).\n"
@@ -671,7 +684,7 @@ def main():
         problems.append(f"{f} is not valid JSON ({e}) -- left untouched; fix it, then re-run ./setup")
     if current is not None:
         merged, added = claude_settings_merge(current, want)
-        print(f"\n9. Claude Code permissions ({f})\n"
+        print("\n" + step() + f"Claude Code permissions ({f})\n"
               "   Claude Code's sandbox blocks the network and writes outside this folder by default, so the\n"
               "   mod registries" + (", the build servers, the workspace and Gradle" if path == "migrate" else
                                     " and your mods folders") + " need allowing. Setup only ADDS entries.")
@@ -702,10 +715,18 @@ def main():
         else:
             notes.append(f"--remove {k}: not set, nothing to do")
 
+    # cloud: is the environment set up? -------------------------------------------------------
+    if IN_CLOUD:
+        print("\n" + step() + "Cloud environment")
+        code, out = run([sys.executable, str(ROOT / "cloud/check.py")], timeout=600)
+        print("   " + (out or "").replace("\n", "\n   "))
+        if code != 0:
+            problems.append("the cloud environment is not ready: see 'Cloud environment' above")
+
     # 8. diff, confirm, write ------------------------------------------------------------------
     changes = {k: v for k, (v, _) in ask.proposed.items()
                if state["keys"].get(k, {}).get("value") != v or k not in state["keys"]}
-    print("\n8. Summary")
+    print("\n" + step() + "Summary")
     if not changes and not removals:
         print("   no changes")
     for k in sorted(changes):
@@ -740,8 +761,11 @@ def main():
     print("\nNext:" + ("" if has_claude else "  (install Claude Code first -- see the note above)"))
     if path == "migrate":
         print("  bash tools/download-tools.sh     # once: fetches + verifies the two decompilers")
-    print(f"  cd {ROOT} && claude")
-    print("  then say what you want, in plain words, e.g.")
+    if IN_CLOUD:
+        print("  say what you want here, in plain words, e.g.")
+    else:
+        print(f"  cd {ROOT} && claude")
+        print("  then say what you want, in plain words, e.g.")
     print('    "Install Sodium"                                   (finds the right build, deploys it)')
     if path == "migrate":
         print('    "Migrate <mod name> to Minecraft 1.21.1"           (ports it when no build exists;')
