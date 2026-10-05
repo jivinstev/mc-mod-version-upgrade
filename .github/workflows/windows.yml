@@ -17,6 +17,11 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes the run in progress: Windows jobs are slow and the runners are shared.
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
 defaults:
   run:
     shell: bash
@@ -187,9 +192,10 @@ jobs:
         run: python3 tools/gen-vendored.py --check
       - run: ./tools/test-gates.sh
       - run: ./tools/test-renames.sh
-      - run: ./tools/test-review.sh
       - run: ./tools/test-cycle.sh
       - run: ./tools/test-port-tools.sh
+      # last: it re-runs a changed self-test (test-cycle.sh) on base and head, so that one must work first
+      - run: ./tools/test-review.sh
 
   build:
     name: windows build + Gate B (template mod)
