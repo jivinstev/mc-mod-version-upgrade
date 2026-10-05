@@ -254,8 +254,12 @@ jobs:
       - name: ./gradlew runGameTestServer (Gate B)
         run: cd "$WS/mods/examplemod" && ./gradlew runGameTestServer --no-daemon --console=plain
 
-      - name: the longest path the build made
+      - name: the longest path the build made (Windows' limit is 260)
         if: always()
         run: |
-          for d in "$WS" "$(cygpath -u "$USERPROFILE")/.gradle"; do
-            find "$(cygpath -w "$d")" 2>/dev/null || true; done | awk '{ print length($0) "\t" $0 }' | sort -n | tail -3
+          python3 - "$(cygpath -w "$WS")" "$USERPROFILE\.gradle" <<'PY'
+          import os, sys
+          paths = [os.path.join(d, f) for root in sys.argv[1:] for d, _, fs in os.walk(root) for f in fs]
+          for p in sorted(paths, key=len)[-3:]:
+              print(len(p), p)
+          PY
