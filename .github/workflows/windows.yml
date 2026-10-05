@@ -156,7 +156,8 @@ jobs:
           import importlib.util, os, pathlib, tempfile
           spec = importlib.util.spec_from_file_location("setup", "tools/setup.py")
           m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-          ws = pathlib.Path(tempfile.mkdtemp()); env = m.ROOT / ".env.local"
+          # on the checkout's drive: a hard link cannot cross drives (setup says so when it would have to)
+          ws = pathlib.Path(tempfile.mkdtemp(dir=os.environ["RUNNER_TEMP"])); env = m.ROOT / ".env.local"
           env.write_text("X=1\n", encoding="utf-8")
           try:
               for name in m.WORKSPACE_LINKS:

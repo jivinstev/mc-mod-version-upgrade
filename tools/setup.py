@@ -300,6 +300,11 @@ def ensure_workspace(ws, notes, problems, dry):
             if SYS == "Windows" and windows_link(link, target):
                 notes.append(f"workspace: linked {link} -> {target} "
                              f"({'junction' if target.is_dir() else 'hard link'}: symlinks need Developer Mode)")
+            elif SYS == "Windows" and target.is_file() and \
+                    os.path.splitdrive(str(link.resolve()))[0].lower() != os.path.splitdrive(str(target.resolve()))[0].lower():
+                problems.append(f"could not link {link}: without Developer Mode a file link must be a hard link, "
+                                f"and those cannot cross drives. Put the workspace on the same drive as {ROOT}, "
+                                "or turn on Developer Mode (Settings > System > For developers)")
             else:
                 problems.append(f"could not link {link}: {e} (copy it by hand)")
 
