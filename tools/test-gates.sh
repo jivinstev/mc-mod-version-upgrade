@@ -65,6 +65,7 @@ names_case 0 "a SHORT name inside an ordinary word is not a hit"   I.md 'the arc
 names_case 1 "a name in a file PATH, not its content"             docs/somemodxyz/notes.md 'nothing to see' 'somemodxyz'
 names_case 1 "a re: entry matches its context"                     J.md 'see mods/arena/x' 're:mods/arena\b'
 names_case 0 "a re: entry does not fire on the ordinary word"      K.md 'the arena path runs' 're:mods/arena\b'
+names_case 1 "a re: entry with a / matches a file PATH (/ on Windows too)" mods/arenaxyz/L.md 'nothing' 're:mods/arenaxyz/'
 
 echo "5. the VENDORED.tsv / SPDX gate"
 ( python3 "$ROOT/tools/gen-vendored.py" --check >/dev/null 2>&1 )

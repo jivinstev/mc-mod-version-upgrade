@@ -200,7 +200,7 @@ def main():
             except OSError:
                 continue
             # The PATH is content too: a directory named after a mod publishes the name.
-            text = f"{f.relative_to(root)}\n{text}"
+            text = f"{f.relative_to(root).as_posix()}\n{text}"   # / on Windows too: re: entries use /
             for n, rx in names:
                 if rx.search(text):
                     violations.append((f, f"names a third-party mod: {n!r}"))

@@ -319,6 +319,22 @@ BAD = re.compile(r"Exception in thread \"main\"|LoadingFailedException|ModLoadin
                  r"Failed to find a primary monitor")
 
 
+def process_lines():
+    """Every running process as "PID COMMAND LINE". Windows has no `ps -axo` (Git Bash's ps lists
+    only its own processes, and has no -o), so it asks WMI through PowerShell instead."""
+    if SYS == "Windows":
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+               "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+               "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.CommandLine)\" }"]
+    else:
+        cmd = ["ps", "-axo", "pid=,command="]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                              encoding="utf-8", errors="replace").stdout.splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
 def game_already_running(inst):
     """PIDs of a Minecraft client already using this instance.
 
@@ -331,18 +347,13 @@ def game_already_running(inst):
     mid-wish with no exception and no crash report, the log simply stopped, and it was diagnosed as
     a mod bug before the timestamps were compared. SIGKILL looks exactly like a mod crash and leaves
     strictly less evidence."""
-    try:
-        out = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True,
-                             text=True, timeout=20, encoding="utf-8", errors="replace").stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
     me, hits = str(os.getpid()), []
-    for line in out.splitlines():
+    for line in process_lines():
         pid, _, cmdline = line.strip().partition(" ")
         if pid == me or "boot-smoke" in cmdline:
             continue
         if "bootstraplauncher" in cmdline or "net.minecraft.client.main.Main" in cmdline:
-            if str(inst) in cmdline or "--gameDir" not in cmdline:
+            if str(inst) in cmdline or inst.as_posix() in cmdline or "--gameDir" not in cmdline:
                 hits.append(pid)
     return hits
 

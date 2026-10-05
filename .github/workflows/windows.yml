@@ -76,17 +76,21 @@ jobs:
           [ -z "$(ls -A "$H/AppData/Roaming")" ] && [ ! -e "$H/bin" ] && [ ! -e .env.local ] \
             || { echo "--check wrote something"; exit 1; }
 
-      - name: ./setup --yes writes the python3 shim; a login Git Bash finds it
+      - name: ./setup --yes writes the python3 and unzip shims; a login Git Bash finds them
         run: |
-          H="$RUNNER_TEMP/home"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          echo "unzip before setup: $(command -v unzip || echo none)"
+          H="$(cygpath -u "$RUNNER_TEMP")/home"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
           HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
             LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" ./setup --yes --no-network
           cat "$H/bin/python3"
           grep -q $'\r' "$H/bin/python3" .env.local && { echo "CRLF in a file bash reads"; exit 1; }
           # Git for Windows' /etc/profile.d puts ~/bin first; that is what makes the shim win.
           found="$(HOME="$H" bash -lc 'command -v python3')"; echo "login bash: python3 = $found"
-          [ "$found" = "$H/bin/python3" ] || [ "$(cygpath -u "$found")" = "$(cygpath -u "$H/bin/python3")" ] \
-            || echo "::warning::a login Git Bash did not put ~/bin first; python3 = $found"
+          [ "$found" = "$H/bin/python3" ] || { echo "a login Git Bash did not put ~/bin first"; exit 1; }
+          if [ -e "$H/bin/unzip" ]; then
+            n="$("$H/bin/unzip" -l templates/neoforge-mod/gradle/wrapper/gradle-wrapper.jar | grep -c '\.class$')"
+            echo "unzip shim: $n classes"; [ "$n" -gt 10 ] || exit 1
+          fi
           "$H/bin/python3" -c 'import os, sys; print(sys.version); assert os.environ["PYTHONUTF8"] == "1"; print("→ ⚠ ≈")'
           rm -f .env.local .env.local.bak .setup-state.json
           cygpath -w "$H/bin" >> "$GITHUB_PATH"

@@ -165,36 +165,69 @@ def java_major():
 SHIM_MARK = "# Written by mc-mod-version-upgrade's setup"
 
 
-def python3_shim(check, notes, problems):
-    """Windows only. The python.org installer provides `python` and `py`, not `python3`, and Windows'
-    own `python3` is a stub that opens the Microsoft Store -- yet the skills, docs and scripts all say
-    `python3`. Git Bash puts ~/bin first on PATH, so a two-line script there makes `python3` this
-    interpreter. It also sets PYTHONUTF8=1: Windows Python prints in cp1252, and the tools print UTF-8.
-    A ~/bin/python3 that setup did not write is left alone."""
-    shim = pathlib.Path.home() / "bin" / "python3"
-    exe = pathlib.Path(sys.executable).as_posix()
-    body = (f"#!/bin/sh\n{SHIM_MARK} (tools/setup.py): Windows Python has no python3 command.\n"
-            f"export PYTHONUTF8=1\nexec \"{exe}\" \"$@\"\n")
+def bash_shim(name, why, command, check, notes, problems):
+    """Windows only: a small script in ~/bin, which Git for Windows' bash puts first on PATH, so a
+    command the skills and docs use works in Git Bash. A ~/bin/<name> setup did not write is left alone."""
+    shim = pathlib.Path.home() / "bin" / name
+    body = f"#!/bin/sh\n{SHIM_MARK} (tools/setup.py): {why}\n{command}\n"
     if shim.exists():
         try:
             have = shim.read_text(encoding="utf-8")
         except (OSError, ValueError):
             have = ""
         if SHIM_MARK not in have:
-            print(f"   python3 (Git Bash): {shim} exists and is not setup's -- left alone")
+            print(f"   {name} (Git Bash): {shim} exists and is not setup's -- left alone")
             return
         if have == body:
-            print(f"   python3 (Git Bash): {shim} -> {exe}")
+            print(f"   {name} (Git Bash): {shim}")
             return
     if check:
-        notes.append(f"would write {shim} so `python3` in Git Bash runs {exe}")
+        notes.append(f"would write {shim} ({why})")
         return
     try:
         shim.parent.mkdir(parents=True, exist_ok=True)
         write_lf(shim, body)
-        notes.append(f"wrote {shim}: `python3` in Git Bash now runs {exe} (open a new Git Bash window)")
+        notes.append(f"wrote {shim}: {why} (takes effect in a new Git Bash window)")
     except OSError as e:
-        problems.append(f"could not write {shim}: {e} -- in Git Bash, use `py -3` wherever the docs say python3")
+        problems.append(f"could not write {shim}: {e}")
+
+
+def long_paths(notes):
+    """Windows' 260-character path limit. Gradle's caches, NeoForm's work tree and a decompiled mod
+    under it run past it, and the failure (a file 'not found' that is there) does not say why. Java
+    itself copes; git and some Python file calls do not, unless both switches are on."""
+    enabled = None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as k:
+            enabled = winreg.QueryValueEx(k, "LongPathsEnabled")[0] == 1
+    except (ImportError, OSError):
+        pass
+    git_long = (run(["git", "config", "--get", "core.longpaths"])[1] or "").strip().lower() == "true"
+    print(f"   long paths: Windows {'on' if enabled else 'OFF' if enabled is False else 'unknown'}, "
+          f"git core.longpaths {'on' if git_long else 'OFF'}")
+    if enabled is False:
+        notes.append("Windows long paths are off: a deep Gradle or decompiled path can fail as 'file not found'. "
+                     "Turn them on (PowerShell as Administrator): New-ItemProperty -Path "
+                     "'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem' -Name LongPathsEnabled -Value 1 "
+                     "-PropertyType DWORD -Force")
+    if not git_long:
+        notes.append("git core.longpaths is off: run  git config --global core.longpaths true")
+
+
+def windows_shims(check, notes, problems):
+    """The python.org installer provides `python` and `py`, not `python3`, and Windows' own `python3` is
+    a stub that opens the Microsoft Store -- yet the skills, docs and scripts all say `python3`. The
+    shim also sets PYTHONUTF8=1: Windows Python prints in cp1252, and the tools print UTF-8. Git for
+    Windows has no `unzip` either; tools/zipls.py takes the same flags."""
+    exe = pathlib.Path(sys.executable).as_posix()
+    bash_shim("python3", "Windows Python has no python3 command",
+              f'export PYTHONUTF8=1\nexec "{exe}" "$@"', check, notes, problems)
+    unzip = shutil.which("unzip")
+    if not unzip or SHIM_MARK in (pathlib.Path(unzip).read_text(encoding="utf-8", errors="replace")
+                                  if pathlib.Path(unzip).stat().st_size < 4096 else ""):
+        bash_shim("unzip", "Git for Windows has no unzip; tools/zipls.py takes its -l/-p/-Z1 flags",
+                  f'exec "{exe}" "{(ROOT / "tools/zipls.py").as_posix()}" "$@"', check, notes, problems)
 
 
 def hint(tool):
@@ -249,18 +282,49 @@ def ensure_workspace(ws, notes, problems, dry):
     (root / "mods").mkdir(parents=True, exist_ok=True)
     for name in WORKSPACE_LINKS:
         link, target = root / name, ROOT / name
-        if link.is_symlink():
-            if os.path.realpath(link) != str(target.resolve()):
-                problems.append(f"{link} links somewhere else ({os.readlink(link)}) -- left alone")
+        if link.is_symlink() or is_junction(link):
+            if os.path.realpath(link) != os.path.realpath(target):
+                problems.append(f"{link} links somewhere else ({os.path.realpath(link)}) -- left alone")
             continue
         if link.exists():
-            problems.append(f"{link} exists and is not a link to this checkout -- left alone")
+            if not (link.is_file() and target.is_file() and os.path.samefile(link, target)):  # a hard link is ours
+                problems.append(f"{link} exists and is not a link to this checkout -- left alone")
             continue
         try:
             link.symlink_to(target)
             notes.append(f"workspace: linked {link} -> {target}")
-        except OSError as e:          # Windows without developer mode, for one
-            problems.append(f"could not link {link}: {e} (run from WSL, or copy it by hand)")
+        except OSError as e:
+            if SYS == "Windows" and windows_link(link, target):
+                notes.append(f"workspace: linked {link} -> {target} "
+                             f"({'junction' if target.is_dir() else 'hard link'}: symlinks need Developer Mode)")
+            else:
+                problems.append(f"could not link {link}: {e} (copy it by hand)")
+
+
+def is_junction(p):
+    """A Windows directory junction (what setup makes when symlinks need Developer Mode)."""
+    if hasattr(os.path, "isjunction"):            # Python 3.12+
+        return os.path.isjunction(p)
+    try:
+        return bool(os.lstat(p).st_reparse_tag == 0xA0000003)   # IO_REPARSE_TAG_MOUNT_POINT
+    except (OSError, AttributeError):
+        return False
+
+
+def windows_link(link, target):
+    """Windows without Developer Mode cannot make symlinks, but needs no privilege for a directory
+    junction or a file hard link. (A hard-linked .env.local is the same file only until an editor
+    saves it by replacing it; setup itself rewrites it in place.)"""
+    if not target.exists():
+        return False
+    if target.is_dir():
+        r = run(["cmd", "/c", "mklink", "/J", str(link), str(target)])[0]
+        return r == 0
+    try:
+        os.link(target, link)
+        return True
+    except OSError:
+        return False
 
 
 def supported_versions():
@@ -535,7 +599,9 @@ def main():
         else:
             print(f"   java: ok (Java {jm}{'' if jm >= 25 else '; MC 26.x targets also need Java 25'})")
     if SYS == "Windows":
-        python3_shim(a.check, notes, problems)
+        windows_shims(a.check, notes, problems)
+        if path == "migrate":
+            long_paths(notes)
         if not shutil.which("bash"):
             notes.append("the tooling is bash + Python: run it from Git Bash (part of Git for Windows, "
                          "which Claude Code needs too)")

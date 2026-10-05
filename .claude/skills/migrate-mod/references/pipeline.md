@@ -357,7 +357,9 @@ drives the REAL client with no manual input, escalating through 4 modes. Set it 
     PY
     ```
     Optionally `caffeinate -u -t 5` before launch to wake a slept display (nice for a human watching; not required).
-    On headless Linux CI use `xvfb-run ./tools/client-validate.sh`. Only if there is **no GUI session at all** (pure
+    On headless Linux CI use `xvfb-run ./tools/client-validate.sh`. **On Windows** there is nothing to hand off:
+    the agent's Git Bash runs in the logged-in desktop, so `./tools/client-validate.sh` opens its window directly.
+    Only if there is **no GUI session at all** (pure
     SSH, no logged-in desktop, no xvfb) is Gate C blocked — then leave the P0 items on the manual list and say so;
     this is where most post-load bugs (R6–R21) actually live.
 

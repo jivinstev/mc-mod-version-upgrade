@@ -114,6 +114,9 @@ only genuinely headless environments fall back to a human-run command. Three par
        in `xvfb-run` with software GL. On a rate-limited machine (HTTP 429 from Maven Central) the loop's own
        `./gradlew runClient` cannot take `--init-script`, so install `tools/central-mirror.init.gradle` into
        `~/.gradle/init.d/` first.
+     - **Windows (Git Bash) — autonomous:** no launcher is needed. A process Claude Code starts runs in the logged-in
+       desktop, which has the display, so run `./tools/client-validate.sh` from the mod dir (in the background, with
+       the monitor armed) exactly as on Linux. A watchdog kill uses `taskkill /T`, since `pkill` is not in Git Bash.
      - **Any other headless machine:** hand the human the ONE command (from the mod dir): `./tools/client-validate.sh`.
 3. **Monitored client run (you launched it; you fix every phase):** `client-validate.sh` loops
    **launch → spawn → battle → gauntlet**, each crash → you fix → relaunch, advancing on each PASS. Your

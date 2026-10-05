@@ -58,7 +58,7 @@ def collect(root, globs):
         for f in sorted(root.glob(g)):
             if f.is_file():
                 for ident, h in entries(f.read_text(errors="replace", encoding="utf-8")).items():
-                    found[f"{f.relative_to(root)}::{ident}"] = h
+                    found[f"{f.relative_to(root).as_posix()}::{ident}"] = h
     return found
 
 
@@ -83,7 +83,7 @@ def dangling_paths(root, globs):
             for m in PATH_RE.finditer(f.read_text(errors="replace", encoding="utf-8")):
                 p = m.group(1).rstrip(".")
                 if p not in allowed and not (root / p).exists():
-                    out.setdefault(p, str(f.relative_to(root)))
+                    out.setdefault(p, f.relative_to(root).as_posix())
     return sorted(out.items())
 
 
