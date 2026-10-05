@@ -115,8 +115,25 @@ def passed(out):
     return int(m.group(1)) if m else None
 
 
+def find_bash():
+    """Plain `bash` everywhere but Windows. There CreateProcess searches System32 BEFORE PATH, so
+    "bash" is WSL's launcher, not Git Bash -- and every self-test 'ran' with no pass count. Git for
+    Windows' own bash sits two levels above `git --exec-path` (<Git>/mingw64/libexec/git-core)."""
+    if os.name == "nt":
+        r = subprocess.run(["git", "--exec-path"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode == 0 and r.stdout.strip():
+            git_root = pathlib.Path(r.stdout.strip()).parents[2]
+            for c in (git_root / "bin/bash.exe", git_root / "usr/bin/bash.exe"):
+                if c.is_file():
+                    return str(c)
+    return "bash"
+
+
+BASH = find_bash()
+
+
 def run_self_test(tree, script):
-    r = subprocess.run(["bash", script], cwd=tree, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = subprocess.run([BASH, script], cwd=tree, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return passed(r.stdout + r.stderr)
 
 
@@ -214,7 +231,7 @@ def main():
         base_census = sh("git", "show", f"{merge_base}:docs/catalog-census.tsv", check=False)
         if base_census.returncode == 0:
             (wt / "docs/catalog-census.tsv").write_text(base_census.stdout, encoding="utf-8")
-        gates = list(GATES) + [(p.stem.replace("test-", "") + "-self-test", ["bash", f"tools/{p.name}"], False)
+        gates = list(GATES) + [(p.stem.replace("test-", "") + "-self-test", [BASH, f"tools/{p.name}"], False)
                                for p in sorted((wt / "tools").glob("test-*.sh"))]
         for name, argv, wants_names in gates:
             if a.skip_self_tests and "self-test" in name:
