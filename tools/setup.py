@@ -44,6 +44,7 @@ STATE = ROOT / ".setup-state.json"
 SCHEMA = 1
 SYS = platform.system()
 DEFAULT_WORKSPACE = "~/.mc-mod-upgrade/work"
+IN_CLOUD = os.environ.get("CLAUDE_CODE_REMOTE") == "true"   # a Claude Code cloud session
 DEFAULT_TARGET = "1.21.1"
 SECRET_KEYS = {"CURSEFORGE_API_KEY"}
 
@@ -443,7 +444,8 @@ def main():
         ask.proposed["SETUP_PATH"] = (a.path, "user")
         path = a.path
     else:
-        path = ask.decide("SETUP_PATH", "install", "Also set up migration? (yes/no)",
+        # A cloud session has no Minecraft to install into: porting is what it is for.
+        path = ask.decide("SETUP_PATH", "migrate" if IN_CLOUD else "install", "Also set up migration? (yes/no)",
                           choices={"no": "install", "n": "install", "yes": "migrate", "y": "migrate"})
     if path not in ("install", "migrate"):
         problems.append(f"SETUP_PATH must be install or migrate, not {path!r}")
@@ -703,7 +705,7 @@ def main():
             notes.append(f"--remove {k}: not set, nothing to do")
 
     # cloud: is the environment set up? -------------------------------------------------------
-    if os.environ.get("CLAUDE_CODE_REMOTE") == "true":
+    if IN_CLOUD:
         print("\nCloud environment")
         code, out = run([sys.executable, str(ROOT / "cloud/check.py")], timeout=600)
         print("   " + (out or "").replace("\n", "\n   "))
@@ -748,8 +750,11 @@ def main():
     print("\nNext:" + ("" if has_claude else "  (install Claude Code first -- see the note above)"))
     if path == "migrate":
         print("  bash tools/download-tools.sh     # once: fetches + verifies the two decompilers")
-    print(f"  cd {ROOT} && claude")
-    print("  then say what you want, in plain words, e.g.")
+    if IN_CLOUD:
+        print("  say what you want here, in plain words, e.g.")
+    else:
+        print(f"  cd {ROOT} && claude")
+        print("  then say what you want, in plain words, e.g.")
     print('    "Install Sodium"                                   (finds the right build, deploys it)')
     if path == "migrate":
         print('    "Migrate <mod name> to Minecraft 1.21.1"           (ports it when no build exists;')

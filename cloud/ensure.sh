@@ -35,13 +35,17 @@ if [ "$(id -u)" != 0 ]; then
   exit 1
 fi
 echo "cloud/ensure.sh: installing ${todo[*]} (first time in this session, about a minute or two)..."
-fail() { echo "cloud/ensure.sh: FAILED: $1" >&2; echo "  Is the host allowed? Run: python3 cloud/check.py" >&2; exit 1; }
+# apt's chatter (and harmless warnings such as debconf's "apt-utils is not installed") goes to a
+# log, shown only when something fails.
+APTLOG="${TMPDIR:-/tmp}/cloud-ensure-apt.log"
+: > "$APTLOG"
+fail() { tail -n 20 "$APTLOG" >&2; echo "cloud/ensure.sh: FAILED: $1" >&2; echo "  Is the host allowed? Run: python3 cloud/check.py" >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -q >/dev/null || fail "apt-get update"
+apt-get update -q >>"$APTLOG" 2>&1 || fail "apt-get update"
 for t in "${todo[@]}"; do
   case "$t" in
     xvfb)
-      apt-get install -y -q xvfb mesa-utils libgl1-mesa-dri >/dev/null || fail "installing xvfb"
+      apt-get install -y -q xvfb mesa-utils libgl1-mesa-dri >>"$APTLOG" 2>&1 || fail "installing xvfb"
       echo "cloud/ensure.sh: xvfb installed" ;;
     java25)
       install -d /etc/apt/keyrings
@@ -49,8 +53,8 @@ for t in "${todo[@]}"; do
         | gpg --dearmor --yes -o /etc/apt/keyrings/adoptium.gpg || fail "fetching the Adoptium key (packages.adoptium.net)"
       echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release; echo "$VERSION_CODENAME") main" \
         > /etc/apt/sources.list.d/adoptium.list
-      apt-get update -q >/dev/null || fail "apt-get update (Adoptium)"
-      apt-get install -y -q temurin-25-jdk >/dev/null || fail "installing temurin-25-jdk"
+      apt-get update -q >>"$APTLOG" 2>&1 || fail "apt-get update (Adoptium)"
+      apt-get install -y -q temurin-25-jdk >>"$APTLOG" 2>&1 || fail "installing temurin-25-jdk"
       echo "cloud/ensure.sh: Java 25 installed" ;;
   esac
 done

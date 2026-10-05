@@ -39,7 +39,8 @@ claude
 ```
 
 `./setup` finds your Minecraft, recommends an answer to every question, and ends by telling you what
-to type. Installing needs Python 3; porting also needs Java 21 (and 25 for Minecraft 26.x).
+to type. Installing needs Python 3. Porting is an add-on: say yes when `./setup` offers it, or run
+`./setup --migrate` later; it needs Java 21 (and 25 for Minecraft 26.x).
 Details: [docs/USING.md](docs/USING.md).
 
 ## Quick start: in the cloud
@@ -72,8 +73,10 @@ Nothing to install. One environment works for this repo and for
      sign in at [console.curseforge.com](https://console.curseforge.com/) and open **API keys**.
      Without it, mods that are only on CurseForge can't be found; everything on Modrinth still works.
 2. **Start a session** on this repo (or your fork), in that environment. It opens straight away.
-   Type `run ./setup`: it checks every host and installs the two missing tools (a virtual screen and
-   Java 25) the first time, which takes a minute or two.
+   Type `run ./setup --yes` (`--yes` is needed: Claude runs it without a terminal to answer
+   questions). It sets up porting, checks every host and installs the two missing tools (a virtual
+   screen and Java 25) the first time, which takes a minute or two. It ends with **Ready.**; then
+   ask for a port in plain words, as above.
 
 In the cloud you can port and test, but there's no Minecraft to install into: take the finished jar
 home.
