@@ -1,0 +1,10 @@
+# List prices in US dollars per million tokens, used by tools/port-cost.py ONLY when Claude Code
+# recorded no dollar figure (its desktop/CLI build writes tokens, not dollars). A row priced this way is
+# marked usd_source=estimated. Add a row when a port runs on a model that isn't here; a model with no
+# row leaves the dollars blank rather than guessing. Thinking is billed as output and is already
+# counted inside output_tokens. Cache writes: 5-minute = 1.25x input, 1-hour = 2x input.
+# source: Anthropic API list prices (first-party), as of the date in the as_of column.
+model	input	output	cache_read	cache_write_5m	cache_write_1h	web_search_each	as_of
+claude-opus-5-5	4.00	20.00	0.20	5.00	8.00	0.01	2026-09-25
+claude-sonnet-5-5	2.00	10.00	0.20	2.50	4.00	0.01	2026-09-25
+claude-haiku-4-5	1.00	5.00	0.10	1.25	2.00	0.01	2026-09-25
