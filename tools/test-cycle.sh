@@ -81,6 +81,12 @@ git -C "$D" log -1 --format=%B | grep -q 'Status: DONE' && ok "the commit messag
 
 { [ -f "$D/mods/fakeport/COST.json" ] && grep -q '^## Cost (recorded by tools/port-cost.py' "$D/mods/fakeport/MIGRATION.md"; } \
   && ok "finish-port records the cost (COST.json + MIGRATION.md) and it travels with the port" || bad "cost not delivered"
+# as if the first run was in an earlier minute (CI once straddled one): recorded_at alone must not
+# make a re-run commit
+for f in "$P/COST.json" "$D/mods/fakeport/COST.json"; do
+  sed -i.bak 's/"recorded_at": "[^"]*"/"recorded_at": "2000-01-01T00:00Z"/' "$f" && rm -f "$f.bak"
+done
+gitq -C "$D" commit -qam "earlier minute"
 n1="$(git -C "$D" rev-list --count HEAD)"
 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
   python3 tools/finish-port.py fakeport --workspace "$WS" --dest "$D" --env /dev/null >/dev/null 2>&1

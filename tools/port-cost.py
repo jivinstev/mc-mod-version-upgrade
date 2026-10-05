@@ -291,7 +291,14 @@ def main():
     if not port.is_dir():
         print(f"port-cost: {port} does not exist -- printed only", file=sys.stderr)
         return 2
-    (port / "COST.json").write_text(json.dumps(c, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    cost = port / "COST.json"
+    try:   # same figures as last time: keep its recorded_at, so a re-run changes no file (and finish-port
+        old = json.loads(cost.read_text(encoding="utf-8"))   # makes no commit, even across a minute)
+        if {k: v for k, v in old.items() if k != "recorded_at"} == {k: v for k, v in c.items() if k != "recorded_at"}:
+            c["recorded_at"] = old.get("recorded_at", c["recorded_at"])
+    except (OSError, ValueError, AttributeError):
+        pass
+    cost.write_text(json.dumps(c, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     mig = port / "MIGRATION.md"
     text = mig.read_text(encoding="utf-8") if mig.exists() else f"# {a.modid} migration\n"
     text = re.sub(r"(?ms)^## Cost \(recorded by tools/port-cost\.py.*?(?=^## |\Z)", "", text).rstrip("\n")
