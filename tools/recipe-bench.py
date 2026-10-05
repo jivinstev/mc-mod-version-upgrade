@@ -162,7 +162,7 @@ def family(msg):
     m = re.match(r'package ([\w.]+) does not exist', msg)
     if m:
         return "package " + ".".join(m.group(1).split(".")[:3]) + ".* does not exist"
-    return re.sub(r'[A-Z][\w$.<>?, ]*', 'T', msg.split(" [")[0])[:90]
+    return re.sub(r'[A-Z][\w$.]*(<[^ ]*>)?', 'T', msg.split(" [")[0])[:90]
 
 
 def bucket(errors, sigs):
