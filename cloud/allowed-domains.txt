@@ -1,0 +1,14 @@
+maven.neoforged.net
+*.minecraft.net
+*.mojang.com
+api.modrinth.com
+cdn.modrinth.com
+api.curseforge.com
+*.forgecdn.net
+maven.parchmentmc.org
+maven.fabricmc.net
+maven.blamejared.com
+maven.ithundxr.dev
+dl.cloudsmith.io
+thedarkcolour.github.io
+packages.adoptium.net

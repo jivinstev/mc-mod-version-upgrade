@@ -4,6 +4,7 @@
 # Every case runs in a throwaway COPY of the repository with a throwaway $HOME, so nothing here can
 # touch the real .env.local, a real Minecraft folder, or ~/.claude.
 set -uo pipefail
+unset CLAUDE_CODE_REMOTE   # a cloud session would otherwise make setup probe the network
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 pass=0; fail=0

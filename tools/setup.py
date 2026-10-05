@@ -702,6 +702,14 @@ def main():
         else:
             notes.append(f"--remove {k}: not set, nothing to do")
 
+    # cloud: is the environment set up? -------------------------------------------------------
+    if os.environ.get("CLAUDE_CODE_REMOTE") == "true":
+        print("\nCloud environment")
+        code, out = run([sys.executable, str(ROOT / "cloud/check.py")], timeout=600)
+        print("   " + (out or "").replace("\n", "\n   "))
+        if code != 0:
+            problems.append("the cloud environment is not ready: see 'Cloud environment' above")
+
     # 8. diff, confirm, write ------------------------------------------------------------------
     changes = {k: v for k, (v, _) in ask.proposed.items()
                if state["keys"].get(k, {}).get("value") != v or k not in state["keys"]}
