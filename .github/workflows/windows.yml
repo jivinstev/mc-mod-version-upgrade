@@ -9,8 +9,9 @@ on:
     types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
-  # The build job takes several minutes (Gradle, NeoForm, a Minecraft server), so it runs on demand:
-  # from the Actions tab, or on a PR carrying the windows-build label.
+  # The build and client jobs take many minutes (Gradle, NeoForm, a Minecraft server or client), so
+  # they run on demand: from the Actions tab, or on a PR carrying the windows-build / windows-gatec
+  # label.
   workflow_dispatch:
 
 permissions:
@@ -263,3 +264,60 @@ jobs:
           for p in sorted(paths, key=len)[-3:]:
               print(len(p), p)
           PY
+
+  # EXPERIMENTAL. Gate C (the real client) on a runner with no GPU. The runner's desktop only has
+  # Windows' OpenGL 1.1, and Minecraft needs 3.2: Mesa's llvmpipe opengl32.dll beside java.exe is the
+  # Windows counterpart of the Linux CI's LIBGL_ALWAYS_SOFTWARE. A real Windows desktop needs none of it.
+  gatec:
+    name: windows Gate C (experimental, Mesa llvmpipe)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'windows-gatec'))
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      MESA_VERSION: 26.2.4
+      MESA_SHA256: 351fc8c8b695878ffb3eaa044b3ead08672a48b1a045e3c3e3975811df0f6695
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Mesa llvmpipe (pinned release, checksum verified) beside java.exe
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/mesa.7z" \
+            "https://github.com/pal1000/mesa-dist-win/releases/download/$MESA_VERSION/mesa3d-$MESA_VERSION-release-msvc.7z"
+          echo "$MESA_SHA256  $RUNNER_TEMP/mesa.7z" | sha256sum -c -
+          7z x -y -o"$RUNNER_TEMP/mesa" "$RUNNER_TEMP/mesa.7z" >/dev/null
+          ls "$RUNNER_TEMP/mesa/x64"
+          cp "$RUNNER_TEMP/mesa/x64/"*.dll "$(cygpath -u "$JAVA_HOME")/bin/"
+          echo "GALLIUM_DRIVER=llvmpipe" >> "$GITHUB_ENV"
+          echo "PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+
+      # The smoke harness boots to the title screen with no target mod, and prints
+      # SMOKEHARNESS_BOOT_TEST: PASS. client-boot-loop.sh is the Windows path a user's agent runs:
+      # no launcher, no xvfb, and a watchdog that kills with taskkill /T.
+      - name: client-boot-loop.sh launch (Gate C, title screen)
+        run: |
+          M="$RUNNER_TEMP/sh"; cp -R templates/smoke-harness "$M"; cd "$M"
+          export SIG_DIR="$RUNNER_TEMP/sig" TIMEOUT_SECS=2400
+          # A crash makes the loop WAIT for a fix (the agent's job); here a crash should end the run.
+          ( while [ ! -f "$SIG_DIR/crash.ready" ]; do sleep 5; done; touch "$SIG_DIR/stop" "$SIG_DIR/fix.done" ) >/dev/null 2>&1 &
+          watcher=$!
+          ./tools/client-boot-loop.sh launch; code=$?
+          kill "$watcher"
+          echo "--- renderer"; grep -aiE 'llvmpipe|OpenGL|GL_RENDERER|LWJGL' "$SIG_DIR/launch.log" | head -10
+          [ -f "$SIG_DIR/crash.log" ] && { echo "--- crash digest"; cat "$SIG_DIR/crash.log"; }
+          exit $code
+
+      - name: keep the client log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gatec-windows-log
+          path: ${{ runner.temp }}/sig
