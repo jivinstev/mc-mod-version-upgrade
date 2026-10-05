@@ -65,5 +65,13 @@ if [ "$N" -eq 0 ] && grep -qE 'An exception has occurred in the compiler' "$LOG"
   grep -E 'An exception has occurred in the compiler|^java\.lang\.[A-Za-z]+' "$LOG" | head -3
   exit 5
 fi
+# X5d: the task can START and fail before javac runs -- an unresolvable dependency fails
+# compileJava itself ("> Task :compileJava FAILED" + "Could not resolve"), which the RAN check
+# above accepts. Zero error: lines from a FAILED compile task is not zero errors.
+if [ "$N" -eq 0 ] && grep -qE '^> Task :(compileJava|compileTestJava) FAILED' "$LOG"; then
+  echo "NOT A COUNT -- compileJava FAILED without a single javac error (it never compiled):"
+  grep -E "^(\* What went wrong|> |   > )" "$LOG" | grep -v '^> Task' | head -4
+  exit 2
+fi
 JAVAC=$(grep -oE '^[0-9]+ error(s)?$' "$LOG" | tail -1)
 echo "errors = $N   (compileJava: $RAN${JAVAC:+, javac said: $JAVAC})"
