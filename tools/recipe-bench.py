@@ -356,8 +356,13 @@ def main():
         res["not_a_count"] = msg
         print("\n".join(msg))
     else:
-        b, u, ex = bucket(parse_errors(log.read_text(encoding="utf-8", errors="replace")), signatures())
-        res.update(buckets=dict(b), unmatched=dict(u), examples=ex)
+        errs = parse_errors(log.read_text(encoding="utf-8", errors="replace"))
+        b, u, ex = bucket(errs, signatures())
+        # per source file, relative to the java root (the start tree's root or a prepared overlay tree):
+        # the file-locality check compares these with the files the finished port changed
+        rel = lambda f: f.rsplit("/java/", 1)[-1]
+        res.update(buckets=dict(b), unmatched=dict(u), examples=ex,
+                   errors_by_file=dict(collections.Counter(rel(f) for f, _l, _m in errs)))
     report(res, a.top)
     if a.json:
         pathlib.Path(a.json).write_text(json.dumps(res, indent=1, sort_keys=True), encoding="utf-8")

@@ -178,7 +178,26 @@ def cluster_key(removed, added):
     return f"{pick(removed) or '-'} -> {pick(added) or '-'}"
 
 
-def census(start, end, bulk=300, det=None, w=None, exclude=()):
+def shape(minus, plus, keep):
+    """A hunk with its incidental names blanked: identifiers outside `keep` (the removed/added API) become
+    ID, literals LIT. Two hunks with the same shape are the same edit at different sites, so one written
+    fix (or one generated rewrite) covers both."""
+    def one(text):
+        out = []
+        for t in TOKEN.findall(code(text)):
+            if t.startswith('"') or t[0].isdigit():
+                out.append("LIT")
+            elif IDENT.fullmatch(t) and t not in keep and code_shaped(t):
+                out.append("ID")
+            else:
+                out.append(t)
+        return " ".join(out)
+    return one(minus) + " => " + one(plus)
+
+
+def census(start, end, bulk=300, det=None, w=None, exclude=(), records=None):
+    """records: a list to append one dict per hunk to (file, kind, lines, entry/cluster, removed, added,
+    shape) -- the input for the hypothesis checks. It names identifiers from the trees: private side only."""
     if det is None:
         det, w = detectors(exclude=exclude)
     res = {"hunks": 0, "attributed": 0, "new_files": 0, "deleted_files": 0, "bulk_hunks": 0,
@@ -186,25 +205,40 @@ def census(start, end, bulk=300, det=None, w=None, exclude=()):
     end_ids = set()
     for f in pathlib.Path(end).rglob("*.java"):
         end_ids |= ids(f.read_text(encoding="utf-8", errors="replace"), is_code=True)
+    root = str(pathlib.Path(end)).lstrip("/") + "/"
+    imp_cache = {}
+
+    def imports(f):   # the import roots (first two segments) of the file, end side else start side
+        if f not in imp_cache:
+            src = pathlib.Path(end, f) if pathlib.Path(end, f).exists() else pathlib.Path(start, f)
+            txt = src.read_text(encoding="utf-8", errors="replace") if src.exists() else ""
+            imp_cache[f] = sorted({".".join(m.split(".")[:2]) for m in re.findall(r'^import\s+(?:static\s+)?([\w.]+)', txt, re.M)})
+        return imp_cache[f]
+
+    rec = lambda **k: records.append(dict(k, imports=imports(k["file"]))) if records is not None else None
     for _f, kind, minus, plus, n in hunks(start, end):
         if not _f.endswith(".java"):
             continue
+        f = _f[len(root):] if _f.startswith(root) else _f
         if kind == "new-file":
-            res["new_files"] += 1; continue
+            res["new_files"] += 1; rec(file=f, cat="new-file", lines=n); continue
         if kind == "deleted-file":
-            res["deleted_files"] += 1; continue
+            res["deleted_files"] += 1; rec(file=f, cat="deleted-file", lines=n); continue
         res["hunks"] += 1
         if n > bulk:
-            res["bulk_hunks"] += 1; continue
+            res["bulk_hunks"] += 1; rec(file=f, cat="bulk", lines=n); continue
         if norm(code(minus)) == norm(code(plus)):
-            res["comment_only"] += 1; continue
+            res["comment_only"] += 1; rec(file=f, cat="comment", lines=n); continue
         ent, removed, added = attribute(minus, plus, det, w, gone=ids(minus, True) - end_ids)
         if ent:
-            res["attributed"] += 1; res["by_entry"][ent] += 1
+            res["attributed"] += 1; res["by_entry"][ent] += 1; key = ent; cat = "entry"
         elif removed or added:
-            res["unattributed"] += 1; res["clusters"][cluster_key(removed, added)] += 1
+            res["unattributed"] += 1; key = cluster_key(removed, added); res["clusters"][key] += 1; cat = "cluster"
         else:
-            res["unattributed"] += 1; res["clusters"]["reshape: " + reshape_key(minus, plus)] += 1
+            res["unattributed"] += 1; key = "reshape: " + reshape_key(minus, plus); res["clusters"][key] += 1; cat = "cluster"
+        if records is not None:
+            rec(file=f, cat=cat, key=key, lines=n, removed=sorted(removed), added=sorted(added),
+                shape=shape(minus, plus, removed | added))
     return res
 
 
@@ -247,6 +281,8 @@ def main():
     ap.add_argument("--start"); ap.add_argument("--end"); ap.add_argument("--json")
     ap.add_argument("--bulk", type=int, default=300); ap.add_argument("--top", type=int, default=12)
     ap.add_argument("--self-check", action="store_true")
+    ap.add_argument("--hunks-out", help="write one JSON line per hunk (file, category, removed/added ids, "
+                    "normalised shape): the hypothesis checks' input. Names identifiers -- keep it private")
     ap.add_argument("--exclude", default="", help="comma-separated entry-id prefixes out of scope, e.g. V "
                     "for a 1.20 -> 1.21 port (the §V entries are the 1.21 -> 26.x era jump)")
     a = ap.parse_args()
@@ -254,8 +290,13 @@ def main():
         return self_check()
     if not (a.start and a.end):
         ap.error("--start and --end are required")
+    recs = [] if a.hunks_out else None
     r = census(pathlib.Path(a.start).resolve(), pathlib.Path(a.end).resolve(), a.bulk,
-               exclude=tuple(x for x in a.exclude.split(",") if x))
+               exclude=tuple(x for x in a.exclude.split(",") if x), records=recs)
+    if a.hunks_out:
+        with open(a.hunks_out, "w", encoding="utf-8") as fh:
+            for x in recs:
+                fh.write(json.dumps(x, sort_keys=True) + "\n")
     h = r["hunks"]
     print(f"hunks {h}: attributed {r['attributed']} ({100 * r['attributed'] // max(h, 1)}%), "
           f"unattributed {r['unattributed']}, comment-only {r['comment_only']}, bulk {r['bulk_hunks']}; files new {r['new_files']}, deleted {r['deleted_files']}")

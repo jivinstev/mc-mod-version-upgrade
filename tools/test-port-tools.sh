@@ -183,6 +183,19 @@ out="$(python3 tools/hunk-census.py --self-check 2>&1)"
 grep -q 'self-check: PASS' <<<"$out" && ok "census: field, prose-arrow and SRG-shape detectors attribute; comment-only and renames-with-no-entry do not" \
   || bad "hunk-census self-check: $out"
 
+echo "8. census-hypotheses.py (H1/H2/H5/H7 arithmetic on synthetic records)"
+H="$T/hyp"; mkdir -p "$H/r1"
+printf 'profile\tport\n' > "$H/census.tsv"; printf 'P1\tr1\n' >> "$H/census.tsv"
+{ echo '{"cat":"new-file","file":"a/Shim.java","lines":9}'
+  echo '{"cat":"entry","key":"9","file":"a/A.java","shape":"S1","removed":["Old"],"added":["Shim"],"imports":[]}'
+  echo '{"cat":"entry","key":"9","file":"a/B.java","shape":"S1","removed":["Old"],"added":["Shim"],"imports":[]}'
+  echo '{"cat":"cluster","key":"x","file":"a/C.java","shape":"S2","removed":["Q"],"added":["Shim"],"imports":["mezz.jei"]}'
+  echo '{"cat":"cluster","key":"x","file":"a/C.java","shape":"S3","removed":["Q"],"added":[],"imports":["mezz.jei"]}'; } > "$H/r1/hunks.jsonl"
+mkdir -p "$H/b/r1"; echo '{"errors_by_file":{"a/A.java":2,"a/Z.java":1}}' > "$H/b/r1/bench.json"
+out="$(python3 tools/census-hypotheses.py --census "$H" --bench "$H/b" 2>&1)"
+grep -q '| P1 | 1 | 4 | 25% / 25% | 75% | 0% | 25% (1 rows) | 50% |' <<<"$out" \
+  && ok "hypotheses: repeats exact/loose, helper routing, file locality, optional code" || bad "census-hypotheses: $(grep '| P1' <<<"$out")"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
