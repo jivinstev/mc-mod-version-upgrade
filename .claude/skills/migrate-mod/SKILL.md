@@ -174,9 +174,12 @@ assumes official names.
 ## Step 3b — Offer the port's scope: full, minimal, or chosen chunks (ASK before the build loop)
 Not every user wants every part of a mod, and the parts cost very different amounts. Before grinding
 errors, measure what can be left off and let the user choose.
-1. Run the FIRST compile with javac's error cap lifted and save the log
-   (`./gradlew compileJava --console=plain > /tmp/first.log 2>&1`; quote the count with
-   `tools/burndown-count.sh /tmp/first.log`).
+1. Run the FIRST compile with javac's error cap lifted and save the log:
+   `./gradlew compileJava --console=plain --init-script ../../tools/maxerrs.init.gradle > /tmp/first.log 2>&1`,
+   then `bash ../../tools/burndown-count.sh /tmp/first.log`. javac stops at **100** errors by default, and a
+   capped list only covers the files it reached first, so per-chunk shares from it are noise; the counter
+   refuses a capped log (exit 6). On a very large mod give Gradle room (`-Dorg.gradle.jvmargs=-Xmx8g`) or
+   the log ends in an OutOfMemoryError, which it also refuses.
 2. `python3 ../../tools/scope-menu.py --src src/main/java --resources src/main/resources --log /tmp/first.log --json /tmp/scope.json`.
    It splits the mod into chunks the port could leave out: optional integrations (recipe viewers,
    tooltips, accessory slots...), custom shaders, HUD overlays, particles, commands, config screens,

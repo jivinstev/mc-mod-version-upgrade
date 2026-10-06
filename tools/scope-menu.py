@@ -23,8 +23,10 @@ Each chunk names what the mod falls back to without it, so "leave it off" is a d
                        renderers, goals). Leaving it off removes those mobs entirely.
 
 WHAT THE ESTIMATE IS, AND IS NOT. With --log (the first compile, javac's cap lifted), a chunk's share of the
-start's compile errors is the best predictor this repo has of its share of the compile phase. Without a log
-it falls back to its share of lines. Dollars are a RANGE: start errors x USD_PER_ERROR, the spread of the
+start's compile errors is the best predictor this repo has of its share of the compile phase -- but only
+from a FULL error list: javac stops at 100 by default, so take the log with tools/maxerrs.init.gradle. A log
+burndown-count.sh refuses (capped, parse abort, OOM) is ignored with a warning, as is no log at all, and the
+shares fall back to lines. Dollars are a RANGE: start errors x USD_PER_ERROR, the spread of the
 published baselines in docs/EVALS.md / docs/port-costs.tsv. It covers the compile phase only; runtime gates,
 client rendering and mixin apply failures cost extra, so chunks with mixins or renderers are flagged.
 "refs" counts references from the rest of the mod into the chunk: each is a call site to cut or stub when
@@ -115,6 +117,14 @@ def build(src, resources=None, log=None, errors_json=None):
                         any(re.search(rf'\b{re.escape(n)}\b', files[rel]) for n in names):
                     chunk[rel] = fc; break
     errors = collections.Counter()
+    refused = None
+    if log:   # only a log burndown-count.sh accepts: a capped, parse-aborted or OOM'd list is a prefix
+        import subprocess
+        r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)],
+                           capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0:
+            refused = r.stdout.strip().splitlines()[0] if r.stdout.strip() else f"exit {r.returncode}"
+            log = None
     if log:
         _s = importlib.util.spec_from_file_location("rb", ROOT / "tools/recipe-bench.py")
         rb = importlib.util.module_from_spec(_s); _s.loader.exec_module(rb)
@@ -154,7 +164,7 @@ def build(src, resources=None, log=None, errors_json=None):
         out["shaders"] = {"kind": "shaders", "files": 0, "lines": 0, "errors": 0, "refs_from_rest": 0, "mixins": 0,
                           "renderers": 0, "fallback": FALLBACK["shaders"], "share": 0.0, "share_basis": "assets only",
                           "assets": shader_assets}
-    return {"total_errors": tot_err, "total_lines": tot_lines,
+    return {"total_errors": tot_err, "total_lines": tot_lines, "log_refused": refused,
             "usd_range_full": [round(tot_err * USD_PER_ERROR[0], 2), round(tot_err * USD_PER_ERROR[1], 2)] if tot_err else None,
             "chunks": out}
 
@@ -164,6 +174,8 @@ def errors_in(files, errors):
 
 
 def report(m):
+    if m.get("log_refused"):
+        print(f"WARNING: the compile log is not a full error list, so shares fall back to LINES:\n  {m['log_refused']}")
     print(f"start compile errors: {m['total_errors'] or 'n/a (no --log; shares are by lines)'}"
           + (f"   rough compile-phase cost of the FULL port: ${m['usd_range_full'][0]}-${m['usd_range_full'][1]}" if m["usd_range_full"] else ""))
     print(f"{'chunk':40} {'files':>5} {'errors':>6} {'share':>6} {'refs':>5}  flags / without it")
@@ -197,10 +209,13 @@ def self_check():
         log.write_text(f"> Task :compileJava\n{s}/compat/JeiPlugin.java:2: error: package mezz.jei.api does not exist\n"
                        f"{s}/Main.java:2: error: cannot find symbol\n", encoding="utf-8")
         m = build(pathlib.Path(t, "java"), log=log)
+        log.write_text(log.read_text(encoding="utf-8") + "only showing the first 100 errors, of 900 total\n", encoding="utf-8")
+        capped = build(pathlib.Path(t, "java"), log=log)
     c = m["chunks"]
     ok = (set(c) == {"core", "commands", "integration:JEI recipe viewer", "family:bugs"}
           and c["integration:JEI recipe viewer"]["errors"] == 1 and c["integration:JEI recipe viewer"]["share"] == 0.5
-          and c["family:bugs"]["files"] == 5 and c["family:bugs"]["refs_from_rest"] == 1 and m["total_errors"] == 2)
+          and c["family:bugs"]["files"] == 5 and c["family:bugs"]["refs_from_rest"] == 1 and m["total_errors"] == 2
+          and capped["total_errors"] == 0 and capped["log_refused"])
     print("self-check:", "PASS" if ok else f"FAIL {json.dumps(m)[:400]}")
     return 0 if ok else 3
 
