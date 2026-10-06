@@ -19,7 +19,7 @@ python3 modreg.py versions --provider curseforge --id 123456 [--loader neoforge 
 python3 modreg.py deps --provider modrinth --id geckolib --file <versionId>
 
 # download a file (verifies sha1); exit 3 = author opt-out, exit 4 = hash mismatch
-python3 modreg.py download --provider modrinth --id geckolib --file <versionId> --out /path/x.jar
+python3 modreg.py download --provider modrinth --id geckolib --file <versionId> --out /path/x.jar   # or a folder: --out ~/Downloads/
 
 # introspect a local jar (no network): modid(s), loader, MC range, mixins, jarjar
 python3 modreg.py resolve-modid --jar /path/to/mod.jar

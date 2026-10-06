@@ -41,7 +41,7 @@ LEAVE_BEHIND_PREFIX = ("run-", "build-mc", "build-")      # per-target run/build
 def read_env(path):
     env = {}
     if path.is_file():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
@@ -53,12 +53,12 @@ def expand(p):
 
 
 def git(dest, *args, check=True):
-    return subprocess.run(["git", "-C", str(dest), *args], capture_output=True, text=True, check=check)
+    return subprocess.run(["git", "-C", str(dest), *args], capture_output=True, text=True, check=check, encoding="utf-8", errors="replace")
 
 
 def is_git_repo(p):
     return subprocess.run(["git", "-C", str(p), "rev-parse", "--is-inside-work-tree"],
-                          capture_output=True, text=True).returncode == 0
+                          capture_output=True, text=True, encoding="utf-8", errors="replace").returncode == 0
 
 
 def ignored(name):
@@ -85,7 +85,7 @@ def status_line(port):
     mig = port / "MIGRATION.md"
     if not mig.is_file():
         return ""
-    for line in mig.read_text(errors="replace").splitlines():
+    for line in mig.read_text(errors="replace", encoding="utf-8").splitlines():
         s = line.strip().strip("*").strip()
         if s.lower().startswith("status"):
             return s[:120]
@@ -165,7 +165,7 @@ def main():
     # record what the port cost (COST.json + MIGRATION.md) BEFORE copying, so it travels with the port.
     # Never fatal: a missing transcript must not block delivering a finished port.
     r = subprocess.run([sys.executable, str(ROOT / "tools/port-cost.py"), a.modid, "--workspace", str(ws)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     print((r.stdout + r.stderr).rstrip() if r.returncode == 0 else
           f"finish-port: cost not recorded ({(r.stderr or r.stdout).strip()})")
 

@@ -90,7 +90,7 @@ def main():
         path = os.path.join(ws, "versions", target + ".properties")
         if not os.path.exists(path):
             sys.exit("no such target: %s\nknown: %s" % (path, " ".join(targets)))
-        for line in open(path):
+        for line in open(path, encoding="utf-8"):
             if "=" in line and not line.strip().startswith("#"):
                 k, v = line.split("=", 1)
                 props[k.strip()] = v.strip()
@@ -113,7 +113,7 @@ def main():
                  "  This tool will NOT reconstruct one: two targets share a module cache, so a\n"
                  "  hand-built path resolves the new target against the old jars and reports\n"
                  "  all-clear (catalogue X25b-ii)." % (cp_file, target))
-    jars = [e.strip() for e in re.split(r"[%s\n]" % os.pathsep, open(cp_file).read())
+    jars = [e.strip() for e in re.split(r"[%s\n]" % os.pathsep, open(cp_file, encoding="utf-8").read())
         if e.strip().endswith(".jar")]
     index = {}
     for j in jars:
@@ -140,14 +140,14 @@ def main():
         if not jar:
             abstract_cache[fqn] = None
             return None
-        out = subprocess.run(["javap", "-cp", jar, fqn], capture_output=True, text=True).stdout
+        out = subprocess.run(["javap", "-cp", jar, fqn], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
         decl = next((l for l in out.splitlines() if " class " in l or " interface " in l), "")
         abstract_cache[fqn] = " abstract class " in decl
         return abstract_cache[fqn]
 
     checked, problems = 0, []
     for path in glob.glob(os.path.join(root, "**/*.java"), recursive=True):
-        s = strip_comments(open(path).read())
+        s = strip_comments(open(path, encoding="utf-8").read())
         pkg = (re.search(r'^package\s+([\w.]+);', s, re.M) or [None, ""])[1]
         rel = os.path.relpath(path, root)
         for simple in [m.group(1) for m in LISTENER.finditer(s)] + ADD_LISTENER.findall(s):

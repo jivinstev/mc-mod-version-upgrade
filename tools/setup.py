@@ -71,7 +71,7 @@ CLAUDE_DOCS = "https://docs.claude.com/en/docs/claude-code/setup"
 def read_env():
     vals = {}
     if ENV.is_file():
-        for line in ENV.read_text().splitlines():
+        for line in ENV.read_text(encoding="utf-8").splitlines():
             m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$', line)
             if m and not line.lstrip().startswith("#"):
                 vals[m.group(1)] = m.group(2).strip().strip('"').strip("'")
@@ -80,7 +80,7 @@ def read_env():
 
 def read_state():
     try:
-        s = json.loads(STATE.read_text())
+        s = json.loads(STATE.read_text(encoding="utf-8"))
         if isinstance(s, dict) and isinstance(s.get("keys"), dict):
             return s
     except (OSError, ValueError):
@@ -111,7 +111,7 @@ def now():
 
 def write_env(changes, removals):
     """Update lines in place so comments and ordering the user wrote survive; append new keys."""
-    lines = ENV.read_text().splitlines() if ENV.is_file() else [
+    lines = ENV.read_text(encoding="utf-8").splitlines() if ENV.is_file() else [
         "# Written by ./setup. Edit freely -- a hand edit always wins over setup's own guesses.",
         "# Provenance for each key lives in .setup-state.json."]
     seen = set()
@@ -132,13 +132,20 @@ def write_env(changes, removals):
             out.append(f"{k}={v}")
     if ENV.is_file():
         shutil.copy2(ENV, ENV.with_name(".env.local.bak"))           # rule 7
-    ENV.write_text("\n".join(out) + "\n")
+    write_lf(ENV, "\n".join(out) + "\n")
+
+
+def write_lf(path, text):
+    """Write UTF-8 with LF endings on every OS. Text mode on Windows would write CRLF, and bash reads
+    .env.local and the python3 shim: a trailing \\r there is a broken value or `$'\\r': not found`."""
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
 
 
 # ── probes ──────────────────────────────────────────────────────────────────────────────────
 def run(cmd, timeout=15):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except (OSError, subprocess.SubprocessError) as e:
         return None, str(e)
@@ -153,6 +160,77 @@ def java_major():
         return None
     major = int(m.group(1))
     return int(m.group(2)) if major == 1 and m.group(2) else major
+
+
+SHIM_MARK = "# Written by mc-mod-version-upgrade's setup"
+
+
+def bash_shim(name, why, command, check, notes, problems):
+    """Windows only: a small script in ~/bin, which Git for Windows' bash puts first on PATH, so a
+    command the skills and docs use works in Git Bash. A ~/bin/<name> setup did not write is left alone."""
+    shim = pathlib.Path.home() / "bin" / name
+    body = f"#!/bin/sh\n{SHIM_MARK} (tools/setup.py): {why}\n{command}\n"
+    if shim.exists():
+        try:
+            have = shim.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            have = ""
+        if SHIM_MARK not in have:
+            print(f"   {name} (Git Bash): {shim} exists and is not setup's -- left alone")
+            return
+        if have == body:
+            print(f"   {name} (Git Bash): {shim}")
+            return
+    if check:
+        notes.append(f"would write {shim} ({why})")
+        return
+    try:
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        write_lf(shim, body)
+        notes.append(f"wrote {shim}: {why} (takes effect in a new Git Bash window)")
+    except OSError as e:
+        problems.append(f"could not write {shim}: {e}")
+
+
+def long_paths(notes):
+    """Windows' 260-character path limit. Gradle's caches, NeoForm's work tree and a decompiled mod
+    under it run past it, and the failure (a file 'not found' that is there) does not say why. Java
+    itself copes; git and some Python file calls do not, unless both switches are on."""
+    enabled = None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as k:
+            enabled = winreg.QueryValueEx(k, "LongPathsEnabled")[0] == 1
+    except (ImportError, OSError):
+        pass
+    git_long = (run(["git", "config", "--get", "core.longpaths"])[1] or "").strip().lower() == "true"
+    print(f"   long paths: Windows {'on' if enabled else 'OFF' if enabled is False else 'unknown'}, "
+          f"git core.longpaths {'on' if git_long else 'OFF'}")
+    if enabled is False:
+        notes.append("Windows long paths are off: a deep Gradle or decompiled path can fail as 'file not found'. "
+                     "Turn them on (PowerShell as Administrator): New-ItemProperty -Path "
+                     "'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem' -Name LongPathsEnabled -Value 1 "
+                     "-PropertyType DWORD -Force")
+    if not git_long:
+        notes.append("git core.longpaths is off: run  git config --global core.longpaths true")
+
+
+def windows_shims(check, notes, problems):
+    """The python.org installer provides `python` and `py`, not `python3`, and Windows' own `python3` is
+    a stub that opens the Microsoft Store -- yet the skills, docs and scripts all say `python3`. The
+    shim also sets PYTHONUTF8=1 (Windows Python prints in cp1252; the tools print UTF-8) and puts
+    tools/winpy on PYTHONPATH (print() writes LF, not CRLF, for bash to read). Git for
+    Windows has no `unzip` either; tools/zipls.py takes the same flags."""
+    exe = pathlib.Path(sys.executable).as_posix()
+    winpy = (ROOT / "tools/winpy").as_posix()     # its sitecustomize makes print() write LF, not CRLF
+    bash_shim("python3", "Windows Python has no python3 command",
+              f'export PYTHONUTF8=1\nexport PYTHONPATH="{winpy}${{PYTHONPATH:+;$PYTHONPATH}}"\nexec "{exe}" "$@"',
+              check, notes, problems)
+    unzip = shutil.which("unzip")
+    if not unzip or SHIM_MARK in (pathlib.Path(unzip).read_text(encoding="utf-8", errors="replace")
+                                  if pathlib.Path(unzip).stat().st_size < 4096 else ""):
+        bash_shim("unzip", "Git for Windows has no unzip; tools/zipls.py takes its -l/-p/-Z1 flags",
+                  f'exec "{exe}" "{(ROOT / "tools/zipls.py").as_posix()}" "$@"', check, notes, problems)
 
 
 def hint(tool):
@@ -207,18 +285,54 @@ def ensure_workspace(ws, notes, problems, dry):
     (root / "mods").mkdir(parents=True, exist_ok=True)
     for name in WORKSPACE_LINKS:
         link, target = root / name, ROOT / name
-        if link.is_symlink():
-            if os.path.realpath(link) != str(target.resolve()):
-                problems.append(f"{link} links somewhere else ({os.readlink(link)}) -- left alone")
+        if link.is_symlink() or is_junction(link):
+            if os.path.realpath(link) != os.path.realpath(target):
+                problems.append(f"{link} links somewhere else ({os.path.realpath(link)}) -- left alone")
             continue
         if link.exists():
-            problems.append(f"{link} exists and is not a link to this checkout -- left alone")
+            if not (link.is_file() and target.is_file() and os.path.samefile(link, target)):  # a hard link is ours
+                problems.append(f"{link} exists and is not a link to this checkout -- left alone")
             continue
         try:
             link.symlink_to(target)
             notes.append(f"workspace: linked {link} -> {target}")
-        except OSError as e:          # Windows without developer mode, for one
-            problems.append(f"could not link {link}: {e} (run from WSL, or copy it by hand)")
+        except OSError as e:
+            if SYS == "Windows" and windows_link(link, target):
+                notes.append(f"workspace: linked {link} -> {target} "
+                             f"({'junction' if target.is_dir() else 'hard link'}: symlinks need Developer Mode)")
+            elif SYS == "Windows" and target.is_file() and \
+                    os.path.splitdrive(str(link.resolve()))[0].lower() != os.path.splitdrive(str(target.resolve()))[0].lower():
+                problems.append(f"could not link {link}: without Developer Mode a file link must be a hard link, "
+                                f"and those cannot cross drives. Put the workspace on the same drive as {ROOT}, "
+                                "or turn on Developer Mode (Settings > System > For developers)")
+            else:
+                problems.append(f"could not link {link}: {e} (copy it by hand)")
+
+
+def is_junction(p):
+    """A Windows directory junction (what setup makes when symlinks need Developer Mode)."""
+    if hasattr(os.path, "isjunction"):            # Python 3.12+
+        return os.path.isjunction(p)
+    try:
+        return bool(os.lstat(p).st_reparse_tag == 0xA0000003)   # IO_REPARSE_TAG_MOUNT_POINT
+    except (OSError, AttributeError):
+        return False
+
+
+def windows_link(link, target):
+    """Windows without Developer Mode cannot make symlinks, but needs no privilege for a directory
+    junction or a file hard link. (A hard-linked .env.local is the same file only until an editor
+    saves it by replacing it; setup itself rewrites it in place.)"""
+    if not target.exists():
+        return False
+    if target.is_dir():
+        r = run(["cmd", "/c", "mklink", "/J", str(link), str(target)])[0]
+        return r == 0
+    try:
+        os.link(target, link)
+        return True
+    except OSError:
+        return False
 
 
 def supported_versions():
@@ -267,6 +381,14 @@ def claude_settings_wanted(path, write_dirs):
         # it: the build runs outside the sandbox, and is allowed without a prompt.
         want["sandbox.excludedCommands"] = ["./gradlew"]
         want["permissions.allow"] = ["Bash(./gradlew:*)"]
+    if SYS == "Windows":
+        # Claude Code's sandbox runs on macOS, Linux and WSL, not native Windows: entries for it would
+        # do nothing there. The permission (no prompt for ./gradlew under Git Bash) still applies.
+        want = {k: v for k, v in want.items() if not k.startswith("sandbox.")}
+        # Every command Claude runs gets these: the interpreter for ./gradlew's Exec gates (the
+        # templates' build.gradle reads $PYTHON on Windows) and UTF-8 output from the tools.
+        want["env.PYTHON"] = sys.executable
+        want["env.PYTHONUTF8"] = "1"
     return want
 
 
@@ -280,6 +402,11 @@ def claude_settings_merge(current, want):
         *parents, leaf = dotted.split(".")
         for k in parents:
             node = node.setdefault(k, {})
+        if isinstance(values, str):               # a single value (env.*): set only when absent
+            if leaf not in node:
+                node[leaf] = values
+                added.append((dotted, [values]))
+            continue
         have = node.setdefault(leaf, [])
         new = [v for v in values if v not in have]
         if new:
@@ -329,13 +456,13 @@ def gh_setup(interactive, notes, no_network):
             return
     print("   gh: signed in")
     url = subprocess.run(["git", "-C", str(ROOT), "remote", "get-url", "origin"], capture_output=True,
-                         text=True).stdout.strip()
+                         text=True, encoding="utf-8", errors="replace").stdout.strip()
     m = re.search(r"github\.com[:/]([^/]+)/(.+?)(?:\.git)?$", url)
     if not m:
         return
     repo = f"{m.group(1)}/{m.group(2)}"
     push = subprocess.run([gh, "api", f"repos/{repo}", "--jq", ".permissions.push"],
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.strip()
     if push == "true":
         print(f"   you can push to {repo}: lessons pull requests open from a branch there")
         return
@@ -489,7 +616,15 @@ def main():
         else:
             print(f"   java: ok (Java {jm}{'' if jm >= 25 else '; MC 26.x targets also need Java 25'})")
     if SYS == "Windows":
-        notes.append("the tooling is bash + Python: on Windows run it from WSL or Git Bash")
+        notes.append("Windows support is EXPERIMENTAL: it passes on GitHub's Windows runners but is not yet "
+                     "confirmed on a real PC. Report anything that differs: "
+                     "https://github.com/jivinstev/mc-mod-version-upgrade/issues/32")
+        windows_shims(a.check, notes, problems)
+        if path == "migrate":
+            long_paths(notes)
+        if not shutil.which("bash"):
+            notes.append("the tooling is bash + Python: run it from Git Bash (part of Git for Windows, "
+                         "which Claude Code needs too)")
 
     # 2. git access ---------------------------------------------------------------------------
     print("\n" + step() + "Git access")
@@ -627,13 +762,23 @@ def main():
             print(f"   destination: {out} (not a git repo: tools/finish-port.py copies only)")
 
     # 6. registries ---------------------------------------------------------------------------
-    print("\n" + step() + "Mod registries\n"
-          "   Modrinth works with no account and is searched first.\n"
-          "   CurseForge is OPTIONAL. Without a key, a mod published ONLY on CurseForge cannot be found\n"
-          "   or downloaded (you will be told when that happens); everything on Modrinth still works.\n"
-          "   To get a free key: sign in at https://console.curseforge.com/ and open \"API keys\".\n"
-          "   You can add it later with ./setup --review, or by editing CURSEFORGE_API_KEY in .env.local.")
-    ask.decide("CURSEFORGE_API_KEY", "", "CurseForge API key (or Enter to skip)", secret=True)
+    in_env = bool((os.environ.get("CURSEFORGE_API_KEY") or "").strip())
+    in_file = (ask.existing("CURSEFORGE_API_KEY") or {}).get("value")
+    if in_env and not in_file:
+        # The key came from the environment (a cloud environment's variables, or your shell). The
+        # registry tools read it from there, so there is nothing to ask and nothing to write: an
+        # empty line in .env.local made the summary read as if there were no key at all.
+        print("\n" + step() + "Mod registries\n"
+              "   Modrinth works with no account and is searched first.\n"
+              "   CurseForge key: found in the environment (CURSEFORGE_API_KEY). Nothing to do.")
+    else:
+        print("\n" + step() + "Mod registries\n"
+              "   Modrinth works with no account and is searched first.\n"
+              "   CurseForge is OPTIONAL. Without a key, a mod published ONLY on CurseForge cannot be found\n"
+              "   or downloaded (you will be told when that happens); everything on Modrinth still works.\n"
+              "   To get a free key: sign in at https://console.curseforge.com/ and open \"API keys\".\n"
+              "   You can add it later with ./setup --review, or by editing CURSEFORGE_API_KEY in .env.local.")
+        ask.decide("CURSEFORGE_API_KEY", "", "CurseForge API key (or Enter to skip)", secret=True)
 
     # 7. Claude hookup ------------------------------------------------------------------------
     print("\n" + step() + "Claude Code")
@@ -647,11 +792,17 @@ def main():
         for s in skills:
             link = dest / s
             if link.exists() or link.is_symlink():
-                if link.is_symlink() and os.path.realpath(link) == str((ROOT / ".claude/skills" / s).resolve()):
+                if (link.is_symlink() or is_junction(link)) and \
+                        os.path.realpath(link) == os.path.realpath(ROOT / ".claude/skills" / s):
                     continue
                 notes.append(f"~/.claude/skills/{s} already exists and is not ours -- left alone")
                 continue
-            link.symlink_to(ROOT / ".claude/skills" / s)
+            try:
+                link.symlink_to(ROOT / ".claude/skills" / s)
+            except OSError as e:          # Windows without Developer Mode: a junction needs no privilege
+                if not (SYS == "Windows" and windows_link(link, ROOT / ".claude/skills" / s)):
+                    problems.append(f"could not link {link}: {e}")
+                    continue
             notes.append(f"linked ~/.claude/skills/{s}")
 
     # 8. sharing what ports teach (migration add-on) ------------------------------------------
@@ -676,7 +827,7 @@ def main():
         write_dirs.append(wsv)
     want = claude_settings_wanted(path, write_dirs)
     try:
-        current = json.loads(f.read_text()) if f.exists() else {}
+        current = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
         if not isinstance(current, dict):
             raise ValueError("not a JSON object")
     except ValueError as e:
@@ -684,7 +835,11 @@ def main():
         problems.append(f"{f} is not valid JSON ({e}) -- left untouched; fix it, then re-run ./setup")
     if current is not None:
         merged, added = claude_settings_merge(current, want)
-        print("\n" + step() + f"Claude Code permissions ({f})\n"
+        print("\n" + step() + f"Claude Code permissions ({f})\n" + (
+              "   Native Windows has no Claude Code sandbox (it needs macOS, Linux or WSL), so Claude asks\n"
+              "   before commands instead. The entries below tell its commands which Python to use (there\n"
+              "   is no python3 outside Git Bash's shim) and, for migration, let ./gradlew run unprompted.\n"
+              if SYS == "Windows" else "") +
               "   Claude Code's sandbox blocks the network and writes outside this folder by default, so the\n"
               "   mod registries" + (", the build servers, the workspace and Gradle" if path == "migrate" else
                                     " and your mods folders") + " need allowing. Setup only ADDS entries.")
@@ -701,7 +856,7 @@ def main():
                 f.parent.mkdir(parents=True, exist_ok=True)
                 if f.exists():
                     shutil.copy2(f, f.with_suffix(".json.bak"))
-                f.write_text(json.dumps(merged, indent=2) + "\n")
+                write_lf(f, json.dumps(merged, indent=2) + "\n")
                 notes.append(f"updated {f} (backup: settings.json.bak); restart Claude Code to pick it up")
             elif ok_ != "yes":
                 notes.append("Claude Code permissions not added: registry downloads and builds may be refused "
@@ -753,7 +908,7 @@ def main():
         for k in removals:
             state["keys"].pop(k, None)
     state["schema"] = SCHEMA
-    STATE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    write_lf(STATE, json.dumps(state, indent=2, sort_keys=True) + "\n")
 
     if ask.kept:
         print(f"\nKept {ask.kept} earlier answer(s) without asking; ./setup --review goes through them all again.")

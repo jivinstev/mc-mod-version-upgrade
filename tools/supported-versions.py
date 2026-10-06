@@ -20,7 +20,7 @@ COLS = ["minecraft", "loader", "mods_gate_c", "override", "evidence"]
 
 def load(path=TSV):
     head, rows = [], []
-    for line in path.read_text().splitlines() if path.exists() else []:
+    for line in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
         if line.startswith("#") or line.split("\t")[0] == "minecraft" or not line.strip():
             head.append(line)
             continue
@@ -68,7 +68,7 @@ def main(argv):
             rows.append(r)
         r["mods_gate_c"] = str(count(r) + 1)
         r["evidence"] = "; ".join(x for x in (r["evidence"], ev) if x)
-        TSV.write_text("\n".join(head + ["\t".join(r[c] for c in COLS) for r in rows]) + "\n")
+        TSV.write_text("\n".join(head + ["\t".join(r[c] for c in COLS) for r in rows]) + "\n", encoding="utf-8")
         print(f"{mc}: {describe(r)}")
         return 0
     print(__doc__, file=sys.stderr)

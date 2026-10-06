@@ -22,6 +22,11 @@ plugins {
 // Everything that differs between versions is DATA in versions/<id>.properties.
 // This file never branches on a version number, which is the point: adding a
 // version is a new properties file plus an overlay directory, not an edit here.
+// The Python the Exec gates run. python3 on Linux and macOS. On Windows the python.org installer has
+// no python3 (and Windows' own python3 only opens the Microsoft Store), so: $PYTHON, which setup puts
+// in Claude Code's environment as the full path, else the py launcher.
+def python = System.getProperty('os.name').toLowerCase().contains('windows') ? (System.getenv('PYTHON') ?: 'py') : 'python3'
+
 ext.mcTarget = project.findProperty('mc') ?: '1.21.1'
 def versionFile = file("versions/${ext.mcTarget}.properties")
 if (!versionFile.exists()) {
@@ -121,7 +126,7 @@ def prepareSources = tasks.register('prepareSources', Exec) {
         // Same reason prepareTestSources is never UP-TO-DATE: the product is the LINE it prints.
         outputs.upToDateWhen { false }
     }
-    commandLine(['python3', 'tools/prepare-sources.py',
+    commandLine([python, 'tools/prepare-sources.py',
             '--src', 'src/main/java',
             '--overlay', "src/${overlay}/java",
             '--renames', "versions/${mcTarget}.renames.tsv",
@@ -161,7 +166,7 @@ def prepareTestSources = tasks.register('prepareTestSources', Exec) {
     // a permanently non-zero warning beside the main tree's zero, which is
     // decoration rather than an alarm (§X22).
     dependsOn prepareSources
-    commandLine('python3', 'tools/prepare-sources.py',
+    commandLine(python, 'tools/prepare-sources.py',
             '--src', 'src/test/java',
             '--renames', "versions/${mcTarget}.renames.tsv",
             '--hits-in', renameHits.get().asFile.absolutePath,
@@ -196,7 +201,7 @@ if (file('src/main/java').listFiles() != null) {
         dependsOn prepareSources
         outputs.upToDateWhen { false }
         workingDir projectDir.parentFile.parentFile
-        commandLine('python3', 'tools/audit-mixin-targets.py',
+        commandLine(python, 'tools/audit-mixin-targets.py',
                 "mods/${projectDir.name}", "--mc=${mcTarget}")
     }
     tasks.named('check') { dependsOn mixinTargets }
@@ -213,7 +218,7 @@ if (file('src/main/java').listFiles() != null) {
         dependsOn prepareSources
         outputs.upToDateWhen { false }
         workingDir projectDir.parentFile.parentFile
-        commandLine('python3', 'tools/audit-event-listeners.py',
+        commandLine(python, 'tools/audit-event-listeners.py',
                 "mods/${projectDir.name}", "--mc=${mcTarget}")
     }
     tasks.named('check') { dependsOn eventListeners }
@@ -227,7 +232,7 @@ if (file('src/main/java').listFiles() != null) {
         description = 'Check no compat pair re-enters the override that calls it'
         outputs.upToDateWhen { false }
         workingDir projectDir.parentFile.parentFile
-        commandLine('python3', 'tools/audit-compat-recursion.py', "mods/${projectDir.name}")
+        commandLine(python, 'tools/audit-compat-recursion.py', "mods/${projectDir.name}")
     }
     tasks.named('check') { dependsOn compatRecursion }
 }
@@ -414,6 +419,6 @@ def onlyIn = tasks.register('checkOnlyIn', Exec) {
     dependsOn tasks.named('prepareSources')
     outputs.upToDateWhen { false }
     workingDir projectDir.parentFile.parentFile
-    commandLine('python3', 'tools/audit-onlyin.py', "mods/${projectDir.name}", "--mc=${mcTarget}")
+    commandLine(python, 'tools/audit-onlyin.py', "mods/${projectDir.name}", "--mc=${mcTarget}")
 }
 tasks.named('check') { dependsOn onlyIn }

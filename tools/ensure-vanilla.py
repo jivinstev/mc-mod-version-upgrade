@@ -95,7 +95,7 @@ def plan(version, root):
     items = [("version json", entry["url"], vjson, entry.get("sha1"))]
     if not present(vjson, entry.get("sha1")):
         fetch(entry["url"], vjson, entry.get("sha1"))          # everything else is read from it
-    v = json.loads(vjson.read_text())
+    v = json.loads(vjson.read_text(encoding="utf-8"))
     c = v["downloads"]["client"]
     items.append(("client jar", c["url"], vdir / f"{version}.jar", c["sha1"]))
     for lib in v.get("libraries", []):
@@ -107,7 +107,7 @@ def plan(version, root):
     items.append(("asset index", ai["url"], idx, ai["sha1"]))
     if not present(idx, ai["sha1"]):
         fetch(ai["url"], idx, ai["sha1"])
-    for obj in json.loads(idx.read_text())["objects"].values():
+    for obj in json.loads(idx.read_text(encoding="utf-8"))["objects"].values():
         h = obj["hash"]
         items.append(("asset object", f"{OBJECTS}/{h[:2]}/{h}", root / "assets" / "objects" / h[:2] / h, h))
     return items

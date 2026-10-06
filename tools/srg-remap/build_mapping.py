@@ -92,7 +92,7 @@ def main():
             off = methods_by_obf.get((cur, p[0], p[1]))
             if off: srg2off[p[2]] = off
 
-    json.dump(srg2off, open(out, 'w'))
+    json.dump(srg2off, open(out, 'w', encoding="utf-8"))
     print(f"[{mc}] SRG->official entries: {len(srg2off)}  (classes {len(cls_off2obf)})")
     for s in ['m_91087_', 'f_19853_']:
         print(f"  {s} -> {srg2off.get(s)}")

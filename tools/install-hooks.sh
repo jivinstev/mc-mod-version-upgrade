@@ -30,6 +30,7 @@ names=""
 names="${names/#\~/$HOME}"
 set -- --root "$root"
 [ -n "$names" ] && set -- "$@" --names "$names" --strict
+. "$root/tools/python.sh" || exit 1   # python3 on Windows too
 python3 "$root/tools/check-no-ip.py" "$@" || {
   echo "pre-push: REFUSED — the IP gate failed. Nothing has been pushed." >&2
   exit 1

@@ -10,7 +10,7 @@ import json, re, os, sys
 def main():
     if len(sys.argv) != 3:
         print(__doc__); sys.exit(2)
-    srg = json.load(open(sys.argv[1]))
+    srg = json.load(open(sys.argv[1], encoding="utf-8"))
     root = sys.argv[2]
     pat = re.compile(r'\b([mf]_\d+_)\b')
     files = hits = 0
@@ -19,7 +19,7 @@ def main():
         for f in fn:
             if not f.endswith('.java'): continue
             p = os.path.join(dp, f)
-            t = open(p).read()
+            t = open(p, encoding="utf-8").read()
             def rep(m):
                 nonlocal hits
                 v = srg.get(m.group(1))
@@ -28,7 +28,7 @@ def main():
                 hits += 1; return v
             nt = pat.sub(rep, t)
             if nt != t:
-                open(p, 'w').write(nt); files += 1
+                open(p, 'w', encoding="utf-8").write(nt); files += 1
     print(f"rewrote {files} files, {hits} member renames applied")
     print(f"unmapped SRG ids left as-is: {len(miss)} distinct: {sorted(miss)[:20]}")
 

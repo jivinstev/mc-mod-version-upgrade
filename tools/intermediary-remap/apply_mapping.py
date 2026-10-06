@@ -19,7 +19,7 @@ import json, re, sys, os
 def main():
     if len(sys.argv) != 3:
         print(__doc__); sys.exit(2)
-    mapping = json.load(open(sys.argv[1]))
+    mapping = json.load(open(sys.argv[1], encoding="utf-8"))
     root = sys.argv[2]
 
     classes = mapping["classes"]          # 'class_A$class_B' -> 'net/minecraft/x/Outer$Inner'

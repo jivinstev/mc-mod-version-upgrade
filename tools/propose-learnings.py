@@ -41,7 +41,7 @@ CATALOG = ROOT / "CATALOG.md"
 def read_env(path):
     env = {}
     if path.is_file():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 k, v = line.split("=", 1)
                 env[k.strip()] = v.strip()
@@ -49,7 +49,7 @@ def read_env(path):
 
 
 def git(*args, check=True):
-    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, check=check)
+    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, check=check, encoding="utf-8", errors="replace")
 
 
 def parse_additions(text):
@@ -154,7 +154,7 @@ def port_targets(port):
     for f in [port / "gradle.properties"] + sorted((port / "versions").glob("*.properties")):
         if not f.is_file():
             continue
-        kv = dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S+)", f.read_text(errors="replace")))
+        kv = dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S+)", f.read_text(errors="replace", encoding="utf-8")))
         mc, neo = kv.get("minecraft_version"), kv.get("neo_version")
         if mc:
             t = f"Minecraft {mc}" + (f", NeoForge {neo}" if neo else "") + f" ({support.get(mc, 'untested')})"
@@ -168,7 +168,7 @@ def identity_tokens(port, ws):
     toks.add(port.name)
     for toml in list(port.glob("src/main/resources/META-INF/*mods.toml")) + list(port.glob("src/*/resources/META-INF/*mods.toml")):
         # only the [[mods]] block names THIS mod; [[dependencies.x]] blocks name minecraft, neoforge, ...
-        text = toml.read_text(errors="replace")
+        text = toml.read_text(errors="replace", encoding="utf-8")
         mods_block = re.split(r'^\s*\[\[dependencies', re.split(r'^\s*\[\[mods\]\]', text, maxsplit=1, flags=re.M)[-1],
                               maxsplit=1, flags=re.M)[0]
         for m in re.finditer(r'^\s*(modId|displayName)\s*=\s*"([^"]+)"', mods_block, re.M):
@@ -183,7 +183,7 @@ def identity_tokens(port, ws):
         toks.add(jar.stem)
     props = port / "gradle.properties"
     if props.is_file():
-        for m in re.finditer(r"^(mod_id|mod_name|mod_group_id)\s*=\s*(.+)$", props.read_text(errors="replace"), re.M):
+        for m in re.finditer(r"^(mod_id|mod_name|mod_group_id)\s*=\s*(.+)$", props.read_text(errors="replace", encoding="utf-8"), re.M):
             toks.add(m.group(2).strip())
     # generic words would make the check useless; the migrator's own placeholder is never an identity
     platform = {"minecraft", "neoforge", "forge", "fabric", "fabricloader", "quilt", "java", "examplemod",
@@ -218,8 +218,8 @@ def main():
         print(f"propose-learnings: {additions} not found -- the skill's retrospective writes it", file=sys.stderr)
         return 2
     try:
-        blocks = parse_additions(additions.read_text())
-        new_text = apply(CATALOG.read_text(), blocks)
+        blocks = parse_additions(additions.read_text(encoding="utf-8"))
+        new_text = apply(CATALOG.read_text(encoding="utf-8"), blocks)
     except ValueError as e:
         print(f"propose-learnings: REFUSED -- {e}", file=sys.stderr)
         return 1
@@ -231,7 +231,7 @@ def main():
     print(f"propose-learnings: {len(blocks)} lesson(s); refusing this port's identity: {', '.join(names)}")
     # (the workspace and home paths are screened here too: the catalogue itself legitimately
     #  mentions paths like /root/.gradle, so they could never go into a whole-repo gate)
-    lowered = additions.read_text().lower()
+    lowered = additions.read_text(encoding="utf-8").lower()
     leaked = [n for n in names + [str(ws), str(pathlib.Path.home())] if n.lower() in lowered]
     if leaked:
         print(f"propose-learnings: REFUSED -- the additions name this port: {', '.join(leaked)}.\n"
@@ -249,8 +249,8 @@ def main():
 
     if a.dry_run:
         tmp = pathlib.Path(tempfile.mkdtemp()) / "CATALOG.md"
-        tmp.write_text(new_text)
-        d = subprocess.run(["diff", "-u", str(CATALOG), str(tmp)], capture_output=True, text=True).stdout
+        tmp.write_text(new_text, encoding="utf-8")
+        d = subprocess.run(["diff", "-u", str(CATALOG), str(tmp)], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
         print(d or "(no change)")
         print("propose-learnings: --dry-run, nothing changed")
         return 0
@@ -281,20 +281,20 @@ def main():
         print(f"propose-learnings: REFUSED -- {msg}. Nothing committed; you are back on {start}.", file=sys.stderr)
         return 1
 
-    CATALOG.write_text(new_text)
+    CATALOG.write_text(new_text, encoding="utf-8")
     ip = subprocess.run([sys.executable, str(ROOT / "tools/check-no-ip.py"), "--root", str(ROOT),
-                         *ip_args], capture_output=True, text=True)
+                         *ip_args], capture_output=True, text=True, encoding="utf-8", errors="replace")
     print(ip.stdout[-2000:], end="")
     if ip.returncode:
         print(ip.stderr[-2000:], file=sys.stderr, end="")
         return abandon("the IP gate failed")
     fid = subprocess.run([sys.executable, str(ROOT / "tools/check-catalog-fidelity.py"), "--root", str(ROOT)],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
     print(fid.stdout[-1500:], end="")
     if fid.returncode:
         return abandon("the fidelity gate failed (an existing entry was lost)")
     subprocess.run([sys.executable, str(ROOT / "tools/check-catalog-fidelity.py"), "--root", str(ROOT), "--update"],
-                   capture_output=True, text=True, check=True)
+                   capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
 
     kinds = ", ".join(f"{b['kind']} {b['key']}" for b in blocks)
     title = a.title or f"Catalogue: lessons from a {datetime.date.today().isoformat()} migration"
@@ -312,10 +312,10 @@ def main():
         spec = importlib.util.spec_from_file_location("pc", ROOT / "tools/port-cost.py")
         pc = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(pc)
-        rec = json.loads(cost_file.read_text())
+        rec = json.loads(cost_file.read_text(encoding="utf-8"))
         row = pc.corpus_row(rec)
         corpus = ROOT / "docs/port-costs.tsv"
-        with open(corpus, "a") as fh:
+        with open(corpus, "a", encoding="utf-8") as fh:
             fh.write("\t".join(str(row[c]) for c in pc.CORPUS_COLS) + "\n")
         git("add", "docs/port-costs.tsv")
         usd = ("dollars not recorded by this build" if not row["usd"] else
@@ -340,7 +340,7 @@ def main():
         return 1
     if shutil.which("gh"):
         pr = subprocess.run(["gh", "pr", "create", "--head", branch, "--title", title,
-                             "--body", body.split("\n\n", 1)[1]], cwd=ROOT, capture_output=True, text=True)
+                             "--body", body.split("\n\n", 1)[1]], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
         print(pr.stdout or pr.stderr)
     else:
         url = git("remote", "get-url", "origin").stdout.strip()

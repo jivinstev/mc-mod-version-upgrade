@@ -42,6 +42,33 @@ to type. Installing needs Python 3. Porting is an add-on: say yes when `./setup`
 `./setup --migrate` later; it needs Java 21 (and 25 for Minecraft 26.x).
 Details: [docs/USING.md](docs/USING.md).
 
+### On Windows (experimental)
+
+Native Windows, no WSL. Claude Code on Windows already needs Git for Windows, whose Git Bash runs
+everything here. Install the prerequisites, then run setup from cmd or PowerShell:
+
+```bat
+winget install --id Git.Git
+winget install --id Python.Python.3.12
+winget install --id EclipseAdoptium.Temurin.21.JDK
+git clone https://github.com/jivinstev/mc-mod-version-upgrade
+cd mc-mod-version-upgrade
+setup.cmd
+claude
+```
+
+The Temurin JDK is only for porting. In Git Bash, `./setup` works the same as `setup.cmd`.
+Python from python.org has no `python3` command, so setup adds one to Git Bash (and an `unzip`), and
+tells Claude Code which Python to use. Open a new Git Bash window after the first run.
+
+Native Windows has no Claude Code sandbox, so Claude asks before running commands. For porting, turn
+on long paths if setup says they're off, and keep the workspace on the same drive as this folder.
+The real-client test opens a Minecraft window on your desktop; nothing else is needed.
+
+> **Experimental.** Windows support passes on GitHub's Windows runners (setup, every check, a full
+> mod build and the real client), but it has not yet been confirmed on a real Windows PC. Please report
+> anything that differs in [#32](https://github.com/jivinstev/mc-mod-version-upgrade/issues/32).
+
 ## Quick start: in the cloud
 
 Nothing to install.

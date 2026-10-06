@@ -18,6 +18,11 @@ version = mod_version
 group = mod_group_id
 base { archivesName = mod_id }
 
+// The Python the Exec gates run. python3 on Linux and macOS. On Windows the python.org installer has
+// no python3 (and Windows' own python3 only opens the Microsoft Store), so: $PYTHON, which setup puts
+// in Claude Code's environment as the full path, else the py launcher.
+def python = System.getProperty('os.name').toLowerCase().contains('windows') ? (System.getenv('PYTHON') ?: 'py') : 'python3'
+
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
 // Migrated mods often decompile with the odd unreachable/dead-code artifact.
@@ -229,7 +234,7 @@ tasks.register('deployToMods') {
 tasks.register('checkDatapackLayout', Exec) {
     group = 'verification'
     description = 'Fails if any datapack directory still uses pre-1.21 (plural) names'
-    commandLine 'python3', "${projectDir}/tools/fix-datapack-layout.py", projectDir.toString(), '--verify'
+    commandLine python, "${projectDir}/tools/fix-datapack-layout.py", projectDir.toString(), '--verify'
 }
 tasks.named('check') { dependsOn 'checkDatapackLayout' }
 

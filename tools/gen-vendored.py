@@ -39,7 +39,7 @@ MAKE_MV = ROOT / "tools/make-multiversion.sh"
 
 def _holder():
     """(year, holder) from LICENSE's `Copyright (c) <year> <holder>` line: the one place the name lives."""
-    m = re.search(r"(?m)^Copyright \(c\) (\d{4}) (.+?)\s*$", (ROOT / "LICENSE").read_text()) \
+    m = re.search(r"(?m)^Copyright \(c\) (\d{4}) (.+?)\s*$", (ROOT / "LICENSE").read_text(encoding="utf-8")) \
         if (ROOT / "LICENSE").is_file() else None
     if not m:
         sys.exit("gen-vendored: LICENSE has no `Copyright (c) <year> <holder>` line")
@@ -67,7 +67,7 @@ COMMENT = {  # suffix -> line-comment prefix
 def tracked():
     try:
         out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True,
-                             text=True, check=True).stdout
+                             text=True, check=True, encoding="utf-8", errors="replace").stdout
     except (OSError, subprocess.SubprocessError) as e:
         # "Could not run" must never look like "found a problem" -- or like a pass.
         print(f"gen-vendored: cannot list tracked files ({e})", file=sys.stderr)
@@ -79,7 +79,7 @@ def copy_set(files):
     """(path, origin) for every file a scaffolder copies. Exits 2 if a rule matches nothing."""
     rows = {}
     # Rule 1: the cp -R of the single-target scaffold.
-    text = PIPELINE.read_text()
+    text = PIPELINE.read_text(encoding="utf-8")
     trees = re.findall(r'cp -R (templates/[A-Za-z0-9_-]+)/\. ', text)
     if not trees:
         print("gen-vendored: pipeline.md no longer contains `cp -R templates/<x>/. ` -- the copy "
@@ -93,7 +93,7 @@ def copy_set(files):
         for f in hits:
             rows[f] = f"cp -R {tree} (migrate-mod pipeline)"
     # Rule 2: individual files make-multiversion.sh copies or renders.
-    mv = MAKE_MV.read_text()
+    mv = MAKE_MV.read_text(encoding="utf-8")
     named = set(re.findall(r'"\$TPL/([^"$]+)"', mv)) | set(re.findall(r'\{tpl\}/([^"\s]+)', mv))
     # A per-target path ("$TPL/versions/$T.renames.hand.tsv") names every file that fits it.
     for pat in re.findall(r'"\$TPL/([^"]*\$T[^"]*)"', mv):
@@ -132,7 +132,7 @@ def comment_for(path):
 
 def has_mit(path):
     try:
-        lines = (ROOT / path).read_text(errors="replace").splitlines()
+        lines = (ROOT / path).read_text(errors="replace", encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return False
     start = 1 if lines and lines[0].startswith("#!") else 0
@@ -145,7 +145,7 @@ COPYRIGHT_RX = re.compile(r"SPDX-FileCopyrightText:\s*(.*?)\s*$")
 def copyright_of(path):
     """The SPDX copyright holder line in a file's header window, or None."""
     try:
-        lines = (ROOT / path).read_text(errors="replace").splitlines()
+        lines = (ROOT / path).read_text(errors="replace", encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return None
     start = 1 if lines and lines[0].startswith("#!") else 0
@@ -162,17 +162,17 @@ def stamp(path):
     if c is None:
         return f"{path}: no known comment syntax -- add a COMMENT entry or mark it upstream"
     p = ROOT / path
-    lines = p.read_text().splitlines(keepends=True)
+    lines = p.read_text(encoding="utf-8").splitlines(keepends=True)
     at = 1 if lines and lines[0].startswith("#!") else 0
     want = f"SPDX-FileCopyrightText: {YEAR} {OWNER}"
     for i in range(at, min(at + HEADER_WINDOW, len(lines))):
         if "SPDX-FileCopyrightText:" in lines[i]:
             lines[i] = re.sub(r"SPDX-FileCopyrightText:.*", want, lines[i].rstrip("\n")) + "\n"
-            p.write_text("".join(lines))
+            p.write_text("".join(lines), encoding="utf-8")
             return None
     header = f"{c} {SPDX_MIT}\n{c} {want}\n"
     lines.insert(at, header)
-    p.write_text("".join(lines))
+    p.write_text("".join(lines), encoding="utf-8")
     return None
 
 
@@ -199,12 +199,12 @@ def main():
     problems = []
 
     if a.check:
-        have = MANIFEST.read_text() if MANIFEST.is_file() else ""
+        have = MANIFEST.read_text(encoding="utf-8") if MANIFEST.is_file() else ""
         if have != want:
             problems.append("VENDORED.tsv is out of date with what the scaffolders copy -- "
                             "run: python3 tools/gen-vendored.py")
     else:
-        MANIFEST.write_text(want)
+        MANIFEST.write_text(want, encoding="utf-8")
 
     mit_rows = {p for p in rows if licence_for(p) == "MIT"}
     want_holder = f"{YEAR} {OWNER}"
