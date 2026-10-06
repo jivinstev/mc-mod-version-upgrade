@@ -298,7 +298,8 @@ def main():
     ap.add_argument("--init-script", action="append", default=[])
     ap.add_argument("--blank", action="append", default=[])
     ap.add_argument("--timeout", type=int, default=3600)
-    ap.add_argument("--javac-heap", default="8g")
+    ap.add_argument("--javac-heap", default="6g")
+    ap.add_argument("--gradle-heap", default="6g")
     ap.add_argument("--bucket-log"); ap.add_argument("--json"); ap.add_argument("--top", type=int, default=12)
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
@@ -321,6 +322,10 @@ def main():
         cmd = ["./gradlew", "compileJava", "--console=plain", "--no-daemon", "--init-script", str(init)]
         for s in a.init_script:
             cmd += ["--init-script", str(pathlib.Path(s).resolve())]
+        # The Gradle side holds every diagnostic the javac worker sends back, so a raw start with
+        # thousands of errors OOMs gradle.properties' usual -Xmx4G before javac does (measured:
+        # 2,900 errors on a 600-file mod). Override it for this run only.
+        cmd.append(f"-Dorg.gradle.jvmargs=-Xmx{a.gradle_heap}")
         if a.mc:
             cmd.append(f"-Pmc={a.mc}")
         log = work / "recipe-bench-compile.log"
