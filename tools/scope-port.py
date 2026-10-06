@@ -65,7 +65,7 @@ def target_versions(mod: pathlib.Path):
         return out
     for f in sorted(vd.glob("*.properties")):
         kv = {}
-        for line in f.read_text().splitlines():
+        for line in f.read_text(encoding="utf-8").splitlines():
             if "=" in line and not line.lstrip().startswith("#"):
                 k, v = line.split("=", 1)
                 kv[k.strip()] = v.strip()
@@ -156,7 +156,7 @@ def rename_table_names(mod: pathlib.Path, mc: str):
     if not tsv.exists():
         return set(), None
     fq, simple = set(), set()
-    for line in tsv.read_text(errors="replace").splitlines():
+    for line in tsv.read_text(errors="replace", encoding="utf-8").splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         f = line.split("\t")[0]
@@ -222,7 +222,7 @@ def main():
     ws = pathlib.Path(os.environ.get("MIGRATE_WORKSPACE", "~/.mc-mod-upgrade/work")).expanduser()
     mp = pathlib.Path(a.moves) if a.moves else ws / "moves" / "moves-1.21.1-to-26.2.tsv"
     if mp.is_file():
-        for line in mp.read_text().splitlines():
+        for line in mp.read_text(encoding="utf-8").splitlines():
             if line.startswith("#") or "\t" not in line:
                 continue
             old, new = line.split("\t")[:2]
@@ -230,7 +230,7 @@ def main():
 
     imports = collections.Counter()
     for f in tree.rglob("*.java"):
-        for m in IMPORT_RE.finditer(f.read_text(errors="replace")):
+        for m in IMPORT_RE.finditer(f.read_text(errors="replace", encoding="utf-8")):
             imports[m.group(1)] += 1
 
     table, tsv = rename_table_names(mod, a.mc)

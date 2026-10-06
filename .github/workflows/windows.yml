@@ -1,0 +1,350 @@
+# Native Windows, the way a user runs it: Git for Windows' bash plus a python.org-style Python
+# (which installs `python` and `py`, NOT `python3`). Issue #32.
+#
+# Kept apart from gates.yml so the required checks on main are untouched until this is stable.
+name: windows
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [main]
+  # The build and client jobs take many minutes (Gradle, NeoForm, a Minecraft server or client), so
+  # they run weekly and on demand: from the Actions tab, or on a PR carrying the windows-build /
+  # windows-gatec label.
+  workflow_dispatch:
+  # Weekly, so drift in what we don't control (the runner image, Git for Windows, NeoForge, Gradle,
+  # Mesa) shows up within a week rather than on the next Windows PR. Scheduled runs use main's copy.
+  schedule:
+    - cron: '23 6 * * 1'
+
+permissions:
+  contents: read
+
+# A newer push supersedes the run in progress: Windows jobs are slow and the runners are shared.
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  static:
+    name: windows static (setup, self-tests, gates)
+    # Adding a label is not a code change; the static checks already ran on this commit.
+    if: github.event.action != 'labeled'
+    runs-on: windows-latest
+    steps:
+      # The runner's git has core.autocrlf=true, like a fresh Git for Windows install: the checkout is
+      # the line-ending test.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: line endings survive core.autocrlf=true
+        run: |
+          echo "core.autocrlf=$(git config core.autocrlf)"
+          bad=$(git ls-files --eol | awk '$2 == "w/crlf" && $NF !~ /\.(bat|cmd)$/ {print $NF}')
+          if [ -n "$bad" ]; then echo "checked out with CRLF:"; echo "$bad"; exit 1; fi
+          echo "no CRLF outside .bat/.cmd"
+
+      # A python.org install has `python` and `py` but no `python3`, and Windows' own python3.exe is a
+      # stub that only points at the Microsoft Store. The runner's Python has a real python3, so put a
+      # stub like Windows' in front of it: from here on, `python3` works only if setup made it work.
+      - name: python3 is the Microsoft Store stub, as on a fresh Windows
+        run: |
+          S="$RUNNER_TEMP/store-stub"; mkdir -p "$S"
+          printf '#!/bin/sh\necho "Python was not found; run without arguments to install from the Microsoft Store" >&2\nexit 49\n' > "$S/python3"
+          chmod +x "$S/python3"
+          cygpath -w "$S" >> "$GITHUB_PATH"
+      - name: (the stub is in front)
+        run: |
+          if python3 -c 'print(1)' 2>/dev/null; then echo "python3 still runs: the stub is not in front"; exit 1; fi
+          python --version
+
+      - name: encoding= on every text open (Windows defaults to cp1252)
+        run: python tools/check-encoding.py
+
+      - name: setup.cmd --check, from cmd.exe, in an empty home
+        shell: cmd
+        run: |
+          set "USERPROFILE=%RUNNER_TEMP%\home-cmd"
+          set "HOME=%RUNNER_TEMP%\home-cmd"
+          set "APPDATA=%RUNNER_TEMP%\home-cmd\AppData\Roaming"
+          set "LOCALAPPDATA=%RUNNER_TEMP%\home-cmd\AppData\Local"
+          mkdir "%APPDATA%" "%LOCALAPPDATA%"
+          call setup.cmd --check --no-network
+
+      - name: ./setup --check, from Git Bash, in an empty home
+        run: |
+          H="$RUNNER_TEMP/home-check"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
+            LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" ./setup --check --no-network
+          [ -z "$(ls -A "$H/AppData/Roaming")" ] && [ ! -e "$H/bin" ] && [ ! -e .env.local ] \
+            || { echo "--check wrote something"; exit 1; }
+
+      - name: ./setup --yes writes the python3 and unzip shims; a login Git Bash finds them
+        run: |
+          echo "unzip before setup: $(command -v unzip || echo none)"
+          H="$(cygpath -u "$RUNNER_TEMP")/home"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
+            LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" ./setup --yes --no-network
+          cat "$H/bin/python3"
+          grep -q $'\r' "$H/bin/python3" .env.local && { echo "CRLF in a file bash reads"; exit 1; }
+          # Git for Windows' /etc/profile.d puts ~/bin first; that is what makes the shim win.
+          found="$(HOME="$H" bash -lc 'command -v python3')"; echo "login bash: python3 = $found"
+          [ "$found" = "$H/bin/python3" ] || { echo "a login Git Bash did not put ~/bin first"; exit 1; }
+          if [ -e "$H/bin/unzip" ]; then
+            n="$("$H/bin/unzip" -l templates/neoforge-mod/gradle/wrapper/gradle-wrapper.jar | grep -c '\.class$')"
+            echo "unzip shim: $n classes"; [ "$n" -gt 10 ] || exit 1
+          fi
+          "$H/bin/python3" -c 'import os, sys; print(sys.version); assert os.environ["PYTHONUTF8"] == "1"; print("→ ⚠ ≈")'
+          # print() must end lines with LF for bash: $(...) and grep 'x$' break on CRLF
+          if "$H/bin/python3" -c 'print(1)' | grep -q $'\r'; then echo "the shim's python prints CRLF"; exit 1; fi
+          rm -f .env.local .env.local.bak .setup-state.json
+          cygpath -w "$H/bin" >> "$GITHUB_PATH"
+
+      # test-setup.sh drives setup's prompts through a pty, which Windows Python lacks, and assumes
+      # ~/.minecraft; these are its non-interactive cases, on the Windows layout.
+      - name: discovery finds the official launcher, Prism and CurseForge under a fake Windows profile
+        run: |
+          U="$(cygpath -u "$RUNNER_TEMP")/winprofile"; A="$U/AppData/Roaming"
+          mkdir -p "$A/.minecraft/versions/1.21.1" "$A/.minecraft/versions/neoforge-21.1.228" "$A/.minecraft/mods" \
+                   "$A/PrismLauncher/instances/Pack/.minecraft/mods" "$U/curseforge/minecraft/Instances/CF Pack/mods"
+          : > "$A/.minecraft/mods/a.jar"
+          printf '{"components":[{"uid":"net.minecraft","version":"1.21.1"},{"uid":"net.neoforged","version":"21.1.228"}]}' \
+            > "$A/PrismLauncher/instances/Pack/mmc-pack.json"
+          printf '{"gameVersion":"1.21.1","baseModLoader":{"name":"neoforge-21.1.228"}}' \
+            > "$U/curseforge/minecraft/Instances/CF Pack/minecraftinstance.json"
+          echo "U=$U" >> "$GITHUB_ENV"
+          out="$(USERPROFILE="$(cygpath -w "$U")" HOME="$U" APPDATA="$(cygpath -w "$A")" \
+                 python3 tools/find-minecraft.py --json --env "$RUNNER_TEMP/none")"
+          echo "$out"
+          python3 - "$out" <<'PY'
+          import json, sys
+          found = {f["source"]: f for f in json.loads(sys.argv[1])["installs"]}
+          print(sorted(found))
+          assert "official launcher default" in found, "the official %APPDATA%\\.minecraft was not found"
+          assert found["official launcher default"]["mods"] == 1
+          assert any(k.startswith("Prism") for k in found), "Prism instance not found"
+          assert any(k.startswith("CurseForge") for k in found), "CurseForge instance not found"
+          PY
+
+      - name: setup --yes on that profile picks the mods folder; a re-run changes nothing; a hand edit wins
+        run: |
+          W() { USERPROFILE="$(cygpath -w "$U")" HOME="$U" APPDATA="$(cygpath -w "$U/AppData/Roaming")" \
+                LOCALAPPDATA="$(cygpath -w "$U/AppData/Local")" ./setup --no-network "$@"; }
+          rm -f .env.local .setup-state.json
+          W --yes > "$RUNNER_TEMP/first.log"; cat "$RUNNER_TEMP/first.log"
+          grep '^MINECRAFT_MODS_DIR_1_21_1=' .env.local
+          want="$(cygpath -w "$U/AppData/Roaming/.minecraft/mods")"
+          v="$(sed -n 's/^MINECRAFT_MODS_DIR_1_21_1=//p' .env.local)"
+          [ "$(cygpath -u "$v")" = "$(cygpath -u "$want")" ] || { echo "picked $v, wanted $want"; exit 1; }
+          a="$(cat .env.local)"; W --yes | tee "$RUNNER_TEMP/second.log" | grep -q "no changes" \
+            && [ "$a" = "$(cat .env.local)" ] || { cat "$RUNNER_TEMP/second.log"; echo "second --yes changed something"; exit 1; }
+          sed -i 's/^SKILLS_INSTALL=.*/SKILLS_INSTALL=user/' .env.local
+          W --yes | grep -q "kept your hand edits to .env.local: SKILLS_INSTALL" \
+            && grep -q '^SKILLS_INSTALL=user$' .env.local || { echo "hand edit not kept"; exit 1; }
+          rm -f .env.local .env.local.bak .setup-state.json
+
+      # The runner is an administrator, so its symlinks always work; a user without Developer Mode
+      # gets setup's fallback instead. Exercise that directly: junctions for tools/ and templates/, a
+      # hard link for .env.local, and a re-run that recognises all three as its own.
+      - name: workspace links without symlinks (junctions + a hard link) are recognised
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os, pathlib, tempfile
+          spec = importlib.util.spec_from_file_location("setup", "tools/setup.py")
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          # on the checkout's drive: a hard link cannot cross drives (setup says so when it would have to)
+          ws = pathlib.Path(tempfile.mkdtemp(dir=os.environ["RUNNER_TEMP"])); env = m.ROOT / ".env.local"
+          env.write_text("X=1\n", encoding="utf-8")
+          try:
+              for name in m.WORKSPACE_LINKS:
+                  assert m.windows_link(ws / name, m.ROOT / name), f"could not link {name}"
+              assert m.is_junction(ws / "tools") and m.is_junction(ws / "templates")
+              assert (ws / "tools/setup.py").is_file(), "the junction does not reach the checkout"
+              assert os.path.samefile(ws / ".env.local", env)
+              notes, problems = [], []
+              m.ensure_workspace(str(ws), notes, problems, dry=False)
+              print("notes:", notes, "problems:", problems)
+              assert not problems and not notes, "a re-run did not recognise its own links"
+          finally:
+              env.unlink()
+          print("junctions + hard link: ok")
+          PY
+
+      # Git for Windows runs hooks through its own bash. Prove it does with ours, through a real
+      # `git push`: a push to main is refused, a push to a branch runs the IP gate and goes through.
+      - name: the pre-push hook works under Git for Windows
+        run: |
+          bash tools/install-hooks.sh
+          if grep -q $'\r' .git/hooks/pre-push; then echo "the hook has CRLF line endings"; exit 1; fi
+          B="$RUNNER_TEMP/hook-remote.git"; git init -q --bare "$B"
+          if git push "$B" HEAD:refs/heads/main > "$RUNNER_TEMP/main.log" 2>&1; then
+            cat "$RUNNER_TEMP/main.log"; echo "a push to main was NOT refused"; exit 1
+          fi
+          grep -q "REFUSED" "$RUNNER_TEMP/main.log" || { cat "$RUNNER_TEMP/main.log"; echo "refused, but not by the hook"; exit 1; }
+          git push "$B" HEAD:refs/heads/feature 2>&1 | tee "$RUNNER_TEMP/branch.log"
+          grep -q "check-no-ip: PASS" "$RUNNER_TEMP/branch.log" || { echo "the hook did not run the IP gate"; exit 1; }
+          git --git-dir="$B" rev-parse --verify -q refs/heads/feature
+          rm .git/hooks/pre-push
+
+      - name: check-no-ip
+        run: python3 tools/check-no-ip.py
+      - name: catalogue fidelity
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            git show "origin/${{ github.base_ref }}:docs/catalog-census.tsv" > docs/catalog-census.tsv
+          fi
+          python3 tools/check-catalog-fidelity.py
+          git checkout -- docs/catalog-census.tsv
+      - name: vendored licence manifest
+        run: python3 tools/gen-vendored.py --check
+      - run: ./tools/test-gates.sh
+      - run: ./tools/test-renames.sh
+      - run: ./tools/test-cycle.sh
+      - run: ./tools/test-port-tools.sh
+      # last: it re-runs a changed self-test (test-cycle.sh) on base and head, so that one must work first
+      - run: ./tools/test-review.sh
+
+  build:
+    name: windows build + Gate B (template mod)
+    if: >-
+      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'windows-build'))
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # The way a user gets here: setup --migrate makes the workspace (tools/, templates/ and
+      # .env.local linked back to the checkout), then the skill copies the template into mods/<modid>.
+      - name: setup --migrate makes the workspace
+        run: |
+          H="$(cygpath -u "$RUNNER_TEMP")/home"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          echo "H=$H" >> "$GITHUB_ENV"
+          HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
+            LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" ./setup --yes --migrate --no-network
+          WS="$H/.mc-mod-upgrade/work"; ls -la "$WS"
+          echo "WS=$WS" >> "$GITHUB_ENV"
+          # What setup gives Claude Code's environment on Windows, so ./gradlew's Exec gates find Python.
+          echo "PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          echo "PYTHONUTF8=1" >> "$GITHUB_ENV"
+
+      - name: scaffold the template mod
+        run: |
+          M="$WS/mods/examplemod"; cp -R templates/neoforge-mod "$M"
+          git ls-files --eol templates/neoforge-mod/gradlew
+          J="$M/src/main/java/com/example/examplemod"; mkdir -p "$J/test"
+          printf '%s\n' 'package com.example.examplemod;' \
+            'import net.neoforged.fml.common.Mod;' \
+            '@Mod("examplemod")' \
+            'public class ExampleMod { public ExampleMod() {} }' > "$J/ExampleMod.java"
+          printf '%s\n' 'package com.example.examplemod.test;' \
+            'import net.minecraft.core.registries.BuiltInRegistries;' \
+            'import net.minecraft.gametest.framework.GameTest;' \
+            'import net.minecraft.gametest.framework.GameTestHelper;' \
+            'import net.minecraft.resources.ResourceLocation;' \
+            'import net.neoforged.neoforge.gametest.GameTestHolder;' \
+            'import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;' \
+            '@GameTestHolder("examplemod")' \
+            '@PrefixGameTestTemplate(false)' \
+            'public class SmokeGameTest {' \
+            '    @GameTest(template = "empty_test")' \
+            '    public static void stoneIsRegistered(GameTestHelper h) {' \
+            '        h.assertTrue(BuiltInRegistries.BLOCK.containsKey(ResourceLocation.withDefaultNamespace("stone")), "stone");' \
+            '        h.succeed();' \
+            '    }' \
+            '}' > "$J/test/SmokeGameTest.java"
+          ( cd "$WS" && python3 tools/gen-empty-structure.py examplemod )
+          find "$M/src" -type f
+
+      - name: ./gradlew build (Gate A)
+        run: cd "$WS/mods/examplemod" && ./gradlew build --no-daemon --console=plain
+
+      - name: ./gradlew runGameTestServer (Gate B)
+        run: cd "$WS/mods/examplemod" && ./gradlew runGameTestServer --no-daemon --console=plain
+
+      - name: the longest path the build made (Windows' limit is 260)
+        if: always()
+        run: |
+          python3 - "$(cygpath -w "$WS")" "$USERPROFILE\.gradle" <<'PY'
+          import os, sys
+          paths = [os.path.join(d, f) for root in sys.argv[1:] for d, _, fs in os.walk(root) for f in fs]
+          for p in sorted(paths, key=len)[-3:]:
+              print(len(p), p)
+          PY
+
+  # EXPERIMENTAL. Gate C (the real client) on a runner with no GPU. The runner's desktop only has
+  # Windows' OpenGL 1.1, and Minecraft needs 3.2: Mesa's llvmpipe opengl32.dll beside java.exe is the
+  # Windows counterpart of the Linux CI's LIBGL_ALWAYS_SOFTWARE. A real Windows desktop needs none of it.
+  gatec:
+    name: windows Gate C (experimental, Mesa llvmpipe)
+    if: >-
+      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'windows-gatec'))
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      MESA_VERSION: 26.2.4
+      MESA_SHA256: 351fc8c8b695878ffb3eaa044b3ead08672a48b1a045e3c3e3975811df0f6695
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Mesa llvmpipe (pinned release, checksum verified) beside java.exe
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/mesa.7z" \
+            "https://github.com/pal1000/mesa-dist-win/releases/download/$MESA_VERSION/mesa3d-$MESA_VERSION-release-msvc.7z"
+          echo "$MESA_SHA256  $RUNNER_TEMP/mesa.7z" | sha256sum -c -
+          7z x -y -o"$RUNNER_TEMP/mesa" "$RUNNER_TEMP/mesa.7z" >/dev/null
+          ls "$RUNNER_TEMP/mesa/x64"
+          cp "$RUNNER_TEMP/mesa/x64/"*.dll "$(cygpath -u "$JAVA_HOME")/bin/"
+          echo "GALLIUM_DRIVER=llvmpipe" >> "$GITHUB_ENV"
+          echo "PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+
+      # The smoke harness boots to the title screen with no target mod, and prints
+      # SMOKEHARNESS_BOOT_TEST: PASS. client-boot-loop.sh is the Windows path a user's agent runs:
+      # no launcher, no xvfb, and a watchdog that kills with taskkill /T.
+      - name: client-boot-loop.sh launch (Gate C, title screen)
+        run: |
+          M="$RUNNER_TEMP/sh"; cp -R templates/smoke-harness "$M"; cd "$M"
+          export SIG_DIR="$RUNNER_TEMP/sig" TIMEOUT_SECS=2400
+          # A crash makes the loop WAIT for a fix (the agent's job); here a crash should end the run.
+          ( while [ ! -f "$SIG_DIR/crash.ready" ]; do sleep 5; done; touch "$SIG_DIR/stop" "$SIG_DIR/fix.done" ) >/dev/null 2>&1 &
+          watcher=$!
+          ./tools/client-boot-loop.sh launch; code=$?
+          kill "$watcher"
+          echo "--- renderer"; grep -aiE 'llvmpipe|OpenGL|GL_RENDERER|LWJGL' "$SIG_DIR/launch.log" | head -10
+          [ -f "$SIG_DIR/crash.log" ] && { echo "--- crash digest"; cat "$SIG_DIR/crash.log"; }
+          exit $code
+
+      - name: keep the client log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gatec-windows-log
+          path: ${{ runner.temp }}/sig

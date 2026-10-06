@@ -7,6 +7,7 @@ set -uo pipefail
 unset CLAUDE_CODE_REMOTE   # a cloud session would otherwise make setup probe the network
 unset CURSEFORGE_API_KEY   # a key in this shell would change what setup says about it
 cd "$(dirname "$0")/.."
+. tools/python.sh || exit 1   # python3 on Windows too
 ROOT="$PWD"
 pass=0; fail=0
 ok()  { echo "  PASS  $1"; pass=$((pass+1)); }

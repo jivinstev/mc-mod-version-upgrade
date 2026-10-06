@@ -33,7 +33,7 @@ PROBES = {
 def reachable(url):
     """Any HTTP answer counts (even 404): it means the proxy let us through."""
     p = subprocess.run(['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', '--max-time', '15', url],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     return p.stdout.strip() not in ('', '000')
 
 
@@ -51,7 +51,7 @@ def main():
     if not in_cloud:
         print('cloud/check.py: this is not a Claude Code cloud session; nothing to check.')
         return 0
-    wanted = [l.strip() for l in (ROOT / 'cloud/allowed-domains.txt').read_text().splitlines() if l.strip()]
+    wanted = [l.strip() for l in (ROOT / 'cloud/allowed-domains.txt').read_text(encoding="utf-8").splitlines() if l.strip()]
     problems = []
     blocked = [d for d in wanted if d in PROBES and not reachable(PROBES[d])]
     for d in blocked:

@@ -63,7 +63,7 @@ def main():
     probed, skipped_multiline, changed = {}, 0, []
     try:
         for f in files:
-            text = f.read_text(errors="replace")
+            text = f.read_text(errors="replace", encoding="utf-8")
             # a class with no supertype cannot override anything (beyond Object): probing it only adds
             # noise that buries the real hits. Anonymous subclasses (`new X(...) {`) count as a supertype.
             if not re.search(r'\b(extends|implements)\b|\bnew\s+[\w$.<>]+\s*\([^;]*\)\s*\{', text):
@@ -88,12 +88,12 @@ def main():
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(f, dest)
                 changed.append(f)
-                f.write_text("\n".join(lines))
+                f.write_text("\n".join(lines), encoding="utf-8")
         print(f"override-probe: probing {len(probed)} method(s) in {len(changed)} file(s)"
               + (f"; {skipped_multiline} multi-line header(s) NOT probed" if skipped_multiline else ""))
         if not probed:
             return 0
-        r = subprocess.run(shlex.split(a.compile), cwd=port, capture_output=True, text=True)
+        r = subprocess.run(shlex.split(a.compile), cwd=port, capture_output=True, text=True, encoding="utf-8", errors="replace")
         out = r.stdout + r.stderr
     finally:
         for f in changed:

@@ -119,7 +119,14 @@ while true; do
   ( sleep "$TIMEOUT_SECS"
     if kill -0 "$GRADLE_PID" 2>/dev/null; then
       echo "[watchdog] ${TIMEOUT_SECS}s elapsed without reaching the title — killing launch" >> "$LAUNCH_LOG"
-      pkill -P "$GRADLE_PID" 2>/dev/null; kill "$GRADLE_PID" 2>/dev/null
+      if [ -r "/proc/$GRADLE_PID/winpid" ]; then
+        # Git Bash: Gradle and the client are Windows processes, which neither pkill (absent) nor
+        # kill reaches; taskkill /T takes the whole tree. (// stops Git Bash rewriting /T as a path.)
+        taskkill //F //T //PID "$(cat "/proc/$GRADLE_PID/winpid")" >/dev/null 2>&1
+      else
+        pkill -P "$GRADLE_PID" 2>/dev/null
+      fi
+      kill "$GRADLE_PID" 2>/dev/null
     fi ) &
   WATCH_PID=$!
   wait "$GRADLE_PID"; EXIT=$?

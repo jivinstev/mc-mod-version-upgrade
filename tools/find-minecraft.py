@@ -69,7 +69,7 @@ def launcher_instance_roots():
 def read_env_local(path):
     out = {}
     try:
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             m = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', line)
             if m and not line.lstrip().startswith("#"):
                 out[m.group(1)] = m.group(2).strip().strip('"').strip("'")
@@ -97,7 +97,7 @@ def describe_official(game_dir):
 def describe_prism(inst):
     info = {"kind": "Prism/MultiMC", "path": str(inst / ".minecraft"), "versions": [], "loaders": []}
     try:
-        pack = json.loads((inst / "mmc-pack.json").read_text())
+        pack = json.loads((inst / "mmc-pack.json").read_text(encoding="utf-8"))
         for c in pack.get("components", []):
             uid, ver = c.get("uid", ""), c.get("version", "")
             if uid == "net.minecraft":
@@ -114,7 +114,7 @@ def describe_prism(inst):
 def describe_modrinth(prof):
     info = {"kind": "Modrinth App", "path": str(prof), "versions": [], "loaders": []}
     try:
-        d = json.loads((prof / "profile.json").read_text())
+        d = json.loads((prof / "profile.json").read_text(encoding="utf-8"))
         meta = d.get("metadata", d)
         if meta.get("game_version"):
             info["versions"].append(meta["game_version"])
@@ -128,7 +128,7 @@ def describe_modrinth(prof):
 def describe_generic(kind, inst):
     info = {"kind": kind, "path": str(inst), "versions": [], "loaders": []}
     try:
-        d = json.loads((inst / "minecraftinstance.json").read_text())   # CurseForge
+        d = json.loads((inst / "minecraftinstance.json").read_text(encoding="utf-8"))   # CurseForge
         if d.get("gameVersion"):
             info["versions"].append(d["gameVersion"])
         bml = d.get("baseModLoader") or {}

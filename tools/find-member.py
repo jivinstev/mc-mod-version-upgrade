@@ -28,7 +28,7 @@ def classes(jar, prefixes=("net/minecraft/", "net/neoforged/")):
 def dump(jar, batch):
     try:
         return subprocess.run(["javap", "-p", "-cp", jar, *batch],
-                              capture_output=True, text=True, timeout=180).stdout
+                              capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace").stdout
     except Exception:
         return ""
 

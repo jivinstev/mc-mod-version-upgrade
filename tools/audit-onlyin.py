@@ -74,7 +74,7 @@ def main():
         path = os.path.join(ws, "versions", target + ".properties")
         if not os.path.exists(path):
             sys.exit("no such target: %s\nknown: %s" % (path, " ".join(targets)))
-        for line in open(path):
+        for line in open(path, encoding="utf-8"):
             if "=" in line and not line.strip().startswith("#"):
                 k, v = line.split("=", 1)
                 props[k.strip()] = v.strip()

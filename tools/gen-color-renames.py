@@ -64,7 +64,7 @@ def class_fields(data):
 
 
 def jars_from_cp(cp_file):
-    return [pathlib.Path(l.strip()) for l in pathlib.Path(cp_file).read_text().splitlines()
+    return [pathlib.Path(l.strip()) for l in pathlib.Path(cp_file).read_text(encoding="utf-8").splitlines()
             if l.strip().endswith(".jar")]
 
 
@@ -96,7 +96,7 @@ def facts_from_mappings(path):
     """Mojang's ProGuard-format mappings list each field with its type, which is all we need."""
     holders, current = {}, None
     want = {h.replace("/", "."): h.rsplit("/", 1)[1] for h in HOLDERS}
-    for line in pathlib.Path(path).read_text().splitlines():
+    for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
         if line.lstrip().startswith("#"):           # `# {"fileName": ...}` metadata, not a class
             continue
         if not line.startswith(" "):
@@ -161,7 +161,7 @@ def main():
         rows, refused = generate(old, new, comps)
     text = "".join(f"{f}\t{t}\n" for f, t in rows)
     if a.out:
-        pathlib.Path(a.out).write_text(text)
+        pathlib.Path(a.out).write_text(text, encoding="utf-8")
     else:
         sys.stdout.write(text)
     print(f"gen-color-renames: {len(rows)} row(s), {len(comps)} colours", file=sys.stderr)

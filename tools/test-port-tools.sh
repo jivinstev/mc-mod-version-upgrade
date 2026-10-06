@@ -2,6 +2,7 @@
 # Self-test for the port-side helpers: the @Override probe and the catalogue-sweep runner.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+. tools/python.sh || exit 1   # python3 on Windows too
 ROOT="$PWD"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
@@ -119,10 +120,45 @@ perl -p tools/srg-remap/forge_import_codemod.pl "$C/B.txt" > "$C/B.out" 2>/dev/n
 { grep -q 'net/neoforged/neoforge/common/CommonHooks' "$C/B.out" && grep -q 'EventHooks' "$C/B.out" \
   && ! grep -q minecraftforge "$C/B.out"; } && ok "forge_import_codemod rewrites the slash form (descriptors, mixin targets)" \
   || bad "slash form: $(cat "$C/B.out")"
-L="$T/link"; mkdir -p "$L"; ln -s "$ROOT/tools" "$L/tools"
+L="$T/link"; mkdir -p "$L"
+case "$(uname -s)" in
+  # Git Bash's ln -s COPIES a directory; a user's workspace has a junction (what setup makes without
+  # Developer Mode), so test through one. // keeps Git Bash from rewriting /c and /J as paths.
+  MINGW*|MSYS*) cmd //c mklink //J "$(cygpath -w "$L/tools")" "$(cygpath -w "$ROOT/tools")" >/dev/null ;;
+  *) ln -s "$ROOT/tools" "$L/tools" ;;
+esac
 out="$(bash "$L/tools/run-catalog-scans.sh" "$C" 2>&1)"; code=$?
 ! grep -q "No such file" <<<"$out" && [ $code = 0 ] && ok "run-catalog-scans.sh works through a symlinked tools/ (the workspace layout)" \
   || bad "run-catalog-scans via symlink (exit $code): $(head -3 <<<"$out")"
+
+echo "5. the Windows stand-ins (they run everywhere, so a drift shows up on Linux CI too)"
+J="$ROOT/templates/neoforge-mod/gradle/wrapper/gradle-wrapper.jar"
+n="$(python3 tools/zipls.py -l "$J" | grep -c '\.class$')"
+[ "$n" -gt 10 ] && [ "$n" = "$(python3 tools/zipls.py -Z1 "$J" | grep -c '\.class$')" ] \
+  && ok "zipls -l / -Z1 list the jar ($n classes), LF-terminated so grep's \$ matches" || bad "zipls listing: $n classes"
+python3 tools/zipls.py -p "$J" META-INF/MANIFEST.MF | grep -q '^Manifest-Version' \
+  && ok "zipls -p prints a member" || bad "zipls -p"
+X="$T/zx"; python3 tools/zipls.py -o -q "$J" 'META-INF/*' -d "$X" && [ -f "$X/META-INF/MANIFEST.MF" ] \
+  && ok "zipls extracts the matching members" || bad "zipls extract"
+if command -v unzip >/dev/null 2>&1 && ! grep -q "mc-mod-version-upgrade's setup" "$(command -v unzip)" 2>/dev/null; then
+  [ "$(unzip -Z1 "$J")" = "$(python3 tools/zipls.py -Z1 "$J")" ] && ok "zipls -Z1 matches unzip -Z1" || bad "zipls differs from unzip"
+fi
+# boot-smoke's "is the game already running on this instance?" must see a real process: on Windows
+# `ps -axo` does not exist, and a probe that sees nothing reads exactly like "nothing running".
+I="$T/inst"; mkdir -p "$I"
+python3 -c 'import time; time.sleep(90)' net.minecraft.client.main.Main --gameDir "$I" &
+FAKE=$!
+sleep 3
+seen="$(python3 - "$I" <<'PY'
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("bs", "tools/boot-smoke.py")
+bs = importlib.util.module_from_spec(spec); spec.loader.exec_module(bs)
+print(len(bs.game_already_running(pathlib.Path(sys.argv[1]))))
+PY
+)"
+kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
+[ "${seen:-0}" -ge 1 ] && ok "boot-smoke sees a client already running on the instance" \
+  || bad "boot-smoke's process probe missed a running client (saw ${seen:-nothing})"
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"

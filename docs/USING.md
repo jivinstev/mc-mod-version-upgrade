@@ -46,8 +46,9 @@ size is likely to take.
 | Python 3 | `brew install python` | `winget install --id Python.Python.3.12` | `sudo apt install python3` | `sudo dnf install python3` |
 | JDK 21 *(migrate only)* | `brew install --cask temurin@21` | `winget install --id EclipseAdoptium.Temurin.21.JDK` | `sudo apt install openjdk-21-jdk` | `sudo dnf install java-21-openjdk-devel` |
 
-Minecraft 26.x targets need Java **25** as well. The tooling is bash + Python, so on Windows run
-it from WSL or Git Bash.
+Minecraft 26.x targets need Java **25** as well. On Windows, see the README's
+[Windows quick start](../README.md#on-windows-experimental) (experimental): the tooling runs in Git Bash (part of Git for
+Windows, which Claude Code needs anyway), and `setup.cmd` starts setup from cmd or PowerShell.
 
 ## In a Claude Code cloud session
 
