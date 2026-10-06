@@ -203,6 +203,10 @@ Hypotheses from the #27 plan update, checked with no model over the Stage 1 and 
   vs 1,291 start errors). Taking CFR only for the 17 files where it did better cut a 1.21.1 decompile from
   337 to 312 errors (−7%; the per-file estimate had said −13%, because errors cross files); on the small row
   it gained nothing. **Weak:** keep Vineflower, with CFR as a per-class fallback.
+**Decision:** H2, H7 and H8 are dropped from the plan as separate workstreams. The 26.x compat pairs
+(H2's only signal) are written as part of the era recipes anyway; optional integrations (H7) are already
+offered as chunks by the scope menu; CFR stays only as the fallback for methods Vineflower cannot
+decompile (catalogue §A).
 - H3 (choice-point recipes) and H4 (scaffolds) need a model or a skeleton design and are scheduled for
   Stages 3–6.
 
