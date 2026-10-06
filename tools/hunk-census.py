@@ -94,9 +94,28 @@ def detectors(text=None, exclude=()):
     return det, {i: 1.0 / c for i, c in df.items()}
 
 
+GIT_HEADER = re.compile(r'^diff --git (?:"a/(?:[^"\\]|\\.)*"|a/.*?) (?:"b/((?:[^"\\]|\\.)*)"|b/(.*))$')
+
+
+def header_path(line):
+    """The b/ path of a `diff --git` header. git QUOTES a path holding a backslash, a quote or (by default)
+    any non-ASCII byte -- `"b/C:\\Users\\...\\A.java"` -- and C-escapes it; a naive split then yields a
+    name ending in `"`, not `.java`, and every hunk of that file is silently dropped."""
+    m = GIT_HEADER.match(line)
+    if not m:
+        return line.split(" b/")[-1]
+    if m.group(1) is None:
+        return m.group(2)
+    raw = m.group(1).encode("latin-1", "backslashreplace").decode("unicode_escape")   # \\ \" \t \303\251
+    return raw.encode("latin-1", "replace").decode("utf-8", "replace")
+
+
 def hunks(start, end):
     """-> [(file, kind, minus_text, plus_text, nlines)] with kind in hunk/new-file/deleted-file."""
-    r = subprocess.run(["git", "diff", "--no-index", "-U0", "--no-color", "--", str(start), str(end)],
+    # / paths: git quotes any path with a backslash in it ("b/C:\\Users\\...\\A.java"), and a quoted
+    # header line ends in `"`, not `.java` -- so on Windows every hunk was dropped
+    r = subprocess.run(["git", "diff", "--no-index", "-U0", "--no-color", "--",
+                        pathlib.Path(start).as_posix(), pathlib.Path(end).as_posix()],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     out, cur, kind, minus, plus, n = [], None, "hunk", [], [], 0
 
@@ -106,7 +125,7 @@ def hunks(start, end):
 
     for l in r.stdout.splitlines():
         if l.startswith("diff --git"):
-            flush(); cur, kind, minus, plus, n = l.split(" b/")[-1], "hunk", [], [], 0
+            flush(); cur, kind, minus, plus, n = header_path(l), "hunk", [], [], 0
         elif l.startswith("new file mode"):
             kind = "new-file"
         elif l.startswith("deleted file mode"):
@@ -205,7 +224,7 @@ def census(start, end, bulk=300, det=None, w=None, exclude=(), records=None):
     end_ids = set()
     for f in pathlib.Path(end).rglob("*.java"):
         end_ids |= ids(f.read_text(encoding="utf-8", errors="replace"), is_code=True)
-    root = str(pathlib.Path(end)).lstrip("/") + "/"
+    root = pathlib.Path(end).as_posix().lstrip("/") + "/"   # matches git's b/ path on every OS
     imp_cache = {}
 
     def imports(f):   # the import roots (first two segments) of the file, end side else start side
@@ -270,6 +289,8 @@ def self_check():
           and "tickOld -> tickRenamedHook" in r["clusters"])
     ok = ok and reshape_key("if (level.isClientSide) x();", "if (level.isClientSide()) x();") == ". isClientSide [] => [( )]"
     ok = ok and attribute("x.m_91087_();", "x.getInstance();", det, w)[0] == "1"
+    ok = ok and header_path('diff --git "a/C:\\\\t\\\\a/A.java" "b/C:\\\\t\\\\b/A.java"') == "C:\\t\\b/A.java"
+    ok = ok and header_path('diff --git a/x/a/A.java b/x/b/A.java') == "x/b/A.java"
     print("self-check:", "PASS" if ok else f"FAIL {json.dumps(r, default=dict)}")
     real, _ = detectors()
     print(f"catalogue: {len(real)} entries with a detector")

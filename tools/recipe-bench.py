@@ -40,6 +40,8 @@ import argparse, collections, hashlib, json, os, pathlib, re, shutil, subprocess
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "CATALOG.md"
 BURNDOWN = ROOT / "tools/burndown-count.sh"
+sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # Git Bash on Windows, where plain "bash" is WSL's launcher
 
 # --- 1. catalogue signatures ------------------------------------------------------------------------
 ENTRY_RES = [  # the same id shapes tools/check-catalog-fidelity.py recognises
@@ -245,7 +247,7 @@ def diff_stat(a, b):
 
 
 def count(log):
-    r = subprocess.run(["bash", str(BURNDOWN), str(log)], capture_output=True, text=True, encoding="utf-8")
+    r = subprocess.run([BASH, str(BURNDOWN), str(log)], capture_output=True, text=True, encoding="utf-8")
     m = re.search(r'errors = (\d+)', r.stdout)
     return r.returncode, (int(m.group(1)) if m else None), r.stdout.strip().splitlines()[:4]
 

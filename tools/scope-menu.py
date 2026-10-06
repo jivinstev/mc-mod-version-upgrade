@@ -36,6 +36,8 @@ the chunk is left off, which is work too.
 import argparse, collections, importlib.util, json, pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # Git Bash on Windows, where plain "bash" is WSL's launcher
 USD_PER_ERROR = (0.05, 0.15)   # published baselines: ~$30 for ~640 start errors .. ~$7 for ~45
 
 INTEGRATIONS = {
@@ -121,7 +123,7 @@ def build(src, resources=None, log=None, errors_json=None):
     refused = None
     if log:   # only a log burndown-count.sh accepts: a capped, parse-aborted or OOM'd list is a prefix
         import subprocess
-        r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)],
+        r = subprocess.run([BASH, str(ROOT / "tools/burndown-count.sh"), str(log)],
                            capture_output=True, text=True, encoding="utf-8")
         if r.returncode != 0:
             refused = r.stdout.strip().splitlines()[0] if r.stdout.strip() else f"exit {r.returncode}"
