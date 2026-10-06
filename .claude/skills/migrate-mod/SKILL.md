@@ -171,6 +171,38 @@ assumes official names.
 - `pack.mcmeta`: bump `pack_format` to 34 (resources) / 48 (data) for 1.21.1.
 - Delete `*.refmap.json` and the old `META-INF/jarjar/` (rebuilt by gradle).
 
+## Step 3b — Offer the port's scope: full, minimal, or chosen chunks (ASK before the build loop)
+Not every user wants every part of a mod, and the parts cost very different amounts. Before grinding
+errors, measure what can be left off and let the user choose.
+1. Run the FIRST compile with javac's error cap lifted and save the log
+   (`./gradlew compileJava --console=plain > /tmp/first.log 2>&1`; quote the count with
+   `tools/burndown-count.sh /tmp/first.log`).
+2. `python3 ../../tools/scope-menu.py --src src/main/java --resources src/main/resources --log /tmp/first.log --json /tmp/scope.json`.
+   It splits the mod into chunks the port could leave out: optional integrations (recipe viewers,
+   tooltips, accessory slots...), custom shaders, HUD overlays, particles, commands, config screens,
+   world generation, advancement triggers, mixin tweaks and mob families. For each chunk it gives
+   its share of the start's compile errors, a rough dollar range, how many references the rest of
+   the mod makes into it (each is a call site to cut), mixins/renderers it carries, and what the mod
+   does without it. Everything else is CORE and always ported.
+3. **If it found no optional chunks, skip the question** and port everything. Otherwise ask with
+   `AskUserQuestion`:
+   - Q1 (single choice): **Full port** (everything; the default) · **Minimal port** (core only; say the
+     total share and dollar range it skips) · **Choose chunks**.
+   - If "Choose chunks": up to four multi-select questions (four options each), one per chunk KIND
+     (integrations, visuals, gameplay systems, mob families), largest share first. Each option's
+     description: files, share of start errors, the `~$a-b` range, refs to cut, and the "without it" line.
+   - Say plainly what the numbers are: the share is of the **compile phase only**, the dollars are a
+     range from a handful of published ports, and runtime work (mixins, renderers, Gate C) is extra.
+   - In a run with no one to ask (an unattended install), port everything.
+4. Record the choice in `MIGRATION.md` under **Scope**: the option, each chunk left out, and its share.
+5. For each chunk left out: delete its files (they stay in `decompiled-raw/`), cut every reference the
+   menu counted (registration lines, event subscriptions, mixin-config entries, the optional
+   `[[dependencies]]` block), and list it in `MANUAL_VALIDATION.md` under **Left out by choice** with
+   its "without it" line, so nobody mistakes it for a bug. Re-run `scope-menu.py` afterwards: a left-out
+   chunk must show 0 files and 0 refs.
+6. A chunk can be added back later: restore its files from `decompiled-raw/` and port them like any
+   other residual. Say so when the user picks a smaller scope.
+
 ## Step 4 — The build-error loop (the real work)
 Iterate. Each pass: run the compile, bucket the errors, fix by category, repeat.
 

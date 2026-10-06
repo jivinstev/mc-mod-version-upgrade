@@ -196,6 +196,11 @@ out="$(python3 tools/census-hypotheses.py --census "$H" --bench "$H/b" 2>&1)"
 grep -q '| P1 | 1 | 4 | 25% / 25% | 75% | 0% | 25% (1 rows) | 50% |' <<<"$out" \
   && ok "hypotheses: repeats exact/loose, helper routing, file locality, optional code" || bad "census-hypotheses: $(grep '| P1' <<<"$out")"
 
+echo "9. scope-menu.py (chunks, error shares and references on a synthetic mod)"
+out="$(python3 tools/scope-menu.py --self-check 2>&1)"
+grep -q 'self-check: PASS' <<<"$out" && ok "scope menu: integration, commands and a mob family found; shares from the first-compile log" \
+  || bad "scope-menu self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
