@@ -105,7 +105,7 @@ def find_families(files):
 
 def build(src, resources=None, log=None, errors_json=None):
     src = pathlib.Path(src)
-    files = {str(f.relative_to(src)): f.read_text(encoding="utf-8", errors="replace") for f in sorted(src.rglob("*.java"))}
+    files = {f.relative_to(src).as_posix(): f.read_text(encoding="utf-8", errors="replace") for f in sorted(src.rglob("*.java"))}
     families = find_families(files)
     chunk = {rel: chunk_of(rel, t, families) for rel, t in files.items()}
     # pull a family's renderers/models (files naming 2+ of its classes) into it, unless already a chunk
@@ -132,7 +132,7 @@ def build(src, resources=None, log=None, errors_json=None):
         _s = importlib.util.spec_from_file_location("rb", ROOT / "tools/recipe-bench.py")
         rb = importlib.util.module_from_spec(_s); _s.loader.exec_module(rb)
         for f, _l, _m in rb.parse_errors(pathlib.Path(log).read_text(encoding="utf-8", errors="replace")):
-            rel = f.rsplit("/java/", 1)[-1]
+            rel = f.replace("\\", "/").rsplit("/java/", 1)[-1]   # javac on Windows writes \ paths
             if rel in chunk:
                 errors[rel] += 1
     if errors_json:   # a recipe-bench.py bench.json: errors_by_file is already relative to the java root

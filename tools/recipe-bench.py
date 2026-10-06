@@ -362,7 +362,7 @@ def main():
         b, u, ex = bucket(errs, signatures())
         # per source file, relative to the java root (the start tree's root or a prepared overlay tree):
         # the file-locality check compares these with the files the finished port changed
-        rel = lambda f: f.rsplit("/java/", 1)[-1]
+        rel = lambda f: f.replace("\\", "/").rsplit("/java/", 1)[-1]   # javac on Windows writes \ paths
         res.update(buckets=dict(b), unmatched=dict(u), examples=ex,
                    errors_by_file=dict(collections.Counter(rel(f) for f, _l, _m in errs)))
     report(res, a.top)
