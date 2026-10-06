@@ -184,7 +184,8 @@ errors, measure what can be left off and let the user choose.
    It splits the mod into chunks the port could leave out: optional integrations (recipe viewers,
    tooltips, accessory slots...), custom shaders, HUD overlays, particles, commands, config screens,
    world generation, advancement triggers, mixin tweaks and mob families. For each chunk it gives
-   its share of the start's compile errors, a rough dollar range, how many references the rest of
+   its estimated share of the port (the mean of its share of the start's compile errors and of its
+   lines, which tracked ten finished ports' real changes closely), a rough dollar range, how many references the rest of
    the mod makes into it (each is a call site to cut), mixins/renderers it carries, and what the mod
    does without it. Everything else is CORE and always ported.
 3. **If it found no optional chunks, skip the question** and port everything. Otherwise ask with
@@ -194,8 +195,9 @@ errors, measure what can be left off and let the user choose.
    - If "Choose chunks": up to four multi-select questions (four options each), one per chunk KIND
      (integrations, visuals, gameplay systems, mob families), largest share first. Each option's
      description: files, share of start errors, the `~$a-b` range, refs to cut, and the "without it" line.
-   - Say plainly what the numbers are: the share is of the **compile phase only**, the dollars are a
-     range from a handful of published ports, and runtime work (mixins, renderers, Gate C) is extra.
+   - Say plainly what the numbers are: estimates, typically within a few points of a chunk's real share
+     of the changes; mixin chunks tend to run ~1.5x their estimate; the dollars are a range from a
+     handful of published ports; runtime work (renderers, Gate C) is extra.
    - In a run with no one to ask (an unattended install), port everything.
 4. Record the choice in `MIGRATION.md` under **Scope**: the option, each chunk left out, and its share.
 5. For each chunk left out: delete its files (they stay in `decompiled-raw/`), cut every reference the

@@ -22,11 +22,12 @@ Each chunk names what the mod falls back to without it, so "leave it off" is a d
     family:<name>      a group of 5+ entity classes in one sub-package (a mob family: entities, models,
                        renderers, goals). Leaving it off removes those mobs entirely.
 
-WHAT THE ESTIMATE IS, AND IS NOT. With --log (the first compile, javac's cap lifted), a chunk's share of the
-start's compile errors is the best predictor this repo has of its share of the compile phase -- but only
-from a FULL error list: javac stops at 100 by default, so take the log with tools/maxerrs.init.gradle. A log
-burndown-count.sh refuses (capped, parse abort, OOM) is ignored with a warning, as is no log at all, and the
-shares fall back to lines. Dollars are a RANGE: start errors x USD_PER_ERROR, the spread of the
+WHAT THE ESTIMATE IS, AND IS NOT. A chunk's share is the MEAN of its share of the first compile's errors and
+its share of the lines -- checked against what 10 finished ports actually changed, per chunk: lines alone
+r=0.88, errors alone r=0.77, the mean r=0.91 (mean absolute error 1.9 points). The error half needs a FULL
+error list: javac stops at 100 by default, so take the log with tools/maxerrs.init.gradle. A log
+burndown-count.sh refuses (capped, parse abort, OOM) is ignored with a warning, and the share is lines only.
+Mixin chunks ran ~1.5x their estimate in that check (much of their work never shows as a compile error). Dollars are a RANGE: start errors x USD_PER_ERROR, the spread of the
 published baselines in docs/EVALS.md / docs/port-costs.tsv. It covers the compile phase only; runtime gates,
 client rendering and mixin apply failures cost extra, so chunks with mixins or renderers are flagged.
 "refs" counts references from the rest of the mod into the chunk: each is a call site to cut or stub when
@@ -158,13 +159,19 @@ def build(src, resources=None, log=None, errors_json=None):
                   "refs_from_rest": refs, "fallback": FALLBACK.get(kind, ""),
                   "mixins": sum(1 for r in mine if re.search(r'^\s*@Mixin\b', files[r], re.M)),
                   "renderers": sum(1 for r in mine if re.search(r'\bextends\s+\w*(Renderer|RenderLayer)\b', files[r])),
-                  "share": round((errors_in(mine, errors) / tot_err) if tot_err else (lines / max(tot_lines, 1)), 3),
-                  "share_basis": "start compile errors" if tot_err else "lines"}
+                  "share_errors": round(errors_in(mine, errors) / tot_err, 3) if tot_err else None,
+                  "share_lines": round(lines / max(tot_lines, 1), 3),
+                  # Measured against 39 chunks of 10 finished ports (what each port actually changed):
+                  # lines alone r=0.88, start errors alone r=0.77, their MEAN r=0.91 (mean abs error 1.9
+                  # points). So the estimate is the mean when a full error list exists, else lines.
+                  "share": round(((errors_in(mine, errors) / tot_err) + lines / max(tot_lines, 1)) / 2, 3)
+                           if tot_err else round(lines / max(tot_lines, 1), 3),
+                  "share_basis": "mean of start-error share and line share" if tot_err else "lines"}
     if shader_assets and "shaders" not in out:
         out["shaders"] = {"kind": "shaders", "files": 0, "lines": 0, "errors": 0, "refs_from_rest": 0, "mixins": 0,
                           "renderers": 0, "fallback": FALLBACK["shaders"], "share": 0.0, "share_basis": "assets only",
                           "assets": shader_assets}
-    return {"total_errors": tot_err, "total_lines": tot_lines, "log_refused": refused,
+    return {"total_errors": tot_err, "total_lines": tot_lines, "log_refused": refused, "file_chunk": chunk,
             "usd_range_full": [round(tot_err * USD_PER_ERROR[0], 2), round(tot_err * USD_PER_ERROR[1], 2)] if tot_err else None,
             "chunks": out}
 
@@ -180,7 +187,7 @@ def report(m):
           + (f"   rough compile-phase cost of the FULL port: ${m['usd_range_full'][0]}-${m['usd_range_full'][1]}" if m["usd_range_full"] else ""))
     print(f"{'chunk':40} {'files':>5} {'errors':>6} {'share':>6} {'refs':>5}  flags / without it")
     for c, d in sorted(m["chunks"].items(), key=lambda kv: (kv[0] == "core", -kv[1]["share"])):
-        flags = ", ".join(x for x in (f"{d['mixins']} mixins" if d["mixins"] else "",
+        flags = ", ".join(x for x in (f"{d['mixins']} mixins (often ~1.5x the estimate)" if d["mixins"] else "",
                                       f"{d['renderers']} renderers" if d["renderers"] else "") if x)
         usd = ""
         if m["usd_range_full"] and c != "core":
@@ -213,7 +220,7 @@ def self_check():
         capped = build(pathlib.Path(t, "java"), log=log)
     c = m["chunks"]
     ok = (set(c) == {"core", "commands", "integration:JEI recipe viewer", "family:bugs"}
-          and c["integration:JEI recipe viewer"]["errors"] == 1 and c["integration:JEI recipe viewer"]["share"] == 0.5
+          and c["integration:JEI recipe viewer"]["errors"] == 1 and c["integration:JEI recipe viewer"]["share_errors"] == 0.5
           and c["family:bugs"]["files"] == 5 and c["family:bugs"]["refs_from_rest"] == 1 and m["total_errors"] == 2
           and capped["total_errors"] == 0 and capped["log_refused"])
     print("self-check:", "PASS" if ok else f"FAIL {json.dumps(m)[:400]}")

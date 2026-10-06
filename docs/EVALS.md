@@ -9,30 +9,36 @@ start snapshots and finished trees stay in the maintainer's private workspace an
 `tools/recipe-bench.py` puts a port's **start** (its deterministic decompile, or for an era jump the
 finished 1.21.1 port with the 26.2 rename tables and overlays removed) into its own build, compiles it
 against the target, and sorts every unique javac error into the catalogue entry whose **Error:** text it
-fits. No model was run. 24 of 29 rows produced a count; `-era` rows are the 1.21.1 → 26.2 jump of ports
+fits. No model was run. 22 of 29 rows produced a count (re-measured after a correction, below); `-era` rows are the 1.21.1 → 26.2 jump of ports
 that also have a 1.20 → 1.21 row.
 
 | Profile | Rows measured | Raw errors per port | Total | Matched | Largest catalogue buckets |
 |---|---|---|---|---|---|
 | P1 | 1 of 2 | 45 | 45 | 35% | 70 (4), M1 (4), M27 (2) |
 | P2 | 1 of 2 | 233 | 233 | 57% | V6 (39), 113 (26), 109 (21) |
-| P2-era | 1 of 1 | 4,289 | 4,289 | 28% | V4 (741), 93 (185), V13 (75) |
+| P2-era | 1 of 1 | 5,322 | 5,322 | 24% | V4 (782), 93 (243), V13 (75) |
 | P3 | 1 of 1 | 9,948 | 9,948 | 35% | 54 (679), 111 (584), 138 (455) |
-| P4 | 1 of 1 | 640 | 640 | 61% | 13 (80), 7 (63), 49 (37) |
-| P4-era | 1 of 1 | 380 | 380 | 37% | V4 (79), V60 (18), V6 (13) |
-| P5 | 4 of 4 | 418 – 1,412 | 3,671 | 46% | 9 (316), 111 (153), 138 (93) |
-| P5-era | 1 of 1 | 3,117 | 3,117 | 20% | V4 (272), V6 (64), 93 (59) |
+| P4 | 1 of 1 | 698 | 698 | 61% | 13 (80), 7 (63), 49 (40) |
+| P4-era | 1 of 1 | 192 | 192 | 31% | V4 (39), V13 (5), V39 (5) |
+| P5 | 4 of 4 | 418 – 1,485 | 3,744 | 46% | 9 (319), 111 (158), 138 (94) |
+| P5-era | 1 of 1 | 2,733 | 2,733 | 13% | V4 (158), V18 (54), 93 (49) |
 | P6 | 2 of 2 | 267 – 957 | 1,224 | 40% | 150 (173), 154 (80), 167 (48) |
 | P7 | 0 of 2 | — | — | — | — |
-| P8 | 2 of 2 | 368 – 2,900 | 3,268 | 37% | 9 (363), 13 (109), 6 (66) |
-| P8-era | 1 of 2 | 3,346 | 3,346 | 34% | V4 (543), V6 (165), V60 (95) |
-| P9 | 5 of 5 | 45 – 192 | 620 | 53% | V4 (151), V6 (78), V50 (41) |
-| P10 | 3 of 3 | 698 – 3,568 | 6,245 | 32% | V4 (1035), V6 (423), V60 (149) |
+| P8 | 2 of 2 | 282 – 2,877 | 3,159 | 38% | 9 (363), 13 (109), 6 (66) |
+| P8-era | 0 of 2 | — | — | — | — |
+| P9 | 5 of 5 | 45 – 243 | 676 | 43% | V4 (148), V6 (49), V50 (41) |
+| P10 | 2 of 3 | 1,255 – 2,312 | 3,567 | 28% | V4 (527), V6 (158), 93 (78) |
 
 **How to read it.** *Raw errors* is what the compiler reports with javac's 100-error cap lifted, counted by
 `tools/burndown-count.sh` as unique `file:line` locations. *Matched* is the share that already maps to a
 catalogue entry by its error text alone; the rest is Stage 2's input (patterns with no entry yet, or
 entries whose **Error:** text is too generic to attribute anything).
+
+**Correction (same day).** The first version of this table compiled the starts of the five multi-version
+ports through their own finished 1.21.1 overlay and rename table, which leaked part of the answer into the
+start. Those rows were re-run with them removed, and the 26.x rows now start from the prepared 1.21.1 tree;
+the 26.x rows also now have every library jar they need, which uncovers errors a missing library had
+hidden. Two large 26.x rows ran out of memory on this 15 GB machine in the re-run and are left out.
 
 **Known limits of this first measurement**
 - Matching is by error text only, not yet scoped by version: an entry written for one version jump can
@@ -68,50 +74,50 @@ recovered methods).
 | Profile | Rows | Code hunks | Attributed | New files | Deleted files |
 |---|---|---|---|---|---|
 | P1 | 2 | 64 | 62% | 1 | 0 |
-| P2 | 2 | 1,072 | 61% | 2 | 0 |
-| P2-era | 1 | 2,349 | 61% | 0 | 0 |
+| P2 | 2 | 1,403 | 50% | 2 | 0 |
+| P2-era | 1 | 1,997 | 65% | 10 | 0 |
 | P3 | 1 | 6,673 | 53% | 0 | 0 |
-| P4 | 1 | 173 | 56% | 4 | 143 |
-| P4-era | 1 | 272 | 68% | 1 | 0 |
-| P5 | 4 | 2,785 | 55% | 27 | 106 |
-| P5-era | 1 | 1,558 | 53% | 5 | 6 |
+| P4 | 1 | 177 | 55% | 4 | 143 |
+| P4-era | 1 | 98 | 65% | 30 | 0 |
+| P5 | 4 | 2,819 | 54% | 27 | 106 |
+| P5-era | 1 | 908 | 48% | 90 | 0 |
 | P6 | 2 | 934 | 49% | 17 | 74 |
 | P7 | 2 | 902 | 43% | 3 | 10 |
-| P8 | 2 | 4,628 | 33% | 30 | 37 |
-| P8-era | 2 | 6,818 | 56% | 9 | 17 |
-| P9 | 5 | 533 | 66% | 3 | 6 |
-| P10 | 3 | 4,343 | 51% | 26 | 18 |
-| **all** | 29 | 33,104 | 51% | 128 | 417 |
+| P8 | 2 | 5,222 | 29% | 30 | 37 |
+| P8-era | 2 | 5,358 | 60% | 156 | 17 |
+| P9 | 5 | 449 | 66% | 24 | 6 |
+| P10 | 3 | 3,281 | 49% | 198 | 18 |
+| **all** | 29 | 30,285 | 50% | 592 | 411 |
 
 **Most frequent entries** (hunks, and in how many of the 29 rows):
 
 | Entry | Hunks | Ports | Profiles |
 |---|---|---|---|
-| V4 | 3,089 | 13 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
-| V6 | 940 | 9 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
+| V4 | 2,840 | 13 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
 | 25 | 890 | 11 | P3, P4, P5, P6, P7, P8 |
 | 1 | 803 | 7 | P3, P4, P5, P8 |
-| 32 | 686 | 20 | P2, P2-era, P3, P4-era, P5, P5-era, P6, P7, P8, P8-era, P10 |
-| 13 | 608 | 14 | P3, P4, P5, P5-era, P6, P7, P8, P8-era, P9, P10 |
-| 103 | 406 | 15 | P3, P4, P5, P6, P8, P8-era, P9, P10 |
-| 9 | 391 | 6 | P4, P5, P6, P7, P8, P10 |
+| V6 | 731 | 7 | P2-era, P8-era, P9, P10 |
+| 32 | 609 | 19 | P2, P2-era, P3, P5, P5-era, P6, P7, P8, P8-era, P10 |
+| 13 | 601 | 12 | P3, P4, P5, P6, P7, P8, P8-era, P9 |
+| 9 | 390 | 5 | P4, P5, P6, P7, P8 |
+| 103 | 385 | 13 | P3, P4, P5, P6, P8, P8-era, P9, P10 |
 | 136 | 356 | 9 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
-| V12 | 354 | 10 | P4-era, P5-era, P8-era, P9, P10 |
+| V12 | 323 | 10 | P4-era, P5-era, P8-era, P9, P10 |
 | 132 | 303 | 4 | P3, P5, P6 |
 | V13 | 301 | 9 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
-| 130 | 284 | 15 | P4, P4-era, P5, P5-era, P6, P7, P8, P8-era, P10 |
-| 175 | 269 | 15 | P1, P4, P4-era, P5, P5-era, P6, P8, P8-era, P10 |
-| V31 | 266 | 9 | P4-era, P5-era, P8-era, P9, P10 |
-| V94 | 261 | 10 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
-| V21 | 255 | 9 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
-| 12d | 238 | 11 | P3, P4, P5, P6, P7, P8, P8-era |
+| 130 | 278 | 14 | P4, P4-era, P5, P5-era, P6, P7, P8, P8-era, P10 |
+| V21 | 254 | 9 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
+| 175 | 240 | 12 | P1, P4, P5, P5-era, P6, P8, P8-era, P10 |
+| 12d | 239 | 11 | P3, P4, P5, P6, P7, P8 |
 | 16 | 223 | 9 | P3, P4, P5, P6, P7, P8 |
-| 104 | 208 | 16 | P2, P2-era, P3, P4-era, P5, P5-era, P6, P8, P8-era, P9, P10 |
 | 37 | 203 | 3 | P3, P4, P5 |
-| V86 | 187 | 9 | P2-era, P4-era, P5-era, P8-era, P9, P10 |
-| 111 | 175 | 6 | P3, P4-era, P5, P5-era, P10 |
-| V38 | 175 | 8 | P2-era, P5-era, P8-era, P9, P10 |
-| 79 | 168 | 13 | P2-era, P3, P5, P5-era, P7, P8, P8-era, P9, P10 |
+| V31 | 201 | 7 | P5-era, P8-era, P9, P10 |
+| V94 | 189 | 6 | P8-era, P9, P10 |
+| 104 | 185 | 11 | P2, P3, P5, P6, P8, P8-era, P9 |
+| 120 | 161 | 4 | P2, P3, P6, P8 |
+| V38 | 155 | 7 | P2-era, P5-era, P8-era, P9, P10 |
+| 111 | 146 | 3 | P3, P5, P10 |
+| 98 | 142 | 3 | P3, P5, P8 |
 
 **Unattributed clusters seen in five or more rows** are the backlog for new entries or wider detectors.
 `A -> B`: identifiers removed → added. `reshape:` means the hunk keeps its identifiers and changes shape
@@ -119,52 +125,89 @@ recovered methods).
 
 | Hunks | Ports | Unattributed cluster |
 |---|---|---|
-| 38 | 10 | `reshape: mc . [] => [gui .]` |
-| 28 | 10 | `reshape:  [] => [@ Override]` |
+| 37 | 10 | `reshape: mc . [] => [gui .]` |
 | 23 | 10 | `EventBusSubscriber -> -` |
-| 12 | 9 | `- -> SuppressWarnings` |
-| 794 | 8 | `reshape: . isClientSide [] => [( )]` |
-| 94 | 8 | `- -> getRandom` |
-| 61 | 8 | `- -> EntitySpawnReason,TRIGGERED` |
+| 94 | 9 | `- -> getRandom` |
+| 802 | 8 | `reshape: . isClientSide [] => [( )]` |
 | 15 | 8 | `reshape:  [] => [return true ;]` |
-| 11 | 8 | `GameRules -> -` |
-| 164 | 7 | `CLIENT,OnlyIn -> -` |
+| 60 | 7 | `- -> EntitySpawnReason,TRIGGERED` |
 | 55 | 7 | `- -> Holder` |
 | 36 | 7 | `reshape: LivingEntity ) [] => [( Object )]` |
-| 15 | 7 | `reshape: . x [] => [( )]` |
-| 10 | 7 | `Minecraft -> -` |
-| 194 | 6 | `CompoundTag -> ValueOutput` |
-| 90 | 6 | `reshape: projectile . [] => [arrow .]` |
-| 73 | 6 | `CompoundTag -> -` |
+| 21 | 7 | `reshape:  [] => [@ Override]` |
+| 258 | 6 | `CLIENT,OnlyIn -> -` |
+| 192 | 6 | `CompoundTag -> ValueOutput` |
+| 89 | 6 | `reshape: projectile . [] => [arrow .]` |
 | 35 | 6 | `reshape: minecraft . [] => [util .]` |
 | 35 | 6 | `reshape: npc . [] => [villager .]` |
-| 32 | 6 | `getPosition -> -` |
-| 22 | 6 | `- -> randomUUID` |
-| 10 | 6 | `Entity -> -` |
+| 14 | 6 | `reshape: . x [] => [( )]` |
 | 157 | 5 | `getDouble -> getDoubleOr` |
 | 109 | 5 | `MobEffect -> -` |
 | 92 | 5 | `- -> hurtLevel,hurtServer` |
-| 85 | 5 | `reshape: import [software . bernie] => [com]` |
+| 83 | 5 | `reshape: import [software . bernie] => [com]` |
 | 35 | 5 | `reshape: animal . [] => [golem .]` |
-| 22 | 5 | `reshape: projectile . [] => [throwableitemprojectile .]` |
+| 21 | 5 | `reshape: projectile . [] => [throwableitemprojectile .]` |
+| 21 | 5 | `- -> randomUUID` |
 | 19 | 5 | `reshape:  [}] => []` |
 | 16 | 5 | `- -> SectionPos,blockToSectionCoord` |
-| 14 | 5 | `- -> RandomSource` |
 | 12 | 5 | `reshape: monster . [] => [zombie .]` |
-| 11 | 5 | `RenderSystem,blaze3d -> -` |
-| 11 | 5 | `reshape: renderer . [] => [rendertype .]` |
+| 10 | 5 | `reshape: renderer . [] => [rendertype .]` |
 | 10 | 5 | `CONFUSION -> NAUSEA` |
+| 7 | 5 | `Minecraft -> -` |
 | 7 | 5 | `reshape: . monster [] => [. zombie]` |
-| 6 | 5 | `LivingEntity -> -` |
-| 5 | 5 | `reshape:  [import java . util . List ;] => []` |
-| 5 | 5 | `GameRules -> DifficultySettings` |
-| 5 | 5 | `TextureSheetParticle -> SingleQuadParticle` |
-| 5 | 5 | `getMainCamera -> mainCamera` |
-| 5 | 5 | `Builder -> -` |
 
 **What this says for Stage 3/4.** Several of the largest unattributed clusters are entries that already
 exist but are written in prose the detector cannot use: a field read becoming a call (V17's
-`isClientSide` → `isClientSide()`, 794 hunks in 8 rows), the 26.x sub-package moves (V3's map),
+`isClientSide` → `isClientSide()`, 802 hunks in 8 rows), the 26.x sub-package moves (V3's map),
 GeckoLib's root-package move (V18), and the NBT `getX` → `getXOr` family (V12). Each is one recipe
 away from attributed and applied. Attribution precision has only been spot-checked so far; Stage 3's
 fixtures will measure it.
+
+## Stage 2.5 — can the judgement work be made smaller? (2026-10-06)
+
+Hypotheses from the #27 plan update, checked with no model over the Stage 1 and Stage 2 data
+(`tools/census-hypotheses.py`, profile-level output only).
+
+| Profile | Rows | Code hunks | H1 repeats (exact / loose) | H2 via a port-added helper | H1 among unattributed | H5 in a file with a start error | H7 in optional-integration code |
+|---|---|---|---|---|---|---|---|
+| P1 | 2 | 64 | 45% / 56% | 0% | 33% | 75% (1 rows) | 0% |
+| P2 | 2 | 1,403 | 85% / 86% | 0% | 87% | 97% (1 rows) | 0% |
+| P2-era | 1 | 1,997 | 93% / 97% | 0% | 93% | 100% (1 rows) | 0% |
+| P3 | 1 | 6,673 | 93% / 94% | 0% | 94% | 97% (1 rows) | 0% |
+| P4 | 1 | 177 | 10% / 19% | 3% | 8% | 94% (1 rows) | 0% |
+| P4-era | 1 | 98 | 22% / 60% | 0% | 15% | 100% (1 rows) | 0% |
+| P5 | 4 | 2,819 | 46% / 59% | 4% | 39% | 89% (4 rows) | 1% |
+| P5-era | 1 | 908 | 64% / 86% | 0% | 66% | 100% (1 rows) | 0% |
+| P6 | 2 | 934 | 34% / 43% | 7% | 34% | 90% (2 rows) | 0% |
+| P7 | 2 | 902 | 51% / 67% | 0% | 51% | — | 0% |
+| P8 | 2 | 5,222 | 44% / 62% | 3% | 44% | 61% (2 rows) | 3% |
+| P8-era | 2 | 5,358 | 64% / 86% | 8% | 60% | — | 3% |
+| P9 | 5 | 449 | 23% / 51% | 0% | 20% | 87% (5 rows) | 0% |
+| P10 | 3 | 3,281 | 54% / 82% | 24% | 56% | 98% (2 rows) | 1% |
+| **all** | 29 | 30,285 | 65% / 78% | 5% | 62% | 87% (22 rows) | 1% |
+
+- **H1 — fix one site, propagate it.** 65% of code hunks repeat an earlier hunk's exact normalised shape in
+  the same row (78% if only the removed/added identifiers must match), and 62% of the hunks no catalogue
+  entry covers do. Generated-code mods are 85–94%; small libraries (P4, P9) 10–23%. **Strongly supported:**
+  a model that fixes one site and has the rest applied by a generated rewrite would write a fraction of the
+  edits.
+- **H5 — fixes land in the file that fails to compile.** 87% of code hunks are in a file with at least one
+  start compile error, and the ports changed 3,049 of the 3,456 files that had one. **Strongly supported:**
+  a per-file loop (one file, its errors, the compiler) sees most of the work. The exception is a port that
+  starts from a native build (P8's decompile-repair row), where most changes are not compile-driven.
+- **H2 — a shared compat library.** 5% of code hunks call a helper class the port added (20% in P10, where
+  the §W compat pairs live), and only 2 helper names recur across rows. **Weak as stated:** ports do not
+  converge on the same helpers by themselves, so a shared library would have to define them.
+- **H7 — defer optional integrations.** 1% of code hunks, 1 of 592 new files. **Weak for cost**, still
+  useful for scope (see the scope menu below).
+- **H8 — choose the decompiler per class.** Vineflower beat CFR on both jar-start rows (45 vs 73 and 337
+  vs 1,291 start errors). Taking CFR only for the 17 files where it did better cut a 1.21.1 decompile from
+  337 to 312 errors (−7%; the per-file estimate had said −13%, because errors cross files); on the small row
+  it gained nothing. **Weak:** keep Vineflower, with CFR as a per-class fallback.
+- H3 (choice-point recipes) and H4 (scaffolds) need a model or a skeleton design and are scheduled for
+  Stages 3–6.
+
+**Scope-menu accuracy** (`tools/scope-menu.py`, migrate-mod Step 3b). Across 39 optional chunks in 10
+finished ports, a chunk's predicted share of the port was compared with its share of what the port actually
+changed. Share of start errors alone: correlation 0.77. Share of lines alone: 0.88. **The mean of the two:
+0.91, mean absolute error 1.9 points**, which is what the menu now reports. Mixin chunks ran about 1.5×
+their estimate, because much of their work never shows as a compile error; the menu says so.

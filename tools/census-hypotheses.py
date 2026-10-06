@@ -105,7 +105,7 @@ def main():
         if a.bench:
             bj = pathlib.Path(a.bench) / r["row"] / "bench.json"
             ebf = json.loads(bj.read_text(encoding="utf-8")).get("errors_by_file") if bj.exists() else None
-            if ebf is not None:
+            if ebf:   # a start with no errors (one that is not a raw start) has nothing to locate
                 n5, inside, ef, efc = h5(r["recs"], ebf)
                 p["h5_rows"] += 1; p["h5_code"] += n5; p["h5_in"] += inside; p["h5_ef"] += ef; p["h5_efc"] += efc
         if a.detail:
