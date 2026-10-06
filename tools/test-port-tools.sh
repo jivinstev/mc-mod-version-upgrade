@@ -142,6 +142,11 @@ out="$(python3 tools/recipe-bench.py --bucket-log "$T/one.log" --json "$T/one.js
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["errors"]==1 and sum(d["buckets"].values())==1 else 1)' "$T/one.json" \
   && ok "a real catalogue signature (Forge package) is attributed from the live CATALOG.md" || bad "bucket-log: $out"
 
+echo "6. hunk-census.py (attribution A/B on a synthetic catalogue and trees)"
+out="$(python3 tools/hunk-census.py --self-check 2>&1)"
+grep -q 'self-check: PASS' <<<"$out" && ok "census: field, prose-arrow and SRG-shape detectors attribute; comment-only and renames-with-no-entry do not" \
+  || bad "hunk-census self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
