@@ -300,6 +300,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=3600)
     ap.add_argument("--javac-heap", default="6g")
     ap.add_argument("--gradle-heap", default="6g")
+    ap.add_argument("--in-process", action="store_true", help="run javac inside Gradle (no fork); give --gradle-heap the memory")
     ap.add_argument("--bucket-log"); ap.add_argument("--json"); ap.add_argument("--top", type=int, default=12)
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
@@ -318,14 +319,19 @@ def main():
         shutil.copytree(start, src)
         res["recipes"] = apply_recipes(work, src, a.recipes)
         init = work / "recipe-bench-maxerrs.init.gradle"
-        init.write_text(MAXERRS_INIT % a.javac_heap)
+        init.write_text(MAXERRS_INIT % a.javac_heap if not a.in_process else
+                        MAXERRS_INIT.replace("options.fork = true; options.forkOptions.memoryMaximumSize = '%s'",
+                                             "options.fork = false"))
         cmd = ["./gradlew", "compileJava", "--console=plain", "--no-daemon", "--init-script", str(init)]
         for s in a.init_script:
             cmd += ["--init-script", str(pathlib.Path(s).resolve())]
         # The Gradle side holds every diagnostic the javac worker sends back, so a raw start with
         # thousands of errors OOMs gradle.properties' usual -Xmx4G before javac does (measured:
         # 2,900 errors on a 600-file mod). Override it for this run only.
-        cmd.append(f"-Dorg.gradle.jvmargs=-Xmx{a.gradle_heap}")
+        # --in-process: no worker, so nothing to serialise back -- the only way a 3,000+ error start
+        # fits on a 15 GB machine. -Xss32m keeps what a port's own forked javac needed for deep
+        # generated expressions (§X5c).
+        cmd.append(f"-Dorg.gradle.jvmargs=-Xmx{a.gradle_heap}" + (" -Xss32m" if a.in_process else ""))
         if a.mc:
             cmd.append(f"-Pmc={a.mc}")
         log = work / "recipe-bench-compile.log"
