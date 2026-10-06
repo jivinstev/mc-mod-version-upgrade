@@ -183,8 +183,11 @@ def bucket(errors, sigs):
 
 # --- 3. the bench -----------------------------------------------------------------------------------
 SKIP = {"build", "run", ".gradle", ".git"}
-MAXERRS_INIT = """allprojects { tasks.withType(JavaCompile).configureEach {
-    options.compilerArgs += ['-Xmaxerrs', '100000', '-Xmaxwarns', '0'] } }
+# Lift javac's error cap, and fork it with a stated heap AFTER the build has configured its own
+# (a 1,000-file era jump OOMs a 4 GB javac at ~5000 errors; §X20: an unstated heap is a variable).
+MAXERRS_INIT = """gradle.projectsEvaluated { gradle.rootProject.allprojects { tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ['-Xmaxerrs', '100000', '-Xmaxwarns', '0']
+    options.fork = true; options.forkOptions.memoryMaximumSize = '%s' } } }
 """
 
 
@@ -295,6 +298,7 @@ def main():
     ap.add_argument("--init-script", action="append", default=[])
     ap.add_argument("--blank", action="append", default=[])
     ap.add_argument("--timeout", type=int, default=3600)
+    ap.add_argument("--javac-heap", default="8g")
     ap.add_argument("--bucket-log"); ap.add_argument("--json"); ap.add_argument("--top", type=int, default=12)
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
@@ -313,7 +317,7 @@ def main():
         shutil.copytree(start, src)
         res["recipes"] = apply_recipes(work, src, a.recipes)
         init = work / "recipe-bench-maxerrs.init.gradle"
-        init.write_text(MAXERRS_INIT)
+        init.write_text(MAXERRS_INIT % a.javac_heap)
         cmd = ["./gradlew", "compileJava", "--console=plain", "--no-daemon", "--init-script", str(init)]
         for s in a.init_script:
             cmd += ["--init-script", str(pathlib.Path(s).resolve())]

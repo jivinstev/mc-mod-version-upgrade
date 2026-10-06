@@ -65,6 +65,13 @@ if [ "$N" -eq 0 ] && grep -qE 'An exception has occurred in the compiler' "$LOG"
   grep -E 'An exception has occurred in the compiler|^java\.lang\.[A-Za-z]+' "$LOG" | head -3
   exit 5
 fi
+# X5e: javac can run OUT OF MEMORY after printing thousands of errors (a 26.x era jump on a
+# 1,000-file mod did, at 5000). Those lines are a prefix of the real list, not a count.
+if grep -qE 'java\.lang\.OutOfMemoryError' "$LOG"; then
+  echo "NOT A COUNT -- the build ran out of memory after $N error location(s); that is a prefix, not a total."
+  grep -m1 -E 'java\.lang\.OutOfMemoryError' "$LOG"
+  exit 5
+fi
 # X5d: the task can START and fail before javac runs -- an unresolvable dependency fails
 # compileJava itself ("> Task :compileJava FAILED" + "Could not resolve"), which the RAN check
 # above accepts. Zero error: lines from a FAILED compile task is not zero errors.
