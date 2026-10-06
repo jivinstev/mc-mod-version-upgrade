@@ -318,6 +318,13 @@ def main():
         src = work / "src/main/java"
         shutil.copytree(start, src)
         res["recipes"] = apply_recipes(work, src, a.recipes)
+        # NeoGradle's shared execution cache (~/.gradle/caches/ng_execute) records ABSOLUTE paths into
+        # the project that first ran each NeoForm step -- including its project-local dummy repo. The
+        # bench deletes work dirs, so the next NeoGradle port is handed a path that no longer exists
+        # and fails at neoFormTransformSource (NoSuchFileException ...ng_dummy_ng...). Start each
+        # NeoGradle scaffold from an empty one; ModDevGradle keeps nothing of the kind.
+        if "net.neoforged.gradle" in (work / "build.gradle").read_text(errors="replace"):
+            shutil.rmtree(pathlib.Path.home() / ".gradle/caches/ng_execute", ignore_errors=True)
         init = work / "recipe-bench-maxerrs.init.gradle"
         init.write_text(MAXERRS_INIT % a.javac_heap if not a.in_process else
                         MAXERRS_INIT.replace("options.fork = true; options.forkOptions.memoryMaximumSize = '%s'",
