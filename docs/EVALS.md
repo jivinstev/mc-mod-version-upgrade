@@ -4,6 +4,26 @@ Measurements for issue #27 (deterministic recipes). One section per stage. Every
 **anonymised**: ports are named only by their profile (P1–P11, defined in #27). The per-port tables,
 start snapshots and finished trees stay in the maintainer's private workspace and never enter this repo.
 
+## The plan these measurements produced (2026-10-06)
+
+Savings are a share of a port's cost, estimated from the measurements below; ranges overlap and do not
+add. Each later step acts on what the earlier ones leave.
+
+| Order | Step | What it does | Evidence | Expected saving |
+|---|---|---|---|---|
+| 1 | 5a: fresh session per phase | resume from `MIGRATION.md` at each phase boundary, so context restarts near its 37–49k floor instead of growing to a median 180–450k | Stage 0: the conversation itself is 44–60% of cache reads | 20–40% |
+| 2 | 5a: no spilled-output re-reads; summaries not raw logs | grep spilled tool output instead of reading it; bucketed error summaries | Stage 0: 7–24% of cache reads | 5–20% |
+| 3 | 3: recipe format + engine | `auto` / `choice` / `scaffold` / `manual`, type-aware, with the §X guards | enabling step | — |
+| 4 | 4: recipes in bulk | apply the mechanical changes with no model, most frequent first (V4, V3 moves, V17, V12, 25, 32, 13...) | Stage 2: 35–50% of 1.20→1.21 hunks and 45–60% of 26.x hunks are mechanical; cost grows faster than linearly in requests | 35–70% |
+| 5 | 5b: per-file residual loop (H5) | each remaining fix in a small fresh context with that file, its errors and the compiler; cheaper model | Stage 2.5: 87% of hunks are in a file that fails the first compile | 50–80% of what is left |
+| 6 | 5b: fix once, apply everywhere (H1) | a hand fix becomes a rewrite applied to every matching site | Stage 2.5: 65% of hunks repeat an earlier one in the same port | 30–50% of what is left |
+| 7 | 3/6: choice points (H3) and scaffolds (H4) | the model picks an option or fills a skeleton instead of writing code | untested | 5–15% of the judgement work |
+| 8 | scope menu (shipped) | the user leaves optional chunks out | Stage 2.5: chunk estimates within ~2 points | 0–40%, the user's choice |
+| — | 6: replays + model tiering | measures all of the above, recipes on vs off, model mix | — | measured, not assumed |
+
+Dropped for low value: a catalogue index (the catalogue is 2–3% of cache reads), a smaller starting context
+(1–2%), general tool-result caps (4–8%, replaced by row 2), H2, H7, H8.
+
 ## Stage 0 — where the baseline ports' tokens went (2026-10-06)
 
 `tools/context-profile.py` on the three published baselines' transcripts: the two cloud replays (each
