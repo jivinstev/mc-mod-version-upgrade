@@ -244,6 +244,22 @@ echo "$out" | grep -q "found in the environment" && ! echo "$out" | grep -q "not
 fresh; out="$(st --yes)"; echo "$out" | grep -q "CurseForge is OPTIONAL" \
   && ok "without a key, setup still explains how to get one" || bad "no key: $(echo "$out" | grep -A3 'Mod registries')"
 
+# model training: only the user's own "confirmed" records it -- never --yes, never a default
+fresh; out="$(st --yes)"
+! grep -q '^TRAINING_OPTOUT' "$R/.env.local" 2>/dev/null && echo "$out" | grep -q 'data-privacy-controls' \
+  && echo "$out" | grep -q 'never assumed, even with --yes' \
+  && ok "--yes never confirms the training opt-out; it points at the setting instead" || bad "--yes training: $(grep TRAINING "$R/.env.local")"
+fresh; out="$(tty_run 'n,,,,,,no,')"
+! grep -q '^TRAINING_OPTOUT' "$R/.env.local" && echo "$out" | grep -q 'model training not confirmed off' \
+  && ok "pressing Enter at the training question records nothing and leaves a reminder" || bad "enter: $(grep TRAINING "$R/.env.local")"
+fresh; out="$(tty_run 'n,,,,,,no,yes')"
+! grep -q '^TRAINING_OPTOUT' "$R/.env.local" \
+  && ok "answering 'yes' is not 'confirmed': nothing recorded" || bad "yes accepted: $(grep TRAINING "$R/.env.local")"
+fresh; out="$(tty_run 'n,,,,,,no,confirmed')"
+grep -q '^TRAINING_OPTOUT=confirmed$' "$R/.env.local" && out2="$(tty_run '')" \
+  && echo "$out2" | grep -q 'kept: you confirmed model training is turned off' \
+  && ok "typing 'confirmed' records it, and a re-run keeps it without asking" || bad "confirmed: $(grep TRAINING "$R/.env.local")"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"
