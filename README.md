@@ -92,6 +92,7 @@ author's permission. The MIT licence covers this tool, never the mods it ports.
 | [docs/USING.md](docs/USING.md) | Installing vs. porting, where ports go, prerequisites |
 | [CATALOG.md](CATALOG.md) | The ~540 migration lessons: pattern → error → fix |
 | [SUPPORTED_VERSIONS.md](SUPPORTED_VERSIONS.md) | Which Minecraft versions are tested |
+| [docs/EVALS.md](docs/EVALS.md) | How much of a port the catalogue and its recipes cover, measured per port profile |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | The safety gates, and sending back what your port taught |
 
 ## Licence
