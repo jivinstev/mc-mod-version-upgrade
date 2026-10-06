@@ -6,36 +6,38 @@ start snapshots and finished trees stay in the maintainer's private workspace an
 
 ## Stage 0 — where the baseline ports' tokens went (2026-10-06)
 
-`tools/context-profile.py` run on the two cloud replay baselines' own transcripts (each session ran it on
-itself; P11's desktop transcript is still to come). "Carried" = a tool result's size times the requests
+`tools/context-profile.py` on the three published baselines' transcripts: the two cloud replays (each
+session ran it on itself) and the desktop P11 port. "Carried" = a tool result's size times the requests
 that re-read it. Shares are of all cache reads.
 
-| | P1 replay | P4 replay |
-|---|---|---|
-| Requests | 214 | 541 |
-| Context per request: first / median / max | 46k / 182k / 324k | 49k / 452k / 741k |
-| Floor (first request's context, re-read by every request) | 26% | 11% |
-| Tool results, carried | 30% | 36% |
-| — catalogue reads | 3% | 2% |
-| — skill and reference docs | 15% | 5% |
-| — build output | 4% | 3% |
-| — the port's source | 1% | 2% |
-| — other (shell output, re-reading spilled tool output) | 7% | 24% |
-| Everything else (the conversation itself: the model's own calls and replies) | 44% | 53% |
-| What-if: every tool result capped at 2,000 tokens | −4% | −8% |
-| What-if: 50% fewer requests | −50% | −50% |
+| | P1 replay | P4 replay | P11 (desktop) |
+|---|---|---|---|
+| Requests | 214 | 541 | 306 |
+| Context per request: first / median / max | 46k / 182k / 324k | 49k / 452k / 741k | 37k / 397k / 596k |
+| Floor (first request's context, re-read by every request) | 26% | 11% | 10% |
+| Tool results, carried | 30% | 36% | 30% |
+| — catalogue reads | 3% | 2% | 3% |
+| — skill and reference docs | 15% | 5% | 2% |
+| — build output | 4% | 3% | 3% |
+| — the port's source | 1% | 2% | 2% |
+| — other (shell output, re-reading spilled tool output) | 7% | 24% | 20% |
+| Everything else (the conversation itself: the model's own calls and replies) | 44% | 53% | 60% |
+| What-if: every tool result capped at 2,000 tokens | −4% | −8% | −5% |
+| What-if: 50% fewer requests | −50% | −50% | −50% |
 
 **What it says.** Cost is driven by how many requests a port makes and how large its context has grown by
-then, not by any one thing it reads. The catalogue costs 2–3%, because the agent reads it in slices; the
-docs it reads at the start cost more (15% in the smaller port). In the larger port a quarter of all cache
-reads came from re-reading tool output that had been too large to show and was spilled to a file. So the
-levers, in order: fewer requests (recipes, and per-file fixes in small fresh contexts: H1/H5), keeping each
-context short (fresh sessions per phase; summaries instead of raw logs), then a smaller starting context.
+then, not by any one thing it reads. The catalogue costs 2–3% in all three, because the agent reads it in
+slices. The largest single tool results in the two bigger ports were re-reads of tool output that had been
+too large to show and was spilled to a file. So the levers, in order: fewer requests (recipes, and
+per-file fixes in small fresh contexts: H1/H5), keeping each context short (fresh sessions per phase;
+summaries instead of raw logs; no spilled-output re-reads), then a smaller starting context.
 
-**Open question.** Both transcripts hold about 2.2× the cache reads of their sessions' own recorded usage
-(38M vs 18M; 232M vs 102M) with requests de-duplicated by id, so the profiler's dollar figures ($17.87,
-$74.01) are above the recorded ones ($6.88, $30.31). The shares above do not depend on which total is
-right. One candidate is subagent requests being counted on one side only; not yet checked.
+**Which totals to trust.** The two cloud replays were archived and later resumed so they could profile
+themselves, and their transcripts then held about 2.2× the cache reads of the sessions' own recorded usage
+(38M vs 18M; 232M vs 102M), most likely history duplicated on resume. On a session that was never resumed
+the transcript and the record agree (checked: 162.6M vs 160.4M). So for the replays the recorded totals
+($6.88, $30.31) stand; the shares above hold either way. The profiler's dollars also run ~7% above a
+session's recorded cost on the same tokens (list-price estimate vs billed).
 
 ## Stage 1 — recipe bench baseline, recipes OFF (2026-10-06)
 
