@@ -4,6 +4,39 @@ Measurements for issue #27 (deterministic recipes). One section per stage. Every
 **anonymised**: ports are named only by their profile (P1–P11, defined in #27). The per-port tables,
 start snapshots and finished trees stay in the maintainer's private workspace and never enter this repo.
 
+## Stage 0 — where the baseline ports' tokens went (2026-10-06)
+
+`tools/context-profile.py` run on the two cloud replay baselines' own transcripts (each session ran it on
+itself; P11's desktop transcript is still to come). "Carried" = a tool result's size times the requests
+that re-read it. Shares are of all cache reads.
+
+| | P1 replay | P4 replay |
+|---|---|---|
+| Requests | 214 | 541 |
+| Context per request: first / median / max | 46k / 182k / 324k | 49k / 452k / 741k |
+| Floor (first request's context, re-read by every request) | 26% | 11% |
+| Tool results, carried | 30% | 36% |
+| — catalogue reads | 3% | 2% |
+| — skill and reference docs | 15% | 5% |
+| — build output | 4% | 3% |
+| — the port's source | 1% | 2% |
+| — other (shell output, re-reading spilled tool output) | 7% | 24% |
+| Everything else (the conversation itself: the model's own calls and replies) | 44% | 53% |
+| What-if: every tool result capped at 2,000 tokens | −4% | −8% |
+| What-if: 50% fewer requests | −50% | −50% |
+
+**What it says.** Cost is driven by how many requests a port makes and how large its context has grown by
+then, not by any one thing it reads. The catalogue costs 2–3%, because the agent reads it in slices; the
+docs it reads at the start cost more (15% in the smaller port). In the larger port a quarter of all cache
+reads came from re-reading tool output that had been too large to show and was spilled to a file. So the
+levers, in order: fewer requests (recipes, and per-file fixes in small fresh contexts: H1/H5), keeping each
+context short (fresh sessions per phase; summaries instead of raw logs), then a smaller starting context.
+
+**Open question.** Both transcripts hold about 2.2× the cache reads of their sessions' own recorded usage
+(38M vs 18M; 232M vs 102M) with requests de-duplicated by id, so the profiler's dollar figures ($17.87,
+$74.01) are above the recorded ones ($6.88, $30.31). The shares above do not depend on which total is
+right. One candidate is subagent requests being counted on one side only; not yet checked.
+
 ## Stage 1 — recipe bench baseline, recipes OFF (2026-10-06)
 
 `tools/recipe-bench.py` puts a port's **start** (its deterministic decompile, or for an era jump the
