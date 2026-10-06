@@ -77,7 +77,7 @@ def walk(f):
     """One transcript file -> (requests, results) in order. A request is (model, context, usage);
     a result is (category, tokens, label, index of the next request)."""
     uses, reqs, results, seen = {}, [], [], {}
-    for line in open(f, errors="replace"):
+    for line in open(f, encoding="utf-8", errors="replace"):
         try:
             d = json.loads(line)
         except ValueError:
@@ -219,7 +219,7 @@ def main():
             cache_read=total_read, categories={c: dict(results=p["counts"][c], size=p["sizes"][c], carried=p["carried"][c])
                                                for c in CATEGORIES},
             top=[dict(carried=c, size=t, category=k, label=l) for c, t, k, l in p["items"][:a.top]],
-            whatifs=[dict(scenario=n, usd=v) for n, v in rows]), indent=2) + "\n")
+            whatifs=[dict(scenario=n, usd=v) for n, v in rows]), indent=2) + "\n", encoding="utf-8")
     return 0
 
 

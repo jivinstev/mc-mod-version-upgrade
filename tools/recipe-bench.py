@@ -212,20 +212,20 @@ def copy_scaffold(scaffold, work, blanks):
         if t.is_dir():
             shutil.rmtree(t); t.mkdir(parents=True)
         elif t.exists():
-            t.write_text("")
+            t.write_text("", encoding="utf-8")
 
 
 def apply_recipes(work, src, recipes_file):
     report = []
     if not recipes_file:
         return report
-    for n, line in enumerate(pathlib.Path(recipes_file).read_text().splitlines(), 1):
+    for n, line in enumerate(pathlib.Path(recipes_file).read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         rid, _, cmd = line.partition("\t")
         before = tree_hash(src)
         r = subprocess.run(cmd, shell=True, cwd=work, env={**os.environ, "SRC": str(src), "MIGRATOR": str(ROOT)},
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8")
         changed = tree_hash(src) != before
         report.append({"id": rid.strip(), "exit": r.returncode, "changed": changed})
     return report
@@ -233,7 +233,7 @@ def apply_recipes(work, src, recipes_file):
 
 def diff_stat(a, b):
     r = subprocess.run(["git", "diff", "--no-index", "--numstat", "--", str(a), str(b)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8")
     files = add = rem = 0
     for l in r.stdout.splitlines():
         p = l.split("\t")
@@ -245,7 +245,7 @@ def diff_stat(a, b):
 
 
 def count(log):
-    r = subprocess.run(["bash", str(BURNDOWN), str(log)], capture_output=True, text=True)
+    r = subprocess.run(["bash", str(BURNDOWN), str(log)], capture_output=True, text=True, encoding="utf-8")
     m = re.search(r'errors = (\d+)', r.stdout)
     return r.returncode, (int(m.group(1)) if m else None), r.stdout.strip().splitlines()[:4]
 
@@ -323,12 +323,12 @@ def main():
         # bench deletes work dirs, so the next NeoGradle port is handed a path that no longer exists
         # and fails at neoFormTransformSource (NoSuchFileException ...ng_dummy_ng...). Start each
         # NeoGradle scaffold from an empty one; ModDevGradle keeps nothing of the kind.
-        if "net.neoforged.gradle" in (work / "build.gradle").read_text(errors="replace"):
+        if "net.neoforged.gradle" in (work / "build.gradle").read_text(encoding="utf-8", errors="replace"):
             shutil.rmtree(pathlib.Path.home() / ".gradle/caches/ng_execute", ignore_errors=True)
         init = work / "recipe-bench-maxerrs.init.gradle"
         init.write_text(MAXERRS_INIT % a.javac_heap if not a.in_process else
                         MAXERRS_INIT.replace("options.fork = true; options.forkOptions.memoryMaximumSize = '%s'",
-                                             "options.fork = false"))
+                                             "options.fork = false"), encoding="utf-8")
         cmd = ["./gradlew", "compileJava", "--console=plain", "--no-daemon", "--init-script", str(init)]
         for s in a.init_script:
             cmd += ["--init-script", str(pathlib.Path(s).resolve())]
@@ -342,7 +342,7 @@ def main():
         if a.mc:
             cmd.append(f"-Pmc={a.mc}")
         log = work / "recipe-bench-compile.log"
-        with open(log, "w") as fh:
+        with open(log, "w", encoding="utf-8") as fh:
             try:
                 subprocess.run(cmd, cwd=work, stdout=fh, stderr=subprocess.STDOUT, timeout=a.timeout)
             except subprocess.TimeoutExpired:
@@ -356,11 +356,11 @@ def main():
         res["not_a_count"] = msg
         print("\n".join(msg))
     else:
-        b, u, ex = bucket(parse_errors(log.read_text(errors="replace")), signatures())
+        b, u, ex = bucket(parse_errors(log.read_text(encoding="utf-8", errors="replace")), signatures())
         res.update(buckets=dict(b), unmatched=dict(u), examples=ex)
     report(res, a.top)
     if a.json:
-        pathlib.Path(a.json).write_text(json.dumps(res, indent=1, sort_keys=True))
+        pathlib.Path(a.json).write_text(json.dumps(res, indent=1, sort_keys=True), encoding="utf-8")
     return 0 if code == 0 else 2
 
 

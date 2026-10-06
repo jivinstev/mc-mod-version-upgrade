@@ -97,7 +97,7 @@ def detectors(text=None, exclude=()):
 def hunks(start, end):
     """-> [(file, kind, minus_text, plus_text, nlines)] with kind in hunk/new-file/deleted-file."""
     r = subprocess.run(["git", "diff", "--no-index", "-U0", "--no-color", "--", str(start), str(end)],
-                       capture_output=True, text=True, errors="replace")
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     out, cur, kind, minus, plus, n = [], None, "hunk", [], [], 0
 
     def flush():
@@ -185,7 +185,7 @@ def census(start, end, bulk=300, det=None, w=None, exclude=()):
            "unattributed": 0, "comment_only": 0, "by_entry": collections.Counter(), "clusters": collections.Counter()}
     end_ids = set()
     for f in pathlib.Path(end).rglob("*.java"):
-        end_ids |= ids(f.read_text(errors="replace"), is_code=True)
+        end_ids |= ids(f.read_text(encoding="utf-8", errors="replace"), is_code=True)
     for _f, kind, minus, plus, n in hunks(start, end):
         if not _f.endswith(".java"):
             continue
@@ -221,15 +221,15 @@ def self_check():
         a, b = pathlib.Path(t, "a"), pathlib.Path(t, "b")
         for d in (a, b):
             d.mkdir()
-        (a / "A.java").write_text("class A {\n RegistryObject<Item> FOO = R.reg();\n int x;\n}\n")
-        (b / "A.java").write_text("class A {\n DeferredHolder<Item, Item> FOO = R.reg();\n int x;\n}\n")
-        (a / "B.java").write_text("class B extends Item implements Vanishable {\n}\n")
-        (b / "B.java").write_text("class B extends Item {\n}\n")
-        (a / "C.java").write_text("class C {\n void tickOld() {}\n}\n")
-        (b / "C.java").write_text("class C {\n void tickRenamedHook() {}\n}\n")
-        (b / "D.java").write_text("class D {}\n")
-        (a / "E.java").write_text("class E {\n void f() { mc.setScreen(s); }\n int keep;\n // old note\n}\n")
-        (b / "E.java").write_text("class E {\n void f() { mc.setScreenAndShow(s); }\n int keep;\n // a new, longer note\n}\n")
+        (a / "A.java").write_text("class A {\n RegistryObject<Item> FOO = R.reg();\n int x;\n}\n", encoding="utf-8")
+        (b / "A.java").write_text("class A {\n DeferredHolder<Item, Item> FOO = R.reg();\n int x;\n}\n", encoding="utf-8")
+        (a / "B.java").write_text("class B extends Item implements Vanishable {\n}\n", encoding="utf-8")
+        (b / "B.java").write_text("class B extends Item {\n}\n", encoding="utf-8")
+        (a / "C.java").write_text("class C {\n void tickOld() {}\n}\n", encoding="utf-8")
+        (b / "C.java").write_text("class C {\n void tickRenamedHook() {}\n}\n", encoding="utf-8")
+        (b / "D.java").write_text("class D {}\n", encoding="utf-8")
+        (a / "E.java").write_text("class E {\n void f() { mc.setScreen(s); }\n int keep;\n // old note\n}\n", encoding="utf-8")
+        (b / "E.java").write_text("class E {\n void f() { mc.setScreenAndShow(s); }\n int keep;\n // a new, longer note\n}\n", encoding="utf-8")
         r = census(a, b, det=det, w=w)
     ok = (dict(r["by_entry"]) == {"9": 1, "33": 1, "V17": 1} and r["unattributed"] == 1 and r["new_files"] == 1
           and r["comment_only"] == 1
@@ -266,7 +266,7 @@ def main():
     for k, v in r["clusters"].most_common(a.top):
         print(f"  {v:6d}  {k[:110]}")
     if a.json:
-        pathlib.Path(a.json).write_text(json.dumps(r, indent=1, sort_keys=True))
+        pathlib.Path(a.json).write_text(json.dumps(r, indent=1, sort_keys=True), encoding="utf-8")
     return 0
 
 
