@@ -479,6 +479,9 @@ def key_for_version(v):
 
 
 # ── asking ──────────────────────────────────────────────────────────────────────────────────
+TRAINING_URL = "https://claude.ai/settings/data-privacy-controls"
+
+
 class Asker:
     def __init__(self, args, state, first_run):
         self.a, self.state, self.first = args, state, first_run
@@ -861,6 +864,33 @@ def main():
             elif ok_ != "yes":
                 notes.append("Claude Code permissions not added: registry downloads and builds may be refused "
                              "inside its sandbox (./setup --review to add them)")
+
+    # model training: the user turns it off themselves, and says so in their own words -----------
+    # Setup cannot change this setting, and it is never assumed: only typing "confirmed" records it.
+    print("\n" + step() + "Training on your data")
+    rec = state["keys"].get("TRAINING_OPTOUT")
+    if rec and rec.get("value") == "confirmed" and not a.review:
+        print("  kept: you confirmed model training is turned off")
+        ask.kept += 1
+    else:
+        print(f"   Claude Code reads what you work on here -- including decompiled mod code. If your Claude\n"
+              f"   account lets Anthropic train on your chats and coding sessions, that code could be used for\n"
+              f"   training. Some people (and some mod authors) are not comfortable with that, so please turn\n"
+              f"   it off before you start:\n"
+              f"     {TRAINING_URL}\n"
+              f"   switch OFF \"Help improve Claude\". (Team, Enterprise and API accounts are not used for\n"
+              f"   training by default; check with your admin if unsure.) Setup cannot change this for you.")
+        if ask.interactive:
+            ans = input('   Type "confirmed" once it is off, or press Enter to do it later: ').strip().lower()
+            if ans == "confirmed":
+                ask.proposed["TRAINING_OPTOUT"] = ("confirmed", "user")
+                print("   thank you -- recorded")
+            else:
+                notes.append(f"model training not confirmed off: turn off \"Help improve Claude\" at {TRAINING_URL}, "
+                             "then run ./setup again and type \"confirmed\"")
+        else:
+            notes.append(f"model training not confirmed off (never assumed, even with --yes): turn off \"Help "
+                         f"improve Claude\" at {TRAINING_URL}, then run ./setup and type \"confirmed\"")
 
     # removals ---------------------------------------------------------------------------------
     removals = set()
