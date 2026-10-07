@@ -304,6 +304,8 @@ def main():
     ap.add_argument("--gradle-heap", default="6g")
     ap.add_argument("--in-process", action="store_true", help="run javac inside Gradle (no fork); give --gradle-heap the memory")
     ap.add_argument("--bucket-log"); ap.add_argument("--json"); ap.add_argument("--top", type=int, default=12)
+    ap.add_argument("--no-compile", action="store_true",
+                    help="stop after the recipes: leaves the prepared tree in --work for reading (designing recipes)")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -320,6 +322,11 @@ def main():
         src = work / "src/main/java"
         shutil.copytree(start, src)
         res["recipes"] = apply_recipes(work, src, a.recipes)
+        if a.no_compile:
+            if a.json:
+                pathlib.Path(a.json).write_text(json.dumps(res, indent=1, sort_keys=True), encoding="utf-8")
+            print(f"recipes applied, no compile: {src}")
+            return 0
         # NeoGradle's shared execution cache (~/.gradle/caches/ng_execute) records ABSOLUTE paths into
         # the project that first ran each NeoForm step -- including its project-local dummy repo. The
         # bench deletes work dirs, so the next NeoGradle port is handed a path that no longer exists
