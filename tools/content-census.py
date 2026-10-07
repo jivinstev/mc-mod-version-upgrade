@@ -59,6 +59,15 @@ def read_lang(f):
     return json.loads(r.decode("utf-8")) if r is not None else None
 
 
+def original_source(work):
+    """The ORIGINAL mod's Java (decompiled-raw/, written at setup and never edited), or None."""
+    raw = work / "decompiled-raw"
+    if not raw.is_dir():
+        return None
+    texts = [f.read_text(encoding="utf-8", errors="replace") for f in raw.rglob("*.java")]
+    return "\n".join(texts) if texts else None
+
+
 def census(work):
     res = work / "src/main/resources"
     out, checked = {}, 0
@@ -70,9 +79,14 @@ def census(work):
             continue
         java = "\n".join(f.read_text(encoding="utf-8", errors="replace")
                          for f in (work / "src/main/java").rglob("*.java")) if (work / "src/main/java").is_dir() else ""
+        orig = original_source(work)
         for kind, (folder, how) in DATA_DRIVEN.items():
             ids = sorted({k.split(".")[2] for k in keys if k.startswith(f"{kind}.{ns}.") and k.count(".") == 2})
             for i in ids:
+                # a lang key alone does not prove the content existed: authors leave strings for things they
+                # never shipped (§S5b). With the original source at hand, count only ids it names.
+                if orig is not None and not re.search(r'"(?:%s:)?%s"' % (re.escape(ns), re.escape(i)), orig):
+                    continue
                 checked += 1
                 if (res / f"data/{ns}/{folder}/{i}.json").exists():
                     continue
@@ -139,6 +153,9 @@ def self_check():
             '{\n "enchantment.mymod.spikes": "S",\n// "x": "y",\n "enchantment.mymod.payback": "P",\n "enchantment.mymod.gone": "G",\n}',
             encoding="utf-8")
         ok &= census(w)[0] == {"enchantment": ["mymod:gone"]}      # a lenient-only file is read, not skipped
+        (w / "decompiled-raw/a").mkdir(parents=True)                 # the original registered spikes/payback only
+        (w / "decompiled-raw/a/E.java").write_text('reg("spikes"); reg("payback");', encoding="utf-8")
+        ok &= census(w)[0] == {}                                     # "gone" was a stray lang string, not content
         ok &= at_least_1_21("26.2") and at_least_1_21("1.21.1") and not at_least_1_21("1.20.1")
         (w / "gradle.properties").write_text("mc=26.2\n", encoding="utf-8")
         (w / "versions").mkdir(); (w / "versions/26.2.properties").write_text("minecraft_version=26.2\n", encoding="utf-8")
