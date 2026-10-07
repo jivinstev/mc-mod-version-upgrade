@@ -243,6 +243,21 @@ Commit the result on its own, so the recipe's rewrites are one reviewable diff. 
 those before the generic buckets below. A recipe that made an error group GROW (the summary flags it)
 is a recipe bug: revert that group, note it in `catalog-additions.md`, and carry on.
 
+**Then run the residual loop instead of fixing errors yourself** (the default when the `claude` CLI is
+on PATH; measured in `docs/EVALS.md`, step 6/7 spike: P1 to a clean compile + green Gate B for under
+$1 of worker spend, P4 from 468 errors for ~$15):
+```
+python3 ../../tools/file-loop.py --work . --first-model sonnet --budget <$ cap> --log file-loop.jsonl
+```
+It compiles, hands small batches of error files to headless workers in clean contexts (Haiku/Sonnet,
+escalating per file, Opus last), sends cross-file rewrites to one subsystem worker, and at 0 errors runs
+the load-crash scan (§R1, client classes on the server) and the dead-override probe, fixing what they
+find. You, the orchestrator, read only its one-line events and the final `end` line, never the workers'
+transcripts. Use `--first-model haiku` on a small, mechanical port. If it stops above 0 (budget, last
+tier, plateau), read `compile-summary.py` on `file-loop-compile.log` and work what is left by hand with
+the bucket list below, or rerun it with `--subsystem` for a cross-file remainder.
+Without the `claude` CLI, work the loop by hand as below.
+
 ```
 ./gradlew compileJava --console=plain --init-script ../../tools/maxerrs.init.gradle > /tmp/build.log 2>&1
 python3 ../../tools/compile-summary.py /tmp/build.log
@@ -361,6 +376,11 @@ list is the input to Step 5 — build the gate tests against it.
 
 ## Step 5 — Three test gates (escalating), then deploy (a clean compile is NOT a clean load)
 All three gates are required before calling a port done — see pipeline.md §6 for exact setup.
+**Drive Gate B with the gate loop** once the GameTests are in place:
+`python3 ../../tools/gate-loop.py --work . --budget <$ cap>`. It reruns `runGameTestServer`, hands each
+load crash or failing test to one headless worker (the deepest `Caused by:` plus the mod's own frames),
+and stops when green, when a fix changes nothing, or at the cap. Read its `green`/`stuck` line; fix by
+hand only what it leaves.
 The progression climbs the crash surface: **compile → static scan → Gate A (pure logic) → Gate B
 (headless server load + tick) → Gate C (real client: load → entities → combat → items/UI).** Each
 gate catches a class the one before it structurally cannot — a clean compile lies, a green GameTest

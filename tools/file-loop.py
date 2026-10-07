@@ -106,6 +106,24 @@ def entry_texts(msgs, sigs, entries, cap=2500, most=4):
     return "\n".join(out) or "(none matched -- these are not in the catalogue yet)", list(hit)
 
 
+def find_sources(work):
+    """Minecraft + NeoForge sources for workers to grep, from the build itself: NeoGradle keeps the
+    transformed tree; ModDevGradle keeps a sources jar, extracted once. None if neither exists yet
+    (compile first)."""
+    for d in sorted(work.glob("build/neoForm/*/steps/transformSource/transformed")):
+        if any(d.rglob("Minecraft.java")):
+            return d
+    jars = sorted(work.glob("build/moddev/artifacts/*sources*.jar"))
+    if jars:
+        out = work / "build/file-loop-sources"
+        if not out.is_dir():
+            import zipfile
+            with zipfile.ZipFile(jars[-1]) as z:
+                z.extractall(out, [n for n in z.namelist() if n.endswith(".java")])
+        return out
+    return None
+
+
 def batches(errs, size, max_errs):
     by = collections.defaultdict(list)
     for f, l, m in errs:
@@ -300,7 +318,8 @@ def main():
     ap.add_argument("--batch-errors", type=int, default=40)
     ap.add_argument("--parallel", type=int, default=4)
     ap.add_argument("--target", default="NeoForge 1.21.1")
-    ap.add_argument("--sources", help="a directory of Minecraft/NeoForge sources workers may grep")
+    ap.add_argument("--sources", default="auto",
+                    help="a directory of Minecraft/NeoForge sources workers may grep (default: found in the build)")
     ap.add_argument("--heap", default="6g")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--log", default="file-loop.jsonl")
@@ -321,7 +340,10 @@ def main():
     entries = {i: b for i, b in rb.catalogue_entries((ROOT / "CATALOG.md").read_text(encoding="utf-8"))}
     clog = work / "file-loop-compile.log"
     n, errs = compile_(work, clog, a.heap)
-    note(event="start", errors=n)
+    if a.sources == "auto":
+        found = find_sources(work)
+        a.sources = str(found) if found else None
+    note(event="start", errors=n, sources=a.sources)
     if n is None:
         print("the start does not compile to a count:", errs); return 2
     state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": set()}

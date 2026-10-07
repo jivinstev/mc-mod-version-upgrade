@@ -242,6 +242,10 @@ out="$(python3 tools/file-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching" \
   || bad "file-loop self-check: $out"
 
+out="$(python3 tools/gate-loop.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "gate loop: the deepest load-crash cause and the mod's own frames go to the worker" \
+  || bad "gate-loop self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
