@@ -124,8 +124,6 @@ public class ClientBootSmokeTest {
     private static void shot(Minecraft mc, String name) {
         if (!SHOTS) return;
         try {
-            mc.getToasts().clear();   // "new recipes" / tutorial toasts would cover part of the frame
-            mc.getTutorial().setStep(net.minecraft.client.tutorial.TutorialSteps.NONE);
             net.minecraft.client.Screenshot.grab(mc.gameDirectory, "gatec-" + name + ".png",
                 mc.getMainRenderTarget(), msg -> { });
             System.out.println("EXAMPLEMOD_BOOT_TEST: [SHOT] gatec-" + name + ".png");
@@ -134,11 +132,33 @@ public class ClientBootSmokeTest {
         }
     }
 
+    /** Call a couple of ticks BEFORE shot(): toasts leave on the next frame, not the one being captured. */
+    private static void clearToasts(Minecraft mc) {
+        mc.getToasts().clear();   // "new recipes" / tutorial toasts would cover part of the frame
+        mc.getTutorial().setStep(net.minecraft.client.tutorial.TutorialSteps.NONE);
+    }
+
     /** Point the camera at the ground ahead, where spawned mobs stand and placed blocks sit. */
     private static void lookAhead(Minecraft mc, float pitch) {
         if (mc.player == null) return;
         mc.player.setYRot(0f); mc.player.setXRot(pitch);
         mc.player.yRotO = 0f; mc.player.xRotO = pitch;
+    }
+
+    /**
+     * Clear a flat, open stage around the player before spawning, so the frames show the mobs rather than
+     * a jungle or a hillside in front of them (a cheap model reviewing the frame cannot judge what it
+     * cannot see). Runs on the server thread. The world itself stays a normal one, so worldgen still runs.
+     */
+    private static void clearStage(ServerLevel level, BlockPos center) {
+        var air = net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+        var floor = net.minecraft.world.level.block.Blocks.GRASS_BLOCK.defaultBlockState();
+        for (int dx = -18; dx <= 18; dx++) {
+            for (int dz = -14; dz <= 14; dz++) {
+                for (int dy = 0; dy <= 8; dy++) level.setBlock(center.offset(dx, dy, dz), air, 2);
+                level.setBlock(center.offset(dx, -1, dz), floor, 2);
+            }
+        }
     }
 
     /** Turn the camera toward the mod's own mobs (the middle of them), so a frame shows what is being tested. */
@@ -349,6 +369,7 @@ public class ClientBootSmokeTest {
         final BlockPos center = mc.player.blockPosition();
         server.execute(() -> {
             ServerLevel level = server.overworld();
+            clearStage(level, center);
             List<ResourceLocation> spawned = new ArrayList<>();
             List<ResourceLocation> failed = new ArrayList<>();
             int i = 0;
@@ -371,6 +392,7 @@ public class ClientBootSmokeTest {
     private static void spawnBattle(Minecraft mc, IntegratedServer server) {
         final BlockPos center = mc.player.blockPosition();
         server.execute(() -> {
+            clearStage(server.overworld(), center);
             ServerLevel level = server.overworld();
             RandomSource rand = level.getRandom();
             teamA.clear();
@@ -417,7 +439,7 @@ public class ClientBootSmokeTest {
         if (MODE == Mode.BATTLE) {
             server.execute(ClientBootSmokeTest::driveBattle); // keep the teams locked onto each other
         }
-        if (ticks == SURVIVE_TICKS / 2 - 2 || ticks == SURVIVE_TICKS - 22) lookAtModMobs(mc);
+        if (ticks == SURVIVE_TICKS / 2 - 2 || ticks == SURVIVE_TICKS - 22) { lookAtModMobs(mc); clearToasts(mc); }
         if (ticks == SURVIVE_TICKS / 2) shot(mc, MODE == Mode.BATTLE ? "battle-mid" : "spawn-world");
         if (ticks == SURVIVE_TICKS - 20) shot(mc, MODE == Mode.BATTLE ? "battle-end" : "spawn-late");
         if (++ticks < SURVIVE_TICKS) return;
@@ -537,6 +559,7 @@ public class ClientBootSmokeTest {
         tickGauntletStep(step, mc, gauntletStepTicks); // per-tick work (e.g. swap which GUI is open)
         if (shotStep(step)) {
             if (gauntletStepTicks == 1 && step == GauntletStep.PLACE_BLOCKS) lookAhead(mc, 40f);
+            if (gauntletStepTicks == step.durationTicks * 2 / 3 - 2) clearToasts(mc);
             if (gauntletStepTicks == step.durationTicks * 2 / 3) {
                 shot(mc, "gauntlet-" + String.format(Locale.ROOT, "%02d", gauntletStep + 1) + "-"
                     + step.name().toLowerCase(Locale.ROOT));
