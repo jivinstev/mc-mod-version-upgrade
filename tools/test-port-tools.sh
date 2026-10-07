@@ -246,6 +246,10 @@ out="$(python3 tools/gate-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gate loop: the deepest load-crash cause and the mod's own frames go to the worker" \
   || bad "gate-loop self-check: $out"
 
+out="$(python3 tools/scaffold-gatec.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "scaffold-gatec: the client harness template becomes a mod's harness with no example names left" \
+  || bad "scaffold-gatec self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

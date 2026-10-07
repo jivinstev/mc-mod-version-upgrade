@@ -381,6 +381,11 @@ All three gates are required before calling a port done — see pipeline.md §6 
 load crash or failing test to one headless worker (the deepest `Caused by:` plus the mod's own frames),
 and stops when green, when a fix changes nothing, or at the cap. Read its `green`/`stuck` line; fix by
 hand only what it leaves.
+**Drive Gate C the same way:** `python3 ../../tools/scaffold-gatec.py --work .` writes the client harness
+from the template (no model; skips a port that already has one), then
+`python3 ../../tools/gate-loop.py --work . --gatec launch,spawn,battle,gauntlet --budget <$ cap>` runs a real
+client per phase (Xvfb + software GL on a headless Linux box) and hands each failing phase to a worker.
+`tools/run-port.py` does recipes → compile → Gate B → Gate C in one command; read its last line.
 The progression climbs the crash surface: **compile → static scan → Gate A (pure logic) → Gate B
 (headless server load + tick) → Gate C (real client: load → entities → combat → items/UI).** Each
 gate catches a class the one before it structurally cannot — a clean compile lies, a green GameTest
