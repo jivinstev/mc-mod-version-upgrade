@@ -161,19 +161,38 @@ public class ClientBootSmokeTest {
         }
     }
 
-    /** Turn the camera toward the mod's own mobs (the middle of them), so a frame shows what is being tested. */
+    /**
+     * Put the camera a few blocks from the nearest of the mod's mobs, facing it, so a frame shows the mob
+     * itself rather than a speck on the horizon. The player is moved on the server (a creative player cannot
+     * be hurt); call it a few ticks before shot() so the client has the new position.
+     */
     private static void lookAtModMobs(Minecraft mc) {
         if (mc.player == null || mc.level == null) return;
-        double sx = 0, sy = 0, sz = 0; int n = 0;
+        Entity best = null; double bestD = Double.MAX_VALUE;
         for (Entity e : mc.level.entitiesForRendering()) {
             if (e == mc.player || !e.isAlive()) continue;
             if (!"examplemod".equals(EntityType.getKey(e.getType()).getNamespace())) continue;
-            sx += e.getX(); sy += e.getY() + e.getBbHeight() / 2; sz += e.getZ(); n++;
+            double d = e.distanceToSqr(mc.player);
+            if (d < bestD) { bestD = d; best = e; }
         }
-        if (n == 0) return;
-        double dx = sx / n - mc.player.getX(), dy = sy / n - mc.player.getEyeY(), dz = sz / n - mc.player.getZ();
+        if (best == null) return;
+        double dist = Math.max(3.0, best.getBbWidth() * 2.5 + 2.0);   // back off further for big mobs
+        double ax = mc.player.getX() - best.getX(), az = mc.player.getZ() - best.getZ();
+        double len = Math.max(1e-3, Math.sqrt(ax * ax + az * az));
+        double px = best.getX() + ax / len * dist, pz = best.getZ() + az / len * dist;
+        double py = best.getY() + Math.max(0.5, best.getBbHeight() * 0.4);
+        double dx = best.getX() - px, dz = best.getZ() - pz;
+        double dy = (best.getY() + best.getBbHeight() / 2) - (py + mc.player.getEyeHeight());
         float yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
         float pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
+        IntegratedServer server = mc.getSingleplayerServer();
+        final java.util.UUID id = mc.player.getUUID();
+        if (server != null) {
+            server.execute(() -> {
+                ServerPlayer sp = server.getPlayerList().getPlayer(id);
+                if (sp != null) sp.teleportTo(server.overworld(), px, py, pz, yaw, pitch);
+            });
+        }
         mc.player.setYRot(yaw); mc.player.setXRot(pitch);
         mc.player.yRotO = yaw; mc.player.xRotO = pitch;
     }
@@ -439,7 +458,7 @@ public class ClientBootSmokeTest {
         if (MODE == Mode.BATTLE) {
             server.execute(ClientBootSmokeTest::driveBattle); // keep the teams locked onto each other
         }
-        if (ticks == SURVIVE_TICKS / 2 - 2 || ticks == SURVIVE_TICKS - 22) { lookAtModMobs(mc); clearToasts(mc); }
+        if (ticks == SURVIVE_TICKS / 2 - 6 || ticks == SURVIVE_TICKS - 26) { lookAtModMobs(mc); clearToasts(mc); }
         if (ticks == SURVIVE_TICKS / 2) shot(mc, MODE == Mode.BATTLE ? "battle-mid" : "spawn-world");
         if (ticks == SURVIVE_TICKS - 20) shot(mc, MODE == Mode.BATTLE ? "battle-end" : "spawn-late");
         if (++ticks < SURVIVE_TICKS) return;

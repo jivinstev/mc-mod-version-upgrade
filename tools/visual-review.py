@@ -87,6 +87,19 @@ def measure(path):
 
 
 MAGENTA_FINDING = 0.003   # vanilla scenes measure ~0; one missing-texture item on screen is already ~0.1%
+MAGENTA_NONE = 0.0005     # below this, a claim of missing textures is contradicted by the pixels
+CLAIMS_MISSING = re.compile(r'magenta|missing.?texture|purple.and.black|purple/black|checkerboard', re.I)
+# gauntlet step -> the harness's count line; an empty frame is expected when the step had nothing to draw
+STEP_COUNT = {"render_items": r"gave (\d+) item", "place_blocks": r"placed (\d+) block",
+              "equip_armor": r"equipped (\d+) armor", "apply_effects": r"applied (\d+) effect"}
+
+
+def nothing_to_draw(frame, log):
+    m = re.search(r'gauntlet-\d+-(\w+)\.png$', frame)
+    if not m or m.group(1) not in STEP_COUNT:
+        return False
+    c = re.search(STEP_COUNT[m.group(1)], log)
+    return bool(c) and c.group(1) == "0"
 
 
 def names(work, modid, cap=60):
@@ -154,15 +167,18 @@ def main():
         print("visual-review: NO FRAMES under run*/screenshots -- nothing was reviewed, this is not a pass")
         (pathlib.Path(a.out) if a.out else work / "visual-review.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
         return 2
-    stats = {}
+    stats, report["dismissed"] = {}, []
+    hlog = log_lines(work, modid)
     for p in fr:
         st, why = measure(p)
         stats[p.name] = st
-        if why:
+        if why and nothing_to_draw(p.name, hlog) and not why.startswith("magenta"):
+            report["dismissed"].append({"frame": p.name, "by": "script", "why": why + " -- expected, the step had nothing to draw"})
+        elif why:
             report["findings"].append({"frame": p.name, "by": "script", "why": why})
     if not a.no_model:
         prompt = PROMPT.format(modid=modid, target=a.target, names=names(work, modid), description=description(work),
-                               log=log_lines(work, modid), stats="\n".join(f"{k}: {v}" for k, v in stats.items()),
+                               log=hlog, stats="\n".join(f"{k}: {v}" for k, v in stats.items()),
                                files="\n".join(str(p) for p in fr))
         env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
         env["MAX_THINKING_TOKENS"] = "0"
@@ -184,11 +200,17 @@ def main():
             if v is None:
                 report["findings"].append({"frame": p.name, "by": "model", "why": "the reviewer gave no verdict for it"})
             elif v["verdict"] == "suspect":
-                report["findings"].append({"frame": p.name, "by": "model", "why": v.get("why", "")})
+                # a cheap model sees "purple-and-black" in plain textures; the pixel count settles that claim
+                if CLAIMS_MISSING.search(v.get("why", "")) and stats[p.name].get("magenta", 1) < MAGENTA_NONE:
+                    report["dismissed"].append({"frame": p.name, "by": "model", "why": v.get("why", "")
+                                                + f" -- contradicted: {stats[p.name]['magenta']:.4%} of the frame is magenta"})
+                else:
+                    report["findings"].append({"frame": p.name, "by": "model", "why": v.get("why", "")})
         report["verdicts"] = verdicts
     out = pathlib.Path(a.out) if a.out else work / "visual-review.json"
     out.write_text(json.dumps(report, indent=1), encoding="utf-8")
-    print(f"visual-review: {len(fr)} frame(s), {len(report['findings'])} finding(s), ${report['usd']:.4f}"
+    print(f"visual-review: {len(fr)} frame(s), {len(report['findings'])} finding(s), "
+          f"{len(report['dismissed'])} dismissed, ${report['usd']:.4f}"
           + "".join(f"\n  {f['frame']} [{f['by']}]: {f['why']}" for f in report["findings"]))
     return 1 if report["findings"] else 0
 
@@ -216,6 +238,9 @@ def self_check():
         w = d / "work"; (w / "run/client/screenshots").mkdir(parents=True)
         png(w / "run/client/screenshots/gatec-spawn-world.png", lambda x, y: (x * 9, y * 9, 40))
         ok &= [p.name for p in frames(w)] == ["gatec-spawn-world.png"]
+        ok &= nothing_to_draw("gatec-gauntlet-02-render_items.png", "[GAUNTLET] gave 0 item(s)")
+        ok &= not nothing_to_draw("gatec-gauntlet-02-render_items.png", "[GAUNTLET] gave 27 item(s)")
+        ok &= bool(CLAIMS_MISSING.search("items show the purple-and-black missing texture pattern"))
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
