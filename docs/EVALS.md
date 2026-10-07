@@ -534,3 +534,55 @@ commented-out code.
 
 Against the spike, P4 is now about 3× cheaper ($15.33 → $4.99); against the Opus-baseline estimate for
 worker spend, about 6×. P1 was already about 13×.
+
+## Gate C without an agent, and mod-specific checks that are now scripted (2026-10-07)
+
+Gate C used to be run and judged by the orchestrating agent. It is now four scripted pieces:
+- `scaffold-gatec.py` writes the client harness from the template;
+- `gate-loop.py --gatec` runs each phase under Xvfb, with a fix worker only on failure;
+- `behaviour-tests.py` writes mod-specific outcome tests;
+- `visual-review.py` reviews the frames the harness now saves.
+
+All of it runs from finished workspaces (P1 $0.51 and P4 $4.99 to compile and pass Gate B), so these
+numbers are what each addition costs on top of that.
+
+| | P1 (tiny generated mod) | P4 (library) |
+|---|---|---|
+| Gate C, four phases | green first time, $0 | green first time, $0 |
+| Behaviour tests | 7 written, all pass, $0.14 | 7 written, all pass after 1 compile repair, $0.21 |
+| Visual review (11 frames) | Haiku $0.036 / Sonnet $0.081 | script only: nothing to find (0 items, 2 short-lived entities) |
+| Found | **one real defect** (below) | nothing |
+
+**The behaviour tests check outcomes, not existence.**
+- P1: each mob drops its item, attribute values match the code, two foods restore hunger, and both
+  mobs ignore fluid push and drowning.
+- P4: the soul orb's damage, icon, discard and save/load paths, a totem's effect-then-death cycle, and
+  the library's attribute defaults.
+
+They are written as optional GameTests, so a failure is a finding and Gate B stays green.
+
+**The visual review found a defect every gate had passed.** In P1 one block's model names an empty
+texture path, so the block renders as the missing-texture cube once placed. The reference port has
+shipped it since its first commit, which means it came from the original mod. It is invisible to the
+compile, Gate A, Gate B and a crash-only Gate C. The game log has one WARN line about it, and nobody
+had read that line.
+
+**Getting usable frames took four harness fixes**, all now in the template:
+- the item sheet was drawn under a second blurred background, so it was unreadable in every Gate C;
+- spawn frames showed terrain, because the mobs spawn behind the default camera; a flat stage is now
+  cleared and the camera moved a few blocks from the nearest mob;
+- toasts covered part of the frames;
+- a cleared toast still appeared in the same tick's frame, so toasts are now cleared two ticks earlier.
+
+**Haiku vs Sonnet on the same frames.** Both flagged the real defect on all three frames it appears
+in. Haiku also claimed missing textures that are not there:
+- four times across earlier runs (red borders drawn into a mod texture, a green jungle, a GUI frame);
+- once on the final run.
+
+Every such claim is now checked against the frame's measured magenta share. Under 0.05% the claim is
+dismissed and kept in the report as dismissed, which removed all of Haiku's false missing-texture
+claims. With that check Haiku catches what Sonnet does for under half the cost, so it stays the
+default; `--model sonnet` is the option when a port's frames are busy.
+
+These checks still cannot judge behaviour that needs a person: whether a mechanic *feels* right, or
+whether an effect looks the way the author meant. That stays in `MANUAL_VALIDATION.md`.
