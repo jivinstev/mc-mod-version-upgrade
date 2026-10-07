@@ -37,6 +37,33 @@ TOP_EXC = re.compile(r'\b(?:[a-z_]\w*\.)+[A-Z]\w*(?:Exception|Error)\b(?::[^\n]{
 MOD_FRAME = re.compile(r'^\s+at (?!java\.|jdk\.|sun\.|net\.minecraft\.|net\.neoforged\.|com\.mojang\.|cpw\.|org\.)\S+')
 
 
+# A client whose mods fail to load does not crash: it shows NeoForge's "Error loading mods" screen and
+# waits for a click. On 26.x no client tick fires before loading finishes (CATALOG §V69), so the harness
+# never reports either, and the run would sit until its timeout. These lines mean mod loading has
+# failed; the gate stops the client as soon as one appears, and the exception goes to the worker.
+LOAD_FAILED = re.compile(r"Cannot register listeners for|has failed to load correctly|ModLoadingException|"
+                         r"Failed to create mod instance|Error loading mods|LoadingFailedException|"
+                         r"Mod loading has failed|Encountered an error during the \w+ event phase")
+STALL_SECONDS = 420   # a client whose log has not grown for this long, with no verdict, is stuck, not slow
+
+
+def _stop(proc):
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, 15)
+        else:
+            proc.kill()
+        proc.wait(timeout=30)
+    except Exception:  # noqa: BLE001 -- best effort; the next line makes sure
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, 9)
+            else:
+                proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def run_gate(work, task, heap, log, phase=None, timeout=1500):
     cmd = ["./gradlew", task, "--console=plain", "--init-script",
            str(ROOT / "tools/central-mirror.init.gradle"), f"-Dorg.gradle.jvmargs=-Xmx{heap}"]
@@ -46,12 +73,65 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
         if sys.platform.startswith("linux") and not env.get("DISPLAY"):
             cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x720x24"] + cmd
             env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    import time
     with open(log, "w", encoding="utf-8") as fh:
-        try:
-            subprocess.run(cmd, cwd=work, stdout=fh, stderr=subprocess.STDOUT, env=env, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            fh.write(f"\n[gate-loop] TIMEOUT after {timeout}s with no verdict\n")
+        proc = subprocess.Popen(cmd, cwd=work, stdout=fh, stderr=subprocess.STDOUT, env=env,
+                                start_new_session=hasattr(os, "killpg"))
+        start = last_growth = time.time(); size = 0; failed_at = None; why = None
+        while proc.poll() is None:
+            time.sleep(2)
+            now = time.time()
+            fh.flush()
+            cur = os.path.getsize(log)
+            if cur != size:
+                size, last_growth = cur, now
+            if phase and failed_at is None and cur:
+                with open(log, encoding="utf-8", errors="replace") as rd:
+                    if LOAD_FAILED.search(rd.read()):
+                        failed_at = now      # give it a few seconds to finish printing the stack trace
+            if failed_at and now - failed_at > 8:
+                why = "mod loading failed; the client shows the error screen and would wait for a click"
+            elif phase and now - last_growth > STALL_SECONDS:
+                why = f"the client's log has not grown for {STALL_SECONDS}s and it has given no verdict"
+            elif now - start > timeout:
+                why = f"TIMEOUT after {timeout}s with no verdict"
+            if why:
+                _stop(proc)
+                break
+        if why:
+            fh.write(f"\n[gate-loop] stopped the run: {why}\n")
     return pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
+
+
+def listener_audit(work):
+    """Before a client is launched: a listener on an event the bus refuses (26.x made several ABSTRACT,
+    one subclass per phase) compiles, passes Gate B (a server never registers client listeners) and kills
+    the client at load (CATALOG §X33). The audit asks the target's own jars, so it is cheap and exact.
+    -> (findings text or None, a note). Runs only where the audit can: a port with versions/<target>."""
+    gp = work / "gradle.properties"
+    mc = (re.findall(r"(?m)^mc\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) or [None])[0] if gp.exists() else None
+    tool = ROOT / "templates/multi-version/tools/audit-event-listeners.py"
+    if not mc or not (work / f"versions/{mc}.properties").exists() or not tool.exists():
+        return None, "listener audit: skipped (not a versioned port)"
+    cp = work / "build" / f"qtc-classpath-{mc}.txt"
+    if not cp.exists():
+        try:
+            _e = importlib.util.spec_from_file_location("eh", ROOT / "tools/era-hop.py")
+            eh = importlib.util.module_from_spec(_e); _e.loader.exec_module(eh)
+            eh.gradle_classpath(work, mc, cp)
+        except Exception as e:  # noqa: BLE001 -- the audit is a pre-check; the client run still decides
+            return None, f"listener audit: skipped (no classpath: {str(e)[:120]})"
+    # the audit reads the PREPARED tree; refresh it, or a worker's fix is judged against the stale copy
+    subprocess.run(["./gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
+                    str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
+    r = subprocess.run([sys.executable, str(tool), str(work), f"--mc={mc}"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode == 1:
+        return ("Before launching the client, this check found listeners the event bus will refuse at load "
+                "(\"Cannot register listeners for abstract class ...\"; name a concrete subclass instead, "
+                "CATALOG §X33):\n" + out[-2500:]), "listener audit: findings"
+    return None, f"listener audit: exit {r.returncode}: {out.splitlines()[-1][:160] if out else ''}"
 
 
 def data_errors(text, ns):
@@ -115,6 +195,26 @@ def failure_of(text, client=False, ns=None):
     return "unknown", "\n".join(lines[-40:]), lines[-1][:200] if lines else ""
 
 
+def call_worker(a, work, srcs, text, phase, note, run):
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
+    prompt = PROMPT.format(target=a.target, failure=text, catalog=ROOT, srcs=srcs or "(none)")
+    if phase:
+        prompt = prompt.replace("its headless GameTest server (Gate B) fails", f"its real client (Gate C, phase {phase}) fails")
+    r = subprocess.run(["claude", "-p", prompt,
+                        "--model", fl.MODELS[a.model], "--output-format", "json", "--permission-mode", "acceptEdits",
+                        "--allowedTools", "Read,Edit,Write,Grep,Glob", "--add-dir", str(ROOT),
+                        *(["--add-dir", srcs] if srcs else [])],
+                       cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       timeout=a.timeout, stdin=subprocess.DEVNULL)
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        d = {"total_cost_usd": 0, "result": (r.stdout + r.stderr)[-300:]}
+    note(event="worker", run=run, phase=phase, model=a.model, usd=d.get("total_cost_usd"), turns=d.get("num_turns"),
+         result=(d.get("result") or "")[-300:])
+    return d.get("total_cost_usd") or 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=fl.TIERS)
@@ -148,6 +248,20 @@ def main():
         if run > a.max_runs:
             break
         phase = phases[0]
+        if phase:
+            found, why = listener_audit(work)
+            note(event="listener-audit", run=run, note=why)
+            if found:
+                f = ("listeners", found, "listeners:" + found[-160:])
+                kind, text, sig = f
+                note(event="red", run=run, phase=phase, kind=kind, sig=sig[:200])
+                if sig == last_sig:
+                    note(event="stuck", run=run, spent=round(spent, 4)); return 1
+                last_sig = sig
+                spent += call_worker(a, work, srcs, text, phase, note, run)
+                if spent >= a.budget:
+                    note(event="budget", spent=round(spent, 4)); return 1
+                continue
         f = failure_of(run_gate(work, task, a.heap, work / f"gate-loop{'-' + phase if phase else ''}.log", phase),
                        client=bool(phase), ns=ns)
         if f is None:
@@ -163,23 +277,7 @@ def main():
         if spent >= a.budget:
             note(event="budget", spent=round(spent, 4)); return 1
         last_sig = sig
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
-        prompt = PROMPT.format(target=a.target, failure=text, catalog=ROOT, srcs=srcs or "(none)")
-        if phase:
-            prompt = prompt.replace("its headless GameTest server (Gate B) fails", f"its real client (Gate C, phase {phase}) fails")
-        r = subprocess.run(["claude", "-p", prompt,
-                            "--model", fl.MODELS[a.model], "--output-format", "json", "--permission-mode", "acceptEdits",
-                            "--allowedTools", "Read,Edit,Write,Grep,Glob", "--add-dir", str(ROOT),
-                            *(["--add-dir", srcs] if srcs else [])],
-                           cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=a.timeout, stdin=subprocess.DEVNULL)
-        try:
-            d = json.loads(r.stdout)
-        except ValueError:
-            d = {"total_cost_usd": 0, "result": (r.stdout + r.stderr)[-300:]}
-        spent += d.get("total_cost_usd") or 0
-        note(event="worker", run=run, phase=phase, model=a.model, usd=d.get("total_cost_usd"), turns=d.get("num_turns"),
-             result=(d.get("result") or "")[-300:])
+        spent += call_worker(a, work, srcs, text, phase, note, run)
     note(event="max-runs", spent=round(spent, 4)); return 1
 
 
