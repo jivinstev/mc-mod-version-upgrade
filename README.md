@@ -40,16 +40,14 @@ Every port here was run from this repository alone:
 |---|---|---|---|---|
 | a small MCreator food mod, 46 files | NeoForge 1.21.4 → 1.21.1 | $6.88, 20 min | **$0.69** | server, behaviour, client, screenshots |
 | a GeckoLib library, 53 files, 6 mixins | Forge 1.20.1 → NeoForge 1.21.1 | $30.31, 43 min | **$5.24** | server, behaviour, client, screenshots |
-| a shield mod, 64 items, 45 files | Forge 1.20.1 → NeoForge 26.2 | ≈ $30.91², 1.8 h | **$12.57**³ | server, client (4 phases), screenshots |
+| a shield mod, 64 items, 45 files | Forge 1.20.1 → NeoForge 26.2 (two hops) | ≈ $30.91², 1.8 h | **$5.64**³ | server, client (4 phases), screenshots |
 
 ¹ What the per-file workers and gate checks cost, measured from their own logs. It leaves out the
 session that drives the port, which the next round of full replays will measure. That cost should be
 small, because the session now only starts the script and answers its stops.
 ² Estimated: Claude Code on a desktop records tokens, not dollars, so this one is its exact token
 counts at list prices ([`tools/model-prices.tsv`](tools/model-prices.tsv)).
-³ An early run, before the one-command script existed. It needed some hand fixes in its session,
-which this figure leaves out. The fixes it prompted are now built in. Details in
-[`docs/EVALS.md`](docs/EVALS.md).
+³ One command, both hops (`tools/port.py`): $5.40 of workers, plus $0.24 for an enchantment fix that Gate B now requires (its content census found the port had dropped three). An earlier run with hand fixes, before the script existed, cost $12.57. Details in [`docs/EVALS.md`](docs/EVALS.md).
 
 Every port also sends back what it taught, written without the mod's name, as a pull request to the
 catalogue: the first three contributed 31 lessons between them (22 new entries, 9 additions). Each

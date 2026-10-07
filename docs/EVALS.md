@@ -586,3 +586,42 @@ default; `--model sonnet` is the option when a port's frames are busy.
 
 These checks still cannot judge behaviour that needs a person: whether a mechanic *feels* right, or
 whether an effect looks the way the author meant. That stays in `MANUAL_VALIDATION.md`.
+
+## One command, end to end: `tools/port.py` on P11 and a fifth port (2026-10-07)
+
+**P11 (Forge 1.20.1 → NeoForge 26.2, two hops), run on a desktop with no orchestrating session.**
+`port.py "<name>" --to 26.2` resolved the jar, set up the workspace, ran hop 1 (pack, compile loop,
+Gate B, behaviour tests) and hop 2 (era step, compile loop, Gate B, Gate C, visual review).
+
+| | earlier run (hand fixes, before the script) | one command |
+|---|---|---|
+| hop 1 (→ 1.21.1) | — | compile 260 → 0, Gate B green, **$3.88** |
+| hop 2 (→ 26.2) | — | compile 331 → 0, Gate B + Gate C (4 phases) green, **$1.52** |
+| total workers | $12.57 | **$5.40**, plus **$0.24** after the run (below) |
+
+One human step: a client stuck on NeoForge's mod-loading error screen (a listener on a 26.2-abstract
+event, §X33) had to be closed by hand. The follow-ups found three defects every gate had passed:
+three enchantments dropped in hop 1 (the Java registration deleted, no 1.21 data files written), a
+lang file with a `//` line that 26.x skips whole (§S8), and 29 recipes refused for no reason.
+
+**A fifth port (NeoForge 1.21.1 → 26.2, one era hop, a ~290-class mod with block entities, menus and
+~530 recipes)** reached every gate green, but its cost is not a measurement of the pipeline: most of
+it was spent before the fixes below, above all workers being handed the 1.21.1 sources on a 26.2 hop.
+After that fix its residual compile went 61 → 0 for $2.80 where the earlier rounds had plateaued.
+
+**What these two runs added, each now a check or a deterministic step (all with self-checks):**
+
+| finding | now |
+|---|---|
+| a client stuck on the mod-loading error screen waits for its timeout | stopped ~8 s after the failure line; listeners on abstract events audited before launch |
+| workers given the wrong version's API sources | sources chosen by the target's NeoForge version, per version, refreshed on change |
+| content lost to 1.21's data-driven move (enchantments) | content census before Gate B, counting only content the ORIGINAL source registered |
+| lenient-only JSON skipped by 26.x | repaired byte-safely in the era step and before every Gate B boot |
+| mod data that fails to parse at load, behind a green Gate B | Gate B is red on the mod's own parse errors |
+| container contents lost on break (§V48) | drop calls diffed against the hop's start snapshot before Gate B |
+| broken mixin targets found one boot at a time | all mixin targets audited in one pass before Gate B |
+| items with no 1.21.2+ client item definition (magenta), behind a Gate C PASS | definitions written in the era step; a PASS with missing item models is red |
+| optional integrations and datagen ported at a worker's expense | parked at setup and listed in MIGRATION.md (1707 → 742 start errors) |
+| a mod's own recipe types refused by the 26.2 data transform | ingredient fields read off the mod's serializers |
+| the compile loop overran its budget by a third | each round priced and trimmed to what fits |
+| a generated behaviour test failing on renamed names | passed through the era hop's applied rename table |
