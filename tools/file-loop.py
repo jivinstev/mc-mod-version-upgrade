@@ -28,6 +28,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from gitbash import BASH   # noqa: E402
 import importlib.util       # noqa: E402
+import singleshot           # noqa: E402
 
 _s = importlib.util.spec_from_file_location("rb", ROOT / "tools/recipe-bench.py")
 rb = importlib.util.module_from_spec(_s); _s.loader.exec_module(rb)
@@ -310,6 +311,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work", help="the Gradle project (src/main/java is edited in place)")
     ap.add_argument("--self-check", action="store_true", help="test the model-free parts (scans, filters, batching)")
+    ap.add_argument("--mode", default="single", choices=["single", "agent"],
+                    help="single (default): one request per file with script-gathered context, agent workers as "
+                         "the fallback; agent: tool-using workers only (the step 6/7 spike's design)")
     ap.add_argument("--first-model", default="sonnet", choices=TIERS)
     ap.add_argument("--max-model", default="opus", choices=TIERS)
     ap.add_argument("--budget", type=float, default=15.0, help="stop when workers have spent this many dollars")
@@ -347,7 +351,13 @@ def main():
     if n is None:
         print("the start does not compile to a count:", errs); return 2
     state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": set()}
-    lo, hi = TIERS.index(a.first_model), TIERS.index(a.max_model)
+    # the escalation ladder: (model, single-shot?). Single-shot tiers go first in --mode single (the
+    # default): one request per file with script-gathered context; agent tiers are the fallback.
+    ladder = ([(m, True) for m in ("haiku", "sonnet")] if a.mode == "single" else []) + [(m, False) for m in TIERS]
+    ladder = [r for r in ladder if TIERS.index(r[0]) <= TIERS.index(a.max_model)]
+    lo = next(i for i, (m, _s) in enumerate(ladder) if m == a.first_model)
+    hi = len(ladder) - 1
+    idx = singleshot.SourceIndex(a.sources) if a.mode == "single" else None
 
     def fix_errors(n, errs):
         """Compile rounds until 0, the budget, the last tier, or a plateau."""
@@ -363,6 +373,7 @@ def main():
             need = [f for f in by if f in state["needs"]]
             if need:
                 jobs.append((need[:40], "sonnet", True))
+            singles = []
             for files in groups:   # a batch runs at the highest tier any of its files has reached
                 files = [f for f in files if f not in need]
                 if not files:
@@ -370,14 +381,29 @@ def main():
                 t_ = max(tier_of.get(f, lo) for f in files)
                 if t_ > hi:
                     continue
-                jobs.append((files, TIERS[t_], a.subsystem))
-            if not jobs:
+                m, single = ladder[t_]
+                if single:   # one request per file
+                    singles += [(f, m) for f in files]
+                else:
+                    jobs.append((files, m, a.subsystem))
+            if not jobs and not singles:
                 break
             from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(a.parallel) as ex:
+
+            def one(fm):
+                f, m = fm
+                ent, _ids = entry_texts([x for _l, x in by[f]], sigs, entries, cap=1500, most=3)
+                r_ = singleshot.run_single(work, f, by[f], ent, idx, MODELS[m], a.target)
+                r_["model"] = m
+                return r_
+            with ThreadPoolExecutor(max(a.parallel, 6 if singles else 0)) as ex:
                 futs = [ex.submit(run_worker, work, f, by, sigs, entries, m, a.target, a.sources, a.timeout, sub)
                         for f, m, sub in jobs]
+                sfuts = [ex.submit(one, fm) for fm in singles]
                 results = [fu.result() for fu in futs]
+                sresults = [fu.result() for fu in sfuts]
+            jobs += [([f], m, "single") for f, m in singles]
+            results += sresults
             for res in results:
                 state["spent"] += res["usd"]; note(event="worker", round=rnd, **res)
             before = n
@@ -392,10 +418,11 @@ def main():
                 says_needs = needs and not needs.group(1).strip().lower().startswith("none")
                 for f in files:
                     if f in still:
-                        if says_needs and not sub:
+                        if says_needs and sub is not True:   # True = already a subsystem worker
                             state["needs"].add(f)
                         else:   # a file still failing moves up a tier
-                            tier_of[f] = max(tier_of.get(f, lo), TIERS.index(m)) + 1
+                            cur = ladder.index((m, sub == "single")) if (m, sub == "single") in ladder else lo
+                            tier_of[f] = max(tier_of.get(f, lo), cur) + 1
             for res in results:
                 if res["rule"] and n:
                     state["rules"] += 1
@@ -467,6 +494,7 @@ def self_check():
               and ("Msg.java", SCAN_CLIENT[:20]) in found
               and {"getLightBlock", "propagatesSkylightDown"} <= inh and "myHelper" not in inh
               and pathlib.Path(rb_rel(str(gen))) == s / "Plain.java")
+        ok = ok and singleshot.self_check()
         b, _by = batches([("a", 1, "x")] * 50 + [("b", 1, "x")] * 3 + [("c", 1, "x")] * 3, 4, 40)
         ok = ok and b == [["a"], ["b", "c"]]
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
