@@ -139,6 +139,23 @@ public class ClientBootSmokeTest {
         mc.player.yRotO = 0f; mc.player.xRotO = pitch;
     }
 
+    /** Turn the camera toward the mod's own mobs (the middle of them), so a frame shows what is being tested. */
+    private static void lookAtModMobs(Minecraft mc) {
+        if (mc.player == null || mc.level == null) return;
+        double sx = 0, sy = 0, sz = 0; int n = 0;
+        for (Entity e : mc.level.entitiesForRendering()) {
+            if (e == mc.player || !e.isAlive()) continue;
+            if (!"examplemod".equals(EntityType.getKey(e.getType()).getNamespace())) continue;
+            sx += e.getX(); sy += e.getY() + e.getBbHeight() / 2; sz += e.getZ(); n++;
+        }
+        if (n == 0) return;
+        double dx = sx / n - mc.player.getX(), dy = sy / n - mc.player.getEyeY(), dz = sz / n - mc.player.getZ();
+        float yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+        float pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
+        mc.player.setYRot(yaw); mc.player.setXRot(pitch);
+        mc.player.yRotO = yaw; mc.player.xRotO = pitch;
+    }
+
     private static int ticks = 0;   // reset on each phase transition
     private static int stuckTicks;
     // Set by the first client tick we are handed. Frames are counted separately, because from
@@ -398,7 +415,7 @@ public class ClientBootSmokeTest {
         if (MODE == Mode.BATTLE) {
             server.execute(ClientBootSmokeTest::driveBattle); // keep the teams locked onto each other
         }
-        if (ticks == SURVIVE_TICKS / 3) lookAhead(mc, 25f);
+        if (ticks == SURVIVE_TICKS / 2 - 2 || ticks == SURVIVE_TICKS - 22) lookAtModMobs(mc);
         if (ticks == SURVIVE_TICKS / 2) shot(mc, MODE == Mode.BATTLE ? "battle-mid" : "spawn-world");
         if (ticks == SURVIVE_TICKS - 20) shot(mc, MODE == Mode.BATTLE ? "battle-end" : "spawn-late");
         if (++ticks < SURVIVE_TICKS) return;
