@@ -509,6 +509,7 @@ def main():
                 note(event="plateau", round=rnd, errors=n); break
         return n, errs
 
+    orig = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java")}
     n, errs = fix_errors(n, errs)
     if n is None:
         print("compile no longer counts:", errs); return 3
@@ -536,7 +537,25 @@ def main():
         e = json.loads(l)
         if e.get("event") == "worker":
             by_model[e["model"]][0] += 1; by_model[e["model"]][1] += e["usd"]
-    note(event="end", errors=n, spent=round(spent, 4), by_model={k: [v[0], round(v[1], 4)] for k, v in by_model.items()})
+    # the end-of-loop audit: every file a worker changed -- agents included, whose edits no guard saw --
+    # compared with where it started. A removed feature makes errors go away just as well as a fix does.
+    stubs = []
+    for path, before in orig.items():
+        f = pathlib.Path(path)
+        after = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        if after == before:
+            continue
+        why = singleshot.stub_signals(before, after)
+        if not f.exists() and singleshot.REMOVED_API.search(before):
+            why = []   # a file built on removed Forge API (§13) is meant to go
+        elif not f.exists() and singleshot.WIRING.search(before):
+            why = ["deleted a file that registered, listened or sent"]
+        if why:
+            stubs.append({"file": os.path.relpath(path, work), "why": "; ".join(why)})
+    if stubs:
+        note(event="stub-signals", files=stubs)
+    note(event="end", errors=n, spent=round(spent, 4), stubs=len(stubs),
+         by_model={k: [v[0], round(v[1], 4)] for k, v in by_model.items()})
     return 0 if n == 0 else 1
 
 

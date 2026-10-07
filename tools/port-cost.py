@@ -272,6 +272,10 @@ def main():
     ap.add_argument("--workspace")
     ap.add_argument("--projects", help="transcript directory (default ~/.claude/projects)")
     ap.add_argument("--print", action="store_true", help="print the record, write nothing")
+    ap.add_argument("--since", help="count only requests at or after this time (ISO, e.g. 2026-10-07T18:00 or "
+                                    "2026-10-07; UTC unless it says otherwise): one replay, not every session "
+                                    "that ever touched the port")
+    ap.add_argument("--session", help="count only sessions whose id starts with this")
     a = ap.parse_args()
     ws = pathlib.Path(os.path.expanduser(a.workspace or read_env().get("MIGRATE_WORKSPACE", "") or "."))
     port = ws / "mods" / a.modid
@@ -280,6 +284,18 @@ def main():
         print(f"port-cost: no transcripts at {projects} -- nothing recorded", file=sys.stderr)
         return 2
     sessions = collect(a.modid, projects)
+    if a.session:
+        sessions = {k: v for k, v in sessions.items() if k.startswith(a.session)}
+    if a.since:
+        since = a.since if ("+" in a.since[10:] or a.since.endswith("Z")) else a.since + ("T00:00" if len(a.since) == 10 else "") + "+00:00"
+        cut = ts(since)
+        for k in list(sessions):
+            v = sessions[k]
+            v["reqs"] = [r for r in v["reqs"] if r[0] >= cut]
+            # a session's recorded total covers ALL of it; with a time cut, price the kept requests instead
+            v["cost"] = None
+            if not v["reqs"]:
+                del sessions[k]
     if not sessions:
         print(f"port-cost: no session in {projects} touched mods/{a.modid} -- nothing recorded", file=sys.stderr)
         return 2

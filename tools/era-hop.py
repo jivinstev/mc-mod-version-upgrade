@@ -53,6 +53,43 @@ def gradle_classpath(work, target, out):
     return out
 
 
+# 26.x data-format transforms, applied in place on a flattened port (CATALOG §V45, §V45b, §V68): recipe
+# ingredients become strings, an advancement icon's `item` becomes `id`, entity predicates become the
+# dispatched map. They live in the multi-version template's gen-resource-overlays.py and REFUSE what they
+# do not recognise; a refused file is listed, never guessed at, because a data file that does not parse
+# is logged once at load and then silently missing.
+RESOURCE_TRANSFORMS = {
+    "26.2": [("ingredients_as_strings", "data/*/recipe/*.json"),
+             ("advancement_display_icon_as_stack", "data/*/advancement/*.json"),
+             ("entity_predicates_as_dispatched_map", "data/*/advancement/*.json"),
+             ("entity_predicates_as_dispatched_map", "data/*/loot_table/*.json")],
+}
+
+
+def transform_resources(work, target):
+    import fnmatch, importlib.util, json
+    s = importlib.util.spec_from_file_location("gro", TPL / "tools/gen-resource-overlays.py")
+    gro = importlib.util.module_from_spec(s); s.loader.exec_module(gro)
+    res = work / "src/main/resources"
+    changed, refused = set(), []
+    for name, pattern in RESOURCE_TRANSFORMS.get(target, []):
+        fn = gro.TRANSFORMS[name]
+        for f in sorted(res.rglob("*.json")):
+            rel = f.relative_to(res).as_posix()
+            if not fnmatch.fnmatch(rel, pattern):
+                continue
+            try:
+                doc = json.loads(f.read_text(encoding="utf-8"))
+                new = fn(json.loads(json.dumps(doc)), rel, {})   # the transforms edit in place: hand them a copy
+            except (gro.Refused, SystemExit, ValueError) as e:
+                refused.append(f"{rel} ({name}): {str(e)[:160]}")
+                continue
+            if new != doc:
+                f.write_text(gro.rendered(new), encoding="utf-8")
+                changed.add(rel)
+    return changed, refused
+
+
 def step(msg):
     print(f"era-hop: {msg}", flush=True)
 
@@ -123,6 +160,12 @@ def main():
     rewrites = sum(int(x) for x in re.findall(r"renameRewrites[=:]\s*(\d+)", text)) or text.count("rewrote")
     step(f"applied in place to src/main/java and src/test/java; report in {log.name}"
          + (f" ({rewrites} rewrites)" if rewrites else ""))
+    changed, refused = transform_resources(work, T)
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(f"\nresource transforms: {len(changed)} file(s) changed\n" + "".join(f"  REFUSED {r}\n" for r in refused))
+    step(f"data files: {len(changed)} rewritten to the {T} format"
+         + (f"; {len(refused)} REFUSED and left as they were (listed in {log.name}; they will not load on {T} "
+            f"until fixed): " + "; ".join(r.split(' (')[0] for r in refused[:6]) if refused else ""))
     # the target is now the canonical one: an empty table, the default target, and no 1.21.1 build
     table.write_text(f"# {T} is this port's only target: its renames were applied to src/ by tools/era-hop.py.\n",
                      encoding="utf-8")

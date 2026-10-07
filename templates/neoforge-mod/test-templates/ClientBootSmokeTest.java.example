@@ -134,6 +134,7 @@ public class ClientBootSmokeTest {
 
     /** Call a couple of ticks BEFORE shot(): toasts leave on the next frame, not the one being captured. */
     private static void clearToasts(Minecraft mc) {
+        if (mc.screen instanceof net.minecraft.client.gui.screens.PauseScreen) mc.setScreen(null);
         mc.getToasts().clear();   // "new recipes" / tutorial toasts would cover part of the frame
         mc.getTutorial().setStep(net.minecraft.client.tutorial.TutorialSteps.NONE);
     }
@@ -320,6 +321,10 @@ public class ClientBootSmokeTest {
     }
 
     private static void createFreshWorld(Minecraft mc, String levelName) {
+        // A client whose window loses focus opens the pause menu and PAUSES the integrated server, so a
+        // person switching to another app mid-run froze the battle and photographed the menu instead of
+        // the mod. The harness must not depend on where the person's focus is.
+        mc.options.pauseOnLostFocus = false;
         LevelSettings settings = new LevelSettings(
             levelName,
             GameType.CREATIVE,     // player can't die / can fly — mobs are the thing under test

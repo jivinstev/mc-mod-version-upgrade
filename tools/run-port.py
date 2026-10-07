@@ -106,8 +106,9 @@ def main():
     start, end = last_event(flog, "start"), last_event(flog, "end")
     usd, by = spend(flog)
     end_errors = end.get("errors") if end else None
+    stubs = (last_event(flog, "stub-signals") or {}).get("files", []) if end and end.get("stubs") else []
     s["stages"]["compile"] = {"exit": r.returncode, "start_errors": start and start.get("errors"),
-                              "end_errors": end_errors, "usd": usd, "by_model": by}
+                              "end_errors": end_errors, "usd": usd, "by_model": by, "stubs": stubs}
     stop = None
     if end_errors != 0:
         summ = subprocess.run([py, str(ROOT / "tools/compile-summary.py"), str(work / "file-loop-compile.log")],
@@ -188,6 +189,12 @@ def main():
           f"findings: behaviour {len(s['stages']['behaviour'].get('findings', []))}, "
           f"visual {len(s['stages']['visual'].get('findings', []))}, "
           f"${total} of workers -- details in {work / f'run-port{sfx}.json'}")
+    if stubs:
+        # not a stop -- the gates may be right that nothing crashes -- but never a silent one either
+        print(f"STUB WARNINGS: the compile loop removed wiring or emptied methods in {len(stubs)} file(s); "
+              "check each is a real port, not a feature deleted to make an error go away:")
+        for x in stubs[:12]:
+            print(f"  - {x['file']}: {x['why']}")
     if stop:
         print(stop_block(stop))
         return stop["code"]

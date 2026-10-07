@@ -185,6 +185,50 @@ def fix_hoisted_spec(src):
     return fixed
 
 
+FORGE_CONDITIONS = {"forge:mod_loaded": "neoforge:mod_loaded", "forge:not": "neoforge:not", "forge:and": "neoforge:and",
+                    "forge:or": "neoforge:or", "forge:true": "neoforge:true", "forge:false": "neoforge:false",
+                    "forge:tag_empty": "neoforge:tag_empty", "forge:item_exists": "neoforge:item_exists"}
+
+
+def neoforge_conditions(res):
+    """Forge's data-load conditions -> NeoForge's (catalog §142): the key `conditions` becomes
+    `neoforge:conditions` and each `forge:` condition type its `neoforge:` twin. Left as they were, NeoForge
+    ignores them, so a recipe meant to load only with another mod present loads always. Mechanical, so it is
+    done here; `#forge:` TAG names are not (NeoForge's common tags are plural nouns) and are only counted."""
+    changed, unknown, forge_tags = 0, set(), 0
+
+    def walk(node, root=False):
+        nonlocal forge_tags
+        if isinstance(node, dict):
+            out = {}
+            for k, v in node.items():
+                if k == "type" and isinstance(v, str) and v.startswith("forge:"):
+                    if v in FORGE_CONDITIONS:
+                        v = FORGE_CONDITIONS[v]
+                    else:
+                        unknown.add(v)
+                # only the ROOT key: a loot table's pools and entries have vanilla `conditions` of their own
+                out["neoforge:conditions" if root and k == "conditions" and isinstance(v, list) else k] = walk(v)
+            return out
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if isinstance(node, str) and (node.startswith("forge:") or node.startswith("#forge:")):
+            forge_tags += 1
+        return node
+    for f in (res / "data").rglob("*.json") if (res / "data").is_dir() else []:
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except ValueError:
+            continue
+        if not isinstance(doc, dict) or "conditions" not in json.dumps(doc):
+            walk(doc)   # still count forge tag references
+            continue
+        new = walk(doc, root=True)
+        if new != doc:
+            f.write_text(json.dumps(new, indent=2) + "\n", encoding="utf-8"); changed += 1
+    return changed, sorted(unknown), forge_tags
+
+
 def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     tpl = ROOT / "templates/neoforge-mod"
     if work.exists() and any(work.iterdir()) and not (work / "port-state.json").exists():
@@ -292,10 +336,13 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
         except ValueError:
             pass
     run([sys.executable, str(ROOT / "tools/fix-datapack-layout.py"), str(work), "--apply"], log=log)
+    cond_changed, cond_unknown, forge_tags = neoforge_conditions(res) if src_loader == "forge" else (0, [], 0)
     hoisted = fix_hoisted_spec(srcj)
     run([sys.executable, str(ROOT / "tools/scaffold-gametest.py"), "--work", str(work)], log=log)
     return {"group": group, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
-            "mixin_configs": meta["mixins"], "deps": meta["deps"]}
+            "mixin_configs": meta["mixins"], "deps": meta["deps"],
+            "conditions_rewritten": cond_changed, "unknown_forge_conditions": cond_unknown,
+            "forge_tag_references_left": forge_tags}
 
 
 # ── main ────────────────────────────────────────────────────────────────────
@@ -421,11 +468,18 @@ def main():
                     return stop(24, f"the era step failed (exit {r.returncode}); see its output above", ["fix and rerun"], state, work)
                 state["done"].append(f"{key}-era"); save_state(work, state)
             pack = None
-        if a.stop_after == f"{key}-recipes":   # testing: apply this hop's deterministic rewrites, run no worker
-            if pack:
-                subprocess.run([sys.executable, str(ROOT / "tools/apply-recipes.py"), "--src", str(work / "src/main/java"),
-                                "--recipes", str(ROOT / pack), "--json", str(work / f"recipes-report-{key}.json")],
-                               stdout=subprocess.DEVNULL)
+        if pack and f"{key}-recipes" not in state["done"]:
+            # applied here rather than by run-port, so the tree is snapshotted AFTER every deterministic rewrite:
+            # tools/learn-pack.py diffs that snapshot against the finished hop to propose the next pack rows
+            subprocess.run([sys.executable, str(ROOT / "tools/apply-recipes.py"), "--src", str(work / "src/main/java"),
+                            "--recipes", str(ROOT / pack), "--json", str(work / f"recipes-report-{key}.json")],
+                           stdout=open(work / f"recipes-report-{key}.txt", "w", encoding="utf-8"), stderr=subprocess.STDOUT)
+            state["done"].append(f"{key}-recipes"); save_state(work, state)
+        pack = None
+        snap = work / "hop-start" / key
+        if not snap.exists():
+            shutil.copytree(work / "src/main/java", snap)
+        if a.stop_after == f"{key}-recipes":   # testing: this hop's deterministic rewrites only, no worker
             say(f"stopped after {key}'s recipes (--stop-after)"); return 0
         behaviour = "off" if a.no_behaviour else ("write" if first else ("rerun" if last else "off"))
         gatec = a.gatec if last else "none"
@@ -456,7 +510,7 @@ def main():
         d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
         total += d.get("usd") or 0
         rows.append({"hop": i, "route": state["hops"][i - 1], "usd": d.get("usd"), "stages": {
-            k: ({"green": v.get("green")} if "green" in v else {kk: v.get(kk) for kk in ("start_errors", "end_errors", "findings", "skipped") if kk in v})
+            k: ({"green": v.get("green")} if "green" in v else {kk: v.get(kk) for kk in ("start_errors", "end_errors", "stubs", "findings", "skipped") if kk in v})
             for k, v in d.get("stages", {}).items()}})
     report = {"modid": meta["modId"], "target": T, "workers_usd": round(total, 4), "hops": rows,
               "note": "workers only; the session that drove this is counted by tools/port-cost.py"}
@@ -489,6 +543,19 @@ def self_check():
         ok &= fix_hoisted_spec(src) == ["a/Cfg.java"]
         t = (src / "a/Cfg.java").read_text(encoding="utf-8")
         ok &= t.index("SPEC = BUILDER.build()") > t.index("defineInRange") and fix_hoisted_spec(src) == []
+        res = d / "res"; (res / "data/m/recipe").mkdir(parents=True)
+        (res / "data/m/recipe/r.json").write_text(json.dumps({"type": "minecraft:crafting_shaped", "conditions": [
+            {"type": "forge:not", "value": {"type": "forge:mod_loaded", "modid": "x"}}], "key": {"#": {"tag": "forge:ingots/tin"}}}),
+            encoding="utf-8")
+        c, unk, tags = neoforge_conditions(res)
+        out = json.loads((res / "data/m/recipe/r.json").read_text(encoding="utf-8"))
+        ok &= c == 1 and not unk and tags == 1 and "conditions" not in out
+        ok &= out["neoforge:conditions"][0] == {"type": "neoforge:not", "value": {"type": "neoforge:mod_loaded", "modid": "x"}}
+        (res / "data/m/loot_table").mkdir(parents=True)
+        loot = {"type": "minecraft:entity", "pools": [{"rolls": 1, "conditions": [{"condition": "minecraft:killed_by_player"}]}]}
+        (res / "data/m/loot_table/l.json").write_text(json.dumps(loot), encoding="utf-8")
+        neoforge_conditions(res)
+        ok &= json.loads((res / "data/m/loot_table/l.json").read_text(encoding="utf-8")) == loot   # vanilla key untouched
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

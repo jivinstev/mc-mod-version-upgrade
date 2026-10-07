@@ -247,10 +247,31 @@ def guard(before, after, dead_api_ok=False):
         return f"comments code out ({len(commented)} lines)"
     if any("UnsupportedOperationException" in l for l in added_lines) and "UnsupportedOperationException" not in before:
         return "adds an UnsupportedOperationException"
-    emptied = len(re.findall(r'\)\s*\{\s*\}', after)) - len(re.findall(r'\)\s*\{\s*\}', before))
-    if emptied > 1:
-        return f"empties {emptied} method bodies"
+    for why in stub_signals(before, after):
+        if dead_api_ok and why.startswith("removes") and removes_dead_api(before, after):
+            continue   # wiring that existed only for removed Forge API (a capability attacher's listener) may go
+        return why
     return None
+
+
+WIRING = re.compile(r'\.(?:register\w*|playTo(?:Server|Client)|playBidirectional|commonToServer|commonToClient|'
+                    r'send\w*|addListener)\s*\(|PacketDistributor\.\w+\(')
+
+
+def stub_signals(before, after):
+    """Ways an edit can make an error go away by removing the feature, each a one-line reason. Measured on a
+    real port: a worker left a packet unregistered and its send method empty, and every gate stayed green.
+      - a method body emptied (even one)
+      - registrations, listeners or packet sends removed and not put back elsewhere in the file
+    A wiring call that MOVES (SimpleChannel -> PayloadRegistrar) keeps or raises the count, so it passes."""
+    out = []
+    emptied = len(re.findall(r'\)\s*(?:throws\s+[\w.,\s]+)?\{\s*\}', after)) - len(re.findall(r'\)\s*(?:throws\s+[\w.,\s]+)?\{\s*\}', before))
+    if emptied >= 1:
+        out.append(f"empties {emptied} method bod{'y' if emptied == 1 else 'ies'}")
+    lost = len(WIRING.findall(before)) - len(WIRING.findall(after))
+    if lost >= 1:
+        out.append(f"removes {lost} registration/listener/send call(s)")
+    return out
 
 
 def run_single(work, f, errs_of_f, entry_text, idx, model_id, target, timeout=300, thinking=0):

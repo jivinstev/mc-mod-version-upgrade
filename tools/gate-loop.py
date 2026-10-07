@@ -33,6 +33,7 @@ Never delete a feature, empty a method or disable a test to make this go away. C
 You cannot run the game. Finish with one line: FIXED: <what you changed>"""
 PASS = re.compile(r'All (\d+) required tests passed')
 BOOT = re.compile(r'[A-Z0-9_]+_BOOT_TEST: (PASS|FAIL).*')
+TOP_EXC = re.compile(r'\b(?:[a-z_]\w*\.)+[A-Z]\w*(?:Exception|Error)\b(?::[^\n]{0,240})?')
 MOD_FRAME = re.compile(r'^\s+at (?!java\.|jdk\.|sun\.|net\.minecraft\.|net\.neoforged\.|com\.mojang\.|cpw\.|org\.)\S+')
 
 
@@ -78,6 +79,14 @@ def failure_of(text, client=False):
     m = [l for l in lines if "error:" in l][:10]
     if m:
         return "compile", "\n".join(m), m[0][:200]
+    # a crash thrown with no `Caused by:` -- e.g. "IllegalStateException: Registry is already frozen" at mod
+    # setup (§R13). Measured: filed as "unknown", its worker changed item code instead of the registration.
+    # the LAST one: a game log carries many harmless logged exceptions before the one that stopped it
+    for i in range(len(lines) - 1, -1, -1):
+        l = lines[i]
+        if TOP_EXC.search(l) and not l.lstrip().startswith("at "):
+            frames = [x.strip() for x in lines[i + 1:i + 80] if MOD_FRAME.match(x)][:8]
+            return "crash", "\n".join([l.strip()[:400]] + frames), TOP_EXC.search(l).group(0)[:200]
     return "unknown", "\n".join(lines[-40:]), lines[-1][:200] if lines else ""
 
 
@@ -156,6 +165,9 @@ def self_check():
     ok = ok and k2 == "gatec" and "FAIL" in t2
     k3, _t, _s = failure_of("Caused by: java.lang.NoClassDefFoundError: x\n\tat a.b.C.d(C.java:1)\n", client=True)
     ok = ok and k3 == "crash"
+    k4, t4, s4 = failure_of("[main/ERROR]: oops\njava.lang.IllegalStateException: Registry is already frozen (trying to add key x)\n"
+                            "\tat net.minecraft.core.MappedRegistry.validateWrite(MappedRegistry.java:1)\n\tat a.b.Stats.init(Stats.java:9)\n")
+    ok = ok and k4 == "crash" and "already frozen" in t4 and "a.b.Stats.init" in t4
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
 

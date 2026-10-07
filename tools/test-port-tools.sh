@@ -254,7 +254,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port.py|port front door: jar metadata, the hoisted-config-SPEC fix" \
             "era-hop.py|era hop: the frame, maps and rename table it needs are present" \
             "scaffold-gametest.py|baseline GameTest: the template becomes a mod's test with no example names left" \
-            "run-port.py|run-port: the stop contract's estimate and block, per-run spend on a resumed log"; do
+            "run-port.py|run-port: the stop contract's estimate and block, per-run spend on a resumed log" \
+            "learn-pack.py|learn-pack: recurring renames become rows; one-offs and non-platform names never do"; do
   tool="${spec%%|*}"; what="${spec#*|}"
   out="$(python3 "tools/$tool" --self-check 2>&1)"
   grep -q 'self-check: OK' <<<"$out" && ok "$what" || bad "$tool self-check: $out"
