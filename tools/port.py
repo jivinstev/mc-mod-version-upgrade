@@ -44,6 +44,21 @@ MODREG = ROOT / "tools/mod-registry/modreg.py"
 TARGET_NAME = {"1.21.1": "NeoForge 1.21.1", "26.2": "NeoForge 26.2"}
 
 
+def ensure_ca_bundle():
+    """The python.org Python on macOS starts with an empty certificate store, so every download a child tool
+    makes (registry search, mapping files) fails CERTIFICATE_VERIFY_FAILED. Point SSL_CERT_FILE at a bundle
+    for this process and every tool it starts, when one is needed and none is set."""
+    sys.path.insert(0, str(ROOT / "tools/mod-registry"))
+    try:
+        import providers
+        b = providers.ca_bundle()
+    except Exception:  # noqa: BLE001 -- a missing helper must not stop a port that does not need it
+        b = None
+    if b:
+        os.environ["SSL_CERT_FILE"] = b
+    return b
+
+
 def say(msg):
     print(f"port: {msg}", flush=True)
 
@@ -91,8 +106,13 @@ def resolve(query, target, providers=("modrinth", "curseforge")):
         return None, None, f"search failed: {d.get('error', rc)}"
     exact = [r for r in d["results"] if norm(r.get("name")) == norm(query)]
     if not exact:
+        if not d["results"] and d.get("warnings"):
+            # nothing came back because the search itself failed: say why, never "no match"
+            return None, None, ("the registry search FAILED, so this is not a 'no match': " + "; ".join(d["warnings"])
+                                + (" -- a certificate problem: set SSL_CERT_FILE to your CA bundle (e.g. /etc/ssl/cert.pem)"
+                                   if any("CERTIFICATE" in w.upper() for w in d["warnings"]) else ""))
         names = ", ".join(r.get("name", "?") for r in d["results"][:8])
-        return None, None, f"no result named exactly {query!r}; closest: {names}"
+        return None, None, f"no result named exactly {query!r}; closest: {names or '(none)'}"
     best = None
     for prov in providers:
         if prov == "curseforge" and not os.environ.get("CURSEFORGE_API_KEY"):
@@ -364,6 +384,7 @@ def main():
         return self_check()
     if not a.mod:
         ap.error("name a mod or a jar")
+    ensure_ca_bundle()
     T = a.to
     if T not in TARGET_NAME:
         print(f"port: unknown target {T}; known: {', '.join(TARGET_NAME)}"); return 2
