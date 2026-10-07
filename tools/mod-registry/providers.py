@@ -19,6 +19,37 @@ import os
 import urllib.parse
 import urllib.request
 import urllib.error
+import ssl
+
+# The python.org Python on macOS ships with an EMPTY certificate store until its "Install Certificates"
+# step is run, so every HTTPS call fails with CERTIFICATE_VERIFY_FAILED -- and a search that fails reads as
+# "no results". Fall back to certifi or the operating system's bundle when the default store is empty.
+CA_BUNDLES = ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt")
+
+
+def ca_bundle():
+    """-> a CA bundle path to use, or None when Python's own store already works (or SSL_CERT_FILE is set)."""
+    if os.environ.get("SSL_CERT_FILE"):
+        return None
+    if ssl.create_default_context().cert_store_stats().get("x509_ca", 0) > 0:
+        return None
+    try:
+        import certifi
+        return certifi.where()
+    except ImportError:
+        pass
+    return next((b for b in CA_BUNDLES if os.path.isfile(b)), None)
+
+
+_CTX = None
+
+
+def ssl_context():
+    global _CTX
+    if _CTX is None:
+        b = ca_bundle()
+        _CTX = ssl.create_default_context(cafile=b) if b else ssl.create_default_context()
+    return _CTX
 
 MODRINTH_API = "https://api.modrinth.com/v2"
 CURSEFORGE_API = "https://api.curseforge.com/v1"
@@ -41,7 +72,7 @@ def _http_json(url, headers=None, data=None, method=None):
         req.add_header("Content-Type", "application/json")
     for k, v in (headers or {}).items():
         req.add_header(k, v)
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=60, context=ssl_context()) as r:
         return json.load(r)
 
 
@@ -251,7 +282,7 @@ class ModrinthProvider(Provider):
                 f = next((x for x in v.get("files", []) if x.get("primary")), None) or v["files"][0]
                 url = f["url"]
                 req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-                with urllib.request.urlopen(req, timeout=120) as r:
+                with urllib.request.urlopen(req, timeout=120, context=ssl_context()) as r:
                     data = r.read()
                 out_path = write_download(out_path, f.get("filename"), data)
                 sha1 = hashlib.sha1(data).hexdigest()
@@ -380,7 +411,7 @@ class CurseForgeProvider(Provider):
                     "websiteUrl": (m.get("links") or {}).get("websiteUrl"),
                     "fileName": f.get("fileName")}
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=120, context=ssl_context()) as r:
             data = r.read()
         out_path = write_download(out_path, f.get("fileName"), data)
         sha1 = hashlib.sha1(data).hexdigest()

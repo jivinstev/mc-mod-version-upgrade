@@ -160,6 +160,118 @@ kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
 [ "${seen:-0}" -ge 1 ] && ok "boot-smoke sees a client already running on the instance" \
   || bad "boot-smoke's process probe missed a running client (saw ${seen:-nothing})"
 
+echo "6. recipe-bench.py (bucketer A/B, and it refuses to count a build that never compiled)"
+out="$(python3 tools/recipe-bench.py --self-check 2>&1)"
+grep -q 'self-check: PASS' <<<"$out" && ok "bucketer: specific entries matched, generic + near-miss names left unmatched" \
+  || bad "recipe-bench self-check: $out"
+printf 'FAILURE: Build failed\n* What went wrong:\nCould not resolve all files\n' > "$T/never.log"
+python3 tools/recipe-bench.py --bucket-log "$T/never.log" >/dev/null 2>&1; code=$?
+[ $code = 2 ] && ok "a log with no compileJava task is NOT a count (exit 2)" || bad "never-compiled log exited $code, wanted 2"
+printf '> Task :compileJava FAILED\n* What went wrong:\n> Could not resolve all files for configuration\n' > "$T/unres.log"
+python3 tools/recipe-bench.py --bucket-log "$T/unres.log" >/dev/null 2>&1; code=$?
+[ $code = 2 ] && ok "compileJava FAILED on an unresolvable dependency is NOT 0 errors (X5d)" || bad "unresolved-dep log exited $code, wanted 2"
+printf '> Task :compileJava\n/w/A.java:3: error: cannot find symbol\nCaused by: java.lang.OutOfMemoryError: Java heap space\n' > "$T/oom.log"
+python3 tools/recipe-bench.py --bucket-log "$T/oom.log" >/dev/null 2>&1; code=$?
+[ $code = 2 ] && ok "errors printed before an OutOfMemoryError are NOT a count (X5e)" || bad "OOM log exited $code, wanted 2"
+printf '> Task :compileJava\n/w/A.java:3: error: cannot find symbol\n100 errors\nonly showing the first 100 errors, of 2254 total; use -Xmaxerrs if you would like to see more\n' > "$T/cap.log"
+python3 tools/recipe-bench.py --bucket-log "$T/cap.log" >/dev/null 2>&1; code=$?
+[ $code = 2 ] && ok "a log cut at javac's error cap is NOT a count (X5f)" || bad "capped log exited $code, wanted 2"
+printf '> Task :compileJava\n/w/A.java:3: error: package net.minecraftforge.common does not exist\n1 error\n' > "$T/one.log"
+out="$(python3 tools/recipe-bench.py --bucket-log "$T/one.log" --json "$T/one.json" 2>&1)"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d["errors"]==1 and sum(d["buckets"].values())==1 else 1)' "$T/one.json" \
+  && ok "a real catalogue signature (Forge package) is attributed from the live CATALOG.md" || bad "bucket-log: $out"
+
+echo "7. hunk-census.py (attribution A/B on a synthetic catalogue and trees)"
+out="$(python3 tools/hunk-census.py --self-check 2>&1)"
+grep -q 'self-check: PASS' <<<"$out" && ok "census: field, prose-arrow and SRG-shape detectors attribute; comment-only and renames-with-no-entry do not" \
+  || bad "hunk-census self-check: $out"
+
+echo "8. census-hypotheses.py (H1/H1x/H2/H5/H7 arithmetic on synthetic records)"
+H="$T/hyp"; mkdir -p "$H/r1" "$H/r2@26.2" "$H/r3"
+printf 'profile\tport\n' > "$H/census.tsv"; printf 'P1\tr1\nP2\tr2@26.2\nP2\tr3\n' >> "$H/census.tsv"
+# r2@26.2 shares r1's entry edit and one of its cluster edits (2 mods); r3 repeats only the entry edit (3 mods)
+{ echo '{"cat":"entry","key":"9","file":"b/A.java","shape":"S9","removed":["Old"],"added":["Shim"],"imports":[]}'
+  echo '{"cat":"cluster","key":"x","file":"b/C.java","shape":"S8","removed":["Q"],"added":[],"imports":[]}'; } > "$H/r2@26.2/hunks.jsonl"
+echo '{"cat":"entry","key":"9","file":"c/A.java","shape":"S9","removed":["Old"],"added":["Shim"],"imports":[]}' > "$H/r3/hunks.jsonl"
+{ echo '{"cat":"new-file","file":"a/Shim.java","lines":9}'
+  echo '{"cat":"entry","key":"9","file":"a/A.java","shape":"S1","removed":["Old"],"added":["Shim"],"imports":[]}'
+  echo '{"cat":"entry","key":"9","file":"a/B.java","shape":"S1","removed":["Old"],"added":["Shim"],"imports":[]}'
+  echo '{"cat":"cluster","key":"x","file":"a/C.java","shape":"S2","removed":["Q"],"added":["Shim"],"imports":["mezz.jei"]}'
+  echo '{"cat":"cluster","key":"x","file":"a/C.java","shape":"S3","removed":["Q"],"added":[],"imports":["mezz.jei"]}'; } > "$H/r1/hunks.jsonl"
+mkdir -p "$H/b/r1"; echo '{"errors_by_file":{"a/A.java":2,"a/Z.java":1}}' > "$H/b/r1/bench.json"
+out="$(python3 tools/census-hypotheses.py --census "$H" --bench "$H/b" 2>&1)"
+grep -q '| P1 | 1 | 4 | 25% / 25% | 75% | 0% | 75% / 50% | 50% | 25% (1 rows) | 50% |' <<<"$out" \
+  && ok "hypotheses: repeats exact/loose, cross-port 2+/3+ mods, helper routing, file locality, optional code" || bad "census-hypotheses: $(grep '| P1' <<<"$out")"
+
+# the path goes in argv, not the -c text: Git Bash converts /tmp/... only in arguments
+out="$(python3 -c "import importlib.util as u, pathlib, sys; s = u.spec_from_file_location('h', 'tools/census-hypotheses.py'); m = u.module_from_spec(s); s.loader.exec_module(m); print(m.h3(m.load(pathlib.Path(sys.argv[1])), min_hunks=1))" "$H" 2>&1)"
+[ "$out" = "[('9', 4, 3, 1, 1.0)]" ] && ok "H3: an entry's fixes counted across 3 mods, one shape covering all of them" || bad "h3: $out"
+
+echo "9. scope-menu.py (chunks, error shares and references on a synthetic mod)"
+out="$(python3 tools/scope-menu.py --self-check 2>&1)"
+grep -q 'self-check: PASS' <<<"$out" && ok "scope menu: integration, commands and a mob family found; shares from the first-compile log" \
+  || bad "scope-menu self-check: $out"
+
+echo "10. compile-summary.py (a bounded log summary; refuses a log that is not a count)"
+out="$(python3 tools/compile-summary.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "summary: catalogue groups, families, files, and GREW/NEW against the previous run" \
+  || bad "compile-summary self-check: $out"
+d="$(mktemp -d)"; printf '> Task :compileJava FAILED\n* What went wrong:\nCould not resolve x\n' > "$d/b.log"
+python3 tools/compile-summary.py "$d/b.log" >"$d/o" 2>&1; rc=$?
+[ "$rc" = 2 ] && grep -q 'NOT A COUNT' "$d/o" && grep -q 'Could not resolve x' "$d/o" \
+  && ok "a never-compiled log prints Gradle's reason and exits 2, not '0 errors'" || bad "never-compiled log: rc=$rc $(head -3 "$d/o")"
+rm -rf "$d"
+
+echo "11. port-handoff.py (one current Hand-off section, Scope carried across)"
+out="$(python3 tools/port-handoff.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "hand-off: replaces itself, keeps other sections, carries the Scope choice and blockers" \
+  || bad "port-handoff self-check: $out"
+
+echo "12. apply-recipes.py (auto rows applied per catalogue entry; choice/manual sites listed, never rewritten)"
+out="$(python3 tools/apply-recipes.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "recipes: auto groups rewrite and count, a dead group is named, choice sites stay untouched" \
+  || bad "apply-recipes self-check: $out"
+
+for pk in tools/recipes/*.recipes.tsv; do
+  out="$(python3 tools/apply-recipes.py --check-pack --recipes "$pk" 2>&1)" \
+    && ok "shipped pack $(basename "$pk") parses and names only catalogue entries" || bad "pack $pk: $out"
+done
+
+echo "13. file-loop.py (model-free parts: load-crash scans, supertype filter, generated-path mapping, batching)"
+out="$(python3 tools/file-loop.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching" \
+  || bad "file-loop self-check: $out"
+
+out="$(python3 tools/gate-loop.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "gate loop: the deepest load-crash cause and the mod's own frames go to the worker" \
+  || bad "gate-loop self-check: $out"
+
+out="$(python3 tools/scaffold-gatec.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "scaffold-gatec: the client harness template becomes a mod's harness with no example names left" \
+  || bad "scaffold-gatec self-check: $out"
+
+for spec in "route.py|route planner: every hop finished before the next, a missing pack or row is said, never guessed" \
+            "port.py|port front door: jar metadata, the hoisted-config-SPEC fix" \
+            "era-hop.py|era hop: the frame, maps and rename table it needs are present" \
+            "scaffold-gametest.py|baseline GameTest: the template becomes a mod's test with no example names left" \
+            "run-port.py|run-port: the stop contract's estimate and block, per-run spend on a resumed log" \
+            "learn-pack.py|learn-pack: recurring renames become rows; one-offs and non-platform names never do" \
+            "park-optional.py|park-optional: integration packages and datagen are parked, required-dep code is not" \
+            "content-census.py|content census: a declared enchantment with no 1.21 data file is missing; all present passes" \
+            "fix-json-strict.py|fix-json-strict: comment lines, trailing commas and a BOM are repaired byte-safe; a missing comma is refused"; do
+  tool="${spec%%|*}"; what="${spec#*|}"
+  out="$(python3 "tools/$tool" --self-check 2>&1)"
+  grep -q 'self-check: OK' <<<"$out" && ok "$what" || bad "$tool self-check: $out"
+done
+
+out="$(python3 tools/visual-review.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "visual review: black, flat and missing-texture frames are findings without a model; verdict lines parse" \
+  || bad "visual-review self-check: $out"
+
+out="$(python3 tools/behaviour-tests.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "behaviour tests: failures read from the GameTest log, a run with no summary is not a pass" \
+  || bad "behaviour-tests self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

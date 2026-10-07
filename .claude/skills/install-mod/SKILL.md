@@ -114,6 +114,10 @@ For a node needing a port, invoke the **migrate-mod skill** with a prompt of thi
 - A `needs-migrate` Forge-1.20.1 node needs no extra params (migrate-mod defaults = forge/1.20.1 →
   neoforge/1.21.1). Other sources: pass the real `SRC_LOADER`/`SRC_MC` (migrate-mod's SRG-skip +
   minor-version-delta handling take over). A `needs-downport` node passes `SRC_MC` = the newer 1.21.x.
+- **Scope is asked inside migrate-mod (its Step 3b):** full port, minimal (core only), or chosen chunks,
+  each with its estimated share of the work. If the user already said how much they want ("just the
+  mobs", "everything"), pass that in the prompt so the question is answered rather than asked twice.
+  A dependency node the user's mod needs in FULL (an API library) is ported in full without asking.
 - **Resume is two-layer:** the chain lives in `plan.json` (which nodes, their edges, coarse status);
   the detail of one port lives in migrate-mod's own `mods/<modid>/MIGRATION.md` + its git branch. Don't
   duplicate — record only `migrate.status` here and let migrate-mod resume itself.

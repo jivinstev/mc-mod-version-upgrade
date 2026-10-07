@@ -23,6 +23,7 @@ Design notes:
 """
 import argparse
 import json
+import urllib.error
 import os
 import re
 import sys
@@ -130,7 +131,9 @@ def cmd_search(args):
             # (a mod that only has an older build should still surface).
             hits = prov.search(query, loader=None, mc=None, limit=args.limit)
         except Exception as e:
-            warnings.append(f"{pname}: {type(e).__name__}")
+            # the reason, not just the class: "URLError" alone hid a certificate failure as "no results"
+            reason = str(getattr(e, "reason", "") or e)[:160] if isinstance(e, urllib.error.URLError) else ""
+            warnings.append(f"{pname}: {type(e).__name__}" + (f" ({reason})" if reason else ""))
             continue
         for h in hits:
             key = _norm(h["name"])

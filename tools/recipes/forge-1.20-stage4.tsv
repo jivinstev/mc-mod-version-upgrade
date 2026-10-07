@@ -1,0 +1,5 @@
+# Stage-4 bench recipe list (issue #27): the existing codemods, then the Forge 1.20 -> NeoForge 1.21.1 recipe
+# pack through tools/apply-recipes.py. Same format and environment as tools/recipes/existing-codemods.tsv.
+4	find "$SRC" -name '*.java' -print0 | xargs -0 perl -pi "$MIGRATOR"/tools/srg-remap/forge_import_codemod.pl
+25	python3 "$MIGRATOR"/tools/srg-remap/mc121_codemod.py "$SRC"
+pack	python3 "$MIGRATOR"/tools/apply-recipes.py --src "$SRC" --recipes "$MIGRATOR"/tools/recipes/forge-1.20-to-neoforge-1.21.1.recipes.tsv --json recipes-report.json > recipes-report.txt

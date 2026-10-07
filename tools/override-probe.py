@@ -44,6 +44,22 @@ def preceding_annotations(lines, i):
     return " ".join(out)
 
 
+GEN = "build/generated/sources/"
+
+
+def source_of(port, f):
+    """A multi-version build (§W) compiles a GENERATED copy of src/main/java (+ the target's overlay);
+    map an error there back to the source file the probe annotated."""
+    f = (port / f).resolve().as_posix()
+    if GEN in f and "/java/" in f:
+        base, tail = f.split(GEN, 1)
+        overlay, rest = tail.split("/java/", 1)
+        for cand in (f"{base}src/{overlay}/java/{rest}", f"{base}src/main/java/{rest}"):
+            if pathlib.Path(cand).is_file():
+                return pathlib.Path(cand).resolve()
+    return pathlib.Path(f)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("port")
@@ -104,7 +120,7 @@ def main():
     for line in out.splitlines():
         m = NO_OVERRIDE.match(line.strip())
         if m:
-            key = (str((port / m.group("file")).resolve()), int(m.group("line")))
+            key = (str(source_of(port, m.group("file"))), int(m.group("line")))
             if key in probed and key not in seen:
                 seen.add(key)
                 hits.append(probed[key])

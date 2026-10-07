@@ -1,0 +1,200 @@
+# Recipe pack: Forge 1.20.x -> NeoForge 1.21.1 (issue #27, Stage 4). Format: tools/apply-recipes.py.
+# Runs AFTER tools/srg-remap/forge_import_codemod.pl and mc121_codemod.py (tools/recipes/existing-codemods.tsv),
+# so Forge packages already read net.neoforged.* here. Every row is a catalogue entry's own Pattern -> Fix;
+# replacements that need an import are written fully qualified inline (§V19), so no import block is edited.
+# A member rename names its owner (§X7). Order matters within the regex rows (§X4): they run in file order,
+# before the plain token rows.
+
+#@ 24 auto  ForgeEventFactory / ForgeHooks / ForgeHooksClient became EventHooks / CommonHooks / ClientHooks
+re:\bForgeEventFactory\.getMobGriefingEvent\(	EventHooks.canEntityGrief(
+net.neoforged.neoforge.event.ForgeEventFactory	net.neoforged.neoforge.event.EventHooks
+ForgeEventFactory	EventHooks
+net.neoforged.neoforge.common.ForgeHooks	net.neoforged.neoforge.common.CommonHooks
+ForgeHooks	CommonHooks
+net.minecraftforge.client.ForgeHooksClient	net.neoforged.neoforge.client.ClientHooks
+ForgeHooksClient	ClientHooks
+
+#@ 7 auto  @Mod.EventBusSubscriber is top-level EventBusSubscriber
+re:(?<![\w.])Mod\.EventBusSubscriber\b	net.neoforged.fml.common.EventBusSubscriber
+net.neoforged.fml.common.Mod.EventBusSubscriber	net.neoforged.fml.common.EventBusSubscriber
+
+#@ 45 auto  the FORGE event bus is the GAME bus
+re:\bBus\.FORGE\b	Bus.GAME
+
+#@ 12 auto  ForgeSpawnEggItem is DeferredSpawnEggItem
+net.neoforged.neoforge.common.ForgeSpawnEggItem	net.neoforged.neoforge.common.DeferredSpawnEggItem
+ForgeSpawnEggItem	DeferredSpawnEggItem
+
+#@ 14 auto  NonNullLazy is Lazy
+net.neoforged.neoforge.common.util.NonNullLazy	net.neoforged.neoforge.common.util.Lazy
+NonNullLazy	Lazy
+
+#@ 11 auto  ForgeRegistries.X is BuiltInRegistries.X (singular); lookups are get, not getValue
+re:\bForgeRegistries\.ITEMS\b	net.minecraft.core.registries.BuiltInRegistries.ITEM
+re:\bForgeRegistries\.BLOCKS\b	net.minecraft.core.registries.BuiltInRegistries.BLOCK
+re:\bForgeRegistries\.ENTITY_TYPES\b	net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE
+re:\bForgeRegistries\.MOB_EFFECTS\b	net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT
+re:\bForgeRegistries\.SOUND_EVENTS\b	net.minecraft.core.registries.BuiltInRegistries.SOUND_EVENT
+re:\bForgeRegistries\.PARTICLE_TYPES\b	net.minecraft.core.registries.BuiltInRegistries.PARTICLE_TYPE
+re:\bForgeRegistries\.BLOCK_ENTITY_TYPES\b	net.minecraft.core.registries.BuiltInRegistries.BLOCK_ENTITY_TYPE
+re:\bForgeRegistries\.ATTRIBUTES\b	net.minecraft.core.registries.BuiltInRegistries.ATTRIBUTE
+re:\bForgeRegistries\.POTIONS\b	net.minecraft.core.registries.BuiltInRegistries.POTION
+re:\bForgeRegistries\.FLUIDS\b	net.minecraft.core.registries.BuiltInRegistries.FLUID
+re:\bForgeRegistries\.MENU_TYPES\b	net.minecraft.core.registries.BuiltInRegistries.MENU
+re:\bForgeRegistries\.RECIPE_SERIALIZERS\b	net.minecraft.core.registries.BuiltInRegistries.RECIPE_SERIALIZER
+re:(BuiltInRegistries\.[A-Z_]+)\.getValue\(	\1.get(
+
+#@ 22 auto  LivingHurtEvent and LivingAttackEvent are LivingIncomingDamageEvent
+net.neoforged.neoforge.event.entity.living.LivingHurtEvent	net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent
+LivingHurtEvent	LivingIncomingDamageEvent
+net.neoforged.neoforge.event.entity.living.LivingAttackEvent	net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent
+LivingAttackEvent	LivingIncomingDamageEvent
+
+#@ 23 auto  MobSpawnEvent.FinalizeSpawn is FinalizeSpawnEvent
+re:(?<![\w.])MobSpawnEvent\.FinalizeSpawn\b	net.neoforged.neoforge.event.entity.living.FinalizeSpawnEvent
+
+#@ 37 auto  BlockPathTypes is PathType
+net.minecraft.world.level.pathfinder.BlockPathTypes	net.minecraft.world.level.pathfinder.PathType
+BlockPathTypes	PathType
+
+#@ 41 auto  AttributeModifier.Operation constants renamed
+re:\bOperation\.ADDITION\b	Operation.ADD_VALUE
+re:\bOperation\.MULTIPLY_BASE\b	Operation.ADD_MULTIPLIED_BASE
+re:\bOperation\.MULTIPLY_TOTAL\b	Operation.ADD_MULTIPLIED_TOTAL
+
+#@ 46 auto  defaultDurability is durability; Properties.copy is ofFullCopy
+re:\.defaultDurability\(	.durability(
+re:\bProperties\.copy\(	Properties.ofFullCopy(
+
+#@ 52 auto  vanilla entity renames
+re:\.setSecondsOnFire\(	.igniteForSeconds(
+re:(?<![\w$])onAddedToWorld\(\)	onAddedToLevel()
+
+#@ 33 auto  Vanishable is gone
+re:import net\.minecraft\.world\.item\.Vanishable;\n	
+re:(?<=implements )Vanishable\s*,\s*	
+re:\s*,\s*Vanishable\b(?=[\s,{])	
+re:\s+implements Vanishable\b(?=\s*\{)	
+
+#@ 26 auto  defineSynchedData takes a SynchedEntityData.Builder
+re:void defineSynchedData\(\)\s*\{	void defineSynchedData(net.minecraft.network.syncher.SynchedEntityData.Builder builder) {
+re:\bsuper\.defineSynchedData\(\)	super.defineSynchedData(builder)
+re:\bthis\.entityData\.define\(	builder.define(
+
+#@ 98 auto  getDimensions is final; override getDefaultDimensions
+re:public EntityDimensions getDimensions\(Pose (\w+)\)	protected EntityDimensions getDefaultDimensions(Pose \1)
+re:\bsuper\.getDimensions\(	super.getDefaultDimensions(
+
+#@ 32 auto  hurtAndBreak takes the slot, not a break callback
+re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]+)\)\)	.hurtAndBreak(\1, \2, \3)
+
+#@ 113 auto  setMaxUpStep is the STEP_HEIGHT attribute (not on known non-living bases: a plain Entity has no attribute map)
+#? only-if	\bextends (?!(?:Entity|Projectile|AbstractArrow|Arrow|ThrowableProjectile|ThrowableItemProjectile|AbstractHurtingProjectile|Fireball|AbstractMinecart|Boat|PartEntity|ItemEntity)\b)\w+
+re:\bthis\.setMaxUpStep\(([^;]*)\);	this.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(\1);
+
+#@ 36 auto  ForgeMod reach attributes are vanilla; the rest of ForgeMod is NeoForgeMod
+re:(?:\(Attribute\)\s*)?\bForgeMod\.ENTITY_REACH\.get\(\)	net.minecraft.world.entity.ai.attributes.Attributes.ENTITY_INTERACTION_RANGE
+re:(?:\(Attribute\)\s*)?\bForgeMod\.BLOCK_REACH\.get\(\)	net.minecraft.world.entity.ai.attributes.Attributes.BLOCK_INTERACTION_RANGE
+net.neoforged.neoforge.common.ForgeMod	net.neoforged.neoforge.common.NeoForgeMod
+ForgeMod	NeoForgeMod
+
+#@ 134 auto  SpawnPlacements.Type constants are SpawnPlacementTypes
+re:\bSpawnPlacements\.Type\.(ON_GROUND|IN_WATER|IN_LAVA|NO_RESTRICTIONS)\b	net.minecraft.world.entity.SpawnPlacementTypes.\1
+
+#@ 138 auto  GeckoLib 4.8 flattened the core packages (bare names only where GeckoLib is imported: mods ship their own RenderUtils)
+#? only-if	import software\.bernie\.geckolib\.
+software.bernie.geckolib.core.animatable.model.CoreGeoBone	software.bernie.geckolib.cache.object.GeoBone
+software.bernie.geckolib.animatable.model.CoreGeoBone	software.bernie.geckolib.cache.object.GeoBone
+software.bernie.geckolib.core.object.PlayState	software.bernie.geckolib.animation.PlayState
+software.bernie.geckolib.core.object.Color	software.bernie.geckolib.util.Color
+software.bernie.geckolib.core.animation	software.bernie.geckolib.animation
+software.bernie.geckolib.core.animatable	software.bernie.geckolib.animatable
+software.bernie.geckolib.util.RenderUtils	software.bernie.geckolib.util.RenderUtil
+CoreGeoBone	GeoBone
+RenderUtils	RenderUtil
+
+#@ 54 auto  SRG ids the 1.20.1 dictionary does not map (names read from finished ports' own diffs, 2+ uses each)
+member:m_7654_	getServer
+member:m_20194_	getServer
+member:m_129892_	getCommands
+member:m_129889_	getAdvancements
+member:m_129880_	getLevel
+member:m_129785_	getAllLevels
+member:m_11083_	convertMobOwnerIfNecessary
+
+#@ R18 auto  setCustomClientFactory is gone; MCreator's same-class SpawnEntity constructor goes with it
+re:\s*\.setCustomClientFactory\(\w+::new\)	
+re:\n[ \t]*public \w+\((?:PlayMessages\.)?SpawnEntity \w+, Level \w+\)\s*\{\s*this\([^;{}]*\);\s*\}	
+re:import net\.minecraftforge\.network\.PlayMessages(?:\.SpawnEntity)?;\n	
+
+#@ 117 auto  appendHoverText takes an Item.TooltipContext, not a Level
+re:void appendHoverText\(ItemStack (\w+), (?:@Nullable )?Level (\w+), List<Component> (\w+), TooltipFlag (\w+)\)	void appendHoverText(ItemStack \1, net.minecraft.world.item.Item.TooltipContext \2, List<Component> \3, TooltipFlag \4)
+
+#@ 105 auto  VertexConsumer builder renamed; endVertex is gone (only in files using the vertex API)
+#? only-if	import com\.mojang\.blaze3d\.vertex\.
+re:\)\s*\.endVertex\(\)	)
+re:\.vertex\(([^,();]+),\s*([^,();]+),\s*([^,();]+)\)(?=\s*\.(?:color|uv|normal|endVertex|overlayCoords|uv2)\()	.addVertex((float) (\1), (float) (\2), (float) (\3))
+re:\.vertex\((?=[^;]*?\)\s*\.(?:color|uv|normal|endVertex|overlayCoords|uv2)\()	.addVertex(
+re:\)(\s*)\.color\(	)\1.setColor(
+re:\)(\s*)\.uv\(	)\1.setUv(
+re:\)(\s*)\.overlayCoords\(([^,()]+)\)	)\1.setOverlay(\2)
+re:\)(\s*)\.overlayCoords\(([^,()]+),\s*([^,()]+)\)	)\1.setUv1(\2, \3)
+re:\)(\s*)\.uv2\(([^,()]+)\)	)\1.setLight(\2)
+re:\)(\s*)\.uv2\(([^,()]+),\s*([^,()]+)\)	)\1.setUv2(\2, \3)
+re:\)(\s*)\.normal\((\w+)\.normal\(\),	)\1.setNormal(\2,
+re:\)(\s*)\.normal\(([^,()]+),\s*([^,()]+),\s*([^,()]+)\)	)\1.setNormal(\2, \3, \4)
+
+#@ 104 auto  renderToBuffer and ModelPart.render take one packed ARGB int, not four floats
+#? only-if	import com\.mojang\.blaze3d\.vertex\.VertexConsumer;
+re:void renderToBuffer\((PoseStack \w+, VertexConsumer \w+, int \w+, int \w+), float (\w+), float (\w+), float (\w+), float (\w+)\)\s*\{	void renderToBuffer(\1, int color) { float \2 = net.minecraft.util.FastColor.ARGB32.red(color) / 255.0F, \3 = net.minecraft.util.FastColor.ARGB32.green(color) / 255.0F, \4 = net.minecraft.util.FastColor.ARGB32.blue(color) / 255.0F, \5 = net.minecraft.util.FastColor.ARGB32.alpha(color) / 255.0F;
+re:\.(render|renderToBuffer)\(([\w.]+), ([\w.]+), ([\w.]+), ([\w.]+), ([^,()]+), ([^,()]+), ([^,()]+), ([^,()]+)\)	.\1(\2, \3, \4, \5, net.minecraft.util.FastColor.ARGB32.colorFromFloat(\9, \6, \7, \8))
+
+#@ 114 auto  MobEffect.isDurationEffectTick is shouldApplyEffectTickThisTick
+re:\bisDurationEffectTick\(	shouldApplyEffectTickThisTick(
+
+#@ 79 auto  Screen.renderBackground takes the render arguments (files whose render method names them mouseX/mouseY/partialTicks)
+#? only-if	int mouseX, int mouseY, float partialTicks\)
+re:\bthis\.renderBackground\((\w+)\);	this.renderBackground(\1, mouseX, mouseY, partialTicks);
+
+#@ 56 auto  partial tick and frame time come from the DeltaTracker
+re:\bMinecraft\.getInstance\(\)\.getPartialTick\(\)	Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(true)
+re:\bMinecraft\.getInstance\(\)\.getFrameTime\(\)	Minecraft.getInstance().getTimer().getGameTimeDeltaPartialTick(true)
+re:\bMinecraft\.getInstance\(\)\.getDeltaFrameTime\(\)	Minecraft.getInstance().getTimer().getGameTimeDeltaTicks()
+
+#@ R21 auto  a custom arrow's pickup item must not be EMPTY (it cannot be saved)
+#? only-if	\bextends AbstractArrow\b
+re:(ItemStack getDefaultPickupItem\(\)\s*\{\s*return )ItemStack\.EMPTY;	\1new ItemStack(net.minecraft.world.item.Items.ARROW);
+
+#@ 127 choice  Block.use is split by whether the held item matters
+#? detect	public InteractionResult use\(BlockState \w+, Level \w+, BlockPos \w+, Player \w+, InteractionHand \w+, BlockHitResult \w+\)
+#? option	useWithoutItem	the body ignores the hand: useWithoutItem(BlockState, Level, BlockPos, Player, BlockHitResult), returns InteractionResult
+#? option	useItemOn	the body reads player.getItemInHand(hand): useItemOn(ItemStack, BlockState, Level, BlockPos, Player, InteractionHand, BlockHitResult), returns ItemInteractionResult
+
+#@ 30 choice  MobType is gone
+#? detect	\bgetMobType\(\)
+#? option	tag	delete the getMobType() override; put the entity type in #minecraft:undead / arthropod / illager / aquatic; checks become getType().is(EntityTypeTags.X)
+#? option	shim	many call sites read getMobType() for damage or potion logic: a local MobType enum plus MobType.of(Entity) keeps them (catalogue 30's augment)
+
+#@ 53 choice  item NBT accessors are gone
+#? detect	\.(getOrCreateTag|getTag|setTag|hasTag)\(
+#? option	component	structured data the mod owns: a DataComponentType<T> (catalogue 28)
+#? option	custom-data	a bag of keys: an ItemNbtCompat helper over DataComponents.CUSTOM_DATA; write back after every mutation (catalogue 53)
+
+#@ 16 manual  SimpleChannel/NetworkEvent -> payloads (CustomPacketPayload + StreamCodec + IPayloadContext)
+#? detect	\b(SimpleChannel|NetworkEvent\.Context|NetworkRegistry)\b
+
+#@ 13 manual  capabilities -> data attachments (AttachmentType, getData/setData)
+#? detect	\b(LazyOptional|ICapabilitySerializable|ICapabilityProvider|AttachCapabilitiesEvent|CapabilityToken)\b
+
+#@ 20 manual  TickEvent phases -> PlayerTickEvent.Post / ServerTickEvent / LevelTickEvent
+#? detect	\bTickEvent\b
+
+#@ 6 manual  DistExecutor -> FMLEnvironment.dist checks
+#? detect	\bDistExecutor\b
+
+#@ 5 manual  @Mod constructor takes (IEventBus, ModContainer)
+#? detect	\bFMLJavaModLoadingContext\b
+
+#@ 38 manual  GUI overlays -> LayeredDraw.Layer + RegisterGuiLayersEvent
+#? detect	\b(IGuiOverlay|RegisterGuiOverlaysEvent|ForgeGui)\b
+

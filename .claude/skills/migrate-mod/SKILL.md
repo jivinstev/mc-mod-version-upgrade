@@ -11,6 +11,30 @@ loads without crashing. Work the process below top-to-bottom, and **loop on the
 build until the error count stops dropping or hits zero** — don't stop at the
 first wall; re-read the references and try the next category of fix.
 
+## The default path: one command (`tools/port.py`)
+For "Port <mod> to <version>" (or a jar path), **start here, not at Step 0**:
+```
+python3 tools/port.py "<exact mod name, or path to the jar>" --to <1.21.1 | 26.2>
+```
+To take a FINISHED single-target port further (e.g. a 1.21.1 port to 26.2), start from it, not from the
+jar, so its fixes carry over: `python3 tools/port.py --from-port mods/<modid> --to 26.2` (the workspace is
+copied, setup is treated as done, and only the remaining hops run).
+It does every deterministic step in a fixed order: resolve the jar (and STOP if a native build already
+exists, or a required dependency has none), route the port hop by hop (`tools/routes.tsv`: e.g. Forge
+1.20.1 → NeoForge 1.21.1 → 26.2, each hop finished — compile + Gate B — before the next), set up the
+workspace (scaffold, decompile, SRG/intermediary remap, codemods, metadata, datapack layout, the
+hoisted-config fix, a baseline GameTest), then per hop: its recipe pack (or `tools/era-hop.py` for
+1.21.1 → 26.x), the cheap compile loop, Gate B; the first hop writes the behaviour tests and the client
+harness so later hops port them; the last hop runs Gate C and the visual review.
+
+**Your job while it runs is small**: start it, read its last lines and `mods/<modid>/port-report.json`,
+never the workers' transcripts or build logs. **When it prints `STOPPED`, put the block's choices to
+the person and wait** — do not hand-port, raise a budget or pass `--allow-no-pack` on your own. After
+the choice, rerun the same command: it resumes from `port-state.json`. When it finishes: report the
+cost (`python3 tools/port-cost.py <modid> --print` for this session; `port-report.json` for the
+workers), the behaviour and visual findings, then Step 7 (deliver). Steps 0–6 below are what each
+stage does, and the manual path for a STOP you are asked to work by hand.
+
 ## Target parameters (this skill is parameterized — nothing is hardcoded to one target)
 A migration is defined by four parameters. **If the caller (or the `install-mod` skill)
 doesn't specify them, use the defaults** — which is exactly the common case and makes the
@@ -123,6 +147,28 @@ only genuinely headless environments fall back to a human-run command. Three par
    monitor fires on every `crash.ready` (the digest names the phase); you read the digest, fix the source,
    `./gradlew compileJava`, `touch $SIG_DIR/fix.done`; the phase relaunches. On `all-done`, every phase passed.
 
+## Phases and fresh contexts — the cheapest saving in a port (do this every time)
+A port's cost is mostly the conversation re-reading itself: in the measured ports it was 44–60% of
+everything each request read, and a raw compile log or grep dump pasted into it is re-read on every
+later request (7–24%). Two rules, neither of which changes what gets ported:
+
+1. **Run each PHASE in a fresh context.** The phases are **setup** (Steps 0–3b), **compile** (Step 4 +
+   4b; on a big port, a fresh context every ~10 passes or whenever the conversation is long),
+   **gates** (Step 5) and **deliver** (Steps 6–8). At each boundary:
+   `python3 tools/port-handoff.py mods/<modid> --done <phase> [--next "<action>"] [--blocker "<x>"] [--log /tmp/build.log]`.
+   It rewrites the one `## Hand-off` section of `MIGRATION.md` from the workspace itself (compile state,
+   local history, uncommitted files, the user's Scope choice, waiting catalogue additions) and prints a
+   resume prompt. Commit, then hand that prompt to a **fresh subagent** (the `Agent` tool) for the next
+   phase and keep only its short report; with no subagent tool, tell the user to start a new session
+   with it. The next context reads `MIGRATION.md`, not this conversation — so anything it needs must
+   be in that file.
+2. **Never put a raw log in the conversation.** Write it to a file and read the summary:
+   `python3 tools/compile-summary.py /tmp/build.log` (about 35 lines whatever the log's size: the count
+   only once `burndown-count.sh` accepts it, the CATALOG.md entries to read, the families not in the
+   catalogue, the files with most errors, and what GREW since the previous pass). For one file's errors,
+   `--file <path>`. For Gradle, Gate B and Gate C logs, `grep`/`tail` the few lines you need — never
+   `cat` a log, and never re-read one you already summarised.
+
 ## Step 0 — Locate the JAR and triage difficulty
 1. Resolve the input jar. If given a bare name, look in `$MODS_SOURCE_DIR`
    (from `.env.local`) and the CurseForge instances under it.
@@ -171,16 +217,81 @@ assumes official names.
 - `pack.mcmeta`: bump `pack_format` to 34 (resources) / 48 (data) for 1.21.1.
 - Delete `*.refmap.json` and the old `META-INF/jarjar/` (rebuilt by gradle).
 
+## Step 3b — Offer the port's scope: full, minimal, or chosen chunks (ASK before the build loop)
+Not every user wants every part of a mod, and the parts cost very different amounts. Before grinding
+errors, measure what can be left off and let the user choose.
+1. Run the FIRST compile with javac's error cap lifted and save the log:
+   `./gradlew compileJava --console=plain --init-script ../../tools/maxerrs.init.gradle > /tmp/first.log 2>&1`,
+   then `bash ../../tools/burndown-count.sh /tmp/first.log`. javac stops at **100** errors by default, and a
+   capped list only covers the files it reached first, so per-chunk shares from it are noise; the counter
+   refuses a capped log (exit 6). On a very large mod give Gradle room (`-Dorg.gradle.jvmargs=-Xmx8g`) or
+   the log ends in an OutOfMemoryError, which it also refuses.
+2. `python3 ../../tools/scope-menu.py --src src/main/java --resources src/main/resources --log /tmp/first.log --json /tmp/scope.json`.
+   It splits the mod into chunks the port could leave out: optional integrations (recipe viewers,
+   tooltips, accessory slots...), custom shaders, HUD overlays, particles, commands, config screens,
+   world generation, advancement triggers, mixin tweaks and mob families. For each chunk it gives
+   its estimated share of the port (the mean of its share of the start's compile errors and of its
+   lines, which tracked ten finished ports' real changes closely), a rough dollar range, how many references the rest of
+   the mod makes into it (each is a call site to cut), mixins/renderers it carries, and what the mod
+   does without it. Everything else is CORE and always ported.
+3. **If it found no optional chunks, skip the question** and port everything. Otherwise ask with
+   `AskUserQuestion`:
+   - Q1 (single choice): **Full port** (everything; the default) · **Minimal port** (core only; say the
+     total share and dollar range it skips) · **Choose chunks**.
+   - If "Choose chunks": up to four multi-select questions (four options each), one per chunk KIND
+     (integrations, visuals, gameplay systems, mob families), largest share first. Each option's
+     description: files, share of start errors, the `~$a-b` range, refs to cut, and the "without it" line.
+   - Say plainly what the numbers are: estimates, typically within a few points of a chunk's real share
+     of the changes; mixin chunks tend to run ~1.5x their estimate; the dollars are a range from a
+     handful of published ports; runtime work (renderers, Gate C) is extra.
+   - In a run with no one to ask (an unattended install), port everything.
+4. Record the choice in `MIGRATION.md` under **Scope**: the option, each chunk left out, and its share.
+5. For each chunk left out: delete its files (they stay in `decompiled-raw/`), cut every reference the
+   menu counted (registration lines, event subscriptions, mixin-config entries, the optional
+   `[[dependencies]]` block), and list it in `MANUAL_VALIDATION.md` under **Left out by choice** with
+   its "without it" line, so nobody mistakes it for a bug. Re-run `scope-menu.py` afterwards: a left-out
+   chunk must show 0 files and 0 refs.
+6. A chunk can be added back later: restore its files from `decompiled-raw/` and port them like any
+   other residual. Say so when the user picks a smaller scope.
+
 ## Step 4 — The build-error loop (the real work)
 Iterate. Each pass: run the compile, bucket the errors, fix by category, repeat.
 
+**First, apply the recipe pack for your axis** (no model work; measured −37% of start errors on Forge
+1.20 → 1.21.1 ports and −59% on 1.21.1 → 26.2, `docs/EVALS.md`):
+- Forge 1.20.x → NeoForge 1.21.1, after the Step 2 codemods:
+  `python3 ../../tools/apply-recipes.py --src src/main/java --recipes ../../tools/recipes/forge-1.20-to-neoforge-1.21.1.recipes.tsv`
+- 1.21.1 → 26.x: the multi-version template's rename table (`templates/multi-version/`, §W) is the pack.
+Commit the result on its own, so the recipe's rewrites are one reviewable diff. Its report lists the
+`choice` sites (pick an option per site) and `manual` pointers (the one catalogue entry to read) — work
+those before the generic buckets below. A recipe that made an error group GROW (the summary flags it)
+is a recipe bug: revert that group, note it in `catalog-additions.md`, and carry on.
+
+**Then run the residual loop instead of fixing errors yourself** (the default when the `claude` CLI is
+on PATH; measured in `docs/EVALS.md`, step 6/7 spike: P1 to a clean compile + green Gate B for under
+$1 of worker spend, P4 from 468 errors for ~$15):
 ```
-./gradlew compileJava --console=plain 2>&1 | tee /tmp/build.log
+python3 ../../tools/file-loop.py --work . --first-model sonnet --budget <$ cap> --log file-loop.jsonl
+```
+It compiles, hands small batches of error files to headless workers in clean contexts (Haiku/Sonnet,
+escalating per file, Opus last), sends cross-file rewrites to one subsystem worker, and at 0 errors runs
+the load-crash scan (§R1, client classes on the server) and the dead-override probe, fixing what they
+find. You, the orchestrator, read only its one-line events and the final `end` line, never the workers'
+transcripts. Use `--first-model haiku` on a small, mechanical port. If it stops above 0 (budget, last
+tier, plateau), read `compile-summary.py` on `file-loop-compile.log` and work what is left by hand with
+the bucket list below, or rerun it with `--subsystem` for a cross-file remainder.
+Without the `claude` CLI, work the loop by hand as below.
+
+```
+./gradlew compileJava --console=plain --init-script ../../tools/maxerrs.init.gradle > /tmp/build.log 2>&1
+python3 ../../tools/compile-summary.py /tmp/build.log
 ```
 - First run downloads NeoForge + decompiles/recompiles Minecraft — slow (minutes),
   then cached. If it fails at the *dependency/setup* stage, fix the workspace
   (gradle/neoforge versions, repos) before touching mod code.
-- Extract errors: `grep -E 'error:|\.java:[0-9]+:' /tmp/build.log`.
+- Read the **summary**, not the log (see *Phases and fresh contexts*): it validates the count,
+  names the CATALOG.md entries the errors match and lists the worst files. Work a file at a time with
+  `--file <path>`. A group under **GREW** means the last change put errors back (§X9) — look at it first.
 - **Bucket by symptom** and fix the whole bucket at once using `CATALOG.md`
   **Migration Pattern Catalog** (Pattern → Error → Fix). Any error NOT already in
   the catalog: fix it, then **record the new pattern in `$MIGRATE_WORKSPACE/catalog-additions.md`
@@ -289,6 +400,16 @@ list is the input to Step 5 — build the gate tests against it.
 
 ## Step 5 — Three test gates (escalating), then deploy (a clean compile is NOT a clean load)
 All three gates are required before calling a port done — see pipeline.md §6 for exact setup.
+**Drive Gate B with the gate loop** once the GameTests are in place:
+`python3 ../../tools/gate-loop.py --work . --budget <$ cap>`. It reruns `runGameTestServer`, hands each
+load crash or failing test to one headless worker (the deepest `Caused by:` plus the mod's own frames),
+and stops when green, when a fix changes nothing, or at the cap. Read its `green`/`stuck` line; fix by
+hand only what it leaves.
+**Drive Gate C the same way:** `python3 ../../tools/scaffold-gatec.py --work .` writes the client harness
+from the template (no model; skips a port that already has one), then
+`python3 ../../tools/gate-loop.py --work . --gatec launch,spawn,battle,gauntlet --budget <$ cap>` runs a real
+client per phase (Xvfb + software GL on a headless Linux box) and hands each failing phase to a worker.
+`tools/run-port.py` does recipes → compile → Gate B → Gate C in one command; read its last line.
 The progression climbs the crash surface: **compile → static scan → Gate A (pure logic) → Gate B
 (headless server load + tick) → Gate C (real client: load → entities → combat → items/UI).** Each
 gate catches a class the one before it structurally cannot — a clean compile lies, a green GameTest

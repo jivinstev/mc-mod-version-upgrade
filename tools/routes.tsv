@@ -1,0 +1,26 @@
+# Port routes: how to get from a source (loader, Minecraft) to the next stop on the way to a target.
+# tools/route.py chains these rows into hops; tools/port.py runs one hop at a time, finishing each
+# (compile + Gate B) before the next starts, so every hop's pack is applied to code that compiles.
+#
+# Columns (tab-separated):
+#   from_loader  from_mc (fnmatch glob)  to_loader  to_mc  kind  pack  setup
+#   kind:  loader   change of loader (and version), from a decompiled jar
+#          version  same loader, different Minecraft version family
+#          era      1.21.1 -> 26.x: the multi-version frame + its rename table, flattened (CATALOG §W/§V)
+#   pack:  the deterministic rewrites for the hop, or `-` when none exists yet. A hop with no pack
+#          STOPS the port unless --allow-no-pack: the workers would have to do the whole hop, which is
+#          exactly the expensive case, so it is a decision for the person, never a silent fallback.
+#   setup: how the decompiled names are made official: srg | intermediary | none
+#
+# Add a row when a new pack lands (tools/learn-pack.py writes one). Order matters only for ties:
+# the first matching row wins.
+forge	1.20*	neoforge	1.21.1	loader	tools/recipes/forge-1.20-to-neoforge-1.21.1.recipes.tsv	srg
+forge	1.19*	neoforge	1.21.1	loader	-	srg
+forge	1.18*	neoforge	1.21.1	loader	-	srg
+forge	1.16*	neoforge	1.21.1	loader	-	srg
+fabric	1.20*	neoforge	1.21.1	loader	-	intermediary
+fabric	1.21*	neoforge	1.21.1	loader	-	intermediary
+neoforge	1.20*	neoforge	1.21.1	version	-	none
+neoforge	1.21.[2-9]	neoforge	1.21.1	version	-	none
+neoforge	1.21.1[0-9]	neoforge	1.21.1	version	-	none
+neoforge	1.21.1	neoforge	26.2	era	templates/multi-version/versions/26.2.renames.hand.tsv	none

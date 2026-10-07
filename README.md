@@ -13,21 +13,46 @@ download and puts it in your mods folder. The second ports a mod that has no bui
 it decompiles the old jar, rewrites it through a catalogue of ~540 known API changes, and only calls
 it done once three test gates pass, the last of them a real Minecraft client.
 
+## Two ways to run a port
+
+**In Claude Code (recommended):** ask in plain words, e.g. `> Port <mod name> to 26.2`. Claude runs
+the port script, and when a stage stops it explains the choices and asks you before doing anything by
+hand. When the port finishes it delivers the jar and reports what the port cost.
+
+**The script alone:** `python3 tools/port.py "<mod name or path to the jar>" --to 26.2` (or `--to
+1.21.1`). There's no orchestrating session to pay for. When it stops, it prints what is left, what it
+has spent and your choices. Rerun the same command to resume. It still needs the `claude` CLI logged
+in, because the cheap fix workers it starts are Claude.
+
+**Taking an existing port further:** `python3 tools/port.py --from-port mods/<modid> --to 26.2` starts
+from a port you already finished (say, a 1.21.1 one) instead of a jar, and keeps its fixes.
+
+Either way the port runs hop by hop (for example Forge 1.20.1 → NeoForge 1.21.1 → 26.2). Each hop
+applies its recipe pack of known rewrites first, then sends what's left to small per-file workers
+(Haiku first, Sonnet and Opus only as needed). The port must then pass the gates: a headless server,
+behaviour tests written for the mod, a real client, and a screenshot review.
+
 ## Measured ports
 
-Every port here was run blind, from this repository alone, by a fresh Claude Code session:
+Every port here was run from this repository alone:
 
-| the mod | from → to | time | cost | gates passed |
+| the mod | from → to | first port (whole session) | now: the port's workers¹ | gates passed |
 |---|---|---|---|---|
-| a small MCreator food mod, 46 files | NeoForge 1.21.4 → 1.21.1 | 20 min | $6.88 | unit, server, client |
-| a GeckoLib library, 53 files, 6 mixins | Forge 1.20.1 → NeoForge 1.21.1 | 43 min | $30.31 | unit, server, client |
-| a shield mod, 64 items, 45 files | Forge 1.20.1 → NeoForge 26.2 | 1.8 h | ≈ $30.91¹ | unit, server, client (4 phases) |
+| a small MCreator food mod, 46 files | NeoForge 1.21.4 → 1.21.1 | $6.88, 20 min | **$0.69** | server, behaviour, client, screenshots |
+| a GeckoLib library, 53 files, 6 mixins | Forge 1.20.1 → NeoForge 1.21.1 | $30.31, 43 min | **$5.24** | server, behaviour, client, screenshots |
+| a shield mod, 64 items, 45 files | Forge 1.20.1 → NeoForge 26.2 (two hops) | ≈ $30.91², 1.8 h | **$5.64**³ | server, client (4 phases), screenshots |
+
+¹ What the per-file workers and gate checks cost, measured from their own logs. It leaves out the
+session that drives the port, which the next round of full replays will measure. That cost should be
+small, because the session now only starts the script and answers its stops.
+² Estimated: Claude Code on a desktop records tokens, not dollars, so this one is its exact token
+counts at list prices ([`tools/model-prices.tsv`](tools/model-prices.tsv)).
+³ One command, both hops (`tools/port.py`): $5.40 of workers, plus $0.24 for an enchantment fix that Gate B now requires (its content census found the port had dropped three). An earlier run with hand fixes, before the script existed, cost $12.57. Details in [`docs/EVALS.md`](docs/EVALS.md).
 
 Every port also sends back what it taught, written without the mod's name, as a pull request to the
-catalogue: those three contributed 31 lessons between them (22 new entries, 9 additions). Each records its own cost in
-[`docs/port-costs.tsv`](docs/port-costs.tsv), so the next person can see what a mod of that size is
-likely to take. ¹ Estimated: Claude Code on a desktop records tokens, not dollars, so this one is
-its exact token counts at list prices ([`tools/model-prices.tsv`](tools/model-prices.tsv)).
+catalogue: the first three contributed 31 lessons between them (22 new entries, 9 additions). Each
+records its own cost in [`docs/port-costs.tsv`](docs/port-costs.tsv), so the next person can see what
+a mod of that size is likely to take.
 
 ## Quick start: on your computer
 
@@ -124,6 +149,7 @@ author's permission. The MIT licence covers this tool, never the mods it ports.
 | [docs/USING.md](docs/USING.md) | Installing vs. porting, where ports go, prerequisites |
 | [CATALOG.md](CATALOG.md) | The ~540 migration lessons: pattern → error → fix |
 | [SUPPORTED_VERSIONS.md](SUPPORTED_VERSIONS.md) | Which Minecraft versions are tested |
+| [docs/EVALS.md](docs/EVALS.md) | How much of a port the catalogue and its recipes cover, measured per port profile |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | The safety gates, and sending back what your port taught |
 
 ## Licence

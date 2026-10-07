@@ -58,6 +58,42 @@ PY2
 grep -q 'these sessions also touched other mods' <<<"$out" && grep -q '\$1.50' <<<"$out" \
   && ok "dollars come from the session's recorded total; a mixed session is flagged" || bad "print: $out"
 
+echo "0b. context-profile.py (fixture transcript)"
+mv "$J/S1.jsonl" "$T/S1.keep"; mv "$J/S1" "$T/S1dir.keep"; mv "$J/S2.jsonl" "$T/S2.keep"
+python3 - "$J/S5.jsonl" <<'PY4'
+import json, sys
+L = []
+def req(rid, ctx, tool=None):
+    content = [{"type": "tool_use", "id": tool[0], "name": tool[1], "input": tool[2]}] if tool else []
+    L.append({"type": "assistant", "requestId": rid, "timestamp": "2026-09-30T13:00:00Z", "message": {
+        "model": "claude-opus-5-5", "content": content,
+        "usage": {"input_tokens": 0, "output_tokens": 10, "cache_read_input_tokens": ctx, "cache_creation_input_tokens": 0}}})
+def res(tid, chars):
+    L.append({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tid, "content": "x" * chars}]}})
+req("q1", 1000, ("t1", "Read", {"file_path": "/w/mods/fakeport/../CATALOG.md"}))
+res("t1", 4000)                                                      # 1000 tokens of catalogue
+req("q2", 2000, ("t2", "Bash", {"command": "cd /w/mods/fakeport && ./gradlew compileJava"}))
+res("t2", 800)                                                       # 200 tokens of build output
+req("q3", 2200); req("q4", 2200)
+req("q5", 300)                                                       # compaction: nothing carried after this
+req("q6", 400)
+open(sys.argv[1], "w").write("\n".join(json.dumps(x) for x in L) + "\n")
+PY4
+P5="$(python3 - <<'PY5'
+import importlib.util, pathlib, os
+spec = importlib.util.spec_from_file_location("cp", "tools/context-profile.py"); cp = importlib.util.module_from_spec(spec); spec.loader.exec_module(cp)
+p = cp.profile("fakeport", pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
+print(len(p["reqs"]), p["carried"]["catalogue"], p["carried"]["build"], p["sizes"]["catalogue"])
+PY5
+)"
+# catalogue (1000 tok) is carried by q2,q3,q4 = 3000; build (200 tok) by q3,q4 = 400; the compaction at q5 stops both
+[ "$P5" = "6 3000 400 1000" ] && ok "context-profile charges each result for the requests that carried it, and a compaction stops it" \
+  || bad "context-profile: $P5"
+out="$(python3 tools/context-profile.py fakeport 2>&1)"
+grep -q 'FLOOR' <<<"$out" && grep -q 'fewer requests' <<<"$out" && grep -q 'without catalogue results' <<<"$out" \
+  && ok "context-profile prints the floor, the categories and the what-ifs" || bad "context-profile output: $out"
+rm "$J/S5.jsonl"; mv "$T/S1.keep" "$J/S1.jsonl"; mv "$T/S1dir.keep" "$J/S1"; mv "$T/S2.keep" "$J/S2.jsonl"
+
 echo "1. finish-port.py"
 out="$(python3 tools/finish-port.py fakeport --workspace "$WS" --dest none --env /dev/null 2>&1)"; code=$?
 [ $code = 0 ] && grep -q 'stays in the workspace' <<<"$out" && ok "no destination: keeps the port in the workspace, exit 0" || bad "dest none (exit $code)"

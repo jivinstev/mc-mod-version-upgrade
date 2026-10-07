@@ -16,7 +16,8 @@
 #   ./gradlew compileJava -Pmc=26.2 --console=plain > /tmp/b.log 2>&1
 #   tools/burndown-count.sh /tmp/b.log
 #
-# Exit 0 = a number you can quote. 2 = never compiled. 3 = no log. 4 = parse abort. 5 = javac crashed.
+# Exit 0 = a number you can quote. 2 = never compiled. 3 = no log. 4 = parse abort. 5 = javac crashed
+# or ran out of memory. 6 = javac's error cap was hit (tools/maxerrs.init.gradle).
 #   - X5a: a build that never reached compilation has 0 error: lines and that is NOT 0 errors.
 #   - X5b: gradle echoes compiler output twice -> count UNIQUE file:line, not lines.
 #   - X13: in a §W tree, prepareSources failing also yields 0 error: lines.
@@ -64,6 +65,29 @@ if [ "$N" -eq 0 ] && grep -qE 'An exception has occurred in the compiler' "$LOG"
   echo "COMPILER CRASH -- javac threw, so it printed no error: lines. This is NOT 0 errors:"
   grep -E 'An exception has occurred in the compiler|^java\.lang\.[A-Za-z]+' "$LOG" | head -3
   exit 5
+fi
+# X5e: javac can run OUT OF MEMORY after printing thousands of errors (a 26.x era jump on a
+# 1,000-file mod did, at 5000). Those lines are a prefix of the real list, not a count.
+if grep -qE 'java\.lang\.OutOfMemoryError' "$LOG"; then
+  echo "NOT A COUNT -- the build ran out of memory after $N error location(s); that is a prefix, not a total."
+  grep -m1 -E 'java\.lang\.OutOfMemoryError' "$LOG"
+  exit 5
+fi
+# X5f: javac's own error CAP. It stops at 100 by default and says "only showing the first N errors,
+# of M total" -- a capped list is a prefix of whichever files javac reached first, so neither the count
+# nor any per-file share is real. Lift it with tools/maxerrs.init.gradle.
+if grep -qE 'only showing the first [0-9]+ errors' "$LOG"; then
+  echo "NOT A COUNT -- javac's error cap: $(grep -oE 'only showing the first [0-9]+ errors, of [0-9]+ total' "$LOG" | tail -1)."
+  echo "Re-run with --init-script tools/maxerrs.init.gradle; a capped list is a prefix, not a total."
+  exit 6
+fi
+# X5d: the task can START and fail before javac runs -- an unresolvable dependency fails
+# compileJava itself ("> Task :compileJava FAILED" + "Could not resolve"), which the RAN check
+# above accepts. Zero error: lines from a FAILED compile task is not zero errors.
+if [ "$N" -eq 0 ] && grep -qE '^> Task :(compileJava|compileTestJava) FAILED' "$LOG"; then
+  echo "NOT A COUNT -- compileJava FAILED without a single javac error (it never compiled):"
+  grep -E "^(\* What went wrong|> |   > )" "$LOG" | grep -v '^> Task' | head -4
+  exit 2
 fi
 JAVAC=$(grep -oE '^[0-9]+ error(s)?$' "$LOG" | tail -1)
 echo "errors = $N   (compileJava: $RAN${JAVAC:+, javac said: $JAVAC})"

@@ -11,6 +11,9 @@
 //   4. build.gradle's `client` run wiring (-Pboottest/-Ptestmode/-Pbattlecount/-Pbattleticks -> systemProperty) is
 //      ALREADY in the template, parameterized by mod_id — nothing to add. Its ABSENCE is a silent hang; see pipeline.md
 //      §6e anti-hang checklist #1. (Verify it survived any build.gradle edits.)
+//   5. Screenshots: every phase saves a few frames as run*/screenshots/gatec-<phase>-<what>.png (off with
+//      -Dexamplemod.shots=false). tools/visual-review.py has a cheap model look at them; the frames are also
+//      what a person reviews for MANUAL_VALIDATION.md.
 // Run via tools/client-boot-loop.sh <launch|spawn|battle|gauntlet>.
 package com.example.examplemod.test;
 
@@ -115,6 +118,86 @@ public class ClientBootSmokeTest {
 
     private enum Phase { WAIT_TITLE, WAIT_INGAME, SURVIVE, GAUNTLET, DONE }
     private static Phase phase = Phase.WAIT_TITLE;
+    private static final boolean SHOTS = !"false".equals(System.getProperty("examplemod.shots"));
+
+    /** Save the frame as screenshots/gatec-<name>.png. Never fails the gate: a frame is evidence, not a check. */
+    private static void shot(Minecraft mc, String name) {
+        if (!SHOTS) return;
+        try {
+            net.minecraft.client.Screenshot.grab(mc.gameDirectory, "gatec-" + name + ".png",
+                mc.getMainRenderTarget(), msg -> { });
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [SHOT] gatec-" + name + ".png");
+        } catch (Throwable t) {
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [SHOT] gatec-" + name + " not taken: " + t);
+        }
+    }
+
+    /** Call a couple of ticks BEFORE shot(): toasts leave on the next frame, not the one being captured. */
+    private static void clearToasts(Minecraft mc) {
+        if (mc.screen instanceof net.minecraft.client.gui.screens.PauseScreen) mc.setScreen(null);
+        mc.getToasts().clear();   // "new recipes" / tutorial toasts would cover part of the frame
+        mc.getTutorial().setStep(net.minecraft.client.tutorial.TutorialSteps.NONE);
+    }
+
+    /** Point the camera at the ground ahead, where spawned mobs stand and placed blocks sit. */
+    private static void lookAhead(Minecraft mc, float pitch) {
+        if (mc.player == null) return;
+        mc.player.setYRot(0f); mc.player.setXRot(pitch);
+        mc.player.yRotO = 0f; mc.player.xRotO = pitch;
+    }
+
+    /**
+     * Clear a flat, open stage around the player before spawning, so the frames show the mobs rather than
+     * a jungle or a hillside in front of them (a cheap model reviewing the frame cannot judge what it
+     * cannot see). Runs on the server thread. The world itself stays a normal one, so worldgen still runs.
+     */
+    private static void clearStage(ServerLevel level, BlockPos center) {
+        var air = net.minecraft.world.level.block.Blocks.AIR.defaultBlockState();
+        var floor = net.minecraft.world.level.block.Blocks.GRASS_BLOCK.defaultBlockState();
+        for (int dx = -18; dx <= 18; dx++) {
+            for (int dz = -14; dz <= 14; dz++) {
+                for (int dy = 0; dy <= 8; dy++) level.setBlock(center.offset(dx, dy, dz), air, 2);
+                level.setBlock(center.offset(dx, -1, dz), floor, 2);
+            }
+        }
+    }
+
+    /**
+     * Put the camera a few blocks from the nearest of the mod's mobs, facing it, so a frame shows the mob
+     * itself rather than a speck on the horizon. The player is moved on the server (a creative player cannot
+     * be hurt); call it a few ticks before shot() so the client has the new position.
+     */
+    private static void lookAtModMobs(Minecraft mc) {
+        if (mc.player == null || mc.level == null) return;
+        Entity best = null; double bestD = Double.MAX_VALUE;
+        for (Entity e : mc.level.entitiesForRendering()) {
+            if (e == mc.player || !e.isAlive()) continue;
+            if (!"examplemod".equals(EntityType.getKey(e.getType()).getNamespace())) continue;
+            double d = e.distanceToSqr(mc.player);
+            if (d < bestD) { bestD = d; best = e; }
+        }
+        if (best == null) return;
+        double dist = Math.max(3.0, best.getBbWidth() * 2.5 + 2.0);   // back off further for big mobs
+        double ax = mc.player.getX() - best.getX(), az = mc.player.getZ() - best.getZ();
+        double len = Math.max(1e-3, Math.sqrt(ax * ax + az * az));
+        double px = best.getX() + ax / len * dist, pz = best.getZ() + az / len * dist;
+        double py = best.getY() + Math.max(0.5, best.getBbHeight() * 0.4);
+        double dx = best.getX() - px, dz = best.getZ() - pz;
+        double dy = (best.getY() + best.getBbHeight() / 2) - (py + mc.player.getEyeHeight());
+        float yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
+        float pitch = (float) -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)));
+        IntegratedServer server = mc.getSingleplayerServer();
+        final java.util.UUID id = mc.player.getUUID();
+        if (server != null) {
+            server.execute(() -> {
+                ServerPlayer sp = server.getPlayerList().getPlayer(id);
+                if (sp != null) sp.teleportTo(server.overworld(), px, py, pz, yaw, pitch);
+            });
+        }
+        mc.player.setYRot(yaw); mc.player.setXRot(pitch);
+        mc.player.yRotO = yaw; mc.player.xRotO = pitch;
+    }
+
     private static int ticks = 0;   // reset on each phase transition
     private static int stuckTicks;
     // Set by the first client tick we are handed. Frames are counted separately, because from
@@ -238,6 +321,10 @@ public class ClientBootSmokeTest {
     }
 
     private static void createFreshWorld(Minecraft mc, String levelName) {
+        // A client whose window loses focus opens the pause menu and PAUSES the integrated server, so a
+        // person switching to another app mid-run froze the battle and photographed the menu instead of
+        // the mod. The harness must not depend on where the person's focus is.
+        mc.options.pauseOnLostFocus = false;
         LevelSettings settings = new LevelSettings(
             levelName,
             GameType.CREATIVE,     // player can't die / can fly — mobs are the thing under test
@@ -306,6 +393,7 @@ public class ClientBootSmokeTest {
         final BlockPos center = mc.player.blockPosition();
         server.execute(() -> {
             ServerLevel level = server.overworld();
+            clearStage(level, center);
             List<ResourceLocation> spawned = new ArrayList<>();
             List<ResourceLocation> failed = new ArrayList<>();
             int i = 0;
@@ -328,6 +416,7 @@ public class ClientBootSmokeTest {
     private static void spawnBattle(Minecraft mc, IntegratedServer server) {
         final BlockPos center = mc.player.blockPosition();
         server.execute(() -> {
+            clearStage(server.overworld(), center);
             ServerLevel level = server.overworld();
             RandomSource rand = level.getRandom();
             teamA.clear();
@@ -374,6 +463,9 @@ public class ClientBootSmokeTest {
         if (MODE == Mode.BATTLE) {
             server.execute(ClientBootSmokeTest::driveBattle); // keep the teams locked onto each other
         }
+        if (ticks == SURVIVE_TICKS / 2 - 6 || ticks == SURVIVE_TICKS - 26) { lookAtModMobs(mc); clearToasts(mc); }
+        if (ticks == SURVIVE_TICKS / 2) shot(mc, MODE == Mode.BATTLE ? "battle-mid" : "spawn-world");
+        if (ticks == SURVIVE_TICKS - 20) shot(mc, MODE == Mode.BATTLE ? "battle-end" : "spawn-late");
         if (++ticks < SURVIVE_TICKS) return;
 
         if (MODE == Mode.BATTLE) {
@@ -452,6 +544,14 @@ public class ClientBootSmokeTest {
         GauntletStep(int d) { this.durationTicks = d; }
     }
 
+    /** Steps whose state is visible on screen, so a frame of it is worth keeping. */
+    private static boolean shotStep(GauntletStep step) {
+        return switch (step) {
+            case RENDER_ITEMS, OPEN_GUIS, EQUIP_ARMOR, PLACE_BLOCKS, USE_ITEMS, APPLY_EFFECTS, OPEN_CREATIVE -> true;
+            default -> false;
+        };
+    }
+
     /** Steps that own the on-screen GUI for their whole duration (closed on exit); others clear leftovers on entry. */
     private static boolean stepWantsScreen(GauntletStep step) {
         return step == GauntletStep.RENDER_ITEMS || step == GauntletStep.OPEN_GUIS;
@@ -481,6 +581,14 @@ public class ClientBootSmokeTest {
             enterGauntletStep(step, mc, server);
         }
         tickGauntletStep(step, mc, gauntletStepTicks); // per-tick work (e.g. swap which GUI is open)
+        if (shotStep(step)) {
+            if (gauntletStepTicks == 1 && step == GauntletStep.PLACE_BLOCKS) lookAhead(mc, 40f);
+            if (gauntletStepTicks == step.durationTicks * 2 / 3 - 2) clearToasts(mc);
+            if (gauntletStepTicks == step.durationTicks * 2 / 3) {
+                shot(mc, "gauntlet-" + String.format(Locale.ROOT, "%02d", gauntletStep + 1) + "-"
+                    + step.name().toLowerCase(Locale.ROOT));
+            }
+        }
         if (++gauntletStepTicks >= step.durationTicks) {
             exitGauntletStep(step, mc);
             gauntletStep++;
@@ -545,16 +653,24 @@ public class ClientBootSmokeTest {
         }
         @Override public boolean isPauseScreen() { return false; } // keep the integrated server ticking
         @Override public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-            this.renderBackground(g, mouseX, mouseY, partialTick);
-            int perRow = Math.max(1, (this.width - 16) / 18);
-            int x = 8, y = 8, col = 0;
+            // A plain backdrop, and no super.render: Screen.render draws the blurred menu background again
+            // ON TOP of whatever was drawn first, which left this sheet unreadable in every Gate C frame.
+            g.fill(0, 0, this.width, this.height, 0xFF404040);
+            // Scale the sheet up to fill the screen (1x-4x), so a frame of it shows each item's real texture.
+            int n = Math.max(1, items.size());
+            float s = Math.max(1f, Math.min(4f, (float) Math.sqrt((this.width - 16f) * (this.height - 16f) / (n * 18f * 18f))));
+            int perRow = Math.max(1, (int) ((this.width - 16) / (18 * s)));
+            g.pose().pushPose();
+            g.pose().translate(8, 8, 0);
+            g.pose().scale(s, s, 1f);
+            int col = 0, row = 0;
             for (Item item : items) {
                 ItemStack stack = new ItemStack(item);
-                g.renderItem(stack, x, y);                          // runs the model resolve + ItemProperties overrides
-                g.renderItemDecorations(this.font, stack, x, y);    // count / durability bar / cooldown overlays
-                if (++col >= perRow) { col = 0; x = 8; y += 18; } else { x += 18; }
+                g.renderItem(stack, col * 18, row * 18);                          // model resolve + ItemProperties overrides
+                g.renderItemDecorations(this.font, stack, col * 18, row * 18);    // count / durability / cooldown overlays
+                if (++col >= perRow) { col = 0; row++; }
             }
-            super.render(g, mouseX, mouseY, partialTick);
+            g.pose().popPose();
         }
     }
 

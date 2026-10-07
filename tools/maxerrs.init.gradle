@@ -1,0 +1,11 @@
+// Lift javac's error cap for one build, so a count or a per-file share covers the WHOLE error list.
+//
+// WHY: javac stops reporting at 100 errors by default ("only showing the first 100 errors, of N total"),
+// and a raw decompile of a mod has hundreds to thousands. A capped log under-counts and, worse, reports
+// only the files javac happened to reach first -- so any per-file or per-chunk share built from it is
+// noise. tools/burndown-count.sh refuses a capped log; this is the fix.
+//
+// USE:  ./gradlew compileJava --console=plain --init-script ../../tools/maxerrs.init.gradle > first.log 2>&1
+// It applies after the build has configured its own javac options, so it wins over a port's own -Xmaxerrs.
+gradle.projectsEvaluated { gradle.rootProject.allprojects { tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs += ['-Xmaxerrs', '100000', '-Xmaxwarns', '0'] } } }
