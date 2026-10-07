@@ -231,6 +231,11 @@ out="$(python3 tools/apply-recipes.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "recipes: auto groups rewrite and count, a dead group is named, choice sites stay untouched" \
   || bad "apply-recipes self-check: $out"
 
+for pk in tools/recipes/*.recipes.tsv; do
+  out="$(python3 tools/apply-recipes.py --check-pack --recipes "$pk" 2>&1)" \
+    && ok "shipped pack $(basename "$pk") parses and names only catalogue entries" || bad "pack $pk: $out"
+done
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

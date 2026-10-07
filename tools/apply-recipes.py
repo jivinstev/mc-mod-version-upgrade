@@ -154,16 +154,33 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report, do not write")
     ap.add_argument("--sites", type=int, default=5, help="sites listed per choice/manual group")
     ap.add_argument("--json", help="also write the full report here")
+    ap.add_argument("--check-pack", action="store_true",
+                    help="validate --recipes only: it parses, and every '#@' id is a CATALOG.md entry")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
+    if a.check_pack:
+        return check_pack(a.recipes)
     if not (a.src and a.recipes):
         ap.error("--src and --recipes are required")
     report, groups = apply(a.src, a.recipes, a.dry_run, a.sites)
     print("\n".join(render(report, groups)))
     if a.json:
         pathlib.Path(a.json).write_text(json.dumps(report, indent=1), encoding="utf-8")
+    return 0
+
+
+def check_pack(pack):
+    _r = importlib.util.spec_from_file_location("rb", ROOT / "tools/recipe-bench.py")
+    rb = importlib.util.module_from_spec(_r); _r.loader.exec_module(rb)
+    ids = {i.split("#")[0] for i, _b in rb.catalogue_entries((ROOT / "CATALOG.md").read_text(encoding="utf-8"))}
+    ps.load_renames(str(pack))   # exits on a malformed, duplicate or identity row
+    groups = load_pack(pack)
+    unknown = [g["id"] for g in groups if g["id"] not in ids]
+    if unknown:
+        print(f"{pack}: '#@' ids that are not CATALOG.md entries: {' '.join(unknown)}"); return 1
+    print(f"{pack}: {len(groups)} groups ({sum(g['kind'] == 'auto' for g in groups)} auto), every id a catalogue entry")
     return 0
 
 
