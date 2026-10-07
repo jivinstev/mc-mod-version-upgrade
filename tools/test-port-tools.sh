@@ -237,6 +237,11 @@ for pk in tools/recipes/*.recipes.tsv; do
     && ok "shipped pack $(basename "$pk") parses and names only catalogue entries" || bad "pack $pk: $out"
 done
 
+echo "13. file-loop.py (model-free parts: load-crash scans, supertype filter, generated-path mapping, batching)"
+out="$(python3 tools/file-loop.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching" \
+  || bad "file-loop self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
