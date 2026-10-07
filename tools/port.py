@@ -181,7 +181,7 @@ def fix_hoisted_spec(src):
         line = m.group(0).strip()
         body = body[:k].rstrip() + "\n\n   " + line + "\n" + body[k:]
         f.write_text(body, encoding="utf-8")
-        fixed.append(str(f.relative_to(src)))
+        fixed.append(f.relative_to(src).as_posix())
     return fixed
 
 
