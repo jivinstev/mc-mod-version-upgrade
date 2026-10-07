@@ -203,7 +203,8 @@ out="$(python3 tools/census-hypotheses.py --census "$H" --bench "$H/b" 2>&1)"
 grep -q '| P1 | 1 | 4 | 25% / 25% | 75% | 0% | 75% / 50% | 50% | 25% (1 rows) | 50% |' <<<"$out" \
   && ok "hypotheses: repeats exact/loose, cross-port 2+/3+ mods, helper routing, file locality, optional code" || bad "census-hypotheses: $(grep '| P1' <<<"$out")"
 
-out="$(python3 -c "import importlib.util as u, pathlib; s = u.spec_from_file_location('h', 'tools/census-hypotheses.py'); m = u.module_from_spec(s); s.loader.exec_module(m); print(m.h3(m.load(pathlib.Path('$H')), min_hunks=1))" 2>&1)"
+# the path goes in argv, not the -c text: Git Bash converts /tmp/... only in arguments
+out="$(python3 -c "import importlib.util as u, pathlib, sys; s = u.spec_from_file_location('h', 'tools/census-hypotheses.py'); m = u.module_from_spec(s); s.loader.exec_module(m); print(m.h3(m.load(pathlib.Path(sys.argv[1])), min_hunks=1))" "$H" 2>&1)"
 [ "$out" = "[('9', 4, 3, 1, 1.0)]" ] && ok "H3: an entry's fixes counted across 3 mods, one shape covering all of them" || bad "h3: $out"
 
 echo "9. scope-menu.py (chunks, error shares and references on a synthetic mod)"
