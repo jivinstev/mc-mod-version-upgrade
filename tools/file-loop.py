@@ -345,6 +345,22 @@ def finding_round(a, work, sigs, entries, note, kind, hits, idx=None):
     return spent
 
 
+def trim_round(plan, left):
+    """plan: [(kind, item, estimated usd)] in priority order -> (the ones that fit in `left`, their cost).
+    Always keeps the first, so a round never dispatches nothing while money remains."""
+    kept, cost = [], 0.0
+    for kind_, item, est in plan:
+        if kept and cost + est > left:
+            continue
+        kept.append((kind_, item)); cost += est
+    return kept, cost
+
+
+# what one worker request costs before this run has measured its own (per model; a batch job is priced
+# per file): measured means from the ports in docs/EVALS.md, rounded up
+PRIOR_USD = {"haiku": 0.05, "sonnet": 0.08, "opus": 0.40}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work", help="the Gradle project (src/main/java is edited in place)")
@@ -392,7 +408,7 @@ def main():
     note(event="start", errors=n, sources=a.sources)
     if n is None:
         print("the start does not compile to a count:", errs); return 2
-    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}, "xtries": {}}
+    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}, "xtries": {}, "cost_of": {}}
     # the escalation ladder: (model, single-shot?). Single-shot tiers go first in --mode single (the
     # default): one request per file with script-gathered context; agent tiers are the fallback.
     ladder = ([(m, True) for m in ("haiku", "sonnet")] if a.mode == "single" else []) + [(m, False) for m in TIERS]
@@ -434,6 +450,21 @@ def main():
                     jobs.append((files, m, a.subsystem))
             if not jobs and not singles and not multi:
                 break
+            # keep the round inside the budget: a round dispatches dozens of workers at once, so a check
+            # only BETWEEN rounds overran $15 by $4.80 on a large port. Each job is priced at this run's
+            # own average for its model (a fixed prior until there is one); the round takes jobs while
+            # they fit, always at least one, and the rest wait for the next round.
+            left = a.budget - state["spent"]
+            avg = lambda m: (state["cost_of"][m][1] / state["cost_of"][m][0]) if state["cost_of"].get(m, [0])[0] \
+                else PRIOR_USD.get(m, 0.1)
+            plan_ = ([("m", None, 2 * avg("sonnet"))] if multi else []) + \
+                [("j", j, avg(j[1])) for j in jobs] + [("s", sj, avg(sj[1])) for sj in singles]
+            kept, cost = trim_round(plan_, left)
+            if len(kept) < len(plan_):
+                note(event="budget-trim", round=rnd, kept=len(kept), of=len(plan_), left=round(left, 3),
+                     est=round(cost, 3))
+            multi = multi if any(k == "m" for k, _ in kept) else None
+            jobs = [i for k, i in kept if k == "j"]; singles = [i for k, i in kept if k == "s"]
             snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java")}
             from concurrent.futures import ThreadPoolExecutor
 
@@ -458,6 +489,7 @@ def main():
             results += sresults
             for res in results:
                 state["spent"] += res["usd"]; note(event="worker", round=rnd, **res)
+                c_ = state["cost_of"].setdefault(res.get("model") or "?", [0, 0.0]); c_[0] += 1; c_[1] += res["usd"] or 0
             before = n
             n, errs = compile_(work, clog, a.heap)
             if n is None and any("PARSE ABORT" in l for l in errs):
@@ -604,6 +636,9 @@ def self_check():
             ok = ok and isinstance(r_, dict) and r_["usd"] == (0.5 if applied else 1.5)
         b, _by = batches([("a", 1, "x")] * 50 + [("b", 1, "x")] * 3 + [("c", 1, "x")] * 3, 4, 40)
         ok = ok and b == [["a"], ["b", "c"]]
+    k_, c_ = trim_round([("m", 1, 0.2), ("s", 2, 0.5), ("s", 3, 0.05), ("s", 4, 0.1)], 0.4)
+    ok &= [i for _k, i in k_] == [1, 3, 4] and abs(c_ - 0.35) < 1e-9          # 0.5 does not fit; later ones do
+    ok &= [i for _k, i in trim_round([("s", 9, 3.0)], 0.1)[0]] == [9]       # never an empty round
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
     return 0 if ok else 1
 
