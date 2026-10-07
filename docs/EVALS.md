@@ -430,3 +430,56 @@ What the spike showed:
 - **Gaps found:** the override probe needs supertype awareness on library mods (164 hits on P4, 60
   of them naming a vanilla method, nearly all false). Fix-once-apply-everywhere (H1) did not get a fair
   test: workers wrote their `RULE` rows as prose, and the parser now tolerates that.
+
+## Single-shot workers vs the spike's agent workers (2026-10-07)
+
+`tools/singleshot.py`, the default in `tools/file-loop.py`, works differently from the spike's agents.
+A script gathers each file's errors, the catalogue entries they match, and the target's own declarations
+of the types those errors name. Coverage includes nested types, enum constants and the members the code
+calls. A worker with no tools and a ~1k-token system prompt then answers once with SEARCH/REPLACE edits.
+
+Every edit is checked before it lands:
+
+- **All or nothing:** it applies whole or not at all, and only to the worker's own file.
+- **Indentation-tolerant:** the search text may be matched ignoring indentation, but only if the match is
+  unique.
+- **Guarded:** edits are rejected if they unbalance brackets, delete a large share of the file, comment
+  code out, add `UnsupportedOperationException` or empty method bodies.
+- **Contained:** a round that still breaks a file's syntax reverts only that file.
+- **Escalated:** files that keep failing move up the ladder: Haiku single-shot (no thinking) → Sonnet
+  single-shot → Sonnet agent → Opus agent.
+
+`tools/run-port.py` runs recipes → loop → static scan → override probe → Gate B loop. Same starts as the
+spike; the dollars are workers only.
+
+| | P1 agent spike | P1 single-shot | P4 agent spike | P4 single-shot |
+|---|---|---|---|---|
+| Compile | 45 → 0 | 45 → 0 | 468 → 0 | 468 → 0 |
+| Static scan / dead overrides fixed | — / 16–18 | — / 16 | — (by hand at Gate B) / — | 7 / 8 |
+| Gate B | green | green on the first run | green after 3 hand-driven fixes | green on the first run |
+| Worker dollars | $0.82–0.88 | **$0.51** | $15.33 | **$6.83** |
+| Published whole-port baseline | $6.88 | | $30.31 | |
+
+P4 single-shot by tier:
+
+| Tier | Calls | Edits applied | Cost |
+|---|---|---|---|
+| Haiku single-shot, no thinking | 101 | 92 | $0.67 |
+| Sonnet single-shot | 46 | 45 | $1.21 |
+| Agent workers (subsystem, scan, fallbacks) | 7 | — | $4.95 |
+
+**One subsystem worker** (the cross-file capabilities → attachments and packets → payloads rewrite) cost
+**$3.69, 54% of the run**. It is the next thing to make cheaper.
+
+Two fixes the first attempts forced, both now in the tool:
+
+- **Haiku re-indented its search text.** 9 of 10 edits missed until the whitespace-tolerant match was
+  added.
+- **Thinking was 90% of a Haiku answer.** On one 12-error file it cost $0.057 with thinking and $0.0064
+  without, and both edits applied.
+
+**Worker-proposed rewrites (H1), tested with no model spend.** Each rewrite row the spike's P4 workers
+proposed was applied alone to P4's post-recipe start and compiled. Of 33 rows, 13 matched nothing and 15
+did not reduce errors. The 3 that helped saved 1–9 errors each, out of 468. Rewrites written by workers
+are not worth chasing; repeated diffs would need to be turned into rules by the script itself, which is
+not built.
