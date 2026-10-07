@@ -233,6 +233,16 @@ errors, measure what can be left off and let the user choose.
 ## Step 4 — The build-error loop (the real work)
 Iterate. Each pass: run the compile, bucket the errors, fix by category, repeat.
 
+**First, apply the recipe pack for your axis** (no model work; measured −37% of start errors on Forge
+1.20 → 1.21.1 ports and −59% on 1.21.1 → 26.2, `docs/EVALS.md`):
+- Forge 1.20.x → NeoForge 1.21.1, after the Step 2 codemods:
+  `python3 ../../tools/apply-recipes.py --src src/main/java --recipes ../../tools/recipes/forge-1.20-to-neoforge-1.21.1.recipes.tsv`
+- 1.21.1 → 26.x: the multi-version template's rename table (`templates/multi-version/`, §W) is the pack.
+Commit the result on its own, so the recipe's rewrites are one reviewable diff. Its report lists the
+`choice` sites (pick an option per site) and `manual` pointers (the one catalogue entry to read) — work
+those before the generic buckets below. A recipe that made an error group GROW (the summary flags it)
+is a recipe bug: revert that group, note it in `catalog-additions.md`, and carry on.
+
 ```
 ./gradlew compileJava --console=plain --init-script ../../tools/maxerrs.init.gradle > /tmp/build.log 2>&1
 python3 ../../tools/compile-summary.py /tmp/build.log
