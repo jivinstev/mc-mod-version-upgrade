@@ -16,6 +16,10 @@ H1x cross-port    The same edit recurs in OTHER ports -- the test of whether a r
                    off again (H1 alone only says a port repeats itself). Measured: share of code hunks
                    whose loose shape (entry/cluster + removed/added identifiers) appears in 2+ and 3+
                    different MODS (a mod's 1.21.1 and 26.2 rows count once).
+H3  choice points  A catalogue entry's real fixes fall into a FEW repeatable edits, so the model can pick
+                   one of k options instead of writing the fix. Measured, per entry hit in 3+ mods with
+                   20+ hunks: the share of its hunks covered by its top-3 loose shapes (removed/added
+                   identifiers); reported as entries (and their hunks) at 50%+ and 80%+ coverage.
 H2  compat shims   Ports route judgement changes through local helpers (an NBT shim, a MobType shim, the
                    §W5 pairs) that a shared library could supply once. Measured: share of code hunks that
                    call a class the port ADDED (a new file) from 3+ hunks in 2+ files; and, in --detail,
@@ -69,6 +73,22 @@ def cross_port(rows):
             if h["cat"] in CODE and (h["removed"] or h["added"]):
                 mods[loose(h)].add(r["row"].split("@")[0])
     return mods
+
+
+def h3(rows, k=3, min_mods=3, min_hunks=20):
+    """-> [(entry, hunks, mods, distinct shapes, top-k coverage)] over attributed hunks."""
+    shapes, mods = collections.defaultdict(collections.Counter), collections.defaultdict(set)
+    for r in rows:
+        for h in r["recs"]:
+            if h["cat"] == "entry":
+                shapes[h["key"]][(tuple(h["removed"]), tuple(h["added"]))] += 1
+                mods[h["key"]].add(r["row"].split("@")[0])
+    out = []
+    for e, c in shapes.items():
+        n = sum(c.values())
+        if len(mods[e]) >= min_mods and n >= min_hunks:
+            out.append((e, n, len(mods[e]), len(c), sum(v for _s, v in c.most_common(k)) / n))
+    return sorted(out, key=lambda r: -r[1])
 
 
 def h2(recs):
@@ -151,6 +171,16 @@ def main():
     print(f"\nH7: {T['opt_new']} of {T['new']} new files import an optional integration.")
     if T["h5_rows"]:
         print(f"H5: {T['h5_efc']} of {T['h5_ef']} files with a start error were changed by the port.")
+    e3 = h3(rows)
+    if e3:
+        nh = sum(r[1] for r in e3)
+        for thr in (0.5, 0.8):
+            sel = [r for r in e3 if r[4] >= thr]
+            print(f"H3: {len(sel)} of {len(e3)} entries (hit in 3+ mods, 20+ hunks) have top-3 shapes covering "
+                  f"{thr:.0%}+ of their fixes: {pct(sum(r[1] for r in sel), nh)} of those entries' hunks.")
+        if a.detail:
+            for e, n, m, s, cov in e3[:30]:
+                print(f"  {e:6} hunks={n} mods={m} shapes={s} top3={cov:.0%}")
     shared = {h: rs for h, rs in helper_rows.items() if len(rs) >= 2}
     print(f"H2: {len(helper_rows)} port-added helper classes; {len(shared)} names recur in 2+ rows.")
     if a.detail:

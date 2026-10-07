@@ -1,0 +1,6 @@
+# Era-jump recipes (Minecraft 1.21.1 -> 26.2) for tools/recipe-bench.py: the multi-version template's
+# inherited rename table, composed with the class-move map, applied by templates/multi-version/tools/
+# prepare-sources.py -- the same engine a two-target port's build already runs (catalogue §W1, §X).
+# Set MOVES to the map from tools/build-class-move-map.py (1.21.1 -> 26.2); without it only the
+# hand-written rows apply. One `<catalogue id><TAB><command>` per line, run in the bench's work dir.
+W1	python3 "$MIGRATOR"/tools/compose-renames.py --hand "$MIGRATOR"/templates/multi-version/versions/26.2.renames.hand.tsv ${MOVES:+--generated "$MOVES"} --out era-renames.tsv >/dev/null && python3 "$MIGRATOR"/templates/multi-version/tools/prepare-sources.py --src "$SRC" --renames era-renames.tsv --out "$SRC.prep" > era-renames.log 2>&1 && rm -rf "$SRC" && mv "$SRC.prep" "$SRC"

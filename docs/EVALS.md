@@ -17,7 +17,7 @@ add. Each later step acts on what the earlier ones leave.
 | 4 | 4: recipes in bulk | apply the mechanical changes with no model, most frequent first (V4, V3 moves, V17, V12, 25, 32, 13...) | Stage 2: 35–50% of 1.20→1.21 hunks and 45–60% of 26.x hunks are mechanical; Stage 3 prep: the 50 most common cross-port edits cover 23% of 1.20→1.21 hunks and 58% of 26.x hunks | 35–70% |
 | 5 | 5b: per-file residual loop (H5) | each remaining fix in a small fresh context with that file, its errors and the compiler; cheaper model | Stage 2.5: 87% of hunks are in a file that fails the first compile | 50–80% of what is left |
 | 6 | 5b: fix once, apply everywhere (H1) | a hand fix becomes a rewrite applied to every matching site | Stage 2.5: 65% of hunks repeat an earlier one in the same port | 30–50% of what is left |
-| 7 | 3/6: choice points (H3) and scaffolds (H4) | the model picks an option or fills a skeleton instead of writing code | untested | 5–15% of the judgement work |
+| 7 | 3/6: choice points (H3) and scaffolds (H4) | the model picks an option or fills a skeleton instead of writing code | H3 measured 2026-10-07: for 38 of 84 frequent entries, 3 options cover 80%+ of real fixes | 5–15% of the judgement work |
 | 8 | scope menu (shipped) | the user leaves optional chunks out | Stage 2.5: chunk estimates within ~2 points | 0–40%, the user's choice |
 | — | 6: replays + model tiering | measures all of the above, recipes on vs off, model mix | — | measured, not assumed |
 
@@ -322,3 +322,19 @@ What this changes for Stage 4:
   fix-once-apply-everywhere (step 6) matters more there than a bigger recipe library.
 - **Unattributed but cross-port (19%) are catalogue gaps.** These are edits real ports made in 2+ mods
   that no catalogue entry describes; they are the first candidates for new entries and recipes.
+
+**H3: are an entry's fixes a few repeatable options?** For each catalogue entry hit in 3+ mods with 20+
+hunks (84 entries, 14,395 hunks), the share of its hunks covered by its three most common loose shapes
+(which identifiers were removed and added):
+
+| Top-3 shapes cover | Entries | Their share of those 84 entries' hunks |
+|---|---|---|
+| 50%+ of the entry's fixes | 66 of 84 | 94% |
+| 80%+ of the entry's fixes | 38 of 84 | 66% |
+
+So most attributed work is not open-ended: for two thirds of it, a recipe that offers three named
+options (or applies the single dominant one) matches what real ports did at least 80% of the time. The
+most-hit entries split cleanly into two kinds. Some are effectively one edit: V4 is 88% one shape, 25 is
+95%, 136 is 98% and 111 is 99%. These are `auto` recipes. Others are a short menu: entry 1 is 46% one
+shape but 92% within three, and V6 and 13 behave the same way. These are `choice` recipes. A few stay
+open (entry 32 at 54%, entry 16 at 43%) and keep the model.
