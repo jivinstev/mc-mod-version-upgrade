@@ -50,7 +50,7 @@ Minecraft/NeoForge sources for checking real signatures: {srcs}
 Rules:
 - Make the smallest change that removes these errors while keeping the code's behaviour. Never stub out
   logic, comment code out, or delete a feature to make an error go away.
-- If a fix needs a change in a file not listed, do not edit it: describe it under NEEDS.
+- {scope_rule}
 - You cannot compile. Reason from the errors and the sources.
 Finish with exactly these three lines:
 FIXED: <what you changed, one line>
@@ -122,11 +122,15 @@ def batches(errs, size, max_errs):
     return out, by
 
 
-def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout):
+def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, subsystem=False):
     rel = lambda f: os.path.relpath(f, work) if os.path.isabs(f) else f
     errors = "\n".join(f"{rel(f)}:{l}: {m}" for f in files for l, m in sorted(by[f])[:60])
     ent, ids = entry_texts([m for f in files for _l, m in by[f]], sigs, entries)
-    prompt = WORKER.format(target=target, files="\n".join("  " + rel(f) for f in files), errors=errors,
+    scope_rule = ("These errors belong to one subsystem that needs coordinated changes across files: you MAY "
+                  "edit or add any file under src/main/java to finish it (keep each change minimal)."
+                  if subsystem else
+                  "If a fix needs a change in a file not listed, do not edit it: describe it under NEEDS.")
+    prompt = WORKER.format(scope_rule=scope_rule, target=target, files="\n".join("  " + rel(f) for f in files), errors=errors,
                            entries=ent, srcs=srcs or "(not available)")
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
     t0 = time.time()
@@ -141,7 +145,10 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout):
         d = {"result": (r.stdout + r.stderr)[-500:], "total_cost_usd": 0, "is_error": True}
     res = d.get("result") or ""
     rule = re.search(r'^RULE:\s*(.+)$', res, re.M)
-    rule = rule.group(1).strip() if rule and rule.group(1).strip().lower() != "none" else None
+    rule = rule.group(1).strip() if rule and not rule.group(1).strip().lower().startswith("none") else None
+    if rule:   # workers write prose: keep the first `from<TAB>to` row, with a literal <TAB> or an arrow allowed
+        rule = rule.split("`, `")[0].strip("` ").replace("<TAB>", "\t")
+        rule = re.split(r'\s+(?:\(|\||;|--|—)', rule)[0] if "\t" in rule else rule
     return {"model": model, "files": [rel(f) for f in files], "errors_in": sum(len(by[f]) for f in files),
             "entries": ids, "usd": d.get("total_cost_usd") or 0, "usage": d.get("usage"),
             "turns": d.get("num_turns"), "secs": round(time.time() - t0), "is_error": d.get("is_error"),
@@ -218,6 +225,9 @@ def main():
     ap.add_argument("--heap", default="6g")
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--log", default="file-loop.jsonl")
+    ap.add_argument("--subsystem", action="store_true",
+                    help="workers may edit any file (for cross-file rewrites the per-file rounds cannot finish: "
+                         "capabilities, networking); use with a large --batch-files")
     ap.add_argument("--no-probe", action="store_true",
                     help="skip the override probe at 0 errors (dead overrides compile clean; catalogue R-class)")
     a = ap.parse_args()
@@ -247,7 +257,7 @@ def main():
             break
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(a.parallel) as ex:
-            futs = [ex.submit(run_worker, work, f, by, sigs, entries, m, a.target, a.sources, a.timeout) for f, m in jobs]
+            futs = [ex.submit(run_worker, work, f, by, sigs, entries, m, a.target, a.sources, a.timeout, a.subsystem) for f, m in jobs]
             results = [fu.result() for fu in futs]
         for res in results:
             spent += res["usd"]; note(event="worker", round=rnd, **res)
