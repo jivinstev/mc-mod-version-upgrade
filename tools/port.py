@@ -368,6 +368,132 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
             "forge_tag_references_left": forge_tags}
 
 
+def run_hops(a, T, hops, work, state, meta):
+    # ── hops
+    for i, h in enumerate(hops, 1):
+        key, last, first = f"hop{i}", i == len(hops), i == 1
+        if key in state["done"]:
+            continue
+        pack = h["pack"]
+        if h["kind"] == "era":
+            if f"{key}-era" not in state["done"]:
+                say(f"hop {i}: era step to {h['to_mc']} (frame, maps, rename table, flatten)")
+                r = subprocess.run([sys.executable, str(ROOT / "tools/era-hop.py"), "--work", str(work), "--target", h["to_mc"]])
+                if r.returncode != 0:
+                    return stop(24, f"the era step failed (exit {r.returncode}); see its output above", ["fix and rerun"], state, work)
+                state["done"].append(f"{key}-era"); save_state(work, state)
+            pack = None
+        if pack and f"{key}-recipes" not in state["done"]:
+            # applied here rather than by run-port, so the tree is snapshotted AFTER every deterministic rewrite:
+            # tools/learn-pack.py diffs that snapshot against the finished hop to propose the next pack rows
+            subprocess.run([sys.executable, str(ROOT / "tools/apply-recipes.py"), "--src", str(work / "src/main/java"),
+                            "--recipes", str(ROOT / pack), "--json", str(work / f"recipes-report-{key}.json")],
+                           stdout=open(work / f"recipes-report-{key}.txt", "w", encoding="utf-8"), stderr=subprocess.STDOUT)
+            state["done"].append(f"{key}-recipes"); save_state(work, state)
+        pack = None
+        snap = work / "hop-start" / key
+        if not snap.exists():
+            shutil.copytree(work / "src/main/java", snap)
+        if a.stop_after == f"{key}-recipes":   # testing: this hop's deterministic rewrites only, no worker
+            say(f"stopped after {key}'s recipes (--stop-after)"); return 0
+        behaviour = "off" if a.no_behaviour else ("write" if first else ("rerun" if last else "off"))
+        gatec = a.gatec if last else "none"
+        cmd = [sys.executable, str(ROOT / "tools/run-port.py"), "--work", str(work), "--tag", key,
+               "--pack", str(ROOT / pack) if pack else "none", "--target", TARGET_NAME.get(h["to_mc"], f"NeoForge {h['to_mc']}"),
+               "--budget", str(a.budget), "--gate-budget", str(a.gate_budget), "--gatec-budget", str(a.gatec_budget),
+               "--behaviour", behaviour, "--gatec", gatec]
+        if a.no_visual_review:
+            cmd.append("--no-visual-review")
+        say(f"hop {i}: {h['from']} -> {h['to']}: recipes, compile loop, Gate B"
+            + (", behaviour tests" if behaviour != "off" else "") + (", Gate C, visual review" if gatec != "none" else ""))
+        r = subprocess.run(cmd)
+        if r.returncode != 0:
+            state["stopped"] = {"code": r.returncode, "what": f"hop {i} stopped (see run-port-{key}.json)"}
+            save_state(work, state)
+            again = f"--from-port {a.from_port}" if getattr(a, "from_port", None) else repr(a.mod)
+            print(f"port: resume with the same command once the choice above is made: python3 tools/port.py {again} --to {T}")
+            return r.returncode
+        if first and not last and a.gatec != "none":
+            # the client harness is ported with the mod by the later hops rather than written per version
+            subprocess.run([sys.executable, str(ROOT / "tools/scaffold-gatec.py"), "--work", str(work)])
+        state["done"].append(key); save_state(work, state)
+        if a.stop_after == key:
+            say(f"stopped after {key} (--stop-after)"); return 0
+    # ── report
+    total, rows = 0.0, []
+    for i in range(1, len(hops) + 1):
+        p = work / f"run-port-hop{i}.json"
+        d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        total += d.get("usd") or 0
+        rows.append({"hop": i, "route": state["hops"][i - 1], "usd": d.get("usd"), "stages": {
+            k: ({"green": v.get("green")} if "green" in v else {kk: v.get(kk) for kk in ("start_errors", "end_errors", "stubs", "findings", "skipped") if kk in v})
+            for k, v in d.get("stages", {}).items()}})
+    report = {"modid": meta["modId"], "target": T, "workers_usd": round(total, 4), "hops": rows,
+              "note": "workers only; the session that drove this is counted by tools/port-cost.py"}
+    (work / "port-report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    state["done"].append("report"); save_state(work, state)
+    say(f"DONE: {meta['modId']} ported to NeoForge {T}; workers ${total:.2f}; details in {work / 'port-report.json'}")
+    return 0
+
+
+
+def port_meta(src):
+    """(modid, minecraft version, why-not) for an existing port workspace, read off its own build files."""
+    gp = src / "gradle.properties"
+    if not gp.exists():
+        return None, None, f"{src} has no gradle.properties; is it a port workspace?"
+    props = dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(.*?)\s*$", gp.read_text(encoding="utf-8", errors="replace")))
+    if list(src.glob("versions/*.properties")):
+        return None, None, (f"{src} is already a multi-version workspace ({', '.join(sorted(p.stem for p in src.glob('versions/*.properties')))}); "
+                            "build its other target with -Pmc=<version> instead")
+    modid, mc = props.get("mod_id"), props.get("minecraft_version")
+    if not modid or not mc:
+        return None, None, f"{gp} does not name mod_id and minecraft_version"
+    return modid, mc, None
+
+
+def from_port(a):
+    """Continue a finished port to a newer target: copy the workspace (never build outputs or a run dir), treat
+    setup as done, and run only the hops from its version. The port's own fixes are the starting point,
+    which is what the 26.x era hop was measured on (59% of start errors removed by the table)."""
+    ensure_ca_bundle()
+    T = a.to
+    if T not in TARGET_NAME:
+        print(f"port: unknown target {T}; known: {', '.join(TARGET_NAME)}"); return 2
+    src = pathlib.Path(a.from_port).expanduser().resolve()
+    modid, mc, why = port_meta(src)
+    if why:
+        return stop(24, why, ["pass a single-target port workspace"])
+    if mc == T:
+        return stop(20, f"{src.name} is already a NeoForge {T} port", ["nothing to do"])
+    hops = route.plan(("neoforge", mc), ("neoforge", T))
+    if hops is None:
+        return stop(22, f"no route from neoforge {mc} to NeoForge {T} in tools/routes.tsv", ["add a row for the missing hop"])
+    work = pathlib.Path(a.mods_dir).resolve() / modid
+    say(f"{modid}: existing port at {src} (NeoForge {mc}) -> NeoForge {T}, {len(hops)} hop(s): "
+        + " | ".join(f"{h['from']} -> {h['to']} [{h['kind']}]" for h in hops))
+    if a.plan_only:
+        print(json.dumps({"from_port": str(src), "modid": modid, "work": str(work), "hops": hops}, indent=1)); return 0
+    if work != src:
+        if work.exists() and not (work / "port-state.json").exists():
+            return stop(24, f"{work} exists and is not a port.py workspace; refusing to overwrite it",
+                        ["pass --mods-dir to put the new workspace elsewhere"])
+        if not work.exists():
+            shutil.copytree(src, work, ignore=shutil.ignore_patterns("build", "run", ".gradle", "hop-start", "*.log"))
+            say(f"copied the port to {work} (build outputs and run dirs left behind)")
+    state = load_state(work)
+    state.update({"info": {"from_port": str(src), "target": T}, "hops": [h["from"] + "->" + h["to"] for h in hops],
+                  "modid": modid})
+    state.pop("stopped", None)
+    if "setup" not in state["done"]:
+        if not list((work / "src/main/java").rglob("BaselineGameTest.java")):   # an older port may predate it
+            run([sys.executable, str(ROOT / "tools/scaffold-gametest.py"), "--work", str(work)], log=work / "setup.log")
+        state["setup"] = {"from_port": str(src)}; state["done"].append("setup")
+    save_state(work, state)
+    a.mod = None
+    return run_hops(a, T, hops, work, state, {"modId": modid})
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -381,12 +507,17 @@ def main():
     ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet")
     ap.add_argument("--plan-only", action="store_true", help="resolve, check and print the route; change nothing")
     ap.add_argument("--stop-after", help="stop after this stage: setup, hop1, hop1-recipes, ... (for testing a stage)")
+    ap.add_argument("--from-port", metavar="WORKSPACE",
+                    help="continue an EXISTING port (a finished single-target NeoForge workspace, e.g. a 1.21.1 port) "
+                         "to --to, instead of starting from a jar")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
+    if a.from_port:
+        return from_port(a)
     if not a.mod:
-        ap.error("name a mod or a jar")
+        ap.error("name a mod or a jar (or --from-port <workspace>)")
     ensure_ca_bundle()
     T = a.to
     if T not in TARGET_NAME:
@@ -479,70 +610,7 @@ def main():
             f"{info_setup.get('parked_files', 0)} file(s) of optional integrations/datagen parked (MIGRATION.md)")
     if a.stop_after == "setup":
         say("stopped after setup (--stop-after)"); return 0
-    # ── hops
-    for i, h in enumerate(hops, 1):
-        key, last, first = f"hop{i}", i == len(hops), i == 1
-        if key in state["done"]:
-            continue
-        pack = h["pack"]
-        if h["kind"] == "era":
-            if f"{key}-era" not in state["done"]:
-                say(f"hop {i}: era step to {h['to_mc']} (frame, maps, rename table, flatten)")
-                r = subprocess.run([sys.executable, str(ROOT / "tools/era-hop.py"), "--work", str(work), "--target", h["to_mc"]])
-                if r.returncode != 0:
-                    return stop(24, f"the era step failed (exit {r.returncode}); see its output above", ["fix and rerun"], state, work)
-                state["done"].append(f"{key}-era"); save_state(work, state)
-            pack = None
-        if pack and f"{key}-recipes" not in state["done"]:
-            # applied here rather than by run-port, so the tree is snapshotted AFTER every deterministic rewrite:
-            # tools/learn-pack.py diffs that snapshot against the finished hop to propose the next pack rows
-            subprocess.run([sys.executable, str(ROOT / "tools/apply-recipes.py"), "--src", str(work / "src/main/java"),
-                            "--recipes", str(ROOT / pack), "--json", str(work / f"recipes-report-{key}.json")],
-                           stdout=open(work / f"recipes-report-{key}.txt", "w", encoding="utf-8"), stderr=subprocess.STDOUT)
-            state["done"].append(f"{key}-recipes"); save_state(work, state)
-        pack = None
-        snap = work / "hop-start" / key
-        if not snap.exists():
-            shutil.copytree(work / "src/main/java", snap)
-        if a.stop_after == f"{key}-recipes":   # testing: this hop's deterministic rewrites only, no worker
-            say(f"stopped after {key}'s recipes (--stop-after)"); return 0
-        behaviour = "off" if a.no_behaviour else ("write" if first else ("rerun" if last else "off"))
-        gatec = a.gatec if last else "none"
-        cmd = [sys.executable, str(ROOT / "tools/run-port.py"), "--work", str(work), "--tag", key,
-               "--pack", str(ROOT / pack) if pack else "none", "--target", TARGET_NAME.get(h["to_mc"], f"NeoForge {h['to_mc']}"),
-               "--budget", str(a.budget), "--gate-budget", str(a.gate_budget), "--gatec-budget", str(a.gatec_budget),
-               "--behaviour", behaviour, "--gatec", gatec]
-        if a.no_visual_review:
-            cmd.append("--no-visual-review")
-        say(f"hop {i}: {h['from']} -> {h['to']}: recipes, compile loop, Gate B"
-            + (", behaviour tests" if behaviour != "off" else "") + (", Gate C, visual review" if gatec != "none" else ""))
-        r = subprocess.run(cmd)
-        if r.returncode != 0:
-            state["stopped"] = {"code": r.returncode, "what": f"hop {i} stopped (see run-port-{key}.json)"}
-            save_state(work, state)
-            print(f"port: resume with the same command once the choice above is made: python3 tools/port.py {a.mod!r} --to {T}")
-            return r.returncode
-        if first and not last and a.gatec != "none":
-            # the client harness is ported with the mod by the later hops rather than written per version
-            subprocess.run([sys.executable, str(ROOT / "tools/scaffold-gatec.py"), "--work", str(work)])
-        state["done"].append(key); save_state(work, state)
-        if a.stop_after == key:
-            say(f"stopped after {key} (--stop-after)"); return 0
-    # ── report
-    total, rows = 0.0, []
-    for i in range(1, len(hops) + 1):
-        p = work / f"run-port-hop{i}.json"
-        d = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-        total += d.get("usd") or 0
-        rows.append({"hop": i, "route": state["hops"][i - 1], "usd": d.get("usd"), "stages": {
-            k: ({"green": v.get("green")} if "green" in v else {kk: v.get(kk) for kk in ("start_errors", "end_errors", "stubs", "findings", "skipped") if kk in v})
-            for k, v in d.get("stages", {}).items()}})
-    report = {"modid": meta["modId"], "target": T, "workers_usd": round(total, 4), "hops": rows,
-              "note": "workers only; the session that drove this is counted by tools/port-cost.py"}
-    (work / "port-report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
-    state["done"].append("report"); save_state(work, state)
-    say(f"DONE: {meta['modId']} ported to NeoForge {T}; workers ${total:.2f}; details in {work / 'port-report.json'}")
-    return 0
+    return run_hops(a, T, hops, work, state, meta)
 
 
 def self_check():
@@ -581,6 +649,13 @@ def self_check():
         (res / "data/m/loot_table/l.json").write_text(json.dumps(loot), encoding="utf-8")
         neoforge_conditions(res)
         ok &= json.loads((res / "data/m/loot_table/l.json").read_text(encoding="utf-8")) == loot   # vanilla key untouched
+    with tempfile.TemporaryDirectory() as d:    # --from-port reads the port's own build; refuses what it cannot continue
+        w = pathlib.Path(d)
+        (w / "gradle.properties").write_text("mod_id=mymod\nminecraft_version=1.21.1\n", encoding="utf-8")
+        ok &= port_meta(w) == ("mymod", "1.21.1", None)
+        (w / "versions").mkdir(); (w / "versions/26.2.properties").write_text("x=1\n", encoding="utf-8")
+        ok &= port_meta(w)[2] is not None and "multi-version" in port_meta(w)[2]
+        ok &= port_meta(w / "nope")[2] is not None
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

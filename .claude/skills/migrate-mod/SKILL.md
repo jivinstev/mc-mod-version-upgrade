@@ -16,6 +16,9 @@ For "Port <mod> to <version>" (or a jar path), **start here, not at Step 0**:
 ```
 python3 tools/port.py "<exact mod name, or path to the jar>" --to <1.21.1 | 26.2>
 ```
+To take a FINISHED single-target port further (e.g. a 1.21.1 port to 26.2), start from it, not from the
+jar, so its fixes carry over: `python3 tools/port.py --from-port mods/<modid> --to 26.2` (the workspace is
+copied, setup is treated as done, and only the remaining hops run).
 It does every deterministic step in a fixed order: resolve the jar (and STOP if a native build already
 exists, or a required dependency has none), route the port hop by hop (`tools/routes.tsv`: e.g. Forge
 1.20.1 → NeoForge 1.21.1 → 26.2, each hop finished — compile + Gate B — before the next), set up the

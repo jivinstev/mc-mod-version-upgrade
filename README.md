@@ -24,6 +24,9 @@ hand. When the port finishes it delivers the jar and reports what the port cost.
 has spent and your choices. Rerun the same command to resume. It still needs the `claude` CLI logged
 in, because the cheap fix workers it starts are Claude.
 
+**Taking an existing port further:** `python3 tools/port.py --from-port mods/<modid> --to 26.2` starts
+from a port you already finished (say, a 1.21.1 one) instead of a jar, and keeps its fixes.
+
 Either way the port runs hop by hop (for example Forge 1.20.1 → NeoForge 1.21.1 → 26.2). Each hop
 applies its recipe pack of known rewrites first, then sends what's left to small per-file workers
 (Haiku first, Sonnet and Opus only as needed). The port must then pass the gates: a headless server,
