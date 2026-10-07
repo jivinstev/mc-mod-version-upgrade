@@ -394,3 +394,39 @@ after the pack):
   moves (0–6%) have few sites for its 20 entries; most of their errors sit in families the pack does not
   cover yet (`compile-summary.py` names them). The rows it moves most
   are large, uniform ones with many identical sites (55–58%).
+
+## Step 6/7 spike — the per-file loop with cheaper models (2026-10-07)
+
+`tools/file-loop.py` on two ports from the same starts as their published baselines (P4 after the
+Stage-4 recipe pack). Each worker is a headless Claude Code session in a clean context: about 30k
+tokens of floor, no inherited project memory, no shell. It gets only its files' errors and the
+catalogue entries they match. Dollars are Claude Code's own per-worker totals; they exclude the
+orchestrating session.
+
+| | P1 (downport, 45 start errors) — Haiku first | P1 — Sonnet first | P4 (library, 468 after recipes) |
+|---|---|---|---|
+| Compile rounds | 1 | 1 | 3 per-file (Haiku → Sonnet → Opus) + 1 subsystem (Sonnet) |
+| Dead overrides (override probe) | 18 found and fixed, one repair round | 16 found and fixed | probe too noisy on a library (see below) |
+| Gate B | all 6 tests pass | all 6 tests pass | all 2 pass after 3 load-crash fixes (§R1 ×2, a client class on the server) |
+| Workers | 7 Haiku | 5 Sonnet | 26 Haiku, 17 Sonnet, 7 Opus, 1 subsystem Sonnet, 3 gate fixes |
+| Worker dollars | $0.82 | $0.88 | $15.33 |
+| Published baseline (whole port, incl. Gate C) | $6.88 | $6.88 | $30.31 |
+
+P4's rounds: Haiku took 468 → 175 errors ($7.12), Sonnet 175 → 45 ($4.05), Opus 45 → 33 ($2.70). The
+last 33 were the capabilities → attachments and packets → payloads rewrites, which span files: one
+Sonnet worker allowed to edit any file finished them in a single pass ($1.11).
+
+What the spike showed:
+
+- **The loop reaches a clean compile and a passing Gate B on both ports, for half (P4) to an eighth
+  (P1) of the published whole-port cost.** The published runs also did Gate C and wrote the port's
+  notes, which these numbers do not include.
+- **Haiku and Sonnet cost about the same per fixed error** (P4: $0.024 vs $0.031). Haiku also needed
+  repair rounds. Escalating per file sent P4's cross-file work through Opus for little gain. A
+  subsystem round as soon as workers report `NEEDS` would have saved most of that $2.70.
+- **Compile-clean is not done.** P1 still had 16–18 overrides that no longer overrode anything, which
+  the finished port had fixed by hand; the probe round fixed them. P4 still had three load crashes.
+  Two of those were §R1 cases that a static scan finds before any server boots.
+- **Gaps found:** the override probe needs supertype awareness on library mods (164 hits on P4, 60
+  of them naming a vanilla method, nearly all false). Fix-once-apply-everywhere (H1) did not get a fair
+  test: workers wrote their `RULE` rows as prose, and the parser now tolerates that.
