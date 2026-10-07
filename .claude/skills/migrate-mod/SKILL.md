@@ -123,6 +123,28 @@ only genuinely headless environments fall back to a human-run command. Three par
    monitor fires on every `crash.ready` (the digest names the phase); you read the digest, fix the source,
    `./gradlew compileJava`, `touch $SIG_DIR/fix.done`; the phase relaunches. On `all-done`, every phase passed.
 
+## Phases and fresh contexts — the cheapest saving in a port (do this every time)
+A port's cost is mostly the conversation re-reading itself: in the measured ports it was 44–60% of
+everything each request read, and a raw compile log or grep dump pasted into it is re-read on every
+later request (7–24%). Two rules, neither of which changes what gets ported:
+
+1. **Run each PHASE in a fresh context.** The phases are **setup** (Steps 0–3b), **compile** (Step 4 +
+   4b; on a big port, a fresh context every ~10 passes or whenever the conversation is long),
+   **gates** (Step 5) and **deliver** (Steps 6–8). At each boundary:
+   `python3 tools/port-handoff.py mods/<modid> --done <phase> [--next "<action>"] [--blocker "<x>"] [--log /tmp/build.log]`.
+   It rewrites the one `## Hand-off` section of `MIGRATION.md` from the workspace itself (compile state,
+   local history, uncommitted files, the user's Scope choice, waiting catalogue additions) and prints a
+   resume prompt. Commit, then hand that prompt to a **fresh subagent** (the `Agent` tool) for the next
+   phase and keep only its short report; with no subagent tool, tell the user to start a new session
+   with it. The next context reads `MIGRATION.md`, not this conversation — so anything it needs must
+   be in that file.
+2. **Never put a raw log in the conversation.** Write it to a file and read the summary:
+   `python3 tools/compile-summary.py /tmp/build.log` (about 35 lines whatever the log's size: the count
+   only once `burndown-count.sh` accepts it, the CATALOG.md entries to read, the families not in the
+   catalogue, the files with most errors, and what GREW since the previous pass). For one file's errors,
+   `--file <path>`. For Gradle, Gate B and Gate C logs, `grep`/`tail` the few lines you need — never
+   `cat` a log, and never re-read one you already summarised.
+
 ## Step 0 — Locate the JAR and triage difficulty
 1. Resolve the input jar. If given a bare name, look in `$MODS_SOURCE_DIR`
    (from `.env.local`) and the CurseForge instances under it.
@@ -212,12 +234,15 @@ errors, measure what can be left off and let the user choose.
 Iterate. Each pass: run the compile, bucket the errors, fix by category, repeat.
 
 ```
-./gradlew compileJava --console=plain 2>&1 | tee /tmp/build.log
+./gradlew compileJava --console=plain --init-script ../../tools/maxerrs.init.gradle > /tmp/build.log 2>&1
+python3 ../../tools/compile-summary.py /tmp/build.log
 ```
 - First run downloads NeoForge + decompiles/recompiles Minecraft — slow (minutes),
   then cached. If it fails at the *dependency/setup* stage, fix the workspace
   (gradle/neoforge versions, repos) before touching mod code.
-- Extract errors: `grep -E 'error:|\.java:[0-9]+:' /tmp/build.log`.
+- Read the **summary**, not the log (see *Phases and fresh contexts*): it validates the count,
+  names the CATALOG.md entries the errors match and lists the worst files. Work a file at a time with
+  `--file <path>`. A group under **GREW** means the last change put errors back (§X9) — look at it first.
 - **Bucket by symptom** and fix the whole bucket at once using `CATALOG.md`
   **Migration Pattern Catalog** (Pattern → Error → Fix). Any error NOT already in
   the catalog: fix it, then **record the new pattern in `$MIGRATE_WORKSPACE/catalog-additions.md`

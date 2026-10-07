@@ -186,9 +186,13 @@ out="$(python3 tools/hunk-census.py --self-check 2>&1)"
 grep -q 'self-check: PASS' <<<"$out" && ok "census: field, prose-arrow and SRG-shape detectors attribute; comment-only and renames-with-no-entry do not" \
   || bad "hunk-census self-check: $out"
 
-echo "8. census-hypotheses.py (H1/H2/H5/H7 arithmetic on synthetic records)"
-H="$T/hyp"; mkdir -p "$H/r1"
-printf 'profile\tport\n' > "$H/census.tsv"; printf 'P1\tr1\n' >> "$H/census.tsv"
+echo "8. census-hypotheses.py (H1/H1x/H2/H5/H7 arithmetic on synthetic records)"
+H="$T/hyp"; mkdir -p "$H/r1" "$H/r2@26.2" "$H/r3"
+printf 'profile\tport\n' > "$H/census.tsv"; printf 'P1\tr1\nP2\tr2@26.2\nP2\tr3\n' >> "$H/census.tsv"
+# r2@26.2 shares r1's entry edit and one of its cluster edits (2 mods); r3 repeats only the entry edit (3 mods)
+{ echo '{"cat":"entry","key":"9","file":"b/A.java","shape":"S9","removed":["Old"],"added":["Shim"],"imports":[]}'
+  echo '{"cat":"cluster","key":"x","file":"b/C.java","shape":"S8","removed":["Q"],"added":[],"imports":[]}'; } > "$H/r2@26.2/hunks.jsonl"
+echo '{"cat":"entry","key":"9","file":"c/A.java","shape":"S9","removed":["Old"],"added":["Shim"],"imports":[]}' > "$H/r3/hunks.jsonl"
 { echo '{"cat":"new-file","file":"a/Shim.java","lines":9}'
   echo '{"cat":"entry","key":"9","file":"a/A.java","shape":"S1","removed":["Old"],"added":["Shim"],"imports":[]}'
   echo '{"cat":"entry","key":"9","file":"a/B.java","shape":"S1","removed":["Old"],"added":["Shim"],"imports":[]}'
@@ -196,13 +200,28 @@ printf 'profile\tport\n' > "$H/census.tsv"; printf 'P1\tr1\n' >> "$H/census.tsv"
   echo '{"cat":"cluster","key":"x","file":"a/C.java","shape":"S3","removed":["Q"],"added":[],"imports":["mezz.jei"]}'; } > "$H/r1/hunks.jsonl"
 mkdir -p "$H/b/r1"; echo '{"errors_by_file":{"a/A.java":2,"a/Z.java":1}}' > "$H/b/r1/bench.json"
 out="$(python3 tools/census-hypotheses.py --census "$H" --bench "$H/b" 2>&1)"
-grep -q '| P1 | 1 | 4 | 25% / 25% | 75% | 0% | 25% (1 rows) | 50% |' <<<"$out" \
-  && ok "hypotheses: repeats exact/loose, helper routing, file locality, optional code" || bad "census-hypotheses: $(grep '| P1' <<<"$out")"
+grep -q '| P1 | 1 | 4 | 25% / 25% | 75% | 0% | 75% / 50% | 50% | 25% (1 rows) | 50% |' <<<"$out" \
+  && ok "hypotheses: repeats exact/loose, cross-port 2+/3+ mods, helper routing, file locality, optional code" || bad "census-hypotheses: $(grep '| P1' <<<"$out")"
 
 echo "9. scope-menu.py (chunks, error shares and references on a synthetic mod)"
 out="$(python3 tools/scope-menu.py --self-check 2>&1)"
 grep -q 'self-check: PASS' <<<"$out" && ok "scope menu: integration, commands and a mob family found; shares from the first-compile log" \
   || bad "scope-menu self-check: $out"
+
+echo "10. compile-summary.py (a bounded log summary; refuses a log that is not a count)"
+out="$(python3 tools/compile-summary.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "summary: catalogue groups, families, files, and GREW/NEW against the previous run" \
+  || bad "compile-summary self-check: $out"
+d="$(mktemp -d)"; printf '> Task :compileJava FAILED\n* What went wrong:\nCould not resolve x\n' > "$d/b.log"
+python3 tools/compile-summary.py "$d/b.log" >"$d/o" 2>&1; rc=$?
+[ "$rc" = 2 ] && grep -q 'NOT A COUNT' "$d/o" && grep -q 'Could not resolve x' "$d/o" \
+  && ok "a never-compiled log prints Gradle's reason and exits 2, not '0 errors'" || bad "never-compiled log: rc=$rc $(head -3 "$d/o")"
+rm -rf "$d"
+
+echo "11. port-handoff.py (one current Hand-off section, Scope carried across)"
+out="$(python3 tools/port-handoff.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "hand-off: replaces itself, keeps other sections, carries the Scope choice and blockers" \
+  || bad "port-handoff self-check: $out"
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"

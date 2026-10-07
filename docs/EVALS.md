@@ -11,10 +11,10 @@ add. Each later step acts on what the earlier ones leave.
 
 | Order | Step | What it does | Evidence | Expected saving |
 |---|---|---|---|---|
-| 1 | 5a: fresh session per phase | resume from `MIGRATION.md` at each phase boundary, so context restarts near its 37–49k floor instead of growing to a median 180–450k | Stage 0: the conversation itself is 44–60% of cache reads | 20–40% |
-| 2 | 5a: no spilled-output re-reads; summaries not raw logs | grep spilled tool output instead of reading it; bucketed error summaries | Stage 0: 7–24% of cache reads | 5–20% |
+| 1 | 5a: fresh session per phase (**shipped**: `port-handoff.py`) | resume from `MIGRATION.md` at each phase boundary, so context restarts near its 37–49k floor instead of growing to a median 180–450k | Stage 0: the conversation itself is 44–60% of cache reads | 20–40% |
+| 2 | 5a: no spilled-output re-reads; summaries not raw logs (**shipped**: `compile-summary.py`) | grep spilled tool output instead of reading it; bucketed error summaries | Stage 0: 7–24% of cache reads | 5–20% |
 | 3 | 3: recipe format + engine | `auto` / `choice` / `scaffold` / `manual`, type-aware, with the §X guards | enabling step | — |
-| 4 | 4: recipes in bulk | apply the mechanical changes with no model, most frequent first (V4, V3 moves, V17, V12, 25, 32, 13...) | Stage 2: 35–50% of 1.20→1.21 hunks and 45–60% of 26.x hunks are mechanical; cost grows faster than linearly in requests | 35–70% |
+| 4 | 4: recipes in bulk | apply the mechanical changes with no model, most frequent first (V4, V3 moves, V17, V12, 25, 32, 13...) | Stage 2: 35–50% of 1.20→1.21 hunks and 45–60% of 26.x hunks are mechanical; Stage 3 prep: the 50 most common cross-port edits cover 23% of 1.20→1.21 hunks and 58% of 26.x hunks | 35–70% |
 | 5 | 5b: per-file residual loop (H5) | each remaining fix in a small fresh context with that file, its errors and the compiler; cheaper model | Stage 2.5: 87% of hunks are in a file that fails the first compile | 50–80% of what is left |
 | 6 | 5b: fix once, apply everywhere (H1) | a hand fix becomes a rewrite applied to every matching site | Stage 2.5: 65% of hunks repeat an earlier one in the same port | 30–50% of what is left |
 | 7 | 3/6: choice points (H3) and scaffolds (H4) | the model picks an option or fills a skeleton instead of writing code | untested | 5–15% of the judgement work |
@@ -270,3 +270,55 @@ finished ports, a chunk's predicted share of the port was compared with its shar
 changed. Share of start errors alone: correlation 0.77. Share of lines alone: 0.88. **The mean of the two:
 0.91, mean absolute error 1.9 points**, which is what the menu now reports. Mixin chunks ran about 1.5×
 their estimate, because much of their work never shows as a compile error; the menu says so.
+
+## Steps 1–2 shipped, and the shape data for Stage 3 (2026-10-07)
+
+**Step 1, fresh context per phase.** `tools/port-handoff.py <mod> --done <phase>` rewrites one
+`## Hand-off` section of the port's `MIGRATION.md` from the workspace (compile state, local history,
+uncommitted files, the user's Scope choice, waiting catalogue additions) and prints a resume prompt for
+a fresh subagent or session. The migrate-mod skill now runs setup, compile, gates and delivery each in a
+fresh context, and the compile loop again every ~10 passes on a big port. Its saving is measured in
+Stage 6, not assumed.
+
+**Step 2, summaries instead of raw logs.** `tools/compile-summary.py <log>` prints the validated count,
+the errors grouped by catalogue entry and by family, the worst files, and what grew since the previous
+pass, in a fixed size. Measured on three real first-compile logs from the bench:
+
+| Profile | Start errors | Raw log | `grep error:` dump | Summary |
+|---|---|---|---|---|
+| P1 | 45 | 46 KB | 20 KB | 1.9 KB |
+| P2 | 233 | 248 KB | 122 KB | 2.6 KB |
+| P4 | 698 | 702 KB | 392 KB | 2.5 KB |
+
+So a pass's error view is ~10× smaller on a tiny port and ~150× on a mid-size one, and it stays flat as
+the port grows. The summary also names the catalogue entries to read, so the model reads those entries
+instead of searching.
+
+**H1x: do edits recur ACROSS ports?** H1 (Stage 2.5) only showed a port repeating itself. A recipe pays
+off if the same edit shows up in other mods. Measured on the census: the share of code hunks whose loose
+shape (entry or cluster plus removed and added identifiers) appears in 2+ different mods (a mod's 1.21.1
+and 26.2 rows count once).
+
+| | Code hunks | In 2+ mods | In 3+ mods | Unattributed hunks in 2+ mods |
+|---|---|---|---|---|
+| all rows | 30,285 | 40% | 33% | 19% |
+| 1.20→1.21 rows, range by profile | — | 12–52% | 7–48% | 3–58% |
+| 26.x era rows, range by profile | — | 63–77% | 47–73% | 38–63% |
+
+The yield curve, cross-port shapes ranked by how many hunks they cover:
+
+| Recipes (top N shapes) | 10 | 25 | 50 | 100 | all cross-port |
+|---|---|---|---|---|---|
+| 1.20→1.21 hunks covered (262 shapes) | 14% | 19% | 23% | 26% | 28% |
+| 26.x hunks covered (107 shapes) | 39% | 50% | 58% | 61% | 61% |
+
+What this changes for Stage 4:
+
+- **26.x is where recipes pay first.** 50 recipes cover over half of an era jump's hunks. The
+  multi-version template's inherited rename table already holds most of them, so the first recipe
+  is that table itself, applied to non-template ports.
+- **1.20→1.21 needs recipes AND the per-file loop.** Cross-port recipes reach about a quarter of the
+  hunks, and the curve flattens after ~50. Most of the rest repeats within a port (H1, 65%), so
+  fix-once-apply-everywhere (step 6) matters more there than a bigger recipe library.
+- **Unattributed but cross-port (19%) are catalogue gaps.** These are edits real ports made in 2+ mods
+  that no catalogue entry describes; they are the first candidates for new entries and recipes.

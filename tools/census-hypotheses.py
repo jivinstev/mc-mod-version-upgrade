@@ -12,6 +12,10 @@ H1  propagation    Judgement fixes repeat inside a port, so "the model fixes one
                    the same edit to the rest" shrinks N fixes to 1. Measured: share of code hunks that
                    repeat an earlier hunk's normalised SHAPE (same entry/cluster, incidental names
                    blanked) in the same row -- exact, and loosely (same removed/added identifiers).
+H1x cross-port    The same edit recurs in OTHER ports -- the test of whether a recipe written once pays
+                   off again (H1 alone only says a port repeats itself). Measured: share of code hunks
+                   whose loose shape (entry/cluster + removed/added identifiers) appears in 2+ and 3+
+                   different MODS (a mod's 1.21.1 and 26.2 rows count once).
 H2  compat shims   Ports route judgement changes through local helpers (an NBT shim, a MobType shim, the
                    §W5 pairs) that a shared library could supply once. Measured: share of code hunks that
                    call a class the port ADDED (a new file) from 3+ hunks in 2+ files; and, in --detail,
@@ -51,6 +55,20 @@ def h1(recs, only=None):
         rep_exact += e in seen_exact; rep_loose += l in seen_loose
         seen_exact.add(e); seen_loose.add(l)
     return len(code), rep_exact, rep_loose
+
+
+def loose(r):
+    return (r["key"], tuple(r["removed"]), tuple(r["added"]))
+
+
+def cross_port(rows):
+    """-> {loose shape: set of mods} over every row's code hunks."""
+    mods = collections.defaultdict(set)
+    for r in rows:
+        for h in r["recs"]:
+            if h["cat"] in CODE and (h["removed"] or h["added"]):
+                mods[loose(h)].add(r["row"].split("@")[0])
+    return mods
 
 
 def h2(recs):
@@ -94,10 +112,17 @@ def main():
     key = lambda p: (int(p.split("-")[0][1:]), p)
     prof = collections.defaultdict(lambda: collections.Counter())
     helper_rows = collections.defaultdict(set)
+    xp = cross_port(rows)
     for r in rows:
         p = prof[r["profile"]]; p["rows"] += 1
         n, ex, lo = h1(r["recs"]); p["code"] += n; p["rep_exact"] += ex; p["rep_loose"] += lo
         un, uex, _ulo = h1(r["recs"], "cluster"); p["un"] += un; p["un_rep"] += uex
+        for h in r["recs"]:
+            if h["cat"] in CODE:
+                k = len(xp.get(loose(h), ()))
+                p["x2"] += k >= 2; p["x3"] += k >= 3
+                if h["cat"] == "cluster":
+                    p["ux2"] += k >= 2
         _n, via, helpers = h2(r["recs"]); p["via"] += via; p["helpers"] += len(helpers)
         for h in helpers:
             helper_rows[h].add(r["row"])
@@ -112,17 +137,17 @@ def main():
             print(f"  {r['profile']:8} {r['row']:30} code={n} repeat={pct(ex, n)}/{pct(lo, n)} via-helper={pct(via, n)} "
                   f"helpers={','.join(sorted(helpers))[:80]}")
     print("| Profile | Rows | Code hunks | H1 repeats (exact / loose) | H2 via a port-added helper | "
-          "H1 among unattributed | H5 in a file with a start error | H7 in optional-integration code |")
-    print("|---|---|---|---|---|---|---|---|")
+          "H1 among unattributed | H1x in 2+ / 3+ mods | H1x unattributed in 2+ mods | H5 in a file with a start error | H7 in optional-integration code |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     T = collections.Counter()
     for pr in sorted(prof, key=key):
         p = prof[pr]; T.update(p)
         h5s = f"{pct(p['h5_in'], p['h5_code'])} ({p['h5_rows']} rows)" if p["h5_rows"] else "—"
         print(f"| {pr} | {p['rows']} | {p['code']:,} | {pct(p['rep_exact'], p['code'])} / {pct(p['rep_loose'], p['code'])} | "
-              f"{pct(p['via'], p['code'])} | {pct(p['un_rep'], p['un'])} | {h5s} | {pct(p['opt_code'], p['code'])} |")
+              f"{pct(p['via'], p['code'])} | {pct(p['un_rep'], p['un'])} | {pct(p['x2'], p['code'])} / {pct(p['x3'], p['code'])} | {pct(p['ux2'], p['un'])} | {h5s} | {pct(p['opt_code'], p['code'])} |")
     h5s = f"{pct(T['h5_in'], T['h5_code'])} ({T['h5_rows']} rows)" if T["h5_rows"] else "—"
     print(f"| **all** | {T['rows']} | {T['code']:,} | {pct(T['rep_exact'], T['code'])} / {pct(T['rep_loose'], T['code'])} | "
-          f"{pct(T['via'], T['code'])} | {pct(T['un_rep'], T['un'])} | {h5s} | {pct(T['opt_code'], T['code'])} |")
+          f"{pct(T['via'], T['code'])} | {pct(T['un_rep'], T['un'])} | {pct(T['x2'], T['code'])} / {pct(T['x3'], T['code'])} | {pct(T['ux2'], T['un'])} | {h5s} | {pct(T['opt_code'], T['code'])} |")
     print(f"\nH7: {T['opt_new']} of {T['new']} new files import an optional integration.")
     if T["h5_rows"]:
         print(f"H5: {T['h5_efc']} of {T['h5_ef']} files with a start error were changed by the port.")
