@@ -143,6 +143,37 @@ def content_census(work):
     return (r.stdout.strip()[-2500:] or None) if r.returncode == 1 else None
 
 
+def mixin_audit(work):
+    """Before a server is booted: every mixin target checked against the target's own sources in ONE pass
+    (tools/audit-mixin-targets.py, §X27). Measured: Gate B found four broken 26.2 mixin targets one boot
+    and one worker at a time; this finds them together. -> findings text or None."""
+    gp = work / "gradle.properties"
+    mc = (re.findall(r"(?m)^mc\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) or [None])[0] if gp.exists() else None
+    if not list((work / "src/main/resources").glob("*mixins*.json")):
+        return None
+    args = [f"--mc={mc}"] if mc and (work / f"versions/{mc}.properties").exists() else []
+    if args and (work / "gradlew").exists():   # the audit reads the PREPARED tree: refresh it so a worker's fix is not judged on a stale copy
+        subprocess.run(["./gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
+                        str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
+    r = subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work), *args],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 1:
+        return None
+    return ("These mixins name a member the target's vanilla code no longer has (each fails at mixin APPLY and "
+            "stops the game loading; CATALOG §R14/§R17). Retarget each to the current member, or delete a mixin "
+            "whose feature vanilla now covers and record it:\n" + r.stdout.strip()[-2500:])
+
+
+# A crash signature that is one instance of a whole FAMILY: the worker is told so, or it fixes one site
+# per boot (measured: the 26.x unset-Properties-id crash, one block per Gate B run).
+FAMILY_HINTS = [
+    (re.compile(r"unbound value: ResourceKey\[minecraft:(block|item) /|(Block|Item) id not set"),
+     "This is CATALOG §R25 and it is a FAMILY: from 1.21.2 every Block and Item Properties needs "
+     ".setId(ResourceKey.create(Registries.BLOCK/ITEM, id)). Fix it where Properties are built for ALL "
+     "blocks and items in one change (a registration helper, or every register call), not just the one named."),
+]
+
+
 def data_errors(text, ns):
     """The mod's own data files that failed to PARSE at load. A green GameTest run says nothing about
     them: the game logs one ERROR per file and goes on without it, so a recipe, advancement or loot
@@ -261,8 +292,8 @@ def main():
             found, why = listener_audit(work)
             note(event="listener-audit", run=run, note=why)
         else:
-            found = content_census(work)
-            note(event="content-census", run=run, note="findings" if found else "complete or not applicable")
+            found = "\n\n".join(x for x in (content_census(work), mixin_audit(work)) if x) or None
+            note(event="pre-checks", run=run, note="findings" if found else "clean or not applicable")
         if found:
             f = ("listeners" if phase else "content", found, ("listeners:" if phase else "content:") + found[-160:])
             kind, text, sig = f
@@ -289,6 +320,7 @@ def main():
         if spent >= a.budget:
             note(event="budget", spent=round(spent, 4)); return 1
         last_sig = sig
+        text += "".join("\n\n" + hint for rx, hint in FAMILY_HINTS if rx.search(text))
         spent += call_worker(a, work, srcs, text, phase, note, run)
     note(event="max-runs", spent=round(spent, 4)); return 1
 
@@ -315,6 +347,8 @@ def self_check():
     ok &= failure_of(green, ns="mymod") is None and failure_of(bad, ns="other") is not None
     d = failure_of(bad, ns="mymod")
     ok &= d is not None and d[0] == "data" and "2 of this mod's own data files" in d[1] and "other:z" not in d[1]
+    ok &= any(rx.search("Trying to access unbound value: ResourceKey[minecraft:item / m:x]") for rx, _h in FAMILY_HINTS)
+    ok &= not any(rx.search("unbound value: ResourceKey[minecraft:sound_event / m:x]") for rx, _h in FAMILY_HINTS)
     ok &= failure_of(bad) is None          # no namespace known: the check is off, never guessing
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
