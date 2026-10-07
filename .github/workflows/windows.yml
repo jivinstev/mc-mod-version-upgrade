@@ -153,7 +153,7 @@ jobs:
           a="$(cat .env.local)"; W --yes > "$RUNNER_TEMP/second.log"; grep -q "no changes" "$RUNNER_TEMP/second.log" \
             && [ "$a" = "$(cat .env.local)" ] || { cat "$RUNNER_TEMP/second.log"; echo "second --yes changed something"; exit 1; }
           sed -i 's/^SKILLS_INSTALL=.*/SKILLS_INSTALL=user/' .env.local
-          W --yes | grep -q "kept your hand edits to .env.local: SKILLS_INSTALL" \
+          W --yes > "$RUNNER_TEMP/third.log"; grep -q "kept your hand edits to .env.local: SKILLS_INSTALL" "$RUNNER_TEMP/third.log" \
             && grep -q '^SKILLS_INSTALL=user$' .env.local || { echo "hand edit not kept"; exit 1; }
           rm -f .env.local .env.local.bak .setup-state.json
 
