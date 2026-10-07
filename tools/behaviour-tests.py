@@ -126,9 +126,15 @@ def results(log):
     (LogTestReporter: "<name> failed at <pos>! <error>", optional ones "(optional) <name> failed at <pos>. ..."),
     so a declared test with no failure line passed -- but only if the server reached its summary line."""
     fails = {}
-    for m in re.finditer(r'(\S*behaviourgametest\.\w+) failed at [^!\n]*?[!.]\s(.*)', log, re.I):
-        fails[m.group(1).split(".")[-1].lower()] = m.group(2).strip()[:300]
+    # 1.21.1 names a test <class>.<method>, lower-cased; 26.x's generated registrar names it
+    # <modid>:<class>/<method> in snake_case (CATALOG V20). Both are keyed by norm(method).
+    for m in re.finditer(r'(\S*behaviour_?game_?test[./](\w+)) failed at [^!\n]*?[!.]\s(.*)', log, re.I):
+        fails[norm(m.group(2))] = m.group(3).strip()[:300]
     return fails, bool(re.search(r'required tests (passed|failed)', log))
+
+
+def norm(name):
+    return re.sub(r'[^a-z0-9]', '', name.lower())
 
 
 def main():
@@ -136,6 +142,8 @@ def main():
     ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=list(fl.MODELS))
     ap.add_argument("--target", default="NeoForge 1.21.1"); ap.add_argument("--heap", default="6g")
     ap.add_argument("--thinking", type=int, default=8000); ap.add_argument("--out")
+    ap.add_argument("--rerun", action="store_true",
+                    help="no model: run the BehaviourGameTest already in the port (e.g. after a later hop) and report")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -146,6 +154,16 @@ def main():
     modid, group = modinfo(work)
     out_path = pathlib.Path(a.out) if a.out else work / "behaviour-tests.json"
     report = {"modid": modid, "usd": 0.0, "tests": {}, "findings": []}
+    if a.rerun:
+        found = sorted((work / "src/main/java").rglob("BehaviourGameTest.java"))
+        if not found:
+            report["skipped"] = "--rerun: the port has no BehaviourGameTest"
+            out_path.write_text(json.dumps(report, indent=1), encoding="utf-8"); print("behaviour-tests:", report["skipped"]); return 2
+        if out_path.exists():   # keep what the writing run recorded (intent, sources, its cost)
+            prev = json.loads(out_path.read_text(encoding="utf-8"))
+            report.update({k: prev[k] for k in ("intent", "sources") if k in prev})
+            report["written_usd"] = prev.get("usd", 0)
+        return run_and_report(work, found[0], report, out_path, a.heap, remove_on_crash=False)
     ex_file, ex_text = existing_test(work)
     if not ex_file:
         report["skipped"] = "the port has no GameTest to copy the template and holder from"
@@ -198,17 +216,22 @@ def main():
         target.unlink()
         report["skipped"] = f"the port itself does not compile ({n} errors elsewhere); tests removed"
         out_path.write_text(json.dumps(report, indent=1), encoding="utf-8"); print("behaviour-tests:", report["skipped"]); return 2
-    log = gl.run_gate(work, "runGameTestServer", a.heap, work / "behaviour-gametest.log")
+    return run_and_report(work, target, report, out_path, a.heap, remove_on_crash=True)
+
+
+def run_and_report(work, target, report, out_path, heap, remove_on_crash):
+    log = gl.run_gate(work, "runGameTestServer", heap, work / "behaviour-gametest.log")
     fails, finished = results(log)
     declared = re.findall(r'@GameTest\b[^\n]*\n(?:\s*@\w+[^\n]*\n)*\s*public\s+static\s+void\s+(\w+)',
                           target.read_text(encoding="utf-8"))
     if not finished:
         crash = gl.failure_of(log)
         report["skipped"] = "the GameTest server did not finish: " + (crash[1][:400] if crash else "no summary line")
-        target.unlink()
+        if remove_on_crash:
+            target.unlink()
         out_path.write_text(json.dumps(report, indent=1), encoding="utf-8"); print("behaviour-tests:", report["skipped"]); return 2
     for name in declared:
-        msg = fails.get(name.lower())
+        msg = fails.get(norm(name))
         report["tests"][name] = {"passed": msg is None, "message": msg or ""}
         if msg is not None:
             report["findings"].append({"test": name, "why": msg})
@@ -224,6 +247,8 @@ def self_check():
            "-1,-60,0. Expected damage below 4.0, got 4.0\n[x] All 7 required tests passed :)\n")
     fails, done = results(log)
     ok = done and "Expected damage" in fails.get("shieldblocks", "") and "foodheals" not in fails
+    f26, _d = results("x (optional) mymod:behaviour_game_test/shield_blocks failed at 1,2,3. less damage\n")
+    ok &= "less damage" in f26.get(norm("shieldBlocks"), "")
     ok &= results("Caused by: x\n")[1] is False
     ok &= java_block("x\n```java\nclass A {}\n```\nINTENT: a -- b") == "class A {}\n"
     ok &= BEHAVIOUR.search("   public InteractionResultHolder<ItemStack> use(Level l, Player p, InteractionHand h) {") is not None

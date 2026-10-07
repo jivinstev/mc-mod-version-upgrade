@@ -11,6 +11,27 @@ loads without crashing. Work the process below top-to-bottom, and **loop on the
 build until the error count stops dropping or hits zero** — don't stop at the
 first wall; re-read the references and try the next category of fix.
 
+## The default path: one command (`tools/port.py`)
+For "Port <mod> to <version>" (or a jar path), **start here, not at Step 0**:
+```
+python3 tools/port.py "<exact mod name, or path to the jar>" --to <1.21.1 | 26.2>
+```
+It does every deterministic step in a fixed order: resolve the jar (and STOP if a native build already
+exists, or a required dependency has none), route the port hop by hop (`tools/routes.tsv`: e.g. Forge
+1.20.1 → NeoForge 1.21.1 → 26.2, each hop finished — compile + Gate B — before the next), set up the
+workspace (scaffold, decompile, SRG/intermediary remap, codemods, metadata, datapack layout, the
+hoisted-config fix, a baseline GameTest), then per hop: its recipe pack (or `tools/era-hop.py` for
+1.21.1 → 26.x), the cheap compile loop, Gate B; the first hop writes the behaviour tests and the client
+harness so later hops port them; the last hop runs Gate C and the visual review.
+
+**Your job while it runs is small**: start it, read its last lines and `mods/<modid>/port-report.json`,
+never the workers' transcripts or build logs. **When it prints `STOPPED`, put the block's choices to
+the person and wait** — do not hand-port, raise a budget or pass `--allow-no-pack` on your own. After
+the choice, rerun the same command: it resumes from `port-state.json`. When it finishes: report the
+cost (`python3 tools/port-cost.py <modid> --print` for this session; `port-report.json` for the
+workers), the behaviour and visual findings, then Step 7 (deliver). Steps 0–6 below are what each
+stage does, and the manual path for a STOP you are asked to work by hand.
+
 ## Target parameters (this skill is parameterized — nothing is hardcoded to one target)
 A migration is defined by four parameters. **If the caller (or the `install-mod` skill)
 doesn't specify them, use the defaults** — which is exactly the common case and makes the

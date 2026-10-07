@@ -17,10 +17,18 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 TPL="$ROOT/templates/multi-version"
 
-MODID="${1:?usage: make-multiversion.sh <modid> [target ...]}"; shift || true
+ARG="${1:?usage: make-multiversion.sh <modid | path to a port> [target ...]}"; shift || true
 TARGETS=("$@"); [ ${#TARGETS[@]} -eq 0 ] && TARGETS=(26.2)
-D="$ROOT/mods/$MODID"
-[ -d "$D" ] || { echo "no such port: mods/$MODID"; exit 2; }
+# A path (anything with a slash that is a directory) is used as-is, so a port outside mods/ (a bench
+# or replay workspace, tools/port.py's era hop) can be converted too; a bare name means mods/<name>.
+if [[ "$ARG" == */* ]] && [ -d "$ARG" ]; then
+  D="$(cd "$ARG" && pwd)"
+  MODID=$(grep -oE '^mod_id=.*' "$D/gradle.properties" | cut -d= -f2- || true)
+  [ -n "$MODID" ] || { echo "no mod_id in $D/gradle.properties"; exit 2; }
+else
+  MODID="$ARG"; D="$ROOT/mods/$MODID"
+fi
+[ -d "$D" ] || { echo "no such port: $D"; exit 2; }
 [ -f "$D/versions/1.21.1.properties" ] && { echo "mods/$MODID is already multi-version"; exit 0; }
 
 echo "=== $MODID -> multi-version (targets: 1.21.1 ${TARGETS[*]})"
