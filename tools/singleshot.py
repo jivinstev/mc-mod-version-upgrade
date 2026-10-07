@@ -159,17 +159,59 @@ def parse_blocks(answer):
     return [(s, r) for s, r in BLOCK.findall(answer.replace("\r\n", "\n"))]
 
 
+def _strip_numbers(s):
+    return re.sub(r'^\s*\d+\| ?', '', s, flags=re.M) if re.search(r'^\s*\d+\| ', s, re.M) else s
+
+
+def _loose_replace(text, s, r):
+    """Whitespace-insensitive fallback: match the SEARCH lines with each line stripped, uniquely, then
+    re-indent the replacement by the difference between the model's indent and the file's."""
+    lines = text.split("\n")
+    want = [l.strip() for l in s.split("\n") if l.strip()]
+    if not want:
+        return None, 0
+    hits = []
+    for i in range(len(lines)):
+        j, k = i, 0
+        while j < len(lines) and k < len(want):
+            if not lines[j].strip():
+                j += 1; continue
+            if lines[j].strip() != want[k]:
+                break
+            j += 1; k += 1
+        if k == len(want) and lines[i].strip() == want[0]:
+            hits.append((i, j))
+    if len(hits) != 1:
+        return None, len(hits)
+    i, j = hits[0]
+    first_model = next(l for l in s.split("\n") if l.strip())
+    shift = (len(lines[i]) - len(lines[i].lstrip())) - (len(first_model) - len(first_model.lstrip()))
+    def indent(l):
+        if not l.strip():
+            return l
+        if shift >= 0:
+            return " " * shift + l
+        cut = min(-shift, len(l) - len(l.lstrip()))
+        return l[cut:]
+    return "\n".join(lines[:i] + [indent(l) for l in r.split("\n")] + lines[j:]), 1
+
+
 def apply_blocks(text, blocks):
-    """-> (new text, None) or (None, why). All-or-nothing; each SEARCH must occur exactly once."""
+    """-> (new text, None) or (None, why). All-or-nothing; each SEARCH must occur exactly once, exactly
+    or -- failing that -- with leading/trailing whitespace ignored line by line."""
     if not blocks:
         return None, "no SEARCH/REPLACE blocks"
     new = text
     for s, r in blocks:
-        s = re.sub(r'^\s*\d+\| ', '', s, flags=re.M) if re.match(r'^\s*\d+\| ', s) else s   # numbers copied by mistake
+        s, r = _strip_numbers(s), _strip_numbers(r)
         n = new.count(s)
-        if n != 1:
-            return None, f"a SEARCH block matched {n} times"
-        new = new.replace(s, r, 1)
+        if n == 1:
+            new = new.replace(s, r, 1)
+            continue
+        loose, m = _loose_replace(new, s, r)
+        if loose is None:
+            return None, f"a SEARCH block matched {n} times exactly and {m} times ignoring whitespace"
+        new = loose
     return new, None
 
 
@@ -192,7 +234,7 @@ def guard(before, after):
     return None
 
 
-def run_single(work, f, errs_of_f, entry_text, idx, model_id, target, timeout=300):
+def run_single(work, f, errs_of_f, entry_text, idx, model_id, target, timeout=300, thinking=0):
     """One request: context in, SEARCH/REPLACE out, applied only if it passes the checks."""
     path = pathlib.Path(f)
     text = path.read_text(encoding="utf-8", errors="replace")
@@ -203,6 +245,9 @@ def run_single(work, f, errs_of_f, entry_text, idx, model_id, target, timeout=30
                            entries=entry_text, api=api_facts(idx, text, [m for _l, m in errs_of_f]),
                            text=body, partial=partial)
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
+    # thinking is ~90% of a single-shot answer's tokens (measured: 10k of 10.8k on one 12-error file) and
+    # the first tier fixes most files without it; the next tier gets a budget
+    env["MAX_THINKING_TOKENS"] = str(thinking)
     t0 = time.time()
     r = subprocess.run(["claude", "-p", "--model", model_id, "--system-prompt", SYSTEM, "--tools", "",
                         "--output-format", "json"], input=prompt, cwd=work, env=env, capture_output=True,
@@ -235,6 +280,10 @@ def self_check():
     ok &= why is not None and "matched 2" in why
     _n, why = apply_blocks(t, parse_blocks("<<<<<<< SEARCH\nnot there\n=======\nx\n>>>>>>> REPLACE"))
     ok &= why is not None
+    # the model re-indented by 4 (as if the line-number column were code): matched loosely, re-indented back
+    new, why = apply_blocks(t, parse_blocks("<<<<<<< SEARCH\n      void f() {\n        old(1);\n=======\n"
+                                            "      void f() {\n        renamed(1);\n        more();\n>>>>>>> REPLACE"))
+    ok &= why is None and "  void f() {\n    renamed(1);\n    more();\n  }" in new
     big = "class B {\n" + "".join(f"  int m{i}() {{ return {i}; }}\n" for i in range(60)) + "}\n"
     ok &= guard(big, "class B {\n}\n") is not None                                              # mass deletion
     ok &= guard(t, t.replace("    old(1);", "    // old(1);\n    // more();\n    // x(2);")) is not None  # commented out

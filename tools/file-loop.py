@@ -254,7 +254,9 @@ def probe(work, sources=None):
     keep, dropped = [], 0
     for f, l, name, rest in hits:   # a dead override can only be one of a name some SUPERTYPE declares
         if name in idx.inherited(pathlib.Path(f).stem):
-            keep.append((str(work / f), int(l), f"{name}({rest.strip()}: {PROBE_MSG}"))
+            sup = idx.decl((work / f))[0]   # name the supertypes, so a single-shot worker is shown their declarations
+            keep.append((str(work / f), int(l), f"{name}({rest.strip()}: {PROBE_MSG} (this class extends/implements "
+                                               f"{', '.join(sup) or '?'})"))
         else:
             dropped += 1
     return keep, r.returncode, dropped
@@ -291,16 +293,27 @@ def static_scan(work):
     return sorted(set(out))
 
 
-def finding_round(a, work, sigs, entries, note, kind, hits):
-    """A list of findings (not compile errors) becomes one worker round; returns dollars spent."""
+def finding_round(a, work, sigs, entries, note, kind, hits, idx=None):
+    """A list of findings (not compile errors) becomes one worker round; returns dollars spent. Probe
+    findings are per file and say exactly what is wrong, so they go single-shot when that mode is on;
+    scan findings (registrations, client classes on the server) can need other files, so an agent."""
     note(event=kind, hits=len(hits))
     if not hits:
         return 0.0
     groups, by = batches(hits, a.batch_files, a.batch_errors)
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(a.parallel) as ex:
-        res = list(ex.map(lambda f: run_worker(work, f, by, sigs, entries, "sonnet" if kind == "scan" else a.first_model,
-                                               a.target, a.sources, a.timeout, kind == "scan"), groups))
+    if kind == "probe" and a.mode == "single" and idx is not None:
+        def one(f):
+            r_ = singleshot.run_single(work, f, by[f], "(none: these are dead overrides, not compile errors)",
+                                       idx, MODELS["sonnet"], a.target, thinking=a.single_thinking)
+            r_["model"] = "sonnet"
+            return r_
+        with ThreadPoolExecutor(6) as ex:
+            res = list(ex.map(one, [f for g in groups for f in g]))
+    else:
+        with ThreadPoolExecutor(a.parallel) as ex:
+            res = list(ex.map(lambda f: run_worker(work, f, by, sigs, entries, "sonnet" if kind == "scan" else a.first_model,
+                                                   a.target, a.sources, a.timeout, kind == "scan"), groups))
     spent = 0.0
     for r_ in res:
         spent += r_["usd"]; note(event="worker", round=kind, **r_)
@@ -311,6 +324,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work", help="the Gradle project (src/main/java is edited in place)")
     ap.add_argument("--self-check", action="store_true", help="test the model-free parts (scans, filters, batching)")
+    ap.add_argument("--single-thinking", type=int, default=4000,
+                    help="thinking budget for single-shot tiers after the first (the first, Haiku, runs without)")
     ap.add_argument("--mode", default="single", choices=["single", "agent"],
                     help="single (default): one request per file with script-gathered context, agent workers as "
                          "the fallback; agent: tool-using workers only (the step 6/7 spike's design)")
@@ -393,7 +408,8 @@ def main():
             def one(fm):
                 f, m = fm
                 ent, _ids = entry_texts([x for _l, x in by[f]], sigs, entries, cap=1500, most=3)
-                r_ = singleshot.run_single(work, f, by[f], ent, idx, MODELS[m], a.target)
+                r_ = singleshot.run_single(work, f, by[f], ent, idx, MODELS[m], a.target,
+                                           thinking=0 if m == "haiku" else a.single_thinking)
                 r_["model"] = m
                 return r_
             with ThreadPoolExecutor(max(a.parallel, 6 if singles else 0)) as ex:
@@ -449,7 +465,7 @@ def main():
         hits, extra = (found[0], {"rc": found[1], "dropped_by_supertype": found[2]}) if kind == "probe" else (found, {})
         if extra:
             note(event="probe-filter", **extra)
-        state["spent"] += finding_round(a, work, sigs, entries, note, kind, hits)
+        state["spent"] += finding_round(a, work, sigs, entries, note, kind, hits, idx)
         if hits:
             n, errs = compile_(work, clog, a.heap)
             note(event=kind + "-after", errors=n, spent=round(state["spent"], 4))
