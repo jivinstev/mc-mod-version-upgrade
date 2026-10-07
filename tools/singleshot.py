@@ -215,8 +215,15 @@ def apply_blocks(text, blocks):
     return new, None
 
 
+def _balance(text):
+    code = re.sub(r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'', '""', re.sub(r'/\*.*?\*/|//[^\n]*', '', text, flags=re.S))
+    return tuple(code.count(o) - code.count(c) for o, c in ("{}", "()", "[]"))
+
+
 def guard(before, after):
-    """-> None when the edit looks like a fix, else why it looks like hiding the error."""
+    """-> None when the edit looks like a fix, else why it looks like hiding the error (or breaking the file)."""
+    if _balance(after) != _balance(before):   # an edit that unbalances brackets aborts the whole compile at parse
+        return f"unbalances brackets {_balance(before)} -> {_balance(after)}"
     b, a = before.split("\n"), after.split("\n")
     sm = difflib.SequenceMatcher(None, b, a)
     removed = sum(i2 - i1 for op, i1, i2, _j1, _j2 in sm.get_opcodes() if op in ("delete", "replace"))
@@ -289,6 +296,8 @@ def self_check():
     ok &= guard(t, t.replace("    old(1);", "    // old(1);\n    // more();\n    // x(2);")) is not None  # commented out
     ok &= guard(t, t.replace("old(1);", "throw new UnsupportedOperationException();")) is not None
     ok &= guard(t, t.replace("old(1);", "renamed(1);")) is None
+    ok &= guard(t, t.replace("  }\n  void g", "  void g")) is not None   # a lost closing brace
+    ok &= guard(t, t.replace("old(1);", 'log("{");')) is None             # a brace inside a string is fine
     with tempfile.TemporaryDirectory() as d:
         g = pathlib.Path(d, "net/x"); g.mkdir(parents=True)
         (g / "Entity.java").write_text("package net.x;\npublic abstract class Entity {\n"

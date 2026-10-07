@@ -403,6 +403,7 @@ def main():
                     jobs.append((files, m, a.subsystem))
             if not jobs and not singles:
                 break
+            snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java")}
             from concurrent.futures import ThreadPoolExecutor
 
             def one(fm):
@@ -424,6 +425,16 @@ def main():
                 state["spent"] += res["usd"]; note(event="worker", round=rnd, **res)
             before = n
             n, errs = compile_(work, clog, a.heap)
+            if n is None and any("PARSE ABORT" in l for l in errs):
+                # a worker's edit broke a file's syntax: revert just those files to this round's start,
+                # move them up a tier, and count again (one bad edit must not stop the round)
+                broken = {rb_rel(f) for f, _l, _m in rb.parse_errors(clog.read_text(encoding="utf-8", errors="replace"))}
+                for f in broken:
+                    if f in snap:
+                        pathlib.Path(f).write_text(snap[f], encoding="utf-8")
+                        tier_of[f] = tier_of.get(f, lo) + 1
+                note(event="reverted-parse-breaks", round=rnd, files=sorted(os.path.relpath(f, work) for f in broken))
+                n, errs = compile_(work, clog, a.heap)
             note(event="compile", round=rnd, errors=n, spent=round(state["spent"], 4))
             if n is None:
                 return None, errs
