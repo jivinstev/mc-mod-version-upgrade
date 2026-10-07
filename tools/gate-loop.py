@@ -134,6 +134,15 @@ def listener_audit(work):
     return None, f"listener audit: exit {r.returncode}: {out.splitlines()[-1][:160] if out else ''}"
 
 
+def json_strict(work):
+    """Repair lenient-only JSON (a `//` line, a trailing comma, a BOM) before booting -- 26.x skips such a
+    file, and for a lang file that is every name in the mod (§S8). Free; only files with no safe repair
+    go to the worker. -> findings text or None."""
+    r = subprocess.run([sys.executable, str(ROOT / "tools/fix-json-strict.py"), "--work", str(work)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return r.stdout.strip()[-2000:] if r.returncode == 1 else None
+
+
 def content_census(work):
     """Before a server is booted: content the mod's own lang file declares, that 1.21 made data-driven
     (enchantments above all), must still exist (tools/content-census.py). A port that deleted the Java
@@ -292,7 +301,7 @@ def main():
             found, why = listener_audit(work)
             note(event="listener-audit", run=run, note=why)
         else:
-            found = "\n\n".join(x for x in (content_census(work), mixin_audit(work)) if x) or None
+            found = "\n\n".join(x for x in (json_strict(work), content_census(work), mixin_audit(work)) if x) or None
             note(event="pre-checks", run=run, note="findings" if found else "clean or not applicable")
         if found:
             f = ("listeners" if phase else "content", found, ("listeners:" if phase else "content:") + found[-160:])

@@ -238,6 +238,10 @@ def main():
     step(f"data files: {len(changed)} rewritten to the {T} format"
          + (f"; {len(refused)} REFUSED and left as they were (listed in {log.name}; they will not load on {T} "
             f"until fixed): " + "; ".join(r.split(' (')[0] for r in refused[:6]) if refused else ""))
+    # 26.x parses JSON strictly and skips a lenient-only file (§S8): repair the shapes with one meaning
+    r = subprocess.run([sys.executable, str(ROOT / "tools/fix-json-strict.py"), "--work", str(work)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    step(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "fix-json-strict: no output")
     # the target is now the canonical one: an empty table, the default target, and no 1.21.1 build
     table.write_text(f"# {T} is this port's only target: its renames were applied to src/ by tools/era-hop.py.\n",
                      encoding="utf-8")

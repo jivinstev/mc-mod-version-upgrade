@@ -257,7 +257,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "run-port.py|run-port: the stop contract's estimate and block, per-run spend on a resumed log" \
             "learn-pack.py|learn-pack: recurring renames become rows; one-offs and non-platform names never do" \
             "park-optional.py|park-optional: integration packages and datagen are parked, required-dep code is not" \
-            "content-census.py|content census: a declared enchantment with no 1.21 data file is missing; all present passes"; do
+            "content-census.py|content census: a declared enchantment with no 1.21 data file is missing; all present passes" \
+            "fix-json-strict.py|fix-json-strict: comment lines, trailing commas and a BOM are repaired byte-safe; a missing comma is refused"; do
   tool="${spec%%|*}"; what="${spec#*|}"
   out="$(python3 "tools/$tool" --self-check 2>&1)"
   grep -q 'self-check: OK' <<<"$out" && ok "$what" || bad "$tool self-check: $out"

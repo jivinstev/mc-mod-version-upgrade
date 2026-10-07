@@ -48,14 +48,25 @@ def at_least_1_21(v):
     return parts[:2] >= [1, 21]
 
 
+def read_lang(f):
+    """The lang file as the game's lenient 1.21.1 parser saw it (a `//` line, a trailing comma), or None.
+    Never skipped silently: a census that cannot read its manifest has checked nothing."""
+    import importlib.util
+    s = importlib.util.spec_from_file_location("fjs", pathlib.Path(__file__).resolve().parent / "fix-json-strict.py")
+    fjs = importlib.util.module_from_spec(s); s.loader.exec_module(fjs)
+    b = f.read_bytes()
+    r = b if fjs.strict_ok(b) else fjs.repair(b)
+    return json.loads(r.decode("utf-8")) if r is not None else None
+
+
 def census(work):
     res = work / "src/main/resources"
     out, checked = {}, 0
     for lang in sorted(res.glob("assets/*/lang/en_us.json")):
         ns = lang.parent.parent.name
-        try:
-            keys = json.loads(lang.read_text(encoding="utf-8", errors="replace"))
-        except ValueError:
+        keys = read_lang(lang)
+        if keys is None:
+            out.setdefault("unreadable", []).append(lang.relative_to(res).as_posix())
             continue
         java = "\n".join(f.read_text(encoding="utf-8", errors="replace")
                          for f in (work / "src/main/java").rglob("*.java")) if (work / "src/main/java").is_dir() else ""
@@ -73,7 +84,12 @@ def census(work):
 
 def report(missing):
     lines = []
+    if "unreadable" in missing:
+        lines.append("the mod's lang file is not JSON even read leniently, so the census cannot check it and "
+                     "26.x will skip it (§S8): " + ", ".join(missing["unreadable"]))
     for kind, ids in missing.items():
+        if kind == "unreadable":
+            continue
         lines.append(f"{len(ids)} {kind}(s) the mod declares (its lang file names them) have no "
                      f"data/<ns>/{DATA_DRIVEN[kind][0]}/ file, so the port no longer has them: {', '.join(ids)}")
         lines.append(f"  port them (CATALOG {DATA_DRIVEN[kind][1]}); the original classes are in decompiled-raw/ "
@@ -119,6 +135,10 @@ def self_check():
         for i in ("spikes", "payback"):
             (w / f"src/main/resources/data/mymod/enchantment/{i}.json").write_text("{}", encoding="utf-8")
         ok &= census(w)[0] == {}
+        (w / "src/main/resources/assets/mymod/lang/en_us.json").write_text(
+            '{\n "enchantment.mymod.spikes": "S",\n// "x": "y",\n "enchantment.mymod.payback": "P",\n "enchantment.mymod.gone": "G",\n}',
+            encoding="utf-8")
+        ok &= census(w)[0] == {"enchantment": ["mymod:gone"]}      # a lenient-only file is read, not skipped
         ok &= at_least_1_21("26.2") and at_least_1_21("1.21.1") and not at_least_1_21("1.20.1")
         (w / "gradle.properties").write_text("mc=26.2\n", encoding="utf-8")
         (w / "versions").mkdir(); (w / "versions/26.2.properties").write_text("minecraft_version=26.2\n", encoding="utf-8")
