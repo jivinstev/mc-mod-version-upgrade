@@ -42,6 +42,11 @@ to type. Installing needs Python 3. Porting is an add-on: say yes when `./setup`
 `./setup --migrate` later; it needs Java 21 (and 25 for Minecraft 26.x).
 Details: [docs/USING.md](docs/USING.md).
 
+Setup also asks you to turn off **"Help improve Claude"** at
+[claude.ai/settings/data-privacy-controls](https://claude.ai/settings/data-privacy-controls): Claude Code
+reads what you work on here, including decompiled mod code. Setup can't change that setting, so it only
+records it once you type `confirmed`.
+
 ### On Windows (experimental)
 
 Native Windows, no WSL. Claude Code on Windows already needs Git for Windows, whose Git Bash runs
