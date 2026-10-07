@@ -466,7 +466,7 @@ def self_check():
               and not any(n == "Real.java" or n == "Cap.java" or n == "Screen.java" for n, _m in found)
               and ("Msg.java", SCAN_CLIENT[:20]) in found
               and {"getLightBlock", "propagatesSkylightDown"} <= inh and "myHelper" not in inh
-              and rb_rel(str(gen)) == str(s / "Plain.java"))
+              and pathlib.Path(rb_rel(str(gen))) == s / "Plain.java")
         b, _by = batches([("a", 1, "x")] * 50 + [("b", 1, "x")] * 3 + [("c", 1, "x")] * 3, 4, 40)
         ok = ok and b == [["a"], ["b", "c"]]
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
