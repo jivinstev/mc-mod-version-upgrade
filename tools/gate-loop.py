@@ -27,7 +27,7 @@ PROMPT = """A Minecraft mod ported to {target} compiles, but its headless GameTe
 
 {failure}
 
-Find the cause in src/main/java and fix it with the smallest change that keeps the mod's behaviour.
+Find the cause in src/main/java (or, for data files, src/main/resources) and fix it with the smallest change that keeps the mod's behaviour.
 Never delete a feature, empty a method or disable a test to make this go away. CATALOG.md section R
 (runtime patterns) in {catalog} lists known causes. Minecraft/NeoForge sources to check APIs: {srcs}.
 You cannot run the game. Finish with one line: FIXED: <what you changed>"""
@@ -132,6 +132,15 @@ def listener_audit(work):
                 "(\"Cannot register listeners for abstract class ...\"; name a concrete subclass instead, "
                 "CATALOG §X33):\n" + out[-2500:]), "listener audit: findings"
     return None, f"listener audit: exit {r.returncode}: {out.splitlines()[-1][:160] if out else ''}"
+
+
+def content_census(work):
+    """Before a server is booted: content the mod's own lang file declares, that 1.21 made data-driven
+    (enchantments above all), must still exist (tools/content-census.py). A port that deleted the Java
+    registration and wrote no data file is otherwise green on every gate. -> findings text or None."""
+    r = subprocess.run([sys.executable, str(ROOT / "tools/content-census.py"), "--work", str(work)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return (r.stdout.strip()[-2500:] or None) if r.returncode == 1 else None
 
 
 def data_errors(text, ns):
@@ -251,17 +260,20 @@ def main():
         if phase:
             found, why = listener_audit(work)
             note(event="listener-audit", run=run, note=why)
-            if found:
-                f = ("listeners", found, "listeners:" + found[-160:])
-                kind, text, sig = f
-                note(event="red", run=run, phase=phase, kind=kind, sig=sig[:200])
-                if sig == last_sig:
-                    note(event="stuck", run=run, spent=round(spent, 4)); return 1
-                last_sig = sig
-                spent += call_worker(a, work, srcs, text, phase, note, run)
-                if spent >= a.budget:
-                    note(event="budget", spent=round(spent, 4)); return 1
-                continue
+        else:
+            found = content_census(work)
+            note(event="content-census", run=run, note="findings" if found else "complete or not applicable")
+        if found:
+            f = ("listeners" if phase else "content", found, ("listeners:" if phase else "content:") + found[-160:])
+            kind, text, sig = f
+            note(event="red", run=run, phase=phase, kind=kind, sig=sig[:200])
+            if sig == last_sig:
+                note(event="stuck", run=run, spent=round(spent, 4)); return 1
+            last_sig = sig
+            spent += call_worker(a, work, srcs, text, phase, note, run)
+            if spent >= a.budget:
+                note(event="budget", spent=round(spent, 4)); return 1
+            continue
         f = failure_of(run_gate(work, task, a.heap, work / f"gate-loop{'-' + phase if phase else ''}.log", phase),
                        client=bool(phase), ns=ns)
         if f is None:
