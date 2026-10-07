@@ -149,7 +149,8 @@ jobs:
           want="$(cygpath -w "$U/AppData/Roaming/.minecraft/mods")"
           v="$(sed -n 's/^MINECRAFT_MODS_DIR_1_21_1=//p' .env.local)"
           [ "$(cygpath -u "$v")" = "$(cygpath -u "$want")" ] || { echo "picked $v, wanted $want"; exit 1; }
-          a="$(cat .env.local)"; W --yes | tee "$RUNNER_TEMP/second.log" | grep -q "no changes" \
+          # no `tee | grep -q`: grep -q exits at the first match and, under pipefail, tee's SIGPIPE failed the step
+          a="$(cat .env.local)"; W --yes > "$RUNNER_TEMP/second.log"; grep -q "no changes" "$RUNNER_TEMP/second.log" \
             && [ "$a" = "$(cat .env.local)" ] || { cat "$RUNNER_TEMP/second.log"; echo "second --yes changed something"; exit 1; }
           sed -i 's/^SKILLS_INSTALL=.*/SKILLS_INSTALL=user/' .env.local
           W --yes | grep -q "kept your hand edits to .env.local: SKILLS_INSTALL" \
