@@ -293,6 +293,26 @@ def static_scan(work):
     return sorted(set(out))
 
 
+def subsystem_job(a, work, files, by, sigs, entries, needs_text, idx, note):
+    """A cross-file change: ONE Sonnet request over all the files (and the mod classes the errors and
+    the NEEDS notes name) first; the tool-using subsystem agent only when that answer cannot be applied.
+    Measured on the step-7 A/B: the agent alone was $3.69 of a $6.83 port."""
+    if a.mode == "single" and idx is not None:
+        ent, _ids = entry_texts([m for f in files for _l, m in by[f]], sigs, entries, cap=3000, most=5)
+        r_ = singleshot.run_multi(work, {f: by[f] for f in files}, needs_text, ent, idx, MODELS["sonnet"],
+                                  a.target, thinking=a.multi_thinking)
+        r_["model"] = "sonnet"
+        if r_["applied"]:
+            return [r_]
+        # logged without a "usd" key: its dollars ride on the agent's record below, so totals count them once
+        note(event="multi-rejected", rejected=r_["rejected"], multi_usd=r_["usd"], files=r_["files"])
+        agent = run_worker(work, files, by, sigs, entries, "sonnet", a.target, a.sources, a.timeout, True)
+        agent["usd"] = (agent["usd"] or 0) + (r_["usd"] or 0)
+        agent["multi_usd"] = r_["usd"]
+        return agent
+    return run_worker(work, files, by, sigs, entries, "sonnet", a.target, a.sources, a.timeout, True)
+
+
 def finding_round(a, work, sigs, entries, note, kind, hits, idx=None):
     """A list of findings (not compile errors) becomes one worker round; returns dollars spent. Probe
     findings are per file and say exactly what is wrong, so they go single-shot when that mode is on;
@@ -310,10 +330,15 @@ def finding_round(a, work, sigs, entries, note, kind, hits, idx=None):
             return r_
         with ThreadPoolExecutor(6) as ex:
             res = list(ex.map(one, [f for g in groups for f in g]))
+    elif kind == "scan":
+        with ThreadPoolExecutor(a.parallel) as ex:
+            res = list(ex.map(lambda g: subsystem_job(a, work, g, by, sigs, entries,
+                                                      "Load-crash scan findings: fix each so the mod loads.", idx, note),
+                              groups))
     else:
         with ThreadPoolExecutor(a.parallel) as ex:
-            res = list(ex.map(lambda f: run_worker(work, f, by, sigs, entries, "sonnet" if kind == "scan" else a.first_model,
-                                                   a.target, a.sources, a.timeout, kind == "scan"), groups))
+            res = list(ex.map(lambda f: run_worker(work, f, by, sigs, entries, a.first_model,
+                                                   a.target, a.sources, a.timeout, False), groups))
     spent = 0.0
     for r_ in res:
         spent += r_["usd"]; note(event="worker", round=kind, **r_)
@@ -329,6 +354,8 @@ def main():
     ap.add_argument("--mode", default="single", choices=["single", "agent"],
                     help="single (default): one request per file with script-gathered context, agent workers as "
                          "the fallback; agent: tool-using workers only (the step 6/7 spike's design)")
+    ap.add_argument("--multi-thinking", type=int, default=8000,
+                    help="thinking budget for the one-request cross-file (subsystem) worker")
     ap.add_argument("--first-model", default="sonnet", choices=TIERS)
     ap.add_argument("--max-model", default="opus", choices=TIERS)
     ap.add_argument("--budget", type=float, default=15.0, help="stop when workers have spent this many dollars")
@@ -365,7 +392,7 @@ def main():
     note(event="start", errors=n, sources=a.sources)
     if n is None:
         print("the start does not compile to a count:", errs); return 2
-    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": set()}
+    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}}
     # the escalation ladder: (model, single-shot?). Single-shot tiers go first in --mode single (the
     # default): one request per file with script-gathered context; agent tiers are the fallback.
     ladder = ([(m, True) for m in ("haiku", "sonnet")] if a.mode == "single" else []) + [(m, False) for m in TIERS]
@@ -386,8 +413,10 @@ def main():
             # (measured: escalating them per file to Opus cost $2.70 and moved 45 -> 33; one Sonnet
             # worker allowed to edit any file then cleared those 33 for $1.11)
             need = [f for f in by if f in state["needs"]]
+            multi = None
             if need:
-                jobs.append((need[:40], "sonnet", True))
+                multi = need[:40]
+                needs_text = "\n".join(f"{os.path.relpath(f, work)}: {state['needs'][f]}" for f in multi)
             singles = []
             for files in groups:   # a batch runs at the highest tier any of its files has reached
                 files = [f for f in files if f not in need]
@@ -417,8 +446,11 @@ def main():
                 futs = [ex.submit(run_worker, work, f, by, sigs, entries, m, a.target, a.sources, a.timeout, sub)
                         for f, m, sub in jobs]
                 sfuts = [ex.submit(one, fm) for fm in singles]
+                mfut = multi and ex.submit(subsystem_job, a, work, multi, by, sigs, entries, needs_text, idx, note)
                 results = [fu.result() for fu in futs]
-                sresults = [fu.result() for fu in sfuts]
+            if multi:
+                jobs.insert(0, (multi, "sonnet", True)); results.insert(0, mfut.result())
+            sresults = [fu.result() for fu in sfuts]
             jobs += [([f], m, "single") for f, m in singles]
             results += sresults
             for res in results:
@@ -432,6 +464,8 @@ def main():
                 for f in broken:
                     if f in snap:
                         pathlib.Path(f).write_text(snap[f], encoding="utf-8")
+                    elif pathlib.Path(f).exists():   # a file a cross-file worker created this round
+                        pathlib.Path(f).unlink()
                         tier_of[f] = tier_of.get(f, lo) + 1
                 note(event="reverted-parse-breaks", round=rnd, files=sorted(os.path.relpath(f, work) for f in broken))
                 n, errs = compile_(work, clog, a.heap)
@@ -439,14 +473,14 @@ def main():
             if n is None:
                 return None, errs
             still = {f for f, _l, _m in errs}
-            state["needs"] = set()
+            state["needs"] = {}
             for (files, m, sub), res in zip(jobs, results):
                 needs = re.search(r'^NEEDS:\s*(.+)$', res["result"], re.M)
                 says_needs = needs and not needs.group(1).strip().lower().startswith("none")
                 for f in files:
                     if f in still:
                         if says_needs and sub is not True:   # True = already a subsystem worker
-                            state["needs"].add(f)
+                            state["needs"][f] = needs.group(1).strip()[:400]
                         else:   # a file still failing moves up a tier
                             cur = ladder.index((m, sub == "single")) if (m, sub == "single") in ladder else lo
                             tier_of[f] = max(tier_of.get(f, lo), cur) + 1
@@ -521,7 +555,7 @@ def self_check():
               and ("Msg.java", SCAN_CLIENT[:20]) in found
               and {"getLightBlock", "propagatesSkylightDown"} <= inh and "myHelper" not in inh
               and pathlib.Path(rb_rel(str(gen))) == s / "Plain.java")
-        ok = ok and singleshot.self_check()
+        ok = ok and singleshot.self_check() and singleshot.self_check_multi()
         b, _by = batches([("a", 1, "x")] * 50 + [("b", 1, "x")] * 3 + [("c", 1, "x")] * 3, 4, 40)
         ok = ok and b == [["a"], ["b", "c"]]
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")

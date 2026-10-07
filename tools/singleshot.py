@@ -310,3 +310,168 @@ def self_check():
         body, part = numbered("\n".join(f"l{i}" for i in range(1000)), [500])
         ok &= part != "" and "  500| l499" in body and "(lines omitted)" in body and "  900|" not in body
     return ok
+
+
+# --- multi-file: one request for a cross-file rewrite (capabilities -> attachments, packets -> payloads) ---
+MULTI_PROMPT = """Target: {target}. These files fail to compile because of ONE cross-file change: earlier workers
+reported that fixing them needs coordinated edits in several files. Make that change across the files below.
+
+ERRORS ({n}):
+{errors}
+
+WHAT EARLIER WORKERS SAID IS NEEDED:
+{needs}
+
+CATALOGUE NOTES (old shape -> fix):
+{entries}
+
+GAME DECLARATIONS (from the target's own sources; trust these over memory):
+{api}
+
+{files}
+
+Answer with edits grouped by file. For an existing file:
+FILE: <path exactly as shown above>
+<<<<<<< SEARCH
+<lines copied EXACTLY from that file, without line numbers>
+=======
+<replacement lines>
+>>>>>>> REPLACE
+(one or more blocks per FILE). To create a file the change needs:
+NEW FILE: src/main/java/<package path>/<Name>.java
+```java
+<the whole file>
+```
+Keep behaviour; do not delete features or stub logic. End with: NEEDS: <anything still missing, or none>"""
+
+FILE_HDR = re.compile(r'^(NEW FILE|FILE):\s*(\S+\.java)\s*$', re.M)
+
+
+def related_files(work, files_errs, needs_text, cap_files=12):
+    """The files a cross-file fix touches: those with errors, plus mod classes the errors and the NEEDS
+    notes name (by simple name or path) -- e.g. the registry class whose constants went missing."""
+    src = pathlib.Path(work) / "src/main/java"
+    by_stem = collections.defaultdict(list)
+    for f in src.rglob("*.java"):
+        by_stem[f.stem].append(f)
+    out = [pathlib.Path(f) for f in files_errs]
+    text = needs_text + " " + " ".join(m for errs in files_errs.values() for _l, m in errs)
+    for path in re.findall(r'[\w/]+\.java', text):
+        for f in src.rglob(pathlib.Path(path).name):
+            if f not in out:
+                out.append(f)
+    for name in re.findall(r'\b([A-Z][A-Za-z0-9_]{2,})\b', text):
+        for f in by_stem.get(name, [])[:1]:
+            if f not in out:
+                out.append(f)
+    return out[:cap_files]
+
+
+def parse_multi(answer):
+    """-> ({rel path: [(search, replace)]}, {rel path: new file text}) from FILE / NEW FILE sections."""
+    edits, new = collections.defaultdict(list), {}
+    marks = list(FILE_HDR.finditer(answer.replace("\r\n", "\n")))
+    text = answer.replace("\r\n", "\n")
+    for i, m in enumerate(marks):
+        seg = text[m.end():marks[i + 1].start() if i + 1 < len(marks) else len(text)]
+        if m.group(1) == "NEW FILE":
+            fence = re.search(r'```(?:java)?\n(.*?)\n```', seg, re.S)
+            if fence:
+                new[m.group(2)] = fence.group(1) + "\n"
+        else:
+            edits[m.group(2)] += parse_blocks(seg)
+    return edits, new
+
+
+def apply_multi(work, answer, allowed):
+    """All-or-nothing across files: every FILE must be one we showed, every block must apply, every
+    result must pass the guard; NEW FILEs must be under src/main/java and not exist yet."""
+    work = pathlib.Path(work)
+    edits, new = parse_multi(answer)
+    if not edits and not new:
+        return None, "no FILE / NEW FILE sections"
+    results = {}
+    for rel, blocks in edits.items():
+        p = (work / rel).resolve()
+        if p not in allowed:
+            return None, f"edits a file it was not shown: {rel}"
+        before = p.read_text(encoding="utf-8", errors="replace")
+        after, why = apply_blocks(before, blocks)
+        if after is None:
+            return None, f"{rel}: {why}"
+        why = guard(before, after)
+        if why:
+            return None, f"{rel}: {why}"
+        results[p] = after
+    for rel, body in new.items():
+        p = (work / rel).resolve()
+        if not str(p).startswith(str((work / "src/main/java").resolve())) or p.exists():
+            return None, f"bad NEW FILE path: {rel}"
+        if _balance(body) != (0, 0, 0):
+            return None, f"NEW FILE {rel} has unbalanced brackets"
+        results[p] = body
+    return results, None
+
+
+def run_multi(work, files_errs, needs_text, entry_text, idx, model_id, target, timeout=900, thinking=8000,
+              cap_chars=140000):
+    work = pathlib.Path(work)
+    files = related_files(work, files_errs, needs_text)
+    shown, parts, total = set(), [], 0
+    for f in files:
+        text = f.read_text(encoding="utf-8", errors="replace")
+        errs = files_errs.get(str(f), [])
+        body, partial = numbered(text, [l for l, _m in errs], full_max=300 if errs else 120, pad=20)
+        block = f"FILE {f.relative_to(work).as_posix()} (line-numbered{partial}):\n{body}\n"
+        if total + len(block) > cap_chars:
+            break
+        parts.append(block); shown.add(f.resolve()); total += len(block)
+    msgs = [m for errs in files_errs.values() for _l, m in errs]
+    rel = lambda f: pathlib.Path(f).relative_to(work).as_posix()
+    prompt = MULTI_PROMPT.format(target=target, n=len(msgs),
+                                 errors="\n".join(f"{rel(f)}:{l}: {m}" for f, errs in files_errs.items() for l, m in sorted(errs)[:40]),
+                                 needs=needs_text.strip() or "(none recorded)", entries=entry_text,
+                                 api=api_facts(idx, "\n".join(p_.read_text(encoding="utf-8", errors="replace") for p_ in files[:4]), msgs, cap=90),
+                                 files="\n".join(parts))
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
+    env["MAX_THINKING_TOKENS"] = str(thinking)
+    t0 = time.time()
+    r = subprocess.run(["claude", "-p", "--model", model_id, "--system-prompt", SYSTEM, "--tools", "",
+                        "--output-format", "json"], input=prompt, cwd=work, env=env, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        d = {"result": (r.stdout + r.stderr)[-400:], "total_cost_usd": 0}
+    ans = d.get("result") or ""
+    results, why = apply_multi(work, ans, shown)
+    if results:
+        for p_, text in results.items():
+            p_.parent.mkdir(parents=True, exist_ok=True)
+            p_.write_text(text, encoding="utf-8")
+    return {"mode": "multi", "files": [rel(f) for f in files_errs], "shown": len(shown), "errors_in": len(msgs),
+            "usd": d.get("total_cost_usd") or 0, "usage": d.get("usage"), "secs": round(time.time() - t0),
+            "applied": why is None, "rejected": why, "rule": None, "result": ans[-600:], "prompt_chars": len(prompt),
+            "edited": [rel(p_) for p_ in (results or {})]}
+
+
+def self_check_multi():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        w = pathlib.Path(d); s = w / "src/main/java/m"; s.mkdir(parents=True)
+        (s / "Caps.java").write_text("package m;\nclass Caps {\n}\n", encoding="utf-8")
+        (s / "Use.java").write_text("package m;\nclass Use {\n  Object x = Caps.LEADER;\n}\n", encoding="utf-8")
+        fe = {str(s / "Use.java"): [(3, "cannot find symbol: variable LEADER")]}
+        rel = related_files(w, fe, "Caps.java must declare LEADER")
+        ok = (s / "Caps.java") in rel
+        allowed = {f.resolve() for f in rel}
+        ans = ("FILE: src/main/java/m/Caps.java\n<<<<<<< SEARCH\nclass Caps {\n=======\nclass Caps {\n"
+               "  static Object LEADER = new Object();\n>>>>>>> REPLACE\n"
+               "NEW FILE: src/main/java/m/Extra.java\n```java\npackage m;\nclass Extra {}\n```\nNEEDS: none")
+        res, why = apply_multi(w, ans, allowed)
+        ok &= why is None and any("LEADER = new Object()" in v for v in res.values()) and any(k.name == "Extra.java" for k in res)
+        bad = ans.replace("src/main/java/m/Caps.java", "src/main/java/m/Other.java")   # a file it was not shown
+        ok &= apply_multi(w, bad, allowed)[0] is None
+        torn = ans.replace("class Extra {}", "class Extra {")                           # an unbalanced new file
+        ok &= apply_multi(w, torn, allowed)[0] is None
+    return ok
