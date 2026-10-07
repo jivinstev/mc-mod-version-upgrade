@@ -86,12 +86,19 @@ public class BaselineGameTest {
     @GameTest(template = "empty_test", timeoutTicks = 200)
     public static void everyBlockPlaces(GameTestHelper helper) {
         List<String> failed = new ArrayList<>();
+        List<String> needsSupport = new ArrayList<>();
         int n = 0;
         for (Block block : BuiltInRegistries.BLOCK) {
             if (!NS.equals(BuiltInRegistries.BLOCK.getKey(block).getNamespace())) continue;
             n++;
             try {
                 BlockState state = block.defaultBlockState();
+                // a crop that needs water or farmland, a wall torch: the block itself says it cannot live on a
+                // plain floor, so popping off here is correct behaviour, not a failure
+                if (!state.canSurvive(helper.getLevel(), helper.absolutePos(AT))) {
+                    needsSupport.add(BuiltInRegistries.BLOCK.getKey(block).toString());
+                    continue;
+                }
                 helper.setBlock(AT, state);
                 if (helper.getBlockState(AT).getBlock() != block) {
                     failed.add(BuiltInRegistries.BLOCK.getKey(block) + ": did not stay placed");
@@ -102,6 +109,9 @@ public class BaselineGameTest {
                 failed.add(BuiltInRegistries.BLOCK.getKey(block) + ": " + t);
             }
         }
+        if (!needsSupport.isEmpty())
+            System.out.println("EXAMPLEMOD_BASELINE: block skipped " + needsSupport.size() + " that need a support the plain floor lacks: "
+                + String.join(", ", needsSupport.subList(0, Math.min(12, needsSupport.size()))));
         report(helper, "block", n, failed, 5);
     }
 

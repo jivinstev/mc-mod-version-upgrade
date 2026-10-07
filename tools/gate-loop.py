@@ -143,6 +143,36 @@ def json_strict(work):
     return r.stdout.strip()[-2000:] if r.returncode == 1 else None
 
 
+DROPS = re.compile(r"\bContainers\.drop\w*\(|\bdropContents\(|\.spawnAtLocation\(|\bpopResource\w*\(|\.dropItemStack\(")
+
+
+def lost_drops(work):
+    """Calls that put items into the world (a container spilling its contents when broken) that the hop's
+    starting snapshot had and the port no longer has anywhere in that file. They compile away silently:
+    26.x removes the block entity BEFORE `affectNeighborsAfterRemoval` runs (§V48), so a port that moves
+    `onRemove`'s body there has nothing to drop and deletes the call. Measured: five storage blocks on a
+    26.2 port lost their contents-on-break. -> findings text or None."""
+    snaps = sorted((work / "hop-start").glob("*")) if (work / "hop-start").is_dir() else []
+    if not snaps:
+        return None
+    start, src = snaps[-1], work / "src/main/java"
+    now = "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java"))
+    lost = []
+    for f in sorted(start.rglob("*.java")):
+        before = len(DROPS.findall(f.read_text(encoding="utf-8", errors="replace")))
+        cur = src / f.relative_to(start)
+        after = len(DROPS.findall(cur.read_text(encoding="utf-8", errors="replace"))) if cur.exists() else 0
+        if before > after:
+            lost.append(f"{f.relative_to(start).as_posix()} ({before} -> {after})")
+    if not lost or len(DROPS.findall(now)) >= sum(1 for _ in DROPS.finditer(
+            "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in start.rglob("*.java")))):
+        return None    # every drop still exists somewhere (moved to the block entity): not lost
+    return ("These files dropped items into the world when broken (a container spilling its contents) and the "
+            "port no longer does anywhere: " + "; ".join(lost[:12]) + ". On 26.x the block entity is already gone "
+            "when Block#affectNeighborsAfterRemoval runs: move the drop to the BLOCK ENTITY's "
+            "preRemoveSideEffects(BlockPos, BlockState) (CATALOG §V48). Restore every one; never delete a drop.")
+
+
 def content_census(work):
     """Before a server is booted: content the mod's own lang file declares, that 1.21 made data-driven
     (enchantments above all), must still exist (tools/content-census.py). A port that deleted the Java
@@ -227,7 +257,12 @@ def failure_of(text, client=False, ns=None):
         frames = [x.strip() for x in lines[last + 1:last + 60] if MOD_FRAME.match(x)][:8]
         cause = lines[last]
         return "crash", "\n".join([cause] + frames), cause[:200]
-    fails = [l.strip() for l in lines if re.search(r'(failed!|::.*fail|GameTestAssert|required tests? failed)', l)]
+    # the NAMED lines first: "<test> failed at <pos>! <why>", the per-test summary "   - <id>: <why>" and a
+    # harness's own "_BASELINE ... FAILED" lines. Measured: matching only "N required tests failed" handed a
+    # worker that one line and nothing about which test or why.
+    fails = [l.strip() for l in lines if re.search(r'( failed at |_BASELINE: .*FAILED|^\S*\s*\[.*GameTestServer\]:\s+- )', l)]
+    fails += [l.strip() for l in lines if re.search(r'(failed!|::.*fail|GameTestAssert|required tests? failed)', l)
+              and l.strip() not in fails]
     if fails:
         return "tests", "\n".join(fails[:30]), "|".join(fails[:3])[:200]
     m = [l for l in lines if "error:" in l][:10]
@@ -301,7 +336,8 @@ def main():
             found, why = listener_audit(work)
             note(event="listener-audit", run=run, note=why)
         else:
-            found = "\n\n".join(x for x in (json_strict(work), content_census(work), mixin_audit(work)) if x) or None
+            found = "\n\n".join(x for x in (json_strict(work), content_census(work), lost_drops(work),
+                                            mixin_audit(work)) if x) or None
             note(event="pre-checks", run=run, note="findings" if found else "clean or not applicable")
         if found:
             f = ("listeners" if phase else "content", found, ("listeners:" if phase else "content:") + found[-160:])
@@ -358,6 +394,21 @@ def self_check():
     ok &= d is not None and d[0] == "data" and "2 of this mod's own data files" in d[1] and "other:z" not in d[1]
     ok &= any(rx.search("Trying to access unbound value: ResourceKey[minecraft:item / m:x]") for rx, _h in FAMILY_HINTS)
     ok &= not any(rx.search("unbound value: ResourceKey[minecraft:sound_event / m:x]") for rx, _h in FAMILY_HINTS)
+    named = ("[x] [Server thread/ERROR] [minecraft/LogTestReporter]: m:baseline/every_block_places failed at 1, 2, 3! 1 block(s) failed: m:rice\n"
+             "M_BASELINE: block FAILED m:rice: did not stay placed\n"
+             "[x] [Server thread/ERROR] [minecraft/GameTestServer]: 1 required tests failed :(\n"
+             "[x] [Server thread/ERROR] [minecraft/GameTestServer]:    - m:baseline/every_block_places: 1 block(s) failed: m:rice\n")
+    k2, t2, _s2 = failure_of(named)
+    ok &= k2 == "tests" and "m:rice" in t2.splitlines()[0] and "every_block_places" in t2
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        w = pathlib.Path(d); (w / "hop-start/hop1/a").mkdir(parents=True); (w / "src/main/java/a").mkdir(parents=True)
+        (w / "hop-start/hop1/a/Pot.java").write_text("void onRemove(){ Containers.dropContents(l, p, c); }", encoding="utf-8")
+        (w / "src/main/java/a/Pot.java").write_text("void affectNeighborsAfterRemoval(){ }", encoding="utf-8")
+        ok &= "a/Pot.java (1 -> 0)" in (lost_drops(w) or "")
+        (w / "src/main/java/a/PotBE.java").write_text("void preRemoveSideEffects(){ Containers.dropContents(l, p, c); }",
+                                                       encoding="utf-8")
+        ok &= lost_drops(w) is None        # moved to the block entity: not lost
     ok &= failure_of(bad) is None          # no namespace known: the check is off, never guessing
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
