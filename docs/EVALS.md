@@ -483,3 +483,54 @@ proposed was applied alone to P4's post-recipe start and compiled. Of 33 rows, 1
 did not reduce errors. The 3 that helped saved 1–9 errors each, out of 468. Rewrites written by workers
 are not worth chasing; repeated diffs would need to be turned into rules by the script itself, which is
 not built.
+
+## The cross-file worker as one request (2026-10-07)
+
+The single-shot A/B left one large cost: the cross-file change (capabilities → data attachments,
+packets → payloads) still went to a tool-using subsystem agent, $3.69 of P4's $6.83. That job is now
+`singleshot.run_multi`: one Sonnet request that is shown every file in the group, plus the mod classes
+the errors and the workers' NEEDS notes name. It answers with `FILE` / `NEW FILE` / `DELETE FILE`
+blocks. The agent runs only if nothing in the answer can be applied. Load-crash scan findings take the
+same route.
+
+**P4, from a fresh post-recipe start (468 errors): 0 errors, Gate B green on its first run, $4.99.**
+
+| | spike (agent workers) | single-shot | cross-file as one request |
+|---|---|---|---|
+| P4 worker spend | $15.33 | $6.83 | **$4.99** |
+| cross-file job | — | $3.69 (agent) | $1.33 over 5 rounds (0.88 + 0.10 + 0.16 + 0.10 + scan 0.09) |
+| Gate B | green after 3 fixes | green first run | green first run, $0 |
+
+It took four runs to get there, and each failure taught something:
+
+1. **All-or-nothing across files threw away good answers.** One stale SEARCH, or the deletion guard
+   refusing a capability attacher that §13 says to remove, sent the whole 30-file answer to the agent
+   ($4.40). Now each file is accepted or skipped on its own, and the next compile checks the result.
+   The deletion guard is waived only when what goes is Forge API that has no NeoForge form
+   (`REMOVED_API`). `DELETE FILE` is allowed only for a file built on that API.
+2. **The file cap hid most of the group.** With 12 files shown out of 32, the answer named 8 sibling
+   attachers it had never seen. The cap is now 48 files and about 240k characters.
+3. **Wiring.** Files still failing after a cross-file pass were moved up the per-file ladder as if an
+   agent had handled them, which sent 33 files to per-file Opus agents ($5.52). Now they get one more
+   cross-file request with the new errors, then the Sonnet subsystem agent, and never Opus one file at
+   a time. Two loop exits were also wrong: a round with only a cross-file job counted as "nothing to
+   do", and one round without progress counted as a plateau before the higher tiers had been tried.
+   Both are fixed; the loop now stops after two stalled rounds in a row.
+
+The final run hit the second exit bug at 2 errors ($4.66). It was resumed in the same workspace after
+the fix: $0.33, including the scan and probe rounds. So the $4.99 is two invocations stitched together,
+not one clean run.
+
+**Correctness read of the diff** (post-recipe tree against the final tree, 114 files changed):
+- 4 attachers deleted and 5 reduced to registration stubs. That is the §13 rewrite.
+- The tool item class lost `TierSortingRegistry` (removed in 1.21) and `canApplyAtEnchantingTable` (§63).
+- One optional-mod integration branch was left as a `TODO`, because the mod is not on the classpath.
+- One judgement call to flag: the armour item's `getMaxDamage` now returns `getType().getDurability(15)`, a
+  constant where the 1.20 code read the configured material. The reference port drops the configured
+  materials for vanilla CHAIN, so it loses the same behaviour, but a constant is easy to miss in review.
+
+No `UnsupportedOperationException`, no emptied methods beyond one registration hook, and no
+commented-out code.
+
+Against the spike, P4 is now about 3× cheaper ($15.33 → $4.99); against the Opus-baseline estimate for
+worker spend, about 6×. P1 was already about 13×.

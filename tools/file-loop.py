@@ -293,17 +293,17 @@ def static_scan(work):
     return sorted(set(out))
 
 
-def subsystem_job(a, work, files, by, sigs, entries, needs_text, idx, note):
+def subsystem_job(a, work, files, by, sigs, entries, needs_text, idx, note, agent_only=False):
     """A cross-file change: ONE Sonnet request over all the files (and the mod classes the errors and
     the NEEDS notes name) first; the tool-using subsystem agent only when that answer cannot be applied.
     Measured on the step-7 A/B: the agent alone was $3.69 of a $6.83 port."""
-    if a.mode == "single" and idx is not None:
+    if a.mode == "single" and idx is not None and not agent_only:
         ent, _ids = entry_texts([m for f in files for _l, m in by[f]], sigs, entries, cap=3000, most=5)
         r_ = singleshot.run_multi(work, {f: by[f] for f in files}, needs_text, ent, idx, MODELS["sonnet"],
                                   a.target, thinking=a.multi_thinking)
         r_["model"] = "sonnet"
         if r_["applied"]:
-            return [r_]
+            return r_
         # logged without a "usd" key: its dollars ride on the agent's record below, so totals count them once
         note(event="multi-rejected", rejected=r_["rejected"], multi_usd=r_["usd"], files=r_["files"])
         agent = run_worker(work, files, by, sigs, entries, "sonnet", a.target, a.sources, a.timeout, True)
@@ -392,7 +392,7 @@ def main():
     note(event="start", errors=n, sources=a.sources)
     if n is None:
         print("the start does not compile to a count:", errs); return 2
-    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}}
+    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}, "xtries": {}}
     # the escalation ladder: (model, single-shot?). Single-shot tiers go first in --mode single (the
     # default): one request per file with script-gathered context; agent tiers are the fallback.
     ladder = ([(m, True) for m in ("haiku", "sonnet")] if a.mode == "single" else []) + [(m, False) for m in TIERS]
@@ -404,6 +404,7 @@ def main():
     def fix_errors(n, errs):
         """Compile rounds until 0, the budget, the last tier, or a plateau."""
         tier_of = state["tier_of"]
+        stalled = 0
         for rnd in range(1, a.max_rounds + 1):
             if n == 0 or state["spent"] >= a.budget:
                 break
@@ -416,6 +417,7 @@ def main():
             multi = None
             if need:
                 multi = need[:40]
+                agent_only = all(state["xtries"].get(f, 0) >= 2 for f in multi)
                 needs_text = "\n".join(f"{os.path.relpath(f, work)}: {state['needs'][f]}" for f in multi)
             singles = []
             for files in groups:   # a batch runs at the highest tier any of its files has reached
@@ -430,7 +432,7 @@ def main():
                     singles += [(f, m) for f in files]
                 else:
                     jobs.append((files, m, a.subsystem))
-            if not jobs and not singles:
+            if not jobs and not singles and not multi:
                 break
             snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java")}
             from concurrent.futures import ThreadPoolExecutor
@@ -446,7 +448,8 @@ def main():
                 futs = [ex.submit(run_worker, work, f, by, sigs, entries, m, a.target, a.sources, a.timeout, sub)
                         for f, m, sub in jobs]
                 sfuts = [ex.submit(one, fm) for fm in singles]
-                mfut = multi and ex.submit(subsystem_job, a, work, multi, by, sigs, entries, needs_text, idx, note)
+                mfut = multi and ex.submit(subsystem_job, a, work, multi, by, sigs, entries, needs_text, idx, note,
+                                          agent_only)
                 results = [fu.result() for fu in futs]
             if multi:
                 jobs.insert(0, (multi, "sonnet", True)); results.insert(0, mfut.result())
@@ -479,7 +482,15 @@ def main():
                 says_needs = needs and not needs.group(1).strip().lower().startswith("none")
                 for f in files:
                     if f in still:
-                        if says_needs and sub is not True:   # True = already a subsystem worker
+                        if sub is True and state["xtries"].get(f, 0) < 2:
+                            # still failing after a cross-file pass: it stays with the cross-file worker
+                            # (one more single request with the new errors, then the subsystem agent),
+                            # never up the per-file ladder -- measured: that sent 33 files to per-file
+                            # Opus agents for $5.52 after a $0.43 cross-file edit had done most of the work
+                            state["xtries"][f] = state["xtries"].get(f, 0) + 1
+                            state["needs"][f] = (needs.group(1).strip()[:400] if says_needs
+                                                 else "still failing after the previous cross-file edit")
+                        elif says_needs and sub is not True:   # True = already a subsystem worker
                             state["needs"][f] = needs.group(1).strip()[:400]
                         else:   # a file still failing moves up a tier
                             cur = ladder.index((m, sub == "single")) if (m, sub == "single") in ladder else lo
@@ -491,7 +502,10 @@ def main():
                     if ok:
                         n, errs = compile_(work, clog, a.heap)
                     note(event="rule", round=rnd, row=res["rule"], kept=ok, why=str(why), errors=n)
-            if n >= before and not state["needs"]:
+            # a round that fixed nothing has already moved its files up a tier; stop only when the next one
+            # also fails (measured: stopping at the first such round left 2 errors with Sonnet/Opus untried)
+            stalled = stalled + 1 if n >= before and not state["needs"] else 0
+            if stalled >= 2:
                 note(event="plateau", round=rnd, errors=n); break
         return n, errs
 
@@ -556,6 +570,19 @@ def self_check():
               and {"getLightBlock", "propagatesSkylightDown"} <= inh and "myHelper" not in inh
               and pathlib.Path(rb_rel(str(gen))) == s / "Plain.java")
         ok = ok and singleshot.self_check() and singleshot.self_check_multi()
+        # the cross-file job hands the caller ONE record, both when its answer applies and when the agent
+        # has to take over (a list here crashed the round after a $1+ request)
+        import types
+        real_multi, real_worker = singleshot.run_multi, run_worker
+        fake_a = types.SimpleNamespace(mode="single", multi_thinking=0, target="t", sources="", timeout=1)
+        for applied in (True, False):
+            singleshot.run_multi = lambda *x, **k: {"applied": applied, "usd": 0.5, "rejected": "x", "files": [], "result": ""}
+            globals()["run_worker"] = lambda *x, **k: {"usd": 1.0, "result": "", "rule": None}
+            try:
+                r_ = subsystem_job(fake_a, ".", ["f"], {"f": [(1, "m")]}, {}, {}, "", object(), lambda **k: None)
+            finally:
+                singleshot.run_multi = real_multi; globals()["run_worker"] = real_worker
+            ok = ok and isinstance(r_, dict) and r_["usd"] == (0.5 if applied else 1.5)
         b, _by = batches([("a", 1, "x")] * 50 + [("b", 1, "x")] * 3 + [("c", 1, "x")] * 3, 4, 40)
         ok = ok and b == [["a"], ["b", "c"]]
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")

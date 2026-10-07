@@ -220,15 +220,27 @@ def _balance(text):
     return tuple(code.count(o) - code.count(c) for o, c in ("{}", "()", "[]"))
 
 
-def guard(before, after):
-    """-> None when the edit looks like a fix, else why it looks like hiding the error (or breaking the file)."""
+# Forge APIs with no NeoForge counterpart: a cross-file rewrite (capabilities -> data attachments,
+# SimpleChannel -> payloads) legitimately deletes the code that used them (catalogue §13, §15-17).
+REMOVED_API = re.compile(r'\b(AttachCapabilitiesEvent|ICapabilityProvider|ICapabilitySerializable|LazyOptional|'
+                         r'CapabilityToken|CapabilityManager|SimpleChannel|NetworkRegistry|NetworkEvent\.Context)\b')
+
+
+def removes_dead_api(before, after):
+    return bool(REMOVED_API.search(before)) and not REMOVED_API.search(after or "")
+
+
+def guard(before, after, dead_api_ok=False):
+    """-> None when the edit looks like a fix, else why it looks like hiding the error (or breaking the file).
+    dead_api_ok: a cross-file worker may shrink a file a lot when what it removes is Forge API that has no
+    NeoForge form (the deletion check would otherwise reject the very rewrite §13 prescribes)."""
     if _balance(after) != _balance(before):   # an edit that unbalances brackets aborts the whole compile at parse
         return f"unbalances brackets {_balance(before)} -> {_balance(after)}"
     b, a = before.split("\n"), after.split("\n")
     sm = difflib.SequenceMatcher(None, b, a)
     removed = sum(i2 - i1 for op, i1, i2, _j1, _j2 in sm.get_opcodes() if op in ("delete", "replace"))
     added_lines = [l for op, _i1, _i2, j1, j2 in sm.get_opcodes() if op in ("insert", "replace") for l in a[j1:j2]]
-    if removed - len(added_lines) > max(30, len(b) // 4):
+    if removed - len(added_lines) > max(30, len(b) // 4) and not (dead_api_ok and removes_dead_api(before, after)):
         return f"deletes {removed - len(added_lines)} net lines of {len(b)}"
     commented = [l for l in added_lines if re.match(r'\s*//.*[;{(]', l) and not re.match(r'\s*//\s*(NOTE|1\.21|MIGRATION)', l)]
     if len(commented) > 2:
@@ -342,12 +354,15 @@ NEW FILE: src/main/java/<package path>/<Name>.java
 ```java
 <the whole file>
 ```
+A file whose only job was a Forge API that no longer exists (a capability provider or attacher, a
+SimpleChannel holder) may be removed, with its callers updated in the same answer:
+DELETE FILE: <path exactly as shown above>
 Keep behaviour; do not delete features or stub logic. End with: NEEDS: <anything still missing, or none>"""
 
-FILE_HDR = re.compile(r'^(NEW FILE|FILE):\s*(\S+\.java)\s*$', re.M)
+FILE_HDR = re.compile(r'^(NEW FILE|DELETE FILE|FILE):\s*(\S+\.java)\s*$', re.M)
 
 
-def related_files(work, files_errs, needs_text, cap_files=12):
+def related_files(work, files_errs, needs_text, cap_files=48):
     """The files a cross-file fix touches: those with errors, plus mod classes the errors and the NEEDS
     notes name (by simple name or path) -- e.g. the registry class whose constants went missing."""
     src = pathlib.Path(work) / "src/main/java"
@@ -368,13 +383,15 @@ def related_files(work, files_errs, needs_text, cap_files=12):
 
 
 def parse_multi(answer):
-    """-> ({rel path: [(search, replace)]}, {rel path: new file text}) from FILE / NEW FILE sections."""
+    """-> ({rel path: [(search, replace)]}, {rel path: new file text, or None to delete}) from the sections."""
     edits, new = collections.defaultdict(list), {}
     marks = list(FILE_HDR.finditer(answer.replace("\r\n", "\n")))
     text = answer.replace("\r\n", "\n")
     for i, m in enumerate(marks):
         seg = text[m.end():marks[i + 1].start() if i + 1 < len(marks) else len(text)]
-        if m.group(1) == "NEW FILE":
+        if m.group(1) == "DELETE FILE":
+            new[m.group(2)] = None
+        elif m.group(1) == "NEW FILE":
             fence = re.search(r'```(?:java)?\n(.*?)\n```', seg, re.S)
             if fence:
                 new[m.group(2)] = fence.group(1) + "\n"
@@ -384,37 +401,44 @@ def parse_multi(answer):
 
 
 def apply_multi(work, answer, allowed):
-    """All-or-nothing across files: every FILE must be one we showed, every block must apply, every
-    result must pass the guard; NEW FILEs must be under src/main/java and not exist yet."""
+    """Per file: a file is changed only if all of ITS blocks apply and the result passes the guard, so one
+    stale SEARCH costs that file, not the whole answer (the next compile judges the rest). Only files we
+    showed may be edited or deleted; deletion only of a file built on removed Forge API; new files only
+    under src/main/java. -> ({path: new text, or None = delete}, [why each skipped file was skipped])."""
     work = pathlib.Path(work)
     edits, new = parse_multi(answer)
-    if not edits and not new:
-        return None, "no FILE / NEW FILE sections"
-    results = {}
+    results, skipped = {}, []
     for rel, blocks in edits.items():
         p = (work / rel).resolve()
         if p not in allowed:
-            return None, f"edits a file it was not shown: {rel}"
+            skipped.append(f"{rel}: not a file it was shown"); continue
         before = p.read_text(encoding="utf-8", errors="replace")
         after, why = apply_blocks(before, blocks)
-        if after is None:
-            return None, f"{rel}: {why}"
-        why = guard(before, after)
+        why = why if after is None else guard(before, after, dead_api_ok=True)
         if why:
-            return None, f"{rel}: {why}"
+            skipped.append(f"{rel}: {why}"); continue
         results[p] = after
     for rel, body in new.items():
         p = (work / rel).resolve()
+        if body is None:
+            # a file it was not shown may go too, when it is under src/main/java and is built on removed
+            # Forge API (measured: the answer named 8 sibling attachers the file cap had kept out)
+            inside = str(p).startswith(str((work / "src/main/java").resolve()))
+            if not (p.exists() and inside and REMOVED_API.search(p.read_text(encoding="utf-8", errors="replace"))):
+                skipped.append(f"{rel}: may delete only a file built on removed Forge API"); continue
+            results[p] = None; continue
         if not str(p).startswith(str((work / "src/main/java").resolve())) or p.exists():
-            return None, f"bad NEW FILE path: {rel}"
+            skipped.append(f"{rel}: bad NEW FILE path"); continue
         if _balance(body) != (0, 0, 0):
-            return None, f"NEW FILE {rel} has unbalanced brackets"
+            skipped.append(f"{rel}: NEW FILE has unbalanced brackets"); continue
         results[p] = body
-    return results, None
+    if not edits and not new:
+        skipped.append("no FILE / NEW FILE / DELETE FILE sections")
+    return results, skipped
 
 
 def run_multi(work, files_errs, needs_text, entry_text, idx, model_id, target, timeout=900, thinking=8000,
-              cap_chars=140000):
+              cap_chars=240000):
     work = pathlib.Path(work)
     files = related_files(work, files_errs, needs_text)
     shown, parts, total = set(), [], 0
@@ -444,15 +468,19 @@ def run_multi(work, files_errs, needs_text, entry_text, idx, model_id, target, t
     except ValueError:
         d = {"result": (r.stdout + r.stderr)[-400:], "total_cost_usd": 0}
     ans = d.get("result") or ""
-    results, why = apply_multi(work, ans, shown)
-    if results:
-        for p_, text in results.items():
+    results, skipped = apply_multi(work, ans, shown)
+    for p_, text in results.items():
+        if text is None:
+            p_.unlink()
+        else:
             p_.parent.mkdir(parents=True, exist_ok=True)
             p_.write_text(text, encoding="utf-8")
+    why = None if results else ("; ".join(skipped) or "nothing applied")
     return {"mode": "multi", "files": [rel(f) for f in files_errs], "shown": len(shown), "errors_in": len(msgs),
             "usd": d.get("total_cost_usd") or 0, "usage": d.get("usage"), "secs": round(time.time() - t0),
             "applied": why is None, "rejected": why, "rule": None, "result": ans[-600:], "prompt_chars": len(prompt),
-            "edited": [rel(p_) for p_ in (results or {})]}
+            "edited": [rel(p_) for p_ in results], "deleted": [rel(p_) for p_, v in results.items() if v is None],
+            "skipped": skipped}
 
 
 def self_check_multi():
@@ -461,17 +489,33 @@ def self_check_multi():
         w = pathlib.Path(d); s = w / "src/main/java/m"; s.mkdir(parents=True)
         (s / "Caps.java").write_text("package m;\nclass Caps {\n}\n", encoding="utf-8")
         (s / "Use.java").write_text("package m;\nclass Use {\n  Object x = Caps.LEADER;\n}\n", encoding="utf-8")
+        (s / "Prov.java").write_text("package m;\nclass Prov implements ICapabilityProvider {\n"
+                                     + "  int a;\n" * 60 + "}\n", encoding="utf-8")
         fe = {str(s / "Use.java"): [(3, "cannot find symbol: variable LEADER")]}
-        rel = related_files(w, fe, "Caps.java must declare LEADER")
-        ok = (s / "Caps.java") in rel
+        rel = related_files(w, fe, "Caps.java must declare LEADER; Prov.java goes")
+        ok = (s / "Caps.java") in rel and (s / "Prov.java") in rel
         allowed = {f.resolve() for f in rel}
         ans = ("FILE: src/main/java/m/Caps.java\n<<<<<<< SEARCH\nclass Caps {\n=======\nclass Caps {\n"
                "  static Object LEADER = new Object();\n>>>>>>> REPLACE\n"
-               "NEW FILE: src/main/java/m/Extra.java\n```java\npackage m;\nclass Extra {}\n```\nNEEDS: none")
-        res, why = apply_multi(w, ans, allowed)
-        ok &= why is None and any("LEADER = new Object()" in v for v in res.values()) and any(k.name == "Extra.java" for k in res)
-        bad = ans.replace("src/main/java/m/Caps.java", "src/main/java/m/Other.java")   # a file it was not shown
-        ok &= apply_multi(w, bad, allowed)[0] is None
-        torn = ans.replace("class Extra {}", "class Extra {")                           # an unbalanced new file
-        ok &= apply_multi(w, torn, allowed)[0] is None
+               "NEW FILE: src/main/java/m/Extra.java\n```java\npackage m;\nclass Extra {}\n```\n"
+               "DELETE FILE: src/main/java/m/Prov.java\nNEEDS: none")
+        res, skipped = apply_multi(w, ans, allowed)
+        ok &= not skipped and any("LEADER = new Object()" in (v or "") for v in res.values())
+        ok &= any(k.name == "Extra.java" for k in res) and res.get((s / "Prov.java").resolve(), 1) is None
+        # one stale SEARCH skips that file only; an unshown file and a torn new file are skipped too
+        bad = ans.replace("class Caps {\n=======", "class Nope {\n=======").replace("class Extra {}", "class Extra {")
+        res, skipped = apply_multi(w, bad, allowed)
+        ok &= len(skipped) == 2 and (s / "Prov.java").resolve() in res
+        ok &= apply_multi(w, ans.replace("m/Caps.java", "m/Other.java"), allowed)[1] != []
+        # deleting a file that holds no removed Forge API is refused
+        ok &= apply_multi(w, "DELETE FILE: src/main/java/m/Use.java\n", allowed)[1] != []
+        # an unshown sibling built on removed Forge API may go; one outside src/main/java may not
+        (s / "Prov2.java").write_text("class Prov2 implements ICapabilityProvider {}\n", encoding="utf-8")
+        (w / "Prov3.java").write_text("class Prov3 implements ICapabilityProvider {}\n", encoding="utf-8")
+        ok &= apply_multi(w, "DELETE FILE: src/main/java/m/Prov2.java\n", allowed)[1] == []
+        ok &= apply_multi(w, "DELETE FILE: Prov3.java\n", allowed)[1] != []
+        # gutting a file passes only when what goes is dead Forge API
+        big = "class P implements ICapabilityProvider {\n" + "  int a;\n" * 60 + "}\n"
+        ok &= guard(big, "class P {\n}\n") is not None and guard(big, "class P {\n}\n", dead_api_ok=True) is None
+        ok &= guard(big.replace("implements ICapabilityProvider ", ""), "class P {\n}\n", dead_api_ok=True) is not None
     return ok
