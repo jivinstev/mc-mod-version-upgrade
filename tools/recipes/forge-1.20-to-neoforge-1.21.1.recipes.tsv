@@ -96,7 +96,8 @@ re:(?:\(Attribute\)\s*)?\bForgeMod\.BLOCK_REACH\.get\(\)	net.minecraft.world.ent
 #@ 134 auto  SpawnPlacements.Type constants are SpawnPlacementTypes
 re:\bSpawnPlacements\.Type\.(ON_GROUND|IN_WATER|IN_LAVA|NO_RESTRICTIONS)\b	net.minecraft.world.entity.SpawnPlacementTypes.\1
 
-#@ 138 auto  GeckoLib 4.8 flattened the core packages
+#@ 138 auto  GeckoLib 4.8 flattened the core packages (bare names only where GeckoLib is imported: mods ship their own RenderUtils)
+#? only-if	import software\.bernie\.geckolib\.
 software.bernie.geckolib.core.animatable.model.CoreGeoBone	software.bernie.geckolib.cache.object.GeoBone
 software.bernie.geckolib.core.object.PlayState	software.bernie.geckolib.animation.PlayState
 software.bernie.geckolib.core.object.Color	software.bernie.geckolib.util.Color

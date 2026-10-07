@@ -20,6 +20,10 @@ recipe the group is. Because every addition is a comment, a pack is still a vali
     #@ 16 manual  SimpleChannel -> payloads: rewrite by hand from the catalogue entry
     #? detect	SimpleChannel
 
+An auto group may carry `#? only-if<TAB><regex>`: its rows then apply only to files whose original
+text matches (typically the library's import), so a bare name the library shares with a mod's own
+class is renamed only where the library is actually used (catalogue §X7).
+
 Kinds (Stage 3 of issue #27; measured in docs/EVALS.md, H3):
   auto     the rows are applied, in place, by the prepare-sources engine. For an entry whose real
            fixes are one edit (V4 is 88% one shape, 25 is 95%).
@@ -39,7 +43,7 @@ _s = importlib.util.spec_from_file_location("ps", ROOT / "templates/multi-versio
 ps = importlib.util.module_from_spec(_s); _s.loader.exec_module(ps)
 
 GROUP = re.compile(r'^#@\s+(\S+)\s+(auto|choice|manual)\b\s*(.*)$')
-META = re.compile(r'^#\?\s+(detect|option)\t(.*)$')
+META = re.compile(r'^#\?\s+(detect|option|only-if)\t(.*)$')
 
 
 def load_pack(path):
@@ -49,7 +53,7 @@ def load_pack(path):
         m = GROUP.match(raw)
         if m:
             cur = {"id": m.group(1), "kind": m.group(2), "title": m.group(3).strip(), "line": lineno,
-                   "rows": [], "detect": None, "options": []}
+                   "rows": [], "detect": None, "options": [], "only_if": None}
             groups.append(cur)
             continue
         m = META.match(raw)
@@ -58,6 +62,8 @@ def load_pack(path):
                 sys.exit(f"{path}:{lineno}: '#?' line before any '#@' group")
             if m.group(1) == "detect":
                 cur["detect"] = re.compile(m.group(2))
+            elif m.group(1) == "only-if":
+                cur["only_if"] = re.compile(m.group(2))
             else:
                 cur["options"].append(m.group(2).split("\t", 1))
             continue
@@ -81,7 +87,7 @@ def apply(src, pack, dry_run=False, max_sites=5):
     # prepare-sources' own loader does the validation (duplicates, identity rules, exhaustive blocks)
     renames = ps.load_renames(str(pack))
     tokens, regexes = ps.split_rules(renames)
-    pattern, table = ps.build_pattern(tokens)
+    patterns = {}   # frozenset of groups switched off by `only-if` -> (pattern, table)
     owner = {}   # rule text -> group id
     for g in load_pack(pack):
         for row in g["rows"]:
@@ -98,9 +104,17 @@ def apply(src, pack, dry_run=False, max_sites=5):
             if g["kind"] != "auto":
                 for m in g["detect"].finditer(before):
                     sites[g["id"]].append(f"{rel}:{before.count(chr(10), 0, m.start()) + 1}")
+        # a group with `#? only-if` applies only to files whose ORIGINAL text matches it, so a bare
+        # name a library shares with the mod's own classes is renamed only where the library is used (§X7)
+        off = frozenset(g["id"] for g in groups if g["only_if"] is not None and not g["only_if"].search(before))
         for rx, repl, _ex in regexes:
+            if owner.get(rx.pattern) in off:
+                continue
             text, n = rx.subn(repl, text)
             hits[owner.get(rx.pattern)] += n
+        if off not in patterns:
+            patterns[off] = ps.build_pattern([r for r in tokens if owner.get(r[0]) not in off])
+        pattern, table = patterns[off]
         if pattern is not None:
             def tok(m):
                 hits[owner.get(m.group(1))] += 1
@@ -192,6 +206,10 @@ def self_check():
             "ResourceLocation\tIdentifier\n"
             "#@ V17 auto  a member rename\n"
             "member:serverLevel\tlevel\n"
+            "#@ 138 auto  a library rename, only where the library is imported\n"
+            "#? only-if\timport lib\\.\n"
+            "lib.RenderUtils\tlib.RenderUtil\n"
+            "RenderUtils\tRenderUtil\n"
             "#@ 99 auto  matches nothing\n"
             "NoSuchThing\tOtherThing\n"
             "#@ V39 choice  moveTo split\n"
@@ -206,12 +224,16 @@ def self_check():
     with tempfile.TemporaryDirectory() as t:
         src = pathlib.Path(t, "java/a"); src.mkdir(parents=True)
         (src / "A.java").write_text(java, encoding="utf-8")
+        (src / "B.java").write_text("package a;\nimport lib.RenderUtils;\nclass B { void f() { RenderUtils.x(); } }\n", encoding="utf-8")
+        (src / "RenderUtils.java").write_text("package a;\npublic class RenderUtils {}\n", encoding="utf-8")
         pk = pathlib.Path(t, "p.recipes.tsv"); pk.write_text(pack, encoding="utf-8")
         report, groups = apply(pathlib.Path(t, "java"), pk)
         out = (src / "A.java").read_text(encoding="utf-8")
         text = "\n".join(render(report, groups))
         g = {r["id"]: r for r in report["groups"]}
-        ok = ("import net.minecraft.resources.Identifier;" in out and "Identifier.parse" in out
+        b = (src / "B.java").read_text(encoding="utf-8"); own = (src / "RenderUtils.java").read_text(encoding="utf-8")
+        ok = ("RenderUtil.x()" in b and "import lib.RenderUtil;" in b and "class RenderUtils" in own and g["138"]["rewrites"] == 2
+              and "import net.minecraft.resources.Identifier;" in out and "Identifier.parse" in out
               and "p.level()" in out and "e.moveTo(1, 2, 3)" in out   # choice sites are NOT rewritten
               and g["V4"]["rewrites"] == 3 and g["V17"]["rewrites"] == 1 and g["99"]["rewrites"] == 0
               and g["V39"]["sites"] == 1 and g["V39"]["first"] == ["a/A.java:5"] and g["16"]["first"] == ["a/A.java:6"]

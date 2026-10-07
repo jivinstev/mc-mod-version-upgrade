@@ -340,3 +340,57 @@ most-hit entries split cleanly into two kinds. Some are effectively one edit: V4
 95%, 136 is 98% and 111 is 99%. These are `auto` recipes. Others are a short menu: entry 1 is 46% one
 shape but 92% within three, and V6 and 13 behave the same way. These are `choice` recipes. A few stay
 open (entry 32 at 54%, entry 16 at 43%) and keep the model.
+
+## Stage 3–4 — the recipe engine and the first measured packs (2026-10-07)
+
+`tools/apply-recipes.py` is the engine. A recipe pack is a `prepare-sources.py` rename table (so every
+§X guard still applies), with rows grouped under `#@ <catalogue entry> <kind>`:
+
+- `auto` groups rewrite in place. They may be scoped with `#? only-if <regex>`, so a bare library name
+  is renamed only in files importing that library.
+- `choice` groups list each site with its named options (H3).
+- `manual` groups list each site with the one entry to read.
+
+Each run reports rewrites per entry and names any group that matched nothing.
+
+Measured on the bench as **start compile errors**, javac's cap lifted, every count validated by
+`burndown-count.sh`. Errors are not cost: one fix can clear a cascade, and fixing a layer can unmask
+the next. They are, though, the work queue the model would otherwise start from.
+
+**To 1.21.1, Forge 1.20 starts (9 rows):** raw → this repo's two existing codemods → those plus the
+first pack (`tools/recipes/forge-1.20-to-neoforge-1.21.1.recipes.tsv`, 20 auto groups and 8 manual
+pointers, each row a catalogue entry's own Pattern → Fix):
+
+| Profile | Raw | Existing codemods | + Stage-4 pack | Pack's cut |
+|---|---|---|---|---|
+| P2 | 233 | 228 | 192 | −16% |
+| P3 | 9,948 | 7,661 | 3,485 | −55% |
+| P4 | 698 | 556 | 476 | −14% |
+| P5 (4 rows) | 3,744 | 2,909 | 2,136 | −27% (0% to −58% per row) |
+| P8 (2 rows) | 3,159 | 2,568 | 2,420 | −6% |
+| **all 9** | **17,782** | **13,922** | **8,709** | **−37%** (−51% from raw) |
+
+**Era jump to 26.2 (10 rows with a count both ways):** raw → the multi-version template's inherited
+rename table with the class-move map, run as one recipe (`tools/recipes/era-26.2.tsv`):
+
+| Profile | Raw | Template table | Cut |
+|---|---|---|---|
+| P9 (5 rows) | 676 | 433 | −36% (−18% to −76% per row) |
+| P10 (2 rows) | 3,567 | 2,479 | −31% |
+| `-era` rows (3) | 8,247 | 2,197 | −73% |
+| **all 10** | **12,490** | **5,109** | **−59%** |
+
+What the per-family check found (`compile-summary.py` compares each row's error groups before and
+after the pack):
+
+- **One real regression, now fixed.** The pack's bare `RenderUtils → RenderUtil` row (GeckoLib, §138)
+  also renamed a mod's OWN class of the same name, so the row went up by 9 errors. That is §X7's trap,
+  and it produced the `only-if` scope above. After the fix, that row is back to its starting count.
+- **Swaps rather than regressions.** On two rows a recipe exchanged one error for another at the same
+  count: `setMaxUpStep` on a non-living entity, which has no attribute map, and a GeckoLib wildcard
+  import that leaves `GeoBone` unimported. These are candidates to downgrade from `auto` to `choice`.
+- **Unmasking.** The other new groups are the next layer a fix exposed (§144); the totals still fell.
+- **Pack coverage is uneven.** Of the 20 auto groups, 1–9 fire on any one row. The rows the pack barely
+  moves (0–6%) have few sites for its 20 entries; most of their errors sit in families the pack does not
+  cover yet (`compile-summary.py` names them). The rows it moves most
+  are large, uniform ones with many identical sites (55–58%).
