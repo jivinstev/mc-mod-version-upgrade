@@ -88,8 +88,8 @@ re:\bsuper\.getDimensions\(	super.getDefaultDimensions(
 #@ 32 auto  hurtAndBreak takes the slot, not a break callback
 re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]+)\)\)	.hurtAndBreak(\1, \2, \3)
 
-#@ 113 auto  setMaxUpStep is the STEP_HEIGHT attribute (living mobs only: a plain Entity has no attribute map)
-#? only-if	\bextends (?:Monster|PathfinderMob|Mob|Animal|TamableAnimal|AbstractGolem|WaterAnimal|FlyingMob|LivingEntity|AgeableMob|Raider|AbstractIllager|AbstractSkeleton|Zombie|Spider)\b
+#@ 113 auto  setMaxUpStep is the STEP_HEIGHT attribute (not on known non-living bases: a plain Entity has no attribute map)
+#? only-if	\bextends (?!(?:Entity|Projectile|AbstractArrow|Arrow|ThrowableProjectile|ThrowableItemProjectile|AbstractHurtingProjectile|Fireball|AbstractMinecart|Boat|PartEntity|ItemEntity)\b)\w+
 re:\bthis\.setMaxUpStep\(([^;]*)\);	this.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(\1);
 
 #@ 36 auto  ForgeMod reach attributes are vanilla; the rest of ForgeMod is NeoForgeMod
@@ -133,7 +133,8 @@ re:void appendHoverText\(ItemStack (\w+), (?:@Nullable )?Level (\w+), List<Compo
 #@ 105 auto  VertexConsumer builder renamed; endVertex is gone (only in files using the vertex API)
 #? only-if	import com\.mojang\.blaze3d\.vertex\.
 re:\)\s*\.endVertex\(\)	)
-re:\.vertex\(	.addVertex(
+re:\.vertex\(([^,();]+),\s*([^,();]+),\s*([^,();]+)\)(?=\s*\.(?:color|uv|normal|endVertex|overlayCoords|uv2)\()	.addVertex((float) (\1), (float) (\2), (float) (\3))
+re:\.vertex\((?=[^;]*?\)\s*\.(?:color|uv|normal|endVertex|overlayCoords|uv2)\()	.addVertex(
 re:\)(\s*)\.color\(	)\1.setColor(
 re:\)(\s*)\.uv\(	)\1.setUv(
 re:\)(\s*)\.overlayCoords\(([^,()]+)\)	)\1.setOverlay(\2)
@@ -145,8 +146,7 @@ re:\)(\s*)\.normal\(([^,()]+),\s*([^,()]+),\s*([^,()]+)\)	)\1.setNormal(\2, \3, 
 
 #@ 104 auto  renderToBuffer and ModelPart.render take one packed ARGB int, not four floats
 #? only-if	import com\.mojang\.blaze3d\.vertex\.VertexConsumer;
-re:void renderToBuffer\((PoseStack \w+, VertexConsumer \w+, int \w+, int \w+), float \w+, float \w+, float \w+, float \w+\)	void renderToBuffer(\1, int color)
-re:\.(render|renderToBuffer)\((\w+), (\w+), (\w+), (\w+), (?:red, green, blue, alpha|r, g, b, a)\)	.\1(\2, \3, \4, \5, color)
+re:void renderToBuffer\((PoseStack \w+, VertexConsumer \w+, int \w+, int \w+), float (\w+), float (\w+), float (\w+), float (\w+)\)\s*\{	void renderToBuffer(\1, int color) { float \2 = net.minecraft.util.FastColor.ARGB32.red(color) / 255.0F, \3 = net.minecraft.util.FastColor.ARGB32.green(color) / 255.0F, \4 = net.minecraft.util.FastColor.ARGB32.blue(color) / 255.0F, \5 = net.minecraft.util.FastColor.ARGB32.alpha(color) / 255.0F;
 re:\.(render|renderToBuffer)\(([\w.]+), ([\w.]+), ([\w.]+), ([\w.]+), ([^,()]+), ([^,()]+), ([^,()]+), ([^,()]+)\)	.\1(\2, \3, \4, \5, net.minecraft.util.FastColor.ARGB32.colorFromFloat(\9, \6, \7, \8))
 
 #@ 114 auto  MobEffect.isDurationEffectTick is shouldApplyEffectTickThisTick
