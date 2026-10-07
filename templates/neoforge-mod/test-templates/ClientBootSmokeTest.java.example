@@ -124,6 +124,8 @@ public class ClientBootSmokeTest {
     private static void shot(Minecraft mc, String name) {
         if (!SHOTS) return;
         try {
+            mc.getToasts().clear();   // "new recipes" / tutorial toasts would cover part of the frame
+            mc.getTutorial().setStep(net.minecraft.client.tutorial.TutorialSteps.NONE);
             net.minecraft.client.Screenshot.grab(mc.gameDirectory, "gatec-" + name + ".png",
                 mc.getMainRenderTarget(), msg -> { });
             System.out.println("EXAMPLEMOD_BOOT_TEST: [SHOT] gatec-" + name + ".png");
@@ -604,16 +606,24 @@ public class ClientBootSmokeTest {
         }
         @Override public boolean isPauseScreen() { return false; } // keep the integrated server ticking
         @Override public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-            this.renderBackground(g, mouseX, mouseY, partialTick);
-            int perRow = Math.max(1, (this.width - 16) / 18);
-            int x = 8, y = 8, col = 0;
+            // A plain backdrop, and no super.render: Screen.render draws the blurred menu background again
+            // ON TOP of whatever was drawn first, which left this sheet unreadable in every Gate C frame.
+            g.fill(0, 0, this.width, this.height, 0xFF404040);
+            // Scale the sheet up to fill the screen (1x-4x), so a frame of it shows each item's real texture.
+            int n = Math.max(1, items.size());
+            float s = Math.max(1f, Math.min(4f, (float) Math.sqrt((this.width - 16f) * (this.height - 16f) / (n * 18f * 18f))));
+            int perRow = Math.max(1, (int) ((this.width - 16) / (18 * s)));
+            g.pose().pushPose();
+            g.pose().translate(8, 8, 0);
+            g.pose().scale(s, s, 1f);
+            int col = 0, row = 0;
             for (Item item : items) {
                 ItemStack stack = new ItemStack(item);
-                g.renderItem(stack, x, y);                          // runs the model resolve + ItemProperties overrides
-                g.renderItemDecorations(this.font, stack, x, y);    // count / durability bar / cooldown overlays
-                if (++col >= perRow) { col = 0; x = 8; y += 18; } else { x += 18; }
+                g.renderItem(stack, col * 18, row * 18);                          // model resolve + ItemProperties overrides
+                g.renderItemDecorations(this.font, stack, col * 18, row * 18);    // count / durability / cooldown overlays
+                if (++col >= perRow) { col = 0; row++; }
             }
-            super.render(g, mouseX, mouseY, partialTick);
+            g.pose().popPose();
         }
     }
 
