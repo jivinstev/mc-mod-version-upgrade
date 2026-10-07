@@ -107,22 +107,49 @@ def entry_texts(msgs, sigs, entries, cap=2500, most=4):
     return "\n".join(out) or "(none matched -- these are not in the catalogue yet)", list(hit)
 
 
+def target_neo_version(work):
+    """The NeoForge version the build compiles against NOW: versions/<mc>.properties when the port is
+    versioned (gradle.properties `mc=` names the target), else gradle.properties."""
+    def props(f):
+        return dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S+)", f.read_text(encoding="utf-8", errors="replace"))) \
+            if f.exists() else {}
+    gp = props(work / "gradle.properties")
+    vp = props(work / f"versions/{gp.get('mc', '')}.properties") if gp.get("mc") else {}
+    return vp.get("neo_version") or gp.get("neo_version")
+
+
 def find_sources(work):
-    """Minecraft + NeoForge sources for workers to grep, from the build itself: NeoGradle keeps the
-    transformed tree; ModDevGradle keeps a sources jar, extracted once. None if neither exists yet
-    (compile first)."""
+    """Minecraft + NeoForge sources for workers to grep, FOR THE TARGET THE BUILD COMPILES AGAINST.
+    NeoGradle keeps the transformed tree; ModDevGradle keeps sources jars, extracted once per NeoForge
+    version into build/file-loop-sources-<version>. Measured: picking the jar by sort order handed a
+    26.2 port's workers the 1.21.1 sources (`neoforge-21.1...` sorts after `minecraft-patched-26.2...`),
+    and an extraction made before the era hop was never refreshed -- the workers said so and guessed.
+    On 26.x the Minecraft sources jar holds no NeoForge API, so NeoForge's own sources jar is added
+    from the Gradle cache. None if nothing matches yet (compile first)."""
     for d in sorted(work.glob("build/neoForm/*/steps/transformSource/transformed")):
         if any(d.rglob("Minecraft.java")):
             return d
+    neo = target_neo_version(work)
     jars = sorted(work.glob("build/moddev/artifacts/*sources*.jar"))
-    if jars:
-        out = work / "build/file-loop-sources"
-        if not out.is_dir():
-            import zipfile
-            with zipfile.ZipFile(jars[-1]) as z:
+    if neo:
+        jars = [j for j in jars if neo in j.name]
+        home = pathlib.Path(os.environ.get("GRADLE_USER_HOME") or pathlib.Path.home() / ".gradle")
+        jars += sorted(home.glob(f"caches/modules-2/files-2.1/net.neoforged/neoforge/{neo}/*/neoforge-{neo}-sources.jar"))[:1]
+    elif len(jars) > 1:
+        return None    # several versions staged and no way to tell the target: never guess (X25b-ii)
+    if not jars:
+        return None
+    out = work / f"build/file-loop-sources-{neo or 'default'}"
+    stamp = out / ".from"
+    want = "\n".join(sorted({str(j) for j in jars}))
+    if not (stamp.exists() and stamp.read_text(encoding="utf-8") == want):
+        import shutil, zipfile
+        shutil.rmtree(out, ignore_errors=True)
+        for j in jars:
+            with zipfile.ZipFile(j) as z:
                 z.extractall(out, [n for n in z.namelist() if n.endswith(".java")])
-        return out
-    return None
+        stamp.write_text(want, encoding="utf-8")
+    return out
 
 
 def batches(errs, size, max_errs):
@@ -636,6 +663,21 @@ def self_check():
             ok = ok and isinstance(r_, dict) and r_["usd"] == (0.5 if applied else 1.5)
         b, _by = batches([("a", 1, "x")] * 50 + [("b", 1, "x")] * 3 + [("c", 1, "x")] * 3, 4, 40)
         ok = ok and b == [["a"], ["b", "c"]]
+    import tempfile, zipfile
+    with tempfile.TemporaryDirectory() as d:
+        w = pathlib.Path(d); art = w / "build/moddev/artifacts"; art.mkdir(parents=True)
+        for name, cls in (("minecraft-patched-26.2.0.75-sources.jar", "New"), ("neoforge-21.1.228-sources.jar", "Old")):
+            with zipfile.ZipFile(art / name, "w") as z:
+                z.writestr(f"net/minecraft/{cls}.java", "class %s {}" % cls)
+        (w / "gradle.properties").write_text("neo_version=21.1.228\nmc=26.2\n", encoding="utf-8")
+        (w / "versions").mkdir(); (w / "versions/26.2.properties").write_text("neo_version=26.2.0.75\n", encoding="utf-8")
+        os.environ["GRADLE_USER_HOME"] = str(w / "nogradle")
+        o = find_sources(w)
+        ok &= o is not None and (o / "net/minecraft/New.java").exists() and not (o / "net/minecraft/Old.java").exists()
+        (w / "gradle.properties").write_text("neo_version=21.1.228\n", encoding="utf-8")   # flattened back: 1.21.1
+        o = find_sources(w)
+        ok &= (o / "net/minecraft/Old.java").exists() and not (o / "net/minecraft/New.java").exists()
+        os.environ.pop("GRADLE_USER_HOME")
     k_, c_ = trim_round([("m", 1, 0.2), ("s", 2, 0.5), ("s", 3, 0.05), ("s", 4, 0.1)], 0.4)
     ok &= [i for _k, i in k_] == [1, 3, 4] and abs(c_ - 0.35) < 1e-9          # 0.5 does not fit; later ones do
     ok &= [i for _k, i in trim_round([("s", 9, 3.0)], 0.1)[0]] == [9]       # never an empty round
