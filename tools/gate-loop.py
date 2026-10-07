@@ -17,7 +17,7 @@ the game; this loop does. Every worker's exact dollars are logged. Stops at "All
 passed", at --budget, at --max-runs, or when a run fails the same way twice (a fix that did nothing).
 Standard library only; needs the `claude` CLI.
 """
-import argparse, importlib.util, json, os, pathlib, re, subprocess, sys
+import collections, argparse, importlib.util, json, os, pathlib, re, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 _s = importlib.util.spec_from_file_location("fl", ROOT / "tools/file-loop.py")
@@ -54,7 +54,26 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
     return pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
 
 
-def failure_of(text, client=False):
+def data_errors(text, ns):
+    """The mod's own data files that failed to PARSE at load. A green GameTest run says nothing about
+    them: the game logs one ERROR per file and goes on without it, so a recipe, advancement or loot
+    table is silently missing (§144, §V67 -- on 26.2 a recipe whose result is read with ItemStack.CODEC
+    fails exactly this way). Missing tag REFERENCES are not counted: those are usually optional-mod
+    entries, and the mod's own upstream ships them."""
+    if not ns:
+        return []
+    pat = re.compile(r"(Couldn't parse data file '%s:[^']*'|Failed to parse \S+ from pack mod/%s\b|"
+                     r"Couldn't parse element [^\n]*?%s:)[^\n]*" % ((re.escape(ns),) * 3))
+    seen, out = set(), []
+    for m in pat.finditer(text):
+        line = m.group(0).strip()[:400]
+        key = re.sub(r"'%s:[^']*'" % re.escape(ns), "'<file>'", line)
+        if line not in seen:
+            seen.add(line); out.append((key, line))
+    return out
+
+
+def failure_of(text, client=False, ns=None):
     """-> (kind, text for the worker, a short signature to detect a repeat) or None when green."""
     lines = text.splitlines()
     if client:   # Gate C: the harness's own verdict decides; a FAIL carries its reason
@@ -65,7 +84,13 @@ def failure_of(text, client=False):
             boot = [l.strip() for l in lines if "_BOOT_TEST:" in l][-15:]
             return "gatec", "\n".join(boot), verdicts[-1][:200]
     elif PASS.search(text):
-        return None
+        bad = data_errors(text, ns)
+        if not bad:
+            return None
+        kinds = collections.Counter(k for k, _ in bad)
+        body = [f"{len(bad)} of this mod's own data files fail to parse at load (each is then silently missing):"]
+        body += [f"  {n}x like: {next(l for k2, l in bad if k2 == k)}" for k, n in kinds.most_common(8)]
+        return "data", "\n".join(body), f"data:{len(bad)}:{kinds.most_common(1)[0][0][:120]}"
     for i, l in enumerate(lines):
         if l.startswith("Caused by:"):   # the deepest cause is the last top-level one
             last = i
@@ -99,6 +124,7 @@ def main():
     ap.add_argument("--heap", default="6g"); ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--log", default="gate-loop.jsonl")
     ap.add_argument("--gatec", help="comma list of Gate C phases (launch,spawn,battle,gauntlet) instead of Gate B")
+    ap.add_argument("--namespace", help="the mod's id, for the data-load check (default: gradle.properties mod_id)")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -110,6 +136,10 @@ def main():
     logf = open(a.log, "a", encoding="utf-8")
     note = lambda **k: (logf.write(json.dumps(k) + "\n"), logf.flush(), print(json.dumps(k)[:300]))
     spent, last_sig = 0.0, None
+    gp = work / "gradle.properties"
+    ns = a.namespace
+    if not ns and gp.exists():
+        ns = (re.findall(r"(?m)^mod_id\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) or [None])[0]
     phases = a.gatec.split(",") if a.gatec else [None]
     task = "runClient" if a.gatec else a.task
     run = 0
@@ -119,7 +149,7 @@ def main():
             break
         phase = phases[0]
         f = failure_of(run_gate(work, task, a.heap, work / f"gate-loop{'-' + phase if phase else ''}.log", phase),
-                       client=bool(phase))
+                       client=bool(phase), ns=ns)
         if f is None:
             note(event="green", run=run, phase=phase, spent=round(spent, 4))
             phases.pop(0); last_sig = None
@@ -168,6 +198,14 @@ def self_check():
     k4, t4, s4 = failure_of("[main/ERROR]: oops\njava.lang.IllegalStateException: Registry is already frozen (trying to add key x)\n"
                             "\tat net.minecraft.core.MappedRegistry.validateWrite(MappedRegistry.java:1)\n\tat a.b.Stats.init(Stats.java:9)\n")
     ok = ok and k4 == "crash" and "already frozen" in t4 and "a.b.Stats.init" in t4
+    green = "All 6 required tests passed :)\n"
+    bad = green + ("[ERROR] Couldn't parse data file 'mymod:cooking/a' from 'x': DataResult.Error['Item mymod:b does not have components yet']\n"
+                   "[ERROR] Couldn't parse data file 'mymod:cooking/c' from 'x': DataResult.Error['Item mymod:d does not have components yet']\n"
+                   "[ERROR] Couldn't parse data file 'other:z' from 'x': nope\n")
+    ok &= failure_of(green, ns="mymod") is None and failure_of(bad, ns="other") is not None
+    d = failure_of(bad, ns="mymod")
+    ok &= d is not None and d[0] == "data" and "2 of this mod's own data files" in d[1] and "other:z" not in d[1]
+    ok &= failure_of(bad) is None          # no namespace known: the check is off, never guessing
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
 

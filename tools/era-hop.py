@@ -66,12 +66,79 @@ RESOURCE_TRANSFORMS = {
 }
 
 
+SER_REG = re.compile(r'\.register\(\s*"([a-z0-9_/]+)"\s*,\s*(?:\(\)\s*->\s*new\s+)?([\w.]+?)(?:::new|\(\))?\s*\)', re.S)
+SIMPLE_SER = re.compile(r'\.register\(\s*"([a-z0-9_/]+)"\s*,\s*\(\)\s*->\s*new\s+(?:\w+\.)*Simple\w*RecipeSerializer\s*[<(]')
+ING_FIELD = re.compile(r'\bIngredient\.(\w+)((?:\s*\.\s*listOf\([^)]*\))?)\s*\.\s*(?:optionalFieldOf|fieldOf)\(\s*"(\w+)"')
+
+
+def mod_namespaces(work):
+    """The mod's own id(s): `[[mods]]` entries of its toml (a template's `${mod_id}` resolved from
+    gradle.properties), never its dependencies."""
+    toml = work / "src/main/resources/META-INF/neoforge.mods.toml"
+    t = toml.read_text(encoding="utf-8", errors="replace") if toml.exists() else ""
+    gp = work / "gradle.properties"
+    g = gp.read_text(encoding="utf-8", errors="replace") if gp.exists() else ""
+    mid = (re.findall(r"(?m)^mod_id\s*=\s*(\S+)", g) or [""])[0]
+    ids = [m.replace("${mod_id}", mid) for m in re.findall(r'\[\[mods\]\][^\[]*?modId\s*=\s*"([^"]+)"', t)]
+    return sorted({i for i in ids if re.fullmatch(r"[a-z0-9_.-]+", i)})
+
+
+def mod_ingredient_fields(work, namespaces):
+    """The mod's OWN recipe types -> which JSON fields are ingredients, read off its serializers' codecs
+    (`Ingredient.CODEC.fieldOf("tool")`, `Ingredient.LIST_CODEC_NONEMPTY.fieldOf("ingredients")`), so
+    the table and the codec cannot disagree. A serializer whose class cannot be found or read is left
+    out, and its recipes stay refused; a `Simple*RecipeSerializer` (a special recipe) has none."""
+    java = work / "src/main/java"
+    if not java.is_dir() or not namespaces:
+        return {}
+    texts = {f: f.read_text(encoding="utf-8", errors="replace") for f in java.rglob("*.java")}
+    by_class = {}
+    for f, t in texts.items():
+        for m in re.finditer(r"\b(?:class|record)\s+(\w+)", t):
+            by_class.setdefault(m.group(1), f)
+    out = {}
+    for f, t in texts.items():
+        if "RecipeSerializer" not in t:
+            continue
+        for m in SIMPLE_SER.finditer(t):
+            for ns in namespaces:
+                out[f"{ns}:{m.group(1)}"] = ()
+        for m in SER_REG.finditer(t):
+            name, ref = m.group(1), m.group(2)
+            if f"{namespaces[0]}:{name}" in out:
+                continue
+            owner = ref.split(".")[0] if "." in ref else ref
+            src = by_class.get(owner)
+            if not src:
+                continue
+            fields = []
+            for g in ING_FIELD.finditer(texts[src]):
+                many = g.group(1).startswith("LIST") or bool(g.group(2).strip())
+                fields.append(g.group(3) + ("[]" if many else ""))
+            if fields:
+                for ns in namespaces:
+                    out[f"{ns}:{name}"] = tuple(dict.fromkeys(fields))
+    return out
+
+
+def needs_other_mod(doc, namespaces):
+    """The mod a recipe's `neoforge:conditions` require that is not this one, if any: such a file
+    loads only alongside that mod, so its format is that mod's business on the target."""
+    for c in doc.get("neoforge:conditions") or []:
+        if isinstance(c, dict) and c.get("type") == "neoforge:mod_loaded" and c.get("modid") not in (
+                *namespaces, "minecraft", "neoforge"):
+            return c.get("modid")
+    return None
+
+
 def transform_resources(work, target):
     import fnmatch, importlib.util, json
     s = importlib.util.spec_from_file_location("gro", TPL / "tools/gen-resource-overlays.py")
     gro = importlib.util.module_from_spec(s); s.loader.exec_module(gro)
     res = work / "src/main/resources"
-    changed, refused = set(), []
+    changed, refused, other = set(), [], []
+    ns = mod_namespaces(work)
+    spec = {"own_namespaces": ns, "ingredient_fields": mod_ingredient_fields(work, ns)}
     for name, pattern in RESOURCE_TRANSFORMS.get(target, []):
         fn = gro.TRANSFORMS[name]
         for f in sorted(res.rglob("*.json")):
@@ -80,14 +147,15 @@ def transform_resources(work, target):
                 continue
             try:
                 doc = json.loads(f.read_text(encoding="utf-8"))
-                new = fn(json.loads(json.dumps(doc)), rel, {})   # the transforms edit in place: hand them a copy
+                new = fn(json.loads(json.dumps(doc)), rel, spec)   # the transforms edit in place: hand them a copy
             except (gro.Refused, SystemExit, ValueError) as e:
-                refused.append(f"{rel} ({name}): {str(e)[:160]}")
+                req = needs_other_mod(doc, ns) if isinstance(locals().get("doc"), dict) else None
+                (other if req else refused).append(f"{rel} ({name}): " + (f"loads only with {req}" if req else str(e)[:160]))
                 continue
             if new != doc:
                 f.write_text(gro.rendered(new), encoding="utf-8")
                 changed.add(rel)
-    return changed, refused
+    return changed, refused, other
 
 
 def step(msg):
@@ -160,9 +228,13 @@ def main():
     rewrites = sum(int(x) for x in re.findall(r"renameRewrites[=:]\s*(\d+)", text)) or text.count("rewrote")
     step(f"applied in place to src/main/java and src/test/java; report in {log.name}"
          + (f" ({rewrites} rewrites)" if rewrites else ""))
-    changed, refused = transform_resources(work, T)
+    changed, refused, other = transform_resources(work, T)
     with open(log, "a", encoding="utf-8") as fh:
-        fh.write(f"\nresource transforms: {len(changed)} file(s) changed\n" + "".join(f"  REFUSED {r}\n" for r in refused))
+        fh.write(f"\nresource transforms: {len(changed)} file(s) changed\n" + "".join(f"  REFUSED {r}\n" for r in refused)
+                 + "".join(f"  OTHER-MOD {r}\n" for r in other))
+    if other:
+        step(f"data files: {len(other)} only load alongside another mod and were left in its 1.21.1 format "
+             f"(listed as OTHER-MOD in {log.name})")
     step(f"data files: {len(changed)} rewritten to the {T} format"
          + (f"; {len(refused)} REFUSED and left as they were (listed in {log.name}; they will not load on {T} "
             f"until fixed): " + "; ".join(r.split(' (')[0] for r in refused[:6]) if refused else ""))
@@ -188,6 +260,40 @@ def self_check():
         ok &= ws_moves() == pathlib.Path(d) / "moves"
     ok &= (TPL / "versions/26.2.renames.hand.tsv").is_file() and (ROOT / "tools/make-multiversion.sh").is_file()
     ok &= (ROOT / "templates/multi-version/tools/prepare-sources.py").is_file()
+    import importlib.util, json
+    with tempfile.TemporaryDirectory() as d:
+        w = pathlib.Path(d)
+        (w / "src/main/resources/META-INF").mkdir(parents=True)
+        (w / "src/main/resources/META-INF/neoforge.mods.toml").write_text(
+            '[[mods]]\nmodId="${mod_id}"\n[[dependencies.${mod_id}]]\nmodId="other"\n', encoding="utf-8")
+        (w / "gradle.properties").write_text("mod_id=mymod\n", encoding="utf-8")
+        (w / "src/main/java/a").mkdir(parents=True)
+        (w / "src/main/java/a/Reg.java").write_text(
+            'class Reg { RecipeSerializer<?> X = S.register("press", PressRecipe.Serializer::new);\n'
+            ' RecipeSerializer<?> Y = S.register("special", () -> new SimpleCraftingRecipeSerializer<>(Z::new)); }',
+            encoding="utf-8")
+        (w / "src/main/java/a/PressRecipe.java").write_text(
+            'class PressRecipe { static class Serializer { M c = Ingredient.LIST_CODEC_NONEMPTY.fieldOf("ingredients");'
+            ' M t = Ingredient.CODEC.fieldOf("tool"); } }', encoding="utf-8")
+        ns = mod_namespaces(w)
+        ok &= ns == ["mymod"]
+        fl = mod_ingredient_fields(w, ns)
+        ok &= fl == {"mymod:press": ("ingredients[]", "tool"), "mymod:special": ()}
+        s = importlib.util.spec_from_file_location("gro", TPL / "tools/gen-resource-overlays.py")
+        gro = importlib.util.module_from_spec(s); s.loader.exec_module(gro)
+        spec = {"own_namespaces": ns, "ingredient_fields": fl}
+        doc = {"type": "mymod:press", "ingredients": [{"tag": "c:a"}],
+               "tool": [{"type": "mymod:knife"}, {"tag": "c:knives"}], "result": [{"item": {"id": "x:y"}}]}
+        out = gro.TRANSFORMS["ingredients_as_strings"](json.loads(json.dumps(doc)), "r", spec)
+        ok &= out["ingredients"] == ["#c:a"] and out["tool"] == {"neoforge:ingredient_type": "neoforge:compound",
+              "children": [{"neoforge:ingredient_type": "mymod:knife"}, "#c:knives"]}
+        ok &= gro.TRANSFORMS["ingredients_as_strings"](json.loads(json.dumps(out)), "r", spec) == out  # idempotent
+        try:
+            gro.TRANSFORMS["ingredients_as_strings"]({"type": "minecraft:smelting", "ingredient": {"type": "x:z"}}, "r", spec)
+            ok = False                                           # a foreign custom ingredient is refused
+        except gro.Refused:
+            pass
+        ok &= needs_other_mod({"neoforge:conditions": [{"type": "neoforge:mod_loaded", "modid": "create"}]}, ns) == "create"
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

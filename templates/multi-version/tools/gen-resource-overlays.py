@@ -98,28 +98,69 @@ INGREDIENT_FIELDS = {
 # MapCodec, so the table and the codec cannot disagree quietly. An unknown type is still REFUSED.
 
 
-def _ingredient(value, where):
-    """One 1.21.1 ingredient -> its 26.2 form. Anything unexpected is refused, not guessed."""
+# NeoForge's own custom ingredients, 1.21.1 -> 26.2: the key that names the type moved from `type` to
+# `neoforge:ingredient_type` (IngredientCodecs on 26.2), and the fields listed here are themselves
+# ingredients, converted in turn. Read off both versions' CompoundIngredient, DifferenceIngredient and
+# IntersectionIngredient codecs; a NeoForge type not listed here is refused.
+NEOFORGE_CUSTOM = {
+    "neoforge:compound":     {"children": "list", "ingredients": "list"},
+    "neoforge:difference":   {"base": "one", "subtracted": "one"},
+    "neoforge:intersection": {"children": "list"},
+}
+
+
+def _ingredient(value, where, own=()):
+    """One 1.21.1 ingredient -> its 26.2 form. Anything unexpected is refused, not guessed.
+
+    `own` names the namespaces whose custom ingredient types belong to the mod being ported: their
+    fields are read by the mod's own codec, which the port carries across, so only the type key moves.
+    A list stays a list only when every member is a plain item id: 26.2's list form is a holder set,
+    which holds item ids and nothing else, so a list with a tag or a custom ingredient in it becomes
+    NeoForge's compound ingredient (what 1.21.1 turned such a list into at load)."""
+    if isinstance(value, str) and value:
+        return value            # already the 26.2 form (a rerun over a converted file is a no-op)
     if isinstance(value, list):
-        return [_ingredient(v, where + "[]") for v in value]
+        conv = [_ingredient(v, where + "[]", own) for v in value]
+        if all(isinstance(c, str) and not c.startswith("#") for c in conv):
+            return conv
+        if len(conv) == 1:
+            return conv[0]
+        return {"neoforge:ingredient_type": "neoforge:compound", "children": conv}
     if isinstance(value, dict):
         if set(value) == {"item"} and isinstance(value["item"], str):
             return value["item"]
         if set(value) == {"tag"} and isinstance(value["tag"], str):
             return "#" + value["tag"]
-        if "type" in value or "neoforge:ingredient_type" in value:
-            # A custom ingredient. 26.2 still takes an object here, but its own shape changed
-            # with the type, and this mod ships none -- so refuse rather than pass it through.
+        key = "type" if "type" in value else "neoforge:ingredient_type" if "neoforge:ingredient_type" in value else None
+        if key:
+            kind = value[key]
+            rest = {k: v for k, v in value.items() if k != key}
+            out = {"neoforge:ingredient_type": kind}
+            if kind in NEOFORGE_CUSTOM:
+                for k, v in rest.items():
+                    shape = NEOFORGE_CUSTOM[kind].get(k)
+                    if shape is None:
+                        raise Refused("%s: %s has a field %r no rule knows" % (where, kind, k))
+                    if shape == "list":
+                        if not isinstance(v, list):
+                            raise Refused("%s.%s of %s is not a list" % (where, k, kind))
+                        out["children"] = [_ingredient(c, "%s.%s[]" % (where, k), own) for c in v]
+                    else:
+                        out[k] = _ingredient(v, "%s.%s" % (where, k), own)
+                return out
+            if isinstance(kind, str) and kind.split(":")[0] in own:
+                out.update(rest)
+                return out
             raise Refused("%s is a custom ingredient (%s); no rule covers its 26.2 shape"
-                          % (where, sorted(value)))
+                          % (where, kind))
     raise Refused("%s is not an ingredient shape this rule knows: %s"
                   % (where, json.dumps(value)[:120]))
 
 
 def _find_leftover_ingredient_objects(node, where, out):
     if isinstance(node, dict):
-        if set(node) in ({"item"}, {"tag"}):
-            out.append(where)
+        if set(node) in ({"item"}, {"tag"}) and isinstance(next(iter(node.values())), str):
+            out.append(where)   # an {"item": {...stack...}} wrapper (a result) is not an ingredient
         for k, v in node.items():
             _find_leftover_ingredient_objects(v, "%s.%s" % (where, k), out)
     elif isinstance(node, list):
@@ -130,6 +171,7 @@ def _find_leftover_ingredient_objects(node, where, out):
 def ingredients_as_strings(doc, rel, spec):
     kind = doc.get("type")
     fields = dict(INGREDIENT_FIELDS)
+    own = tuple(spec.get("own_namespaces") or ())
     for k, v in (spec.get("ingredient_fields") or {}).items():
         fields[k] = tuple(v)
     if kind not in fields:
@@ -140,13 +182,13 @@ def ingredients_as_strings(doc, rel, spec):
         if field.endswith("[]"):
             name = field[:-2]
             if name in doc:
-                doc[name] = [_ingredient(v, "%s[%d]" % (name, i))
+                doc[name] = [_ingredient(v, "%s[%d]" % (name, i), own)
                              for i, v in enumerate(doc[name])]
         elif field == "key.*":
             for k, v in doc.get("key", {}).items():
-                doc["key"][k] = _ingredient(v, "key.%s" % k)
+                doc["key"][k] = _ingredient(v, "key.%s" % k, own)
         elif field in doc:
-            doc[field] = _ingredient(doc[field], field)
+            doc[field] = _ingredient(doc[field], field, own)
 
     # The table above says which fields are ingredients; this says nothing was left behind. A
     # known type that later grows a new ingredient field would otherwise pass through untouched
@@ -218,6 +260,8 @@ def _entity_predicate(pred, where):
             if key in NESTED_ENTITY_PREDICATE:
                 value = _entity_predicate(value, "%s.%s" % (where, key))
             out[ENTITY_PREDICATE_KEYS[key]] = value
+        elif key in set(ENTITY_PREDICATE_KEYS.values()) or key.startswith("type_specific/"):
+            out[key] = value        # already the 26.2 id: a rerun over a converted file is a no-op
         else:
             raise Refused("%s.%s has no known 26.2 sub-predicate id" % (where, key))
     return out
