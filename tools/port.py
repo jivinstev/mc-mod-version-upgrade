@@ -358,8 +358,11 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     run([sys.executable, str(ROOT / "tools/fix-datapack-layout.py"), str(work), "--apply"], log=log)
     cond_changed, cond_unknown, forge_tags = neoforge_conditions(res) if src_loader == "forge" else (0, [], 0)
     hoisted = fix_hoisted_spec(srcj)
+    # optional integrations and datagen are code the port cannot compile against (tools/park-optional.py)
+    pk = run([sys.executable, str(ROOT / "tools/park-optional.py"), "--work", str(work), "--group", group], log=log)
+    parked = int((re.findall(r"park-optional: (\d+) file", pk.stdout) or ["0"])[0])
     run([sys.executable, str(ROOT / "tools/scaffold-gametest.py"), "--work", str(work)], log=log)
-    return {"group": group, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
+    return {"group": group, "parked_files": parked, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
             "mixin_configs": meta["mixins"], "deps": meta["deps"],
             "conditions_rewritten": cond_changed, "unknown_forge_conditions": cond_unknown,
             "forge_tag_references_left": forge_tags}
@@ -472,7 +475,8 @@ def main():
             return stop(24, f"setup failed: {e}", ["read mods/<modid>/setup.log", "fix the cause and rerun"], state, work)
         state["setup"] = info_setup; state["done"].append("setup"); save_state(work, state)
         say(f"setup done: group {info_setup['group']}, {info_setup['unmapped_names_left']} unmapped names left, "
-            f"{len(info_setup['hoisted_spec_fixed'])} hoisted config SPEC(s) fixed")
+            f"{len(info_setup['hoisted_spec_fixed'])} hoisted config SPEC(s) fixed, "
+            f"{info_setup.get('parked_files', 0)} file(s) of optional integrations/datagen parked (MIGRATION.md)")
     if a.stop_after == "setup":
         say("stopped after setup (--stop-after)"); return 0
     # ── hops
