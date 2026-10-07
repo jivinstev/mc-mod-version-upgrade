@@ -149,7 +149,7 @@ def main():
     ex_file, ex_text = existing_test(work)
     if not ex_file:
         report["skipped"] = "the port has no GameTest to copy the template and holder from"
-        out_path.write_text(json.dumps(report, indent=1)); print("behaviour-tests:", report["skipped"]); return 2
+        out_path.write_text(json.dumps(report, indent=1), encoding="utf-8"); print("behaviour-tests:", report["skipped"]); return 2
     package = re.search(r'^package\s+([\w.]+)\s*;', ex_text, re.M).group(1).rsplit(".test", 1)[0]
     sources, used = pick_sources(work)
     vr = _load("vr", "tools/visual-review.py")
@@ -171,7 +171,7 @@ def main():
     code = java_block(answer)
     if not code:
         report["skipped"] = "the answer had no java block"
-        out_path.write_text(json.dumps(report, indent=1)); print("behaviour-tests:", report["skipped"]); return 2
+        out_path.write_text(json.dumps(report, indent=1), encoding="utf-8"); print("behaviour-tests:", report["skipped"]); return 2
     target = work / "src/main/java" / pathlib.Path(*package.split(".")) / "test/BehaviourGameTest.java"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(code, encoding="utf-8")
@@ -189,7 +189,7 @@ def main():
             target.unlink()
             report["skipped"] = f"the generated tests did not compile after {attempt} repair(s); removed"
             report["compile_errors"] = [m for _l, m in mine][:10]
-            out_path.write_text(json.dumps(report, indent=1)); print("behaviour-tests:", report["skipped"]); return 2
+            out_path.write_text(json.dumps(report, indent=1), encoding="utf-8"); print("behaviour-tests:", report["skipped"]); return 2
         fix = singleshot.run_single(work, target, mine, "(a generated GameTest; fix it to compile, keep every test)",
                                     idx, fl.MODELS["sonnet"], a.target, thinking=4000)
         report["usd"] += fix["usd"]
@@ -197,7 +197,7 @@ def main():
     if n:
         target.unlink()
         report["skipped"] = f"the port itself does not compile ({n} errors elsewhere); tests removed"
-        out_path.write_text(json.dumps(report, indent=1)); print("behaviour-tests:", report["skipped"]); return 2
+        out_path.write_text(json.dumps(report, indent=1), encoding="utf-8"); print("behaviour-tests:", report["skipped"]); return 2
     log = gl.run_gate(work, "runGameTestServer", a.heap, work / "behaviour-gametest.log")
     fails, finished = results(log)
     declared = re.findall(r'@GameTest\b[^\n]*\n(?:\s*@\w+[^\n]*\n)*\s*public\s+static\s+void\s+(\w+)',
@@ -206,7 +206,7 @@ def main():
         crash = gl.failure_of(log)
         report["skipped"] = "the GameTest server did not finish: " + (crash[1][:400] if crash else "no summary line")
         target.unlink()
-        out_path.write_text(json.dumps(report, indent=1)); print("behaviour-tests:", report["skipped"]); return 2
+        out_path.write_text(json.dumps(report, indent=1), encoding="utf-8"); print("behaviour-tests:", report["skipped"]); return 2
     for name in declared:
         msg = fails.get(name.lower())
         report["tests"][name] = {"passed": msg is None, "message": msg or ""}

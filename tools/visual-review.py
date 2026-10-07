@@ -152,7 +152,7 @@ def main():
     report = {"modid": modid, "frames": len(fr), "findings": [], "usd": 0.0}
     if not fr:
         print("visual-review: NO FRAMES under run*/screenshots -- nothing was reviewed, this is not a pass")
-        (pathlib.Path(a.out) if a.out else work / "visual-review.json").write_text(json.dumps(report, indent=1))
+        (pathlib.Path(a.out) if a.out else work / "visual-review.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
         return 2
     stats = {}
     for p in fr:
