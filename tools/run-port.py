@@ -3,6 +3,7 @@
 
     python3 tools/run-port.py --work mods/<modid> [--pack <recipes.tsv>] [--budget 20] [--gate-budget 5]
                               [--gatec launch,spawn,battle,gauntlet | --gatec none] [--gatec-budget 3]
+                              [--no-behaviour] [--no-visual-review]
 
 Why (issue #27, plan step 3): the orchestrating session should not grow while a port runs. It starts
 this, then reads ONE summary (stdout's last line, and run-port.json), never the workers' transcripts or
@@ -12,8 +13,13 @@ Stages, each skipped with a reason when it does not apply:
   1. recipes   tools/apply-recipes.py with --pack (or none)
   2. compile   tools/file-loop.py (single-shot workers first; scans and the override probe at 0 errors)
   3. gate B    tools/gate-loop.py, only when the compile reached 0 and the project has a gameTestServer run
-  4. gate C    tools/scaffold-gatec.py (when the port has no client harness), then gate-loop.py --gatec,
+  4. behaviour tools/behaviour-tests.py after a green Gate B: one Sonnet request writes mod-specific
+               outcome GameTests (optional ones), the server runs them; a failure is a finding, not a red gate
+  5. gate C    tools/scaffold-gatec.py (when the port has no client harness), then gate-loop.py --gatec,
                only after Gate B is green; a real client per phase, under Xvfb on a headless Linux box
+  6. visual    tools/visual-review.py over the frames Gate C saved: script checks, then one Haiku request
+Steps 4 and 6 are on by default and only report; --no-behaviour / --no-visual-review skip them for the
+lowest cost (their ground then falls to MANUAL_VALIDATION.md).
 The dollar caps are per stage; the summary adds them up with the per-model split.
 Standard library only.
 """
@@ -50,6 +56,7 @@ def main():
     ap.add_argument("--target", default="NeoForge 1.21.1"); ap.add_argument("--heap", default="6g")
     ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet", help="Gate C phases, or none")
     ap.add_argument("--gatec-budget", type=float, default=3.0)
+    ap.add_argument("--no-behaviour", action="store_true"); ap.add_argument("--no-visual-review", action="store_true")
     a = ap.parse_args()
     work = pathlib.Path(a.work).resolve()
     s = {"work": str(work), "stages": {}}
@@ -87,6 +94,17 @@ def main():
     else:
         s["stages"]["gate_b"] = {"skipped": "compile not at 0" if not (end and end.get("errors") == 0)
                                  else "no gameTestServer run in build.gradle"}
+    def finding_stage(tool, enabled, why_not):
+        if not enabled:
+            return {"skipped": why_not}
+        r = subprocess.run([py, str(ROOT / "tools" / tool), "--work", str(work), "--target", a.target],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        rep_ = work / (tool.replace(".py", ".json"))
+        d = json.loads(rep_.read_text(encoding="utf-8")) if rep_.exists() else {}
+        return {"exit": r.returncode, "usd": round(d.get("usd") or 0, 4), "findings": d.get("findings", []),
+                "skipped_reason": d.get("skipped"), "summary": (r.stdout.strip().splitlines() or [""])[0]}
+    s["stages"]["behaviour"] = finding_stage("behaviour-tests.py", gate_ok and not a.no_behaviour,
+                                             "--no-behaviour" if a.no_behaviour else "Gate B not green")
     gatec_ok = None
     if gate_ok and a.gatec != "none":
         sc = subprocess.run([py, str(ROOT / "tools/scaffold-gatec.py"), "--work", str(work)],
@@ -103,6 +121,8 @@ def main():
                                           or last_event(clog, "max-runs") or last_event(clog, "green"))}
     else:
         s["stages"]["gate_c"] = {"skipped": "--gatec none" if a.gatec == "none" else "Gate B not green"}
+    s["stages"]["visual"] = finding_stage("visual-review.py", bool(gatec_ok) and not a.no_visual_review,
+                                          "--no-visual-review" if a.no_visual_review else "Gate C not green")
     total = round(sum(st.get("usd", 0) for st in s["stages"].values()), 4)
     s["usd"] = total
     s["done"] = bool(end and end.get("errors") == 0 and gate_ok and (gatec_ok or a.gatec == "none"))
@@ -111,6 +131,8 @@ def main():
     print(f"run-port: compile {c['start_errors']} -> {c['end_errors']} errors, Gate B "
           f"{'green' if gate_ok else ('red' if gate_ok is False else 'not run: ' + g.get('skipped', ''))}, Gate C "
           f"{'green' if gatec_ok else ('red' if gatec_ok is False else 'not run: ' + gc.get('skipped', ''))}, "
+          f"findings: behaviour {len(s['stages']['behaviour'].get('findings', []))}, "
+          f"visual {len(s['stages']['visual'].get('findings', []))}, "
           f"${total} of workers {json.dumps({**c['by_model'], **{('gate:' + k): v for k, v in g.get('by_model', {}).items()}})}"
           f" -- details in {work / 'run-port.json'}")
     return 0 if s["done"] else 1

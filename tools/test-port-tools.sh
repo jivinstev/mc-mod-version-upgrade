@@ -250,6 +250,14 @@ out="$(python3 tools/scaffold-gatec.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "scaffold-gatec: the client harness template becomes a mod's harness with no example names left" \
   || bad "scaffold-gatec self-check: $out"
 
+out="$(python3 tools/visual-review.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "visual review: black, flat and missing-texture frames are findings without a model; verdict lines parse" \
+  || bad "visual-review self-check: $out"
+
+out="$(python3 tools/behaviour-tests.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "behaviour tests: failures read from the GameTest log, a run with no summary is not a pass" \
+  || bad "behaviour-tests self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

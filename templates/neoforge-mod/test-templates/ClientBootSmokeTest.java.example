@@ -11,6 +11,9 @@
 //   4. build.gradle's `client` run wiring (-Pboottest/-Ptestmode/-Pbattlecount/-Pbattleticks -> systemProperty) is
 //      ALREADY in the template, parameterized by mod_id — nothing to add. Its ABSENCE is a silent hang; see pipeline.md
 //      §6e anti-hang checklist #1. (Verify it survived any build.gradle edits.)
+//   5. Screenshots: every phase saves a few frames as run*/screenshots/gatec-<phase>-<what>.png (off with
+//      -Dexamplemod.shots=false). tools/visual-review.py has a cheap model look at them; the frames are also
+//      what a person reviews for MANUAL_VALIDATION.md.
 // Run via tools/client-boot-loop.sh <launch|spawn|battle|gauntlet>.
 package com.example.examplemod.test;
 
@@ -115,6 +118,27 @@ public class ClientBootSmokeTest {
 
     private enum Phase { WAIT_TITLE, WAIT_INGAME, SURVIVE, GAUNTLET, DONE }
     private static Phase phase = Phase.WAIT_TITLE;
+    private static final boolean SHOTS = !"false".equals(System.getProperty("examplemod.shots"));
+
+    /** Save the frame as screenshots/gatec-<name>.png. Never fails the gate: a frame is evidence, not a check. */
+    private static void shot(Minecraft mc, String name) {
+        if (!SHOTS) return;
+        try {
+            net.minecraft.client.Screenshot.grab(mc.gameDirectory, "gatec-" + name + ".png",
+                mc.getMainRenderTarget(), msg -> { });
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [SHOT] gatec-" + name + ".png");
+        } catch (Throwable t) {
+            System.out.println("EXAMPLEMOD_BOOT_TEST: [SHOT] gatec-" + name + " not taken: " + t);
+        }
+    }
+
+    /** Point the camera at the ground ahead, where spawned mobs stand and placed blocks sit. */
+    private static void lookAhead(Minecraft mc, float pitch) {
+        if (mc.player == null) return;
+        mc.player.setYRot(0f); mc.player.setXRot(pitch);
+        mc.player.yRotO = 0f; mc.player.xRotO = pitch;
+    }
+
     private static int ticks = 0;   // reset on each phase transition
     private static int stuckTicks;
     // Set by the first client tick we are handed. Frames are counted separately, because from
@@ -374,6 +398,9 @@ public class ClientBootSmokeTest {
         if (MODE == Mode.BATTLE) {
             server.execute(ClientBootSmokeTest::driveBattle); // keep the teams locked onto each other
         }
+        if (ticks == SURVIVE_TICKS / 3) lookAhead(mc, 25f);
+        if (ticks == SURVIVE_TICKS / 2) shot(mc, MODE == Mode.BATTLE ? "battle-mid" : "spawn-world");
+        if (ticks == SURVIVE_TICKS - 20) shot(mc, MODE == Mode.BATTLE ? "battle-end" : "spawn-late");
         if (++ticks < SURVIVE_TICKS) return;
 
         if (MODE == Mode.BATTLE) {
@@ -452,6 +479,14 @@ public class ClientBootSmokeTest {
         GauntletStep(int d) { this.durationTicks = d; }
     }
 
+    /** Steps whose state is visible on screen, so a frame of it is worth keeping. */
+    private static boolean shotStep(GauntletStep step) {
+        return switch (step) {
+            case RENDER_ITEMS, OPEN_GUIS, EQUIP_ARMOR, PLACE_BLOCKS, USE_ITEMS, APPLY_EFFECTS, OPEN_CREATIVE -> true;
+            default -> false;
+        };
+    }
+
     /** Steps that own the on-screen GUI for their whole duration (closed on exit); others clear leftovers on entry. */
     private static boolean stepWantsScreen(GauntletStep step) {
         return step == GauntletStep.RENDER_ITEMS || step == GauntletStep.OPEN_GUIS;
@@ -481,6 +516,13 @@ public class ClientBootSmokeTest {
             enterGauntletStep(step, mc, server);
         }
         tickGauntletStep(step, mc, gauntletStepTicks); // per-tick work (e.g. swap which GUI is open)
+        if (shotStep(step)) {
+            if (gauntletStepTicks == 1 && step == GauntletStep.PLACE_BLOCKS) lookAhead(mc, 40f);
+            if (gauntletStepTicks == step.durationTicks * 2 / 3) {
+                shot(mc, "gauntlet-" + String.format(Locale.ROOT, "%02d", gauntletStep + 1) + "-"
+                    + step.name().toLowerCase(Locale.ROOT));
+            }
+        }
         if (++gauntletStepTicks >= step.durationTicks) {
             exitGauntletStep(step, mc);
             gauntletStep++;
