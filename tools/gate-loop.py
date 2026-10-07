@@ -238,7 +238,15 @@ def failure_of(text, client=False, ns=None):
     if client:   # Gate C: the harness's own verdict decides; a FAIL carries its reason
         verdicts = [m.group(0) for m in BOOT.finditer(text)]
         if verdicts and ": PASS" in verdicts[-1]:
-            return None
+            # a client that did not crash is not a client that DRAWS the mod: an item with no model is the
+            # magenta cube with one WARN line (§V42b; 184 items on a 26.2 port behind a PASS)
+            miss = sorted(set(re.findall(r"Missing item model for location (%s:[\w/.-]+)" % re.escape(ns), text))) if ns else []
+            if not miss:
+                return None
+            return ("assets", f"The client ran, but {len(miss)} of this mod's items have no model and render as the "
+                    f"missing-texture cube (one 'Missing item model for location' line each): {', '.join(miss[:15])}. "
+                    "From 1.21.2 an item needs assets/<ns>/items/<id>.json naming its model (CATALOG §V42b); "
+                    "add one per item, or the model it names.", f"assets:{len(miss)}")
         if verdicts:
             boot = [l.strip() for l in lines if "_BOOT_TEST:" in l][-15:]
             return "gatec", "\n".join(boot), verdicts[-1][:200]
@@ -409,6 +417,8 @@ def self_check():
         (w / "src/main/java/a/PotBE.java").write_text("void preRemoveSideEffects(){ Containers.dropContents(l, p, c); }",
                                                        encoding="utf-8")
         ok &= lost_drops(w) is None        # moved to the block entity: not lost
+    cl = "M_BOOT_TEST: PASS - done\n[x] [Render thread/WARN] [minecraft/ModelManager]: Missing item model for location m:pie\n"
+    ok &= failure_of(cl, client=True, ns="m")[0] == "assets" and failure_of(cl, client=True, ns="z") is None
     ok &= failure_of(bad) is None          # no namespace known: the check is off, never guessing
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1

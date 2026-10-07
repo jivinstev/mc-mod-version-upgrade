@@ -158,6 +158,36 @@ def transform_resources(work, target):
     return changed, refused, other
 
 
+def client_items(work, namespaces):
+    """1.21.2+ binds an item to its model through assets/<ns>/items/<id>.json; an item without one is the
+    magenta cube (§V42b). Measured: 184 of a 1.21.1 mod's items, behind a green Gate C. Writes ONLY the
+    missing definitions, with the multi-version template's generator (which skips parent templates and
+    counts layers), so a definition the port already has -- a special renderer -- is never touched.
+    -> number written."""
+    import runpy
+    written = 0
+    for ns in namespaces:
+        if not (work / f"src/main/resources/assets/{ns}/models/item").is_dir():
+            continue
+        argv, sys.argv = sys.argv, ["gen-client-items.py", "--ns", ns, "--root", str(work)]
+        try:
+            g = runpy.run_path(str(TPL / "tools/gen-client-items.py"), run_name="gen_client_items")
+        finally:
+            sys.argv = argv
+        models = g["load_models"]()
+        items = work / f"src/main/resources/assets/{ns}/items"
+        items.mkdir(parents=True, exist_ok=True)
+        parented = {m.get("parent", "").split("/", 1)[1] for m in models.values()
+                    if (m.get("parent") or "").startswith(ns + ":item/")}
+        for item_id in sorted(models):
+            if (items / f"{item_id}.json").exists() or (item_id in parented and not models[item_id].get("textures")):
+                continue
+            (items / f"{item_id}.json").write_text(
+                g["render"](g["definition"](item_id, g["layer_count"](item_id, models), {})), encoding="utf-8")
+            written += 1
+    return written
+
+
 def step(msg):
     print(f"era-hop: {msg}", flush=True)
 
@@ -238,11 +268,16 @@ def main():
     step(f"data files: {len(changed)} rewritten to the {T} format"
          + (f"; {len(refused)} REFUSED and left as they were (listed in {log.name}; they will not load on {T} "
             f"until fixed): " + "; ".join(r.split(' (')[0] for r in refused[:6]) if refused else ""))
+    n_items = client_items(work, mod_namespaces(work))
+    step(f"client item definitions: {n_items} written (an item without one renders as the missing cube on {T})")
     # 26.x parses JSON strictly and skips a lenient-only file (§S8): repair the shapes with one meaning
     r = subprocess.run([sys.executable, str(ROOT / "tools/fix-json-strict.py"), "--work", str(work)],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     step(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "fix-json-strict: no output")
     # the target is now the canonical one: an empty table, the default target, and no 1.21.1 build
+    # keep the table that was applied: code written LATER in the old dialect (a generated behaviour test)
+    # is passed through it too, instead of failing on every renamed name (measured: EntityType.COW, §V21)
+    shutil.copy(table, work / f"versions/{T}.renames.applied.tsv")
     table.write_text(f"# {T} is this port's only target: its renames were applied to src/ by tools/era-hop.py.\n",
                      encoding="utf-8")
     for f in ("versions/1.21.1.properties", "versions/1.21.1.renames.tsv"):
@@ -304,6 +339,17 @@ def self_check():
             ok = False                                           # unknown type WITH an ingredient: still refused
         except gro.Refused:
             pass
+        (w / "src/main/resources/assets/mymod/models/item").mkdir(parents=True)
+        (w / "src/main/resources/assets/mymod/models/item/pie.json").write_text(
+            '{"parent":"minecraft:item/generated","textures":{"layer0":"mymod:item/pie"}}', encoding="utf-8")
+        (w / "src/main/resources/assets/mymod/models/item/pan.json").write_text('{"parent":"minecraft:item/handheld"}',
+                                                                               encoding="utf-8")
+        (w / "src/main/resources/assets/mymod/items").mkdir(parents=True)
+        (w / "src/main/resources/assets/mymod/items/pan.json").write_text('{"model":{"type":"minecraft:special"}}',
+                                                                          encoding="utf-8")
+        ok &= client_items(w, ["mymod"]) == 1                     # only the missing one
+        ok &= '"mymod:item/pie"' in (w / "src/main/resources/assets/mymod/items/pie.json").read_text(encoding="utf-8")
+        ok &= "special" in (w / "src/main/resources/assets/mymod/items/pan.json").read_text(encoding="utf-8")
         ok &= needs_other_mod({"neoforge:conditions": [{"type": "neoforge:mod_loaded", "modid": "create"}]}, ns) == "create"
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1

@@ -137,6 +137,29 @@ def norm(name):
     return re.sub(r'[^a-z0-9]', '', name.lower())
 
 
+def to_target_dialect(work, target):
+    """A model writes tests in the API it knows best, which after an era hop is the OLD one. Pass the new
+    file through the rename table the era hop applied to the port (versions/<mc>.renames.applied.tsv,
+    kept by tools/era-hop.py) so renamed names do not cost a repair each. -> rewrites applied, or 0."""
+    tables = sorted(work.glob("versions/*.renames.applied.tsv"))
+    if not tables:
+        return 0
+    import shutil, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        src = pathlib.Path(d) / "src"; out = pathlib.Path(d) / "out"
+        rel = target.relative_to(work / "src/main/java")
+        (src / rel).parent.mkdir(parents=True)
+        shutil.copy(target, src / rel)
+        r = subprocess.run([sys.executable, str(ROOT / "templates/multi-version/tools/prepare-sources.py"), "--src", str(src),
+                            "--renames", str(tables[-1]), "--out", str(out)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        if r.returncode != 0 or not (out / rel).exists():
+            return 0
+        shutil.copy(out / rel, target)
+        m = re.search(r"renameRewrites=(\d+)", r.stdout + r.stderr)
+        return int(m.group(1)) if m else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=list(fl.MODELS))
@@ -193,6 +216,7 @@ def main():
     target = work / "src/main/java" / pathlib.Path(*package.split(".")) / "test/BehaviourGameTest.java"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(code, encoding="utf-8")
+    report["renamed"] = to_target_dialect(work, target)
     clog = work / "behaviour-compile.log"
     idx = singleshot.SourceIndex(fl.find_sources(work)) if fl.find_sources(work) else None
     for attempt in range(3):
