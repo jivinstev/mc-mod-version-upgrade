@@ -175,6 +175,12 @@ def ingredients_as_strings(doc, rel, spec):
     for k, v in (spec.get("ingredient_fields") or {}).items():
         fields[k] = tuple(v)
     if kind not in fields:
+        # A type no table names is only a problem if it carries something to convert: one whose fields
+        # hold no 1.21.1 ingredient object anywhere (e.g. `"shield": "<item id>"`) is already valid on 26.2.
+        leftover = []
+        _find_leftover_ingredient_objects(doc, "", leftover)
+        if not leftover:
+            return doc
         raise Refused("recipe type %r is not in INGREDIENT_FIELDS, and this transform's own "
                       "ingredient_fields does not declare it either, so this rule does not know "
                       "which of its fields are ingredients" % (kind,))

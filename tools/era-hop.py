@@ -293,6 +293,13 @@ def self_check():
             ok = False                                           # a foreign custom ingredient is refused
         except gro.Refused:
             pass
+        nothing = {"type": "mymod:apply_banner", "shield": "mymod:iron_shield"}   # unknown type, no ingredients
+        ok &= gro.TRANSFORMS["ingredients_as_strings"](json.loads(json.dumps(nothing)), "r", spec) == nothing
+        try:
+            gro.TRANSFORMS["ingredients_as_strings"]({"type": "mymod:unknown", "input": {"item": "a:b"}}, "r", spec)
+            ok = False                                           # unknown type WITH an ingredient: still refused
+        except gro.Refused:
+            pass
         ok &= needs_other_mod({"neoforge:conditions": [{"type": "neoforge:mod_loaded", "modid": "create"}]}, ns) == "create"
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
