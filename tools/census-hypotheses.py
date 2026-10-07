@@ -15,7 +15,9 @@ H1  propagation    Judgement fixes repeat inside a port, so "the model fixes one
 H1x cross-port    The same edit recurs in OTHER ports -- the test of whether a recipe written once pays
                    off again (H1 alone only says a port repeats itself). Measured: share of code hunks
                    whose loose shape (entry/cluster + removed/added identifiers) appears in 2+ and 3+
-                   different MODS (a mod's 1.21.1 and 26.2 rows count once).
+                   different MODS (a mod's 1.21.1 and 26.2 rows count once), counted within one AXIS:
+                   era-jump rows (profile *-era, or one of --era-profiles) only match era rows, since
+                   a recipe pack is written per axis.
 H3  choice points  A catalogue entry's real fixes fall into a FEW repeatable edits, so the model can pick
                    one of k options instead of writing the fix. Measured, per entry hit in 3+ mods with
                    20+ hunks: the share of its hunks covered by its top-3 loose shapes (removed/added
@@ -40,13 +42,14 @@ OPTIONAL_ROOTS = ("mezz.jei", "dev.emi", "me.shedaniel", "snownee.jade", "mcjty.
 CODE = ("entry", "cluster")
 
 
-def load(census):
+def load(census, era_profiles=("P9", "P10")):
     rows = []
     for t in csv.DictReader(open(census / "census.tsv", encoding="utf-8"), delimiter="\t"):
         f = census / t["port"] / "hunks.jsonl"
         if f.exists():
             recs = [json.loads(l) for l in open(f, encoding="utf-8")]
-            rows.append({"profile": t["profile"], "row": t["port"], "recs": recs})
+            rows.append({"profile": t["profile"], "row": t["port"], "recs": recs,
+                         "era": t["profile"].endswith("-era") or t["profile"] in era_profiles})
     return rows
 
 
@@ -66,12 +69,12 @@ def loose(r):
 
 
 def cross_port(rows):
-    """-> {loose shape: set of mods} over every row's code hunks."""
+    """-> {(axis, loose shape): set of mods} over every row's code hunks."""
     mods = collections.defaultdict(set)
     for r in rows:
         for h in r["recs"]:
             if h["cat"] in CODE and (h["removed"] or h["added"]):
-                mods[loose(h)].add(r["row"].split("@")[0])
+                mods[(r["era"], loose(h))].add(r["row"].split("@")[0])
     return mods
 
 
@@ -125,8 +128,9 @@ def pct(a, b):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--census", required=True); ap.add_argument("--bench"); ap.add_argument("--detail", action="store_true")
+    ap.add_argument("--era-profiles", default="P9,P10", help="profiles whose rows are era jumps (besides *-era)")
     a = ap.parse_args()
-    rows = load(pathlib.Path(a.census))
+    rows = load(pathlib.Path(a.census), tuple(a.era_profiles.split(",")))
     if not rows:
         print("no hunks.jsonl under", a.census, "-- run recipe-bench-drive.py --census first"); return 2
     key = lambda p: (int(p.split("-")[0][1:]), p)
@@ -139,7 +143,7 @@ def main():
         un, uex, _ulo = h1(r["recs"], "cluster"); p["un"] += un; p["un_rep"] += uex
         for h in r["recs"]:
             if h["cat"] in CODE:
-                k = len(xp.get(loose(h), ()))
+                k = len(xp.get((r["era"], loose(h)), ()))
                 p["x2"] += k >= 2; p["x3"] += k >= 3
                 if h["cat"] == "cluster":
                     p["ux2"] += k >= 2
@@ -171,6 +175,20 @@ def main():
     print(f"\nH7: {T['opt_new']} of {T['new']} new files import an optional integration.")
     if T["h5_rows"]:
         print(f"H5: {T['h5_efc']} of {T['h5_ef']} files with a start error were changed by the port.")
+    for era in (False, True):
+        mods, n = collections.defaultdict(set), collections.Counter()
+        tot = 0
+        for r in (r for r in rows if r["era"] == era):
+            for h in r["recs"]:
+                if h["cat"] in CODE:
+                    tot += 1
+                    if h["removed"] or h["added"]:
+                        mods[loose(h)].add(r["row"].split("@")[0]); n[loose(h)] += 1
+        cand = sorted((k for k in mods if len(mods[k]) >= 2), key=lambda k: -n[k])
+        if tot and cand:
+            cum = [sum(n[k] for k in cand[:i]) for i in (10, 25, 50, 100)]
+            print(f"H1x {'era-jump' if era else 'to-1.21.x'} rows: {len(cand)} cross-port shapes; top 10/25/50/100 cover "
+                  + " / ".join(pct(c, tot) for c in cum) + f" of {tot:,} code hunks ({pct(sum(n[k] for k in cand), tot)} all)")
     e3 = h3(rows)
     if e3:
         nh = sum(r[1] for r in e3)

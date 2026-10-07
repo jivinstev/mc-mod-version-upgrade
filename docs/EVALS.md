@@ -14,7 +14,7 @@ add. Each later step acts on what the earlier ones leave.
 | 1 | 5a: fresh session per phase (**shipped**: `port-handoff.py`) | resume from `MIGRATION.md` at each phase boundary, so context restarts near its 37–49k floor instead of growing to a median 180–450k | Stage 0: the conversation itself is 44–60% of cache reads | 20–40% |
 | 2 | 5a: no spilled-output re-reads; summaries not raw logs (**shipped**: `compile-summary.py`) | grep spilled tool output instead of reading it; bucketed error summaries | Stage 0: 7–24% of cache reads | 5–20% |
 | 3 | 3: recipe format + engine | `auto` / `choice` / `scaffold` / `manual`, type-aware, with the §X guards | enabling step | — |
-| 4 | 4: recipes in bulk | apply the mechanical changes with no model, most frequent first (V4, V3 moves, V17, V12, 25, 32, 13...) | Stage 2: 35–50% of 1.20→1.21 hunks and 45–60% of 26.x hunks are mechanical; Stage 3 prep: the 50 most common cross-port edits cover 23% of 1.20→1.21 hunks and 58% of 26.x hunks | 35–70% |
+| 4 | 4: recipes in bulk | apply the mechanical changes with no model, most frequent first (V4, V3 moves, V17, V12, 25, 32, 13...) | Stage 2: 35–50% of 1.20→1.21 hunks and 45–60% of 26.x hunks are mechanical; Stage 3 prep: the 50 most common cross-port edits cover 21% of to-1.21.x hunks and 55% of 26.x hunks | 35–70% |
 | 5 | 5b: per-file residual loop (H5) | each remaining fix in a small fresh context with that file, its errors and the compiler; cheaper model | Stage 2.5: 87% of hunks are in a file that fails the first compile | 50–80% of what is left |
 | 6 | 5b: fix once, apply everywhere (H1) | a hand fix becomes a rewrite applied to every matching site | Stage 2.5: 65% of hunks repeat an earlier one in the same port | 30–50% of what is left |
 | 7 | 3/6: choice points (H3) and scaffolds (H4) | the model picks an option or fills a skeleton instead of writing code | H3 measured 2026-10-07: for 38 of 84 frequent entries, 3 options cover 80%+ of real fixes | 5–15% of the judgement work |
@@ -296,32 +296,34 @@ instead of searching.
 
 **H1x: do edits recur ACROSS ports?** H1 (Stage 2.5) only showed a port repeating itself. A recipe pays
 off if the same edit shows up in other mods. Measured on the census: the share of code hunks whose loose
-shape (entry or cluster plus removed and added identifiers) appears in 2+ different mods (a mod's 1.21.1
-and 26.2 rows count once).
+shape (entry or cluster plus removed and added identifiers) appears in 2+ different mods on the SAME
+axis. A mod's 1.21.1 and 26.2 rows count once. Era-jump rows (P9, P10 and the `-era` rows) only match
+each other, because a recipe pack is written per axis.
 
-| | Code hunks | In 2+ mods | In 3+ mods | Unattributed hunks in 2+ mods |
+| Rows | Code hunks | In 2+ mods | In 3+ mods | Unattributed hunks in 2+ mods |
 |---|---|---|---|---|
-| all rows | 30,285 | 40% | 33% | 19% |
-| 1.20→1.21 rows, range by profile | — | 12–52% | 7–48% | 3–58% |
-| 26.x era rows, range by profile | — | 63–77% | 47–73% | 38–63% |
+| all 29 | 30,285 | 39% | 33% | 18% |
+| to 1.21.x (P1–P8), range by profile | 18,194 | 11–37% | 5–26% | 3–50% |
+| era jump to 26.2 (P9, P10, `-era`), range by profile | 12,091 | 50–76% | 43–73% | 19–63% |
 
 The yield curve, cross-port shapes ranked by how many hunks they cover:
 
 | Recipes (top N shapes) | 10 | 25 | 50 | 100 | all cross-port |
 |---|---|---|---|---|---|
-| 1.20→1.21 hunks covered (262 shapes) | 14% | 19% | 23% | 26% | 28% |
-| 26.x hunks covered (107 shapes) | 39% | 50% | 58% | 61% | 61% |
+| to-1.21.x hunks covered (190 shapes) | 12% | 18% | 21% | 23% | 24% |
+| era-jump hunks covered (185 shapes) | 37% | 47% | 55% | 60% | 63% |
 
 What this changes for Stage 4:
 
 - **26.x is where recipes pay first.** 50 recipes cover over half of an era jump's hunks. The
-  multi-version template's inherited rename table already holds most of them, so the first recipe
+  multi-version template's inherited rename table already holds many of them, so the first recipe
   is that table itself, applied to non-template ports.
-- **1.20→1.21 needs recipes AND the per-file loop.** Cross-port recipes reach about a quarter of the
-  hunks, and the curve flattens after ~50. Most of the rest repeats within a port (H1, 65%), so
+- **To-1.21.x ports need recipes AND the per-file loop.** Cross-port recipes reach about a fifth of
+  the hunks, and the curve flattens after ~50. Most of the rest repeats within a port (H1, 65%), so
   fix-once-apply-everywhere (step 6) matters more there than a bigger recipe library.
-- **Unattributed but cross-port (19%) are catalogue gaps.** These are edits real ports made in 2+ mods
-  that no catalogue entry describes; they are the first candidates for new entries and recipes.
+- **Unattributed but cross-port hunks (18%) are catalogue gaps.** These are edits real ports made in
+  2+ mods that no catalogue entry describes, and they are the first candidates for new entries and
+  recipes.
 
 **H3: are an entry's fixes a few repeatable options?** For each catalogue entry hit in 3+ mods with 20+
 hunks (84 entries, 14,395 hunks), the share of its hunks covered by its three most common loose shapes

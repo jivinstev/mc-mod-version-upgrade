@@ -226,6 +226,11 @@ out="$(python3 tools/port-handoff.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "hand-off: replaces itself, keeps other sections, carries the Scope choice and blockers" \
   || bad "port-handoff self-check: $out"
 
+echo "12. apply-recipes.py (auto rows applied per catalogue entry; choice/manual sites listed, never rewritten)"
+out="$(python3 tools/apply-recipes.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "recipes: auto groups rewrite and count, a dead group is named, choice sites stay untouched" \
+  || bad "apply-recipes self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
