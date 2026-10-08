@@ -52,7 +52,10 @@ python3 tools/port-profile.py ~/forks/<repo>
 python3 tools/port-deps.py --repo ~/forks/<repo> --mc <target>
 ```
 The profile names the cost-driving patterns and the tool covering each; the deps check finds blocked
-hosts and dependencies with no build for the target **before** anything is spent. Measured fork ports
+hosts and dependencies with no build for the target **before** anything is spent. Add `--api` (and
+`--provide OLD=NEW` / `--api-tree <ported dep's src/main/java>` for a sibling port) to see, per dependency,
+what the mod imports, which of its overrides changed signature, and whether the ids it names still exist:
+"integrates with a dozen mods" is often a handful of unchanged APIs plus string ids. Measured fork ports
 for comparison (Forge 1.20.1 → NeoForge 1.21.1, as each port's `COST.md` recorded it): a library of 198
 Java files and 25 mixins, $5.86; a mob mod of 353 Java files and 25 mixins that depends on it, $8.94. A port well outside those sizes, with coremods,
 custom shaders or many mixins, costs more — say so.

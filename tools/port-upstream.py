@@ -146,7 +146,9 @@ def st_deps(c):
     t = tgt(c)
     log = c["dir"] / "deps.log"
     r = sh([sys.executable, str(ROOT / "tools/port-deps.py"), "--repo", str(c["repo"]), "--mc", t.mc,
-            "--fill-local", "--apply-moves", "--json", str(c["dir"] / "deps.json")], timeout=1800, log=log)
+            "--fill-local", "--apply-moves", "--api", "--json", str(c["dir"] / "deps.json")]
+           + [x for p in (c["args"].provide or []) for x in ("--provide", p)]
+           + [x for t in (c["args"].lib_tree or []) for x in ("--api-tree", t)], timeout=1800, log=log)
     if r.returncode:
         why = {2: "a registry lookup failed", 3: "a required dependency has no build for the target",
                4: "a dependency sits on a blocked host with no registry source"}.get(r.returncode, "port-deps failed")
