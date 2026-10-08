@@ -23,6 +23,42 @@ import argparse, json, pathlib, re, sys
 
 OVERRIDE = re.compile(r"/transformed/(?P<path>net/minecraft/\S+?)\.java:\d+: error: (?P<m>[\w$]+)\([^)]*\) in [\w$.]+ "
                       r"cannot override (?P=m)\([^)]*\) in (?P<base>[\w$.]+)")
+# ModDevGradle (the only toolchain for 26.x) reports the same javac error with the class's FQN instead of a path
+OVERRIDE_MDG = re.compile(r"ERROR Line: \d+, (?P<m>[\w$]+)\([^)]*\) in (?P<fqn>net\.minecraft\.[\w$.]+) "
+                          r"cannot override (?P=m)\([^)]*\) in (?P<base>[\w$.]+)")
+
+
+def remap_classes(text, moves):
+    """Rewrite moved class names in AT entries: the owner column (dotted, $ for nested types) and the
+    L...; references inside method descriptors. A version hop that moves packages (1.21.1 -> 26.x moved
+    hundreds) otherwise leaves every entry for a moved class pointing at nothing."""
+    slash = {a.replace(".", "/"): b.replace(".", "/") for a, b in moves.items()}
+    n = 0
+
+    def owner(m):
+        nonlocal n
+        cls = m.group(2)
+        outer, _, inner = cls.partition("$")
+        if outer in moves:
+            n += 1
+            return m.group(1) + moves[outer] + ("$" + inner if inner else "")
+        return m.group(0)
+
+    def desc(m):
+        nonlocal n
+        outer, _, inner = m.group(1).partition("$")
+        if outer in slash:
+            n += 1
+            return "L" + slash[outer] + ("$" + inner if inner else "") + ";"
+        return m.group(0)
+    out = []
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("#"):
+            out.append(line); continue
+        line = re.sub(r"^(\s*[\w-]+\s+)([\w.$]+)", owner, line, count=1)
+        line = re.sub(r"L([\w/$]+);", desc, line)
+        out.append(line)
+    return "".join(out), n
 
 
 def at_files(work):
@@ -59,8 +95,9 @@ def override_lines(log_text, text):
     """New entries widening each overriding subclass's method, from 'cannot override' errors."""
     have = {(c, m, d) for _a, c, m, d in entries(text)}
     adds = []
-    for e in OVERRIDE.finditer(log_text):
-        sub_cls = e.group("path").replace("/", ".")
+    hits = [(e.group("path").replace("/", "."), e) for e in OVERRIDE.finditer(log_text)]
+    hits += [(e.group("fqn"), e) for e in OVERRIDE_MDG.finditer(log_text)]
+    for sub_cls, e in hits:
         base_simple = e.group("base").split(".")[-1]
         for _a, cls, member, desc in entries(text):
             if member == e.group("m") and desc and cls.split(".")[-1].split("$")[-1] == base_simple:
@@ -75,6 +112,7 @@ def override_lines(log_text, text):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work"); ap.add_argument("--srg-map"); ap.add_argument("--overrides-from")
+    ap.add_argument("--class-map", help="old<TAB>new class moves (tools/build-class-move-map.py output)")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -84,18 +122,27 @@ def main():
         print("fix-access-transformer: no accesstransformer.cfg; nothing to do"); return 0
     mapping = json.loads(pathlib.Path(a.srg_map).read_text(encoding="utf-8")) if a.srg_map else {}
     log_text = pathlib.Path(a.overrides_from).read_text(encoding="utf-8", errors="replace") if a.overrides_from else ""
+    moves = {}
+    if a.class_map:
+        for l in pathlib.Path(a.class_map).read_text(encoding="utf-8").splitlines():
+            if "\t" in l and not l.startswith("#"):
+                x, y = l.split("\t")[:2]
+                moves[x.strip()] = y.strip()
     for f in files:
         text = f.read_text(encoding="utf-8")
         n = 0
         if mapping:
             text, n = remap_srg(text, mapping)
+        moved = 0
+        if moves:
+            text, moved = remap_classes(text, moves)
         adds = override_lines(log_text, text) if log_text else []
         if adds:
             text = text.rstrip("\n") + "\n" + "\n".join(adds) + "\n"
         f.write_text(text, encoding="utf-8")
         left = len(re.findall(r"\b[fm]_\d+_\b", text))
         print(f"fix-access-transformer: {f.relative_to(a.work)}: {n} SRG name(s) remapped"
-              + (f", {left} left unmapped" if left else "") + f", {len(adds)} override widening(s) added")
+              + (f", {left} left unmapped" if left else "") + (f", {moved} moved class name(s) rewritten" if moves else "") + f", {len(adds)} override widening(s) added")
     return 0
 
 
@@ -111,6 +158,17 @@ def self_check():
     ok &= adds == ["public net.minecraft.world.entity.player.Player actuallyHurt(Lnet/minecraft/world/damagesource/"
                    "DamageSource;F)V # overrides net.minecraft.world.entity.LivingEntity.actuallyHurt, widened there"]
     ok &= override_lines(log, t + "\n" + adds[0]) == []       # idempotent
+    mv = {"net.minecraft.world.entity.animal.horse.AbstractHorse": "net.minecraft.world.entity.animal.equine.AbstractHorse",
+          "net.minecraft.world.entity.vehicle.Boat": "net.minecraft.world.entity.vehicle.boat.Boat"}
+    at2 = ("public net.minecraft.world.entity.animal.horse.AbstractHorse m(Lnet/minecraft/world/entity/vehicle/Boat;)V\n"
+           "public net.minecraft.world.entity.animal.horse.AbstractHorse$Inner f\n# net.minecraft.world.entity.vehicle.Boat kept\n")
+    r2, k = remap_classes(at2, mv)
+    ok &= k == 3 and "animal.equine.AbstractHorse m(Lnet/minecraft/world/entity/vehicle/boat/Boat;)V" in r2 \
+        and "equine.AbstractHorse$Inner f" in r2 and "# net.minecraft.world.entity.vehicle.Boat kept" in r2
+    mdg = (" ERROR Line: 929, actuallyHurt(net.minecraft.world.damagesource.DamageSource,float) in "
+           "net.minecraft.world.entity.animal.equine.AbstractHorse cannot override actuallyHurt(net.minecraft.world.damagesource."
+           "DamageSource,float) in net.minecraft.world.entity.LivingEntity\n")
+    ok &= override_lines(mdg, t)[0].startswith("public net.minecraft.world.entity.animal.equine.AbstractHorse actuallyHurt(")
     print("self-check:", "OK" if ok else f"FAIL {adds}")
     return 0 if ok else 1
 
