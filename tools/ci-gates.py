@@ -147,7 +147,7 @@ def main():
         rows.append(f"| {name} | {'PASS' if passed else 'FAIL'} | {detail} |")
         print(f"[ci-gates] {name}: {'PASS' if passed else 'FAIL'} -- {detail}", flush=True)
 
-    excluded = {}
+    excluded, ex, arts = {}, [], []
     if a.env == "minimal":
         env0 = dict(os.environ, **pu.gate_env(c))
         lst = work / "runtime-artifacts.log"
@@ -183,6 +183,19 @@ def main():
             record("Gate A -- mixin-config integrity", True, f"{n} test(s)")
         except pu.Fail as e:
             record("Gate A -- mixin-config integrity", False, str(e)[:300])
+
+    if ok and a.env == "minimal" and ex:
+        # Before booting anything: does code the minimal run will load need a mod it leaves out?
+        jars = [path for coord, path in arts if coord in ex]
+        cls = repo / "build/classes/java/main"
+        r = subprocess.run([sys.executable, str(ROOT / "tools/optional-dep-scan.py"), "--classes", str(cls),
+                            *[x for j in jars for x in ("--jar", j)]],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        (work / "optional-dep-scan.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+        print(r.stdout.rstrip(), flush=True)
+        last = (r.stdout.strip().splitlines() or ["no output"])[-1]
+        record("Optional mods -- nothing the mod loads needs one", r.returncode == 0,
+               last.replace("optional-dep-scan: ", "")[:300])
 
     env = dict(os.environ, **pu.gate_env(c))
     for label, extra in [("Gate B -- headless server loads the mod, GameTests", [])] + \

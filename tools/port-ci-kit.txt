@@ -15,6 +15,7 @@ tools/ci-gates.py
 tools/content-census.py
 tools/fix-json-strict.py
 tools/gate-loop.py
+tools/optional-dep-scan.py
 tools/gen-empty-structure.py
 tools/gitbash.py
 tools/port_gates.py

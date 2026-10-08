@@ -82,6 +82,12 @@ The authors' own `build`, Gate A, Gate B and Gate C (a real client under Xvfb: `
 nothing fixed. This is exactly what the fork's CI will run, so a red here is a red there. Gate C needs
 Xvfb + Mesa (`apt-get install -y xvfb libgl1-mesa-dri`; the CI workflow installs the same).
 
+CI runs it twice: `--env full` (every mod the build puts on the runtime) and `--env minimal` (only the
+mods the port's `neoforge.mods.toml` requires). Run both. In minimal, `tools/optional-dep-scan.py` reads
+the compiled classes before Gate B and fails when a listener class names an optional mod in a method's
+types (NeoForge cannot even scan it without that mod); a mixin that reaches one is reported, because it
+runs whether or not the mod is installed and is safe only behind a "mod loaded" check.
+
 ## 5. CI and release
 
 ```bash
@@ -134,6 +140,19 @@ variant its CI tested. An install list the user cannot follow end to end on a fr
 back. Once the `-upstream` branch is pushed (so its links resolve), offer to publish it as a **private
 artifact**: a page the user can copy from that outlives the session (a cloud session's work dir does
 not). It may name the mod, being outside this repository; the no-names rule covers this repository only.
+
+## Every fork at once
+
+`tools/port-fleet.py` runs the same step over every fork you maintain, in dependency order, with each
+fork's flags in one fleet file kept outside this repository (it names the mods):
+
+```bash
+python3 tools/port-fleet.py --fleet ~/forks.json status
+python3 tools/port-fleet.py --fleet ~/forks.json gates --env minimal
+python3 tools/port-fleet.py --fleet ~/forks.json ci --push          # stop 2; then dispatch releases (stop 3)
+python3 tools/port-fleet.py --fleet ~/forks.json offer --push
+```
+Use it whenever the kit or the offer changes, so no fork is left on an old one.
 
 ## 8. Close out
 
