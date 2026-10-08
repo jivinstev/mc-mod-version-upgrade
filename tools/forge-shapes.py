@@ -107,7 +107,7 @@ def methods(text):
         while " " in ret and ret.split(None, 1)[0] in MODIFIERS:
             ret = ret.split(None, 1)[1]
         last = ret.split()[-1] if ret.split() else ""
-        if last in KEYWORDS or ret in KEYWORDS or "=" in ret:
+        if last in KEYWORDS or ret in KEYWORDS or "=" in ret or m.group("name") in KEYWORDS:
             continue
         p0 = m.end() - 1
         p1 = match(text, p0)
@@ -327,6 +327,7 @@ def t_tick(path, text, ctx, res):
                 nb = re.sub(PHASE_CMP % re.escape(name),
                             lambda q: "true" if (q.group(1) == "==") == (q.group(2) == ph) else "false", body)
                 nb = _simplify(nb)
+                nb = re.sub(r"\n[ \t]*return\s*;\s*\n(?:[ \t]*\n)*([ \t]*\})$", r"\n\1", nb)   # a void method's last return
                 for old, new in TICK[kind][1].items():
                     nb = re.sub(r"(?<![\w$.])%s\.%s(?![\w$(])" % (re.escape(name), old), f"{name}.{new}", nb)
                 head = text[decl_span_start(text, mt.start):mt.params_open]
@@ -850,6 +851,35 @@ def root_package(src):
     return ".".join(pre)
 
 
+INLINE_NBT = [   # helper call -> the native 1.21 expression (only shapes whose meaning is unchanged inline)
+    (r"ItemNbt\.hasTag\(([^()]+)\)", r"\1.has(DataComponents.CUSTOM_DATA)"),
+    (r"ItemNbt\.getTag\(([^()]+)\)(?=\.)", r"\1.get(DataComponents.CUSTOM_DATA).copyTag()"),
+    (r"ItemNbt\.getOrCreateTag\(([^()]+)\)", r"\1.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag()"),
+    (r"ItemNbt\.update\(([^(),]+),", r"CustomData.update(DataComponents.CUSTOM_DATA, \1,"),
+]
+
+
+def inline_small_nbt(src, nbt_fqn, res):
+    """A helper class serving fewer than three call sites is more design than the port needs (review principle
+    P3): rewrite those sites to the native expressions and generate no helper. True when inlined."""
+    users = {f: f.read_text(encoding="utf-8") for f in pathlib.Path(src).rglob("*.java")}
+    users = {f: t for f, t in users.items() if "ItemNbt." in t}
+    sites = sum(t.count("ItemNbt.") for t in users.values())
+    if sites >= 3 or any(re.search(r"ItemNbt\.(setTag|getTagElement)\(|ItemNbt\.getTag\([^()]+\)(?!\.)", t)
+                         for t in users.values()):
+        return False
+    for f, t in users.items():
+        for pat, rep in INLINE_NBT:
+            t = re.sub(pat, rep, t)
+        t = remove_import_if_unused(t, nbt_fqn)
+        t = add_import(t, "net.minecraft.core.component.DataComponents")
+        if "CustomData." in t:
+            t = add_import(t, "net.minecraft.world.item.component.CustomData")
+        f.write_text(t, encoding="utf-8")
+    res.count["nbt"] += 0
+    return True
+
+
 def run(src, modid, only=None, dry=False):
     src = pathlib.Path(src)
     res = Result()
@@ -873,6 +903,8 @@ def run(src, modid, only=None, dry=False):
             need_helper |= bool(ctx.get("need_nbt_helper"))
             if not dry:
                 f.write_text(text, encoding="utf-8")
+    if need_helper and not dry:
+        need_helper = not inline_small_nbt(src, nbt_fqn, res)
     if need_helper:
         hp = src / (nbt_fqn.replace(".", "/") + ".java")
         if not hp.exists() and not dry:
@@ -967,8 +999,8 @@ class S {
     }
 }
 """, ["public void onLevelTickPre(LevelTickEvent.Pre event) {", "public void onLevelTick(LevelTickEvent.Post event) {",
-      "event.getLevel() instanceof ServerLevel sl", "        check(sl);\n        return;\n    }",
-      "        tick(sl);\n    }"], ["Phase", "true", "false"]),
+      "event.getLevel() instanceof ServerLevel sl",
+      "        tick(sl);\n    }", "        check(sl);\n    }"], ["Phase", "true", "false", "return;\n    }\n\n    @Sub"]),
     ("tick", """package a;
 class B {
     public static void l(LivingEvent.LivingTickEvent event) {
@@ -1016,6 +1048,14 @@ class E {
 }
 """, ["ItemNbt.hasTag(stack) && ItemNbt.getTag(stack).contains", "ItemNbt.update(stack, t -> t.putInt(K, g(1)));",
       "ItemNbt.update(stack, t -> t.remove(K));", "h.getTag() == Opcodes", "ItemNbt.getTag(player.getMainHandItem()).getInt"], []),
+    ("nbt", """package a;
+class E2 {
+    String f(ItemStack stack) {
+        return stack.hasTag() ? "n=" + stack.getTag().getAllKeys().size() : null;
+    }
+}
+""", ["stack.has(DataComponents.CUSTOM_DATA) ? \"n=\" + stack.get(DataComponents.CUSTOM_DATA).copyTag().getAllKeys().size()",
+      "import net.minecraft.core.component.DataComponents;"], ["ItemNbt"]),
     ("hooks", """package a;
 class F extends BlockEntity {
     @Override

@@ -309,16 +309,21 @@ def st_normalise(c):
 
 def st_reviewer(c):
     repo, base = c["repo"], c["args"].base
+    metrics = tool("review-metrics.py", "--repo", repo, "--base", base, "--fix", "--sites", 12)
     stat = sh(["git", "diff", "--stat", "-M", base, "--", "."], cwd=repo).stdout
+    principles = (ROOT / "templates/upstream-harness/REVIEW_PRINCIPLES.md").read_text(encoding="utf-8")
+    principles = principles[principles.index("| #"):principles.index("P6 and P7 are gates")]
     prompt = (ROOT / "templates/upstream-harness/reviewer-prompt.md").read_text(encoding="utf-8")
-    prompt = prompt.replace("{BASE}", base).replace("{STAT}", stat[-6000:])
+    prompt = (prompt.replace("{BASE}", base).replace("{STAT}", stat[-6000:]).replace("{PRINCIPLES}", principles)
+              .replace("{METRICS}", metrics[-6000:] or "(nothing found)"))
     text, usd = claude(prompt, repo, "Read,Edit,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git log:*)")
     (c["dir"] / "REVIEW.md").write_text(text, encoding="utf-8")
     n, line = compile_count(repo, c["dir"] / "review-compile.log")
     if n:
         raise Fail(f"the reviewer's edits broke the compile ({n} errors); see REVIEW.md and review-compile.log")
     gate_a(c, c["dir"] / "gateA-after-review.log")
-    return {"usd": usd, "review": str(c["dir"] / "REVIEW.md")}
+    scores = re.findall(r"(?m)^\W*(P\d)\W.*?(✅|⚠️|❌)", text)
+    return {"usd": usd, "review": str(c["dir"] / "REVIEW.md"), "scores": dict(scores), "metrics": metrics}
 
 
 def st_provenance(c):
