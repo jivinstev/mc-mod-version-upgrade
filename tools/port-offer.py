@@ -320,8 +320,14 @@ def verified(state):
     return out
 
 
+def display_name(props, upstream, fork, modid):
+    """What the authors call the mod: their mod_name, else their repository's name. Never the --modid, which
+    is an id for lookups (a fleet run always passes one), and never a local folder name."""
+    return props.get("mod_name") or (upstream or fork or "").split("/")[-1] or modid
+
+
 def render(ctx):
-    L = [f"# Offering the {ctx['modid']} port to its authors", "",
+    L = [f"# Offering the {ctx['name']} port to its authors", "",
          "Nothing here has been sent. Edit, then send it yourself (or don't).", "",
          "## Links", "",
          f"- **The diff** (author's code -> the port; send this): {ctx['compare']}",
@@ -355,13 +361,13 @@ def render(ctx):
         proof.append("loads on a headless server with GameTests passing")
     if "Gate C" in facts:
         proof.append("starts a real client")
-    msg = (f"Hi -- I ported {ctx['modid']} to {ctx['target']} in a fork, keeping your layout and the smallest diff "
+    msg = (f"Hi -- I ported {ctx['name']} to {ctx['target']} in a fork, keeping your layout and the smallest diff "
            f"I could ({ctx['files']} files, +{ctx['ins']}/-{ctx['dels']}). The whole change is here: {ctx['compare']}\n\n"
            + (f"It {', '.join(proof[:-1]) + ' and ' + proof[-1] if len(proof) > 1 else proof[0]}. " if proof else "")
            + "If it's useful, I'm happy to open a PR or adjust anything to how you'd like it done.")
     L += ["", "## Draft message to the authors", "", msg, "",
           "## Draft PR description (only if they ask for a PR)", "",
-          f"Ports {ctx['modid']} to {ctx['target']}, keeping the existing layout and the smallest diff that works.", "",
+          f"Ports {ctx['name']} to {ctx['target']}, keeping the existing layout and the smallest diff that works.", "",
           "Checked:"] + [f"- {v}" for v in ctx["verified"]] + [
           "", "Not checked: gameplay by a person. The port's CI workflow is deliberately not included."]
     return "\n".join(L) + "\n"
@@ -370,6 +376,8 @@ def render(ctx):
 def self_check():
     import tempfile
     ok = True
+    ok &= display_name({"mod_name": "Some Mod"}, "a/repo", "me/repo", "sm") == "Some Mod"
+    ok &= display_name({}, "a/SomeRepo", "me/somerepo", "sm") == "SomeRepo"          # --modid never wins
     ok &= is_port_tag("m-2.2.1-mc1.21.1-r2", "m", "1.21.1") and is_port_tag("m-2.2.1-mc1.21.1", "m", "1.21.1")
     ok &= not is_port_tag("m-2.2.1-mc1.21.10", "m", "1.21.1") and not is_port_tag("mx-1-mc1.21.1", "m", "1.21.1")
     with tempfile.TemporaryDirectory() as d:
@@ -459,11 +467,12 @@ def main():
         if props.get("neo_version") and props.get("minecraft_version") else branch
     upstream = a.upstream or parent_of(fork)
     # the name the AUTHORS know it by: their mod_name, else their repository's name -- never a local folder name
-    modid = a.modid or props.get("mod_name") or (upstream or fork).split("/")[1]
+    modid = a.modid or props.get("mod_id") or (upstream or fork).split("/")[1]
+    name = display_name(props, upstream, fork, modid)
     up_default = "main"
     if upstream:
         up_default = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False).split("/", 1)[-1] or "main"
-    ctx = {"modid": modid, "target": target, "files": files, "ins": ins, "dels": dels, "tracked": tracked,
+    ctx = {"modid": modid, "name": name, "target": target, "files": files, "ins": ins, "dels": dels, "tracked": tracked,
            "hunks": hunk_sizes(git(repo, "diff", "-U0", f"{base_sha}..{tip}")), "commits": port, "ci_commits": ci,
            "verified": verified(state) + (ci_verified(ci_run(fork, branch)) if ci else []),
            "compare": f"https://github.com/{fork}/compare/{base_sha[:12]}...{offer}",
