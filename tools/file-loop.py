@@ -427,7 +427,8 @@ def main():
     note = lambda **k: (logf.write(json.dumps(k) + "\n"), logf.flush(), print(json.dumps({x: k[x] for x in k if x not in ("result", "usage")})[:300]))
     sigs = rb.signatures()
     entries = {i: b for i, b in rb.catalogue_entries((ROOT / "CATALOG.md").read_text(encoding="utf-8"))}
-    clog = work / "file-loop-compile.log"
+    # an upstream port must not write into the author's tree: PORT_LOG_DIR (tools/port-upstream.py) moves the log
+    clog = pathlib.Path(os.environ.get("PORT_LOG_DIR") or work) / "file-loop-compile.log"
     n, errs = compile_(work, clog, a.heap)
     if a.sources == "auto":
         found = find_sources(work)

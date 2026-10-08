@@ -230,7 +230,8 @@ def st_mechanical(c):
 def st_burndown(c):
     log = c["dir"] / "file-loop.jsonl"
     r = sh([sys.executable, str(ROOT / "tools/file-loop.py"), "--work", str(c["repo"]), "--budget",
-            str(c["args"].budget), "--log", str(log)], timeout=4 * 3600)
+            str(c["args"].budget), "--log", str(log)], env=dict(os.environ, PORT_LOG_DIR=str(c["dir"])),
+           timeout=4 * 3600)
     end = next((json.loads(l) for l in reversed(r.stdout.splitlines()) if '"event": "end"' in l), None)
     if not end:
         raise Fail(f"file-loop ended without a result: {r.stdout[-600:]}")
@@ -327,7 +328,24 @@ def st_provenance(c):
     diff = sh(["git", "diff", "-U0", base, "--", "src"], cwd=repo).stdout
     removed = [l for l in diff.splitlines() if l.startswith("-") and re.search(r"(?i)copyright|SPDX", l)]
     added = [l for l in diff.splitlines() if l.startswith("+") and re.search(r"(?i)copyright|SPDX-", l)]
+    # nothing of the porting machinery may reach the author's repo: logs, harness files, machine paths,
+    # session details, or the names of this repository's tools and catalogue
+    allowed = re.compile(r"^(src/.+|build\.gradle|settings\.gradle|gradle\.properties|gradle/wrapper/.+)$")
+    added_files = [l.split("\t")[-1] for l in names.splitlines() if l[:1] in "AR"]
+    stray = [f for f in added_files if not allowed.match(f)]
+    leak = re.compile(r"/tmp/|/home/\w|/root/|\.mc-mod-upgrade|claude\.ai|Claude-Session|JAVA_TOOL_OPTIONS|proxyHost"
+                      r"|CATALOG|§[A-Z]?\d|forge-shapes|fix-holders|convert-simplechannel|port-upstream|file-loop|gate-loop"
+                      r"|BaselineGameTest|ClientBootSmokeTest|mc-mod-version-upgrade")
+    extra = [l.strip() for l in pathlib.Path(c["args"].leak_names).read_text(encoding="utf-8").splitlines()
+             if l.strip() and not l.startswith("#")] if getattr(c["args"], "leak_names", None) else []
+    full = sh(["git", "diff", "-U0", base, "--", "."], cwd=repo).stdout
+    leaks = [l for l in full.splitlines() if l.startswith("+") and not l.startswith("+++")
+             and (leak.search(l) or any(x.lower() in l.lower() for x in extra))]
     problems = []
+    if stray:
+        problems.append("files added outside the source and build files: " + ", ".join(stray[:6]))
+    if leaks:
+        problems.append(f"{len(leaks)} added line(s) carry porting-machine details, e.g. {leaks[0][:120]}")
     if bad:
         problems.append("licence files changed: " + "; ".join(bad))
     if removed:
@@ -366,6 +384,8 @@ def main():
     ap.add_argument("--repo", required=True); ap.add_argument("--modid", required=True)
     ap.add_argument("--branch", default="neoforge-1.21.1"); ap.add_argument("--base", default=None)
     ap.add_argument("--permission"); ap.add_argument("--budget", type=float, default=20)
+    ap.add_argument("--leak-names", help="file of further names (one per line) that must not appear in the diff, "
+                                         "e.g. private repositories; kept out of this public repository")
     ap.add_argument("--from", dest="start", choices=STAGES); ap.add_argument("--only", choices=STAGES)
     ap.add_argument("--record", help="STAGE=USD for a stage run by hand"); ap.add_argument("--report", action="store_true")
     a = ap.parse_args()
@@ -434,6 +454,14 @@ def self_check():
             subprocess.run(cmd, cwd=r, check=True)
         c["state"] = {"license": {"result": {"licence": "MIT", "file": ["LICENSE.txt"]}}}
         ok &= st_provenance(c)["licence"] == "MIT"        # untouched tree passes
+        (r / "file-loop-compile.log").write_text("log\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=r, check=True)
+        try:
+            st_provenance(c); ok = False                  # a tool's log committed into the author's tree must stop
+        except Fail:
+            pass
+        subprocess.run(["git", "rm", "-q", "--cached", "file-loop-compile.log"], cwd=r, check=True)
+        (r / "file-loop-compile.log").unlink()
         (r / "src/main/java/A.java").write_text("class A {}\n", encoding="utf-8")
         try:
             st_provenance(c); ok = False                  # an author copyright line removed must stop
