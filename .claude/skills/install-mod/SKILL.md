@@ -36,7 +36,11 @@ It follows sibling ports a port depends on, installs each mod once (newest file 
 disagree), verifies every sha256, skips mods already in the instance, and installs the NeoForge the
 ports were tested on when it is missing (its own installer, headless, with the Launcher's Java; the
 Launcher must have been opened once). `--no-neoforge` skips that. `--with-optional` adds the optional mods CI loaded; `--mods-dir` picks another
-instance; it also adds what an optional mod itself requires (read from that mod's jar). `--full` installs
+instance; it also adds what an optional mod itself requires (read from that mod's jar). A mod CI had no
+file for comes from Modrinth/CurseForge (the same registry tool as below), checked to declare that mod id and
+labelled "not tested by CI"; an optional mod whose own requirement cannot be found is left out, and NeoForge is
+raised within its line when an added mod needs newer. The output leads with SUCCEEDED/FAILED per port and
+`RESULT: OK` (exit 0); warnings about optional mods never change it. `--full` installs
 exactly what CI's full pass loaded. Before writing to the real instance (confirm first, as below), install
 into a scratch folder and boot it:
 
