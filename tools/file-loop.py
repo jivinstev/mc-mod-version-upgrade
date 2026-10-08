@@ -2,7 +2,7 @@
 """The per-file residual loop (issue #27, plan steps 5b/6-7): fix what the recipes left, one small
 context per file batch, with the cheapest model that works, and turn repeated fixes into rewrites.
 
-    python3 tools/file-loop.py --work <gradle project> [--first-model sonnet] [--budget 15] [--log run.jsonl]
+    python3 tools/file-loop.py --work <gradle project> [--first-model haiku] [--budget 15] [--log run.jsonl]
 
 Each ROUND: compile (javac's error cap lifted) -> group the error files into small batches -> one
 headless Claude Code worker per batch, started in a CLEAN context (`claude -p`, no inherited
@@ -32,7 +32,7 @@ import singleshot           # noqa: E402
 
 _s = importlib.util.spec_from_file_location("rb", ROOT / "tools/recipe-bench.py")
 rb = importlib.util.module_from_spec(_s); _s.loader.exec_module(rb)
-MODELS = {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
+MODELS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 TIERS = ["haiku", "sonnet", "opus"]
 
 WORKER = """You are fixing compile errors in a Minecraft mod being ported to {target} (Java 21).
@@ -399,7 +399,7 @@ def main():
                          "the fallback; agent: tool-using workers only (the step 6/7 spike's design)")
     ap.add_argument("--multi-thinking", type=int, default=8000,
                     help="thinking budget for the one-request cross-file (subsystem) worker")
-    ap.add_argument("--first-model", default="sonnet", choices=TIERS)
+    ap.add_argument("--first-model", default="haiku", choices=TIERS)
     ap.add_argument("--max-model", default="opus", choices=TIERS)
     ap.add_argument("--budget", type=float, default=15.0, help="stop when workers have spent this many dollars")
     ap.add_argument("--max-rounds", type=int, default=8)
