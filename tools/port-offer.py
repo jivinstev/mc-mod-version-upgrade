@@ -185,15 +185,24 @@ def sibling_releases(repo, branch):
         r'curl -fsSL -o "[^"]*/([\w.+-]+\.jar)" "(https://github\.com/[^"]+/releases/download/[^"]+)"', wf)]
 
 
-def is_port_tag(tag, modid, mc):
-    """<modid>-<version>-mc<mc>, or a re-release of it (-r2, -r3: the port changed, the author's version did not)."""
-    return bool(re.fullmatch(re.escape(modid) + r"-.+-mc" + re.escape(mc) + r"(?:-r\d+)?", tag))
+def is_port_tag(tag, modid, mc, suffix=""):
+    """<modid>-<version>-mc<mc><suffix>, or a re-release of it (-r2, -r3: the port changed, the author's version did
+    not). The suffix is the branch's own tag series (port-ci --tag-suffix): a release-aligned branch's jars never
+    pass for the development port's, nor the other way round."""
+    return bool(re.fullmatch(re.escape(modid) + r"-.+-mc" + re.escape(mc) + re.escape(suffix) + r"(?:-r\d+)?", tag))
 
 
-def own_release(fork, modid, mc):
+def tag_suffix(repo, branch, mc):
+    """The tag series this branch's CI releases under, read from its workflow's tag filter."""
+    wf = git(repo, "show", f"{branch}:.github/workflows/port-ci.yml", check=False)
+    m = re.search(r'tags:\s*\["\*-mc' + re.escape(mc) + r'([^"]*)"\]', wf)
+    return m.group(1) if m else ""
+
+
+def own_release(fork, modid, mc, suffix=""):
     rels = _api(f"https://api.github.com/repos/{fork}/releases?per_page=30") or []
     for r in rels:
-        if is_port_tag(r.get("tag_name", ""), modid, mc):     # newest first: a -r2 re-release wins
+        if is_port_tag(r.get("tag_name", ""), modid, mc, suffix):     # newest first: a -r2 re-release wins
             return r["html_url"], [(a["name"], a["browser_download_url"]) for a in r.get("assets", [])]
     return None, []
 
@@ -215,7 +224,7 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
     def add(role, mid, name, url, page=None, port=None):
         man["files"].append({k: v for k, v in (("role", role), ("modid", mid), ("name", name), ("url", url),
                                                 ("page", page), ("port", port)) if v})
-    rel, assets = own_release(fork, ownid, mc)
+    rel, assets = own_release(fork, ownid, mc, tag_suffix(repo, branch, mc))
     if assets:
         pick = [a for a in assets if variant and variant[0] in a[0]] or assets
         add("self", ownid, pick[0][0], pick[0][1]) if (len(assets) == 1 or len(pick) == 1) else None
@@ -385,6 +394,8 @@ def self_check():
     ok &= display_name({}, "a/SomeRepo", "me/somerepo", "sm") == "SomeRepo"          # --modid never wins
     ok &= is_port_tag("m-2.2.1-mc1.21.1-r2", "m", "1.21.1") and is_port_tag("m-2.2.1-mc1.21.1", "m", "1.21.1")
     ok &= not is_port_tag("m-2.2.1-mc1.21.10", "m", "1.21.1") and not is_port_tag("mx-1-mc1.21.1", "m", "1.21.1")
+    ok &= is_port_tag("m-2-mc1.21.1-release-r2", "m", "1.21.1", "-release") and not is_port_tag("m-2-mc1.21.1-r5", "m", "1.21.1", "-release")
+    ok &= not is_port_tag("m-2-mc1.21.1-release", "m", "1.21.1")      # a release-aligned jar never passes for the dev port
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@e"], ["config", "user.name", "t"]):
