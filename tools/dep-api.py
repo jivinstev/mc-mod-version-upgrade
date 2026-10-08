@@ -248,12 +248,12 @@ def self_check():
     ok = True
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
-        lib = d / "lib/org/lib"; lib.mkdir(parents=True)
-        (lib / "Base.java").write_text("package org.lib; public interface Base {"
+        lib = d / "lib/com/example/lib"; lib.mkdir(parents=True)
+        (lib / "Base.java").write_text("package com.example.lib; public interface Base {"
                                        " default void tick(String a, int b) {}"
                                        " default void sound(Object ctx) {} }", encoding="utf-8")
-        (lib / "Helper.java").write_text("package org.lib; public class Helper {}", encoding="utf-8")
-        (lib / "Model.java").write_text("package org.lib; public abstract class Model<T> {"
+        (lib / "Helper.java").write_text("package com.example.lib; public class Helper {}", encoding="utf-8")
+        (lib / "Model.java").write_text("package com.example.lib; public abstract class Model<T> {"
                                         " public abstract String res(T t); }", encoding="utf-8")
         out = d / "classes"; out.mkdir()
         subprocess.run(["javac", "-d", str(out), str(lib / "Base.java"), str(lib / "Helper.java"), str(lib / "Model.java")], check=True,
@@ -265,8 +265,8 @@ def self_check():
             z.writestr("assets/lib/lang/en_us.json", '{"attribute.lib.max_mana": "x"}')
         src = d / "src/my"; src.mkdir(parents=True)
         (src / "Ring.java").write_text("""package my;
-import org.lib.Base;
-import org.lib.Gone;
+import com.example.lib.Base;
+import com.example.lib.Gone;
 public class Ring implements Base {
     @Override
     public void tick(String a, int b) {}
@@ -276,11 +276,11 @@ public class Ring implements Base {
     public String toString() { return ""; }
     void x() { if (net.ModList.get().isLoaded("spells")) get("spells:max_mana"); get(new ResourceLocation("spells", "ghost_thing")); }
 }""", encoding="utf-8")
-        (src / "M.java").write_text("package my;\nimport org.lib.Model;\npublic class M extends Model<Ring> {\n"
+        (src / "M.java").write_text("package my;\nimport com.example.lib.Model;\npublic class M extends Model<Ring> {\n"
                                     "    @Override\n    public String res(Ring r) { return \"\"; }\n}", encoding="utf-8")
         rep, by_id, loaded = analyse(list(src.rglob("*.java")), {"lib": Jar(path=jar)})
         r = rep["lib"]
-        ok &= r["missing"] == {"org.lib.Gone"} and len(r["ok"]) == 2 and len(r["changed"]) == 1
+        ok &= r["missing"] == {"com.example.lib.Gone"} and len(r["ok"]) == 2 and len(r["changed"]) == 1
         ok &= "sound(Object)" in r["changed"][0] and "1 imported class(es) missing" in r["verdict"] \
             and "1 overridden method(s) changed" in r["verdict"]
         ok &= "toString" not in " ".join(r["ok"] + r["changed"])          # vanilla/Object overrides are not ours
