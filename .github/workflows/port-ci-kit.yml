@@ -1,0 +1,79 @@
+# Publishes the Port CI kit: the files a ported fork's CI downloads to run its gates (tools/port-ci-kit.py).
+#
+# Scope, deliberately narrow: ONE archive, port-ci-kit-vN.tar.gz, containing exactly the files listed in
+# tools/port-ci-kit.txt (measured from a real green tools/ci-gates.py run) plus its MANIFEST.txt and a
+# SHA256SUMS. It is not a release of this repository -- no other tools, no catalogue, no docs -- and it is
+# never marked "latest".
+#
+# When: every push to main (a merged PR) builds the kit and compares its files with the newest published
+# kit's MANIFEST. Only if a kit file changed is a new version published, numbered one past the newest, so most
+# merges (catalogue, other tools) publish nothing. A manual run does the same check. Kits are immutable once
+# published -- forks pin them by tag AND sha256 (tools/port-ci.py) -- so an existing tag is never replaced.
+name: port-ci-kit release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-ci-kit-release      # two merges in quick succession must not race for the same version number
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compare with the newest published kit
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          latest=$(gh release list --repo "${{ github.repository }}" --limit 200 --json tagName \
+                   --jq '[.[].tagName | select(test("^port-ci-kit-v[0-9]+$")) | ltrimstr("port-ci-kit-v") | tonumber] | max // 0')
+          python3 tools/port-ci-kit.py build --version 0 --out probe >/dev/null
+          if [ "$latest" -gt 0 ]; then
+            gh release download "port-ci-kit-v$latest" --repo "${{ github.repository }}" -p MANIFEST.txt -D published
+            # compare only the per-file hash lines: the version in the header changes every release
+            if diff <(grep -E '^[0-9a-f]{64}  ' published/MANIFEST.txt) <(grep -E '^[0-9a-f]{64}  ' probe/MANIFEST.txt) >/dev/null; then
+              echo "kit files unchanged since port-ci-kit-v$latest -- nothing to publish"
+              echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "version=$((latest + 1))" >> "$GITHUB_OUTPUT"
+      - name: Build the kit
+        if: steps.plan.outputs.publish == 'true'
+        run: python3 tools/port-ci-kit.py build --version "${{ steps.plan.outputs.version }}" --out dist
+      - name: Verify it from an empty directory
+        if: steps.plan.outputs.publish == 'true'
+        run: python3 tools/port-ci-kit.py verify "dist/port-ci-kit-v${{ steps.plan.outputs.version }}.tar.gz"
+      - name: Publish
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v="${{ steps.plan.outputs.version }}"
+          {
+            echo "**Port CI kit v$v** -- the runtime a ported fork's CI downloads to run its gates."
+            echo
+            echo "Not a release of this repository. It contains only the files listed in MANIFEST.txt:"
+            echo "the gate runner (tools/ci-gates.py) and what it opens or passes to Gradle -- measured from a"
+            echo "real green run, verified by unpacking into an empty directory and self-checking every tool."
+            echo
+            echo "Forks pin it by tag and sha256 (SHA256SUMS). Built from \`${{ github.sha }}\`, published"
+            echo "automatically because a kit file changed in that merge."
+          } > notes.md
+          gh release create "port-ci-kit-v$v" dist/port-ci-kit-v$v.tar.gz dist/SHA256SUMS dist/MANIFEST.txt \
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" --latest=false \
+            --title "Port CI kit v$v" --notes-file notes.md

@@ -36,6 +36,43 @@ public class MixinConfigIntegrityTest {
             if (!Files.exists(pkgDir.resolve(n.replace('.', '/') + ".class"))) missing.add(n);
         assertTrue(missing.isEmpty(), "mixin(s) with no compiled class (will crash at runtime):\n  " + String.join("\n  ", missing));
     }
+    /**
+     * The reverse direction, and the one a port gets wrong: a mixin class that exists but is listed in NO
+     * config is never applied, so every cast to it (an accessor, an invoker) is a ClassCastException at
+     * runtime. Measured: a burn-down worker added a new accessor to replace a removed API and never
+     * registered it -- javac, Gate A's forward check and the baseline GameTests all passed.
+     * A class counts as a mixin when its bytecode carries the @Mixin annotation.
+     */
+    /** Mixin classes the AUTHOR left out of every config at the base commit -- parked, not forgotten; listing
+     *  them would switch on code the author disabled. Filled by the port's harness from git; empty otherwise. */
+    private static final Set<String> AUTHOR_UNLISTED = Set.of(/*AUTHOR_UNLISTED*/);
+
+    @Test
+    void everyMixinClassIsListedInAConfig() throws IOException {
+        String json = Files.readString(MIXIN_CONFIG);
+        String pkg = find(json, "\"package\"\\s*:\\s*\"([^\"]+)\"");
+        Path pkgDir = MAIN_CLASSES.resolve(pkg.replace('.', '/'));
+        Set<String> listed = new HashSet<>();
+        try (DirectoryStream<Path> cfgs = Files.newDirectoryStream(MIXIN_CONFIG.getParent(), "*mixins*.json")) {
+            for (Path cfg : cfgs) {
+                String c = Files.readString(cfg);
+                if (!pkg.equals(find(c, "\"package\"\\s*:\\s*\"([^\"]+)\""))) continue;
+                for (String k : new String[]{"mixins", "client", "server"}) listed.addAll(array(c, k));
+            }
+        }
+        List<String> unlisted = new ArrayList<>();
+        try (var files = Files.walk(pkgDir)) {
+            for (Path f : (Iterable<Path>) files.filter(x -> x.toString().endsWith(".class"))::iterator) {
+                String bytes = new String(Files.readAllBytes(f), java.nio.charset.StandardCharsets.ISO_8859_1);
+                if (!bytes.contains("Lorg/spongepowered/asm/mixin/Mixin;")) continue;
+                String name = pkgDir.relativize(f).toString().replace('\\', '/').replaceAll("\\.class$", "").replace('/', '.');
+                if (!listed.contains(name) && !AUTHOR_UNLISTED.contains(name)) unlisted.add(name);
+            }
+        }
+        Collections.sort(unlisted);
+        assertTrue(unlisted.isEmpty(), "mixin class(es) listed in no config (never applied; casts to them fail at runtime):\n  "
+                + String.join("\n  ", unlisted));
+    }
     private static String find(String s, String re) { Matcher m = Pattern.compile(re).matcher(s); return m.find() ? m.group(1) : null; }
     private static List<String> array(String s, String key) {
         List<String> out = new ArrayList<>();

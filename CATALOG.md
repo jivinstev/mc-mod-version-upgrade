@@ -2272,6 +2272,16 @@ split 27 model/entity renders (`poseStack, buffer, light, overlay`) against 7 GU
 the first argument being `graphics` separates them exactly. And with the compat base in place the
 screens want **no** rename at all — only widgets extending vanilla `AbstractWidget` do.
 
+· ⚠ **AUGMENT — a SINGLE-target port (an upstream branch that only has to build on 26.x) wants the
+rewrite, not the compat base, and it is mechanical: `tools/convert-gui-hooks.py`.** It renames the
+`render*` overrides, turns `renderBg(g, pt, mx, my)` into `extractBackground(g, mx, my, pt)` after a
+`super.extractBackground` call, and moves the input handlers onto `MouseButtonEvent`/`KeyEvent`/`CharacterEvent`
+while keeping each body byte for byte (the old parameter names become locals read from the event; a
+forwarded call passes the event on). Two guards came from its first real run: only `@Override` methods with
+the exact 1.21 parameter types are touched, and a render CALL is renamed only at the hook's arity AND when it
+passes the GUI method's own parameters through — the mod had a `render(g, font, x, y)` helper of the same
+arity that a looser rule renamed. 63 sites, GUI errors 170 → 75.
+
 **V54. Client removals that are NOT renames — check each with `find-member.py` before writing a
 rule.** All four report *declared nowhere* on 26.2: **`MultiBufferSource`** (the world-render buffer
 handed to every block-entity and entity renderer), **`RenderSystem.setShaderColor` /
@@ -3404,6 +3414,51 @@ V96. **`Direction.getNearest(x, y, z)` → `getApproximateNearest`** · **Patter
 V97. **🔴 On 26.2 an `Item`'s components are NOT BOUND until a world's registries load — reading them at the title screen throws** · **Pattern:** client code that runs before any world exists (a boot harness at `TitleScreen`, a model/texture check in a client setup or reload listener) reading `item.components()`, `item.getDefaultInstance()` or `new ItemStack(item).get(…)` · **Runtime:** `java.lang.NullPointerException: Components not bound yet` at `Holder$Reference.components(Holder.java)` ← `Item.components(Item.java)` · **Fix:** before a world is loaded, work from the item's registry id instead (`BuiltInRegistries.ITEM.getKey(item)` is the default `ITEM_MODEL` id, so `ModelManager.getItemModel(id)` answers "is this item's model bound" without touching components); defer anything that needs a stack until in-world. This is §V67's cause (components bind late, with the datapack) seen from the client side. (a shield-adding item mod's Gate C `launch` model check.) · **Scan:** `grep -rn "\.components()\|getDefaultInstance()" src/main/java | grep -i "client\|title\|reload\|boot"`
 
 V98. **Gate C on 26.2: a synthetic client CANNOT hold up a shield through its own input path — raise it on the SERVER player and hold the use key from `ClientTickEvent.Pre`** · **Pattern:** a Gate-C `battle` phase that raises a shield with `mc.options.keyUse.setDown(true)` and/or `mc.gameMode.useItem(player, OFF_HAND)` from `ClientTickEvent.Post`, then checks `player.isBlocking()` · **Symptom:** `isUsingItem()` is true but `isBlocking()` never is — `getUseItemRemainingTicks()` sits at 72000 (or 71999) forever, so the 5-tick block delay of `BlocksAttacks` is never reached; **a vanilla `minecraft:shield` in the same harness behaves identically**, which is the control that proves it is the harness, not the port · **Cause:** `setDown` is not a click (use starts from `consumeClick()`), the key state is refreshed from the real keyboard before each tick, and `Minecraft.handleKeybinds` releases the used item every tick whose key is up — so each Post-tick restart resets the timer · **Fix:** keep the key down by setting it in `ClientTickEvent.Pre` (after the refresh, before `handleKeybinds`), and start the use on the server: `server.execute(() -> { if (!sp.isUsingItem()) sp.startUsingItem(InteractionHand.OFF_HAND); })`; judge blocking by the SERVER player (`sp.isBlocking()`, `Stats.ITEM_USED` for the shield counts real blocks). Measured once green: 27 zombie hits blocked, shield bashes accepted over real packets. (a shield-adding item mod.)
+
+**V92. 🔴 `RenderType.create(..., CompositeState)` → `RenderType.create(name, RenderSetup)` + an immutable
+`RenderPipeline` — mechanical, so CONVERT it (`tools/convert-rendertypes.py`).** · **Pattern:** the 1.21 7-argument
+`RenderType.create(name, format, mode, size, crumbling, sort, CompositeState.builder()...createCompositeState(outline))`
+· **Error:** `cannot find symbol: CompositeState / TRANSLUCENT_TRANSPARENCY / NO_CULL / COLOR_WRITE / LEQUAL_DEPTH_TEST`
+and `VertexFormat.Mode`, dozens per file · **Fix:** what a shard SWITCHED (blend, depth test + write, colour mask,
+cull, depth bias, vertex format, topology) moved into the pipeline; what is BOUND per draw (textures, lightmap,
+overlay, crumbling, sorting, layering, output target, outline) stays on `RenderSetup`. The table is exact and the
+tool refuses anything outside it, because two rows are traps: **26.x is reverse-Z**, so `LEQUAL_DEPTH_TEST` is
+`CompareOp.GREATER_THAN_OR_EQUAL` (a guess renders nothing), and `POLYGON_OFFSET_LAYERING` became a depth BIAS on
+`DepthStencilState` (`-1.0F, -10.0F`), not a layering transform. `NEW_ENTITY` → `ENTITY`; `PrimitiveTopology`
+lives in `com.mojang.blaze3d`, not `.vertex`. A custom shader shard has no vanilla meaning, so the port supplies a
+state type with `pipeline(name, UnaryOperator<RenderPipeline.Builder>)`; key pipelines by name so a factory method
+called per texture does not build one per call. **Measured: 71 of 71 on the first mod tried, output kept in the
+author's multi-line layout.** Texture shards' blur/mipmap flags are dropped (26.x samples with the texture's own
+sampler) and the tool says so per site.
+
+**V93. 🔴 A custom `ShaderInstance` → a `RenderPipeline` + a std140 uniform BLOCK, and what binds the block is a
+two-line mixin — but WHEN you snapshot the values is the part that decides faithfulness.** · **Pattern:** a JSON
+core program + GLSL 150 with loose `uniform float X;`, fetched with `getUniform("X").set(...)` in a shard's
+`setupRenderState()` · **Error:** `ShaderInstance`, `RegisterShadersEvent`, `Uniform.set` all gone · **Fix:**
+measured on 26.2's own sources —
+· A RenderType draw (`PreparedRenderType.drawFromBuffer`) binds only `Projection`, `Fog`, `Globals`, `Lighting`
+  (via `RenderSystem.bindDefaultUniforms`) and `DynamicTransforms`. No NeoForge hook binds more, so a
+  `@WrapOperation` on that `bindDefaultUniforms` call binds the mod's block. GL validation (on in dev) throws
+  `Missing uniform` / `Missing sampler` for anything the pipeline declares or the program uses and nobody bound:
+  bind EVERY declared sampler, falling back to `Sampler0`'s view.
+· 🔴 **Snapshot at `RenderType.prepare()`, not at draw.** 26.x calls `prepare()` when geometry is RECORDED
+  (`RenderTypeFeatureRenderer.getOrAddDraw`) and draws at flush. A mod that sets per-entity state around each
+  render call (colour keys, UV bounds, masks) must have its block written then — write it with a
+  `DynamicUniformStorage`, key the slice by the returned `PreparedRenderType` instance, bind it in the draw
+  mixin. ⚠ `DynamicUniformStorage.writeUniform` reuses the last slice when the new value `equals` the last one,
+  so the snapshot must COPY the floats (a record over mutable uniform objects serves stale values).
+· 🔴 **Which uniforms bind to vanilla is decided by what 1.21 DID, not by the name.** 1.21's
+  `ShaderInstance.setDefaultUniforms` ran at draw AFTER the mod's `setupRenderState`, so a mod's own
+  `GameTime`/`ScreenSize`/`GlintAlpha` were overwritten and the shader always saw vanilla's — 26.x's `Globals` block
+  carries the same values (`(gameTime % 24000 + partial) / 24000`), so those bind to vanilla. `ColorModulator`
+  stays the mod's: 26.x's copy in `DynamicTransforms` is always white for a RenderType draw, while 1.21 let a mod
+  override it after.
+· **GLSL: offline when the shaders are static files** (`tools/convert-core-shaders.py` rewrites them into a
+  generated include), **at load when the mod builds shaders at runtime** (preset packs, in-game generators): a
+  mixin RETURN on `ShaderManager$CompilationCache.getShaderSource` serves the upgraded text, leaving the author's
+  GLSL untouched. 26.x shader ids carry the `core/` prefix (`"ns:x"` in a 1.21 JSON is `ns:core/x`).
+· **Register early:** `RegisterRenderPipelinesEvent` fires before resource packs load, and RenderType fields are
+  built at class init, so create the shader objects there from the mod's own jar and rebuild them on each reload.
 
 ## W. ONE SOURCE TREE, TWO MINECRAFT VERSIONS — the shape that makes an era jump survivable
 > **Axis:** build architecture. Everything above ports a mod *from* A *to* B and leaves A behind.
@@ -5230,3 +5285,18 @@ Migrations here are for running mods on the user's own machine. Many mods are
 original author's permission.
 
 NN. **`defineId` registered against the WRONG class (runtime crash, decompile artifact)** · **Pattern:** `public static final EntityDataAccessor<Integer> LIFE_TICKS = SynchedEntityData.defineId(SomeOtherEntity.class, EntityDataSerializers.INT);` in a class that is **not** `SomeOtherEntity` · **Runtime:** `java.lang.IllegalArgumentException: Data value id is too big with 28! (Max is 8)` thrown from `SynchedEntityData$Builder.define` inside the entity's `defineSynchedData`, i.e. **at construction** — so the server dies the moment that entity is ever spawned (a ~390-file mob mod: every time one golem boss summoned a mine) · **Fix:** `defineId` must always name **the class that declares the field**; ids are allocated per class-hierarchy, so naming another class hands you that class's id while your own builder is sized for yours. **Scan:** `grep -rn 'SynchedEntityData.defineId(' src/main/java` and flag any file whose `defineId(X.class` does not match its own class name — EXCEPT mixins, which legitimately define against the vanilla class they inject into. **Gate:** a `@GameTest` that simply *spawns* the entity catches it (verified to fail with the exact message on the unfixed code).
+
+**X47. 🔴 Gates that only ever compile `src/main` cannot fail on the author's OTHER artifacts — end every
+port with the author's own build, untouched.** · **Pattern:** a mod that ships several jars from one tree (a
+CurseForge variant, a "pro" build, a JVMTI backend), each from its own source set, all assembled by the author's
+`build` · **Symptom:** none, on every gate. An upstream port reported green Gate A, Gate B and Gate C while
+`./gradlew build` failed with 38 errors in two variant source sets that no tool, burn-down or gate had compiled
+— so the first contributor to clone the branch would have hit BUILD FAILED · **Fix:** every tool, compile count
+and burn-down covers every source set the build declares (`tools/srcsets.py`), and the pipeline's last check is
+the author's `build` plus every Jar task they registered, run with NONE of the port's harness (only the
+Central-mirror init script, which rewrites repository URLs). Two more things the same check surfaced, both silent:
+a worker "fixed" a moved interface by deleting `implements` and calling the type gone (it had moved to
+`net.neoforged.neoforgespi.earlywindow`; the `META-INF/services` file had to move with it), and a
+never-transform whitelist still named `"net.minecraftforge."`, which on NeoForge protects nothing — now a
+codemod rule. And pass the TARGET from the build: a tool default had told 26.x workers they were porting to
+1.21.1.

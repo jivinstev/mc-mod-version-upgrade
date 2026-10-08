@@ -23,7 +23,7 @@ import argparse, importlib.util, json, os, pathlib, re, subprocess, sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 _s = importlib.util.spec_from_file_location("shots", ROOT / "tools/compare-gatec-shots.py")
 shots = importlib.util.module_from_spec(_s); _s.loader.exec_module(shots)
-MODELS = {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
+MODELS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 
 SYSTEM = ("You review screenshots from an automated Minecraft client test of a ported mod. You read the image "
           "files you are given and answer only in the format asked. You do not edit anything.")

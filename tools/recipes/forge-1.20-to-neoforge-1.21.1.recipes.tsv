@@ -198,3 +198,25 @@ re:(ItemStack getDefaultPickupItem\(\)\s*\{\s*return )ItemStack\.EMPTY;	\1new It
 #@ 38 manual  GUI overlays -> LayeredDraw.Layer + RegisterGuiLayersEvent
 #? detect	\b(IGuiOverlay|RegisterGuiOverlaysEvent|ForgeGui)\b
 
+
+#@ 62 auto  Enchantments constants renamed with the 1.20.5 data-driven rework (verified on the 1.21.1 jar)
+#!exhaustive  # a mod uses a few of these
+re:\bEnchantments\.ALL_DAMAGE_PROTECTION\b	Enchantments.PROTECTION
+re:\bEnchantments\.FALL_PROTECTION\b	Enchantments.FEATHER_FALLING
+re:\bEnchantments\.BLOCK_EFFICIENCY\b	Enchantments.EFFICIENCY
+re:\bEnchantments\.BLOCK_FORTUNE\b	Enchantments.FORTUNE
+re:\bEnchantments\.MOB_LOOTING\b	Enchantments.LOOTING
+re:\bEnchantments\.POWER_ARROWS\b	Enchantments.POWER
+re:\bEnchantments\.PUNCH_ARROWS\b	Enchantments.PUNCH
+re:\bEnchantments\.FLAMING_ARROWS\b	Enchantments.FLAME
+re:\bEnchantments\.INFINITY_ARROWS\b	Enchantments.INFINITY
+re:\bEnchantments\.FISHING_LUCK\b	Enchantments.LUCK_OF_THE_SEA
+re:\bEnchantments\.FISHING_SPEED\b	Enchantments.LURE
+#!strict
+
+#@ 103 auto  EquipmentSlot.Type.ARMOR became HUMANOID_ARMOR (1.20.5 added ANIMAL_ARMOR)
+re:\bEquipmentSlot\.Type\.ARMOR\b	EquipmentSlot.Type.HUMANOID_ARMOR
+
+#@ 5 auto  mod-bus and config access outside the @Mod constructor go through the active container (forge-shapes injects the constructor's own)
+re:\bFMLJavaModLoadingContext\.get\(\)\.getModEventBus\(\)	net.neoforged.fml.ModLoadingContext.get().getActiveContainer().getEventBus()
+re:\bModLoadingContext\.get\(\)\.registerConfig\(	ModLoadingContext.get().getActiveContainer().registerConfig(

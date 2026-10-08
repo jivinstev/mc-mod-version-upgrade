@@ -32,6 +32,21 @@ applies its recipe pack of known rewrites first, then sends what's left to small
 (Haiku first, Sonnet and Opus only as needed). The port must then pass the gates: a headless server,
 behaviour tests written for the mod, a real client, and a screenshot review.
 
+## Porting a mod in its own repository
+
+When a mod's source is on GitHub under a licence that allows it, you can port it **in a fork** instead of
+from its jar: `> Port my fork <github url> to 1.21.1` (the `port-fork` skill). The result is a branch in the
+authors' own layout, `neoforge-<mc>`, with the smallest diff that works. The test harness stays outside their
+tree. Then:
+
+- **CI on the fork** runs the authors' own build and the same three gates on every push. It downloads a
+  small, pinned "Port CI kit" from this repository's releases, not this whole repository.
+- **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes.
+- **An offer for the authors**: a compare link showing just the port (without our CI), the size and shape of
+  the diff, what was verified, and draft words. Nothing is sent: contacting the authors is your call.
+
+Forge 1.20.1 → NeoForge 1.21.1 is proven on three MIT-licensed forks. 26.2 is wired but not yet proven.
+
 ## Measured ports
 
 Every port here was run from this repository alone:

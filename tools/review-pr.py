@@ -100,6 +100,33 @@ def added_lines(diff):
     return out
 
 
+def added_entries(diff, path="CATALOG.md"):
+    """-> [entry text] for every catalogue entry the diff ADDS, with its wrapped lines joined: entries wrap at
+    ~95 columns, so their labels are usually on the second line or later. An entry runs from its start line to
+    the next start, a blank or heading line, or the end of the run of added lines."""
+    out, cur, here = [], None, None
+    def close():
+        nonlocal cur
+        if cur is not None:
+            out.append(" ".join(cur))
+        cur = None
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            close(); here = line[6:] if line.startswith("+++ b/") else None
+        elif line.startswith("+") and not line.startswith("+++") and here == path:
+            t = line[1:]
+            if ENTRY_START.match(t):
+                close(); cur = [t]
+            elif cur is not None and t.strip() and not t.startswith(("#", ">")):
+                cur.append(t.strip())
+            else:
+                close()
+        else:
+            close()
+    close()
+    return out
+
+
 def removed_lines(diff):
     out, path = [], None
     for line in diff.splitlines():
@@ -199,9 +226,8 @@ def main():
             f("BLOCKING", "gates", "a CI step can no longer fail", f"{path}: {text.strip()}")
 
     # --- catalogue -------------------------------------------------------------------------------
-    cat_added = [t for p, t in added_lines(diff) if p == "CATALOG.md"]
-    for t in cat_added:
-        if ENTRY_START.match(t):
+    for t in added_entries(diff):
+        if True:
             labels = entry_labels(t)
             has = lambda word: word in labels
             miss = [f"**{k}:**" for k in ("Pattern", "Fix") if not has(k)]

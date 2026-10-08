@@ -17,11 +17,26 @@ the game; this loop does. Every worker's exact dollars are logged. Stops at "All
 passed", at --budget, at --max-runs, or when a run fails the same way twice (a fix that did nothing).
 Standard library only; needs the `claude` CLI.
 """
-import collections, argparse, importlib.util, json, os, pathlib, re, subprocess, sys
+import collections, argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-_s = importlib.util.spec_from_file_location("fl", ROOT / "tools/file-loop.py")
-fl = importlib.util.module_from_spec(_s); _s.loader.exec_module(fl)
+_FL = None
+
+
+def _fl():
+    """The burn-down engine (tools/file-loop.py), loaded only when a worker is about to run: a worker-free CI
+    run (--no-workers) never needs it, so the Port CI kit does not carry it."""
+    global _FL
+    if _FL is None:
+        s = importlib.util.spec_from_file_location("fl", ROOT / "tools/file-loop.py")
+        _FL = importlib.util.module_from_spec(s); s.loader.exec_module(_FL)
+    return _FL
+
+
+_ss = importlib.util.spec_from_file_location("srcsets", ROOT / "tools/srcsets.py")
+srcsets = importlib.util.module_from_spec(_ss); _ss.loader.exec_module(srcsets)
+sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # noqa: E402  (Git Bash on Windows; plain bash elsewhere)
 
 PROMPT = """A Minecraft mod ported to {target} compiles, but its headless GameTest server (Gate B) fails:
 
@@ -44,6 +59,16 @@ MOD_FRAME = re.compile(r'^\s+at (?!java\.|jdk\.|sun\.|net\.minecraft\.|net\.neof
 LOAD_FAILED = re.compile(r"Cannot register listeners for|has failed to load correctly|ModLoadingException|"
                          r"Failed to create mod instance|Error loading mods|LoadingFailedException|"
                          r"Mod loading has failed|Encountered an error during the \w+ event phase")
+
+
+def load_failed(text):
+    """A real mod-loading failure, not a mention of the words: a DEBUG line naming the TYPE (measured: a mixin
+    renaming an accessor that returns ModLoadingException) stopped a healthy client and sent two workers after
+    nothing."""
+    return any(LOAD_FAILED.search(l) for l in text.splitlines()
+               if "/DEBUG]" not in l and "/TRACE]" not in l and not re.search(r"L[\w/]+/ModLoadingException;", l))
+
+
 STALL_SECONDS = 420   # a client whose log has not grown for this long, with no verdict, is stuck, not slow
 
 
@@ -64,9 +89,21 @@ def _stop(proc):
             pass
 
 
+def LOG_DIR(work):
+    """Where run logs go: the workspace, unless PORT_LOG_DIR says otherwise (an upstream port must not write
+    into the author's tree)."""
+    d = pathlib.Path(os.environ.get("PORT_LOG_DIR") or work)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def run_gate(work, task, heap, log, phase=None, timeout=1500):
-    cmd = ["./gradlew", task, "--console=plain", "--init-script",
+    cmd = [BASH, "gradlew", task, "--console=plain", "--init-script",
            str(ROOT / "tools/central-mirror.init.gradle"), f"-Dorg.gradle.jvmargs=-Xmx{heap}"]
+    # an upstream port keeps its test harness OUTSIDE the author's tree and wires it in per run
+    # (templates/upstream-harness/gates.init.gradle; tools/port-upstream.py sets this)
+    for extra in filter(None, os.environ.get("PORT_GRADLE_INIT", "").split(os.pathsep)):
+        cmd += ["--init-script", extra]
     env = dict(os.environ)
     if phase:   # Gate C: a real client; headless Linux gets Xvfb + Mesa's software GL (OpenGL 4.5 core)
         cmd += ["-Pboottest", f"-Ptestmode={phase}", "--no-daemon"]
@@ -87,7 +124,7 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
                 size, last_growth = cur, now
             if phase and failed_at is None and cur:
                 with open(log, encoding="utf-8", errors="replace") as rd:
-                    if LOAD_FAILED.search(rd.read()):
+                    if load_failed(rd.read()):
                         failed_at = now      # give it a few seconds to finish printing the stack trace
             if failed_at and now - failed_at > 8:
                 why = "mod loading failed; the client shows the error screen and would wait for a click"
@@ -122,7 +159,7 @@ def listener_audit(work):
         except Exception as e:  # noqa: BLE001 -- the audit is a pre-check; the client run still decides
             return None, f"listener audit: skipped (no classpath: {str(e)[:120]})"
     # the audit reads the PREPARED tree; refresh it, or a worker's fix is judged against the stale copy
-    subprocess.run(["./gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
+    subprocess.run([BASH, "gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
                     str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
     r = subprocess.run([sys.executable, str(tool), str(work), f"--mc={mc}"], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
@@ -192,11 +229,18 @@ def mixin_audit(work):
         return None
     args = [f"--mc={mc}"] if mc and (work / f"versions/{mc}.properties").exists() else []
     if args and (work / "gradlew").exists():   # the audit reads the PREPARED tree: refresh it so a worker's fix is not judged on a stale copy
-        subprocess.run(["./gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
+        subprocess.run([BASH, "gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
                         str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
-    r = subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work), *args],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if r.returncode != 1:
+    audit = lambda: subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work), *args],
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = audit()
+    if "no sources" in r.stderr and (work / "gradlew").exists():
+        # a fresh checkout (CI) has not staged Minecraft's sources yet; the audit's sys.exit(msg) is ALSO exit 1,
+        # which read as findings with an empty list and failed a clean port's Gate B. Stage them once and retry.
+        subprocess.run([BASH, "gradlew", "-q", "createMinecraftArtifacts", "--console=plain", "--init-script",
+                        str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=1800)
+        r = audit()
+    if r.returncode != 1 or "MISMATCH" not in r.stdout:   # only real mismatches are findings
         return None
     return ("These mixins name a member the target's vanilla code no longer has (each fails at mixin APPLY and "
             "stops the game loading; CATALOG §R14/§R17). Retarget each to the current member, or delete a mixin "
@@ -273,7 +317,7 @@ def failure_of(text, client=False, ns=None):
               and l.strip() not in fails]
     if fails:
         return "tests", "\n".join(fails[:30]), "|".join(fails[:3])[:200]
-    m = [l for l in lines if "error:" in l][:10]
+    m = [l for l in lines if re.search(r"\.(?:java|kt|groovy|gradle):\d+: error:|^\s*error: |^e: ", l)][:10]
     if m:
         return "compile", "\n".join(m), m[0][:200]
     # a crash thrown with no `Caused by:` -- e.g. "IllegalStateException: Registry is already frozen" at mod
@@ -292,39 +336,48 @@ def call_worker(a, work, srcs, text, phase, note, run):
     prompt = PROMPT.format(target=a.target, failure=text, catalog=ROOT, srcs=srcs or "(none)")
     if phase:
         prompt = prompt.replace("its headless GameTest server (Gate B) fails", f"its real client (Gate C, phase {phase}) fails")
+    snap = _fl().singleshot.sibling_snapshot(work)
     r = subprocess.run(["claude", "-p", prompt,
-                        "--model", fl.MODELS[a.model], "--output-format", "json", "--permission-mode", "acceptEdits",
+                        "--model", _fl().MODELS[a.model], "--output-format", "json", "--permission-mode", "acceptEdits",
                         "--allowedTools", "Read,Edit,Write,Grep,Glob", "--add-dir", str(ROOT),
                         *(["--add-dir", srcs] if srcs else [])],
                        cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=a.timeout, stdin=subprocess.DEVNULL)
+    # a fix belongs in THIS mod: an edit to a sibling repo (the library it depends on) is undone and recorded,
+    # so the failure surfaces as the library's own bug instead of a silent half-fix in someone else's tree
+    outside = _fl().singleshot.restore_siblings(snap)
     try:
         d = json.loads(r.stdout)
     except ValueError:
         d = {"total_cost_usd": 0, "result": (r.stdout + r.stderr)[-300:]}
     note(event="worker", run=run, phase=phase, model=a.model, usd=d.get("total_cost_usd"), turns=d.get("num_turns"),
-         result=(d.get("result") or "")[-300:])
+         result=(d.get("result") or "")[-300:], reverted_outside=outside or None)
     return d.get("total_cost_usd") or 0
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=fl.TIERS)
+    ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=("haiku", "sonnet", "opus"))
     ap.add_argument("--task", default="runGameTestServer")
+    ap.add_argument("--no-workers", action="store_true",
+                    help="CI: report a red gate and exit 1; never call a model")
     ap.add_argument("--budget", type=float, default=5.0); ap.add_argument("--max-runs", type=int, default=6)
-    ap.add_argument("--target", default="NeoForge 1.21.1"); ap.add_argument("--sources", default="auto")
+    ap.add_argument("--target", default=None); ap.add_argument("--sources", default="auto")
     ap.add_argument("--heap", default="6g"); ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--log", default="gate-loop.jsonl")
     ap.add_argument("--gatec", help="comma list of Gate C phases (launch,spawn,battle,gauntlet) instead of Gate B")
     ap.add_argument("--namespace", help="the mod's id, for the data-load check (default: gradle.properties mod_id)")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
+    if a.target is None and a.work:   # the build says what it targets (tools/srcsets.py)
+        a.target = srcsets.target(pathlib.Path(a.work)) or "NeoForge 1.21.1"
     if a.self_check:
         return self_check()
     if not a.work:
         ap.error("--work is required")
     work = pathlib.Path(a.work).resolve()
-    srcs = str(fl.find_sources(work) or "") if a.sources == "auto" else a.sources
+    # sources (and dependency stubs) are only for workers; a worker-free CI run skips extracting them
+    srcs = "" if a.no_workers else (str(_fl().find_sources(work) or "") if a.sources == "auto" else a.sources)
     logf = open(a.log, "a", encoding="utf-8")
     note = lambda **k: (logf.write(json.dumps(k) + "\n"), logf.flush(), print(json.dumps(k)[:300]))
     spent, last_sig = 0.0, None
@@ -354,11 +407,13 @@ def main():
             if sig == last_sig:
                 note(event="stuck", run=run, spent=round(spent, 4)); return 1
             last_sig = sig
+            if a.no_workers:
+                return verdict_red(note, run, phase, text)
             spent += call_worker(a, work, srcs, text, phase, note, run)
             if spent >= a.budget:
                 note(event="budget", spent=round(spent, 4)); return 1
             continue
-        f = failure_of(run_gate(work, task, a.heap, work / f"gate-loop{'-' + phase if phase else ''}.log", phase),
+        f = failure_of(run_gate(work, task, a.heap, LOG_DIR(work) / f"gate-loop{'-' + phase if phase else ''}.log", phase),
                        client=bool(phase), ns=ns)
         if f is None:
             note(event="green", run=run, phase=phase, spent=round(spent, 4))
@@ -373,9 +428,18 @@ def main():
         if spent >= a.budget:
             note(event="budget", spent=round(spent, 4)); return 1
         last_sig = sig
+        if a.no_workers:
+            return verdict_red(note, run, phase, text)
         text += "".join("\n\n" + hint for rx, hint in FAMILY_HINTS if rx.search(text))
         spent += call_worker(a, work, srcs, text, phase, note, run)
     note(event="max-runs", spent=round(spent, 4)); return 1
+
+
+def verdict_red(note, run, phase, text):
+    """--no-workers (CI): a red gate is the verdict. Print what failed and stop; never call a model."""
+    note(event="red-final", run=run, phase=phase)
+    print(f"GATE {'C/' + phase if phase else 'B'} FAILED:\n{text[-4000:]}", flush=True)
+    return 1
 
 
 def self_check():
@@ -420,6 +484,16 @@ def self_check():
     cl = "M_BOOT_TEST: PASS - done\n[x] [Render thread/WARN] [minecraft/ModelManager]: Missing item model for location m:pie\n"
     ok &= failure_of(cl, client=True, ns="m")[0] == "assets" and failure_of(cl, client=True, ns="z") is None
     ok &= failure_of(bad) is None          # no namespace known: the check is off, never guessing
+    # not a load failure: a DEBUG mixin line naming the type; a real one still is
+    ok = ok and not load_failed("[04:57:25] [Render thread/DEBUG] [mixin/]: Renaming @Accessor method "
+                                "getError()Lnet/neoforged/fml/ModLoadingException; to getError$x in a.json\n")
+    ok = ok and load_failed("[Render thread/ERROR] [ne.ne.fm.ModLoader/]: Mod loading has failed\n")
+    # an ALSA "error" from the sound device is not a compile error
+    k5 = failure_of("ALSA lib conf.c:5208:(_snd_config_evaluate) function snd_func_card_inum returned error: No such file\n"
+                    "Caused by: java.lang.NoClassDefFoundError: x\n\tat a.b.C.d(C.java:1)\n", client=True)
+    ok = ok and k5 and k5[0] == "crash"
+    k6 = failure_of("src/main/java/a/B.java:12: error: cannot find symbol\n")
+    ok = ok and k6 and k6[0] == "compile"
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
 

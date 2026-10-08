@@ -2,7 +2,7 @@
 """The per-file residual loop (issue #27, plan steps 5b/6-7): fix what the recipes left, one small
 context per file batch, with the cheapest model that works, and turn repeated fixes into rewrites.
 
-    python3 tools/file-loop.py --work <gradle project> [--first-model sonnet] [--budget 15] [--log run.jsonl]
+    python3 tools/file-loop.py --work <gradle project> [--first-model haiku] [--budget 15] [--log run.jsonl]
 
 Each ROUND: compile (javac's error cap lifted) -> group the error files into small batches -> one
 headless Claude Code worker per batch, started in a CLEAN context (`claude -p`, no inherited
@@ -32,7 +32,10 @@ import singleshot           # noqa: E402
 
 _s = importlib.util.spec_from_file_location("rb", ROOT / "tools/recipe-bench.py")
 rb = importlib.util.module_from_spec(_s); _s.loader.exec_module(rb)
-MODELS = {"haiku": "claude-haiku-4-5-20251001", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
+_ss = importlib.util.spec_from_file_location("srcsets", ROOT / "tools/srcsets.py")
+srcsets = importlib.util.module_from_spec(_ss); _ss.loader.exec_module(srcsets)
+
+MODELS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 TIERS = ["haiku", "sonnet", "opus"]
 
 WORKER = """You are fixing compile errors in a Minecraft mod being ported to {target} (Java 21).
@@ -63,7 +66,8 @@ RULE: <if one mechanical rewrite would fix this same error wherever it occurs, a
 def compile_(work, log, heap):
     init = ROOT / "tools/maxerrs.init.gradle"
     with open(log, "w", encoding="utf-8") as fh:
-        subprocess.run(["./gradlew", "compileJava", "--console=plain", "--init-script", str(init),
+        # every source set the author builds, not just main (tools/srcsets.py); --continue so all report
+        subprocess.run([BASH, "gradlew", *srcsets.compile_tasks(work), "--continue", "--console=plain", "--init-script", str(init),
                         "--init-script", str(ROOT / "tools/central-mirror.init.gradle"),
                         f"-Dorg.gradle.jvmargs=-Xmx{heap}"], cwd=work, stdout=fh, stderr=subprocess.STDOUT)
     text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
@@ -149,7 +153,88 @@ def find_sources(work):
             with zipfile.ZipFile(j) as z:
                 z.extractall(out, [n for n in z.namelist() if n.endswith(".java")])
         stamp.write_text(want, encoding="utf-8")
+    dependency_stubs(work, out)
     return out
+
+
+def compile_classpath(work):
+    """Gradle's own resolved compile classpath (tools/qtc-init.gradle), never one rebuilt from the cache."""
+    r = subprocess.run(["bash", "gradlew", "-q", "qtcClasspath", "--init-script", str(ROOT / "tools/qtc-init.gradle"),
+                        "--init-script", str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=900)
+    m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout, re.S)
+    return [pathlib.Path(x) for x in m.group(1).split()] if m else []
+
+
+def javap_stub(text):
+    """javap -public output for one class -> a declaration the source index reads: simple type names, and a
+    constructor written `public new Name(...)` so the member regex (which wants a return type) lists it."""
+    out, outer = [], None
+    for l in text.splitlines():
+        l = re.sub(r"\b(?:[a-z_][\w]*\.)+([A-Z]\w*)", r"\1", l.rstrip())    # drop package qualifiers
+        l = l.replace("$", ".")
+        m = re.match(r"^((?:public|protected|abstract|final|static|sealed|non-sealed|\s)*)(class|interface|enum|record)\s+([\w.]+)(.*)\{$", l)
+        if m:
+            name = m.group(3).rsplit(".", 1)[-1]
+            outer = name
+            out.append(f"{m.group(1)}{m.group(2)} {name}{m.group(4)}{{"); continue
+        if outer and re.match(rf"^\s+(public|protected)[^(]*\b{re.escape(outer)}\(", l) and \
+                not re.search(rf"\s\w[\w<>\[\], ?.]*\s+{re.escape(outer)}\(", l.replace("public ", "", 1).replace("protected ", "", 1)):
+            l = re.sub(rf"\b{re.escape(outer)}\(", f"new {outer}(", l, count=1)
+        out.append(l)
+    return "\n".join(out) + "\n"
+
+
+def dependency_stubs(work, out):
+    """Public-API stubs for every MOD jar the build compiles against (Minecraft and NeoForge come from real
+    sources above). Measured: a library that renamed its root package and reshaped its registry left 38 errors
+    workers could not see an answer for -- its jar ships no sources -- and five Opus calls ($2.18) were spent
+    guessing. One javap per jar, cached by the classpath."""
+    import zipfile
+    try:
+        cp = compile_classpath(work)
+    except (subprocess.TimeoutExpired, OSError):
+        return
+    mods = []
+    for j in cp:
+        if j.suffix != ".jar" or not j.exists():
+            continue
+        try:
+            with zipfile.ZipFile(j) as z:
+                names = z.namelist()
+        except zipfile.BadZipFile:
+            continue
+        if any(n in names for n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml")) and \
+                not any(n.startswith("net/minecraft/") for n in names[:2000]):
+            mods.append((j, [n[:-6].replace("/", ".") for n in names
+                             if n.endswith(".class") and "module-info" not in n and not re.search(r"\$\d", n)]))
+    dd = out / "_deps"
+    stamp = dd / ".from"
+    want = "\n".join(sorted(str(j) for j, _ in mods))
+    if stamp.exists() and stamp.read_text(encoding="utf-8") == want:
+        return
+    import shutil
+    shutil.rmtree(dd, ignore_errors=True)
+    for j, classes in mods:
+        tops = [c for c in classes if "$" not in c]
+        for i in range(0, len(tops), 200):
+            chunk = tops[i:i + 200]
+            nested = [c for c in classes if "$" in c and c.split("$")[0] in set(chunk)]
+            r = subprocess.run(["javap", "-public", "-cp", str(j), *chunk, *nested], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=600)
+            for block in re.split(r"(?m)^Compiled from [^\n]*\n", r.stdout):
+                m = re.search(r"(?m)^[^\n]*\b(?:class|interface|enum|record)\s+([\w.$]+)", block)
+                if not m:
+                    continue
+                fqn = m.group(1)
+                top, simple = fqn.split("$")[0], fqn.rsplit(".", 1)[-1].split("$")[-1]
+                f = dd / (top.replace(".", "/") + (".java" if "$" not in fqn else "$" + simple + ".java"))
+                f.parent.mkdir(parents=True, exist_ok=True)
+                pkg = top.rsplit(".", 1)[0]
+                f.write_text(f"package {pkg};\n// public API of {j.name}, from javap (no sources ship)\n" + javap_stub(block),
+                             encoding="utf-8")
+    dd.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(want, encoding="utf-8")
 
 
 def batches(errs, size, max_errs):
@@ -173,7 +258,7 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
     errors = "\n".join(f"{rel(f)}:{l}: {m}" for f in files for l, m in sorted(by[f])[:60])
     ent, ids = entry_texts([m for f in files for _l, m in by[f]], sigs, entries)
     scope_rule = ("These errors belong to one subsystem that needs coordinated changes across files: you MAY "
-                  "edit or add any file under src/main/java to finish it (keep each change minimal)."
+                  "edit or add any file under src/*/java to finish it (keep each change minimal)."
                   if subsystem else
                   "If a fix needs a change in a file not listed, do not edit it: describe it under NEEDS.")
     prompt = WORKER.format(scope_rule=scope_rule, target=target, files="\n".join("  " + rel(f) for f in files), errors=errors,
@@ -181,10 +266,12 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
     t0 = time.time()
     extra = ["--add-dir", srcs] if srcs else []
+    snap = singleshot.sibling_snapshot(work)
     r = subprocess.run(["claude", "-p", prompt, "--model", MODELS[model], "--output-format", "json",
                         "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Grep,Glob", *extra],
                        cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=timeout)
+    outside = singleshot.restore_siblings(snap)
     try:
         d = json.loads(r.stdout)
     except ValueError:
@@ -198,6 +285,7 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
     return {"model": model, "files": [rel(f) for f in files], "errors_in": sum(len(by[f]) for f in files),
             "entries": ids, "usd": d.get("total_cost_usd") or 0, "usage": d.get("usage"),
             "turns": d.get("num_turns"), "secs": round(time.time() - t0), "is_error": d.get("is_error"),
+            "reverted_outside": outside or None,
             "rule": rule, "result": res[-600:]}
 
 
@@ -317,7 +405,61 @@ def static_scan(work):
             for g in src.rglob(m.group(1) + ".java"):
                 if not re.search(r'^\s*@SubscribeEvent', g.read_text(encoding="utf-8", errors="replace"), re.M):
                     out.append((str(g), 1, SCAN_R1))
+    out += mixin_package_strays(work)
     return sorted(set(out))
+
+
+SCAN_MIXIN_PKG = ("a class with no @Mixin sits in a package a mixin config declares: Mixin refuses to load any "
+                  "non-mixin class from that package (\"is in a defined mixin package\") the first time it is "
+                  "used. Move it to another package and update its references; keep its behaviour unchanged.")
+
+
+def mixin_package_strays(work):
+    """Non-mixin classes inside a declared mixin package -- compile clean, crash at first use. Measured: a
+    helper split out of an accessor during a library's port; only a DEPENDENT mod's Gate B reached it."""
+    import importlib.util
+    sp = importlib.util.spec_from_file_location("srcsets", ROOT / "tools/srcsets.py")
+    ss = importlib.util.module_from_spec(sp); sp.loader.exec_module(ss)
+    out = []
+    for cfg in ss.mixin_configs(work):
+        try:
+            pkg = json.loads(cfg.read_text(encoding="utf-8"))["package"]
+        except (ValueError, KeyError):
+            continue
+        for jd in ss.java_dirs(work):
+            pdir = jd / pkg.replace(".", "/")
+            for f in sorted(pdir.rglob("*.java")) if pdir.is_dir() else []:
+                if f.name != "package-info.java" and "@Mixin" not in f.read_text(encoding="utf-8", errors="replace"):
+                    out.append((str(f), 1, SCAN_MIXIN_PKG))
+    return out
+
+
+def mixin_audit(work):
+    """tools/audit-mixin-targets.py at 0 errors: every @Inject/@Shadow/@Accessor/@Invoker checked against the
+    target's own sources, in seconds. A stale target compiles clean and fails at mixin APPLY; found at Gate B it
+    costs one server boot per finding (measured: four boots, $1.48, on a library whose audit took 5 seconds)."""
+    r = subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work)], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=600)
+    if r.returncode != 1:          # 0 = all match; 2 = no mixins / no targets; anything else = no sources jar
+        return []
+    src, out, cur = work / "src/main/java", [], None
+    for l in r.stdout.splitlines():
+        m = re.match(r"^  (\S+\.java)\s+(.*\S)\s*$", l)
+        if m:
+            cur = [m.group(1), m.group(2), "", ""]; out.append(cur); continue
+        m = re.match(r"^\s+(mixin|vanilla):\s+(.*)$", l)
+        if m and cur:
+            cur[2 if m.group(1) == "mixin" else 3] = m.group(2)
+    hits = []
+    for rel, name, mine, van in out:
+        f = next((x for x in (work / rel, src / rel) if x.exists()), None) \
+            or next(iter(sorted(src.rglob(pathlib.Path(rel).name))), src / rel)   # the audit may print a bare name
+        t = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        key = re.split(r"[\s(]", name.split()[-1] if name.split() else name)[0]
+        line = next((i + 1 for i, x in enumerate(t.splitlines()) if key and key in x), 1)
+        hits.append((str(f), line, f"mixin target does not match vanilla -- it fails at mixin apply, not at compile: "
+                                   f"{name}; mixin: {mine}" + (f"; vanilla: {van}" if van else "")))
+    return hits
 
 
 def subsystem_job(a, work, files, by, sigs, entries, needs_text, idx, note, agent_only=False):
@@ -399,14 +541,14 @@ def main():
                          "the fallback; agent: tool-using workers only (the step 6/7 spike's design)")
     ap.add_argument("--multi-thinking", type=int, default=8000,
                     help="thinking budget for the one-request cross-file (subsystem) worker")
-    ap.add_argument("--first-model", default="sonnet", choices=TIERS)
+    ap.add_argument("--first-model", default="haiku", choices=TIERS)
     ap.add_argument("--max-model", default="opus", choices=TIERS)
     ap.add_argument("--budget", type=float, default=15.0, help="stop when workers have spent this many dollars")
     ap.add_argument("--max-rounds", type=int, default=8)
     ap.add_argument("--batch-files", type=int, default=4)
     ap.add_argument("--batch-errors", type=int, default=40)
     ap.add_argument("--parallel", type=int, default=4)
-    ap.add_argument("--target", default="NeoForge 1.21.1")
+    ap.add_argument("--target", default=None, help="default: read from the project's gradle.properties")
     ap.add_argument("--sources", default="auto",
                     help="a directory of Minecraft/NeoForge sources workers may grep (default: found in the build)")
     ap.add_argument("--heap", default="6g")
@@ -423,11 +565,15 @@ def main():
     if not a.work:
         ap.error("--work is required")
     work = pathlib.Path(a.work).resolve(); src = work / "src/main/java"
+    all_java = lambda: (f for d in srcsets.java_dirs(work) for f in d.rglob("*.java"))
+    if a.target is None:   # the build says what it targets; a default here once told 26.2 workers "1.21.1"
+        a.target = srcsets.target(work) or "NeoForge 1.21.1"
     logf = open(a.log, "a", encoding="utf-8")
     note = lambda **k: (logf.write(json.dumps(k) + "\n"), logf.flush(), print(json.dumps({x: k[x] for x in k if x not in ("result", "usage")})[:300]))
     sigs = rb.signatures()
     entries = {i: b for i, b in rb.catalogue_entries((ROOT / "CATALOG.md").read_text(encoding="utf-8"))}
-    clog = work / "file-loop-compile.log"
+    # an upstream port must not write into the author's tree: PORT_LOG_DIR (tools/port-upstream.py) moves the log
+    clog = pathlib.Path(os.environ.get("PORT_LOG_DIR") or work) / "file-loop-compile.log"
     n, errs = compile_(work, clog, a.heap)
     if a.sources == "auto":
         found = find_sources(work)
@@ -492,7 +638,7 @@ def main():
                      est=round(cost, 3))
             multi = multi if any(k == "m" for k, _ in kept) else None
             jobs = [i for k, i in kept if k == "j"]; singles = [i for k, i in kept if k == "s"]
-            snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java")}
+            snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in all_java()}
             from concurrent.futures import ThreadPoolExecutor
 
             def one(fm):
@@ -568,13 +714,13 @@ def main():
                 note(event="plateau", round=rnd, errors=n); break
         return n, errs
 
-    orig = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java")}
+    orig = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in all_java()}
     n, errs = fix_errors(n, errs)
     if n is None:
         print("compile no longer counts:", errs); return 3
     # at 0 errors: the load-crash scans, then the dead-override probe; each finding round may break the
     # compile, which the error rounds then repair
-    finders = [("scan", lambda: static_scan(work))]
+    finders = [("scan", lambda: static_scan(work)), ("scan", lambda: mixin_audit(work))]
     if not a.no_probe:
         finders.append(("probe", lambda: probe(work, a.sources)))
     for kind, find in finders:
@@ -605,6 +751,14 @@ def main():
         if after == before:
             continue
         why = singleshot.stub_signals(before, after)
+        # a signal must also hold against the AUTHOR's file (git HEAD: the port is uncommitted while the loop
+        # runs), or an earlier deterministic stage's reshuffle reads as a worker emptying a method the author
+        # had already left empty (measured: an upstream no-op event handler flagged as a stub)
+        authored = subprocess.run(["git", "-C", work, "show", f"HEAD:{os.path.relpath(path, work)}"],
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if why and authored.returncode == 0:
+            kinds = {w.split()[0] for w in singleshot.stub_signals(authored.stdout, after)}
+            why = [w for w in why if w.split()[0] in kinds]
         if not f.exists() and singleshot.REMOVED_API.search(before):
             why = []   # a file built on removed Forge API (§13) is meant to go
         elif not f.exists() and singleshot.WIRING.search(before):
@@ -681,6 +835,10 @@ def self_check():
     k_, c_ = trim_round([("m", 1, 0.2), ("s", 2, 0.5), ("s", 3, 0.05), ("s", 4, 0.1)], 0.4)
     ok &= [i for _k, i in k_] == [1, 3, 4] and abs(c_ - 0.35) < 1e-9          # 0.5 does not fit; later ones do
     ok &= [i for _k, i in trim_round([("s", 9, 3.0)], 0.1)[0]] == [9]       # never an empty round
+    stub = javap_stub("public class a.b.Foo extends a.b.Base {\n  public a.b.Foo(a.b.Foo$Props);\n"
+                      "  public static a.b.Foo of(int);\n  public java.util.List<a.c.Bar> bars();\n}")
+    ok = ok and "public new Foo(Foo.Props);" in stub and "public static Foo of(int);" in stub \
+        and "List<Bar> bars();" in stub and "class Foo extends Base {" in stub
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
     return 0 if ok else 1
 

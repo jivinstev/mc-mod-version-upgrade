@@ -25,7 +25,12 @@ def rewrite = { RepositoryHandler repos ->
         if (r instanceof MavenArtifactRepository && isCentral(r.url)) { r.url = MIRROR }
     }
 }
+// A machine whose egress blocks a mod's own maven (cursemaven, a mod author's maven) can be given those
+// artifacts in a LOCAL maven directory filled by tools/local-maven.py; it goes first when it exists, and a
+// miss falls through. The author's build file is untouched -- this is the machine's workaround, not the mod's.
+def LOCAL = new File(System.getProperty('user.home'), '.mc-mod-upgrade/local-maven')
 def mirrorFirst = { RepositoryHandler repos ->
+    if (LOCAL.isDirectory()) { repos.maven { name = 'LocalBlockedHosts'; url = LOCAL.toURI() } }
     repos.maven { name = 'CentralMirror'; url = MIRROR }
     rewrite(repos)
 }

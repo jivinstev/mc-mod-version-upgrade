@@ -246,7 +246,13 @@ def main():
         if rel in dropped_rel:
             dropped += 1
             continue
-        text = open(full, encoding='utf-8').read()
+        # Line endings are preserved: a port of someone else's tree (tools/port-upstream.py) must not show
+        # every CRLF file as rewritten. Rules are written against \n, so match on that and put CRLF back.
+        with open(full, encoding='utf-8', newline='') as fh:
+            text = fh.read()
+        crlf = '\r\n' in text
+        if crlf:
+            text = text.replace('\r\n', '\n')
         # ORDER MATTERS, and getting it wrong is silent. Regex rules encode whole call
         # SHAPES (`InteractionResultHolder.success(stack)`), token rules are the broad
         # type sweep (`InteractionResultHolder` -> `InteractionResult`). With the sweep
@@ -266,8 +272,8 @@ def main():
             rewrites += n
         dest = os.path.join(a.out, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, 'w', encoding='utf-8') as fh:
-            fh.write(text)
+        with open(dest, 'w', encoding='utf-8', newline='') as fh:
+            fh.write(text.replace('\n', '\r\n') if crlf else text)
         shared += 1
 
     for full, rel in ([] if not a.overlay else java_files(a.overlay)):

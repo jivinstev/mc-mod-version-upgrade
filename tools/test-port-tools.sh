@@ -120,6 +120,11 @@ perl -p tools/srg-remap/forge_import_codemod.pl "$C/B.txt" > "$C/B.out" 2>/dev/n
 { grep -q 'net/neoforged/neoforge/common/CommonHooks' "$C/B.out" && grep -q 'EventHooks' "$C/B.out" \
   && ! grep -q minecraftforge "$C/B.out"; } && ok "forge_import_codemod rewrites the slash form (descriptors, mixin targets)" \
   || bad "slash form: $(cat "$C/B.out")"
+printf 'Set.of("net.minecraft.", "net.minecraftforge.", "cpw.mods.");\n' > "$C/W.txt"
+perl -p tools/srg-remap/forge_import_codemod.pl "$C/W.txt" > "$C/W.out" 2>/dev/null
+grep -q '"net.minecraft.", "net.neoforged.", "cpw.mods."' "$C/W.out" \
+  && ok "forge_import_codemod: a loader package-prefix string (a transform whitelist) follows the loader" \
+  || bad "prefix string: $(cat "$C/W.out")"
 L="$T/link"; mkdir -p "$L"
 case "$(uname -s)" in
   # Git Bash's ln -s COPIES a directory; a user's workspace has a junction (what setup makes without
@@ -258,7 +263,31 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "learn-pack.py|learn-pack: recurring renames become rows; one-offs and non-platform names never do" \
             "park-optional.py|park-optional: integration packages and datagen are parked, required-dep code is not" \
             "content-census.py|content census: a declared enchantment with no 1.21 data file is missing; all present passes" \
-            "fix-json-strict.py|fix-json-strict: comment lines, trailing commas and a BOM are repaired byte-safe; a missing comma is refused"; do
+            "fix-json-strict.py|fix-json-strict: comment lines, trailing commas and a BOM are repaired byte-safe; a missing comma is refused" \
+            "fix-access-transformer.py|fix-access-transformer: SRG names remapped, an overridden widening is widened on the subclass too" \
+            "forge-shapes.py|forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib colour rewritten idempotently" \
+            "fix-holders.py|fix-holders: the expression under javac's caret is unwrapped, retyped or resolved, never guessed" \
+            "fix-missing-members.py|fix-missing-members: a moved member is renamed only where javac names its owner type" \
+            "convert-rendertypes.py|convert-rendertypes: a CompositeState becomes a pipeline + RenderSetup; reverse-Z depth, unknown shards refused" \
+            "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
+            "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
+            "srcsets.py|srcsets: every source set the author builds, their compile and jar tasks, and the target from the build" \
+            "port-profile.py|port-profile: count the cost-driving port patterns per mod and name the tool covering each" \
+            "convert-entity-renderstate.py|convert-entity-renderstate: vanilla entity renderers/models/layers onto 26.2 render state; refuses what it cannot rewrite exactly" \
+            "convert-geckolib.py|convert-geckolib: GeckoLib 4.8 renderer/layer/model/animation hooks and asset layout onto 5.5; refuses what it cannot rewrite exactly" \
+            "ci-gates.py|ci-gates: a finished port's gates in CI, worker-free pass/fail with a summary" \
+            "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
+            "port-offer.py|port-offer: the authors see the port without our CI commit; a CI commit mid-branch is refused; only what state.json verified is claimed" \
+            "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
+            "port-deps.py|port-deps: dependency preflight -- blocked hosts, missing target builds, local-maven fill" \
+            "dep-moves.py|dep-moves: classes a dependency moved between the author's jar and the target's are found by comparing the jars, and rewritten" \
+            "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
+            "local-maven.py|local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry" \
+            "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \
+            "normalise-imports.py|normalise-imports: inline names a port wrote become imports; the author's own and colliding names are kept" \
+            "targets.py|targets: one table of what each target needs -- unknown branch names listed, build bump and post-check agree, pack formats and prompts per target" \
+            "port-upstream.py|port-upstream: an unlicensed or mismatched repo stops before spending; a dropped copyright line stops the push" \
+            "review-metrics.py|review-metrics: stubbed bodies, import churn, the port's unused imports and voice measured; the author's own left alone"; do
   tool="${spec%%|*}"; what="${spec#*|}"
   out="$(python3 "tools/$tool" --self-check 2>&1)"
   grep -q 'self-check: OK' <<<"$out" && ok "$what" || bad "$tool self-check: $out"

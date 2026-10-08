@@ -4,7 +4,12 @@
 # row leaves the dollars blank rather than guessing. Thinking is billed as output and is already
 # counted inside output_tokens. Cache writes: 5-minute = 1.25x input, 1-hour = 2x input.
 # source: Anthropic API list prices (first-party), as of the date in the as_of column.
+# claude-haiku-5-5 is priced by PROMPT LENGTH: these are the rates for a request of <=100K input tokens; a
+# longer request pays 5x on every column (0.50 / 2.50 / 0.05 / ...). The per-model estimate below assumes
+# the short tier -- right for file-loop's single-shot workers, an underestimate for a long agent session.
+# Checked 2026-10-08 against Claude Code's own recorded costUSD on two probes (exact match, incl. 1h writes).
 model	input	output	cache_read	cache_write_5m	cache_write_1h	web_search_each	as_of
 claude-opus-5-5	4.00	20.00	0.20	5.00	8.00	0.01	2026-09-25
 claude-sonnet-5-5	2.00	10.00	0.20	2.50	4.00	0.01	2026-09-25
 claude-haiku-4-5	1.00	5.00	0.10	1.25	2.00	0.01	2026-09-25
+claude-haiku-5-5	0.10	0.50	0.01	0.125	0.20	0.01	2026-10-08

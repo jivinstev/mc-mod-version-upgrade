@@ -33,3 +33,8 @@ s{net/minecraftforge/registries/}{net/neoforged/neoforge/registries/}g;
 s{net/minecraftforge/event/}{net/neoforged/neoforge/event/}g;
 s{net/minecraftforge/common/}{net/neoforged/neoforge/common/}g;
 s{net/minecraftforge/(items|entity|energy|fluids|server)/}{net/neoforged/neoforge/$1/}g;
+# A bare package PREFIX string names the loader itself, as in a "never transform these" whitelist:
+# "net.minecraftforge." (or the slash form) matches nothing on NeoForge, so the list silently stops
+# protecting the loader -- the code compiles and the protection is gone. Only the exact prefix is rewritten.
+s{"net\.minecraftforge\."}{"net.neoforged."}g;
+s{"net/minecraftforge/"}{"net/neoforged/"}g;
