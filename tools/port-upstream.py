@@ -170,6 +170,26 @@ def st_branch(c):
     return {"branch": a.branch}
 
 
+def provide_pairs(c):
+    """--provide OLD=NEW: a dependency whose port exists only as a sibling fork (no release for the target yet),
+    published to mavenLocal. OLD is the author's coordinate prefix, NEW the group:artifact:version to use."""
+    return [tuple(x.split("=", 1)) for x in (c["args"].provide or [])]
+
+
+def provide_text(c):
+    pairs = provide_pairs(c)
+    if not pairs:
+        return ""
+    lines = [f"- replace the dependency on `{o}` (any version) with `{n}`" for o, n in pairs]
+    return ("DEPENDENCIES PORTED ALONGSIDE THIS MOD (they have no release for the target; each is published to "
+            "mavenLocal from its own port, so add `mavenLocal()` to repositories):\n" + "\n".join(lines) + "\n\n")
+
+
+def provide_unmet(c):
+    g = (c["repo"] / "build.gradle").read_text(encoding="utf-8", errors="replace")
+    return [(o, n) for o, n in provide_pairs(c) if o in g or n not in g or "mavenLocal()" not in g]
+
+
 def st_build(c):
     repo = c["repo"]
     design = (c["dir"] / "DESIGN.md").read_text(encoding="utf-8") if (c["dir"] / "DESIGN.md").exists() else ""
@@ -177,14 +197,19 @@ def st_build(c):
               "'2.0.146'), following the BUILD section of the design below. Edit only build.gradle, settings.gradle, "
               "gradle.properties and gradle/wrapper/*. Keep the author's structure: the same source sets, task names, "
               "comments and order; change only what the new toolchain requires (drop reobf/refmap/ForgeGradle-only "
-              "pieces, map jarJar). Do not touch Java sources.\n\n" + design)
+              "pieces, map jarJar). Do not touch Java sources.\n\n" + provide_text(c) + design)
     usd = 0.0
     for attempt in range(2):
         _t, u = claude(prompt, repo, "Read,Edit,Write,Grep,Glob")
         usd += u
         n, line = compile_count(repo, c["dir"] / "build-check.log")
-        if n is not None:
+        unmet = provide_unmet(c)
+        if n is not None and not unmet:
             return {"usd": usd, "first_count": n}
+        if unmet:
+            prompt = (f"build.gradle must depend on {unmet[0][1]} in place of {unmet[0][0]} (resolved from "
+                      "mavenLocal(), which must be in repositories). Fix the build files only.")
+            continue
         log = (c["dir"] / "build-check.log").read_text(encoding="utf-8", errors="replace")
         wrong = re.search(r"\* What went wrong:\n(.*?)(?:\n\* Try:|\Z)", log, re.S)   # the reason, not the last line
         prompt = (f"The build you wrote does not reach javac. Gradle says:\n{(wrong.group(1) if wrong else line)[:2000]}\n"
@@ -527,6 +552,8 @@ def main():
     ap.add_argument("--from", dest="start", choices=STAGES); ap.add_argument("--only", choices=STAGES)
     ap.add_argument("--record", help="STAGE=USD for a stage run by hand"); ap.add_argument("--report", action="store_true")
     ap.add_argument("--no-commit", action="store_true", help="write COMMIT_MSG.md but do not make the final commit")
+    ap.add_argument("--provide", action="append", metavar="OLD=NEW",
+                    help="a dependency ported alongside this mod: author's coordinate prefix = mavenLocal coordinate")
     ap.add_argument("--trailer", action="append", help="a line appended to the final commit (attribution trailers)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
