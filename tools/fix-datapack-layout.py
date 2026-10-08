@@ -125,6 +125,36 @@ def fix_recipe(path):
     return changed
 
 
+# An advancement's display.icon is an ItemStack, and since 1.20.5 the ItemStack codec names the item `id`.
+# `{"item": X}` fails to parse ("No key id in MapLike") and the advancement is dropped -- logged, then silent.
+# Rewritten as a LITERAL key swap inside the icon object, so the file keeps its own formatting.
+ICON_ITEM = re.compile(r'("icon"\s*:\s*\{[^{}]*?)"item"(\s*:)')
+
+
+def fix_advancement_icon(path, apply=True):
+    text = open(path, encoding="utf-8").read()
+    if '"icon"' not in text:
+        return None
+    new, n = ICON_ITEM.subn(r'\1"id"\2', text)
+    if not n or re.search(r'"icon"\s*:\s*\{[^{}]*"id"[^{}]*"id"', new):
+        return None
+    if apply:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write(new)
+    return "advancement icon item->id"
+
+
+def scan_advancements(data_root, apply):
+    hits = []
+    for root, _, files in os.walk(data_root):
+        if os.sep + "advancement" not in root + os.sep:
+            continue
+        for fn in files:
+            if fn.endswith(".json") and fix_advancement_icon(os.path.join(root, fn), apply):
+                hits.append(os.path.relpath(os.path.join(root, fn), data_root))
+    return hits
+
+
 # ─────────────────────────── §143: the 1.21 loot-table cluster ───────────────────────────
 # Every 1.20 mob-drop table fails to parse on 1.21, and it fails SILENTLY: the error is logged at
 # data load and the table is then ignored, so the mob simply drops nothing. Live example, found by
@@ -454,6 +484,8 @@ def main():
                 if fn.endswith(".json") and fix_recipe(os.path.join(root, fn)):
                     fixed += 1
         print(f"   rewrote {fixed} recipe results for the 1.21 codec")
+        icons = scan_advancements(data_root, apply=True)
+        print(f"   rewrote {len(icons)} advancement icon(s) for the 1.21 ItemStack codec")
         lfiles, lcounts = scan_loot(data_root, apply=True)
         print(f"   rewrote {lfiles} loot table(s) for the 1.21 codecs")
         for note, n in sorted(lcounts.items()):
@@ -484,6 +516,12 @@ def main():
     if verify:
         # §143 is checked even when the layout is already clean -- fixing the layout is what UNMASKS
         # it, so a port that passed the directory check months ago can still be shipping dead tables.
+        icons = scan_advancements(data_root, apply=False)
+        if icons:
+            raise SystemExit(
+                f"\n   ✗ {len(icons)} advancement icon(s) still name the item `item`, e.g. {icons[0]}.\n"
+                "     The 1.21 ItemStack codec wants `id`; the advancement fails to parse and is DROPPED --\n"
+                "     one log line, no crash. Fix: python3 tools/fix-datapack-layout.py <mod> --apply")
         lfiles, lcounts = scan_loot(data_root, apply=False)
         if lfiles:
             detail = "\n".join(f"       {n:4d}x  {note}" for note, n in sorted(lcounts.items()))
@@ -517,6 +555,9 @@ def self_check():
           "ingredients": [{"item": "minecraft:stick"}], "result": {"item": "m:r"}}}]})
         w(t, "assets/m/models/item/s.json", {"loader": "forge:separate_transforms"})
         w(t, "data/forge/tags/item/leather.json", {"values": ["m:l"]})          # unknown: refused, never guessed
+        pathlib.Path(t, "src/main/resources/data/m/advancement").mkdir(parents=True, exist_ok=True)
+        pathlib.Path(t, "src/main/resources/data/m/advancement/a.json").write_text(
+            '{\n  "display": {\n    "icon": {\n      "item": "m:i"\n    },\n    "title": "t"\n  }\n}\n', encoding="utf-8")
         run = lambda *a: subprocess.run([sys.executable, __file__, t, *a], capture_output=True, text=True,
                                         encoding="utf-8")
         ok &= run("--verify").returncode != 0
@@ -533,6 +574,8 @@ def self_check():
         ok &= rc["type"] == "minecraft:crafting_shapeless" and rc["result"] == {"id": "m:r"}
         ok &= rc["neoforge:conditions"] == [{"type": "neoforge:mod_loaded", "modid": "z"}]
         ok &= r(t, "assets/m/models/item/s.json")["loader"] == "neoforge:separate_transforms"
+        ok &= pathlib.Path(t, "src/main/resources/data/m/advancement/a.json").read_text(encoding="utf-8") == \
+            '{\n  "display": {\n    "icon": {\n      "id": "m:i"\n    },\n    "title": "t"\n  }\n}\n'   # key only, layout kept
         ok &= run("--verify").returncode != 0                  # the refused tag still fails the gate
         os.remove(os.path.join(t, "src/main/resources/data/forge/tags/item/leather.json"))
         v = run("--verify")

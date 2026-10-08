@@ -507,6 +507,21 @@ reads the compiled classes and fails on this shape (and reports mixins that reac
 and fork CI's `minimal` environment runs it before Gate B, then boots without the optional mods. On the
 released port it named the three crashes the minimal Gate B then hit one at a time.
 
+R28. **🔴 `StreamCodec.unit(new X())` on a field-less payload CLASS rejects every send — the player is
+disconnected, and no server-side gate can see it.** · **Pattern:** the natural port of a Forge "signal" packet with
+no fields: `public class SwitchHand implements CustomPacketPayload { static final StreamCodec<…, SwitchHand>
+STREAM_CODEC = StreamCodec.unit(new SwitchHand()); }`, sent as `PacketDistributor.sendToServer(new SwitchHand())`.
+· **Runtime (client, at send):** `EncoderException: Failed to encode packet 'serverbound/minecraft:custom_payload'`
+← `IllegalStateException: Can't encode 'X@f05c125', expected 'X@675c6cdf'`, and the client drops out of the world.
+`StreamCodec.unit` writes nothing and refuses any value not `equals()` to the one it was built with; a plain class
+has identity equality, so the codec accepts only that one object. · **Fix:** `public record X() implements
+CustomPacketPayload` — a record with no components makes every instance equal, a one-word diff with every call site
+unchanged. (Or one shared `INSTANCE`, used to build the codec and at every send.) · **Why the gates missed it:**
+it compiles, Gate B's server never sends a client packet, and Gate C sends it only if something triggers the
+action (here an off-hand attack while dual-wielding). Caught by a player, after green CI on the release.
+**Control:** `tools/audit-unit-codecs.py` (a ci-gates row; matches the call across line breaks, which a plain
+grep did not) — exit 1 on a non-record, non-enum class with no `equals`.
+
 **Non-fatal runtime issues (log errors / wrong visuals, not a crash — fix during the boot loop, they won't fail the gate):**
 - **Forge biome modifier not renamespaced/retyped** (mob silently stops spawning naturally) · **Pattern:** `data/<ns>/forge/biome_modifier/*.json` with `"type": "forge:add_spawns"` (also `add_features`, `remove_spawns`) · **Log:** usually silent (a datapack registry the mod's own code doesn't read) → the entity just never spawns in its biomes. · **Fix:** move the file to `data/<ns>/**neoforge**/biome_modifier/` and rename the type `forge:add_spawns` → `neoforge:add_spawns` (the `{biomes, spawners:{type,weight,minCount,maxCount}}` body is unchanged). **Scan:** `grep -rln '"forge:add_spawns"\|/forge/biome_modifier/' src/main/resources` and `find src/main/resources/data/*/forge/biome_modifier`. (a single-mob MCreator mod (~15 files): deep_dark + dark_forest spawns.)
 - **`forge:` model-loader id not renamespaced** · **Log:** `Model loader 'forge:separate_transforms' not found. Registered loaders: neoforge:separate_transforms, …` → the item bakes as the missing-model (black/purple), no crash. · **Fix:** renamespace the `"loader"` id in the item-model JSONs, `forge:<x>` → `neoforge:<x>` (`separate_transforms`, `composite`, `obj`, `item_layers`, …). **Scan:** `grep -rln '"loader": *"forge:' src/main/resources`. (Was 8 models here: crossbow variants, a lance, a hammer, a scimitar.)
@@ -1143,6 +1158,20 @@ in a Forge-only folder; fork CI also runs the static `--verify` as its own row, 
 server refused to start the moment its structure modifiers loaded, on two entity ids the mod had
 dropped years before. A port of this same mod through the jar pipeline had hit both, and the lesson
 did not reach the fork pipeline until the converter enforced it — §S2 again.
+
+**S10. 🔴 `"item"` → `"id"` reaches every ItemStack in data, not just recipe RESULTS — advancement icons and a
+mod's OWN JSON formats too.** · **Pattern:** a 1.20.1 data file naming a stack `{"item": "ns:x"}` anywhere the
+reader now uses `ItemStack.CODEC`: an advancement's `display.icon`, and any mod-specific format whose loader the
+port moved from hand-written `GsonHelper` reads (which accepted `item`) to the codec (which wants `id`).
+· **Runtime:** one ERROR per file — `Couldn't parse data file '<ns>:<adv>' … No key id in MapLike[{"item":…}]`, or the
+mod's own "Failed to load …" with the same cause — and the advancement or recipe is DROPPED. No crash; every gate
+green. Measured on one port after green CI: 38 advancements and 62 custom smithing recipes, all dead. · **Fix:**
+the key, and only the key: `fix-datapack-layout.py --apply` now swaps it inside advancement icons as a literal
+(file formatting kept), and `--verify` fails on any left. A mod-specific format is the mod's own business: swap the
+key in its files AND, when players write their own files in that format (a `config/` folder of recipes), give the
+codec `Codec.withAlternative(ItemStack.CODEC, <legacy {item, count}>)` so files written for 1.20.1 still load.
+· **Control for the whole class:** ci-gates now reads Gate B's server log and fails the row "Data loads" on any
+rejection line naming the mod's namespace — the only check that sees a format no converter knows.
 
 **S5c. Corollary — scope a cross-mod audit to the mods you are auditing.** The first census run loaded the
 whole 66-jar instance and never reached the census: one third-party mod requires NeoForge 21.1.233 and the harness
