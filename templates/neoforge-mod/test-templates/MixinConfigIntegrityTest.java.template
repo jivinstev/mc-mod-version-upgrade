@@ -43,6 +43,10 @@ public class MixinConfigIntegrityTest {
      * registered it -- javac, Gate A's forward check and the baseline GameTests all passed.
      * A class counts as a mixin when its bytecode carries the @Mixin annotation.
      */
+    /** Mixin classes the AUTHOR left out of every config at the base commit -- parked, not forgotten; listing
+     *  them would switch on code the author disabled. Filled by the port's harness from git; empty otherwise. */
+    private static final Set<String> AUTHOR_UNLISTED = Set.of(/*AUTHOR_UNLISTED*/);
+
     @Test
     void everyMixinClassIsListedInAConfig() throws IOException {
         String json = Files.readString(MIXIN_CONFIG);
@@ -62,7 +66,7 @@ public class MixinConfigIntegrityTest {
                 String bytes = new String(Files.readAllBytes(f), java.nio.charset.StandardCharsets.ISO_8859_1);
                 if (!bytes.contains("Lorg/spongepowered/asm/mixin/Mixin;")) continue;
                 String name = pkgDir.relativize(f).toString().replace('\\', '/').replaceAll("\\.class$", "").replace('/', '.');
-                if (!listed.contains(name)) unlisted.add(name);
+                if (!listed.contains(name) && !AUTHOR_UNLISTED.contains(name)) unlisted.add(name);
             }
         }
         Collections.sort(unlisted);

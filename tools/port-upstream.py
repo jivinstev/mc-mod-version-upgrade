@@ -377,6 +377,37 @@ def register_new_mixins(repo, base):
     return added
 
 
+def author_unlisted_mixins(repo, base):
+    """@Mixin classes in the author's tree at `base` that no config of theirs listed: parked by the author.
+    The port must keep them unregistered, and the integrity test must not demand otherwise."""
+    if not base:
+        return []
+    out = []
+    files = sh(["git", "ls-tree", "-r", "--name-only", base], cwd=repo).stdout.split()
+    listed = set()
+    for f in files:
+        if f.endswith(".json") and "/resources/" in f:
+            t = sh(["git", "show", f"{base}:{f}"], cwd=repo).stdout
+            try:
+                d = json.loads(t)
+            except ValueError:
+                continue
+            if isinstance(d, dict) and isinstance(d.get("package"), str):
+                listed |= {(d["package"], n) for k in ("mixins", "client", "server") for n in d.get(k) or []}
+    pkgs = {p for p, _ in listed}
+    for f in files:
+        if not f.endswith(".java") or "/java/" not in f:
+            continue
+        cls = f.split("/java/", 1)[1][:-5].replace("/", ".")
+        pkg = next((p for p in pkgs if cls.startswith(p + ".")), None)
+        if not pkg:
+            continue
+        name = cls[len(pkg) + 1:]
+        if (pkg, name) not in listed and "@Mixin" in sh(["git", "show", f"{base}:{f}"], cwd=repo).stdout:
+            out.append(name)
+    return sorted(out)
+
+
 def harness(c):
     """The external harness: a baseline GameTest, its structure, the mixin integrity test."""
     h, modid = c["dir"] / "harness", c["args"].modid
@@ -402,6 +433,8 @@ def harness(c):
     for cfg in [f.name for f in srcsets.mixin_configs(c["repo"]) if f.parent.parent.name == "main"][:1]:
         t = (ROOT / "templates/neoforge-mod/test-templates/MixinConfigIntegrityTest.java.template").read_text(encoding="utf-8")
         t = t.replace("PACKAGE_PLACEHOLDER", pkg).replace("MODID.mixins.json", cfg)
+        parked = author_unlisted_mixins(c["repo"], c["args"].base)
+        t = t.replace("/*AUTHOR_UNLISTED*/", ", ".join(f'"{n}"' for n in parked))
         (h / "test" / pkg.replace(".", "/")).mkdir(parents=True)
         (h / "test" / pkg.replace(".", "/") / "MixinConfigIntegrityTest.java").write_text(t, encoding="utf-8")
     return h
