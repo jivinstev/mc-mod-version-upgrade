@@ -80,6 +80,26 @@ def parent_of(fork):
         return None
 
 
+def ci_run(fork, branch):
+    """The branch's newest completed port-ci run, from the GitHub API: (conclusion, url, sha), or None."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/{fork}/actions/workflows/port-ci.yml/runs"
+                                     f"?branch={branch}&status=completed&per_page=1", headers={"User-Agent": "port-offer"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            w = json.loads(r.read().decode("utf-8")).get("workflow_runs") or []
+        return (w[0]["conclusion"], w[0]["html_url"], w[0]["head_sha"]) if w else None
+    except Exception:
+        return None
+
+
+def ci_verified(run):
+    if run and run[0] == "success":
+        return [f"CI on the branch ({run[1]}): the authors' own build, Gate A, Gate B and Gate C (a real client "
+                "under Xvfb, launch + spawn) all pass, with nothing fixed by the run."]
+    return []
+
+
 def verified(state):
     """What the pipeline CHECKED, from its state file -- one line each, nothing inferred."""
     out = []
@@ -125,11 +145,18 @@ def render(ctx):
               + ", ".join(f"`{s[:10]}`" for s, _, _ in ctx["ci_commits"]) + ")."]
     L += ["", "## Verified", ""] + [f"- {v}" for v in ctx["verified"] or ["(no pipeline state found -- say only what you checked)"]]
     L += ["- Not verified by any automated check: gameplay by a person."]
+    facts = " ".join(ctx["verified"])
+    proof = []
+    if "authors' own" in facts:
+        proof.append("builds with your own Gradle build")
+    if "Gate B" in facts:
+        proof.append("loads on a headless server with GameTests passing")
+    if "Gate C" in facts:
+        proof.append("starts a real client")
     msg = (f"Hi -- I ported {ctx['modid']} to {ctx['target']} in a fork, keeping your layout and the smallest diff "
            f"I could ({ctx['files']} files, +{ctx['ins']}/-{ctx['dels']}). The whole change is here: {ctx['compare']}\n\n"
-           "It builds with your own Gradle build and loads on a headless server with GameTests passing"
-           + (", and every push runs those checks in CI" if ctx.get("ci_url") else "") + ". "
-           "If it's useful, I'm happy to open a PR or adjust anything to how you'd like it done.")
+           + (f"It {', '.join(proof[:-1]) + ' and ' + proof[-1] if len(proof) > 1 else proof[0]}. " if proof else "")
+           + "If it's useful, I'm happy to open a PR or adjust anything to how you'd like it done.")
     L += ["", "## Draft message to the authors", "", msg, "",
           "## Draft PR description (only if they ask for a PR)", "",
           f"Ports {ctx['modid']} to {ctx['target']}, keeping the existing layout and the smallest diff that works.", "",
@@ -168,7 +195,8 @@ def self_check():
           "result": {"gateA_tests": 2}}, "author-build": {"status": "done", "result": {"jars": ["m-1.jar"]}}}
     v = verified(st)
     ok &= len(v) == 4 and "MIT" in v[0] and "m-1.jar" in v[3]
-    ok &= verified({"gates": {"status": "failed"}}) == []          # a failed gate is never reported as passed
+    ok &= verified({"gates": {"status": "failed"}}) == []
+    ok &= ci_verified(("failure", "u", "x")) == [] and "Gate C" in ci_verified(("success", "u", "x"))[0]          # a failed gate is never reported as passed
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -214,15 +242,17 @@ def main():
         state = json.loads((work / "state.json").read_text(encoding="utf-8"))
     props = dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(.*?)\s*$",
                             git(repo, "show", f"{tip}:gradle.properties", check=False)))
-    modid = a.modid or props.get("mod_id") or repo.name
     target = f"NeoForge {props['neo_version']} (Minecraft {props['minecraft_version']})" \
         if props.get("neo_version") and props.get("minecraft_version") else branch
     upstream = a.upstream or parent_of(fork)
+    # the name the AUTHORS know it by: their mod_name, else their repository's name -- never a local folder name
+    modid = a.modid or props.get("mod_name") or (upstream or fork).split("/")[1]
     up_default = "main"
     if upstream:
         up_default = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False).split("/", 1)[-1] or "main"
     ctx = {"modid": modid, "target": target, "files": files, "ins": ins, "dels": dels, "tracked": tracked,
-           "hunks": hunk_sizes(git(repo, "diff", "-U0", f"{base_sha}..{tip}")), "commits": port, "ci_commits": ci, "verified": verified(state),
+           "hunks": hunk_sizes(git(repo, "diff", "-U0", f"{base_sha}..{tip}")), "commits": port, "ci_commits": ci,
+           "verified": verified(state) + (ci_verified(ci_run(fork, branch)) if ci else []),
            "compare": f"https://github.com/{fork}/compare/{base_sha[:12]}...{offer}",
            "branch_url": f"https://github.com/{fork}/tree/{offer}",
            "pr_url": (f"https://github.com/{upstream}/compare/{up_default}...{fork.replace('/', ':')}:{offer}?expand=1"
