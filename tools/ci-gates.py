@@ -184,6 +184,15 @@ def main():
         except pu.Fail as e:
             record("Gate A -- mixin-config integrity", False, str(e)[:300])
 
+    if ok:     # static: data and assets NeoForge would silently ignore (the GameTest sees server data only)
+        r = subprocess.run([sys.executable, str(ROOT / "tools/fix-datapack-layout.py"), str(repo), "--verify"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        (work / "datapack-verify.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+        lines = [l.strip() for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+        record("Data -- nothing NeoForge would silently ignore", r.returncode == 0,
+               "1.21-clean" if r.returncode == 0 else
+               "; ".join(l for l in lines if l.startswith(("✗", "REFUSED")))[:300] or lines[-1][:300])
+
     if ok and a.env == "minimal" and ex:
         # Before booting anything: does code the minimal run will load need a mod it leaves out?
         jars = [path for coord, path in arts if coord in ex]

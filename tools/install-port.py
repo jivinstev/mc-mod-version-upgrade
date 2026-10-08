@@ -16,7 +16,8 @@ on, raised within the same line when an added mod needs newer, with NeoForge's o
 The output leads with the result: SUCCEEDED / FAILED per requested port (the port plus every mod it needs),
 then optional extras, then warnings about optional mods, which never change the result. Exit 0 = every port in.
 
-  --with-optional   also the optional integrations (and what they need)
+  --with-optional   also the optional mods CI tested with the ports (and what they need)
+  --with-untested   also the optional integrations CI never loaded, from Modrinth/CurseForge, labelled as such
   --full            also what CI's full pass added (an exact replica of the tested setup)
   --dry-run         say what would happen, change nothing
   --no-neoforge     leave NeoForge alone
@@ -181,12 +182,15 @@ def registry_lookup(modid, mc, get=fetch):
     return None, f"no NeoForge {mc} build on Modrinth or CurseForge"
 
 
-def plan(repos, branch, with_optional, full, get=fetch, mc="1.21.1", lookup=None):
+UNTESTED = "not tested by CI"
+
+
+def plan(repos, branch, with_optional, full, get=fetch, mc="1.21.1", lookup=None, untested=False):
     """-> (files, notes, problems, neo, ports, missing). A mod named twice is installed once (the newest tested
     file); a mod CI had no file for comes from the registries; an added mod's own requirements come too.
     ports: per requested repo, the mod ids it needs (its siblings' included). missing: modid -> why not found."""
     lookup = lookup or (lambda m: registry_lookup(m, mc, get))
-    with_optional = with_optional or full          # an exact replica includes the optional integrations
+    with_optional = with_optional or full or untested   # each flag includes the CI-tested optional mods
     roles = {"self", "required"} | ({"optional"} if with_optional else set()) | ({"extra"} if full else set())
     files, seen, notes, problems, mans, queue, conflicts = [], {}, [], [], {}, [(r, r) for r in repos], {}
     extras, missing, wanted_by, raise_to = {}, {}, {}, []        # extras: modid -> an "extra" file, should an added mod need it
@@ -226,6 +230,9 @@ def plan(repos, branch, with_optional, full, get=fetch, mc="1.21.1", lookup=None
                 continue
             entry = dict(f, from_port=port)
             if not f.get("url"):                         # CI had no file: the registries
+                if f["role"] not in ("self", "required") and not untested:
+                    missing[mid] = UNTESTED              # an optional integration CI never loaded: only on request
+                    continue
                 found, why = lookup(mid)
                 if not found:
                     missing[mid] = why
@@ -261,6 +268,9 @@ def plan(repos, branch, with_optional, full, get=fetch, mc="1.21.1", lookup=None
                 wanted_by.setdefault(d, set()).update(wanted_by.get(f["modid"], set()))
                 if d in extras:
                     e = dict(extras[d], role=f["role"] if f["role"] != "self" else "required", needed_by=f["modid"])
+                elif f["role"] in ("optional", "extra") and not untested:
+                    missing[d] = f"needed by {f['modid']}, and CI has no file for it ({UNTESTED})"
+                    continue
                 else:
                     found, why = lookup(d)
                     if not found:
@@ -399,7 +409,8 @@ def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
                      f"({', '.join(label(d) for d in deps)})" if deps else " (no dependencies)"))
     required = {m for pt in ports for m in [pt["self"]] + pt["deps"] if m}
     extra_ok = [m for m in by_id if m not in required and status.get(m) in OK_WORDS]
-    warn = [f"{m}: {why}" for m, why in sorted(missing.items()) if m not in required]
+    skipped = sorted(m for m, why in missing.items() if why == UNTESTED and m not in required)
+    warn = [f"{m}: {why}" for m, why in sorted(missing.items()) if m not in required and why != UNTESTED]
     warn += [x for x in bad if x.split(":")[0] not in required]
     out = []
     if lines:
@@ -412,6 +423,9 @@ def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
                    + ", ".join(label(m) for m in extra_ok))
     if failed or not neo_ok:
         out += ["", "FAILED:"] + [f"  {x}" for x in failed] + ([] if neo_ok else [f"  {neo_line}"])
+    if skipped:
+        out += ["", f"Not installed: {len(skipped)} optional integration(s) CI never tested ({', '.join(skipped)}). "
+                "--with-untested fetches them from Modrinth/CurseForge."]
     if warn:
         out += ["", "Warnings (optional mods only; they do not change the result):"] + [f"  - {x}" for x in warn]
     good = not failed and neo_ok and bool(ports)
@@ -581,7 +595,9 @@ def self_check():
         _d4, _s4, bad4, st4 = install(f4, d / "inst4/mods", dry=True, get=get)
         out4, good4 = summarise(pt4, f4, st4, m4, bad4, "", True, True)
         ok &= _chk(good4 and any(x.startswith("Optional, would also install: optdep, needed") for x in out4), 71)
-        ok &= _chk(any("gone" in x for x in out4[out4.index("Warnings (optional mods only; they do not change the result):"):]), 72)
+        ok &= _chk(any(x.startswith("Not installed: 1 optional") and "gone" in x and "--with-untested" in x for x in out4), 72)
+        f4u, _n4u, _p4u, _neo4u, pt4u, m4u = plan(["o/x"], "b", False, False, get, lookup=lookup, untested=True)
+        ok &= _chk("gone" in m4u and m4u["gone"] != UNTESTED and [f["modid"] for f in f4u] == ["x", "optdep", "needed"], 900)
         ok &= _chk([f["modid"] for f in plan(["o/x"], "b", False, False, get, lookup=lookup)[0]] == ["x"], 73)
         ok &= _chk({f["modid"] for f in plan(["o/x"], "b", False, True, get, lookup=lookup)[0]} == {"x", "optdep", "g:needed-123", "unrelated"}, 74)
         f2 = plan(["o/me"], "b", True, False, get, lookup=lookup)[0]
@@ -612,7 +628,9 @@ def self_check():
         g2 = lambda u: json.dumps(man).encode() if u == manifest_url("o/s", "b") else fetch(u)
         reg2 = {"helper": {"name": "helper.jar", "url": helper.as_uri(), "source": "modrinth"}}
         lk2 = lambda m: (reg2[m], None) if m in reg2 else (None, "nowhere")
-        fs, _n, _p, _ne, pts, ms = plan(["o/s"], "b", True, False, g2, lookup=lk2)
+        fs, _n, _p, _ne, pts, ms = plan(["o/s"], "b", True, False, g2, lookup=lk2, untested=True)
+        fsn = plan(["o/s"], "b", True, False, g2, lookup=lk2)[0]
+        ok &= _chk([f["modid"] for f in fsn] == ["s", "big"], 901)        # without --with-untested, no registry fetch
         ok &= _chk([f["modid"] for f in fs] == ["s", "big"], 104)                     # bad and its helper both left out
         ok &= _chk("needs absent" in ms.get("bad", "") and "only bad needed it" in ms.get("helper", ""), 105)
         nf = lambda v: f'[[dependencies.a]]\nmodId="neoforge"\ntype="required"\nversionRange="[{v},)"\n'
@@ -623,7 +641,7 @@ def self_check():
             {"role": "optional", "modid": "newer", "name": "newer.jar", "url": newer.as_uri()},
             {"role": "optional", "modid": "otherline", "name": "other.jar", "url": other.as_uri()}]}
         g3 = lambda u: json.dumps(man3).encode() if u == manifest_url("o/n", "b") else fetch(u)
-        fs3, _n3, _p3, ne3, _pt3, ms3 = plan(["o/n"], "b", True, False, g3, lookup=lk2)
+        fs3, _n3, _p3, ne3, _pt3, ms3 = plan(["o/n"], "b", True, False, g3, lookup=lk2, untested=True)
         ok &= _chk([f["modid"] for f in fs3] == ["s", "newer"] and "outside" in ms3.get("otherline", ""), 115)
         ok &= _chk(ne3[-1][1] == "21.1.300" and "newer" in ne3[-1][2], 116)       # NeoForge raised for the added mod
     with tempfile.TemporaryDirectory() as d:     # macOS python.org Python with no CA bundle: curl takes over
@@ -680,7 +698,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("repos", nargs="+", help="fork ports, owner/repo or https://github.com/owner/repo")
     ap.add_argument("--mc", default="1.21.1"); ap.add_argument("--branch")
-    ap.add_argument("--mods-dir"); ap.add_argument("--with-optional", action="store_true")
+    ap.add_argument("--mods-dir")
+    ap.add_argument("--with-optional", action="store_true", help="also the optional mods CI tested with the ports")
+    ap.add_argument("--with-untested", action="store_true",
+                    help="also optional integrations CI never loaded, from Modrinth/CurseForge, with what they need")
     ap.add_argument("--full", action="store_true"); ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-neoforge", action="store_true", help="do not install NeoForge when it is missing")
     ap.add_argument("-v", "--verbose", action="store_true", help="also every file and every note")
@@ -693,7 +714,7 @@ def main():
         return cache[u]
     print(f"install-port: {', '.join(a.repos)} -> {mods}" + (" (dry run)" if a.dry_run else ""), flush=True)
     files, notes, problems, neo, ports, missing = plan(a.repos, a.branch or f"neoforge-{a.mc}", a.with_optional,
-                                                       a.full, get, a.mc)
+                                                       a.full, get, a.mc, untested=a.with_untested)
     done, skipped, bad, status = install(files, mods, a.dry_run, get)
     nnotes, nprob = ([], []) if (a.no_neoforge or not neo) else ensure_neoforge(neo, mods, a.dry_run, get)
     neo_line = nprob[0] if nprob else next((x for x in nnotes if not x.startswith("tested on")), "")
