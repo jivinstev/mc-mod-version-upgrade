@@ -486,6 +486,27 @@ Gate-B spawn path runs it once, and it only crashes when the mod that calls the 
 with the mod that owns it. Only the DEPENDENT's Gate B had both.
 
 
+R27. **🔴 An OPTIONAL dependency that is required in practice: a listener class whose method TYPES name
+the optional mod** · **Pattern:** `neoforge.mods.toml` declares a mod `type = "optional"`, the
+registration path is guarded with `ModList.get().isLoaded(...)`, and yet an `@EventBusSubscriber` class
+has a helper method (or a lambda — javac gives it a synthetic method) whose parameter or return type comes
+from that mod: `private static void setupEnchants(LivingEntity e, …, MobEnchantCapability cap)`.
+· **Runtime:** with the optional mod absent, mod construction fails:
+`Failed to register automatic subscribers` ← `NoClassDefFoundError: <optional pkg>/<Class>` ←
+`Class.getDeclaredMethods` ← `AutomaticEventSubscriber.inject`. NeoForge scans every method of a
+subscriber class, and resolving a method's descriptor loads every type in it, guard or no guard. The
+same mod also had a mixin into a vanilla `Entity` method calling the optional mod's registry class
+unguarded, which crashed on the first entity tick. All three were in the author's own 1.20 code; the
+port only made them visible. · **Fix:** move the method out of the subscriber class into a plain helper
+class (calls are rewritten to `Helper.method(...)`; the helper is only loaded when called, and every call
+is already behind the guard), or register the listener from the guarded block instead of by annotation;
+guard a mixin body with the same `isLoaded` check the author used elsewhere. **Codemod:**
+`tools/fix-optional-listeners.py` does the move for static helpers and synthetic lambdas' enclosing
+methods, and refuses what it cannot move safely. · **Detection, no game:** `tools/optional-dep-scan.py`
+reads the compiled classes and fails on this shape (and reports mixins that reach an optional mod),
+and fork CI's `minimal` environment runs it before Gate B, then boots without the optional mods. On the
+released port it named the three crashes the minimal Gate B then hit one at a time.
+
 **Non-fatal runtime issues (log errors / wrong visuals, not a crash — fix during the boot loop, they won't fail the gate):**
 - **Forge biome modifier not renamespaced/retyped** (mob silently stops spawning naturally) · **Pattern:** `data/<ns>/forge/biome_modifier/*.json` with `"type": "forge:add_spawns"` (also `add_features`, `remove_spawns`) · **Log:** usually silent (a datapack registry the mod's own code doesn't read) → the entity just never spawns in its biomes. · **Fix:** move the file to `data/<ns>/**neoforge**/biome_modifier/` and rename the type `forge:add_spawns` → `neoforge:add_spawns` (the `{biomes, spawners:{type,weight,minCount,maxCount}}` body is unchanged). **Scan:** `grep -rln '"forge:add_spawns"\|/forge/biome_modifier/' src/main/resources` and `find src/main/resources/data/*/forge/biome_modifier`. (a single-mob MCreator mod (~15 files): deep_dark + dark_forest spawns.)
 - **`forge:` model-loader id not renamespaced** · **Log:** `Model loader 'forge:separate_transforms' not found. Registered loaders: neoforge:separate_transforms, …` → the item bakes as the missing-model (black/purple), no crash. · **Fix:** renamespace the `"loader"` id in the item-model JSONs, `forge:<x>` → `neoforge:<x>` (`separate_transforms`, `composite`, `obj`, `item_layers`, …). **Scan:** `grep -rln '"loader": *"forge:' src/main/resources`. (Was 8 models here: crossbow variants, a lance, a hammer, a scimitar.)
@@ -653,7 +674,7 @@ else is reading them (§X25b-iii).
 
 143. **1.21 LOOT-TABLE cluster — every 1.20 mob-drop table fails to parse (silently, at data load)** · **Pattern:** the standard 1.20 mob drop table: `{"function":"minecraft:looting_enchant","count":{...}}` and `{"condition":"minecraft:random_chance_with_looting","chance":C,"looting_multiplier":M}`, plus `{"function":"minecraft:set_nbt","tag":"{Potion:\"minecraft:poison\"}"}` and `"entity":"killer"` · **Runtime:** `Couldn't parse element …loot_table]:<id> - Failed to parse either. First: Unknown registry key in …loot_function_type]: minecraft:looting_enchant` — logged as an ERROR at data load and then **ignored**: the mob simply drops nothing. No crash, no gate failure · **Fix:** four renames, all mechanical (do them with a JSON walker, not sed — these nest inside `pools[].entries[].functions[]`): `looting_enchant` → **`enchanted_count_increase`** + an explicit `"enchantment": "minecraft:looting"`; `random_chance_with_looting{chance, looting_multiplier}` → **`random_chance_with_enchanted_bonus`**`{unenchanted_chance, enchanted_chance: {type: "minecraft:linear", base, per_level_above_first}, enchantment}`; `set_nbt{tag}` → **`set_components`**`{components: {...}}` (item NBT is data components); loot-context entity target `"killer"` → **`"attacker"`** (and `killer_player` → `attacking_player`). **You only SEE these once §142's directory rename is done** — under `loot_tables/` the files were never read at all. (the ~390-file mob mod, 36 tables)
 
-144. **Fixing §142 UNMASKS latent data bugs — expect a second wave, and treat it as progress** · **Pattern:** after renaming `loot_tables`→`loot_table` / `forge/`→`neoforge/`, data that had been silently inert starts loading — and hard-fails · **Runtime:** `IllegalStateException: Unknown registry key in ResourceKey[minecraft:root / minecraft:entity_type]: <modid>:<id>` → `Failed to load registries` → **server won't start**; and a flood of `Couldn't parse element …loot_table]` (see #143) · **Fix:** these are usually **pre-existing bugs in the upstream mod's own data** (stale ids the author left behind, e.g. a structure modifier spawning `gold_armored_vindicator` when only `armored_vindicator` was ever registered), not something the migration introduced — the 1.20 path just never read the file. Cross-check every `<modid>:` id referenced from `data/` against the registry (`grep -rho '"<modid>:[a-z_]*"' src/main/resources/data | sort -u`) and delete or re-point the dead ones. Sequence matters: rename dirs → fix the hard registry failures → fix the parse errors → re-run Gate B, and **read the data-load ERROR lines even when the gate is green**, because a loot-table parse failure never fails a test. (the ~390-file mob mod's `mansion_spawns.json`)
+144. **Fixing §142 UNMASKS latent data bugs — expect a second wave, and treat it as progress** · **Pattern:** after renaming `loot_tables`→`loot_table` / `forge/`→`neoforge/`, data that had been silently inert starts loading — and hard-fails · **Runtime:** `IllegalStateException: Unknown registry key in ResourceKey[minecraft:root / minecraft:entity_type]: <modid>:<id>` → `Failed to load registries` → **server won't start**; and a flood of `Couldn't parse element …loot_table]` (see #143) · **Fix:** these are usually **pre-existing bugs in the upstream mod's own data** (stale ids the author left behind, e.g. a structure modifier spawning `gold_armored_vindicator` when only `armored_vindicator` was ever registered), not something the migration introduced — the 1.20 path just never read the file. Cross-check every `<modid>:` id referenced from `data/` against the registry (`grep -rho '"<modid>:[a-z_]*"' src/main/resources/data | sort -u`) and delete or re-point the dead ones. Sequence matters: rename dirs → fix the hard registry failures → fix the parse errors → re-run Gate B, and **read the data-load ERROR lines even when the gate is green**, because a loot-table parse failure never fails a test. (the ~390-file mob mod's `mansion_spawns.json`) · ⚠ **AUGMENT — it recurred in a FORK port of the same mod** (the jar-pipeline port's fix does not carry over), and Gate B's `DataLivenessGameTest` is what now forces the second wave to surface: a structure modifier that names a dead id stops the server loading its registries, so the gate fails by name. Re-point a dropped variant at the entity that replaced it rather than deleting the spawn, so the author's intent survives (see S9).
 
 ## P. FABRIC → NeoForge — a WHOLE NEW AXIS (surfaced porting two Fabric gear mods)
 > **Axis:** loader-transform where `SRC_LOADER = fabric`. Everything in §B–§E/§H assumes a *Forge*
@@ -1098,6 +1119,30 @@ logged line. · **So the §S8 sweep has a second axis:** for every library you b
 for it (§X41), because nothing fails. · **And the fix is a §W6 JUDGEMENT, not a rename:** replacing
 `NaN` with `0` changes 1.21.1's behaviour deliberately. Say so in the commit; a NaN keyframe is not
 a value anyone authored, but it is a value the shipping version has been using.
+
+**S9. 🔴 Forge's DATA NAMESPACE is dead on NeoForge, and the converter used to call it clean.** §142
+lists the renames; this is why they still shipped. · **Pattern:** a Forge 1.20 mod's
+`data/<ns>/forge/biome_modifier/*.json` (`"type": "forge:add_spawns"`), `forge/structure_modifier`,
+`data/forge/loot_modifiers/global_loot_modifiers.json` with `"condition": "forge:loot_table_id"`,
+`"loader": "forge:separate_transforms"` item models, `"type": "forge:conditional"` recipes, `#forge:is_*`
+biome tags and `data/forge/tags/**` · **Symptom:** nothing. The folders are never read and the ids are
+unknown, so mobs never spawn naturally, global loot modifiers never apply, items render as the missing
+model, and every crash gate passes (mobs still come from eggs and structures). Measured on a ported
+fork: 28 dead files, after it had passed Gate A, Gate B and Gate C, and after
+`fix-datapack-layout --verify` had printed "1.21-clean", because it checked plural/singular folder names
+and only *warned* about `data/forge`. · **Fix:** `tools/fix-datapack-layout.py <mod> --apply` now
+converts all of it: the folders move to `neoforge/`, `forge:X` becomes `neoforge:X` for the X NeoForge
+21.1 registers, a conditional recipe becomes the recipe with `neoforge:conditions`, and Forge tags map
+through a table checked against the NeoForge jar (`is_peak` → `c:is_mountain/peak`,
+`needs_netherite_tool` → `neoforge:`). It swaps only the changed literals, so the author's formatting
+and the diff stay small. Anything not in the tables is refused by name, and `--verify` fails while
+anything is left. · **The runtime control:** Gate B's `DataLivenessGameTest` (template) asserts every
+biome and structure modifier file of the mod registered, every loot modifier decodes, and nothing sits
+in a Forge-only folder; fork CI also runs the static `--verify` as its own row, because client assets
+(the model loader) are invisible to a server test. · **Then expect §144 at once:** the same fork's
+server refused to start the moment its structure modifiers loaded, on two entity ids the mod had
+dropped years before. A port of this same mod through the jar pipeline had hit both, and the lesson
+did not reach the fork pipeline until the converter enforced it — §S2 again.
 
 **S5c. Corollary — scope a cross-mod audit to the mods you are auditing.** The first census run loaded the
 whole 66-jar instance and never reached the census: one third-party mod requires NeoForge 21.1.233 and the harness

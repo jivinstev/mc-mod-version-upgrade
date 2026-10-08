@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 Jason Hendrickson
+// ─── TEMPLATE (Gate B, data). The harness writes it beside BaselineGameTest, substituting the package and
+// the "examplemod" literals. Like the baseline it names NO class of the mod: it reads the mod's own data
+// files from the server's resource manager and asks the game whether each one is live.
+package com.example.examplemod.test;
+
+import java.io.Reader;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
+import com.mojang.serialization.JsonOps;
+
+import net.minecraft.core.Registry;
+import net.minecraft.gametest.framework.GameTest;
+import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.resources.RegistryOps;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.packs.resources.Resource;
+import net.minecraft.server.packs.resources.ResourceManager;
+import net.neoforged.neoforge.common.loot.IGlobalLootModifier;
+import net.neoforged.neoforge.gametest.GameTestHolder;
+import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
+import net.neoforged.neoforge.registries.NeoForgeRegistries;
+
+/**
+ * The mod's data is LIVE, not just present. A Forge-era data file NeoForge does not read is silent: no
+ * error, no crash, so every other gate passes while mobs never spawn naturally or loot modifiers never
+ * apply. This fails on:
+ *  - any file left in a Forge-only place (data/&lt;ns&gt;/forge/..., data/forge/loot_modifiers/...);
+ *  - a biome or structure modifier file of this mod that did not become a registry entry;
+ *  - a global loot modifier of this mod that does not decode (an unknown condition, e.g. forge:loot_table_id).
+ */
+@GameTestHolder("examplemod")
+@PrefixGameTestTemplate(false)
+public class DataLivenessGameTest {
+    private static final String NS = "examplemod";
+
+    @GameTest(template = "empty_test")
+    public static void modDataIsLive(GameTestHelper helper) {
+        MinecraftServer server = helper.getLevel().getServer();
+        ResourceManager rm = server.getResourceManager();
+        List<String> dead = new ArrayList<>();
+
+        for (ResourceLocation id : rm.listResources("forge", p -> p.getPath().endsWith(".json")).keySet())
+            if (NS.equals(id.getNamespace())) dead.add(id + ": in a Forge-only folder, NeoForge never reads it");
+        for (ResourceLocation id : rm.listResources("loot_modifiers", p -> p.getPath().endsWith(".json")).keySet())
+            if ("forge".equals(id.getNamespace())) dead.add(id + ": Forge's loot modifier list, NeoForge reads neoforge:");
+
+        live(rm, server, "neoforge/biome_modifier", NeoForgeRegistries.Keys.BIOME_MODIFIERS, dead);
+        live(rm, server, "neoforge/structure_modifier", NeoForgeRegistries.Keys.STRUCTURE_MODIFIERS, dead);
+
+        RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, server.registryAccess());
+        int glm = 0;
+        for (Map.Entry<ResourceLocation, Resource> e : rm.listResources("loot_modifiers", p -> p.getPath().endsWith(".json")).entrySet()) {
+            if (!NS.equals(e.getKey().getNamespace())) continue;
+            glm++;
+            try (Reader r = e.getValue().openAsReader()) {
+                JsonElement json = JsonParser.parseReader(r);
+                IGlobalLootModifier.DIRECT_CODEC.parse(ops, json).error()
+                        .ifPresent(err -> dead.add(e.getKey() + ": " + err.message()));
+            } catch (Exception ex) {
+                dead.add(e.getKey() + ": " + ex);
+            }
+        }
+
+        if (!dead.isEmpty()) {
+            for (String d : dead) System.err.println("[data-liveness] " + d);
+            String msg = dead.size() + " dead data file(s) of " + NS + ": " + String.join("; ", dead);
+            helper.fail(msg.length() > 500 ? msg.substring(0, 500) + "..." : msg);   // catalog #164
+        }
+        System.out.println("[data-liveness] " + NS + ": every biome/structure modifier registered, "
+                + glm + " loot modifier(s) decode, nothing in Forge-only folders");
+        helper.succeed();
+    }
+
+    private static <T> void live(ResourceManager rm, MinecraftServer server, String dir,
+                                 ResourceKey<Registry<T>> key, List<String> dead) {
+        Registry<T> reg = server.registryAccess().registryOrThrow(key);
+        for (ResourceLocation file : rm.listResources(dir, p -> p.getPath().endsWith(".json")).keySet()) {
+            if (!NS.equals(file.getNamespace())) continue;
+            String path = file.getPath().substring(dir.length() + 1, file.getPath().length() - ".json".length());
+            if (!reg.containsKey(ResourceLocation.fromNamespaceAndPath(NS, path)))
+                dead.add(file + ": not registered as a " + key.location());
+        }
+    }
+}

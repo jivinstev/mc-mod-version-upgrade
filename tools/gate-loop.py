@@ -413,6 +413,10 @@ def main():
             if spent >= a.budget:
                 note(event="budget", spent=round(spent, 4)); return 1
             continue
+        if not phase:
+            gone = fresh_world(work)
+            if gone:
+                note(event="fresh-world", run=run, note=str(gone))
         f = failure_of(run_gate(work, task, a.heap, LOG_DIR(work) / f"gate-loop{'-' + phase if phase else ''}.log", phase),
                        client=bool(phase), ns=ns)
         if f is None:
@@ -435,6 +439,21 @@ def main():
     note(event="max-runs", spent=round(spent, 4)); return 1
 
 
+def fresh_world(work):
+    """Gate B's world is deleted before every run: the GameTest server reuses `run/world`, so anything a run
+    saved there -- a mod's own persistent state -- is still there for the next one, and the gate measures the
+    previous run instead of the code. Measured: a mod whose weapon spawn-bans what it kills (saved data in the
+    world) banned more of its own entity types each run, and two worker rounds ($5) chased "the level refused
+    it" for 22 entities that no code change could fix. Only `world` goes; configs and the rest of run/ stay.
+    -> the directory removed, or None."""
+    base = pathlib.Path(os.environ.get("PORT_HARNESS_DIR") or work)
+    w = base / "run" / "world"
+    if w.is_dir():
+        shutil.rmtree(w, ignore_errors=True)
+        return w
+    return None
+
+
 def verdict_red(note, run, phase, text):
     """--no-workers (CI): a red gate is the verdict. Print what failed and stop; never call a model."""
     note(event="red-final", run=run, phase=phase)
@@ -450,6 +469,17 @@ def self_check():
     ok = (k == "crash" and text.startswith("Caused by: java.lang.IllegalArgumentException") and "a.b.Mod.<init>" in text
           and "net.neoforged" not in text and failure_of("All 6 required tests passed :)") is None)
     ok = ok and failure_of("x\nMY_MOD_BOOT_TEST: PASS mode=spawn\n", client=True) is None
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:                       # Gate B's saved world never outlives a run
+        (pathlib.Path(d) / "run/world/data").mkdir(parents=True)
+        (pathlib.Path(d) / "run/world/data/bans.dat").write_bytes(b"x")
+        (pathlib.Path(d) / "run/config").mkdir()
+        old = os.environ.pop("PORT_HARNESS_DIR", None)
+        gone = fresh_world(pathlib.Path(d))
+        ok = ok and gone is not None and not (pathlib.Path(d) / "run/world").exists() \
+            and (pathlib.Path(d) / "run/config").is_dir() and fresh_world(pathlib.Path(d)) is None
+        if old is not None:
+            os.environ["PORT_HARNESS_DIR"] = old
     k2, t2, _s = failure_of("MY_MOD_BOOT_TEST: spawning 4\nMY_MOD_BOOT_TEST: FAIL — 1 entity crashed\n", client=True)
     ok = ok and k2 == "gatec" and "FAIL" in t2
     k3, _t, _s = failure_of("Caused by: java.lang.NoClassDefFoundError: x\n\tat a.b.C.d(C.java:1)\n", client=True)

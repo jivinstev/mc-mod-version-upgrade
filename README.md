@@ -47,6 +47,22 @@ tree. Then:
 
 Forge 1.20.1 → NeoForge 1.21.1 is proven on three MIT-licensed forks. 26.2 is wired but not yet proven.
 
+## Skills: in Claude Code, or from the command line
+
+Each job is a Claude Code skill, so inside `claude` (started in this folder) you can either ask in plain words
+or type the skill's slash command. Each skill drives scripts in `tools/` that you can also run yourself,
+with no Claude session.
+
+| Skill | In Claude Code | From the command line |
+|---|---|---|
+| **install-mod**: install a mod and its dependencies from Modrinth or CurseForge | `> Install Sodium` or `/install-mod Sodium` | `python3 tools/mod-registry/modreg.py search --query "Sodium"`, then `versions`, `deps` and `download` (see [tools/mod-registry/README.md](tools/mod-registry/README.md)) |
+| **install-mod**: install fork ports from GitHub, with their dependencies and NeoForge | `> Install these mods from owner/RepoA owner/RepoB` or `/install-mod owner/RepoA owner/RepoB` | `python3 tools/install-port.py owner/RepoA owner/RepoB [--with-optional | --with-untested] [--dry-run] [--mods-dir DIR]`, then optionally `tools/boot-mods.sh DIR` to boot the folder headless first |
+| **migrate-mod**: port a mod from its jar | `> Migrate <mod name> to 26.2` or `/migrate-mod <mod name> to 26.2` | `python3 tools/port.py "<mod name or jar>" --to 26.2` (rerun to resume; `--from-port mods/<modid>` to continue a finished port) |
+| **port-fork**: port a mod in its own GitHub fork, with CI, releases and an offer | `> Port my fork <github url> to 1.21.1` or `/port-fork <github url>` | `python3 tools/port-upstream.py --repo DIR --modid ID` (the port), `tools/ci-gates.py` (gates as CI runs them, `--env full` or `minimal`), `tools/port-ci.py` (adds the CI), `tools/port-offer.py` (the offer and install manifest), `tools/port-fleet.py --fleet FILE <step>` (every fork at once) |
+| **review-contribution**: review a pull request to this repository | `> Review PR 42` or `/review-contribution 42` | `python3 tools/review-pr.py --base origin/main --head HEAD` (the mechanical checks; the judgement half is the skill) |
+
+Each script prints its options with `--help`. Most also have `--self-check`, which runs their own tests.
+
 ## Measured ports
 
 Every port here was run from this repository alone:

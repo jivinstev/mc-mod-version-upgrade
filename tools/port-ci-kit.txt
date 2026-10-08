@@ -5,6 +5,7 @@ templates/multi-version/tools/gametest_adapter.py
 templates/multi-version/tools/prepare-sources.py
 templates/multi-version/versions/26.2.renames.hand.tsv
 templates/neoforge-mod/test-templates/BaselineGameTest.java.example
+templates/neoforge-mod/test-templates/DataLivenessGameTest.java.example
 templates/neoforge-mod/test-templates/ClientBootSmokeTest.java.example
 templates/neoforge-mod/test-templates/MixinConfigIntegrityTest.java.template
 templates/upstream-harness/clientboot-26.2.patch.txt
@@ -15,9 +16,11 @@ tools/ci-gates.py
 tools/content-census.py
 tools/fix-json-strict.py
 tools/gate-loop.py
+tools/optional-dep-scan.py
 tools/gen-empty-structure.py
 tools/gitbash.py
 tools/port_gates.py
 tools/scaffold-gatec.py
 tools/srcsets.py
 tools/targets.py
+tools/fix-datapack-layout.py

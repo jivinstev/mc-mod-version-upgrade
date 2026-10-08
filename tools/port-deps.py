@@ -27,7 +27,7 @@ EXIT CODES
     2  the preflight itself could not finish (registry lookup failed): NOT a pass
 Standard library only.
 """
-import argparse, concurrent.futures, json, os, pathlib, re, subprocess, sys, tempfile, time
+import argparse, concurrent.futures, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODREG = ROOT / "tools/mod-registry/modreg.py"
@@ -613,9 +613,41 @@ def dep_moves(repo, deps, apply, fetch=fetch_jar, out=None):
     return res
 
 
+def api_report(repo, deps, fetch=fetch_jar, trees=()):
+    """tools/dep-api.py over every mod dependency's TARGET jar (local maven first, else the registry) plus any
+    ported sibling source trees. Never fatal: a failure is a line."""
+    try:
+        sp = importlib.util.spec_from_file_location("dep_api", ROOT / "tools/dep-api.py")
+        da = importlib.util.module_from_spec(sp); sp.loader.exec_module(da)
+        jars, seen = {}, set()
+        for d in deps:
+            if d["kind"] != "mod" or d.get("provided") or not d.get("target"):
+                continue
+            ch = ((d.get("res") or {}).get("versions") or {}).get("chosen")
+            coord = (d.get("suggested") or {}).get("coord")
+            if not ch or not coord or coord in seen:
+                continue
+            seen.add(coord)
+            g, a, v = coord.split(":")[:3]
+            path = LOCAL_MAVEN / g.replace(".", "/") / a / v / f"{a}-{v}.jar"
+            if not path.is_file():
+                path, _ = fetch(d["res"].get("fallback_provider") or d["res"]["provider"], d["res"]["id"], ch["fileId"])
+            if path:
+                j = da.Jar(path=path); jars[j.name] = j
+        for t in trees:
+            j = da.Jar(tree=t); jars[j.name] = j
+        if not jars:
+            return ["no target jars to compare"]
+        rep, by_id, loaded = da.analyse(da.source_files(repo), jars)
+        return da.render(rep, by_id, loaded, {}, jars).splitlines()
+    except Exception as e:                                        # a broken jar must not fail the preflight
+        return [f"dep-api failed: {type(e).__name__}: {e}"]
+
+
 # ---------------------------------------------------------------------------------------------- main run
 def run(repo, mc, loader="neoforge", fill_local=False, probe=curl_probe, search=None, versions_fn=None,
-        vn_fn=modrinth_version_number, local_place=None, out=print, apply_moves=False, fetch=fetch_jar):
+        vn_fn=modrinth_version_number, local_place=None, out=print, apply_moves=False, fetch=fetch_jar,
+        provide=(), api=False, api_trees=()):
     repo = pathlib.Path(repo)
     bg = repo / "build.gradle"
     if not bg.is_file():
@@ -727,6 +759,16 @@ def run(repo, mc, loader="neoforge", fill_local=False, probe=curl_probe, search=
             d["toml_modid"] = hit[0] if hit else None
             d["target"] = d["res"]["versions"]["has_native"] if d["res"].get("versions") else None
             d["suggested"] = suggest(d, d["res"], mc, vn_fn) if d["res"].get("versions") else {"coord": None, "change": None, "note": d["res"].get("error")}
+    # a dependency ported ALONGSIDE this mod (port-upstream --provide OLD=NEW) has a target build: ours
+    for spec in provide:
+        old, new = spec.split("=", 1)
+        for d in deps:
+            if f"{d['group']}:{d['artifact']}".startswith(old):
+                d["provided"] = new
+                d["target"] = True
+                d["suggested"] = {"coord": new, "change": None, "note": "provided by a sibling port (--provide)"}
+                if d.get("required") in (None, "unknown"):
+                    d["required"] = "provided"
     mapped = {d.get("toml_modid") for d in deps if d.get("toml_modid")}
     unmapped_toml = sorted(m for m in toml if m not in mapped and m not in ("forge", "neoforge", "minecraft"))
 
@@ -750,12 +792,22 @@ def run(repo, mc, loader="neoforge", fill_local=False, probe=curl_probe, search=
     # 5b. jars of the author's version vs the target's: classes that moved
     moves = dep_moves(repo, deps, apply_moves, fetch) if (fill_local or apply_moves) else None
 
+    # 5c. what the mod USES of each dependency's API, against the target jar (tools/dep-api.py)
+    api_lines = api_report(repo, deps, fetch, api_trees) if api else None
+
     # 6. report + exit code
     req_missing = [d for d in deps if d["kind"] == "mod" and d["required"] == "required" and d.get("target") is False]
     blocked_noreg = [d for d in deps if d["host_status"] == "BLOCKED" and d["kind"] in ("library", "unresolved")]
     reg_err = [d for d in deps if d["kind"] in ("mod", "unresolved") and d.get("res", {}).get("error") and d["kind"] == "mod" and not d["res"].get("versions")]
     code = 3 if req_missing else 4 if blocked_noreg else 2 if reg_err else 0
     report = render(repo, mc, loader, repos, deps, notes, unmapped_toml, filled, req_missing, blocked_noreg, reg_err, code, out, moves)
+    if api_lines is not None:
+        out("")
+        out("API use against the target jars (tools/dep-api.py):")
+        for l in api_lines:
+            out("  " + l)
+        if isinstance(report, dict):
+            report["api"] = api_lines
     return code, report
 
 
@@ -788,7 +840,7 @@ def render(repo, mc, loader, repos, deps, notes, unmapped_toml, filled, req_miss
         elif d["kind"] == "library":
             tb = "library"
         hs = d["host_status"] + (" " + ",".join(d["hosts"][:1]) if d["hosts"] and d["host_status"] != "n/a" else "")
-        rows.append((dep, d["kind"], d["scope"], {"required": "req", "optional": "opt", "unknown": "?", None: "-"}[d["required"]], hs, tb, sug))
+        rows.append((dep, d["kind"], d["scope"], {"required": "req", "optional": "opt", "unknown": "?", "provided": "prov", None: "-"}[d["required"]], hs, tb, sug))
     w = [min(max(len(r[i]) for r in rows), 60) for i in range(7)]
     for r in rows:
         out("  " + "  ".join(str(c)[:w[i]].ljust(w[i]) for i, c in enumerate(r)).rstrip())
@@ -1036,12 +1088,17 @@ def main():
     ap.add_argument("--repo"); ap.add_argument("--mc"); ap.add_argument("--loader", default="neoforge")
     ap.add_argument("--fill-local", action="store_true"); ap.add_argument("--apply-moves", action="store_true"); ap.add_argument("--json")
     ap.add_argument("--self-check", action="store_true")
+    ap.add_argument("--provide", action="append", default=[], metavar="OLD=NEW",
+                    help="a dependency ported alongside this mod: it has a target build (ours)")
+    ap.add_argument("--api", action="store_true", help="also report what the mod uses of each dependency's API")
+    ap.add_argument("--api-tree", action="append", default=[], help="a ported sibling's source tree, for --api")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
     if not a.repo or not a.mc:
         ap.error("--repo and --mc are required")
-    code, rep = run(a.repo, a.mc, a.loader, a.fill_local, apply_moves=a.apply_moves)
+    code, rep = run(a.repo, a.mc, a.loader, a.fill_local, apply_moves=a.apply_moves, provide=a.provide, api=a.api,
+                    api_trees=a.api_tree)
     if a.json:
         pathlib.Path(a.json).write_text(json.dumps(rep, indent=2), encoding="utf-8")
     return code

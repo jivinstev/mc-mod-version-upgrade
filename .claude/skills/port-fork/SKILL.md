@@ -52,7 +52,10 @@ python3 tools/port-profile.py ~/forks/<repo>
 python3 tools/port-deps.py --repo ~/forks/<repo> --mc <target>
 ```
 The profile names the cost-driving patterns and the tool covering each; the deps check finds blocked
-hosts and dependencies with no build for the target **before** anything is spent. Measured fork ports
+hosts and dependencies with no build for the target **before** anything is spent. Add `--api` (and
+`--provide OLD=NEW` / `--api-tree <ported dep's src/main/java>` for a sibling port) to see, per dependency,
+what the mod imports, which of its overrides changed signature, and whether the ids it names still exist:
+"integrates with a dozen mods" is often a handful of unchanged APIs plus string ids. Measured fork ports
 for comparison (Forge 1.20.1 → NeoForge 1.21.1, as each port's `COST.md` recorded it): a library of 198
 Java files and 25 mixins, $5.86; a mob mod of 353 Java files and 25 mixins that depends on it, $8.94. A port well outside those sizes, with coremods,
 custom shaders or many mixins, costs more — say so.
@@ -79,6 +82,12 @@ The authors' own `build`, Gate A, Gate B and Gate C (a real client under Xvfb: `
 nothing fixed. This is exactly what the fork's CI will run, so a red here is a red there. Gate C needs
 Xvfb + Mesa (`apt-get install -y xvfb libgl1-mesa-dri`; the CI workflow installs the same).
 
+CI runs it twice: `--env full` (every mod the build puts on the runtime) and `--env minimal` (only the
+mods the port's `neoforge.mods.toml` requires). Run both. In minimal, `tools/optional-dep-scan.py` reads
+the compiled classes before Gate B and fails when a listener class names an optional mod in a method's
+types (NeoForge cannot even scan it without that mod); a mixin that reaches one is reported, because it
+runs whether or not the mod is installed and is safe only behind a "mod loaded" check.
+
 ## 5. CI and release
 
 ```bash
@@ -95,9 +104,16 @@ only if every gate passes. Give the user the release link; they smoke-test it on
 
 ## 6. (dependents) CI that needs another fork
 
-A dependent mod's CI builds its dependency's fork into mavenLocal first (`--dep`). Prefer pointing it at
-the dependency's **released** JAR once that exists, so the dependent's CI does not rebuild a branch that
-can move under it.
+A dependent mod's CI needs its dependency in mavenLocal. Once the dependency has a release (step 5), use
+that JAR, pinned by sha256 the same way as the kit:
+
+```bash
+python3 tools/port-ci.py --repo ~/forks/<dependent> --modid <id> \
+    --dep-jar <user>/<lib>@<lib release tag>/<lib jar>=<group>:<artifactId>:<version>
+```
+with the coordinates the dependent's `build.gradle` asks for. `--dep <user>/<lib>@<branch>` (build the
+dependency's branch first) works only when that build publishes those exact coordinates. A build with no
+`rootProject.name` publishes under its checkout directory's name, so it breaks quietly; prefer `--dep-jar`.
 
 ## 7. Offer it to the authors (nothing is sent)
 
@@ -110,10 +126,33 @@ authors' repository that opens nothing by itself, the size and shape of the diff
 from `state.json`, never paraphrased), and a draft message and PR description. Whether, when and how to
 contact the authors is the user's decision.
 
+**Standing rule: every offer carries "How to install", per target, and so does anything built from it.**
+`port-offer.py` writes it from what was TESTED, never the newest file on a registry: the NeoForge version the
+build names (with its installer), this fork's release jar, each required dependency at the exact version the
+ported build declares (`neoforge.mods.toml` decides required vs optional) with a direct file link, sibling
+ports from the exact release asset CI installed, optional integrations, and the build's other runtime mods
+(usually a library an optional one needs). When a release has one jar per platform, pass
+`--variant <substring>=<why>`: platform builds can differ in content, not only packaging (one library's
+CurseForge jar leaves out the Java agent its Modrinth jar carries), so a dependent must be installed with the
+variant its CI tested. An install list the user cannot follow end to end on a fresh instance is a bug.
+
 `OFFER.md` lives in the work dir, outside both repositories: it is never committed and nothing reads it
 back. Once the `-upstream` branch is pushed (so its links resolve), offer to publish it as a **private
 artifact**: a page the user can copy from that outlives the session (a cloud session's work dir does
 not). It may name the mod, being outside this repository; the no-names rule covers this repository only.
+
+## Every fork at once
+
+`tools/port-fleet.py` runs the same step over every fork you maintain, in dependency order, with each
+fork's flags in one fleet file kept outside this repository (it names the mods):
+
+```bash
+python3 tools/port-fleet.py --fleet ~/forks.json status
+python3 tools/port-fleet.py --fleet ~/forks.json gates --env minimal
+python3 tools/port-fleet.py --fleet ~/forks.json ci --push          # stop 2; then dispatch releases (stop 3)
+python3 tools/port-fleet.py --fleet ~/forks.json offer --push
+```
+Use it whenever the kit or the offer changes, so no fork is left on an old one.
 
 ## 8. Close out
 

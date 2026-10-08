@@ -81,18 +81,38 @@ def normalise(text, orig, same_package_classes):
 def blank_lines(text, orig):
     """Undo blank-line debris a port leaves: a removed import whose newline stayed behind, or three blank
     lines where an edit deleted a block. Measured against the author's own file, so their spacing is kept:
-    blank lines between imports survive only if the original import block had any, and no run of blank lines
-    grows longer than the original file's longest."""
+    inside the import block a blank line survives only where a line diff matches it to one of the author's,
+    and no run of blank lines grows longer than the original file's longest."""
     if not orig:
         return text
-    def import_gaps(t):
-        ls = t.split("\n"); idx = [i for i, l in enumerate(ls) if re.match(r"import\s", l)]
-        return any(not ls[i].strip() for i in range(idx[0], idx[-1])) if idx else False
+    import difflib
     lines = text.split("\n")
     imp = [i for i, l in enumerate(lines) if re.match(r"import\s", l)]
-    if imp and not import_gaps(orig):
-        drop = {i for i in range(imp[0], imp[-1]) if not lines[i].strip()}
-        lines = [l for i, l in enumerate(lines) if i not in drop]
+    ol = orig.split("\n")
+    oimp = [i for i, l in enumerate(ol) if re.match(r"import\s", l)]
+    drop = set()
+    if imp:
+        # line-diff the two import blocks: a blank line the diff matches to one of the author's stays (their
+        # grouping, even when the port renamed the import beside it); a blank the port inserted or turned an
+        # import into goes -- a removed import's newline, a blank setting off an added import
+        new = [l.strip() for l in lines[imp[0]:imp[-1] + 1]]
+        old = [l.strip() for l in ol[oimp[0]:oimp[-1] + 1]] if oimp else []
+        kept = set()
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            if tag == "equal":
+                kept.update(range(j1, j2))
+            elif tag == "replace":       # the author's blanks inside a rewritten stretch: keep as many as they had
+                ob = sum(1 for k in range(i1, i2) if not old[k])
+                for k in range(j1, j2):
+                    if not new[k] and ob:
+                        kept.add(k); ob -= 1
+        last_blank = False
+        for k, l in enumerate(new):
+            if not l and (k not in kept or last_blank):    # a run collapses against what is KEPT, not dropped
+                drop.add(imp[0] + k)
+                continue
+            last_blank = not l
+    lines = [l for i, l in enumerate(lines) if i not in drop]
     longest = max((len(m.group(0)) - 1 for m in re.finditer(r"\n(?:[ \t]*\n)+", orig)), default=1)
     text = "\n".join(lines)
     return re.sub(r"\n(?:[ \t]*\n){%d,}" % (longest + 1), "\n" * (longest + 1), text)
@@ -186,6 +206,15 @@ class A {
     grouped = "import a.B;\n\nimport b.C;\n"
     if blank_lines(grouped, grouped) != grouped:
         miss.append("author's import grouping removed")
+    # the author groups imports; the port removed one (its newline stayed) and set a new one off by a blank
+    og = "package p;\n\nimport a.B;\nimport a.C;\nimport a.Gone;\n\nimport m.Y;\n\nclass X {}\n"
+    pg = "package p;\n\nimport a.New;\n\nimport a.B;\nimport a.C;\n\n\nimport m.Y;\n\nclass X {}\n"
+    if blank_lines(pg, og) != "package p;\n\nimport a.New;\nimport a.B;\nimport a.C;\n\nimport m.Y;\n\nclass X {}\n":
+        miss.append("port debris kept inside an author-grouped import block: " + repr(blank_lines(pg, og)))
+    oren = "import a.B;\nimport forge.X;\n\nimport m.Y;\n"
+    pren = "import a.B;\nimport neo.X;\n\nimport m.Y;\n"
+    if blank_lines(pren, oren) != pren:
+        miss.append("author's group break dropped beside a renamed import")
     print("self-check:", "OK" if not miss else f"FAIL {miss}\n{out}")
     return 0 if not miss else 1
 

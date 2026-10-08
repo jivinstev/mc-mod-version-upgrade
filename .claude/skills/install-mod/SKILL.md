@@ -22,6 +22,34 @@ so a long dependency/migration chain never loses its place.
 - **Smoke test:** `templates/smoke-harness/` — boots arbitrary prebuilt jars headless + client.
 - **Exact commands for every step: `references/pipeline.md`. Read it.**
 
+## From a fork port (a GitHub repo, not a registry)
+When the user names GitHub repositories holding fork ports (made with the `port-fork` skill), do
+not search the registries. Each port's branch carries `.github/port-install.json`, listing the
+released jar and every dependency CI tested it with, each with a URL and sha256:
+
+```bash
+python3 tools/install-port.py owner/RepoA owner/RepoB --dry-run      # show the plan
+python3 tools/install-port.py owner/RepoA owner/RepoB                # install into MINECRAFT_MODS_DIR
+```
+
+It follows sibling ports a port depends on, installs each mod once (newest file when ports
+disagree), verifies every sha256, skips mods already in the instance, and installs the NeoForge the
+ports were tested on when it is missing (its own installer, headless, with the Launcher's Java; the
+Launcher must have been opened once). `--no-neoforge` skips that. `--with-optional` adds the optional mods CI tested with the ports; `--with-untested` also adds
+the optional integrations CI never loaded, fetched from Modrinth/CurseForge and labelled as such; `--mods-dir` picks another
+instance; it also adds what an optional mod itself requires (read from that mod's jar). A mod CI had no
+file for (a required one, or an optional one with `--with-untested`) comes from Modrinth/CurseForge (the same
+registry tool as below), checked to declare that mod id and labelled "not tested by CI"; an optional mod whose own requirement cannot be found is left out, and NeoForge is
+raised within its line when an added mod needs newer. The output leads with SUCCEEDED/FAILED per port and
+`RESULT: OK` (exit 0); warnings about optional mods never change it. `--full` installs
+exactly what CI's full pass loaded. Before writing to the real instance (confirm first, as below), install
+into a scratch folder and boot it:
+
+```bash
+python3 tools/install-port.py owner/RepoA owner/RepoB --mods-dir /tmp/try/mods
+tools/boot-mods.sh /tmp/try/mods            # headless server; PASS = the set loads together
+```
+
 ## Operating model
 Run autonomously through resolution + download + migrate + smoke-test. **Stop and ask** only at
 the three question gates (below) and **before writing to the real instance** (the final install is

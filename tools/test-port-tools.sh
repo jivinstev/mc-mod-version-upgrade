@@ -277,8 +277,14 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-geckolib.py|convert-geckolib: GeckoLib 4.8 renderer/layer/model/animation hooks and asset layout onto 5.5; refuses what it cannot rewrite exactly" \
             "ci-gates.py|ci-gates: a finished port's gates in CI, worker-free pass/fail with a summary" \
             "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
-            "port-offer.py|port-offer: the authors see the port without our CI commit; a CI commit mid-branch is refused; only what state.json verified is claimed" \
+            "port-offer.py|port-offer: the authors see the port without our CI commit; port commits after a CI commit are replayed without it; only what state.json verified is claimed" \
             "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
+            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict" \
+            "optional-dep-scan.py|optional-dep-scan: a listener class naming an optional mod in a method type blocks; a mixin reaching one through the mod is reported" \
+            "port-fleet.py|port-fleet: one fleet file runs ci/gates/offer over every fork in order, flags per fork, push after each" \
+            "fix-datapack-layout.py|fix-datapack-layout: Forge-only data (biome/structure/loot modifiers, forge: ids, conditional recipes, forge tags) converted to NeoForge; unknown ones refused and fail --verify" \
+            "fix-optional-listeners.py|fix-optional-listeners: a subscriber method naming an optional mod moves to a helper and its callers follow; it compiles and the scan then finds nothing; an optional-typed listener is refused" \
+            "dep-api.py|dep-api: per dependency, what the mod imports, overrides and names by id, against the target jar; type variables match concrete types" \
             "port-deps.py|port-deps: dependency preflight -- blocked hosts, missing target builds, local-maven fill" \
             "dep-moves.py|dep-moves: classes a dependency moved between the author's jar and the target's are found by comparing the jars, and rewritten" \
             "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \

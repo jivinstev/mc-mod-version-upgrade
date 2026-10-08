@@ -89,6 +89,11 @@ def harness(c):
     gt = re.sub(r"(?m)^package\s+[\w.]+;", f"package {pkg}.gatetest;", gt).replace('"examplemod"', f'"{modid}"')
     (h / "java" / pkg.replace(".", "/") / "gatetest").mkdir(parents=True)
     (h / "java" / pkg.replace(".", "/") / "gatetest/BaselineGameTest.java").write_text(gt, encoding="utf-8")
+    tg0 = tgt(c)
+    if tg0.gametest != "registration":     # data liveness: annotation-discovered targets (1.21.x); 26.x registers tests
+        dl = (ROOT / "templates/neoforge-mod/test-templates/DataLivenessGameTest.java.example").read_text(encoding="utf-8")
+        dl = re.sub(r"(?m)^package\s+[\w.]+;", f"package {pkg}.gatetest;", dl).replace('"examplemod"', f'"{modid}"')
+        (h / "java" / pkg.replace(".", "/") / "gatetest/DataLivenessGameTest.java").write_text(dl, encoding="utf-8")
     sd = h / "resources/data" / modid / "structure"; sd.mkdir(parents=True)
     import gzip, importlib.util
     spec = importlib.util.spec_from_file_location("ges", ROOT / "tools/gen-empty-structure.py")
