@@ -11,6 +11,8 @@ Changed files (git diff --stat -M {BASE}):
 
 Use `git diff -M {BASE} -- <path>` to read the diff and `git show {BASE}:<path>` for the author's original. Sample the large mechanical changes; read closely every file whose diff is unusual (big rewrites, deleted code, new classes, moved hooks).
 
+Commit messages are not yours to judge for P6: the attribution trailers (`Co-Authored-By`, `Claude-Session`) are required, and the port-cost table is requested by the maintainer. Judge the CODE.
+
 1. FIX what is mechanical and safe: changes the port did not need (re-wrapped lines, rewritten or removed author comments, needless renames), leftovers the port made obsolete, and a port comment that does not match the file's voice. Restore the author's text from `git show {BASE}:<path>`. Do not change behaviour; do not touch LICENSE files, build files or anything outside src/.
 2. JUDGE P1 (faithful), P3 (native), P5 (clear: does each non-obvious port decision say why, in one short comment?) and P8 (honest) by reading the code; P2, P4, P6, P7 from the measurements plus what you see.
 
