@@ -19,7 +19,7 @@ The mods folder defaults to $MINECRAFT_MODS_DIR, then the platform's default ins
 ~/Library/Application Support/minecraft/mods, Linux ~/.minecraft/mods, Windows %APPDATA%/.minecraft/mods).
 Standard library only.
 """
-import argparse, hashlib, json, os, pathlib, platform, re, shutil, sys, tempfile, urllib.request, zipfile
+import argparse, hashlib, json, os, pathlib, platform, re, shutil, sys, tempfile, urllib.error, urllib.request, zipfile
 
 UA = {"User-Agent": "install-port"}
 
@@ -36,8 +36,20 @@ def default_mods_dir():
 
 
 def fetch(url, timeout=120):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
-        return r.read()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+            return r.read()
+    except urllib.error.URLError as e:
+        # python.org's macOS Python has no CA certificates until "Install Certificates.command" is run;
+        # the system curl uses the OS's own. Fall back to it rather than fail on every download.
+        if "CERTIFICATE_VERIFY_FAILED" not in str(getattr(e, "reason", e)) or not shutil.which("curl"):
+            raise
+        import subprocess
+        r = subprocess.run(["curl", "-fsSL", "--max-time", str(timeout), "-A", UA["User-Agent"], url],
+                           capture_output=True)
+        if r.returncode:
+            raise urllib.error.URLError(f"curl exit {r.returncode}: {r.stderr.decode('utf-8', 'replace').strip()}")
+        return r.stdout
 
 
 def manifest_url(repo, branch):
@@ -108,7 +120,7 @@ def plan(repos, branch, with_optional, full, get=fetch):
         try:
             man = json.loads(get(url).decode("utf-8"))
         except Exception as e:
-            problems.append(f"{repo}: no port manifest at {url} ({type(e).__name__})")
+            problems.append(f"{repo}: no port manifest at {url} ({type(e).__name__}: {getattr(e, 'reason', e)})")
             continue
         mans.append(man)
         if not any(f.get("role") == "self" for f in man.get("files", [])):
@@ -272,6 +284,16 @@ def self_check():
         f2, _n, _p, _ = plan(["o/me"], "b", True, False, get)
         _d, _s, bad2 = install([f for f in f2 if f["modid"] == "opt"], mods, get=get)
         ok &= bad2 and "sha256 mismatch" in bad2[0] and "opt" not in installed_modids(mods)
+    with tempfile.TemporaryDirectory() as d:     # macOS python.org Python with no CA bundle: curl takes over
+        f = pathlib.Path(d, "m.json"); f.write_text('{"x": 1}', encoding="utf-8")
+        real = urllib.request.urlopen
+        def broken(*a, **k):
+            raise urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        urllib.request.urlopen = broken
+        try:
+            ok &= json.loads(fetch(f.as_uri())) == {"x": 1}
+        finally:
+            urllib.request.urlopen = real
     ok &= vkey("geckolib-neoforge-1.21.1-4.8.4.jar") > vkey("geckolib-neoforge-1.21.1-4.7.1.jar")
     ok &= vkey("curios-neoforge-9.5.1+1.21.1.jar") == (9, 5, 1)
     print("self-check:", "OK" if ok else "FAIL")
