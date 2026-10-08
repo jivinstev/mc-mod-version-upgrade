@@ -85,14 +85,27 @@ def blank_lines(text, orig):
     grows longer than the original file's longest."""
     if not orig:
         return text
-    def import_gaps(t):
-        ls = t.split("\n"); idx = [i for i, l in enumerate(ls) if re.match(r"import\s", l)]
-        return any(not ls[i].strip() for i in range(idx[0], idx[-1])) if idx else False
     lines = text.split("\n")
     imp = [i for i, l in enumerate(lines) if re.match(r"import\s", l)]
-    if imp and not import_gaps(orig):
-        drop = {i for i in range(imp[0], imp[-1]) if not lines[i].strip()}
-        lines = [l for i, l in enumerate(lines) if i not in drop]
+    ol = orig.split("\n")
+    opos = {l.strip(): i for i, l in enumerate(ol) if re.match(r"import\s", l)}
+    oblank = [i for i, l in enumerate(ol) if not l.strip()]
+    def author_gap(a, b):
+        """The author put a blank line between these two imports (both theirs, in this order)."""
+        pa, pb = opos.get(a.strip()), opos.get(b.strip())
+        return pa is not None and pb is not None and pa < pb and any(pa < k < pb for k in oblank)
+    drop = set()
+    if imp:
+        for i in range(imp[0], imp[-1]):
+            if lines[i].strip():
+                continue
+            prev = next((lines[k] for k in range(i - 1, imp[0] - 1, -1) if re.match(r"import\s", lines[k])), None)
+            nxt = next((lines[k] for k in range(i + 1, imp[-1] + 1) if re.match(r"import\s", lines[k])), None)
+            # a blank line the port left (a removed import's newline, or one set off around an added import)
+            # goes; one the author put between two of their own import groups stays -- once
+            if not (prev and nxt and author_gap(prev, nxt)) or (i > imp[0] and not lines[i - 1].strip()):
+                drop.add(i)
+    lines = [l for i, l in enumerate(lines) if i not in drop]
     longest = max((len(m.group(0)) - 1 for m in re.finditer(r"\n(?:[ \t]*\n)+", orig)), default=1)
     text = "\n".join(lines)
     return re.sub(r"\n(?:[ \t]*\n){%d,}" % (longest + 1), "\n" * (longest + 1), text)
@@ -186,6 +199,11 @@ class A {
     grouped = "import a.B;\n\nimport b.C;\n"
     if blank_lines(grouped, grouped) != grouped:
         miss.append("author's import grouping removed")
+    # the author groups imports; the port removed one (its newline stayed) and set a new one off by a blank
+    og = "package p;\n\nimport a.B;\nimport a.C;\nimport a.Gone;\n\nimport m.Y;\n\nclass X {}\n"
+    pg = "package p;\n\nimport a.New;\n\nimport a.B;\nimport a.C;\n\n\nimport m.Y;\n\nclass X {}\n"
+    if blank_lines(pg, og) != "package p;\n\nimport a.New;\nimport a.B;\nimport a.C;\n\nimport m.Y;\n\nclass X {}\n":
+        miss.append("port debris kept inside an author-grouped import block: " + repr(blank_lines(pg, og)))
     print("self-check:", "OK" if not miss else f"FAIL {miss}\n{out}")
     return 0 if not miss else 1
 

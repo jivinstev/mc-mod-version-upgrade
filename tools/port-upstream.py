@@ -192,6 +192,29 @@ def provide_text(c):
             "mavenLocal from its own port, so add `mavenLocal()` to repositories):\n" + "\n".join(lines) + "\n\n")
 
 
+def loader_in_jar_name(repo):
+    """The loader word in the JAR's name follows the port: an author who names their jars
+    `version = "${mc}-forge-${v}"` (or archivesName / archives_base_name likewise) gets `-neoforge-`. Only the
+    lines that name the artifact; `forge.logging.*` run properties are NeoForge's names too and stay.
+    Measured: a port shipped `<mod>-1.21.1-forge-<v>.jar` as its NeoForge release. Idempotent. -> lines changed."""
+    out = []
+    for name in ("build.gradle", "gradle.properties"):
+        f = repo / name
+        if not f.is_file():
+            continue
+        t = f.read_text(encoding="utf-8")
+        def fix(m):
+            new = re.sub(r"(?<![A-Za-z])forge(?![A-Za-z.])", "neoforge", m.group(0))
+            if new != m.group(0):
+                out.append(f"{name}: {new.strip()}")
+            return new
+        t2 = re.sub(r"(?m)^\s*(?:version|archivesName|archives_base_name|archivesBaseName|base\.archivesName)\s*=.*$",
+                    fix, t)
+        if t2 != t:
+            f.write_text(t2, encoding="utf-8")
+    return out
+
+
 def provide_nontransitive(repo, pairs):
     """Declare each --provide'd sibling NON-transitive. The registry artifact it replaces (maven.modrinth,
     cursemaven) carries no dependencies; a sibling published with `from components.java` carries all of its
@@ -345,7 +368,8 @@ def st_build(c):
             _t, u = claude(prompt, repo, "Read,Edit,Write,Grep,Glob")
             usd += u; asks += 1
         applied += apply_dep_versions(repo, c["dir"] / "deps.json")
-        applied += [f"{x} (non-transitive)" for x in provide_nontransitive(repo, provide_pairs(c))]    # never left to the model (see the function)
+        applied += [f"{x} (non-transitive)" for x in provide_nontransitive(repo, provide_pairs(c))]
+        applied += loader_in_jar_name(repo)         # every target is NeoForge; an existing `neoforge` is left alone    # never left to the model (see the function)
         n, line = compile_count(repo, c["dir"] / "build-check.log")
         if n is not None and raise_neo_floor(c):          # a dependency needs a newer NeoForge: recount on it
             n, line = compile_count(repo, c["dir"] / "build-check.log")
@@ -1073,6 +1097,13 @@ def self_check():
         ok &= provide_nontransitive(d, [("old:x", "net.x:lib:1.0")]) == ["net.x:lib:1.0"]
         ok &= provide_nontransitive(d, [("old:x", "net.x:lib:1.0")]) == []
         ok &= 'implementation("net.x:lib:1.0") { transitive = false }' in (d / "build.gradle").read_text(encoding="utf-8")
+        (d / "build.gradle").write_text('version = "${mc}-forge-${v}"\n'
+                                        "systemProperty 'forge.logging.markers', 'REGISTRIES'\n", encoding="utf-8")
+        (d / "gradle.properties").write_text("archives_base_name=mymod-forge\nloader=forge\n", encoding="utf-8")
+        ok &= len(loader_in_jar_name(d)) == 2 and loader_in_jar_name(d) == []
+        bg, gp = (d / "build.gradle").read_text(encoding="utf-8"), (d / "gradle.properties").read_text(encoding="utf-8")
+        ok &= 'version = "${mc}-neoforge-${v}"' in bg and "'forge.logging.markers'" in bg
+        ok &= "archives_base_name=mymod-neoforge" in gp and "loader=forge" in gp
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         (r / "src/main/resources/META-INF").mkdir(parents=True)
