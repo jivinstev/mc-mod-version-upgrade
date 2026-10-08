@@ -210,25 +210,85 @@ def install(files, mods_dir, dry=False, get=fetch):
     return done, skipped, bad
 
 
-def neoforge_note(neo, mods_dir):
-    """One instance has one NeoForge: the newest version any of the ports was tested on (21.1.x is compatible
-    within its line), and which port was tested on which when they differ."""
+NEO_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
+
+
+def neoforge_installed(mc_dir, v):
+    """The installed NeoForge of v's line (21.1.x) that is v or newer, else None."""
+    line = v.rsplit(".", 1)[0]
+    have = sorted((p.name[len("neoforge-"):] for p in (mc_dir / "versions").glob(f"neoforge-{line}.*")),
+                  key=vkey) if (mc_dir / "versions").is_dir() else []
+    ok = [h for h in have if vkey(h) >= vkey(v)]
+    return ok[-1] if ok else None
+
+
+def java_works(java):
+    try:
+        import subprocess
+        return subprocess.run([str(java), "-version"], capture_output=True, timeout=60).returncode == 0
+    except (OSError, Exception):
+        return False
+
+
+def find_java(mc_dir):
+    """A Java to run the NeoForge installer: the one the Minecraft Launcher downloaded (always there once it
+    has run), then JAVA_HOME, then PATH. macOS's /usr/bin/java is a stub without a JDK, so each is tried."""
+    rt = mc_dir / "runtime"
+    cands = sorted(rt.glob("**/bin/java"), key=lambda p: ("delta" not in str(p), str(p))) if rt.is_dir() else []
+    if os.environ.get("JAVA_HOME"):
+        cands.append(pathlib.Path(os.environ["JAVA_HOME"]) / "bin/java")
+    if shutil.which("java"):
+        cands.append(pathlib.Path(shutil.which("java")))
+    return next((c for c in cands if c.is_file() and java_works(c)), None)
+
+
+def ensure_neoforge(neo, mods_dir, dry=False, get=fetch, run=None):
+    """One instance has one NeoForge: the newest version any port was tested on (newer in the same line is
+    fine). Install it with its own installer, headless, when it is missing. -> (notes, problems)."""
     if not neo:
-        return []
+        return [], []
     mc, v, _p = neo[-1]
-    out = []
+    notes, problems = [], []
     if len({n[1] for n in neo}) > 1:
-        out.append("tested on different NeoForge versions (" + "; ".join(f"{p}: {n}" for _m, n, p in neo)
-                   + f") -- use the newest, {v}")
-    versions = mods_dir.parent / "versions"
-    if (versions / f"neoforge-{v}").is_dir():
-        out.append(f"NeoForge {v} (Minecraft {mc}) is installed.")
+        notes.append("tested on different NeoForge versions (" + "; ".join(f"{p}: {n}" for _m, n, p in neo)
+                     + f") -- using the newest, {v}")
+    mc_dir = mods_dir.parent
+    have = neoforge_installed(mc_dir, v)
+    if have:
+        notes.append(f"NeoForge {have} (Minecraft {mc}) is installed -- pick it in the Launcher")
+        return notes, problems
+    url = f"{NEO_MAVEN}/{v}/neoforge-{v}-installer.jar"
+    if dry:
+        notes.append(f"would install NeoForge {v} (Minecraft {mc}) with its installer, {url}")
+        return notes, problems
+    if not (mc_dir / "launcher_profiles.json").is_file():
+        problems.append(f"NeoForge {v} not installed: {mc_dir} has no launcher_profiles.json -- open the "
+                        "Minecraft Launcher once (it creates it), then run this again")
+        return notes, problems
+    java = find_java(mc_dir)
+    if not java:
+        problems.append(f"NeoForge {v} not installed: no working Java found (the Minecraft Launcher's own, "
+                        f"JAVA_HOME, or PATH) -- install it by hand: {url}")
+        return notes, problems
+    try:
+        data = get(url)
+        want = get(url + ".sha256").decode("utf-8").split()[0]
+    except Exception as e:
+        problems.append(f"NeoForge {v}: download failed ({type(e).__name__}: {getattr(e, 'reason', e)})")
+        return notes, problems
+    if hashlib.sha256(data).hexdigest() != want:
+        problems.append(f"NeoForge {v}: the installer's sha256 does not match the maven's -- not run")
+        return notes, problems
+    import subprocess
+    with tempfile.TemporaryDirectory() as t:
+        jar = pathlib.Path(t, f"neoforge-{v}-installer.jar"); jar.write_bytes(data)
+        r = (run or subprocess.run)([str(java), "-jar", str(jar), "--install-client", str(mc_dir)],
+                                    cwd=t, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode or not neoforge_installed(mc_dir, v):
+        problems.append(f"NeoForge {v}: its installer failed: " + (r.stdout + r.stderr).strip()[-400:])
     else:
-        have = sorted(p.name for p in versions.glob("neoforge-*")) if versions.is_dir() else []
-        out.append(f"Needs NeoForge {v} (Minecraft {mc}); " + (f"this instance has {', '.join(have)}. "
-                   if have else "none found in this instance. ")
-                   + f"Installer: https://maven.neoforged.net/releases/net/neoforged/neoforge/{v}/neoforge-{v}-installer.jar")
-    return out
+        notes.append(f"installed NeoForge {v} (Minecraft {mc}) -- in the Launcher pick the \"NeoForge\" profile")
+    return notes, problems
 
 
 def self_check():
@@ -295,6 +355,32 @@ def self_check():
             ok &= json.loads(fetch(f.as_uri())) == {"x": 1}
         finally:
             urllib.request.urlopen = real
+    with tempfile.TemporaryDirectory() as d:     # NeoForge: detected, installed headless, or refused
+        mc = pathlib.Path(d, "mc"); mods = mc / "mods"; mods.mkdir(parents=True)
+        neo = [("1.21.1", "21.1.9", "o/a"), ("1.21.1", "21.1.20", "o/b")]
+        inst = pathlib.Path(d, "inst.jar"); inst.write_bytes(b"jar")
+        calls = []
+        def fake_get(u):
+            return hashlib.sha256(b"jar").hexdigest().encode() if u.endswith(".sha256") else b"jar"
+        def fake_run(argv, **k):
+            calls.append(argv); (mc / "versions/neoforge-21.1.20").mkdir(parents=True)
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
+        ok &= any("launcher_profiles" in x for x in pr) and not calls          # launcher never run: refuse
+        (mc / "launcher_profiles.json").write_text("{}", encoding="utf-8")
+        javadir = mc / "runtime/java-runtime-delta/x/bin"; javadir.mkdir(parents=True)
+        (javadir / "java").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8"); (javadir / "java").chmod(0o755)
+        n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
+        ok &= not pr and calls and calls[0][0] == str(javadir / "java") and "--install-client" in calls[0]
+        ok &= any("21.1.20" in x and "installed" in x for x in n)
+        n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
+        ok &= len(calls) == 1 and any("is installed" in x for x in n)            # second run: nothing to do
+        (mc / "versions/neoforge-21.1.20").rename(mc / "versions/neoforge-21.1.30")
+        ok &= neoforge_installed(mc, "21.1.20") == "21.1.30" and neoforge_installed(mc, "21.1.31") is None
+        bad = lambda u: b"0" * 64 if u.endswith(".sha256") else b"jar"
+        shutil.rmtree(mc / "versions")
+        _n, pr = ensure_neoforge(neo, mods, get=bad, run=fake_run)
+        ok &= any("sha256" in x for x in pr) and len(calls) == 1
     ok &= vkey("geckolib-neoforge-1.21.1-4.8.4.jar") > vkey("geckolib-neoforge-1.21.1-4.7.1.jar")
     ok &= vkey("curios-neoforge-9.5.1+1.21.1.jar") == (9, 5, 1)
     print("self-check:", "OK" if ok else "FAIL")
@@ -309,6 +395,7 @@ def main():
     ap.add_argument("--mc", default="1.21.1"); ap.add_argument("--branch")
     ap.add_argument("--mods-dir"); ap.add_argument("--with-optional", action="store_true")
     ap.add_argument("--full", action="store_true"); ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-neoforge", action="store_true", help="do not install NeoForge when it is missing")
     a = ap.parse_args()
     mods = pathlib.Path(a.mods_dir).expanduser() if a.mods_dir else default_mods_dir()
     files, notes, problems, neo = plan(a.repos, a.branch or f"neoforge-{a.mc}", a.with_optional, a.full)
@@ -316,7 +403,9 @@ def main():
     done, skipped, bad = install(files, mods, a.dry_run)
     for line in done + skipped:
         print("  " + line)
-    for line in neoforge_note(neo, mods) + notes:
+    nnotes, nprob = ([], []) if a.no_neoforge else ensure_neoforge(neo, mods, a.dry_run)
+    problems += nprob
+    for line in nnotes + notes:
         print("  note: " + line)
     for line in problems + bad:
         print("  PROBLEM: " + line)
