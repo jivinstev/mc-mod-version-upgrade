@@ -35,7 +35,14 @@ python3 tools/install-port.py owner/RepoA owner/RepoB                # install i
 It follows sibling ports a port depends on, installs each mod once (newest file when ports
 disagree), verifies every sha256, skips mods already in the instance, and says which NeoForge
 version to install. `--with-optional` adds the optional mods CI loaded; `--mods-dir` picks another
-instance. The same rule as below applies: confirm before writing to the real instance.
+instance; it also adds what an optional mod itself requires (read from that mod's jar). `--full` installs
+exactly what CI's full pass loaded. Before writing to the real instance (confirm first, as below), install
+into a scratch folder and boot it:
+
+```bash
+python3 tools/install-port.py owner/RepoA owner/RepoB --mods-dir /tmp/try/mods
+tools/boot-mods.sh /tmp/try/mods            # headless server; PASS = the set loads together
+```
 
 ## Operating model
 Run autonomously through resolution + download + migrate + smoke-test. **Stop and ask** only at

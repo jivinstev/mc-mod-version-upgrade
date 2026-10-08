@@ -61,6 +61,30 @@ def installed_modids(mods_dir):
     return out
 
 
+def jar_modids(data):
+    import io
+    z = zipfile.ZipFile(io.BytesIO(data))
+    t = "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist()
+                if n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"))
+    return re.findall(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', t)
+
+
+def jar_required(data):
+    """The modIds a mod jar's mods.toml marks required."""
+    import io
+    z = zipfile.ZipFile(io.BytesIO(data))
+    t = "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist()
+                if n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"))
+    out = set()
+    for blk in re.split(r"(?m)^\s*\[\[", t):
+        if blk.startswith("dependencies."):
+            m = re.search(r'modId\s*=\s*"([^"]+)"', blk)
+            req = re.search(r'type\s*=\s*"required"', blk) or re.search(r"mandatory\s*=\s*true", blk)
+            if m and req and m.group(1) not in ("minecraft", "neoforge", "forge", "java"):
+                out.add(m.group(1))
+    return out
+
+
 def vkey(name):
     """Sortable version from a jar name or version string: the numbers in order (geckolib-...-4.8.4.jar > 4.7.1)."""
     nums = re.findall(r"\d+", re.sub(r"(?:neoforge|forge)-?1\.\d+(?:\.\d+)?|mc1\.\d+(?:\.\d+)?|\+1\.\d+(?:\.\d+)?", "",
@@ -70,8 +94,10 @@ def vkey(name):
 
 def plan(repos, branch, with_optional, full, get=fetch):
     """-> (files to install in order, notes, problems). Ports first-come; a mod named twice is installed once."""
+    with_optional = with_optional or full          # an exact replica includes the optional integrations
     roles = {"self", "required"} | ({"optional"} if with_optional else set()) | ({"extra"} if full else set())
     files, seen, notes, problems, mans, queue, conflicts = [], {}, [], [], [], list(repos), {}
+    extras = {}                                     # modid -> an "extra" file, in case an optional mod needs it
     visited = set()
     while queue:
         repo = queue.pop(0)
@@ -88,6 +114,8 @@ def plan(repos, branch, with_optional, full, get=fetch):
         if not any(f.get("role") == "self" for f in man.get("files", [])):
             problems.append(f"{man.get('port', repo)}: its release has several jars and the manifest names none")
         for f in man.get("files", []):
+            if f.get("role") == "extra" and f.get("url"):
+                extras.setdefault(f.get("modid") or f.get("name"), dict(f, from_port=man.get("port", repo)))
             if f.get("role") not in roles:
                 continue
             mid = f.get("modid") or f.get("name")
@@ -109,6 +137,31 @@ def plan(repos, branch, with_optional, full, get=fetch):
             files.append(entry)
             if f.get("port") and f["role"] != "self":
                 queue.append(f["port"])                 # a port this one depends on: its own requirements too
+    # an optional mod brings its own requirements, which CI loaded as "extra": read them from its jar
+    checked = set()
+    while with_optional and not full:
+        todo = [f for f in files if f["role"] in ("optional", "extra") and f["modid"] not in checked]
+        if not todo:
+            break
+        for f in todo:
+            checked.add(f["modid"])
+            try:
+                need = jar_required(get(f["url"]))
+            except Exception:
+                continue
+            missing = need - set(seen) - set(extras)
+            for k, e in list(extras.items()):         # an extra named by its build coordinate: read its modIds
+                if missing and not e.get("_read"):
+                    e["_read"] = True
+                    try:
+                        for m in jar_modids(get(e["url"])):
+                            extras.setdefault(m, dict(e, modid=m))
+                    except Exception:
+                        pass
+            for d in sorted(need - set(seen)):
+                if d in extras:
+                    seen[d] = extras[d]; files.append(extras[d])
+                    notes.append(f"{d}: added because {f['modid']} requires it")
     for mid, names in sorted(conflicts.items()):
         notes.append(f"{mid}: the ports were tested with {', '.join(sorted(n for n in names if n))}; "
                      f"installing the newest, {seen[mid]['name']}")
@@ -202,6 +255,20 @@ def self_check():
         f3, n3, _p3, neo3 = plan(["o/me", "o/other"], "b", False, False, get)
         ok &= next(f for f in f3 if f["modid"] == "lib")["name"] == "lib-2.jar" and any("newest" in n for n in n3)
         ok &= neo3[-1][1] == "21.1.9"
+        withdep = d / "src" / "optdep.jar"
+        with zipfile.ZipFile(withdep, "w") as z:
+            z.writestr("META-INF/neoforge.mods.toml", '[[mods]]\nmodId="optdep"\n[[dependencies.optdep]]\n'
+                       'modId="needed"\ntype="required"\n[[dependencies.optdep]]\nmodId="neoforge"\ntype="required"\n')
+        needed = jar("needed.jar", "needed")
+        mans[manifest_url("o/x", "b")] = {"port": "o/x", "files": [
+            {"role": "self", "modid": "x", "name": "x.jar", "url": me.as_uri()},
+            {"role": "optional", "modid": "optdep", "name": "optdep.jar", "url": withdep.as_uri()},
+            {"role": "extra", "modid": "g:needed-123", "name": "needed.jar", "url": needed.as_uri()},
+            {"role": "extra", "modid": "unrelated", "name": "u.jar", "url": needed.as_uri()}]}
+        f4, n4, _p4, _ = plan(["o/x"], "b", True, False, get)
+        ok &= [f["modid"] for f in f4] == ["x", "optdep", "needed"] and any("requires it" in n for n in n4)
+        ok &= [f["modid"] for f in plan(["o/x"], "b", False, False, get)[0]] == ["x"]
+        ok &= {f["modid"] for f in plan(["o/x"], "b", False, True, get)[0]} == {"x", "optdep", "g:needed-123", "unrelated"}
         f2, _n, _p, _ = plan(["o/me"], "b", True, False, get)
         _d, _s, bad2 = install([f for f in f2 if f["modid"] == "opt"], mods, get=get)
         ok &= bad2 and "sha256 mismatch" in bad2[0] and "opt" not in installed_modids(mods)
