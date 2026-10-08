@@ -1,0 +1,19 @@
+# Member moves 1.21.1 -> 26.2, applied by tools/fix-missing-members.py ONLY where javac reports the owner type.
+# <owner simple name> <old member> <new form>. Each row checked against the 26.2 jar (same parameters) and
+# against how the shipped 26.2 ports call it.
+GuiGraphicsExtractor	drawString	text
+GuiGraphicsExtractor	drawCenteredString	centeredText
+GuiGraphicsExtractor	renderOutline	outline
+GameRenderer	getMainCamera	mainCamera
+Minecraft	getMainRenderTarget	{recv}.gameRenderer.mainRenderTarget
+FriendlyByteBuf	readResourceLocation	readIdentifier
+FriendlyByteBuf	writeResourceLocation	writeIdentifier
+RegistryFriendlyByteBuf	readResourceLocation	readIdentifier
+RegistryFriendlyByteBuf	writeResourceLocation	writeIdentifier
+Matrix3x2fStack	pushPose	pushMatrix
+Matrix3x2fStack	popPose	popMatrix
+Camera	getPosition	position
+Screen	hasControlDown	static:Minecraft.getInstance().hasControlDown
+Screen	hasShiftDown	static:Minecraft.getInstance().hasShiftDown
+Screen	hasAltDown	static:Minecraft.getInstance().hasAltDown
+CompoundTag	getAllKeys	keySet

@@ -1002,4 +1002,9 @@ re:\bScreen\.hasShiftDown\(\)	net.minecraft.client.Minecraft.getInstance().hasSh
 # other half, and the half that keeps paying as overlays are written.
 re:\n[ \t]*@OnlyIn\([^)]*\)[ \t]*	
 
+# V38b: FML's @EventBusSubscriber lost `bus` (26.x infers it from the event type). Both argument positions.
+re:(@EventBusSubscriber\((?:[^()]|\([^()]*\))*?),\s*bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+	\1
+re:(@EventBusSubscriber\(\s*)bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+\s*,\s*	\1
+re:@EventBusSubscriber\(\s*bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+\s*\)	@EventBusSubscriber
+
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----
