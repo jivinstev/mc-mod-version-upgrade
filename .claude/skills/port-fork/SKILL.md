@@ -107,8 +107,13 @@ python3 tools/port-offer.py --repo ~/forks/<repo> --push       # stop 2: pushes 
 Makes `neoforge-<mc>-upstream` — the port branch without our CI commit — and writes `OFFER.md` in the
 work dir: the compare link to send (authors' code → the port), a pre-filled "propose a PR" link on the
 authors' repository that opens nothing by itself, the size and shape of the diff, what was verified (read
-from `state.json`, never paraphrased), and a draft message and PR description. Hand the user the file and
-the links. Whether, when and how to contact the authors is theirs to decide.
+from `state.json`, never paraphrased), and a draft message and PR description. Whether, when and how to
+contact the authors is the user's decision.
+
+`OFFER.md` lives in the work dir, outside both repositories: it is never committed and nothing reads it
+back. Once the `-upstream` branch is pushed (so its links resolve), offer to publish it as a **private
+artifact**: a page the user can copy from that outlives the session (a cloud session's work dir does
+not). It may name the mod, being outside this repository; the no-names rule covers this repository only.
 
 ## 8. Close out
 
