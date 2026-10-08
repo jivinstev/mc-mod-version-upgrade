@@ -100,6 +100,41 @@ def pre_build(deps):
     return "\n".join(steps)
 
 
+DEP_JAR = re.compile(r"([\w.-]+/[\w.-]+)@([^/=]+)/([^/=]+\.jar)=([\w.-]+):([\w.-]+):([\w.+-]+)")
+
+
+def dep_jars(specs, sha_of=None):
+    """Steps that put a sibling port's RELEASED jar into mavenLocal, pinned by sha256 like the kit:
+    owner/repo@tag/asset.jar=group:artifact:version. Prefer this to --dep once the dependency has a release: the
+    dependent's CI then builds against exactly the jar people download, not a branch that can move under it --
+    and not against whatever artifactId the dependency's build happens to publish (a build with no
+    rootProject.name publishes under its checkout directory's name)."""
+    steps = []
+    for d in specs:
+        m = DEP_JAR.fullmatch(d)
+        if not m:
+            raise SystemExit(f"--dep-jar must be owner/repo@tag/asset.jar=group:artifact:version, got {d!r}")
+        repo, tag, asset, g, art, ver = m.groups()
+        url = f"https://github.com/{repo}/releases/download/{tag}/{asset}"
+        sha = (sha_of or _sha_url)(url)
+        dest = "$HOME/.m2/repository/" + g.replace(".", "/") + f"/{art}/{ver}"
+        pom = (f'<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId><artifactId>{art}</artifactId>'
+               f'<version>{ver}</version><packaging>jar</packaging></project>')
+        steps += [f"      - name: {art} {ver} from the {tag} release into mavenLocal (pinned by sha256)",
+                  f"        run: |",
+                  f'          mkdir -p "{dest}"',
+                  f'          curl -fsSL -o "{dest}/{art}-{ver}.jar" "{url}"',
+                  f'          echo "{sha}  {dest}/{art}-{ver}.jar" | sha256sum -c -',
+                  f"          echo '{pom}' > \"{dest}/{art}-{ver}.pom\""]
+    return "\n".join(steps)
+
+
+def _sha_url(url):
+    import hashlib, urllib.request
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "port-ci"}), timeout=120) as r:
+        return hashlib.sha256(r.read()).hexdigest()
+
+
 def self_check():
     t = TEMPLATE.read_text(encoding="utf-8")
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
@@ -118,6 +153,13 @@ def self_check():
         render("x {{NOPE}}", {}); ok = False
     except (SystemExit, KeyError):
         pass
+    j = dep_jars(["o/lib@lib-1.0-mc1.21.1/lib-1.0.jar=net.x.lib:lib:1.0"], sha_of=lambda u: "a" * 64)
+    ok &= ('/net/x/lib/lib/1.0/lib-1.0.jar" "https://github.com/o/lib/releases/download/lib-1.0-mc1.21.1/lib-1.0.jar"'
+           in j and "a" * 64 + "  " in j and "<artifactId>lib</artifactId>" in j)
+    try:
+        dep_jars(["o/lib@tag=net.x:lib:1.0"], sha_of=lambda u: "a" * 64); ok = False
+    except SystemExit:
+        pass
     try:
         pre_build(["not-a-dep"]); ok = False
     except SystemExit:
@@ -133,6 +175,8 @@ def main():
     ap.add_argument("--repo", required=True); ap.add_argument("--modid", required=True)
     ap.add_argument("--upstream", default="", help="the author's repository URL, for the release notes")
     ap.add_argument("--dep", action="append", default=[], help="owner/repo@branch built into mavenLocal first")
+    ap.add_argument("--dep-jar", action="append", default=[], metavar="OWNER/REPO@TAG/ASSET.jar=G:A:V",
+                    help="a sibling port's released jar, put into mavenLocal (pinned by sha256) -- preferred to --dep")
     ap.add_argument("--gatec", default="launch,spawn"); ap.add_argument("--no-commit", action="store_true")
     ap.add_argument("--trailer", action="append", default=[])
     ap.add_argument("--kit-version", type=int, help="Port CI kit to pin (default: the newest published)")
@@ -150,7 +194,7 @@ def main():
     kver, ksha = kit_pin(mrepo, a.kit_version, a.kit_sha)
     values = {"TARGET": f"NeoForge {neo} (Minecraft {mc})", "BRANCH": branch, "MC": mc, "MODID": a.modid,
               "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
-              "GATEC": a.gatec, "PRE_BUILD": pre_build(a.dep), "UPSTREAM": a.upstream or "the original"}
+              "GATEC": a.gatec, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
     out = render(TEMPLATE.read_text(encoding="utf-8"), values)
     if a.print:
         print(out); return 0

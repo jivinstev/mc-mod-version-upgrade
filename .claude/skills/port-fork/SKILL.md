@@ -95,9 +95,16 @@ only if every gate passes. Give the user the release link; they smoke-test it on
 
 ## 6. (dependents) CI that needs another fork
 
-A dependent mod's CI builds its dependency's fork into mavenLocal first (`--dep`). Prefer pointing it at
-the dependency's **released** JAR once that exists, so the dependent's CI does not rebuild a branch that
-can move under it.
+A dependent mod's CI needs its dependency in mavenLocal. Once the dependency has a release (step 5), use
+that JAR, pinned by sha256 the same way as the kit:
+
+```bash
+python3 tools/port-ci.py --repo ~/forks/<dependent> --modid <id> \
+    --dep-jar <user>/<lib>@<lib release tag>/<lib jar>=<group>:<artifactId>:<version>
+```
+with the coordinates the dependent's `build.gradle` asks for. `--dep <user>/<lib>@<branch>` (build the
+dependency's branch first) works only when that build publishes those exact coordinates. A build with no
+`rootProject.name` publishes under its checkout directory's name, so it breaks quietly; prefer `--dep-jar`.
 
 ## 7. Offer it to the authors (nothing is sent)
 
