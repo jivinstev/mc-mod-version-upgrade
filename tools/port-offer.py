@@ -165,7 +165,9 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
     L = [f"Tested with Minecraft {mc} and NeoForge {neo}. Install that NeoForge "
          f"([installer](https://maven.neoforged.net/releases/net/neoforged/neoforge/{neo}/neoforge-{neo}-installer.jar)), "
          "then put these in the instance's `mods` folder:", ""]
-    rel, assets = own_release(fork, modid, mc)
+    mods_toml = git(repo, "show", f"{tip}:src/main/resources/META-INF/neoforge.mods.toml", check=False)
+    own = re.search(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', mods_toml)   # release tags use the mod id
+    rel, assets = own_release(fork, own.group(1) if own else modid, mc)
     if assets:
         pick = [a for a in assets if variant and variant[0] in a[0]] or assets
         if len(assets) == 1 or (variant and len(pick) == 1):
@@ -219,7 +221,8 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
         extra.append(f"- {d.get('artifact')} -- " + (f"[{label}]({file})" if file else label)
                      + (f" ([project]({page}))" if page else ""))
     if extra:
-        L += ["", "Also loaded in CI, not named by this mod (usually a library one of the optional mods above needs):"] + extra
+        L += ["", "Also loaded in CI, though this mod does not declare it (to reproduce exactly what was tested; "
+                  "often a library an optional mod above needs):"] + extra
     return L
 
 
