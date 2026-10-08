@@ -338,6 +338,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=fl.TIERS)
     ap.add_argument("--task", default="runGameTestServer")
+    ap.add_argument("--no-workers", action="store_true",
+                    help="CI: report a red gate and exit 1; never call a model")
     ap.add_argument("--budget", type=float, default=5.0); ap.add_argument("--max-runs", type=int, default=6)
     ap.add_argument("--target", default=None); ap.add_argument("--sources", default="auto")
     ap.add_argument("--heap", default="6g"); ap.add_argument("--timeout", type=int, default=900)
@@ -353,7 +355,8 @@ def main():
     if not a.work:
         ap.error("--work is required")
     work = pathlib.Path(a.work).resolve()
-    srcs = str(fl.find_sources(work) or "") if a.sources == "auto" else a.sources
+    # sources (and dependency stubs) are only for workers; a worker-free CI run skips extracting them
+    srcs = "" if a.no_workers else (str(fl.find_sources(work) or "") if a.sources == "auto" else a.sources)
     logf = open(a.log, "a", encoding="utf-8")
     note = lambda **k: (logf.write(json.dumps(k) + "\n"), logf.flush(), print(json.dumps(k)[:300]))
     spent, last_sig = 0.0, None
@@ -383,6 +386,8 @@ def main():
             if sig == last_sig:
                 note(event="stuck", run=run, spent=round(spent, 4)); return 1
             last_sig = sig
+            if a.no_workers:
+                return verdict_red(note, run, phase, text)
             spent += call_worker(a, work, srcs, text, phase, note, run)
             if spent >= a.budget:
                 note(event="budget", spent=round(spent, 4)); return 1
@@ -402,9 +407,18 @@ def main():
         if spent >= a.budget:
             note(event="budget", spent=round(spent, 4)); return 1
         last_sig = sig
+        if a.no_workers:
+            return verdict_red(note, run, phase, text)
         text += "".join("\n\n" + hint for rx, hint in FAMILY_HINTS if rx.search(text))
         spent += call_worker(a, work, srcs, text, phase, note, run)
     note(event="max-runs", spent=round(spent, 4)); return 1
+
+
+def verdict_red(note, run, phase, text):
+    """--no-workers (CI): a red gate is the verdict. Print what failed and stop; never call a model."""
+    note(event="red-final", run=run, phase=phase)
+    print(f"GATE {'C/' + phase if phase else 'B'} FAILED:\n{text[-4000:]}", flush=True)
+    return 1
 
 
 def self_check():

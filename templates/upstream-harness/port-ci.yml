@@ -1,0 +1,97 @@
+# Port CI: proves this unofficial port builds, loads and runs, and publishes the JAR on a version tag.
+#
+# Installed by tools/port-ci.py into a fork's port branch, as a commit of its own so it can be dropped if
+# the port is ever offered upstream. It runs the author's own build, then the same gates the port was held
+# to (mixin-config integrity, a headless server running GameTests, a real client under Xvfb) with NO model
+# and no automatic fixes -- a plain pass/fail. The gate harness is not part of this repository: it is
+# generated from the migrator repository, pinned to one commit, outside the source tree.
+#
+# Release: push a tag named <mod>-<version>-mc<minecraft> on this branch. If every gate passes, the JARs the
+# author's build produced are published as a PRE-release; promote it once a person has played it.
+name: Port CI ({{TARGET}})
+
+on:
+  push:
+    branches: ["{{BRANCH}}"]
+    tags: ["*-mc{{MC}}"]
+  pull_request:
+    branches: ["{{BRANCH}}"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the author's branch is needed: mixins they left unlisted stay exempt
+      - uses: actions/checkout@v4
+        with:
+          repository: {{MIGRATOR_REPO}}
+          ref: {{MIGRATOR_SHA}}
+          path: .port-tools
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "{{JAVA}}"
+      - name: Software OpenGL for the client gate
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
+{{PRE_BUILD}}
+      - name: Build and gates
+        run: |
+          git fetch --no-tags origin "{{BASE}}"
+          python3 .port-tools/tools/ci-gates.py --repo . --modid "{{MODID}}" --base "origin/{{BASE}}" \
+            --gatec "{{GATEC}}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md"
+      - name: Gate summary
+        if: always()
+        run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-logs
+          path: |
+            ${{ runner.temp }}/port-ci/*.log
+            ${{ runner.temp }}/port-ci/*.jsonl
+            ${{ runner.temp }}/gates.md
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jars
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
+
+  release:
+    needs: gates
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: jars
+          path: jars
+      - uses: actions/download-artifact@v4
+        with:
+          name: gate-logs
+          path: logs
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo "**Unofficial port** of {{UPSTREAM}} to {{TARGET}}."
+            echo "Same licence and credits as the original; not an official release by the author."
+            echo
+            cat logs/gates.md 2>/dev/null || echo "(gate summary missing)"
+            echo
+            echo "Built from \`${{ github.sha }}\` by the author's own Gradle build. Pre-release until played by a person."
+          } > notes.md
+          gh release create "$TAG" jars/*.jar --repo "${{ github.repository }}" --prerelease \
+            --title "$TAG (unofficial {{TARGET}} port)" --notes-file notes.md --target "${{ github.sha }}"
