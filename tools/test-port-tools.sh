@@ -272,6 +272,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
             "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
             "srcsets.py|srcsets: every source set the author builds, their compile and jar tasks, and the target from the build" \
+            "port-profile.py|port-profile: count the cost-driving port patterns per mod and name the tool covering each" \
             "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \
             "normalise-imports.py|normalise-imports: inline names a port wrote become imports; the author's own and colliding names are kept" \
             "port-upstream.py|port-upstream: an unlicensed or mismatched repo stops before spending; a dropped copyright line stops the push" \
