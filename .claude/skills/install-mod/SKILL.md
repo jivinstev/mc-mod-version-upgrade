@@ -22,6 +22,21 @@ so a long dependency/migration chain never loses its place.
 - **Smoke test:** `templates/smoke-harness/` — boots arbitrary prebuilt jars headless + client.
 - **Exact commands for every step: `references/pipeline.md`. Read it.**
 
+## From a fork port (a GitHub repo, not a registry)
+When the user names GitHub repositories holding fork ports (made with the `port-fork` skill), do
+not search the registries. Each port's branch carries `.github/port-install.json`, listing the
+released jar and every dependency CI tested it with, each with a URL and sha256:
+
+```bash
+python3 tools/install-port.py owner/RepoA owner/RepoB --dry-run      # show the plan
+python3 tools/install-port.py owner/RepoA owner/RepoB                # install into MINECRAFT_MODS_DIR
+```
+
+It follows sibling ports a port depends on, installs each mod once (newest file when ports
+disagree), verifies every sha256, skips mods already in the instance, and says which NeoForge
+version to install. `--with-optional` adds the optional mods CI loaded; `--mods-dir` picks another
+instance. The same rule as below applies: confirm before writing to the real instance.
+
 ## Operating model
 Run autonomously through resolution + download + migrate + smoke-test. **Stop and ask** only at
 the three question gates (below) and **before writing to the real instance** (the final install is

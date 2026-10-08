@@ -21,7 +21,8 @@ is not given).
 """
 import argparse, json, os, pathlib, re, subprocess, sys
 
-CI_FILES = {".github/workflows/port-ci.yml"}
+CI_FILES = {".github/workflows/port-ci.yml", ".github/port-install.json"}
+MANIFEST = ".github/port-install.json"
 
 
 def git(repo, *a, check=True):
@@ -168,9 +169,17 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
          "minimal pass runs exactly these and nothing else.", ""]
     mods_toml = git(repo, "show", f"{tip}:src/main/resources/META-INF/neoforge.mods.toml", check=False)
     own = re.search(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', mods_toml)   # release tags use the mod id
-    rel, assets = own_release(fork, own.group(1) if own else modid, mc)
+    ownid = own.group(1) if own else modid
+    if "${" in ownid:
+        ownid = modid
+    man = {"schema": 1, "port": fork, "modid": ownid, "minecraft": mc, "neoforge": neo, "files": []}
+    def add(role, mid, name, url, page=None, port=None):
+        man["files"].append({k: v for k, v in (("role", role), ("modid", mid), ("name", name), ("url", url),
+                                                ("page", page), ("port", port)) if v})
+    rel, assets = own_release(fork, ownid, mc)
     if assets:
         pick = [a for a in assets if variant and variant[0] in a[0]] or assets
+        add("self", ownid, pick[0][0], pick[0][1]) if (len(assets) == 1 or len(pick) == 1) else None
         if len(assets) == 1 or (variant and len(pick) == 1):
             L.append(f"1. **This mod:** [{pick[0][0]}]({pick[0][1]})"
                      + (f" -- {variant[1]}" if variant and len(assets) > 1 else ""))
@@ -193,12 +202,17 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
     for mid, required, rng in toml:
         d = build_dep(mid)
         sib = next(((a, u) for a, u in sibs if mid.replace("_", "") in a.replace("-", "").replace("_", "")), None)
+        role = "required" if required else "optional"
         if sib:
             line = f"**{mid}** -- [{sib[1].rsplit('/', 1)[-1]}]({sib[1]}) (another of these ports; the exact file CI tested)"
+            sp = re.match(r"https://github\.com/([^/]+/[^/]+)/releases/", sib[1])
+            add(role, mid, sib[1].rsplit("/", 1)[-1], sib[1], port=sp.group(1) if sp else None)
         elif d:
             label, page, file = registry_link(d, mc)
             line = f"**{mid}** -- " + (f"[{label}]({file})" if file else label) + (f" ([project]({page}))" if page else "")
+            add(role, mid, label, file, page)
         else:
+            add(role, mid, None, None, f"https://modrinth.com/mods?q={mid}&g=categories:neoforge&v={mc}")
             line = (f"**{mid}** {rng} -- not in the build, so no tested version: [find a NeoForge {mc} build]"
                     f"(https://modrinth.com/mods?q={mid}&g=categories:neoforge&v={mc})")
         (req if required else opt).append(line)
@@ -221,10 +235,30 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
         label, page, file = registry_link(d, mc)
         extra.append(f"- {d.get('artifact')} -- " + (f"[{label}]({file})" if file else label)
                      + (f" ([project]({page}))" if page else ""))
+        add("extra", d.get("artifact"), label, file, page)
     if extra:
         L += ["", "Added in CI's full pass, though this mod does not declare them (the full setup that was also "
                   "tested; often an integration, or a library an optional mod above needs):"] + extra
-    return L
+    return L, man
+
+
+def hash_files(man):
+    """sha256 of every file the manifest links, so an installer verifies what it downloads is what CI tested."""
+    import hashlib, urllib.request
+    for f in man["files"]:
+        if f.get("url") and not f.get("sha256"):
+            try:
+                req = urllib.request.Request(f["url"], headers={"User-Agent": "port-offer"})
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    data = r.read()
+                f["sha256"] = hashlib.sha256(data).hexdigest()
+                if not f.get("name") or f["name"].startswith(("CurseForge file", "version ")):
+                    disp = r.headers.get("Content-Disposition") or ""
+                    m = re.search(r'filename="?([^";]+)', disp)
+                    f["name"] = m.group(1) if m else urllib.request.unquote(r.geturl().rsplit("/", 1)[-1])
+            except Exception as e:
+                f["error"] = f"{type(e).__name__}: {e}"[:200]
+    return man
 
 
 def verified(state):
@@ -342,6 +376,7 @@ def main():
     ap.add_argument("--base", help="the authors' ref (default: origin/HEAD)")
     ap.add_argument("--upstream", help="the authors' repository, owner/repo (default: the fork's GitHub parent)")
     ap.add_argument("--modid"); ap.add_argument("--work-dir"); ap.add_argument("--push", action="store_true")
+    ap.add_argument("--trailer", action="append", default=[])
     ap.add_argument("--variant", metavar="SUBSTRING=WHY",
                     help="when the release has one jar per platform, the one to install and why (e.g. _mr=...)")
     a = ap.parse_args()
@@ -401,11 +436,29 @@ def main():
         deps = dep_rep.get("dependencies") if isinstance(dep_rep, dict) else []
     except SystemExit:
         deps = []
-    ctx["install"] = install_section(repo, tip, branch, fork, props.get("mod_id") or modid,
+    ctx["install"], man = install_section(repo, tip, branch, fork, props.get("mod_id") or modid,
                                      props.get("minecraft_version", ""), props.get("neo_version", ""),
                                      tuple(a.variant.split("=", 1)) if a.variant else None, deps)
     work.mkdir(parents=True, exist_ok=True)
     (work / "OFFER.md").write_text(render(ctx), encoding="utf-8")
+    man = hash_files(man)
+    mtext = json.dumps(man, indent=2) + "\n"
+    (work / "port-install.json").write_text(mtext, encoding="utf-8")
+    if ci and a.push:     # beside our CI file, never in the authors' offer; [skip ci]: data, not code
+        cur = git(repo, "show", f"{branch}:{MANIFEST}", check=False)
+        if cur.strip() != mtext.strip():
+            if git(repo, "rev-parse", "--abbrev-ref", "HEAD") != branch:
+                sys.exit(f"check out {branch} to commit {MANIFEST}")
+            (repo / MANIFEST).parent.mkdir(parents=True, exist_ok=True)
+            (repo / MANIFEST).write_text(mtext, encoding="utf-8")
+            git(repo, "add", MANIFEST)
+            git(repo, "commit", "-q", "-m", "Install manifest for this port [skip ci]\n\nThe exact files CI tested, "
+                "with sha256, for tools/install-port.py in the migrator. Data only; not part of the port.\n"
+                + "".join(f"\n{t}" for t in (a.trailer or [])))
+            r = subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", branch], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace")
+            if r.returncode:
+                sys.exit(f"push of {MANIFEST} failed: {r.stderr.strip()[-300:]}")
     pushed = ""
     if ci and a.push:
         r = subprocess.run(["git", "-C", str(repo), "push", "-f", "origin", f"{offer}:refs/heads/{offer}"],

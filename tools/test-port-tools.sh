@@ -279,6 +279,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
             "port-offer.py|port-offer: the authors see the port without our CI commit; a CI commit mid-branch is refused; only what state.json verified is claimed" \
             "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
+            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict" \
             "dep-api.py|dep-api: per dependency, what the mod imports, overrides and names by id, against the target jar; type variables match concrete types" \
             "port-deps.py|port-deps: dependency preflight -- blocked hosts, missing target builds, local-maven fill" \
             "dep-moves.py|dep-moves: classes a dependency moved between the author's jar and the target's are found by comparing the jars, and rewritten" \

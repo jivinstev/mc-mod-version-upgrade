@@ -37,7 +37,7 @@ def toml_mods(text):
     """{modId: [required dependency modIds]} from a (neoforge.)mods.toml."""
     mods = re.findall(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', text)
     out = {m: [] for m in mods}
-    for owner, block in re.findall(r'(?s)\[\[dependencies\.([\w.-]+)\]\](.*?)(?=\[\[|\Z)', text):
+    for owner, block in re.findall(r'(?s)\[\[dependencies\.([^\]]+)\]\](.*?)(?=\[\[|\Z)', text):
         mid = re.search(r'modId\s*=\s*"([^"]+)"', block)
         req = re.search(r'type\s*=\s*"required"', block) or re.search(r'mandatory\s*=\s*true', block)
         if mid and req and mid.group(1) not in PLATFORM:
@@ -60,6 +60,10 @@ def minimal_exclusions(own_toml, artifacts):
     stay. -> ([group:module to exclude], {group:module: [modIds]})."""
     own = toml_mods(own_toml)
     need = {d for deps in own.values() for d in deps}
+    blocks = len(re.findall(r"\[\[dependencies\.", own_toml))
+    parsed = len(re.findall(r'(?s)\[\[dependencies\.([^\]]+)\]\]', own_toml))
+    if blocks != parsed:     # a dependency block the parser cannot read would be "not required" -> removed
+        raise SystemExit(f"minimal environment: read {parsed} of {blocks} dependency blocks in neoforge.mods.toml")
     jars = {coord: jar_mods(path) for coord, path in artifacts}
     changed = True
     while changed:                                  # close over what the required mods themselves require
@@ -94,7 +98,8 @@ def self_check():
     ok &= green_detail("M_BOOT_TEST: spawned 40 creature type(s): [a]\nM_BOOT_TEST: PASS — ticked 200").startswith(
         "PASS — ticked 200; 40 entity types spawned")
     ok &= green_detail("") == "green"
-    own = '[[mods]]\nmodId="me"\n[[dependencies.me]]\nmodId="lib"\ntype="required"\n[[dependencies.me]]\nmodId="opt"\ntype="optional"\n'
+    own = ('[[mods]]\nmodId="${mod_id}"\n[[dependencies.${mod_id}]] #optional\n    modId="lib" #mandatory\n'
+           '    type = "required" #mandatory\n[[dependencies.${mod_id}]]\nmodId="opt"\ntype="optional"\n')
     import tempfile as _t
     with _t.TemporaryDirectory() as d:
         def jar(name, toml):
