@@ -65,7 +65,7 @@ class Target:
 
 TARGETS = {
     "1.21.1": Target(
-        mc="1.21.1", neo_version="21.1.228", neo_range="[21.1,)", mc_range="[1.21.1,1.22)", loader_range="[4,)",
+        mc="1.21.1", neo_version="21.1.228", neo_range="[21.1,21.2)", mc_range="[1.21.1,1.21.2)", loader_range="[4,)",
         java=21, mdg="2.0.146", gradle="", mixin_compat="JAVA_21", mixin_legacy=("JAVA_17", "JAVA_8"),
         pack_style="pack_format", pack_resources=(34, 0), pack_data=(48, 0), world_version=3955,
         parchment=True,
@@ -78,7 +78,7 @@ TARGETS = {
         recipe_pack="tools/recipes/forge-1.20-to-neoforge-1.21.1.recipes.tsv", rename_table="", members_table="", client_patch="",
         note="ModDevGradle 2.x builds both NeoForge 21.1.x and 26.2, so the same build can be bumped later."),
     "26.2": Target(
-        mc="26.2", neo_version="26.2.0.75", neo_range="[26.2,)", mc_range="[26.2,26.3)", loader_range="[4,)",
+        mc="26.2", neo_version="26.2.0.75", neo_range="[26.2,26.3)", mc_range="[26.2,26.3)", loader_range="[4,)",
         java=25, mdg="2.0.146", gradle="8.14.5", mixin_compat="JAVA_21", mixin_legacy=("JAVA_17", "JAVA_8"),
         pack_style="formats", pack_resources=(88, 0), pack_data=(107, 1), world_version=4903,
         parchment=False,
@@ -506,10 +506,10 @@ def self_check():
             '[[dependencies.m]]\nmodId="minecraft"\nmandatory=true\nversionRange="[1.20.1,1.21)"\n'
     t1, t2 = TARGETS["1.21.1"], TARGETS["26.2"]
     o = retarget_toml(forge, t1)
-    chk("1.21.1 toml", 'loaderVersion = "[4,)"' in o and 'modId="neoforge"' in o and 'versionRange="[21.1,)"' in o
-        and 'versionRange="[1.21.1,1.22)"' in o and 'type = "required"' in o and "mandatory" not in o)
+    chk("1.21.1 toml", 'loaderVersion = "[4,)"' in o and 'modId="neoforge"' in o and 'versionRange="[21.1,21.2)"' in o
+        and 'versionRange="[1.21.1,1.21.2)"' in o and 'type = "required"' in o and "mandatory" not in o)
     o2 = retarget_toml(o, t2)
-    chk("26.2 toml hop", 'versionRange="[26.2,)"' in o2 and 'versionRange="[26.2,26.3)"' in o2 and 'modId="neoforge"' in o2)
+    chk("26.2 toml hop", 'versionRange="[26.2,26.3)"' in o2 and 'versionRange="[26.2,26.3)"' in o2 and 'modId="neoforge"' in o2)
     chk("toml idempotent", retarget_toml(o2, t2) == o2)
     chk("dependency ranges listed", dependency_ranges(o2 + '[[dependencies.m]]\nmodId="lib"\nversionRange="[4.7,)"\n') == [("lib", "[4.7,)")])
     mx = '{"refmap": "a.refmap.json", "compatibilityLevel": "JAVA_17", "mixins": []}'
@@ -578,7 +578,7 @@ tasks.withType(JavaCompile).configureEach { it.options.release = 21 }
         and nb.count("\n") > build.count("\n") - 8)
     chk("gecko wiring", 'implementation("maven.modrinth:geckolib:${geckolib_version}")' in nb and "api.modrinth.com/maven" in nb
         and "interfaceInjectionData.from(provider {" in nb and "geckolib_version=IEGPh4CJ" in np_
-        and "minecraft_version=26.2" in np_ and "neo_version=26.2.0.75" in np_ and "neo_version_range=[26.2,)" in np_
+        and "minecraft_version=26.2" in np_ and "neo_version=26.2.0.75" in np_ and "neo_version_range=[26.2,26.3)" in np_
         and "minecraft_version_range=[26.2,26.3)" in np_)
     wr = "distributionBase=GRADLE_USER_HOME\ndistributionUrl=https\\://services.gradle.org/distributions/gradle-8.8-bin.zip\ndistributionSha256Sum=abc\n"
     w2, wn = bump_wrapper(wr, t2)

@@ -1236,7 +1236,7 @@ def self_check_targets():
             out = st_metadata({"repo": r, "args": types.SimpleNamespace(modid="m"), "target": t2})
         toml = (res / "META-INF/neoforge.mods.toml").read_text(encoding="utf-8")
         pack = json.loads((res / "pack.mcmeta").read_text(encoding="utf-8"))["pack"]
-        chk("26.2 metadata", 'versionRange="[26.2,)"' in toml and 'versionRange="[26.2,26.3)"' in toml
+        chk("26.2 metadata", 'versionRange="[26.2,26.3)"' in toml and 'versionRange="[26.2,26.3)"' in toml
             and '[[mixins]]\nconfig = "m.mixins.json"' in toml and pack["min_format"] and "pack_format" not in pack
             and out["dependency_ranges_to_review"] == ["lib [4.7,)"] and out["pack_formats"]["data"][0] == 107)
         # a second run changes nothing

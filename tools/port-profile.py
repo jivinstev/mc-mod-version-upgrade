@@ -11,11 +11,11 @@ profiled while a port branch is checked out. Standard library only.
 import collections, pathlib, re, subprocess, sys
 
 PAT=[ # (name, regex over file text, covered-by)
- ('vanilla entity renderer', r'extends\s+(Mob|Living|Humanoid|Entity|AgeableMob|Projectile|Arrow|ThrownItem)\w*Renderer\b', 'none (proposed: convert-entity-renderstate)'),
- ('vanilla entity model', r'extends\s+(Hierarchical|Entity|Humanoid|Agean|Ageable|Listed|Quadruped)\w*Model\b', 'none (proposed)'),
- ('vanilla render layer', r'extends\s+RenderLayer\b', 'none (proposed)'),
- ('GeckoLib renderer/layer/model', r'extends\s+(Geo\w*Renderer|GeoRenderLayer|\w*GeoLayer|GeoModel|DefaultedEntityGeoModel|DefaultedBlockGeoModel)', 'renames only (proposed: convert-geckolib)'),
- ('GeckoLib animatable', r'implements\s+[^{]*GeoEntity|GeoBlockEntity|GeoItem|registerControllers\s*\(', 'renames only (proposed)'),
+ ('vanilla entity renderer', r'extends\s+(Mob|Living|Humanoid|Entity|AgeableMob|Projectile|Arrow|ThrownItem)\w*Renderer\b', 'convert-entity-renderstate'),
+ ('vanilla entity model', r'extends\s+(Hierarchical|Entity|Humanoid|Agean|Ageable|Listed|Quadruped)\w*Model\b', 'convert-entity-renderstate'),
+ ('vanilla render layer', r'extends\s+RenderLayer\b', 'convert-entity-renderstate'),
+ ('GeckoLib renderer/layer/model', r'extends\s+(Geo\w*Renderer|GeoRenderLayer|\w*GeoLayer|GeoModel|DefaultedEntityGeoModel|DefaultedBlockGeoModel)', 'convert-geckolib'),
+ ('GeckoLib animatable', r'implements\s+[^{]*GeoEntity|GeoBlockEntity|GeoItem|registerControllers\s*\(', 'convert-geckolib'),
  ('custom RenderType', r'RenderType\.create\s*\(|CompositeState', 'convert-rendertypes'),
  ('custom shader program', r'ShaderInstance|RegisterShadersEvent', 'convert-core-shaders / runtime seam'),
  ('GUI screen/widget', r'extends\s+(Abstract\w*)?(Screen|Widget|ContainerScreen|SelectionList)\b', 'convert-gui-hooks'),
@@ -27,7 +27,7 @@ PAT=[ # (name, regex over file text, covered-by)
  ('tick event phase', r'TickEvent\.\w+Event', 'forge-shapes tick'),
  ('item NBT', r'getOrCreateTag|getTag\(\)|setTag\(', 'forge-shapes nbt'),
  ('armor/tool tier', r'implements\s+(ArmorMaterial|Tier)\b|extends\s+(ArmorItem|SwordItem|PickaxeItem|DiggerItem|ShieldItem|TieredItem)', 'none'),
- ('entity hurt/save', r'boolean\s+hurt\s*\(DamageSource|addAdditionalSaveData|readAdditionalSaveData', 'none (26.2 ValueIO)'),
+ ('entity hurt/save', r'boolean\s+hurt\s*\(DamageSource|addAdditionalSaveData|readAdditionalSaveData', 'convert-valueio'),
  ('SavedData', r'extends\s+SavedData', 'none'),
  ('config spec', r'ForgeConfigSpec', 'recipes'),
 ]
@@ -61,6 +61,22 @@ def main(argv):
     return 0
 
 
+def coverage_problems(root=None):
+    """The covered-by column is a claim about this repository: every tool it names must exist, and a tool it
+    calls "proposed" must not -- otherwise the table quietly reports gaps that are closed, or cover that is not."""
+    root = pathlib.Path(root or pathlib.Path(__file__).resolve().parent)
+    exists = lambda n: (root / f"{n}.py").is_file() or (root / n).is_dir()
+    out = []
+    for name, _rx, cov in PAT:
+        for tool in re.findall(r"\b[a-z]+(?:-[a-z0-9]+)+\b", cov):
+            proposed = re.search(r"proposed[^)]*\b" + re.escape(tool), cov)
+            if proposed and exists(tool):
+                out.append(f"{name}: '{tool}' exists, but the table still calls it proposed")
+            elif not proposed and not exists(tool):
+                out.append(f"{name}: names '{tool}', which is not in tools/")
+    return out
+
+
 def self_check():
     import tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -72,7 +88,16 @@ def self_check():
             subprocess.run(["git", "-C", d, *c], check=True)
         n, c = profile(d, "HEAD")
         ok = n == 2 and c["vanilla entity renderer"] == 1 and c["custom RenderType"] == 1 and c["GeckoLib renderer/layer/model"] == 1
-    print("self-check:", "OK" if ok else f"FAIL {n} {c}")
+    stale = coverage_problems()
+    ok &= not stale
+    import tempfile as _t
+    with _t.TemporaryDirectory() as d:                 # the guard itself: a stale entry is caught
+        (pathlib.Path(d) / "convert-x.py").write_text("", encoding="utf-8")
+        saved = PAT[:]
+        PAT[:] = [("a", "x", "none (proposed: convert-x)"), ("b", "y", "convert-gone")]
+        ok &= len(coverage_problems(d)) == 2
+        PAT[:] = saved
+    print("self-check:", "OK" if ok else f"FAIL {n} {c} {stale}")
     return 0 if ok else 1
 
 
