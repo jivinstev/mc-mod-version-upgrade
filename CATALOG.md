@@ -522,6 +522,19 @@ action (here an off-hand attack while dual-wielding). Caught by a player, after 
 **Control:** `tools/audit-unit-codecs.py` (a ci-gates row; matches the call across line breaks, which a plain
 grep did not) — exit 1 on a non-record, non-enum class with no `equals`.
 
+R29. **🔴 A mixin class that EXTENDS a vanilla parent inherits that parent's covariant bridges — and on 1.21 two
+of them can collide on the target, so mixin apply fails at startup.** · **Pattern:** `@Mixin(MushroomCow.class)
+abstract class X extends Cow` — the usual way to reach `goalSelector` and the parent's methods from a mixin. On
+1.21.1 `Cow` and `MushroomCow` each declare `getBreedOffspring(ServerLevel, AgeableMob)` with their own covariant
+return, so each has a synthetic bridge with the same descriptor. · **Runtime:** `InvalidMixinException:
+Conflicting synthetic bridge target method descriptor in synthetic bridge method getBreedOffspring(…)… Existing:
+(…)MushroomCow; Incoming: (…)Cow` — the mod refuses to load. Compiles clean. · **Fix:** extend the nearest ancestor
+that has what the mixin uses and no override of the target's covariant methods (`PathfinderMob` for goal
+selectors), keeping the constructor's `EntityType<? extends …>` in step. · **Why it hid:** it surfaced in CI's
+Gate B and not in two local Gate B runs of the same commit and kit, i.e. it depends on when the target class is
+first loaded. A green local Gate B is not proof a mixin applies; the CI run is the second sample. Found on a
+release-aligned branch, where `port-derive` had listed the released mixin again (see §W19).
+
 **Non-fatal runtime issues (log errors / wrong visuals, not a crash — fix during the boot loop, they won't fail the gate):**
 - **Forge biome modifier not renamespaced/retyped** (mob silently stops spawning naturally) · **Pattern:** `data/<ns>/forge/biome_modifier/*.json` with `"type": "forge:add_spawns"` (also `add_features`, `remove_spawns`) · **Log:** usually silent (a datapack registry the mod's own code doesn't read) → the entity just never spawns in its biomes. · **Fix:** move the file to `data/<ns>/**neoforge**/biome_modifier/` and rename the type `forge:add_spawns` → `neoforge:add_spawns` (the `{biomes, spawners:{type,weight,minCount,maxCount}}` body is unchanged). **Scan:** `grep -rln '"forge:add_spawns"\|/forge/biome_modifier/' src/main/resources` and `find src/main/resources/data/*/forge/biome_modifier`. (a single-mob MCreator mod (~15 files): deep_dark + dark_forest spawns.)
 - **`forge:` model-loader id not renamespaced** · **Log:** `Model loader 'forge:separate_transforms' not found. Registered loaders: neoforge:separate_transforms, …` → the item bakes as the missing-model (black/purple), no crash. · **Fix:** renamespace the `"loader"` id in the item-model JSONs, `forge:<x>` → `neoforge:<x>` (`separate_transforms`, `composite`, `obj`, `item_layers`, …). **Scan:** `grep -rln '"loader": *"forge:' src/main/resources`. (Was 8 models here: crossbow variants, a lance, a hammer, a scimitar.)
@@ -4037,6 +4050,20 @@ same for `CLIENT_RESOURCES`). An external tool cannot do that, so the caller pas
 (1.21/1.21.1 → 48, 1.21.2/1.21.3 → 57, 1.21.4 → 61), and a test drives the REAL writer rather than
 the table. The writer test is red on the old code (48 ≠ 61). **Sweep:** `catalog-scans.md` §W18. A
 rewrite at install is a backstop, and while it exists the bug stays invisible.
+
+**W19. A RELEASE-ALIGNED BRANCH, derived instead of re-ported — and the three things the derivation got wrong.**
+A fork cut from an author's development tip ships code players have never run (measured: 52 commits, +4877 lines
+past the release). `tools/port-derive.py` replays the port's commits onto the release commit, drops files that
+exist only in unreleased code, and `--resolve` hands each still-failing file to one worker with the release copy
+beside it. Measured on one mod: 58 errors → 0 for $1.77 of model spend, against $2.55 for the original port. It is
+not a free lunch, and the gates were what made it safe: (a) clearing an error, the model DELETED two released
+behaviours whose declaration the replay had lost (a config option, a registry registration) -- now flagged by
+`release_losses`, which lists every removed line the release also has; (b) the replay took the development
+branch's mixin config, naming ten unreleased mixins and dropping two released ones -- now fixed by the derive
+itself; (c) one released mixin re-listed that way does not apply on the new version at all (R29). Read the
+loss list, run every gate, and let CI be the second sample. Match the release by publish time over EVERY registry
+the mod is on (`tools/port-provenance.py`), and find the project by its `displayName`: a similarly named mod once
+put a 1-commit distance at 34.
 
 ## X. CODEMOD HYGIENE — a rule that matches nothing is invisible, and that is the whole problem
 > **Axis:** instrument quality. Every large migration here is driven by mass rewrites, and this
