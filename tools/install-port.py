@@ -138,7 +138,8 @@ def plan(repos, branch, with_optional, full, get=fetch):
                         newf = dict(f, from_port=man.get("port", repo))
                         files[next(i for i, x in enumerate(files) if x is old)] = newf
                         seen[mid] = newf
-                    conflicts.setdefault(mid, set()).update({old.get("name"), f.get("name")})
+                    if f.get("name") != old.get("name"):     # the same file from two URLs is not a conflict
+                        conflicts.setdefault(mid, set()).update({old.get("name"), f.get("name")})
                 continue
             if not f.get("url"):
                 (problems if f["role"] in ("self", "required") else notes).append(
