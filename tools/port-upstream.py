@@ -522,7 +522,8 @@ def st_gates(c):
     end = next((json.loads(l) for l in reversed(r.stdout.splitlines())
                 if re.search(r'"event": "(green|stuck|budget|max-runs)"', l)), None)
     if not end or end["event"] != "green":
-        raise Fail(f"Gate B not green ({end and end['event']}): {(r.stdout or r.stderr)[-800:]}")
+        raise Fail(f"Gate B not green ({end and end['event']}): {(r.stdout or r.stderr)[-800:]}",
+                   usd=(end or {}).get("spent", 0))
     return {"gateA_tests": ran, "usd": end.get("spent", 0), "gateB_runs": end.get("run")}
 
 
