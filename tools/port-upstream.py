@@ -256,6 +256,11 @@ def harness(c):
     spec = importlib.util.spec_from_file_location("ges", ROOT / "tools/gen-empty-structure.py")
     ges = importlib.util.module_from_spec(spec); spec.loader.exec_module(ges)
     (sd / "empty_test.nbt").write_bytes(gzip.compress(ges.build(modid, "empty_test", 9, 3955)))
+    sg = importlib.util.spec_from_file_location("sgc", ROOT / "tools/scaffold-gatec.py")
+    sgc = importlib.util.module_from_spec(sg); sg.loader.exec_module(sgc)
+    (h / "java" / pkg.replace(".", "/") / "test").mkdir(parents=True, exist_ok=True)
+    (h / "java" / pkg.replace(".", "/") / "test/ClientBootSmokeTest.java").write_text(
+        sgc.render(sgc.TEMPLATE.read_text(encoding="utf-8"), modid, pkg), encoding="utf-8")
     cfg = f"{modid}.mixins.json"
     if (c["repo"] / "src/main/resources" / cfg).exists():
         t = (ROOT / "templates/neoforge-mod/test-templates/MixinConfigIntegrityTest.java.template").read_text(encoding="utf-8")

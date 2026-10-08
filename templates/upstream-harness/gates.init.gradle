@@ -17,6 +17,13 @@ allprojects { p ->
         p.dependencies.add('testImplementation', 'org.junit.jupiter:junit-jupiter:5.10.2')
         p.dependencies.add('testRuntimeOnly', 'org.junit.platform:junit-platform-launcher')
         p.tasks.withType(Test).configureEach { useJUnitPlatform(); workingDir = p.projectDir }
+        // Gate C: the repo's own client run, pointed at a run directory outside the tree and passed the
+        // harness switches (`runClient -Pboottest -Ptestmode=<launch|spawn|battle|gauntlet>`).
+        p.neoForge.runs.matching { it.name == 'client' }.configureEach { r ->
+            r.gameDirectory = p.file("${harness}/run-client")
+            if (p.hasProperty('boottest')) r.systemProperty "${modid}.boottest", 'true'
+            if (p.hasProperty('testmode')) r.systemProperty "${modid}.testmode", p.property('testmode').toString()
+        }
         p.neoForge.runs.create('gameTestServer') {
             type = 'gameTestServer'
             gameDirectory = p.file("${harness}/run")
