@@ -39,6 +39,17 @@ VANILLA_ACTIONS = {   # a mixin into one of these is how the player triggers it
     "drop": "drop the held item (Q)", "keyPress": "press the mod's key", "onKeyPress": "press the mod's key",
     "mouseClicked": "click in the screen", "releaseUsing": "release right-click after charging",
 }
+EVENT_ACTIONS = {   # a packet sent from one of these client events: the player action that fires it
+    "LoggingIn": "Join a world (single-player) and, if you can, a server -- it is sent on joining",
+    "LoggingOut": "Leave the world back to the title screen",
+    "Clone": "Die and respawn", "PlayerRespawnEvent": "Die and respawn",
+    "InteractionKeyMappingTriggered": "Attack or use an item (left/right-click)",
+    "Key": "Press the mod's key", "MouseButton": "Click the mouse in a world",
+    "LeftClickEmpty": "Left-click at nothing (air)", "RightClickEmpty": "Right-click at nothing (air)",
+    "LeftClickBlock": "Left-click a block", "RightClickItem": "Use (right-click) the item in hand",
+    "ScreenEvent": "Open the screen it watches", "Post": "Play normally for a minute (it runs every tick)",
+    "Pre": "Play normally for a minute (it runs every tick)",
+}
 FAIL_BLOCK = """### If a test fails
 
 1. Note the test number and the step where it went wrong. Was there a crash, a disconnect ("Connection lost"), or
@@ -136,8 +147,15 @@ def d_client_packets(mod):
             action = VANILLA_ACTIONS.get(method or "", None)
             if target and action:
                 how = f"In a world, {action}" + (" while holding the mod's item in the off-hand" if "Hand" in payload else "")
-            elif re.search(r"KeyMapping|consumeClick|isDown\(\)", t):
-                how = "Press the mod's key (see Options → Controls → Key Binds) in the situation it is meant for"
+            elif ev := [e for e in re.findall(r"\(\s*([\w.]*Event[\w.]*)\s+\w+\s*\)\s*\{", t[max(0, m.start() - 600):m.start()])]:
+                how = EVENT_ACTIONS.get(ev[-1].split(".")[-1], f"Do what makes the game fire `{ev[-1]}` (the method that sends it)")
+            elif re.search(r"consumeClick|isDown\(\)", t[max(0, m.start() - 1500):m.start()]):
+                keys = [mod.lang.get(k, k) for k in re.findall(r'new\s+KeyMapping\(\s*"([\w.]+)"', "".join(mod.java.values()))]
+                how = ("Press the mod's key" + (f" (**{keys[0]}**" + (" or another of its keys" if len(keys) > 1 else "") + ")" if keys else "")
+                       + " in the situation it is for; Options → Controls → Key Binds lists them")
+            elif re.search(r"onPress|Button\.builder|new\s+Button\(", t[max(0, m.start() - 1500):m.start()]):
+                scr = re.search(r"class\s+(\w+)", t)
+                how = f"Open the mod's screen ({scr.group(1) if scr else pathlib.Path(f).stem}) and click the button that saves or applies it"
             elif re.search(r"extends\s+\w*Screen", t):
                 how = f"Open the screen in `{pathlib.Path(f).stem}` and use each of its buttons"
             else:
@@ -173,27 +191,32 @@ def d_music(mod):
                 steps = ["Options → Music & Sounds: set **Music** above 0 (this plays on the Music channel; a muted "
                          "slider looks exactly like a broken mod)"]
                 if ent:
-                    steps += [summon(mod, ent) + f" -- the {mod.name('entity', ent)}",
+                    steps += [summon(mod, ent) + f" -- {mod.name('entity', ent)}",
                               "Stay near it / let it fight you for 20-30 seconds", "Then kill it (`/kill @e[type=" +
                               f"{mod.modid}:{ent}]`) or walk far away"]
                     expect = f"The '{rid}' track starts within a few seconds of the fight, and stops after."
                 else:
                     steps += [f"Trigger what `{pathlib.Path(f).stem}` handles (it plays the track)"]
                     expect = f"The '{rid}' track plays."
-                out.append(cand("music", 90 - len(out), f"Music: {rid.replace('_', ' ')}",
+                boss_ids = {mod.class_id.get(c) for c in boss_classes(mod)}
+                out.append(cand("music", 90 - len(out) + (8 if ent in boss_ids else 0), f"Music: {rid.replace('_', ' ')}",
                                 "Audio can only be checked by ear: a test can prove the file loads, not that it starts "
                                 "at the right moment.", steps, expect, mod.rel(f)))
     return out
 
 
-def d_boss(mod):
-    out = []
+def boss_classes(mod):
     bossy = {re.search(r"class\s+(\w+)", t).group(1) for t in mod.java.values()
              if re.search(r"\bnew\s+\w*Boss\w*(?:Event|Info|Bar)\w*\(", t) and re.search(r"class\s+\w+", t)}
     for _ in range(3):   # subclasses of a boss-bar class are bosses too
         bossy |= {m.group(1) for t in mod.java.values() for m in re.finditer(r"class\s+(\w+)\s+extends\s+(\w+)", t)
                   if m.group(2) in bossy}
-    for cls in sorted(bossy):
+    return bossy
+
+
+def d_boss(mod):
+    out = []
+    for cls in sorted(boss_classes(mod)):
         rid = mod.class_id.get(cls) if cls.endswith("Entity") else None
         f = next((g for g, t in mod.java.items() if re.search(r"class\s+" + cls + r"\b", t)), None)
         if rid and f:
@@ -295,12 +318,15 @@ def d_recipe(mod):
             continue
         typ = d.get("type", "") if isinstance(d, dict) else ""
         if typ.startswith(mod.modid + ":"):
-            types.setdefault(typ, (f, d))
-    for typ, (f, d) in list(types.items())[:3]:
-        items = sorted(set(re.findall(r'"(?:item|id)"\s*:\s*"([a-z0-9_]+:[a-z0-9_/]+)"', json.dumps(d))))
+            n = len(set(re.findall(r'"[a-z0-9_]+:[a-z0-9_/]+"', json.dumps(d))))
+            if typ not in types or n > types[typ][2]:      # the example that names the most ingredients
+                types[typ] = (f, d, n)
+    for typ, (f, d, _) in sorted(types.items(), key=lambda kv: -kv[1][2])[:3]:
+        items = sorted(set(re.findall(r'"(?:item|id)"\s*:\s*"([a-z0-9_]+:[a-z0-9_/]+)"', json.dumps(d)))
+                       or {v for v in re.findall(r'"([a-z0-9_]+:[a-z0-9_/]+)"', json.dumps(d)) if v != typ})
         out.append(cand("recipe", 55, f"Recipe type: {typ}",
                         "A custom recipe type parses, syncs to the client and crafts through code a gate never runs.",
-                        [f"`/give @s` each of: {', '.join(items[:6])}" if items else "Get the ingredients",
+                        [f"`/give @s` each of: {', '.join(items[:6])}" if items else f"Its JSON names no ingredients (the rule is in the mod's code for `{typ}`): find the item or station that uses it",
                          f"Use them at the mod's station for `{typ}` (example: {mod.rel(f)})"],
                         "The recipe shows in the station and produces its result; no disconnect when joining a world.",
                         mod.rel(f)))
