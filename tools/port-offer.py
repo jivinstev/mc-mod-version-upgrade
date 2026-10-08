@@ -19,7 +19,7 @@ owner's decision. --push pushes the `-upstream` branch to the fork (origin) so t
 the command to run is printed. Standard library only (network only to read the fork's parent when --upstream
 is not given).
 """
-import argparse, json, os, pathlib, re, subprocess, sys
+import argparse, json, os, pathlib, re, subprocess, sys, tempfile
 
 CI_FILES = {".github/workflows/port-ci.yml", ".github/port-install.json"}
 MANIFEST = ".github/port-install.json"
@@ -507,7 +507,11 @@ def main():
     try:     # the top-10 manual tests (tools/manual-tests.py), read off this checkout of the port
         sp = __import__("importlib.util").util.spec_from_file_location("manual_tests", pathlib.Path(__file__).parent / "manual-tests.py")
         mt = __import__("importlib.util").util.module_from_spec(sp); sp.loader.exec_module(mt)
-        mmod, chosen, total = mt.tests(repo, 10)
+        with tempfile.TemporaryDirectory() as snap:      # the OFFERED commit's tree, whatever is checked out
+            paths = [x for x in ("src", "gradle.properties") if git(repo, "ls-tree", tip, x, check=False)]
+            arc = subprocess.run(["git", "-C", str(repo), "archive", tip, *paths], capture_output=True, check=True)
+            subprocess.run(["tar", "-x", "-C", snap], input=arc.stdout, check=True)
+            mmod, chosen, total = mt.tests(snap, 10)
         ctx["manual"] = mt.markdown(mmod, chosen, total) if chosen else ""
     except Exception as e:     # never lose the offer over the test list; say so instead
         ctx["manual"] = f"## Manual tests\n\n(manual-tests.py failed: {e}; run it by hand)\n"

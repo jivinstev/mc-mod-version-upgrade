@@ -166,9 +166,11 @@ A fork is usually cut from the author's development tip, and that can be far fro
 
 ```bash
 python3 tools/port-provenance.py --repo ~/forks/<repo> --base $(git -C ~/forks/<repo> merge-base origin/HEAD neoforge-<mc>) \
-    --provider modrinth --id <slug> --mc <author's mc>     # or --published <ISO> / --release <commit>
+    --registry modrinth:<slug> --registry curseforge:<id> --mc <author's mc> --loader <loader>   # or --published / --release
 ```
 The release commit is matched by publish time (the last commit before the upload); say so when quoting it.
+Name every registry the mod is on (the newest file wins: one can lag a version behind) and find the project by
+the `displayName` in its mods.toml -- a similarly named mod once put a 1-commit distance at 34.
 Small distances (one or two commits) are fine to ship as-is, with the provenance in the offer. For a large
 one, ship BOTH:
 

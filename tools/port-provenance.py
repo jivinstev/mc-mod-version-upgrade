@@ -2,7 +2,7 @@
 """How far a port's base is from what the author actually RELEASED: the commits in between, how big, and what.
 
     python3 tools/port-provenance.py --repo <fork clone> --base <commit the port branch starts from>
-        (--release <commit> | --published <ISO time> | --provider modrinth|curseforge --id <project> --mc <ver>)
+        (--release <commit> | --published <ISO time> | --registry modrinth:<slug> [--registry curseforge:<id>] --mc <ver> [--loader forge])
         [--branch <author's branch, default: the base's own history>] [--format md|json]
     python3 tools/port-provenance.py --self-check
 
@@ -15,6 +15,9 @@ branch (tools/port-derive.py).
 FINDING THE RELEASE. A registry stores when a file was PUBLISHED, not which commit built it. The release commit is
 taken as the last commit on the author's branch at or before that time (the version bump usually lands minutes
 before the upload). Say "matched by publish time" when you quote it; pass --release when you know the commit.
+Name every registry the mod is on and its loader: the newest file over all of them wins (one registry can lag a
+version behind), and match the project by the mod's displayName in its mods.toml -- search ranks by downloads, and
+a similarly named mod's dates put the release weeks off.
 Standard library only; --provider runs tools/mod-registry/modreg.py.
 """
 import argparse, json, pathlib, re, subprocess, sys, tempfile
@@ -28,15 +31,20 @@ def git(repo, *a):
     return r.stdout
 
 
-def published_from_registry(provider, pid, mc):
-    """The newest datePublished among the project's files for this Minecraft version (any loader)."""
+def published_from_registry(registries, mc, loader=None):
+    """The newest datePublished among the project's files for this Minecraft version, over EVERY registry given:
+    the same release lands on each minutes or days apart, and one of them can lag a whole version behind."""
     tool = pathlib.Path(__file__).parent / "mod-registry/modreg.py"
-    r = subprocess.run([sys.executable, str(tool), "versions", "--provider", provider, "--id", pid, "--mc", mc],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
-    dates = re.findall(r'"datePublished":\s*"([^"]+)"', r.stdout)
+    dates = []
+    for reg in registries:
+        provider, pid = reg.split(":", 1)
+        r = subprocess.run([sys.executable, str(tool), "versions", "--provider", provider, "--id", pid, "--mc", mc]
+                           + (["--loader", loader] if loader else []),
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        dates += re.findall(r'"datePublished":\s*"([^"]+)"', r.stdout)
     if not dates:
-        sys.exit(f"modreg found no published file for {pid} on {mc}: {(r.stderr or r.stdout)[-300:]}")
-    return max(dates)
+        sys.exit(f"no registry has a published file for {', '.join(registries)} on {mc}")
+    return max(dates, key=lambda d: datetime.fromisoformat(d.replace("Z", "+00:00")))
 
 
 def release_at(repo, ref, published):
@@ -119,7 +127,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo"); ap.add_argument("--base"); ap.add_argument("--branch")
     ap.add_argument("--release"); ap.add_argument("--published")
-    ap.add_argument("--provider"); ap.add_argument("--id"); ap.add_argument("--mc")
+    ap.add_argument("--registry", action="append", default=[], metavar="PROVIDER:ID")
+    ap.add_argument("--mc"); ap.add_argument("--loader")
     ap.add_argument("--format", choices=["md", "json"], default="md"); ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -129,9 +138,9 @@ def main():
     if a.release:
         rel, how = a.release, "the given commit"
     else:
-        pub = a.published or (published_from_registry(a.provider, a.id, a.mc) if a.provider and a.id and a.mc else None)
+        pub = a.published or (published_from_registry(a.registry, a.mc, a.loader) if a.registry and a.mc else None)
         if not pub:
-            ap.error("give --release, --published, or --provider/--id/--mc")
+            ap.error("give --release, --published, or --registry ... --mc")
         rel, how = release_at(a.repo, a.branch or a.base, pub), f"publish time {pub}"
     r = report(a.repo, a.base, rel, how)
     print(json.dumps(r, indent=1) if a.format == "json" else markdown(r))
