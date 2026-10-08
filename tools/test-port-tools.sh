@@ -276,6 +276,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-entity-renderstate.py|convert-entity-renderstate: vanilla entity renderers/models/layers onto 26.2 render state; refuses what it cannot rewrite exactly" \
             "convert-geckolib.py|convert-geckolib: GeckoLib 4.8 renderer/layer/model/animation hooks and asset layout onto 5.5; refuses what it cannot rewrite exactly" \
             "port-deps.py|port-deps: dependency preflight -- blocked hosts, missing target builds, local-maven fill" \
+            "dep-moves.py|dep-moves: classes a dependency moved between the author's jar and the target's are found by comparing the jars, and rewritten" \
             "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
             "local-maven.py|local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry" \
             "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dependency PREFLIGHT for a port: find missing / blocked dependencies with a script, before any model is spent.
 
-    python3 tools/port-deps.py --repo <mod git repo> --mc <target MC> [--loader neoforge] [--fill-local] [--json out.json]
+    python3 tools/port-deps.py --repo <mod git repo> --mc <target MC> [--loader neoforge] [--fill-local] [--apply-moves] [--json out.json]
     python3 tools/port-deps.py --self-check
 
 Reads the author's build.gradle (+ settings.gradle, gradle.properties, META-INF/*mods.toml), then:
@@ -14,6 +14,11 @@ Reads the author's build.gradle (+ settings.gradle, gradle.properties, META-INF/
   4. probes where each declared artifact is actually served from, so a BLOCKED host is named per dependency;
   5. --fill-local places the registry jar of every blocked-host mod under the suggested coordinate via
      tools/local-maven.py.
+  6. with --fill-local, for every mod whose AUTHOR version the registry can also serve (a cursemaven file id, a
+     modrinth maven version), downloads the old jar into ~/.mc-mod-upgrade/dep-cache/ and runs tools/dep-moves.py
+     on (old jar, target jar): classes a dependency MOVED between the two versions (a renamed root package) are
+     found by comparing the jars, before any model is spent on `package X does not exist`. --apply-moves
+     rewrites the mod's sources for the unambiguous moves. A failed old-jar download is reported, never fatal.
 
 EXIT CODES
     0  all good (optional mods without a target build are reported, never dropped)
@@ -27,6 +32,8 @@ import argparse, concurrent.futures, json, os, pathlib, re, subprocess, sys, tem
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODREG = ROOT / "tools/mod-registry/modreg.py"
 LOCALMAVEN = ROOT / "tools/local-maven.py"
+DEP_CACHE = pathlib.Path.home() / ".mc-mod-upgrade/dep-cache"
+LOCAL_MAVEN = pathlib.Path.home() / ".mc-mod-upgrade/local-maven"
 
 PLATFORM_GROUPS = ("net.neoforged", "net.minecraftforge", "net.minecraft", "minecraft")
 LIBRARY_PREFIXES = ("org.", "com.google.", "io.github.llamalad7", "javax.", "jakarta.", "com.mojang", "io.netty",
@@ -527,9 +534,88 @@ def loader_swap_needed(art):
     return bool(re.search(r"(?<![a-z])forge(?![a-z])", art))
 
 
+# ---------------------------------------------------------------------------------------------- dependency moves
+def _dep_moves():
+    import importlib.util
+    sp = importlib.util.spec_from_file_location("dep_moves", ROOT / "tools/dep-moves.py")
+    m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+    return m
+
+
+def old_source(d):
+    """(provider, project id, file id) of the AUTHOR's version when the registry can serve it, else (None, reason)."""
+    v = d.get("version") or ""
+    if d["group"] == "curse.maven":
+        m = re.match(r"^.+-(\d+)$", d["artifact"])
+        return ("curseforge", m.group(1), v) if m and v.isdigit() else (None, "no numeric cursemaven file id")
+    if d["group"] == "maven.modrinth" and v:
+        rc, out, _ = _run(["curl", "-sS", "-m", "30", f"https://api.modrinth.com/v2/project/{d['artifact']}/version"], 40)
+        try:
+            for row in json.loads(out):
+                if v in (row.get("id"), row.get("version_number")):
+                    return "modrinth", d["artifact"], row["id"]
+        except (ValueError, TypeError, AttributeError):
+            pass
+        return None, f"modrinth version {v!r} not found"
+    return None, "author's own maven -- the registry cannot name the old file"
+
+
+def fetch_jar(provider, pid, fid):
+    """Download through modreg into the dep cache (reused when already there) -> (path|None, message)."""
+    d = DEP_CACHE / f"{provider}-{pid}-{fid}"
+    jars = sorted(d.glob("*.jar")) if d.is_dir() else []
+    if not jars:
+        d.mkdir(parents=True, exist_ok=True)
+        rc, out, err = _run([sys.executable, str(MODREG), "download", "--provider", provider, "--id", str(pid),
+                             "--file", str(fid), "--out", str(d)], 300)
+        jars = sorted(d.glob("*.jar"))
+        if rc != 0 or not jars:
+            return None, ((err or out).strip().splitlines() or [f"exit {rc}"])[-1][:160]
+    return jars[0], "ok"
+
+
+def dep_moves(repo, deps, apply, fetch=fetch_jar, out=None):
+    """Compare each mod's old jar with its target jar. Never fatal: every failure becomes a line."""
+    res = {"pairs": [], "failures": [], "reports": [], "lines": []}
+    pairs = []
+    for d in deps:
+        if d["kind"] != "mod" or not d.get("target") or not (d.get("suggested") or {}).get("coord"):
+            continue
+        name = f"{d['group']}:{d['artifact']}"
+        if name in res["pairs"] or any(f.startswith(name + ":") for f in res["failures"]):
+            continue                                              # declared twice (api + runtime): compare once
+        oldsrc = old_source(d)
+        if oldsrc[0] is None:
+            res["failures"].append(f"{name}: old jar not fetched -- {oldsrc[1]}")
+            continue
+        ch = d["res"]["versions"]["chosen"]
+        prov = d["res"].get("fallback_provider") or d["res"]["provider"]
+        if (oldsrc[0], str(oldsrc[2])) == (prov, str(ch["fileId"])):
+            continue                                              # the author's file IS the target file
+        old, msg = fetch(*oldsrc)
+        if old is None:
+            res["failures"].append(f"{name}: old jar download failed -- {msg}")
+            continue
+        parts = d["suggested"]["coord"].split(":")
+        g, a, v = parts[:3]
+        new = LOCAL_MAVEN / g.replace(".", "/") / a / v / f"{a}-{v}.jar"
+        if not new.is_file():
+            new, msg = fetch(prov, d["res"]["id"], ch["fileId"])
+            if new is None:
+                res["failures"].append(f"{name}: target jar download failed -- {msg}")
+                continue
+        pairs.append((old, new)); res["pairs"].append(name)
+    if pairs:
+        try:
+            res["reports"] = _dep_moves().analyse(repo, pairs, apply, res["lines"].append)
+        except Exception as e:                                    # a broken jar must not fail the preflight
+            res["failures"].append(f"dep-moves failed: {type(e).__name__}: {e}")
+    return res
+
+
 # ---------------------------------------------------------------------------------------------- main run
 def run(repo, mc, loader="neoforge", fill_local=False, probe=curl_probe, search=None, versions_fn=None,
-        vn_fn=modrinth_version_number, local_place=None, out=print):
+        vn_fn=modrinth_version_number, local_place=None, out=print, apply_moves=False, fetch=fetch_jar):
     repo = pathlib.Path(repo)
     bg = repo / "build.gradle"
     if not bg.is_file():
@@ -661,12 +747,15 @@ def run(repo, mc, loader="neoforge", fill_local=False, probe=curl_probe, search=
                 d["filled"] = ok
                 filled.append({"coord": c, "ok": ok, "msg": msg})
 
+    # 5b. jars of the author's version vs the target's: classes that moved
+    moves = dep_moves(repo, deps, apply_moves, fetch) if (fill_local or apply_moves) else None
+
     # 6. report + exit code
     req_missing = [d for d in deps if d["kind"] == "mod" and d["required"] == "required" and d.get("target") is False]
     blocked_noreg = [d for d in deps if d["host_status"] == "BLOCKED" and d["kind"] in ("library", "unresolved")]
     reg_err = [d for d in deps if d["kind"] in ("mod", "unresolved") and d.get("res", {}).get("error") and d["kind"] == "mod" and not d["res"].get("versions")]
     code = 3 if req_missing else 4 if blocked_noreg else 2 if reg_err else 0
-    report = render(repo, mc, loader, repos, deps, notes, unmapped_toml, filled, req_missing, blocked_noreg, reg_err, code, out)
+    report = render(repo, mc, loader, repos, deps, notes, unmapped_toml, filled, req_missing, blocked_noreg, reg_err, code, out, moves)
     return code, report
 
 
@@ -675,7 +764,7 @@ def _local_maven(coord, provider, pid, fid):
     return rc == 0, (o or e).strip().splitlines()[-1][:200] if (o or e).strip() else ""
 
 
-def render(repo, mc, loader, repos, deps, notes, unmapped_toml, filled, req_missing, blocked_noreg, reg_err, code, out):
+def render(repo, mc, loader, repos, deps, notes, unmapped_toml, filled, req_missing, blocked_noreg, reg_err, code, out, moves=None):
     out(f"port-deps: {repo}  ->  {loader} {mc}")
     out("\nREPOSITORIES (reachability from this machine)")
     for r in repos:
@@ -745,6 +834,14 @@ def render(repo, mc, loader, repos, deps, notes, unmapped_toml, filled, req_miss
             out(f"!!!   {d['group']}:{d['artifact']}:{d['version']}  via {','.join(d['hosts'])}")
     if reg_err:
         out("\n!!! registry lookup failed (preflight incomplete, NOT a pass): " + ", ".join(d["artifact"] for d in reg_err))
+    if moves is not None:
+        out("\nDEP MOVES (author's jar vs target jar)")
+        for ln in moves["lines"]:
+            out(ln)
+        for ln in moves["failures"]:
+            out("  not compared: " + ln)
+        if not moves["pairs"] and not moves["failures"]:
+            out("  no mod dependency with an old and a new jar to compare")
     out(f"\nexit {code}")
     return {"repo": str(repo), "mc": mc, "loader": loader, "exit": code,
             "repositories": [{k: r[k] for k in ("url", "kind", "http", "state", "includes", "regex")} for r in repos],
@@ -758,7 +855,8 @@ def render(repo, mc, loader, repos, deps, notes, unmapped_toml, filled, req_miss
                 "suggested": d.get("suggested"), "filled": d.get("filled"),
                 "registry_error": (d.get("res") or {}).get("error"),
             } for d in deps],
-            "mods_toml_unmapped": unmapped_toml, "notes": notes, "fill_local": filled}
+            "mods_toml_unmapped": unmapped_toml, "notes": notes, "fill_local": filled,
+            "dep_moves": None if moves is None else {k: moves[k] for k in ("pairs", "failures", "reports")}}
 
 
 # ---------------------------------------------------------------------------------------------- self-check
@@ -803,6 +901,8 @@ dependencies {
     implementation fg.deobf('curse.maven:optmod-333:444')
     modImplementation group: 'ex.map', name: 'mapmod-forge', version: '1.5'
     implementation "maven.modrinth:rinthmod:ver1"
+    implementation fg.deobf("curse.maven:movemod-666:700")
+    implementation fg.deobf("curse.maven:movemod2-888:800")
     compileOnly(annotationProcessor("io.github.llamalad7:mixinextras-common:${mixinx}"))
     implementation(jarJar("io.github.llamalad7:mixinextras-forge:${mixinx}")) { jarJar.ranged(it, "[${mixinx},)") }
     implementation "weird.corp:mystery:3.0"
@@ -846,7 +946,8 @@ dependencies {
         def versions(p, i, l, m):
             tbl = {("curseforge", "111"): (False, "reqmod"), ("curseforge", "333"): (False, "optmod"),
                    ("modrinth", "exlib"): (True, "exlib-neoforge-9.5.1+1.21.1.jar"),
-                   ("curseforge", "555"): (True, "mapmod-neoforge-2.0.jar"), ("modrinth", "rinthmod"): (True, "rinthmod-1.jar")}
+                   ("curseforge", "555"): (True, "mapmod-neoforge-2.0.jar"),
+                   ("curseforge", "666"): (True, "movemod-1.jar"), ("curseforge", "888"): (True, "movemod2-1.jar"), ("modrinth", "rinthmod"): (True, "rinthmod-1.jar")}
             if (p, i) not in tbl:
                 raise RegError("unknown")
             ok, fn = tbl[(p, i)]
@@ -854,8 +955,32 @@ dependencies {
                     "chosen": {"fileId": "999", "fileName": fn, "sha1": "x"} if ok else None}
         lines = []
         placed = []
+        # dep-moves wiring: fake jars are enough (only entry names are read); one old-jar download fails
+        import zipfile
+        def mkjar(name, entries):
+            j = pathlib.Path(td) / name
+            with zipfile.ZipFile(j, "w") as z:
+                for e in entries:
+                    z.writestr(e, b"")
+            return j
+        jars = {("curseforge", "666", "700"): mkjar("old.jar", ["com/example/oldlib/Foo.class"]),
+                ("curseforge", "666", "999"): mkjar("new.jar", ["com/example/newlib/Foo.class"])}
+        fetched = []
+
+        def fake_fetch(p, i, f):
+            fetched.append((p, i, f))
+            return (jars[(p, i, f)], "ok") if (p, i, f) in jars else (None, "boom")
+        usedir = repo / "src/main/java/com/example/mod"; usedir.mkdir(parents=True)
+        (usedir / "Use.java").write_text("package com.example.mod;\nimport com.example.oldlib.Foo;\nclass Use { Foo f; }\n", encoding="utf-8")
         code, rep = run(repo, "1.21.1", probe=probe, search=search, versions_fn=versions, vn_fn=lambda v: "ver2",
-                        fill_local=True, local_place=lambda c, p, i, f: (placed.append(c) or (True, "ok")), out=lines.append)
+                        fill_local=True, local_place=lambda c, p, i, f: (placed.append(c) or (True, "ok")), out=lines.append,
+                        apply_moves=True, fetch=fake_fetch)
+        dm = rep["dep_moves"]
+        chk("moves-pair", dm["pairs"] == ["curse.maven:movemod-666"] and dm["reports"][0]["moved"][0]["new"] == "com.example.newlib.Foo")
+        chk("moves-applied", "import com.example.newlib.Foo;" in (usedir / "Use.java").read_text(encoding="utf-8"))
+        chk("moves-failure-not-fatal", any("movemod2-888" in f and "boom" in f for f in dm["failures"]) and code == 3)
+        chk("moves-author-maven", any("mapmod-forge" in f and "author's own maven" in f for f in dm["failures"]))
+        chk("moves-render", any("DEP MOVES" in l for l in lines))
         D = {(d["group"], d["artifact"], d["classifier"]): d for d in rep["dependencies"]}
         chk("exit3", code == 3)
         chk("commented", not any(d["group"] == "ex.commented" for d in rep["dependencies"]))
@@ -909,14 +1034,14 @@ dependencies { implementation "ex.exlib:exlib-forge:1.0" }
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo"); ap.add_argument("--mc"); ap.add_argument("--loader", default="neoforge")
-    ap.add_argument("--fill-local", action="store_true"); ap.add_argument("--json")
+    ap.add_argument("--fill-local", action="store_true"); ap.add_argument("--apply-moves", action="store_true"); ap.add_argument("--json")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
     if not a.repo or not a.mc:
         ap.error("--repo and --mc are required")
-    code, rep = run(a.repo, a.mc, a.loader, a.fill_local)
+    code, rep = run(a.repo, a.mc, a.loader, a.fill_local, apply_moves=a.apply_moves)
     if a.json:
         pathlib.Path(a.json).write_text(json.dumps(rep, indent=2), encoding="utf-8")
     return code

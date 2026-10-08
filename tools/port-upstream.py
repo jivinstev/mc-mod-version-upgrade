@@ -145,7 +145,7 @@ def st_deps(c):
         return {"skipped": "no Minecraft version in the branch name"}
     log = c["dir"] / "deps.log"
     r = sh([sys.executable, str(ROOT / "tools/port-deps.py"), "--repo", str(c["repo"]), "--mc", m.group(1),
-            "--fill-local", "--json", str(c["dir"] / "deps.json")], timeout=900, log=log)
+            "--fill-local", "--apply-moves", "--json", str(c["dir"] / "deps.json")], timeout=1800, log=log)
     if r.returncode:
         why = {2: "a registry lookup failed", 3: "a required dependency has no build for the target",
                4: "a dependency sits on a blocked host with no registry source"}.get(r.returncode, "port-deps failed")
