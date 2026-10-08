@@ -64,6 +64,8 @@ def manifest_url(repo, branch):
     if repo.startswith(("file:", "http://", "https://")) and repo.endswith(".json"):
         return repo
     repo = re.sub(r"^https://github\.com/", "", repo).strip("/").removesuffix(".git")
+    if "@" in repo:          # owner/repo@branch: this one port from another branch (e.g. its -release port)
+        repo, branch = repo.split("@", 1)
     return f"https://raw.githubusercontent.com/{repo}/{branch}/.github/port-install.json"
 
 
@@ -696,7 +698,7 @@ def main():
     if "--self-check" in sys.argv:
         return self_check()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("repos", nargs="+", help="fork ports, owner/repo or https://github.com/owner/repo")
+    ap.add_argument("repos", nargs="+", help="fork ports, owner/repo or https://github.com/owner/repo; owner/repo@branch for a port on another branch")
     ap.add_argument("--mc", default="1.21.1"); ap.add_argument("--branch")
     ap.add_argument("--mods-dir")
     ap.add_argument("--with-optional", action="store_true", help="also the optional mods CI tested with the ports")

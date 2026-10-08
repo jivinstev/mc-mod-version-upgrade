@@ -16,7 +16,7 @@ name: Port CI ({{TARGET}})
 on:
   push:
     branches: ["{{BRANCH}}"]
-    tags: ["*-mc{{MC}}"]
+    tags: ["*-mc{{MC}}{{TAG_SUFFIX}}"]
   pull_request:
     branches: ["{{BRANCH}}"]
   workflow_dispatch:
@@ -109,7 +109,7 @@ jobs:
         run: |
           if [ "${{ github.ref_type }}" = tag ]; then TAG="${{ github.ref_name }}"; else
             v=$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
-            TAG="{{MODID}}-${v}-mc{{MC}}"
+            TAG="{{MODID}}-${v}-mc{{MC}}{{TAG_SUFFIX}}"
             # the port was fixed but the author's version did not move: release it as -r2, -r3, ...
             base="$TAG"; n=2
             while gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; do

@@ -178,6 +178,8 @@ def main():
     ap.add_argument("--dep-jar", action="append", default=[], metavar="OWNER/REPO@TAG/ASSET.jar=G:A:V",
                     help="a sibling port's released jar, put into mavenLocal (pinned by sha256) -- preferred to --dep")
     ap.add_argument("--gatec", default="launch,spawn"); ap.add_argument("--no-commit", action="store_true")
+    ap.add_argument("--tag-suffix", default="", help="a tag series of its own, e.g. -release for a release-aligned "
+                    "branch, so its JARs never share tags with the development port's")
     ap.add_argument("--trailer", action="append", default=[])
     ap.add_argument("--kit-version", type=int, help="Port CI kit to pin (default: the newest published)")
     ap.add_argument("--kit-sha", help="its sha256 (default: read from the release's SHA256SUMS)")
@@ -194,7 +196,7 @@ def main():
     kver, ksha = kit_pin(mrepo, a.kit_version, a.kit_sha)
     values = {"TARGET": f"NeoForge {neo} (Minecraft {mc})", "BRANCH": branch, "MC": mc, "MODID": a.modid,
               "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
-              "GATEC": a.gatec, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
+              "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
     out = render(TEMPLATE.read_text(encoding="utf-8"), values)
     if a.print:
         print(out); return 0

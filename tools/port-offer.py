@@ -341,6 +341,8 @@ def render(ctx):
               f"- Built JARs: {ctx['releases_url']}"]
     if ctx.get("install"):
         L += ["", "## How to install", ""] + ctx["install"]
+    if ctx.get("provenance"):
+        L += [""] + ctx["provenance"].rstrip().splitlines()
     h, h1, h3 = ctx["hunks"]
     L += ["", "## Size of the change", "",
           f"{ctx['files']} of the {ctx['tracked']} files in the authors' tree changed, +{ctx['ins']} / -{ctx['dels']} "
@@ -352,7 +354,10 @@ def render(ctx):
         L += ["", f"Left out of the offer: {len(ctx['ci_commits'])} CI commit(s) of ours ("
               + ", ".join(f"`{s[:10]}`" for s, _, _ in ctx["ci_commits"]) + ")."]
     L += ["", "## Verified", ""] + [f"- {v}" for v in ctx["verified"] or ["(no pipeline state found -- say only what you checked)"]]
-    L += ["- Not verified by any automated check: gameplay by a person."]
+    L += ["- Not verified by any automated check: gameplay by a person"
+          + (" -- the manual tests below cover what the gates cannot reach." if ctx.get("manual") else ".")]
+    if ctx.get("manual"):
+        L += [""] + ctx["manual"].rstrip().splitlines()
     facts = " ".join(ctx["verified"])
     proof = []
     if "authors' own" in facts:
@@ -428,6 +433,8 @@ def main():
     ap.add_argument("--upstream", help="the authors' repository, owner/repo (default: the fork's GitHub parent)")
     ap.add_argument("--modid"); ap.add_argument("--work-dir"); ap.add_argument("--push", action="store_true")
     ap.add_argument("--trailer", action="append", default=[])
+    ap.add_argument("--release", help="the author's RELEASED commit: the offer then says how far the port's base is from it")
+    ap.add_argument("--published", help="or: the release's publish time (ISO); its commit is matched by time")
     ap.add_argument("--variant", metavar="SUBSTRING=WHY",
                     help="when the release has one jar per platform, the one to install and why (e.g. _mr=...)")
     a = ap.parse_args()
@@ -491,8 +498,23 @@ def main():
     ctx["install"], man = install_section(repo, tip, branch, fork, props.get("mod_id") or modid,
                                      props.get("minecraft_version", ""), props.get("neo_version", ""),
                                      tuple(a.variant.split("=", 1)) if a.variant else None, deps)
+    if a.release or a.published:     # how far the port's base is from what players run (tools/port-provenance.py)
+        sp = __import__("importlib.util").util.spec_from_file_location("port_prov", pathlib.Path(__file__).parent / "port-provenance.py")
+        pv = __import__("importlib.util").util.module_from_spec(sp); sp.loader.exec_module(pv)
+        start = git(repo, "merge-base", base, branch)
+        rel = a.release or pv.release_at(repo, base, a.published)
+        ctx["provenance"] = pv.markdown(pv.report(repo, start, rel, "the given commit" if a.release else f"publish time {a.published}"))
+    try:     # the top-10 manual tests (tools/manual-tests.py), read off this checkout of the port
+        sp = __import__("importlib.util").util.spec_from_file_location("manual_tests", pathlib.Path(__file__).parent / "manual-tests.py")
+        mt = __import__("importlib.util").util.module_from_spec(sp); sp.loader.exec_module(mt)
+        mmod, chosen, total = mt.tests(repo, 10)
+        ctx["manual"] = mt.markdown(mmod, chosen, total) if chosen else ""
+    except Exception as e:     # never lose the offer over the test list; say so instead
+        ctx["manual"] = f"## Manual tests\n\n(manual-tests.py failed: {e}; run it by hand)\n"
+        chosen = []
     work.mkdir(parents=True, exist_ok=True)
     (work / "OFFER.md").write_text(render(ctx), encoding="utf-8")
+    (work / "manual-tests.json").write_text(json.dumps(chosen, indent=1) + "\n", encoding="utf-8")
     man = hash_files(man)
     mtext = json.dumps(man, indent=2) + "\n"
     (work / "port-install.json").write_text(mtext, encoding="utf-8")

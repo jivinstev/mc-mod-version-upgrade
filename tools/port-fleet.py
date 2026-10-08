@@ -12,6 +12,7 @@ The fleet file lives OUTSIDE this repository (it names other people's mods). JSO
      {"repo": "/path/to/clone", "modid": "a", "base": "origin/main", "branch": "neoforge-1.21.1",
       "upstream": "https://github.com/author/a", "upstream_name": "A by author",
       "dep_jar": ["owner/fork@tag/x.jar=g:a:v"], "variant": ["_mr=why"], "gatec": "launch,spawn",
+      "tag_suffix": "-release" (a release-aligned branch), "release": "<author's released commit>",
       "work_dir": "~/.mc-mod-upgrade/upstream/<dir>"}]}   # work_dir: only if the clone's folder name differs
 
 Steps, run in the file's order (put a library before the mods that use it):
@@ -57,6 +58,8 @@ def commands(fleet, step, push=False, env="full", work=None):
             argv += [x for d in p.get("dep", []) for x in ("--dep", d)]
             if p.get("gatec"):
                 argv += ["--gatec", p["gatec"]]
+            if p.get("tag_suffix"):                     # a release-aligned branch's own tag series
+                argv.append(f"--tag-suffix={p['tag_suffix']}")
             out.append((p, repo, argv))
             if push:
                 out.append((p, repo, ["git", "push", "origin", branch]))
@@ -77,6 +80,10 @@ def commands(fleet, step, push=False, env="full", work=None):
             if p.get("upstream_repo"):
                 argv += ["--upstream", p["upstream_repo"]]
             argv += [x for v in p.get("variant", []) for x in ("--variant", v)]
+            if p.get("release"):                        # the author's released commit: the offer states the distance
+                argv += ["--release", p["release"]]
+            elif p.get("published"):
+                argv += ["--published", p["published"]]
             if p.get("work_dir"):                       # the port's own records (state.json): licence, what was verified
                 argv += ["--work-dir", str(pathlib.Path(p["work_dir"]).expanduser())]
             if push:

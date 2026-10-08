@@ -30,7 +30,29 @@ only part that needs a person or a model, and their count is the derivative port
 
 Nothing is pushed. Standard library only.
 """
-import argparse, pathlib, re, subprocess, sys, tempfile
+import argparse, json, pathlib, re, subprocess, sys, tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+SONNET = "claude-sonnet-5-5"
+RESOLVE_PROMPT = """You are finishing a Minecraft mod port. The file {path} is the author's RELEASED source with a
+NeoForge 1.21.1 port applied by replaying commits that were made on a newer, UNRELEASED development branch. It fails
+to compile only because it still refers to things that exist solely in that unreleased code: classes, fields,
+methods, config options, registrations.
+
+{release_note}
+
+The current file is the ground truth for HOW it is written for 1.21.1 (keep every 1.21.1 API change).
+The release copy is the ground truth for WHAT the file does.
+
+Compiler errors in this file:
+{errors}
+
+Edit {path} so these errors go away by removing each reference to an unreleased feature, or by restoring the
+release's behaviour for that spot (written in 1.21.1 API). Never create files or classes, never add stubs, never
+re-implement an unreleased feature, never edit another file. Never delete something the release copy ALSO has
+(a config option, a registration call, a field): if it fails only because the replay lost its declaration or made it
+private, restore the declaration or call the public way in, so the released behaviour survives. Reply with one line:
+what you removed."""
 
 DROP, KEEP_PORT, DROP_ADDED = "only in unreleased code", "both changed: port's side", "port-added for unreleased code"
 
@@ -137,32 +159,47 @@ def prune_dead_imports(repo, pkg_root, report):
             report.append(("imports of unreleased classes removed", f"{f.relative_to(repo)} ({n})"))
 
 
-def prune_mixin_configs(repo, report):
-    """Drop mixin-config entries whose class no longer exists (it was unreleased): a missing mixin class is a crash
-    at game start, which javac cannot see."""
+def prune_mixin_configs(repo, report, release=None):
+    """Make each mixin config list exactly the mixins that exist: drop entries whose class is gone (it was unreleased;
+    a missing mixin class crashes the game at start, which javac cannot see), and put back entries the RELEASE's
+    config had whose class is still here (a replay that took the port's side of the config loses them, and a
+    mixin listed nowhere is never applied)."""
     import json
-    for cfg in pathlib.Path(repo, "src/main/resources").glob("*.mixins.json"):
+    res = pathlib.Path(repo, "src/main/resources")
+    for cfg in sorted(set(res.glob("*.mixins.json")) | set(res.glob("mixins.*.json"))):
+        if "refmap" in cfg.name:
+            continue
         raw = cfg.read_text(encoding="utf-8")
         data = json.loads(raw)
         pkg = data.get("package", "")
-        dropped = []
+        here = lambda n: pathlib.Path(repo, "src/main/java", *(pkg + "." + n).split(".")).with_suffix(".java").is_file()
+        old = {}
+        if release:
+            shown = subprocess.run(["git", "-C", str(repo), "show", f"{release}:{cfg.relative_to(repo).as_posix()}"],
+                                   capture_output=True, text=True, encoding="utf-8")
+            if shown.returncode == 0:
+                old = json.loads(shown.stdout)
+        dropped, added = [], []
         for key in ("mixins", "client", "server"):
-            keep = []
-            for name in data.get(key, []):
-                if pathlib.Path(repo, "src/main/java", *(pkg + "." + name).split(".")).with_suffix(".java").is_file():
-                    keep.append(name)
-                else:
-                    dropped.append(name)
-            if key in data:
-                data[key] = keep
-        if dropped:
-            for name in dropped:      # edit the text, not a re-serialisation, so the file keeps its own layout
-                raw = re.sub(r'\n[ \t]*"' + re.escape(name) + r'",?', "", raw)
-            raw = re.sub(r",(\s*\])", r"\1", raw)
-            cfg.write_text(raw, encoding="utf-8")
-            json.loads(raw)
+            if key not in data and key not in old:
+                continue
+            cur = data.get(key, [])
+            keep = [n for n in cur if here(n)]
+            dropped += [n for n in cur if not here(n)]
+            listed = {n for k in ("mixins", "client", "server") for n in data.get(k, [])}
+            back = [n for n in old.get(key, []) if here(n) and n not in listed]
+            added += back
+            data[key] = keep + back
+        if dropped or added:
+            if "\n" in raw.strip():
+                indent = re.search(r'\n([ \t]+)"', raw)
+                text = json.dumps(data, indent=indent.group(1) if indent else 2) + "\n"
+            else:
+                text = json.dumps(data, separators=(",", ":")) + ("\n" if raw.endswith("\n") else "")
+            cfg.write_text(text, encoding="utf-8")
             git(repo, "add", "--", str(cfg.relative_to(repo)))
             report.extend(("mixin config: unreleased mixin removed", f"{cfg.name}: {n}") for n in dropped)
+            report.extend(("mixin config: released mixin listed again", f"{cfg.name}: {n}") for n in added)
 
 
 def derive(repo, branch, base, release, new_branch, pkg_root=None, dry=False):
@@ -187,14 +224,14 @@ def derive(repo, branch, base, release, new_branch, pkg_root=None, dry=False):
         added |= {l.split("\t")[-1] for l in git(repo, "show", "--name-status", "--format=", h).splitlines()
                   if l.startswith("A")}
         # -X theirs: only the CONFLICTING hunks take the port's side; everything else keeps the release's text.
-        r = subprocess.run(["git", "-C", str(repo), "cherry-pick", "-X", "theirs", h], capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", str(repo), "cherry-pick", "-X", "theirs", h], capture_output=True, text=True, encoding="utf-8")
         if r.returncode:
             if not conflicted(repo):
                 raise SystemExit(f"cherry-pick {h[:9]} failed without a conflict: {r.stderr.strip()[:300]}")
             resolve(repo, report)
             drop_orphans(repo, added, pkg_root, report)
             c = subprocess.run(["git", "-C", str(repo), "-c", "core.editor=true", "cherry-pick", "--continue"],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, encoding="utf-8")
             if c.returncode:
                 if "now empty" not in c.stdout + c.stderr:
                     raise SystemExit(f"cherry-pick {h[:9]} --continue: {(c.stdout + c.stderr).strip()[:300]}")
@@ -202,7 +239,7 @@ def derive(repo, branch, base, release, new_branch, pkg_root=None, dry=False):
                 report.append(("skipped (only touched unreleased code)", f"{h[:9]} {subject[:70]}"))
     before = len(report)
     drop_orphans(repo, added, pkg_root, report)
-    prune_mixin_configs(repo, report)
+    prune_mixin_configs(repo, report, release)
     prune_dead_imports(repo, pkg_root, report)
     git(repo, "add", "-A", "src")
     if len(report) > before:
@@ -218,6 +255,95 @@ def derive(repo, branch, base, release, new_branch, pkg_root=None, dry=False):
     print("next: compile (tools/burndown-count.sh). Each remaining error is a leftover reference to unreleased "
           "code -- the derivative port's only manual cost.")
     return 0
+
+
+def compile_errors(repo, log):
+    """(error count, {file: [error lines]}) from a real compile, the same way port-upstream counts."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import port_gates, srcsets  # noqa: E402
+    port_gates.gradle(repo, ["-I", str(ROOT / "tools/maxerrs.init.gradle"), *srcsets.compile_tasks(repo), "--continue"], log)
+    r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True, encoding="utf-8")
+    m = re.search(r"errors = (\d+)", r.stdout)
+    if not m or "compileJava: yes" not in r.stdout:
+        raise SystemExit(f"the compile did not run: {r.stdout.strip()[-300:]}")
+    lines = pathlib.Path(log).read_text(encoding="utf-8", errors="replace").splitlines()
+    by_file = {}
+    for i, l in enumerate(lines):
+        e = re.match(r"^(\S+\.java):(\d+): error: (.*)", l)
+        if e:
+            sym = next((x.strip() for x in lines[i + 1:i + 5] if x.strip().startswith("symbol:")), "")
+            item = f"line {e.group(2)}: {e.group(3)} {sym}".strip()
+            by_file.setdefault(e.group(1), [])
+            if item not in by_file[e.group(1)]:
+                by_file[e.group(1)].append(item)
+    return int(m.group(1)), by_file
+
+
+def release_losses(repo, release, base="HEAD"):
+    """Lines the resolve pass REMOVED that the release copy of the same file also has: a released option,
+    registration or behaviour the model deleted to make an error go away. Each one needs a person's look."""
+    repo = pathlib.Path(repo)
+    out = []
+    for rel in git(repo, "diff", "--name-only", base, "--", "src").split():
+        shown = subprocess.run(["git", "-C", str(repo), "show", f"{release}:{rel}"], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+        if shown.returncode:
+            continue
+        released = {" ".join(x.split()) for x in shown.stdout.splitlines()}
+        for line in git(repo, "diff", "-U0", base, "--", rel).splitlines():
+            t = " ".join(line[1:].split())
+            if (line.startswith("-") and not line.startswith("---") and len(t) > 25 and t in released and not t.startswith(".")
+                    and not t.startswith(("import ", "//", "*", "/*")) and t not in ("}", "});", "break;")):
+                out.append((rel, t))
+    return out
+
+
+def resolve_with_model(repo, release, rounds=3, model=SONNET, record=None):
+    """Compile, and hand each file with errors to one worker that sees the RELEASE copy of that file."""
+    repo = pathlib.Path(repo).resolve()
+    spent, history = 0.0, []
+    with tempfile.TemporaryDirectory() as tmp:
+        for rnd in range(1, rounds + 1):
+            n, by_file = compile_errors(repo, pathlib.Path(tmp) / f"compile-{rnd}.log")
+            history.append(n)
+            print(f"port-derive: round {rnd}: {n} error(s) in {len(by_file)} file(s); ${spent:.2f} spent", flush=True)
+            if n == 0:
+                break
+            for path, errs in sorted(by_file.items()):
+                rel = str(pathlib.Path(path).resolve().relative_to(repo))
+                rel_copy = pathlib.Path(tmp, "release", rel)
+                shown = subprocess.run(["git", "-C", str(repo), "show", f"{release}:{rel}"], capture_output=True, text=True, encoding="utf-8")
+                if shown.returncode == 0:
+                    rel_copy.parent.mkdir(parents=True, exist_ok=True)
+                    rel_copy.write_text(shown.stdout, encoding="utf-8")
+                    note = f"The author's RELEASED version of this file, before porting, is at {rel_copy}."
+                else:
+                    note = "This file did not exist in the release: the port added it. Keep only what released code needs."
+                prompt = RESOLVE_PROMPT.format(path=rel, release_note=note, errors="\n".join(errs[:40]))
+                r = subprocess.run(["claude", "-p", prompt, "--model", model, "--output-format", "json",
+                                    "--allowedTools", "Read,Edit", "--add-dir", tmp, "--permission-mode", "acceptEdits"],
+                                   cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                   timeout=1200, stdin=subprocess.DEVNULL)
+                try:
+                    d = json.loads(r.stdout[r.stdout.index("{"):])
+                    spent += float(d.get("total_cost_usd") or 0)
+                    print(f"   {rel}: {d.get('result', '').strip()[:160]}", flush=True)
+                except (ValueError, json.JSONDecodeError):
+                    print(f"   {rel}: worker returned no result: {(r.stderr or r.stdout)[-200:]}", flush=True)
+        else:
+            n, _ = compile_errors(repo, pathlib.Path(tmp) / "compile-final.log")
+            history.append(n)
+    print(f"port-derive: resolve finished at {history[-1]} error(s) (history {history}); model spend ${spent:.2f}")
+    losses = release_losses(repo, release)
+    if losses:
+        print(f"port-derive: CHECK {len(losses)} removed line(s) that the release also has -- restore any that are "
+              "released behaviour, not just an unreleased reference:")
+        for rel, t in losses[:40]:
+            print(f"   {rel}: {t[:140]}")
+    if record:
+        pathlib.Path(record).write_text(json.dumps({"errors": history, "usd": round(spent, 4), "model": model,
+                                                    "release_lines_removed": len(losses)}) + "\n", encoding="utf-8")
+    return 0 if history[-1] == 0 else 1
 
 
 def self_check():
@@ -264,6 +390,19 @@ def self_check():
         chk("port-added handler for it dropped", "src/main/java/m/net/BossHandler.java" not in tree)
         chk("port-added file for released code kept", "src/main/java/m/net/Ok.java" in tree)
         chk("CI commit not replayed", ".github/workflows/ci.yml" not in tree)
+    with tempfile.TemporaryDirectory() as d:     # mixin config: single-line mixins.<id>.json, release entries return
+        r = pathlib.Path(d)
+        git(r, "init", "-q"); git(r, "config", "user.email", "a@a"); git(r, "config", "user.name", "a")
+        for n in ("Kept", "Released"):
+            f = r / "src/main/java/m/mixin" / f"{n}.java"; f.parent.mkdir(parents=True, exist_ok=True); f.write_text("class X{}", encoding="utf-8")
+        cfg = r / "src/main/resources/mixins.m.json"; cfg.parent.mkdir(parents=True)
+        cfg.write_text('{"package":"m.mixin","mixins":["Kept","Released"]}\n', encoding="utf-8"); git(r, "add", "-A"); git(r, "commit", "-qm", "rel")
+        rel = git(r, "rev-parse", "HEAD").strip()
+        cfg.write_text('{"package":"m.mixin","mixins":["Kept","Gone"]}\n', encoding="utf-8")
+        rep = []
+        prune_mixin_configs(r, rep, rel)
+        got = json.loads(cfg.read_text(encoding="utf-8"))["mixins"]
+        chk("mixins.<id>.json: unreleased dropped, released listed again", got == ["Kept", "Released"] and len(rep) == 2)
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -274,9 +413,17 @@ def main():
     ap.add_argument("--release", help="the commit the author released")
     ap.add_argument("--new-branch"); ap.add_argument("--package", help="the mod's root package (default: the @Mod class's)")
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--self-check", action="store_true")
+    ap.add_argument("--resolve", action="store_true",
+                    help="on the derived branch: compile, and give each file with errors to one worker with the release "
+                         "copy of that file (model; spends money)")
+    ap.add_argument("--rounds", type=int, default=3); ap.add_argument("--record", help="write the error history and spend here")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
+    if a.resolve:
+        if not (a.repo and a.release):
+            ap.error("--resolve needs --repo and --release")
+        return resolve_with_model(a.repo, a.release, a.rounds, record=a.record)
     if not (a.repo and a.branch and a.base and a.release):
         ap.error("--repo, --branch, --base and --release are required")
     return derive(pathlib.Path(a.repo), a.branch, a.base, a.release, a.new_branch or a.branch + "-release", a.package, a.dry_run)
