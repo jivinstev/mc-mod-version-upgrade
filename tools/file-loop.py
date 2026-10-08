@@ -324,6 +324,34 @@ def static_scan(work):
     return sorted(set(out))
 
 
+def mixin_audit(work):
+    """tools/audit-mixin-targets.py at 0 errors: every @Inject/@Shadow/@Accessor/@Invoker checked against the
+    target's own sources, in seconds. A stale target compiles clean and fails at mixin APPLY; found at Gate B it
+    costs one server boot per finding (measured: four boots, $1.48, on a library whose audit took 5 seconds)."""
+    r = subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work)], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=600)
+    if r.returncode != 1:          # 0 = all match; 2 = no mixins / no targets; anything else = no sources jar
+        return []
+    src, out, cur = work / "src/main/java", [], None
+    for l in r.stdout.splitlines():
+        m = re.match(r"^  (\S+\.java)\s+(.*\S)\s*$", l)
+        if m:
+            cur = [m.group(1), m.group(2), "", ""]; out.append(cur); continue
+        m = re.match(r"^\s+(mixin|vanilla):\s+(.*)$", l)
+        if m and cur:
+            cur[2 if m.group(1) == "mixin" else 3] = m.group(2)
+    hits = []
+    for rel, name, mine, van in out:
+        f = next((x for x in (work / rel, src / rel) if x.exists()), None) \
+            or next(iter(sorted(src.rglob(pathlib.Path(rel).name))), src / rel)   # the audit may print a bare name
+        t = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+        key = re.split(r"[\s(]", name.split()[-1] if name.split() else name)[0]
+        line = next((i + 1 for i, x in enumerate(t.splitlines()) if key and key in x), 1)
+        hits.append((str(f), line, f"mixin target does not match vanilla -- it fails at mixin apply, not at compile: "
+                                   f"{name}; mixin: {mine}" + (f"; vanilla: {van}" if van else "")))
+    return hits
+
+
 def subsystem_job(a, work, files, by, sigs, entries, needs_text, idx, note, agent_only=False):
     """A cross-file change: ONE Sonnet request over all the files (and the mod classes the errors and
     the NEEDS notes name) first; the tool-using subsystem agent only when that answer cannot be applied.
@@ -582,7 +610,7 @@ def main():
         print("compile no longer counts:", errs); return 3
     # at 0 errors: the load-crash scans, then the dead-override probe; each finding round may break the
     # compile, which the error rounds then repair
-    finders = [("scan", lambda: static_scan(work))]
+    finders = [("scan", lambda: static_scan(work)), ("scan", lambda: mixin_audit(work))]
     if not a.no_probe:
         finders.append(("probe", lambda: probe(work, a.sources)))
     for kind, find in finders:

@@ -227,7 +227,7 @@ def st_metadata(c):
         t = re.sub(r'(?m)^(\s*)mandatory\s*=\s*false', r'\1type = "optional"', t)
         t = re.sub(r'(modId\s*=\s*"neoforge"[^\[]*?versionRange\s*=\s*)"[^"]*"', r'\1"[21.1,)"', t, flags=re.S)
         t = re.sub(r'(modId\s*=\s*"minecraft"[^\[]*?versionRange\s*=\s*)"[^"]*"', r'\1"[1.21.1,1.22)"', t, flags=re.S)
-        for cfg in [f.name for f in srcsets.mixin_configs(repo) if f.parent.parent == toml.parent.parent]:
+        for cfg in [f.name for f in srcsets.mixin_configs(repo) if f.parent == toml.parent.parent]:
             if not re.search(r'(?m)^\s*config\s*=\s*"%s"' % re.escape(cfg), t):
                 t = t.rstrip("\n") + f'\n\n[[mixins]]\nconfig = "{cfg}"\n'
         new = toml.with_name("neoforge.mods.toml")
@@ -235,7 +235,8 @@ def st_metadata(c):
         new.write_text(t, encoding="utf-8"); done.append(str(new.relative_to(repo)))
     for mj in srcsets.mixin_configs(repo):
         t = mj.read_text(encoding="utf-8")
-        t2 = re.sub(r'\n\s*"refmap"\s*:\s*"[^"]*",?', "", t).replace('"JAVA_17"', '"JAVA_21"').replace('"JAVA_8"', '"JAVA_21"')
+        t2 = re.sub(r'\s*"refmap"\s*:\s*"[^"]*"\s*,', "", t)              # any layout, one-line JSON included
+        t2 = re.sub(r',\s*"refmap"\s*:\s*"[^"]*"(\s*\})', r"\1", t2).replace('"JAVA_17"', '"JAVA_21"').replace('"JAVA_8"', '"JAVA_21"')
         if t2 != t:
             mj.write_text(t2, encoding="utf-8"); done.append(str(mj.relative_to(repo)))
     for pm in repo.glob("src/*/resources/pack.mcmeta"):
@@ -244,7 +245,46 @@ def st_metadata(c):
         if t2 != t:
             pm.write_text(t2, encoding="utf-8"); done.append(str(pm.relative_to(repo)))
     tool("fix-datapack-layout.py", repo, "--apply")
-    return {"files": done}
+    moved = client_side_mixins(repo)
+    lost = srcsets.undeclared_mixin_configs(repo)
+    if lost:      # caught here, before the burn-down, not at Gate A after it
+        raise Fail(f"mixin config(s) still declared in no neoforge.mods.toml [[mixins]]: {lost}")
+    return {"files": done, "moved_to_client": moved}
+
+
+CLIENT_ONLY = re.compile(r"^(net\.minecraft\.client\.|com\.mojang\.blaze3d\.|net\.neoforged\.neoforge\.client\.|"
+                         r"software\.bernie\.geckolib\.(renderer|model|cache|loading)\.|[\w.]*\.client\.)")
+
+
+def client_side_mixins(repo):
+    """Move a mixin listed in the COMMON array to "client" when its @Mixin target is a client-only class: a dedicated
+    server cannot load the target, so the mixin fails there (measured: a GeckoLib renderer mixin listed as common,
+    found by Gate C after every other gate was green). Decided from the target's import, never guessed."""
+    moved = []
+    for cfg in srcsets.mixin_configs(repo):
+        t = cfg.read_text(encoding="utf-8"); d = json.loads(t)
+        pdirs = [jd / d["package"].replace(".", "/") for jd in srcsets.java_dirs(repo)]
+        go = []
+        for name in d.get("mixins") or []:
+            f = next((pd / (name.replace(".", "/") + ".java") for pd in pdirs
+                      if (pd / (name.replace(".", "/") + ".java")).exists()), None)
+            if not f:
+                continue
+            src = f.read_text(encoding="utf-8", errors="replace")
+            imports = dict((m.group(2), m.group(1)) for m in re.finditer(r"(?m)^import\s+([\w.]+\.(\w+))\s*;", src))
+            targets = re.findall(r"@Mixin\s*\(\s*(?:value\s*=\s*)?\{?([^)]*)", src)
+            fqns = [imports.get(x, x) for grp in targets for x in re.findall(r"([\w.]+)\.class", grp)]
+            fqns += [x.replace("$", ".") for grp in targets for x in re.findall(r'"([\w.$]+)"', grp)]
+            if fqns and all(CLIENT_ONLY.match(x) for x in fqns):
+                go.append(name)
+        if go:
+            d["mixins"] = [n for n in d["mixins"] if n not in go]
+            d["client"] = (d.get("client") or []) + go
+            one_line = "\n" not in t.strip()
+            cfg.write_text((json.dumps(d, separators=(",", ":")) if one_line else json.dumps(d, indent=2)) + "\n",
+                           encoding="utf-8")
+            moved += [f"{cfg.name}:{n}" for n in go]
+    return moved
 
 
 def st_mechanical(c):
@@ -420,8 +460,21 @@ def st_normalise(c):
     return {"out": [tool("normalise-imports.py", "--src", d, "--base", c["args"].base) for d in srcsets.java_dirs(c["repo"])]}
 
 
+def tree_fingerprint(repo):
+    """The working tree's content, committed or not: diff against HEAD plus untracked files."""
+    import hashlib
+    d = sh(["git", "diff", "HEAD", "--", "."], cwd=repo).stdout
+    u = sh(["git", "ls-files", "-o", "--exclude-standard", "-z"], cwd=repo).stdout
+    h = hashlib.sha1((d + u).encode("utf-8", "replace"))
+    for f in sorted(u.split("\0")):
+        if f and (repo / f).is_file():
+            h.update((repo / f).read_bytes())
+    return h.hexdigest()
+
+
 def st_reviewer(c):
     repo, base = c["repo"], c["args"].base
+    before = tree_fingerprint(repo)
     metrics = tool("review-metrics.py", "--repo", repo, "--base", base, "--fix", "--sites", 12)
     stat = sh(["git", "diff", "--stat", "-M", base, "--", "."], cwd=repo).stdout
     principles = (ROOT / "templates/upstream-harness/REVIEW_PRINCIPLES.md").read_text(encoding="utf-8")
@@ -435,8 +488,20 @@ def st_reviewer(c):
     if n:
         raise Fail(f"the reviewer's edits broke the compile ({n} errors); see REVIEW.md and review-compile.log")
     gate_a(c, c["dir"] / "gateA-after-review.log")
+    regated = None
+    if tree_fingerprint(repo) != before:
+        # the reviewer cannot run Gradle, so its edits reach no gate unless we run them: Gate A alone missed
+        # nothing here only by luck; a renamed hook or moved registration fails at load, i.e. Gate B
+        r = sh([sys.executable, str(ROOT / "tools/gate-loop.py"), "--work", str(repo), "--namespace", c["args"].modid,
+                "--budget", "2", "--log", str(c["dir"] / "gate-loop-after-review.jsonl")], env=gate_env(c), timeout=2 * 3600)
+        end = next((json.loads(l) for l in reversed(r.stdout.splitlines())
+                    if re.search(r'"event": "(green|stuck|budget|max-runs)"', l)), None)
+        if not end or end["event"] != "green":
+            raise Fail(f"Gate B is not green after the reviewer's edits ({end and end['event']})")
+        usd_b = end.get("spent", 0); regated = {"gateB_runs": end.get("run"), "usd": usd_b}
     scores = re.findall(r"(?m)^\W*(P\d)\W.*?(✅|⚠️|❌)", text)
-    return {"usd": usd, "review": str(c["dir"] / "REVIEW.md"), "scores": dict(scores), "metrics": metrics}
+    return {"usd": usd + ((regated or {}).get("usd") or 0), "review": str(c["dir"] / "REVIEW.md"),
+            "scores": dict(scores), "metrics": metrics, "regated_after_review": regated}
 
 
 def st_provenance(c):
@@ -495,6 +560,7 @@ def st_report(c):
     md += ["", "Verified:",
            f"- Gate A: {g['gateA_tests']} test(s) passed" if g.get("gateA_tests") else "- Gate A: NOT RUN",
            f"- Gate B: green after {g.get('gateB_runs')} run(s)" if g else "- Gate B: NOT RUN",
+           *([f"- Gate A and Gate B re-run after the reviewer's edits: green"] if res("reviewer").get("regated_after_review") else []),
            (f"- the author's own `{' '.join(ab['tasks'])}` succeeds with none of the port's harness, its own tests "
             f"included ({len(ab.get('jars', []))} jar(s))") if ab else "- the author's own build: NOT RUN",
            "Not verified here: Gate C (real client) unless recorded separately; gameplay by a person."]
@@ -653,6 +719,26 @@ def self_check():
         dj = json.loads(cfg.read_text(encoding="utf-8"))
         ok &= dj["mixins"] == ["Old", "NewAcc"] and dj["client"] == ["NewCli"] and len(got) == 2
         ok &= register_new_mixins(r, "HEAD") == []
+    with tempfile.TemporaryDirectory() as d:     # metadata: declare a non-<modid> config; one-line refmap; client move
+        r = pathlib.Path(d); res = r / "src/main/resources"; (res / "META-INF").mkdir(parents=True)
+        (res / "META-INF/mods.toml").write_text('modLoader="javafml"\nloaderVersion="[47,)"\n', encoding="utf-8")
+        (res / "mixins.foo.json").write_text('{"package":"a.mixin","refmap":"x.refmap.json","compatibilityLevel":"JAVA_17",'
+                                             '"mixins":["Common","Gfx"]}', encoding="utf-8")
+        md = r / "src/main/java/a/mixin"; md.mkdir(parents=True)
+        (md / "Common.java").write_text("import net.minecraft.world.entity.Mob;\n@Mixin(Mob.class) class Common {}", encoding="utf-8")
+        (md / "Gfx.java").write_text("import software.bernie.geckolib.renderer.GeoEntityRenderer;\n"
+                                     "@Mixin(GeoEntityRenderer.class) class Gfx {}", encoding="utf-8")
+        sh("git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm base", cwd=r)
+        global tool
+        real_tool, tool = tool, (lambda *a, **k: "")
+        try:
+            out = st_metadata({"repo": r, "args": types.SimpleNamespace(modid="foo")})
+        finally:
+            tool = real_tool
+        toml = (res / "META-INF/neoforge.mods.toml").read_text(encoding="utf-8")
+        dj = json.loads((res / "mixins.foo.json").read_text(encoding="utf-8"))
+        ok &= ('config = "mixins.foo.json"' in toml and "refmap" not in dj and dj["compatibilityLevel"] == "JAVA_21"
+               and dj["mixins"] == ["Common"] and dj["client"] == ["Gfx"] and out["moved_to_client"] == ["mixins.foo.json:Gfx"])
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
