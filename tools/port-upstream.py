@@ -275,7 +275,40 @@ def st_burndown(c):
         raise Fail(f"file-loop ended without a result: {r.stdout[-600:]}")
     if end["errors"]:
         raise Fail(f"file-loop stopped at {end['errors']} errors (${end['spent']:.2f}); see {log}")
-    return {"usd": end["spent"], "stubs": end.get("stubs"), "by_model": end.get("by_model")}
+    return {"usd": end["spent"], "stubs": end.get("stubs"), "by_model": end.get("by_model"),
+            "mixins_registered": register_new_mixins(c["repo"], c["args"].base)}
+
+
+def register_new_mixins(repo, base):
+    """Register every @Mixin class the PORT added (absent at the base commit) in the config whose package holds
+    it: javac cannot see an unregistered mixin, and the first cast to it is a runtime ClassCastException
+    (catalog H#43). Client-side if it imports client classes, else common. Upstream mixins are never touched."""
+    added = []
+    for cfg in srcsets.mixin_configs(repo):
+        t = cfg.read_text(encoding="utf-8")
+        d = json.loads(t)
+        listed = {n for k in ("mixins", "client", "server") for n in d.get(k) or []}
+        for jd in srcsets.java_dirs(repo):
+            pdir = jd / d["package"].replace(".", "/")
+            for f in sorted(pdir.rglob("*.java")) if pdir.is_dir() else []:
+                rel = f.relative_to(repo).as_posix()
+                if base and sh(["git", "cat-file", "-e", f"{base}:{rel}"], cwd=repo).returncode == 0:
+                    continue
+                src = f.read_text(encoding="utf-8", errors="replace")
+                name = f.relative_to(pdir).with_suffix("").as_posix().replace("/", ".")
+                if "@Mixin" not in src or name in listed:
+                    continue
+                key = "client" if re.search(r"(?m)^import\s+(net\.minecraft\.client|com\.mojang\.blaze3d)\.", src) else "mixins"
+                m = re.search(r'("%s"\s*:\s*\[)(.*?)(\s*)\]' % key, t, re.S)
+                if m and m.group(2).strip():
+                    ind = re.search(r"\n([ \t]*)\"[^\"]*\"\s*$", m.group(2))
+                    ins = ',\n%s"%s"' % (ind.group(1) if ind else "    ", name)
+                    t = t[:m.end(2)] + ins + t[m.end(2):]
+                else:
+                    d = json.loads(t); d.setdefault(key, []).append(name); t = json.dumps(d, indent=2) + "\n"
+                listed.add(name); added.append(f"{cfg.name}:{key}:{name}")
+        cfg.write_text(t, encoding="utf-8")
+    return added
 
 
 def harness(c):
@@ -573,6 +606,20 @@ def self_check():
             st_provenance(c); ok = False                  # an author copyright line removed must stop
         except Fail:
             pass
+    with tempfile.TemporaryDirectory() as d:                 # register_new_mixins: only port-added, side by imports
+        r = pathlib.Path(d); md = r / "src/main/java/a/mixin"; md.mkdir(parents=True)
+        (r / "src/main/resources").mkdir(parents=True)
+        cfg = r / "src/main/resources/mixins.x.json"
+        cfg.write_text('{\n  "package": "a.mixin",\n  "mixins": [\n    "Old"\n  ]\n}\n', encoding="utf-8")
+        (md / "Old.java").write_text("@Mixin(X.class) class Old {}", encoding="utf-8")
+        (md / "Stray.java").write_text("@Mixin(X.class) class Stray {}", encoding="utf-8")
+        sh("git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm base", cwd=r)
+        (md / "NewAcc.java").write_text("@Mixin(Y.class) interface NewAcc {}", encoding="utf-8")
+        (md / "NewCli.java").write_text("import net.minecraft.client.Minecraft;\n@Mixin(Z.class) class NewCli {}", encoding="utf-8")
+        got = register_new_mixins(r, "HEAD")
+        dj = json.loads(cfg.read_text(encoding="utf-8"))
+        ok &= dj["mixins"] == ["Old", "NewAcc"] and dj["client"] == ["NewCli"] and len(got) == 2
+        ok &= register_new_mixins(r, "HEAD") == []
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
