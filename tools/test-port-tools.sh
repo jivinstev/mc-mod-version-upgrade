@@ -277,7 +277,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-geckolib.py|convert-geckolib: GeckoLib 4.8 renderer/layer/model/animation hooks and asset layout onto 5.5; refuses what it cannot rewrite exactly" \
             "ci-gates.py|ci-gates: a finished port's gates in CI, worker-free pass/fail with a summary" \
             "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
-            "port-offer.py|port-offer: the authors see the port without our CI commit; a CI commit mid-branch is refused; only what state.json verified is claimed" \
+            "port-offer.py|port-offer: the authors see the port without our CI commit; port commits after a CI commit are replayed without it; only what state.json verified is claimed" \
             "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
             "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict" \
             "optional-dep-scan.py|optional-dep-scan: a listener class naming an optional mod in a method type blocks; a mixin reaching one through the mod is reported" \

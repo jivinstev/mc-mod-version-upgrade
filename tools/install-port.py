@@ -70,9 +70,9 @@ def installed_modids(mods_dir):
     out = {}
     for j in sorted(pathlib.Path(mods_dir).glob("*.jar")) if pathlib.Path(mods_dir).is_dir() else []:
         try:
-            z = zipfile.ZipFile(j)
-            t = "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist()
-                        if n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"))
+            with zipfile.ZipFile(j) as z:        # closed again: Windows cannot replace an open file
+                t = "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist()
+                            if n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"))
         except (OSError, zipfile.BadZipFile):
             continue
         for m in re.findall(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', t):
@@ -446,9 +446,10 @@ def find_java(mc_dir):
     """A Java to run the NeoForge installer: the one the Minecraft Launcher downloaded (always there once it
     has run), then JAVA_HOME, then PATH. macOS's /usr/bin/java is a stub without a JDK, so each is tried."""
     rt = mc_dir / "runtime"
-    cands = sorted(rt.glob("**/bin/java"), key=lambda p: ("delta" not in str(p), str(p))) if rt.is_dir() else []
+    exe = "java.exe" if os.name == "nt" else "java"
+    cands = sorted(rt.glob(f"**/bin/{exe}"), key=lambda p: ("delta" not in str(p), str(p))) if rt.is_dir() else []
     if os.environ.get("JAVA_HOME"):
-        cands.append(pathlib.Path(os.environ["JAVA_HOME"]) / "bin/java")
+        cands.append(pathlib.Path(os.environ["JAVA_HOME"]) / "bin" / exe)
     if shutil.which("java"):
         cands.append(pathlib.Path(shutil.which("java")))
     return next((c for c in cands if c.is_file() and java_works(c)), None)
@@ -504,6 +505,11 @@ def ensure_neoforge(neo, mods_dir, dry=False, get=fetch, run=None):
 
 
 def self_check():
+    failed = []
+    def _chk(cond, where):
+        if not cond:
+            failed.append(where)
+        return bool(cond)
     ok = True
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
@@ -529,36 +535,36 @@ def self_check():
         reg = {"ghost": {"name": "ghost-1.jar", "url": ghostjar.as_uri(), "sha256": sha(ghostjar), "source": "modrinth"}}
         lookup = lambda m: (reg[m], None) if m in reg else (None, "no NeoForge 1.21.1 build on Modrinth or CurseForge")
         files, notes, problems, neo, ports, missing = plan(["o/me"], "b", False, False, get, lookup=lookup)
-        ok &= [f["modid"] for f in files] == ["me", "lib", "ghost", "base"]  # registry fills the gap; sibling's too
-        ok &= next(f for f in files if f["modid"] == "ghost")["source"] == "modrinth" and not missing
-        ok &= ports == [{"repo": "o/me", "port": "o/me", "self": "me", "deps": ["lib", "ghost", "base"]}]
-        ok &= {n[1] for n in neo} == {"21.1.1"}
+        ok &= _chk([f["modid"] for f in files] == ["me", "lib", "ghost", "base"], 26)  # registry fills the gap; sibling's too
+        ok &= _chk(next(f for f in files if f["modid"] == "ghost")["source"] == "modrinth" and not missing, 27)
+        ok &= _chk(ports == [{"repo": "o/me", "port": "o/me", "self": "me", "deps": ["lib", "ghost", "base"]}], 28)
+        ok &= _chk({n[1] for n in neo} == {"21.1.1"}, 29)
         mods = d / "inst/mods"
         done, skipped, bad, status = install(files, mods, get=get)
-        ok &= len(done) == 4 and not bad and sorted(installed_modids(mods)) == ["base", "ghost", "lib", "me"]
+        ok &= _chk(len(done) == 4 and not bad and sorted(installed_modids(mods)) == ["base", "ghost", "lib", "me"], 32)
         out, good = summarise(ports, files, status, missing, bad, "NeoForge 21.1.1 is installed", True, False)
-        ok &= good and out[0] == "SUCCEEDED:" and "me + 3 dependencies" in out[1] and "Modrinth, not tested" in out[1]
-        ok &= out[-1].startswith("RESULT: OK -- 1 of 1")
+        ok &= _chk(good and out[0] == "SUCCEEDED:" and "me + 3 dependencies" in out[1] and "Modrinth, not tested" in out[1], 34)
+        ok &= _chk(out[-1].startswith("RESULT: OK -- 1 of 1"), 35)
         done2, skipped2, _, st2 = install(files, mods, get=get)
-        ok &= not done2 and len(skipped2) == 4 and set(st2.values()) == {"present"}   # idempotent
+        ok &= _chk(not done2 and len(skipped2) == 4 and set(st2.values()) == {"present"}, 37)   # idempotent
         with zipfile.ZipFile(me, "a") as z:                                  # a re-release: same name, new bytes
             z.writestr("changed.txt", "r2")
         meman["files"][0]["sha256"] = sha(me)
         done3, _s3, bad3, _st3 = install(plan(["o/me"], "b", False, False, get, lookup=lookup)[0], mods, get=get)
-        ok &= done3 == ["me: updated me.jar"] and not bad3
+        ok &= _chk(done3 == ["me: updated me.jar"] and not bad3, 42)
         # a required mod nobody has: that port FAILS, and says why
         f5, _n5, _p5, _neo5, ports5, missing5 = plan(["o/me"], "b", False, False, get, lookup=lambda m: (None, "nowhere"))
         _d5, _s5, bad5, st5 = install(f5, d / "inst5/mods", dry=True, get=get)
         out5, good5 = summarise(ports5, f5, st5, missing5, bad5, "", True, True)
-        ok &= not good5 and "FAILED:" in out5 and any("ghost: nowhere" in x for x in out5)
-        ok &= out5[-1].startswith("RESULT: FAILED -- 0 of 1")
+        ok &= _chk(not good5 and "FAILED:" in out5 and any("ghost: nowhere" in x for x in out5), 47)
+        ok &= _chk(out5[-1].startswith("RESULT: FAILED -- 0 of 1"), 48)
         lib2 = jar("lib-2.jar", "lib")
         mans[manifest_url("o/other", "b")] = {"port": "o/other", "minecraft": "1.21.1", "neoforge": "21.1.9", "files": [
             {"role": "self", "modid": "other", "name": "other.jar", "url": me.as_uri()},
             {"role": "required", "modid": "lib", "name": "lib-2.jar", "url": lib2.as_uri()}]}
         f3, n3, _p3, neo3, _pt3, _m3 = plan(["o/me", "o/other"], "b", False, False, get, lookup=lookup)
-        ok &= next(f for f in f3 if f["modid"] == "lib")["name"] == "lib-2.jar" and any("newest" in n for n in n3)
-        ok &= neo3[-1][1] == "21.1.9"
+        ok &= _chk(next(f for f in f3 if f["modid"] == "lib")["name"] == "lib-2.jar" and any("newest" in n for n in n3), 54)
+        ok &= _chk(neo3[-1][1] == "21.1.9", 55)
         withdep = d / "src" / "optdep.jar"
         with zipfile.ZipFile(withdep, "w") as z:
             z.writestr("META-INF/neoforge.mods.toml", '[[mods]]\nmodId="optdep"\n[[dependencies.optdep]]\n'
@@ -571,16 +577,16 @@ def self_check():
             {"role": "extra", "modid": "g:needed-123", "name": "needed.jar", "url": needed.as_uri()},
             {"role": "extra", "modid": "unrelated", "name": "u.jar", "url": needed.as_uri()}]}
         f4, _n4, _p4, _neo4, pt4, m4 = plan(["o/x"], "b", True, False, get, lookup=lookup)
-        ok &= [f["modid"] for f in f4] == ["x", "optdep", "needed"] and "gone" in m4
+        ok &= _chk([f["modid"] for f in f4] == ["x", "optdep", "needed"] and "gone" in m4, 68)
         _d4, _s4, bad4, st4 = install(f4, d / "inst4/mods", dry=True, get=get)
         out4, good4 = summarise(pt4, f4, st4, m4, bad4, "", True, True)
-        ok &= good4 and any(x.startswith("Optional, would also install: optdep, needed") for x in out4)
-        ok &= any("gone" in x for x in out4[out4.index("Warnings (optional mods only; they do not change the result):"):])
-        ok &= [f["modid"] for f in plan(["o/x"], "b", False, False, get, lookup=lookup)[0]] == ["x"]
-        ok &= {f["modid"] for f in plan(["o/x"], "b", False, True, get, lookup=lookup)[0]} == {"x", "optdep", "g:needed-123", "unrelated"}
+        ok &= _chk(good4 and any(x.startswith("Optional, would also install: optdep, needed") for x in out4), 71)
+        ok &= _chk(any("gone" in x for x in out4[out4.index("Warnings (optional mods only; they do not change the result):"):]), 72)
+        ok &= _chk([f["modid"] for f in plan(["o/x"], "b", False, False, get, lookup=lookup)[0]] == ["x"], 73)
+        ok &= _chk({f["modid"] for f in plan(["o/x"], "b", False, True, get, lookup=lookup)[0]} == {"x", "optdep", "g:needed-123", "unrelated"}, 74)
         f2 = plan(["o/me"], "b", True, False, get, lookup=lookup)[0]
         _d, _s, bad2, _st = install([f for f in f2 if f["modid"] == "opt"], mods, get=get)
-        ok &= bad2 and "sha256 mismatch" in bad2[0] and "opt" not in installed_modids(mods)
+        ok &= _chk(bad2 and "sha256 mismatch" in bad2[0] and "opt" not in installed_modids(mods), 77)
     with tempfile.TemporaryDirectory() as d:     # bundled (jarjar) mods are not missing; an unmet need drops the mod
         d = pathlib.Path(d)
         def mk(name, toml, nested=()):
@@ -596,7 +602,7 @@ def self_check():
             return p
         dep = lambda m: f'[[dependencies.a]]\nmodId="{m}"\ntype="required"\n'
         big = mk("big.jar", '[[mods]]\nmodId="big"\n' + dep("inner"), [("inner.jar", '[[mods]]\nmodId="inner"\n')])
-        ok &= jar_required(big.read_bytes()) == set()
+        ok &= _chk(jar_required(big.read_bytes()) == set(), 93)
         bad = mk("bad.jar", '[[mods]]\nmodId="bad"\n' + dep("helper") + dep("absent"))
         helper = mk("helper.jar", '[[mods]]\nmodId="helper"\n')
         selfj = mk("s.jar", '[[mods]]\nmodId="s"\n')
@@ -607,8 +613,8 @@ def self_check():
         reg2 = {"helper": {"name": "helper.jar", "url": helper.as_uri(), "source": "modrinth"}}
         lk2 = lambda m: (reg2[m], None) if m in reg2 else (None, "nowhere")
         fs, _n, _p, _ne, pts, ms = plan(["o/s"], "b", True, False, g2, lookup=lk2)
-        ok &= [f["modid"] for f in fs] == ["s", "big"]                     # bad and its helper both left out
-        ok &= "needs absent" in ms.get("bad", "") and "only bad needed it" in ms.get("helper", "")
+        ok &= _chk([f["modid"] for f in fs] == ["s", "big"], 104)                     # bad and its helper both left out
+        ok &= _chk("needs absent" in ms.get("bad", "") and "only bad needed it" in ms.get("helper", ""), 105)
         nf = lambda v: f'[[dependencies.a]]\nmodId="neoforge"\ntype="required"\nversionRange="[{v},)"\n'
         newer = mk("newer.jar", '[[mods]]\nmodId="newer"\n' + nf("21.1.300"))
         other = mk("other.jar", '[[mods]]\nmodId="otherline"\n' + nf("22.0.1"))
@@ -618,8 +624,8 @@ def self_check():
             {"role": "optional", "modid": "otherline", "name": "other.jar", "url": other.as_uri()}]}
         g3 = lambda u: json.dumps(man3).encode() if u == manifest_url("o/n", "b") else fetch(u)
         fs3, _n3, _p3, ne3, _pt3, ms3 = plan(["o/n"], "b", True, False, g3, lookup=lk2)
-        ok &= [f["modid"] for f in fs3] == ["s", "newer"] and "outside" in ms3.get("otherline", "")
-        ok &= ne3[-1][1] == "21.1.300" and "newer" in ne3[-1][2]       # NeoForge raised for the added mod
+        ok &= _chk([f["modid"] for f in fs3] == ["s", "newer"] and "outside" in ms3.get("otherline", ""), 115)
+        ok &= _chk(ne3[-1][1] == "21.1.300" and "newer" in ne3[-1][2], 116)       # NeoForge raised for the added mod
     with tempfile.TemporaryDirectory() as d:     # macOS python.org Python with no CA bundle: curl takes over
         f = pathlib.Path(d, "m.json"); f.write_text('{"x": 1}', encoding="utf-8")
         real = urllib.request.urlopen
@@ -627,7 +633,7 @@ def self_check():
             raise urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
         urllib.request.urlopen = broken
         try:
-            ok &= json.loads(fetch(f.as_uri())) == {"x": 1}
+            ok &= _chk(json.loads(fetch(f.as_uri())) == {"x": 1}, 124)
         finally:
             urllib.request.urlopen = real
     with tempfile.TemporaryDirectory() as d:     # NeoForge: detected, installed headless, or refused
@@ -641,24 +647,30 @@ def self_check():
             calls.append(argv); (mc / "versions/neoforge-21.1.20").mkdir(parents=True)
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
-        ok &= any("launcher_profiles" in x for x in pr) and not calls          # launcher never run: refuse
+        ok &= _chk(any("launcher_profiles" in x for x in pr) and not calls, 138)          # launcher never run: refuse
         (mc / "launcher_profiles.json").write_text("{}", encoding="utf-8")
         javadir = mc / "runtime/java-runtime-delta/x/bin"; javadir.mkdir(parents=True)
-        (javadir / "java").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8"); (javadir / "java").chmod(0o755)
+        fakejava = javadir / ("java.exe" if os.name == "nt" else "java")
+        fakejava.write_text("", encoding="utf-8")
+        global java_works
+        real_works, java_works = java_works, (lambda j: True)    # a stand-in that "runs" on any OS
+        try:
+            n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
+        finally:
+            java_works = real_works
+        ok &= _chk(not pr and calls and calls[0][0] == str(fakejava) and "--install-client" in calls[0], 149)
+        ok &= _chk(any("21.1.20" in x and "installed" in x for x in n), 150)
         n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
-        ok &= not pr and calls and calls[0][0] == str(javadir / "java") and "--install-client" in calls[0]
-        ok &= any("21.1.20" in x and "installed" in x for x in n)
-        n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
-        ok &= len(calls) == 1 and any("is installed" in x for x in n)            # second run: nothing to do
+        ok &= _chk(len(calls) == 1 and any("is installed" in x for x in n), 152)            # second run: nothing to do
         (mc / "versions/neoforge-21.1.20").rename(mc / "versions/neoforge-21.1.30")
-        ok &= neoforge_installed(mc, "21.1.20") == "21.1.30" and neoforge_installed(mc, "21.1.31") is None
+        ok &= _chk(neoforge_installed(mc, "21.1.20") == "21.1.30" and neoforge_installed(mc, "21.1.31") is None, 154)
         bad = lambda u: b"0" * 64 if u.endswith(".sha256") else b"jar"
         shutil.rmtree(mc / "versions")
         _n, pr = ensure_neoforge(neo, mods, get=bad, run=fake_run)
-        ok &= any("sha256" in x for x in pr) and len(calls) == 1
-    ok &= vkey("geckolib-neoforge-1.21.1-4.8.4.jar") > vkey("geckolib-neoforge-1.21.1-4.7.1.jar")
-    ok &= vkey("curios-neoforge-9.5.1+1.21.1.jar") == (9, 5, 1)
-    print("self-check:", "OK" if ok else "FAIL")
+        ok &= _chk(any("sha256" in x for x in pr) and len(calls) == 1, 158)
+    ok &= _chk(vkey("geckolib-neoforge-1.21.1-4.8.4.jar") > vkey("geckolib-neoforge-1.21.1-4.7.1.jar"), 159)
+    ok &= _chk(vkey("curios-neoforge-9.5.1+1.21.1.jar") == (9, 5, 1), 160)
+    print("self-check:", "OK" if ok else f"FAIL (checks at self_check lines {failed})")
     return 0 if ok else 1
 
 
