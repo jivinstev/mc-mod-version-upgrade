@@ -274,6 +274,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "srcsets.py|srcsets: every source set the author builds, their compile and jar tasks, and the target from the build" \
             "port-profile.py|port-profile: count the cost-driving port patterns per mod and name the tool covering each" \
             "convert-entity-renderstate.py|convert-entity-renderstate: vanilla entity renderers/models/layers onto 26.2 render state; refuses what it cannot rewrite exactly" \
+            "convert-geckolib.py|convert-geckolib: GeckoLib 4.8 renderer/layer/model/animation hooks and asset layout onto 5.5; refuses what it cannot rewrite exactly" \
             "port-deps.py|port-deps: dependency preflight -- blocked hosts, missing target builds, local-maven fill" \
             "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
             "local-maven.py|local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry" \

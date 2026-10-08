@@ -1261,7 +1261,7 @@ def main():
 
 # ------------------------------------------------------------------------------------------------ self-check
 FIX = {
-"entity/FooEntity.java": '''package m.entity;
+"entity/FooEntity.java": '''package com.example.entity;
 
 import net.minecraft.world.entity.monster.Monster;
 
@@ -1279,18 +1279,18 @@ public class FooEntity extends Monster {
     }
 }
 ''',
-"entity/PlainEntity.java": '''package m.entity;
+"entity/PlainEntity.java": '''package com.example.entity;
 
 import net.minecraft.world.entity.Entity;
 
 public class PlainEntity extends Entity {
 }
 ''',
-"client/FooModel.java": '''package m.client;
+"client/FooModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.model.geom.ModelPart;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class FooModel<T extends FooEntity> extends EntityModel<T> {
     private final ModelPart head;
@@ -1305,10 +1305,10 @@ public class FooModel<T extends FooEntity> extends EntityModel<T> {
     }
 }
 ''',
-"client/BarModel.java": '''package m.client;
+"client/BarModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.EntityModel;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class BarModel<T extends FooEntity> extends FooModel<T> {
     public BarModel(ModelPart root) {
@@ -1322,10 +1322,10 @@ public class BarModel<T extends FooEntity> extends FooModel<T> {
     }
 }
 ''',
-"client/BadModel.java": '''package m.client;
+"client/BadModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.EntityModel;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class BadModel<T extends FooEntity> extends EntityModel<T> {
     public BadModel(ModelPart root) {
@@ -1336,15 +1336,15 @@ public class BadModel<T extends FooEntity> extends EntityModel<T> {
     }
 }
 ''',
-"client/HierModel.java": '''package m.client;
+"client/HierModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.HierarchicalModel;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class HierModel<T extends FooEntity> extends HierarchicalModel<T> {
 }
 ''',
-"client/FooLayer.java": '''package m.client;
+"client/FooLayer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.world.entity.LivingEntity;
@@ -1359,7 +1359,7 @@ public class FooLayer<T extends LivingEntity, M extends EntityModel<T>> extends 
     }
 }
 ''',
-"client/BusyLayer.java": '''package m.client;
+"client/BusyLayer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.layers.RenderLayer;
 import net.minecraft.world.entity.LivingEntity;
@@ -1370,11 +1370,11 @@ public class BusyLayer<T extends LivingEntity, M extends EntityModel<T>> extends
     }
 }
 ''',
-"client/FooRenderer.java": '''package m.client;
+"client/FooRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.MobRenderer;
 import net.minecraft.resources.ResourceLocation;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class FooRenderer extends MobRenderer<FooEntity, FooModel<FooEntity>> {
     private static final ResourceLocation TEX = loc("a.png");
@@ -1395,10 +1395,10 @@ public class FooRenderer extends MobRenderer<FooEntity, FooModel<FooEntity>> {
     }
 }
 ''',
-"client/BabyRenderer.java": '''package m.client;
+"client/BabyRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.MobRenderer;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class BabyRenderer extends MobRenderer<FooEntity, BarModel<FooEntity>> {
     public BabyRenderer(Context ctx) {
@@ -1414,10 +1414,10 @@ public class BabyRenderer extends MobRenderer<FooEntity, BarModel<FooEntity>> {
     }
 }
 ''',
-"client/DrawRenderer.java": '''package m.client;
+"client/DrawRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.EntityRenderer;
-import m.entity.PlainEntity;
+import com.example.entity.PlainEntity;
 
 public class DrawRenderer extends EntityRenderer<PlainEntity> {
     public DrawRenderer(Context ctx) {
@@ -1432,10 +1432,10 @@ public class DrawRenderer extends EntityRenderer<PlainEntity> {
     }
 }
 ''',
-"client/VanillaRenderer.java": '''package m.client;
+"client/VanillaRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.MobRenderer;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class VanillaRenderer extends MobRenderer<FooEntity, CreeperModel<FooEntity>> {
     public ResourceLocation getTextureLocation(FooEntity e) {
@@ -1443,10 +1443,10 @@ public class VanillaRenderer extends MobRenderer<FooEntity, CreeperModel<FooEnti
     }
 }
 ''',
-"client/NullRenderer.java": '''package m.client;
+"client/NullRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.EntityRenderer;
-import m.entity.PlainEntity;
+import com.example.entity.PlainEntity;
 
 public class NullRenderer extends EntityRenderer<PlainEntity> {
     public NullRenderer(Context ctx) {
@@ -1458,10 +1458,10 @@ public class NullRenderer extends EntityRenderer<PlainEntity> {
     }
 }
 ''',
-"client/ListyModel.java": '''package m.client;
+"client/ListyModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.ListModel;
-import m.entity.PlainEntity;
+import com.example.entity.PlainEntity;
 
 public class ListyModel<T extends PlainEntity> extends ListModel<T> {
     private final ModelPart root;
@@ -1478,10 +1478,10 @@ public class ListyModel<T extends PlainEntity> extends ListModel<T> {
     }
 }
 ''',
-"client/WalkerRenderer.java": '''package m.client;
+"client/WalkerRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.HumanoidMobRenderer;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class WalkerRenderer<T extends FooEntity> extends HumanoidMobRenderer<T, WalkerModel<T>> {
     private final WalkerModel<T> spare;
@@ -1502,10 +1502,10 @@ public class WalkerRenderer<T extends FooEntity> extends HumanoidMobRenderer<T, 
     }
 }
 ''',
-"client/WalkerModel.java": '''package m.client;
+"client/WalkerModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.HumanoidModel;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class WalkerModel<T extends FooEntity> extends HumanoidModel<T> {
     public WalkerModel(ModelPart root) {
@@ -1513,10 +1513,10 @@ public class WalkerModel<T extends FooEntity> extends HumanoidModel<T> {
     }
 }
 ''',
-"client/GuardRenderer.java": '''package m.client;
+"client/GuardRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.IllagerRenderer;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class GuardRenderer<T extends FooEntity> extends IllagerRenderer<T> {
     public ResourceLocation getTextureLocation(T e) {
@@ -1524,10 +1524,10 @@ public class GuardRenderer<T extends FooEntity> extends IllagerRenderer<T> {
     }
 }
 ''',
-"client/RootedModel.java": '''package m.client;
+"client/RootedModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.HierarchicalModel;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class RootedModel<T extends FooEntity> extends HierarchicalModel<T> {
     private final ModelPart rootPart;
@@ -1546,10 +1546,10 @@ public class RootedModel<T extends FooEntity> extends HierarchicalModel<T> {
     }
 }
 ''',
-"client/AnimModel.java": '''package m.client;
+"client/AnimModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.HierarchicalModel;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class AnimModel<T extends FooEntity> extends HierarchicalModel<T> {
     private final ModelPart root;
@@ -1567,10 +1567,10 @@ public class AnimModel<T extends FooEntity> extends HierarchicalModel<T> {
     }
 }
 ''',
-"client/RideModel.java": '''package m.client;
+"client/RideModel.java": '''package com.example.client;
 
 import net.minecraft.client.model.EntityModel;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class RideModel<T extends FooEntity> extends EntityModel<T> {
     public RideModel(ModelPart root) {
@@ -1581,10 +1581,10 @@ public class RideModel<T extends FooEntity> extends EntityModel<T> {
     }
 }
 ''',
-"client/KfModel.java": '''package m.client;
+"client/KfModel.java": '''package com.example.client;
 
-import m.entity.FooEntity;
-import m.entity.Marker;
+import com.example.entity.FooEntity;
+import com.example.entity.Marker;
 
 public class KfModel<T extends FooEntity & Marker> extends BaseKf<T> {
     public KfModel(ModelPart root) {
@@ -1600,15 +1600,15 @@ public class KfModel<T extends FooEntity & Marker> extends BaseKf<T> {
     }
 }
 ''',
-"client/BaseKf.java": '''package m.client;
+"client/BaseKf.java": '''package com.example.client;
 
 public abstract class BaseKf<T extends Entity & Marker> extends HierarchicalModel<T> {
 }
 ''',
-"client/KfRenderer.java": '''package m.client;
+"client/KfRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.MobRenderer;
-import m.entity.FooEntity;
+import com.example.entity.FooEntity;
 
 public class KfRenderer extends MobRenderer<FooEntity, KfModel<FooEntity>> {
     public ResourceLocation getTextureLocation(FooEntity e) {
@@ -1616,7 +1616,7 @@ public class KfRenderer extends MobRenderer<FooEntity, KfModel<FooEntity>> {
     }
 }
 ''',
-"client/PillRenderer.java": '''package m.client;
+"client/PillRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.ZombieRenderer;
 import net.minecraft.world.entity.monster.Zombie;
@@ -1627,7 +1627,7 @@ public class PillRenderer extends ZombieRenderer {
     }
 }
 ''',
-"client/GhostRenderer.java": '''package m.client;
+"client/GhostRenderer.java": '''package com.example.client;
 
 import net.minecraft.client.renderer.entity.ZombieRenderer;
 import net.minecraft.world.entity.monster.Zombie;
@@ -1642,7 +1642,7 @@ public class GhostRenderer extends ZombieRenderer {
 
 
 FIX_CTX = {
-"BaseKf.java": '''package m.client;
+"BaseKf.java": '''package com.example.client;
 
 import net.minecraft.client.model.EntityModel;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
