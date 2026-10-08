@@ -277,6 +277,40 @@ def build_unmet(c):
                                wp.read_text(encoding="utf-8", errors="replace") if wp.exists() else None)
 
 
+def apply_dep_versions(repo, deps_json):
+    """Put the target builds the deps stage resolved into the build, mechanically: each dependency's
+    `suggested.change` from deps.json (`gradle.properties: KEY=old -> new`, or a literal coordinate in
+    build.gradle). Measured: a build model kept the author's 1.20.1 file ids for 13 dependencies while the
+    preflight had already named every replacement. Idempotent. -> the changes made."""
+    try:
+        deps = json.loads(pathlib.Path(deps_json).read_text(encoding="utf-8")).get("dependencies") or []
+    except (OSError, ValueError):
+        return []
+    done = []
+    for d in deps:
+        ch, coord = (d.get("suggested") or {}).get("change"), (d.get("suggested") or {}).get("coord")
+        if not ch or not coord or d.get("provided"):
+            continue
+        m = re.match(r"gradle\.properties: ([\w.-]+)=(.*) -> (.*)$", ch)
+        if m:
+            f = repo / "gradle.properties"
+            if f.is_file():
+                t = f.read_text(encoding="utf-8")
+                n = re.sub(r"(?m)^(\s*" + re.escape(m.group(1)) + r"\s*=\s*)" + re.escape(m.group(2)) + r"\s*$",
+                           lambda x: x.group(1) + m.group(3), t)
+                if n != t:
+                    f.write_text(n, encoding="utf-8"); done.append(f"{m.group(1)}={m.group(3)}")
+            continue
+        m = re.match(r"(?:build\.gradle )?literal: (.*) -> (.*)$", ch)
+        f = repo / "build.gradle"
+        if m and f.is_file():
+            t = f.read_text(encoding="utf-8")
+            old = f"{d['group']}:{d['artifact']}:{m.group(1)}"
+            if old in t:
+                f.write_text(t.replace(old, coord), encoding="utf-8"); done.append(f"{old} -> {coord}")
+    return done
+
+
 def st_build(c):
     repo, t = c["repo"], tgt(c)
     design = (c["dir"] / "DESIGN.md").read_text(encoding="utf-8") if (c["dir"] / "DESIGN.md").exists() else ""
@@ -284,13 +318,14 @@ def st_build(c):
     if t.mechanical == "era":
         bumped = bump_build_files(c)   # a version bump needs no model; one is asked only for what is still missing
         prompt = None
-    usd, asks = 0.0, 0
+    usd, asks, applied = 0.0, 0, []
     while True:
         if prompt is not None:
             if asks == 2:
                 break
             _t, u = claude(prompt, repo, "Read,Edit,Write,Grep,Glob")
             usd += u; asks += 1
+        applied += apply_dep_versions(repo, c["dir"] / "deps.json")    # never left to the model (see the function)
         n, line = compile_count(repo, c["dir"] / "build-check.log")
         if n is not None and raise_neo_floor(c):          # a dependency needs a newer NeoForge: recount on it
             n, line = compile_count(repo, c["dir"] / "build-check.log")
@@ -304,7 +339,7 @@ def st_build(c):
                       "outside the tree. Fix the build files only.")
             continue
         if n is not None and not unmet and not wrong_target:
-            res = {"usd": usd, "first_count": n}
+            res = {"usd": usd, "first_count": n, "dep_versions": applied}
             if t.mechanical == "era":
                 res["bumped"] = bumped
             return res
@@ -998,6 +1033,21 @@ def self_check():
     """The two stages that must never pass wrongly: licence (first) and provenance (last)."""
     import tempfile, types
     ok = True
+    with tempfile.TemporaryDirectory() as d:      # deps.json's resolved target builds land in the build files
+        d = pathlib.Path(d)
+        (d / "build.gradle").write_text('implementation "curse.maven:lib-1:100"\nimplementation "a:b:${b_v}"\n',
+                                        encoding="utf-8")
+        (d / "gradle.properties").write_text("b_v=1.0+1.20.1\n", encoding="utf-8")
+        (d / "deps.json").write_text(json.dumps({"dependencies": [
+            {"group": "curse.maven", "artifact": "lib-1", "suggested": {"coord": "curse.maven:lib-1:200",
+                                                                       "change": "build.gradle literal: 100 -> 200"}},
+            {"group": "a", "artifact": "b", "suggested": {"coord": "a:b:2.0", "change": "gradle.properties: b_v=1.0+1.20.1 -> 2.0+1.21.1"}},
+            {"group": "x", "artifact": "y", "provided": "z:y:1", "suggested": {"coord": "z:y:1", "change": "literal: 1 -> 2"}}]}),
+            encoding="utf-8")
+        first = apply_dep_versions(d, d / "deps.json")
+        ok &= len(first) == 2 and apply_dep_versions(d, d / "deps.json") == []
+        ok &= '"curse.maven:lib-1:200"' in (d / "build.gradle").read_text(encoding="utf-8")
+        ok &= "b_v=2.0+1.21.1" in (d / "gradle.properties").read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         (r / "src/main/resources/META-INF").mkdir(parents=True)
