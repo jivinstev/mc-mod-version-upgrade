@@ -54,7 +54,8 @@ LICENCE_SIGNS = [("MIT", r"\bMIT License\b|Permission is hereby granted, free of
 
 
 class Fail(Exception):
-    pass
+    def __init__(self, msg, usd=0.0):
+        super().__init__(msg); self.usd = usd
 
 
 def sh(cmd, cwd=None, env=None, timeout=None, log=None):
@@ -339,7 +340,7 @@ def st_burndown(c):
     if not end:
         raise Fail(f"file-loop ended without a result: {r.stdout[-600:]}")
     if end["errors"]:
-        raise Fail(f"file-loop stopped at {end['errors']} errors (${end['spent']:.2f}); see {log}")
+        raise Fail(f"file-loop stopped at {end['errors']} errors (${end['spent']:.2f}); see {log}", usd=end["spent"])
     return {"usd": end["spent"], "stubs": end.get("stubs"), "by_model": end.get("by_model"),
             "mixins_registered": register_new_mixins(c["repo"], c["args"].base)}
 
@@ -643,7 +644,11 @@ def main():
         try:
             res = FUNCS[s](c)
         except Fail as e:
-            state[s] = {"status": "failed", "why": str(e), "secs": int(time.time() - t0)}; save()
+            prev, secs = state.get(s) or {}, int(time.time() - t0)
+            # a failed attempt still cost money; the next successful run adds to it
+            state[s] = {"status": "failed", "why": str(e), "secs": secs, "runs": prev.get("runs", 0) + 1,
+                        "usd": e.usd, "usd_all": prev.get("usd_all", prev.get("usd", 0.0)) + e.usd,
+                        "secs_all": prev.get("secs_all", prev.get("secs", 0)) + secs}; save()
             print(f"[port-upstream] {s} FAILED: {e}\n  state: {sf}", flush=True)
             return 1
         prev = state.get(s) or {}
