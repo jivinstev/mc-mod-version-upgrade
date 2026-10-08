@@ -266,10 +266,12 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
     t0 = time.time()
     extra = ["--add-dir", srcs] if srcs else []
+    snap = singleshot.sibling_snapshot(work)
     r = subprocess.run(["claude", "-p", prompt, "--model", MODELS[model], "--output-format", "json",
                         "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Grep,Glob", *extra],
                        cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=timeout)
+    outside = singleshot.restore_siblings(snap)
     try:
         d = json.loads(r.stdout)
     except ValueError:
@@ -283,6 +285,7 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
     return {"model": model, "files": [rel(f) for f in files], "errors_in": sum(len(by[f]) for f in files),
             "entries": ids, "usd": d.get("total_cost_usd") or 0, "usage": d.get("usage"),
             "turns": d.get("num_turns"), "secs": round(time.time() - t0), "is_error": d.get("is_error"),
+            "reverted_outside": outside or None,
             "rule": rule, "result": res[-600:]}
 
 
@@ -402,7 +405,33 @@ def static_scan(work):
             for g in src.rglob(m.group(1) + ".java"):
                 if not re.search(r'^\s*@SubscribeEvent', g.read_text(encoding="utf-8", errors="replace"), re.M):
                     out.append((str(g), 1, SCAN_R1))
+    out += mixin_package_strays(work)
     return sorted(set(out))
+
+
+SCAN_MIXIN_PKG = ("a class with no @Mixin sits in a package a mixin config declares: Mixin refuses to load any "
+                  "non-mixin class from that package (\"is in a defined mixin package\") the first time it is "
+                  "used. Move it to another package and update its references; keep its behaviour unchanged.")
+
+
+def mixin_package_strays(work):
+    """Non-mixin classes inside a declared mixin package -- compile clean, crash at first use. Measured: a
+    helper split out of an accessor during a library's port; only a DEPENDENT mod's Gate B reached it."""
+    import importlib.util
+    sp = importlib.util.spec_from_file_location("srcsets", ROOT / "tools/srcsets.py")
+    ss = importlib.util.module_from_spec(sp); sp.loader.exec_module(ss)
+    out = []
+    for cfg in ss.mixin_configs(work):
+        try:
+            pkg = json.loads(cfg.read_text(encoding="utf-8"))["package"]
+        except (ValueError, KeyError):
+            continue
+        for jd in ss.java_dirs(work):
+            pdir = jd / pkg.replace(".", "/")
+            for f in sorted(pdir.rglob("*.java")) if pdir.is_dir() else []:
+                if f.name != "package-info.java" and "@Mixin" not in f.read_text(encoding="utf-8", errors="replace"):
+                    out.append((str(f), 1, SCAN_MIXIN_PKG))
+    return out
 
 
 def mixin_audit(work):

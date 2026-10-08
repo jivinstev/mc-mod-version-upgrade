@@ -274,6 +274,53 @@ def stub_signals(before, after):
     return out
 
 
+def _status(repo):
+    r = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "-z", "--untracked-files=all"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    out = {}
+    for e in filter(None, r.stdout.split("\0")):
+        if len(e) > 3:
+            out[e[3:]] = e[:2]
+    return out
+
+
+def sibling_snapshot(work):
+    """Every OTHER git repo beside `work` (the session's other ports), with the exact bytes of each file that is
+    already dirty there -- so a worker's edit outside its own repo can be undone without touching anyone's
+    uncommitted work. Measured: a Gate B worker on one mod edited the library it depends on, in a sibling repo."""
+    work = pathlib.Path(work).resolve()
+    snap = {}
+    for g in sorted(work.parent.glob("*/.git")):
+        repo = g.parent
+        if repo == work:
+            continue
+        st = _status(repo)
+        snap[repo] = {p: (repo / p).read_bytes() if (repo / p).is_file() else None for p in st}
+    return snap
+
+
+def restore_siblings(snap):
+    """Undo anything changed in a sibling repo since sibling_snapshot(); returns the paths restored."""
+    undone = []
+    for repo, before in snap.items():
+        for p, code in _status(repo).items():
+            f = repo / p
+            now = f.read_bytes() if f.is_file() else None
+            if p in before:
+                if now != before[p]:
+                    if before[p] is None:
+                        f.unlink(missing_ok=True)
+                    else:
+                        f.write_bytes(before[p])
+                    undone.append(str(f))
+            elif code == "??":
+                f.unlink(missing_ok=True); undone.append(str(f))
+            else:
+                subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--", p], capture_output=True)
+                undone.append(str(f))
+    return undone
+
+
 def run_single(work, f, errs_of_f, entry_text, idx, model_id, target, timeout=300, thinking=0):
     """One request: context in, SEARCH/REPLACE out, applied only if it passes the checks."""
     path = pathlib.Path(f)
@@ -342,6 +389,20 @@ def self_check():
         ok &= "net.x.Entity" in facts and "LivingHurtEvent: NOT in the target's sources" in facts
         body, part = numbered("\n".join(f"l{i}" for i in range(1000)), [500])
         ok &= part != "" and "  500| l499" in body and "(lines omitted)" in body and "  900|" not in body
+    with tempfile.TemporaryDirectory() as d:          # sibling-repo guard: undo the worker, keep the owner's work
+        d = pathlib.Path(d)
+        for n in ("work", "sib"):
+            (d / n).mkdir(); (d / n / "a.txt").write_text("a\n", encoding="utf-8"); (d / n / "b.txt").write_text("b\n", encoding="utf-8")
+            subprocess.run("git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm i",
+                           shell=True, cwd=d / n, check=True)
+        (d / "sib/a.txt").write_text("owner's uncommitted edit\n", encoding="utf-8")
+        snap = sibling_snapshot(d / "work")
+        (d / "sib/a.txt").write_text("worker\n", encoding="utf-8"); (d / "sib/b.txt").write_text("worker\n", encoding="utf-8"); (d / "sib/new.txt").write_text("x", encoding="utf-8")
+        (d / "work/a.txt").write_text("worker in its own repo\n", encoding="utf-8")
+        undone = restore_siblings(snap)
+        ok &= ((d / "sib/a.txt").read_text(encoding="utf-8") == "owner's uncommitted edit\n" and (d / "sib/b.txt").read_text(encoding="utf-8") == "b\n"
+               and not (d / "sib/new.txt").exists() and len(undone) == 3
+               and (d / "work/a.txt").read_text(encoding="utf-8") == "worker in its own repo\n")
     return ok
 
 

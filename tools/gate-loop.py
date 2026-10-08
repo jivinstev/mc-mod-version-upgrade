@@ -315,18 +315,22 @@ def call_worker(a, work, srcs, text, phase, note, run):
     prompt = PROMPT.format(target=a.target, failure=text, catalog=ROOT, srcs=srcs or "(none)")
     if phase:
         prompt = prompt.replace("its headless GameTest server (Gate B) fails", f"its real client (Gate C, phase {phase}) fails")
+    snap = fl.singleshot.sibling_snapshot(work)
     r = subprocess.run(["claude", "-p", prompt,
                         "--model", fl.MODELS[a.model], "--output-format", "json", "--permission-mode", "acceptEdits",
                         "--allowedTools", "Read,Edit,Write,Grep,Glob", "--add-dir", str(ROOT),
                         *(["--add-dir", srcs] if srcs else [])],
                        cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=a.timeout, stdin=subprocess.DEVNULL)
+    # a fix belongs in THIS mod: an edit to a sibling repo (the library it depends on) is undone and recorded,
+    # so the failure surfaces as the library's own bug instead of a silent half-fix in someone else's tree
+    outside = fl.singleshot.restore_siblings(snap)
     try:
         d = json.loads(r.stdout)
     except ValueError:
         d = {"total_cost_usd": 0, "result": (r.stdout + r.stderr)[-300:]}
     note(event="worker", run=run, phase=phase, model=a.model, usd=d.get("total_cost_usd"), turns=d.get("num_turns"),
-         result=(d.get("result") or "")[-300:])
+         result=(d.get("result") or "")[-300:], reverted_outside=outside or None)
     return d.get("total_cost_usd") or 0
 
 

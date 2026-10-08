@@ -294,9 +294,9 @@ def self_check():
             d = td / name; (d / "src").mkdir(parents=True)
             paths = []
             for rel, body in srcs.items():
-                p = d / "src" / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(body)
+                p = d / "src" / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(body, encoding="utf-8")
                 paths.append(str(p))
-            r = subprocess.run(["javac", "-nowarn", "-d", str(d / "out"), *paths], capture_output=True, text=True)
+            r = subprocess.run(["javac", "-nowarn", "-d", str(d / "out"), *paths], capture_output=True, text=True, encoding="utf-8")
             if r.returncode:
                 raise SystemExit(f"self-check: javac failed: {r.stderr[-300:]}")
             j = td / f"{name}.jar"
@@ -325,7 +325,7 @@ def self_check():
         ja, jb = jar("old", A), jar("new", B)
 
         repo = td / "mod"; src = repo / "src/main/java/com/example/mod"; src.mkdir(parents=True)
-        (repo / "build.gradle").write_text("plugins {}\n")
+        (repo / "build.gradle").write_text("plugins {}\n", encoding="utf-8")
         original = '''package com.example.mod;
 
 import com.example.alphalib.core.Alpha;
@@ -344,11 +344,11 @@ public class Use {
     Beta b; Alpha a; Inner i; Same same; Dup dup; Lost lost;
 }
 '''
-        (src / "Use.java").write_text(original)
+        (src / "Use.java").write_text(original, encoding="utf-8")
         pairs = [(ja, jb)]
         lines = []
         rep = analyse(repo, pairs, False, lines.append)[0]
-        if (src / "Use.java").read_text() != original:
+        if (src / "Use.java").read_text(encoding="utf-8") != original:
             fails.append("report-only edited the source")
         got = {m["old"]: m["new"] for m in rep["moved"]}
         want = {"com.example.alphalib.core.Alpha": "com.example.betalib.core.Alpha",
@@ -363,7 +363,7 @@ public class Use {
         if [(r["old"], r["new"]) for r in rep["prefix_rules"]] != [("com.example.alphalib.core", "com.example.betalib.core")]:
             fails.append(f"prefix {rep['prefix_rules']}")
         analyse(repo, pairs, True, lambda s: None)
-        after = (src / "Use.java").read_text()
+        after = (src / "Use.java").read_text(encoding="utf-8")
         for must in ("import com.example.betalib.core.Alpha;", "import static com.example.betalib.core.Alpha.helper;",
                      "import com.example.betalib.core.sub.Beta.Inner;", "import com.example.betalib.core.sub.*;",
                      "com.example.betalib.misc.Gamma g;", "com.example.betalib.core.Delta d",
@@ -373,7 +373,7 @@ public class Use {
             if must not in after:
                 fails.append(f"after apply missing: {must}")
         analyse(repo, pairs, True, lambda s: None)
-        if (src / "Use.java").read_text() != after:
+        if (src / "Use.java").read_text(encoding="utf-8") != after:
             fails.append("not idempotent")
         rep2 = analyse(repo, pairs, False, lambda s: None)[0]
         if rep2["moved"] or rep2["unchanged"] != 1:
@@ -394,7 +394,7 @@ def main():
     if len(a.old_jar) != len(a.new_jar):
         ap.error("--old-jar and --new-jar must be given the same number of times")
     if a.pairs:
-        for ln in pathlib.Path(a.pairs).read_text().splitlines():
+        for ln in pathlib.Path(a.pairs).read_text(encoding="utf-8").splitlines():
             if ln.strip() and not ln.startswith("#"):
                 o, _, n = ln.partition("\t"); pairs.append((o.strip(), n.strip()))
     if not a.repo or not pairs:
