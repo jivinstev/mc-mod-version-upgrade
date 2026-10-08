@@ -75,7 +75,12 @@ def main():
         jars = ss.author_jar_tasks(repo)
         r = pu.gradle(repo, ["build", *jars], work / "author-build.log")
         built = sorted(p.name for p in (repo / "build/libs").glob("*.jar")) if (repo / "build/libs").is_dir() else []
-        record("author's own build (`build" + "".join(f" {j}" for j in jars) + "`)", r.returncode == 0 and bool(built),
+        passed = r.returncode == 0 and bool(built)
+        if not passed:   # the reason, on the run page -- the log itself is only in the downloadable artifact
+            log = (work / "author-build.log").read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"\* What went wrong:\n(.*?)(?:\n\* Try:|\Z)", log, re.S)
+            print("author's build failed:\n" + (m.group(1).strip() if m else log[-3000:]), flush=True)
+        record("author's own build (`build" + "".join(f" {j}" for j in jars) + "`)", passed,
                ", ".join(built) or "no jar produced")
 
     if ok:

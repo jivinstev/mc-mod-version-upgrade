@@ -72,6 +72,12 @@ def undeclared_mixin_configs(repo):
     declared = set()
     for t in pathlib.Path(repo).glob("src/*/resources/META-INF/neoforge.mods.toml"):
         declared |= set(_re.findall(r'(?m)^\s*config\s*=\s*"([^"]+)"', t.read_text(encoding="utf-8")))
+    # a build may ship a variant jar whose MANIFEST names its own config (a dev build's extra mixins, measured):
+    # `'MixinConfigs': 'a.json,b.json'` in build.gradle is a declaration too
+    g = pathlib.Path(repo) / "build.gradle"
+    if g.exists():
+        for v in _re.findall(r"""['"]MixinConfigs['"]\s*:\s*['"]([^'"]+)['"]""", g.read_text(encoding="utf-8")):
+            declared |= {x.strip() for x in v.split(",") if x.strip()}
     return [f.name for f in mixin_configs(repo) if f.name not in declared]
 
 
@@ -103,6 +109,11 @@ def self_check():
         (r / "src/main/resources/META-INF/neoforge.mods.toml").write_text('modId="foo"\n', encoding="utf-8")
         ok = undeclared_mixin_configs(r) == ["mixins.foo.json"]
         (r / "src/main/resources/META-INF/neoforge.mods.toml").write_text('[[mixins]]\nconfig = "mixins.foo.json"\n', encoding="utf-8")
+        ok &= undeclared_mixin_configs(r) == []
+        (r / "src/main/resources/mixins.dev.json").write_text('{"package": "a.b", "mixins": ["D"]}', encoding="utf-8")
+        ok &= undeclared_mixin_configs(r) == ["mixins.dev.json"]
+        (r / "build.gradle").write_text((r / "build.gradle").read_text(encoding="utf-8")
+                                        + "manifest { attributes('MixinConfigs': 'mixins.dev.json') }\n", encoding="utf-8")
         ok &= undeclared_mixin_configs(r) == []
         ok &= (compile_tasks(r) == ["compileCfJava", "compileJava"] and author_jar_tasks(r) == ["cfJar"]
               and target(r) == "NeoForge 26.2.0.75 (Minecraft 26.2)")
