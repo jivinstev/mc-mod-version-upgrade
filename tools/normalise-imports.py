@@ -81,30 +81,37 @@ def normalise(text, orig, same_package_classes):
 def blank_lines(text, orig):
     """Undo blank-line debris a port leaves: a removed import whose newline stayed behind, or three blank
     lines where an edit deleted a block. Measured against the author's own file, so their spacing is kept:
-    blank lines between imports survive only if the original import block had any, and no run of blank lines
-    grows longer than the original file's longest."""
+    inside the import block a blank line survives only where a line diff matches it to one of the author's,
+    and no run of blank lines grows longer than the original file's longest."""
     if not orig:
         return text
+    import difflib
     lines = text.split("\n")
     imp = [i for i, l in enumerate(lines) if re.match(r"import\s", l)]
     ol = orig.split("\n")
-    opos = {l.strip(): i for i, l in enumerate(ol) if re.match(r"import\s", l)}
-    oblank = [i for i, l in enumerate(ol) if not l.strip()]
-    def author_gap(a, b):
-        """The author put a blank line between these two imports (both theirs, in this order)."""
-        pa, pb = opos.get(a.strip()), opos.get(b.strip())
-        return pa is not None and pb is not None and pa < pb and any(pa < k < pb for k in oblank)
+    oimp = [i for i, l in enumerate(ol) if re.match(r"import\s", l)]
     drop = set()
     if imp:
-        for i in range(imp[0], imp[-1]):
-            if lines[i].strip():
+        # line-diff the two import blocks: a blank line the diff matches to one of the author's stays (their
+        # grouping, even when the port renamed the import beside it); a blank the port inserted or turned an
+        # import into goes -- a removed import's newline, a blank setting off an added import
+        new = [l.strip() for l in lines[imp[0]:imp[-1] + 1]]
+        old = [l.strip() for l in ol[oimp[0]:oimp[-1] + 1]] if oimp else []
+        kept = set()
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            if tag == "equal":
+                kept.update(range(j1, j2))
+            elif tag == "replace":       # the author's blanks inside a rewritten stretch: keep as many as they had
+                ob = sum(1 for k in range(i1, i2) if not old[k])
+                for k in range(j1, j2):
+                    if not new[k] and ob:
+                        kept.add(k); ob -= 1
+        last_blank = False
+        for k, l in enumerate(new):
+            if not l and (k not in kept or last_blank):    # a run collapses against what is KEPT, not dropped
+                drop.add(imp[0] + k)
                 continue
-            prev = next((lines[k] for k in range(i - 1, imp[0] - 1, -1) if re.match(r"import\s", lines[k])), None)
-            nxt = next((lines[k] for k in range(i + 1, imp[-1] + 1) if re.match(r"import\s", lines[k])), None)
-            # a blank line the port left (a removed import's newline, or one set off around an added import)
-            # goes; one the author put between two of their own import groups stays -- once
-            if not (prev and nxt and author_gap(prev, nxt)) or (i > imp[0] and not lines[i - 1].strip()):
-                drop.add(i)
+            last_blank = not l
     lines = [l for i, l in enumerate(lines) if i not in drop]
     longest = max((len(m.group(0)) - 1 for m in re.finditer(r"\n(?:[ \t]*\n)+", orig)), default=1)
     text = "\n".join(lines)
@@ -204,6 +211,10 @@ class A {
     pg = "package p;\n\nimport a.New;\n\nimport a.B;\nimport a.C;\n\n\nimport m.Y;\n\nclass X {}\n"
     if blank_lines(pg, og) != "package p;\n\nimport a.New;\nimport a.B;\nimport a.C;\n\nimport m.Y;\n\nclass X {}\n":
         miss.append("port debris kept inside an author-grouped import block: " + repr(blank_lines(pg, og)))
+    oren = "import a.B;\nimport forge.X;\n\nimport m.Y;\n"
+    pren = "import a.B;\nimport neo.X;\n\nimport m.Y;\n"
+    if blank_lines(pren, oren) != pren:
+        miss.append("author's group break dropped beside a renamed import")
     print("self-check:", "OK" if not miss else f"FAIL {miss}\n{out}")
     return 0 if not miss else 1
 
