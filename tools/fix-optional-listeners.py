@@ -200,18 +200,18 @@ def self_check():
     with tempfile.TemporaryDirectory() as t:
         t = pathlib.Path(t)
         files = {
-            "opt/dep/Cap.java": "package opt.dep; public class Cap { public void add(String s) {} }",
-            "opt/dep/Reg.java": "package opt.dep; public class Reg { public static String id() { return \"x\"; } }",
+            "com/example/dep/Cap.java": "package com.example.dep; public class Cap { public void add(String s) {} }",
+            "com/example/dep/Reg.java": "package com.example.dep; public class Reg { public static String id() { return \"x\"; } }",
             "net/neoforged/fml/common/EventBusSubscriber.java":
                 "package net.neoforged.fml.common; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) public @interface EventBusSubscriber {}",
             "net/neoforged/bus/api/SubscribeEvent.java":
                 "package net.neoforged.bus.api; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) public @interface SubscribeEvent {}",
-            "my/Events.java": """package my;
+            "com/example/app/Events.java": """package com.example.app;
 
 import java.util.List;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
-import opt.dep.Cap;
+import com.example.dep.Cap;
 
 @EventBusSubscriber
 public class Events {
@@ -235,7 +235,7 @@ public class Events {
     }
 }
 """,
-            "my/other/User.java": "package my.other;\nimport my.Events;\npublic class User { String f() { return Events.label(java.util.List.of()); } }\n",
+            "com/example/app/other/User.java": "package com.example.app.other;\nimport com.example.app.Events;\npublic class User { String f() { return Events.label(java.util.List.of()); } }\n",
         }
         for rel, body in files.items():
             (t / "src" / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -249,7 +249,7 @@ public class Events {
         if not good:
             print("self-check: fixture does not compile:", err[:400]); return 1
         appsrc = t / "src"
-        mv, rf = plan(appsrc, t / "out", {"opt/dep"})
+        mv, rf = plan(appsrc, t / "out", {"com/example/dep"})
         ok &= _chk(set(next(iter(mv.values()))["methods"]) == {"setup", "label"} and not rf, 1)
         done = apply_moves(appsrc, mv)
         good, err = compile_all()
@@ -257,22 +257,22 @@ public class Events {
         if not good:
             print(err[:800])
         ods = _scan_module()
-        cl = {k: v for k, v in ods.load_classes(t / "out").items() if not k.startswith("opt/")}
-        blocking, _ = ods.scan(cl, {"opt/dep"})
+        cl = {k: v for k, v in ods.load_classes(t / "out").items() if not k.startswith("com/example/dep/")}
+        blocking, _ = ods.scan(cl, {"com/example/dep"})
         ok &= _chk(blocking == [], 3)                                              # A/B: blocking before, none after
-        ev = (appsrc / "my/Events.java").read_text(encoding="utf-8")
+        ev = (appsrc / "com/example/app/Events.java").read_text(encoding="utf-8")
         ok &= _chk("EventsOptional.setup(event, new Cap())" in ev and "static final String PREFIX" in ev, 4)
         ok &= _chk("private static final String PREFIX" not in ev, 5)               # widened for the helper
-        ok &= _chk("EventsOptional.label(" in (appsrc / "my/other/User.java").read_text(encoding="utf-8"), 6)
-        ok &= _chk("import my.EventsOptional;" in (appsrc / "my/other/User.java").read_text(encoding="utf-8"), 7)
-        ok &= _chk("Events.PREFIX + name" in (appsrc / "my/EventsOptional.java").read_text(encoding="utf-8"), 8)
+        ok &= _chk("EventsOptional.label(" in (appsrc / "com/example/app/other/User.java").read_text(encoding="utf-8"), 6)
+        ok &= _chk("import com.example.app.EventsOptional;" in (appsrc / "com/example/app/other/User.java").read_text(encoding="utf-8"), 7)
+        ok &= _chk("Events.PREFIX + name" in (appsrc / "com/example/app/EventsOptional.java").read_text(encoding="utf-8"), 8)
         # a listener whose event type is the optional mod's is refused, not moved
-        (appsrc / "my/Bad.java").write_text("package my;\nimport net.neoforged.bus.api.SubscribeEvent;\n"
+        (appsrc / "com/example/app/Bad.java").write_text("package com.example.app;\nimport net.neoforged.bus.api.SubscribeEvent;\n"
             "import net.neoforged.fml.common.EventBusSubscriber;\n@EventBusSubscriber\npublic class Bad {\n"
-            "    @SubscribeEvent\n    public static void on(opt.dep.Cap c) {}\n}\n", encoding="utf-8")
+            "    @SubscribeEvent\n    public static void on(com.example.dep.Cap c) {}\n}\n", encoding="utf-8")
         compile_all()
-        _mv2, rf2 = plan(appsrc, t / "out", {"opt/dep"})
-        ok &= _chk(any("my/Bad.on" in r and "guarded block" in r for r in rf2), 9)
+        _mv2, rf2 = plan(appsrc, t / "out", {"com/example/dep"})
+        ok &= _chk(any("com/example/app/Bad.on" in r and "guarded block" in r for r in rf2), 9)
     print("self-check:", "OK" if ok else f"FAIL (checks {failed})")
     return 0 if ok else 1
 
