@@ -46,16 +46,50 @@ def is_ci(files):
     return bool(files) and set(files) <= CI_FILES
 
 
-def offer_tip(cs):
-    """The commit the authors should see: the branch without its CI commits. Only CI commits at the TIP can be
-    left off without rewriting anything; a CI commit in the middle would need a replay, which is refused rather
-    than guessed (port-ci.py always commits last, so this is the shape every port has)."""
-    i = len(cs)
-    while i and is_ci(cs[i - 1][2]):
-        i -= 1
-    if any(is_ci(f) for _, _, f in cs[:i]):
-        raise SystemExit("a CI commit sits between port commits; move it to the tip first (nothing was changed)")
-    return (cs[i - 1][0] if i else None), cs[:i], cs[i:]
+def offer_tip(cs, repo=None):
+    """The commit the authors should see: the branch without its CI commits. CI commits at the tip are just left
+    off. A CI commit in the middle (a port fix landed after CI was added) needs the port commits after it replayed
+    without it: each one keeps its own tree except the CI files, its author, dates and message, so the replay is
+    the same commit on every run, and the port branch itself is never rewritten. -> (tip, port commits, CI)."""
+    port = [c for c in cs if not is_ci(c[2])]
+    ci = [c for c in cs if is_ci(c[2])]
+    k = 0
+    while k < len(cs) and not is_ci(cs[k][2]):
+        k += 1
+    if all(is_ci(c[2]) for c in cs[k:]):                    # no port commit after the first CI commit
+        return (cs[k - 1][0] if k else None), cs[:k], cs[k:]
+    if repo is None:
+        raise SystemExit("a CI commit sits between port commits; pass the repository to replay them")
+    parent = cs[k - 1][0] if k else git(repo, "rev-parse", f"{cs[0][0]}^")
+    keep = parent
+    idx = pathlib.Path(repo, git(repo, "rev-parse", "--git-dir"), "port-offer.index")   # .git may be a file
+    env0 = dict(os.environ, GIT_INDEX_FILE=str(idx))
+    def g(*a, env=None, inp=None):
+        r = subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env or env0, input=inp)
+        if r.returncode:
+            sys.exit(f"git {' '.join(a)}: {r.stderr.strip()[:300]}")
+        return r.stdout.strip()
+    try:
+        for sha, _subj, files in cs[k:]:
+            if is_ci(files):
+                continue
+            g("read-tree", sha)
+            for f in sorted(CI_FILES):                       # the CI files as they were before any CI commit
+                blob = git(repo, "rev-parse", "--verify", "-q", f"{keep}:{f}", check=False)
+                if blob:
+                    g("update-index", "--add", "--cacheinfo", f"100644,{blob},{f}")
+                else:
+                    g("update-index", "--force-remove", f)
+            tree = g("write-tree")
+            meta = git(repo, "log", "-1", "--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI", sha).split("\0")
+            msg = git(repo, "log", "-1", "--format=%B", sha)
+            env = dict(os.environ, GIT_AUTHOR_NAME=meta[0], GIT_AUTHOR_EMAIL=meta[1], GIT_AUTHOR_DATE=meta[2],
+                       GIT_COMMITTER_NAME=meta[3], GIT_COMMITTER_EMAIL=meta[4], GIT_COMMITTER_DATE=meta[5])
+            parent = g("commit-tree", tree, "-p", parent, env=env, inp=msg + "\n")
+    finally:
+        idx.unlink(missing_ok=True)
+    return parent, port, ci
 
 
 def hunk_sizes(diff_u0):
@@ -353,12 +387,14 @@ def self_check():
         tip, port, ci = offer_tip(cs)
         ok &= len(port) == 1 and len(ci) == 1 and tip == cs[0][0]
         ok &= "port-ci.yml" not in git(r, "diff", "--name-only", f"main..{tip}")
-        # a CI commit in the middle is refused, not replayed
+        # a port fix after the CI commit: replayed without the CI files, the same commit every time
         (r / "B.java").write_text("b2\n", encoding="utf-8"); git(r, "commit", "-qam", "late fix")
-        try:
-            offer_tip(commits(r, "main", "neoforge-1.21.1")); ok = False
-        except SystemExit:
-            pass
+        cs2 = commits(r, "main", "neoforge-1.21.1")
+        t2, p2, c2 = offer_tip(cs2, r)
+        ok &= [x[1] for x in p2] == ["Port", "late fix"] and [x[1] for x in c2] == ["CI"]
+        ok &= git(r, "diff", "--name-only", f"main..{t2}").split() == ["A.java", "B.java"]
+        ok &= git(r, "log", "-1", "--format=%s%x00%an", t2) == "late fix\x00t" and offer_tip(cs2, r)[0] == t2
+        ok &= git(r, "rev-parse", "neoforge-1.21.1") == cs2[-1][0]            # the port branch is untouched
     ok &= hunk_sizes("@@ -1 +1 @@\n@@ -3,2 +3,3 @@\n@@ -9,0 +10,8 @@\n") == (3, 1, 2)
     ok &= gh_slug("https://github.com/o/r.git") == "o/r" and gh_slug("git@github.com:o/r") == "o/r"
     st = {"license": {"result": {"licence": "MIT", "file": ["LICENSE"]}}, "gates": {"status": "done",
@@ -396,7 +432,7 @@ def main():
     cs = commits(repo, base, branch)
     if not cs:
         sys.exit(f"{branch} has no commits over {base}")
-    tip, port, ci = offer_tip(cs)
+    tip, port, ci = offer_tip(cs, repo)
     offer = branch if not ci else f"{branch}-upstream"
     if ci:
         cur = git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{offer}", check=False)
