@@ -5285,3 +5285,18 @@ Migrations here are for running mods on the user's own machine. Many mods are
 original author's permission.
 
 NN. **`defineId` registered against the WRONG class (runtime crash, decompile artifact)** · **Pattern:** `public static final EntityDataAccessor<Integer> LIFE_TICKS = SynchedEntityData.defineId(SomeOtherEntity.class, EntityDataSerializers.INT);` in a class that is **not** `SomeOtherEntity` · **Runtime:** `java.lang.IllegalArgumentException: Data value id is too big with 28! (Max is 8)` thrown from `SynchedEntityData$Builder.define` inside the entity's `defineSynchedData`, i.e. **at construction** — so the server dies the moment that entity is ever spawned (a ~390-file mob mod: every time one golem boss summoned a mine) · **Fix:** `defineId` must always name **the class that declares the field**; ids are allocated per class-hierarchy, so naming another class hands you that class's id while your own builder is sized for yours. **Scan:** `grep -rn 'SynchedEntityData.defineId(' src/main/java` and flag any file whose `defineId(X.class` does not match its own class name — EXCEPT mixins, which legitimately define against the vanilla class they inject into. **Gate:** a `@GameTest` that simply *spawns* the entity catches it (verified to fail with the exact message on the unfixed code).
+
+**X47. 🔴 Gates that only ever compile `src/main` cannot fail on the author's OTHER artifacts — end every
+port with the author's own build, untouched.** · **Pattern:** a mod that ships several jars from one tree (a
+CurseForge variant, a "pro" build, a JVMTI backend), each from its own source set, all assembled by the author's
+`build` · **Symptom:** none, on every gate. An upstream port reported green Gate A, Gate B and Gate C while
+`./gradlew build` failed with 38 errors in two variant source sets that no tool, burn-down or gate had compiled
+— so the first contributor to clone the branch would have hit BUILD FAILED · **Fix:** every tool, compile count
+and burn-down covers every source set the build declares (`tools/srcsets.py`), and the pipeline's last check is
+the author's `build` plus every Jar task they registered, run with NONE of the port's harness (only the
+Central-mirror init script, which rewrites repository URLs). Two more things the same check surfaced, both silent:
+a worker "fixed" a moved interface by deleting `implements` and calling the type gone (it had moved to
+`net.neoforged.neoforgespi.earlywindow`; the `META-INF/services` file had to move with it), and a
+never-transform whitelist still named `"net.minecraftforge."`, which on NeoForge protects nothing — now a
+codemod rule. And pass the TARGET from the build: a tool default had told 26.x workers they were porting to
+1.21.1.
