@@ -41,7 +41,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 import importlib.util  # noqa: E402
 _ss = importlib.util.spec_from_file_location("srcsets", ROOT / "tools/srcsets.py")
 srcsets = importlib.util.module_from_spec(_ss); _ss.loader.exec_module(srcsets)
-STAGES = ["license", "designer", "branch", "build", "metadata", "mechanical", "burndown", "gates", "author-build", "normalise",
+STAGES = ["license", "deps", "designer", "branch", "build", "metadata", "mechanical", "burndown", "gates", "author-build", "normalise",
           "reviewer", "provenance", "report"]
 SONNET = "claude-sonnet-5-5"
 PERMISSIVE = {"MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "ISC", "Zlib", "Unlicense", "CC0-1.0", "MPL-2.0",
@@ -134,6 +134,22 @@ def st_license(c):
         raise Fail("; ".join(notes) + " -- resolve or pass --permission")
     return result
 
+
+
+def st_deps(c):
+    """Dependency preflight (tools/port-deps.py): find missing or blocked dependencies before any model is
+    spent, and fill the local maven from the registry where the author's host is unreachable."""
+    m = re.search(r"(\d+(?:\.\d+)+)$", c["args"].branch)
+    if not m:
+        return {"skipped": "no Minecraft version in the branch name"}
+    log = c["dir"] / "deps.log"
+    r = sh([sys.executable, str(ROOT / "tools/port-deps.py"), "--repo", str(c["repo"]), "--mc", m.group(1),
+            "--fill-local", "--json", str(c["dir"] / "deps.json")], timeout=900, log=log)
+    if r.returncode:
+        why = {2: "a registry lookup failed", 3: "a required dependency has no build for the target",
+               4: "a dependency sits on a blocked host with no registry source"}.get(r.returncode, "port-deps failed")
+        raise Fail(f"dependency preflight: {why} (see {log})")
+    return {"mc": m.group(1), "report": str(c["dir"] / "deps.json")}
 
 def st_designer(c):
     prompt = (ROOT / "templates/upstream-harness/designer-prompt.md").read_text(encoding="utf-8")
