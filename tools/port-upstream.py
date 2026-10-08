@@ -111,6 +111,10 @@ def st_license(c):
     holders = re.findall(r"(?im)^.*copyright\s*(?:\(c\)|©)?\s*[^\n]{0,80}$", text)
     toml = next((p for p in repo.glob("src/main/resources/META-INF/*mods.toml")), None)
     declared = (re.search(r'(?m)^\s*license\s*=\s*"([^"]+)"', toml.read_text(encoding="utf-8")) or [None, None])[1] if toml else None
+    props_file = repo / "gradle.properties"           # mods.toml is often templated: license="${mod_license}"
+    props = dict(re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(.*?)\s*$", props_file.read_text(encoding="utf-8"))) if props_file.exists() else {}
+    if declared:
+        declared = re.sub(r"\$\{([\w.]+)\}", lambda m: props.get(m.group(1), m.group(0)), declared)
     if found and declared and found.split("-")[0].lower() not in declared.lower():
         notes.append(f"LICENSE file reads as {found} but mods.toml says '{declared}'")
     kind = found or (declared if declared in PERMISSIVE else None)
