@@ -171,6 +171,9 @@ def st_branch(c):
     return {"branch": a.branch}
 
 
+MACHINE = re.compile(r"/tmp/|/home/\w|/root/|\.mc-mod-upgrade|\bfile:/(?!/\$\{)")
+
+
 def provide_pairs(c):
     """--provide OLD=NEW: a dependency whose port exists only as a sibling fork (no release for the target yet),
     published to mavenLocal. OLD is the author's coordinate prefix, NEW the group:artifact:version to use."""
@@ -246,6 +249,13 @@ def st_build(c):
         if n is not None and raise_neo_floor(c):          # a dependency needs a newer NeoForge: recount on it
             n, line = compile_count(repo, c["dir"] / "build-check.log")
         unmet = provide_unmet(c)
+        local = [f"{f.name}: {l.strip()}" for f in (repo / "build.gradle", repo / "settings.gradle", repo / "gradle.properties")
+                 if f.exists() for l in f.read_text(encoding="utf-8").splitlines() if MACHINE.search(l)]
+        if local:      # caught here, not by provenance after the whole port (measured: a pinned local-maven repo)
+            prompt = ("The build files name paths on THIS machine, which the author's build cannot have: "
+                      + "; ".join(local[:5]) + ". Remove them -- the harness supplies its own repositories from "
+                      "outside the tree. Fix the build files only.")
+            continue
         if n is not None and not unmet:
             return {"usd": usd, "first_count": n}
         if unmet:

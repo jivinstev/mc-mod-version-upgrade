@@ -271,7 +271,26 @@ def stub_signals(before, after):
     lost = len(WIRING.findall(before)) - len(WIRING.findall(after))
     if lost >= 1:
         out.append(f"removes {lost} registration/listener/send call(s)")
+    dropped = sorted(_overridden(before) - _overridden(after) & _declared(after))
+    if dropped:
+        out.append(f"drops @Override from {', '.join(dropped[:4])} and keeps the method: it then overrides nothing and "
+                   "never runs -- port it to the new signature, or delete it and say what vanilla now does instead")
     return out
+
+
+_OVERRIDE = re.compile(r'@Override\s+(?:@[\w.]+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|static|final|'
+                       r'synchronized|default)\s+)*(?:<[^>]+>\s+)?[\w.<>\[\], ?]+\s+(\w+)\s*\(')
+_DECL = re.compile(r'^\s*(?:(?:public|protected|private|static|final|synchronized|default|abstract)\s+)+'
+                   r'(?:<[^>]+>\s+)?[\w.<>\[\], ?]+\s+(\w+)\s*\(', re.M)
+
+
+def _overridden(text):
+    """Names of methods annotated @Override (comments stripped)."""
+    return set(_OVERRIDE.findall(COMMENTS.sub("", text or "")))
+
+
+def _declared(text):
+    return set(_DECL.findall(COMMENTS.sub("", text or "")))
 
 
 def _status(repo):
@@ -376,6 +395,10 @@ def self_check():
     ok &= guard(t, t.replace("    old(1);", "    // old(1);\n    // more();\n    // x(2);")) is not None  # commented out
     ok &= guard(t, t.replace("old(1);", "throw new UnsupportedOperationException();")) is not None
     ok &= guard(t, t.replace("old(1);", "renamed(1);")) is None
+    ov = "class A extends B {\n  @Override\n  protected void hit(Mob m, double d) {\n    x();\n  }\n}\n"
+    ok &= guard(ov, ov.replace("  @Override\n", "")) is not None                              # @Override dropped, kept
+    ok &= guard(ov, ov.replace("Mob m, double d", "Mob m")) is None                            # ported signature
+    ok &= guard(ov, "class A extends B {\n}\n") is None                                       # deleted outright
     ok &= guard(t, t.replace("  }\n  void g", "  void g")) is not None   # a lost closing brace
     ok &= guard(t, t.replace("old(1);", 'log("{");')) is None             # a brace inside a string is fine
     with tempfile.TemporaryDirectory() as d:
