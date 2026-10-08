@@ -34,12 +34,12 @@ PAT=[ # (name, regex over file text, covered-by)
 
 
 def files(path, ref):
-    out = subprocess.run(["git", "-C", path, "ls-tree", "-r", "--name-only", ref], capture_output=True, text=True).stdout.split()
+    out = subprocess.run(["git", "-C", path, "ls-tree", "-r", "--name-only", ref], capture_output=True, text=True, encoding="utf-8").stdout.split()
     return [f for f in out if f.endswith(".java") and f.startswith("src/")]
 
 
 def profile(path, ref):
-    texts = {f: subprocess.run(["git", "-C", path, "show", f"{ref}:{f}"], capture_output=True, text=True,
+    texts = {f: subprocess.run(["git", "-C", path, "show", f"{ref}:{f}"], capture_output=True, text=True, encoding="utf-8",
                                errors="replace").stdout for f in files(path, ref)}
     return len(texts), {name: sum(1 for t in texts.values() if re.search(rx, t)) for name, rx, _ in PAT}
 

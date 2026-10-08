@@ -273,6 +273,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
             "srcsets.py|srcsets: every source set the author builds, their compile and jar tasks, and the target from the build" \
             "port-profile.py|port-profile: count the cost-driving port patterns per mod and name the tool covering each" \
+            "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
+            "local-maven.py|local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry" \
             "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \
             "normalise-imports.py|normalise-imports: inline names a port wrote become imports; the author's own and colliding names are kept" \
             "port-upstream.py|port-upstream: an unlicensed or mismatched repo stops before spending; a dropped copyright line stops the push" \

@@ -226,6 +226,11 @@ def st_mechanical(c):
         n, _ = compile_count(repo, c["dir"] / f"at-{k}.log")
         if n is not None:
             break
+        log = (c["dir"] / f"at-{k}.log").read_text(encoding="utf-8", errors="replace")
+        unresolved = sorted(set(re.findall(r"Could not resolve ([\w.\-]+:[\w.\-]+:[^\s.]+[^\s]*)\.", log)))
+        if unresolved:                            # a dependency, not Minecraft: say so instead of blaming the AT
+            raise Fail("dependencies do not resolve: " + ", ".join(unresolved[:6]) + " -- wrong coordinates for the "
+                       "target, or a maven this machine cannot reach (tools/local-maven.py); see " + f"at-{k}.log")
         out = tool("fix-access-transformer.py", "--work", repo, "--overrides-from", c["dir"] / f"at-{k}.log")
         if " 0 override" in out:
             raise Fail("Minecraft's recompile fails and no access-transformer override explains it (see at-*.log)")
@@ -413,11 +418,46 @@ def st_report(c):
     md += ["", "Verified:",
            f"- Gate A: {g['gateA_tests']} test(s) passed" if g.get("gateA_tests") else "- Gate A: NOT RUN",
            f"- Gate B: green after {g.get('gateB_runs')} run(s)" if g else "- Gate B: NOT RUN",
-           (f"- the author's own `{' '.join(ab['tasks'])}` succeeds with none of the port's harness "
-            f"({len(ab.get('jars', []))} jar(s))") if ab else "- the author's own build: NOT RUN",
+           (f"- the author's own `{' '.join(ab['tasks'])}` succeeds with none of the port's harness, its own tests "
+            f"included ({len(ab.get('jars', []))} jar(s))") if ab else "- the author's own build: NOT RUN",
            "Not verified here: Gate C (real client) unless recorded separately; gameplay by a person."]
     (c["dir"] / "COST.md").write_text("\n".join(md) + "\n", encoding="utf-8")
-    return {"total_usd": round(total, 2), "table": "\n".join(md)}
+    msg = commit_message(c, md)
+    (c["dir"] / "COMMIT_MSG.md").write_text(msg, encoding="utf-8")
+    sha = None
+    if not c["args"].no_commit:                      # the record goes where the author will read it: the commit
+        sh(["git", "-C", str(c["repo"]), "add", "-A", "--", "src", "build.gradle", "settings.gradle", "gradle.properties",
+            "gradle"])
+        if sh(["git", "-C", str(c["repo"]), "diff", "--cached", "--quiet"]).returncode:
+            r = sh(["git", "-C", str(c["repo"]), "commit", "-q", "-F", str(c["dir"] / "COMMIT_MSG.md")])
+            if r.returncode:
+                raise Fail(f"final commit failed: {r.stderr or r.stdout}")
+        sha = sh(["git", "-C", str(c["repo"]), "rev-parse", "--short", "HEAD"]).stdout.strip()
+    return {"total_usd": round(total, 2), "table": "\n".join(md), "commit": sha}
+
+
+def commit_message(c, md):
+    """The final commit's message: what changed, the review, what was verified and what was not, the cost."""
+    res = lambda s: (c["state"].get(s) or {}).get("result") or {}
+    target = srcsets.target(c["repo"]) or "the target"
+    stat = sh(["git", "-C", str(c["repo"]), "diff", "--shortstat", c["args"].base or "HEAD"]).stdout.strip()
+    mech, burn = res("mechanical"), res("burndown")
+    counts = mech.get("errors") or []
+    lines = [f"Port to {target}", "",
+             f"Source-first port of the author's own code; {stat or 'see the diff'}."]
+    if counts:
+        lines.append(f"Compile errors after the deterministic tools: {counts[-1]}; burn-down to 0 by workers"
+                     + (f" ({burn.get('stubs')} stub(s))" if burn.get("stubs") is not None else "") + ".")
+    review = c["dir"] / "REVIEW.md"
+    if review.exists():
+        text = review.read_text(encoding="utf-8")
+        for head in ("Scores", "Needs a person"):
+            m = re.search(r"(?ms)^## %s\s*\n(.*?)(?=^## |\Z)" % re.escape(head), text)
+            if m and m.group(1).strip():
+                lines += ["", f"Review -- {head.lower()}:", m.group(1).strip()]
+    lines += ["", *md]
+    lines += ["", *[f"{t_}" for t_ in (c["args"].trailer or [])]] if c["args"].trailer else []
+    return "\n".join(lines).rstrip() + "\n"
 
 
 FUNCS = {s: globals()["st_" + s.replace("-", "_")] for s in STAGES}
@@ -434,6 +474,8 @@ def main():
                                          "e.g. private repositories; kept out of this public repository")
     ap.add_argument("--from", dest="start", choices=STAGES); ap.add_argument("--only", choices=STAGES)
     ap.add_argument("--record", help="STAGE=USD for a stage run by hand"); ap.add_argument("--report", action="store_true")
+    ap.add_argument("--no-commit", action="store_true", help="write COMMIT_MSG.md but do not make the final commit")
+    ap.add_argument("--trailer", action="append", help="a line appended to the final commit (attribution trailers)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
     if a.base is None:
