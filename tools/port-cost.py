@@ -107,8 +107,11 @@ def port_size(port):
     }
 
 
-def collect(modid, projects):
-    rx = re.compile(r"mods/" + re.escape(modid) + r"(?:/|\b)")
+def collect(modid, projects, path=None, labels=()):
+    """`path`: match sessions by a checkout path instead of mods/<modid> (an upstream fork lives elsewhere).
+    `labels`: [(name, path)] -- each request is labelled with the first path its tool calls touch, and a request
+    touching none inherits the previous one's label (its reading and thinking belong to that work)."""
+    rx = re.compile(re.escape(path) if path else r"mods/" + re.escape(modid) + r"(?:/|\b)")
     other_rx = re.compile(r"mods/([A-Za-z0-9_-]+)(?=/)")
     files = collections.defaultdict(list)                    # session -> [jsonl files]
     for f in projects.rglob("*.jsonl"):
@@ -117,6 +120,7 @@ def collect(modid, projects):
     sessions = {}
     for sid, fs in files.items():
         reqs, cost, touches, others = {}, None, False, collections.Counter()
+        lab, current = {}, "other"
         versions, entry = set(), set()
         for f in fs:
             for line in open(f, errors="replace", encoding="utf-8"):
@@ -133,6 +137,10 @@ def collect(modid, projects):
                 calls = json.dumps([c.get("input") for c in uses])
                 if rx.search(calls):
                     touches = True
+                for name, lp in labels:
+                    if lp in calls:
+                        current = name
+                        break
                 # only WORK on another mod makes a session mixed: reading a finished port for reference
                 # (Read/Grep/Glob) is part of this port, not a second one
                 work = json.dumps([c.get("input") for c in uses if c.get("name") not in READ_ONLY_TOOLS])
@@ -142,10 +150,11 @@ def collect(modid, projects):
                 entry.add(d.get("entrypoint"))
                 rid = (f.name, d.get("requestId") or d.get("uuid"))
                 if rid not in reqs and m.get("model") != "<synthetic>":
+                    lab[rid] = current
                     reqs[rid] = (ts(d["timestamp"]), m.get("model", "?"), d.get("effort") or "unset",
                                  m.get("usage") or {}, f.parent.name == "subagents")
         if touches:
-            sessions[sid] = dict(reqs=list(reqs.values()), cost=cost, others=others,
+            sessions[sid] = dict(reqs=list(reqs.values()), labels=[lab[r] for r in reqs], cost=cost, others=others,
                                  versions=versions - {None}, entry=entry - {None})
     return sessions
 
@@ -276,6 +285,9 @@ def main():
                                     "2026-10-07; UTC unless it says otherwise): one replay, not every session "
                                     "that ever touched the port")
     ap.add_argument("--session", help="count only sessions whose id starts with this")
+    ap.add_argument("--path", help="match sessions by this checkout path instead of mods/<modid> (upstream ports)")
+    ap.add_argument("--label", action="append", default=[], metavar="NAME=PATH",
+                    help="split the cost by which path each request worked in, e.g. port=/src/fork tools=/src/migrator")
     a = ap.parse_args()
     ws = pathlib.Path(os.path.expanduser(a.workspace or read_env().get("MIGRATE_WORKSPACE", "") or "."))
     port = ws / "mods" / a.modid
@@ -283,7 +295,8 @@ def main():
     if not projects.is_dir():
         print(f"port-cost: no transcripts at {projects} -- nothing recorded", file=sys.stderr)
         return 2
-    sessions = collect(a.modid, projects)
+    labels = [tuple(x.split("=", 1)) for x in a.label]
+    sessions = collect(a.modid, projects, a.path, labels)
     if a.session:
         sessions = {k: v for k, v in sessions.items() if k.startswith(a.session)}
     if a.since:
@@ -291,7 +304,9 @@ def main():
         cut = ts(since)
         for k in list(sessions):
             v = sessions[k]
-            v["reqs"] = [r for r in v["reqs"] if r[0] >= cut]
+            keep = [i for i, r in enumerate(v["reqs"]) if r[0] >= cut]
+            v["reqs"] = [v["reqs"][i] for i in keep]
+            v["labels"] = [v["labels"][i] for i in keep]
             # a session's recorded total covers ALL of it; with a time cut, price the kept requests instead
             v["cost"] = None
             if not v["reqs"]:
@@ -302,6 +317,16 @@ def main():
     c = summarise(a.modid, sessions, port)
     sec = migration_section(c)
     print(sec, end="")
+    if labels:
+        print("\nBy where the work happened (label: requests, est. USD):")
+        for name in [n for n, _ in labels] + ["other"]:
+            part = {k: dict(v, reqs=[r for r, l in zip(v["reqs"], v["labels"]) if l == name], cost=None)
+                    for k, v in sessions.items()}
+            part = {k: v for k, v in part.items() if v["reqs"]}
+            if part:
+                s = summarise(a.modid, part, port)
+                print(f"  {name}: {s['totals'].get('requests', 0)} requests, "
+                      f"{'$%.2f' % s['usd'] if s['usd'] is not None else 'unpriced'}")
     if a.print:
         return 0
     if not port.is_dir():
