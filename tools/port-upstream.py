@@ -38,7 +38,10 @@ model stages need the `claude` CLI.
 import argparse, json, os, pathlib, re, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-STAGES = ["license", "designer", "branch", "build", "metadata", "mechanical", "burndown", "gates", "normalise",
+import importlib.util  # noqa: E402
+_ss = importlib.util.spec_from_file_location("srcsets", ROOT / "tools/srcsets.py")
+srcsets = importlib.util.module_from_spec(_ss); _ss.loader.exec_module(srcsets)
+STAGES = ["license", "designer", "branch", "build", "metadata", "mechanical", "burndown", "gates", "author-build", "normalise",
           "reviewer", "provenance", "report"]
 SONNET = "claude-sonnet-5-5"
 PERMISSIVE = {"MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "ISC", "Zlib", "Unlicense", "CC0-1.0", "MPL-2.0",
@@ -83,7 +86,7 @@ def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
 
 
 def compile_count(repo, log):
-    gradle(repo, ["-I", str(ROOT / "tools/maxerrs.init.gradle"), "compileJava"], log)
+    gradle(repo, ["-I", str(ROOT / "tools/maxerrs.init.gradle"), *srcsets.compile_tasks(repo), "--continue"], log)
     r = sh(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)])
     m = re.search(r"errors = (\d+)", r.stdout)
     if not m or "compileJava: yes" not in r.stdout:
@@ -203,7 +206,14 @@ def st_mechanical(c):
         for d in repo.glob("src/*/java"):
             rep[f"srg:{d.parent.name}"] = tool("srg-remap/apply_mapping.py", srg, d).splitlines()[0:1]
     pack = ROOT / "tools/recipes/forge-1.20-to-neoforge-1.21.1.recipes.tsv"
-    rep["pack"] = [l for l in tool("apply-recipes.py", "--src", src, "--recipes", pack).splitlines() if l.startswith("auto")]
+    dirs = srcsets.java_dirs(repo)                # every source set the author builds, not just main
+    for d in dirs:                                # Forge -> NeoForge packages and the 1.21 renames, as port.py does
+        files = [str(f) for f in d.rglob("*.java")]
+        for i in range(0, len(files), 200):
+            sh(["perl", "-pi", str(ROOT / "tools/srg-remap/forge_import_codemod.pl"), *files[i:i + 200]])
+        tool("srg-remap/mc121_codemod.py", d)
+    rep["pack"] = [l for d in dirs for l in tool("apply-recipes.py", "--src", d, "--recipes", pack).splitlines()
+                   if l.startswith("auto")]
     rep["at"] = tool("fix-access-transformer.py", "--work", repo, *(["--srg-map", srg] if srg.exists() else []))
     for k in range(4):                         # override widenings appear one subclass level per compile
         n, _ = compile_count(repo, c["dir"] / f"at-{k}.log")
@@ -212,16 +222,16 @@ def st_mechanical(c):
         out = tool("fix-access-transformer.py", "--work", repo, "--overrides-from", c["dir"] / f"at-{k}.log")
         if " 0 override" in out:
             raise Fail("Minecraft's recompile fails and no access-transformer override explains it (see at-*.log)")
-    rep["shapes"] = tool("forge-shapes.py", "--src", src, "--modid", a.modid, "--sites", 0)
-    rep["net"] = tool("convert-simplechannel.py", "--src", src, "--modid", a.modid)
+    rep["shapes"] = [tool("forge-shapes.py", "--src", d, "--modid", a.modid, "--sites", 0) for d in dirs]
+    rep["net"] = [tool("convert-simplechannel.py", "--src", d, "--modid", a.modid) for d in dirs]
     counts = []
     for r in range(4):
         n, line = compile_count(repo, c["dir"] / f"mech-{r}.log")
         if n is None:
             raise Fail(f"compile did not run: {line}")
         counts.append(n)
-        out = tool("fix-holders.py", "--src", src, "--log", c["dir"] / f"mech-{r}.log", "--sites", 0)
-        if " 0 site" in out.splitlines()[0]:
+        outs = [tool("fix-holders.py", "--src", d, "--log", c["dir"] / f"mech-{r}.log", "--sites", 0) for d in dirs]
+        if all(" 0 site" in o.splitlines()[0] for o in outs):
             break
     rep["errors"] = counts
     return rep
@@ -303,8 +313,23 @@ def st_gates(c):
     return {"gateA_tests": ran, "usd": end.get("spent", 0), "gateB_runs": end.get("run")}
 
 
+def st_author_build(c):
+    """The author's own `build` plus every Jar task they registered, with NONE of the port's harness -- what a
+    contributor runs after cloning. Our gates compile and test what we wired; this proves the author's build
+    still works (measured: a port green on every gate failed `build` in two unported variant source sets).
+    The Central mirror init script is the one addition: it only rewrites repository URLs."""
+    jars = srcsets.author_jar_tasks(c["repo"])
+    log = c["dir"] / "author-build.log"
+    r = gradle(c["repo"], ["build", *jars, "--continue"], log)
+    if r.returncode:
+        n, line = compile_count(c["repo"], c["dir"] / "author-build-count.log")
+        raise Fail(f"the author's build fails ({line}); see {log}")
+    built = sorted(p.name for p in (c["repo"] / "build/libs").glob("*.jar")) if (c["repo"] / "build/libs").is_dir() else []
+    return {"tasks": ["build", *jars], "jars": built}
+
+
 def st_normalise(c):
-    return {"out": tool("normalise-imports.py", "--src", c["repo"] / "src/main/java", "--base", c["args"].base)}
+    return {"out": [tool("normalise-imports.py", "--src", d, "--base", c["args"].base) for d in srcsets.java_dirs(c["repo"])]}
 
 
 def st_reviewer(c):
@@ -375,11 +400,20 @@ def st_report(c):
     md = ["| stage | model cost | wall time |", "|---|---|---|", *rows, f"| **total** | **${total:.2f}** | |", "",
           f"Licence: {lic.get('licence')} ({', '.join(lic.get('file') or [])}); notices retained."
           + (f" Author's permission: {lic['permission']}" if lic.get("permission") else "")]
+    # P8: each claim comes from a stage result, and what did not run is said, not omitted
+    res = lambda s: (c["state"].get(s) or {}).get("result") or {}
+    g, ab = res("gates"), res("author-build")
+    md += ["", "Verified:",
+           f"- Gate A: {g['gateA_tests']} test(s) passed" if g.get("gateA_tests") else "- Gate A: NOT RUN",
+           f"- Gate B: green after {g.get('gateB_runs')} run(s)" if g else "- Gate B: NOT RUN",
+           (f"- the author's own `{' '.join(ab['tasks'])}` succeeds with none of the port's harness "
+            f"({len(ab.get('jars', []))} jar(s))") if ab else "- the author's own build: NOT RUN",
+           "Not verified here: Gate C (real client) unless recorded separately; gameplay by a person."]
     (c["dir"] / "COST.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     return {"total_usd": round(total, 2), "table": "\n".join(md)}
 
 
-FUNCS = {s: globals()["st_" + s] for s in STAGES}
+FUNCS = {s: globals()["st_" + s.replace("-", "_")] for s in STAGES}
 
 
 def main():

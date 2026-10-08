@@ -22,6 +22,7 @@ import collections, argparse, importlib.util, json, os, pathlib, re, subprocess,
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 _s = importlib.util.spec_from_file_location("fl", ROOT / "tools/file-loop.py")
 fl = importlib.util.module_from_spec(_s); _s.loader.exec_module(fl)
+BASH = fl.BASH
 
 PROMPT = """A Minecraft mod ported to {target} compiles, but its headless GameTest server (Gate B) fails:
 
@@ -73,7 +74,7 @@ def LOG_DIR(work):
 
 
 def run_gate(work, task, heap, log, phase=None, timeout=1500):
-    cmd = ["./gradlew", task, "--console=plain", "--init-script",
+    cmd = [BASH, "gradlew", task, "--console=plain", "--init-script",
            str(ROOT / "tools/central-mirror.init.gradle"), f"-Dorg.gradle.jvmargs=-Xmx{heap}"]
     # an upstream port keeps its test harness OUTSIDE the author's tree and wires it in per run
     # (templates/upstream-harness/gates.init.gradle; tools/port-upstream.py sets this)
@@ -134,7 +135,7 @@ def listener_audit(work):
         except Exception as e:  # noqa: BLE001 -- the audit is a pre-check; the client run still decides
             return None, f"listener audit: skipped (no classpath: {str(e)[:120]})"
     # the audit reads the PREPARED tree; refresh it, or a worker's fix is judged against the stale copy
-    subprocess.run(["./gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
+    subprocess.run([BASH, "gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
                     str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
     r = subprocess.run([sys.executable, str(tool), str(work), f"--mc={mc}"], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
@@ -204,7 +205,7 @@ def mixin_audit(work):
         return None
     args = [f"--mc={mc}"] if mc and (work / f"versions/{mc}.properties").exists() else []
     if args and (work / "gradlew").exists():   # the audit reads the PREPARED tree: refresh it so a worker's fix is not judged on a stale copy
-        subprocess.run(["./gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
+        subprocess.run([BASH, "gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
                         str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
     r = subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work), *args],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -324,13 +325,15 @@ def main():
     ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=fl.TIERS)
     ap.add_argument("--task", default="runGameTestServer")
     ap.add_argument("--budget", type=float, default=5.0); ap.add_argument("--max-runs", type=int, default=6)
-    ap.add_argument("--target", default="NeoForge 1.21.1"); ap.add_argument("--sources", default="auto")
+    ap.add_argument("--target", default=None); ap.add_argument("--sources", default="auto")
     ap.add_argument("--heap", default="6g"); ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--log", default="gate-loop.jsonl")
     ap.add_argument("--gatec", help="comma list of Gate C phases (launch,spawn,battle,gauntlet) instead of Gate B")
     ap.add_argument("--namespace", help="the mod's id, for the data-load check (default: gradle.properties mod_id)")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
+    if a.target is None and a.work:   # the build says what it targets (tools/srcsets.py)
+        a.target = fl.srcsets.target(pathlib.Path(a.work)) or "NeoForge 1.21.1"
     if a.self_check:
         return self_check()
     if not a.work:

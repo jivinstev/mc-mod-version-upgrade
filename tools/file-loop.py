@@ -32,6 +32,9 @@ import singleshot           # noqa: E402
 
 _s = importlib.util.spec_from_file_location("rb", ROOT / "tools/recipe-bench.py")
 rb = importlib.util.module_from_spec(_s); _s.loader.exec_module(rb)
+_ss = importlib.util.spec_from_file_location("srcsets", ROOT / "tools/srcsets.py")
+srcsets = importlib.util.module_from_spec(_ss); _ss.loader.exec_module(srcsets)
+
 MODELS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 TIERS = ["haiku", "sonnet", "opus"]
 
@@ -63,7 +66,8 @@ RULE: <if one mechanical rewrite would fix this same error wherever it occurs, a
 def compile_(work, log, heap):
     init = ROOT / "tools/maxerrs.init.gradle"
     with open(log, "w", encoding="utf-8") as fh:
-        subprocess.run(["./gradlew", "compileJava", "--console=plain", "--init-script", str(init),
+        # every source set the author builds, not just main (tools/srcsets.py); --continue so all report
+        subprocess.run([BASH, "gradlew", *srcsets.compile_tasks(work), "--continue", "--console=plain", "--init-script", str(init),
                         "--init-script", str(ROOT / "tools/central-mirror.init.gradle"),
                         f"-Dorg.gradle.jvmargs=-Xmx{heap}"], cwd=work, stdout=fh, stderr=subprocess.STDOUT)
     text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
@@ -173,7 +177,7 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
     errors = "\n".join(f"{rel(f)}:{l}: {m}" for f in files for l, m in sorted(by[f])[:60])
     ent, ids = entry_texts([m for f in files for _l, m in by[f]], sigs, entries)
     scope_rule = ("These errors belong to one subsystem that needs coordinated changes across files: you MAY "
-                  "edit or add any file under src/main/java to finish it (keep each change minimal)."
+                  "edit or add any file under src/*/java to finish it (keep each change minimal)."
                   if subsystem else
                   "If a fix needs a change in a file not listed, do not edit it: describe it under NEEDS.")
     prompt = WORKER.format(scope_rule=scope_rule, target=target, files="\n".join("  " + rel(f) for f in files), errors=errors,
@@ -406,7 +410,7 @@ def main():
     ap.add_argument("--batch-files", type=int, default=4)
     ap.add_argument("--batch-errors", type=int, default=40)
     ap.add_argument("--parallel", type=int, default=4)
-    ap.add_argument("--target", default="NeoForge 1.21.1")
+    ap.add_argument("--target", default=None, help="default: read from the project's gradle.properties")
     ap.add_argument("--sources", default="auto",
                     help="a directory of Minecraft/NeoForge sources workers may grep (default: found in the build)")
     ap.add_argument("--heap", default="6g")
@@ -423,6 +427,9 @@ def main():
     if not a.work:
         ap.error("--work is required")
     work = pathlib.Path(a.work).resolve(); src = work / "src/main/java"
+    all_java = lambda: (f for d in srcsets.java_dirs(work) for f in d.rglob("*.java"))
+    if a.target is None:   # the build says what it targets; a default here once told 26.2 workers "1.21.1"
+        a.target = srcsets.target(work) or "NeoForge 1.21.1"
     logf = open(a.log, "a", encoding="utf-8")
     note = lambda **k: (logf.write(json.dumps(k) + "\n"), logf.flush(), print(json.dumps({x: k[x] for x in k if x not in ("result", "usage")})[:300]))
     sigs = rb.signatures()
@@ -493,7 +500,7 @@ def main():
                      est=round(cost, 3))
             multi = multi if any(k == "m" for k, _ in kept) else None
             jobs = [i for k, i in kept if k == "j"]; singles = [i for k, i in kept if k == "s"]
-            snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java")}
+            snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in all_java()}
             from concurrent.futures import ThreadPoolExecutor
 
             def one(fm):
@@ -569,7 +576,7 @@ def main():
                 note(event="plateau", round=rnd, errors=n); break
         return n, errs
 
-    orig = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java")}
+    orig = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in all_java()}
     n, errs = fix_errors(n, errs)
     if n is None:
         print("compile no longer counts:", errs); return 3

@@ -26,9 +26,9 @@ LOG="$1"
 [ -f "$LOG" ] || { echo "X13: no log at $LOG"; exit 3; }
 
 # Did compileJava actually EXECUTE? (not merely appear in a failure message)
-if grep -qE '^> Task :(compileJava|compileTestJava)( |$)' "$LOG"; then
+if grep -qE '^> Task :compile[A-Za-z]*Java( |$)' "$LOG"; then
   RAN=yes
-elif grep -qE '^> Task :(compileJava|compileTestJava) (UP-TO-DATE|FROM-CACHE|NO-SOURCE)' "$LOG"; then
+elif grep -qE '^> Task :compile[A-Za-z]*Java (UP-TO-DATE|FROM-CACHE|NO-SOURCE)' "$LOG"; then
   RAN=skipped
 else
   RAN=no
@@ -84,7 +84,7 @@ fi
 # X5d: the task can START and fail before javac runs -- an unresolvable dependency fails
 # compileJava itself ("> Task :compileJava FAILED" + "Could not resolve"), which the RAN check
 # above accepts. Zero error: lines from a FAILED compile task is not zero errors.
-if [ "$N" -eq 0 ] && grep -qE '^> Task :(compileJava|compileTestJava) FAILED' "$LOG"; then
+if [ "$N" -eq 0 ] && grep -qE '^> Task :compile[A-Za-z]*Java FAILED' "$LOG"; then
   echo "NOT A COUNT -- compileJava FAILED without a single javac error (it never compiled):"
   grep -E "^(\* What went wrong|> |   > )" "$LOG" | grep -v '^> Task' | head -4
   exit 2

@@ -120,6 +120,11 @@ perl -p tools/srg-remap/forge_import_codemod.pl "$C/B.txt" > "$C/B.out" 2>/dev/n
 { grep -q 'net/neoforged/neoforge/common/CommonHooks' "$C/B.out" && grep -q 'EventHooks' "$C/B.out" \
   && ! grep -q minecraftforge "$C/B.out"; } && ok "forge_import_codemod rewrites the slash form (descriptors, mixin targets)" \
   || bad "slash form: $(cat "$C/B.out")"
+printf 'Set.of("net.minecraft.", "net.minecraftforge.", "cpw.mods.");\n' > "$C/W.txt"
+perl -p tools/srg-remap/forge_import_codemod.pl "$C/W.txt" > "$C/W.out" 2>/dev/null
+grep -q '"net.minecraft.", "net.neoforged.", "cpw.mods."' "$C/W.out" \
+  && ok "forge_import_codemod: a loader package-prefix string (a transform whitelist) follows the loader" \
+  || bad "prefix string: $(cat "$C/W.out")"
 L="$T/link"; mkdir -p "$L"
 case "$(uname -s)" in
   # Git Bash's ln -s COPIES a directory; a user's workspace has a junction (what setup makes without
@@ -266,6 +271,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-rendertypes.py|convert-rendertypes: a CompositeState becomes a pipeline + RenderSetup; reverse-Z depth, unknown shards refused" \
             "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
             "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
+            "srcsets.py|srcsets: every source set the author builds, their compile and jar tasks, and the target from the build" \
             "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \
             "normalise-imports.py|normalise-imports: inline names a port wrote become imports; the author's own and colliding names are kept" \
             "port-upstream.py|port-upstream: an unlicensed or mismatched repo stops before spending; a dropped copyright line stops the push" \
