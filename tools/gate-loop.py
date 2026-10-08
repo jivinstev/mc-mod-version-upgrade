@@ -45,6 +45,16 @@ MOD_FRAME = re.compile(r'^\s+at (?!java\.|jdk\.|sun\.|net\.minecraft\.|net\.neof
 LOAD_FAILED = re.compile(r"Cannot register listeners for|has failed to load correctly|ModLoadingException|"
                          r"Failed to create mod instance|Error loading mods|LoadingFailedException|"
                          r"Mod loading has failed|Encountered an error during the \w+ event phase")
+
+
+def load_failed(text):
+    """A real mod-loading failure, not a mention of the words: a DEBUG line naming the TYPE (measured: a mixin
+    renaming an accessor that returns ModLoadingException) stopped a healthy client and sent two workers after
+    nothing."""
+    return any(LOAD_FAILED.search(l) for l in text.splitlines()
+               if "/DEBUG]" not in l and "/TRACE]" not in l and not re.search(r"L[\w/]+/ModLoadingException;", l))
+
+
 STALL_SECONDS = 420   # a client whose log has not grown for this long, with no verdict, is stuck, not slow
 
 
@@ -100,7 +110,7 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
                 size, last_growth = cur, now
             if phase and failed_at is None and cur:
                 with open(log, encoding="utf-8", errors="replace") as rd:
-                    if LOAD_FAILED.search(rd.read()):
+                    if load_failed(rd.read()):
                         failed_at = now      # give it a few seconds to finish printing the stack trace
             if failed_at and now - failed_at > 8:
                 why = "mod loading failed; the client shows the error screen and would wait for a click"
@@ -286,7 +296,7 @@ def failure_of(text, client=False, ns=None):
               and l.strip() not in fails]
     if fails:
         return "tests", "\n".join(fails[:30]), "|".join(fails[:3])[:200]
-    m = [l for l in lines if "error:" in l][:10]
+    m = [l for l in lines if re.search(r"\.(?:java|kt|groovy|gradle):\d+: error:|^\s*error: |^e: ", l)][:10]
     if m:
         return "compile", "\n".join(m), m[0][:200]
     # a crash thrown with no `Caused by:` -- e.g. "IllegalStateException: Registry is already frozen" at mod
@@ -435,6 +445,16 @@ def self_check():
     cl = "M_BOOT_TEST: PASS - done\n[x] [Render thread/WARN] [minecraft/ModelManager]: Missing item model for location m:pie\n"
     ok &= failure_of(cl, client=True, ns="m")[0] == "assets" and failure_of(cl, client=True, ns="z") is None
     ok &= failure_of(bad) is None          # no namespace known: the check is off, never guessing
+    # not a load failure: a DEBUG mixin line naming the type; a real one still is
+    ok = ok and not load_failed("[04:57:25] [Render thread/DEBUG] [mixin/]: Renaming @Accessor method "
+                                "getError()Lnet/neoforged/fml/ModLoadingException; to getError$x in a.json\n")
+    ok = ok and load_failed("[Render thread/ERROR] [ne.ne.fm.ModLoader/]: Mod loading has failed\n")
+    # an ALSA "error" from the sound device is not a compile error
+    k5 = failure_of("ALSA lib conf.c:5208:(_snd_config_evaluate) function snd_func_card_inum returned error: No such file\n"
+                    "Caused by: java.lang.NoClassDefFoundError: x\n\tat a.b.C.d(C.java:1)\n", client=True)
+    ok = ok and k5 and k5[0] == "crash"
+    k6 = failure_of("src/main/java/a/B.java:12: error: cannot find symbol\n")
+    ok = ok and k6 and k6[0] == "compile"
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
 
