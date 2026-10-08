@@ -19,7 +19,7 @@ The harness is generated OUTSIDE the author's tree (--work-dir, default a temp d
 --init-script, exactly as during the port. The summary (markdown) lists what ran and what passed, and is
 what the release notes quote. Standard library only.
 """
-import argparse, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, types
+import argparse, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, types, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -28,6 +28,56 @@ def _load(name, file):
     spec = importlib.util.spec_from_file_location(name, ROOT / "tools" / file)
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
     return m
+
+
+PLATFORM = {"minecraft", "neoforge", "forge", "java", "mixinextras"}
+
+
+def toml_mods(text):
+    """{modId: [required dependency modIds]} from a (neoforge.)mods.toml."""
+    mods = re.findall(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', text)
+    out = {m: [] for m in mods}
+    for owner, block in re.findall(r'(?s)\[\[dependencies\.([\w.-]+)\]\](.*?)(?=\[\[|\Z)', text):
+        mid = re.search(r'modId\s*=\s*"([^"]+)"', block)
+        req = re.search(r'type\s*=\s*"required"', block) or re.search(r'mandatory\s*=\s*true', block)
+        if mid and req and mid.group(1) not in PLATFORM:
+            out.setdefault(owner, []).append(mid.group(1))
+    return out
+
+
+def jar_mods(path):
+    try:
+        z = zipfile.ZipFile(path)
+        return toml_mods("".join(z.read(n).decode("utf-8", "replace") for n in z.namelist()
+                                 if n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml")))
+    except (OSError, zipfile.BadZipFile):
+        return {}
+
+
+def minimal_exclusions(own_toml, artifacts):
+    """The runtime mods a MINIMAL environment leaves out: every mod jar none of whose mods is required -- by this
+    mod's neoforge.mods.toml, or (transitively) by a mod that is. Libraries (no mods.toml) and the platform
+    stay. -> ([group:module to exclude], {group:module: [modIds]})."""
+    own = toml_mods(own_toml)
+    need = {d for deps in own.values() for d in deps}
+    jars = {coord: jar_mods(path) for coord, path in artifacts}
+    changed = True
+    while changed:                                  # close over what the required mods themselves require
+        changed = False
+        for mods in jars.values():
+            if set(mods) & need:
+                for deps in mods.values():
+                    for d in deps:
+                        if d not in need:
+                            need.add(d); changed = True
+    out = {c: sorted(m) for c, m in jars.items() if m and not (set(m) & (need | PLATFORM))}
+    return sorted(out), out
+
+
+def loaded_mods(log):
+    """Mod ids FML listed in its "Mod List:" block -- what the game actually loaded."""
+    m = re.search(r"Mod List:\n(.*?)(?:\n\[|\Z)", log, re.S)
+    return set(re.findall(r"\(([a-z0-9_.-]+)\)\s*$", m.group(1), re.M)) if m else set()
 
 
 def green_detail(text):
@@ -44,6 +94,24 @@ def self_check():
     ok &= green_detail("M_BOOT_TEST: spawned 40 creature type(s): [a]\nM_BOOT_TEST: PASS — ticked 200").startswith(
         "PASS — ticked 200; 40 entity types spawned")
     ok &= green_detail("") == "green"
+    own = '[[mods]]\nmodId="me"\n[[dependencies.me]]\nmodId="lib"\ntype="required"\n[[dependencies.me]]\nmodId="opt"\ntype="optional"\n'
+    import tempfile as _t
+    with _t.TemporaryDirectory() as d:
+        def jar(name, toml):
+            path = pathlib.Path(d) / name
+            with zipfile.ZipFile(path, "w") as z:
+                if toml is not None:
+                    z.writestr("META-INF/neoforge.mods.toml", toml)
+            return str(path)
+        arts = [("g:lib", jar("lib.jar", '[[mods]]\nmodId="lib"\n[[dependencies.lib]]\nmodId="base"\ntype="required"\n')),
+                ("g:base", jar("base.jar", '[[mods]]\nmodId="base"\n')),
+                ("g:opt", jar("opt.jar", '[[mods]]\nmodId="opt"\n')),
+                ("g:spark", jar("spark.jar", '[[mods]]\nmodId="spark"\n')),
+                ("g:plainlib", jar("plain.jar", None))]
+        ex, _info = minimal_exclusions(own, arts)
+        ok &= ex == ["g:opt", "g:spark"]               # optional + dev-only out; required + its own requirement in
+    ok &= loaded_mods("x\n     Mod List:\n\t\tName Version (Mod Id)\n\n\t\tCurios 9 (curios)\n\t\tMe 1 (me)\n[10:00] next") \
+        == {"curios", "me"}
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -57,6 +125,9 @@ def main():
     ap.add_argument("--gatec", default="launch,spawn", help="Gate C phases; '' skips Gate C")
     ap.add_argument("--summary", default="ci-gates-summary.md"); ap.add_argument("--work-dir")
     ap.add_argument("--skip-author-build", action="store_true")
+    ap.add_argument("--env", choices=("full", "minimal"), default="full",
+                    help="full: every mod the build puts on the runtime; minimal: only what neoforge.mods.toml "
+                         "requires (optional integrations and dev-only mods removed from the runtime, not the compile)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
     work = pathlib.Path(a.work_dir or tempfile.mkdtemp(prefix="port-ci-")).resolve()
@@ -71,7 +142,25 @@ def main():
         rows.append(f"| {name} | {'PASS' if passed else 'FAIL'} | {detail} |")
         print(f"[ci-gates] {name}: {'PASS' if passed else 'FAIL'} -- {detail}", flush=True)
 
-    if not a.skip_author_build:
+    excluded = {}
+    if a.env == "minimal":
+        env0 = dict(os.environ, **pu.gate_env(c))
+        lst = work / "runtime-artifacts.log"
+        r = pu.gradle(repo, ["portRuntimeArtifacts", "-q"], lst, extra_init=[env0["PORT_GRADLE_INIT"]], env=env0)
+        arts = [tuple(l[len("PORT_RT "):].split("\t", 1)) for l in lst.read_text(encoding="utf-8", errors="replace").splitlines()
+                if l.startswith("PORT_RT ")]
+        if r.returncode or not arts:
+            record("minimal environment", False, "could not list the runtime's mods (see runtime-artifacts.log)")
+            arts = []
+        toml = repo / "src/main/resources/META-INF/neoforge.mods.toml"
+        ex, excluded = minimal_exclusions(toml.read_text(encoding="utf-8") if toml.is_file() else "", arts)
+        os.environ["PORT_RUNTIME_EXCLUDE"] = ",".join(ex)
+        if arts:
+            rows.append("| environment | minimal | " + (("without " + ", ".join(m for ms in excluded.values() for m in ms))
+                                                       if ex else "nothing to leave out: every runtime mod is required")
+                        + " |")
+            print(f"[ci-gates] minimal environment: leaving out {ex or 'nothing'}", flush=True)
+    if not a.skip_author_build and a.env == "full":
         jars = ss.author_jar_tasks(repo)
         r = pu.gradle(repo, ["build", *jars], work / "author-build.log")
         built = sorted(p.name for p in (repo / "build/libs").glob("*.jar")) if (repo / "build/libs").is_dir() else []
@@ -107,12 +196,20 @@ def main():
             print(r.stdout[-6000:], flush=True)
         else:
             gl = pathlib.Path(env["PORT_LOG_DIR"]) / f"gate-loop{'-' + extra[1] if extra else ''}.log"
-            detail = green_detail(gl.read_text(encoding="utf-8", errors="replace") if gl.exists() else "")
+            text = gl.read_text(encoding="utf-8", errors="replace") if gl.exists() else ""
+            detail = green_detail(text)
+            leaked = sorted(loaded_mods(text) & {m for ms in excluded.values() for m in ms})
+            if leaked:      # a minimal pass that loaded the mods it meant to leave out tested nothing
+                record(label, False, f"minimal environment not applied: the game loaded {', '.join(leaked)}")
+                continue
+            if a.env == "minimal" and excluded and not loaded_mods(text):
+                record(label, False, "minimal environment unverified: no Mod List in the log")
+                continue
         record(label, r.returncode == 0, detail)
 
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                           encoding="utf-8").stdout.strip()
-    md = [f"Gates for `{a.modid}` at `{head}` -- run by CI with no model and no fixes applied:", "",
+    md = [f"Gates for `{a.modid}` at `{head}` ({a.env} environment) -- run by CI with no model and no fixes applied:", "",
           "| check | result | detail |", "|---|---|---|", *rows, "",
           "Not covered by any automated gate: gameplay by a person."]
     pathlib.Path(a.summary).write_text("\n".join(md) + "\n", encoding="utf-8")

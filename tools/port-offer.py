@@ -164,7 +164,8 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
     at the version CI ran -- with the exact file, not the newest one. Never guessed: what cannot be resolved says so."""
     L = [f"Tested with Minecraft {mc} and NeoForge {neo}. Install that NeoForge "
          f"([installer](https://maven.neoforged.net/releases/net/neoforged/neoforge/{neo}/neoforge-{neo}-installer.jar)), "
-         "then put these in the instance's `mods` folder:", ""]
+         "then put these in the instance's `mods` folder. This numbered list is the whole minimal setup: CI's "
+         "minimal pass runs exactly these and nothing else.", ""]
     mods_toml = git(repo, "show", f"{tip}:src/main/resources/META-INF/neoforge.mods.toml", check=False)
     own = re.search(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', mods_toml)   # release tags use the mod id
     rel, assets = own_release(fork, own.group(1) if own else modid, mc)
@@ -193,7 +194,7 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
         d = build_dep(mid)
         sib = next(((a, u) for a, u in sibs if mid.replace("_", "") in a.replace("-", "").replace("_", "")), None)
         if sib:
-            line = f"**{mid}** -- [{sib[0]}]({sib[1]}) (another of these ports; the exact file CI tested)"
+            line = f"**{mid}** -- [{sib[1].rsplit('/', 1)[-1]}]({sib[1]}) (another of these ports; the exact file CI tested)"
         elif d:
             label, page, file = registry_link(d, mc)
             line = f"**{mid}** -- " + (f"[{label}]({file})" if file else label) + (f" ([project]({page}))" if page else "")
@@ -221,8 +222,8 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
         extra.append(f"- {d.get('artifact')} -- " + (f"[{label}]({file})" if file else label)
                      + (f" ([project]({page}))" if page else ""))
     if extra:
-        L += ["", "Also loaded in CI, though this mod does not declare it (to reproduce exactly what was tested; "
-                  "often a library an optional mod above needs):"] + extra
+        L += ["", "Added in CI's full pass, though this mod does not declare them (the full setup that was also "
+                  "tested; often an integration, or a library an optional mod above needs):"] + extra
     return L
 
 

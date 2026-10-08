@@ -31,6 +31,15 @@ permissions:
 
 jobs:
   gates:
+    # Two passes, in parallel. full: every mod the build puts on the game's runtime (the setup the port was
+    # developed in). minimal: only what neoforge.mods.toml requires -- optional integrations and dev-only mods
+    # removed from the runtime (still compiled against), which is what catches a mod that uses another mod
+    # without declaring it. The minimal pass checks FML's own mod list to prove the removal took.
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [full, minimal]
+    name: gates (${{ matrix.env }})
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -54,20 +63,21 @@ jobs:
         run: |
           git fetch --no-tags origin "{{BASE}}"
           python3 .port-tools/tools/ci-gates.py --repo . --modid "{{MODID}}" --base "origin/{{BASE}}" \
-            --gatec "{{GATEC}}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md"
+            --gatec "{{GATEC}}" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md"
       - name: Gate summary
         if: always()
         run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: gate-logs
+          name: gate-logs-${{ matrix.env }}
           path: |
             ${{ runner.temp }}/port-ci/*.log
             ${{ runner.temp }}/port-ci/*.jsonl
             ${{ runner.temp }}/gates.md
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
+        if: matrix.env == 'full'
         with:
           name: jars
           path: |
@@ -91,7 +101,7 @@ jobs:
           path: jars
       - uses: actions/download-artifact@v4
         with:
-          name: gate-logs
+          pattern: gate-logs-*
           path: logs
       - name: Publish pre-release
         env:
@@ -105,7 +115,10 @@ jobs:
             echo "**Unofficial port** of {{UPSTREAM}} to {{TARGET}}."
             echo "Same licence and credits as the original; not an official release by the author."
             echo
-            cat logs/gates.md 2>/dev/null || echo "(gate summary missing)"
+            for e in full minimal; do
+              cat "logs/gate-logs-$e/gates.md" 2>/dev/null || echo "(gate summary for the $e environment missing)"
+              echo
+            done
             echo
             echo "Built from \`${{ github.sha }}\` by the author's own Gradle build. Pre-release until played by a person."
           } > notes.md

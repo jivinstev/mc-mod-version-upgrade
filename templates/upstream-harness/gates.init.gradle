@@ -4,12 +4,26 @@
 //
 //   PORT_HARNESS_DIR  the harness directory
 //   PORT_MODID        the mod id (GameTest namespace)
+//   PORT_RUNTIME_EXCLUDE  optional "group:module,..." removed from the RUNTIME classpath only (tools/ci-gates.py
+//                         --env minimal): the game runs without them while the build still compiles against them
 def harness = System.getenv('PORT_HARNESS_DIR')
 def modid = System.getenv('PORT_MODID')
 if (!harness || !modid) {
     throw new GradleException("gates.init.gradle needs PORT_HARNESS_DIR and PORT_MODID")
 }
+def runtimeExclude = (System.getenv('PORT_RUNTIME_EXCLUDE') ?: '').split(',').findAll { it.contains(':') }
 allprojects { p ->
+    p.configurations.matching { it.name == 'runtimeClasspath' }.configureEach { c ->
+        runtimeExclude.each { e -> def gm = e.split(':'); c.exclude(group: gm[0], module: gm[1]) }
+    }
+    // the runtime's mods with their coordinates, for tools/ci-gates.py --env minimal to choose what to exclude
+    p.tasks.register('portRuntimeArtifacts') {
+        doLast {
+            p.configurations.getByName('runtimeClasspath').resolvedConfiguration.resolvedArtifacts.each { a ->
+                println "PORT_RT ${a.moduleVersion.id.group}:${a.moduleVersion.id.name}\t${a.file}"
+            }
+        }
+    }
     p.pluginManager.withPlugin('net.neoforged.moddev') {
         p.sourceSets.main.java.srcDir("${harness}/java")
         p.sourceSets.main.resources.srcDir("${harness}/resources")
