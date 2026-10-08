@@ -613,6 +613,14 @@ def main():
         if after == before:
             continue
         why = singleshot.stub_signals(before, after)
+        # a signal must also hold against the AUTHOR's file (git HEAD: the port is uncommitted while the loop
+        # runs), or an earlier deterministic stage's reshuffle reads as a worker emptying a method the author
+        # had already left empty (measured: an upstream no-op event handler flagged as a stub)
+        authored = subprocess.run(["git", "-C", work, "show", f"HEAD:{os.path.relpath(path, work)}"],
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if why and authored.returncode == 0:
+            kinds = {w.split()[0] for w in singleshot.stub_signals(authored.stdout, after)}
+            why = [w for w in why if w.split()[0] in kinds]
         if not f.exists() and singleshot.REMOVED_API.search(before):
             why = []   # a file built on removed Forge API (§13) is meant to go
         elif not f.exists() and singleshot.WIRING.search(before):

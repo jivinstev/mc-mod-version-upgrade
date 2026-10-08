@@ -78,6 +78,26 @@ def normalise(text, orig, same_package_classes):
     return text, len(edits)
 
 
+def blank_lines(text, orig):
+    """Undo blank-line debris a port leaves: a removed import whose newline stayed behind, or three blank
+    lines where an edit deleted a block. Measured against the author's own file, so their spacing is kept:
+    blank lines between imports survive only if the original import block had any, and no run of blank lines
+    grows longer than the original file's longest."""
+    if not orig:
+        return text
+    def import_gaps(t):
+        ls = t.split("\n"); idx = [i for i, l in enumerate(ls) if re.match(r"import\s", l)]
+        return any(not ls[i].strip() for i in range(idx[0], idx[-1])) if idx else False
+    lines = text.split("\n")
+    imp = [i for i, l in enumerate(lines) if re.match(r"import\s", l)]
+    if imp and not import_gaps(orig):
+        drop = {i for i in range(imp[0], imp[-1]) if not lines[i].strip()}
+        lines = [l for i, l in enumerate(lines) if i not in drop]
+    longest = max((len(m.group(0)) - 1 for m in re.finditer(r"\n(?:[ \t]*\n)+", orig)), default=1)
+    text = "\n".join(lines)
+    return re.sub(r"\n(?:[ \t]*\n){%d,}" % (longest + 1), "\n" * (longest + 1), text)
+
+
 def add_import(text, fqn):
     imps = list(re.finditer(r"(?m)^import\s+(static\s+)?([\w.*]+)\s*;[ \t]*\n", text))
     if not imps:
@@ -102,15 +122,19 @@ def run(src, base, dry=False):
     by_pkg = {}
     for f in src.rglob("*.java"):
         by_pkg.setdefault(f.parent, set()).add(f.stem)
-    files = n = 0
+    files = n = blanks = 0
     for f in sorted(src.rglob("*.java")):
         t = f.read_text(encoding="utf-8")
-        nt, k = normalise(t, original(f, base, root), by_pkg.get(f.parent, set()) - {f.stem})
+        orig = original(f, base, root)
+        nt, k = normalise(t, orig, by_pkg.get(f.parent, set()) - {f.stem})
+        nt2 = blank_lines(nt, orig)
+        b = nt2 != nt; nt = nt2
+        blanks += b; k += b
         if k:
             files += 1; n += k
             if not dry:
                 f.write_text(nt, encoding="utf-8")
-    return files, n
+    return files, n, blanks
 
 
 def main():
@@ -122,8 +146,9 @@ def main():
         return self_check()
     if not a.src:
         ap.error("--src is required")
-    files, n = run(a.src, a.base, a.dry_run)
-    print(f"normalise-imports: {n} inline name(s) shortened to imports in {files} file(s)" + (" (dry run)" if a.dry_run else ""))
+    files, n, blanks = run(a.src, a.base, a.dry_run)
+    print(f"normalise-imports: {n - blanks} inline name(s) shortened to imports, blank-line debris removed in "
+          f"{blanks} file(s); {files} file(s) changed" + (" (dry run)" if a.dry_run else ""))
     return 0
 
 
@@ -154,6 +179,13 @@ class A {
     again, n2 = normalise(out, "net.minecraft.core.Kept", set())
     if n2:
         miss.append("not idempotent")
+    o = "package p;\n\nimport a.B;\nimport a.C;\n\nclass X {\n\n    int i;\n}\n"
+    port = "package p;\n\nimport a.B;\n\nimport a.D;\n\nclass X {\n\n\n\n    int i;\n}\n"
+    if blank_lines(port, o) != "package p;\n\nimport a.B;\nimport a.D;\n\nclass X {\n\n    int i;\n}\n":
+        miss.append("blank-line debris kept")
+    grouped = "import a.B;\n\nimport b.C;\n"
+    if blank_lines(grouped, grouped) != grouped:
+        miss.append("author's import grouping removed")
     print("self-check:", "OK" if not miss else f"FAIL {miss}\n{out}")
     return 0 if not miss else 1
 
