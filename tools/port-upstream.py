@@ -169,7 +169,10 @@ def st_build(c):
         n, line = compile_count(repo, c["dir"] / "build-check.log")
         if n is not None:
             return {"usd": usd, "first_count": n}
-        prompt = f"The build you wrote does not reach javac. Gradle says:\n{line}\nFix the build files only."
+        log = (c["dir"] / "build-check.log").read_text(encoding="utf-8", errors="replace")
+        wrong = re.search(r"\* What went wrong:\n(.*?)(?:\n\* Try:|\Z)", log, re.S)   # the reason, not the last line
+        prompt = (f"The build you wrote does not reach javac. Gradle says:\n{(wrong.group(1) if wrong else line)[:2000]}\n"
+                  "Fix the build files only.")
     raise Fail(f"build still does not reach javac: {line}")
 
 
