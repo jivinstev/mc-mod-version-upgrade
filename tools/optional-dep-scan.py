@@ -187,7 +187,7 @@ def self_check():
             (t / "src" / rel).parent.mkdir(parents=True, exist_ok=True)
             (t / "src" / rel).write_text(body, encoding="utf-8")
         r = subprocess.run(["javac", "-d", str(t / "out")] + [str(t / "src" / k) for k in src],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode:
             print("self-check: javac failed:", r.stderr[:400]); return 1
         # V is a compile-time constant only if javac can prove it; it calls a method, so Holder is real
