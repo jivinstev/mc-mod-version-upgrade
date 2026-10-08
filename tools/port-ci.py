@@ -81,6 +81,13 @@ def self_check():
     out = render(t, v)
     ok = "${{ github.sha }}" in out and "{{" not in out.replace("${{", "")    # GitHub's own ${{ }} survive
     ok &= "repository: owner/lib" in out and "path: .port-deps/lib" in out and "publishToMavenLocal" in out
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:        # the toolchain the workflow installs is the build's, per target
+        for build, mc, want in (("java.toolchain.languageVersion = JavaLanguageVersion.of(25)\n", "26.2", "25"),
+                                ("java.toolchain.languageVersion = JavaLanguageVersion.of(21)\n", "1.21.1", "21"),
+                                ("// no toolchain line\n", "26.2", "25"), ("// no toolchain line\n", "1.21.1", "21")):
+            (pathlib.Path(d) / "build.gradle").write_text(build, encoding="utf-8")
+            ok &= java_version(d, mc) == want
     try:
         render("x {{NOPE}}", {}); ok = False
     except (SystemExit, KeyError):

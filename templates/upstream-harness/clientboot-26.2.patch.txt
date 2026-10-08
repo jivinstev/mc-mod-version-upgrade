@@ -1,0 +1,108 @@
+# What the 26.2 client harness needs beyond the rename table (templates/multi-version/versions/26.2.renames.hand.tsv).
+# tools/port-upstream.py applies this to the harness copy of ClientBootSmokeTest.java after the renames: the table
+# changes names, these are the call SHAPES that changed (CATALOG V28 client god-object split, V53 GUI recording,
+# V35 armour as a component, V16-era LevelSettings). Each block must match EXACTLY ONCE -- a block that matches
+# nothing means the harness template moved under it, and the run stops rather than shipping a harness that does not
+# compile (a rule that matches nothing is invisible, CATALOG X1).
+#
+#   @@ old      the text as it stands after the rename table
+#   ...
+#   @@ new      what it becomes
+#   ...
+#   @@          end of the block
+
+@@ old
+import net.minecraft.world.item.ArmorItem;
+import net.minecraft.world.item.Item;
+@@ new
+import net.minecraft.world.item.Item;
+@@
+
+@@ old
+import net.minecraft.world.item.TooltipFlag;
+import net.minecraft.world.level.GameRules;
+@@ new
+import net.minecraft.world.item.TooltipFlag;
+@@
+
+@@ old
+                mc.getMainRenderTarget(), msg -> { });
+@@ new
+                mc.gameRenderer.mainRenderTarget(), 1, msg -> { });
+@@
+
+@@ old
+        mc.getToasts().clear();
+@@ new
+        mc.gui.toastManager().clear();
+@@
+
+@@ old
+sp.teleportTo(server.overworld(), px, py, pz, yaw, pitch);
+@@ new
+sp.teleportTo(server.overworld(), px, py, pz, java.util.Set.of(), yaw, pitch, false);
+@@
+
+@@ old
+            false,                 // hardcore
+            Difficulty.NORMAL,     // NOT peaceful: hostile mobs would be culled instantly
+            true,                  // allow commands
+            new GameRules(),
+            WorldDataConfiguration.DEFAULT
+@@ new
+            new LevelSettings.DifficultySettings(
+                Difficulty.NORMAL, // NOT peaceful: hostile mobs would be culled instantly
+                false,             // hardcore
+                false),            // difficulty locked
+            true,                  // allow commands
+            WorldDataConfiguration.DEFAULT
+@@
+
+@@ old
+        Function<RegistryAccess, WorldDimensions> dimensions
+@@ new
+        Function<net.minecraft.core.HolderLookup.Provider, WorldDimensions> dimensions
+@@
+
+@@ old
+            g.pose().pushPose();
+            g.pose().translate(8, 8, 0);
+            g.pose().scale(s, s, 1f);
+@@ new
+            g.pose().pushMatrix();
+            g.pose().translate(8, 8);
+            g.pose().scale(s, s);
+@@
+
+@@ old
+g.renderItem(stack, col * 18, row * 18);
+@@ new
+g.item(stack, col * 18, row * 18);
+@@
+
+@@ old
+g.renderItemDecorations(this.font, stack, col * 18, row * 18);
+@@ new
+g.itemDecorations(this.font, stack, col * 18, row * 18);
+@@
+
+@@ old
+            g.pose().popPose();
+@@ new
+            g.pose().popMatrix();
+@@
+
+@@ old
+                if (item instanceof ArmorItem armor) {
+                    sp.setItemSlot(armor.getEquipmentSlot(), new ItemStack(item));
+@@ new
+                var equippable = new ItemStack(item).get(net.minecraft.core.component.DataComponents.EQUIPPABLE);
+                if (equippable != null && equippable.slot().isArmor()) {
+                    sp.setItemSlot(equippable.slot(), new ItemStack(item));
+@@
+
+@@ old
+BuiltInRegistries.MOB_EFFECT.holders()
+@@ new
+BuiltInRegistries.MOB_EFFECT.listElements()
+@@

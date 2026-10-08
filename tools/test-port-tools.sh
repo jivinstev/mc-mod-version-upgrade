@@ -283,6 +283,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "local-maven.py|local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry" \
             "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \
             "normalise-imports.py|normalise-imports: inline names a port wrote become imports; the author's own and colliding names are kept" \
+            "targets.py|targets: one table of what each target needs -- unknown branch names listed, build bump and post-check agree, pack formats and prompts per target" \
             "port-upstream.py|port-upstream: an unlicensed or mismatched repo stops before spending; a dropped copyright line stops the push" \
             "review-metrics.py|review-metrics: stubbed bodies, import churn, the port's unused imports and voice measured; the author's own left alone"; do
   tool="${spec%%|*}"; what="${spec#*|}"
