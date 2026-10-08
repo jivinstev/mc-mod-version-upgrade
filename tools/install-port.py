@@ -126,7 +126,8 @@ def jar_required(data):
     for blk in re.split(r"(?m)^\s*\[\[", t):
         if blk.startswith("dependencies."):
             m = re.search(r'modId\s*=\s*"([^"]+)"', blk)
-            req = re.search(r'type\s*=\s*"required"', blk) or re.search(r"mandatory\s*=\s*true", blk)
+            t = re.search(r'type\s*=\s*"(\w+)"', blk)
+            req = (t.group(1) == "required") if t else not re.search(r"mandatory\s*=\s*false", blk)  # NeoForge: no type = required
             if m and req and m.group(1) not in ("minecraft", "neoforge", "forge", "java"):
                 out.add(m.group(1))
     return out - jar_bundled(data)
@@ -380,7 +381,9 @@ def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
     by_id = {f["modid"]: f for f in files}
     def label(m):
         f = by_id.get(m, {})
-        return m + (f" (from {f['source'].capitalize()}, not tested by CI)" if f.get("source") else "")
+        bits = ([f"from {f['source'].capitalize()}, not tested by CI"] if f.get("source") else []) + \
+               ([f"needed by {f['needed_by']}"] if f.get("needed_by") else [])
+        return m + (f" ({'; '.join(bits)})" if bits else "")
     lines, failed = [], []
     for pt in ports:
         name = pt["repo"]
