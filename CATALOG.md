@@ -3590,6 +3590,22 @@ exact `.`, so a row `EnchantmentInstance  level  level()` rewrites that site and
 that already has parentheses and an assignment target. **Measured:** 30 sites in one library, all fixed in
 one pass.
 
+**V96. The general form of §V76: an override whose hook SIGNATURE changed keeps its body in a private 1.21.1-shaped
+copy, and a table says how to adapt each hook.** · **Pattern:** the item hooks every content mod overrides —
+measured over our ports and the 13-mod corpus: ~350 `appendHoverText`, 48 `releaseUsing`, 39 `inventoryTick`,
+33 `hurtEnemy`, nearly all in one 1.21.1 shape each · **Error:** `method does not override or implement a method
+from a supertype`, the largest single bucket in every 26.2 baseline · **Fix:** `tools/convert-override-signatures.py`.
+The new override adapts the arguments at the boundary and calls `ported$<hook>(<old args>)`, whose body is the
+original, untouched. Only `super.<hook>(...)` inside it is rewritten to the 26.2 call. The rows, read off both jars:
+`appendHoverText` takes `TooltipDisplay` + `Consumer<Component>` in place of the list (the copy fills a list; the
+override forwards it in order); `releaseUsing` returns boolean (false, vanilla's default); `hurtEnemy` returns void
+(`return super.hurtEnemy(..)` becomes `super.hurtEnemy(..); return true`); `inventoryTick` takes
+`(ItemStack, ServerLevel, Entity, EquipmentSlot)` — `isSelected` becomes `slot == MAINHAND`, and a body reading the
+old slot INDEX or branching on `isClientSide` is NOTED, because 26.2 passes no index and ticks on the server only.
+A `super` call used as a value where the new one is void is REFUSED. **Adding a hook is a table row**, which is the
+point: a §V entry that says "this hook changed shape" should land as a row here, not as per-port judgement.
+**Measured:** 7 overrides in one library, −14 errors, 0 at the rewritten sites.
+
 **V95. Small 26.2 removals found by zero-model baselines (cluster).** Each is a row in the 26.2 rename
 table or the member table, checked against the 26.2 jar:
 · `CompoundTag/ValueOutput.putUUID(k, v)` → `store(k, UUIDUtil.CODEC, v)`; `getUUID(k)` →

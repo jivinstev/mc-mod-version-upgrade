@@ -34,7 +34,7 @@ Stages, in order (each records its dollars and seconds in the state file; --from
               forge-shapes, convert-simplechannel, then compile + fix-holders until it converges.
               26.2: class-move and colour maps from the two real classpaths, the composed rename table applied in
               place, data-format transforms, the access transformer, member renames where javac names the owner,
-              then the 26.x converters (GUI hooks, ValueInput/Output, attachment serializers, tool tiers and
+              then the 26.x converters (GUI hooks, ValueInput/Output, attachment serializers, changed hook signatures, tool tiers and
               armour, render types, core shaders, entity render
               state, GeckoLib 5); a compile count after each step.
   burndown    tools/file-loop.py on what is left.
@@ -722,6 +722,7 @@ def mechanical_era(c):
     plan = [("gui-hooks", "convert-gui-hooks.py", lambda d, i: ["--src", d]),
             ("valueio", "convert-valueio.py", lambda d, i: ["--src", d]),
             ("attachment-io", "convert-attachment-io.py", lambda d, i: ["--src", d]),
+            ("override-signatures", "convert-override-signatures.py", lambda d, i: ["--src", d]),
             ("gear-tiers", "convert-gear-tiers.py",
              lambda d, i: ["--src", d, *(["--assets", repo / "src/main/resources/assets"] if i == 0 else [])])]
     advisories = []
