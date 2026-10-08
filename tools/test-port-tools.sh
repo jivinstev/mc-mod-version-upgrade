@@ -262,7 +262,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "fix-access-transformer.py|fix-access-transformer: SRG names remapped, an overridden widening is widened on the subclass too" \
             "forge-shapes.py|forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib colour rewritten idempotently" \
             "fix-holders.py|fix-holders: the expression under javac's caret is unwrapped, retyped or resolved, never guessed" \
-            "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept"; do
+            "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \
+            "normalise-imports.py|normalise-imports: inline names a port wrote become imports; the author's own and colliding names are kept"; do
   tool="${spec%%|*}"; what="${spec#*|}"
   out="$(python3 "tools/$tool" --self-check 2>&1)"
   grep -q 'self-check: OK' <<<"$out" && ok "$what" || bad "$tool self-check: $out"
