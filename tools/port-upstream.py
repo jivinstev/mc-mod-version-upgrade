@@ -266,7 +266,7 @@ def harness(c):
 
 
 def gate_env(c):
-    env = dict(os.environ, PORT_HARNESS_DIR=str(harness(c)), PORT_MODID=c["args"].modid,
+    env = dict(os.environ, PORT_HARNESS_DIR=str(harness(c)), PORT_MODID=c["args"].modid, PORT_LOG_DIR=str(c["dir"]),
                PORT_GRADLE_INIT=str(ROOT / "templates/upstream-harness/gates.init.gradle"))
     return env
 

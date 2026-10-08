@@ -64,6 +64,14 @@ def _stop(proc):
             pass
 
 
+def LOG_DIR(work):
+    """Where run logs go: the workspace, unless PORT_LOG_DIR says otherwise (an upstream port must not write
+    into the author's tree)."""
+    d = pathlib.Path(os.environ.get("PORT_LOG_DIR") or work)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def run_gate(work, task, heap, log, phase=None, timeout=1500):
     cmd = ["./gradlew", task, "--console=plain", "--init-script",
            str(ROOT / "tools/central-mirror.init.gradle"), f"-Dorg.gradle.jvmargs=-Xmx{heap}"]
@@ -362,7 +370,7 @@ def main():
             if spent >= a.budget:
                 note(event="budget", spent=round(spent, 4)); return 1
             continue
-        f = failure_of(run_gate(work, task, a.heap, work / f"gate-loop{'-' + phase if phase else ''}.log", phase),
+        f = failure_of(run_gate(work, task, a.heap, LOG_DIR(work) / f"gate-loop{'-' + phase if phase else ''}.log", phase),
                        client=bool(phase), ns=ns)
         if f is None:
             note(event="green", run=run, phase=phase, spent=round(spent, 4))
