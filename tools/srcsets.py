@@ -48,6 +48,33 @@ def target(repo):
     return f"NeoForge {neo} (Minecraft {mc})" if mc and neo else None
 
 
+def mixin_configs(repo):
+    """Every mixin config the mod ships: resource JSONs that carry a "package" and a "mixins"/"client"/"server"
+    list, whatever they are called. A port must not assume <modid>.mixins.json -- Forge mods often named the
+    config mixins.<modid>.json and registered it from build.gradle (MixinGradle `config '...'`), a line the
+    NeoForge build drops; the config then loads only if neoforge.mods.toml declares it in [[mixins]]."""
+    import json
+    out = []
+    for f in sorted(pathlib.Path(repo).glob("src/*/resources/*.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(d, dict) and isinstance(d.get("package"), str) and any(
+                isinstance(d.get(k), list) for k in ("mixins", "client", "server")):
+            out.append(f)
+    return out
+
+
+def undeclared_mixin_configs(repo):
+    """Mixin configs no neoforge.mods.toml [[mixins]] entry names -- each one silently never loads."""
+    import re as _re
+    declared = set()
+    for t in pathlib.Path(repo).glob("src/*/resources/META-INF/neoforge.mods.toml"):
+        declared |= set(_re.findall(r'(?m)^\s*config\s*=\s*"([^"]+)"', t.read_text(encoding="utf-8")))
+    return [f.name for f in mixin_configs(repo) if f.name not in declared]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo"); ap.add_argument("--self-check", action="store_true")
@@ -70,7 +97,14 @@ def self_check():
         (r / "build.gradle").write_text("sourceSets {\n    cf {\n        java.srcDir 'src/cf/java'\n    }\n}\n"
                                         "tasks.register('cfJar', Jar) {}\ntasks.register('x', Copy) {}\n", encoding="utf-8")
         (r / "gradle.properties").write_text("minecraft_version=26.2\nneo_version=26.2.0.75\n", encoding="utf-8")
-        ok = (compile_tasks(r) == ["compileCfJava", "compileJava"] and author_jar_tasks(r) == ["cfJar"]
+        (r / "src/main/resources/META-INF").mkdir(parents=True)
+        (r / "src/main/resources/mixins.foo.json").write_text('{"package": "a.b", "mixins": ["X"]}', encoding="utf-8")
+        (r / "src/main/resources/pack.json").write_text('{"pack": {}}', encoding="utf-8")
+        (r / "src/main/resources/META-INF/neoforge.mods.toml").write_text('modId="foo"\n', encoding="utf-8")
+        ok = undeclared_mixin_configs(r) == ["mixins.foo.json"]
+        (r / "src/main/resources/META-INF/neoforge.mods.toml").write_text('[[mixins]]\nconfig = "mixins.foo.json"\n', encoding="utf-8")
+        ok &= undeclared_mixin_configs(r) == []
+        ok &= (compile_tasks(r) == ["compileCfJava", "compileJava"] and author_jar_tasks(r) == ["cfJar"]
               and target(r) == "NeoForge 26.2.0.75 (Minecraft 26.2)")
     print("self-check:", "OK" if ok else f"FAIL {compile_tasks(r)} {author_jar_tasks(r)} {target(r)}")
     return 0 if ok else 1

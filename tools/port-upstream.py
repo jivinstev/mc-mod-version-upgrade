@@ -202,13 +202,13 @@ def st_metadata(c):
         t = re.sub(r'(?m)^(\s*)mandatory\s*=\s*false', r'\1type = "optional"', t)
         t = re.sub(r'(modId\s*=\s*"neoforge"[^\[]*?versionRange\s*=\s*)"[^"]*"', r'\1"[21.1,)"', t, flags=re.S)
         t = re.sub(r'(modId\s*=\s*"minecraft"[^\[]*?versionRange\s*=\s*)"[^"]*"', r'\1"[1.21.1,1.22)"', t, flags=re.S)
-        cfg = f"{modid}.mixins.json"
-        if (repo / "src/main/resources" / cfg).exists() and "[[mixins]]" not in t:
-            t = t.rstrip("\n") + f'\n\n[[mixins]]\nconfig = "{cfg}"\n'
+        for cfg in [f.name for f in srcsets.mixin_configs(repo) if f.parent.parent == toml.parent.parent]:
+            if not re.search(r'(?m)^\s*config\s*=\s*"%s"' % re.escape(cfg), t):
+                t = t.rstrip("\n") + f'\n\n[[mixins]]\nconfig = "{cfg}"\n'
         new = toml.with_name("neoforge.mods.toml")
         sh(["git", "mv", str(toml), str(new)], cwd=repo)
         new.write_text(t, encoding="utf-8"); done.append(str(new.relative_to(repo)))
-    for mj in repo.glob("src/*/resources/*.mixins*.json"):
+    for mj in srcsets.mixin_configs(repo):
         t = mj.read_text(encoding="utf-8")
         t2 = re.sub(r'\n\s*"refmap"\s*:\s*"[^"]*",?', "", t).replace('"JAVA_17"', '"JAVA_21"').replace('"JAVA_8"', '"JAVA_21"')
         if t2 != t:
@@ -300,8 +300,7 @@ def harness(c):
     (h / "java" / pkg.replace(".", "/") / "test").mkdir(parents=True, exist_ok=True)
     (h / "java" / pkg.replace(".", "/") / "test/ClientBootSmokeTest.java").write_text(
         sgc.render(sgc.TEMPLATE.read_text(encoding="utf-8"), modid, pkg), encoding="utf-8")
-    cfg = f"{modid}.mixins.json"
-    if (c["repo"] / "src/main/resources" / cfg).exists():
+    for cfg in [f.name for f in srcsets.mixin_configs(c["repo"]) if f.parent.parent.name == "main"][:1]:
         t = (ROOT / "templates/neoforge-mod/test-templates/MixinConfigIntegrityTest.java.template").read_text(encoding="utf-8")
         t = t.replace("PACKAGE_PLACEHOLDER", pkg).replace("MODID.mixins.json", cfg)
         (h / "test" / pkg.replace(".", "/")).mkdir(parents=True)
@@ -316,6 +315,9 @@ def gate_env(c):
 
 
 def gate_a(c, log):
+    lost = srcsets.undeclared_mixin_configs(c["repo"])
+    if lost:
+        raise Fail(f"mixin config(s) declared in no neoforge.mods.toml [[mixins]] -- they never load: {lost}")
     env = gate_env(c)
     r = gradle(c["repo"], ["test"], log, extra_init=[env["PORT_GRADLE_INIT"]], env=env)
     res = list((c["repo"] / "build/test-results/test").glob("*.xml"))
