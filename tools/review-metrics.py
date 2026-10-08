@@ -85,6 +85,30 @@ def measure(repo, base):
                 if TRIVIAL.fullmatch(nb.strip()) and obs and not any(TRIVIAL.fullmatch(b.strip()) for b in obs) \
                         and max(len(b) for b in obs) > 40:
                     out["P1 method bodies made trivial"].append(f"{path}:{fs.line_of(new, m.start)} {m.name}")
+        # P1 inert code that still compiles: an override that lost @Override (it may override nothing now -- a
+        # hook the new platform renamed or removed), and a supertype the class stopped extending/implementing
+        # (measured: a coremod made to compile by dropping its interfaces, a moved interface called "gone")
+        if old:
+            def overrides(text):
+                return {(m.name, len(m.params)) for m in fs.methods(text)
+                        if "@Override" in text[fs.decl_span_start(text, m.start):m.start]}
+            def supers(text):
+                flat = text
+                while True:                       # drop every generic list, so `<T extends X>` is not a supertype
+                    nxt = re.sub(r"<[^<>{};()]*>", "", flat)
+                    if nxt == flat:
+                        break
+                    flat = nxt
+                return {(m.group(1), s.strip().split(".")[-1])
+                        for m in re.finditer(r"\b(?:class|interface|enum|record)\s+(\w+)\s*(?:\([^)]*\))?\s*((?:extends|implements)[^{]+)\{", flat)
+                        for s in re.split(r",|\bimplements\b|\bextends\b", m.group(2)) if s.strip()}
+            new_methods = {(m.name, len(m.params)) for m in fs.methods(new)}
+            for name, n in sorted(overrides(old) - overrides(new)):
+                if (name, n) in new_methods:
+                    out["P1 @Override dropped, method kept"].append(f"{path}: {name}/{n}")
+            for cls, sup in sorted(supers(old) - supers(new)):
+                if re.search(r"\b(?:class|interface|enum|record)\s+%s\b" % re.escape(cls), new):
+                    out["P1 supertype dropped"].append(f"{path}: {cls} no longer extends/implements {sup}")
         # P1 empty catch blocks added; P4 comment language
         old_c = comments(old) if old else comments(new)
         file_cjk = sum(1 for c in old_c if CJK.search(c)) > len(old_c) / 2 if old_c else False
@@ -92,6 +116,10 @@ def measure(repo, base):
             line = h.group(1)
             if re.search(r"catch\s*\([^)]*\)\s*\{\s*\}", line):
                 out["P1 empty catch blocks added"].append(f"{path}: {line.strip()[:80]}")
+            if re.search(r"(//|/\*|^\s*\*).*\b(?:TODO|FIXME|XXX|no longer (?:exists?|available|supported)|does not exist|not available|"
+                         r"no (?:26\.\d+|1\.21\S*) equivalent|no equivalent|removed in|cannot be ported|dropped|stub(?:bed)?|no-op)\b",
+                         line, re.I):
+                out["P8 port comment admits lost behaviour"].append(f"{path}: {line.strip()[:90]}")
             c = re.search(r"//\s*(.+)$|/\*+\s*(.+?)(\*/|$)|^\s*\*\s+(.+)$", line)
             if c:
                 txt = next(g for g in c.groups() if g)
@@ -158,7 +186,9 @@ def self_check():
 import java.util.List;
 import java.util.Map;
 // 原始注释
-class A {
+class A implements Runnable, Tickable {
+    @Override
+    public void tick() { run(); }
     int f(int x) {
         int y = x * 2;
         return y + 1;
@@ -173,13 +203,14 @@ import java.util.Map;
 import java.util.List;
 import java.util.Set;
 // 原始注释
-class A {
+class A implements Runnable {
     int f(int x) {
         return 0;
     }
     void g()  { run(); }
     // the port changed this hook because the new platform has none
     void h() { try { run(); } catch (Exception e) {} }
+    public void tick() { run(); } // TODO: no 26.2 equivalent, kept as a plain method
 }
 """, encoding="utf-8")
         (r / "src/a/Shim.java").write_text("package a;\nclass Shim {}\n", encoding="utf-8")
@@ -187,7 +218,8 @@ class A {
         res = measure(r, "HEAD")
         want = {"P1 method bodies made trivial", "P2 imports reordered", "P2 unused imports in changed files",
                 "P2 whitespace-only changed lines", "P1 empty catch blocks added",
-                "P4 comment language differs from the file", "P3 classes added by the port (users)"}
+                "P4 comment language differs from the file", "P3 classes added by the port (users)",
+                "P1 @Override dropped, method kept", "P1 supertype dropped", "P8 port comment admits lost behaviour"}
         ok = want <= set(res) and any("Set" in x for x in res["P2 unused imports in changed files"])
         fix_imports(r, res["P2 unused imports in changed files"])
         t = (r / "src/a/A.java").read_text(encoding="utf-8")

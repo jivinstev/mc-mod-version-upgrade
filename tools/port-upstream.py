@@ -339,7 +339,7 @@ def st_reviewer(c):
     principles = (ROOT / "templates/upstream-harness/REVIEW_PRINCIPLES.md").read_text(encoding="utf-8")
     principles = principles[principles.index("| #"):principles.index("P6 and P7 are gates")]
     prompt = (ROOT / "templates/upstream-harness/reviewer-prompt.md").read_text(encoding="utf-8")
-    prompt = (prompt.replace("{BASE}", base).replace("{STAT}", stat[-6000:]).replace("{PRINCIPLES}", principles)
+    prompt = (prompt.replace("{BASE}", base).replace("{TARGET}", srcsets.target(c["repo"]) or "NeoForge 1.21.1").replace("{STAT}", stat[-6000:]).replace("{PRINCIPLES}", principles)
               .replace("{METRICS}", metrics[-6000:] or "(nothing found)"))
     text, usd = claude(prompt, repo, "Read,Edit,Grep,Glob,Bash(git diff:*),Bash(git show:*),Bash(git log:*)")
     (c["dir"] / "REVIEW.md").write_text(text, encoding="utf-8")
