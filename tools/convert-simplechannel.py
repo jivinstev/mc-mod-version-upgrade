@@ -482,8 +482,8 @@ class Use { void a() { Net.sendToServer(new PongPacket(1)); } }
 class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
 """, encoding="utf-8")
         report, flags, _ = run(d, "mymod")
-        net = (r / "Net.java").read_text(); ping = (r / "PingPacket.java").read_text(); pong = (r / "PongPacket.java").read_text()
-        mod = (r / "Mod.java").read_text()
+        net = (r / "Net.java").read_text(encoding="utf-8"); ping = (r / "PingPacket.java").read_text(encoding="utf-8"); pong = (r / "PongPacket.java").read_text(encoding="utf-8")
+        mod = (r / "Mod.java").read_text(encoding="utf-8")
         want = [(net, "public static void register(RegisterPayloadHandlersEvent event) {"),
                 (net, "PayloadRegistrar registrar = event.registrar(PROTOCOL_VERSION);"),
                 (net, "// to the client"),
@@ -507,9 +507,9 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
                        ("CHANNEL", net)):
             if bad in t:
                 miss.append(f"still has {bad}")
-        before = {p: p.read_text() for p in r.iterdir()}
+        before = {p: p.read_text(encoding="utf-8") for p in r.iterdir()}
         run(d, "mymod")
-        if any(p.read_text() != before[p] for p in r.iterdir()):
+        if any(p.read_text(encoding="utf-8") != before[p] for p in r.iterdir()):
             miss.append("not idempotent")
         ok = not miss and not flags
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{net}\n{pong}")
