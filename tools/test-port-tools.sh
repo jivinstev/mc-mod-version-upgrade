@@ -267,7 +267,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "fix-access-transformer.py|fix-access-transformer: SRG names remapped, an overridden widening is widened on the subclass too" \
             "forge-shapes.py|forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib colour rewritten idempotently" \
             "fix-holders.py|fix-holders: the expression under javac's caret is unwrapped, retyped or resolved, never guessed" \
-            "fix-missing-members.py|fix-missing-members: a moved member is renamed only where javac names its owner type" \
+            "fix-missing-members.py|fix-missing-members: a moved member is renamed only where javac names its owner type (incl. record fields gone private)" \
             "convert-rendertypes.py|convert-rendertypes: a CompositeState becomes a pipeline + RenderSetup; reverse-Z depth, unknown shards refused" \
             "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
             "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
@@ -288,6 +288,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port-deps.py|port-deps: dependency preflight -- blocked hosts, missing target builds, local-maven fill" \
             "dep-moves.py|dep-moves: classes a dependency moved between the author's jar and the target's are found by comparing the jars, and rewritten" \
             "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
+            "convert-attachment-io.py|convert-attachment-io: attachment serializers onto ValueInput/ValueOutput through the CompoundTag bridge, bodies unchanged" \
+            "convert-gear-tiers.py|convert-gear-tiers: the 1.21.1 tool-tier and armour classes re-supplied on 26.2 components; instanceof widened only where safe" \
             "local-maven.py|local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry" \
             "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \
             "normalise-imports.py|normalise-imports: inline names a port wrote become imports; the author's own and colliding names are kept" \

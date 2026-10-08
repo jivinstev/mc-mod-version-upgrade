@@ -3505,6 +3505,78 @@ measured on 26.2's own sources —
 · **Register early:** `RegisterRenderPipelinesEvent` fires before resource packs load, and RenderType fields are
   built at class init, so create the shader objects there from the mod's own jar and rebuild them on each reload.
 
+**V92. 🔴 The tool-tier and armour classes are GONE, and the class-move map makes it worse by
+renaming `ArmorMaterial` to a different type.** · **Pattern:** `implements Tier`, `Tiers.IRON`,
+`extends SwordItem/TieredItem/PickaxeItem/ArmorItem`, `SwordItem.createAttributes(tier, 3, -2.4F)`,
+`Holder.direct(new ArmorMaterial(defense, ench, sound, () -> repair, List.of(new ArmorMaterial.Layer(id)), t, kb))`
+· **Error:** `cannot find symbol: class Tier / TieredItem / SwordItem / ArmorItem`, and then
+`constructor ArmorMaterial cannot be applied` on every material. The second error is the move map's doing:
+it matches classes by simple name, so 1.21.1 `item.ArmorMaterial` becomes 26.2 `item.equipment.ArmorMaterial`
+(a record with a durability, an `ArmorType` map, a repair TAG and an `EquipmentAsset` key). That is §V44's
+blind spot again: same name, unrelated shape. · **Fix:** `tools/convert-gear-tiers.py` re-supplies the
+1.21.1 contracts in the mod's own package (`<mod>.compat.gear`), built on the 26.2 components exactly as
+`ToolMaterial.applyToolProperties` / `applySwordProperties` and `Item.Properties.humanoidArmor` build them,
+and points the mod's imports there. Subclasses, overrides and anonymous `new Tier() {...}` then compile
+unchanged. Two details are what make it faithful. **Repair is a DELAYED component**
+(`Properties.delayedComponent(REPAIRABLE, ...)`), because 1.21.1 read the repair ingredient lazily and building
+it at item construction touches other items before they are bound (§R3). **Armour durability is not set**,
+because the 1.21.1 `ArmorItem` constructor did not set it either; the caller did. · ⚠ **`instanceof` is the
+half a shim cannot make faithful.** `x instanceof SwordItem` used to match every sword in the game, and against
+the shim it matches only the mod's own. An UNBOUND test is widened to `GearChecks.isSword(x)` (tags and
+components, so vanilla gear answers too). A BOUND test or a cast is left alone and reported as NARROWED,
+because widening the guard in front of a cast hands it a vanilla item and a `ClassCastException`. · **Armour
+textures move too:** 26.2 draws worn armour from `assets/<ns>/equipment/<id>.json` and
+`textures/entity/equipment/humanoid[_leggings]/`, not `textures/models/armor/<id>_layer_{1,2}.png`; the
+converter writes the json and moves the textures for every layer id the code names. · **Refused, named:**
+`AxeItem`/`ShovelItem`/`HoeItem` subclasses (still vanilla classes on 26.2, with a
+`(ToolMaterial, float, float, Properties)` constructor), `Registries.ARMOR_MATERIAL` (no such registry), and
+`getDefaultAttributeModifiers` overrides. **Measured:** −102 errors on a 467-error library port, 0 errors
+inside the generated package.
+
+**V93. NeoForge's attachment serializer changed shape, and its bridge keeps every body byte-identical.**
+· **Pattern:** `new IAttachmentSerializer<CompoundTag, T>() { T read(IAttachmentHolder h, CompoundTag t,
+HolderLookup.Provider p) {...} CompoundTag write(T x, HolderLookup.Provider p) {...} }`, and data classes
+`implements INBTSerializable<CompoundTag>` · **Error:** `wrong number of type arguments; required 1`,
+`method does not override` on read/write/serializeNBT/deserializeNBT, `cannot find symbol: class
+INBTSerializable` · **Fix:** 26.2 is `IAttachmentSerializer<T>`: `T read(IAttachmentHolder, ValueInput)` and
+`boolean write(T, ValueOutput)` (false = nothing to save, which is what 1.21.1's `return null` meant).
+`tools/convert-attachment-io.py` changes only the headers. `read` opens with
+`CompoundTag t = NbtBridge.tag(in)` (`in.read(MapCodec.assumeMapUnsafe(CompoundTag.CODEC))`) and
+`HolderLookup.Provider p = in.lookup()`. `write` calls the original body, moved verbatim into a private method,
+and hands its tag to `ValueOutput.store(CompoundTag)`, which merges entries at the top level, so the save is
+byte-identical (§V31). `INBTSerializable` is re-supplied as the same two-method interface, so `implements`,
+`@Override` and bounds like `<T extends INBTSerializable<CompoundTag>>` stay as written. · ⚠ **`write` is
+handed no registry lookup on 26.2.** The bridge supplies the running server's; a body that uses its provider is
+reported, so the reader knows where the value now comes from. **Measured:** −61 errors on the same library
+port.
+
+**V94. 🔴 A class that becomes a RECORD reports its field reads as "has private access", not "cannot find
+symbol" — and the fix is the accessor.** · **Pattern:** `instance.enchantment`, `instance.level` on an
+`EnchantmentInstance` (a public-final-field class on 1.21.1, a record on 26.2) · **Error:**
+`enchantment has private access in EnchantmentInstance`. No `symbol:`/`location:` lines follow it, so a
+tool keyed on `cannot find symbol` never sees it · **Fix:** the record's accessor has the field's name:
+`instance.enchantment()`. A text rule for `.level` would also hit every `this.level` in the mod, so
+`tools/fix-missing-members.py` now reads this error form too. javac names the owner AND puts its caret on the
+exact `.`, so a row `EnchantmentInstance  level  level()` rewrites that site and no other. It skips a call
+that already has parentheses and an assignment target. **Measured:** 30 sites in one library, all fixed in
+one pass.
+
+**V95. Small 26.2 removals found by zero-model baselines (cluster).** Each is a row in the 26.2 rename
+table or the member table, checked against the 26.2 jar:
+· `CompoundTag/ValueOutput.putUUID(k, v)` → `store(k, UUIDUtil.CODEC, v)`; `getUUID(k)` →
+`read(k, UUIDUtil.CODEC).orElseThrow()`; `hasUUID(k)` → `read(...).isPresent()` (§V12; `UUIDUtil.CODEC`
+writes the same int array, so saves read back). These are member rows rather than text rows, so the no-arg
+`Entity.getUUID()` is never touched.
+· `ValueInput.getShort(k)` → `(short) getShortOr(k, (short) 0)`: it returns `int` on 26.2.
+`ValueInput.contains(k)` → `keySet().contains(k)`.
+· `Entity.getCommandSenderWorld()` → `level()` (§V71), per owner type javac names.
+· `ResourceKey::location` as a METHOD REFERENCE → `ResourceKey::identifier`. The §V17 row matches only a call.
+· `FastColor.ARGB32.color/colorFromFloat/...` → `ARGB.*`, same (a, r, g, b) order and packing (`ABGR32`
+is not covered).
+· `LazyLoadedValue` → `java.util.function.Supplier` built by Guava's `Suppliers.memoize(...)` (computes once,
+on first `get()`).
+· `Ingredient.of(new ItemStack(x))` → `Ingredient.of(x)`: the `ItemStack` overload is gone.
+
 ## W. ONE SOURCE TREE, TWO MINECRAFT VERSIONS — the shape that makes an era jump survivable
 > **Axis:** build architecture. Everything above ports a mod *from* A *to* B and leaves A behind.
 > This is what to do when the mod must keep running on **both** — which is the normal case for a
