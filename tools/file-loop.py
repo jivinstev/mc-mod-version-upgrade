@@ -153,7 +153,88 @@ def find_sources(work):
             with zipfile.ZipFile(j) as z:
                 z.extractall(out, [n for n in z.namelist() if n.endswith(".java")])
         stamp.write_text(want, encoding="utf-8")
+    dependency_stubs(work, out)
     return out
+
+
+def compile_classpath(work):
+    """Gradle's own resolved compile classpath (tools/qtc-init.gradle), never one rebuilt from the cache."""
+    r = subprocess.run(["bash", "gradlew", "-q", "qtcClasspath", "--init-script", str(ROOT / "tools/qtc-init.gradle"),
+                        "--init-script", str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=900)
+    m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout, re.S)
+    return [pathlib.Path(x) for x in m.group(1).split()] if m else []
+
+
+def javap_stub(text):
+    """javap -public output for one class -> a declaration the source index reads: simple type names, and a
+    constructor written `public new Name(...)` so the member regex (which wants a return type) lists it."""
+    out, outer = [], None
+    for l in text.splitlines():
+        l = re.sub(r"\b(?:[a-z_][\w]*\.)+([A-Z]\w*)", r"\1", l.rstrip())    # drop package qualifiers
+        l = l.replace("$", ".")
+        m = re.match(r"^((?:public|protected|abstract|final|static|sealed|non-sealed|\s)*)(class|interface|enum|record)\s+([\w.]+)(.*)\{$", l)
+        if m:
+            name = m.group(3).rsplit(".", 1)[-1]
+            outer = name
+            out.append(f"{m.group(1)}{m.group(2)} {name}{m.group(4)}{{"); continue
+        if outer and re.match(rf"^\s+(public|protected)[^(]*\b{re.escape(outer)}\(", l) and \
+                not re.search(rf"\s\w[\w<>\[\], ?.]*\s+{re.escape(outer)}\(", l.replace("public ", "", 1).replace("protected ", "", 1)):
+            l = re.sub(rf"\b{re.escape(outer)}\(", f"new {outer}(", l, count=1)
+        out.append(l)
+    return "\n".join(out) + "\n"
+
+
+def dependency_stubs(work, out):
+    """Public-API stubs for every MOD jar the build compiles against (Minecraft and NeoForge come from real
+    sources above). Measured: a library that renamed its root package and reshaped its registry left 38 errors
+    workers could not see an answer for -- its jar ships no sources -- and five Opus calls ($2.18) were spent
+    guessing. One javap per jar, cached by the classpath."""
+    import zipfile
+    try:
+        cp = compile_classpath(work)
+    except (subprocess.TimeoutExpired, OSError):
+        return
+    mods = []
+    for j in cp:
+        if j.suffix != ".jar" or not j.exists():
+            continue
+        try:
+            with zipfile.ZipFile(j) as z:
+                names = z.namelist()
+        except zipfile.BadZipFile:
+            continue
+        if any(n in names for n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml")) and \
+                not any(n.startswith("net/minecraft/") for n in names[:2000]):
+            mods.append((j, [n[:-6].replace("/", ".") for n in names
+                             if n.endswith(".class") and "module-info" not in n and not re.search(r"\$\d", n)]))
+    dd = out / "_deps"
+    stamp = dd / ".from"
+    want = "\n".join(sorted(str(j) for j, _ in mods))
+    if stamp.exists() and stamp.read_text(encoding="utf-8") == want:
+        return
+    import shutil
+    shutil.rmtree(dd, ignore_errors=True)
+    for j, classes in mods:
+        tops = [c for c in classes if "$" not in c]
+        for i in range(0, len(tops), 200):
+            chunk = tops[i:i + 200]
+            nested = [c for c in classes if "$" in c and c.split("$")[0] in set(chunk)]
+            r = subprocess.run(["javap", "-public", "-cp", str(j), *chunk, *nested], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=600)
+            for block in re.split(r"(?m)^Compiled from [^\n]*\n", r.stdout):
+                m = re.search(r"(?m)^[^\n]*\b(?:class|interface|enum|record)\s+([\w.$]+)", block)
+                if not m:
+                    continue
+                fqn = m.group(1)
+                top, simple = fqn.split("$")[0], fqn.rsplit(".", 1)[-1].split("$")[-1]
+                f = dd / (top.replace(".", "/") + (".java" if "$" not in fqn else "$" + simple + ".java"))
+                f.parent.mkdir(parents=True, exist_ok=True)
+                pkg = top.rsplit(".", 1)[0]
+                f.write_text(f"package {pkg};\n// public API of {j.name}, from javap (no sources ship)\n" + javap_stub(block),
+                             encoding="utf-8")
+    dd.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(want, encoding="utf-8")
 
 
 def batches(errs, size, max_errs):
@@ -725,6 +806,10 @@ def self_check():
     k_, c_ = trim_round([("m", 1, 0.2), ("s", 2, 0.5), ("s", 3, 0.05), ("s", 4, 0.1)], 0.4)
     ok &= [i for _k, i in k_] == [1, 3, 4] and abs(c_ - 0.35) < 1e-9          # 0.5 does not fit; later ones do
     ok &= [i for _k, i in trim_round([("s", 9, 3.0)], 0.1)[0]] == [9]       # never an empty round
+    stub = javap_stub("public class a.b.Foo extends a.b.Base {\n  public a.b.Foo(a.b.Foo$Props);\n"
+                      "  public static a.b.Foo of(int);\n  public java.util.List<a.c.Bar> bars();\n}")
+    ok = ok and "public new Foo(Foo.Props);" in stub and "public static Foo of(int);" in stub \
+        and "List<Bar> bars();" in stub and "class Foo extends Base {" in stub
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
     return 0 if ok else 1
 
