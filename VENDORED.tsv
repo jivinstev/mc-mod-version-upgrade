@@ -18,6 +18,7 @@ templates/neoforge-mod/settings.gradle	MIT	cp -R templates/neoforge-mod (migrate
 templates/neoforge-mod/src/main/resources/META-INF/neoforge.mods.toml	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
 templates/neoforge-mod/test-templates/BaselineGameTest.java.example	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
 templates/neoforge-mod/test-templates/ClientBootSmokeTest.java.example	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
+templates/neoforge-mod/test-templates/DataLivenessGameTest.java.example	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
 templates/neoforge-mod/test-templates/MixinConfigIntegrityTest.java.template	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
 templates/neoforge-mod/test-templates/ModGameTest.java.example	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
 templates/neoforge-mod/test-templates/PersistenceGameTest.java.example	MIT	cp -R templates/neoforge-mod (migrate-mod pipeline)
