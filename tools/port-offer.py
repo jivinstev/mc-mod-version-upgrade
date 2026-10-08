@@ -100,6 +100,129 @@ def ci_verified(run):
     return []
 
 
+def _api(url):
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "port-offer"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def toml_deps(text):
+    """[(modId, required?, versionRange)] from a neoforge.mods.toml, minus the platform."""
+    out = []
+    for block in re.split(r"(?m)^\s*\[\[dependencies\.[^\]]+\]\]", text)[1:]:
+        kv = dict(re.findall(r'(?m)^\s*(\w+)\s*=\s*"?([^"\n#]*)"?', block))
+        mid = kv.get("modId", "").strip()
+        if not mid or mid in ("minecraft", "neoforge", "forge"):
+            continue
+        req = kv.get("type", "").strip().lower() == "required" or kv.get("mandatory", "").strip().lower() == "true"
+        out.append((mid, req, kv.get("versionRange", "").strip()))
+    return out
+
+
+def registry_link(d, mc):
+    """(label, page url, file url or None) for the version a build TESTED -- not the newest on the registry."""
+    v, prov, pid = str(d.get("version") or ""), d.get("provider"), d.get("id")
+    if prov == "curseforge" and v.isdigit():
+        return (f"CurseForge file {v}", f"https://www.curseforge.com/projects/{pid}",
+                f"https://www.curseforge.com/api/v1/mods/{pid}/files/{v}/download")
+    if prov == "modrinth" and pid:
+        rows = _api(f'https://api.modrinth.com/v2/project/{pid}/version?loaders=%5B%22neoforge%22%5D'
+                    f'&game_versions=%5B%22{mc}%22%5D') or []
+        hit = next((r for r in rows if r.get("version_number") == v), None) or \
+            next((r for r in rows if v and v in (r.get("version_number") or "")), None)
+        if hit:
+            f = (hit.get("files") or [{}])[0]
+            return (f.get("filename") or hit.get("version_number"),
+                    f"https://modrinth.com/mod/{pid}/version/{hit['id']}", f.get("url"))
+        return (f"version {v}", f"https://modrinth.com/mod/{pid}", None)
+    return (f"version {v}" if v else "see the project", None, None)
+
+
+def sibling_releases(repo, branch):
+    """Ports of OTHER forks this one's CI installs from their releases (tools/port-ci.py --dep-jar): their exact
+    release asset is what CI tested, so it is what to install."""
+    wf = git(repo, "show", f"{branch}:.github/workflows/port-ci.yml", check=False)
+    return [(m.group(1), m.group(2)) for m in re.finditer(
+        r'curl -fsSL -o "[^"]*/([\w.+-]+\.jar)" "(https://github\.com/[^"]+/releases/download/[^"]+)"', wf)]
+
+
+def own_release(fork, modid, mc):
+    rels = _api(f"https://api.github.com/repos/{fork}/releases?per_page=30") or []
+    for r in rels:
+        if r.get("tag_name", "").startswith(modid + "-") and r["tag_name"].endswith(f"-mc{mc}"):
+            return r["html_url"], [(a["name"], a["browser_download_url"]) for a in r.get("assets", [])]
+    return None, []
+
+
+def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=None):
+    """How to install THIS port on a real game, from what was tested: the NeoForge version the build names, this
+    fork's release, and each dependency from the ported build (required/optional from its neoforge.mods.toml),
+    at the version CI ran -- with the exact file, not the newest one. Never guessed: what cannot be resolved says so."""
+    L = [f"Tested with Minecraft {mc} and NeoForge {neo}. Install that NeoForge "
+         f"([installer](https://maven.neoforged.net/releases/net/neoforged/neoforge/{neo}/neoforge-{neo}-installer.jar)), "
+         "then put these in the instance's `mods` folder:", ""]
+    rel, assets = own_release(fork, modid, mc)
+    if assets:
+        pick = [a for a in assets if variant and variant[0] in a[0]] or assets
+        if len(assets) == 1 or (variant and len(pick) == 1):
+            L.append(f"1. **This mod:** [{pick[0][0]}]({pick[0][1]})"
+                     + (f" -- {variant[1]}" if variant and len(assets) > 1 else ""))
+        else:
+            L.append(f"1. **This mod:** one of the jars on [the release]({rel}): "
+                     + ", ".join(f"`{n}`" for n, _ in assets) + " (the build makes one per platform)")
+    else:
+        L.append("1. **This mod:** no release yet -- run the fork's CI with release=true first")
+    toml = toml_deps(git(repo, "show", f"{tip}:src/main/resources/META-INF/neoforge.mods.toml", check=False))
+    def norm(x):
+        return re.sub(r"[^a-z0-9]", "", (x or "").lower())
+    def build_dep(mid):          # the mods.toml id against the build's coordinates and registry ids
+        for d in deps or []:
+            if d.get("kind") == "mod" and d.get("toml_modid") == mid:
+                return d
+        return next((d for d in deps or [] if d.get("kind") == "mod" and (
+            norm(mid) in norm(d.get("artifact")) or norm(mid) == norm(str(d.get("id"))))), None)
+    sibs = sibling_releases(repo, branch)
+    req, opt, n = [], [], 2
+    for mid, required, rng in toml:
+        d = build_dep(mid)
+        sib = next(((a, u) for a, u in sibs if mid.replace("_", "") in a.replace("-", "").replace("_", "")), None)
+        if sib:
+            line = f"**{mid}** -- [{sib[0]}]({sib[1]}) (another of these ports; the exact file CI tested)"
+        elif d:
+            label, page, file = registry_link(d, mc)
+            line = f"**{mid}** -- " + (f"[{label}]({file})" if file else label) + (f" ([project]({page}))" if page else "")
+        else:
+            line = (f"**{mid}** {rng} -- not in the build, so no tested version: [find a NeoForge {mc} build]"
+                    f"(https://modrinth.com/mods?q={mid}&g=categories:neoforge&v={mc})")
+        (req if required else opt).append(line)
+    for line in req:
+        L.append(f"{n}. {line}"); n += 1
+    if opt:
+        L += ["", "Optional (only for the integration with that mod):"] + [f"- {x}" for x in opt]
+    # mods the build puts on the game's runtime that mods.toml does not name: usually a dependency OF one of the
+    # above (an optional integration's own library), and CI ran with them -- so a player who adds that
+    # integration needs them too
+    named = {(d.get("group"), d.get("artifact")) for d in (build_dep(mid) for mid, _r, _g in toml) if d}
+    extra, seen = [], set()
+    for d in deps or []:
+        key = (d.get("group"), d.get("artifact"))
+        if d.get("kind") != "mod" or key in named or d.get("scope") in ("compileOnly",):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        label, page, file = registry_link(d, mc)
+        extra.append(f"- {d.get('artifact')} -- " + (f"[{label}]({file})" if file else label)
+                     + (f" ([project]({page}))" if page else ""))
+    if extra:
+        L += ["", "Also loaded in CI, not named by this mod (usually a library one of the optional mods above needs):"] + extra
+    return L
+
+
 def verified(state):
     """What the pipeline CHECKED, from its state file -- one line each, nothing inferred."""
     out = []
@@ -133,6 +256,8 @@ def render(ctx):
     if ctx.get("ci_url"):
         L += [f"- Our CI for the branch (gates on every push; not part of the offer): {ctx['ci_url']}",
               f"- Built JARs: {ctx['releases_url']}"]
+    if ctx.get("install"):
+        L += ["", "## How to install", ""] + ctx["install"]
     h, h1, h3 = ctx["hunks"]
     L += ["", "## Size of the change", "",
           f"{ctx['files']} of the {ctx['tracked']} files in the authors' tree changed, +{ctx['ins']} / -{ctx['dels']} "
@@ -196,6 +321,10 @@ def self_check():
     v = verified(st)
     ok &= len(v) == 4 and "MIT" in v[0] and "m-1.jar" in v[3]
     ok &= verified({"gates": {"status": "failed"}}) == []
+    ok &= toml_deps('[[dependencies.m]]\nmodId="minecraft"\n[[dependencies.m]]\nmodId="lib"\ntype="required"\nversionRange="[1,)"\n'
+                    '[[dependencies.m]]\nmodId="opt"\ntype="optional"\n') == [("lib", True, "[1,)"), ("opt", False, "")]
+    ok &= registry_link({"version": "123", "provider": "curseforge", "id": "9"}, "1.21.1")[2] \
+        == "https://www.curseforge.com/api/v1/mods/9/files/123/download"
     ok &= ci_verified(("failure", "u", "x")) == [] and "Gate C" in ci_verified(("success", "u", "x"))[0]          # a failed gate is never reported as passed
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
@@ -209,6 +338,8 @@ def main():
     ap.add_argument("--base", help="the authors' ref (default: origin/HEAD)")
     ap.add_argument("--upstream", help="the authors' repository, owner/repo (default: the fork's GitHub parent)")
     ap.add_argument("--modid"); ap.add_argument("--work-dir"); ap.add_argument("--push", action="store_true")
+    ap.add_argument("--variant", metavar="SUBSTRING=WHY",
+                    help="when the release has one jar per platform, the one to install and why (e.g. _mr=...)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
     branch = a.branch or git(repo, "rev-parse", "--abbrev-ref", "HEAD")
@@ -259,6 +390,16 @@ def main():
                       if upstream else None),
            "ci_url": (f"https://github.com/{fork}/actions/workflows/port-ci.yml?query=branch%3A{branch}" if ci else None),
            "releases_url": f"https://github.com/{fork}/releases"}
+    try:
+        sp = __import__("importlib.util").util.spec_from_file_location("port_deps", pathlib.Path(__file__).parent / "port-deps.py")
+        pd = __import__("importlib.util").util.module_from_spec(sp); sys.modules["port_deps"] = pd; sp.loader.exec_module(pd)
+        _c, dep_rep = pd.run(repo, props.get("minecraft_version", "1.21.1"), out=lambda *x: None)
+        deps = dep_rep.get("dependencies") if isinstance(dep_rep, dict) else []
+    except SystemExit:
+        deps = []
+    ctx["install"] = install_section(repo, tip, branch, fork, props.get("mod_id") or modid,
+                                     props.get("minecraft_version", ""), props.get("neo_version", ""),
+                                     tuple(a.variant.split("=", 1)) if a.variant else None, deps)
     work.mkdir(parents=True, exist_ok=True)
     (work / "OFFER.md").write_text(render(ctx), encoding="utf-8")
     pushed = ""

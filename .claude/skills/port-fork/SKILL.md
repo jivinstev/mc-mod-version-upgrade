@@ -120,6 +120,16 @@ authors' repository that opens nothing by itself, the size and shape of the diff
 from `state.json`, never paraphrased), and a draft message and PR description. Whether, when and how to
 contact the authors is the user's decision.
 
+**Standing rule: every offer carries "How to install", per target, and so does anything built from it.**
+`port-offer.py` writes it from what was TESTED, never the newest file on a registry: the NeoForge version the
+build names (with its installer), this fork's release jar, each required dependency at the exact version the
+ported build declares (`neoforge.mods.toml` decides required vs optional) with a direct file link, sibling
+ports from the exact release asset CI installed, optional integrations, and the build's other runtime mods
+(usually a library an optional one needs). When a release has one jar per platform, pass
+`--variant <substring>=<why>`: platform builds can differ in content, not only packaging (one library's
+CurseForge jar leaves out the Java agent its Modrinth jar carries), so a dependent must be installed with the
+variant its CI tested. An install list the user cannot follow end to end on a fresh instance is a bug.
+
 `OFFER.md` lives in the work dir, outside both repositories: it is never committed and nothing reads it
 back. Once the `-upstream` branch is pushed (so its links resolve), offer to publish it as a **private
 artifact**: a page the user can copy from that outlives the session (a cloud session's work dir does
