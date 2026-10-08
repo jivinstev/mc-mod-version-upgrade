@@ -192,6 +192,25 @@ def provide_text(c):
             "mavenLocal from its own port, so add `mavenLocal()` to repositories):\n" + "\n".join(lines) + "\n\n")
 
 
+def provide_nontransitive(repo, pairs):
+    """Declare each --provide'd sibling NON-transitive. The registry artifact it replaces (maven.modrinth,
+    cursemaven) carries no dependencies; a sibling published with `from components.java` carries all of its
+    own, from hosts the author's build never named. Measured: Gate A's test classpath failed resolving the
+    sibling's GeckoLib from a blocked maven, when the mod declares its own GeckoLib. Idempotent."""
+    f = repo / "build.gradle"
+    if not f.is_file():
+        return []
+    t, done = f.read_text(encoding="utf-8"), []
+    for _old, new in pairs:
+        pat = re.compile(r'(?m)^(\s*)(\w+)\s*\(?\s*(["\'])' + re.escape(new) + r'\3\s*\)?\s*$')
+        t2 = pat.sub(lambda m: f'{m.group(1)}{m.group(2)}("{new}") {{ transitive = false }}', t)
+        if t2 != t:
+            t = t2; done.append(new)
+    if done:
+        f.write_text(t, encoding="utf-8")
+    return done
+
+
 def provide_unmet(c):
     g = (c["repo"] / "build.gradle").read_text(encoding="utf-8", errors="replace")
     return [(o, n) for o, n in provide_pairs(c) if o in g or n not in g or "mavenLocal()" not in g]
@@ -325,7 +344,8 @@ def st_build(c):
                 break
             _t, u = claude(prompt, repo, "Read,Edit,Write,Grep,Glob")
             usd += u; asks += 1
-        applied += apply_dep_versions(repo, c["dir"] / "deps.json")    # never left to the model (see the function)
+        applied += apply_dep_versions(repo, c["dir"] / "deps.json")
+        applied += [f"{x} (non-transitive)" for x in provide_nontransitive(repo, provide_pairs(c))]    # never left to the model (see the function)
         n, line = compile_count(repo, c["dir"] / "build-check.log")
         if n is not None and raise_neo_floor(c):          # a dependency needs a newer NeoForge: recount on it
             n, line = compile_count(repo, c["dir"] / "build-check.log")
@@ -1048,6 +1068,11 @@ def self_check():
         ok &= len(first) == 2 and apply_dep_versions(d, d / "deps.json") == []
         ok &= '"curse.maven:lib-1:200"' in (d / "build.gradle").read_text(encoding="utf-8")
         ok &= "b_v=2.0+1.21.1" in (d / "gradle.properties").read_text(encoding="utf-8")
+        (d / "build.gradle").write_text('dependencies {\n    implementation "net.x:lib:1.0"\n    implementation "a:b:1"\n}\n',
+                                        encoding="utf-8")
+        ok &= provide_nontransitive(d, [("old:x", "net.x:lib:1.0")]) == ["net.x:lib:1.0"]
+        ok &= provide_nontransitive(d, [("old:x", "net.x:lib:1.0")]) == []
+        ok &= 'implementation("net.x:lib:1.0") { transitive = false }' in (d / "build.gradle").read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         (r / "src/main/resources/META-INF").mkdir(parents=True)
