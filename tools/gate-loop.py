@@ -217,9 +217,16 @@ def mixin_audit(work):
     if args and (work / "gradlew").exists():   # the audit reads the PREPARED tree: refresh it so a worker's fix is not judged on a stale copy
         subprocess.run([BASH, "gradlew", "-q", "prepareSources", f"-Pmc={mc}", "--console=plain", "--init-script",
                         str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=900)
-    r = subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work), *args],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if r.returncode != 1:
+    audit = lambda: subprocess.run([sys.executable, str(ROOT / "tools/audit-mixin-targets.py"), str(work), *args],
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = audit()
+    if "no sources" in r.stderr and (work / "gradlew").exists():
+        # a fresh checkout (CI) has not staged Minecraft's sources yet; the audit's sys.exit(msg) is ALSO exit 1,
+        # which read as findings with an empty list and failed a clean port's Gate B. Stage them once and retry.
+        subprocess.run([BASH, "gradlew", "-q", "createMinecraftArtifacts", "--console=plain", "--init-script",
+                        str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True, timeout=1800)
+        r = audit()
+    if r.returncode != 1 or "MISMATCH" not in r.stdout:   # only real mismatches are findings
         return None
     return ("These mixins name a member the target's vanilla code no longer has (each fails at mixin APPLY and "
             "stops the game loading; CATALOG §R14/§R17). Retarget each to the current member, or delete a mixin "
