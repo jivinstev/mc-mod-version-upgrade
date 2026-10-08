@@ -214,6 +214,34 @@ def edit_spans(text, edits):
     return text
 
 
+# --------------------------------------------------------------------------- T0 @Mod constructor (§5/§8)
+
+BUS_CALL = r"(?:FMLJavaModLoadingContext\.get\(\)\.getModEventBus\(\)|(?:net\.neoforged\.fml\.)?ModLoadingContext\.get\(\)\.getActiveContainer\(\)\.getEventBus\(\))"
+
+
+def t_modctor(path, text, ctx, res):
+    cm = re.search(r"@Mod\s*\([^)]*\)\s*(?:public\s+)?(?:final\s+)?class\s+(\w+)", text)
+    if not cm:
+        return text
+    cls = cm.group(1)
+    m = re.search(r"(?m)^([ \t]*)public\s+%s\s*\(\s*\)\s*\{" % re.escape(cls), text)
+    if not m:
+        return text
+    b0 = m.end() - 1; b1 = match(text, b0)
+    body = text[b0:b1 + 1]
+    bus = fresh("modEventBus", body) if not re.search(r"IEventBus\s+modEventBus\s*=\s*" + BUS_CALL, body) else "modEventBus"
+    nb = re.sub(r"\n[ \t]*(?:final\s+)?IEventBus\s+%s\s*=\s*%s\s*;[ \t]*" % (re.escape(bus), BUS_CALL), "", body)
+    nb = re.sub(BUS_CALL, bus, nb)
+    nb = re.sub(r"(?:net\.neoforged\.fml\.)?ModLoadingContext\.get\(\)(?:\.getActiveContainer\(\))?\.registerConfig\(",
+                "modContainer.registerConfig(", nb)
+    text = text[:m.start()] + f"{m.group(1)}public {cls}(IEventBus {bus}, ModContainer modContainer) " + nb + text[b1 + 1:]
+    ctx["imports"] |= {"net.neoforged.bus.api.IEventBus", "net.neoforged.fml.ModContainer"}
+    for f in ("net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext", "net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext"):
+        text = remove_import_if_unused(text, f)
+    res.count["modctor"] += 1
+    return text
+
+
 # --------------------------------------------------------------------------- T1 tick events (§20/§21)
 
 TICK = {  # old nested type -> (new fqn, accessor renames)
@@ -799,7 +827,7 @@ def t_source(path, text, ctx, res):
     return text
 
 
-TRANSFORMS = [("tick", t_tick), ("dist", t_dist), ("attrmod", t_attrmod), ("nbt", t_nbt), ("hooks", t_hooks),
+TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attrmod", t_attrmod), ("nbt", t_nbt), ("hooks", t_hooks),
               ("geo", t_geo), ("vc", t_vc), ("source", t_source)]
 
 
@@ -910,6 +938,18 @@ class A {
 }
 """, ["ServerTickEvent.Post event", "if (++ticks < 20) {", "PlayerTickEvent.Post event", "        event.getEntity().tick();\n    }",
       "ClientTickEvent.Pre event", "import net.neoforged.neoforge.event.tick.ServerTickEvent;"], ["TickEvent.Phase", "import net.neoforged.neoforge.event.TickEvent;"]),
+    ("modctor", """package a;
+import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
+@Mod(MyMod.MOD_ID)
+public class MyMod {
+    public MyMod() {
+        Net.register();
+        FMLJavaModLoadingContext.get().getModEventBus().addListener(this::setup);
+        ModLoadingContext.get().registerConfig(Type.COMMON, SPEC);
+    }
+}
+""", ["public MyMod(IEventBus modEventBus, ModContainer modContainer) {", "modEventBus.addListener(this::setup);",
+      "modContainer.registerConfig(Type.COMMON, SPEC);", "import net.neoforged.bus.api.IEventBus;"], ["FMLJavaModLoadingContext"]),
     ("tick", """package a;
 class S {
     @SubscribeEvent
@@ -1020,7 +1060,7 @@ class F extends BlockEntity {
       "getUpdateTag(HolderLookup.Provider registries) { return this.saveWithFullMetadata(registries); }",
       "this.renderBackground(g, mx, my, pt);"], ["getMobType", "MobType.UNDEFINED", "NetworkHooks", "@Override\n    @Override", "@Override\n    @Override\n"]),
     ("geo", """package a;
-import software.bernie.geckolib.renderer.GeoEntityRenderer;
+// a geckolib renderer
 class G {
     @Override
     public void preRender(PoseStack p, T e, BakedGeoModel m, MultiBufferSource b, VertexConsumer v, boolean r, float pt, int pl, int po, float red, float green, float blue, float alpha) {

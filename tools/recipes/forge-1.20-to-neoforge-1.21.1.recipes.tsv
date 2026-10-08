@@ -216,3 +216,7 @@ re:\bEnchantments\.FISHING_SPEED\b	Enchantments.LURE
 
 #@ 103 auto  EquipmentSlot.Type.ARMOR became HUMANOID_ARMOR (1.20.5 added ANIMAL_ARMOR)
 re:\bEquipmentSlot\.Type\.ARMOR\b	EquipmentSlot.Type.HUMANOID_ARMOR
+
+#@ 5 auto  mod-bus and config access outside the @Mod constructor go through the active container (forge-shapes injects the constructor's own)
+re:\bFMLJavaModLoadingContext\.get\(\)\.getModEventBus\(\)	net.neoforged.fml.ModLoadingContext.get().getActiveContainer().getEventBus()
+re:\bModLoadingContext\.get\(\)\.registerConfig\(	ModLoadingContext.get().getActiveContainer().registerConfig(

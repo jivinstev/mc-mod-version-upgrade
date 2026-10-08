@@ -463,7 +463,7 @@ class Use {
     }
 }
 """, encoding="utf-8")
-        u = (root / "Use.java").read_text().splitlines()
+        u = (root / "Use.java").read_text(encoding="utf-8").splitlines()
         def at(ln, needle):
             return u[ln - 1].index(needle)
         F = str(root / "Use.java")
@@ -480,7 +480,7 @@ class Use {
             u[10], " " * at(11, "attribute") + "^",
         ])
         report, flags, _ = run(d, log)
-        out = (root / "Use.java").read_text(); eff = (root / "ModEffects.java").read_text()
+        out = (root / "Use.java").read_text(encoding="utf-8"); eff = (root / "ModEffects.java").read_text(encoding="utf-8")
         want = ["e.hasEffect(ModEffects.PHASING)", "s.enchant(ModHolders.enchantment(Enchantments.MENDING), 1)",
                 "MobEffect eff = inst.getEffect().value();", "void strip(LivingEntity e, Holder<Attribute> attribute)",
                 "import net.minecraft.core.Holder;"]
