@@ -67,6 +67,10 @@ def _stop(proc):
 def run_gate(work, task, heap, log, phase=None, timeout=1500):
     cmd = ["./gradlew", task, "--console=plain", "--init-script",
            str(ROOT / "tools/central-mirror.init.gradle"), f"-Dorg.gradle.jvmargs=-Xmx{heap}"]
+    # an upstream port keeps its test harness OUTSIDE the author's tree and wires it in per run
+    # (templates/upstream-harness/gates.init.gradle; tools/port-upstream.py sets this)
+    for extra in filter(None, os.environ.get("PORT_GRADLE_INIT", "").split(os.pathsep)):
+        cmd += ["--init-script", extra]
     env = dict(os.environ)
     if phase:   # Gate C: a real client; headless Linux gets Xvfb + Mesa's software GL (OpenGL 4.5 core)
         cmd += ["-Pboottest", f"-Ptestmode={phase}", "--no-daemon"]

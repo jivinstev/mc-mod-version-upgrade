@@ -1,0 +1,26 @@
+// Wires an EXTERNAL test harness into an upstream repo's own ModDevGradle build, for the gate run only.
+// Nothing here is committed to that repo: the harness lives in $PORT_HARNESS_DIR (java/, resources/,
+// test/, run/), and this script is passed with --init-script. tools/port-upstream.py sets both.
+//
+//   PORT_HARNESS_DIR  the harness directory
+//   PORT_MODID        the mod id (GameTest namespace)
+def harness = System.getenv('PORT_HARNESS_DIR')
+def modid = System.getenv('PORT_MODID')
+if (!harness || !modid) {
+    throw new GradleException("gates.init.gradle needs PORT_HARNESS_DIR and PORT_MODID")
+}
+allprojects { p ->
+    p.pluginManager.withPlugin('net.neoforged.moddev') {
+        p.sourceSets.main.java.srcDir("${harness}/java")
+        p.sourceSets.main.resources.srcDir("${harness}/resources")
+        p.sourceSets.test.java.srcDir("${harness}/test")
+        p.dependencies.add('testImplementation', 'org.junit.jupiter:junit-jupiter:5.10.2')
+        p.dependencies.add('testRuntimeOnly', 'org.junit.platform:junit-platform-launcher')
+        p.tasks.withType(Test).configureEach { useJUnitPlatform(); workingDir = p.projectDir }
+        p.neoForge.runs.create('gameTestServer') {
+            type = 'gameTestServer'
+            gameDirectory = p.file("${harness}/run")
+            systemProperty 'neoforge.enabledGameTestNamespaces', modid
+        }
+    }
+}

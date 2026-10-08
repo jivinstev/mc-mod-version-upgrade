@@ -131,7 +131,7 @@ def self_check():
     t = """package my;
 
 import net.minecraft.world.entity.Entity;
-import other.Item;
+import java.awt.Item;
 
 class A {
     // net.minecraft.world.level.Level in a comment stays
