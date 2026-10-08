@@ -191,6 +191,45 @@ def provide_unmet(c):
     return [(o, n) for o, n in provide_pairs(c) if o in g or n not in g or "mavenLocal()" not in g]
 
 
+def neo_floor(repo):
+    """The highest NeoForge minimum any mod on the compile classpath declares (its neoforge.mods.toml
+    versionRange), or None. Measured: the build stage picked 21.1.172 while a dependency required 21.1.228,
+    which compiled clean and refused to load at Gate B."""
+    import zipfile
+    spec = importlib.util.spec_from_file_location("fl", ROOT / "tools/file-loop.py")
+    fl = importlib.util.module_from_spec(spec); spec.loader.exec_module(fl)
+    best = None
+    for j in fl.compile_classpath(repo):
+        if j.suffix != ".jar" or not j.exists():
+            continue
+        try:
+            with zipfile.ZipFile(j) as z:
+                t = z.read("META-INF/neoforge.mods.toml").decode("utf-8", "replace")
+        except (KeyError, zipfile.BadZipFile):
+            continue
+        for blk in re.findall(r'modId\s*=\s*"neoforge"(.*?)(?=\[\[|\Z)', t, re.S):
+            m = re.search(r'versionRange\s*=\s*"[\[(]([\d.]+)', blk)
+            if m:
+                v = tuple(int(x) for x in m.group(1).split("."))
+                best = max(best, v) if best else v
+    return best
+
+
+def raise_neo_floor(c):
+    """Raise gradle.properties neo_version to what the dependencies require; True if it changed."""
+    gp = c["repo"] / "gradle.properties"
+    t = gp.read_text(encoding="utf-8")
+    m = re.search(r"(?m)^neo_version\s*=\s*([\d.]+)\s*$", t)
+    floor = neo_floor(c["repo"]) if m else None
+    have = tuple(int(x) for x in m.group(1).split(".")) if m else None
+    if not floor or not have or have >= floor:
+        return False
+    want = ".".join(map(str, floor))
+    gp.write_text(t[:m.start(1)] + want + t[m.end(1):], encoding="utf-8")
+    c.setdefault("notes", []).append(f"neo_version {m.group(1)} -> {want}: a dependency requires it")
+    return True
+
+
 def st_build(c):
     repo = c["repo"]
     design = (c["dir"] / "DESIGN.md").read_text(encoding="utf-8") if (c["dir"] / "DESIGN.md").exists() else ""
@@ -204,6 +243,8 @@ def st_build(c):
         _t, u = claude(prompt, repo, "Read,Edit,Write,Grep,Glob")
         usd += u
         n, line = compile_count(repo, c["dir"] / "build-check.log")
+        if n is not None and raise_neo_floor(c):          # a dependency needs a newer NeoForge: recount on it
+            n, line = compile_count(repo, c["dir"] / "build-check.log")
         unmet = provide_unmet(c)
         if n is not None and not unmet:
             return {"usd": usd, "first_count": n}
