@@ -151,10 +151,15 @@ def sibling_releases(repo, branch):
         r'curl -fsSL -o "[^"]*/([\w.+-]+\.jar)" "(https://github\.com/[^"]+/releases/download/[^"]+)"', wf)]
 
 
+def is_port_tag(tag, modid, mc):
+    """<modid>-<version>-mc<mc>, or a re-release of it (-r2, -r3: the port changed, the author's version did not)."""
+    return bool(re.fullmatch(re.escape(modid) + r"-.+-mc" + re.escape(mc) + r"(?:-r\d+)?", tag))
+
+
 def own_release(fork, modid, mc):
     rels = _api(f"https://api.github.com/repos/{fork}/releases?per_page=30") or []
     for r in rels:
-        if r.get("tag_name", "").startswith(modid + "-") and r["tag_name"].endswith(f"-mc{mc}"):
+        if is_port_tag(r.get("tag_name", ""), modid, mc):     # newest first: a -r2 re-release wins
             return r["html_url"], [(a["name"], a["browser_download_url"]) for a in r.get("assets", [])]
     return None, []
 
@@ -331,6 +336,8 @@ def render(ctx):
 def self_check():
     import tempfile
     ok = True
+    ok &= is_port_tag("m-2.2.1-mc1.21.1-r2", "m", "1.21.1") and is_port_tag("m-2.2.1-mc1.21.1", "m", "1.21.1")
+    ok &= not is_port_tag("m-2.2.1-mc1.21.10", "m", "1.21.1") and not is_port_tag("mx-1-mc1.21.1", "m", "1.21.1")
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@e"], ["config", "user.name", "t"]):

@@ -188,11 +188,16 @@ def install(files, mods_dir, dry=False, get=fetch):
     done, skipped, bad = [], [], []
     for f in files:
         mid = f.get("modid") or f["name"]
+        name = re.sub(r"[^\w.+-]", "_", f.get("name") or f"{mid}.jar")
+        update = False
         if mid in have:
-            skipped.append(f"{mid}: already in the mods folder ({have[mid]})")
-            continue
+            same = have[mid] == name and f.get("sha256")
+            if not (same and hashlib.sha256((mods_dir / name).read_bytes()).hexdigest() != f["sha256"]):
+                skipped.append(f"{mid}: already in the mods folder ({have[mid]})")
+                continue
+            update = True                    # same file name, different contents: a re-release of the port
         if dry:
-            done.append(f"{mid}: would install {f['name']}")
+            done.append(f"{mid}: would {'update' if update else 'install'} {f['name']}")
             continue
         try:
             data = get(f["url"])
@@ -202,11 +207,10 @@ def install(files, mods_dir, dry=False, get=fetch):
         if f.get("sha256") and sha != f["sha256"]:
             bad.append(f"{mid}: sha256 mismatch -- not the file CI tested, not installed"); continue
         mods_dir.mkdir(parents=True, exist_ok=True)
-        name = re.sub(r"[^\w.+-]", "_", f.get("name") or f"{mid}.jar")
         tmp = tempfile.NamedTemporaryFile(dir=mods_dir, suffix=".part", delete=False)
         tmp.write(data); tmp.close()
         os.replace(tmp.name, mods_dir / name)
-        done.append(f"{mid}: installed {name}" + ("" if f.get("sha256") else " (no sha256 in the manifest)"))
+        done.append(f"{mid}: {'updated' if update else 'installed'} {name}" + ("" if f.get("sha256") else " (no sha256 in the manifest)"))
     return done, skipped, bad
 
 
@@ -321,6 +325,11 @@ def self_check():
         ok &= len(done) == 3 and not bad and sorted(installed_modids(mods)) == ["base", "lib", "me"]
         done2, skipped2, _ = install(files, mods, get=get)
         ok &= not done2 and len(skipped2) == 3                               # idempotent: nothing twice
+        with zipfile.ZipFile(me, "a") as z:                                  # a re-release: same name, new bytes
+            z.writestr("changed.txt", "r2")
+        meman["files"][0]["sha256"] = sha(me)
+        done3, _s3, bad3 = install(plan(["o/me"], "b", False, False, get)[0], mods, get=get)
+        ok &= done3 == ["me: updated me.jar"] and not bad3
         lib2 = jar("lib-2.jar", "lib")
         mans[manifest_url("o/other", "b")] = {"port": "o/other", "minecraft": "1.21.1", "neoforge": "21.1.9", "files": [
             {"role": "self", "modid": "other", "name": "other.jar", "url": me.as_uri()},

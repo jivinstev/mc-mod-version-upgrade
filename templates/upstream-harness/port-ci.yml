@@ -110,6 +110,11 @@ jobs:
           if [ "${{ github.ref_type }}" = tag ]; then TAG="${{ github.ref_name }}"; else
             v=$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
             TAG="{{MODID}}-${v}-mc{{MC}}"
+            # the port was fixed but the author's version did not move: release it as -r2, -r3, ...
+            base="$TAG"; n=2
+            while gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+              TAG="${base}-r${n}"; n=$((n+1))
+            done
           fi
           {
             echo "**Unofficial port** of {{UPSTREAM}} to {{TARGET}}."
