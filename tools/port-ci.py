@@ -11,8 +11,8 @@ pass. Everything is read from the repository rather than guessed: the target fro
 Java toolchain from build.gradle, the author's branch from origin/HEAD. --dep names a sibling port this one
 compiles against (published to mavenLocal by its own build first, as during the port).
 
-The workflow pins the migrator repository to its CURRENT commit, which must already be pushed -- a pin to a
-commit GitHub does not have fails every run. Standard library only.
+The workflow downloads the Port CI kit (tools/port-ci-kit.py) -- a release asset holding only the gate runner and
+what it needs -- pinned by version and sha256, rather than checking this repository out. Standard library only.
 """
 import argparse, pathlib, re, subprocess, sys
 
@@ -37,21 +37,47 @@ def java_version(repo, mc):
     return m.group(1) if m else ("21" if mc.startswith("1.21") else "25")
 
 
-def migrator_ref():
-    sha = git(ROOT, "rev-parse", "HEAD").stdout.strip()
+def migrator_repo():
     url = git(ROOT, "remote", "get-url", "origin").stdout.strip()
     m = re.search(r"github\.com[/:]([\w.-]+/[\w.-]+?)(?:\.git)?$", url)
     if not m:
         sys.exit(f"cannot read the migrator's GitHub repository from {url!r}")
-    on_remote = git(ROOT, "branch", "-r", "--contains", sha).stdout.strip()
-    if not on_remote:
-        sys.exit(f"migrator commit {sha[:10]} is not on any remote branch -- push it first; CI pins to it")
-    return m.group(1), sha
+    return m.group(1)
+
+
+def _get(url):
+    import urllib.request
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "port-ci"}), timeout=30) as r:
+        return r.read().decode("utf-8")
+
+
+def kit_pin(repo, version=None, sha=None):
+    """(version, sha256) of the Port CI kit the workflow downloads: the newest published kit unless a version is
+    given, and the sha256 its release's own SHA256SUMS states unless one is given. A fork's CI then trusts a
+    checksum, not a download (tools/port-ci-kit.py builds kits reproducibly, so `port-ci-kit.py sha` on the
+    release commit cross-checks it)."""
+    import json
+    if version is None:
+        rels = json.loads(_get(f"https://api.github.com/repos/{repo}/releases?per_page=100"))
+        vs = [int(r["tag_name"].rsplit("v", 1)[1]) for r in rels
+              if re.fullmatch(r"port-ci-kit-v\d+", r.get("tag_name", ""))]
+        if not vs:
+            sys.exit(f"{repo} has published no Port CI kit yet (merge to main publishes one)")
+        version = max(vs)
+    if sha is None:
+        sums = _get(f"https://github.com/{repo}/releases/download/port-ci-kit-v{version}/SHA256SUMS")
+        m = re.search(rf"^([0-9a-f]{{64}})\s+port-ci-kit-v{version}\.tar\.gz$", sums, re.M)
+        if not m:
+            sys.exit(f"port-ci-kit-v{version}'s SHA256SUMS names no port-ci-kit-v{version}.tar.gz")
+        sha = m.group(1)
+    if not re.fullmatch(r"[0-9a-f]{64}", sha):
+        sys.exit(f"not a sha256: {sha!r}")
+    return int(version), sha
 
 
 def render(text, values):
-    out = re.sub(r"(?<!\$)\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), text)
-    left = re.findall(r"(?<!\$)\{\{[A-Z_]+\}\}", out)
+    out = re.sub(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", lambda m: values.get(m.group(1), m.group(0)), text)
+    left = re.findall(r"(?<!\$)\{\{[A-Z0-9_]+\}\}", out)
     if left:
         raise SystemExit(f"unfilled template placeholders: {left}")
     return out
@@ -76,7 +102,7 @@ def pre_build(deps):
 
 def self_check():
     t = TEMPLATE.read_text(encoding="utf-8")
-    v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z_]+)\}\}", t))}
+    v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
     v["PRE_BUILD"] = pre_build(["owner/lib@neoforge-1.21.1"])
     out = render(t, v)
     ok = "${{ github.sha }}" in out and "{{" not in out.replace("${{", "")    # GitHub's own ${{ }} survive
@@ -109,6 +135,8 @@ def main():
     ap.add_argument("--dep", action="append", default=[], help="owner/repo@branch built into mavenLocal first")
     ap.add_argument("--gatec", default="launch,spawn"); ap.add_argument("--no-commit", action="store_true")
     ap.add_argument("--trailer", action="append", default=[])
+    ap.add_argument("--kit-version", type=int, help="Port CI kit to pin (default: the newest published)")
+    ap.add_argument("--kit-sha", help="its sha256 (default: read from the release's SHA256SUMS)")
     ap.add_argument("--print", action="store_true", help="print the rendered workflow and change nothing")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
@@ -118,9 +146,10 @@ def main():
         sys.exit("gradle.properties has no minecraft_version / neo_version")
     branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     base = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip().split("/", 1)[-1] or "main"
-    mrepo, msha = migrator_ref()
+    mrepo = migrator_repo()
+    kver, ksha = kit_pin(mrepo, a.kit_version, a.kit_sha)
     values = {"TARGET": f"NeoForge {neo} (Minecraft {mc})", "BRANCH": branch, "MC": mc, "MODID": a.modid,
-              "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "MIGRATOR_SHA": msha,
+              "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
               "GATEC": a.gatec, "PRE_BUILD": pre_build(a.dep), "UPSTREAM": a.upstream or "the original"}
     out = render(TEMPLATE.read_text(encoding="utf-8"), values)
     if a.print:
@@ -136,7 +165,7 @@ def main():
            "integrity, a headless server running GameTests, and a real client under Xvfb -- with no\n"
            "model and no automatic fixes. A tag <mod>-<version>-mc" + mc + " publishes the author-built\n"
            "JARs as a pre-release once every gate passes. The gate harness is not added to this\n"
-           "repository: it is generated from " + mrepo + " at " + msha[:10] + ", outside the tree.\n"
+           f"repository: it comes from {mrepo}'s Port CI kit v{kver} (pinned by sha256), outside the tree.\n"
            "This commit stands alone so it can be dropped from anything offered upstream.\n")
     if a.trailer:
         msg += "\n" + "\n".join(a.trailer) + "\n"

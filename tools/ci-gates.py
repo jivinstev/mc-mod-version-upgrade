@@ -8,7 +8,7 @@ The fork's own CI calls this (templates/upstream-harness/port-ci.yml), so anyone
 the port PROVABLY loads and runs -- not only that it compiles. Measured: none of the four mods ported this
 way shipped a test suite of its own, so "the author's tests pass" proves only that the JAR builds.
 
-Same gates the port was held to, with the same code (tools/port-upstream.py's harness and Gate A,
+Same gates the port was held to, with the same code (tools/port_gates.py: the pipeline's own harness and Gate A,
 tools/gate-loop.py --no-workers for Gate B and Gate C), so CI cannot judge a port more leniently than the
 pipeline did:
   - the author's own `build` (and every Jar task they registered), with none of the harness;
@@ -61,7 +61,7 @@ def main():
     repo = pathlib.Path(a.repo).resolve()
     work = pathlib.Path(a.work_dir or tempfile.mkdtemp(prefix="port-ci-")).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    pu, ss = _load("pu", "port-upstream.py"), _load("srcsets", "srcsets.py")
+    pu, ss = _load("port_gates", "port_gates.py"), _load("srcsets", "srcsets.py")
     c = {"repo": repo, "dir": work, "args": types.SimpleNamespace(modid=a.modid, base=a.base)}
     rows, ok = [], True
 

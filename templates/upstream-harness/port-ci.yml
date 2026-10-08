@@ -3,8 +3,9 @@
 # Installed by tools/port-ci.py into a fork's port branch, as a commit of its own so it can be dropped if
 # the port is ever offered upstream. It runs the author's own build, then the same gates the port was held
 # to (mixin-config integrity, a headless server running GameTests, a real client under Xvfb) with NO model
-# and no automatic fixes -- a plain pass/fail. The gate harness is not part of this repository: it is
-# generated from the migrator repository, pinned to one commit, outside the source tree.
+# and no automatic fixes -- a plain pass/fail. The gate harness is not part of this repository: it comes from
+# the Port CI kit, a release asset of {{MIGRATOR_REPO}} holding only the gate runner and what it needs,
+# pinned here by version and sha256, and is generated outside the source tree.
 #
 # Release: run this workflow by hand (Actions -> Port CI -> Run workflow) with release = true, or push a tag
 # named <mod>-<version>-mc<minecraft>. If every gate passes, the JARs the author's build produced are published
@@ -36,11 +37,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # the author's branch is needed: mixins they left unlisted stay exempt
-      - uses: actions/checkout@v4
-        with:
-          repository: {{MIGRATOR_REPO}}
-          ref: {{MIGRATOR_SHA}}
-          path: .port-tools
+      - name: Port CI kit v{{KIT_VERSION}} (pinned by sha256)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \
+            "https://github.com/{{MIGRATOR_REPO}}/releases/download/port-ci-kit-v{{KIT_VERSION}}/port-ci-kit-v{{KIT_VERSION}}.tar.gz"
+          echo "{{KIT_SHA256}}  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

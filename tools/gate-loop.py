@@ -17,12 +17,26 @@ the game; this loop does. Every worker's exact dollars are logged. Stops at "All
 passed", at --budget, at --max-runs, or when a run fails the same way twice (a fix that did nothing).
 Standard library only; needs the `claude` CLI.
 """
-import collections, argparse, importlib.util, json, os, pathlib, re, subprocess, sys
+import collections, argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-_s = importlib.util.spec_from_file_location("fl", ROOT / "tools/file-loop.py")
-fl = importlib.util.module_from_spec(_s); _s.loader.exec_module(fl)
-BASH = fl.BASH
+_FL = None
+
+
+def _fl():
+    """The burn-down engine (tools/file-loop.py), loaded only when a worker is about to run: a worker-free CI
+    run (--no-workers) never needs it, so the Port CI kit does not carry it."""
+    global _FL
+    if _FL is None:
+        s = importlib.util.spec_from_file_location("fl", ROOT / "tools/file-loop.py")
+        _FL = importlib.util.module_from_spec(s); s.loader.exec_module(_FL)
+    return _FL
+
+
+_ss = importlib.util.spec_from_file_location("srcsets", ROOT / "tools/srcsets.py")
+srcsets = importlib.util.module_from_spec(_ss); _ss.loader.exec_module(srcsets)
+sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # noqa: E402  (Git Bash on Windows; plain bash elsewhere)
 
 PROMPT = """A Minecraft mod ported to {target} compiles, but its headless GameTest server (Gate B) fails:
 
@@ -322,16 +336,16 @@ def call_worker(a, work, srcs, text, phase, note, run):
     prompt = PROMPT.format(target=a.target, failure=text, catalog=ROOT, srcs=srcs or "(none)")
     if phase:
         prompt = prompt.replace("its headless GameTest server (Gate B) fails", f"its real client (Gate C, phase {phase}) fails")
-    snap = fl.singleshot.sibling_snapshot(work)
+    snap = _fl().singleshot.sibling_snapshot(work)
     r = subprocess.run(["claude", "-p", prompt,
-                        "--model", fl.MODELS[a.model], "--output-format", "json", "--permission-mode", "acceptEdits",
+                        "--model", _fl().MODELS[a.model], "--output-format", "json", "--permission-mode", "acceptEdits",
                         "--allowedTools", "Read,Edit,Write,Grep,Glob", "--add-dir", str(ROOT),
                         *(["--add-dir", srcs] if srcs else [])],
                        cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=a.timeout, stdin=subprocess.DEVNULL)
     # a fix belongs in THIS mod: an edit to a sibling repo (the library it depends on) is undone and recorded,
     # so the failure surfaces as the library's own bug instead of a silent half-fix in someone else's tree
-    outside = fl.singleshot.restore_siblings(snap)
+    outside = _fl().singleshot.restore_siblings(snap)
     try:
         d = json.loads(r.stdout)
     except ValueError:
@@ -343,7 +357,7 @@ def call_worker(a, work, srcs, text, phase, note, run):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=fl.TIERS)
+    ap.add_argument("--work"); ap.add_argument("--model", default="sonnet", choices=("haiku", "sonnet", "opus"))
     ap.add_argument("--task", default="runGameTestServer")
     ap.add_argument("--no-workers", action="store_true",
                     help="CI: report a red gate and exit 1; never call a model")
@@ -356,14 +370,14 @@ def main():
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.target is None and a.work:   # the build says what it targets (tools/srcsets.py)
-        a.target = fl.srcsets.target(pathlib.Path(a.work)) or "NeoForge 1.21.1"
+        a.target = srcsets.target(pathlib.Path(a.work)) or "NeoForge 1.21.1"
     if a.self_check:
         return self_check()
     if not a.work:
         ap.error("--work is required")
     work = pathlib.Path(a.work).resolve()
     # sources (and dependency stubs) are only for workers; a worker-free CI run skips extracting them
-    srcs = "" if a.no_workers else (str(fl.find_sources(work) or "") if a.sources == "auto" else a.sources)
+    srcs = "" if a.no_workers else (str(_fl().find_sources(work) or "") if a.sources == "auto" else a.sources)
     logf = open(a.log, "a", encoding="utf-8")
     note = lambda **k: (logf.write(json.dumps(k) + "\n"), logf.flush(), print(json.dumps(k)[:300]))
     spent, last_sig = 0.0, None

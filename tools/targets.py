@@ -478,7 +478,10 @@ def self_check():
         ok &= bool(cond)
 
     chk("both targets known", known() == ["1.21.1", "26.2"])
-    chk("every file the table names exists", all((ROOT / f).is_file() for tt in TARGETS.values()
+    # only in a full checkout: the Port CI kit (tools/port-ci-kit.py) carries the files its gates use, not the
+    # pipeline's recipe packs and member tables, and it marks itself with a MANIFEST.txt at its root
+    in_kit = (ROOT / "MANIFEST.txt").is_file() and not (ROOT / "CATALOG.md").is_file()
+    chk("every file the table names exists", in_kit or all((ROOT / f).is_file() for tt in TARGETS.values()
         for f in (tt.recipe_pack, tt.rename_table, tt.members_table, tt.client_patch) if f))
     chk("a hop names its tables, a first port its pack", TARGETS["26.2"].rename_table and TARGETS["26.2"].members_table
         and TARGETS["26.2"].client_patch and not TARGETS["26.2"].recipe_pack and TARGETS["1.21.1"].recipe_pack

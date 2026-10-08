@@ -277,6 +277,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-geckolib.py|convert-geckolib: GeckoLib 4.8 renderer/layer/model/animation hooks and asset layout onto 5.5; refuses what it cannot rewrite exactly" \
             "ci-gates.py|ci-gates: a finished port's gates in CI, worker-free pass/fail with a summary" \
             "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
+            "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
             "port-deps.py|port-deps: dependency preflight -- blocked hosts, missing target builds, local-maven fill" \
             "dep-moves.py|dep-moves: classes a dependency moved between the author's jar and the target's are found by comparing the jars, and rewritten" \
             "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
