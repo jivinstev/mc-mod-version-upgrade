@@ -456,9 +456,10 @@ def st_report(c):
         e = c["state"].get(s)
         if not e:
             continue
-        usd = e.get("usd") or e.get("result", {}).get("usd") or 0.0
+        usd = e.get("usd_all", e.get("usd") or (e.get("result") or {}).get("usd") or 0.0)
         total += usd
-        rows.append(f"| {s} | ${usd:.2f} | {e.get('secs', 0) // 60} min |")
+        runs = f" ({e['runs']} runs)" if e.get("runs", 1) > 1 else ""
+        rows.append(f"| {s}{runs} | ${usd:.2f} | {e.get('secs_all', e.get('secs', 0)) // 60} min |")
     lic = c["state"].get("license", {}).get("result", {})
     md = ["| stage | model cost | wall time |", "|---|---|---|", *rows, f"| **total** | **${total:.2f}** | |", "",
           f"Licence: {lic.get('licence')} ({', '.join(lic.get('file') or [])}); notices retained."
@@ -552,7 +553,12 @@ def main():
             state[s] = {"status": "failed", "why": str(e), "secs": int(time.time() - t0)}; save()
             print(f"[port-upstream] {s} FAILED: {e}\n  state: {sf}", flush=True)
             return 1
-        state[s] = {"status": "done", "secs": int(time.time() - t0), "usd": (res or {}).get("usd", 0.0), "result": res}
+        prev = state.get(s) or {}
+        usd, secs = (res or {}).get("usd", 0.0), int(time.time() - t0)
+        # a re-run ADDS to what the stage already cost: overwriting dropped a gate loop's $1.48 from the table
+        state[s] = {"status": "done", "secs": secs, "usd": usd, "result": res, "runs": prev.get("runs", 0) + 1,
+                    "usd_all": prev.get("usd_all", prev.get("usd", 0.0)) + usd,
+                    "secs_all": prev.get("secs_all", prev.get("secs", 0)) + secs}
         save()
         print(f"[port-upstream] {s} done ({state[s]['secs']}s, ${state[s]['usd']:.2f})", flush=True)
     if "report" in todo:
