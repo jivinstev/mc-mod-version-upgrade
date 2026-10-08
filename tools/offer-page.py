@@ -5,7 +5,7 @@
     python3 tools/offer-page.py --self-check
 
 mods.json is a list of {"work": <dir with OFFER.md, as port-offer.py writes it>, "fork": "owner/repo",
-"tag": <release tag or null>, "pending": <note or null>}; a relative "work" is under ~/.mc-mod-upgrade/upstream.
+"tag": <release tag or null>, "pending": <note or null>, "label": <optional, e.g. "release build">}; a relative "work" is under ~/.mc-mod-upgrade/upstream.
 Each section: links, install steps, size, verified checks, the TOP-10 MANUAL TESTS with full steps (what no gate
 reaches -- tools/manual-tests.py), then the draft words. Publish the result as an Artifact for the person handing
 the ports over. --offline skips the release-asset lookup (GitHub API).
@@ -53,7 +53,7 @@ def build(mods, out, offline=False):
             cards.append(f'<section class="mod pending"><h2>{fork.split("/")[1]}</h2><p class="status">Pending</p>'
                          f'<p>{html.escape(pending or "No offer yet.")}</p></section>'); continue
         md = f.read_text(encoding="utf-8")
-        name = re.match(r"# Offering the (.+?) port", md).group(1)
+        name = re.match(r"# Offering the (.+?) port", md).group(1) + (f" — {m['label']}" if m.get("label") else "")
         links = dict(re.findall(r"^- \*?\*?(.+?)\*?\*?[^:]*?: (https://\S+)", sec(md, "Links"), re.M))
         lk = re.findall(r"https://\S+", sec(md, "Links"))
         diff, branch, pr = lk[0], lk[1], lk[2]
