@@ -31,7 +31,7 @@ HOLDER_TYPES = {"MobEffect": "MOB_EFFECT", "Attribute": "ATTRIBUTE", "Potion": "
 # an anonymous one compiles and fails to encode -- that is the §115 record template's job, not a rewrite.
 RETYPE_PARAMS = {"MobEffect", "Attribute", "Potion", "Enchantment"}
 
-ERR = re.compile(r"^(?P<file>/\S+?\.java):(?P<line>\d+): error: (?P<msg>.*)$")
+ERR = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[\\/]\S+?\.java):(?P<line>\d+): error: (?P<msg>.*)$")
 CONV = re.compile(r"incompatible types: (?P<a>.+?) cannot be converted to (?P<b>.+)$")
 
 HELPER = """package {pkg};
@@ -492,6 +492,7 @@ class Use {
         if "Holder<Holder<" in out:
             miss.append("double retype")
         ok = not miss and not flags
+    ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: incompatible types: A cannot be converted to B"))   # javac on Windows names a drive path
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{out}")
     return 0 if ok else 1
 

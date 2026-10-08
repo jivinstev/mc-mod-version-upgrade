@@ -19,7 +19,7 @@ Standard library only.
 """
 import argparse, collections, pathlib, re, sys
 
-ERR = re.compile(r"^(?P<file>/\S+?\.java):(?P<line>\d+): error: cannot find symbol")
+ERR = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[\\/]\S+?\.java):(?P<line>\d+): error: cannot find symbol")
 
 
 def table(path):
@@ -127,6 +127,7 @@ def self_check():
         ok = ("g.text(font, s, 1, 2, -1);" in t and "        drawString(x);" in t
               and "Minecraft.getInstance().gameRenderer.mainRenderTarget()" in t
               and "if (Minecraft.getInstance().hasControlDown())" in t and not missed)
+    ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: cannot find symbol"))   # javac on Windows names a drive path
     print("self-check:", "OK" if ok else f"FAIL {report} {missed}\n{t}")
     return 0 if ok else 1
 

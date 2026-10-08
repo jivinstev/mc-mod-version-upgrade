@@ -3434,8 +3434,8 @@ sampler) and the tool says so per site.
 **V93. 🔴 A custom `ShaderInstance` → a `RenderPipeline` + a std140 uniform BLOCK, and what binds the block is a
 two-line mixin — but WHEN you snapshot the values is the part that decides faithfulness.** · **Pattern:** a JSON
 core program + GLSL 150 with loose `uniform float X;`, fetched with `getUniform("X").set(...)` in a shard's
-`setupRenderState()` · **Error:** `ShaderInstance`, `RegisterShadersEvent`, `Uniform.set` all gone · **Fix,
-measured on 26.2's own sources:**
+`setupRenderState()` · **Error:** `ShaderInstance`, `RegisterShadersEvent`, `Uniform.set` all gone · **Fix:**
+measured on 26.2's own sources —
 · A RenderType draw (`PreparedRenderType.drawFromBuffer`) binds only `Projection`, `Fog`, `Globals`, `Lighting`
   (via `RenderSystem.bindDefaultUniforms`) and `DynamicTransforms`. No NeoForge hook binds more, so a
   `@WrapOperation` on that `bindDefaultUniforms` call binds the mod's block. GL validation (on in dev) throws
