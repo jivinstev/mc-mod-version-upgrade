@@ -566,6 +566,10 @@ def main():
     if ci and not a.push:
         print(f"  not pushed -- the links resolve after: git -C {repo} push -f origin {offer}")
     print(f"  write-up: {work / 'OFFER.md'}")
+    meta = _api(f"https://api.github.com/repos/{fork}") if fork else None
+    if meta and meta.get("has_issues") is False:   # forks start with Issues off; pre-existing defects are filed there
+        print(f"  NOTE: Issues are turned off on {fork} (GitHub's default for a fork). Turn them on in Settings > "
+              "General > Features so its pre-existing defects can be filed (port-fork skill, step 4b).")
     return 0
 
 
