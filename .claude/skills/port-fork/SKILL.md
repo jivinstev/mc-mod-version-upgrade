@@ -98,11 +98,19 @@ runs whether or not the mod is installed and is safe only behind a "mod loaded" 
 
 ## 4b. Defects the authors' original already has
 
-The gates (above all the X49 log check) find defects the port did not cause. Handle each the same way:
+The gates (above all the X49 log check) find defects the port did not cause. Run the gates with every
+Gate C phase first, and once more with the mod together with what players install it with (its dependents
+too): a defect a mod shows only in company (one mod's code calling another's) never appears in its own run.
+Then, for each finding:
 
+0. **Trace it to its cause** -- the asset, registration or code line the log line points at (a texture path
+   built from a prefix, a sounds.json entry, a sound event id, an animation value, a missing placement). A
+   finding is one cause; several log lines can share it.
 1. **Prove it is pre-existing** before calling it that: the same code or asset on the authors' own branch
    (`git show origin/<authors' branch>:<path>`, with the commit), and where vanilla behaviour decides it, the
    old Minecraft version's own classes (`javap` on its server jar). "Probably was like that" is not evidence.
+   Check the authors' NEWEST code too: they may have fixed it after the release (take their fix, and say so),
+   or their fix may have a side effect of its own (fix that as well, in the same commit, and say so).
 2. **Clear-cut fix** (one obvious correct change: a missing registration, a dead `sounds.json` entry, a
    malformed value, a missing atlas source) -- fix it on the port branch as **one commit per defect**, subject
    `Pre-existing upstream defect: <what>`, the body naming the authors' file and commit that has it, the fix,
@@ -119,7 +127,15 @@ The gates (above all the X49 log check) find defects the port did not cause. Han
    hand-off; backport only when a maintainer asks or someone plays that version, and then build Gates A/B
    for it first.
 
-The offer's commit list then shows the port and its pre-existing fixes apart, which is the honest offer.
+**Bring the user one decision table before changing anything**: per defect, the mod, what a player sees,
+the proof it is pre-existing, and either the clear-cut fix (flag any that change behaviour, e.g. new spawn
+rules) or the options when there is none. Ask about the non-obvious ones; a fix that needs art may have a
+stand-in worth trying -- look at it in a real client (a Gate C photo) before proposing it.
+
+**The handoff shows them.** `tools/port-offer.py` adds a "Defects the authors' original already has"
+section -- the `Pre-existing upstream defect:` commits, the `gatec-known.txt` lines and the fork's
+`Pre-existing:` issues -- and `tools/offer-page.py` puts it on the handoff page, so whoever installs or
+reviews the port sees what was wrong before it, what was fixed, and what is still open.
 
 ## 5. CI and release
 

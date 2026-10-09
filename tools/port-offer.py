@@ -335,6 +335,35 @@ def display_name(props, upstream, fork, modid):
     return props.get("mod_name") or (upstream or fork or "").split("/")[-1] or modid
 
 
+DEFECT_SECTION = "Defects the authors' original already has"
+
+
+def defects_section(repo, tip, fork, commits):
+    """The pre-existing defects the gates found (port-fork skill, step 4b), for the offer and the handoff page:
+    the fixes on the branch (one commit each, subject 'Pre-existing upstream defect: ...'), the ones recorded in
+    .github/gatec-known.txt, and the fork's 'Pre-existing: ...' issues. "" when there are none."""
+    fixed = [(sha, subj) for sha, subj, _ in commits if subj.startswith("Pre-existing upstream defect:")]
+    known = [l.strip() for l in git(repo, "show", f"{tip}:.github/gatec-known.txt", check=False).splitlines()
+             if l.strip() and not l.lstrip().startswith("#")]
+    issues = [i for i in (_api(f"https://api.github.com/repos/{fork}/issues?state=all&per_page=100") or [])
+              if isinstance(i, dict) and "pull_request" not in i and i.get("title", "").startswith("Pre-existing")]
+    if not (fixed or known or issues):
+        return ""
+    L = [f"## {DEFECT_SECTION}", "",
+         "The gates found these in the authors' own code, before the port -- the port did not cause them. Each is "
+         "an issue on the fork; none is backported to the authors' Minecraft version (there is no test setup for it).", ""]
+    if fixed:
+        L += ["**Fixed in this port**, one commit each:", ""] + [f"- `{sha[:10]}` {subj.split(':', 1)[1].strip()}"
+                                                                  for sha, subj in fixed] + [""]
+    if known:
+        L += ["**Recorded, not fixed** (the gate lists them and stays green; `.github/gatec-known.txt`):", ""]
+        L += [f"- {k.split('#', 1)[0].strip()}" + (f" -- {k.split('#', 1)[1].strip()}" if "#" in k else "") for k in known] + [""]
+    if issues:
+        L += ["**Issues on the fork:**", ""] + [f"- [#{i['number']} {i['title']}]({i['html_url']}) ({i['state']})"
+                                                for i in sorted(issues, key=lambda i: i["number"])] + [""]
+    return "\n".join(L)
+
+
 def render(ctx):
     L = [f"# Offering the {ctx['name']} port to its authors", "",
          "Nothing here has been sent. Edit, then send it yourself (or don't).", "",
@@ -365,6 +394,8 @@ def render(ctx):
     L += ["", "## Verified", ""] + [f"- {v}" for v in ctx["verified"] or ["(no pipeline state found -- say only what you checked)"]]
     L += ["- Not verified by any automated check: gameplay by a person"
           + (" -- the manual tests below cover what the gates cannot reach." if ctx.get("manual") else ".")]
+    if ctx.get("defects"):
+        L += [""] + ctx["defects"].rstrip().splitlines()
     if ctx.get("manual"):
         L += [""] + ctx["manual"].rstrip().splitlines()
     facts = " ".join(ctx["verified"])
@@ -506,6 +537,7 @@ def main():
         deps = dep_rep.get("dependencies") if isinstance(dep_rep, dict) else []
     except SystemExit:
         deps = []
+    ctx["defects"] = defects_section(repo, tip, fork, ctx["commits"])
     ctx["install"], man = install_section(repo, tip, branch, fork, props.get("mod_id") or modid,
                                      props.get("minecraft_version", ""), props.get("neo_version", ""),
                                      tuple(a.variant.split("=", 1)) if a.variant else None, deps)

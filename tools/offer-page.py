@@ -96,6 +96,7 @@ def build(mods, out, offline=False):
       <ul class="commits">{"".join(f"<li><code>{s}</code> {html.escape(t)}</li>" for s, t in commits)}</ul>
       {f'<p class="muted">{html.escape("Left out: " + left.group(1))}</p>' if left else ""}
       <h3>Verified</h3><ul class="checks">{"".join(f"<li>{linkify(v)}</li>" for v in ver)}</ul>
+      {(lambda d: f'<h3>Defects the authors&#39; original already has</h3>{md_block(d)}' if d else "")(sec(md, "Defects the authors' original already has"))}
       {f'<h3>Manual tests -- the {len(tests)} that matter most</h3><p class="muted">What no automated gate reaches. A few minutes each.</p>{manual}' if tests else ""}
       <h3>Words</h3>
       {copy(f"msg{i}", msg, "Message to the authors")}

@@ -44,7 +44,8 @@ tree. Then:
 - **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes.
 - **Defects the authors' original already has** are proved pre-existing (their branch, their commit), then
   either fixed in one commit each or recorded in the fork's known-defects list (`gatec-known.txt`), and filed as an issue on the fork
-  either way -- never backported unvalidated. Turn Issues on in a new fork; GitHub starts them off.
+  either way -- never backported unvalidated. The offer and the handoff page list them. Turn Issues on in a
+  new fork; GitHub starts them off.
 - **An offer for the authors**: a compare link showing just the port (without our CI), the size and shape of
   the diff, what was verified, and draft words. Nothing is sent: contacting the authors is your call.
 - **The ten manual tests that matter most**, in every offer: what no automated gate reaches (music, keys,

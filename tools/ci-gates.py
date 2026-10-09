@@ -250,7 +250,10 @@ def main():
         detail = "green"
         if r.returncode:
             m = re.search(r"GATE \S+ FAILED:\n(.*)", r.stdout, re.S)
-            detail = (m.group(1) if m else (r.stdout + r.stderr)[-600:]).strip().splitlines()[0][:300]
+            lines = (m.group(1) if m else (r.stdout + r.stderr)[-600:]).strip().splitlines()
+            items = [x.strip()[2:] for x in lines if x.lstrip().startswith("- ")]   # a list of findings: name them
+            detail = ("; ".join(items[:3]) + (f"; +{len(items) - 3} more" if len(items) > 3 else "") if items
+                      else lines[0] if lines else "no output")[:300]
             print(r.stdout[-6000:], flush=True)
         else:
             gl = pathlib.Path(env["PORT_LOG_DIR"]) / f"gate-loop{'-' + extra[1] if extra else ''}.log"
