@@ -17,3 +17,26 @@ Screen	hasControlDown	static:Minecraft.getInstance().hasControlDown
 Screen	hasShiftDown	static:Minecraft.getInstance().hasShiftDown
 Screen	hasAltDown	static:Minecraft.getInstance().hasAltDown
 CompoundTag	getAllKeys	keySet
+# 26.2 made EnchantmentInstance a record: javac reports "<field> has private access", and the accessor has the
+# field's name (both checked in the 26.2 jar: Holder<Enchantment> enchantment(), int level()).
+EnchantmentInstance	enchantment	enchantment()
+EnchantmentInstance	level	level()
+# A UUID goes through a codec on 26.2 (§V12). CompoundTag and ValueInput/ValueOutput share the same
+# store(String, Codec, T) / read(String, Codec) -> Optional pair, and UUIDUtil.CODEC writes the int array
+# 1.21.1's putUUID wrote, so saved data reads back unchanged. 1.21.1's getUUID threw on an absent key.
+CompoundTag	putUUID	{recv}.store({a0}, net.minecraft.core.UUIDUtil.CODEC, {a1})
+CompoundTag	getUUID	{recv}.read({a0}, net.minecraft.core.UUIDUtil.CODEC).orElseThrow()
+CompoundTag	hasUUID	{recv}.read({a0}, net.minecraft.core.UUIDUtil.CODEC).isPresent()
+ValueOutput	putUUID	{recv}.store({a0}, net.minecraft.core.UUIDUtil.CODEC, {a1})
+ValueInput	getUUID	{recv}.read({a0}, net.minecraft.core.UUIDUtil.CODEC).orElseThrow()
+ValueInput	hasUUID	{recv}.read({a0}, net.minecraft.core.UUIDUtil.CODEC).isPresent()
+# ValueInput (what convert-valueio hands a load body): getShortOr returns int on 26.2; contains is keySet().
+ValueInput	getShort	(short) {recv}.getShortOr({a0}, (short) 0)
+ValueInput	contains	{recv}.keySet().contains({a0})
+# Entity.getCommandSenderWorld() was removed; it always returned level() (§V71).
+Entity	getCommandSenderWorld	level
+LivingEntity	getCommandSenderWorld	level
+Mob	getCommandSenderWorld	level
+PathfinderMob	getCommandSenderWorld	level
+Player	getCommandSenderWorld	level
+ServerPlayer	getCommandSenderWorld	level

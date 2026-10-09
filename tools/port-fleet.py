@@ -11,7 +11,9 @@ The fleet file lives OUTSIDE this repository (it names other people's mods). JSO
    "ports": [
      {"repo": "/path/to/clone", "modid": "a", "base": "origin/main", "branch": "neoforge-1.21.1",
       "upstream": "https://github.com/author/a", "upstream_name": "A by author",
-      "dep_jar": ["owner/fork@tag/x.jar=g:a:v"], "variant": ["_mr=why"], "gatec": "launch,spawn"}]}
+      "dep_jar": ["owner/fork@tag/x.jar=g:a:v"], "variant": ["_mr=why"], "gatec": "launch,spawn",
+      "tag_suffix": "-release" (a release-aligned branch), "release": "<author's released commit>",
+      "work_dir": "~/.mc-mod-upgrade/upstream/<dir>"}]}   # work_dir: only if the clone's folder name differs
 
 Steps, run in the file's order (put a library before the mods that use it):
   ci       regenerate the CI workflow (tools/port-ci.py) as its own commit; --push to push it
@@ -56,6 +58,8 @@ def commands(fleet, step, push=False, env="full", work=None):
             argv += [x for d in p.get("dep", []) for x in ("--dep", d)]
             if p.get("gatec"):
                 argv += ["--gatec", p["gatec"]]
+            if p.get("tag_suffix"):                     # a release-aligned branch's own tag series
+                argv.append(f"--tag-suffix={p['tag_suffix']}")
             out.append((p, repo, argv))
             if push:
                 out.append((p, repo, ["git", "push", "origin", branch]))
@@ -76,6 +80,12 @@ def commands(fleet, step, push=False, env="full", work=None):
             if p.get("upstream_repo"):
                 argv += ["--upstream", p["upstream_repo"]]
             argv += [x for v in p.get("variant", []) for x in ("--variant", v)]
+            if p.get("release"):                        # the author's released commit: the offer states the distance
+                argv += ["--release", p["release"]]
+            elif p.get("published"):
+                argv += ["--published", p["published"]]
+            if p.get("work_dir"):                       # the port's own records (state.json): licence, what was verified
+                argv += ["--work-dir", str(pathlib.Path(p["work_dir"]).expanduser())]
             if push:
                 argv.append("--push")
             out.append((p, repo, argv))
@@ -91,7 +101,7 @@ def self_check():
     fleet = {"trailers": ["T: x"], "ports": [
         {"repo": "/r/lib", "modid": "lib", "base": "origin/main"},
         {"repo": "/r/mod", "modid": "mod", "base": "origin/master", "dep_jar": ["o/lib@t/lib.jar=g:lib:1"],
-         "variant": ["_mr=why"], "upstream": "https://github.com/a/mod", "gatec": "launch"}]}
+         "variant": ["_mr=why"], "upstream": "https://github.com/a/mod", "gatec": "launch", "work_dir": "/w/mod"}]}
     ok = True
     ci = commands(fleet, "ci", push=True)
     ok &= [c[2][0] for c in ci] == [sys.executable, "git", sys.executable, "git"]          # order kept, push after each
@@ -99,6 +109,7 @@ def self_check():
     ok &= ci[0][2].count("--trailer") == 1
     of = commands(fleet, "offer", push=True)
     ok &= of[1][2][-1] == "--push" and "--variant" in of[1][2] and "--variant" not in of[0][2]
+    ok &= pathlib.Path(of[1][2][of[1][2].index("--work-dir") + 1]) == pathlib.Path("/w/mod") and "--work-dir" not in of[0][2]   # a Path: Windows gives \\w\\mod
     g = commands(fleet, "gates", env="minimal", work="/w")
     ok &= g[0][2][g[0][2].index("--env") + 1] == "minimal" and g[1][2][g[1][2].index("--base") + 1] == "origin/master"
     with tempfile.TemporaryDirectory() as t:

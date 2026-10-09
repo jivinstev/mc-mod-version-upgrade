@@ -141,6 +141,58 @@ back. Once the `-upstream` branch is pushed (so its links resolve), offer to pub
 artifact**: a page the user can copy from that outlives the session (a cloud session's work dir does
 not). It may name the mod, being outside this repository; the no-names rule covers this repository only.
 
+**Standing rule: every handoff carries the 10 manual tests that matter most, with full steps.** No gate
+presses a key, listens to music, fights a boss to the end or opens a screen, and those are where ports break
+unseen (a client-to-server packet sent on one action took a player's game down after every gate was green).
+`port-offer.py` runs `tools/manual-tests.py` on the checkout and puts the list in `OFFER.md` ("Manual tests")
+and `manual-tests.json`. The list is picked round-robin across kinds -- music first, then client packets,
+bosses, keys, screens, raids, curios, custom recipes, structures, natural spawns -- so ten tests cover ten
+different things, and each step names a real `/summon`, `/give` or `/locate` id read from the mod's own
+registration code. Read it before handing over: where a step says "see what starts it in <file>", open that
+file and write the real trigger in. Ends with what to do when one fails (which logs, the prompt to paste).
+
+**When the fork is not on the release** (see "Two branches" below), pass `--release <commit>` or
+`--published <ISO time>`: the offer then says how many unreleased commits the port sits on, how big they are
+and what they are (`tools/port-provenance.py`). An offer that hides that is offering code nobody has played.
+
+**The handoff page:** `tools/offer-page.py --mods <mods.json> --out <page.html>` builds one page from every
+fork's `OFFER.md` + `manual-tests.json` (links, install steps, distance from release, checks, manual tests,
+draft words). Publish it as the private artifact; update it in place after each release.
+
+## Two branches: the author's release, and their newest code
+
+A fork is usually cut from the author's development tip, and that can be far from what players run (measured:
+52 commits, +4877 lines). Count it first:
+
+```bash
+python3 tools/port-provenance.py --repo ~/forks/<repo> --base $(git -C ~/forks/<repo> merge-base origin/HEAD neoforge-<mc>) \
+    --registry modrinth:<slug> --registry curseforge:<id> --mc <author's mc> --loader <loader>   # or --published / --release
+```
+The release commit is matched by publish time (the last commit before the upload); say so when quoting it.
+Name every registry the mod is on (the newest file wins: one can lag a version behind) and find the project by
+the `displayName` in its mods.toml -- a similarly named mod once put a 1-commit distance at 34.
+Small distances (one or two commits) are fine to ship as-is, with the provenance in the offer. For a large
+one, ship BOTH:
+
+- `neoforge-<mc>` -- the development port, on the author's newest code. Keep it current with
+  `tools/port-sync.py --repo <clone> --port neoforge-<mc> --upstream origin/<branch>` (stop 2 before pushing):
+  it merges (never rebases) the author's new commits, stops on a conflict with the files named, and says what
+  to re-port. This is what to hand the author to maintain.
+- `neoforge-<mc>-release` -- the port of what they released, derived with no re-porting:
+
+```bash
+python3 tools/port-derive.py --repo <clone> --branch neoforge-<mc> --base <fork point> --release <release commit> \
+    --new-branch neoforge-<mc>-release
+python3 tools/port-derive.py --repo <clone> --resolve --release <release commit> --record <work>/resolve.json   # stop 1: a model
+```
+The replay drops files that exist only in unreleased code and the port's handlers for them; `--resolve` then
+gives each file still failing to one worker with the release copy beside it, and lists every removed line the
+release also has. **Read that list**: a model clearing an error can delete a released option or registration
+(measured: a config option and a registry registration, both restored by hand). Then the gates, same as any
+port (they found two more: a mixin config naming unreleased mixins, and a latent release crash). Give the
+release branch its own CI tag series and install manifest. When the author releases again, re-derive; never
+sync the release branch.
+
 ## Every fork at once
 
 `tools/port-fleet.py` runs the same step over every fork you maintain, in dependency order, with each

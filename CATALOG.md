@@ -507,6 +507,34 @@ reads the compiled classes and fails on this shape (and reports mixins that reac
 and fork CI's `minimal` environment runs it before Gate B, then boots without the optional mods. On the
 released port it named the three crashes the minimal Gate B then hit one at a time.
 
+R28. **🔴 `StreamCodec.unit(new X())` on a field-less payload CLASS rejects every send — the player is
+disconnected, and no server-side gate can see it.** · **Pattern:** the natural port of a Forge "signal" packet with
+no fields: `public class SwitchHand implements CustomPacketPayload { static final StreamCodec<…, SwitchHand>
+STREAM_CODEC = StreamCodec.unit(new SwitchHand()); }`, sent as `PacketDistributor.sendToServer(new SwitchHand())`.
+· **Runtime (client, at send):** `EncoderException: Failed to encode packet 'serverbound/minecraft:custom_payload'`
+← `IllegalStateException: Can't encode 'X@f05c125', expected 'X@675c6cdf'`, and the client drops out of the world.
+`StreamCodec.unit` writes nothing and refuses any value not `equals()` to the one it was built with; a plain class
+has identity equality, so the codec accepts only that one object. · **Fix:** `public record X() implements
+CustomPacketPayload` — a record with no components makes every instance equal, a one-word diff with every call site
+unchanged. (Or one shared `INSTANCE`, used to build the codec and at every send.) · **Why the gates missed it:**
+it compiles, Gate B's server never sends a client packet, and Gate C sends it only if something triggers the
+action (here an off-hand attack while dual-wielding). Caught by a player, after green CI on the release.
+**Control:** `tools/audit-unit-codecs.py` (a ci-gates row; matches the call across line breaks, which a plain
+grep did not) — exit 1 on a non-record, non-enum class with no `equals`.
+
+R29. **🔴 A mixin class that EXTENDS a vanilla parent inherits that parent's covariant bridges — and on 1.21 two
+of them can collide on the target, so mixin apply fails at startup.** · **Pattern:** `@Mixin(MushroomCow.class)
+abstract class X extends Cow` — the usual way to reach `goalSelector` and the parent's methods from a mixin. On
+1.21.1 `Cow` and `MushroomCow` each declare `getBreedOffspring(ServerLevel, AgeableMob)` with their own covariant
+return, so each has a synthetic bridge with the same descriptor. · **Runtime:** `InvalidMixinException:
+Conflicting synthetic bridge target method descriptor in synthetic bridge method getBreedOffspring(…)… Existing:
+(…)MushroomCow; Incoming: (…)Cow` — the mod refuses to load. Compiles clean. · **Fix:** extend the nearest ancestor
+that has what the mixin uses and no override of the target's covariant methods (`PathfinderMob` for goal
+selectors), keeping the constructor's `EntityType<? extends …>` in step. · **Why it hid:** it surfaced in CI's
+Gate B and not in two local Gate B runs of the same commit and kit, i.e. it depends on when the target class is
+first loaded. A green local Gate B is not proof a mixin applies; the CI run is the second sample. Found on a
+release-aligned branch, where `port-derive` had listed the released mixin again (see §W19).
+
 **Non-fatal runtime issues (log errors / wrong visuals, not a crash — fix during the boot loop, they won't fail the gate):**
 - **Forge biome modifier not renamespaced/retyped** (mob silently stops spawning naturally) · **Pattern:** `data/<ns>/forge/biome_modifier/*.json` with `"type": "forge:add_spawns"` (also `add_features`, `remove_spawns`) · **Log:** usually silent (a datapack registry the mod's own code doesn't read) → the entity just never spawns in its biomes. · **Fix:** move the file to `data/<ns>/**neoforge**/biome_modifier/` and rename the type `forge:add_spawns` → `neoforge:add_spawns` (the `{biomes, spawners:{type,weight,minCount,maxCount}}` body is unchanged). **Scan:** `grep -rln '"forge:add_spawns"\|/forge/biome_modifier/' src/main/resources` and `find src/main/resources/data/*/forge/biome_modifier`. (a single-mob MCreator mod (~15 files): deep_dark + dark_forest spawns.)
 - **`forge:` model-loader id not renamespaced** · **Log:** `Model loader 'forge:separate_transforms' not found. Registered loaders: neoforge:separate_transforms, …` → the item bakes as the missing-model (black/purple), no crash. · **Fix:** renamespace the `"loader"` id in the item-model JSONs, `forge:<x>` → `neoforge:<x>` (`separate_transforms`, `composite`, `obj`, `item_layers`, …). **Scan:** `grep -rln '"loader": *"forge:' src/main/resources`. (Was 8 models here: crossbow variants, a lance, a hammer, a scimitar.)
@@ -1143,6 +1171,20 @@ in a Forge-only folder; fork CI also runs the static `--verify` as its own row, 
 server refused to start the moment its structure modifiers loaded, on two entity ids the mod had
 dropped years before. A port of this same mod through the jar pipeline had hit both, and the lesson
 did not reach the fork pipeline until the converter enforced it — §S2 again.
+
+**S10. 🔴 `"item"` → `"id"` reaches every ItemStack in data, not just recipe RESULTS — advancement icons and a
+mod's OWN JSON formats too.** · **Pattern:** a 1.20.1 data file naming a stack `{"item": "ns:x"}` anywhere the
+reader now uses `ItemStack.CODEC`: an advancement's `display.icon`, and any mod-specific format whose loader the
+port moved from hand-written `GsonHelper` reads (which accepted `item`) to the codec (which wants `id`).
+· **Runtime:** one ERROR per file — `Couldn't parse data file '<ns>:<adv>' … No key id in MapLike[{"item":…}]`, or the
+mod's own "Failed to load …" with the same cause — and the advancement or recipe is DROPPED. No crash; every gate
+green. Measured on one port after green CI: 38 advancements and 62 custom smithing recipes, all dead. · **Fix:**
+the key, and only the key: `fix-datapack-layout.py --apply` now swaps it inside advancement icons as a literal
+(file formatting kept), and `--verify` fails on any left. A mod-specific format is the mod's own business: swap the
+key in its files AND, when players write their own files in that format (a `config/` folder of recipes), give the
+codec `Codec.withAlternative(ItemStack.CODEC, <legacy {item, count}>)` so files written for 1.20.1 still load.
+· **Control for the whole class:** ci-gates now reads Gate B's server log and fails the row "Data loads" on any
+rejection line naming the mod's namespace — the only check that sees a format no converter knows.
 
 **S5c. Corollary — scope a cross-mod audit to the mods you are auditing.** The first census run loaded the
 whole 66-jar instance and never reached the census: one third-party mod requires NeoForge 21.1.233 and the harness
@@ -3505,6 +3547,97 @@ measured on 26.2's own sources —
 · **Register early:** `RegisterRenderPipelinesEvent` fires before resource packs load, and RenderType fields are
   built at class init, so create the shader objects there from the mod's own jar and rebuild them on each reload.
 
+**V92. 🔴 The tool-tier and armour classes are GONE, and the class-move map makes it worse by
+renaming `ArmorMaterial` to a different type.** · **Pattern:** `implements Tier`, `Tiers.IRON`,
+`extends SwordItem/TieredItem/PickaxeItem/ArmorItem`, `SwordItem.createAttributes(tier, 3, -2.4F)`,
+`Holder.direct(new ArmorMaterial(defense, ench, sound, () -> repair, List.of(new ArmorMaterial.Layer(id)), t, kb))`
+· **Error:** `cannot find symbol: class Tier / TieredItem / SwordItem / ArmorItem`, and then
+`constructor ArmorMaterial cannot be applied` on every material. The second error is the move map's doing:
+it matches classes by simple name, so 1.21.1 `item.ArmorMaterial` becomes 26.2 `item.equipment.ArmorMaterial`
+(a record with a durability, an `ArmorType` map, a repair TAG and an `EquipmentAsset` key). That is §V44's
+blind spot again: same name, unrelated shape. · **Fix:** `tools/convert-gear-tiers.py` re-supplies the
+1.21.1 contracts in the mod's own package (`<mod>.compat.gear`), built on the 26.2 components exactly as
+`ToolMaterial.applyToolProperties` / `applySwordProperties` and `Item.Properties.humanoidArmor` build them,
+and points the mod's imports there. Subclasses, overrides and anonymous `new Tier() {...}` then compile
+unchanged. Two details are what make it faithful. **Repair is a DELAYED component**
+(`Properties.delayedComponent(REPAIRABLE, ...)`), because 1.21.1 read the repair ingredient lazily and building
+it at item construction touches other items before they are bound (§R3). **Armour durability is not set**,
+because the 1.21.1 `ArmorItem` constructor did not set it either; the caller did. · ⚠ **`instanceof` is the
+half a shim cannot make faithful.** `x instanceof SwordItem` used to match every sword in the game, and against
+the shim it matches only the mod's own. An UNBOUND test is widened to `GearChecks.isSword(x)` (tags and
+components, so vanilla gear answers too). A BOUND test or a cast is left alone and reported as NARROWED,
+because widening the guard in front of a cast hands it a vanilla item and a `ClassCastException`. · **Armour
+textures move too:** 26.2 draws worn armour from `assets/<ns>/equipment/<id>.json` and
+`textures/entity/equipment/humanoid[_leggings]/`, not `textures/models/armor/<id>_layer_{1,2}.png`; the
+converter writes the json and moves the textures for every layer id the code names. · **Refused, named:**
+`AxeItem`/`ShovelItem`/`HoeItem` subclasses (still vanilla classes on 26.2, with a
+`(ToolMaterial, float, float, Properties)` constructor), `Registries.ARMOR_MATERIAL` (no such registry), and
+`getDefaultAttributeModifiers` overrides. **Measured:** −102 errors on a 467-error library port, 0 errors
+inside the generated package.
+
+**V93. NeoForge's attachment serializer changed shape, and its bridge keeps every body byte-identical.**
+· **Pattern:** `new IAttachmentSerializer<CompoundTag, T>() { T read(IAttachmentHolder h, CompoundTag t,
+HolderLookup.Provider p) {...} CompoundTag write(T x, HolderLookup.Provider p) {...} }`, and data classes
+`implements INBTSerializable<CompoundTag>` · **Error:** `wrong number of type arguments; required 1`,
+`method does not override` on read/write/serializeNBT/deserializeNBT, `cannot find symbol: class
+INBTSerializable` · **Fix:** 26.2 is `IAttachmentSerializer<T>`: `T read(IAttachmentHolder, ValueInput)` and
+`boolean write(T, ValueOutput)` (false = nothing to save, which is what 1.21.1's `return null` meant).
+`tools/convert-attachment-io.py` changes only the headers. `read` opens with
+`CompoundTag t = NbtBridge.tag(in)` (`in.read(MapCodec.assumeMapUnsafe(CompoundTag.CODEC))`) and
+`HolderLookup.Provider p = in.lookup()`. `write` calls the original body, moved verbatim into a private method,
+and hands its tag to `ValueOutput.store(CompoundTag)`, which merges entries at the top level, so the save is
+byte-identical (§V31). `INBTSerializable` is re-supplied as the same two-method interface, so `implements`,
+`@Override` and bounds like `<T extends INBTSerializable<CompoundTag>>` stay as written. · ⚠ **`write` is
+handed no registry lookup on 26.2.** The bridge supplies the running server's; a body that uses its provider is
+reported, so the reader knows where the value now comes from. **Measured:** −61 errors on the same library
+port.
+
+**V94. 🔴 A class that becomes a RECORD reports its field reads as "has private access", not "cannot find
+symbol" — and the fix is the accessor.** · **Pattern:** `instance.enchantment`, `instance.level` on an
+`EnchantmentInstance` (a public-final-field class on 1.21.1, a record on 26.2) · **Error:**
+`enchantment has private access in EnchantmentInstance`. No `symbol:`/`location:` lines follow it, so a
+tool keyed on `cannot find symbol` never sees it · **Fix:** the record's accessor has the field's name:
+`instance.enchantment()`. A text rule for `.level` would also hit every `this.level` in the mod, so
+`tools/fix-missing-members.py` now reads this error form too. javac names the owner AND puts its caret on the
+exact `.`, so a row `EnchantmentInstance  level  level()` rewrites that site and no other. It skips a call
+that already has parentheses and an assignment target. **Measured:** 30 sites in one library, all fixed in
+one pass.
+
+**V96. The general form of §V76: an override whose hook SIGNATURE changed keeps its body in a private 1.21.1-shaped
+copy, and a table says how to adapt each hook.** · **Pattern:** the item hooks every content mod overrides —
+measured over our ports and the 13-mod corpus: ~350 `appendHoverText`, 48 `releaseUsing`, 39 `inventoryTick`,
+33 `hurtEnemy`, nearly all in one 1.21.1 shape each · **Error:** `method does not override or implement a method
+from a supertype`, the largest single bucket in every 26.2 baseline · **Fix:** `tools/convert-override-signatures.py`.
+The new override adapts the arguments at the boundary and calls `ported$<hook>(<old args>)`, whose body is the
+original, untouched. Only `super.<hook>(...)` inside it is rewritten to the 26.2 call. The rows, read off both jars:
+`appendHoverText` takes `TooltipDisplay` + `Consumer<Component>` in place of the list (the copy fills a list; the
+override forwards it in order); `releaseUsing` returns boolean (false, vanilla's default); `hurtEnemy` returns void
+(`return super.hurtEnemy(..)` becomes `super.hurtEnemy(..); return true`); `inventoryTick` takes
+`(ItemStack, ServerLevel, Entity, EquipmentSlot)` — `isSelected` becomes `slot == MAINHAND`, and a body reading the
+old slot INDEX or branching on `isClientSide` is NOTED, because 26.2 passes no index and ticks on the server only.
+A `super` call used as a value where the new one is void is REFUSED. **Adding a hook is a table row**, which is the
+point: a §V entry that says "this hook changed shape" should land as a row here, not as per-port judgement.
+**Measured:** 7 overrides in one library, −14 errors, 0 at the rewritten sites.
+
+**V95. Small 26.2 removals found by zero-model baselines (cluster).** · **Pattern:** the 1.21.1 calls listed
+below, each a one-line shape · **Error:** `cannot find symbol` on the old member (`putUUID`, `getShort`,
+`getCommandSenderWorld`, `ResourceKey::location`, `FastColor`, `LazyLoadedValue`, `Ingredient.of(ItemStack)`), or
+`incompatible types: int cannot be converted to short` · **Fix:** each is a row in the 26.2 rename table or the
+member table, checked against the 26.2 jar:
+· `CompoundTag/ValueOutput.putUUID(k, v)` → `store(k, UUIDUtil.CODEC, v)`; `getUUID(k)` →
+`read(k, UUIDUtil.CODEC).orElseThrow()`; `hasUUID(k)` → `read(...).isPresent()` (§V12; `UUIDUtil.CODEC`
+writes the same int array, so saves read back). These are member rows rather than text rows, so the no-arg
+`Entity.getUUID()` is never touched.
+· `ValueInput.getShort(k)` → `(short) getShortOr(k, (short) 0)`: it returns `int` on 26.2.
+`ValueInput.contains(k)` → `keySet().contains(k)`.
+· `Entity.getCommandSenderWorld()` → `level()` (§V71), per owner type javac names.
+· `ResourceKey::location` as a METHOD REFERENCE → `ResourceKey::identifier`. The §V17 row matches only a call.
+· `FastColor.ARGB32.color/colorFromFloat/...` → `ARGB.*`, same (a, r, g, b) order and packing (`ABGR32`
+is not covered).
+· `LazyLoadedValue` → `java.util.function.Supplier` built by Guava's `Suppliers.memoize(...)` (computes once,
+on first `get()`).
+· `Ingredient.of(new ItemStack(x))` → `Ingredient.of(x)`: the `ItemStack` overload is gone.
+
 ## W. ONE SOURCE TREE, TWO MINECRAFT VERSIONS — the shape that makes an era jump survivable
 > **Axis:** build architecture. Everything above ports a mod *from* A *to* B and leaves A behind.
 > This is what to do when the mod must keep running on **both** — which is the normal case for a
@@ -3920,6 +4053,24 @@ same for `CLIENT_RESOURCES`). An external tool cannot do that, so the caller pas
 (1.21/1.21.1 → 48, 1.21.2/1.21.3 → 57, 1.21.4 → 61), and a test drives the REAL writer rather than
 the table. The writer test is red on the old code (48 ≠ 61). **Sweep:** `catalog-scans.md` §W18. A
 rewrite at install is a backstop, and while it exists the bug stays invisible.
+
+**W19. A RELEASE-ALIGNED BRANCH, derived instead of re-ported — and the three things the derivation got wrong.**
+· **Pattern:** a fork port built on the author's development tip, offered or installed as if it were their
+release · **Symptom:** players run code the author never released (half-finished features, their bugs), and
+nothing in the offer says so; a derived release branch then compiles yet drops released behaviour or crashes at
+start · **Fix:** measure the distance (`tools/port-provenance.py`), derive the release branch with
+`tools/port-derive.py` and read its loss list, then run every gate. A fork cut from an author's development tip ships code players have never run (measured: 52 commits, +4877 lines
+past the release). `tools/port-derive.py` replays the port's commits onto the release commit, drops files that
+exist only in unreleased code, and `--resolve` hands each still-failing file to one worker with the release copy
+beside it. Measured on one mod: 58 errors → 0 for $1.77 of model spend, against $2.55 for the original port. It is
+not a free lunch, and the gates were what made it safe: (a) clearing an error, the model DELETED two released
+behaviours whose declaration the replay had lost (a config option, a registry registration) -- now flagged by
+`release_losses`, which lists every removed line the release also has; (b) the replay took the development
+branch's mixin config, naming ten unreleased mixins and dropping two released ones -- now fixed by the derive
+itself; (c) one released mixin re-listed that way does not apply on the new version at all (R29). Read the
+loss list, run every gate, and let CI be the second sample. Match the release by publish time over EVERY registry
+the mod is on (`tools/port-provenance.py`), and find the project by its `displayName`: a similarly named mod once
+put a 1-commit distance at 34.
 
 ## X. CODEMOD HYGIENE — a rule that matches nothing is invisible, and that is the whole problem
 > **Axis:** instrument quality. Every large migration here is driven by mass rewrites, and this
@@ -5345,3 +5496,18 @@ a worker "fixed" a moved interface by deleting `implements` and calling the type
 never-transform whitelist still named `"net.minecraftforge."`, which on NeoForge protects nothing — now a
 codemod rule. And pass the TARGET from the build: a tool default had told 26.x workers they were porting to
 1.21.1.
+
+**X48. 🔴 A deterministic stage wired into ONE porting route is a cost the other route pays to a model — keep
+each hop's tail in one shared stage both routes call.** · **Pattern:** a converter or fix-up tool built while
+measuring one route (here the fork route, `port-upstream.py`) and called from that route's own code · **Symptom:**
+none on the route that has it; on the other route (the jar route, `port.py`) every error the converter would have
+removed goes to the compile loop's workers, priced like real porting. Nothing fails: the burn-down is just higher.
+It was found by noticing a README sentence could not be written truthfully for both routes · **Measured** (26.2
+era hop on finished jar-route 1.21.1 ports, no model): 145 → 78 errors (−46%) and 506 → 73 (−86%), almost all of
+it the tool-tier/armour converter and the changed-hook-signature converter. The same audit found the jar route's
+Forge hop missing the access-transformer fix (a Forge AT in SRG names was copied unconverted, §139), Forge code
+shapes, SimpleChannel → payloads and the Holder fixes · **Fix:** `tools/mechanical-hop.py` holds both stages with
+one list each; both routes call it, and `tools/test-port-tools.sh` fails if either stops, runs a stage tool
+itself, or a converter on disk is in no list. · **Also found:** the jar route's era hop leaves GeckoLib at its
+1.21.1 version, so a GeckoLib mod's 26.2 build asks for an artifact that does not exist (§V10) and the compile
+never starts; the fork route bumps it in `tools/targets.py`. Same shape, one layer down: a build step one route has.

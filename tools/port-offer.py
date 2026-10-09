@@ -19,7 +19,7 @@ owner's decision. --push pushes the `-upstream` branch to the fork (origin) so t
 the command to run is printed. Standard library only (network only to read the fork's parent when --upstream
 is not given).
 """
-import argparse, json, os, pathlib, re, subprocess, sys
+import argparse, json, os, pathlib, re, subprocess, sys, tempfile
 
 CI_FILES = {".github/workflows/port-ci.yml", ".github/port-install.json"}
 MANIFEST = ".github/port-install.json"
@@ -185,15 +185,24 @@ def sibling_releases(repo, branch):
         r'curl -fsSL -o "[^"]*/([\w.+-]+\.jar)" "(https://github\.com/[^"]+/releases/download/[^"]+)"', wf)]
 
 
-def is_port_tag(tag, modid, mc):
-    """<modid>-<version>-mc<mc>, or a re-release of it (-r2, -r3: the port changed, the author's version did not)."""
-    return bool(re.fullmatch(re.escape(modid) + r"-.+-mc" + re.escape(mc) + r"(?:-r\d+)?", tag))
+def is_port_tag(tag, modid, mc, suffix=""):
+    """<modid>-<version>-mc<mc><suffix>, or a re-release of it (-r2, -r3: the port changed, the author's version did
+    not). The suffix is the branch's own tag series (port-ci --tag-suffix): a release-aligned branch's jars never
+    pass for the development port's, nor the other way round."""
+    return bool(re.fullmatch(re.escape(modid) + r"-.+-mc" + re.escape(mc) + re.escape(suffix) + r"(?:-r\d+)?", tag))
 
 
-def own_release(fork, modid, mc):
+def tag_suffix(repo, branch, mc):
+    """The tag series this branch's CI releases under, read from its workflow's tag filter."""
+    wf = git(repo, "show", f"{branch}:.github/workflows/port-ci.yml", check=False)
+    m = re.search(r'tags:\s*\["\*-mc' + re.escape(mc) + r'([^"]*)"\]', wf)
+    return m.group(1) if m else ""
+
+
+def own_release(fork, modid, mc, suffix=""):
     rels = _api(f"https://api.github.com/repos/{fork}/releases?per_page=30") or []
     for r in rels:
-        if is_port_tag(r.get("tag_name", ""), modid, mc):     # newest first: a -r2 re-release wins
+        if is_port_tag(r.get("tag_name", ""), modid, mc, suffix):     # newest first: a -r2 re-release wins
             return r["html_url"], [(a["name"], a["browser_download_url"]) for a in r.get("assets", [])]
     return None, []
 
@@ -215,7 +224,7 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
     def add(role, mid, name, url, page=None, port=None):
         man["files"].append({k: v for k, v in (("role", role), ("modid", mid), ("name", name), ("url", url),
                                                 ("page", page), ("port", port)) if v})
-    rel, assets = own_release(fork, ownid, mc)
+    rel, assets = own_release(fork, ownid, mc, tag_suffix(repo, branch, mc))
     if assets:
         pick = [a for a in assets if variant and variant[0] in a[0]] or assets
         add("self", ownid, pick[0][0], pick[0][1]) if (len(assets) == 1 or len(pick) == 1) else None
@@ -320,8 +329,14 @@ def verified(state):
     return out
 
 
+def display_name(props, upstream, fork, modid):
+    """What the authors call the mod: their mod_name, else their repository's name. Never the --modid, which
+    is an id for lookups (a fleet run always passes one), and never a local folder name."""
+    return props.get("mod_name") or (upstream or fork or "").split("/")[-1] or modid
+
+
 def render(ctx):
-    L = [f"# Offering the {ctx['modid']} port to its authors", "",
+    L = [f"# Offering the {ctx['name']} port to its authors", "",
          "Nothing here has been sent. Edit, then send it yourself (or don't).", "",
          "## Links", "",
          f"- **The diff** (author's code -> the port; send this): {ctx['compare']}",
@@ -335,6 +350,8 @@ def render(ctx):
               f"- Built JARs: {ctx['releases_url']}"]
     if ctx.get("install"):
         L += ["", "## How to install", ""] + ctx["install"]
+    if ctx.get("provenance"):
+        L += [""] + ctx["provenance"].rstrip().splitlines()
     h, h1, h3 = ctx["hunks"]
     L += ["", "## Size of the change", "",
           f"{ctx['files']} of the {ctx['tracked']} files in the authors' tree changed, +{ctx['ins']} / -{ctx['dels']} "
@@ -346,7 +363,10 @@ def render(ctx):
         L += ["", f"Left out of the offer: {len(ctx['ci_commits'])} CI commit(s) of ours ("
               + ", ".join(f"`{s[:10]}`" for s, _, _ in ctx["ci_commits"]) + ")."]
     L += ["", "## Verified", ""] + [f"- {v}" for v in ctx["verified"] or ["(no pipeline state found -- say only what you checked)"]]
-    L += ["- Not verified by any automated check: gameplay by a person."]
+    L += ["- Not verified by any automated check: gameplay by a person"
+          + (" -- the manual tests below cover what the gates cannot reach." if ctx.get("manual") else ".")]
+    if ctx.get("manual"):
+        L += [""] + ctx["manual"].rstrip().splitlines()
     facts = " ".join(ctx["verified"])
     proof = []
     if "authors' own" in facts:
@@ -355,13 +375,13 @@ def render(ctx):
         proof.append("loads on a headless server with GameTests passing")
     if "Gate C" in facts:
         proof.append("starts a real client")
-    msg = (f"Hi -- I ported {ctx['modid']} to {ctx['target']} in a fork, keeping your layout and the smallest diff "
+    msg = (f"Hi -- I ported {ctx['name']} to {ctx['target']} in a fork, keeping your layout and the smallest diff "
            f"I could ({ctx['files']} files, +{ctx['ins']}/-{ctx['dels']}). The whole change is here: {ctx['compare']}\n\n"
            + (f"It {', '.join(proof[:-1]) + ' and ' + proof[-1] if len(proof) > 1 else proof[0]}. " if proof else "")
            + "If it's useful, I'm happy to open a PR or adjust anything to how you'd like it done.")
     L += ["", "## Draft message to the authors", "", msg, "",
           "## Draft PR description (only if they ask for a PR)", "",
-          f"Ports {ctx['modid']} to {ctx['target']}, keeping the existing layout and the smallest diff that works.", "",
+          f"Ports {ctx['name']} to {ctx['target']}, keeping the existing layout and the smallest diff that works.", "",
           "Checked:"] + [f"- {v}" for v in ctx["verified"]] + [
           "", "Not checked: gameplay by a person. The port's CI workflow is deliberately not included."]
     return "\n".join(L) + "\n"
@@ -370,8 +390,12 @@ def render(ctx):
 def self_check():
     import tempfile
     ok = True
+    ok &= display_name({"mod_name": "Some Mod"}, "a/repo", "me/repo", "sm") == "Some Mod"
+    ok &= display_name({}, "a/SomeRepo", "me/somerepo", "sm") == "SomeRepo"          # --modid never wins
     ok &= is_port_tag("m-2.2.1-mc1.21.1-r2", "m", "1.21.1") and is_port_tag("m-2.2.1-mc1.21.1", "m", "1.21.1")
     ok &= not is_port_tag("m-2.2.1-mc1.21.10", "m", "1.21.1") and not is_port_tag("mx-1-mc1.21.1", "m", "1.21.1")
+    ok &= is_port_tag("m-2-mc1.21.1-release-r2", "m", "1.21.1", "-release") and not is_port_tag("m-2-mc1.21.1-r5", "m", "1.21.1", "-release")
+    ok &= not is_port_tag("m-2-mc1.21.1-release", "m", "1.21.1")      # a release-aligned jar never passes for the dev port
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@e"], ["config", "user.name", "t"]):
@@ -420,6 +444,8 @@ def main():
     ap.add_argument("--upstream", help="the authors' repository, owner/repo (default: the fork's GitHub parent)")
     ap.add_argument("--modid"); ap.add_argument("--work-dir"); ap.add_argument("--push", action="store_true")
     ap.add_argument("--trailer", action="append", default=[])
+    ap.add_argument("--release", help="the author's RELEASED commit: the offer then says how far the port's base is from it")
+    ap.add_argument("--published", help="or: the release's publish time (ISO); its commit is matched by time")
     ap.add_argument("--variant", metavar="SUBSTRING=WHY",
                     help="when the release has one jar per platform, the one to install and why (e.g. _mr=...)")
     a = ap.parse_args()
@@ -459,11 +485,12 @@ def main():
         if props.get("neo_version") and props.get("minecraft_version") else branch
     upstream = a.upstream or parent_of(fork)
     # the name the AUTHORS know it by: their mod_name, else their repository's name -- never a local folder name
-    modid = a.modid or props.get("mod_name") or (upstream or fork).split("/")[1]
+    modid = a.modid or props.get("mod_id") or (upstream or fork).split("/")[1]
+    name = display_name(props, upstream, fork, modid)
     up_default = "main"
     if upstream:
         up_default = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False).split("/", 1)[-1] or "main"
-    ctx = {"modid": modid, "target": target, "files": files, "ins": ins, "dels": dels, "tracked": tracked,
+    ctx = {"modid": modid, "name": name, "target": target, "files": files, "ins": ins, "dels": dels, "tracked": tracked,
            "hunks": hunk_sizes(git(repo, "diff", "-U0", f"{base_sha}..{tip}")), "commits": port, "ci_commits": ci,
            "verified": verified(state) + (ci_verified(ci_run(fork, branch)) if ci else []),
            "compare": f"https://github.com/{fork}/compare/{base_sha[:12]}...{offer}",
@@ -482,8 +509,27 @@ def main():
     ctx["install"], man = install_section(repo, tip, branch, fork, props.get("mod_id") or modid,
                                      props.get("minecraft_version", ""), props.get("neo_version", ""),
                                      tuple(a.variant.split("=", 1)) if a.variant else None, deps)
+    if a.release or a.published:     # how far the port's base is from what players run (tools/port-provenance.py)
+        sp = __import__("importlib.util").util.spec_from_file_location("port_prov", pathlib.Path(__file__).parent / "port-provenance.py")
+        pv = __import__("importlib.util").util.module_from_spec(sp); sp.loader.exec_module(pv)
+        start = git(repo, "merge-base", base, branch)
+        rel = a.release or pv.release_at(repo, base, a.published)
+        ctx["provenance"] = pv.markdown(pv.report(repo, start, rel, "the given commit" if a.release else f"publish time {a.published}"))
+    try:     # the top-10 manual tests (tools/manual-tests.py), read off this checkout of the port
+        sp = __import__("importlib.util").util.spec_from_file_location("manual_tests", pathlib.Path(__file__).parent / "manual-tests.py")
+        mt = __import__("importlib.util").util.module_from_spec(sp); sp.loader.exec_module(mt)
+        with tempfile.TemporaryDirectory() as snap:      # the OFFERED commit's tree, whatever is checked out
+            paths = [x for x in ("src", "gradle.properties") if git(repo, "ls-tree", tip, x, check=False)]
+            arc = subprocess.run(["git", "-C", str(repo), "archive", tip, *paths], capture_output=True, check=True)
+            subprocess.run(["tar", "-x", "-C", snap], input=arc.stdout, check=True)
+            mmod, chosen, total = mt.tests(snap, 10)
+        ctx["manual"] = mt.markdown(mmod, chosen, total) if chosen else ""
+    except Exception as e:     # never lose the offer over the test list; say so instead
+        ctx["manual"] = f"## Manual tests\n\n(manual-tests.py failed: {e}; run it by hand)\n"
+        chosen = []
     work.mkdir(parents=True, exist_ok=True)
     (work / "OFFER.md").write_text(render(ctx), encoding="utf-8")
+    (work / "manual-tests.json").write_text(json.dumps(chosen, indent=1) + "\n", encoding="utf-8")
     man = hash_files(man)
     mtext = json.dumps(man, indent=2) + "\n"
     (work / "port-install.json").write_text(mtext, encoding="utf-8")

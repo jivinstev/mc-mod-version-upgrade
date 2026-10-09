@@ -34,7 +34,8 @@ Stages, in order (each records its dollars and seconds in the state file; --from
               forge-shapes, convert-simplechannel, then compile + fix-holders until it converges.
               26.2: class-move and colour maps from the two real classpaths, the composed rename table applied in
               place, data-format transforms, the access transformer, member renames where javac names the owner,
-              then the 26.x converters (GUI hooks, ValueInput/Output, render types, core shaders, entity render
+              then the 26.x converters (GUI hooks, ValueInput/Output, attachment serializers, changed hook signatures, tool tiers and
+              armour, render types, core shaders, entity render
               state, GeckoLib 5); a compile count after each step.
   burndown    tools/file-loop.py on what is left.
   gates       Gate A (mixin-config integrity, asserting tests actually ran) and Gate B (tools/gate-loop.py,
@@ -62,6 +63,7 @@ def _load_tool(name, file):
 srcsets = _load_tool("srcsets", "srcsets.py")
 targets = _load_tool("targets", "targets.py")
 _pg = _load_tool("port_gates", "port_gates.py")   # the gate harness, shared with tools/ci-gates.py
+mh = _load_tool("mechanical_hop", "mechanical-hop.py")   # members + converters, shared with tools/port.py
 Fail, sh, gradle, tgt, author_unlisted_mixins, harness, read_patch, apply_patch, harness_registration, \
     gate_env, gate_a = (_pg.Fail, _pg.sh, _pg.gradle, _pg.tgt, _pg.author_unlisted_mixins, _pg.harness,
                         _pg.read_patch, _pg.apply_patch, _pg.harness_registration, _pg.gate_env, _pg.gate_a)
@@ -477,21 +479,11 @@ def client_side_mixins(repo):
 
 
 def at_loop(c):
-    """Override widenings appear one subclass level per compile: compile, widen what the log names, repeat."""
-    repo = c["repo"]
-    for k in range(4):                         # override widenings appear one subclass level per compile
-        n, _ = compile_count(repo, c["dir"] / f"at-{k}.log")
-        if n is not None:
-            return n
-        log = (c["dir"] / f"at-{k}.log").read_text(encoding="utf-8", errors="replace")
-        unresolved = sorted(set(re.findall(r"Could not resolve ([\w.\-]+:[\w.\-]+:[^\s.]+[^\s]*)\.", log)))
-        if unresolved:                            # a dependency, not Minecraft: say so instead of blaming the AT
-            raise Fail("dependencies do not resolve: " + ", ".join(unresolved[:6]) + " -- wrong coordinates for the "
-                       "target, or a maven this machine cannot reach (tools/local-maven.py); see " + f"at-{k}.log")
-        out = tool("fix-access-transformer.py", "--work", repo, "--overrides-from", c["dir"] / f"at-{k}.log")
-        if " 0 override" in out:
-            raise Fail("Minecraft's recompile fails and no access-transformer override explains it (see at-*.log)")
-    return None
+    """The shared access-transformer loop (tools/mechanical-hop.py), with this route's compile."""
+    try:
+        return mh.at_loop(c["repo"], lambda log: compile_count(c["repo"], log), c["dir"], run=run_tool)
+    except RuntimeError as e:
+        raise Fail(str(e))
 
 
 def mechanical_forge(c):
@@ -509,20 +501,13 @@ def mechanical_forge(c):
         tool("srg-remap/mc121_codemod.py", d)
     rep["pack"] = [l for d in dirs for l in tool("apply-recipes.py", "--src", d, "--recipes", pack).splitlines()
                    if l.startswith("auto")]
-    rep["at"] = tool("fix-access-transformer.py", "--work", repo, *(["--srg-map", srg] if srg.exists() else []))
-    at_loop(c)
-    rep["shapes"] = [tool("forge-shapes.py", "--src", d, "--modid", a.modid, "--sites", 0) for d in dirs]
-    rep["net"] = [tool("convert-simplechannel.py", "--src", d, "--modid", a.modid) for d in dirs]
-    counts = []
-    for r in range(4):
-        n, line = compile_count(repo, c["dir"] / f"mech-{r}.log")
-        if n is None:
-            raise Fail(f"compile did not run: {line}")
-        counts.append(n)
-        outs = [tool("fix-holders.py", "--src", d, "--log", c["dir"] / f"mech-{r}.log", "--sites", 0) for d in dirs]
-        if all(" 0 site" in o.splitlines()[0] for o in outs):
-            break
-    rep["errors"] = counts
+    # the access transformer, forge-shapes, convert-simplechannel, fix-holders: the stage the jar route runs too
+    try:
+        rep.update(mh.run_forge_stage(repo, dirs, a.modid, c["dir"], lambda log: compile_count(repo, log), run=run_tool,
+                                      srg_map=srg if srg.exists() else None,
+                                      say=lambda s: print(f"[port-upstream]   {s}", flush=True)))
+    except RuntimeError as e:
+        raise Fail(str(e))
     return rep
 
 
@@ -679,7 +664,7 @@ def mechanical_era(c):
     rep["renames"] = {"maps": how, "rows": rows, "files_changed": files, "rewrites": rewrites, "dead_rules": dead}
     rep["data"] = {"rewritten": len(changed), "refused": refused[:20], "other_mod": other[:20], "client_items": items,
                    "json_strict": headline(js, "fix-json-strict", "fix-json-strict")}
-    rep["at"] = run_tool("fix-access-transformer.py", "--work", repo, "--class-map", moves)[1]
+    rep["at"] = mh.era_access_transformer(repo, moves, run=run_tool)
     n = at_loop(c)          # the access transformer has to be valid before Minecraft recompiles at all
     if n is None:
         raise Fail("Minecraft's recompile never succeeded after the access-transformer passes (see at-*.log)")
@@ -689,78 +674,17 @@ def mechanical_era(c):
                   f"{len(refused)} refused, {items} client item definition(s)"})
     print(f"[port-upstream]   renames: {steps[-1]['summary']} -> {n} errors", flush=True)
 
-    members = ROOT / t.members_table
-
-    def member_loop(label):
-        fixed, n = 0, last["n"]
-        for r in range(6):
-            log = c["dir"] / f"era-{label}-{r}.log"
-            n, _ = compile_count(repo, log)
-            if n is None:
-                raise Fail(f"compile did not run during {label}")
-            if n == 0:
-                break
-            got = 0
-            for d in dirs:
-                _rc, o = run_tool("fix-missing-members.py", "--src", d, "--log", log, "--table", members)
-                got += sum(int(x) for x in re.findall(r"(\d+) site\(s\) rewritten", o))
-            fixed += got
-            if not got:
-                break
-        last["n"] = n
-        steps.append({"step": label, "errors": n, "summary": f"{fixed} member site(s) renamed where javac named the owner"})
-        print(f"[port-upstream]   {label}: {steps[-1]['summary']} -> {n} errors", flush=True)
-
-    member_loop("members")
-
-    fp = [tree_fingerprint(repo)]
-    libs = a.lib_tree or []
-    ctx = [x for lib in libs for x in ("--context", lib)]
-    idx = [x for lib in libs for x in ("--index", lib)]
-    text = "\n".join(f.read_text(encoding="utf-8", errors="replace") for d in dirs for f in d.rglob("*.java"))
-    plan = [("gui-hooks", "convert-gui-hooks.py", lambda d, i: ["--src", d]),
-            ("valueio", "convert-valueio.py", lambda d, i: ["--src", d])]
-    advisories = []
-    if "CompositeState" in text:
-        custom = re.search(r"new\s+(?:RenderStateShard\.)?ShaderStateShard\s*\(", text)
-        if custom and not (a.render_state_type and a.render_state_factory):
-            advisories.append("custom ShaderStateShard in the render types: convert-rendertypes needs the port's own "
-                              "state type and factory (--render-state-type / --render-state-factory); not run")
-        else:
-            st, sf = (a.render_state_type, a.render_state_factory) if custom else ("unused.State", "unused.state")
-            plan.append(("rendertypes", "convert-rendertypes.py", lambda d, i: ["--src", d, "--state-type", st, "--state-factory", sf]))
-    sh_dir = repo / f"src/main/resources/assets/{a.modid}/shaders"
-    if sh_dir.is_dir() and any(sh_dir.glob("core/*.json")):
-        if a.shader_block:
-            plan.append(("core-shaders", "convert-core-shaders.py",
-                         lambda d, i: ["--shaders", sh_dir, "--ns", a.modid, "--block", a.shader_block] if i == 0 else None))
-        else:
-            advisories.append("core shader programs present: pass --shader-block <UniformBlockName> to run convert-core-shaders "
-                              "(26.x reads no program JSON and binds uniform blocks; the Java that fills the block is the port's to write)")
-    plan.append(("entity-renderstate", "convert-entity-renderstate.py", lambda d, i: ["--src", d, *ctx]))
-    if uses_geckolib(repo):
-        assets = repo / "src/main/resources/assets"
-        plan.append(("geckolib", "convert-geckolib.py",
-                     lambda d, i: ["--src", d, *(["--assets", assets] if i == 0 and assets.is_dir() else []), *idx]))
-    for label, script, args_for in plan:
-        outs = []
-        for i, d in enumerate(dirs):
-            args = args_for(d, i)
-            if args is None:
-                continue
-            rc, o = run_tool(script, *args)
-            if rc not in (0, 1):
-                raise Fail(f"{script} failed: {o[-600:]}")
-            outs.append(o)
-        joined = "\n".join(outs)
-        heads = list(dict.fromkeys(headline(o, "convert-", script[:-3]) for o in outs))
-        (c["dir"] / f"era-{label}.out").write_text(joined + "\n", encoding="utf-8")
-        now = tree_fingerprint(repo)
-        changed_tree, fp[0] = now != fp[0], now
-        nref = sum(1 for l in joined.splitlines() if "REFUSED" in l and not re.search(r"REFUSED \d+ site", l))
-        record(label, " | ".join(heads) + (f"; {nref} REFUSED (see era-{label}.out)" if nref else ""),
-               count=changed_tree)
-    member_loop("members-after-converters")
+    # members -> every converter -> members: the stage the jar route (tools/port.py) runs too
+    try:
+        more, advisories = mh.run_stage(repo, dirs, ROOT / t.members_table, c["dir"], a.modid,
+                                        lambda log: compile_count(repo, log), last["n"],
+                                        say=lambda s: print(f"[port-upstream]   {s}", flush=True),
+                                        run=run_tool, fp=tree_fingerprint,
+                                        render_state_type=a.render_state_type, render_state_factory=a.render_state_factory,
+                                        shader_block=a.shader_block, lib_trees=a.lib_tree or [])
+    except RuntimeError as e:
+        raise Fail(str(e))
+    steps.extend(more)
     rep["advisories"] = advisories + era_advisories(c)
     rep["errors"] = [s["errors"] for s in steps if s["errors"] is not None]
     return rep
@@ -1236,7 +1160,7 @@ def self_check_targets():
             out = st_metadata({"repo": r, "args": types.SimpleNamespace(modid="m"), "target": t2})
         toml = (res / "META-INF/neoforge.mods.toml").read_text(encoding="utf-8")
         pack = json.loads((res / "pack.mcmeta").read_text(encoding="utf-8"))["pack"]
-        chk("26.2 metadata", 'versionRange="[26.2,)"' in toml and 'versionRange="[26.2,26.3)"' in toml
+        chk("26.2 metadata", 'versionRange="[26.2,26.3)"' in toml and 'versionRange="[26.2,26.3)"' in toml
             and '[[mixins]]\nconfig = "m.mixins.json"' in toml and pack["min_format"] and "pack_format" not in pack
             and out["dependency_ranges_to_review"] == ["lib [4.7,)"] and out["pack_formats"]["data"][0] == 107)
         # a second run changes nothing

@@ -84,6 +84,25 @@ def loaded_mods(log):
     return set(re.findall(r"\(([a-z0-9_.-]+)\)\s*$", m.group(1), re.M)) if m else set()
 
 
+# What the game prints when it REJECTS a data file and carries on without it. Each is an ERROR or WARN
+# line and then silence: the recipe, advancement, tag or loot table simply does not exist, and every
+# GameTest still passes. Caught live: 38 advancements and 62 smithing recipes of one port, after green CI.
+DATA_REJECTED = re.compile(r"Couldn't parse|Parsing error loading|Couldn't load tag|missing following references|"
+                           r"No key \w+ in MapLike|Not a JSON object|Failed to parse|Unknown registry key|"
+                           r"MalformedJsonException|Failed to load built-in")
+
+
+def data_rejections(log, modid):
+    """Log lines where the game rejected one of THIS mod's data files: the line, or the one after it (where a
+    mod's own loader logs the cause), must name the mod's namespace. Other mods' noise is not this port's."""
+    lines, out = log.splitlines(), []
+    for i, l in enumerate(lines):
+        near = [l] + [x for x in lines[i + 1:i + 2] if not x.startswith("[")]   # a continuation, not a new log line
+        if DATA_REJECTED.search(l) and any(f"{modid}:" in x or f"/{modid}/" in x for x in near):
+            out.append(l.strip()[:240])
+    return list(dict.fromkeys(out))
+
+
 def green_detail(text):
     """What a green gate log proves, in one line: the GameTest count, or the client's PASS line and spawns."""
     m = re.search(r"All (\d+) required tests passed", text) or re.search(r"BOOT_TEST: (PASS[^\n]*)", text)
@@ -117,6 +136,11 @@ def self_check():
         ok &= ex == ["g:opt", "g:spark"]               # optional + dev-only out; required + its own requirement in
     ok &= loaded_mods("x\n     Mod List:\n\t\tName Version (Mod Id)\n\n\t\tCurios 9 (curios)\n\t\tMe 1 (me)\n[10:00] next") \
         == {"curios", "me"}
+    rej = ("[x] ERROR Couldn't parse data file 'm:adv/a' from 'mod/m': No key id in MapLike[{\"item\":\"m:i\"}]\n"
+           "[x] ERROR [m] Failed to load built-in recipe: smithing/b.json\n"
+           "java.lang.IllegalArgumentException: Invalid recipe m:b: No key id in MapLike\n"
+           "[x] ERROR Couldn't parse data file 'other:x': No key id\n[x] INFO loaded m:fine")
+    ok &= len(data_rejections(rej, "m")) == 3 and data_rejections(rej, "zz") == []
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -193,6 +217,13 @@ def main():
                "1.21-clean" if r.returncode == 0 else
                "; ".join(l for l in lines if l.startswith(("✗", "REFUSED")))[:300] or lines[-1][:300])
 
+    if ok:     # static: a payload codec that rejects every send (client disconnect, no server-side gate sees it)
+        r = subprocess.run([sys.executable, str(ROOT / "tools/audit-unit-codecs.py"), str(repo / "src/main/java")],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        lines = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+        record("Payloads -- every StreamCodec.unit payload has equal instances", r.returncode == 0,
+               (lines[0] if r.returncode else lines[-1] if lines else "no output")[:300])
+
     if ok and a.env == "minimal" and ex:
         # Before booting anything: does code the minimal run will load need a mod it leaves out?
         jars = [path for coord, path in arts if coord in ex]
@@ -232,6 +263,10 @@ def main():
             if a.env == "minimal" and excluded and not loaded_mods(text):
                 record(label, False, "minimal environment unverified: no Mod List in the log")
                 continue
+            if not extra:
+                bad = data_rejections(text, a.modid)
+                record("Data loads -- the server rejected none of the mod's data files", not bad,
+                       f"{len(bad)} rejected, e.g. {bad[0]}" if bad else "no rejection logged")
         record(label, r.returncode == 0, detail)
 
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,

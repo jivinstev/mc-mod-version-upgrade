@@ -24,3 +24,4 @@ tools/scaffold-gatec.py
 tools/srcsets.py
 tools/targets.py
 tools/fix-datapack-layout.py
+tools/audit-unit-codecs.py

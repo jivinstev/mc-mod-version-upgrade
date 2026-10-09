@@ -79,6 +79,23 @@ jobs:
         run: git show "origin/${{ github.base_ref }}:docs/catalog-census.tsv" > docs/catalog-census.tsv
       - run: python3 tools/check-catalog-fidelity.py
 
+  readme-skills:
+    name: the README still describes the skills
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # On a PR, a branch that changes a skill (or adds a script a skill names) must change README.md too,
+      # or say why not in a `README-unchanged:` commit line. On a push, the always-on checks only.
+      - if: github.event_name == 'pull_request'
+        run: python3 tools/check-readme.py --base "origin/${{ github.base_ref }}"
+      - if: github.event_name != 'pull_request'
+        run: python3 tools/check-readme.py
+
   vendored-licence:
     name: vendored files match the licence manifest
     runs-on: ubuntu-latest

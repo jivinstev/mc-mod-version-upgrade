@@ -1007,4 +1007,18 @@ re:(@EventBusSubscriber\((?:[^()]|\([^()]*\))*?),\s*bus\s*=\s*(?:[\w.]+\.)?Bus\.
 re:(@EventBusSubscriber\(\s*)bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+\s*,\s*	\1
 re:@EventBusSubscriber\(\s*bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+\s*\)	@EventBusSubscriber
 
+# --- Removed 1.21.1 helpers, found by the zero-model 26.2 baselines of four Forge-origin ports -------------
+# ResourceKey::location as a METHOD REFERENCE: the `.location()` row above only matches a call.
+re:\bResourceKey::location\b	ResourceKey::identifier
+# FastColor.ARGB32 -> ARGB: color(a, r, g, b), colorFromFloat(a, r, g, b), alpha/red/green/blue keep their
+# argument order and packing (both bodies read; ABGR32 is NOT covered and stays an error).
+re:\bFastColor\.ARGB32\.	ARGB.
+net.minecraft.util.FastColor	net.minecraft.util.ARGB
+# LazyLoadedValue was removed; Guava's memoizing supplier is the same contract (compute once, on first get()).
+re:\bnew LazyLoadedValue<[^>]*>\(	com.google.common.base.Suppliers.memoize(
+net.minecraft.util.LazyLoadedValue	java.util.function.Supplier
+LazyLoadedValue	Supplier
+# Ingredient.of(ItemStack) is gone; of(ItemLike) takes the item the stack wrapped (one level of call nesting).
+re:\bIngredient\.of\(\s*new ItemStack\(((?:[^()]|\([^()]*\))*)\)\s*\)	Ingredient.of(\1)
+
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----
