@@ -398,22 +398,22 @@ def self_check():
             (src / rel).parent.mkdir(parents=True, exist_ok=True)
             (src / rel).write_text(body, encoding="utf-8")
         convert(src, "x")
-        reg = (src / "a/Reg.java").read_text()
+        reg = (src / "a/Reg.java").read_text(encoding="utf-8")
         ok &= 'event.addListener(Identifier.fromNamespaceAndPath("x", "configs"), CONFIGS);' in reg
         ok &= 'event.addListener(Identifier.fromNamespaceAndPath("x", "gear_config_reload_listener"), new GearConfigReloadListener());' in reg
         ok &= "other.addListener(CONFIGS);" in reg          # not the event: untouched
         ok &= 'fromNamespaceAndPath("x", "configs_2"), Holder.CONFIGS' in reg   # unique across the tree
         ok &= "import net.minecraft.resources.Identifier;" in reg
-        data = (src / "a/Data.java").read_text()
+        data = (src / "a/Data.java").read_text(encoding="utf-8")
         ok &= "extends SimpleJsonResourceReloadListener<JsonElement>" in data
         ok &= "super(ExtraCodecs.JSON, FileToIdConverter.json(folder));" in data
-        el = (src / "a/Elite.java").read_text()
+        el = (src / "a/Elite.java").read_text(encoding="utf-8")
         ok &= "import a.compat.Weight;" in el and "import a.compat.WeightedEntry;" in el
         ok &= "getRandomItem(r, l, e -> e.getWeight().asInt())" in el and "getTotalWeight(l, e -> e.getWeight().asInt())" in el
         ok &= (src / "a/compat/Weight.java").exists() and (src / "a/compat/WeightedEntry.java").exists()
-        snap = {p: p.read_text() for p in src.rglob("*.java")}
+        snap = {p: p.read_text(encoding="utf-8") for p in src.rglob("*.java")}
         convert(src, "x")
-        ok &= snap == {p: p.read_text() for p in src.rglob("*.java")}     # idempotent
+        ok &= snap == {p: p.read_text(encoding="utf-8") for p in src.rglob("*.java")}     # idempotent
     print("self-check:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

@@ -429,23 +429,23 @@ def self_check():
             (src / rel).parent.mkdir(parents=True, exist_ok=True)
             (src / rel).write_text(body, encoding="utf-8")
         convert(src, "x")
-        s = (src / "a/Snow.java").read_text()
+        s = (src / "a/Snow.java").read_text(encoding="utf-8")
         ok &= "import a.compat.TextureSheetParticle;" in s and "getRenderType" not in s
         ok &= "return SingleQuadParticle.Layer.TRANSLUCENT;" in s and "int getLightCoords(float pt)" in s
         ok &= "double dz, net.minecraft.util.RandomSource portedRandom)" in s
-        g = (src / "a/Gear.java").read_text()
+        g = (src / "a/Gear.java").read_text(encoding="utf-8")
         ok &= "implements a.compat.ClientExtensionHooks.ForItem" in g and "super.initializeClient" not in g and "@Override" not in g
         ok &= "consumer.accept(new IClientItemExtensions() {});" in g
-        c = (src / "a/Child.java").read_text()
+        c = (src / "a/Child.java").read_text(encoding="utf-8")
         ok &= "super.initializeClient(consumer);" in c and "@Override" in c      # its superclass is the mod's own
         ok &= "implements a.compat.ClientExtensionHooks.ForItem, Comparable<Child>" in c
-        p = (src / "a/Props.java").read_text()
+        p = (src / "a/Props.java").read_text(encoding="utf-8")
         ok &= "import a.compat.ItemProperties;" in p and "import a.compat.ItemProperties.ItemPropertyFunction;" in p
         for n in ("TextureSheetParticle", "ClientExtensionHooks", "ItemProperties"):
             ok &= (src / f"a/compat/{n}.java").exists()
-        snap = {p: p.read_text() for p in src.rglob("*.java")}
+        snap = {p: p.read_text(encoding="utf-8") for p in src.rglob("*.java")}
         convert(src, "x")
-        ok &= snap == {p: p.read_text() for p in src.rglob("*.java")}
+        ok &= snap == {p: p.read_text(encoding="utf-8") for p in src.rglob("*.java")}
     print("self-check:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

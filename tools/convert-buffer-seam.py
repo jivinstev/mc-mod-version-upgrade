@@ -433,21 +433,21 @@ def self_check():
             (src / rel).parent.mkdir(parents=True, exist_ok=True)
             (src / rel).write_text(body, encoding="utf-8")
         convert(src, "x")
-        t = (src / "a/Layer.java").read_text()
+        t = (src / "a/Layer.java").read_text(encoding="utf-8")
         ok &= "import a.compat.MultiBufferSource;" in t and "import net.minecraft.client.renderer.MultiBufferSource;" not in t
         ok &= "static void draw(PoseStack pose, MultiBufferSource buffer)" in t      # the type keeps its name
         ok &= "draw(null, Buffers.current());" in t and "import a.compat.Buffers;" in t
         ok &= "MultiBufferSource.immediate(new ByteBufferBuilder(4096));" in t     # a static on the interface
         ok &= "MultiBufferSource forced = ignored -> delegate.getBuffer(RT);" in t  # still a functional interface
         ok &= '"MultiBufferSource stays in a string"' in t
-        seam = (src / "a/compat/Buffers.java").read_text()
+        seam = (src / "a/compat/Buffers.java").read_text(encoding="utf-8")
         ok &= "implements MultiBufferSource.BufferSource" in seam and "pushCollector" in seam
         ok &= seam.count("@Override") == 11 and 'getLogger("x/Buffers")' in seam
-        iface = (src / "a/compat/MultiBufferSource.java").read_text()
+        iface = (src / "a/compat/MultiBufferSource.java").read_text(encoding="utf-8")
         ok &= "@FunctionalInterface" in iface and "static BufferSource immediate(Object" in iface
-        snap = {p: p.read_text() for p in src.rglob("*.java")}
+        snap = {p: p.read_text(encoding="utf-8") for p in src.rglob("*.java")}
         convert(src, "x")
-        ok &= snap == {p: p.read_text() for p in src.rglob("*.java")}
+        ok &= snap == {p: p.read_text(encoding="utf-8") for p in src.rglob("*.java")}
     print("self-check:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
