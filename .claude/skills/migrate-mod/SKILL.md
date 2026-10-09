@@ -24,7 +24,9 @@ exists, or a required dependency has none), route the port hop by hop (`tools/ro
 1.20.1 → NeoForge 1.21.1 → 26.2, each hop finished — compile + Gate B — before the next), set up the
 workspace (scaffold, decompile, SRG/intermediary remap, codemods, metadata, datapack layout, the
 hoisted-config fix, a baseline GameTest), then per hop: its recipe pack (or `tools/era-hop.py` for
-1.21.1 → 26.x), the cheap compile loop, Gate B; the first hop writes the behaviour tests and the client
+1.21.1 → 26.x), the hop's mechanical stage (`tools/mechanical-hop.py`, the same one a fork port runs:
+for a Forge hop the access transformer, Forge shapes, SimpleChannel → payloads and Holder fixes; for an era
+hop the member renames and every converter), the cheap compile loop, Gate B; the first hop writes the behaviour tests and the client
 harness so later hops port them; the last hop runs Gate C and the visual review.
 
 **Your job while it runs is small**: start it, read its last lines and `mods/<modid>/port-report.json`,

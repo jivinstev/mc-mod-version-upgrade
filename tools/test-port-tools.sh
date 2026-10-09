@@ -291,6 +291,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "audit-unit-codecs.py|audit-unit-codecs: a field-less payload class behind StreamCodec.unit is caught; a record is not" \
             "convert-override-signatures.py|convert-override-signatures: a hook whose 26.2 signature changed keeps its body in a private 1.21.1-shaped copy" \
             "port-derive.py|port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handlers dropped" \
+            "mechanical-hop.py|mechanical-hop: members, then every converter in order, then members; a converter that changed nothing is not recounted; one needing the port's input is an advisory" \
             "manual-tests.py|manual-tests: the 10 manual tests no gate reaches, one per kind first (music, client packets, bosses, keys...), with steps naming real ids" \
             "offer-page.py|offer-page: the handoff page shows each fork's install, distance from release, checks and its manual tests" \
             "port-provenance.py|port-provenance: the release commit is matched by publish time and the unreleased commits on top are counted and listed" \
@@ -315,6 +316,34 @@ grep -q 'self-check: OK' <<<"$out" && ok "visual review: black, flat and missing
 out="$(python3 tools/behaviour-tests.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "behaviour tests: failures read from the GameTest log, a run with no summary is not a pass" \
   || bad "behaviour-tests self-check: $out"
+
+echo "both porting routes run the same deterministic era stage"
+out="$(python3 - <<'PY' 2>&1
+import pathlib, re, sys
+t = pathlib.Path("tools")
+mh = (t / "mechanical-hop.py").read_text(encoding="utf-8")
+listed = set(re.findall(r'"(convert-[\w-]+\.py)"', mh.split("CONVERTERS = [", 1)[1].split("]", 1)[0]))
+on_disk = {p.name for p in t.glob("convert-*.py")} - {"convert-simplechannel.py"}   # a 1.21.1 converter, not an era one
+problems = []
+if on_disk - listed:
+    problems.append(f"era converters not in CONVERTERS (so neither route runs them): {sorted(on_disk - listed)}")
+shared = on_disk | {"convert-simplechannel.py", "forge-shapes.py", "fix-holders.py", "fix-access-transformer.py",
+                    "fix-missing-members.py"}
+needs = {"port-upstream.py": ["mh.run_stage(", "mh.run_forge_stage(", "mh.at_loop(", "mh.era_access_transformer("],
+         "port.py": ['"--stage", "forge"', '"--stage", "era"']}
+for route, need in needs.items():
+    src = (t / route).read_text(encoding="utf-8")
+    for n in need:
+        if n not in src:
+            problems.append(f"{route} no longer goes through the shared stage ({n})")
+    stray = sorted(set(re.findall(r"[\w-]+\.py", src)) & shared)
+    if stray:
+        problems.append(f"{route} runs a stage tool itself (keep it in mechanical-hop.py only): {stray}")
+print("\n".join(problems) or "parity OK")
+PY
+)"
+grep -q '^parity OK$' <<<"$out" && ok "port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs a stage tool itself; every era converter is listed" \
+  || bad "route parity: $out"
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"

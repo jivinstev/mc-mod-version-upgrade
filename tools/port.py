@@ -22,7 +22,8 @@ This is the deterministic part of a port, in a fixed order, so two runs do the s
   hops      each hop is FINISHED before the next starts (tools/run-port.py: recipes -> compile loop ->
             Gate B): a hop's pack was measured on code that compiles at that hop's start. The first hop
             also writes the behaviour tests and the client harness, so later hops port them with the mod.
-            An era hop runs tools/era-hop.py first. The last hop runs Gate C and the visual review.
+            An era hop runs tools/era-hop.py first, then tools/mechanical-hop.py (member renames and every
+            converter, the stage the fork route runs too). The last hop runs Gate C and the visual review.
   report    port-report.json: every hop's cost and result, and the total.
 
 Every stage records itself in mods/<modid>/port-state.json, so a rerun skips what is done. When a stage
@@ -382,6 +383,18 @@ def run_hops(a, T, hops, work, state, meta):
                 if r.returncode != 0:
                     return stop(24, f"the era step failed (exit {r.returncode}); see its output above", ["fix and rerun"], state, work)
                 state["done"].append(f"{key}-era"); save_state(work, state)
+            if f"{key}-mechanical" not in state["done"]:
+                # members -> every converter -> members (tools/mechanical-hop.py): the same deterministic stage the
+                # fork route runs, so a converter reaches both routes and no worker is paid for what a script does
+                say(f"hop {i}: mechanical stage for {h['to_mc']} (member renames, converters)")
+                r = subprocess.run([sys.executable, str(ROOT / "tools/mechanical-hop.py"), "--work", str(work),
+                                    "--stage", "era", "--target", h["to_mc"], "--json", str(work / f"mechanical-{key}.json")])
+                if r.returncode != 0:
+                    return stop(25, f"the mechanical stage failed (exit {r.returncode}); see its output above",
+                                ["fix and rerun"], state, work)
+                state["done"].append(f"{key}-mechanical"); save_state(work, state)
+            if a.stop_after == f"{key}-mechanical":   # measuring: every deterministic rewrite of the hop, no worker
+                say(f"stopped after {key}'s mechanical stage (--stop-after)"); return 0
             pack = None
         if pack and f"{key}-recipes" not in state["done"]:
             # applied here rather than by run-port, so the tree is snapshotted AFTER every deterministic rewrite:
@@ -390,6 +403,21 @@ def run_hops(a, T, hops, work, state, meta):
                             "--recipes", str(ROOT / pack), "--json", str(work / f"recipes-report-{key}.json")],
                            stdout=open(work / f"recipes-report-{key}.txt", "w", encoding="utf-8"), stderr=subprocess.STDOUT)
             state["done"].append(f"{key}-recipes"); save_state(work, state)
+        if h.get("from_loader") == "forge" and h["to_loader"] == "neoforge" and f"{key}-mechanical" not in state["done"]:
+            # the access transformer, forge-shapes, convert-simplechannel, fix-holders (tools/mechanical-hop.py):
+            # the same deterministic tail the fork route runs on a Forge hop
+            say(f"hop {i}: mechanical stage for {h['to_mc']} (access transformer, Forge shapes, networking, holders)")
+            ws = pathlib.Path(os.environ.get("MIGRATE_WORKSPACE") or pathlib.Path.home() / ".mc-mod-upgrade/work")
+            srg = next(iter(sorted(ws.glob(f"srg2official-{h['from_mc']}.json"))), None)   # setup built it for this hop
+            r = subprocess.run([sys.executable, str(ROOT / "tools/mechanical-hop.py"), "--work", str(work), "--stage", "forge",
+                                *(["--srg-map", str(srg)] if srg else []),
+                                "--json", str(work / f"mechanical-{key}.json")])
+            if r.returncode != 0:
+                return stop(25, f"the mechanical stage failed (exit {r.returncode}); see its output above",
+                            ["fix and rerun"], state, work)
+            state["done"].append(f"{key}-mechanical"); save_state(work, state)
+            if a.stop_after == f"{key}-mechanical":
+                say(f"stopped after {key}'s mechanical stage (--stop-after)"); return 0
         pack = None
         snap = work / "hop-start" / key
         if not snap.exists():
@@ -506,7 +534,7 @@ def main():
     ap.add_argument("--no-behaviour", action="store_true"); ap.add_argument("--no-visual-review", action="store_true")
     ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet")
     ap.add_argument("--plan-only", action="store_true", help="resolve, check and print the route; change nothing")
-    ap.add_argument("--stop-after", help="stop after this stage: setup, hop1, hop1-recipes, ... (for testing a stage)")
+    ap.add_argument("--stop-after", help="stop after this stage: setup, hop1, hop1-recipes, hop2-mechanical, ... (for testing a stage)")
     ap.add_argument("--from-port", metavar="WORKSPACE",
                     help="continue an EXISTING port (a finished single-target NeoForge workspace, e.g. a 1.21.1 port) "
                          "to --to, instead of starting from a jar")
