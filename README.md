@@ -44,6 +44,16 @@ tree. Then:
 - **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes.
 - **An offer for the authors**: a compare link showing just the port (without our CI), the size and shape of
   the diff, what was verified, and draft words. Nothing is sent: contacting the authors is your call.
+- **The ten manual tests that matter most**, in every offer: what no automated gate reaches (music, keys,
+  client-to-server packets, bosses, screens, raids, worn items, custom recipes, structures, natural spawns),
+  one kind each first, with steps that name real `/summon`, `/give` and `/locate` ids and what to do if one
+  fails. A handoff page gathers every fork's install steps, checks and tests in one place.
+- **How far the port is from what players run.** A fork is often cut from the authors' newest code, not their
+  release. The offer says how many unreleased commits it sits on (the release is matched by its publish time on
+  every registry the mod is on). When the gap is large, ship two branches: `neoforge-<mc>`, the port of their
+  newest code, kept current by merging their new commits; and `neoforge-<mc>-release`, the port of their
+  release, derived from the first instead of ported again (measured: about 30% cheaper, and still needing
+  every gate), with its own tag series and install manifest.
 
 Forge 1.20.1 → NeoForge 1.21.1 is proven on three MIT-licensed forks. 26.2 is wired but not yet proven.
 
@@ -58,10 +68,17 @@ with no Claude session.
 | **install-mod**: install a mod and its dependencies from Modrinth or CurseForge | `> Install Sodium` or `/install-mod Sodium` | `python3 tools/mod-registry/modreg.py search --query "Sodium"`, then `versions`, `deps` and `download` (see [tools/mod-registry/README.md](tools/mod-registry/README.md)) |
 | **install-mod**: install fork ports from GitHub, with their dependencies and NeoForge | `> Install these mods from owner/RepoA owner/RepoB` or `/install-mod owner/RepoA owner/RepoB` | `python3 tools/install-port.py owner/RepoA owner/RepoB [--with-optional | --with-untested] [--dry-run] [--mods-dir DIR]`, then optionally `tools/boot-mods.sh DIR` to boot the folder headless first |
 | **migrate-mod**: port a mod from its jar | `> Migrate <mod name> to 26.2` or `/migrate-mod <mod name> to 26.2` | `python3 tools/port.py "<mod name or jar>" --to 26.2` (rerun to resume; `--from-port mods/<modid>` to continue a finished port) |
-| **port-fork**: port a mod in its own GitHub fork, with CI, releases and an offer | `> Port my fork <github url> to 1.21.1` or `/port-fork <github url>` | `python3 tools/port-upstream.py --repo DIR --modid ID` (the port), `tools/ci-gates.py` (gates as CI runs them, `--env full` or `minimal`), `tools/port-ci.py` (adds the CI), `tools/port-offer.py` (the offer and install manifest), `tools/port-fleet.py --fleet FILE <step>` (every fork at once) |
+| **port-fork**: port a mod in its own GitHub fork, with CI, releases and an offer | `> Port my fork <github url> to 1.21.1` or `/port-fork <github url>` | `python3 tools/port-upstream.py --repo DIR --modid ID` (the port), `tools/ci-gates.py` (gates as CI runs them, `--env full` or `minimal`), `tools/port-ci.py` (adds the CI; `--tag-suffix=-release` for a release branch), `tools/port-offer.py` (the offer, install manifest and manual tests; `--release` adds the distance from release), `tools/port-fleet.py --fleet FILE <step>` (every fork at once) |
+| **port-fork**: the handoff | `> Prepare the handoff for my forks` | `tools/manual-tests.py --repo DIR` (the ten manual tests), `tools/offer-page.py --mods FILE --out page.html` (one page for every fork) |
+| **port-fork**: the authors' release vs. their newest code | `> How far is my fork from the authors' release?` / `> Make a release branch for my fork` / `> Bring my fork up to date with the authors` | `tools/port-provenance.py --repo DIR --base REF --registry modrinth:SLUG --registry curseforge:ID --mc VER --loader forge` (the gap), `tools/port-derive.py` (a release branch; `--resolve` finishes it with a model, at a stop), `tools/port-sync.py --repo DIR --port BRANCH --upstream origin/BRANCH` (merge the authors' new commits) |
 | **review-contribution**: review a pull request to this repository | `> Review PR 42` or `/review-contribution 42` | `python3 tools/review-pr.py --base origin/main --head HEAD` (the mechanical checks; the judgement half is the skill) |
 
 Each script prints its options with `--help`. Most also have `--self-check`, which runs their own tests.
+
+The fork port also runs converters you don't call by hand: for a 26.2 hop, `port-upstream.py` applies rewrites for GUI hooks, entity save/load, data attachments, changed hook signatures, tool tiers
+and armour, render types and shaders, entity render state and GeckoLib before any worker sees an error. Two
+gates guard bug classes found in shipped ports: a field-less network payload behind `StreamCodec.unit`
+(`tools/audit-unit-codecs.py`), and data files the server silently rejected (a row of `tools/ci-gates.py`).
 
 ## Measured ports
 
