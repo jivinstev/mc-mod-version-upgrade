@@ -151,6 +151,13 @@ different things, and each step names a real `/summon`, `/give` or `/locate` id 
 registration code. Read it before handing over: where a step says "see what starts it in <file>", open that
 file and write the real trigger in. Ends with what to do when one fails (which logs, the prompt to paste).
 
+**A test that is only safe in some setting gets a warning, and the warning lives in the work folder.** The
+generator reads code; it cannot know that a debug mob wrecks the world it is summoned into (one did: summoning
+it switched off every other content mod and disconnected the player, by the author's design). Write
+`manual-tests.notes.json` next to `OFFER.md` -- `{"<test title>": {"warning": "...", "steps_before": ["..."]}}` --
+and `port-offer.py` merges it on every regeneration; the warning shows above the steps in `OFFER.md` and on the
+handoff page. Whenever a manual test turns out to be hazardous, add the note before the next handoff.
+
 **When the fork is not on the release** (see "Two branches" below), pass `--release <commit>` or
 `--published <ISO time>`: the offer then says how many unreleased commits the port sits on, how big they are
 and what they are (`tools/port-provenance.py`). An offer that hides that is offering code nobody has played.

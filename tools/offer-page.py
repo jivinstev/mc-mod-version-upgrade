@@ -67,7 +67,8 @@ def build(mods, out, offline=False):
         manual = "".join(
             f'<details class="test"><summary><span class="n">{n}</span> {html.escape(t["title"])} '
             f'<span class="cat">{html.escape(t["category"])}</span></summary>'
-            f'<p class="muted">{md_inline(t["why"])}</p><ol class="install">'
+            + (f'<p class="warn"><strong>Warning:</strong> {md_inline(t["warning"])}</p>' if t.get("warning") else "")
+            + f'<p class="muted">{md_inline(t["why"])}</p><ol class="install">'
             + "".join(f"<li>{md_inline(s)}</li>" for s in t["steps"])
             + f'</ol><p><strong>Expect:</strong> {md_inline(t["expect"])}</p><p class="muted"><code>{html.escape(t["where"])}</code></p></details>'
             for n, t in enumerate(tests, 1))
@@ -124,6 +125,7 @@ def build(mods, out, offline=False):
     .assets {{ margin:4px 0 0; padding-left:18px; font:13px var(--mono) }}
     .commits, .checks {{ margin:0; padding-left:18px }} .commits li, .checks li {{ overflow-wrap:anywhere }}
     code {{ font:12.5px var(--mono); background:var(--code); padding:1px 4px; border-radius:3px }} .muted {{ color:var(--muted); font-size:13px }}
+    .warn {{ border-left:3px solid var(--pend); padding:6px 10px; margin:8px 0; background:var(--code) }}
     .copy {{ border:1px solid var(--line); border-radius:6px; margin-top:10px; overflow:hidden }}
     .copy-head {{ display:flex; justify-content:space-between; align-items:center; padding:6px 10px; background:var(--code); font-size:13px }}
     .copy button {{ font:600 12px var(--sans); color:var(--fg); background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:3px 10px; cursor:pointer }}

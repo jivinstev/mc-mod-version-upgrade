@@ -523,6 +523,9 @@ def main():
             arc = subprocess.run(["git", "-C", str(repo), "archive", tip, *paths], capture_output=True, check=True)
             subprocess.run(["tar", "-x", "-C", snap], input=arc.stdout, check=True)
             mmod, chosen, total = mt.tests(snap, 10)
+        notes = work / "manual-tests.notes.json"      # hand-written per-port warnings, kept across regenerations
+        if notes.exists():
+            mt.apply_notes(chosen, json.loads(notes.read_text(encoding="utf-8")))
         ctx["manual"] = mt.markdown(mmod, chosen, total) if chosen else ""
     except Exception as e:     # never lose the offer over the test list; say so instead
         ctx["manual"] = f"## Manual tests\n\n(manual-tests.py failed: {e}; run it by hand)\n"
