@@ -348,22 +348,38 @@ def plan(repos, branch, with_optional, full, get=fetch, mc="1.21.1", lookup=None
     return files, notes, problems, neo, ports, missing
 
 
-def install(files, mods_dir, dry=False, get=fetch):
-    """-> (done lines, skipped lines, failure lines, status: modid -> installed|updated|present|would install|
-    would update|failed)."""
+REPLACED_DIR = "mods-replaced"     # next to mods/: where --replace moves the jar it swapped out
+
+
+def install(files, mods_dir, dry=False, get=fetch, replace=False):
+    """-> (done lines, skipped lines, failure lines, status: modid -> installed|updated|present|other build|
+    would install|would update|failed).
+
+    A mod already in the mods folder is left alone when it IS the tested file (its sha256 matches, whatever it
+    is called) or when the manifest has no sha256 to compare. Under the same file name with other contents it
+    is a re-release of the port and is updated. Under ANOTHER file name with other contents it is a different
+    build (an older port, the author's own jar): reported as "other build" and kept, unless replace, which
+    installs the tested file and moves the old one to ../mods-replaced/ (never deletes it)."""
     have = installed_modids(mods_dir)
     done, skipped, bad, status = [], [], [], {}
     for f in files:
         mid = f.get("modid") or f["name"]
         name = re.sub(r"[^\w.+-]", "_", f.get("name") or f"{mid}.jar")
-        update = False
+        update, old = False, None
         if mid in have:
-            same = have[mid] == name and f.get("sha256")
-            if not (same and hashlib.sha256((mods_dir / name).read_bytes()).hexdigest() != f["sha256"]):
+            held = mods_dir / have[mid]
+            tested = bool(f.get("sha256")) and hashlib.sha256(held.read_bytes()).hexdigest() == f["sha256"]
+            if not f.get("sha256") or tested:
                 skipped.append(f"{mid}: already in the mods folder ({have[mid]})")
                 status[mid] = "present"
                 continue
-            update = True                    # same file name, different contents: a re-release of the port
+            if have[mid] != name and not replace:
+                skipped.append(f"{mid}: a different build is in the mods folder ({have[mid]}), not the one CI "
+                               f"tested ({name}); kept -- --replace swaps it")
+                status[mid] = "other build"
+                continue
+            update = True                    # a re-release of the port, or --replace over another build
+            old = held if have[mid] != name else None
         if dry:
             done.append(f"{mid}: would {'update' if update else 'install'} {f['name']}")
             status[mid] = "would update" if update else "would install"
@@ -379,13 +395,21 @@ def install(files, mods_dir, dry=False, get=fetch):
         tmp = tempfile.NamedTemporaryFile(dir=mods_dir, suffix=".part", delete=False)
         tmp.write(data); tmp.close()
         os.replace(tmp.name, mods_dir / name)
-        done.append(f"{mid}: {'updated' if update else 'installed'} {name}"
+        moved = ""
+        if old is not None:                  # two jars with one modId stop the game loading: move the old one out
+            keep = mods_dir.parent / REPLACED_DIR
+            keep.mkdir(exist_ok=True)
+            os.replace(old, keep / old.name)
+            moved = f" (moved {old.name} to {REPLACED_DIR}/)"
+        done.append(f"{mid}: {'updated' if update else 'installed'} {name}{moved}"
                     + ("" if f.get("sha256") else " (no sha256 in the manifest)"))
         status[mid] = "updated" if update else "installed"
     return done, skipped, bad, status
 
 
-OK_WORDS = {"installed", "updated", "present", "would install", "would update"}
+OK_WORDS = {"installed", "updated", "present", "other build", "would install", "would update"}
+STATUS_TAG = {"updated": "updated", "would update": "would update", "present": "already installed",
+              "other build": "different build kept"}
 
 
 def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
@@ -395,7 +419,9 @@ def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
         f = by_id.get(m, {})
         bits = ([f"from {f['source'].capitalize()}, not tested by CI"] if f.get("source") else []) + \
                ([f"needed by {f['needed_by']}"] if f.get("needed_by") else [])
-        return m + (f" ({'; '.join(bits)})" if bits else "")
+        tag = STATUS_TAG.get(status.get(m))      # an update must not read as a fresh install
+        return m + (f" [{tag}]" if tag else "") + (f" ({'; '.join(bits)})" if bits else "")
+
     lines, failed = [], []
     for pt in ports:
         name = pt["repo"]
@@ -407,7 +433,7 @@ def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
                                                   for m in bad_ids))
             continue
         deps = pt["deps"]
-        lines.append(f"  {name}: {pt['self']}" + (f" + {len(deps)} dependenc{'y' if len(deps) == 1 else 'ies'} "
+        lines.append(f"  {name}: {label(pt['self'])}" + (f" + {len(deps)} dependenc{'y' if len(deps) == 1 else 'ies'} "
                      f"({', '.join(label(d) for d in deps)})" if deps else " (no dependencies)"))
     required = {m for pt in ports for m in [pt["self"]] + pt["deps"] if m}
     extra_ok = [m for m in by_id if m not in required and status.get(m) in OK_WORDS]
@@ -428,6 +454,11 @@ def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
     if skipped:
         out += ["", f"Not installed: {len(skipped)} optional integration(s) CI never tested ({', '.join(skipped)}). "
                 "--with-untested fetches them from Modrinth/CurseForge."]
+    kept = sorted(m for m, v in status.items() if v == "other build")
+    if kept:
+        out += ["", f"Kept: {len(kept)} mod(s) already in the mods folder are a different build from the one CI "
+                f"tested ({', '.join(kept)}). Re-run with --replace to install the tested build; the old jar is "
+                f"moved to {REPLACED_DIR}/, not deleted."]
     if warn:
         out += ["", "Warnings (optional mods only; they do not change the result):"] + [f"  - {x}" for x in warn]
     good = not failed and neo_ok and bool(ports)
@@ -568,6 +599,32 @@ def self_check():
         meman["files"][0]["sha256"] = sha(me)
         done3, _s3, bad3, _st3 = install(plan(["o/me"], "b", False, False, get, lookup=lookup)[0], mods, get=get)
         ok &= _chk(done3 == ["me: updated me.jar"] and not bad3, 42)
+        with zipfile.ZipFile(me, "a") as z:                                  # r3: the summary must say update
+            z.writestr("changed3.txt", "r3")
+        meman["files"][0]["sha256"] = sha(me)
+        fu = plan(["o/me"], "b", False, False, get, lookup=lookup)
+        _du, _su, bdu, stu = install(fu[0], mods, dry=True, get=get)
+        outu, _gu = summarise(fu[4], fu[0], stu, fu[5], bdu, "", True, True)
+        ok &= _chk(stu["me"] == "would update" and "me [would update]" in outu[1]
+                   and "lib [already installed]" in outu[1], 43)
+        # another build of a port's mod under ANOTHER file name: kept and reported, swapped only with replace
+        mods6 = d / "inst6/mods"
+        mods6.mkdir(parents=True)
+        oldme = jar("me-old-1.0.jar", "me")
+        (mods6 / oldme.name).write_bytes(oldme.read_bytes())
+        _d6, _s6, bad6, st6 = install(fu[0], mods6, get=get)
+        out6, good6 = summarise(fu[4], fu[0], st6, fu[5], bad6, "", True, False)
+        ok &= _chk(st6["me"] == "other build" and installed_modids(mods6)["me"] == oldme.name, 44)
+        ok &= _chk(good6 and "me [different build kept]" in out6[1]
+                   and any(x.startswith("Kept: 1 mod(s)") and "--replace" in x for x in out6), 45)
+        d7, _s7, bad7, st7 = install(fu[0], mods6, get=get, replace=True)
+        ok &= _chk(st7["me"] == "updated" and not bad7 and installed_modids(mods6)["me"] == "me.jar"
+                   and not (mods6 / oldme.name).exists() and (mods6.parent / REPLACED_DIR / oldme.name).exists()
+                   and any("moved me-old-1.0.jar" in x for x in d7), 46)
+        renamed = d / "inst7/mods"                                        # the tested file, renamed: still present
+        renamed.mkdir(parents=True)
+        (renamed / "me-renamed.jar").write_bytes(me.read_bytes())
+        ok &= _chk(install(fu[0], renamed, dry=True, get=get)[3]["me"] == "present", 49)
         # a required mod nobody has: that port FAILS, and says why
         f5, _n5, _p5, _neo5, ports5, missing5 = plan(["o/me"], "b", False, False, get, lookup=lambda m: (None, "nowhere"))
         _d5, _s5, bad5, st5 = install(f5, d / "inst5/mods", dry=True, get=get)
@@ -705,6 +762,8 @@ def main():
     ap.add_argument("--with-untested", action="store_true",
                     help="also optional integrations CI never loaded, from Modrinth/CurseForge, with what they need")
     ap.add_argument("--full", action="store_true"); ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--replace", action="store_true",
+                    help="replace a different build of a port's mod already in the mods folder (moved to mods-replaced/)")
     ap.add_argument("--no-neoforge", action="store_true", help="do not install NeoForge when it is missing")
     ap.add_argument("-v", "--verbose", action="store_true", help="also every file and every note")
     a = ap.parse_args()
@@ -717,7 +776,7 @@ def main():
     print(f"install-port: {', '.join(a.repos)} -> {mods}" + (" (dry run)" if a.dry_run else ""), flush=True)
     files, notes, problems, neo, ports, missing = plan(a.repos, a.branch or f"neoforge-{a.mc}", a.with_optional,
                                                        a.full, get, a.mc, untested=a.with_untested)
-    done, skipped, bad, status = install(files, mods, a.dry_run, get)
+    done, skipped, bad, status = install(files, mods, a.dry_run, get, replace=a.replace)
     nnotes, nprob = ([], []) if (a.no_neoforge or not neo) else ensure_neoforge(neo, mods, a.dry_run, get)
     neo_line = nprob[0] if nprob else next((x for x in nnotes if not x.startswith("tested on")), "")
     if neo_line and not nprob and neo and "needs at least" in neo[-1][2]:

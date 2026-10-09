@@ -33,9 +33,9 @@ python3 tools/install-port.py owner/RepoA owner/RepoB                # install i
 ```
 
 It follows sibling ports a port depends on, installs each mod once (newest file when ports
-disagree), verifies every sha256, skips mods already in the instance, and installs the NeoForge the
+disagree), verifies every sha256, skips mods already in the instance when they are the tested file, updates a re-released port in place (same file name, new contents), and installs the NeoForge the
 ports were tested on when it is missing (its own installer, headless, with the Launcher's Java; the
-Launcher must have been opened once). `--no-neoforge` skips that. `--with-optional` adds the optional mods CI tested with the ports; `--with-untested` also adds
+Launcher must have been opened once). `--no-neoforge` skips that. A different build of a port's mod under another file name (an older port, the author's own jar) is kept and reported under "Kept:"; `--replace` installs the tested build instead and moves the old jar to `mods-replaced/` beside the mods folder (two jars with one mod id stop the game loading). Each port line tags what happened to every mod (`[updated]`, `[would update]`, `[already installed]`, `[different build kept]`), so an update never reads as a fresh install. `--with-optional` adds the optional mods CI tested with the ports; `--with-untested` also adds
 the optional integrations CI never loaded, fetched from Modrinth/CurseForge and labelled as such; `--mods-dir` picks another
 instance; it also adds what an optional mod itself requires (read from that mod's jar). A mod CI had no
 file for (a required one, or an optional one with `--with-untested`) comes from Modrinth/CurseForge (the same
