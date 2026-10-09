@@ -317,6 +317,30 @@ def known_findings(work):
     return [l.split("#", 1)[0].strip() for l in f.read_text(encoding="utf-8").splitlines() if l.split("#", 1)[0].strip()]
 
 
+def logged_exceptions(text):
+    """{(exception, the first non-platform frame's method): count} for every stack trace in a log, most first.
+    The owner is the code that threw, read past the platform (Minecraft, NeoForge, the JDK, libraries)."""
+    lines, seen = text.splitlines(), {}
+    for i, l in enumerate(lines):
+        m = EXC_HEAD.match(l.strip())
+        if not m or i + 1 >= len(lines) or not lines[i + 1].lstrip().startswith("at "):
+            continue
+        frames = [x for x in lines[i + 1:i + 60] if x.lstrip().startswith("at ")]
+        names = [FRAME_CLASS.match(x).group(1) for x in frames if FRAME_CLASS.match(x)]
+        owner = next((n for n in names if not VANILLA_FRAME.match(n) and "$$Lambda" not in n), None)
+        if owner and not HARNESS.search(owner):
+            seen[(m.group(1), owner)] = seen.get((m.group(1), owner), 0) + 1
+    return dict(sorted(seen.items(), key=lambda kv: -kv[1]))
+
+
+def foreign_findings(text, work=None):
+    """Logged exceptions thrown in ANOTHER mod's code during this mod's run -- never this port's failure, but
+    often triggered by it (a mod calling a library's API that is broken). Reported, so the trail is not lost."""
+    pkgs = mod_packages(work)
+    return [f"{exc} thrown in {where}, caught and only logged ({n}x)" for (exc, where), n in logged_exceptions(text).items()
+            if not any(where.startswith(pk + ".") for pk in pkgs)] if pkgs else []
+
+
 def log_findings(text, ns, work=None):
     """-> (findings, known): the mod's lost assets and the logged exceptions its own code threw, one line each."""
     out = []
@@ -336,19 +360,9 @@ def log_findings(text, ns, work=None):
                        f"even in mid-air): {', '.join(unplaced)}")
     pkgs = mod_packages(work)
     if pkgs:
-        lines, seen = text.splitlines(), {}
-        for i, l in enumerate(lines):
-            m = EXC_HEAD.match(l.strip())
-            if not m or i + 1 >= len(lines) or not lines[i + 1].lstrip().startswith("at "):
-                continue
-            frames = [x for x in lines[i + 1:i + 60] if x.lstrip().startswith("at ")]
-            names = [FRAME_CLASS.match(x).group(1) for x in frames if FRAME_CLASS.match(x)]
-            owner = next((n for n in names if not VANILLA_FRAME.match(n) and "$$Lambda" not in n), None)
-            if owner and not HARNESS.search(owner) and any(owner.startswith(pk + ".") for pk in pkgs):
-                key = (m.group(1), owner)
-                seen[key] = seen.get(key, 0) + 1
-        for (exc, where), n in sorted(seen.items(), key=lambda kv: -kv[1]):
-            out.append(f"{exc} thrown in {where}, caught and only logged ({n}x)")
+        for (exc, where), n in logged_exceptions(text).items():
+            if any(where.startswith(pk + ".") for pk in pkgs):
+                out.append(f"{exc} thrown in {where}, caught and only logged ({n}x)")
     known = known_findings(work)
     return [f for f in out if not any(k in f for k in known)], [f for f in out if any(k in f for k in known)]
 
@@ -602,6 +616,8 @@ def self_check():
         f = failure_of(lg, client=True, ns="m", work=w)
         ok &= f is not None and f[0] == "logged" and "a.m.Util.clear" in f[1] and "m:textures/e/x.png" in f[1]
         ok &= failure_of(lg.replace("a.m.Util", "b.o.Util"), client=True, ns="z", work=w) is None   # not this mod's
+        ok &= foreign_findings(lg.replace("a.m.Util", "b.o.Util"), w) == [
+            "java.lang.UnsupportedOperationException thrown in b.o.Util.clear, caught and only logged (1x)"]
         (w / ".github/gatec-known.txt").write_text("a.m.Util.clear  # pre-existing upstream\nx.png\n", encoding="utf-8")
         ok &= failure_of(lg, client=True, ns="m", work=w) is None       # recorded as known: listed, not failing
 

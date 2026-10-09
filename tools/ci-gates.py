@@ -260,9 +260,16 @@ def main():
             text = gl.read_text(encoding="utf-8", errors="replace") if gl.exists() else ""
             detail = green_detail(text)
             if extra:     # a green client with recorded pre-existing defects says so, never silently
-                _b, known = _load("gate_loop", "gate-loop.py").log_findings(text, a.modid, repo)
+                gl = _load("gate_loop", "gate-loop.py")
+                _b, known = gl.log_findings(text, a.modid, repo)
                 if known:
                     detail += f"; {len(known)} known pre-existing defect(s) listed in .github/gatec-known.txt"
+                foreign = gl.foreign_findings(text, repo)
+                if foreign:   # another mod's code threw during this run: not this port's failure, but its trail
+                    print("[ci-gates] WARNING: logged exceptions thrown in OTHER mods' code during this run "
+                          "(report each to that mod):\n" + "\n".join(f"  - {f}" for f in foreign), flush=True)
+                    detail += (f"; warning: {len(foreign)} logged exception(s) in other mods' code, e.g. "
+                               f"{foreign[0].split(', caught')[0]}")
             leaked = sorted(loaded_mods(text) & {m for ms in excluded.values() for m in ms})
             if leaked:      # a minimal pass that loaded the mods it meant to leave out tested nothing
                 record(label, False, f"minimal environment not applied: the game loaded {', '.join(leaked)}")

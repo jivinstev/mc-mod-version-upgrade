@@ -103,6 +103,9 @@ Gate C phase first, and once more with the mod together with what players instal
 too): a defect a mod shows only in company (one mod's code calling another's) never appears in its own run.
 Then, for each finding:
 
+A green run can also WARN about logged exceptions thrown in another mod's code (a dependency whose broken
+path only your mod's calls reach): those go through the same steps on THAT mod's fork.
+
 0. **Trace it to its cause** -- the asset, registration or code line the log line points at (a texture path
    built from a prefix, a sounds.json entry, a sound event id, an animation value, a missing placement). A
    finding is one cause; several log lines can share it.
