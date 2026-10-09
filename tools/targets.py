@@ -334,6 +334,12 @@ def bump_build(build, props, t, gecko):
         if new != build:
             notes.append(f"GeckoLib dependency -> {_gecko_dep(t)}:{g['version']} (GeckoLib {g['release']} from Modrinth)")
         build = new
+        # a jarJar(...) or exclusion names the coordinate with no version (the version lives in a block): same move
+        new = re.sub(r"""(['"])software\.bernie\.geckolib:geckolib-neoforge-(?:\$\{[^}]+\}|[\d.]+)\1""",
+                     lambda m: m.group(1) + _gecko_dep(t) + m.group(1), build)
+        if new != build:
+            notes.append(f"GeckoLib versionless coordinate (jarJar) -> {_gecko_dep(t)}")
+        build = new
         if g["repository"] not in build:
             m = re.search(r"(?m)^([ \t]*)repositories\s*\{", build)
             if m:

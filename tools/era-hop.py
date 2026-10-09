@@ -188,6 +188,39 @@ def client_items(work, namespaces):
     return written
 
 
+def gecko_bump(work, T):
+    """A GeckoLib mod's build names GeckoLib's 1.21.1 coordinate; the target's GeckoLib is another artifact on
+    another repository, with interface injections it cannot compile without (CATALOG §V10, §V18b). The fork route
+    bumps it in tools/targets.py; this is the same bump, so the jar route's compile can start at all (§X48)."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import targets
+    t = targets.TARGETS.get(T)
+    bg = work / "build.gradle"
+    if not t or not bg.exists():
+        return
+    build = bg.read_text(encoding="utf-8")
+    srcs = (f.read_text(encoding="utf-8", errors="replace") for f in (work / "src/main/java").rglob("*.java"))
+    gp, vp = work / "gradle.properties", work / f"versions/{T}.properties"
+    props = "".join(x.read_text(encoding="utf-8") for x in (gp, vp) if x.exists())
+    flag = re.search(r"(?m)^uses_geckolib\s*=\s*(\w+)", props)
+    if flag and flag.group(1) != "true" or not (flag or targets.uses_geckolib(build) or any(map(targets.uses_geckolib, srcs))):
+        return
+    new, _props, notes = targets.bump_build(build, props, t, True)
+    bg.write_text(new, encoding="utf-8")
+    g = t.geckolib
+    for f in (gp, vp):          # the version property the build reads, wherever it lives, becomes the target's id
+        if f.exists() and re.search(r"(?m)^geckolib_version\s*=", f.read_text(encoding="utf-8")):
+            f.write_text(re.sub(r"(?m)^geckolib_version\s*=.*$", f"geckolib_version={g['version']}",
+                                f.read_text(encoding="utf-8")), encoding="utf-8")
+            notes.append(f"geckolib_version={g['version']} in {f.name} (GeckoLib {g['release']})")
+            break
+    else:
+        if "${geckolib_version}" in new or "project.geckolib_version" in new:
+            vp.write_text(vp.read_text(encoding="utf-8").rstrip() + f"\ngeckolib_version={g['version']}\n", encoding="utf-8")
+            notes.append(f"geckolib_version={g['version']} added to {vp.name}")
+    step("GeckoLib: " + ("; ".join(notes) if notes else "already on the target's coordinate"))
+
+
 def step(msg):
     print(f"era-hop: {msg}", flush=True)
 
@@ -287,6 +320,7 @@ def main():
     g = re.sub(r"(?m)^mc=.*\n?", "", gp.read_text(encoding="utf-8"))
     gp.write_text(g.rstrip() + f"\n# the build's target (tools/era-hop.py): ./gradlew picks versions/{T}.properties\nmc={T}\n",
                   encoding="utf-8")
+    gecko_bump(work, T)
     step(f"flattened: {T} is now the only target (mc={T}); ready for the compile loop")
     return 0
 
@@ -351,6 +385,20 @@ def self_check():
         ok &= '"mymod:item/pie"' in (w / "src/main/resources/assets/mymod/items/pie.json").read_text(encoding="utf-8")
         ok &= "special" in (w / "src/main/resources/assets/mymod/items/pan.json").read_text(encoding="utf-8")
         ok &= needs_other_mod({"neoforge:conditions": [{"type": "neoforge:mod_loaded", "modid": "create"}]}, ns) == "create"
+    with tempfile.TemporaryDirectory() as d:   # §X48: the jar route's GeckoLib coordinate moves to the target's
+        w = pathlib.Path(d); (w / "versions").mkdir(); (w / "src/main/java").mkdir(parents=True)
+        tpl = (ROOT / "templates/neoforge-mod/build.gradle").read_text(encoding="utf-8")
+        (w / "build.gradle").write_text(tpl, encoding="utf-8")
+        (w / "gradle.properties").write_text("mod_id=m\nuses_geckolib=true\ngeckolib_version=4.8.4\n", encoding="utf-8")
+        (w / "versions/26.2.properties").write_text("minecraft_version=26.2\n", encoding="utf-8")
+        gecko_bump(w, "26.2")
+        b = (w / "build.gradle").read_text(encoding="utf-8")
+        ok &= "geckolib-neoforge-${minecraft_version}" not in b and "maven.modrinth:geckolib" in b
+        ok &= "geckolib_version=4.8.4" not in (w / "gradle.properties").read_text(encoding="utf-8")
+        (w / "gradle.properties").write_text("mod_id=m\nuses_geckolib=false\n", encoding="utf-8")
+        (w / "build.gradle").write_text(tpl, encoding="utf-8")
+        gecko_bump(w, "26.2")
+        ok &= (w / "build.gradle").read_text(encoding="utf-8") == tpl        # a mod without GeckoLib is untouched
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
