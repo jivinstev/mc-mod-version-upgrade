@@ -19,7 +19,7 @@ while [ $# -gt 0 ]; do
   case "$1" in --no-jei) nojei=1 ;; --neoforge) neo="$2"; shift ;; *) echo "boot-mods: unknown option $1"; exit 2 ;; esac
   shift
 done
-jars=$(ls "$dir"/*.jar 2>/dev/null | paste -sd, || true)
+jars=$(ls "$dir"/*.jar 2>/dev/null | paste -sd, - || true)
 [ -n "$jars" ] || { echo "boot-mods: no jars in $dir"; exit 2; }
 work=$(mktemp -d "${TMPDIR:-/tmp}/boot-mods.XXXXXX")
 trap 'rm -rf "$work"' EXIT
