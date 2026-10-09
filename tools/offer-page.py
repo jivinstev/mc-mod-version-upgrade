@@ -79,6 +79,10 @@ def build(mods, out, offline=False):
         commits = re.findall(r"^- `(\w+)` (.+)$", size, re.M)
         left = re.search(r"Left out of the offer: (.+)", size)
         ver = [l[2:] for l in sec(md, "Verified").splitlines() if l.startswith("- ")]
+        mts = sec(md, f"Manual tests (the {len(tests)} highest-value)")
+        before = "".join(f'<p class="warn">{md_inline(l[2:])}</p>' for l in
+                         (mts.split("### Before you test", 1)[1].split("### 1.", 1)[0] if "### Before you test" in mts else "").splitlines()
+                         if l.startswith("- "))
         msg = sec(md, "Draft message to the authors")
         prd = sec(md, "Draft PR description (only if they ask for a PR)")
         cards.append(f'''<section class="mod" id="m{i}">
@@ -97,7 +101,7 @@ def build(mods, out, offline=False):
       {f'<p class="muted">{html.escape("Left out: " + left.group(1))}</p>' if left else ""}
       <h3>Verified</h3><ul class="checks">{"".join(f"<li>{linkify(v)}</li>" for v in ver)}</ul>
       {(lambda d: f'<h3>Defects the authors&#39; original already has</h3>{md_block(d)}' if d else "")(sec(md, "Defects the authors' original already has"))}
-      {f'<h3>Manual tests -- the {len(tests)} that matter most</h3><p class="muted">What no automated gate reaches. A few minutes each.</p>{manual}' if tests else ""}
+      {f'<h3>Manual tests -- the {len(tests)} that matter most</h3><p class="muted">What no automated gate reaches. A few minutes each.</p>{before}{manual}' if tests else ""}
       <h3>Words</h3>
       {copy(f"msg{i}", msg, "Message to the authors")}
       {copy(f"pr{i}", prd, "PR description, only if they ask")}

@@ -205,7 +205,8 @@ generator reads code; it cannot know that a debug mob wrecks the world it is sum
 it switched off every other content mod and disconnected the player, by the author's design). Write
 `manual-tests.notes.json` next to `OFFER.md` -- `{"<test title>": {"warning": "...", "steps_before": ["..."]}}` --
 and `port-offer.py` merges it on every regeneration; the warning shows above the steps in `OFFER.md` and on the
-handoff page. Whenever a manual test turns out to be hazardous, add the note before the next handoff.
+handoff page. A hazard no generated test names (an item that wrecks the world it is used in) goes in the same
+file as `"_warnings": ["..."]`, shown under "Before you test" ahead of every test. Whenever a manual test turns out to be hazardous, add the note before the next handoff.
 
 **When the fork is not on the release** (see "Two branches" below), pass `--release <commit>` or
 `--published <ISO time>`: the offer then says how many unreleased commits the port sits on, how big they are

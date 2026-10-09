@@ -417,10 +417,14 @@ def apply_notes(chosen, notes):
     return chosen
 
 
-def markdown(mod, chosen, total):
+def markdown(mod, chosen, total, warnings=()):
+    """warnings: mod-wide hazards a tester must know first (the notes file's "_warnings" list), whatever test
+    they run -- e.g. an item that wrecks the world it is used in, which no generated test names."""
     L = [f"## Manual tests (the {len(chosen)} highest-value)", "",
          f"What no automated gate reaches, picked for variety from {total} candidates found in this port's own code. "
          "Each is a few minutes; together they cover the paths where ports break unseen.", ""]
+    if warnings:
+        L += ["### Before you test", ""] + [f"- **Warning:** {w}" for w in warnings] + [""]
     for i, t in enumerate(chosen, 1):
         L += [f"### {i}. {t['title']}", ""]
         if t.get("warning"):
@@ -476,6 +480,7 @@ def self_check():
         boss = next(t for t in chosen if t["category"] == "boss")
         apply_notes(chosen, {boss["title"]: {"warning": "wrecks the world", "steps_before": ["Make a throwaway world"]}})
         md2 = markdown(mod, chosen, total)
+        chk("mod-wide warnings come first", "### Before you test" in markdown(mod, chosen, total, ["sword wipes"]).split("### 1.")[0])
         chk("a note's warning and first step survive into the markdown",
             "> **Warning:** wrecks the world" in md2 and boss["steps"][0] == "Make a throwaway world")
     print("self-check:", "OK" if ok else "FAIL")
