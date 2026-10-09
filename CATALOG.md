@@ -5489,3 +5489,18 @@ a worker "fixed" a moved interface by deleting `implements` and calling the type
 never-transform whitelist still named `"net.minecraftforge."`, which on NeoForge protects nothing — now a
 codemod rule. And pass the TARGET from the build: a tool default had told 26.x workers they were porting to
 1.21.1.
+
+**X48. 🔴 A deterministic stage wired into ONE porting route is a cost the other route pays to a model — keep
+each hop's tail in one shared stage both routes call.** · **Pattern:** a converter or fix-up tool built while
+measuring one route (here the fork route, `port-upstream.py`) and called from that route's own code · **Symptom:**
+none on the route that has it; on the other route (the jar route, `port.py`) every error the converter would have
+removed goes to the compile loop's workers, priced like real porting. Nothing fails: the burn-down is just higher.
+It was found by noticing a README sentence could not be written truthfully for both routes · **Measured** (26.2
+era hop on finished jar-route 1.21.1 ports, no model): 145 → 78 errors (−46%) and 506 → 73 (−86%), almost all of
+it the tool-tier/armour converter and the changed-hook-signature converter. The same audit found the jar route's
+Forge hop missing the access-transformer fix (a Forge AT in SRG names was copied unconverted, §139), Forge code
+shapes, SimpleChannel → payloads and the Holder fixes · **Fix:** `tools/mechanical-hop.py` holds both stages with
+one list each; both routes call it, and `tools/test-port-tools.sh` fails if either stops, runs a stage tool
+itself, or a converter on disk is in no list. · **Also found:** the jar route's era hop leaves GeckoLib at its
+1.21.1 version, so a GeckoLib mod's 26.2 build asks for an artifact that does not exist (§V10) and the compile
+never starts; the fork route bumps it in `tools/targets.py`. Same shape, one layer down: a build step one route has.
