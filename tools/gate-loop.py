@@ -70,6 +70,10 @@ def load_failed(text):
 
 
 STALL_SECONDS = 420   # a client whose log has not grown for this long, with no verdict, is stuck, not slow
+# Gate B: a STARTED GameTest server that goes quiet this long is stuck too. Measured on a fork's CI: a server
+# hung after start (an exception in a native-callback thread) and sat to the full timeout, 25 minutes, every
+# time. The clock starts only once the server is up, so a long silent compile before it cannot trip it.
+SERVER_UP = re.compile(r"Started game test server|tests are now running")
 
 
 def _stop(proc):
@@ -114,7 +118,7 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
     with open(log, "w", encoding="utf-8") as fh:
         proc = subprocess.Popen(cmd, cwd=work, stdout=fh, stderr=subprocess.STDOUT, env=env,
                                 start_new_session=hasattr(os, "killpg"))
-        start = last_growth = time.time(); size = 0; failed_at = None; why = None
+        start = last_growth = time.time(); size = 0; failed_at = None; why = None; server_up = False
         while proc.poll() is None:
             time.sleep(2)
             now = time.time()
@@ -122,6 +126,9 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
             cur = os.path.getsize(log)
             if cur != size:
                 size, last_growth = cur, now
+            if not phase and not server_up and cur:
+                with open(log, encoding="utf-8", errors="replace") as rd:
+                    server_up = bool(SERVER_UP.search(rd.read()))
             if phase and failed_at is None and cur:
                 with open(log, encoding="utf-8", errors="replace") as rd:
                     if load_failed(rd.read()):
@@ -130,6 +137,8 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
                 why = "mod loading failed; the client shows the error screen and would wait for a click"
             elif phase and now - last_growth > STALL_SECONDS:
                 why = f"the client's log has not grown for {STALL_SECONDS}s and it has given no verdict"
+            elif server_up and now - last_growth > STALL_SECONDS:
+                why = f"the GameTest server started, then its log did not grow for {STALL_SECONDS}s with no verdict"
             elif now - start > timeout:
                 why = f"TIMEOUT after {timeout}s with no verdict"
             if why:
