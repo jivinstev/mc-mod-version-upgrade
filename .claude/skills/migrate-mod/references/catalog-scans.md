@@ -152,6 +152,10 @@ grep -rn 'readMetaAndCreate(' $SRC 2>/dev/null
 hit "§O/#127  BlockState#use(Level,Player,InteractionHand,BlockHitResult) -> useWithoutItem(Level,Player,BlockHitResult)"
 grep -rnE '\.use\([a-zA-Z]*[Ll]evel *,' $SRC 2>/dev/null
 
+hit "§L/107b  MultiBufferSource wrapper that stores a fetched VertexConsumer (1.21: 'Not building!' when another type is requested)"
+grep -rlE 'implements +MultiBufferSource' $SRC 2>/dev/null | while read f; do
+  grep -nE 'new +[A-Za-z_]+\( *[A-Za-z_]+\.getBuffer\(' "$f" | sed "s#^#  $f:#"; done
+
 hit "R21  no-arg readNbt() — throws 'Not a compound tag' in 1.21 if the writer emits a ListTag (client-only, Gate C)"
 # A HIT is only real when the matching writer emits a NON-compound. The symmetric
 # writeNbt(x.getCompound())/readNbt() pair is correct — verify the writer before changing anything.
