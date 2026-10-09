@@ -3642,12 +3642,20 @@ on first `get()`).
 
 **V92. Four 26.2 shapes the fork and jar routes now port with no model — reload listeners, weights, client hooks,
 and MultiBufferSource — each by generating the removed 1.21.1 contract into the mod and repointing names, so no
-method body is edited.** · Run by the shared mechanical stage (`tools/mechanical-hop.py`), in this order:
-· `tools/convert-reload-weighted.py` (§V36): `AddServerReloadListenersEvent.addListener(x)` gains the
-`Identifier` 26.2 requires, named from `x` (unique across the tree); a `SimpleJsonResourceReloadListener`
-subclass asks for the RAW map (`super(ExtraCodecs.JSON, FileToIdConverter.json(dir))`), so its `apply` body and
-its defensive per-file parsing stay as written; `Weight`/`WeightedEntry` are generated with their 1.21.1
-contract and every `WeightedRandom` call gains `e -> e.getWeight().asInt()`.
+method body is edited.** · **Pattern:** `event.addListener(X)` on `AddServerReloadListenersEvent`; a class
+extending `SimpleJsonResourceReloadListener` with `super(gson, dir)`; `implements WeightedEntry` /
+`Weight.of(n)` / `WeightedRandom.getRandomItem(r, list)`; `extends TextureSheetParticle`; an `initializeClient`
+override on an Item/Block/MobEffect; `ItemProperties.register(...)`; a `MultiBufferSource` parameter or
+`renderBuffers().bufferSource()` · **Error:** `method addListener in class SortedReloadListenerEvent cannot be
+applied`, `cannot find symbol: class Weight / WeightedEntry / TextureSheetParticle / ItemProperties /
+ItemPropertyFunction / MultiBufferSource`, `cannot find symbol: variable xd/yd/zd/lifetime` (the particle
+superclass cascade), `method does not override` on `initializeClient` · **Fix:** run by the shared mechanical
+stage (`tools/mechanical-hop.py`), in this order:
+· `tools/convert-reload-weighted.py` (§V36): the listener gains the `Identifier` 26.2 requires, named from `X`
+(unique across the tree); a JSON listener asks for the RAW map (`super(ExtraCodecs.JSON,
+FileToIdConverter.json(dir))`), so `apply` and its defensive per-file parsing stay as written; `Weight` /
+`WeightedEntry` are generated with their 1.21.1 contract and every `WeightedRandom` call gains
+`e -> e.getWeight().asInt()`.
 · `tools/convert-client-hooks.py` (§V51, §V52, §S4b): a generated `TextureSheetParticle` keeps both 1.21.1
 constructors over `SingleQuadParticle` (the sprite starts null and is picked later, exactly as before); a
 constant `getRenderType()` becomes `getLayer()`; `getLightColor` → `getLightCoords`; `createParticle` gains its
@@ -3658,27 +3666,28 @@ method goes; one to the mod's own superclass stays). `ItemProperties` becomes a 
 · `tools/convert-buffer-seam.py` (§V54, §V66, X52): the recording `Buffers` seam four hand ports wrote, plus
 vanilla's own `MultiBufferSource` shape; each render-hook override that took one is listed as NEEDS SUBMIT.
 · **Measured, zero-model, on the 26.2 hop of real ports:** a mob library 232 → 159 (−31%: −23 reload/weights,
-−36 client hooks, −14 seam); a boss-effects library 1431 → 1378 (seam only: it has no listeners, particles or item
-properties, and the other two correctly do nothing).
+−36 client hooks, −14 seam); a boss-effects library 1431 → 1378 (seam only: it has no listeners, particles or
+item properties, and the other two correctly do nothing).
 · **What none of them claims:** a render hook that took a `MultiBufferSource` became `submit(...)` over a
 render STATE, not the entity, and that port is per class; a property override is a client item model; neither is
 expressible as a rewrite, so both are named rather than half-done.
 
 **V93. 🔴 No 26.2 port in this project binds a mod's OWN uniform block — so the block `convert-core-shaders`
 lays out has no proven runtime path yet, and a "Java shader converter" built on it would compile and draw
-nothing.** · **Pattern:** a mod with Java-driven core shaders: `ShaderInstance` fields, `getUniform("X").set(...)`
-per frame, `RegisterShadersEvent`, a custom `ShaderStateShard` in its render types (one measured library: 12 effect
-classes, ~150 `getUniform` calls) · **What 26.2 offers, read off the jar:** a `RenderType` is a name plus a
-`RenderSetup` (textures, texture transform) over a `RenderPipeline`; the draw path binds vanilla's
-`DynamicTransforms`/`Projection`/`Globals` and nothing else, and neither `RenderSetup` nor `RenderType` has a
-hook to bind another uniform buffer. Swept the shipped 26.2 overlays: the only `setUniform` is one port writing
-vanilla's `DynamicTransforms` on its own render pass. · **So the honest state is:** the GLSL half is automated
-(`convert-core-shaders`), the RenderType half is automated given a state type (`convert-rendertypes`), and the
-piece in between — getting a mod's per-frame values into its block on a real draw — has never been done here.
-A converter that keeps `ShaderInstance`/`Uniform` compiling as stand-ins would be §S4 in its purest form: every
-gate green and every effect invisible. · **The next step is one hand port, proven on a client:** one such effect
-drawn through its own `RenderPass` with `setUniform(<block>, slice)` (or a NeoForge hook if one exists), checked
-by a Gate C photograph, and only then generalised into a converter.
+nothing.** · **Pattern:** a mod with Java-driven core shaders: `ShaderInstance` fields,
+`getUniform("X").set(...)` per frame, `RegisterShadersEvent`, a custom `ShaderStateShard` in its render types
+(one measured library: 12 effect classes, ~150 `getUniform` calls) · **Error:** `cannot find symbol: class
+ShaderInstance / RegisterShadersEvent / Uniform`, and `convert-rendertypes` refusing the custom
+`ShaderStateShard` for want of a state type · **Symptom, if forced to compile with stand-ins:** every gate
+green and every effect invisible — no log line, because nothing failed. · **Why, read off the jar:** a
+`RenderType` is a name plus a `RenderSetup` (textures, texture transform) over a `RenderPipeline`; the draw path
+binds vanilla's `DynamicTransforms`/`Projection`/`Globals` and nothing else, and neither `RenderSetup` nor
+`RenderType` has a hook to bind another uniform buffer. Swept the shipped 26.2 overlays: the only `setUniform`
+is one port writing vanilla's `DynamicTransforms` on its own render pass. · **Fix (not yet automated):** port
+ONE such effect by hand — drawn through its own `RenderPass` with `setUniform(<block>, slice)` (or a NeoForge
+hook if one exists) — prove it with a Gate C photograph, and only then generalise it into a converter. The GLSL
+half (`convert-core-shaders`) and the RenderType half given a state type (`convert-rendertypes`) are already
+automated; the piece in between has never been done here.
 
 ## W. ONE SOURCE TREE, TWO MINECRAFT VERSIONS — the shape that makes an era jump survivable
 > **Axis:** build architecture. Everything above ports a mod *from* A *to* B and leaves A behind.
