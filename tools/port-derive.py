@@ -366,6 +366,7 @@ def self_check():
             git(r, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg)
             return git(r, "rev-parse", "HEAD").strip()
         git(r, "init", "-q", "-b", "master")
+        git(r, "config", "user.name", "t"); git(r, "config", "user.email", "t@t")   # CI runners have no git identity
         w("src/main/java/m/Mod.java", "package m;\n@Mod(\"m\")\nclass Mod {\n  void a() {}\n}\n")
         w("src/main/java/m/Reg.java", "package m;\nclass Reg {\n  int a = 1;\n}\n")
         release = commit("release 1.0")

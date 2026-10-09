@@ -3619,8 +3619,11 @@ A `super` call used as a value where the new one is void is REFUSED. **Adding a 
 point: a §V entry that says "this hook changed shape" should land as a row here, not as per-port judgement.
 **Measured:** 7 overrides in one library, −14 errors, 0 at the rewritten sites.
 
-**V95. Small 26.2 removals found by zero-model baselines (cluster).** Each is a row in the 26.2 rename
-table or the member table, checked against the 26.2 jar:
+**V95. Small 26.2 removals found by zero-model baselines (cluster).** · **Pattern:** the 1.21.1 calls listed
+below, each a one-line shape · **Error:** `cannot find symbol` on the old member (`putUUID`, `getShort`,
+`getCommandSenderWorld`, `ResourceKey::location`, `FastColor`, `LazyLoadedValue`, `Ingredient.of(ItemStack)`), or
+`incompatible types: int cannot be converted to short` · **Fix:** each is a row in the 26.2 rename table or the
+member table, checked against the 26.2 jar:
 · `CompoundTag/ValueOutput.putUUID(k, v)` → `store(k, UUIDUtil.CODEC, v)`; `getUUID(k)` →
 `read(k, UUIDUtil.CODEC).orElseThrow()`; `hasUUID(k)` → `read(...).isPresent()` (§V12; `UUIDUtil.CODEC`
 writes the same int array, so saves read back). These are member rows rather than text rows, so the no-arg
@@ -4052,7 +4055,11 @@ the table. The writer test is red on the old code (48 ≠ 61). **Sweep:** `catal
 rewrite at install is a backstop, and while it exists the bug stays invisible.
 
 **W19. A RELEASE-ALIGNED BRANCH, derived instead of re-ported — and the three things the derivation got wrong.**
-A fork cut from an author's development tip ships code players have never run (measured: 52 commits, +4877 lines
+· **Pattern:** a fork port built on the author's development tip, offered or installed as if it were their
+release · **Symptom:** players run code the author never released (half-finished features, their bugs), and
+nothing in the offer says so; a derived release branch then compiles yet drops released behaviour or crashes at
+start · **Fix:** measure the distance (`tools/port-provenance.py`), derive the release branch with
+`tools/port-derive.py` and read its loss list, then run every gate. A fork cut from an author's development tip ships code players have never run (measured: 52 commits, +4877 lines
 past the release). `tools/port-derive.py` replays the port's commits onto the release commit, drops files that
 exist only in unreleased code, and `--resolve` hands each still-failing file to one worker with the release copy
 beside it. Measured on one mod: 58 errors → 0 for $1.77 of model spend, against $2.55 for the original port. It is

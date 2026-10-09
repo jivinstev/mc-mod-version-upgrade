@@ -109,7 +109,7 @@ def self_check():
     ok &= ci[0][2].count("--trailer") == 1
     of = commands(fleet, "offer", push=True)
     ok &= of[1][2][-1] == "--push" and "--variant" in of[1][2] and "--variant" not in of[0][2]
-    ok &= of[1][2][of[1][2].index("--work-dir") + 1] == "/w/mod" and "--work-dir" not in of[0][2]
+    ok &= pathlib.Path(of[1][2][of[1][2].index("--work-dir") + 1]) == pathlib.Path("/w/mod") and "--work-dir" not in of[0][2]   # a Path: Windows gives \\w\\mod
     g = commands(fleet, "gates", env="minimal", work="/w")
     ok &= g[0][2][g[0][2].index("--env") + 1] == "minimal" and g[1][2][g[1][2].index("--base") + 1] == "origin/master"
     with tempfile.TemporaryDirectory() as t:
