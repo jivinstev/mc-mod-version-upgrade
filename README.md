@@ -42,6 +42,10 @@ tree. Then:
 - **CI on the fork** runs the authors' own build and the same three gates on every push. It downloads a
   small, pinned "Port CI kit" from this repository's releases, not this whole repository.
 - **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes.
+- **Defects the authors' original already has** are proved pre-existing (their branch, their commit), then
+  either fixed in one commit each or recorded in the fork's known-defects list (`gatec-known.txt`), and filed as an issue on the fork
+  either way -- never backported unvalidated. The offer and the handoff page list them. Turn Issues on in a
+  new fork; GitHub starts them off.
 - **An offer for the authors**: a compare link showing just the port (without our CI), the size and shape of
   the diff, what was verified, and draft words. Nothing is sent: contacting the authors is your call.
 - **The ten manual tests that matter most**, in every offer: what no automated gate reaches (music, keys,
@@ -69,7 +73,7 @@ with no Claude session.
 | **install-mod**: install fork ports from GitHub, with their dependencies and NeoForge | `> Install these mods from owner/RepoA owner/RepoB` or `/install-mod owner/RepoA owner/RepoB` | `python3 tools/install-port.py owner/RepoA owner/RepoB [--with-optional | --with-untested] [--dry-run] [--replace] [--mods-dir DIR]`, then optionally `tools/boot-mods.sh DIR` to boot the folder headless first |
 | **migrate-mod**: port a mod from its jar | `> Migrate <mod name> to 26.2` or `/migrate-mod <mod name> to 26.2` | `python3 tools/port.py "<mod name or jar>" --to 26.2` (rerun to resume; `--from-port mods/<modid>` to continue a finished port) |
 | **port-fork**: port a mod in its own GitHub fork, with CI, releases and an offer | `> Port my fork <github url> to 1.21.1` or `/port-fork <github url>` | `python3 tools/port-upstream.py --repo DIR --modid ID` (the port), `tools/ci-gates.py` (gates as CI runs them, `--env full` or `minimal`), `tools/port-ci.py` (adds the CI; `--tag-suffix=-release` for a release branch), `tools/port-offer.py` (the offer, install manifest and manual tests; `--release` adds the distance from release), `tools/port-fleet.py --fleet FILE <step>` (every fork at once) |
-| **port-fork**: the handoff | `> Prepare the handoff for my forks` | `tools/manual-tests.py --repo DIR` (the ten manual tests), `tools/offer-page.py --mods FILE --out page.html` (one page for every fork) |
+| **port-fork**: the handoff | `> Prepare the handoff for my forks` | `tools/manual-tests.py --repo DIR` (the ten manual tests; per-port warnings from the work folder's `manual-tests.notes.json`), `tools/offer-page.py --mods FILE --out page.html` (one page for every fork) |
 | **port-fork**: the authors' release vs. their newest code | `> How far is my fork from the authors' release?` / `> Make a release branch for my fork` / `> Bring my fork up to date with the authors` | `tools/port-provenance.py --repo DIR --base REF --registry modrinth:SLUG --registry curseforge:ID --mc VER --loader forge` (the gap), `tools/port-derive.py` (a release branch; `--resolve` finishes it with a model, at a stop), `tools/port-sync.py --repo DIR --port BRANCH --upstream origin/BRANCH` (merge the authors' new commits) |
 | **review-contribution**: review a pull request to this repository | `> Review PR 42` or `/review-contribution 42` | `python3 tools/review-pr.py --base origin/main --head HEAD` (the mechanical checks; the judgement half is the skill) |
 

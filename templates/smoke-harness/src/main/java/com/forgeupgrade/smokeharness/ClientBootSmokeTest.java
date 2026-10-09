@@ -602,21 +602,23 @@ public class ClientBootSmokeTest {
         server.execute(() -> {
             ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
             ServerLevel level = server.overworld();
-            Mob mob = null;
-            List<EntityType<?>> creatures = targetCreatureTypes();
-            if (!creatures.isEmpty() && creatures.get(0).spawn(level, center.offset(2, 1, 2), MobSpawnType.COMMAND) instanceof Mob m) {
-                mob = m;
+            // every targeted mob gets every targeted effect, in view (see the neoforge-mod template's note)
+            List<Mob> targets = new java.util.ArrayList<>();
+            int i = 0;
+            for (EntityType<?> type : targetCreatureTypes()) {
+                BlockPos pos = center.offset(-6 + (i % 7) * 2, 1, 4 + (i / 7) * 2);
+                i++;
+                if (type.spawn(level, pos, MobSpawnType.COMMAND) instanceof Mob m) targets.add(m);
             }
-            final Mob target = mob;
             int[] n = {0};
             BuiltInRegistries.MOB_EFFECT.holders()
                 .filter(h -> inTarget(h.key().location()))
                 .forEach(h -> {
                     if (sp != null) sp.addEffect(new MobEffectInstance(h, 100, 0, false, true));
-                    if (target != null) target.addEffect(new MobEffectInstance(h, 100, 0, false, true));
+                    for (Mob m : targets) m.addEffect(new MobEffectInstance(h, 100, 0, false, true));
                     n[0]++;
                 });
-            System.out.println(TAG + ": [GAUNTLET] applied " + n[0] + " effect(s) to player + a mob");
+            System.out.println(TAG + ": [GAUNTLET] applied " + n[0] + " effect(s) to the player and " + targets.size() + " mob(s)");
         });
     }
 

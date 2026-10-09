@@ -2,7 +2,7 @@
 """Install a port's CI (and tag-driven release) into a fork's port branch, as a commit of its own.
 
     python3 tools/port-ci.py --repo <fork checkout> --modid <modid> [--upstream <author repo URL>]
-                             [--dep owner/repo@branch ...] [--gatec launch,spawn] [--no-commit]
+                             [--dep owner/repo@branch ...] [--gatec launch,spawn,battle,gauntlet] [--no-commit]
 
 The last step of every port: the fork's branch then shows, on every push, that the port builds with the
 author's own Gradle build and passes the gates it was held to (tools/ci-gates.py, no model involved); and a
@@ -177,7 +177,7 @@ def main():
     ap.add_argument("--dep", action="append", default=[], help="owner/repo@branch built into mavenLocal first")
     ap.add_argument("--dep-jar", action="append", default=[], metavar="OWNER/REPO@TAG/ASSET.jar=G:A:V",
                     help="a sibling port's released jar, put into mavenLocal (pinned by sha256) -- preferred to --dep")
-    ap.add_argument("--gatec", default="launch,spawn"); ap.add_argument("--no-commit", action="store_true")
+    ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet"); ap.add_argument("--no-commit", action="store_true")
     ap.add_argument("--tag-suffix", default="", help="a tag series of its own, e.g. -release for a release-aligned "
                     "branch, so its JARs never share tags with the development port's")
     ap.add_argument("--trailer", action="append", default=[])

@@ -11,7 +11,7 @@ The fleet file lives OUTSIDE this repository (it names other people's mods). JSO
    "ports": [
      {"repo": "/path/to/clone", "modid": "a", "base": "origin/main", "branch": "neoforge-1.21.1",
       "upstream": "https://github.com/author/a", "upstream_name": "A by author",
-      "dep_jar": ["owner/fork@tag/x.jar=g:a:v"], "variant": ["_mr=why"], "gatec": "launch,spawn",
+      "dep_jar": ["owner/fork@tag/x.jar=g:a:v"], "variant": ["_mr=why"], "gatec": "launch,spawn,battle,gauntlet",
       "tag_suffix": "-release" (a release-aligned branch), "release": "<author's released commit>",
       "work_dir": "~/.mc-mod-upgrade/upstream/<dir>"}]}   # work_dir: only if the clone's folder name differs
 

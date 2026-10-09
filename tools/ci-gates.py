@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run a finished port's gates in CI -- no model, no workers, a plain pass/fail with the evidence.
 
-    python3 tools/ci-gates.py --repo . --modid <modid> --base <author's ref> [--gatec launch,spawn]
+    python3 tools/ci-gates.py --repo . --modid <modid> --base <author's ref> [--gatec launch,spawn,battle,gauntlet]
                               [--summary SUMMARY.md] [--work-dir DIR]
 
 The fork's own CI calls this (templates/upstream-harness/port-ci.yml), so anyone can see on the branch that
@@ -151,7 +151,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", default="."); ap.add_argument("--modid", required=True)
     ap.add_argument("--base", help="the author's ref (mixins they left unlisted stay exempt from Gate A)")
-    ap.add_argument("--gatec", default="launch,spawn", help="Gate C phases; '' skips Gate C")
+    ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet", help="Gate C phases; '' skips Gate C")
     ap.add_argument("--summary", default="ci-gates-summary.md"); ap.add_argument("--work-dir")
     ap.add_argument("--skip-author-build", action="store_true")
     ap.add_argument("--env", choices=("full", "minimal"), default="full",
@@ -250,12 +250,26 @@ def main():
         detail = "green"
         if r.returncode:
             m = re.search(r"GATE \S+ FAILED:\n(.*)", r.stdout, re.S)
-            detail = (m.group(1) if m else (r.stdout + r.stderr)[-600:]).strip().splitlines()[0][:300]
+            lines = (m.group(1) if m else (r.stdout + r.stderr)[-600:]).strip().splitlines()
+            items = [x.strip()[2:] for x in lines if x.lstrip().startswith("- ")]   # a list of findings: name them
+            detail = ("; ".join(items[:3]) + (f"; +{len(items) - 3} more" if len(items) > 3 else "") if items
+                      else lines[0] if lines else "no output")[:300]
             print(r.stdout[-6000:], flush=True)
         else:
             gl = pathlib.Path(env["PORT_LOG_DIR"]) / f"gate-loop{'-' + extra[1] if extra else ''}.log"
             text = gl.read_text(encoding="utf-8", errors="replace") if gl.exists() else ""
             detail = green_detail(text)
+            if extra:     # a green client with recorded pre-existing defects says so, never silently
+                gl = _load("gate_loop", "gate-loop.py")
+                _b, known = gl.log_findings(text, a.modid, repo)
+                if known:
+                    detail += f"; {len(known)} known pre-existing defect(s) listed in .github/gatec-known.txt"
+                foreign = gl.foreign_findings(text, repo)
+                if foreign:   # another mod's code threw during this run: not this port's failure, but its trail
+                    print("[ci-gates] WARNING: logged exceptions thrown in OTHER mods' code during this run "
+                          "(report each to that mod):\n" + "\n".join(f"  - {f}" for f in foreign), flush=True)
+                    detail += (f"; warning: {len(foreign)} logged exception(s) in other mods' code, e.g. "
+                               f"{foreign[0].split(', caught')[0]}")
             leaked = sorted(loaded_mods(text) & {m for ms in excluded.values() for m in ms})
             if leaked:      # a minimal pass that loaded the mods it meant to leave out tested nothing
                 record(label, False, f"minimal environment not applied: the game loaded {', '.join(leaked)}")

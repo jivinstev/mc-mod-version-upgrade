@@ -67,7 +67,8 @@ def build(mods, out, offline=False):
         manual = "".join(
             f'<details class="test"><summary><span class="n">{n}</span> {html.escape(t["title"])} '
             f'<span class="cat">{html.escape(t["category"])}</span></summary>'
-            f'<p class="muted">{md_inline(t["why"])}</p><ol class="install">'
+            + (f'<p class="warn"><strong>Warning:</strong> {md_inline(t["warning"])}</p>' if t.get("warning") else "")
+            + f'<p class="muted">{md_inline(t["why"])}</p><ol class="install">'
             + "".join(f"<li>{md_inline(s)}</li>" for s in t["steps"])
             + f'</ol><p><strong>Expect:</strong> {md_inline(t["expect"])}</p><p class="muted"><code>{html.escape(t["where"])}</code></p></details>'
             for n, t in enumerate(tests, 1))
@@ -78,6 +79,10 @@ def build(mods, out, offline=False):
         commits = re.findall(r"^- `(\w+)` (.+)$", size, re.M)
         left = re.search(r"Left out of the offer: (.+)", size)
         ver = [l[2:] for l in sec(md, "Verified").splitlines() if l.startswith("- ")]
+        mts = sec(md, f"Manual tests (the {len(tests)} highest-value)")
+        before = "".join(f'<p class="warn">{md_inline(l[2:])}</p>' for l in
+                         (mts.split("### Before you test", 1)[1].split("### 1.", 1)[0] if "### Before you test" in mts else "").splitlines()
+                         if l.startswith("- "))
         msg = sec(md, "Draft message to the authors")
         prd = sec(md, "Draft PR description (only if they ask for a PR)")
         cards.append(f'''<section class="mod" id="m{i}">
@@ -95,7 +100,8 @@ def build(mods, out, offline=False):
       <ul class="commits">{"".join(f"<li><code>{s}</code> {html.escape(t)}</li>" for s, t in commits)}</ul>
       {f'<p class="muted">{html.escape("Left out: " + left.group(1))}</p>' if left else ""}
       <h3>Verified</h3><ul class="checks">{"".join(f"<li>{linkify(v)}</li>" for v in ver)}</ul>
-      {f'<h3>Manual tests -- the {len(tests)} that matter most</h3><p class="muted">What no automated gate reaches. A few minutes each.</p>{manual}' if tests else ""}
+      {(lambda d: f'<h3>Defects the authors&#39; original already has</h3>{md_block(d)}' if d else "")(sec(md, "Defects the authors' original already has"))}
+      {f'<h3>Manual tests -- the {len(tests)} that matter most</h3><p class="muted">What no automated gate reaches. A few minutes each.</p>{before}{manual}' if tests else ""}
       <h3>Words</h3>
       {copy(f"msg{i}", msg, "Message to the authors")}
       {copy(f"pr{i}", prd, "PR description, only if they ask")}
@@ -124,6 +130,7 @@ def build(mods, out, offline=False):
     .assets {{ margin:4px 0 0; padding-left:18px; font:13px var(--mono) }}
     .commits, .checks {{ margin:0; padding-left:18px }} .commits li, .checks li {{ overflow-wrap:anywhere }}
     code {{ font:12.5px var(--mono); background:var(--code); padding:1px 4px; border-radius:3px }} .muted {{ color:var(--muted); font-size:13px }}
+    .warn {{ border-left:3px solid var(--pend); padding:6px 10px; margin:8px 0; background:var(--code) }}
     .copy {{ border:1px solid var(--line); border-radius:6px; margin-top:10px; overflow:hidden }}
     .copy-head {{ display:flex; justify-content:space-between; align-items:center; padding:6px 10px; background:var(--code); font-size:13px }}
     .copy button {{ font:600 12px var(--sans); color:var(--fg); background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:3px 10px; cursor:pointer }}

@@ -403,12 +403,33 @@ def tests(repo, limit=10):
     return mod, pick(cands, limit), len(cands)
 
 
-def markdown(mod, chosen, total):
+def apply_notes(chosen, notes):
+    """Merge a port's hand-written notes (its work folder's manual-tests.notes.json) into the generated tests,
+    matched by title, so a regenerated list keeps them: {"<title>": {"warning": "...", "steps_before": [...]}}.
+    A warning is for a test that is safe to run only in some setting (a throwaway world, say): what the generator
+    reads off the code cannot know that a debug mob wrecks the world it is summoned into."""
+    for t in chosen:
+        n = notes.get(t["title"], {})
+        if n.get("warning"):
+            t["warning"] = n["warning"]
+        if n.get("steps_before"):
+            t["steps"] = list(n["steps_before"]) + [s for s in t["steps"] if s not in n["steps_before"]]
+    return chosen
+
+
+def markdown(mod, chosen, total, warnings=()):
+    """warnings: mod-wide hazards a tester must know first (the notes file's "_warnings" list), whatever test
+    they run -- e.g. an item that wrecks the world it is used in, which no generated test names."""
     L = [f"## Manual tests (the {len(chosen)} highest-value)", "",
          f"What no automated gate reaches, picked for variety from {total} candidates found in this port's own code. "
          "Each is a few minutes; together they cover the paths where ports break unseen.", ""]
+    if warnings:
+        L += ["### Before you test", ""] + [f"- **Warning:** {w}" for w in warnings] + [""]
     for i, t in enumerate(chosen, 1):
-        L += [f"### {i}. {t['title']}", "", f"*Why:* {t['why']}", ""]
+        L += [f"### {i}. {t['title']}", ""]
+        if t.get("warning"):
+            L += [f"> **Warning:** {t['warning']}", ""]
+        L += [f"*Why:* {t['why']}", ""]
         L += [f"{n}. {s}" for n, s in enumerate(t["steps"], 1)]
         L += ["", f"**Expect:** {t['expect']}", "", f"<sub>code: `{t['where']}`</sub>", ""]
     return "\n".join(L + [FAIL_BLOCK, ""])
@@ -456,6 +477,12 @@ def self_check():
         chk("curio and structure steps", "/give @s ex:lucky_ring" in md and "/locate structure ex:tower" in md)
         chk("failure block", "### If a test fails" in md)
         chk("cap honoured", len(tests(d, 3)[1]) == 3)
+        boss = next(t for t in chosen if t["category"] == "boss")
+        apply_notes(chosen, {boss["title"]: {"warning": "wrecks the world", "steps_before": ["Make a throwaway world"]}})
+        md2 = markdown(mod, chosen, total)
+        chk("mod-wide warnings come first", "### Before you test" in markdown(mod, chosen, total, ["sword wipes"]).split("### 1.")[0])
+        chk("a note's warning and first step survive into the markdown",
+            "> **Warning:** wrecks the world" in md2 and boss["steps"][0] == "Make a throwaway world")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

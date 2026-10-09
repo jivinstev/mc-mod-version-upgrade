@@ -260,6 +260,8 @@ The whole `VertexConsumer`/`renderToBuffer` API changed shape in 1.21; a mod wit
 106. **`ModelPart` fields are final; `BufferBuilder`/`Tesselator` reshaped to `MeshData`** · **Pattern:** reassigning `modelPart.x/y/z`/`xRot` on a `final` field; `Tesselator.getInstance().getBuilder()` then `builder.end()` → `BufferBuilder.RenderedBuffer` · **Error:** `cannot assign a value to final variable` / `cannot find symbol: getBuilder / RenderedBuffer` · **Fix:** mutate pose via the setters (`part.setPos`, `part.setRotation`, or `part.x = …` only where still allowed — most are now assigned through helpers). Buffers: `Tesselator.getInstance().begin(Mode, VertexFormat)` returns a `BufferBuilder`; `builder.build()` yields a **`MeshData`** (was `RenderedBuffer`); upload via `BufferUploader.drawWithShader(mesh)`. `RenderSystem.getInverseViewRotationMatrix()` is gone — reconstruct from the camera/pose if you needed it (flagged for visual re-verify, not a crash).
 107. **A custom `VertexConsumer` wrapper must implement the new interface** · **Pattern:** a decorator like a `TiledTextureGenerator`/`SheetedDecalTextureGenerator` implementing `VertexConsumer` with the old `vertex/color/uv/endVertex` methods · **Error:** `X is not abstract and does not override abstract method addVertex/setColor/… in VertexConsumer` · **Fix:** implement the renamed surface (`addVertex`, `setColor`, `setUv`, `setUv1`, `setUv2`, `setOverlay`, `setLight`, `setNormal`) and delegate; there's no `endVertex` to forward. `DefaultedVertexConsumer` was removed, so a wrapper that extended it must implement `VertexConsumer` directly.
 
+107b. **🔴 A `VertexConsumer` kept across another `getBuffer(...)` crashes on 1.21 — it used to write into the wrong batch quietly** · **Pattern:** a `MultiBufferSource` wrapper (a "phasing"/"ghost"/tint effect) that returns `new Wrapper(delegate.getBuffer(otherType))`, typically re-routing a solid/cutout entity type to a translucent one from the SHARED buffer, while the renderer (GeckoLib above all) keeps that consumer for the whole model and a layer asks the same source for a different type mid-render · **Runtime (1.21):** `IllegalStateException: Not building!` from `BufferBuilder.ensureBuilding` ← the wrapper's `addVertex` ← `GeoRenderer.createVerticesOfQuad`, under "Rendering entity in world": the shared source closed the first type's builder when the second was requested, and on 1.21 each type gets its own short-lived builder. On 1.20 the shared builder object was reused for the next type, so the stale consumer silently drew into the wrong batch (a wrong-texture glitch nobody reported). Only fires when the wrapped path runs (here: a mob under the mod's own effect), so a gauntlet that dresses one mob finds it on some runs and not others · **Fix:** hold the SOURCE and the type, and fetch the buffer again at the start of every vertex (`addVertex`): the same type returns the same builder, another type a fresh one, and each whole vertex lands in the right batch. **Scan:** `catalog-scans.md` "§L/107b". **Gate:** the gauntlet now gives every mod effect to every mod mob in view (both harness templates).
+
 ## §A augment — Vineflower "Couldn't be decompiled" methods (its `$VF` marker) → recover with CFR
 Add to §A (decompile prep): Vineflower sometimes emits a method body as a bare comment — Vineflower's `$VF` marker, a colon, then `Couldn't be decompiled` —
 (complex control flow, or a **huge tool-generated method** it won't lift). **Void** ones compile as empty
@@ -5511,3 +5513,28 @@ one list each; both routes call it, and `tools/test-port-tools.sh` fails if eith
 itself, or a converter on disk is in no list. · **Also found:** the jar route's era hop leaves GeckoLib at its
 1.21.1 version, so a GeckoLib mod's 26.2 build asks for an artifact that does not exist (§V10) and the compile
 never starts; the fork route bumps it in `tools/targets.py`. Same shape, one layer down: a build step one route has.
+
+**X49. 🔴 A gate that only asks "did it crash" passes over everything the game CAUGHT — read a green client's
+log for the mod's own lost assets and logged exceptions, and record what the original already had.** ·
+**Pattern:** a Gate C verdict taken from the harness's PASS line alone · **Symptom:** none; every phase green.
+Measured on one full mod set (a 200-mob battle, 60 s): a library's force-removal threw
+`UnsupportedOperationException` 18 times and logged it, leaving entities half-removed; one mod had two entity
+textures, a sound file and a sound event missing, a GeckoLib animation that failed to parse (`'-'` as a value)
+and an entity with a spawn entry but no spawn placement; another had armour icons whose trim textures were
+never added to the block atlas. All behind PASS, and the logged exception sat 30 lines above a disconnect a
+player hit later · **Fix:** `tools/gate-loop.py`'s Gate C verdict now reads the passing log too
+(`log_findings`): the mod's own `Failed to load texture`, `Missing textures in model`, `File <ns>:sounds/…
+does not exist`, `Missing sound for event`, GeckoLib `Unable to find model/animation` and `Unable to parse
+animation` (attributed by searching the mod's own animation files), entities listed as lacking a spawn
+placement, and any logged exception whose first non-platform frame is in a package of the mod's `@Mod`
+class (frames are read past the `LAYER/module@ver/` prefix; harness classes are ignored). Every pattern is
+scoped to the mod's namespace or package, so another mod's noise is never the port's · **Pre-existing is not
+the same as fine, and not the port's to hide:** all of the findings above were in the authors' original
+1.20.1 code (checked against their branches, and for the removal against 1.20.1's own bytecode). A defect
+the original already has goes in the fork's `.github/gatec-known.txt` -- one substring per line with
+`# why` -- so the run lists it, says so in its detail, and stays green; the same line is the trail for
+anyone who later fixes it. A finding with no such line is red. · **And the trigger can be in another mod:**
+a library's own gates may never call the broken path (here the removal bug fired only when a dependent's mob
+used the library's API), so a dependent's run lists logged exceptions thrown in OTHER mods' code as a
+non-failing warning (`foreign_findings`; ci-gates prints them and names one in its summary row). File each on
+that mod's fork -- it is not the dependent's failure, and dropping it is how this one stayed hidden.

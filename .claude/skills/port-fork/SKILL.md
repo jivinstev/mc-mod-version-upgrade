@@ -41,6 +41,10 @@ mod's code never enters it:
 ```bash
 git clone https://github.com/<user>/<repo> ~/forks/<repo> && cd ~/forks/<repo> && git fetch --all
 ```
+**Turn Issues on in the new fork** (GitHub turns them off for forks): Settings > General > Features >
+Issues. Step 4b files the authors' pre-existing defects there, and no tool here can change that setting --
+ask the user to tick it. `tools/port-offer.py` reminds you when it is still off.
+
 Dependencies that are themselves forks being ported: port those first (step 3 per dependency), then
 pass `--provide <authors' coordinate prefix>=<mavenLocal coordinate>` to the dependent port. The
 dependency's own build publishes it with `./gradlew publishToMavenLocal`.
@@ -78,8 +82,12 @@ why; fix the cause it names, then resume with `--from <stage>`. A stage run by h
 ```bash
 python3 tools/ci-gates.py --repo ~/forks/<repo> --modid <modid> --base origin/<authors' branch>
 ```
-The authors' own `build`, Gate A, Gate B and Gate C (a real client under Xvfb: `launch`, `spawn`), with
-nothing fixed. This is exactly what the fork's CI will run, so a red here is a red there. Gate C needs
+The authors' own `build`, Gate A, Gate B and Gate C (a real client under Xvfb: `launch`, `spawn`, `battle`
+-- every mob in two teams fighting -- and `gauntlet` -- every item used, block placed, effect applied), with
+nothing fixed. A client that passes is still red when its log shows the mod's own textures, models, sounds or
+GeckoLib animations failing to load, or an exception thrown in the mod's own code that something caught and
+only logged (CATALOG §X49). A defect the authors' original already has is recorded, not hidden: one substring
+per line in the fork's `.github/gatec-known.txt`, with `# why` -- the run then lists it and stays green. This is exactly what the fork's CI will run, so a red here is a red there. Gate C needs
 Xvfb + Mesa (`apt-get install -y xvfb libgl1-mesa-dri`; the CI workflow installs the same).
 
 CI runs it twice: `--env full` (every mod the build puts on the runtime) and `--env minimal` (only the
@@ -87,6 +95,50 @@ mods the port's `neoforge.mods.toml` requires). Run both. In minimal, `tools/opt
 the compiled classes before Gate B and fails when a listener class names an optional mod in a method's
 types (NeoForge cannot even scan it without that mod); a mixin that reaches one is reported, because it
 runs whether or not the mod is installed and is safe only behind a "mod loaded" check.
+
+## 4b. Defects the authors' original already has
+
+The gates (above all the X49 log check) find defects the port did not cause. Run the gates with every
+Gate C phase first, and once more with the mod together with what players install it with (its dependents
+too): a defect a mod shows only in company (one mod's code calling another's) never appears in its own run.
+Then, for each finding:
+
+A green run can also WARN about logged exceptions thrown in another mod's code (a dependency whose broken
+path only your mod's calls reach): those go through the same steps on THAT mod's fork.
+
+0. **Trace it to its cause** -- the asset, registration or code line the log line points at (a texture path
+   built from a prefix, a sounds.json entry, a sound event id, an animation value, a missing placement). A
+   finding is one cause; several log lines can share it.
+1. **Prove it is pre-existing** before calling it that: the same code or asset on the authors' own branch
+   (`git show origin/<authors' branch>:<path>`, with the commit), and where vanilla behaviour decides it, the
+   old Minecraft version's own classes (`javap` on its server jar). "Probably was like that" is not evidence.
+   Check the authors' NEWEST code too: they may have fixed it after the release (take their fix, and say so),
+   or their fix may have a side effect of its own (fix that as well, in the same commit, and say so).
+2. **Clear-cut fix** (one obvious correct change: a missing registration, a dead `sounds.json` entry, a
+   malformed value, a missing atlas source) -- fix it on the port branch as **one commit per defect**, subject
+   `Pre-existing upstream defect: <what>`, the body naming the authors' file and commit that has it, the fix,
+   and the gate that now proves it. One commit each keeps the port's own diff readable and lets anyone
+   cherry-pick a single fix.
+3. **No clear-cut fix** (it needs art, or it is the authors' design, or the choice is theirs) -- change no
+   code. Add a line to the fork's `.github/gatec-known.txt` (`<substring>  # pre-existing upstream, #<issue>`)
+   so the gate lists it and stays green. Ask the user first when the call is not obvious.
+4. **File an issue on the fork for every one, fixed or not**, titled `Pre-existing: <symptom>`: that it is
+   pre-existing (with the authors' file:line and commit), the symptom and log lines, the impact, and either
+   the fix commit or the options. A fixed one is filed and closed by its commit; an open one is the record.
+5. **Do not backport to the authors' old branch.** There is no test setup for their Minecraft version here,
+   and an unvalidated fix in their branch costs more than the bug. The issue and the single commit are the
+   hand-off; backport only when a maintainer asks or someone plays that version, and then build Gates A/B
+   for it first.
+
+**Bring the user one decision table before changing anything**: per defect, the mod, what a player sees,
+the proof it is pre-existing, and either the clear-cut fix (flag any that change behaviour, e.g. new spawn
+rules) or the options when there is none. Ask about the non-obvious ones; a fix that needs art may have a
+stand-in worth trying -- look at it in a real client (a Gate C photo) before proposing it.
+
+**The handoff shows them.** `tools/port-offer.py` adds a "Defects the authors' original already has"
+section -- the `Pre-existing upstream defect:` commits, the `gatec-known.txt` lines and the fork's
+`Pre-existing:` issues -- and `tools/offer-page.py` puts it on the handoff page, so whoever installs or
+reviews the port sees what was wrong before it, what was fixed, and what is still open.
 
 ## 5. CI and release
 
@@ -150,6 +202,14 @@ bosses, keys, screens, raids, curios, custom recipes, structures, natural spawns
 different things, and each step names a real `/summon`, `/give` or `/locate` id read from the mod's own
 registration code. Read it before handing over: where a step says "see what starts it in <file>", open that
 file and write the real trigger in. Ends with what to do when one fails (which logs, the prompt to paste).
+
+**A test that is only safe in some setting gets a warning, and the warning lives in the work folder.** The
+generator reads code; it cannot know that a debug mob wrecks the world it is summoned into (one did: summoning
+it switched off every other content mod and disconnected the player, by the author's design). Write
+`manual-tests.notes.json` next to `OFFER.md` -- `{"<test title>": {"warning": "...", "steps_before": ["..."]}}` --
+and `port-offer.py` merges it on every regeneration; the warning shows above the steps in `OFFER.md` and on the
+handoff page. A hazard no generated test names (an item that wrecks the world it is used in) goes in the same
+file as `"_warnings": ["..."]`, shown under "Before you test" ahead of every test. Whenever a manual test turns out to be hazardous, add the note before the next handoff.
 
 **When the fork is not on the release** (see "Two branches" below), pass `--release <commit>` or
 `--published <ISO time>`: the offer then says how many unreleased commits the port sits on, how big they are
