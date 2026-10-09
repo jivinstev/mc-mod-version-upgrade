@@ -35,6 +35,12 @@ python3 "$root/tools/check-no-ip.py" "$@" || {
   echo "pre-push: REFUSED — the IP gate failed. Nothing has been pushed." >&2
   exit 1
 }
+# A skill change is a README change (CLAUDE.md): compared with origin/main when this clone has it.
+base=""; git -C "$root" rev-parse -q --verify origin/main >/dev/null && base="--base origin/main"
+python3 "$root/tools/check-readme.py" --root "$root" $base || {
+  echo "pre-push: REFUSED — the README no longer describes the skills (see above). Nothing has been pushed." >&2
+  exit 1
+}
 HOOK
 chmod +x .git/hooks/pre-push
-echo "installed: .git/hooks/pre-push  (refuses pushes to main; runs check-no-ip.py)"
+echo "installed: .git/hooks/pre-push  (refuses pushes to main; runs check-no-ip.py and check-readme.py)"

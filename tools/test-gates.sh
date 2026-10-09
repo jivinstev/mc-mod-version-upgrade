@@ -137,6 +137,14 @@ ecase 0 "binary open is fine"                 'open("x", "rb").read()'
 ecase 0 "encoding= named"                     'p.read_text(encoding="utf-8")'
 ecase 0 "a marked exception"                  'p.read_text()  # encoding-ok: test'
 
+echo "8. the README gate (a skill change is a README change)"
+( python3 "$ROOT/tools/check-readme.py" >/dev/null 2>&1 )
+[ $? = 0 ] && { echo "  PASS  the real README describes every skill"; pass=$((pass+1)); } \
+           || { echo "  FAIL  the real README fails its own gate"; fail=$((fail+1)); }
+( python3 "$ROOT/tools/check-readme.py" --self-check | grep -q "self-check: OK" )
+[ $? = 0 ] && { echo "  PASS  a skill with no row, a missing path, and a skill change without a README change all FAIL; 'nothing checked' is not a pass"; pass=$((pass+1)); } \
+           || { echo "  FAIL  check-readme.py --self-check"; fail=$((fail+1)); }
+
 echo
 echo "gates self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

@@ -29,6 +29,7 @@ GATES = [  # (name, argv relative to the worktree, needs names file?)
     ("ip", [sys.executable, "tools/check-no-ip.py", "--root", "."], True),
     ("fidelity", [sys.executable, "tools/check-catalog-fidelity.py", "--root", "."], False),
     ("vendored", [sys.executable, "tools/gen-vendored.py", "--check"], False),
+    ("readme", [sys.executable, "tools/check-readme.py", "--root", "."], False),
 ]
 # Every tools/test-*.sh in the PR's own tree is run too, DISCOVERED rather than listed: a hand-kept list
 # silently stopped running two self-tests the day they were added. (test-review.sh calls this script with

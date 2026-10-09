@@ -9,7 +9,10 @@ script a skill drives (a new `tools/*.py`, a new flag people will type, a step t
 
 - the skill's row in the "Skills" table: what to ask in Claude Code, and the command-line equivalent;
 - the section that describes the workflow, if what the user gets has changed;
-- check every `tools/` path the README names still exists (`python3 tools/check-catalog-fidelity.py` checks
-  the catalogue's, not the README's).
+- every `tools/` path the README names must still exist.
+
+`tools/check-readme.py` enforces this: the pre-push hook (`tools/install-hooks.sh`) and CI run it. A skill edit
+that genuinely needs no README change (a typo, an internal step) says so with a commit line
+`README-unchanged: <reason>`.
 
 Describe only what the code does: if a step runs on one route and not another, say which.
