@@ -52,8 +52,10 @@ def load_pack(path):
     for lineno, raw in enumerate(pathlib.Path(path).read_text(encoding="utf-8").splitlines(), 1):
         m = GROUP.match(raw)
         if m:
-            cur = {"id": m.group(1), "kind": m.group(2), "title": m.group(3).strip(), "line": lineno,
-                   "rows": [], "detect": None, "options": [], "only_if": None}
+            # `key` identifies the GROUP; several groups can implement one catalogue id, and an `only-if` on one
+            # of them must not switch the others off (measured: it silently disabled two unrelated groups)
+            cur = {"id": m.group(1), "key": f"{m.group(1)}@{lineno}", "kind": m.group(2), "title": m.group(3).strip(),
+                   "line": lineno, "rows": [], "detect": None, "options": [], "only_if": None}
             groups.append(cur)
             continue
         m = META.match(raw)
@@ -93,7 +95,7 @@ def apply(src, pack, dry_run=False, max_sites=5):
         for row in g["rows"]:
             frm = row.split("\t", 1)[0].strip()
             owner[frm[3:] if frm.startswith("re:") else
-                  (r'(?<=\.)' + re.escape(frm[len("member:"):]) + r'\b' if frm.startswith("member:") else frm)] = g["id"]
+                  (r'(?<=\.)' + re.escape(frm[len("member:"):]) + r'\b' if frm.startswith("member:") else frm)] = g["key"]
     groups = load_pack(pack)
     hits, sites = collections.Counter(), collections.defaultdict(list)
     files_changed = 0
@@ -103,10 +105,10 @@ def apply(src, pack, dry_run=False, max_sites=5):
         for g in groups:   # choice/manual: find, do not touch -- on the text BEFORE any rewrite
             if g["kind"] != "auto":
                 for m in g["detect"].finditer(before):
-                    sites[g["id"]].append(f"{rel}:{before.count(chr(10), 0, m.start()) + 1}")
+                    sites[g["key"]].append(f"{rel}:{before.count(chr(10), 0, m.start()) + 1}")
         # a group with `#? only-if` applies only to files whose ORIGINAL text matches it, so a bare
         # name a library shares with the mod's own classes is renamed only where the library is used (§X7)
-        off = frozenset(g["id"] for g in groups if g["only_if"] is not None and not g["only_if"].search(before))
+        off = frozenset(g["key"] for g in groups if g["only_if"] is not None and not g["only_if"].search(before))
         for rx, repl, _ex in regexes:
             if owner.get(rx.pattern) in off:
                 continue
@@ -129,9 +131,9 @@ def apply(src, pack, dry_run=False, max_sites=5):
     for g in groups:
         r = {"id": g["id"], "kind": g["kind"], "title": g["title"]}
         if g["kind"] == "auto":
-            r["rewrites"] = hits.get(g["id"], 0)
+            r["rewrites"] = hits.get(g["key"], 0)
         else:
-            r["sites"] = len(sites[g["id"]]); r["first"] = sites[g["id"]][:max_sites]
+            r["sites"] = len(sites[g["key"]]); r["first"] = sites[g["key"]][:max_sites]
             if g["kind"] == "choice":
                 r["options"] = [o[0] for o in g["options"]]
         report["groups"].append(r)

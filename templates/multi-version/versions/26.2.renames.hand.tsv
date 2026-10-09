@@ -1021,4 +1021,70 @@ LazyLoadedValue	Supplier
 # Ingredient.of(ItemStack) is gone; of(ItemLike) takes the item the stack wrapped (one level of call nesting).
 re:\bIngredient\.of\(\s*new ItemStack\(((?:[^()]|\([^()]*\))*)\)\s*\)	Ingredient.of(\1)
 
+# --- Constant holders diffed between the two jars (1.21.1 neoforge merged vs 26.2 patched): every removed
+# constant whose successor is unambiguous. Block/item tag PAIRS moved to BlockItemTags (a record of
+# block()/item() keys); the rest are renames checked present-in-26.2 / absent-in-26.2 by the generator.
+# PathType's DANGER_* -> *_IN_NEIGHBOR and DAMAGE_* -> * keep their ordinal meaning (the 26.2 evaluator reads
+# them where 1.21.1 read the old names); three shipped ports made the same four renames by hand.
+re:\bBlockTags\.ACACIA_LOGS\b	net.minecraft.tags.BlockItemTags.ACACIA_LOGS.block()
+re:\bBlockTags\.BIRCH_LOGS\b	net.minecraft.tags.BlockItemTags.BIRCH_LOGS.block()
+re:\bBlockTags\.CHERRY_LOGS\b	net.minecraft.tags.BlockItemTags.CHERRY_LOGS.block()
+re:\bBlockTags\.COAL_ORES\b	net.minecraft.tags.BlockItemTags.COAL_ORES.block()
+re:\bBlockTags\.CRIMSON_STEMS\b	net.minecraft.tags.BlockItemTags.CRIMSON_STEMS.block()
+re:\bBlockTags\.DARK_OAK_LOGS\b	net.minecraft.tags.BlockItemTags.DARK_OAK_LOGS.block()
+re:\bBlockTags\.DIAMOND_ORES\b	net.minecraft.tags.BlockItemTags.DIAMOND_ORES.block()
+re:\bBlockTags\.EMERALD_ORES\b	net.minecraft.tags.BlockItemTags.EMERALD_ORES.block()
+re:\bBlockTags\.LAPIS_ORES\b	net.minecraft.tags.BlockItemTags.LAPIS_ORES.block()
+re:\bBlockTags\.LOGS_THAT_BURN\b	net.minecraft.tags.BlockItemTags.LOGS_THAT_BURN.block()
+re:\bBlockTags\.MANGROVE_LOGS\b	net.minecraft.tags.BlockItemTags.MANGROVE_LOGS.block()
+re:\bBlockTags\.OAK_LOGS\b	net.minecraft.tags.BlockItemTags.OAK_LOGS.block()
+re:\bBlockTags\.REDSTONE_ORES\b	net.minecraft.tags.BlockItemTags.REDSTONE_ORES.block()
+re:\bBlockTags\.SAPLINGS\b	net.minecraft.tags.BlockItemTags.SAPLINGS.block()
+re:\bBlockTags\.SMELTS_TO_GLASS\b	net.minecraft.tags.BlockItemTags.SMELTS_TO_GLASS.block()
+re:\bBlockTags\.SPRUCE_LOGS\b	net.minecraft.tags.BlockItemTags.SPRUCE_LOGS.block()
+re:\bBlockTags\.WARPED_STEMS\b	net.minecraft.tags.BlockItemTags.WARPED_STEMS.block()
+re:\bItemTags\.BUTTONS\b	net.minecraft.tags.BlockItemTags.BUTTONS.item()
+re:\bItemTags\.DOORS\b	net.minecraft.tags.BlockItemTags.DOORS.item()
+re:\bItemTags\.FENCES\b	net.minecraft.tags.BlockItemTags.FENCES.item()
+re:\bItemTags\.FLOWERS\b	net.minecraft.tags.BlockItemTags.FLOWERS.item()
+re:\bItemTags\.SLABS\b	net.minecraft.tags.BlockItemTags.SLABS.item()
+re:\bItemTags\.SMALL_FLOWERS\b	net.minecraft.tags.BlockItemTags.SMALL_FLOWERS.item()
+re:\bItemTags\.STAIRS\b	net.minecraft.tags.BlockItemTags.STAIRS.item()
+re:\bItemTags\.STONE_BUTTONS\b	net.minecraft.tags.BlockItemTags.STONE_BUTTONS.item()
+re:\bItemTags\.TRAPDOORS\b	net.minecraft.tags.BlockItemTags.TRAPDOORS.item()
+re:\bMobEffects\.CONFUSION\b	MobEffects.NAUSEA
+re:\bMobEffects\.DIG_SLOWDOWN\b	MobEffects.MINING_FATIGUE
+re:\bMobEffects\.HARM\b	MobEffects.INSTANT_DAMAGE
+re:\bMobEffects\.HEAL\b	MobEffects.INSTANT_HEALTH
+re:\bPathType\.DAMAGE_FIRE\b	PathType.FIRE
+re:\bPathType\.DANGER_FIRE\b	PathType.FIRE_IN_NEIGHBOR
+re:\bPathType\.DAMAGE_OTHER\b	PathType.DAMAGING
+re:\bPathType\.DANGER_OTHER\b	PathType.DAMAGING_IN_NEIGHBOR
+re:\bPathType\.DANGER_POWDER_SNOW\b	PathType.ON_TOP_OF_POWDER_SNOW
+re:\bPathType\.DANGER_TRAPDOOR\b	PathType.ON_TOP_OF_TRAPDOOR
+re:\bBlockStateProperties\.DRIPSTONE_THICKNESS\b	BlockStateProperties.SPELEOTHEM_THICKNESS
+re:\bBlockTags\.CONCRETE_POWDER\b	BlockTags.CONCRETE_POWDERS
+re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_0_OCCUPIED\b	BlockStateProperties.SLOT_0_OCCUPIED
+re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_1_OCCUPIED\b	BlockStateProperties.SLOT_1_OCCUPIED
+re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_2_OCCUPIED\b	BlockStateProperties.SLOT_2_OCCUPIED
+re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_3_OCCUPIED\b	BlockStateProperties.SLOT_3_OCCUPIED
+re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_4_OCCUPIED\b	BlockStateProperties.SLOT_4_OCCUPIED
+re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_5_OCCUPIED\b	BlockStateProperties.SLOT_5_OCCUPIED
+
+# --- Recurring hand rows harvested from the shipped multi-version ports (each in 2+ of them), checked in the
+# 26.2 jar. isAlliedTo(Entity) is FINAL on 26.2 and its overridable half is considersEntityAsAlly: the override
+# moves, and a super call inside it follows (a judgement row, §W6: a super.isAlliedTo outside an override would
+# skip the team check -- the ports' sites were all inside the override).
+re:\bFMLLoader\.getDist\(\)	net.neoforged.fml.loading.FMLEnvironment.getDist()
+re:\bFMLEnvironment\.production\b	FMLEnvironment.isProduction()
+re:\bLevelRenderer\.getLightColor\(	net.minecraft.util.LightCoordsUtil.getLightCoords(
+re:\bRenderType\.entityCutout\(	net.minecraft.client.renderer.rendertype.RenderTypes.entityCutoutCull(
+re:\bRenderType\.entityCutoutNoCull\(	net.minecraft.client.renderer.rendertype.RenderTypes.entityCutout(
+re:\bpublic boolean isAlliedTo\(Entity (\w+)\)	protected boolean considersEntityAsAlly(Entity \1)
+re:\bsuper\.isAlliedTo\(	super.considersEntityAsAlly(
+net.minecraft.world.level.portal.DimensionTransition	net.minecraft.world.level.portal.TeleportTransition
+DimensionTransition	TeleportTransition
+net.neoforged.neoforge.event.level.BlockEvent.BreakEvent	net.neoforged.neoforge.event.level.block.BreakBlockEvent
+BlockEvent.BreakEvent	net.neoforged.neoforge.event.level.block.BreakBlockEvent
+
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----

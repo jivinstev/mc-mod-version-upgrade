@@ -86,6 +86,8 @@ re:public EntityDimensions getDimensions\(Pose (\w+)\)	protected EntityDimension
 re:\bsuper\.getDimensions\(	super.getDefaultDimensions(
 
 #@ 32 auto  hurtAndBreak takes the slot, not a break callback
+re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?(\w+)\)?\s*->\s*\3\.broadcastBreakEvent\(\3\.getUsedItemHand\(\)\)\)	.hurtAndBreak(\1, \2, net.minecraft.world.entity.LivingEntity.getSlotForHand(\2.getUsedItemHand()))
+re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]*[hH]and(?:\(\))?)\)\)	.hurtAndBreak(\1, \2, net.minecraft.world.entity.LivingEntity.getSlotForHand(\3))
 re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]+)\)\)	.hurtAndBreak(\1, \2, \3)
 
 #@ 113 auto  setMaxUpStep is the STEP_HEIGHT attribute (not on known non-living bases: a plain Entity has no attribute map)
@@ -220,3 +222,121 @@ re:\bEquipmentSlot\.Type\.ARMOR\b	EquipmentSlot.Type.HUMANOID_ARMOR
 #@ 5 auto  mod-bus and config access outside the @Mod constructor go through the active container (forge-shapes injects the constructor's own)
 re:\bFMLJavaModLoadingContext\.get\(\)\.getModEventBus\(\)	net.neoforged.fml.ModLoadingContext.get().getActiveContainer().getEventBus()
 re:\bModLoadingContext\.get\(\)\.registerConfig\(	ModLoadingContext.get().getActiveContainer().registerConfig(
+
+# ---- catalogue-to-codemod pass (measured on a real Forge 1.20.1 jar; every target checked with javap on 21.1)
+
+#@ 103 auto  IronGolem.Crackiness is net.minecraft.world.entity.Crackiness.Level
+#? only-if	\bCrackiness\b
+re:(?m)^import\s+net\.minecraft\.world\.entity\.animal\.IronGolem\.Crackiness\s*;	import net.minecraft.world.entity.Crackiness;
+re:(?<![\w$.])(?:IronGolem\.)?Crackiness(?![\w$])(?!\s*;)(?!\.Level\b)(?!\.GOLEM\b)(?!\.WOLF_ARMOR\b)	Crackiness.Level
+
+#@ 30 auto  a MobType comparison is an entity-type tag test (WATER is #aquatic)
+re:([\w.]+(?:\(\))?)\.getMobType\(\)\s*==\s*MobType\.(UNDEAD|ARTHROPOD|ILLAGER)\b	\1.getType().is(net.minecraft.tags.EntityTypeTags.\2)
+re:([\w.]+(?:\(\))?)\.getMobType\(\)\s*!=\s*MobType\.(UNDEAD|ARTHROPOD|ILLAGER)\b	!\1.getType().is(net.minecraft.tags.EntityTypeTags.\2)
+re:([\w.]+(?:\(\))?)\.getMobType\(\)\s*==\s*MobType\.WATER\b	\1.getType().is(net.minecraft.tags.EntityTypeTags.AQUATIC)
+re:([\w.]+(?:\(\))?)\.getMobType\(\)\s*!=\s*MobType\.WATER\b	!\1.getType().is(net.minecraft.tags.EntityTypeTags.AQUATIC)
+
+#@ 5 auto  Forge's ConfigScreenFactory is NeoForge's IConfigScreenFactory (a functional interface: the lambda is the factory)
+re:registerExtensionPoint\(\s*(?:ConfigScreenHandler\.)?ConfigScreenFactory\.class,\s*\(\)\s*->\s*new\s+(?:ConfigScreenHandler\.)?ConfigScreenFactory\(\s*(\([\w\s,]*\)\s*->\s*(?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\)\s*\)	registerExtensionPoint(net.neoforged.neoforge.client.gui.IConfigScreenFactory.class, () -> \1)
+re:(?m)^import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.client\.ConfigScreenHandler(?:\.ConfigScreenFactory)?\s*;[ \t]*\n	
+
+#@ 133 auto  Raid.RaiderType.create is gone (raider types are an enum extension): the call is left as a comment
+re:(?m)^([ \t]*)((?:Raid\.)?RaiderType\.create\([^;\n]*\);)	\1// 1.21 MIGRATION (catalogue #133): raider types are an enum extension now (enumextensions.json); dropped: \2
+
+#@ 10 auto  registry keys are singular (ForgeRegistries.Keys.X became Registries.X with the plural kept)
+#? only-if	net\.minecraft\.core\.registries\.Registries|ForgeRegistries
+re:(?<![\w$])Registries\.BLOCKS\b	Registries.BLOCK
+re:(?<![\w$])Registries\.ITEMS\b	Registries.ITEM
+re:(?<![\w$])Registries\.FLUIDS\b	Registries.FLUID
+re:(?<![\w$])Registries\.MOB_EFFECTS\b	Registries.MOB_EFFECT
+re:(?<![\w$])Registries\.SOUND_EVENTS\b	Registries.SOUND_EVENT
+re:(?<![\w$])Registries\.POTIONS\b	Registries.POTION
+re:(?<![\w$])Registries\.ENTITY_TYPES\b	Registries.ENTITY_TYPE
+re:(?<![\w$])Registries\.BLOCK_ENTITY_TYPES\b	Registries.BLOCK_ENTITY_TYPE
+re:(?<![\w$])Registries\.PARTICLE_TYPES\b	Registries.PARTICLE_TYPE
+re:(?<![\w$])Registries\.MENU_TYPES\b	Registries.MENU
+re:(?<![\w$])Registries\.RECIPE_TYPES\b	Registries.RECIPE_TYPE
+re:(?<![\w$])Registries\.RECIPE_SERIALIZERS\b	Registries.RECIPE_SERIALIZER
+re:(?<![\w$])Registries\.ATTRIBUTES\b	Registries.ATTRIBUTE
+re:(?<![\w$])Registries\.STAT_TYPES\b	Registries.STAT_TYPE
+re:(?<![\w$])Registries\.FEATURES\b	Registries.FEATURE
+re:(?<![\w$])Registries\.WORLD_CARVERS\b	Registries.CARVER
+re:(?<![\w$])Registries\.PAINTING_VARIANTS\b	Registries.PAINTING_VARIANT
+re:(?<![\w$])Registries\.VILLAGER_PROFESSIONS\b	Registries.VILLAGER_PROFESSION
+re:(?<![\w$])Registries\.POI_TYPES\b	Registries.POINT_OF_INTEREST_TYPE
+re:(?<![\w$])Registries\.MEMORY_MODULE_TYPES\b	Registries.MEMORY_MODULE_TYPE
+re:(?<![\w$])Registries\.SENSOR_TYPES\b	Registries.SENSOR_TYPE
+re:(?<![\w$])Registries\.ACTIVITIES\b	Registries.ACTIVITY
+re:(?<![\w$])Registries\.COMMAND_ARGUMENT_TYPES\b	Registries.COMMAND_ARGUMENT_TYPE
+re:(?<![\w$])Registries\.ENCHANTMENTS\b	Registries.ENCHANTMENT
+re:(?<![\w$])Registries\.BIOMES\b	Registries.BIOME
+re:(?<![\w$])Registries\.STRUCTURE_TYPES\b	Registries.STRUCTURE_TYPE
+re:(?<![\w$])Registries\.CHUNK_GENERATORS\b	Registries.CHUNK_GENERATOR
+re:(?<![\w$])Registries\.BLOCK_STATE_PROVIDER_TYPES\b	Registries.BLOCK_STATE_PROVIDER_TYPE
+re:(?<![\w$])Registries\.FOLIAGE_PLACER_TYPES\b	Registries.FOLIAGE_PLACER_TYPE
+re:(?<![\w$])Registries\.TREE_DECORATOR_TYPES\b	Registries.TREE_DECORATOR_TYPE
+
+#@ 83 auto  a SoundEvents constant with variants is a Holder: unwrap with value(), never get()
+re:\b(SoundEvents\.[A-Z_0-9]+)\.get\(\)	\1.value()
+
+#@ 24 auto  MobEffectInstance curative items are EffectCures (an empty list clears them)
+re:\.setCurativeItems\(\s*(?:ImmutableList|List)\.of\(\s*\)\s*\)	.getCures().clear()
+
+#@ R21 auto  ProjectileUtil.getMobArrow takes the firing weapon (null = none; an EMPTY stack throws)
+re:\bProjectileUtil\.getMobArrow\(([^,()]+),\s*([^,()]+),\s*([^,()]+)\)	ProjectileUtil.getMobArrow(\1, \2, \3, null)
+
+#@ 104 auto  renderColoredCutoutModel takes one packed ARGB int (opaque white = -1)
+re:\brenderColoredCutoutModel\(((?:[^()]|\([^()]*\))*?),\s*1\.0F?,\s*1\.0F?,\s*1\.0F?\s*\)	renderColoredCutoutModel(\1, -1)
+
+#@ 120 auto  LivingChangeTargetEvent.getOriginalTarget is getOriginalAboutToBeSetTarget
+re:\.getOriginalTarget\(\)	.getOriginalAboutToBeSetTarget()
+
+#@ 95 auto  LootContextParams.KILLER is ATTACKING_ENTITY; DIRECT_KILLER is DIRECT_ATTACKING_ENTITY
+re:\bLootContextParams\.KILLER_ENTITY\b	LootContextParams.ATTACKING_ENTITY
+re:\bLootContextParams\.DIRECT_KILLER_ENTITY\b	LootContextParams.DIRECT_ATTACKING_ENTITY
+re:\bLootContextParams\.KILLER\b	LootContextParams.ATTACKING_ENTITY
+re:\bLootContextParams\.DIRECT_KILLER\b	LootContextParams.DIRECT_ATTACKING_ENTITY
+
+#@ 66 auto  Entity.getGravity is final; the overridable hook is getDefaultGravity (a double)
+re:\b(protected|public)\s+float\s+getGravity\(\s*\)	\1 double getDefaultGravity()
+
+#@ 92 auto  ToolAction is ItemAbility (ToolActions -> ItemAbilities)
+#? only-if	net\.(?:minecraftforge|neoforged\.neoforge)\.common\.ToolAction
+net.neoforged.neoforge.common.ToolActions	net.neoforged.neoforge.common.ItemAbilities
+net.neoforged.neoforge.common.ToolAction	net.neoforged.neoforge.common.ItemAbility
+ToolActions	ItemAbilities
+ToolAction	ItemAbility
+
+#@ 91 auto  IEntityWithComplexSpawn reads and writes a registry-aware buffer
+#? only-if	IEntityWithComplexSpawn|IEntityAdditionalSpawnData
+re:\b(writeSpawnData|readSpawnData)\(\s*(?:net\.minecraft\.network\.)?FriendlyByteBuf\b	\1(net.minecraft.network.RegistryFriendlyByteBuf
+
+#@ 135 auto  Event.isCancelable is gone: a cancellable event is so by type, so the guard is dropped
+re:\s*&&\s*\w+\.isCancelable\(\)	
+re:(?<![\w$.])\w+\.isCancelable\(\)\s*&&\s*	
+
+#@ 65 auto  SpawnEggItem.getType reads the stack's components, not its tag
+re:\.getType\(\s*(\w+)\.getTag\(\)\s*\)	.getType(\1)
+
+#@ 97 auto  wood/set-type blocks take the type FIRST, then Properties
+re:\bnew\s+(DoorBlock|TrapDoorBlock|StandingSignBlock|WallSignBlock|CeilingHangingSignBlock|WallHangingSignBlock)\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType|WoodType)\.\w+|[\w.]*(?:SET_TYPE|WOOD_TYPE|_WOOD|BlockSetType|WoodType)\w*)\s*\)	new \1(\3, \2)
+re:\bnew\s+FenceGateBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:WoodType)\.\w+|[\w.]*(?:WOOD_TYPE|_WOOD|WoodType)\w*)\s*\)	new FenceGateBlock(\2, \1)
+re:\bnew\s+ButtonBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)\w*),\s*(\d+),\s*(?:true|false)\s*\)	new ButtonBlock(\2, \3, \1)
+
+#@ 35 manual  RecordItem is gone: music discs are an Item with the JUKEBOX_PLAYABLE component + a jukebox_song datapack entry
+#? detect	\bRecordItem\b
+
+#@ 141 manual  getAttackReachSqr is gone: isWithinMeleeAttackRange returns a boolean (delete the distance comparison)
+#? detect	\bgetAttackReachSqr\(
+
+#@ 103 manual  Raid.getLeaderBannerInstance takes the BannerPattern lookup: level.registryAccess().lookupOrThrow(Registries.BANNER_PATTERN)
+#? detect	\bgetLeaderBannerInstance\(\s*\)
+
+#@ R17 manual  JigsawPlacement.addPieces gained PoolAliasLookup, DimensionPadding and LiquidSettings
+#? detect	\bJigsawPlacement\.addPieces\(
+
+#@ 102 manual  a Structure codec is a MapCodec (RecordCodecBuilder.mapCodec) with Structure.settingsCodec(instance) first
+#? detect	\bsettingsCodec\(
+
+#@ 100 manual  ProjectileWeaponItem.customArrow takes the projectile and weapon stacks
+#? detect	\.customArrow\(\s*\w+\s*\)

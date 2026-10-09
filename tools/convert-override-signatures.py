@@ -29,6 +29,8 @@ THE TABLE (HOOKS below; `--list` prints it).  Each row was read off the 26.2 jar
   Item.inventoryTick(ItemStack, Level, Entity, int, boolean)    -> (ItemStack, ServerLevel, Entity, EquipmentSlot)
      isSelected becomes `slot == MAINHAND`; the inventory slot INDEX has no 26.2 value (-1 is passed) and 26.2
      calls this on the SERVER only -- a body that reads the index or branches on isClientSide is NOTED.
+  Mob.customServerAiStep()                                      -> (ServerLevel)   (it ran server-side already;
+     six shipped ports made this edit by hand)
 
 Matched by method name AND the exact old parameter types (annotations, `final` and package prefixes ignored), in
 a class that extends or implements something; an override already in the 26.2 shape does not match.  REFUSED and
@@ -70,6 +72,11 @@ HOOKS = [
      "super": "super.inventoryTick({a0}, portedLevel, {a2}, portedSlot)", "super_void": True,
      "notes": [("{n3}", "reads the inventory slot index, which 26.2 does not pass (-1 now)"),
                ("isClientSide", "branches on isClientSide; 26.2 calls inventoryTick on the server only")]},
+    {"name": "customServerAiStep", "old_ret": "void", "old": [],
+     "new_ret": "void", "new": ["net.minecraft.server.level.ServerLevel portedLevel"],
+     "body": ["this.ported$customServerAiStep(portedLevel);"],
+     "extras": ["net.minecraft.server.level.ServerLevel portedLevel"],
+     "super": "super.customServerAiStep(portedLevel)", "super_void": True},
 ]
 HEADER = re.compile(r"(?P<mods>(?:public|protected)\s+(?:final\s+)?)(?P<ret>[\w.<>\[\]]+)\s+(?P<name>\w+)\s*\(")
 
@@ -201,7 +208,7 @@ def convert_text(text):
         ind = re.match(r"[ \t]*", text[text.rfind("\n", 0, m.start()) + 1:]).group(0)
         inner = ind + ("\t" if ind.startswith("\t") else "    ")
         new_params = ", ".join(x.format(**fill) for x in hook["new"])
-        old_params = ", ".join(f"{t} {n}" for t, n in typed) + "".join(", " + e for e in hook["extras"])
+        old_params = ", ".join([f"{t} {n}" for t, n in typed] + list(hook["extras"]))
         stmts = "".join(f"\n{inner}{s.format(**fill)}" for s in hook["body"])
         out.append(text[pos:m.start()])
         out.append(f"{m.group('mods')}{hook['new_ret']} {hook['name']}({new_params}) {{{stmts}\n{ind}}}\n\n"

@@ -206,6 +206,9 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
         if unresolved:
             raise RuntimeError("dependencies do not resolve: " + ", ".join(unresolved[:6]) + " -- wrong coordinates for "
                                "the target, or a maven this machine cannot reach (tools/local-maven.py); see " + log.name)
+        if "daemon has disappeared" in text or "OutOfMemoryError" in text:   # not the AT's fault: say so
+            raise RuntimeError(f"the Gradle daemon died while recompiling Minecraft (memory?), not an AT problem; "
+                               f"rerun the stage (see {log.name})")
         _rc, out = run("fix-access-transformer.py", "--work", repo, "--overrides-from", log)
         if " 0 override" in out:
             raise RuntimeError(f"Minecraft's recompile fails and no access-transformer override explains it (see {log.name})")
