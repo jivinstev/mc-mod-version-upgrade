@@ -78,8 +78,12 @@ why; fix the cause it names, then resume with `--from <stage>`. A stage run by h
 ```bash
 python3 tools/ci-gates.py --repo ~/forks/<repo> --modid <modid> --base origin/<authors' branch>
 ```
-The authors' own `build`, Gate A, Gate B and Gate C (a real client under Xvfb: `launch`, `spawn`), with
-nothing fixed. This is exactly what the fork's CI will run, so a red here is a red there. Gate C needs
+The authors' own `build`, Gate A, Gate B and Gate C (a real client under Xvfb: `launch`, `spawn`, `battle`
+-- every mob in two teams fighting -- and `gauntlet` -- every item used, block placed, effect applied), with
+nothing fixed. A client that passes is still red when its log shows the mod's own textures, models, sounds or
+GeckoLib animations failing to load, or an exception thrown in the mod's own code that something caught and
+only logged (CATALOG §X49). A defect the authors' original already has is recorded, not hidden: one substring
+per line in the fork's `.github/gatec-known.txt`, with `# why` -- the run then lists it and stays green. This is exactly what the fork's CI will run, so a red here is a red there. Gate C needs
 Xvfb + Mesa (`apt-get install -y xvfb libgl1-mesa-dri`; the CI workflow installs the same).
 
 CI runs it twice: `--env full` (every mod the build puts on the runtime) and `--env minimal` (only the

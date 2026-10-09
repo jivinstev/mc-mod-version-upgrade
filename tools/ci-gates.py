@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run a finished port's gates in CI -- no model, no workers, a plain pass/fail with the evidence.
 
-    python3 tools/ci-gates.py --repo . --modid <modid> --base <author's ref> [--gatec launch,spawn]
+    python3 tools/ci-gates.py --repo . --modid <modid> --base <author's ref> [--gatec launch,spawn,battle,gauntlet]
                               [--summary SUMMARY.md] [--work-dir DIR]
 
 The fork's own CI calls this (templates/upstream-harness/port-ci.yml), so anyone can see on the branch that
@@ -151,7 +151,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", default="."); ap.add_argument("--modid", required=True)
     ap.add_argument("--base", help="the author's ref (mixins they left unlisted stay exempt from Gate A)")
-    ap.add_argument("--gatec", default="launch,spawn", help="Gate C phases; '' skips Gate C")
+    ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet", help="Gate C phases; '' skips Gate C")
     ap.add_argument("--summary", default="ci-gates-summary.md"); ap.add_argument("--work-dir")
     ap.add_argument("--skip-author-build", action="store_true")
     ap.add_argument("--env", choices=("full", "minimal"), default="full",
@@ -256,6 +256,10 @@ def main():
             gl = pathlib.Path(env["PORT_LOG_DIR"]) / f"gate-loop{'-' + extra[1] if extra else ''}.log"
             text = gl.read_text(encoding="utf-8", errors="replace") if gl.exists() else ""
             detail = green_detail(text)
+            if extra:     # a green client with recorded pre-existing defects says so, never silently
+                _b, known = _load("gate_loop", "gate-loop.py").log_findings(text, a.modid, repo)
+                if known:
+                    detail += f"; {len(known)} known pre-existing defect(s) listed in .github/gatec-known.txt"
             leaked = sorted(loaded_mods(text) & {m for ms in excluded.values() for m in ms})
             if leaked:      # a minimal pass that loaded the mods it meant to leave out tested nothing
                 record(label, False, f"minimal environment not applied: the game loaded {', '.join(leaked)}")

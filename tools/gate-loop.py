@@ -276,7 +276,84 @@ def data_errors(text, ns):
     return out
 
 
-def failure_of(text, client=False, ns=None):
+# What a PASSING client can still be telling you, in one WARN/ERROR line each (CATALOG §X49): the mod's own
+# assets missing (each renders or plays as nothing) and errors its code threw that something caught and only
+# logged. A crash gate cannot see any of them. Each pattern must name the mod's namespace, so another mod's
+# noise is never this port's.
+ASSET_LOST = [
+    (r"Missing item model for location ({ns}:[\w/.-]+)", "item with no model (renders as the missing-texture cube; "
+     "from 1.21.2 it needs assets/<ns>/items/<id>.json, CATALOG §V42b)"),
+    (r"Failed to load texture: ({ns}:[\w/.-]+)", "texture that does not load"),
+    (r"Missing textures in model ({ns}:[\w/.#-]+)", "model whose textures are missing"),
+    (r"File ({ns}:sounds/[\w/.-]+) does not exist", "sound file a sounds.json names but the jar lacks"),
+    (r"Missing sound for event: ({ns}:[\w/.-]+)", "sound event with no sound"),
+    (r"Unable to find (?:model|animation)[:]? ({ns}:[\w/.-]+)", "GeckoLib model or animation that is not found"),
+]
+VANILLA_FRAME = re.compile(r"^(?:java\.|jdk\.|sun\.|com\.sun\.|net\.minecraft\.|net\.neoforged\.|com\.mojang\.|"
+                           r"com\.google\.|it\.unimi\.|io\.netty\.|org\.|cpw\.|com\.llamalad7\.)")
+FRAME_CLASS = re.compile(r"^\s*at (?:\S+/)?([\w$.]+)\(")    # drops a 'LAYER/module@ver/' prefix
+HARNESS = re.compile(r"(BootSmokeTest|RecipeProbe|GameTestRegistrar)")
+EXC_HEAD = re.compile(r"^(?:Caused by: )?((?:[a-z_]\w*\.)+[A-Z]\w*(?:Exception|Error|Throwable))\b(:.*)?$")
+
+
+def mod_packages(work):
+    """The Java packages of the mod's @Mod classes: whose frames make a logged exception this mod's own."""
+    out = set()
+    for f in pathlib.Path(work, "src/main/java").rglob("*.java") if work else []:
+        t = f.read_text(encoding="utf-8", errors="replace")
+        if re.search(r"^@Mod\b|^\s*@Mod\(", t, re.M):
+            m = re.search(r"^package\s+([\w.]+)\s*;", t, re.M)
+            if m:
+                out.add(m.group(1))
+    return out
+
+
+def known_findings(work):
+    """<repo>/.github/gatec-known.txt: one substring per line (+ '# why'); a finding containing it is a recorded,
+    pre-existing defect -- still listed, no longer failing. Lets a port be green without hiding what is wrong."""
+    f = pathlib.Path(work, ".github/gatec-known.txt") if work else None
+    if not f or not f.exists():
+        return []
+    return [l.split("#", 1)[0].strip() for l in f.read_text(encoding="utf-8").splitlines() if l.split("#", 1)[0].strip()]
+
+
+def log_findings(text, ns, work=None):
+    """-> (findings, known): the mod's lost assets and the logged exceptions its own code threw, one line each."""
+    out = []
+    if ns:
+        for rx, what in ASSET_LOST:
+            hits = sorted(set(re.findall(rx.format(ns=re.escape(ns)), text)))
+            if hits:
+                out.append(f"{len(hits)} {what}: {', '.join(hits[:12])}")
+        anims = sorted(set(re.findall(r"Unable to parse animation: (\S+)", text)))
+        mine = [a for a in anims if work and any(a in f.read_text(encoding="utf-8", errors="replace")
+                for f in pathlib.Path(work, "src/main/resources/assets", ns).rglob("*.json"))]
+        if mine:
+            out.append(f"{len(mine)} GeckoLib animation(s) that fail to parse (each plays as nothing): {', '.join(mine[:12])}")
+        unplaced = sorted(set(re.findall(r"^\s+- (%s:[\w/.-]+)$" % re.escape(ns), text, re.M)))
+        if unplaced and "RegisterSpawnPlacementsEvent" in text:
+            out.append(f"{len(unplaced)} entity type(s) with a spawn entry but no spawn placement (they spawn anywhere, "
+                       f"even in mid-air): {', '.join(unplaced)}")
+    pkgs = mod_packages(work)
+    if pkgs:
+        lines, seen = text.splitlines(), {}
+        for i, l in enumerate(lines):
+            m = EXC_HEAD.match(l.strip())
+            if not m or i + 1 >= len(lines) or not lines[i + 1].lstrip().startswith("at "):
+                continue
+            frames = [x for x in lines[i + 1:i + 60] if x.lstrip().startswith("at ")]
+            names = [FRAME_CLASS.match(x).group(1) for x in frames if FRAME_CLASS.match(x)]
+            owner = next((n for n in names if not VANILLA_FRAME.match(n) and "$$Lambda" not in n), None)
+            if owner and not HARNESS.search(owner) and any(owner.startswith(pk + ".") for pk in pkgs):
+                key = (m.group(1), owner)
+                seen[key] = seen.get(key, 0) + 1
+        for (exc, where), n in sorted(seen.items(), key=lambda kv: -kv[1]):
+            out.append(f"{exc} thrown in {where}, caught and only logged ({n}x)")
+    known = known_findings(work)
+    return [f for f in out if not any(k in f for k in known)], [f for f in out if any(k in f for k in known)]
+
+
+def failure_of(text, client=False, ns=None, work=None):
     """-> (kind, text for the worker, a short signature to detect a repeat) or None when green."""
     lines = text.splitlines()
     if client:   # Gate C: the harness's own verdict decides; a FAIL carries its reason
@@ -284,13 +361,13 @@ def failure_of(text, client=False, ns=None):
         if verdicts and ": PASS" in verdicts[-1]:
             # a client that did not crash is not a client that DRAWS the mod: an item with no model is the
             # magenta cube with one WARN line (§V42b; 184 items on a 26.2 port behind a PASS)
-            miss = sorted(set(re.findall(r"Missing item model for location (%s:[\w/.-]+)" % re.escape(ns), text))) if ns else []
-            if not miss:
+            bad, _known = log_findings(text, ns, work)
+            if not bad:
                 return None
-            return ("assets", f"The client ran, but {len(miss)} of this mod's items have no model and render as the "
-                    f"missing-texture cube (one 'Missing item model for location' line each): {', '.join(miss[:15])}. "
-                    "From 1.21.2 an item needs assets/<ns>/items/<id>.json naming its model (CATALOG §V42b); "
-                    "add one per item, or the model it names.", f"assets:{len(miss)}")
+            kind = "assets" if all("thrown in" not in b for b in bad) else "logged"
+            return (kind, "The client passed, but the log shows what it could not do (CATALOG §X49); fix each, or "
+                    "record a pre-existing one in .github/gatec-known.txt with why:\n" + "\n".join(f"  - {b}" for b in bad),
+                    f"{kind}:" + "|".join(b[:60] for b in bad)[:180])
         if verdicts:
             boot = [l.strip() for l in lines if "_BOOT_TEST:" in l][-15:]
             return "gatec", "\n".join(boot), verdicts[-1][:200]
@@ -418,7 +495,7 @@ def main():
             if gone:
                 note(event="fresh-world", run=run, note=str(gone))
         f = failure_of(run_gate(work, task, a.heap, LOG_DIR(work) / f"gate-loop{'-' + phase if phase else ''}.log", phase),
-                       client=bool(phase), ns=ns)
+                       client=bool(phase), ns=ns, work=work)
         if f is None:
             note(event="green", run=run, phase=phase, spent=round(spent, 4))
             phases.pop(0); last_sig = None
@@ -514,6 +591,20 @@ def self_check():
     cl = "M_BOOT_TEST: PASS - done\n[x] [Render thread/WARN] [minecraft/ModelManager]: Missing item model for location m:pie\n"
     ok &= failure_of(cl, client=True, ns="m")[0] == "assets" and failure_of(cl, client=True, ns="z") is None
     ok &= failure_of(bad) is None          # no namespace known: the check is off, never guessing
+    with tempfile.TemporaryDirectory() as d:  # §X49: a PASS with a logged exception from the mod's own code is red
+        w = pathlib.Path(d); (w / "src/main/java/a/m").mkdir(parents=True); (w / ".github").mkdir()
+        (w / "src/main/java/a/m/M.java").write_text("package a.m;\n@Mod(\"m\")\nclass M {}\n", encoding="utf-8")
+        lg = ("M_BOOT_TEST: PASS - done\n[S/ERROR] [x]: removal failed\njava.lang.UnsupportedOperationException: null\n"
+              "\tat MC-BOOTSTRAP/com.google.common@32/com.google.common.collect.ImmutableCollection.remove(I.java:1)\n"
+              "\tat TRANSFORMER/m@1/a.m.Util.clear(Util.java:9)\n"
+              "[W/WARN] [minecraft/TextureManager]: Failed to load texture: m:textures/e/x.png\n"
+              "\tat TRANSFORMER/o@1/b.o.Other.x(O.java:1)\n")
+        f = failure_of(lg, client=True, ns="m", work=w)
+        ok &= f is not None and f[0] == "logged" and "a.m.Util.clear" in f[1] and "m:textures/e/x.png" in f[1]
+        ok &= failure_of(lg.replace("a.m.Util", "b.o.Util"), client=True, ns="z", work=w) is None   # not this mod's
+        (w / ".github/gatec-known.txt").write_text("a.m.Util.clear  # pre-existing upstream\nx.png\n", encoding="utf-8")
+        ok &= failure_of(lg, client=True, ns="m", work=w) is None       # recorded as known: listed, not failing
+
     # not a load failure: a DEBUG mixin line naming the type; a real one still is
     ok = ok and not load_failed("[04:57:25] [Render thread/DEBUG] [mixin/]: Renaming @Accessor method "
                                 "getError()Lnet/neoforged/fml/ModLoadingException; to getError$x in a.json\n")

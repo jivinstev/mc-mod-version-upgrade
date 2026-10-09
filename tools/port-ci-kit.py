@@ -168,7 +168,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("trace"); t.add_argument("--repo", required=True); t.add_argument("--modid", required=True)
-    t.add_argument("--base"); t.add_argument("--gatec", default="launch,spawn")
+    t.add_argument("--base"); t.add_argument("--gatec", default="launch,spawn,battle,gauntlet")
     b = sub.add_parser("build"); b.add_argument("--version", required=True); b.add_argument("--out", default="dist")
     v = sub.add_parser("verify"); v.add_argument("kit")
     s = sub.add_parser("sha"); s.add_argument("--version", required=True)

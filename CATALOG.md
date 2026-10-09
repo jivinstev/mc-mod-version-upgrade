@@ -5511,3 +5511,24 @@ one list each; both routes call it, and `tools/test-port-tools.sh` fails if eith
 itself, or a converter on disk is in no list. · **Also found:** the jar route's era hop leaves GeckoLib at its
 1.21.1 version, so a GeckoLib mod's 26.2 build asks for an artifact that does not exist (§V10) and the compile
 never starts; the fork route bumps it in `tools/targets.py`. Same shape, one layer down: a build step one route has.
+
+**X49. 🔴 A gate that only asks "did it crash" passes over everything the game CAUGHT — read a green client's
+log for the mod's own lost assets and logged exceptions, and record what the original already had.** ·
+**Pattern:** a Gate C verdict taken from the harness's PASS line alone · **Symptom:** none; every phase green.
+Measured on one full mod set (a 200-mob battle, 60 s): a library's force-removal threw
+`UnsupportedOperationException` 18 times and logged it, leaving entities half-removed; one mod had two entity
+textures, a sound file and a sound event missing, a GeckoLib animation that failed to parse (`'-'` as a value)
+and an entity with a spawn entry but no spawn placement; another had armour icons whose trim textures were
+never added to the block atlas. All behind PASS, and the logged exception sat 30 lines above a disconnect a
+player hit later · **Fix:** `tools/gate-loop.py`'s Gate C verdict now reads the passing log too
+(`log_findings`): the mod's own `Failed to load texture`, `Missing textures in model`, `File <ns>:sounds/…
+does not exist`, `Missing sound for event`, GeckoLib `Unable to find model/animation` and `Unable to parse
+animation` (attributed by searching the mod's own animation files), entities listed as lacking a spawn
+placement, and any logged exception whose first non-platform frame is in a package of the mod's `@Mod`
+class (frames are read past the `LAYER/module@ver/` prefix; harness classes are ignored). Every pattern is
+scoped to the mod's namespace or package, so another mod's noise is never the port's · **Pre-existing is not
+the same as fine, and not the port's to hide:** all of the findings above were in the authors' original
+1.20.1 code (checked against their branches, and for the removal against 1.20.1's own bytecode). A defect
+the original already has goes in the fork's `.github/gatec-known.txt` -- one substring per line with
+`# why` -- so the run lists it, says so in its detail, and stays green; the same line is the trail for
+anyone who later fixes it. A finding with no such line is red.
