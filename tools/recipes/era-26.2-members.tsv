@@ -40,3 +40,11 @@ Mob	getCommandSenderWorld	level
 PathfinderMob	getCommandSenderWorld	level
 Player	getCommandSenderWorld	level
 ServerPlayer	getCommandSenderWorld	level
+# Harvested from the shipped multi-version ports (2-3 ports each); 1.21.1 owner and 26.2 member checked by javap.
+Mob	isWithinRestriction	isWithinHome
+PathfinderMob	isWithinRestriction	isWithinHome
+Direction	getNormal	getUnitVec3i
+Level	blockUpdated	updateNeighborsAt
+ServerLevel	blockUpdated	updateNeighborsAt
+LevelAccessor	blockUpdated	updateNeighborsAt
+Minecraft	getTimer	getDeltaTracker

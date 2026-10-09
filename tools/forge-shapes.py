@@ -359,6 +359,7 @@ def t_tick(path, text, ctx, res):
         res.count["tick"] += 1
     text = edit_spans(text, edits)
     if edits:
+        text = re.sub(r"(?m)^import\s+net\.(?:neoforged\.neoforge|minecraftforge)\.event\.TickEvent\.\w+\s*;[ \t]*\n", "", text)
         text = remove_import_if_unused(text, "net.neoforged.neoforge.event.TickEvent")
         text = remove_import_if_unused(text, "net.minecraftforge.event.TickEvent")
         text = remove_import_if_unused(text, "net.neoforged.neoforge.event.entity.living.LivingEvent")
@@ -828,8 +829,215 @@ def t_source(path, text, ctx, res):
     return text
 
 
+
+# --------------------------------------------------------------------------- T9 changed vanilla signatures (catalogue §B-§J)
+
+# Overrides whose PARAMETER LIST changed 1.20.1 -> 1.21.1 in a way a body need not notice: the new
+# parameter is added under a fresh name (or a dropped one removed when the body never reads it), and the
+# `super` call inside is rewritten to match. Each row: (method, old param types, new param list template,
+# super-call args template). {pN} is the Nth old parameter's NAME, {new} the fresh name. Verified with
+# javap on the NeoForge 21.1 recompile (catalogue #50, #103, #109, #119, R17e).
+SIG_OVERRIDES = [
+    ("applyRaidBuffs", ["int", "boolean"],
+     "net.minecraft.server.level.ServerLevel {new}, int {p0}, boolean {p1}", "{new}, {p0}, {p1}", "serverLevel"),
+    ("populateDefaultEquipmentEnchantments", ["RandomSource", "DifficultyInstance"],
+     "net.minecraft.world.level.ServerLevelAccessor {new}, RandomSource {p0}, DifficultyInstance {p1}", "{new}, {p0}, {p1}", "level"),
+    ("setupRotations", ["*", "PoseStack", "float", "float", "float"],
+     "{t0} {p0}, PoseStack {p1}, float {p2}, float {p3}, float {p4}, float {new}", "{p0}, {p1}, {p2}, {p3}, {p4}, {new}", "scale"),
+    ("getExperienceReward", [],
+     "net.minecraft.server.level.ServerLevel {new}, @javax.annotation.Nullable net.minecraft.world.entity.Entity killer", "{new}, killer", "level"),
+]
+# Overrides that DROP a parameter: (method, old types, index dropped, new prefix param, new prefix super arg).
+SIG_DROPS = [
+    ("finalizeSpawn", ["ServerLevelAccessor", "DifficultyInstance", "MobSpawnType", "SpawnGroupData", "CompoundTag"], 4, None),
+    ("dropCustomDeathLoot", ["DamageSource", "int", "boolean"], 1, ("net.minecraft.server.level.ServerLevel", "level")),
+]
+
+
+def _strip_ann(p):
+    return re.sub(r"@[\w.]+(\([^)]*\))?\s*", "", p).replace("final ", "").strip()
+
+
+def _types_match(params, want):
+    if len(params) != len(want):
+        return False
+    for p, w in zip(params, want):
+        t = ptype(_strip_ann(p)).split(".")[-1]
+        if w != "*" and t != w:
+            return False
+    return True
+
+
+def t_sigs(path, text, ctx, res):
+    edits = []
+    for mt in methods(text):
+        body = text[mt.body_open:mt.body_close + 1]
+        for name, want, tmpl, sup, base in SIG_OVERRIDES:
+            if mt.name != name or not _types_match(mt.params, want):
+                continue
+            names = [pname(p) for p in mt.params]
+            new = fresh(base, body + " ".join(names))
+            fmt = {f"p{i}": n for i, n in enumerate(names)} | {"new": new,
+                   "t0": ptype(_strip_ann(mt.params[0])) if mt.params else ""}
+            edits.append((mt.params_open + 1, mt.params_close, tmpl.format(**fmt)))
+            nb = re.sub(r"\bsuper\.%s\(([^()]*(?:\([^()]*\)[^()]*)*)\)" % name, lambda q: f"super.{name}({sup.format(**fmt)})", body)
+            if nb != body:
+                edits.append((mt.body_open, mt.body_close + 1, nb))
+            res.count["sigs"] += 1
+        for name, want, drop, prefix in SIG_DROPS:
+            if mt.name != name or not _types_match(mt.params, want):
+                continue
+            names = [pname(p) for p in mt.params]
+            dn = names[drop]
+            no_super = re.sub(r"\bsuper\.%s\(([^()]*(?:\([^()]*\)[^()]*)*)\)" % name, "", body)
+            if re.search(r"(?<![\w$.])%s(?![\w$])" % re.escape(dn), no_super):
+                # the body reads the dropped parameter (e.g. looting): say so, never guess its replacement
+                res.flags["sigs"].append(f"{path}:{line_of(text, mt.start)} {name}: the body reads `{dn}`, which "
+                                         "1.21.1 no longer passes; port it by hand")
+                continue
+            ps = [p for i, p in enumerate(mt.params) if i != drop]
+            args = [n for i, n in enumerate(names) if i != drop]
+            if prefix:
+                new = fresh(prefix[1], body + " ".join(names))
+                ps, args = [f"{prefix[0]} {new}"] + ps, [new] + args
+            edits.append((mt.params_open + 1, mt.params_close, ", ".join(ps)))
+            nb = re.sub(r"\bsuper\.%s\(([^()]*(?:\([^()]*\)[^()]*)*)\)" % name,
+                        lambda q: f"super.{name}({', '.join(args)})", body)
+            if nb != body:
+                edits.append((mt.body_open, mt.body_close + 1, nb))
+            res.count["sigs"] += 1
+    text = edit_spans(text, edits)
+
+    # CALL sites whose argument list changed and whose new argument the caller has in scope
+    def calls(t, name):
+        for m in re.finditer(r"(?<![\w$])%s\(" % re.escape(name), t):
+            e = match(t, m.end() - 1)
+            if e > 0:
+                yield m, e
+    # finalizeSpawn(level, difficulty, reason, data, null) -> drop the trailing CompoundTag (catalogue #50)
+    out, last = [], 0
+    for m, e in list(calls(text, "finalizeSpawn")):
+        args = split_args(text[m.end():e])
+        if len(args) == 5 and re.fullmatch(r"\s*(?:null|\(\s*CompoundTag\s*\)\s*null)\s*", args[4]):
+            out.append((m.end(), e, ",".join(args[:4]).strip()))
+            res.count["sigs"] += 1
+    text = edit_spans(text, out)
+    # JigsawPlacement.addPieces gained pool aliases, dimension padding and liquid settings (R17c): vanilla's own
+    # defaults for a structure that names none of them
+    out = []
+    for m, e in list(calls(text, "JigsawPlacement.addPieces")):
+        if len(split_args(text[m.end():e])) == 8:
+            out.append((e, e, ", net.minecraft.world.level.levelgen.structure.pools.alias.PoolAliasLookup.EMPTY, "
+                        "net.minecraft.world.level.levelgen.structure.pools.DimensionPadding.ZERO, "
+                        "net.minecraft.world.level.levelgen.structure.templatesystem.LiquidSettings.APPLY_WATERLOGGING"))
+            res.count["sigs"] += 1
+    text = edit_spans(text, out)
+    # populateDefaultEquipmentEnchantments(random, difficulty) inside a method holding a ServerLevelAccessor
+    out = []
+    for mt in methods(text):
+        lvl = next((pname(p) for p in mt.params if re.search(r"\b(ServerLevelAccessor|ServerLevel)\b", ptype(_strip_ann(p)))), None)
+        body = text[mt.body_open:mt.body_close + 1]
+        for m in re.finditer(r"(?<![\w$])populateDefaultEquipmentEnchantments\(", body):
+            e = match(body, m.end() - 1)
+            args = split_args(body[m.end():e])
+            if len(args) != 2:
+                continue
+            if not lvl:
+                res.flags["sigs"].append(f"{path}:{line_of(text, mt.body_open + m.start())} populateDefaultEquipmentEnchantments: "
+                                         "no ServerLevelAccessor in scope; pass one as the new first argument")
+                continue
+            out.append((mt.body_open + m.end(), mt.body_open + e, f"{lvl}, " + ", ".join(a.strip() for a in args)))
+            res.count["sigs"] += 1
+    text = edit_spans(text, out)
+    return text
+
+
+# --------------------------------------------------------------------------- T10 code shapes a rename row cannot see
+
+def _supplier_fields(src_texts):
+    """Simple field names declared `Supplier<...>` anywhere in the tree (registry entries a recipe row turned
+    from RegistryObject into Supplier): owner.FIELD passed where an ItemLike is wanted needs `.get()`."""
+    out = set()
+    for t in src_texts:
+        out |= set(re.findall(r"\bSupplier<[^;=]*?>\s+(\w+)\s*=", t))
+    return out
+
+
+def t_misc(path, text, ctx, res):
+    edits = []
+    # Raider/AbstractIllager inner goals: `new X(this, this...)` is `this.new X(this...)`; the protected nested
+    # class cannot be imported from another package, but a subclass names it by its simple name (catalogue #140).
+    for g in ("RaiderOpenDoorGoal", "HoldGroundAttackGoal"):
+        t2 = re.sub(r"(?<![\w$.])new\s+(?:(?:AbstractIllager|Raider)\.)?%s\(\s*this\s*,\s*" % g, f"this.new {g}(", text)
+        if t2 != text:
+            t2 = re.sub(r"(?m)^import\s+net\.minecraft\.world\.entity\.(?:monster\.AbstractIllager|raid\.Raider)\.%s\s*;[ \t]*\n" % g, "", t2)
+            res.count["misc"] += 1
+            text = t2
+    # A mixin casting `this` to its target must go through Object (catalogue §H #41 / #162)
+    if re.search(r"@Mixin\b", text):
+        t2, n = re.subn(r"\(\s*\(\s*([A-Z][\w.]*(?:<[^<>()]*>)?)\s*\)\s*this\s*\)", r"((\1)(Object)this)", text)
+        t2, n2 = re.subn(r"(?<![\w$)])\(\s*([A-Z][\w.]*)\s*\)\s*this\b(?!\s*\))", r"(\1)(Object)this", t2)
+        t2 = t2.replace("(Object)(Object)this", "(Object)this")
+        if t2 != text:
+            res.count["misc"] += n + n2
+            text = t2
+    # BuildCreativeModeTabContentsEvent.accept takes an ItemLike: a Supplier field needs .get()
+    sup = ctx.get("supplier_fields") or set()
+    if sup and "accept(" in text:
+        def fix(m):
+            fld = m.group(2).rsplit(".", 1)[-1]
+            if fld in sup:
+                res.count["misc"] += 1
+                return f"{m.group(1)}({m.group(2)}.get())"
+            return m.group(0)
+        text = re.sub(r"(\b\w+\.accept)\(\s*([\w.]+)\s*\)", fix, text)
+    # AttributeInstance.hasModifier takes the modifier's id now: a field declared AttributeModifier needs .id()
+    mods = set(re.findall(r"\bAttributeModifier\s+(\w+)\s*=", text))
+    if mods:
+        t2 = re.sub(r"\.hasModifier\(\s*(%s)\s*\)" % "|".join(map(re.escape, mods)), r".hasModifier(\1.id())", text)
+        if t2 != text:
+            res.count["misc"] += 1
+            text = t2
+    # A MobType getter override is gone: the entity type goes in the matching entity-type tag (catalogue #30)
+    for mt in reversed(methods(text)):
+        if mt.name == "getMobType" and not mt.params:
+            body = text[mt.body_open:mt.body_close + 1]
+            tag = re.search(r"return\s+MobType\.(UNDEAD|ARTHROPOD|ILLAGER|WATER|UNDEFINED)\s*;", body)
+            if not tag or body.count(";") != 1:
+                res.flags["misc"].append(f"{path}:{line_of(text, mt.start)} getMobType: not a constant return; port by hand")
+                continue
+            s = decl_span_start(text, mt.start)
+            text = text[:s] + text[mt.body_close + 1:]
+            if tag.group(1) != "UNDEFINED":   # the data half: the entity joins the vanilla tag (not guessed here)
+                res.flags["misc"].append(f"{path}: getMobType() returned {tag.group(1)}; add this entity to "
+                                         f"#minecraft:{TAG_OF_MOBTYPE[tag.group(1)].lower()} (data/minecraft/tags/entity_type/)")
+            res.count["misc"] += 1
+    # A Structure's codec is a MapCodec (catalogue #102): the 1.20 `mapCodec(...).codec()` / `create(...)`
+    # stored as a Codec becomes the MapCodec itself, so StructureType.codec() can return it
+    cls = re.search(r"\bclass\s+(\w+)[^{]*\bextends\s+(?:net\.minecraft\.world\.level\.levelgen\.structure\.)?Structure\b", text)
+    if cls:
+        me = cls.group(1)
+        for m in reversed(list(re.finditer(r"\bCodec<%s>(\s+\w+\s*=\s*)RecordCodecBuilder\.(mapCodec|create)\(" % me, text))):
+            e = match(text, m.end() - 1)
+            if e < 0:
+                continue
+            tail = re.match(r"\s*\.codec\(\)", text[e + 1:])
+            if m.group(2) == "mapCodec" and not tail:
+                continue
+            new_tail = "" if tail else ""
+            end = e + 1 + (tail.end() if tail else 0)
+            text = (text[:m.start()] + f"com.mojang.serialization.MapCodec<{me}>{m.group(1)}RecordCodecBuilder.mapCodec("
+                    + text[m.end():e + 1] + new_tail + text[end:])
+            res.count["misc"] += 1
+    text = remove_import_if_unused(text, "net.minecraft.world.entity.MobType")
+    return text
+
+
+TAG_OF_MOBTYPE = {"UNDEAD": "UNDEAD", "ARTHROPOD": "ARTHROPOD", "ILLAGER": "ILLAGER", "WATER": "AQUATIC"}
+
 TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attrmod", t_attrmod), ("nbt", t_nbt), ("hooks", t_hooks),
-              ("geo", t_geo), ("vc", t_vc), ("source", t_source)]
+              ("geo", t_geo), ("vc", t_vc), ("source", t_source),
+              ("sigs", t_sigs), ("misc", t_misc)]
 
 
 # --------------------------------------------------------------------------- driver
@@ -887,10 +1095,11 @@ def run(src, modid, only=None, dry=False):
     nbt_fqn = f"{root}.ItemNbt" if root else "ItemNbt"
     need_helper = False
     changed = 0
+    supplier_fields = _supplier_fields(f.read_text(encoding="utf-8", errors="replace") for f in src.rglob("*.java"))
     for f in sorted(src.rglob("*.java")):
         text = f.read_text(encoding="utf-8")
         orig = text
-        ctx = {"modid": modid, "imports": set(), "nbt_fqn": nbt_fqn}
+        ctx = {"modid": modid, "imports": set(), "nbt_fqn": nbt_fqn, "supplier_fields": supplier_fields}
         rel = f.relative_to(src).as_posix()
         for name, fn in TRANSFORMS:
             if only and name not in only:
@@ -948,6 +1157,35 @@ def main():
 # --------------------------------------------------------------------------- self-check
 
 CASES = [
+    ("sigs", """package a;
+class A extends AbstractIllager {
+    public void applyRaidBuffs(int wave, boolean unused) { super.applyRaidBuffs(wave, unused); }
+    protected void dropCustomDeathLoot(DamageSource source, int looting, boolean hit) { super.dropCustomDeathLoot(source, looting, hit); }
+    public SpawnGroupData finalizeSpawn(ServerLevelAccessor lvl, DifficultyInstance d, MobSpawnType r, SpawnGroupData g, CompoundTag t) {
+        this.populateDefaultEquipmentEnchantments(this.random, d);
+        return super.finalizeSpawn(lvl, d, r, g, t);
+    }
+    void s(Mob m, ServerLevel l) { m.finalizeSpawn(l, d, MobSpawnType.EVENT, null, null); }
+}
+""", ["applyRaidBuffs(net.minecraft.server.level.ServerLevel serverLevel, int wave, boolean unused)",
+      "super.applyRaidBuffs(serverLevel, wave, unused)",
+      "dropCustomDeathLoot(net.minecraft.server.level.ServerLevel level, DamageSource source, boolean hit)",
+      "super.dropCustomDeathLoot(level, source, hit)", "finalizeSpawn(ServerLevelAccessor lvl, DifficultyInstance d, MobSpawnType r, SpawnGroupData g)",
+      "super.finalizeSpawn(lvl, d, r, g)", "populateDefaultEquipmentEnchantments(lvl, this.random, d)",
+      "m.finalizeSpawn(l, d, MobSpawnType.EVENT, null)"], ["CompoundTag t"]),
+    ("misc", """package a;
+import net.minecraft.world.entity.monster.AbstractIllager.RaiderOpenDoorGoal;
+import net.minecraft.world.entity.MobType;
+@Mixin(DamageSources.class)
+class A extends AbstractIllager {
+    static final AttributeModifier SPEED = null;
+    void g() { this.goalSelector.addGoal(2, new RaiderOpenDoorGoal(this, this));
+        cir.setReturnValue(((DamageSources)this).source(x));
+        if (!inst.hasModifier(SPEED)) {} }
+    public MobType getMobType() { return MobType.ILLAGER; }
+}
+""", ["this.new RaiderOpenDoorGoal(this)", "((DamageSources)(Object)this).source(x)", "hasModifier(SPEED.id())"],
+     ["import net.minecraft.world.entity.monster.AbstractIllager.RaiderOpenDoorGoal;", "getMobType", "import net.minecraft.world.entity.MobType;"]),
     ("tick", """package a;
 import net.neoforged.neoforge.event.TickEvent;
 class A {

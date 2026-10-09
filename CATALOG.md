@@ -5538,3 +5538,29 @@ a library's own gates may never call the broken path (here the removal bug fired
 used the library's API), so a dependent's run lists logged exceptions thrown in OTHER mods' code as a
 non-failing warning (`foreign_findings`; ci-gates prints them and names one in its summary row). File each on
 that mod's fork -- it is not the dependent's failure, and dropping it is how this one stayed hidden.
+
+**X50. 🔴 A scope guard keyed by a NON-UNIQUE id switches off every group sharing it — `#? only-if` in a
+recipe pack silently disabled two unrelated groups.** · **Pattern:** several recipe groups implement the same
+catalogue entry (`#@ R21`, `#@ 104`, `#@ 103` each appear more than once), and one of them carries an
+`only-if` · **Symptom:** the other groups report DEAD on files they plainly match; a standalone test of the
+row matches and the pack does not. Measured: a new `getMobArrow` row (R21) died because the arrow-pickup
+group (also R21) is scoped to arrow files, and a `renderColoredCutoutModel` row (104) died behind the
+`renderToBuffer` group's scope. On a real port this also kept an existing networking group off, so two
+`PacketDistributor` rewrites it was written to make never happened · **Fix:** `tools/apply-recipes.py` keys
+groups by `<id>@<line>`, so a scope belongs to the group that declares it. · **General form:** any
+per-item switch must be keyed by something the item owns. An id that names a *lesson* is shared by design;
+a scope applies to *rows*.
+
+**X51. 🔴 A pre-stage that PARKS what the compiler will choke on makes every later count lie in the good
+direction — `park-optional` parked the source loader's own API as an "optional integration".** · **Pattern:**
+the parker calls a file an integration when it imports a package outside the platform list, and
+`net.minecraftforge.` was not on it, so any file still naming a Forge type at setup (networking on
+`SimpleChannel`, a `ConfigScreenFactory`, commands) was moved out of the build · **Symptom:** a LOWER error
+count and a port that compiles without its networking. Measured: 17 files of one library (its whole
+`message/` package, its commands and client events) and the config-screen handler of a mob mod, whose main
+class then failed on the missing import. The SimpleChannel converter, which exists for exactly those files,
+reported "0 files changed" because they were already gone · **Fix:** `net.minecraftforge.` is platform
+(`tools/park-optional.py`): it is what the recipe pack and forge-shapes port. · **How to measure across such
+a change:** compare the errors in files BOTH versions compiled, and report the newly-visible files as their
+own number. Here the like-for-like count fell (57 → 56) while the total rose by 142 errors that the old
+setup had been hiding, not causing. A before/after whose denominators differ is not a regression report.

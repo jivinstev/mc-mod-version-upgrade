@@ -355,6 +355,28 @@ def apply_dep_versions(repo, deps_json):
     return done
 
 
+def era_build_access_transformer(c, n, line):
+    """The access transformer is applied while Minecraft is RECOMPILED, which happens before the mod's own javac
+    -- so a 1.21.1 AT naming classes 26.2 moved, or missing a widening for an override 26.2 added, fails the build
+    step outright, and the mechanical stage that would fix both never runs (measured: an AT widening
+    Entity.positionRider, whose override widenings still named Boat/horse.AbstractHorse/Chicken, and 26.2's
+    Minecart overriding it for the first time). The same two steps the mechanical stage runs, run here first
+    (tools/mechanical-hop.py, so both routes keep one implementation): re-point the class names through the
+    cached 1.21.1 -> 26.x class-move map, then widen what the recompile log names. -> (n, line)"""
+    repo, t = c["repo"], tgt(c)
+    if not any(repo.glob("src/*/resources/META-INF/accesstransformer.cfg")):
+        return n, line
+    mh = _load_tool("mechanical_hop", "mechanical-hop.py")
+    moves = _load_tool("era_hop", "era-hop.py").ws_moves() / f"moves-1.21.1-to-{t.mc}.tsv"
+    if moves.exists():
+        mh.era_access_transformer(repo, moves)
+    try:
+        n = mh.at_loop(repo, lambda log: compile_count(repo, log), c["dir"])
+    except RuntimeError as e:
+        return None, str(e)
+    return n, (line if n is None else f"{n} errors")
+
+
 def st_build(c):
     repo, t = c["repo"], tgt(c)
     design = (c["dir"] / "DESIGN.md").read_text(encoding="utf-8") if (c["dir"] / "DESIGN.md").exists() else ""
@@ -373,6 +395,8 @@ def st_build(c):
         applied += [f"{x} (non-transitive)" for x in provide_nontransitive(repo, provide_pairs(c))]
         applied += loader_in_jar_name(repo)         # every target is NeoForge; an existing `neoforge` is left alone    # never left to the model (see the function)
         n, line = compile_count(repo, c["dir"] / "build-check.log")
+        if n is None and t.mechanical == "era":
+            n, line = era_build_access_transformer(c, n, line)
         if n is not None and raise_neo_floor(c):          # a dependency needs a newer NeoForge: recount on it
             n, line = compile_count(repo, c["dir"] / "build-check.log")
         unmet = provide_unmet(c)

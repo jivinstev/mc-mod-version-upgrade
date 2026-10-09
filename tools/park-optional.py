@@ -24,7 +24,10 @@ the compile loop will see it, and it is main code, so it is never parked automat
 """
 import argparse, pathlib, re, shutil, sys
 
-PLATFORM = ("java.", "javax.", "jdk.", "sun.", "net.minecraft.", "net.neoforged.", "com.mojang.", "org.spongepowered.",
+# net.minecraftforge.* is the SOURCE loader's own API, not an optional integration: the recipe pack and
+# forge-shapes port it. Parking it hid a main-class dependency (measured: a config-screen handler).
+
+PLATFORM = ("java.", "javax.", "jdk.", "sun.", "net.minecraft.", "net.neoforged.", "net.minecraftforge.", "com.mojang.", "org.spongepowered.",
             "org.jetbrains.", "org.intellij.", "com.google.", "it.unimi.", "org.apache.", "com.llamalad7.", "org.joml.",
             "org.slf4j.", "io.netty.", "org.lwjgl.", "com.electronwill.", "org.objectweb.", "cpw.mods.", "org.checkerframework.",
             "org.jspecify.", "net.jodah.", "com.ibm.icu.", "oshi.", "com.sun.", "org.w3c.", "org.xml.", "org.antlr.")
