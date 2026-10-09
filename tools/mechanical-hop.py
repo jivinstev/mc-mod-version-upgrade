@@ -36,11 +36,15 @@ CONVERTERS = [
     ("valueio", "convert-valueio.py", None),
     ("attachment-io", "convert-attachment-io.py", None),
     ("override-signatures", "convert-override-signatures.py", None),
+    ("reload-weighted", "convert-reload-weighted.py", "modid"),
+    ("client-hooks", "convert-client-hooks.py", "modid"),
     ("gear-tiers", "convert-gear-tiers.py", "assets"),
     ("rendertypes", "convert-rendertypes.py", "rendertypes"),
     ("core-shaders", "convert-core-shaders.py", "shaders"),
     ("entity-renderstate", "convert-entity-renderstate.py", "context"),
     ("geckolib", "convert-geckolib.py", "geckolib"),
+    # last: the converters above pattern-match render hooks by their MultiBufferSource parameter
+    ("buffer-seam", "convert-buffer-seam.py", "modid"),
 ]
 
 
@@ -119,6 +123,8 @@ def plan(repo, dirs, modid, render_state_type=None, render_state_factory=None, s
                            "(26.x reads no program JSON and binds uniform blocks; the Java that fills the block is the port's to write)")
                 continue
             fn = lambda d, i, sh_dir=sh_dir: ["--shaders", sh_dir, "--ns", modid, "--block", shader_block] if i == 0 else None
+        elif cond == "modid":
+            fn = lambda d, i: ["--src", d, "--modid", modid]
         elif cond == "context":
             fn = lambda d, i: ["--src", d, *ctx]
         elif cond == "geckolib":
@@ -364,7 +370,9 @@ def self_check():
         ok &= names[0] == "members" and names[-1] == "members-after-converters"
         ok &= [c for c in calls if c.startswith("convert-")] == ["convert-gui-hooks.py", "convert-valueio.py",
                                                                     "convert-attachment-io.py", "convert-override-signatures.py",
-                                                                    "convert-gear-tiers.py", "convert-entity-renderstate.py"]
+                                                                    "convert-reload-weighted.py", "convert-client-hooks.py",
+                                                                    "convert-gear-tiers.py", "convert-entity-renderstate.py",
+                                                                    "convert-buffer-seam.py"]
         recount = [s for s in steps if s["step"] == "valueio"][0]
         ok &= recount["errors"] == 3 and [s for s in steps if s["step"] == "gui-hooks"][0]["errors"] == 5
         (repo / "src/main/resources/assets/x/shaders/core").mkdir(parents=True)

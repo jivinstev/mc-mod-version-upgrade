@@ -3640,6 +3640,46 @@ is not covered).
 on first `get()`).
 · `Ingredient.of(new ItemStack(x))` → `Ingredient.of(x)`: the `ItemStack` overload is gone.
 
+**V92. Four 26.2 shapes the fork and jar routes now port with no model — reload listeners, weights, client hooks,
+and MultiBufferSource — each by generating the removed 1.21.1 contract into the mod and repointing names, so no
+method body is edited.** · Run by the shared mechanical stage (`tools/mechanical-hop.py`), in this order:
+· `tools/convert-reload-weighted.py` (§V36): `AddServerReloadListenersEvent.addListener(x)` gains the
+`Identifier` 26.2 requires, named from `x` (unique across the tree); a `SimpleJsonResourceReloadListener`
+subclass asks for the RAW map (`super(ExtraCodecs.JSON, FileToIdConverter.json(dir))`), so its `apply` body and
+its defensive per-file parsing stay as written; `Weight`/`WeightedEntry` are generated with their 1.21.1
+contract and every `WeightedRandom` call gains `e -> e.getWeight().asInt()`.
+· `tools/convert-client-hooks.py` (§V51, §V52, §S4b): a generated `TextureSheetParticle` keeps both 1.21.1
+constructors over `SingleQuadParticle` (the sprite starts null and is picked later, exactly as before); a
+constant `getRenderType()` becomes `getLayer()`; `getLightColor` → `getLightCoords`; `createParticle` gains its
+`RandomSource`. `initializeClient` overrides keep their bodies and a generated `ClientExtensionHooks` registers
+them from `RegisterClientExtensionsEvent`, which exists on both versions (a super call to the removed vanilla
+method goes; one to the mod's own superclass stays). `ItemProperties` becomes a LOGGED no-op that names the
+`assets/<ns>/items/<id>.json` to write instead, and its `PROPERTIES` map answers empty rather than null.
+· `tools/convert-buffer-seam.py` (§V54, §V66, X52): the recording `Buffers` seam four hand ports wrote, plus
+vanilla's own `MultiBufferSource` shape; each render-hook override that took one is listed as NEEDS SUBMIT.
+· **Measured, zero-model, on the 26.2 hop of real ports:** a mob library 232 → 159 (−31%: −23 reload/weights,
+−36 client hooks, −14 seam); a boss-effects library 1431 → 1378 (seam only: it has no listeners, particles or item
+properties, and the other two correctly do nothing).
+· **What none of them claims:** a render hook that took a `MultiBufferSource` became `submit(...)` over a
+render STATE, not the entity, and that port is per class; a property override is a client item model; neither is
+expressible as a rewrite, so both are named rather than half-done.
+
+**V93. 🔴 No 26.2 port in this project binds a mod's OWN uniform block — so the block `convert-core-shaders`
+lays out has no proven runtime path yet, and a "Java shader converter" built on it would compile and draw
+nothing.** · **Pattern:** a mod with Java-driven core shaders: `ShaderInstance` fields, `getUniform("X").set(...)`
+per frame, `RegisterShadersEvent`, a custom `ShaderStateShard` in its render types (one measured library: 12 effect
+classes, ~150 `getUniform` calls) · **What 26.2 offers, read off the jar:** a `RenderType` is a name plus a
+`RenderSetup` (textures, texture transform) over a `RenderPipeline`; the draw path binds vanilla's
+`DynamicTransforms`/`Projection`/`Globals` and nothing else, and neither `RenderSetup` nor `RenderType` has a
+hook to bind another uniform buffer. Swept the shipped 26.2 overlays: the only `setUniform` is one port writing
+vanilla's `DynamicTransforms` on its own render pass. · **So the honest state is:** the GLSL half is automated
+(`convert-core-shaders`), the RenderType half is automated given a state type (`convert-rendertypes`), and the
+piece in between — getting a mod's per-frame values into its block on a real draw — has never been done here.
+A converter that keeps `ShaderInstance`/`Uniform` compiling as stand-ins would be §S4 in its purest form: every
+gate green and every effect invisible. · **The next step is one hand port, proven on a client:** one such effect
+drawn through its own `RenderPass` with `setUniform(<block>, slice)` (or a NeoForge hook if one exists), checked
+by a Gate C photograph, and only then generalised into a converter.
+
 ## W. ONE SOURCE TREE, TWO MINECRAFT VERSIONS — the shape that makes an era jump survivable
 > **Axis:** build architecture. Everything above ports a mod *from* A *to* B and leaves A behind.
 > This is what to do when the mod must keep running on **both** — which is the normal case for a
@@ -5564,3 +5604,19 @@ reported "0 files changed" because they were already gone · **Fix:** `net.minec
 a change:** compare the errors in files BOTH versions compiled, and report the newly-visible files as their
 own number. Here the like-for-like count fell (57 → 56) while the total rose by 142 errors that the old
 setup had been hiding, not causing. A before/after whose denominators differ is not a regression report.
+
+**X52. 🔴 A seam that stands in for a removed vanilla INTERFACE must keep its shape AND its simple name —
+repoint the import, never rename the type.** · **Pattern:** the natural first cut of a MultiBufferSource
+converter rewrites every `MultiBufferSource` to the seam class, `Buffers` · **Symptom:** a parse abort and a
+cascade, measured on a boss-effects library: `MultiBufferSource forced = ignored -> delegate.getBuffer(...)` is a LAMBDA
+(vanilla's type is a functional interface), which a class cannot be the target of; and
+`MultiBufferSource.BufferSource x = MultiBufferSource.immediate(new ByteBufferBuilder(4096))` lost a closing
+paren to a lazy `[^;]*?\)` rewrite · **Fix:** generate `<package>.MultiBufferSource` with vanilla's own shape
+(`@FunctionalInterface`, a nested `BufferSource` with `endBatch`, a static `immediate(Object)`), have the recorder
+implement it, and change only the import. Every lambda, cast, generic bound and nested-type reference then stays
+as written, and the diff is one line per file. · **The general rule:** when a removed API was an interface, the
+replacement must be one too, under the same simple name — a mod uses an interface in more syntactic positions
+than a grep for the name shows. And a call rewrite that has to cross nested parentheses needs a paren matcher,
+not a lazy regex: `tools/burndown-count.sh` exited 4 (parse abort) on the first run, which is the only reason
+this read as a bug and not as "53 errors fewer".
+
