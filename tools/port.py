@@ -682,8 +682,12 @@ def main():
     say(f"{meta['modId']}: {loader} {src_mc} -> NeoForge {T}, {len(hops)} hop(s): "
         + " | ".join(f"{h['from']} -> {h['to']} [{h['kind']}, pack: {'yes' if h['pack'] else 'NONE'}]" for h in hops))
     nopack = [h for h in hops if not h["pack"]]
+    listed = ((info.get("source") or {}).get("chosen") or {}).get("loader")
+    if listed and listed != loader and not (listed == "neoforge" and loader == "forge"):
+        say(f"note: the registry lists this file as a {listed} build, but the jar itself is {loader} (a mislabelled upload)")
     if nopack and not a.allow_no_pack:
-        return stop(22, f"no recipe pack for {', '.join(h['from'] + ' -> ' + h['to'] for h in nopack)}: the workers would do that whole hop",
+        return stop(22, f"no recipe pack for {', '.join(h['from'] + ' -> ' + h['to'] for h in nopack)}: the workers would do that whole hop"
+                    + (f" (the registry calls this file {listed}; the jar is {loader})" if listed and listed != loader else ""),
                     ["continue anyway: rerun with --allow-no-pack (likely several times the cost of a packed hop)",
                      "build a pack for the hop first (tools/learn-pack.py from a finished port of that kind)"])
     if a.plan_only:
