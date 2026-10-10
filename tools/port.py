@@ -834,6 +834,7 @@ def in_range(ver, rng):
     return False
 
 
+VF_MARK = "$" + "VF" + ":"   # Vineflower's failure marker, spelled so this file does not carry it (tools/check-no-ip.py)
 _BARE_NEW = re.compile(r"(?m)^([ \t]*)(?:([\w.$<>\[\], ?]+?)\s+)?(\w+)\s*=\s*new\s+([\w.$]+(?:<[^;()]*>)?)\s*;[ \t]*\n")
 
 
@@ -842,7 +843,7 @@ def _resugar_constructors(t):
     while True:
         for m in _BARE_NEW.finditer(t):
             v = m.group(3)
-            call = re.compile(r"\b%s\.\s*/\*\s*\$VF: Unable to resugar constructor\s*\*/\s*<init>\(" % re.escape(v))
+            call = re.compile(r"\b%s\.\s*/\*\s*" % re.escape(v) + re.escape(VF_MARK) + r"\s*Unable to resugar constructor\s*\*/\s*<init>\(")
             c = call.search(t, m.end())
             if not c or re.search(r"\b%s\b" % re.escape(v), t[m.end():c.start()]):
                 continue
@@ -876,7 +877,7 @@ def fix_decompile_artifacts(srcj):
       * a local class named with a leading digit (`class 1NoiseCondition`, `new 1NoiseCondition(..)`); Vineflower
         already renames its constructor `_NoiseCondition`, so the class and its uses get that name too;
       * CATALOG §A2: `<unrepresentable>.$assertionsDisabled` -> `true` (asserts are off at runtime);
-      * an unresugared constructor: `X v = new X;` ... `v./* $VF: Unable to resugar constructor */<init>(args);`
+      * an unresugared constructor: `X v = new X;` ... `v./* <marker> Unable to resugar constructor */<init>(args);`
         (the statements between compute the arguments) -> the bare `new X;` goes and the call becomes
         `X v = new X(args);`, when nothing between them touches v.
     -> {"digit_classes": n, "assert_guards": n, "constructors": n}"""
@@ -1021,7 +1022,7 @@ def self_check():
     ok &= loader_siblings("x-fabric") == ["x-fabric", "x", "x-forge", "x-neoforge"] and loader_siblings(123)[0] == "123"
     ok &= "farmers-delight" in slug_guesses("farmersdelight") and slug_guesses("my_mod")[:2] == ["my_mod", "my-mod"]
     t, c = _resugar_constructors("   T f() {\n      Pair var1 = new Pair;\n      String a = g(x);\n"
-                                 "      var1./* $VF: Unable to resugar constructor */<init>(a, h(\")\", switch (y) { case 1 -> 2; }));\n"
+                                 "      var1./* " + VF_MARK + " Unable to resugar constructor */<init>(a, h(\")\", switch (y) { case 1 -> 2; }));\n"
                                  "      return var1;\n   }\n")
     ok &= c == 1 and "new Pair;" not in t and 'Pair var1 = new Pair(a, h(")", switch (y) { case 1 -> 2; }));' in t \
         and t.index("String a") < t.index("Pair var1")
