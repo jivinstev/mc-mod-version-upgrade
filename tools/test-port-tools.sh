@@ -349,6 +349,17 @@ PY
 grep -q '^parity OK$' <<<"$out" && ok "port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs a stage tool itself; every era converter is listed" \
   || bad "route parity: $out"
 
+echo "burndown-count.sh: a log that hit the capped Gradle compile is refused unless recounted (X5g)"
+printf '> Task :compileJava FAILED\n/w/A.java:3: error: cannot find symbol\n1,000 errors\n' > "$T/gcap.log"
+bash tools/burndown-count.sh "$T/gcap.log" >/dev/null 2>&1; code=$?
+[ $code = 6 ] && ok "a Gradle compile stopped at its 1000-error cap is NOT a count (X5g)" || bad "gradle-capped log exited $code, wanted 6"
+printf '> Task :compileJava FAILED\n/w/A.java:3: error: cannot find symbol\n1,000 errors\nPORT_FULL_ERRORS compileJava: uncapped javac over 2 file(s)\n/w/A.java:3: error: cannot find symbol\n/w/B.java:9: error: cannot find symbol\n2 errors\nPORT_FULL_ERRORS compileJava: javac exit 1\n' > "$T/gfull.log"
+out="$(bash tools/burndown-count.sh "$T/gfull.log" 2>&1)"
+grep -q 'errors = 2 ' <<<"$out" && ok "the uncapped recount is read from the same log (union of unique file:line)" || bad "recounted log: $out"
+grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CAP = '1000'" tools/maxerrs.init.gradle \
+  && grep -q '1,?000 errors' tools/burndown-count.sh && grep -q '1,?000 errors' tools/file-loop.py \
+  && ok "the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count" || bad "the Gradle error cap disagrees between its four copies"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

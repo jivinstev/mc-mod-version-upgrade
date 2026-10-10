@@ -261,7 +261,7 @@ def compile_errors(repo, log):
     """(error count, {file: [error lines]}) from a real compile, the same way port-upstream counts."""
     sys.path.insert(0, str(ROOT / "tools"))
     import port_gates, srcsets  # noqa: E402
-    port_gates.gradle(repo, ["-I", str(ROOT / "tools/maxerrs.init.gradle"), *srcsets.compile_tasks(repo), "--continue"], log)
+    port_gates.compile_log(repo, srcsets.compile_tasks(repo), log)
     r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True, encoding="utf-8")
     m = re.search(r"errors = (\d+)", r.stdout)
     if not m or "compileJava: yes" not in r.stdout:

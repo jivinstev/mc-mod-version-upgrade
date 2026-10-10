@@ -336,7 +336,7 @@ def gradle_count(work, log):
     """Compile the port's own source sets and count unique errors (burndown-count.sh refuses a run that never
     reached javac, which a bare grep would read as 0)."""
     srcsets, pg = _load("srcsets", "srcsets.py"), _load("port_gates", "port_gates.py")
-    pg.gradle(work, ["-I", str(ROOT / "tools/maxerrs.init.gradle"), *srcsets.compile_tasks(work), "--continue"], log)
+    pg.compile_log(work, srcsets.compile_tasks(work), log)
     r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     m = re.search(r"errors = (\d+)", r.stdout)

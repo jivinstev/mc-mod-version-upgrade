@@ -81,6 +81,14 @@ if grep -qE 'only showing the first [0-9]+ errors' "$LOG"; then
   echo "Re-run with --init-script tools/maxerrs.init.gradle; a capped list is a prefix, not a total."
   exit 6
 fi
+# X5g: tools/maxerrs.init.gradle caps the GRADLE-integrated compile at 1000 (Gradle's diagnostics are
+# quadratic in the error count and hang past a few thousand), and recounts a capped run with javac
+# directly. A log that hit that cap with no recount is a prefix, exactly like X5f.
+if grep -qE '^\s*1,?000 errors\s*$' "$LOG" && ! grep -qE '^PORT_FULL_ERRORS .*javac exit' "$LOG"; then
+  echo "NOT A COUNT -- the capped Gradle compile hit 1000 errors and nothing recounted it."
+  echo "Use tools/port_gates.py compile_log(), or run ./gradlew portFullErrors with tools/maxerrs.init.gradle."
+  exit 6
+fi
 # X5d: the task can START and fail before javac runs -- an unresolvable dependency fails
 # compileJava itself ("> Task :compileJava FAILED" + "Could not resolve"), which the RAN check
 # above accepts. Zero error: lines from a FAILED compile task is not zero errors.

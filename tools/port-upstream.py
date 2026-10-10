@@ -93,7 +93,7 @@ def claude(prompt, cwd, tools, model=SONNET, timeout=2400):
 
 
 def compile_count(repo, log):
-    gradle(repo, ["-I", str(ROOT / "tools/maxerrs.init.gradle"), *srcsets.compile_tasks(repo), "--continue"], log)
+    _pg.compile_log(repo, srcsets.compile_tasks(repo), log)
     r = sh(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)])
     m = re.search(r"errors = (\d+)", r.stdout)
     if not m or "compileJava: yes" not in r.stdout:

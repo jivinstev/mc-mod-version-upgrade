@@ -71,6 +71,14 @@ def compile_(work, log, heap):
                         "--init-script", str(ROOT / "tools/central-mirror.init.gradle"),
                         f"-Dorg.gradle.jvmargs=-Xmx{heap}"], cwd=work, stdout=fh, stderr=subprocess.STDOUT)
     text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
+    if re.search(r"(?m)^\s*1,?000 errors\s*$", text):   # hit the capped compile's limit: recount uncapped (see the init)
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write("\n# --- the capped compile hit 1000 errors; uncapped recount (portFullErrors) ---\n"); fh.flush()
+            subprocess.run([BASH, "gradlew", "portFullErrors", "-PportFullErrorsTasks=" + ",".join(srcsets.compile_tasks(work)),
+                            "--console=plain", "--init-script", str(init), "--init-script",
+                            str(ROOT / "tools/central-mirror.init.gradle"), f"-Dorg.gradle.jvmargs=-Xmx{heap}"],
+                           cwd=work, stdout=fh, stderr=subprocess.STDOUT)
+        text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
     if "BUILD SUCCESSFUL" in text:
         return 0, []
     r = subprocess.run([BASH, str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True,

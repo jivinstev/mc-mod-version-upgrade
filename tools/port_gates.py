@@ -38,6 +38,29 @@ def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
     return sh(cmd + list(args) + ["-Dorg.gradle.jvmargs=-Xmx6g"], cwd=repo, env=env, timeout=timeout, log=log)
 
 
+GRADLE_ERROR_CAP = 1000   # PORT_GRADLE_CAP in tools/maxerrs.init.gradle
+
+
+def compile_log(repo, tasks, log, extra_init=(), env=None, timeout=2400):
+    """Compile `tasks` and leave the WHOLE javac error list in `log`, for tools/burndown-count.sh.
+
+    Gradle's own javac integration is quadratic in the error count (tools/maxerrs.init.gradle says why), so the
+    compile runs capped, and only a run that HIT the cap is recounted by `portFullErrors` -- the same javac, run
+    directly, uncapped -- with its output appended to the same log."""
+    init = ROOT / "tools/maxerrs.init.gradle"
+    r = gradle(repo, ["-I", str(init), *tasks, "--continue"], log, extra_init=extra_init, env=env, timeout=timeout)
+    text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
+    if not re.search(r"(?m)^\s*%s errors\s*$" % format(GRADLE_ERROR_CAP, ",").replace(",", ",?"), text):
+        return r
+    full = pathlib.Path(str(log) + ".full")
+    r2 = gradle(repo, ["-I", str(init), "portFullErrors", "-PportFullErrorsTasks=" + ",".join(tasks)], full,
+                extra_init=extra_init, env=env, timeout=timeout)
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("\n# --- the capped compile hit %d errors; uncapped recount (portFullErrors) ---\n" % GRADLE_ERROR_CAP)
+        fh.write(full.read_text(encoding="utf-8", errors="replace"))
+    return r2 if r2.returncode else r
+
+
 def tgt(c):
     """The Target of this run: from --branch normally; from gradle.properties for a caller that never parsed
     arguments (tools/ci-gates.py builds the same context to reuse the harness and Gate A)."""
