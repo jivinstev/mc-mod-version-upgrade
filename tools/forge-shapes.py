@@ -254,10 +254,47 @@ TICK = {  # old nested type -> (new fqn, accessor renames)
 PHASE_CMP = r"%s\.phase\s*(==|!=)\s*(?:TickEvent\.)?Phase\.(START|END)"
 
 
+def _skip_else_chain(body, i):
+    """i just past a block's '}': -> the index past any `else {..}` / `else if (..) {..}` chain that follows."""
+    while True:
+        m = re.match(r"\s*else\s*", body[i:])
+        if not m:
+            return i
+        j = i + m.end()
+        c = re.match(r"if\s*\(", body[j:])
+        if c:
+            j = match(body, j + c.end() - 1) + 1
+            j += len(body[j:]) - len(body[j:].lstrip())
+        if j >= len(body) or body[j] != "{":
+            return i                         # an unbraced branch: leave the whole thing alone
+        k = match(body, j)
+        if k < 0:
+            return i
+        i = k + 1
+
+
 def _simplify(body):
-    """Fold the constants a removed phase check leaves behind. Only the shapes it produces."""
-    for _ in range(4):
+    """Fold the constants a removed phase check leaves behind. Only the shapes it produces, including the
+    else-chain a two-phase handler leaves (`if (true) {A} else if (false) {B}` and its mirror)."""
+    for _ in range(8):
         b = body
+        # if (false) {X} else REST  ->  REST
+        m = re.search(r"\bif\s*\(\s*false\s*\)\s*\{", body)
+        if m:
+            k = match(body, m.end() - 1)
+            e = re.match(r"\s*else\s*", body[k + 1:]) if k > 0 else None
+            if e:
+                body = body[:m.start()] + body[k + 1 + e.end():]
+                continue
+        # if (true) {X} else <chain>  ->  if (true) {X}   (folded to X below)
+        m = re.search(r"\bif\s*\(\s*true\s*\)\s*\{", body)
+        if m:
+            k = match(body, m.end() - 1)
+            if k > 0 and re.match(r"\s*else\b", body[k + 1:]):
+                end = _skip_else_chain(body, k + 1)
+                if end > k + 1:
+                    body = body[:k + 1] + body[end:]
+                    continue
         body = re.sub(r"\(\s*true\s*&&\s*", "(", body)
         body = re.sub(r"\(\s*false\s*\|\|\s*", "(", body)
         body = re.sub(r"\s*&&\s*true\s*\)", ")", body)
@@ -280,6 +317,8 @@ def _simplify(body):
                     ind = re.match(r"[ \t]*", body[body.rfind("\n", 0, m.start()) + 1:]).group(0)
                     inner = re.sub(r"(?m)^" + re.escape(ind) + r"    ", ind, inner).lstrip("\n").rstrip()
                     line_start = body.rfind("\n", 0, m.start()) + 1
+                    if body[line_start:m.start()].strip():        # code before the `if` on its line: keep it
+                        line_start = m.start()
                     body = body[:line_start] + inner + body[k + 1:]
             else:
                 body = body[:m.start()] + body[j:]
@@ -1221,6 +1260,24 @@ class A {
 }
 """, ["ServerTickEvent.Post event", "if (++ticks < 20) {", "PlayerTickEvent.Post event", "        event.getEntity().tick();\n    }",
       "ClientTickEvent.Pre event", "import net.neoforged.neoforge.event.tick.ServerTickEvent;"], ["TickEvent.Phase", "import net.neoforged.neoforge.event.TickEvent;"]),
+    ("tick", """package a;
+import net.neoforged.neoforge.event.TickEvent;
+class A {
+    @SubscribeEvent
+    public static void onClientTick(TickEvent.ClientTickEvent event) {
+        if (event.phase == TickEvent.Phase.START) {
+            start();
+        } else if (event.phase == TickEvent.Phase.END) {
+            end();
+        }
+    }
+
+    @SubscribeEvent
+    public static void after(Object o) {
+    }
+}
+""", ["onClientTickPre(ClientTickEvent.Pre event) {", "onClientTick(ClientTickEvent.Post event) {",
+      "public static void after(Object o) {"], ["else", "if (true)", "if (false)"]),
     ("modctor", """package a;
 import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
 @Mod(MyMod.MOD_ID)
