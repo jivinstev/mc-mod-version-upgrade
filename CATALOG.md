@@ -5674,7 +5674,7 @@ only when the cap was hit and appends it to the same log. The direct run took 10
 **X54. A datagen package stays in the build when MAIN code wires it — park the wiring, not the class.** ·
 **Pattern:** the mod's main class holds `private void generateData(GatherDataEvent e)` (registered with
 `addListener(this::generateData)`), or registers a separate subscriber (`addListener(DataGen::gather)`) ·
-**Symptom:** the never-park-what-main-code-names rule (X51's guard against parking runtime code) keeps every
+**Symptom:** the never-park-what-main-code-names rule (which keeps runtime code out of `parked/`) keeps every
 provider, because main code names them through the handler. Measured: 18 datagen files on a 26.2 port, nine of
 them against NeoForge's removed `client.model.generators` — real-looking errors a worker would be paid to "fix"
 in code the game never runs · **Fix:** `tools/park-optional.py` cuts the handler method or the registration
@@ -5711,3 +5711,11 @@ emits a local class as `class 1Name` and an assertion guard as `<unrepresentable
 · **Symptom:** a parse abort, so the burn-down reports a handful of errors in a tree that has thousands
 (burndown-count exit 4) · **Fix:** `tools/port.py` setup renames digit-prefixed local classes to `_Name` and
 replaces the guard with `true`, and records how many it fixed.
+
+**X59. Splitting a two-phase tick handler leaves an `if (true)` / `if (false)` else-chain to fold, and a fold
+that deletes too much compiles.** · **Pattern:** a Forge `onClientTick(TickEvent.ClientTickEvent e)` with
+`if (e.phase == START) {…} else if (e.phase == END) {…}`, which `tools/forge-shapes.py` splits into `Pre` and
+`Post` handlers by substituting the phase test with a constant · **Symptom:** an unbalanced brace (a parse abort),
+or code before the `if` on the same line silently removed · **Fix:** forge-shapes folds `if (false) {X} else REST`
+to REST and `if (true) {X} else <whole chain>` to X, walking the chain to its real end, and never touches text
+before the `if`.
