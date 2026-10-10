@@ -632,6 +632,13 @@ def main():
     if not loader:              # no (neo)forge toml: say what the jar IS rather than assume Forge
         with zipfile.ZipFile(jar) as z:
             names = set(z.namelist())
+        nested = sorted(n for n in names if n.endswith(".jar"))
+        if any(n.startswith("META-INF/services/") and n.endswith("IModLocator") for n in names) and nested:
+            return stop(23, f"{jar.name} is a self-loading multi-loader jar: a Forge mod LOCATOR (not a mod) that picks "
+                             f"one of {len(nested)} nested jars at runtime ({', '.join(nested[:3])}...), so there is no "
+                             f"single mod source to port",
+                        ["port the nested jar for the nearest Minecraft version by hand (unzip it and pass its path)",
+                         "or skip this mod"])
         if "fabric.mod.json" in names or "quilt.mod.json" in names:
             loader = "fabric"
         else:
