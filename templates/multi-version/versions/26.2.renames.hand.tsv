@@ -313,6 +313,24 @@ re:\.getCompound\(([^,()]+)\)	.getCompoundOrEmpty(\1)
 re:\.getList\(([^,()]+),\s*[A-Za-z0-9_.]+\)	.getListOrEmpty(\1)
 re:\.getList\(([^,()]+)\)	.getListOrEmpty(\1)
 
+# -- CompoundTag.contains(key, type) lost its type argument on 26.x. The 1.21.1 call was true only when the key
+# -- held THAT tag type (99 = any number), so the faithful form is an instanceof on get(key), which is null when
+# -- absent. Matched only with a literal tag id or a TAG_* constant as the second argument, which no other
+# -- contains(a, b) in the corpus takes. A receiver with arguments or a cast is left as the compile error.
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:1|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_BYTE)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ByteTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:2|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_SHORT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ShortTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:3|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:4|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:5|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_FLOAT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.FloatTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:6|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_DOUBLE)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.DoubleTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:7|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_BYTE_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ByteArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:8|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_STRING)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.StringTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:9|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LIST)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ListTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:10|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_COMPOUND)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.CompoundTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:11|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:12|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:99|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_ANY_NUMERIC)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.NumericTag)
+
 # -- CompoundTag.getUUID/putUUID have no 26.x equivalent (a UUID goes through a codec now),
 # -- so both targets route through a compat helper. The get pattern requires an ARGUMENT so
 # -- it cannot touch the 50 no-arg Entity.getUUID() calls, which are unrelated and fine.
