@@ -140,11 +140,11 @@ def foreign(imp, own, req):
     return not any(r in flat.split(".") or r in flat for r in req)
 
 
-def plan(work, group):
+def plan(work, group, also=()):
     java = work / "src/main/java"
     files = sorted(java.rglob("*.java"))
     own = {group, group.rsplit(".", 1)[0]} if group else set()
-    req = required_roots(work)
+    req = required_roots(work) | {m.replace("-", "").replace("_", "").lower() for m in also if m}
     park, why, cuts = {}, {}, {}
     for f in files:
         t = f.read_text(encoding="utf-8", errors="replace")
@@ -254,6 +254,8 @@ def class_name(java, f):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work"); ap.add_argument("--group", help="the mod's root package (default: from gradle.properties)")
+    ap.add_argument("--also-required", default="", help="mod ids to treat as required whatever the toml says (port.py "
+                    "passes optional dependencies the code uses throughout, and geckolib when the build supplies it)")
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -269,7 +271,7 @@ def main():
         print("park-optional: no root package (pass --group); refusing to guess what is the mod's own code")
         return 2
     java = work / "src/main/java"
-    park, cuts = plan(work, group)
+    park, cuts = plan(work, group, [m for m in a.also_required.split(",") if m])
     parked_names = {class_name(java, f) for f in park}
     def now(f):
         return cuts[f][0] if f in cuts else f.read_text(encoding="utf-8", errors="replace")

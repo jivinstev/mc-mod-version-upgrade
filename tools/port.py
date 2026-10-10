@@ -383,8 +383,9 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     cond_changed, cond_unknown, forge_tags = neoforge_conditions(res) if src_loader == "forge" else (0, [], 0)
     hoisted = fix_hoisted_spec(srcj)
     # optional integrations and datagen are code the port cannot compile against (tools/park-optional.py)
+    keep = sorted({d["modId"] for d in meta.get("deps", []) if d["required"]} | ({"geckolib"} if uses_gecko else set()))
     pk = run([sys.executable, str(ROOT / "tools/park-optional.py"), "--work", str(work), "--group",
-              group or f"com.{meta['modId']}"], log=log)
+              group or f"com.{meta['modId']}", "--also-required", ",".join(keep)], log=log)
     parked = int((re.findall(r"park-optional: (\d+) file", pk.stdout) or ["0"])[0])
     run([sys.executable, str(ROOT / "tools/scaffold-gametest.py"), "--work", str(work)], log=log)
     return {"group": group, "parked_files": parked, "decompile_artifacts_fixed": artifacts, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
@@ -702,6 +703,13 @@ def main():
     state.update({"info": info, "hops": [h["from"] + "->" + h["to"] for h in hops], "modid": meta["modId"]})
     state.pop("stopped", None)
     log = work / "setup.log"
+    hard = hard_optional_deps(jar, meta.get("deps", []))
+    if hard:
+        say(f"dependencies declared optional but used throughout the code, treated as required: {', '.join(hard)}")
+        for d in meta.get("deps", []):
+            if d["modId"] in hard:
+                d["required"] = True
+    state["hard_optional"] = hard
     if "deps-wired" not in state["done"] and not a.ignore_deps:
         src = info["source"]
         req = [d["modId"] for d in meta.get("deps", []) if d["required"]]
@@ -809,6 +817,28 @@ def slug_guesses(mid):
     return list(dict.fromkeys(out))
 
 
+def hard_optional_deps(jar, deps):
+    """Optional dependencies the mod actually USES as hard ones. Many mods (MCreator's default above all) declare
+    every dependency mandatory=false while hundreds of classes import its API, and parking all of those as an
+    'optional integration' would gut the port. A declared dependency whose id appears as a package segment in at
+    least 20 classes, or a tenth of them, is treated as required."""
+    opt = [d["modId"] for d in deps if not d["required"]]
+    if not opt:
+        return []
+    with zipfile.ZipFile(jar) as z:
+        cls = [z.read(n) for n in z.namelist() if n.endswith(".class") and not n.startswith("META-INF/")]
+    out = []
+    for mid in opt:
+        flat = mid.replace("_", "").replace("-", "").lower().encode()
+        if len(flat) < 4:
+            continue
+        pat = re.compile(rb"l[\w/$]*/" + re.escape(flat) + rb"[\w$]*/")   # the bytes are lowercased below: L -> l
+        n = sum(1 for b in cls if pat.search(b.replace(b"_", b"").lower()))
+        if n >= max(20, len(cls) // 10):
+            out.append(mid)
+    return out
+
+
 def kotlin_share(jar):
     """(classes carrying kotlin.Metadata, all classes) -- a Kotlin mod decompiles to Kotlin, not Java."""
     with zipfile.ZipFile(jar) as z:
@@ -883,6 +913,73 @@ def _resugar_constructors(t):
             return t, count
 
 
+_INDY_CONCAT = re.compile(r'(?:java\.lang\.invoke\.)?StringConcatFactory\.makeConcatWithConstants'
+                          r'<"makeConcatWithConstants"\s*,\s*"((?:[^"\\]|\\.)*)"\s*>\(')
+
+
+def _resugar_string_concat(t):
+    """`StringConcatFactory.makeConcatWithConstants<"makeConcatWithConstants","<recipe>">(a, b)` -- an invokedynamic
+    string concatenation Vineflower did not fold. In the recipe each \\u0001 is the next argument and the rest is
+    literal text, so it becomes ("" + (a) + "lit" + (b)). A recipe with \\u0002 (a bootstrap constant) is left."""
+    count, out, pos = 0, [], 0
+    for m in _INDY_CONCAT.finditer(t):
+        if m.start() < pos:
+            continue
+        recipe = m.group(1)
+        if "\\u0002" in recipe or "\x02" in recipe:
+            continue
+        depth, i = 1, m.end()
+        while i < len(t) and depth:
+            ch = t[i]
+            if ch in "\"'":
+                j = i + 1
+                while j < len(t) and t[j] != ch:
+                    j += 2 if t[j] == "\\" else 1
+                i = j
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            i += 1
+        if depth:
+            continue
+        inner = t[m.end():i - 1]
+        args, d, cur = [], 0, []
+        k = 0
+        while k < len(inner):                       # split on top-level commas, skipping string literals
+            ch = inner[k]
+            if ch in "\"'":
+                j = k + 1
+                while j < len(inner) and inner[j] != ch:
+                    j += 2 if inner[j] == "\\" else 1
+                cur.append(inner[k:j + 1]); k = j + 1; continue
+            if ch in "([{":
+                d += 1
+            elif ch in ")]}":
+                d -= 1
+            if ch == "," and d == 0:
+                args.append("".join(cur).strip()); cur = []
+            else:
+                cur.append(ch)
+            k += 1
+        if "".join(cur).strip():
+            args.append("".join(cur).strip())
+        segs = re.split(r"\\u0001|\x01", recipe)
+        if len(segs) - 1 != len(args):
+            continue
+        parts = ['""']
+        for k2, seg in enumerate(segs):
+            if seg:
+                parts.append(f'"{seg}"')
+            if k2 < len(args):
+                parts.append(f"({args[k2]})")
+        out.append(t[pos:m.start()] + "(" + " + ".join(parts) + ")")
+        pos = i
+        count += 1
+    out.append(t[pos:])
+    return "".join(out), count
+
+
 def fix_decompile_artifacts(srcj):
     """Vineflower output that does not PARSE, fixed before anything else reads it (a parse error stops javac before
     it reports anything else, and the stage then misreads the failure):
@@ -893,7 +990,7 @@ def fix_decompile_artifacts(srcj):
         (the statements between compute the arguments) -> the bare `new X;` goes and the call becomes
         `X v = new X(args);`, when nothing between them touches v.
     -> {"digit_classes": n, "assert_guards": n, "constructors": n}"""
-    n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0}
+    n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0, "string_concats": 0}
     for f in pathlib.Path(srcj).rglob("*.java"):
         t = f.read_text(encoding="utf-8", errors="replace")
         new = t
@@ -903,6 +1000,8 @@ def fix_decompile_artifacts(srcj):
             n["digit_classes"] += 1
         new, c = _resugar_constructors(new)
         n["constructors"] += c
+        new, c = _resugar_string_concat(new)
+        n["string_concats"] += c
         k = new.count("<unrepresentable>.$assertionsDisabled")
         if k:
             new = new.replace("<unrepresentable>.$assertionsDisabled", "true")
@@ -1011,7 +1110,7 @@ def self_check():
                      " return new 1Cond(c); float f = 1F; } }", encoding="utf-8")
         got = fix_decompile_artifacts(d)
         s = f.read_text(encoding="utf-8")
-        ok &= got == {"digit_classes": 1, "assert_guards": 1, "constructors": 0} and "class _Cond" in s and "new _Cond(c)" in s
+        ok &= got == {"digit_classes": 1, "assert_guards": 1, "constructors": 0, "string_concats": 0} and "class _Cond" in s and "new _Cond(c)" in s
         ok &= "1Cond" not in s.split("$VF was")[0] and "!true &&" in s and "1F" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
@@ -1044,6 +1143,17 @@ def self_check():
                                  "      return var1;\n   }\n")
     ok &= c == 1 and "new Pair;" not in t and 'Pair var1 = new Pair(a, h(")", switch (y) { case 1 -> 2; }));' in t \
         and t.index("String a") < t.index("Pair var1")
+    sc, k = _resugar_string_concat('x = StringConcatFactory.makeConcatWithConstants<"makeConcatWithConstants","Hi \\u0001, you (\\u0001)">'
+                                   '(a.b(1, "x,)"), n);')
+    ok &= k == 1 and sc == 'x = ("" + "Hi " + (a.b(1, "x,)")) + ", you (" + (n) + ")");'
+    with _tf.TemporaryDirectory() as d:
+        with zipfile.ZipFile(f"{d}/h.jar", "w") as z:
+            for i in range(30):
+                z.writestr(f"m/C{i}.class", b"\xca\xfe Ltop/theillusivec4/curios/api/SlotContext; Lm/X;"
+                           + (b" Lmezz/jei/api/IModPlugin;" if i == 0 else b""))
+        ok &= hard_optional_deps(pathlib.Path(d, "h.jar"), [{"modId": "curios", "required": False},
+                                                            {"modId": "jei", "required": False},
+                                                            {"modId": "caelus", "required": False}]) == ["curios"]
     ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
     with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
