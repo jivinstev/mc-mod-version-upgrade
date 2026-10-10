@@ -733,6 +733,8 @@ def packed_source(prov, pid, T, v, tries=6):
     or None. Only builds the registry says exist are considered, newest first."""
     c = v.get("chosen") or {}
     def packed(loader, mc):
+        if loader == "neoforge" and mc == "1.20.1":   # NeoForge's 1.20.1 line IS the Forge fork (forge_api_jar
+            loader = "forge"                          # confirms it from the jar once downloaded)
         hops = route.plan((loader, mc), ("neoforge", T))
         return hops is not None and all(h["pack"] for h in hops)
     if not c or packed(c.get("loader") or "neoforge", c["mc"]):
@@ -793,7 +795,7 @@ def forge_api_jar(jar):
     names at runtime. Such a jar is ported exactly like a Forge one, whatever its toml's loader dependency says."""
     with zipfile.ZipFile(jar) as z:
         names = z.namelist()
-        if "META-INF/neoforge.mods.toml" in names or "META-INF/mods.toml" not in names:
+        if "META-INF/mods.toml" not in names:   # some carry a neoforge.mods.toml too: the CLASSES decide
             return False
         neo = forge = 0
         for n in names:
@@ -938,11 +940,14 @@ def self_check():
     with _tf.TemporaryDirectory() as d:
         for nm, toml, cls in (("a.jar", "META-INF/mods.toml", b"net/minecraftforge/common/MinecraftForge"),
                               ("b.jar", "META-INF/mods.toml", b"net/neoforged/neoforge/common/NeoForge"),
-                              ("c.jar", "META-INF/neoforge.mods.toml", b"net/minecraftforge/x")):
+                              ("c.jar", "META-INF/neoforge.mods.toml", b"net/minecraftforge/x"),
+                              ("d.jar", "META-INF/mods.toml", b"net/minecraftforge/x")):
             with zipfile.ZipFile(f"{d}/{nm}", "w") as z:
                 z.writestr(toml, "modLoader=\"javafml\"\n"); z.writestr("x/A.class", b"\xca\xfe" + cls)
+                if nm == "d.jar":
+                    z.writestr("META-INF/neoforge.mods.toml", "modLoader=\"javafml\"\n")
         ok &= forge_api_jar(pathlib.Path(d, "a.jar")) and not forge_api_jar(pathlib.Path(d, "b.jar")) \
-            and not forge_api_jar(pathlib.Path(d, "c.jar"))
+            and not forge_api_jar(pathlib.Path(d, "c.jar")) and forge_api_jar(pathlib.Path(d, "d.jar"))
     with _tf.TemporaryDirectory() as d:            # multi-loader jar: the toml (single-quoted is legal TOML) wins
         with zipfile.ZipFile(f"{d}/m.jar", "w") as z:
             z.writestr("META-INF/mods.toml", "modLoader = 'lowcodefml'\n[[mods]]\n  modId = 'mymod'\n")
