@@ -679,6 +679,7 @@ def main():
         return stop(22, f"no route from {loader} {src_mc} to NeoForge {T} in tools/routes.tsv",
                     ["add a row (and, ideally, a pack) for the missing hop"])
     work = pathlib.Path(a.mods_dir) / meta["modId"]
+    WORKS.append(work)
     say(f"{meta['modId']}: {loader} {src_mc} -> NeoForge {T}, {len(hops)} hop(s): "
         + " | ".join(f"{h['from']} -> {h['to']} [{h['kind']}, pack: {'yes' if h['pack'] else 'NONE'}]" for h in hops))
     nopack = [h for h in hops if not h["pack"]]
@@ -1031,5 +1032,21 @@ def self_check():
     return 0 if ok else 1
 
 
+WORKS = []     # workspaces this run touched: their Gradle daemons are stopped on exit
+
+
+def stop_daemons():
+    """An idle Gradle daemon keeps its heap (gigabytes) for hours, and a NeoGradle and a ModDevGradle port each
+    leave one. Porting several mods in a row then runs the next compile out of memory and the kernel kills it
+    ("Gradle build daemon disappeared unexpectedly"). Stop this run's daemons when it ends, however it ends."""
+    for w in WORKS:
+        if (w / "gradlew").exists():
+            subprocess.run(["bash", "gradlew", "--stop"], cwd=w, capture_output=True, timeout=120)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        rc = main()
+    finally:
+        stop_daemons()
+    sys.exit(rc)
