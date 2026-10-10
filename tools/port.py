@@ -524,8 +524,14 @@ def from_port(a):
 
 
 def parse_ver(v):
-    """'1.21.1' -> (1, 21, 1); '26.2' -> (26, 2); a snapshot or junk sorts first."""
-    return tuple(int(x) for x in re.findall(r"\d+", v)) if re.fullmatch(r"\d+(\.\d+)*", v or "") else (0,)
+    """'1.21.1' -> (1, 21, 1); '26.2' and '26.2.0' -> (26, 2) (trailing zeros dropped, so a range's '[26.2.0,)'
+    admits 26.2); a snapshot or junk sorts first."""
+    if not re.fullmatch(r"\d+(\.\d+)*", v or ""):
+        return (0,)
+    t = [int(x) for x in v.split(".")]
+    while len(t) > 1 and t[-1] == 0:
+        t.pop()
+    return tuple(t)
 
 
 # ── main ────────────────────────────────────────────────────────────────────
@@ -859,6 +865,7 @@ def self_check():
         ok &= "1Cond" not in s.split("$VF was")[0] and "!true &&" in s and "1F" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
+    ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
     with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
         j = pathlib.Path(d) / "dep.jar"
