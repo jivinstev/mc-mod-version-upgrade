@@ -62,12 +62,16 @@ def free(name, body):
     return name if not re.search(r"(?<![\w$])%s(?![\w$])" % name, body) else name + "Event"
 
 
-def call_rewrites(body, hook, names, ev, dc):
-    """Rewrite `<recv>.hook(args)` and bare `hook(args)` calls inside a converted handler body."""
+def call_rewrites(body, hook, names, ev, dc, keep=frozenset()):
+    """Rewrite `<recv>.hook(args)` and bare `hook(args)` calls inside a converted handler body. A hook in `keep`
+    is one the mod also declares itself in the 1.21 shape (its own widget hierarchy): a call on a child may reach
+    that method, so only super.* calls are rewritten -- the old locals stay in scope and the call still compiles."""
     masked = ni.code_spans(body)
     out, last, notes = [], 0, []
     for m in re.finditer(r"(?<![\w$])%s\s*\(" % hook, masked):
         if masked[:m.start()].rstrip().endswith(("boolean", "void")):
+            continue
+        if hook in keep and not re.search(r"\bsuper\s*\.\s*$", masked[:m.start()]):
             continue
         close = fs.match(masked, m.end() - 1)
         args = [a.strip() for a in fs.split_args(body[m.end():close])]
@@ -87,7 +91,17 @@ def call_rewrites(body, hook, names, ev, dc):
     return "".join(out)
 
 
-def convert_text(text):
+def own_old_hooks(texts):
+    """Input hooks the mod declares ITSELF in the 1.21 shape (no @Override): its own widget base classes."""
+    keep = set()
+    for text in texts:
+        for m in fs.methods(text):
+            if (m.name, tuple(ptype(p) for p in m.params)) in INPUT and not overridden(text, m):
+                keep.add(m.name)
+    return frozenset(keep)
+
+
+def convert_text(text, keep=frozenset()):
     notes, n = [], 0
     while True:
         changed = False
@@ -126,7 +140,7 @@ def convert_text(text):
                 params = [f"CharacterEvent {ev}"]
                 pro = [f"char {names[0]} = (char) {ev}.codepoint();", f"int {names[1]} = 0;"]
             indent = re.match(r"\n?([ \t]*)", body).group(1) or "        "
-            new_body = call_rewrites(body, m.name, names, ev, dc)
+            new_body = call_rewrites(body, m.name, names, ev, dc, keep)
             used = ni.code_spans(new_body)                               # forwarded calls no longer name them
             pro = [p for p in pro if re.search(r"(?<![\w$])%s(?![\w$])" % p.split()[1], used)]
             if m.name == "charTyped" and any(p.startswith("int ") for p in pro):
@@ -164,11 +178,12 @@ def convert_text(text):
 
 def run(src, dry=False):
     total, report = 0, []
+    keep = own_old_hooks(f.read_text(encoding="utf-8") for f in pathlib.Path(src).rglob("*.java"))
     for f in sorted(pathlib.Path(src).rglob("*.java")):
         t = f.read_text(encoding="utf-8")
         if not re.search(r"\b(?:render\w*|renderBg|mouse(?:Clicked|Released|Dragged)|key(?:Pressed|Released)|charTyped)\s*\(", t):
             continue
-        out, n, notes = convert_text(t)
+        out, n, notes = convert_text(t, keep)
         total += n
         if notes:
             report.append((f, notes))
@@ -252,6 +267,12 @@ class S extends Screen {
         miss.append("unused local declared")
     if notes:
         miss.append(f"unexpected notes {notes}")
+    kept, _, _ = convert_text(t, frozenset({"mouseClicked"}))   # the mod has its own old-shape mouseClicked
+    if "child.mouseClicked(mouseX - 4, mouseY, button)" not in kept or "return super.mouseClicked(event, doubleClick);" not in kept:
+        miss.append("own-hook guard: a child call to a mod-declared old-shape hook was rewritten (or super was not)")
+    base = "class Base {\n    public boolean mouseClicked(double x, double y, int b) { return false; }\n}\n"
+    if own_old_hooks([t]) or own_old_hooks([t, base]) != frozenset({"mouseClicked"}):
+        miss.append(f"own_old_hooks: {sorted(own_old_hooks([t]))} / {sorted(own_old_hooks([t, base]))}")
     again = convert_text(out)
     if again[1] or again[0] != out:
         miss.append("not idempotent")

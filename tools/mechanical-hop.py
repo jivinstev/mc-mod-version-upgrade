@@ -205,14 +205,16 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
         changed, print_fp[0] = now != print_fp[0], now
         nref = sum(1 for l in joined.splitlines() if "REFUSED" in l and not re.search(r"REFUSED \d+ site", l))
         summary = " | ".join(heads) + (f"; {nref} REFUSED (see era-{label}.out)" if nref else "")
-        n = last["n"]
+        n = before = last["n"]
         if changed:
             n, _ = compile_count(workdir / f"era-{len(steps)}-{label}.log")
             if n is None:
                 raise RuntimeError(f"compile did not run after {label}")
         last["n"] = n
-        steps.append({"step": label, "summary": summary, "errors": n})
-        say(f"{label}: {summary}" + (f" -> {n} errors" if changed else " (no change, no recount)"))
+        steps.append({"step": label, "summary": summary, "errors": n, **({"raised_from": before} if n > before else {})})
+        say(f"{label}: {summary}" + (f" -> {n} errors" if changed else " (no change, no recount)")
+            + (f"  ** RAISED from {before}: a converter regression, or errors it unmasked -- compare "
+               f"era-{len(steps) - 1}-{label}.log with the previous log **" if n > before else ""))
     member_loop("members-after-converters")
     return steps, advisories
 
