@@ -834,14 +834,53 @@ def in_range(ver, rng):
     return False
 
 
+_BARE_NEW = re.compile(r"(?m)^([ \t]*)(?:([\w.$<>\[\], ?]+?)\s+)?(\w+)\s*=\s*new\s+([\w.$]+(?:<[^;()]*>)?)\s*;[ \t]*\n")
+
+
+def _resugar_constructors(t):
+    count = 0
+    while True:
+        for m in _BARE_NEW.finditer(t):
+            v = m.group(3)
+            call = re.compile(r"\b%s\.\s*/\*\s*\$VF: Unable to resugar constructor\s*\*/\s*<init>\(" % re.escape(v))
+            c = call.search(t, m.end())
+            if not c or re.search(r"\b%s\b" % re.escape(v), t[m.end():c.start()]):
+                continue
+            depth, i = 1, c.end()                    # the matching ')' of the <init>( call
+            while i < len(t) and depth:
+                ch = t[i]
+                if ch in "\"'":
+                    j = i + 1
+                    while j < len(t) and t[j] != ch:
+                        j += 2 if t[j] == "\\" else 1
+                    i = j
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                i += 1
+            if depth:
+                continue
+            args = t[c.end():i - 1]
+            decl = (m.group(2) + " ") if m.group(2) else ""
+            t = t[:m.start()] + t[m.end():c.start()] + f"{decl}{v} = new {m.group(4)}({args})" + t[i:]
+            count += 1
+            break
+        else:
+            return t, count
+
+
 def fix_decompile_artifacts(srcj):
     """Vineflower output that does not PARSE, fixed before anything else reads it (a parse error stops javac before
     it reports anything else, and the stage then misreads the failure):
       * a local class named with a leading digit (`class 1NoiseCondition`, `new 1NoiseCondition(..)`); Vineflower
         already renames its constructor `_NoiseCondition`, so the class and its uses get that name too;
-      * CATALOG §A2: `<unrepresentable>.$assertionsDisabled` -> `true` (asserts are off at runtime).
-    -> {"digit_classes": n, "assert_guards": n}"""
-    n = {"digit_classes": 0, "assert_guards": 0}
+      * CATALOG §A2: `<unrepresentable>.$assertionsDisabled` -> `true` (asserts are off at runtime);
+      * an unresugared constructor: `X v = new X;` ... `v./* $VF: Unable to resugar constructor */<init>(args);`
+        (the statements between compute the arguments) -> the bare `new X;` goes and the call becomes
+        `X v = new X(args);`, when nothing between them touches v.
+    -> {"digit_classes": n, "assert_guards": n, "constructors": n}"""
+    n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0}
     for f in pathlib.Path(srcj).rglob("*.java"):
         t = f.read_text(encoding="utf-8", errors="replace")
         new = t
@@ -849,6 +888,8 @@ def fix_decompile_artifacts(srcj):
             fixed = "_" + re.sub(r"^\d+", "", name)
             new = re.sub(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])", fixed, new)
             n["digit_classes"] += 1
+        new, c = _resugar_constructors(new)
+        n["constructors"] += c
         k = new.count("<unrepresentable>.$assertionsDisabled")
         if k:
             new = new.replace("<unrepresentable>.$assertionsDisabled", "true")
@@ -955,7 +996,7 @@ def self_check():
                      " return new 1Cond(c); float f = 1F; } }", encoding="utf-8")
         got = fix_decompile_artifacts(d)
         s = f.read_text(encoding="utf-8")
-        ok &= got == {"digit_classes": 1, "assert_guards": 1} and "class _Cond" in s and "new _Cond(c)" in s
+        ok &= got == {"digit_classes": 1, "assert_guards": 1, "constructors": 0} and "class _Cond" in s and "new _Cond(c)" in s
         ok &= "1Cond" not in s.split("$VF was")[0] and "!true &&" in s and "1F" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
@@ -979,6 +1020,11 @@ def self_check():
         ok &= m["modId"] == "mymod" and m["displayName"] == "My Mod" and jar_toml(pathlib.Path(d, "m.jar"))[0] == {"mymod"}
     ok &= loader_siblings("x-fabric") == ["x-fabric", "x", "x-forge", "x-neoforge"] and loader_siblings(123)[0] == "123"
     ok &= "farmers-delight" in slug_guesses("farmersdelight") and slug_guesses("my_mod")[:2] == ["my_mod", "my-mod"]
+    t, c = _resugar_constructors("   T f() {\n      Pair var1 = new Pair;\n      String a = g(x);\n"
+                                 "      var1./* $VF: Unable to resugar constructor */<init>(a, h(\")\", switch (y) { case 1 -> 2; }));\n"
+                                 "      return var1;\n   }\n")
+    ok &= c == 1 and "new Pair;" not in t and 'Pair var1 = new Pair(a, h(")", switch (y) { case 1 -> 2; }));' in t \
+        and t.index("String a") < t.index("Pair var1")
     ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
     with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
