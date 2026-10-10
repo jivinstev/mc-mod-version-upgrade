@@ -633,8 +633,8 @@ def main():
             for dep in dd["dependencies"]:
                 if dep.get("type") != "required":
                     continue
-                rc2, dv = modreg("versions", "--provider", prov, "--id", dep["id"], "--loader", "neoforge", "--mc", T)
-                if not dv.get("has_native"):
+                if not any(modreg("versions", "--provider", prov, "--id", sid, "--loader", "neoforge", "--mc", T)[1]
+                           .get("has_native") for sid in (loader_siblings(dep["id"]) if prov == "modrinth" else [dep["id"]])):
                     need.append(dep.get("name") or dep["id"])
             info["required_deps_missing_at_target"] = need
             if need:
@@ -781,6 +781,13 @@ def jar_toml(jar):
     return own, rng
 
 
+def loader_siblings(slug):
+    """Some authors publish one registry project per loader, and a dependency can point at the Fabric one
+    (friends-and-foes) while the NeoForge build lives in a sibling (friends-and-foes-forge)."""
+    base = re.sub(r"-(fabric|quilt)$", "", str(slug))
+    return list(dict.fromkeys([str(slug), base, base + "-forge", base + "-neoforge"]))
+
+
 def slug_guesses(mid):
     """Registry slugs a mod id commonly corresponds to: itself, underscores as hyphens, and one hyphen inserted
     at each word boundary of a run-together id (farmersdelight -> farmers-delight)."""
@@ -885,7 +892,11 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=()):
             if (p, dep) in seen or "geckolib" in dep.lower():
                 continue
             seen.add((p, dep))
-            got, why = fetch(p, dep)
+            got, why = None, "no build"
+            for sid in loader_siblings(dep) if p == "modrinth" else [dep]:
+                got, why = fetch(p, sid)
+                if got:
+                    break
             if not got:
                 names.append(f"{dep} (NO usable {mc} build: {why})")
                 continue
@@ -954,6 +965,7 @@ def self_check():
             z.writestr("fabric.mod.json", '{"id": "my-mod", "name": "My Mod"}')
         m = read_jar_meta(pathlib.Path(d, "m.jar"))
         ok &= m["modId"] == "mymod" and m["displayName"] == "My Mod" and jar_toml(pathlib.Path(d, "m.jar"))[0] == {"mymod"}
+    ok &= loader_siblings("x-fabric") == ["x-fabric", "x", "x-forge", "x-neoforge"] and loader_siblings(123)[0] == "123"
     ok &= "farmers-delight" in slug_guesses("farmersdelight") and slug_guesses("my_mod")[:2] == ["my_mod", "my-mod"]
     ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
