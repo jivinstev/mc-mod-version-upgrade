@@ -133,8 +133,11 @@ def required_roots(work):
     return out
 
 
-def foreign(imp, own, req):
+def foreign(imp, own, req, tree=frozenset()):
     if imp.startswith(PLATFORM) or any(imp.startswith(o + ".") for o in own):
+        return False
+    parts = imp.split(".")                  # a package present in the decompiled tree is the mod's own (a second
+    if any(".".join(parts[:k]) in tree for k in range(2, len(parts) + 1)):   # root package, a shaded library)
         return False
     flat = imp.replace("_", "").lower()
     return not any(r in flat.split(".") or r in flat for r in req)
@@ -144,11 +147,12 @@ def plan(work, group, also=()):
     java = work / "src/main/java"
     files = sorted(java.rglob("*.java"))
     own = {group, group.rsplit(".", 1)[0]} if group else set()
+    tree = {f.relative_to(java).parent.as_posix().replace("/", ".") for f in files}
     req = required_roots(work) | {m.replace("-", "").replace("_", "").lower() for m in also if m}
     park, why, cuts = {}, {}, {}
     for f in files:
         t = f.read_text(encoding="utf-8", errors="replace")
-        bad = sorted({i for i in IMPORT.findall(t) if foreign(i, own, req)})
+        bad = sorted({i for i in IMPORT.findall(t) if foreign(i, own, req, tree)})
         if bad and ENTRY.search(t):
             continue          # the @Mod entry class is never parked: its integration references are compile-loop work
         if bad:
@@ -321,6 +325,8 @@ def self_check():
             "MyMod.java": "package com.ex.mymod;\nimport net.minecraft.world.item.Item;\nimport com.ex.mymod.integration.jei.Plug;\nclass MyMod {}",
             "integration/jei/Plug.java": "package com.ex.mymod.integration.jei;\nimport mezz.jei.api.IModPlugin;\nclass Plug {}",
             "Entry.java": "package com.ex.mymod;\nimport top.theillusivec4.curios.api.CuriosApi;\n@Mod(\"mymod\")\nclass Entry {}",
+            "../../core/lib/Thing.java": "package com.core.lib;\nclass Thing {}",
+            "UsesCore.java": "package com.ex.mymod;\nimport com.core.lib.Thing;\nclass UsesCore {}",
             "integration/jei/Helper.java": "package com.ex.mymod.integration.jei;\nimport net.minecraft.world.item.Item;\nclass Helper {}",
             "integration/Shared.java": "package com.ex.mymod.integration;\nclass Shared {}",
             "data/Gen.java": "package com.ex.mymod.data;\nimport net.neoforged.neoforge.data.event.GatherDataEvent;\nclass Gen {}",
