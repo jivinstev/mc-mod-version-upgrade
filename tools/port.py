@@ -278,6 +278,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     srcj.mkdir(parents=True, exist_ok=True)
     for f in raw.rglob("*.java"):
         d = srcj / f.relative_to(raw); d.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(f, d)
+    artifacts = fix_decompile_artifacts(srcj)
     for x in list(raw.iterdir()):
         if x.name in ("assets", "data") and x.is_dir():
             shutil.copytree(x, res / x.name, dirs_exist_ok=True)
@@ -363,7 +364,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     pk = run([sys.executable, str(ROOT / "tools/park-optional.py"), "--work", str(work), "--group", group], log=log)
     parked = int((re.findall(r"park-optional: (\d+) file", pk.stdout) or ["0"])[0])
     run([sys.executable, str(ROOT / "tools/scaffold-gametest.py"), "--work", str(work)], log=log)
-    return {"group": group, "parked_files": parked, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
+    return {"group": group, "parked_files": parked, "decompile_artifacts_fixed": artifacts, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
             "mixin_configs": meta["mixins"], "deps": meta["deps"],
             "conditions_rewritten": cond_changed, "unknown_forge_conditions": cond_unknown,
             "forge_tag_references_left": forge_tags}
@@ -744,6 +745,30 @@ def in_range(ver, rng):
     return False
 
 
+def fix_decompile_artifacts(srcj):
+    """Vineflower output that does not PARSE, fixed before anything else reads it (a parse error stops javac before
+    it reports anything else, and the stage then misreads the failure):
+      * a local class named with a leading digit (`class 1NoiseCondition`, `new 1NoiseCondition(..)`); Vineflower
+        already renames its constructor `_NoiseCondition`, so the class and its uses get that name too;
+      * CATALOG §A2: `<unrepresentable>.$assertionsDisabled` -> `true` (asserts are off at runtime).
+    -> {"digit_classes": n, "assert_guards": n}"""
+    n = {"digit_classes": 0, "assert_guards": 0}
+    for f in pathlib.Path(srcj).rglob("*.java"):
+        t = f.read_text(encoding="utf-8", errors="replace")
+        new = t
+        for name in sorted(set(re.findall(r"\bclass\s+(\d+[A-Za-z_]\w*)", t)), key=len, reverse=True):
+            fixed = "_" + re.sub(r"^\d+", "", name)
+            new = re.sub(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])", fixed, new)
+            n["digit_classes"] += 1
+        k = new.count("<unrepresentable>.$assertionsDisabled")
+        if k:
+            new = new.replace("<unrepresentable>.$assertionsDisabled", "true")
+            n["assert_guards"] += k
+        if new != t:
+            f.write_text(new, encoding="utf-8")
+    return n
+
+
 def wire_deps(work, prov, pid, file_id, mcs, toml_required=()):
     """Put each REQUIRED dependency's build for every hop's target into libs/<mc>/, which the build compiles and
     runs against (templates/neoforge-mod/build.gradle), transitive ones too. Two sources, because each misses
@@ -817,6 +842,15 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=()):
 def self_check():
     import tempfile
     ok = norm("Some Mod Name!") == "somemodname"
+    with tempfile.TemporaryDirectory() as d:          # decompile artifacts that do not parse
+        f = pathlib.Path(d) / "A.java"
+        f.write_text("class A { Object m(Ctx c) {\n class 1Cond implements X {\n _Cond/* $VF was: 1Cond*/(Ctx c) {}\n }\n"
+                     " if (!<unrepresentable>.$assertionsDisabled && c == null) throw new AssertionError();\n"
+                     " return new 1Cond(c); float f = 1F; } }", encoding="utf-8")
+        got = fix_decompile_artifacts(d)
+        s = f.read_text(encoding="utf-8")
+        ok &= got == {"digit_classes": 1, "assert_guards": 1} and "class _Cond" in s and "new _Cond(c)" in s
+        ok &= "1Cond" not in s.split("$VF was")[0] and "!true &&" in s and "1F" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"

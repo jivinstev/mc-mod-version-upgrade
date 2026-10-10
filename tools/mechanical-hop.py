@@ -242,6 +242,10 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
         if "daemon has disappeared" in text or "OutOfMemoryError" in text:   # not the AT's fault: say so
             raise RuntimeError(f"the Gradle daemon died while recompiling Minecraft (memory?), not an AT problem; "
                                f"rerun the stage (see {log.name})")
+        src_err = re.search(r"(\S+\.java:\d+: error: [^\n]+)", text)
+        if src_err and "neoForm" not in src_err.group(1):     # Minecraft compiled; the MOD's own sources did not
+            raise RuntimeError(f"the mod's own sources do not compile (Minecraft's recompile is not the problem): "
+                               f"{src_err.group(1)[-220:]} -- see {log.name}")
         _rc, out = run("fix-access-transformer.py", "--work", repo, "--overrides-from", log)
         if " 0 override" in out:
             raise RuntimeError(f"Minecraft's recompile fails and no access-transformer override explains it (see {log.name})")
