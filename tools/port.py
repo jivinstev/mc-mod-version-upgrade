@@ -580,7 +580,8 @@ def main():
         # 1.21.1 -> 26.2 (a packed era hop), not downport 1.21.8 -> 1.21.1 first (no pack: a worker-only hop)
         alt = packed_source(prov, pid, T, v)
         if alt:
-            say(f"source: {v['chosen']['mc']} would need an unpacked hop; using the {alt['mc']} build instead")
+            say(f"source: the {v['chosen'].get('loader', '?')} {v['chosen']['mc']} build would need an unpacked hop; "
+                f"using the {alt.get('loader', '?')} {alt['mc']} build instead")
             v = {**v, "chosen": alt}
             info["source"].update({"chosen": alt, "fileId": alt["fileId"]})
         if v.get("has_native"):
