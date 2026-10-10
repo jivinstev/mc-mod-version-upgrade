@@ -674,6 +674,12 @@ def main():
         state["deps_wired"] = wired
         if wired:
             say("dependencies: " + "; ".join(f"{mc}: {', '.join(n for n in names)}" for mc, names in wired.items()))
+        missing = [n for names in wired.values() for n in names if "NO usable" in n or "REQUIRED by" in n]
+        if missing:     # the same decision the registry pre-check asks for, for a dependency only the toml names
+            return stop(21, f"required dependencies with no usable build for the target: {'; '.join(missing)}",
+                        ["port each one first (python3 tools/port.py \"<name>\" --to <target>)",
+                         "or rerun with --ignore-deps to port this one anyway (its Gate B will not load without them)"],
+                        state, work)
         state["done"].append("deps-wired"); save_state(work, state)
     if a.stop_after == "setup":
         say("stopped after setup (--stop-after)"); return 0
