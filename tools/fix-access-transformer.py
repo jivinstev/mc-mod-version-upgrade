@@ -21,10 +21,12 @@ Never removes an entry. Prints what it changed. Standard library only.
 """
 import argparse, json, pathlib, re, sys
 
-OVERRIDE = re.compile(r"/transformed/(?P<path>net/minecraft/\S+?)\.java:\d+: error: (?P<m>[\w$]+)\([^)]*\) in [\w$.]+ "
+OVERRIDE = re.compile(r"/transformed/(?P<path>net/(?:minecraft|neoforged)/\S+?)\.java:\d+: error: (?P<m>[\w$]+)\([^)]*\) in [\w$.]+ "
                       r"cannot override (?P=m)\([^)]*\) in (?P<base>[\w$.]+)")
+# NeoForge's own classes are recompiled in the same step (a widened SpawnEggItem method breaks NeoForge's
+# DeferredSpawnEggItem override), so their overrides need widening exactly like Minecraft's.
 # ModDevGradle (the only toolchain for 26.x) reports the same javac error with the class's FQN instead of a path
-OVERRIDE_MDG = re.compile(r"ERROR Line: \d+, (?P<m>[\w$]+)\([^)]*\) in (?P<fqn>net\.minecraft\.[\w$.]+) "
+OVERRIDE_MDG = re.compile(r"ERROR Line: \d+, (?P<m>[\w$]+)\([^)]*\) in (?P<fqn>net\.(?:minecraft|neoforged)\.[\w$.]+) "
                           r"cannot override (?P=m)\([^)]*\) in (?P<base>[\w$.]+)")
 
 
@@ -169,6 +171,12 @@ def self_check():
            "net.minecraft.world.entity.animal.equine.AbstractHorse cannot override actuallyHurt(net.minecraft.world.damagesource."
            "DamageSource,float) in net.minecraft.world.entity.LivingEntity\n")
     ok &= override_lines(mdg, t)[0].startswith("public net.minecraft.world.entity.animal.equine.AbstractHorse actuallyHurt(")
+    neo = ("/x/transformed/net/neoforged/neoforge/common/DeferredSpawnEggItem.java:56: error: getDefaultType() in "
+           "DeferredSpawnEggItem cannot override getDefaultType() in SpawnEggItem\n")
+    egg = "public net.minecraft.world.item.SpawnEggItem getDefaultType()Lnet/minecraft/world/entity/EntityType;\n"
+    ok &= override_lines(neo, egg) == ["public net.neoforged.neoforge.common.DeferredSpawnEggItem getDefaultType()"
+                                       "Lnet/minecraft/world/entity/EntityType; # overrides net.minecraft.world.item."
+                                       "SpawnEggItem.getDefaultType, widened there"]
     print("self-check:", "OK" if ok else f"FAIL {adds}")
     return 0 if ok else 1
 
