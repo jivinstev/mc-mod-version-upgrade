@@ -44,6 +44,7 @@ DATAGEN_DIR = re.compile(r"^(data|datagen|datagenerator|datagenerators|gen|gener
 IMPORT = re.compile(r"(?m)^\s*import\s+(?:static\s+)?([\w.]+)\s*;")
 DATAGEN_PKG = re.compile(r"^(?:net\.minecraft\.data\.(?!worldgen\b)|net\.minecraft\.data\.[A-Z]"
                          r"|net\.(?:neoforged\.neoforge|minecraftforge)\.(?:common\.data|client\.model\.generators)\.)")
+ENTRY = re.compile(r"(?m)^\s*@(?:net\.neoforged\.fml\.common\.|net\.minecraftforge\.fml\.common\.)?Mod\s*\(")
 DECL = re.compile(r"\b(?:class|interface|record)\s+(\w+)[^{;]*?\b(?:extends|implements)\s+([^{]+)\{", re.S)
 GATHER_METHOD = re.compile(r"(?m)^[ \t]*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:(?:public|private|protected|static|final"
                            r"|synchronized)\s+)*void\s+(\w+)\s*\(\s*(?:final\s+)?(?:[\w.]+\.)?GatherDataEvent(?:\.\w+)?"
@@ -148,6 +149,8 @@ def plan(work, group):
     for f in files:
         t = f.read_text(encoding="utf-8", errors="replace")
         bad = sorted({i for i in IMPORT.findall(t) if foreign(i, own, req)})
+        if bad and ENTRY.search(t):
+            continue          # the @Mod entry class is never parked: its integration references are compile-loop work
         if bad:
             rel = f.relative_to(java)
             parts = rel.parts
@@ -315,6 +318,7 @@ def self_check():
         for rel, body in {
             "MyMod.java": "package com.ex.mymod;\nimport net.minecraft.world.item.Item;\nimport com.ex.mymod.integration.jei.Plug;\nclass MyMod {}",
             "integration/jei/Plug.java": "package com.ex.mymod.integration.jei;\nimport mezz.jei.api.IModPlugin;\nclass Plug {}",
+            "Entry.java": "package com.ex.mymod;\nimport top.theillusivec4.curios.api.CuriosApi;\n@Mod(\"mymod\")\nclass Entry {}",
             "integration/jei/Helper.java": "package com.ex.mymod.integration.jei;\nimport net.minecraft.world.item.Item;\nclass Helper {}",
             "integration/Shared.java": "package com.ex.mymod.integration;\nclass Shared {}",
             "data/Gen.java": "package com.ex.mymod.data;\nimport net.neoforged.neoforge.data.event.GatherDataEvent;\nclass Gen {}",

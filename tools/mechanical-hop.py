@@ -186,6 +186,9 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
     # the generated helpers' package, found ONCE across every source set: a converter run on a source set that
     # holds no @Mod class (a client or datagen set) otherwise stops with "no @Mod class found"
     pkg = mod_package(dirs)
+    if not pkg:                     # no @Mod class in the compiled tree: the scaffold's group is the mod's package
+        gp = pathlib.Path(repo) / "gradle.properties"
+        pkg = (re.findall(r"(?m)^mod_group_id\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) or [None])[0] if gp.exists() else None
     for label, script, args_for in todo:
         outs = []
         for i, d in enumerate(dirs):
