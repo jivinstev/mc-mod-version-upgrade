@@ -26,7 +26,7 @@ NOT FOR a two-target (§W, `era-hop --keep-old`) tree: converters write target-o
 which would break the other target. Refused when the tree still has a versions/1.21.1.properties.
 Standard library only (the converters it runs are too).
 """
-import argparse, os, hashlib, importlib.util, json, pathlib, re, subprocess, sys, tempfile
+import argparse, os, hashlib, importlib.util, json, pathlib, re, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -215,8 +215,9 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
                                "the target, or a maven this machine cannot reach (tools/local-maven.py); see " + log.name)
         if "NoSuchFileException" in text and "/.gradle/repositories/" in text:
             healed = heal_ng_cache(repo)
-            if healed:
-                continue                                # retry with the cache pointing at this workspace
+            if healed:                                  # the daemon holds the old entry in memory: stop it, then retry
+                subprocess.run(["bash", "gradlew", "--stop"], cwd=repo, capture_output=True)
+                continue
         if "daemon has disappeared" in text or "OutOfMemoryError" in text:   # not the AT's fault: say so
             raise RuntimeError(f"the Gradle daemon died while recompiling Minecraft (memory?), not an AT problem; "
                                f"rerun the stage (see {log.name})")
@@ -231,22 +232,32 @@ def heal_ng_cache(repo, home=None):
     that list names files inside the .gradle/repositories/ of whichever workspace first ran it. Delete that
     workspace and every later port whose access transformer forces the step dies with NoSuchFileException on a
     path in a project that no longer exists. The file is the same in every workspace of that Minecraft version
-    (a dummy repository of Minecraft's own jars), so point the stale entries at this workspace's copy.
+    (a dummy repository of Minecraft's own jars), so copy this workspace's file to a STABLE place in the Gradle
+    home and point the stale entries there -- pointing them at this workspace would only move the bug to the day
+    this workspace is deleted. The caller must stop the Gradle daemon before retrying: a running daemon keeps
+    the entry in memory and never rereads the file (measured: the rewrite alone left the retry failing).
     -> number of paths rewritten (0: nothing to heal, the failure is something else)."""
     home = pathlib.Path(home or os.environ.get("GRADLE_USER_HOME") or pathlib.Path.home() / ".gradle")
+    stable = home / "caches/ng-heal"
     n = 0
-    for lib in (home / "caches/ng_execute").glob("*/libraries.txt"):
+    # the cache entry, and every copy of it a workspace's own build already made (a retry reads that copy)
+    libs = list((home / "caches/ng_execute").glob("*/libraries.txt")) + list(pathlib.Path(repo).glob("build/neoForm/**/libraries.txt"))
+    for lib in libs:
         text = lib.read_text(encoding="utf-8", errors="replace")
         def fix(m):
             nonlocal n
             path = m.group(0)
             if pathlib.Path(path).exists():
                 return path
-            mine = pathlib.Path(repo) / ".gradle/repositories" / path.split("/.gradle/repositories/", 1)[1]
-            if not mine.exists():
-                return path
+            rel = path.split("/.gradle/repositories/", 1)[1]
+            mine, keep = pathlib.Path(repo) / ".gradle/repositories" / rel, stable / rel
+            if not keep.exists():
+                if not mine.exists():
+                    return path
+                keep.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(mine, keep)
             n += 1
-            return str(mine)
+            return str(keep)
         new = re.sub(r"[^\s=]+/\.gradle/repositories/[^\s]+", fix, text)
         if new != text:
             lib.write_text(new, encoding="utf-8")
@@ -436,8 +447,14 @@ def self_check():
         lib.parent.mkdir(parents=True)
         lib.write_text(f"-e={d}/gone/{rel}\n-e=/does/not/matter.jar\n", encoding="utf-8")
         ok &= heal_ng_cache(d / "repo", home=d / "home") == 1
-        ok &= str(d / "repo" / rel) in lib.read_text(encoding="utf-8") and "/does/not/matter.jar" in lib.read_text(encoding="utf-8")
+        ok &= str(d / "home/caches/ng-heal" / rel.split(".gradle/repositories/", 1)[1]) in lib.read_text(encoding="utf-8")
+        ok &= (d / "home/caches/ng-heal" / rel.split(".gradle/repositories/", 1)[1]).exists()   # survives the workspace
+        ok &= "/does/not/matter.jar" in lib.read_text(encoding="utf-8")
         ok &= heal_ng_cache(d / "repo", home=d / "home") == 0      # idempotent
+        copy = d / "repo/build/neoForm/x/steps/listTransformLibraries/libraries.txt"   # the workspace's own copy
+        copy.parent.mkdir(parents=True)
+        copy.write_text(f"-e={d}/gone/{rel}\n", encoding="utf-8")
+        ok &= heal_ng_cache(d / "repo", home=d / "home") == 1 and "/gone/" not in copy.read_text(encoding="utf-8")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

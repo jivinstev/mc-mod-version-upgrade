@@ -576,6 +576,13 @@ def main():
                                                                   "or pass the path to the jar"])
         info["source"] = {"provider": prov, "id": pid, "classification": v["classification"], "chosen": v.get("chosen"),
                           "fileId": (v.get("chosen") or {}).get("fileId")}
+        # the newest older build is not always the right source: a mod on 1.21.8 that ALSO ships 1.21.1 should port
+        # 1.21.1 -> 26.2 (a packed era hop), not downport 1.21.8 -> 1.21.1 first (no pack: a worker-only hop)
+        alt = packed_source(prov, pid, T, v)
+        if alt:
+            say(f"source: {v['chosen']['mc']} would need an unpacked hop; using the {alt['mc']} build instead")
+            v = {**v, "chosen": alt}
+            info["source"].update({"chosen": alt, "fileId": alt["fileId"]})
         if v.get("has_native"):
             c = v["chosen"] or {}
             return stop(20, f"{a.mod} already has a NeoForge {T} build ({c.get('fileName')}); there is nothing to port",
@@ -663,6 +670,31 @@ def main():
     if a.stop_after == "setup":
         say("stopped after setup (--stop-after)"); return 0
     return run_hops(a, T, hops, work, state, meta)
+
+
+def packed_source(prov, pid, T, v, tries=6):
+    """When the chosen build's route has a hop with no pack, the newest OLDER build whose route is fully packed,
+    or None. Only builds the registry says exist are considered, newest first."""
+    c = v.get("chosen") or {}
+    def packed(loader, mc):
+        hops = route.plan((loader, mc), ("neoforge", T))
+        return hops is not None and all(h["pack"] for h in hops)
+    if not c or packed(c.get("loader") or "neoforge", c["mc"]):
+        return None
+    for mc in sorted(v.get("older_mcs") or [], key=parse_ver, reverse=True)[:tries * 2]:
+        if mc == c["mc"] or not re.fullmatch(r"\d+(\.\d+)+", mc):
+            continue
+        for loader in ("neoforge", "forge"):
+            if not packed(loader, mc):
+                continue
+            rc, dv = modreg("versions", "--provider", prov, "--id", pid, "--loader", loader, "--mc", mc)
+            alt = dv.get("chosen") if dv.get("has_native") else None
+            if alt:
+                return alt
+            tries -= 1
+            if tries <= 0:
+                return None
+    return None
 
 
 def wire_deps(work, prov, pid, file_id, mcs):
