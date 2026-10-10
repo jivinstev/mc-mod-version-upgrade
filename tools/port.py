@@ -637,6 +637,9 @@ def main():
         else:
             return stop(23, f"{jar.name} carries no Forge, NeoForge or Fabric metadata, so it is not a mod this tool can port",
                         ["check it is the mod's jar and not a library or a launcher plugin"])
+    if loader == "neoforge" and forge_api_jar(jar):
+        say(f"{jar.name}: NeoForge on the Forge API (mods.toml, net.minecraftforge classes) -- ported as Forge")
+        loader = "forge"
     src_mc = (info["source"].get("chosen") or {}).get("mc") or re.sub(r"[\[\](),]", "", (rm.get("mcRange") or "").split(",")[0]) or "1.20.1"
     meta["modId"] = meta.get("modId") or (rm.get("modIds") or [None])[0]
     if not meta["modId"]:
@@ -741,6 +744,22 @@ def jar_toml(jar):
             r = re.search(r'versionRange\s*=\s*"([^"]+)"', block)
             rng = r.group(1) if r else None
     return own, rng
+
+
+def forge_api_jar(jar):
+    """NeoForge's first line (MC 1.20.1, 47.1.x) is a fork of Forge: mods.toml, net.minecraftforge packages, SRG
+    names at runtime. Such a jar is ported exactly like a Forge one, whatever its toml's loader dependency says."""
+    with zipfile.ZipFile(jar) as z:
+        names = z.namelist()
+        if "META-INF/neoforge.mods.toml" in names or "META-INF/mods.toml" not in names:
+            return False
+        neo = forge = 0
+        for n in names:
+            if n.endswith(".class"):
+                b = z.read(n)
+                forge += b"net/minecraftforge/" in b
+                neo += b"net/neoforged/neoforge/" in b
+        return forge > 0 and neo == 0
 
 
 def in_range(ver, rng):
@@ -865,6 +884,15 @@ def self_check():
         ok &= "1Cond" not in s.split("$VF was")[0] and "!true &&" in s and "1F" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        for nm, toml, cls in (("a.jar", "META-INF/mods.toml", b"net/minecraftforge/common/MinecraftForge"),
+                              ("b.jar", "META-INF/mods.toml", b"net/neoforged/neoforge/common/NeoForge"),
+                              ("c.jar", "META-INF/neoforge.mods.toml", b"net/minecraftforge/x")):
+            with zipfile.ZipFile(f"{d}/{nm}", "w") as z:
+                z.writestr(toml, "modLoader=\"javafml\"\n"); z.writestr("x/A.class", b"\xca\xfe" + cls)
+        ok &= forge_api_jar(pathlib.Path(d, "a.jar")) and not forge_api_jar(pathlib.Path(d, "b.jar")) \
+            and not forge_api_jar(pathlib.Path(d, "c.jar"))
     ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
     with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
