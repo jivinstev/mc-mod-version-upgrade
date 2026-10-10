@@ -217,9 +217,9 @@ def cmd_resolve_modid(args):
             info["loader"] = "forge"
             toml_txt = z.read("META-INF/mods.toml").decode("utf-8", "replace")
         if toml_txt:
-            info["modIds"] = re.findall(r'^\s*modId\s*=\s*"([^"]+)"', toml_txt, re.M)
+            info["modIds"] = re.findall(r"""^\s*modId\s*=\s*["']([^"'\n]+)["']""", toml_txt, re.M)
             # first minecraft dependency versionRange, if any
-            mrange = re.search(r'modId\s*=\s*"minecraft".*?versionRange\s*=\s*"([^"]+)"',
+            mrange = re.search(r"""modId\s*=\s*["']minecraft["'].*?versionRange\s*=\s*["']([^"'\n]+)["']""",
                                toml_txt, re.S)
             if mrange:
                 info["mcRange"] = mrange.group(1)
@@ -247,7 +247,7 @@ def _read_modids_from_jar(path):
                 if fj.get("id"):
                     ids = [fj["id"]]
             if txt:
-                ids = re.findall(r'^\s*modId\s*=\s*"([^"]+)"', txt, re.M)
+                ids = re.findall(r"""^\s*modId\s*=\s*["']([^"'\n]+)["']""", txt, re.M)
     except Exception:
         pass
     return loader, ids

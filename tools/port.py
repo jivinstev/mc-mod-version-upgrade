@@ -162,10 +162,13 @@ def read_jar_meta(jar):
         meta["mixins"] = sorted(set(meta["mixins"]) | {n for n in names if n.endswith(".mixins.json") and "/" not in n})
         if "fabric.mod.json" in names:
             f = json.loads(z.read("fabric.mod.json").decode("utf-8", "replace"))
-            meta.update({"modId": f.get("id"), "version": f.get("version"), "displayName": f.get("name"),
-                         "description": f.get("description"), "authors": ", ".join(
-                             a if isinstance(a, str) else a.get("name", "") for a in f.get("authors", [])),
-                         "license": f.get("license") if isinstance(f.get("license"), str) else None})
+            fab = {"modId": f.get("id"), "version": f.get("version"), "displayName": f.get("name"),
+                   "description": f.get("description"), "authors": ", ".join(
+                       a if isinstance(a, str) else a.get("name", "") for a in f.get("authors", [])),
+                   "license": f.get("license") if isinstance(f.get("license"), str) else None}
+            # a multi-loader jar carries both: the (neo)forge toml is the one this port runs on, so the Fabric
+            # file only fills what the toml left out (its id can differ, and a hyphen is not a legal NeoForge id)
+            meta.update({k: v for k, v in fab.items() if not (toml and meta.get(k))})
             meta["mixins"] = sorted(set(meta["mixins"]) | {m if isinstance(m, str) else m.get("config") for m in f.get("mixins", [])})
     if meta.get("version") and "${" in meta["version"]:
         meta["version"] = None
@@ -273,7 +276,26 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     shutil.rmtree(raw, ignore_errors=True); raw.mkdir(parents=True)
     r = run(["java", "-jar", str(vf), "-dgs=1", "-rsy=1", "-rbr=1", str(jar), str(raw)], log=log, timeout=7200)
     if not any(raw.rglob("*.java")):
-        raise RuntimeError("Vineflower produced no Java (see setup.log)")
+        with zipfile.ZipFile(jar) as z:
+            if any(n.endswith(".class") for n in z.namelist()):
+                raise RuntimeError("Vineflower produced no Java (see setup.log)")
+            # a RESOURCE-ONLY mod (a structure or datapack bundle): nothing to decompile, the port is its data
+            for n in z.namelist():
+                if n.startswith(("assets/", "data/", "META-INF/")) or n == "pack.mcmeta":
+                    if not n.endswith("/"):
+                        d = raw / n; d.parent.mkdir(parents=True, exist_ok=True); d.write_bytes(z.read(n))
+        meta["resource_only"] = True
+        # its loader was lowcodefml (no code); the port runs on javafml like every other, so it gets a one-line
+        # @Mod entry class -- which also gives the GameTest gates a package to live in
+        mid = meta["modId"]
+        cls = "".join(w.capitalize() for w in re.split(r"[_\W]+", mid) if w) + "Mod"
+        d = raw / "com" / mid
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{cls}.java").write_text(f"package com.{mid};\n\nimport net.neoforged.fml.common.Mod;\n\n"
+                                       f"/** Entry point for a resource-only mod: its content is all data and assets. */\n"
+                                       f"@Mod(\"{mid}\")\npublic class {cls} {{\n}}\n", encoding="utf-8")
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write("setup: resource-only mod (no classes): the port is its data and metadata\n")
     srcj, res = work / "src/main/java", work / "src/main/resources"
     srcj.mkdir(parents=True, exist_ok=True)
     for f in raw.rglob("*.java"):
@@ -361,7 +383,8 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     cond_changed, cond_unknown, forge_tags = neoforge_conditions(res) if src_loader == "forge" else (0, [], 0)
     hoisted = fix_hoisted_spec(srcj)
     # optional integrations and datagen are code the port cannot compile against (tools/park-optional.py)
-    pk = run([sys.executable, str(ROOT / "tools/park-optional.py"), "--work", str(work), "--group", group], log=log)
+    pk = run([sys.executable, str(ROOT / "tools/park-optional.py"), "--work", str(work), "--group",
+              group or f"com.{meta['modId']}"], log=log)
     parked = int((re.findall(r"park-optional: (\d+) file", pk.stdout) or ["0"])[0])
     run([sys.executable, str(ROOT / "tools/scaffold-gametest.py"), "--work", str(work)], log=log)
     return {"group": group, "parked_files": parked, "decompile_artifacts_fixed": artifacts, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
@@ -677,6 +700,9 @@ def main():
             save_state(work, state)
             info_setup = setup(work, jar, loader, src_mc, hops[0]["setup"], meta, log)
         except Exception as e:  # noqa: BLE001 -- a setup failure is a STOP with the reason, never a traceback-and-guess
+            import traceback
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write("\nsetup failed:\n" + traceback.format_exc())
             return stop(24, f"setup failed: {e}", ["read mods/<modid>/setup.log", "fix the cause and rerun"], state, work)
         state["setup"] = info_setup; state["done"].append("setup"); save_state(work, state)
         say(f"setup done: group {info_setup['group']}, {info_setup['unmapped_names_left']} unmapped names left, "
@@ -744,11 +770,11 @@ def jar_toml(jar):
     text = re.sub(r"#[^\n]*", "", text)
     own, rng = set(), None
     for block in re.split(r"(?m)^\s*\[\[", text)[1:]:
-        mid = re.search(r'modId\s*=\s*"([^"]+)"', block)
+        mid = re.search(r"""modId\s*=\s*["']([^"'\n]+)["']""", block)   # TOML: either quote
         if block.startswith("mods]]") and mid:
             own.add(mid.group(1))
         elif block.startswith("dependencies.") and mid and mid.group(1) == "minecraft":
-            r = re.search(r'versionRange\s*=\s*"([^"]+)"', block)
+            r = re.search(r"""versionRange\s*=\s*["']([^"'\n]+)["']""", block)
             rng = r.group(1) if r else None
     return own, rng
 
@@ -900,6 +926,12 @@ def self_check():
                 z.writestr(toml, "modLoader=\"javafml\"\n"); z.writestr("x/A.class", b"\xca\xfe" + cls)
         ok &= forge_api_jar(pathlib.Path(d, "a.jar")) and not forge_api_jar(pathlib.Path(d, "b.jar")) \
             and not forge_api_jar(pathlib.Path(d, "c.jar"))
+    with _tf.TemporaryDirectory() as d:            # multi-loader jar: the toml (single-quoted is legal TOML) wins
+        with zipfile.ZipFile(f"{d}/m.jar", "w") as z:
+            z.writestr("META-INF/mods.toml", "modLoader = 'lowcodefml'\n[[mods]]\n  modId = 'mymod'\n")
+            z.writestr("fabric.mod.json", '{"id": "my-mod", "name": "My Mod"}')
+        m = read_jar_meta(pathlib.Path(d, "m.jar"))
+        ok &= m["modId"] == "mymod" and m["displayName"] == "My Mod" and jar_toml(pathlib.Path(d, "m.jar"))[0] == {"mymod"}
     ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
     with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
