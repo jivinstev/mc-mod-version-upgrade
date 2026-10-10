@@ -1743,6 +1743,33 @@ CompoundTag()))`. The tag round-trips untouched, the hand-written load/save do t
 on-disk format is unchanged, and there is no rewrite to get wrong. Pass `null` for the provider
 only after checking no store reads it; one that does needs the level-sensitive
 `SavedDataType.Factory` overload instead. (the builder mod: six stores, one ~40-line helper.)
+· ⚠ **AUGMENT — now a converter, and it found a silent data loss the adapter alone does not cover.**
+`tools/convert-saved-data.py` (run by the 26.2 mechanical stage) generates `<pkg>.SavedDataCompat` and repoints
+three shapes, leaving every load and save body as written: `extends SavedData` → `extends SavedDataCompat.Base`
+(which re-declares the removed `save(CompoundTag, Provider)`, so each `@Override` stays valid);
+`SavedData.Factory` → `SavedDataCompat.Factory` (the same record shape); and
+`<storage>.computeIfAbsent/get(factory, name)` → `(SavedDataCompat.type(factory, name))`, where the receiver is a
+`getDataStorage()` call or a variable declared `DimensionDataStorage` (a `Map.computeIfAbsent` is never touched).
+· **The provider question is answered, not guessed:** NeoForge 26.2 patches `SavedDataType` so its constructor
+and codec factories receive the `ServerLevel`, so the bridge hands BOTH load and save `level.registryAccess()`,
+as 1.21.1 did. No store has to be checked for whether it reads the provider.
+· 🔴 **The file MOVES, and that is a world reset with a clean compile and a green gate.** 26.2 saves a store at
+`<dimension>/data/<namespace>/<name>.dat`; 1.21.1 wrote `<dimension>/data/<name>.dat`. Ported by the adapter
+alone, every 1.21.1 world opens on 26.2 with each store EMPTY (a boss counted as never beaten, a ban list gone)
+and nothing logs. The bridge's constructor factory runs only when no 26.2 file exists, so it is the one place
+to carry the old file across: it reads `<dimension>/data/<name>.dat` with `SavedDataStorage.readTagFromDisk`,
+loads the `data` compound with the store's own load, marks it dirty (so it is written at the new path) and
+logs one line. The old file is left in place. A hand port that wrote the adapter recorded this as an accepted
+loss; it does not have to be one.
+· **REFUSED by name:** `storage.set(name, data)` (26.2's `set` needs the type), a storage call that is not
+`(factory, name)`, and a subclass with no `save(CompoundTag, Provider)` (which `Base` turns into a compile
+error rather than a silent no-op).
+· **Measured:** a boss-effects library's 5 store files, 15 sites: every `SavedData` error gone, 1378 → 1372
+(the stores' remaining errors are unrelated). Compiled against the patched 26.2 classpath in isolation, all
+converted shapes — a storage variable, a nested `Factory` import, fully qualified names, a lambda loader —
+produce classes. Two converter bugs it shipped without and the real tree found: a `computeIfAbsent(...)` inside a
+COMMENT, and an argument splitter that read a lambda's `->` as a closing generic bracket. A self-check over
+hand-written samples had neither shape; the first real tree had both.
 
 **V30. `EntityType.create(Level)` gained an `EntitySpawnReason`, and the reason is INERT — but
 `canSpawn` is not.** Read the 26.2 body before agonising over which reason to pass: `create`

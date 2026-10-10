@@ -300,6 +300,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-gear-tiers.py|convert-gear-tiers: the 1.21.1 tool-tier and armour classes re-supplied on 26.2 components; instanceof widened only where safe" \
             "convert-reload-weighted.py|convert-reload-weighted: reload listeners named, JSON listeners on the raw map, Weight/WeightedEntry re-supplied; idempotent" \
             "convert-client-hooks.py|convert-client-hooks: TextureSheetParticle re-supplied, initializeClient through RegisterClientExtensionsEvent, ItemProperties a logged no-op" \
+            "convert-saved-data.py|convert-saved-data: SavedData.Factory + name onto SavedDataType through the CompoundTag bridge; load/save unchanged, a 1.21.1 file read once" \
             "convert-buffer-seam.py|convert-buffer-seam: MultiBufferSource as an interface over the recording seam; lambdas and nested types keep their shape" \
             "local-maven.py|local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry" \
             "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \

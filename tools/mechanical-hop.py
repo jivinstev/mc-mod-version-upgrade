@@ -38,6 +38,7 @@ CONVERTERS = [
     ("override-signatures", "convert-override-signatures.py", None),
     ("reload-weighted", "convert-reload-weighted.py", "modid"),
     ("client-hooks", "convert-client-hooks.py", "modid"),
+    ("saved-data", "convert-saved-data.py", "modid"),
     ("gear-tiers", "convert-gear-tiers.py", "assets"),
     ("rendertypes", "convert-rendertypes.py", "rendertypes"),
     ("core-shaders", "convert-core-shaders.py", "shaders"),
@@ -371,6 +372,7 @@ def self_check():
         ok &= [c for c in calls if c.startswith("convert-")] == ["convert-gui-hooks.py", "convert-valueio.py",
                                                                     "convert-attachment-io.py", "convert-override-signatures.py",
                                                                     "convert-reload-weighted.py", "convert-client-hooks.py",
+                                                                    "convert-saved-data.py",
                                                                     "convert-gear-tiers.py", "convert-entity-renderstate.py",
                                                                     "convert-buffer-seam.py"]
         recount = [s for s in steps if s["step"] == "valueio"][0]
