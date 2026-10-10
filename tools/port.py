@@ -779,6 +779,15 @@ def jar_toml(jar):
     return own, rng
 
 
+def slug_guesses(mid):
+    """Registry slugs a mod id commonly corresponds to: itself, underscores as hyphens, and one hyphen inserted
+    at each word boundary of a run-together id (farmersdelight -> farmers-delight)."""
+    out = [mid, mid.replace("_", "-")]
+    if "_" not in mid and len(mid) >= 8:
+        out += [mid[:i] + "-" + mid[i:] for i in range(3, len(mid) - 2)]
+    return list(dict.fromkeys(out))
+
+
 def forge_api_jar(jar):
     """NeoForge's first line (MC 1.20.1, 47.1.x) is a fork of Forge: mods.toml, net.minecraftforge packages, SRG
     names at runtime. Such a jar is ported exactly like a Forge one, whatever its toml's loader dependency says."""
@@ -886,8 +895,16 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=()):
         for mid in sorted(set(toml_required) - declared - PLATFORM_IDS):
             if "geckolib" in mid.lower():
                 continue
-            rc4, sr = modreg("search", "--query", mid, "--loader", "neoforge", "--mc", mc, "--limit", "5")
             hit = None
+            # most mod ids are their Modrinth slug with the hyphens taken out (farmersdelight -> farmers-delight),
+            # and a full-text search for the bare id can miss the mod entirely: try those slugs first. fetch()
+            # still accepts a build only if its own toml declares `mid`, so a wrong guess costs a lookup, nothing more.
+            for slug in slug_guesses(mid):
+                got, _why = fetch("modrinth", slug, expect=mid)
+                if got:
+                    hit = got[0]["fileName"]
+                    break
+            sr = {} if hit else modreg("search", "--query", mid, "--loader", "neoforge", "--mc", mc, "--limit", "5")[1]
             for r in sr.get("results", [])[:5]:
                 for pv in r.get("providers", []):
                     got, _why = fetch(pv["provider"], pv["id"], expect=mid)
@@ -932,6 +949,7 @@ def self_check():
             z.writestr("fabric.mod.json", '{"id": "my-mod", "name": "My Mod"}')
         m = read_jar_meta(pathlib.Path(d, "m.jar"))
         ok &= m["modId"] == "mymod" and m["displayName"] == "My Mod" and jar_toml(pathlib.Path(d, "m.jar"))[0] == {"mymod"}
+    ok &= "farmers-delight" in slug_guesses("farmersdelight") and slug_guesses("my_mod")[:2] == ["my_mod", "my-mod"]
     ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
     with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
