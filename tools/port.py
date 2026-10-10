@@ -666,14 +666,12 @@ def main():
             f"{info_setup.get('parked_files', 0)} file(s) of optional integrations/datagen parked (MIGRATION.md)")
     if "deps-wired" not in state["done"] and not a.ignore_deps:
         src = info["source"]
-        if src.get("provider") and src.get("fileId"):
-            wired = wire_deps(work, src["provider"], src["id"], src["fileId"], sorted({h["to_mc"] for h in hops}, key=parse_ver))
-            state["deps_wired"] = wired
-            if wired:
-                say("dependencies: " + "; ".join(f"{mc}: {', '.join(n for n in names)}" for mc, names in wired.items()))
-        else:
-            say("dependencies: the jar is not on a registry; required mods its toml names must be put in "
-                "libs/<minecraft version>/ by hand: " + (", ".join(d["modId"] for d in meta.get("deps", []) if d["required"]) or "none"))
+        req = [d["modId"] for d in meta.get("deps", []) if d["required"]]
+        wired = wire_deps(work, src.get("provider"), src.get("id"), src.get("fileId"),
+                          sorted({h["to_mc"] for h in hops}, key=parse_ver), req)
+        state["deps_wired"] = wired
+        if wired:
+            say("dependencies: " + "; ".join(f"{mc}: {', '.join(n for n in names)}" for mc, names in wired.items()))
         state["done"].append("deps-wired"); save_state(work, state)
     if a.stop_after == "setup":
         say("stopped after setup (--stop-after)"); return 0
@@ -708,33 +706,108 @@ def packed_source(prov, pid, T, v, tries=6):
     return None
 
 
-def wire_deps(work, prov, pid, file_id, mcs):
+PLATFORM_IDS = {"minecraft", "forge", "neoforge", "fabric", "fabricloader", "java", "fabric-api"}
+
+
+def jar_toml(jar):
+    """(own mod ids, minecraft versionRange or None) read from a jar's (neo)forge toml."""
+    try:
+        with zipfile.ZipFile(jar) as z:
+            name = next((n for n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml") if n in z.namelist()), None)
+            text = z.read(name).decode("utf-8", "replace") if name else ""
+    except (OSError, zipfile.BadZipFile):
+        return set(), None
+    text = re.sub(r"#[^\n]*", "", text)
+    own, rng = set(), None
+    for block in re.split(r"(?m)^\s*\[\[", text)[1:]:
+        mid = re.search(r'modId\s*=\s*"([^"]+)"', block)
+        if block.startswith("mods]]") and mid:
+            own.add(mid.group(1))
+        elif block.startswith("dependencies.") and mid and mid.group(1) == "minecraft":
+            r = re.search(r'versionRange\s*=\s*"([^"]+)"', block)
+            rng = r.group(1) if r else None
+    return own, rng
+
+
+def in_range(ver, rng):
+    """Maven-style range check ('[1.21,1.21.2)', '[1.21.1,)', '1.21.1'); True when the range is absent."""
+    if not rng or rng.strip() in ("*", ""):
+        return True
+    v = parse_ver(ver)
+    for part in re.findall(r"[\[(][^\])]*[\])]", rng) or [f"[{rng},{rng}]"]:
+        lo, _, hi = part[1:-1].partition(",") if "," in part else (part[1:-1], "", part[1:-1])
+        ok_lo = not lo.strip() or (v >= parse_ver(lo.strip()) if part[0] == "[" else v > parse_ver(lo.strip()))
+        ok_hi = not hi.strip() or (v <= parse_ver(hi.strip()) if part[-1] == "]" else v < parse_ver(hi.strip()))
+        if ok_lo and ok_hi:
+            return True
+    return False
+
+
+def wire_deps(work, prov, pid, file_id, mcs, toml_required=()):
     """Put each REQUIRED dependency's build for every hop's target into libs/<mc>/, which the build compiles and
-    runs against (templates/neoforge-mod/build.gradle). Transitive required dependencies too. GeckoLib is left to
-    the build's own coordinate (uses_geckolib). A dependency with no build for a target is reported, not fatal:
-    the name route already stops on it, and a jar path gets to decide. -> {mc: [file names]}"""
-    rc, dd = modreg("deps", "--provider", prov, "--id", pid, "--file", file_id)
-    top = [d["id"] for d in dd.get("dependencies", []) if d.get("type") == "required"]
+    runs against (templates/neoforge-mod/build.gradle), transitive ones too. Two sources, because each misses
+    things the other has: the registry's declared dependencies, and the jar's own toml (measured: a mod's toml
+    required "emi" and "foundation" that its registry page never declared). A toml id the registry did not cover
+    is looked up by name and accepted only when the downloaded jar's own toml declares that mod id. Every jar is
+    checked against the target by its OWN minecraft range: a registry tag is not proof (a 1.21.1 build was
+    listed for 26.2). GeckoLib is left to the build's own coordinate (uses_geckolib). Anything unresolved is
+    reported, never fatal. -> {mc: [file names and notes]}"""
+    top = []
+    if prov and pid and file_id:
+        rc, dd = modreg("deps", "--provider", prov, "--id", pid, "--file", file_id)
+        top = [(prov, d["id"]) for d in dd.get("dependencies", []) if d.get("type") == "required"]
     out = {}
     for mc in mcs:
         lib = work / "libs" / mc
         seen, queue, names = set(), list(top), []
-        while queue:
-            dep = queue.pop(0)
-            if dep in seen or "geckolib" in dep.lower():
-                continue
-            seen.add(dep)
-            rc2, dv = modreg("versions", "--provider", prov, "--id", dep, "--loader", "neoforge", "--mc", mc)
+
+        def fetch(p, dep, expect=None):
+            rc2, dv = modreg("versions", "--provider", p, "--id", dep, "--loader", "neoforge", "--mc", mc)
             c = dv.get("chosen") if dv.get("has_native") else None
             if not c:
-                names.append(f"{dep} (NO {mc} BUILD)")
-                continue
+                return None, "no build"
             lib.mkdir(parents=True, exist_ok=True)
-            if not (lib / c["fileName"]).exists():
-                modreg("download", "--provider", prov, "--id", dep, "--file", c["fileId"], "--out", str(lib) + "/", timeout=600)
+            f = lib / c["fileName"]
+            if not f.exists():
+                modreg("download", "--provider", p, "--id", dep, "--file", c["fileId"], "--out", str(lib) + "/", timeout=600)
+            if not f.exists():
+                return None, "download failed"
+            own, rng = jar_toml(f)
+            if expect and expect not in own or not in_range(mc, rng):
+                f.unlink()
+                return None, (f"does not declare mod id {expect}" if expect and expect not in own
+                              else f"{c['fileName']} is for Minecraft {rng}, not {mc}")
+            return (c, own), None
+
+        while queue:
+            p, dep = queue.pop(0)
+            if (p, dep) in seen or "geckolib" in dep.lower():
+                continue
+            seen.add((p, dep))
+            got, why = fetch(p, dep)
+            if not got:
+                names.append(f"{dep} (NO usable {mc} build: {why})")
+                continue
+            c, _own = got
             names.append(c["fileName"])
-            rc3, sub = modreg("deps", "--provider", prov, "--id", dep, "--file", c["fileId"])
-            queue += [d["id"] for d in sub.get("dependencies", []) if d.get("type") == "required"]
+            rc3, sub = modreg("deps", "--provider", p, "--id", dep, "--file", c["fileId"])
+            queue += [(p, d["id"]) for d in sub.get("dependencies", []) if d.get("type") == "required"]
+        declared = set().union(*(jar_toml(f)[0] for f in lib.glob("*.jar"))) if lib.exists() else set()
+        for mid in sorted(set(toml_required) - declared - PLATFORM_IDS):
+            if "geckolib" in mid.lower():
+                continue
+            rc4, sr = modreg("search", "--query", mid, "--loader", "neoforge", "--mc", mc, "--limit", "5")
+            hit = None
+            for r in sr.get("results", [])[:5]:
+                for pv in r.get("providers", []):
+                    got, _why = fetch(pv["provider"], pv["id"], expect=mid)
+                    if got:
+                        hit = got[0]["fileName"]
+                        break
+                if hit:
+                    break
+            names.append(f"{hit} (required by the jar's toml as {mid})" if hit
+                         else f"{mid} (REQUIRED by the jar's toml; no {mc} build found that declares it)")
         if names:
             out[mc] = names
     return out
@@ -743,6 +816,16 @@ def wire_deps(work, prov, pid, file_id, mcs):
 def self_check():
     import tempfile
     ok = norm("Some Mod Name!") == "somemodname"
+    ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
+    ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
+    ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
+    with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
+        j = pathlib.Path(d) / "dep.jar"
+        with zipfile.ZipFile(j, "w") as z:
+            z.writestr("META-INF/neoforge.mods.toml", '[[mods]]\nmodId="emi"\n[[dependencies.emi]]\nmodId="minecraft"\n'
+                       'versionRange="[1.21.1,1.21.2)"\n[[dependencies.emi]]\nmodId="other"\n')
+        own, rng = jar_toml(j)
+        ok &= own == {"emi"} and rng == "[1.21.1,1.21.2)"
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
         jar = d / "m.jar"

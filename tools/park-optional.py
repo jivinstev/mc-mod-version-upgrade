@@ -94,6 +94,17 @@ def plan(work, group):
             else:
                 park[f] = "datagen: GatherDataEvent subscriber"
     park.update(datagen_by_type(java, files, park))
+    # a datagen PACKAGE can hold runtime code too (a mod's tag constants under datagen/tags, named by its items
+    # and blocks): never park a datagen-reason file that a file staying in the build still names
+    text = {f: f.read_text(encoding="utf-8", errors="replace") for f in files}
+    changed = True
+    while changed:
+        changed = False
+        for f in [f for f, why in park.items() if why.startswith("datagen")]:
+            who = re.compile(r"\b" + re.escape(f.stem) + r"\b")
+            if any(g not in park and who.search(u) for g, u in text.items() if g != f):
+                del park[f]
+                changed = True
     return park
 
 
@@ -222,6 +233,9 @@ def self_check():
             "item/CoatBuilder.java": "package com.ex.mymod.item;\nimport net.neoforged.neoforge.client.model.generators.ModelBuilder;\npublic class CoatBuilder extends ModelBuilder {}",
             "client/CoatModel.java": "package com.ex.mymod.client;\nimport com.ex.mymod.item.CoatBuilder;\nclass CoatModel { CoatBuilder b; }",
             "Reg.java": "package com.ex.mymod;\nimport com.ex.mymod.client.CoatModel;\nclass Reg { CoatModel m; }",
+            # runtime constants inside the datagen package stay: main code names them
+            "data/ModTagKeys.java": "package com.ex.mymod.data;\npublic class ModTagKeys { public static Object GEMS; }",
+            "item/Gem.java": "package com.ex.mymod.item;\nimport com.ex.mymod.data.ModTagKeys;\nclass Gem { Object t = ModTagKeys.GEMS; }",
             # worldgen helpers are runtime: not datagen
             "world/Feats.java": "package com.ex.mymod.world;\nimport net.minecraft.data.worldgen.placement.PlacementUtils;\nclass Feats extends PlacementUtils {}",
         }.items():
