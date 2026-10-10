@@ -77,7 +77,7 @@ def stop(code, what, choices, state=None, work=None):
 
 
 def modreg(*args, timeout=180):
-    r = subprocess.run([sys.executable, str(MODREG), *args], capture_output=True, text=True, encoding="utf-8",
+    r = subprocess.run([sys.executable, str(MODREG), *map(str, args)], capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=timeout)
     try:
         return r.returncode, json.loads(r.stdout)
