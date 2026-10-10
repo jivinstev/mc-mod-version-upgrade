@@ -667,6 +667,11 @@ def main():
         else:
             return stop(23, f"{jar.name} carries no Forge, NeoForge or Fabric metadata, so it is not a mod this tool can port",
                         ["check it is the mod's jar and not a library or a launcher plugin"])
+    kt, total = kotlin_share(jar)
+    if total and kt * 2 > total:
+        return stop(23, f"{jar.name} is a Kotlin mod ({kt} of {total} classes carry kotlin.Metadata): this pipeline "
+                        f"decompiles and ports Java, and turning a Kotlin mod into Java is a rewrite, not a port",
+                    ["port it by hand in Kotlin (kotlinforforge has NeoForge builds)", "or skip this mod"])
     if loader == "neoforge" and forge_api_jar(jar):
         say(f"{jar.name}: NeoForge on the Forge API (mods.toml, net.minecraftforge classes) -- ported as Forge")
         loader = "forge"
@@ -802,6 +807,13 @@ def slug_guesses(mid):
     if "_" not in mid and len(mid) >= 8:
         out += [mid[:i] + "-" + mid[i:] for i in range(3, len(mid) - 2)]
     return list(dict.fromkeys(out))
+
+
+def kotlin_share(jar):
+    """(classes carrying kotlin.Metadata, all classes) -- a Kotlin mod decompiles to Kotlin, not Java."""
+    with zipfile.ZipFile(jar) as z:
+        cls = [n for n in z.namelist() if n.endswith(".class") and not n.startswith("META-INF/")]
+        return sum(1 for n in cls if b"Lkotlin/Metadata;" in z.read(n)), len(cls)
 
 
 def forge_api_jar(jar):
@@ -1013,6 +1025,10 @@ def self_check():
                 z.writestr(toml, "modLoader=\"javafml\"\n"); z.writestr("x/A.class", b"\xca\xfe" + cls)
                 if nm == "d.jar":
                     z.writestr("META-INF/neoforge.mods.toml", "modLoader=\"javafml\"\n")
+        with zipfile.ZipFile(f"{d}/k.jar", "w") as z:
+            z.writestr("a/A.class", b"\xca\xfe Lkotlin/Metadata; x"); z.writestr("a/B.class", b"\xca\xfe x")
+            z.writestr("a/C.class", b"\xca\xfe Lkotlin/Metadata; y")
+        ok &= kotlin_share(pathlib.Path(d, "k.jar")) == (2, 3) and kotlin_share(pathlib.Path(d, "a.jar")) == (0, 1)
         ok &= forge_api_jar(pathlib.Path(d, "a.jar")) and not forge_api_jar(pathlib.Path(d, "b.jar")) \
             and not forge_api_jar(pathlib.Path(d, "c.jar")) and forge_api_jar(pathlib.Path(d, "d.jar"))
     with _tf.TemporaryDirectory() as d:            # multi-loader jar: the toml (single-quoted is legal TOML) wins
