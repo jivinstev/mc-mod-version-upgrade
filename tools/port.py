@@ -637,10 +637,10 @@ def main():
                            .get("has_native") for sid in (loader_siblings(dep["id"]) if prov == "modrinth" else [dep["id"]])):
                     need.append(dep.get("name") or dep["id"])
             info["required_deps_missing_at_target"] = need
-            if need:
-                return stop(21, f"{a.mod} requires {', '.join(need)}, " + ("which has no" if len(need) == 1 else "none of which has a") + f" NeoForge {T} build",
-                            [f'port it first: python3 tools/port.py "{n}" --to {T}' for n in need]
-                            + ["pass --ignore-deps to port this one anyway (its Gate B will not load without them)"])
+            if need:   # the registry's word; the jar's own toml decides once downloaded (wire_deps): registry
+                       # dependency data is sometimes the other loader's (a Forge build listing a Fabric project)
+                say(f"registry: {', '.join(need)} listed as required, " + ("with no" if len(need) == 1 else "none with a")
+                    + f" NeoForge {T} build -- checking the jar's own toml")
         jars.mkdir(parents=True, exist_ok=True)
         jar = jars / c["fileName"]
         if not jar.exists():
@@ -696,6 +696,23 @@ def main():
     state.update({"info": info, "hops": [h["from"] + "->" + h["to"] for h in hops], "modid": meta["modId"]})
     state.pop("stopped", None)
     log = work / "setup.log"
+    if "deps-wired" not in state["done"] and not a.ignore_deps:
+        src = info["source"]
+        req = [d["modId"] for d in meta.get("deps", []) if d["required"]]
+        work.mkdir(parents=True, exist_ok=True)
+        wired = wire_deps(work, src.get("provider"), src.get("id"), src.get("fileId"),
+                          sorted({h["to_mc"] for h in hops}, key=parse_ver), req,
+                          toml_authority=bool(rm.get("hasNeoforgeToml") or rm.get("hasForgeToml")))
+        state["deps_wired"] = wired
+        if wired:
+            say("dependencies: " + "; ".join(f"{mc}: {', '.join(n for n in names)}" for mc, names in wired.items()))
+        missing = [n for names in wired.values() for n in names if "NO usable" in n or "REQUIRED by" in n]
+        if missing:     # the same decision the registry pre-check asks for, for a dependency only the toml names
+            return stop(21, f"required dependencies with no usable build for the target: {'; '.join(missing)}",
+                        ["port each one first (python3 tools/port.py \"<name>\" --to <target>)",
+                         "or rerun with --ignore-deps to port this one anyway (its Gate B will not load without them)"],
+                        state, work)
+        state["done"].append("deps-wired"); save_state(work, state)
     # ── setup
     if "setup" not in state["done"]:
         say(f"setup: scaffold {work}, decompile, official names, metadata, datapack layout, baseline GameTest")
@@ -712,21 +729,6 @@ def main():
         say(f"setup done: group {info_setup['group']}, {info_setup['unmapped_names_left']} unmapped names left, "
             f"{len(info_setup['hoisted_spec_fixed'])} hoisted config SPEC(s) fixed, "
             f"{info_setup.get('parked_files', 0)} file(s) of optional integrations/datagen parked (MIGRATION.md)")
-    if "deps-wired" not in state["done"] and not a.ignore_deps:
-        src = info["source"]
-        req = [d["modId"] for d in meta.get("deps", []) if d["required"]]
-        wired = wire_deps(work, src.get("provider"), src.get("id"), src.get("fileId"),
-                          sorted({h["to_mc"] for h in hops}, key=parse_ver), req)
-        state["deps_wired"] = wired
-        if wired:
-            say("dependencies: " + "; ".join(f"{mc}: {', '.join(n for n in names)}" for mc, names in wired.items()))
-        missing = [n for names in wired.values() for n in names if "NO usable" in n or "REQUIRED by" in n]
-        if missing:     # the same decision the registry pre-check asks for, for a dependency only the toml names
-            return stop(21, f"required dependencies with no usable build for the target: {'; '.join(missing)}",
-                        ["port each one first (python3 tools/port.py \"<name>\" --to <target>)",
-                         "or rerun with --ignore-deps to port this one anyway (its Gate B will not load without them)"],
-                        state, work)
-        state["done"].append("deps-wired"); save_state(work, state)
     if a.stop_after == "setup":
         say("stopped after setup (--stop-after)"); return 0
     return run_hops(a, T, hops, work, state, meta)
@@ -855,7 +857,7 @@ def fix_decompile_artifacts(srcj):
     return n
 
 
-def wire_deps(work, prov, pid, file_id, mcs, toml_required=()):
+def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=False):
     """Put each REQUIRED dependency's build for every hop's target into libs/<mc>/, which the build compiles and
     runs against (templates/neoforge-mod/build.gradle), transitive ones too. Two sources, because each misses
     things the other has: the registry's declared dependencies, and the jar's own toml (measured: a mod's toml
@@ -863,7 +865,9 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=()):
     is looked up by name and accepted only when the downloaded jar's own toml declares that mod id. Every jar is
     checked against the target by its OWN minecraft range: a registry tag is not proof (a 1.21.1 build was
     listed for 26.2). GeckoLib is left to the build's own coordinate (uses_geckolib). Anything unresolved is
-    reported, never fatal. -> {mc: [file names and notes]}"""
+    reported, never fatal. When the jar has a (neo)forge toml it is the authority: a dependency only the registry
+    lists that has no build is a note, not a stop (registry data can be the other loader's), while a toml-required id
+    with no build stays fatal for the caller. -> {mc: [file names and notes]}"""
     top = []
     if prov and pid and file_id:
         rc, dd = modreg("deps", "--provider", prov, "--id", pid, "--file", file_id)
@@ -902,7 +906,10 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=()):
                 if got:
                     break
             if not got:
-                names.append(f"{dep} (NO usable {mc} build: {why})")
+                if toml_authority and (p, dep) in top:
+                    names.append(f"{dep} (listed by the registry, no {mc} build: {why}; not what the jar's toml requires)")
+                else:
+                    names.append(f"{dep} (NO usable {mc} build: {why})")
                 continue
             c, _own = got
             names.append(c["fileName"])
