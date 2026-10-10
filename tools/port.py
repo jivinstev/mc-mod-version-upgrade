@@ -620,7 +620,15 @@ def main():
     # ── triage
     rc, rm = modreg("resolve-modid", "--jar", str(jar))
     meta = read_jar_meta(jar)
-    loader = (rm.get("loader") or "forge").lower()
+    loader = (rm.get("loader") or "").lower()
+    if not loader:              # no (neo)forge toml: say what the jar IS rather than assume Forge
+        with zipfile.ZipFile(jar) as z:
+            names = set(z.namelist())
+        if "fabric.mod.json" in names or "quilt.mod.json" in names:
+            loader = "fabric"
+        else:
+            return stop(23, f"{jar.name} carries no Forge, NeoForge or Fabric metadata, so it is not a mod this tool can port",
+                        ["check it is the mod's jar and not a library or a launcher plugin"])
     src_mc = (info["source"].get("chosen") or {}).get("mc") or re.sub(r"[\[\](),]", "", (rm.get("mcRange") or "").split(",")[0]) or "1.20.1"
     meta["modId"] = meta.get("modId") or (rm.get("modIds") or [None])[0]
     if not meta["modId"]:
@@ -681,11 +689,14 @@ def packed_source(prov, pid, T, v, tries=6):
         return hops is not None and all(h["pack"] for h in hops)
     if not c or packed(c.get("loader") or "neoforge", c["mc"]):
         return None
-    for mc in sorted(v.get("older_mcs") or [], key=parse_ver, reverse=True)[:tries * 2]:
-        if mc == c["mc"] or not re.fullmatch(r"\d+(\.\d+)+", mc):
+    # the SAME version on another loader first (Forge still ships 1.21.x; a NeoForge build of it is the right
+    # source), then older versions, newest first
+    mcs = [c["mc"]] + sorted(v.get("older_mcs") or [], key=parse_ver, reverse=True)[:tries * 2]
+    for mc in mcs:
+        if not re.fullmatch(r"\d+(\.\d+)+", mc):
             continue
         for loader in ("neoforge", "forge"):
-            if not packed(loader, mc):
+            if (mc, loader) == (c["mc"], c.get("loader")) or not packed(loader, mc):
                 continue
             rc, dv = modreg("versions", "--provider", prov, "--id", pid, "--loader", loader, "--mc", mc)
             alt = dv.get("chosen") if dv.get("has_native") else None
