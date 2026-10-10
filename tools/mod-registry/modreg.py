@@ -21,7 +21,7 @@ Design notes:
       needs-downport— only NEWER 1.21.x builds exist → ask the user, then downport
       none          — nothing usable found
 """
-import argparse
+import argparse, pathlib
 import json
 import urllib.error
 import os
@@ -182,6 +182,25 @@ def cmd_download(args):
         sys.exit(4)  # hash mismatch
 
 
+# ── identify (which registry file IS this jar?) ──────────────────────────────
+def cmd_identify(args):
+    """A jar path carries no exact Minecraft version (a toml range like [1.21,) names none), no project id and
+    no file id. Modrinth indexes every file by hash, so the jar's sha1 answers all three. Exit 5 when no
+    registry knows the file (a hand-built or CurseForge-only jar): the caller falls back to the toml."""
+    import hashlib
+    sha1 = hashlib.sha1(pathlib.Path(args.jar).read_bytes()).hexdigest()
+    prov = providers.get_provider("modrinth")
+    try:
+        v = prov._get(f"/version_file/{sha1}?algorithm=sha1")
+    except Exception as e:                             # 404: unknown file
+        _emit({"jar": args.jar, "sha1": sha1, "found": False, "error": str(e)[:200]})
+        sys.exit(5)
+    proj = prov.project(v["project_id"])
+    _emit({"jar": args.jar, "sha1": sha1, "found": True, "provider": "modrinth", "id": proj["slug"],
+           "name": proj["name"], "fileId": v["id"], "fileName": pathlib.Path(args.jar).name,
+           "loaders": v.get("loaders", []), "mcs": v.get("game_versions", [])})
+
+
 # ── resolve-modid (jar introspection, no network) ────────────────────────────
 def cmd_resolve_modid(args):
     info = {"jar": args.jar, "loader": None, "modIds": [], "mcRange": None,
@@ -284,6 +303,10 @@ def main():
     dl.add_argument("--file", required=True)
     dl.add_argument("--out", required=True)
     dl.set_defaults(func=cmd_download)
+
+    idf = sub.add_parser("identify")
+    idf.add_argument("--jar", required=True)
+    idf.set_defaults(func=cmd_identify)
 
     rm = sub.add_parser("resolve-modid")
     rm.add_argument("--jar", required=True)

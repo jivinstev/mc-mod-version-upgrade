@@ -522,6 +522,11 @@ def from_port(a):
     return run_hops(a, T, hops, work, state, {"modId": modid})
 
 
+def parse_ver(v):
+    """'1.21.1' -> (1, 21, 1); '26.2' -> (26, 2); a snapshot or junk sorts first."""
+    return tuple(int(x) for x in re.findall(r"\d+", v)) if re.fullmatch(r"\d+(\.\d+)*", v or "") else (0,)
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -557,12 +562,20 @@ def main():
     if local.is_file():
         jar = local.resolve()
         info["source"] = {"jar": str(jar)}
+        # a toml range ([1.21,)) names no exact version and no registry file; the jar's hash names both
+        rc, idf = modreg("identify", "--jar", str(jar))
+        if idf.get("found"):
+            mcs = idf.get("mcs") or []
+            info["source"].update({"provider": idf["provider"], "id": idf["id"], "fileId": idf["fileId"]})
+            if mcs:
+                info["source"]["chosen"] = {"mc": max(mcs, key=parse_ver), "fileId": idf["fileId"]}   # [1.21, 1.21.1] -> 1.21.1
     else:
         prov, pid, v = resolve(a.mod, T)
         if prov is None:
             return stop(23, f"could not resolve {a.mod!r}: {v}", ["give the exact name as it appears on Modrinth/CurseForge",
                                                                   "or pass the path to the jar"])
-        info["source"] = {"provider": prov, "id": pid, "classification": v["classification"], "chosen": v.get("chosen")}
+        info["source"] = {"provider": prov, "id": pid, "classification": v["classification"], "chosen": v.get("chosen"),
+                          "fileId": (v.get("chosen") or {}).get("fileId")}
         if v.get("has_native"):
             c = v["chosen"] or {}
             return stop(20, f"{a.mod} already has a NeoForge {T} build ({c.get('fileName')}); there is nothing to port",
@@ -636,9 +649,52 @@ def main():
         say(f"setup done: group {info_setup['group']}, {info_setup['unmapped_names_left']} unmapped names left, "
             f"{len(info_setup['hoisted_spec_fixed'])} hoisted config SPEC(s) fixed, "
             f"{info_setup.get('parked_files', 0)} file(s) of optional integrations/datagen parked (MIGRATION.md)")
+    if "deps-wired" not in state["done"] and not a.ignore_deps:
+        src = info["source"]
+        if src.get("provider") and src.get("fileId"):
+            wired = wire_deps(work, src["provider"], src["id"], src["fileId"], sorted({h["to_mc"] for h in hops}, key=parse_ver))
+            state["deps_wired"] = wired
+            if wired:
+                say("dependencies: " + "; ".join(f"{mc}: {', '.join(n for n in names)}" for mc, names in wired.items()))
+        else:
+            say("dependencies: the jar is not on a registry; required mods its toml names must be put in "
+                "libs/<minecraft version>/ by hand: " + (", ".join(d["modId"] for d in meta.get("deps", []) if d["required"]) or "none"))
+        state["done"].append("deps-wired"); save_state(work, state)
     if a.stop_after == "setup":
         say("stopped after setup (--stop-after)"); return 0
     return run_hops(a, T, hops, work, state, meta)
+
+
+def wire_deps(work, prov, pid, file_id, mcs):
+    """Put each REQUIRED dependency's build for every hop's target into libs/<mc>/, which the build compiles and
+    runs against (templates/neoforge-mod/build.gradle). Transitive required dependencies too. GeckoLib is left to
+    the build's own coordinate (uses_geckolib). A dependency with no build for a target is reported, not fatal:
+    the name route already stops on it, and a jar path gets to decide. -> {mc: [file names]}"""
+    rc, dd = modreg("deps", "--provider", prov, "--id", pid, "--file", file_id)
+    top = [d["id"] for d in dd.get("dependencies", []) if d.get("type") == "required"]
+    out = {}
+    for mc in mcs:
+        lib = work / "libs" / mc
+        seen, queue, names = set(), list(top), []
+        while queue:
+            dep = queue.pop(0)
+            if dep in seen or "geckolib" in dep.lower():
+                continue
+            seen.add(dep)
+            rc2, dv = modreg("versions", "--provider", prov, "--id", dep, "--loader", "neoforge", "--mc", mc)
+            c = dv.get("chosen") if dv.get("has_native") else None
+            if not c:
+                names.append(f"{dep} (NO {mc} BUILD)")
+                continue
+            lib.mkdir(parents=True, exist_ok=True)
+            if not (lib / c["fileName"]).exists():
+                modreg("download", "--provider", prov, "--id", dep, "--file", c["fileId"], "--out", str(lib) + "/", timeout=600)
+            names.append(c["fileName"])
+            rc3, sub = modreg("deps", "--provider", prov, "--id", dep, "--file", c["fileId"])
+            queue += [d["id"] for d in sub.get("dependencies", []) if d.get("type") == "required"]
+        if names:
+            out[mc] = names
+    return out
 
 
 def self_check():

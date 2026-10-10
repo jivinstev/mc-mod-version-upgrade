@@ -18,7 +18,12 @@ JDK, the libraries every NeoForge game ships) nor the mod itself, nor a REQUIRED
 When such a file sits under an `integration`/`compat`/`addon(s)`/`plugin(s)` package, that whole
 sub-package goes (an integration's helpers import nothing foreign themselves). Datagen is the package
 that holds the GatherDataEvent subscriber, when it is a dedicated data/datagen package; otherwise only
-that file. Parked files move to mods/<modid>/parked/ with their paths kept, and every one is listed in
+that file. A datagen CLASS is also found by its TYPE, wherever it lives (authors often keep the subscriber in
+event/ and the providers in data/ or api/data/): it extends or implements a datagen base -- a provider, a
+recipe/model builder, DataProvider -- imported from a datagen package (net.minecraft.data.* except
+net.minecraft.data.worldgen, whose helpers mods call at runtime; NeoForge's/Forge's common.data and
+client.model.generators), or another such class of the mod. A helper that merely imports a datagen package
+joins them only when every class that names it is already datagen. Nothing that main code names is parked. Parked files move to mods/<modid>/parked/ with their paths kept, and every one is listed in
 MIGRATION.md, so nothing is dropped silently. A remaining file that imports a parked class is listed too:
 the compile loop will see it, and it is main code, so it is never parked automatically. Standard library.
 """
@@ -34,6 +39,9 @@ PLATFORM = ("java.", "javax.", "jdk.", "sun.", "net.minecraft.", "net.neoforged.
 INTEGRATION_DIR = re.compile(r"^(integration|integrations|compat|compatibility|addon|addons|plugin|plugins)$", re.I)
 DATAGEN_DIR = re.compile(r"^(data|datagen|datagenerator|datagenerators|gen|generators?)$", re.I)
 IMPORT = re.compile(r"(?m)^\s*import\s+(?:static\s+)?([\w.]+)\s*;")
+DATAGEN_PKG = re.compile(r"^(?:net\.minecraft\.data\.(?!worldgen\b)|net\.minecraft\.data\.[A-Z]"
+                         r"|net\.(?:neoforged\.neoforge|minecraftforge)\.(?:common\.data|client\.model\.generators)\.)")
+DECL = re.compile(r"\b(?:class|interface|record)\s+(\w+)[^{;]*?\b(?:extends|implements)\s+([^{]+)\{", re.S)
 
 
 def required_roots(work):
@@ -85,7 +93,54 @@ def plan(work, group):
                     park[g] = f"datagen: {d.as_posix()} (GatherDataEvent)"
             else:
                 park[f] = "datagen: GatherDataEvent subscriber"
+    park.update(datagen_by_type(java, files, park))
     return park
+
+
+def datagen_by_type(java, files, already):
+    """-> {file: reason} for datagen classes found by type, plus helpers only datagen names (see the docstring)."""
+    text = {f: f.read_text(encoding="utf-8", errors="replace") for f in files}
+    dg_imports = {f: {i.rsplit(".", 1)[1] for i in IMPORT.findall(t) if DATAGEN_PKG.match(i)} for f, t in text.items()}
+    simple = {f: f.stem for f in files}
+    found, changed = {}, True
+    while changed:                                   # transitive: a class extending one of the mod's providers
+        changed = False
+        dg_names = {simple[f] for f in found} | {simple[f] for f in already}
+        for f, t in text.items():
+            if f in found or f in already:
+                continue
+            for m in DECL.finditer(t):
+                if m.group(1) != simple[f]:
+                    continue
+                bases = set(re.findall(r"\b([A-Z]\w*)\b", m.group(2)))
+                hit = (bases & dg_imports[f]) or (bases & dg_names)
+                if hit:
+                    found[f] = f"datagen: {sorted(hit)[0]} subclass"
+                    changed = True
+                break
+    changed = True
+    while changed:                                   # helpers named by datagen classes only
+        changed = False
+        dg = set(found) | set(already)
+        for f, t in text.items():
+            if f in dg or not dg_imports[f]:
+                continue
+            who = re.compile(r"\b" + re.escape(simple[f]) + r"\b")
+            users = [g for g, u in text.items() if g != f and who.search(u)]
+            if users and all(g in dg for g in users):
+                found[f] = "datagen: helper used only by datagen"
+                changed = True
+    # never park what main code names: drop any found class a non-datagen, non-parked class refers to
+    changed = True
+    while changed:
+        changed = False
+        dg = set(found) | set(already)
+        for f in list(found):
+            who = re.compile(r"\b" + re.escape(simple[f]) + r"\b")
+            if any(g not in dg and who.search(u) for g, u in text.items() if g != f):
+                del found[f]
+                changed = True
+    return found
 
 
 def class_name(java, f):
@@ -156,6 +211,19 @@ def self_check():
             "data/Gen.java": "package com.ex.mymod.data;\nimport net.neoforged.neoforge.data.event.GatherDataEvent;\nclass Gen {}",
             "data/Recipes.java": "package com.ex.mymod.data;\nimport net.minecraft.data.recipes.RecipeProvider;\nclass Recipes {}",
             "lib/UsesLib.java": "package com.ex.mymod.lib;\nimport dev.reqlib.api.Thing;\nclass UsesLib {}",
+            # the subscriber in event/, the providers elsewhere: found by type
+            "event/DataGenEvents.java": "package com.ex.mymod.event;\nimport net.neoforged.neoforge.data.event.GatherDataEvent;\nimport com.ex.mymod.gen.ModItems;\nclass DataGenEvents { void g(GatherDataEvent e){ new ModItems(); new ModTags(); } }",
+            "gen/ModItems.java": "package com.ex.mymod.gen;\nimport net.neoforged.neoforge.client.model.generators.ItemModelProvider;\npublic class ModItems extends ItemModelProvider {}",
+            "gen/ModTags.java": "package com.ex.mymod.gen;\npublic class ModTags extends BaseTags {}",
+            "gen/BaseTags.java": "package com.ex.mymod.gen;\nimport net.minecraft.data.tags.TagsProvider;\npublic abstract class BaseTags extends TagsProvider {}",
+            "api/data/RecipeHelper.java": "package com.ex.mymod.api.data;\nimport net.minecraft.data.recipes.RecipeOutput;\npublic class RecipeHelper {}",
+            "gen/ModRecipes.java": "package com.ex.mymod.gen;\nimport net.minecraft.data.recipes.RecipeProvider;\nclass ModRecipes extends RecipeProvider { void r(){ RecipeHelper.x(); } }",
+            # runtime code: a builder named by a client model is NOT parked, nor is the model
+            "item/CoatBuilder.java": "package com.ex.mymod.item;\nimport net.neoforged.neoforge.client.model.generators.ModelBuilder;\npublic class CoatBuilder extends ModelBuilder {}",
+            "client/CoatModel.java": "package com.ex.mymod.client;\nimport com.ex.mymod.item.CoatBuilder;\nclass CoatModel { CoatBuilder b; }",
+            "Reg.java": "package com.ex.mymod;\nimport com.ex.mymod.client.CoatModel;\nclass Reg { CoatModel m; }",
+            # worldgen helpers are runtime: not datagen
+            "world/Feats.java": "package com.ex.mymod.world;\nimport net.minecraft.data.worldgen.placement.PlacementUtils;\nclass Feats extends PlacementUtils {}",
         }.items():
             (j / rel).parent.mkdir(parents=True, exist_ok=True)
             (j / rel).write_text(body, encoding="utf-8")
@@ -165,7 +233,10 @@ def self_check():
             encoding="utf-8")
         got = {f.relative_to(w / "src/main/java").as_posix() for f in plan(w, "com.ex.mymod")}
         ok = got == {"com/ex/mymod/integration/jei/Plug.java", "com/ex/mymod/integration/jei/Helper.java",
-                     "com/ex/mymod/data/Gen.java", "com/ex/mymod/data/Recipes.java"}
+                     "com/ex/mymod/data/Gen.java", "com/ex/mymod/data/Recipes.java",
+                     "com/ex/mymod/event/DataGenEvents.java", "com/ex/mymod/gen/ModItems.java",
+                     "com/ex/mymod/gen/ModTags.java", "com/ex/mymod/gen/BaseTags.java",
+                     "com/ex/mymod/gen/ModRecipes.java", "com/ex/mymod/api/data/RecipeHelper.java"}
     print("self-check:", "OK" if ok else f"FAIL {sorted(got)}")
     return 0 if ok else 1
 

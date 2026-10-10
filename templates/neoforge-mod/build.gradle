@@ -103,6 +103,11 @@ configurations { runtimeClasspath.extendsFrom localRuntime }
 dependencies {
     implementation "net.neoforged:neoforge:${neo_version}"
 
+    // Required mod dependencies: tools/port.py puts each target's build in libs/<minecraft version>/ (a jar from a
+    // registry, matched to that target), so the port compiles against the dependency's real API and Gate B/C load it.
+    compileOnly fileTree(dir: "libs/${minecraft_version}", include: ['*.jar'])
+    localRuntime fileTree(dir: "libs/${minecraft_version}", include: ['*.jar'])
+
     // Gate A: Minecraft-free JUnit tests (test-templates/ResourceIntegrityTest, MixinConfigIntegrityTest).
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'

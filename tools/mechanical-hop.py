@@ -26,7 +26,7 @@ NOT FOR a two-target (§W, `era-hop --keep-old`) tree: converters write target-o
 which would break the other target. Refused when the tree still has a versions/1.21.1.properties.
 Standard library only (the converters it runs are too).
 """
-import argparse, hashlib, importlib.util, json, pathlib, re, subprocess, sys, tempfile
+import argparse, os, hashlib, importlib.util, json, pathlib, re, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -213,6 +213,10 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
         if unresolved:
             raise RuntimeError("dependencies do not resolve: " + ", ".join(unresolved[:6]) + " -- wrong coordinates for "
                                "the target, or a maven this machine cannot reach (tools/local-maven.py); see " + log.name)
+        if "NoSuchFileException" in text and "/.gradle/repositories/" in text:
+            healed = heal_ng_cache(repo)
+            if healed:
+                continue                                # retry with the cache pointing at this workspace
         if "daemon has disappeared" in text or "OutOfMemoryError" in text:   # not the AT's fault: say so
             raise RuntimeError(f"the Gradle daemon died while recompiling Minecraft (memory?), not an AT problem; "
                                f"rerun the stage (see {log.name})")
@@ -220,6 +224,33 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
         if " 0 override" in out:
             raise RuntimeError(f"Minecraft's recompile fails and no access-transformer override explains it (see {log.name})")
     return None
+
+
+def heal_ng_cache(repo, home=None):
+    """NeoGradle caches a recompile step machine-wide (<gradle home>/caches/ng_execute/<hash>/libraries.txt), and
+    that list names files inside the .gradle/repositories/ of whichever workspace first ran it. Delete that
+    workspace and every later port whose access transformer forces the step dies with NoSuchFileException on a
+    path in a project that no longer exists. The file is the same in every workspace of that Minecraft version
+    (a dummy repository of Minecraft's own jars), so point the stale entries at this workspace's copy.
+    -> number of paths rewritten (0: nothing to heal, the failure is something else)."""
+    home = pathlib.Path(home or os.environ.get("GRADLE_USER_HOME") or pathlib.Path.home() / ".gradle")
+    n = 0
+    for lib in (home / "caches/ng_execute").glob("*/libraries.txt"):
+        text = lib.read_text(encoding="utf-8", errors="replace")
+        def fix(m):
+            nonlocal n
+            path = m.group(0)
+            if pathlib.Path(path).exists():
+                return path
+            mine = pathlib.Path(repo) / ".gradle/repositories" / path.split("/.gradle/repositories/", 1)[1]
+            if not mine.exists():
+                return path
+            n += 1
+            return str(mine)
+        new = re.sub(r"[^\s=]+/\.gradle/repositories/[^\s]+", fix, text)
+        if new != text:
+            lib.write_text(new, encoding="utf-8")
+    return n
 
 
 def era_access_transformer(repo, moves, run=run_tool):
@@ -396,6 +427,17 @@ def self_check():
         ok &= calls[0] == "fix-access-transformer.py" and calls.count("fix-access-transformer.py") == 2
         ok &= calls.index("forge-shapes.py") < calls.index("convert-simplechannel.py") < calls.index("fix-holders.py")
         ok &= rep["errors"] == [30]
+    with tempfile.TemporaryDirectory() as d:        # a NeoGradle cache entry naming a deleted workspace is healed
+        d = pathlib.Path(d)
+        rel = ".gradle/repositories/ng_dummy_ng/net/minecraft/client/1.21.1/client-1.21.1-client-extra.jar"
+        (d / "repo" / rel).parent.mkdir(parents=True)
+        (d / "repo" / rel).write_bytes(b"jar")
+        lib = d / "home/caches/ng_execute/abc/libraries.txt"
+        lib.parent.mkdir(parents=True)
+        lib.write_text(f"-e={d}/gone/{rel}\n-e=/does/not/matter.jar\n", encoding="utf-8")
+        ok &= heal_ng_cache(d / "repo", home=d / "home") == 1
+        ok &= str(d / "repo" / rel) in lib.read_text(encoding="utf-8") and "/does/not/matter.jar" in lib.read_text(encoding="utf-8")
+        ok &= heal_ng_cache(d / "repo", home=d / "home") == 0      # idempotent
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
