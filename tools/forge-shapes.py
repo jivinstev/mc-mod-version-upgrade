@@ -1043,13 +1043,26 @@ TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attr
 # --------------------------------------------------------------------------- driver
 
 def root_package(src):
-    pkgs = []
+    """The mod's root package: the @Mod class's, else the common prefix of the largest group of packages sharing
+    a first segment. A plain common prefix over EVERY file is "" as soon as one stray class sits elsewhere (an
+    Architectury-injected `architectury_inject_<mod>_...` class did), and a helper generated there is then
+    `import ItemNbt;`, which does not parse."""
+    pkgs, mod = [], None
     for f in src.rglob("*.java"):
-        m = re.search(r"(?m)^package\s+([\w.]+)\s*;", f.read_text(encoding="utf-8", errors="replace"))
+        text = f.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r"(?m)^package\s+([\w.]+)\s*;", text)
         if m:
             pkgs.append(m.group(1).split("."))
+            if mod is None and re.search(r"(?m)^\s*@(?:net\.\w+\.fml\.common\.)?Mod\s*\(", text):
+                mod = m.group(1)
+    if mod:
+        return mod
     if not pkgs:
         return ""
+    groups = {}
+    for p in pkgs:
+        groups.setdefault(p[0], []).append(p)
+    pkgs = max(groups.values(), key=len)
     pre = pkgs[0]
     for p in pkgs[1:]:
         k = 0
@@ -1373,6 +1386,13 @@ class I {}
 def self_check():
     import tempfile
     bad = []
+    with tempfile.TemporaryDirectory() as d:       # a stray class elsewhere must not empty the root package
+        d = pathlib.Path(d)
+        for rel, pk in (("a/A.java", "uk.co.x.a"), ("b/B.java", "uk.co.x.b"), ("z/Z.java", "architectury_inject_x_1")):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text(f"package {pk};\nclass C {{}}\n", encoding="utf-8")
+        if root_package(d) != "uk.co.x":
+            bad.append(f"root_package: {root_package(d)!r}")
     for name, src, want, gone in CASES:
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d) / "my" / "X.java"
