@@ -5656,3 +5656,58 @@ than a grep for the name shows. And a call rewrite that has to cross nested pare
 not a lazy regex: `tools/burndown-count.sh` exited 4 (parse abort) on the first run, which is the only reason
 this read as a bug and not as "53 errors fewer".
 
+
+**X53. 🔴 Gradle's own javac integration is QUADRATIC in the error count — past a few thousand errors the
+count does not come back at all.** · **Pattern:** an uncapped compile (`-Xmaxerrs 100000`, which is what a
+burn-down needs) of a large raw decompile · **Symptom:** no result. The javac worker finishes in seconds and
+then blocks forever writing its diagnostics back to the daemon, whose 6 GB heap is full; the caller times out
+40 minutes later and reports a stage failure. Measured on a 1,640-file 26.2 port with 2,448 errors: a cap of
+2,000 finished in 56 s and still wrote a 266 MB `build/reports/problems/problems-report.html`, while the
+uncapped run hung · **Cause:** Gradle 9 keeps every diagnostic as a `Problem` whose details carry the compiler
+output accumulated so far, so memory grows with the square of the count. There is no switch for it
+(`org.gradle.internal.problem.summary.threshold` changes nothing). · **Fix:** never ask Gradle for the whole
+list. `tools/maxerrs.init.gradle` caps the integrated compile at 1000 and adds `portFullErrors`, which runs the
+SAME javac (the task's toolchain, classpath, sources, args) outside Gradle; `port_gates.compile_log()` runs it
+only when the cap was hit and appends it to the same log. The direct run took 10 s for the full 2,448.
+`tools/burndown-count.sh` exits 6 on a log that hit the cap with no recount, so a prefix cannot pass as a count.
+
+**X54. A datagen package stays in the build when MAIN code wires it — park the wiring, not the class.** ·
+**Pattern:** the mod's main class holds `private void generateData(GatherDataEvent e)` (registered with
+`addListener(this::generateData)`), or registers a separate subscriber (`addListener(DataGen::gather)`) ·
+**Symptom:** the never-park-what-main-code-names rule (X51's guard against parking runtime code) keeps every
+provider, because main code names them through the handler. Measured: 18 datagen files on a 26.2 port, nine of
+them against NeoForge's removed `client.model.generators` — real-looking errors a worker would be paid to "fix"
+in code the game never runs · **Fix:** `tools/park-optional.py` cuts the handler method or the registration
+line (plus the imports left unused), records it in MIGRATION.md, and judges references on the cut text. A class
+in the datagen package that runtime code still names (a block entity reading a loot-table key) stays.
+
+**X55. 🔴 Dependencies come from the JAR'S OWN toml as well as the registry, and each one is checked against the
+target before the port starts.** · **Pattern:** a registry project page lists fewer required dependencies than
+the jar declares, or lists a dependency whose newest build is for another Minecraft · **Symptom:** a compile
+full of "package does not exist" that looks like porting work, or a port finished against a library that has
+no build for the target and can never load · **Fix:** `tools/port.py` resolves every required mod id from
+`neoforge.mods.toml`/`mods.toml` the registry missed (accepting only a jar whose own toml declares that id),
+reads each dependency jar's own `minecraft` versionRange, and STOPS (exit 21) naming any required dependency
+with no usable build for the target. An open-ended range (`[1.21,)`) cannot prove a mismatch, so it is accepted.
+
+**X56. The source build is a choice, and a wrong one costs a whole unpacked hop.** · **Pattern:** a project
+publishes several loaders and Minecraft versions; the newest build is not always the one a route can use, and
+a "NeoForge" listing can be a Fabric jar or a jar with no loader metadata at all · **Fix:** `tools/port.py`
+identifies a jar by its sha1 (`modreg identify`), prefers a build whose route has a recipe pack (same Minecraft
+on another loader first, then older versions newest-first) and says which it chose, reads the loader from the
+jar (Fabric when `fabric.mod.json`/`quilt.mod.json`), and stops (exit 23) on a jar that carries no loader
+metadata instead of assuming Forge.
+
+**X57. A NeoGradle execution cache records ABSOLUTE paths into the workspace that first ran it.** · **Pattern:**
+port workspaces are created, run and deleted one after another (a sweep, a bench) · **Symptom:**
+`NoSuchFileException …/.gradle/repositories/ng_dummy_ng/…` at the Minecraft recompile of the NEXT port, which
+reads like a broken build of that port · **Fix:** `tools/mechanical-hop.py` heals it: on that error it copies the
+referenced files to a stable place under the Gradle home, rewrites `caches/ng_execute/*/libraries.txt` and the
+workspace's own copies, stops the daemon (which caches the entry) and retries. If the mod's OWN sources fail
+there instead, it says so rather than blaming the recompile.
+
+**X58. Decompiler output that does not parse is fixed at setup, before any count.** · **Pattern:** Vineflower
+emits a local class as `class 1Name` and an assertion guard as `<unrepresentable>.$assertionsDisabled` (§A2)
+· **Symptom:** a parse abort, so the burn-down reports a handful of errors in a tree that has thousands
+(burndown-count exit 4) · **Fix:** `tools/port.py` setup renames digit-prefixed local classes to `_Name` and
+replaces the guard with `true`, and records how many it fixed.
