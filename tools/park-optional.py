@@ -23,7 +23,10 @@ event/ and the providers in data/ or api/data/): it extends or implements a data
 recipe/model builder, DataProvider -- imported from a datagen package (net.minecraft.data.* except
 net.minecraft.data.worldgen, whose helpers mods call at runtime; NeoForge's/Forge's common.data and
 client.model.generators), or another such class of the mod. A helper that merely imports a datagen package
-joins them only when every class that names it is already datagen. Nothing that main code names is parked. Parked files move to mods/<modid>/parked/ with their paths kept, and every one is listed in
+joins them only when every class that names it is already datagen. Nothing that main code names is parked --
+except through the datagen WIRING itself: when main code (often the mod's main class) holds a GatherDataEvent
+handler or registers a datagen subscriber class, that handler method / registration line is cut out of it
+(and recorded), so it no longer keeps every provider in the build. Parked files move to mods/<modid>/parked/ with their paths kept, and every one is listed in
 MIGRATION.md, so nothing is dropped silently. A remaining file that imports a parked class is listed too:
 the compile loop will see it, and it is main code, so it is never parked automatically. Standard library.
 """
@@ -42,6 +45,77 @@ IMPORT = re.compile(r"(?m)^\s*import\s+(?:static\s+)?([\w.]+)\s*;")
 DATAGEN_PKG = re.compile(r"^(?:net\.minecraft\.data\.(?!worldgen\b)|net\.minecraft\.data\.[A-Z]"
                          r"|net\.(?:neoforged\.neoforge|minecraftforge)\.(?:common\.data|client\.model\.generators)\.)")
 DECL = re.compile(r"\b(?:class|interface|record)\s+(\w+)[^{;]*?\b(?:extends|implements)\s+([^{]+)\{", re.S)
+GATHER_METHOD = re.compile(r"(?m)^[ \t]*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:(?:public|private|protected|static|final"
+                           r"|synchronized)\s+)*void\s+(\w+)\s*\(\s*(?:final\s+)?(?:[\w.]+\.)?GatherDataEvent(?:\.\w+)?"
+                           r"\s+\w+\s*\)\s*(?:throws[^{]*)?\{")
+
+
+def _block_end(t, i):
+    """Index just past the brace block opening at t[i] == '{', skipping strings, chars and comments."""
+    depth, n = 0, len(t)
+    while i < n:
+        c = t[i]
+        if t.startswith("//", i):
+            i = t.find("\n", i); i = n if i < 0 else i
+        elif t.startswith("/*", i):
+            i = t.find("*/", i + 2); i = n if i < 0 else i + 2; continue
+        elif c in "\"'":
+            j = i + 1
+            while j < n and t[j] != c:
+                j += 2 if t[j] == "\\" else 1
+            i = j
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def cut_registrations(t, stems):
+    """Drop the lines that only REGISTER a datagen subscriber class (addListener(Gen::gather),
+    EVENT_BUS.register(Gen.class)) and the imports left unused -> (new text, [stems cut])."""
+    hit = []
+    for st in sorted(stems):
+        pat = re.compile(r"(?m)^[ \t]*[\w.()]*(?:addListener\(\s*(?:[\w.]+\.)?%s::\w+\s*\)"
+                         r"|register\(\s*(?:[\w.]+\.)?%s\.class\s*\))\s*;[ \t]*\n" % (st, st))
+        t2 = pat.sub("", t)
+        if t2 != t:
+            hit.append(st); t = t2
+    if hit:
+        body = IMPORT.sub("", t)
+        for imp in IMPORT.findall(t):
+            if imp.rsplit(".", 1)[1] in hit and not re.search(r"\b%s\b" % re.escape(imp.rsplit(".", 1)[1]), body):
+                t = re.sub(r"(?m)^\s*import\s+%s\s*;[ \t]*\n" % re.escape(imp), "", t)
+    return t, hit
+
+
+def cut_gather(t):
+    """A class that main code needs but that also wires datagen (a mod's main class registering its own
+    GatherDataEvent handler is common): remove each GatherDataEvent handler METHOD, the line that registers
+    it (addListener(this::m) / addListener(X::m)), and the imports left unused. -> (new text, [method names])."""
+    names = []
+    while True:
+        m = GATHER_METHOD.search(t)
+        if not m:
+            break
+        end = _block_end(t, m.end() - 1)
+        if end < 0:
+            break
+        names.append(m.group(1))
+        start = t.rfind("\n", 0, m.start()) + 1
+        t = t[:start] + t[end:].lstrip(" \t").removeprefix("\n")
+    for n in names:
+        t = re.sub(r"(?m)^[ \t]*[\w.()]*addListener\(\s*[\w.]+::%s\s*\)\s*;[ \t]*\n" % re.escape(n), "", t)
+    if names:
+        body = IMPORT.sub("", t)
+        for imp in IMPORT.findall(t):
+            simple = imp.rsplit(".", 1)[1]
+            if not re.search(r"\b%s\b" % re.escape(simple), body):
+                t = re.sub(r"(?m)^\s*import\s+%s\s*;[ \t]*\n" % re.escape(imp), "", t)
+    return t, names
 
 
 def required_roots(work):
@@ -70,7 +144,7 @@ def plan(work, group):
     files = sorted(java.rglob("*.java"))
     own = {group, group.rsplit(".", 1)[0]} if group else set()
     req = required_roots(work)
-    park, why = {}, {}
+    park, why, cuts = {}, {}, {}
     for f in files:
         t = f.read_text(encoding="utf-8", errors="replace")
         bad = sorted({i for i in IMPORT.findall(t) if foreign(i, own, req)})
@@ -88,15 +162,31 @@ def plan(work, group):
         if re.search(r"\bGatherDataEvent\b", t):
             rel = f.relative_to(java)
             d = rel.parent
-            if DATAGEN_DIR.match(d.name):
+            named = re.compile(r"\b" + re.escape(f.stem) + r"\b")
+            new, names = cut_gather(t)
+            if names and not re.search(r"\bGatherDataEvent\b", IMPORT.sub("", new)) and any(
+                    g != f and named.search(g.read_text(encoding="utf-8", errors="replace")) for g in files):
+                cuts[f] = (new, names)                   # main code wiring datagen: cut the handler, keep the class
+            elif DATAGEN_DIR.match(d.name):
                 for g in (java / d).rglob("*.java"):
                     park[g] = f"datagen: {d.as_posix()} (GatherDataEvent)"
             else:
                 park[f] = "datagen: GatherDataEvent subscriber"
-    park.update(datagen_by_type(java, files, park))
+    text = {f: f.read_text(encoding="utf-8", errors="replace") for f in files}
+    text.update({f: new for f, (new, _) in cuts.items()})
+    # main code that only REGISTERS a separate datagen subscriber class must not keep it (and so everything
+    # it names) in the build: cut the registration line, and let the subscriber park as datagen
+    subs = {f.stem for f, why in park.items() if why.startswith("datagen")}
+    for f in files:
+        if f in park or not subs:
+            continue
+        new, hit = cut_registrations(text[f], subs)
+        if hit:
+            text[f] = new
+            cuts[f] = (new, cuts.get(f, (None, []))[1] + [f"register {h}" for h in hit])
+    park.update(datagen_by_type(java, files, park, text))
     # a datagen PACKAGE can hold runtime code too (a mod's tag constants under datagen/tags, named by its items
     # and blocks): never park a datagen-reason file that a file staying in the build still names
-    text = {f: f.read_text(encoding="utf-8", errors="replace") for f in files}
     changed = True
     while changed:
         changed = False
@@ -105,12 +195,12 @@ def plan(work, group):
             if any(g not in park and who.search(u) for g, u in text.items() if g != f):
                 del park[f]
                 changed = True
-    return park
+    return park, cuts
 
 
-def datagen_by_type(java, files, already):
+def datagen_by_type(java, files, already, text=None):
     """-> {file: reason} for datagen classes found by type, plus helpers only datagen names (see the docstring)."""
-    text = {f: f.read_text(encoding="utf-8", errors="replace") for f in files}
+    text = text or {f: f.read_text(encoding="utf-8", errors="replace") for f in files}
     dg_imports = {f: {i.rsplit(".", 1)[1] for i in IMPORT.findall(t) if DATAGEN_PKG.match(i)} for f, t in text.items()}
     simple = {f: f.stem for f in files}
     found, changed = {}, True
@@ -176,19 +266,25 @@ def main():
         print("park-optional: no root package (pass --group); refusing to guess what is the mod's own code")
         return 2
     java = work / "src/main/java"
-    park = plan(work, group)
+    park, cuts = plan(work, group)
     parked_names = {class_name(java, f) for f in park}
+    def now(f):
+        return cuts[f][0] if f in cuts else f.read_text(encoding="utf-8", errors="replace")
     still = sorted({class_name(java, f) for f in java.rglob("*.java") if f not in park
-                    and any(i in parked_names for i in IMPORT.findall(f.read_text(encoding="utf-8", errors="replace")))})
+                    and any(i in parked_names for i in IMPORT.findall(now(f)))})
     units = sorted(set(park.values()))
     print(f"park-optional: {len(park)} file(s) in {len(units)} unit(s)" + (" (dry run)" if a.dry_run else ""))
     for u in units:
         print(f"  {sum(1 for v in park.values() if v == u):4d}  {u}")
+    for f, (_, names) in sorted(cuts.items()):
+        print(f"  cut datagen wiring ({', '.join(names)}) out of {f.relative_to(java).as_posix()} (main code; kept)")
     if still:
         print(f"  {len(still)} remaining file(s) import a parked class (main code; left for the compile loop): "
               + ", ".join(s.rsplit('.', 1)[-1] for s in still[:8]))
-    if a.dry_run or not park:
+    if a.dry_run or not (park or cuts):
         return 0
+    for f, (new, _) in cuts.items():
+        f.write_text(new, encoding="utf-8")
     dest = work / "parked/src/main/java"
     for f in park:
         t = dest / f.relative_to(java)
@@ -202,6 +298,8 @@ def main():
              "Not compiled into this port; kept under `parked/` with their paths. Re-port an integration against",
              "the other mod's real API when it is wanted (CATALOG §N); datagen output already ships in resources/.", ""]
     lines += [f"- {u}: {sum(1 for v in park.values() if v == u)} file(s)" for u in units]
+    lines += [f"- datagen wiring ({', '.join(n)}) cut out of {f.relative_to(java).as_posix()}, which main code needs "
+              f"(the original is in decompiled-raw/)" for f, (_, n) in sorted(cuts.items())]
     if still:
         lines += ["", "Main-code files that imported a parked class: " + ", ".join(still)]
     with open(mig, "a", encoding="utf-8") as fh:
@@ -236,6 +334,18 @@ def self_check():
             # runtime constants inside the datagen package stay: main code names them
             "data/ModTagKeys.java": "package com.ex.mymod.data;\npublic class ModTagKeys { public static Object GEMS; }",
             "item/Gem.java": "package com.ex.mymod.item;\nimport com.ex.mymod.data.ModTagKeys;\nclass Gem { Object t = ModTagKeys.GEMS; }",
+            # the mod's main class wires its own datagen: cut the handler, park the providers it named
+            "Main.java": "package com.ex.mymod;\nimport com.ex.mymod.gen.Blocks;\nimport net.neoforged.neoforge.data.event.GatherDataEvent;\n"
+                         "class Main {\n   Main(Bus b) {\n      b.addListener(this::gen);\n      Reg r = null;\n   }\n\n"
+                         "   private void gen(GatherDataEvent event) {\n      String s = \"}\";\n      event.add(new Blocks());\n   }\n}\n",
+            "Boot.java": "package com.ex.mymod;\nclass Boot { Main m; }",
+            "gen/Blocks.java": "package com.ex.mymod.gen;\nimport net.neoforged.neoforge.client.model.generators.BlockStateProvider;\npublic class Blocks extends BlockStateProvider {}",
+            # ...or registers a separate datagen subscriber: cut the registration, park the subscriber
+            "Setup.java": "package com.ex.mymod;\nimport com.ex.mymod.datagen.DataGenerators;\nclass Setup {\n   void init(Bus bus) {\n"
+                          "      bus.addListener(DataGenerators::gather);\n      bus.addListener(this::common);\n   }\n}\n",
+            "Wire.java": "package com.ex.mymod;\nclass Wire { Setup s; }",
+            "datagen/DataGenerators.java": "package com.ex.mymod.datagen;\nimport net.neoforged.neoforge.data.event.GatherDataEvent;\n"
+                                           "public class DataGenerators { public static void gather(GatherDataEvent e) {} }",
             # worldgen helpers are runtime: not datagen
             "world/Feats.java": "package com.ex.mymod.world;\nimport net.minecraft.data.worldgen.placement.PlacementUtils;\nclass Feats extends PlacementUtils {}",
         }.items():
@@ -245,8 +355,13 @@ def self_check():
         (w / "src/main/resources/META-INF/neoforge.mods.toml").write_text(
             '[[dependencies.mymod]]\nmodId="reqlib"\ntype="required"\n[[dependencies.mymod]]\nmodId="jei"\ntype="optional"\n',
             encoding="utf-8")
-        got = {f.relative_to(w / "src/main/java").as_posix() for f in plan(w, "com.ex.mymod")}
-        ok = got == {"com/ex/mymod/integration/jei/Plug.java", "com/ex/mymod/integration/jei/Helper.java",
+        park, cuts = plan(w, "com.ex.mymod")
+        got = {f.relative_to(w / "src/main/java").as_posix() for f in park}
+        main = {f.name: c for f, c in cuts.items()}.get("Main.java")
+        setup = {f.name: c for f, c in cuts.items()}.get("Setup.java")
+        ok = setup is not None and "DataGenerators" not in setup[0] and "this::common" in setup[0] and main is not None and main[1] == ["gen"] and "GatherDataEvent" not in main[0] and "addListener" not in main[0] \
+            and "gen.Blocks" not in main[0] and "Reg r = null;" in main[0] and main[0].rstrip().endswith("}") and got == {
+                     "com/ex/mymod/gen/Blocks.java", "com/ex/mymod/datagen/DataGenerators.java", "com/ex/mymod/integration/jei/Plug.java", "com/ex/mymod/integration/jei/Helper.java",
                      "com/ex/mymod/data/Gen.java", "com/ex/mymod/data/Recipes.java",
                      "com/ex/mymod/event/DataGenEvents.java", "com/ex/mymod/gen/ModItems.java",
                      "com/ex/mymod/gen/ModTags.java", "com/ex/mymod/gen/BaseTags.java",
