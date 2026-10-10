@@ -5719,3 +5719,53 @@ that deletes too much compiles.** · **Pattern:** a Forge `onClientTick(TickEven
 or code before the `if` on the same line silently removed · **Fix:** forge-shapes folds `if (false) {X} else REST`
 to REST and `if (true) {X} else <whole chain>` to X, walking the chain to its real end, and never touches text
 before the `if`.
+
+**X60. Registry metadata is a hint; the JAR decides — six ways a sweep found it wrong.** · **Pattern:** a port
+starts from what a registry (Modrinth/CurseForge) says about a build: its loader, its Minecraft version, its
+required dependencies · **Symptom:** a port that stops on a dependency it can have, routes as the wrong loader,
+or reads the wrong mod id — each found on a popular mod, each reading as "this mod cannot be ported" · **Fix**
+(`tools/port.py`, with a self-check for each):
+- *Dependency data can be the other loader's* (a Forge build listing a Fabric project as required). The jar's own
+  (neo)forge toml is the authority: a registry-only dependency with no target build is a note, a toml-required id
+  with no build still stops, and dependencies are wired before setup so that stop is cheap.
+- *One project per loader*: the dependency points at `<slug>` (Fabric) while the NeoForge build is `<slug>-forge`.
+  Sibling slugs are tried before a dependency is called missing.
+- *A toml-only dependency id the full-text search cannot find* (`farmersdelight`): try it as a slug with the hyphens
+  put back, then search it with underscores as spaces; a build is accepted only if its own toml declares the id.
+- *Single-quoted TOML is legal* (`modId = 'x'`); a reader that only takes double quotes misses the id.
+- *A multi-loader jar carries a toml and a `fabric.mod.json`*: the toml is the one the port runs on; the Fabric file
+  only fills gaps (its id can differ and can be illegal for NeoForge).
+- *A version range's trailing zero* (`[26.2.0,)`) must admit `26.2`.
+- *A mislabelled upload* (a `…-FORGE-….jar` that holds only `fabric.mod.json`) is named in the stop.
+
+**X61. Four kinds of jar that are not "a Forge or NeoForge mod with Java in it", each with its own answer.** ·
+- *NeoForge 1.20.1 IS Forge*: NeoForge's first line was the Forge fork (mods.toml, `net.minecraftforge`, SRG), and some
+  such jars carry a `neoforge.mods.toml` too. The CLASSES decide: Forge references and no `net.neoforged.neoforge`
+  ones take the Forge route, and source selection rates a NeoForge 1.20.1 build by that route from the start.
+- *Resource-only* (a structure or datapack bundle, `modLoader = 'lowcodefml'`, no classes): setup takes `assets/` and
+  `data/` from the jar, runs the data conversions, and generates a one-line `@Mod` entry class so it loads as javafml
+  and the gates have a package.
+- *Self-loading multi-loader* (a Forge `IModLocator` service plus nested per-version jars): there is no single mod
+  source; the port stops saying so.
+- *Fabric labelled as Forge*: X60's last item.
+
+**X62. Vineflower can leave a constructor split: `X v = new X;` … `v.<init>(args)`.** · **Pattern:** a constructor
+whose arguments needed temporaries (a switch expression per argument) · **Symptom:** `'(' or '[' expected` — a parse
+abort, so the count is not a count · **Fix:** setup removes the bare `new X;` and rewrites the `<init>` call as
+`X v = new X(args);`, when nothing between them touches `v` (the statements between compute the arguments).
+
+**X63. A converter that forwards calls by NAME rewrites calls into the mod's own classes.** · **Pattern:** a
+converted 26.x input handler (`mouseClicked(MouseButtonEvent, boolean)`) forwards to `child.mouseClicked(...)`,
+and `child` is the mod's own widget whose method still has the 1.21 `(double, double, int)` shape · **Symptom:** the
+converter RAISES the count (77 conversions, 437 → 475 on one port), as `required: double,double,int` · **Fix:**
+`tools/convert-gui-hooks.py` collects hook names the mod declares itself in the old shape and rewrites only
+`super.*` calls to those. `tools/mechanical-hop.py` now marks any step that raises the count, because a step that
+makes things worse otherwise reads as one more number in a list.
+
+**X64. A machine that ports many mods in a row runs out of disk and memory unless each port cleans up.** ·
+**Symptom:** `No space left on device` mid-sweep, and `Gradle build daemon disappeared unexpectedly` (the kernel's
+OOM killer) on a compile that is fine alone · **Cause:** every Forge-hop port leaves its own ~73 MB Minecraft
+recompile in `~/.gradle/caches/ng_execute` (its access transformer changes the hash), and every NeoGradle or MDG
+port leaves an idle daemon holding gigabytes for hours · **Fix:** `tools/port.py` stops its workspace's daemons
+when a port ends, however it ends. Prune per-port `ng_execute` / `neoformruntime/intermediate_results` entries
+between ports on a long run.
