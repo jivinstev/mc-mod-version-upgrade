@@ -971,8 +971,10 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
                 if got:
                     hit = got[0]["fileName"]
                     break
-            sr = {} if hit else modreg("search", "--query", mid, "--loader", "neoforge", "--mc", mc, "--limit", "5")[1]
-            for r in sr.get("results", [])[:5]:
+            res = []
+            for q in ([] if hit else list(dict.fromkeys([mid, mid.replace("_", " ")]))):   # structure_gel -> "structure gel"
+                res += modreg("search", "--query", q, "--loader", "neoforge", "--mc", mc, "--limit", "5")[1].get("results", [])[:5]
+            for r in res:
                 for pv in r.get("providers", []):
                     got, _why = fetch(pv["provider"], pv["id"], expect=mid)
                     if got:
