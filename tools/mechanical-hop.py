@@ -49,6 +49,22 @@ CONVERTERS = [
 ]
 
 
+TAKES_PACKAGE = {"convert-attachment-io.py", "convert-buffer-seam.py", "convert-client-hooks.py", "convert-gear-tiers.py",
+                 "convert-reload-weighted.py", "convert-saved-data.py"}
+
+
+def mod_package(dirs):
+    """The @Mod class's package, searched across every source set. None when there is none."""
+    for d in dirs:
+        for f in sorted(pathlib.Path(d).rglob("*.java")):
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?m)^\s*@(?:net\.neoforged\.fml\.common\.)?Mod\s*\(", text):
+                m = re.search(r"(?m)^package\s+([\w.]+)\s*;", text)
+                if m:
+                    return m.group(1)
+    return None
+
+
 def _load(name, file):
     sp = importlib.util.spec_from_file_location(name, ROOT / "tools" / file)
     m = importlib.util.module_from_spec(sp)
@@ -167,12 +183,17 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
     member_loop("members")
     todo, advisories = plan(repo, dirs, modid, render_state_type, render_state_factory, shader_block, lib_trees)
     print_fp = [fp(repo)]
+    # the generated helpers' package, found ONCE across every source set: a converter run on a source set that
+    # holds no @Mod class (a client or datagen set) otherwise stops with "no @Mod class found"
+    pkg = mod_package(dirs)
     for label, script, args_for in todo:
         outs = []
         for i, d in enumerate(dirs):
             args = args_for(d, i)
             if args is None:
                 continue
+            if pkg and script in TAKES_PACKAGE:
+                args = [*args, "--package", pkg + ".compat"]
             rc, o = run(script, *args)
             if rc not in (0, 1):
                 raise RuntimeError(f"{script} failed: {o[-600:]}")
