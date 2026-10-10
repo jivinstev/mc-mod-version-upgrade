@@ -615,7 +615,7 @@ def main():
                     need.append(dep.get("name") or dep["id"])
             info["required_deps_missing_at_target"] = need
             if need:
-                return stop(21, f"{a.mod} requires {', '.join(need)}, which has no NeoForge {T} build",
+                return stop(21, f"{a.mod} requires {', '.join(need)}, " + ("which has no" if len(need) == 1 else "none of which has a") + f" NeoForge {T} build",
                             [f'port it first: python3 tools/port.py "{n}" --to {T}' for n in need]
                             + ["pass --ignore-deps to port this one anyway (its Gate B will not load without them)"])
         jars.mkdir(parents=True, exist_ok=True)
