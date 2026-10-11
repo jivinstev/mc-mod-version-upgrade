@@ -5846,3 +5846,9 @@ like `.get(` or `.normal(` would hit every other class's member of that name, so
 javac names the owner. The Forge stage runs it beside `fix-holders` until neither changes anything. Each row is
 checked against the 1.21.1 jar; a rename whose target depends on arity (`overlayCoords`, `uv2`) stays with
 `forge-shapes`, which sees the arguments.
+
+**X74. A library Minecraft itself ships is not an optional integration.** · **Pattern:** a mod's config class
+imports `joptsimple.internal.Strings` (jopt-simple is on every Minecraft classpath) · **Symptom:** park-optional
+called it foreign and parked the config class; ~100 references to it became errors · **Fix:** the platform list now
+names every library root the 1.21 / 26.x game classpath carries (jopt-simple, lz4, noexception, MixinExtras' new
+group, jline, beside Guava, fastutil, Netty, JOML…).

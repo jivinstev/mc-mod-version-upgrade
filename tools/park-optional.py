@@ -38,7 +38,10 @@ import argparse, pathlib, re, shutil, sys
 PLATFORM = ("java.", "javax.", "jdk.", "sun.", "net.minecraft.", "net.neoforged.", "net.minecraftforge.", "com.mojang.", "org.spongepowered.",
             "org.jetbrains.", "org.intellij.", "com.google.", "it.unimi.", "org.apache.", "com.llamalad7.", "org.joml.",
             "org.slf4j.", "io.netty.", "org.lwjgl.", "com.electronwill.", "org.objectweb.", "cpw.mods.", "org.checkerframework.",
-            "org.jspecify.", "net.jodah.", "com.ibm.icu.", "oshi.", "com.sun.", "org.w3c.", "org.xml.", "org.antlr.")
+            "org.jspecify.", "net.jodah.", "com.ibm.icu.", "oshi.", "com.sun.", "org.w3c.", "org.xml.", "org.antlr.",
+            # also on every 1.21+ classpath (Minecraft's and NeoForge's own libraries): parking a mod's config class
+            # for `import joptsimple.internal.Strings` cost one mod 100 errors (X74)
+            "joptsimple.", "net.jpountz.", "com.machinezoo.", "io.github.llamalad7.", "org.jline.")
 INTEGRATION_DIR = re.compile(r"^(integration|integrations|compat|compatibility|addon|addons|plugin|plugins)$", re.I)
 DATAGEN_DIR = re.compile(r"^(data|datagen|datagenerator|datagenerators|gen|generators?)$", re.I)
 IMPORT = re.compile(r"(?m)^\s*import\s+(?:static\s+)?([\w.]+)\s*;")
