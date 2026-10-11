@@ -1170,6 +1170,9 @@ def fix_decompile_artifacts(srcj):
         n["string_concats"] += c
         new, c = re.subn(r"\(([A-Za-z_][\w.$]*)<>\)", r"(\1)", new)   # `(Supplier<>) () -> x`: a raw cast is legal
         n["diamond_casts"] += c
+        if "@Mixin" in new:       # `(Player)(Object)this` compiles to one checkcast; the decompile drops the hop (§162)
+            new, c = re.subn(r"\((?!Object\))([A-Z][\w.]*(?:<[^()]*>)?)\)\s*this\b", r"(\1)(Object)this", new)
+            n["mixin_self_casts"] = n.get("mixin_self_casts", 0) + c
         if "com.google.auto.service.AutoService" in new:    # build-time only: the jar already has META-INF/services
             new = re.sub(r"(?m)^import com\.google\.auto\.service\.AutoService;[ \t]*\n", "", new)
             new, c = re.subn(r"@(?:com\.google\.auto\.service\.)?AutoService\((?:[^()]|\([^()]*\))*\)[ \t]*\n?[ \t]*", "", new)
@@ -1304,6 +1307,12 @@ def self_check():
         got = fix_decompile_artifacts(d)
         s = g.read_text(encoding="utf-8")
         ok &= got["expect_platform"] == 1 and "AutoService" not in s and "public class Q implements Svc" in s
+        g.write_text("@Mixin(ServerPlayer.class)\nclass M { void a() { Player p = (Player)this; Object o = (Object)this; "
+                     "var q = ((LivingEntity) this).getHealth(); } }\n", encoding="utf-8")
+        got = fix_decompile_artifacts(d)
+        s = g.read_text(encoding="utf-8")
+        ok &= got.get("mixin_self_casts") == 2 and "(Player)(Object)this" in s and "((LivingEntity)(Object)this)" in s \
+            and "Object o = (Object)this" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
     import tempfile as _tf

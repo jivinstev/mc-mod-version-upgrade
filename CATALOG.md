@@ -5899,3 +5899,8 @@ jar had the class: under memory pressure, which class is lost varies · **Fix:**
 with the files written and retries any missing one, with Vineflower at 8 GB and then CFR (`--jarfilter`), and logs
 what is still missing. Tool output in setup.log keeps its first 2000 characters too, where a stack trace names its
 exception.
+
+**X80. A mixin's self-cast loses its `(Object)` hop in the decompile.** · **Pattern:** source `(Player)(Object)this`
+in a `@Mixin` class compiles to one `checkcast`, so Vineflower writes `(Player)this` · **Symptom:**
+`incompatible types: ServerPlayerMixin cannot be converted to Player` (§162), in every mod that does it ·
+**Fix:** setup restores `(X)(Object)this` in every file carrying `@Mixin`.
