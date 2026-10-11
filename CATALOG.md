@@ -5919,7 +5919,10 @@ anything, and also removes the field a local channel was copied into.
 is "FTB Quests (NeoForge)" on CurseForge, slug `ftb-quests-forge` · **Symptom:** a confident "no 1.21.1 build found
 that declares it", and the mod stopped, while FTB Quests 2101.x exists · **Fix:** besides the bare id, the resolver
 searches the phrases its slug guesses spell (`ftb quests`), each only while nothing has matched; a candidate is still
-accepted only when its own toml declares the id.
+accepted only when its own toml declares the id. Rechecking every earlier dependency stop this way found no other false
+negative — but one near miss: OctoLib's 26.2 build declares `shatterlib` (the library was renamed), so a mod requiring
+`octolib` is not portable as-is. The stop now names such a candidate (its project name contains the id, its jar
+declares other ids) as `nearest: … -- a renamed mod id?`.
 
 **X83. An enum with no constants decompiles without its `;`.** · **Pattern:** a `@Deprecated` enum whose constants
 were all removed, keeping fields and constructors · **Symptom:** `enum constant expected here` on its first field —

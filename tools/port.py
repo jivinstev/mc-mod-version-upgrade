@@ -1224,9 +1224,9 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
     out = {}
     for mc in mcs:
         lib = work / "libs" / mc
-        seen, queue, names = set(), list(top), []
+        seen, queue, names, near = set(), list(top), [], []
 
-        def fetch(p, dep, expect=None):
+        def fetch(p, dep, expect=None, label=None):
             rc2, dv = modreg("versions", "--provider", p, "--id", dep, "--loader", "neoforge", "--mc", mc)
             c = dv.get("chosen") if dv.get("has_native") else None
             if not c:
@@ -1238,6 +1238,8 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
             if not f.exists():
                 return None, "download failed"
             own, rng = jar_toml(f)
+            if expect and expect not in own and in_range(mc, rng) and label and norm(expect) in norm(label):
+                near.append(f"{label} ({c['fileName']}) declares {', '.join(sorted(own)) or 'nothing'}")
             if expect and expect not in own or not in_range(mc, rng):
                 f.unlink()
                 return None, (f"does not declare mod id {expect}" if expect and expect not in own
@@ -1269,6 +1271,7 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
             if "geckolib" in mid.lower():
                 continue
             hit = None
+            near.clear()
             # most mod ids are their Modrinth slug with the hyphens taken out (farmersdelight -> farmers-delight),
             # and a full-text search for the bare id can miss the mod entirely: try those slugs first. fetch()
             # still accepts a build only if its own toml declares `mid`, so a wrong guess costs a lookup, nothing more.
@@ -1288,7 +1291,7 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
                         if (pv["provider"], pv["id"]) in tried:
                             continue
                         tried.add((pv["provider"], pv["id"]))
-                        got, _why = fetch(pv["provider"], pv["id"], expect=mid)
+                        got, _why = fetch(pv["provider"], pv["id"], expect=mid, label=r.get("name"))
                         if got:
                             hit = got[0]["fileName"]
                             break
@@ -1297,7 +1300,8 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
                 if hit:
                     break
             names.append(f"{hit} (required by the jar's toml as {mid})" if hit
-                         else f"{mid} (REQUIRED by the jar's toml; no {mc} build found that declares it)")
+                         else f"{mid} (REQUIRED by the jar's toml; no {mc} build found that declares it"
+                              + (f"; nearest: {near[0]} -- a renamed mod id?" if near else "") + ")")
         if names:
             out[mc] = names
     return out
