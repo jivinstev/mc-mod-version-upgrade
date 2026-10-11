@@ -108,7 +108,7 @@ def load_config(repo):
 
 
 def git(repo, *a):
-    return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, check=False)
+    return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
 
 
 def slug_of(repo):
@@ -135,7 +135,10 @@ def minecraft_of(tag):
 
 def version_of(tag, modid):
     v = re.sub(r"-mc\d+\.\d+(?:\.\d+)?", "+mc", tag[len(modid) + 1:] if tag.startswith(modid + "-") else tag)
-    return v.replace("+mc", f"+neoforge-{minecraft_of(tag)}")
+    v = v.replace("+mc", f"+{minecraft_of(tag)}")
+    if len(v) > 32:                      # Modrinth's version_number limit
+        raise SystemExit(f"{tag}: version number {v!r} is over 32 characters")
+    return v
 
 
 # ---------------------------------------------------------------- gates
@@ -275,7 +278,7 @@ def modrinth_version(cfg, tag, release, text, dry):
         return proj, {"id": "existing", "version_number": number}
     asset = pick_asset(release, mr.get("asset", ""))
     deps = [{"project_id": modrinth("GET", f"/project/{s}")["id"], "dependency_type": t} for s, t in dep_entries(cfg, "modrinth")]
-    data = {"project_id": proj["id"], "name": f"{cfg['title']} {number}", "version_number": number,
+    data = {"project_id": proj["id"], "name": f"{number} (NeoForge {minecraft_of(tag)})", "version_number": number,
             "changelog": text, "dependencies": deps, "game_versions": [minecraft_of(tag)], "version_type": "release",
             "loaders": ["neoforge"], "featured": True, "file_parts": ["file"], "primary_file": "file"}
     if dry:
@@ -300,7 +303,7 @@ def curseforge_file(cfg, tag, release, text, dry):
     cf = cfg["curseforge"]
     asset = pick_asset(release, cf.get("asset", ""))
     kinds = {"required": "requiredDependency", "optional": "optionalDependency"}
-    meta = {"changelog": text, "changelogType": "markdown", "displayName": f"{cfg['title']} {version_of(tag, cfg.get('modid', ''))}",
+    meta = {"changelog": text, "changelogType": "markdown", "displayName": f"{version_of(tag, cfg.get('modid', ''))} (NeoForge {minecraft_of(tag)})",
             "releaseType": "release",
             "relations": {"projects": [{"slug": s, "type": kinds.get(t, "requiredDependency")}
                                        for s, t in dep_entries(cfg, "curseforge")]}}
@@ -386,7 +389,7 @@ def modrinth_create(repo):
     return 0
 
 
-def setup(repo, permission, branch, out=None):
+def setup(repo, permission, branch, out=None, ledgers=()):
     repo = pathlib.Path(repo).expanduser()
     ref = f"origin/{branch}"
     if git(repo, "rev-parse", "--verify", ref).returncode:
@@ -410,29 +413,50 @@ def setup(repo, permission, branch, out=None):
     authors = mod.get("authors", "the original authors")
     up = (orig or {}).get("source_url") or (disp if "github.com" in disp else None)
     deps = []
-    for f in install.get("files", []):
-        if f.get("role") != "required":
+    by_modid = {f.get("modid"): f for f in install.get("files", [])}
+    for d in toml.get("dependencies", {}).get(modid, []):
+        dep, kind = d["modId"], d.get("type", "required")
+        if dep in ("minecraft", "neoforge") or kind not in ("required", "optional"):
             continue
-        if f.get("port"):
-            deps.append({"port": f["port"], "type": "required"})
-        else:
-            deps.append({"modrinth": f["modid"], "curseforge": f["modid"], "type": "required"})
-    for f in install.get("files", []):
-        if f.get("role") == "extra" and f.get("modid", "").startswith(("geckolib",)):
-            deps.append({"modrinth": "geckolib", "curseforge": "geckolib", "type": "optional"})
+        if (by_modid.get(dep) or {}).get("port"):
+            deps.append({"port": by_modid[dep]["port"], "type": kind}); continue
+        try:
+            http("GET", f"{MODRINTH}/project/{dep}")
+            deps.append({"modrinth": dep, "curseforge": dep, "type": kind})
+        except SystemExit:
+            print(f"WARNING: dependency {dep} has no Modrinth project of that name -- set its slugs by hand")
+            deps.append({"modrinth": None, "curseforge": None, "type": kind, "modid": dep})
     fork = slug_of(repo)
-    title = f"{name} (NeoForge {mc} community port)"
+    title = f"{name} - Community Port"
+    if len(title) > 64:
+        title = f"{name[:50]} - Community Port"
     oslug = (orig or {}).get("slug") or modid.replace("_", "-")
-    jars = [a for a in ("_mr.jar", "_cf.jar")]
+    fork_slug = slug_of(repo)
+    try:
+        rels = http("GET", f"{GITHUB}/repos/{fork_slug}/releases?per_page=1")
+        names = [a["name"] for a in rels[0]["assets"]] if rels else []
+    except SystemExit:
+        names = []
+    variant = lambda sfx: sfx if any(n.endswith(sfx) for n in names) else ""
     cfg = {"schema": 1, "permission": permission, "auto": True, "modid": modid, "title": title,
-           "summary": f"Unofficial NeoForge {mc} port of {name} by {authors}, maintained by the community with their permission.",
+           "summary": f"Unofficial NeoForge port of {name} by {authors} to newer Minecraft, maintained by the community "
+                      "with the author's permission.",
            "body_file": BODY, "icon": f"src/main/resources/{mod['logoFile']}" if mod.get("logoFile") else None,
            "license": toml.get("license", "MIT"), "categories": (orig or {}).get("categories", []),
            "additional_categories": (orig or {}).get("additional_categories", []),
-           "ledger_issues": [], "dependencies": deps,
-           "modrinth": {"slug": f"{oslug}-neoforge", "asset": "_mr.jar"},
-           "curseforge": {"project_id": None, "slug": f"{oslug}-neoforge", "asset": "_cf.jar"}}
+           "ledger_issues": list(ledgers), "dependencies": deps,
+           "modrinth": {"slug": f"{oslug}-neoforge", "asset": variant("_mr.jar")},
+           "curseforge": {"project_id": None, "slug": f"{oslug}-neoforge", "asset": variant("_cf.jar")}}
     credits = str(mod.get("credits", "")).strip()
+    fixes = []
+    for ref in ledgers:
+        o, n = ref.split("#")
+        try:
+            t = http("GET", f"{GITHUB}/repos/{o}/issues/{n}")["title"]
+        except SystemExit:
+            t = ref
+        fixes.append(f"  - [{t}](https://github.com/{o}/issues/{n})")
+    fixes = fixes or [f"  - https://github.com/{fork}/issues"]
     lines = [f"# {title}", "",
              f"**Unofficial.** A community-maintained port of **{name}** by **{authors}** to NeoForge {mc}. "
              f"It is not made or supported by {authors}: please report problems with this port "
@@ -445,12 +469,16 @@ def setup(repo, permission, branch, out=None):
              *([f"- On Modrinth: https://modrinth.com/mod/{orig['slug']} (Forge, {', '.join(orig['game_versions'][-1:])})"] if orig else []), "",
              "## What this port changes", "",
              f"- Runs on **NeoForge {mc}**.",
-             "- Carries fixes for defects found while porting and playing it; each is tracked, with evidence, in "
-             f"this port's issues: https://github.com/{fork}/issues?q=label%3A%22%22+is%3Aissue", "",
+             "- Carries fixes for defects found while porting and playing it. Each is tracked, with its evidence and "
+             "which release fixes it, in an issue:", *fixes, "",
              "## Requirements", ""]
     for d in deps:
-        lines.append(f"- {'Required' if d['type'] == 'required' else 'Optional'}: "
-                     + (f"the community port of https://github.com/{d['port']}" if d.get("port") else d["modrinth"]))
+        what = (f"the community port of https://github.com/{d['port']} (the same NeoForge {mc} port, published "
+                "alongside this one)" if d.get("port") else
+                f"[{d['modrinth']}](https://modrinth.com/mod/{d['modrinth']})" if d.get("modrinth") else d.get("modid"))
+        lines.append(f"- {'Required' if d['type'] == 'required' else 'Optional'}: {what}")
+    if not deps:
+        lines.append(f"- Nothing beyond NeoForge {mc}.")
     lines += ["", "## How releases are made", "",
               f"Every release is built by the original author's own build from https://github.com/{fork}, passes "
               "automated checks (it builds, loads on a dedicated server, runs in a real client), and is played by a "
@@ -460,10 +488,10 @@ def setup(repo, permission, branch, out=None):
     lines += ["## Licence", "", f"{cfg['license']}, copyright {authors}. See LICENSE.txt in the source."]
     target = pathlib.Path(out) if out else repo
     (target / BODY).parent.mkdir(parents=True, exist_ok=True)
-    (target / BODY).write_text("\n".join(lines).replace("?q=label%3A%22%22+is%3Aissue", "") + "\n", encoding="utf-8")
+    (target / BODY).write_text("\n".join(lines) + "\n", encoding="utf-8")
     (target / CONFIG).write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {target / CONFIG} and {target / BODY} -- review both: ledger_issues is empty until you list "
-          "the issues carrying fix ledgers, and curseforge.project_id is set after the project is created")
+    print(f"wrote {target / CONFIG} and {target / BODY} -- review both; curseforge.project_id is set after the "
+          "project is created on the website")
     print("\nCurseForge create-project form (https://authors.curseforge.com, Create Project, Minecraft, Mods):")
     print(f"  Name:        {title}\n  Summary:     {cfg['summary']}\n  Description: paste {BODY}\n"
           f"  License:     {cfg['license']}\n  Source URL:  https://github.com/{fork}\n  Issues URL:  https://github.com/{fork}/issues\n"
@@ -480,8 +508,9 @@ def self_check():
         if not c:
             ok = False; print("FAIL:", msg)
     expect(minecraft_of("eca-1.1.9-mc1.21.1") == "1.21.1", "minecraft from tag")
-    expect(version_of("eca-1.1.9-mc1.21.1-r2", "eca") == "1.1.9+neoforge-1.21.1-r2", version_of("eca-1.1.9-mc1.21.1-r2", "eca"))
-    expect(version_of("the_last_sword-1.1.2-mc1.21.1", "the_last_sword") == "1.1.2+neoforge-1.21.1", "version, no suffix")
+    expect(version_of("eca-1.1.9-mc1.21.1-r2", "eca") == "1.1.9+1.21.1-r2", version_of("eca-1.1.9-mc1.21.1-r2", "eca"))
+    expect(version_of("the_last_sword-1.1.2-mc1.21.1", "the_last_sword") == "1.1.2+1.21.1", "version, no suffix")
+    expect(version_of("the_last_sword-1.1.1-fix-fix-mc1.21.1-r6", "the_last_sword") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
     body = "notes\n\nPublished on Modrinth: x " + MARK.format(platform="modrinth", ref="AbCd1234")
     expect(published(body) == {"modrinth": "AbCd1234"}, "markers parse")
     rel = {"assets": [{"name": "m-1_mr.jar"}, {"name": "m-1_cf.jar"}, {"name": "m-1-sources.txt"}]}
@@ -532,7 +561,7 @@ def self_check():
         expect(any("not an ancestor" in w for w in gate(".", cfg, "m-2-mc1.21.1", good)), "foreign tag refuses")
     finally:
         gh, git = real_gh, real_git
-    print("self-check:", "ok" if ok else "FAILED")
+    print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
 
@@ -541,7 +570,8 @@ def main():
     ap.add_argument("--self-check", action="store_true")
     sub = ap.add_subparsers(dest="cmd")
     s = sub.add_parser("setup"); s.add_argument("--repo", required=True); s.add_argument("--permission", required=True)
-    s.add_argument("--branch", default="neoforge-1.21.1"); s.add_argument("--out", help="write here instead of into the clone")
+    s.add_argument("--branch", default="neoforge-1.21.1")
+    s.add_argument("--ledger-issue", action="append", default=[], help="owner/repo#n carrying a fix ledger; repeat"); s.add_argument("--out", help="write here instead of into the clone")
     c = sub.add_parser("modrinth-create"); c.add_argument("--repo", default=".")
     p = sub.add_parser("publish"); p.add_argument("--repo", default="."); p.add_argument("--tag", required=True)
     p.add_argument("--dry-run", action="store_true"); p.add_argument("--manual", action="store_true",
@@ -552,7 +582,7 @@ def main():
     if a.cmd == "setup":
         if not a.permission.startswith("https://"):
             sys.exit("--permission must be the https link where the authors agreed")
-        return setup(a.repo, a.permission, a.branch, a.out)
+        return setup(a.repo, a.permission, a.branch, a.out, a.ledger_issue)
     if a.cmd == "modrinth-create":
         return modrinth_create(a.repo)
     if a.cmd == "publish":

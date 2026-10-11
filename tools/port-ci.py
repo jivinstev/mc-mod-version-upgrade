@@ -233,11 +233,19 @@ def self_check():
     except SystemExit:
         pass
     # promote: the job exists, the gates do not run for it, and its inputs reach the script only through env
-    ok &= "\n  promote:\n" in out and "if: ${{ !inputs.promote }}" in out and "if: ${{ inputs.promote }}" in out
-    job = out.split("\n  promote:\n", 1)[-1]
+    ok &= "\n  promote:\n" in out and "!inputs.promote" in out.split("\n  gates:\n", 1)[1].split("steps:", 1)[0]
+    ok &= "if: ${{ inputs.promote }}" in out
+    job = out.split("\n  promote:\n", 1)[-1].split("\n  publish:\n", 1)[0]
     ok &= "TAG: ${{ inputs.promote }}" in job and "--prerelease=false --latest" in job
     ok &= "run: |" in job and "${{" not in job.split("run: |", 1)[1]        # nothing spliced into the script
     ok &= "Pre-release until played by a person." in out          # the marker promote rewrites
+    # publish: runs in the promote's own run (GITHUB_TOKEN edits start no other workflow), never gates on a
+    # release event, takes its tag only through env, and the tokens reach only that job
+    pub = out.split("\n  publish:\n", 1)[-1].split("\n  publish-setup:\n", 1)[0]
+    ok &= "needs: promote" in pub and "github.event_name == 'release'" in pub and "types: [released]" in out
+    ok &= "github.event_name != 'release'" in out.split("\n  gates:\n", 1)[1].split("steps:", 1)[0]
+    ok &= "run: |" in pub and "${{" not in pub.rsplit("run: |", 1)[1] and "port-publish.py publish" in pub
+    ok &= out.count("secrets.MODRINTH_TOKEN") == 2 and out.count("secrets.CURSEFORGE_TOKEN") == 1
     ok &= branch_for("mymod-1.0-fix-mc1.21.1-r4") == "neoforge-1.21.1"
     ok &= branch_for("x-1.0-mc26.2") == "neoforge-26.2"
     ok &= branch_for("x_y-2.0+b3-mc1.21.1-release-r2") == "neoforge-1.21.1-release"
