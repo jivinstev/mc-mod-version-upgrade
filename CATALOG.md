@@ -6046,3 +6046,9 @@ retypes a send helper's `Object` message parameter to `CustomPacketPayload`, and
 Seen in 4 swept mods (Forge 1.20.2-1.20.4 sources). On one mod's real network package: 4 packets, 4 handlers
 and its send converted, 0 flagged. Self-check fails against the old handler rule. A handler whose context shape is not recognised is now named in the flags instead of skipped
 without a word, which is how this one went unnoticed.
+
+**X96. NeoForge renamed the whole `IForgeX` extension family to `IXExtension`.** · **Pattern:**
+`IForgeMenuType.create(...)`, `implements IForgeItem`, `IForgeBlockState` · **Error:** `cannot find symbol:
+variable IForgeMenuType` (the import codemod moves the package, not the simple name) · **Fix:** 55 generated
+pairs in the Forge recipe pack, from the 21.1 jar: one row per `IXExtension` that exists, FQ and bare, so a Forge
+name with no NeoForge counterpart is left for review rather than guessed.
