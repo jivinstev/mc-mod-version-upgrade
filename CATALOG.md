@@ -6295,3 +6295,12 @@ id (the five camera overlays share `CAMERA_OVERLAYS`), turns `getOverlay()` comp
 unwraps the render event's DeltaTracker. ForgeGui's own helpers (`renderHealth`, `shouldDrawSurvivalElements`,
 `setupOverlayRenderState`, ...) are on no public 1.21 method and are flagged by line. Runs in the Forge mechanical stage
 after the MCreator variables step.
+
+**X119. A rename row that matches a call's FIRST shape and not its second, plus a token row behind it, writes a parse
+error.** · **Pattern:** the 26.2 rows for `DirectionProperty` (gone in 1.21.2) rewrote `DirectionProperty.create("f",
+predicate)` to `EnumProperty.create("f", Direction.class, predicate)` -- and the one-argument `create("direction")` (every
+direction) fell through to the TYPE row `DirectionProperty` → `EnumProperty<Direction>`, giving
+`EnumProperty<net.minecraft.core.Direction>.create("direction")` · **Symptom:** not an error count: javac stops at parse,
+so the whole mechanical stage failed (`the start compile never reached javac`) on one line of one file · **Fix:** the
+`create` row takes both arities. The general rule: when a TYPE token row would also rewrite the type's static-call
+receiver, every static on that type needs its own regex row first, because `Type<Arg>.call()` is never legal Java.

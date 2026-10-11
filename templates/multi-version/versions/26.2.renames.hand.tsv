@@ -1278,7 +1278,9 @@ LootContextParam	net.minecraft.util.context.ContextKey
 # 1.21.2 removed DirectionProperty: a direction property is EnumProperty<Direction>. create() gains the enum
 # class (Direction.Plane is a Predicate<Direction>, so the HORIZONTAL form resolves to that overload). The FQ row
 # rewrites the import WITHOUT a type argument (an import cannot carry one, §X5b); the bare row adds it at uses.
-re:\bDirectionProperty\.create\(\s*("[^"]*")\s*,	EnumProperty.create(\1, net.minecraft.core.Direction.class,
+# X119: also the ONE-argument form (every direction) -- left alone it met the token row below and became
+# `EnumProperty<Direction>.create(...)`, which does not parse and stopped a whole mechanical stage.
+re:\bDirectionProperty\.create\(\s*("[^"]*")\s*([,)])	EnumProperty.create(\1, net.minecraft.core.Direction.class\2
 net.minecraft.world.level.block.state.properties.DirectionProperty	net.minecraft.world.level.block.state.properties.EnumProperty
 DirectionProperty	EnumProperty<net.minecraft.core.Direction>
 net.minecraft.world.level.portal.DimensionTransition	net.minecraft.world.level.portal.TeleportTransition
