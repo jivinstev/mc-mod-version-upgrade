@@ -6381,3 +6381,9 @@ RandomSource.create(), null)) { shrink; reset }` -- `hurt` is gone, and nothing 
 the same test written out (add the damage, compare with the maximum). That last row is a JUDGEMENT: the old call also
 rolled Unbreaking, which needs a ServerLevel the call site does not have. The mod's largest remaining bucket is MCreator's
 dimension teleporter (`ITeleporter`/`PortalInfo`, ~800 lines over a handful of classes), a §89 rewrite.
+
+**X129. Forge's `IExtensionPoint.DisplayTest` registration has no 1.21 call.** Client-only mods register
+`ModLoadingContext.get().registerExtensionPoint(DisplayTest.class, () -> new DisplayTest(() -> "...", (v, net) -> net))` so a
+server without them still accepts the client; NeoForge reads that from `neoforge.mods.toml` (`displayTest`) instead. A
+row leaves the statement as a comment and drops Vineflower's nested `IExtensionPoint.DisplayTest` import. Setting the toml
+field to the matching value (`IGNORE_ALL_VERSION` for "anything") is still a metadata step for the port.

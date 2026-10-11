@@ -527,3 +527,8 @@ re:\.getYSpawn\(\)	.getSpawnPos().getY()
 re:\.getZSpawn\(\)	.getSpawnPos().getZ()
 re:(?<![\w$.])(?!this\.)([\w$]+(?:\.[\w$]+)*)\.setMaxUpStep\(([^;]+?)\)\s*;	if (\1 instanceof net.minecraft.world.entity.LivingEntity _stepLe) _stepLe.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(\2);
 re:(?<![\w$.])([\w$]+)\.hurt\(\s*(\w+)\s*,\s*RandomSource\.create\(\)\s*,\s*null\s*\)	(\1.isDamageableItem() && ((java.util.function.IntPredicate) d -> { \1.setDamageValue(d); return d >= \1.getMaxDamage(); }).test(\1.getDamageValue() + \2))
+
+#@ X129 auto  Forge's IExtensionPoint.DisplayTest registration is gone: NeoForge reads the display test from
+#           neoforge.mods.toml (`displayTest = "IGNORE_SERVER_VERSION"` and friends). The call is left as a comment.
+re:(?m)^([ \t]*)((?:ModLoadingContext\.get\(\)|[\w.]+)\s*\.\s*registerExtensionPoint\(\s*(?:[\w.]*IExtensionPoint\.)?DisplayTest\.class[^;]*;)	\1/* 1.21 MIGRATION (X129): the display test is neoforge.mods.toml's displayTest field now; dropped: \2 */
+re:(?m)^import\s+net\.(?:minecraftforge|neoforged)\.fml\.IExtensionPoint\.DisplayTest\s*;[ \t]*\n	
