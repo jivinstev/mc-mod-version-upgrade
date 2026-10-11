@@ -6070,3 +6070,15 @@ the constructor that has the mod bus, which the existing step turns into `bus.ad
 declaration, `(Object)` message casts and the MCreator dimension target are accepted, and constructors are found
 (the shared `methods()` skips them). One mod's real tree: 10 registrations, 10 packets, 10 handlers, 19 sends,
 0 flagged. Self-check covers used and unused and fails without the pre-pass.
+
+**X98. `fix-holders` stalled on fields registered through the mod's own helper, and on Holder mismatches javac
+reports inside "no suitable constructor".** · **Pattern:** `Supplier<MobEffect> HOT = registryEffect("hot", new
+EffectHot())` with `Supplier<MobEffect> registryEffect(..) { return EFFECTS.register(..); }`; call sites
+`new MobEffectInstance((MobEffect)LTCEffects.HOT.get(), 600)` · **Error:** `MobEffect cannot be converted to
+Holder<MobEffect>` -- 170 sites in one mod survived the holders loop (705 -> 641, then flat), reported as "no
+registry field declaration found" · **Fix:** the field finder accepts `= helper(...)` when that helper, in the
+same class, returns `REG.register(...)`, and retypes the helper's return type (every overload) together with the
+field; and an argument-mismatch report nested in a no-suitable-constructor/method error now gets rule A for each
+`(T)Owner.F.get()` of that type on the line, since its caret points at the call, not the argument. On that mod's
+tree: 94 sites rewritten where 0 were, leaving the recipe-holder shapes (a separate topic). Self-check fails
+against the old tool.

@@ -194,6 +194,22 @@ def base_type(t):
     return m.group(1) if m else None
 
 
+class _HelperDecl:
+    """A field registered through a helper method: behaves like the `.register(` match for groups 1-3."""
+
+    def __init__(self, m, target, helpers):
+        self.m, self.target, self.helpers = m, target, helpers
+
+    def group(self, i):
+        return self.target if i == 3 else self.m.group(i)
+
+    def start(self, i=0):
+        return self.m.start(i)
+
+    def end(self, i=0):
+        return self.m.end(i)
+
+
 class Index:
     """Registry fields and method signatures across the source tree."""
 
@@ -216,6 +232,19 @@ class Index:
                           % re.escape(name), t)
             if m:
                 return f, m
+            # X98: registered through the class's own helper -- `Supplier<MobEffect> HOT = registryEffect("hot", ..)`
+            # where `Supplier<MobEffect> registryEffect(..) { return EFFECTS.register(..); }`. The match is rebuilt so
+            # group(3) names the register target, and .helpers carries each overload's return-type span to retype too.
+            m = re.search(r"\b(Supplier|RegistryObject|DeferredHolder)<([^=;]*?)>\s+%s\s*=\s*(\w+)\s*\(" % re.escape(name), t)
+            if m:
+                helpers, target = [], None
+                for h in re.finditer(r"\b(?:Supplier|RegistryObject|DeferredHolder)<[^=;(]*?>(?=\s+%s\s*\()" % re.escape(m.group(3)), t):
+                    body = t[h.end():h.end() + 2000]
+                    r = re.match(r"\s+\w+\s*\([^)]*\)\s*\{\s*return\s+(\w+)\s*\.\s*register\w*\(", body)
+                    if r:
+                        helpers.append((h.start(), h.end())); target = target or r.group(1)
+                if target:
+                    return f, _HelperDecl(m, target, helpers)
         return None, None
 
     def methods_named(self, name):
@@ -307,6 +336,42 @@ def run(src, log_text, dry=False):
         need_imports[f].add("net.minecraft.core.Holder")
         return True
 
+    # X98: inside a "no suitable constructor/method" error javac names the argument only as
+    # "argument mismatch; MobEffect cannot be converted to Holder<MobEffect>" and points its caret at the CALL, so the
+    # incompatible-types path below never sees it. For such an error, rule A applies to each `[(T)] Owner.F.get()` of
+    # that type on the line whose registry field resolves -- the same rewrite, located by text instead of by caret.
+    lines_ = log_text.splitlines()
+    done_lines = set()
+    for i, l in enumerate(lines_):
+        em = ERR.match(l)
+        if not em or not re.search(r"no suitable (?:constructor|method) found|cannot be applied to given types", em.group("msg")):
+            continue
+        tail = "\n".join(lines_[i + 1:i + 12])
+        for tm in re.finditer(r"argument mismatch; (\w+) cannot be converted to Holder<\1>", tail):
+            T = tm.group(1)
+            f = pathlib.Path(em.group("file")).resolve()
+            ln = int(em.group("line"))
+            if f not in idx.files or (f, ln, T) in done_lines:
+                continue
+            done_lines.add((f, ln, T))
+            src_line = idx.files[f].splitlines()[ln - 1]
+            for m in re.finditer(r"\(\s*%s\s*\)\s*(\w+)\.(\w+)\s*\.\s*get\(\)" % re.escape(T), src_line):
+                owner, name = m.group(1), m.group(2)
+                df, dm = idx.field_decl(owner, name)
+                if df is None:
+                    continue
+                base = idx.regs.get(dm.group(3)) if dm.group(1) != "DeferredHolder" else None
+                if dm.group(1) != "DeferredHolder" and not base:
+                    continue
+                s0 = offset(f, ln, m.start()); edits[f].append((s0, s0 + (m.end() - m.start()), f"{owner}.{name}"))
+                if base:
+                    targs = dm.group(2).strip()
+                    edits[df].append((dm.start(1), dm.end(2) + 1, f"DeferredHolder<{base}, {targs}>"))
+                    for h0, h1 in getattr(dm, "helpers", []):
+                        edits[df].append((h0, h1, f"DeferredHolder<{base}, {targs}>"))
+                    need_imports[df].add("net.neoforged.neoforge.registries.DeferredHolder")
+                report["A in argument mismatch"] += 1
+
     for file, line, msg, col in errors(log_text):
         f = pathlib.Path(file).resolve()
         if f not in idx.files or col is None:
@@ -341,6 +406,8 @@ def run(src, log_text, dry=False):
                         continue
                     targs = dm.group(2).strip()
                     edits[df].append((dm.start(1), dm.end(2) + 1, f"DeferredHolder<{base}, {targs}>"))
+                    for h0, h1 in getattr(dm, "helpers", []):     # and the helper that returns it (X98)
+                        edits[df].append((h0, h1, f"DeferredHolder<{base}, {targs}>"))
                     need_imports[df].add("net.neoforged.neoforge.registries.DeferredHolder")
                 report["A drop .get()"] += 1; continue
             if re.fullmatch(r"[\w$]+", e):                                           # B
@@ -493,6 +560,27 @@ class Use {
             miss.append("double retype")
         ok = not miss and not flags
     ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: incompatible types: A cannot be converted to B"))   # javac on Windows names a drive path
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:     # X98: a helper-registered field, fixed from an argument-mismatch error
+        p = pathlib.Path(d) / "m"; p.mkdir()
+        (p / "Effects.java").write_text(
+            "package m;\npublic class Effects {\n   public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(Registries.MOB_EFFECT, \"m\");\n"
+            "   public static final Supplier<MobEffect> HOT = registryEffect(\"hot\", new Hot());\n"
+            "   public static Supplier<MobEffect> registryEffect(String name, MobEffect e) {\n      return EFFECTS.register(name, () -> e);\n   }\n}\n",
+            encoding="utf-8")
+        line = "      t.addEffect(new MobEffectInstance((MobEffect)Effects.HOT.get(), 100));"
+        (p / "Use.java").write_text("package m;\nclass Use {\n   void u(LivingEntity t) {\n" + line + "\n   }\n}\n", encoding="utf-8")
+        log2 = "\n".join([f"{p / 'Use.java'}:4: error: no suitable constructor found for MobEffectInstance(MobEffect,int)", line,
+                          "               ^", "    constructor MobEffectInstance.MobEffectInstance(Holder<MobEffect>,int) is not applicable",
+                          "      (argument mismatch; MobEffect cannot be converted to Holder<MobEffect>)"])
+        run(d, log2)
+        ef, us = (p / "Effects.java").read_text(encoding="utf-8"), (p / "Use.java").read_text(encoding="utf-8")
+        ok2 = ("DeferredHolder<MobEffect, MobEffect> HOT = registryEffect" in ef
+               and "public static DeferredHolder<MobEffect, MobEffect> registryEffect(" in ef
+               and "new MobEffectInstance(Effects.HOT, 100)" in us)
+        if not ok2:
+            print("self-check X98:\n" + ef + us)
+        ok = ok and ok2
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{out}")
     return 0 if ok else 1
 
