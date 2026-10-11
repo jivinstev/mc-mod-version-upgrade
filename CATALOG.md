@@ -6280,3 +6280,18 @@ the toml's word, `port.py` asks the jar's classes: if any references a package n
 (`farmers-delight` → `.../farmersdelight/...`), the dependency is required whatever the toml says, and the port stops
 like any missing required dependency. The toml stays the authority for dependencies the code does not use (the case X82
 was written for: registry data copied from the other loader).
+
+**X118. Forge's GUI overlay API has a fixed 1.21 shape, so it is now a converter (`tools/convert-gui-overlays.py`).** ·
+**Pattern:** a HUD mod's `void armor(ForgeGui gui, GuiGraphics g, float partialTick, int screenWidth, int screenHeight)`
+methods (or five-parameter lambdas), registered with `event.registerAbove(VanillaGuiOverlay.PLAYER_HEALTH.id(), "armor",
+Overlays::armor)` on `RegisterGuiOverlaysEvent`, and a `RenderGuiOverlayEvent.Pre` handler that cancels a vanilla overlay
+by `event.getOverlay() == VanillaGuiOverlay.ARMOR_LEVEL.type()` · **Error:** `cannot find symbol: class ForgeGui /
+IGuiOverlay / RegisterGuiOverlaysEvent` -- 27 of one HUD mod's 57 · **Fix:** a layer is `LayeredDraw.Layer.render(GuiGraphics,
+DeltaTracker)`; the converter keeps every body and hands the old parameters back as locals (`gui` from
+`Minecraft.getInstance().gui` -- NeoForge's `Gui` carries `leftHeight`/`rightHeight` -- the partial tick from the
+DeltaTracker, the screen size from `guiWidth()/guiHeight()`), rewrites the registrations (a String id becomes
+`ResourceLocation(modid, id)`, `rl.getPath()` becomes `rl`), maps every `VanillaGuiOverlay` to its `VanillaGuiLayers`
+id (the five camera overlays share `CAMERA_OVERLAYS`), turns `getOverlay()` comparisons into `getName().equals(...)`, and
+unwraps the render event's DeltaTracker. ForgeGui's own helpers (`renderHealth`, `shouldDrawSurvivalElements`,
+`setupOverlayRenderState`, ...) are on no public 1.21 method and are flagged by line. Runs in the Forge mechanical stage
+after the MCreator variables step.
