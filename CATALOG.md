@@ -5834,7 +5834,8 @@ facade.** · **Pattern:** a shared class `PlatformUtil` whose static methods car
 annotation's package is foreign), and 76 references to the mod's own platform facade became errors · **Fix:** the
 build already rewrote each annotated method to call `<pkg>.<loader>.<Name>Impl` (the bytecode says
 `invokestatic …/forge/PlatformUtilImpl`), so setup strips the annotation and its import, and the class is ordinary
-code.
+code. Google's `@AutoService` is the same case (build-time only; setup already copies the `META-INF/services`
+file it generated) and is stripped too.
 
 **X73. The Forge route had no owner-resolved member renames at all.** · **Pattern:** one of the commonest Forge
 leftovers, `FoodProperties.Builder.saturationMod(f)` (`saturationModifier` since 1.20.5), sat in 8 of the swept mods
