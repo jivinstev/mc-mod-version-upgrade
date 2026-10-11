@@ -6744,3 +6744,15 @@ An empty stack is not encoded (1.21 throws, R21), which `of` reads back as empty
 A/B'd. The import codemod also maps `net.minecraftforge.client.settings` (KeyConflictContext, KeyModifier),
 `client.gui.widget` (with `ForgeSlider` -> `ExtendedSlider`) and `client.textures`, which NeoForge kept under the
 same names. Found on a food-storage mod whose key binding and inventory were both left unported.
+
+**X168. Parking an integration left main code calling a class that was gone: a no-op stub keeps the name.** 77 of
+387 swept mods had main code naming a parked class, typically a guarded entry point (`if (mode == COMPATIBLE)
+TerraInit.terraEnable();`, a `ModList.isLoaded(..)` branch). Every such site was a compile error the worker had to
+resolve by hand. park-optional now writes a stub at the parked class's own path for each class that main code names
+(through an import or from the same package): the class keeps its name and its non-private constructors, methods and
+literal `static final` constants, as long as their signatures mention no type from the parked API (a foreign import of
+any parked file, or a parked class that is not itself stubbed). Each method returns its type's default. Imports that
+name those types are dropped. The original is under `parked/`, and MIGRATION.md lists every stub as "the integration
+still does nothing until re-ported", so nothing is dropped silently. Only a plain class is stubbed; an interface, enum
+or record is still listed for the compile loop. Self-check through `main` (moved, stubbed, recorded); A/B'd. Found on a
+biome mod whose TerraBlender integration's entry point is called from the mod class and its config screen.

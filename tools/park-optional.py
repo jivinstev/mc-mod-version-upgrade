@@ -27,8 +27,10 @@ joins them only when every class that names it is already datagen. Nothing that 
 except through the datagen WIRING itself: when main code (often the mod's main class) holds a GatherDataEvent
 handler or registers a datagen subscriber class, that handler method / registration line is cut out of it
 (and recorded), so it no longer keeps every provider in the build. Parked files move to mods/<modid>/parked/ with their paths kept, and every one is listed in
-MIGRATION.md, so nothing is dropped silently. A remaining file that imports a parked class is listed too:
-the compile loop will see it, and it is main code, so it is never parked automatically. Standard library.
+MIGRATION.md, so nothing is dropped silently. A remaining file that imports a parked class is listed too,
+and the parked class it names is left behind as a no-op STUB (X168): the same name, its non-private members whose
+signatures use no type from the parked API, each doing nothing -- so a guarded call compiles and the integration is
+still recorded as dropped. Standard library.
 """
 import argparse, json, pathlib, re, shutil, sys
 
@@ -403,6 +405,99 @@ def prune_mixin_configs(work, parked_names):
     return out
 
 
+# --------------------------------------------------------------------------- stubs (X168)
+# Parking an integration leaves the main code that calls it naming a class that is gone: measured on 77 of 387 swept
+# mods. Main code is never parked, so a STUB keeps the name: the class's non-private constructors, methods and literal
+# constants whose signatures use no type from the parked API, each a no-op returning its type's default. The
+# integration is as dropped as it was -- the stub is recorded in MIGRATION.md -- but the guarded call sites compile.
+
+DEFAULTS = {"void": None, "boolean": "false", "char": "'\\0'", "byte": "0", "short": "0", "int": "0", "long": "0L",
+            "float": "0.0F", "double": "0.0D"}
+MODS = r"(?:(?:public|protected|private|static|final|synchronized|abstract|native|strictfp)\s+)*"
+
+
+def _flatten(body):
+    """The class body with every nested {...} (method bodies, nested classes, initialisers) blanked out."""
+    out, depth = [], 0
+    for c in body:
+        if c == "{":
+            depth += 1
+            out.append(c if depth == 1 else " ")
+        elif c == "}":
+            out.append(c if depth == 1 else " ")
+            depth -= 1
+        else:
+            out.append(c if depth == 0 else ("\n" if c == "\n" else " "))
+    return "".join(out)
+
+
+def stub_for(text, simple, unsafe):
+    """Source of a no-op stub of top-level class `simple`, or None when it cannot be one (not a plain class)."""
+    text = re.sub(r"/\*.*?\*/|//[^\n]*", lambda m: " " * len(m.group(0)), text, flags=re.S)
+    m = re.search(r"(?m)^(?:public\s+)?(?:final\s+)?class\s+%s\b(?P<gen><[^{]*?>)?[^{]*\{" % re.escape(simple), text)
+    if not m:
+        return None
+    pkg = re.search(r"(?m)^\s*package\s+([\w.]+)\s*;", text)
+    i, depth = m.end() - 1, 0
+    for j in range(i, len(text)):
+        depth += {"{": 1, "}": -1}.get(text[j], 0)
+        if depth == 0:
+            break
+    flat = _flatten(text[i + 1:j])
+    tok = lambda s: not (set(re.findall(r"[A-Za-z_]\w*", s)) & unsafe)
+    members = []
+    for mm in re.finditer(r"(?:@[\w.]+(?:\([^()]*\))?\s*)*(?P<mods>" + MODS + r")(?P<tp><[^(){};=]*?>\s+)?"
+                          r"(?:(?P<ret>[\w.$]+(?:<[^(){};=]*?>)?(?:\[\])*)\s+)?(?P<name>\w+)\s*\((?P<params>[^(){};]*)\)\s*"
+                          r"(?:throws\s+[\w.,\s]+)?\{", flat):
+        mods, ret, name, params = mm.group("mods"), mm.group("ret"), mm.group("name"), mm.group("params")
+        if "private" in mods or "abstract" in mods or name in ("if", "for", "while", "switch", "catch", "synchronized"):
+            continue
+        sig = (ret or "") + " " + params + " " + (mm.group("tp") or "")
+        if not tok(sig):
+            continue
+        mods = re.sub(r"\b(synchronized|native|strictfp|final)\s+", "", mods)
+        if ret is None:
+            if name != simple:
+                continue
+            members.append(f"    {mods}{simple}({params.strip()}) {{\n    }}\n")
+        else:
+            d = DEFAULTS.get(ret, "null")
+            body = "" if ret == "void" else f"\n        return {d};"
+            members.append(f"    {mods}{mm.group('tp') or ''}{ret} {name}({params.strip()}) {{{body}\n    }}\n")
+    for fm in re.finditer(r"(?m)^\s*(?P<mods>(?:(?:public|protected|static|final)\s+)+)(?P<ty>[\w.]+)\s+(?P<n>\w+)\s*=\s*"
+                          r"(?P<v>\"(?:[^\"\\]|\\.)*\"|-?[\d.]+[FfDdLl]?|true|false)\s*;", flat):
+        if "static" in fm.group("mods") and "final" in fm.group("mods") and tok(fm.group("ty")):
+            members.insert(0, f"    {fm.group('mods').strip()} {fm.group('ty')} {fm.group('n')} = {fm.group('v')};\n")
+    imports = [im for im in re.findall(r"(?m)^\s*import\s+(?:static\s+)?[\w.*]+\s*;", text)
+               if im.strip().split()[-1].rstrip(";").split(".")[-1] not in unsafe]
+    head = f"package {pkg.group(1)};\n\n" if pkg else ""
+    return (head + "\n".join(x.strip() for x in imports) + ("\n\n" if imports else "")
+            + "/** Parked-integration stub (tools/park-optional.py, CATALOG X168): the real class is under parked/ and every\n"
+            + " *  member here does nothing. Re-port the integration against the other mod's API to restore it. */\n"
+            + f"public class {simple}{m.group('gen') or ''} {{\n" + "".join(members) + "}\n")
+
+
+def unsafe_names(java, park_texts, own, req, tree, stubbed):
+    """Simple names a stub must not mention: every foreign import of a parked file, and every parked class
+    that is not itself stubbed."""
+    out = set()
+    for f, text in park_texts.items():
+        for imp in IMPORT.findall(text):
+            if foreign(imp, own, req, tree):
+                out.add(imp.rsplit(".", 1)[-1])
+        name = class_name(java, f).rsplit(".", 1)[-1]
+        if name not in stubbed:
+            out.add(name)
+    return out
+
+
+def _same_pkg_user(java, f, park, now):
+    """A main-code file in the same package names the class without an import."""
+    simple = f.stem
+    return any(g.parent == f.parent and g not in park and re.search(r"(?<![\w.])%s\b" % re.escape(simple), now(g))
+               for g in f.parent.glob("*.java"))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work"); ap.add_argument("--group", help="the mod's root package (default: from gradle.properties)")
@@ -443,6 +538,18 @@ def main():
     for f, (new, _) in cuts.items():
         f.write_text(new, encoding="utf-8")
     dest = work / "parked/src/main/java"
+    texts = {f: now(f) for f in park}
+    stubbed = {}
+    for f, text in texts.items():           # X168: main code still names it -> a no-op stub keeps the name
+        if class_name(java, f) in {i for g in java.rglob("*.java") if g not in park for i in IMPORT.findall(now(g))} \
+                or _same_pkg_user(java, f, park, now):
+            stubbed[f] = class_name(java, f).rsplit(".", 1)[-1]
+    own = {group, group.rsplit(".", 1)[0]}
+    tree = {g.relative_to(java).parent.as_posix().replace("/", ".") for g in java.rglob("*.java") if g not in park}
+    tree |= classpath_packages(work)
+    req = required_roots(work) | {m.replace("-", "").replace("_", "").lower() for m in a.also_required.split(",") if m}
+    unsafe = unsafe_names(java, texts, own, req, tree, set(stubbed.values()))
+    stubs = {f: stub_for(texts[f], s, unsafe) for f, s in stubbed.items()}
     for f in park:
         t = dest / f.relative_to(java)
         t.parent.mkdir(parents=True, exist_ok=True)
@@ -450,6 +557,15 @@ def main():
     for d in sorted(java.rglob("*"), reverse=True):     # drop the directories parking emptied
         if d.is_dir() and not any(d.iterdir()):
             d.rmdir()
+    made = []
+    for f, src in stubs.items():
+        if src:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(src, encoding="utf-8")
+            made.append(class_name(java, f))
+    if made:
+        print(f"  {len(made)} parked class(es) main code names left as no-op stubs (X168): "
+              + ", ".join(s.rsplit('.', 1)[-1] for s in made[:8]))
     pruned = prune_mixin_configs(work, parked_names)
     mig = work / "MIGRATION.md"
     lines = ["", "## Parked (tools/park-optional.py)", "",
@@ -460,6 +576,9 @@ def main():
               f"(the original is in decompiled-raw/)" for f, (_, n) in sorted(cuts.items())]
     if still:
         lines += ["", "Main-code files that imported a parked class: " + ", ".join(still)]
+    if made:
+        lines += ["", "Left as no-op STUBS so that main code compiles (X168) -- the integration still does nothing until "
+                  "re-ported: " + ", ".join(made)]
     if pruned:
         lines += ["", "Parked mixins dropped from their configs (a listed mixin with no class fails at load): "
                   + ", ".join(pruned)]
@@ -613,6 +732,29 @@ def self_check():
         if not ok6:
             print("self-check X122:", sorted(got6), wand)
         ok = ok and ok6
+    with tempfile.TemporaryDirectory() as d:     # X168: a parked class main code still names becomes a no-op stub
+        w = pathlib.Path(d)
+        (w / "gradle.properties").write_text("mod_group_id=com.ex.t\n", encoding="utf-8")
+        j = w / "src/main/java/com/ex/t"
+        for rel, body in {
+            "Main.java": "package com.ex.t;\nimport com.ex.t.terra.TerraInit;\nclass Main { void s() { if (on) TerraInit.enable(); } }\n",
+            "terra/TerraInit.java": "package com.ex.t.terra;\nimport terrablender.api.Regions;\nimport java.util.List;\n"
+                                    "public class TerraInit {\n   private static final String P = \"x\";\n"
+                                    "   public static final int MAX = 3;\n   public static void enable() {\n      Regions.register(new Reg());\n   }\n"
+                                    "   public static boolean on(List<String> l) { return true; }\n"
+                                    "   public static void add(Regions r) {}\n   private static void helper() {}\n}\n",
+            "terra/Reg.java": "package com.ex.t.terra;\nimport terrablender.api.Region;\nclass Reg extends Region {}\n"}.items():
+            (j / rel).parent.mkdir(parents=True, exist_ok=True); (j / rel).write_text(body, encoding="utf-8")
+        import subprocess
+        subprocess.run([sys.executable, __file__, "--work", str(w)], capture_output=True, text=True)
+        stub = (j / "terra/TerraInit.java").read_text(encoding="utf-8") if (j / "terra/TerraInit.java").exists() else ""
+        ok7 = ("public static void enable() {\n    }" in stub and "public static boolean on(List<String> l) {\n        return false;" in stub
+               and "public static final int MAX = 3;" in stub and "Regions" not in stub and "helper" not in stub
+               and not (j / "terra/Reg.java").exists() and (w / "parked/src/main/java/com/ex/t/terra/TerraInit.java").exists()
+               and "X168" in (w / "MIGRATION.md").read_text(encoding="utf-8"))
+        if not ok7:
+            print("self-check X168:", stub)
+        ok = ok and ok7
     print("self-check:", "OK" if ok else f"FAIL {sorted(got)}")
     return 0 if ok else 1
 
