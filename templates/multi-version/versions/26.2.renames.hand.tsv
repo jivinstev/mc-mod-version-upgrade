@@ -37,6 +37,17 @@ re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.gameplay"	\1net.min
 re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.inventory"	\1net.minecraft.client.KeyMapping.Category.INVENTORY
 re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.creative"	\1net.minecraft.client.KeyMapping.Category.CREATIVE
 
+# -- X146: ItemCooldowns is keyed by the STACK (or a cooldown-group id) on 26.x. An Item argument -- `this` in an
+# -- Item subclass, a registry `.get()`, an Items constant -- becomes a stack of it (its group is the item's own id
+# -- unless a USE_COOLDOWN component says otherwise); `stack.getItem()` passes the stack itself.
+re:(getCooldowns\(\)\s*\.\s*(?:isOnCooldown|getCooldownPercent|addCooldown)\(\s*)([\w.()]+?)\.getItem\(\)(?=\s*[,)])	\1\2
+re:(getCooldowns\(\)\s*\.\s*(?:isOnCooldown|getCooldownPercent|addCooldown)\(\s*)(this|[\w.]+\.get\(\)|Items\.\w+)(?=\s*[,)])	\1new net.minecraft.world.item.ItemStack(\2)
+re:(getCooldowns\(\)\s*\.\s*removeCooldown\(\s*)(this|[\w.]+\.get\(\)|Items\.\w+)(?=\s*\))	\1net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(\2)
+# -- X146: teleportTo(ServerLevel, x, y, z, yaw, pitch) is gone: the one left takes the relative-movement set and a
+# -- trailing setCamera (what the old player form did).
+re:(\.teleportTo\(\s*)(?=[^,]*(?:[Ll]evel|[Ww]orld|[Dd]im|[Ss]erver))((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	\1\2, \3, \4, \5, java.util.Set.of(), \6, \7, true)
+re:(\.teleportTo\(\s*)(?=[^,]*(?:[Ll]evel|[Ww]orld|[Dd]im|[Ss]erver))((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?=[^,]*(?:Set|Relative|Movement))(?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	\1\2, \3, \4, \5, \6, \7, \8, true)
+
 #!strict` WITH A REASON.
 #     A warning that is never zero is decoration.
 #

@@ -6534,3 +6534,12 @@ converted to Holder<MobEffect>)`, and fix-holders' argument-mismatch path (X98) 
 with a registry field to retype. It now wraps the constructor's first argument in
 `BuiltInRegistries.MOB_EFFECT.wrapAsHolder(..)` (rule F). That is the one MobEffect position, so the mismatch javac
 names is the one rewritten.
+
+**X146. Three 26.2 signatures a relic mod hit at once.** (1) `ItemCooldowns` is keyed by the STACK. An Item
+argument (`this` in an Item subclass, a registry `.get()`, an `Items` constant) becomes `new ItemStack(it)`, whose
+cooldown group is the item's own id unless a USE_COOLDOWN component says otherwise. `stack.getItem()` passes the stack
+itself, and `removeCooldown(item)` takes the item's registry id. (2) `teleportTo(ServerLevel, x, y, z, yaw, pitch)` is
+gone. The one left takes a relative-movement set and a trailing `setCamera`, so the 6-argument player form gains
+`Set.of()` and `true`, and the 7-argument Entity form gains `true`. Both rows apply only when the first argument names
+a level, so a mod's own 6-argument `teleportTo` is left alone. (3) `Inventory.items` is private; the main-inventory
+list is `getNonEquipmentItems()` (an era member row).

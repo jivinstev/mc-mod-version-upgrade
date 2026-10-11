@@ -63,3 +63,5 @@ Gui	getChat	{recv}.hud.getChat(){()}
 Minecraft	getToasts	{recv}.gui.toastManager(){()}
 # X135 (26.2 jar): the GLFW window handle accessor
 Window	getWindow	handle
+# X146 (26.2 jar): Inventory.items is private; the main-inventory list is getNonEquipmentItems()
+Inventory	items	getNonEquipmentItems()
