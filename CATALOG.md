@@ -6581,3 +6581,13 @@ listed. Compiled against 1.21.1.
 state" procedure. Under erasure the cast is invisible, so the decompile omits it, and javac then cannot type
 `setValue(Property<T>, V)` with a `Comparable<?>`: 93 errors in one mod, every procedure that swaps a block. Where a
 file declares a raw `Property x`, `fix_decompile_artifacts` restores the cast on `.setValue(x, y.getValue())`.
+
+**X151. Custom arrows: AbstractArrow's shooter and position constructors gained `(ItemStack pickup, @Nullable ItemStack
+weapon)`, and the abstract pickup hook moved.** Across the sweeps this was 17 mods and ~1070 error lines, nearly all
+`super(type, shooter, level)` and `super(type, x, y, z, level)` in an `AbstractArrow` subclass (MCreator writes both
+into every ranged mob's projectile). The pack rows append a vanilla-arrow pickup and a null weapon. The pickup is never
+EMPTY, because an empty stack cannot be saved, and the weapon is never EMPTY, because that throws "Invalid weapon
+firing an arrow" (R21 both ways). A super call that already passes an ItemStack is left alone, which keeps the rows
+from feeding each other. 1.21 also made `getDefaultPickupItem()` the abstract hook and kept `getPickupItem()` as a
+plain method. A 1.20 arrow overrode the latter, so it gains `getDefaultPickupItem() { return this.getPickupItem(); }`,
+and what a player picks up stays the class's own item.

@@ -564,3 +564,16 @@ re:\bInventoryScreen\.renderEntityInInventoryFollowsMouse\(\s*((?:[^(),]|\((?:[^
 
 #@ X148 auto  ServerPlayer.awardRecipesByKey takes a List since 1.20.2; MCreator passes a one-element array
 re:\.awardRecipesByKey\(\s*new\s+ResourceLocation\[\]\s*\{([^{}]*)\}\s*\)	.awardRecipesByKey(java.util.List.of(\1))
+
+#@ X151 auto  AbstractArrow's shooter / position constructors gained (ItemStack pickup, @Nullable ItemStack weapon) in 1.21.
+#           A subclass's super(type, shooter, level) / super(type, x, y, z, level): pickup a vanilla arrow (never EMPTY --
+#           it cannot be saved, R21), weapon null (EMPTY throws "Invalid weapon firing an arrow", R21). What a player picks
+#           up is still the class's own getPickupItem() override.
+#? only-if	\bextends\s+AbstractArrow\b
+re:\bsuper\((?![^;]*ItemStack)\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?)\s*\)\s*;	super(\1, \2, \3, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ARROW), null);
+re:\bsuper\((?![^;]*ItemStack)\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?)\s*\)\s*;	super(\1, \2, \3, \4, \5, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ARROW), null);
+
+#@ X151 auto  ...and the abstract pickup hook is getDefaultPickupItem() now; a 1.20 arrow overrode getPickupItem(), which 1.21
+#           keeps as a plain method -- so the new hook answers what the old override did.
+#? only-if	\A(?![\s\S]*\bgetDefaultPickupItem\b)[\s\S]*\bextends\s+AbstractArrow\b[\s\S]*ItemStack\s+getPickupItem\(\)\s*\{
+re:(\n([ \t]*)(?:@Override\s*\n[ \t]*)?(?:public|protected)\s+ItemStack\s+getPickupItem\(\)\s*\{)	\n\2@Override\n\2protected ItemStack getDefaultPickupItem() {\n\2   return this.getPickupItem();\n\2}\n\1
