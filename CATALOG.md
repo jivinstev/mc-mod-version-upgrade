@@ -6127,3 +6127,13 @@ reads `libs/*/`, so code that uses them is kept and javac sees their real API. T
 the mod; a TARGET-version build of a bundled mod is still for the dependency step to find. · **The lesson about the
 measurement:** a re-run that goes UP is a finding, not noise -- compare its parked count and its error symbols against
 the earlier run before blaming the newest fix.
+
+**X102. Three more channel shapes the networking converter skipped without a word.** · **Pattern:** (a) the channel
+field is declared bare (`private static SimpleChannel INSTANCE;`) and assigned inside `register()`; (b) handlers live in
+a class nested in the packet (`.consumerMainThread(PacketUndo.Handler::handle)`); (c) `register()` is called from a
+common-setup handler, where no mod bus is in scope · **Symptom:** `convert-simplechannel: 0 file(s) changed` and no
+flag -- the channel regex wanted `SimpleChannel X = ...` · **Fix:** a pre-pass moves a single late assignment from
+`NetworkRegistry.newSimpleChannel(` / `ChannelBuilder` onto the field; a `Outer.Inner::m` handler is looked up in
+`Outer`'s file; and a registration call with no bus in scope is removed and replaced by `bus.addListener(X::register)`
+in the `@Mod` constructor (cut first, then insert: both can be in one file, and inserting first left the old call in
+place). One mod's network package converts completely; the self-check covers all three and fails without (a).

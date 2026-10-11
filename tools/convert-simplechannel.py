@@ -294,6 +294,50 @@ def _cut_method(t, mt):
     return t[:start] + t[end:]
 
 
+def place_listener(new, ref):
+    """Add `<bus>.addListener(<ref>);` at the end of the @Mod class constructor that has the mod bus. -> file or None."""
+    for f, t in new.items():
+        if not re.search(r"(?m)^@Mod\(", t):
+            continue
+        for cm in re.finditer(r"(?m)^[ \t]*(?:(?:public|protected|private)\s+)?%s\s*\(" % re.escape(f.stem), t):
+            p1 = match(t, cm.end() - 1)
+            b = re.match(r"\s*\{", t[p1 + 1:]) if p1 > 0 else None
+            if not b:
+                continue
+            b1 = match(t, p1 + b.end())
+            bus = buses_in_scope(t, b1 - 1) if b1 > 0 else []
+            if bus:
+                ind = re.match(r"[ \t]*", t[t.rfind("\n", 0, b1) + 1:]).group(0)
+                new[f] = t[:b1] + f"   {bus[-1]}.addListener({ref});\n{ind}" + t[b1:]
+                return f
+    return None
+
+
+def normalise_late_channel(new):
+    """`private static SimpleChannel INSTANCE;` assigned once inside a method (`INSTANCE = ChannelBuilder...;`):
+    move the initialiser onto the field, so the converter sees the usual `SimpleChannel X = ...` shape (X102)."""
+    for f in list(new):
+        t = new[f]
+        for dm in re.finditer(r"(?m)^([ \t]*(?:(?:public|private|protected|static)\s+)*)SimpleChannel\s+(\w+)\s*;", t):
+            chan = dm.group(2)
+            am = list(re.finditer(r"(?m)^[ \t]*(?:this\.|\w+\.)?%s\s*=\s*(?=NetworkRegistry\.newSimpleChannel\(|ChannelBuilder\b|NetworkRegistry\.ChannelBuilder\b)" % re.escape(chan), t))
+            if len(am) != 1:
+                continue
+            a = am[0]
+            e = a.end()
+            while e < len(t) and t[e] != ";":
+                k = fs._skip(t, e)
+                if k != e:
+                    e = k; continue
+                e = match(t, e) + 1 if t[e] in "({[" else e + 1
+            expr = t[a.end():e]
+            ls = t.rfind("\n", 0, a.start()) + 1
+            t = t[:ls] + t[e + 1:].removeprefix("\n")
+            t = t[:dm.start()] + f"{dm.group(1)}SimpleChannel {chan} = {expr};" + t[dm.end():]
+            new[f] = t
+            break
+
+
 def normalise_mcreator(new, src, flags, report):
     """MCreator's channel (X97): a `<T> addNetworkMessage(Class<T>, encoder, decoder, consumer)` helper that calls
     CHAN.registerMessage(messageID, ...) with VARIABLES, and one `Owner.addNetworkMessage(P.class, ...)` per message,
@@ -385,6 +429,7 @@ def run(src, modid, dry=False):
     new = dict(files)
     flags, report = [], collections.Counter()
     used_ids = set()
+    normalise_late_channel(new)
     normalise_mcreator(new, src, flags, report)
     for f in files:
         # the CURRENT text: an earlier channel's send rewrite (step 4) may already have edited this file, and every
@@ -420,7 +465,11 @@ def run(src, modid, dry=False):
             txt, ok = convert_packet(txt, c.cls, c.enc, c.dec, modid, used_ids, flags, pf.relative_to(src).as_posix())
             hm = re.fullmatch(r"(?:([\w.]+)\.)?(\w+)::(\w+)", c.handler.strip())
             if hm:
-                hf = pf if hm.group(2) == c.cls.rsplit(".", 1)[-1] else class_file(hm.group(2), files, f)
+                outer = (hm.group(1) or "").rsplit(".", 1)[-1]
+                simple_cls = c.cls.rsplit(".", 1)[-1]
+                # `P.Handler::handle` -- a handler class nested in the packet (or in another named class)
+                hf = pf if simple_cls in (hm.group(2), outer) else \
+                    (class_file(outer, files, f) if outer else None) or class_file(hm.group(2), files, f)
                 if hf == pf:
                     txt, k = convert_handler(txt, hm.group(3), flags, pf.relative_to(src).as_posix())
                 else:
@@ -508,8 +557,19 @@ def run(src, modid, dry=False):
                     new[g] = new[g][:m.start()] + f"{bus[-1]}.addListener({cname}::{owner.name});" + new[g][m.end():]
                     report["call sites"] += 1
                 else:
-                    flags.append(f"{g.relative_to(src).as_posix()}:{fs.line_of(new[g], m.start())} {cname}.{owner.name}() "
-                                 "has no IEventBus in scope: add `modBus.addListener(" + cname + "::" + owner.name + ")`")
+                    # called from a setup handler with no mod bus in scope: register from the @Mod constructor instead
+                    # (the mod bus is there), and drop the old call -- RegisterPayloadHandlersEvent fires on its own (X102)
+                    before = new[g]       # cut the old call FIRST: placing the listener may shift offsets in this file
+                    ls = before.rfind("\n", 0, m.start()) + 1
+                    line_only = not before[ls:m.start()].strip()
+                    new[g] = (before[:ls] + before[m.end():].lstrip(" \t").removeprefix("\n") if line_only
+                              else before[:m.start()] + before[m.end():])
+                    if place_listener(new, f"{cname}::{owner.name}"):
+                        report["call sites"] += 1
+                    else:
+                        new[g] = before
+                        flags.append(f"{g.relative_to(src).as_posix()}:{fs.line_of(new[g], m.start())} {cname}.{owner.name}() "
+                                     "has no IEventBus in scope: add `modBus.addListener(" + cname + "::" + owner.name + ")`")
                 break
     changed = 0
     for f, t in new.items():
@@ -766,6 +826,31 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
             if not ok3:
                 print(f"self-check X97 ({'used' if used else 'unused'}):", f3, "\n" + mm)
             ok = ok and ok3
+    with tempfile.TemporaryDirectory() as d:     # X102: late-assigned channel, nested Handler, register() from setup
+        p = pathlib.Path(d) / "c"; p.mkdir()
+        (p / "CMod.java").write_text(
+            "package c;\n@Mod(\"c\")\npublic class CMod {\n   public CMod(IEventBus modEventBus, ModContainer c) {\n"
+            "      modEventBus.addListener(this::commonSetup);\n   }\n\n   private void commonSetup(FMLCommonSetupEvent event) {\n"
+            "      Msgs.register();\n   }\n}\n", encoding="utf-8")
+        (p / "Msgs.java").write_text(
+            "package c;\npublic final class Msgs {\n   private static SimpleChannel INSTANCE;\n   public static void register() {\n"
+            "      INSTANCE = ChannelBuilder.named(new ResourceLocation(\"c\", \"main\")).networkProtocolVersion(1).simpleChannel();\n"
+            "      INSTANCE.messageBuilder(Undo.class, 0, NetworkDirection.PLAY_TO_CLIENT)\n         .encoder(Undo::encode)\n"
+            "         .decoder(Undo::decode)\n         .consumerMainThread(Undo.Handler::handle)\n         .add();\n   }\n}\n",
+            encoding="utf-8")
+        (p / "Undo.java").write_text(
+            "package c;\nimport net.neoforged.neoforge.event.network.CustomPayloadEvent.Context;\npublic class Undo {\n"
+            "   public static Undo decode(FriendlyByteBuf buf) { return new Undo(); }\n   public void encode(FriendlyByteBuf buf) { }\n"
+            "   public static class Handler {\n      public static void handle(Undo msg, Context ctx) { }\n   }\n}\n", encoding="utf-8")
+        r4, f4, _c = run(d, "c")
+        cm_, ms_, un_ = ((p / n).read_text(encoding="utf-8") for n in ("CMod.java", "Msgs.java", "Undo.java"))
+        ok4 = ("modEventBus.addListener(Msgs::register);" in cm_ and "Msgs.register();" not in cm_
+               and "registrar.playToClient(Undo.TYPE, Undo.STREAM_CODEC, Undo.Handler::handle);" in ms_
+               and "SimpleChannel" not in ms_ and "INSTANCE" not in ms_
+               and "public static void handle(Undo msg, IPayloadContext ctx)" in un_ and not f4)
+        if not ok4:
+            print("self-check X102:", f4, "\n" + cm_ + ms_ + un_)
+        ok = ok and ok4
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{net}\n{pong}")
     return 0 if ok else 1
 
