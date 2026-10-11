@@ -1273,14 +1273,22 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
                 if got:
                     hit = got[0]["fileName"]
                     break
-            res = []
-            for q in ([] if hit else list(dict.fromkeys([mid, mid.replace("_", " ")]))):   # structure_gel -> "structure gel"
-                res += modreg("search", "--query", q, "--loader", "neoforge", "--mc", mc, "--limit", "5")[1].get("results", [])[:5]
-            for r in res:
-                for pv in r.get("providers", []):
-                    got, _why = fetch(pv["provider"], pv["id"], expect=mid)
-                    if got:
-                        hit = got[0]["fileName"]
+            # structure_gel -> "structure gel"; a run-together id is searched as the phrases its slug guesses spell
+            # (ftbquests -> "ftb quests": the bare id finds nothing, and the CurseForge project is
+            # "FTB Quests (NeoForge)", X82). Each phrase is tried only while nothing has matched.
+            queries = list(dict.fromkeys([mid, mid.replace("_", " ")] + [g.replace("-", " ") for g in slug_guesses(mid)[2:8]]))
+            tried = set()
+            for q in ([] if hit else queries):
+                for r in modreg("search", "--query", q, "--loader", "neoforge", "--mc", mc, "--limit", "5")[1].get("results", [])[:5]:
+                    for pv in r.get("providers", []):
+                        if (pv["provider"], pv["id"]) in tried:
+                            continue
+                        tried.add((pv["provider"], pv["id"]))
+                        got, _why = fetch(pv["provider"], pv["id"], expect=mid)
+                        if got:
+                            hit = got[0]["fileName"]
+                            break
+                    if hit:
                         break
                 if hit:
                     break

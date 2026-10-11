@@ -5911,3 +5911,9 @@ classes each declaring a `SimpleChannel`, one keeping it in a local (`SimpleChan
 channel's send rewrite had already edited the second file, and the second file's registration was cut using offsets
 from its original text · **Fix:** `convert-simplechannel` reads each file's current text before it computes
 anything, and also removes the field a local channel was copied into.
+
+**X82. A run-together mod id is not a search phrase.** · **Pattern:** a jar's toml requires `ftbquests`; the project
+is "FTB Quests (NeoForge)" on CurseForge, slug `ftb-quests-forge` · **Symptom:** a confident "no 1.21.1 build found
+that declares it", and the mod stopped, while FTB Quests 2101.x exists · **Fix:** besides the bare id, the resolver
+searches the phrases its slug guesses spell (`ftb quests`), each only while nothing has matched; a candidate is still
+accepted only when its own toml declares the id.
