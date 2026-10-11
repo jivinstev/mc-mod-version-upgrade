@@ -5978,3 +5978,14 @@ with "no recipe pack for fabric → neoforge", though the project might ship a r
 downloads up to four tagged forge/neoforge, and restarts on the first whose jar is (Neo)Forge. Measured honestly: in
 the three mislabelled projects seen so far every "Forge" file was Fabric too (one author uploads only Fabric jars,
 under every label), so the stop stands — it is now a verified stop rather than a guess.
+
+**X90. A BUNDLE jar ports almost nothing and reads as a clean zero.** · **Pattern:** an outer jar with one or two
+classes of its own (the mod entrypoint) whose real code ships as several nested module jars of the SAME mod under
+`META-INF/jars/<stem>-<module>-*.jar` (a modular library publishing one "all-in-one" download) · **Symptom:** the
+sweep reports `exit=0 start=0 left=0` in seconds — a perfect port of one class, over a library of ten modules nobody
+decompiled. It is the reassuring direction again: nothing about the number says the scope was a single file ·
+**Fix:** triage stop (exit 23) when the outer jar has at most five classes and two or more nested jars share its
+name stem, naming the modules; port each as its own mod, dependencies first. A library jar-in-jar'd BESIDE real code
+does not match, because the outer jar then has code. Measured: 1 match in 398 sweep jars, and it was the true one.
+· **The general check:** a `start=0` from a jar is a claim about how much code was read. Ask the class count before
+believing it.

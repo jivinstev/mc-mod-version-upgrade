@@ -778,6 +778,13 @@ def main():
         return stop(23, f"{jar.name} is a Kotlin mod ({kt} of {total} classes carry kotlin.Metadata): this pipeline "
                         f"decompiles and ports Java, and turning a Kotlin mod into Java is a rewrite, not a port",
                     ["port it by hand in Kotlin (kotlinforforge has NeoForge builds)", "or skip this mod"])
+    own_split = bundle_modules(jar)
+    if own_split:
+        return stop(23, f"{jar.name} is a bundle jar: it carries {own_split[0]} class(es) of its own and ships its code as "
+                        f"{len(own_split[1])} nested module jar(s) of the same mod ({', '.join(own_split[1][:3])}...), so a "
+                        f"decompile of the outer jar ports almost nothing and would report a misleading clean result (X90)",
+                    ["port each nested module as its own mod (unzip it and pass its path), dependencies first",
+                     "or skip this mod"])
     if loader == "neoforge" and forge_api_jar(jar):
         say(f"{jar.name}: NeoForge on the Forge API (mods.toml, net.minecraftforge classes) -- ported as Forge")
         loader = "forge"
@@ -998,6 +1005,19 @@ def true_loader_file(source, mc, jars, say=print, tries=4):
         if names & {"META-INF/mods.toml", "META-INF/neoforge.mods.toml"} and "fabric" not in loader_families(j):
             return j
     return None
+
+
+def bundle_modules(jar):
+    """X90: an outer jar that is a SHELL around its own nested modules (META-INF/jars/<stem>-*.jar). Returns
+    (own class count, [module names]) when the outer jar has almost no code and >=2 nested jars share its name
+    stem; None otherwise. A library jar-in-jar'd beside real code is not this: the outer jar then has code."""
+    with zipfile.ZipFile(jar) as z:
+        names = z.namelist()
+    own = sum(1 for n in names if n.endswith(".class") and not n.startswith("META-INF/"))
+    stem = re.split(r"[-_]", jar.name.lower())[0]
+    mods = sorted(n.rsplit("/", 1)[-1] for n in names if n.startswith("META-INF/jars/") and n.endswith(".jar")
+                  and n.rsplit("/", 1)[-1].lower().startswith(stem + "-"))
+    return (own, mods) if own <= 5 and len(mods) >= 2 else None
 
 
 def kotlin_share(jar):
