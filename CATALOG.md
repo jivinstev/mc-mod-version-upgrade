@@ -6686,3 +6686,13 @@ trailing `}`, which 1.21.1's Gson reads and 26.x's strict parser rejects (§S8).
 definitions before it ran fix-json-strict, and the generator's `json.load` raised, so the hop stopped (exit 24)
 before any compile. Now the strict-JSON repair runs first. The generator also reads a model that still does not
 parse the way Gson did (its first object), or skips it with a warning, instead of failing the hop.
+
+**X162. Global loot modifiers serialize through a MapCodec in 1.21.1 (forge-shapes `lootmod`), and X147 must not
+touch them.** `IGlobalLootModifier.codec()` returns `MapCodec<? extends IGlobalLootModifier>`, and
+`GLOBAL_LOOT_MODIFIER_SERIALIZERS` holds MapCodecs. 15 swept mods carry the 1.20 `Codec` form. The transform
+rewrites every `Codec<? extends IGlobalLootModifier>` (the override, the DeferredRegister, its holders) to MapCodec,
+and inside a class extending LootModifier it rewrites the class's own `Codec<X>` to `MapCodec<X>`, built with
+`RecordCodecBuilder.mapCodec` where the builder starts from `codecStart(..)`. Compiled against 1.21.1. Found because
+X147's block-codec fixer read `does not override abstract method codec() in IGlobalLootModifier` as a block and gave
+the modifier a block `codec()`. Its error pattern now accepts only block bases (`*Block`, `BlockBehaviour`), and its
+self-check feeds it the loot-modifier message.

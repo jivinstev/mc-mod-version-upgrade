@@ -22,7 +22,8 @@ _spec = importlib.util.spec_from_file_location("forge_shapes", pathlib.Path(__fi
 fs = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(fs)
 
 ERR = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[\\/]\S+?\.java):(?P<line>\d+): error: (?P<cls>[\w$]+) is not abstract and does not "
-                 r"override abstract method codec\(\) in (?P<base>[\w$.]+)\s*$", re.M)
+                 r"override abstract method codec\(\) in (?P<base>[\w$.]*(?:Block|BlockBehaviour))\s*$", re.M)
+# only BLOCK bases: a loot modifier's codec() (IGlobalLootModifier) is a different method with a different fix (X162)
 
 
 def fix(text, cls):
@@ -103,7 +104,8 @@ def self_check():
         log = "\n".join([f"{p / 'Fern.java'}:2: error: Fern is not abstract and does not override abstract method codec() in DirectionalBlock",
                          f"{p / 'Cactus.java'}:2: error: Cactus is not abstract and does not override abstract method codec() in BushBlock",
                          f"{p / 'Cactus.java'}:4: error: Inner is not abstract and does not override abstract method codec() in BaseEntityBlock",
-                         f"{p / 'Cactus.java'}:4: error: Inner is not abstract and does not override abstract method codec() in BaseEntityBlock"])
+                         f"{p / 'Cactus.java'}:4: error: Inner is not abstract and does not override abstract method codec() in BaseEntityBlock",
+                         f"{p / 'Fern.java'}:2: error: Fern is not abstract and does not override abstract method codec() in IGlobalLootModifier"])
         report, flags, changed = run(d, log)
         fern, cac = (p / "Fern.java").read_text(encoding="utf-8"), (p / "Cactus.java").read_text(encoding="utf-8")
         run(d, log)

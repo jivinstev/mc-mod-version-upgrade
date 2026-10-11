@@ -1233,10 +1233,35 @@ def t_effecthooks(path, text, ctx, res):
     return text
 
 
+# --------------------------------------------------------------------------- global loot modifiers (X162)
+
+def t_lootmod(path, text, ctx, res):
+    """X162: a global loot modifier's serializer is a MapCodec in 1.21.1 -- IGlobalLootModifier.codec() returns
+    MapCodec<? extends IGlobalLootModifier> and GLOBAL_LOOT_MODIFIER_SERIALIZERS holds MapCodecs. So every
+    Codec<? extends IGlobalLootModifier> (the codec() override, the DeferredRegister, its holders) becomes a MapCodec, and
+    in a class extending LootModifier its own Codec<X> becomes MapCodec<X>, built with RecordCodecBuilder.mapCodec where
+    the builder starts from codecStart(..)."""
+    if "IGlobalLootModifier" not in text and "LootModifier" not in text:
+        return text
+    n0 = text
+    text, n1 = re.subn(r"(?<![\w.])(?:com\.mojang\.serialization\.)?Codec<\s*\?\s*extends\s+((?:[\w.]+\.)?IGlobalLootModifier)\s*>",
+                       r"com.mojang.serialization.MapCodec<? extends \1>", text)
+    cm = re.search(r"\bclass\s+(\w+)\b[^{]*\bextends\s+(?:[\w.]+\.)?LootModifier\b", text)
+    n2 = n3 = 0
+    if cm:
+        x = cm.group(1)
+        text, n2 = re.subn(r"(?<![\w.])(?:com\.mojang\.serialization\.)?Codec<\s*%s\s*>" % re.escape(x),
+                           f"com.mojang.serialization.MapCodec<{x}>", text)
+        text, n3 = re.subn(r"\bRecordCodecBuilder\s*\.\s*create\((?=[^;]*?codecStart\()", "RecordCodecBuilder.mapCodec(", text)
+    if text != n0:
+        res.count["lootmod"] += 1
+    return text
+
+
 TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attrmod", t_attrmod), ("nbt", t_nbt), ("hooks", t_hooks),
               ("geo", t_geo), ("vc", t_vc), ("source", t_source),
               ("sigs", t_sigs), ("misc", t_misc), ("imagebutton", t_imagebutton),
-              ("effecthooks", t_effecthooks)]
+              ("effecthooks", t_effecthooks), ("lootmod", t_lootmod)]
 
 
 # --------------------------------------------------------------------------- menu screens (X141), cross-file
@@ -1445,6 +1470,18 @@ def main():
 # --------------------------------------------------------------------------- self-check
 
 CASES = [
+    ("lootmod", """package a;
+public class RingsLootModifier extends LootModifier {
+   public static final Supplier<Codec<RingsLootModifier>> CODEC = Suppliers.memoize(() -> RecordCodecBuilder.create(inst -> codecStart(inst)
+      .and(Codec.STRING.fieldOf("item").forGetter(m -> m.item)).apply(inst, RingsLootModifier::new)));
+   public static final DeferredRegister<Codec<? extends IGlobalLootModifier>> REGISTER = DeferredRegister.create(NeoForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS, "m");
+   public Codec<? extends IGlobalLootModifier> codec() {
+      return CODEC.get();
+   }
+}
+""", ["Supplier<com.mojang.serialization.MapCodec<RingsLootModifier>> CODEC", "RecordCodecBuilder.mapCodec(inst -> codecStart(inst)",
+      "Codec.STRING.fieldOf", "DeferredRegister<com.mojang.serialization.MapCodec<? extends IGlobalLootModifier>> REGISTER",
+      "public com.mojang.serialization.MapCodec<? extends IGlobalLootModifier> codec() {"], ["RecordCodecBuilder.create("]),
     ("effecthooks", """package a;
 public class CrittersMobEffect extends MobEffect {
    public CrittersMobEffect() {
