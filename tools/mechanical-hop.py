@@ -4,7 +4,8 @@
   --stage forge  (Forge 1.20.x -> NeoForge 1.21.1, after the remap, codemods and recipe pack): the access
                  transformer made valid (official names, override widenings, one compile per subclass level),
                  forge-shapes, convert-simplechannel, convert-mcreator-variables, convert-gui-overlays,
-                 convert-capabilities (X142), then fix-holders until a compile round fixes nothing.
+                 convert-capabilities (X142), then fix-holders, the member renames and
+                 fix-block-codecs (X147) until a compile round fixes nothing.
   --stage era    (1.21.1 -> 26.x, after the rename table): the access transformer re-pointed through the class-move
                  map, the member pass, then every converter, then the member pass again.
 
@@ -338,8 +339,11 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
         mouts = [run("fix-missing-members.py", "--src", d, "--log", log, "--table", ROOT / FORGE_MEMBERS)[1]
                  for d in dirs] if (ROOT / FORGE_MEMBERS).exists() else []
         rep.setdefault("members", []).extend(mouts)
+        # X147: a concrete subclass of an abstract vanilla block must implement codec() since 1.20.3
+        couts = [run("fix-block-codecs.py", "--src", d, "--log", log)[1] for d in dirs]
+        rep.setdefault("codecs", []).extend(couts)
         if all(" 0 site" in (o.splitlines() or [""])[0] for o in outs) and \
-                all(re.search(r"\b0 site\(s\) rewritten", o or "") for o in mouts):
+                all(re.search(r"\b0 site\(s\) rewritten", o or "") for o in mouts + couts):
             break
     rep["errors"] = counts
     say(f"holders+members: {' -> '.join(map(str, counts))} errors")
@@ -514,12 +518,14 @@ def self_check():
             calls.append(name)
             return 0, {"fix-access-transformer.py": "fix-access-transformer: 1 override widened",
                        "fix-holders.py": "fix-holders: 0 site(s)",
-                       "fix-missing-members.py": "fix-missing-members: 0 site(s) rewritten"}.get(name, f"{name[:-3]}: ok")
+                       "fix-missing-members.py": "fix-missing-members: 0 site(s) rewritten",
+                       "fix-block-codecs.py": "fix-block-codecs: 0 file(s) changed, 0 site(s) rewritten"}.get(name, f"{name[:-3]}: ok")
         rep = run_forge_stage(repo, [repo / "src/main/java"], "x", repo, lambda log: (next(seq), "line"), run=frun,
                               say=lambda s: None)
         ok &= calls[0] == "fix-access-transformer.py" and calls.count("fix-access-transformer.py") == 2
         ok &= calls.index("forge-shapes.py") < calls.index("convert-simplechannel.py") < calls.index("fix-holders.py")
-        ok &= rep["errors"] == [30] and "fix-missing-members.py" in calls
+        ok &= rep["errors"] == [30] and "fix-missing-members.py" in calls and "fix-block-codecs.py" in calls
+        ok &= calls.index("convert-capabilities.py") < calls.index("fix-holders.py")
     with tempfile.TemporaryDirectory() as d:        # an unparseable file is set aside, a mass of them is not
         w = pathlib.Path(d); j = w / "src/main/java/p"; j.mkdir(parents=True)
         for i in range(12):

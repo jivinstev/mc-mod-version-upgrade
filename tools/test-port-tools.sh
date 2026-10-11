@@ -268,6 +268,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "forge-shapes.py|forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib colour rewritten idempotently" \
             "fix-holders.py|fix-holders: the expression under javac's caret is unwrapped, retyped or resolved, never guessed" \
             "fix-missing-members.py|fix-missing-members: a moved member is renamed only where javac names its owner type (incl. record fields gone private)" \
+            "fix-block-codecs.py|fix-block-codecs: a concrete block subclass gets codec() -- simpleCodec when it has a (Properties) constructor" \
+            "convert-capabilities.py|convert-capabilities: Forge capability code keeps its shape through a compat layer wired into NeoForge" \
             "convert-rendertypes.py|convert-rendertypes: a CompositeState becomes a pipeline + RenderSetup; reverse-Z depth, unknown shards refused" \
             "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
             "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
@@ -327,12 +329,12 @@ import pathlib, re, sys
 t = pathlib.Path("tools")
 mh = (t / "mechanical-hop.py").read_text(encoding="utf-8")
 listed = set(re.findall(r'"(convert-[\w-]+\.py)"', mh.split("CONVERTERS = [", 1)[1].split("]", 1)[0]))
-on_disk = {p.name for p in t.glob("convert-*.py")} - {"convert-simplechannel.py"}   # a 1.21.1 converter, not an era one
+forge = set(re.findall(r'"([\w-]+\.py)"', mh.split("FORGE_STEPS = [", 1)[1].split("]\n", 1)[0]))   # the 1.21.1 converters
+on_disk = {p.name for p in t.glob("convert-*.py")} - forge
 problems = []
 if on_disk - listed:
-    problems.append(f"era converters not in CONVERTERS (so neither route runs them): {sorted(on_disk - listed)}")
-shared = on_disk | {"convert-simplechannel.py", "forge-shapes.py", "fix-holders.py", "fix-access-transformer.py",
-                    "fix-missing-members.py"}
+    problems.append(f"converters in neither CONVERTERS nor FORGE_STEPS (so neither route runs them): {sorted(on_disk - listed)}")
+shared = on_disk | forge | {"fix-holders.py", "fix-access-transformer.py", "fix-missing-members.py", "fix-block-codecs.py"}
 needs = {"port-upstream.py": ["mh.run_stage(", "mh.run_forge_stage(", "mh.at_loop(", "mh.era_access_transformer("],
          "port.py": ['"--stage", "forge"', '"--stage", "era"']}
 for route, need in needs.items():

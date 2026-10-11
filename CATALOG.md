@@ -6543,3 +6543,18 @@ gone. The one left takes a relative-movement set and a trailing `setCamera`, so 
 `Set.of()` and `true`, and the 7-argument Entity form gains `true`. Both rows apply only when the first argument names
 a level, so a mod's own 6-argument `teleportTo` is left alone. (3) `Inventory.items` is private; the main-inventory
 list is `getNonEquipmentItems()` (an era member row).
+
+**X147. `codec()` on every concrete block subclass, from javac's own errors (`tools/fix-block-codecs.py`).** Since
+1.20.3 a class that extends an abstract vanilla block (BushBlock, DirectionalBlock, BaseEntityBlock, ...) must
+implement `protected MapCodec<? extends B> codec()` (§72). It was the commonest single Forge-hop error left after the
+converters: 49 swept mods, ~650 error lines. javac names each class (`X is not abstract and does not override
+abstract method codec() in DirectionalBlock`). X gets `return simpleCodec(X::new);`, vanilla's own shape, when it has
+a one-argument `(Properties)` constructor. Otherwise it gets `MapCodec.unit(this)`, the block instance itself, which is
+what a codec for a registered block decodes to; vanilla only reads block codecs to validate the BLOCK_TYPE registry.
+It runs in the Forge stage's compile loop beside fix-holders and the member renames.
+
+Two related changes. (a) `tools/test-port-tools.sh`'s route-parity check treated every `convert-*.py` as an era
+converter, so the Forge-stage converters (gui-overlays, mcreator-variables, capabilities) made it fail. It now reads
+`FORGE_STEPS` too. (b) X146's `teleportTo` row made the 26.2 client-harness patch block for the same call redundant,
+and the patch's "must match exactly once" rule caught that. The block is gone. The patch passed `setCamera = false`
+where 1.21.1's six-argument form called `setCamera(this)` unconditionally; the row's `true` is the faithful one.
