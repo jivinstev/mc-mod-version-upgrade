@@ -6516,3 +6516,21 @@ convert-mcreator-variables, so MCreator's capability-based variables still go th
 (`illegal start of type`), and a parse error stops the whole compile before the mechanical stage can count anything:
 a 26.2 hop of a GUI library failed outright on three of these. `fix_decompile_artifacts` now writes the outer
 diamond, `new ListProperty<>()`, which infers the same type.
+
+**X144. The §97 block-constructor rows only matched a type constant whose NAME ended in the type, and only `new`
+calls.** `new ButtonBlock(props, HabitatBlockSetType.FAIRY_RING_MUSHROOM, 30, true)` (a holder class, then the
+constant) went through untouched. So did every subclass's `super(properties, woodTypeIn)`, and so did the pressure
+plates. The rows now accept a qualified constant. New rows reorder the pressure plates: their 1.20 sensitivity moved
+INTO the BlockSetType, which is a JUDGEMENT row, because a plate whose sensitivity differed from its set type's now
+uses the set type's. Another group reorders a subclass's `super(...)`. It runs only in files that extend one of
+those blocks, and it matches a properties-named first argument and a type-named second one. Separately, the §32
+hurtAndBreak row now accepts a hand variable with a suffix (`handIn`). Before this, the next row took
+`broadcastBreakEvent(handIn)` to be a slot and passed an InteractionHand where an EquipmentSlot belongs (10 errors in
+one mod).
+
+**X145. `new MobEffectInstance(effect, 160)` where `effect` is a local or a `Supplier<MobEffect>` parameter.** javac
+reports an overloaded constructor as `no suitable constructor found ... (argument mismatch; MobEffect cannot be
+converted to Holder<MobEffect>)`, and fix-holders' argument-mismatch path (X98) handled only `Owner.FIELD.get()`
+with a registry field to retype. It now wraps the constructor's first argument in
+`BuiltInRegistries.MOB_EFFECT.wrapAsHolder(..)` (rule F). That is the one MobEffect position, so the mismatch javac
+names is the one rewritten.

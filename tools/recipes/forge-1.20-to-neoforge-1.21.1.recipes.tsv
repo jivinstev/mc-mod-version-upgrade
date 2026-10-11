@@ -88,9 +88,20 @@ re:\bthis\.entityData\.define\(	builder.define(
 re:public EntityDimensions getDimensions\(Pose (\w+)\)	protected EntityDimensions getDefaultDimensions(Pose \1)
 re:\bsuper\.getDimensions\(	super.getDefaultDimensions(
 
+#@ 97 auto  ...and the pressure plates: the sensitivity moved INTO the BlockSetType (a JUDGEMENT row: a plate whose
+#           sensitivity differed from its set type's now uses the set type's), the weight stays first
+re:\bnew\s+PressurePlateBlock\(\s*(?:(?:PressurePlateBlock\.)?Sensitivity\.\w+)\s*,\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)[\w.]*)\s*\)	new PressurePlateBlock(\2, \1)
+re:\bnew\s+WeightedPressurePlateBlock\(\s*([^(),]+),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)[\w.]*)\s*\)	new WeightedPressurePlateBlock(\1, \3, \2)
+
+#@ 97 auto  ...and a SUBCLASS's super(...) call, in files that extend one of those blocks (X144)
+#? only-if	\bextends\s+(?:DoorBlock|TrapDoorBlock|StandingSignBlock|WallSignBlock|CeilingHangingSignBlock|WallHangingSignBlock|FenceGateBlock|ButtonBlock|PressurePlateBlock|WeightedPressurePlateBlock)\b
+re:\bsuper\(\s*([\w.]*(?i:propert|settings|props)[\w.]*|(?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*([\w.]*(?i:woodtype|settype|blockset|_wood|type)[\w.]*)\s*\)\s*;	super(\2, \1);
+re:\bsuper\(\s*([\w.]*(?i:propert|settings|props)[\w.]*),\s*([\w.]*(?i:settype|blockset|type)[\w.]*),\s*([\w.]+),\s*(?:true|false|[\w.]+)\s*\)\s*;	super(\2, \3, \1);
+re:\bsuper\(\s*(?:(?:PressurePlateBlock\.)?Sensitivity\.\w+|\w*[sS]ensitivity\w*)\s*,\s*([\w.]*(?i:propert|settings|props)[\w.]*),\s*([\w.]*(?i:settype|blockset|type)[\w.]*)\s*\)\s*;	super(\2, \1);
+
 #@ 32 auto  hurtAndBreak takes the slot, not a break callback
 re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?(\w+)\)?\s*->\s*\3\.broadcastBreakEvent\(\3\.getUsedItemHand\(\)\)\)	.hurtAndBreak(\1, \2, net.minecraft.world.entity.LivingEntity.getSlotForHand(\2.getUsedItemHand()))
-re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]*[hH]and(?:\(\))?)\)\)	.hurtAndBreak(\1, \2, net.minecraft.world.entity.LivingEntity.getSlotForHand(\3))
+re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]*[hH]and\w*(?:\(\))?)\)\)	.hurtAndBreak(\1, \2, net.minecraft.world.entity.LivingEntity.getSlotForHand(\3))
 re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]+)\)\)	.hurtAndBreak(\1, \2, \3)
 
 #@ 113 auto  setMaxUpStep is the STEP_HEIGHT attribute (not on known non-living bases: a plain Entity has no attribute map)
@@ -337,9 +348,9 @@ re:(?<![\w$.])\w+\.isCancelable\(\)\s*&&\s*
 re:\.getType\(\s*(\w+)\.getTag\(\)\s*\)	.getType(\1)
 
 #@ 97 auto  wood/set-type blocks take the type FIRST, then Properties
-re:\bnew\s+(DoorBlock|TrapDoorBlock|StandingSignBlock|WallSignBlock|CeilingHangingSignBlock|WallHangingSignBlock)\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType|WoodType)\.\w+|[\w.]*(?:SET_TYPE|WOOD_TYPE|_WOOD|BlockSetType|WoodType)\w*)\s*\)	new \1(\3, \2)
-re:\bnew\s+FenceGateBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:WoodType)\.\w+|[\w.]*(?:WOOD_TYPE|_WOOD|WoodType)\w*)\s*\)	new FenceGateBlock(\2, \1)
-re:\bnew\s+ButtonBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)\w*),\s*(\d+),\s*(?:true|false)\s*\)	new ButtonBlock(\2, \3, \1)
+re:\bnew\s+(DoorBlock|TrapDoorBlock|StandingSignBlock|WallSignBlock|CeilingHangingSignBlock|WallHangingSignBlock)\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType|WoodType)\.\w+|[\w.]*(?:SET_TYPE|WOOD_TYPE|_WOOD|BlockSetType|WoodType)[\w.]*)\s*\)	new \1(\3, \2)
+re:\bnew\s+FenceGateBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:WoodType)\.\w+|[\w.]*(?:WOOD_TYPE|_WOOD|WoodType)[\w.]*)\s*\)	new FenceGateBlock(\2, \1)
+re:\bnew\s+ButtonBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)[\w.]*),\s*(\d+),\s*(?:true|false)\s*\)	new ButtonBlock(\2, \3, \1)
 
 #@ 35 manual  RecordItem is gone: music discs are an Item with the JUKEBOX_PLAYABLE component + a jukebox_song datapack entry
 #? detect	\bRecordItem\b

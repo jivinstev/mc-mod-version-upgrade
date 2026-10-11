@@ -384,6 +384,30 @@ def run(src, log_text, dry=False):
                         edits[df].append((h0, h1, f"DeferredHolder<{base}, {targs}>"))
                     need_imports[df].add("net.neoforged.neoforge.registries.DeferredHolder")
                 report["A in argument mismatch"] += 1
+            # X145: the effect is a local or a Supplier parameter (`new MobEffectInstance(effect, 160)`,
+            # `effect.get()`): no registry field to retype, so rule F -- wrap the VALUE. Only the constructor's first
+            # argument, the one MobEffect position, so the mismatch javac names is the one rewritten.
+            if T == "MobEffect":
+                t_ = idx.files[f]
+                ls_ = offset(f, ln, 0)
+                for nm in re.finditer(r"\bnew\s+MobEffectInstance\s*\(", src_line):
+                    p0 = ls_ + nm.end() - 1
+                    p1 = close_of(t_, p0)
+                    if p1 < 0:
+                        continue
+                    a0 = split_args(t_[p0 + 1:p1])[0] if t_[p0 + 1:p1].strip() else ""
+                    e0 = a0.strip()
+                    if not e0 or "wrapAsHolder" in e0 or e0.startswith("Holder"):
+                        continue
+                    fm = re.fullmatch(r"(?:\(\s*MobEffect\s*\)\s*)?(?:(\w+)\.)?(\w+)", e0)
+                    if fm and fm.group(1):
+                        df, dm = idx.field_decl(fm.group(1), fm.group(2))
+                        if df is not None and dm.group(1) == "DeferredHolder":
+                            continue
+                    s0 = p0 + 1 + len(a0) - len(a0.lstrip())
+                    edits[f].append((s0, s0 + len(e0), f"BuiltInRegistries.MOB_EFFECT.wrapAsHolder({e0})"))
+                    need_imports[f].add("net.minecraft.core.registries.BuiltInRegistries")
+                    report["F wrapAsHolder in argument mismatch"] += 1
 
     for file, line, msg, col in errors(log_text):
         f = pathlib.Path(file).resolve()
@@ -573,6 +597,20 @@ class Use {
             miss.append("double retype")
         ok = not miss and not flags
     ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: incompatible types: A cannot be converted to B"))   # javac on Windows names a drive path
+    with tempfile.TemporaryDirectory() as d:     # X145: a local / Supplier-parameter effect in an overloaded constructor
+        p = pathlib.Path(d) / "my"; p.mkdir()
+        (p / "P.java").write_text("package my;\nclass P {\n    void a(Supplier<MobEffect> effect, MobEffect e2, int j) {\n"
+                                  "        x(new MobEffectInstance(effect.get(), j));\n        y(new MobEffectInstance(e2, 160));\n    }\n}\n",
+                                  encoding="utf-8")
+        F = str(p / "P.java")
+        log = "\n".join("\n".join([f"{F}:{n}: error: no suitable constructor found for MobEffectInstance(MobEffect,int)", "x", "^",
+                                   "    constructor MobEffectInstance.MobEffectInstance(Holder<MobEffect>,int) is not applicable",
+                                   "      (argument mismatch; MobEffect cannot be converted to Holder<MobEffect>)"]) for n in (4, 5))
+        run(d, log)
+        out = (p / "P.java").read_text(encoding="utf-8")
+        ok = ok and "new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(effect.get()), j)" in out \
+            and "new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(e2), 160)" in out \
+            and "import net.minecraft.core.registries.BuiltInRegistries;" in out
     import tempfile
     with tempfile.TemporaryDirectory() as d:     # X98: a helper-registered field, fixed from an argument-mismatch error
         p = pathlib.Path(d) / "m"; p.mkdir()
