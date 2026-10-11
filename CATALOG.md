@@ -5805,3 +5805,15 @@ last `)` and deleted the else branch (`c ? InteractionResult.SUCCESS;`), and bur
 `'x' expected` parse errors, read javac's `: expected` as a count of **1** on a 1,000-file port · **Fix:** such rows
 match `\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)`; burndown-count matches the whole `<tokens> expected` family. An
 audit of every earlier sweep result for a hidden parse abort found only the three already known.
+
+**X70. Three more decompile leftovers, and a report of what setup could not repair.** ·
+- *Diamond cast*: `(Map<>)x` is not legal Java (`illegal start of type`). Setup drops the empty type arguments.
+- *An interface with an empty assertion-status `static {}`*: the guard removal from X59 leaves `static { }` in an
+  interface, which javac rejects (`initializers not allowed in interfaces`, now in the parse family). Setup deletes
+  it.
+- *Whatever is left*: setup now counts the decompiler's failure markers by kind (an unrecovered method body, an
+  unresugared constructor, an unfolded concat) and puts the counts in its line and in the port info as
+  `decompile_markers_left`. A marker that survives setup is a method that is wrong or empty, not a compile error,
+  so the count is the only place it shows.
+- *A library the build supplies from `libs/`* (a jar or a nested jarJar) is not foreign either: park-optional reads
+  the packages in those jars as well as the decompiled tree, so a shaded or bundled library stops being parked.
