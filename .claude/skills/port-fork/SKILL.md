@@ -154,6 +154,22 @@ workflow → branch `neoforge-<mc>`, release: true**, or `gh workflow run port-c
 -f release=true`. It publishes the authors' own JARs as a pre-release named `<modid>-<version>-mc<mc>`,
 only if every gate passes. Give the user the release link; they smoke-test it on their machine.
 
+**Promote it once they have played it** (`> Promote my fork's release`). Ask who played it and, optionally,
+one line on what they did; never promote on your own or from an unattended run -- promotion is the "a person
+played it" gate, and the fork's newest full Release is the baseline everything after it (syncing, publishing)
+starts from:
+```bash
+python3 tools/port-ci.py promote --fork <user>/<repo> --tag <release tag> --played-by <their login> \
+    [--notes "<what they played>"]
+```
+It dispatches the fork's own Port CI workflow with `promote=<tag>` (no gates run). The workflow refuses a tag that
+is not a pre-release it published from that branch, makes it a full Release marked latest, and replaces
+"Pre-release until played by a person." with who played it and when. Without a logged-in `gh` it prints the
+dispatch instead: send it through the GitHub connector (workflow `port-ci.yml`, ref = the port branch, inputs
+`promote`, `played_by`, `played_notes`). A fork whose workflow predates the `promote` input needs it re-rendered
+first: `port-ci.py --print` with the same `--dep-jar`/`--kit-version`/`--kit-sha` it was installed with, diff
+against the installed file, and commit only the added promote input and job.
+
 ## 6. (dependents) CI that needs another fork
 
 A dependent mod's CI needs its dependency in mavenLocal. Once the dependency has a release (step 5), use
@@ -180,7 +196,7 @@ contact the authors is the user's decision.
 
 **Standing rule: every offer carries "How to install", per target, and so does anything built from it.**
 `port-offer.py` writes it from what was TESTED, never the newest file on a registry: the NeoForge version the
-build names (with its installer), this fork's release jar, each required dependency at the exact version the
+build names (with its installer), this fork's release jar (its newest full Release; a pre-release only when there is none yet, and then said so), each required dependency at the exact version the
 ported build declares (`neoforge.mods.toml` decides required vs optional) with a direct file link, sibling
 ports from the exact release asset CI installed, optional integrations, and the build's other runtime mods
 (usually a library an optional one needs). When a release has one jar per platform, pass
