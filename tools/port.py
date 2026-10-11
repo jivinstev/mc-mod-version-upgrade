@@ -353,20 +353,14 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
         f.unlink()
     # official names
     if setup_kind == "srg":
-        mp = pathlib.Path(os.environ.get("MIGRATE_WORKSPACE") or pathlib.Path.home() / ".mc-mod-upgrade/work") / f"srg2official-{src_mc}.json"
-        mp.parent.mkdir(parents=True, exist_ok=True)
-        if not mp.exists():
-            run([sys.executable, str(ROOT / "tools/srg-remap/build_mapping.py"), src_mc, str(mp)], log=log)
+        mp = name_map("srg", src_mc, log)
         run([sys.executable, str(ROOT / "tools/srg-remap/apply_mapping.py"), str(mp), str(srcj)], log=log)
         files = [str(f) for f in srcj.rglob("*.java")]
         for i in range(0, len(files), 200):
             run(["perl", "-pi", str(ROOT / "tools/srg-remap/forge_import_codemod.pl"), *files[i:i + 200]], log=log)
         run([sys.executable, str(ROOT / "tools/srg-remap/mc121_codemod.py"), str(srcj)], log=log)
     elif setup_kind == "intermediary":
-        mp = pathlib.Path(os.environ.get("MIGRATE_WORKSPACE") or pathlib.Path.home() / ".mc-mod-upgrade/work") / f"intermediary2official-{src_mc}.json"
-        mp.parent.mkdir(parents=True, exist_ok=True)
-        if not mp.exists():
-            run([sys.executable, str(ROOT / "tools/intermediary-remap/build_mapping.py"), src_mc, str(mp)], log=log)
+        mp = name_map("intermediary", src_mc, log)
         run([sys.executable, str(ROOT / "tools/intermediary-remap/apply_mapping.py"), str(mp), str(srcj)], log=log)
     # A (Neo)Forge jar can carry intermediary-named code too (a multi-loader build that bundles its Fabric-side
     # classes): 1951 such names in one NeoForge jar. Intermediary ids are globally unique, so the same remap a Fabric
@@ -374,10 +368,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     if setup_kind != "intermediary" and any(re.search(r"\bnet\.minecraft\.class_\d+\b|\b(?:method|field)_\d+\b",
                                                       f.read_text(encoding="utf-8", errors="replace"))
                                             for f in srcj.rglob("*.java")):
-        mp = pathlib.Path(os.environ.get("MIGRATE_WORKSPACE") or pathlib.Path.home() / ".mc-mod-upgrade/work") / f"intermediary2official-{src_mc}.json"
-        mp.parent.mkdir(parents=True, exist_ok=True)
-        if not mp.exists():
-            run([sys.executable, str(ROOT / "tools/intermediary-remap/build_mapping.py"), src_mc, str(mp)], log=log)
+        mp = name_map("intermediary", src_mc, log)
         if mp.exists():
             run([sys.executable, str(ROOT / "tools/intermediary-remap/apply_mapping.py"), str(mp), str(srcj)], log=log)
     left = sum(len(re.findall(r'\b[mf]_\d+_\b|\b(?:class|method|field)_\d+\b', f.read_text(encoding="utf-8", errors="replace")))
@@ -1081,6 +1072,21 @@ def decompile_markers(srcj):
                 n, first = out.get(k, (0, f.name))
                 out[k] = (n + 1, first)
     return out
+
+
+def name_map(kind, mc, log):
+    """The cached <kind>2official-<mc>.json (kind: srg | intermediary), built on first use and REBUILT when it
+    predates the current builder (no "__schema__" >= 2: those builds dropped every member of an unobfuscated class,
+    MinecraftServer's included -- X77)."""
+    mp = pathlib.Path(os.environ.get("MIGRATE_WORKSPACE") or pathlib.Path.home() / ".mc-mod-upgrade/work") / f"{kind}2official-{mc}.json"
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fresh = json.loads(mp.read_text(encoding="utf-8")).get("__schema__", 0) >= 2
+    except (OSError, ValueError, AttributeError):
+        fresh = False
+    if not fresh:
+        run([sys.executable, str(ROOT / f"tools/{kind}-remap/build_mapping.py"), mc, str(mp)], log=log)
+    return mp
 
 
 def fix_decompile_artifacts(srcj):

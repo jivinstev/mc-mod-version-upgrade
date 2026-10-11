@@ -28,7 +28,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix=f"srgmap-{mc}-")
 
     # 1) Mojang official client mappings for this version
-    manifest = json.loads(fetch("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json"))
+    manifest = json.loads(fetch("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"))
     vurl = next(v['url'] for v in manifest['versions'] if v['id'] == mc)
     vjson = json.loads(fetch(vurl))
     moj = fetch(vjson['downloads']['client_mappings']['url']).decode()
@@ -45,7 +45,7 @@ def main():
     for ln in moj.splitlines():
         if ln and not ln.startswith(' ') and '->' in ln:
             off, obf = ln.split(' -> ')
-            cls_off2obf[off.strip()] = obf.strip().rstrip(':')
+            cls_off2obf[off.strip()] = obf.strip().rstrip(':').replace('.', '/')   # an UNobfuscated class keeps its dotted name (X77)
 
     def to_obf_desc(t):
         t = t.strip(); arr = 0
@@ -59,12 +59,14 @@ def main():
 
     methods_by_obf, fields_by_obf = {}, {}
     cur = None
-    mre = re.compile(r'^\s+(?:\d+:\d+:)?([\w.$\[\]]+)\s+([\w$<>]+)\((.*)\)\s+->\s+(\S+)$')
+    # a method Mojang's compiler inlined carries its origin lines AFTER the parameters too: `foo():12:34 -> a`.
+    # Without the optional tail every such method was dropped -- all of MinecraftServer's, among others (X77).
+    mre = re.compile(r'^\s+(?:\d+:\d+:)?([\w.$\[\]]+)\s+([\w$<>]+)\(([^)]*)\)(?::\d+:\d+)?\s+->\s+(\S+)$')
     fre = re.compile(r'^\s+([\w.$\[\]]+)\s+([\w$]+)\s+->\s+(\S+)$')
     for ln in moj.splitlines():
         if not ln or ln.startswith('#'): continue
         if not ln.startswith(' '):
-            cur = ln.split(' -> ')[1].strip().rstrip(':'); continue
+            cur = ln.split(' -> ')[1].strip().rstrip(':').replace('.', '/'); continue
         m = mre.match(ln)
         if m:
             ret, name, params, obfn = m.groups()
@@ -92,6 +94,7 @@ def main():
             off = methods_by_obf.get((cur, p[0], p[1]))
             if off: srg2off[p[2]] = off
 
+    srg2off["__schema__"] = 2      # tools/port.py rebuilds a cached map without it (X77: earlier builds dropped ~900 names)
     json.dump(srg2off, open(out, 'w', encoding="utf-8"))
     print(f"[{mc}] SRG->official entries: {len(srg2off)}  (classes {len(cls_off2obf)})")
     for s in ['m_91087_', 'f_19853_']:

@@ -5867,3 +5867,16 @@ bundles classes still in Fabric's intermediary names (`net.minecraft.class_3675`
 reported 1951 and 394 "unmapped names left" on two NeoForge jars, and every such class failed to compile · **Fix:**
 intermediary ids are globally unique, so setup now applies the intermediary remap to whatever survives the route's
 own remap, on every route.
+
+**X77. The name-map builders dropped every member of an UNobfuscated class.** · **Pattern:** Mojang's mappings
+leave a few classes unobfuscated (`net.minecraft.server.MinecraftServer -> net.minecraft.server.MinecraftServer`);
+the "obfuscated" name then keeps its dots, while `joined.tsrg` and tiny files write it with slashes · **Symptom:** the
+SRG and intermediary joins missed the class and every descriptor naming it: ~900 SRG names, all of
+`MinecraftServer`'s methods (`getPlayerList`, `getLevel`, `getCommands`…) among them, left as `m_129921_` — 295 in
+one mod, 221 in another. CATALOG §I #54 recorded a handful of them as "Forge-injected" and fixed them by hand ·
+**Fix:** both builders normalise obfuscated names to slashes (the SRG map grows 65368 → 66271, no existing entry
+changes), stamp the map `"__schema__": 2`, and `port.py` rebuilds a cached map without it. Two network facts came
+with it: both builders now read the version manifest from piston-meta (launchermeta is blocked, §V0), and
+`maven.fabricmc.net` is not reachable here, so the intermediary builder falls back to FabricMC's own repository
+(`raw.githubusercontent.com/FabricMC/intermediary`, tiny v1, converted) — without it the intermediary remap had
+never been able to run in a cloud session.
