@@ -5925,3 +5925,12 @@ accepted only when its own toml declares the id.
 were all removed, keeping fields and constructors · **Symptom:** `enum constant expected here` on its first field —
 a parse error, so the stage stopped before counting anything · **Fix:** setup inserts the `;` when an enum body
 opens straight onto a member modifier.
+
+**X84. One unparseable file stopped the whole stage, every time a new decompile artifact turned up.** · **Pattern:**
+X62, X66, X70, X80 and X83 were each found because a single file failed to PARSE: javac then reports nothing else,
+and the stage stopped with "fix and rerun" · **Symptom:** a mod with thousands of errors to count produced no count
+at all · **Fix:** each artifact still gets its own setup fix, but the long tail will keep producing new ones, so the
+stage no longer depends on having seen them all: when javac reports parse-family errors in at most ten files (and at
+most a tenth of the tree), those files move to `parked/unparseable/`, are listed in MIGRATION.md for the compile
+loop, the stage prints `QUARANTINED …`, and the count goes on. More than that is not a decompile artifact and still
+stops. Grep sweep logs for `QUARANTINED` to find the next artifact worth a setup fix.

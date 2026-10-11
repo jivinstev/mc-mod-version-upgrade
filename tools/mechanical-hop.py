@@ -345,11 +345,48 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
 
 # ---------------------------------------------------------------------------------------------- CLI (jar route)
 
+PARSE_ERR = re.compile(r"^(\S+\.java):\d+: error: (?:[^ ]+(?: or [^ ]+)* expected|illegal start of|class, interface, enum, "
+                       r"or record expected|reached end of file while parsing|not a statement|initializers not allowed "
+                       r"in interfaces|enum constant expected here)", re.M)
+
+
+def quarantine_unparseable(work, log, cap=10):
+    """javac stops at PARSE errors before it attributes anything, so one file the decompiler left unparseable hides
+    every other error and stops the stage (each new decompile artifact did, until a fix landed: X84). Move such
+    files (at most `cap`, and at most a tenth of the tree) to parked/unparseable/, record them for the compile loop,
+    and let the count go on. -> files moved (0: nothing to do, or too many to be a decompile artifact)"""
+    work = pathlib.Path(work)
+    text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace") if pathlib.Path(log).exists() else ""
+    files = sorted({pathlib.Path(m.group(1)) for m in PARSE_ERR.finditer(text)})
+    srcs = [work / d for d in ("src/main/java", "src/test/java")]
+    files = [f for f in files if f.exists() and any(r in f.parents for r in srcs)]
+    total = sum(1 for r in srcs if r.exists() for _ in r.rglob("*.java"))
+    if not files or len(files) > cap or len(files) * 10 > max(total, 10):
+        return 0
+    dest = work / "parked/unparseable"
+    for f in files:
+        root = next(r for r in srcs if r in f.parents)
+        t = dest / root.relative_to(work) / f.relative_to(root)
+        t.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(f), str(t))
+    print(f"mechanical-hop: QUARANTINED {len(files)} unparseable file(s) to parked/unparseable/: "
+          + ", ".join(f.name for f in files), flush=True)
+    with open(work / "MIGRATION.md", "a", encoding="utf-8") as fh:
+        fh.write("\n## Unparseable after decompile (parked/unparseable/)\n\nThese did not parse, which stops javac before it "
+                 "reports anything else; fix them by hand (or re-decompile with CFR) and move them back:\n"
+                 + "".join(f"- {f.relative_to(work).as_posix()}\n" for f in files))
+    return len(files)
+
+
 def gradle_count(work, log):
     """Compile the port's own source sets and count unique errors (burndown-count.sh refuses a run that never
     reached javac, which a bare grep would read as 0)."""
     srcsets, pg = _load("srcsets", "srcsets.py"), _load("port_gates", "port_gates.py")
     pg.compile_log(work, srcsets.compile_tasks(work), log)
+    for _ in range(3):
+        if not quarantine_unparseable(work, log):
+            break
+        pg.compile_log(work, srcsets.compile_tasks(work), log)
     r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     m = re.search(r"errors = (\d+)", r.stdout)
@@ -480,6 +517,19 @@ def self_check():
         ok &= calls[0] == "fix-access-transformer.py" and calls.count("fix-access-transformer.py") == 2
         ok &= calls.index("forge-shapes.py") < calls.index("convert-simplechannel.py") < calls.index("fix-holders.py")
         ok &= rep["errors"] == [30] and "fix-missing-members.py" in calls
+    with tempfile.TemporaryDirectory() as d:        # an unparseable file is set aside, a mass of them is not
+        w = pathlib.Path(d); j = w / "src/main/java/p"; j.mkdir(parents=True)
+        for i in range(12):
+            (j / f"C{i}.java").write_text("class C {}", encoding="utf-8")
+        log = w / "b.log"
+        log.write_text(f"{j / 'C3.java'}:13: error: enum constant expected here\n{j / 'C4.java'}:2: error: ';' expected\n",
+                       encoding="utf-8")
+        ok &= quarantine_unparseable(w, log) == 0      # 2 of 12 > a tenth: refused
+        ok &= (j / "C3.java").exists()
+        for i in range(12, 40):
+            (j / f"C{i}.java").write_text("class C {}", encoding="utf-8")
+        ok &= quarantine_unparseable(w, log) == 2 and not (j / "C3.java").exists() \
+            and (w / "parked/unparseable/src/main/java/p/C3.java").exists() and "C4.java" in (w / "MIGRATION.md").read_text()
     with tempfile.TemporaryDirectory() as d:        # a NeoGradle cache entry naming a deleted workspace is healed
         d = pathlib.Path(d)
         rel = ".gradle/repositories/ng_dummy_ng/net/minecraft/client/1.21.1/client-1.21.1-client-extra.jar"
