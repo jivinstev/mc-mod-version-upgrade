@@ -40,6 +40,8 @@ DEAD = ["net.neoforged.neoforge.network.NetworkEvent", "net.minecraftforge.netwo
         "java.util.function.Supplier", "net.minecraftforge.network.PacketDistributor",
         # Forge 1.20.2+ networking (ChannelBuilder / CustomPayloadEvent), as written and as the import codemod renamed it
         "net.minecraftforge.event.network.CustomPayloadEvent", "net.neoforged.neoforge.event.network.CustomPayloadEvent",
+        "net.minecraftforge.event.network.CustomPayloadEvent.Context",
+        "net.neoforged.neoforge.event.network.CustomPayloadEvent.Context",
         "net.minecraftforge.network.SimpleChannel", "net.neoforged.neoforge.network.SimpleChannel",
         "net.minecraftforge.network.ChannelBuilder", "net.neoforged.neoforge.network.ChannelBuilder",
         "net.minecraftforge.network.Channel", "net.neoforged.neoforge.network.Channel"]
@@ -216,7 +218,9 @@ def convert_handler(text, hname, flags, rel):
         if mt.name != hname or not mt.params:
             continue
         pt = fs.ptype(mt.params[-1])
-        direct = bool(re.fullmatch(r"(?:[\w.]+\.)?CustomPayloadEvent\.Context", pt))   # Forge 1.20.2+: no Supplier
+        # Forge 1.20.2+: no Supplier. Vineflower writes it bare (`handle(Context ctx)`) and imports the nested class.
+        direct = bool(re.fullmatch(r"(?:[\w.]+\.)?CustomPayloadEvent\.Context", pt)) or (
+            pt == "Context" and re.search(r"(?m)^import\s+[\w.]*\.CustomPayloadEvent\.Context\s*;", text) is not None)
         if not direct and not re.fullmatch(r"Supplier<\s*NetworkEvent\.Context\s*>", pt):
             continue
         cs = fs.pname(mt.params[-1])
@@ -696,12 +700,22 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
             "public class Skip {\n    public static Skip decode(FriendlyByteBuf buf) { return new Skip(); }\n"
             "    public void encode(FriendlyByteBuf buf) { }\n"
             "    public void handle(CustomPayloadEvent.Context context) { context.enqueueWork(() -> {}); }\n}\n", encoding="utf-8")
+        (p / "Skip2.java").write_text(
+            "package m;\nimport net.minecraft.network.FriendlyByteBuf;\nimport net.neoforged.neoforge.event.network.CustomPayloadEvent.Context;\n"
+            "public class Skip2 {\n    public static Skip2 decode(FriendlyByteBuf buf) { return new Skip2(); }\n"
+            "    public void encode(FriendlyByteBuf buf) { }\n    public void handle(Context context) { }\n}\n", encoding="utf-8")
+        nt = (p / "Net.java").read_text(encoding="utf-8").replace(".add();\n    }", ".add();\n        network.messageBuilder("
+              "Skip2.class, id++, NetworkDirection.PLAY_TO_CLIENT).encoder(Skip2::encode).decoder(Skip2::decode)"
+              ".consumerMainThread(Skip2::handle).add();\n    }", 1)
+        (p / "Net.java").write_text(nt, encoding="utf-8")
         r2, f2, _c = run(d, "m")
+        k2b = (p / "Skip2.java").read_text(encoding="utf-8")
         n2, k2 = (p / "Net.java").read_text(encoding="utf-8"), (p / "Skip.java").read_text(encoding="utf-8")
         ok2 = ("registrar.playToClient(Skip.TYPE, Skip.STREAM_CODEC, Skip::handle);" in n2
                and "PacketDistributor.sendToPlayer(player, packet);" in n2 and "CustomPacketPayload packet" in n2
                and "SimpleChannel" not in n2 and "public void handle(IPayloadContext context)" in k2
-               and "CustomPayloadEvent" not in k2 and not f2)
+               and "CustomPayloadEvent" not in k2 and not f2
+               and "public void handle(IPayloadContext context)" in k2b and "CustomPayloadEvent" not in k2b)
         if not ok2:
             print("self-check (1.20.2 shape):", f2, "\n" + n2 + "\n" + k2)
         ok = ok and ok2

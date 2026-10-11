@@ -6045,7 +6045,9 @@ parameter is `CustomPayloadEvent.Context` (static `(P, ctx)` or instance `(ctx)`
 retypes a send helper's `Object` message parameter to `CustomPacketPayload`, and drops the 1.20.2 imports.
 Seen in 4 swept mods (Forge 1.20.2-1.20.4 sources). On one mod's real network package: 4 packets, 4 handlers
 and its send converted, 0 flagged. Self-check fails against the old handler rule. A handler whose context shape is not recognised is now named in the flags instead of skipped
-without a word, which is how this one went unnoticed.
+without a word, which is how this one went unnoticed. ⚠ **And test on the pipeline's own decompiler:** the first fix was verified on a CFR
+decompile, which writes `CustomPayloadEvent.Context`; Vineflower imports the nested class and writes bare `Context`,
+so the real run converted 0 handlers. Both forms are accepted now, and the self-check carries one of each.
 
 **X96. NeoForge renamed the whole `IForgeX` extension family to `IXExtension`.** · **Pattern:**
 `IForgeMenuType.create(...)`, `implements IForgeItem`, `IForgeBlockState` · **Error:** `cannot find symbol:
