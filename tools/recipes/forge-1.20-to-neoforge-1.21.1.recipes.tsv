@@ -84,6 +84,11 @@ re:void defineSynchedData\(\)\s*\{	void defineSynchedData(net.minecraft.network.
 re:\bsuper\.defineSynchedData\(\)	super.defineSynchedData(builder)
 re:\bthis\.entityData\.define\(	builder.define(
 
+#@ X165 auto  Architectury on NeoForge has no EventBuses: NeoForge hands every mod its own bus, so the Forge-side
+#             registration call (and its import) is deleted
+re:[ \t]*\bEventBuses\.registerModEventBus\([^;]*\);[ \t]*\n	
+re:import dev\.architectury\.platform\.forge\.EventBuses;[ \t]*\n	
+
 #@ 98 auto  getDimensions is final; override getDefaultDimensions
 re:public EntityDimensions getDimensions\(Pose (\w+)\)	protected EntityDimensions getDefaultDimensions(Pose \1)
 re:\bsuper\.getDimensions\(	super.getDefaultDimensions(

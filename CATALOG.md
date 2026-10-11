@@ -6698,9 +6698,24 @@ the modifier a block `codec()`. Its error pattern now accepts only block bases (
 self-check feeds it the loot-modifier message.
 
 **X163. Forge's step-height attribute is vanilla's, and so is the registry codec getter.** `ForgeMod.STEP_HEIGHT_ADDITION`
-(an addition on top of 0.6) became NeoForge's... nothing: 1.20.5 made step height the vanilla `Attributes.STEP_HEIGHT`
+(an addition on top of 0.6) has no NeoForge successor: 1.20.5 made step height the vanilla `Attributes.STEP_HEIGHT`
 (base 0.6), and `NeoForgeMod` has no step attribute. The §36 group now maps both `STEP_HEIGHT_ADDITION` and
 `STEP_HEIGHT` reads (with or without the `(Attribute)` cast) to the vanilla holder, before the ForgeMod rename turns
 them into a name that does not exist. An ADD_VALUE modifier gives the same total either way. And a registry's
 `getCodec()` is `byNameCodec()` (§48), now a member-table row for `Registry` and `DefaultedRegistry`, applied only
 where javac says the owner is a registry.
+
+**X164. A mixin `@Inject` into `defineSynchedData` must take the Builder too (forge-shapes `syncinject`).** §26 fixes
+an entity's own override, but a mixin that adds synced data to a VANILLA entity injects at the tail of
+`defineSynchedData` with a `(CallbackInfo ci)` handler and calls `wolf.getEntityData().define(..)`. In 1.21 the target
+takes a `SynchedEntityData.Builder` and `entityData` is not assigned until after it returns (R8), so `define` is not
+there to call. The transform finds each `@Inject` whose `method` names `defineSynchedData`, gives the handler the
+Builder parameter ahead of its CallbackInfo (Mixin matches the target's parameters first), rewrites the body's
+`<entity>.getEntityData().define(`, `((T)(Object)this).getEntityData().define(` and `this.entityData.define(` to
+`builder.define(`, and updates a pinned `defineSynchedData()V` descriptor. Injects into other methods are untouched.
+Found on a wolf-variant mod; A/B'd (self-check FAIL with the transform removed).
+
+**X165. Architectury on NeoForge has no `EventBuses`.** Every Architectury mod's Forge entrypoint calls
+`EventBuses.registerModEventBus(MOD_ID, modEventBus)` so the common code can find the mod bus. The NeoForge build of
+Architectury dropped the class, because NeoForge gives each mod its bus directly. The recipe deletes the call and its
+`dev.architectury.platform.forge.EventBuses` import.

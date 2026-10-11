@@ -1258,10 +1258,44 @@ def t_lootmod(path, text, ctx, res):
     return text
 
 
+def t_syncinject(path, text, ctx, res):
+    """X164: a mixin @Inject into defineSynchedData. 1.21 passes a SynchedEntityData.Builder and the entity's own
+    entityData does not exist yet (R8), so the handler gains the Builder parameter and every
+    `<entity>.getEntityData().define(` / `this.entityData.define(` in its body becomes `builder.define(`. A pinned
+    `defineSynchedData()V` descriptor is updated too (§136: javac cannot see a mixin's parameters)."""
+    if "defineSynchedData" not in text or "@Inject" not in text:
+        return text
+    out, pos, n = [], 0, 0
+    for m in re.finditer(r"@Inject\s*\(", text):
+        if m.start() < pos:
+            continue
+        a1 = match(text, m.end() - 1)
+        if a1 < 0 or "defineSynchedData" not in text[m.start():a1]:
+            continue
+        h = re.compile(r"\s*(?:(?:private|public|protected|static|final)\s+)*void\s+\w+\s*\(\s*((?:final\s+)?CallbackInfo\s+\w+)\s*\)\s*\{").match(text, a1 + 1)
+        if not h:
+            continue
+        b1 = match(text, h.end() - 1)
+        if b1 < 0:
+            continue
+        ann = re.sub(r"defineSynchedData\(\)V", "defineSynchedData(Lnet/minecraft/network/syncher/SynchedEntityData$Builder;)V",
+                     text[m.start():a1 + 1])
+        head = text[a1 + 1:h.end()].replace(h.group(1), "net.minecraft.network.syncher.SynchedEntityData.Builder builder, " + h.group(1), 1)
+        body = re.sub(r"(?:\(\(\s*[\w.]+\s*\)\s*\(\s*Object\s*\)\s*this\)|\bthis|(?<![\w.])\w+)\s*\.\s*getEntityData\(\)\s*\.\s*define\("
+                      r"|\bthis\.entityData\.define\(", "builder.define(", text[h.end():b1])
+        out.append(text[pos:m.start()] + ann + head + body)
+        pos = b1
+        n += 1
+    if not n:
+        return text
+    res.count["syncinject"] += n
+    return "".join(out) + text[pos:]
+
+
 TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attrmod", t_attrmod), ("nbt", t_nbt), ("hooks", t_hooks),
               ("geo", t_geo), ("vc", t_vc), ("source", t_source),
               ("sigs", t_sigs), ("misc", t_misc), ("imagebutton", t_imagebutton),
-              ("effecthooks", t_effecthooks), ("lootmod", t_lootmod)]
+              ("effecthooks", t_effecthooks), ("lootmod", t_lootmod), ("syncinject", t_syncinject)]
 
 
 # --------------------------------------------------------------------------- menu screens (X141), cross-file
@@ -1470,6 +1504,32 @@ def main():
 # --------------------------------------------------------------------------- self-check
 
 CASES = [
+    ("syncinject", """package a;
+@Mixin({Wolf.class})
+public abstract class WolfEntityMixin {
+   @Inject(
+      method = {"defineSynchedData"},
+      at = {@At("TAIL")}
+   )
+   private void defineSynchedData(CallbackInfo ci) {
+      Wolf wolf = (Wolf)this;
+      wolf.getEntityData().define(VARIANT, "pale");
+      ((Wolf)(Object)this).getEntityData().define(SOUND, "classic");
+   }
+   @Inject(method = "defineSynchedData()V", at = @At("RETURN"))
+   private void more(CallbackInfo info) {
+      this.entityData.define(X, 1);
+   }
+   @Inject(method = "tick", at = @At("HEAD"))
+   private void tick(CallbackInfo ci) {
+      wolf.getEntityData().define(Y, 2);
+   }
+}
+""", ["private void defineSynchedData(net.minecraft.network.syncher.SynchedEntityData.Builder builder, CallbackInfo ci) {",
+      "builder.define(VARIANT, \"pale\");", "builder.define(SOUND, \"classic\");", "builder.define(X, 1);",
+      "defineSynchedData(Lnet/minecraft/network/syncher/SynchedEntityData$Builder;)V",
+      "private void more(net.minecraft.network.syncher.SynchedEntityData.Builder builder, CallbackInfo info)",
+      "wolf.getEntityData().define(Y, 2);"], []),
     ("lootmod", """package a;
 public class RingsLootModifier extends LootModifier {
    public static final Supplier<Codec<RingsLootModifier>> CODEC = Suppliers.memoize(() -> RecordCodecBuilder.create(inst -> codecStart(inst)
