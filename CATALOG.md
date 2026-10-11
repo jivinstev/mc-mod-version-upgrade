@@ -6364,3 +6364,11 @@ swaps the import in any file whose sends it rewrote. Same mod: `NetworkHooks.ope
 Its owner is now the class declared above the line in the source file, which the supertype walk then resolves
 (`LichEntity` → ... → `Entity`). Found by re-running the mod X107 was written for: 6 `teleportToWithTicket` and 4
 `getFeetBlockState` sites were still there.
+
+**X127. MCreator names every init class's register `REGISTRY`, and fix-holders looked registers up by name tree-wide.**
+`Index.regs` mapped field name → registry type across all files, so with `ModSounds.REGISTRY`, `ModEnchantments.REGISTRY`,
+... the last file read won: an enchantment holder came out `DeferredHolder<SoundEvent, Enchantment>`, which compiles to a
+confusing error instead of the real one and can mistype items or blocks the same way. Registers are now indexed per file:
+the declaring class's own field first, a tree-wide answer only when the name is unambiguous, otherwise a flag. Same mod:
+forge-shapes converted a `LivingTickEvent` handler but left Vineflower's nested import
+(`...LivingEvent.LivingTickEvent;`), which no longer resolves.

@@ -216,12 +216,25 @@ class Index:
     def __init__(self, src):
         self.src = pathlib.Path(src).resolve()
         self.files = {f: f.read_text(encoding="utf-8", errors="replace") for f in self.src.rglob("*.java")}
-        self.regs = {}            # DeferredRegister field name -> base type
-        for t in self.files.values():
+        # DeferredRegister field name -> base type, PER FILE: MCreator names every init class's register `REGISTRY`,
+        # so a tree-wide map keyed by the name alone answered with whichever file came last (X127: an enchantment
+        # holder typed DeferredHolder<SoundEvent, Enchantment>)
+        self.regs_by_file = {}
+        for f, t in self.files.items():
+            r = self.regs_by_file.setdefault(f, {})
             for m in re.finditer(r"DeferredRegister(?:\.\w+)?<\s*([\w.]+)\s*>\s+(\w+)\s*=", t):
-                self.regs[m.group(2)] = m.group(1).rsplit(".", 1)[-1]
+                r[m.group(2)] = m.group(1).rsplit(".", 1)[-1]
             for m in re.finditer(r"DeferredRegister\.(Items|Blocks)\s+(\w+)\s*=", t):
-                self.regs[m.group(2)] = m.group(1)[:-1]
+                r[m.group(2)] = m.group(1)[:-1]
+
+    def reg_base(self, f, name):
+        """The base type of register field `name` as seen from file `f`: its own field, else the one field of that
+        name in the tree when it is unambiguous, else None (the caller flags it)."""
+        own = self.regs_by_file.get(f, {})
+        if name in own:
+            return own[name]
+        found = {r[name] for r in self.regs_by_file.values() if name in r}
+        return found.pop() if len(found) == 1 else None
 
     def field_decl(self, owner, name):
         """(file, match) of `<Type> name = REG.register(` in class `owner`."""
@@ -360,7 +373,7 @@ def run(src, log_text, dry=False):
                 df, dm = idx.field_decl(owner, name)
                 if df is None:
                     continue
-                base = idx.regs.get(dm.group(3)) if dm.group(1) != "DeferredHolder" else None
+                base = idx.reg_base(df, dm.group(3)) if dm.group(1) != "DeferredHolder" else None
                 if dm.group(1) != "DeferredHolder" and not base:
                     continue
                 s0 = offset(f, ln, m.start()); edits[f].append((s0, s0 + (m.end() - m.start()), f"{owner}.{name}"))
@@ -400,7 +413,7 @@ def run(src, log_text, dry=False):
                     flags.append(f"{f.name}:{line} {e}: no registry field declaration found"); continue
                 edits[f].append((s0, s1, f"{owner + '.' if owner else ''}{name}"))
                 if dm.group(1) != "DeferredHolder":
-                    base = idx.regs.get(dm.group(3))
+                    base = idx.reg_base(df, dm.group(3))
                     if not base:
                         flags.append(f"{f.name}:{line} {e}: register target {dm.group(3)} has no DeferredRegister<T>")
                         continue
@@ -581,6 +594,16 @@ class Use {
         if not ok2:
             print("self-check X98:\n" + ef + us)
         ok = ok and ok2
+    with tempfile.TemporaryDirectory() as d:     # X127: two init classes, both with a register named REGISTRY
+        for nm, ty in (("ModSounds", "SoundEvent"), ("ModEnchantments", "Enchantment")):
+            (pathlib.Path(d) / f"{nm}.java").write_text(
+                f"class {nm} {{\n   public static final DeferredRegister<{ty}> REGISTRY = DeferredRegister.create(x, \"m\");\n}}\n",
+                encoding="utf-8")
+        ix = Index(d)
+        ench = pathlib.Path(d, "ModEnchantments.java").resolve()
+        if ix.reg_base(ench, "REGISTRY") != "Enchantment" or ix.reg_base(pathlib.Path(d, "Other.java").resolve(), "REGISTRY") is not None:
+            ok = False
+            print("self-check X127:", ix.reg_base(ench, "REGISTRY"))
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{out}")
     return 0 if ok else 1
 

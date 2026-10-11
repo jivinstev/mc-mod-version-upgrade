@@ -415,6 +415,10 @@ def t_tick(path, text, ctx, res):
         text = remove_import_if_unused(text, "net.neoforged.neoforge.event.TickEvent")
         text = remove_import_if_unused(text, "net.minecraftforge.event.TickEvent")
         text = remove_import_if_unused(text, "net.neoforged.neoforge.event.entity.living.LivingEvent")
+        # X127: Vineflower's nested form of the living tick event, which the rewrite above leaves unused
+        if not re.search(r"(?<![\w.])LivingTickEvent\b", re.sub(r"(?m)^import .*$", "", text)):
+            text = re.sub(r"(?m)^import\s+net\.(?:neoforged\.neoforge|minecraftforge)\.event\.entity\.living\.LivingEvent"
+                          r"\.LivingTickEvent\s*;[ \t]*\n", "", text)
     return text
 
 
@@ -1354,6 +1358,15 @@ public class M {
    public static CommonProxy PROXY = (CommonProxy)DistExecutor.runForDist(() -> ClientProxy::new, () -> CommonProxy::new);
 }
 """, ["(CommonProxy)(FMLEnvironment.dist == Dist.CLIENT ? new ClientProxy() : new CommonProxy());"], ["DistExecutor"]),
+    ("tick", """package a;
+import net.neoforged.neoforge.event.entity.living.LivingEvent.LivingTickEvent;
+class L {
+    @SubscribeEvent
+    public static void onTick(LivingTickEvent event) {
+        event.getEntity().heal(1.0F);
+    }
+}
+""", ["onTick(EntityTickEvent.Pre event)"], ["LivingTickEvent"]),
     ("modctor", """package a;
 import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
 @Mod(MyMod.MOD_ID)
