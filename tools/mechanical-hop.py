@@ -178,6 +178,8 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
                 if _rc:   # X166: a table that does not load must stop the hop, not read as "0 renamed"
                     raise RuntimeError(f"fix-missing-members failed on {members_table}: {(o or '').strip().splitlines()[-1:]}")
                 got += sum(int(x) for x in re.findall(r"(\d+) site\(s\) rewritten", o))
+                for cnt, row in re.findall(r"(?m)^\s+(\d+)\s+(\w+\.\w+)\s*$", o or ""):
+                    say(f"  member-row: {row} {cnt}")    # per-row hits, for measuring how many mods a row serves
             fixed += got
             if not got:
                 break
@@ -380,6 +382,9 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
             if mrc:
                 raise RuntimeError(f"fix-missing-members failed on {FORGE_MEMBERS}: {(mo or '').strip().splitlines()[-1:]}")
         mouts = [mo for _, mo in mruns]
+        for mo in mouts:
+            for cnt, row in re.findall(r"(?m)^\s+(\d+)\s+(\w+\.\w+)\s*$", mo or ""):
+                say(f"  member-row: {row} {cnt}")
         rep.setdefault("members", []).extend(mouts)
         # X147: a concrete subclass of an abstract vanilla block must implement codec() since 1.20.3
         couts = [run("fix-block-codecs.py", "--src", d, "--log", log)[1] for d in dirs]
