@@ -218,6 +218,13 @@ def cmd_resolve_modid(args):
             toml_txt = z.read("META-INF/mods.toml").decode("utf-8", "replace")
         if toml_txt:
             info["modIds"] = re.findall(r"""^\s*modId\s*=\s*["']([^"'\n]+)["']""", toml_txt, re.M)
+            try:                       # inline `mods = [ { modId = ... } ]` is legal TOML too
+                import tomllib
+                d = tomllib.loads(toml_txt)
+                own = [m["modId"] for m in d.get("mods", []) if isinstance(m, dict) and isinstance(m.get("modId"), str)]
+                info["modIds"] = own + [x for x in info["modIds"] if x not in own]
+            except Exception:  # noqa: BLE001
+                pass
             # first minecraft dependency versionRange, if any
             mrange = re.search(r"""modId\s*=\s*["']minecraft["'].*?versionRange\s*=\s*["']([^"'\n]+)["']""",
                                toml_txt, re.S)

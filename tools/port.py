@@ -135,6 +135,21 @@ def resolve(query, target, providers=("modrinth", "curseforge")):
     return best[0], best[1], v
 
 
+def parse_mods_toml(text):
+    """(mods, deps) from a mods.toml / neoforge.mods.toml with a real TOML parser: [[mods]] blocks and the
+    `mods = [ { modId = ... } ]` inline form are both legal, and single quotes too. None when it does not parse
+    (callers keep their regex reading). mods: [dict]; deps: [(owner, dict)]."""
+    try:
+        import tomllib
+        d = tomllib.loads(text)
+    except Exception:  # noqa: BLE001 -- unparseable (a template placeholder, a typo): the regex path reads it
+        return None
+    mods = [m for m in d.get("mods", []) if isinstance(m, dict)]
+    deps = [(owner, x) for owner, lst in (d.get("dependencies") or {}).items() if isinstance(lst, list)
+            for x in lst if isinstance(x, dict)]
+    return mods, deps, d
+
+
 def read_jar_meta(jar):
     """mods.toml / neoforge.mods.toml / fabric.mod.json fields we carry into the scaffold."""
     meta = {"deps": [], "mixins": []}
@@ -143,22 +158,39 @@ def read_jar_meta(jar):
         toml = next((n for n in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml") if n in names), None)
         if toml:
             t = z.read(toml).decode("utf-8", "replace")
-            mods = t.split("[[mods]]", 1)[1].split("[[", 1)[0] if "[[mods]]" in t else t
+            parsed = parse_mods_toml(t)
+            if parsed and parsed[0]:            # a real TOML parse: [[mods]] or inline tables, either quote
+                m0 = parsed[0][0]
+                for k in ("modId", "version", "displayName", "authors", "description"):
+                    v = m0.get(k)
+                    meta[k] = v.strip() if isinstance(v, str) else None
+                lic = parsed[2].get("license")
+                meta["license"] = lic if isinstance(lic, str) else None
+                for _owner, x in parsed[1]:
+                    dep = x.get("modId")
+                    if dep in (None, "forge", "neoforge", "minecraft"):
+                        continue
+                    req = x.get("mandatory") is True or str(x.get("type", "")).lower() == "required"
+                    meta["deps"].append({"modId": dep, "required": req})
+                meta["mixins"] = [m.get("config") for m in parsed[2].get("mixins", [])
+                                  if isinstance(m, dict) and isinstance(m.get("config"), str)]
+            else:
+                mods = t.split("[[mods]]", 1)[1].split("[[", 1)[0] if "[[mods]]" in t else t
 
-            def field(k, src):
-                m = re.search(rf'^\s*{k}\s*=\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')', src, re.S | re.M) or \
-                    re.search(rf'^\s*{k}\s*=\s*"([^"\n]*)"', src, re.M) or re.search(rf"^\s*{k}\s*=\s*'([^'\n]*)'", src, re.M)
-                return m.group(1).strip() if m else None
-            for k in ("modId", "version", "displayName", "authors", "description"):
-                meta[k] = field(k, mods)
-            meta["license"] = field("license", t)
-            for blk in re.split(r"\[\[dependencies\.[^\]]+\]\]", t)[1:]:
-                dep = field("modId", blk)
-                if dep in (None, "forge", "neoforge", "minecraft"):
-                    continue
-                mandatory = re.search(r'^\s*mandatory\s*=\s*true', blk, re.M) or re.search(r'^\s*type\s*=\s*"required"', blk, re.M)
-                meta["deps"].append({"modId": dep, "required": bool(mandatory)})
-            meta["mixins"] = re.findall(r'config\s*=\s*"([^"]+\.json)"', t)
+                def field(k, src):
+                    m = re.search(rf'^\s*{k}\s*=\s*(?:"""|\'\'\')(.*?)(?:"""|\'\'\')', src, re.S | re.M) or \
+                        re.search(rf'^\s*{k}\s*=\s*"([^"\n]*)"', src, re.M) or re.search(rf"^\s*{k}\s*=\s*'([^'\n]*)'", src, re.M)
+                    return m.group(1).strip() if m else None
+                for k in ("modId", "version", "displayName", "authors", "description"):
+                    meta[k] = field(k, mods)
+                meta["license"] = field("license", t)
+                for blk in re.split(r"\[\[dependencies\.[^\]]+\]\]", t)[1:]:
+                    dep = field("modId", blk)
+                    if dep in (None, "forge", "neoforge", "minecraft"):
+                        continue
+                    mandatory = re.search(r'^\s*mandatory\s*=\s*true', blk, re.M) or re.search(r'^\s*type\s*=\s*"required"', blk, re.M)
+                    meta["deps"].append({"modId": dep, "required": bool(mandatory)})
+                meta["mixins"] = re.findall(r'config\s*=\s*"([^"]+\.json)"', t)
         meta["mixins"] = sorted(set(meta["mixins"]) | {n for n in names if n.endswith(".mixins.json") and "/" not in n})
         if "fabric.mod.json" in names:
             f = json.loads(z.read("fabric.mod.json").decode("utf-8", "replace"))
@@ -789,6 +821,11 @@ def jar_toml(jar):
             text = z.read(name).decode("utf-8", "replace") if name else ""
     except (OSError, zipfile.BadZipFile):
         return set(), None
+    parsed = parse_mods_toml(text)
+    if parsed:
+        own = {m["modId"] for m in parsed[0] if isinstance(m.get("modId"), str)}
+        rng = next((x.get("versionRange") for _o, x in parsed[1] if x.get("modId") == "minecraft"), None)
+        return own, rng
     text = re.sub(r"#[^\n]*", "", text)
     own, rng = set(), None
     for block in re.split(r"(?m)^\s*\[\[", text)[1:]:
@@ -1154,6 +1191,14 @@ def self_check():
         ok &= hard_optional_deps(pathlib.Path(d, "h.jar"), [{"modId": "curios", "required": False},
                                                             {"modId": "jei", "required": False},
                                                             {"modId": "caelus", "required": False}]) == ["curios"]
+    with _tf.TemporaryDirectory() as d:
+        with zipfile.ZipFile(f"{d}/i.jar", "w") as z:
+            z.writestr("META-INF/mods.toml", "modLoader = 'lowcodefml'\nmods = [\n\t{ modId = 'inl', version = '1.1' },\n]\n"
+                       "[[dependencies.inl]]\nmodId='minecraft'\nmandatory=true\nversionRange='[1.20.1]'\n"
+                       "[[dependencies.inl]]\nmodId='lib'\nmandatory=true\n")
+        m = read_jar_meta(pathlib.Path(d, "i.jar"))
+        ok &= m["modId"] == "inl" and m["version"] == "1.1" and m["deps"] == [{"modId": "lib", "required": True}]
+        ok &= jar_toml(pathlib.Path(d, "i.jar")) == ({"inl"}, "[1.20.1]")
     ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
     with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
