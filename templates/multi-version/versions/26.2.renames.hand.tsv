@@ -514,6 +514,10 @@ re:\bBlocks\.CHAIN\b	Blocks.IRON_CHAIN
 # unique enough anchor to make the non-greedy capture safe over an argument list that itself
 # contains parentheses (`X::new, FOO.get()`).
 re:BlockEntityType\s*\.Builder\s*\.of\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*\.build\(null\)	new BlockEntityType<>(\1)
+# X111: Vineflower imports the nested class and writes it BARE (`import ...BlockEntityType.Builder;` +
+# `Builder.of(...).build(null)`); `.build(null)` still anchors it -- EntityType.Builder.build takes a key.
+re:(?<![\w$.])Builder\s*\.of\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*\.build\(null\)	new net.minecraft.world.level.block.entity.BlockEntityType<>(\1)
+re:(?m)^import net\.minecraft\.world\.level\.block\.entity\.BlockEntityType\.Builder;[ \t]*\n	
 
 # --- Entity.getTags() -> entityTags() ----------------------------------------------------
 # Renamed to stop colliding with EntityType.getTags()/Registry.getTags(), which return TAG
@@ -1139,4 +1143,8 @@ BlockEvent.BreakEvent	net.neoforged.neoforge.event.level.block.BreakBlockEvent
 # layer is chosen per quad from the sprite's own alpha (ChunkSectionLayer.byTransparency). The call is left as a comment.
 re:(?m)^([ \t]*)(ItemBlockRenderTypes\.setRenderLayer\([^;\n]*\);)	\1// 26.2 (X108): the chunk layer follows the sprite's transparency; dropped: \2
 re:(?m)^import net\.minecraft\.client\.renderer\.ItemBlockRenderTypes;[ \t]*\n	
+# X111: net.minecraft.MethodsReturnNonnullByDefault / FieldsAreNonnullByDefault are gone on 26.2 (no class in the jar);
+# they were nullness hints for tooling, so a package-info or class that carries one just loses it.
+re:(?m)^[ \t]*@(?:net\.minecraft\.)?(?:MethodsReturnNonnullByDefault|FieldsAreNonnullByDefault)\b[ \t]*\n?	
+re:(?m)^import net\.minecraft\.(?:MethodsReturnNonnullByDefault|FieldsAreNonnullByDefault);[ \t]*\n	
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----

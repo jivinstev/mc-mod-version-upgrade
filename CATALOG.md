@@ -6218,3 +6218,16 @@ X101 is the same rule for the mod's own bundled jars; this one is one level out.
 `java.time.Duration` (an int literal becomes `Duration.ofMillis(n)`), and `Screen.renderDirtBackground(GuiGraphics)` is
 gone; its place is `renderMenuBackground(GuiGraphics)` (the textured menu background that replaced dirt). Both checked
 in the 21.1 jar; both rows.
+
+**X111. The vanilla container block entity has a direct 26.2 form, and the persistence converter refused it.** ·
+**Pattern:** the `RandomizableContainerBlockEntity` save/load every chest-like block copies --
+`super.saveAdditional(t, p); if (!this.trySaveLootTable(t)) ContainerHelper.saveAllItems(t, this.items, p);` and the load
+twin with `NonNullList.withSize(n, ItemStack.EMPTY)` · **Symptom:** `convert-valueio` refused both methods ("`ContainerHelper` /
+`ItemStack` in the body"), leaving a cascade of `CompoundTag cannot be converted to ValueOutput` · **Fix:** 26.2 has the
+exact counterparts (checked in the jar): `ContainerHelper.saveAllItems(ValueOutput, items)` / `loadAllItems(ValueInput,
+items)` -- the provider argument goes -- and `trySaveLootTable(ValueOutput)` / `tryLoadLootTable(ValueInput)` take the new
+type as they are. The converter now rewrites those calls when their first argument is the method's own tag, and lets
+`ItemStack.EMPTY` through; anything else that touches a stack is still refused. · **Same mod, two rename rows:**
+Vineflower writes `BlockEntityType.Builder.of(...).build(null)` BARE (`Builder.of`, nested import), which the qualified
+row could not see; and `net.minecraft.MethodsReturnNonnullByDefault` / `FieldsAreNonnullByDefault` no longer exist on
+26.2, so the annotations (usually on a package-info) are dropped.

@@ -119,11 +119,37 @@ def convert_persistence(text, m, kind, arity):
     open_, close = m.body_open + 1, m.body_close
     body = text[open_:close]
     masked = ni.code_spans(body)
-    mm = NESTED.search(masked)
+    # X111: the vanilla container shape has a direct ValueOutput/ValueInput form on 26.2 --
+    # ContainerHelper.saveAllItems/loadAllItems(tag, items[, provider]) lose the provider, and
+    # RandomizableContainer.trySaveLootTable/tryLoadLootTable(tag) take the new type as they are.
+    pre_handled, pre_edits = [], []
+    for hm in re.finditer(r"(?<![\w$.])(?:ContainerHelper\s*\.\s*(saveAllItems|loadAllItems)"
+                          r"|(?:this\s*\.\s*)?(trySaveLootTable|tryLoadLootTable))\s*\(", masked):
+        helper = hm.group(1) or hm.group(2)
+        if helper not in ({"saveAllItems", "trySaveLootTable"} if kind == "save" else {"loadAllItems", "tryLoadLootTable"}):
+            continue
+        pc = fs.match(masked, hm.end() - 1)
+        args = [a.strip() for a in fs.split_args(body[hm.end():pc])]
+        if not args or args[0] != t:
+            continue
+        if hm.group(1):
+            if prov and len(args) >= 3 and args[-1] == prov:
+                cut = body.rindex(",", hm.end(), pc)
+                pre_edits.append((cut, pc, ""))
+            elif prov or len(args) not in (2, 3):
+                continue
+        elif len(args) != 1:
+            continue
+        pre_handled.append((hm.start(), pc + 1))
+    scan = masked
+    for a, b in pre_handled:
+        scan = scan[:a] + " " * (b - a) + scan[b:]
+    scan = re.sub(r"(?<![\w$.])ItemStack\s*\.\s*EMPTY\b", lambda x: " " * len(x.group(0)), scan)
+    mm = NESTED.search(scan)
     if mm:
         return None, ("nested", f"`{mm.group(1)}` in the body; {V31}")
-    edits = []                                                      # (start, end, replacement) relative to body
-    handled = []                                                    # spans of rewritten super calls
+    edits = list(pre_edits)                                         # (start, end, replacement) relative to body
+    handled = list(pre_handled)                                     # spans of rewritten super calls / helpers
     for sm in re.finditer(r"(?<![\w$.])super\s*\.\s*(\w+)\s*\(", masked):
         if sm.group(1) != m.name:
             continue
@@ -499,6 +525,17 @@ def self_check():
     o2 = convert_text(small)[0]
     if "CompoundTag" in o2 or "HolderLookup" in o2 or "import net.minecraft.world.level.storage.ValueOutput;" not in o2:
         miss.append(f"imports not tidied:\n{o2}")
+    box = ('package b;\nclass Box extends RandomizableContainerBlockEntity {\n'
+           '    protected void saveAdditional(CompoundTag t, HolderLookup.Provider p) {\n        super.saveAdditional(t, p);\n'
+           '        if (!this.trySaveLootTable(t)) { ContainerHelper.saveAllItems(t, this.items, p); }\n    }\n'
+           '    protected void loadAdditional(CompoundTag t, HolderLookup.Provider p) {\n        super.loadAdditional(t, p);\n'
+           '        this.items = NonNullList.withSize(9, ItemStack.EMPTY);\n'
+           '        if (!this.tryLoadLootTable(t)) { ContainerHelper.loadAllItems(t, this.items, p); }\n    }\n}\n')
+    o3 = convert_text(box)[0]      # X111: the vanilla container shape converts
+    for w in ("saveAdditional(ValueOutput t)", "ContainerHelper.saveAllItems(t, this.items);",
+              "loadAdditional(ValueInput t)", "ContainerHelper.loadAllItems(t, this.items);", "this.tryLoadLootTable(t)"):
+        if w not in o3:
+            miss.append(f"container shape: {w!r} missing:\n{o3}")
     with tempfile.TemporaryDirectory() as d:
         p = pathlib.Path(d) / "Thing.java"
         p.write_text(FIXTURE, encoding="utf-8")
