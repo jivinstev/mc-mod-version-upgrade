@@ -48,6 +48,15 @@ re:(getCooldowns\(\)\s*\.\s*removeCooldown\(\s*)(this|[\w.]+\.get\(\)|Items\.\w+
 re:(\.teleportTo\(\s*)(?=[^,]*(?:[Ll]evel|[Ww]orld|[Dd]im|[Ss]erver))((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	\1\2, \3, \4, \5, java.util.Set.of(), \6, \7, true)
 re:(\.teleportTo\(\s*)(?=[^,]*(?:[Ll]evel|[Ww]orld|[Dd]im|[Ss]erver))((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?=[^,]*(?:Set|Relative|Movement))(?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	\1\2, \3, \4, \5, \6, \7, \8, true)
 
+# -- X160 (26.2 sources): LivingEntity.knockback(power, x, z) takes the DamageSource and damage that caused it. The
+# -- base body uses neither, but an override does (SulfurCube reads source.getEntity()), so not null: the receiver's
+# -- own generic source, damage 0.
+re:(?<![\w$.])((?:this|[\w$]+)(?:\.[\w$]+(?:\(\))?)*)\.knockback\(\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	\1.knockback(\2, \3, \4, \1.damageSources().generic(), 0.0F)
+# -- X160: BlockState.getOffset(level, pos) -> getOffset(pos) (the offset function no longer reads the level)
+re:\.getOffset\(\s*(?:this\.)?(?:level|world|getter|reader|blockGetter|levelReader|\w+\.level\(\)|level\(\))\s*,\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	.getOffset(\1)
+# -- X160: EventHooks.canEntityGrief takes a ServerLevel on 26.x; a client level answers false (no client-side grief)
+re:(?<![\w.])EventHooks\.canEntityGrief\(\s*(?!_griefLevel\b)([\w$.()]+?)\s*,\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	(\1 instanceof net.minecraft.server.level.ServerLevel _griefLevel && net.neoforged.neoforge.event.EventHooks.canEntityGrief(_griefLevel, \2))
+
 #!strict` WITH A REASON.
 #     A warning that is never zero is decoration.
 #
