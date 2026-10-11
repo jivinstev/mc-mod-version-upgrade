@@ -165,6 +165,18 @@ def cmd_versions(args):
            **result})
 
 
+def cmd_files(args):
+    """Every file of a project, newest first, with its declared loaders and Minecraft versions (a caller that found
+    the chosen file mislabelled looks here for the build that really is its loader)."""
+    prov = providers.get_provider(args.provider)
+    files = prov.list_files(args.id)
+    if args.mc:
+        files = [f for f in files if args.mc in (f.get("mcs") or [])]
+    files.sort(key=lambda f: f.get("datePublished") or "", reverse=True)
+    _emit({"provider": args.provider, "id": args.id, "files": [
+        {k: f.get(k) for k in ("fileId", "fileName", "loaders", "mcs", "datePublished")} for f in files]})
+
+
 def cmd_deps(args):
     prov = providers.get_provider(args.provider)
     deps = prov.file_deps(args.id, args.file)
@@ -297,6 +309,12 @@ def main():
     v.add_argument("--loader", default=DEFAULT_LOADER)
     v.add_argument("--mc", default=DEFAULT_MC)
     v.set_defaults(func=cmd_versions)
+
+    fl = sub.add_parser("files")
+    fl.add_argument("--provider", required=True)
+    fl.add_argument("--id", required=True)
+    fl.add_argument("--mc", default=None, help="only files declaring this Minecraft version")
+    fl.set_defaults(func=cmd_files)
 
     d = sub.add_parser("deps")
     d.add_argument("--provider", required=True)

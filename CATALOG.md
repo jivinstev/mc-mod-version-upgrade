@@ -5970,3 +5970,11 @@ net.minecraft.world.entity.vehicle.Boat *()` (every method of `Boat`) · **Sympt
 each protected override in `ChestBoat`, and the override loop, which matched only named members, found nothing to add
 and stopped the stage · **Fix:** for a base class widened by a method wildcard, each conflicting subclass gets the
 same wildcard (`public …ChestBoat *()`).
+
+**X89. A mislabelled upload: look at the project's other files before stopping.** · **Pattern:** a registry file tagged
+`fabric, forge, neoforge` whose jar is Fabric (`fabric.mod.json`, intermediary names) · **Symptom:** the port stops
+with "no recipe pack for fabric → neoforge", though the project might ship a real Forge jar for the same version ·
+**Fix:** on such a mislabel, `port.py` lists the project's other files for that Minecraft version (`modreg.py files`),
+downloads up to four tagged forge/neoforge, and restarts on the first whose jar is (Neo)Forge. Measured honestly: in
+the three mislabelled projects seen so far every "Forge" file was Fabric too (one author uploads only Fabric jars,
+under every label), so the stop stands — it is now a verified stop rather than a guess.

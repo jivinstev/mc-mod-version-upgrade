@@ -659,6 +659,7 @@ def parse_ver(v):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("mod", nargs="?", help="a mod's exact name on Modrinth/CurseForge, or a path to its jar")
+    ap.add_argument("--relabel-tried", dest="_relabel_tried", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--to", default="1.21.1", help="target Minecraft version (NeoForge): 1.21.1 or 26.2")
     ap.add_argument("--mods-dir", default=str(ROOT / "mods")); ap.add_argument("--jars-dir")
     ap.add_argument("--budget", type=float, default=15.0, help="compile-loop dollars per hop")
@@ -796,6 +797,14 @@ def main():
     listed = ((info.get("source") or {}).get("chosen") or {}).get("loader")
     if listed and listed != loader and not (listed == "neoforge" and loader == "forge"):
         say(f"note: the registry lists this file as a {listed} build, but the jar itself is {loader} (a mislabelled upload)")
+    if nopack and listed and listed != loader and not local.is_file() and not getattr(a, "_relabel_tried", False):
+        # the registry listed this file as a loader the jar is not (a Fabric jar tagged forge+neoforge): another file of
+        # the same project and Minecraft version may really be that loader -- try it before stopping (X89)
+        better = true_loader_file(info["source"], src_mc, jars, say)
+        if better:
+            say(f"source: {jar.name} is {loader}, not {listed}; using {better.name}, which is")
+            return os.execv(sys.executable, [sys.executable, str(pathlib.Path(__file__).resolve()), str(better)]
+                            + [x for x in sys.argv[1:] if x != a.mod] + ["--relabel-tried"])
     if nopack and not a.allow_no_pack:
         return stop(22, f"no recipe pack for {', '.join(h['from'] + ' -> ' + h['to'] for h in nopack)}: the workers would do that whole hop"
                     + (f" (the registry calls this file {listed}; the jar is {loader})" if listed and listed != loader else ""),
@@ -967,6 +976,28 @@ def loader_families(jar, at_least=2):
                     if any(p in b for p in pats):
                         hits[fam] += 1
     return {f for f, k in hits.items() if k >= at_least}
+
+
+def true_loader_file(source, mc, jars, say=print, tries=4):
+    """Another file of the same project and Minecraft version whose JAR is Forge or NeoForge, when the chosen one was a
+    mislabelled upload. -> a downloaded jar path, or None"""
+    prov, pid, bad = source.get("provider"), source.get("id"), str(source.get("fileId"))
+    if not prov or not pid:
+        return None
+    rc, fl = modreg("files", "--provider", prov, "--id", str(pid), "--mc", mc)
+    cands = [f for f in fl.get("files", []) if str(f.get("fileId")) != bad
+             and set(f.get("loaders") or []) & {"forge", "neoforge"}][:tries]
+    for f in cands:
+        jars.mkdir(parents=True, exist_ok=True)
+        modreg("download", "--provider", prov, "--id", str(pid), "--file", str(f["fileId"]), "--out", str(jars) + "/", timeout=600)
+        j = jars / f["fileName"]
+        if not j.exists():
+            continue
+        with zipfile.ZipFile(j) as z:
+            names = set(z.namelist())
+        if names & {"META-INF/mods.toml", "META-INF/neoforge.mods.toml"} and "fabric" not in loader_families(j):
+            return j
+    return None
 
 
 def kotlin_share(jar):
