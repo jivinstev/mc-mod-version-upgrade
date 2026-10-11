@@ -305,7 +305,8 @@ def era_access_transformer(repo, moves, run=run_tool):
 
 
 FORGE_STEPS = [("shapes", "forge-shapes.py"), ("net", "convert-simplechannel.py"), ("vars", "convert-mcreator-variables.py"),
-               ("overlays", "convert-gui-overlays.py"), ("caps", "convert-capabilities.py")]
+               ("overlays", "convert-gui-overlays.py"), ("caps", "convert-capabilities.py"),
+               ("paintings", "convert-paintings.py")]
 
 
 FORGE_MEMBERS = "tools/recipes/forge-1.21.1-members.tsv"

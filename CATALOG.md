@@ -6627,3 +6627,11 @@ only flagged it. `normalise_helper_channel` now rewrites it into the shape the c
 On Blood Magic it converts all 16 packets, the registration and 11 sends. Two send targets are new on the way:
 DIMENSION with a bare `ResourceKey<Level>` (the server's level for it) and TRACKING_CHUNK (the chunk's level and
 pos).
+
+**X155. Painting variants are a datapack registry in 1.21 (`tools/convert-paintings.py`, Forge stage `paintings`).**
+A 1.20 mod registers `REGISTRY.register("album", () -> new PaintingVariant(32, 16))` with sizes in PIXELS; 6 swept
+mods do. 1.21 has nothing to register in code: a DeferredRegister on it never fires, the record takes an asset id, and
+sizes are in BLOCKS. Each such field becomes `data/<ns>/painting_variant/<name>.json`
+(`{"asset_id": "<ns>:<name>", "width": w/16, "height": h/16}`) plus an entry in `#minecraft:placeable`, which is what
+lets a player place it; 1.20 placed every registered variant. The texture stays at `textures/painting/<name>.png`. The
+Java field is deleted, unless something still reads it: that one is listed and kept.
