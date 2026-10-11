@@ -1021,6 +1021,12 @@ def main():
     return 0
 
 
+
+def _touch(log):
+    """A self-check's fake compile still leaves a log, as a real one does: the tools that read it must not crash (X166)."""
+    pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(log).touch()
+
 def self_check():
     """The two stages that must never pass wrongly: licence (first) and provenance (last)."""
     import tempfile, types
@@ -1202,7 +1208,7 @@ def self_check_targets():
         (r / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.172\ngeckolib_version=4.7.1\n", encoding="utf-8")
         asked = []
         c = {"repo": r, "args": types.SimpleNamespace(provide=None), "dir": r, "state": {}, "target": t2}
-        with patched(compile_count=lambda repo, log: (1500, "errors = 1500"), claude=lambda *a, **k: asked.append(a) or ("", 0.25),
+        with patched(compile_count=lambda repo, log: _touch(log) or (1500, "errors = 1500"), claude=lambda *a, **k: asked.append(a) or ("", 0.25),
                      raise_neo_floor=lambda c: False):
             res = st_build(c)
         chk("26.2 build: deterministic, no model", not asked and res["usd"] == 0 and res["first_count"] == 1500
@@ -1215,7 +1221,7 @@ def self_check_targets():
             calls.append(prompt)
             (r / "build.gradle").write_text((r / "build.gradle").read_text(encoding="utf-8").replace("of(21)", "of(25)"), encoding="utf-8")
             return "", 0.5
-        with patched(compile_count=lambda repo, log: (1500, "errors = 1500"), claude=fix, raise_neo_floor=lambda c: False,
+        with patched(compile_count=lambda repo, log: _touch(log) or (1500, "errors = 1500"), claude=fix, raise_neo_floor=lambda c: False,
                      bump_build_files=lambda c: []):
             res = st_build(c2)
         chk("26.2 build: the model is asked only what the post-check names", len(calls) == 1 and "Java toolchain must be 25" in calls[0]
@@ -1236,7 +1242,7 @@ def self_check_targets():
         c = {"repo": r, "args": types.SimpleNamespace(modid="m", base="HEAD", lib_tree=None, render_state_type=None,
              render_state_factory=None, shader_block=None), "dir": w, "state": {}, "target": t2}
         import contextlib, io
-        with patched(compile_count=lambda repo, log: (next(counts), "x"), at_loop=lambda c: 700,
+        with patched(compile_count=lambda repo, log: _touch(log) or (next(counts), "x"), at_loop=lambda c: 700,
                      era_maps=lambda c: (mv, cv, "cached")), contextlib.redirect_stdout(io.StringIO()):
             rep = mechanical_era(c)
         a_bytes = (java / "A.java").read_bytes()

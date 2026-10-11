@@ -175,6 +175,8 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
             got = 0
             for d in dirs:
                 _rc, o = run("fix-missing-members.py", "--src", d, "--log", log, "--table", members_table)
+                if _rc:   # X166: a table that does not load must stop the hop, not read as "0 renamed"
+                    raise RuntimeError(f"fix-missing-members failed on {members_table}: {(o or '').strip().splitlines()[-1:]}")
                 got += sum(int(x) for x in re.findall(r"(\d+) site\(s\) rewritten", o))
             fixed += got
             if not got:
@@ -372,8 +374,12 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
         counts.append(n)
         outs = [run("fix-holders.py", "--src", d, "--log", log, "--sites", 0)[1] for d in dirs]
         # the owner-resolved member renames (X73): javac names the owner, so a same-named member elsewhere is safe
-        mouts = [run("fix-missing-members.py", "--src", d, "--log", log, "--table", ROOT / FORGE_MEMBERS)[1]
+        mruns = [run("fix-missing-members.py", "--src", d, "--log", log, "--table", ROOT / FORGE_MEMBERS)
                  for d in dirs] if (ROOT / FORGE_MEMBERS).exists() else []
+        for mrc, mo in mruns:     # X166: a table that does not load must stop the stage, not read as "0 rewritten"
+            if mrc:
+                raise RuntimeError(f"fix-missing-members failed on {FORGE_MEMBERS}: {(mo or '').strip().splitlines()[-1:]}")
+        mouts = [mo for _, mo in mruns]
         rep.setdefault("members", []).extend(mouts)
         # X147: a concrete subclass of an abstract vanilla block must implement codec() since 1.20.3
         couts = [run("fix-block-codecs.py", "--src", d, "--log", log)[1] for d in dirs]

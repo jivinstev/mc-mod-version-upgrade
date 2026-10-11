@@ -41,6 +41,7 @@ DefaultedRegistry	getValue	get
 Registry	getCodec	byNameCodec
 DefaultedRegistry	getCodec	byNameCodec
 # X157: food is a data component; an Item is edible when its default components carry one
-Item	isEdible	{recv}.components().has(net.minecraft.core.component.DataComponents.FOOD)
+Item	isEdible	{recv}.components().has(net.minecraft.core.component.DataComponents.FOOD){()}
+ItemStack	isEdible	{recv}.has(net.minecraft.core.component.DataComponents.FOOD){()}
 # X157: item tags are components now
 ItemStack	isSameItemSameTags	isSameItemSameComponents

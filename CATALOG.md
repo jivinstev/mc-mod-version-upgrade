@@ -6719,3 +6719,16 @@ Found on a wolf-variant mod; A/B'd (self-check FAIL with the transform removed).
 `EventBuses.registerModEventBus(MOD_ID, modEventBus)` so the common code can find the mod bus. The NeoForge build of
 Architectury dropped the class, because NeoForge gives each mod its bus directly. The recipe deletes the call and its
 `dev.architectury.platform.forge.EventBuses` import.
+
+**X166. A member table that does not load must stop the hop, and it had not been loading.** `fix-missing-members`
+refuses a `{recv}` template ending in its own call (X73), and it refuses it by raising at TABLE LOAD -- so one bad row
+made the tool exit 1 for every call. mechanical-hop threw that exit code away and counted the output's
+`N site(s) rewritten`, of which there were none: the run read as "0 renamed". The Forge table carried such a row from
+X157 (`Item.isEdible`) and the 26.2 table from X158 (`Item.getDescription`, `ItemStack.getFoodProperties`), so every
+owner-resolved member rename on both hops was inert for the mods swept since, and their counts are high by that much.
+Found when a static `ItemStack.isSameItemSameTags` call survived with its row in the table. Fixes: the rows end in
+`{()}`, and a new `{(..)}` token consumes the original call whatever its arguments (`getFoodProperties(entity)` ->
+`get(FOOD)`); a non-zero exit from the fixer now raises in both of mechanical-hop's loops; `test-port-tools.sh`
+loads every `*members*.tsv` and checks that a broken one exits non-zero. Raising also exposed port-upstream's
+self-check, whose fake compiles never wrote the log the fixer reads -- a crash that had read as success there too.
+`ItemStack.isEdible` -> `has(FOOD)` is added beside the `Item` row.

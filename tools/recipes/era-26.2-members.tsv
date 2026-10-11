@@ -72,6 +72,6 @@ PathNavigation	snapTo	moveTo
 # X158 (26.2 jar): Minecraft.cameraEntity is private; getCameraEntity() is public
 Minecraft	cameraEntity	getCameraEntity()
 # X158 (26.2 jar): Item.getDescription() is gone; the item name comes from a stack
-Item	getDescription	{recv}.getName({recv}.getDefaultInstance())
+Item	getDescription	{recv}.getName({recv}.getDefaultInstance()){()}
 # X158 (26.2 jar): food is a data component
-ItemStack	getFoodProperties	{recv}.get(net.minecraft.core.component.DataComponents.FOOD)
+ItemStack	getFoodProperties	{recv}.get(net.minecraft.core.component.DataComponents.FOOD){(..)}

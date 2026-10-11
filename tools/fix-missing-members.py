@@ -17,7 +17,9 @@ Table rows (tab-separated, `#` comments):
 The new form is a member name (`text`), or a template using {recv} for the receiver expression
 (`{recv}.gameRenderer.mainRenderTarget` turns `mc.getMainRenderTarget()` into
 `mc.gameRenderer.mainRenderTarget()`; {a0}, {a1}, ... are the call's own arguments, so `{recv}.store({a0}, X, {a1})`
-replaces the whole call), or `static:<expr>` to replace `Owner.member` / an unqualified
+replaces the whole call; a template ending in its own call ends with {()} to consume an EMPTY original call, or
+{(..)} to consume the original call whatever its arguments -- `{recv}.get(FOOD){(..)}` drops `getFoodProperties(entity)`'s
+argument), or `static:<expr>` to replace `Owner.member` / an unqualified
 `member` with a fixed expression (`static:Minecraft.getInstance().hasControlDown`).
 Standard library only.
 """
@@ -36,7 +38,7 @@ def table(path):
         if not l.strip() or l.lstrip().startswith("#"):
             continue
         owner, old, new = [x.strip() for x in l.split("\t")[:3]]
-        if "{recv}" in new and new.endswith(")") and not re.search(r"\{a\d\}|\{\(\)\}", new):
+        if "{recv}" in new and new.endswith(")") and not re.search(r"\{a\d\}|\{\(\)\}|\{\(\.\.\)\}", new):
             # the original call's (...) is kept after a {recv} template, so one ending in its own call yields `f(x)()`
             raise ValueError(f"{path}: row {owner}.{old} -> {new} supplies its own call: end it with {{()}} (X73)")
         rows[(owner, old)] = new
@@ -140,7 +142,13 @@ def apply_row(line, member, new, owner, col=None):
         if not m:
             return None
         end = m.end()
-        if "{()}" in new:        # the template supplies its own arguments: consume an EMPTY call, keep nothing of it
+        if "{(..)}" in new:      # the template supplies its own call and DROPS the original's arguments, whatever they are
+            args = call_args(line, line.index("(", m.end()))
+            if args is None:
+                return None
+            end = args[1]
+            new = new.replace("{(..)}", "")
+        elif "{()}" in new:      # the template supplies its own arguments: consume an EMPTY call, keep nothing of it
             args = call_args(line, line.index("(", m.end()))
             if args is None or args[0]:
                 return None
