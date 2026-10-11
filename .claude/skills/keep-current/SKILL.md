@@ -124,9 +124,23 @@ until its dependency's run is green, and it is then gated against the dependency
 ## Setup: run it nightly on the user's subscription
 
 A Claude Code routine fires a fresh cloud session on a schedule under the user's own account. Create one (with
-the user's go-ahead, stop 1) whose prompt is: run the keep-current skill over the fleet file at `<path>`, in run
-mode, with the pushes the user allowed. The environment needs the forks in its repository scope and the build
-hosts in its allowed domains (`cloud/allowed-domains.txt`). Cheap nights matter: step 1 exits with no model work.
+the user's go-ahead, stop 1) whose prompt is: run the keep-current skill over the fleet, in run mode, with the
+pushes the user allowed. A cloud routine starts from a fresh container, so a fleet file in this session's home
+directory is not there when it fires: put the fleet JSON in the routine's prompt. The environment needs the forks
+in its repository scope and the build hosts in its allowed domains (`cloud/allowed-domains.txt`). Cheap nights
+matter: step 1 exits with no model work.
+
+**A time like "2am" means the user's local time, and a cloud session runs in UTC.** Do not ask for the zone;
+read it from git. The user's own commits keep the offset of the machine they were made on, while commits made in
+a cloud session or on github.com say `+0000`:
+
+    git log --all --author=<user's email> --format='%ad' --date=format:'%Y-%m %z' | grep -v '+0000' | sort | uniq -c
+
+Map the offset, together with the months it was seen in, to an IANA zone. Daylight saving changes the offset, so
+an offset seen in both summer and winter months narrows it down. If more than one zone still fits (`-0700` in
+October is both Los Angeles and Phoenix), pick the most populous one, write the cron as
+`CRON_TZ=<zone> <min> <hour> * * *` so daylight saving is handled, and say in one line which zone was assumed and
+why. The user corrects it if wrong. Ask only when no commit carries a non-UTC offset.
 
 ## Evidence that this is needed (and the mistake it prevents)
 
