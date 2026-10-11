@@ -711,7 +711,15 @@ def main():
                           "fileId": (v.get("chosen") or {}).get("fileId")}
         # the newest older build is not always the right source: a mod on 1.21.8 that ALSO ships 1.21.1 should port
         # 1.21.1 -> 26.2 (a packed era hop), not downport 1.21.8 -> 1.21.1 first (no pack: a worker-only hop)
+        orig = v.get("chosen") or {}
         alt = packed_source(prov, pid, T, v)
+        if not v.get("has_native"):
+            hit = native_by_range(prov, pid, orig, T, jars)
+            if hit:
+                return stop(20, f"{a.mod} already has a NeoForge build that loads on {T}: {hit} -- there is nothing to port "
+                                f"(the registry files it under a sibling version, X131)",
+                            [f"install it: python3 tools/mod-registry/modreg.py download --provider {prov} --id {pid} "
+                             f"--file {orig.get('fileId')} --out <mods dir>", "or use the install-mod skill"])
         if alt:
             say(f"source: the {v['chosen'].get('loader', '?')} {v['chosen']['mc']} build would need an unpacked hop; "
                 f"using the {alt.get('loader', '?')} {alt['mc']} build instead")
@@ -878,6 +886,27 @@ def main():
     if a.stop_after == "setup":
         say("stopped after setup (--stop-after)"); return 0
     return run_hops(a, T, hops, work, state, meta)
+
+
+def native_by_range(prov, pid, chosen, T, jars):
+    """X131: a registry files a NeoForge build under the version it was BUILT for ("1.21"), while its toml declares the
+    range it loads on ("[1.21,1.21.2)") -- so `versions --mc 1.21.1` says "no native build" for a mod that has one. When
+    the newest build is NeoForge for a sibling of the target (same major.minor), read the range it declares. -> its file
+    name and range when the range names the target, else None. A build declaring NO range proves nothing."""
+    if not chosen or chosen.get("loader") != "neoforge" or chosen.get("mc") == T:
+        return None
+    fam = lambda s: tuple(str(s).split(".")[:2])
+    if fam(chosen.get("mc", "")) != fam(T) or not chosen.get("fileId"):
+        return None
+    d = pathlib.Path(jars) / "native-check"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / chosen["fileName"]
+    if not f.exists():
+        modreg("download", "--provider", prov, "--id", pid, "--file", chosen["fileId"], "--out", str(d) + "/", timeout=600)
+    if not f.exists():
+        return None
+    _own, rng = jar_toml(f)
+    return f"{chosen['fileName']} declares Minecraft {rng}" if rng and in_range(T, rng) else None
 
 
 def packed_source(prov, pid, T, v, tries=6):
@@ -1375,6 +1404,8 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
         def fetch(p, dep, expect=None, label=None):
             rc2, dv = modreg("versions", "--provider", p, "--id", dep, "--loader", "neoforge", "--mc", mc)
             c = dv.get("chosen") if dv.get("has_native") else None
+            if c is None and native_by_range(p, dep, dv.get("chosen"), mc, work / "libs"):   # filed under a sibling (X131)
+                c = dv.get("chosen")
             if not c:
                 return None, "no build"
             lib.mkdir(parents=True, exist_ok=True)
@@ -1652,6 +1683,14 @@ def self_check():
             z.writestr("META-INF/jarjar/mixinextras-neoforge-0.4.jar", b"x")
             z.writestr("META-INF/jarjar/metadata.json", "{}")
         ok &= wire_nested_dep_jars(lib) == ["Registrate-1.jar"] and (lib / "nested/Registrate-1.jar").is_file()
+    with tempfile.TemporaryDirectory() as d:          # X131: a NeoForge "1.21" build whose toml loads on 1.21.1
+        nd = pathlib.Path(d, "native-check"); nd.mkdir()
+        with zipfile.ZipFile(nd / "m-1.21.jar", "w") as z:
+            z.writestr("META-INF/neoforge.mods.toml", '[[mods]]\nmodId="m"\n[[dependencies.m]]\nmodId="minecraft"\n'
+                                                     'type="required"\nversionRange="[1.21, 1.22)"\n')
+        ch = {"fileId": "x", "fileName": "m-1.21.jar", "loader": "neoforge", "mc": "1.21"}
+        ok &= bool(native_by_range("modrinth", "m", ch, "1.21.1", d)) and native_by_range("modrinth", "m", ch, "26.2", d) is None
+        ok &= native_by_range("modrinth", "m", {**ch, "loader": "forge"}, "1.21.1", d) is None
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

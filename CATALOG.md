@@ -6394,3 +6394,11 @@ is `f has private access in Owner` until someone writes `Owner f f()` into the m
 such reads of two fields. `fix-missing-members.py` now checks, for a private-access site with no row, whether the owner is
 a RECORD in the compile jar with a same-named accessor (one `javap` per owner, only when such a site exists) and rewrites
 `x.f` to `x.f()`. Hand rows still win, and anything that is not a record accessor is still left alone.
+
+**X131. "No native build" was the registry's filing, not the mod's.** Modrinth files a build under the version it was
+built FOR ("1.21") while its toml declares what it loads ON (`[1.21, 1.22)`), so `modreg versions --mc 1.21.1` answered
+`has_native: false` for a mod with a perfectly good NeoForge 1.21.1 jar -- and the sweep spent a port on it (a popular
+minimap, 279 errors' worth of work nobody needs; CurseForge, asked the same question, said yes). `port.py` now downloads
+the newest NeoForge build when it is filed under a SIBLING of the target (same major.minor) and reads its declared
+Minecraft range: if the target is in it, the port stops as "already native" (exit 20), and a dependency resolves to that
+build instead of "no build". A build declaring no range proves nothing and is not taken.
