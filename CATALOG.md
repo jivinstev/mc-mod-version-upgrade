@@ -6643,3 +6643,16 @@ entity's own `getAttributes()`, and the super call goes, since vanilla still app
 no entity-aware removal hook on the effect, so the remove hook becomes a plain `onEffectRemoved(LivingEntity, int)`.
 Every constructor that calls `super(...)` subscribes that method to NeoForge's `MobEffectEvent.Remove` and `Expired`
 for this effect, at lowest priority and not when cancelled. Compiled against 1.21.1.
+
+**X157. MCreator procedure templates around events, projectiles and items (one 1.20 mod, ~200 errors).**
+- MCreator's `@Nullable Event event` template does `if (event != null && event.isCancelable()) { event.setCanceled(true);
+  } else if (event != null && event.hasResult()) { event.setResult(Event.Result.DENY); }`. NeoForge's `Event` has
+  neither, and §135's row only dropped the `isCancelable()` guard, which left `event.setCanceled` unresolved. Cancelling
+  now goes through `instanceof ICancellableEvent` (braced and brace-less). The generic-result branch goes, as a
+  JUDGEMENT row: an event whose 1.21 form has its own result API needs a worker.
+- The projectile procedure's `entityToSpawn.setKnockback(k)` is gone in 1.21, where knockback is the weapon's
+  enchantment. The call becomes a comment (a judgement: the projectile knocks back by its default).
+- X128's `ItemStack.hurt(n, RandomSource.create(), null)` row now also takes a player argument.
+- Member rows (1.21.1): `Registry`/`DefaultedRegistry.getValue` → `get` (getValue is 1.21.2+, #70);
+  `Item.isEdible()` → `components().has(DataComponents.FOOD)`; `ItemStack.isSameItemSameTags` →
+  `isSameItemSameComponents`.

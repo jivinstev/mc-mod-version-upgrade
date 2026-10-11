@@ -340,6 +340,18 @@ ToolAction	ItemAbility
 #? only-if	IEntityWithComplexSpawn|IEntityAdditionalSpawnData
 re:\b(writeSpawnData|readSpawnData)\(\s*(?:net\.minecraft\.network\.)?FriendlyByteBuf\b	\1(net.minecraft.network.RegistryFriendlyByteBuf
 
+#@ X157 auto  MCreator's event template, `if (event != null && event.isCancelable()) { event.setCanceled(true); } else if (event
+#           != null && event.hasResult()) { event.setResult(Event.Result.DENY); }` on a `@Nullable Event event`: NeoForge's
+#           Event has neither. Cancelling goes through ICancellableEvent; there is no generic result any more, so that
+#           branch goes (a JUDGEMENT row: an event whose 1.21 form has its own result API needs a worker). Runs before §135.
+re:\bif\s*\(\s*(\w+)\s*!=\s*null\s*&&\s*\1\.isCancelable\(\)\s*\)\s*\{\s*\1\.setCanceled\(\s*(true|false)\s*\)\s*;\s*\}	if (\1 instanceof net.neoforged.bus.api.ICancellableEvent _cancellable) { _cancellable.setCanceled(\2); }
+re:\bif\s*\(\s*(\w+)\s*!=\s*null\s*&&\s*\1\.isCancelable\(\)\s*\)\s*\1\.setCanceled\(\s*(true|false)\s*\)\s*;	if (\1 instanceof net.neoforged.bus.api.ICancellableEvent _cancellable) _cancellable.setCanceled(\2);
+re:\s*else\s+if\s*\(\s*(\w+)\s*!=\s*null\s*&&\s*\1\.hasResult\(\)\s*\)\s*\{\s*\1\.setResult\(\s*(?:[\w.]*Event\.)?Result\.\w+\s*\)\s*;\s*\}	
+
+#@ X157 auto  MCreator's projectile procedure sets knockback on the arrow it spawns; 1.21 removed it (knockback is the
+#           weapon's enchantment now), so the call goes (a JUDGEMENT row: the projectile knocks back by its default)
+re:(?m)^([ \t]*)([\w$.]+)\.setKnockback\(([^;]*)\)\s*;	\1/* 1.21 MIGRATION (X157): \2.setKnockback(\3) -- arrow knockback is the weapon's enchantment now */
+
 #@ 135 auto  Event.isCancelable is gone: a cancellable event is so by type, so the guard is dropped
 re:\s*&&\s*\w+\.isCancelable\(\)	
 re:(?<![\w$.])\w+\.isCancelable\(\)\s*&&\s*	
@@ -537,7 +549,7 @@ re:\.getXSpawn\(\)	.getSpawnPos().getX()
 re:\.getYSpawn\(\)	.getSpawnPos().getY()
 re:\.getZSpawn\(\)	.getSpawnPos().getZ()
 re:(?<![\w$.])(?!this\.)([\w$]+(?:\.[\w$]+)*)\.setMaxUpStep\(([^;]+?)\)\s*;	if (\1 instanceof net.minecraft.world.entity.LivingEntity _stepLe) _stepLe.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(\2);
-re:(?<![\w$.])([\w$]+)\.hurt\(\s*(\w+)\s*,\s*RandomSource\.create\(\)\s*,\s*null\s*\)	(\1.isDamageableItem() && ((java.util.function.IntPredicate) d -> { \1.setDamageValue(d); return d >= \1.getMaxDamage(); }).test(\1.getDamageValue() + \2))
+re:(?<![\w$.])([\w$]+)\.hurt\(\s*(\w+)\s*,\s*RandomSource\.create\(\)\s*,\s*(?:null|\(?\s*(?:ServerPlayer\s*\)\s*)?[\w$.]+)\s*\)	(\1.isDamageableItem() && ((java.util.function.IntPredicate) d -> { \1.setDamageValue(d); return d >= \1.getMaxDamage(); }).test(\1.getDamageValue() + \2))
 
 #@ X129 auto  Forge's IExtensionPoint.DisplayTest registration is gone: NeoForge reads the display test from
 #           neoforge.mods.toml (`displayTest = "IGNORE_SERVER_VERSION"` and friends). The call is left as a comment.
