@@ -6418,3 +6418,12 @@ the old import goes when nothing else names the class. All in the 26.2 table.
 `Gui.hud.getChat()` (the HUD split, §V28) and `Minecraft.getToasts()` is `Minecraft.gui.toastManager()`. Both
 checked against the 26.2 jar with javap. Added as member rows in `tools/recipes/era-26.2-members.tsv`, so
 fix-missing-members rewrites them from the compile error (found in a zero-model sweep of a footstep-sound mod).
+
+**X134. Three 26.2 rows that only covered the spelling their first mod used.** The `ClickEvent` rows took
+`ClickEvent.Action.X` plus a string literal, so `new ClickEvent(Action.OPEN_FILE, loc.toString())` (a nested
+import and a computed argument) went through untouched, and OPEN_FILE, COPY_TO_CLIPBOARD and CHANGE_PAGE had no
+row at all. Now any argument (balanced parentheses), either spelling, every action (CHANGE_PAGE wraps the old
+string page in `Integer.parseInt`). The `EntityType.create(level)` row now also takes `world` and the client
+level (`Minecraft.getInstance().level`, `mc.level`). And a `KeyMapping` category is a `KeyMapping.Category`
+record: the six vanilla `"key.categories.*"` keys inside a `new KeyMapping(...)` become its constants. A mod's
+own category key needs `Category.register` and is left for a worker. Checked against the 26.2 jar.

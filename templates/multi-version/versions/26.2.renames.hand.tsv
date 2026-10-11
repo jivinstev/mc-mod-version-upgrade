@@ -28,7 +28,16 @@
 #   * A member rename must name its OWNER unless the member name is globally unique.
 #     `MobEffects.MOVEMENT_SPEED` became SPEED; `Attributes.MOVEMENT_SPEED` did not.
 #   * `prepare-sources.py` reports every rule that matched NOTHING. Drive that to zero and keep
-#     it there, marking a genuinely-unused block `#!exhaustive` ... `#!strict` WITH A REASON.
+#     it there, marking a genuinely-unused block `#!exhaustive` ... `# -- X134: KeyMapping's category is a KeyMapping.Category record, not a translation key. The vanilla
+# -- categories map to its constants (a mod's OWN category needs Category.register -- left for a worker).
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.movement"	\1net.minecraft.client.KeyMapping.Category.MOVEMENT
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.misc"	\1net.minecraft.client.KeyMapping.Category.MISC
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.multiplayer"	\1net.minecraft.client.KeyMapping.Category.MULTIPLAYER
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.gameplay"	\1net.minecraft.client.KeyMapping.Category.GAMEPLAY
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.inventory"	\1net.minecraft.client.KeyMapping.Category.INVENTORY
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.creative"	\1net.minecraft.client.KeyMapping.Category.CREATIVE
+
+#!strict` WITH A REASON.
 #     A warning that is never zero is decoration.
 #
 # Rows carrying a judgement rather than a pure rename are commented as such -- keep those notes,
@@ -482,7 +491,7 @@ re:super\.loadAdditional\((\w+), \w+\)	super.loadAdditional(\1)
 # Anchored on the ARGUMENT NAME rather than the receiver, because a receiver pattern cannot
 # tell EntityType.create apart from ClientboundBlockEntityDataPacket.create(this) (8 sites),
 # IceCreamItem.create(s) or CoffeeDrinkItem.create(brew) — all of which must not be touched.
-re:\.create\((level|serverLevel|targetLevel|serverWorld|server|here|helper\.getLevel\(\)|\w+\.level\(\))\)	.create(\1, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
+re:\.create\((level|world|serverLevel|targetLevel|serverWorld|server|here|helper\.getLevel\(\)|\w+\.level\(\)|(?:Minecraft\.getInstance\(\)|mc|client|minecraft)\.level)\)	.create(\1, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
 
 # --- GameTestHelper.getBlockEntity now takes the expected class -------------------------
 # 26.x: `<T extends BlockEntity> T getBlockEntity(BlockPos, Class<T>)`. The cast the call site
@@ -882,9 +891,13 @@ re:\.isSolidRender\((?:[^()]|\([^()]*\))*\)	.isSolidRender()
 
 # -- ClickEvent became an interface with a record per action, so the Action enum is no longer an
 # -- argument -- it is the type you construct.
-re:new ClickEvent\(\s*ClickEvent\.Action\.SUGGEST_COMMAND,\s*("[^"]*")\)	new ClickEvent.SuggestCommand(\1)
-re:new ClickEvent\(\s*ClickEvent\.Action\.RUN_COMMAND,\s*("[^"]*")\s*\)	new ClickEvent.RunCommand(\1)
-re:new ClickEvent\(\s*ClickEvent\.Action\.OPEN_URL,\s*("[^"]*")\)	new ClickEvent.OpenUrl(java.net.URI.create(\1))
+# -- X134: any argument (not only a literal), the bare `Action.X` a nested import produces, and every action.
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.SUGGEST_COMMAND,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.SuggestCommand(\1)
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.RUN_COMMAND,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.RunCommand(\1)
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.OPEN_URL,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.OpenUrl(java.net.URI.create(\1))
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.OPEN_FILE,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.OpenFile(\1)
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.COPY_TO_CLIPBOARD,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.CopyToClipboard(\1)
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.CHANGE_PAGE,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.ChangePage(Integer.parseInt(\1))
 
 # -- authlib's GameProfile is a record now, so getName() is gone. Player.nameAndId() is 26.x's own
 # -- accessor for the same pair and reads better than profile.name().
