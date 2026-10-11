@@ -6047,7 +6047,10 @@ Seen in 4 swept mods (Forge 1.20.2-1.20.4 sources). On one mod's real network pa
 and its send converted, 0 flagged. Self-check fails against the old handler rule. A handler whose context shape is not recognised is now named in the flags instead of skipped
 without a word, which is how this one went unnoticed. ⚠ **And test on the pipeline's own decompiler:** the first fix was verified on a CFR
 decompile, which writes `CustomPayloadEvent.Context`; Vineflower imports the nested class and writes bare `Context`,
-so the real run converted 0 handlers. Both forms are accepted now, and the self-check carries one of each.
+so the real run converted 0 handlers. Both forms are accepted now, and the self-check carries one of each. The same holds for the 1.20.1 shape: Vineflower writes
+`Supplier<Context>` with `import ...NetworkEvent.Context;`, which the converter also missed (X97's MCreator
+handlers among them), and a method-reference dimension target (`DIMENSION.with(level::dimension)`). Fixed alongside;
+the MCreator self-check now uses the Vineflower spelling.
 
 **X96. NeoForge renamed the whole `IForgeX` extension family to `IXExtension`.** · **Pattern:**
 `IForgeMenuType.create(...)`, `implements IForgeItem`, `IForgeBlockState` · **Error:** `cannot find symbol:

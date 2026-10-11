@@ -41,6 +41,7 @@ DEAD = ["net.neoforged.neoforge.network.NetworkEvent", "net.minecraftforge.netwo
         # Forge 1.20.2+ networking (ChannelBuilder / CustomPayloadEvent), as written and as the import codemod renamed it
         "net.minecraftforge.event.network.CustomPayloadEvent", "net.neoforged.neoforge.event.network.CustomPayloadEvent",
         "net.minecraftforge.event.network.CustomPayloadEvent.Context",
+        "net.minecraftforge.network.NetworkEvent.Context", "net.neoforged.neoforge.network.NetworkEvent.Context",
         "net.neoforged.neoforge.event.network.CustomPayloadEvent.Context",
         "net.minecraftforge.network.SimpleChannel", "net.neoforged.neoforge.network.SimpleChannel",
         "net.minecraftforge.network.ChannelBuilder", "net.neoforged.neoforge.network.ChannelBuilder",
@@ -119,8 +120,8 @@ def class_file(cls, files, near):
     return hits[0] if hits else None
 
 
-# `() -> level.dimension()`, and MCreator's `() -> ((Level)level).dimension()`
-DIM = r"\(\)\s*->\s*(?:\(\(\w+\)\s*)?([\w.]+)\)?\.dimension\(\)"
+# `() -> level.dimension()`, MCreator's `() -> ((Level)level).dimension()`, and Vineflower's `level::dimension`
+DIM = r"(?:\(\)\s*->\s*(?:\(\(\w+\)\s*)?([\w.]+)\)?\.dimension\(\)|([\w.]+)::dimension)"
 
 
 def rewrite_sends(text, chan, flags, rel):
@@ -149,7 +150,7 @@ def rewrite_sends(text, chan, flags, rel):
                 target = re.sub(r"^\(\)\s*->\s*", "", t.group(3).strip())
                 rep = f"PacketDistributor.{TARGETS[t.group(1)]}({target}, {args[1]})"
             elif t and t.group(1) == "DIMENSION" and re.fullmatch(DIM, t.group(3).strip()):
-                lvl = re.fullmatch(DIM, t.group(3).strip()).group(1)
+                dm_ = re.fullmatch(DIM, t.group(3).strip()); lvl = dm_.group(1) or dm_.group(2)
                 rep = f"PacketDistributor.sendToPlayersInDimension({lvl}, {args[1]})"
             elif t and t.group(1) == "ALL":
                 rep = f"PacketDistributor.sendToAllPlayers({args[1]})"
@@ -221,11 +222,14 @@ def convert_handler(text, hname, flags, rel):
         # Forge 1.20.2+: no Supplier. Vineflower writes it bare (`handle(Context ctx)`) and imports the nested class.
         direct = bool(re.fullmatch(r"(?:[\w.]+\.)?CustomPayloadEvent\.Context", pt)) or (
             pt == "Context" and re.search(r"(?m)^import\s+[\w.]*\.CustomPayloadEvent\.Context\s*;", text) is not None)
-        if not direct and not re.fullmatch(r"Supplier<\s*NetworkEvent\.Context\s*>", pt):
+        # Vineflower imports the nested class (`import ...NetworkEvent.Context;`) and writes `Supplier<Context>`
+        nested = re.search(r"(?m)^import\s+[\w.]*\.NetworkEvent\.Context\s*;", text) is not None
+        if not direct and not re.fullmatch(r"Supplier<\s*NetworkEvent\.Context\s*>", pt) \
+                and not (nested and re.fullmatch(r"Supplier<\s*Context\s*>", pt)):
             continue
         cs = fs.pname(mt.params[-1])
         body = text[mt.body_open:mt.body_close + 1]
-        alias = re.search(r"\n[ \t]*NetworkEvent\.Context\s+(\w+)\s*=\s*%s\.get\(\)\s*;[ \t]*" % re.escape(cs), body)
+        alias = re.search(r"\n[ \t]*(?:NetworkEvent\.)?Context\s+(\w+)\s*=\s*%s\.get\(\)\s*;[ \t]*" % re.escape(cs), body)
         name = cs
         if alias:
             name = alias.group(1)
@@ -736,11 +740,12 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
             if used:
                 (p / "KeyMessage.java").write_text(
                     "package m;\nimport java.util.function.Supplier;\nimport net.minecraft.network.FriendlyByteBuf;\n"
+                    "import net.neoforged.neoforge.network.NetworkEvent.Context;\n"
                     "@Mod.EventBusSubscriber(bus=Mod.EventBusSubscriber.Bus.MOD)\npublic class KeyMessage {\n    int type;\n"
                     "    public KeyMessage(int type) { this.type = type; }\n    public KeyMessage(FriendlyByteBuf buffer) { this.type = buffer.readInt(); }\n"
                     "    public static void buffer(KeyMessage message, FriendlyByteBuf buffer) { buffer.writeInt(message.type); }\n"
-                    "    public static void handler(KeyMessage message, Supplier<NetworkEvent.Context> contextSupplier) {\n"
-                    "        NetworkEvent.Context context = contextSupplier.get();\n        context.enqueueWork(() -> {});\n"
+                    "    public static void handler(KeyMessage message, Supplier<Context> contextSupplier) {\n"
+                    "        Context context = contextSupplier.get();\n        context.enqueueWork(() -> {});\n"
                     "        context.setPacketHandled(true);\n    }\n    @SubscribeEvent\n    public static void registerMessage(FMLCommonSetupEvent event) {\n"
                     "        MMod.addNetworkMessage(KeyMessage.class, KeyMessage::buffer, KeyMessage::new, KeyMessage::handler);\n    }\n}\n",
                     encoding="utf-8")
@@ -753,6 +758,7 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
                 ok3 = ("registrar.playToServer(KeyMessage.TYPE, KeyMessage.STREAM_CODEC, KeyMessage::handler);" in mm
                        and "bus.addListener(MMod::registerMessages);" in mm and "addNetworkMessage" not in mm + km
                        and "messageID" not in mm and "EventBusSubscriber" not in km and "FMLCommonSetupEvent event" not in km
+                       and "handler(KeyMessage message, IPayloadContext context)" in km and "NetworkEvent" not in km
                        and "PacketDistributor.sendToServer(new KeyMessage(0))" in (p / "Keys.java").read_text(encoding="utf-8")
                        and not f3)
             else:
