@@ -5852,3 +5852,12 @@ imports `joptsimple.internal.Strings` (jopt-simple is on every Minecraft classpa
 called it foreign and parked the config class; ~100 references to it became errors · **Fix:** the platform list now
 names every library root the 1.21 / 26.x game classpath carries (jopt-simple, lz4, noexception, MixinExtras' new
 group, jline, beside Guava, fastutil, Netty, JOML…).
+
+**X75. A universal jar has no single source tree.** · **Pattern:** one jar for Forge, NeoForge and Fabric across
+Minecraft versions (a `mods.toml`, a `neoforge.mods.toml` and a `fabric.mod.json`; classes calling all three loaders'
+APIs, Fabric's in intermediary names; mixin packages per era, `legacy`/`modern`/`vintage`) that picks a path at
+runtime · **Symptom:** the 26.2 hop "ran" and left 318 errors, nearly all old Forge packages and 306 unmapped names,
+none of it portable code · **Fix:** triage counts the loader families the classes reference (each in at least two
+classes) and stops on all three, pointing at the source repository, which builds each target separately. Over every
+jar swept so far, exactly one reached three; a jar with two (Forge plus Fabric references, or NeoForge plus Fabric
+intermediary names) is ported as before.

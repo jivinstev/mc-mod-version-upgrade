@@ -33,7 +33,7 @@ session driving this, decides. Exit codes: 0 done; 10-12 a hop stopped (see run-
 build already exists; 21 a dependency needs porting first; 22 a hop has no pack; 23 not found or
 ambiguous; 24 setup failed; 2 bad input. Standard library only; the workers need the `claude` CLI.
 """
-import argparse, json, os, pathlib, re, shutil, subprocess, sys, zipfile
+import argparse, collections, json, os, pathlib, re, shutil, subprocess, sys, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -705,6 +705,13 @@ def main():
         else:
             return stop(23, f"{jar.name} carries no Forge, NeoForge or Fabric metadata, so it is not a mod this tool can port",
                         ["check it is the mod's jar and not a library or a launcher plugin"])
+    fams = loader_families(jar)
+    if len(fams) >= 3:
+        return stop(23, f"{jar.name} is a universal jar: its classes call {', '.join(sorted(fams))} APIs at once and "
+                        f"pick a path per loader and Minecraft version at runtime, so its decompile mixes every target's "
+                        f"names and there is no single source tree to port (X75)",
+                    ["port from the mod's own source repository, which builds each target separately",
+                     "or skip this mod"])
     kt, total = kotlin_share(jar)
     if total and kt * 2 > total:
         return stop(23, f"{jar.name} is a Kotlin mod ({kt} of {total} classes carry kotlin.Metadata): this pipeline "
@@ -881,6 +888,25 @@ def hard_optional_deps(jar, deps):
         if n >= max(20, len(cls) // 10):
             out.append(mid)
     return out
+
+
+LOADER_FAMILIES = {"forge": (b"net/minecraftforge/", b"cpw/mods/fml/"), "neoforge": (b"net/neoforged/",),
+                   "fabric": (b"net/fabricmc/", b"net/minecraft/class_")}
+
+
+def loader_families(jar, at_least=2):
+    """The loader APIs a jar's own classes reference ({family}, each in >= at_least classes). An ordinary mod jar,
+    an Architectury per-loader jar included, references one; a universal jar (one jar for Forge, NeoForge and Fabric
+    across Minecraft versions, dispatching at runtime) references all three."""
+    hits = collections.Counter()
+    with zipfile.ZipFile(jar) as z:
+        for n in z.namelist():
+            if n.endswith(".class") and not n.startswith("META-INF/"):
+                b = z.read(n)
+                for fam, pats in LOADER_FAMILIES.items():
+                    if any(p in b for p in pats):
+                        hits[fam] += 1
+    return {f for f, k in hits.items() if k >= at_least}
 
 
 def kotlin_share(jar):
@@ -1227,6 +1253,12 @@ def self_check():
             z.writestr("a/A.class", b"\xca\xfe Lkotlin/Metadata; x"); z.writestr("a/B.class", b"\xca\xfe x")
             z.writestr("a/C.class", b"\xca\xfe Lkotlin/Metadata; y")
         ok &= kotlin_share(pathlib.Path(d, "k.jar")) == (2, 3) and kotlin_share(pathlib.Path(d, "a.jar")) == (0, 1)
+        with zipfile.ZipFile(f"{d}/u.jar", "w") as z:
+            for i, b in enumerate((b"net/minecraftforge/x", b"net/minecraftforge/y", b"net/neoforged/a", b"net/neoforged/b",
+                                   b"net/fabricmc/api", b"net/minecraft/class_123")):
+                z.writestr(f"u/C{i}.class", b"\xca\xfe" + b)
+        ok &= loader_families(pathlib.Path(d, "u.jar")) == {"forge", "neoforge", "fabric"}
+        ok &= loader_families(pathlib.Path(d, "a.jar")) == set()      # one class only: below the threshold
         ok &= forge_api_jar(pathlib.Path(d, "a.jar")) and not forge_api_jar(pathlib.Path(d, "b.jar")) \
             and not forge_api_jar(pathlib.Path(d, "c.jar")) and forge_api_jar(pathlib.Path(d, "d.jar"))
     with _tf.TemporaryDirectory() as d:            # multi-loader jar: the toml (single-quoted is legal TOML) wins
