@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 GUARDS, RX_GUARDS = {}, {}     # '#? only-if' scopes: by table key, and by compiled pattern
 
 
-def load_renames(path):
+def load_renames(path, guards=False):
     """TSV of `from<TAB>to`. Blank lines and #-comments ignored.
 
     Three kinds of row:
@@ -88,11 +88,12 @@ def load_renames(path):
         if marker.split()[0:1] == ['!strict']:
             exhaustive = False
             continue
-        # `#? only-if <regex>` scopes the NEXT row to files whose (original) text matches the regex -- for a
+        # `#? only-if <regex>` (guards=True: a rename table; a recipe pack's apply-recipes owns its own group guards)
+        # scopes the NEXT row to files whose (original) text matches the regex -- for a
         # LIBRARY's renamed class whose simple name a mod may also use for its own class (X169: a mod's own
         # `PlatformHelper` must not be rewritten because cristellib's moved). Only on re:/member: rows: plain rows
         # are merged into one pattern.
-        if line.lstrip().startswith('#? only-if'):
+        if guards and line.lstrip().startswith('#? only-if'):
             pending_guard = (re.compile(line.split('only-if', 1)[1].strip()), lineno)
             continue
         if not line.strip() or line.lstrip().startswith('#'):
@@ -245,7 +246,7 @@ def main():
             sys.exit('%s names %d path(s) that are not in %s: %s'
                      % (a.drop, len(missing), a.src, ', '.join(missing)))
 
-    token_rules, regex_rules = split_rules(load_renames(a.renames))
+    token_rules, regex_rules = split_rules(load_renames(a.renames, guards=True))
     pattern, table = build_pattern(token_rules)
 
     if os.path.isdir(a.out):
