@@ -65,3 +65,13 @@ Minecraft	getToasts	{recv}.gui.toastManager(){()}
 Window	getWindow	handle
 # X146 (26.2 jar): Inventory.items is private; the main-inventory list is getNonEquipmentItems()
 Inventory	items	getNonEquipmentItems()
+# X158 (26.2 jar): Item tooltips take a Consumer<Component> (accept, not add)
+Consumer	add	accept
+# X158: the moveTo -> snapTo rename (V39) is for Entity; PathNavigation.moveTo(x, y, z, speed) is unchanged (X7b)
+PathNavigation	snapTo	moveTo
+# X158 (26.2 jar): Minecraft.cameraEntity is private; getCameraEntity() is public
+Minecraft	cameraEntity	getCameraEntity()
+# X158 (26.2 jar): Item.getDescription() is gone; the item name comes from a stack
+Item	getDescription	{recv}.getName({recv}.getDefaultInstance())
+# X158 (26.2 jar): food is a data component
+ItemStack	getFoodProperties	{recv}.get(net.minecraft.core.component.DataComponents.FOOD)

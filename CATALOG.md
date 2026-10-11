@@ -6656,3 +6656,13 @@ for this effect, at lowest priority and not when cancelled. Compiled against 1.2
 - Member rows (1.21.1): `Registry`/`DefaultedRegistry.getValue` → `get` (getValue is 1.21.2+, #70);
   `Item.isEdible()` → `components().has(DataComponents.FOOD)`; `ItemStack.isSameItemSameTags` →
   `isSameItemSameComponents`.
+
+**X158. Five 26.2 member rows from a large GeckoLib/MCreator-style mod.** All are owner-resolved, so they apply only
+where javac names that type:
+- `Consumer.add` → `accept`: 26.2 tooltips hand `appendHoverText` a `Consumer<Component>`, and the body still said
+  `components.add(..)` (119 errors).
+- `PathNavigation.snapTo` → `moveTo`: undoes V39's Entity rename where the inherited row's receiver lookbehind
+  (§X7b) let a `navigation.moveTo(x, y, z, speed)` through (32).
+- `Minecraft.cameraEntity` → `getCameraEntity()`.
+- `Item.getDescription()` → `getName(getDefaultInstance())`.
+- `ItemStack.getFoodProperties(player)` → `get(DataComponents.FOOD)`.
