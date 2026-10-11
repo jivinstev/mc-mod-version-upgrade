@@ -489,3 +489,6 @@ net.minecraft.network.chat.contents.LiteralContents	net.minecraft.network.chat.c
 #           dirt screen background became the menu background (Screen.renderMenuBackground(GuiGraphics))
 re:\bsetTooltipDelay\((\d+)\)	setTooltipDelay(java.time.Duration.ofMillis(\1))
 re:(?<![\w$])renderDirtBackground\(	renderMenuBackground(
+
+#@ X114 auto  BonemealableBlock.isValidBonemealTarget lost its isClient flag in 1.20.2 (21.1 jar: (LevelReader, BlockPos, BlockState))
+re:(boolean\s+isValidBonemealTarget\(\s*(?:final\s+)?LevelReader\s+\w+,\s*(?:final\s+)?BlockPos\s+\w+,\s*(?:final\s+)?BlockState\s+\w+),\s*(?:final\s+)?boolean\s+\w+\)	\1)

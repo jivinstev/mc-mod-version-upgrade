@@ -6248,3 +6248,12 @@ event) { if (event.phase.equals(Phase.START)) {...} }` (also `Phase.END.equals(e
 `TickEvent.ClientTickEvent` / `TickEvent.Phase` imports stayed and the handler did not compile · **Fix:** the phase test is
 normalised to `==` / `!=` before the existing split runs, so it converts like every other tick handler
 (`ClientTickEvent.Pre`, here). The original `==` form was the only one the converter had ever seen.
+
+**X114. MCreator's `Block.use` was refused as "reads its hand", and the only read was the super forward.** · **Pattern:**
+every MCreator block that reacts to a right-click: `public InteractionResult use(BlockState blockstate, Level world, BlockPos
+pos, Player entity, InteractionHand hand, BlockHitResult hit) { super.use(blockstate, world, pos, entity, hand, hit); ...}`
+· **Symptom:** forge-shapes flagged it for a hand port to `useItemOn` and left it, so the method overrode nothing and the
+super call failed (`cannot find symbol: method use(...)`) · **Fix:** the hand check now ignores the `super.use(...)`
+forward -- passing the hand on to vanilla is not a read of it, and that call is rewritten to `super.useWithoutItem` in the
+same step. A body that really reads the hand is still flagged. · **Same mod:** `isValidBonemealTarget` lost its trailing
+`boolean isClient` in 1.20.2; a row drops it from the override.

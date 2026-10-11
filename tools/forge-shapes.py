@@ -750,7 +750,10 @@ def t_hooks(path, text, ctx, res):
             res.count["hooks"] += 1
         elif mt.name == "use" and types == ["BlockState", "Level", "BlockPos", "Player", "InteractionHand", "BlockHitResult"]:
             hand = names[4]
-            if re.search(r"(?<![\w$.])%s(?![\w$])" % re.escape(hand), body):
+            # the super forward carries the hand on to vanilla and is rewritten below: it is not a READ of it
+            # (MCreator's every Block.use opens with `super.use(blockstate, world, pos, entity, hand, hit);`, X114)
+            rest = re.sub(r"super\.use\(([^,()]+),([^,()]+),([^,()]+),([^,()]+),[^,()]+,([^,()]+)\)", "", body)
+            if re.search(r"(?<![\w$.])%s(?![\w$])" % re.escape(hand), rest):
                 flag(mt.start, "Block.use reads its hand: port to useItemOn (returns ItemInteractionResult, §127)"); continue
             nb = re.sub(r"super\.use\(([^,()]+),([^,()]+),([^,()]+),([^,()]+),[^,()]+,([^,()]+)\)",
                         r"super.useWithoutItem(\1,\2,\3,\4,\5)", body)
@@ -1303,6 +1306,16 @@ class A {
     }
 }
 """, ["onClientTick(ClientTickEvent.Pre event) {", "        tick();"], [".phase", "Phase", "if ("]),
+    ("hooks", """package a;
+class B extends Block {
+    public InteractionResult use(BlockState blockstate, Level world, BlockPos pos, Player entity, InteractionHand hand, BlockHitResult hit) {
+        super.use(blockstate, world, pos, entity, hand, hit);
+        Proc.execute(world, pos.getX(), entity);
+        return InteractionResult.SUCCESS;
+    }
+}
+""", ["InteractionResult useWithoutItem(BlockState blockstate, Level world, BlockPos pos, Player entity, BlockHitResult hit)",
+      "super.useWithoutItem(blockstate, world, pos, entity, hit);"], ["super.use(", "InteractionHand"]),
     ("modctor", """package a;
 import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
 @Mod(MyMod.MOD_ID)
