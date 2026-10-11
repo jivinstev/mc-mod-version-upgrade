@@ -372,11 +372,14 @@ def main_cli(a):
     logs = work / "mechanical-hop"
     logs.mkdir(exist_ok=True)
     n0, _ = gradle_count(work, logs / "start.log")
-    if n0 is None:
+    moves = _load("era_hop", "era-hop.py").ws_moves() / f"moves-1.21.1-to-{a.target}.tsv"
+    has_at = any(work.glob("src/*/resources/META-INF/accesstransformer.cfg")) and moves.exists()
+    # An AT that widens a vanilla method breaks Minecraft's own recompile, so the START compile never reaches javac:
+    # that is exactly the case the AT loop below repairs, so it must not be a stop (X71).
+    if n0 is None and not has_at:
         print("mechanical-hop: the start compile never reached javac; see mechanical-hop/start.log")
         return 2
-    moves = _load("era_hop", "era-hop.py").ws_moves() / f"moves-1.21.1-to-{a.target}.tsv"
-    if any(work.glob("src/*/resources/META-INF/accesstransformer.cfg")) and moves.exists():
+    if has_at:
         out = era_access_transformer(work, moves)
         print(f"mechanical-hop:   access transformer: {headline(out, 'fix-access-transformer', 'at')}", flush=True)
         try:
