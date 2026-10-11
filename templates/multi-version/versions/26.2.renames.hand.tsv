@@ -60,6 +60,9 @@
 #             # where a dead rule IS a real bug.
 net.minecraft.resources.ResourceLocation	net.minecraft.resources.Identifier
 ResourceLocation	Identifier
+# X106: the command argument followed the type (26.2 jar: IdentifierArgument.id() / getId(ctx, name), same shape)
+net.minecraft.commands.arguments.ResourceLocationArgument	net.minecraft.commands.arguments.IdentifierArgument
+ResourceLocationArgument	IdentifierArgument
 
 # -- sub-package reorganisation: same simple name, new home.
 net.neoforged.neoforge.client.model.data.ModelData	net.neoforged.neoforge.model.data.ModelData

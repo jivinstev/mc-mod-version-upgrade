@@ -53,3 +53,5 @@ Minecraft	getTimer	getDeltaTracker
 LootContext	getParam	getParameter
 LootContext	hasParam	hasParameter
 LootContext	getParamOrNull	getOptionalParameter
+# 26.2: SoundEvent.getLocation() -> location() (checked in the 26.2 jar: Identifier location())
+SoundEvent	getLocation	location

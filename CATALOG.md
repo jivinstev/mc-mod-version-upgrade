@@ -6170,3 +6170,10 @@ record fields; `Keys.X` goes to `NeoForgeRegistries.Keys.X` for NeoForge-owned r
 so the reference is bound); `Item.TooltipContext` for the BlockGetter form; the effect packet's new blend flag as
 `false`; `dropExperience(null)` (the killer is unknown at that call); `new ArrayList<>(...)`. The packet flag and the null
 killer are judgements, not renames -- recorded here so a later reader knows which rows to distrust.
+
+**X106. 26.2 renamed the companions of `ResourceLocation` too, and a token rule for the type cannot reach them.**
+`ResourceLocationArgument` became `IdentifierArgument` (same `id()` / `getId(ctx, name)`), and `SoundEvent.getLocation()`
+became `location()`. The `ResourceLocation` → `Identifier` row is anchored on the whole token, so it leaves
+`ResourceLocationArgument` alone, which is right for it and leaves the argument unported. A type rename sweeps the
+type; every class whose NAME merely contains it needs its own row. Found on a 14-error client music mod, where these
+were 7 of the 14.
