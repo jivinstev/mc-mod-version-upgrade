@@ -1043,6 +1043,9 @@ def fix_decompile_artifacts(srcj):
         n["string_concats"] += c
         new, c = re.subn(r"\(([A-Za-z_][\w.$]*)<>\)", r"(\1)", new)   # `(Supplier<>) () -> x`: a raw cast is legal
         n["diamond_casts"] += c
+        new, c = re.subn(r"(?m)^[ \t]*static\s*\{\s*if\s*\(\s*<unrepresentable>\.\$assertionsDisabled\s*\)\s*\{\s*\}\s*\}[ \t]*\n",
+                         "", new)          # javac's assertion-status initializer, empty once decompiled (illegal in an interface)
+        n["assert_guards"] += c
         k = new.count("<unrepresentable>.$assertionsDisabled")
         if k:
             new = new.replace("<unrepresentable>.$assertionsDisabled", "true")
