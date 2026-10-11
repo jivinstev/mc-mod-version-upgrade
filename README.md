@@ -81,7 +81,8 @@ Each script prints its options with `--help`. Most also have `--self-check`, whi
 
 Both routes run the same deterministic stage after each hop's rename tables and before any worker sees an
 error (`tools/mechanical-hop.py`, called by `port.py` and `port-upstream.py`): on a Forge → 1.21.1 hop the
-access transformer, Forge code shapes, SimpleChannel → payloads and Holder fixes; on a 26.2 hop the member
+access transformer, Forge code shapes, SimpleChannel → payloads, MCreator variables, GUI overlays → layers, Forge
+capabilities → a mod-local compat layer wired into NeoForge (`tools/convert-capabilities.py`) and Holder fixes; on a 26.2 hop the member
 renames and the converters for GUI hooks, entity save/load, data attachments, changed hook signatures, tool tiers
 and armour, render types and shaders, entity render state and GeckoLib. A converter added there reaches both
 routes; `tools/test-port-tools.sh` fails if a route stops going through it. Two
