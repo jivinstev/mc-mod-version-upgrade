@@ -6511,3 +6511,8 @@ Listed rather than guessed: instance attachers; ItemStack attachers (an ItemStac
 1.21.1, so its capabilities would not persist); `getCapability` method references; and a mod with no IEventBus in
 its constructor. Data that old saves kept under "ForgeCaps" is not migrated. The stage runs after
 convert-mcreator-variables, so MCreator's capability-based variables still go through their own converter.
+
+**X143. Vineflower nests a diamond inside type arguments: `new ListProperty<List<>>()`.** This does not parse
+(`illegal start of type`), and a parse error stops the whole compile before the mechanical stage can count anything:
+a 26.2 hop of a GUI library failed outright on three of these. `fix_decompile_artifacts` now writes the outer
+diamond, `new ListProperty<>()`, which infers the same type.

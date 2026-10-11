@@ -1411,6 +1411,9 @@ def fix_decompile_artifacts(srcj):
         n["string_concats"] += c
         new, c = re.subn(r"\(([A-Za-z_][\w.$]*)<>\)", r"(\1)", new)   # `(Supplier<>) () -> x`: a raw cast is legal
         n["diamond_casts"] += c
+        # `new ListProperty<List<>>()`: a diamond nested inside type arguments does not parse; the outer one infers (X143)
+        new, c = re.subn(r"\bnew\s+([\w.$]+)\s*<\s*[\w.$]+\s*<>\s*>\s*\(", r"new \1<>(", new)
+        n["diamond_casts"] += c
         # an enum with NO constants needs a `;` before its members, and the decompile omits it (X83)
         new, c = re.subn(r"(\benum\s+\w+(?:\s+implements\s+[\w.<>, ]+)?\s*\{)(\s*)(?=(?:public|private|protected|static|final|abstract)\b)",
                          r"\1\2;\2", new)
@@ -1622,6 +1625,10 @@ def self_check():
                      "var q = ((LivingEntity) this).getHealth(); } }\n", encoding="utf-8")
         got = fix_decompile_artifacts(d)
         s = g.read_text(encoding="utf-8")
+        g.write_text("class N { ListProperty<T> a = new ListProperty<List<>>().with(x); Map<K, V> b = new HashMap<>(); }\n",
+                     encoding="utf-8")
+        fix_decompile_artifacts(d)
+        ok &= g.read_text(encoding="utf-8") == "class N { ListProperty<T> a = new ListProperty<>().with(x); Map<K, V> b = new HashMap<>(); }\n"
         g.write_text("public enum E implements I {\n   public final int x;\n   private E(int x) { this.x = x; }\n}\n"
                      "enum F { A, B; private int y; }\n", encoding="utf-8")
         got = fix_decompile_artifacts(d)
