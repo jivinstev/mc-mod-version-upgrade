@@ -21,7 +21,7 @@ Never removes an entry. Prints what it changed. Standard library only.
 """
 import argparse, json, pathlib, re, sys
 
-OVERRIDE = re.compile(r"/transformed/(?P<path>net/(?:minecraft|neoforged)/\S+?)\.java:\d+: error: (?P<m>[\w$]+)\([^)]*\) in [\w$.]+ "
+OVERRIDE = re.compile(r"(?P<full>\S*/transformed/(?P<path>net/(?:minecraft|neoforged)/\S+?)\.java):(?P<line>\d+): error: (?P<m>[\w$]+)\([^)]*\) in [\w$.]+ "
                       r"cannot override (?P=m)\([^)]*\) in (?P<base>[\w$.]+)")
 # NeoForge's own classes are recompiled in the same step (a widened SpawnEggItem method breaks NeoForge's
 # DeferredSpawnEggItem override), so their overrides need widening exactly like Minecraft's.
@@ -93,6 +93,65 @@ def entries(text):
     return out
 
 
+PRIM = {"void": "V", "boolean": "Z", "byte": "B", "char": "C", "short": "S", "int": "I", "long": "J", "float": "F",
+        "double": "D"}
+
+
+def source_desc(path, line, member, base_desc):
+    """The OVERRIDING method's own descriptor, read from the recompiled source javac named. A subclass that overrides a
+    generic method (`scale(AbstractClientPlayer, ..)` for `scale(T, ..)`) has a narrower descriptor than the base; an
+    AT line written with the base's descriptor widens only the compiler's bridge method, and the same errors come back
+    (X86). The return type is taken from the base (covariant returns are rare here). -> descriptor, or None"""
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = text.split("\n")
+    chunk = "\n".join(lines[int(line) - 1:int(line) + 6])
+    m = re.search(r"\b" + re.escape(member) + r"\s*\(([^)]*)\)", chunk)
+    if not m:
+        return None
+    pkg = (re.search(r"^package\s+([\w.]+);", text, re.M) or [None, ""])[1]
+    imports = {i.rsplit(".", 1)[-1]: i for i in re.findall(r"^import\s+([\w.]+);", text, re.M)}
+    bounds = {}
+    for tp in re.findall(r"\b(?:class|interface)\s+\w+\s*<(.*?)>\s*(?:extends|implements|\{)", text):
+        depth, cur, parts = 0, "", []
+        for ch in tp:
+            depth += ch == "<"; depth -= ch == ">"
+            if ch == "," and depth == 0:
+                parts.append(cur); cur = ""
+            else:
+                cur += ch
+        for p_ in parts + [cur]:
+            bm = re.match(r"\s*(\w+)(?:\s+extends\s+([\w.]+))?", p_)
+            if bm:
+                bounds[bm.group(1)] = bm.group(2) or "Object"
+
+    def fq(t):
+        t = bounds.get(t, t)
+        if t in PRIM:
+            return PRIM[t]
+        head, _, rest = t.partition(".")
+        if head in imports:
+            name = imports[head] + ("$" + rest.replace(".", "$") if rest else "")
+        elif t in ("String", "Object", "Integer", "Long", "Boolean", "Float", "Double", "Class", "Iterable"):
+            name = "java.lang." + t
+        elif "." in t and t[0].islower():
+            name = t
+        else:
+            name = (pkg + "." if pkg else "") + t.replace(".", "$")
+        return "L" + name.replace(".", "/") + ";"
+
+    out = []
+    for param in [x for x in re.split(r",(?![^<]*>)", m.group(1)) if x.strip()]:
+        param = re.sub(r"@[\w.]+(?:\([^)]*\))?\s*", "", param).replace("final ", "").strip()
+        t = re.sub(r"<.*>", "", param.rsplit(None, 1)[0] if " " in param else param).strip()
+        dims = t.count("[]") + (1 if t.endswith("...") else 0)
+        t = t.replace("[]", "").replace("...", "").strip()
+        out.append("[" * dims + fq(t))
+    return "(" + "".join(out) + ")" + base_desc.rsplit(")", 1)[1]
+
+
 def override_lines(log_text, text):
     """New entries widening each overriding subclass's method, from 'cannot override' errors."""
     have = {(c, m, d) for _a, c, m, d in entries(text)}
@@ -103,10 +162,13 @@ def override_lines(log_text, text):
         base_simple = e.group("base").split(".")[-1]
         for _a, cls, member, desc in entries(text):
             if member == e.group("m") and desc and cls.split(".")[-1].split("$")[-1] == base_simple:
-                key = (sub_cls, member, desc)
-                if key not in have:
-                    have.add(key)
-                    adds.append(f"public {sub_cls} {member}{desc} # overrides {cls}.{member}, widened there")
+                full = e.groupdict().get("full")
+                own = source_desc(full, e.group("line"), member, desc) if full else None
+                for d in dict.fromkeys([own or desc, desc]):     # the method itself, and its bridge
+                    key = (sub_cls, member, d)
+                    if key not in have:
+                        have.add(key)
+                        adds.append(f"public {sub_cls} {member}{d} # overrides {cls}.{member}, widened there")
                 break
     return adds
 
@@ -177,6 +239,19 @@ def self_check():
     ok &= override_lines(neo, egg) == ["public net.neoforged.neoforge.common.DeferredSpawnEggItem getDefaultType()"
                                        "Lnet/minecraft/world/entity/EntityType; # overrides net.minecraft.world.item."
                                        "SpawnEggItem.getDefaultType, widened there"]
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:    # a generic override: the subclass's OWN descriptor, plus the bridge
+        f = pathlib.Path(d, "steps/transformSource/transformed/net/minecraft/client/r/HorseR.java")
+        f.parent.mkdir(parents=True)
+        f.write_text("package net.minecraft.client.r;\nimport net.minecraft.world.entity.animal.horse.AbstractHorse;\n"
+                     "public class HorseR<T extends AbstractHorse, M> extends LivingR<T, M> {\n"
+                     "    protected void scale(T e, PoseStack p, float f) {}\n}\n", encoding="utf-8")
+        pathlib.Path(d, "steps/transformSource/transformed/net/minecraft/client/r/PoseStack.java").write_text("", encoding="utf-8")
+        log2 = f"{f}:4: error: scale(T#1,PoseStack,float) in HorseR cannot override scale(T#2,PoseStack,float) in LivingR\n"
+        at2 = "public net.minecraft.client.r.LivingR scale(Lnet/minecraft/world/entity/LivingEntity;Lcom/mojang/blaze3d/vertex/PoseStack;F)V\n"
+        adds2 = override_lines(log2, at2)
+        ok = ok and any("HorseR scale(Lnet/minecraft/world/entity/animal/horse/AbstractHorse;Lnet/minecraft/client/r/PoseStack;F)V" in a
+                        for a in adds2) and any("HorseR scale(Lnet/minecraft/world/entity/LivingEntity;" in a for a in adds2)
     print("self-check:", "OK" if ok else f"FAIL {adds}")
     return 0 if ok else 1
 

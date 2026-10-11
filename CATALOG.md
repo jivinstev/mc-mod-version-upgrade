@@ -5947,3 +5947,12 @@ error that the `<token> expected` family also matched, so a parseable file was s
 the optional imports cause · **Fix:** a file outside an integration package that at least three staying files name
 is kept; its optional imports are compile-loop work. A plugin in an `integration/`/`compat/` package still parks
 whole.
+
+**X86. Widening an override of a GENERIC method needs the override's own descriptor.** · **Pattern:** a mod's AT
+widens `LivingEntityRenderer.scale(T, PoseStack, float)`; twenty vanilla renderers override it as `protected` with
+concrete types (`PlayerRenderer.scale(AbstractClientPlayer, …)`, `AbstractHorseRenderer.scale(T extends AbstractHorse,
+…)`) · **Symptom:** Minecraft's recompile fails with `cannot override … attempting to assign weaker access`; the
+override loop added 20 widenings with the BASE descriptor, which only widened each compiler bridge, the same errors
+returned, and the stage stopped ("no access-transformer override explains it"). Surfaced by X77: the line had been
+an unmapped SRG name, i.e. dead · **Fix:** each subclass's descriptor is read from the recompiled source javac
+names (imports, package, type-variable bounds), and both it and the bridge are widened.
