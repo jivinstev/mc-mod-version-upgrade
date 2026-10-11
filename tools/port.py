@@ -1414,6 +1414,12 @@ def fix_decompile_artifacts(srcj):
         # `new ListProperty<List<>>()`: a diamond nested inside type arguments does not parse; the outer one infers (X143)
         new, c = re.subn(r"\bnew\s+([\w.$]+)\s*<\s*[\w.$]+\s*<>\s*>\s*\(", r"new \1<>(", new)
         n["diamond_casts"] += c
+        # MCreator's block-state copy loop: `Property _property = ...; _bs.setValue(_property, (Comparable) entry.getValue())`
+        # -- the decompile drops the raw (Comparable) cast (erasure makes it invisible), and javac cannot type the call (X150)
+        for pv in set(re.findall(r"(?<![\w.<])Property\s+(\w+)\s*=", new)):
+            new, c = re.subn(r"\.setValue\(\s*%s\s*,\s*(?!\(Comparable\))([\w.]+\.getValue\(\))\s*\)" % re.escape(pv),
+                             r".setValue(%s, (Comparable) \1)" % pv, new)
+            n["raw_state_values"] = n.get("raw_state_values", 0) + c
         # an enum with NO constants needs a `;` before its members, and the decompile omits it (X83)
         new, c = re.subn(r"(\benum\s+\w+(?:\s+implements\s+[\w.<>, ]+)?\s*\{)(\s*)(?=(?:public|private|protected|static|final|abstract)\b)",
                          r"\1\2;\2", new)
@@ -1625,6 +1631,13 @@ def self_check():
                      "var q = ((LivingEntity) this).getHealth(); } }\n", encoding="utf-8")
         got = fix_decompile_artifacts(d)
         s = g.read_text(encoding="utf-8")
+        g.write_text("class P { void f() { Property _property = b.getProperty(k); _bs = (BlockState)_bs.setValue(_property, entry.getValue()); "
+                     "s.setValue(other, entry.getValue()); } }\n", encoding="utf-8")
+        got = fix_decompile_artifacts(d)
+        ok &= g.read_text(encoding="utf-8") == ("class P { void f() { Property _property = b.getProperty(k); _bs = (BlockState)_bs.setValue("
+                                                "_property, (Comparable) entry.getValue()); s.setValue(other, entry.getValue()); } }\n")
+        fix_decompile_artifacts(d)
+        ok &= "(Comparable) (Comparable)" not in g.read_text(encoding="utf-8")
         g.write_text("class N { ListProperty<T> a = new ListProperty<List<>>().with(x); Map<K, V> b = new HashMap<>(); }\n",
                      encoding="utf-8")
         fix_decompile_artifacts(d)

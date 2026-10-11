@@ -6575,3 +6575,9 @@ and a 1.20 mod never shipped any. The transform uses the 1.21.1 constructor (spr
 adds a `renderWidget` that blits the same region 1.20's `renderTexture` did: v + yDiff when hovered or focused,
 + 2·yDiff when inactive. The button keeps its own art with no atlas work. A button that already has a body is
 listed. Compiled against 1.21.1.
+
+**X150. Vineflower drops MCreator's raw `(Comparable)` cast in its block-state copy loop.** MCreator writes
+`Property _property = ...; _bs = _bs.setValue(_property, (Comparable) entry.getValue());` into every "copy block
+state" procedure. Under erasure the cast is invisible, so the decompile omits it, and javac then cannot type
+`setValue(Property<T>, V)` with a `Comparable<?>`: 93 errors in one mod, every procedure that swaps a block. Where a
+file declares a raw `Property x`, `fix_decompile_artifacts` restores the cast on `.setValue(x, y.getValue())`.
