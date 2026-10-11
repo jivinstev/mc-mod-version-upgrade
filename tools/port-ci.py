@@ -11,6 +11,16 @@ pass. Everything is read from the repository rather than guessed: the target fro
 Java toolchain from build.gradle, the author's branch from origin/HEAD. --dep names a sibling port this one
 compiles against (published to mavenLocal by its own build first, as during the port).
 
+    python3 tools/port-ci.py promote --fork <owner/repo> --tag <release tag> --played-by <github login>
+                             [--notes "<what was played>"] [--branch <port branch>] [--print]
+
+`promote` turns a pre-release into a full Release once a person has played it. It does not edit the release itself:
+it dispatches the fork's own Port CI workflow with promote=<tag>, which checks the tag is a pre-release that
+workflow published from that branch and rewrites "Pre-release until played by a person." with who played it and
+when. It runs `gh workflow run` when gh is logged in; otherwise (or with --print) it prints the dispatch, which an
+agent can send through its GitHub connector (workflow port-ci.yml, ref = the branch, inputs promote / played_by /
+played_notes). A nightly or unattended run must never promote: promotion is the "a person played it" gate.
+
 The workflow downloads the Port CI kit (tools/port-ci-kit.py) -- a release asset holding only the gate runner and
 what it needs -- pinned by version and sha256, rather than checking this repository out. Standard library only.
 """
@@ -135,6 +145,64 @@ def _sha_url(url):
         return hashlib.sha256(r.read()).hexdigest()
 
 
+LOGIN = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}")
+TAG = re.compile(r"(?P<modid>[\w.+-]+?)-(?P<ver>[^/]+)-mc(?P<mc>\d+\.\d+(?:\.\d+)?)(?P<suffix>-release)?(?:-r\d+)?")
+
+
+def branch_for(tag):
+    """The port branch a release tag was built on: <mod>-<ver>-mc<mc>[-release][-rN] -> neoforge-<mc>[-release]."""
+    m = TAG.fullmatch(tag)
+    if not m:
+        raise SystemExit(f"{tag!r} is not a Port CI release tag (<mod>-<version>-mc<minecraft>[-release][-rN]); "
+                         "pass --branch")
+    return f"neoforge-{m['mc']}{m['suffix'] or ''}"
+
+
+def promote_dispatch(fork, tag, who, notes="", branch=None):
+    """The workflow dispatch that promotes `tag`: (ref, inputs). Refuses what the workflow would refuse, earlier."""
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", fork or ""):
+        raise SystemExit(f"--fork must be owner/repo, got {fork!r}")
+    if not who or not LOGIN.fullmatch(who):
+        raise SystemExit("--played-by must be the GitHub login of the person who played this build: promotion "
+                         "records who did, and nothing promotes without one")
+    if "\n" in notes:
+        raise SystemExit("--notes is one line")
+    return branch or branch_for(tag), {"promote": tag, "played_by": who, "played_notes": notes}
+
+
+def promote(argv):
+    ap = argparse.ArgumentParser(prog="port-ci.py promote", description="promote a played pre-release to a Release")
+    ap.add_argument("--fork", required=True); ap.add_argument("--tag", required=True)
+    ap.add_argument("--played-by", required=True); ap.add_argument("--notes", default="")
+    ap.add_argument("--branch"); ap.add_argument("--print", action="store_true")
+    a = ap.parse_args(argv)
+    ref, inputs = promote_dispatch(a.fork, a.tag, a.played_by, a.notes, a.branch)
+    import json
+    try:
+        rel = json.loads(_get(f"https://api.github.com/repos/{a.fork}/releases/tags/{a.tag}"))
+    except Exception as e:                                  # no network, or no such release: say which
+        rel = None
+        print(f"(could not read release {a.tag} from GitHub: {e}; the workflow checks it anyway)")
+    if rel is not None and not rel.get("prerelease"):
+        sys.exit(f"{a.tag} is already a full Release")
+    cmd = ["gh", "workflow", "run", "port-ci.yml", "--repo", a.fork, "--ref", ref]
+    for k, v in inputs.items():
+        cmd += ["-f", f"{k}={v}"]
+    import shlex, shutil
+    logged_in = shutil.which("gh") and subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0
+    if a.print or not logged_in:
+        print("Dispatch the fork's Port CI workflow (port-ci.yml) on ref", ref, "with inputs", json.dumps(inputs))
+        print("  " + shlex.join(cmd))
+        if not logged_in and not a.print:
+            print("(gh is not logged in here: run that, use Actions -> Port CI -> Run workflow, or let an agent "
+                  "dispatch it through its GitHub connector)")
+        return 0
+    r = subprocess.run(cmd)
+    if r.returncode == 0:
+        print(f"dispatched: watch https://github.com/{a.fork}/actions/workflows/port-ci.yml")
+    return r.returncode
+
+
 def self_check():
     t = TEMPLATE.read_text(encoding="utf-8")
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
@@ -164,6 +232,23 @@ def self_check():
         pre_build(["not-a-dep"]); ok = False
     except SystemExit:
         pass
+    # promote: the job exists, the gates do not run for it, and its inputs reach the script only through env
+    ok &= "\n  promote:\n" in out and "if: ${{ !inputs.promote }}" in out and "if: ${{ inputs.promote }}" in out
+    job = out.split("\n  promote:\n", 1)[-1]
+    ok &= "TAG: ${{ inputs.promote }}" in job and "--prerelease=false --latest" in job
+    ok &= "run: |" in job and "${{" not in job.split("run: |", 1)[1]        # nothing spliced into the script
+    ok &= "Pre-release until played by a person." in out          # the marker promote rewrites
+    ok &= branch_for("mymod-1.0-fix-mc1.21.1-r4") == "neoforge-1.21.1"
+    ok &= branch_for("x-1.0-mc26.2") == "neoforge-26.2"
+    ok &= branch_for("x_y-2.0+b3-mc1.21.1-release-r2") == "neoforge-1.21.1-release"
+    ok &= promote_dispatch("o/r", "x-1.0-mc1.21.1", "some-one", "beat the boss") == (
+        "neoforge-1.21.1", {"promote": "x-1.0-mc1.21.1", "played_by": "some-one", "played_notes": "beat the boss"})
+    for bad in (("o/r", "x-1.0-mc1.21.1", ""), ("o/r", "x-1.0-mc1.21.1", "a b"), ("o/r", "x-1.0-mc1.21.1", "-x"),
+                ("nope", "x-1.0-mc1.21.1", "me"), ("o/r", "not-a-tag", "me")):
+        try:
+            promote_dispatch(*bad); ok = False
+        except SystemExit:
+            pass
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -171,6 +256,8 @@ def self_check():
 def main():
     if "--self-check" in sys.argv:
         return self_check()
+    if sys.argv[1:2] == ["promote"]:
+        return promote(sys.argv[2:])
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", required=True); ap.add_argument("--modid", required=True)
     ap.add_argument("--upstream", default="", help="the author's repository URL, for the release notes")

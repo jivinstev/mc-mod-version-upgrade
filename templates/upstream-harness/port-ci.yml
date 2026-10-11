@@ -9,8 +9,12 @@
 #
 # Release: run this workflow by hand (Actions -> Port CI -> Run workflow) with release = true, or push a tag
 # named <mod>-<version>-mc<minecraft>. If every gate passes, the JARs the author's build produced are published
-# as a PRE-release tagged <mod>-<version>-mc<minecraft> (the version read from gradle.properties); promote it
-# once a person has played it.
+# as a PRE-release tagged <mod>-<version>-mc<minecraft> (the version read from gradle.properties).
+#
+# Promote: once a person has played a pre-release, run this workflow with promote = <that tag> and played_by =
+# <their GitHub login> (tools/port-ci.py promote does it). It runs no gates and builds nothing: it checks the tag
+# is a pre-release this workflow published from this branch, then makes it a full Release, marked latest, and
+# replaces "Pre-release until played by a person." in its notes with who played it and when.
 name: Port CI ({{TARGET}})
 
 on:
@@ -25,6 +29,18 @@ on:
         description: "Publish a pre-release if every gate passes"
         type: boolean
         default: false
+      promote:
+        description: "Promote this pre-release tag to a full Release (no gates run)"
+        type: string
+        default: ""
+      played_by:
+        description: "With promote: GitHub login of the person who played the build (required)"
+        type: string
+        default: ""
+      played_notes:
+        description: "With promote: optional one line on what was played or tested"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -40,6 +56,7 @@ jobs:
       matrix:
         env: [full, minimal]
     name: gates (${{ matrix.env }})
+    if: ${{ !inputs.promote }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -129,3 +146,53 @@ jobs:
           } > notes.md
           gh release create "$TAG" jars/*.jar --repo "${{ github.repository }}" --prerelease \
             --title "$TAG (unofficial {{TARGET}} port)" --notes-file notes.md --target "${{ github.sha }}"
+
+  promote:
+    # A person played this pre-release: make it a full Release. Inputs reach the script only through env, never
+    # spliced into it, so a tag or name cannot inject shell.
+    if: ${{ inputs.promote }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # tags and history, to prove the tag was built from this branch
+      - name: Promote to a full Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.promote }}
+          WHO: ${{ inputs.played_by }}
+          WHAT: ${{ inputs.played_notes }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$WHO" | grep -Eq '^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$'; then
+            echo "::error::played_by must be the GitHub login of the person who played this build"; exit 1
+          fi
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+               --json tagName,isPrerelease,isDraft,author,body > rel.json; then
+            echo "::error::no release named $TAG in $GITHUB_REPOSITORY"; exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/$TAG" HEAD; then
+            echo "::error::$TAG was not built from ${GITHUB_REF_NAME}; promote it from the branch it was built on"; exit 1
+          fi
+          python3 - <<'PY'
+          import datetime, json, os, sys
+          r = json.load(open("rel.json"))
+          why = ("it is already a full Release" if not r["isPrerelease"] else
+                 "it is a draft" if r["isDraft"] else
+                 "it was not published by this workflow" if r["author"]["login"] != "github-actions[bot]" else None)
+          if why:
+              sys.exit(f"::error::will not promote {os.environ['TAG']}: {why}")
+          mark = "Pre-release until played by a person."
+          if mark not in r["body"]:
+              sys.exit(f"::error::{os.environ['TAG']}'s notes lack {mark!r}; not a release this workflow made")
+          day = datetime.date.today().isoformat()
+          line = f"Played by @{os.environ['WHO']} on {day}"
+          what = os.environ["WHAT"].strip().rstrip(".")
+          line += (f": {what}." if what else ".") + f" Promoted to a full Release by [this run]({os.environ['RUN_URL']})."
+          open("notes.md", "w").write(r["body"].replace(mark, line))
+          PY
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest --notes-file notes.md
+          echo "Promoted $TAG (played by @$WHO)" >> "$GITHUB_STEP_SUMMARY"
