@@ -782,6 +782,12 @@ def main():
         return stop(23, f"{jar.name} is a Kotlin mod ({kt} of {total} classes carry kotlin.Metadata): this pipeline "
                         f"decompiles and ports Java, and turning a Kotlin mod into Java is a rewrite, not a port",
                     ["port it by hand in Kotlin (kotlinforforge has NeoForge builds)", "or skip this mod"])
+    gv, total = groovy_share(jar)
+    if total and gv * 2 > total:
+        return stop(23, f"{jar.name} is a Groovy mod ({gv} of {total} classes are Groovy-compiled -- GroovyObject / "
+                        f"org.codehaus.groovy): its invokedynamic call sites decompile to Java that does not parse "
+                        f"(`IndyInterface.bootstrap<...>(...)`), so there is no Java source to port (X116)",
+                    ["port it by hand in Groovy (GML has NeoForge builds)", "or skip this mod"])
     own_split = bundle_modules(jar)
     if own_split:
         return stop(23, f"{jar.name} is a bundle jar: it carries {own_split[0]} class(es) of its own and ships its code as "
@@ -1061,6 +1067,13 @@ def kotlin_share(jar):
     with zipfile.ZipFile(jar) as z:
         cls = [n for n in z.namelist() if n.endswith(".class") and not n.startswith("META-INF/")]
         return sum(1 for n in cls if b"Lkotlin/Metadata;" in z.read(n)), len(cls)
+
+
+def groovy_share(jar):
+    """(Groovy-compiled classes, all classes) -- X116: Groovy's indy call sites do not decompile to Java."""
+    with zipfile.ZipFile(jar) as z:
+        cls = [n for n in z.namelist() if n.endswith(".class") and not n.startswith("META-INF/")]
+        return sum(1 for n in cls if re.search(rb"groovy/lang/GroovyObject|org/codehaus/groovy/", z.read(n))), len(cls)
 
 
 def forge_api_jar(jar):
@@ -1512,6 +1525,10 @@ def self_check():
             z.writestr("a/A.class", b"\xca\xfe Lkotlin/Metadata; x"); z.writestr("a/B.class", b"\xca\xfe x")
             z.writestr("a/C.class", b"\xca\xfe Lkotlin/Metadata; y")
         ok &= kotlin_share(pathlib.Path(d, "k.jar")) == (2, 3) and kotlin_share(pathlib.Path(d, "a.jar")) == (0, 1)
+        with zipfile.ZipFile(f"{d}/g.jar", "w") as z:
+            z.writestr("a/A.class", b"\xca\xfe groovy/lang/GroovyObject x"); z.writestr("a/B.class", b"\xca\xfe x")
+            z.writestr("a/C.class", b"\xca\xfe org/codehaus/groovy/vmplugin/v8/IndyInterface y")
+        ok &= groovy_share(pathlib.Path(d, "g.jar")) == (2, 3) and groovy_share(pathlib.Path(d, "a.jar")) == (0, 1)
         with zipfile.ZipFile(f"{d}/u.jar", "w") as z:
             for i, b in enumerate((b"net/minecraftforge/x", b"net/minecraftforge/y", b"net/neoforged/a", b"net/neoforged/b",
                                    b"net/fabricmc/api", b"net/minecraft/class_123")):

@@ -6262,3 +6262,10 @@ same step. A body that really reads the hand is still flagged. · **Same mod:** 
 (§V38b), and the rename rows strip `bus = Bus.MOD` -- but Vineflower writes the constant through a nested import,
 `import net.neoforged.fml.common.EventBusSubscriber.Bus;`, which then named a class 26.2 does not have: 43 errors in one
 mod, one per subscriber class. A row now drops that import (and the older `Mod.EventBusSubscriber.Bus` spelling).
+
+**X116. A Groovy mod reached the compile and stopped on a parse error.** · **Pattern:** a mod written for GML (the Groovy
+mod loader): 16 of its 21 classes implement `groovy.lang.GroovyObject` or call `org.codehaus.groovy`, and Groovy compiles
+dynamic calls to invokedynamic · **Symptom:** `mechanical stage failed (exit 2)`, `';' expected` on
+`compatibleMods = IndyInterface.bootstrap<"cast","()",0>(var9);` -- the decompiler's rendering of an indy site, which is not
+Java · **Fix:** triage counts Groovy-compiled classes the way it already counts Kotlin ones, and stops a mod that is mostly
+Groovy before setup with the honest reason: there is no Java source to port; a Groovy port is by hand.
