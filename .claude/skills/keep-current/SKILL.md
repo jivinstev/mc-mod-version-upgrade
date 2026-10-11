@@ -18,14 +18,18 @@ Tools: `tools/port-sync.py` (bring the authors' commits in), `tools/fix-ledger.p
 1. Setting up the schedule (once): which forks, the time, what may be pushed unattended.
 2. A reconcile decision the rule below does not settle (both outcomes would ship an S1 mode, or the only fix is a
    design change of the authors' feature).
-3. Merging a keep-current PR into the port branch, until the user has said such PRs may merge on green.
+3. Merging a keep-current PR into the port branch -- unless that fork's fleet entry says `"automerge": true`. The
+   user may set it for every fork whose releases they promote by hand: the pre-release a merge produces is not
+   what players are pointed at until a person has played it and promoted it, so merging on green is safe.
 4. **Never**: promoting a release (a person must have played it -- `port-ci.py promote` is theirs), publishing to
    Modrinth/CurseForge, pushing to or commenting on the authors' repository, force-pushing.
 
 ## The fleet and its order
 
 The fleet file (outside this repository: it names other people's mods) is `tools/port-fleet.py`'s. Order is
-**dependencies first**. A dependent's CI pins its dependency by exact release asset (`--dep-jar`, written into
+**dependencies first**. Per-fork fields this skill reads beyond port-fleet's: `"upstream"` (the authors' repo and
+branch), `"automerge"` (merge its keep-current PR once CI is green), `"ledger_issues"` (the fork issues that carry
+fix ledgers). A dependent's CI pins its dependency by exact release asset (`--dep-jar`, written into
 the dependent's `port-ci.yml`), so read the edges from those pins, not from memory. A dependent is not touched
 until its dependency's run is green, and it is then gated against the dependency's NEW build.
 
@@ -99,9 +103,16 @@ until its dependency's run is green, and it is then gated against the dependency
    client gate -- Gate B passes even when it fails to apply).
 5. **Gate** (`ci-gates.py`, full and minimal; one run at a time -- the software-rendered client gives false
    failures under CPU contention, and the A/B worktrees share `~/.gradle`, so they count too). Then each mode's reproduction, for the modes this run decided.
-6. **Push the work branch and open a PR into the port branch** with: the incoming commits, the reconcile table
-   (mode, severity, decision, evidence), the gate tables, the ledger changes. Run `fix-ledger.py check --release
-   keep-current/<date>`: an S1 mode open on a branch that ships blocks the PR, and the run stops and reports.
+6. **Push the work branch and open a PR into the port branch** -- the fork's versioned branch, e.g.
+   `neoforge-1.21.1` -- with: the incoming commits, the reconcile table (mode, severity, decision, evidence), the
+   gate tables, the ledger changes. Merge the port branch into the work branch first if it moved (a CI-only
+   commit, say), so the PR is current. Run `fix-ledger.py check --release keep-current/<date>` first: an S1 mode
+   open on a branch that ships blocks the PR, and the run stops and reports.
+   **Auto-merge** (fleet entry `"automerge": true`): wait for the PR's own CI -- every gate, full and minimal --
+   and merge with a merge commit (never squash or rebase: the authors' commits must stay commits). A red or
+   missing check is not merged: fix it on the work branch, or stop and report. After merging, start the fork's
+   release run (`release=true`): it cuts a pre-release, which dependents re-pin to (step 7). Promotion stays a
+   person's (stop 4). Without `automerge`, leave the PR open for the user.
 7. **Dependents next.** Gate each dependent locally against this build (its `_mr`-style jar put into mavenLocal
    the way its CI does). Its pin (`port-ci.py --dep-jar`, a release asset + sha256) can only move once this
    dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
