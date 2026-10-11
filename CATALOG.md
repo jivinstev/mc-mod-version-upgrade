@@ -6116,3 +6116,14 @@ untouched; the provider and the capability subscriber go, `ATTACHMENT_TYPES` is 
 and `PlayerVariables` loses the handler-less `@EventBusSubscriber` MCreator puts on it (R1). Death copying stays with
 MCreator's own clone handler, which copies only the variables marked persistent. The receiver of each call is found by
 scanning back over identifiers, calls and casts, so `((Entity)entity).getCapability(..)` keeps its cast.
+
+**X101. A mod's own jar-in-jar libraries are REQUIRED, not optional integrations.** · **Pattern:** a mod bundling its
+author's UI/markup libraries in `META-INF/jars/` (`hermes`, `olympus`) and importing them throughout · **Symptom:**
+`park-optional` saw imports of packages on no classpath and parked them as integrations; when X85's hub rule kept the
+files many others name, their `olympus` imports turned into ~130 new errors on one mod (960 -> 1091 between sweeps,
+same dependencies) -- the libraries were never on the compile classpath at all · **Fix:** setup copies every bundled
+jar (MixinExtras aside: NeoForge provides it) into `libs/compile/`, compile-only; the parker's classpath scan already
+reads `libs/*/`, so code that uses them is kept and javac sees their real API. The bundled copy still ships inside
+the mod; a TARGET-version build of a bundled mod is still for the dependency step to find. · **The lesson about the
+measurement:** a re-run that goes UP is a finding, not noise -- compare its parked count and its error symbols against
+the earlier run before blaming the newest fix.

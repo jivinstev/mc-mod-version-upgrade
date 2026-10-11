@@ -403,7 +403,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     resource_jars = wire_resource_jars(raw, srcj, work)
     if resource_jars:
         with open(log, "a", encoding="utf-8") as fh:
-            fh.write(f"setup: compile-only resource jar(s) the code names: {', '.join(resource_jars)} (X94)\n")
+            fh.write(f"setup: compile-only bundled/resource jar(s): {', '.join(resource_jars)} (X94, X101)\n")
     # official names
     if setup_kind == "srg":
         mp = name_map("srg", src_mc, log)
@@ -1025,7 +1025,7 @@ def bundle_modules(jar):
 
 
 def wire_resource_jars(raw, srcj, work):
-    """X94: a jar the mod ships as a RESOURCE (META-INF/<mod>/bootstrap-agent.jar), not jar-in-jar, whose classes the
+    """X94/X101: a jar the mod ships as a RESOURCE (META-INF/<mod>/bootstrap-agent.jar), not jar-in-jar, whose classes the
     mod's own code names: copy it to libs/compile/ (compileOnly in the template, never on the runtime classpath, since
     the mod loads it itself). -> [jar names wired]."""
     meta = raw / "META-INF"
@@ -1036,6 +1036,13 @@ def wire_resource_jars(raw, srcj, work):
     out = []
     for j in sorted(meta.rglob("*.jar")):
         if {"jarjar", "jars"} & set(j.relative_to(meta).parts[:-1]):
+            # X101: a library the mod BUNDLES (jar-in-jar) is required by definition; its code is no optional
+            # integration. Compile against the bundled copy (MixinExtras aside: NeoForge provides it), so the parker
+            # keeps the code that uses it and javac sees its real API. The jar still ships inside the mod.
+            if not re.match(r"mixinextras", j.name, re.I):
+                (work / "libs/compile").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(j, work / "libs/compile" / j.name)
+                out.append(j.relative_to(raw).as_posix())
             continue
         try:
             with zipfile.ZipFile(j) as z:
