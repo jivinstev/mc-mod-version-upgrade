@@ -161,7 +161,7 @@ def pinned_dependency_tag(repo, dep_repo):
     wf = (pathlib.Path(repo) / ".github/workflows/port-ci.yml")
     if not wf.exists():
         return None
-    m = re.search(rf"github\.com/{re.escape(dep_repo)}/releases/download/([^/\"]+)/", wf.read_text(), re.I)
+    m = re.search(rf"github\.com/{re.escape(dep_repo)}/releases/download/([^/\"]+)/", wf.read_text(encoding="utf-8"), re.I)
     return m.group(1) if m else None
 
 
