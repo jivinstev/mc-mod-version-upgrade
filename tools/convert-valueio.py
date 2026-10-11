@@ -155,9 +155,10 @@ def convert_persistence(text, m, kind, arity):
             continue
         pc = fs.match(masked, sm.end() - 1)
         args = [a.strip() for a in fs.split_args(body[sm.end():pc])]
-        if args != names:
+        # X124: the 26.2 rename table may already have dropped the provider from the forward (`super.saveAdditional(t)`)
+        if args != names and not (arity == 2 and args == [t]):
             return None, ("super-call", f"super.{m.name}({', '.join(args)}) is not the plain forward; {V31}")
-        if arity == 2:
+        if arity == 2 and args != [t]:
             edits.append((sm.end(), pc, t))
         handled.append((sm.start(), pc + 1))
     in_handled = lambda i: any(a <= i < b for a, b in handled)
@@ -536,6 +537,11 @@ def self_check():
               "loadAdditional(ValueInput t)", "ContainerHelper.loadAllItems(t, this.items);", "this.tryLoadLootTable(t)"):
         if w not in o3:
             miss.append(f"container shape: {w!r} missing:\n{o3}")
+    fwd = ('package b;\nclass Fw extends BlockEntity {\n    protected void saveAdditional(CompoundTag t, HolderLookup.Provider p) {\n'
+           '        super.saveAdditional(t);\n        t.putInt("a", 1);\n    }\n}\n')
+    o4 = convert_text(fwd)[0]      # X124: a forward the rename table already shortened is still the plain forward
+    if "saveAdditional(ValueOutput t)" not in o4 or "super.saveAdditional(t);" not in o4:
+        miss.append(f"shortened forward not converted:\n{o4}")
     with tempfile.TemporaryDirectory() as d:
         p = pathlib.Path(d) / "Thing.java"
         p.write_text(FIXTURE, encoding="utf-8")

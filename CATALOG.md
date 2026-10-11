@@ -6344,3 +6344,9 @@ own tag passes, which is the generous reading. `server.getAdvancements().getAdva
 `AdvancementHolder` (~130). Vineflower's `UnmodifiableIterator x = state.getValues().entrySet().iterator()` → a plain
 `Iterator` (~110). And a render event's `getWindow()` → `Minecraft.getInstance().getWindow()` (~54). All rows in the
 Forge pack; each target checked with javap on the 21.1 jar.
+
+**X124. A save/load forward the rename table had already shortened was refused as "not the plain forward".** The 26.2
+rename rows turn `super.saveAdditional(t, p)` into `super.saveAdditional(t)` before `convert-valueio` runs, so a
+container block entity that X111 should have converted was refused on its first line. The converter now accepts the
+one-argument forward too (it is exactly what it would have written). Found by re-running the mod X111 was written for --
+a fix verified on a fixture is not verified on the pipeline until the pipeline has run it.
