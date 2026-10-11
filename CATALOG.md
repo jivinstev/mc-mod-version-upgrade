@@ -6204,3 +6204,12 @@ texture with soft alpha that the author pinned to cutout now draws translucent: 
 `Level.random` became protected beside a public `getRandom()`; `fix-missing-members.py` now reads "has PROTECTED access"
 as well as private, and rewrites a field read to a differently-named accessor at javac's caret only, so the second of
 two `w.random` on one line is the one fixed when that is the one reported.
+
+**X109. A dependency's OWN bundled libraries are part of the API its dependents compile against.** · **Pattern:** a Create
+addon: its code names Registrate (`BlockBuilder`, `BlockEntry`, `NonNullUnaryOperator`), Flywheel and Ponder, none of
+which is a mod the addon declares -- Create ships all three inside its own jar (`META-INF/jarjar/`) · **Error:** 100+ of
+the addon's 116 errors were `package com.tterrag.registrate... does not exist` and the symbols in it, with Create itself
+correctly on the classpath · **Fix:** after fetching a target's dependencies, `port.py` unpacks each one's jar-in-jar
+libraries (MixinExtras aside: NeoForge ships it) into `libs/<mc>/nested/`, which the template puts on the COMPILE
+classpath only. At runtime the dependency's jar-in-jar provides them, and a loose second copy would be a duplicate mod.
+X101 is the same rule for the mod's own bundled jars; this one is one level out.

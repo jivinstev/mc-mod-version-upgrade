@@ -1420,8 +1420,33 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
             names.append(f"{hit} (required by the jar's toml as {mid})" if hit
                          else f"{mid} (REQUIRED by the jar's toml; no {mc} build found that declares it"
                               + (f"; nearest: {near[0]} -- a renamed mod id?" if near else "") + ")")
+        nested = wire_nested_dep_jars(lib)
+        if nested:
+            names.append(f"compile-only, bundled inside the dependencies above: {', '.join(nested)} (X109)")
         if names:
             out[mc] = names
+    return out
+
+
+def wire_nested_dep_jars(lib):
+    """X109: a dependency's OWN jar-in-jar libraries (Create bundles Registrate, Flywheel, Ponder) are API its dependents
+    compile against, and nothing else supplies them: unpack them into libs/<mc>/nested/, which the template puts on
+    the compile classpath ONLY -- at runtime the dependency's jar-in-jar provides them, and a second loose copy would be
+    a duplicate mod. MixinExtras is skipped (NeoForge ships it). -> [jar names]."""
+    if not lib.is_dir():
+        return []
+    dest, out = lib / "nested", []
+    for j in sorted(lib.glob("*.jar")):
+        try:
+            with zipfile.ZipFile(j) as z:
+                for n in z.namelist():
+                    if (re.match(r"META-INF/(?:jarjar|jars)/[^/]+\.jar$", n)
+                            and not re.match(r"mixinextras", n.rsplit("/", 1)[-1], re.I)):
+                        dest.mkdir(parents=True, exist_ok=True)
+                        (dest / n.rsplit("/", 1)[-1]).write_bytes(z.read(n))
+                        out.append(n.rsplit("/", 1)[-1])
+        except zipfile.BadZipFile:
+            continue
     return out
 
 
@@ -1583,6 +1608,13 @@ def self_check():
         (w / "versions").mkdir(); (w / "versions/26.2.properties").write_text("x=1\n", encoding="utf-8")
         ok &= port_meta(w)[2] is not None and "multi-version" in port_meta(w)[2]
         ok &= port_meta(w / "nope")[2] is not None
+    with tempfile.TemporaryDirectory() as d:          # a dependency's bundled libraries go to nested/ (X109)
+        lib = pathlib.Path(d)
+        with zipfile.ZipFile(lib / "dep.jar", "w") as z:
+            z.writestr("META-INF/jarjar/Registrate-1.jar", b"x")
+            z.writestr("META-INF/jarjar/mixinextras-neoforge-0.4.jar", b"x")
+            z.writestr("META-INF/jarjar/metadata.json", "{}")
+        ok &= wire_nested_dep_jars(lib) == ["Registrate-1.jar"] and (lib / "nested/Registrate-1.jar").is_file()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

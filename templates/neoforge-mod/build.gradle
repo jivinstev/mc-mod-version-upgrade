@@ -107,6 +107,9 @@ dependencies {
     // registry, matched to that target), so the port compiles against the dependency's real API and Gate B/C load it.
     compileOnly fileTree(dir: "libs/${minecraft_version}", include: ['*.jar'])
     localRuntime fileTree(dir: "libs/${minecraft_version}", include: ['*.jar'])
+    // X109: the libraries those dependencies bundle (Create's Registrate/Flywheel/Ponder) -- compile only: at runtime
+    // each dependency's own jar-in-jar provides them
+    compileOnly fileTree(dir: "libs/${minecraft_version}/nested", include: ['*.jar'])
     // A jar the mod ships as a RESOURCE (a Java agent, a bootstrap helper) whose classes its own code names:
     // compile against it, but never put it on the runtime classpath -- the mod loads it itself (CATALOG §S7b, X94).
     compileOnly fileTree(dir: "libs/compile", include: ['*.jar'])
