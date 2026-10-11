@@ -6087,3 +6087,16 @@ field; and an argument-mismatch report nested in a no-suitable-constructor/metho
 `(T)Owner.F.get()` of that type on the line, since its caret points at the call, not the argument. On that mod's
 tree: 94 sites rewritten where 0 were, leaving the recipe-holder shapes (a separate topic). Self-check fails
 against the old tool.
+
+**X99. Vineflower imports NESTED classes and writes them bare -- so every rule keyed on `Outer.Inner` needs the bare
+spelling too.** · **Pattern:** `import ...NetworkEvent.Context;` + `Supplier<Context>`;
+`import ...CustomPayloadEvent.Context;` + `handle(Context ctx)`; `import ...SpawnPlacements.Type;` +
+`Type.NO_RESTRICTIONS`; and a method-reference target `DIMENSION.with(level::dimension)` · **Symptom:** the rules were
+written against CFR or hand-written source, which qualify the nested name; on the pipeline's own Vineflower
+output they matched nothing, silently -- the networking converter skipped every 1.20.1 handler on a Vineflower
+tree, and spawn placements stayed broken · **Fix:** each rule accepts the bare form when the file imports the
+nested class (or, for `SpawnPlacements.Type`, when the constant names are unique to it), and the nested imports
+are dropped; `net.minecraftforge.network.NetworkHooks` (left by the import codemod by design) joins the dead
+imports `forge-shapes` removes after it deletes the override. · **The general rule:** test every converter on the
+decompiler the pipeline actually runs. Two fixes in this session were verified on CFR output and measured zero on
+the real run.

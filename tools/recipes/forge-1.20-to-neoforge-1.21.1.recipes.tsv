@@ -102,6 +102,10 @@ ForgeMod	NeoForgeMod
 
 #@ 134 auto  SpawnPlacements.Type constants are SpawnPlacementTypes
 re:\bSpawnPlacements\.Type\.(ON_GROUND|IN_WATER|IN_LAVA|NO_RESTRICTIONS)\b	net.minecraft.world.entity.SpawnPlacementTypes.\1
+# Vineflower imports the nested type and writes it bare (`import ...SpawnPlacements.Type;` + `Type.NO_RESTRICTIONS`);
+# those four constant names are SpawnPlacements.Type's alone in vanilla, so the bare form is safe to rewrite too.
+re:(?<![\w.])Type\.(ON_GROUND|IN_WATER|IN_LAVA|NO_RESTRICTIONS)\b	net.minecraft.world.entity.SpawnPlacementTypes.\1
+re:import net\.minecraft\.world\.entity\.SpawnPlacements\.Type;\n	
 
 #@ 138 auto  GeckoLib 4.8 flattened the core packages (bare names only where GeckoLib is imported: mods ship their own RenderUtils)
 #? only-if	import software\.bernie\.geckolib\.

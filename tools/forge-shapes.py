@@ -850,7 +850,8 @@ def t_vc(path, text, ctx, res):
 # --------------------------------------------------------------------------- T8 source shapes the pack leaves
 
 DEAD_IMPORTS = ("net.neoforged.neoforge.registries.ForgeRegistries", "net.neoforged.neoforge.common.capabilities.ForgeCapabilities",
-                "net.neoforged.neoforge.network.NetworkHooks", "net.minecraft.world.entity.MobType",
+                "net.neoforged.neoforge.network.NetworkHooks", "net.minecraftforge.network.NetworkHooks",
+                "net.minecraft.world.entity.MobType",
                 "net.neoforged.neoforge.event.TickEvent", "net.neoforged.fml.DistExecutor")
 
 
