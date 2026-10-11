@@ -333,6 +333,11 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     for f in raw.rglob("*.java"):
         d = srcj / f.relative_to(raw); d.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(f, d)
     artifacts = fix_decompile_artifacts(srcj)
+    leftover = decompile_markers(srcj)
+    if leftover:
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write("decompile markers left after the artifact fixes (by kind: count, first file):\n"
+                     + "".join(f"  {k}: {n}, {f}\n" for k, (n, f) in sorted(leftover.items())))
     for x in list(raw.iterdir()):
         if x.name in ("assets", "data") and x.is_dir():
             shutil.copytree(x, res / x.name, dirs_exist_ok=True)
@@ -420,7 +425,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
               group or f"com.{meta['modId']}", "--also-required", ",".join(keep)], log=log)
     parked = int((re.findall(r"park-optional: (\d+) file", pk.stdout) or ["0"])[0])
     run([sys.executable, str(ROOT / "tools/scaffold-gametest.py"), "--work", str(work)], log=log)
-    return {"group": group, "parked_files": parked, "decompile_artifacts_fixed": artifacts, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
+    return {"group": group, "parked_files": parked, "decompile_artifacts_fixed": artifacts, "decompile_markers_left": {k: v[0] for k, v in leftover.items()}, "unmapped_names_left": left, "hoisted_spec_fixed": hoisted, "geckolib": uses_gecko,
             "mixin_configs": meta["mixins"], "deps": meta["deps"],
             "conditions_rewritten": cond_changed, "unknown_forge_conditions": cond_unknown,
             "forge_tag_references_left": forge_tags}
@@ -772,6 +777,8 @@ def main():
                 fh.write("\nsetup failed:\n" + traceback.format_exc())
             return stop(24, f"setup failed: {e}", ["read mods/<modid>/setup.log", "fix the cause and rerun"], state, work)
         state["setup"] = info_setup; state["done"].append("setup"); save_state(work, state)
+        if info_setup.get("decompile_markers_left"):
+            say("decompile markers left (see setup.log): " + ", ".join(f"{k} x{n}" for k, n in info_setup["decompile_markers_left"].items()))
         say(f"setup done: group {info_setup['group']}, {info_setup['unmapped_names_left']} unmapped names left, "
             f"{len(info_setup['hoisted_spec_fixed'])} hoisted config SPEC(s) fixed, "
             f"{info_setup.get('parked_files', 0)} file(s) of optional integrations/datagen parked (MIGRATION.md)")
@@ -1017,6 +1024,27 @@ def _resugar_string_concat(t):
     return "".join(out), count
 
 
+def decompile_markers(srcj):
+    """Vineflower output that is not Java, still in the tree after fix_decompile_artifacts: {kind: (count, first file)}.
+    Each kind is a known way the decompiler gives up; reporting them by name at setup means an unhandled one is seen
+    before it breaks a compile (where a parse abort hides every other error)."""
+    kinds = {"failure marker": re.compile(re.escape(VF_MARK) + r"\s*([A-Za-z][A-Za-z' ]{3,40})"),
+             "<unrepresentable>": re.compile(r"<unrepresentable>"),
+             "raw <init> call": re.compile(r"\.\s*(?:/\*[^*]*\*/\s*)?<init>\("),
+             "<clinit>/<lambda>": re.compile(r"<(?:clinit|lambda)[^>]*>"),
+             "digit-named local class": re.compile(r"\bclass\s+\d"),
+             "diamond cast": re.compile(r"\([A-Za-z_][\w.$]*<>\)")}
+    out = {}
+    for f in pathlib.Path(srcj).rglob("*.java"):
+        t = f.read_text(encoding="utf-8", errors="replace")
+        for kind, rx in kinds.items():
+            for m in rx.finditer(t):
+                k = f"{kind}: {m.group(1).strip()}" if kind == "failure marker" else kind
+                n, first = out.get(k, (0, f.name))
+                out[k] = (n + 1, first)
+    return out
+
+
 def fix_decompile_artifacts(srcj):
     """Vineflower output that does not PARSE, fixed before anything else reads it (a parse error stops javac before
     it reports anything else, and the stage then misreads the failure):
@@ -1206,6 +1234,11 @@ def self_check():
         m = read_jar_meta(pathlib.Path(d, "i.jar"))
         ok &= m["modId"] == "inl" and m["version"] == "1.1" and m["deps"] == [{"modId": "lib", "required": True}]
         ok &= jar_toml(pathlib.Path(d, "i.jar")) == ({"inl"}, "[1.20.1]")
+    with _tf.TemporaryDirectory() as d:
+        pathlib.Path(d, "A.java").write_text("class A { void m() { /* " + VF_MARK + " Couldn't be decompiled */ x.<init>(1); "
+                                             "Object o = (Supplier<>) () -> 1; } }", encoding="utf-8")
+        mk = decompile_markers(d)
+        ok &= set(mk) == {"failure marker: Couldn't be decompiled", "raw <init> call", "diamond cast"}
     ok &= in_range("26.2", "[26.2.0,)") and in_range("1.21", "[1.21.0]") and not in_range("26.1", "[26.2.0,)")
     ok &= max(["1.21", "1.21.1"], key=parse_ver) == "1.21.1"
     with tempfile.TemporaryDirectory() as d:          # a toml's OWN mod ids are the [[mods]] blocks, not its deps
