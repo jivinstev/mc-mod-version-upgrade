@@ -251,6 +251,14 @@ out="$(python3 tools/gate-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gate loop: the deepest load-crash cause and the mod's own frames go to the worker" \
   || bad "gate-loop self-check: $out"
 
+out="$(python3 tools/port-publish.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "publish: refuses without permission, for a pre-release or foreign release, an open S1, an unknown tag, an unpublished dependency" \
+  || bad "port-publish self-check: $out"
+
+out="$(python3 tools/fix-ledger.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fix ledger: A/B required to drop a fix, S1 open blocks a release, a joined column matches either tag" \
+  || bad "fix-ledger self-check: $out"
+
 out="$(python3 tools/scaffold-gatec.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "scaffold-gatec: the client harness template becomes a mod's harness with no example names left" \
   || bad "scaffold-gatec self-check: $out"
