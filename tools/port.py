@@ -1056,8 +1056,12 @@ def fix_decompile_artifacts(srcj):
       * an unresugared constructor: `X v = new X;` ... `v./* <marker> Unable to resugar constructor */<init>(args);`
         (the statements between compute the arguments) -> the bare `new X;` goes and the call becomes
         `X v = new X(args);`, when nothing between them touches v.
-    -> {"digit_classes": n, "assert_guards": n, "constructors": n}"""
-    n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0, "string_concats": 0, "diamond_casts": 0}
+      * Architectury's `@ExpectPlatform` (+ `.Transformed`): the build already rewrote each such method to call
+        `<pkg>.<loader>.<Name>Impl`, so the annotation is inert -- but its foreign package made park-optional park
+        the mod's own platform facade (X72). Strip it and its import.
+    -> {"digit_classes": n, "assert_guards": n, "constructors": n, ...}"""
+    n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0, "string_concats": 0, "diamond_casts": 0,
+         "expect_platform": 0}
     for f in pathlib.Path(srcj).rglob("*.java"):
         t = f.read_text(encoding="utf-8", errors="replace")
         new = t
@@ -1071,6 +1075,11 @@ def fix_decompile_artifacts(srcj):
         n["string_concats"] += c
         new, c = re.subn(r"\(([A-Za-z_][\w.$]*)<>\)", r"(\1)", new)   # `(Supplier<>) () -> x`: a raw cast is legal
         n["diamond_casts"] += c
+        if "dev.architectury.injectables.annotations" in new:
+            new = re.sub(r"(?m)^import dev\.architectury\.injectables\.annotations\.[\w.]+;[ \t]*\n", "", new)
+            new, c = re.subn(r"@(?:dev\.architectury\.injectables\.annotations\.)?ExpectPlatform(?:\.Transformed)?\b[ \t]*\n?[ \t]*",
+                             "", new)
+            n["expect_platform"] += c
         new, c = re.subn(r"(?m)^[ \t]*static\s*\{\s*if\s*\(\s*<unrepresentable>\.\$assertionsDisabled\s*\)\s*\{\s*\}\s*\}[ \t]*\n",
                          "", new)          # javac's assertion-status initializer, empty once decompiled (illegal in an interface)
         n["assert_guards"] += c
@@ -1182,8 +1191,15 @@ def self_check():
                      " return new 1Cond(c); float f = 1F; } }", encoding="utf-8")
         got = fix_decompile_artifacts(d)
         s = f.read_text(encoding="utf-8")
-        ok &= got == {"digit_classes": 1, "assert_guards": 1, "constructors": 0, "string_concats": 0, "diamond_casts": 0} and "class _Cond" in s and "new _Cond(c)" in s
+        ok &= got == {"digit_classes": 1, "assert_guards": 1, "constructors": 0, "string_concats": 0, "diamond_casts": 0, "expect_platform": 0} and "class _Cond" in s and "new _Cond(c)" in s
         ok &= "1Cond" not in s.split("$VF was")[0] and "!true &&" in s and "1F" in s
+        g = pathlib.Path(d) / "P.java"
+        g.write_text("package p;\n\nimport dev.architectury.injectables.annotations.ExpectPlatform;\n\npublic class P {\n"
+                     "   @ExpectPlatform\n   @ExpectPlatform.Transformed\n   public static Path dir() {\n"
+                     "      return PImpl.dir();\n   }\n}\n", encoding="utf-8")
+        got = fix_decompile_artifacts(d)
+        s = g.read_text(encoding="utf-8")
+        ok &= got["expect_platform"] == 2 and "ExpectPlatform" not in s and "public static Path dir()" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
     import tempfile as _tf

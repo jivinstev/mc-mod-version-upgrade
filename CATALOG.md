@@ -5827,3 +5827,11 @@ audit of every earlier sweep result for a hidden parse abort found only the thre
   the start compile "never reached javac", which was treated as fatal. With an AT present it now goes to the loop.
 - *The stale NeoGradle cache heal (X57) ran only for a mod with an access transformer*; a mod without one stopped
   on the same stale entry. The heal now runs either way.
+
+**X72. An Architectury multi-loader jar's `@ExpectPlatform` is inert, and it must not cost the mod its own
+facade.** · **Pattern:** a shared class `PlatformUtil` whose static methods carry `@ExpectPlatform`
+(`dev.architectury.injectables.annotations`) · **Symptom:** park-optional parked the class as an integration (the
+annotation's package is foreign), and 76 references to the mod's own platform facade became errors · **Fix:** the
+build already rewrote each annotated method to call `<pkg>.<loader>.<Name>Impl` (the bytecode says
+`invokestatic …/forge/PlatformUtilImpl`), so setup strips the annotation and its import, and the class is ordinary
+code.
