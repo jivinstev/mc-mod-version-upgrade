@@ -517,3 +517,13 @@ re:(?<![\w$.])event\.getWindow\(\)	net.minecraft.client.Minecraft.getInstance().
 #@ X125 auto  NetworkHooks.openScreen(player, provider[, pos | buf -> ...]) is the player's own openMenu in 1.21.1
 #           (IPlayerExtension.openMenu(MenuProvider, BlockPos) / (MenuProvider, Consumer<RegistryFriendlyByteBuf>), 21.1 jar)
 re:(?<![\w$])(?:[\w.]+\.)?NetworkHooks\.openScreen\(\s*((?:\([\w.]+\)\s*)?[\w.]+(?:\(\))?)\s*,\s*	(\1).openMenu(
+
+#@ X128 auto  three more MCreator 1.20.1 shapes (21.1 jar): LevelData's spawn is one BlockPos (getSpawnPos); step height is
+#           the STEP_HEIGHT attribute (§113; a receiver may be a plain Entity, which has none, so it is guarded); and ItemStack.hurt(n, random, player) -- "add n damage, true if it broke" --
+#           is gone. It is rewritten in place as that same test: add the damage, report >= max. A JUDGEMENT row: the old
+#           call also applied Unbreaking, which needs a ServerLevel the call site does not have.
+re:\.getXSpawn\(\)	.getSpawnPos().getX()
+re:\.getYSpawn\(\)	.getSpawnPos().getY()
+re:\.getZSpawn\(\)	.getSpawnPos().getZ()
+re:(?<![\w$.])(?!this\.)([\w$]+(?:\.[\w$]+)*)\.setMaxUpStep\(([^;]+?)\)\s*;	if (\1 instanceof net.minecraft.world.entity.LivingEntity _stepLe) _stepLe.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(\2);
+re:(?<![\w$.])([\w$]+)\.hurt\(\s*(\w+)\s*,\s*RandomSource\.create\(\)\s*,\s*null\s*\)	(\1.isDamageableItem() && ((java.util.function.IntPredicate) d -> { \1.setDamageValue(d); return d >= \1.getMaxDamage(); }).test(\1.getDamageValue() + \2))

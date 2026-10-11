@@ -6372,3 +6372,12 @@ confusing error instead of the real one and can mistype items or blocks the same
 the declaring class's own field first, a tree-wide answer only when the name is unambiguous, otherwise a flag. Same mod:
 forge-shapes converted a `LivingTickEvent` handler but left Vineflower's nested import
 (`...LivingEvent.LivingTickEvent;`), which no longer resolves.
+
+**X128. Three more MCreator 1.20.1 tails, from re-measuring one mod (2676 → 920 after the earlier fixes).**
+`level.getLevelData().getXSpawn()` → `.getSpawnPos().getX()` (and Y, Z) -- 144 sites. `entity.setMaxUpStep(x)` on a
+procedure's `Entity` (no attribute map in 1.21) → `if (entity instanceof LivingEntity e) e.getAttribute(STEP_HEIGHT)
+.setBaseValue(x);` -- §113's own row only covers `this.`. And MCreator's item-damage idiom `if (stack.hurt(1,
+RandomSource.create(), null)) { shrink; reset }` -- `hurt` is gone, and nothing in 1.21.1 returns "it broke" -- becomes
+the same test written out (add the damage, compare with the maximum). That last row is a JUDGEMENT: the old call also
+rolled Unbreaking, which needs a ServerLevel the call site does not have. The mod's largest remaining bucket is MCreator's
+dimension teleporter (`ITeleporter`/`PortalInfo`, ~800 lines over a handful of classes), a §89 rewrite.
