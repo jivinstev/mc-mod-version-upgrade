@@ -1168,9 +1168,75 @@ def t_imagebutton(path, text, ctx, res):
     return edit_spans(text, edits)
 
 
+# --------------------------------------------------------------------------- MobEffect entity hooks (X156)
+
+_EVT = "net.neoforged.neoforge.event.entity.living.MobEffectEvent"
+
+
+def t_effecthooks(path, text, ctx, res):
+    """X156: MobEffect.add/removeAttributeModifiers(LivingEntity, AttributeMap, int) lost the entity in 1.21.1. An
+    effect used them as its 'started' / 'ended' hooks (MCreator runs its procedures there).
+      add    -> onEffectStarted(LivingEntity, int), the 1.21.1 hook for exactly that; the map is the entity's own
+                (`e.getAttributes()`), and the super call goes (vanilla still applies the modifiers itself).
+      remove -> a plain onEffectRemoved(LivingEntity, int), which every constructor subscribes to NeoForge's
+                MobEffectEvent.Remove / Expired for this effect (lowest priority, not when cancelled) -- 1.21.1 has
+                no entity-aware removal hook on the effect."""
+    if "AttributeModifiers(LivingEntity" not in text and not re.search(r"AttributeModifiers\(\s*LivingEntity", text):
+        return text
+    cm = re.search(r"\bclass\s+(\w+)\b[^{]*\bextends\s+[\w.]*MobEffect\b", text)
+    if not cm:
+        return text
+    cls = cm.group(1)
+    removed = False
+    for mt in sorted(methods(text), key=lambda x: -x.start):
+        if mt.name not in ("addAttributeModifiers", "removeAttributeModifiers") or len(mt.params) != 3 \
+                or "LivingEntity" not in mt.params[0] or "AttributeMap" not in mt.params[1]:
+            continue
+        e, m_, a = pname(mt.params[0]), pname(mt.params[1]), pname(mt.params[2])
+        body = text[mt.body_open:mt.body_close + 1]
+        body = re.sub(r"\n[ \t]*super\s*\.\s*%s\s*\([^;]*\)\s*;[ \t]*" % mt.name, "", body)
+        body = re.sub(r"(?<![\w$.])%s(?![\w$])" % re.escape(m_), f"{e}.getAttributes()", body)
+        new_name = "onEffectStarted" if mt.name == "addAttributeModifiers" else "onEffectRemoved"
+        head = text[mt.start:mt.params_open]
+        head = re.sub(r"\b%s\s*$" % mt.name, new_name, head)
+        text = text[:mt.start] + head + f"({mt.params[0]}, {mt.params[2]})" + text[mt.params_close + 1:mt.body_open] + body \
+            + text[mt.body_close + 1:]
+        if new_name == "onEffectRemoved":
+            s = decl_span_start(text, mt.start)
+            seg = re.sub(r"(?m)^[ \t]*@Override[ \t]*\n", "", text[s:mt.start])
+            text = text[:s] + seg + text[mt.start:]
+            removed = True
+        res.count["effecthooks"] += 1
+    if removed:
+        wire = ("{EV}.addListener(net.neoforged.bus.api.EventPriority.LOWEST, false, " + _EVT + ".{K}.class, _ev -> {{ "
+                "if (_ev.getEffectInstance() != null && _ev.getEffectInstance().getEffect().value() == this) "
+                "this.onEffectRemoved(_ev.getEntity(), _ev.getEffectInstance().getAmplifier()); }});")
+        EV = "net.neoforged.neoforge.common.NeoForge.EVENT_BUS"
+        edits = []
+        for cm2 in re.finditer(r"(?<![\w$.])(?:(?:public|protected|private)\s+)?%s\s*\(" % re.escape(cls), text):
+            p0 = cm2.end() - 1; p1 = match(text, p0)
+            bm = re.match(r"\s*\{", text[p1 + 1:])
+            if p1 < 0 or not bm:
+                continue
+            b0 = p1 + 1 + bm.end() - 1
+            sm = re.match(r"\s*super\s*\(", text[b0 + 1:])
+            if not sm:
+                continue
+            q0 = b0 + 1 + sm.end() - 1; q1 = match(text, q0)
+            semi = text.find(";", q1)
+            ind = re.match(r"[ \t]*", text[text.rfind("\n", 0, q0) + 1:]).group(0)
+            ins = "".join(f"\n{ind}" + wire.format(EV=EV, K=k) for k in ("Remove", "Expired"))
+            edits.append((semi + 1, semi + 1, ins))
+        if not edits:
+            res.flags["effecthooks"].append(f"{path}: {cls}.onEffectRemoved has no constructor calling super(...) to subscribe it")
+        text = edit_spans(text, edits)
+    return text
+
+
 TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attrmod", t_attrmod), ("nbt", t_nbt), ("hooks", t_hooks),
               ("geo", t_geo), ("vc", t_vc), ("source", t_source),
-              ("sigs", t_sigs), ("misc", t_misc), ("imagebutton", t_imagebutton)]
+              ("sigs", t_sigs), ("misc", t_misc), ("imagebutton", t_imagebutton),
+              ("effecthooks", t_effecthooks)]
 
 
 # --------------------------------------------------------------------------- menu screens (X141), cross-file
@@ -1379,6 +1445,27 @@ def main():
 # --------------------------------------------------------------------------- self-check
 
 CASES = [
+    ("effecthooks", """package a;
+public class CrittersMobEffect extends MobEffect {
+   public CrittersMobEffect() {
+      super(MobEffectCategory.HARMFUL, -16777216);
+   }
+   @Override
+   public void addAttributeModifiers(LivingEntity entity, AttributeMap attributeMap, int amplifier) {
+      super.addAttributeModifiers(entity, attributeMap, amplifier);
+      StartProcedure.execute(entity.level(), entity, attributeMap);
+   }
+   @Override
+   public void removeAttributeModifiers(LivingEntity entity, AttributeMap attributeMap, int amplifier) {
+      super.removeAttributeModifiers(entity, attributeMap, amplifier);
+      EndProcedure.execute(entity.level(), entity);
+   }
+}
+""", ["public void onEffectStarted(LivingEntity entity, int amplifier) {", "StartProcedure.execute(entity.level(), entity, entity.getAttributes());",
+      "   public void onEffectRemoved(LivingEntity entity, int amplifier) {",
+      "net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.LOWEST, false, net.neoforged.neoforge.event.entity.living.MobEffectEvent.Remove.class, _ev -> { if (_ev.getEffectInstance() != null && _ev.getEffectInstance().getEffect().value() == this) this.onEffectRemoved(_ev.getEntity(), _ev.getEffectInstance().getAmplifier()); });",
+      "MobEffectEvent.Expired.class"],
+     ["super.addAttributeModifiers", "super.removeAttributeModifiers", "@Override\n   public void onEffectRemoved"]),
     ("imagebutton", """package a;
 class S {
    void init() {

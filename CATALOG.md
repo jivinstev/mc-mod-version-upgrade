@@ -6635,3 +6635,11 @@ sizes are in BLOCKS. Each such field becomes `data/<ns>/painting_variant/<name>.
 (`{"asset_id": "<ns>:<name>", "width": w/16, "height": h/16}`) plus an entry in `#minecraft:placeable`, which is what
 lets a player place it; 1.20 placed every registered variant. The texture stays at `textures/painting/<name>.png`. The
 Java field is deleted, unless something still reads it: that one is listed and kept.
+
+**X156. `MobEffect.add/removeAttributeModifiers(LivingEntity, AttributeMap, int)` lost the entity in 1.21.1
+(forge-shapes `effecthooks`).** An effect, MCreator's above all, used them as its started and ended hooks (6 swept
+mods). The add hook becomes `onEffectStarted(LivingEntity, int)`, the 1.21.1 hook for exactly that. The map is the
+entity's own `getAttributes()`, and the super call goes, since vanilla still applies the modifiers itself. 1.21.1 has
+no entity-aware removal hook on the effect, so the remove hook becomes a plain `onEffectRemoved(LivingEntity, int)`.
+Every constructor that calls `super(...)` subscribes that method to NeoForge's `MobEffectEvent.Remove` and `Expired`
+for this effect, at lowest priority and not when cancelled. Compiled against 1.21.1.
