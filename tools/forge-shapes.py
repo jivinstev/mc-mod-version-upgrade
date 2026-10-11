@@ -327,6 +327,19 @@ def _simplify(body):
     return body
 
 
+def norm_phase(body, name):
+    """`e.phase.equals((Object)TickEvent.Phase.START)` / `Phase.END.equals(e.phase)` -> `e.phase == ...` (X113: the
+    author compared the enum with equals; PHASE_CMP only knew == / !=)."""
+    ph = r"((?:TickEvent\.)?Phase\.(?:START|END))"
+    n = re.escape(name)
+    for neg, op in (("!\\s*", "!="), ("", "==")):
+        body = re.sub(r"%s(?<![\w$.])%s\.phase\.equals\(\s*(?:\(Object\)\s*)?%s\s*\)" % (neg, n, ph),
+                      lambda q: f"{name}.phase {op} {q.group(1)}", body)
+        body = re.sub(r"%s(?<![\w$.])%s\.equals\(\s*%s\.phase\s*\)" % (neg, ph, n),
+                      lambda q: f"{name}.phase {op} {q.group(1)}", body)
+    return body
+
+
 def t_tick(path, text, ctx, res):
     edits = []
     for mt in methods(text):
@@ -351,7 +364,7 @@ def t_tick(path, text, ctx, res):
             continue
         kind = m.group(1)
         fqn, acc = TICK[kind]
-        body = text[mt.body_open:mt.body_close + 1]
+        body = norm_phase(text[mt.body_open:mt.body_close + 1], name)
         phases = {(a, b) for a, b in re.findall(PHASE_CMP % re.escape(name), body)}
         used = {b for _a, b in phases}
         if len(used) > 1:
@@ -392,7 +405,7 @@ def t_tick(path, text, ctx, res):
                                      f"rewritten to {kind}.Post (check it did not rely on START)")
         new_simple = fqn.rsplit(".", 1)[-1]
         edits.append((mt.params_open + 1, mt.params_close, p.replace(typ, f"{new_simple}.{sub}")))
-        if nb != body:
+        if nb != text[mt.body_open:mt.body_close + 1]:
             edits.append((mt.body_open, mt.body_close + 1, nb))
         ctx["imports"].add(fqn)
         res.count["tick"] += 1
@@ -1279,6 +1292,17 @@ class A {
 }
 """, ["onClientTickPre(ClientTickEvent.Pre event) {", "onClientTick(ClientTickEvent.Post event) {",
       "public static void after(Object o) {"], ["else", "if (true)", "if (false)"]),
+    ("tick", """package a;
+import net.neoforged.neoforge.event.TickEvent.ClientTickEvent;
+import net.neoforged.neoforge.event.TickEvent.Phase;
+class A {
+    public static void onClientTick(ClientTickEvent event) {
+        if (event.phase.equals((Object)Phase.START)) {
+            tick();
+        }
+    }
+}
+""", ["onClientTick(ClientTickEvent.Pre event) {", "        tick();"], [".phase", "Phase", "if ("]),
     ("modctor", """package a;
 import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
 @Mod(MyMod.MOD_ID)

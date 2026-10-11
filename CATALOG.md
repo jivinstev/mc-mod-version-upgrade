@@ -6241,3 +6241,10 @@ hand-written subset of a generated family is §V11's lesson again -- the colour 
 · **Scoping note from the same mod:** it was a BACKPORT of the copper update to 1.21.1, and on 26.2 its whole content is
 vanilla. A port of a backport onto a version that already has the feature is usually work nobody needs; ask before
 spending on one.
+
+**X113. A tick handler that compares its phase with `equals` was skipped.** · **Pattern:** `onClientTick(ClientTickEvent
+event) { if (event.phase.equals(Phase.START)) {...} }` (also `Phase.END.equals(event.phase)`, `!...equals`, and CFR's
+`(Object)` cast), registered through `addListener` · **Symptom:** forge-shapes left the method alone, so the stale
+`TickEvent.ClientTickEvent` / `TickEvent.Phase` imports stayed and the handler did not compile · **Fix:** the phase test is
+normalised to `==` / `!=` before the existing split runs, so it converts like every other tick handler
+(`ClientTickEvent.Pre`, here). The original `==` form was the only one the converter had ever seen.
