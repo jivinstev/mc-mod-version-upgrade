@@ -251,7 +251,11 @@ def run(src, modid, dry=False):
     new = dict(files)
     flags, report = [], collections.Counter()
     used_ids = set()
-    for f, t in files.items():
+    for f in files:
+        # the CURRENT text: an earlier channel's send rewrite (step 4) may already have edited this file, and every
+        # offset below is taken from what is spliced -- offsets from the original text cut one mod's registration
+        # in half (X81)
+        t = new[f]
         cm = re.search(r"(?:public\s+)?(?:static\s+)?(?:final\s+)?SimpleChannel\s+(\w+)\s*=\s*(NetworkRegistry\.newSimpleChannel\(|ChannelBuilder)", t)
         if not cm:
             continue
@@ -330,6 +334,11 @@ def run(src, modid, dry=False):
                 break
             e += 1
         t = t[:cm2.start()] + t[e + 2 if t[e + 1:e + 2] == "\n" else e + 1:]
+        # a LOCAL channel stored into a field (`SimpleChannel net = ...; INSTANCE = net;`): the alias and its field go too
+        for alias in re.findall(r"(?m)^[ \t]*(\w+)\s*=\s*%s\s*;[ \t]*$" % re.escape(chan), t):
+            t = re.sub(r"(?m)^[ \t]*%s\s*=\s*%s\s*;[ \t]*\n" % (re.escape(alias), re.escape(chan)), "", t)
+            t = re.sub(r"(?m)^[ \t]*(?:(?:public|private|protected|static|final)\s+)*SimpleChannel\s+%s\s*;[ \t]*\n"
+                       % re.escape(alias), "", t)
         for imp in ("net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent",
                     "net.neoforged.neoforge.network.registration.PayloadRegistrar"):
             t = add_import(t, imp)
@@ -512,6 +521,26 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         if any(p.read_text(encoding="utf-8") != before[p] for p in r.iterdir()):
             miss.append("not idempotent")
         ok = not miss and not flags
+    with tempfile.TemporaryDirectory() as d:       # two channel files; one keeps its channel in a local (X81)
+        root = pathlib.Path(d) / "m/net"; root.mkdir(parents=True)
+        def pk(n):
+            return (f"package m.net;\nimport net.minecraft.network.FriendlyByteBuf;\nimport java.util.function.Supplier;\n"
+                    f"public class {n} {{\n   public {n}(FriendlyByteBuf b) {{}}\n   public void toBytes(FriendlyByteBuf b) {{}}\n"
+                    f"   public boolean handle(Supplier<NetworkEvent.Context> s) {{ return true; }}\n}}\n")
+        (root / "A.java").write_text(pk("A"), encoding="utf-8"); (root / "B.java").write_text(pk("B"), encoding="utf-8")
+        (root / "Net.java").write_text(
+            "package m.net;\npublic class Net {\n   public static final SimpleChannel CH = NetworkRegistry.newSimpleChannel(x, () -> \"1\", s -> true, s -> true);\n"
+            "   public static void register() {\n      CH.messageBuilder(A.class, 0, NetworkDirection.PLAY_TO_CLIENT).decoder(A::new).encoder(A::toBytes).consumerMainThread(A::handle).add();\n   }\n"
+            "   public static void send(Object o) { Msgs.INSTANCE.send(PacketDistributor.ALL.noArg(), o); }\n}\n", encoding="utf-8")
+        (root / "Msgs.java").write_text(
+            "package m.net;\npublic class Msgs {\n   public static SimpleChannel INSTANCE;\n   public static void register() {\n"
+            "      SimpleChannel net = ChannelBuilder.named(x)\n         .simpleChannel();\n      INSTANCE = net;\n"
+            "      net.messageBuilder(B.class, 1, NetworkDirection.PLAY_TO_CLIENT)\n         .decoder(B::new)\n         .encoder(B::toBytes)\n"
+            "         .consumerMainThread(B::handle)\n         .add();\n   }\n}\n", encoding="utf-8")
+        run(d, "m")
+        m2 = (root / "Msgs.java").read_text(encoding="utf-8")
+        ok = ok and "registrar.playToClient(B.TYPE, B.STREAM_CODEC, B::handle);" in m2 and ".consumerMainThread" not in m2 \
+            and "INSTANCE" not in m2 and "SimpleChannel" not in m2
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{net}\n{pong}")
     return 0 if ok else 1
 

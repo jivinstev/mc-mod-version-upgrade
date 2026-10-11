@@ -5904,3 +5904,10 @@ exception.
 in a `@Mixin` class compiles to one `checkcast`, so Vineflower writes `(Player)this` · **Symptom:**
 `incompatible types: ServerPlayerMixin cannot be converted to Player` (§162), in every mod that does it ·
 **Fix:** setup restores `(X)(Object)this` in every file carrying `@Mixin`.
+
+**X81. The networking converter spliced with stale offsets when a mod has two channels.** · **Pattern:** two
+classes each declaring a `SimpleChannel`, one keeping it in a local (`SimpleChannel net = …; INSTANCE = net;`) ·
+**Symptom:** `illegal start of expression` at a dangling `.consumerMainThread(...)`, and the stage stopped: the first
+channel's send rewrite had already edited the second file, and the second file's registration was cut using offsets
+from its original text · **Fix:** `convert-simplechannel` reads each file's current text before it computes
+anything, and also removes the field a local channel was copied into.
