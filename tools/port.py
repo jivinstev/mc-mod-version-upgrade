@@ -846,7 +846,7 @@ def main():
         work.mkdir(parents=True, exist_ok=True)
         wired = wire_deps(work, src.get("provider"), src.get("id"), src.get("fileId"),
                           sorted({h["to_mc"] for h in hops}, key=parse_ver), req,
-                          toml_authority=bool(rm.get("hasNeoforgeToml") or rm.get("hasForgeToml")))
+                          toml_authority=bool(rm.get("hasNeoforgeToml") or rm.get("hasForgeToml")), jar=jar)
         state["deps_wired"] = wired
         if wired:
             say("dependencies: " + "; ".join(f"{mc}: {', '.join(n for n in names)}" for mc, names in wired.items()))
@@ -1067,6 +1067,21 @@ def kotlin_share(jar):
     with zipfile.ZipFile(jar) as z:
         cls = [n for n in z.namelist() if n.endswith(".class") and not n.startswith("META-INF/")]
         return sum(1 for n in cls if b"Lkotlin/Metadata;" in z.read(n)), len(cls)
+
+
+def jar_uses(jar, dep):
+    """X117: does the mod's own code reference a package named after `dep` (a registry slug, e.g. farmers-delight ->
+    .../farmersdelight/...)? A toml that forgot a dependency the code imports does not make that dependency optional."""
+    key = norm(dep).encode()
+    if len(key) < 4:
+        return False
+    with zipfile.ZipFile(jar) as z:
+        for n in z.namelist():
+            if n.endswith(".class") and not n.startswith("META-INF/") and key not in n.lower().encode():
+                if re.search(rb"L[\w/$]*/" + re.escape(key) + rb"/[\w/$]+;|[\w/$]*/" + re.escape(key) + rb"/[\w/$]+",
+                             z.read(n).lower()):
+                    return True
+    return False
 
 
 def groovy_share(jar):
@@ -1337,7 +1352,7 @@ def fix_decompile_artifacts(srcj):
     return n
 
 
-def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=False):
+def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=False, jar=None):
     """Put each REQUIRED dependency's build for every hop's target into libs/<mc>/, which the build compiles and
     runs against (templates/neoforge-mod/build.gradle), transitive ones too. Two sources, because each misses
     things the other has: the registry's declared dependencies, and the jar's own toml (measured: a mod's toml
@@ -1388,8 +1403,10 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
                 if got:
                     break
             if not got:
-                if toml_authority and (p, dep) in top:
+                if toml_authority and (p, dep) in top and not (jar and jar_uses(jar, dep)):
                     names.append(f"{dep} (listed by the registry, no {mc} build: {why}; not what the jar's toml requires)")
+                elif toml_authority and (p, dep) in top:
+                    names.append(f"{dep} (NO usable {mc} build: {why}; the jar's toml omits it, but its classes use it -- X117)")
                 else:
                     names.append(f"{dep} (NO usable {mc} build: {why})")
                 continue
@@ -1529,6 +1546,9 @@ def self_check():
             z.writestr("a/A.class", b"\xca\xfe groovy/lang/GroovyObject x"); z.writestr("a/B.class", b"\xca\xfe x")
             z.writestr("a/C.class", b"\xca\xfe org/codehaus/groovy/vmplugin/v8/IndyInterface y")
         ok &= groovy_share(pathlib.Path(d, "g.jar")) == (2, 3) and groovy_share(pathlib.Path(d, "a.jar")) == (0, 1)
+        with zipfile.ZipFile(f"{d}/s.jar", "w") as z:     # X117: the code names the registry dependency's package
+            z.writestr("org/x/seed/Reg.class", b"\xca\xfe Lvectorwing/farmersdelight/common/block/PieBlock; x")
+        ok &= jar_uses(pathlib.Path(d, "s.jar"), "farmers-delight") and not jar_uses(pathlib.Path(d, "s.jar"), "geckolib")
         with zipfile.ZipFile(f"{d}/u.jar", "w") as z:
             for i, b in enumerate((b"net/minecraftforge/x", b"net/minecraftforge/y", b"net/neoforged/a", b"net/neoforged/b",
                                    b"net/fabricmc/api", b"net/minecraft/class_123")):

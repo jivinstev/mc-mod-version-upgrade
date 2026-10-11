@@ -6269,3 +6269,14 @@ dynamic calls to invokedynamic · **Symptom:** `mechanical stage failed (exit 2)
 `compatibleMods = IndyInterface.bootstrap<"cast","()",0>(var9);` -- the decompiler's rendering of an indy site, which is not
 Java · **Fix:** triage counts Groovy-compiled classes the way it already counts Kotlin ones, and stops a mod that is mostly
 Groovy before setup with the honest reason: there is no Java source to port; a Groovy port is by hand.
+
+**X117. A toml that FORGOT a dependency made it optional, and the parker then removed the mod's own registries.** ·
+**Pattern:** a Farmer's Delight addon whose `neoforge.mods.toml` declares only neoforge and minecraft, while the registry
+lists Farmer's Delight as required and the addon's block and item registries extend its classes · **Symptom:** for a
+target where the dependency has no build, X82's rule ("the toml is the authority") recorded it as "not what the jar's
+toml requires"; setup then parked the files importing `vectorwing.farmersdelight` as an optional integration -- which
+were `BlockRegistry` and `ItemRegistry` -- and the compile failed on the mod's own main class · **Fix:** before taking
+the toml's word, `port.py` asks the jar's classes: if any references a package named after the registry dependency
+(`farmers-delight` → `.../farmersdelight/...`), the dependency is required whatever the toml says, and the port stops
+like any missing required dependency. The toml stays the authority for dependencies the code does not use (the case X82
+was written for: registry data copied from the other loader).
