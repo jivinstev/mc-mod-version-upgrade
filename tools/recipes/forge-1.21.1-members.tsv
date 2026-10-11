@@ -31,3 +31,5 @@ EntityDimensions	height	height()
 # (the ticket is the server's job now -- a judgement row, X107)
 Entity	getFeetBlockState	getInBlockState
 Entity	teleportToWithTicket	teleportTo
+# 1.20.5 folded the permanent/transient removal into one (21.1 jar: boolean removeModifier(ResourceLocation)) -- X120
+AttributeInstance	removePermanentModifier	removeModifier

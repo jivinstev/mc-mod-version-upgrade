@@ -6304,3 +6304,12 @@ direction) fell through to the TYPE row `DirectionProperty` → `EnumProperty<Di
 so the whole mechanical stage failed (`the start compile never reached javac`) on one line of one file · **Fix:** the
 `create` row takes both arities. The general rule: when a TYPE token row would also rewrite the type's static-call
 receiver, every static on that type needs its own regex row first, because `Type<Arg>.call()` is never legal Java.
+
+**X120. The proxy idiom and two smaller Forge 1.20.1 leftovers from one small mod.** ·
+`public static CommonProxy PROXY = DistExecutor.runForDist(() -> ClientProxy::new, () -> CommonProxy::new);` is a VALUE,
+which §6's statement rewrite flagged and left; forge-shapes now writes `(FMLEnvironment.dist == Dist.CLIENT ? new
+ClientProxy() : new CommonProxy())` for `runForDist` / `safeRunForDist` / `unsafeRunForDist` (a `::new`, a `::method`
+or a `() -> () -> expr` supplier). Vineflower imports Forge 1.20.1's channel builder NESTED
+(`import net.minecraftforge.network.NetworkRegistry.ChannelBuilder;`), which the network converter did not know to drop
+after converting the channel. And `AttributeInstance.removePermanentModifier` became `removeModifier(ResourceLocation)`
+in 1.20.5 (member row).

@@ -420,7 +420,39 @@ def t_tick(path, text, ctx, res):
 
 # --------------------------------------------------------------------------- T2 DistExecutor (§6)
 
+def _dist_value(sup):
+    """The value a DistExecutor supplier-of-supplier yields, as an expression, or None."""
+    s = sup.strip()
+    m = re.fullmatch(r"\(\)\s*->\s*([\w.$]+)::new", s)
+    if m:
+        return f"new {m.group(1)}()"
+    m = re.fullmatch(r"\(\)\s*->\s*([\w.$]+)::(\w+)", s)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}()"
+    m = re.fullmatch(r"\(\)\s*->\s*\(\)\s*->\s*(.+)", s, re.S)
+    if m and not m.group(1).strip().startswith("{"):
+        return m.group(1).strip()
+    return None
+
+
 def t_dist(path, text, ctx, res):
+    # X120: DistExecutor.runForDist(clientSupplier, serverSupplier) -- the proxy idiom -- is a VALUE
+    n0 = 0
+    for m in reversed(list(re.finditer(r"DistExecutor\.(?:unsafeRunForDist|safeRunForDist|runForDist)\(", text))):
+        p1 = match(text, m.end() - 1)
+        args = split_args(text[m.end():p1]) if p1 > 0 else []
+        vals = [_dist_value(a) for a in args] if len(args) == 2 else [None]
+        if None in vals:
+            res.flags["dist"].append(f"{path}:{line_of(text, m.start())} DistExecutor.runForDist shape not recognised")
+            continue
+        text = text[:m.start()] + f"(FMLEnvironment.dist == Dist.CLIENT ? {vals[0]} : {vals[1]})" + text[p1 + 1:]
+        n0 += 1
+    if n0:
+        res.count["dist"] += n0
+        ctx["imports"].add("net.neoforged.fml.loading.FMLEnvironment")
+        ctx["imports"].add("net.neoforged.api.distmarker.Dist")
+        for f in ("net.neoforged.fml.DistExecutor", "net.minecraftforge.fml.DistExecutor"):
+            text = remove_import_if_unused(text, f)
     out, i, n = [], 0, 0
     pat = re.compile(r"DistExecutor\.(unsafeRunWhenOn|safeRunWhenOn|runWhenOn)\(")
     while True:
@@ -1316,6 +1348,12 @@ class B extends Block {
 }
 """, ["InteractionResult useWithoutItem(BlockState blockstate, Level world, BlockPos pos, Player entity, BlockHitResult hit)",
       "super.useWithoutItem(blockstate, world, pos, entity, hit);"], ["super.use(", "InteractionHand"]),
+    ("dist", """package a;
+import net.neoforged.fml.DistExecutor;
+public class M {
+   public static CommonProxy PROXY = (CommonProxy)DistExecutor.runForDist(() -> ClientProxy::new, () -> CommonProxy::new);
+}
+""", ["(CommonProxy)(FMLEnvironment.dist == Dist.CLIENT ? new ClientProxy() : new CommonProxy());"], ["DistExecutor"]),
     ("modctor", """package a;
 import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
 @Mod(MyMod.MOD_ID)

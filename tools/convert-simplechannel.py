@@ -45,7 +45,9 @@ DEAD = ["net.neoforged.neoforge.network.NetworkEvent", "net.minecraftforge.netwo
         "net.neoforged.neoforge.event.network.CustomPayloadEvent.Context",
         "net.minecraftforge.network.SimpleChannel", "net.neoforged.neoforge.network.SimpleChannel",
         "net.minecraftforge.network.ChannelBuilder", "net.neoforged.neoforge.network.ChannelBuilder",
-        "net.minecraftforge.network.Channel", "net.neoforged.neoforge.network.Channel"]
+        "net.minecraftforge.network.Channel", "net.neoforged.neoforge.network.Channel",
+        # X120: Forge 1.20.1's builder is NESTED in NetworkRegistry, and Vineflower imports it that way
+        "net.minecraftforge.network.NetworkRegistry.ChannelBuilder", "net.neoforged.neoforge.network.NetworkRegistry.ChannelBuilder"]
 TARGETS = {"PLAYER": "sendToPlayer", "TRACKING_ENTITY": "sendToPlayersTrackingEntity",
            "TRACKING_ENTITY_AND_SELF": "sendToPlayersTrackingEntityAndSelf"}
 
