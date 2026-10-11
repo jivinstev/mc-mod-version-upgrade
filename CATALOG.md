@@ -6004,3 +6004,14 @@ A 1.21.1-shaped probe (registry, condition, conditional function, context reads)
 gradle's echo, which also dropped a SECOND missing member on the same line, so `c.hasParam(p) && c.getParam(p)`
 took one full compile per call. It now keys on the caret column, like its private-access path; the self-check
 covers it and fails against the old key.
+
+**X92. A datagen subscriber registered by INSTANCE was kept as main code, and with it a whole datagen package.**
+· **Pattern:** `data/gen/Generators` holds only a `GatherDataEvent` handler; a proxy does
+`bus.register(new Generators())`; the providers beside it extend a LIBRARY's datagen base
+(`BlueprintItemModelProvider`), not a vanilla/NeoForge one · **Symptom:** ~366 of one mod's 643 residual errors in
+three providers that never run in-game. `park-optional` saw a file that main code names and took the "main code
+that also wires datagen" branch -- cut the handler, keep the class -- so the package was never parked, and the
+type rule could not recognise a library's provider base · **Fix:** a `GatherDataEvent` class is main code only if
+it is outside a datagen package AND still declares something once its handlers are cut (a field, a real
+constructor, another method). Otherwise it parks with its package, and `cut_registrations` now also drops
+`register(new Gen())`. Self-check covers both halves and fails against the old branch.

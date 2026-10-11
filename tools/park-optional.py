@@ -79,13 +79,34 @@ def _block_end(t, i):
     return -1
 
 
+def has_members(t, cls):
+    """Does this class still declare anything once its GatherDataEvent handlers are cut -- a field, or a method
+    other than a no-argument constructor? (Bodies are skipped by brace depth, so only the class's own members count.)"""
+    m = re.search(r"\b(?:class|record|enum|interface)\s+%s\b[^{]*\{" % re.escape(cls), t)
+    if not m:
+        return True
+    depth, i, top = 1, m.end(), []
+    while i < len(t) and depth:
+        c = t[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        elif depth == 1:
+            top.append(c)
+        i += 1
+    decls = [x.strip() for x in re.split(r"[;)]", re.sub(r"//[^\n]*|/\*.*?\*/|@\w+(?:\([^)]*\))?", "", "".join(top), flags=re.S)) if x.strip()]
+    return any(not re.fullmatch(r"(?:public|protected|private)?\s*%s\s*\(" % re.escape(cls), x) for x in decls)
+
+
 def cut_registrations(t, stems):
     """Drop the lines that only REGISTER a datagen subscriber class (addListener(Gen::gather),
     EVENT_BUS.register(Gen.class)) and the imports left unused -> (new text, [stems cut])."""
     hit = []
     for st in sorted(stems):
         pat = re.compile(r"(?m)^[ \t]*[\w.()]*(?:addListener\(\s*(?:[\w.]+\.)?%s::\w+\s*\)"
-                         r"|register\(\s*(?:[\w.]+\.)?%s\.class\s*\))\s*;[ \t]*\n" % (st, st))
+                         r"|register\(\s*(?:[\w.]+\.)?%s\.class\s*\)"
+                         r"|register\(\s*new\s+(?:[\w.]+\.)?%s\s*\(\s*\)\s*\))\s*;[ \t]*\n" % (st, st, st))
         t2 = pat.sub("", t)
         if t2 != t:
             hit.append(st); t = t2
@@ -207,7 +228,13 @@ def plan(work, group, also=()):
             d = rel.parent
             named = re.compile(r"\b" + re.escape(f.stem) + r"\b")
             new, names = cut_gather(t)
-            if names and not re.search(r"\bGatherDataEvent\b", IMPORT.sub("", new)) and any(
+            # main code that ALSO wires datagen keeps the class minus its handlers -- but a class that is NOTHING
+            # but handlers (a `Generators` registered with bus.register(new Generators())), or that sits in a datagen
+            # package, is the subscriber itself: park it with its package, and cut_registrations drops the line that
+            # registers it. Keeping it hid a whole data/gen package whose providers extend a LIBRARY's datagen base,
+            # which the type rule cannot see (X92).
+            if names and not DATAGEN_DIR.match(d.name) and has_members(new, f.stem) \
+                    and not re.search(r"\bGatherDataEvent\b", IMPORT.sub("", new)) and any(
                     g != f and named.search(g.read_text(encoding="utf-8", errors="replace")) for g in files):
                 cuts[f] = (new, names)                   # main code wiring datagen: cut the handler, keep the class
             elif DATAGEN_DIR.match(d.name):
@@ -488,6 +515,31 @@ def self_check():
         got3 = prune_mixin_configs(w, {"com.ex.m.mixin.jei.B", "com.ex.m.mixin.jei.C"})
         cfg = json.loads((res / "m.mixins.json").read_text(encoding="utf-8"))
         ok = ok and cfg["mixins"] == ["A"] and cfg["client"] == [] and len(got3) == 2
+    with tempfile.TemporaryDirectory() as d:     # X92: a handler-only subscriber registered by INSTANCE, in data/gen,
+        w = pathlib.Path(d)                      # whose providers extend a LIBRARY's datagen base
+        j = w / "src/main/java"
+        for rel, body in {
+                "com/ex/r/proxy/Proxy.java": "package com.ex.r.proxy;\nimport com.ex.r.data.gen.Generators;\nclass Proxy {\n"
+                                             "  void a(IEventBus bus) {\n    bus.register(new Generators());\n    bus.register(this);\n  }\n}\n",
+                "com/ex/r/data/gen/Generators.java": "package com.ex.r.data.gen;\nimport net.minecraftforge.data.event.GatherDataEvent;\n"
+                                                    "public class Generators {\n  @SubscribeEvent\n  public void gatherData(GatherDataEvent e) {\n"
+                                                    "    new Items();\n  }\n}\n",
+                "com/ex/r/data/gen/Items.java": "package com.ex.r.data.gen;\nimport com.lib.core.data.client.LibItemModelProvider;\n"
+                                               "class Items extends LibItemModelProvider {}\n",
+                # main code that ALSO wires datagen keeps its class
+                "com/ex/r/Main.java": "package com.ex.r;\nimport net.minecraftforge.data.event.GatherDataEvent;\npublic class Main {\n"
+                                      "  public static final String ID = \"r\";\n  void gather(GatherDataEvent e) {\n  }\n}\n",
+                "com/ex/r/Uses.java": "package com.ex.r;\nclass Uses { String s = Main.ID; }\n"}.items():
+            (j / rel).parent.mkdir(parents=True, exist_ok=True); (j / rel).write_text(body, encoding="utf-8")
+        park5, cuts5 = plan(w, "com.ex.r")
+        got5 = {f.relative_to(j).as_posix() for f in park5}
+        proxy = cuts5.get(j / "com/ex/r/proxy/Proxy.java", ("", []))[0]
+        ok5 = ({"com/ex/r/data/gen/Generators.java", "com/ex/r/data/gen/Items.java"} <= got5
+               and "com/ex/r/Main.java" not in got5 and "new Generators" not in proxy and "register(this)" in proxy
+               and "gather(" not in cuts5.get(j / "com/ex/r/Main.java", ("gather(", []))[0])
+        if not ok5:
+            print("self-check X92:", sorted(got5), proxy)
+        ok = ok and ok5
     print("self-check:", "OK" if ok else f"FAIL {sorted(got)}")
     return 0 if ok else 1
 
