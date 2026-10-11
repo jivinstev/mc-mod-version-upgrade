@@ -158,8 +158,16 @@ def override_lines(log_text, text):
     adds = []
     hits = [(e.group("path").replace("/", "."), e) for e in OVERRIDE.finditer(log_text)]
     hits += [(e.group("fqn"), e) for e in OVERRIDE_MDG.finditer(log_text)]
+    # `public a.B *()` widens EVERY method of B: answer each conflicting subclass with the same wildcard (X88)
+    wild = {p[1].split(".")[-1].split("$")[-1]: p[1] for p in (l.split("#", 1)[0].split() for l in text.splitlines())
+            if len(p) >= 3 and p[2] == "*()" and p[0].startswith("public")}
     for sub_cls, e in hits:
         base_simple = e.group("base").split(".")[-1]
+        if base_simple in wild:
+            if (sub_cls, "*", "()") not in have:
+                have.add((sub_cls, "*", "()"))
+                adds.append(f"public {sub_cls} *() # overrides methods of {wild[base_simple]}, widened there by wildcard")
+            continue
         for _a, cls, member, desc in entries(text):
             if member == e.group("m") and desc and cls.split(".")[-1].split("$")[-1] == base_simple:
                 full = e.groupdict().get("full")
@@ -239,6 +247,13 @@ def self_check():
     ok &= override_lines(neo, egg) == ["public net.neoforged.neoforge.common.DeferredSpawnEggItem getDefaultType()"
                                        "Lnet/minecraft/world/entity/EntityType; # overrides net.minecraft.world.item."
                                        "SpawnEggItem.getDefaultType, widened there"]
+    adds3 = override_lines("/x/transformed/net/minecraft/world/entity/vehicle/ChestBoat.java:47: error: getMaxPassengers() in "
+                           "ChestBoat cannot override getMaxPassengers() in Boat\n"
+                           "/x/transformed/net/minecraft/world/entity/vehicle/ChestBoat.java:57: error: tick() in "
+                           "ChestBoat cannot override tick() in Boat\n",
+                           "public net.minecraft.world.entity.vehicle.Boat *()\n")
+    ok = ok and adds3 == ["public net.minecraft.world.entity.vehicle.ChestBoat *() # overrides methods of "
+                          "net.minecraft.world.entity.vehicle.Boat, widened there by wildcard"]
     import tempfile
     with tempfile.TemporaryDirectory() as d:    # a generic override: the subclass's OWN descriptor, plus the bridge
         f = pathlib.Path(d, "steps/transformSource/transformed/net/minecraft/client/r/HorseR.java")

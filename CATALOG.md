@@ -5964,3 +5964,9 @@ preprocessor's `//#if FABRIC` lines and a trailing comma — Mixin's lenient Gso
 died (`json.decoder.JSONDecodeError`) before anything was ported · **Fix:** setup reads mixin configs and
 `pack.mcmeta` leniently (comments, trailing commas) and writes them back strict, so every later reader sees plain
 JSON.
+
+**X88. A wildcard access transformer widens every override below it too.** · **Pattern:** `public
+net.minecraft.world.entity.vehicle.Boat *()` (every method of `Boat`) · **Symptom:** Minecraft's recompile failed on
+each protected override in `ChestBoat`, and the override loop, which matched only named members, found nothing to add
+and stopped the stage · **Fix:** for a base class widened by a method wildcard, each conflicting subclass gets the
+same wildcard (`public …ChestBoat *()`).
