@@ -1056,6 +1056,8 @@ def fix_decompile_artifacts(srcj):
       * an unresugared constructor: `X v = new X;` ... `v./* <marker> Unable to resugar constructor */<init>(args);`
         (the statements between compute the arguments) -> the bare `new X;` goes and the call becomes
         `X v = new X(args);`, when nothing between them touches v.
+      * Google's `@AutoService(X.class)` -- build-time only, the jar already carries the META-INF/services file it
+        generated -- is stripped likewise (counted with expect_platform);
       * Architectury's `@ExpectPlatform` (+ `.Transformed`): the build already rewrote each such method to call
         `<pkg>.<loader>.<Name>Impl`, so the annotation is inert -- but its foreign package made park-optional park
         the mod's own platform facade (X72). Strip it and its import.
@@ -1075,6 +1077,10 @@ def fix_decompile_artifacts(srcj):
         n["string_concats"] += c
         new, c = re.subn(r"\(([A-Za-z_][\w.$]*)<>\)", r"(\1)", new)   # `(Supplier<>) () -> x`: a raw cast is legal
         n["diamond_casts"] += c
+        if "com.google.auto.service.AutoService" in new:    # build-time only: the jar already has META-INF/services
+            new = re.sub(r"(?m)^import com\.google\.auto\.service\.AutoService;[ \t]*\n", "", new)
+            new, c = re.subn(r"@(?:com\.google\.auto\.service\.)?AutoService\((?:[^()]|\([^()]*\))*\)[ \t]*\n?[ \t]*", "", new)
+            n["expect_platform"] += c
         if "dev.architectury.injectables.annotations" in new:
             new = re.sub(r"(?m)^import dev\.architectury\.injectables\.annotations\.[\w.]+;[ \t]*\n", "", new)
             new, c = re.subn(r"@(?:dev\.architectury\.injectables\.annotations\.)?ExpectPlatform(?:\.Transformed)?\b[ \t]*\n?[ \t]*",
@@ -1200,6 +1206,11 @@ def self_check():
         got = fix_decompile_artifacts(d)
         s = g.read_text(encoding="utf-8")
         ok &= got["expect_platform"] == 2 and "ExpectPlatform" not in s and "public static Path dir()" in s
+        g.write_text("package p;\nimport com.google.auto.service.AutoService;\n@AutoService(Svc.class)\npublic class Q implements Svc {}\n",
+                     encoding="utf-8")
+        got = fix_decompile_artifacts(d)
+        s = g.read_text(encoding="utf-8")
+        ok &= got["expect_platform"] == 1 and "AutoService" not in s and "public class Q implements Svc" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
     import tempfile as _tf
