@@ -36,7 +36,12 @@ until its dependency's run is green, and it is then gated against the dependency
 2. **Merge** on a work branch `keep-current/<date>` cut from the port branch: `port-sync.py` (a merge, never a
    rebase). Fetch immediately before merging and name the exact commit merged in the message, read from git
    (`git rev-parse --short <remote>/<branch>`), never from memory: the authors can push while a reconcile is
-   running, and the next run decides from what this one says it merged. A conflict in a file one of our fix commits touched is not resolved here -- it is step 3's question.
+   running, and the next run decides from what this one says it merged (`port-sync.py` now puts it in the message).
+   **A conflict in a file one of our fix commits touched** cannot wait for step 3 -- the merge cannot be committed,
+   and the A/B needs a tree that compiles. Resolve it to the AUTHORS' side, say in the merge message that the
+   resolution is provisional ("decision and A/B: <issue> ledger"), and if step 3's A/B then fails, commit our fix
+   back on top. Also bring the fork's mirror of the authors' branch up to the merged commit (a push: only with the
+   user's allowance from stop 1) -- CI judges Gate A's exemptions against that base.
 3. **Reconcile** -- the step that is easy to do badly. Do all of it, every run that brings anything in:
    1. **Read every issue, the text not your memory of it**: this fork's AND every dependency's and dependent's
       fork, open and closed, plus each fix commit's message. `fix-ledger.py worksheet` lists our fix commits,
@@ -49,8 +54,12 @@ until its dependency's run is green, and it is then gated against the dependency
       this mod was for (it now clears a state on logout), and our fix in the dependency can make a dependent's
       fix unnecessary or wrong. Ask it for every fix of ours, in both directions.
    4. **Decide per mode, by the rule**:
-      - the authors' (or the dependency's) change resolves the mode, **proven by an A/B** -- our fix reverted on a
-        scratch worktree, the reproduction run, the mode absent: **drop ours**, take theirs (the fork shrinks);
+      - the authors' (or the dependency's) change resolves the mode, **proven by an A/B with two arms**: the
+        CONTROL (neither fix -- our fix reverted, theirs not applied, nothing else changed) must SHOW the mode,
+        and the TREATMENT (theirs) must not. A control that does not show it means the reproduction does not
+        reproduce -- fix the reproduction, do not drop the fix. (A library can mask its own bug: one coremod
+        replaced the very list the bug mutated, so the failure only existed where that coremod was absent, and
+        a first control printed "mode absent" over a bug it could not reach.) Then **drop ours**, take theirs;
       - it resolves part of it: **shrink ours** to the residual (often a one-line guard that does what the
         authors' own comment says the code meant to do);
       - otherwise **keep ours**.
@@ -58,27 +67,46 @@ until its dependency's run is green, and it is then gated against the dependency
       run. A mode that would ship as S1 is never accepted to save diff. A file the authors now ship
       **byte-identical** to our fix is their adoption of it: the merge drops our diff by itself; record it as
       fixed by them, with the comparison as the evidence.
+      **The authors' fix is written for THEIR loader.** When it hooks something that does not exist on ours (a
+      Forge networking class, say), it is not a port but our re-implementation of their intent: decision
+      `adjust`, with its own two-arm A/B -- their evidence does not carry over. If two re-implementations both
+      pass, prefer the smaller diff against their code and the one proven in the runtime where the mode happens
+      (a real client for a networking or rendering mode; a GameTest can only approximate one).
+      **Some modes need a real installed instance to reproduce** (a library whose transformation backend only
+      loads from a mods folder, not a dev classpath). A `keep` needs no A/B; a `drop`/`accept` of such a mode
+      stays `keep` until the reproduction has been run where it can happen -- by a person if no gate can.
       **An A/B is only evidence if it ran on the tree you think it did.** Cut it on its own throwaway branch
       (`git worktree add -b ab/<what> <dir> <work branch>` -- never the work branch itself, which is checked out
       already and makes `worktree add` fail), stop on any setup failure (`|| exit 1`, never `;`), and before
       reading the result assert the reverted code really is absent (grep for the line the fix removed or added).
    5. **Record it in the ledger** of each issue (`fix-ledger.py render --into`, posted with the GitHub connector):
-      per mode, per branch, `fixed` / `open` / `not-affected`, by whom (`ours <sha>`, `upstream <repo>@<sha>`,
-      `dependency <repo>@<tag>`), the decision and the evidence. An issue closes only when every mode is fixed
+      per mode, per branch, `fixed` / `fixed-unconfirmed` (shipped, repro not re-run where it reproduced) /
+      `open` / `not-affected`, by whom (`ours <sha>`, `upstream <repo>@<sha>`, `dependency <repo>@<tag>`), the
+      decision, the evidence, and for drop/accept/adjust the A/B arms (`"ab": {"control", "treatment"}`, or
+      `"identical"` for a byte-identical adoption). An issue closes only when every mode is fixed
       or not-affected on every branch that ships. `fix-ledger.py check` must pass. A defect that spans two
       forks (a library and a mod that uses it) has ONE ledger, in the library's issue; the other fork's issue
       links it. Name each branch column for what a player can tell apart: the released build (`r6`), upstream
-      (their version, their Minecraft), and the pending reconcile.
-4. **Port the new code**: the authors' new commits are written for their Minecraft version. Compile
+      (their version, their Minecraft), and the pending reconcile -- named after the work branch
+      (`keep-current/<date>`), which is the column `check --release` takes (it fails if the name matches none).
+      **Judge the released column too.** Splitting an issue finely can show an S1 mode already open in what
+      players have now (latent in a library: reachable by any other caller). That is a stop: tell the user, and
+      offer to expedite this reconcile's PR and pre-release.
+4. **Port the new code**: the authors' new commits are written for their Minecraft version. (An authors' `gradlew`
+   committed without its exec bit: run `bash gradlew`, do not chmod it -- that is diff in their tree.) Compile
    (`tools/burndown-count.sh`), run the mechanical stage, fix the rest with the catalogue. Mixins they added need
    their targets re-checked against this version (a mixin into networking or rendering is only exercised by a
    client gate -- Gate B passes even when it fails to apply).
 5. **Gate** (`ci-gates.py`, full and minimal; one run at a time -- the software-rendered client gives false
-   failures under CPU contention). Then each mode's reproduction, for the modes this run decided.
+   failures under CPU contention, and the A/B worktrees share `~/.gradle`, so they count too). Then each mode's reproduction, for the modes this run decided.
 6. **Push the work branch and open a PR into the port branch** with: the incoming commits, the reconcile table
    (mode, severity, decision, evidence), the gate tables, the ledger changes. Run `fix-ledger.py check --release
-   <port branch>`: an S1 mode open on a branch that ships blocks the PR, and the run stops and reports.
-7. **Dependents next**, against this build: bump their pin in their own PR and repeat from step 2 for them.
+   keep-current/<date>`: an S1 mode open on a branch that ships blocks the PR, and the run stops and reports.
+7. **Dependents next.** Gate each dependent locally against this build (its `_mr`-style jar put into mavenLocal
+   the way its CI does). Its pin (`port-ci.py --dep-jar`, a release asset + sha256) can only move once this
+   dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
+   PR as a blocking item, and re-pin then. A pre-release may be pinned for CI; the dependent's own release waits
+   for the dependency's to be promoted.
 8. **Report once** on the fleet's tracking issue: what came in, what was decided, what is waiting for a person
    (a PR to merge, a build to play and promote). Silent when nothing changed.
 
