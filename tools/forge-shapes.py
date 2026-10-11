@@ -600,6 +600,43 @@ public final class ItemNbt {{
         CompoundTag tag = getTag(stack);
         return tag != null && tag.contains(key, 10) ? tag.getCompound(key) : null;
     }}
+
+    /** 1.20's ItemStack.of(tag): empty when the tag is empty or names nothing. */
+    public static ItemStack of(CompoundTag tag) {{
+        return ItemStack.parseOptional(registries(), tag);
+    }}
+
+    /** 1.20's stack.save(new CompoundTag()). */
+    public static CompoundTag save(ItemStack stack) {{
+        return save(stack, new CompoundTag());
+    }}
+
+    /** 1.20's stack.save(tag): writes into the tag and returns it. 1.21 refuses to encode an EMPTY stack (R21), so an
+     *  empty one leaves the tag as it was, which of(..) reads back as empty. */
+    public static CompoundTag save(ItemStack stack, CompoundTag into) {{
+        if (stack.isEmpty()) return into;
+        return stack.save(registries(), into) instanceof CompoundTag c ? c : into;
+    }}
+
+    /** The registries for the CALLING thread (R24): a holder from the other side's copy cannot be sent. */
+    static net.minecraft.core.HolderLookup.Provider registries() {{
+        net.minecraft.server.MinecraftServer server = net.neoforged.neoforge.server.ServerLifecycleHooks.getCurrentServer();
+        if (server != null && server.isSameThread()) return server.registryAccess();
+        if (net.neoforged.fml.loading.FMLEnvironment.dist.isClient()) {{
+            net.minecraft.core.HolderLookup.Provider client = Client.registries();
+            if (client != null) return client;
+        }}
+        if (server != null) return server.registryAccess();
+        return net.minecraft.core.RegistryAccess.fromRegistryOfRegistries(net.minecraft.core.registries.BuiltInRegistries.REGISTRY);
+    }}
+
+    /** Loaded only when called, so a dedicated server never resolves the client class. */
+    private static final class Client {{
+        static net.minecraft.core.HolderLookup.Provider registries() {{
+            net.minecraft.client.multiplayer.ClientLevel level = net.minecraft.client.Minecraft.getInstance().level;
+            return level == null ? null : level.registryAccess();
+        }}
+    }}
 }}
 """
 
@@ -630,6 +667,12 @@ def t_nbt(path, text, ctx, res):
     rw(recv + r"\.setTag\(", lambda m: f"{H}.setTag({m.group('r')}, ")
     rw(recv + r"\.getTagElement\(", lambda m: f"{H}.getTagElement({m.group('r')}, ")
     rw(recv + r"\.removeTagKey\((?P<a>[^()]*)\)", lambda m: f"{H}.update({m.group('r')}, t -> t.remove({m.group('a')}))")
+    # X167: ItemStack.of(tag) and stack.save(tag) took no registries in 1.20; 1.21 needs a HolderLookup.Provider
+    rw(r"(?<![\w$.])(?:net\.minecraft\.world\.item\.)?ItemStack\s*(?:\.\s*of\s*(?=\()|::\s*of\b)",
+       lambda m: f"{H}::of" if "::" in m.group(0) else f"{H}.of")
+    rw(recv + r"\.save\(\s*new\s+CompoundTag\(\)\s*\)", lambda m: f"{H}.save({m.group('r')})")
+    rw(recv + r"\.save\((?P<a>(?!\s*(?:\w+\.)?(?:registryAccess|registries|provider|lookup)\b)[\w$]+)\)",
+       lambda m: f"{H}.save({m.group('r')}, {m.group('a')})")
     # an ItemNbt.setTag(x, ) left by a no-arg setTag cannot happen; a getOrCreateTag() stored and then mutated can:
     for m in re.finditer(r"CompoundTag\s+(\w+)\s*=\s*ItemNbt\.getOrCreateTag\((\w+)\)\s*;", text):
         tail = text[m.end():m.end() + 4000]
@@ -1418,7 +1461,7 @@ def inline_small_nbt(src, nbt_fqn, res):
     users = {f: f.read_text(encoding="utf-8") for f in pathlib.Path(src).rglob("*.java")}
     users = {f: t for f, t in users.items() if "ItemNbt." in t}
     sites = sum(t.count("ItemNbt.") for t in users.values())
-    if sites >= 3 or any(re.search(r"ItemNbt\.(setTag|getTagElement)\(|ItemNbt\.getTag\([^()]+\)(?!\.)", t)
+    if sites >= 3 or any(re.search(r"ItemNbt\.(setTag|getTagElement|of|save)\(|ItemNbt::of|ItemNbt\.getTag\([^()]+\)(?!\.)", t)
                          for t in users.values()):
         return False
     for f, t in users.items():
@@ -1504,6 +1547,17 @@ def main():
 # --------------------------------------------------------------------------- self-check
 
 CASES = [
+    ("nbt", """package a;
+public class Bag extends Item {
+   void f(CompoundTag tag, ListTag list) {
+      ItemStack itemstack = ItemStack.of(tag);
+      list.add(0, itemstack.save(new CompoundTag()));
+      itemstack.save(tag);
+      list.stream().map(CompoundTag.class::cast).map(ItemStack::of);
+   }
+}
+""", ["ItemStack itemstack = ItemNbt.of(tag);", "list.add(0, ItemNbt.save(itemstack));", "ItemNbt.save(itemstack, tag);",
+      ".map(ItemNbt::of)"], ["ItemStack.of", "ItemStack::of"]),
     ("syncinject", """package a;
 @Mixin({Wolf.class})
 public abstract class WolfEntityMixin {

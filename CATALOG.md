@@ -6732,3 +6732,15 @@ Found when a static `ItemStack.isSameItemSameTags` call survived with its row in
 loads every `*members*.tsv` and checks that a broken one exits non-zero. Raising also exposed port-upstream's
 self-check, whose fake compiles never wrote the log the fixer reads -- a crash that had read as success there too.
 `ItemStack.isEdible` -> `has(FOOD)` is added beside the `Item` row.
+
+**X167. Item stacks to and from NBT without a registry provider, and three Forge client packages.** 1.20's
+`ItemStack.of(tag)` and `stack.save(tag)` took no registries; 1.21's `parseOptional(provider, tag)` and
+`save(provider, tag)` need a `HolderLookup.Provider`, which a bundle-like item that stores stacks in its own tag has
+no way to name (§58). forge-shapes `nbt` now routes `ItemStack.of` (and `ItemStack::of`) to `ItemNbt.of` and an
+ItemStack's `save(new CompoundTag())` / `save(tag)` to `ItemNbt.save`. The helper resolves the registries for the
+CALLING thread (the integrated server's on its own thread, the client level's on the client, R24), then a dedicated
+server's, then the built-in registries; the client reach sits in a nested class so a dedicated server never loads it.
+An empty stack is not encoded (1.21 throws, R21), which `of` reads back as empty, as 1.20 did. Compiled against 1.21.1;
+A/B'd. The import codemod also maps `net.minecraftforge.client.settings` (KeyConflictContext, KeyModifier),
+`client.gui.widget` (with `ForgeSlider` -> `ExtendedSlider`) and `client.textures`, which NeoForge kept under the
+same names. Found on a food-storage mod whose key binding and inventory were both left unported.
