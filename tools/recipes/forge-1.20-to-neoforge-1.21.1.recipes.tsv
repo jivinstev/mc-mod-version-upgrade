@@ -577,3 +577,13 @@ re:\bsuper\((?![^;]*ItemStack)\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\)
 #           keeps as a plain method -- so the new hook answers what the old override did.
 #? only-if	\A(?![\s\S]*\bgetDefaultPickupItem\b)[\s\S]*\bextends\s+AbstractArrow\b[\s\S]*ItemStack\s+getPickupItem\(\)\s*\{
 re:(\n([ \t]*)(?:@Override\s*\n[ \t]*)?(?:public|protected)\s+ItemStack\s+getPickupItem\(\)\s*\{)	\n\2@Override\n\2protected ItemStack getDefaultPickupItem() {\n\2   return this.getPickupItem();\n\2}\n\1
+
+#@ X152 auto  Forge's ForgeFlowingFluid is NeoForge's BaseFlowingFluid, with the same nested Properties / Source / Flowing
+#           (and the same Properties(Supplier<FluidType>, Supplier<Fluid>, Supplier<Fluid>) constructor)
+net.neoforged.neoforge.fluids.ForgeFlowingFluid	net.neoforged.neoforge.fluids.BaseFlowingFluid
+net.minecraftforge.fluids.ForgeFlowingFluid	net.neoforged.neoforge.fluids.BaseFlowingFluid
+ForgeFlowingFluid	BaseFlowingFluid
+
+#@ X152 auto  LiquidBlock and BucketItem take the fluid itself, not Forge's supplier: the lambda's body becomes the argument.
+#           Fluids register before blocks and items (registry order), so it is bound when the block or item is built.
+re:\bnew\s+(LiquidBlock|BucketItem)\(\s*\(\)\s*->\s*	new \1(

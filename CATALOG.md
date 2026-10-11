@@ -6591,3 +6591,11 @@ firing an arrow" (R21 both ways). A super call that already passes an ItemStack 
 from feeding each other. 1.21 also made `getDefaultPickupItem()` the abstract hook and kept `getPickupItem()` as a
 plain method. A 1.20 arrow overrode the latter, so it gains `getDefaultPickupItem() { return this.getPickupItem(); }`,
 and what a player picks up stays the class's own item.
+
+**X152. Forge's `ForgeFlowingFluid` is NeoForge's `BaseFlowingFluid`.** Across the sweeps this was 10 mods and ~526
+error lines. It has the same nested `Properties`/`Source`/`Flowing` and the same
+`Properties(Supplier<FluidType>, Supplier<Fluid>, Supplier<Fluid>)` constructor, so it is a plain rename (FQN, Forge
+and codemodded spellings, and bare). `LiquidBlock` and `BucketItem` take the fluid itself rather than Forge's
+supplier, so `new LiquidBlock(() -> F.get(), props)` loses its lambda. NeoForge's `GameData.getRegistrationOrder`
+follows vanilla's order, where fluids come before blocks and items (vanilla's own `LiquidBlock(Fluids.WATER)` relies
+on it), so the fluid is bound by the time the block or item is built.
