@@ -310,6 +310,10 @@ def run(src, modid, dry=False):
                     new[pf] = txt
                     t2, k = convert_handler(new[hf], hm.group(3), flags, hf.relative_to(src).as_posix())
                     new[hf] = t2; txt = new[pf]
+                if not k and not re.search(r"\b%s\s*\([^)]*\bIPayloadContext\b" % re.escape(hm.group(3)),
+                                           txt if hf == pf else new[hf]):
+                    # say so: a handler whose context shape is not recognised is otherwise left untouched without a word
+                    flags.append(f"{rel}: handler {hm.group(2)}::{hm.group(3)} has no recognised context parameter; not converted")
                 report["handlers"] += k
             if ok:
                 for imp in IMPORTS_PACKET:

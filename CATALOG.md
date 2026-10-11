@@ -6044,4 +6044,5 @@ parameter is `CustomPayloadEvent.Context` (static `(P, ctx)` or instance `(ctx)`
 `P::handle` unchanged), recognises a target in either argument of `send`, handles `PacketDistributor.SERVER`,
 retypes a send helper's `Object` message parameter to `CustomPacketPayload`, and drops the 1.20.2 imports.
 Seen in 4 swept mods (Forge 1.20.2-1.20.4 sources). On one mod's real network package: 4 packets, 4 handlers
-and its send converted, 0 flagged. Self-check fails against the old handler rule.
+and its send converted, 0 flagged. Self-check fails against the old handler rule. A handler whose context shape is not recognised is now named in the flags instead of skipped
+without a word, which is how this one went unnoticed.
