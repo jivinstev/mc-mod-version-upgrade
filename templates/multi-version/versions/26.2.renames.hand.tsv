@@ -1096,6 +1096,12 @@ re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_5_OCCUPIED\b	BlockStateProper
 re:\bFMLLoader\.getDist\(\)	net.neoforged.fml.loading.FMLEnvironment.getDist()
 re:\bFMLEnvironment\.production\b	FMLEnvironment.isProduction()
 re:\bLevelRenderer\.getLightColor\(	net.minecraft.util.LightCoordsUtil.getLightCoords(
+# 26.2 moved RenderType's static factories to rendertype.RenderTypes. Only the 23 whose 26.2 pipeline matches
+# the 1.21.1 state on cull, blend and depth write are mapped here (compared from both sources, §V60's rule: a
+# same-named factory can change meaning). Unmapped and left for review: createArmorDecalCutoutNoCull, crumbling,
+# debugFilledBox, debugQuads, dragonRays, outline, textBackgroundSeeThrough, translucentMovingBlock, waterMask.
+# Covers calls and method references alike; not after a dot, so an FQ use is left whole.
+re:(?<![\w.])RenderType(\.|::)(armorCutoutNoCull|armorEntityGlint|beaconBeam|breezeEyes|breezeWind|endGateway|endPortal|energySwirl|entityGlint|entityShadow|entitySolid|entityTranslucent|entityTranslucentEmissive|eyes|glint|glintTranslucent|leash|lightning|lines|text|textBackground|textPolygonOffset|textSeeThrough)\b	net.minecraft.client.renderer.rendertype.RenderTypes\1\2
 re:\bRenderType\.entityCutout\(	net.minecraft.client.renderer.rendertype.RenderTypes.entityCutoutCull(
 re:\bRenderType\.entityCutoutNoCull\(	net.minecraft.client.renderer.rendertype.RenderTypes.entityCutout(
 re:\bpublic boolean isAlliedTo\(Entity (\w+)\)	protected boolean considersEntityAsAlly(Entity \1)

@@ -6015,3 +6015,12 @@ type rule could not recognise a library's provider base · **Fix:** a `GatherDat
 it is outside a datagen package AND still declares something once its handlers are cut (a field, a real
 constructor, another method). Otherwise it parks with its package, and `cut_registrations` now also drops
 `register(new Gen())`. Self-check covers both halves and fails against the old branch.
+
+**X93. RenderType's factories moved to `RenderTypes`, and only behaviour-equal ones are renamed.** · **Pattern:**
+`RenderType.entitySolid(tex)`, `RenderType::entityTranslucent` · **Error:** `cannot find symbol` /
+`invalid method reference` on 26.2, where the type moved (§V3) and its static factories went to
+`rendertype.RenderTypes` · **Fix:** one regex row covering calls AND method references, limited to the 23
+factories whose 26.2 pipeline matches the 1.21.1 composite state on cull, blend and depth write -- compared from
+both versions' sources, because §V60 showed a same-named factory can invert culling. Nine that differ or could
+not be resolved mechanically are named in the row's comment and left for review. A probe of both forms compiles
+against 26.2.
