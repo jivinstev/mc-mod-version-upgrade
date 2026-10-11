@@ -43,6 +43,20 @@ def table(path):
     return rows
 
 
+def enclosing_class(path, line):
+    """Simple name of the innermost class/interface/enum/record declared above `line` in `path` (a close enough
+    reading of 'the class this statement is in' for the supertype walk), or None."""
+    try:
+        lines = pathlib.Path(to_source(path)).read_text(encoding="utf-8", errors="replace").split("\n")[:line]
+    except OSError:
+        return None
+    for l in reversed(lines):
+        m = re.search(r"\b(?:class|interface|enum|record)\s+(\w+)", l)
+        if m and not l.lstrip().startswith(("//", "*")):
+            return m.group(1)
+    return None
+
+
 def sites(log_text):
     lines = log_text.splitlines()
     out, seen = [], set()
@@ -71,10 +85,14 @@ def sites(log_text):
         loc = next((x.strip() for x in lines[i + 1:i + 7] if x.strip().startswith("location:")), "")
         sm = re.match(r"symbol:\s+(?:method|variable)\s+(\w+)", sym)
         lm = re.match(r"location:\s+(?:variable \w+ of type |class |interface |@interface )?([\w.$]+)", loc)
-        if not sm or not lm:
+        owner = lm.group(1).split("<")[0].rsplit(".", 1)[-1] if lm else None
+        if sm and not owner:
+            # X126: an unqualified or `this.` call gets NO location line from javac; its owner is the enclosing class
+            owner = enclosing_class(m.group("file"), int(m.group("line")))
+        if not sm or not owner:
             continue
         seen.add(key)
-        out.append((m.group("file"), int(m.group("line")), sm.group(1), lm.group(1).split("<")[0].rsplit(".", 1)[-1], None))
+        out.append((m.group("file"), int(m.group("line")), sm.group(1), owner, None))
     return out
 
 
@@ -376,6 +394,14 @@ def self_check():
         log = "\n".join([f"{f}:2: error: random has protected access in Level", line, " " * col + "^"])
         run(d, log, {("Level", "random"): "getRandom()"}, jars=[])
         ok &= "w.random.nextInt(w.getRandom().nextInt(3) + 1)" in f.read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory() as d:          # X126: a `this.` call has no location line; its owner is the class
+        f = pathlib.Path(d) / "Lich.java"
+        f.write_text("class Lich extends Mob {\n  void t() { this.teleportToWithTicket(1.0, 2.0, 3.0); }\n}\n", encoding="utf-8")
+        (pathlib.Path(d) / "Mob.java").write_text("abstract class Mob extends Entity {}\n", encoding="utf-8")
+        log = (f"{f}:2: error: cannot find symbol\n  void t() {{ this.teleportToWithTicket(1.0, 2.0, 3.0); }}\n"
+               "                 ^\n  symbol: method teleportToWithTicket(double,double,double)\n")
+        got, _ = run(d, log, {("Entity", "teleportToWithTicket"): "teleportTo"}, jars=[])
+        ok &= sum(got.values()) == 1 and "this.teleportTo(1.0, 2.0, 3.0)" in f.read_text()
     print("self-check:", "OK" if ok else f"FAIL ")
     return 0 if ok else 1
 

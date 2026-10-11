@@ -6357,3 +6357,10 @@ just written USE `PacketDistributor`, so the Forge import stayed and `add_import
 every converted `PacketDistributor.sendToPlayer(...)` was then `cannot find symbol` (12 in one mod). The converter now
 swaps the import in any file whose sends it rewrote. Same mod: `NetworkHooks.openScreen(player, provider[, pos | buf ->
 ...])` is the player's own `openMenu(...)` in 1.21.1 (row).
+
+**X126. An unqualified or `this.` call has no owner in javac's report, so X107's supertype walk never saw it.** For
+`this.teleportToWithTicket(...)` javac prints `symbol: method teleportToWithTicket(double,double,double)` and NO
+`location:` line, and `fix-missing-members.py` skipped every such site -- which is most calls an entity makes on itself.
+Its owner is now the class declared above the line in the source file, which the supertype walk then resolves
+(`LichEntity` → ... → `Entity`). Found by re-running the mod X107 was written for: 6 `teleportToWithTicket` and 4
+`getFeetBlockState` sites were still there.
