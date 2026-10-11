@@ -6452,3 +6452,13 @@ ChannelBuilder...; INSTANCE = net;` registers through `net`. convert-simplechann
 alias and its field, but it rewrote sends only for `net`, so every `INSTANCE.send(...)`, `sendToServer` and
 `sendTo` was left calling a field that no longer existed (4 errors). The send rewrite now runs for the channel
 and for every field it was stored in, in every file.
+
+**X138. Casts TO a mixin class or a duck interface lose their `(Object)` hop in the decompile.** §162 restores
+`(Player)(Object)this`. A performance mod (a Lithium fork) also casts other values to its own mixin types:
+`((HopperBlockEntityMixin) hopper)`, `((ItemStackAccessor) stack)`, `((StorableItemStack) stack)`, where the last
+is an interface that a mixin class implements on ItemStack. The source wrote these as `(T)(Object)x`, which
+compiles to one checkcast, and the decompile drops the hop. javac then rejects them, because ItemStack is final and
+a mixin is a class unrelated to its target: 64 `cannot be converted to` errors in one mod. `mixin_duck_types` in
+`tools/port.py` collects the mod's `@Mixin` classes, its accessor interfaces, and the mod's own interfaces that a
+mixin class implements. `fix_decompile_artifacts` then rewrites every cast to one of those types as
+`(T)(Object)x`. The runtime checkcast is identical. Vanilla types (such as `(Container)c`) are not touched.

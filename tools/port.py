@@ -1361,6 +1361,23 @@ def name_map(kind, mc, log):
     return mp
 
 
+def mixin_duck_types(srcj):
+    """X138: the mod's own types a value is cast TO only because a mixin makes it true -- mixin classes and accessor
+    interfaces (`@Mixin` files) and the mod's interfaces a mixin class implements (Lithium's StorableItemStack on
+    ItemStack). javac rejects `(ItemStackAccessor) stack` when ItemStack is final or the mixin is a class; the source
+    wrote `(ItemStackAccessor)(Object) stack`, one checkcast the decompile shows without the hop."""
+    files = {f: f.read_text(encoding="utf-8", errors="replace") for f in pathlib.Path(srcj).rglob("*.java")}
+    own = {f.stem for f in files}
+    duck = set()
+    for f, t in files.items():
+        if "@Mixin" not in t:
+            continue
+        duck.add(f.stem)
+        for im in re.findall(r"\b(?:class|interface)\s+\w+(?:<[^{]*?>)?(?:\s+extends\s+[\w.<>, ?]+?)?\s+implements\s+([\w.<>, ?]+?)\s*\{", t):
+            duck |= {s.strip().split("<")[0].rsplit(".", 1)[-1] for s in re.split(r",(?![^<]*>)", im)}
+    return {d for d in duck if d in own}
+
+
 def fix_decompile_artifacts(srcj):
     """Vineflower output that does not PARSE, fixed before anything else reads it (a parse error stops javac before
     it reports anything else, and the stage then misreads the failure):
@@ -1380,6 +1397,7 @@ def fix_decompile_artifacts(srcj):
     -> {"digit_classes": n, "assert_guards": n, "constructors": n, ...}"""
     n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0, "string_concats": 0, "diamond_casts": 0,
          "expect_platform": 0}
+    duck = mixin_duck_types(srcj)
     for f in pathlib.Path(srcj).rglob("*.java"):
         t = f.read_text(encoding="utf-8", errors="replace")
         new = t
@@ -1400,6 +1418,10 @@ def fix_decompile_artifacts(srcj):
         if "@Mixin" in new:       # `(Player)(Object)this` compiles to one checkcast; the decompile drops the hop (§162)
             new, c = re.subn(r"\((?!Object\))([A-Z][\w.]*(?:<[^()]*>)?)\)\s*this\b", r"(\1)(Object)this", new)
             n["mixin_self_casts"] = n.get("mixin_self_casts", 0) + c
+        if duck:                  # `(StorableItemStack)(Object)stack`: the same hop for a cast TO a mixin or duck type (X138)
+            new, c = re.subn(r"(?<![\w$.])\((%s)\)(\s*)(?!\(Object\))(?=[A-Za-z_$(])" % "|".join(map(re.escape, sorted(duck))),
+                             r"(\1)\2(Object)", new)
+            n["mixin_duck_casts"] = n.get("mixin_duck_casts", 0) + c
         if "com.google.auto.service.AutoService" in new:    # build-time only: the jar already has META-INF/services
             new = re.sub(r"(?m)^import com\.google\.auto\.service\.AutoService;[ \t]*\n", "", new)
             new, c = re.subn(r"@(?:com\.google\.auto\.service\.)?AutoService\((?:[^()]|\([^()]*\))*\)[ \t]*\n?[ \t]*", "", new)
@@ -1611,6 +1633,18 @@ def self_check():
         s = g.read_text(encoding="utf-8")
         ok &= got.get("mixin_self_casts") == 2 and "(Player)(Object)this" in s and "((LivingEntity)(Object)this)" in s \
             and "Object o = (Object)this" in s
+        h = pathlib.Path(d, "HM.java")   # X138: casts TO a mixin class and to a duck interface a mixin implements
+        h.write_text("@Mixin(HopperBlockEntity.class)\npublic abstract class HM implements Duck { }\n", encoding="utf-8")
+        pathlib.Path(d, "Duck.java").write_text("public interface Duck { void reg(); }\n", encoding="utf-8")
+        u = pathlib.Path(d, "U.java")
+        u.write_text("class U { void f(HopperBlockEntity h, ItemStack s, Container c) { ((HM)h).x(); ((Duck) s).reg(); "
+                     "Duck d = (Duck)(Object)s; Container k = (Container)c; foo(HM.class); } }\n", encoding="utf-8")
+        got = fix_decompile_artifacts(d)
+        s = u.read_text(encoding="utf-8")
+        ok &= got.get("mixin_duck_casts") == 2 and "((HM)(Object)h).x()" in s and "((Duck) (Object)s).reg()" in s \
+            and "Duck d = (Duck)(Object)s" in s and "(Container)c" in s and "foo(HM.class)" in s
+        for x in (h, u, pathlib.Path(d, "Duck.java")):
+            x.unlink()
     ok &= "ftb-quests" in [g for g in slug_guesses("ftbquests") if g != "ftbquests"][:6]   # X82: the phrase searched
     ok &= lenient_json('{"a": ["x", // c\n  "y",\n  //#if F\n], /* b */ "u": "http://z"}') == {"a": ["x", "y"], "u": "http://z"}
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
