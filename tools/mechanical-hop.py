@@ -324,7 +324,7 @@ AT_WIDEN = [
 def at_widenings(repo, dirs):
     """-> AT lines added for the AT_WIDEN rows the source needs (X153)."""
     need = []
-    for pat, legal, lines in AT_WIDEN[:0]:
+    for pat, legal, lines in AT_WIDEN:
         for d in dirs:
             for f in pathlib.Path(d).rglob("*.java"):
                 tx = f.read_text(encoding="utf-8", errors="replace")
