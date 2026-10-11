@@ -5769,3 +5769,39 @@ recompile in `~/.gradle/caches/ng_execute` (its access transformer changes the h
 port leaves an idle daemon holding gigabytes for hours · **Fix:** `tools/port.py` stops its workspace's daemons
 when a port ends, however it ends. Prune per-port `ng_execute` / `neoformruntime/intermediate_results` entries
 between ports on a long run.
+
+**X65. A Kotlin mod decompiles to Kotlin.** · **Pattern:** a mod written in Kotlin (it depends on Kotlin for
+Forge) · **Symptom:** setup produces `.java` files full of `var x: T = …` and backtick names, the compile is a wall of
+parse errors, and the stage fails far from the cause · **Fix:** `tools/port.py` counts classes carrying
+`kotlin/Metadata` and stops at triage when they are the majority: porting it into Java would be a rewrite, not a
+port. Measured: 5 of 40 mods in one popularity batch.
+
+**X66. Vineflower can leave a Java 9+ string concatenation unfolded.** · **Pattern:** a `"…" + x` concatenation
+compiled to `invokedynamic` · **Symptom:** `StringConcatFactory.makeConcatWithConstants<"makeConcatWithConstants",
+"<recipe>">(args)`, a parse abort · **Fix:** setup rebuilds it from the recipe (each `\u0001` is the next argument,
+the rest literal text): `("" + "lit" + (a) + …)`. A recipe with `\u0002` (a bootstrap constant) is left alone.
+
+**X67. An access transformer that widens a vanilla method breaks NeoForge's own override of it.** · **Pattern:**
+the mod's AT makes `SpawnEggItem.getDefaultType()` public · **Symptom:** Minecraft's recompile fails in
+`net/neoforged/neoforge/common/DeferredSpawnEggItem.java: attempting to assign weaker access privileges` · **Fix:**
+NeoForge's classes are recompiled in the same step, so `tools/fix-access-transformer.py` widens their overrides
+exactly like Minecraft's (it only read `net/minecraft` paths).
+
+**X68. What a mod's toml calls optional, and what its own package is, have to be read from the code.** ·
+- *`mandatory=false` on a dependency hundreds of classes use* (MCreator's default): park-optional parked 706 files
+  of one mod as "optional integrations". A declared dependency referenced by at least 20 classes (or a tenth) is now
+  required: wired onto the classpath, and its code kept. GeckoLib is kept whenever the build supplies it.
+- *A second root package*: an `@Mod` class in `org.x.zetaimplforge` made `org.x.zeta.*`, the mod's core, look
+  foreign, and 312 of its own files were parked; a shaded library bundled in the jar likewise. A package present in
+  the decompiled tree is the mod's own.
+- *The `@Mod` class itself* importing an optional API (Curios) was parked, taking the entry point and the package
+  every converter needs with it. It is never parked; its integration references are compile-loop work.
+- *`mods = [ { modId = … } ]`* (an inline array of tables) is legal TOML; metadata is read with a TOML parser now.
+
+**X69. A rename row's argument must be a BALANCED argument list, and every unquoted parse error is a parse
+abort.** · **Pattern:** `re:InteractionResultHolder\.success\([^;]*\)` on
+`c ? InteractionResultHolder.success(s) : super.use(level, player, hand);` · **Symptom:** the greedy class ran to the
+last `)` and deleted the else branch (`c ? InteractionResult.SUCCESS;`), and burndown-count, which knew only quoted
+`'x' expected` parse errors, read javac's `: expected` as a count of **1** on a 1,000-file port · **Fix:** such rows
+match `\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)`; burndown-count matches the whole `<tokens> expected` family. An
+audit of every earlier sweep result for a hidden parse abort found only the three already known.
