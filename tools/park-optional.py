@@ -230,6 +230,19 @@ def plan(work, group, also=()):
     park.update(datagen_by_type(java, files, park, text))
     # a datagen PACKAGE can hold runtime code too (a mod's tag constants under datagen/tags, named by its items
     # and blocks): never park a datagen-reason file that a file staying in the build still names
+    # an integration-reason file OUTSIDE an integration package that main code leans on is a hub, not a plugin
+    # (a mod's 40-KB client facade and its "safe class" helper, guarding optional APIs at runtime): parking it cost one
+    # mod ~200 errors to save a handful. Keep a file at least 3 staying files name; its optional imports become
+    # compile-loop work (X85).
+    changed = True
+    while changed:
+        changed = False
+        for f in [f for f, why in park.items() if why.startswith("integration: imports")
+                  and not any(INTEGRATION_DIR.match(p) for p in f.relative_to(java).parts[:-1])]:
+            who = re.compile(r"\b" + re.escape(f.stem) + r"\b")
+            if sum(1 for g, u in text.items() if g != f and g not in park and who.search(u)) >= 3:
+                del park[f]
+                changed = True
     changed = True
     while changed:
         changed = False
@@ -459,6 +472,16 @@ def self_check():
         park2, _ = plan(w, "neoforge.com.ex.m")
         got2 = {f.relative_to(j).as_posix() for f in park2}
         ok = ok and got2 == {"fabric/com/ex/m/Init.java", "fabric/com/ex/m/net/Packet.java"}
+        for rel, body in {"com/ex/m/client/Hub.java": "package com.ex.m.client;\nimport net.irisshaders.iris.Iris;\nclass Hub {}",
+                          "com/ex/m/A1.java": "package com.ex.m;\nclass A1 { Hub h; }", "com/ex/m/A2.java": "package com.ex.m;\nclass A2 { Hub h; }",
+                          "com/ex/m/A3.java": "package com.ex.m;\nclass A3 { Hub h; }",
+                          "com/ex/m/compat/iris/Plug.java": "package com.ex.m.compat.iris;\nimport net.irisshaders.iris.Iris;\nclass Plug {}",
+                          "com/ex/m/B1.java": "package com.ex.m;\nclass B1 { Plug p; }", "com/ex/m/B2.java": "package com.ex.m;\nclass B2 { Plug p; }",
+                          "com/ex/m/B3.java": "package com.ex.m;\nclass B3 { Plug p; }"}.items():
+            (j / rel).parent.mkdir(parents=True, exist_ok=True); (j / rel).write_text(body, encoding="utf-8")
+        park4, _ = plan(w, "com.ex.m")
+        got4 = {f.relative_to(j).as_posix() for f in park4}
+        ok = ok and "com/ex/m/client/Hub.java" not in got4 and "com/ex/m/compat/iris/Plug.java" in got4
         res = w / "src/main/resources"; res.mkdir(parents=True)
         (res / "m.mixins.json").write_text(json.dumps({"package": "com.ex.m.mixin", "mixins": ["A", "jei.B"],
                                                         "client": ["jei.C"]}), encoding="utf-8")

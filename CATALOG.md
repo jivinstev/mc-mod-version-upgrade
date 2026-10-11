@@ -5937,3 +5937,10 @@ stage no longer depends on having seen them all: when javac reports parse-family
 most a tenth of the tree), those files move to `parked/unparseable/`, are listed in MIGRATION.md for the compile
 loop, the stage prints `QUARANTINED …`, and the count goes on. More than that is not a decompile artifact and still
 stops. Grep sweep logs for `QUARANTINED` to find the next artifact worth a setup fix.
+
+**X85. A hub that guards optional APIs is not an integration.** · **Pattern:** a mod's 40-KB client facade and its
+"safe class" helper import optional mods' APIs (Iris, ModernUI) behind runtime checks, and half the mod calls them
+· **Symptom:** park-optional parked both as integrations; ~200 references to them became errors, to save the handful
+the optional imports cause · **Fix:** a file outside an integration package that at least three staying files name
+is kept; its optional imports are compile-loop work. A plugin in an `integration/`/`compat/` package still parks
+whole.
