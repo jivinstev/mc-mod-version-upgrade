@@ -107,6 +107,9 @@ dependencies {
     // registry, matched to that target), so the port compiles against the dependency's real API and Gate B/C load it.
     compileOnly fileTree(dir: "libs/${minecraft_version}", include: ['*.jar'])
     localRuntime fileTree(dir: "libs/${minecraft_version}", include: ['*.jar'])
+    // A jar the mod ships as a RESOURCE (a Java agent, a bootstrap helper) whose classes its own code names:
+    // compile against it, but never put it on the runtime classpath -- the mod loads it itself (CATALOG §S7b, X94).
+    compileOnly fileTree(dir: "libs/compile", include: ['*.jar'])
 
     // Gate A: Minecraft-free JUnit tests (test-templates/ResourceIntegrityTest, MixinConfigIntegrityTest).
     testImplementation platform('org.junit:junit-bom:5.10.2')

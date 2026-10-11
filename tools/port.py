@@ -400,6 +400,10 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
                 d = res / rel; d.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(f, d)
     for f in res.glob("*.refmap.json"):
         f.unlink()
+    resource_jars = wire_resource_jars(raw, srcj, work)
+    if resource_jars:
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(f"setup: compile-only resource jar(s) the code names: {', '.join(resource_jars)} (X94)\n")
     # official names
     if setup_kind == "srg":
         mp = name_map("srg", src_mc, log)
@@ -1018,6 +1022,31 @@ def bundle_modules(jar):
     mods = sorted(n.rsplit("/", 1)[-1] for n in names if n.startswith("META-INF/jars/") and n.endswith(".jar")
                   and n.rsplit("/", 1)[-1].lower().startswith(stem + "-"))
     return (own, mods) if own <= 5 and len(mods) >= 2 else None
+
+
+def wire_resource_jars(raw, srcj, work):
+    """X94: a jar the mod ships as a RESOURCE (META-INF/<mod>/bootstrap-agent.jar), not jar-in-jar, whose classes the
+    mod's own code names: copy it to libs/compile/ (compileOnly in the template, never on the runtime classpath, since
+    the mod loads it itself). -> [jar names wired]."""
+    meta = raw / "META-INF"
+    if not meta.is_dir():
+        return []
+    own = {".".join(f.relative_to(srcj).parts[:-1]) for f in srcj.rglob("*.java")}
+    text = "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in srcj.rglob("*.java"))
+    out = []
+    for j in sorted(meta.rglob("*.jar")):
+        if {"jarjar", "jars"} & set(j.relative_to(meta).parts[:-1]):
+            continue
+        try:
+            with zipfile.ZipFile(j) as z:
+                pkgs = {n.rsplit("/", 1)[0].replace("/", ".") for n in z.namelist() if n.endswith(".class") and "/" in n}
+        except zipfile.BadZipFile:
+            continue
+        if any(p not in own and re.search(r"\b%s\." % re.escape(p), text) for p in pkgs):
+            (work / "libs/compile").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(j, work / "libs/compile" / j.name)
+            out.append(j.relative_to(raw).as_posix())
+    return out
 
 
 def kotlin_share(jar):

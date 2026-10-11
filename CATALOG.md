@@ -6024,3 +6024,11 @@ factories whose 26.2 pipeline matches the 1.21.1 composite state on cull, blend 
 both versions' sources, because §V60 showed a same-named factory can invert culling. Nine that differ or could
 not be resolved mechanically are named in the row's comment and left for review. A probe of both forms compiles
 against 26.2.
+
+**X94. A jar shipped as a RESOURCE that the mod's own code compiles against.** · **Pattern:** a mod ships a Java
+agent / bootstrap jar inside its jar (`META-INF/<mod>/bootstrap-agent.jar`, not jar-in-jar) and its code names
+classes that exist only in there · **Error:** `package <the mod's own>.bootstrap.runtime does not exist`, which
+reads as a decompile loss · **Fix:** setup copies any nested jar outside `META-INF/jarjar|jars` whose packages the
+source names but does not contain into `libs/compile/`, which the template puts on `compileOnly` and never on the
+runtime classpath (the mod loads it itself -- §S7b; the resource copy still ships). Measured: 2 of 398 sweep jars
+carry resource jars; one is this case, the other a multi-loader locator triage already stops.
