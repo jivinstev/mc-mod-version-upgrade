@@ -5889,3 +5889,13 @@ never been able to run in a cloud session.
 - *A parked mixin was still listed in `<mod>.mixins.json`*: Mixin fails at load on an entry whose class is gone,
   and only Gate A would have said so. park-optional now drops parked classes from every mixin config and records
   them in MIGRATION.md.
+
+**X79. Vineflower can run out of memory and silently drop a class.** · **Pattern:** a 3-MB mod jar with a
+1300-line block-registration class · **Symptom:** the decompile "succeeded"; the log held only the tail of an
+`OutOfMemoryError` (setup kept the last 4000 characters of each tool's output), and the registration class simply
+did not exist, so 2401 of 3273 errors were `package BlockRegistration does not exist`. The previous run of the same
+jar had the class: under memory pressure, which class is lost varies · **Fix:** Vineflower gets `-Xmx6g -Xss16m`
+(the JVM default, a quarter of a 15-GB machine, was not enough); setup then compares the jar's top-level classes
+with the files written and retries any missing one, with Vineflower at 8 GB and then CFR (`--jarfilter`), and logs
+what is still missing. Tool output in setup.log keeps its first 2000 characters too, where a stack trace names its
+exception.

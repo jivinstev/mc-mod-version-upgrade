@@ -208,12 +208,57 @@ def read_jar_meta(jar):
 
 
 # ── setup ───────────────────────────────────────────────────────────────────
+def _clip(t, head=2000, tail=4000):
+    """Keep where an output STARTS as well as where it ends: a stack trace's first lines name the exception."""
+    return t if len(t) <= head + tail else t[:head] + f"\n[... {len(t) - head - tail} chars ...]\n" + t[-tail:]
+
+
 def run(cmd, cwd=None, log=None, timeout=3600):
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if log:
         with open(log, "a", encoding="utf-8") as fh:
-            fh.write(f"$ {' '.join(map(str, cmd))}\n{r.stdout[-4000:]}{r.stderr[-4000:]}\n")
+            fh.write(f"$ {' '.join(map(str, cmd))}\n{_clip(r.stdout)}{_clip(r.stderr)}\n")
     return r
+
+
+def missing_classes(jar, raw):
+    """Top-level classes in the jar with no .java in the decompile: Vineflower can fail to WRITE a class (a huge
+    registration class, under memory pressure) and say so only in a stack trace, and the class is then simply
+    absent -- one mod's 2401 errors were one such class (X79)."""
+    with zipfile.ZipFile(jar) as z:
+        names = [n[:-6] for n in z.namelist() if n.endswith(".class") and "$" not in n
+                 and not n.startswith("META-INF/") and not n.endswith(("module-info.class", "package-info.class"))]
+    return sorted(n for n in names if not (raw / f"{n}.java").exists())
+
+
+def recover_missing_classes(jar, raw, vf, log):
+    """Retry the classes the decompile dropped: Vineflower again with room (stack, heap), then CFR. -> still missing"""
+    miss = missing_classes(jar, raw)
+    if not miss:
+        return []
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(f"decompile: {len(miss)} class(es) missing after Vineflower: {', '.join(miss[:8])}; retrying\n")
+    import tempfile
+    with tempfile.TemporaryDirectory() as t:
+        run(["java", "-Xss64m", "-Xmx8g", "-jar", str(vf), "-dgs=1", "-rsy=1", "-rbr=1", str(jar), t], log=log, timeout=7200)
+        for n in miss:
+            f = pathlib.Path(t, f"{n}.java")
+            if f.exists():
+                (raw / f"{n}.java").parent.mkdir(parents=True, exist_ok=True); shutil.copy2(f, raw / f"{n}.java")
+    miss = missing_classes(jar, raw)
+    cfr = ROOT / "tools/cfr.jar"
+    if miss and cfr.exists():
+        with tempfile.TemporaryDirectory() as t:
+            for n in miss:
+                run(["java", "-Xss64m", "-jar", str(cfr), str(jar), "--outputdir", t,
+                     "--jarfilter", "^" + re.escape(n.replace("/", ".")) + "$"], log=log, timeout=1800)
+                f = pathlib.Path(t, f"{n}.java")
+                if f.exists():
+                    (raw / f"{n}.java").parent.mkdir(parents=True, exist_ok=True); shutil.copy2(f, raw / f"{n}.java")
+        miss = missing_classes(jar, raw)
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(f"decompile: {len(miss)} class(es) still missing after the retries" + (f": {', '.join(miss)}" if miss else "") + "\n")
+    return miss
 
 
 def fix_hoisted_spec(src):
@@ -306,7 +351,11 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
         run(["bash", str(ROOT / "tools/download-tools.sh")], log=log)
     raw = work / "decompiled-raw"
     shutil.rmtree(raw, ignore_errors=True); raw.mkdir(parents=True)
-    r = run(["java", "-jar", str(vf), "-dgs=1", "-rsy=1", "-rbr=1", str(jar), str(raw)], log=log, timeout=7200)
+    # an explicit heap and stack: the JVM default heap ran out on a 3-MB mod jar, and Vineflower then silently skips
+    # whichever class it was writing (X79)
+    r = run(["java", "-Xss16m", "-Xmx6g", "-jar", str(vf), "-dgs=1", "-rsy=1", "-rbr=1", str(jar), str(raw)], log=log, timeout=7200)
+    if any(raw.rglob("*.java")):
+        recover_missing_classes(jar, raw, vf, log)
     if not any(raw.rglob("*.java")):
         with zipfile.ZipFile(jar) as z:
             if any(n.endswith(".class") for n in z.namelist()):
@@ -1276,6 +1325,8 @@ def self_check():
                                    b"net/fabricmc/api", b"net/minecraft/class_123")):
                 z.writestr(f"u/C{i}.class", b"\xca\xfe" + b)
         ok &= loader_families(pathlib.Path(d, "u.jar")) == {"forge", "neoforge", "fabric"}
+        rawd = pathlib.Path(d, "raw"); (rawd / "u").mkdir(parents=True); (rawd / "u/C0.java").write_text("", encoding="utf-8")
+        ok &= missing_classes(pathlib.Path(d, "u.jar"), rawd) == ["u/C1", "u/C2", "u/C3", "u/C4", "u/C5"]
         ok &= loader_families(pathlib.Path(d, "a.jar")) == set()      # one class only: below the threshold
         ok &= forge_api_jar(pathlib.Path(d, "a.jar")) and not forge_api_jar(pathlib.Path(d, "b.jar")) \
             and not forge_api_jar(pathlib.Path(d, "c.jar")) and forge_api_jar(pathlib.Path(d, "d.jar"))
