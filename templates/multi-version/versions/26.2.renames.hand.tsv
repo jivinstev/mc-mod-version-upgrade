@@ -1261,6 +1261,10 @@ re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_5_OCCUPIED\b	BlockStateProper
 # moves, and a super call inside it follows (a judgement row, §W6: a super.isAlliedTo outside an override would
 # skip the team check -- the ports' sites were all inside the override).
 re:\bFMLLoader\.getDist\(\)	net.neoforged.fml.loading.FMLEnvironment.getDist()
+# -- X135: the other FMLLoader statics a mod reaches for are instance methods on 26.x (FMLLoader.getCurrent());
+# -- FMLEnvironment and FMLPaths keep static forms.
+re:\bFMLLoader\.isProduction\(\)	net.neoforged.fml.loading.FMLEnvironment.isProduction()
+re:\bFMLLoader\.getGamePath\(\)	net.neoforged.fml.loading.FMLPaths.GAMEDIR.get()
 re:\bFMLEnvironment\.production\b	FMLEnvironment.isProduction()
 re:\bLevelRenderer\.getLightColor\(	net.minecraft.util.LightCoordsUtil.getLightCoords(
 # 26.2 moved RenderType's static factories to rendertype.RenderTypes. Only the 23 whose 26.2 pipeline matches

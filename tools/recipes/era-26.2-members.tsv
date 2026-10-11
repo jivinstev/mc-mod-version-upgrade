@@ -61,3 +61,5 @@ Level	random	getRandom()
 # §V28), Minecraft.getToasts is Gui.toastManager()
 Gui	getChat	{recv}.hud.getChat(){()}
 Minecraft	getToasts	{recv}.gui.toastManager(){()}
+# X135 (26.2 jar): the GLFW window handle accessor
+Window	getWindow	handle

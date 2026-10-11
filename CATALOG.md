@@ -6427,3 +6427,10 @@ string page in `Integer.parseInt`). The `EntityType.create(level)` row now also 
 level (`Minecraft.getInstance().level`, `mc.level`). And a `KeyMapping` category is a `KeyMapping.Category`
 record: the six vanilla `"key.categories.*"` keys inside a `new KeyMapping(...)` become its constants. A mod's
 own category key needs `Category.register` and is left for a worker. Checked against the 26.2 jar.
+
+**X135. `FMLLoader`'s statics became instance methods on 26.x, and `Window.getWindow()` is `handle()`.** On 26.x
+`FMLLoader.isProduction()` is an instance method (reached through `FMLLoader.getCurrent()`), so the static call
+fails as `non-static method ... cannot be referenced from a static context`. `FMLEnvironment.isProduction()` keeps
+the static form, and `FMLLoader.getGamePath()` becomes `FMLPaths.GAMEDIR.get()` (next to the existing `getDist`
+row). The GLFW handle accessor `Window.getWindow()` is `Window.handle()`, added as an era member row. Found on a
+2-error loading-screen mod, where these were the only two errors.
