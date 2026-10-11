@@ -1300,4 +1300,15 @@ re:(?m)^import net\.minecraft\.(?:MethodsReturnNonnullByDefault|FieldsAreNonnull
 # clientbound payload with no handler, at load). 1.21.1's one handler served both sides: pass it twice. MCreator's
 # generated loop also loses inference over its wildcard map, so its two accessor calls get raw casts.
 re:\.playBidirectional\(\s*(\w+)\s*,\s*(\w+)\.reader\(\)\s*,\s*\2\.handler\(\)\s*\)	.playBidirectional(\1, (net.minecraft.network.codec.StreamCodec) \2.reader(), (net.neoforged.neoforge.network.handling.IPayloadHandler) \2.handler(), (net.neoforged.neoforge.network.handling.IPayloadHandler) \2.handler())
+# X132: three MCreator NeoForge 1.21.1 shapes (26.2 jar): Player.displayClientMessage(text, bool) split into
+# sendOverlayMessage(text) / sendSystemMessage(text) -- a LITERAL boolean picks the method, anything else is left;
+# the CommandSourceStack constructor's permission level is a PermissionSet -- level 4 (owners) is exactly
+# ALL_PERMISSIONS and 0 exactly NO_PERMISSIONS, other levels have no 1:1 set and are left; and ThrownPotion is
+# abstract AbstractThrownPotion now (splash and lingering are separate classes), so an instanceof test names that.
+re:\.displayClientMessage\(((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*),\s*true\s*\)	.sendOverlayMessage(\1)
+re:\.displayClientMessage\(((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*),\s*false\s*\)	.sendSystemMessage(\1)
+re:(new\s+(?:[\w.]+\.)?CommandSourceStack\((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,\s*)4(\s*,)	\1net.minecraft.server.permissions.PermissionSet.ALL_PERMISSIONS\2
+re:(new\s+(?:[\w.]+\.)?CommandSourceStack\((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,\s*)0(\s*,)	\1net.minecraft.server.permissions.PermissionSet.NO_PERMISSIONS\2
+re:\binstanceof\s+(?:net\.minecraft\.world\.entity\.projectile\.)?ThrownPotion\b	instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.AbstractThrownPotion
+re:(?m)^import net\.minecraft\.world\.entity\.projectile\.ThrownPotion;[ \t]*\n(?![\s\S]*\bThrownPotion\b)	
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----

@@ -6405,3 +6405,11 @@ build instead of "no build". A build declaring no range proves nothing and is no
 · **Measured across the popularity sweeps:** four mods had been ported this way, all four now stop as native -- the
 minimap above plus three whose NeoForge "1.21" jars declare `[1.21,1.22)`, `[1.21.0,1.22)` and `[1.21,)`. That is the
 single most expensive false positive the sweep found, because each one is a whole port.
+
+**X132. Three MCreator NeoForge 1.21.1 shapes on 26.2, from one 2114-error mod.** `player.displayClientMessage(text,
+true|false)` (148 lines) splits by its literal boolean into `sendOverlayMessage(text)` / `sendSystemMessage(text)` --
+§V16 routes it through a compat pair in a two-target tree; on a single-target hop the literal decides, and a non-literal
+boolean is left for a worker. MCreator's `new CommandSourceStack(CommandSource.NULL, pos, rot, level, 4, ...)` (129) takes
+a `PermissionSet`: level 4 is exactly `ALL_PERMISSIONS` and 0 exactly `NO_PERMISSIONS`; 1-3 have no one-to-one set and are
+left. `instanceof ThrownPotion` (144) names `AbstractThrownPotion` (splash and lingering are separate classes now), and
+the old import goes when nothing else names the class. All in the 26.2 table.
