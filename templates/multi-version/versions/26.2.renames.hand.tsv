@@ -1352,4 +1352,10 @@ re:(new\s+(?:[\w.]+\.)?CommandSourceStack\((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*
 re:(new\s+(?:[\w.]+\.)?CommandSourceStack\((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,\s*)0(\s*,)	\1net.minecraft.server.permissions.PermissionSet.NO_PERMISSIONS\2
 re:\binstanceof\s+(?:net\.minecraft\.world\.entity\.projectile\.)?ThrownPotion\b	instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.AbstractThrownPotion
 re:(?m)^import net\.minecraft\.world\.entity\.projectile\.ThrownPotion;[ \t]*\n(?![\s\S]*\bThrownPotion\b)	
+# X169: cristellib 26.x moved its static PlatformHelper behind a ServiceLoader holder (platform.Services.PLATFORM).
+# Guarded: a mod may have its own class called PlatformHelper.
+#? only-if import de\.cristelknight\.cristellib\.PlatformHelper;
+re:(?<![\w.])PlatformHelper\.	de.cristelknight.cristellib.platform.Services.PLATFORM.
+de.cristelknight.cristellib.PlatformHelper	de.cristelknight.cristellib.platform.Services
+
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----

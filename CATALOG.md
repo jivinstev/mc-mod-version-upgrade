@@ -6756,3 +6756,12 @@ name those types are dropped. The original is under `parked/`, and MIGRATION.md 
 still does nothing until re-ported", so nothing is dropped silently. Only a plain class is stubbed; an interface, enum
 or record is still listed for the compile loop. Self-check through `main` (moved, stubbed, recorded); A/B'd. Found on a
 biome mod whose TerraBlender integration's entry point is called from the mod class and its config screen.
+
+**X169. A rename row can be scoped to the files that import a library (`#? only-if`).** cristellib 26.x replaced its
+static `PlatformHelper` with a ServiceLoader holder, `platform.Services.PLATFORM`, which breaks every Cristel mod's
+26.2 hop (found on a biome mod). The rename is two rows, but the bare `PlatformHelper.` row cannot be global: mods
+commonly have their own class with that name, and unguarded it rewrote one. prepare-sources now reads
+`#? only-if <regex>` above a `re:` or `member:` row and applies that row only to files whose original text matches.
+A guard on a plain row, or one that guards no row, is a hard error. The rows are scoped to files importing
+cristellib's class. A port carrying an older copy of prepare-sources would read the guard as a comment, so its rename
+table should be recomposed together with the tool.
