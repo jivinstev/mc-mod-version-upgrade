@@ -6032,3 +6032,16 @@ reads as a decompile loss · **Fix:** setup copies any nested jar outside `META-
 source names but does not contain into `libs/compile/`, which the template puts on `compileOnly` and never on the
 runtime classpath (the mod loads it itself -- §S7b; the resource copy still ships). Measured: 2 of 398 sweep jars
 carry resource jars; one is this case, the other a multi-loader locator triage already stops.
+
+**X95. Forge 1.20.2+ networking is the same channel with a new handler shape -- and the converter skipped it
+silently.** · **Pattern:** `ChannelBuilder.named(...).simpleChannel()` with the familiar
+`messageBuilder(...).encoder().decoder().consumerMainThread(P::handle).add()` chains, but the handler is an
+INSTANCE `handle(CustomPayloadEvent.Context ctx)` (no `Supplier`), and `send(message, target)` takes its
+arguments in the reverse order · **Error:** `package ...event.network.CustomPayloadEvent does not exist` (the
+import codemod renamed it to a NeoForge path that does not exist), `cannot find symbol: Context`; the converter
+reported `0 file(s) changed` and flagged nothing · **Fix:** `convert-simplechannel` accepts a handler whose last
+parameter is `CustomPayloadEvent.Context` (static `(P, ctx)` or instance `(ctx)`, the latter registering as
+`P::handle` unchanged), recognises a target in either argument of `send`, handles `PacketDistributor.SERVER`,
+retypes a send helper's `Object` message parameter to `CustomPacketPayload`, and drops the 1.20.2 imports.
+Seen in 4 swept mods (Forge 1.20.2-1.20.4 sources). On one mod's real network package: 4 packets, 4 handlers
+and its send converted, 0 flagged. Self-check fails against the old handler rule.

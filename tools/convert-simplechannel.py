@@ -37,7 +37,12 @@ DEAD = ["net.neoforged.neoforge.network.NetworkEvent", "net.minecraftforge.netwo
         "net.neoforged.neoforge.network.simple.SimpleChannel", "net.minecraftforge.network.simple.SimpleChannel",
         "net.neoforged.neoforge.network.NetworkRegistry", "net.minecraftforge.network.NetworkRegistry",
         "net.neoforged.neoforge.network.NetworkDirection", "net.minecraftforge.network.NetworkDirection",
-        "java.util.function.Supplier", "net.minecraftforge.network.PacketDistributor"]
+        "java.util.function.Supplier", "net.minecraftforge.network.PacketDistributor",
+        # Forge 1.20.2+ networking (ChannelBuilder / CustomPayloadEvent), as written and as the import codemod renamed it
+        "net.minecraftforge.event.network.CustomPayloadEvent", "net.neoforged.neoforge.event.network.CustomPayloadEvent",
+        "net.minecraftforge.network.SimpleChannel", "net.neoforged.neoforge.network.SimpleChannel",
+        "net.minecraftforge.network.ChannelBuilder", "net.neoforged.neoforge.network.ChannelBuilder",
+        "net.minecraftforge.network.Channel", "net.neoforged.neoforge.network.Channel"]
 TARGETS = {"PLAYER": "sendToPlayer", "TRACKING_ENTITY": "sendToPlayersTrackingEntity",
            "TRACKING_ENTITY_AND_SELF": "sendToPlayersTrackingEntityAndSelf"}
 
@@ -122,8 +127,17 @@ def rewrite_sends(text, chan, flags, rel):
         if m.group(1) == "sendToServer" and len(args) == 1:
             rep = f"PacketDistributor.sendToServer({args[0]})"
         elif m.group(1) == "send" and len(args) == 2:
+            # Forge 1.20.2+ reversed the order to send(message, target); a target is recognisable, a message is not
+            tgt = r"PacketDistributor\.\w+\.(?:with|noArg)\(.*\)|[\w.()]+?\.connection\.(?:connection|getConnection\(\))"
+            if re.fullmatch(tgt, args[1], re.S) and not re.fullmatch(tgt, args[0], re.S):
+                args = [args[1], args[0]]
+            pm = re.fullmatch(r"([\w.()]+?)\.connection\.(?:connection|getConnection\(\))", args[0])
             t = re.fullmatch(r"PacketDistributor\.(\w+)\.(with|noArg)\((.*)\)", args[0], re.S)
-            if t and t.group(1) in TARGETS:
+            if pm:
+                rep = f"PacketDistributor.sendToPlayer({pm.group(1)}, {args[1]})"
+            elif t and t.group(1) == "SERVER":
+                rep = f"PacketDistributor.sendToServer({args[1]})"
+            elif t and t.group(1) in TARGETS:
                 target = re.sub(r"^\(\)\s*->\s*", "", t.group(3).strip())
                 rep = f"PacketDistributor.{TARGETS[t.group(1)]}({target}, {args[1]})"
             elif t and t.group(1) == "DIMENSION" and re.fullmatch(r"\(\)\s*->\s*([\w.]+)\.dimension\(\)", t.group(3).strip()):
@@ -193,7 +207,11 @@ def convert_handler(text, hname, flags, rel):
     """handle(P, Supplier<NetworkEvent.Context> ctx) -> handle(P, IPayloadContext ctx)."""
     n = 0
     for mt in sorted(methods(text), key=lambda x: -x.start):
-        if mt.name != hname or not mt.params or not re.fullmatch(r"Supplier<\s*NetworkEvent\.Context\s*>", fs.ptype(mt.params[-1])):
+        if mt.name != hname or not mt.params:
+            continue
+        pt = fs.ptype(mt.params[-1])
+        direct = bool(re.fullmatch(r"(?:[\w.]+\.)?CustomPayloadEvent\.Context", pt))   # Forge 1.20.2+: no Supplier
+        if not direct and not re.fullmatch(r"Supplier<\s*NetworkEvent\.Context\s*>", pt):
             continue
         cs = fs.pname(mt.params[-1])
         body = text[mt.body_open:mt.body_close + 1]
@@ -351,6 +369,12 @@ def run(src, modid, dry=False):
             if k:
                 t2 = add_import(t2, "net.neoforged.neoforge.network.PacketDistributor")
                 t2 = re.sub(r"(public\s+static\s+)<(\w+)>(\s+void\s+\w+\(\s*\2\s+\w+)", r"\1<\2 extends CustomPacketPayload>\3", t2)
+                # a helper taking the message as Object (`sendToPlayer(Object packet, ServerPlayer p)`) must take a payload now:
+                # retype the parameter a PacketDistributor call sends, when exactly one Object parameter has that name
+                for nm in set(re.findall(r"PacketDistributor\.sendTo\w*\((?:[^;]*?,\s*)?(\w+)\)\s*;", t2)):
+                    hit = list(re.finditer(r"(?<=[(,])(\s*)Object(\s+%s\s*[,)])" % re.escape(nm), t2))
+                    if len(hit) == 1:
+                        t2 = t2[:hit[0].start()] + hit[0].group(1) + "CustomPacketPayload" + hit[0].group(2) + t2[hit[0].end():]
                 if "CustomPacketPayload" in t2:
                     t2 = add_import(t2, CPP)
                 new[g] = t2; report["sends"] += k
@@ -541,6 +565,33 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         m2 = (root / "Msgs.java").read_text(encoding="utf-8")
         ok = ok and "registrar.playToClient(B.TYPE, B.STREAM_CODEC, B::handle);" in m2 and ".consumerMainThread" not in m2 \
             and "INSTANCE" not in m2 and "SimpleChannel" not in m2
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:     # Forge 1.20.2+: ChannelBuilder, instance handle(CustomPayloadEvent.Context),
+        p = pathlib.Path(d) / "m/net"           # send(message, target), and a helper taking the message as Object
+        p.mkdir(parents=True)
+        (p / "Net.java").write_text(
+            "package m.net;\nimport net.minecraft.server.level.ServerPlayer;\nimport net.neoforged.neoforge.network.ChannelBuilder;\n"
+            "import net.neoforged.neoforge.network.NetworkDirection;\nimport net.neoforged.neoforge.network.SimpleChannel;\n"
+            "public class Net {\n    public static final SimpleChannel network = ChannelBuilder.named(new ResourceLocation(\"m\", \"main\"))"
+            ".networkProtocolVersion(1).simpleChannel();\n    private static int id = 0;\n    public static void setup() {\n"
+            "        network.messageBuilder(Skip.class, id++, NetworkDirection.PLAY_TO_CLIENT).encoder(Skip::encode).decoder(Skip::decode)"
+            ".consumerMainThread(Skip::handle).add();\n    }\n"
+            "    public static void sendToPlayer(Object packet, ServerPlayer player) {\n"
+            "        network.send(packet, player.connection.getConnection());\n    }\n}\n", encoding="utf-8")
+        (p / "Skip.java").write_text(
+            "package m.net;\nimport net.minecraft.network.FriendlyByteBuf;\nimport net.neoforged.neoforge.event.network.CustomPayloadEvent;\n"
+            "public class Skip {\n    public static Skip decode(FriendlyByteBuf buf) { return new Skip(); }\n"
+            "    public void encode(FriendlyByteBuf buf) { }\n"
+            "    public void handle(CustomPayloadEvent.Context context) { context.enqueueWork(() -> {}); }\n}\n", encoding="utf-8")
+        r2, f2, _c = run(d, "m")
+        n2, k2 = (p / "Net.java").read_text(encoding="utf-8"), (p / "Skip.java").read_text(encoding="utf-8")
+        ok2 = ("registrar.playToClient(Skip.TYPE, Skip.STREAM_CODEC, Skip::handle);" in n2
+               and "PacketDistributor.sendToPlayer(player, packet);" in n2 and "CustomPacketPayload packet" in n2
+               and "SimpleChannel" not in n2 and "public void handle(IPayloadContext context)" in k2
+               and "CustomPayloadEvent" not in k2 and not f2)
+        if not ok2:
+            print("self-check (1.20.2 shape):", f2, "\n" + n2 + "\n" + k2)
+        ok = ok and ok2
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{net}\n{pong}")
     return 0 if ok else 1
 
