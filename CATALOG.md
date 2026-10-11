@@ -6231,3 +6231,13 @@ type as they are. The converter now rewrites those calls when their first argume
 Vineflower writes `BlockEntityType.Builder.of(...).build(null)` BARE (`Builder.of`, nested import), which the qualified
 row could not see; and `net.minecraft.MethodsReturnNonnullByDefault` / `FieldsAreNonnullByDefault` no longer exist on
 26.2, so the annotations (usually on a package-info) are dropped.
+
+**X112. §V33's copper rows covered one family of nine.** · **Pattern:** `Blocks.WAXED_WEATHERED_COPPER`,
+`Blocks.EXPOSED_CUT_COPPER_SLAB`, `Items.WAXED_COPPER_BULB` · **Error:** `cannot find symbol` -- the inherited table
+mapped only `WAXED_COPPER_BLOCK`, `OXIDIZED_COPPER` and `COPPER_BLOCK` · **Fix:** the rows are now GENERATED from the 26.2
+jar's `WeatheringCopperCollection` fields for every family 1.21.1 had (block, cut, chiseled, stairs, slab, door, trapdoor,
+grate, bulb; lightning rod's unaffected form), for `Blocks` and `Items`, waxed and not: 146 rows instead of 3. A
+hand-written subset of a generated family is §V11's lesson again -- the colour table was generated from the start.
+· **Scoping note from the same mod:** it was a BACKPORT of the copper update to 1.21.1, and on 26.2 its whole content is
+vanilla. A port of a backport onto a version that already has the feature is usually work nobody needs; ask before
+spending on one.
