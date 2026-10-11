@@ -33,3 +33,5 @@ Entity	getFeetBlockState	getInBlockState
 Entity	teleportToWithTicket	teleportTo
 # 1.20.5 folded the permanent/transient removal into one (21.1 jar: boolean removeModifier(ResourceLocation)) -- X120
 AttributeInstance	removePermanentModifier	removeModifier
+# X153 (1.21.1 jar): the listener's Connection field is protected; getConnection() is public
+ServerCommonPacketListenerImpl	connection	getConnection()

@@ -6599,3 +6599,13 @@ and codemodded spellings, and bare). `LiquidBlock` and `BucketItem` take the flu
 supplier, so `new LiquidBlock(() -> F.get(), props)` loses its lambda. NeoForge's `GameData.getRegistrationOrder`
 follows vanilla's order, where fluids come before blocks and items (vanilla's own `LiquidBlock(Fluids.WATER)` relies
 on it), so the fluid is bound by the time the block or item is built.
+
+**X153. Access 1.21 narrowed, used from outside the class.** `MoveControl.Operation` and the `operation` field are
+protected in 1.21.1, so a 1.20 mob that checks `moveControl.operation == MoveControl.Operation.WAIT` outside a
+MoveControl subclass fails with `Operation has protected access` (16 swept mods). The Forge stage now keeps an
+`AT_WIDEN` table: a source pattern, a guard for files where the access is already legal (a subclass), and the AT
+lines. Before the access-transformer loop it writes only the lines a mod needs, so Minecraft recompiles once, and
+every line names a member that exists in 1.21.1 (§139: one dead line truncates the recompile). At runtime FML
+loads META-INF/accesstransformer.cfg by default. Separately, `ServerCommonPacketListenerImpl.connection` (a Forge mod
+sending a raw packet through `player.connection.connection`) is protected, and a member row rewrites it to the public
+`getConnection()`.

@@ -311,9 +311,44 @@ FORGE_STEPS = [("shapes", "forge-shapes.py"), ("net", "convert-simplechannel.py"
 FORGE_MEMBERS = "tools/recipes/forge-1.21.1-members.tsv"
 
 
+# X153: access 1.21 NARROWED, which a 1.20 mod used from outside the class. Each row: the source pattern that needs it,
+# a guard for files where it is already legal (a subclass), and the AT lines. Written BEFORE the access-transformer loop
+# so Minecraft is recompiled once; at runtime FML loads META-INF/accesstransformer.cfg by default.
+AT_WIDEN = [
+    (r"\bMoveControl\.Operation\b", r"\bextends\s+(?:[\w.]+\.)?MoveControl\b",
+     ["public net.minecraft.world.entity.ai.control.MoveControl$Operation",
+      "public net.minecraft.world.entity.ai.control.MoveControl operation # X153"]),
+]
+
+
+def at_widenings(repo, dirs):
+    """-> AT lines added for the AT_WIDEN rows the source needs (X153)."""
+    need = []
+    for pat, legal, lines in AT_WIDEN[:0]:
+        for d in dirs:
+            for f in pathlib.Path(d).rglob("*.java"):
+                tx = f.read_text(encoding="utf-8", errors="replace")
+                if re.search(pat, tx) and not re.search(legal, tx):
+                    need += [l for l in lines if l not in need]
+                    break
+    if not need:
+        return []
+    at = pathlib.Path(repo) / "src/main/resources/META-INF/accesstransformer.cfg"
+    have = at.read_text(encoding="utf-8") if at.exists() else ""
+    norm = {re.sub(r"\s*#.*$", "", l).strip() for l in have.splitlines()}
+    add = [l for l in need if re.sub(r"\s*#.*$", "", l).strip() not in norm]
+    if add:
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text(have + ("" if not have or have.endswith("\n") else "\n") + "\n".join(add) + "\n", encoding="utf-8")
+    return add
+
+
 def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg_map=None, say=print):
     """Forge -> NeoForge 1.21.1, after the remap, codemods and recipe pack. -> {at, shapes, net, errors}"""
     repo, rep = pathlib.Path(repo), {}
+    widened = at_widenings(repo, dirs)
+    if widened:
+        say(f"access transformer: {len(widened)} line(s) for access 1.21 narrowed (X153)")
     if any(repo.glob("src/*/resources/META-INF/accesstransformer.cfg")):
         rep["at"] = run("fix-access-transformer.py", "--work", repo, *(["--srg-map", srg_map] if srg_map else []))[1]
         say(f"access transformer: {headline(rep['at'], 'fix-access-transformer', 'at')}")
@@ -526,6 +561,15 @@ def self_check():
         ok &= calls.index("forge-shapes.py") < calls.index("convert-simplechannel.py") < calls.index("fix-holders.py")
         ok &= rep["errors"] == [30] and "fix-missing-members.py" in calls and "fix-block-codecs.py" in calls
         ok &= calls.index("convert-capabilities.py") < calls.index("fix-holders.py")
+    with tempfile.TemporaryDirectory() as d:        # X153: narrowed access is widened by AT, once, not for a subclass
+        w = pathlib.Path(d); j = w / "src/main/java/p"; j.mkdir(parents=True)
+        (j / "Fly.java").write_text("class Fly { void f() { if (m.operation == MoveControl.Operation.WAIT) {} } }", encoding="utf-8")
+        (j / "Ctl.java").write_text("class Ctl extends MoveControl { void f() { this.operation = MoveControl.Operation.WAIT; } }", encoding="utf-8")
+        a1 = at_widenings(w, [w / "src/main/java"]); a2 = at_widenings(w, [w / "src/main/java"])
+        cfg = (w / "src/main/resources/META-INF/accesstransformer.cfg").read_text(encoding="utf-8")
+        ok &= len(a1) == 2 and a2 == [] and cfg.count("MoveControl$Operation") == 1
+        (j / "Fly.java").unlink(); (w / "src/main/resources/META-INF/accesstransformer.cfg").unlink()
+        ok &= at_widenings(w, [w / "src/main/java"]) == []
     with tempfile.TemporaryDirectory() as d:        # an unparseable file is set aside, a mass of them is not
         w = pathlib.Path(d); j = w / "src/main/java/p"; j.mkdir(parents=True)
         for i in range(12):
