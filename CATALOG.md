@@ -6100,3 +6100,19 @@ are dropped; `net.minecraftforge.network.NetworkHooks` (left by the import codem
 imports `forge-shapes` removes after it deletes the override. · **The general rule:** test every converter on the
 decompiler the pipeline actually runs. Two fixes in this session were verified on CFR output and measured zero on
 the real run.
+
+**X100. MCreator's player variables are a Forge CAPABILITY, generated identically in every such mod -- so convert
+it, rather than leave a §D13 rewrite to a worker.** · **Pattern:** `<Mod>Variables` with `Capability<PlayerVariables>
+PLAYER_VARIABLES_CAPABILITY = CapabilityManager.get(new CapabilityToken<>(){})`, an `init(RegisterCapabilitiesEvent)`
+subscriber, a `PlayerVariablesProvider implements ICapabilitySerializable<Tag>` attached on `AttachCapabilitiesEvent`,
+`PlayerVariables` with `writeNBT()`/`readNBT(Tag)`, and procedures that go through
+`entity.getCapability(X.PLAYER_VARIABLES_CAPABILITY, null).orElse(new X.PlayerVariables())` / `.ifPresent(cap -> ..)`
+· **Error:** `package net.neoforged.neoforge.common.capabilities does not exist`, `package ManModVariables does not
+exist` and a cloud of `cannot find symbol` at every call site · **Fix:** `tools/convert-mcreator-variables.py` (in the
+Forge stage after the networking converter): the capability becomes a registered `AttachmentType` serialized through
+the class's own `writeNBT`/`readNBT` (same saved layout), `vars(Entity)` returns an `Optional` present for a player --
+exactly what the `LazyOptional` was -- so every call site is rewritten to `X.vars(recv)` with its `.orElse`/`.ifPresent`
+untouched; the provider and the capability subscriber go, `ATTACHMENT_TYPES` is registered from the `@Mod` constructor,
+and `PlayerVariables` loses the handler-less `@EventBusSubscriber` MCreator puts on it (R1). Death copying stays with
+MCreator's own clone handler, which copies only the variables marked persistent. The receiver of each call is found by
+scanning back over identifiers, calls and casts, so `((Entity)entity).getCapability(..)` keeps its cast.
