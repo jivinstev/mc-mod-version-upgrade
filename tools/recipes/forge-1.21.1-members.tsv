@@ -1,11 +1,10 @@
 # Member moves Forge 1.20.x -> NeoForge 1.21.1, applied by tools/fix-missing-members.py ONLY where javac reports the
 # owner type (so a same-named member on another class is never touched). <owner simple name> <old member> <new form>.
-# Each row checked against the 1.21.1 jar (javap) -- an arity-dependent rename (VertexConsumer.overlayCoords/uv2,
+# Each row checked against the 1.21.1 jar (javap) -- an arity-dependent rename (VertexConsumer.overlayCoords/uv2/normal,
 # whose 1- and 2-int forms map to different methods) is left to tools/forge-shapes.py, which sees the arguments.
 Builder	saturationMod	saturationModifier
 Builder	alwaysEat	alwaysEdible
 Properties	defaultDurability	durability
-VertexConsumer	normal	setNormal
 VertexConsumer	color	setColor
 VertexConsumer	uv	setUv
 Operation	ADDITION	ADD_VALUE

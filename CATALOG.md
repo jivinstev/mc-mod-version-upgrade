@@ -5848,7 +5848,9 @@ checked against the 1.21.1 jar; a rename whose target depends on arity (`overlay
 `forge-shapes`, which sees the arguments. ⚠ A `{recv}` template keeps the original call's `(...)` after it, so a row
 that supplies its own call (`getPartialTick` → `…getGameTimeDeltaPartialTick(true)`) must end in `{()}`, which
 consumes an empty call; otherwise it writes `f(true)()` -- a parse error that stopped one mod's stage. The table
-loader now refuses such a row.
+loader now refuses such a row. `VertexConsumer.normal → setNormal` was removed after a rerun: `normal(Matrix3f, x, y, z)`
+must become `setNormal(pose, …)` (the recipe pack's rule), and the rename turned 120 `cannot find symbol` errors into
+120 `Matrix3f cannot be converted to Pose` — the same count, and a misleading shape.
 
 **X74. A library Minecraft itself ships is not an optional integration.** · **Pattern:** a mod's config class
 imports `joptsimple.internal.Strings` (jopt-simple is on every Minecraft classpath) · **Symptom:** park-optional
