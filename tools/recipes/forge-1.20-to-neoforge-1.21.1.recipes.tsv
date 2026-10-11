@@ -42,6 +42,9 @@ re:\bForgeRegistries\.POTIONS\b	net.minecraft.core.registries.BuiltInRegistries.
 re:\bForgeRegistries\.FLUIDS\b	net.minecraft.core.registries.BuiltInRegistries.FLUID
 re:\bForgeRegistries\.MENU_TYPES\b	net.minecraft.core.registries.BuiltInRegistries.MENU
 re:\bForgeRegistries\.RECIPE_SERIALIZERS\b	net.minecraft.core.registries.BuiltInRegistries.RECIPE_SERIALIZER
+re:\bForgeRegistries\.POI_TYPES\.getHolder\(poiType\)\.get\(\)	net.minecraft.core.registries.BuiltInRegistries.POINT_OF_INTEREST_TYPE.wrapAsHolder(poiType)
+re:\bForgeRegistries\.POI_TYPES\b	net.minecraft.core.registries.BuiltInRegistries.POINT_OF_INTEREST_TYPE
+re:\bForgeRegistries\.VILLAGER_PROFESSIONS\b	net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION
 re:(BuiltInRegistries\.[A-Z_]+)\.getValue\(	\1.get(
 
 #@ 22 auto  LivingHurtEvent and LivingAttackEvent are LivingIncomingDamageEvent
@@ -135,6 +138,7 @@ re:import net\.minecraftforge\.network\.PlayMessages(?:\.SpawnEntity)?;\n
 
 #@ 117 auto  appendHoverText takes an Item.TooltipContext, not a Level
 re:void appendHoverText\(ItemStack (\w+), (?:@Nullable )?Level (\w+), List<Component> (\w+), TooltipFlag (\w+)\)	void appendHoverText(ItemStack \1, net.minecraft.world.item.Item.TooltipContext \2, List<Component> \3, TooltipFlag \4)
+re:void appendHoverText\(ItemStack (\w+), (?:@Nullable )?BlockGetter (\w+), List<Component> (\w+), TooltipFlag (\w+)\)	void appendHoverText(ItemStack \1, net.minecraft.world.item.Item.TooltipContext \2, List<Component> \3, TooltipFlag \4)
 
 #@ 105 auto  VertexConsumer builder renamed; endVertex is gone (only in files using the vertex API)
 #? only-if	import com\.mojang\.blaze3d\.vertex\.
@@ -247,6 +251,14 @@ re:(?m)^import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.client\.ConfigScre
 #@ 133 auto  Raid.RaiderType.create is gone (raider types are an enum extension): the call is left as a comment
 re:(?m)^([ \t]*)((?:Raid\.)?RaiderType\.create\([^;\n]*\);)	\1// 1.21 MIGRATION (catalogue #133): raider types are an enum extension now (enumextensions.json); dropped: \2
 
+#@ X105 auto  ForgeRegistries.Keys split: NeoForge-owned keys are NeoForgeRegistries.Keys, the rest are vanilla Registries
+#? only-if	ForgeRegistries\.Keys\b
+re:(?<![\w$.])(?:ForgeRegistries\.)?Keys\.(ENTITY_DATA_SERIALIZERS|GLOBAL_LOOT_MODIFIER_SERIALIZERS|BIOME_MODIFIER_SERIALIZERS|STRUCTURE_MODIFIER_SERIALIZERS|FLUID_TYPES|HOLDER_SET_TYPES|BIOME_MODIFIERS|STRUCTURE_MODIFIERS)\b	net.neoforged.neoforge.registries.NeoForgeRegistries.Keys.\1
+re:(?<![\w$.])(?:ForgeRegistries\.)?Keys\.CONDITION_SERIALIZERS\b	net.neoforged.neoforge.registries.NeoForgeRegistries.Keys.CONDITION_CODECS
+re:(?<![\w$.])(?:ForgeRegistries\.)?Keys\.INGREDIENT_SERIALIZERS\b	net.neoforged.neoforge.registries.NeoForgeRegistries.Keys.INGREDIENT_TYPES
+re:(?<![\w$.])(?:ForgeRegistries\.)?Keys\.([A-Z][A-Z_]+)\b	net.minecraft.core.registries.Registries.\1
+re:(?m)^import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.registries\.ForgeRegistries\.Keys\s*;[ \t]*\n	
+
 #@ 10 auto  registry keys are singular (ForgeRegistries.Keys.X became Registries.X with the plural kept)
 #? only-if	net\.minecraft\.core\.registries\.Registries|ForgeRegistries
 re:(?<![\w$])Registries\.BLOCKS\b	Registries.BLOCK
@@ -273,6 +285,8 @@ re:(?<![\w$])Registries\.SENSOR_TYPES\b	Registries.SENSOR_TYPE
 re:(?<![\w$])Registries\.ACTIVITIES\b	Registries.ACTIVITY
 re:(?<![\w$])Registries\.COMMAND_ARGUMENT_TYPES\b	Registries.COMMAND_ARGUMENT_TYPE
 re:(?<![\w$])Registries\.ENCHANTMENTS\b	Registries.ENCHANTMENT
+re:(?<![\w$])Registries\.SCHEDULES\b	Registries.SCHEDULE
+re:(?<![\w$])Registries\.DECORATED_POT_PATTERNS\b	Registries.DECORATED_POT_PATTERN
 re:(?<![\w$])Registries\.BIOMES\b	Registries.BIOME
 re:(?<![\w$])Registries\.STRUCTURE_TYPES\b	Registries.STRUCTURE_TYPE
 re:(?<![\w$])Registries\.CHUNK_GENERATORS\b	Registries.CHUNK_GENERATOR
@@ -457,3 +471,10 @@ net.neoforged.neoforge.common.extensions.IForgeTagBuilder	net.neoforged.neoforge
 IForgeTagBuilder	ITagBuilderExtension
 net.neoforged.neoforge.common.extensions.IForgeTransformation	net.neoforged.neoforge.common.extensions.ITransformationExtension
 IForgeTransformation	ITransformationExtension
+
+#@ X105 auto  MCreator 1.20 call shapes whose 1.21.1 signature changed: the effect packet gained a blend flag (false: no
+#           darkness fade, what a re-send wants), dropExperience takes the killer (none known here), and the raw
+#           ArrayList over players() erases the element type so the enhanced for over Entity cannot compile
+re:new ClientboundUpdateMobEffectPacket\(((?:[^(),]|\([^()]*\))+),\s*((?:[^(),]|\([^()]*\))+)\)	new ClientboundUpdateMobEffectPacket(\1, \2, false)
+re:(?<!void )(?<![\w$])dropExperience\(\)	dropExperience(null)
+re:new ArrayList\(((?:\w+\.)*\w+)\.players\(\)\)	new ArrayList<>(\1.players())

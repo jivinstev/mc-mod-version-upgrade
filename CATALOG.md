@@ -6156,3 +6156,17 @@ calling `sup.get()`, and nothing was flagged · **Fix:** a lambda of exactly tha
 handler runs on the main thread by default, which is all the wrapper did), and a handler taking a bare `Context` with
 `import ...NetworkEvent.Context;` is converted directly. Any other lambda is kept as written AND named in the flags.
 One mod: 7 of 8 handlers now convert; the eighth has a real inline body and is flagged.
+
+**X105. A popular MCreator mod's residual buckets were six missing rows, not six hard problems.** · **Pattern:** in one
+1.20.1 MCreator mod's post-mechanical count, the six largest non-generic buckets were each a single call shape:
+`dims.width`/`dims.height` (a record now: `width()`/`height()`), `import ...ForgeRegistries.Keys;` with bare
+`Keys.POI_TYPES`, `ForgeRegistries.POI_TYPES.getHolder(poiType).get()`, a Block's
+`appendHoverText(ItemStack, BlockGetter, ...)`, `new ClientboundUpdateMobEffectPacket(id, effect)`, `this.dropExperience()`
+and `for (Entity e : new ArrayList(world.players()))` (a raw list, so the element is `Object`) · **Error:** ~1700 of
+~2100 remaining lines between them · **Fix:** rows, each checked against the 21.1 jar with `javap`: member rows for the
+record fields; `Keys.X` goes to `NeoForgeRegistries.Keys.X` for NeoForge-owned registries and to vanilla
+`Registries.X` otherwise (then the plural→singular block), guarded by `only-if ForgeRegistries\.Keys` because a bare
+`Keys` means that class only when its import is there; `wrapAsHolder(poiType)` (the value was registered a line earlier,
+so the reference is bound); `Item.TooltipContext` for the BlockGetter form; the effect packet's new blend flag as
+`false`; `dropExperience(null)` (the killer is unknown at that call); `new ArrayList<>(...)`. The packet flag and the null
+killer are judgements, not renames -- recorded here so a later reader knows which rows to distrust.

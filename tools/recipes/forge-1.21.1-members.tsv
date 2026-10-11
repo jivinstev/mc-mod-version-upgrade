@@ -25,3 +25,5 @@ LocalPlayer	getEntityReach	entityInteractionRange
 LocalPlayer	getBlockReach	blockInteractionRange
 ServerPlayer	getEntityReach	entityInteractionRange
 ServerPlayer	getBlockReach	blockInteractionRange
+EntityDimensions	width	width()
+EntityDimensions	height	height()
