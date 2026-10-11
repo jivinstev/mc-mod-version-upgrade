@@ -1,0 +1,98 @@
+---
+name: keep-current
+description: Keep a fork port current with its authors, unattended or on request -- bring in their new commits and releases (and new releases of the forks it depends on), reconcile every defect fix the port carries against what the authors changed (take their fix when it is proven to cover ours, keep or shrink ours when not), port the new code, gate it, and push it as a PR on the fork, with each fork issue's fix ledger kept current. Also sets this up as a nightly Claude Code routine on the user's own subscription. Use when the user asks to update, sync or keep current a fork port, to reconcile with the authors' new version, to check whether the authors fixed a bug we fixed, or to schedule that.
+---
+
+# Keep a fork port current
+
+The port-fork skill makes a port; this one keeps it alive. A community fork is judged by the people who install
+it: **if it crashes them, kicks them from a server, hangs, damages a save or breaks their other mods, the fork is
+"busted", whoever's code did it.** Everything below serves that.
+
+Tools: `tools/port-sync.py` (bring the authors' commits in), `tools/fix-ledger.py` (the worksheet and the ledger),
+`tools/port-upstream.py` + the file loop (port the new code), `tools/ci-gates.py` (gates, no model),
+`tools/port-ci.py` (CI; `promote` is never run here), `tools/port-fleet.py` (every fork, dependency order).
+
+## Stops -- ask the user
+
+1. Setting up the schedule (once): which forks, the time, what may be pushed unattended.
+2. A reconcile decision the rule below does not settle (both outcomes would ship an S1 mode, or the only fix is a
+   design change of the authors' feature).
+3. Merging a keep-current PR into the port branch, until the user has said such PRs may merge on green.
+4. **Never**: promoting a release (a person must have played it -- `port-ci.py promote` is theirs), publishing to
+   Modrinth/CurseForge, pushing to or commenting on the authors' repository, force-pushing.
+
+## The fleet and its order
+
+The fleet file (outside this repository: it names other people's mods) is `tools/port-fleet.py`'s. Order is
+**dependencies first**. A dependent's CI pins its dependency by exact release asset (`--dep-jar`, written into
+the dependent's `port-ci.yml`), so read the edges from those pins, not from memory. A dependent is not touched
+until its dependency's run is green, and it is then gated against the dependency's NEW build.
+
+## Run (per fork, in fleet order)
+
+1. **Nothing new? Stop cheaply.** `port-sync.py --dry-run` for the authors' branch, and for each dependency
+   "has it a newer green build than the dependent pins?". No change anywhere: exit, no model work.
+2. **Merge** on a work branch `keep-current/<date>` cut from the port branch: `port-sync.py` (a merge, never a
+   rebase). Fetch immediately before merging and name the exact commit merged in the message, read from git
+   (`git rev-parse --short <remote>/<branch>`), never from memory: the authors can push while a reconcile is
+   running, and the next run decides from what this one says it merged. A conflict in a file one of our fix commits touched is not resolved here -- it is step 3's question.
+3. **Reconcile** -- the step that is easy to do badly. Do all of it, every run that brings anything in:
+   1. **Read every issue, the text not your memory of it**: this fork's AND every dependency's and dependent's
+      fork, open and closed, plus each fix commit's message. `fix-ledger.py worksheet` lists our fix commits,
+      which files the incoming change (and each dependency's) touches next to them, and what it adds there.
+   2. **Split each issue into failure modes**, each with a severity and a reproduction:
+      S1 crash / kick / hang / save damage / other mods broken -- S2 this mod's feature broken -- S3 cosmetic.
+      One issue is usually several modes (a disconnect, a feature switched off, a state that survives a reload),
+      and the authors' change commonly covers some of them and not others.
+   3. **Cross the dependency boundary both ways.** A dependency's new release can cover part of what a fix in
+      this mod was for (it now clears a state on logout), and our fix in the dependency can make a dependent's
+      fix unnecessary or wrong. Ask it for every fix of ours, in both directions.
+   4. **Decide per mode, by the rule**:
+      - the authors' (or the dependency's) change resolves the mode, **proven by an A/B** -- our fix reverted on a
+        scratch worktree, the reproduction run, the mode absent: **drop ours**, take theirs (the fork shrinks);
+      - it resolves part of it: **shrink ours** to the residual (often a one-line guard that does what the
+        authors' own comment says the code meant to do);
+      - otherwise **keep ours**.
+      "The authors touched that file" is not evidence, and neither is a code reading alone when the A/B can be
+      run. A mode that would ship as S1 is never accepted to save diff. A file the authors now ship
+      **byte-identical** to our fix is their adoption of it: the merge drops our diff by itself; record it as
+      fixed by them, with the comparison as the evidence.
+      **An A/B is only evidence if it ran on the tree you think it did.** Cut it on its own throwaway branch
+      (`git worktree add -b ab/<what> <dir> <work branch>` -- never the work branch itself, which is checked out
+      already and makes `worktree add` fail), stop on any setup failure (`|| exit 1`, never `;`), and before
+      reading the result assert the reverted code really is absent (grep for the line the fix removed or added).
+   5. **Record it in the ledger** of each issue (`fix-ledger.py render --into`, posted with the GitHub connector):
+      per mode, per branch, `fixed` / `open` / `not-affected`, by whom (`ours <sha>`, `upstream <repo>@<sha>`,
+      `dependency <repo>@<tag>`), the decision and the evidence. An issue closes only when every mode is fixed
+      or not-affected on every branch that ships. `fix-ledger.py check` must pass. A defect that spans two
+      forks (a library and a mod that uses it) has ONE ledger, in the library's issue; the other fork's issue
+      links it. Name each branch column for what a player can tell apart: the released build (`r6`), upstream
+      (their version, their Minecraft), and the pending reconcile.
+4. **Port the new code**: the authors' new commits are written for their Minecraft version. Compile
+   (`tools/burndown-count.sh`), run the mechanical stage, fix the rest with the catalogue. Mixins they added need
+   their targets re-checked against this version (a mixin into networking or rendering is only exercised by a
+   client gate -- Gate B passes even when it fails to apply).
+5. **Gate** (`ci-gates.py`, full and minimal; one run at a time -- the software-rendered client gives false
+   failures under CPU contention). Then each mode's reproduction, for the modes this run decided.
+6. **Push the work branch and open a PR into the port branch** with: the incoming commits, the reconcile table
+   (mode, severity, decision, evidence), the gate tables, the ledger changes. Run `fix-ledger.py check --release
+   <port branch>`: an S1 mode open on a branch that ships blocks the PR, and the run stops and reports.
+7. **Dependents next**, against this build: bump their pin in their own PR and repeat from step 2 for them.
+8. **Report once** on the fleet's tracking issue: what came in, what was decided, what is waiting for a person
+   (a PR to merge, a build to play and promote). Silent when nothing changed.
+
+## Setup: run it nightly on the user's subscription
+
+A Claude Code routine fires a fresh cloud session on a schedule under the user's own account. Create one (with
+the user's go-ahead, stop 1) whose prompt is: run the keep-current skill over the fleet file at `<path>`, in run
+mode, with the pushes the user allowed. The environment needs the forks in its repository scope and the build
+hosts in its allowed domains (`cloud/allowed-domains.txt`). Cheap nights matter: step 1 exits with no model work.
+
+## Evidence that this is needed (and the mistake it prevents)
+
+Reconciling two forks with their authors' new versions, the first pass judged each issue as a whole: "the authors
+fixed the disconnect, the rest is theirs" -- and kept two fixes in the dependent mod without asking whether the
+library's new "clear the switch on logout" had covered one of them, while missing that a saved entity re-arms it on
+every world load despite the authors' own comment saying it should only happen at spawn. Splitting the issue into
+modes, crossing the dependency boundary and running the A/B is what turned that into decisions that hold.
