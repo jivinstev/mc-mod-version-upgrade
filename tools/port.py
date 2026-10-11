@@ -368,6 +368,18 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
         if not mp.exists():
             run([sys.executable, str(ROOT / "tools/intermediary-remap/build_mapping.py"), src_mc, str(mp)], log=log)
         run([sys.executable, str(ROOT / "tools/intermediary-remap/apply_mapping.py"), str(mp), str(srcj)], log=log)
+    # A (Neo)Forge jar can carry intermediary-named code too (a multi-loader build that bundles its Fabric-side
+    # classes): 1951 such names in one NeoForge jar. Intermediary ids are globally unique, so the same remap a Fabric
+    # source gets is safe on any route (X76).
+    if setup_kind != "intermediary" and any(re.search(r"\bnet\.minecraft\.class_\d+\b|\b(?:method|field)_\d+\b",
+                                                      f.read_text(encoding="utf-8", errors="replace"))
+                                            for f in srcj.rglob("*.java")):
+        mp = pathlib.Path(os.environ.get("MIGRATE_WORKSPACE") or pathlib.Path.home() / ".mc-mod-upgrade/work") / f"intermediary2official-{src_mc}.json"
+        mp.parent.mkdir(parents=True, exist_ok=True)
+        if not mp.exists():
+            run([sys.executable, str(ROOT / "tools/intermediary-remap/build_mapping.py"), src_mc, str(mp)], log=log)
+        if mp.exists():
+            run([sys.executable, str(ROOT / "tools/intermediary-remap/apply_mapping.py"), str(mp), str(srcj)], log=log)
     left = sum(len(re.findall(r'\b[mf]_\d+_\b|\b(?:class|method|field)_\d+\b', f.read_text(encoding="utf-8", errors="replace")))
                for f in srcj.rglob("*.java"))
     # gradle.properties

@@ -5861,3 +5861,9 @@ none of it portable code · **Fix:** triage counts the loader families the class
 classes) and stops on all three, pointing at the source repository, which builds each target separately. Over every
 jar swept so far, exactly one reached three; a jar with two (Forge plus Fabric references, or NeoForge plus Fabric
 intermediary names) is ported as before.
+
+**X76. A (Neo)Forge jar can carry intermediary-named code.** · **Pattern:** a multi-loader build whose NeoForge jar
+bundles classes still in Fabric's intermediary names (`net.minecraft.class_3675`, `method_1234`) · **Symptom:** setup
+reported 1951 and 394 "unmapped names left" on two NeoForge jars, and every such class failed to compile · **Fix:**
+intermediary ids are globally unique, so setup now applies the intermediary remap to whatever survives the route's
+own remap, on every route.
