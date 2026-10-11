@@ -338,15 +338,15 @@ re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\
 # -- 26.x collapsed the three interaction-result types into one InteractionResult.
 # -- The Holder forms carried a payload (the resulting ItemStack) that the new API does not
 # -- take, so the argument is dropped -- vanilla now reads the stack back from the player.
-re:InteractionResultHolder\.success\([^;]*\)	InteractionResult.SUCCESS
-re:InteractionResultHolder\.pass\([^;]*\)	InteractionResult.PASS
-re:InteractionResultHolder\.fail\([^;]*\)	InteractionResult.FAIL
-re:InteractionResultHolder\.consume\([^;]*\)	InteractionResult.CONSUME
+re:InteractionResultHolder\.success\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.SUCCESS
+re:InteractionResultHolder\.pass\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.PASS
+re:InteractionResultHolder\.fail\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.FAIL
+re:InteractionResultHolder\.consume\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.CONSUME
 # NOTE, behavioural: 1.21.1's sidedSuccess(x, isClientSide) meant "SUCCESS on the client, CONSUME on the
 # server". 26.x folds that decision into SUCCESS itself, so this is the faithful mapping --
 # but it is the one rule here that is a judgement rather than a pure rename, so it is worth
 # eyeballing in-game (the arm-swing on use) rather than trusting the compile.
-re:InteractionResultHolder\.sidedSuccess\([^;]*\)	InteractionResult.SUCCESS
+re:InteractionResultHolder\.sidedSuccess\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.SUCCESS
 net.minecraft.world.InteractionResultHolder	net.minecraft.world.InteractionResult
 re:InteractionResultHolder<[^>]*>	InteractionResult
 
@@ -510,7 +510,7 @@ re:\bBlocks\.CHAIN\b	Blocks.IRON_CHAIN
 # 26.x: `BlockEntityType(BlockEntitySupplier<? extends T>, Block...)`. `.build(null)` is a
 # unique enough anchor to make the non-greedy capture safe over an argument list that itself
 # contains parentheses (`X::new, FOO.get()`).
-re:BlockEntityType\s*\.Builder\s*\.of\(([^;]*?)\)\s*\.build\(null\)	new BlockEntityType<>(\1)
+re:BlockEntityType\s*\.Builder\s*\.of\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*\.build\(null\)	new BlockEntityType<>(\1)
 
 # --- Entity.getTags() -> entityTags() ----------------------------------------------------
 # Renamed to stop colliding with EntityType.getTags()/Registry.getTags(), which return TAG
@@ -582,7 +582,7 @@ re:new ServerBossEvent\(	new ServerBossEvent(java.util.UUID.randomUUID(),
 # the "test.error.tick" message. Our sites all throw from inside a `helper.succeedWhen`
 # retry, where the helper's own tick is not reachable -- vanilla passes
 # `testInfo.getTick()`, we cannot, and 0 is the honest placeholder rather than a wrong number.
-re:new GameTestAssertException\(([^;]*?)\)	new GameTestAssertException(net.minecraft.network.chat.Component.literal(\1), 0)
+re:new GameTestAssertException\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)	new GameTestAssertException(net.minecraft.network.chat.Component.literal(\1), 0)
 
 # -- SoundEvents is a MIX on both versions: sounds with variants are Holder.Reference, the rest are
 # -- plain SoundEvent. So a blanket ".value()" rule is wrong -- measured, it created 67 errors by

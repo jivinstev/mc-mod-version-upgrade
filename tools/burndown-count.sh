@@ -49,12 +49,12 @@ N=$(grep -oE '^[^ ]+\.java:[0-9]+: error:' "$LOG" | sort -u | wc -l | tr -d ' ')
 # X5b: javac stops at PARSE when a file will not parse, so it never attributes and never sees
 # the rest. Three parse errors in three files then read as a 99.8% burn-down. Distinguish by
 # error KIND: parse errors are a broken file, not progress.
-PARSE=$(grep -oE "^[^ ]+\.java:[0-9]+: error: ('[^']*' expected|<identifier> expected|illegal start of|class, interface, enum, or record expected|reached end of file while parsing|not a statement)" "$LOG" \
+PARSE=$(grep -oE "^[^ ]+\.java:[0-9]+: error: ([^ ]+( or [^ ]+)* expected|illegal start of|class, interface, enum, or record expected|reached end of file while parsing|not a statement)" "$LOG" \
         | sed -E 's/: error:.*//' | sort -u | wc -l | tr -d ' ')
 if [ "$N" -gt 0 ] && [ "$PARSE" -gt 0 ] && [ $((PARSE * 2)) -ge "$N" ]; then
   echo "PARSE ABORT -- $PARSE of $N errors are SYNTAX. javac stopped before attribution, so this"
   echo "is NOT a count: a rewrite broke a file. Offending files:"
-  grep -oE "^[^ ]+\.java:[0-9]+: error: ('[^']*' expected|<identifier> expected|illegal start of|class, interface, enum, or record expected|reached end of file while parsing)" "$LOG" | sort -u | head -6
+  grep -oE "^[^ ]+\.java:[0-9]+: error: ([^ ]+( or [^ ]+)* expected|illegal start of|class, interface, enum, or record expected|reached end of file while parsing)" "$LOG" | sort -u | head -6
   exit 4
 fi
 # X5c: a FIFTH way to read zero. javac can die with an INTERNAL exception (a StackOverflowError

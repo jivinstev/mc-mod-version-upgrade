@@ -356,6 +356,9 @@ bash tools/burndown-count.sh "$T/gcap.log" >/dev/null 2>&1; code=$?
 printf '> Task :compileJava FAILED\n/w/A.java:3: error: cannot find symbol\n1,000 errors\nPORT_FULL_ERRORS compileJava: uncapped javac over 2 file(s)\n/w/A.java:3: error: cannot find symbol\n/w/B.java:9: error: cannot find symbol\n2 errors\nPORT_FULL_ERRORS compileJava: javac exit 1\n' > "$T/gfull.log"
 out="$(bash tools/burndown-count.sh "$T/gfull.log" 2>&1)"
 grep -q 'errors = 2 ' <<<"$out" && ok "the uncapped recount is read from the same log (union of unique file:line)" || bad "recounted log: $out"
+printf '> Task :compileJava\n/w/A.java:61: error: : expected\n1 error\n' > "$T/colon.log"
+bash tools/burndown-count.sh "$T/colon.log" >/dev/null 2>&1; code=$?
+[ $code = 4 ] && ok "javac's ': expected' (no quotes) is a parse abort, not a count of 1" || bad "colon-expected log exited $code, wanted 4"
 grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CAP = '1000'" tools/maxerrs.init.gradle \
   && grep -q '1,?000 errors' tools/burndown-count.sh && grep -q '1,?000 errors' tools/file-loop.py \
   && ok "the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count" || bad "the Gradle error cap disagrees between its four copies"
