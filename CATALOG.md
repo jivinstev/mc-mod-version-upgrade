@@ -6147,3 +6147,12 @@ when its package differs. ⚠ The first version added the imports to the text BE
 with offsets computed earlier, which cut the helper mid-signature and pushed a later insertion past the class's closing
 brace -- found by running both converters in pipeline order on a full Vineflower tree, not by the self-checks (whose
 fixtures put every class in one package). Imports now go in after the splice.
+
+**X104. A registration whose consumer is a main-thread WRAPPER lambda around the real handler.** · **Pattern:**
+`CHANNEL.registerMessage(id++, P.class, P::encode, P::decode, (pkt, sup) -> { Context ctx = (Context)sup.get();
+ctx.enqueueWork(() -> P.handle(pkt, ctx)); ctx.setPacketHandled(true); })` with `P.handle(P, Context)` taking the context
+directly · **Symptom:** packets converted, 0 handlers -- the lambda went into the registrar line verbatim, still
+calling `sup.get()`, and nothing was flagged · **Fix:** a lambda of exactly that shape is `P::handle` (a NeoForge payload
+handler runs on the main thread by default, which is all the wrapper did), and a handler taking a bare `Context` with
+`import ...NetworkEvent.Context;` is converted directly. Any other lambda is kept as written AND named in the flags.
+One mod: 7 of 8 handlers now convert; the eighth has a real inline body and is flagged.

@@ -58,6 +58,23 @@ class Chain:
     __slots__ = ("start", "end", "cls", "direction", "enc", "dec", "handler", "network_thread")
 
 
+# `(pkt, sup) -> { Context ctx = (Context)sup.get(); ctx.enqueueWork(() -> P.handle(pkt, ctx)); ctx.setPacketHandled(true); }`
+# -- a wrapper that only moves the call to the main thread, which is where a NeoForge payload handler already runs:
+# it is `P::handle` (X104). Anything else in the lambda leaves it alone.
+WRAPPER = re.compile(r"\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*->\s*\{\s*(?:(?:final\s+)?(?:[\w.]*Context)\s+)?(\w+)\s*=\s*"
+                     r"(?:\(\s*[\w.]*Context\s*\)\s*)?\2\s*\.\s*get\(\)\s*;\s*\3\s*\.\s*enqueueWork\(\s*\(\)\s*->\s*"
+                     r"\{?\s*([\w.]+)\s*\(\s*\1\s*,\s*\3\s*\)\s*;?\s*\}?\s*\)\s*;\s*(?:\3\s*\.\s*setPacketHandled\(\s*true\s*\)\s*;\s*)?\}",
+                     re.S)
+
+
+def unwrap_handler(h):
+    m = WRAPPER.fullmatch(h.strip())
+    if not m:
+        return h
+    q = m.group(4)
+    return q[::-1].replace(".", "::", 1)[::-1] if "." in q else h
+
+
 def chains(text, chan):
     """messageBuilder(...)...add(); and registerMessage(...) registrations on `chan`."""
     out = []
@@ -74,7 +91,7 @@ def chains(text, chan):
         c.direction = next((d for d in ("PLAY_TO_CLIENT", "PLAY_TO_SERVER") if any(d in a for a in args[2:])), None)
         g = lambda k: (re.search(r"\.%s\(\s*([^()]+?)\s*\)" % k, tail) or [None, None])[1]
         c.enc, c.dec = g("encoder"), g("decoder")
-        c.handler = g("consumerMainThread") or g("consumerNetworkThread") or g("consumer")
+        c.handler = unwrap_handler(g("consumerMainThread") or g("consumerNetworkThread") or g("consumer") or "")
         c.network_thread = bool(g("consumerNetworkThread"))
         if c.enc and c.dec and c.handler:
             out.append(c)
@@ -86,7 +103,7 @@ def chains(text, chan):
             continue
         c = Chain()
         c.start, c.end, c.cls = m.start(), semi + 1, args[1][:-6]
-        c.enc, c.dec, c.handler = args[2], args[3], args[4]
+        c.enc, c.dec, c.handler = args[2], args[3], unwrap_handler(args[4])
         c.direction = next((d for d in ("PLAY_TO_CLIENT", "PLAY_TO_SERVER") if len(args) > 5 and d in args[5]), None)
         c.network_thread = False
         out.append(c)
@@ -221,7 +238,8 @@ def convert_handler(text, hname, flags, rel):
         pt = fs.ptype(mt.params[-1])
         # Forge 1.20.2+: no Supplier. Vineflower writes it bare (`handle(Context ctx)`) and imports the nested class.
         direct = bool(re.fullmatch(r"(?:[\w.]+\.)?CustomPayloadEvent\.Context", pt)) or (
-            pt == "Context" and re.search(r"(?m)^import\s+[\w.]*\.CustomPayloadEvent\.Context\s*;", text) is not None)
+            pt == "Context" and re.search(r"(?m)^import\s+[\w.]*\.(?:CustomPayloadEvent|NetworkEvent)\.Context\s*;", text) is not None) \
+            or pt == "NetworkEvent.Context"     # a handler the X104 unwrapping exposed: the context comes in directly
         # Vineflower imports the nested class (`import ...NetworkEvent.Context;`) and writes `Supplier<Context>`
         nested = re.search(r"(?m)^import\s+[\w.]*\.NetworkEvent\.Context\s*;", text) is not None
         if not direct and not re.fullmatch(r"Supplier<\s*NetworkEvent\.Context\s*>", pt) \
@@ -505,6 +523,8 @@ def run(src, modid, dry=False):
             fn = {"PLAY_TO_CLIENT": "playToClient", "PLAY_TO_SERVER": "playToServer"}.get(d, "playBidirectional")
             reg = "registrar.executesOn(HandlerThread.NETWORK)" if c.network_thread else "registrar"
             lines.append(f"{reg}.{fn}({c.cls}.TYPE, {c.cls}.STREAM_CODEC, {c.handler.strip()});")
+            if "->" in c.handler:
+                flags.append(f"{rel}: {c.cls.rsplit('.', 1)[-1]}'s handler is a lambda kept as written; its context use needs porting")
             report[fn] += 1
         ms = methods(t)
         owner = next(x for x in ms if x.body_open < regs[0].start < x.body_close)
@@ -865,6 +885,12 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         if not ok4:
             print("self-check X102:", f4, "\n" + cm_ + ms_ + un_)
         ok = ok and ok4
+    ok5 = (unwrap_handler("(pkt, sup) -> {\n   Context ctx = (Context)sup.get();\n   ctx.enqueueWork(() -> P.handle(pkt, ctx));\n"
+                          "   ctx.setPacketHandled(true);\n}") == "P::handle"
+           and unwrap_handler("(m, s) -> { s.get().enqueueWork(() -> go()); }").startswith("(m, s)"))
+    if not ok5:
+        print("self-check X104: unwrap_handler")
+    ok = ok and ok5
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{net}\n{pong}")
     return 0 if ok else 1
 
