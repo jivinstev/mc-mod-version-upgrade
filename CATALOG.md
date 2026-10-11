@@ -6193,3 +6193,14 @@ type the row does not name, so a clean pass pays nothing. · **Found with it, sa
 Architectury's `@ExpectPlatform.Transformed`, which the decompile prep already stripped in its qualified spelling but
 Vineflower writes BARE (`import ...ExpectPlatform.Transformed;` + `@Transformed`): 50 of the mod's 164 errors. The bare
 form is stripped only in a file whose import says what it is.
+
+**X108. Two 26.2 removals that need no replacement, only to stop being called.** · **Pattern:** a client setup full of
+`ItemBlockRenderTypes.setRenderLayer(block, RenderType.cutout())` (21 calls in one farming mod), and server code reading
+`level.random` · **Error:** `cannot find symbol: variable ItemBlockRenderTypes` per call; `random has protected access in
+Level` · **Fix:** 26.2 picks the chunk layer for each quad from its sprite's own alpha
+(`ChunkSectionLayer.byTransparency`: translucent pixels → TRANSLUCENT, transparent → CUTOUT, else SOLID), so the call has
+nothing left to do -- a rename row on the 26.2 table leaves each one as a comment naming why, and drops the import. (A
+texture with soft alpha that the author pinned to cutout now draws translucent: a visual check, not a compile one.)
+`Level.random` became protected beside a public `getRandom()`; `fix-missing-members.py` now reads "has PROTECTED access"
+as well as private, and rewrites a field read to a differently-named accessor at javac's caret only, so the second of
+two `w.random` on one line is the one fixed when that is the one reported.

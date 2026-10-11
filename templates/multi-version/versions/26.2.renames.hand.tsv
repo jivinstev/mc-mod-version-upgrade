@@ -1135,4 +1135,8 @@ DimensionTransition	TeleportTransition
 net.neoforged.neoforge.event.level.BlockEvent.BreakEvent	net.neoforged.neoforge.event.level.block.BreakBlockEvent
 BlockEvent.BreakEvent	net.neoforged.neoforge.event.level.block.BreakBlockEvent
 
+# X108: ItemBlockRenderTypes is declared nowhere on 26.2, and nothing replaces it because nothing needs to: the chunk
+# layer is chosen per quad from the sprite's own alpha (ChunkSectionLayer.byTransparency). The call is left as a comment.
+re:(?m)^([ \t]*)(ItemBlockRenderTypes\.setRenderLayer\([^;\n]*\);)	\1// 26.2 (X108): the chunk layer follows the sprite's transparency; dropped: \2
+re:(?m)^import net\.minecraft\.client\.renderer\.ItemBlockRenderTypes;[ \t]*\n	
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----

@@ -26,7 +26,7 @@ import argparse, collections, pathlib, re, sys
 ERR = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[\\/]\S+?\.java):(?P<line>\d+): error: cannot find symbol")
 # A class that became a record keeps its fields PRIVATE behind same-named accessors (26.2's EnchantmentInstance):
 # javac then reports the field read, with the owner, on one line.
-PRIV = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[\\/]\S+?\.java):(?P<line>\d+): error: (?P<sym>\w+) has private access in "
+PRIV = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[\\/]\S+?\.java):(?P<line>\d+): error: (?P<sym>\w+) has (?:private|protected) access in "
                   r"(?P<owner>[\w.$]+)")
 
 
@@ -144,6 +144,9 @@ def apply_row(line, member, new, owner, col=None):
             return line[:m.end()] + "()" + line[m.end():] if m else None
         out, n = re.subn(r"(?<=\.)%s\b(?!\s*\()(?!\s*=[^=])" % re.escape(member), new, line, count=1)
         return out if n else None
+    if col is not None and new.endswith("()"):   # a field read whose accessor has another name (26.2 Level.random -> getRandom())
+        m = re.compile(r"\.\s*(%s)\b(?!\s*\()(?!\s*=[^=])" % re.escape(member)).match(line, col)
+        return line[:m.start(1)] + new + line[m.end(1):] if m else None
     out, n = re.subn(r"(?<=\.)%s(?=\s*[\(<])|(?<=\.)%s\b" % (re.escape(member), re.escape(member)), new, line, count=1)
     return out if n else None
 
@@ -365,6 +368,14 @@ def self_check():
         (pathlib.Path(d) / "Monster.java").write_text("abstract class Monster extends Entity {}\n", encoding="utf-8")
         got, _ = run(d, log, {("Entity", "setSecondsOnFire"): "igniteForSeconds"}, jars=[])
         ok &= sum(got.values()) == 1 and "this.igniteForSeconds(3)" in f.read_text()
+    with tempfile.TemporaryDirectory() as d:          # a PROTECTED field whose accessor has another name (X108)
+        f = pathlib.Path(d) / "R.java"
+        line = "  int t(ServerLevel w) { return w.random.nextInt(w.random.nextInt(3) + 1); }"
+        f.write_text("class R {\n" + line + "\n}\n", encoding="utf-8")
+        col = line.index(".random", line.index("nextInt("))
+        log = "\n".join([f"{f}:2: error: random has protected access in Level", line, " " * col + "^"])
+        run(d, log, {("Level", "random"): "getRandom()"}, jars=[])
+        ok &= "w.random.nextInt(w.getRandom().nextInt(3) + 1)" in f.read_text(encoding="utf-8")
     print("self-check:", "OK" if ok else f"FAIL ")
     return 0 if ok else 1
 
