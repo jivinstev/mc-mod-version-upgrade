@@ -6213,3 +6213,8 @@ correctly on the classpath · **Fix:** after fetching a target's dependencies, `
 libraries (MixinExtras aside: NeoForge ships it) into `libs/<mc>/nested/`, which the template puts on the COMPILE
 classpath only. At runtime the dependency's jar-in-jar provides them, and a loose second copy would be a duplicate mod.
 X101 is the same rule for the mod's own bundled jars; this one is one level out.
+
+**X110. Two 1.20.3-1.20.5 GUI signatures a small config screen hits.** `AbstractWidget.setTooltipDelay(int)` takes a
+`java.time.Duration` (an int literal becomes `Duration.ofMillis(n)`), and `Screen.renderDirtBackground(GuiGraphics)` is
+gone; its place is `renderMenuBackground(GuiGraphics)` (the textured menu background that replaced dirt). Both checked
+in the 21.1 jar; both rows.

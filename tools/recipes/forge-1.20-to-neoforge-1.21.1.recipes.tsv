@@ -484,3 +484,8 @@ re:new ArrayList\(((?:\w+\.)*\w+)\.players\(\)\)	new ArrayList<>(\1.players())
 net.minecraft.world.level.block.GlassBlock	net.minecraft.world.level.block.TransparentBlock
 GlassBlock	TransparentBlock
 net.minecraft.network.chat.contents.LiteralContents	net.minecraft.network.chat.contents.PlainTextContents.LiteralContents
+
+#@ X110 auto  1.20.3-1.20.5 GUI signatures (21.1 jar): a widget's tooltip delay is a java.time.Duration, and the
+#           dirt screen background became the menu background (Screen.renderMenuBackground(GuiGraphics))
+re:\bsetTooltipDelay\((\d+)\)	setTooltipDelay(java.time.Duration.ofMillis(\1))
+re:(?<![\w$])renderDirtBackground\(	renderMenuBackground(
