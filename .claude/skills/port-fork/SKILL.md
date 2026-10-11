@@ -196,7 +196,7 @@ contact the authors is the user's decision.
 
 **Standing rule: every offer carries "How to install", per target, and so does anything built from it.**
 `port-offer.py` writes it from what was TESTED, never the newest file on a registry: the NeoForge version the
-build names (with its installer), this fork's release jar, each required dependency at the exact version the
+build names (with its installer), this fork's release jar (its newest full Release; a pre-release only when there is none yet, and then said so), each required dependency at the exact version the
 ported build declares (`neoforge.mods.toml` decides required vs optional) with a direct file link, sibling
 ports from the exact release asset CI installed, optional integrations, and the build's other runtime mods
 (usually a library an optional one needs). When a release has one jar per platform, pass
