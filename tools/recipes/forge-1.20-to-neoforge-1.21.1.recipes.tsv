@@ -513,3 +513,7 @@ re:\bAdvancement(\s+\w+\s*=\s*[\w.()]+?\.getAdvancements\(\)\.)getAdvancement\(	
 re:(\.getAdvancements\(\)\.)getAdvancement\(	\1get(
 re:\bUnmodifiableIterator(\s+\w+\s*=\s*[\w.()]+?\.getValues\(\)\.entrySet\(\)\.iterator\(\))	java.util.Iterator\1
 re:(?<![\w$.])event\.getWindow\(\)	net.minecraft.client.Minecraft.getInstance().getWindow()
+
+#@ X125 auto  NetworkHooks.openScreen(player, provider[, pos | buf -> ...]) is the player's own openMenu in 1.21.1
+#           (IPlayerExtension.openMenu(MenuProvider, BlockPos) / (MenuProvider, Consumer<RegistryFriendlyByteBuf>), 21.1 jar)
+re:(?<![\w$])(?:[\w.]+\.)?NetworkHooks\.openScreen\(\s*((?:\([\w.]+\)\s*)?[\w.]+(?:\(\))?)\s*,\s*	(\1).openMenu(

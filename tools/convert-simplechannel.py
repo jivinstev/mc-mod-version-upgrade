@@ -569,6 +569,9 @@ def run(src, modid, dry=False):
         for g in list(new):
             t2, k = rewrite_sends(new[g], chan, flags, g.relative_to(src).as_posix())
             if k:
+                # X125: the sends just written are NeoForge's; a Forge PacketDistributor import (kept because the old
+                # calls used it) would shadow the new one, and add_import refuses a second class of that name
+                t2 = re.sub(r"(?m)^import\s+net\.minecraftforge\.network\.PacketDistributor\s*;[ \t]*\n", "", t2)
                 t2 = add_import(t2, "net.neoforged.neoforge.network.PacketDistributor")
                 t2 = re.sub(r"(public\s+static\s+)<(\w+)>(\s+void\s+\w+\(\s*\2\s+\w+)", r"\1<\2 extends CustomPacketPayload>\3", t2)
                 # a helper taking the message as Object (`sendToPlayer(Object packet, ServerPlayer p)`) must take a payload now:
@@ -648,7 +651,7 @@ def self_check():
 
 import net.neoforged.neoforge.network.NetworkDirection;
 import net.neoforged.neoforge.network.NetworkRegistry;
-import net.neoforged.neoforge.network.PacketDistributor;
+import net.minecraftforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.simple.SimpleChannel;
 
 public class Net {
@@ -735,6 +738,7 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         net = (r / "Net.java").read_text(encoding="utf-8"); ping = (r / "PingPacket.java").read_text(encoding="utf-8"); pong = (r / "PongPacket.java").read_text(encoding="utf-8")
         mod = (r / "Mod.java").read_text(encoding="utf-8")
         want = [(net, "public static void register(RegisterPayloadHandlersEvent event) {"),
+                (net, "import net.neoforged.neoforge.network.PacketDistributor;"),   # X125: replaces Forge's
                 (net, "PayloadRegistrar registrar = event.registrar(PROTOCOL_VERSION);"),
                 (net, "// to the client"),
                 (net, "registrar.playToClient(PingPacket.TYPE, PingPacket.STREAM_CODEC, PingPacket::handle);"),
@@ -753,6 +757,8 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
                 (pong, "Server.pong(((ServerPlayer) context.player()), msg.n)"),
                 (mod, "modEventBus.addListener(Net::register);")]
         miss = [w for t, w in want if w not in t]
+        if "import net.minecraftforge.network.PacketDistributor;" in net:
+            miss.append("Forge PacketDistributor import left beside the NeoForge sends (X125)")
         for bad, t in (("SimpleChannel", net), ("NetworkEvent", ping), ("setPacketHandled", pong), ("Supplier", pong),
                        ("CHANNEL", net)):
             if bad in t:

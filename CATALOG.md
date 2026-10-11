@@ -6350,3 +6350,10 @@ rename rows turn `super.saveAdditional(t, p)` into `super.saveAdditional(t)` bef
 container block entity that X111 should have converted was refused on its first line. The converter now accepts the
 one-argument forward too (it is exactly what it would have written). Found by re-running the mod X111 was written for --
 a fix verified on a fixture is not verified on the pipeline until the pipeline has run it.
+
+**X125. Converted sends kept Forge's `PacketDistributor` import.** The import codemod leaves `net.minecraftforge.network`
+alone (the network converter owns it), the converter's dead-import sweep only drops it when unused -- and the sends it had
+just written USE `PacketDistributor`, so the Forge import stayed and `add_import` refused a second class of that name:
+every converted `PacketDistributor.sendToPlayer(...)` was then `cannot find symbol` (12 in one mod). The converter now
+swaps the import in any file whose sends it rewrote. Same mod: `NetworkHooks.openScreen(player, provider[, pos | buf ->
+...])` is the player's own `openMenu(...)` in 1.21.1 (row).
