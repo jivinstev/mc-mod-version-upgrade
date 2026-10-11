@@ -430,6 +430,14 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
             m = re.search(r'^package\s+([\w.]+);', t, re.M)
             group = m.group(1) if m else None
             break
+    if group is None:           # no @Mod class (a mixin-only mod): the package every class shares, not a made-up one
+        pk = [f.relative_to(srcj).parent.parts for f in srcj.rglob("*.java")]
+        common = []
+        for parts in zip(*pk) if pk else ():
+            if len(set(parts)) != 1:
+                break
+            common.append(parts[0])
+        group = ".".join(common) if len(common) >= 2 else None
     uses_gecko = any("software.bernie.geckolib" in f.read_text(encoding="utf-8", errors="replace") for f in srcj.rglob("*.java"))
     gp = work / "gradle.properties"
     g = gp.read_text(encoding="utf-8")
