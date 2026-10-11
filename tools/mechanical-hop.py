@@ -33,6 +33,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # (label, script, how to call it per source root; a condition key or None). The ONE list both routes run.
 CONVERTERS = [
     ("gui-hooks", "convert-gui-hooks.py", None),
+    ("removed-types", "convert-removed-types.py", None),
     ("valueio", "convert-valueio.py", None),
     ("attachment-io", "convert-attachment-io.py", None),
     ("override-signatures", "convert-override-signatures.py", None),
@@ -490,7 +491,7 @@ def self_check():
                                lambda log: (next(counts), "ok"), 9, say=lambda s: None, run=fake_run)
         names = [s["step"] for s in steps]
         ok &= names[0] == "members" and names[-1] == "members-after-converters"
-        ok &= [c for c in calls if c.startswith("convert-")] == ["convert-gui-hooks.py", "convert-valueio.py",
+        ok &= [c for c in calls if c.startswith("convert-")] == ["convert-gui-hooks.py", "convert-removed-types.py", "convert-valueio.py",
                                                                     "convert-attachment-io.py", "convert-override-signatures.py",
                                                                     "convert-reload-weighted.py", "convert-client-hooks.py",
                                                                     "convert-saved-data.py",

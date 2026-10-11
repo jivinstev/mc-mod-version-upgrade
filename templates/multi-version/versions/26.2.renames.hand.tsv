@@ -1296,4 +1296,8 @@ re:(?m)^import net\.minecraft\.client\.renderer\.ItemBlockRenderTypes;[ \t]*\n
 # they were nullness hints for tooling, so a package-info or class that carries one just loses it.
 re:(?m)^[ \t]*@(?:net\.minecraft\.)?(?:MethodsReturnNonnullByDefault|FieldsAreNonnullByDefault)\b[ \t]*\n?	
 re:(?m)^import net\.minecraft\.(?:MethodsReturnNonnullByDefault|FieldsAreNonnullByDefault);[ \t]*\n	
+# X121: a 3-argument playBidirectional registers the SERVER handler only on 26.2 (§V81: the client then refuses a
+# clientbound payload with no handler, at load). 1.21.1's one handler served both sides: pass it twice. MCreator's
+# generated loop also loses inference over its wildcard map, so its two accessor calls get raw casts.
+re:\.playBidirectional\(\s*(\w+)\s*,\s*(\w+)\.reader\(\)\s*,\s*\2\.handler\(\)\s*\)	.playBidirectional(\1, (net.minecraft.network.codec.StreamCodec) \2.reader(), (net.neoforged.neoforge.network.handling.IPayloadHandler) \2.handler(), (net.neoforged.neoforge.network.handling.IPayloadHandler) \2.handler())
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----

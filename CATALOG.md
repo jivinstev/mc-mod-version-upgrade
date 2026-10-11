@@ -6313,3 +6313,15 @@ or a `() -> () -> expr` supplier). Vineflower imports Forge 1.20.1's channel bui
 (`import net.minecraftforge.network.NetworkRegistry.ChannelBuilder;`), which the network converter did not know to drop
 after converting the channel. And `AttributeInstance.removePermanentModifier` became `removeModifier(ResourceLocation)`
 in 1.20.5 (member row).
+
+**X121. Two lines every MCreator NeoForge 1.21.1 mod carries, both broken on 26.2.** · **Pattern:** the generated main
+class keeps a `workQueue` of `net.minecraft.util.Tuple<Runnable, Integer>` (`new Tuple(r, t)`, `getA/getB/setB`), and
+registers its payloads with `MESSAGES.forEach((id, networkMessage) -> registrar.playBidirectional(id,
+networkMessage.reader(), networkMessage.handler()))` · **Error:** `cannot find symbol: class Tuple` (26.x removed it);
+`no suitable method found for playBidirectional(...)` (inference over the wildcard map fails against 26.2's two
+overloads) -- and §V81 says the 3-argument form would register the SERVER handler only, so a client would refuse the
+mod's clientbound payloads at load even once it compiled · **Fix:** a new era step, `tools/convert-removed-types.py`,
+replaces a removed vanilla type with a same-shaped library type ONLY in files that import it (a rename row cannot tell
+vanilla's `Tuple` from a mod's own): `Tuple` → commons-lang3 `MutablePair` (mutable, so `setB` keeps working; on every
+Minecraft classpath), `getA/getB/setA/setB` → `getLeft/getRight/setLeft/setRight`. And a 26.2 row passes the handler
+twice with raw casts, which is 1.21.1's one-handler-both-sides behaviour (§V81).
