@@ -458,7 +458,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     for cfg in meta["mixins"]:
         p = res / cfg
         if p.exists():
-            d = json.loads(p.read_text(encoding="utf-8"))
+            d = lenient_json(p.read_text(encoding="utf-8"))     # rewritten strict below, for every later reader
             d.pop("refmap", None)
             if str(d.get("compatibilityLevel", "JAVA_21")) < "JAVA_21":
                 d["compatibilityLevel"] = "JAVA_21"
@@ -471,7 +471,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     pm = res / "pack.mcmeta"
     if pm.exists():
         try:
-            d = json.loads(pm.read_text(encoding="utf-8"))
+            d = lenient_json(pm.read_text(encoding="utf-8"))
             d.setdefault("pack", {})["pack_format"] = 34
             pm.write_text(json.dumps(d, indent=2) + "\n", encoding="utf-8")
         except ValueError:
@@ -1131,6 +1131,31 @@ def decompile_markers(srcj):
     return out
 
 
+def lenient_json(text):
+    """JSON as Mixin's and Minecraft's own (lenient) Gson read it: `//` and `/* */` comments, trailing commas. A mod's
+    mixin config carried a build preprocessor's `//#if FABRIC` lines and a dangling comma, which Gson accepts and
+    Python's json refuses -- setup died on it (X87)."""
+    out, i, n, q = [], 0, len(text), None
+    while i < n:
+        c = text[i]
+        if q:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1]); i += 1
+            elif c == q:
+                q = None
+        elif c == '"':
+            q = c; out.append(c)
+        elif text.startswith("//", i):
+            j = text.find("\n", i); i = n if j < 0 else j; continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2); i = n if j < 0 else j + 2; continue
+        else:
+            out.append(c)
+        i += 1
+    return json.loads(re.sub(r",(\s*[\]}])", r"\1", "".join(out)))
+
+
 def name_map(kind, mc, log):
     """The cached <kind>2official-<mc>.json (kind: srg | intermediary), built on first use and REBUILT when it
     predates the current builder (no "__schema__" >= 2: those builds dropped every member of an unobfuscated class,
@@ -1347,6 +1372,7 @@ def self_check():
         ok &= got.get("mixin_self_casts") == 2 and "(Player)(Object)this" in s and "((LivingEntity)(Object)this)" in s \
             and "Object o = (Object)this" in s
     ok &= "ftb-quests" in [g for g in slug_guesses("ftbquests") if g != "ftbquests"][:6]   # X82: the phrase searched
+    ok &= lenient_json('{"a": ["x", // c\n  "y",\n  //#if F\n], /* b */ "u": "http://z"}') == {"a": ["x", "y"], "u": "http://z"}
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
     import tempfile as _tf

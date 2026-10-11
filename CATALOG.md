@@ -5958,3 +5958,9 @@ override loop added 20 widenings with the BASE descriptor, which only widened ea
 returned, and the stage stopped ("no access-transformer override explains it"). Surfaced by X77: the line had been
 an unmapped SRG name, i.e. dead · **Fix:** each subclass's descriptor is read from the recompiled source javac
 names (imports, package, type-variable bounds), and both it and the bridge are widened.
+
+**X87. A mixin config is read the way Gson reads it.** · **Pattern:** `<mod>.mixins.json` carrying a build
+preprocessor's `//#if FABRIC` lines and a trailing comma — Mixin's lenient Gson accepts it · **Symptom:** setup
+died (`json.decoder.JSONDecodeError`) before anything was ported · **Fix:** setup reads mixin configs and
+`pack.mcmeta` leniently (comments, trailing commas) and writes them back strict, so every later reader sees plain
+JSON.
