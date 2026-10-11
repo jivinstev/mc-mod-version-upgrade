@@ -6696,3 +6696,11 @@ and inside a class extending LootModifier it rewrites the class's own `Codec<X>`
 X147's block-codec fixer read `does not override abstract method codec() in IGlobalLootModifier` as a block and gave
 the modifier a block `codec()`. Its error pattern now accepts only block bases (`*Block`, `BlockBehaviour`), and its
 self-check feeds it the loot-modifier message.
+
+**X163. Forge's step-height attribute is vanilla's, and so is the registry codec getter.** `ForgeMod.STEP_HEIGHT_ADDITION`
+(an addition on top of 0.6) became NeoForge's... nothing: 1.20.5 made step height the vanilla `Attributes.STEP_HEIGHT`
+(base 0.6), and `NeoForgeMod` has no step attribute. The §36 group now maps both `STEP_HEIGHT_ADDITION` and
+`STEP_HEIGHT` reads (with or without the `(Attribute)` cast) to the vanilla holder, before the ForgeMod rename turns
+them into a name that does not exist. An ADD_VALUE modifier gives the same total either way. And a registry's
+`getCodec()` is `byNameCodec()` (§48), now a member-table row for `Registry` and `DefaultedRegistry`, applied only
+where javac says the owner is a registry.

@@ -108,9 +108,10 @@ re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBre
 #? only-if	\bextends (?!(?:Entity|Projectile|AbstractArrow|Arrow|ThrowableProjectile|ThrowableItemProjectile|AbstractHurtingProjectile|Fireball|AbstractMinecart|Boat|PartEntity|ItemEntity)\b)\w+
 re:\bthis\.setMaxUpStep\(([^;]*)\);	this.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(\1);
 
-#@ 36 auto  ForgeMod reach attributes are vanilla; the rest of ForgeMod is NeoForgeMod
+#@ 36 auto  ForgeMod reach + step-height attributes are vanilla (X163); the rest of ForgeMod is NeoForgeMod
 re:(?:\(Attribute\)\s*)?\bForgeMod\.ENTITY_REACH\.get\(\)	net.minecraft.world.entity.ai.attributes.Attributes.ENTITY_INTERACTION_RANGE
 re:(?:\(Attribute\)\s*)?\bForgeMod\.BLOCK_REACH\.get\(\)	net.minecraft.world.entity.ai.attributes.Attributes.BLOCK_INTERACTION_RANGE
+re:(?:\(Attribute\)\s*)?\b(?:Neo)?ForgeMod\.STEP_HEIGHT(?:_ADDITION)?\.get\(\)	net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT
 net.neoforged.neoforge.common.ForgeMod	net.neoforged.neoforge.common.NeoForgeMod
 ForgeMod	NeoForgeMod
 
