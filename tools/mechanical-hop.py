@@ -304,6 +304,9 @@ def era_access_transformer(repo, moves, run=run_tool):
 FORGE_STEPS = [("shapes", "forge-shapes.py"), ("net", "convert-simplechannel.py")]
 
 
+FORGE_MEMBERS = "tools/recipes/forge-1.21.1-members.tsv"
+
+
 def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg_map=None, say=print):
     """Forge -> NeoForge 1.21.1, after the remap, codemods and recipe pack. -> {at, shapes, net, errors}"""
     repo, rep = pathlib.Path(repo), {}
@@ -328,10 +331,15 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
             raise RuntimeError(f"compile did not run: {line}")
         counts.append(n)
         outs = [run("fix-holders.py", "--src", d, "--log", log, "--sites", 0)[1] for d in dirs]
-        if all(" 0 site" in (o.splitlines() or [""])[0] for o in outs):
+        # the owner-resolved member renames (X73): javac names the owner, so a same-named member elsewhere is safe
+        mouts = [run("fix-missing-members.py", "--src", d, "--log", log, "--table", ROOT / FORGE_MEMBERS)[1]
+                 for d in dirs] if (ROOT / FORGE_MEMBERS).exists() else []
+        rep.setdefault("members", []).extend(mouts)
+        if all(" 0 site" in (o.splitlines() or [""])[0] for o in outs) and \
+                all(re.search(r"\b0 site\(s\) rewritten", o or "") for o in mouts):
             break
     rep["errors"] = counts
-    say(f"holders: {' -> '.join(map(str, counts))} errors")
+    say(f"holders+members: {' -> '.join(map(str, counts))} errors")
     return rep
 
 
@@ -465,12 +473,13 @@ def self_check():
         def frun(name, *args):
             calls.append(name)
             return 0, {"fix-access-transformer.py": "fix-access-transformer: 1 override widened",
-                       "fix-holders.py": "fix-holders: 0 site(s)"}.get(name, f"{name[:-3]}: ok")
+                       "fix-holders.py": "fix-holders: 0 site(s)",
+                       "fix-missing-members.py": "fix-missing-members: 0 site(s) rewritten"}.get(name, f"{name[:-3]}: ok")
         rep = run_forge_stage(repo, [repo / "src/main/java"], "x", repo, lambda log: (next(seq), "line"), run=frun,
                               say=lambda s: None)
         ok &= calls[0] == "fix-access-transformer.py" and calls.count("fix-access-transformer.py") == 2
         ok &= calls.index("forge-shapes.py") < calls.index("convert-simplechannel.py") < calls.index("fix-holders.py")
-        ok &= rep["errors"] == [30]
+        ok &= rep["errors"] == [30] and "fix-missing-members.py" in calls
     with tempfile.TemporaryDirectory() as d:        # a NeoGradle cache entry naming a deleted workspace is healed
         d = pathlib.Path(d)
         rel = ".gradle/repositories/ng_dummy_ng/net/minecraft/client/1.21.1/client-1.21.1-client-extra.jar"

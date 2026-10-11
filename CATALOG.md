@@ -5835,3 +5835,13 @@ annotation's package is foreign), and 76 references to the mod's own platform fa
 build already rewrote each annotated method to call `<pkg>.<loader>.<Name>Impl` (the bytecode says
 `invokestatic …/forge/PlatformUtilImpl`), so setup strips the annotation and its import, and the class is ordinary
 code.
+
+**X73. The Forge route had no owner-resolved member renames at all.** · **Pattern:** one of the commonest Forge
+leftovers, `FoodProperties.Builder.saturationMod(f)` (`saturationModifier` since 1.20.5), sat in 8 of the swept mods
+with ~500 sites, alongside `alwaysEat`, `AttributeModifier.Operation.ADDITION`, `Holder.get()`, the Forge reach
+getters on `Player` · **Symptom:** they reach the compile loop as unported API · **Fix:** a text rule for a bare name
+like `.get(` or `.normal(` would hit every other class's member of that name, so these go in
+`tools/recipes/forge-1.21.1-members.tsv`, applied by `fix-missing-members.py` (as on the 26.2 route) only where
+javac names the owner. The Forge stage runs it beside `fix-holders` until neither changes anything. Each row is
+checked against the 1.21.1 jar; a rename whose target depends on arity (`overlayCoords`, `uv2`) stays with
+`forge-shapes`, which sees the arguments.
