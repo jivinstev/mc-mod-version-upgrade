@@ -226,9 +226,7 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
     """The access transformer has to be valid before Minecraft recompiles at all. Override widenings appear one
     subclass level per compile: compile, widen what the log names, repeat. -> errors, or None if it never compiled.
     A dependency that does not resolve is reported as that, not blamed on the AT."""
-    if not any(pathlib.Path(repo).glob("src/*/resources/META-INF/accesstransformer.cfg")):
-        n, _ = compile_count(pathlib.Path(workdir) / "at-0.log")
-        return n
+    has_at = any(pathlib.Path(repo).glob("src/*/resources/META-INF/accesstransformer.cfg"))
     for k in range(4):
         log = pathlib.Path(workdir) / f"at-{k}.log"
         n, _ = compile_count(log)
@@ -244,6 +242,8 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
             if healed:                                  # the daemon holds the old entry in memory: stop it, then retry
                 subprocess.run(["bash", "gradlew", "--stop"], cwd=repo, capture_output=True)
                 continue
+        if not has_at:      # the stale-cache heal above is the only repair that applies without an AT (X71)
+            return None
         if "daemon has disappeared" in text or "OutOfMemoryError" in text:   # not the AT's fault: say so
             raise RuntimeError(f"the Gradle daemon died while recompiling Minecraft (memory?), not an AT problem; "
                                f"rerun the stage (see {log.name})")
