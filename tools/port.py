@@ -1283,7 +1283,7 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
             # structure_gel -> "structure gel"; a run-together id is searched as the phrases its slug guesses spell
             # (ftbquests -> "ftb quests": the bare id finds nothing, and the CurseForge project is
             # "FTB Quests (NeoForge)", X82). Each phrase is tried only while nothing has matched.
-            queries = list(dict.fromkeys([mid, mid.replace("_", " ")] + [g.replace("-", " ") for g in slug_guesses(mid)[2:8]]))
+            queries = list(dict.fromkeys([mid, mid.replace("_", " ")] + [g.replace("-", " ") for g in slug_guesses(mid) if g != mid][:6]))
             tried = set()
             for q in ([] if hit else queries):
                 for r in modreg("search", "--query", q, "--loader", "neoforge", "--mc", mc, "--limit", "5")[1].get("results", [])[:5]:
@@ -1346,6 +1346,7 @@ def self_check():
         s = g.read_text(encoding="utf-8")
         ok &= got.get("mixin_self_casts") == 2 and "(Player)(Object)this" in s and "((LivingEntity)(Object)this)" in s \
             and "Object o = (Object)this" in s
+    ok &= "ftb-quests" in [g for g in slug_guesses("ftbquests") if g != "ftbquests"][:6]   # X82: the phrase searched
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
     import tempfile as _tf
