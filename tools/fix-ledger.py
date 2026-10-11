@@ -263,7 +263,7 @@ def self_check():
         lp = r / "l.json"; lp.write_text(json.dumps({"issue": "o/r#9", "modes": [{"status": {"x": {
             "by": "ours " + fx[0]["sha"]}}}]}), encoding="utf-8")
         g("checkout", "-q", "port"); g("commit", "-q", "--allow-empty", "-m", "Pre-existing upstream defect: no issue named")
-        sha = subprocess.run(["git", "-C", d, "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True).stdout.strip()
+        sha = subprocess.run(["git", "-C", d, "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, encoding="utf-8").stdout.strip()
         lp.write_text(json.dumps({"issue": "o/r#9", "modes": [{"status": {"x": {"by": "ours " + sha}}}]}), encoding="utf-8")
         ok &= "o/r#9 (from its ledger)" in worksheet(r, "port", "up", ledgers=[lp])
     print("self-check:", "OK" if ok else "FAIL")
