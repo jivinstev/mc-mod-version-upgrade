@@ -6481,3 +6481,33 @@ statement out of its method, usually a client-setup handler and often inside `en
 one that registers the old method, which may be in the @Mod constructor in another file. A method with neither
 wiring, or with an expression-lambda call, is listed and left alone, because an unwired listener would silently
 lose every screen.
+
+**X142. Forge capabilities, the largest Forge bucket left, go through a mod-local compat layer
+(`tools/convert-capabilities.py`, Forge stage `caps`).** Measured across the swept mods: 37 carry Forge capability
+code. `LazyOptional` appears on about 6300 error lines, `ForgeCapabilities` on 2300, and
+`CapabilityManager`/`CapabilityToken`/`AttachCapabilitiesEvent` on about 700. NeoForge 1.21.1 removed the whole
+system (§D13, §12e). Most of that code only USES the API, and it keeps working unchanged if the API is still there,
+so the converter generates it in `<root>.compat.caps`:
+- `LazyOptional`, `Capability` (one per type, as Forge's were), `CapabilityToken`, `CapabilityManager`,
+  `ForgeCapabilities`, `ICapabilityProvider`, `ICapabilitySerializable`, `AttachCapabilitiesEvent` and `NonNull*`.
+  These are compiled against 1.21.1 in the converter's own check.
+- It rewrites the Forge imports and inline FQNs, in both the Forge and the codemodded-NeoForge spellings.
+- A class declaring `getCapability(Capability<T>, Direction)` implements `ICapabilityProvider` and loses its
+  `@Override`. `super.getCapability(..)` becomes `LazyOptional.empty()` unless a MOD superclass declares it.
+  `invalidateCaps`/`reviveCaps` drop their vanilla super calls, and calls on other objects become comments.
+- An Item overriding `initCapabilities` implements `ICapabilityItem`.
+- Consumer calls `x.getCapability(args)` become `Caps.get(x, args)`. Caps asks the holder itself, then the
+  capabilities attached to it, then NeoForge (`Capabilities.ItemHandler.BLOCK/ITEM/ENTITY`, fluid, energy).
+- A static `@SubscribeEvent AttachCapabilitiesEvent<T>` handler stops being a listener and is listed in
+  `Caps.registerAttachers()`, and `addGenericListener(T.class, ref)` becomes `Caps.attach(T.class, ref)`. Attached
+  providers live in ONE data attachment per holder (Entity, BlockEntity, Level, LevelChunk), created lazily and
+  saved through `ICapabilitySerializable`. A subscriber class left with no `@SubscribeEvent` loses its annotation,
+  to avoid an R1 crash.
+- `Caps.register(modBus)` goes into the @Mod constructor. It registers the attachment type and a
+  `RegisterCapabilitiesEvent` listener that exposes every mod block entity's and item's own ITEM_HANDLER,
+  FLUID_HANDLER(_ITEM) and ENERGY to NeoForge, so hoppers and pipes see them.
+
+Listed rather than guessed: instance attachers; ItemStack attachers (an ItemStack is not an attachment holder in
+1.21.1, so its capabilities would not persist); `getCapability` method references; and a mod with no IEventBus in
+its constructor. Data that old saves kept under "ForgeCaps" is not migrated. The stage runs after
+convert-mcreator-variables, so MCreator's capability-based variables still go through their own converter.

@@ -3,7 +3,8 @@
 
   --stage forge  (Forge 1.20.x -> NeoForge 1.21.1, after the remap, codemods and recipe pack): the access
                  transformer made valid (official names, override widenings, one compile per subclass level),
-                 forge-shapes, convert-simplechannel, convert-mcreator-variables, convert-gui-overlays, then fix-holders until a compile round fixes nothing.
+                 forge-shapes, convert-simplechannel, convert-mcreator-variables, convert-gui-overlays,
+                 convert-capabilities (X142), then fix-holders until a compile round fixes nothing.
   --stage era    (1.21.1 -> 26.x, after the rename table): the access transformer re-pointed through the class-move
                  map, the member pass, then every converter, then the member pass again.
 
@@ -303,7 +304,7 @@ def era_access_transformer(repo, moves, run=run_tool):
 
 
 FORGE_STEPS = [("shapes", "forge-shapes.py"), ("net", "convert-simplechannel.py"), ("vars", "convert-mcreator-variables.py"),
-               ("overlays", "convert-gui-overlays.py")]
+               ("overlays", "convert-gui-overlays.py"), ("caps", "convert-capabilities.py")]
 
 
 FORGE_MEMBERS = "tools/recipes/forge-1.21.1-members.tsv"
