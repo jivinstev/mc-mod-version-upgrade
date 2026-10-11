@@ -1176,6 +1176,8 @@ re:\n[ \t]*@OnlyIn\([^)]*\)[ \t]*
 re:(@EventBusSubscriber\((?:[^()]|\([^()]*\))*?),\s*bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+	\1
 re:(@EventBusSubscriber\(\s*)bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+\s*,\s*	\1
 re:@EventBusSubscriber\(\s*bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+\s*\)	@EventBusSubscriber
+# X115: ...and the nested Bus import the decompile writes for it, which names a class 26.2 no longer has
+re:(?m)^import net\.neoforged\.fml\.common\.(?:Mod\.)?EventBusSubscriber\.Bus;[ \t]*\n	
 
 # --- Removed 1.21.1 helpers, found by the zero-model 26.2 baselines of four Forge-origin ports -------------
 # ResourceKey::location as a METHOD REFERENCE: the `.location()` row above only matches a call.

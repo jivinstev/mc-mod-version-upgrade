@@ -6257,3 +6257,8 @@ super call failed (`cannot find symbol: method use(...)`) · **Fix:** the hand c
 forward -- passing the hand on to vanilla is not a read of it, and that call is rewritten to `super.useWithoutItem` in the
 same step. A body that really reads the hand is still flagged. · **Same mod:** `isValidBonemealTarget` lost its trailing
 `boolean isClient` in 1.20.2; a row drops it from the override.
+
+**X115. The `bus =` rows removed the attribute and left its import.** 26.2's `@EventBusSubscriber` has no `bus`
+(§V38b), and the rename rows strip `bus = Bus.MOD` -- but Vineflower writes the constant through a nested import,
+`import net.neoforged.fml.common.EventBusSubscriber.Bus;`, which then named a class 26.2 does not have: 43 errors in one
+mod, one per subscriber class. A row now drops that import (and the older `Mod.EventBusSubscriber.Bus` spelling).
