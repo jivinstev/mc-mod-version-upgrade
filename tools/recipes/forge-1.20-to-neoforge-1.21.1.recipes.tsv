@@ -492,3 +492,24 @@ re:(?<![\w$])renderDirtBackground\(	renderMenuBackground(
 
 #@ X114 auto  BonemealableBlock.isValidBonemealTarget lost its isClient flag in 1.20.2 (21.1 jar: (LevelReader, BlockPos, BlockState))
 re:(boolean\s+isValidBonemealTarget\(\s*(?:final\s+)?LevelReader\s+\w+,\s*(?:final\s+)?BlockPos\s+\w+,\s*(?:final\s+)?BlockState\s+\w+),\s*(?:final\s+)?boolean\s+\w+\)	\1)
+
+#@ X123 auto  five call shapes every MCreator 1.20.1 mod carries, each checked in the 21.1 jar:
+#           ForgeSoundType is NeoForge's DeferredSoundType (same seven-argument constructor);
+#           Tier.getLevel() is gone (a tier is its incorrect-for-drops block tag now): MCreator's `canHarvestBlock` test
+#           `tier.getLevel() >= N` holds exactly when the tier's tag is none of the tiers below N (vanilla's order:
+#           wooden/gold 0, stone 1, iron 2, diamond 3, netherite 4) -- a custom tier with its own tag passes;
+#           ServerAdvancementManager.getAdvancement(rl) is get(rl) and returns an AdvancementHolder;
+#           Vineflower's guava UnmodifiableIterator over a block state's getValues() is a plain Iterator now;
+#           a render event's getWindow() is gone -- the window is Minecraft's
+net.neoforged.neoforge.common.util.ForgeSoundType	net.neoforged.neoforge.common.util.DeferredSoundType
+net.minecraftforge.common.util.ForgeSoundType	net.neoforged.neoforge.common.util.DeferredSoundType
+ForgeSoundType	DeferredSoundType
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*(?:-\d+|0)\b	true
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*1\b	!java.util.Set.of(net.minecraft.tags.BlockTags.INCORRECT_FOR_WOODEN_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_GOLD_TOOL).contains(\1.getTier().getIncorrectBlocksForDrops())
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*2\b	!java.util.Set.of(net.minecraft.tags.BlockTags.INCORRECT_FOR_WOODEN_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_GOLD_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_STONE_TOOL).contains(\1.getTier().getIncorrectBlocksForDrops())
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*3\b	!java.util.Set.of(net.minecraft.tags.BlockTags.INCORRECT_FOR_WOODEN_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_GOLD_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_STONE_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_IRON_TOOL).contains(\1.getTier().getIncorrectBlocksForDrops())
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*4\b	!java.util.Set.of(net.minecraft.tags.BlockTags.INCORRECT_FOR_WOODEN_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_GOLD_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_STONE_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_IRON_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_DIAMOND_TOOL).contains(\1.getTier().getIncorrectBlocksForDrops())
+re:\bAdvancement(\s+\w+\s*=\s*[\w.()]+?\.getAdvancements\(\)\.)getAdvancement\(	net.minecraft.advancements.AdvancementHolder\1get(
+re:(\.getAdvancements\(\)\.)getAdvancement\(	\1get(
+re:\bUnmodifiableIterator(\s+\w+\s*=\s*[\w.()]+?\.getValues\(\)\.entrySet\(\)\.iterator\(\))	java.util.Iterator\1
+re:(?<![\w$.])event\.getWindow\(\)	net.minecraft.client.Minecraft.getInstance().getWindow()

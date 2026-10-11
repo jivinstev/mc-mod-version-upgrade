@@ -6335,3 +6335,12 @@ package (`client.model.generators`, gone in 1.21.1) stayed in the compile · **F
 that only hooks a parked datagen type loses the hook: methods whose parameters name the type, the `implements` entry
 naming it, and the imports left unused (datagen-package ones included). Datagen output already ships in the jar; the hook
 only ever ran at the author's build. One mod: 4 → 6 datagen files parked, and its main item no longer names datagen.
+
+**X123. Five call shapes every MCreator 1.20.1 mod carries, measured on one 1164-error mod.** · `new ForgeSoundType(...)`
+(882 error lines) is NeoForge's `DeferredSoundType`, same seven-argument constructor. MCreator's `canHarvestBlock` test
+`tieredItem.getTier().getLevel() >= N` (~470): tiers have no level in 1.21 -- a tier IS its incorrect-for-drops tag --
+so `>= N` becomes "the tier's tag is none of vanilla's below N" (`>= 0` or less is just `true`); a modded tier with its
+own tag passes, which is the generous reading. `server.getAdvancements().getAdvancement(rl)` → `get(rl)`, typed
+`AdvancementHolder` (~130). Vineflower's `UnmodifiableIterator x = state.getValues().entrySet().iterator()` → a plain
+`Iterator` (~110). And a render event's `getWindow()` → `Minecraft.getInstance().getWindow()` (~54). All rows in the
+Forge pack; each target checked with javap on the 21.1 jar.
