@@ -404,7 +404,17 @@ def normalise_mcreator(new, src, flags, report):
             continue
         ind = re.match(r"[ \t]*", t[_line_start(t, hm.start):]).group(0)
         body = "".join(f"\n{ind}    {chan}.registerMessage({i}, {', '.join(a)});" for i, a in enumerate(regs))
+
         t = t[:_line_start(t, hm.start)] + f"{ind}public static void registerMessages() {{{body}\n{ind}}}\n" + t[hm.body_close + 2:]
+        # the registrations were written in each message's own file: import the classes they name (X103) -- AFTER the
+        # splice above, which uses offsets taken before any import is added
+        own_pkg = (re.search(r"(?m)^package\s+([\w.]+)\s*;", t) or [None, None])[1]
+        for a in regs:
+            first = re.match(r"([A-Z]\w*)", a[0])
+            g = next((x for x in new if first and x.stem == first.group(1)), None)
+            pm = re.search(r"(?m)^package\s+([\w.]+)\s*;", new[g]) if g else None
+            if pm and pm.group(1) != own_pkg:
+                t = add_import(t, f"{pm.group(1)}.{first.group(1)}")
         t = re.sub(r"(?m)^[ \t]*(?:(?:private|public|protected|static)\s+)+int\s+messageID\s*=\s*0\s*;[ \t]*\n", "", t)
         # the call that step 5 turns into bus.addListener(Owner::registerMessages): in the @Mod constructor, after its bus
         close = None          # methods() skips constructors: find `Owner(...) {` with the mod bus in scope at its end

@@ -6137,3 +6137,13 @@ flag -- the channel regex wanted `SimpleChannel X = ...` · **Fix:** a pre-pass 
 `Outer`'s file; and a registration call with no bus in scope is removed and replaced by `bus.addListener(X::register)`
 in the `@Mod` constructor (cut first, then insert: both can be in one file, and inserting first left the old call in
 place). One mod's network package converts completely; the self-check covers all three and fails without (a).
+
+**X103. Code a converter inserts into ANOTHER file must bring its imports -- and an import added before a splice
+moves the splice.** · **Pattern:** the MCreator converters (X97, X100) write `ManModVariables.PlayerVariablesSyncMessage
+.TYPE` and `ManModVariables.ATTACHMENT_TYPES.register(bus)` into the `@Mod` class, which lives in another package ·
+**Error:** `package ManModVariables does not exist` (javac reads an unknown capitalised qualifier as a package) --
+14 of one mod's remaining errors, all manufactured by the converters · **Fix:** both import each mod class they name
+when its package differs. ⚠ The first version added the imports to the text BEFORE splicing the generated method in
+with offsets computed earlier, which cut the helper mid-signature and pushed a later insertion past the class's closing
+brace -- found by running both converters in pipeline order on a full Vineflower tree, not by the self-checks (whose
+fixtures put every class in one package). Imports now go in after the splice.

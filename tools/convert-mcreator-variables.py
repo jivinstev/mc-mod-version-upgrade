@@ -149,6 +149,20 @@ def convert_owner(t, owner, modid):
     return t, True, notes
 
 
+def import_owner(t, owner, files):
+    """Import class `owner` (a mod file's stem) into t when it lives in another package (X103)."""
+    of = next((g for g in files if g.stem == owner), None)
+    if of is None:
+        return t
+    pm = re.search(r"(?m)^package\s+([\w.]+)\s*;", files[of]); tm = re.search(r"(?m)^package\s+([\w.]+)\s*;", t)
+    if not pm or (tm and tm.group(1) == pm.group(1)):
+        return t
+    fqn = f"{pm.group(1)}.{owner}"
+    if re.search(r"(?m)^import\s+%s\s*;" % re.escape(fqn), t):
+        return t
+    return fs.add_import(t, fqn)
+
+
 def register_on_bus(files, owner):
     """Add `Owner.ATTACHMENT_TYPES.register(bus);` to the @Mod class constructor that has the mod bus."""
     for f, t in files.items():
@@ -164,7 +178,8 @@ def register_on_bus(files, owner):
             bm = re.search(r"\bIEventBus\s+(\w+)", scope)
             if bm:
                 ind = re.match(r"[ \t]*", t[t.rfind("\n", 0, b1) + 1:]).group(0)
-                files[f] = t[:b1] + f"   {owner}.ATTACHMENT_TYPES.register({bm.group(1)});\n{ind}" + t[b1:]
+                t = t[:b1] + f"   {owner}.ATTACHMENT_TYPES.register({bm.group(1)});\n{ind}" + t[b1:]
+                files[f] = import_owner(t, owner, files)
                 return f
     return None
 
