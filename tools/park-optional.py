@@ -118,6 +118,45 @@ def cut_registrations(t, stems):
     return t, hit
 
 
+def cut_datagen_hooks(t, stem):
+    """X122: main code that only HOOKS datagen -- `implements ICustomItemModel` and the
+    `generateCustomItemModel(ItemModelGenerator g, ...)` that interface asks for -- keeps the whole datagen package in the
+    build. Cut the methods whose parameters name `stem`, the `implements` entry naming it, and the imports left unused
+    (datagen-package ones included). -> the new text, or None when nothing was cut."""
+    new, n = t, 0
+    hdr = re.compile(r"(?m)^[ \t]*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|static|final|default|abstract"
+                     r"|synchronized)\s+)*[\w<>\[\],.? ]+?\s+\w+\s*\(([^()]*)\)\s*(?:throws[^{;]*)?\{")
+    while True:
+        m = next((m for m in hdr.finditer(new) if re.search(r"\b%s\b" % re.escape(stem), m.group(1))), None)
+        if not m:
+            break
+        end = _block_end(new, m.end() - 1)
+        while end < len(new) and new[end] in " \t":
+            end += 1
+        if new[end:end + 1] == "\n":
+            end += 1
+        new = new[:m.start()] + new[end:]
+        n += 1
+
+    def drop_impl(cm):
+        nonlocal n
+        parts = [p.strip() for p in cm.group(2).split(",")]
+        keep = [p for p in parts if re.sub(r"<.*", "", p).rsplit(".", 1)[-1] != stem]
+        if len(keep) == len(parts):
+            return cm.group(0)
+        n += 1
+        return (cm.group(1) + ", ".join(keep) + " " if keep else "") + "{"
+    new = re.sub(r"(\bimplements\s+)([^{]+?)\s*\{", drop_impl, new, count=1)
+    if not n:
+        return None
+    body = IMPORT.sub("", new)
+    for imp in IMPORT.findall(new):
+        simple = imp.rsplit(".", 1)[1]
+        if (simple == stem or DATAGEN_PKG.match(imp)) and not re.search(r"\b%s\b" % re.escape(simple), body):
+            new = re.sub(r"(?m)^\s*import\s+%s\s*;[ \t]*\n" % re.escape(imp), "", new)
+    return new
+
+
 def cut_gather(t):
     """A class that main code needs but that also wires datagen (a mod's main class registering its own
     GatherDataEvent handler is common): remove each GatherDataEvent handler METHOD, the line that registers
@@ -270,6 +309,15 @@ def plan(work, group, also=()):
             if sum(1 for g, u in text.items() if g != f and g not in park and who.search(u)) >= 3:
                 del park[f]
                 changed = True
+    # X122: a staying class that only HOOKS a parked datagen type (implements its interface, has a method taking its
+    # generator) loses the hook, so the datagen type can stay parked instead of pulling its package back in
+    for f in [f for f, why in park.items() if why.startswith("datagen")]:
+        who = re.compile(r"\b" + re.escape(f.stem) + r"\b")
+        for g in [g for g in files if g not in park and g != f and who.search(text[g])]:
+            new = cut_datagen_hooks(text[g], f.stem)
+            if new is not None and not who.search(IMPORT.sub("", new)):
+                text[g] = new
+                cuts[g] = (new, cuts.get(g, (None, []))[1] + [f"datagen hook {f.stem}"])
     changed = True
     while changed:
         changed = False
@@ -540,6 +588,31 @@ def self_check():
         if not ok5:
             print("self-check X92:", sorted(got5), proxy)
         ok = ok and ok5
+    with tempfile.TemporaryDirectory() as d:     # X122: a main item that only HOOKS datagen loses the hook
+        w = pathlib.Path(d)
+        j = w / "src/main/java"
+        for rel, body in {
+                "com/ex/w/data/DataGen.java": "package com.ex.w.data;\nimport net.minecraftforge.data.event.GatherDataEvent;\n"
+                                              "public class DataGen {\n  public static void g(GatherDataEvent e) {\n  }\n}\n",
+                "com/ex/w/data/ItemModels.java": "package com.ex.w.data;\nimport net.minecraftforge.client.model.generators.ItemModelProvider;\n"
+                                                 "public class ItemModels extends ItemModelProvider {}\n",
+                "com/ex/w/data/ICustomModel.java": "package com.ex.w.data;\npublic interface ICustomModel {\n"
+                                                   "  void gen(ItemModels g, String name);\n}\n",
+                "com/ex/w/item/Wand.java": "package com.ex.w.item;\nimport com.ex.w.data.ICustomModel;\nimport com.ex.w.data.ItemModels;\n"
+                                           "import net.minecraftforge.client.model.generators.ModelFile;\n"
+                                           "public class Wand extends Item implements ICustomModel {\n  int use() { return 1; }\n\n"
+                                           "  @Override\n  public void gen(ItemModels g, String name) {\n    ModelFile f = null;\n  }\n}\n",
+                "com/ex/w/Items.java": "package com.ex.w;\nimport com.ex.w.item.Wand;\nclass Items { Object w = new Wand(); }\n"}.items():
+            (j / rel).parent.mkdir(parents=True, exist_ok=True); (j / rel).write_text(body, encoding="utf-8")
+        park6, cuts6 = plan(w, "com.ex.w")
+        got6 = {f.relative_to(j).as_posix() for f in park6}
+        wand = cuts6.get(j / "com/ex/w/item/Wand.java", ("", []))[0]
+        ok6 = ({"com/ex/w/data/ItemModels.java", "com/ex/w/data/ICustomModel.java"} <= got6
+               and "public class Wand extends Item {" in wand and "gen(" not in wand and "ModelFile" not in wand
+               and "int use()" in wand)
+        if not ok6:
+            print("self-check X122:", sorted(got6), wand)
+        ok = ok and ok6
     print("self-check:", "OK" if ok else f"FAIL {sorted(got)}")
     return 0 if ok else 1
 

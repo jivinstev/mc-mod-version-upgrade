@@ -6325,3 +6325,13 @@ replaces a removed vanilla type with a same-shaped library type ONLY in files th
 vanilla's `Tuple` from a mod's own): `Tuple` → commons-lang3 `MutablePair` (mutable, so `setB` keeps working; on every
 Minecraft classpath), `getA/getB/setA/setB` → `getLeft/getRight/setLeft/setRight`. And a 26.2 row passes the handler
 twice with raw casts, which is 1.21.1's one-handler-both-sides behaviour (§V81).
+
+**X122. A main item that HOOKS datagen pulled the whole datagen package back into the build.** · **Pattern:** `public
+class ItemWand extends Item implements ICustomItemModel { ... public void generateCustomItemModel(ItemModelGenerator g,
+String name) { g.withExistingParent(...) ... } }`, with `ICustomItemModel` and `ItemModelGenerator` in the mod's `data/`
+package · **Symptom:** the parker parks `data/` as datagen, then un-parks every datagen file that main code still names
+(the right rule for runtime constants that live there) -- so the item kept its generator, and `ItemModelProvider`'s
+package (`client.model.generators`, gone in 1.21.1) stayed in the compile · **Fix:** before that un-park, a staying class
+that only hooks a parked datagen type loses the hook: methods whose parameters name the type, the `implements` entry
+naming it, and the imports left unused (datagen-package ones included). Datagen output already ships in the jar; the hook
+only ever ran at the author's build. One mod: 4 → 6 datagen files parked, and its main item no longer names datagen.
