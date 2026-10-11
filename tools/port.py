@@ -1178,6 +1178,10 @@ def fix_decompile_artifacts(srcj):
         n["string_concats"] += c
         new, c = re.subn(r"\(([A-Za-z_][\w.$]*)<>\)", r"(\1)", new)   # `(Supplier<>) () -> x`: a raw cast is legal
         n["diamond_casts"] += c
+        # an enum with NO constants needs a `;` before its members, and the decompile omits it (X83)
+        new, c = re.subn(r"(\benum\s+\w+(?:\s+implements\s+[\w.<>, ]+)?\s*\{)(\s*)(?=(?:public|private|protected|static|final|abstract)\b)",
+                         r"\1\2;\2", new)
+        n["empty_enums"] = n.get("empty_enums", 0) + c
         if "@Mixin" in new:       # `(Player)(Object)this` compiles to one checkcast; the decompile drops the hop (§162)
             new, c = re.subn(r"\((?!Object\))([A-Z][\w.]*(?:<[^()]*>)?)\)\s*this\b", r"(\1)(Object)this", new)
             n["mixin_self_casts"] = n.get("mixin_self_casts", 0) + c
@@ -1309,7 +1313,7 @@ def self_check():
                      " return new 1Cond(c); float f = 1F; } }", encoding="utf-8")
         got = fix_decompile_artifacts(d)
         s = f.read_text(encoding="utf-8")
-        ok &= got == {"digit_classes": 1, "assert_guards": 1, "constructors": 0, "string_concats": 0, "diamond_casts": 0, "expect_platform": 0} and "class _Cond" in s and "new _Cond(c)" in s
+        ok &= {k: got.get(k) for k in ("digit_classes", "assert_guards", "constructors", "string_concats", "diamond_casts")} == {"digit_classes": 1, "assert_guards": 1, "constructors": 0, "string_concats": 0, "diamond_casts": 0} and "class _Cond" in s and "new _Cond(c)" in s
         ok &= "1Cond" not in s.split("$VF was")[0] and "!true &&" in s and "1F" in s
         g = pathlib.Path(d) / "P.java"
         g.write_text("package p;\n\nimport dev.architectury.injectables.annotations.ExpectPlatform;\n\npublic class P {\n"
@@ -1323,6 +1327,15 @@ def self_check():
         got = fix_decompile_artifacts(d)
         s = g.read_text(encoding="utf-8")
         ok &= got["expect_platform"] == 1 and "AutoService" not in s and "public class Q implements Svc" in s
+        g.write_text("@Mixin(ServerPlayer.class)\nclass M { void a() { Player p = (Player)this; Object o = (Object)this; "
+                     "var q = ((LivingEntity) this).getHealth(); } }\n", encoding="utf-8")
+        got = fix_decompile_artifacts(d)
+        s = g.read_text(encoding="utf-8")
+        g.write_text("public enum E implements I {\n   public final int x;\n   private E(int x) { this.x = x; }\n}\n"
+                     "enum F { A, B; private int y; }\n", encoding="utf-8")
+        got = fix_decompile_artifacts(d)
+        s2 = g.read_text(encoding="utf-8")
+        ok &= got.get("empty_enums") == 1 and "implements I {\n   ;\n   public final int x;" in s2 and "{ A, B;" in s2
         g.write_text("@Mixin(ServerPlayer.class)\nclass M { void a() { Player p = (Player)this; Object o = (Object)this; "
                      "var q = ((LivingEntity) this).getHealth(); } }\n", encoding="utf-8")
         got = fix_decompile_artifacts(d)

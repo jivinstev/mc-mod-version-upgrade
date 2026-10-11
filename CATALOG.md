@@ -5920,3 +5920,8 @@ is "FTB Quests (NeoForge)" on CurseForge, slug `ftb-quests-forge` · **Symptom:*
 that declares it", and the mod stopped, while FTB Quests 2101.x exists · **Fix:** besides the bare id, the resolver
 searches the phrases its slug guesses spell (`ftb quests`), each only while nothing has matched; a candidate is still
 accepted only when its own toml declares the id.
+
+**X83. An enum with no constants decompiles without its `;`.** · **Pattern:** a `@Deprecated` enum whose constants
+were all removed, keeping fields and constructors · **Symptom:** `enum constant expected here` on its first field —
+a parse error, so the stage stopped before counting anything · **Fix:** setup inserts the `;` when an enum body
+opens straight onto a member modifier.
