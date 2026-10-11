@@ -6413,3 +6413,8 @@ boolean is left for a worker. MCreator's `new CommandSourceStack(CommandSource.N
 a `PermissionSet`: level 4 is exactly `ALL_PERMISSIONS` and 0 exactly `NO_PERMISSIONS`; 1-3 have no one-to-one set and are
 left. `instanceof ThrownPotion` (144) names `AbstractThrownPotion` (splash and lingering are separate classes now), and
 the old import goes when nothing else names the class. All in the 26.2 table.
+
+**X133. The 26.2 client HUD and toast accessors moved off `Gui`/`Minecraft`.** `Gui.getChat()` is now
+`Gui.hud.getChat()` (the HUD split, §V28) and `Minecraft.getToasts()` is `Minecraft.gui.toastManager()`. Both
+checked against the 26.2 jar with javap. Added as member rows in `tools/recipes/era-26.2-members.tsv`, so
+fix-missing-members rewrites them from the compile error (found in a zero-model sweep of a footstep-sound mod).

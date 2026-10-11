@@ -57,3 +57,7 @@ LootContext	getParamOrNull	getOptionalParameter
 SoundEvent	getLocation	location
 # 26.2 made Level.random protected (26.2 jar: protected final RandomSource random; public getRandom()) -- X108
 Level	random	getRandom()
+# X133 (26.2 jar): the HUD and the toast manager moved off the god objects -- Gui.getChat is Hud.getChat (Gui.hud,
+# §V28), Minecraft.getToasts is Gui.toastManager()
+Gui	getChat	{recv}.hud.getChat(){()}
+Minecraft	getToasts	{recv}.gui.toastManager(){()}
