@@ -1023,11 +1023,13 @@ def fix_decompile_artifacts(srcj):
       * a local class named with a leading digit (`class 1NoiseCondition`, `new 1NoiseCondition(..)`); Vineflower
         already renames its constructor `_NoiseCondition`, so the class and its uses get that name too;
       * CATALOG §A2: `<unrepresentable>.$assertionsDisabled` -> `true` (asserts are off at runtime);
+      * a cast with an empty diamond, `(Supplier<>) () -> x`, written when the type arguments cannot be expressed:
+        it becomes the raw cast `(Supplier)`, which is legal and keeps the lambda's target type;
       * an unresugared constructor: `X v = new X;` ... `v./* <marker> Unable to resugar constructor */<init>(args);`
         (the statements between compute the arguments) -> the bare `new X;` goes and the call becomes
         `X v = new X(args);`, when nothing between them touches v.
     -> {"digit_classes": n, "assert_guards": n, "constructors": n}"""
-    n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0, "string_concats": 0}
+    n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0, "string_concats": 0, "diamond_casts": 0}
     for f in pathlib.Path(srcj).rglob("*.java"):
         t = f.read_text(encoding="utf-8", errors="replace")
         new = t
@@ -1039,6 +1041,8 @@ def fix_decompile_artifacts(srcj):
         n["constructors"] += c
         new, c = _resugar_string_concat(new)
         n["string_concats"] += c
+        new, c = re.subn(r"\(([A-Za-z_][\w.$]*)<>\)", r"(\1)", new)   # `(Supplier<>) () -> x`: a raw cast is legal
+        n["diamond_casts"] += c
         k = new.count("<unrepresentable>.$assertionsDisabled")
         if k:
             new = new.replace("<unrepresentable>.$assertionsDisabled", "true")
@@ -1147,7 +1151,7 @@ def self_check():
                      " return new 1Cond(c); float f = 1F; } }", encoding="utf-8")
         got = fix_decompile_artifacts(d)
         s = f.read_text(encoding="utf-8")
-        ok &= got == {"digit_classes": 1, "assert_guards": 1, "constructors": 0, "string_concats": 0} and "class _Cond" in s and "new _Cond(c)" in s
+        ok &= got == {"digit_classes": 1, "assert_guards": 1, "constructors": 0, "string_concats": 0, "diamond_casts": 0} and "class _Cond" in s and "new _Cond(c)" in s
         ok &= "1Cond" not in s.split("$VF was")[0] and "!true &&" in s and "1F" in s
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)

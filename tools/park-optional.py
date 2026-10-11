@@ -133,6 +133,28 @@ def required_roots(work):
     return out
 
 
+def classpath_packages(work):
+    """Packages of every jar in libs/<mc>/ (the wired dependencies, transitive ones included) and their nested jars."""
+    import io, zipfile
+    out = set()
+
+    def scan(z):
+        for n in z.namelist():
+            if n.endswith(".class") and "/" in n and not n.startswith("META-INF/"):
+                out.add(n.rsplit("/", 1)[0].replace("/", "."))
+            elif n.endswith(".jar") and n.startswith("META-INF/jarjar/"):
+                try:
+                    scan(zipfile.ZipFile(io.BytesIO(z.read(n))))
+                except zipfile.BadZipFile:
+                    pass
+    for j in pathlib.Path(work).glob("libs/*/*.jar"):
+        try:
+            scan(zipfile.ZipFile(j))
+        except (zipfile.BadZipFile, OSError):
+            pass
+    return out
+
+
 def foreign(imp, own, req, tree=frozenset()):
     if imp.startswith(PLATFORM) or any(imp.startswith(o + ".") for o in own):
         return False
@@ -148,6 +170,7 @@ def plan(work, group, also=()):
     files = sorted(java.rglob("*.java"))
     own = {group, group.rsplit(".", 1)[0]} if group else set()
     tree = {f.relative_to(java).parent.as_posix().replace("/", ".") for f in files}
+    tree |= classpath_packages(work)      # a dependency jar the port compiles against: its API is there, nothing to park
     req = required_roots(work) | {m.replace("-", "").replace("_", "").lower() for m in also if m}
     park, why, cuts = {}, {}, {}
     for f in files:
@@ -367,6 +390,12 @@ def self_check():
         (w / "src/main/resources/META-INF/neoforge.mods.toml").write_text(
             '[[dependencies.mymod]]\nmodId="reqlib"\ntype="required"\n[[dependencies.mymod]]\nmodId="jei"\ntype="optional"\n',
             encoding="utf-8")
+        import zipfile
+        (w / "libs/1.21.1").mkdir(parents=True)
+        with zipfile.ZipFile(w / "libs/1.21.1/flw.jar", "w") as z:     # a wired dependency: its API is on the classpath
+            z.writestr("dev/flw/api/Visual.class", b"\xca\xfe")
+        (j / "client/Rend.java").write_text("package com.ex.mymod.client;\nimport dev.flw.api.Visual;\nclass Rend {}",
+                                           encoding="utf-8")
         park, cuts = plan(w, "com.ex.mymod")
         got = {f.relative_to(w / "src/main/java").as_posix() for f in park}
         main = {f.name: c for f, c in cuts.items()}.get("Main.java")
