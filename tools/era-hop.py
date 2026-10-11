@@ -283,7 +283,7 @@ def main():
             out = work / (tree + ".era")
             shutil.rmtree(out, ignore_errors=True)
             r = subprocess.run([sys.executable, str(prep), "--src", str(work / tree), "--renames", str(table),
-                                "--out", str(out)], stdout=fh, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+                                "--out", str(out), "--hits-json", str(work / f"era-rule-hits-{tree.split('/')[1]}.json")], stdout=fh, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
             if r.returncode != 0:
                 step(f"FAILED applying the table to {tree} (see {log.name})"); return 6
             shutil.rmtree(work / tree); out.rename(work / tree)

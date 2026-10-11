@@ -208,6 +208,9 @@ def main():
     ap.add_argument('--hits-out', metavar='FILE',
                     help='write this root\'s matched rules here and skip the dead-rule report '
                          '(for a root that shares its table with a later one)')
+    ap.add_argument('--hits-json', metavar='FILE',
+                    help='also write {rule: rewrites} here (does not change the dead-rule report): '
+                         'measures how many mods each rule serves across a sweep')
     ap.add_argument('--hits-in', metavar='FILE',
                     help='merge rules matched by an earlier root before reporting dead ones')
     # A file the NEW target must not compile AT ALL. The motivating case is a mixin whose
@@ -336,6 +339,10 @@ def main():
         print(f"  note: overlay-only file (shadows nothing in --src, and no sibling overlay "
               f"has it either -- stale path?): {rel}")
 
+    if a.hits_json:
+        import json
+        with open(a.hits_json, 'w', encoding='utf-8') as fh:
+            json.dump(dict(sorted(hits.items())), fh, indent=0)
     if a.hits_out:
         with open(a.hits_out, 'w', encoding='utf-8') as fh:
             for k in sorted(hits):
