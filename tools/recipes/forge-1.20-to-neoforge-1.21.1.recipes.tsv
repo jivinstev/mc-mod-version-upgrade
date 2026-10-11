@@ -553,3 +553,14 @@ re:new StairBlock\(\s*\(\)\s*->\s*	new StairBlock(
 #           caller iterates. Only in files that never name RecipeHolder (code already written for holders is left).
 #? only-if	\A(?![\s\S]*\bRecipeHolder\b)[\s\S]*\.getAllRecipesFor\(
 re:\.getAllRecipesFor\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)	.getAllRecipesFor(\1).stream().map(net.minecraft.world.item.crafting.RecipeHolder::value).toList()
+
+#@ X148 auto  InventoryScreen's entity preview takes a BOX since 1.20.2: renderEntityInInventoryFollowsAngle/Mouse(g, x1, y1,
+#           x2, y2, scale, yOffset, ...). 1.21.1 centres the entity in the box and lifts it by half its height, where the
+#           1.20 form put its feet at (x, y) -- so the box is centred on x and on y - height*scale/2, with a scale of margin
+#           (it is also the scissor). FollowsMouse took mouse OFFSETS from (x, y); the 1.21.1 one takes the mouse position,
+#           so it becomes FollowsAngle with the 1.20 atan(offset / 40) angles.
+re:\bInventoryScreen\.renderEntityInInventoryFollowsAngle\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?)\s*\)	InventoryScreen.renderEntityInInventoryFollowsAngle(\1, (\2) - 3 * (\4), (int) ((\3) - (\7).getBbHeight() * (\4)) - (\4), (\2) + 3 * (\4), (\3) + (\4), \4, 0.0F, \5, \6, \7)
+re:\bInventoryScreen\.renderEntityInInventoryFollowsMouse\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?)\s*\)	InventoryScreen.renderEntityInInventoryFollowsAngle(\1, (\2) - 3 * (\4), (int) ((\3) - (\7).getBbHeight() * (\4)) - (\4), (\2) + 3 * (\4), (\3) + (\4), \4, 0.0F, (float) Math.atan((\5) / 40.0F), (float) Math.atan((\6) / 40.0F), \7)
+
+#@ X148 auto  ServerPlayer.awardRecipesByKey takes a List since 1.20.2; MCreator passes a one-element array
+re:\.awardRecipesByKey\(\s*new\s+ResourceLocation\[\]\s*\{([^{}]*)\}\s*\)	.awardRecipesByKey(java.util.List.of(\1))

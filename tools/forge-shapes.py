@@ -1127,9 +1127,50 @@ def t_misc(path, text, ctx, res):
 
 TAG_OF_MOBTYPE = {"UNDEAD": "UNDEAD", "ARTHROPOD": "ARTHROPOD", "ILLAGER": "ILLAGER", "WATER": "AQUATIC"}
 
+# --------------------------------------------------------------------------- ImageButton (X149)
+
+def t_imagebutton(path, text, ctx, res):
+    """X149: 1.20's texture-region ImageButton constructors -- (x, y, w, h, u, v, [yDiff,] texture, [texW, texH,] onPress
+    [, message]) -- are gone; 1.21.1 takes WidgetSprites, which name sprites in the GUI atlas a 1.20 mod never shipped.
+    So the button keeps its own texture: the 1.21.1 constructor (sprites = the texture, unused) plus a renderWidget that
+    blits the same region 1.20's renderTexture did -- v + yDiff when hovered or focused, + 2*yDiff when inactive.
+    A button that already has a body (an anonymous subclass) is LISTED: its own render code decides what it draws."""
+    if "new ImageButton(" not in text:
+        return text
+    edits = []
+    for m in re.finditer(r"\bnew\s+ImageButton\s*\(", text):
+        p0 = m.end() - 1; p1 = match(text, p0)
+        if p1 < 0:
+            continue
+        a = [x.strip() for x in split_args(text[p0 + 1:p1])]
+        if len(a) == 8:
+            x, y, w, h, u, v, tex, press = a; yd, tw, th, msg = h, "256", "256", None
+        elif len(a) == 9:
+            x, y, w, h, u, v, yd, tex, press = a; tw, th, msg = "256", "256", None
+        elif len(a) in (11, 12):
+            x, y, w, h, u, v, yd, tex, tw, th, press = a[:11]; msg = a[11] if len(a) == 12 else None
+        else:
+            continue
+        if re.match(r"\s*\{", text[p1 + 1:]):
+            res.flags["imagebutton"].append(f"{path}:{line_of(text, m.start())} ImageButton already has a body; args left")
+            continue
+        ls = text.rfind("\n", 0, m.start()) + 1
+        ind = re.match(r"[ \t]*", text[ls:]).group(0)
+        i1, i2 = ind + "   ", ind + "      "
+        sprites = f"new net.minecraft.client.gui.components.WidgetSprites({tex}, {tex})"
+        head = f"new ImageButton({x}, {y}, {w}, {h}, {sprites}, {press}" + (f", {msg}" if msg else "") + ")"
+        body = (f" {{\n{i1}@Override\n{i1}public void renderWidget(net.minecraft.client.gui.GuiGraphics guiGraphics, int mouseX, int mouseY, "
+                f"float partialTick) {{\n{i2}int _v = ({v}) + (!this.isActive() ? ({yd}) * 2 : this.isHoveredOrFocused() ? ({yd}) : 0);\n"
+                f"{i2}guiGraphics.blit({tex}, this.getX(), this.getY(), (float) ({u}), (float) _v, this.width, this.height, {tw}, {th});\n"
+                f"{i1}}}\n{ind}}}")
+        edits.append((m.start(), p1 + 1, head + body))
+        res.count["imagebutton"] += 1
+    return edit_spans(text, edits)
+
+
 TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attrmod", t_attrmod), ("nbt", t_nbt), ("hooks", t_hooks),
               ("geo", t_geo), ("vc", t_vc), ("source", t_source),
-              ("sigs", t_sigs), ("misc", t_misc)]
+              ("sigs", t_sigs), ("misc", t_misc), ("imagebutton", t_imagebutton)]
 
 
 # --------------------------------------------------------------------------- menu screens (X141), cross-file
@@ -1338,6 +1379,20 @@ def main():
 # --------------------------------------------------------------------------- self-check
 
 CASES = [
+    ("imagebutton", """package a;
+class S {
+   void init() {
+      this.b = new ImageButton(this.leftPos + 10, this.topPos + 5, 16, 16, 0, 0, 16, ResourceLocation.parse("m:textures/screens/b.png"), 16, 32, e -> {
+         if (true) { PacketDistributor.sendToServer(new M(0, x, y, z)); M.handle(entity, 0, x, y, z); }
+      });
+      this.c = new ImageButton(1, 2, 3, 4, 5, 6, TEX, e -> {});
+   }
+}
+""", ["new ImageButton(this.leftPos + 10, this.topPos + 5, 16, 16, new net.minecraft.client.gui.components.WidgetSprites(ResourceLocation.parse(\"m:textures/screens/b.png\"), ResourceLocation.parse(\"m:textures/screens/b.png\")), e -> {",
+      "int _v = (0) + (!this.isActive() ? (16) * 2 : this.isHoveredOrFocused() ? (16) : 0);",
+      "guiGraphics.blit(ResourceLocation.parse(\"m:textures/screens/b.png\"), this.getX(), this.getY(), (float) (0), (float) _v, this.width, this.height, 16, 32);",
+      "new ImageButton(1, 2, 3, 4, new net.minecraft.client.gui.components.WidgetSprites(TEX, TEX), e -> {})",
+      "this.isHoveredOrFocused() ? (4) : 0", "this.width, this.height, 256, 256);"], []),
     ("sigs", """package a;
 class A extends AbstractIllager {
     public void applyRaidBuffs(int wave, boolean unused) { super.applyRaidBuffs(wave, unused); }

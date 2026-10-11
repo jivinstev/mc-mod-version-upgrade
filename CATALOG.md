@@ -6558,3 +6558,20 @@ converter, so the Forge-stage converters (gui-overlays, mcreator-variables, capa
 `FORGE_STEPS` too. (b) X146's `teleportTo` row made the 26.2 client-harness patch block for the same call redundant,
 and the patch's "must match exactly once" rule caught that. The block is gone. The patch passed `setCamera = false`
 where 1.21.1's six-argument form called `setCamera(this)` unconditionally; the row's `true` is the faithful one.
+
+**X148. Two MCreator template calls whose signatures changed in 1.20.2.**
+- `InventoryScreen.renderEntityInInventoryFollowsAngle/Mouse(g, x, y, scale, a, b, entity)`, the entity preview,
+  takes a BOX since 1.20.2: `(g, x1, y1, x2, y2, scale, yOffset, a, b, entity)`. Read from the 1.21.1 bytecode, it
+  centres the entity in the box and lifts it by half its height, where the 1.20 form put the feet at (x, y). So the
+  pack row centres the box on x and on `y - height*scale/2`, with one scale of margin, since the box is also the
+  scissor. FollowsMouse took mouse OFFSETS, and the 1.21.1 FollowsMouse takes the mouse POSITION, so it becomes
+  FollowsAngle with 1.20's own `atan(offset / 40)` angles. 48 errors in one mod.
+- `ServerPlayer.awardRecipesByKey` takes a List. MCreator passes a one-element array, which becomes `List.of(..)`.
+
+**X149. 1.20's texture-region `ImageButton` constructors are gone (forge-shapes `imagebutton`).**
+`ImageButton(x, y, w, h, u, v, [yDiff,] texture, [texW, texH,] onPress [, message])` is the button MCreator writes
+into every GUI with images: 111 errors in one mod. 1.21.1 takes `WidgetSprites`, which name sprites in the GUI atlas,
+and a 1.20 mod never shipped any. The transform uses the 1.21.1 constructor (sprites = the texture, so unused) and
+adds a `renderWidget` that blits the same region 1.20's `renderTexture` did: v + yDiff when hovered or focused,
++ 2·yDiff when inactive. The button keeps its own art with no atlas work. A button that already has a body is
+listed. Compiled against 1.21.1.
