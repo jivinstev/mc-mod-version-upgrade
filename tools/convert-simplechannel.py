@@ -110,9 +110,15 @@ def infer_direction(cls, files):
 def class_file(cls, files, near):
     simple = cls.rsplit(".", 1)[-1]
     hits = [f for f in files if f.stem == simple]
+    if not hits and isinstance(files, dict):     # a NESTED message class (MCreator's <Mod>Variables.SavedDataSyncMessage)
+        hits = [f for f, t in files.items() if re.search(r"\b(?:class|record)\s+%s\b" % re.escape(simple), t)]
     if len(hits) > 1:
         hits = sorted(hits, key=lambda f: -len(set(f.parts) & set(near.parts)))
     return hits[0] if hits else None
+
+
+# `() -> level.dimension()`, and MCreator's `() -> ((Level)level).dimension()`
+DIM = r"\(\)\s*->\s*(?:\(\(\w+\)\s*)?([\w.]+)\)?\.dimension\(\)"
 
 
 def rewrite_sends(text, chan, flags, rel):
@@ -122,7 +128,7 @@ def rewrite_sends(text, chan, flags, rel):
         if m.start() < i:
             continue
         p0 = m.end() - 1; p1 = match(text, p0)
-        args = [a.strip() for a in split_args(text[p0 + 1:p1])]
+        args = [re.sub(r"^\(Object\)\s*", "", a.strip()) for a in split_args(text[p0 + 1:p1])]   # MCreator casts the message
         rep = None
         if m.group(1) == "sendToServer" and len(args) == 1:
             rep = f"PacketDistributor.sendToServer({args[0]})"
@@ -140,8 +146,8 @@ def rewrite_sends(text, chan, flags, rel):
             elif t and t.group(1) in TARGETS:
                 target = re.sub(r"^\(\)\s*->\s*", "", t.group(3).strip())
                 rep = f"PacketDistributor.{TARGETS[t.group(1)]}({target}, {args[1]})"
-            elif t and t.group(1) == "DIMENSION" and re.fullmatch(r"\(\)\s*->\s*([\w.]+)\.dimension\(\)", t.group(3).strip()):
-                lvl = re.fullmatch(r"\(\)\s*->\s*([\w.]+)\.dimension\(\)", t.group(3).strip()).group(1)
+            elif t and t.group(1) == "DIMENSION" and re.fullmatch(DIM, t.group(3).strip()):
+                lvl = re.fullmatch(DIM, t.group(3).strip()).group(1)
                 rep = f"PacketDistributor.sendToPlayersInDimension({lvl}, {args[1]})"
             elif t and t.group(1) == "ALL":
                 rep = f"PacketDistributor.sendToAllPlayers({args[1]})"
@@ -263,12 +269,115 @@ def buses_in_scope(text, pos):
     return out
 
 
+def _line_start(t, i):
+    return t.rfind("\n", 0, i) + 1
+
+
+def _cut_method(t, mt):
+    """Remove method `mt` together with the annotation lines directly above it."""
+    start = _line_start(t, mt.start)
+    while True:
+        prev = _line_start(t, start - 1) if start > 0 else 0
+        if start == 0 or not re.match(r"[ \t]*@", t[prev:start]):
+            break
+        start = prev
+    end = mt.body_close + 1
+    end = end + 1 if t[end:end + 1] == "\n" else end
+    return t[:start] + t[end:]
+
+
+def normalise_mcreator(new, src, flags, report):
+    """MCreator's channel (X97): a `<T> addNetworkMessage(Class<T>, encoder, decoder, consumer)` helper that calls
+    CHAN.registerMessage(messageID, ...) with VARIABLES, and one `Owner.addNetworkMessage(P.class, ...)` per message,
+    each in that message's own @SubscribeEvent FMLCommonSetupEvent method. Rewrite it into the classic shape the
+    converter handles: the helper becomes `registerMessages()` holding one `CHAN.registerMessage(n, P.class, ...)` per
+    message, the per-message subscribers go (and an @EventBusSubscriber left with no handler loses its annotation,
+    catalogue R1), and `Owner.registerMessages();` is placed where the mod bus is in scope. An unused helper (MCreator
+    generates it in every mod) is deleted with its counter and channel."""
+    for f in list(new):
+        t = new[f]
+        hm = next((mt for mt in methods(t) if mt.name == "addNetworkMessage"
+                   and re.search(r"\bClass<\s*\w+\s*>", t[mt.params_open:mt.params_close])), None)
+        if hm is None:
+            continue
+        cm = re.search(r"(\w+)\s*\.\s*registerMessage\(", t[hm.body_open:hm.body_close])
+        if not cm:
+            continue
+        chan, owner, rel = cm.group(1), f.stem, f.relative_to(src).as_posix()
+        regs = []
+        for g in list(new):
+            u = new[g]
+            for m in reversed(list(re.finditer(r"(?<![\w$])(?:(?:[\w.]+\.)?%s\.)?addNetworkMessage\(" % re.escape(owner), u))):
+                if g == f and hm.body_open <= m.start() <= hm.body_close:
+                    continue
+                if g == f and m.start() >= hm.start and m.start() < hm.body_open:
+                    continue
+                p0 = m.end() - 1; p1 = match(u, p0)
+                args = [a.strip() for a in split_args(u[p0 + 1:p1])]
+                semi = u.find(";", p1)
+                if len(args) != 4 or not args[0].endswith(".class") or semi < 0 or u[p1 + 1:semi].strip():
+                    flags.append(f"{g.relative_to(src).as_posix()}:{fs.line_of(u, m.start())} addNetworkMessage(...) not a plain registration")
+                    continue
+                regs.append(args)
+                ls = _line_start(u, m.start())
+                le = semi + 1 + (1 if u[semi + 1:semi + 2] == "\n" else 0)
+                u = u[:ls] + u[le:] if not u[ls:m.start()].strip() else u[:m.start()] + u[semi + 1:]
+            if u is not new[g] and u != new[g]:
+                # a setup subscriber the registration was all of: remove it; an @EventBusSubscriber left without any
+                # @SubscribeEvent method would crash mod construction (R1), so its annotation goes too
+                for mt in sorted(methods(u), key=lambda x: -x.start):
+                    if (not u[mt.body_open + 1:mt.body_close].strip() and re.search(r"\bFMLCommonSetupEvent\b",
+                            u[mt.params_open:mt.params_close])):
+                        u = _cut_method(u, mt)
+                if not re.search(r"(?m)^[ \t]*@SubscribeEvent\b", u):
+                    u = re.sub(r"(?m)^[ \t]*@(?:Mod\.)?EventBusSubscriber\b(?:\([^)]*\))?[ \t]*\n", "", u)
+                new[g] = u
+        t = new[f]
+        hm = next(mt for mt in methods(t) if mt.name == "addNetworkMessage")
+        if not regs:
+            # generated and never used: drop the helper, its counter and the channel
+            t = _cut_method(t, hm)
+            t = re.sub(r"(?m)^[ \t]*(?:(?:private|public|protected|static)\s+)+int\s+messageID\s*=\s*0\s*;[ \t]*\n", "", t)
+            dm = re.search(r"(?m)^[ \t]*(?:(?:public|private|protected|static|final)\s+)*SimpleChannel\s+%s\s*=" % re.escape(chan), t)
+            if dm and not re.search(r"(?<![\w$])%s\b" % re.escape(chan), t[:dm.start()] + t[t.find(";", dm.end()) + 1:]) \
+                    and not any(re.search(r"\b%s\b" % re.escape(chan), u) for g, u in new.items() if g != f):
+                e = dm.end()
+                while t[e] != ";":
+                    e = match(t, e) + 1 if t[e] in "({[" else e + 1
+                t = t[:dm.start()] + t[e + 1:].removeprefix("\n")
+                report["unused mcreator channels"] += 1
+            else:
+                flags.append(f"{rel}: {chan} declared with no registrations but still used")
+            new[f] = t
+            continue
+        ind = re.match(r"[ \t]*", t[_line_start(t, hm.start):]).group(0)
+        body = "".join(f"\n{ind}    {chan}.registerMessage({i}, {', '.join(a)});" for i, a in enumerate(regs))
+        t = t[:_line_start(t, hm.start)] + f"{ind}public static void registerMessages() {{{body}\n{ind}}}\n" + t[hm.body_close + 2:]
+        t = re.sub(r"(?m)^[ \t]*(?:(?:private|public|protected|static)\s+)+int\s+messageID\s*=\s*0\s*;[ \t]*\n", "", t)
+        # the call that step 5 turns into bus.addListener(Owner::registerMessages): in the @Mod constructor, after its bus
+        close = None          # methods() skips constructors: find `Owner(...) {` with the mod bus in scope at its end
+        for cm2 in re.finditer(r"(?m)^[ \t]*(?:(?:public|protected|private)\s+)?%s\s*\(" % re.escape(owner), t):
+            p1 = match(t, cm2.end() - 1)
+            b = re.match(r"\s*\{", t[p1 + 1:])
+            if p1 > 0 and b:
+                b0 = p1 + b.end(); b1 = match(t, b0)
+                if b1 > 0 and buses_in_scope(t, b1 - 1):
+                    close = b1; break
+        if close is None:
+            flags.append(f"{rel}: no constructor with the mod bus in scope; add `modBus.addListener({owner}::registerMessages)`")
+        else:
+            t = t[:close] + f"    {owner}.registerMessages();\n{ind}" + t[close:]
+        new[f] = t
+        report["mcreator registrations"] += len(regs)
+
+
 def run(src, modid, dry=False):
     src = pathlib.Path(src).resolve()
     files = {f: f.read_text(encoding="utf-8") for f in src.rglob("*.java")}
     new = dict(files)
     flags, report = [], collections.Counter()
     used_ids = set()
+    normalise_mcreator(new, src, flags, report)
     for f in files:
         # the CURRENT text: an earlier channel's send rewrite (step 4) may already have edited this file, and every
         # offset below is taken from what is spliced -- offsets from the original text cut one mod's registration
@@ -596,6 +705,47 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         if not ok2:
             print("self-check (1.20.2 shape):", f2, "\n" + n2 + "\n" + k2)
         ok = ok and ok2
+    with tempfile.TemporaryDirectory() as d:     # X97: MCreator's addNetworkMessage helper, used and unused
+        base = pathlib.Path(d)
+        for sub, used in (("a", True), ("b", False)):
+            p = base / sub / "m"; p.mkdir(parents=True)
+            (p / "MMod.java").write_text(
+                "package m;\nimport net.neoforged.bus.api.IEventBus;\nimport net.neoforged.neoforge.network.NetworkRegistry;\n"
+                "import net.neoforged.neoforge.network.simple.SimpleChannel;\n@Mod(\"m\")\npublic class MMod {\n"
+                "    public static final SimpleChannel PACKET_HANDLER = NetworkRegistry.newSimpleChannel(new ResourceLocation(\"m\", \"m\"), () -> \"1\", \"1\"::equals, \"1\"::equals);\n"
+                "    private static int messageID = 0;\n    public MMod() {\n        IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();\n"
+                "        Things.REGISTRY.register(bus);\n    }\n"
+                "    public static <T> void addNetworkMessage(Class<T> messageType, BiConsumer<T, FriendlyByteBuf> encoder, "
+                "Function<FriendlyByteBuf, T> decoder, BiConsumer<T, Supplier<NetworkEvent.Context>> messageConsumer) {\n"
+                "        PACKET_HANDLER.registerMessage(messageID, messageType, encoder, decoder, messageConsumer);\n        ++messageID;\n    }\n}\n",
+                encoding="utf-8")
+            if used:
+                (p / "KeyMessage.java").write_text(
+                    "package m;\nimport java.util.function.Supplier;\nimport net.minecraft.network.FriendlyByteBuf;\n"
+                    "@Mod.EventBusSubscriber(bus=Mod.EventBusSubscriber.Bus.MOD)\npublic class KeyMessage {\n    int type;\n"
+                    "    public KeyMessage(int type) { this.type = type; }\n    public KeyMessage(FriendlyByteBuf buffer) { this.type = buffer.readInt(); }\n"
+                    "    public static void buffer(KeyMessage message, FriendlyByteBuf buffer) { buffer.writeInt(message.type); }\n"
+                    "    public static void handler(KeyMessage message, Supplier<NetworkEvent.Context> contextSupplier) {\n"
+                    "        NetworkEvent.Context context = contextSupplier.get();\n        context.enqueueWork(() -> {});\n"
+                    "        context.setPacketHandled(true);\n    }\n    @SubscribeEvent\n    public static void registerMessage(FMLCommonSetupEvent event) {\n"
+                    "        MMod.addNetworkMessage(KeyMessage.class, KeyMessage::buffer, KeyMessage::new, KeyMessage::handler);\n    }\n}\n",
+                    encoding="utf-8")
+                (p / "Keys.java").write_text("package m;\nclass Keys { void k() { MMod.PACKET_HANDLER.sendToServer(new KeyMessage(0)); } }\n",
+                                             encoding="utf-8")
+            r3, f3, _c = run(base / sub, "m")
+            mm = (p / "MMod.java").read_text(encoding="utf-8")
+            if used:
+                km = (p / "KeyMessage.java").read_text(encoding="utf-8")
+                ok3 = ("registrar.playToServer(KeyMessage.TYPE, KeyMessage.STREAM_CODEC, KeyMessage::handler);" in mm
+                       and "bus.addListener(MMod::registerMessages);" in mm and "addNetworkMessage" not in mm + km
+                       and "messageID" not in mm and "EventBusSubscriber" not in km and "FMLCommonSetupEvent event" not in km
+                       and "PacketDistributor.sendToServer(new KeyMessage(0))" in (p / "Keys.java").read_text(encoding="utf-8")
+                       and not f3)
+            else:
+                ok3 = "PACKET_HANDLER" not in mm and "addNetworkMessage" not in mm and "messageID" not in mm and not f3
+            if not ok3:
+                print(f"self-check X97 ({'used' if used else 'unused'}):", f3, "\n" + mm)
+            ok = ok and ok3
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{net}\n{pong}")
     return 0 if ok else 1
 

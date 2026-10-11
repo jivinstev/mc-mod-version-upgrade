@@ -6052,3 +6052,21 @@ without a word, which is how this one went unnoticed.
 variable IForgeMenuType` (the import codemod moves the package, not the simple name) · **Fix:** 55 generated
 pairs in the Forge recipe pack, from the 21.1 jar: one row per `IXExtension` that exists, FQ and bare, so a Forge
 name with no NeoForge counterpart is left for review rather than guessed.
+
+**X97. MCreator's network channel registers every message through a generic helper, so the converter saw none.**
+· **Pattern:** every MCreator mod carries `SimpleChannel PACKET_HANDLER = NetworkRegistry.newSimpleChannel(...)`,
+an `int messageID`, and `<T> addNetworkMessage(Class<T>, encoder, decoder, consumer)` that calls
+`PACKET_HANDLER.registerMessage(messageID, messageType, ...)` with VARIABLES; each message registers itself from its
+own `@Mod.EventBusSubscriber` class via `@SubscribeEvent registerMessage(FMLCommonSetupEvent)`; the two variables
+messages are NESTED in `<Mod>Variables`; sends are `send(PacketDistributor.DIMENSION.with(() -> ((Level)level)
+.dimension()), (Object)new Msg(...))` · **Error:** `package net.minecraftforge.network(.simple) does not exist`,
+`cannot find symbol: SimpleChannel / NetworkEvent`; the converter flagged "no registration this converts". 12 of
+the swept jars carry the helper; one registers 43 messages through it · **Fix:** a pre-pass in
+`convert-simplechannel` rewrites it into the classic shape: the helper becomes `registerMessages()` holding one
+`registerMessage(n, P.class, ...)` per call found in the tree, the per-message setup subscribers are removed (and an
+`@EventBusSubscriber` left without a handler loses its annotation, R1), and `Owner.registerMessages();` goes into
+the constructor that has the mod bus, which the existing step turns into `bus.addListener(...)`. An unused helper
+(generated in every mod) is deleted with its counter and channel. Also: a nested message class is found by its
+declaration, `(Object)` message casts and the MCreator dimension target are accepted, and constructors are found
+(the shared `methods()` skips them). One mod's real tree: 10 registrations, 10 packets, 10 handlers, 19 sends,
+0 flagged. Self-check covers used and unused and fails without the pre-pass.
