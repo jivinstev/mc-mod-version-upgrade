@@ -6609,3 +6609,21 @@ every line names a member that exists in 1.21.1 (§139: one dead line truncates 
 loads META-INF/accesstransformer.cfg by default. Separately, `ServerCommonPacketListenerImpl.connection` (a Forge mod
 sending a raw packet through `player.connection.connection`) is protected, and a member row rewrites it to the public
 `getConnection()`.
+
+**X154. A SimpleChannel registered through a BASE class's helpers.** This is the Mekanism-lineage shape that Blood
+Magic uses: an abstract `BasePacketHandler` with `getChannel()`, `registerServerToClient/ClientToServer(Class,
+encoder, decoder, consumer)` wrapping `registerMessage(..., Optional.of(NetworkDirection.X))`, and send helpers on
+`this.getChannel()`. A subclass holds `INSTANCE = createChannel(rl)` and an `initialize()` of helper calls, and the
+mod calls `packetHandler.initialize()` on an instance. convert-simplechannel saw no channel at all (98 errors) and
+only flagged it. `normalise_helper_channel` now rewrites it into the shape the converter already handles:
+- The channel is built by ChannelBuilder.
+- Each helper call becomes `INSTANCE.registerMessage(0, P.class, ..., Optional.of(dir))`.
+- `initialize()` turns static, and `packetHandler.initialize()` becomes `Handler.initialize()`, so the converter's
+  call-site step wires it on the mod bus.
+- The base drops the helpers, `createChannel`, `getChannel` and the abstract `initialize`. Its context helpers
+  (`getPlayer(Supplier<Context>)`) take `IPayloadContext`, and its `this.getChannel().send(..)` calls become
+  PacketDistributor calls.
+
+On Blood Magic it converts all 16 packets, the registration and 11 sends. Two send targets are new on the way:
+DIMENSION with a bare `ResourceKey<Level>` (the server's level for it) and TRACKING_CHUNK (the chunk's level and
+pos).

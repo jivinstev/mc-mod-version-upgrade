@@ -171,6 +171,15 @@ def rewrite_sends(text, chan, flags, rel):
             elif t and t.group(1) == "DIMENSION" and re.fullmatch(DIM, t.group(3).strip()):
                 dm_ = re.fullmatch(DIM, t.group(3).strip()); lvl = dm_.group(1) or dm_.group(2)
                 rep = f"PacketDistributor.sendToPlayersInDimension({lvl}, {args[1]})"
+            elif t and t.group(1) == "DIMENSION" and re.fullmatch(r"\(\)\s*->\s*([\w.]+)", t.group(3).strip()):
+                # a bare ResourceKey<Level> (X154): the server's level for it
+                key = re.fullmatch(r"\(\)\s*->\s*([\w.]+)", t.group(3).strip()).group(1)
+                rep = (f"PacketDistributor.sendToPlayersInDimension(net.neoforged.neoforge.server.ServerLifecycleHooks"
+                       f".getCurrentServer().getLevel({key}), {args[1]})")
+            elif t and t.group(1) == "TRACKING_CHUNK" and re.fullmatch(r"\(\)\s*->\s*(.+)", t.group(3).strip(), re.S):
+                ch = re.fullmatch(r"\(\)\s*->\s*(.+)", t.group(3).strip(), re.S).group(1).strip()
+                rep = (f"PacketDistributor.sendToPlayersTrackingChunk((net.minecraft.server.level.ServerLevel) ({ch}).getLevel(), "
+                       f"({ch}).getPos(), {args[1]})")
             elif t and t.group(1) == "ALL":
                 rep = f"PacketDistributor.sendToAllPlayers({args[1]})"
         elif m.group(1) == "sendTo" and len(args) == 3:
@@ -453,6 +462,96 @@ def normalise_mcreator(new, src, flags, report):
         report["mcreator registrations"] += len(regs)
 
 
+def normalise_helper_channel(new, flags, report):
+    """X154: the channel registered through a BASE class's helpers (a Mekanism-lineage shape, Blood Magic's):
+        abstract class Base { protected abstract SimpleChannel getChannel(); public abstract void initialize();
+            protected <MSG> void registerServerToClient(Class<MSG> type, enc, dec, consumer) {
+                this.getChannel().registerMessage(this.index++, type, enc, dec, consumer, Optional.of(NetworkDirection.PLAY_TO_CLIENT)); }
+            public <MSG> void sendTo(MSG m, ServerPlayer p) { this.getChannel().sendTo(m, p.connection.connection, ...); } }
+        class Handler extends Base { public static final SimpleChannel INSTANCE = createChannel(rl);
+            @Override public void initialize() { this.registerServerToClient(P.class, P::encode, P::decode, P::handle); ... }
+            @Override protected SimpleChannel getChannel() { return INSTANCE; } }
+        Mod { static final Handler packetHandler = new Handler(); ... packetHandler.initialize(); }
+    is rewritten into the shape the converter knows -- the channel field built by ChannelBuilder, one
+    `INSTANCE.registerMessage(0, P.class, enc, dec, h, Optional.of(dir))` per helper call, in a STATIC initialize()
+    called as `Handler.initialize();` -- and the base loses what only served the channel (the helpers, getChannel,
+    createChannel, the abstract initialize). Its sends (`this.getChannel().send(..)`) are rewritten with the rest."""
+    for base_f in list(new):
+        bt = new[base_f]
+        if not re.search(r"abstract\s+SimpleChannel\s+getChannel\s*\(\s*\)\s*;", bt):
+            continue
+        base = base_f.stem
+        helpers = {}
+        for mt in methods(bt):
+            body = bt[mt.body_open:mt.body_close]
+            rm = re.search(r"getChannel\(\)\s*\.\s*registerMessage\(", body)
+            if not rm or len(mt.params) != 4:
+                continue
+            dm = re.search(r"NetworkDirection\.(PLAY_TO_CLIENT|PLAY_TO_SERVER)", body)
+            helpers[mt.name] = dm.group(1) if dm else None
+        if not helpers:
+            continue
+        subs = [(f, t) for f, t in new.items() if re.search(r"\bextends\s+%s\b" % re.escape(base), t)]
+        if len(subs) != 1:
+            flags.append(f"{base_f.name}: {len(subs)} subclasses of {base}; helper-registered channel not converted")
+            continue
+        sf, st = subs[0]
+        sub = sf.stem
+        fm = re.search(r"(SimpleChannel\s+(\w+)\s*=\s*)createChannel\(", st)
+        gm = re.search(r"SimpleChannel\s+getChannel\s*\(\s*\)\s*\{\s*return\s+(\w+)\s*;\s*\}", st)
+        if not fm or not gm or gm.group(1) != fm.group(2):
+            flags.append(f"{sf.name}: channel field / getChannel() not in the expected shape; helper-registered channel not converted")
+            continue
+        chan = fm.group(2)
+        p0 = fm.end() - 1; p1 = match(st, p0)
+        st = st[:fm.start()] + f"{fm.group(1)}ChannelBuilder.named({st[p0 + 1:p1].strip()}).simpleChannel()" + st[p1 + 1:]
+        # helper calls -> registerMessage on the channel
+        for name, d in helpers.items():
+            def call(m, d=d):
+                q0 = m.end() - 1; q1 = match(m.string, q0)
+                return None if q1 < 0 else (m.start(), q1 + 1, m.string[q0 + 1:q1])
+            for m in reversed(list(re.finditer(r"(?<![\w$])(?:this\.)?%s\s*\(" % re.escape(name), st))):
+                c = call(m)
+                if not c:
+                    continue
+                dpart = f", Optional.of(NetworkDirection.{d})" if d else ""
+                st = st[:c[0]] + f"{chan}.registerMessage(0, {c[2].strip()}{dpart})" + st[c[1]:]
+                report["helper registrations"] += 1
+        # initialize(): static, no @Override; getChannel() override gone
+        st = re.sub(r"(?m)^([ \t]*)@Override\s*\n([ \t]*)public\s+void\s+initialize\s*\(", r"\2public static void initialize(", st)
+        st = re.sub(r"(?m)^([ \t]*)public\s+void\s+initialize\s*\(", r"\1public static void initialize(", st)
+        st = re.sub(r"\n[ \t]*(?:@Override\s*\n[ \t]*)?(?:public|protected)\s+SimpleChannel\s+getChannel\s*\(\s*\)\s*\{\s*return\s+\w+\s*;\s*\}[ \t]*", "", st)
+        if "Optional.of(" in st and not re.search(r"(?m)^import\s+java\.util\.Optional\s*;", st):
+            st = add_import(st, "java.util.Optional")
+        if "NetworkDirection." in st and "NetworkDirection;" not in st:
+            st = add_import(st, "net.minecraftforge.network.NetworkDirection")
+        new[sf] = st
+        # the base: drop the helpers, createChannel, getChannel, the abstract initialize
+        for mt in sorted(methods(bt), key=lambda x: -x.start):
+            if mt.name in helpers or mt.name == "createChannel":
+                s = fs.decl_span_start(bt, mt.start)
+                bt = bt[:s] + bt[mt.body_close + 1:]
+        bt = re.sub(r"\n[ \t]*(?:protected|public)\s+abstract\s+(?:SimpleChannel\s+getChannel|void\s+initialize)\s*\(\s*\)\s*;[ \t]*", "", bt)
+        bt = re.sub(r"\n[ \t]*private\s+int\s+index\s*=\s*0\s*;[ \t]*", "", bt)
+        for mt in sorted(methods(bt), key=lambda x: -x.start):       # context helpers (`getPlayer(Supplier<Context> c)`)
+            if mt.params and "Context" in mt.params[-1]:
+                bt, _k = convert_handler(bt, mt.name, flags, base_f.name)
+        new[base_f] = bt
+        # call sites: `<field of type Sub>.initialize();` -> `Sub.initialize();`
+        fields = set()
+        for t2 in new.values():
+            fields |= set(re.findall(r"\b%s\s+(\w+)\s*=\s*new\s+%s\s*\(" % (re.escape(sub), re.escape(sub)), t2))
+        for g in list(new):
+            t2 = new[g]
+            for fld in fields:
+                t2 = re.sub(r"(?<![\w$])(?:[\w.]+\.)?%s\s*\.\s*initialize\s*\(\s*\)\s*;" % re.escape(fld), f"{sub}.initialize();", t2)
+            t2 = re.sub(r"(?<![\w$])new\s+%s\s*\(\s*\)\s*\.\s*initialize\s*\(\s*\)\s*;" % re.escape(sub), f"{sub}.initialize();", t2)
+            new[g] = t2
+        report["helper channels"] += 1
+        return "getChannel()"
+    return None
+
+
 def run(src, modid, dry=False):
     src = pathlib.Path(src).resolve()
     files = {f: f.read_text(encoding="utf-8") for f in src.rglob("*.java")}
@@ -461,6 +560,7 @@ def run(src, modid, dry=False):
     used_ids = set()
     normalise_late_channel(new)
     normalise_mcreator(new, src, flags, report)
+    helper_alias = normalise_helper_channel(new, flags, report)
     for f in files:
         # the CURRENT text: an earlier channel's send rewrite (step 4) may already have edited this file, and every
         # offset below is taken from what is spliced -- offsets from the original text cut one mod's registration
@@ -569,7 +669,7 @@ def run(src, modid, dry=False):
         # 4. sends, everywhere
         for g in list(new):
             t2, k = new[g], 0
-            for name in [chan] + aliases:     # the sends go through the FIELD the local was stored in (X137)
+            for name in [chan] + aliases + ([helper_alias] if helper_alias else []):   # X137 field alias, X154 base getChannel()
                 t2, k1 = rewrite_sends(t2, name, flags, g.relative_to(src).as_posix())
                 k += k1
             if k:
@@ -577,7 +677,7 @@ def run(src, modid, dry=False):
                 # calls used it) would shadow the new one, and add_import refuses a second class of that name
                 t2 = re.sub(r"(?m)^import\s+net\.minecraftforge\.network\.PacketDistributor\s*;[ \t]*\n", "", t2)
                 t2 = add_import(t2, "net.neoforged.neoforge.network.PacketDistributor")
-                t2 = re.sub(r"(public\s+static\s+)<(\w+)>(\s+void\s+\w+\(\s*\2\s+\w+)", r"\1<\2 extends CustomPacketPayload>\3", t2)
+                t2 = re.sub(r"(public\s+(?:static\s+)?)<(\w+)>(\s+void\s+\w+\(\s*\2\s+\w+)", r"\1<\2 extends CustomPacketPayload>\3", t2)
                 # a helper taking the message as Object (`sendToPlayer(Object packet, ServerPlayer p)`) must take a payload now:
                 # retype the parameter a PacketDistributor call sends, when exactly one Object parameter has that name
                 for nm in set(re.findall(r"PacketDistributor\.sendTo\w*\((?:[^;]*?,\s*)?(\w+)\)\s*;", t2)):
@@ -908,6 +1008,46 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
     if not ok5:
         print("self-check X104: unwrap_handler")
     ok = ok and ok5
+    with tempfile.TemporaryDirectory() as d:     # X154: registration through a base class's helpers
+        q = pathlib.Path(d) / "m/net"; q.mkdir(parents=True)
+        (q / "Base.java").write_text(
+            "package m.net;\nimport java.util.Optional;\nimport java.util.function.Supplier;\nimport net.minecraftforge.network.NetworkDirection;\n"
+            "import net.minecraftforge.network.PacketDistributor;\nimport net.minecraftforge.network.NetworkEvent.Context;\n"
+            "import net.minecraftforge.network.NetworkRegistry.ChannelBuilder;\nimport net.minecraftforge.network.simple.SimpleChannel;\n"
+            "public abstract class Base {\n   private int index = 0;\n"
+            "   protected static SimpleChannel createChannel(ResourceLocation name) {\n      return ChannelBuilder.named(name).simpleChannel();\n   }\n"
+            "   public static Player getPlayer(Supplier<Context> context) {\n      return context.get().getSender();\n   }\n"
+            "   protected abstract SimpleChannel getChannel();\n   public abstract void initialize();\n"
+            "   protected <MSG> void registerServerToClient(Class<MSG> type, BiConsumer<MSG, FriendlyByteBuf> encoder, "
+            "Function<FriendlyByteBuf, MSG> decoder, BiConsumer<MSG, Supplier<Context>> consumer) {\n"
+            "      this.getChannel().registerMessage(this.index++, type, encoder, decoder, consumer, Optional.of(NetworkDirection.PLAY_TO_CLIENT));\n   }\n"
+            "   public <MSG> void sendToAll(MSG message) {\n      this.getChannel().send(PacketDistributor.ALL.noArg(), message);\n   }\n}\n",
+            encoding="utf-8")
+        (q / "Handler.java").write_text(
+            "package m.net;\nimport net.minecraftforge.network.simple.SimpleChannel;\npublic class Handler extends Base {\n"
+            "   public static final SimpleChannel INSTANCE = createChannel(new ResourceLocation(\"m\", \"main\"));\n"
+            "   @Override\n   public void initialize() {\n      this.registerServerToClient(P.class, P::encode, P::decode, P::handle);\n   }\n"
+            "   @Override\n   protected SimpleChannel getChannel() {\n      return INSTANCE;\n   }\n}\n", encoding="utf-8")
+        (q / "P.java").write_text(
+            "package m.net;\nimport java.util.function.Supplier;\nimport net.minecraft.network.FriendlyByteBuf;\n"
+            "import net.minecraftforge.network.NetworkEvent.Context;\npublic class P {\n"
+            "   public static void encode(P p, FriendlyByteBuf b) {}\n   public static P decode(FriendlyByteBuf b) { return new P(); }\n"
+            "   public static void handle(P p, Supplier<Context> c) { c.get().setPacketHandled(true); }\n}\n", encoding="utf-8")
+        (pathlib.Path(d) / "m/Mod.java").write_text(
+            "package m;\n@Mod(\"m\")\npublic class Mod {\n   public static final Handler packetHandler = new Handler();\n"
+            "   public Mod(IEventBus modBus) {\n      packetHandler.initialize();\n   }\n}\n", encoding="utf-8")
+        _r, f5, _c = run(d, "m")
+        h5, b5, m5 = ((q / "Handler.java").read_text(encoding="utf-8"), (q / "Base.java").read_text(encoding="utf-8"),
+                      (pathlib.Path(d) / "m/Mod.java").read_text(encoding="utf-8"))
+        ok5 = ("public static void initialize(RegisterPayloadHandlersEvent event)" in h5
+               and "registrar.playToClient(P.TYPE, P.STREAM_CODEC, P::handle);" in h5 and "getChannel" not in h5
+               and "INSTANCE" not in h5 and "modBus.addListener(Handler::initialize);" in m5
+               and "registerServerToClient" not in b5 and "getChannel" not in b5 and "createChannel" not in b5
+               and "PacketDistributor.sendToAllPlayers(message);" in b5 and "getPlayer(IPayloadContext context)" in b5
+               and "<MSG extends CustomPacketPayload> void sendToAll" in b5)
+        if not ok5:
+            print("self-check X154:", f5, "\n" + h5 + b5 + m5)
+        ok = ok and ok5
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{net}\n{pong}")
     return 0 if ok else 1
 
