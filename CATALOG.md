@@ -5880,3 +5880,12 @@ with it: both builders now read the version manifest from piston-meta (launcherm
 `maven.fabricmc.net` is not reachable here, so the intermediary builder falls back to FabricMC's own repository
 (`raw.githubusercontent.com/FabricMC/intermediary`, tiny v1, converted) — without it the intermediary remap had
 never been able to run in a cloud session.
+
+**X78. A jar with one tree per loader, and parked mixins left in their configs.** ·
+- *A tree per loader*: one NeoForge jar kept a full Fabric copy of the mod relocated under `fabric.com.x…` beside
+  `neoforge.com.x…`. park-optional parked only the Fabric files that import a Fabric API; the rest of that copy
+  (its packets, its utilities) stayed and failed. A `fabric/` or `quilt/` directory with a `neoforge/` or `forge/`
+  sibling is now parked whole.
+- *A parked mixin was still listed in `<mod>.mixins.json`*: Mixin fails at load on an entry whose class is gone,
+  and only Gate A would have said so. park-optional now drops parked classes from every mixin config and records
+  them in MIGRATION.md.

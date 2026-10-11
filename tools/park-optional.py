@@ -30,7 +30,7 @@ handler or registers a datagen subscriber class, that handler method / registrat
 MIGRATION.md, so nothing is dropped silently. A remaining file that imports a parked class is listed too:
 the compile loop will see it, and it is main code, so it is never parked automatically. Standard library.
 """
-import argparse, pathlib, re, shutil, sys
+import argparse, json, pathlib, re, shutil, sys
 
 # net.minecraftforge.* is the SOURCE loader's own API, not an optional integration: the recipe pack and
 # forge-shapes port it. Parking it hid a main-class dependency (measured: a config-screen handler).
@@ -42,6 +42,7 @@ PLATFORM = ("java.", "javax.", "jdk.", "sun.", "net.minecraft.", "net.neoforged.
             # also on every 1.21+ classpath (Minecraft's and NeoForge's own libraries): parking a mod's config class
             # for `import joptsimple.internal.Strings` cost one mod 100 errors (X74)
             "joptsimple.", "net.jpountz.", "com.machinezoo.", "io.github.llamalad7.", "org.jline.")
+OTHER_LOADERS = ("fabric", "quilt")
 INTEGRATION_DIR = re.compile(r"^(integration|integrations|compat|compatibility|addon|addons|plugin|plugins)$", re.I)
 DATAGEN_DIR = re.compile(r"^(data|datagen|datagenerator|datagenerators|gen|generators?)$", re.I)
 IMPORT = re.compile(r"(?m)^\s*import\s+(?:static\s+)?([\w.]+)\s*;")
@@ -176,7 +177,16 @@ def plan(work, group, also=()):
     tree |= classpath_packages(work)      # a dependency jar the port compiles against: its API is there, nothing to park
     req = required_roots(work) | {m.replace("-", "").replace("_", "").lower() for m in also if m}
     park, why, cuts = {}, {}, {}
+    # a jar that carries one tree PER LOADER (`fabric/...` beside `neoforge/...`, or `x.fabric` beside `x.neoforge`):
+    # the other loader's copy is never run on NeoForge, and parking only its files that import Fabric leaves the rest
+    # of it to fail (X78). Park the whole sibling tree.
+    for d in sorted({p for f in files for p in f.relative_to(java).parents} - {pathlib.Path(".")}):
+        if d.name in OTHER_LOADERS and any((java / d.parent / n).is_dir() for n in ("neoforge", "forge")):
+            for g in (java / d).rglob("*.java"):
+                park[g] = f"other loader: {d.as_posix()}/ (this jar keeps a tree per loader; the port targets NeoForge)"
     for f in files:
+        if f in park:
+            continue
         t = f.read_text(encoding="utf-8", errors="replace")
         bad = sorted({i for i in IMPORT.findall(t) if foreign(i, own, req, tree)})
         if bad and ENTRY.search(t):
@@ -281,6 +291,30 @@ def class_name(java, f):
     return f.relative_to(java).with_suffix("").as_posix().replace("/", ".")
 
 
+def prune_mixin_configs(work, parked_names):
+    """Drop parked classes from every *.mixins.json: Mixin fails at load on an entry whose class is gone (X78).
+    -> [config: entry, ...]"""
+    out = []
+    for cfg in sorted((work / "src/main/resources").glob("*.json")):
+        try:
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or "package" not in data:
+            continue
+        pkg, changed = data["package"], False
+        for key in ("mixins", "client", "server"):
+            entries = data.get(key)
+            if isinstance(entries, list):
+                keep = [e for e in entries if f"{pkg}.{e}" not in parked_names]
+                if len(keep) != len(entries):
+                    out += [f"{cfg.name}: {e}" for e in entries if e not in keep]
+                    data[key], changed = keep, True
+        if changed:
+            cfg.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work"); ap.add_argument("--group", help="the mod's root package (default: from gradle.properties)")
@@ -328,6 +362,7 @@ def main():
     for d in sorted(java.rglob("*"), reverse=True):     # drop the directories parking emptied
         if d.is_dir() and not any(d.iterdir()):
             d.rmdir()
+    pruned = prune_mixin_configs(work, parked_names)
     mig = work / "MIGRATION.md"
     lines = ["", "## Parked (tools/park-optional.py)", "",
              "Not compiled into this port; kept under `parked/` with their paths. Re-port an integration against",
@@ -337,6 +372,10 @@ def main():
               f"(the original is in decompiled-raw/)" for f, (_, n) in sorted(cuts.items())]
     if still:
         lines += ["", "Main-code files that imported a parked class: " + ", ".join(still)]
+    if pruned:
+        lines += ["", "Parked mixins dropped from their configs (a listed mixin with no class fails at load): "
+                  + ", ".join(pruned)]
+        print(f"  {len(pruned)} parked mixin(s) dropped from their mixin configs")
     with open(mig, "a", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     return 0
@@ -410,6 +449,22 @@ def self_check():
                      "com/ex/mymod/event/DataGenEvents.java", "com/ex/mymod/gen/ModItems.java",
                      "com/ex/mymod/gen/ModTags.java", "com/ex/mymod/gen/BaseTags.java",
                      "com/ex/mymod/gen/ModRecipes.java", "com/ex/mymod/api/data/RecipeHelper.java"}
+    with tempfile.TemporaryDirectory() as d:        # a tree per loader: the Fabric copy goes whole, NeoForge's stays
+        w = pathlib.Path(d); j = w / "src/main/java"
+        for rel, body in {"neoforge/com/ex/m/Entry.java": "package neoforge.com.ex.m;\n@Mod(\"m\")\nclass Entry {}",
+                          "fabric/com/ex/m/Init.java": "package fabric.com.ex.m;\nimport net.fabricmc.api.ModInitializer;\nclass Init {}",
+                          "fabric/com/ex/m/net/Packet.java": "package fabric.com.ex.m.net;\nclass Packet {}",
+                          "com/ex/m/Common.java": "package com.ex.m;\nclass Common {}"}.items():
+            (j / rel).parent.mkdir(parents=True, exist_ok=True); (j / rel).write_text(body, encoding="utf-8")
+        park2, _ = plan(w, "neoforge.com.ex.m")
+        got2 = {f.relative_to(j).as_posix() for f in park2}
+        ok = ok and got2 == {"fabric/com/ex/m/Init.java", "fabric/com/ex/m/net/Packet.java"}
+        res = w / "src/main/resources"; res.mkdir(parents=True)
+        (res / "m.mixins.json").write_text(json.dumps({"package": "com.ex.m.mixin", "mixins": ["A", "jei.B"],
+                                                        "client": ["jei.C"]}), encoding="utf-8")
+        got3 = prune_mixin_configs(w, {"com.ex.m.mixin.jei.B", "com.ex.m.mixin.jei.C"})
+        cfg = json.loads((res / "m.mixins.json").read_text(encoding="utf-8"))
+        ok = ok and cfg["mixins"] == ["A"] and cfg["client"] == [] and len(got3) == 2
     print("self-check:", "OK" if ok else f"FAIL {sorted(got)}")
     return 0 if ok else 1
 
