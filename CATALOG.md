@@ -6462,3 +6462,22 @@ a mixin is a class unrelated to its target: 64 `cannot be converted to` errors i
 `tools/port.py` collects the mod's `@Mixin` classes, its accessor interfaces, and the mod's own interfaces that a
 mixin class implements. `fix_decompile_artifacts` then rewrites every cast to one of those types as
 `(T)(Object)x`. The runtime checkcast is identical. Vanilla types (such as `(Container)c`) are not touched.
+
+**X139. Forge's `StairBlock(Supplier<BlockState>, Properties)` constructor is gone.** Only vanilla's
+`StairBlock(BlockState, Properties)` remains, so `new StairBlock(() -> BASE.get().defaultBlockState(), props)` fails
+with `BlockState is not a functional interface` (30 errors in one mod). Pack row: the supplier's body becomes the
+argument. It is evaluated when the stair's own registry supplier runs, which comes after the base block, since a
+DeferredRegister registers in order.
+
+**X140. `RecipeManager.getAllRecipesFor` returns `List<RecipeHolder<T>>` since 1.20.2.** A 1.20.1 caller iterates
+recipes, so a pack row appends `.stream().map(RecipeHolder::value).toList()`. It runs only in files that never name
+`RecipeHolder`, so code already written for holders is left alone.
+
+**X141. `MenuScreens.register` is private in 1.21.1.** Screens are bound on the mod-bus `RegisterMenuScreensEvent`.
+A cross-file pass in `tools/forge-shapes.py` (`t_menus`) moves every plain `MenuScreens.register(type, ctor);`
+statement out of its method, usually a client-setup handler and often inside `enqueueWork`, into a new sibling
+`registerMenuScreens(RegisterMenuScreensEvent event)`. The new method is wired the way the old one was: it gets
+`@SubscribeEvent` if the old method had one; otherwise an `addListener(X::registerMenuScreens)` is added next to the
+one that registers the old method, which may be in the @Mod constructor in another file. A method with neither
+wiring, or with an expression-lambda call, is listed and left alone, because an unwired listener would silently
+lose every screen.

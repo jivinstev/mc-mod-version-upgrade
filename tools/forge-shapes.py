@@ -1132,6 +1132,80 @@ TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attr
               ("sigs", t_sigs), ("misc", t_misc)]
 
 
+# --------------------------------------------------------------------------- menu screens (X141), cross-file
+
+MENU_EVT = "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent"
+
+
+def t_menus(src, res, dry=False):
+    """X141: `MenuScreens.register(type, Screen::new)` is private in 1.21.1; screens are bound on the mod-bus
+    RegisterMenuScreensEvent. Each method holding such statements (a client-setup handler, often inside enqueueWork)
+    loses them to a new sibling `registerMenuScreens(RegisterMenuScreensEvent event)`, wired the way the old method
+    was: `@SubscribeEvent` if it carried one, else an `addListener(X::registerMenuScreens)` beside the one that
+    registers it. A method with neither wiring is LISTED and left alone -- an unwired listener would be a silent
+    loss of every screen. Cross-file (the wiring may live in the @Mod constructor), so it runs after the per-file
+    transforms."""
+    files = {f: f.read_text(encoding="utf-8", errors="replace") for f in sorted(pathlib.Path(src).rglob("*.java"))}
+    for f in list(files):
+        text = files[f]
+        if "MenuScreens.register(" not in text:
+            continue
+        rel = f.relative_to(src).as_posix()
+        cls = f.stem
+        for mth in sorted(methods(text), key=lambda x: -x.start):
+            body = text[mth.body_open:mth.body_close]
+            stmts, bad = [], False
+            for m in re.finditer(r"(?<![\w$.])(?:net\.minecraft\.client\.gui\.screens\.)?MenuScreens\s*\.\s*register\(", body):
+                p0 = m.end() - 1; p1 = match(body, p0)
+                ls = body.rfind("\n", 0, m.start()) + 1
+                semi = re.match(r"\s*;[ \t]*\n?", body[p1 + 1:])
+                if p1 < 0 or body[ls:m.start()].strip() or not semi:
+                    bad = True; break
+                stmts.append((ls, p1 + 1 + semi.end(), body[p0 + 1:p1]))
+            if not stmts:
+                continue
+            if bad:
+                res.flags["menus"].append(f"{rel}:{line_of(text, mth.body_open)} MenuScreens.register not a plain statement; left")
+                continue
+            static = bool(re.search(r"\bstatic\b", text[mth.start:mth.params_open]))
+            subscribed = "@SubscribeEvent" in text[decl_span_start(text, mth.start):mth.start]
+            name = fresh("registerMenuScreens", text)
+            wire = []
+            if not subscribed:
+                for g, gt in files.items():
+                    for am in re.finditer(r"(?m)^([ \t]*)([\w.()]+)\.addListener\(\s*(this|%s|[\w.]+\.%s)::%s\s*\)\s*;"
+                                          % (re.escape(cls), re.escape(cls), re.escape(mth.name)), gt):
+                        wire.append((g, am))
+                if not wire:
+                    res.flags["menus"].append(f"{rel}:{line_of(text, mth.body_open)} {mth.name} registers screens but is "
+                                              "not @SubscribeEvent and no addListener names it; left")
+                    continue
+            ind = re.match(r"[ \t]*", text[text.rfind("\n", 0, mth.start) + 1:]).group(0)
+            inner = ind + (ind or "    ")
+            new_m = ("\n\n" + (f"{ind}@SubscribeEvent\n" if subscribed else "") + f"{ind}public {'static ' if static else ''}void {name}("
+                     + f"{MENU_EVT} event) {{\n" + "".join(f"{inner}event.register({a.strip()});\n" for _s, _e, a in stmts) + f"{ind}}}")
+            nb = body
+            for s, e, _a in sorted(stmts, reverse=True):
+                nb = nb[:s] + nb[e:]
+            text = text[:mth.body_open] + nb + text[mth.body_close:mth.body_close + 1] + new_m + text[mth.body_close + 1:]
+            res.count["menus"] += len(stmts)
+            files[f] = text
+            for g, am in wire:
+                gt = files[g] if g != f else text
+                mm = re.search(re.escape(am.group(0)), gt)
+                if mm:
+                    line = f"\n{am.group(1)}{am.group(2)}.addListener({am.group(3)}::{name});"
+                    gt = gt[:mm.end()] + line + gt[mm.end():]
+                    files[g] = gt
+                    if g == f:
+                        text = gt
+        files[f] = remove_import_if_unused(files[f] if files[f] != text else text, "net.minecraft.client.gui.screens.MenuScreens")
+    if not dry:
+        for f, t in files.items():
+            if f.read_text(encoding="utf-8", errors="replace") != t:
+                f.write_text(t, encoding="utf-8")
+
+
 # --------------------------------------------------------------------------- driver
 
 def root_package(src):
@@ -1217,6 +1291,8 @@ def run(src, modid, only=None, dry=False):
             need_helper |= bool(ctx.get("need_nbt_helper"))
             if not dry:
                 f.write_text(text, encoding="utf-8")
+    if not only or "menus" in only:
+        t_menus(src, res, dry)
     if need_helper and not dry:
         need_helper = not inline_small_nbt(src, nbt_fqn, res)
     if need_helper:
@@ -1243,7 +1319,7 @@ def main():
         print(json.dumps({"files": changed, "rewrites": dict(res.count), "flags": {k: v for k, v in res.flags.items()}}))
         return 0
     print(f"forge-shapes: {changed} file(s) changed" + (" (dry run)" if a.dry_run else ""))
-    for name, _fn in TRANSFORMS:
+    for name, _fn in TRANSFORMS + [("menus", None)]:
         if only and name not in only:
             continue
         fl = res.flags.get(name, [])
@@ -1539,6 +1615,28 @@ def self_check():
             (d / rel).write_text(f"package {pk};\nclass C {{}}\n", encoding="utf-8")
         if root_package(d) != "uk.co.x":
             bad.append(f"root_package: {root_package(d)!r}")
+    with tempfile.TemporaryDirectory() as d:       # X141: screens move to RegisterMenuScreensEvent, wired like their method
+        d = pathlib.Path(d); (d / "a").mkdir()
+        (d / "a/M.java").write_text("package a;\npublic class M {\n   public M(IEventBus bus) {\n      bus.addListener(C::setup);\n"
+                                    "   }\n}\n", encoding="utf-8")
+        (d / "a/C.java").write_text("package a;\nimport net.minecraft.client.gui.screens.MenuScreens;\npublic class C {\n"
+                                    "   public static void setup(FMLClientSetupEvent e) {\n      e.enqueueWork(() -> {\n"
+                                    "         MenuScreens.register((MenuType)R.A.get(), SA::new);\n         MenuScreens.register(\n"
+                                    "            R.B.get(), SB::new\n         );\n      });\n   }\n"
+                                    "   @SubscribeEvent\n   public static void s2(FMLClientSetupEvent e) {\n"
+                                    "      MenuScreens.register(R.C, SC::new);\n   }\n"
+                                    "   public static void lost(FMLClientSetupEvent e) {\n      MenuScreens.register(R.D, SD::new);\n   }\n}\n",
+                                    encoding="utf-8")
+        res, _ = run(d, "m", {"menus"})
+        c, m = (d / "a/C.java").read_text(encoding="utf-8"), (d / "a/M.java").read_text(encoding="utf-8")
+        run(d, "m", {"menus"})
+        ok = (res.count["menus"] == 3 and "event.register((MenuType)R.A.get(), SA::new);" in c
+              and "event.register(R.B.get(), SB::new);" in c and "event.register(R.C, SC::new);" in c
+              and "MenuScreens.register(R.D, SD::new);" in c and len(res.flags["menus"]) == 1
+              and "bus.addListener(C::registerMenuScreens2);" in m and "@SubscribeEvent\n   public static void registerMenuScreens(" in c
+              and (d / "a/C.java").read_text(encoding="utf-8") == c)
+        if not ok:
+            bad.append(("menus", ["X141"], c + m))
     for name, src, want, gone in CASES:
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d) / "my" / "X.java"
