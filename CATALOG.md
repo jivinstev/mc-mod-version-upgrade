@@ -5936,7 +5936,10 @@ at all · **Fix:** each artifact still gets its own setup fix, but the long tail
 stage no longer depends on having seen them all: when javac reports parse-family errors in at most ten files (and at
 most a tenth of the tree), those files move to `parked/unparseable/`, are listed in MIGRATION.md for the compile
 loop, the stage prints `QUARANTINED …`, and the count goes on. More than that is not a decompile artifact and still
-stops. Grep sweep logs for `QUARANTINED` to find the next artifact worth a setup fix.
+stops. Grep sweep logs for `QUARANTINED` to find the next artifact worth a setup fix. ⚠ Its first catch was a
+false one: `interface X extends ArmorMaterial` (a record since 1.21) gives `interface expected here`, a TYPE
+error that the `<token> expected` family also matched, so a parseable file was set aside. Parse messages end in
+`expected`; both this pattern and burndown-count's are now anchored there (plus `enum constant expected here`).
 
 **X85. A hub that guards optional APIs is not an integration.** · **Pattern:** a mod's 40-KB client facade and its
 "safe class" helper import optional mods' APIs (Iris, ModernUI) behind runtime checks, and half the mod calls them

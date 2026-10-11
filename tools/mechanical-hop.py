@@ -345,7 +345,7 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
 
 # ---------------------------------------------------------------------------------------------- CLI (jar route)
 
-PARSE_ERR = re.compile(r"^(\S+\.java):\d+: error: (?:[^ ]+(?: or [^ ]+)* expected|illegal start of|class, interface, enum, "
+PARSE_ERR = re.compile(r"^(\S+\.java):\d+: error: (?:[^ ]+(?: or [^ ]+)* expected\s*$|illegal start of|class, interface, enum, "
                        r"or record expected|reached end of file while parsing|not a statement|initializers not allowed "
                        r"in interfaces|enum constant expected here)", re.M)
 
@@ -522,14 +522,15 @@ def self_check():
         for i in range(12):
             (j / f"C{i}.java").write_text("class C {}", encoding="utf-8")
         log = w / "b.log"
-        log.write_text(f"{j / 'C3.java'}:13: error: enum constant expected here\n{j / 'C4.java'}:2: error: ';' expected\n",
-                       encoding="utf-8")
+        log.write_text(f"{j / 'C3.java'}:13: error: enum constant expected here\n{j / 'C4.java'}:2: error: ';' expected\n"
+                       f"{j / 'C5.java'}:5: error: interface expected here\n", encoding="utf-8")   # C5: a TYPE error
         ok &= quarantine_unparseable(w, log) == 0      # 2 of 12 > a tenth: refused
         ok &= (j / "C3.java").exists()
         for i in range(12, 40):
             (j / f"C{i}.java").write_text("class C {}", encoding="utf-8")
         ok &= quarantine_unparseable(w, log) == 2 and not (j / "C3.java").exists() \
-            and (w / "parked/unparseable/src/main/java/p/C3.java").exists() and "C4.java" in (w / "MIGRATION.md").read_text()
+            and (w / "parked/unparseable/src/main/java/p/C3.java").exists() and "C4.java" in (w / "MIGRATION.md").read_text() \
+            and (j / "C5.java").exists()
     with tempfile.TemporaryDirectory() as d:        # a NeoGradle cache entry naming a deleted workspace is healed
         d = pathlib.Path(d)
         rel = ".gradle/repositories/ng_dummy_ng/net/minecraft/client/1.21.1/client-1.21.1-client-extra.jar"
