@@ -6666,3 +6666,9 @@ where javac names that type:
 - `Minecraft.cameraEntity` → `getCameraEntity()`.
 - `Item.getDescription()` → `getName(getDefaultInstance())`.
 - `ItemStack.getFoodProperties(player)` → `get(DataComponents.FOOD)`.
+
+**X159. `EntityType.Builder.build(String)` → `build(ResourceKey)` had a comment in the 26.2 table and no rows.** The
+rows were mod-specific and never promoted, so a mod writing `.build(Identifier.fromNamespaceAndPath(ns, n).toString())`
+got 89 errors. Two generic rows now cover the forms that carry the FULL id: the `Identifier`/`ResourceLocation`
+`.toString()` form, and a namespaced literal. On 26.x the key is the type's identity (its translation key and loot
+table), so a bare `"name"` with no namespace is left for a worker rather than guessed.

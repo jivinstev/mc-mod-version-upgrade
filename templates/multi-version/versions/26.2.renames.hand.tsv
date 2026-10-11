@@ -285,6 +285,10 @@ software.bernie.geckolib.util.RenderUtil	com.geckolib.util.RenderUtil
 # -- 1.21.2 change this project's migrator catalog records as M4). Written fully
 # -- qualified on purpose: a rewrite that needed three new imports per file would have
 # -- to edit import blocks, and this table only ever rewrites expressions.
+# -- X159: only the forms that carry the FULL id are rewritten -- on 26.x the key is the type's identity (its
+# -- translation key and loot table), so a bare "name" with no namespace is left for a worker rather than guessed.
+re:\.build\(\s*((?:Identifier|ResourceLocation)\.(?:fromNamespaceAndPath|parse)\((?:[^()]|\([^()]*\))*\))\.toString\(\)\s*\)	.build(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENTITY_TYPE, \1))
+re:\.build\(\s*"([a-z0-9_.-]+:[a-z0-9_./-]+)"\s*\)	.build(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENTITY_TYPE, net.minecraft.resources.Identifier.parse("\1")))
 
 # -- GameRules was overhauled: constants lost the RULE_ prefix, are typed GameRule<T>,
 # -- and their serialized ids changed too (advance_time / spawn_mobs, not the old
