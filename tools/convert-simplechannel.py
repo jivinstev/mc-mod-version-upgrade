@@ -571,6 +571,10 @@ def run(src, modid, dry=False):
                         flags.append(f"{g.relative_to(src).as_posix()}:{fs.line_of(new[g], m.start())} {cname}.{owner.name}() "
                                      "has no IEventBus in scope: add `modBus.addListener(" + cname + "::" + owner.name + ")`")
                 break
+    # a channel shape none of the above recognised must not pass silently (X102): name every file still holding one
+    for f, t in new.items():
+        if re.search(r"\bSimpleChannel\s+\w+\s*[=;]", t):
+            flags.append(f"{f.relative_to(src).as_posix()}: a SimpleChannel this converter did not recognise is still declared")
     changed = 0
     for f, t in new.items():
         if t != files[f]:
