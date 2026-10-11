@@ -6434,3 +6434,21 @@ fails as `non-static method ... cannot be referenced from a static context`. `FM
 the static form, and `FMLLoader.getGamePath()` becomes `FMLPaths.GAMEDIR.get()` (next to the existing `getDist`
 row). The GLFW handle accessor `Window.getWindow()` is `Window.handle()`, added as an era member row. Found on a
 2-error loading-screen mod, where these were the only two errors.
+
+**X136. An add-on whose toml AND registry page both forget its parent mod.** A Farmer's Delight add-on's
+`mods.toml` declared only `forge` and `minecraft`, and the registry listed no dependencies, so neither the toml
+check nor the registry check (X117) had anything to fetch. The decompile then failed with
+`package vectorwing.farmersdelight.common.item does not exist`, and park-optional parked the add-on's core
+food and pie classes as an "optional integration". `undeclared_code_deps` in `tools/port.py` now reads the
+package references in the mod's own classes, skipping compat/integration/datagen packages, the JDK, Minecraft,
+the loaders and the common libraries. Any segment named by three or more classes becomes a candidate mod id. The
+candidates are SOFT, because a scan of 327 cached jars showed most of them are author names (`vectorwing`,
+`simibubi`) or bundled libraries (`registrate`, `catnip`). A candidate is wired into `libs/<mc>/` only when a
+registry build exists whose own toml declares exactly that id. It is never written into the port's toml, and it
+never causes a dependency stop. park-optional now keeps code for every mod wired into `libs/`.
+
+**X137. A SimpleChannel kept in a local and stored into a field lost every send.** `SimpleChannel net =
+ChannelBuilder...; INSTANCE = net;` registers through `net`. convert-simplechannel already deleted the `INSTANCE`
+alias and its field, but it rewrote sends only for `net`, so every `INSTANCE.send(...)`, `sendToServer` and
+`sendTo` was left calling a field that no longer existed (4 errors). The send rewrite now runs for the channel
+and for every field it was stored in, in every file.

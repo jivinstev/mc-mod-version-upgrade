@@ -484,7 +484,9 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     cond_changed, cond_unknown, forge_tags = neoforge_conditions(res) if src_loader == "forge" else (0, [], 0)
     hoisted = fix_hoisted_spec(srcj)
     # optional integrations and datagen are code the port cannot compile against (tools/park-optional.py)
-    keep = sorted({d["modId"] for d in meta.get("deps", []) if d["required"]} | ({"geckolib"} if uses_gecko else set()))
+    keep = sorted({d["modId"] for d in meta.get("deps", []) if d["required"]} | ({"geckolib"} if uses_gecko else set())
+                  # every mod wired into libs/ is on the compile classpath, so code using it need not be parked (X136)
+                  | {m for f in work.glob("libs/*/*.jar") for m in jar_toml(f)[0]} - PLATFORM_IDS)
     pk = run([sys.executable, str(ROOT / "tools/park-optional.py"), "--work", str(work), "--group",
               group or f"com.{meta['modId']}", "--also-required", ",".join(keep)], log=log)
     parked = int((re.findall(r"park-optional: (\d+) file", pk.stdout) or ["0"])[0])
@@ -848,13 +850,16 @@ def main():
             if d["modId"] in hard:
                 d["required"] = True
     state["hard_optional"] = hard
+    # X136: ids the code imports by package but nothing declares; wired only if a build declaring that id exists
+    inferred = [] if a.ignore_deps else undeclared_code_deps(jar, [d["modId"] for d in meta.get("deps", [])] + list(PLATFORM_IDS))
     if "deps-wired" not in state["done"] and not a.ignore_deps:
         src = info["source"]
         req = [d["modId"] for d in meta.get("deps", []) if d["required"]]
         work.mkdir(parents=True, exist_ok=True)
         wired = wire_deps(work, src.get("provider"), src.get("id"), src.get("fileId"),
                           sorted({h["to_mc"] for h in hops}, key=parse_ver), req,
-                          toml_authority=bool(rm.get("hasNeoforgeToml") or rm.get("hasForgeToml")), jar=jar)
+                          toml_authority=bool(rm.get("hasNeoforgeToml") or rm.get("hasForgeToml")), jar=jar,
+                          inferred=inferred)
         state["deps_wired"] = wired
         if wired:
             say("dependencies: " + "; ".join(f"{mc}: {', '.join(n for n in names)}" for mc, names in wired.items()))
@@ -1003,6 +1008,47 @@ def hard_optional_deps(jar, deps):
         if n >= max(20, len(cls) // 10):
             out.append(mid)
     return out
+
+
+# package roots that are never a mod a port has to fetch: the JDK, Minecraft, the loaders, and the libraries every
+# Minecraft classpath already carries
+NOT_A_MOD_ROOT = ("java/", "javax/", "jdk/", "sun/", "net/minecraft/", "com/mojang/", "net/minecraftforge/",
+                  "net/neoforged/", "cpw/mods/", "net/fabricmc/", "org/", "com/google/", "io/netty/", "it/unimi/",
+                  "com/llamalad7/", "joptsimple/", "oshi/", "com/ibm/", "com/sun/", "kotlin/", "kotlinx/", "scala/",
+                  "com/electronwill/", "software/bernie/", "mezz/jei/")
+PKG_WORDS = {"common", "client", "server", "api", "core", "util", "utils", "registry", "registries", "network",
+             "mixin", "mixins", "world", "level", "item", "items", "block", "blocks", "entity", "entities", "init",
+             "event", "events", "config", "data", "impl", "lib", "library", "main", "content", "compat", "render",
+             "renderer", "tags", "tag", "utility", "setup", "github", "minecraft", "forge", "neoforge", "fabric",
+             "mods", "mod", "team", "studio", "studios", "games", "craft"}
+INTEGRATION_DIRS = re.compile(r"/(compat|compatibility|integration|integrations|jei|rei|emi|jade|top|datagen|data/gen|plugin|plugins)/")
+
+
+def undeclared_code_deps(jar, declared, at_least=3):
+    """X136: mod ids the code's OWN classes name by package (vectorwing/farmersdelight/... -> farmersdelight) that the
+    toml does not declare at all -- an add-on whose author forgot the dependency in mods.toml (and on the registry
+    page, so the registry check cannot see it either). A segment counts only when classes outside the mod's
+    integration/datagen packages reference it at least `at_least` times; whether it really is a mod is settled later
+    by the dependency fetch, which accepts only a build whose own toml declares that id."""
+    with zipfile.ZipFile(jar) as z:
+        names = [n for n in z.namelist() if n.endswith(".class") and not n.startswith("META-INF/")]
+        roots = collections.Counter("/".join(n.split("/")[:2]) for n in names if n.count("/") >= 2)
+        own = roots.most_common(1)[0][0] + "/" if roots else "\0"
+        hits = collections.Counter()
+        flat = {norm(d) for d in declared}
+        for n in names:
+            if INTEGRATION_DIRS.search(n.lower()):
+                continue
+            segs = set()
+            for ref in re.findall(rb"L?([a-z][a-z0-9_]*(?:/[a-z0-9_]+)+)/[A-Z][\w$]*", z.read(n)):
+                r = ref.decode("latin-1") + "/"
+                if r.startswith(own) or r.startswith(NOT_A_MOD_ROOT):
+                    continue
+                for s in r.split("/")[:3]:
+                    if len(s) >= 5 and s.isalnum() and s.islower() and s not in PKG_WORDS and s not in flat:
+                        segs.add(s)
+            hits.update(segs)
+    return sorted(s for s, n in hits.items() if n >= at_least)
 
 
 LOADER_FAMILIES = {"forge": (b"net/minecraftforge/", b"cpw/mods/fml/"), "neoforge": (b"net/neoforged/",),
@@ -1381,7 +1427,7 @@ def fix_decompile_artifacts(srcj):
     return n
 
 
-def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=False, jar=None):
+def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=False, jar=None, inferred=()):
     """Put each REQUIRED dependency's build for every hop's target into libs/<mc>/, which the build compiles and
     runs against (templates/neoforge-mod/build.gradle), transitive ones too. Two sources, because each misses
     things the other has: the registry's declared dependencies, and the jar's own toml (measured: a mod's toml
@@ -1481,6 +1527,16 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
             names.append(f"{hit} (required by the jar's toml as {mid})" if hit
                          else f"{mid} (REQUIRED by the jar's toml; no {mc} build found that declares it"
                               + (f"; nearest: {near[0]} -- a renamed mod id?" if near else "") + ")")
+        # X136: a dependency the code imports by package (vectorwing/farmersdelight/...) that neither the toml nor the
+        # registry names. Soft: wired only when a build whose own toml declares exactly that id exists (most guesses
+        # are author names or bundled libraries, and fail that test), never a stop, never written into the port's toml.
+        for mid in sorted(set(inferred) - declared - set(toml_required) - PLATFORM_IDS):
+            for slug in slug_guesses(mid):
+                got, _why = fetch("modrinth", slug, expect=mid)
+                if got:
+                    names.append(f"{got[0]['fileName']} (the code imports {mid} by package; the toml never declares it -- X136)")
+                    declared |= jar_toml(lib / got[0]["fileName"])[0]
+                    break
         nested = wire_nested_dep_jars(lib)
         if nested:
             names.append(f"compile-only, bundled inside the dependencies above: {', '.join(nested)} (X109)")
@@ -1580,6 +1636,14 @@ def self_check():
         with zipfile.ZipFile(f"{d}/s.jar", "w") as z:     # X117: the code names the registry dependency's package
             z.writestr("org/x/seed/Reg.class", b"\xca\xfe Lvectorwing/farmersdelight/common/block/PieBlock; x")
         ok &= jar_uses(pathlib.Path(d, "s.jar"), "farmers-delight") and not jar_uses(pathlib.Path(d, "s.jar"), "geckolib")
+        with zipfile.ZipFile(f"{d}/x.jar", "w") as z:     # X136: an add-on whose toml forgot its parent mod
+            for i in range(4):
+                z.writestr(f"com/scouter/sd/items/I{i}.class", b"\xca\xfe4vectorwing/farmersdelight/common/item/ConsumableItem x"
+                           + b" Lnet/minecraft/world/item/Item; Lcom/scouter/sd/Other;")
+            for i in range(5):                            # an optional integration lives in a compat package
+                z.writestr(f"com/scouter/sd/compat/C{i}.class", b"\xca\xfe Lvazkii/botania/api/BotaniaAPI; x")
+        ok &= undeclared_code_deps(pathlib.Path(d, "x.jar"), ["forge"]) == ["farmersdelight", "vectorwing"]
+        ok &= undeclared_code_deps(pathlib.Path(d, "x.jar"), ["farmersdelight"]) == ["vectorwing"]
         with zipfile.ZipFile(f"{d}/u.jar", "w") as z:
             for i, b in enumerate((b"net/minecraftforge/x", b"net/minecraftforge/y", b"net/neoforged/a", b"net/neoforged/b",
                                    b"net/fabricmc/api", b"net/minecraft/class_123")):

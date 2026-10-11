@@ -555,7 +555,8 @@ def run(src, modid, dry=False):
             e += 1
         t = t[:cm2.start()] + t[e + 2 if t[e + 1:e + 2] == "\n" else e + 1:]
         # a LOCAL channel stored into a field (`SimpleChannel net = ...; INSTANCE = net;`): the alias and its field go too
-        for alias in re.findall(r"(?m)^[ \t]*(\w+)\s*=\s*%s\s*;[ \t]*$" % re.escape(chan), t):
+        aliases = re.findall(r"(?m)^[ \t]*(\w+)\s*=\s*%s\s*;[ \t]*$" % re.escape(chan), t)
+        for alias in aliases:
             t = re.sub(r"(?m)^[ \t]*%s\s*=\s*%s\s*;[ \t]*\n" % (re.escape(alias), re.escape(chan)), "", t)
             t = re.sub(r"(?m)^[ \t]*(?:(?:public|private|protected|static|final)\s+)*SimpleChannel\s+%s\s*;[ \t]*\n"
                        % re.escape(alias), "", t)
@@ -567,7 +568,10 @@ def run(src, modid, dry=False):
         new[f] = t
         # 4. sends, everywhere
         for g in list(new):
-            t2, k = rewrite_sends(new[g], chan, flags, g.relative_to(src).as_posix())
+            t2, k = new[g], 0
+            for name in [chan] + aliases:     # the sends go through the FIELD the local was stored in (X137)
+                t2, k1 = rewrite_sends(t2, name, flags, g.relative_to(src).as_posix())
+                k += k1
             if k:
                 # X125: the sends just written are NeoForge's; a Forge PacketDistributor import (kept because the old
                 # calls used it) would shadow the new one, and add_import refuses a second class of that name
@@ -783,11 +787,16 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
             "package m.net;\npublic class Msgs {\n   public static SimpleChannel INSTANCE;\n   public static void register() {\n"
             "      SimpleChannel net = ChannelBuilder.named(x)\n         .simpleChannel();\n      INSTANCE = net;\n"
             "      net.messageBuilder(B.class, 1, NetworkDirection.PLAY_TO_CLIENT)\n         .decoder(B::new)\n         .encoder(B::toBytes)\n"
-            "         .consumerMainThread(B::handle)\n         .add();\n   }\n}\n", encoding="utf-8")
+            "         .consumerMainThread(B::handle)\n         .add();\n   }\n"
+            "   public static <MSG> void to(MSG m, ServerPlayer p) {\n      INSTANCE.sendTo(m, p.connection.connection, NetworkDirection.PLAY_TO_CLIENT);\n   }\n}\n",
+            encoding="utf-8")
         run(d, "m")
         m2 = (root / "Msgs.java").read_text(encoding="utf-8")
         ok = ok and "registrar.playToClient(B.TYPE, B.STREAM_CODEC, B::handle);" in m2 and ".consumerMainThread" not in m2 \
             and "INSTANCE" not in m2 and "SimpleChannel" not in m2
+        # X137: the sends go through the field the local was stored in, here and in another class
+        ok = ok and "PacketDistributor.sendToPlayer(p, m);" in m2 and "<MSG extends CustomPacketPayload>" in m2 \
+            and "PacketDistributor.sendToAllPlayers(o)" in (root / "Net.java").read_text(encoding="utf-8")
     import tempfile
     with tempfile.TemporaryDirectory() as d:     # Forge 1.20.2+: ChannelBuilder, instance handle(CustomPayloadEvent.Context),
         p = pathlib.Path(d) / "m/net"           # send(message, target), and a helper taking the message as Object
