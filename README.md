@@ -173,6 +173,7 @@ Nothing to install.
      api.modrinth.com
      cdn.modrinth.com
      api.curseforge.com
+     cursemaven.com
      *.forgecdn.net
      maven.parchmentmc.org
      maven.fabricmc.net
