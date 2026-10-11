@@ -6680,3 +6680,9 @@ table), so a bare `"name"` with no namespace is left for a worker rather than gu
 - `BlockState.getOffset(level, pos)` is `getOffset(pos)`; the offset function no longer reads the level.
 - `EventHooks.canEntityGrief` takes a ServerLevel. The call is guarded with `instanceof ServerLevel`, so a client
   level answers false, and the guard never re-matches its own output.
+
+**X161. A lenient-only model JSON crashed the whole 26.2 era step.** A dungeon mod ships an item model with a stray
+trailing `}`, which 1.21.1's Gson reads and 26.x's strict parser rejects (§S8). era-hop generated the client item
+definitions before it ran fix-json-strict, and the generator's `json.load` raised, so the hop stopped (exit 24)
+before any compile. Now the strict-JSON repair runs first. The generator also reads a model that still does not
+parse the way Gson did (its first object), or skips it with a warning, instead of failing the hop.
