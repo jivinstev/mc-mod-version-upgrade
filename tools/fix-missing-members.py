@@ -132,12 +132,29 @@ def apply_row(line, member, new, owner, col=None):
     return out if n else None
 
 
+GEN = "/build/generated/sources/"
+
+
+def to_source(f):
+    """A multi-version build (§W) makes javac report errors against a GENERATED copy
+    (build/generated/sources/<overlay>/java). Edit the file it came from: the overlay's own copy if the target
+    overrides it, else the shared tree. Without this every site was skipped -- 0 renames in every sweep (X71)."""
+    f = f.replace("\\", "/")
+    if GEN in f and "/java/" in f.split(GEN, 1)[1]:
+        base, tail = f.split(GEN, 1)
+        overlay, rest = tail.split("/java/", 1)
+        for cand in (f"{base}/src/{overlay}/java/{rest}", f"{base}/src/main/java/{rest}"):
+            if pathlib.Path(cand).is_file():
+                return cand
+    return f
+
+
 def run(src, log_text, rows, dry=False):
     src = pathlib.Path(src).resolve()
     by_file = collections.defaultdict(list)
     for f, ln, member, owner, col in sites(log_text):
         if (owner, member) in rows:
-            by_file[pathlib.Path(f).resolve()].append((ln, member, owner, rows[(owner, member)], col))
+            by_file[pathlib.Path(to_source(f)).resolve()].append((ln, member, owner, rows[(owner, member)], col))
     report, missed = collections.Counter(), []
     for f, hits in by_file.items():
         if src not in f.parents:
@@ -199,6 +216,15 @@ def self_check():
               and "if (Minecraft.getInstance().hasControlDown())" in t and "int l = this.level + e.level();" in t
               and 'tag.store("o", UUIDUtil.CODEC, f(a, b)); x();' in t
               and not missed)
+    with tempfile.TemporaryDirectory() as d:     # an error reported against the GENERATED copy edits the source
+        w = pathlib.Path(d); src = w / "src/main/java/p"; gen = w / "build/generated/sources/mc26/java/p"
+        src.mkdir(parents=True); gen.mkdir(parents=True)
+        for g in (src, gen):
+            (g / "B.java").write_text("class B {\n  void r() {\n    var v = facing.getNormal();\n  }\n}\n", encoding="utf-8")
+        log = "\n".join([f"{gen / 'B.java'}:3: error: cannot find symbol", "  symbol:   method getNormal()",
+                         "  location: variable facing of type Direction"])
+        report2, missed2 = run(w / "src/main/java", log, {("Direction", "getNormal"): "getUnitVec3i"})
+        ok = ok and "facing.getUnitVec3i()" in (src / "B.java").read_text(encoding="utf-8") and not missed2
     ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: cannot find symbol"))   # javac on Windows names a drive path
     print("self-check:", "OK" if ok else f"FAIL {report} {missed}\n{t}")
     return 0 if ok else 1

@@ -5817,3 +5817,13 @@ audit of every earlier sweep result for a hidden parse abort found only the thre
   so the count is the only place it shows.
 - *A library the build supplies from `libs/`* (a jar or a nested jarJar) is not foreign either: park-optional reads
   the packages in those jars as well as the decompiled tree, so a shaded or bundled library stops being parked.
+
+**X71. Three pipeline steps that silently did nothing on one route.** ·
+- *The type-aware member renames never applied on a 26.2 hop.* javac reports errors against the generated copy
+  (`build/generated/sources/<overlay>/java`), and `fix-missing-members.py` skipped every file outside `src/`. It
+  printed `0 member site(s) renamed` on every sweep, which reads like a mod with nothing to rename. Errors on the
+  generated copy are now mapped back to the source file they came from (the overlay's copy first).
+- *An access transformer that breaks Minecraft's recompile stopped the stage before the AT loop could repair it*:
+  the start compile "never reached javac", which was treated as fatal. With an AT present it now goes to the loop.
+- *The stale NeoGradle cache heal (X57) ran only for a mod with an access transformer*; a mod without one stopped
+  on the same stale entry. The heal now runs either way.
