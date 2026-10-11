@@ -135,6 +135,8 @@ the proof it is pre-existing, and either the clear-cut fix (flag any that change
 rules) or the options when there is none. Ask about the non-obvious ones; a fix that needs art may have a
 stand-in worth trying -- look at it in a real client (a Gate C photo) before proposing it.
 
+**Keeping them true later is the keep-current skill's job**: every time the authors (or a dependency) change, it reconciles each fix against their change per failure mode and keeps a fix ledger in each issue (`tools/fix-ledger.py`) -- which mode is fixed, by whom, on which branch.
+
 **The handoff shows them.** `tools/port-offer.py` adds a "Defects the authors' original already has"
 section -- the `Pre-existing upstream defect:` commits, the `gatec-known.txt` lines and the fork's
 `Pre-existing:` issues -- and `tools/offer-page.py` puts it on the handoff page, so whoever installs or
