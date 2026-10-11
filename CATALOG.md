@@ -6402,3 +6402,6 @@ minimap, 279 errors' worth of work nobody needs; CurseForge, asked the same ques
 the newest NeoForge build when it is filed under a SIBLING of the target (same major.minor) and reads its declared
 Minecraft range: if the target is in it, the port stops as "already native" (exit 20), and a dependency resolves to that
 build instead of "no build". A build declaring no range proves nothing and is not taken.
+· **Measured across the popularity sweeps:** four mods had been ported this way, all four now stop as native -- the
+minimap above plus three whose NeoForge "1.21" jars declare `[1.21,1.22)`, `[1.21.0,1.22)` and `[1.21,)`. That is the
+single most expensive false positive the sweep found, because each one is a whole port.
