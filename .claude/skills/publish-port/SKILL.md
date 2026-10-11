@@ -35,8 +35,21 @@ original, link the fork's bug issues, or say "fixed", "bug", "crash" or "pre-exi
 that is advertising someone else's bugs next to their name. The fix history stays where it belongs: the fork's
 GitHub issues and fix ledgers, which still gate every publish. What a page may say about the port is how it
 **differs** for a player: the Minecraft version and loader always, and a behaviour difference only if a player would
-notice it (`--difference "..."`, stated neutrally -- what happens here, what happens in the original). A fix a
-player cannot tell from correct behaviour is not a difference. The tool enforces this:
+notice it (`--difference "..."`). A fix a player cannot tell from correct behaviour is not a difference.
+
+**How to word a difference -- low-key, and sized right:**
+- One line per difference, as a delta: what is different *in this version*, not what is wrong with the original.
+- Give its scale, so nobody over-reads it: which feature it touches (a debug item, an experimental mode, a config
+  default) and, when true, that most players won't notice.
+- At most a short, neutral reason ("an experimental feature that didn't play well with some other mods on
+  1.21.1"). No blame, no "bug", no severity, no history.
+- Be specific rather than vague. "Minor differences, see issue N" sounds more alarming than the plain fact, and
+  sends readers to an issue written for maintainers.
+- Example: "The Ultra Test Sword's lockdown mode and the Test Entity don't turn on Epic Core API's global
+  "AllReturn" in this version. That's an experimental feature that didn't play well with some other mods on
+  1.21.1."
+
+The user reviews the wording of each difference before it goes on a page; offer a draft in this style. The tool enforces this:
 `port-publish.py` refuses to sync a page or upload notes that name a defect or link a numbered issue (the authors'
 own words -- their description and credits -- and the permission link are exempt).
 
