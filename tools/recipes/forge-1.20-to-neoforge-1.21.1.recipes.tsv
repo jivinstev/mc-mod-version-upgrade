@@ -478,3 +478,9 @@ IForgeTransformation	ITransformationExtension
 re:new ClientboundUpdateMobEffectPacket\(((?:[^(),]|\([^()]*\))+),\s*((?:[^(),]|\([^()]*\))+)\)	new ClientboundUpdateMobEffectPacket(\1, \2, false)
 re:(?<!void )(?<![\w$])dropExperience\(\)	dropExperience(null)
 re:new ArrayList\(((?:\w+\.)*\w+)\.players\(\)\)	new ArrayList<>(\1.players())
+
+#@ X107 auto  1.20.3-1.20.5 type renames a 1.20.1 source still names (each checked in the 21.1 jar): GlassBlock is
+#           TransparentBlock (same Properties ctor); LiteralContents moved inside PlainTextContents
+net.minecraft.world.level.block.GlassBlock	net.minecraft.world.level.block.TransparentBlock
+GlassBlock	TransparentBlock
+net.minecraft.network.chat.contents.LiteralContents	net.minecraft.network.chat.contents.PlainTextContents.LiteralContents

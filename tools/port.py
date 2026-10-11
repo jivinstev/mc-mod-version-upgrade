@@ -1302,10 +1302,16 @@ def fix_decompile_artifacts(srcj):
             new, c = re.subn(r"@(?:com\.google\.auto\.service\.)?AutoService\((?:[^()]|\([^()]*\))*\)[ \t]*\n?[ \t]*", "", new)
             n["expect_platform"] += c
         if "dev.architectury.injectables.annotations" in new:
+            # Vineflower imports the nested marker and writes it bare: `import ...ExpectPlatform.Transformed;` +
+            # `@Transformed` (X107) -- so the bare form is only stripped when THAT import says what it is
+            bare = re.search(r"(?m)^import dev\.architectury\.injectables\.annotations\.ExpectPlatform\.Transformed;", new)
             new = re.sub(r"(?m)^import dev\.architectury\.injectables\.annotations\.[\w.]+;[ \t]*\n", "", new)
             new, c = re.subn(r"@(?:dev\.architectury\.injectables\.annotations\.)?ExpectPlatform(?:\.Transformed)?\b[ \t]*\n?[ \t]*",
                              "", new)
             n["expect_platform"] += c
+            if bare:
+                new, c = re.subn(r"@Transformed\b[ \t]*\n?[ \t]*", "", new)
+                n["expect_platform"] += c
         new, c = re.subn(r"(?m)^[ \t]*static\s*\{\s*if\s*\(\s*<unrepresentable>\.\$assertionsDisabled\s*\)\s*\{\s*\}\s*\}[ \t]*\n",
                          "", new)          # javac's assertion-status initializer, empty once decompiled (illegal in an interface)
         n["assert_guards"] += c
@@ -1438,6 +1444,11 @@ def self_check():
         got = fix_decompile_artifacts(d)
         s = g.read_text(encoding="utf-8")
         ok &= got["expect_platform"] == 2 and "ExpectPlatform" not in s and "public static Path dir()" in s
+        g.write_text("package p;\nimport dev.architectury.injectables.annotations.ExpectPlatform.Transformed;\n\npublic class P {\n"
+                     "   @Transformed\n   public static Path dir() {\n      return PImpl.dir();\n   }\n}\n", encoding="utf-8")
+        got = fix_decompile_artifacts(d)      # Vineflower's bare nested form (X107)
+        s = g.read_text(encoding="utf-8")
+        ok &= got["expect_platform"] == 1 and "Transformed" not in s and "public static Path dir()" in s
         g.write_text("package p;\nimport com.google.auto.service.AutoService;\n@AutoService(Svc.class)\npublic class Q implements Svc {}\n",
                      encoding="utf-8")
         got = fix_decompile_artifacts(d)

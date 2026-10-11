@@ -27,3 +27,7 @@ ServerPlayer	getEntityReach	entityInteractionRange
 ServerPlayer	getBlockReach	blockInteractionRange
 EntityDimensions	width	width()
 EntityDimensions	height	height()
+# 1.20.5 renames (21.1 jar): getFeetBlockState -> getInBlockState; teleportToWithTicket folded into teleportTo
+# (the ticket is the server's job now -- a judgement row, X107)
+Entity	getFeetBlockState	getInBlockState
+Entity	teleportToWithTicket	teleportTo

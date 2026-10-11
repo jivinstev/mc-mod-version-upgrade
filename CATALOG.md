@@ -6177,3 +6177,19 @@ became `location()`. The `ResourceLocation` → `Identifier` row is anchored on 
 `ResourceLocationArgument` alone, which is right for it and leaves the argument unported. A type rename sweeps the
 type; every class whose NAME merely contains it needs its own row. Found on a 14-error client music mod, where these
 were 7 of the 14.
+
+**X107. A member row names the DECLARING type, javac names the RECEIVER's -- so every call on a subclass skipped the
+row.** · **Pattern:** a row `Entity  teleportToWithTicket  teleportTo`, and the error
+`location: variable player of type ServerPlayer` (or `class NightmareEntity` for `this.getFeetBlockState()`) ·
+**Symptom:** `fix-missing-members: 0 site(s) rewritten` on a mod whose biggest symbol bucket is exactly that rename;
+every `Entity` row in the table had only ever fired on receivers typed `Entity` · **Fix:** when no row names the
+receiver's type, `fix-missing-members.py` walks its supertypes, breadth first: the mod's own classes from the source
+tree, Minecraft's from the class files of the jar the build compiles against (NeoGradle's recompile output or MDG's
+merged jar), keyed by simple name like the rows. A nested class only speaks for a simple name no top-level class has
+(`OutgoingChatMessage$Player` must not become `Player`'s supertype). Built only when a row's member is missing on a
+type the row does not name, so a clean pass pays nothing. · **Found with it, same mod:** two 1.20.3-1.20.5 type renames
+(`GlassBlock` → `TransparentBlock`, `LiteralContents` → `PlainTextContents.LiteralContents`), two member renames
+(`getFeetBlockState` → `getInBlockState`, and `teleportToWithTicket` folded into `teleportTo` -- a judgement row), and
+Architectury's `@ExpectPlatform.Transformed`, which the decompile prep already stripped in its qualified spelling but
+Vineflower writes BARE (`import ...ExpectPlatform.Transformed;` + `@Transformed`): 50 of the mod's 164 errors. The bare
+form is stripped only in a file whose import says what it is.

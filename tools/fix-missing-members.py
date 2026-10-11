@@ -148,6 +148,96 @@ def apply_row(line, member, new, owner, col=None):
     return out if n else None
 
 
+
+# A row names the type that DECLARED the member (`Entity  setSecondsOnFire`), but javac names the receiver's
+# static type (`location: variable player of type ServerPlayer`, `class NightmareEntity`). Exact matching
+# skipped every call on a subclass (X107), so the owner's supertypes are walked: the mod's own classes from the
+# source tree, Minecraft's from the compile jar's class files. Simple names, like the rows.
+def _class_supers(data):
+    """(super simple name, [interface simple names]) from a .class file's bytes."""
+    import struct
+    n = struct.unpack(">H", data[8:10])[0]
+    pool, i, k = [None] * n, 10, 1
+    while k < n:
+        tag = data[i]
+        if tag == 1:
+            ln = struct.unpack(">H", data[i + 1:i + 3])[0]
+            pool[k] = data[i + 3:i + 3 + ln].decode("utf-8", "replace"); i += 3 + ln
+        elif tag == 7:
+            pool[k] = ("C", struct.unpack(">H", data[i + 1:i + 3])[0]); i += 3
+        elif tag in (8, 16, 19, 20):
+            i += 3
+        elif tag == 15:
+            i += 4
+        elif tag in (3, 4, 9, 10, 11, 12, 17, 18):
+            i += 5
+        elif tag in (5, 6):
+            i += 9; k += 1
+        else:
+            return None
+        k += 1
+    def name(ix):
+        c = pool[ix]
+        return pool[c[1]].rsplit("/", 1)[-1].rsplit("$", 1)[-1] if c else None
+    sup = struct.unpack(">H", data[i + 4:i + 6])[0]
+    cnt = struct.unpack(">H", data[i + 6:i + 8])[0]
+    ifs = [name(struct.unpack(">H", data[i + 8 + 2 * j:i + 10 + 2 * j])[0]) for j in range(cnt)]
+    return (name(sup) if sup else None), ifs
+
+
+def supertypes(src, jars=()):
+    """{simple name: [direct supertype simple names]} for the mod's sources and the given jars."""
+    import zipfile
+    out = collections.defaultdict(list)
+    for f in pathlib.Path(src).rglob("*.java"):
+        t = f.read_text(encoding="utf-8", errors="replace")
+        for m in re.finditer(r"\b(?:class|interface)\s+(\w+)(?:\s*<[^{]*?>)?\s+((?:extends|implements)[^{]*)\{", t):
+            for s in re.findall(r"(?:extends|implements|,)\s*([\w.]+)", re.sub(r"<[^<>]*>", "", re.sub(r"<[^<>]*>", "", m.group(2)))):
+                out[m.group(1)].append(s.rsplit(".", 1)[-1])
+    top, nested = collections.defaultdict(list), collections.defaultdict(list)
+    for j in jars:
+        try:
+            z = zipfile.ZipFile(j)
+        except Exception:
+            continue
+        for e in z.namelist():
+            if e.startswith("net/minecraft/") and e.endswith(".class"):
+                r = _class_supers(z.read(e))
+                if r:
+                    base = e.rsplit("/", 1)[-1][:-6]
+                    # a nested class shares its simple name with unrelated top-level ones (OutgoingChatMessage$Player):
+                    # it only speaks for a name no top-level class has
+                    (nested if "$" in base else top)[base.rsplit("$", 1)[-1]] += [s for s in [r[0], *r[1]] if s and s != "Object"]
+    for k, v in list(top.items()) + [(k, v) for k, v in nested.items() if k not in top]:
+        if k not in out:
+            out[k] += v
+    return out
+
+
+def compile_jars(src):
+    """The Minecraft jar the build compiles against: NeoGradle's recompile output, or ModDevGradle's merged jar."""
+    p = pathlib.Path(src).resolve()
+    for d in [p, *p.parents]:
+        if (d / "build.gradle").is_file():
+            js = sorted(d.glob("build/neoForm/*/steps/recompile/outputs.jar"))
+            js += [x for x in sorted(d.glob("build/moddev/artifacts/*merged.jar")) if "sources" not in x.name]
+            return js
+    return []
+
+
+def row_for(rows, owner, member, sup):
+    """The row for owner.member, or for the nearest supertype that has one (breadth first)."""
+    seen, queue = set(), [owner]
+    while queue:
+        o = queue.pop(0)
+        if o in seen:
+            continue
+        seen.add(o)
+        if (o, member) in rows:
+            return o, rows[(o, member)]
+        queue += sup.get(o, [])
+    return None
+
 GEN = "/build/generated/sources/"
 
 
@@ -165,12 +255,21 @@ def to_source(f):
     return f
 
 
-def run(src, log_text, rows, dry=False):
+def run(src, log_text, rows, dry=False, jars=None):
     src = pathlib.Path(src).resolve()
     by_file = collections.defaultdict(list)
+    sup = None
     for f, ln, member, owner, col in sites(log_text):
         if (owner, member) in rows:
             by_file[pathlib.Path(to_source(f)).resolve()].append((ln, member, owner, rows[(owner, member)], col))
+            continue
+        if not any(m == member for _o, m in rows):
+            continue
+        if sup is None:      # only built when some row's member is missing on a type the row does not name
+            sup = supertypes(src, compile_jars(src) if jars is None else jars)
+        hit = row_for(rows, owner, member, sup)
+        if hit:
+            by_file[pathlib.Path(to_source(f)).resolve()].append((ln, member, owner, hit[1], col))
     report, missed = collections.Counter(), []
     for f, hits in by_file.items():
         if src not in f.parents:
@@ -256,7 +355,17 @@ def self_check():
         run(d, log, {("LootContext", "hasParam"): "hasParameter", ("LootContext", "getParam"): "getParameter"})
         ok = ok and "c.hasParameter(p) && c.getParameter(p)" in f.read_text(encoding="utf-8")
     ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: cannot find symbol"))   # javac on Windows names a drive path
-    print("self-check:", "OK" if ok else f"FAIL {report} {missed}\n{t}")
+    with tempfile.TemporaryDirectory() as d:          # a row on the declaring type reaches a subclass receiver (X107)
+        f = pathlib.Path(d) / "N.java"
+        f.write_text("class N extends Monster {\n  void t() { this.setSecondsOnFire(3); }\n}\n", encoding="utf-8")
+        log = (f"{f}:2: error: cannot find symbol\n  void t() {{ this.setSecondsOnFire(3); }}\n"
+               "                 ^\n  symbol: method setSecondsOnFire(int)\n  location: class N\n")
+        got, _ = run(d, log, {("Entity", "setSecondsOnFire"): "igniteForSeconds"}, jars=[])
+        ok &= got.get("N.setSecondsOnFire") is None and "igniteForSeconds" not in f.read_text()   # Monster unknown: no hit
+        (pathlib.Path(d) / "Monster.java").write_text("abstract class Monster extends Entity {}\n", encoding="utf-8")
+        got, _ = run(d, log, {("Entity", "setSecondsOnFire"): "igniteForSeconds"}, jars=[])
+        ok &= sum(got.values()) == 1 and "this.igniteForSeconds(3)" in f.read_text()
+    print("self-check:", "OK" if ok else f"FAIL ")
     return 0 if ok else 1
 
 
