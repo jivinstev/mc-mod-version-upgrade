@@ -178,6 +178,12 @@ def replace_block(body, led):
     return body.rstrip() + "\n\n" + block + "\n"
 
 
+def column_matches(col, release):
+    """A column names a release when it IS that name or lists it among " + "-joined names: one ledger can span a
+    library and the mod that uses it, so a column is often "<lib tag> + <mod tag>"."""
+    return col == release or release in [t.strip() for t in col.split(" + ")]
+
+
 def check(led, release=None):
     errs = []
     for m in led.get("modes", []):
@@ -198,9 +204,9 @@ def check(led, release=None):
                             "-- or \"identical\": <proof they ship our fix byte-identical>")
             if s.get("state") == "fixed" and not s.get("by"):
                 errs.append(f"{m.get('id')} on {b}: fixed by whom? (ours <sha> / upstream <repo>@<sha> / dependency)")
-            if release and b == release and m.get("severity") == "S1" and s.get("state") == "open":
+            if release and column_matches(b, release) and m.get("severity") == "S1" and s.get("state") == "open":
                 errs.append(f"{m.get('id')}: S1 ({SEVERITIES['S1']}) is open on {b} -- it must not be released")
-    if release and not any(release in m.get("status", {}) for m in led.get("modes", [])):
+    if release and not any(column_matches(b, release) for m in led.get("modes", []) for b in m.get("status", {})):
         cols = sorted({b for m in led.get("modes", []) for b in m.get("status", {})})
         errs.append(f"--release {release!r} names no column of this ledger (columns: {', '.join(cols)}) -- a check "
                     "against a column that does not exist checks nothing")
@@ -210,7 +216,7 @@ def check(led, release=None):
 def warnings(led, release=None):
     return [f"{m.get('id')} on {b}: S1 fixed but not confirmed by re-running its repro ({s.get('evidence', '')[:80]})"
             for m in led.get("modes", []) for b, s in m.get("status", {}).items()
-            if m.get("severity") == "S1" and s.get("state") == "fixed-unconfirmed" and (not release or b == release)]
+            if m.get("severity") == "S1" and s.get("state") == "fixed-unconfirmed" and (not release or column_matches(b, release))]
 
 
 def self_check():
@@ -235,6 +241,8 @@ def self_check():
     errs = check(bad, "neoforge-1.21.1")
     ok &= any("both arms" in e for e in errs) and any("must not be released" in e for e in errs)
     ok &= any("names no column" in e for e in check(led, "neoforge-1.21"))   # a --release that matches nothing
+    ok &= column_matches("lib-1-mc1.21.1 + mod-2-mc1.21.1", "mod-2-mc1.21.1")            # one tag of a joined column
+    ok &= not column_matches("lib-1-mc1.21.1-r2 + mod-2", "lib-1-mc1.21.1")             # a prefix is not that tag
     idl = json.loads(json.dumps(led)); idl["modes"][0]["status"]["neoforge-1.21.1"].pop("ab")
     idl["modes"][0]["status"]["neoforge-1.21.1"]["identical"] = "cmp: identical"
     ok &= check(idl, "neoforge-1.21.1") == []
