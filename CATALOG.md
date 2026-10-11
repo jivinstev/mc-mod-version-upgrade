@@ -6387,3 +6387,10 @@ dimension teleporter (`ITeleporter`/`PortalInfo`, ~800 lines over a handful of c
 server without them still accepts the client; NeoForge reads that from `neoforge.mods.toml` (`displayTest`) instead. A
 row leaves the statement as a comment and drops Vineflower's nested `IExtensionPoint.DisplayTest` import. Setting the toml
 field to the matching value (`IGNORE_ALL_VERSION` for "anything") is still a metadata step for the port.
+
+**X130. A class that became a record needs no hand row: the jar already says what the accessor is.** 26.2 turned
+configuration classes into records (`HugeMushroomFeatureConfiguration`, `EnchantmentInstance`, ...), so every field read
+is `f has private access in Owner` until someone writes `Owner f f()` into the members table -- one worldgen mod had ~200
+such reads of two fields. `fix-missing-members.py` now checks, for a private-access site with no row, whether the owner is
+a RECORD in the compile jar with a same-named accessor (one `javap` per owner, only when such a site exists) and rewrites
+`x.f` to `x.f()`. Hand rows still win, and anything that is not a record accessor is still left alone.

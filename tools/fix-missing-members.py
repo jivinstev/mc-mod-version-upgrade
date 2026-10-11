@@ -276,11 +276,43 @@ def to_source(f):
     return f
 
 
+def record_accessors(jars, owners):
+    """X130: {owner simple name: {component names}} for the owners that are RECORDS in the compile jar -- a class that
+    became a record keeps each field private behind a same-named accessor, so `x.f` is `x.f()` with no row needed."""
+    import subprocess, zipfile
+    out = {}
+    for j in jars:
+        try:
+            names = zipfile.ZipFile(j).namelist()
+        except Exception:
+            continue
+        for o in owners - set(out):
+            hits = [n[:-6].replace("/", ".") for n in names if n.endswith(f"/{o}.class") and n.startswith("net/minecraft/")]
+            for fq in hits[:3]:
+                try:
+                    jp = subprocess.run(["javap", "-cp", str(j), fq], capture_output=True, text=True, timeout=60).stdout
+                except Exception:
+                    continue
+                if "extends java.lang.Record" in jp:
+                    out[o] = set(re.findall(r"public [\w.<>\[\], ?]+ (\w+)\(\);", jp))
+                    break
+    return out
+
+
 def run(src, log_text, rows, dry=False, jars=None):
     src = pathlib.Path(src).resolve()
     by_file = collections.defaultdict(list)
     sup = None
-    for f, ln, member, owner, col in sites(log_text):
+    all_sites = sites(log_text)
+    # private-field reads with no row: ask the jar whether the owner is a record (one javap per owner, only when needed)
+    priv = {(o, m) for f, ln, m, o, col in all_sites if col is not None and (o, m) not in rows}
+    if priv:
+        rec = record_accessors(compile_jars(src) if jars is None else jars, {o for o, _ in priv})
+        rows = dict(rows)
+        for o, m in priv:
+            if m in rec.get(o, ()):
+                rows[(o, m)] = m + "()"
+    for f, ln, member, owner, col in all_sites:
         if (owner, member) in rows:
             by_file[pathlib.Path(to_source(f)).resolve()].append((ln, member, owner, rows[(owner, member)], col))
             continue
@@ -402,6 +434,22 @@ def self_check():
                "                 ^\n  symbol: method teleportToWithTicket(double,double,double)\n")
         got, _ = run(d, log, {("Entity", "teleportToWithTicket"): "teleportTo"}, jars=[])
         ok &= sum(got.values()) == 1 and "this.teleportTo(1.0, 2.0, 3.0)" in f.read_text()
+    import shutil, subprocess, zipfile
+    if shutil.which("javac") and shutil.which("javap"):
+        with tempfile.TemporaryDirectory() as d:      # X130: a record owner needs no row
+            src = pathlib.Path(d, "net/minecraft/Cfg.java"); src.parent.mkdir(parents=True)
+            src.write_text("package net.minecraft;\npublic record Cfg(int stemProvider) {}\n", encoding="utf-8")
+            subprocess.run(["javac", "-d", d, str(src)], capture_output=True)
+            jar = pathlib.Path(d, "mc.jar")
+            with zipfile.ZipFile(jar, "w") as z:
+                z.write(pathlib.Path(d, "net/minecraft/Cfg.class"), "net/minecraft/Cfg.class")
+            w = pathlib.Path(d, "w"); w.mkdir()
+            f = w / "F.java"
+            line = "  int t(Cfg config) { return config.stemProvider + 1; }"
+            f.write_text("class F {\n" + line + "\n}\n", encoding="utf-8")
+            log = "\n".join([f"{f}:2: error: stemProvider has private access in Cfg", line, " " * line.index(".stemProvider") + "^"])
+            got, _ = run(w, log, {}, jars=[jar])
+            ok &= "config.stemProvider() + 1" in f.read_text(encoding="utf-8")
     print("self-check:", "OK" if ok else f"FAIL ")
     return 0 if ok else 1
 
