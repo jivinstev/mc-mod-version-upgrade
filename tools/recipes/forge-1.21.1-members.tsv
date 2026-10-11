@@ -14,9 +14,9 @@ Operation	MULTIPLY_TOTAL	ADD_MULTIPLIED_TOTAL
 Entity	setSecondsOnFire	igniteForSeconds
 Entity	onAddedToWorld	onAddedToLevel
 Explosion	getExploder	getDirectSourceEntity
-Minecraft	getFrameTime	{recv}.getTimer().getGameTimeDeltaPartialTick(true)
-Minecraft	getPartialTick	{recv}.getTimer().getGameTimeDeltaPartialTick(true)
-Minecraft	getDeltaFrameTime	{recv}.getTimer().getGameTimeDeltaPartialTick(false)
+Minecraft	getFrameTime	{recv}.getTimer().getGameTimeDeltaPartialTick(true){()}
+Minecraft	getPartialTick	{recv}.getTimer().getGameTimeDeltaPartialTick(true){()}
+Minecraft	getDeltaFrameTime	{recv}.getTimer().getGameTimeDeltaPartialTick(false){()}
 ItemStack	setHoverName	{recv}.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, {a0})
 Holder	get	value
 Reference	get	value

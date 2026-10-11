@@ -36,6 +36,9 @@ def table(path):
         if not l.strip() or l.lstrip().startswith("#"):
             continue
         owner, old, new = [x.strip() for x in l.split("\t")[:3]]
+        if "{recv}" in new and new.endswith(")") and not re.search(r"\{a\d\}|\{\(\)\}", new):
+            # the original call's (...) is kept after a {recv} template, so one ending in its own call yields `f(x)()`
+            raise ValueError(f"{path}: row {owner}.{old} -> {new} supplies its own call: end it with {{()}} (X73)")
         rows[(owner, old)] = new
     return rows
 
@@ -112,7 +115,13 @@ def apply_row(line, member, new, owner, col=None):
         if not m:
             return None
         end = m.end()
-        if "{a" in new:          # the call's arguments, split at top-level commas: {a0}, {a1}, ...
+        if "{()}" in new:        # the template supplies its own arguments: consume an EMPTY call, keep nothing of it
+            args = call_args(line, line.index("(", m.end()))
+            if args is None or args[0]:
+                return None
+            end = args[1]
+            new = new.replace("{()}", "")
+        elif "{a" in new:          # the call's arguments, split at top-level commas: {a0}, {a1}, ...
             args = call_args(line, line.index("(", m.end()))
             if args is None:
                 return None
@@ -193,12 +202,14 @@ def self_check():
     rows = {("GuiGraphicsExtractor", "drawString"): "text", ("Minecraft", "getMainRenderTarget"): "{recv}.gameRenderer.mainRenderTarget",
             ("Screen", "hasControlDown"): "static:Minecraft.getInstance().hasControlDown",
             ("EnchantmentInstance", "level"): "level()",
-            ("CompoundTag", "putUUID"): "{recv}.store({a0}, UUIDUtil.CODEC, {a1})"}
+            ("CompoundTag", "putUUID"): "{recv}.store({a0}, UUIDUtil.CODEC, {a1})",
+            ("Minecraft", "getPartialTick"): "{recv}.getTimer().getGameTimeDeltaPartialTick(true){()}"}
     with tempfile.TemporaryDirectory() as d:
         f = pathlib.Path(d) / "A.java"
         f.write_text("class A {\n    void r() {\n        g.drawString(font, s, 1, 2, -1);\n        drawString(x);\n"
                      "        var t = Minecraft.getInstance().getMainRenderTarget();\n        if (Screen.hasControlDown()) {}\n"
-                     "        int l = this.level + e.level;\n        tag.putUUID(\"o\", f(a, b)); x();\n    }\n}\n",
+                     "        int l = this.level + e.level;\n        tag.putUUID(\"o\", f(a, b)); x();\n"
+                     "        var p = e.getPosition(mc.getPartialTick());\n    }\n}\n",
                      encoding="utf-8")
         F = str(f)
         log = "\n".join([f"{F}:3: error: cannot find symbol", "  symbol:   method drawString(Font,String,int,int,int)",
@@ -208,13 +219,15 @@ def self_check():
                          f"{F}:6: error: cannot find symbol", "  symbol:   method hasControlDown()", "  location: class Screen",
                          f"{F}:7: error: level has private access in EnchantmentInstance",
                          "        int l = this.level + e.level;", "                              ^",
-                         f"{F}:8: error: cannot find symbol", "  symbol:   method putUUID(String,UUID)", "  location: variable tag of type CompoundTag"])
+                         f"{F}:8: error: cannot find symbol", "  symbol:   method putUUID(String,UUID)", "  location: variable tag of type CompoundTag",
+                         f"{F}:9: error: cannot find symbol", "  symbol:   method getPartialTick()", "  location: variable mc of type Minecraft"])
         report, missed = run(d, log, rows)
         t = f.read_text(encoding="utf-8")
         ok = ("g.text(font, s, 1, 2, -1);" in t and "        drawString(x);" in t
               and "Minecraft.getInstance().gameRenderer.mainRenderTarget()" in t
               and "if (Minecraft.getInstance().hasControlDown())" in t and "int l = this.level + e.level();" in t
               and 'tag.store("o", UUIDUtil.CODEC, f(a, b)); x();' in t
+              and "e.getPosition(mc.getTimer().getGameTimeDeltaPartialTick(true));" in t
               and not missed)
     with tempfile.TemporaryDirectory() as d:     # an error reported against the GENERATED copy edits the source
         w = pathlib.Path(d); src = w / "src/main/java/p"; gen = w / "build/generated/sources/mc26/java/p"

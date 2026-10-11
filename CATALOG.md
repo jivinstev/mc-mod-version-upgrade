@@ -5845,7 +5845,10 @@ like `.get(` or `.normal(` would hit every other class's member of that name, so
 `tools/recipes/forge-1.21.1-members.tsv`, applied by `fix-missing-members.py` (as on the 26.2 route) only where
 javac names the owner. The Forge stage runs it beside `fix-holders` until neither changes anything. Each row is
 checked against the 1.21.1 jar; a rename whose target depends on arity (`overlayCoords`, `uv2`) stays with
-`forge-shapes`, which sees the arguments.
+`forge-shapes`, which sees the arguments. ⚠ A `{recv}` template keeps the original call's `(...)` after it, so a row
+that supplies its own call (`getPartialTick` → `…getGameTimeDeltaPartialTick(true)`) must end in `{()}`, which
+consumes an empty call; otherwise it writes `f(true)()` -- a parse error that stopped one mod's stage. The table
+loader now refuses such a row.
 
 **X74. A library Minecraft itself ships is not an optional integration.** · **Pattern:** a mod's config class
 imports `joptsimple.internal.Strings` (jopt-simple is on every Minecraft classpath) · **Symptom:** park-optional
