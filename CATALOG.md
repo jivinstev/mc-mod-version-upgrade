@@ -5989,3 +5989,18 @@ name stem, naming the modules; port each as its own mod, dependencies first. A l
 does not match, because the outer jar then has code. Measured: 1 match in 398 sweep jars, and it was the true one.
 · **The general check:** a `start=0` from a jar is a claim about how much code was read. Ask the class count before
 believing it.
+
+**X91. 1.21.2's loot-type records are gone, and the member fixer fixed one site per line.** · **Pattern:** a mod
+registering custom loot conditions/functions — `DeferredRegister<LootItemConditionType>`,
+`new LootItemFunctionType<>(CODEC)`, `getType()` overrides — and reading `LootContext.getParam/hasParam` ·
+**Error:** `cannot find symbol: class LootItemConditionType / LootItemFunctionType / LootContextParam` on 26.2;
+measured **239 errors across 7 of the swept mods** · **Fix:** the loot registries hold the `MapCodec` itself
+and the override is `codec()`, so this is all rename rows (`26.2.renames.hand.tsv`): the override is renamed WITH
+its declared type, `new X(codec)` unwraps to the codec, `LootItemFunctionType<?>` widens to the registry's
+`MapCodec<? extends LootItemFunction>`, the import becomes `MapCodec` (no type argument, §X5b),
+`LootContextParam` becomes `ContextKey`, and `LootContext`'s three accessors are owner-resolved member rows.
+A 1.21.1-shaped probe (registry, condition, conditional function, context reads) compiles to 0 against 26.2.
+· **What the probe found on the way:** `fix-missing-members.py` de-duplicated errors by `file:line` to drop
+gradle's echo, which also dropped a SECOND missing member on the same line, so `c.hasParam(p) && c.getParam(p)`
+took one full compile per call. It now keys on the caret column, like its private-access path; the self-check
+covers it and fails against the old key.

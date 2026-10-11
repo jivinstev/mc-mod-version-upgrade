@@ -48,3 +48,8 @@ Level	blockUpdated	updateNeighborsAt
 ServerLevel	blockUpdated	updateNeighborsAt
 LevelAccessor	blockUpdated	updateNeighborsAt
 Minecraft	getTimer	getDeltaTracker
+# 1.21.2 replaced LootContextParam with util.context.ContextKey and renamed the LootContext accessors with it
+# (same parameters; getParamOrNull's nullable read is getOptionalParameter).
+LootContext	getParam	getParameter
+LootContext	hasParam	hasParameter
+LootContext	getParamOrNull	getOptionalParameter

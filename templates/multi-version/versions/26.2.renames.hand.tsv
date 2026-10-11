@@ -1100,6 +1100,21 @@ re:\bRenderType\.entityCutout\(	net.minecraft.client.renderer.rendertype.RenderT
 re:\bRenderType\.entityCutoutNoCull\(	net.minecraft.client.renderer.rendertype.RenderTypes.entityCutout(
 re:\bpublic boolean isAlliedTo\(Entity (\w+)\)	protected boolean considersEntityAsAlly(Entity \1)
 re:\bsuper\.isAlliedTo\(	super.considersEntityAsAlly(
+# 1.21.2 dropped the LootItemConditionType/LootItemFunctionType records: the loot registries hold the MapCodec
+# itself and a condition/function overrides codec() where it overrode getType(). So the override is renamed with
+# its declared type (regexes run before the type rows), `new X(codec)` unwraps to the codec, the <?> registry
+# element widens to what Registries.LOOT_FUNCTION_TYPE declares, and the import becomes MapCodec (an import
+# carries no type argument, §X5b). LootContextParam is ContextKey; LootContext's accessors are member rows.
+re:\bpublic\s+(LootItemConditionType|LootItemFunctionType(?:<[^;{(]*?>)?)\s+getType\(\)	public \1 codec()
+re:\bnew\s+LootItemConditionType\(	(
+re:\bnew\s+LootItemFunctionType(?:<[^>]*>)?\(	(
+re:\bLootItemFunctionType<\?>	com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.storage.loot.functions.LootItemFunction>
+net.minecraft.world.level.storage.loot.predicates.LootItemConditionType	com.mojang.serialization.MapCodec
+LootItemConditionType	com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.storage.loot.predicates.LootItemCondition>
+net.minecraft.world.level.storage.loot.functions.LootItemFunctionType	com.mojang.serialization.MapCodec
+LootItemFunctionType	com.mojang.serialization.MapCodec
+net.minecraft.world.level.storage.loot.parameters.LootContextParam	net.minecraft.util.context.ContextKey
+LootContextParam	net.minecraft.util.context.ContextKey
 # 1.21.2 removed DirectionProperty: a direction property is EnumProperty<Direction>. create() gains the enum
 # class (Direction.Plane is a Predicate<Direction>, so the HORIZONTAL form resolves to that overload). The FQ row
 # rewrites the import WITHOUT a type argument (an import cannot carry one, §X5b); the bare row adds it at uses.

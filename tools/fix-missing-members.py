@@ -58,7 +58,14 @@ def sites(log_text):
             out.append((p.group("file"), int(p.group("line")), p.group("sym"), p.group("owner").rsplit(".", 1)[-1], col))
             continue
         m = ERR.match(l)
-        if not m or (m.group("file"), m.group("line")) in seen:
+        if not m:
+            continue
+        caret = lines[i + 2] if i + 2 < len(lines) else ""
+        key = (m.group("file"), m.group("line"), caret.index("^") if caret.strip() == "^" else None)
+        # Key on the caret too, not just file:line -- gradle's echo of the same error repeats it exactly, while a
+        # SECOND missing member on the same line (`c.hasParam(p) && c.getParam(p)`) has its own caret and must be
+        # fixed in this pass, not one compile later.
+        if key in seen:
             continue
         sym = next((x.strip() for x in lines[i + 1:i + 6] if x.strip().startswith("symbol:")), "")
         loc = next((x.strip() for x in lines[i + 1:i + 7] if x.strip().startswith("location:")), "")
@@ -66,7 +73,7 @@ def sites(log_text):
         lm = re.match(r"location:\s+(?:variable \w+ of type |class |interface |@interface )?([\w.$]+)", loc)
         if not sm or not lm:
             continue
-        seen.add((m.group("file"), m.group("line")))
+        seen.add(key)
         out.append((m.group("file"), int(m.group("line")), sm.group(1), lm.group(1).split("<")[0].rsplit(".", 1)[-1], None))
     return out
 
@@ -238,6 +245,16 @@ def self_check():
                          "  location: variable facing of type Direction"])
         report2, missed2 = run(w / "src/main/java", log, {("Direction", "getNormal"): "getUnitVec3i"})
         ok = ok and "facing.getUnitVec3i()" in (src / "B.java").read_text(encoding="utf-8") and not missed2
+    with tempfile.TemporaryDirectory() as d:     # two missing members on ONE line are both fixed in one pass
+        f = pathlib.Path(d) / "C.java"
+        f.write_text("class C {\n  boolean t() { return c.hasParam(p) && c.getParam(p) != null; }\n}\n", encoding="utf-8")
+        line = "  boolean t() { return c.hasParam(p) && c.getParam(p) != null; }"
+        log = "\n".join([f"{f}:2: error: cannot find symbol", line, " " * line.index(".hasParam") + "^",
+                         "  symbol:   method hasParam(ContextKey<Entity>)", "  location: variable c of type LootContext",
+                         f"{f}:2: error: cannot find symbol", line, " " * line.index(".getParam") + "^",
+                         "  symbol:   method getParam(ContextKey<Entity>)", "  location: variable c of type LootContext"])
+        run(d, log, {("LootContext", "hasParam"): "hasParameter", ("LootContext", "getParam"): "getParameter"})
+        ok = ok and "c.hasParameter(p) && c.getParameter(p)" in f.read_text(encoding="utf-8")
     ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: cannot find symbol"))   # javac on Windows names a drive path
     print("self-check:", "OK" if ok else f"FAIL {report} {missed}\n{t}")
     return 0 if ok else 1
