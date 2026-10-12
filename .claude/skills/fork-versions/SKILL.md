@@ -1,6 +1,6 @@
 ---
 name: fork-versions
-description: Make a fork port build for more Minecraft versions from the same branch -- a multi-version layer (.multiversion/ plus one commented hook line) that leaves the authors' code and the 1.21.1 build untouched, ports one 1.21.x target at a time through rename tables, overlays and a shared helper library, gates each target like the base, records what it cost, and feeds every new pattern back into the shared library. Use when the user asks to support another 1.21.x version (or "the latest") in a fork, to add or port a target, to gate a target, or to measure how far a fork is from newer versions.
+description: Make a fork port build for more Minecraft versions from the same branch -- a multi-version layer (.multiversion/ plus one commented hook line) that leaves the authors' code and the 1.21.1 build untouched, ports one target (1.21.x, then 26.x) at a time through rename tables, overlays and a shared helper library, gates each target like the base, records what it cost, and feeds every new pattern back into the shared library. Use when the user asks to support another 1.21.x or 26.x version (or "the latest") in a fork, to add or port a target, to gate a target, or to measure how far a fork is from newer versions.
 ---
 
 # Build a fork for more Minecraft versions
@@ -59,8 +59,20 @@ a middle version ships to players (each hop is small, each is gated, and a regre
 published a **stable** line for it (players install stable NeoForge; a jar for a beta line pins a loader few run).
 1.21.2, 1.21.6, 1.21.7 and 1.21.9 had beta-only NeoForge lines, each superseded within weeks, and are skipped --
 the reason is recorded per line and `add-target` refuses them. `make-fork-layer.py versions` prints the table;
-`versions --refresh` re-reads the NeoForge maven. A target's jar declares exactly its own Minecraft and NeoForge
-ranges (`[1.21.3,1.21.4)`), so a skipped version is never claimed.
+`versions --refresh` re-reads the NeoForge maven (and names any stable line versions.json does not have yet). A
+target's jar declares exactly its own Minecraft and NeoForge ranges (`[1.21.3,1.21.4)`), so a skipped version is never
+claimed.
+
+**The 26.x calendar line** follows 1.21.11 in the same table: 26.1.2, 26.2 and 26.3 are targeted (26.1 and 26.1.1 had
+beta-only NeoForge and are skipped). Three things differ, and `add-target` handles each from versions.json: NeoForge
+numbers 26.x by the whole Minecraft version (26.2 is NeoForge `26.2.0.B`, 26.1.2 is `26.1.2.B`), so every Minecraft
+release is its own line and both ranges stop at the next patch release (`[26.2,26.2.1)`, `[26.1.2,26.1.3)`); the
+target gets `java_version=25` (CATALOG §V1); and GeckoLib 5.5+ is published as `com.geckolib:geckolib-neoforge-<mc>`, so a
+fork that names `software.bernie.geckolib` gets an escaped `substitute.` line for it. 26.2 and 26.3 also get `nfrt_version=2.0.31`: the NeoForm runtime that ModDevGradle 2.0.146 brings (2.0.27)
+cannot stage NeoForge 26.2 at all, and `layer.gradle` sets the newer one without touching the authors' plugins block. The default chain is one hop on:
+26.1.2 inherits 1.21.11. Read CATALOG §V (the 1.21.1 -> 26.2 era jump) before porting a 26.x target; its rename table
+(`templates/multi-version/versions/26.2.renames.tsv`) is a 1.21.1 table, so most of what it does a 1.21.11 tree already
+has -- the shared libraries for 26.x start empty and grow from measured hops.
 
 ## The layer's rules (each is checked, not remembered)
 
@@ -147,6 +159,10 @@ The steps below are the reference for what each stage does and for fixing its re
    shared library (`.multiversion/shared/<t>/`: rows every fork inherits + helper classes in the fork's
    `mv_package`). `sync-shared --check` fails when the fork's copy drifted. A target that jumps over middle versions is added with
    `--direct` (see "Direct jumps" above); the default is one hop.
+   **CI, once per fork, before the first target lands:** `python3 tools/port-ci.py --repo DIR --modid ID --layer-branch
+   <layer branch>`, as a PR on the port branch, then merged into the layer branch (see "CI on the layer branch"). From
+   then on every push gets the bookends in full (1.21.1 and the newest target) and compile + audits for the middle
+   targets. A layer branch without this has no gate of its own.
 3. **Access transformer**: the base AT names classes vanilla moved. Re-derive it into
    `targets/<t>/resources/META-INF/accesstransformer.cfg` with `fix-access-transformer.py --overrides-from <log>`
    until `createMinecraftArtifacts` succeeds. Never widen a method vanilla subclasses override to a protected

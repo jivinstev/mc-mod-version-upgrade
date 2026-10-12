@@ -431,6 +431,21 @@ def self_check():
         expect(plan(r)["shipped"] == "true", "shipped-expect*.txt is noticed")
         (mv / "targets" / "1.21.11" / "target.properties").write_text("prop.neo_version=1\n", encoding="utf-8")
         expect(java_of(mv, "1.21.11") == "21", "no java_version anywhere: 21")
+    # the 26.x line as make-fork-layer.py add-target writes it: 26.3 newest with Java 25, each middle target's own JDK
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d); mv = r / ".multiversion"
+        (mv / "targets").mkdir(parents=True)
+        (mv / "base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        for t_, body in (("1.21.10", "java_version=21\n"), ("1.21.11", "java_version=21\ninherits=1.21.10\n"),
+                         ("26.1.2", "java_version=25\ninherits=1.21.11\n"), ("26.2", "inherits=26.1.2\n"),
+                         ("26.3", "java_version=25\ninherits=26.2\n")):
+            (mv / "targets" / t_).mkdir()
+            (mv / "targets" / t_ / "target.properties").write_text(body, encoding="utf-8")
+        p26 = plan(r)
+        expect(p26["newest"] == "26.3" and p26["newest_java"] == "25", f"26.3 is newest, on Java 25: {p26['newest']}")
+        expect(p26["middle"] == ["1.21.10", "1.21.11", "26.1.2", "26.2"], f"26.x middle order: {p26['middle']}")
+        expect({i["t"]: i["java"] for i in json.loads(p26["matrix"])["include"]}
+               == {"1.21.10": "21", "1.21.11": "21", "26.1.2": "25", "26.2": "25"}, "per-target JDK; 26.2 inherits 25")
     # CI policy: full_gates (ci.properties) names extra fully gated MIDDLE targets; default none; typos are errors
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d); mv = r / ".multiversion"

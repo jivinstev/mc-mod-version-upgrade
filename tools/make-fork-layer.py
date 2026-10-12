@@ -11,9 +11,13 @@
     make-fork-layer.py --self-check
 
 Which versions to target: templates/fork-layer/versions.json. Only Minecraft versions with a STABLE NeoForge line
-are targeted (players install stable NeoForge); 1.21.2, 1.21.6, 1.21.7 and 1.21.9 had beta-only NeoForge lines and
-are skipped, with the reason recorded per line. `add-target` refuses a skipped version and fills --neo, --java and
-the GeckoLib version from that file.
+are targeted (players install stable NeoForge); 1.21.2, 1.21.6, 1.21.7, 1.21.9, 26.1 and 26.1.1 had beta-only NeoForge
+lines and are skipped, with the reason recorded per line. `add-target` refuses a skipped version and fills --neo, --java
+and the GeckoLib version (and, where GeckoLib moved Maven group, a dependency substitution) from that file.
+
+Version numbering: 1.21.N is built by NeoForge 21.N.B; from the 26.x calendar line NeoForge carries the whole Minecraft
+version (26.2 -> 26.2.0.B, 26.1.2 -> 26.1.2.B), and every Minecraft release is its own line. Versions compare as numeric
+tuples, so 26.x sorts after 1.21.11.
 
 The shared library (templates/fork-layer/shared/<t>/: a rename table every fork inherits plus helper classes such
 as a 1.21.1-API ShaderInstance on 1.21.2's shader programs) is copied into the fork by `sync-shared`, with the
@@ -151,20 +155,51 @@ def sync_shared(repo, check=False):
     return 0
 
 
-def refresh_versions():
-    """Newest stable (non-beta) NeoForge per 21.N line, from the NeoForge maven."""
-    url = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
-    xml = urllib.request.urlopen(url, timeout=30).read().decode("utf-8")
+def neo_line(v):
+    """(Minecraft version, build) a NeoForge version builds, or None for a beta or a version of neither scheme.
+    21.N.B -> 1.21.N (21.0.B -> 1.21); from 26.x the Minecraft version is the first three parts with a trailing .0
+    dropped: 26.2.0.B -> 26.2, 26.1.2.B -> 26.1.2."""
+    m = re.match(r"21\.(\d+)\.(\d+)$", v)
+    if m:
+        n = int(m.group(1))
+        return ("1.21" if n == 0 else f"1.21.{n}"), int(m.group(2))
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)\.(\d+)$", v)
+    if m and int(m.group(1)) >= 26:
+        a, b, c = m.group(1), m.group(2), int(m.group(3))
+        return (f"{a}.{b}" if c == 0 else f"{a}.{b}.{c}"), int(m.group(4))
+    return None
+
+
+def neo_of(mc, build):
+    """The NeoForge version string for a Minecraft version and build: the inverse of neo_line."""
+    p = mc.split(".")
+    if p[0] == "1":
+        return f"21.{p[2] if len(p) > 2 else 0}.{build}"
+    return f"{p[0]}.{p[1]}.{p[2] if len(p) > 2 else 0}.{build}"
+
+
+def newest_stable(xml):
+    """{Minecraft version: newest stable NeoForge version string} from maven-metadata.xml."""
     newest = {}
     for v in re.findall(r"<version>([^<]+)</version>", xml):
-        m = re.match(r"21\.(\d+)\.(\d+)$", v)
-        if m:
-            newest[int(m.group(1))] = max(newest.get(int(m.group(1)), 0), int(m.group(2)))
+        nl = neo_line(v)
+        if nl:
+            newest[nl[0]] = max(newest.get(nl[0], 0), nl[1])
+    return {mc: neo_of(mc, b) for mc, b in newest.items()}
+
+
+def refresh_versions():
+    """Newest stable (non-beta) NeoForge per line (1.21.x and 26.x), from the NeoForge maven."""
+    url = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+    newest = newest_stable(urllib.request.urlopen(url, timeout=30).read().decode("utf-8"))
+    known = {l["mc"] for l in versions()["lines"]}
     for l in versions()["lines"]:
-        n = int(l["mc"].split(".")[2]) if l["mc"].count(".") == 2 else 0
         print(f"{l['mc']:8} recorded {l['neo'] or '-':10} newest stable on maven: "
-              f"{'21.%d.%d' % (n, newest[n]) if n in newest else 'none (beta only)'}"
+              f"{newest.get(l['mc'], 'none (beta only)')}"
               + (f"   skipped: {l['skip']}" if l.get("skip") else ""))
+    for mc in sorted(set(newest) - known, key=mc_key):
+        if mc_key(mc) > mc_key(versions()["base"]):
+            print(f"{mc:8} NOT IN versions.json: newest stable on maven {newest[mc]} -- add a line for it")
 
 
 def init(repo, mv_pkg=None):
@@ -190,10 +225,27 @@ def init(repo, mv_pkg=None):
 
 
 def ranges(target, neo):
+    """(minecraft, neoforge) mods.toml version ranges for a target: one NeoForge line each.
+    1.21.N: [1.21.N,1.21.N+1) and [21.N,21.N+1). 26.x: every Minecraft release is its own NeoForge line (26.1, 26.1.1
+    and 26.1.2 are three; NeoForge 26.2.0.B builds 26.2), so both ranges stop at the next patch release:
+    [26.2,26.2.1) and [26.1.2,26.1.3), the same interval for NeoForge since its version starts with the Minecraft one
+    (26.2.0.90 is in [26.2,26.2.1)). The NeoForge MDK pins the Minecraft version exactly ([26.2]); a half-open range
+    to the next patch admits the same releases."""
     parts = [int(x) for x in target.split(".")]
+    if parts[0] >= 26:
+        nxt = ".".join(map(str, parts[:2] + [parts[2] + 1 if len(parts) > 2 else 1]))
+        return f"[{target},{nxt})", f"[{target},{nxt})"
     nxt = ".".join(map(str, parts[:-1] + [parts[-1] + 1])) if len(parts) == 3 else f"{target}.1"
     major, minor = neo.split(".")[:2]
     return f"[{target},{nxt})", f"[{major}.{minor},{major}.{int(minor) + 1})"
+
+
+def substitute_line(s):
+    """`group:name=group:name:version` as a target.properties line. The key's ':' is escaped: java.util.Properties
+    (layer.gradle reads the file with it) ends a key at the first unescaped ':' as well as '=', so an unescaped
+    `substitute.a:b=a:c:1` would load as key `substitute.a`."""
+    k, _, v = s.partition("=")
+    return f"{k.replace(':', chr(92) + ':')}={v}"
 
 
 def mc_key(v):
@@ -213,6 +265,10 @@ def add_target(repo, a):
     a.java = a.java or ln.get("java", 21)
     if ln.get("geckolib") and "geckolib_version" in gradle_props(repo) and not any(p.startswith("geckolib_version=") for p in a.prop):
         a.prop = [*a.prop, f"geckolib_version={ln['geckolib']}"]
+        old = f"software.bernie.geckolib:geckolib-neoforge-{a.target}"
+        if ln.get("geckolib_group") and not any(s.startswith(old + "=") for s in a.substitute):
+            # GeckoLib 5.5+ publishes under a new group; the authors' build names the old one
+            a.substitute = [*a.substitute, f"{old}={ln['geckolib_group']}:geckolib-neoforge-{a.target}:{ln['geckolib']}"]
     if a.inherits is None and not getattr(a, "direct", False):      # the nearest lower target the fork already has
         have = {p.name for p in (mv / "targets").iterdir() if p.is_dir()}
         order = [l["mc"] for l in versions()["lines"]]
@@ -225,11 +281,13 @@ def add_target(repo, a):
              f"prop.neo_version={a.neo}"]
     lines += [f"prop.{p}" for p in a.prop]
     lines += [f"toml.minecraft={mc_range}", f"toml.neoforge={neo_range}", f"java_version={a.java}"]
+    if ln.get("nfrt"):                # a NeoForm runtime newer than the authors' ModDevGradle brings (layer.gradle)
+        lines.append(f"nfrt_version={ln['nfrt']}")
     if a.inherits:
         lines.append(f"inherits={a.inherits}")
     if getattr(a, "direct", False):     # a jump: still pull the shared library of every targeted version in between
         lines.append("shared_chain=" + ",".join(direct_chain(a.target)))
-    lines += [f"substitute.{s}" for s in a.substitute]
+    lines += [f"substitute.{substitute_line(s)}" for s in a.substitute]
     if mc_key(a.target) >= mc_key("1.21.6"):   # CATALOG V79: @OnlyIn strips nothing from 1.21.6 and fails a dev run
         lines.append("strip_onlyin=true")
     (t / "target.properties").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -301,8 +359,72 @@ def self_check():
             ok = False; print("FAIL --direct did not install the intermediate shared libraries")
         if direct_chain("1.21.5") != ["1.21.3", "1.21.4", "1.21.5"]:
             ok = False; print("FAIL direct_chain skips beta-only lines and stops at the target")
+    ok = self_check_26x() and ok
     print("self-check:", "OK" if ok else "FAILED")
     return 0 if ok else 1
+
+
+def props_key(line):
+    """The key java.util.Properties reads from one line: up to the first unescaped '=' or ':' (escapes removed)."""
+    out, i = [], 0
+    while i < len(line) and line[i] not in "=:":
+        if line[i] == "\\" and i + 1 < len(line):
+            i += 1
+        out.append(line[i]); i += 1
+    return "".join(out)
+
+
+def self_check_26x():
+    """The 26.x calendar line: numbering, ranges, the maven parse, and add-target's defaults (Java 25, the inherits
+    chain 1.21.11 -> 26.1.2 -> 26.2 -> 26.3, GeckoLib's new Maven group as an escaped substitution)."""
+    ok = True
+    def expect(c, msg):
+        nonlocal ok
+        if not c:
+            ok = False; print("FAIL", msg)
+    expect(ranges("26.2", "26.2.0.90") == ("[26.2,26.2.1)", "[26.2,26.2.1)"), f"26.2 ranges {ranges('26.2', '26.2.0.90')}")
+    expect(ranges("26.1.2", "26.1.2.116") == ("[26.1.2,26.1.3)", "[26.1.2,26.1.3)"), "26.1.2 ranges")
+    expect(ranges("1.21.11", "21.11.45") == ("[1.21.11,1.21.12)", "[21.11,21.12)"), "1.21.11 ranges unchanged")
+    expect(sorted(["26.1.2", "1.21.11", "26.3", "26.2", "1.21.8"], key=mc_key) == ["1.21.8", "1.21.11", "26.1.2", "26.2", "26.3"],
+           "26.x sorts after 1.21.11, 26.1.2 before 26.2")
+    expect([neo_line(v) for v in ("21.4.158", "26.2.0.90", "26.1.2.116", "26.1.0.19-beta", "21.6.0-beta", "20.4.1")]
+           == [("1.21.4", 158), ("26.2", 90), ("26.1.2", 116), None, None, None], "neo_line")
+    xml = "".join(f"<version>{v}</version>" for v in ("21.11.44", "21.11.45", "26.1.0.19-beta", "26.1.1.15-beta",
+                                                       "26.1.2.9", "26.1.2.116", "26.2.0.90", "26.3.0.69-beta", "26.3.0.76"))
+    expect(newest_stable(xml) == {"1.21.11": "21.11.45", "26.1.2": "26.1.2.116", "26.2": "26.2.0.90", "26.3": "26.3.0.76"},
+           f"newest_stable: {newest_stable(xml)}")
+    expect(neo_of("1.21.4", 158) == "21.4.158" and neo_of("26.2", 90) == "26.2.0.90", "neo_of")
+    expect(props_key(substitute_line("a.b:c-26.2=x.y:c-26.2:5")) == "a.b:c-26.2", "an escaped substitute key loads whole")
+    expect(props_key("substitute.a.b:c=x") == "substitute.a.b", "control: an unescaped one is cut at the ':'")
+    expect(direct_chain("26.3")[-3:] == ["26.1.2", "26.2", "26.3"] and "26.1" not in direct_chain("26.3"), "direct_chain to 26.3")
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d)
+        (repo / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.1\ngeckolib_version=4.8.4\n",
+                                                encoding="utf-8")
+        (repo / "build.gradle").write_text("plugins {}\n", encoding="utf-8")
+        init(repo)
+        ns = lambda t: argparse.Namespace(target=t, neo=None, inherits=None, java=None, prop=[], substitute=[])
+        for t in ("1.21.11", "26.1.2", "26.2", "26.3"):
+            add_target(repo, ns(t))
+        props = {t: (repo / f".multiversion/targets/{t}/target.properties").read_text(encoding="utf-8")
+                 for t in ("1.21.11", "26.1.2", "26.2", "26.3")}
+        expect("java_version=21" in props["1.21.11"] and "substitute." not in props["1.21.11"] and "nfrt" not in props["1.21.11"]
+               and "prop.geckolib_version=5.4.5" in props["1.21.11"], "1.21.11 keeps Java 21, no substitution")
+        for t, inh, neo, gl in (("26.1.2", "1.21.11", "26.1.2.116", "5.5.2"), ("26.2", "26.1.2", "26.2.0.90", "5.5.6"),
+                                ("26.3", "26.2", "26.3.0.76", "5.5.7")):
+            p = props[t]
+            expect(f"inherits={inh}\n" in p and "java_version=25" in p and f"prop.neo_version={neo}" in p
+                   and f"prop.geckolib_version={gl}" in p and "strip_onlyin=true" in p, f"{t} defaults: {p}")
+            sub = f"substitute.software.bernie.geckolib\\:geckolib-neoforge-{t}=com.geckolib:geckolib-neoforge-{t}:{gl}\n"
+            expect(sub in p, f"{t} GeckoLib group substitution: {p}")
+            expect(("nfrt_version=2.0.31\n" in p) == (t != "26.1.2"), f"{t} nfrt_version from versions.json: {p}")
+        expect("toml.minecraft=[26.2,26.2.1)" in props["26.2"] and "toml.neoforge=[26.2,26.2.1)" in props["26.2"], "26.2 toml")
+        try:
+            add_target(repo, ns("26.1.1"))
+            expect(False, "a beta-only 26.x line was accepted")
+        except SystemExit as e:
+            expect("beta" in str(e), f"wrong refusal: {e}")
+    return ok
 
 
 def main():
