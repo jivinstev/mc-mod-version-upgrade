@@ -20,7 +20,8 @@ Stages, each logged as one line and skipped with a reason when it does not apply
            rename table. Generated per fork per target from Mojang's data, so not a map anyone commits upstream.
   measure  compile every source set (srcsets.compile_tasks); burndown-count.sh decides whether it is a count
   loop     file-loop.py --layer <t> --budget N (its kept rows land in the target's renames.tsv)
-  audit    audit-mixin-targets.py against the target's sources jar and prepared tree (only at 0 errors)
+  audit    audit-mixin-targets.py against the target's sources jar and prepared tree, then audit-event-listeners.py (abstract
+           events) over every prepared tree against the target's resolved classpath (only at 0 errors)
   gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases
   cost     port-cost.py --target <t> --since <start of this port> appended to targets/<t>/COST.md
 
@@ -32,7 +33,7 @@ Whoever picks it up fixes what RESIDUE.md lists, and puts each fix in the shared
 (templates/fork-layer/shared/<t>) or a converter -- not in one fork.
 
 Exit codes: 0 done; 10 stopped before/in the compile (stage, moves, measure, loop); 11 Gate A/B (or the author's
-build) red; 12 Gate C red; 13 mixin audit; 2 bad input. Standard library only.
+build) red; 12 Gate C red; 13 mixin / event-listener audit; 2 bad input. Standard library only.
 """
 import argparse, datetime, importlib.util, json, pathlib, re, shutil, subprocess, sys, tempfile
 
@@ -478,7 +479,10 @@ class Run:
                      f"--sources={prepared}"])
         lines = (r.stdout or "").strip().splitlines()
         if r.returncode == 0:
-            return {"done": (lines[-1] if lines else "all targets match")[:160]}
+            ev = self.audit_event_listeners()
+            if ev.get("stop"):
+                return ev
+            return {"done": ((lines[-1] if lines else "all targets match")[:120] + "; " + ev["done"])[:200]}
         if r.returncode == 2 or any("NO TARGETS CHECKED" in l for l in lines):
             # the audit looked at nothing: a scope fault in this run, never a verdict on the mixins (§X27)
             return {"stop": "the mixin audit checked no targets (wrong jar or tree?) -- not a pass",
@@ -491,6 +495,50 @@ class Run:
                 "code": 13, "audit": bad, "detail": bad[:6],
                 "choices": ["retarget each mixin in a per-target overlay or with mixin_add (fork-versions step 5)",
                             "a recurring shape belongs in the shared library"]}
+
+    def target_classpath(self):
+        """Gradle's own resolved compile classpath for this layer target (tools/qtc-init.gradle, passing the layer's
+        -P args through .multiversion/build.sh), cached under the run's work dir. Never rebuilt by hand (X25b-ii)."""
+        cp = self.work / f"qtc-classpath-{self.t}.txt"
+        self.work.mkdir(parents=True, exist_ok=True)
+        r = self.sh([BASH, str(self.mv / "build.sh"), self.t, "-I", str(ROOT / "tools/qtc-init.gradle"),
+                     "-I", str(ROOT / "tools/central-mirror.init.gradle"), "-q", "qtcClasspath", "--console=plain"])
+        m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout or "", re.S)
+        jars = [l.strip() for l in m.group(1).splitlines() if l.strip()] if m else []
+        if not jars:
+            return None, "could not resolve the %s classpath: %s" % (self.t, (r.stdout or "")[-300:])
+        gone = [j for j in jars if not pathlib.Path(j).exists()]
+        if gone:
+            return None, "the %s classpath names %d file(s) that do not exist, e.g. %s" % (self.t, len(gone), gone[0])
+        cp.write_text("\n".join(jars) + "\n", encoding="utf-8")
+        return cp, ""
+
+    def audit_event_listeners(self):
+        """audit-event-listeners.py (CATALOG X33/X42) over every prepared tree of the target, against its own classpath:
+        a listener naming an ABSTRACT event compiles everywhere and kills mod loading (measured on 1.21.8)."""
+        trees = sorted(str(p) for p in (self.repo / "build" / f"mc{self.t}" / "mv").glob("*java") if p.is_dir())
+        if not trees:
+            return {"stop": "no prepared tree to audit event listeners in", "code": 13,
+                    "choices": ["build the target once so build/mc<t>/mv exists"]}
+        cp, why = self.target_classpath()
+        if cp is None:
+            return {"stop": "event-listener audit: " + why, "code": 13, "detail": [why],
+                    "choices": ["fix the classpath resolution; this audit refuses to run on a guessed one"]}
+        r = self.sh([self.py, str(ROOT / "tools/audit-event-listeners.py"), str(self.repo), f"--cp-file={cp}",
+                     f"--tree={','.join(trees)}", f"--mc={self.t}"])
+        lines = (r.stdout or "").strip().splitlines()
+        if r.returncode == 0:
+            return {"done": (lines[0] if lines else "event listeners ok")[:100]}
+        if r.returncode == 2:
+            return {"stop": "the event-listener audit checked no listeners (wrong tree or classpath?) -- not a pass",
+                    "code": 13, "audit": lines[:8], "detail": lines[:4],
+                    "choices": ["fix the audit's inputs in tools/fork-port.py and resume with --from-stage audit"]}
+        bad = [l for l in lines if l.strip() and not l.startswith("checked ")]
+        return {"stop": f"{sum('ABSTRACT' in l for l in bad)} event listener(s) name an abstract event "
+                        f"(the bus refuses them at load)",
+                "code": 13, "audit": bad, "detail": bad[:6],
+                "choices": ["port each listener to a concrete subclass of the event in a per-target overlay "
+                            "(CATALOG X33: check the subclass still carries what the listener uses)"]}
 
     def modid(self):
         if self.a.modid:

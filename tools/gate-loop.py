@@ -307,6 +307,18 @@ HARNESS = re.compile(r"(BootSmokeTest|RecipeProbe|GameTestRegistrar)")
 EXC_HEAD = re.compile(r"^(?:Caused by: )?((?:[a-z_]\w*\.)+[A-Z]\w*(?:Exception|Error|Throwable))\b(:.*)?$")
 
 
+# Causes logged by the sandbox having no network, not by the mod: authlib's public-key fetch and session checks.
+# They are logged AND survived (the game goes on offline), and as the last `Caused by:` in a log they were chosen
+# as THE cause of a failure that was really an abstract-event listener (measured, 1.21.8 Gate C launch).
+OFFLINE_NOISE = re.compile(r"(?:UnknownHostException|ConnectException|SocketTimeoutException|NoRouteToHostException|"
+                           r"SSLHandshakeException)\b[^\n]*?(?:minecraftservices\.com|mojang\.com|minecraft\.net|"
+                           r"sessionserver|authserver|\bapi\.|\bsession\.)")
+
+
+def is_noise(line):
+    return bool(OFFLINE_NOISE.search(line))
+
+
 def mod_packages(work):
     """The Java packages of the mod's @Mod classes: whose frames make a logged exception this mod's own."""
     out = set()
@@ -405,12 +417,20 @@ def failure_of(text, client=False, ns=None, work=None):
         body += [f"  {n}x like: {next(l for k2, l in bad if k2 == k)}" for k, n in kinds.most_common(8)]
         return "data", "\n".join(body), f"data:{len(bad)}:{kinds.most_common(1)[0][0][:120]}"
     for i, l in enumerate(lines):
-        if l.startswith("Caused by:"):   # the deepest cause is the last top-level one
+        if l.startswith("Caused by:") and not is_noise(l):   # the deepest cause is the last top-level one
             last = i
     if "last" in locals():
         frames = [x.strip() for x in lines[last + 1:last + 60] if MOD_FRAME.match(x)][:8]
         cause = lines[last]
         return "crash", "\n".join([cause] + frames), cause[:200]
+    # a mod-loading failure FML reports in its crash report, not as a `Caused by:` ("Failure message:" then the
+    # exception on the next line, e.g. a clientbound payload with no client handler): it IS the stop reason, and
+    # an unrelated logged exception from a later reload listener must not stand in for it
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip().startswith("Failure message:") and i + 1 < len(lines) and TOP_EXC.search(lines[i + 1]) \
+                and not is_noise(lines[i + 1]):
+            cause = lines[i + 1].strip()
+            return "crash", "\n".join([cause[:400]]), cause[:200]
     # the NAMED lines first: "<test> failed at <pos>! <why>", the per-test summary "   - <id>: <why>" and a
     # harness's own "_BASELINE ... FAILED" lines. Measured: matching only "N required tests failed" handed a
     # worker that one line and nothing about which test or why.
@@ -427,7 +447,7 @@ def failure_of(text, client=False, ns=None, work=None):
     # the LAST one: a game log carries many harmless logged exceptions before the one that stopped it
     for i in range(len(lines) - 1, -1, -1):
         l = lines[i]
-        if TOP_EXC.search(l) and not l.lstrip().startswith("at "):
+        if TOP_EXC.search(l) and not l.lstrip().startswith("at ") and not is_noise(l):
             frames = [x.strip() for x in lines[i + 1:i + 80] if MOD_FRAME.match(x)][:8]
             return "crash", "\n".join([l.strip()[:400]] + frames), TOP_EXC.search(l).group(0)[:200]
     return "unknown", "\n".join(lines[-40:]), lines[-1][:200] if lines else ""
@@ -589,6 +609,18 @@ def self_check():
     k4, t4, s4 = failure_of("[main/ERROR]: oops\njava.lang.IllegalStateException: Registry is already frozen (trying to add key x)\n"
                             "\tat net.minecraft.core.MappedRegistry.validateWrite(MappedRegistry.java:1)\n\tat a.b.Stats.init(Stats.java:9)\n")
     ok = ok and k4 == "crash" and "already frozen" in t4 and "a.b.Stats.init" in t4
+    # the offline sandbox's authlib noise logged AFTER the real cause must not become "the" cause (1.21.8 Gate C)
+    real = "Caused by: java.lang.IllegalArgumentException: Cannot register listeners for abstract class a.b.E.\n\tat a.b.Mod.<init>(Mod.java:9)\n"
+    noisy = real + ("com.mojang.authlib.exceptions.MinecraftClientException: Failed to read from https://api.minecraftservices.com/publickeys\n"
+                    "Caused by: java.net.UnknownHostException: api.minecraftservices.com\n\tat java.base/java.net.X.y(X.java:1)\n")
+    for cl in (True, False):
+        kn, tn, _sn = failure_of(noisy, client=cl)
+        ok &= kn == "crash" and "abstract class" in tn and "UnknownHost" not in tn
+    kf, tf, _sf = failure_of("Failure message: An uncaught parallel processing error has occurred.\n\tjava.lang.IllegalStateException: Some clientbound payloads are missing client-side handlers: [m:p]\n"
+                             "[x] [Render thread/ERROR] [m/Reloader]: shader registration failed\njava.util.NoSuchElementException: No value present\n", client=True)
+    ok &= kf == "crash" and "missing client-side handlers" in tf
+    kn, tn, _sn = failure_of("Caused by: java.net.UnknownHostException: db.example.org\n", client=False)
+    ok &= kn == "crash" and "db.example.org" in tn          # a real network failure of the mod is not hidden
     green = "All 6 required tests passed :)\n"
     bad = green + ("[ERROR] Couldn't parse data file 'mymod:cooking/a' from 'x': DataResult.Error['Item mymod:b does not have components yet']\n"
                    "[ERROR] Couldn't parse data file 'mymod:cooking/c' from 'x': DataResult.Error['Item mymod:d does not have components yet']\n"

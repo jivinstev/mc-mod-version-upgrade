@@ -380,6 +380,49 @@ PY
 grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
   || bad "port_gates check: $out"
 
+echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, layer mode"
+if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+  E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \
+    "$E/src/net/neoforged/neoforge/client/event" "$E/tree/a/b" "$E/classes"
+  echo 'package net.minecraft.world.item; public class Item {}' > "$E/src/net/minecraft/world/item/Item.java"
+  echo 'package net.neoforged.neoforge.common; public class NeoForge {}' > "$E/src/net/neoforged/neoforge/common/NeoForge.java"
+  echo 'package net.neoforged.bus.api; public @interface SubscribeEvent {}' > "$E/src/net/neoforged/bus/api/SubscribeEvent.java"
+  cat > "$E/src/net/neoforged/neoforge/client/event/Stage.java" <<'J'
+package net.neoforged.neoforge.client.event;
+public abstract class Stage { public static class After extends Stage {} }
+J
+  (cd "$E" && javac -d classes $(find src -name '*.java') && jar cf fake.jar -C classes .) >/dev/null 2>&1
+  echo "$E/fake.jar" > "$E/cp.txt"
+  cat > "$E/tree/a/b/Hook.java" <<'J'
+package a.b;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.client.event.Stage;
+public class Hook {
+    @SubscribeEvent
+    public static void onStage(Stage event) { if (!(event instanceof Stage.After)) return; }
+    static void init(Object bus) { bus.addListener(Hook::viaRef); }
+    private static void viaRef(Stage event) { }
+}
+J
+  out="$(python3 tools/audit-event-listeners.py "$E" --cp-file="$E/cp.txt" --tree="$E/tree" 2>&1)"; rc=$?
+  [ "$rc" = 1 ] && [ "$(grep -c 'is ABSTRACT' <<<"$out")" = 2 ] \
+    && ok "audit-event-listeners: the abstract parameter is reported for the annotated listener AND the Cls::method one" \
+    || bad "audit-event-listeners did not report both abstract listeners (rc=$rc): $out"
+  sed -i 's/Stage event) { if (!(event instanceof Stage.After)) return; }/Stage.After event) { }/; s/viaRef(Stage event)/viaRef(Stage.After event)/' "$E/tree/a/b/Hook.java"
+  out="$(python3 tools/audit-event-listeners.py "$E" --cp-file="$E/cp.txt" --tree="$E/tree" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && grep -q 'checked 2 event listener' <<<"$out" \
+    && ok "audit-event-listeners: naming the concrete subclass passes, with the listener count printed" \
+    || bad "audit-event-listeners failed the fixed listeners (rc=$rc): $out"
+  echo 'package a.b; public class Empty {}' > "$E/tree/a/b/Hook.java"
+  python3 tools/audit-event-listeners.py "$E" --cp-file="$E/cp.txt" --tree="$E/tree" >/dev/null 2>&1; rc=$?
+  [ "$rc" = 2 ] && ok "audit-event-listeners: zero listeners checked exits 2, never a pass" \
+    || bad "audit-event-listeners zero-listener exit was $rc, expected 2"
+else
+  echo "  SKIP  audit-event-listeners (no javac/jar)"
+fi
+out="$(python3 tools/gate-loop.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause" || bad "gate-loop self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
