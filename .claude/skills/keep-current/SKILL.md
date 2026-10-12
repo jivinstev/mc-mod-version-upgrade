@@ -159,19 +159,20 @@ directory is not there when it fires: put the fleet JSON in the routine's prompt
 in its repository scope and the build hosts in its allowed domains (`cloud/allowed-domains.txt`). Cheap nights
 matter: step 1 exits with no model work.
 
-**A routine session starts with no repositories, and its remote tools may still be connecting.** A fired session
-attaches the forks itself with `add_repo` (push for the forks, read for this repository). Measured on a real nightly
-run: the session searched for `add_repo` 8 s after it started, found nothing, and stopped -- while its own tool list
-held `add_repo` by then. "The tool is not loaded yet" is not "the attach was refused". So the routine's prompt must
-say, in these words or stronger:
+**A routine session cannot add repositories: they must be configured ON THE ROUTINE.** Measured twice: a fired
+routine session searched for `add_repo` at 8 s, and in a second run polled for it for over 3 minutes -- it never
+appears in a routine session, while the routine's own config showed `sources: []`. The tool that creates a routine
+from a session (`create_trigger`) has no way to set its repositories, so:
 
-- **Attach preflight.** Search for `add_repo` (`ToolSearch`); if it is not found, search again every 15 s for up to
-  3 minutes before deciding it is missing. Then attach each repository. Report the two failures differently: "the
-  tool never appeared" (an environment problem) versus "attach refused: <the tool's own reason>" (access).
-- **Step 1 needs no attach.** The "anything new?" check only reads: fetch public repositories over plain HTTPS (the
-  session's git proxy serves public reads) and compare. A night with nothing new ends there, attached or not.
+- **The user adds the repositories to the routine** in the claude.ai Routines page (edit the routine, select the
+  forks and this repository). Say exactly which ones in one line; it takes them a minute. Until then the routine
+  cannot work, however its prompt is written.
+- **The prompt checks, it does not wait.** It looks for the clones it expects; if one is missing, it still does step
+  1, then stops and names the missing repository and where to add it. It never polls for `add_repo`.
+- **Step 1 needs no repository.** The "anything new?" check only reads: `git ls-remote` the public repositories over
+  HTTPS (the session's git proxy serves public reads). A night with nothing new ends there either way.
 - **After creating or editing the routine, fire it once** (`fire_trigger`) and read the run's first events: it must
-  get past the attach step. A routine that has never fired cleanly is not set up.
+  find its repositories. A routine that has never fired cleanly is not set up.
 
 **A time like "2am" means the user's local time, and a cloud session runs in UTC.** Do not ask for the zone;
 read it from git. The user's own commits keep the offset of the machine they were made on, while commits made in
