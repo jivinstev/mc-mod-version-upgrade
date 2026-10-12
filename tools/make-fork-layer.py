@@ -171,6 +171,10 @@ def ranges(target, neo):
     return f"[{target},{nxt})", f"[{major}.{minor},{major}.{int(minor) + 1})"
 
 
+def mc_key(v):
+    return tuple(int(x) for x in v.split(".") if x.isdigit())
+
+
 def add_target(repo, a):
     mv = repo / ".multiversion"
     if not (mv / "base.properties").exists():
@@ -199,6 +203,8 @@ def add_target(repo, a):
     if a.inherits:
         lines.append(f"inherits={a.inherits}")
     lines += [f"substitute.{s}" for s in a.substitute]
+    if mc_key(a.target) >= mc_key("1.21.6"):   # CATALOG V79: @OnlyIn strips nothing from 1.21.6 and fails a dev run
+        lines.append("strip_onlyin=true")
     (t / "target.properties").write_text("\n".join(lines) + "\n", encoding="utf-8")
     if not (t / "renames.tsv").exists():
         (t / "renames.tsv").write_text(f"# {a.target}: from<TAB>to (plain type, member:, re:) -- see prepare-sources.py\n",

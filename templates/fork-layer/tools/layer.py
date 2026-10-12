@@ -15,7 +15,7 @@
         CI builds the base jar with and without the hook line and compares them: the layer must be inert.
   layer.py --self-check
 """
-import argparse, hashlib, os, pathlib, shutil, subprocess, sys, tempfile, zipfile
+import re, argparse, hashlib, os, pathlib, shutil, subprocess, sys, tempfile, zipfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 MV = HERE.parent
@@ -102,7 +102,27 @@ def cmd_prepare(a):
         rc = subprocess.call(args)
         if rc == 0 and a.set == "main":
             add_shared_helpers(names, out)
+        if rc == 0 and load_props(MV / "targets" / a.target / "target.properties").get("strip_onlyin") == "true":
+            strip_onlyin(out)
         return rc
+
+
+ONLYIN = re.compile(r"\n[ \t]*@OnlyIn\([^)]*\)[ \t]*")
+
+
+def strip_onlyin(out):
+    """CATALOG V79: from 1.21.6 (as on 26.x) @OnlyIn strips nothing, and in a DEV run any @OnlyIn in the mod is a
+    mod-loading error. A rename row cannot reach an overlay, so a target with `strip_onlyin=true` has the annotation
+    removed from its whole PREPARED tree -- the authors' files and every overlay the chain merged in. Earlier targets,
+    where @OnlyIn still strips client classes on a server, keep it."""
+    n = 0
+    for f in pathlib.Path(out).rglob("*.java"):
+        t = f.read_text(encoding="utf-8")
+        new, k = ONLYIN.subn("", t)
+        if k:
+            f.write_text(new, encoding="utf-8"); n += k
+    if n:
+        print(f"layer: stripped {n} @OnlyIn (strip_onlyin=true)")
 
 
 def add_shared_helpers(names, out):
@@ -233,6 +253,13 @@ def self_check():
         with zipfile.ZipFile(b, "a") as z:
             z.writestr("c.txt", "y")
         expect(jar_digest(a) != jar_digest(b), "extra entry seen")
+    with tempfile.TemporaryDirectory() as d:   # strip_onlyin: one-line and multi-line forms, nothing else touched
+        f = pathlib.Path(d) / "A.java"
+        f.write_text("package a;\n@OnlyIn(Dist.CLIENT)\nclass A {\n    @OnlyIn(\n        value = Dist.CLIENT,\n"
+                     "        _interface = X.class\n    )\n    void m() {}\n    String s = \"@OnlyIn\";\n}\n", encoding="utf-8")
+        strip_onlyin(d)
+        t = f.read_text(encoding="utf-8")
+        expect("@OnlyIn(" not in t and 'String s = "@OnlyIn";' in t and "void m() {}" in t, "strip_onlyin")
     print("self-check:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

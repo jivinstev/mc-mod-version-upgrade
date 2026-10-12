@@ -24,3 +24,4 @@ re:(@Inject\(method = "readAdditionalSaveData"[\s\S]{0,300}?private void [\w$]+\
 # ServerCommonPacketListenerImpl.send(Packet, PacketSendListener) takes a netty ChannelFutureListener (1.21.6)
 re:(\bsend\(Lnet/minecraft/network/protocol/Packet;)Lnet/minecraft/network/PacketSendListener;\)V	\1Lio/netty/channel/ChannelFutureListener;)V
 re:(\bPacket<\?> \w+, )PacketSendListener (\w+)(, CallbackInfo)	\1io.netty.channel.ChannelFutureListener \2\3
+
