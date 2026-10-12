@@ -19,7 +19,7 @@ The harness is generated OUTSIDE the author's tree (--work-dir, default a temp d
 --init-script, exactly as during the port. The summary (markdown) lists what ran and what passed, and is
 what the release notes quote. Standard library only.
 """
-import argparse, shutil, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, types, zipfile
+import argparse, atexit, shutil, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, types, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -163,7 +163,8 @@ def main():
     ap.add_argument("--shipped-jar", help="glob (under the build's libs dir) naming the jar a player installs; default: "
                                           ".multiversion/shipped-jar.txt, else the only jar there")
     ap.add_argument("--mc", help="a Minecraft target of the fork's multi-version layer (.multiversion/targets/<mc>); "
-                                 "every Gradle call of the run then builds that target")
+                                 "every Gradle call of the run then builds that target (and takes build/.fork-port.lock: "
+                                 "a second run on the same checkout is refused, exit 14)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
     if a.mc:
@@ -171,6 +172,14 @@ def main():
         if not (repo / ".multiversion/targets" / a.mc).is_dir() or not layer.is_file():
             print(f"[ci-gates] --mc {a.mc}: no .multiversion/targets/{a.mc} in {repo}", flush=True)
             return 2
+        # one gate run per checkout (CATALOG X44), only on a layer target: a single-version fork never takes the lock.
+        # tools/fork-port.py holds it for its whole run and its gates stage reaches here as a child (let through).
+        lock = _load("layer_ci", "layer-ci.py").CheckoutLock(repo, "ci-gates.py", a.mc)
+        busy = lock.acquire()
+        if busy:
+            print(f"[ci-gates] {busy}", flush=True)
+            return 14
+        atexit.register(lock.release)
         props = subprocess.run([sys.executable, str(layer), "props", "--target", a.mc], capture_output=True,
                                text=True, encoding="utf-8", check=True).stdout
         os.environ["PORT_GRADLE_ARGS"] = props

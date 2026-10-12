@@ -698,6 +698,34 @@ def trim_round(plan, left):
 PRIOR_USD = {"haiku": 0.05, "sonnet": 0.08, "opus": 0.40}
 
 
+def rows_first(work, clog, heap, note, run_rule, rnd, results, n, pre_created):
+    """Layer mode, before a worker's overlay edits are kept: a worker that proposed a row gets it tried while the
+    files it would touch are still shared text (a row never reaches an overlay, CATALOG W8), against the count
+    the round started at. Then the overlays are put back and the ones the row made unnecessary are dropped."""
+    new = {ov: pathlib.Path(ov).read_text(encoding="utf-8", errors="replace") for ov in LAYER["created"]
+           if ov not in pre_created and pathlib.Path(ov).exists()}
+    for ov in new:
+        pathlib.Path(ov).unlink()
+    cur, kept_any = n, False
+    for res in results:
+        if res["rule"] and cur:
+            c2, _e = run_rule(rnd, res["rule"], cur, [])
+            kept_any = kept_any or (c2 is not None and c2 < cur)
+            cur = c2 if c2 is not None else cur
+    for ov, text in new.items():
+        # a row that tied the count may have dropped a sibling overlay and removed its now-empty directory
+        pathlib.Path(ov).parent.mkdir(parents=True, exist_ok=True)
+        pathlib.Path(ov).write_text(text, encoding="utf-8")
+    if not kept_any or not new:
+        return cur
+    c, _e = compile_(work, clog, heap)
+    dropped, c2 = layer_drop_unneeded(work, clog, heap, c, candidates=set(new))
+    if dropped:
+        note(event="rows-first-dropped-overlays", round=rnd, overlays=[os.path.relpath(x, work) for x in dropped])
+        return c2
+    return c if c is not None else cur
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--work", help="the Gradle project (src/main/java is edited in place)")
@@ -784,31 +812,6 @@ def main():
              why=str(why), errors=n)
         return n, errs
 
-    def rows_first(rnd, results, n, pre_created):
-        """Layer mode, before a worker's overlay edits are kept: a worker that proposed a row gets it tried while the
-        files it would touch are still shared text (a row never reaches an overlay, CATALOG W8), against the count
-        the round started at. Then the overlays are put back and the ones the row made unnecessary are dropped."""
-        new = {ov: pathlib.Path(ov).read_text(encoding="utf-8", errors="replace") for ov in LAYER["created"]
-               if ov not in pre_created and pathlib.Path(ov).exists()}
-        for ov in new:
-            pathlib.Path(ov).unlink()
-        cur, kept_any = n, False
-        for res in results:
-            if res["rule"] and cur:
-                c2, _e = run_rule(rnd, res["rule"], cur, [])
-                kept_any = kept_any or (c2 is not None and c2 < cur)
-                cur = c2 if c2 is not None else cur
-        for ov, text in new.items():
-            pathlib.Path(ov).write_text(text, encoding="utf-8")
-        if not kept_any or not new:
-            return cur
-        c, _e = compile_(work, clog, a.heap)
-        dropped, c2 = layer_drop_unneeded(work, clog, a.heap, c, candidates=set(new))
-        if dropped:
-            note(event="rows-first-dropped-overlays", round=rnd, overlays=[os.path.relpath(x, work) for x in dropped])
-            return c2
-        return c if c is not None else cur
-
     def fix_errors(n, errs):
         """Compile rounds until 0, the budget, the last tier, or a plateau."""
         tier_of = state["tier_of"]
@@ -893,7 +896,7 @@ def main():
                 state["spent"] += res["usd"]; note(event="worker", round=rnd, **res)
                 c_ = state["cost_of"].setdefault(res.get("model") or "?", [0, 0.0]); c_[0] += 1; c_[1] += res["usd"] or 0
             if LAYER and n and any(res["rule"] for res in results):
-                n = rows_first(rnd, results, start_n, pre_created)
+                n = rows_first(work, clog, a.heap, note, run_rule, rnd, results, start_n, pre_created)
             before = start_n
             n, errs = compile_(work, clog, a.heap)
             if n is None and any("PARSE ABORT" in l for l in errs):
@@ -1004,6 +1007,102 @@ def main():
     note(event="end", errors=n, spent=round(spent, 4), stubs=len(stubs),
          by_model={k: [v[0], round(v[1], 4)] for k, v in by_model.items()})
     return 0 if n == 0 else 1
+
+
+def self_check_rows_first():
+    """rows_first (layer mode): a worker's proposed row is tried with the files it would touch still shared text, an
+    overlay the row makes unnecessary is dropped, one it does not is kept, a useless row changes nothing."""
+    import tempfile
+    global LAYER
+    ok = True
+
+    def expect(c, msg):
+        nonlocal ok
+        if not c:
+            ok = False; print("FAIL rows_first:", msg)
+    real_compile = compile_
+    saved = LAYER
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            w = pathlib.Path(d)
+            subprocess.run("git init -q && touch README && git add -A && git -c user.email=a@b -c user.name=a commit -qm i",
+                           shell=True, cwd=w, check=True)
+            tdir = w / ".multiversion/targets/1.21.4"
+            tbl = tdir / "renames.tsv"
+            tdir.mkdir(parents=True); tbl.write_text("# t\n", encoding="utf-8")
+            old_ov, new_ov = tdir / "java/a/Old.java", tdir / "java/a/New.java"
+            for o, txt in ((old_ov, "class Old {}\n"), (new_ov, "class New { int x; }\n")):
+                o.parent.mkdir(parents=True, exist_ok=True); o.write_text(txt, encoding="utf-8")
+            events, tried, nrule = [], set(), [0]
+            note = lambda **k: events.append(k)
+
+            def run_rule(rnd, row, n, errs):
+                nrule[0] += 1
+                ok_, why = try_rule(w, None, row, n, w / "l.log", "1g", nrule[0], tried)
+                if ok_:
+                    n, errs = compile_(w, w / "l.log", "1g")
+                note(event="rule", round=rnd, row=row, kept=ok_, why=str(why), errors=n)
+                return n, errs
+
+            def setup(created_old=True):
+                LAYER = globals()["LAYER"] = {"target": "1.21.4", "build": "build/mc1.21.4", "args": [], "neo": "x",
+                                              "created": {str(new_ov): "class New {}\n"}, "src_of": {}}
+                if created_old:
+                    LAYER["created"][str(old_ov)] = "class Old {}\n"
+                for o, txt in ((old_ov, "class Old {}\n"), (new_ov, "class New { int x; }\n")):
+                    o.parent.mkdir(parents=True, exist_ok=True); o.write_text(txt, encoding="utf-8")
+                tbl.write_text("# t\n", encoding="utf-8")
+                tried.clear(); events.clear()
+                return LAYER
+            # the fake compile: the row ROW removes 2 of the 5 errors; New.java is needed only when need_new
+            ROW = "A\tB"
+            need_new = [False]
+
+            def fake(work_, log_, heap_):
+                has_row = ROW in tbl.read_text(encoding="utf-8")
+                n = 5 - (2 if has_row else 0)
+                errs = [(str(new_ov), 1, "m")] if (need_new[0] and not new_ov.exists()) else []
+                return n, errs
+            globals()["compile_"] = fake
+            pre = {str(old_ov)}                      # Old.java existed before the round (committed / earlier round)
+            # 1. the row helps and New.java (made this round) is unnecessary once the row reaches its file: dropped,
+            #    Old.java (pre-existing) is never touched; the count is the post-row count
+            setup(); need_new[0] = False
+            n = rows_first(w, w / "l.log", "1g", note, run_rule, 1, [{"rule": ROW}], 5, pre)
+            expect(n == 3, f"count after a kept row is 3, got {n}")
+            expect(not new_ov.exists() and str(new_ov) not in LAYER["created"], "unnecessary new overlay dropped")
+            expect(old_ov.exists() and str(old_ov) in LAYER["created"], "pre-existing overlay untouched")
+            expect(ROW in tbl.read_text(encoding="utf-8"), "row kept in the target's table")
+            expect(any(e["event"] == "rows-first-dropped-overlays" for e in events), "drop is logged")
+            # 2. the row helps but New.java still has an error without it: the overlay stays, restored with its text
+            setup(); need_new[0] = True
+            n = rows_first(w, w / "l.log", "1g", note, run_rule, 1, [{"rule": ROW}], 5, pre)
+            expect(n == 3 and new_ov.exists() and new_ov.read_text(encoding="utf-8") == "class New { int x; }\n",
+                   "needed overlay restored byte for byte")
+            expect(not any(e["event"] == "rows-first-dropped-overlays" for e in events), "nothing dropped")
+            # 3. a row that does not help is reverted, the overlay is put back, the count is the round's start
+            setup(created_old=False); need_new[0] = False
+            n = rows_first(w, w / "l.log", "1g", note, run_rule, 1, [{"rule": "C\tD"}], 5, pre)
+            expect(n == 5 and "C\tD" not in tbl.read_text(encoding="utf-8") and new_ov.exists(),
+                   "a useless row is reverted and nothing is lost")
+            # 3b. the useless row TIES the count and so drops the sibling overlay Old.java (this run's), emptying the
+            #     directory: the new overlay must still be restored (it was written into a vanished directory once)
+            setup(); need_new[0] = False
+            rows_first(w, w / "l.log", "1g", note, run_rule, 1, [{"rule": "E\tF"}], 5, pre)
+            expect(new_ov.exists() and new_ov.read_text(encoding="utf-8") == "class New { int x; }\n",
+                   "overlay restored although a tied row removed its directory")
+            # 4. no proposals, or already at 0: no compile at all
+            setup(); calls = []
+            globals()["compile_"] = lambda *x, **k: (calls.append(1), fake(*x))[1]
+            expect(rows_first(w, w / "l.log", "1g", note, run_rule, 1, [{"rule": None}], 5, pre) == 5 and not calls,
+                   "no rule: no compile")
+            expect(rows_first(w, w / "l.log", "1g", note, run_rule, 1, [{"rule": ROW}], 0, pre) == 0 and not calls,
+                   "0 errors: no rule tried")
+    finally:
+        globals()["compile_"] = real_compile
+        LAYER = saved
+    print("self-check rows_first:", "OK" if ok else "FAIL")
+    return ok
 
 
 def self_check():
@@ -1136,6 +1235,7 @@ def self_check():
         finally:
             globals()["compile_"] = real_compile
     LAYER = None
+    ok = self_check_rows_first() and ok
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
     return 0 if ok else 1
 

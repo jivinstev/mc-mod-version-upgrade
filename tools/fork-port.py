@@ -3,15 +3,18 @@
 """Port one fork-layer target in one command, and hand back only the residue.
 
     python3 tools/fork-port.py --repo DIR --target 1.21.5 [--budget 15] [--gates none|ab|full]
-                               [--json out.json] [--from-stage <name>] [--base REF] [--modid ID] [--self-check]
+                               [--json out.json] [--from-stage <name>] [--base REF] [--modid ID] [--direct]
+                               [--self-check]
 
 The fork-versions skill's procedure (steps 1-9) as stages, the way tools/run-port.py is the jar-port procedure.
 The orchestrating session starts this and then reads ONE summary (the last lines of stdout, the --json file, and
 .multiversion/targets/<t>/RESIDUE.md when it stopped) -- never the workers' transcripts or the build logs.
 
 Stages, each logged as one line and skipped with a reason when it does not apply:
-  setup    make-fork-layer.py add-target (when the target dir is missing) + sync-shared; installs layer.py's
-           support for the generated moves table when the fork's copy predates it
+  setup    make-fork-layer.py add-target (when the target dir is missing; --direct passes `add-target --direct`: a jump
+           that inherits nothing but still takes the shared library of every targeted version in between, see the
+           fork-versions skill) + sync-shared; installs layer.py's support for the generated moves table and for
+           shared_chain when the fork's copy is a verbatim older copy of the template
   stage    one `.multiversion/build.sh <t> compileJava` to stage Minecraft; while createMinecraftArtifacts fails
            on the access transformer, fix-access-transformer.py --overrides-from <log> on the TARGET's own AT
            (bounded: 4 rounds)
@@ -34,8 +37,17 @@ mismatches or failing gates with their one-line reason, and the command to resum
 Whoever picks it up fixes what RESIDUE.md lists, and puts each fix in the shared library
 (templates/fork-layer/shared/<t>) or a converter -- not in one fork.
 
+ONE RUN PER CHECKOUT (CATALOG X44). The run takes build/.fork-port.lock (pid, stale-pid aware) for its whole length and a
+second run on the same checkout is refused at once with a message naming the holder; its own children (ci-gates.py)
+are let through. A lock whose process is gone is taken over. tools/layer-ci.py CheckoutLock is the code.
+
+A RESUME RE-MEASURES. `--from-stage S` keeps the earlier stages' results for the summary but never their numbers: the
+compile count the loop, audit and gates rely on is always one this run measured (a stale 0 once skipped the audit and
+every gate and reported the target done).
+
 Exit codes: 0 done; 10 stopped before/in the compile (stage, moves, measure, loop); 11 Gate A/B (or the author's
-build) red; 12 Gate C red; 13 mixin / event-listener audit; 2 bad input. Standard library only.
+build) red; 12 Gate C red; 13 mixin / event-listener audit; 14 the checkout is in use by another run; 2 bad input.
+Standard library only.
 """
 import argparse, datetime, importlib.util, json, pathlib, re, shutil, subprocess, sys, tempfile
 
@@ -137,6 +149,21 @@ def chain(mv, target):
     return out   # nearest first
 
 
+def mc_key(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.findall(r"\d+|[A-Za-z]+", v))
+
+
+def shared_chain(mv, target):
+    """The targets whose shared library applies to `target`, newest first: its inherits chain, plus every version named by
+    a `shared_chain=` key in that chain (a direct jump). The same rule as templates/fork-layer/tools/layer.py
+    shared_chain(), checked against it in --self-check; without the key it is chain()."""
+    names = chain(mv, target)
+    extra = []
+    for x in names:
+        extra += [s.strip() for s in read_props(mv / "targets" / x / "target.properties").get("shared_chain", "").split(",") if s.strip()]
+    return sorted(set(names) | set(extra), key=mc_key, reverse=True) if extra else names
+
+
 def parse_modid(toml_text):
     m = re.search(r'(?s)\[\[mods\]\].*?modId\s*=\s*"([^"]+)"', toml_text)
     return m.group(1) if m else None
@@ -178,12 +205,32 @@ def read_pairs(path):
     return out
 
 
-def layer_patch(fork_text, template_text):
-    """('current'|'replace'|'diverged', text). The fork's layer.py is the migrator's file copied in by `init`; when
-    it equals the template minus the moves lines it is safe to replace, otherwise a human merges."""
-    if "moves.generated.tsv" in fork_text:
+def layer_history(rel="templates/fork-layer/tools/layer.py"):
+    """Every committed version of the template's layer.py (git log of the migrator), newest first; [] without git."""
+    r = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "--", rel], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    out = []
+    for h in r.stdout.split() if r.returncode == 0 else []:
+        s = subprocess.run(["git", "-C", str(ROOT), "show", f"{h}:{rel}"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        if s.returncode == 0:
+            out.append(s.stdout)
+    return out
+
+
+def layer_patch(fork_text, template_text, history=(), need_shared_chain=False):
+    """('current'|'replace'|'diverged', text). The fork's layer.py is the migrator's file copied in by `init`. It is
+    replaced only when it is a verbatim OLDER copy of the template (the template minus the moves lines, or any version in
+    `history`); anything else a human merges. A fork whose layer.py already reads the generated moves is `current` unless a
+    target needs `shared_chain` (a direct jump) and the copy does not know it -- so a fork that does not jump is
+    never touched."""
+    if fork_text == template_text:
+        return "current", fork_text
+    if "moves.generated.tsv" in fork_text and not (need_shared_chain and "shared_chain" not in fork_text):
         return "current", fork_text
     if INSERT in template_text and fork_text == template_text.replace(INSERT, ""):
+        return "replace", template_text
+    if fork_text in set(history):
         return "replace", template_text
     return "diverged", fork_text
 
@@ -323,7 +370,7 @@ class Run:
         did = []
         if not self.tdir.is_dir():
             r = self.sh([self.py, str(ROOT / "tools/make-fork-layer.py"), "add-target", "--repo", str(self.repo),
-                         "--target", self.t])
+                         "--target", self.t, *(["--direct"] if self.a.direct else [])])
             if r.returncode != 0:
                 return {"stop": "add-target refused: " + (r.stdout or "").strip().splitlines()[-1][:200], "code": 2,
                         "choices": ["make-fork-layer.py versions lists the targeted lines and why others are skipped"]}
@@ -331,13 +378,19 @@ class Run:
         r = self.sh([self.py, str(ROOT / "tools/make-fork-layer.py"), "sync-shared", "--repo", str(self.repo)])
         did.append("sync-shared")
         lp, tp = self.mv / "tools/layer.py", ROOT / "templates/fork-layer/tools/layer.py"
-        verdict, text = layer_patch(lp.read_text(encoding="utf-8"), tp.read_text(encoding="utf-8"))
+        need_sc = any("shared_chain" in read_props(self.mv / "targets" / x / "target.properties")
+                      for x in chain(self.mv, self.t) if (self.mv / "targets" / x / "target.properties").is_file())
+        fork_text = lp.read_text(encoding="utf-8")
+        verdict, text = layer_patch(fork_text, tp.read_text(encoding="utf-8"),
+                                    layer_history() if "moves.generated.tsv" not in fork_text or need_sc else (), need_sc)
         if verdict == "replace":
-            lp.write_text(text, encoding="utf-8"); did.append("layer.py: generated-moves support installed")
+            lp.write_text(text, encoding="utf-8"); did.append("layer.py: replaced by the template's (shared_chain / generated-moves support)")
         elif verdict == "diverged":
-            return {"stop": ".multiversion/tools/layer.py does not read moves.generated.tsv and differs from the "
-                            "template, so it cannot be replaced safely", "code": 2,
-                    "choices": ["merge templates/fork-layer/tools/layer.py's moves.generated.tsv block into the fork's copy"]}
+            return {"stop": ".multiversion/tools/layer.py lacks " + ("shared_chain" if need_sc and "moves.generated.tsv" in fork_text
+                                                                       else "moves.generated.tsv") +
+                            " support and is not a verbatim older copy of the template, so it cannot be replaced safely",
+                    "code": 2,
+                    "choices": ["merge templates/fork-layer/tools/layer.py's changes (generated moves, shared_chain) into the fork's copy"]}
         return {"done": ", ".join(did)}
 
     def s_stage(self):
@@ -406,7 +459,7 @@ class Run:
             return {"stop": "build-class-move-map.py failed: " + (r.stdout or "").strip()[-200:], "code": 10,
                     "choices": ["see build-class-move-map.py's usage; check both jars hold net.minecraft classes"]}
         existing = set()
-        for x in ch:
+        for x in dict.fromkeys(ch + shared_chain(self.mv, self.t)):      # a direct jump's shared tables count too (X31)
             for f in (self.mv / "targets" / x / "renames.tsv", self.mv / "shared" / x / "renames.tsv"):
                 if f.is_file():
                     existing |= plain_froms(f.read_text(encoding="utf-8"))
@@ -449,8 +502,7 @@ class Run:
         return cs.render(s, None, 8, 8), set(s["files"])
 
     def s_loop(self):
-        prior = self.summary["stages"].get("measure", {})
-        start = prior.get("errors")
+        start = self.compile_errors()      # a count THIS run measured; a resume re-measures rather than trusting the last run's
         if start == 0:
             return {"skipped": "already at 0 errors", "errors": 0}
         flog = self.work / "file-loop.jsonl"
@@ -660,6 +712,25 @@ class Run:
         return {"done": f"appended to {f.relative_to(self.repo)}"}
 
 
+def carry_over(old_stages, skipped):
+    """What a resume keeps of an earlier run's stage results: the results of the stages it skips, MINUS `this_run`. A
+    number carried over from another run is a record, never a measurement: compile_errors() re-measures unless this
+    run did (measured: a resume trusted an old 0, skipped the audit and every gate, and reported the target done)."""
+    return {k: {x: y for x, y in v.items() if x != "this_run"} for k, v in old_stages.items() if k in skipped}
+
+
+def execute(run, todo):
+    """Run the stages in order; -> the stop dict (with stage/left) of the first stage that cannot finish, or None."""
+    for s in todo:
+        res = getattr(run, "s_" + s)()
+        run.summary["stages"][s] = {k: v for k, v in res.items() if k not in ("view", "esc", "stop", "choices", "code", "detail")}
+        if "stop" in res:
+            run.summary["stages"][s]["stopped"] = res["stop"]
+            return dict(res, stage=s, left=res["stop"])
+        run.say(s, res.get("done") or ("skipped: " + res.get("skipped", "")))
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo"); ap.add_argument("--target")
@@ -667,6 +738,9 @@ def main():
     ap.add_argument("--gates", default="ab", choices=["none", "ab", "full"])
     ap.add_argument("--json"); ap.add_argument("--from-stage"); ap.add_argument("--modid")
     ap.add_argument("--base", default="origin/neoforge-1.21.1", help="the authors' ref, for ci-gates.py --base")
+    ap.add_argument("--direct", action="store_true",
+                    help="a NEW target that jumps: no inherits, shared_chain= pulls the shared library of every targeted version "
+                         "in between (make-fork-layer.py add-target --direct); ignored when the target already exists")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -680,26 +754,29 @@ def main():
     except ValueError as e:
         print(f"fork-port: {e}"); return 2
     run = Run(a)
+    lock = load("layer_ci", "layer-ci.py").CheckoutLock(run.repo, "fork-port.py", a.target)
+    busy = lock.acquire()
+    if busy:
+        print(f"fork-port: {busy}")
+        return 14
+    try:
+        return drive(run, a, skipped, todo)
+    finally:
+        lock.release()
+
+
+def drive(run, a, skipped, todo):
+    """Everything after the checkout lock is held: resume bookkeeping, the stages, the stop report."""
     if run.jpath.is_file() and skipped:    # a resume keeps what the earlier stages found
         try:
             old = json.loads(run.jpath.read_text(encoding="utf-8"))
-            # carried-over results are an earlier run's: drop this_run so compile_errors() re-measures
-            run.summary["stages"] = {k: {x: y for x, y in v.items() if x != "this_run"}
-                                     for k, v in old.get("stages", {}).items() if k in skipped}
+            run.summary["stages"] = carry_over(old.get("stages", {}), skipped)
             run.summary["started"] = old.get("started", run.summary["started"])
         except ValueError:
             pass
     for s in skipped:
         run.summary["stages"].setdefault(s, {"skipped": f"before --from-stage {a.from_stage}"})
-    stop = None
-    for s in todo:
-        res = getattr(run, "s_" + s)()
-        run.summary["stages"][s] = {k: v for k, v in res.items() if k not in ("view", "esc", "stop", "choices", "code", "detail")}
-        if "stop" in res:
-            run.summary["stages"][s]["stopped"] = res["stop"]
-            stop = dict(res, stage=s, left=res["stop"])
-            break
-        run.say(s, res.get("done") or ("skipped: " + res.get("skipped", "")))
+    stop = execute(run, todo)
     run.summary["done"] = stop is None
     if stop:
         stop.setdefault("spent", 0)
@@ -828,6 +905,122 @@ def self_check():
     r_.summary = {"stages": {"measure": {"errors": 0, "this_run": True}}}
     r_.s_measure = lambda: (_ for _ in ()).throw(AssertionError("must not re-measure"))
     expect(r_.compile_errors() == 0, "this run's own count is used as is")
+    # ---- every --from-stage resume re-measures: a carried-over count is a record, never a measurement
+    import contextlib, io, types
+    from subprocess import CompletedProcess
+
+    def resumed(stage, fresh, stale=0):
+        """Resume from `stage` over a summary whose every stage says `stale` errors (this_run and all), with a measure
+        that now answers `fresh`. -> (stop dict or None, how many times it measured, the commands it ran, summary)."""
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d)
+            (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m",
+                                    base="x", direct=False, from_stage=stage)
+            run = Run(a_)
+            run.jpath.parent.mkdir(parents=True, exist_ok=True)
+            run.jpath.write_text(json.dumps({"started": "2026-01-01T00:00:00+00:00", "stages": {
+                s: {"done": "earlier run", "errors": stale, "this_run": True} for s in STAGES}}), encoding="utf-8")
+            calls, cmds = [], []
+            run.s_measure = lambda: (calls.append(1), {"done": f"{fresh} error(s)", "errors": fresh, "this_run": True})[1]
+            for s in ("setup", "stage", "moves"):
+                setattr(run, "s_" + s, lambda: {"done": "fake"})
+            run.s_cost = lambda: {"skipped": "fake"}
+            def fake_sh(cmd, log=None, cwd=None):
+                cmds.append(" ".join(map(str, cmd)))
+                if log:
+                    pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
+                    pathlib.Path(log).write_text("[ci-gates] Gate A: PASS -- fake\n", encoding="utf-8")
+                return CompletedProcess(cmd, 0 if fresh == 0 else 1, "all targets match\n", "")
+            run.sh = fake_sh
+            run.artifacts = lambda: ([], [pathlib.Path("neo-sources.jar")])
+            run.audit_event_listeners = lambda: {"done": "listeners ok"}
+            run.modid = lambda: "m"
+            skipped, todo = select_stages(stage)
+            run.summary["stages"] = carry_over(json.loads(run.jpath.read_text(encoding="utf-8"))["stages"], skipped)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                stop = execute(run, todo)
+            return stop, len(calls), cmds, run.summary
+    expect(carry_over({"measure": {"errors": 0, "this_run": True}, "loop": {"errors": 0}}, ["measure"])
+           == {"measure": {"errors": 0}}, "carry_over drops this_run and keeps only skipped stages")
+    for stage in STAGES:
+        stop, n_meas, cmds, summ = resumed(stage, fresh=7)
+        if stage in ("loop", "audit", "gates"):
+            expect(n_meas == 1, f"--from-stage {stage} measured again (stale 0 not trusted): measured {n_meas}x")
+            expect(stop is not None and stop["stage"] == stage, f"--from-stage {stage} with 7 real errors must stop at {stage}, got {stop and stop['stage']}")
+        if stage in ("audit", "gates"):
+            expect(stop and stop["code"] == 10 and not any("audit-mixin" in c or "ci-gates" in c for c in cmds),
+                   f"--from-stage {stage}: no audit or gate runs over 7 errors")
+        if stage == "loop":
+            expect(summ["stages"]["loop"].get("start_errors") == 7, "the loop started from the fresh 7, not the stale 0")
+            expect(not any("file-loop" in c and "already" in c for c in cmds), "loop was not skipped as 'already at 0'")
+        if stage in ("setup", "stage", "moves", "measure"):
+            expect(n_meas == 1, f"--from-stage {stage} runs the measure stage itself once")
+        expect(summ["stages"].get("measure", {}).get("errors") in (7, 0) , "summary holds a number")
+    # a fresh 0 over a stale 7 DOES proceed to the audit (the re-measure is not a stop in disguise)
+    stop, n_meas, cmds, _s = resumed("audit", fresh=0, stale=7)
+    expect(n_meas == 1 and stop is None or (stop and stop["stage"] != "audit"), "fresh 0 lets the audit run")
+    expect(any("audit-mixin-targets" in c for c in cmds), "the audit tool ran over the fresh 0")
+    # the single-run (no resume) path is untouched: the measure of THIS run is used as is
+    stop, n_meas, cmds, _s = resumed("setup", fresh=0)
+    expect(n_meas == 1 and stop is None or (stop and stop["stage"] != "measure"), "full run: one measure, then on")
+    # ---- one run per checkout: a live holder refuses a second run (exit 14, naming it); a dead one is taken over
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d)
+        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            (repo / "build").mkdir()
+            (repo / "build/.fork-port.lock").write_text(json.dumps({"pid": holder.pid, "tool": "fork-port.py", "target": "1.21.3",
+                                                                    "started": "2026-01-01T00:00:00Z"}), encoding="utf-8")
+            buf = io.StringIO()
+            real_argv = sys.argv
+            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4"]
+            try:
+                with contextlib.redirect_stdout(buf):
+                    rc = main()
+            finally:
+                sys.argv = real_argv
+            expect(rc == 14 and str(holder.pid) in buf.getvalue() and "one gate run per checkout" in buf.getvalue(),
+                   f"a second run is refused with exit 14 naming the holder: rc={rc} {buf.getvalue()[:200]}")
+            expect(json.loads((repo / "build/.fork-port.lock").read_text(encoding="utf-8"))["pid"] == holder.pid,
+                   "the refused run leaves the holder's lock alone")
+        finally:
+            holder.kill(); holder.wait()
+        buf = io.StringIO()
+        sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4"]
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = main()          # the holder is dead now: stale, taken over; it then stops at setup (no .multiversion) with 2
+        finally:
+            sys.argv = real_argv
+        expect(rc == 2 and not (repo / "build/.fork-port.lock").exists(),
+               f"a dead holder's lock is taken over and released at the end: rc={rc}")
+    # ---- --direct and shared_chain: layer.py's rule and the tool's mirror of it agree
+    lay = load("layer_tpl", "../templates/fork-layer/tools/layer.py")
+    with tempfile.TemporaryDirectory() as d:
+        mv = pathlib.Path(d)
+        for t_, props in (("1.21.3", "x=1\n"), ("1.21.5", "inherits=1.21.3\n"),
+                          ("1.21.11", "shared_chain=1.21.4, 1.21.5,1.21.8,1.21.10\n"), ("1.21.12", "inherits=1.21.11\n")):
+            (mv / "targets" / t_).mkdir(parents=True)
+            (mv / "targets" / t_ / "target.properties").write_text(props, encoding="utf-8")
+        for t_ in ("1.21.3", "1.21.5", "1.21.11", "1.21.12"):
+            expect(shared_chain(mv, t_) == lay.shared_chain(t_, mv), f"fork-port and layer.py agree on shared_chain({t_})")
+        expect(shared_chain(mv, "1.21.5") == chain(mv, "1.21.5") == ["1.21.5", "1.21.3"], "no key: the inherits chain, as before")
+        expect(shared_chain(mv, "1.21.11") == ["1.21.11", "1.21.10", "1.21.8", "1.21.5", "1.21.4"], "direct: newest first")
+        expect(shared_chain(mv, "1.21.12")[:2] == ["1.21.12", "1.21.11"] and "1.21.8" in shared_chain(mv, "1.21.12"),
+               "a target inheriting a direct one sees what its parent saw")
+    # layer.py replacement: only a verbatim older copy; a fork that does not jump is never touched
+    older = tpl.replace(INSERT, "")
+    expect(layer_patch(tpl, tpl, [], True)[0] == "current", "template copy is current")
+    withmoves_nosc = tpl.replace("shared_chain", "shared_chaiN")
+    expect(layer_patch(withmoves_nosc, tpl, [withmoves_nosc], False)[0] == "current", "moves-aware fork that needs no jump is untouched")
+    expect(layer_patch(withmoves_nosc, tpl, [withmoves_nosc], True)[0] == "replace", "a verbatim older copy is replaced when a jump needs shared_chain")
+    expect(layer_patch(withmoves_nosc + "# hand edit\n", tpl, [withmoves_nosc], True)[0] == "diverged", "an edited copy is never replaced")
+    expect(layer_patch(older, tpl, [])[0] == "replace", "the pre-moves copy is still replaced")
+    hist = layer_history()
+    if len(hist) >= 2:
+        expect(layer_patch(hist[-1], tpl, hist, True)[0] in ("replace", "current"), "the oldest committed template copy is replaceable")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

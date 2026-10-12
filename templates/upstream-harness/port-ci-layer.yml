@@ -7,6 +7,8 @@
   #   layer-inertness  the authors' jars are entry-for-entry identical with and without that hook line
   #   layer-compile    each MIDDLE target: every source set compiles, the mixin and event-listener audits are clean
   #   layer-gates      the NEWEST target: all gates, Gate C included, plus the shipped jar when the fork records one
+  #   layer-gates-extra  a RELEASED middle target the fork lists in .multiversion/ci.properties (full_gates=1.21.4,...):
+  #                    the same full gates. Absent or empty = this job never runs (the default).
   # The {{BRANCH}} gates above also run on the layer branch: they are its 1.21.1 bookend.
   layer-plan:
     name: layer plan
@@ -162,4 +164,57 @@
             ${{ runner.temp }}/layer-gates/*.jsonl
             ${{ runner.temp }}/layer-gates/shipped/**
             ${{ runner.temp }}/layer-gates.md
+          if-no-files-found: ignore
+
+  layer-gates-extra:
+    # CI policy: bookends fully gated, middle targets compile + audits; a middle target that is RELEASED is also fully
+    # gated. The list is data (.multiversion/ci.properties full_gates), read by layer-ci.py plan; empty = no job.
+    name: layer gates (released middle target ${{ matrix.t }})
+    needs: layer-plan
+    if: ${{ needs.layer-plan.outputs.layer == 'true' && needs.layer-plan.outputs.has_full == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.layer-plan.outputs.full_matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Port CI kit v{{KIT_VERSION}} (pinned by sha256)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \
+            "https://github.com/{{MIGRATOR_REPO}}/releases/download/port-ci-kit-v{{KIT_VERSION}}/port-ci-kit-v{{KIT_VERSION}}.tar.gz"
+          echo "{{KIT_SHA256}}  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - name: Software OpenGL for the client gate
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
+{{PRE_BUILD}}
+      - name: All gates on this target
+        env:
+          TARGET: ${{ matrix.t }}
+        run: |
+          git fetch --no-tags origin "{{BASE}}"
+          extra=""
+          if [ -f ".multiversion/shipped-expect-$TARGET.txt" ] || [ -f .multiversion/shipped-expect.txt ]; then extra="--shipped"; fi
+          python3 .port-tools/tools/ci-gates.py --repo . --modid "{{MODID}}" --base "origin/{{BASE}}" --mc "$TARGET" $extra \
+            --gatec "{{GATEC}}" --work-dir "$RUNNER_TEMP/layer-gates-$TARGET" --summary "$RUNNER_TEMP/layer-gates-$TARGET.md"
+      - name: Gate summary
+        if: always()
+        env:
+          TARGET: ${{ matrix.t }}
+        run: cat "$RUNNER_TEMP/layer-gates-$TARGET.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: layer-gates-${{ matrix.t }}
+          path: |
+            ${{ runner.temp }}/layer-gates-${{ matrix.t }}/*.log
+            ${{ runner.temp }}/layer-gates-${{ matrix.t }}/*.jsonl
+            ${{ runner.temp }}/layer-gates-${{ matrix.t }}/shipped/**
+            ${{ runner.temp }}/layer-gates-${{ matrix.t }}.md
           if-no-files-found: ignore

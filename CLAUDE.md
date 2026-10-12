@@ -16,3 +16,18 @@ that genuinely needs no README change (a typo, an internal step) says so with a 
 `README-unchanged: <reason>`.
 
 Describe only what the code does: if a step runs on one route and not another, say which.
+
+## Single-version first
+
+A fork port is single-version by default: one `neoforge-<mc>` branch, built, gated, synced and published as it is
+today. The multi-version layer (`.multiversion/`, the `fork-versions` skill) is **opt-in per fork, by an explicit
+decision**; for now only Epic Core API and The Last Sword have it, and Dungeons Libraries and Dungeons Mobs stay
+single-version. So:
+
+- Every multi-version behaviour (layer branch CI, `fork-port.py`, direct jumps, `full_gates`, the checkout lock) is gated
+  on the fork having `.multiversion/` and defaults off. A change to a shared tool (`ci-gates.py`, `port-ci.py`,
+  `port-sync.py`, `port-publish.py`, the skills) must leave a single-version fork's behaviour byte-for-byte as it was.
+- Check every such change against a single-version fixture as well as a layer fixture, and say so in its self-check or
+  `tools/test-port-tools.sh` test (a layer-only assertion proves nothing about the default path).
+- `fork-versions`, `keep-current` and `publish-port` say in their first lines which kind of fork they are on and default
+  to single-version; do not turn a single-version fork into a layer fork without being asked.
