@@ -324,6 +324,113 @@ L16. **Mixin targets that moved (found by the audit, fixed per mod)** · `CloudR
 `LivingEntity`/`Mob` do, through `EntityEquipment`) — retarget to `LivingEntity` with an `instanceof Player` guard.
 Deliberately NOT shared rows: a regex over a handler's parameter list cannot tell a handler that uses the matrices.
 
+### 1.21.5 → 1.21.8 (fork multi-version layer) — uniform blocks, ValueOutput, the 2D GUI (185 errors at the start)
+Shared rows/helpers: `templates/fork-layer/shared/1.21.8/` (renames.tsv, `ShaderInstance`/`Uniform`/`LegacyGl` blocks, `Mv`,
+`EntityOf`, `ShaderReloader`). Measured on Epic Core API (369 shared files, 56 overlays at the end, 93 `@OnlyIn` stripped);
+every gate green. NeoForge 21.6/21.7 are beta-only, so 1.21.6 and 1.21.7 changes ALL arrive here. Each entry names the 26.2
+entry it anticipates ("arrives at 1.21.x, filed under 26.2 as §V..") -- see the tally at the end.
+
+L17. **Plain GLSL uniforms → std140 uniform BLOCKS (1.21.6)** · `uniform mat4 ModelViewMat;` is no longer a program
+uniform: a pipeline declares uniform BUFFERS (`withUniform("X", UniformType.UNIFORM_BUFFER)`) and the vanilla ones live in
+`DynamicTransforms` (ModelViewMat, ColorModulator, ModelOffset, TextureMat, LineWidth), `Projection`, `Fog`, `Globals`
+(ScreenSize, GlintAlpha, GameTime, MenuBlurRadius) and `Lighting`; `FogStart/FogEnd/FogShape` became differently named
+members. · **What breaks:** compile-clean (the shader is a resource) and load-clean: the program links, then every draw fails
+GL validation (`Missing uniform`) or reads zeros. · **Fix:** the shared `ShaderInstance` rewrites the shader SOURCE when it
+reads it (`legacyUniforms`): a built-in declaration becomes the vanilla block (member ORDER is the std140 layout, spelled out,
+not `#moj_import`ed, so a generated-shader provider still compiles), a fog name becomes a `#define`, any other
+`uniform vec4 X;` becomes a one-member block `MV_X` that `Uniform` uploads per draw. 1.21.1 semantics kept: `setDefaultUniforms`
+overwrote every built-in right before `apply()`, so a built-in written BEFORE a draw (ECA writes `GameTime` in a shard's
+setupRenderState) is vanilla's on 1.21.1 AND here; one written in the mod's own `apply()` override wins (`ShaderInstance.
+setDefaultUniforms/globalsBuffer/projectionBuffer`); light and fog writes cannot be honoured (logged once). · **Anticipates:**
+arrives at 1.21.6, filed under 26.2 as §V93 (a custom ShaderInstance → pipeline + std140 block) and §V6/§V54 (state lives
+in the pipeline).
+
+L18. **`DynamicTransforms` and `CompositeRenderType.draw` (1.21.6)** · a draw is `createRenderPass(label, colorView, ..)`,
+`RenderSystem.bindDefaultUniforms(pass)`, `pass.setUniform("DynamicTransforms", RenderSystem.getDynamicUniforms().
+writeTransform(modelView, colour, modelOffset, textureMatrix, lineWidth))`, `drawIndexed(0, 0, count, 1)`; views replace
+textures, and an `outputColorTextureOverride` (post-effect pass) wins over the target's. · **What breaks:** the 1.21.5
+`LegacyGl.draw` (`pass.bindSampler(name, GpuTexture)`, no DynamicTransforms) → `cannot find symbol` / `NoSuchMethodError`.
+· **Fix:** the shared 1.21.8 `LegacyGl.draw` mirrors `CompositeRenderType.draw` line for line and keeps the 1.21.5 surface
+(`setShaderTexture(slot, GpuTextureView)`, scissor via `getScissorStateForRenderTypeDraws`); a mod-written ColorModulator
+feeds the transform. · **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V6 (recorded render state) and §V92
+(`RenderType.create` → `RenderSetup`).
+
+L19. **`RenderLevelStageEvent` is ABSTRACT; one subclass per stage (1.21.6+)** · `getStage()` and the `Stage` enum are
+gone; `AfterSky`, `AfterOpaqueBlocks`, `AfterEntities`, `AfterBlockEntities`, `AfterTranslucentBlocks`, `AfterTripwireBlocks`,
+`AfterParticles`, `AfterWeather`, `AfterLevel` are concrete. · **What breaks:** `@SubscribeEvent onX(RenderLevelStageEvent e)`
+compiles, then `IllegalArgumentException: Cannot register listeners for abstract class` at client load (§X33 caught by
+`tools/audit-event-listeners.py`). · **Fix:** name the stage class and drop the `getStage()` test; a listener that tested two
+stages becomes two. **Unlike 26.2, the 1.21.8 event STILL carries `getPoseStack()`, `getCamera()` and the modelview matrix**
+(`javap` the class: 1.21.8 has all three, 26.2 has none and passes `null` to its posts), so the listener body is unchanged
+and the §X33 augment ("compiles, registers, draws nothing") does NOT apply here; verify before assuming it does on 1.21.10+.
+ECA: 55 listeners audited clean, the stage ones in `EcaClientLifecycle`/`BossShowEditorClientEvents`/`GlobalSkyboxHook`.
+· **Anticipates:** arrives at 1.21.6, filed under 26.2 as §X33 (and its augment, which is the 26.2-only half).
+
+L20. **`SoundManager.play(SoundInstance)` returns `SoundEngine.PlayResult` (by 1.21.8)** · void → `PlayResult`; a mixin
+`@Inject(method = "play")` with `CallbackInfo` no longer binds. · **What breaks:** mixin APPLY failure at client load;
+compile-clean (R17 shape (f)); `audit-mixin-targets.py`'s callback-kind check reports it. · **Fix:** per-target overlay of the
+mixin: `CallbackInfoReturnable<PlayResult>` and `setReturnValue(PlayResult.NOT_STARTED)`. **Choosing the value:** the only
+consumer of the result, `MusicManager.startPlaying`, shows the "now playing" toast on `STARTED`. A mixin that blocks a sound
+and starts nothing in its place answers `NOT_STARTED` (ECA's combat-music lock: its own track plays through a separate
+call); one that starts a replacement answers `STARTED`. · **Anticipates:** arrives by 1.21.8, filed under 26.2 as R17 (f)
+(the 26.2 entry already names this exact target).
+
+L21. **`@OnlyIn` is a mod-LOADING ERROR in dev from 1.21.6 (`loadwarning.neoforge.onlyin`)** · NeoForge stopped stripping
+`@OnlyIn` members and warns on every use; in a dev run that stops Gate B before a test runs and puts `LoadingErrorScreen` up
+on a client. Production jars are inert, which is why nobody ships it as a bug. · **Fix:** the layer's `strip_onlyin=true`
+target property removes the annotation from the whole PREPARED tree (shared files and overlays alike -- a rename row cannot
+reach an overlay); ECA: 93 stripped. Nothing is lost: the strip bought nothing on the common classes. ·
+**Anticipates:** arrives at 1.21.6, filed under 26.2 as §V79.
+
+L22. **`@EventBusSubscriber` lost `bus()` (FML 9, 21.6+)** · the bus follows from the event class (a mod-bus event is
+delivered on the mod bus, anything else on the game bus). · **What breaks:** `cannot find symbol: bus` / `Bus`. ·
+**Fix:** three shared rows drop `bus = Bus.MOD|GAME` (either argument position) and the `EventBusSubscriber.Bus` import; the
+subscriber stays where it was because the event type decides. The class is in the FML `loader` jar, not in `neoforge-universal`.
+· **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V38b.
+
+L23. **Entity (and LivingEntity) save/load → `ValueOutput` / `ValueInput` (1.21.6)** · `addAdditionalSaveData(CompoundTag)`
+→ `(ValueOutput)`, `readAdditionalSaveData(CompoundTag)` → `(ValueInput)` (BlockEntity moved too). · **What breaks:** `does not
+override`, then `CompoundTag cannot be converted to ValueOutput` through the body; a mixin `@Inject` into either mismatches its
+descriptor at apply. · **Fix:** two shared rows retype the mixin handler's parameter; a body that only PUTS scalars keeps
+its text (`putInt/putString/putBoolean` exist), one that reads needs `ValueInput`'s `Optional`/`...Or` getters and has no
+`contains()` -- that one is a per-fork overlay. · **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V31.
+
+L24. **GUI drawing is 2D: `GuiGraphics.pose()` is a `Matrix3x2fStack` (1.21.6)** · `pose().pushPose()/translate(x,y,z)/
+scale(x,y,z)/mulPose(..)` → `pushMatrix()/translate(x,y)/scale(x,y)/rotate(angle)`; z is gone (draw order is submission order).
+· **What breaks:** `incompatible types` on every GUI/HUD render with a `PoseStack`. · **Fix:** no shared row (a GUI's z use
+is a design decision); the fork's GUI files become overlays or are rewritten to the 2D calls; `Screenshot.grab` and the Gate C
+harness's GUI hooks need the same treatment. · **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V6 (`pose()` returns
+a 2D `Matrix3x2fStack`).
+
+L25. **`LevelRenderer.renderLevel` has a new signature (1.21.5-1.21.8 frame graph + fog buffer)** · `(DeltaTracker, boolean,
+Camera, GameRenderer, LightTexture, Matrix4f, Matrix4f)` → `(GraphicsResourceAllocator, DeltaTracker, boolean, Camera, Matrix4f,
+Matrix4f, GpuBufferSlice, Vector4f, boolean)`: the GameRenderer and LightTexture are gone, and the fog buffer, fog colour and a
+"render the sky" flag arrived. · **What breaks:** mixin APPLY (`Invalid descriptor … Expected … found`), compile-clean (R17
+(a)). · **Fix:** two shared rows rewrite the `method = "renderLevel(...)"` descriptor and an `@Inject` handler's nine-parameter
+list in one go (the handler may keep ignoring the new parameters). · **Anticipates:** arrives at 1.21.6, filed under 26.2 as R17
+(a)/(e) and M20 (the frame graph).
+
+L26. **`ServerCommonPacketListenerImpl.send` takes a netty `ChannelFutureListener` (1.21.6)** · was `PacketSendListener`.
+· **What breaks:** a mixin on `send(Packet, PacketSendListener)` fails at apply; callers passing a `PacketSendListener` do not
+compile. · **Fix:** two shared rows retype the descriptor and the handler parameter (`io.netty.channel.ChannelFutureListener`).
+· **Anticipates:** arrives at 1.21.6; **no 26.2 entry exists** (a 26.2 port should expect the same row).
+
+L27. **Bidirectional payloads register only the SERVER handler from the 3-argument form (21.8; CATALOG §V81)** ·
+`playBidirectional / commonBidirectional / configurationBidirectional(type, codec, serverHandler)` now delegates with a null
+client handler; the client's `ClientNetworkRegistry` refuses to load: "Some clientbound payloads are missing client-side
+handlers: [..]". Compile-clean, Gate B green (a dedicated server never validates it), found by Gate C `launch`. ·
+**Fix:** a shared row repeats the handler (method reference, or an expression lambda -- block lambdas are left to the author)
+on the 3-argument shape only, so `playBidirectional(T, C, H)` → `(T, C, H, H)`; a handler for a bidirectional payload already
+branches on `ctx.flow()`. ECA's per-fork `NetworkHandler.java` overlay is gone: the row plus a second one
+(`PacketDistributor.sendToServer` → `net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer`, fully
+qualified because a row cannot add an import) reproduce it exactly (diff of the prepared file against the old overlay: the
+import and a comment). · **Anticipates:** arrives at 21.8 (1.21.8), filed under 26.2 as §V81.
+
+**Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
+§X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
+no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:
+the era jump is partly a reading of the four unreleased 1.21.x lines in between.
+
 ### Runtime deltas (Gate B over a clean compile, 1.21.1 → 1.21.4)
 **Measured:** the first 1.21.4 Gate B run was **27 red** with main + test compiling clean on both targets.
 Every one was one of the six below. After them: `ci,default` 613 passed, batch composition identical to the

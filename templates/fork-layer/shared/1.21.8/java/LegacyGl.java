@@ -184,15 +184,20 @@ public final class LegacyGl {
             // 1.21.1's BufferUploader/RenderType draws called shader.apply() right before drawing and shader.clear()
             // after; a mod's ShaderInstance subclass overrides apply() to push its per-draw state (a mask, an opacity
             // written into COLOR_MODULATOR after super.apply()), so it has to run here too
-            if (own != null) own.apply();
+            if (own != null) {
+                own.setDefaultUniforms();   // 1.21.1's VertexBuffer._drawWithShader ran this right before apply()
+                own.apply();
+            }
             // 1.21.1's ShaderInstance.apply() uploaded RenderSystem's colour into COLOR_MODULATOR and a mod could
             // overwrite it afterwards; 1.21.8 puts the colour in the DynamicTransforms block, so use the mod's value
             // when it wrote one
             boolean override = own != null && own.COLOR_MODULATOR != null && own.COLOR_MODULATOR.touched();
             float[] c = override ? own.COLOR_MODULATOR.floats() : shaderColor;
             GpuBufferSlice transforms = RenderSystem.getDynamicUniforms().writeTransform(
-                    RenderSystem.getModelViewMatrix(), new Vector4f(c[0], c[1], c[2], c[3]),
-                    RenderSystem.getModelOffset(), RenderSystem.getTextureMatrix(), RenderSystem.getShaderLineWidth());
+                    own == null ? RenderSystem.getModelViewMatrix() : own.transformMatrix(own.MODEL_VIEW_MATRIX, RenderSystem.getModelViewMatrix()),
+                    new Vector4f(c[0], c[1], c[2], c[3]), RenderSystem.getModelOffset(),
+                    own == null ? RenderSystem.getTextureMatrix() : own.transformMatrix(own.TEXTURE_MATRIX, RenderSystem.getTextureMatrix()),
+                    own == null ? RenderSystem.getShaderLineWidth() : own.lineWidth(RenderSystem.getShaderLineWidth()));
             // as CompositeRenderType.draw: an output override (a post-effect pass) wins over the target's own views
             GpuTextureView colorView = RenderSystem.outputColorTextureOverride != null
                     ? RenderSystem.outputColorTextureOverride : target.getColorTextureView();
@@ -205,6 +210,13 @@ public final class LegacyGl {
                 pass.setPipeline(pipeline);
                 RenderSystem.bindDefaultUniforms(pass);
                 pass.setUniform("DynamicTransforms", transforms);
+                if (own != null) {
+                    // a built-in the mod wrote replaces vanilla's block for this draw (see ShaderInstance.globalsBuffer)
+                    GpuBuffer projection = own.projectionBuffer(temps);
+                    if (projection != null) pass.setUniform("Projection", projection);
+                    GpuBuffer globals = own.globalsBuffer(temps);
+                    if (globals != null) pass.setUniform("Globals", globals);
+                }
                 pass.setVertexBuffer(0, vertices);
                 var scissor = RenderSystem.getScissorStateForRenderTypeDraws();
                 if (scissor.enabled()) pass.enableScissor(scissor.x(), scissor.y(), scissor.width(), scissor.height());
@@ -221,6 +233,7 @@ public final class LegacyGl {
                 for (GpuBuffer tb : temps) tb.close();
                 if (own != null) own.clear();
                 if (override) own.COLOR_MODULATOR.consume();   // 1.21.1 re-uploaded the default on every apply()
+                if (own != null) own.consumeBuiltIns();
             }
         }
     }

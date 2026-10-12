@@ -900,6 +900,19 @@ Shared rows/helpers every fork inherits: `templates/fork-layer/shared/1.21.3/`. 
 - **M28. NBT getters return Optional (1.21.5)** — shared rows anchored on a literal/CONSTANT key, never on the bare call (a ByteBuffer read matches it too) (L14).
 - **M29. RenderPipeline/RenderPass replaces immediate-mode GL (1.21.5)** — the shared compat layer keeps the 1.21.4 surface; `precompilePipeline` takes a mod's own shader sources (L15).
 - **M30. Mixin targets moved in 1.21.5: CloudRenderer.render's matrices, Player.setItemSlot -> LivingEntity** (L16).
+### 1.21.5 → 1.21.8 (fork multi-version layer, Epic Core API) — M31-M41; details as L17-L27 in `references/minor-version-deltas.md`
+Shared rows/helpers: `templates/fork-layer/shared/1.21.8/`. Each line says which 26.2 entry it anticipates (the 26.2-overlap measurement): 10 of 11 have one.
+- **M31. Plain uniforms → std140 blocks (1.21.6)** — the shared `ShaderInstance` rewrites the shader source into `DynamicTransforms`/`Projection`/`Globals`/`Lighting`/`Fog` or a one-member `MV_X` block; built-ins written before a draw lose, as on 1.21.1 (L17). Arrives at 1.21.6, filed under 26.2 as §V93, §V6/§V54.
+- **M32. `DynamicTransforms` and `CompositeRenderType.draw` (1.21.6)** — `LegacyGl.draw` mirrors vanilla's pass setup (L18). Arrives at 1.21.6, filed under 26.2 as §V6, §V92.
+- **M33. `RenderLevelStageEvent` abstract → per-stage subclasses (1.21.6)** — name the stage class; on 1.21.8 they still carry pose stack and camera, unlike 26.2 (L19). Arrives at 1.21.6, filed under 26.2 as §X33.
+- **M34. `SoundManager.play` returns `PlayResult`** — `CallbackInfoReturnable`; `NOT_STARTED` when nothing replaces the sound (L20). Arrives by 1.21.8, filed under 26.2 as R17 (f).
+- **M35. `@OnlyIn` is a dev loading error (1.21.6)** — the layer's `strip_onlyin` step (L21). Arrives at 1.21.6, filed under 26.2 as §V79.
+- **M36. `@EventBusSubscriber` lost `bus()` (FML 9)** — shared rows (L22). Arrives at 1.21.6, filed under 26.2 as §V38b.
+- **M37. Entity save/load → `ValueOutput`/`ValueInput` (1.21.6)** — scalar bodies keep their text; readers are overlays (L23). Arrives at 1.21.6, filed under 26.2 as §V31.
+- **M38. GUI pose is a 2D `Matrix3x2fStack` (1.21.6)** — no z; per-fork (L24). Arrives at 1.21.6, filed under 26.2 as §V6.
+- **M39. `LevelRenderer.renderLevel` new signature** — descriptor and handler rows (L25). Arrives by 1.21.8, filed under 26.2 as R17 (a)/M20.
+- **M40. `ServerCommonPacketListenerImpl.send` takes a `ChannelFutureListener` (1.21.6)** — shared rows (L26). No 26.2 entry.
+- **M41. 3-argument bidirectional payloads register only the server handler** — a shared row repeats the handler; client sends via `ClientPacketDistributor` (L27). Arrives at 21.8, filed under 26.2 as §V81.
 
 ## S. Silent-resource patterns (compile clean, run clean, *silently wrong*)
 > **Axis:** neither the compiler nor the crash gates can see these. Java has a compiler; resources do

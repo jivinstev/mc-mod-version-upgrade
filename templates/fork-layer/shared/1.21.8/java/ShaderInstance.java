@@ -13,6 +13,12 @@ import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
 import com.mojang.blaze3d.shaders.ShaderType;
 import com.mojang.blaze3d.shaders.UniformType;
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.buffers.Std140Builder;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.GlobalSettingsUniform;
+import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.systems.RenderPass;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
@@ -53,7 +59,16 @@ import java.util.regex.Pattern;
  * shader SOURCE is rewritten when it is read ({@link #legacyUniforms}): a 1.21.1 built-in uniform
  * ({@code uniform mat4 ModelViewMat;}) becomes the vanilla block that now carries it, filled from RenderSystem exactly
  * as vanilla's own draws fill it; every other uniform becomes a one-member block of its own ({@link Uniform#block}),
- * filled from the value the mod set. As on 1.21.5, only COLOR_MODULATOR of the built-ins honours a value the mod wrote.
+ * filled from the value the mod set. A value the MOD wrote into a built-in
+ * wins over vanilla's for that draw only when it wrote it where 1.21.1 let it: 1.21.1 drew with
+ * {@code setDefaultUniforms(..)} (every built-in overwritten from RenderSystem, GameTime included) and then {@code apply()},
+ * so a write made BEFORE the draw (a shard's setupRenderState -- Epic Core API sets GameTime to seconds there) was lost on
+ * 1.21.1 and is lost here ({@link #setDefaultUniforms}), while one made in the mod's own {@code apply()} override survives:
+ * {@link #transformMatrix}/{@link #lineWidth}/colour feed {@code DynamicTransforms}, {@link #projectionBuffer} and
+ * {@link #globalsBuffer} replace the {@code Projection}/{@code Globals} block, and {@link #consumeBuiltIns} forgets the
+ * writes after the draw (1.21.1 re-uploaded the defaults on every apply). Light and fog writes cannot be honoured
+ * (their other members cannot be read back from vanilla's buffers) and are logged once. A built-in the mod never wrote
+ * keeps vanilla's value.
  *
  * <p>Ids are made unique per instance: the device caches compiled shaders by id, so a mod that rebuilds a shader under
  * the same name (a live shader editor) would otherwise keep drawing the first version it compiled.
@@ -62,8 +77,8 @@ public class ShaderInstance implements AutoCloseable {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final AtomicInteger SERIAL = new AtomicInteger();
 
-    // 1.21.1's public built-in uniform fields: null when the shader's JSON does not declare them. Only COLOR_MODULATOR
-    // is honoured when the mod overwrites it (LegacyGl.draw); the others are read from RenderSystem, as vanilla does.
+    // 1.21.1's public built-in uniform fields: null when the shader's JSON does not declare them. A value the mod wrote
+    // wins for that draw (LegacyGl.draw, the transformMatrix/globalsBuffer family below); an unwritten one is vanilla's.
     public Uniform MODEL_VIEW_MATRIX, PROJECTION_MATRIX, TEXTURE_MATRIX, SCREEN_SIZE, COLOR_MODULATOR, LIGHT0_DIRECTION,
             LIGHT1_DIRECTION, GLINT_ALPHA, FOG_START, FOG_END, FOG_COLOR, FOG_SHAPE, LINE_WIDTH, GAME_TIME;
 
@@ -207,6 +222,76 @@ public class ShaderInstance implements AutoCloseable {
         out.addAll(hidden.values());
         return out;
     }
+
+    // ---- built-ins the MOD wrote: they win over vanilla's value for that draw ---------------------------------------
+    private static boolean wrote(Uniform u) { return u != null && u.touched(); }
+
+    /** DynamicTransforms' ModelViewMat/TextureMat: the mod's matrix when it wrote one, else {@code vanilla}. */
+    org.joml.Matrix4f transformMatrix(Uniform u, org.joml.Matrix4f vanilla) {
+        return wrote(u) ? new org.joml.Matrix4f().set(u.floats()) : vanilla;
+    }
+
+    float lineWidth(float vanilla) { return wrote(LINE_WIDTH) ? LINE_WIDTH.floats()[0] : vanilla; }
+
+    /** A replacement {@code Projection} block when the mod wrote ProjMat, else null (vanilla's stays bound). */
+    GpuBuffer projectionBuffer(List<GpuBuffer> temps) {
+        if (!wrote(PROJECTION_MATRIX)) return null;
+        ByteBuffer bb = ByteBuffer.allocateDirect(64).order(ByteOrder.nativeOrder());
+        Std140Builder.intoBuffer(bb).putMat4f(new org.joml.Matrix4f().set(PROJECTION_MATRIX.floats()));
+        return upload(bb, "mv Projection", temps);
+    }
+
+    /**
+     * A replacement {@code Globals} block when the mod wrote ScreenSize, GlintAlpha or GameTime, else null. The members it
+     * did not write are what vanilla's {@code GlobalSettingsUniform.update} puts there (GameRenderer.render's arguments).
+     */
+    GpuBuffer globalsBuffer(List<GpuBuffer> temps) {
+        if (!wrote(SCREEN_SIZE) && !wrote(GLINT_ALPHA) && !wrote(GAME_TIME)) return null;
+        Minecraft mc = Minecraft.getInstance();
+        float[] size = wrote(SCREEN_SIZE) ? SCREEN_SIZE.floats() : new float[] {mc.getWindow().getWidth(), mc.getWindow().getHeight()};
+        float glint = wrote(GLINT_ALPHA) ? GLINT_ALPHA.floats()[0] : mc.options.glintStrength().get().floatValue();
+        float time = wrote(GAME_TIME) ? GAME_TIME.floats()[0]
+                : ((float) ((mc.level == null ? 0L : mc.level.getGameTime()) % 24000L)
+                        + mc.getDeltaTracker().getGameTimeDeltaPartialTick(false)) / 24000.0F;
+        ByteBuffer bb = ByteBuffer.allocateDirect(Math.max(32, GlobalSettingsUniform.UBO_SIZE)).order(ByteOrder.nativeOrder());
+        Std140Builder.intoBuffer(bb).putVec2(size[0], size[1]).putFloat(glint).putFloat(time)
+                .putInt(mc.options.getMenuBackgroundBlurriness());
+        return upload(bb, "mv Globals", temps);
+    }
+
+    private static GpuBuffer upload(ByteBuffer bb, String label, List<GpuBuffer> temps) {
+        bb.clear();
+        GpuBuffer buffer = RenderSystem.getDevice().createBuffer(() -> label, GpuBuffer.USAGE_UNIFORM, bb);
+        temps.add(buffer);
+        return buffer;
+    }
+
+    /** 1.21.1's setDefaultUniforms: every built-in is reset to vanilla's value, so a write made before the draw is lost.
+     *  COLOR_MODULATOR is left to its own (older, 1.21.5-compatible) rule in LegacyGl.draw. */
+    void setDefaultUniforms() {
+        for (Uniform u : new Uniform[] {MODEL_VIEW_MATRIX, PROJECTION_MATRIX, TEXTURE_MATRIX, SCREEN_SIZE, GLINT_ALPHA,
+                GAME_TIME, LINE_WIDTH, LIGHT0_DIRECTION, LIGHT1_DIRECTION, FOG_START, FOG_END, FOG_COLOR, FOG_SHAPE}) {
+            if (wrote(u)) u.consume();
+        }
+    }
+
+    /** Forgets the built-in writes a draw consumed, and says once about the ones this helper cannot honour. */
+    void consumeBuiltIns() {
+        for (Uniform u : new Uniform[] {MODEL_VIEW_MATRIX, PROJECTION_MATRIX, TEXTURE_MATRIX, SCREEN_SIZE, GLINT_ALPHA,
+                GAME_TIME, LINE_WIDTH}) {
+            if (wrote(u)) u.consume();
+        }
+        for (Uniform u : new Uniform[] {LIGHT0_DIRECTION, LIGHT1_DIRECTION, FOG_START, FOG_END, FOG_COLOR, FOG_SHAPE}) {
+            if (wrote(u)) {
+                if (unhonoured.add(u.getName())) {
+                    LOGGER.warn("[mv] {}: a value written to built-in {} is ignored on 1.21.8 (vanilla's Lighting/Fog blocks cannot be partly replaced)", name, u.getName());
+                }
+                u.consume();
+            }
+        }
+    }
+
+    private final Set<String> unhonoured = new HashSet<>();
 
     void bind(RenderPass pass, int programId, List<GpuBuffer> temps) {
         lastProgramId = programId;

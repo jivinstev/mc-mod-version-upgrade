@@ -25,3 +25,14 @@ re:(@Inject\(method = "readAdditionalSaveData"[\s\S]{0,300}?private void [\w$]+\
 re:(\bsend\(Lnet/minecraft/network/protocol/Packet;)Lnet/minecraft/network/PacketSendListener;\)V	\1Lio/netty/channel/ChannelFutureListener;)V
 re:(\bPacket<\?> \w+, )PacketSendListener (\w+)(, CallbackInfo)	\1io.netty.channel.ChannelFutureListener \2\3
 
+# ---- CATALOG V81: the 3-argument playBidirectional / commonBidirectional / configurationBidirectional(type, codec, handler)
+# registers only the SERVER handler on NeoForge 21.8 (the 4-argument form takes the client one, @Nullable), and the client then
+# refuses to load: "Some clientbound payloads are missing client-side handlers". 1.21.1's 3-argument form served both
+# directions, and a handler for a bidirectional payload already branches on ctx.flow(), so passing the SAME handler twice
+# restores that exactly. The rows fire only on the 3-argument shape (a 4-argument call has a second top-level comma before its
+# closing paren, which the handler group cannot cross). Two rows: a method reference (the usual shape), and an EXPRESSION lambda
+# (the text is repeated; a block lambda is not handled -- write that one by hand, or hoist it to a method).
+re:(\b(?:play|common|configuration)Bidirectional\(\s*(?:[^,()]|\([^()]*\))+,\s*(?:[^,()]|\([^()]*\))+,\s*)([\w.$]+(?:<[^>()]*>)?::[\w$]+)(\s*\))	\1\2, \2\3
+re:(\b(?:play|common|configuration)Bidirectional\(\s*(?:[^,()]|\([^()]*\))+,\s*(?:[^,()]|\([^()]*\))+,\s*)((?:\w+|\([^()]*\))\s*->\s*(?:[^(),;{}]|\((?:[^()]|\([^()]*\))*\))+)(\s*\))	\1\2, \2\3
+# PacketDistributor.sendToServer moved to the client-only ClientPacketDistributor (NeoForge 21.6+); written fully qualified (a row cannot add an import).
+re:\bPacketDistributor\.sendToServer\(	net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer(
