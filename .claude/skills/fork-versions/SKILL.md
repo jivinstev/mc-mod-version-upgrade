@@ -6,8 +6,7 @@ description: Make a fork port build for more Minecraft versions from the same br
 # Build a fork for more Minecraft versions
 
 **Opt-in, and not the default.** A single-version fork (`neoforge-1.21.1` and nothing else) is the default and the
-proven path; this skill runs only when the user explicitly decides a fork gets more versions. Today that is Epic Core
-API and The Last Sword. **Do NOT use it** to port a fork to a new version (that is `port-fork`), to keep a fork current
+proven path; this skill runs only when the user explicitly decides a fork gets more versions. Only the forks the maintainer has opted in have it. **Do NOT use it** to port a fork to a new version (that is `port-fork`), to keep a fork current
 (`keep-current`), to publish (`publish-port`), or when the user only said "the latest" for a fork that has no
 `.multiversion/` -- ask first. Nothing here may change how a single-version fork builds, gates, syncs or publishes:
 every behaviour below is gated on the fork having `.multiversion/` and is off by default.

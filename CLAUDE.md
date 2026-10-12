@@ -21,8 +21,7 @@ Describe only what the code does: if a step runs on one route and not another, s
 
 A fork port is single-version by default: one `neoforge-<mc>` branch, built, gated, synced and published as it is
 today. The multi-version layer (`.multiversion/`, the `fork-versions` skill) is **opt-in per fork, by an explicit
-decision**; for now only Epic Core API and The Last Sword have it, and Dungeons Libraries and Dungeons Mobs stay
-single-version. So:
+decision**; only the forks the maintainer has opted in have it, and every other fork stays single-version. So:
 
 - Every multi-version behaviour (layer branch CI, `fork-port.py`, direct jumps, `full_gates`, the checkout lock) is gated
   on the fork having `.multiversion/` and defaults off. A change to a shared tool (`ci-gates.py`, `port-ci.py`,

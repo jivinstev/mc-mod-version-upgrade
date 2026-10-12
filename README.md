@@ -46,8 +46,7 @@ tree. Then:
   changes no jar, every middle target still compiles and passes the mixin and event-listener audits, and the newest
   target passes every gate. Those jobs are skipped on the 1.21.1 port branch.
 - **Single-version first.** A fork port is one `neoforge-<mc>` branch by default, and that is the proven path. The
-  multi-version layer is opt-in per fork (today Epic Core API and The Last Sword; the Dungeons forks stay
-  single-version), every layer feature is switched on only where `.multiversion/` exists, and a single-version fork
+  multi-version layer is opt-in per fork (only the forks the maintainer has opted in), every layer feature is switched on only where `.multiversion/` exists, and a single-version fork
   builds, gates, syncs and publishes exactly as before.
 - **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes. Once a person
   has played it, `port-ci.py promote` makes it a full Release that records who played it; the newest full Release
