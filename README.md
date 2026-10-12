@@ -213,6 +213,7 @@ author's permission. The MIT licence covers this tool, never the mods it ports.
 | [CATALOG.md](CATALOG.md) | The ~540 migration lessons: pattern → error → fix |
 | [SUPPORTED_VERSIONS.md](SUPPORTED_VERSIONS.md) | Which Minecraft versions are tested |
 | [docs/EVALS.md](docs/EVALS.md) | How much of a port the catalogue and its recipes cover, measured per port profile |
+| [docs/POPULARITY_SWEEP.md](docs/POPULARITY_SWEEP.md) | A zero-model run of the pipeline over 384 popular mods: how they were chosen, what it found, and the tools to repeat it (`tools/sweep/`) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | The safety gates, and sending back what your port taught |
 
 ## Licence
