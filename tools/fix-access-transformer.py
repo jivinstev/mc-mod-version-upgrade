@@ -21,7 +21,7 @@ Never removes an entry. Prints what it changed. Standard library only.
 """
 import argparse, json, pathlib, re, sys
 
-OVERRIDE = re.compile(r"(?P<full>\S*/transformed/(?P<path>net/(?:minecraft|neoforged)/\S+?)\.java):(?P<line>\d+): error: (?P<m>[\w$]+)\([^)]*\) in [\w$.]+ "
+OVERRIDE = re.compile(r"(?P<full>\S*[/\\]transformed[/\\](?P<path>net[/\\](?:minecraft|neoforged)[/\\]\S+?)\.java):(?P<line>\d+): error: (?P<m>[\w$]+)\([^)]*\) in [\w$.]+ "
                       r"cannot override (?P=m)\([^)]*\) in (?P<base>[\w$.]+)")
 # NeoForge's own classes are recompiled in the same step (a widened SpawnEggItem method breaks NeoForge's
 # DeferredSpawnEggItem override), so their overrides need widening exactly like Minecraft's.
@@ -156,7 +156,7 @@ def override_lines(log_text, text):
     """New entries widening each overriding subclass's method, from 'cannot override' errors."""
     have = {(c, m, d) for _a, c, m, d in entries(text)}
     adds = []
-    hits = [(e.group("path").replace("/", "."), e) for e in OVERRIDE.finditer(log_text)]
+    hits = [(re.sub(r"[/\\]", ".", e.group("path")), e) for e in OVERRIDE.finditer(log_text)]   # javac on Windows prints backslashes
     hits += [(e.group("fqn"), e) for e in OVERRIDE_MDG.finditer(log_text)]
     # `public a.B *()` widens EVERY method of B: answer each conflicting subclass with the same wildcard (X92)
     wild = {p[1].split(".")[-1].split("$")[-1]: p[1] for p in (l.split("#", 1)[0].split() for l in text.splitlines())
@@ -230,6 +230,7 @@ def self_check():
     ok &= adds == ["public net.minecraft.world.entity.player.Player actuallyHurt(Lnet/minecraft/world/damagesource/"
                    "DamageSource;F)V # overrides net.minecraft.world.entity.LivingEntity.actuallyHurt, widened there"]
     ok &= override_lines(log, t + "\n" + adds[0]) == []       # idempotent
+    ok &= override_lines(log.replace("/", "\\"), t) == adds    # javac on Windows names the file with backslashes
     mv = {"net.minecraft.world.entity.animal.horse.AbstractHorse": "net.minecraft.world.entity.animal.equine.AbstractHorse",
           "net.minecraft.world.entity.vehicle.Boat": "net.minecraft.world.entity.vehicle.boat.Boat"}
     at2 = ("public net.minecraft.world.entity.animal.horse.AbstractHorse m(Lnet/minecraft/world/entity/vehicle/Boat;)V\n"
