@@ -129,6 +129,44 @@ def layer_prune(work):
     return gone
 
 
+def layer_tracked(work, ov):
+    return subprocess.run(["git", "-C", str(work), "ls-files", "--error-unmatch", os.path.relpath(ov, work)],
+                          capture_output=True).returncode == 0
+
+
+def layer_drop_unneeded(work, log, heap, limit, candidates=None):
+    """After a row went in: move every overlay THIS RUN created (never a committed one) aside in ONE compile; those
+    whose file now has no error are unnecessary (the row reaches the file again) and are dropped, the rest are
+    restored. Nothing is dropped unless the final count stays <= limit. Returns (dropped paths, count)."""
+    cand = [ov for ov in LAYER["created"] if pathlib.Path(ov).exists() and (candidates is None or ov in candidates)
+            and not layer_tracked(work, ov)]
+    if not cand:
+        return [], None
+    saved = {ov: pathlib.Path(ov).read_text(encoding="utf-8", errors="replace") for ov in cand}
+    for ov in cand:
+        pathlib.Path(ov).unlink()
+
+    def restore(which):
+        for ov in which:
+            pathlib.Path(ov).write_text(saved[ov], encoding="utf-8")
+    n, errs = compile_(work, log, heap)
+    if n is None:
+        restore(cand); return [], None
+    needed = [ov for ov in cand if ov in {f for f, _l, _m in errs}]
+    restore(needed)
+    dropped = [ov for ov in cand if ov not in needed]
+    if dropped and needed:
+        n, _e = compile_(work, log, heap)
+    if not dropped or n is None or (limit is not None and n > limit):
+        restore(dropped); return [], None
+    for ov in dropped:
+        del LAYER["created"][ov]
+        d = pathlib.Path(ov).parent
+        while d != pathlib.Path(work) / ".multiversion" and d.is_dir() and not any(d.iterdir()):
+            d.rmdir(); d = d.parent
+    return dropped, n
+
+
 def layer_guard(work, before):
     """Undo anything a worker changed outside .multiversion/ (the authors' tree and the base port stay theirs)."""
     undone = []
@@ -391,12 +429,24 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
             "rule": rule, "result": res[-600:]}
 
 
-def try_rule(work, src, row, n_before, log, heap, n_rule):
-    """Apply one proposed row tree-wide; keep it only if the error count falls."""
+def norm_row(row):
+    row = row.strip()
     if "\t" not in row:
         row = re.sub(r'\s{2,}|\s*->\s*|\s*→\s*', "\t", row, count=1)
+    return row
+
+
+def try_rule(work, src, row, n_before, log, heap, n_rule, tried=None):
+    """Apply one proposed row tree-wide; keep it only if the error count falls -- or, in layer mode, stays equal while
+    it makes an overlay this run created unnecessary. A row already tried in this run (same from/to) is skipped."""
+    row = norm_row(row)
     if "\t" not in row:
         return False, "no TAB in the row"
+    if tried is not None:
+        key = tuple(x.strip() for x in row.split("\t")[:2])
+        if key in tried:
+            return False, "skipped: this row was already tried in this run"
+        tried.add(key)
     if LAYER:   # a row goes into the target's own table, never over the authors' tree
         table = pathlib.Path(work) / ".multiversion/targets" / LAYER["target"] / "renames.tsv"
         before = table.read_text(encoding="utf-8") if table.exists() else ""
@@ -404,6 +454,11 @@ def try_rule(work, src, row, n_before, log, heap, n_rule):
                          + f"# X{n_rule}: proposed by a file-loop worker, kept because the error count fell\n{row}\n",
                          encoding="utf-8")
         n, _e = compile_(work, log, heap)
+        if n is not None and n == n_before:
+            dropped, n2 = layer_drop_unneeded(work, log, heap, n_before)
+            if dropped:
+                return True, (f"{n_before} -> {n2}: dropped {len(dropped)} loop overlay(s) the row makes "
+                              f"unnecessary ({', '.join(os.path.relpath(x, work) for x in dropped[:3])})")
         if n is None or n >= n_before:
             table.write_text(before, encoding="utf-8")
             return False, f"compile {n} >= {n_before}: reverted"
@@ -710,7 +765,7 @@ def main():
     note(event="start", errors=n, sources=a.sources)
     if n is None:
         print("the start does not compile to a count:", errs); return 2
-    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}, "xtries": {}, "cost_of": {}}
+    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}, "xtries": {}, "cost_of": {}, "tried": set()}
     # the escalation ladder: (model, single-shot?). Single-shot tiers go first in --mode single (the
     # default): one request per file with script-gathered context; agent tiers are the fallback.
     ladder = ([(m, True) for m in ("haiku", "sonnet")] if a.mode == "single" else []) + [(m, False) for m in TIERS]
@@ -718,6 +773,41 @@ def main():
     lo = next(i for i, (m, _s) in enumerate(ladder) if m == a.first_model)
     hi = len(ladder) - 1
     idx = singleshot.SourceIndex(a.sources) if a.mode == "single" else None
+
+    def run_rule(rnd, row, n, errs):
+        """Try one proposed row (once per run) and log it; returns the new (count, errs)."""
+        state["rules"] += 1
+        ok, why = try_rule(work, src, row, n, clog, a.heap, state["rules"], state["tried"])
+        if ok:
+            n, errs = compile_(work, clog, a.heap)
+        note(event="rule-skipped" if str(why).startswith("skipped") else "rule", round=rnd, row=row, kept=ok,
+             why=str(why), errors=n)
+        return n, errs
+
+    def rows_first(rnd, results, n, pre_created):
+        """Layer mode, before a worker's overlay edits are kept: a worker that proposed a row gets it tried while the
+        files it would touch are still shared text (a row never reaches an overlay, CATALOG W8), against the count
+        the round started at. Then the overlays are put back and the ones the row made unnecessary are dropped."""
+        new = {ov: pathlib.Path(ov).read_text(encoding="utf-8", errors="replace") for ov in LAYER["created"]
+               if ov not in pre_created and pathlib.Path(ov).exists()}
+        for ov in new:
+            pathlib.Path(ov).unlink()
+        cur, kept_any = n, False
+        for res in results:
+            if res["rule"] and cur:
+                c2, _e = run_rule(rnd, res["rule"], cur, [])
+                kept_any = kept_any or (c2 is not None and c2 < cur)
+                cur = c2 if c2 is not None else cur
+        for ov, text in new.items():
+            pathlib.Path(ov).write_text(text, encoding="utf-8")
+        if not kept_any or not new:
+            return cur
+        c, _e = compile_(work, clog, a.heap)
+        dropped, c2 = layer_drop_unneeded(work, clog, a.heap, c, candidates=set(new))
+        if dropped:
+            note(event="rows-first-dropped-overlays", round=rnd, overlays=[os.path.relpath(x, work) for x in dropped])
+            return c2
+        return c if c is not None else cur
 
     def fix_errors(n, errs):
         """Compile rounds until 0, the budget, the last tier, or a plateau."""
@@ -767,6 +857,8 @@ def main():
                      est=round(cost, 3))
             multi = multi if any(k == "m" for k, _ in kept) else None
             jobs = [i for k, i in kept if k == "j"]; singles = [i for k, i in kept if k == "s"]
+            pre_created = set(LAYER["created"]) if LAYER else set()
+            start_n = n
             if LAYER:
                 layer_materialize(work, [f for files, _m, _s in jobs for f in files] + [f for f, _m in singles]
                                   + (multi or []))
@@ -800,7 +892,9 @@ def main():
             for res in results:
                 state["spent"] += res["usd"]; note(event="worker", round=rnd, **res)
                 c_ = state["cost_of"].setdefault(res.get("model") or "?", [0, 0.0]); c_[0] += 1; c_[1] += res["usd"] or 0
-            before = n
+            if LAYER and n and any(res["rule"] for res in results):
+                n = rows_first(rnd, results, start_n, pre_created)
+            before = start_n
             n, errs = compile_(work, clog, a.heap)
             if n is None and any("PARSE ABORT" in l for l in errs):
                 # a worker's edit broke a file's syntax: revert just those files to this round's start,
@@ -840,11 +934,7 @@ def main():
                             tier_of[f] = max(tier_of.get(f, lo), cur) + 1
             for res in results:
                 if res["rule"] and n:
-                    state["rules"] += 1
-                    ok, why = try_rule(work, src, res["rule"], n, clog, a.heap, state["rules"])
-                    if ok:
-                        n, errs = compile_(work, clog, a.heap)
-                    note(event="rule", round=rnd, row=res["rule"], kept=ok, why=str(why), errors=n)
+                    n, errs = run_rule(rnd, res["rule"], n, errs)
             # a round that fixed nothing has already moved its files up a tier; stop only when the next one
             # also fails (measured: stopping at the first such round left 2 errors with Sonnet/Opus untried)
             stalled = stalled + 1 if n >= before and not state["needs"] else 0
@@ -1011,6 +1101,40 @@ def self_check():
         undone = layer_guard(w, set())
         ok &= (w / "README").read_text() == "" and not (w / "src/New.java").exists() and ov_b.exists() \
             and "README" in undone
+        # a row already tried in this run is skipped, not compiled again
+        tbl = w / ".multiversion/targets/1.21.4/renames.tsv"
+        real_compile, calls = compile_, []
+        try:
+            globals()["compile_"] = lambda *x, **k: (calls.append(1), (5, []))[1]
+            tried = set(); LAYER["created"] = {}
+            r1 = try_rule(w, None, "A\tB", 5, w / "l.log", "1g", 1, tried)
+            r2 = try_rule(w, None, "A  B", 5, w / "l.log", "1g", 2, tried)
+            ok &= r1[0] is False and r2 == (False, "skipped: this row was already tried in this run") and len(calls) == 1
+            # an EQUAL count is accepted when it makes an overlay this run created unnecessary: the overlay is
+            # compiled without, its file is clean, so it goes; one whose file would error stays; a committed one
+            # is never touched
+            ov_need, ov_gone = w / ".multiversion/targets/1.21.4/java/a/Need.java", ov_b
+            kept = w / ".multiversion/targets/1.21.4/java/a/Kept.java"
+            kept.parent.mkdir(parents=True, exist_ok=True); kept.write_text("committed\n")
+            subprocess.run("git add -f .multiversion/targets/1.21.4/java/a/Kept.java && "
+                           "git -c user.email=a@b -c user.name=a commit -qm k", shell=True, cwd=w, check=True)
+            for o in (ov_need, ov_gone):
+                o.write_text("class X { int y; }\n")
+            LAYER["created"] = {str(ov_need): "class X {}\n", str(ov_gone): "class X {}\n", str(kept): "committed\n"}
+
+            def fake(work_, log_, heap_):   # without ov_need the compile reports an error in it; Kept would too
+                have = {o for o in (ov_need, ov_gone, kept) if o.exists()}
+                return (6 if ov_need not in have else 5), ([(str(ov_need), 1, "m")] if ov_need not in have else [])
+            globals()["compile_"] = fake
+            r3 = try_rule(w, None, "C\tD", 5, w / "l.log", "1g", 3, tried)
+            ok &= r3[0] is True and "dropped 1" in r3[1] and not ov_gone.exists() and ov_need.exists() \
+                and kept.exists() and str(ov_gone) not in LAYER["created"] and tbl.read_text().rstrip().endswith("C\tD")
+            # no loop overlay to drop: an equal count is still a revert
+            LAYER["created"] = {}
+            r4 = try_rule(w, None, "E\tF", 5, w / "l.log", "1g", 4, tried)
+            ok &= r4[0] is False and "E\tF" not in tbl.read_text()
+        finally:
+            globals()["compile_"] = real_compile
     LAYER = None
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
     return 0 if ok else 1
