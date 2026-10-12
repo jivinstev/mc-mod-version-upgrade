@@ -385,6 +385,23 @@ grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CA
 out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges, add-target --direct writes shared_chain (default off)" \
   || bad "make-fork-layer self-check: $out"
+# the 26.x calendar line, through the real command line on a single-version fixture turned layer: 26.1.2 one hop on from
+# 1.21.11, Java 25, ranges to the next patch release, GeckoLib's new group as an ESCAPED substitution (Properties keys end
+# at ':'), and layer-ci's plan picks 26.3 as the newest with its own JDK
+L26="$T/layer26"; mkdir -p "$L26/src/main/java/com/example/mod"
+echo 'package com.example.mod; class A {}' > "$L26/src/main/java/com/example/mod/A.java"
+printf 'minecraft_version=1.21.1\nneo_version=21.1.228\ngeckolib_version=4.8.4\n' > "$L26/gradle.properties"; echo 'plugins {}' > "$L26/build.gradle"
+python3 tools/make-fork-layer.py init --repo "$L26" >/dev/null 2>&1
+for t26 in 1.21.11 26.1.2 26.2 26.3; do python3 tools/make-fork-layer.py add-target --repo "$L26" --target "$t26" >/dev/null 2>&1; done
+P26="$L26/.multiversion/targets/26.1.2/target.properties"
+grep -qx 'inherits=1.21.11' "$P26" && grep -qx 'java_version=25' "$P26" && grep -qx 'toml.minecraft=\[26.1.2,26.1.3)' "$P26" \
+  && grep -qxF 'substitute.software.bernie.geckolib\:geckolib-neoforge-26.1.2=com.geckolib:geckolib-neoforge-26.1.2:5.5.2' "$P26" \
+  && grep -qx 'inherits=26.2' "$L26/.multiversion/targets/26.3/target.properties" \
+  && ! grep -q 'substitute\|java_version=25' "$L26/.multiversion/targets/1.21.11/target.properties" \
+  && ok "fork layer: 26.x targets get Java 25, the 1.21.11 -> 26.1.2 -> 26.2 -> 26.3 chain, next-patch ranges and an escaped GeckoLib substitution; 1.21.11 unchanged" \
+  || bad "26.x add-target: $(cat "$P26" 2>&1)"
+out="$(python3 tools/layer-ci.py plan --repo "$L26" 2>&1)"
+python3 -c 'import json,sys; p=json.load(sys.stdin); sys.exit(not (p["newest"] == "26.3" and p["newest_java"] == "25"))' <<<"$out" && ok "layer-ci plan: 26.3 is the newest target (after 1.21.11), on Java 25" || bad "layer-ci plan on 26.x: $out"
 out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest, a direct jump (shared_chain) prepares the hop-by-hop chain's tree" \
   || bad "layer.py self-check: $out"

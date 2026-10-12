@@ -812,6 +812,9 @@ def self_check():
         if not c:
             ok = False; print("FAIL:", msg)
     expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
+    expect(minecraft_of("examplemod-1.0.0-mc26.1.2-r2") == "26.1.2" and minecraft_of("examplemod-1.0.0-mc26.2") == "26.2",
+           "minecraft from a 26.x tag")
+    expect(sorted(["26.2", "1.21.11", "26.1.2"], key=mc_key) == ["1.21.11", "26.1.2", "26.2"], "26.x sorts after 1.21.11")
     expect(version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod") == "1.0.0+1.21.1-r2", version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod"))
     expect(version_of("the_last_sword-1.1.2-mc1.21.1", "the_last_sword") == "1.1.2+1.21.1", "version, no suffix")
     expect(version_of("the_last_sword-1.1.1-fix-fix-mc1.21.1-r6", "the_last_sword") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
