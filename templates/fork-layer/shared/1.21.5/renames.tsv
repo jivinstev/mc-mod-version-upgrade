@@ -98,4 +98,18 @@ re:([\w.]+(?:\(\))?)\.computeIfAbsent\(\s*new SavedData\.Factory<>\(\s*((?:[^,()
 re:@Override(\s+public CompoundTag save\(CompoundTag \w+, HolderLookup\.Provider \w+\))	\1
 # ---- Screenshot.takeScreenshot(target) is callback-based now (the GL backend completes it before returning)
 re:\bScreenshot\.takeScreenshot\(\s*((?:[^,()]|\([^()]*\))+)\s*\)	@MVPKG@.Screenshots.take(\1)
+# ---- BakedQuad became a record: getSprite()/getVertices()/getDirection()/getTintIndex()/isShade()/getLightEmission()
+# are sprite()/vertices()/direction()/tintIndex()/shade()/lightEmission(). Anchored on the receiver names a quad is
+# conventionally held in (X7b: a guess at spelling, not at type; getSprite() alone belongs to far too many classes).
+re:\b(quad|bakedQuad|q)\.getSprite\(\)	\1.sprite()
+re:\b(quad|bakedQuad|q)\.getVertices\(\)	\1.vertices()
+re:\b(quad|bakedQuad|q)\.getDirection\(\)	\1.direction()
+re:\b(quad|bakedQuad|q)\.getTintIndex\(\)	\1.tintIndex()
+re:\b(quad|bakedQuad|q)\.isShade\(\)	\1.shade()
+re:\b(quad|bakedQuad|q)\.getLightEmission\(\)	\1.lightEmission()
+# ---- RenderTarget is textures, not a framebuffer: frameBufferId / bindWrite(viewport) ask the backend for the FBO
+re:([\w.]+(?:\(\))?)\.frameBufferId\b	@MVPKG@.LegacyTargets.fbo(\1)
+re:([\w.]+(?:\(\))?)\.bindWrite\(\s*(true|false)\s*\)	@MVPKG@.LegacyTargets.bindWrite(\1, \2)
+# GlStateManager no longer tracks the clear colour; the GL call is the same
+re:\bGlStateManager\._clearColor\(	org.lwjgl.opengl.GL11.glClearColor(
 #!strict
