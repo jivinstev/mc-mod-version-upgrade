@@ -97,8 +97,12 @@ def author_unlisted_mixins(repo, base):
 def harness(c):
     """The external harness: a baseline GameTest, its structure, the mixin integrity test."""
     h, modid = c["dir"] / "harness", c["args"].modid
-    if h.exists():
+    # reuse a harness only when it was built for this target by this harness code: a stale one fails the same way
+    # on every later run (measured: a pre-1.21.5-adapter harness, reused through a persistent --work-dir)
+    stamp = f"{layer_target() or 'base'}\n{_harness_code_hash()}"
+    if h.exists() and (h / ".built-for").is_file() and (h / ".built-for").read_text(encoding="utf-8") == stamp:
         return h
+    shutil.rmtree(h, ignore_errors=True)
     pkg = (re.search(r"(?m)^package\s+([\w.]+)\s*;", next((c["repo"] / "src/main/java").rglob("*.java")).read_text(
         encoding="utf-8")) or [None, modid])[1].split(".")
     pkg = ".".join(pkg[:2]) if len(pkg) > 1 else pkg[0]
@@ -137,7 +141,19 @@ def harness(c):
         harness_layer_target(h, layer)
         if no_gametest_annotation(layer):
             harness_layer_registration(c, h, pkg, layer)
+    (h / ".built-for").write_text(stamp, encoding="utf-8")
     return h
+
+
+def _harness_code_hash():
+    """What the harness is built from: this module, the harness templates and the GameTest adapter."""
+    import hashlib
+    d = hashlib.sha256()
+    for p in [pathlib.Path(__file__), ROOT / "templates/multi-version/tools/gametest_adapter.py",
+              *sorted((ROOT / "templates/upstream-harness").rglob("*"))]:
+        if p.is_file():
+            d.update(p.read_bytes())
+    return d.hexdigest()[:16]
 
 
 def mc_tuple(mc):
