@@ -95,6 +95,13 @@ def layer_overlay(work, prepared):
     return pathlib.Path(work) / ".multiversion/targets" / LAYER["target"] / sub / rest
 
 
+def layer_is_shared(work, overlay):
+    """Is this overlay path a class the shared library supplies (.multiversion/shared/<t>/java/<same path>)?"""
+    parts = pathlib.Path(overlay).relative_to(pathlib.Path(work) / ".multiversion/targets" / LAYER["target"]).parts
+    rel = pathlib.Path(*parts[1:]) if parts and parts[0] == "java" else None
+    return rel is not None and any((pathlib.Path(work) / ".multiversion/shared").glob(f"*/java/{rel.as_posix()}"))
+
+
 def layer_materialize(work, files):
     """Give each prepared-tree file its overlay (a copy of the prepared text) before a worker edits it."""
     out = []
@@ -162,6 +169,12 @@ def compile_(work, log, heap):
         for f, l, msg in rb.parse_errors(text):
             n_all += 1
             ov = layer_overlay(work, f)
+            if ov is not None and layer_is_shared(work, ov):
+                # an error inside a SHARED-library helper is library work: a per-fork overlay of it forks the library
+                # and hides the fix from every other fork (measured: 8 helpers overlaid on one unattended target).
+                # Counted, never routed to a worker; tools/fork-port.py reports it as residue.
+                LAYER.setdefault("shared_errors", set()).add(str(ov.relative_to(work)))
+                continue
             if ov is not None:
                 LAYER["src_of"][str(ov)] = str(pathlib.Path(f).resolve())
                 errs.append((str(ov), l, msg))
@@ -896,7 +909,8 @@ def main():
         note(event="stub-signals", files=stubs)
     if LAYER:
         note(event="layer-end", target=LAYER["target"],
-             overlays_created=sorted(os.path.relpath(x, work) for x in LAYER["created"]))
+             overlays_created=sorted(os.path.relpath(x, work) for x in LAYER["created"]),
+             shared_helper_errors=sorted(LAYER.get("shared_errors", ())))
     note(event="end", errors=n, spent=round(spent, 4), stubs=len(stubs),
          by_model={k: [v[0], round(v[1], 4)] for k, v in by_model.items()})
     return 0 if n == 0 else 1
@@ -983,6 +997,9 @@ def self_check():
         ok &= ov_b == w / ".multiversion/targets/1.21.4/java/a/B.java"
         ok &= ov_c == w / ".multiversion/targets/1.21.4/pro/java/a/C.java"
         ok &= layer_overlay(w, w / "harness/X.java") is None
+        sh = w / ".multiversion/shared/1.21.4/java/a/Shared.java"; sh.parent.mkdir(parents=True); sh.write_text("class S {}\n")
+        ok &= layer_is_shared(w, w / ".multiversion/targets/1.21.4/java/a/Shared.java") \
+            and not layer_is_shared(w, ov_b)
         LAYER["src_of"] = {str(ov_b): str(pre), str(ov_c): str(pro)}
         layer_materialize(w, [str(ov_b), str(ov_c)])
         ok &= ov_b.read_text() == "class B {}\n" and ov_c.exists()

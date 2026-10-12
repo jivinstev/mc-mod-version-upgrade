@@ -434,6 +434,20 @@ class Run:
         clog = self.repo / "build" / f"mc{self.t}" / "file-loop-compile.log"
         res = {"errors": n, "start_errors": start, "exit": r.returncode, "log": str(flog)}
         if n == 0:
+            # 0 errors is not done when a worker got there by emptying code or by forking the shared library: the
+            # loop's own stub audit, and any overlay of a shared helper, are residue (measured on the first
+            # unattended target: both happened at "0 errors" and the run went on to the audit)
+            stubs = [s for e in ev if e.get("event") == "stub-signals" for s in e.get("files", [])]
+            shared = self.shared_helper_overlays()
+            if stubs or shared:
+                detail = [f"stub: {s['file']}: {s['why'][:200]}" for s in stubs] + \
+                         [f"shared helper overlaid in this fork: {f}" for f in shared]
+                res.update({"stop": f"0 errors, but {len(stubs)} stub signal(s) and {len(shared)} overlay(s) of the "
+                                    f"shared library", "code": 10, "detail": detail, "view": detail,
+                            "choices": ["port each flagged method to the new signature (never drop @Override)",
+                                        "fix a shared helper in templates/fork-layer/shared/<t> and delete the "
+                                        "fork's overlay of it; then resume with --from-stage loop"]})
+                return res
             res["done"] = f"{start} -> 0 errors, ${end.get('spent', 0)} of workers"
             return res
         view, files = self.error_view(clog) if clog.is_file() else ([], set())
@@ -443,6 +457,13 @@ class Run:
                     "choices": [f"continue: {self.resume_cmd('loop')} with a higher --budget",
                                 "fix the listed groups by hand, as shared rows / helpers (not in this fork)"]})
         return res
+
+    def shared_helper_overlays(self):
+        """Overlays (this target's java/) of a class the shared library supplies: a fix there belongs in the library."""
+        mv_pkg = read_props(self.repo / ".multiversion/base.properties").get("mv_package", "")
+        names = {p.name for p in (self.repo / ".multiversion/shared").glob("*/java/**/*.java")}
+        root = self.tdir / "java" / mv_pkg.replace(".", "/")
+        return sorted(str(p.relative_to(self.repo)) for p in root.glob("*.java") if p.name in names) if mv_pkg else []
 
     def s_audit(self):
         m = self.summary["stages"]
