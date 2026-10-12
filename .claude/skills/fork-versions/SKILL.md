@@ -147,6 +147,10 @@ The steps below are the reference for what each stage does and for fixing its re
    shared library (`.multiversion/shared/<t>/`: rows every fork inherits + helper classes in the fork's
    `mv_package`). `sync-shared --check` fails when the fork's copy drifted. A target that jumps over middle versions is added with
    `--direct` (see "Direct jumps" above); the default is one hop.
+   **CI, once per fork, before the first target lands:** `python3 tools/port-ci.py --repo DIR --modid ID --layer-branch
+   <layer branch>`, as a PR on the port branch, then merged into the layer branch (see "CI on the layer branch"). From
+   then on every push gets the bookends in full (1.21.1 and the newest target) and compile + audits for the middle
+   targets. A layer branch without this has no gate of its own.
 3. **Access transformer**: the base AT names classes vanilla moved. Re-derive it into
    `targets/<t>/resources/META-INF/accesstransformer.cfg` with `fix-access-transformer.py --overrides-from <log>`
    until `createMinecraftArtifacts` succeeds. Never widen a method vanilla subclasses override to a protected
