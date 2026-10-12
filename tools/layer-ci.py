@@ -103,7 +103,14 @@ def sources_jars(repo, t):
     return sorted(j for j in d.glob("*-sources.jar") if "resources" not in j.name)
 
 
-def target_classpath(repo, t, work, extra_init=(), bash="bash"):
+def no_ci_env():
+    """The environment for a Gradle call whose result the audits read. ModDevGradle/NFRT decompile Minecraft (the
+    sources jar the mixin audit compares against, and the merged jar) only when the CI variable is unset: with CI
+    set, `compileJava` still succeeds and stages neither (measured on a GitHub runner: 'no staged sources jar')."""
+    return {k: v for k, v in os.environ.items() if k != "CI"}
+
+
+def target_classpath(repo, t, work, extra_init=(), bash="bash", env=None):
     """Gradle's own resolved compile classpath for layer target t (tools/qtc-init.gradle through the fork's
     .multiversion/build.sh), written under `work`. Never rebuilt by hand (CATALOG X25b-ii). -> (path|None, why)."""
     repo, work = pathlib.Path(repo), pathlib.Path(work)
@@ -112,7 +119,7 @@ def target_classpath(repo, t, work, extra_init=(), bash="bash"):
     for x in extra_init:
         cmd += ["-I", str(x)]
     cmd += ["-q", "qtcClasspath", "--console=plain"]
-    r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
     m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout or "", re.S)
     jars = [l.strip() for l in m.group(1).splitlines() if l.strip()] if m else []
     if not jars:
@@ -127,10 +134,10 @@ def target_classpath(repo, t, work, extra_init=(), bash="bash"):
 
 # ---------------------------------------------------------------- commands
 
-def _run(cmd, cwd, log):
+def _run(cmd, cwd, log, env=None):
     with open(log, "w", encoding="utf-8") as f:
         return subprocess.run(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                              errors="replace").returncode
+                              errors="replace", env=env).returncode
 
 
 def _tail_cause(log):
@@ -210,7 +217,8 @@ def cmd_compile(a):
         print(f"[layer-ci] {t} {name}: {'PASS' if passed else 'FAIL'} -- {detail}", flush=True)
 
     log = work / f"compile-{t}.log"
-    rc = _run(["bash", str(repo / ".multiversion/build.sh"), t, *tasks, "--console=plain"], repo, log)
+    rc = _run(["bash", str(repo / ".multiversion/build.sh"), t, *tasks, "--console=plain"], repo, log, no_ci_env())
+    compiled = rc == 0
     record(f"compile ({' '.join(tasks)})", rc == 0, "0 errors" if rc == 0 else "see the log")
     if rc:
         print(_tail_cause(log))
@@ -233,9 +241,9 @@ def cmd_compile(a):
                     f"{len([l for l in lines if 'mixin:' in l]) or len(lines)} mixin target(s) do not match vanilla"))
             if r.returncode:
                 print(r.stdout[-3000:])
-    if ok:
+    if compiled:
         trees = sorted(str(p) for p in (repo / "build" / f"mc{t}" / "mv").glob("*java") if p.is_dir())
-        cp, why = target_classpath(repo, t, work)
+        cp, why = target_classpath(repo, t, work, env=no_ci_env())
         if not trees or cp is None:
             record("event-listener audit", False, why or "no prepared tree to audit")
         else:
@@ -250,7 +258,7 @@ def cmd_compile(a):
                     f"{sum('ABSTRACT' in l for l in lines)} listener(s) name an abstract event"))
             if r.returncode:
                 print(r.stdout[-3000:])
-    else:
+    if not compiled:
         for n in ("mixin audit", "event-listener audit"):
             rows.append(f"| {n} | not run | the compile failed |")
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
@@ -305,6 +313,8 @@ def self_check():
     t, n = strip_hook(f"a\n// c\n{HOOK_MARK}\n")
     expect(n == 1 and HOOK_MARK not in t and "// c" in t, "strip_hook removes the hook line, keeps comments")
     expect(strip_hook("a\n")[1] == 0, "no hook: counted 0")
+    os.environ["CI"] = "true"
+    expect("CI" not in no_ci_env() and "PATH" in no_ci_env(), "no_ci_env drops CI only")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
