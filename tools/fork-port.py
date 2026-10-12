@@ -806,14 +806,14 @@ def self_check():
     with tempfile.TemporaryDirectory() as d:
         prev, cur = pathlib.Path(d, "prev"), pathlib.Path(d, "cur")
         for n in ("latest.log", "debug.log", "2026-10-12-1.log.gz", "2026-10-12-2.log", "EcaBootstrap.log", "EcaAgent.log"):
-            (prev.mkdir(exist_ok=True) or prev / n).write_text("x")
+            (prev.mkdir(exist_ok=True) or prev / n).write_text("x", encoding="utf-8")
         for n in ("latest.log", "debug.log"):
-            (cur.mkdir(exist_ok=True) or cur / n).write_text("x")
+            (cur.mkdir(exist_ok=True) or cur / n).write_text("x", encoding="utf-8")
         expect(mod_log_files(prev) == {"EcaBootstrap.log", "EcaAgent.log"}, "mod_log_files skips vanilla's and the dated archives: %s" % mod_log_files(prev))
         expect(lost_log_files(prev, cur) == ["EcaAgent.log", "EcaBootstrap.log"], "A: the 1.21.10 state (mod logs missing) is flagged")
         expect(lost_log_files(prev, cur, ["EcaAgent.log"]) == ["EcaBootstrap.log"], "a recorded known-absent file is not flagged")
         for n in ("EcaBootstrap.log", "EcaAgent.log", "NewOnlyHere.log"):
-            (cur / n).write_text("x")
+            (cur / n).write_text("x", encoding="utf-8")
         expect(lost_log_files(prev, cur) == [], "B: after the fix (same set, plus a new file) it passes")
         expect(lost_log_files(None, cur) == [] and lost_log_files(pathlib.Path(d, "nope"), cur) == [], "no previous run: nothing to compare")
     # a resume must not trust a carried-over compile count (measured: it skipped audit + gates and said "done")

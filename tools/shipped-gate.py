@@ -44,7 +44,7 @@ def find_java(major, explicit=None):
     for c in cands:
         j = pathlib.Path(c) / "bin" / "java"
         if j.is_file():
-            out = subprocess.run([str(j), "-version"], capture_output=True, text=True).stderr
+            out = subprocess.run([str(j), "-version"], capture_output=True, text=True, encoding="utf-8").stderr
             m = re.search(r'version "(\d+)', out)
             if m and int(m.group(1)) == major:
                 return str(j)
@@ -209,7 +209,7 @@ def layer_props(repo, mc):
     layer = repo / ".multiversion/tools/layer.py"
     if not layer.is_file() or not (repo / ".multiversion/targets" / mc).is_dir():
         return {}
-    out = subprocess.run([sys.executable, str(layer), "props", "--target", mc], capture_output=True, text=True).stdout
+    out = subprocess.run([sys.executable, str(layer), "props", "--target", mc], capture_output=True, text=True, encoding="utf-8").stdout
     return dict(re.findall(r"-P(\w+)=(\S+)", out))
 
 

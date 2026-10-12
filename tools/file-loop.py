@@ -1081,25 +1081,25 @@ def self_check():
         subprocess.run("git init -q && touch README && git add -A && git -c user.email=a@b -c user.name=a commit -qm i",
                        shell=True, cwd=w, check=True)
         LAYER = {"target": "1.21.4", "build": "build/mc1.21.4", "args": [], "neo": "21.4.1", "created": {}, "src_of": {}}
-        pre = w / "build/mc1.21.4/mv/java/a/B.java"; pre.parent.mkdir(parents=True); pre.write_text("class B {}\n")
-        pro = w / "build/mc1.21.4/mv/pro-java/a/C.java"; pro.parent.mkdir(parents=True); pro.write_text("class C {}\n")
+        pre = w / "build/mc1.21.4/mv/java/a/B.java"; pre.parent.mkdir(parents=True); pre.write_text("class B {}\n", encoding="utf-8")
+        pro = w / "build/mc1.21.4/mv/pro-java/a/C.java"; pro.parent.mkdir(parents=True); pro.write_text("class C {}\n", encoding="utf-8")
         ov_b, ov_c = layer_overlay(w, pre), layer_overlay(w, pro)
         ok &= ov_b == w / ".multiversion/targets/1.21.4/java/a/B.java"
         ok &= ov_c == w / ".multiversion/targets/1.21.4/pro/java/a/C.java"
         ok &= layer_overlay(w, w / "harness/X.java") is None
-        sh = w / ".multiversion/shared/1.21.4/java/a/Shared.java"; sh.parent.mkdir(parents=True); sh.write_text("class S {}\n")
+        sh = w / ".multiversion/shared/1.21.4/java/a/Shared.java"; sh.parent.mkdir(parents=True); sh.write_text("class S {}\n", encoding="utf-8")
         ok &= layer_is_shared(w, w / ".multiversion/targets/1.21.4/java/a/Shared.java") \
             and not layer_is_shared(w, ov_b)
         LAYER["src_of"] = {str(ov_b): str(pre), str(ov_c): str(pro)}
         layer_materialize(w, [str(ov_b), str(ov_c)])
-        ok &= ov_b.read_text() == "class B {}\n" and ov_c.exists()
-        ov_b.write_text("class B { int x; }\n")                    # a worker changed B, left C alone
+        ok &= ov_b.read_text(encoding="utf-8") == "class B {}\n" and ov_c.exists()
+        ov_b.write_text("class B { int x; }\n", encoding="utf-8")                    # a worker changed B, left C alone
         pruned = layer_prune(w)
         ok &= pruned == [str(ov_c)] and not ov_c.exists() and ov_b.exists() \
             and not (w / ".multiversion/targets/1.21.4/pro").exists()
-        (w / "README").write_text("edited by a worker\n"); (w / "src").mkdir(); (w / "src/New.java").write_text("x")
+        (w / "README").write_text("edited by a worker\n", encoding="utf-8"); (w / "src").mkdir(); (w / "src/New.java").write_text("x", encoding="utf-8")
         undone = layer_guard(w, set())
-        ok &= (w / "README").read_text() == "" and not (w / "src/New.java").exists() and ov_b.exists() \
+        ok &= (w / "README").read_text(encoding="utf-8") == "" and not (w / "src/New.java").exists() and ov_b.exists() \
             and "README" in undone
         # a row already tried in this run is skipped, not compiled again
         tbl = w / ".multiversion/targets/1.21.4/renames.tsv"
@@ -1115,11 +1115,11 @@ def self_check():
             # is never touched
             ov_need, ov_gone = w / ".multiversion/targets/1.21.4/java/a/Need.java", ov_b
             kept = w / ".multiversion/targets/1.21.4/java/a/Kept.java"
-            kept.parent.mkdir(parents=True, exist_ok=True); kept.write_text("committed\n")
+            kept.parent.mkdir(parents=True, exist_ok=True); kept.write_text("committed\n", encoding="utf-8")
             subprocess.run("git add -f .multiversion/targets/1.21.4/java/a/Kept.java && "
                            "git -c user.email=a@b -c user.name=a commit -qm k", shell=True, cwd=w, check=True)
             for o in (ov_need, ov_gone):
-                o.write_text("class X { int y; }\n")
+                o.write_text("class X { int y; }\n", encoding="utf-8")
             LAYER["created"] = {str(ov_need): "class X {}\n", str(ov_gone): "class X {}\n", str(kept): "committed\n"}
 
             def fake(work_, log_, heap_):   # without ov_need the compile reports an error in it; Kept would too
@@ -1128,11 +1128,11 @@ def self_check():
             globals()["compile_"] = fake
             r3 = try_rule(w, None, "C\tD", 5, w / "l.log", "1g", 3, tried)
             ok &= r3[0] is True and "dropped 1" in r3[1] and not ov_gone.exists() and ov_need.exists() \
-                and kept.exists() and str(ov_gone) not in LAYER["created"] and tbl.read_text().rstrip().endswith("C\tD")
+                and kept.exists() and str(ov_gone) not in LAYER["created"] and tbl.read_text(encoding="utf-8").rstrip().endswith("C\tD")
             # no loop overlay to drop: an equal count is still a revert
             LAYER["created"] = {}
             r4 = try_rule(w, None, "E\tF", 5, w / "l.log", "1g", 4, tried)
-            ok &= r4[0] is False and "E\tF" not in tbl.read_text()
+            ok &= r4[0] is False and "E\tF" not in tbl.read_text(encoding="utf-8")
         finally:
             globals()["compile_"] = real_compile
     LAYER = None

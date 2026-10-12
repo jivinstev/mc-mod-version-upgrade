@@ -237,7 +237,7 @@ def self_check():
         (repo / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.1\ngeckolib_version=4.7\n",
                                                 encoding="utf-8")
         r = subprocess.run([sys.executable, __file__, "add-target", "--repo", str(repo), "--target", "1.21.4"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8")
         tp = repo / ".multiversion/targets/1.21.4/target.properties"
         if r.returncode != 0 or not tp.exists() or "prop.geckolib_version=" not in tp.read_text(encoding="utf-8"):
             ok = False; print("FAIL add-target from the command line:", (r.stdout + r.stderr)[-300:])

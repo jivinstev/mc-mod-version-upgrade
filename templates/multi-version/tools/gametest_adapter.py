@@ -313,11 +313,11 @@ def self_check():
                               ('1.21.8', 'ResourceLocation', False), ('1.21.11', 'Identifier', False)):
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, 'p/t'))
-            open(os.path.join(d, 'p/t/A.java'), 'w').write(src)
+            open(os.path.join(d, 'p/t/A.java'), 'w', encoding='utf-8').write(src)
             ts = adapt(d, 'm', 'p.t', 'empty_test', dialect=dialect)
-            a = open(os.path.join(d, 'p/t/A.java')).read()
-            reg = open(os.path.join(d, 'p/t/GeneratedGameTests.java')).read()
-            dg = open(os.path.join(d, 'p/t/DirectGameTest.java')).read()
+            a = open(os.path.join(d, 'p/t/A.java'), encoding='utf-8').read()
+            reg = open(os.path.join(d, 'p/t/GeneratedGameTests.java'), encoding='utf-8').read()
+            dg = open(os.path.join(d, 'p/t/DirectGameTest.java'), encoding='utf-8').read()
             good = (len(ts) == 2 and '@GameTest' not in a and 'GameTestHolder' not in a
                     and 'GameTestHelper;' in a and 'a/foo_bar' in reg and 'a/baz' in reg
                     and ('bus = EventBusSubscriber.Bus.MOD' in reg) == bus
