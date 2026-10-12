@@ -63,11 +63,89 @@ RULE: <if one mechanical rewrite would fix this same error wherever it occurs, a
 `from<TAB>to` (plain name, `member:name`, or `re:<regex>`), else none>"""
 
 
+# Fork-layer mode (--layer <t>, skill fork-versions): the authors' src/ is never edited. The build compiles a
+# PREPARED copy (build/mc<t>/mv/<set>-java, renamed by the target's table); a worker edits that target's OVERLAY
+# (.multiversion/targets/<t>/[<set>/]java/<rel>), copied from the prepared file the moment a worker is given it --
+# not earlier, because an overlay is not run through the table and would block a row that fixes the file.
+LAYER = None   # {"target", "args", "build", "created": {overlay path: prepared text}}
+
+
+def layer_setup(work, target):
+    r = subprocess.run([sys.executable, str(work / ".multiversion/tools/layer.py"), "props", "--target", target],
+                       cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    args = [l.strip() for l in r.stdout.splitlines() if l.strip().startswith("-P")]
+    if r.returncode != 0 or f"-Pmc={target}" not in args:
+        sys.exit(f"file-loop: no layer target {target} in {work} ({(r.stdout + r.stderr).strip()[-200:]})")
+    props = dict(a[2:].split("=", 1) for a in args)
+    return {"target": target, "args": args, "build": f"build/mc{target}", "neo": props.get("neo_version"),
+            "created": {}, "src_of": {}}
+
+
+def layer_overlay(work, prepared):
+    """build/mc<t>/mv/<set>-java/<rel> -> (.multiversion/targets/<t>/[<set>/]java/<rel>, source set), or None."""
+    pre = (pathlib.Path(work) / LAYER["build"] / "mv").resolve()
+    try:
+        tail = pathlib.Path(prepared).resolve().relative_to(pre)
+    except ValueError:
+        return None
+    head, rest = tail.parts[0], pathlib.Path(*tail.parts[1:])
+    sub = "java" if head == "java" else (f"{head[:-len('-java')]}/java" if head.endswith("-java") else None)
+    if sub is None:
+        return None
+    return pathlib.Path(work) / ".multiversion/targets" / LAYER["target"] / sub / rest
+
+
+def layer_materialize(work, files):
+    """Give each prepared-tree file its overlay (a copy of the prepared text) before a worker edits it."""
+    out = []
+    for f in files:
+        ov = pathlib.Path(f)
+        if not ov.exists():
+            ov.parent.mkdir(parents=True, exist_ok=True)
+            text = pathlib.Path(LAYER["src_of"][f]).read_text(encoding="utf-8", errors="replace")
+            ov.write_text(text, encoding="utf-8")
+            LAYER["created"][str(ov)] = text
+        out.append(str(ov))
+    return out
+
+
+def layer_prune(work):
+    """An overlay a worker created and left unchanged is deleted, so the table keeps reaching that file."""
+    gone = []
+    for ov, text in list(LAYER["created"].items()):
+        p = pathlib.Path(ov)
+        if p.exists() and p.read_text(encoding="utf-8", errors="replace") == text:
+            p.unlink(); del LAYER["created"][ov]; gone.append(ov)
+            d = p.parent
+            while d != pathlib.Path(work) / ".multiversion" and d.is_dir() and not any(d.iterdir()):
+                d.rmdir(); d = d.parent
+    return gone
+
+
+def layer_guard(work, before):
+    """Undo anything a worker changed outside .multiversion/ (the authors' tree and the base port stay theirs)."""
+    undone = []
+    for p, code in singleshot._status(pathlib.Path(work)).items():
+        if p.startswith(".multiversion/") or p in before:
+            continue
+        f = pathlib.Path(work) / p
+        if code == "??":
+            if f.is_dir():
+                shutil.rmtree(f)
+            else:
+                f.unlink(missing_ok=True)
+        else:
+            subprocess.run(["git", "-C", str(work), "checkout", "-q", "--", p], capture_output=True)
+        undone.append(p)
+    return undone
+
+
 def compile_(work, log, heap):
     init = ROOT / "tools/maxerrs.init.gradle"
     with open(log, "w", encoding="utf-8") as fh:
         # every source set the author builds, not just main (tools/srcsets.py); --continue so all report
-        subprocess.run([BASH, "gradlew", *srcsets.compile_tasks(work), "--continue", "--console=plain", "--init-script", str(init),
+        subprocess.run([BASH, "gradlew", *srcsets.compile_tasks(work), *(LAYER["args"] if LAYER else []),
+                        "--continue", "--console=plain", "--init-script", str(init),
                         "--init-script", str(ROOT / "tools/central-mirror.init.gradle"),
                         f"-Dorg.gradle.jvmargs=-Xmx{heap}"], cwd=work, stdout=fh, stderr=subprocess.STDOUT)
     text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
@@ -77,6 +155,17 @@ def compile_(work, log, heap):
                        encoding="utf-8", errors="replace")
     if r.returncode != 0:   # a capped, parse-aborted, OOM'd or never-compiled log is not a count
         return None, r.stdout.strip().splitlines()[:3]
+    if LAYER:
+        # keyed by the OVERLAY path whether or not it exists yet, so a file keeps its tier once it has one;
+        # an error outside the prepared tree (a gate harness) is counted but not routed to a worker
+        errs, n_all = [], 0
+        for f, l, msg in rb.parse_errors(text):
+            n_all += 1
+            ov = layer_overlay(work, f)
+            if ov is not None:
+                LAYER["src_of"][str(ov)] = str(pathlib.Path(f).resolve())
+                errs.append((str(ov), l, msg))
+        return n_all, errs
     return len(errs := [(rb_rel(f), l, msg) for f, l, msg in rb.parse_errors(text)]), errs
 
 
@@ -131,10 +220,10 @@ def find_sources(work):
     On 26.x the Minecraft sources jar holds no NeoForge API, so NeoForge's own sources jar is added
     from the Gradle cache. None if nothing matches yet (compile first)."""
     for d in sorted(work.glob("build/neoForm/*/steps/transformSource/transformed")):
-        if any(d.rglob("Minecraft.java")):
+        if any(d.rglob("Minecraft.java")) and not LAYER:
             return d
-    neo = target_neo_version(work)
-    jars = sorted(work.glob("build/moddev/artifacts/*sources*.jar"))
+    neo = LAYER["neo"] if LAYER else target_neo_version(work)
+    jars = sorted(work.glob(f"{LAYER['build'] if LAYER else 'build'}/moddev/artifacts/*sources*.jar"))
     if neo:
         jars = [j for j in jars if neo in j.name]
         home = pathlib.Path(os.environ.get("GRADLE_USER_HOME") or pathlib.Path.home() / ".gradle")
@@ -295,6 +384,17 @@ def try_rule(work, src, row, n_before, log, heap, n_rule):
         row = re.sub(r'\s{2,}|\s*->\s*|\s*→\s*', "\t", row, count=1)
     if "\t" not in row:
         return False, "no TAB in the row"
+    if LAYER:   # a row goes into the target's own table, never over the authors' tree
+        table = pathlib.Path(work) / ".multiversion/targets" / LAYER["target"] / "renames.tsv"
+        before = table.read_text(encoding="utf-8") if table.exists() else ""
+        table.write_text(before + ("" if before.endswith("\n") or not before else "\n")
+                         + f"# X{n_rule}: proposed by a file-loop worker, kept because the error count fell\n{row}\n",
+                         encoding="utf-8")
+        n, _e = compile_(work, log, heap)
+        if n is None or n >= n_before:
+            table.write_text(before, encoding="utf-8")
+            return False, f"compile {n} >= {n_before}: reverted"
+        return True, f"{n_before} -> {n}"
     snap = pathlib.Path(tempfile.mkdtemp()) / "src"
     shutil.copytree(src, snap)
     pack = pathlib.Path(tempfile.mkdtemp()) / "p.recipes.tsv"
@@ -557,6 +657,10 @@ def main():
     ap.add_argument("--subsystem", action="store_true",
                     help="workers may edit any file (for cross-file rewrites the per-file rounds cannot finish: "
                          "capabilities, networking); use with a large --batch-files")
+    ap.add_argument("--layer", metavar="TARGET",
+                    help="a fork's multi-version layer target (skill fork-versions): compile that target, and fix each "
+                         "error in its overlay (.multiversion/targets/<t>/...) or with a row in its renames.tsv; "
+                         "the authors' tree is never edited")
     ap.add_argument("--no-probe", action="store_true",
                     help="skip the override probe at 0 errors (dead overrides compile clean; catalogue R-class)")
     a = ap.parse_args()
@@ -566,6 +670,17 @@ def main():
         ap.error("--work is required")
     work = pathlib.Path(a.work).resolve(); src = work / "src/main/java"
     all_java = lambda: (f for d in srcsets.java_dirs(work) for f in d.rglob("*.java"))
+    global LAYER
+    if a.layer:
+        LAYER = layer_setup(work, a.layer)
+        tdir = work / ".multiversion/targets" / a.layer
+        all_java = lambda: tdir.rglob("*.java")
+        if a.target is None:
+            a.target = (f"NeoForge {LAYER['neo']} (Minecraft {a.layer}). The file you edit is a per-version OVERLAY "
+                        f"under .multiversion/: the mod's own file already renamed for {a.layer}, which replaces the "
+                        f"original on that version only. Change only what the errors need")
+        a.no_probe = True   # the post-compile checks of a layer are its gates and the mixin audit (fork-versions)
+        status0 = set(singleshot._status(work))
     if a.target is None:   # the build says what it targets; a default here once told 26.2 workers "1.21.1"
         a.target = srcsets.target(work) or "NeoForge 1.21.1"
     logf = open(a.log, "a", encoding="utf-8")
@@ -573,7 +688,8 @@ def main():
     sigs = rb.signatures()
     entries = {i: b for i, b in rb.catalogue_entries((ROOT / "CATALOG.md").read_text(encoding="utf-8"))}
     # an upstream port must not write into the author's tree: PORT_LOG_DIR (tools/port-upstream.py) moves the log
-    clog = pathlib.Path(os.environ.get("PORT_LOG_DIR") or work) / "file-loop-compile.log"
+    clog = pathlib.Path(os.environ.get("PORT_LOG_DIR") or (work / LAYER["build"] if LAYER else work)) / "file-loop-compile.log"
+    clog.parent.mkdir(parents=True, exist_ok=True)
     n, errs = compile_(work, clog, a.heap)
     if a.sources == "auto":
         found = find_sources(work)
@@ -638,6 +754,9 @@ def main():
                      est=round(cost, 3))
             multi = multi if any(k == "m" for k, _ in kept) else None
             jobs = [i for k, i in kept if k == "j"]; singles = [i for k, i in kept if k == "s"]
+            if LAYER:
+                layer_materialize(work, [f for files, _m, _s in jobs for f in files] + [f for f, _m in singles]
+                                  + (multi or []))
             snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in all_java()}
             from concurrent.futures import ThreadPoolExecutor
 
@@ -658,6 +777,11 @@ def main():
             if multi:
                 jobs.insert(0, (multi, "sonnet", True)); results.insert(0, mfut.result())
             sresults = [fu.result() for fu in sfuts]
+            if LAYER:
+                undone, pruned = layer_guard(work, status0), layer_prune(work)
+                if undone or pruned:
+                    note(event="layer-guard", round=rnd, undone_outside_layer=undone,
+                         pruned_unchanged_overlays=[os.path.relpath(x, work) for x in pruned])
             jobs += [([f], m, "single") for f, m in singles]
             results += sresults
             for res in results:
@@ -668,7 +792,8 @@ def main():
             if n is None and any("PARSE ABORT" in l for l in errs):
                 # a worker's edit broke a file's syntax: revert just those files to this round's start,
                 # move them up a tier, and count again (one bad edit must not stop the round)
-                broken = {rb_rel(f) for f, _l, _m in rb.parse_errors(clog.read_text(encoding="utf-8", errors="replace"))}
+                broken = {(str(layer_overlay(work, f)) if LAYER and layer_overlay(work, f) else rb_rel(f))
+                          for f, _l, _m in rb.parse_errors(clog.read_text(encoding="utf-8", errors="replace"))}
                 for f in broken:
                     if f in snap:
                         pathlib.Path(f).write_text(snap[f], encoding="utf-8")
@@ -720,7 +845,7 @@ def main():
         print("compile no longer counts:", errs); return 3
     # at 0 errors: the load-crash scans, then the dead-override probe; each finding round may break the
     # compile, which the error rounds then repair
-    finders = [("scan", lambda: static_scan(work)), ("scan", lambda: mixin_audit(work))]
+    finders = [] if LAYER else [("scan", lambda: static_scan(work)), ("scan", lambda: mixin_audit(work))]
     if not a.no_probe:
         finders.append(("probe", lambda: probe(work, a.sources)))
     for kind, find in finders:
@@ -744,6 +869,8 @@ def main():
             by_model[e["model"]][0] += 1; by_model[e["model"]][1] += e["usd"]
     # the end-of-loop audit: every file a worker changed -- agents included, whose edits no guard saw --
     # compared with where it started. A removed feature makes errors go away just as well as a fix does.
+    if LAYER:   # an overlay a worker created is audited against the prepared copy it started from
+        orig.update(LAYER["created"])
     stubs = []
     for path, before in orig.items():
         f = pathlib.Path(path)
@@ -767,6 +894,9 @@ def main():
             stubs.append({"file": os.path.relpath(path, work), "why": "; ".join(why)})
     if stubs:
         note(event="stub-signals", files=stubs)
+    if LAYER:
+        note(event="layer-end", target=LAYER["target"],
+             overlays_created=sorted(os.path.relpath(x, work) for x in LAYER["created"]))
     note(event="end", errors=n, spent=round(spent, 4), stubs=len(stubs),
          by_model={k: [v[0], round(v[1], 4)] for k, v in by_model.items()})
     return 0 if n == 0 else 1
@@ -839,6 +969,32 @@ def self_check():
                       "  public static a.b.Foo of(int);\n  public java.util.List<a.c.Bar> bars();\n}")
     ok = ok and "public new Foo(Foo.Props);" in stub and "public static Foo of(int);" in stub \
         and "List<Bar> bars();" in stub and "class Foo extends Base {" in stub
+    # fork-layer mode: the prepared tree maps to the target's overlays, an overlay is made only when a worker is
+    # given the file, an unchanged one is pruned, and nothing outside .multiversion/ survives a round
+    global LAYER
+    with tempfile.TemporaryDirectory() as d:
+        w = pathlib.Path(d)
+        subprocess.run("git init -q && touch README && git add -A && git -c user.email=a@b -c user.name=a commit -qm i",
+                       shell=True, cwd=w, check=True)
+        LAYER = {"target": "1.21.4", "build": "build/mc1.21.4", "args": [], "neo": "21.4.1", "created": {}, "src_of": {}}
+        pre = w / "build/mc1.21.4/mv/java/a/B.java"; pre.parent.mkdir(parents=True); pre.write_text("class B {}\n")
+        pro = w / "build/mc1.21.4/mv/pro-java/a/C.java"; pro.parent.mkdir(parents=True); pro.write_text("class C {}\n")
+        ov_b, ov_c = layer_overlay(w, pre), layer_overlay(w, pro)
+        ok &= ov_b == w / ".multiversion/targets/1.21.4/java/a/B.java"
+        ok &= ov_c == w / ".multiversion/targets/1.21.4/pro/java/a/C.java"
+        ok &= layer_overlay(w, w / "harness/X.java") is None
+        LAYER["src_of"] = {str(ov_b): str(pre), str(ov_c): str(pro)}
+        layer_materialize(w, [str(ov_b), str(ov_c)])
+        ok &= ov_b.read_text() == "class B {}\n" and ov_c.exists()
+        ov_b.write_text("class B { int x; }\n")                    # a worker changed B, left C alone
+        pruned = layer_prune(w)
+        ok &= pruned == [str(ov_c)] and not ov_c.exists() and ov_b.exists() \
+            and not (w / ".multiversion/targets/1.21.4/pro").exists()
+        (w / "README").write_text("edited by a worker\n"); (w / "src").mkdir(); (w / "src/New.java").write_text("x")
+        undone = layer_guard(w, set())
+        ok &= (w / "README").read_text() == "" and not (w / "src/New.java").exists() and ov_b.exists() \
+            and "README" in undone
+    LAYER = None
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
     return 0 if ok else 1
 
