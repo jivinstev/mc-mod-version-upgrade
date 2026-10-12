@@ -191,6 +191,17 @@ def layer_target(env=None):
 def harness_table(mc, seen=()):
     """templates/upstream-harness/versions/<mc>.renames.tsv, with any `#!inherit <mc>` line expanded in place."""
     p = ROOT / "templates/upstream-harness/versions" / f"{mc}.renames.tsv"
+    if not p.is_file() and not seen:
+        # a new 1.21.x target with no table yet inherits the nearest lower 1.21.x table (a hop inside one family
+        # mostly needs no harness rows; any it does need still show up as Gate A compile errors). Never across
+        # families: a 26.x target without its own table is still refused.
+        fam = mc_tuple(mc)[:2]
+        lower = sorted((mc_tuple(q.name[:-len(".renames.tsv")]), q) for q in p.parent.glob("*.renames.tsv")
+                       if mc_tuple(q.name[:-len(".renames.tsv")])[:2] == fam
+                       and mc_tuple(q.name[:-len(".renames.tsv")]) < mc_tuple(mc))
+        if lower:
+            print(f"[port_gates] no harness table for {mc}: inheriting {lower[-1][1].name}", file=sys.stderr)
+            return harness_table(lower[-1][1].name[:-len(".renames.tsv")], (mc,))
     if not p.is_file():
         raise Fail(f"the gate harness has no rename table for Minecraft {mc} "
                    f"(templates/upstream-harness/versions/{mc}.renames.tsv): it is written for 1.21.1")
