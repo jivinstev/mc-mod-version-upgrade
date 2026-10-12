@@ -58,12 +58,17 @@ def cmd_prepare(a):
             d = MV / "targets" / t / "java"
             if d.is_dir():
                 shutil.copytree(d, overlay, dirs_exist_ok=True)
-        # rename rows: nearer target's rows FIRST so a correction to an inherited row is applied before it
+        # rename rows: nearer target's rows FIRST so a correction to an inherited row is applied before it; the
+        # shared tables (mc-mod-version-upgrade, synced into .multiversion/shared/) after every fork row
         rows = []
         for t in names:
             r = MV / "targets" / t / "renames.tsv"
             if r.exists():
                 rows.append(f"# ---- {t}\n" + r.read_text(encoding="utf-8"))
+        for t in names:
+            r = MV / "shared" / t / "renames.tsv"
+            if r.exists():
+                rows.append(f"# ---- shared {t}\n" + r.read_text(encoding="utf-8"))
         renames = tmp / "renames.tsv"
         renames.write_text("\n".join(rows) + "\n", encoding="utf-8")
         drops = set()
@@ -78,7 +83,44 @@ def cmd_prepare(a):
             dl.write_text("\n".join(sorted(drops)) + "\n", encoding="utf-8")
             args += ["--drop", str(dl)]
         print(f"layer: {a.target} chain {' > '.join(names)}")
-        return subprocess.call(args)
+        rc = subprocess.call(args)
+        if rc == 0:
+            add_shared_helpers(names, pathlib.Path(a.out))
+        return rc
+
+
+def add_shared_helpers(names, out):
+    """Copy in the shared helper classes (.multiversion/shared/<t>/java) that the prepared tree actually uses,
+    transitively. A helper nothing references stays out of the jar; a fork's own overlay of the same path wins."""
+    pool = {}
+    for t in reversed(names):          # farthest first, nearer target's copy wins
+        d = MV / "shared" / t / "java"
+        if d.is_dir():
+            for f in d.rglob("*.java"):
+                pool[f.relative_to(d).as_posix()] = f
+    if not pool:
+        return
+    def fqn(rel):
+        return rel[:-5].replace("/", ".")
+    text = "\n".join(p.read_text(encoding="utf-8") for p in out.rglob("*.java"))
+    added, changed = set(), True
+    while changed:
+        changed = False
+        for rel, f in pool.items():
+            if rel in added or (out / rel).exists():
+                continue
+            name = rel.rsplit("/", 1)[-1][:-5]
+            # a helper nothing names but that must ride along (an event subscriber) is pulled in by a
+            # `// MV-REQUIRES: Name` line in a helper that is used
+            if fqn(rel) in text or (fqn(rel).rsplit(".", 1)[0] + ".*") in text or f"MV-REQUIRES: {name}" in text:
+                dest = out / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                body = f.read_text(encoding="utf-8")
+                dest.write_text(body, encoding="utf-8")
+                text += "\n" + body
+                added.add(rel); changed = True
+    if added:
+        print(f"layer: shared helpers used: {', '.join(sorted(r.rsplit('/', 1)[-1][:-5] for r in added))}")
 
 
 def cmd_props(a):

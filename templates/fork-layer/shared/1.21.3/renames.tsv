@@ -1,0 +1,70 @@
+# Shared fork-layer rename table: NeoForge 1.21.1 -> 1.21.3 (Minecraft 1.21.2 API; NeoForge 21.3).
+# Harvested from the Epic Core API port (issue #49) and measured against neoforge-21.3.97-sources.jar.
+# Every fork that adds a 1.21.3 target inherits these rows (make-fork-layer.py sync-shared copies them to
+# .multiversion/shared/1.21.3/, with @MVPKG@ = the fork's helper package). Fork-specific rows stay in
+# .multiversion/targets/1.21.3/renames.tsv. CATALOG §M (M26-M45) has the reasoning for each row.
+#
+# Most of a shared table matches nothing in any one mod, so it is exempt from the dead-rule report as one
+# block (CATALOG X23); the fork's own table is checked.
+#!exhaustive  shared table: most rows are for API this mod does not use
+# ---- type moves and renames
+net.minecraft.util.FastColor	net.minecraft.util.ARGB
+re:\bFastColor\.ARGB32\.	ARGB.
+net.minecraft.world.level.portal.DimensionTransition	net.minecraft.world.level.portal.TeleportTransition
+DimensionTransition	TeleportTransition
+net.minecraft.world.entity.MobSpawnType	net.minecraft.world.entity.EntitySpawnReason
+MobSpawnType	EntitySpawnReason
+member:registryOrThrow	lookupOrThrow
+re:\bBuiltInRegistries\.(\w+)\.get\(	BuiltInRegistries.\1.getValue(
+re:\.lookupOrThrow\((Registries\.\w+)\)\.get\(	.lookupOrThrow(\1).getValue(
+re:\bminecraft\.getTimer\(\)	minecraft.getDeltaTracker()
+re:\.getToasts\(\)	.getToastManager()
+re:\.input\.jumping\b	.input.keyPresses.jump()
+re:\.input\.shiftKeyDown\b	.input.keyPresses.shift()
+# ---- render system
+re:VertexSorting\.DISTANCE_TO_ORIGIN\)	com.mojang.blaze3d.ProjectionType.PERSPECTIVE)
+re:VertexSorting\.ORTHOGRAPHIC_Z\)	com.mojang.blaze3d.ProjectionType.ORTHOGRAPHIC)
+re:TextureStateShard\(([^,()]+), false, (true|false)\)	TextureStateShard(\1, net.minecraft.util.TriState.FALSE, \2)
+re:TextureStateShard\(([^,()]+), true, (true|false)\)	TextureStateShard(\1, net.minecraft.util.TriState.TRUE, \2)
+re:[ \t]*RenderSystem\.applyModelViewMatrix\(\);[ \t]*\n	
+re:RenderSystem\.setShader\(GameRenderer::getPositionColorShader\)	RenderSystem.setShader(net.minecraft.client.renderer.CoreShaders.POSITION_COLOR)
+re:RenderSystem\.setShader\(GameRenderer::getPositionTexShader\)	RenderSystem.setShader(net.minecraft.client.renderer.CoreShaders.POSITION_TEX)
+re:RenderSystem\.setShader\(GameRenderer::getPositionTexColorShader\)	RenderSystem.setShader(net.minecraft.client.renderer.CoreShaders.POSITION_TEX_COLOR)
+re:RenderSystem\.setShader\(GameRenderer::getPositionShader\)	RenderSystem.setShader(net.minecraft.client.renderer.CoreShaders.POSITION)
+re:GlStateManager\._clear\(([^;]*), false\);	GlStateManager._clear(\1);
+re:\bLevelRenderer\.renderLineBox\(	net.minecraft.client.renderer.ShapeRenderer.renderLineBox(
+re:RenderSystem\.runAsFancy\(	@MVPKG@.Mv.run(
+re:(\w+)\.getBoundingBoxForCulling\(\)	@MVPKG@.Mv.cullingBox(\1)
+re:\(EntityRenderer<\? super (\w+)>	(EntityRenderer<? super \1, ?>
+re:EntityRenderer<\? super (\w+)> (\w+) =	EntityRenderer<? super \1, ?> \2 =
+# 1.21.2 dropped the yaw argument of EntityRenderDispatcher.render(entity, x, y, z, yaw, partialTick, ...)
+re:(dispatcher\.render\(\s*[^,()]+,\s*[^,()]+,\s*[^,()]+,\s*[^,()]+,)\s*[^,()]+,	\1
+re:(\w+)\.blit\((\w+), 	\1.blit(net.minecraft.client.renderer.RenderType::guiTextured, \2, 
+re:\.bufferSource\(\)\.getBuffer\(	.bufferSource.getBuffer(
+# NativeImage: 1.21.1 getPixelRGBA/setPixelRGBA took ABGR; 1.21.2 getPixel/setPixel take ARGB. Convert at the call.
+re:(\w+)\.getPixelRGBA\(((?:[^()]|\([^()]*\))*)\)	net.minecraft.util.ARGB.toABGR(\1.getPixel(\2))
+re:(\w+)\.setPixelRGBA\(\s*([^,]+),\s*([^,]+),\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*;	\1.setPixel(\2, \3, net.minecraft.util.ARGB.fromABGR(\4));
+re:(\w+)\.asByteArray\(\)	@MVPKG@.Mv.pngBytes(\1)
+# ---- fog: one FogParameters value
+re:(\w+) = RenderSystem\.getShaderFogStart\(\);\s*(\w+) = RenderSystem\.getShaderFogEnd\(\);\s*RenderSystem\.setShaderFogStart\(Float\.MAX_VALUE\);\s*RenderSystem\.setShaderFogEnd\(Float\.MAX_VALUE\);	@MVPKG@.Mv.suspendFog();
+re:RenderSystem\.setShaderFogStart\((\w+)\);\s*RenderSystem\.setShaderFogEnd\((\w+)\);	@MVPKG@.Mv.restoreFog();
+# ---- shaders: the mod keeps building its own ShaderInstances (1.21.1 API) on 1.21.2 CompiledShaderPrograms
+net.minecraft.client.renderer.ShaderInstance	@MVPKG@.ShaderInstance
+net.neoforged.neoforge.client.event.RegisterShadersEvent	@MVPKG@.RegisterShadersEvent
+re:RenderSystem\.setShader\(\(\) -> (\w+)\)	RenderSystem.setShader(\1)
+re:RenderSystem\.setShader\((\w+)::(\w+)\)	RenderSystem.setShader(\1.\2())
+re:new RenderStateShard\.ShaderStateShard\(	new @MVPKG@.ShaderShard(
+# ---- entities and saved data
+re:\b(\w+)\.create\((\w*[lL]evel)\)	\1.create(\2, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
+re:EntityType\.loadEntityRecursive\(([^,]+), (\w+), 	EntityType.loadEntityRecursive(\1, \2, net.minecraft.world.entity.EntitySpawnReason.LOAD, 
+re:import net\.neoforged\.neoforge\.common\.util\.DummySavedData;\n	
+# ---- mixin targets (invisible to javac; audit-mixin-targets.py checks them against the target's sources)
+re:@Inject\(method = "hurt",([^\n]*)\n(\s*)private void ([\w$]+)\(DamageSource (\w+),	@Inject(method = "hurtServer",\1\n\2private void \3(net.minecraft.server.level.ServerLevel mv$hurtLevel, DamageSource \4,
+re:@Inject\(method = "actuallyHurt",([^\n]*)\n(\s*)private void ([\w$]+)\(DamageSource (\w+),	@Inject(method = "actuallyHurt",\1\n\2private void \3(net.minecraft.server.level.ServerLevel mv$hurtLevel, DamageSource \4,
+re:"changeDimension\(Lnet/minecraft/world/level/portal/DimensionTransition;\)Lnet/minecraft/world/entity/Entity;"	"teleport(Lnet/minecraft/world/level/portal/TeleportTransition;)Lnet/minecraft/world/entity/Entity;"
+re:LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;
+re:@Inject\(method = "render",(\s*at = @At\(value = "INVOKE",\s*target = "Lcom/mojang/blaze3d/vertex/PoseStack;popPose\(\)V")	@Inject(method = "renderItemModelRaw",\1
+re:(int \w+, int \w+, BakedModel \w+,)(\s*)CallbackInfo ci\)	\1 boolean mv$flat, float mv$depth,\2CallbackInfo ci)
+# GeckoLib 4.7.3 (1.21.3) / 4.8.5 (1.21.4): GeoRenderLayer preRender/render gained a trailing int colour
+re:(VertexConsumer \w+, float \w+,\s*int \w+, int \w+)\) \{	\1, int renderColor) {
+#!strict
