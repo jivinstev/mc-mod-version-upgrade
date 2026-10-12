@@ -156,13 +156,21 @@ def main():
     def is_abstract(fqn):
         if fqn in abstract_cache:
             return abstract_cache[fqn]
-        jar = index.get(fqn) or index.get(fqn.replace(".", "$", fqn.count(".") - 1))
+        # a nested type is Outer$Inner in the jar: walk trailing dots into '$' (CATALOG X25c's nested-class trap)
+        jar, parts = None, fqn.split(".")
+        for k in range(len(parts), 0, -1):
+            cand = ".".join(parts[:k]) + "".join("$" + q for q in parts[k:])
+            if cand in index:
+                jar, fqn = index[cand], cand
+                break
         if not jar:
             abstract_cache[fqn] = None
             return None
         out = subprocess.run(["javap", "-cp", jar, fqn], capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
         decl = next((l for l in out.splitlines() if " class " in l or " interface " in l), "")
-        abstract_cache[fqn] = " abstract class " in decl
+        # an interface cannot be registered either: the bus walks getSuperclass(), which is null for one
+        # (CATALOG M44 -- GeckoLib 5.3's GeoRenderEvent.* became interfaces; the listener NPEs at mod load)
+        abstract_cache[fqn] = " abstract class " in decl or " interface " in decl
         return abstract_cache[fqn]
 
     checked, problems = 0, []
@@ -179,10 +187,12 @@ def main():
                     simples.append(pm.group(1))
         for simple in simples:
             fqn = resolve(simple, s, pkg)
-            if not fqn.startswith(("net.neoforged.", "net.minecraft.")):
-                continue          # the mod's own events are its own business
-            checked += 1
+            # every event type a dependency jar declares (NeoForge, Minecraft, GeckoLib, ...); the mod's own
+            # classes are not on the jar classpath, so is_abstract() answers None and they are not counted
             verdict = is_abstract(fqn)
+            if verdict is None:
+                continue
+            checked += 1
             if verdict:
                 problems.append((rel, simple, fqn))
 
@@ -194,12 +204,12 @@ def main():
               "  otherwise the scope is wrong (prepared tree, package, or target)." % root)
         return 2
     if not problems:
-        print("\nno listener names an abstract event")
+        print("\nno listener names an abstract or interface event type")
         return 0
     print()
     for rel, simple, fqn in problems:
         print("  %-46s %s" % (rel, simple))
-        print("      %s is ABSTRACT -- the bus refuses it at load;" % fqn)
+        print("      %s is ABSTRACT or an INTERFACE -- the bus refuses it at load;" % fqn)
         print("      name one of its subclasses instead.")
     print("\n%d LISTENER(S) THE BUS WILL REFUSE" % len(problems))
     return 1

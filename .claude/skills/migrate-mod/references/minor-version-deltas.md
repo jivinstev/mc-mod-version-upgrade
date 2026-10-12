@@ -459,8 +459,10 @@ L30. **GeckoLib 5.3 (1.21.10 line): `GeoRenderEvent.*` render-layer events are I
 `…event.block.CompileBlockRenderLayersEvent`. · **Symptom:** `addListener` on the interface compiles; the bus calls `getSuperclass()`
 on it, gets null and NPEs, so mod loading breaks on the CLIENT only. A secondary `IllegalStateException: No value present` from a
 mod-container lookup in a reload listener was fallout. Found by Gate C `launch`, not Gate B. · **Fix:** listen on the concrete classes.
-· **Follow-up (not done):** `tools/audit-event-listeners.py` flags a listener only when the parameter is an `abstract class`
-(it matches `" abstract class "` in `javap` output); a parameter that is an `interface` is not reported.
+· **Guard:** `tools/audit-event-listeners.py` now flags an interface parameter as well as an abstract class, checks every
+event type a dependency jar declares (it was `net.neoforged`/`net.minecraft` only, so GeckoLib's were never looked at), and
+resolves nested types (`GeoRenderEvent.Entity.CompileRenderLayers` → `…$Entity$CompileRenderLayers`). A/B'd on ECA 1.21.10:
+the pre-fix file is caught (3 listeners, exit 1), the fixed one is clean; 1.21.5–1.21.11 sweep: no new findings.
 
 L31. **1.21.11: `ResourceLocation` → `Identifier` and 329 class moves (CATALOG M45)** · `net.minecraft.resources.Identifier` is a pure
 rename (§V4 arrives here, not at 26.x); `FriendlyByteBuf.readResourceLocation/writeResourceLocation` → `readIdentifier/writeIdentifier`;
