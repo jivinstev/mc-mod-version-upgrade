@@ -97,8 +97,12 @@ def main():
         # detect from the PORT branch of a layer fork must not read as single-version (the nightly-run miss)
         git(f, "checkout", "-q", "port")
         r = sh(sys.executable, str(LS), "detect", "--repo", str(f))
-        expect(r.returncode == 3 and "layer=false" in r.stdout and "layer carries .multiversion" in r.stdout,
+        expect(r.returncode == 3 and "layer=false" in r.stdout and "but layer carries .multiversion" in r.stdout,
                f"detect on the port branch names the layer branch and exits 3: {r.stdout}{r.stderr}")
+        c = tmp / "clone"; sh("git", "clone", "-q", "--no-checkout", str(f), str(c)); git(c, "checkout", "-q", "port"); git(c, "remote", "set-head", "origin", "layer")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(c))
+        expect(r.returncode == 3 and "origin/layer carries" in r.stdout and "origin," not in r.stdout
+               and "origin carries" not in r.stdout, f"a clone's origin/HEAD alias is not listed as a branch: {r.stdout}")
         r = sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "layer")
         expect(r.returncode == 0 and "layer=true targets=1.21.4,1.21.5,1.21.8" in r.stdout
                and git(f, "rev-parse", "--abbrev-ref", "HEAD").strip() == "port", f"detect --ref reads the layer without checkout: {r.stdout}")

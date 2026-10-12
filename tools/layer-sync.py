@@ -146,8 +146,9 @@ def ref_targets(repo, ref):
 
 def layer_refs(repo):
     """Every local or remote branch that carries a layer target (so a check of the wrong branch cannot pass silently)."""
-    out = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes").stdout.split()
-    return [r for r in out if not r.endswith("/HEAD") and ref_targets(repo, r)]
+    rows = git(repo, "for-each-ref", "--format=%(refname:short)\t%(symref)", "refs/heads", "refs/remotes").stdout.splitlines()
+    # skip symbolic refs (origin/HEAD, which --format=short prints as a bare "origin"): an alias, not a branch
+    return [r for r, _, sym in (l.partition("\t") for l in rows) if r and not sym and ref_targets(repo, r)]
 
 
 def cmd_detect(a):
