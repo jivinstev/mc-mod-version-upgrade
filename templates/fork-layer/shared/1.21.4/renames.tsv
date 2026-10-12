@@ -1,0 +1,25 @@
+# Shared fork-layer rename table: NeoForge 1.21.3 -> 1.21.4 (Minecraft 1.21.4; NeoForge 21.4). Applied AFTER the
+# fork's own rows and on top of the 1.21.3 table (a 1.21.4 target inherits 1.21.3). Measured against
+# neoforge-21.4.158-sources.jar on the Epic Core API port (issue #49). CATALOG §M / minor-version-deltas L8+.
+#!exhaustive  shared table: most rows are for API this mod does not use
+# ---- client reload listeners: a named graph in 1.21.4
+net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent	net.neoforged.neoforge.client.event.AddClientReloadListenersEvent
+RegisterClientReloadListenersEvent	AddClientReloadListenersEvent
+re:(\w+)\.registerReloadListener\(([\w.()]+)\)	\1.addListener(@MVPKG@.ReloadIds.of(\2), \2)
+# ---- atlases and textures
+re:\bInventoryMenu\.BLOCK_ATLAS\b	net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_BLOCKS
+# ---- NeoForge 21.4: ClientLevel.partEntities (id -> part map) is gone; dragonParts() is the list of all parts
+re:\b(\w+)\.partEntities\.get\(([^()]+)\)	@MVPKG@.PartEntities.byId(\1, \2)
+re:\b(\w+)\.partEntities\.values\(\)	\1.dragonParts()
+re:\b(\w+)\.partEntities\.remove\((\w+)\.getId\(\)\)	\1.dragonParts().remove(\2)
+# ---- tickets: vanilla dropped POST_TELEPORT
+re:\bTicketType\.POST_TELEPORT\b	@MVPKG@.Tickets.POST_TELEPORT
+# ---- TextureManager.register(String prefix, texture) -> named registration (the first argument is a string)
+re:(\w+)\.register\(\s*("(?:[^"\\]|\\.)*"(?:\s*\+\s*(?:[^,()]|\([^()]*\))+)*),\s*(\w+)\s*\)	@MVPKG@.Textures.register(\1, \2, \3)
+re:\bSkullBlockRenderer\.createSkullRenderers\(	@MVPKG@.Skulls.createSkullRenderers(
+# ---- FML 6 (NeoForge 21.4) early display: SimpleBufferBuilder takes a name for its buffer
+re:new SimpleBufferBuilder\((\d+)\)	new SimpleBufferBuilder("@MODID@", \1)
+# ---- LevelRenderer.renderLevel lost its LightTexture argument (1.21.4); this row runs before the 1.21.3 one, on the
+# 1.21.1 text, so it writes the full 1.21.4 descriptor itself
+re:LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/renderer/LightTexture;	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;
+#!strict

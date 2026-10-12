@@ -54,8 +54,9 @@ def cmd_prepare(a):
         overlay = tmp / "overlay"
         overlay.mkdir()
         # farthest first, so a nearer target's file overwrites
+        sub = "java" if a.set == "main" else f"{a.set}/java"      # a non-main source set's overlays: targets/<t>/<set>/java
         for t in reversed(names):
-            d = MV / "targets" / t / "java"
+            d = MV / "targets" / t / sub
             if d.is_dir():
                 shutil.copytree(d, overlay, dirs_exist_ok=True)
         # rename rows: nearer target's rows FIRST so a correction to an inherited row is applied before it; the
@@ -82,10 +83,22 @@ def cmd_prepare(a):
             dl = tmp / "drops.txt"
             dl.write_text("\n".join(sorted(drops)) + "\n", encoding="utf-8")
             args += ["--drop", str(dl)]
-        print(f"layer: {a.target} chain {' > '.join(names)}")
+        # one table, several source sets: "matched nothing" is a property of the union (CATALOG X22). A non-main set
+        # records its hits next to its output; main (prepared last) merges every set's and reports once.
+        out = pathlib.Path(a.out)
+        hits_dir = out.parent
+        if a.set != "main":
+            args += ["--hits-out", str(hits_dir / f"hits-{a.set}.txt")]
+        else:
+            merged = sorted(hits_dir.glob("hits-*.txt"))
+            if merged:
+                allhits = tmp / "hits.txt"
+                allhits.write_text("".join(f.read_text(encoding="utf-8") for f in merged), encoding="utf-8")
+                args += ["--hits-in", str(allhits)]
+        print(f"layer: {a.target} [{a.set}] chain {' > '.join(names)}")
         rc = subprocess.call(args)
-        if rc == 0:
-            add_shared_helpers(names, pathlib.Path(a.out))
+        if rc == 0 and a.set == "main":
+            add_shared_helpers(names, out)
         return rc
 
 
@@ -227,6 +240,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("prepare"); p.add_argument("--target", required=True)
     p.add_argument("--src", required=True); p.add_argument("--out", required=True)
+    p.add_argument("--set", default="main", help="the source set (overlays for a non-main set: targets/<t>/<set>/java)")
     p = sub.add_parser("props"); p.add_argument("--target", required=True)
     p = sub.add_parser("isolation"); p.add_argument("--base", required=True)
     p = sub.add_parser("compare-jars"); p.add_argument("a"); p.add_argument("b")

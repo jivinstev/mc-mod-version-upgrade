@@ -46,17 +46,37 @@ def mvPython = System.getProperty('os.name').toLowerCase().contains('windows') ?
 layout.buildDirectory = file("build/mc${mvTarget}")   // inside build/: every authors' .gitignore ignores it
 
 // ---- sources -----------------------------------------------------------------------------------
+// Every source set's own src/<set>/java goes through the same table (a mod can have more than main: an extra
+// variant built against main's classes). Main is prepared last so it can report dead rules over all of them.
+// Only the authors' src/<set>/java is swapped: anything else on a set (a gate harness's GameTests wired in by an
+// init script, say) stays as it is -- it is written for every target.
+def mvOtherSets = []
+sourceSets.each { ss ->
+    def authors = file("src/${ss.name}/java")
+    if (ss.name == 'main' || !authors.isDirectory() || !ss.java.srcDirs.contains(authors)) return
+    def prepared = layout.buildDirectory.dir("mv/${ss.name}-java")
+    def task = tasks.register("mvPrepare${ss.name.capitalize()}Sources", Exec) {
+        description = "Prepare src/${ss.name}/java for Minecraft ${mvTarget}"
+        inputs.dir(authors)
+        inputs.dir('.multiversion')
+        outputs.dir(prepared)
+        commandLine mvPython, '.multiversion/tools/layer.py', 'prepare', '--target', mvTarget, '--set', ss.name,
+                '--src', authors.path, '--out', prepared.get().asFile.path
+    }
+    ss.java.srcDirs = ss.java.srcDirs.collect { it == authors ? prepared : it }
+    tasks.named(ss.compileJavaTaskName) { dependsOn task }
+    mvOtherSets << task
+}
 def mvPrepared = layout.buildDirectory.dir('mv/java')
 def mvPrepare = tasks.register('mvPrepareSources', Exec) {
     description = "Prepare src/main/java for Minecraft ${mvTarget}"
+    dependsOn mvOtherSets
     inputs.dir('src/main/java')
-    inputs.dir('.multiversion/targets')
+    inputs.dir('.multiversion')
     outputs.dir(mvPrepared)
     commandLine mvPython, '.multiversion/tools/layer.py', 'prepare', '--target', mvTarget,
             '--src', 'src/main/java', '--out', mvPrepared.get().asFile.path
 }
-// Swap ONLY the authors' src/main/java for the prepared tree: anything else on the source set (a gate harness's
-// GameTests wired in by an init script, say) stays, and is not renamed -- it is written for every target.
 def mvAuthorsJava = file('src/main/java')
 sourceSets.main.java.srcDirs = sourceSets.main.java.srcDirs.collect { it == mvAuthorsJava ? mvPrepared : it }
 tasks.named('compileJava') { dependsOn mvPrepare }
