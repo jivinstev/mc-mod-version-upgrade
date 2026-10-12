@@ -135,7 +135,33 @@ def harness(c):
     layer = layer_target()
     if layer:
         harness_layer_target(h, layer)
+        if no_gametest_annotation(layer):
+            harness_layer_registration(c, h, pkg, layer)
     return h
+
+
+def mc_tuple(mc):
+    return tuple(int(x) for x in re.findall(r"\d+", mc))
+
+
+def no_gametest_annotation(mc):
+    """1.21.5 removed the annotation-driven GameTest API (net.minecraft.gametest.framework.GameTest,
+    neoforge's GameTestHolder / PrefixGameTestTemplate): tests are data-driven GameTestInstances from there on
+    (CATALOG V5, V20, V47). 1.21.1-1.21.4 keep the annotations, so their harness is left byte-identical."""
+    return mc_tuple(mc) >= (1, 21, 5)
+
+
+def harness_layer_registration(c, h, pkg, mc):
+    """A layer target past 1.21.5: the (already renamed) harness tests are wired by the generated registrar and
+    their dead annotations stripped, by the same templates/multi-version/tools/gametest_adapter.py the 26.x route uses.
+    The 1.21.5 dialect keeps ResourceLocation and FML's @EventBusSubscriber bus attribute; 26.x is the adapter's default."""
+    dialect = "26" if mc_tuple(mc) >= (26,) else "1.21.5"
+    r = subprocess.run([sys.executable, str(ROOT / "templates/multi-version/tools/gametest_adapter.py"), "--root",
+                        str(h / "java"), "--modid", c["args"].modid, "--package", f"{pkg}.gatetest", "--structure",
+                        "empty_test", "--dialect", dialect],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode or "wired 0 tests" in r.stdout:
+        raise Fail(f"wiring the harness GameTests for {mc} failed: {(r.stderr or r.stdout)[-400:]}")
 
 
 def layer_target(env=None):
@@ -257,7 +283,9 @@ def gate_a(c, log):
     ran = sum(int(m) for f in res for m in re.findall(r'tests="(\d+)"', f.read_text(encoding="utf-8")))
     bad = sum(int(m) for f in res for m in re.findall(r'(?:failures|errors)="(\d+)"', f.read_text(encoding="utf-8")))
     if r.returncode or bad:
-        raise Fail(f"Gate A failed ({bad} failure(s)); see {log}")
+        errs = list(dict.fromkeys(f"{'/'.join(m[0].split('/')[-3:])}:{m[1]}: {m[2].strip()}" for m in re.findall(
+            r"(?m)^\s*(\S+\.java):(\d+): error: (.+)$", pathlib.Path(log).read_text(encoding="utf-8", errors="replace"))))[:3]
+        raise Fail(f"Gate A failed ({bad} failure(s)); see {log}" + (f" -- first compile error(s): {' | '.join(errs)}" if errs else ""))
     if not ran:
         raise Fail("Gate A ran no tests -- that is not a pass")
     return ran

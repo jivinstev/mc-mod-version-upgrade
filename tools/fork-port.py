@@ -57,6 +57,27 @@ def load(name, file):
 
 # ---------------------------------------------------------------- pure helpers (covered by --self-check)
 
+def gate_evidence(text, limit=4):
+    """The first few concrete reasons a gate log is red: javac `file:line: error: message` lines (path shortened to
+    its last three parts), else failing JUnit/GameTest lines. [] when the log says neither."""
+    out, seen = [], set()
+    for m in re.finditer(r"(?m)^\s*(\S+\.java):(\d+): error: (.+)$", text):
+        key = (m.group(1), m.group(2))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append("%s:%s: %s" % ("/".join(m.group(1).split("/")[-3:]), m.group(2), m.group(3).strip()))
+        if len(out) >= limit:
+            return out
+    if out:
+        return out
+    for m in re.finditer(r"(?m)^.*(?:FAILED|failed after|Test .* failed|Unregistered holder|Missing test).*$", text):
+        out.append(m.group(0).strip()[:200])
+        if len(out) >= limit:
+            break
+    return out
+
+
 def select_stages(from_stage):
     """(skipped, to_run) for --from-stage."""
     if from_stage is None:
@@ -478,8 +499,14 @@ class Run:
         if r.returncode == 0:
             return {"done": f"{len(passed)} gate(s) green ({self.a.gates})"}
         code = 12 if any("Gate C" in l for l in failed) else 11
+        evidence = []       # why each red gate is red: its own log's first compile errors / failing tests
+        for l in failed[:2]:
+            lp = re.search(r"see (\S+?)(?:[;)\s]|$)", l)
+            lp = pathlib.Path(lp.group(1)) if lp else None
+            if lp and lp.is_file():
+                evidence += [f"{l.split(':')[0][:40]}: {e}" for e in gate_evidence(lp.read_text(encoding="utf-8", errors="replace"))]
         return {"stop": f"{len(failed) or 'a'} gate(s) red: " + "; ".join(l[:90] for l in failed[:2]), "code": code,
-                "gates": [l[:200] for l in failed], "detail": [l[:200] for l in failed[:4]],
+                "gates": [l[:200] for l in failed], "detail": [l[:200] for l in failed[:4]] + [e[:240] for e in evidence],
                 "choices": ["run the same gates without --mc as the control: a red that is red on the base is not this target's",
                             "read build/mc%s/fork-port/ci-gates.log and the gate's own log" % self.t]}
 
@@ -633,6 +660,12 @@ def self_check():
         lg = pathlib.Path(d, "l.jsonl")
         lg.write_text("\n".join(json.dumps(e) for e in [{"event": "start"}, {"event": "worker", "usd": 9}] + evs) + "\n", encoding="utf-8")
         expect(loop_events(lg)[0]["event"] == "start" and len(loop_events(lg)) == len(evs), "only the last run's events")
+    ev = gate_evidence("noise\n/w/x/y/java/net/eca/gatetest/BaselineGameTest.java:15: error: cannot find symbol\n"
+                       "/w/x/y/java/net/eca/gatetest/BaselineGameTest.java:15: error: cannot find symbol\n"
+                       "  /w/x/y/java/net/eca/Other.java:9: error: incompatible types: A cannot be converted to B\n")
+    expect(ev == ["eca/gatetest/BaselineGameTest.java:15: cannot find symbol",
+                  "net/eca/Other.java:9: incompatible types: A cannot be converted to B"], "gate_evidence compile errors: %s" % ev)
+    expect(gate_evidence("> Task :test FAILED\n")[0].endswith("FAILED") and gate_evidence("all fine") == [], "gate_evidence tests/none")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

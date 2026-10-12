@@ -366,6 +366,19 @@ grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .mult
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, the generated moves table (no duplicate froms, block closed), residue report, STOP block, layer.py patch" \
   || bad "fork-port self-check: $out"
+out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
+  || bad "gametest_adapter self-check: $out"
+out="$(python3 - <<'PY' 2>&1
+import importlib.util, pathlib
+s = importlib.util.spec_from_file_location("pg", "tools/port_gates.py"); m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+assert [m.no_gametest_annotation(v) for v in ("1.21.1", "1.21.4", "1.21.5", "1.21.10", "26.2")] == [False, False, True, True, True]
+assert pathlib.Path("templates/upstream-harness/versions/1.21.5.renames.tsv").read_text().count("snapTo") >= 1
+print("self-check: OK")
+PY
+)"
+grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
+  || bad "port_gates check: $out"
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
