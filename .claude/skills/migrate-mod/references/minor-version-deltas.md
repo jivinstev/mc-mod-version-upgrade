@@ -453,6 +453,34 @@ for a mod that also has an agent backend:** initialise the backend from `FMLCons
 so it need only be selected before the first transformed class loads) -- restores 1.21.1's shipped behaviour; a
 coremod-only mod has no shipped path on FML 10 and should say so loudly.
 
+L30. **GeckoLib 5.3 (1.21.10 line): `GeoRenderEvent.*` render-layer events are INTERFACES (CATALOG M44)** ·
+`GeoRenderEvent.Entity/ReplacedEntity/Block.CompileRenderLayers` are interfaces; the postable events are the concrete classes
+`software.bernie.geckolib.event.entity.CompileEntityRenderLayersEvent`, `…event.replacedentity.CompileReplacedEntityRenderLayersEvent`,
+`…event.block.CompileBlockRenderLayersEvent`. · **Symptom:** `addListener` on the interface compiles; the bus calls `getSuperclass()`
+on it, gets null and NPEs, so mod loading breaks on the CLIENT only. A secondary `IllegalStateException: No value present` from a
+mod-container lookup in a reload listener was fallout. Found by Gate C `launch`, not Gate B. · **Fix:** listen on the concrete classes.
+· **Follow-up (not done):** `tools/audit-event-listeners.py` flags a listener only when the parameter is an `abstract class`
+(it matches `" abstract class "` in `javap` output); a parameter that is an `interface` is not reported.
+
+L31. **1.21.11: `ResourceLocation` → `Identifier` and 329 class moves (CATALOG M45)** · `net.minecraft.resources.Identifier` is a pure
+rename (§V4 arrives here, not at 26.x); `FriendlyByteBuf.readResourceLocation/writeResourceLocation` → `readIdentifier/writeIdentifier`;
+`ResourceKey.location()` → `identifier()`; **`TagKey.location()` is unchanged**, so never a bare `.location()` row. 329 classes moved
+(the start of the 26.x sub-package split). Mixin descriptors name classes in slash form (`Lnet/minecraft/...;`), which a dotted move
+row cannot reach: give those moves slash-form rows. Shared helpers and inherited overlays are not rewritten by the rows (CATALOG X54).
+· **Anticipates:** §V4, §V3.
+
+L32. **1.21.11 signature changes found by the mixin audit (CATALOG M46)** · `Camera.setup(Level, …)` (was `BlockGetter`);
+`CloudRenderer.render` has a `long gameTime` before the partial tick; `FogRenderer.setupFog` lost `boolean thickFog`;
+`LevelRenderer.isSectionCompiled` → `isSectionCompiledAndVisible`; `RenderType` → `net.minecraft.client.renderer.rendertype`
+(`RenderTypes.*`; here `entityCutout`/`entityCutoutNoCull` still mean what they did, §V60's swap comes later); `SkullModelBase` →
+`client.model.object.skull`; `SavedDataType.Factory` takes a `ServerLevel` and `SavedData.Context` is gone; command
+`hasPermission(2)` → `Commands.hasPermission(Commands.LEVEL_GAMEMASTERS)`. · **Anticipates:** §V15, §V60.
+
+L33. **GeckoLib 5.4.5 (1.21.11): no hidden state on `GeoBone`; hooks take `RenderPassInfo<R>` (CATALOG M47)** · `setHidden`,
+`getChildBones`, `renderBone` and `buildRenderTask` are gone; layer hooks take `RenderPassInfo<R>`; `frameSnapshot` is live only
+inside `RenderPassInfo.renderPosed`. · **Fix:** hide bones with a `BoneUpdater` added in `preRender`; draw with
+`renderPassInfo.model().render(...)` inside `renderPosed`. · **Anticipates:** extends §V18d.
+
 **Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
 §X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
 no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:

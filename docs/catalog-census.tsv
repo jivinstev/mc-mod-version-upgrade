@@ -60,8 +60,12 @@
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L26	90c4ea94155bb9d4
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L27	afba96e6292864de
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L28	ff4ace3e8629328a
-.claude/skills/migrate-mod/references/minor-version-deltas.md::L29	bedde153ff5cfd6f
+.claude/skills/migrate-mod/references/minor-version-deltas.md::L29	bf21f104cc743ec5
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L3	a85890668058b8ad
+.claude/skills/migrate-mod/references/minor-version-deltas.md::L30	020f7e6d740c8740
+.claude/skills/migrate-mod/references/minor-version-deltas.md::L31	7ea496805bdae88a
+.claude/skills/migrate-mod/references/minor-version-deltas.md::L32	0fa7f0d7ad91dbbe
+.claude/skills/migrate-mod/references/minor-version-deltas.md::L33	b7a985998dbdc823
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L4	04557cbb0abbe812
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L5	31fa1cc1f2a67565
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L6	c253bc770f084e4d
@@ -390,6 +394,10 @@ CATALOG.md::M40	16fbde33811379e2
 CATALOG.md::M41	7934f56cfda6764c
 CATALOG.md::M42	50a9e09570e8f4a6
 CATALOG.md::M43	3735dbfcbb01190c
+CATALOG.md::M44	735f2ea1d816b298
+CATALOG.md::M45	fc8bcbb4393c6728
+CATALOG.md::M46	22a0be27d8f1859b
+CATALOG.md::M47	1713479ebf57b097
 CATALOG.md::M5	e5c35b6e2d4feb49
 CATALOG.md::M6	b7c94bc9a91f521b
 CATALOG.md::M7	2bfb0aeab0fc64c0
@@ -635,7 +643,7 @@ CATALOG.md::X40	129c77ba07610bec
 CATALOG.md::X41	3b3613d1960b2c30
 CATALOG.md::X42	e95cee5147c7efc6
 CATALOG.md::X43	cd8046e9febe8eba
-CATALOG.md::X44	a569a3b35babb3d5
+CATALOG.md::X44	e17a878f46635579
 CATALOG.md::X45	fc8b3dae95152aba
 CATALOG.md::X46	cc44eb976e54dceb
 CATALOG.md::X47	b3e86d412f63f196
@@ -646,6 +654,7 @@ CATALOG.md::X50	34d572aee29fde2f
 CATALOG.md::X51	37b83da3fc5a538a
 CATALOG.md::X52	aabf17d63dac1ea4
 CATALOG.md::X53	d4610438cad642dc
+CATALOG.md::X54	17f74074027e4f98
 CATALOG.md::X5b	b1489539cb25c625
 CATALOG.md::X6	d05f85b6976e30be
 CATALOG.md::X7	8049466805237a2c
