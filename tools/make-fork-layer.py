@@ -33,7 +33,7 @@ directory and ONE commented hook line appended to the authors' build.gradle (des
 its access transformer from the base one (re-derive it with fix-access-transformer.py --overrides-from).
 Standard library only.
 """
-import argparse, json, pathlib, re, shutil, sys, tempfile, urllib.request
+import argparse, subprocess, json, pathlib, re, shutil, sys, tempfile, urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TPL = ROOT / "templates" / "fork-layer"
@@ -226,6 +226,15 @@ def self_check():
             ok = False; print("FAIL hook not idempotent")
         ns = argparse.Namespace(target="1.21.3", neo="21.3.97", inherits=None, java=21, prop=["g=1"], substitute=[])
         add_target(repo, ns)
+        # through the real command line too: --prop/--substitute once hung off the wrong subcommand, and a
+        # Namespace built here could not see it (a GeckoLib mod's add-target crashed on a.prop)
+        (repo / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.1\ngeckolib_version=4.7\n",
+                                                encoding="utf-8")
+        r = subprocess.run([sys.executable, __file__, "add-target", "--repo", str(repo), "--target", "1.21.4"],
+                           capture_output=True, text=True)
+        tp = repo / ".multiversion/targets/1.21.4/target.properties"
+        if r.returncode != 0 or not tp.exists() or "prop.geckolib_version=" not in tp.read_text(encoding="utf-8"):
+            ok = False; print("FAIL add-target from the command line:", (r.stdout + r.stderr)[-300:])
         p = (repo / ".multiversion/targets/1.21.3/target.properties").read_text(encoding="utf-8")
         if "prop.g=1" not in p or "toml.minecraft=[1.21.3,1.21.4)" not in p:
             ok = False; print("FAIL target props")
@@ -253,10 +262,10 @@ def main():
     p = sub.add_parser("add-target"); p.add_argument("--repo", required=True)
     p.add_argument("--target", required=True); p.add_argument("--neo")
     p.add_argument("--inherits"); p.add_argument("--java", type=int)
-    p = sub.add_parser("sync-shared"); p.add_argument("--repo", required=True); p.add_argument("--check", action="store_true")
-    p = sub.add_parser("versions"); p.add_argument("--refresh", action="store_true")
     p.add_argument("--prop", action="append", default=[], help="k=v passed as -Pk=v")
     p.add_argument("--substitute", action="append", default=[], help="group:name=group:name:version")
+    p = sub.add_parser("sync-shared"); p.add_argument("--repo", required=True); p.add_argument("--check", action="store_true")
+    p = sub.add_parser("versions"); p.add_argument("--refresh", action="store_true")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
