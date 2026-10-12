@@ -158,6 +158,30 @@ def chain(mv, target):
     return out   # nearest first
 
 
+RECOUNT_MARK = "# --- the capped compile hit the cap; uncapped recount (portFullErrors) ---"
+
+
+def hit_cap(text):
+    """Did the Gradle-integrated compile stop at tools/maxerrs.init.gradle's cap (javac printing '1,000 errors')?"""
+    cap = load("port_gates", "port_gates.py").GRADLE_ERROR_CAP
+    return re.search(r"(?m)^\s*%s errors\s*$" % format(cap, ",").replace(",", ",?"), text) is not None
+
+
+def capped_tasks(text):
+    """The compile tasks whose javac stopped at the cap: each '1,000 errors' line belongs to the last
+    '> Task :compile...Java' before it. Only those are recounted -- recounting a task whose dependency (main's
+    compileJava, for a source set built on main) failed would not run at all."""
+    cap = load("port_gates", "port_gates.py").GRADLE_ERROR_CAP
+    out, cur = [], None
+    for line in text.splitlines():
+        m = re.match(r"^> Task :(compile\w*Java)\b", line)
+        if m:
+            cur = m.group(1)
+        elif re.match(r"^%s errors\s*$" % format(cap, ",").replace(",", ",?"), line.strip()) and cur and cur not in out:
+            out.append(cur)
+    return out
+
+
 def mc_key(v):
     return tuple(int(x) if x.isdigit() else 0 for x in re.findall(r"\d+|[A-Za-z]+", v))
 
@@ -371,7 +395,7 @@ class Run:
     def count(self, log):
         """(errors or None, reason). BUILD SUCCESSFUL is 0; otherwise only burndown-count.sh may call it a count."""
         text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
-        if "BUILD SUCCESSFUL" in text:
+        if "BUILD SUCCESSFUL" in text.split(RECOUNT_MARK)[0]:       # the recount's own run SUCCEEDS: not a clean compile
             return 0, ""
         r = subprocess.run([BASH, str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
@@ -518,6 +542,15 @@ class Run:
         log = self.work / "measure.log"
         self.work.mkdir(parents=True, exist_ok=True)
         self.gradle(tasks, log)
+        capped = capped_tasks(pathlib.Path(log).read_text(encoding="utf-8", errors="replace"))
+        if capped:
+            # the capped compile is not a count (tools/maxerrs.init.gradle): re-run the same javac uncapped and append
+            # it to the same log, as tools/port_gates.py compile_log() does (measured: a 26.3 hop stopped here)
+            full = self.work / "measure.full.log"
+            self.gradle(["portFullErrors", "-PportFullErrorsTasks=" + ",".join(capped)], full)
+            with open(log, "a", encoding="utf-8") as fh:
+                fh.write("\n" + RECOUNT_MARK + "\n")
+                fh.write(full.read_text(encoding="utf-8", errors="replace"))
         n, why = self.count(log)
         if n is None:
             return {"stop": "the compile does not count: " + why, "code": 10, "errors": None, "detail": [why],
@@ -861,6 +894,17 @@ def self_check():
         if not c:
             ok = False; print("FAIL:", msg)
     # stage selection
+    expect(hit_cap("> Task :compileJava\n1,000 errors\n") and hit_cap("1000 errors\n") and not hit_cap("999 errors\n")
+           and not hit_cap("21,000 errors\n"), "hit_cap reads javac's capped total, with or without the comma")
+    with tempfile.TemporaryDirectory() as d_:
+        lg = pathlib.Path(d_) / "m.log"
+        lg.write_text("> Task :compileJava\n/w/A.java:1: error: cannot find symbol\n1,000 errors\n> Task :compileJava FAILED\nBUILD FAILED\n\n"
+                      + RECOUNT_MARK + "\nPORT_FULL_ERRORS compileJava: uncapped javac over 1 file(s)\n/w/A.java:1: error: cannot find symbol\n"
+                      "/w/B.java:2: error: cannot find symbol\n2 errors\nPORT_FULL_ERRORS compileJava: javac exit 1\nBUILD SUCCESSFUL in 3s\n", encoding="utf-8")
+        n_, _w = Run.count(None, lg)
+        expect(n_ == 2, f"a recounted log is counted, not read as clean from the recount run's BUILD SUCCESSFUL: {n_}")
+    expect(capped_tasks("> Task :compileJava\nA.java:1: error: x\n1,000 errors\n> Task :compileJava FAILED\n> Task :compileJvmtiJava\n"
+                        "B.java:1: error: y\n1 error\n") == ["compileJava"], "only the task that hit the cap is recounted")
     expect(select_stages(None) == ([], STAGES), "no --from-stage runs everything")
     expect(select_stages(None, None) == ([], STAGES), "--to-stage absent changes nothing")
     expect(select_stages("stage", "measure") == (["setup"], ["stage", "moves", "measure"]), "from stage to measure")
