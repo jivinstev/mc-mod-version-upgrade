@@ -897,6 +897,9 @@ Shared rows/helpers every fork inherits: `templates/fork-layer/shared/1.21.3/`. 
 - **M25. Item rendering by render state (1.21.4)** — no stack while an item draws: record it at `ItemModelResolver.appendItemLayers`, draw in `ItemStackRenderState$LayerRenderState.render` once per item (L10).
 - **M26. GUI scroll widgets and metadata (1.21.4)** — `AbstractScrollWidget` → `AbstractTextAreaWidget`; `clicked` → `isMouseOver`; `getScrollbarPosition` → `scrollBarX`; `AnimationMetadataSection` is a codec record (L11, L12).
 - **M27. A layer prepares EVERY source set, and distrusts a class dir after failed compiles** (L13).
+- **M28. NBT getters return Optional (1.21.5)** — shared rows anchored on a literal/CONSTANT key, never on the bare call (a ByteBuffer read matches it too) (L14).
+- **M29. RenderPipeline/RenderPass replaces immediate-mode GL (1.21.5)** — the shared compat layer keeps the 1.21.4 surface; `precompilePipeline` takes a mod's own shader sources (L15).
+- **M30. Mixin targets moved in 1.21.5: CloudRenderer.render's matrices, Player.setItemSlot -> LivingEntity** (L16).
 
 ## S. Silent-resource patterns (compile clean, run clean, *silently wrong*)
 > **Axis:** neither the compiler nor the crash gates can see these. Java has a compiler; resources do

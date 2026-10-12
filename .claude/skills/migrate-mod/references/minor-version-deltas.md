@@ -301,6 +301,29 @@ string of failed compiles a target's incremental state can leave `classes/` part
 compile "succeeds" and every set built on main fails with `package … does not exist`. Delete `build/mc<t>/classes`
 and recompile before believing either.
 
+### 1.21.4 → 1.21.5 (fork multi-version layer) — the RenderPipeline hop (888 errors at the start)
+Shared rows/helpers: `templates/fork-layer/shared/1.21.5/` (NBT Optional rows, `Nbt`, the render compat classes).
+
+L14. **NBT getters return `Optional`** · the same change 26.2 carries (CATALOG §V12), arriving here. The 26.2 rows
+match `.getInt(<anything>)` and so also rewrite a `ByteBuffer` read (`bytes.getInt(at)`); the shared 1.21.5 rows
+anchor on a string-literal or CONSTANT key instead. A key in a variable, and a ListTag index, need the fork's own
+rows (a shared row cannot know the receiver's type). `getUUID/putUUID/hasUUID` are gone: `Nbt` (UUIDUtil.CODEC).
+
+L15. **Immediate-mode GL → `RenderPipeline` + `RenderPass`** · `RenderSystem.enableBlend/blendFunc/depthMask/
+enable(Disable)DepthTest/Cull/colorMask/setShader`, `BufferUploader`, `CoreShaders`, `ShaderStateShard`, and the
+transparency/depth/write/cull shards are gone; blend, depth, cull and masks are fixed per pipeline, and a draw is a
+RenderPass. Custom uniforms are set on the pass by name; the standard ones (`GlProgram.BUILT_IN_UNIFORMS`) are
+filled automatically; every sampler the program declares must be bound. A mod can compile its own shader sources
+into a pipeline with `GpuDevice.precompilePipeline(pipeline, sourceFunction)` (public, cached by pipeline) — no
+mixin. The shared compat (`LegacyGl`, `LegacyRenderType`, `ShaderInstance`, `ShaderShard`, `Uniform`,
+`RawGlTexture`) keeps the 1.21.4 surface. Not expressible: a blend equation other than ADD (logged).
+`GlTexture` gained an `external` constructor (NeoForge 21.5): a mod's own GL texture id wraps as a GpuTexture.
+
+L16. **Mixin targets that moved (found by the audit, fixed per mod)** · `CloudRenderer.render` dropped its two
+`Matrix4f` parameters (`(int, CloudStatus, float, Vec3, float)`); `Player` no longer declares `setItemSlot` (only
+`LivingEntity`/`Mob` do, through `EntityEquipment`) — retarget to `LivingEntity` with an `instanceof Player` guard.
+Deliberately NOT shared rows: a regex over a handler's parameter list cannot tell a handler that uses the matrices.
+
 ### Runtime deltas (Gate B over a clean compile, 1.21.1 → 1.21.4)
 **Measured:** the first 1.21.4 Gate B run was **27 red** with main + test compiling clean on both targets.
 Every one was one of the six below. After them: `ci,default` 613 passed, batch composition identical to the
