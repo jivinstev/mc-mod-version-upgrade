@@ -1,0 +1,119 @@
+// Multi-version layer for a community fork port (mc-mod-version-upgrade: templates/fork-layer).
+//
+// Applied by ONE line, last in the authors' build.gradle, on the fork's `neoforge-1.21.x` branch only.
+// Without -Pmc (or with -Pmc=<base version>) this script returns before touching anything, so the base
+// build is byte-for-byte the authors' build; CI checks that by building the jar both ways.
+//
+// With -Pmc=<target> it adjusts the authors' build after the fact, never by editing it:
+//   * Java sources go through .multiversion/tools/layer.py prepare: the target's rename table and its
+//     whole-file overlays (targets/<t>/java), chained through each target's `inherits`.
+//   * targets/<t>/resources is layered over src/main/resources (an overlay file wins).
+//   * The access transformer, if the target has one, replaces the authors' (it must be re-derived per
+//     Minecraft version: vanilla moves the classes it names).
+//   * The Java toolchain, neoforge.mods.toml version ranges and dependency substitutions follow the
+//     target's target.properties.
+//   * Everything builds into build-mc<t>/, so one target's classes never mix with another's.
+// Versions are NOT changed here: run through .multiversion/build.sh <t>, which passes the target's
+// versions as -P (they override gradle.properties) along with -Pmc.
+
+def mvTarget = project.findProperty('mc')?.toString()
+def mvBase = new Properties()
+file('.multiversion/base.properties').withInputStream { mvBase.load(it) }
+if (mvTarget == null || mvTarget == mvBase.getProperty('minecraft_version')) {
+    return
+}
+
+def mvDir = file(".multiversion/targets/${mvTarget}")
+if (!file("${mvDir}/target.properties").exists()) {
+    def known = file('.multiversion/targets').list()?.sort()?.join(', ')
+    throw new GradleException("Unknown -Pmc=${mvTarget}. Known targets: ${mvBase.getProperty('minecraft_version')} (base), ${known}")
+}
+def mvProps = new Properties()
+file("${mvDir}/target.properties").withInputStream { mvProps.load(it) }
+
+// The versions must have arrived as -P. Building 1.21.1's Minecraft with a 1.21.4 source tree would
+// compile against the wrong game and say nothing.
+mvProps.stringPropertyNames().findAll { it.startsWith('prop.') }.each { k ->
+    def name = k.substring(5)
+    def want = mvProps.getProperty(k)
+    if (project.findProperty(name)?.toString() != want) {
+        throw new GradleException("-Pmc=${mvTarget} needs -P${name}=${want} (got ${project.findProperty(name)}). " +
+                "Build with: .multiversion/build.sh ${mvTarget} <tasks>")
+    }
+}
+
+def mvPython = System.getProperty('os.name').toLowerCase().contains('windows') ? 'python' : 'python3'
+layout.buildDirectory = file("build-mc${mvTarget}")
+
+// ---- sources -----------------------------------------------------------------------------------
+def mvPrepared = layout.buildDirectory.dir('mv/java')
+def mvPrepare = tasks.register('mvPrepareSources', Exec) {
+    description = "Prepare src/main/java for Minecraft ${mvTarget}"
+    inputs.dir('src/main/java')
+    inputs.dir('.multiversion/targets')
+    outputs.dir(mvPrepared)
+    commandLine mvPython, '.multiversion/tools/layer.py', 'prepare', '--target', mvTarget,
+            '--src', 'src/main/java', '--out', mvPrepared.get().asFile.path
+}
+sourceSets.main.java.srcDirs = [mvPrepared]
+tasks.named('compileJava') { dependsOn mvPrepare }
+
+// ---- resources ---------------------------------------------------------------------------------
+def mvChain = []
+for (def t = mvTarget; t; ) {
+    mvChain.add(0, t)
+    def p = new Properties()
+    file(".multiversion/targets/${t}/target.properties").withInputStream { p.load(it) }
+    t = p.getProperty('inherits')
+}
+def mvResDirs = mvChain.reverse().collect { file(".multiversion/targets/${it}/resources") }.findAll { it.isDirectory() }
+sourceSets.main.resources.srcDirs = mvResDirs + sourceSets.main.resources.srcDirs.toList()
+tasks.withType(ProcessResources).configureEach { duplicatesStrategy = DuplicatesStrategy.EXCLUDE }
+
+def mvAt = mvChain.reverse().collect { file(".multiversion/targets/${it}/resources/META-INF/accesstransformer.cfg") }.find { it.exists() }
+if (mvAt != null) {
+    neoForge.accessTransformers.files.setFrom(mvAt)
+}
+
+def mvRanges = mvProps.stringPropertyNames().findAll { it.startsWith('toml.') }.collectEntries { [(it.substring(5)): mvProps.getProperty(it)] }
+tasks.withType(ProcessResources).configureEach {
+    inputs.property('mvRanges', mvRanges.toString())
+    doLast {
+        destinationDir.eachFileRecurse { f ->
+            if (f.name == 'neoforge.mods.toml') {
+                f.text = mvRewriteToml(f.text, mvRanges)
+            }
+        }
+    }
+}
+
+// ---- toolchain and dependencies ----------------------------------------------------------------
+if (mvProps.getProperty('java_version')) {
+    def jv = mvProps.getProperty('java_version') as int
+    java.toolchain.languageVersion = JavaLanguageVersion.of(jv)
+    tasks.withType(JavaCompile).configureEach { options.release = jv }
+}
+def mvSubs = mvProps.stringPropertyNames().findAll { it.startsWith('substitute.') }
+configurations.configureEach {
+    resolutionStrategy.dependencySubstitution {
+        mvSubs.each { k -> substitute(module(k.substring(11))).using(module(mvProps.getProperty(k))) }
+    }
+}
+println "multiversion: target ${mvTarget} (chain ${mvChain.join(' > ')}), build dir build-mc${mvTarget}"
+
+// Replace versionRange in the [[dependencies.*]] block whose modId the key names ("minecraft", "neoforge").
+String mvRewriteToml(String text, Map ranges) {
+    def out = new StringBuilder()
+    String modId = null
+    text.eachLine { line ->
+        def m = line =~ /^\s*modId\s*=\s*"([^"]+)"/
+        if (line.trim().startsWith('[')) modId = null
+        if (m.find()) modId = m.group(1)
+        def v = line =~ /^(\s*versionRange\s*=\s*)"[^"]*"(.*)$/
+        if (modId != null && ranges.containsKey(modId) && v.find()) {
+            line = "${v.group(1)}\"${ranges[modId]}\"${v.group(2)}"
+        }
+        out.append(line).append('\n')
+    }
+    return out.toString()
+}

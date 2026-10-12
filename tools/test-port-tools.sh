@@ -357,6 +357,13 @@ PY
 grep -q '^parity OK$' <<<"$out" && ok "port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs a stage tool itself; every era converter is listed" \
   || bad "route parity: $out"
 
+out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges" \
+  || bad "make-fork-layer self-check: $out"
+out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest" \
+  || bad "layer.py self-check: $out"
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
