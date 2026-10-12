@@ -91,7 +91,7 @@ def cmd_props(a):
 
 
 def git(*args, cwd="."):
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", check=True).stdout
 
 
 def isolation_problems(changed, build_diff):
@@ -165,7 +165,7 @@ def self_check():
         root = pathlib.Path(d)
         for t, inh in (("1.21.3", None), ("1.21.4", "1.21.3")):
             (root / "targets" / t).mkdir(parents=True)
-            (root / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "x=1\n")
+            (root / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "x=1\n", encoding="utf-8")
         expect(chain("1.21.4", root) == ["1.21.4", "1.21.3"], "chain")
         a, b = root / "a.jar", root / "b.jar"
         for p, body in ((a, b"x"), (b, b"x")):

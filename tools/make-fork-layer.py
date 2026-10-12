@@ -103,14 +103,14 @@ def self_check():
         ok = False; print("FAIL ranges")
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d)
-        (repo / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.1\n")
-        (repo / "build.gradle").write_text("plugins {}\n")
+        (repo / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.1\n", encoding="utf-8")
+        (repo / "build.gradle").write_text("plugins {}\n", encoding="utf-8")
         init(repo); init(repo)
-        if (repo / "build.gradle").read_text().count("apply from: '.multiversion/layer.gradle'") != 1:
+        if (repo / "build.gradle").read_text(encoding="utf-8").count("apply from: '.multiversion/layer.gradle'") != 1:
             ok = False; print("FAIL hook not idempotent")
         ns = argparse.Namespace(target="1.21.3", neo="21.3.97", inherits=None, java=21, prop=["g=1"], substitute=[])
         add_target(repo, ns)
-        p = (repo / ".multiversion/targets/1.21.3/target.properties").read_text()
+        p = (repo / ".multiversion/targets/1.21.3/target.properties").read_text(encoding="utf-8")
         if "prop.g=1" not in p or "toml.minecraft=[1.21.3,1.21.4)" not in p:
             ok = False; print("FAIL target props")
     print("self-check:", "OK" if ok else "FAILED")
