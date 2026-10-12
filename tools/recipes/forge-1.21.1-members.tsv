@@ -28,20 +28,20 @@ ServerPlayer	getBlockReach	blockInteractionRange
 EntityDimensions	width	width()
 EntityDimensions	height	height()
 # 1.20.5 renames (21.1 jar): getFeetBlockState -> getInBlockState; teleportToWithTicket folded into teleportTo
-# (the ticket is the server's job now -- a judgement row, X107)
+# (the ticket is the server's job now -- a judgement row, X111)
 Entity	getFeetBlockState	getInBlockState
 Entity	teleportToWithTicket	teleportTo
-# 1.20.5 folded the permanent/transient removal into one (21.1 jar: boolean removeModifier(ResourceLocation)) -- X120
+# 1.20.5 folded the permanent/transient removal into one (21.1 jar: boolean removeModifier(ResourceLocation)) -- X124
 AttributeInstance	removePermanentModifier	removeModifier
-# X153 (1.21.1 jar): the listener's Connection field is protected; getConnection() is public
+# X157 (1.21.1 jar): the listener's Connection field is protected; getConnection() is public
 ServerCommonPacketListenerImpl	connection	getConnection()
-# X157 (1.21.1 jar): registry lookups are still get(ResourceLocation) in 1.21.1 (getValue is 1.21.2+, catalog #70)
+# X161 (1.21.1 jar): registry lookups are still get(ResourceLocation) in 1.21.1 (getValue is 1.21.2+, catalog #70)
 Registry	getValue	get
 DefaultedRegistry	getValue	get
 Registry	getCodec	byNameCodec
 DefaultedRegistry	getCodec	byNameCodec
-# X157: food is a data component; an Item is edible when its default components carry one
+# X161: food is a data component; an Item is edible when its default components carry one
 Item	isEdible	{recv}.components().has(net.minecraft.core.component.DataComponents.FOOD){()}
 ItemStack	isEdible	{recv}.has(net.minecraft.core.component.DataComponents.FOOD){()}
-# X157: item tags are components now
+# X161: item tags are components now
 ItemStack	isSameItemSameTags	isSameItemSameComponents

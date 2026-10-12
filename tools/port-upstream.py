@@ -1023,7 +1023,7 @@ def main():
 
 
 def _touch(log):
-    """A self-check's fake compile still leaves a log, as a real one does: the tools that read it must not crash (X166)."""
+    """A self-check's fake compile still leaves a log, as a real one does: the tools that read it must not crash (X170)."""
     pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(log).touch()
 

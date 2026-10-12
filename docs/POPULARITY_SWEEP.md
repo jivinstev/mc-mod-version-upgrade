@@ -32,7 +32,7 @@ point a worker would start, then deletes the workspace. Exit codes: 0 the mechan
 already exists · 21 a required dependency has no build for the target · 22 no recipe pack for the hop (e.g. a
 Fabric source) · 23 a triage stop (Kotlin, a universal multi-loader jar, no metadata) · 25 the stage itself failed.
 
-Between batches, every new failure shape was fixed in the pipeline (CATALOG X53–X170). After the last batch, all
+Between batches, every new failure shape was fixed in the pipeline (CATALOG X57–X174). After the last batch, all
 384 mods were re-run with the final pipeline. That full rerun is the measurement below.
 
 ## What the full rerun found
@@ -51,7 +51,7 @@ Between batches, every new failure shape was fixed in the pipeline (CATALOG X53�
 | Forge 1.20 → NeoForge 1.21.1 | 120 | 39,252 → 22,855 (−42%) | 105 | 2 |
 | 1.21.1 → 26.2 | 80 | 22,495 → 18,974 (−16%) | 70 | 1 |
 
-One of the three "worse" mods was a real regression, found by this rerun and fixed (X170). The other two were the
+One of the three "worse" mods was a real regression, found by this rerun and fixed (X174). The other two were the
 compiler getting further and reporting errors that were already there.
 
 **Is the rule library overfit?** Each rule's evidence is kept, so this is measured, not argued

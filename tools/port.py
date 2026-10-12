@@ -224,7 +224,7 @@ def run(cmd, cwd=None, log=None, timeout=3600):
 def missing_classes(jar, raw):
     """Top-level classes in the jar with no .java in the decompile: Vineflower can fail to WRITE a class (a huge
     registration class, under memory pressure) and say so only in a stack trace, and the class is then simply
-    absent -- one mod's 2401 errors were one such class (X79)."""
+    absent -- one mod's 2401 errors were one such class (X83)."""
     with zipfile.ZipFile(jar) as z:
         names = [n[:-6] for n in z.namelist() if n.endswith(".class") and "$" not in n
                  and not n.startswith("META-INF/") and not n.endswith(("module-info.class", "package-info.class"))]
@@ -352,7 +352,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     raw = work / "decompiled-raw"
     shutil.rmtree(raw, ignore_errors=True); raw.mkdir(parents=True)
     # an explicit heap and stack: the JVM default heap ran out on a 3-MB mod jar, and Vineflower then silently skips
-    # whichever class it was writing (X79)
+    # whichever class it was writing (X83)
     r = run(["java", "-Xss16m", "-Xmx6g", "-jar", str(vf), "-dgs=1", "-rsy=1", "-rbr=1", str(jar), str(raw)], log=log, timeout=7200)
     if any(raw.rglob("*.java")):
         recover_missing_classes(jar, raw, vf, log)
@@ -403,7 +403,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     resource_jars = wire_resource_jars(raw, srcj, work)
     if resource_jars:
         with open(log, "a", encoding="utf-8") as fh:
-            fh.write(f"setup: compile-only bundled/resource jar(s): {', '.join(resource_jars)} (X94, X101)\n")
+            fh.write(f"setup: compile-only bundled/resource jar(s): {', '.join(resource_jars)} (X98, X105)\n")
     # official names
     if setup_kind == "srg":
         mp = name_map("srg", src_mc, log)
@@ -417,7 +417,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
         run([sys.executable, str(ROOT / "tools/intermediary-remap/apply_mapping.py"), str(mp), str(srcj)], log=log)
     # A (Neo)Forge jar can carry intermediary-named code too (a multi-loader build that bundles its Fabric-side
     # classes): 1951 such names in one NeoForge jar. Intermediary ids are globally unique, so the same remap a Fabric
-    # source gets is safe on any route (X76).
+    # source gets is safe on any route (X80).
     if setup_kind != "intermediary" and any(re.search(r"\bnet\.minecraft\.class_\d+\b|\b(?:method|field)_\d+\b",
                                                       f.read_text(encoding="utf-8", errors="replace"))
                                             for f in srcj.rglob("*.java")):
@@ -485,7 +485,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     hoisted = fix_hoisted_spec(srcj)
     # optional integrations and datagen are code the port cannot compile against (tools/park-optional.py)
     keep = sorted({d["modId"] for d in meta.get("deps", []) if d["required"]} | ({"geckolib"} if uses_gecko else set())
-                  # every mod wired into libs/ is on the compile classpath, so code using it need not be parked (X136)
+                  # every mod wired into libs/ is on the compile classpath, so code using it need not be parked (X140)
                   | {m for f in work.glob("libs/*/*.jar") for m in jar_toml(f)[0]} - PLATFORM_IDS)
     pk = run([sys.executable, str(ROOT / "tools/park-optional.py"), "--work", str(work), "--group",
               group or f"com.{meta['modId']}", "--also-required", ",".join(keep)], log=log)
@@ -719,7 +719,7 @@ def main():
             hit = native_by_range(prov, pid, orig, T, jars)
             if hit:
                 return stop(20, f"{a.mod} already has a NeoForge build that loads on {T}: {hit} -- there is nothing to port "
-                                f"(the registry files it under a sibling version, X131)",
+                                f"(the registry files it under a sibling version, X135)",
                             [f"install it: python3 tools/mod-registry/modreg.py download --provider {prov} --id {pid} "
                              f"--file {orig.get('fileId')} --out <mods dir>", "or use the install-mod skill"])
         if alt:
@@ -784,7 +784,7 @@ def main():
     if len(fams) >= 3:
         return stop(23, f"{jar.name} is a universal jar: its classes call {', '.join(sorted(fams))} APIs at once and "
                         f"pick a path per loader and Minecraft version at runtime, so its decompile mixes every target's "
-                        f"names and there is no single source tree to port (X75)",
+                        f"names and there is no single source tree to port (X79)",
                     ["port from the mod's own source repository, which builds each target separately",
                      "or skip this mod"])
     kt, total = kotlin_share(jar)
@@ -796,13 +796,13 @@ def main():
     if total and gv * 2 > total:
         return stop(23, f"{jar.name} is a Groovy mod ({gv} of {total} classes are Groovy-compiled -- GroovyObject / "
                         f"org.codehaus.groovy): its invokedynamic call sites decompile to Java that does not parse "
-                        f"(`IndyInterface.bootstrap<...>(...)`), so there is no Java source to port (X116)",
+                        f"(`IndyInterface.bootstrap<...>(...)`), so there is no Java source to port (X120)",
                     ["port it by hand in Groovy (GML has NeoForge builds)", "or skip this mod"])
     own_split = bundle_modules(jar)
     if own_split:
         return stop(23, f"{jar.name} is a bundle jar: it carries {own_split[0]} class(es) of its own and ships its code as "
                         f"{len(own_split[1])} nested module jar(s) of the same mod ({', '.join(own_split[1][:3])}...), so a "
-                        f"decompile of the outer jar ports almost nothing and would report a misleading clean result (X90)",
+                        f"decompile of the outer jar ports almost nothing and would report a misleading clean result (X94)",
                     ["port each nested module as its own mod (unzip it and pass its path), dependencies first",
                      "or skip this mod"])
     if loader == "neoforge" and forge_api_jar(jar):
@@ -826,7 +826,7 @@ def main():
         say(f"note: the registry lists this file as a {listed} build, but the jar itself is {loader} (a mislabelled upload)")
     if nopack and listed and listed != loader and not local.is_file() and not getattr(a, "_relabel_tried", False):
         # the registry listed this file as a loader the jar is not (a Fabric jar tagged forge+neoforge): another file of
-        # the same project and Minecraft version may really be that loader -- try it before stopping (X89)
+        # the same project and Minecraft version may really be that loader -- try it before stopping (X93)
         better = true_loader_file(info["source"], src_mc, jars, say)
         if better:
             say(f"source: {jar.name} is {loader}, not {listed}; using {better.name}, which is")
@@ -850,7 +850,7 @@ def main():
             if d["modId"] in hard:
                 d["required"] = True
     state["hard_optional"] = hard
-    # X136: ids the code imports by package but nothing declares; wired only if a build declaring that id exists
+    # X140: ids the code imports by package but nothing declares; wired only if a build declaring that id exists
     inferred = [] if a.ignore_deps else undeclared_code_deps(jar, [d["modId"] for d in meta.get("deps", [])] + list(PLATFORM_IDS))
     if "deps-wired" not in state["done"] and not a.ignore_deps:
         src = info["source"]
@@ -894,7 +894,7 @@ def main():
 
 
 def native_by_range(prov, pid, chosen, T, jars):
-    """X131: a registry files a NeoForge build under the version it was BUILT for ("1.21"), while its toml declares the
+    """X135: a registry files a NeoForge build under the version it was BUILT for ("1.21"), while its toml declares the
     range it loads on ("[1.21,1.21.2)") -- so `versions --mc 1.21.1` says "no native build" for a mod that has one. When
     the newest build is NeoForge for a sibling of the target (same major.minor), read the range it declares. -> its file
     name and range when the range names the target, else None. A build declaring NO range proves nothing."""
@@ -1025,7 +1025,7 @@ INTEGRATION_DIRS = re.compile(r"/(compat|compatibility|integration|integrations|
 
 
 def undeclared_code_deps(jar, declared, at_least=3):
-    """X136: mod ids the code's OWN classes name by package (acmedev/kitchencore/... -> kitchencore) that the
+    """X140: mod ids the code's OWN classes name by package (acmedev/kitchencore/... -> kitchencore) that the
     toml does not declare at all -- an add-on whose author forgot the dependency in mods.toml (and on the registry
     page, so the registry check cannot see it either). A segment counts only when classes outside the mod's
     integration/datagen packages reference it at least `at_least` times; whether it really is a mod is settled later
@@ -1093,7 +1093,7 @@ def true_loader_file(source, mc, jars, say=print, tries=4):
 
 
 def bundle_modules(jar):
-    """X90: an outer jar that is a SHELL around its own nested modules (META-INF/jars/<stem>-*.jar). Returns
+    """X94: an outer jar that is a SHELL around its own nested modules (META-INF/jars/<stem>-*.jar). Returns
     (own class count, [module names]) when the outer jar has almost no code and >=2 nested jars share its name
     stem; None otherwise. A library jar-in-jar'd beside real code is not this: the outer jar then has code."""
     with zipfile.ZipFile(jar) as z:
@@ -1106,7 +1106,7 @@ def bundle_modules(jar):
 
 
 def wire_resource_jars(raw, srcj, work):
-    """X94/X101: a jar the mod ships as a RESOURCE (META-INF/<mod>/bootstrap-agent.jar), not jar-in-jar, whose classes the
+    """X98/X105: a jar the mod ships as a RESOURCE (META-INF/<mod>/bootstrap-agent.jar), not jar-in-jar, whose classes the
     mod's own code names: copy it to libs/compile/ (compileOnly in the template, never on the runtime classpath, since
     the mod loads it itself). -> [jar names wired]."""
     meta = raw / "META-INF"
@@ -1117,7 +1117,7 @@ def wire_resource_jars(raw, srcj, work):
     out = []
     for j in sorted(meta.rglob("*.jar")):
         if {"jarjar", "jars"} & set(j.relative_to(meta).parts[:-1]):
-            # X101: a library the mod BUNDLES (jar-in-jar) is required by definition; its code is no optional
+            # X105: a library the mod BUNDLES (jar-in-jar) is required by definition; its code is no optional
             # integration. Compile against the bundled copy (MixinExtras aside: NeoForge provides it), so the parker
             # keeps the code that uses it and javac sees its real API. The jar still ships inside the mod.
             if not re.match(r"mixinextras", j.name, re.I):
@@ -1145,7 +1145,7 @@ def kotlin_share(jar):
 
 
 def jar_uses(jar, dep):
-    """X117: does the mod's own code reference a package named after `dep` (a registry slug, e.g. kitchen-core ->
+    """X121: does the mod's own code reference a package named after `dep` (a registry slug, e.g. kitchen-core ->
     .../kitchencore/...)? A toml that forgot a dependency the code imports does not make that dependency optional."""
     key = norm(dep).encode()
     if len(key) < 4:
@@ -1160,7 +1160,7 @@ def jar_uses(jar, dep):
 
 
 def groovy_share(jar):
-    """(Groovy-compiled classes, all classes) -- X116: Groovy's indy call sites do not decompile to Java."""
+    """(Groovy-compiled classes, all classes) -- X120: Groovy's indy call sites do not decompile to Java."""
     with zipfile.ZipFile(jar) as z:
         cls = [n for n in z.namelist() if n.endswith(".class") and not n.startswith("META-INF/")]
         return sum(1 for n in cls if re.search(rb"groovy/lang/GroovyObject|org/codehaus/groovy/", z.read(n))), len(cls)
@@ -1324,7 +1324,7 @@ def decompile_markers(srcj):
 def lenient_json(text):
     """JSON as Mixin's and Minecraft's own (lenient) Gson read it: `//` and `/* */` comments, trailing commas. A mod's
     mixin config carried a build preprocessor's `//#if FABRIC` lines and a dangling comma, which Gson accepts and
-    Python's json refuses -- setup died on it (X87)."""
+    Python's json refuses -- setup died on it (X91)."""
     out, i, n, q = [], 0, len(text), None
     while i < n:
         c = text[i]
@@ -1349,7 +1349,7 @@ def lenient_json(text):
 def name_map(kind, mc, log):
     """The cached <kind>2official-<mc>.json (kind: srg | intermediary), built on first use and REBUILT when it
     predates the current builder (no "__schema__" >= 2: those builds dropped every member of an unobfuscated class,
-    MinecraftServer's included -- X77)."""
+    MinecraftServer's included -- X81)."""
     mp = pathlib.Path(os.environ.get("MIGRATE_WORKSPACE") or pathlib.Path.home() / ".mc-mod-upgrade/work") / f"{kind}2official-{mc}.json"
     mp.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1362,7 +1362,7 @@ def name_map(kind, mc, log):
 
 
 def mixin_duck_types(srcj):
-    """X138: the mod's own types a value is cast TO only because a mixin makes it true -- mixin classes and accessor
+    """X142: the mod's own types a value is cast TO only because a mixin makes it true -- mixin classes and accessor
     interfaces (`@Mixin` files) and the mod's interfaces a mixin class implements (Lithium's StorableItemStack on
     ItemStack). javac rejects `(ItemStackAccessor) stack` when ItemStack is final or the mixin is a class; the source
     wrote `(ItemStackAccessor)(Object) stack`, one checkcast the decompile shows without the hop."""
@@ -1393,7 +1393,7 @@ def fix_decompile_artifacts(srcj):
         generated -- is stripped likewise (counted with expect_platform);
       * Architectury's `@ExpectPlatform` (+ `.Transformed`): the build already rewrote each such method to call
         `<pkg>.<loader>.<Name>Impl`, so the annotation is inert -- but its foreign package made park-optional park
-        the mod's own platform facade (X72). Strip it and its import.
+        the mod's own platform facade (X76). Strip it and its import.
     -> {"digit_classes": n, "assert_guards": n, "constructors": n, ...}"""
     n = {"digit_classes": 0, "assert_guards": 0, "constructors": 0, "string_concats": 0, "diamond_casts": 0,
          "expect_platform": 0}
@@ -1411,23 +1411,23 @@ def fix_decompile_artifacts(srcj):
         n["string_concats"] += c
         new, c = re.subn(r"\(([A-Za-z_][\w.$]*)<>\)", r"(\1)", new)   # `(Supplier<>) () -> x`: a raw cast is legal
         n["diamond_casts"] += c
-        # `new ListProperty<List<>>()`: a diamond nested inside type arguments does not parse; the outer one infers (X143)
+        # `new ListProperty<List<>>()`: a diamond nested inside type arguments does not parse; the outer one infers (X147)
         new, c = re.subn(r"\bnew\s+([\w.$]+)\s*<\s*[\w.$]+\s*<>\s*>\s*\(", r"new \1<>(", new)
         n["diamond_casts"] += c
         # MCreator's block-state copy loop: `Property _property = ...; _bs.setValue(_property, (Comparable) entry.getValue())`
-        # -- the decompile drops the raw (Comparable) cast (erasure makes it invisible), and javac cannot type the call (X150)
+        # -- the decompile drops the raw (Comparable) cast (erasure makes it invisible), and javac cannot type the call (X154)
         for pv in set(re.findall(r"(?<![\w.<])Property\s+(\w+)\s*=", new)):
             new, c = re.subn(r"\.setValue\(\s*%s\s*,\s*(?!\(Comparable\))([\w.]+\.getValue\(\))\s*\)" % re.escape(pv),
                              r".setValue(%s, (Comparable) \1)" % pv, new)
             n["raw_state_values"] = n.get("raw_state_values", 0) + c
-        # an enum with NO constants needs a `;` before its members, and the decompile omits it (X83)
+        # an enum with NO constants needs a `;` before its members, and the decompile omits it (X87)
         new, c = re.subn(r"(\benum\s+\w+(?:\s+implements\s+[\w.<>, ]+)?\s*\{)(\s*)(?=(?:public|private|protected|static|final|abstract)\b)",
                          r"\1\2;\2", new)
         n["empty_enums"] = n.get("empty_enums", 0) + c
         if "@Mixin" in new:       # `(Player)(Object)this` compiles to one checkcast; the decompile drops the hop (§162)
             new, c = re.subn(r"\((?!Object\))([A-Z][\w.]*(?:<[^()]*>)?)\)\s*this\b", r"(\1)(Object)this", new)
             n["mixin_self_casts"] = n.get("mixin_self_casts", 0) + c
-        if duck:                  # `(StorableItemStack)(Object)stack`: the same hop for a cast TO a mixin or duck type (X138)
+        if duck:                  # `(StorableItemStack)(Object)stack`: the same hop for a cast TO a mixin or duck type (X142)
             new, c = re.subn(r"(?<![\w$.])\((%s)\)(\s*)(?!\(Object\))(?=[A-Za-z_$(])" % "|".join(map(re.escape, sorted(duck))),
                              r"(\1)\2(Object)", new)
             n["mixin_duck_casts"] = n.get("mixin_duck_casts", 0) + c
@@ -1437,7 +1437,7 @@ def fix_decompile_artifacts(srcj):
             n["expect_platform"] += c
         if "dev.architectury.injectables.annotations" in new:
             # Vineflower imports the nested marker and writes it bare: `import ...ExpectPlatform.Transformed;` +
-            # `@Transformed` (X107) -- so the bare form is only stripped when THAT import says what it is
+            # `@Transformed` (X111) -- so the bare form is only stripped when THAT import says what it is
             bare = re.search(r"(?m)^import dev\.architectury\.injectables\.annotations\.ExpectPlatform\.Transformed;", new)
             new = re.sub(r"(?m)^import dev\.architectury\.injectables\.annotations\.[\w.]+;[ \t]*\n", "", new)
             new, c = re.subn(r"@(?:dev\.architectury\.injectables\.annotations\.)?ExpectPlatform(?:\.Transformed)?\b[ \t]*\n?[ \t]*",
@@ -1481,7 +1481,7 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
         def fetch(p, dep, expect=None, label=None):
             rc2, dv = modreg("versions", "--provider", p, "--id", dep, "--loader", "neoforge", "--mc", mc)
             c = dv.get("chosen") if dv.get("has_native") else None
-            if c is None and native_by_range(p, dep, dv.get("chosen"), mc, work / "libs"):   # filed under a sibling (X131)
+            if c is None and native_by_range(p, dep, dv.get("chosen"), mc, work / "libs"):   # filed under a sibling (X135)
                 c = dv.get("chosen")
             if not c:
                 return None, "no build"
@@ -1514,7 +1514,7 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
                 if toml_authority and (p, dep) in top and not (jar and jar_uses(jar, dep)):
                     names.append(f"{dep} (listed by the registry, no {mc} build: {why}; not what the jar's toml requires)")
                 elif toml_authority and (p, dep) in top:
-                    names.append(f"{dep} (NO usable {mc} build: {why}; the jar's toml omits it, but its classes use it -- X117)")
+                    names.append(f"{dep} (NO usable {mc} build: {why}; the jar's toml omits it, but its classes use it -- X121)")
                 else:
                     names.append(f"{dep} (NO usable {mc} build: {why})")
                 continue
@@ -1538,7 +1538,7 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
                     break
             # structure_gel -> "structure gel"; a run-together id is searched as the phrases its slug guesses spell
             # (ftbquests -> "ftb quests": the bare id finds nothing, and the CurseForge project is
-            # "FTB Quests (NeoForge)", X82). Each phrase is tried only while nothing has matched.
+            # "FTB Quests (NeoForge)", X86). Each phrase is tried only while nothing has matched.
             queries = list(dict.fromkeys([mid, mid.replace("_", " ")] + [g.replace("-", " ") for g in slug_guesses(mid) if g != mid][:6]))
             tried = set()
             for q in ([] if hit else queries):
@@ -1558,26 +1558,26 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
             names.append(f"{hit} (required by the jar's toml as {mid})" if hit
                          else f"{mid} (REQUIRED by the jar's toml; no {mc} build found that declares it"
                               + (f"; nearest: {near[0]} -- a renamed mod id?" if near else "") + ")")
-        # X136: a dependency the code imports by package (acmedev/kitchencore/...) that neither the toml nor the
+        # X140: a dependency the code imports by package (acmedev/kitchencore/...) that neither the toml nor the
         # registry names. Soft: wired only when a build whose own toml declares exactly that id exists (most guesses
         # are author names or bundled libraries, and fail that test), never a stop, never written into the port's toml.
         for mid in sorted(set(inferred) - declared - set(toml_required) - PLATFORM_IDS):
             for slug in slug_guesses(mid):
                 got, _why = fetch("modrinth", slug, expect=mid)
                 if got:
-                    names.append(f"{got[0]['fileName']} (the code imports {mid} by package; the toml never declares it -- X136)")
+                    names.append(f"{got[0]['fileName']} (the code imports {mid} by package; the toml never declares it -- X140)")
                     declared |= jar_toml(lib / got[0]["fileName"])[0]
                     break
         nested = wire_nested_dep_jars(lib)
         if nested:
-            names.append(f"compile-only, bundled inside the dependencies above: {', '.join(nested)} (X109)")
+            names.append(f"compile-only, bundled inside the dependencies above: {', '.join(nested)} (X113)")
         if names:
             out[mc] = names
     return out
 
 
 def wire_nested_dep_jars(lib):
-    """X109: a dependency's OWN jar-in-jar libraries (Create bundles Registrate, Flywheel, Ponder) are API its dependents
+    """X113: a dependency's OWN jar-in-jar libraries (Create bundles Registrate, Flywheel, Ponder) are API its dependents
     compile against, and nothing else supplies them: unpack them into libs/<mc>/nested/, which the template puts on
     the compile classpath ONLY -- at runtime the dependency's jar-in-jar provides them, and a second loose copy would be
     a duplicate mod. MixinExtras is skipped (NeoForge ships it). -> [jar names]."""
@@ -1619,7 +1619,7 @@ def self_check():
         ok &= got["expect_platform"] == 2 and "ExpectPlatform" not in s and "public static Path dir()" in s
         g.write_text("package p;\nimport dev.architectury.injectables.annotations.ExpectPlatform.Transformed;\n\npublic class P {\n"
                      "   @Transformed\n   public static Path dir() {\n      return PImpl.dir();\n   }\n}\n", encoding="utf-8")
-        got = fix_decompile_artifacts(d)      # Vineflower's bare nested form (X107)
+        got = fix_decompile_artifacts(d)      # Vineflower's bare nested form (X111)
         s = g.read_text(encoding="utf-8")
         ok &= got["expect_platform"] == 1 and "Transformed" not in s and "public static Path dir()" in s
         g.write_text("package p;\nimport com.google.auto.service.AutoService;\n@AutoService(Svc.class)\npublic class Q implements Svc {}\n",
@@ -1653,7 +1653,7 @@ def self_check():
         s = g.read_text(encoding="utf-8")
         ok &= got.get("mixin_self_casts") == 2 and "(Player)(Object)this" in s and "((LivingEntity)(Object)this)" in s \
             and "Object o = (Object)this" in s
-        h = pathlib.Path(d, "HM.java")   # X138: casts TO a mixin class and to a duck interface a mixin implements
+        h = pathlib.Path(d, "HM.java")   # X142: casts TO a mixin class and to a duck interface a mixin implements
         h.write_text("@Mixin(HopperBlockEntity.class)\npublic abstract class HM implements Duck { }\n", encoding="utf-8")
         pathlib.Path(d, "Duck.java").write_text("public interface Duck { void reg(); }\n", encoding="utf-8")
         u = pathlib.Path(d, "U.java")
@@ -1665,7 +1665,7 @@ def self_check():
             and "Duck d = (Duck)(Object)s" in s and "(Container)c" in s and "foo(HM.class)" in s
         for x in (h, u, pathlib.Path(d, "Duck.java")):
             x.unlink()
-    ok &= "ftb-quests" in [g for g in slug_guesses("ftbquests") if g != "ftbquests"][:6]   # X82: the phrase searched
+    ok &= "ftb-quests" in [g for g in slug_guesses("ftbquests") if g != "ftbquests"][:6]   # X86: the phrase searched
     ok &= lenient_json('{"a": ["x", // c\n  "y",\n  //#if F\n], /* b */ "u": "http://z"}') == {"a": ["x", "y"], "u": "http://z"}
     ok &= in_range("26.2", "[1.21,)") and not in_range("26.2", "[1.21,1.21.2)") and in_range("1.21.1", "[1.21.1]")
     ok &= not in_range("1.21.1", "[1.20.1,1.21)") and in_range("1.21.1", None)
@@ -1687,10 +1687,10 @@ def self_check():
             z.writestr("a/A.class", b"\xca\xfe groovy/lang/GroovyObject x"); z.writestr("a/B.class", b"\xca\xfe x")
             z.writestr("a/C.class", b"\xca\xfe org/codehaus/groovy/vmplugin/v8/IndyInterface y")
         ok &= groovy_share(pathlib.Path(d, "g.jar")) == (2, 3) and groovy_share(pathlib.Path(d, "a.jar")) == (0, 1)
-        with zipfile.ZipFile(f"{d}/s.jar", "w") as z:     # X117: the code names the registry dependency's package
+        with zipfile.ZipFile(f"{d}/s.jar", "w") as z:     # X121: the code names the registry dependency's package
             z.writestr("org/x/seed/Reg.class", b"\xca\xfe Lacmedev/kitchencore/common/block/PieBlock; x")
         ok &= jar_uses(pathlib.Path(d, "s.jar"), "kitchen-core") and not jar_uses(pathlib.Path(d, "s.jar"), "geckolib")
-        with zipfile.ZipFile(f"{d}/x.jar", "w") as z:     # X136: an add-on whose toml forgot its parent mod
+        with zipfile.ZipFile(f"{d}/x.jar", "w") as z:     # X140: an add-on whose toml forgot its parent mod
             for i in range(4):
                 z.writestr(f"com/example/sd/items/I{i}.class", b"\xca\xfe4acmedev/kitchencore/common/item/ConsumableItem x"
                            + b" Lnet/minecraft/world/item/Item; Lcom/example/sd/Other;")
@@ -1794,14 +1794,14 @@ def self_check():
         (w / "versions").mkdir(); (w / "versions/26.2.properties").write_text("x=1\n", encoding="utf-8")
         ok &= port_meta(w)[2] is not None and "multi-version" in port_meta(w)[2]
         ok &= port_meta(w / "nope")[2] is not None
-    with tempfile.TemporaryDirectory() as d:          # a dependency's bundled libraries go to nested/ (X109)
+    with tempfile.TemporaryDirectory() as d:          # a dependency's bundled libraries go to nested/ (X113)
         lib = pathlib.Path(d)
         with zipfile.ZipFile(lib / "dep.jar", "w") as z:
             z.writestr("META-INF/jarjar/Registrate-1.jar", b"x")
             z.writestr("META-INF/jarjar/mixinextras-neoforge-0.4.jar", b"x")
             z.writestr("META-INF/jarjar/metadata.json", "{}")
         ok &= wire_nested_dep_jars(lib) == ["Registrate-1.jar"] and (lib / "nested/Registrate-1.jar").is_file()
-    with tempfile.TemporaryDirectory() as d:          # X131: a NeoForge "1.21" build whose toml loads on 1.21.1
+    with tempfile.TemporaryDirectory() as d:          # X135: a NeoForge "1.21" build whose toml loads on 1.21.1
         nd = pathlib.Path(d, "native-check"); nd.mkdir()
         with zipfile.ZipFile(nd / "m-1.21.jar", "w") as z:
             z.writestr("META-INF/neoforge.mods.toml", '[[mods]]\nmodId="m"\n[[dependencies.m]]\nmodId="minecraft"\n'

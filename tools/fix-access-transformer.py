@@ -101,7 +101,7 @@ def source_desc(path, line, member, base_desc):
     """The OVERRIDING method's own descriptor, read from the recompiled source javac named. A subclass that overrides a
     generic method (`scale(AbstractClientPlayer, ..)` for `scale(T, ..)`) has a narrower descriptor than the base; an
     AT line written with the base's descriptor widens only the compiler's bridge method, and the same errors come back
-    (X86). The return type is taken from the base (covariant returns are rare here). -> descriptor, or None"""
+    (X90). The return type is taken from the base (covariant returns are rare here). -> descriptor, or None"""
     try:
         text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -158,7 +158,7 @@ def override_lines(log_text, text):
     adds = []
     hits = [(e.group("path").replace("/", "."), e) for e in OVERRIDE.finditer(log_text)]
     hits += [(e.group("fqn"), e) for e in OVERRIDE_MDG.finditer(log_text)]
-    # `public a.B *()` widens EVERY method of B: answer each conflicting subclass with the same wildcard (X88)
+    # `public a.B *()` widens EVERY method of B: answer each conflicting subclass with the same wildcard (X92)
     wild = {p[1].split(".")[-1].split("$")[-1]: p[1] for p in (l.split("#", 1)[0].split() for l in text.splitlines())
             if len(p) >= 3 and p[2] == "*()" and p[0].startswith("public")}
     for sub_cls, e in hits:

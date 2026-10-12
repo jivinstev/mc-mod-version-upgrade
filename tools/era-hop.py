@@ -301,7 +301,7 @@ def main():
     step(f"data files: {len(changed)} rewritten to the {T} format"
          + (f"; {len(refused)} REFUSED and left as they were (listed in {log.name}; they will not load on {T} "
             f"until fixed): " + "; ".join(r.split(' (')[0] for r in refused[:6]) if refused else ""))
-    # 26.x parses JSON strictly and skips a lenient-only file (§S8): repair -- BEFORE the client items, which parse every model (X161) -- the shapes with one meaning
+    # 26.x parses JSON strictly and skips a lenient-only file (§S8): repair -- BEFORE the client items, which parse every model (X165) -- the shapes with one meaning
     r = subprocess.run([sys.executable, str(ROOT / "tools/fix-json-strict.py"), "--work", str(work)],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     step(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "fix-json-strict: no output")

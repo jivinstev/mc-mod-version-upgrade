@@ -157,7 +157,7 @@ def load_models():
                     models[name[:-5]] = json.loads(text)
                 except ValueError:
                     # a model 1.21.1 loaded leniently (a stray trailing `}`): its first object is the model, as
-                    # Gson read it; anything worse is skipped with a word, not a crash of the whole hop (X161)
+                    # Gson read it; anything worse is skipped with a word, not a crash of the whole hop (X165)
                     try:
                         models[name[:-5]] = json.JSONDecoder().raw_decode(text.lstrip())[0]
                     except ValueError as e:

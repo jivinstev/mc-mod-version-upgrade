@@ -145,7 +145,7 @@ python3 tools/zipls.py -p "$J" META-INF/MANIFEST.MF | grep -q '^Manifest-Version
   && ok "zipls -p prints a member" || bad "zipls -p"
 X="$T/zx"; python3 tools/zipls.py -o -q "$J" 'META-INF/*' -d "$X" && [ -f "$X/META-INF/MANIFEST.MF" ] \
   && ok "zipls extracts the matching members" || bad "zipls extract"
-# X166: a member table that fails to load made the fixer exit 1, which the hop read as "0 rewritten" for weeks
+# X170: a member table that fails to load made the fixer exit 1, which the hop read as "0 rewritten" for weeks
 for MT in tools/recipes/*members*.tsv; do
   python3 -c "import importlib.util,sys; s=importlib.util.spec_from_file_location('m','tools/fix-missing-members.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.table(sys.argv[1])" "$MT" \
     && ok "member table loads: $(basename "$MT")" || bad "member table does not load: $MT"

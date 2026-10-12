@@ -28,7 +28,7 @@ except through the datagen WIRING itself: when main code (often the mod's main c
 handler or registers a datagen subscriber class, that handler method / registration line is cut out of it
 (and recorded), so it no longer keeps every provider in the build. Parked files move to mods/<modid>/parked/ with their paths kept, and every one is listed in
 MIGRATION.md, so nothing is dropped silently. A remaining file that imports a parked class is listed too,
-and the parked class it names is left behind as a no-op STUB (X168): the same name, its non-private members whose
+and the parked class it names is left behind as a no-op STUB (X172): the same name, its non-private members whose
 signatures use no type from the parked API, each doing nothing -- so a guarded call compiles and the integration is
 still recorded as dropped. Standard library.
 """
@@ -42,7 +42,7 @@ PLATFORM = ("java.", "javax.", "jdk.", "sun.", "net.minecraft.", "net.neoforged.
             "org.slf4j.", "io.netty.", "org.lwjgl.", "com.electronwill.", "org.objectweb.", "cpw.mods.", "org.checkerframework.",
             "org.jspecify.", "net.jodah.", "com.ibm.icu.", "oshi.", "com.sun.", "org.w3c.", "org.xml.", "org.antlr.",
             # also on every 1.21+ classpath (Minecraft's and NeoForge's own libraries): parking a mod's config class
-            # for `import joptsimple.internal.Strings` cost one mod 100 errors (X74)
+            # for `import joptsimple.internal.Strings` cost one mod 100 errors (X78)
             "joptsimple.", "net.jpountz.", "com.machinezoo.", "io.github.llamalad7.", "org.jline.")
 OTHER_LOADERS = ("fabric", "quilt")
 INTEGRATION_DIR = re.compile(r"^(integration|integrations|compat|compatibility|addon|addons|plugin|plugins)$", re.I)
@@ -121,7 +121,7 @@ def cut_registrations(t, stems):
 
 
 def cut_datagen_hooks(t, stem):
-    """X122: main code that only HOOKS datagen -- `implements ICustomItemModel` and the
+    """X126: main code that only HOOKS datagen -- `implements ICustomItemModel` and the
     `generateCustomItemModel(ItemModelGenerator g, ...)` that interface asks for -- keeps the whole datagen package in the
     build. Cut the methods whose parameters name `stem`, the `implements` entry naming it, and the imports left unused
     (datagen-package ones included). -> the new text, or None when nothing was cut."""
@@ -241,7 +241,7 @@ def plan(work, group, also=()):
     park, why, cuts = {}, {}, {}
     # a jar that carries one tree PER LOADER (`fabric/...` beside `neoforge/...`, or `x.fabric` beside `x.neoforge`):
     # the other loader's copy is never run on NeoForge, and parking only its files that import Fabric leaves the rest
-    # of it to fail (X78). Park the whole sibling tree.
+    # of it to fail (X82). Park the whole sibling tree.
     for d in sorted({p for f in files for p in f.relative_to(java).parents} - {pathlib.Path(".")}):
         if d.name in OTHER_LOADERS and any((java / d.parent / n).is_dir() for n in ("neoforge", "forge")):
             for g in (java / d).rglob("*.java"):
@@ -273,7 +273,7 @@ def plan(work, group, also=()):
             # but handlers (a `Generators` registered with bus.register(new Generators())), or that sits in a datagen
             # package, is the subscriber itself: park it with its package, and cut_registrations drops the line that
             # registers it. Keeping it hid a whole data/gen package whose providers extend a LIBRARY's datagen base,
-            # which the type rule cannot see (X92).
+            # which the type rule cannot see (X96).
             if names and not DATAGEN_DIR.match(d.name) and has_members(new, f.stem) \
                     and not re.search(r"\bGatherDataEvent\b", IMPORT.sub("", new)) and any(
                     g != f and named.search(g.read_text(encoding="utf-8", errors="replace")) for g in files):
@@ -301,7 +301,7 @@ def plan(work, group, also=()):
     # an integration-reason file OUTSIDE an integration package that main code leans on is a hub, not a plugin
     # (a mod's 40-KB client facade and its "safe class" helper, guarding optional APIs at runtime): parking it cost one
     # mod ~200 errors to save a handful. Keep a file at least 3 staying files name; its optional imports become
-    # compile-loop work (X85).
+    # compile-loop work (X89).
     changed = True
     while changed:
         changed = False
@@ -311,7 +311,7 @@ def plan(work, group, also=()):
             if sum(1 for g, u in text.items() if g != f and g not in park and who.search(u)) >= 3:
                 del park[f]
                 changed = True
-    # X122: a staying class that only HOOKS a parked datagen type (implements its interface, has a method taking its
+    # X126: a staying class that only HOOKS a parked datagen type (implements its interface, has a method taking its
     # generator) loses the hook, so the datagen type can stay parked instead of pulling its package back in
     for f in [f for f, why in park.items() if why.startswith("datagen")]:
         who = re.compile(r"\b" + re.escape(f.stem) + r"\b")
@@ -382,7 +382,7 @@ def class_name(java, f):
 
 
 def prune_mixin_configs(work, parked_names):
-    """Drop parked classes from every *.mixins.json: Mixin fails at load on an entry whose class is gone (X78).
+    """Drop parked classes from every *.mixins.json: Mixin fails at load on an entry whose class is gone (X82).
     -> [config: entry, ...]"""
     out = []
     for cfg in sorted((work / "src/main/resources").glob("*.json")):
@@ -405,7 +405,7 @@ def prune_mixin_configs(work, parked_names):
     return out
 
 
-# --------------------------------------------------------------------------- stubs (X168)
+# --------------------------------------------------------------------------- stubs (X172)
 # Parking an integration leaves the main code that calls it naming a class that is gone: measured on 77 of 387 swept
 # mods. Main code is never parked, so a STUB keeps the name: the class's non-private constructors, methods and literal
 # constants whose signatures use no type from the parked API, each a no-op returning its type's default. The
@@ -445,7 +445,7 @@ def stub_for(text, simple, unsafe):
             break
     flat = _flatten(text[i + 1:j])
     # a class that carries STATE others read (a config POJO: `public boolean eatMelons = true;`) cannot be a no-op stand-in:
-    # its values ARE its behaviour, and defaults would change them silently. Leave it unstubbed (X168 regression, 37 -> 212).
+    # its values ARE its behaviour, and defaults would change them silently. Leave it unstubbed (X172 regression, 37 -> 212).
     if re.search(r"(?m)^\s*(?:@[\w.]+(?:\([^()]*\))?\s*)*(?:public|protected)\s+(?!static\b)(?:final\s+)?[\w.<>\[\], ?]+\s+\w+\s*[=;]", flat):
         return None
     tok = lambda s: not (set(re.findall(r"[A-Za-z_]\w*", s)) & unsafe)
@@ -476,7 +476,7 @@ def stub_for(text, simple, unsafe):
                if im.strip().split()[-1].rstrip(";").split(".")[-1] not in unsafe]
     head = f"package {pkg.group(1)};\n\n" if pkg else ""
     return (head + "\n".join(x.strip() for x in imports) + ("\n\n" if imports else "")
-            + "/** Parked-integration stub (tools/park-optional.py, CATALOG X168): the real class is under parked/ and every\n"
+            + "/** Parked-integration stub (tools/park-optional.py, CATALOG X172): the real class is under parked/ and every\n"
             + " *  member here does nothing. Re-port the integration against the other mod's API to restore it. */\n"
             + f"public class {simple}{m.group('gen') or ''} {{\n" + "".join(members) + "}\n")
 
@@ -544,7 +544,7 @@ def main():
     dest = work / "parked/src/main/java"
     texts = {f: now(f) for f in park}
     stubbed = {}
-    for f, text in texts.items():           # X168: main code still names it -> a no-op stub keeps the name
+    for f, text in texts.items():           # X172: main code still names it -> a no-op stub keeps the name
         if class_name(java, f) in {i for g in java.rglob("*.java") if g not in park for i in IMPORT.findall(now(g))} \
                 or _same_pkg_user(java, f, park, now):
             stubbed[f] = class_name(java, f).rsplit(".", 1)[-1]
@@ -568,7 +568,7 @@ def main():
             f.write_text(src, encoding="utf-8")
             made.append(class_name(java, f))
     if made:
-        print(f"  {len(made)} parked class(es) main code names left as no-op stubs (X168): "
+        print(f"  {len(made)} parked class(es) main code names left as no-op stubs (X172): "
               + ", ".join(s.rsplit('.', 1)[-1] for s in made[:8]))
     pruned = prune_mixin_configs(work, parked_names)
     mig = work / "MIGRATION.md"
@@ -581,7 +581,7 @@ def main():
     if still:
         lines += ["", "Main-code files that imported a parked class: " + ", ".join(still)]
     if made:
-        lines += ["", "Left as no-op STUBS so that main code compiles (X168) -- the integration still does nothing until "
+        lines += ["", "Left as no-op STUBS so that main code compiles (X172) -- the integration still does nothing until "
                   "re-ported: " + ", ".join(made)]
     if pruned:
         lines += ["", "Parked mixins dropped from their configs (a listed mixin with no class fails at load): "
@@ -686,7 +686,7 @@ def self_check():
         got3 = prune_mixin_configs(w, {"com.ex.m.mixin.jei.B", "com.ex.m.mixin.jei.C"})
         cfg = json.loads((res / "m.mixins.json").read_text(encoding="utf-8"))
         ok = ok and cfg["mixins"] == ["A"] and cfg["client"] == [] and len(got3) == 2
-    with tempfile.TemporaryDirectory() as d:     # X92: a handler-only subscriber registered by INSTANCE, in data/gen,
+    with tempfile.TemporaryDirectory() as d:     # X96: a handler-only subscriber registered by INSTANCE, in data/gen,
         w = pathlib.Path(d)                      # whose providers extend a LIBRARY's datagen base
         j = w / "src/main/java"
         for rel, body in {
@@ -709,9 +709,9 @@ def self_check():
                and "com/ex/r/Main.java" not in got5 and "new Generators" not in proxy and "register(this)" in proxy
                and "gather(" not in cuts5.get(j / "com/ex/r/Main.java", ("gather(", []))[0])
         if not ok5:
-            print("self-check X92:", sorted(got5), proxy)
+            print("self-check X96:", sorted(got5), proxy)
         ok = ok and ok5
-    with tempfile.TemporaryDirectory() as d:     # X122: a main item that only HOOKS datagen loses the hook
+    with tempfile.TemporaryDirectory() as d:     # X126: a main item that only HOOKS datagen loses the hook
         w = pathlib.Path(d)
         j = w / "src/main/java"
         for rel, body in {
@@ -734,9 +734,9 @@ def self_check():
                and "public class Wand extends Item {" in wand and "gen(" not in wand and "ModelFile" not in wand
                and "int use()" in wand)
         if not ok6:
-            print("self-check X122:", sorted(got6), wand)
+            print("self-check X126:", sorted(got6), wand)
         ok = ok and ok6
-    with tempfile.TemporaryDirectory() as d:     # X168: a parked class main code still names becomes a no-op stub
+    with tempfile.TemporaryDirectory() as d:     # X172: a parked class main code still names becomes a no-op stub
         w = pathlib.Path(d)
         (w / "gradle.properties").write_text("mod_group_id=com.ex.t\n", encoding="utf-8")
         j = w / "src/main/java/com/ex/t"
@@ -758,10 +758,10 @@ def self_check():
         ok7 = ("public static void enable() {\n    }" in stub and "public static boolean on(List<String> l) {\n        return false;" in stub
                and "public static final int MAX = 3;" in stub and "Regions" not in stub and "helper" not in stub
                and not (j / "terra/Reg.java").exists() and (w / "parked/src/main/java/com/ex/t/terra/TerraInit.java").exists()
-               and "X168" in (w / "MIGRATION.md").read_text(encoding="utf-8")
+               and "X172" in (w / "MIGRATION.md").read_text(encoding="utf-8")
                and not (j / "conf/Conf.java").exists())     # a stateful (config) class is never a no-op stub
         if not ok7:
-            print("self-check X168:", stub)
+            print("self-check X172:", stub)
         ok = ok and ok7
     print("self-check:", "OK" if ok else f"FAIL {sorted(got)}")
     return 0 if ok else 1

@@ -4,8 +4,8 @@
   --stage forge  (Forge 1.20.x -> NeoForge 1.21.1, after the remap, codemods and recipe pack): the access
                  transformer made valid (official names, override widenings, one compile per subclass level),
                  forge-shapes, convert-simplechannel, convert-mcreator-variables, convert-gui-overlays,
-                 convert-capabilities (X142), then fix-holders, the member renames and
-                 fix-block-codecs (X147) until a compile round fixes nothing.
+                 convert-capabilities (X146), then fix-holders, the member renames and
+                 fix-block-codecs (X151) until a compile round fixes nothing.
   --stage era    (1.21.1 -> 26.x, after the rename table): the access transformer re-pointed through the class-move
                  map, the member pass, then every converter, then the member pass again.
 
@@ -175,7 +175,7 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
             got = 0
             for d in dirs:
                 _rc, o = run("fix-missing-members.py", "--src", d, "--log", log, "--table", members_table)
-                if _rc:   # X166: a table that does not load must stop the hop, not read as "0 renamed"
+                if _rc:   # X170: a table that does not load must stop the hop, not read as "0 renamed"
                     raise RuntimeError(f"fix-missing-members failed on {members_table}: {(o or '').strip().splitlines()[-1:]}")
                 got += sum(int(x) for x in re.findall(r"(\d+) site\(s\) rewritten", o))
                 for cnt, row in re.findall(r"(?m)^\s+(\d+)\s+(\w+\.\w+)\s*$", o or ""):
@@ -249,7 +249,7 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
             if healed:                                  # the daemon holds the old entry in memory: stop it, then retry
                 subprocess.run(["bash", "gradlew", "--stop"], cwd=repo, capture_output=True)
                 continue
-        if not has_at:      # the stale-cache heal above is the only repair that applies without an AT (X71)
+        if not has_at:      # the stale-cache heal above is the only repair that applies without an AT (X75)
             return None
         if "daemon has disappeared" in text or "OutOfMemoryError" in text:   # not the AT's fault: say so
             raise RuntimeError(f"the Gradle daemon died while recompiling Minecraft (memory?), not an AT problem; "
@@ -316,18 +316,18 @@ FORGE_STEPS = [("shapes", "forge-shapes.py"), ("net", "convert-simplechannel.py"
 FORGE_MEMBERS = "tools/recipes/forge-1.21.1-members.tsv"
 
 
-# X153: access 1.21 NARROWED, which a 1.20 mod used from outside the class. Each row: the source pattern that needs it,
+# X157: access 1.21 NARROWED, which a 1.20 mod used from outside the class. Each row: the source pattern that needs it,
 # a guard for files where it is already legal (a subclass), and the AT lines. Written BEFORE the access-transformer loop
 # so Minecraft is recompiled once; at runtime FML loads META-INF/accesstransformer.cfg by default.
 AT_WIDEN = [
     (r"\bMoveControl\.Operation\b", r"\bextends\s+(?:[\w.]+\.)?MoveControl\b",
      ["public net.minecraft.world.entity.ai.control.MoveControl$Operation",
-      "public net.minecraft.world.entity.ai.control.MoveControl operation # X153"]),
+      "public net.minecraft.world.entity.ai.control.MoveControl operation # X157"]),
 ]
 
 
 def at_widenings(repo, dirs):
-    """-> AT lines added for the AT_WIDEN rows the source needs (X153)."""
+    """-> AT lines added for the AT_WIDEN rows the source needs (X157)."""
     need = []
     for pat, legal, lines in AT_WIDEN:
         for d in dirs:
@@ -353,7 +353,7 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
     repo, rep = pathlib.Path(repo), {}
     widened = at_widenings(repo, dirs)
     if widened:
-        say(f"access transformer: {len(widened)} line(s) for access 1.21 narrowed (X153)")
+        say(f"access transformer: {len(widened)} line(s) for access 1.21 narrowed (X157)")
     if any(repo.glob("src/*/resources/META-INF/accesstransformer.cfg")):
         rep["at"] = run("fix-access-transformer.py", "--work", repo, *(["--srg-map", srg_map] if srg_map else []))[1]
         say(f"access transformer: {headline(rep['at'], 'fix-access-transformer', 'at')}")
@@ -375,10 +375,10 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
             raise RuntimeError(f"compile did not run: {line}")
         counts.append(n)
         outs = [run("fix-holders.py", "--src", d, "--log", log, "--sites", 0)[1] for d in dirs]
-        # the owner-resolved member renames (X73): javac names the owner, so a same-named member elsewhere is safe
+        # the owner-resolved member renames (X77): javac names the owner, so a same-named member elsewhere is safe
         mruns = [run("fix-missing-members.py", "--src", d, "--log", log, "--table", ROOT / FORGE_MEMBERS)
                  for d in dirs] if (ROOT / FORGE_MEMBERS).exists() else []
-        for mrc, mo in mruns:     # X166: a table that does not load must stop the stage, not read as "0 rewritten"
+        for mrc, mo in mruns:     # X170: a table that does not load must stop the stage, not read as "0 rewritten"
             if mrc:
                 raise RuntimeError(f"fix-missing-members failed on {FORGE_MEMBERS}: {(mo or '').strip().splitlines()[-1:]}")
         mouts = [mo for _, mo in mruns]
@@ -386,7 +386,7 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
             for cnt, row in re.findall(r"(?m)^\s+(\d+)\s+(\w+\.\w+)\s*$", mo or ""):
                 say(f"  member-row: {row} {cnt}")
         rep.setdefault("members", []).extend(mouts)
-        # X147: a concrete subclass of an abstract vanilla block must implement codec() since 1.20.3
+        # X151: a concrete subclass of an abstract vanilla block must implement codec() since 1.20.3
         couts = [run("fix-block-codecs.py", "--src", d, "--log", log)[1] for d in dirs]
         rep.setdefault("codecs", []).extend(couts)
         if all(" 0 site" in (o.splitlines() or [""])[0] for o in outs) and \
@@ -406,7 +406,7 @@ PARSE_ERR = re.compile(r"^(\S+\.java):\d+: error: (?:[^ ]+(?: or [^ ]+)* expecte
 
 def quarantine_unparseable(work, log, cap=10):
     """javac stops at PARSE errors before it attributes anything, so one file the decompiler left unparseable hides
-    every other error and stops the stage (each new decompile artifact did, until a fix landed: X84). Move such
+    every other error and stops the stage (each new decompile artifact did, until a fix landed: X88). Move such
     files (at most `cap`, and at most a tenth of the tree) to parked/unparseable/, record them for the compile loop,
     and let the count go on. -> files moved (0: nothing to do, or too many to be a decompile artifact)"""
     work = pathlib.Path(work)
@@ -474,7 +474,7 @@ def main_cli(a):
     moves = _load("era_hop", "era-hop.py").ws_moves() / f"moves-1.21.1-to-{a.target}.tsv"
     has_at = any(work.glob("src/*/resources/META-INF/accesstransformer.cfg")) and moves.exists()
     # An AT that widens a vanilla method breaks Minecraft's own recompile, so the START compile never reaches javac:
-    # that is exactly the case the AT loop below repairs, so it must not be a stop (X71).
+    # that is exactly the case the AT loop below repairs, so it must not be a stop (X75).
     if n0 is None and not has_at:
         print("mechanical-hop: the start compile never reached javac; see mechanical-hop/start.log")
         return 2
@@ -573,7 +573,7 @@ def self_check():
         ok &= calls.index("forge-shapes.py") < calls.index("convert-simplechannel.py") < calls.index("fix-holders.py")
         ok &= rep["errors"] == [30] and "fix-missing-members.py" in calls and "fix-block-codecs.py" in calls
         ok &= calls.index("convert-capabilities.py") < calls.index("fix-holders.py")
-    with tempfile.TemporaryDirectory() as d:        # X153: narrowed access is widened by AT, once, not for a subclass
+    with tempfile.TemporaryDirectory() as d:        # X157: narrowed access is widened by AT, once, not for a subclass
         w = pathlib.Path(d); j = w / "src/main/java/p"; j.mkdir(parents=True)
         (j / "Fly.java").write_text("class Fly { void f() { if (m.operation == MoveControl.Operation.WAIT) {} } }", encoding="utf-8")
         (j / "Ctl.java").write_text("class Ctl extends MoveControl { void f() { this.operation = MoveControl.Operation.WAIT; } }", encoding="utf-8")

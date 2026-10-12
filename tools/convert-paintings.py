@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Move code-registered painting variants to the datapack registry 1.21 made them (CATALOG X155).
+"""Move code-registered painting variants to the datapack registry 1.21 made them (CATALOG X159).
 
     python3 tools/convert-paintings.py --src src/main/java --modid <modid> [--dry-run] [--self-check]
 

@@ -3,7 +3,7 @@
 
     python3 tools/convert-mcreator-variables.py --src src/main/java --modid <modid> [--dry-run] [--self-check]
 
-Every MCreator mod with player variables carries the same generated `<Mod>Variables` class (CATALOG X100):
+Every MCreator mod with player variables carries the same generated `<Mod>Variables` class (CATALOG X104):
 
     public static final Capability<PlayerVariables> PLAYER_VARIABLES_CAPABILITY = CapabilityManager.get(new CapabilityToken<>(){});
     @SubscribeEvent public static void init(RegisterCapabilitiesEvent event) { event.register(PlayerVariables.class); }
@@ -123,7 +123,7 @@ def convert_owner(t, owner, modid):
            f"{ind}         @Override\n"
            f"{ind}         public net.minecraft.nbt.CompoundTag write({pv} v, net.minecraft.core.HolderLookup.Provider provider) {{\n"
            f"{ind}            return (net.minecraft.nbt.CompoundTag) v.writeNBT();\n{ind}         }}\n{ind}      }}).build());\n\n"
-           f"{ind}/** The capability's LazyOptional, as an Optional: present for a player (CATALOG X100). */\n"
+           f"{ind}/** The capability's LazyOptional, as an Optional: present for a player (CATALOG X104). */\n"
            f"{ind}public static java.util.Optional<{pv}> vars(net.minecraft.world.entity.Entity entity) {{\n"
            f"{ind}   return entity instanceof net.minecraft.world.entity.player.Player\n"
            f"{ind}      ? java.util.Optional.of(entity.getData(PLAYER_VARIABLES)) : java.util.Optional.empty();\n{ind}}}\n")
@@ -150,7 +150,7 @@ def convert_owner(t, owner, modid):
 
 
 def import_owner(t, owner, files):
-    """Import class `owner` (a mod file's stem) into t when it lives in another package (X103)."""
+    """Import class `owner` (a mod file's stem) into t when it lives in another package (X107)."""
     of = next((g for g in files if g.stem == owner), None)
     if of is None:
         return t

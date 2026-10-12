@@ -5,7 +5,7 @@
 
 A rename table rewrites tokens everywhere, so it cannot replace a SIMPLE name such as `Tuple` without also hitting a
 mod's own class of that name. This step is scoped by the import: a file that says `import net.minecraft.util.Tuple;`
-means vanilla's, and only there are the type and its accessors rewritten (CATALOG X121).
+means vanilla's, and only there are the type and its accessors rewritten (CATALOG X125).
 
     net.minecraft.util.Tuple (gone in 26.x) -> org.apache.commons.lang3.tuple.MutablePair (on every Minecraft classpath)
         getA/getB/setA/setB -> getLeft/getRight/setLeft/setRight      -- mutable, like Tuple, so setB keeps working

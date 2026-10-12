@@ -119,7 +119,7 @@ def convert_persistence(text, m, kind, arity):
     open_, close = m.body_open + 1, m.body_close
     body = text[open_:close]
     masked = ni.code_spans(body)
-    # X111: the vanilla container shape has a direct ValueOutput/ValueInput form on 26.2 --
+    # X115: the vanilla container shape has a direct ValueOutput/ValueInput form on 26.2 --
     # ContainerHelper.saveAllItems/loadAllItems(tag, items[, provider]) lose the provider, and
     # RandomizableContainer.trySaveLootTable/tryLoadLootTable(tag) take the new type as they are.
     pre_handled, pre_edits = [], []
@@ -155,7 +155,7 @@ def convert_persistence(text, m, kind, arity):
             continue
         pc = fs.match(masked, sm.end() - 1)
         args = [a.strip() for a in fs.split_args(body[sm.end():pc])]
-        # X124: the 26.2 rename table may already have dropped the provider from the forward (`super.saveAdditional(t)`)
+        # X128: the 26.2 rename table may already have dropped the provider from the forward (`super.saveAdditional(t)`)
         if args != names and not (arity == 2 and args == [t]):
             return None, ("super-call", f"super.{m.name}({', '.join(args)}) is not the plain forward; {V31}")
         if arity == 2 and args != [t]:
@@ -532,14 +532,14 @@ def self_check():
            '    protected void loadAdditional(CompoundTag t, HolderLookup.Provider p) {\n        super.loadAdditional(t, p);\n'
            '        this.items = NonNullList.withSize(9, ItemStack.EMPTY);\n'
            '        if (!this.tryLoadLootTable(t)) { ContainerHelper.loadAllItems(t, this.items, p); }\n    }\n}\n')
-    o3 = convert_text(box)[0]      # X111: the vanilla container shape converts
+    o3 = convert_text(box)[0]      # X115: the vanilla container shape converts
     for w in ("saveAdditional(ValueOutput t)", "ContainerHelper.saveAllItems(t, this.items);",
               "loadAdditional(ValueInput t)", "ContainerHelper.loadAllItems(t, this.items);", "this.tryLoadLootTable(t)"):
         if w not in o3:
             miss.append(f"container shape: {w!r} missing:\n{o3}")
     fwd = ('package b;\nclass Fw extends BlockEntity {\n    protected void saveAdditional(CompoundTag t, HolderLookup.Provider p) {\n'
            '        super.saveAdditional(t);\n        t.putInt("a", 1);\n    }\n}\n')
-    o4 = convert_text(fwd)[0]      # X124: a forward the rename table already shortened is still the plain forward
+    o4 = convert_text(fwd)[0]      # X128: a forward the rename table already shortened is still the plain forward
     if "saveAdditional(ValueOutput t)" not in o4 or "super.saveAdditional(t);" not in o4:
         miss.append(f"shortened forward not converted:\n{o4}")
     with tempfile.TemporaryDirectory() as d:

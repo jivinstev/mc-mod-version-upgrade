@@ -5657,7 +5657,7 @@ not a lazy regex: `tools/burndown-count.sh` exited 4 (parse abort) on the first 
 this read as a bug and not as "53 errors fewer".
 
 
-**X53. 🔴 Gradle's own javac integration is QUADRATIC in the error count — past a few thousand errors the
+**X57. 🔴 Gradle's own javac integration is QUADRATIC in the error count — past a few thousand errors the
 count does not come back at all.** · **Pattern:** an uncapped compile (`-Xmaxerrs 100000`, which is what a
 burn-down needs) of a large raw decompile · **Symptom:** no result. The javac worker finishes in seconds and
 then blocks forever writing its diagnostics back to the daemon, whose 6 GB heap is full; the caller times out
@@ -5671,7 +5671,7 @@ SAME javac (the task's toolchain, classpath, sources, args) outside Gradle; `por
 only when the cap was hit and appends it to the same log. The direct run took 10 s for the full 2,448.
 `tools/burndown-count.sh` exits 6 on a log that hit the cap with no recount, so a prefix cannot pass as a count.
 
-**X54. A datagen package stays in the build when MAIN code wires it — park the wiring, not the class.** ·
+**X58. A datagen package stays in the build when MAIN code wires it — park the wiring, not the class.** ·
 **Pattern:** the mod's main class holds `private void generateData(GatherDataEvent e)` (registered with
 `addListener(this::generateData)`), or registers a separate subscriber (`addListener(DataGen::gather)`) ·
 **Symptom:** the never-park-what-main-code-names rule (which keeps runtime code out of `parked/`) keeps every
@@ -5681,7 +5681,7 @@ in code the game never runs · **Fix:** `tools/park-optional.py` cuts the handle
 line (plus the imports left unused), records it in MIGRATION.md, and judges references on the cut text. A class
 in the datagen package that runtime code still names (a block entity reading a loot-table key) stays.
 
-**X55. 🔴 Dependencies come from the JAR'S OWN toml as well as the registry, and each one is checked against the
+**X59. 🔴 Dependencies come from the JAR'S OWN toml as well as the registry, and each one is checked against the
 target before the port starts.** · **Pattern:** a registry project page lists fewer required dependencies than
 the jar declares, or lists a dependency whose newest build is for another Minecraft · **Symptom:** a compile
 full of "package does not exist" that looks like porting work, or a port finished against a library that has
@@ -5690,7 +5690,7 @@ no build for the target and can never load · **Fix:** `tools/port.py` resolves 
 reads each dependency jar's own `minecraft` versionRange, and STOPS (exit 21) naming any required dependency
 with no usable build for the target. An open-ended range (`[1.21,)`) cannot prove a mismatch, so it is accepted.
 
-**X56. The source build is a choice, and a wrong one costs a whole unpacked hop.** **Pattern:** a project publishing several loaders and Minecraft versions, where the newest build is not one the route can use and a "NeoForge" listing may be a Fabric jar or carry no loader metadata · **Symptom:** a whole unpacked hop spent on the wrong source build · **Fix:** `tools/port.py` identifies the jar by sha1 (`modreg identify`), prefers a build with a recipe pack, reads the loader from the jar, and stops (exit 23) on a jar with no loader metadata · · **Pattern:** a project
+**X60. The source build is a choice, and a wrong one costs a whole unpacked hop.** **Pattern:** a project publishing several loaders and Minecraft versions, where the newest build is not one the route can use and a "NeoForge" listing may be a Fabric jar or carry no loader metadata · **Symptom:** a whole unpacked hop spent on the wrong source build · **Fix:** `tools/port.py` identifies the jar by sha1 (`modreg identify`), prefers a build with a recipe pack, reads the loader from the jar, and stops (exit 23) on a jar with no loader metadata · · **Pattern:** a project
 publishes several loaders and Minecraft versions; the newest build is not always the one a route can use, and
 a "NeoForge" listing can be a Fabric jar or a jar with no loader metadata at all · **Fix:** `tools/port.py`
 identifies a jar by its sha1 (`modreg identify`), prefers a build whose route has a recipe pack (same Minecraft
@@ -5698,7 +5698,7 @@ on another loader first, then older versions newest-first) and says which it cho
 jar (Fabric when `fabric.mod.json`/`quilt.mod.json`), and stops (exit 23) on a jar that carries no loader
 metadata instead of assuming Forge.
 
-**X57. A NeoGradle execution cache records ABSOLUTE paths into the workspace that first ran it.** · **Pattern:**
+**X61. A NeoGradle execution cache records ABSOLUTE paths into the workspace that first ran it.** · **Pattern:**
 port workspaces are created, run and deleted one after another (a sweep, a bench) · **Symptom:**
 `NoSuchFileException …/.gradle/repositories/ng_dummy_ng/…` at the Minecraft recompile of the NEXT port, which
 reads like a broken build of that port · **Fix:** `tools/mechanical-hop.py` heals it: on that error it copies the
@@ -5706,13 +5706,13 @@ referenced files to a stable place under the Gradle home, rewrites `caches/ng_ex
 workspace's own copies, stops the daemon (which caches the entry) and retries. If the mod's OWN sources fail
 there instead, it says so rather than blaming the recompile.
 
-**X58. Decompiler output that does not parse is fixed at setup, before any count.** · **Pattern:** Vineflower
+**X62. Decompiler output that does not parse is fixed at setup, before any count.** · **Pattern:** Vineflower
 emits a local class as `class 1Name` and an assertion guard as `<unrepresentable>.$assertionsDisabled` (§A2)
 · **Symptom:** a parse abort, so the burn-down reports a handful of errors in a tree that has thousands
 (burndown-count exit 4) · **Fix:** `tools/port.py` setup renames digit-prefixed local classes to `_Name` and
 replaces the guard with `true`, and records how many it fixed.
 
-**X59. Splitting a two-phase tick handler leaves an `if (true)` / `if (false)` else-chain to fold, and a fold
+**X63. Splitting a two-phase tick handler leaves an `if (true)` / `if (false)` else-chain to fold, and a fold
 that deletes too much compiles.** · **Pattern:** a Forge `onClientTick(TickEvent.ClientTickEvent e)` with
 `if (e.phase == START) {…} else if (e.phase == END) {…}`, which `tools/forge-shapes.py` splits into `Pre` and
 `Post` handlers by substituting the phase test with a constant · **Symptom:** an unbalanced brace (a parse abort),
@@ -5720,7 +5720,7 @@ or code before the `if` on the same line silently removed · **Fix:** forge-shap
 to REST and `if (true) {X} else <whole chain>` to X, walking the chain to its real end, and never touches text
 before the `if`.
 
-**X60. Registry metadata is a hint; the JAR decides — six ways a sweep found it wrong.** · **Pattern:** a port
+**X64. Registry metadata is a hint; the JAR decides — six ways a sweep found it wrong.** · **Pattern:** a port
 starts from what a registry (Modrinth/CurseForge) says about a build: its loader, its Minecraft version, its
 required dependencies · **Symptom:** a port that stops on a dependency it can have, routes as the wrong loader,
 or reads the wrong mod id — each found on a popular mod, each reading as "this mod cannot be ported" · **Fix**
@@ -5738,7 +5738,7 @@ or reads the wrong mod id — each found on a popular mod, each reading as "this
 - *A version range's trailing zero* (`[26.2.0,)`) must admit `26.2`.
 - *A mislabelled upload* (a `…-FORGE-….jar` that holds only `fabric.mod.json`) is named in the stop.
 
-**X61. Four kinds of jar that are not "a Forge or NeoForge mod with Java in it", each with its own answer.** **Pattern:** a jar that is not a plain Forge/NeoForge Java mod: NeoForge 1.20.1 (really Forge), resource-only (`lowcodefml`, no classes), a self-loading multi-loader (`IModLocator` + nested jars), or Fabric labelled Forge · **Symptom:** the port takes the wrong route or has nothing to port · **Fix:** the classes decide the route; setup generates a one-line `@Mod` class for resource-only jars; a self-loader stops with a reason · ·
+**X65. Four kinds of jar that are not "a Forge or NeoForge mod with Java in it", each with its own answer.** **Pattern:** a jar that is not a plain Forge/NeoForge Java mod: NeoForge 1.20.1 (really Forge), resource-only (`lowcodefml`, no classes), a self-loading multi-loader (`IModLocator` + nested jars), or Fabric labelled Forge · **Symptom:** the port takes the wrong route or has nothing to port · **Fix:** the classes decide the route; setup generates a one-line `@Mod` class for resource-only jars; a self-loader stops with a reason · ·
 - *NeoForge 1.20.1 IS Forge*: NeoForge's first line was the Forge fork (mods.toml, `net.minecraftforge`, SRG), and some
   such jars carry a `neoforge.mods.toml` too. The CLASSES decide: Forge references and no `net.neoforged.neoforge`
   ones take the Forge route, and source selection rates a NeoForge 1.20.1 build by that route from the start.
@@ -5747,14 +5747,14 @@ or reads the wrong mod id — each found on a popular mod, each reading as "this
   and the gates have a package.
 - *Self-loading multi-loader* (a Forge `IModLocator` service plus nested per-version jars): there is no single mod
   source; the port stops saying so.
-- *Fabric labelled as Forge*: X60's last item.
+- *Fabric labelled as Forge*: X64's last item.
 
-**X62. Vineflower can leave a constructor split: `X v = new X;` … `v.<init>(args)`.** · **Pattern:** a constructor
+**X66. Vineflower can leave a constructor split: `X v = new X;` … `v.<init>(args)`.** · **Pattern:** a constructor
 whose arguments needed temporaries (a switch expression per argument) · **Symptom:** `'(' or '[' expected` — a parse
 abort, so the count is not a count · **Fix:** setup removes the bare `new X;` and rewrites the `<init>` call as
 `X v = new X(args);`, when nothing between them touches `v` (the statements between compute the arguments).
 
-**X63. A converter that forwards calls by NAME rewrites calls into the mod's own classes.** · **Pattern:** a
+**X67. A converter that forwards calls by NAME rewrites calls into the mod's own classes.** · **Pattern:** a
 converted 26.x input handler (`mouseClicked(MouseButtonEvent, boolean)`) forwards to `child.mouseClicked(...)`,
 and `child` is the mod's own widget whose method still has the 1.21 `(double, double, int)` shape · **Symptom:** the
 converter RAISES the count (77 conversions, 437 → 475 on one port), as `required: double,double,int` · **Fix:**
@@ -5762,7 +5762,7 @@ converter RAISES the count (77 conversions, 437 → 475 on one port), as `requir
 `super.*` calls to those. `tools/mechanical-hop.py` now marks any step that raises the count, because a step that
 makes things worse otherwise reads as one more number in a list.
 
-**X64. A machine that ports many mods in a row runs out of disk and memory unless each port cleans up.** **Pattern:** porting many mods in a row on one machine, each Forge-hop port leaving a ~73 MB recompile in `~/.gradle/caches/ng_execute` and an idle Gradle daemon · **Symptom:** `No space left on device` mid-sweep and `Gradle build daemon disappeared unexpectedly` (OOM killer) on a compile that is fine alone · **Fix:** `tools/port.py` stops its workspace's daemons when a port ends; prune per-port `ng_execute` / `neoformruntime/intermediate_results` between ports · ·
+**X68. A machine that ports many mods in a row runs out of disk and memory unless each port cleans up.** **Pattern:** porting many mods in a row on one machine, each Forge-hop port leaving a ~73 MB recompile in `~/.gradle/caches/ng_execute` and an idle Gradle daemon · **Symptom:** `No space left on device` mid-sweep and `Gradle build daemon disappeared unexpectedly` (OOM killer) on a compile that is fine alone · **Fix:** `tools/port.py` stops its workspace's daemons when a port ends; prune per-port `ng_execute` / `neoformruntime/intermediate_results` between ports · ·
 **Symptom:** `No space left on device` mid-sweep, and `Gradle build daemon disappeared unexpectedly` (the kernel's
 OOM killer) on a compile that is fine alone · **Cause:** every Forge-hop port leaves its own ~73 MB Minecraft
 recompile in `~/.gradle/caches/ng_execute` (its access transformer changes the hash), and every NeoGradle or MDG
@@ -5770,24 +5770,24 @@ port leaves an idle daemon holding gigabytes for hours · **Fix:** `tools/port.p
 when a port ends, however it ends. Prune per-port `ng_execute` / `neoformruntime/intermediate_results` entries
 between ports on a long run.
 
-**X65. A Kotlin mod decompiles to Kotlin.** · **Pattern:** a mod written in Kotlin (it depends on Kotlin for
+**X69. A Kotlin mod decompiles to Kotlin.** · **Pattern:** a mod written in Kotlin (it depends on Kotlin for
 Forge) · **Symptom:** setup produces `.java` files full of `var x: T = …` and backtick names, the compile is a wall of
 parse errors, and the stage fails far from the cause · **Fix:** `tools/port.py` counts classes carrying
 `kotlin/Metadata` and stops at triage when they are the majority: porting it into Java would be a rewrite, not a
 port. Measured: 5 of 40 mods in one popularity batch.
 
-**X66. Vineflower can leave a Java 9+ string concatenation unfolded.** · **Pattern:** a `"…" + x` concatenation
+**X70. Vineflower can leave a Java 9+ string concatenation unfolded.** · **Pattern:** a `"…" + x` concatenation
 compiled to `invokedynamic` · **Symptom:** `StringConcatFactory.makeConcatWithConstants<"makeConcatWithConstants",
 "<recipe>">(args)`, a parse abort · **Fix:** setup rebuilds it from the recipe (each `\u0001` is the next argument,
 the rest literal text): `("" + "lit" + (a) + …)`. A recipe with `\u0002` (a bootstrap constant) is left alone.
 
-**X67. An access transformer that widens a vanilla method breaks NeoForge's own override of it.** · **Pattern:**
+**X71. An access transformer that widens a vanilla method breaks NeoForge's own override of it.** · **Pattern:**
 the mod's AT makes `SpawnEggItem.getDefaultType()` public · **Symptom:** Minecraft's recompile fails in
 `net/neoforged/neoforge/common/DeferredSpawnEggItem.java: attempting to assign weaker access privileges` · **Fix:**
 NeoForge's classes are recompiled in the same step, so `tools/fix-access-transformer.py` widens their overrides
 exactly like Minecraft's (it only read `net/minecraft` paths).
 
-**X68. What a mod's toml calls optional, and what its own package is, have to be read from the code.** **Pattern:** a heavily-used dependency marked `mandatory=false`, a second root package, an `@Mod` class importing an optional API, or an inline `mods = [ { modId = … } ]` array · **Symptom:** park-optional parks hundreds of the mod's own files (or its entry point), or the mod id is misread · **Fix:** a dependency used by 20+ classes is required, decompiled-tree packages are the mod's own, the `@Mod` class is never parked, metadata is read with a TOML parser · ·
+**X72. What a mod's toml calls optional, and what its own package is, have to be read from the code.** **Pattern:** a heavily-used dependency marked `mandatory=false`, a second root package, an `@Mod` class importing an optional API, or an inline `mods = [ { modId = … } ]` array · **Symptom:** park-optional parks hundreds of the mod's own files (or its entry point), or the mod id is misread · **Fix:** a dependency used by 20+ classes is required, decompiled-tree packages are the mod's own, the `@Mod` class is never parked, metadata is read with a TOML parser · ·
 - *`mandatory=false` on a dependency hundreds of classes use* (MCreator's default): park-optional parked 706 files
   of one mod as "optional integrations". A declared dependency referenced by at least 20 classes (or a tenth) is now
   required: wired onto the classpath, and its code kept. GeckoLib is kept whenever the build supplies it.
@@ -5798,7 +5798,7 @@ exactly like Minecraft's (it only read `net/minecraft` paths).
   every converter needs with it. It is never parked; its integration references are compile-loop work.
 - *`mods = [ { modId = … } ]`* (an inline array of tables) is legal TOML; metadata is read with a TOML parser now.
 
-**X69. A rename row's argument must be a BALANCED argument list, and every unquoted parse error is a parse
+**X73. A rename row's argument must be a BALANCED argument list, and every unquoted parse error is a parse
 abort.** · **Pattern:** `re:InteractionResultHolder\.success\([^;]*\)` on
 `c ? InteractionResultHolder.success(s) : super.use(level, player, hand);` · **Symptom:** the greedy class ran to the
 last `)` and deleted the else branch (`c ? InteractionResult.SUCCESS;`), and burndown-count, which knew only quoted
@@ -5806,9 +5806,9 @@ last `)` and deleted the else branch (`c ? InteractionResult.SUCCESS;`), and bur
 match `\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)`; burndown-count matches the whole `<tokens> expected` family. An
 audit of every earlier sweep result for a hidden parse abort found only the three already known.
 
-**X70. Three more decompile leftovers, and a report of what setup could not repair.** **Pattern:** decompile leftovers: a diamond cast `(Map<>)x`, an empty `static { }` left in an interface, unrepaired decompiler markers, a library bundled under `libs/` · **Error:** `illegal start of type`; `initializers not allowed in interfaces` · **Fix:** `tools/port.py` setup drops empty type arguments, deletes the empty interface initializer, reports leftover markers as `decompile_markers_left`, and park-optional treats `libs/` packages as the mod's own · ·
+**X74. Three more decompile leftovers, and a report of what setup could not repair.** **Pattern:** decompile leftovers: a diamond cast `(Map<>)x`, an empty `static { }` left in an interface, unrepaired decompiler markers, a library bundled under `libs/` · **Error:** `illegal start of type`; `initializers not allowed in interfaces` · **Fix:** `tools/port.py` setup drops empty type arguments, deletes the empty interface initializer, reports leftover markers as `decompile_markers_left`, and park-optional treats `libs/` packages as the mod's own · ·
 - *Diamond cast*: `(Map<>)x` is not legal Java (`illegal start of type`). Setup drops the empty type arguments.
-- *An interface with an empty assertion-status `static {}`*: the guard removal from X59 leaves `static { }` in an
+- *An interface with an empty assertion-status `static {}`*: the guard removal from X63 leaves `static { }` in an
   interface, which javac rejects (`initializers not allowed in interfaces`, now in the parse family). Setup deletes
   it.
 - *Whatever is left*: setup now counts the decompiler's failure markers by kind (an unrecovered method body, an
@@ -5818,17 +5818,17 @@ audit of every earlier sweep result for a hidden parse abort found only the thre
 - *A library the build supplies from `libs/`* (a jar or a nested jarJar) is not foreign either: park-optional reads
   the packages in those jars as well as the decompiled tree, so a shaded or bundled library stops being parked.
 
-**X71. Three pipeline steps that silently did nothing on one route.** **Pattern:** errors reported against `build/generated/sources/<overlay>/java`, an AT that breaks Minecraft's recompile, a mod with no AT on a stale NeoGradle cache · **Symptom:** `fix-missing-members.py` prints `0 member site(s) renamed` on every 26.2 sweep, or the stage stops before repair · **Fix:** errors map back to their source file, an AT failure goes to the AT loop, and the X57 cache heal runs with or without an AT · ·
+**X75. Three pipeline steps that silently did nothing on one route.** **Pattern:** errors reported against `build/generated/sources/<overlay>/java`, an AT that breaks Minecraft's recompile, a mod with no AT on a stale NeoGradle cache · **Symptom:** `fix-missing-members.py` prints `0 member site(s) renamed` on every 26.2 sweep, or the stage stops before repair · **Fix:** errors map back to their source file, an AT failure goes to the AT loop, and the X61 cache heal runs with or without an AT · ·
 - *The type-aware member renames never applied on a 26.2 hop.* javac reports errors against the generated copy
   (`build/generated/sources/<overlay>/java`), and `fix-missing-members.py` skipped every file outside `src/`. It
   printed `0 member site(s) renamed` on every sweep, which reads like a mod with nothing to rename. Errors on the
   generated copy are now mapped back to the source file they came from (the overlay's copy first).
 - *An access transformer that breaks Minecraft's recompile stopped the stage before the AT loop could repair it*:
   the start compile "never reached javac", which was treated as fatal. With an AT present it now goes to the loop.
-- *The stale NeoGradle cache heal (X57) ran only for a mod with an access transformer*; a mod without one stopped
+- *The stale NeoGradle cache heal (X61) ran only for a mod with an access transformer*; a mod without one stopped
   on the same stale entry. The heal now runs either way.
 
-**X72. An Architectury multi-loader jar's `@ExpectPlatform` is inert, and it must not cost the mod its own
+**X76. An Architectury multi-loader jar's `@ExpectPlatform` is inert, and it must not cost the mod its own
 facade.** · **Pattern:** a shared class `PlatformUtil` whose static methods carry `@ExpectPlatform`
 (`dev.architectury.injectables.annotations`) · **Symptom:** park-optional parked the class as an integration (the
 annotation's package is foreign), and 76 references to the mod's own platform facade became errors · **Fix:** the
@@ -5837,7 +5837,7 @@ build already rewrote each annotated method to call `<pkg>.<loader>.<Name>Impl` 
 code. Google's `@AutoService` is the same case (build-time only; setup already copies the `META-INF/services`
 file it generated) and is stripped too.
 
-**X73. The Forge route had no owner-resolved member renames at all.** · **Pattern:** one of the commonest Forge
+**X77. The Forge route had no owner-resolved member renames at all.** · **Pattern:** one of the commonest Forge
 leftovers, `FoodProperties.Builder.saturationMod(f)` (`saturationModifier` since 1.20.5), sat in 8 of the swept mods
 with ~500 sites, alongside `alwaysEat`, `AttributeModifier.Operation.ADDITION`, `Holder.get()`, the Forge reach
 getters on `Player` · **Symptom:** they reach the compile loop as unported API · **Fix:** a text rule for a bare name
@@ -5852,13 +5852,13 @@ loader now refuses such a row. `VertexConsumer.normal → setNormal` was removed
 must become `setNormal(pose, …)` (the recipe pack's rule), and the rename turned 120 `cannot find symbol` errors into
 120 `Matrix3f cannot be converted to Pose` — the same count, and a misleading shape.
 
-**X74. A library Minecraft itself ships is not an optional integration.** · **Pattern:** a mod's config class
+**X78. A library Minecraft itself ships is not an optional integration.** · **Pattern:** a mod's config class
 imports `joptsimple.internal.Strings` (jopt-simple is on every Minecraft classpath) · **Symptom:** park-optional
 called it foreign and parked the config class; ~100 references to it became errors · **Fix:** the platform list now
 names every library root the 1.21 / 26.x game classpath carries (jopt-simple, lz4, noexception, MixinExtras' new
 group, jline, beside Guava, fastutil, Netty, JOML…).
 
-**X75. A universal jar has no single source tree.** · **Pattern:** one jar for Forge, NeoForge and Fabric across
+**X79. A universal jar has no single source tree.** · **Pattern:** one jar for Forge, NeoForge and Fabric across
 Minecraft versions (a `mods.toml`, a `neoforge.mods.toml` and a `fabric.mod.json`; classes calling all three loaders'
 APIs, Fabric's in intermediary names; mixin packages per era, `legacy`/`modern`/`vintage`) that picks a path at
 runtime · **Symptom:** the 26.2 hop "ran" and left 318 errors, nearly all old Forge packages and 306 unmapped names,
@@ -5867,13 +5867,13 @@ classes) and stops on all three, pointing at the source repository, which builds
 jar swept so far, exactly one reached three; a jar with two (Forge plus Fabric references, or NeoForge plus Fabric
 intermediary names) is ported as before.
 
-**X76. A (Neo)Forge jar can carry intermediary-named code.** · **Pattern:** a multi-loader build whose NeoForge jar
+**X80. A (Neo)Forge jar can carry intermediary-named code.** · **Pattern:** a multi-loader build whose NeoForge jar
 bundles classes still in Fabric's intermediary names (`net.minecraft.class_3675`, `method_1234`) · **Symptom:** setup
 reported 1951 and 394 "unmapped names left" on two NeoForge jars, and every such class failed to compile · **Fix:**
 intermediary ids are globally unique, so setup now applies the intermediary remap to whatever survives the route's
 own remap, on every route.
 
-**X77. The name-map builders dropped every member of an UNobfuscated class.** · **Pattern:** Mojang's mappings
+**X81. The name-map builders dropped every member of an UNobfuscated class.** · **Pattern:** Mojang's mappings
 leave a few classes unobfuscated (`net.minecraft.server.MinecraftServer -> net.minecraft.server.MinecraftServer`);
 the "obfuscated" name then keeps its dots, while `joined.tsrg` and tiny files write it with slashes · **Symptom:** the
 SRG and intermediary joins missed the class and every descriptor naming it: ~900 SRG names, all of
@@ -5886,7 +5886,7 @@ with it: both builders now read the version manifest from piston-meta (launcherm
 (`raw.githubusercontent.com/FabricMC/intermediary`, tiny v1, converted) — without it the intermediary remap had
 never been able to run in a cloud session.
 
-**X78. A jar with one tree per loader, and parked mixins left in their configs.** **Pattern:** a NeoForge jar carrying a Fabric copy of the mod under `fabric.<pkg>` beside `neoforge.<pkg>`, and parked mixins still listed in `<mod>.mixins.json` · **Symptom:** the unparked Fabric files fail to compile, and Mixin fails at load on an entry whose class is gone · **Fix:** park-optional parks a `fabric/`/`quilt/` directory with a `neoforge/`/`forge/` sibling whole, and drops parked classes from every mixin config · ·
+**X82. A jar with one tree per loader, and parked mixins left in their configs.** **Pattern:** a NeoForge jar carrying a Fabric copy of the mod under `fabric.<pkg>` beside `neoforge.<pkg>`, and parked mixins still listed in `<mod>.mixins.json` · **Symptom:** the unparked Fabric files fail to compile, and Mixin fails at load on an entry whose class is gone · **Fix:** park-optional parks a `fabric/`/`quilt/` directory with a `neoforge/`/`forge/` sibling whole, and drops parked classes from every mixin config · ·
 - *A tree per loader*: one NeoForge jar kept a full Fabric copy of the mod relocated under `fabric.com.x…` beside
   `neoforge.com.x…`. park-optional parked only the Fabric files that import a Fabric API; the rest of that copy
   (its packets, its utilities) stayed and failed. A `fabric/` or `quilt/` directory with a `neoforge/` or `forge/`
@@ -5895,7 +5895,7 @@ never been able to run in a cloud session.
   and only Gate A would have said so. park-optional now drops parked classes from every mixin config and records
   them in MIGRATION.md.
 
-**X79. Vineflower can run out of memory and silently drop a class.** · **Pattern:** a 3-MB mod jar with a
+**X83. Vineflower can run out of memory and silently drop a class.** · **Pattern:** a 3-MB mod jar with a
 1300-line block-registration class · **Symptom:** the decompile "succeeded"; the log held only the tail of an
 `OutOfMemoryError` (setup kept the last 4000 characters of each tool's output), and the registration class simply
 did not exist, so 2401 of 3273 errors were `package BlockRegistration does not exist`. The previous run of the same
@@ -5905,19 +5905,19 @@ with the files written and retries any missing one, with Vineflower at 8 GB and 
 what is still missing. Tool output in setup.log keeps its first 2000 characters too, where a stack trace names its
 exception.
 
-**X80. A mixin's self-cast loses its `(Object)` hop in the decompile.** · **Pattern:** source `(Player)(Object)this`
+**X84. A mixin's self-cast loses its `(Object)` hop in the decompile.** · **Pattern:** source `(Player)(Object)this`
 in a `@Mixin` class compiles to one `checkcast`, so Vineflower writes `(Player)this` · **Symptom:**
 `incompatible types: ServerPlayerMixin cannot be converted to Player` (§162), in every mod that does it ·
 **Fix:** setup restores `(X)(Object)this` in every file carrying `@Mixin`.
 
-**X81. The networking converter spliced with stale offsets when a mod has two channels.** · **Pattern:** two
+**X85. The networking converter spliced with stale offsets when a mod has two channels.** · **Pattern:** two
 classes each declaring a `SimpleChannel`, one keeping it in a local (`SimpleChannel net = …; INSTANCE = net;`) ·
 **Symptom:** `illegal start of expression` at a dangling `.consumerMainThread(...)`, and the stage stopped: the first
 channel's send rewrite had already edited the second file, and the second file's registration was cut using offsets
 from its original text · **Fix:** `convert-simplechannel` reads each file's current text before it computes
 anything, and also removes the field a local channel was copied into.
 
-**X82. A run-together mod id is not a search phrase.** · **Pattern:** a jar's toml requires `ftbquests`; the project
+**X86. A run-together mod id is not a search phrase.** · **Pattern:** a jar's toml requires `ftbquests`; the project
 is "FTB Quests (NeoForge)" on CurseForge, slug `ftb-quests-forge` · **Symptom:** a confident "no 1.21.1 build found
 that declares it", and the mod stopped, while FTB Quests 2101.x exists · **Fix:** besides the bare id, the resolver
 searches the phrases its slug guesses spell (`ftb quests`), each only while nothing has matched; a candidate is still
@@ -5926,13 +5926,13 @@ negative — but one near miss: OctoLib's 26.2 build declares `shatterlib` (the 
 `octolib` is not portable as-is. The stop now names such a candidate (its project name contains the id, its jar
 declares other ids) as `nearest: … -- a renamed mod id?`.
 
-**X83. An enum with no constants decompiles without its `;`.** · **Pattern:** a `@Deprecated` enum whose constants
+**X87. An enum with no constants decompiles without its `;`.** · **Pattern:** a `@Deprecated` enum whose constants
 were all removed, keeping fields and constructors · **Symptom:** `enum constant expected here` on its first field —
 a parse error, so the stage stopped before counting anything · **Fix:** setup inserts the `;` when an enum body
 opens straight onto a member modifier.
 
-**X84. One unparseable file stopped the whole stage, every time a new decompile artifact turned up.** · **Pattern:**
-X62, X66, X70, X80 and X83 were each found because a single file failed to PARSE: javac then reports nothing else,
+**X88. One unparseable file stopped the whole stage, every time a new decompile artifact turned up.** · **Pattern:**
+X66, X70, X74, X84 and X87 were each found because a single file failed to PARSE: javac then reports nothing else,
 and the stage stopped with "fix and rerun" · **Symptom:** a mod with thousands of errors to count produced no count
 at all · **Fix:** each artifact still gets its own setup fix, but the long tail will keep producing new ones, so the
 stage no longer depends on having seen them all: when javac reports parse-family errors in at most ten files (and at
@@ -5943,35 +5943,35 @@ false one: `interface X extends ArmorMaterial` (a record since 1.21) gives `inte
 error that the `<token> expected` family also matched, so a parseable file was set aside. Parse messages end in
 `expected`; both this pattern and burndown-count's are now anchored there (plus `enum constant expected here`).
 
-**X85. A hub that guards optional APIs is not an integration.** · **Pattern:** a mod's 40-KB client facade and its
+**X89. A hub that guards optional APIs is not an integration.** · **Pattern:** a mod's 40-KB client facade and its
 "safe class" helper import optional mods' APIs (Iris, ModernUI) behind runtime checks, and half the mod calls them
 · **Symptom:** park-optional parked both as integrations; ~200 references to them became errors, to save the handful
 the optional imports cause · **Fix:** a file outside an integration package that at least three staying files name
 is kept; its optional imports are compile-loop work. A plugin in an `integration/`/`compat/` package still parks
 whole.
 
-**X86. Widening an override of a GENERIC method needs the override's own descriptor.** · **Pattern:** a mod's AT
+**X90. Widening an override of a GENERIC method needs the override's own descriptor.** · **Pattern:** a mod's AT
 widens `LivingEntityRenderer.scale(T, PoseStack, float)`; twenty vanilla renderers override it as `protected` with
 concrete types (`PlayerRenderer.scale(AbstractClientPlayer, …)`, `AbstractHorseRenderer.scale(T extends AbstractHorse,
 …)`) · **Symptom:** Minecraft's recompile fails with `cannot override … attempting to assign weaker access`; the
 override loop added 20 widenings with the BASE descriptor, which only widened each compiler bridge, the same errors
-returned, and the stage stopped ("no access-transformer override explains it"). Surfaced by X77: the line had been
+returned, and the stage stopped ("no access-transformer override explains it"). Surfaced by X81: the line had been
 an unmapped SRG name, i.e. dead · **Fix:** each subclass's descriptor is read from the recompiled source javac
 names (imports, package, type-variable bounds), and both it and the bridge are widened.
 
-**X87. A mixin config is read the way Gson reads it.** · **Pattern:** `<mod>.mixins.json` carrying a build
+**X91. A mixin config is read the way Gson reads it.** · **Pattern:** `<mod>.mixins.json` carrying a build
 preprocessor's `//#if FABRIC` lines and a trailing comma — Mixin's lenient Gson accepts it · **Symptom:** setup
 died (`json.decoder.JSONDecodeError`) before anything was ported · **Fix:** setup reads mixin configs and
 `pack.mcmeta` leniently (comments, trailing commas) and writes them back strict, so every later reader sees plain
 JSON.
 
-**X88. A wildcard access transformer widens every override below it too.** · **Pattern:** `public
+**X92. A wildcard access transformer widens every override below it too.** · **Pattern:** `public
 net.minecraft.world.entity.vehicle.Boat *()` (every method of `Boat`) · **Symptom:** Minecraft's recompile failed on
 each protected override in `ChestBoat`, and the override loop, which matched only named members, found nothing to add
 and stopped the stage · **Fix:** for a base class widened by a method wildcard, each conflicting subclass gets the
 same wildcard (`public …ChestBoat *()`).
 
-**X89. A mislabelled upload: look at the project's other files before stopping.** · **Pattern:** a registry file tagged
+**X93. A mislabelled upload: look at the project's other files before stopping.** · **Pattern:** a registry file tagged
 `fabric, forge, neoforge` whose jar is Fabric (`fabric.mod.json`, intermediary names) · **Symptom:** the port stops
 with "no recipe pack for fabric → neoforge", though the project might ship a real Forge jar for the same version ·
 **Fix:** on such a mislabel, `port.py` lists the project's other files for that Minecraft version (`modreg.py files`),
@@ -5979,7 +5979,7 @@ downloads up to four tagged forge/neoforge, and restarts on the first whose jar 
 the three mislabelled projects seen so far every "Forge" file was Fabric too (one author uploads only Fabric jars,
 under every label), so the stop stands — it is now a verified stop rather than a guess.
 
-**X90. A BUNDLE jar ports almost nothing and reads as a clean zero.** · **Pattern:** an outer jar with one or two
+**X94. A BUNDLE jar ports almost nothing and reads as a clean zero.** · **Pattern:** an outer jar with one or two
 classes of its own (the mod entrypoint) whose real code ships as several nested module jars of the SAME mod under
 `META-INF/jars/<stem>-<module>-*.jar` (a modular library publishing one "all-in-one" download) · **Symptom:** the
 sweep reports `exit=0 start=0 left=0` in seconds — a perfect port of one class, over a library of ten modules nobody
@@ -5990,7 +5990,7 @@ does not match, because the outer jar then has code. Measured: 1 match in 398 sw
 · **The general check:** a `start=0` from a jar is a claim about how much code was read. Ask the class count before
 believing it.
 
-**X91. 1.21.2's loot-type records are gone, and the member fixer fixed one site per line.** · **Pattern:** a mod
+**X95. 1.21.2's loot-type records are gone, and the member fixer fixed one site per line.** · **Pattern:** a mod
 registering custom loot conditions/functions — `DeferredRegister<LootItemConditionType>`,
 `new LootItemFunctionType<>(CODEC)`, `getType()` overrides — and reading `LootContext.getParam/hasParam` ·
 **Error:** `cannot find symbol: class LootItemConditionType / LootItemFunctionType / LootContextParam` on 26.2;
@@ -6005,7 +6005,7 @@ gradle's echo, which also dropped a SECOND missing member on the same line, so `
 took one full compile per call. It now keys on the caret column, like its private-access path; the self-check
 covers it and fails against the old key.
 
-**X92. A datagen subscriber registered by INSTANCE was kept as main code, and with it a whole datagen package.**
+**X96. A datagen subscriber registered by INSTANCE was kept as main code, and with it a whole datagen package.**
 · **Pattern:** `data/gen/Generators` holds only a `GatherDataEvent` handler; a proxy does
 `bus.register(new Generators())`; the providers beside it extend a LIBRARY's datagen base
 (`BlueprintItemModelProvider`), not a vanilla/NeoForge one · **Symptom:** ~366 of one mod's 643 residual errors in
@@ -6016,7 +6016,7 @@ it is outside a datagen package AND still declares something once its handlers a
 constructor, another method). Otherwise it parks with its package, and `cut_registrations` now also drops
 `register(new Gen())`. Self-check covers both halves and fails against the old branch.
 
-**X93. RenderType's factories moved to `RenderTypes`, and only behaviour-equal ones are renamed.** · **Pattern:**
+**X97. RenderType's factories moved to `RenderTypes`, and only behaviour-equal ones are renamed.** · **Pattern:**
 `RenderType.entitySolid(tex)`, `RenderType::entityTranslucent` · **Error:** `cannot find symbol` /
 `invalid method reference` on 26.2, where the type moved (§V3) and its static factories went to
 `rendertype.RenderTypes` · **Fix:** one regex row covering calls AND method references, limited to the 23
@@ -6025,7 +6025,7 @@ both versions' sources, because §V60 showed a same-named factory can invert cul
 not be resolved mechanically are named in the row's comment and left for review. A probe of both forms compiles
 against 26.2.
 
-**X94. A jar shipped as a RESOURCE that the mod's own code compiles against.** · **Pattern:** a mod ships a Java
+**X98. A jar shipped as a RESOURCE that the mod's own code compiles against.** · **Pattern:** a mod ships a Java
 agent / bootstrap jar inside its jar (`META-INF/<mod>/bootstrap-agent.jar`, not jar-in-jar) and its code names
 classes that exist only in there · **Error:** `package <the mod's own>.bootstrap.runtime does not exist`, which
 reads as a decompile loss · **Fix:** setup copies any nested jar outside `META-INF/jarjar|jars` whose packages the
@@ -6033,7 +6033,7 @@ source names but does not contain into `libs/compile/`, which the template puts 
 runtime classpath (the mod loads it itself -- §S7b; the resource copy still ships). Measured: 2 of 398 sweep jars
 carry resource jars; one is this case, the other a multi-loader locator triage already stops.
 
-**X95. Forge 1.20.2+ networking is the same channel with a new handler shape -- and the converter skipped it
+**X99. Forge 1.20.2+ networking is the same channel with a new handler shape -- and the converter skipped it
 silently.** · **Pattern:** `ChannelBuilder.named(...).simpleChannel()` with the familiar
 `messageBuilder(...).encoder().decoder().consumerMainThread(P::handle).add()` chains, but the handler is an
 INSTANCE `handle(CustomPayloadEvent.Context ctx)` (no `Supplier`), and `send(message, target)` takes its
@@ -6048,17 +6048,17 @@ and its send converted, 0 flagged. Self-check fails against the old handler rule
 without a word, which is how this one went unnoticed. ⚠ **And test on the pipeline's own decompiler:** the first fix was verified on a CFR
 decompile, which writes `CustomPayloadEvent.Context`; Vineflower imports the nested class and writes bare `Context`,
 so the real run converted 0 handlers. Both forms are accepted now, and the self-check carries one of each. The same holds for the 1.20.1 shape: Vineflower writes
-`Supplier<Context>` with `import ...NetworkEvent.Context;`, which the converter also missed (X97's MCreator
+`Supplier<Context>` with `import ...NetworkEvent.Context;`, which the converter also missed (X101's MCreator
 handlers among them), and a method-reference dimension target (`DIMENSION.with(level::dimension)`). Fixed alongside;
 the MCreator self-check now uses the Vineflower spelling.
 
-**X96. NeoForge renamed the whole `IForgeX` extension family to `IXExtension`.** · **Pattern:**
+**X100. NeoForge renamed the whole `IForgeX` extension family to `IXExtension`.** · **Pattern:**
 `IForgeMenuType.create(...)`, `implements IForgeItem`, `IForgeBlockState` · **Error:** `cannot find symbol:
 variable IForgeMenuType` (the import codemod moves the package, not the simple name) · **Fix:** 55 generated
 pairs in the Forge recipe pack, from the 21.1 jar: one row per `IXExtension` that exists, FQ and bare, so a Forge
 name with no NeoForge counterpart is left for review rather than guessed.
 
-**X97. MCreator's network channel registers every message through a generic helper, so the converter saw none.**
+**X101. MCreator's network channel registers every message through a generic helper, so the converter saw none.**
 · **Pattern:** every MCreator mod carries `SimpleChannel PACKET_HANDLER = NetworkRegistry.newSimpleChannel(...)`,
 an `int messageID`, and `<T> addNetworkMessage(Class<T>, encoder, decoder, consumer)` that calls
 `PACKET_HANDLER.registerMessage(messageID, messageType, ...)` with VARIABLES; each message registers itself from its
@@ -6076,7 +6076,7 @@ declaration, `(Object)` message casts and the MCreator dimension target are acce
 (the shared `methods()` skips them). One mod's real tree: 10 registrations, 10 packets, 10 handlers, 19 sends,
 0 flagged. Self-check covers used and unused and fails without the pre-pass.
 
-**X98. `fix-holders` stalled on fields registered through the mod's own helper, and on Holder mismatches javac
+**X102. `fix-holders` stalled on fields registered through the mod's own helper, and on Holder mismatches javac
 reports inside "no suitable constructor".** · **Pattern:** `Supplier<MobEffect> HOT = registryEffect("hot", new
 EffectHot())` with `Supplier<MobEffect> registryEffect(..) { return EFFECTS.register(..); }`; call sites
 `new MobEffectInstance((MobEffect)LTCEffects.HOT.get(), 600)` · **Error:** `MobEffect cannot be converted to
@@ -6088,7 +6088,7 @@ field; and an argument-mismatch report nested in a no-suitable-constructor/metho
 tree: 94 sites rewritten where 0 were, leaving the recipe-holder shapes (a separate topic). Self-check fails
 against the old tool.
 
-**X99. Vineflower imports NESTED classes and writes them bare -- so every rule keyed on `Outer.Inner` needs the bare
+**X103. Vineflower imports NESTED classes and writes them bare -- so every rule keyed on `Outer.Inner` needs the bare
 spelling too.** · **Pattern:** `import ...NetworkEvent.Context;` + `Supplier<Context>`;
 `import ...CustomPayloadEvent.Context;` + `handle(Context ctx)`; `import ...SpawnPlacements.Type;` +
 `Type.NO_RESTRICTIONS`; and a method-reference target `DIMENSION.with(level::dimension)` · **Symptom:** the rules were
@@ -6101,7 +6101,7 @@ imports `forge-shapes` removes after it deletes the override. · **The general r
 decompiler the pipeline actually runs. Two fixes in this session were verified on CFR output and measured zero on
 the real run.
 
-**X100. MCreator's player variables are a Forge CAPABILITY, generated identically in every such mod -- so convert
+**X104. MCreator's player variables are a Forge CAPABILITY, generated identically in every such mod -- so convert
 it, rather than leave a §D13 rewrite to a worker.** · **Pattern:** `<Mod>Variables` with `Capability<PlayerVariables>
 PLAYER_VARIABLES_CAPABILITY = CapabilityManager.get(new CapabilityToken<>(){})`, an `init(RegisterCapabilitiesEvent)`
 subscriber, a `PlayerVariablesProvider implements ICapabilitySerializable<Tag>` attached on `AttachCapabilitiesEvent`,
@@ -6117,9 +6117,9 @@ and `PlayerVariables` loses the handler-less `@EventBusSubscriber` MCreator puts
 MCreator's own clone handler, which copies only the variables marked persistent. The receiver of each call is found by
 scanning back over identifiers, calls and casts, so `((Entity)entity).getCapability(..)` keeps its cast.
 
-**X101. A mod's own jar-in-jar libraries are REQUIRED, not optional integrations.** · **Pattern:** a mod bundling its
+**X105. A mod's own jar-in-jar libraries are REQUIRED, not optional integrations.** · **Pattern:** a mod bundling its
 author's UI/markup libraries in `META-INF/jars/` (`hermes`, `olympus`) and importing them throughout · **Symptom:**
-`park-optional` saw imports of packages on no classpath and parked them as integrations; when X85's hub rule kept the
+`park-optional` saw imports of packages on no classpath and parked them as integrations; when X89's hub rule kept the
 files many others name, their `olympus` imports turned into ~130 new errors on one mod (960 -> 1091 between sweeps,
 same dependencies) -- the libraries were never on the compile classpath at all · **Fix:** setup copies every bundled
 jar (MixinExtras aside: NeoForge provides it) into `libs/compile/`, compile-only; the parker's classpath scan already
@@ -6128,7 +6128,7 @@ the mod; a TARGET-version build of a bundled mod is still for the dependency ste
 measurement:** a re-run that goes UP is a finding, not noise -- compare its parked count and its error symbols against
 the earlier run before blaming the newest fix.
 
-**X102. Three more channel shapes the networking converter skipped without a word.** · **Pattern:** (a) the channel
+**X106. Three more channel shapes the networking converter skipped without a word.** · **Pattern:** (a) the channel
 field is declared bare (`private static SimpleChannel INSTANCE;`) and assigned inside `register()`; (b) handlers live in
 a class nested in the packet (`.consumerMainThread(PacketUndo.Handler::handle)`); (c) `register()` is called from a
 common-setup handler, where no mod bus is in scope · **Symptom:** `convert-simplechannel: 0 file(s) changed` and no
@@ -6138,8 +6138,8 @@ flag -- the channel regex wanted `SimpleChannel X = ...` · **Fix:** a pre-pass 
 in the `@Mod` constructor (cut first, then insert: both can be in one file, and inserting first left the old call in
 place). One mod's network package converts completely; the self-check covers all three and fails without (a).
 
-**X103. Code a converter inserts into ANOTHER file must bring its imports -- and an import added before a splice
-moves the splice.** · **Pattern:** the MCreator converters (X97, X100) write `ManModVariables.PlayerVariablesSyncMessage
+**X107. Code a converter inserts into ANOTHER file must bring its imports -- and an import added before a splice
+moves the splice.** · **Pattern:** the MCreator converters (X101, X104) write `ManModVariables.PlayerVariablesSyncMessage
 .TYPE` and `ManModVariables.ATTACHMENT_TYPES.register(bus)` into the `@Mod` class, which lives in another package ·
 **Error:** `package ManModVariables does not exist` (javac reads an unknown capitalised qualifier as a package) --
 14 of one mod's remaining errors, all manufactured by the converters · **Fix:** both import each mod class they name
@@ -6148,7 +6148,7 @@ with offsets computed earlier, which cut the helper mid-signature and pushed a l
 brace -- found by running both converters in pipeline order on a full Vineflower tree, not by the self-checks (whose
 fixtures put every class in one package). Imports now go in after the splice.
 
-**X104. A registration whose consumer is a main-thread WRAPPER lambda around the real handler.** · **Pattern:**
+**X108. A registration whose consumer is a main-thread WRAPPER lambda around the real handler.** · **Pattern:**
 `CHANNEL.registerMessage(id++, P.class, P::encode, P::decode, (pkt, sup) -> { Context ctx = (Context)sup.get();
 ctx.enqueueWork(() -> P.handle(pkt, ctx)); ctx.setPacketHandled(true); })` with `P.handle(P, Context)` taking the context
 directly · **Symptom:** packets converted, 0 handlers -- the lambda went into the registrar line verbatim, still
@@ -6157,7 +6157,7 @@ handler runs on the main thread by default, which is all the wrapper did), and a
 `import ...NetworkEvent.Context;` is converted directly. Any other lambda is kept as written AND named in the flags.
 One mod: 7 of 8 handlers now convert; the eighth has a real inline body and is flagged.
 
-**X105. A popular MCreator mod's residual buckets were six missing rows, not six hard problems.** · **Pattern:** in one
+**X109. A popular MCreator mod's residual buckets were six missing rows, not six hard problems.** · **Pattern:** in one
 1.20.1 MCreator mod's post-mechanical count, the six largest non-generic buckets were each a single call shape:
 `dims.width`/`dims.height` (a record now: `width()`/`height()`), `import ...ForgeRegistries.Keys;` with bare
 `Keys.POI_TYPES`, `ForgeRegistries.POI_TYPES.getHolder(poiType).get()`, a Block's
@@ -6171,14 +6171,14 @@ so the reference is bound); `Item.TooltipContext` for the BlockGetter form; the 
 `false`; `dropExperience(null)` (the killer is unknown at that call); `new ArrayList<>(...)`. The packet flag and the null
 killer are judgements, not renames -- recorded here so a later reader knows which rows to distrust.
 
-**X106. 26.2 renamed the companions of `ResourceLocation` too, and a token rule for the type cannot reach them.** **Pattern:** `ResourceLocationArgument` (`id()`, `getId(ctx, name)`) and `SoundEvent.getLocation()` on a 26.2 hop · **Symptom:** the whole-token `ResourceLocation` → `Identifier` row leaves classes whose names merely contain it unported (7 of a 14-error mod) · **Fix:** separate rename rows: `ResourceLocationArgument` → `IdentifierArgument` and `SoundEvent.getLocation()` → `location()`; every class whose name contains a renamed type needs its own row ·
+**X110. 26.2 renamed the companions of `ResourceLocation` too, and a token rule for the type cannot reach them.** **Pattern:** `ResourceLocationArgument` (`id()`, `getId(ctx, name)`) and `SoundEvent.getLocation()` on a 26.2 hop · **Symptom:** the whole-token `ResourceLocation` → `Identifier` row leaves classes whose names merely contain it unported (7 of a 14-error mod) · **Fix:** separate rename rows: `ResourceLocationArgument` → `IdentifierArgument` and `SoundEvent.getLocation()` → `location()`; every class whose name contains a renamed type needs its own row ·
 `ResourceLocationArgument` became `IdentifierArgument` (same `id()` / `getId(ctx, name)`), and `SoundEvent.getLocation()`
 became `location()`. The `ResourceLocation` → `Identifier` row is anchored on the whole token, so it leaves
 `ResourceLocationArgument` alone, which is right for it and leaves the argument unported. A type rename sweeps the
 type; every class whose NAME merely contains it needs its own row. Found on a 14-error client music mod, where these
 were 7 of the 14.
 
-**X107. A member row names the DECLARING type, javac names the RECEIVER's -- so every call on a subclass skipped the
+**X111. A member row names the DECLARING type, javac names the RECEIVER's -- so every call on a subclass skipped the
 row.** · **Pattern:** a row `Entity  teleportToWithTicket  teleportTo`, and the error
 `location: variable player of type ServerPlayer` (or `class NightmareEntity` for `this.getFeetBlockState()`) ·
 **Symptom:** `fix-missing-members: 0 site(s) rewritten` on a mod whose biggest symbol bucket is exactly that rename;
@@ -6194,7 +6194,7 @@ Architectury's `@ExpectPlatform.Transformed`, which the decompile prep already s
 Vineflower writes BARE (`import ...ExpectPlatform.Transformed;` + `@Transformed`): 50 of the mod's 164 errors. The bare
 form is stripped only in a file whose import says what it is.
 
-**X108. Two 26.2 removals that need no replacement, only to stop being called.** · **Pattern:** a client setup full of
+**X112. Two 26.2 removals that need no replacement, only to stop being called.** · **Pattern:** a client setup full of
 `ItemBlockRenderTypes.setRenderLayer(block, RenderType.cutout())` (21 calls in one farming mod), and server code reading
 `level.random` · **Error:** `cannot find symbol: variable ItemBlockRenderTypes` per call; `random has protected access in
 Level` · **Fix:** 26.2 picks the chunk layer for each quad from its sprite's own alpha
@@ -6205,21 +6205,21 @@ texture with soft alpha that the author pinned to cutout now draws translucent: 
 as well as private, and rewrites a field read to a differently-named accessor at javac's caret only, so the second of
 two `w.random` on one line is the one fixed when that is the one reported.
 
-**X109. A dependency's OWN bundled libraries are part of the API its dependents compile against.** · **Pattern:** a Create
+**X113. A dependency's OWN bundled libraries are part of the API its dependents compile against.** · **Pattern:** a Create
 addon: its code names Registrate (`BlockBuilder`, `BlockEntry`, `NonNullUnaryOperator`), Flywheel and Ponder, none of
 which is a mod the addon declares -- Create ships all three inside its own jar (`META-INF/jarjar/`) · **Error:** 100+ of
 the addon's 116 errors were `package com.tterrag.registrate... does not exist` and the symbols in it, with Create itself
 correctly on the classpath · **Fix:** after fetching a target's dependencies, `port.py` unpacks each one's jar-in-jar
 libraries (MixinExtras aside: NeoForge ships it) into `libs/<mc>/nested/`, which the template puts on the COMPILE
 classpath only. At runtime the dependency's jar-in-jar provides them, and a loose second copy would be a duplicate mod.
-X101 is the same rule for the mod's own bundled jars; this one is one level out.
+X105 is the same rule for the mod's own bundled jars; this one is one level out.
 
-**X110. Two 1.20.3-1.20.5 GUI signatures a small config screen hits.** **Pattern:** a small config screen calling `AbstractWidget.setTooltipDelay(int)` and `Screen.renderDirtBackground(GuiGraphics)` from before 1.20.3-1.20.5 · **Symptom:** both calls fail to compile against 1.21.1 (the int parameter became `java.time.Duration`; `renderDirtBackground` is gone) · **Fix:** rename rows: an int literal becomes `Duration.ofMillis(n)`, and `renderDirtBackground` becomes `renderMenuBackground(GuiGraphics)`; both checked in the 21.1 jar · `AbstractWidget.setTooltipDelay(int)` takes a
+**X114. Two 1.20.3-1.20.5 GUI signatures a small config screen hits.** **Pattern:** a small config screen calling `AbstractWidget.setTooltipDelay(int)` and `Screen.renderDirtBackground(GuiGraphics)` from before 1.20.3-1.20.5 · **Symptom:** both calls fail to compile against 1.21.1 (the int parameter became `java.time.Duration`; `renderDirtBackground` is gone) · **Fix:** rename rows: an int literal becomes `Duration.ofMillis(n)`, and `renderDirtBackground` becomes `renderMenuBackground(GuiGraphics)`; both checked in the 21.1 jar · `AbstractWidget.setTooltipDelay(int)` takes a
 `java.time.Duration` (an int literal becomes `Duration.ofMillis(n)`), and `Screen.renderDirtBackground(GuiGraphics)` is
 gone; its place is `renderMenuBackground(GuiGraphics)` (the textured menu background that replaced dirt). Both checked
 in the 21.1 jar; both rows.
 
-**X111. The vanilla container block entity has a direct 26.2 form, and the persistence converter refused it.** ·
+**X115. The vanilla container block entity has a direct 26.2 form, and the persistence converter refused it.** ·
 **Pattern:** the `RandomizableContainerBlockEntity` save/load every chest-like block copies --
 `super.saveAdditional(t, p); if (!this.trySaveLootTable(t)) ContainerHelper.saveAllItems(t, this.items, p);` and the load
 twin with `NonNullList.withSize(n, ItemStack.EMPTY)` · **Symptom:** `convert-valueio` refused both methods ("`ContainerHelper` /
@@ -6232,7 +6232,7 @@ Vineflower writes `BlockEntityType.Builder.of(...).build(null)` BARE (`Builder.o
 row could not see; and `net.minecraft.MethodsReturnNonnullByDefault` / `FieldsAreNonnullByDefault` no longer exist on
 26.2, so the annotations (usually on a package-info) are dropped.
 
-**X112. §V33's copper rows covered one family of nine.** · **Pattern:** `Blocks.WAXED_WEATHERED_COPPER`,
+**X116. §V33's copper rows covered one family of nine.** · **Pattern:** `Blocks.WAXED_WEATHERED_COPPER`,
 `Blocks.EXPOSED_CUT_COPPER_SLAB`, `Items.WAXED_COPPER_BULB` · **Error:** `cannot find symbol` -- the inherited table
 mapped only `WAXED_COPPER_BLOCK`, `OXIDIZED_COPPER` and `COPPER_BLOCK` · **Fix:** the rows are now GENERATED from the 26.2
 jar's `WeatheringCopperCollection` fields for every family 1.21.1 had (block, cut, chiseled, stairs, slab, door, trapdoor,
@@ -6242,14 +6242,14 @@ hand-written subset of a generated family is §V11's lesson again -- the colour 
 vanilla. A port of a backport onto a version that already has the feature is usually work nobody needs; ask before
 spending on one.
 
-**X113. A tick handler that compares its phase with `equals` was skipped.** · **Pattern:** `onClientTick(ClientTickEvent
+**X117. A tick handler that compares its phase with `equals` was skipped.** · **Pattern:** `onClientTick(ClientTickEvent
 event) { if (event.phase.equals(Phase.START)) {...} }` (also `Phase.END.equals(event.phase)`, `!...equals`, and CFR's
 `(Object)` cast), registered through `addListener` · **Symptom:** forge-shapes left the method alone, so the stale
 `TickEvent.ClientTickEvent` / `TickEvent.Phase` imports stayed and the handler did not compile · **Fix:** the phase test is
 normalised to `==` / `!=` before the existing split runs, so it converts like every other tick handler
 (`ClientTickEvent.Pre`, here). The original `==` form was the only one the converter had ever seen.
 
-**X114. MCreator's `Block.use` was refused as "reads its hand", and the only read was the super forward.** · **Pattern:**
+**X118. MCreator's `Block.use` was refused as "reads its hand", and the only read was the super forward.** · **Pattern:**
 every MCreator block that reacts to a right-click: `public InteractionResult use(BlockState blockstate, Level world, BlockPos
 pos, Player entity, InteractionHand hand, BlockHitResult hit) { super.use(blockstate, world, pos, entity, hand, hit); ...}`
 · **Symptom:** forge-shapes flagged it for a hand port to `useItemOn` and left it, so the method overrode nothing and the
@@ -6258,30 +6258,30 @@ forward -- passing the hand on to vanilla is not a read of it, and that call is 
 same step. A body that really reads the hand is still flagged. · **Same mod:** `isValidBonemealTarget` lost its trailing
 `boolean isClient` in 1.20.2; a row drops it from the override.
 
-**X115. The `bus =` rows removed the attribute and left its import.** **Pattern:** `@EventBusSubscriber(bus = Bus.MOD)` with Vineflower's nested `import net.neoforged.fml.common.EventBusSubscriber.Bus;` on a 26.2 hop · **Symptom:** the `bus =` rows strip the attribute but leave the import, which names a class 26.2 does not have (43 errors in one mod, one per subscriber class) · **Fix:** a rename row drops that import, and the older `Mod.EventBusSubscriber.Bus` spelling too · 26.2's `@EventBusSubscriber` has no `bus`
+**X119. The `bus =` rows removed the attribute and left its import.** **Pattern:** `@EventBusSubscriber(bus = Bus.MOD)` with Vineflower's nested `import net.neoforged.fml.common.EventBusSubscriber.Bus;` on a 26.2 hop · **Symptom:** the `bus =` rows strip the attribute but leave the import, which names a class 26.2 does not have (43 errors in one mod, one per subscriber class) · **Fix:** a rename row drops that import, and the older `Mod.EventBusSubscriber.Bus` spelling too · 26.2's `@EventBusSubscriber` has no `bus`
 (§V38b), and the rename rows strip `bus = Bus.MOD` -- but Vineflower writes the constant through a nested import,
 `import net.neoforged.fml.common.EventBusSubscriber.Bus;`, which then named a class 26.2 does not have: 43 errors in one
 mod, one per subscriber class. A row now drops that import (and the older `Mod.EventBusSubscriber.Bus` spelling).
 
-**X116. A Groovy mod reached the compile and stopped on a parse error.** · **Pattern:** a mod written for GML (the Groovy
+**X120. A Groovy mod reached the compile and stopped on a parse error.** · **Pattern:** a mod written for GML (the Groovy
 mod loader): 16 of its 21 classes implement `groovy.lang.GroovyObject` or call `org.codehaus.groovy`, and Groovy compiles
 dynamic calls to invokedynamic · **Symptom:** `mechanical stage failed (exit 2)`, `';' expected` on
 `compatibleMods = IndyInterface.bootstrap<"cast","()",0>(var9);` -- the decompiler's rendering of an indy site, which is not
 Java · **Fix:** triage counts Groovy-compiled classes the way it already counts Kotlin ones, and stops a mod that is mostly
 Groovy before setup with the honest reason: there is no Java source to port; a Groovy port is by hand.
 
-**X117. A toml that FORGOT a dependency made it optional, and the parker then removed the mod's own registries.** ·
+**X121. A toml that FORGOT a dependency made it optional, and the parker then removed the mod's own registries.** ·
 **Pattern:** a Farmer's Delight addon whose `neoforge.mods.toml` declares only neoforge and minecraft, while the registry
 lists Farmer's Delight as required and the addon's block and item registries extend its classes · **Symptom:** for a
-target where the dependency has no build, X82's rule ("the toml is the authority") recorded it as "not what the jar's
+target where the dependency has no build, X86's rule ("the toml is the authority") recorded it as "not what the jar's
 toml requires"; setup then parked the files importing `acmedev.kitchencore` as an optional integration -- which
 were `BlockRegistry` and `ItemRegistry` -- and the compile failed on the mod's own main class · **Fix:** before taking
 the toml's word, `port.py` asks the jar's classes: if any references a package named after the registry dependency
 (`kitchen-core` → `.../kitchencore/...`), the dependency is required whatever the toml says, and the port stops
-like any missing required dependency. The toml stays the authority for dependencies the code does not use (the case X82
+like any missing required dependency. The toml stays the authority for dependencies the code does not use (the case X86
 was written for: registry data copied from the other loader).
 
-**X118. Forge's GUI overlay API has a fixed 1.21 shape, so it is now a converter (`tools/convert-gui-overlays.py`).** ·
+**X122. Forge's GUI overlay API has a fixed 1.21 shape, so it is now a converter (`tools/convert-gui-overlays.py`).** ·
 **Pattern:** a HUD mod's `void armor(ForgeGui gui, GuiGraphics g, float partialTick, int screenWidth, int screenHeight)`
 methods (or five-parameter lambdas), registered with `event.registerAbove(VanillaGuiOverlay.PLAYER_HEALTH.id(), "armor",
 Overlays::armor)` on `RegisterGuiOverlaysEvent`, and a `RenderGuiOverlayEvent.Pre` handler that cancels a vanilla overlay
@@ -6296,7 +6296,7 @@ unwraps the render event's DeltaTracker. ForgeGui's own helpers (`renderHealth`,
 `setupOverlayRenderState`, ...) are on no public 1.21 method and are flagged by line. Runs in the Forge mechanical stage
 after the MCreator variables step.
 
-**X119. A rename row that matches a call's FIRST shape and not its second, plus a token row behind it, writes a parse
+**X123. A rename row that matches a call's FIRST shape and not its second, plus a token row behind it, writes a parse
 error.** · **Pattern:** the 26.2 rows for `DirectionProperty` (gone in 1.21.2) rewrote `DirectionProperty.create("f",
 predicate)` to `EnumProperty.create("f", Direction.class, predicate)` -- and the one-argument `create("direction")` (every
 direction) fell through to the TYPE row `DirectionProperty` → `EnumProperty<Direction>`, giving
@@ -6305,7 +6305,7 @@ so the whole mechanical stage failed (`the start compile never reached javac`) o
 `create` row takes both arities. The general rule: when a TYPE token row would also rewrite the type's static-call
 receiver, every static on that type needs its own regex row first, because `Type<Arg>.call()` is never legal Java.
 
-**X120. The proxy idiom and two smaller Forge 1.20.1 leftovers from one small mod.** **Pattern:** `DistExecutor.runForDist(() -> ClientProxy::new, () -> CommonProxy::new)` as a field value, a nested `NetworkRegistry.ChannelBuilder` import, `AttributeInstance.removePermanentModifier` · **Symptom:** the value-form proxy was flagged and left, the nested import stayed · **Fix:** forge-shapes writes `(FMLEnvironment.dist == Dist.CLIENT ? new ClientProxy() : new CommonProxy())`, the network converter drops the import, a row maps to `removeModifier(ResourceLocation)` · ·
+**X124. The proxy idiom and two smaller Forge 1.20.1 leftovers from one small mod.** **Pattern:** `DistExecutor.runForDist(() -> ClientProxy::new, () -> CommonProxy::new)` as a field value, a nested `NetworkRegistry.ChannelBuilder` import, `AttributeInstance.removePermanentModifier` · **Symptom:** the value-form proxy was flagged and left, the nested import stayed · **Fix:** forge-shapes writes `(FMLEnvironment.dist == Dist.CLIENT ? new ClientProxy() : new CommonProxy())`, the network converter drops the import, a row maps to `removeModifier(ResourceLocation)` · ·
 `public static CommonProxy PROXY = DistExecutor.runForDist(() -> ClientProxy::new, () -> CommonProxy::new);` is a VALUE,
 which §6's statement rewrite flagged and left; forge-shapes now writes `(FMLEnvironment.dist == Dist.CLIENT ? new
 ClientProxy() : new CommonProxy())` for `runForDist` / `safeRunForDist` / `unsafeRunForDist` (a `::new`, a `::method`
@@ -6314,7 +6314,7 @@ or a `() -> () -> expr` supplier). Vineflower imports Forge 1.20.1's channel bui
 after converting the channel. And `AttributeInstance.removePermanentModifier` became `removeModifier(ResourceLocation)`
 in 1.20.5 (member row).
 
-**X121. Two lines every MCreator NeoForge 1.21.1 mod carries, both broken on 26.2.** · **Pattern:** the generated main
+**X125. Two lines every MCreator NeoForge 1.21.1 mod carries, both broken on 26.2.** · **Pattern:** the generated main
 class keeps a `workQueue` of `net.minecraft.util.Tuple<Runnable, Integer>` (`new Tuple(r, t)`, `getA/getB/setB`), and
 registers its payloads with `MESSAGES.forEach((id, networkMessage) -> registrar.playBidirectional(id,
 networkMessage.reader(), networkMessage.handler()))` · **Error:** `cannot find symbol: class Tuple` (26.x removed it);
@@ -6326,7 +6326,7 @@ vanilla's `Tuple` from a mod's own): `Tuple` → commons-lang3 `MutablePair` (mu
 Minecraft classpath), `getA/getB/setA/setB` → `getLeft/getRight/setLeft/setRight`. And a 26.2 row passes the handler
 twice with raw casts, which is 1.21.1's one-handler-both-sides behaviour (§V81).
 
-**X122. A main item that HOOKS datagen pulled the whole datagen package back into the build.** · **Pattern:** `public
+**X126. A main item that HOOKS datagen pulled the whole datagen package back into the build.** · **Pattern:** `public
 class ItemWand extends Item implements ICustomItemModel { ... public void generateCustomItemModel(ItemModelGenerator g,
 String name) { g.withExistingParent(...) ... } }`, with `ICustomItemModel` and `ItemModelGenerator` in the mod's `data/`
 package · **Symptom:** the parker parks `data/` as datagen, then un-parks every datagen file that main code still names
@@ -6336,7 +6336,7 @@ that only hooks a parked datagen type loses the hook: methods whose parameters n
 naming it, and the imports left unused (datagen-package ones included). Datagen output already ships in the jar; the hook
 only ever ran at the author's build. One mod: 4 → 6 datagen files parked, and its main item no longer names datagen.
 
-**X123. Five call shapes every MCreator 1.20.1 mod carries, measured on one 1164-error mod.** **Pattern:** MCreator 1.20.1 shapes: `new ForgeSoundType(...)`, `getTier().getLevel() >= N`, `getAdvancements().getAdvancement(rl)`, `UnmodifiableIterator`, a render event's `getWindow()` · **Symptom:** over a thousand compile-error lines from five shapes in one mod · **Fix:** Forge-pack rows: `DeferredSoundType`; a tier-tag test; `get(rl)` typed `AdvancementHolder`; plain `Iterator`; `Minecraft.getInstance().getWindow()` · · `new ForgeSoundType(...)`
+**X127. Five call shapes every MCreator 1.20.1 mod carries, measured on one 1164-error mod.** **Pattern:** MCreator 1.20.1 shapes: `new ForgeSoundType(...)`, `getTier().getLevel() >= N`, `getAdvancements().getAdvancement(rl)`, `UnmodifiableIterator`, a render event's `getWindow()` · **Symptom:** over a thousand compile-error lines from five shapes in one mod · **Fix:** Forge-pack rows: `DeferredSoundType`; a tier-tag test; `get(rl)` typed `AdvancementHolder`; plain `Iterator`; `Minecraft.getInstance().getWindow()` · · `new ForgeSoundType(...)`
 (882 error lines) is NeoForge's `DeferredSoundType`, same seven-argument constructor. MCreator's `canHarvestBlock` test
 `tieredItem.getTier().getLevel() >= N` (~470): tiers have no level in 1.21 -- a tier IS its incorrect-for-drops tag --
 so `>= N` becomes "the tier's tag is none of vanilla's below N" (`>= 0` or less is just `true`); a modded tier with its
@@ -6345,27 +6345,27 @@ own tag passes, which is the generous reading. `server.getAdvancements().getAdva
 `Iterator` (~110). And a render event's `getWindow()` → `Minecraft.getInstance().getWindow()` (~54). All rows in the
 Forge pack; each target checked with javap on the 21.1 jar.
 
-**X124. A save/load forward the rename table had already shortened was refused as "not the plain forward".** **Pattern:** a container block entity whose `super.saveAdditional(t, p)` the 26.2 rename rows had already shortened to `super.saveAdditional(t)` · **Symptom:** `convert-valueio` refused the method on its first line as "not the plain forward", so the X111 conversion never happened · **Fix:** `convert-valueio` now accepts the one-argument forward too; re-run the pipeline on the real mod, since a fixture-verified fix is not pipeline-verified · The 26.2
+**X128. A save/load forward the rename table had already shortened was refused as "not the plain forward".** **Pattern:** a container block entity whose `super.saveAdditional(t, p)` the 26.2 rename rows had already shortened to `super.saveAdditional(t)` · **Symptom:** `convert-valueio` refused the method on its first line as "not the plain forward", so the X115 conversion never happened · **Fix:** `convert-valueio` now accepts the one-argument forward too; re-run the pipeline on the real mod, since a fixture-verified fix is not pipeline-verified · The 26.2
 rename rows turn `super.saveAdditional(t, p)` into `super.saveAdditional(t)` before `convert-valueio` runs, so a
-container block entity that X111 should have converted was refused on its first line. The converter now accepts the
-one-argument forward too (it is exactly what it would have written). Found by re-running the mod X111 was written for --
+container block entity that X115 should have converted was refused on its first line. The converter now accepts the
+one-argument forward too (it is exactly what it would have written). Found by re-running the mod X115 was written for --
 a fix verified on a fixture is not verified on the pipeline until the pipeline has run it.
 
-**X125. Converted sends kept Forge's `PacketDistributor` import.** **Pattern:** a send converted to `PacketDistributor.sendToPlayer(...)` in a file still importing Forge's `net.minecraftforge.network.PacketDistributor` · **Error:** `cannot find symbol` on every converted send (the Forge import stayed and `add_import` refused a second class of that name) · **Fix:** the network converter swaps the import in any file whose sends it rewrote; a row maps `NetworkHooks.openScreen` to the player's `openMenu(...)` · The import codemod leaves `net.minecraftforge.network`
+**X129. Converted sends kept Forge's `PacketDistributor` import.** **Pattern:** a send converted to `PacketDistributor.sendToPlayer(...)` in a file still importing Forge's `net.minecraftforge.network.PacketDistributor` · **Error:** `cannot find symbol` on every converted send (the Forge import stayed and `add_import` refused a second class of that name) · **Fix:** the network converter swaps the import in any file whose sends it rewrote; a row maps `NetworkHooks.openScreen` to the player's `openMenu(...)` · The import codemod leaves `net.minecraftforge.network`
 alone (the network converter owns it), the converter's dead-import sweep only drops it when unused -- and the sends it had
 just written USE `PacketDistributor`, so the Forge import stayed and `add_import` refused a second class of that name:
 every converted `PacketDistributor.sendToPlayer(...)` was then `cannot find symbol` (12 in one mod). The converter now
 swaps the import in any file whose sends it rewrote. Same mod: `NetworkHooks.openScreen(player, provider[, pos | buf ->
 ...])` is the player's own `openMenu(...)` in 1.21.1 (row).
 
-**X126. An unqualified or `this.` call has no owner in javac's report, so X107's supertype walk never saw it.** **Pattern:** an unqualified or `this.` call to a renamed member, e.g. `this.teleportToWithTicket(...)` · **Symptom:** javac prints `symbol: method ...` with no `location:` line, so `fix-missing-members.py` skipped the site and X107's supertype walk never saw it · **Fix:** `fix-missing-members.py` takes the owner from the class declared above the line in the source file, then resolves it through the supertype walk · For
+**X130. An unqualified or `this.` call has no owner in javac's report, so X111's supertype walk never saw it.** **Pattern:** an unqualified or `this.` call to a renamed member, e.g. `this.teleportToWithTicket(...)` · **Symptom:** javac prints `symbol: method ...` with no `location:` line, so `fix-missing-members.py` skipped the site and X111's supertype walk never saw it · **Fix:** `fix-missing-members.py` takes the owner from the class declared above the line in the source file, then resolves it through the supertype walk · For
 `this.teleportToWithTicket(...)` javac prints `symbol: method teleportToWithTicket(double,double,double)` and NO
 `location:` line, and `fix-missing-members.py` skipped every such site -- which is most calls an entity makes on itself.
 Its owner is now the class declared above the line in the source file, which the supertype walk then resolves
-(`LichEntity` → ... → `Entity`). Found by re-running the mod X107 was written for: 6 `teleportToWithTicket` and 4
+(`LichEntity` → ... → `Entity`). Found by re-running the mod X111 was written for: 6 `teleportToWithTicket` and 4
 `getFeetBlockState` sites were still there.
 
-**X127. MCreator names every init class's register `REGISTRY`, and fix-holders looked registers up by name tree-wide.** **Pattern:** MCreator init classes that all name their register `REGISTRY` (`ModSounds.REGISTRY`, `ModEnchantments.REGISTRY`, ...) · **Symptom:** fix-holders' tree-wide lookup let the last file win, giving e.g. `DeferredHolder<SoundEvent, Enchantment>` and a confusing compile error · **Fix:** registers are indexed per file (own class first, tree-wide only when unambiguous, else a flag); a stale nested `LivingEvent.LivingTickEvent` import is also dropped ·
+**X131. MCreator names every init class's register `REGISTRY`, and fix-holders looked registers up by name tree-wide.** **Pattern:** MCreator init classes that all name their register `REGISTRY` (`ModSounds.REGISTRY`, `ModEnchantments.REGISTRY`, ...) · **Symptom:** fix-holders' tree-wide lookup let the last file win, giving e.g. `DeferredHolder<SoundEvent, Enchantment>` and a confusing compile error · **Fix:** registers are indexed per file (own class first, tree-wide only when unambiguous, else a flag); a stale nested `LivingEvent.LivingTickEvent` import is also dropped ·
 `Index.regs` mapped field name → registry type across all files, so with `ModSounds.REGISTRY`, `ModEnchantments.REGISTRY`,
 ... the last file read won: an enchantment holder came out `DeferredHolder<SoundEvent, Enchantment>`, which compiles to a
 confusing error instead of the real one and can mistype items or blocks the same way. Registers are now indexed per file:
@@ -6373,7 +6373,7 @@ the declaring class's own field first, a tree-wide answer only when the name is 
 forge-shapes converted a `LivingTickEvent` handler but left Vineflower's nested import
 (`...LivingEvent.LivingTickEvent;`), which no longer resolves.
 
-**X128. Three more MCreator 1.20.1 tails, from re-measuring one mod (2676 → 920 after the earlier fixes).** **Pattern:** MCreator 1.20.1: `getLevelData().getXSpawn()`, `entity.setMaxUpStep(x)` on a plain `Entity`, `if (stack.hurt(1, RandomSource.create(), null))` · **Symptom:** hundreds of compile errors left after earlier fixes (144 spawn-getter sites) · **Fix:** rows rewrite to `.getSpawnPos().getX()`, an `instanceof LivingEntity` guarded `STEP_HEIGHT` set, and a written-out damage-versus-maximum test (a judgement row: no Unbreaking roll) ·
+**X132. Three more MCreator 1.20.1 tails, from re-measuring one mod (2676 → 920 after the earlier fixes).** **Pattern:** MCreator 1.20.1: `getLevelData().getXSpawn()`, `entity.setMaxUpStep(x)` on a plain `Entity`, `if (stack.hurt(1, RandomSource.create(), null))` · **Symptom:** hundreds of compile errors left after earlier fixes (144 spawn-getter sites) · **Fix:** rows rewrite to `.getSpawnPos().getX()`, an `instanceof LivingEntity` guarded `STEP_HEIGHT` set, and a written-out damage-versus-maximum test (a judgement row: no Unbreaking roll) ·
 `level.getLevelData().getXSpawn()` → `.getSpawnPos().getX()` (and Y, Z) -- 144 sites. `entity.setMaxUpStep(x)` on a
 procedure's `Entity` (no attribute map in 1.21) → `if (entity instanceof LivingEntity e) e.getAttribute(STEP_HEIGHT)
 .setBaseValue(x);` -- §113's own row only covers `this.`. And MCreator's item-damage idiom `if (stack.hurt(1,
@@ -6382,20 +6382,20 @@ the same test written out (add the damage, compare with the maximum). That last 
 rolled Unbreaking, which needs a ServerLevel the call site does not have. The mod's largest remaining bucket is MCreator's
 dimension teleporter (`ITeleporter`/`PortalInfo`, ~800 lines over a handful of classes), a §89 rewrite.
 
-**X129. Forge's `IExtensionPoint.DisplayTest` registration has no 1.21 call.** **Pattern:** a client-only mod calling `ModLoadingContext.get().registerExtensionPoint(DisplayTest.class, () -> new DisplayTest(...))` with Vineflower's nested `IExtensionPoint.DisplayTest` import · **Symptom:** the Forge registration has no 1.21 call · **Fix:** a row leaves the statement as a comment and drops the nested import; setting `displayTest` in `neoforge.mods.toml` (e.g. `IGNORE_ALL_VERSION`) is still a metadata step for the port · Client-only mods register
+**X133. Forge's `IExtensionPoint.DisplayTest` registration has no 1.21 call.** **Pattern:** a client-only mod calling `ModLoadingContext.get().registerExtensionPoint(DisplayTest.class, () -> new DisplayTest(...))` with Vineflower's nested `IExtensionPoint.DisplayTest` import · **Symptom:** the Forge registration has no 1.21 call · **Fix:** a row leaves the statement as a comment and drops the nested import; setting `displayTest` in `neoforge.mods.toml` (e.g. `IGNORE_ALL_VERSION`) is still a metadata step for the port · Client-only mods register
 `ModLoadingContext.get().registerExtensionPoint(DisplayTest.class, () -> new DisplayTest(() -> "...", (v, net) -> net))` so a
 server without them still accepts the client; NeoForge reads that from `neoforge.mods.toml` (`displayTest`) instead. A
 row leaves the statement as a comment and drops Vineflower's nested `IExtensionPoint.DisplayTest` import. Setting the toml
 field to the matching value (`IGNORE_ALL_VERSION` for "anything") is still a metadata step for the port.
 
-**X130. A class that became a record needs no hand row: the jar already says what the accessor is.** **Pattern:** field reads on a vanilla class that 26.2 turned into a record (`HugeMushroomFeatureConfiguration`, `EnchantmentInstance`) · **Error:** `f has private access in Owner` at every field read (~200 in one worldgen mod) · **Fix:** `fix-missing-members.py` checks, with one `javap` per owner, whether the owner is a record with a same-named accessor and rewrites `x.f` to `x.f()`; hand rows still win · 26.2 turned
+**X134. A class that became a record needs no hand row: the jar already says what the accessor is.** **Pattern:** field reads on a vanilla class that 26.2 turned into a record (`HugeMushroomFeatureConfiguration`, `EnchantmentInstance`) · **Error:** `f has private access in Owner` at every field read (~200 in one worldgen mod) · **Fix:** `fix-missing-members.py` checks, with one `javap` per owner, whether the owner is a record with a same-named accessor and rewrites `x.f` to `x.f()`; hand rows still win · 26.2 turned
 configuration classes into records (`HugeMushroomFeatureConfiguration`, `EnchantmentInstance`, ...), so every field read
 is `f has private access in Owner` until someone writes `Owner f f()` into the members table -- one worldgen mod had ~200
 such reads of two fields. `fix-missing-members.py` now checks, for a private-access site with no row, whether the owner is
 a RECORD in the compile jar with a same-named accessor (one `javap` per owner, only when such a site exists) and rewrites
 `x.f` to `x.f()`. Hand rows still win, and anything that is not a record accessor is still left alone.
 
-**X131. "No native build" was the registry's filing, not the mod's.** **Pattern:** a NeoForge build Modrinth files under "1.21" while its toml declares `[1.21, 1.22)` · **Symptom:** `modreg versions --mc 1.21.1` answers `has_native: false`, so the sweep spends a whole port on a mod that already loads on the target · **Fix:** `port.py` downloads the newest NeoForge build filed under a sibling version, reads its declared Minecraft range, and stops as "already native" (exit 20) when the target is in it; a dependency resolves to that build · Modrinth files a build under the version it was
+**X135. "No native build" was the registry's filing, not the mod's.** **Pattern:** a NeoForge build Modrinth files under "1.21" while its toml declares `[1.21, 1.22)` · **Symptom:** `modreg versions --mc 1.21.1` answers `has_native: false`, so the sweep spends a whole port on a mod that already loads on the target · **Fix:** `port.py` downloads the newest NeoForge build filed under a sibling version, reads its declared Minecraft range, and stops as "already native" (exit 20) when the target is in it; a dependency resolves to that build · Modrinth files a build under the version it was
 built FOR ("1.21") while its toml declares what it loads ON (`[1.21, 1.22)`), so `modreg versions --mc 1.21.1` answered
 `has_native: false` for a mod with a perfectly good NeoForge 1.21.1 jar -- and the sweep spent a port on it (a popular
 minimap, 279 errors' worth of work nobody needs; CurseForge, asked the same question, said yes). `port.py` now downloads
@@ -6406,7 +6406,7 @@ build instead of "no build". A build declaring no range proves nothing and is no
 minimap above plus three whose NeoForge "1.21" jars declare `[1.21,1.22)`, `[1.21.0,1.22)` and `[1.21,)`. That is the
 single most expensive false positive the sweep found, because each one is a whole port.
 
-**X132. Three MCreator NeoForge 1.21.1 shapes on 26.2, from one 2114-error mod.** **Pattern:** MCreator `player.displayClientMessage(text, true|false)`, `new CommandSourceStack(CommandSource.NULL, pos, rot, level, 4, ...)`, `instanceof ThrownPotion` on 26.2 · **Symptom:** the three shapes no longer fit 26.2 · **Fix:** 26.2 table rows: literal boolean picks `sendOverlayMessage`/`sendSystemMessage`, level 4/0 become `ALL_PERMISSIONS`/`NO_PERMISSIONS`, `ThrownPotion` becomes `AbstractThrownPotion` · `player.displayClientMessage(text,
+**X136. Three MCreator NeoForge 1.21.1 shapes on 26.2, from one 2114-error mod.** **Pattern:** MCreator `player.displayClientMessage(text, true|false)`, `new CommandSourceStack(CommandSource.NULL, pos, rot, level, 4, ...)`, `instanceof ThrownPotion` on 26.2 · **Symptom:** the three shapes no longer fit 26.2 · **Fix:** 26.2 table rows: literal boolean picks `sendOverlayMessage`/`sendSystemMessage`, level 4/0 become `ALL_PERMISSIONS`/`NO_PERMISSIONS`, `ThrownPotion` becomes `AbstractThrownPotion` · `player.displayClientMessage(text,
 true|false)` (148 lines) splits by its literal boolean into `sendOverlayMessage(text)` / `sendSystemMessage(text)` --
 §V16 routes it through a compat pair in a two-target tree; on a single-target hop the literal decides, and a non-literal
 boolean is left for a worker. MCreator's `new CommandSourceStack(CommandSource.NULL, pos, rot, level, 4, ...)` (129) takes
@@ -6414,12 +6414,12 @@ a `PermissionSet`: level 4 is exactly `ALL_PERMISSIONS` and 0 exactly `NO_PERMIS
 left. `instanceof ThrownPotion` (144) names `AbstractThrownPotion` (splash and lingering are separate classes now), and
 the old import goes when nothing else names the class. All in the 26.2 table.
 
-**X133. The 26.2 client HUD and toast accessors moved off `Gui`/`Minecraft`.** **Pattern:** `gui.getChat()` and `minecraft.getToasts()` carried to 26.2 · **Symptom:** both accessors are missing on 26.2 (the HUD split moved them off `Gui`/`Minecraft`) · **Fix:** member rows in `tools/recipes/era-26.2-members.tsv` (`Gui.hud.getChat()`, `Minecraft.gui.toastManager()`), applied by fix-missing-members from the compile error · `Gui.getChat()` is now
+**X137. The 26.2 client HUD and toast accessors moved off `Gui`/`Minecraft`.** **Pattern:** `gui.getChat()` and `minecraft.getToasts()` carried to 26.2 · **Symptom:** both accessors are missing on 26.2 (the HUD split moved them off `Gui`/`Minecraft`) · **Fix:** member rows in `tools/recipes/era-26.2-members.tsv` (`Gui.hud.getChat()`, `Minecraft.gui.toastManager()`), applied by fix-missing-members from the compile error · `Gui.getChat()` is now
 `Gui.hud.getChat()` (the HUD split, §V28) and `Minecraft.getToasts()` is `Minecraft.gui.toastManager()`. Both
 checked against the 26.2 jar with javap. Added as member rows in `tools/recipes/era-26.2-members.tsv`, so
 fix-missing-members rewrites them from the compile error (found in a zero-model sweep of a footstep-sound mod).
 
-**X134. Three 26.2 rows that only covered the spelling their first mod used.** **Pattern:** `new ClickEvent(Action.OPEN_FILE, loc.toString())`, `EntityType.create(world)` or a client-level argument, `new KeyMapping(..., "key.categories.*")` on 26.2 · **Symptom:** the 26.2 rows matched only the spelling their first mod used, so these calls went through unrewritten · **Fix:** rows widened to any balanced argument, nested-import spelling and every action; `create` takes `world`/client level; vanilla category keys become `KeyMapping.Category` constants · The `ClickEvent` rows took
+**X138. Three 26.2 rows that only covered the spelling their first mod used.** **Pattern:** `new ClickEvent(Action.OPEN_FILE, loc.toString())`, `EntityType.create(world)` or a client-level argument, `new KeyMapping(..., "key.categories.*")` on 26.2 · **Symptom:** the 26.2 rows matched only the spelling their first mod used, so these calls went through unrewritten · **Fix:** rows widened to any balanced argument, nested-import spelling and every action; `create` takes `world`/client level; vanilla category keys become `KeyMapping.Category` constants · The `ClickEvent` rows took
 `ClickEvent.Action.X` plus a string literal, so `new ClickEvent(Action.OPEN_FILE, loc.toString())` (a nested
 import and a computed argument) went through untouched, and OPEN_FILE, COPY_TO_CLIPBOARD and CHANGE_PAGE had no
 row at all. Now any argument (balanced parentheses), either spelling, every action (CHANGE_PAGE wraps the old
@@ -6428,16 +6428,16 @@ level (`Minecraft.getInstance().level`, `mc.level`). And a `KeyMapping` category
 record: the six vanilla `"key.categories.*"` keys inside a `new KeyMapping(...)` become its constants. A mod's
 own category key needs `Category.register` and is left for a worker. Checked against the 26.2 jar.
 
-**X135. `FMLLoader`'s statics became instance methods on 26.x, and `Window.getWindow()` is `handle()`.** **Pattern:** static `FMLLoader.isProduction()`, `FMLLoader.getGamePath()`, `Window.getWindow()` on 26.x · **Error:** `non-static method ... cannot be referenced from a static context` · **Fix:** rows rewrite to `FMLEnvironment.isProduction()`, `FMLPaths.GAMEDIR.get()`, and the era member row `Window.handle()` · On 26.x
+**X139. `FMLLoader`'s statics became instance methods on 26.x, and `Window.getWindow()` is `handle()`.** **Pattern:** static `FMLLoader.isProduction()`, `FMLLoader.getGamePath()`, `Window.getWindow()` on 26.x · **Error:** `non-static method ... cannot be referenced from a static context` · **Fix:** rows rewrite to `FMLEnvironment.isProduction()`, `FMLPaths.GAMEDIR.get()`, and the era member row `Window.handle()` · On 26.x
 `FMLLoader.isProduction()` is an instance method (reached through `FMLLoader.getCurrent()`), so the static call
 fails as `non-static method ... cannot be referenced from a static context`. `FMLEnvironment.isProduction()` keeps
 the static form, and `FMLLoader.getGamePath()` becomes `FMLPaths.GAMEDIR.get()` (next to the existing `getDist`
 row). The GLFW handle accessor `Window.getWindow()` is `Window.handle()`, added as an era member row. Found on a
 2-error loading-screen mod, where these were the only two errors.
 
-**X136. An add-on whose toml AND registry page both forget its parent mod.** **Pattern:** an add-on whose `mods.toml` and registry page declare no dependency on the parent mod it is built on · **Error:** `package <parent>.common.item does not exist` · **Fix:** `undeclared_code_deps` in `tools/port.py` wires a package-derived candidate id into `libs/<mc>/` only when a registry build declares exactly that id; park-optional keeps code for every wired mod · A Farmer's Delight add-on's
+**X140. An add-on whose toml AND registry page both forget its parent mod.** **Pattern:** an add-on whose `mods.toml` and registry page declare no dependency on the parent mod it is built on · **Error:** `package <parent>.common.item does not exist` · **Fix:** `undeclared_code_deps` in `tools/port.py` wires a package-derived candidate id into `libs/<mc>/` only when a registry build declares exactly that id; park-optional keeps code for every wired mod · A Farmer's Delight add-on's
 `mods.toml` declared only `forge` and `minecraft`, and the registry listed no dependencies, so neither the toml
-check nor the registry check (X117) had anything to fetch. The decompile then failed with
+check nor the registry check (X121) had anything to fetch. The decompile then failed with
 `package acmedev.kitchencore.common.item does not exist`, and park-optional parked the add-on's core
 food and pie classes as an "optional integration". `undeclared_code_deps` in `tools/port.py` now reads the
 package references in the mod's own classes, skipping compat/integration/datagen packages, the JDK, Minecraft,
@@ -6447,13 +6447,13 @@ candidates are SOFT, because a scan of 327 cached jars showed most of them are a
 registry build exists whose own toml declares exactly that id. It is never written into the port's toml, and it
 never causes a dependency stop. park-optional now keeps code for every mod wired into `libs/`.
 
-**X137. A SimpleChannel kept in a local and stored into a field lost every send.** **Pattern:** `SimpleChannel net = ChannelBuilder...; INSTANCE = net;` with sends through `INSTANCE.send(...)`/`sendToServer`/`sendTo` · **Symptom:** convert-simplechannel deleted the `INSTANCE` field but rewrote sends only for `net`, leaving calls to a field that no longer exists (4 errors) · **Fix:** convert-simplechannel now rewrites sends for the channel and every field it was stored in, in every file · `SimpleChannel net =
+**X141. A SimpleChannel kept in a local and stored into a field lost every send.** **Pattern:** `SimpleChannel net = ChannelBuilder...; INSTANCE = net;` with sends through `INSTANCE.send(...)`/`sendToServer`/`sendTo` · **Symptom:** convert-simplechannel deleted the `INSTANCE` field but rewrote sends only for `net`, leaving calls to a field that no longer exists (4 errors) · **Fix:** convert-simplechannel now rewrites sends for the channel and every field it was stored in, in every file · `SimpleChannel net =
 ChannelBuilder...; INSTANCE = net;` registers through `net`. convert-simplechannel already deleted the `INSTANCE`
 alias and its field, but it rewrote sends only for `net`, so every `INSTANCE.send(...)`, `sendToServer` and
 `sendTo` was left calling a field that no longer existed (4 errors). The send rewrite now runs for the channel
 and for every field it was stored in, in every file.
 
-**X138. Casts TO a mixin class or a duck interface lose their `(Object)` hop in the decompile.** **Pattern:** decompiled casts to the mod's own mixin class, accessor interface or duck interface, e.g. `((ItemStackAccessor) stack)`, with the `(Object)` hop dropped · **Error:** `cannot be converted to` (64 in one mod) · **Fix:** `mixin_duck_types` in `tools/port.py` collects those types and `fix_decompile_artifacts` rewrites each cast as `(T)(Object)x`; vanilla casts are untouched · §162 restores
+**X142. Casts TO a mixin class or a duck interface lose their `(Object)` hop in the decompile.** **Pattern:** decompiled casts to the mod's own mixin class, accessor interface or duck interface, e.g. `((ItemStackAccessor) stack)`, with the `(Object)` hop dropped · **Error:** `cannot be converted to` (64 in one mod) · **Fix:** `mixin_duck_types` in `tools/port.py` collects those types and `fix_decompile_artifacts` rewrites each cast as `(T)(Object)x`; vanilla casts are untouched · §162 restores
 `(Player)(Object)this`. A performance mod (a Lithium fork) also casts other values to its own mixin types:
 `((HopperBlockEntityMixin) hopper)`, `((ItemStackAccessor) stack)`, `((StorableItemStack) stack)`, where the last
 is an interface that a mixin class implements on ItemStack. The source wrote these as `(T)(Object)x`, which
@@ -6463,17 +6463,17 @@ a mixin is a class unrelated to its target: 64 `cannot be converted to` errors i
 mixin class implements. `fix_decompile_artifacts` then rewrites every cast to one of those types as
 `(T)(Object)x`. The runtime checkcast is identical. Vanilla types (such as `(Container)c`) are not touched.
 
-**X139. Forge's `StairBlock(Supplier<BlockState>, Properties)` constructor is gone.** **Pattern:** `new StairBlock(() -> BASE.get().defaultBlockState(), props)` (Forge's `Supplier<BlockState>` constructor) · **Error:** `BlockState is not a functional interface` · **Fix:** pack row passes the supplier's body as the `BlockState` argument to vanilla's `StairBlock(BlockState, Properties)` · Only vanilla's
+**X143. Forge's `StairBlock(Supplier<BlockState>, Properties)` constructor is gone.** **Pattern:** `new StairBlock(() -> BASE.get().defaultBlockState(), props)` (Forge's `Supplier<BlockState>` constructor) · **Error:** `BlockState is not a functional interface` · **Fix:** pack row passes the supplier's body as the `BlockState` argument to vanilla's `StairBlock(BlockState, Properties)` · Only vanilla's
 `StairBlock(BlockState, Properties)` remains, so `new StairBlock(() -> BASE.get().defaultBlockState(), props)` fails
 with `BlockState is not a functional interface` (30 errors in one mod). Pack row: the supplier's body becomes the
 argument. It is evaluated when the stair's own registry supplier runs, which comes after the base block, since a
 DeferredRegister registers in order.
 
-**X140. `RecipeManager.getAllRecipesFor` returns `List<RecipeHolder<T>>` since 1.20.2.** **Pattern:** a 1.20.1 caller iterating `recipeManager.getAllRecipesFor(type)` as plain recipes · **Symptom:** since 1.20.2 the method returns `List<RecipeHolder<T>>`, so the recipe-typed loop no longer fits · **Fix:** pack row appends `.stream().map(RecipeHolder::value).toList()`, only in files that never name `RecipeHolder` · A 1.20.1 caller iterates
+**X144. `RecipeManager.getAllRecipesFor` returns `List<RecipeHolder<T>>` since 1.20.2.** **Pattern:** a 1.20.1 caller iterating `recipeManager.getAllRecipesFor(type)` as plain recipes · **Symptom:** since 1.20.2 the method returns `List<RecipeHolder<T>>`, so the recipe-typed loop no longer fits · **Fix:** pack row appends `.stream().map(RecipeHolder::value).toList()`, only in files that never name `RecipeHolder` · A 1.20.1 caller iterates
 recipes, so a pack row appends `.stream().map(RecipeHolder::value).toList()`. It runs only in files that never name
 `RecipeHolder`, so code already written for holders is left alone.
 
-**X141. `MenuScreens.register` is private in 1.21.1.** **Pattern:** `MenuScreens.register(type, ctor);` in a client-setup handler, often inside `enqueueWork` · **Symptom:** `MenuScreens.register` is private in 1.21.1 · **Fix:** `t_menus` in `tools/forge-shapes.py` moves each call into a new `registerMenuScreens(RegisterMenuScreensEvent)` wired like the old method (`@SubscribeEvent` or a sibling `addListener`); unwired cases are listed, not moved · Screens are bound on the mod-bus `RegisterMenuScreensEvent`.
+**X145. `MenuScreens.register` is private in 1.21.1.** **Pattern:** `MenuScreens.register(type, ctor);` in a client-setup handler, often inside `enqueueWork` · **Symptom:** `MenuScreens.register` is private in 1.21.1 · **Fix:** `t_menus` in `tools/forge-shapes.py` moves each call into a new `registerMenuScreens(RegisterMenuScreensEvent)` wired like the old method (`@SubscribeEvent` or a sibling `addListener`); unwired cases are listed, not moved · Screens are bound on the mod-bus `RegisterMenuScreensEvent`.
 A cross-file pass in `tools/forge-shapes.py` (`t_menus`) moves every plain `MenuScreens.register(type, ctor);`
 statement out of its method, usually a client-setup handler and often inside `enqueueWork`, into a new sibling
 `registerMenuScreens(RegisterMenuScreensEvent event)`. The new method is wired the way the old one was: it gets
@@ -6482,7 +6482,7 @@ one that registers the old method, which may be in the @Mod constructor in anoth
 wiring, or with an expression-lambda call, is listed and left alone, because an unwired listener would silently
 lose every screen.
 
-**X142. Forge capabilities, the largest Forge bucket left, go through a mod-local compat layer
+**X146. Forge capabilities, the largest Forge bucket left, go through a mod-local compat layer
 (`tools/convert-capabilities.py`, Forge stage `caps`).** **Pattern:** Forge capability code: `LazyOptional`, `ForgeCapabilities`, `CapabilityManager`, `AttachCapabilitiesEvent` handlers · **Symptom:** NeoForge 1.21.1 removed the whole system; thousands of error lines across 37 mods · **Fix:** `tools/convert-capabilities.py` (Forge stage `caps`) generates a compat API in `<root>.compat.caps`, rewrites imports, routes consumers through `Caps.get` and adds `Caps.register(modBus)` · Measured across the swept mods: 37 carry Forge capability
 code. `LazyOptional` appears on about 6300 error lines, `ForgeCapabilities` on 2300, and
 `CapabilityManager`/`CapabilityToken`/`AttachCapabilitiesEvent` on about 700. NeoForge 1.21.1 removed the whole
@@ -6512,12 +6512,12 @@ Listed rather than guessed: instance attachers; ItemStack attachers (an ItemStac
 its constructor. Data that old saves kept under "ForgeCaps" is not migrated. The stage runs after
 convert-mcreator-variables, so MCreator's capability-based variables still go through their own converter.
 
-**X143. Vineflower nests a diamond inside type arguments: `new ListProperty<List<>>()`.** **Pattern:** decompiled nested diamond `new ListProperty<List<>>()` · **Error:** `illegal start of type` (a parse error that stops the whole compile) · **Fix:** `fix_decompile_artifacts` writes the outer diamond `new ListProperty<>()` · This does not parse
+**X147. Vineflower nests a diamond inside type arguments: `new ListProperty<List<>>()`.** **Pattern:** decompiled nested diamond `new ListProperty<List<>>()` · **Error:** `illegal start of type` (a parse error that stops the whole compile) · **Fix:** `fix_decompile_artifacts` writes the outer diamond `new ListProperty<>()` · This does not parse
 (`illegal start of type`), and a parse error stops the whole compile before the mechanical stage can count anything:
 a 26.2 hop of a GUI library failed outright on three of these. `fix_decompile_artifacts` now writes the outer
 diamond, `new ListProperty<>()`, which infers the same type.
 
-**X144. The §97 block-constructor rows only matched a type constant whose NAME ended in the type, and only `new`
+**X148. The §97 block-constructor rows only matched a type constant whose NAME ended in the type, and only `new`
 calls.** **Pattern:** `new ButtonBlock(props, Holder.CONSTANT, 30, true)` with a qualified type constant, subclass `super(properties, woodTypeIn)`, pressure plates, and `hurtAndBreak` with `handIn` · **Symptom:** the §97 rows skipped these, and a later row passed an InteractionHand where an EquipmentSlot belongs (10 errors) · **Fix:** rows accept qualified constants, reorder pressure plates (judgement row) and subclass `super(...)`; §32 row accepts suffixed hand variables · `new ButtonBlock(props, HabitatBlockSetType.FAIRY_RING_MUSHROOM, 30, true)` (a holder class, then the
 constant) went through untouched. So did every subclass's `super(properties, woodTypeIn)`, and so did the pressure
 plates. The rows now accept a qualified constant. New rows reorder the pressure plates: their 1.20 sensitivity moved
@@ -6528,14 +6528,14 @@ hurtAndBreak row now accepts a hand variable with a suffix (`handIn`). Before th
 `broadcastBreakEvent(handIn)` to be a slot and passed an InteractionHand where an EquipmentSlot belongs (10 errors in
 one mod).
 
-**X145. `new MobEffectInstance(effect, 160)` where `effect` is a local or a `Supplier<MobEffect>` parameter.** **Pattern:** `new MobEffectInstance(effect, 160)` where `effect` is a local or `Supplier<MobEffect>` parameter · **Error:** `no suitable constructor found ... (argument mismatch; MobEffect cannot be converted to Holder<MobEffect>)` · **Fix:** fix-holders rule F wraps the first argument in `BuiltInRegistries.MOB_EFFECT.wrapAsHolder(..)` · javac
+**X149. `new MobEffectInstance(effect, 160)` where `effect` is a local or a `Supplier<MobEffect>` parameter.** **Pattern:** `new MobEffectInstance(effect, 160)` where `effect` is a local or `Supplier<MobEffect>` parameter · **Error:** `no suitable constructor found ... (argument mismatch; MobEffect cannot be converted to Holder<MobEffect>)` · **Fix:** fix-holders rule F wraps the first argument in `BuiltInRegistries.MOB_EFFECT.wrapAsHolder(..)` · javac
 reports an overloaded constructor as `no suitable constructor found ... (argument mismatch; MobEffect cannot be
-converted to Holder<MobEffect>)`, and fix-holders' argument-mismatch path (X98) handled only `Owner.FIELD.get()`
+converted to Holder<MobEffect>)`, and fix-holders' argument-mismatch path (X102) handled only `Owner.FIELD.get()`
 with a registry field to retype. It now wraps the constructor's first argument in
 `BuiltInRegistries.MOB_EFFECT.wrapAsHolder(..)` (rule F). That is the one MobEffect position, so the mismatch javac
 names is the one rewritten.
 
-**X146. Three 26.2 signatures a relic mod hit at once.** **Pattern:** `getCooldowns().addCooldown(item, n)`, 6/7-argument `teleportTo(ServerLevel, x, y, z, yaw, pitch)`, `inventory.items` on 26.2 · **Symptom:** cooldowns are keyed by the stack, the old `teleportTo` is gone, and `Inventory.items` is private · **Fix:** rows wrap Items in `new ItemStack(it)`, append `Set.of(), true` / `true` to `teleportTo` when the first argument names a level, and an era member row maps to `getNonEquipmentItems()` · (1) `ItemCooldowns` is keyed by the STACK. An Item
+**X150. Three 26.2 signatures a relic mod hit at once.** **Pattern:** `getCooldowns().addCooldown(item, n)`, 6/7-argument `teleportTo(ServerLevel, x, y, z, yaw, pitch)`, `inventory.items` on 26.2 · **Symptom:** cooldowns are keyed by the stack, the old `teleportTo` is gone, and `Inventory.items` is private · **Fix:** rows wrap Items in `new ItemStack(it)`, append `Set.of(), true` / `true` to `teleportTo` when the first argument names a level, and an era member row maps to `getNonEquipmentItems()` · (1) `ItemCooldowns` is keyed by the STACK. An Item
 argument (`this` in an Item subclass, a registry `.get()`, an `Items` constant) becomes `new ItemStack(it)`, whose
 cooldown group is the item's own id unless a USE_COOLDOWN component says otherwise. `stack.getItem()` passes the stack
 itself, and `removeCooldown(item)` takes the item's registry id. (2) `teleportTo(ServerLevel, x, y, z, yaw, pitch)` is
@@ -6544,7 +6544,7 @@ gone. The one left takes a relative-movement set and a trailing `setCamera`, so 
 a level, so a mod's own 6-argument `teleportTo` is left alone. (3) `Inventory.items` is private; the main-inventory
 list is `getNonEquipmentItems()` (an era member row).
 
-**X147. `codec()` on every concrete block subclass, from javac's own errors (`tools/fix-block-codecs.py`).** **Pattern:** a concrete subclass of an abstract vanilla block (BushBlock, DirectionalBlock, BaseEntityBlock) with no `codec()` · **Error:** `X is not abstract and does not override abstract method codec() in DirectionalBlock` · **Fix:** `tools/fix-block-codecs.py` adds `return simpleCodec(X::new);` when a `(Properties)` constructor exists, else `MapCodec.unit(this)`, in the Forge stage's compile loop · Since
+**X151. `codec()` on every concrete block subclass, from javac's own errors (`tools/fix-block-codecs.py`).** **Pattern:** a concrete subclass of an abstract vanilla block (BushBlock, DirectionalBlock, BaseEntityBlock) with no `codec()` · **Error:** `X is not abstract and does not override abstract method codec() in DirectionalBlock` · **Fix:** `tools/fix-block-codecs.py` adds `return simpleCodec(X::new);` when a `(Properties)` constructor exists, else `MapCodec.unit(this)`, in the Forge stage's compile loop · Since
 1.20.3 a class that extends an abstract vanilla block (BushBlock, DirectionalBlock, BaseEntityBlock, ...) must
 implement `protected MapCodec<? extends B> codec()` (§72). It was the commonest single Forge-hop error left after the
 converters: 49 swept mods, ~650 error lines. javac names each class (`X is not abstract and does not override
@@ -6555,11 +6555,11 @@ It runs in the Forge stage's compile loop beside fix-holders and the member rena
 
 Two related changes. (a) `tools/test-port-tools.sh`'s route-parity check treated every `convert-*.py` as an era
 converter, so the Forge-stage converters (gui-overlays, mcreator-variables, capabilities) made it fail. It now reads
-`FORGE_STEPS` too. (b) X146's `teleportTo` row made the 26.2 client-harness patch block for the same call redundant,
+`FORGE_STEPS` too. (b) X150's `teleportTo` row made the 26.2 client-harness patch block for the same call redundant,
 and the patch's "must match exactly once" rule caught that. The block is gone. The patch passed `setCamera = false`
 where 1.21.1's six-argument form called `setCamera(this)` unconditionally; the row's `true` is the faithful one.
 
-**X148. Two MCreator template calls whose signatures changed in 1.20.2.** **Pattern:** MCreator `InventoryScreen.renderEntityInInventoryFollowsAngle/Mouse(g, x, y, scale, a, b, entity)` and `awardRecipesByKey(new ResourceLocation[]{...})` · **Symptom:** since 1.20.2 the preview takes a box and `awardRecipesByKey` takes a List (48 errors in one mod) · **Fix:** pack rows build a centred box (FollowsMouse becomes FollowsAngle with `atan(offset / 40)` angles) and wrap the array as `List.of(..)` ·
+**X152. Two MCreator template calls whose signatures changed in 1.20.2.** **Pattern:** MCreator `InventoryScreen.renderEntityInInventoryFollowsAngle/Mouse(g, x, y, scale, a, b, entity)` and `awardRecipesByKey(new ResourceLocation[]{...})` · **Symptom:** since 1.20.2 the preview takes a box and `awardRecipesByKey` takes a List (48 errors in one mod) · **Fix:** pack rows build a centred box (FollowsMouse becomes FollowsAngle with `atan(offset / 40)` angles) and wrap the array as `List.of(..)` ·
 - `InventoryScreen.renderEntityInInventoryFollowsAngle/Mouse(g, x, y, scale, a, b, entity)`, the entity preview,
   takes a BOX since 1.20.2: `(g, x1, y1, x2, y2, scale, yOffset, a, b, entity)`. Read from the 1.21.1 bytecode, it
   centres the entity in the box and lifts it by half its height, where the 1.20 form put the feet at (x, y). So the
@@ -6568,7 +6568,7 @@ where 1.21.1's six-argument form called `setCamera(this)` unconditionally; the r
   FollowsAngle with 1.20's own `atan(offset / 40)` angles. 48 errors in one mod.
 - `ServerPlayer.awardRecipesByKey` takes a List. MCreator passes a one-element array, which becomes `List.of(..)`.
 
-**X149. 1.20's texture-region `ImageButton` constructors are gone (forge-shapes `imagebutton`).** **Pattern:** MCreator `new ImageButton(x, y, w, h, u, v, [yDiff,] texture, [texW, texH,] onPress)` · **Symptom:** the texture-region constructors are gone in 1.21.1, which takes `WidgetSprites` (111 errors in one mod) · **Fix:** forge-shapes `imagebutton` uses the 1.21.1 constructor and adds a `renderWidget` that blits the same region with the hovered/inactive `yDiff` offsets ·
+**X153. 1.20's texture-region `ImageButton` constructors are gone (forge-shapes `imagebutton`).** **Pattern:** MCreator `new ImageButton(x, y, w, h, u, v, [yDiff,] texture, [texW, texH,] onPress)` · **Symptom:** the texture-region constructors are gone in 1.21.1, which takes `WidgetSprites` (111 errors in one mod) · **Fix:** forge-shapes `imagebutton` uses the 1.21.1 constructor and adds a `renderWidget` that blits the same region with the hovered/inactive `yDiff` offsets ·
 `ImageButton(x, y, w, h, u, v, [yDiff,] texture, [texW, texH,] onPress [, message])` is the button MCreator writes
 into every GUI with images: 111 errors in one mod. 1.21.1 takes `WidgetSprites`, which name sprites in the GUI atlas,
 and a 1.20 mod never shipped any. The transform uses the 1.21.1 constructor (sprites = the texture, so unused) and
@@ -6576,13 +6576,13 @@ adds a `renderWidget` that blits the same region 1.20's `renderTexture` did: v +
 + 2·yDiff when inactive. The button keeps its own art with no atlas work. A button that already has a body is
 listed. Compiled against 1.21.1.
 
-**X150. Vineflower drops MCreator's raw `(Comparable)` cast in its block-state copy loop.** **Pattern:** MCreator block-state copy loop `_bs.setValue(_property, entry.getValue())` with a raw `Property`, the `(Comparable)` cast dropped by the decompile · **Symptom:** javac cannot type `setValue(Property<T>, V)` with a `Comparable<?>` (93 errors in one mod) · **Fix:** `fix_decompile_artifacts` restores the `(Comparable)` cast where the file declares a raw `Property` · MCreator writes
+**X154. Vineflower drops MCreator's raw `(Comparable)` cast in its block-state copy loop.** **Pattern:** MCreator block-state copy loop `_bs.setValue(_property, entry.getValue())` with a raw `Property`, the `(Comparable)` cast dropped by the decompile · **Symptom:** javac cannot type `setValue(Property<T>, V)` with a `Comparable<?>` (93 errors in one mod) · **Fix:** `fix_decompile_artifacts` restores the `(Comparable)` cast where the file declares a raw `Property` · MCreator writes
 `Property _property = ...; _bs = _bs.setValue(_property, (Comparable) entry.getValue());` into every "copy block
 state" procedure. Under erasure the cast is invisible, so the decompile omits it, and javac then cannot type
 `setValue(Property<T>, V)` with a `Comparable<?>`: 93 errors in one mod, every procedure that swaps a block. Where a
 file declares a raw `Property x`, `fix_decompile_artifacts` restores the cast on `.setValue(x, y.getValue())`.
 
-**X151. Custom arrows: AbstractArrow's shooter and position constructors gained `(ItemStack pickup, @Nullable ItemStack
+**X155. Custom arrows: AbstractArrow's shooter and position constructors gained `(ItemStack pickup, @Nullable ItemStack
 weapon)`, and the abstract pickup hook moved.** **Pattern:** `super(type, shooter, level)` / `super(type, x, y, z, level)` in an `AbstractArrow` subclass, and an override of `getPickupItem()` · **Symptom:** 1.21 added `(ItemStack pickup, @Nullable ItemStack weapon)` and made `getDefaultPickupItem()` the abstract hook (~1070 error lines in 17 mods) · **Fix:** pack rows append a vanilla-arrow pickup and a null weapon; the class gains `getDefaultPickupItem() { return this.getPickupItem(); }` · Across the sweeps this was 17 mods and ~1070 error lines, nearly all
 `super(type, shooter, level)` and `super(type, x, y, z, level)` in an `AbstractArrow` subclass (MCreator writes both
 into every ranged mob's projectile). The pack rows append a vanilla-arrow pickup and a null weapon. The pickup is never
@@ -6592,7 +6592,7 @@ from feeding each other. 1.21 also made `getDefaultPickupItem()` the abstract ho
 plain method. A 1.20 arrow overrode the latter, so it gains `getDefaultPickupItem() { return this.getPickupItem(); }`,
 and what a player picks up stays the class's own item.
 
-**X152. Forge's `ForgeFlowingFluid` is NeoForge's `BaseFlowingFluid`.** **Pattern:** Forge `ForgeFlowingFluid` (`Properties`/`Source`/`Flowing`), and `new LiquidBlock(() -> F.get(), props)` / `BucketItem` taking a fluid supplier · **Symptom:** ~526 error lines across 10 mods on `ForgeFlowingFluid` and the supplier-taking ctors · **Fix:** plain rename to NeoForge `BaseFlowingFluid` (FQN, codemodded and bare spellings); `LiquidBlock`/`BucketItem` take the fluid itself, so the lambda is dropped · Across the sweeps this was 10 mods and ~526
+**X156. Forge's `ForgeFlowingFluid` is NeoForge's `BaseFlowingFluid`.** **Pattern:** Forge `ForgeFlowingFluid` (`Properties`/`Source`/`Flowing`), and `new LiquidBlock(() -> F.get(), props)` / `BucketItem` taking a fluid supplier · **Symptom:** ~526 error lines across 10 mods on `ForgeFlowingFluid` and the supplier-taking ctors · **Fix:** plain rename to NeoForge `BaseFlowingFluid` (FQN, codemodded and bare spellings); `LiquidBlock`/`BucketItem` take the fluid itself, so the lambda is dropped · Across the sweeps this was 10 mods and ~526
 error lines. It has the same nested `Properties`/`Source`/`Flowing` and the same
 `Properties(Supplier<FluidType>, Supplier<Fluid>, Supplier<Fluid>)` constructor, so it is a plain rename (FQN, Forge
 and codemodded spellings, and bare). `LiquidBlock` and `BucketItem` take the fluid itself rather than Forge's
@@ -6600,7 +6600,7 @@ supplier, so `new LiquidBlock(() -> F.get(), props)` loses its lambda. NeoForge'
 follows vanilla's order, where fluids come before blocks and items (vanilla's own `LiquidBlock(Fluids.WATER)` relies
 on it), so the fluid is bound by the time the block or item is built.
 
-**X153. Access 1.21 narrowed, used from outside the class.** **Pattern:** a 1.20 mob reading `moveControl.operation == MoveControl.Operation.WAIT` outside a MoveControl subclass; `player.connection.connection` from a Forge mod · **Error:** `Operation has protected access` · **Fix:** the Forge stage's `AT_WIDEN` table writes only the needed access-transformer lines (each naming a member that exists in 1.21.1) before the AT loop; a member row rewrites `.connection` to public `getConnection()` · `MoveControl.Operation` and the `operation` field are
+**X157. Access 1.21 narrowed, used from outside the class.** **Pattern:** a 1.20 mob reading `moveControl.operation == MoveControl.Operation.WAIT` outside a MoveControl subclass; `player.connection.connection` from a Forge mod · **Error:** `Operation has protected access` · **Fix:** the Forge stage's `AT_WIDEN` table writes only the needed access-transformer lines (each naming a member that exists in 1.21.1) before the AT loop; a member row rewrites `.connection` to public `getConnection()` · `MoveControl.Operation` and the `operation` field are
 protected in 1.21.1, so a 1.20 mob that checks `moveControl.operation == MoveControl.Operation.WAIT` outside a
 MoveControl subclass fails with `Operation has protected access` (16 swept mods). The Forge stage now keeps an
 `AT_WIDEN` table: a source pattern, a guard for files where the access is already legal (a subclass), and the AT
@@ -6610,7 +6610,7 @@ loads META-INF/accesstransformer.cfg by default. Separately, `ServerCommonPacket
 sending a raw packet through `player.connection.connection`) is protected, and a member row rewrites it to the public
 `getConnection()`.
 
-**X154. A SimpleChannel registered through a BASE class's helpers.** **Pattern:** a SimpleChannel registered through an abstract base class's helpers (`registerServerToClient/ClientToServer`, `createChannel(rl)`, instance `initialize()`) · **Symptom:** convert-simplechannel saw no channel at all and only flagged it (98 errors) · **Fix:** `normalise_helper_channel` rewrites it to `INSTANCE.registerMessage(0, P.class, ..., Optional.of(dir))` with a static `initialize()`, which the converter then handles · This is a shape several large tech and magic
+**X158. A SimpleChannel registered through a BASE class's helpers.** **Pattern:** a SimpleChannel registered through an abstract base class's helpers (`registerServerToClient/ClientToServer`, `createChannel(rl)`, instance `initialize()`) · **Symptom:** convert-simplechannel saw no channel at all and only flagged it (98 errors) · **Fix:** `normalise_helper_channel` rewrites it to `INSTANCE.registerMessage(0, P.class, ..., Optional.of(dir))` with a static `initialize()`, which the converter then handles · This is a shape several large tech and magic
 mods share: an abstract `BasePacketHandler` with `getChannel()`, `registerServerToClient/ClientToServer(Class,
 encoder, decoder, consumer)` wrapping `registerMessage(..., Optional.of(NetworkDirection.X))`, and send helpers on
 `this.getChannel()`. A subclass holds `INSTANCE = createChannel(rl)` and an `initialize()` of helper calls, and the
@@ -6628,7 +6628,7 @@ On the mod that surfaced it, it converts all 16 packets, the registration and 11
 DIMENSION with a bare `ResourceKey<Level>` (the server's level for it) and TRACKING_CHUNK (the chunk's level and
 pos).
 
-**X155. Painting variants are a datapack registry in 1.21 (`tools/convert-paintings.py`, Forge stage `paintings`).** **Pattern:** `REGISTRY.register("x", () -> new PaintingVariant(32, 16))` with sizes in pixels · **Symptom:** in 1.21 the DeferredRegister never fires and the record wants an asset id and block sizes, so the paintings do not exist · **Fix:** `tools/convert-paintings.py` (Forge stage `paintings`) writes `data/<ns>/painting_variant/<name>.json` with `asset_id` and width/height divided by 16, adds it to `#minecraft:placeable`, and deletes the unread Java field ·
+**X159. Painting variants are a datapack registry in 1.21 (`tools/convert-paintings.py`, Forge stage `paintings`).** **Pattern:** `REGISTRY.register("x", () -> new PaintingVariant(32, 16))` with sizes in pixels · **Symptom:** in 1.21 the DeferredRegister never fires and the record wants an asset id and block sizes, so the paintings do not exist · **Fix:** `tools/convert-paintings.py` (Forge stage `paintings`) writes `data/<ns>/painting_variant/<name>.json` with `asset_id` and width/height divided by 16, adds it to `#minecraft:placeable`, and deletes the unread Java field ·
 A 1.20 mod registers `REGISTRY.register("album", () -> new PaintingVariant(32, 16))` with sizes in PIXELS; 6 swept
 mods do. 1.21 has nothing to register in code: a DeferredRegister on it never fires, the record takes an asset id, and
 sizes are in BLOCKS. Each such field becomes `data/<ns>/painting_variant/<name>.json`
@@ -6636,7 +6636,7 @@ sizes are in BLOCKS. Each such field becomes `data/<ns>/painting_variant/<name>.
 lets a player place it; 1.20 placed every registered variant. The texture stays at `textures/painting/<name>.png`. The
 Java field is deleted, unless something still reads it: that one is listed and kept.
 
-**X156. `MobEffect.add/removeAttributeModifiers(LivingEntity, AttributeMap, int)` lost the entity in 1.21.1
+**X160. `MobEffect.add/removeAttributeModifiers(LivingEntity, AttributeMap, int)` lost the entity in 1.21.1
 (forge-shapes `effecthooks`).** **Pattern:** a `MobEffect` overriding `addAttributeModifiers` / `removeAttributeModifiers(LivingEntity, AttributeMap, int)` as start/end hooks · **Symptom:** the overrides no longer match 1.21.1, which dropped the `LivingEntity` parameter · **Fix:** forge-shapes `effecthooks` turns the add hook into `onEffectStarted(LivingEntity, int)` and the remove hook into `onEffectRemoved` subscribed to `MobEffectEvent.Remove`/`Expired` · An effect, MCreator's above all, used them as its started and ended hooks (6 swept
 mods). The add hook becomes `onEffectStarted(LivingEntity, int)`, the 1.21.1 hook for exactly that. The map is the
 entity's own `getAttributes()`, and the super call goes, since vanilla still applies the modifiers itself. 1.21.1 has
@@ -6644,7 +6644,7 @@ no entity-aware removal hook on the effect, so the remove hook becomes a plain `
 Every constructor that calls `super(...)` subscribes that method to NeoForge's `MobEffectEvent.Remove` and `Expired`
 for this effect, at lowest priority and not when cancelled. Compiled against 1.21.1.
 
-**X157. MCreator procedure templates around events, projectiles and items (one 1.20 mod, ~200 errors).** **Pattern:** MCreator's `event.isCancelable()`/`setCanceled`/`setResult(Event.Result.DENY)` template, `entityToSpawn.setKnockback(k)`, `Item.isEdible()`, `isSameItemSameTags` · **Symptom:** ~200 errors; `event.setCanceled` left unresolved after §135's row · **Fix:** cancel via `instanceof ICancellableEvent`, drop the result branch and `setKnockback` (judgement rows); member rows for `getValue`, `isEdible`, `isSameItemSameTags` ·
+**X161. MCreator procedure templates around events, projectiles and items (one 1.20 mod, ~200 errors).** **Pattern:** MCreator's `event.isCancelable()`/`setCanceled`/`setResult(Event.Result.DENY)` template, `entityToSpawn.setKnockback(k)`, `Item.isEdible()`, `isSameItemSameTags` · **Symptom:** ~200 errors; `event.setCanceled` left unresolved after §135's row · **Fix:** cancel via `instanceof ICancellableEvent`, drop the result branch and `setKnockback` (judgement rows); member rows for `getValue`, `isEdible`, `isSameItemSameTags` ·
 - MCreator's `@Nullable Event event` template does `if (event != null && event.isCancelable()) { event.setCanceled(true);
   } else if (event != null && event.hasResult()) { event.setResult(Event.Result.DENY); }`. NeoForge's `Event` has
   neither, and §135's row only dropped the `isCancelable()` guard, which left `event.setCanceled` unresolved. Cancelling
@@ -6652,12 +6652,12 @@ for this effect, at lowest priority and not when cancelled. Compiled against 1.2
   JUDGEMENT row: an event whose 1.21 form has its own result API needs a worker.
 - The projectile procedure's `entityToSpawn.setKnockback(k)` is gone in 1.21, where knockback is the weapon's
   enchantment. The call becomes a comment (a judgement: the projectile knocks back by its default).
-- X128's `ItemStack.hurt(n, RandomSource.create(), null)` row now also takes a player argument.
+- X132's `ItemStack.hurt(n, RandomSource.create(), null)` row now also takes a player argument.
 - Member rows (1.21.1): `Registry`/`DefaultedRegistry.getValue` → `get` (getValue is 1.21.2+, #70);
   `Item.isEdible()` → `components().has(DataComponents.FOOD)`; `ItemStack.isSameItemSameTags` →
   `isSameItemSameComponents`.
 
-**X158. Five 26.2 member rows from a large GeckoLib/MCreator-style mod.** **Pattern:** 26.2 code still calling `components.add(..)` in tooltips, `navigation.moveTo(x, y, z, speed)` rewritten to `snapTo`, `Minecraft.cameraEntity`, `Item.getDescription()`, `ItemStack.getFoodProperties(player)` · **Symptom:** 119 errors on `Consumer.add` and 32 on `PathNavigation.snapTo` · **Fix:** owner-resolved 26.2 member rows: `Consumer.add`->`accept`, `PathNavigation.snapTo`->`moveTo`, plus `cameraEntity`, `getDescription`, `getFoodProperties` rows · All are owner-resolved, so they apply only
+**X162. Five 26.2 member rows from a large GeckoLib/MCreator-style mod.** **Pattern:** 26.2 code still calling `components.add(..)` in tooltips, `navigation.moveTo(x, y, z, speed)` rewritten to `snapTo`, `Minecraft.cameraEntity`, `Item.getDescription()`, `ItemStack.getFoodProperties(player)` · **Symptom:** 119 errors on `Consumer.add` and 32 on `PathNavigation.snapTo` · **Fix:** owner-resolved 26.2 member rows: `Consumer.add`->`accept`, `PathNavigation.snapTo`->`moveTo`, plus `cameraEntity`, `getDescription`, `getFoodProperties` rows · All are owner-resolved, so they apply only
 where javac names that type:
 - `Consumer.add` → `accept`: 26.2 tooltips hand `appendHoverText` a `Consumer<Component>`, and the body still said
   `components.add(..)` (119 errors).
@@ -6667,13 +6667,13 @@ where javac names that type:
 - `Item.getDescription()` → `getName(getDefaultInstance())`.
 - `ItemStack.getFoodProperties(player)` → `get(DataComponents.FOOD)`.
 
-**X159. `EntityType.Builder.build(String)` → `build(ResourceKey)` had a comment in the 26.2 table and no rows.** **Pattern:** `EntityType.Builder.build(Identifier.fromNamespaceAndPath(ns, n).toString())` or a namespaced string literal on 26.2 · **Symptom:** 89 errors because 26.2's `build` takes a `ResourceKey` and the 26.2 table had only a comment, no rows · **Fix:** two generic 26.2 rename rows convert the `Identifier`/`ResourceLocation` `.toString()` form and a namespaced literal to `build(ResourceKey)`; a bare un-namespaced name is left for a worker · The
+**X163. `EntityType.Builder.build(String)` → `build(ResourceKey)` had a comment in the 26.2 table and no rows.** **Pattern:** `EntityType.Builder.build(Identifier.fromNamespaceAndPath(ns, n).toString())` or a namespaced string literal on 26.2 · **Symptom:** 89 errors because 26.2's `build` takes a `ResourceKey` and the 26.2 table had only a comment, no rows · **Fix:** two generic 26.2 rename rows convert the `Identifier`/`ResourceLocation` `.toString()` form and a namespaced literal to `build(ResourceKey)`; a bare un-namespaced name is left for a worker · The
 rows were mod-specific and never promoted, so a mod writing `.build(Identifier.fromNamespaceAndPath(ns, n).toString())`
 got 89 errors. Two generic rows now cover the forms that carry the FULL id: the `Identifier`/`ResourceLocation`
 `.toString()` form, and a namespaced literal. On 26.x the key is the type's identity (its translation key and loot
 table), so a bare `"name"` with no namespace is left for a worker rather than guessed.
 
-**X160. Three more 26.2 signatures, read from the 26.2 sources.** **Pattern:** `LivingEntity.knockback(power, x, z)`, `BlockState.getOffset(level, pos)`, `EventHooks.canEntityGrief(level, e)` with a plain Level on 26.2 · **Symptom:** the three calls no longer match 26.2's signatures · **Fix:** rows pass the receiver's `damageSources().generic()` and 0 to `knockback`, drop the level from `getOffset(pos)`, and guard `canEntityGrief` with `instanceof ServerLevel` (client level answers false) ·
+**X164. Three more 26.2 signatures, read from the 26.2 sources.** **Pattern:** `LivingEntity.knockback(power, x, z)`, `BlockState.getOffset(level, pos)`, `EventHooks.canEntityGrief(level, e)` with a plain Level on 26.2 · **Symptom:** the three calls no longer match 26.2's signatures · **Fix:** rows pass the receiver's `damageSources().generic()` and 0 to `knockback`, drop the level from `getOffset(pos)`, and guard `canEntityGrief` with `instanceof ServerLevel` (client level answers false) ·
 - `LivingEntity.knockback(power, x, z)` takes the DamageSource and damage that caused it. The base body uses neither,
   but an override does (SulfurCube reads `source.getEntity()`), so the row passes the receiver's own
   `damageSources().generic()` and 0, never null.
@@ -6681,23 +6681,23 @@ table), so a bare `"name"` with no namespace is left for a worker rather than gu
 - `EventHooks.canEntityGrief` takes a ServerLevel. The call is guarded with `instanceof ServerLevel`, so a client
   level answers false, and the guard never re-matches its own output.
 
-**X161. A lenient-only model JSON crashed the whole 26.2 era step.** **Pattern:** a shipped item model JSON with a stray trailing `}` that 1.21.1's lenient Gson accepts · **Symptom:** the client-item-definition generator's `json.load` raised and era-hop stopped (exit 24) before any compile · **Fix:** era-hop runs the strict-JSON repair (fix-json-strict) first, and the generator reads the first object Gson would have read or skips the model with a warning instead of failing the hop · A dungeon mod ships an item model with a stray
+**X165. A lenient-only model JSON crashed the whole 26.2 era step.** **Pattern:** a shipped item model JSON with a stray trailing `}` that 1.21.1's lenient Gson accepts · **Symptom:** the client-item-definition generator's `json.load` raised and era-hop stopped (exit 24) before any compile · **Fix:** era-hop runs the strict-JSON repair (fix-json-strict) first, and the generator reads the first object Gson would have read or skips the model with a warning instead of failing the hop · A dungeon mod ships an item model with a stray
 trailing `}`, which 1.21.1's Gson reads and 26.x's strict parser rejects (§S8). era-hop generated the client item
 definitions before it ran fix-json-strict, and the generator's `json.load` raised, so the hop stopped (exit 24)
 before any compile. Now the strict-JSON repair runs first. The generator also reads a model that still does not
 parse the way Gson did (its first object), or skips it with a warning, instead of failing the hop.
 
-**X162. Global loot modifiers serialize through a MapCodec in 1.21.1 (forge-shapes `lootmod`), and X147 must not
-touch them.** **Pattern:** a 1.20 `IGlobalLootModifier` whose `codec()` returns `Codec<? extends IGlobalLootModifier>`, built with `RecordCodecBuilder.create` · **Error:** `does not override abstract method codec() in IGlobalLootModifier` (which X147's block-codec fixer misread as a block) · **Fix:** forge-shapes `lootmod` rewrites the override, DeferredRegister and holders to `MapCodec` and uses `RecordCodecBuilder.mapCodec`; X147's error pattern now accepts only block bases · `IGlobalLootModifier.codec()` returns `MapCodec<? extends IGlobalLootModifier>`, and
+**X166. Global loot modifiers serialize through a MapCodec in 1.21.1 (forge-shapes `lootmod`), and X151 must not
+touch them.** **Pattern:** a 1.20 `IGlobalLootModifier` whose `codec()` returns `Codec<? extends IGlobalLootModifier>`, built with `RecordCodecBuilder.create` · **Error:** `does not override abstract method codec() in IGlobalLootModifier` (which X151's block-codec fixer misread as a block) · **Fix:** forge-shapes `lootmod` rewrites the override, DeferredRegister and holders to `MapCodec` and uses `RecordCodecBuilder.mapCodec`; X151's error pattern now accepts only block bases · `IGlobalLootModifier.codec()` returns `MapCodec<? extends IGlobalLootModifier>`, and
 `GLOBAL_LOOT_MODIFIER_SERIALIZERS` holds MapCodecs. 15 swept mods carry the 1.20 `Codec` form. The transform
 rewrites every `Codec<? extends IGlobalLootModifier>` (the override, the DeferredRegister, its holders) to MapCodec,
 and inside a class extending LootModifier it rewrites the class's own `Codec<X>` to `MapCodec<X>`, built with
 `RecordCodecBuilder.mapCodec` where the builder starts from `codecStart(..)`. Compiled against 1.21.1. Found because
-X147's block-codec fixer read `does not override abstract method codec() in IGlobalLootModifier` as a block and gave
+X151's block-codec fixer read `does not override abstract method codec() in IGlobalLootModifier` as a block and gave
 the modifier a block `codec()`. Its error pattern now accepts only block bases (`*Block`, `BlockBehaviour`), and its
 self-check feeds it the loot-modifier message.
 
-**X163. Forge's step-height attribute is vanilla's, and so is the registry codec getter.** **Pattern:** `(Attribute) ForgeMod.STEP_HEIGHT_ADDITION.get()` / `ForgeMod.STEP_HEIGHT`, and `registry.getCodec()` · **Symptom:** the ForgeMod rename produces a name that does not exist, since `NeoForgeMod` has no step attribute · **Fix:** the §36 group maps both step reads (with or without the cast) to vanilla `Attributes.STEP_HEIGHT` before the ForgeMod rename; a member-table row maps `Registry`/`DefaultedRegistry.getCodec()` to `byNameCodec()` · `ForgeMod.STEP_HEIGHT_ADDITION`
+**X167. Forge's step-height attribute is vanilla's, and so is the registry codec getter.** **Pattern:** `(Attribute) ForgeMod.STEP_HEIGHT_ADDITION.get()` / `ForgeMod.STEP_HEIGHT`, and `registry.getCodec()` · **Symptom:** the ForgeMod rename produces a name that does not exist, since `NeoForgeMod` has no step attribute · **Fix:** the §36 group maps both step reads (with or without the cast) to vanilla `Attributes.STEP_HEIGHT` before the ForgeMod rename; a member-table row maps `Registry`/`DefaultedRegistry.getCodec()` to `byNameCodec()` · `ForgeMod.STEP_HEIGHT_ADDITION`
 (an addition on top of 0.6) has no NeoForge successor: 1.20.5 made step height the vanilla `Attributes.STEP_HEIGHT`
 (base 0.6), and `NeoForgeMod` has no step attribute. The §36 group now maps both `STEP_HEIGHT_ADDITION` and
 `STEP_HEIGHT` reads (with or without the `(Attribute)` cast) to the vanilla holder, before the ForgeMod rename turns
@@ -6705,7 +6705,7 @@ them into a name that does not exist. An ADD_VALUE modifier gives the same total
 `getCodec()` is `byNameCodec()` (§48), now a member-table row for `Registry` and `DefaultedRegistry`, applied only
 where javac says the owner is a registry.
 
-**X164. A mixin `@Inject` into `defineSynchedData` must take the Builder too (forge-shapes `syncinject`).** **Pattern:** a mixin `@Inject` at the tail of a vanilla entity's `defineSynchedData` calling `getEntityData().define(..)` · **Symptom:** in 1.21 the target takes a `SynchedEntityData.Builder` and `entityData` is not assigned yet, so `define` is not there to call · **Fix:** forge-shapes `syncinject` adds the Builder parameter before the CallbackInfo, rewrites the `define` calls to `builder.define(` and updates a pinned descriptor · §26 fixes
+**X168. A mixin `@Inject` into `defineSynchedData` must take the Builder too (forge-shapes `syncinject`).** **Pattern:** a mixin `@Inject` at the tail of a vanilla entity's `defineSynchedData` calling `getEntityData().define(..)` · **Symptom:** in 1.21 the target takes a `SynchedEntityData.Builder` and `entityData` is not assigned yet, so `define` is not there to call · **Fix:** forge-shapes `syncinject` adds the Builder parameter before the CallbackInfo, rewrites the `define` calls to `builder.define(` and updates a pinned descriptor · §26 fixes
 an entity's own override, but a mixin that adds synced data to a VANILLA entity injects at the tail of
 `defineSynchedData` with a `(CallbackInfo ci)` handler and calls `wolf.getEntityData().define(..)`. In 1.21 the target
 takes a `SynchedEntityData.Builder` and `entityData` is not assigned until after it returns (R8), so `define` is not
@@ -6715,16 +6715,16 @@ Builder parameter ahead of its CallbackInfo (Mixin matches the target's paramete
 `builder.define(`, and updates a pinned `defineSynchedData()V` descriptor. Injects into other methods are untouched.
 Found on a wolf-variant mod; A/B'd (self-check FAIL with the transform removed).
 
-**X165. Architectury on NeoForge has no `EventBuses`.** **Pattern:** an Architectury mod's Forge entrypoint calling `EventBuses.registerModEventBus(MOD_ID, modEventBus)` · **Symptom:** NeoForge Architectury dropped the `EventBuses` class, since NeoForge hands each mod its bus directly · **Fix:** the recipe deletes the call and its `dev.architectury.platform.forge.EventBuses` import · Every Architectury mod's Forge entrypoint calls
+**X169. Architectury on NeoForge has no `EventBuses`.** **Pattern:** an Architectury mod's Forge entrypoint calling `EventBuses.registerModEventBus(MOD_ID, modEventBus)` · **Symptom:** NeoForge Architectury dropped the `EventBuses` class, since NeoForge hands each mod its bus directly · **Fix:** the recipe deletes the call and its `dev.architectury.platform.forge.EventBuses` import · Every Architectury mod's Forge entrypoint calls
 `EventBuses.registerModEventBus(MOD_ID, modEventBus)` so the common code can find the mod bus. The NeoForge build of
 Architectury dropped the class, because NeoForge gives each mod its bus directly. The recipe deletes the call and its
 `dev.architectury.platform.forge.EventBuses` import.
 
-**X166. A member table that does not load must stop the hop, and it had not been loading.** **Pattern:** a `fix-missing-members` table row whose `{recv}` template ends in its own call (X73) · **Symptom:** the tool raised at table load and exited 1 for every call; mechanical-hop ignored the exit code and reported "0 renamed", so every owner-resolved member rename was inert · **Fix:** rows end in `{()}` or the new `{(..)}` token; a non-zero fixer exit now raises in mechanical-hop; `test-port-tools.sh` tests it · `fix-missing-members`
-refuses a `{recv}` template ending in its own call (X73), and it refuses it by raising at TABLE LOAD -- so one bad row
+**X170. A member table that does not load must stop the hop, and it had not been loading.** **Pattern:** a `fix-missing-members` table row whose `{recv}` template ends in its own call (X77) · **Symptom:** the tool raised at table load and exited 1 for every call; mechanical-hop ignored the exit code and reported "0 renamed", so every owner-resolved member rename was inert · **Fix:** rows end in `{()}` or the new `{(..)}` token; a non-zero fixer exit now raises in mechanical-hop; `test-port-tools.sh` tests it · `fix-missing-members`
+refuses a `{recv}` template ending in its own call (X77), and it refuses it by raising at TABLE LOAD -- so one bad row
 made the tool exit 1 for every call. mechanical-hop threw that exit code away and counted the output's
 `N site(s) rewritten`, of which there were none: the run read as "0 renamed". The Forge table carried such a row from
-X157 (`Item.isEdible`) and the 26.2 table from X158 (`Item.getDescription`, `ItemStack.getFoodProperties`), so every
+X161 (`Item.isEdible`) and the 26.2 table from X162 (`Item.getDescription`, `ItemStack.getFoodProperties`), so every
 owner-resolved member rename on both hops was inert for the mods swept since, and their counts are high by that much.
 Found when a static `ItemStack.isSameItemSameTags` call survived with its row in the table. Fixes: the rows end in
 `{()}`, and a new `{(..)}` token consumes the original call whatever its arguments (`getFoodProperties(entity)` ->
@@ -6733,7 +6733,7 @@ loads every `*members*.tsv` and checks that a broken one exits non-zero. Raising
 self-check, whose fake compiles never wrote the log the fixer reads -- a crash that had read as success there too.
 `ItemStack.isEdible` -> `has(FOOD)` is added beside the `Item` row.
 
-**X167. Item stacks to and from NBT without a registry provider, and three Forge client packages.** **Pattern:** 1.20 `ItemStack.of(tag)` / `ItemStack::of` and `stack.save(new CompoundTag())` in code with no registry provider · **Symptom:** 1.21's `parseOptional`/`save` need a `HolderLookup.Provider` the item cannot name · **Fix:** forge-shapes `nbt` routes them to an `ItemNbt.of`/`ItemNbt.save` helper resolving registries per calling thread; the import codemod also maps three Forge client packages · 1.20's
+**X171. Item stacks to and from NBT without a registry provider, and three Forge client packages.** **Pattern:** 1.20 `ItemStack.of(tag)` / `ItemStack::of` and `stack.save(new CompoundTag())` in code with no registry provider · **Symptom:** 1.21's `parseOptional`/`save` need a `HolderLookup.Provider` the item cannot name · **Fix:** forge-shapes `nbt` routes them to an `ItemNbt.of`/`ItemNbt.save` helper resolving registries per calling thread; the import codemod also maps three Forge client packages · 1.20's
 `ItemStack.of(tag)` and `stack.save(tag)` took no registries; 1.21's `parseOptional(provider, tag)` and
 `save(provider, tag)` need a `HolderLookup.Provider`, which a bundle-like item that stores stacks in its own tag has
 no way to name (§58). forge-shapes `nbt` now routes `ItemStack.of` (and `ItemStack::of`) to `ItemNbt.of` and an
@@ -6745,7 +6745,7 @@ A/B'd. The import codemod also maps `net.minecraftforge.client.settings` (KeyCon
 `client.gui.widget` (with `ForgeSlider` -> `ExtendedSlider`) and `client.textures`, which NeoForge kept under the
 same names. Found on a food-storage mod whose key binding and inventory were both left unported.
 
-**X168. Parking an integration left main code calling a class that was gone: a no-op stub keeps the name.** **Pattern:** main code calling a class from a parked optional integration (a guarded entry point) · **Symptom:** each site was a compile error a worker resolved by hand (77 of 387 swept mods) · **Fix:** park-optional writes a no-op stub at the parked class's path keeping its name and API-free members (returning defaults), moves the original to `parked/` and lists the stub in MIGRATION.md · 77 of
+**X172. Parking an integration left main code calling a class that was gone: a no-op stub keeps the name.** **Pattern:** main code calling a class from a parked optional integration (a guarded entry point) · **Symptom:** each site was a compile error a worker resolved by hand (77 of 387 swept mods) · **Fix:** park-optional writes a no-op stub at the parked class's path keeping its name and API-free members (returning defaults), moves the original to `parked/` and lists the stub in MIGRATION.md · 77 of
 387 swept mods had main code naming a parked class, typically a guarded entry point (`if (mode == COMPATIBLE)
 TerraInit.terraEnable();`, a `ModList.isLoaded(..)` branch). Every such site was a compile error the worker had to
 resolve by hand. park-optional now writes a stub at the parked class's own path for each class that main code names
@@ -6757,7 +6757,7 @@ still does nothing until re-ported", so nothing is dropped silently. Only a plai
 or record is still listed for the compile loop. Self-check through `main` (moved, stubbed, recorded); A/B'd. Found on a
 biome mod whose TerraBlender integration's entry point is called from the mod class and its config screen.
 
-**X169. A rename row can be scoped to the files that import a library (`#? only-if`).** **Pattern:** a library's static helper replaced by a ServiceLoader holder (`PlatformHelper.` -> `platform.Services.PLATFORM`) where mods often have their own class of the same name · **Symptom:** an unguarded global rename row rewrote a mod's own `PlatformHelper` · **Fix:** prepare-sources reads `#? only-if <regex>` above a `re:`/`member:` row and applies it only to files whose original text matches; a guard on a plain row or one guarding no row is a hard error · cristellib 26.x replaced its
+**X173. A rename row can be scoped to the files that import a library (`#? only-if`).** **Pattern:** a library's static helper replaced by a ServiceLoader holder (`PlatformHelper.` -> `platform.Services.PLATFORM`) where mods often have their own class of the same name · **Symptom:** an unguarded global rename row rewrote a mod's own `PlatformHelper` · **Fix:** prepare-sources reads `#? only-if <regex>` above a `re:`/`member:` row and applies it only to files whose original text matches; a guard on a plain row or one guarding no row is a hard error · cristellib 26.x replaced its
 static `PlatformHelper` with a ServiceLoader holder, `platform.Services.PLATFORM`, which breaks every Cristel mod's
 26.2 hop (found on a biome mod). The rename is two rows, but the bare `PlatformHelper.` row cannot be global: mods
 commonly have their own class with that name, and unguarded it rewrote one. prepare-sources now reads
@@ -6766,10 +6766,10 @@ A guard on a plain row, or one that guards no row, is a hard error. The rows are
 cristellib's class. A port carrying an older copy of prepare-sources would read the guard as a comment, so its rename
 table should be recomposed together with the tool.
 
-**X170. X168's stubs must not stand in for a class that carries state.** **Pattern:** park-optional (X168) stubbing a parked config POJO with instance fields (`public boolean flag = true;`, nested sub-configs) read field by field from main code · **Symptom:** errors rose 37 -> 212 because the stub kept no fields, and keeping them with type defaults would silently turn `true` into `false` · **Fix:** park-optional refuses to stub a class with a non-private instance field, so it stays parked and listed as before X168 · Measured over the full rerun, 56 mods got
+**X174. X172's stubs must not stand in for a class that carries state.** **Pattern:** park-optional (X172) stubbing a parked config POJO with instance fields (`public boolean flag = true;`, nested sub-configs) read field by field from main code · **Symptom:** errors rose 37 -> 212 because the stub kept no fields, and keeping them with type defaults would silently turn `true` into `false` · **Fix:** park-optional refuses to stub a class with a non-private instance field, so it stays parked and listed as before X172 · Measured over the full rerun, 56 mods got
 stubs and 55 improved (one from 2875 to 669 errors, another from 110 to 57). The one that got worse is the lesson: its
 parked class was a Cloth AutoConfig POJO (`public boolean villagersEatMelons = true;`, nested sub-configs), read field by
 field from main code. The stub kept no fields, so each read became its own error (37 -> 212). Worse, a stub that DID
 keep fields with type defaults would have silently turned `true` into `false`: for a data class, the values are the
 behaviour. park-optional now refuses to stub a class with a non-private instance field, so it stays parked and listed,
-as it was before X168.
+as it was before X172.

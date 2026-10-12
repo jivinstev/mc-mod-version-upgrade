@@ -5,7 +5,7 @@
 
 Since 1.20.3 a block class that extends an abstract vanilla block (BushBlock, DirectionalBlock, BaseEntityBlock,
 HorizontalDirectionalBlock, ...) must implement `protected MapCodec<? extends B> codec()` (CATALOG §72). Swept across
-the popularity list this was the commonest single Forge-hop error left after the converters (X147: 49 mods). The fix
+the popularity list this was the commonest single Forge-hop error left after the converters (X151: 49 mods). The fix
 is the same at every site and javac names each one:
 
     X.java:49: error: X is not abstract and does not override abstract method codec() in DirectionalBlock
@@ -23,7 +23,7 @@ fs = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(fs)
 
 ERR = re.compile(r"^(?P<file>(?:[A-Za-z]:)?[\\/]\S+?\.java):(?P<line>\d+): error: (?P<cls>[\w$]+) is not abstract and does not "
                  r"override abstract method codec\(\) in (?P<base>[\w$.]*(?:Block|BlockBehaviour))\s*$", re.M)
-# only BLOCK bases: a loot modifier's codec() (IGlobalLootModifier) is a different method with a different fix (X162)
+# only BLOCK bases: a loot modifier's codec() (IGlobalLootModifier) is a different method with a different fix (X166)
 
 
 def fix(text, cls):

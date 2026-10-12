@@ -328,7 +328,7 @@ def _simplify(body):
 
 
 def norm_phase(body, name):
-    """`e.phase.equals((Object)TickEvent.Phase.START)` / `Phase.END.equals(e.phase)` -> `e.phase == ...` (X113: the
+    """`e.phase.equals((Object)TickEvent.Phase.START)` / `Phase.END.equals(e.phase)` -> `e.phase == ...` (X117: the
     author compared the enum with equals; PHASE_CMP only knew == / !=)."""
     ph = r"((?:TickEvent\.)?Phase\.(?:START|END))"
     n = re.escape(name)
@@ -415,7 +415,7 @@ def t_tick(path, text, ctx, res):
         text = remove_import_if_unused(text, "net.neoforged.neoforge.event.TickEvent")
         text = remove_import_if_unused(text, "net.minecraftforge.event.TickEvent")
         text = remove_import_if_unused(text, "net.neoforged.neoforge.event.entity.living.LivingEvent")
-        # X127: Vineflower's nested form of the living tick event, which the rewrite above leaves unused
+        # X131: Vineflower's nested form of the living tick event, which the rewrite above leaves unused
         if not re.search(r"(?<![\w.])LivingTickEvent\b", re.sub(r"(?m)^import .*$", "", text)):
             text = re.sub(r"(?m)^import\s+net\.(?:neoforged\.neoforge|minecraftforge)\.event\.entity\.living\.LivingEvent"
                           r"\.LivingTickEvent\s*;[ \t]*\n", "", text)
@@ -440,7 +440,7 @@ def _dist_value(sup):
 
 
 def t_dist(path, text, ctx, res):
-    # X120: DistExecutor.runForDist(clientSupplier, serverSupplier) -- the proxy idiom -- is a VALUE
+    # X124: DistExecutor.runForDist(clientSupplier, serverSupplier) -- the proxy idiom -- is a VALUE
     n0 = 0
     for m in reversed(list(re.finditer(r"DistExecutor\.(?:unsafeRunForDist|safeRunForDist|runForDist)\(", text))):
         p1 = match(text, m.end() - 1)
@@ -667,7 +667,7 @@ def t_nbt(path, text, ctx, res):
     rw(recv + r"\.setTag\(", lambda m: f"{H}.setTag({m.group('r')}, ")
     rw(recv + r"\.getTagElement\(", lambda m: f"{H}.getTagElement({m.group('r')}, ")
     rw(recv + r"\.removeTagKey\((?P<a>[^()]*)\)", lambda m: f"{H}.update({m.group('r')}, t -> t.remove({m.group('a')}))")
-    # X167: ItemStack.of(tag) and stack.save(tag) took no registries in 1.20; 1.21 needs a HolderLookup.Provider
+    # X171: ItemStack.of(tag) and stack.save(tag) took no registries in 1.20; 1.21 needs a HolderLookup.Provider
     rw(r"(?<![\w$.])(?:net\.minecraft\.world\.item\.)?ItemStack\s*(?:\.\s*of\s*(?=\()|::\s*of\b)",
        lambda m: f"{H}::of" if "::" in m.group(0) else f"{H}.of")
     rw(recv + r"\.save\(\s*new\s+CompoundTag\(\)\s*\)", lambda m: f"{H}.save({m.group('r')})")
@@ -830,7 +830,7 @@ def t_hooks(path, text, ctx, res):
         elif mt.name == "use" and types == ["BlockState", "Level", "BlockPos", "Player", "InteractionHand", "BlockHitResult"]:
             hand = names[4]
             # the super forward carries the hand on to vanilla and is rewritten below: it is not a READ of it
-            # (MCreator's every Block.use opens with `super.use(blockstate, world, pos, entity, hand, hit);`, X114)
+            # (MCreator's every Block.use opens with `super.use(blockstate, world, pos, entity, hand, hit);`, X118)
             rest = re.sub(r"super\.use\(([^,()]+),([^,()]+),([^,()]+),([^,()]+),[^,()]+,([^,()]+)\)", "", body)
             if re.search(r"(?<![\w$.])%s(?![\w$])" % re.escape(hand), rest):
                 flag(mt.start, "Block.use reads its hand: port to useItemOn (returns ItemInteractionResult, §127)"); continue
@@ -1170,10 +1170,10 @@ def t_misc(path, text, ctx, res):
 
 TAG_OF_MOBTYPE = {"UNDEAD": "UNDEAD", "ARTHROPOD": "ARTHROPOD", "ILLAGER": "ILLAGER", "WATER": "AQUATIC"}
 
-# --------------------------------------------------------------------------- ImageButton (X149)
+# --------------------------------------------------------------------------- ImageButton (X153)
 
 def t_imagebutton(path, text, ctx, res):
-    """X149: 1.20's texture-region ImageButton constructors -- (x, y, w, h, u, v, [yDiff,] texture, [texW, texH,] onPress
+    """X153: 1.20's texture-region ImageButton constructors -- (x, y, w, h, u, v, [yDiff,] texture, [texW, texH,] onPress
     [, message]) -- are gone; 1.21.1 takes WidgetSprites, which name sprites in the GUI atlas a 1.20 mod never shipped.
     So the button keeps its own texture: the 1.21.1 constructor (sprites = the texture, unused) plus a renderWidget that
     blits the same region 1.20's renderTexture did -- v + yDiff when hovered or focused, + 2*yDiff when inactive.
@@ -1211,13 +1211,13 @@ def t_imagebutton(path, text, ctx, res):
     return edit_spans(text, edits)
 
 
-# --------------------------------------------------------------------------- MobEffect entity hooks (X156)
+# --------------------------------------------------------------------------- MobEffect entity hooks (X160)
 
 _EVT = "net.neoforged.neoforge.event.entity.living.MobEffectEvent"
 
 
 def t_effecthooks(path, text, ctx, res):
-    """X156: MobEffect.add/removeAttributeModifiers(LivingEntity, AttributeMap, int) lost the entity in 1.21.1. An
+    """X160: MobEffect.add/removeAttributeModifiers(LivingEntity, AttributeMap, int) lost the entity in 1.21.1. An
     effect used them as its 'started' / 'ended' hooks (MCreator runs its procedures there).
       add    -> onEffectStarted(LivingEntity, int), the 1.21.1 hook for exactly that; the map is the entity's own
                 (`e.getAttributes()`), and the super call goes (vanilla still applies the modifiers itself).
@@ -1276,10 +1276,10 @@ def t_effecthooks(path, text, ctx, res):
     return text
 
 
-# --------------------------------------------------------------------------- global loot modifiers (X162)
+# --------------------------------------------------------------------------- global loot modifiers (X166)
 
 def t_lootmod(path, text, ctx, res):
-    """X162: a global loot modifier's serializer is a MapCodec in 1.21.1 -- IGlobalLootModifier.codec() returns
+    """X166: a global loot modifier's serializer is a MapCodec in 1.21.1 -- IGlobalLootModifier.codec() returns
     MapCodec<? extends IGlobalLootModifier> and GLOBAL_LOOT_MODIFIER_SERIALIZERS holds MapCodecs. So every
     Codec<? extends IGlobalLootModifier> (the codec() override, the DeferredRegister, its holders) becomes a MapCodec, and
     in a class extending LootModifier its own Codec<X> becomes MapCodec<X>, built with RecordCodecBuilder.mapCodec where
@@ -1302,7 +1302,7 @@ def t_lootmod(path, text, ctx, res):
 
 
 def t_syncinject(path, text, ctx, res):
-    """X164: a mixin @Inject into defineSynchedData. 1.21 passes a SynchedEntityData.Builder and the entity's own
+    """X168: a mixin @Inject into defineSynchedData. 1.21 passes a SynchedEntityData.Builder and the entity's own
     entityData does not exist yet (R8), so the handler gains the Builder parameter and every
     `<entity>.getEntityData().define(` / `this.entityData.define(` in its body becomes `builder.define(`. A pinned
     `defineSynchedData()V` descriptor is updated too (§136: javac cannot see a mixin's parameters)."""
@@ -1341,13 +1341,13 @@ TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attr
               ("effecthooks", t_effecthooks), ("lootmod", t_lootmod), ("syncinject", t_syncinject)]
 
 
-# --------------------------------------------------------------------------- menu screens (X141), cross-file
+# --------------------------------------------------------------------------- menu screens (X145), cross-file
 
 MENU_EVT = "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent"
 
 
 def t_menus(src, res, dry=False):
-    """X141: `MenuScreens.register(type, Screen::new)` is private in 1.21.1; screens are bound on the mod-bus
+    """X145: `MenuScreens.register(type, Screen::new)` is private in 1.21.1; screens are bound on the mod-bus
     RegisterMenuScreensEvent. Each method holding such statements (a client-setup handler, often inside enqueueWork)
     loses them to a new sibling `registerMenuScreens(RegisterMenuScreensEvent event)`, wired the way the old method
     was: `@SubscribeEvent` if it carried one, else an `addListener(X::registerMenuScreens)` beside the one that
@@ -1908,7 +1908,7 @@ def self_check():
             (d / rel).write_text(f"package {pk};\nclass C {{}}\n", encoding="utf-8")
         if root_package(d) != "uk.co.x":
             bad.append(f"root_package: {root_package(d)!r}")
-    with tempfile.TemporaryDirectory() as d:       # X141: screens move to RegisterMenuScreensEvent, wired like their method
+    with tempfile.TemporaryDirectory() as d:       # X145: screens move to RegisterMenuScreensEvent, wired like their method
         d = pathlib.Path(d); (d / "a").mkdir()
         (d / "a/M.java").write_text("package a;\npublic class M {\n   public M(IEventBus bus) {\n      bus.addListener(C::setup);\n"
                                     "   }\n}\n", encoding="utf-8")
@@ -1929,7 +1929,7 @@ def self_check():
               and "bus.addListener(C::registerMenuScreens2);" in m and "@SubscribeEvent\n   public static void registerMenuScreens(" in c
               and (d / "a/C.java").read_text(encoding="utf-8") == c)
         if not ok:
-            bad.append(("menus", ["X141"], c + m))
+            bad.append(("menus", ["X145"], c + m))
     for name, src, want, gone in CASES:
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d) / "my" / "X.java"

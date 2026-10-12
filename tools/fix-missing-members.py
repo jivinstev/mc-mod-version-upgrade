@@ -40,7 +40,7 @@ def table(path):
         owner, old, new = [x.strip() for x in l.split("\t")[:3]]
         if "{recv}" in new and new.endswith(")") and not re.search(r"\{a\d\}|\{\(\)\}|\{\(\.\.\)\}", new):
             # the original call's (...) is kept after a {recv} template, so one ending in its own call yields `f(x)()`
-            raise ValueError(f"{path}: row {owner}.{old} -> {new} supplies its own call: end it with {{()}} (X73)")
+            raise ValueError(f"{path}: row {owner}.{old} -> {new} supplies its own call: end it with {{()}} (X77)")
         rows[(owner, old)] = new
     return rows
 
@@ -89,7 +89,7 @@ def sites(log_text):
         lm = re.match(r"location:\s+(?:variable \w+ of type |class |interface |@interface )?([\w.$]+)", loc)
         owner = lm.group(1).split("<")[0].rsplit(".", 1)[-1] if lm else None
         if sm and not owner:
-            # X126: an unqualified or `this.` call gets NO location line from javac; its owner is the enclosing class
+            # X130: an unqualified or `this.` call gets NO location line from javac; its owner is the enclosing class
             owner = enclosing_class(m.group("file"), int(m.group("line")))
         if not sm or not owner:
             continue
@@ -180,7 +180,7 @@ def apply_row(line, member, new, owner, col=None):
 
 # A row names the type that DECLARED the member (`Entity  setSecondsOnFire`), but javac names the receiver's
 # static type (`location: variable player of type ServerPlayer`, `class NightmareEntity`). Exact matching
-# skipped every call on a subclass (X107), so the owner's supertypes are walked: the mod's own classes from the
+# skipped every call on a subclass (X111), so the owner's supertypes are walked: the mod's own classes from the
 # source tree, Minecraft's from the compile jar's class files. Simple names, like the rows.
 def _class_supers(data):
     """(super simple name, [interface simple names]) from a .class file's bytes."""
@@ -273,7 +273,7 @@ GEN = "/build/generated/sources/"
 def to_source(f):
     """A multi-version build (§W) makes javac report errors against a GENERATED copy
     (build/generated/sources/<overlay>/java). Edit the file it came from: the overlay's own copy if the target
-    overrides it, else the shared tree. Without this every site was skipped -- 0 renames in every sweep (X71)."""
+    overrides it, else the shared tree. Without this every site was skipped -- 0 renames in every sweep (X75)."""
     f = f.replace("\\", "/")
     if GEN in f and "/java/" in f.split(GEN, 1)[1]:
         base, tail = f.split(GEN, 1)
@@ -285,7 +285,7 @@ def to_source(f):
 
 
 def record_accessors(jars, owners):
-    """X130: {owner simple name: {component names}} for the owners that are RECORDS in the compile jar -- a class that
+    """X134: {owner simple name: {component names}} for the owners that are RECORDS in the compile jar -- a class that
     became a record keeps each field private behind a same-named accessor, so `x.f` is `x.f()` with no row needed."""
     import subprocess, zipfile
     out = {}
@@ -416,7 +416,7 @@ def self_check():
         run(d, log, {("LootContext", "hasParam"): "hasParameter", ("LootContext", "getParam"): "getParameter"})
         ok = ok and "c.hasParameter(p) && c.getParameter(p)" in f.read_text(encoding="utf-8")
     ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: cannot find symbol"))   # javac on Windows names a drive path
-    with tempfile.TemporaryDirectory() as d:          # a row on the declaring type reaches a subclass receiver (X107)
+    with tempfile.TemporaryDirectory() as d:          # a row on the declaring type reaches a subclass receiver (X111)
         f = pathlib.Path(d) / "N.java"
         f.write_text("class N extends Monster {\n  void t() { this.setSecondsOnFire(3); }\n}\n", encoding="utf-8")
         log = (f"{f}:2: error: cannot find symbol\n  void t() {{ this.setSecondsOnFire(3); }}\n"
@@ -426,7 +426,7 @@ def self_check():
         (pathlib.Path(d) / "Monster.java").write_text("abstract class Monster extends Entity {}\n", encoding="utf-8")
         got, _ = run(d, log, {("Entity", "setSecondsOnFire"): "igniteForSeconds"}, jars=[])
         ok &= sum(got.values()) == 1 and "this.igniteForSeconds(3)" in f.read_text(encoding="utf-8")
-    with tempfile.TemporaryDirectory() as d:          # a PROTECTED field whose accessor has another name (X108)
+    with tempfile.TemporaryDirectory() as d:          # a PROTECTED field whose accessor has another name (X112)
         f = pathlib.Path(d) / "R.java"
         line = "  int t(ServerLevel w) { return w.random.nextInt(w.random.nextInt(3) + 1); }"
         f.write_text("class R {\n" + line + "\n}\n", encoding="utf-8")
@@ -434,7 +434,7 @@ def self_check():
         log = "\n".join([f"{f}:2: error: random has protected access in Level", line, " " * col + "^"])
         run(d, log, {("Level", "random"): "getRandom()"}, jars=[])
         ok &= "w.random.nextInt(w.getRandom().nextInt(3) + 1)" in f.read_text(encoding="utf-8")
-    with tempfile.TemporaryDirectory() as d:          # X126: a `this.` call has no location line; its owner is the class
+    with tempfile.TemporaryDirectory() as d:          # X130: a `this.` call has no location line; its owner is the class
         f = pathlib.Path(d) / "Lich.java"
         f.write_text("class Lich extends Mob {\n  void t() { this.teleportToWithTicket(1.0, 2.0, 3.0); }\n}\n", encoding="utf-8")
         (pathlib.Path(d) / "Mob.java").write_text("abstract class Mob extends Entity {}\n", encoding="utf-8")
@@ -444,7 +444,7 @@ def self_check():
         ok &= sum(got.values()) == 1 and "this.teleportTo(1.0, 2.0, 3.0)" in f.read_text(encoding="utf-8")
     import shutil, subprocess, zipfile
     if shutil.which("javac") and shutil.which("javap"):
-        with tempfile.TemporaryDirectory() as d:      # X130: a record owner needs no row
+        with tempfile.TemporaryDirectory() as d:      # X134: a record owner needs no row
             src = pathlib.Path(d, "net/minecraft/Cfg.java"); src.parent.mkdir(parents=True)
             src.write_text("package net.minecraft;\npublic record Cfg(int stemProvider) {}\n", encoding="utf-8")
             subprocess.run(["javac", "-d", d, str(src)], capture_output=True)

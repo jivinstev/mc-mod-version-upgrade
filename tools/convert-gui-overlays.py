@@ -3,7 +3,7 @@
 
     python3 tools/convert-gui-overlays.py --src src/main/java --modid <modid> [--dry-run] [--self-check]
 
-CATALOG §38 / X118. Forge 1.20 drew a HUD element as an IGuiOverlay:
+CATALOG §38 / X122. Forge 1.20 drew a HUD element as an IGuiOverlay:
 
     void render(ForgeGui gui, GuiGraphics g, float partialTick, int screenWidth, int screenHeight)
     event.registerAbove(VanillaGuiOverlay.PLAYER_HEALTH.id(), "armor", Overlays::armor);   // RegisterGuiOverlaysEvent

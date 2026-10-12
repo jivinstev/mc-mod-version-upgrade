@@ -77,7 +77,7 @@ def main():
     for ln in moj.splitlines():
         if ln and not ln.startswith(' ') and '->' in ln and not ln.startswith('#'):
             off, obf = ln.split(' -> ')
-            cls_off2obf[off.strip()] = obf.strip().rstrip(':').replace('.', '/')   # an UNobfuscated class keeps its dotted name (X77)
+            cls_off2obf[off.strip()] = obf.strip().rstrip(':').replace('.', '/')   # an UNobfuscated class keeps its dotted name (X81)
     cls_obf2off = {v: k for k, v in cls_off2obf.items()}
 
     def to_obf_desc(t):
@@ -95,7 +95,7 @@ def main():
     methods_by_obf, fields_by_obf = {}, {}
     cur = None
     # a method Mojang's compiler inlined carries its origin lines AFTER the parameters too: `foo():12:34 -> a`.
-    # Without the optional tail every such method was dropped -- all of MinecraftServer's, among others (X77).
+    # Without the optional tail every such method was dropped -- all of MinecraftServer's, among others (X81).
     mre = re.compile(r'^\s+(?:\d+:\d+:)?([\w.$\[\]]+)\s+([\w$<>]+)\(([^)]*)\)(?::\d+:\d+)?\s+->\s+(\S+)$')
     fre = re.compile(r'^\s+([\w.$\[\]]+)\s+([\w$]+)\s+->\s+(\S+)$')
     for ln in moj.splitlines():

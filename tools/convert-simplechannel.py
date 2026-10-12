@@ -46,7 +46,7 @@ DEAD = ["net.neoforged.neoforge.network.NetworkEvent", "net.minecraftforge.netwo
         "net.minecraftforge.network.SimpleChannel", "net.neoforged.neoforge.network.SimpleChannel",
         "net.minecraftforge.network.ChannelBuilder", "net.neoforged.neoforge.network.ChannelBuilder",
         "net.minecraftforge.network.Channel", "net.neoforged.neoforge.network.Channel",
-        # X120: Forge 1.20.1's builder is NESTED in NetworkRegistry, and Vineflower imports it that way
+        # X124: Forge 1.20.1's builder is NESTED in NetworkRegistry, and Vineflower imports it that way
         "net.minecraftforge.network.NetworkRegistry.ChannelBuilder", "net.neoforged.neoforge.network.NetworkRegistry.ChannelBuilder"]
 TARGETS = {"PLAYER": "sendToPlayer", "TRACKING_ENTITY": "sendToPlayersTrackingEntity",
            "TRACKING_ENTITY_AND_SELF": "sendToPlayersTrackingEntityAndSelf"}
@@ -62,7 +62,7 @@ class Chain:
 
 # `(pkt, sup) -> { Context ctx = (Context)sup.get(); ctx.enqueueWork(() -> P.handle(pkt, ctx)); ctx.setPacketHandled(true); }`
 # -- a wrapper that only moves the call to the main thread, which is where a NeoForge payload handler already runs:
-# it is `P::handle` (X104). Anything else in the lambda leaves it alone.
+# it is `P::handle` (X108). Anything else in the lambda leaves it alone.
 WRAPPER = re.compile(r"\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*->\s*\{\s*(?:(?:final\s+)?(?:[\w.]*Context)\s+)?(\w+)\s*=\s*"
                      r"(?:\(\s*[\w.]*Context\s*\)\s*)?\2\s*\.\s*get\(\)\s*;\s*\3\s*\.\s*enqueueWork\(\s*\(\)\s*->\s*"
                      r"\{?\s*([\w.]+)\s*\(\s*\1\s*,\s*\3\s*\)\s*;?\s*\}?\s*\)\s*;\s*(?:\3\s*\.\s*setPacketHandled\(\s*true\s*\)\s*;\s*)?\}",
@@ -172,7 +172,7 @@ def rewrite_sends(text, chan, flags, rel):
                 dm_ = re.fullmatch(DIM, t.group(3).strip()); lvl = dm_.group(1) or dm_.group(2)
                 rep = f"PacketDistributor.sendToPlayersInDimension({lvl}, {args[1]})"
             elif t and t.group(1) == "DIMENSION" and re.fullmatch(r"\(\)\s*->\s*([\w.]+)", t.group(3).strip()):
-                # a bare ResourceKey<Level> (X154): the server's level for it
+                # a bare ResourceKey<Level> (X158): the server's level for it
                 key = re.fullmatch(r"\(\)\s*->\s*([\w.]+)", t.group(3).strip()).group(1)
                 rep = (f"PacketDistributor.sendToPlayersInDimension(net.neoforged.neoforge.server.ServerLifecycleHooks"
                        f".getCurrentServer().getLevel({key}), {args[1]})")
@@ -250,7 +250,7 @@ def convert_handler(text, hname, flags, rel):
         # Forge 1.20.2+: no Supplier. Vineflower writes it bare (`handle(Context ctx)`) and imports the nested class.
         direct = bool(re.fullmatch(r"(?:[\w.]+\.)?CustomPayloadEvent\.Context", pt)) or (
             pt == "Context" and re.search(r"(?m)^import\s+[\w.]*\.(?:CustomPayloadEvent|NetworkEvent)\.Context\s*;", text) is not None) \
-            or pt == "NetworkEvent.Context"     # a handler the X104 unwrapping exposed: the context comes in directly
+            or pt == "NetworkEvent.Context"     # a handler the X108 unwrapping exposed: the context comes in directly
         # Vineflower imports the nested class (`import ...NetworkEvent.Context;`) and writes `Supplier<Context>`
         nested = re.search(r"(?m)^import\s+[\w.]*\.NetworkEvent\.Context\s*;", text) is not None
         if not direct and not re.fullmatch(r"Supplier<\s*NetworkEvent\.Context\s*>", pt) \
@@ -344,7 +344,7 @@ def place_listener(new, ref):
 
 def normalise_late_channel(new):
     """`private static SimpleChannel INSTANCE;` assigned once inside a method (`INSTANCE = ChannelBuilder...;`):
-    move the initialiser onto the field, so the converter sees the usual `SimpleChannel X = ...` shape (X102)."""
+    move the initialiser onto the field, so the converter sees the usual `SimpleChannel X = ...` shape (X106)."""
     for f in list(new):
         t = new[f]
         for dm in re.finditer(r"(?m)^([ \t]*(?:(?:public|private|protected|static)\s+)*)SimpleChannel\s+(\w+)\s*;", t):
@@ -368,7 +368,7 @@ def normalise_late_channel(new):
 
 
 def normalise_mcreator(new, src, flags, report):
-    """MCreator's channel (X97): a `<T> addNetworkMessage(Class<T>, encoder, decoder, consumer)` helper that calls
+    """MCreator's channel (X101): a `<T> addNetworkMessage(Class<T>, encoder, decoder, consumer)` helper that calls
     CHAN.registerMessage(messageID, ...) with VARIABLES, and one `Owner.addNetworkMessage(P.class, ...)` per message,
     each in that message's own @SubscribeEvent FMLCommonSetupEvent method. Rewrite it into the classic shape the
     converter handles: the helper becomes `registerMessages()` holding one `CHAN.registerMessage(n, P.class, ...)` per
@@ -435,7 +435,7 @@ def normalise_mcreator(new, src, flags, report):
         body = "".join(f"\n{ind}    {chan}.registerMessage({i}, {', '.join(a)});" for i, a in enumerate(regs))
 
         t = t[:_line_start(t, hm.start)] + f"{ind}public static void registerMessages() {{{body}\n{ind}}}\n" + t[hm.body_close + 2:]
-        # the registrations were written in each message's own file: import the classes they name (X103) -- AFTER the
+        # the registrations were written in each message's own file: import the classes they name (X107) -- AFTER the
         # splice above, which uses offsets taken before any import is added
         own_pkg = (re.search(r"(?m)^package\s+([\w.]+)\s*;", t) or [None, None])[1]
         for a in regs:
@@ -463,7 +463,7 @@ def normalise_mcreator(new, src, flags, report):
 
 
 def normalise_helper_channel(new, flags, report):
-    """X154: the channel registered through a BASE class's helpers (a shape several large tech and magic mods share):
+    """X158: the channel registered through a BASE class's helpers (a shape several large tech and magic mods share):
         abstract class Base { protected abstract SimpleChannel getChannel(); public abstract void initialize();
             protected <MSG> void registerServerToClient(Class<MSG> type, enc, dec, consumer) {
                 this.getChannel().registerMessage(this.index++, type, enc, dec, consumer, Optional.of(NetworkDirection.PLAY_TO_CLIENT)); }
@@ -564,7 +564,7 @@ def run(src, modid, dry=False):
     for f in files:
         # the CURRENT text: an earlier channel's send rewrite (step 4) may already have edited this file, and every
         # offset below is taken from what is spliced -- offsets from the original text cut one mod's registration
-        # in half (X81)
+        # in half (X85)
         t = new[f]
         cm = re.search(r"(?:public\s+)?(?:static\s+)?(?:final\s+)?SimpleChannel\s+(\w+)\s*=\s*(NetworkRegistry\.newSimpleChannel\(|ChannelBuilder)", t)
         if not cm:
@@ -669,11 +669,11 @@ def run(src, modid, dry=False):
         # 4. sends, everywhere
         for g in list(new):
             t2, k = new[g], 0
-            for name in [chan] + aliases + ([helper_alias] if helper_alias else []):   # X137 field alias, X154 base getChannel()
+            for name in [chan] + aliases + ([helper_alias] if helper_alias else []):   # X141 field alias, X158 base getChannel()
                 t2, k1 = rewrite_sends(t2, name, flags, g.relative_to(src).as_posix())
                 k += k1
             if k:
-                # X125: the sends just written are NeoForge's; a Forge PacketDistributor import (kept because the old
+                # X129: the sends just written are NeoForge's; a Forge PacketDistributor import (kept because the old
                 # calls used it) would shadow the new one, and add_import refuses a second class of that name
                 t2 = re.sub(r"(?m)^import\s+net\.minecraftforge\.network\.PacketDistributor\s*;[ \t]*\n", "", t2)
                 t2 = add_import(t2, "net.neoforged.neoforge.network.PacketDistributor")
@@ -697,7 +697,7 @@ def run(src, modid, dry=False):
                     report["call sites"] += 1
                 else:
                     # called from a setup handler with no mod bus in scope: register from the @Mod constructor instead
-                    # (the mod bus is there), and drop the old call -- RegisterPayloadHandlersEvent fires on its own (X102)
+                    # (the mod bus is there), and drop the old call -- RegisterPayloadHandlersEvent fires on its own (X106)
                     before = new[g]       # cut the old call FIRST: placing the listener may shift offsets in this file
                     ls = before.rfind("\n", 0, m.start()) + 1
                     line_only = not before[ls:m.start()].strip()
@@ -710,7 +710,7 @@ def run(src, modid, dry=False):
                         flags.append(f"{g.relative_to(src).as_posix()}:{fs.line_of(new[g], m.start())} {cname}.{owner.name}() "
                                      "has no IEventBus in scope: add `modBus.addListener(" + cname + "::" + owner.name + ")`")
                 break
-    # a channel shape none of the above recognised must not pass silently (X102): name every file still holding one
+    # a channel shape none of the above recognised must not pass silently (X106): name every file still holding one
     for f, t in new.items():
         if re.search(r"\bSimpleChannel\s+\w+\s*[=;]", t):
             flags.append(f"{f.relative_to(src).as_posix()}: a SimpleChannel this converter did not recognise is still declared")
@@ -842,7 +842,7 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         net = (r / "Net.java").read_text(encoding="utf-8"); ping = (r / "PingPacket.java").read_text(encoding="utf-8"); pong = (r / "PongPacket.java").read_text(encoding="utf-8")
         mod = (r / "Mod.java").read_text(encoding="utf-8")
         want = [(net, "public static void register(RegisterPayloadHandlersEvent event) {"),
-                (net, "import net.neoforged.neoforge.network.PacketDistributor;"),   # X125: replaces Forge's
+                (net, "import net.neoforged.neoforge.network.PacketDistributor;"),   # X129: replaces Forge's
                 (net, "PayloadRegistrar registrar = event.registrar(PROTOCOL_VERSION);"),
                 (net, "// to the client"),
                 (net, "registrar.playToClient(PingPacket.TYPE, PingPacket.STREAM_CODEC, PingPacket::handle);"),
@@ -862,7 +862,7 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
                 (mod, "modEventBus.addListener(Net::register);")]
         miss = [w for t, w in want if w not in t]
         if "import net.minecraftforge.network.PacketDistributor;" in net:
-            miss.append("Forge PacketDistributor import left beside the NeoForge sends (X125)")
+            miss.append("Forge PacketDistributor import left beside the NeoForge sends (X129)")
         for bad, t in (("SimpleChannel", net), ("NetworkEvent", ping), ("setPacketHandled", pong), ("Supplier", pong),
                        ("CHANNEL", net)):
             if bad in t:
@@ -872,7 +872,7 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         if any(p.read_text(encoding="utf-8") != before[p] for p in r.iterdir()):
             miss.append("not idempotent")
         ok = not miss and not flags
-    with tempfile.TemporaryDirectory() as d:       # two channel files; one keeps its channel in a local (X81)
+    with tempfile.TemporaryDirectory() as d:       # two channel files; one keeps its channel in a local (X85)
         root = pathlib.Path(d) / "m/net"; root.mkdir(parents=True)
         def pk(n):
             return (f"package m.net;\nimport net.minecraft.network.FriendlyByteBuf;\nimport java.util.function.Supplier;\n"
@@ -894,7 +894,7 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         m2 = (root / "Msgs.java").read_text(encoding="utf-8")
         ok = ok and "registrar.playToClient(B.TYPE, B.STREAM_CODEC, B::handle);" in m2 and ".consumerMainThread" not in m2 \
             and "INSTANCE" not in m2 and "SimpleChannel" not in m2
-        # X137: the sends go through the field the local was stored in, here and in another class
+        # X141: the sends go through the field the local was stored in, here and in another class
         ok = ok and "PacketDistributor.sendToPlayer(p, m);" in m2 and "<MSG extends CustomPacketPayload>" in m2 \
             and "PacketDistributor.sendToAllPlayers(o)" in (root / "Net.java").read_text(encoding="utf-8")
     import tempfile
@@ -934,7 +934,7 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
         if not ok2:
             print("self-check (1.20.2 shape):", f2, "\n" + n2 + "\n" + k2)
         ok = ok and ok2
-    with tempfile.TemporaryDirectory() as d:     # X97: MCreator's addNetworkMessage helper, used and unused
+    with tempfile.TemporaryDirectory() as d:     # X101: MCreator's addNetworkMessage helper, used and unused
         base = pathlib.Path(d)
         for sub, used in (("a", True), ("b", False)):
             p = base / sub / "m"; p.mkdir(parents=True)
@@ -975,9 +975,9 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
             else:
                 ok3 = "PACKET_HANDLER" not in mm and "addNetworkMessage" not in mm and "messageID" not in mm and not f3
             if not ok3:
-                print(f"self-check X97 ({'used' if used else 'unused'}):", f3, "\n" + mm)
+                print(f"self-check X101 ({'used' if used else 'unused'}):", f3, "\n" + mm)
             ok = ok and ok3
-    with tempfile.TemporaryDirectory() as d:     # X102: late-assigned channel, nested Handler, register() from setup
+    with tempfile.TemporaryDirectory() as d:     # X106: late-assigned channel, nested Handler, register() from setup
         p = pathlib.Path(d) / "c"; p.mkdir()
         (p / "CMod.java").write_text(
             "package c;\n@Mod(\"c\")\npublic class CMod {\n   public CMod(IEventBus modEventBus, ModContainer c) {\n"
@@ -1000,15 +1000,15 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
                and "SimpleChannel" not in ms_ and "INSTANCE" not in ms_
                and "public static void handle(Undo msg, IPayloadContext ctx)" in un_ and not f4)
         if not ok4:
-            print("self-check X102:", f4, "\n" + cm_ + ms_ + un_)
+            print("self-check X106:", f4, "\n" + cm_ + ms_ + un_)
         ok = ok and ok4
     ok5 = (unwrap_handler("(pkt, sup) -> {\n   Context ctx = (Context)sup.get();\n   ctx.enqueueWork(() -> P.handle(pkt, ctx));\n"
                           "   ctx.setPacketHandled(true);\n}") == "P::handle"
            and unwrap_handler("(m, s) -> { s.get().enqueueWork(() -> go()); }").startswith("(m, s)"))
     if not ok5:
-        print("self-check X104: unwrap_handler")
+        print("self-check X108: unwrap_handler")
     ok = ok and ok5
-    with tempfile.TemporaryDirectory() as d:     # X154: registration through a base class's helpers
+    with tempfile.TemporaryDirectory() as d:     # X158: registration through a base class's helpers
         q = pathlib.Path(d) / "m/net"; q.mkdir(parents=True)
         (q / "Base.java").write_text(
             "package m.net;\nimport java.util.Optional;\nimport java.util.function.Supplier;\nimport net.minecraftforge.network.NetworkDirection;\n"
@@ -1046,7 +1046,7 @@ class Mod { public Mod(IEventBus modEventBus) { Net.register(); } }
                and "PacketDistributor.sendToAllPlayers(message);" in b5 and "getPlayer(IPayloadContext context)" in b5
                and "<MSG extends CustomPacketPayload> void sendToAll" in b5)
         if not ok5:
-            print("self-check X154:", f5, "\n" + h5 + b5 + m5)
+            print("self-check X158:", f5, "\n" + h5 + b5 + m5)
         ok = ok and ok5
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{net}\n{pong}")
     return 0 if ok else 1

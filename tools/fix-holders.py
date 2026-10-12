@@ -217,7 +217,7 @@ class Index:
         self.src = pathlib.Path(src).resolve()
         self.files = {f: f.read_text(encoding="utf-8", errors="replace") for f in self.src.rglob("*.java")}
         # DeferredRegister field name -> base type, PER FILE: MCreator names every init class's register `REGISTRY`,
-        # so a tree-wide map keyed by the name alone answered with whichever file came last (X127: an enchantment
+        # so a tree-wide map keyed by the name alone answered with whichever file came last (X131: an enchantment
         # holder typed DeferredHolder<SoundEvent, Enchantment>)
         self.regs_by_file = {}
         for f, t in self.files.items():
@@ -245,7 +245,7 @@ class Index:
                           % re.escape(name), t)
             if m:
                 return f, m
-            # X98: registered through the class's own helper -- `Supplier<MobEffect> HOT = registryEffect("hot", ..)`
+            # X102: registered through the class's own helper -- `Supplier<MobEffect> HOT = registryEffect("hot", ..)`
             # where `Supplier<MobEffect> registryEffect(..) { return EFFECTS.register(..); }`. The match is rebuilt so
             # group(3) names the register target, and .helpers carries each overload's return-type span to retype too.
             m = re.search(r"\b(Supplier|RegistryObject|DeferredHolder)<([^=;]*?)>\s+%s\s*=\s*(\w+)\s*\(" % re.escape(name), t)
@@ -349,7 +349,7 @@ def run(src, log_text, dry=False):
         need_imports[f].add("net.minecraft.core.Holder")
         return True
 
-    # X98: inside a "no suitable constructor/method" error javac names the argument only as
+    # X102: inside a "no suitable constructor/method" error javac names the argument only as
     # "argument mismatch; MobEffect cannot be converted to Holder<MobEffect>" and points its caret at the CALL, so the
     # incompatible-types path below never sees it. For such an error, rule A applies to each `[(T)] Owner.F.get()` of
     # that type on the line whose registry field resolves -- the same rewrite, located by text instead of by caret.
@@ -384,7 +384,7 @@ def run(src, log_text, dry=False):
                         edits[df].append((h0, h1, f"DeferredHolder<{base}, {targs}>"))
                     need_imports[df].add("net.neoforged.neoforge.registries.DeferredHolder")
                 report["A in argument mismatch"] += 1
-            # X145: the effect is a local or a Supplier parameter (`new MobEffectInstance(effect, 160)`,
+            # X149: the effect is a local or a Supplier parameter (`new MobEffectInstance(effect, 160)`,
             # `effect.get()`): no registry field to retype, so rule F -- wrap the VALUE. Only the constructor's first
             # argument, the one MobEffect position, so the mismatch javac names is the one rewritten.
             if T == "MobEffect":
@@ -443,7 +443,7 @@ def run(src, log_text, dry=False):
                         continue
                     targs = dm.group(2).strip()
                     edits[df].append((dm.start(1), dm.end(2) + 1, f"DeferredHolder<{base}, {targs}>"))
-                    for h0, h1 in getattr(dm, "helpers", []):     # and the helper that returns it (X98)
+                    for h0, h1 in getattr(dm, "helpers", []):     # and the helper that returns it (X102)
                         edits[df].append((h0, h1, f"DeferredHolder<{base}, {targs}>"))
                     need_imports[df].add("net.neoforged.neoforge.registries.DeferredHolder")
                 report["A drop .get()"] += 1; continue
@@ -597,7 +597,7 @@ class Use {
             miss.append("double retype")
         ok = not miss and not flags
     ok = ok and bool(ERR.match(r"D:\a\w\A.java:3: error: incompatible types: A cannot be converted to B"))   # javac on Windows names a drive path
-    with tempfile.TemporaryDirectory() as d:     # X145: a local / Supplier-parameter effect in an overloaded constructor
+    with tempfile.TemporaryDirectory() as d:     # X149: a local / Supplier-parameter effect in an overloaded constructor
         p = pathlib.Path(d) / "my"; p.mkdir()
         (p / "P.java").write_text("package my;\nclass P {\n    void a(Supplier<MobEffect> effect, MobEffect e2, int j) {\n"
                                   "        x(new MobEffectInstance(effect.get(), j));\n        y(new MobEffectInstance(e2, 160));\n    }\n}\n",
@@ -612,7 +612,7 @@ class Use {
             and "new MobEffectInstance(BuiltInRegistries.MOB_EFFECT.wrapAsHolder(e2), 160)" in out \
             and "import net.minecraft.core.registries.BuiltInRegistries;" in out
     import tempfile
-    with tempfile.TemporaryDirectory() as d:     # X98: a helper-registered field, fixed from an argument-mismatch error
+    with tempfile.TemporaryDirectory() as d:     # X102: a helper-registered field, fixed from an argument-mismatch error
         p = pathlib.Path(d) / "m"; p.mkdir()
         (p / "Effects.java").write_text(
             "package m;\npublic class Effects {\n   public static final DeferredRegister<MobEffect> EFFECTS = DeferredRegister.create(Registries.MOB_EFFECT, \"m\");\n"
@@ -630,9 +630,9 @@ class Use {
                and "public static DeferredHolder<MobEffect, MobEffect> registryEffect(" in ef
                and "new MobEffectInstance(Effects.HOT, 100)" in us)
         if not ok2:
-            print("self-check X98:\n" + ef + us)
+            print("self-check X102:\n" + ef + us)
         ok = ok and ok2
-    with tempfile.TemporaryDirectory() as d:     # X127: two init classes, both with a register named REGISTRY
+    with tempfile.TemporaryDirectory() as d:     # X131: two init classes, both with a register named REGISTRY
         for nm, ty in (("ModSounds", "SoundEvent"), ("ModEnchantments", "Enchantment")):
             (pathlib.Path(d) / f"{nm}.java").write_text(
                 f"class {nm} {{\n   public static final DeferredRegister<{ty}> REGISTRY = DeferredRegister.create(x, \"m\");\n}}\n",
@@ -641,7 +641,7 @@ class Use {
         ench = pathlib.Path(d, "ModEnchantments.java").resolve()
         if ix.reg_base(ench, "REGISTRY") != "Enchantment" or ix.reg_base(pathlib.Path(d, "Other.java").resolve(), "REGISTRY") is not None:
             ok = False
-            print("self-check X127:", ix.reg_base(ench, "REGISTRY"))
+            print("self-check X131:", ix.reg_base(ench, "REGISTRY"))
     print("self-check:", "OK" if ok else f"FAIL {miss} {flags}\n{out}")
     return 0 if ok else 1
 

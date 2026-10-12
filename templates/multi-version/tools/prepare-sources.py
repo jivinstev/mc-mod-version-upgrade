@@ -90,7 +90,7 @@ def load_renames(path, guards=False):
             continue
         # `#? only-if <regex>` (guards=True: a rename table; a recipe pack's apply-recipes owns its own group guards)
         # scopes the NEXT row to files whose (original) text matches the regex -- for a
-        # LIBRARY's renamed class whose simple name a mod may also use for its own class (X169: a mod's own
+        # LIBRARY's renamed class whose simple name a mod may also use for its own class (X173: a mod's own
         # `PlatformHelper` must not be rewritten because cristellib's moved). Only on re:/member: rows: plain rows
         # are merged into one pattern.
         if guards and line.lstrip().startswith('#? only-if'):

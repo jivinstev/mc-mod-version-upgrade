@@ -55,23 +55,23 @@ LootContext	hasParam	hasParameter
 LootContext	getParamOrNull	getOptionalParameter
 # 26.2: SoundEvent.getLocation() -> location() (checked in the 26.2 jar: Identifier location())
 SoundEvent	getLocation	location
-# 26.2 made Level.random protected (26.2 jar: protected final RandomSource random; public getRandom()) -- X108
+# 26.2 made Level.random protected (26.2 jar: protected final RandomSource random; public getRandom()) -- X112
 Level	random	getRandom()
-# X133 (26.2 jar): the HUD and the toast manager moved off the god objects -- Gui.getChat is Hud.getChat (Gui.hud,
+# X137 (26.2 jar): the HUD and the toast manager moved off the god objects -- Gui.getChat is Hud.getChat (Gui.hud,
 # §V28), Minecraft.getToasts is Gui.toastManager()
 Gui	getChat	{recv}.hud.getChat(){()}
 Minecraft	getToasts	{recv}.gui.toastManager(){()}
-# X135 (26.2 jar): the GLFW window handle accessor
+# X139 (26.2 jar): the GLFW window handle accessor
 Window	getWindow	handle
-# X146 (26.2 jar): Inventory.items is private; the main-inventory list is getNonEquipmentItems()
+# X150 (26.2 jar): Inventory.items is private; the main-inventory list is getNonEquipmentItems()
 Inventory	items	getNonEquipmentItems()
-# X158 (26.2 jar): Item tooltips take a Consumer<Component> (accept, not add)
+# X162 (26.2 jar): Item tooltips take a Consumer<Component> (accept, not add)
 Consumer	add	accept
-# X158: the moveTo -> snapTo rename (V39) is for Entity; PathNavigation.moveTo(x, y, z, speed) is unchanged (X7b)
+# X162: the moveTo -> snapTo rename (V39) is for Entity; PathNavigation.moveTo(x, y, z, speed) is unchanged (X7b)
 PathNavigation	snapTo	moveTo
-# X158 (26.2 jar): Minecraft.cameraEntity is private; getCameraEntity() is public
+# X162 (26.2 jar): Minecraft.cameraEntity is private; getCameraEntity() is public
 Minecraft	cameraEntity	getCameraEntity()
-# X158 (26.2 jar): Item.getDescription() is gone; the item name comes from a stack
+# X162 (26.2 jar): Item.getDescription() is gone; the item name comes from a stack
 Item	getDescription	{recv}.getName({recv}.getDefaultInstance()){()}
-# X158 (26.2 jar): food is a data component
+# X162 (26.2 jar): food is a data component
 ItemStack	getFoodProperties	{recv}.get(net.minecraft.core.component.DataComponents.FOOD){(..)}
