@@ -177,8 +177,9 @@ def no_gametest_annotation(mc):
 def harness_layer_registration(c, h, pkg, mc):
     """A layer target past 1.21.5: the (already renamed) harness tests are wired by the generated registrar and
     their dead annotations stripped, by the same templates/multi-version/tools/gametest_adapter.py the 26.x route uses.
-    The 1.21.5 dialect keeps ResourceLocation and FML's @EventBusSubscriber bus attribute; 1.21.6+ (FML 9) drops the attribute; 26.x is the adapter's default."""
-    dialect = "26" if mc_tuple(mc) >= (26,) else "1.21.8" if mc_tuple(mc) >= (1, 21, 6) else "1.21.5"
+    The 1.21.5 dialect keeps ResourceLocation and FML's @EventBusSubscriber bus attribute; 1.21.6+ (FML 9) drops the attribute; 1.21.11 writes Identifier (the 26.x rename) over a non-generic TestEnvironmentDefinition; 26.x is the adapter's default."""
+    dialect = ("26" if mc_tuple(mc) >= (26,) else "1.21.11" if mc_tuple(mc) >= (1, 21, 11)
+               else "1.21.8" if mc_tuple(mc) >= (1, 21, 6) else "1.21.5")
     r = subprocess.run([sys.executable, str(ROOT / "templates/multi-version/tools/gametest_adapter.py"), "--root",
                         str(h / "java"), "--modid", c["args"].modid, "--package", f"{pkg}.gatetest", "--structure",
                         "empty_test", "--dialect", dialect],

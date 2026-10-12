@@ -60,6 +60,9 @@ DIALECTS = {
     # 1.21.6+ (FML 9): @EventBusSubscriber has no bus() any more (inferred from the event type); otherwise as 1.21.5.
     '1.21.8': dict(ident='ResourceLocation', ident_import='net.minecraft.resources.ResourceLocation',
                    envt='TestEnvironmentDefinition', bus=''),
+    # 1.21.11: ResourceLocation is Identifier (CATALOG V4) but TestEnvironmentDefinition is still not generic (26.x made it so); FML as 1.21.8.
+    '1.21.11': dict(ident='Identifier', ident_import='net.minecraft.resources.Identifier',
+                    envt='TestEnvironmentDefinition', bus=''),
 }
 
 TIMEOUT_RE = re.compile(r'timeoutTicks\s*=\s*(\d+)')
@@ -307,7 +310,7 @@ def self_check():
            '    @GameTest(template = "empty_test", timeoutTicks = 50)\n    public static void fooBar(GameTestHelper h) {}\n'
            '    @GameTest\n    public void baz(GameTestHelper h) {}\n}\n')
     for dialect, ident, bus in (('26', 'Identifier', False), ('1.21.5', 'ResourceLocation', True),
-                              ('1.21.8', 'ResourceLocation', False)):
+                              ('1.21.8', 'ResourceLocation', False), ('1.21.11', 'Identifier', False)):
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, 'p/t'))
             open(os.path.join(d, 'p/t/A.java'), 'w').write(src)
@@ -320,7 +323,7 @@ def self_check():
                     and ('bus = EventBusSubscriber.Bus.MOD' in reg) == bus
                     and f'import net.minecraft.resources.{ident};' in reg and f'import net.minecraft.resources.{ident};' in dg
                     and ('TestEnvironmentDefinition<?>' in reg) == (dialect == '26')
-                    and ('Identifier' not in reg) == (dialect != '26'))
+                    and ('Identifier' not in reg) == (dialect not in ('26', '1.21.11')))
             if not good:
                 ok = False
                 print(f"FAIL: gametest adapter dialect {dialect}")
@@ -342,7 +345,8 @@ if __name__ == '__main__':
     ap.add_argument('--structure', default='empty_test')
     ap.add_argument('--dialect', choices=sorted(DIALECTS), default='26',
                     help="'26' (26.x: Identifier, generic environment), '1.21.5' (ResourceLocation, FML bus attribute) "
-                         "or '1.21.8' (1.21.6+: ResourceLocation, no bus attribute)")
+                         "'1.21.8' (1.21.6+: ResourceLocation, no bus attribute) "
+                         "or '1.21.11' (Identifier, non-generic environment, no bus attribute)")
     a = ap.parse_args()
     if not a.package:
         a.package = a.modid + '.compat'
