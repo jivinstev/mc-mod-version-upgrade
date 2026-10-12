@@ -260,6 +260,47 @@ L7. **Small ones** · `DummySavedData` removed: `DimensionDataStorage.cache` is 
 (empty = failed read) · `NativeImage.asByteArray()` removed (write a temp PNG) · GeckoLib 4.7.3/4.8.5
 `GeoRenderLayer.preRender/render` gained a trailing `int` colour · `Minecraft.getTimer()` → `getDeltaTracker()`.
 
+### 1.21.3 → 1.21.4 (fork multi-version layer) — the same library, its second target (62 errors after 1.21.3's work)
+Shared rows/helpers: `templates/fork-layer/shared/1.21.4/` (a 1.21.4 target inherits 1.21.3's as well).
+
+L8. **Client reload listeners are a named graph** · `RegisterClientReloadListenersEvent.registerReloadListener(l)` →
+`AddClientReloadListenersEvent.addListener(ResourceLocation id, l)`; a unique id per listener (shared `ReloadIds`:
+the listener's class name).
+
+L9. **Things NeoForge 21.4 / Minecraft 1.21.4 dropped that a mod reached into** · `ClientLevel.partEntities` (id →
+part map) → only `dragonParts()` (a list; shared `PartEntities.byId`) · `TicketType.POST_TELEPORT` → gone (shared
+`Tickets` recreates it: Integer key, 5 ticks) · `TextureManager.register(String prefix, DynamicTexture)` (it NAMED the
+texture, `minecraft:dynamic/<prefix>_<n>`) → only `register(ResourceLocation, AbstractTexture)` (shared `Textures`
+keeps the naming) · `SkullBlockRenderer.createSkullRenderers(models)` → per-type `createModel(models, type)` ·
+`InventoryMenu.BLOCK_ATLAS` → `TextureAtlas.LOCATION_BLOCKS` · FML 6's `SimpleBufferBuilder(int)` → `(String, int)` ·
+`LevelRenderer.renderLevel` lost its `LightTexture` (a mixin `@At` descriptor and every `@Inject` callback).
+
+L10. **Item rendering is an `ItemStackRenderState` (U12's mechanism, from the renderer's side)** · `ItemRenderer.render(
+stack, …, BakedModel)` and `getModel(stack, level, entity, seed)` are gone; `renderStatic(...)` resolves and draws.
+A hook that decided from the STACK while drawing has no stack: record it at `ItemModelResolver.appendItemLayers` (a
+one-line mixin) and read it where the layer draws — `ItemStackRenderState$LayerRenderState.render`, before its
+`popPose` — once per item, not per layer (shared `ItemStacks`). `ItemRenderer.renderModelLists` is private static and
+takes the layer's resolved `int[]` tints instead of the stack. Shared `ItemModels.resolve` answers the old
+`getModel` from a resolved state's first layer.
+
+L11. **GUI** · `AbstractScrollWidget` → `AbstractTextAreaWidget` / `AbstractScrollArea` (`getMaxScrollAmount` →
+`maxScrollAmount`, `withinContentAreaPoint` gone, `updateWidgetNarration` protected; the scrollbar is the
+superclass's — 6 px wide, its own sprites) · `AbstractWidget.clicked(x,y)` → `isMouseOver(x,y)` (same test) ·
+`AbstractSelectionList.getScrollbarPosition()` → `scrollBarX()`.
+
+L12. **Animation metadata is a record with a codec** · `AnimationMetadataSection.forEachFrame`/`getDefaultFrameTime`/
+`isInterpolatedFrames`/`EMPTY`/`SERIALIZER` → `frames()` (Optional list of `AnimationFrame`, `timeOr(default)`),
+`defaultFrameTime()`, `interpolatedFrames()`, `CODEC`/`TYPE`; `MetadataSectionSerializer` → `MetadataSectionType`.
+`EMPTY` overrode `calculateFrameSize` to answer the whole image; the record cannot, so "no metadata" has to be
+handled by the caller. The codec rejects malformed `.mcmeta` the old serializer skipped.
+
+L13. **The layer itself: every source set, and a clean class dir after failed compiles** · a mod with more than
+`main` (Epic Core API builds `cf`, `pro`, `jvmti` variants against main's classes) needs each `src/<set>/java`
+through the same table — the first 1.21.3 pass prepared only main, and `pro` met a 1.21.4 change. And after a
+string of failed compiles a target's incremental state can leave `classes/` partial (33 of 864 classes): the next
+compile "succeeds" and every set built on main fails with `package … does not exist`. Delete `build/mc<t>/classes`
+and recompile before believing either.
+
 ### Runtime deltas (Gate B over a clean compile, 1.21.1 → 1.21.4)
 **Measured:** the first 1.21.4 Gate B run was **27 red** with main + test compiling clean on both targets.
 Every one was one of the six below. After them: `ci,default` 613 passed, batch composition identical to the

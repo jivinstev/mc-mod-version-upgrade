@@ -892,6 +892,11 @@ Shared rows/helpers every fork inherits: `templates/fork-layer/shared/1.21.3/`. 
 - **M20. Frame graph (1.21.2)** — sky/clouds are recorded passes: draw after the sky from `RenderLevelStageEvent.AFTER_SKY`, skip clouds in `CloudRenderer.render`; `renderLevel` gains `GraphicsResourceAllocator`.
 - **M21. Mixin targets (1.21.2)** — `hurt` → `hurtServer(ServerLevel,…)`, `actuallyHurt(ServerLevel,…)`, `changeDimension` → `teleport(TeleportTransition)`, `ItemRenderer.render` body → `renderItemModelRaw`, `FallingBlockRenderer.render(state,…)`: compile-clean, load-fatal — audit them.
 - **M22. Read the U section first** — `references/minor-version-deltas.md` U2-U12 (1.21.1 → 1.21.4) already held five of this port's rows; the shared table now carries them.
+- **M23. Client reload listeners (1.21.4)** — `RegisterClientReloadListenersEvent` → `AddClientReloadListenersEvent.addListener(id, l)`: every listener needs an id.
+- **M24. Removed internals (1.21.4)** — `ClientLevel.partEntities`, `TicketType.POST_TELEPORT`, `TextureManager.register(String, …)`, `createSkullRenderers`, `InventoryMenu.BLOCK_ATLAS`, `renderLevel`'s `LightTexture`: shared helpers keep the old behaviour (L9).
+- **M25. Item rendering by render state (1.21.4)** — no stack while an item draws: record it at `ItemModelResolver.appendItemLayers`, draw in `ItemStackRenderState$LayerRenderState.render` once per item (L10).
+- **M26. GUI scroll widgets and metadata (1.21.4)** — `AbstractScrollWidget` → `AbstractTextAreaWidget`; `clicked` → `isMouseOver`; `getScrollbarPosition` → `scrollBarX`; `AnimationMetadataSection` is a codec record (L11, L12).
+- **M27. A layer prepares EVERY source set, and distrusts a class dir after failed compiles** (L13).
 
 ## S. Silent-resource patterns (compile clean, run clean, *silently wrong*)
 > **Axis:** neither the compiler nor the crash gates can see these. Java has a compiler; resources do

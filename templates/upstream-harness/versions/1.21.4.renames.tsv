@@ -1,2 +1,4 @@
-# 1.21.4 (NeoForge 21.4): the harness renames are those of 1.21.3.
+# 1.21.4 (NeoForge 21.4): the harness renames are those of 1.21.3, plus the rows below.
 #!inherit 1.21.3
+# SpawnEggItem.getType reads ENTITY_DATA through a registry lookup now: getType(HolderLookup.Provider, ItemStack).
+re:egg\.getType\(new ItemStack\(item\)\)	egg.getType(helper.getLevel().registryAccess(), new ItemStack(item))
