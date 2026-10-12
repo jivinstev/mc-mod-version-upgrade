@@ -71,8 +71,9 @@ of the corpus after a batch of them.
 
 ## What to automate next
 
-`tools/sweep/families.py` measures named error families over the rerun. Fourteen are worth a converter (one GitHub
-issue each, labelled `sweep-candidate`, with prevalence, catalog references and a build estimate). Together they
+`tools/sweep/families.py` measures named error families over the rerun. Fourteen are worth a converter: one GitHub
+issue each ([#55–#68](https://github.com/jivinstev/mc-mod-version-upgrade/issues?q=label%3Asweep-candidate), labelled
+`sweep-candidate`), with prevalence, catalog references and a build estimate, ranked by value. Together they
 cover roughly 12% of the errors left; the rest is a long tail of mod-specific code, which is what the model stage is
 for. Families judged not worth a converter, with the reason:
 
