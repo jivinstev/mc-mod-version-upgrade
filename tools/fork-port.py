@@ -902,7 +902,7 @@ def self_check():
             (mv / "targets" / t).mkdir(parents=True)
             (mv / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "x=1\n", encoding="utf-8")
         expect(chain(mv, "1.21.5") == ["1.21.5", "1.21.4"], "chain")
-    expect(parse_modid('[[mods]]\nmodId = "eca"\n[[dependencies.eca]]\nmodId = "neoforge"\n') == "eca", "modid")
+    expect(parse_modid('[[mods]]\nmodId = "examplemod"\n[[dependencies.examplemod]]\nmodId = "neoforge"\n') == "examplemod", "modid")
     # the residue builder over a canned compile log, plus a canned loop log
     cs = load("compile_summary", "compile-summary.py")
     log = ("> Task :compileJava\n/w/build/mc1.21.5/mv/java/m/A.java:3: error: cannot find symbol\n  symbol:   class Foo\n"
@@ -933,23 +933,23 @@ def self_check():
         lg = pathlib.Path(d, "l.jsonl")
         lg.write_text("\n".join(json.dumps(e) for e in [{"event": "start"}, {"event": "worker", "usd": 9}] + evs) + "\n", encoding="utf-8")
         expect(loop_events(lg)[0]["event"] == "start" and len(loop_events(lg)) == len(evs), "only the last run's events")
-    ev = gate_evidence("noise\n/w/x/y/java/net/eca/gatetest/BaselineGameTest.java:15: error: cannot find symbol\n"
-                       "/w/x/y/java/net/eca/gatetest/BaselineGameTest.java:15: error: cannot find symbol\n"
-                       "  /w/x/y/java/net/eca/Other.java:9: error: incompatible types: A cannot be converted to B\n")
-    expect(ev == ["eca/gatetest/BaselineGameTest.java:15: cannot find symbol",
-                  "net/eca/Other.java:9: incompatible types: A cannot be converted to B"], "gate_evidence compile errors: %s" % ev)
+    ev = gate_evidence("noise\n/w/x/y/java/com/example/mod/gatetest/BaselineGameTest.java:15: error: cannot find symbol\n"
+                       "/w/x/y/java/com/example/mod/gatetest/BaselineGameTest.java:15: error: cannot find symbol\n"
+                       "  /w/x/y/java/com/example/mod/Other.java:9: error: incompatible types: A cannot be converted to B\n")
+    expect(ev == ["mod/gatetest/BaselineGameTest.java:15: cannot find symbol",
+                  "example/mod/Other.java:9: incompatible types: A cannot be converted to B"], "gate_evidence compile errors: %s" % ev)
     expect(gate_evidence("> Task :test FAILED\n")[0].endswith("FAILED") and gate_evidence("all fine") == [], "gate_evidence tests/none")
     # CATALOG X47: the mod's own log files, compared between the inherited target and this one
     with tempfile.TemporaryDirectory() as d:
         prev, cur = pathlib.Path(d, "prev"), pathlib.Path(d, "cur")
-        for n in ("latest.log", "debug.log", "2026-10-12-1.log.gz", "2026-10-12-2.log", "EcaBootstrap.log", "EcaAgent.log"):
+        for n in ("latest.log", "debug.log", "2026-10-12-1.log.gz", "2026-10-12-2.log", "ExampleBootstrap.log", "ExampleAgent.log"):
             (prev.mkdir(exist_ok=True) or prev / n).write_text("x", encoding="utf-8")
         for n in ("latest.log", "debug.log"):
             (cur.mkdir(exist_ok=True) or cur / n).write_text("x", encoding="utf-8")
-        expect(mod_log_files(prev) == {"EcaBootstrap.log", "EcaAgent.log"}, "mod_log_files skips vanilla's and the dated archives: %s" % mod_log_files(prev))
-        expect(lost_log_files(prev, cur) == ["EcaAgent.log", "EcaBootstrap.log"], "A: the 1.21.10 state (mod logs missing) is flagged")
-        expect(lost_log_files(prev, cur, ["EcaAgent.log"]) == ["EcaBootstrap.log"], "a recorded known-absent file is not flagged")
-        for n in ("EcaBootstrap.log", "EcaAgent.log", "NewOnlyHere.log"):
+        expect(mod_log_files(prev) == {"ExampleBootstrap.log", "ExampleAgent.log"}, "mod_log_files skips vanilla's and the dated archives: %s" % mod_log_files(prev))
+        expect(lost_log_files(prev, cur) == ["ExampleAgent.log", "ExampleBootstrap.log"], "A: the 1.21.10 state (mod logs missing) is flagged")
+        expect(lost_log_files(prev, cur, ["ExampleAgent.log"]) == ["ExampleBootstrap.log"], "a recorded known-absent file is not flagged")
+        for n in ("ExampleBootstrap.log", "ExampleAgent.log", "NewOnlyHere.log"):
             (cur / n).write_text("x", encoding="utf-8")
         expect(lost_log_files(prev, cur) == [], "B: after the fix (same set, plus a new file) it passes")
         expect(lost_log_files(None, cur) == [] and lost_log_files(pathlib.Path(d, "nope"), cur) == [], "no previous run: nothing to compare")

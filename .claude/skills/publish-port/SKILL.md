@@ -49,9 +49,9 @@ notice it (`--difference "..."`). A fix a player cannot tell from correct behavi
   1.21.1"). No blame, no "bug", no severity, no history.
 - Be specific rather than vague. "Minor differences, see issue N" sounds more alarming than the plain fact, and
   sends readers to an issue written for maintainers.
-- Example: "The Ultra Test Sword's lockdown mode and the Test Entity don't turn on Epic Core API's global
-  "AllReturn" in this version. That's an experimental feature that didn't play well with some other mods on
-  1.21.1."
+- Example: "The item's lockdown mode and the second test object don't turn on the library's global
+  "protect everything" setting in this version. That's an experimental feature that didn't play well with some
+  other mods on 1.21.1."
 
 The user reviews the wording of each difference before it goes on a page; offer a draft in this style. The tool enforces this:
 `port-publish.py` refuses to sync a page or upload notes that name a defect or link a numbered issue (the authors'

@@ -1,7 +1,7 @@
 # Shared fork-layer rename table: NeoForge 21.8 -> 21.10 (Minecraft 1.21.10; NeoForge 21.10; FML 10). Applied FIRST (nearest
 # target) on the 1.21.1 text, then the 1.21.8/1.21.5/1.21.4/1.21.3 tables on whatever it left, so a row here that rewrites
 # something those rows also rewrite has to write the 1.21.10 form itself. Measured against neoforge-21.10.64-sources.jar and
-# tools/audit-mixin-targets.py on the Epic Core API port (the mixin audit is what finds these: javac cannot see them).
+# tools/audit-mixin-targets.py on the first layer-fork port (the mixin audit is what finds these: javac cannot see them).
 #!exhaustive  # shared library: most forks use only some of these rows
 # ---- mixin targets
 # LevelRenderer.renderLevel(GraphicsResourceAllocator, DeltaTracker, boolean, Camera, Matrix4f, Matrix4f, GpuBufferSlice, Vector4f, boolean)

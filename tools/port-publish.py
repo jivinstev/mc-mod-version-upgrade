@@ -811,8 +811,8 @@ def self_check():
         nonlocal ok
         if not c:
             ok = False; print("FAIL:", msg)
-    expect(minecraft_of("eca-1.1.9-mc1.21.1") == "1.21.1", "minecraft from tag")
-    expect(version_of("eca-1.1.9-mc1.21.1-r2", "eca") == "1.1.9+1.21.1-r2", version_of("eca-1.1.9-mc1.21.1-r2", "eca"))
+    expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
+    expect(version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod") == "1.0.0+1.21.1-r2", version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod"))
     expect(version_of("the_last_sword-1.1.2-mc1.21.1", "the_last_sword") == "1.1.2+1.21.1", "version, no suffix")
     expect(version_of("the_last_sword-1.1.1-fix-fix-mc1.21.1-r6", "the_last_sword") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
     body = "notes\n\nPublished on Modrinth: x " + MARK.format(platform="modrinth", ref="AbCd1234")

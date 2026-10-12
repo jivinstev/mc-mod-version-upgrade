@@ -199,7 +199,7 @@ from `state.pickParticleIcon(...)`.
 `checked=17 dead=0`; 19 pairs, 17 rows, 8 main + 1 test recorded drops. The burn-down, in commits:
 332 → 285 → 186 → 145 → 106 → 73 → 53 → 1 → 0.
 
-### 1.21.1 → 1.21.3 (fork multi-version layer) — from Epic Core API, an ~89k-line library with its own shader engine
+### 1.21.1 → 1.21.3 (fork multi-version layer) — from the first layer fork, an ~89k-line library mod with its own shader engine
 Measured with every stable NeoForge line compiled against the 1.21.1 source (issue #49): 1.21.3 **282**,
 1.21.4 **342**, 1.21.5 ≥1028, 1.21.8 ≥1132, 1.21.10 ≥1346, 1.21.11 ≥2300 unique error sites. Carried in a
 **fork layer** (`.multiversion/`, templates/fork-layer): the authors' `src/` is never edited, so every
@@ -295,7 +295,7 @@ L12. **Animation metadata is a record with a codec** · `AnimationMetadataSectio
 handled by the caller. The codec rejects malformed `.mcmeta` the old serializer skipped.
 
 L13. **The layer itself: every source set, and a clean class dir after failed compiles** · a mod with more than
-`main` (Epic Core API builds `cf`, `pro`, `jvmti` variants against main's classes) needs each `src/<set>/java`
+`main` (a fork builds several packaging variants against main's classes) needs each `src/<set>/java`
 through the same table — the first 1.21.3 pass prepared only main, and `pro` met a 1.21.4 change. And after a
 string of failed compiles a target's incremental state can leave `classes/` partial (33 of 864 classes): the next
 compile "succeeds" and every set built on main fails with `package … does not exist`. Delete `build/mc<t>/classes`
@@ -326,7 +326,7 @@ Deliberately NOT shared rows: a regex over a handler's parameter list cannot tel
 
 ### 1.21.5 → 1.21.8 (fork multi-version layer) — uniform blocks, ValueOutput, the 2D GUI (185 errors at the start)
 Shared rows/helpers: `templates/fork-layer/shared/1.21.8/` (renames.tsv, `ShaderInstance`/`Uniform`/`LegacyGl` blocks, `Mv`,
-`EntityOf`, `ShaderReloader`). Measured on Epic Core API (369 shared files, 56 overlays at the end, 93 `@OnlyIn` stripped);
+`EntityOf`, `ShaderReloader`). Measured on the first layer fork (369 shared files, 56 overlays at the end, 93 `@OnlyIn` stripped);
 every gate green. NeoForge 21.6/21.7 are beta-only, so 1.21.6 and 1.21.7 changes ALL arrive here. Each entry names the 26.2
 entry it anticipates ("arrives at 1.21.x, filed under 26.2 as §V..") -- see the tally at the end.
 
@@ -339,7 +339,7 @@ GL validation (`Missing uniform`) or reads zeros. · **Fix:** the shared `Shader
 reads it (`legacyUniforms`): a built-in declaration becomes the vanilla block (member ORDER is the std140 layout, spelled out,
 not `#moj_import`ed, so a generated-shader provider still compiles), a fog name becomes a `#define`, any other
 `uniform vec4 X;` becomes a one-member block `MV_X` that `Uniform` uploads per draw. 1.21.1 semantics kept: `setDefaultUniforms`
-overwrote every built-in right before `apply()`, so a built-in written BEFORE a draw (ECA writes `GameTime` in a shard's
+overwrote every built-in right before `apply()`, so a built-in written BEFORE a draw (a fork writes `GameTime` in a shard's
 setupRenderState) is vanilla's on 1.21.1 AND here; one written in the mod's own `apply()` override wins (`ShaderInstance.
 setDefaultUniforms/globalsBuffer/projectionBuffer`); light and fog writes cannot be honoured (logged once). · **Anticipates:**
 arrives at 1.21.6, filed under 26.2 as §V93 (a custom ShaderInstance → pipeline + std140 block) and §V6/§V54 (state lives
@@ -363,7 +363,7 @@ compiles, then `IllegalArgumentException: Cannot register listeners for abstract
 stages becomes two. **Unlike 26.2, the 1.21.8 event STILL carries `getPoseStack()`, `getCamera()` and the modelview matrix**
 (`javap` the class: 1.21.8 has all three, 26.2 has none and passes `null` to its posts), so the listener body is unchanged
 and the §X33 augment ("compiles, registers, draws nothing") does NOT apply here; verify before assuming it does on 1.21.10+.
-ECA: 55 listeners audited clean, the stage ones in `EcaClientLifecycle`/`BossShowEditorClientEvents`/`GlobalSkyboxHook`.
+First fork: 55 listeners audited clean, the stage ones in its client lifecycle class, an editor's client events and a sky hook.
 · **Anticipates:** arrives at 1.21.6, filed under 26.2 as §X33 (and its augment, which is the 26.2-only half).
 
 L20. **`SoundManager.play(SoundInstance)` returns `SoundEngine.PlayResult` (by 1.21.8)** · void → `PlayResult`; a mixin
@@ -371,7 +371,7 @@ L20. **`SoundManager.play(SoundInstance)` returns `SoundEngine.PlayResult` (by 1
 compile-clean (R17 shape (f)); `audit-mixin-targets.py`'s callback-kind check reports it. · **Fix:** per-target overlay of the
 mixin: `CallbackInfoReturnable<PlayResult>` and `setReturnValue(PlayResult.NOT_STARTED)`. **Choosing the value:** the only
 consumer of the result, `MusicManager.startPlaying`, shows the "now playing" toast on `STARTED`. A mixin that blocks a sound
-and starts nothing in its place answers `NOT_STARTED` (ECA's combat-music lock: its own track plays through a separate
+and starts nothing in its place answers `NOT_STARTED` (a fork's combat-music lock: its own track plays through a separate
 call); one that starts a replacement answers `STARTED`. · **Anticipates:** arrives by 1.21.8, filed under 26.2 as R17 (f)
 (the 26.2 entry already names this exact target).
 
@@ -379,7 +379,7 @@ L21. **`@OnlyIn` is a mod-LOADING ERROR in dev from 1.21.6 (`loadwarning.neoforg
 `@OnlyIn` members and warns on every use; in a dev run that stops Gate B before a test runs and puts `LoadingErrorScreen` up
 on a client. Production jars are inert, which is why nobody ships it as a bug. · **Fix:** the layer's `strip_onlyin=true`
 target property removes the annotation from the whole PREPARED tree (shared files and overlays alike -- a rename row cannot
-reach an overlay); ECA: 93 stripped. Nothing is lost: the strip bought nothing on the common classes. ·
+reach an overlay); first fork: 93 stripped. Nothing is lost: the strip bought nothing on the common classes. ·
 **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V79.
 
 L22. **`@EventBusSubscriber` lost `bus()` (FML 9, 21.6+)** · the bus follows from the event class (a mod-bus event is
@@ -421,7 +421,7 @@ client handler; the client's `ClientNetworkRegistry` refuses to load: "Some clie
 handlers: [..]". Compile-clean, Gate B green (a dedicated server never validates it), found by Gate C `launch`. ·
 **Fix:** a shared row repeats the handler (method reference, or an expression lambda -- block lambdas are left to the author)
 on the 3-argument shape only, so `playBidirectional(T, C, H)` → `(T, C, H, H)`; a handler for a bidirectional payload already
-branches on `ctx.flow()`. ECA's per-fork `NetworkHandler.java` overlay is gone: the row plus a second one
+branches on `ctx.flow()`. The first fork's per-fork network-handler overlay is gone: the row plus a second one
 (`PacketDistributor.sendToServer` → `net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer`, fully
 qualified because a row cannot add an import) reproduce it exactly (diff of the prepared file against the old overlay: the
 import and a comment). · **Anticipates:** arrives at 21.8 (1.21.8), filed under 26.2 as §V81.
@@ -436,9 +436,9 @@ found only where that loader can see a `META-INF/services/net.neoforged.neoforge
 classpath, or a jar FML appends to it (manifest `FMLModType: LIBRARY`, which `FMLLoader.loadPlugins` appends; a `MOD` jar's services are
 NOT scanned for this interface, and the early-service jar scan does not list it). · **What breaks:** nothing at compile or load. The old
 services file is simply never read, so the mod boots without its transformations; Gate A and B pass. Found only because the mod's own
-`EcaBootstrap.log` was missing from the Gate B run (X53). · **Fix:** a per-target provider class (`EcaClassProcessorProvider`, an overlay
+the mod's own bootstrap log was missing from the Gate B run (X53). · **Fix:** a per-target provider class (a `ClassProcessor` provider class, an overlay
 file with no counterpart in the authors' tree) touching the old service class first (its static initialiser starts the bootstrap log) and
-calling `collector.add(new EcaCoreTransformer())`, plus the services resource in the target's `resources/`. `SelectionContext.type()` is an
+calling `collector.add(<the mod's transformer>)`, plus the services resource in the target's `resources/`. `SelectionContext.type()` is an
 ASM `Type` (`getClassName()` is dotted); `processClass` edits the passed `ClassNode` in place and returns the `ComputeFlags` to recompute.
 · **Anticipates:** arrives at 21.9 (1.21.9/1.21.10); 26.x inherits it unchanged (no dedicated 26.2 entry).
 
@@ -461,7 +461,7 @@ on it, gets null and NPEs, so mod loading breaks on the CLIENT only. A secondary
 mod-container lookup in a reload listener was fallout. Found by Gate C `launch`, not Gate B. · **Fix:** listen on the concrete classes.
 · **Guard:** `tools/audit-event-listeners.py` now flags an interface parameter as well as an abstract class, checks every
 event type a dependency jar declares (it was `net.neoforged`/`net.minecraft` only, so GeckoLib's were never looked at), and
-resolves nested types (`GeoRenderEvent.Entity.CompileRenderLayers` → `…$Entity$CompileRenderLayers`). A/B'd on ECA 1.21.10:
+resolves nested types (`GeoRenderEvent.Entity.CompileRenderLayers` → `…$Entity$CompileRenderLayers`). A/B'd on the first fork at 1.21.10:
 the pre-fix file is caught (3 listeners, exit 1), the fixed one is clean; 1.21.5–1.21.11 sweep: no new findings.
 
 L31. **1.21.11: `ResourceLocation` → `Identifier` and 329 class moves (CATALOG M45)** · `net.minecraft.resources.Identifier` is a pure

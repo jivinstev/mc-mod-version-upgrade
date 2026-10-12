@@ -36,3 +36,11 @@ decision**; only the forks the maintainer has opted in have it, and every other 
 Only the repository's human maintainer merges pull requests into main. An agent opens the PR, subscribes to it and
 drives it to green (CI, review comments), but never merges, approves or enables auto-merge on this repository -- even
 when every check is green and even when the merge is needed to publish a kit.
+
+## Keep fork identities out of this repository
+
+This repository names no mod, mod id, mod package, author or mod repository: not in files, fixtures, comments or
+commit messages. Every agent working on a fork must set `FORBIDDEN_NAMES_FILE` (in the environment, or in
+`.env.local`) to a list OUTSIDE this repository naming that fork, and run `tools/install-hooks.sh`; the pre-push
+hook then refuses a push whose commit messages or added lines contain any listed name, and the IP gate scans the
+whole tree for them. Use invented placeholders (`examplemod`, `com/example/mod`) in fixtures and self-checks.

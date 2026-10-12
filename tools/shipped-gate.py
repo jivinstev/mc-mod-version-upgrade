@@ -11,7 +11,7 @@ class loader there -- a coremod's ClassProcessorProvider, a service file -- and 
 jar in mods/. So a subsystem can run in every dev gate and be inert in the file a player downloads, and no dev gate
 can see it. This one installs a real NeoForge server (installer from maven.neoforged.net, cached per version),
 puts ONLY the built jar (+ --deps) in mods/, starts it, waits for "Done (", sends `stop`, and then checks each
---expect-log FILE:REGEX against <server>/logs/FILE (the mod's own log, e.g. EcaBootstrap.log). A missing
+--expect-log FILE:REGEX against <server>/logs/FILE (the mod's own log, e.g. ExampleBootstrap.log). A missing
 expectation is a FAIL: that is the point.
 
 --expect-file reads one expectation per line (FILE:REGEX, '#' comments); a fork lists its own in

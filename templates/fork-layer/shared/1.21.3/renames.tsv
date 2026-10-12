@@ -1,5 +1,5 @@
 # Shared fork-layer rename table: NeoForge 1.21.1 -> 1.21.3 (Minecraft 1.21.2 API; NeoForge 21.3).
-# Harvested from the Epic Core API port (issue #49) and measured against neoforge-21.3.97-sources.jar.
+# Harvested from the first layer-fork port and measured against neoforge-21.3.97-sources.jar.
 # Every fork that adds a 1.21.3 target inherits these rows (make-fork-layer.py sync-shared copies them to
 # .multiversion/shared/1.21.3/, with @MVPKG@ = the fork's helper package). Fork-specific rows stay in
 # .multiversion/targets/1.21.3/renames.tsv. CATALOG §M (M26-M45) has the reasoning for each row.

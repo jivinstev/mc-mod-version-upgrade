@@ -62,7 +62,7 @@ import java.util.regex.Pattern;
  * filled from the value the mod set. A value the MOD wrote into a built-in
  * wins over vanilla's for that draw only when it wrote it where 1.21.1 let it: 1.21.1 drew with
  * {@code setDefaultUniforms(..)} (every built-in overwritten from RenderSystem, GameTime included) and then {@code apply()},
- * so a write made BEFORE the draw (a shard's setupRenderState -- Epic Core API sets GameTime to seconds there) was lost on
+ * so a write made BEFORE the draw (a shard's setupRenderState -- a fork sets GameTime to seconds there) was lost on
  * 1.21.1 and is lost here ({@link #setDefaultUniforms}), while one made in the mod's own {@code apply()} override survives:
  * {@link #transformMatrix}/{@link #lineWidth}/colour feed {@code DynamicTransforms}, {@link #projectionBuffer} and
  * {@link #globalsBuffer} replace the {@code Projection}/{@code Globals} block, and {@link #consumeBuiltIns} forgets the

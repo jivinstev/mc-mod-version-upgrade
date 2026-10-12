@@ -190,5 +190,5 @@ The per-error loop of a layer target is `tools/file-loop.py --layer <t>` (Haiku 
 as a row in the target's renames.tsv or an overlay, never in the authors' tree), which `tools/fork-port.py` runs.
 Keep the session's own context small -- most of a long session's cost is cache reads (`tools/context-profile.py`).
 
-First measured target (Epic Core API, 1.21.1 -> 1.21.3, 282 -> 0 errors, 142 mixin targets, Gates A/B green):
+First measured target (a large library mod, 1.21.1 -> 1.21.3, 282 -> 0 errors, 142 mixin targets, Gates A/B green):
 about $30 on Opus alone, ~1.3 h, covering the measurement of all lines, the layer tooling, the port and its gates.
