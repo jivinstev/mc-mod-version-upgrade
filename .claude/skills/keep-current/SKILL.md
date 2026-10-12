@@ -166,7 +166,8 @@ from a session (`create_trigger`) has no way to set its repositories, so:
 
 - **The user adds the repositories to the routine.** Give them the exact link and steps, never just "the Routines
   page": open https://claude.ai/code/routines, click the routine by name, open the menu next to its name, choose
-  **Edit**, add each repository (list them as `owner/repo`), and save. Each one is cloned on every run. Until they
+  **Edit**, then use the small **Select a repository** control at the bottom-left of the **Instructions** box (easy to
+  miss: it is not a separate section of the form) to add each repository (list them as `owner/repo`), and save. Each one is cloned on every run. Until they
   have, the routine cannot work, however its prompt is written.
 - **The prompt checks, it does not wait.** It looks for the clones it expects; if one is missing, it still does step
   1, then stops and names the missing repository and where to add it. It never polls for `add_repo`.
