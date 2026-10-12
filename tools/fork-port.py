@@ -546,21 +546,10 @@ class Run:
                             "a recurring shape belongs in the shared library"]}
 
     def target_classpath(self):
-        """Gradle's own resolved compile classpath for this layer target (tools/qtc-init.gradle, passing the layer's
-        -P args through .multiversion/build.sh), cached under the run's work dir. Never rebuilt by hand (X25b-ii)."""
-        cp = self.work / f"qtc-classpath-{self.t}.txt"
-        self.work.mkdir(parents=True, exist_ok=True)
-        r = self.sh([BASH, str(self.mv / "build.sh"), self.t, "-I", str(ROOT / "tools/qtc-init.gradle"),
-                     "-I", str(ROOT / "tools/central-mirror.init.gradle"), "-q", "qtcClasspath", "--console=plain"])
-        m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout or "", re.S)
-        jars = [l.strip() for l in m.group(1).splitlines() if l.strip()] if m else []
-        if not jars:
-            return None, "could not resolve the %s classpath: %s" % (self.t, (r.stdout or "")[-300:])
-        gone = [j for j in jars if not pathlib.Path(j).exists()]
-        if gone:
-            return None, "the %s classpath names %d file(s) that do not exist, e.g. %s" % (self.t, len(gone), gone[0])
-        cp.write_text("\n".join(jars) + "\n", encoding="utf-8")
-        return cp, ""
+        """Gradle's own resolved compile classpath for this layer target, cached under the run's work dir (the code
+        is tools/layer-ci.py's, shared with the fork's layer CI). Never rebuilt by hand (X25b-ii)."""
+        return load("layer_ci", "layer-ci.py").target_classpath(
+            self.repo, self.t, self.work, [ROOT / "tools/central-mirror.init.gradle"], BASH)
 
     def audit_event_listeners(self):
         """audit-event-listeners.py (CATALOG X33/X42) over every prepared tree of the target, against its own classpath:

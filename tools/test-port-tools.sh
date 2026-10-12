@@ -428,6 +428,17 @@ python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] &&
 printf 'x' > "$T/notjar.jar"; python3 tools/shipped-gate.py --jar "$T/notjar.jar" --neo 21.1.228 >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a file that is not a jar exits 2" || bad "shipped-gate non-jar exit"
 python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1],'w').writestr('a','b')" "$T/ok.jar"
 python3 tools/shipped-gate.py --jar "$T/ok.jar" --neo 21.1.228 --expect-log 'bad/path:x' >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a malformed --expect-log exits 2 before anything is downloaded" || bad "shipped-gate bad expectation exit"
+out="$(python3 tools/layer-ci.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "layer-ci: targets are VERSION-sorted (1.21.11 is newer than 1.21.8), java follows inherits, hook stripping" || bad "layer-ci self-check: $out"
+mkdir -p "$T/lay/.multiversion/targets"/{1.21.8,1.21.10,1.21.11,1.21.3}; echo x=1 > "$T/lay/.multiversion/base.properties"
+for t in 1.21.8 1.21.10 1.21.11 1.21.3; do echo "java_version=21" > "$T/lay/.multiversion/targets/$t/target.properties"; done
+out="$(python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho" 2>&1)"
+grep -q '^newest=1.21.11$' "$T/gho" && grep -q '"1.21.8"' <<<"$out" && ! grep -q '"t":"1.21.11"' "$T/gho" \
+  && ok "layer-ci plan: newest target is 1.21.11 (not the lexically last 1.21.8) and it is not in the compile matrix" || bad "layer-ci plan: $out $(cat "$T/gho")"
+out="$(python3 tools/layer-ci.py plan --repo "$T/nolayer" 2>&1)"
+grep -q '"layer": "false"' <<<"$out" && ok "layer-ci plan: a fork without .multiversion/ plans no layer job" || bad "layer-ci plan (no layer): $out"
+out="$(python3 tools/port-ci.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script" || bad "port-ci self-check: $out"
 python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"
 import re,sys
 src=open("tools/ci-gates.py").read()
