@@ -40,6 +40,11 @@ import java.util.Set;
  *
  * <p>Not expressible on 1.21.5 and logged once: a blend equation other than ADD.
  */
+// MV-REQUIRES: RawGlTexture
+// MV-REQUIRES: ShaderInstance
+// MV-REQUIRES: ShaderShard
+// MV-REQUIRES: Uniform
+// MV-REQUIRES: LegacyRenderType
 public final class LegacyGl {
     private static final Logger LOGGER = LogUtils.getLogger();
     static final Set<String> BUILT_IN = GlProgram.BUILT_IN_UNIFORMS;
@@ -90,6 +95,8 @@ public final class LegacyGl {
     public static void disableCull() { cull = false; }
     public static void setShader(ShaderInstance s) { shader = s; }
     public static void setShader(Vanilla s) { shader = s; }
+    /** 1.21.1's {@code RenderSystem.setShader(Supplier<ShaderInstance>)}, as the mod's lambdas and method refs write it. */
+    public static void setShader(java.util.function.Supplier<ShaderInstance> s) { shader = s == null ? null : s.get(); }
     public static void recordRenderCall(Runnable r) {
         if (RenderSystem.isOnRenderThread()) r.run(); else Minecraft.getInstance().execute(r);
     }
@@ -167,6 +174,14 @@ public final class LegacyGl {
                 indices = format.uploadImmediateIndexBuffer(m.indexBuffer());
                 indexType = m.drawState().indexType();
             }
+            float[] savedColor = null;
+            if (own != null && own.COLOR_MODULATOR != null && own.COLOR_MODULATOR.touched()) {
+                // 1.21.1's ShaderInstance.apply() uploaded RenderSystem's colour into COLOR_MODULATOR and a mod could
+                // overwrite it afterwards; 1.21.5's built-in uniform is read from RenderSystem at draw time.
+                savedColor = RenderSystem.getShaderColor().clone();
+                float[] c = own.COLOR_MODULATOR.floats();
+                RenderSystem.setShaderColor(c[0], c[1], c[2], c[3]);
+            }
             try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder().createRenderPass(
                     target.getColorTexture(), OptionalInt.empty(),
                     target.useDepth ? target.getDepthTexture() : null, OptionalDouble.empty())) {
@@ -182,6 +197,11 @@ public final class LegacyGl {
                 }
                 pass.setIndexBuffer(indices, indexType);
                 pass.drawIndexed(0, m.drawState().indexCount());
+            } finally {
+                if (savedColor != null) {
+                    RenderSystem.setShaderColor(savedColor[0], savedColor[1], savedColor[2], savedColor[3]);
+                    own.COLOR_MODULATOR.consume();   // 1.21.1 re-uploaded the default on every apply()
+                }
             }
         }
     }

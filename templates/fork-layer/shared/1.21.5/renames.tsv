@@ -62,6 +62,10 @@ re:\bShaderStateShard\b	@MVPKG@.ShaderShard
 com.mojang.blaze3d.shaders.Uniform	@MVPKG@.Uniform
 re:\bGlStateManager\.(SourceFactor|DestFactor)\b	com.mojang.blaze3d.platform.\1
 re:\bRenderSystem\.(enableBlend|disableBlend|defaultBlendFunc|blendFuncSeparate|blendFunc|blendEquation|enableDepthTest|disableDepthTest|depthFunc|depthMask|colorMask|enableCull|disableCull|recordRenderCall)\(	@MVPKG@.LegacyGl.\1(
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionColorShader\s*\)	@MVPKG@.LegacyGl.setShader(@MVPKG@.LegacyGl.Vanilla.POSITION_COLOR)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionTexShader\s*\)	@MVPKG@.LegacyGl.setShader(@MVPKG@.LegacyGl.Vanilla.POSITION_TEX)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionTexColorShader\s*\)	@MVPKG@.LegacyGl.setShader(@MVPKG@.LegacyGl.Vanilla.POSITION_TEX_COLOR)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionShader\s*\)	@MVPKG@.LegacyGl.setShader(@MVPKG@.LegacyGl.Vanilla.POSITION)
 re:\bRenderSystem\.setShader\(	@MVPKG@.LegacyGl.setShader(
 re:\bRenderSystem\.setShaderTexture\(	@MVPKG@.LegacyGl.setShaderTexture(
 re:\bBufferUploader\.drawWithShader\(	@MVPKG@.LegacyGl.drawWithShader(
@@ -72,4 +76,26 @@ re:\bRenderType\.CompositeState\b	@MVPKG@.LegacyRenderType.State
 re:\b(?:RenderStateShard|RenderType)\.(NO_TRANSPARENCY|ADDITIVE_TRANSPARENCY|LIGHTNING_TRANSPARENCY|GLINT_TRANSPARENCY|CRUMBLING_TRANSPARENCY|OVERLAY_TRANSPARENCY|VIGNETTE_TRANSPARENCY|TRANSLUCENT_TRANSPARENCY|NO_DEPTH_TEST|EQUAL_DEPTH_TEST|LEQUAL_DEPTH_TEST|GREATER_DEPTH_TEST|COLOR_DEPTH_WRITE|COLOR_WRITE|DEPTH_WRITE|CULL|NO_CULL|POLYGON_OFFSET_LAYERING)\b	@MVPKG@.LegacyRenderType.\1
 re:import com\.mojang\.blaze3d\.vertex\.BufferUploader;\n?	
 re:import net\.minecraft\.client\.renderer\.CoreShaders;\n?	
+# DynamicTexture(NativeImage) gained a name supplier (debug label only)
+re:new DynamicTexture\(([^(),]+)\)	new DynamicTexture(() -> "@MVPKG@", \1)
+# ---- Entity.moveTo(...) is snapTo(...) (CATALOG §V39: same body; NOT absSnapTo). A receiver that is a PathNavigation
+# keeps its own moveTo(x, y, z, speed) -- X7b: this guesses at the receiver's spelling, it cannot see its type.
+re:(?<!Navigation\(\))(?<!avigation)(?<!avigator)\.moveTo\(	.snapTo(
+# ---- chunk tickets lost their value type: addRegionTicket(type, pos, radius, value) -> addTicketWithRadius(type, pos, radius)
+# (the value only told two tickets of one type apart; vanilla 1.21.5 keeps one ticket per type, pos and level)
+re:\.addRegionTicket\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*(?:[^,()]|\([^()]*\))+\)	.addTicketWithRadius(\1, \2, \3)
+re:\.removeRegionTicket\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*(?:[^,()]|\([^()]*\))+\)	.removeTicketWithRadius(\1, \2, \3)
+# ---- ClientInput lost forwardImpulse/leftImpulse/jumping/shiftKeyDown
+re:\binput\.forwardImpulse\b	input.getMoveVector().y
+re:\binput\.leftImpulse\b	input.getMoveVector().x
+re:\binput\.jumping\b	input.keyPresses.jump()
+re:\binput\.shiftKeyDown\b	input.keyPresses.shift()
+# ---- OwnableEntity.getOwnerUUID() -> getOwnerReference() (a nullable EntityReference)
+re:([\w.]+(?:\(\))?)\.getOwnerUUID\(\)	@MVPKG@.Owners.uuid(\1)
+# ---- SavedData is a SavedDataType (id + constructor + codec) now; Factory is gone, and save() overrides nothing.
+# The helper keeps the mod's own save(CompoundTag, Provider)/load(CompoundTag[, Provider]) and the on-disk layout.
+re:([\w.]+(?:\(\))?)\.computeIfAbsent\(\s*new SavedData\.Factory<>\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+)(?:,\s*null)?\s*\),\s*((?:[^,()]|\([^()]*\))+)\s*\)	@MVPKG@.SavedDatas.computeIfAbsent(\1, \2, \3, \4)
+re:@Override(\s+public CompoundTag save\(CompoundTag \w+, HolderLookup\.Provider \w+\))	\1
+# ---- Screenshot.takeScreenshot(target) is callback-based now (the GL backend completes it before returning)
+re:\bScreenshot\.takeScreenshot\(\s*((?:[^,()]|\([^()]*\))+)\s*\)	@MVPKG@.Screenshots.take(\1)
 #!strict

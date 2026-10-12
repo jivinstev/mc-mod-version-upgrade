@@ -50,6 +50,11 @@ public class ShaderInstance implements AutoCloseable {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final AtomicInteger SERIAL = new AtomicInteger();
 
+    // 1.21.1's public built-in uniform fields: null when the shader's JSON does not declare them. Only COLOR_MODULATOR
+    // is honoured when the mod overwrites it (LegacyGl.draw); the others are read from RenderSystem by 1.21.5 itself.
+    public Uniform MODEL_VIEW_MATRIX, PROJECTION_MATRIX, TEXTURE_MATRIX, SCREEN_SIZE, COLOR_MODULATOR, LIGHT0_DIRECTION,
+            LIGHT1_DIRECTION, GLINT_ALPHA, FOG_START, FOG_END, FOG_COLOR, FOG_SHAPE, LINE_WIDTH, GAME_TIME;
+
     private final String name;
     private final VertexFormat format;
     private final ResourceLocation vertexId;
@@ -97,6 +102,20 @@ public class ShaderInstance implements AutoCloseable {
                 uniforms.put(n, new Uniform(n, type, defaults));
             }
         }
+        MODEL_VIEW_MATRIX = uniforms.get("ModelViewMat");
+        PROJECTION_MATRIX = uniforms.get("ProjMat");
+        TEXTURE_MATRIX = uniforms.get("TextureMat");
+        SCREEN_SIZE = uniforms.get("ScreenSize");
+        COLOR_MODULATOR = uniforms.get("ColorModulator");
+        LIGHT0_DIRECTION = uniforms.get("Light0_Direction");
+        LIGHT1_DIRECTION = uniforms.get("Light1_Direction");
+        GLINT_ALPHA = uniforms.get("GlintAlpha");
+        FOG_START = uniforms.get("FogStart");
+        FOG_END = uniforms.get("FogEnd");
+        FOG_COLOR = uniforms.get("FogColor");
+        FOG_SHAPE = uniforms.get("FogShape");
+        LINE_WIDTH = uniforms.get("LineWidth");
+        GAME_TIME = uniforms.get("GameTime");
         this.blend = json.has("blend") ? blend(json.getAsJsonObject("blend")) : null;
     }
 

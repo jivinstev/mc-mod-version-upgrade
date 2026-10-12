@@ -18,6 +18,7 @@ public class Uniform {
     private final UniformType type;
     private float[] floats;
     private int[] ints;
+    private boolean touched;
 
     Uniform(String name, UniformType type, float[] defaults) {
         this.name = name;
@@ -34,6 +35,13 @@ public class Uniform {
     }
 
     public String getName() { return name; }
+
+    /** True once the mod has written a value (a built-in uniform is then the mod's override, see LegacyGl.draw). */
+    boolean touched() { return touched; }
+
+    float[] floats() { return floats; }
+
+    void consume() { touched = false; }
     public UniformType getType() { return type; }
 
     public void set(float x) { put(x); }
@@ -56,6 +64,7 @@ public class Uniform {
     public void upload() {}
 
     private void put(float... v) {
+        touched = true;
         if (ints != null) {
             for (int i = 0; i < Math.min(ints.length, v.length); i++) ints[i] = (int) v[i];
         } else if (floats != null) {
@@ -64,6 +73,7 @@ public class Uniform {
     }
 
     private void putInts(int... v) {
+        touched = true;
         if (floats != null) {
             for (int i = 0; i < Math.min(floats.length, v.length); i++) floats[i] = v[i];
         } else if (ints != null) {
