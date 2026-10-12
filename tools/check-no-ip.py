@@ -152,7 +152,7 @@ def main():
     ap.add_argument("--names", default=None,
                     help="file of third-party mod names to forbid (lives in the PRIVATE repo). "
                          "Required when --strict is set.")
-    ap.add_argument("--push-range", nargs="+", metavar="REV", default=None,
+    ap.add_argument("--push-range", nargs=argparse.REMAINDER, metavar="REV", default=None,   # LAST: takes "--not --remotes" too
                     help="instead of the tree, name-check what a push would publish: the commit messages and "
                          "added lines of this git revision selection (e.g. NEW --not --remotes). Needs --names.")
     ap.add_argument("--strict", action="store_true",

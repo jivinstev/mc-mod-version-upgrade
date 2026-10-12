@@ -156,14 +156,18 @@ hook_case() {  # hook_case <wanted-exit> <label> <file-content> <commit-message>
    ( cd "$H" && printf '%s\n' "$3" > note.txt && git add -A && git commit -qm "$4" )
    local sha; sha="$(git -C "$H" rev-parse HEAD)"
    local base; base="$(git -C "$H" rev-parse HEAD~1)"
+   [ "${5:-}" = new ] && base=0000000000000000000000000000000000000000   # a branch the remote does not have yet
    ( cd "$H" && echo "refs/heads/x $sha refs/heads/x $base" | FORBIDDEN_NAMES_FILE="$H/../names.$$" .git/hooks/pre-push origin url >/dev/null 2>&1 )
    local got=$?
    if [ "$got" = "$1" ]; then echo "  PASS  $2 (exit $got)"; pass=$((pass+1))
    else echo "  FAIL  $2 -- wanted exit $1, got $got"; fail=$((fail+1)); fi
 }
 hook_case 0 "no forbidden name in the push passes"           "plain text"                      "plain commit"
+# (before any named commit: with no remote, a new branch's range is its WHOLE history)
+hook_case 0 "a NEW branch (no remote ref) with no name passes" "new branch text"              "new branch commit"  new
 hook_case 1 "a forbidden name in an ADDED line blocks"      "we ported $FAKE"          "innocent message"
 hook_case 1 "a forbidden name in a commit MESSAGE blocks"   "plain again"                     "port of ${FAKE,,}"
+hook_case 1 "a NEW branch carrying a name blocks"            "new $FAKE"                       "new branch named"   new
 rm -rf "$H" "$H/../names.$$"
 
 echo
