@@ -442,7 +442,9 @@ class Run:
             return {"stop": "the mixin audit checked no targets (wrong jar or tree?) -- not a pass",
                     "code": 13, "audit": lines[:8], "detail": lines[:4],
                     "choices": ["fix the audit's inputs in tools/fork-port.py and resume with --from-stage audit"]}
-        bad = [l for l in lines if re.search(r"mixin:|vanilla:|MISMATCH|no such", l)] or lines
+        # keep each mismatch WITH its header line (the mixin file and the annotated target): a "mixin:/vanilla:"
+        # pair alone does not say which file to fix -- measured, the first residue report could not be acted on
+        bad = [l for l in lines if l.strip() and not l.strip().startswith(("ok ", "checked ")) and "all targets" not in l] or lines
         return {"stop": f"{len([l for l in lines if 'mixin:' in l]) or len(bad)} mixin target(s) do not match vanilla",
                 "code": 13, "audit": bad, "detail": bad[:6],
                 "choices": ["retarget each mixin in a per-target overlay or with mixin_add (fork-versions step 5)",
