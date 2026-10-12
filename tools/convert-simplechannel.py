@@ -463,7 +463,7 @@ def normalise_mcreator(new, src, flags, report):
 
 
 def normalise_helper_channel(new, flags, report):
-    """X154: the channel registered through a BASE class's helpers (a Mekanism-lineage shape, Blood Magic's):
+    """X154: the channel registered through a BASE class's helpers (a shape several large tech and magic mods share):
         abstract class Base { protected abstract SimpleChannel getChannel(); public abstract void initialize();
             protected <MSG> void registerServerToClient(Class<MSG> type, enc, dec, consumer) {
                 this.getChannel().registerMessage(this.index++, type, enc, dec, consumer, Optional.of(NetworkDirection.PLAY_TO_CLIENT)); }

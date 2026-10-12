@@ -5730,7 +5730,7 @@ or reads the wrong mod id — each found on a popular mod, each reading as "this
   with no build still stops, and dependencies are wired before setup so that stop is cheap.
 - *One project per loader*: the dependency points at `<slug>` (Fabric) while the NeoForge build is `<slug>-forge`.
   Sibling slugs are tried before a dependency is called missing.
-- *A toml-only dependency id the full-text search cannot find* (`farmersdelight`): try it as a slug with the hyphens
+- *A toml-only dependency id the full-text search cannot find* (`kitchencore`): try it as a slug with the hyphens
   put back, then search it with underscores as spaces; a build is accepted only if its own toml declares the id.
 - *Single-quoted TOML is legal* (`modId = 'x'`); a reader that only takes double quotes misses the id.
 - *A multi-loader jar carries a toml and a `fabric.mod.json`*: the toml is the one the port runs on; the Fabric file
@@ -6274,10 +6274,10 @@ Groovy before setup with the honest reason: there is no Java source to port; a G
 **Pattern:** a Farmer's Delight addon whose `neoforge.mods.toml` declares only neoforge and minecraft, while the registry
 lists Farmer's Delight as required and the addon's block and item registries extend its classes · **Symptom:** for a
 target where the dependency has no build, X82's rule ("the toml is the authority") recorded it as "not what the jar's
-toml requires"; setup then parked the files importing `vectorwing.farmersdelight` as an optional integration -- which
+toml requires"; setup then parked the files importing `acmedev.kitchencore` as an optional integration -- which
 were `BlockRegistry` and `ItemRegistry` -- and the compile failed on the mod's own main class · **Fix:** before taking
 the toml's word, `port.py` asks the jar's classes: if any references a package named after the registry dependency
-(`farmers-delight` → `.../farmersdelight/...`), the dependency is required whatever the toml says, and the port stops
+(`kitchen-core` → `.../kitchencore/...`), the dependency is required whatever the toml says, and the port stops
 like any missing required dependency. The toml stays the authority for dependencies the code does not use (the case X82
 was written for: registry data copied from the other loader).
 
@@ -6438,11 +6438,11 @@ row). The GLFW handle accessor `Window.getWindow()` is `Window.handle()`, added 
 **X136. An add-on whose toml AND registry page both forget its parent mod.** A Farmer's Delight add-on's
 `mods.toml` declared only `forge` and `minecraft`, and the registry listed no dependencies, so neither the toml
 check nor the registry check (X117) had anything to fetch. The decompile then failed with
-`package vectorwing.farmersdelight.common.item does not exist`, and park-optional parked the add-on's core
+`package acmedev.kitchencore.common.item does not exist`, and park-optional parked the add-on's core
 food and pie classes as an "optional integration". `undeclared_code_deps` in `tools/port.py` now reads the
 package references in the mod's own classes, skipping compat/integration/datagen packages, the JDK, Minecraft,
 the loaders and the common libraries. Any segment named by three or more classes becomes a candidate mod id. The
-candidates are SOFT, because a scan of 327 cached jars showed most of them are author names (`vectorwing`,
+candidates are SOFT, because a scan of 327 cached jars showed most of them are author names (`acmedev`,
 `simibubi`) or bundled libraries (`registrate`, `catnip`). A candidate is wired into `libs/<mc>/` only when a
 registry build exists whose own toml declares exactly that id. It is never written into the port's toml, and it
 never causes a dependency stop. park-optional now keeps code for every mod wired into `libs/`.
@@ -6610,8 +6610,8 @@ loads META-INF/accesstransformer.cfg by default. Separately, `ServerCommonPacket
 sending a raw packet through `player.connection.connection`) is protected, and a member row rewrites it to the public
 `getConnection()`.
 
-**X154. A SimpleChannel registered through a BASE class's helpers.** This is the Mekanism-lineage shape that Blood
-Magic uses: an abstract `BasePacketHandler` with `getChannel()`, `registerServerToClient/ClientToServer(Class,
+**X154. A SimpleChannel registered through a BASE class's helpers.** This is a shape several large tech and magic
+mods share: an abstract `BasePacketHandler` with `getChannel()`, `registerServerToClient/ClientToServer(Class,
 encoder, decoder, consumer)` wrapping `registerMessage(..., Optional.of(NetworkDirection.X))`, and send helpers on
 `this.getChannel()`. A subclass holds `INSTANCE = createChannel(rl)` and an `initialize()` of helper calls, and the
 mod calls `packetHandler.initialize()` on an instance. convert-simplechannel saw no channel at all (98 errors) and
@@ -6624,7 +6624,7 @@ only flagged it. `normalise_helper_channel` now rewrites it into the shape the c
   (`getPlayer(Supplier<Context>)`) take `IPayloadContext`, and its `this.getChannel().send(..)` calls become
   PacketDistributor calls.
 
-On Blood Magic it converts all 16 packets, the registration and 11 sends. Two send targets are new on the way:
+On the mod that surfaced it, it converts all 16 packets, the registration and 11 sends. Two send targets are new on the way:
 DIMENSION with a bare `ResourceKey<Level>` (the server's level for it) and TRACKING_CHUNK (the chunk's level and
 pos).
 
@@ -6767,7 +6767,7 @@ cristellib's class. A port carrying an older copy of prepare-sources would read 
 table should be recomposed together with the tool.
 
 **X170. X168's stubs must not stand in for a class that carries state.** Measured over the full rerun, 56 mods got
-stubs and 55 improved (Create Steam 'n' Rails 2875 -> 669, Diet 110 -> 57). The one that got worse is the lesson: its
+stubs and 55 improved (one from 2875 to 669 errors, another from 110 to 57). The one that got worse is the lesson: its
 parked class was a Cloth AutoConfig POJO (`public boolean villagersEatMelons = true;`, nested sub-configs), read field by
 field from main code. The stub kept no fields, so each read became its own error (37 -> 212). Worse, a stub that DID
 keep fields with type defaults would have silently turned `true` into `false`: for a data class, the values are the

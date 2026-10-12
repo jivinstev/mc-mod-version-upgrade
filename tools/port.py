@@ -981,7 +981,7 @@ def loader_siblings(slug):
 
 def slug_guesses(mid):
     """Registry slugs a mod id commonly corresponds to: itself, underscores as hyphens, and one hyphen inserted
-    at each word boundary of a run-together id (farmersdelight -> farmers-delight)."""
+    at each word boundary of a run-together id (kitchencore -> kitchen-core)."""
     out = [mid, mid.replace("_", "-")]
     if "_" not in mid and len(mid) >= 8:
         out += [mid[:i] + "-" + mid[i:] for i in range(3, len(mid) - 2)]
@@ -1025,7 +1025,7 @@ INTEGRATION_DIRS = re.compile(r"/(compat|compatibility|integration|integrations|
 
 
 def undeclared_code_deps(jar, declared, at_least=3):
-    """X136: mod ids the code's OWN classes name by package (vectorwing/farmersdelight/... -> farmersdelight) that the
+    """X136: mod ids the code's OWN classes name by package (acmedev/kitchencore/... -> kitchencore) that the
     toml does not declare at all -- an add-on whose author forgot the dependency in mods.toml (and on the registry
     page, so the registry check cannot see it either). A segment counts only when classes outside the mod's
     integration/datagen packages reference it at least `at_least` times; whether it really is a mod is settled later
@@ -1145,8 +1145,8 @@ def kotlin_share(jar):
 
 
 def jar_uses(jar, dep):
-    """X117: does the mod's own code reference a package named after `dep` (a registry slug, e.g. farmers-delight ->
-    .../farmersdelight/...)? A toml that forgot a dependency the code imports does not make that dependency optional."""
+    """X117: does the mod's own code reference a package named after `dep` (a registry slug, e.g. kitchen-core ->
+    .../kitchencore/...)? A toml that forgot a dependency the code imports does not make that dependency optional."""
     key = norm(dep).encode()
     if len(key) < 4:
         return False
@@ -1528,7 +1528,7 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
                 continue
             hit = None
             near.clear()
-            # most mod ids are their Modrinth slug with the hyphens taken out (farmersdelight -> farmers-delight),
+            # most mod ids are their Modrinth slug with the hyphens taken out (kitchencore -> kitchen-core),
             # and a full-text search for the bare id can miss the mod entirely: try those slugs first. fetch()
             # still accepts a build only if its own toml declares `mid`, so a wrong guess costs a lookup, nothing more.
             for slug in slug_guesses(mid):
@@ -1558,7 +1558,7 @@ def wire_deps(work, prov, pid, file_id, mcs, toml_required=(), toml_authority=Fa
             names.append(f"{hit} (required by the jar's toml as {mid})" if hit
                          else f"{mid} (REQUIRED by the jar's toml; no {mc} build found that declares it"
                               + (f"; nearest: {near[0]} -- a renamed mod id?" if near else "") + ")")
-        # X136: a dependency the code imports by package (vectorwing/farmersdelight/...) that neither the toml nor the
+        # X136: a dependency the code imports by package (acmedev/kitchencore/...) that neither the toml nor the
         # registry names. Soft: wired only when a build whose own toml declares exactly that id exists (most guesses
         # are author names or bundled libraries, and fail that test), never a stop, never written into the port's toml.
         for mid in sorted(set(inferred) - declared - set(toml_required) - PLATFORM_IDS):
@@ -1688,16 +1688,16 @@ def self_check():
             z.writestr("a/C.class", b"\xca\xfe org/codehaus/groovy/vmplugin/v8/IndyInterface y")
         ok &= groovy_share(pathlib.Path(d, "g.jar")) == (2, 3) and groovy_share(pathlib.Path(d, "a.jar")) == (0, 1)
         with zipfile.ZipFile(f"{d}/s.jar", "w") as z:     # X117: the code names the registry dependency's package
-            z.writestr("org/x/seed/Reg.class", b"\xca\xfe Lvectorwing/farmersdelight/common/block/PieBlock; x")
-        ok &= jar_uses(pathlib.Path(d, "s.jar"), "farmers-delight") and not jar_uses(pathlib.Path(d, "s.jar"), "geckolib")
+            z.writestr("org/x/seed/Reg.class", b"\xca\xfe Lacmedev/kitchencore/common/block/PieBlock; x")
+        ok &= jar_uses(pathlib.Path(d, "s.jar"), "kitchen-core") and not jar_uses(pathlib.Path(d, "s.jar"), "geckolib")
         with zipfile.ZipFile(f"{d}/x.jar", "w") as z:     # X136: an add-on whose toml forgot its parent mod
             for i in range(4):
-                z.writestr(f"com/scouter/sd/items/I{i}.class", b"\xca\xfe4vectorwing/farmersdelight/common/item/ConsumableItem x"
-                           + b" Lnet/minecraft/world/item/Item; Lcom/scouter/sd/Other;")
+                z.writestr(f"com/example/sd/items/I{i}.class", b"\xca\xfe4acmedev/kitchencore/common/item/ConsumableItem x"
+                           + b" Lnet/minecraft/world/item/Item; Lcom/example/sd/Other;")
             for i in range(5):                            # an optional integration lives in a compat package
-                z.writestr(f"com/scouter/sd/compat/C{i}.class", b"\xca\xfe Lvazkii/botania/api/BotaniaAPI; x")
-        ok &= undeclared_code_deps(pathlib.Path(d, "x.jar"), ["forge"]) == ["farmersdelight", "vectorwing"]
-        ok &= undeclared_code_deps(pathlib.Path(d, "x.jar"), ["farmersdelight"]) == ["vectorwing"]
+                z.writestr(f"com/example/sd/compat/C{i}.class", b"\xca\xfe Lvazkii/botania/api/BotaniaAPI; x")
+        ok &= undeclared_code_deps(pathlib.Path(d, "x.jar"), ["forge"]) == ["acmedev", "kitchencore"]
+        ok &= undeclared_code_deps(pathlib.Path(d, "x.jar"), ["kitchencore"]) == ["acmedev"]
         with zipfile.ZipFile(f"{d}/u.jar", "w") as z:
             for i, b in enumerate((b"net/minecraftforge/x", b"net/minecraftforge/y", b"net/neoforged/a", b"net/neoforged/b",
                                    b"net/fabricmc/api", b"net/minecraft/class_123")):
@@ -1715,7 +1715,7 @@ def self_check():
         m = read_jar_meta(pathlib.Path(d, "m.jar"))
         ok &= m["modId"] == "mymod" and m["displayName"] == "My Mod" and jar_toml(pathlib.Path(d, "m.jar"))[0] == {"mymod"}
     ok &= loader_siblings("x-fabric") == ["x-fabric", "x", "x-forge", "x-neoforge"] and loader_siblings(123)[0] == "123"
-    ok &= "farmers-delight" in slug_guesses("farmersdelight") and slug_guesses("my_mod")[:2] == ["my_mod", "my-mod"]
+    ok &= "kitchen-core" in slug_guesses("kitchencore") and slug_guesses("my_mod")[:2] == ["my_mod", "my-mod"]
     t, c = _resugar_constructors("   T f() {\n      Pair var1 = new Pair;\n      String a = g(x);\n"
                                  "      var1./* " + VF_MARK + " Unable to resugar constructor */<init>(a, h(\")\", switch (y) { case 1 -> 2; }));\n"
                                  "      return var1;\n   }\n")
