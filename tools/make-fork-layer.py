@@ -5,6 +5,7 @@
     make-fork-layer.py init        --repo <fork clone> [--mv-package net.example.mv]
     make-fork-layer.py add-target  --repo <fork clone> --target 1.21.4 [--neo 21.4.158] [--inherits 1.21.3]
                                    [--java 21] [--prop geckolib_version=4.8.5 ...] [--substitute a:b=a:c ...]
+                                   [--direct]
     make-fork-layer.py sync-shared --repo <fork clone> [--check]
     make-fork-layer.py versions    [--refresh]
     make-fork-layer.py --self-check
@@ -17,6 +18,11 @@ the GeckoLib version from that file.
 The shared library (templates/fork-layer/shared/<t>/: a rename table every fork inherits plus helper classes such
 as a 1.21.1-API ShaderInstance on 1.21.2's shader programs) is copied into the fork by `sync-shared`, with the
 fork's helper package substituted; `--check` fails when the fork's copy drifted from the migrator's.
+
+`add-target --direct` is for a fork that jumps (1.21.1 -> 1.21.11 without the middle targets): the target inherits
+nothing, and `shared_chain=` in its target.properties (filled from versions.json: every targeted version above the
+base up to this one) makes `layer.py prepare` still apply the shared rename tables and helpers of the versions in
+between, newest first -- the same order a hop-by-hop `inherits` chain has. Without --direct nothing changes.
 
 The layer lives on the fork's `neoforge-1.21.x` branch, which is `neoforge-1.21.1` plus a .multiversion/
 directory and ONE commented hook line appended to the authors' build.gradle (design: issue #49):
@@ -101,8 +107,27 @@ def shared_files(repo, target):
     return out
 
 
+def shared_chain_names(repo):
+    """Versions named by any target's `shared_chain=` key (the direct-jump targets): their shared library is installed too."""
+    out = set()
+    tdir = repo / ".multiversion/targets"
+    for p in sorted(tdir.glob("*/target.properties")) if tdir.is_dir() else []:
+        m = re.search(r"(?m)^shared_chain\s*=\s*(.*?)\s*$", p.read_text(encoding="utf-8"))
+        if m:
+            out |= {x.strip() for x in m.group(1).split(",") if x.strip()}
+    return out
+
+
+def direct_chain(target):
+    """The versions.json lines a direct jump to `target` takes the shared library of: targeted (stable) lines above the
+    base, up to and including the target, oldest first."""
+    base = versions()["base"]
+    return [l["mc"] for l in versions()["lines"]
+            if l["stable"] and mc_key(base) < mc_key(l["mc"]) <= mc_key(target)]
+
+
 def sync_shared(repo, check=False):
-    targets = sorted(p.name for p in (repo / ".multiversion/targets").iterdir() if p.is_dir()) \
+    targets = sorted({p.name for p in (repo / ".multiversion/targets").iterdir() if p.is_dir()} | shared_chain_names(repo)) \
         if (repo / ".multiversion/targets").is_dir() else []
     want = {}
     for t in targets:
@@ -188,7 +213,7 @@ def add_target(repo, a):
     a.java = a.java or ln.get("java", 21)
     if ln.get("geckolib") and "geckolib_version" in gradle_props(repo) and not any(p.startswith("geckolib_version=") for p in a.prop):
         a.prop = [*a.prop, f"geckolib_version={ln['geckolib']}"]
-    if a.inherits is None:      # the nearest lower target the fork already has
+    if a.inherits is None and not getattr(a, "direct", False):      # the nearest lower target the fork already has
         have = {p.name for p in (mv / "targets").iterdir() if p.is_dir()}
         order = [l["mc"] for l in versions()["lines"]]
         lower = [m for m in order[:order.index(a.target)] if m in have]
@@ -202,6 +227,8 @@ def add_target(repo, a):
     lines += [f"toml.minecraft={mc_range}", f"toml.neoforge={neo_range}", f"java_version={a.java}"]
     if a.inherits:
         lines.append(f"inherits={a.inherits}")
+    if getattr(a, "direct", False):     # a jump: still pull the shared library of every targeted version in between
+        lines.append("shared_chain=" + ",".join(direct_chain(a.target)))
     lines += [f"substitute.{s}" for s in a.substitute]
     if mc_key(a.target) >= mc_key("1.21.6"):   # CATALOG V79: @OnlyIn strips nothing from 1.21.6 and fails a dev run
         lines.append("strip_onlyin=true")
@@ -215,7 +242,12 @@ def add_target(repo, a):
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(at, dst)
     print(f"add-target: {a.target} (minecraft {mc_range}, neoforge {neo_range}, java {a.java}"
-          f"{', inherits ' + a.inherits if a.inherits else ''})")
+          f"{', inherits ' + a.inherits if a.inherits else ''}"
+          f"{', direct: shared libraries ' + ' '.join(direct_chain(a.target)) if getattr(a, 'direct', False) else ''})")
+    lp = mv / "tools/layer.py"
+    if getattr(a, "direct", False) and lp.is_file() and "shared_chain" not in lp.read_text(encoding="utf-8"):
+        print("add-target: WARNING .multiversion/tools/layer.py predates shared_chain and would IGNORE it; "
+              "run tools/fork-port.py (its setup stage replaces a verbatim older copy) or copy templates/fork-layer/tools/layer.py")
     sync_shared(repo)
 
 
@@ -256,6 +288,19 @@ def self_check():
             ok = False; print("FAIL 1.21.4 defaults from versions.json")
         if sync_shared(repo, check=True) != 0:
             ok = False; print("FAIL shared library drift right after sync")
+        # --direct: no inherits, shared_chain from versions.json, and the middle versions' shared libraries installed;
+        # without it the target.properties has no shared_chain (default off)
+        if "shared_chain" in p4 or "shared_chain" in p:
+            ok = False; print("FAIL a hop target got shared_chain")
+        add_target(repo, argparse.Namespace(target="1.21.11", neo=None, inherits=None, java=None, prop=[], substitute=[], direct=True))
+        pd = (repo / ".multiversion/targets/1.21.11/target.properties").read_text(encoding="utf-8")
+        want = "shared_chain=1.21.3,1.21.4,1.21.5,1.21.8,1.21.10,1.21.11"
+        if want not in pd or "inherits=" in pd:
+            ok = False; print("FAIL --direct properties:", pd)
+        if not (repo / ".multiversion/shared/1.21.8/renames.tsv").is_file() or sync_shared(repo, check=True) != 0:
+            ok = False; print("FAIL --direct did not install the intermediate shared libraries")
+        if direct_chain("1.21.5") != ["1.21.3", "1.21.4", "1.21.5"]:
+            ok = False; print("FAIL direct_chain skips beta-only lines and stops at the target")
     print("self-check:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -268,6 +313,9 @@ def main():
     p = sub.add_parser("add-target"); p.add_argument("--repo", required=True)
     p.add_argument("--target", required=True); p.add_argument("--neo")
     p.add_argument("--inherits"); p.add_argument("--java", type=int)
+    p.add_argument("--direct", action="store_true",
+                   help="a jump: no inherits, and shared_chain= lists every targeted version up to this one so layer.py "
+                        "still applies their shared libraries (default off: one hop from the nearest lower target)")
     p.add_argument("--prop", action="append", default=[], help="k=v passed as -Pk=v")
     p.add_argument("--substitute", action="append", default=[], help="group:name=group:name:version")
     p = sub.add_parser("sync-shared"); p.add_argument("--repo", required=True); p.add_argument("--check", action="store_true")

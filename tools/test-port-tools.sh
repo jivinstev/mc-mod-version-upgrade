@@ -252,7 +252,7 @@ done
 
 echo "13. file-loop.py (model-free parts: load-crash scans, supertype filter, generated-path mapping, batching)"
 out="$(python3 tools/file-loop.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching" \
+grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching, rows_first (layer mode: a worker row is tried before its overlay is kept; a dropped overlay's directory is recreated)" \
   || bad "file-loop self-check: $out"
 
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
@@ -383,13 +383,13 @@ grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CA
   && ok "the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count" || bad "the Gradle error cap disagrees between its four copies"
 
 out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges, add-target --direct writes shared_chain (default off)" \
   || bad "make-fork-layer self-check: $out"
 out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest, a direct jump (shared_chain) prepares the hop-by-hop chain's tree" \
   || bad "layer.py self-check: $out"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, the generated moves table (no duplicate froms, block closed), residue report, STOP block, layer.py patch" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py" \
   || bad "fork-port self-check: $out"
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
@@ -463,12 +463,79 @@ grep -q '^newest=1.21.11$' "$T/gho" && grep -q '"1.21.8"' <<<"$out" && ! grep -q
   && ok "layer-ci plan: newest target is 1.21.11 (not the lexically last 1.21.8) and it is not in the compile matrix" || bad "layer-ci plan: $out $(cat "$T/gho")"
 out="$(python3 tools/layer-ci.py plan --repo "$T/nolayer" 2>&1)"
 grep -q '"layer": "false"' <<<"$out" && ok "layer-ci plan: a fork without .multiversion/ plans no layer job" || bad "layer-ci plan (no layer): $out"
+# CI policy: full_gates is opt-in (default none), a typo is an error, and a single-version fork never sees it
+out="$(python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho0" 2>&1)"
+grep -q '^has_full=false$' "$T/gho0" && ok "layer-ci plan: no ci.properties means no extra full-gate target (the default)" || bad "layer-ci plan default has_full: $out"
+printf 'full_gates=1.21.8\n' > "$T/lay/.multiversion/ci.properties"
+python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho1" >/dev/null 2>&1
+grep -q '^has_full=true$' "$T/gho1" && grep -q '^full_matrix=.*"t":"1.21.8"' "$T/gho1" && ! grep -q '"t":"1.21.11"' <(grep '^full_matrix=' "$T/gho1") \
+  && ok "layer-ci plan: full_gates=1.21.8 gets the released middle target a full-gate job" || bad "layer-ci plan full_gates: $(cat "$T/gho1")"
+printf 'full_gates=1.21.9\n' > "$T/lay/.multiversion/ci.properties"
+python3 tools/layer-ci.py plan --repo "$T/lay" >/dev/null 2>&1; [ $? != 0 ] && ok "layer-ci plan: a full_gates typo fails the plan instead of meaning 'no gates'" || bad "full_gates typo accepted"
+rm "$T/lay/.multiversion/ci.properties"
+mkdir -p "$T/single"; printf 'full_gates=1.21.4\n' > "$T/single/ci.properties"
+python3 tools/layer-ci.py plan --repo "$T/single" --github-output "$T/gho2" >/dev/null 2>&1
+grep -q '^layer=false$' "$T/gho2" && grep -q '^has_full=false$' "$T/gho2" && ok "layer-ci plan: a single-version fork (no .multiversion/) plans nothing, whatever files it has" || bad "single-version plan: $(cat "$T/gho2")"
+# one run per checkout: a live holder refuses a second layer run (exit 14); a single-version run takes no lock at all
+mkdir -p "$T/lk/build" "$T/lk/.multiversion/targets/1.21.4" "$T/lk/.multiversion/tools"; : > "$T/lk/.multiversion/tools/layer.py"
+# the holder is a Python process writing its OWN pid: under Git Bash on Windows `$!` is an MSYS pid, not the native pid
+# the lock code checks, so a shell-written pid reads as dead there
+python3 -c 'import json,os,sys,time; open(sys.argv[1],"w",encoding="utf-8").write(json.dumps({"pid": os.getpid(), "tool": "fork-port.py", "target": "1.21.3", "started": "2026-01-01T00:00:00Z"})); time.sleep(30)' "$T/lk/build/.fork-port.lock" & HOLDJOB=$!
+for _ in $(seq 50); do [ -s "$T/lk/build/.fork-port.lock" ] && break; sleep 0.1; done
+HOLD="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["pid"])' "$T/lk/build/.fork-port.lock")"
+out="$(python3 tools/ci-gates.py --repo "$T/lk" --modid m --mc 1.21.4 --work-dir "$T/lkw" 2>&1)"; code=$?
+[ $code = 14 ] && grep -q "$HOLD" <<<"$out" && ok "ci-gates --mc: a second run on a busy checkout is refused (exit 14) naming the holder" || bad "ci-gates lock exit $code: $out"
+out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
+[ $code = 14 ] && ok "fork-port: a second run on a busy checkout is refused (exit 14)" || bad "fork-port lock exit $code: $out"
+python3 tools/ci-gates.py --repo "$T/lk" --modid m --work-dir "$T/lkw2" >/dev/null 2>&1; code=$?
+[ $code != 14 ] && grep -q "\"pid\": $HOLD" "$T/lk/build/.fork-port.lock" && ok "ci-gates without --mc (a single-version fork) ignores the lock entirely" || bad "single-version ci-gates touched the lock (exit $code)"
+kill $HOLDJOB 2>/dev/null; wait $HOLDJOB 2>/dev/null
+out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
+[ $code = 10 ] || [ $code = 2 ] && [ ! -e "$T/lk/build/.fork-port.lock" ] && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
+
+out="$(python3 tools/layer-sync.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "layer-sync: classification (untouched / touch-up / rework), overlay shadowing, table, stop block" || bad "layer-sync self-check: $out"
+out="$(python3 tools/test-layer-sync.py 2>&1)"
+grep -q 'test-layer-sync: OK' <<<"$out" && ok "keep-current on a layer fork: merge commit (no force), per-target class + table, rework stops with RESIDUE (exit 10), single-version fork untouched" || bad "test-layer-sync: $out"
+out="$(python3 tools/test-port-publish.py 2>&1)"
+grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; layer forks publish one file per green target, refuse non-green / stale / unpublished-dependency targets" || bad "test-port-publish: $out"
+out="$(python3 tools/fix-ledger.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fix-ledger: a ledger without a layer section renders as before; the layer table renders and validates" || bad "fix-ledger self-check: $out"
+if command -v gradle >/dev/null 2>&1; then
+  G="$T/gj"; mkdir -p "$G"
+  printf "rootProject.name = 'scratch'\n" > "$G/settings.gradle"
+  cat > "$G/build.gradle" <<'GR'
+plugins { id 'java' }
+version = '1.0'
+tasks.register('embedded', Jar) { archiveFileName.set('helper.jar'); destinationDirectory = layout.buildDirectory.dir('embedded') }
+tasks.register('mrJar', Jar) { archiveFileName.set("scratch-${project.version}_mr.jar") }
+tasks.jar { archiveFileName.set("scratch-${project.version}_base.jar"); destinationDirectory = layout.buildDirectory.dir('intermediates') }
+tasks.register('plain', Jar) { }
+def mvTarget = project.findProperty('mc')?.toString()
+if (mvTarget == null) return
+layout.buildDirectory = file("build/mc${mvTarget}")
+GR
+  sed -n '/BEGIN-JAR-NAMES/,/END-JAR-NAMES/p' templates/fork-layer/layer.gradle >> "$G/build.gradle"
+  (cd "$G" && gradle -q --offline mrJar jar plain embedded >/dev/null 2>&1; gradle -q --offline mrJar jar plain embedded -Pmc=1.21.4 >/dev/null 2>&1)
+  base="$(cd "$G/build" && find . -name '*.jar' -not -path './mc*' | sort | tr '\n' ' ')"
+  mc="$(cd "$G/build/mc1.21.4" && find . -name '*.jar' | sort | tr '\n' ' ')"
+  [ "$base" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0.jar ./libs/scratch-1.0_mr.jar " ] \
+    && [ "$mc" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0-mc1.21.4.jar ./libs/scratch-1.0_mr-mc1.21.4.jar " ] \
+    && ok "layer.gradle: with -Pmc the jars in libs are named -mc<target>; without it, and for embedded/intermediate jars, names are unchanged" \
+    || bad "layer.gradle jar names: base=[$base] mc=[$mc]"
+fi
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script" || bad "port-ci self-check: $out"
 python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"
 import re,sys
 src=open("tools/ci-gates.py").read()
 assert 'if q and q != "none"' in src
+PY
+python3 - <<'PY' && ok "shared tables: every '#!exhaustive' is closed by '#!strict' (a chain ending at any version loads)" || bad "a shared renames.tsv leaves '#!exhaustive' open"
+import glob,sys
+for f in sorted(glob.glob("templates/fork-layer/shared/*/renames.tsv")):
+    marks=[l.strip().split()[0] for l in open(f) if l.startswith(("#!exhaustive","#!strict"))]
+    if marks and marks[-1]!="#!strict": sys.exit(f"{f}: unclosed")
 PY
 
 echo

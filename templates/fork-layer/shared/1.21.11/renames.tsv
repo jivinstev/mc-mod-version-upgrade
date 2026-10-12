@@ -50,3 +50,4 @@ re:(@Inject\(method = "setup"[\s\S]{0,200}?private void [\w$]+\()BlockGetter (\w
 # type rows above can reach. The two that matter for a client mod: RenderType moved into `rendertype`, ResourceLocation is Identifier.
 re:Lnet/minecraft/client/renderer/RenderType;	Lnet/minecraft/client/renderer/rendertype/RenderType;
 re:Lnet/minecraft/resources/ResourceLocation;	Lnet/minecraft/resources/Identifier;
+#!strict

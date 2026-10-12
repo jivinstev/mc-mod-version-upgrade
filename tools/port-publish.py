@@ -17,6 +17,15 @@ The fork carries its publishing config as .github/port-publish.json (written by 
    "modrinth": {"slug": "...", "asset": "_mr.jar"},
    "curseforge": {"project_id": 123456, "slug": "...", "asset": "_cf.jar"}}
 
+A MULTI-VERSION fork (the opt-in `.multiversion/` layer, tools/make-fork-layer.py) also adds a "layer" section:
+
+  "layer": {"branch": "neoforge-1.21.x", "targets": ["1.21.4", ...optional: default every green target],
+            "released": ["1.21.8", ...targets whose full gates were run and recorded in their GATES.md]}
+
+and then `publish` uploads ONE FILE PER GREEN TARGET (see publish_layer). Both are needed: the tag's commit must
+carry `.multiversion/base.properties` AND the config must have the "layer" section. A single-version fork has
+neither, and every code path below that is not named *layer* is byte-for-byte what it was.
+
 `setup` writes that file and the project page from data the port already has (neoforge.mods.toml, the
 author's own project on Modrinth, the tested dependencies in .github/port-install.json, the fix ledgers), and
 prints the fields to paste into CurseForge's create-project form (CurseForge has no API for creating one).
@@ -133,9 +142,10 @@ def minecraft_of(tag):
     return m.group(1)
 
 
-def version_of(tag, modid):
+def version_of(tag, modid, mc=None):
+    """mc: the Minecraft version to name (a layer target's); default the tag's own."""
     v = re.sub(r"-mc\d+\.\d+(?:\.\d+)?", "+mc", tag[len(modid) + 1:] if tag.startswith(modid + "-") else tag)
-    v = v.replace("+mc", f"+{minecraft_of(tag)}")
+    v = v.replace("+mc", f"+{mc or minecraft_of(tag)}")
     if len(v) > 32:                      # Modrinth's version_number limit
         raise SystemExit(f"{tag}: version number {v!r} is over 32 characters")
     return v
@@ -169,8 +179,10 @@ def published(body):
     return {p: r for p, r in MARK_RE.findall(body or "")}
 
 
-def gate(repo, cfg, tag, release, manual=False):
-    """Every reason not to publish this release; empty means go."""
+def gate(repo, cfg, tag, release, manual=False, layer_branch=None):
+    """Every reason not to publish this release; empty means go. layer_branch: a multi-version release is tagged on
+    the layer branch, not the port branch, so "built from this branch" is judged against origin/<layer_branch>, and
+    the dependency check is per TARGET (publish_layer), not per release."""
     why = []
     if not cfg.get("permission", "").startswith("https://"):
         why.append("no permission link in the config -- publishing needs the authors' agreement on record")
@@ -182,10 +194,13 @@ def gate(repo, cfg, tag, release, manual=False):
         why.append(f"{tag} is still a pre-release -- a person plays it and promotes it first")
     if (release.get("author") or {}).get("login") != "github-actions[bot]":
         why.append(f"{tag} was not published by this fork's CI")
-    if git(repo, "merge-base", "--is-ancestor", f"refs/tags/{tag}", "HEAD").returncode != 0:
+    if layer_branch:
+        if git(repo, "merge-base", "--is-ancestor", f"refs/tags/{tag}", f"refs/remotes/origin/{layer_branch}").returncode != 0:
+            why.append(f"{tag} is not an ancestor of origin/{layer_branch} (the layer branch)")
+    elif git(repo, "merge-base", "--is-ancestor", f"refs/tags/{tag}", "HEAD").returncode != 0:
         why.append(f"{tag} is not an ancestor of the checked-out branch")
     why += ledger_errors(cfg, tag)
-    for d in cfg.get("dependencies", []):
+    for d in ([] if layer_branch else cfg.get("dependencies", [])):
         if d.get("port") and d.get("type") == "required":
             dtag = pinned_dependency_tag(repo, d["port"])
             if not dtag:
@@ -208,14 +223,14 @@ def platforms(cfg):
 
 # ---------------------------------------------------------------- release notes
 
-def notes(cfg, tag, release, repo_slug):
+def notes(cfg, tag, release, repo_slug, mc=None):
     """The changelog players see. Deliberately says nothing about defects in the original: bugs are tracked in the
     fork's GitHub issues, and a public page listing the original's bugs reads as disparaging the authors whose
     work this is. Only differences a player would notice ("differences" in the config) are stated, neutrally."""
     body = release.get("body") or ""
     played = re.search(r"Played by @[^\n]*", body)
     out = [f"**Unofficial community port** of {cfg.get('original_name', 'the original mod')} to NeoForge "
-           f"{minecraft_of(tag)}, based on the original's version {version_of(tag, cfg.get('modid', '')).split('+')[0]}.", ""]
+           f"{mc or minecraft_of(tag)}, based on the original's version {version_of(tag, cfg.get('modid', '')).split('+')[0]}.", ""]
     diffs = cfg.get("differences", [])
     if diffs:
         out += ["Differences from the original:", *[f"- {d}" for d in diffs], ""]
@@ -280,17 +295,23 @@ def dep_entries(cfg, plat):
     return out
 
 
-def modrinth_version(cfg, tag, release, text, dry):
+def modrinth_version(cfg, tag, release, text, dry, mc=None, asset=None, dep_versions=None):
+    """mc / asset / dep_versions are a layer target's (publish_layer); a single-version publish passes none."""
     mr = cfg["modrinth"]
+    mc = mc or minecraft_of(tag)
     proj = modrinth("GET", f"/project/{mr['slug']}")
     have = {v["version_number"] for v in modrinth("GET", f"/project/{proj['id']}/version") or []}
-    number = version_of(tag, cfg.get("modid", ""))
+    number = version_of(tag, cfg.get("modid", ""), mc)
     if number in have:
         return proj, {"id": "existing", "version_number": number}
-    asset = pick_asset(release, mr.get("asset", ""))
+    asset = asset or pick_asset(release, mr.get("asset", ""))
     deps = [{"project_id": modrinth("GET", f"/project/{s}")["id"], "dependency_type": t} for s, t in dep_entries(cfg, "modrinth")]
-    data = {"project_id": proj["id"], "name": f"{number} (NeoForge {minecraft_of(tag)})", "version_number": number,
-            "changelog": text, "dependencies": deps, "game_versions": [minecraft_of(tag)], "version_type": "release",
+    for d in deps if dep_versions else []:        # a layer target pins the dependency's version built for the same Minecraft
+        pinned = dep_versions.get(d["project_id"])
+        if pinned:
+            d["version_id"] = pinned
+    data = {"project_id": proj["id"], "name": f"{number} (NeoForge {mc})", "version_number": number,
+            "changelog": text, "dependencies": deps, "game_versions": [mc], "version_type": "release",
             "loaders": ["neoforge"], "featured": True, "file_parts": ["file"], "primary_file": "file"}
     if dry:
         print("modrinth version:", json.dumps({**data, "changelog": "<notes>", "file": asset["name"]}, indent=1))
@@ -310,11 +331,12 @@ def curseforge_ids(mc):
     return mcid + loader
 
 
-def curseforge_file(cfg, tag, release, text, dry):
+def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
     cf = cfg["curseforge"]
-    asset = pick_asset(release, cf.get("asset", ""))
+    mc = mc or minecraft_of(tag)
+    asset = asset or pick_asset(release, cf.get("asset", ""))
     kinds = {"required": "requiredDependency", "optional": "optionalDependency"}
-    meta = {"changelog": text, "changelogType": "markdown", "displayName": f"{version_of(tag, cfg.get('modid', ''))} (NeoForge {minecraft_of(tag)})",
+    meta = {"changelog": text, "changelogType": "markdown", "displayName": f"{version_of(tag, cfg.get('modid', ''), mc)} (NeoForge {mc})",
             "releaseType": "release",
             "relations": {"projects": [{"slug": s, "type": kinds.get(t, "requiredDependency")}
                                        for s, t in dep_entries(cfg, "curseforge")]}}
@@ -322,9 +344,272 @@ def curseforge_file(cfg, tag, release, text, dry):
         print("curseforge file:", json.dumps({**meta, "changelog": "<notes>", "file": asset["name"],
                                               "project_id": cf["project_id"]}, indent=1))
         return None
-    meta["gameVersions"] = curseforge_ids(minecraft_of(tag))
+    meta["gameVersions"] = curseforge_ids(mc)
     body, h = multipart({"metadata": json.dumps(meta)}, {"file": (asset["name"], download(asset), "application/java-archive")})
     return curseforge("POST", f"/projects/{cf['project_id']}/upload-file", body, h)
+
+
+
+# ---------------------------------------------------------------- multi-version (layer) releases
+# Opt-in twice over: the config has a "layer" section AND the tag's commit carries .multiversion/ (the layer
+# branch). Nothing here runs for a single-version fork -- publish() asks layer_of() first and, on None, takes the
+# unchanged single-version path.
+
+GATES_DOC = re.compile(r"^((?!src/)[^\n]*\.md|LICENSE[^/]*|\.github/.*)$")     # nothing a player's jar contains
+
+
+def mc_key(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.findall(r"\d+|[A-Za-z]+", v))
+
+
+def props_of(text):
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def layer_of(repo, tag, cfg):
+    """None = a single-version publish. Else {'base': mc, 'targets': [mc, ... oldest first], 'branch': ..., 'commit': sha}."""
+    lc = cfg.get("layer")
+    if not lc:
+        return None
+    r = git(repo, "show", f"{tag}:.multiversion/base.properties")
+    if r.returncode != 0:
+        return None
+    base = props_of(r.stdout).get("minecraft_version")
+    ls = git(repo, "ls-tree", "-d", "--name-only", f"{tag}:.multiversion/targets/")
+    targets = sorted((n.strip() for n in ls.stdout.splitlines() if n.strip()), key=mc_key) if ls.returncode == 0 else []
+    return {"base": base, "targets": targets, "branch": lc.get("branch"),
+            "commit": git(repo, "rev-parse", f"{tag}^{{commit}}").stdout.strip()}
+
+
+def layer_chain(repo, tag, t):
+    out = []
+    while t and t not in out:
+        out.append(t)
+        t = props_of(git(repo, "show", f"{tag}:.multiversion/targets/{t}/target.properties").stdout).get("inherits")
+    return out
+
+
+def latest_by_name(runs):
+    best = {}
+    for r in runs:
+        n = r.get("name") or ""
+        if n not in best or (r.get("id") or 0) > (best[n].get("id") or 0):
+            best[n] = r
+    return best
+
+
+def ci_green(t, base, newest, runs):
+    """(green, why) from the CI jobs that ran at the released commit. Only the two bookends have full gates in CI:
+    the base ("gates (full)", "gates (minimal)") and the newest target ("layer gates (newest target T)"). A middle
+    target is compile-only there, which is not a gate to publish on."""
+    best = latest_by_name(runs)
+    if t == base:
+        mine = {n: r for n, r in best.items() if n.startswith("gates (")}
+        if not mine:
+            return False, "no 'gates (...)' check run at the released commit"
+        bad = sorted(n for n, r in mine.items() if r.get("conclusion") != "success")
+        return (not bad), (f"{', '.join(bad)} not green" if bad else "gates green at the released commit")
+    if t == newest:
+        n = f"layer gates (newest target {t})"
+        r = best.get(n)
+        if not r:
+            return False, f"no '{n}' check run at the released commit"
+        return r.get("conclusion") == "success", f"{n}: {r.get('conclusion') or r.get('status')}"
+    return False, "a middle target: CI only compiles it (list it under layer.released once its full gates were run)"
+
+
+def listed_green(t, gates_text, changed_since, chain):
+    """(green, why) for a target listed under layer.released: its GATES.md (what ci-gates.py wrote for that target)
+    must name the target, hold no FAIL row, and no file that could change its jar may have changed between the
+    commit it was written at and the released one (documents, CI files and other targets' own directories excepted).
+    changed_since: file names changed since that commit, or None when it is not in this clone."""
+    if not gates_text:
+        return False, f".multiversion/targets/{t}/GATES.md is missing at the released commit"
+    head = gates_text.splitlines()[0]
+    m = re.search(r"for Minecraft (\S+)", head)
+    if not m or m.group(1) != t:
+        return False, f"GATES.md is for Minecraft {m.group(1) if m else '?'}, not {t}"
+    if re.search(r"\|\s*FAIL\s*\|", gates_text) or not re.search(r"\|\s*PASS\s*\|", gates_text):
+        return False, "GATES.md has a FAIL row or no PASS row"
+    if changed_since is None:
+        return False, "the commit GATES.md was written at is not in this clone -- cannot prove it is current"
+    mine = tuple(f".multiversion/targets/{c}/" for c in chain) + tuple(f".multiversion/shared/{c}/" for c in chain)
+    stale = [f for f in changed_since if not GATES_DOC.match(f)
+             and not (f.startswith((".multiversion/targets/", ".multiversion/shared/")) and not f.startswith(mine))]
+    return (not stale), (f"{len(stale)} file(s) changed since its gates ran, e.g. {stale[0]}" if stale else
+                         "its recorded gates are current at the released commit")
+
+
+def check_runs(repo_slug, sha):
+    out, page = [], 1
+    while True:
+        r = gh("GET", f"/repos/{repo_slug}/commits/{sha}/check-runs?per_page=100&page={page}")
+        got = (r or {}).get("check_runs", [])
+        out += got
+        if len(got) < 100:
+            return out
+        page += 1
+
+
+def target_green(repo, tag, info, t, lc, runs):
+    green, why = ci_green(t, info["base"], info["targets"][-1] if info["targets"] else info["base"], runs)
+    if green or t not in lc.get("released", []):
+        return green, why
+    gt = git(repo, "show", f"{tag}:.multiversion/targets/{t}/GATES.md")
+    text = gt.stdout if gt.returncode == 0 else ""
+    m = re.search(r"at `([0-9a-f]{7,40})`", text.splitlines()[0]) if text else None
+    changed = None
+    if m and git(repo, "cat-file", "-e", f"{m.group(1)}^{{commit}}").returncode == 0:
+        d = git(repo, "diff", "--name-only", m.group(1), info["commit"])
+        changed = [l for l in d.stdout.splitlines() if l] if d.returncode == 0 else None
+    return listed_green(t, text, changed, layer_chain(repo, tag, t))
+
+
+def layer_asset_suffix(suffix, t, base):
+    """The asset-name ending of target t's file: the base target's jar is the unsuffixed one, every other target's is
+    named "<name>-mc<t>.jar" by the layer build (templates/fork-layer/layer.gradle)."""
+    if t == base:
+        return suffix
+    return (suffix[:-4] if suffix.endswith(".jar") else suffix) + f"-mc{t}.jar"
+
+
+LAYER_NAMED = re.compile(r"-mc\d[\w.]*\.jar$")
+
+
+def layer_pick_asset(release, suffix, t, base):
+    """The release's one jar for target t, or None. The base target's jar is the one NOT named for a layer target."""
+    jars = [a for a in release.get("assets", []) if a["name"].endswith(".jar")]
+    want = layer_asset_suffix(suffix, t, base)
+    hit = [a for a in jars if a["name"].endswith(want)] if want else jars
+    if t == base:
+        hit = [a for a in hit if not LAYER_NAMED.search(a["name"])]
+    if len(hit) > 1:
+        raise SystemExit(f"target {t}: asset ending '{want}' matches {len(hit)} of {[a['name'] for a in jars]}")
+    return hit[0] if hit else None
+
+
+def published_pairs(body, tag):
+    """{(platform, minecraft)} a release says it is published for: a layer marker 'id@T', or the single-version
+    marker (which is for the minecraft in the tag)."""
+    out = set()
+    for plat, ref in MARK_RE.findall(body or ""):
+        out.add((plat, ref.split("@", 1)[1] if "@" in ref else minecraft_of(tag)))
+    return out
+
+
+def layer_dep_pins(repo, tag, t, cfg):
+    """{dependency repo name: version number} this target pins, from its target.properties 'publish.dep.<repo name>'
+    (the dependency's version built for the SAME Minecraft). Empty = the project-level dependency, unpinned."""
+    props = props_of(git(repo, "show", f"{tag}:.multiversion/targets/{t}/target.properties").stdout)
+    return {k[len("publish.dep."):]: v for k, v in props.items() if k.startswith("publish.dep.")}
+
+
+def layer_dep_versions(repo, tag, cfg, t):
+    """({dependency project id: version id}, errors) for Modrinth: each port dependency this target pins
+    (layer_dep_pins), resolved on the dependency's own Modrinth project. A pin the project lacks is an error."""
+    pins, out, errs = layer_dep_pins(repo, tag, t, cfg), {}, []
+    for d in cfg.get("dependencies", []):
+        name = (d.get("port") or "").split("/")[-1]
+        if not d.get("port") or not pins.get(name):
+            continue
+        other = json.loads(gh("GET", f"/repos/{d['port']}/contents/{CONFIG}", accept="application/vnd.github.raw", raw=True))
+        slug = (other.get("modrinth") or {}).get("slug")
+        hit = [v for v in (modrinth("GET", f"/project/{slug}/version") or []) if v["version_number"] == pins[name]]
+        if hit:
+            out[hit[0]["project_id"]] = hit[0]["id"]
+        else:
+            errs.append(f"target {t}: dependency {slug} has no Modrinth version {pins[name]} (publish.dep.{name})")
+    return out, errs
+
+
+def publish_layer(repo, tag, cfg, release, repo_slug, info, dry=False, manual=False):
+    lc = cfg["layer"]
+    if not info["branch"]:
+        print(f"::error::will not publish {tag}: the config's \"layer\" section names no \"branch\" (the layer branch)")
+        return 1
+    why = gate(repo, cfg, tag, release, manual, layer_branch=info["branch"])
+    if why:
+        for w in why:
+            print(f"::error::will not publish {tag}: {w}")
+        return 1
+    all_t = [info["base"]] + info["targets"]
+    asked = lc.get("targets") or []
+    unknown = [t for t in asked if t not in all_t]
+    if unknown:
+        print(f"::error::will not publish {tag}: layer.targets names {', '.join(unknown)}, which the layer does not have")
+        return 1
+    plats = platforms(cfg)
+    suffix = {p: cfg[p].get("asset", "") for p in plats}
+    cand = list(asked)
+    if not asked:           # every target the release holds a file for
+        cand = [t for t in all_t if any(layer_pick_asset(release, suffix[p], t, info["base"]) for p in plats)]
+    if not cand:
+        print(f"::error::will not publish {tag}: the release holds no jar for any target of the layer")
+        return 1
+    runs = check_runs(repo_slug, info["commit"])
+    done = published_pairs(release.get("body"), tag)
+    errors, plan, dvs = [], [], {}
+    for t in sorted(cand, key=mc_key):
+        green, gwhy = target_green(repo, tag, info, t, lc, runs)
+        if not green:
+            errors.append(f"target {t}: gates are not green at the released commit -- {gwhy}")
+            continue
+        assets = {}
+        for p in plats:
+            a = layer_pick_asset(release, suffix[p], t, info["base"])
+            if a is None:
+                errors.append(f"target {t}: no {p} asset (name ending '{layer_asset_suffix(suffix[p], t, info['base'])}') on {tag}")
+            assets[p] = a
+        for d in cfg.get("dependencies", []):
+            if d.get("port") and d.get("type") == "required":
+                dtag = pinned_dependency_tag(repo, d["port"])
+                if not dtag:
+                    errors.append(f"target {t}: {d['port']}: no pinned release in port-ci.yml to check is published"); continue
+                have = published_pairs(gh("GET", f"/repos/{d['port']}/releases/tags/{dtag}").get("body"), dtag)
+                for p in plats:
+                    if (p, t) not in have:
+                        errors.append(f"target {t}: {d['port']}@{dtag} is not published on {p} for Minecraft {t} -- publish the dependency for {t} first")
+        if "modrinth" in plats:         # the dependency version built for the same Minecraft, resolved BEFORE any upload
+            dvs[t], pin_errors = layer_dep_versions(repo, tag, cfg, t)
+            errors += pin_errors
+        plan.append((t, assets))
+    for t, _ in plan:
+        bad = public_text_problems(notes(cfg, tag, release, repo_slug, mc=t), cfg.get("permission", ""))
+        errors += [f"target {t}: the release notes {b} -- edit \"differences\" in the config" for b in bad]
+    if errors:
+        for e in errors:
+            print(f"::error::will not publish {tag}: {e}")
+        return 1
+    links, missing = [], []
+    for t, assets in plan:
+        text = notes(cfg, tag, release, repo_slug, mc=t)
+        for plat in plats:
+            if (plat, t) in done:
+                print(f"{plat} {t}: already published -- skipped"); continue
+            if not dry and not os.environ.get(f"{plat.upper()}_TOKEN"):
+                missing.append(f"{plat} is configured but the {plat.upper()}_TOKEN secret is not set"); continue
+            if plat == "modrinth":
+                proj, v = modrinth_version(cfg, tag, release, text, dry, mc=t, asset=assets[plat], dep_versions=dvs[t])
+                if v and v["id"] != "existing":
+                    links.append((plat, f"{v['id']}@{t}", f"https://modrinth.com/mod/{proj['slug']}/version/{v['version_number']}"))
+            else:
+                f = curseforge_file(cfg, tag, release, text, dry, mc=t, asset=assets[plat])
+                if f:
+                    links.append((plat, f"{f.get('id')}@{t}", f"https://www.curseforge.com/minecraft/mc-mods/{cfg['curseforge']['slug']}/files/{f.get('id')}"))
+    if links and not dry:
+        add = "\n".join(f"Published on {p.title()} for Minecraft {r.split('@')[1]}: {u} {MARK.format(platform=p, ref=r)}" for p, r, u in links)
+        gh("PATCH", f"/repos/{repo_slug}/releases/{release['id']}", {"body": (release.get("body") or "").rstrip() + "\n\n" + add})
+        for p, r, u in links:
+            print(f"published {tag} on {p} for Minecraft {r.split('@')[1]}: {u}")
+    for m in missing:
+        print(f"::error::{m}")
+    return 1 if missing else 0
 
 
 # ---------------------------------------------------------------- commands
@@ -335,6 +620,9 @@ def publish(repo, tag, dry=False, manual=False):
         print(f"::notice::no {CONFIG}: this fork is not set up to publish (port-publish.py setup)"); return 0
     repo_slug = slug_of(repo)
     release = gh("GET", f"/repos/{repo_slug}/releases/tags/{tag}")
+    info = layer_of(repo, tag, cfg)
+    if info:            # a multi-version release: one file per green target
+        return publish_layer(repo, tag, cfg, release, repo_slug, info, dry, manual)
     why = gate(repo, cfg, tag, release, manual)
     if why:
         for w in why:
@@ -523,8 +811,8 @@ def self_check():
         nonlocal ok
         if not c:
             ok = False; print("FAIL:", msg)
-    expect(minecraft_of("eca-1.1.9-mc1.21.1") == "1.21.1", "minecraft from tag")
-    expect(version_of("eca-1.1.9-mc1.21.1-r2", "eca") == "1.1.9+1.21.1-r2", version_of("eca-1.1.9-mc1.21.1-r2", "eca"))
+    expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
+    expect(version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod") == "1.0.0+1.21.1-r2", version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod"))
     expect(version_of("the_last_sword-1.1.2-mc1.21.1", "the_last_sword") == "1.1.2+1.21.1", "version, no suffix")
     expect(version_of("the_last_sword-1.1.1-fix-fix-mc1.21.1-r6", "the_last_sword") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
     body = "notes\n\nPublished on Modrinth: x " + MARK.format(platform="modrinth", ref="AbCd1234")

@@ -33,7 +33,8 @@ def load_props(path):
     return out
 
 
-def chain(target, root=MV):
+def chain(target, root=None):
+    root = root or MV
     seen, out, t = set(), [], target
     while t:
         if t in seen:
@@ -47,8 +48,34 @@ def chain(target, root=MV):
     return out  # nearest first
 
 
+def mc_key(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.findall(r"\d+|[A-Za-z]+", v))
+
+
+def shared_chain(target, root=None):
+    """The targets whose SHARED library (shared/<t>/) applies to `target`, nearest (newest) first.
+
+    Normally that is the `inherits` chain. A target that jumps over the middle versions (1.21.11 with no 1.21.3..1.21.10
+    targets in the fork) adds `shared_chain=1.21.3,1.21.4,...,1.21.11` to its target.properties (add-target --direct
+    writes it from versions.json). The union over the target's whole chain is used, ordered by version, newest first:
+    the order the same targets have in a hop-by-hop `inherits` chain, so rows (nearest first) and helpers (nearest
+    wins) resolve identically. Without the key this is `chain(target)`, unchanged."""
+    root = root or MV
+    names = chain(target, root)
+    extra = []
+    for t in names:
+        extra += [x.strip() for x in load_props(root / "targets" / t / "target.properties").get("shared_chain", "").split(",")
+                  if x.strip()]
+    if not extra:
+        return names
+    return sorted(set(names) | set(extra), key=mc_key, reverse=True)
+
+
 def cmd_prepare(a):
     names = chain(a.target)
+    snames = shared_chain(a.target)
+    if snames != names:
+        print(f"layer: {a.target} shared libraries {' > '.join(snames)} (shared_chain)")
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         overlay = tmp / "overlay"
@@ -69,7 +96,7 @@ def cmd_prepare(a):
             m = MV / "targets" / t / "moves.generated.tsv"   # tools/fork-port.py: derived from the staged jars
             if m.exists():
                 rows.append(f"# ---- moves {t} (generated)\n" + m.read_text(encoding="utf-8"))
-        for t in names:
+        for t in snames:
             r = MV / "shared" / t / "renames.tsv"
             if r.exists():
                 rows.append(f"# ---- shared {t}\n" + r.read_text(encoding="utf-8"))
@@ -101,7 +128,7 @@ def cmd_prepare(a):
         print(f"layer: {a.target} [{a.set}] chain {' > '.join(names)}")
         rc = subprocess.call(args)
         if rc == 0 and a.set == "main":
-            add_shared_helpers(names, out)
+            add_shared_helpers(snames, out)
         if rc == 0 and load_props(MV / "targets" / a.target / "target.properties").get("strip_onlyin") == "true":
             strip_onlyin(out)
         return rc
@@ -227,12 +254,65 @@ def cmd_compare(a):
     return 1 if bad else 0
 
 
+def check_direct_jump(expect):
+    """A direct 1.21.11 target with shared_chain prepares the same tree as the hop-by-hop 1.21.3 > ... > 1.21.11
+    chain for shared-only content (rows and helper classes); without the key only 1.21.11's own library applies."""
+    global MV
+    saved = MV
+    ns = lambda root: argparse.Namespace(target="1.21.11", src=str(root / "src"), out=str(root / "out"), set="main")
+    hops = ["1.21.3", "1.21.4", "1.21.5", "1.21.11"]
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        trees = {}
+        try:
+            for label in ("chained", "direct", "direct-without-key"):
+                root = d / label
+                (root / "src/m").mkdir(parents=True)
+                (root / "src/m/A.java").write_text("package m;\nimport old.One;\nimport old.Two;\nimport old.Three;\n"
+                                                   "import m.Helper;\nclass A { One a; Two b; Three c; Helper h; }\n", encoding="utf-8")
+                mv = root / "mv"
+                for t, row in zip(hops, ("old.One\tnew.One", "old.Two\tnew.Two", "old.Three\tnew.Three", "# none")):
+                    (mv / "shared" / t).mkdir(parents=True)
+                    (mv / "shared" / t / "renames.tsv").write_text(row + "\n", encoding="utf-8")
+                for t in ("1.21.4", "1.21.11"):       # the same helper twice: the nearest (newest) copy must win
+                    (mv / "shared" / t / "java/m").mkdir(parents=True)
+                    (mv / "shared" / t / "java/m/Helper.java").write_text("package m;\nclass Helper { int v = %s; }\n"
+                                                                          % t.replace(".", "_"), encoding="utf-8")
+                tp = lambda t, body: ((mv / "targets" / t).mkdir(parents=True),
+                                      (mv / "targets" / t / "target.properties").write_text(body, encoding="utf-8"))
+                if label == "chained":
+                    for i, t in enumerate(hops):
+                        tp(t, f"inherits={hops[i - 1]}\n" if i else "x=1\n")
+                else:
+                    tp("1.21.11", "x=1\n" + ("shared_chain=1.21.3, 1.21.4,1.21.5,1.21.11\n" if label == "direct" else ""))
+                MV = mv
+                if label == "chained":
+                    expect(shared_chain("1.21.11", mv) == chain("1.21.11", mv) == hops[::-1],
+                           "no shared_chain key: the shared libraries are the inherits chain, as before")
+                if label == "direct":
+                    expect(shared_chain("1.21.11", mv) == hops[::-1], f"direct shared order is newest first: {shared_chain('1.21.11', mv)}")
+                    expect(chain("1.21.11", mv) == ["1.21.11"], "the fork-target chain of a direct target is just itself")
+                rc = cmd_prepare(ns(root))
+                expect(rc == 0, f"{label}: prepare ran")
+                trees[label] = {f.relative_to(root / "out").as_posix(): f.read_text(encoding="utf-8")
+                                for f in (root / "out").rglob("*.java")}
+        finally:
+            MV = saved
+    expect(trees["direct"] == trees["chained"], "a direct jump prepares the same tree as the chain for shared-only content")
+    a_ = trees["chained"]["m/A.java"]
+    expect("new.One" in a_ and "new.Two" in a_ and "new.Three" in a_, "all three intermediate shared rows applied")
+    expect("1_21_11" in trees["chained"]["m/Helper.java"], "nearest helper wins")
+    expect(trees["direct-without-key"] != trees["chained"] and "old.One" in trees["direct-without-key"]["m/A.java"],
+           "control: without shared_chain the intermediate libraries are NOT pulled in (the test can tell)")
+
+
 def self_check():
     ok = True
     def expect(c, msg):
         nonlocal ok
         if not c:
             ok = False; print("FAIL:", msg)
+    check_direct_jump(expect)
     hook = f"+// comment\n+{HOOK_MARK}\n"
     expect(not isolation_problems([".multiversion/a", "build.gradle"], hook), "clean layer passes")
     expect(isolation_problems(["src/main/java/X.java"], ""), "source edit fails")

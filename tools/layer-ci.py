@@ -23,10 +23,23 @@ themselves off where there is no .multiversion/. This tool is what those jobs ca
               staged sources jar and the event-listener audit against Gradle's own resolved classpath. These are the
               checks that go red when a change on the 1.21.1 branch breaks only one middle target's overlay.
 
+CI policy (fork-versions skill): the bookends (the base branch's 1.21.1 and the NEWEST target) get every gate on every
+push; every middle target gets compile + mixin audit + event-listener audit only. A middle target that is RELEASED
+gets the full gates too, and the fork says so in `.multiversion/ci.properties`:
+
+    full_gates=1.21.4,1.21.8        # comma list of middle targets; absent or empty = none (the default)
+
+`plan` then also prints `has_full` / `full_matrix` for the `layer-gates-extra` job. A name that is not a target is an
+error (a typo must not quietly mean "no gates"); the newest target is always fully gated, so naming it is redundant.
+A fork without ci.properties behaves exactly as before.
+
+One run per checkout (CATALOG X44): `acquire_lock()` is the lock tools/fork-port.py and `ci-gates.py --mc` take on
+build/.fork-port.lock (pid, stale-pid aware). Without a layer target the lock is never taken.
+
 target_classpath() and sources_jars() are shared with fork-port.py, so the CI audit and the port's audit stage
 cannot drift apart. Standard library only.
 """
-import argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
+import argparse, datetime, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 HOOK_MARK = "apply from: '.multiversion/layer.gradle'"
@@ -69,6 +82,17 @@ def java_of(mv, target):
     return DEFAULT_JAVA
 
 
+def full_gate_targets(mv, targets):
+    """(extra full-gate targets, problems) from .multiversion/ci.properties `full_gates=a,b`. Only MIDDLE targets are
+    returned (the newest is always fully gated, so naming it is redundant); a name that is not a target is a problem."""
+    raw = read_props(pathlib.Path(mv) / "ci.properties").get("full_gates", "")
+    names = [x.strip() for x in raw.split(",") if x.strip()]
+    bad = [n for n in names if n not in targets]
+    newest = targets[-1] if targets else None
+    mid = sorted({n for n in names if n in targets and n != newest}, key=version_key)
+    return mid, [f"full_gates names {n}, which is not a target in .multiversion/targets" for n in bad]
+
+
 def plan(repo):
     mv = pathlib.Path(repo) / ".multiversion"
     tdir = mv / "targets"
@@ -76,13 +100,20 @@ def plan(repo):
                      key=version_key) if tdir.is_dir() else []
     if not (mv / "base.properties").is_file() or not targets:
         return {"layer": "false", "targets": [], "newest": "", "newest_java": DEFAULT_JAVA, "middle": [],
-                "has_middle": "false", "matrix": json.dumps({"include": []}, separators=(",", ":")), "shipped": "false"}
+                "has_middle": "false", "matrix": json.dumps({"include": []}, separators=(",", ":")), "shipped": "false",
+                "full_extra": [], "has_full": "false", "full_matrix": json.dumps({"include": []}, separators=(",", ":"))}
     newest, middle = targets[-1], targets[:-1]
     inc = [{"t": t, "java": java_of(mv, t)} for t in middle]
+    full, problems = full_gate_targets(mv, targets)
+    if problems:
+        raise SystemExit("plan: " + "; ".join(problems))
+    finc = [{"t": t, "java": java_of(mv, t)} for t in full]
     return {"layer": "true", "targets": targets, "newest": newest, "newest_java": java_of(mv, newest),
             "middle": middle, "has_middle": "true" if middle else "false",
             "matrix": json.dumps({"include": inc}, separators=(",", ":")),
-            "shipped": "true" if list(mv.glob("shipped-expect*.txt")) else "false"}
+            "shipped": "true" if list(mv.glob("shipped-expect*.txt")) else "false",
+            "full_extra": full, "has_full": "true" if full else "false",
+            "full_matrix": json.dumps({"include": finc}, separators=(",", ":"))}
 
 
 def strip_hook(text):
@@ -94,6 +125,96 @@ def strip_hook(text):
         else:
             keep.append(l)
     return "".join(keep), n
+
+
+# ---------------------------------------------------------------- one run per checkout (CATALOG X44)
+
+LOCK_REL = "build/.fork-port.lock"
+LOCK_ENV = "MV_CHECKOUT_LOCK_HOLDER"      # a child of the lock holder (fork-port.py -> ci-gates.py) is let through
+
+
+def pid_alive(pid):
+    """Is a process with this pid running? (A reused pid reads as alive: the lock then needs deleting by hand, which
+    the refusal message says.)"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)      # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        return bool(ok) and code.value == 259                            # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class CheckoutLock:
+    """An exclusive lock on one checkout: build/.fork-port.lock holding {"pid", "tool", "target", "started"}.
+    acquire() -> None when taken (or inherited from a live parent that holds it), else the refusal message.
+    A lock whose pid is dead is stale and is taken over. release() removes only a lock this object created."""
+
+    def __init__(self, repo, tool, target="", pid=None, alive=pid_alive, env=None):
+        self.path = pathlib.Path(repo) / LOCK_REL
+        self.tool, self.target = tool, target
+        self.pid = pid if pid is not None else os.getpid()
+        self.alive = alive
+        self.env = env if env is not None else os.environ
+        self.mine = False
+
+    def _read(self):
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def acquire(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        for _ in range(3):
+            body = json.dumps({"pid": self.pid, "tool": self.tool, "target": self.target,
+                               "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                held = self._read()
+                hp = held.get("pid") if isinstance(held, dict) else None
+                if isinstance(hp, int) and hp != self.pid and self.alive(hp):
+                    if str(hp) == str(self.env.get(LOCK_ENV, "")):
+                        return None           # our parent holds it and started us: its run, not a second one
+                    return (f"another {held.get('tool', 'run')} is using this checkout (pid {hp}, target "
+                            f"{held.get('target') or '-'}, since {held.get('started', '?')}): one gate run per checkout "
+                            f"(CATALOG X44) -- two share build/, the Gradle daemon and the CPU, and their results are "
+                            f"not attributable. Wait for it, or if pid {hp} is not really that run, delete {self.path}")
+                try:
+                    self.path.unlink()           # stale (dead pid) or unreadable: take it over
+                except FileNotFoundError:
+                    pass
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(body)
+            self.mine = True
+            self.env[LOCK_ENV] = str(self.pid)
+            return None
+        return f"could not take {self.path} (it keeps being recreated by another process)"
+
+    def release(self):
+        if self.mine:
+            held = self._read()
+            if isinstance(held, dict) and held.get("pid") == self.pid:
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+            if self.env.get(LOCK_ENV) == str(self.pid):
+                del self.env[LOCK_ENV]
+            self.mine = False
 
 
 # ---------------------------------------------------------------- shared with fork-port.py
@@ -152,7 +273,7 @@ def cmd_plan(a):
     print(json.dumps(p, indent=1))
     if a.github_output:
         with open(a.github_output, "a", encoding="utf-8") as f:
-            for k in ("layer", "newest", "newest_java", "has_middle", "matrix", "shipped"):
+            for k in ("layer", "newest", "newest_java", "has_middle", "matrix", "shipped", "has_full", "full_matrix"):
                 f.write(f"{k}={p[k]}\n")
     return 0
 
@@ -310,6 +431,65 @@ def self_check():
         expect(plan(r)["shipped"] == "true", "shipped-expect*.txt is noticed")
         (mv / "targets" / "1.21.11" / "target.properties").write_text("prop.neo_version=1\n", encoding="utf-8")
         expect(java_of(mv, "1.21.11") == "21", "no java_version anywhere: 21")
+    # CI policy: full_gates (ci.properties) names extra fully gated MIDDLE targets; default none; typos are errors
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d); mv = r / ".multiversion"
+        (mv / "targets").mkdir(parents=True)
+        (mv / "base.properties").write_text("x=1\n", encoding="utf-8")
+        for t_ in ("1.21.3", "1.21.4", "1.21.8", "1.21.10", "1.21.11"):
+            (mv / "targets" / t_).mkdir()
+            (mv / "targets" / t_ / "target.properties").write_text("java_version=21\n", encoding="utf-8")
+        p0 = plan(r)
+        expect(p0["has_full"] == "false" and p0["full_extra"] == [] and json.loads(p0["full_matrix"]) == {"include": []},
+               "no ci.properties: no extra full-gate target (the default)")
+        (mv / "ci.properties").write_text("# policy\nfull_gates = 1.21.10, 1.21.4 ,1.21.11\n", encoding="utf-8")
+        p1 = plan(r)
+        expect(p1["full_extra"] == ["1.21.4", "1.21.10"], f"extras are middle targets in version order, newest dropped: {p1['full_extra']}")
+        expect([i["t"] for i in json.loads(p1["full_matrix"])["include"]] == ["1.21.4", "1.21.10"] and p1["has_full"] == "true",
+               "full_matrix")
+        expect(p1["middle"] == p0["middle"] and p1["matrix"] == p0["matrix"] and p1["newest"] == p0["newest"],
+               "the compile-only matrix does not change: an extra target is compiled AND gated")
+        (mv / "ci.properties").write_text("full_gates=1.21.9\n", encoding="utf-8")
+        try:
+            plan(r); expect(False, "a typo in full_gates must fail the plan")
+        except SystemExit as e:
+            expect("1.21.9" in str(e), "the failure names the unknown target")
+        (mv / "ci.properties").write_text("full_gates=\n", encoding="utf-8")
+        expect(plan(r)["has_full"] == "false", "empty list = none")
+        # a single-version fork (no .multiversion) is untouched, ci.properties or not
+        r2 = pathlib.Path(d) / "single"; r2.mkdir()
+        (r2 / "ci.properties").write_text("full_gates=1.21.4\n", encoding="utf-8")
+        q = plan(r2)
+        expect(q["layer"] == "false" and q["has_full"] == "false", "no .multiversion: layer=false, nothing extra")
+    # one run per checkout
+    with tempfile.TemporaryDirectory() as d:
+        alive = {1001, 1002}
+        mk = lambda pid, env=None, tool="fork-port.py": CheckoutLock(d, tool, "1.21.4", pid=pid, alive=lambda x: x in alive,
+                                                                       env={} if env is None else env)
+        a_, b_ = mk(1001), mk(1002)
+        expect(a_.acquire() is None and (pathlib.Path(d) / LOCK_REL).is_file(), "first run takes the lock")
+        msg = b_.acquire()
+        expect(msg and "1001" in msg and "one gate run per checkout" in msg and "delete" in msg, f"second run refused: {msg}")
+        expect(not b_.mine, "a refused run owns nothing")
+        b_.release()
+        expect((pathlib.Path(d) / LOCK_REL).is_file(), "a refused run's release leaves the holder's lock")
+        kid = mk(1002, env={LOCK_ENV: "1001"}, tool="ci-gates.py")
+        expect(kid.acquire() is None and not kid.mine, "a child of the holder is let through and owns nothing")
+        kid.release()
+        expect((pathlib.Path(d) / LOCK_REL).is_file(), "the child's release leaves the parent's lock")
+        a_.release()
+        expect(not (pathlib.Path(d) / LOCK_REL).exists(), "release removes the lock")
+        (pathlib.Path(d) / "build").mkdir(exist_ok=True)
+        (pathlib.Path(d) / LOCK_REL).write_text(json.dumps({"pid": 4242, "tool": "fork-port.py"}), encoding="utf-8")
+        c_ = mk(1002)
+        expect(c_.acquire() is None and c_.mine and json.loads((pathlib.Path(d) / LOCK_REL).read_text(encoding="utf-8"))["pid"] == 1002,
+               "a dead holder's lock is stale and taken over")
+        c_.release()
+        (pathlib.Path(d) / LOCK_REL).write_text("garbage", encoding="utf-8")
+        e_ = mk(1001)
+        expect(e_.acquire() is None, "an unreadable lock file is stale")
+        e_.release()
+    expect(pid_alive(os.getpid()) and not pid_alive(0), "pid_alive: this process is alive, pid 0 is not")
     t, n = strip_hook(f"a\n// c\n{HOOK_MARK}\n")
     expect(n == 1 and HOOK_MARK not in t and "// c" in t, "strip_hook removes the hook line, keeps comments")
     expect(strip_hook("a\n")[1] == 0, "no hook: counted 0")

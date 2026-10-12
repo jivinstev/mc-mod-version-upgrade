@@ -5,6 +5,10 @@ description: Keep a fork port current with its authors, unattended or on request
 
 # Keep a fork port current
 
+**Which fork:** a single-version fork (one `neoforge-1.21.1`-style branch) is the default and the proven path; everything in
+"Run" below is for it. A fork with the opt-in multi-version layer (`.multiversion/`) gets the extra step in "A fork
+with the layer" after step 6, and nothing else changes for it. `tools/layer-sync.py detect --repo DIR` says which.
+
 The port-fork skill makes a port; this one keeps it alive. A community fork is judged by the people who install
 it: **if it crashes them, kicks them from a server, hangs, damages a save or breaks their other mods, the fork is
 "busted", whoever's code did it.** Everything below serves that.
@@ -123,6 +127,27 @@ until its dependency's run is green, and it is then gated against the dependency
    for the dependency's to be promoted.
 8. **Report once** on the fleet's tracking issue: what came in, what was decided, what is waiting for a person
    (a PR to merge, a build to play and promote). Silent when nothing changed.
+
+## A fork with the layer (opt-in; skip this for a single-version fork)
+
+Only when `layer-sync.py detect` says `layer=true`. The port branch's PR (steps 1-6) is the authors' code at the base
+version; the layer branch must carry it to every target, and nothing fixes a middle target unless this is run.
+
+1. Cut `keep-current/<date>-layer` from the layer branch and `python3 tools/layer-sync.py merge --repo DIR --port-ref
+   keep-current/<date>` (the port work branch, or the port branch once its PR is merged): a MERGE COMMIT, never a
+   rebase or force-push; a conflict is aborted and listed (it means the layer's isolation rule was already broken).
+2. `python3 tools/layer-sync.py run --repo DIR --json t.json --md t.md`: per target, oldest first, fork-port.py's
+   `stage..measure`, then the audits at 0 errors or the compile loop (`--budget`) otherwise. Each target is
+   **untouched** (0 errors, clean audits right after the merge), **touch-up** (the loop cleared it) or **rework**
+   (residue left: `.multiversion/targets/<t>/RESIDUE.md`). It also lists the upstream-changed files each target
+   OVERLAYS: an overlay replaces the whole file, so read it against upstream's new version even when it compiles.
+3. **A rework target stops the run (exit 10) for a person.** It is never skipped, never released as is, and never
+   reported as done; fix what its RESIDUE.md lists in the shared library, then `layer-sync.py run --targets <t>`.
+4. Put `t.md` (target | errors before | errors after | class | residue) in the layer PR body and link it from the port
+   PR; `layer-sync.py ledger --ledger L.json --json t.json --column keep-current/<date>` then `fix-ledger.py render
+   --ledger L.json --into BODY` puts the same table in the fix ledger's issue.
+5. Gates: the layer's CI runs the full gates on the base and the newest target and compile + audits on the middle
+   ones; a target you intend to release gets `ci-gates.py --mc <t>` (full) first.
 
 ## Setup: run it nightly on the user's subscription
 

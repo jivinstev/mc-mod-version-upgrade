@@ -1,0 +1,173 @@
+DRY 0
+modrinth version: {
+ "project_id": "Pm-neoforge",
+ "name": "2+1.21.1 (NeoForge 1.21.1)",
+ "version_number": "2+1.21.1",
+ "changelog": "<notes>",
+ "dependencies": [
+  {
+   "project_id": "Plib-nf",
+   "dependency_type": "required"
+  },
+  {
+   "project_id": "Pgeckolib",
+   "dependency_type": "optional"
+  }
+ ],
+ "game_versions": [
+  "1.21.1"
+ ],
+ "version_type": "release",
+ "loaders": [
+  "neoforge"
+ ],
+ "featured": true,
+ "file_parts": [
+  "file"
+ ],
+ "primary_file": "file",
+ "file": "m-2_mr.jar"
+}
+curseforge file: {
+ "changelog": "<notes>",
+ "changelogType": "markdown",
+ "displayName": "2+1.21.1 (NeoForge 1.21.1)",
+ "releaseType": "release",
+ "relations": {
+  "projects": [
+   {
+    "slug": "lib-nf",
+    "type": "requiredDependency"
+   },
+   {
+    "slug": "geckolib",
+    "type": "optionalDependency"
+   }
+  ]
+ },
+ "file": "m-2_cf.jar",
+ "project_id": 7
+}
+
+[
+[
+"gh",
+"GET",
+"/repos/o/m/releases/tags/m-2-mc1.21.1",
+null
+],
+[
+"gh",
+"GET",
+"/repos/o/lib/releases/tags/lib-1-mc1.21.1",
+null
+],
+[
+"modrinth",
+"GET",
+"/project/m-neoforge"
+],
+[
+"modrinth",
+"GET",
+"/project/Pm-neoforge/version"
+],
+[
+"gh",
+"GET",
+"/repos/o/lib/contents/.github/port-publish.json",
+null
+],
+[
+"modrinth",
+"GET",
+"/project/lib-nf"
+],
+[
+"modrinth",
+"GET",
+"/project/geckolib"
+],
+[
+"gh",
+"GET",
+"/repos/o/lib/contents/.github/port-publish.json",
+null
+]
+]
+REAL 0
+published m-2-mc1.21.1 on modrinth: https://modrinth.com/mod/m-neoforge/version/2+1.21.1
+published m-2-mc1.21.1 on curseforge: https://www.curseforge.com/minecraft/mc-mods/m-neoforge/files/77
+
+[
+[
+"gh",
+"GET",
+"/repos/o/m/releases/tags/m-2-mc1.21.1",
+null
+],
+[
+"gh",
+"GET",
+"/repos/o/lib/releases/tags/lib-1-mc1.21.1",
+null
+],
+[
+"modrinth",
+"GET",
+"/project/m-neoforge"
+],
+[
+"modrinth",
+"GET",
+"/project/Pm-neoforge/version"
+],
+[
+"gh",
+"GET",
+"/repos/o/lib/contents/.github/port-publish.json",
+null
+],
+[
+"modrinth",
+"GET",
+"/project/lib-nf"
+],
+[
+"modrinth",
+"GET",
+"/project/geckolib"
+],
+[
+"modrinth",
+"POST",
+"/version"
+],
+[
+"gh",
+"GET",
+"/repos/o/lib/contents/.github/port-publish.json",
+null
+],
+[
+"curseforge",
+"GET",
+"/game/version-types"
+],
+[
+"curseforge",
+"GET",
+"/game/versions"
+],
+[
+"curseforge",
+"POST",
+"/projects/7/upload-file"
+],
+[
+"gh",
+"PATCH",
+"/repos/o/m/releases/5",
+"{\"body\": \"notes\\n\\nPlayed by @someone on 2026-10-12.\\n\\nPublished on Modrinth: https://modrinth.com/mod/m-neoforge/version/2+1.21.1 <!-- port-publish:modrinth:V1 -->\\nPublished on Curseforge: https://www.curseforge.com/minecraft/mc-mods/m-neoforge/files/77 <!-- port-publish:curseforge:77 -->\"}"
+]
+]

@@ -19,7 +19,7 @@ The harness is generated OUTSIDE the author's tree (--work-dir, default a temp d
 --init-script, exactly as during the port. The summary (markdown) lists what ran and what passed, and is
 what the release notes quote. Standard library only.
 """
-import argparse, shutil, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, types, zipfile
+import argparse, atexit, shutil, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, types, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -103,6 +103,15 @@ def data_rejections(log, modid):
     return list(dict.fromkeys(out))
 
 
+def target_jar_glob(pat, mc):
+    """The shipped-jar glob for a layer target. The layer names the jars it builds for target T "<name>-mcT.jar"
+    (templates/fork-layer/layer.gradle, only with -Pmc), so ".multiversion/shipped-jar.txt"'s "*_mr.jar" is
+    "*_mr-mcT.jar" there. A glob already naming the target, or with no .jar ending, is left alone; no --mc: unchanged."""
+    if not pat or not mc or not pat.endswith(".jar") or pat.endswith(f"-mc{mc}.jar"):
+        return pat
+    return pat[:-4] + f"-mc{mc}.jar"
+
+
 def green_detail(text):
     """What a green gate log proves, in one line: the GameTest count, or the client's PASS line and spawns."""
     m = re.search(r"All (\d+) required tests passed", text) or re.search(r"BOOT_TEST: (PASS[^\n]*)", text)
@@ -141,6 +150,9 @@ def self_check():
            "java.lang.IllegalArgumentException: Invalid recipe m:b: No key id in MapLike\n"
            "[x] ERROR Couldn't parse data file 'other:x': No key id\n[x] INFO loaded m:fine")
     ok &= len(data_rejections(rej, "m")) == 3 and data_rejections(rej, "zz") == []
+    ok &= target_jar_glob("*_mr.jar", "1.21.4") == "*_mr-mc1.21.4.jar" and target_jar_glob("*_mr.jar", None) == "*_mr.jar"
+    ok &= target_jar_glob("*_mr-mc1.21.4.jar", "1.21.4") == "*_mr-mc1.21.4.jar" and target_jar_glob("mod", "1.21.4") == "mod"
+    ok &= target_jar_glob(None, "1.21.4") is None
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -163,7 +175,8 @@ def main():
     ap.add_argument("--shipped-jar", help="glob (under the build's libs dir) naming the jar a player installs; default: "
                                           ".multiversion/shipped-jar.txt, else the only jar there")
     ap.add_argument("--mc", help="a Minecraft target of the fork's multi-version layer (.multiversion/targets/<mc>); "
-                                 "every Gradle call of the run then builds that target")
+                                 "every Gradle call of the run then builds that target (and takes build/.fork-port.lock: "
+                                 "a second run on the same checkout is refused, exit 14)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
     if a.mc:
@@ -171,6 +184,14 @@ def main():
         if not (repo / ".multiversion/targets" / a.mc).is_dir() or not layer.is_file():
             print(f"[ci-gates] --mc {a.mc}: no .multiversion/targets/{a.mc} in {repo}", flush=True)
             return 2
+        # one gate run per checkout (CATALOG X44), only on a layer target: a single-version fork never takes the lock.
+        # tools/fork-port.py holds it for its whole run and its gates stage reaches here as a child (let through).
+        lock = _load("layer_ci", "layer-ci.py").CheckoutLock(repo, "ci-gates.py", a.mc)
+        busy = lock.acquire()
+        if busy:
+            print(f"[ci-gates] {busy}", flush=True)
+            return 14
+        atexit.register(lock.release)
         props = subprocess.run([sys.executable, str(layer), "props", "--target", a.mc], capture_output=True,
                                text=True, encoding="utf-8", check=True).stdout
         os.environ["PORT_GRADLE_ARGS"] = props
@@ -312,6 +333,7 @@ def main():
             libs = bdir / "libs"
             pat = a.shipped_jar or ((repo / ".multiversion/shipped-jar.txt").read_text(encoding="utf-8").split() or [""])[0] \
                 if (a.shipped_jar or (repo / ".multiversion/shipped-jar.txt").is_file()) else None
+            pat = target_jar_glob(pat, a.mc)
             found = sorted(libs.glob(pat)) if pat and libs.is_dir() else (sorted(libs.glob("*.jar")) if libs.is_dir() else [])
             label = "Shipped jar -- the built jar boots in a real server, the mod's own logs show its subsystems ran"
             if len(found) != 1:

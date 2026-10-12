@@ -1,7 +1,7 @@
 # Shared fork-layer rename table: NeoForge 1.21.5 -> 1.21.8 (Minecraft 1.21.8; NeoForge 21.8; FML 9). Applied FIRST (nearest
 # target) on the 1.21.1 text, then the 1.21.5/1.21.4/1.21.3 tables on whatever it left, so a row here that rewrites
 # something those rows also rewrite has to write the 1.21.8 form itself. Measured against neoforge-21.8.54-sources.jar
-# on the Epic Core API port (the unattended 1.21.8 loop's residue, which put every one of these in a per-fork overlay).
+# on the first layer-fork port (the unattended 1.21.8 loop's residue, which put every one of these in a per-fork overlay).
 #!exhaustive  # shared library: most forks use only some of these rows
 # ---- FML 9: @EventBusSubscriber has no `bus` any more; the bus follows from the event class (a mod-bus event is
 # delivered on the mod bus, anything else on the game bus), so dropping the argument keeps every subscriber where it was.
@@ -36,3 +36,4 @@ re:(\b(?:play|common|configuration)Bidirectional\(\s*(?:[^,()]|\([^()]*\))+,\s*(
 re:(\b(?:play|common|configuration)Bidirectional\(\s*(?:[^,()]|\([^()]*\))+,\s*(?:[^,()]|\([^()]*\))+,\s*)((?:\w+|\([^()]*\))\s*->\s*(?:[^(),;{}]|\((?:[^()]|\([^()]*\))*\))+)(\s*\))	\1\2, \2\3
 # PacketDistributor.sendToServer moved to the client-only ClientPacketDistributor (NeoForge 21.6+); written fully qualified (a row cannot add an import).
 re:\bPacketDistributor\.sendToServer\(	net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer(
+#!strict

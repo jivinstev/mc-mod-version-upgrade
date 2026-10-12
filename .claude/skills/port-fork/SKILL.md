@@ -154,7 +154,7 @@ This adds `.github/workflows/port-ci.yml` as a commit of its own. It downloads t
 step 4 on every push. Wait for the run to go green, then release (stop 3): **Actions → Port CI → Run
 workflow → branch `neoforge-<mc>`, release: true**, or `gh workflow run port-ci.yml --ref neoforge-<mc>
 -f release=true`. It publishes the authors' own JARs as a pre-release named `<modid>-<version>-mc<mc>`,
-only if every gate passes. Give the user the release link; they smoke-test it on their machine.
+only if every gate passes. The kit is published when the maintainer merges the change to main, so a change that needs a new kit waits for that merge (never merge it yourself). Give the user the release link; they smoke-test it on their machine.
 
 **Promote it once they have played it** (`> Promote my fork's release`). Ask who played it and, optionally,
 one line on what they did; never promote on your own or from an unattended run -- promotion is the "a person

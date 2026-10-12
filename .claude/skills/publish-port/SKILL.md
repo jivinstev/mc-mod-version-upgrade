@@ -5,6 +5,10 @@ description: Publish a fork port as an unofficial community version on Modrinth 
 
 # Publish a fork port on Modrinth and CurseForge
 
+**Which fork:** a single-version fork is the default and the proven path, and Parts 1-3 below are exactly it. A fork with
+the opt-in multi-version layer adds "Part 4" and only when its config has a `layer` section; without that section
+`port-publish.py` behaves byte-for-byte as before (a test compares its output and API calls with a recorded golden).
+
 The step after `port-fork` and `keep-current`: a fork whose release a person has played and promoted goes onto
 the platforms players install from. Tool: `tools/port-publish.py`. The upload itself always runs in the fork's
 GitHub Actions (the `publish` job `tools/port-ci.py` generates): the platform tokens are repository secrets, never
@@ -45,9 +49,9 @@ notice it (`--difference "..."`). A fix a player cannot tell from correct behavi
   1.21.1"). No blame, no "bug", no severity, no history.
 - Be specific rather than vague. "Minor differences, see issue N" sounds more alarming than the plain fact, and
   sends readers to an issue written for maintainers.
-- Example: "The Ultra Test Sword's lockdown mode and the Test Entity don't turn on Epic Core API's global
-  "AllReturn" in this version. That's an experimental feature that didn't play well with some other mods on
-  1.21.1."
+- Example: "The item's lockdown mode and the second test object don't turn on the library's global
+  "protect everything" setting in this version. That's an experimental feature that didn't play well with some
+  other mods on 1.21.1."
 
 The user reviews the wording of each difference before it goes on a page; offer a draft in this style. The tool enforces this:
 `port-publish.py` refuses to sync a page or upload notes that name a defect or link a numbered issue (the authors'
@@ -105,6 +109,27 @@ Nothing to do once Part 1 is merged: the `publish` job runs `needs: promote`, in
 **keep-current must name ledger columns after release tags.** When its PR is merged and the release run has cut
 the pre-release, rename that reconcile's column (`keep-current/<date>`) to the tag, joined with ` + ` for a shared
 ledger. Publishing judges exactly that column.
+
+## Part 4: a multi-version release (opt-in; layer forks only)
+
+Config: `"layer": {"branch": "<layer branch>", "targets": [optional explicit list], "released": [targets whose full
+gates were run]}`, AND the tag's commit must carry `.multiversion/`. `publish` then uploads **one file per green
+target**, each with its own game version (Modrinth `game_versions`, CurseForge `gameVersions`), version number
+(`<ver>+<mc>`) and notes:
+- **Files.** The layer build names each target's jars `<name>-mc<target>.jar` (only with `-Pmc`; the base jar is
+  untouched). The release must hold them; the newest target's jar is in its `layer-gates-<newest>` artifact. Without
+  `layer.targets`, every target the release holds a file for is a candidate; a missing file on a configured
+  platform refuses the publish.
+- **Green.** A target publishes only if, at the released commit, the base's `gates (...)` jobs are green (base),
+  `layer gates (newest target T)` is green (newest), or it is listed under `released` and its `GATES.md` names it, has
+  no FAIL row, and nothing that builds its jar changed since (documents, CI files and other targets' own directories
+  excepted). A middle target is compile-only in CI and is not green on that alone. **Any candidate that is not green
+  refuses the whole publish, naming it; nothing is uploaded.**
+- **Dependencies.** A required port dependency must be published for that target's Minecraft on each platform
+  (its release notes carry `id@<mc>` markers). A target pins the dependency's version for the same Minecraft with
+  `publish.dep.<repo name>=<version number>` in its `target.properties`; a pin the dependency lacks refuses.
+- Idempotent per target and platform (markers `id@<mc>` in the release notes). The tag may be on the layer branch;
+  "built from the branch" is judged against `origin/<layer branch>`.
 
 ## After the first publish
 

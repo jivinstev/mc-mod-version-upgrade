@@ -274,20 +274,22 @@ def self_check():
         except SystemExit:
             pass
     # layer branch: without --layer-branch the workflow has no layer text at all; with it the SAME file gains the
-    # triggers and five layer-* jobs, each skipped on the port branch and without .multiversion/
+    # triggers and six layer-* jobs, each skipped on the port branch and without .multiversion/
     ok &= "layer-plan" not in plain and "layer-gates" not in plain and "neoforge-1.21.x" not in plain and 'branches: ["neoforge-1.21.1"]' in plain
     ok &= plain.endswith("modrinth-create --repo .\n") and "{{" not in plain.replace("${{", "")
     ok &= "{{" not in lay.replace("${{", "") and lay.count("\n  gates:\n") == 1
     ok &= lay.count('branches: ["neoforge-1.21.1", "neoforge-1.21.x"]') == 2
-    for j in ("layer-plan", "layer-isolation", "layer-inertness", "layer-compile", "layer-gates"):
+    for j in ("layer-plan", "layer-isolation", "layer-inertness", "layer-compile", "layer-gates", "layer-gates-extra"):
         ok &= f"\n  {j}:\n" in lay
     ljobs = lay.split("\n  layer-plan:\n", 1)[1]
     ok &= "github.ref_name == 'neoforge-1.21.x' || github.base_ref == 'neoforge-1.21.x'" in ljobs.split("steps:", 1)[0]
-    for j in ("layer-isolation", "layer-inertness", "layer-compile", "layer-gates"):
+    for j in ("layer-isolation", "layer-inertness", "layer-compile", "layer-gates", "layer-gates-extra"):
         body = ljobs.split(f"\n  {j}:\n", 1)[1].split("\n  layer-", 1)[0]
         ok &= "needs: layer-plan" in body and "needs.layer-plan.outputs.layer == 'true'" in body and not any("always()" in l for l in body.splitlines() if l.startswith("    if:"))
     ok &= "python3 .multiversion/tools/layer.py isolation --base \"origin/neoforge-1.21.1\"" in lay
     ok &= "layer-ci.py inertness" in lay and "layer-ci.py compile" in lay and "--mc \"$NEWEST\"" in lay
+    extra = ljobs.split("\n  layer-gates-extra:\n", 1)[1]
+    ok &= "has_full == 'true'" in extra.split("steps:", 1)[0] and "fromJson(needs.layer-plan.outputs.full_matrix)" in extra
     ok &= "fromJson(needs.layer-plan.outputs.matrix)" in lay and "java-version: ${{ matrix.java }}" in lay
     ok &= "run: |" in ljobs and "${{ needs" not in "\n".join(l for l in ljobs.splitlines() if l.lstrip().startswith(("python3", "extra=", "git fetch", "curl")))
     for bad in ("neoforge-1.21.1", "x y"):         # the port branch itself, or not a branch name

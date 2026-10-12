@@ -1,6 +1,6 @@
 # Shared fork-layer rename table: NeoForge 1.21.3 -> 1.21.4 (Minecraft 1.21.4; NeoForge 21.4). Applied AFTER the
 # fork's own rows and on top of the 1.21.3 table (a 1.21.4 target inherits 1.21.3). Measured against
-# neoforge-21.4.158-sources.jar on the Epic Core API port (issue #49). CATALOG §M / minor-version-deltas L8+.
+# neoforge-21.4.158-sources.jar on the first layer-fork port. CATALOG §M / minor-version-deltas L8+.
 #!exhaustive  shared table: most rows are for API this mod does not use
 # ---- client reload listeners: a named graph in 1.21.4
 net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent	net.neoforged.neoforge.client.event.AddClientReloadListenersEvent
