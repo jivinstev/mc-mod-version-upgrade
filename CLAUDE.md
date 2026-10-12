@@ -31,3 +31,9 @@ single-version. So:
   `tools/test-port-tools.sh` test (a layer-only assertion proves nothing about the default path).
 - `fork-versions`, `keep-current` and `publish-port` say in their first lines which kind of fork they are on and default
   to single-version; do not turn a single-version fork into a layer fork without being asked.
+
+## Merging
+
+Only the repository's human maintainer merges pull requests into main. An agent opens the PR, subscribes to it and
+drives it to green (CI, review comments), but never merges, approves or enables auto-merge on this repository -- even
+when every check is green and even when the merge is needed to publish a kit.

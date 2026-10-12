@@ -101,13 +101,18 @@ RELEASED gets the full gates too**: list it in the fork's `.multiversion/ci.prop
 
 and `layer-ci.py plan` gives it a `layer-gates-extra` job (the same `ci-gates.py --mc` the newest target gets; it is still
 compiled in the middle matrix). A name that is not a target fails the plan, so a typo cannot mean "no gates". The new job
-needs the Port CI kit that carries this `layer-ci.py` (a fork pinned to an older kit simply never runs it), and
+needs the Port CI kit that carries this `layer-ci.py` (a fork pinned to an older kit simply never runs it; the kit is published when the maintainer merges to main, so such a change waits for that merge), and
 `port-ci.py --layer-branch` regenerates the workflow that holds it. Take a target off the list when it stops being released.
 
 **One run per checkout (CATALOG X44).** `fork-port.py` takes `build/.fork-port.lock` (pid; a dead pid is stale and taken
 over) for its whole run and a second run on the same checkout is refused at once, exit 14, naming the holder; `ci-gates.py
 --mc <t>` takes the same lock (its parent's children are let through, so `fork-port.py`'s gates stage works). A run without
 `--mc` -- a single-version fork -- takes no lock. Delete the file by hand only if its pid is not really that run.
+
+**Spend guard.** The measure stage prints the starting error count; before the loop, `fork-port.py` refuses to start (exit 10,
+spend guard) when it exceeds `--max-errors` (default 100 per dollar of `--budget`; earlier hops cleared 76-144/$) unless
+`--confirm-spend` is given. A target that skips versions with shared libraries and has no `shared_chain` gets a warning
+naming them (use `--direct`).
 
 **A resume re-measures.** `fork-port.py --from-stage S` keeps the earlier stages' results for the summary but never their
 counts: the loop, the audit and the gates start from a compile count measured by THIS run, so a stale 0 cannot skip them.

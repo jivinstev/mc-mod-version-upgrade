@@ -4,7 +4,7 @@
 
     python3 tools/fork-port.py --repo DIR --target 1.21.5 [--budget 15] [--gates none|ab|full]
                                [--json out.json] [--from-stage <name>] [--base REF] [--modid ID] [--direct]
-                               [--self-check]
+                               [--max-errors N] [--confirm-spend] [--self-check]
 
 The fork-versions skill's procedure (steps 1-9) as stages, the way tools/run-port.py is the jar-port procedure.
 The orchestrating session starts this and then reads ONE summary (the last lines of stdout, the --json file, and
@@ -162,6 +162,29 @@ def shared_chain(mv, target):
     for x in names:
         extra += [s.strip() for s in read_props(mv / "targets" / x / "target.properties").get("shared_chain", "").split(",") if s.strip()]
     return sorted(set(names) | set(extra), key=mc_key, reverse=True) if extra else names
+
+
+SHARED_DIR = ROOT / "templates/fork-layer/shared"
+ERRORS_PER_DOLLAR = 100      # measured hops cleared 76-144 errors per dollar of workers (issue #49); the guard's default
+
+
+def skipped_shared(mv, target, shared_root=SHARED_DIR):
+    """Shared libraries (versions) strictly between what `target` inherits (or the base) and itself that its shared chain
+    does not include: a target that skips versions without `shared_chain` would miss their rows and helpers."""
+    ch = chain(mv, target)
+    low = ch[1] if len(ch) > 1 else read_props(mv / "base.properties").get("minecraft_version", "0")
+    have = set(shared_chain(mv, target))
+    vs = [p.name for p in shared_root.iterdir() if p.is_dir()] if shared_root.is_dir() else []
+    return sorted((v for v in vs if mc_key(low) < mc_key(v) < mc_key(target) and v not in have), key=mc_key)
+
+
+def spend_guard(errors, budget, max_errors=None, confirm=False):
+    """None, or the reason the loop must not start: more errors than the budget can plausibly clear."""
+    limit = max_errors if max_errors is not None else int(budget * ERRORS_PER_DOLLAR)
+    if confirm or errors is None or errors <= limit:
+        return None
+    return (f"{errors} errors against a ${budget:g} budget (limit {limit} = {ERRORS_PER_DOLLAR} errors per dollar, the measured "
+            f"range of earlier hops is 76-144)")
 
 
 def parse_modid(toml_text):
@@ -490,7 +513,11 @@ class Run:
         if n is None:
             return {"stop": "the compile does not count: " + why, "code": 10, "errors": None, "detail": [why],
                     "choices": ["read build/mc%s/fork-port/measure.log; fix what keeps javac from attributing" % self.t]}
-        return {"done": f"{n} error(s) across {len(tasks)} compile task(s)", "errors": n, "log": str(log), "this_run": True}
+        sk = skipped_shared(self.mv, self.t)
+        if sk:
+            self.say("measure", f"WARNING {self.t} skips shared librar{'y' if len(sk) == 1 else 'ies'} {', '.join(sk)} "
+                                f"and has no shared_chain: their rows and helpers are NOT applied (add-target --direct)")
+        return {"done": f"{n} error(s) across {len(tasks)} compile task(s) (starting count)", "errors": n, "log": str(log), "this_run": True}
 
     def error_view(self, log):
         cs = load("compile_summary", "compile-summary.py")
@@ -505,6 +532,15 @@ class Run:
         start = self.compile_errors()      # a count THIS run measured; a resume re-measures rather than trusting the last run's
         if start == 0:
             return {"skipped": "already at 0 errors", "errors": 0}
+        why = spend_guard(start, self.a.budget, self.a.max_errors, self.a.confirm_spend)
+        if why:
+            skipped = skipped_shared(self.mv, self.t)
+            return {"stop": "spend guard: " + why, "code": 10, "errors": start, "this_run": True,
+                    "detail": [why] + ([f"the target skips shared librar{'y' if len(skipped) == 1 else 'ies'} {', '.join(skipped)}: "
+                                        f"a direct jump needs shared_chain (add-target --direct)"] if skipped else []),
+                    "choices": [f"raise it on purpose: {self.resume_cmd('loop')} --confirm-spend (or --max-errors N / a larger --budget)",
+                                "a jump that skips versions: add shared_chain= (make-fork-layer.py add-target --direct) so the shared "
+                                "libraries clear most of these errors for free"]}
         flog = self.work / "file-loop.jsonl"
         out = self.work / "file-loop.out"
         r = self.sh([self.py, str(ROOT / "tools/file-loop.py"), "--work", str(self.repo), "--layer", self.t,
@@ -738,6 +774,8 @@ def main():
     ap.add_argument("--gates", default="ab", choices=["none", "ab", "full"])
     ap.add_argument("--json"); ap.add_argument("--from-stage"); ap.add_argument("--modid")
     ap.add_argument("--base", default="origin/neoforge-1.21.1", help="the authors' ref, for ci-gates.py --base")
+    ap.add_argument("--max-errors", type=int, help="the loop refuses to start above this many errors (default: 100 per dollar of --budget)")
+    ap.add_argument("--confirm-spend", action="store_true", help="start the loop although the error count exceeds the spend guard")
     ap.add_argument("--direct", action="store_true",
                     help="a NEW target that jumps: no inherits, shared_chain= pulls the shared library of every targeted version "
                          "in between (make-fork-layer.py add-target --direct); ignored when the target already exists")
@@ -916,7 +954,7 @@ def self_check():
             repo = pathlib.Path(d)
             (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
             a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m",
-                                    base="x", direct=False, from_stage=stage)
+                                    base="x", direct=False, from_stage=stage, max_errors=None, confirm_spend=False)
             run = Run(a_)
             run.jpath.parent.mkdir(parents=True, exist_ok=True)
             run.jpath.write_text(json.dumps({"started": "2026-01-01T00:00:00+00:00", "stages": {
@@ -965,6 +1003,38 @@ def self_check():
     # the single-run (no resume) path is untouched: the measure of THIS run is used as is
     stop, n_meas, cmds, _s = resumed("setup", fresh=0)
     expect(n_meas == 1 and stop is None or (stop and stop["stage"] != "measure"), "full run: one measure, then on")
+    # ---- spend guard and the skipped-shared warning
+    expect(spend_guard(900, 15) is None and spend_guard(1501, 15) and spend_guard(1501, 15, confirm=True) is None
+           and spend_guard(50, 0.1) and spend_guard(50, 0.1, max_errors=60) is None, "spend guard thresholds")
+    with tempfile.TemporaryDirectory() as d:
+        mv = pathlib.Path(d) / "mv"; sh = pathlib.Path(d) / "shared"
+        for v in ("1.21.3", "1.21.4", "1.21.5", "1.21.11"):
+            (sh / v).mkdir(parents=True)
+        (mv / "targets/1.21.11").mkdir(parents=True)
+        (mv / "base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (mv / "targets/1.21.11/target.properties").write_text("x=1\n", encoding="utf-8")
+        expect(skipped_shared(mv, "1.21.11", sh) == ["1.21.3", "1.21.4", "1.21.5"], "a jump without shared_chain names the skipped libraries")
+        (mv / "targets/1.21.11/target.properties").write_text("shared_chain=1.21.3,1.21.4,1.21.5\n", encoding="utf-8")
+        expect(skipped_shared(mv, "1.21.11", sh) == [], "shared_chain silences it")
+        (mv / "targets/1.21.4").mkdir(); (mv / "targets/1.21.4/target.properties").write_text("x=1\n", encoding="utf-8")
+        (mv / "targets/1.21.5").mkdir(); (mv / "targets/1.21.5/target.properties").write_text("inherits=1.21.4\n", encoding="utf-8")
+        expect(skipped_shared(mv, "1.21.5", sh) == [], "an ordinary hop (inherits the nearest lower target) skips nothing")
+    # the guard stops the loop stage before any worker runs
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        (repo / ".multiversion/base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
+                                direct=False, from_stage=None, max_errors=None, confirm_spend=False)
+        run = Run(a_); ran = []
+        run.s_measure = lambda: {"done": "x", "errors": 5000, "this_run": True}
+        run.summary["stages"]["measure"] = {"errors": 5000, "this_run": True}
+        run.sh = lambda *x, **k: ran.append(x)
+        res = run.s_loop()
+        expect(res.get("code") == 10 and "spend guard" in res["stop"] and not ran, "spend guard stops before file-loop runs")
+        a_.confirm_spend = True
+        run.sh = lambda *x, **k: (ran.append(x), CompletedProcess(x, 1, "", ""))[1]
+        run.s_loop()
+        expect(ran, "--confirm-spend lets the loop start")
     # ---- one run per checkout: a live holder refuses a second run (exit 14, naming it); a dead one is taken over
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d)
