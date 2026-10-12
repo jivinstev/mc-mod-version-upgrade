@@ -470,7 +470,7 @@ class Run:
         else:
             old_dir = self.repo / "build" / "moddev" / "artifacts"
         old = sorted(old_dir.glob("*merged.jar"))
-        if not old and len(ch) > 1:     # the previous layer target was never staged on this checkout
+        if not old:     # the previous target (or, on a direct jump / first target, the base) was never staged here
             self.sh([BASH, str(self.mv / "build.sh"), prev, "createMinecraftArtifacts", "--console=plain"],
                     self.work / "stage-prev.log")
             old = sorted(old_dir.glob("*merged.jar"))
