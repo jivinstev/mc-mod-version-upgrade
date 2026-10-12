@@ -66,6 +66,9 @@ def cmd_prepare(a):
             r = MV / "targets" / t / "renames.tsv"
             if r.exists():
                 rows.append(f"# ---- {t}\n" + r.read_text(encoding="utf-8"))
+            m = MV / "targets" / t / "moves.generated.tsv"   # tools/fork-port.py: derived from the staged jars
+            if m.exists():
+                rows.append(f"# ---- moves {t} (generated)\n" + m.read_text(encoding="utf-8"))
         for t in names:
             r = MV / "shared" / t / "renames.tsv"
             if r.exists():

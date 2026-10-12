@@ -363,6 +363,9 @@ grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one ho
 out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest" \
   || bad "layer.py self-check: $out"
+out="$(python3 tools/fork-port.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, the generated moves table (no duplicate froms, block closed), residue report, STOP block, layer.py patch" \
+  || bad "fork-port self-check: $out"
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"

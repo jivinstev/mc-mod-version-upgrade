@@ -41,6 +41,19 @@ ranges (`[1.21.3,1.21.4)`), so a skipped version is never claimed.
 - **Versions come from `-P`**: `.multiversion/build.sh <t> <tasks>` passes the target's set; `layer.gradle`
   refuses a `-Pmc` whose versions did not arrive.
 
+## Run the tool; handle only the residue
+
+`python3 tools/fork-port.py --repo DIR --target <t> [--budget 15] [--gates none|ab|full]` runs steps 2-7 below
+as stages (setup, stage, moves, measure, loop, audit, gates, cost) and prints one line per stage. It stops
+only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11 (Gate A/B), 12 (Gate C) or 13 (mixin
+audit), and `.multiversion/targets/<t>/RESIDUE.md` -- the remaining errors by CATALOG entry, what the compile
+loop tried (files still failing at the top model tier, rows it reverted), the audit mismatches or failing gates,
+and the `--from-stage` command that resumes. **You handle only what RESIDUE.md lists** -- do not read the build
+logs -- and **every fix you make goes into the shared library (`templates/fork-layer/shared/<t>`) or a converter,
+not into one fork** (step 8). The class moves between versions are generated, not written: `moves.generated.tsv`
+is rebuilt per fork per target from the two staged Minecraft jars and is never committed upstream as a map.
+The steps below are the reference for what each stage does and for fixing its residue by hand.
+
 ## Procedure
 
 0. **Read first**: CATALOG §M and `references/minor-version-deltas.md` (the U and L sections). The first layer
@@ -91,11 +104,9 @@ ranges (`[1.21.3,1.21.4)`), so a skipped version is never claimed.
 
 ## Models and cost
 
-Today the per-error loop of a layer target is done in the session itself. The pipeline's Haiku -> Sonnet -> Opus
-escalation (`tools/file-loop.py`) edits a work tree directly, which a layer forbids (fixes must become rows,
-helpers or overlays), so it cannot drive a layer target yet; that "layer mode" is the next tool to build. Until
-it exists, work the cheap mechanical buckets first (shared rows, then fork rows) and keep the session's context
-small -- most of a long session's cost is cache reads (`tools/context-profile.py` shows where).
+The per-error loop of a layer target is `tools/file-loop.py --layer <t>` (Haiku -> Sonnet -> Opus; a fix lands
+as a row in the target's renames.tsv or an overlay, never in the authors' tree), which `tools/fork-port.py` runs.
+Keep the session's own context small -- most of a long session's cost is cache reads (`tools/context-profile.py`).
 
 First measured target (Epic Core API, 1.21.1 -> 1.21.3, 282 -> 0 errors, 142 mixin targets, Gates A/B green):
 about $30 on Opus alone, ~1.3 h, covering the measurement of all lines, the layer tooling, the port and its gates.
