@@ -38,12 +38,6 @@ import net.minecraft.world.item.TooltipFlag;
 @@
 
 @@ old
-sp.teleportTo(server.overworld(), px, py, pz, yaw, pitch);
-@@ new
-sp.teleportTo(server.overworld(), px, py, pz, java.util.Set.of(), yaw, pitch, false);
-@@
-
-@@ old
             false,                 // hardcore
             Difficulty.NORMAL,     // NOT peaceful: hostile mobs would be culled instantly
             true,                  // allow commands

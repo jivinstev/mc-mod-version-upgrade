@@ -94,7 +94,8 @@ Each script prints its options with `--help`. Most also have `--self-check`, whi
 
 Both routes run the same deterministic stage after each hop's rename tables and before any worker sees an
 error (`tools/mechanical-hop.py`, called by `port.py` and `port-upstream.py`): on a Forge → 1.21.1 hop the
-access transformer, Forge code shapes, SimpleChannel → payloads and Holder fixes; on a 26.2 hop the member
+access transformer, Forge code shapes, SimpleChannel → payloads, MCreator variables, GUI overlays → layers, Forge
+capabilities → a mod-local compat layer wired into NeoForge (`tools/convert-capabilities.py`) and Holder fixes; on a 26.2 hop the member
 renames and the converters for GUI hooks, entity save/load, data attachments, changed hook signatures, tool tiers
 and armour, render types and shaders, entity render state and GeckoLib. A converter added there reaches both
 routes; `tools/test-port-tools.sh` fails if a route stops going through it. Two
@@ -220,6 +221,7 @@ author's permission. The MIT licence covers this tool, never the mods it ports.
 | [CATALOG.md](CATALOG.md) | The ~540 migration lessons: pattern → error → fix |
 | [SUPPORTED_VERSIONS.md](SUPPORTED_VERSIONS.md) | Which Minecraft versions are tested |
 | [docs/EVALS.md](docs/EVALS.md) | How much of a port the catalogue and its recipes cover, measured per port profile |
+| [docs/POPULARITY_SWEEP.md](docs/POPULARITY_SWEEP.md) | A zero-model run of the pipeline over 384 popular mods: how they were chosen, what it found, and the tools to repeat it (`tools/sweep/`) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | The safety gates, and sending back what your port taught |
 
 ## Licence

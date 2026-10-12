@@ -1,11 +1,63 @@
-// Lift javac's error cap for one build, so a count or a per-file share covers the WHOLE error list.
+// Get the WHOLE javac error list out of a build, without letting Gradle's own bookkeeping blow up on it.
 //
-// WHY: javac stops reporting at 100 errors by default ("only showing the first 100 errors, of N total"),
-// and a raw decompile of a mod has hundreds to thousands. A capped log under-counts and, worse, reports
-// only the files javac happened to reach first -- so any per-file or per-chunk share built from it is
-// noise. tools/burndown-count.sh refuses a capped log; this is the fix.
+// WHY THE CAP EXISTS AT ALL: javac stops reporting at 100 errors by default, and a raw decompile has hundreds
+// to thousands. A capped log under-counts and reports only the files javac reached first, so any per-file share
+// built from it is noise. tools/burndown-count.sh refuses a capped log.
+//
+// WHY THE CAP IS NOT SIMPLY LIFTED (measured, Gradle 9.3.1): Gradle turns every javac diagnostic into a
+// "Problem" and keeps them all, and each one's DETAILS carry the compiler output accumulated so far -- so the
+// total is QUADRATIC in the error count. A cap of 2,000 wrote a 266 MB build/reports/problems/problems-report.html
+// and finished in 56 s; lifting it on the same mod (2,448 errors in all) filled the daemon's 6 GB heap and hung --
+// the javac worker blocked forever writing its result back to a daemon that had stopped reading. Nothing failed
+// and nothing timed out but the caller, 40 minutes later. The same javac run directly finished in 10 s.
+//
+// SO: the Gradle-integrated compile is capped at PORT_GRADLE_CAP errors (cheap, and enough for every ordinary
+// port), and `portFullErrors` re-runs the SAME javac -- the task's own toolchain, classpath, sources and
+// arguments -- outside Gradle's diagnostics plumbing, uncapped, printing javac's own output. Callers run it only
+// when the capped compile hit the cap: tools/port_gates.py compile_log() does both and appends the recount to
+// the same log, so tools/burndown-count.sh reads one log either way. burndown-count refuses a log that hit the
+// cap with no recount.
 //
 // USE:  ./gradlew compileJava --console=plain --init-script ../../tools/maxerrs.init.gradle > first.log 2>&1
+//       ./gradlew portFullErrors -PportFullErrorsTasks=compileJava --init-script ../../tools/maxerrs.init.gradle
 // It applies after the build has configured its own javac options, so it wins over a port's own -Xmaxerrs.
-gradle.projectsEvaluated { gradle.rootProject.allprojects { tasks.withType(JavaCompile).configureEach {
-    options.compilerArgs += ['-Xmaxerrs', '100000', '-Xmaxwarns', '0'] } } }
+def PORT_GRADLE_CAP = '1000'
+gradle.projectsEvaluated { gradle.rootProject.allprojects { p ->
+    p.tasks.withType(JavaCompile).configureEach {
+        options.compilerArgs += ['-Xmaxerrs', PORT_GRADLE_CAP, '-Xmaxwarns', '0'] }
+    p.tasks.register('portFullErrors') { task ->
+        def names = (p.findProperty('portFullErrorsTasks') ?: 'compileJava').toString().split(',').collect { it.trim() }
+        def cts = names.collect { p.tasks.findByName(it) }.findAll { it instanceof JavaCompile }
+        cts.each { ct -> task.dependsOn(ct.taskDependencies) }   // prepared sources, staged artifacts -- not the compile
+        task.doLast {
+            def q = { String s -> '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"' }
+            cts.each { JavaCompile ct ->
+                def tmp = new File(p.layout.buildDirectory.get().asFile, "portFullErrors/${ct.name}")
+                tmp.deleteDir(); new File(tmp, 'classes').mkdirs(); new File(tmp, 'gen').mkdirs()
+                def args = ['-d', new File(tmp, 'classes').path, '-s', new File(tmp, 'gen').path]
+                def cp = ct.classpath.files.collect { it.path }.join(File.pathSeparator)
+                if (cp) args += ['-classpath', cp]
+                def ap = ct.options.annotationProcessorPath?.files
+                args += ap ? ['-processorpath', ap.collect { it.path }.join(File.pathSeparator)] : ['-proc:none']
+                if (ct.options.release.isPresent()) args += ['--release', ct.options.release.get().toString()]
+                else args += ['-source', ct.sourceCompatibility.toString(), '-target', ct.targetCompatibility.toString()]
+                if (ct.options.encoding) args += ['-encoding', ct.options.encoding]
+                def own = (ct.options.compilerArgs + ct.options.compilerArgumentProviders.collectMany { it.asArguments() as List }).collect { it.toString() }
+                for (int i = 0; i < own.size(); i++) {   // our cap and theirs, -Werror: the recount must not stop early
+                    def a = own[i]
+                    if (a in ['-Xmaxerrs', '-Xmaxwarns']) { i++; continue }
+                    if (a == '-Werror' || a.startsWith('-Xlint')) continue
+                    args << a
+                }
+                args += ['-Xmaxerrs', '100000', '-Xmaxwarns', '0']
+                args += ct.source.files.collect { it.path }
+                def argfile = new File(tmp, 'args.txt'); argfile.text = args.collect { q(it) }.join('\n')
+                def javac = ct.javaCompiler.get().executablePath.asFile.path
+                println "PORT_FULL_ERRORS ${ct.name}: uncapped javac over ${ct.source.files.size()} file(s)"
+                def proc = new ProcessBuilder(javac, '-J-Xmx4g', "@${argfile.path}").redirectErrorStream(true).start()
+                proc.inputStream.eachLine { println it }
+                println "PORT_FULL_ERRORS ${ct.name}: javac exit ${proc.waitFor()}"
+            }
+        }
+    }
+} }

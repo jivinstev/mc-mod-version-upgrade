@@ -145,6 +145,14 @@ python3 tools/zipls.py -p "$J" META-INF/MANIFEST.MF | grep -q '^Manifest-Version
   && ok "zipls -p prints a member" || bad "zipls -p"
 X="$T/zx"; python3 tools/zipls.py -o -q "$J" 'META-INF/*' -d "$X" && [ -f "$X/META-INF/MANIFEST.MF" ] \
   && ok "zipls extracts the matching members" || bad "zipls extract"
+# X170: a member table that fails to load made the fixer exit 1, which the hop read as "0 rewritten" for weeks
+for MT in tools/recipes/*members*.tsv; do
+  python3 -c "import importlib.util,sys; s=importlib.util.spec_from_file_location('m','tools/fix-missing-members.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.table(sys.argv[1])" "$MT" \
+    && ok "member table loads: $(basename "$MT")" || bad "member table does not load: $MT"
+done
+printf 'Item\tx\t{recv}.y(z)\n' > "$T/bad-members.tsv"
+python3 tools/fix-missing-members.py --src "$T" --log /dev/null --table "$T/bad-members.tsv" >/dev/null 2>&1 \
+  && bad "a broken member table must exit non-zero" || ok "a broken member table exits non-zero"
 if command -v unzip >/dev/null 2>&1 && ! grep -q "mc-mod-version-upgrade's setup" "$(command -v unzip)" 2>/dev/null; then
   [ "$(unzip -Z1 "$J")" = "$(python3 tools/zipls.py -Z1 "$J")" ] && ok "zipls -Z1 matches unzip -Z1" || bad "zipls differs from unzip"
 fi
@@ -276,6 +284,9 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "forge-shapes.py|forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib colour rewritten idempotently" \
             "fix-holders.py|fix-holders: the expression under javac's caret is unwrapped, retyped or resolved, never guessed" \
             "fix-missing-members.py|fix-missing-members: a moved member is renamed only where javac names its owner type (incl. record fields gone private)" \
+            "fix-block-codecs.py|fix-block-codecs: a concrete block subclass gets codec() -- simpleCodec when it has a (Properties) constructor" \
+            "convert-capabilities.py|convert-capabilities: Forge capability code keeps its shape through a compat layer wired into NeoForge" \
+            "convert-paintings.py|convert-paintings: a code-registered painting becomes a painting_variant data file + the placeable tag" \
             "convert-rendertypes.py|convert-rendertypes: a CompositeState becomes a pipeline + RenderSetup; reverse-Z depth, unknown shards refused" \
             "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
             "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
@@ -335,12 +346,12 @@ import pathlib, re, sys
 t = pathlib.Path("tools")
 mh = (t / "mechanical-hop.py").read_text(encoding="utf-8")
 listed = set(re.findall(r'"(convert-[\w-]+\.py)"', mh.split("CONVERTERS = [", 1)[1].split("]", 1)[0]))
-on_disk = {p.name for p in t.glob("convert-*.py")} - {"convert-simplechannel.py"}   # a 1.21.1 converter, not an era one
+forge = set(re.findall(r'"([\w-]+\.py)"', mh.split("FORGE_STEPS = [", 1)[1].split("]\n", 1)[0]))   # the 1.21.1 converters
+on_disk = {p.name for p in t.glob("convert-*.py")} - forge
 problems = []
 if on_disk - listed:
-    problems.append(f"era converters not in CONVERTERS (so neither route runs them): {sorted(on_disk - listed)}")
-shared = on_disk | {"convert-simplechannel.py", "forge-shapes.py", "fix-holders.py", "fix-access-transformer.py",
-                    "fix-missing-members.py"}
+    problems.append(f"converters in neither CONVERTERS nor FORGE_STEPS (so neither route runs them): {sorted(on_disk - listed)}")
+shared = on_disk | forge | {"fix-holders.py", "fix-access-transformer.py", "fix-missing-members.py", "fix-block-codecs.py"}
 needs = {"port-upstream.py": ["mh.run_stage(", "mh.run_forge_stage(", "mh.at_loop(", "mh.era_access_transformer("],
          "port.py": ['"--stage", "forge"', '"--stage", "era"']}
 for route, need in needs.items():
@@ -356,6 +367,20 @@ PY
 )"
 grep -q '^parity OK$' <<<"$out" && ok "port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs a stage tool itself; every era converter is listed" \
   || bad "route parity: $out"
+
+echo "burndown-count.sh: a log that hit the capped Gradle compile is refused unless recounted (X5g)"
+printf '> Task :compileJava FAILED\n/w/A.java:3: error: cannot find symbol\n1,000 errors\n' > "$T/gcap.log"
+bash tools/burndown-count.sh "$T/gcap.log" >/dev/null 2>&1; code=$?
+[ $code = 6 ] && ok "a Gradle compile stopped at its 1000-error cap is NOT a count (X5g)" || bad "gradle-capped log exited $code, wanted 6"
+printf '> Task :compileJava FAILED\n/w/A.java:3: error: cannot find symbol\n1,000 errors\nPORT_FULL_ERRORS compileJava: uncapped javac over 2 file(s)\n/w/A.java:3: error: cannot find symbol\n/w/B.java:9: error: cannot find symbol\n2 errors\nPORT_FULL_ERRORS compileJava: javac exit 1\n' > "$T/gfull.log"
+out="$(bash tools/burndown-count.sh "$T/gfull.log" 2>&1)"
+grep -q 'errors = 2 ' <<<"$out" && ok "the uncapped recount is read from the same log (union of unique file:line)" || bad "recounted log: $out"
+printf '> Task :compileJava\n/w/A.java:61: error: : expected\n1 error\n' > "$T/colon.log"
+bash tools/burndown-count.sh "$T/colon.log" >/dev/null 2>&1; code=$?
+[ $code = 4 ] && ok "javac's ': expected' (no quotes) is a parse abort, not a count of 1" || bad "colon-expected log exited $code, wanted 4"
+grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CAP = '1000'" tools/maxerrs.init.gradle \
+  && grep -q '1,?000 errors' tools/burndown-count.sh && grep -q '1,?000 errors' tools/file-loop.py \
+  && ok "the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count" || bad "the Gradle error cap disagrees between its four copies"
 
 out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges, add-target --direct writes shared_chain (default off)" \
