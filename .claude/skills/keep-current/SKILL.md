@@ -44,7 +44,11 @@ until its dependency's run is green, and it is then gated against the dependency
 ## Run (per fork, in fleet order)
 
 1. **Nothing new? Stop cheaply.** `port-sync.py --dry-run` for the authors' branch, and for each dependency
-   "has it a newer green build than the dependent pins?". No change anywhere: exit, no model work.
+   "has it a newer green build than the dependent pins?". For a fork with a `layer_branch`, also
+   `layer-sync.py detect --repo DIR --ref origin/<layer_branch> --port-ref origin/<branch>` after a `git fetch`:
+   `layer_behind=N` above 0 is new work even when the authors pushed nothing (a fix of ours, or a night whose layer
+   step did not run). Then skip steps 2-7 for that fork and go straight to "A fork with the layer", merging the port
+   branch itself. No change anywhere: exit, no model work.
 2. **Merge** on a work branch `keep-current/<date>` cut from the port branch: `port-sync.py` (a merge, never a
    rebase). Fetch immediately before merging and name the exact commit merged in the message, read from git
    (`git rev-parse --short <remote>/<branch>`), never from memory: the authors can push while a reconcile is

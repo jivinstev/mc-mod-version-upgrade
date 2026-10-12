@@ -107,9 +107,13 @@ def main():
         expect(r.returncode == 0 and "layer=true targets=1.21.4,1.21.5,1.21.8" in r.stdout
                and git(f, "rev-parse", "--abbrev-ref", "HEAD").strip() == "port", f"detect --ref reads the layer without checkout: {r.stdout}")
         expect(sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "nope").returncode == 2, "detect --ref unknown exits 2")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "layer", "--port-ref", "port")
+        expect(r.returncode == 0 and "layer_behind=0" in r.stdout, f"detect: a layer cut from the port branch owes nothing: {r.stdout}")
         git(f, "checkout", "-q", "layer")
         git(f, "checkout", "-q", "port")
         (f / "src/main/java/net/m/A.java").write_text("a2\n", encoding="utf-8"); git(f, "commit", "-qam", "upstream change")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "layer", "--port-ref", "port")
+        expect(r.returncode == 0 and "layer_behind=1" in r.stdout, f"detect counts the port commit the layer has not merged: {r.stdout}")
         git(f, "checkout", "-q", "layer")
         r = sh(sys.executable, str(LS), "merge", "--repo", str(f), "--port-ref", "port", "--layer-branch", "layer")
         expect(r.returncode == 0 and len(git(f, "rev-list", "--merges", "-1", "HEAD").split()) == 1, f"merge made a merge commit: {r.stdout}{r.stderr}")

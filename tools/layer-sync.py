@@ -160,7 +160,16 @@ def cmd_detect(a):
             return 2
     else:
         ts = layer_targets(repo)
-    print(f"layer={'true' if ts else 'false'}" + (f" targets={','.join(ts)}" if ts else ""))
+    behind = ""
+    if ts and a.ref and a.port_ref:
+        # Is the layer owed a merge? The port branch can move with nothing new upstream (a fix of ours, or a night whose
+        # layer step was skipped), so "anything new?" must ask this as well as asking the authors.
+        n = git(repo, "rev-list", "--count", f"{a.ref}..{a.port_ref}")
+        if n.returncode:
+            print(f"layer-sync: unknown ref {a.port_ref}")
+            return 2
+        behind = f" layer_behind={n.stdout.strip()}"
+    print(f"layer={'true' if ts else 'false'}" + (f" targets={','.join(ts)}" if ts else "") + behind)
     if ts or a.ref:
         return 0
     # The checked-out branch has no layer. On a single-version fork no branch has one either, so nothing changes; but
@@ -364,6 +373,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("detect"); p.add_argument("--repo", default=".")
     p.add_argument("--ref", help="read the layer from this branch/ref (the fleet's layer_branch) without checking it out")
+    p.add_argument("--port-ref", help="with --ref: also print layer_behind=N, the port-branch commits the layer has not merged")
     p = sub.add_parser("merge"); p.add_argument("--repo", default="."); p.add_argument("--port-ref", required=True)
     p.add_argument("--layer-branch")
     p = sub.add_parser("run"); p.add_argument("--repo", default="."); p.add_argument("--targets")
