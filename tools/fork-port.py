@@ -253,7 +253,7 @@ class Run:
 
     def artifacts(self):
         d = self.repo / "build" / f"mc{self.t}" / "moddev" / "artifacts"
-        return sorted(d.glob("*merged.jar")), sorted(d.glob("*sources.jar"))
+        return sorted(d.glob("*merged.jar")), sorted(j for j in d.glob("*-sources.jar") if "resources" not in j.name)
 
     def resume_cmd(self, stage):
         a = self.a
@@ -437,6 +437,11 @@ class Run:
         lines = (r.stdout or "").strip().splitlines()
         if r.returncode == 0:
             return {"done": (lines[-1] if lines else "all targets match")[:160]}
+        if r.returncode == 2 or any("NO TARGETS CHECKED" in l for l in lines):
+            # the audit looked at nothing: a scope fault in this run, never a verdict on the mixins (§X27)
+            return {"stop": "the mixin audit checked no targets (wrong jar or tree?) -- not a pass",
+                    "code": 13, "audit": lines[:8], "detail": lines[:4],
+                    "choices": ["fix the audit's inputs in tools/fork-port.py and resume with --from-stage audit"]}
         bad = [l for l in lines if re.search(r"mixin:|vanilla:|MISMATCH|no such", l)] or lines
         return {"stop": f"{len([l for l in lines if 'mixin:' in l]) or len(bad)} mixin target(s) do not match vanilla",
                 "code": 13, "audit": bad, "detail": bad[:6],
