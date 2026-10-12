@@ -281,6 +281,8 @@ def add_target(repo, a):
              f"prop.neo_version={a.neo}"]
     lines += [f"prop.{p}" for p in a.prop]
     lines += [f"toml.minecraft={mc_range}", f"toml.neoforge={neo_range}", f"java_version={a.java}"]
+    if ln.get("nfrt"):                # a NeoForm runtime newer than the authors' ModDevGradle brings (layer.gradle)
+        lines.append(f"nfrt_version={ln['nfrt']}")
     if a.inherits:
         lines.append(f"inherits={a.inherits}")
     if getattr(a, "direct", False):     # a jump: still pull the shared library of every targeted version in between
@@ -406,7 +408,7 @@ def self_check_26x():
             add_target(repo, ns(t))
         props = {t: (repo / f".multiversion/targets/{t}/target.properties").read_text(encoding="utf-8")
                  for t in ("1.21.11", "26.1.2", "26.2", "26.3")}
-        expect("java_version=21" in props["1.21.11"] and "substitute." not in props["1.21.11"]
+        expect("java_version=21" in props["1.21.11"] and "substitute." not in props["1.21.11"] and "nfrt" not in props["1.21.11"]
                and "prop.geckolib_version=5.4.5" in props["1.21.11"], "1.21.11 keeps Java 21, no substitution")
         for t, inh, neo, gl in (("26.1.2", "1.21.11", "26.1.2.116", "5.5.2"), ("26.2", "26.1.2", "26.2.0.90", "5.5.6"),
                                 ("26.3", "26.2", "26.3.0.76", "5.5.7")):
@@ -415,6 +417,7 @@ def self_check_26x():
                    and f"prop.geckolib_version={gl}" in p and "strip_onlyin=true" in p, f"{t} defaults: {p}")
             sub = f"substitute.software.bernie.geckolib\\:geckolib-neoforge-{t}=com.geckolib:geckolib-neoforge-{t}:{gl}\n"
             expect(sub in p, f"{t} GeckoLib group substitution: {p}")
+            expect(("nfrt_version=2.0.31\n" in p) == (t != "26.1.2"), f"{t} nfrt_version from versions.json: {p}")
         expect("toml.minecraft=[26.2,26.2.1)" in props["26.2"] and "toml.neoforge=[26.2,26.2.1)" in props["26.2"], "26.2 toml")
         try:
             add_target(repo, ns("26.1.1"))

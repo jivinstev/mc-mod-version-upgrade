@@ -68,7 +68,8 @@ beta-only NeoForge and are skipped). Three things differ, and `add-target` handl
 numbers 26.x by the whole Minecraft version (26.2 is NeoForge `26.2.0.B`, 26.1.2 is `26.1.2.B`), so every Minecraft
 release is its own line and both ranges stop at the next patch release (`[26.2,26.2.1)`, `[26.1.2,26.1.3)`); the
 target gets `java_version=25` (CATALOG §V1); and GeckoLib 5.5+ is published as `com.geckolib:geckolib-neoforge-<mc>`, so a
-fork that names `software.bernie.geckolib` gets an escaped `substitute.` line for it. The default chain is one hop on:
+fork that names `software.bernie.geckolib` gets an escaped `substitute.` line for it. 26.2 and 26.3 also get `nfrt_version=2.0.31`: the NeoForm runtime that ModDevGradle 2.0.146 brings (2.0.27)
+cannot stage NeoForge 26.2 at all, and `layer.gradle` sets the newer one without touching the authors' plugins block. The default chain is one hop on:
 26.1.2 inherits 1.21.11. Read CATALOG §V (the 1.21.1 -> 26.2 era jump) before porting a 26.x target; its rename table
 (`templates/multi-version/versions/26.2.renames.tsv`) is a 1.21.1 table, so most of what it does a 1.21.11 tree already
 has -- the shared libraries for 26.x start empty and grow from measured hops.

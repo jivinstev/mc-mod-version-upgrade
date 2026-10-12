@@ -98,6 +98,13 @@ def mvAt = mvChain.reverse().collect { file(".multiversion/targets/${it}/resourc
 if (mvAt != null) {
     neoForge.accessTransformers.files.setFrom(mvAt)
 }
+// nfrt_version=<v>: the NeoForm runtime that stages this target's Minecraft. Absent (every 1.21.x target): the one the
+// authors' ModDevGradle brings. Measured: MDG 2.0.146's NFRT 2.0.27 cannot stage NeoForge 26.2.0.90 (its own access
+// transformer widens HolderSet$Named.contents() and the recompile fails on an anonymous subclass); NFRT 2.0.31 (what
+// MDG 2.0.148 brings) stages it. Setting it here keeps the authors' plugins block untouched.
+if (mvProps.getProperty('nfrt_version')) {
+    neoFormRuntime.version = mvProps.getProperty('nfrt_version')      // a project extension of ModDevGradle's, not on neoForge
+}
 
 def mvRanges = mvProps.stringPropertyNames().findAll { it.startsWith('toml.') }.collectEntries { [(it.substring(5)): mvProps.getProperty(it)] }
 // mixin_add.<config file>=<array>:<Class>,<Class>;<array>:<Class> -- mixins that exist only on this target (and

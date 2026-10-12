@@ -13,7 +13,9 @@
     "geckolib: the GeckoLib release for that line (Modrinth, newest release for the line, measured 2026-10-12). geckolib_group:",
     "the Maven group it is published under when not the 1.21.x one -- from 5.5 GeckoLib publishes com.geckolib:geckolib-neoforge-<mc>",
     "on the same cloudsmith maven (software.bernie.geckolib:geckolib-neoforge-26.x is a 404, which reads as 'no 26.x build');",
-    "add-target turns it into a dependency substitution for a fork that names the old group."
+    "add-target turns it into a dependency substitution for a fork that names the old group.",
+    "nfrt: the NeoForm runtime layer.gradle stages that target with, when the one ModDevGradle 2.0.146 brings (2.0.27) cannot:",
+    "it fails NeoForge 26.2.0.90's own access transformer at recompile (measured 2026-10-12; 2.0.31, MDG 2.0.148's, stages it)."
   ],
   "base": "1.21.1",
   "lines": [
@@ -32,7 +34,7 @@
     {"mc": "26.1", "neo": null, "stable": false, "skip": "NeoForge 26.1.0 is beta-only (26.1.0.19-beta; superseded by 26.1.2)"},
     {"mc": "26.1.1", "neo": null, "stable": false, "skip": "NeoForge 26.1.1 is beta-only (26.1.1.15-beta; superseded by 26.1.2)"},
     {"mc": "26.1.2", "neo": "26.1.2.116", "stable": true, "java": 25, "geckolib": "5.5.2", "geckolib_group": "com.geckolib"},
-    {"mc": "26.2", "neo": "26.2.0.90", "stable": true, "java": 25, "geckolib": "5.5.6", "geckolib_group": "com.geckolib"},
-    {"mc": "26.3", "neo": "26.3.0.76", "stable": true, "java": 25, "geckolib": "5.5.7", "geckolib_group": "com.geckolib"}
+    {"mc": "26.2", "neo": "26.2.0.90", "stable": true, "java": 25, "nfrt": "2.0.31", "geckolib": "5.5.6", "geckolib_group": "com.geckolib"},
+    {"mc": "26.3", "neo": "26.3.0.76", "stable": true, "java": 25, "nfrt": "2.0.31", "geckolib": "5.5.7", "geckolib_group": "com.geckolib"}
   ]
 }
