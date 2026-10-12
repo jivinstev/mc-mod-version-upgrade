@@ -392,7 +392,8 @@ package net.neoforged.neoforge.client.event;
 public abstract class Stage { public static class After extends Stage {} }
 J
   (cd "$E" && javac -d classes $(find src -name '*.java') && jar cf fake.jar -C classes .) >/dev/null 2>&1
-  echo "$E/fake.jar" > "$E/cp.txt"
+  EW="$E"; command -v cygpath >/dev/null 2>&1 && EW="$(cygpath -m "$E")"   # python on Windows cannot open /tmp/... paths
+  echo "$EW/fake.jar" > "$E/cp.txt"
   cat > "$E/tree/a/b/Hook.java" <<'J'
 package a.b;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -404,17 +405,17 @@ public class Hook {
     private static void viaRef(Stage event) { }
 }
 J
-  out="$(python3 tools/audit-event-listeners.py "$E" --cp-file="$E/cp.txt" --tree="$E/tree" 2>&1)"; rc=$?
+  out="$(python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" 2>&1)"; rc=$?
   [ "$rc" = 1 ] && [ "$(grep -c 'is ABSTRACT' <<<"$out")" = 2 ] \
     && ok "audit-event-listeners: the abstract parameter is reported for the annotated listener AND the Cls::method one" \
     || bad "audit-event-listeners did not report both abstract listeners (rc=$rc): $out"
   sed -i 's/Stage event) { if (!(event instanceof Stage.After)) return; }/Stage.After event) { }/; s/viaRef(Stage event)/viaRef(Stage.After event)/' "$E/tree/a/b/Hook.java"
-  out="$(python3 tools/audit-event-listeners.py "$E" --cp-file="$E/cp.txt" --tree="$E/tree" 2>&1)"; rc=$?
+  out="$(python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" 2>&1)"; rc=$?
   [ "$rc" = 0 ] && grep -q 'checked 2 event listener' <<<"$out" \
     && ok "audit-event-listeners: naming the concrete subclass passes, with the listener count printed" \
     || bad "audit-event-listeners failed the fixed listeners (rc=$rc): $out"
   echo 'package a.b; public class Empty {}' > "$E/tree/a/b/Hook.java"
-  python3 tools/audit-event-listeners.py "$E" --cp-file="$E/cp.txt" --tree="$E/tree" >/dev/null 2>&1; rc=$?
+  python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" >/dev/null 2>&1; rc=$?
   [ "$rc" = 2 ] && ok "audit-event-listeners: zero listeners checked exits 2, never a pass" \
     || bad "audit-event-listeners zero-listener exit was $rc, expected 2"
 else
