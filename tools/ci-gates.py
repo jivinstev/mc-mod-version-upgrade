@@ -151,12 +151,17 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", default="."); ap.add_argument("--modid", required=True)
     ap.add_argument("--base", help="the author's ref (mixins they left unlisted stay exempt from Gate A)")
-    ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet", help="Gate C phases; '' skips Gate C")
+    ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet", help="Gate C phases; '' or 'none' skips Gate C")
     ap.add_argument("--summary", default="ci-gates-summary.md"); ap.add_argument("--work-dir")
     ap.add_argument("--skip-author-build", action="store_true")
     ap.add_argument("--env", choices=("full", "minimal"), default="full",
                     help="full: every mod the build puts on the runtime; minimal: only what neoforge.mods.toml "
                          "requires (optional integrations and dev-only mods removed from the runtime, not the compile)")
+    ap.add_argument("--shipped", action="store_true",
+                    help="also boot the BUILT jar in a real NeoForge server and read the mod's own logs (tools/shipped-gate.py); "
+                         "expectations come from the fork's .multiversion/shipped-expect[-<target>].txt")
+    ap.add_argument("--shipped-jar", help="glob (under the build's libs dir) naming the jar a player installs; default: "
+                                          ".multiversion/shipped-jar.txt, else the only jar there")
     ap.add_argument("--mc", help="a Minecraft target of the fork's multi-version layer (.multiversion/targets/<mc>); "
                                  "every Gradle call of the run then builds that target")
     a = ap.parse_args()
@@ -251,7 +256,7 @@ def main():
 
     env = dict(os.environ, **pu.gate_env(c))
     for label, extra in [("Gate B -- headless server loads the mod, GameTests", [])] + \
-            [(f"Gate C -- real client, `{p}`", ["--gatec", p]) for p in filter(None, a.gatec.split(","))]:
+            [(f"Gate C -- real client, `{p}`", ["--gatec", p]) for p in (q for q in a.gatec.split(",") if q and q != "none")]:
         if not ok:
             rows.append(f"| {label} | not run | an earlier gate failed |")
             continue
@@ -294,6 +299,41 @@ def main():
                 record("Data loads -- the server rejected none of the mod's data files", not bad,
                        f"{len(bad)} rejected, e.g. {bad[0]}" if bad else "no rejection logged")
         record(label, r.returncode == 0, detail)
+
+    if a.shipped:
+        if not ok:
+            rows.append("| Shipped jar -- the built jar boots in a real server | not run | an earlier gate failed |")
+        else:
+            libs = bdir / "libs"
+            pat = a.shipped_jar or ((repo / ".multiversion/shipped-jar.txt").read_text(encoding="utf-8").split() or [""])[0] \
+                if (a.shipped_jar or (repo / ".multiversion/shipped-jar.txt").is_file()) else None
+            found = sorted(libs.glob(pat)) if pat and libs.is_dir() else (sorted(libs.glob("*.jar")) if libs.is_dir() else [])
+            label = "Shipped jar -- the built jar boots in a real server, the mod's own logs show its subsystems ran"
+            if len(found) != 1:
+                record(label, False, f"cannot tell which jar a player installs: {len(found)} match(es) in {libs}"
+                                     f"{' for ' + pat if pat else ''}; pass --shipped-jar GLOB or write .multiversion/shipped-jar.txt")
+            else:
+                cmd = [sys.executable, str(ROOT / "tools/shipped-gate.py"), "--repo", str(repo), "--jar", str(found[0]),
+                       "--work-dir", str(work / "shipped")]
+                if a.mc:
+                    cmd += ["--mc", a.mc]
+                else:
+                    gp = repo / "gradle.properties"
+                    m = re.search(r"^neo_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8"), re.M) if gp.is_file() else None
+                    if m:
+                        cmd += ["--neo", m.group(1)]
+                    for n in ("shipped-expect.txt",):
+                        if (repo / ".multiversion" / n).is_file():
+                            cmd += ["--expect-file", str(repo / ".multiversion" / n)]
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
+                (work / "shipped-gate.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+                print(r.stdout[-4000:], flush=True)
+                rl = [l.replace("[shipped-gate] ", "") for l in r.stdout.splitlines() if "FAIL" in l or "PASS" in l]
+                bad = [l for l in rl if l.startswith("FAIL")]
+                record(label, r.returncode == 0,
+                       f"{found[0].name}: " + ("; ".join(l[:160] for l in bad[:2]) + f" (see {work / 'shipped-gate.log'})" if bad
+                                                  else f"{len([l for l in rl if l.startswith('PASS')])} check(s) green"
+                                                       if r.returncode == 0 else (r.stdout + r.stderr).strip().splitlines()[-1][:200]))
 
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                           encoding="utf-8").stdout.strip()

@@ -592,6 +592,8 @@ class Run:
                self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates")]
         if self.a.gates == "ab":
             cmd += ["--gatec", ""]
+        if any((self.repo / ".multiversion").glob("shipped-expect*.txt")):    # the fork lists what its shipped jar must log
+            cmd += ["--shipped"]
         r = self.sh(cmd, self.work / "ci-gates.log")
         lines = (self.work / "ci-gates.log").read_text(encoding="utf-8", errors="replace").splitlines()
         rows = [re.sub(r"^\[ci-gates\] ", "", l) for l in lines if l.startswith("[ci-gates]") and ": " in l]

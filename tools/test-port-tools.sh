@@ -422,6 +422,17 @@ else
 fi
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause" || bad "gate-loop self-check: $out"
+out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick and crash-cause self-check" || bad "shipped-gate self-check: $out"
+python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
+printf 'x' > "$T/notjar.jar"; python3 tools/shipped-gate.py --jar "$T/notjar.jar" --neo 21.1.228 >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a file that is not a jar exits 2" || bad "shipped-gate non-jar exit"
+python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1],'w').writestr('a','b')" "$T/ok.jar"
+python3 tools/shipped-gate.py --jar "$T/ok.jar" --neo 21.1.228 --expect-log 'bad/path:x' >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a malformed --expect-log exits 2 before anything is downloaded" || bad "shipped-gate bad expectation exit"
+python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"
+import re,sys
+src=open("tools/ci-gates.py").read()
+assert 'if q and q != "none"' in src
+PY
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
