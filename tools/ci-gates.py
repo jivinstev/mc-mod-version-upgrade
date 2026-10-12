@@ -157,11 +157,23 @@ def main():
     ap.add_argument("--env", choices=("full", "minimal"), default="full",
                     help="full: every mod the build puts on the runtime; minimal: only what neoforge.mods.toml "
                          "requires (optional integrations and dev-only mods removed from the runtime, not the compile)")
+    ap.add_argument("--mc", help="a Minecraft target of the fork's multi-version layer (.multiversion/targets/<mc>); "
+                                 "every Gradle call of the run then builds that target")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
+    if a.mc:
+        layer = repo / ".multiversion/tools/layer.py"
+        if not (repo / ".multiversion/targets" / a.mc).is_dir() or not layer.is_file():
+            print(f"[ci-gates] --mc {a.mc}: no .multiversion/targets/{a.mc} in {repo}", flush=True)
+            return 2
+        props = subprocess.run([sys.executable, str(layer), "props", "--target", a.mc], capture_output=True,
+                               text=True, encoding="utf-8", check=True).stdout
+        os.environ["PORT_GRADLE_ARGS"] = props
+        print(f"[ci-gates] multi-version target {a.mc}: " + " ".join(props.split()), flush=True)
     work = pathlib.Path(a.work_dir or tempfile.mkdtemp(prefix="port-ci-")).resolve()
     work.mkdir(parents=True, exist_ok=True)
     pu, ss = _load("port_gates", "port_gates.py"), _load("srcsets", "srcsets.py")
+    bdir = repo / pu.build_dir_name()
     c = {"repo": repo, "dir": work, "args": types.SimpleNamespace(modid=a.modid, base=a.base)}
     rows, ok = [], True
 
@@ -192,7 +204,7 @@ def main():
     if not a.skip_author_build and a.env == "full":
         jars = ss.author_jar_tasks(repo)
         r = pu.gradle(repo, ["build", *jars], work / "author-build.log")
-        built = sorted(p.name for p in (repo / "build/libs").glob("*.jar")) if (repo / "build/libs").is_dir() else []
+        built = sorted(p.name for p in (bdir / "libs").glob("*.jar")) if (bdir / "libs").is_dir() else []
         passed = r.returncode == 0 and bool(built)
         if not passed:   # the reason, on the run page -- the log itself is only in the downloadable artifact
             log = (work / "author-build.log").read_text(encoding="utf-8", errors="replace")
@@ -227,7 +239,7 @@ def main():
     if ok and a.env == "minimal" and ex:
         # Before booting anything: does code the minimal run will load need a mod it leaves out?
         jars = [path for coord, path in arts if coord in ex]
-        cls = repo / "build/classes/java/main"
+        cls = bdir / "classes/java/main"
         r = subprocess.run([sys.executable, str(ROOT / "tools/optional-dep-scan.py"), "--classes", str(cls),
                             *[x for j in jars for x in ("--jar", j)]],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -285,7 +297,7 @@ def main():
 
     head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                           encoding="utf-8").stdout.strip()
-    md = [f"Gates for `{a.modid}` at `{head}` ({a.env} environment) -- run by CI with no model and no fixes applied:", "",
+    md = [f"Gates for `{a.modid}` at `{head}`{f' for Minecraft {a.mc}' if a.mc else ''} ({a.env} environment) -- run by CI with no model and no fixes applied:", "",
           "| check | result | detail |", "|---|---|---|", *rows, "",
           "Not covered by any automated gate: gameplay by a person."]
     pathlib.Path(a.summary).write_text("\n".join(md) + "\n", encoding="utf-8")

@@ -108,6 +108,8 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
     # (templates/upstream-harness/gates.init.gradle; tools/port-upstream.py sets this)
     for extra in filter(None, os.environ.get("PORT_GRADLE_INIT", "").split(os.pathsep)):
         cmd += ["--init-script", extra]
+    # a fork's multi-version layer: the target's -P set (tools/ci-gates.py --mc), newline-separated
+    cmd += [x for x in os.environ.get("PORT_GRADLE_ARGS", "").splitlines() if x.strip()]
     env = dict(os.environ)
     if phase:   # Gate C: a real client; headless Linux gets Xvfb + Mesa's software GL (OpenGL 4.5 core)
         cmd += ["-Pboottest", f"-Ptestmode={phase}", "--no-daemon"]

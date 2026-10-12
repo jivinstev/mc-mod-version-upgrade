@@ -35,7 +35,24 @@ def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
     cmd = ["bash", "gradlew", "--console=plain", "-I", str(ROOT / "tools/central-mirror.init.gradle")]
     for i in extra_init:
         cmd += ["-I", str(i)]
+    # a fork's multi-version layer builds another Minecraft from the same tree (.multiversion/build.sh's -P set,
+    # which tools/ci-gates.py --mc puts here); every Gradle call of a gate run must carry it, or the run tests 1.21.1
+    cmd += gradle_target_args(env)
     return sh(cmd + list(args) + ["-Dorg.gradle.jvmargs=-Xmx6g"], cwd=repo, env=env, timeout=timeout, log=log)
+
+
+def build_dir_name(env=None):
+    """The build directory of this run: a fork layer builds target <t> into build-mc<t>/ (layer.gradle)."""
+    for a in gradle_target_args(env):
+        if a.startswith("-Pmc="):
+            return "build-mc" + a[len("-Pmc="):]
+    return "build"
+
+
+def gradle_target_args(env=None):
+    """PORT_GRADLE_ARGS: extra Gradle arguments for every call of a gate run, newline-separated."""
+    raw = (env if env is not None else os.environ).get("PORT_GRADLE_ARGS", "")
+    return [a for a in raw.splitlines() if a.strip()]
 
 
 def tgt(c):
@@ -115,7 +132,49 @@ def harness(c):
         (h / "test" / pkg.replace(".", "/") / "MixinConfigIntegrityTest.java").write_text(t, encoding="utf-8")
     if tg.gametest == "registration":
         harness_registration(c, h, pkg)
+    layer = layer_target()
+    if layer:
+        harness_layer_target(h, layer)
     return h
+
+
+def layer_target(env=None):
+    """The Minecraft target a fork's multi-version layer builds in this run (-Pmc in PORT_GRADLE_ARGS), or None."""
+    for a in gradle_target_args(env):
+        if a.startswith("-Pmc="):
+            return a[len("-Pmc="):]
+    return None
+
+
+def harness_table(mc, seen=()):
+    """templates/upstream-harness/versions/<mc>.renames.tsv, with any `#!inherit <mc>` line expanded in place."""
+    p = ROOT / "templates/upstream-harness/versions" / f"{mc}.renames.tsv"
+    if not p.is_file():
+        raise Fail(f"the gate harness has no rename table for Minecraft {mc} "
+                   f"(templates/upstream-harness/versions/{mc}.renames.tsv): it is written for 1.21.1")
+    if mc in seen:
+        raise Fail(f"#!inherit loop at {mc}")
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#!inherit "):
+            out.append(harness_table(line.split()[1], (*seen, mc)))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def harness_layer_target(h, mc):
+    """A fork's multi-version layer builds the author's tree for another 1.21.x; the harness (written for 1.21.1)
+    gets that target's own rename table, the same mechanism as the layer's."""
+    table = h.parent / f"harness-{mc}.renames.tsv"
+    table.write_text(harness_table(mc) + "\n", encoding="utf-8")
+    out = h / "java.renamed"
+    r = subprocess.run([sys.executable, str(ROOT / "templates/multi-version/tools/prepare-sources.py"), "--src",
+                        str(h / "java"), "--renames", str(table), "--out", str(out)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode:
+        raise Fail(f"renaming the harness for {mc} failed: {(r.stderr or r.stdout)[-400:]}")
+    shutil.rmtree(h / "java"); out.rename(h / "java")
 
 
 def read_patch(text):
@@ -194,7 +253,7 @@ def gate_a(c, log):
         raise Fail(f"mixin config(s) declared in no neoforge.mods.toml [[mixins]] -- they never load: {lost}")
     env = gate_env(c)
     r = gradle(c["repo"], ["test"], log, extra_init=[env["PORT_GRADLE_INIT"]], env=env)
-    res = list((c["repo"] / "build/test-results/test").glob("*.xml"))
+    res = list((c["repo"] / build_dir_name() / "test-results/test").glob("*.xml"))
     ran = sum(int(m) for f in res for m in re.findall(r'tests="(\d+)"', f.read_text(encoding="utf-8")))
     bad = sum(int(m) for f in res for m in re.findall(r'(?:failures|errors)="(\d+)"', f.read_text(encoding="utf-8")))
     if r.returncode or bad:

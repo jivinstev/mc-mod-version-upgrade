@@ -1,0 +1,13 @@
+# The gate harness (BaselineGameTest, DataLivenessGameTest, ClientBootSmokeTest) for a fork's multi-version layer
+# target 1.21.3 (NeoForge 21.3), applied by tools/port_gates.py when the gate run builds -Pmc=1.21.3.
+# Format: tools/prepare-sources.py (plain type rows, member:, re:). Measured against neoforge-21.3.97-sources.jar.
+net.minecraft.world.entity.MobSpawnType	net.minecraft.world.entity.EntitySpawnReason
+MobSpawnType	EntitySpawnReason
+member:registryOrThrow	lookupOrThrow
+re:\.getToasts\(\)	.getToastManager()
+re:Entity e = type\.create\(level\);	Entity e = type.create(level, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED);
+re:sp\.teleportTo\(server\.overworld\(\), px, py, pz, yaw, pitch\)	sp.teleportTo(server.overworld(), px, py, pz, java.util.Set.of(), yaw, pitch, true)
+re:new GameRules\(\),	new GameRules(net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS),
+re:Function<RegistryAccess, WorldDimensions>	Function<net.minecraft.core.HolderLookup.Provider, WorldDimensions>
+re:armor\.getEquipmentSlot\(\)	armor.getEquipmentSlot(new ItemStack(item))
+re:BuiltInRegistries\.MOB_EFFECT\.holders\(\)	BuiltInRegistries.MOB_EFFECT.listElements()
