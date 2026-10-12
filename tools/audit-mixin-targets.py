@@ -202,6 +202,15 @@ def matches(vanilla, want, want_return=None):
     return want_return is None or same(vanilla_return, want_return)
 
 
+def ci_kind(params):
+    """'CallbackInfo' / 'CallbackInfoReturnable' as named by a handler's parameters, else None."""
+    for prm in params:
+        ty = simple(prm.rsplit(" ", 1)[0])
+        if ty in ("CallbackInfo", "CallbackInfoReturnable"):
+            return ty
+    return None
+
+
 def show(decl):
     """A vanilla declaration as it reads in a report line."""
     return "%s (%s)" % (decl[0], ", ".join(decl[1]))
@@ -720,8 +729,20 @@ def main():
                 r'[@\w.<>\[\], ?]+\s+[\w$]+\s*\((?P<params>[^)]*)\)', s):
             ann = mm.group("ann")
             spec = re.search(r'method\s*=\s*\{?\s*"([^"]+)"', ann)
-            if not spec or "(" in spec.group(1):
-                continue                  # no target, or a pinned descriptor the block below reads
+            if not spec:
+                continue                  # no target
+            if "(" in spec.group(1):
+                # Pinned descriptor: the block below compares parameters and return. FAULT #24
+                # (below) needs the HANDLER's callback kind checked against that return too.
+                pname, pdesc = strip_owner(spec.group(1)).split("(", 1)
+                pret = parse_return("(" + pdesc)
+                ci = ci_kind(split_params(mm.group("params")))
+                if (ci and pret and not pname.startswith("lambda$")
+                        and pname not in ("<init>", "<clinit>") and "*" not in pname
+                        and (ci == "CallbackInfoReturnable") != (pret != "void")):
+                    problems.append((rel, "@Inject " + pname + " (callback kind)",
+                                     ci, "target returns " + pret))
+                continue                  # the parameter comparison is the block below
             name = strip_owner(spec.group(1))
             # `<clinit>` joins `<init>` here: a class initializer is not a declared method in
             # source, so `declarations()` can never find one and every @Inject into a static
@@ -763,6 +784,14 @@ def main():
             elif not any(matches(d, want) for d in decls):
                 problems.append((rel, "@Inject " + name, "(%s)" % ", ".join(want),
                                  " | ".join(show(d) for d in decls)))
+            # FAULT #24 (§X27): Mixin also requires the callback to be CallbackInfo for a void
+            # target and CallbackInfoReturnable otherwise -- `CallbackInfoReturnable is required!`.
+            ci = ci_kind(params)
+            cand = [d for d in decls if not want or matches(d, want)]
+            if ci and cand and all((ci == "CallbackInfoReturnable") != (d[0] != "void")
+                                   for d in cand):
+                problems.append((rel, "@Inject " + name + " (callback kind)", ci,
+                                 " | ".join(show(d) for d in cand)))
 
         # ── @Inject / @Redirect / @ModifyVariable targets carrying an explicit descriptor ──
         # ⚠ The pattern here was `r'method = \{?"([^"]+)"'` -- single literal spaces, and the

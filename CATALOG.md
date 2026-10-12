@@ -5104,6 +5104,17 @@ the class Mixin really targets (`Outer$Inner`, also for a nested class reached t
 both ways on a 1.21.4 fork layer: 146 checked with 1 false mismatch became 148 checked and clean (Gate C
 `launch` confirmed the mixin applies), and a planted `@At` is still caught, naming the inner class's real call.
 
+⚠ **AUGMENT — fault TWENTY-FOUR: the callback KIND was never compared with the target's return.** The
+name-only branch (fault #10) compared the handler's parameters up to its `CallbackInfo` and then ignored
+which `CallbackInfo` it was. Mixin also requires `CallbackInfo` for a `void` target and
+`CallbackInfoReturnable` otherwise (`Invalid descriptor ... CallbackInfoReturnable is required!`), so a
+target whose return type changed under a stable name and parameters (R17 shape (f): 1.21.8's
+`SoundManager.play(SoundInstance)` went `void` -> `SoundEngine.PlayResult`) passed as "all targets match"
+and killed the client at mixin apply. Both the name-only and the pinned-descriptor `@Inject` now check it.
+A/B'd: the unported 1.21.8 prepared tree reports `SoundManagerMixin @Inject play (callback kind)`
+(mixin `CallbackInfo`, vanilla `PlayResult (SoundInstance)`); after the overlay it is clean; zero new
+findings on 1.21.1, 1.21.3, 1.21.4 and 1.21.5.
+
 **The fix that makes the next one visible is neither of those: `checked == 0` now EXITS 2 and says
 "NO TARGETS CHECKED -- this is NOT a pass."** Six independent faults in one instrument, five of
 which reported *all targets match*, is not six unlucky bugs — it is one missing invariant, and the
