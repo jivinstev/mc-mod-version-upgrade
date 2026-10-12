@@ -22,7 +22,9 @@ Stages, each logged as one line and skipped with a reason when it does not apply
   loop     file-loop.py --layer <t> --budget N (its kept rows land in the target's renames.tsv)
   audit    audit-mixin-targets.py against the target's sources jar and prepared tree, then audit-event-listeners.py (abstract
            events) over every prepared tree against the target's resolved classpath (only at 0 errors)
-  gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases
+  gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases. After a green run, the
+           mod's own log files (harness/run/logs, minus vanilla's) are compared with the inherited target's last gate run: a file
+           it wrote there and not here is residue (exit 11) -- a subsystem stopped running (CATALOG X47)
   cost     port-cost.py --target <t> --since <start of this port> appended to targets/<t>/COST.md
 
 THE STOP CONTRACT. When a stage cannot finish this does not hand the rest to anyone silently: it prints a
@@ -77,6 +79,32 @@ def gate_evidence(text, limit=4):
         if len(out) >= limit:
             break
     return out
+
+
+def mod_log_files(d):
+    """The log files the MOD wrote in a Gate B run's logs/ directory: every regular file except vanilla's own
+    latest.log / debug.log, the dated archives log4j rolls them into (2026-10-12-1.log.gz), and crash dumps.
+    set() when the directory is absent."""
+    d = pathlib.Path(d)
+    if not d.is_dir():
+        return set()
+    out = set()
+    for f in d.iterdir():
+        n = f.name
+        if not f.is_file() or n in ("latest.log", "debug.log") or n.endswith(".gz"):
+            continue
+        if re.match(r"^\d{4}-\d{2}-\d{2}-\d+\.log$", n) or n.startswith("crash-"):
+            continue
+        out.add(n)
+    return out
+
+
+def lost_log_files(prev_dir, cur_dir, known_absent=()):
+    """Log files the mod wrote on the previous target and did not write on this one (CATALOG X47), minus the ones
+    the fork has recorded as deliberately gone. [] when there is no previous run to compare with."""
+    if prev_dir is None or not pathlib.Path(prev_dir).is_dir():
+        return []
+    return sorted(mod_log_files(prev_dir) - mod_log_files(cur_dir) - set(known_absent))
 
 
 def select_stages(from_stage):
@@ -570,7 +598,16 @@ class Run:
         failed = [l for l in rows if re.search(r": FAIL\b", l)]
         passed = [l for l in rows if re.search(r": PASS\b", l)]
         if r.returncode == 0:
-            return {"done": f"{len(passed)} gate(s) green ({self.a.gates})"}
+            lost, prev = self.lost_logs()
+            if lost:
+                msg = "; ".join(f"the mod wrote {f} on {prev} and not on {self.t}: a subsystem stopped running" for f in lost)
+                return {"stop": f"gates green but {msg}", "code": 11, "gates": [f"log file {f} (written on {prev}, absent on {self.t})" for f in lost],
+                        "detail": [msg[:240]],
+                        "choices": ["find what writes that file (grep the source for its name), and why it no longer runs on this target "
+                                    "(CATALOG X47: a registration the new loader ignores is the usual cause)",
+                                    "if the file is gone on purpose, list it in .multiversion/targets/%s/logs-known-absent.txt with the reason" % self.t]}
+            note = f"; log files match {prev}" if prev else ""
+            return {"done": f"{len(passed)} gate(s) green ({self.a.gates}){note}"}
         code = 12 if any("Gate C" in l for l in failed) else 11
         evidence = []       # why each red gate is red: its own log's first compile errors / failing tests
         for l in failed[:2]:
@@ -582,6 +619,18 @@ class Run:
                 "gates": [l[:200] for l in failed], "detail": [l[:200] for l in failed[:4]] + [e[:240] for e in evidence],
                 "choices": ["run the same gates without --mc as the control: a red that is red on the base is not this target's",
                             "read build/mc%s/fork-port/ci-gates.log and the gate's own log" % self.t]}
+
+    def lost_logs(self):
+        """(files, previous target) -- the mod's own log files from the inherited target's last gate run that this run lacks."""
+        inh = read_props(self.tdir / "target.properties").get("inherits")
+        if not inh:
+            return [], None
+        prev = self.repo / "build" / f"mc{inh}" / "fork-port" / "gates" / "harness" / "run" / "logs"
+        if not prev.is_dir():
+            return [], None
+        known = pathlib.Path(self.tdir / "logs-known-absent.txt")
+        absent = [l.split("#", 1)[0].strip() for l in known.read_text(encoding="utf-8").splitlines()] if known.is_file() else []
+        return lost_log_files(prev, self.work / "gates" / "harness" / "run" / "logs", [a for a in absent if a]), inh
 
     def s_cost(self):
         modid = self.modid()
@@ -739,6 +788,20 @@ def self_check():
     expect(ev == ["eca/gatetest/BaselineGameTest.java:15: cannot find symbol",
                   "net/eca/Other.java:9: incompatible types: A cannot be converted to B"], "gate_evidence compile errors: %s" % ev)
     expect(gate_evidence("> Task :test FAILED\n")[0].endswith("FAILED") and gate_evidence("all fine") == [], "gate_evidence tests/none")
+    # CATALOG X47: the mod's own log files, compared between the inherited target and this one
+    with tempfile.TemporaryDirectory() as d:
+        prev, cur = pathlib.Path(d, "prev"), pathlib.Path(d, "cur")
+        for n in ("latest.log", "debug.log", "2026-10-12-1.log.gz", "2026-10-12-2.log", "EcaBootstrap.log", "EcaAgent.log"):
+            (prev.mkdir(exist_ok=True) or prev / n).write_text("x")
+        for n in ("latest.log", "debug.log"):
+            (cur.mkdir(exist_ok=True) or cur / n).write_text("x")
+        expect(mod_log_files(prev) == {"EcaBootstrap.log", "EcaAgent.log"}, "mod_log_files skips vanilla's and the dated archives: %s" % mod_log_files(prev))
+        expect(lost_log_files(prev, cur) == ["EcaAgent.log", "EcaBootstrap.log"], "A: the 1.21.10 state (mod logs missing) is flagged")
+        expect(lost_log_files(prev, cur, ["EcaAgent.log"]) == ["EcaBootstrap.log"], "a recorded known-absent file is not flagged")
+        for n in ("EcaBootstrap.log", "EcaAgent.log", "NewOnlyHere.log"):
+            (cur / n).write_text("x")
+        expect(lost_log_files(prev, cur) == [], "B: after the fix (same set, plus a new file) it passes")
+        expect(lost_log_files(None, cur) == [] and lost_log_files(pathlib.Path(d, "nope"), cur) == [], "no previous run: nothing to compare")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

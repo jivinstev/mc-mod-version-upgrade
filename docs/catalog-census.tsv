@@ -58,7 +58,8 @@
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L24	76297c32c05f14c4
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L25	df48d266d4d1acde
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L26	90c4ea94155bb9d4
-.claude/skills/migrate-mod/references/minor-version-deltas.md::L27	14164fad096814bd
+.claude/skills/migrate-mod/references/minor-version-deltas.md::L27	afba96e6292864de
+.claude/skills/migrate-mod/references/minor-version-deltas.md::L28	6d26b0fe1156568a
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L3	a85890668058b8ad
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L4	04557cbb0abbe812
 .claude/skills/migrate-mod/references/minor-version-deltas.md::L5	31fa1cc1f2a67565
@@ -385,7 +386,8 @@ CATALOG.md::M38	b6343cc443af1303
 CATALOG.md::M39	8d15822a260c0315
 CATALOG.md::M4	f6a0ef812267eacb
 CATALOG.md::M40	16fbde33811379e2
-CATALOG.md::M41	512536bcc0d7d4f4
+CATALOG.md::M41	7934f56cfda6764c
+CATALOG.md::M42	50a9e09570e8f4a6
 CATALOG.md::M5	e5c35b6e2d4feb49
 CATALOG.md::M6	b7c94bc9a91f521b
 CATALOG.md::M7	2bfb0aeab0fc64c0
@@ -641,6 +643,7 @@ CATALOG.md::X5	e86ba79a14baf51a
 CATALOG.md::X50	34d572aee29fde2f
 CATALOG.md::X51	37b83da3fc5a538a
 CATALOG.md::X52	aabf17d63dac1ea4
+CATALOG.md::X53	d4610438cad642dc
 CATALOG.md::X5b	b1489539cb25c625
 CATALOG.md::X6	d05f85b6976e30be
 CATALOG.md::X7	8049466805237a2c

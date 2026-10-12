@@ -913,6 +913,8 @@ Shared rows/helpers: `templates/fork-layer/shared/1.21.8/`. Each line says which
 - **M39. `LevelRenderer.renderLevel` new signature** — descriptor and handler rows (L25). Arrives by 1.21.8, filed under 26.2 as R17 (a)/M20.
 - **M40. `ServerCommonPacketListenerImpl.send` takes a `ChannelFutureListener` (1.21.6)** — shared rows (L26). No 26.2 entry.
 - **M41. 3-argument bidirectional payloads register only the server handler** — a shared row repeats the handler; client sends via `ClientPacketDistributor` (L27). Arrives at 21.8, filed under 26.2 as §V81.
+### 1.21.8 → 1.21.10 (fork multi-version layer, Epic Core API) — M42; details as L28 in `references/minor-version-deltas.md`
+- **M42. FML 10 (NeoForge 21.9+) has no ModLauncher: coremods are `ClassProcessor`s found through `ClassProcessorProvider`** — the `ITransformationService` services file is inert; a per-target provider plus a `META-INF/services/net.neoforged.neoforgespi.transformation.ClassProcessorProvider` resource registers the processor; a jar FML loads as a mod is not scanned for it (L28). Compile-clean, Gate A/B green, caught only by diffing the mod's own log files (X53). Arrives at 21.9, filed under 26.2 as §V2/§X53 (no dedicated entry).
 
 ## S. Silent-resource patterns (compile clean, run clean, *silently wrong*)
 > **Axis:** neither the compiler nor the crash gates can see these. Java has a compiler; resources do
@@ -5705,4 +5707,26 @@ replacement must be one too, under the same simple name — a mod uses an interf
 than a grep for the name shows. And a call rewrite that has to cross nested parentheses needs a paren matcher,
 not a lazy regex: `tools/burndown-count.sh` exited 4 (parse abort) on the first run, which is the only reason
 this read as a bug and not as "53 errors fewer".
+
+**X53. 🔴 Green gates over a DEAD SUBSYSTEM: diff the log files the MOD itself writes between targets.** ·
+**Pattern:** a mod with an early-boot subsystem (a coremod / class processor, an agent, a native loader) that
+writes its own log file, ported to a loader version that no longer calls it · **Symptom:** none, on every gate. Epic
+Core API's 1.21.10 port compiled at 0, passed Gate A, Gate B (6 tests) and the audits while its coremod never ran: FML
+10 has no ModLauncher, the loop had turned `EcaCoreTransformer` into a `ClassProcessor` and left the old
+`ITransformationService` service file as the only registration (L28). The protected containers and the base
+health/removal hooks that the whole mod exists to install were simply absent, and no test asserts on them ·
+**The tell was a FILE that was not there:** on 1.21.8 a dev Gate B run writes `logs/EcaBootstrap.log` and
+`logs/EcaAgent.log` beside vanilla's; on 1.21.10 the directory held `latest.log` and `debug.log` only. Nothing red,
+nothing in the verdict, and X41's "read a PASSING log" would not have helped because the log that mattered did not
+exist · **Fix:** `tools/fork-port.py`'s gates stage compares, after a green run, the set of files the mod wrote in
+`harness/run/logs/` (everything but vanilla's `latest.log`/`debug.log`, dated archives and crash dumps) with the
+inherited target's last gate run (`build/mc<prev>/fork-port/gates/harness/run/logs/`). A file present there and
+absent here stops the run as residue (exit 11) naming it: *the mod wrote X on <prev> and not on <t>: a subsystem
+stopped running.* A log that is gone on purpose goes in `.multiversion/targets/<t>/logs-known-absent.txt` with the
+reason (§S5b's named-known-absent shape: a deletion is recorded, not inferred). A/B'd on the real tree: against the
+pre-fix 1.21.10 run it names `EcaAgent.log` and `EcaBootstrap.log`; after registering the processor the sets match ·
+**The general rule, which is X14's blind spot measured from the other side:** a subsystem that stopped running
+leaves an ABSENCE, and a gate only ever asserts presence. Anything the mod writes on a boot is a free manifest of what
+ran; diff it between the version you trust and the one you are porting. It only works while the previous target's run
+directory exists, so it compares what is there and says "no previous run" rather than passing silently.
 

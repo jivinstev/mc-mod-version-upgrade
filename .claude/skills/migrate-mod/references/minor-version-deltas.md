@@ -426,6 +426,22 @@ branches on `ctx.flow()`. ECA's per-fork `NetworkHandler.java` overlay is gone: 
 qualified because a row cannot add an import) reproduce it exactly (diff of the prepared file against the old overlay: the
 import and a comment). · **Anticipates:** arrives at 21.8 (1.21.8), filed under 26.2 as §V81.
 
+L28. **FML 10 removed ModLauncher: a coremod is a `ClassProcessor`, registered by a `ClassProcessorProvider` (21.9; CATALOG M42, X53)** ·
+`cpw.mods.modlauncher.api.ITransformationService` / `ITransformer` and `META-INF/services/cpw.mods.modlauncher.api.ITransformationService`
+are gone. The replacement is `net.neoforged.neoforgespi.transformation.ClassProcessor` (`name()`, `handlesClass(SelectionContext)`,
+`processClass(TransformationContext)`, ordering via `runsBefore/runsAfter/orderingHint`) handed to FML by a
+`ClassProcessorProvider.createProcessors(Context, Collector)`; FML builds the processor set in `FMLLoader.createClassProcessorSet`
+with `ServiceLoader.load(ClassProcessorProvider.class)` on the launch class loader, i.e. BEFORE the game layer exists, so the provider is
+found only where that loader can see a `META-INF/services/net.neoforged.neoforgespi.transformation.ClassProcessorProvider` file: the dev
+classpath, or a jar FML appends to it (manifest `FMLModType: LIBRARY`, which `FMLLoader.loadPlugins` appends; a `MOD` jar's services are
+NOT scanned for this interface, and the early-service jar scan does not list it). · **What breaks:** nothing at compile or load. The old
+services file is simply never read, so the mod boots without its transformations; Gate A and B pass. Found only because the mod's own
+`EcaBootstrap.log` was missing from the Gate B run (X53). · **Fix:** a per-target provider class (`EcaClassProcessorProvider`, an overlay
+file with no counterpart in the authors' tree) touching the old service class first (its static initialiser starts the bootstrap log) and
+calling `collector.add(new EcaCoreTransformer())`, plus the services resource in the target's `resources/`. `SelectionContext.type()` is an
+ASM `Type` (`getClassName()` is dotted); `processClass` edits the passed `ClassNode` in place and returns the `ComputeFlags` to recompute.
+· **Anticipates:** arrives at 21.9 (1.21.9/1.21.10); 26.x inherits it unchanged (no dedicated 26.2 entry).
+
 **Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
 §X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
 no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:
