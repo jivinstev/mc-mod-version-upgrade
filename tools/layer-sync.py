@@ -134,9 +134,52 @@ def not_a_layer(repo):
     return 0
 
 
+def ref_targets(repo, ref):
+    """Layer targets on REF without checking it out (a target is a .multiversion/targets/<t>/target.properties)."""
+    r = git(repo, "ls-tree", "-r", "--name-only", ref, "--", ".multiversion/targets")
+    if r.returncode:
+        return None
+    ts = {m.group(1) for m in (re.fullmatch(r"\.multiversion/targets/([^/]+)/target\.properties", l)
+                               for l in r.stdout.split()) if m}
+    return sorted(ts, key=lambda t: [int(x) if x.isdigit() else x for x in re.split(r"[.]", t)])
+
+
+def layer_refs(repo):
+    """Every local or remote branch that carries a layer target (so a check of the wrong branch cannot pass silently)."""
+    rows = git(repo, "for-each-ref", "--format=%(refname:short)\t%(symref)", "refs/heads", "refs/remotes").stdout.splitlines()
+    # skip symbolic refs (origin/HEAD, which --format=short prints as a bare "origin"): an alias, not a branch
+    return [r for r, _, sym in (l.partition("\t") for l in rows) if r and not sym and ref_targets(repo, r)]
+
+
 def cmd_detect(a):
-    ts = layer_targets(a.repo)
-    print(f"layer={'true' if ts else 'false'}" + (f" targets={','.join(ts)}" if ts else ""))
+    repo = pathlib.Path(a.repo).resolve()
+    if a.ref:
+        ts = ref_targets(repo, a.ref)
+        if ts is None:
+            print(f"layer-sync: unknown ref {a.ref}")
+            return 2
+    else:
+        ts = layer_targets(repo)
+    behind = ""
+    if ts and a.ref and a.port_ref:
+        # Is the layer owed a merge? The port branch can move with nothing new upstream (a fix of ours, or a night whose
+        # layer step was skipped), so "anything new?" must ask this as well as asking the authors.
+        n = git(repo, "rev-list", "--count", f"{a.ref}..{a.port_ref}")
+        if n.returncode:
+            print(f"layer-sync: unknown ref {a.port_ref}")
+            return 2
+        behind = f" layer_behind={n.stdout.strip()}"
+    print(f"layer={'true' if ts else 'false'}" + (f" targets={','.join(ts)}" if ts else "") + behind)
+    if ts or a.ref:
+        return 0
+    # The checked-out branch has no layer. On a single-version fork no branch has one either, so nothing changes; but
+    # a layer fork checked out on its port branch would otherwise read as single-version and skip the layer step.
+    others = layer_refs(repo)
+    if others:
+        print(f"layer-sync: the checked-out branch has no layer, but {', '.join(others)} carr"
+              f"{'ies' if len(others) == 1 else 'y'} .multiversion/ -- this fork HAS a layer; rerun with --ref <layer branch>"
+              " (the fleet entry's layer_branch)")
+        return 3
     return 0
 
 
@@ -329,6 +372,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1] if __doc__ else "")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("detect"); p.add_argument("--repo", default=".")
+    p.add_argument("--ref", help="read the layer from this branch/ref (the fleet's layer_branch) without checking it out")
+    p.add_argument("--port-ref", help="with --ref: also print layer_behind=N, the port-branch commits the layer has not merged")
     p = sub.add_parser("merge"); p.add_argument("--repo", default="."); p.add_argument("--port-ref", required=True)
     p.add_argument("--layer-branch")
     p = sub.add_parser("run"); p.add_argument("--repo", default="."); p.add_argument("--targets")

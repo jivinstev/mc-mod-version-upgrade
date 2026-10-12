@@ -183,6 +183,12 @@ The steps below are the reference for what each stage does and for fixing its re
    `references/minor-version-deltas.md`.
 9. Commit on the layer branch (`neoforge-1.21.x`), push, and report: errors before/after, gates per target with the
    control, cost, what was harvested, what is left.
+10. **Keep it current** (once per fork, when its first target is green): give the fork's keep-current fleet entry
+   `"layer_branch": "<layer branch>"`, and if a nightly routine runs it, put that key in the routine's fleet JSON
+   too (the routine reads its prompt, not this repo's copy). Without the key, the nightly run checks the port branch,
+   reads the fork as single-version, and the layer falls behind. Then check it the way the run will:
+   `layer-sync.py detect --repo DIR --ref origin/<layer branch> --port-ref origin/<port branch>` must print
+   `layer=true` with every target and `layer_behind=0` (or the count the next run will merge).
 
 ## Models and cost
 

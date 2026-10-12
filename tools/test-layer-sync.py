@@ -87,13 +87,33 @@ def main():
             r = sh(sys.executable, str(LS), cmd[0], "--repo", str(s), *cmd[1:], env=env)
             expect(r.returncode == 0, f"single-version {cmd[0]} exits 0: {r.stdout}{r.stderr}")
         expect("layer=false" in sh(sys.executable, str(LS), "detect", "--repo", str(s)).stdout, "detect says layer=false")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(s), "--ref", "port")
+        expect(r.returncode == 0 and r.stdout.strip() == "layer=false", f"single-version detect --ref: layer=false, exit 0: {r.stdout}")
         expect("not a multi-version fork" in sh(sys.executable, str(LS), "run", "--repo", str(s), env=env).stdout, "run says nothing to do")
         expect(git(s, "rev-parse", "HEAD") == head and git(s, "status", "--porcelain=v1", "--ignored") == before
                and not (s / "build").exists(), "single-version fork: no commit, no file, no build dir")
         # layer fork: new upstream commit on the port branch, merged into the layer
         f = tmp / "layer"; f.mkdir(); make_fork(f, True)
+        # detect from the PORT branch of a layer fork must not read as single-version (the nightly-run miss)
+        git(f, "checkout", "-q", "port")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(f))
+        expect(r.returncode == 3 and "layer=false" in r.stdout and "but layer carries .multiversion" in r.stdout,
+               f"detect on the port branch names the layer branch and exits 3: {r.stdout}{r.stderr}")
+        c = tmp / "clone"; sh("git", "clone", "-q", "--no-checkout", str(f), str(c)); git(c, "checkout", "-q", "port"); git(c, "remote", "set-head", "origin", "layer")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(c))
+        expect(r.returncode == 3 and "origin/layer carries" in r.stdout and "origin," not in r.stdout
+               and "origin carries" not in r.stdout, f"a clone's origin/HEAD alias is not listed as a branch: {r.stdout}")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "layer")
+        expect(r.returncode == 0 and "layer=true targets=1.21.4,1.21.5,1.21.8" in r.stdout
+               and git(f, "rev-parse", "--abbrev-ref", "HEAD").strip() == "port", f"detect --ref reads the layer without checkout: {r.stdout}")
+        expect(sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "nope").returncode == 2, "detect --ref unknown exits 2")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "layer", "--port-ref", "port")
+        expect(r.returncode == 0 and "layer_behind=0" in r.stdout, f"detect: a layer cut from the port branch owes nothing: {r.stdout}")
+        git(f, "checkout", "-q", "layer")
         git(f, "checkout", "-q", "port")
         (f / "src/main/java/net/m/A.java").write_text("a2\n", encoding="utf-8"); git(f, "commit", "-qam", "upstream change")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "layer", "--port-ref", "port")
+        expect(r.returncode == 0 and "layer_behind=1" in r.stdout, f"detect counts the port commit the layer has not merged: {r.stdout}")
         git(f, "checkout", "-q", "layer")
         r = sh(sys.executable, str(LS), "merge", "--repo", str(f), "--port-ref", "port", "--layer-branch", "layer")
         expect(r.returncode == 0 and len(git(f, "rev-list", "--merges", "-1", "HEAD").split()) == 1, f"merge made a merge commit: {r.stdout}{r.stderr}")
