@@ -13,6 +13,7 @@
 //   * The Java toolchain, neoforge.mods.toml version ranges and dependency substitutions follow the
 //     target's target.properties.
 //   * Everything builds into build/mc<t>/, so one target's classes never mix with another's.
+//     The jars it writes to libs carry the target in their name (-mc<t>), so a release can hold one per target.
 // Versions are NOT changed here: run through .multiversion/build.sh <t>, which passes the target's
 // versions as -P (they override gradle.properties) along with -Pmc.
 
@@ -147,6 +148,25 @@ configurations.configureEach {
         mvSubs.each { k -> substitute(module(k.substring(11))).using(module(mvProps.getProperty(k))) }
     }
 }
+// ---- jar names ---------------------------------------------------------------------------------
+// Every target writes into its own build/mc<t>/libs, so the jars never clash on disk -- but they would all carry
+// the SAME file name, and a name is what a release asset, a Modrinth/CurseForge file and a player's mods/ folder
+// know them by. So the jars a player can pick up (those written to the libs directory) get "-mc<target>" before
+// the extension: examplemod-1.1.9_mr.jar -> examplemod-1.1.9_mr-mc1.21.4.jar. Only with -Pmc (this script
+// returned above otherwise), so the base build's jars are byte-for-byte what they were. Jars written elsewhere
+// (a helper embedded into another jar by file name) keep their names: the mod finds them by name.
+// BEGIN-JAR-NAMES
+tasks.withType(Jar).configureEach { jarTask ->
+    if (jarTask.destinationDirectory.get().asFile != base.libsDirectory.get().asFile) return
+    // read now: a property cannot be set to a provider derived from itself (Gradle: circular evaluation)
+    jarTask.archiveFileName.set(mvJarName(jarTask.archiveFileName.get(), mvTarget))
+}
+String mvJarName(String name, String target) {
+    def suffix = "-mc${target}"
+    if (!name.endsWith('.jar') || name.endsWith("${suffix}.jar")) return name
+    return name.substring(0, name.length() - 4) + suffix + '.jar'
+}
+// END-JAR-NAMES
 println "multiversion: target ${mvTarget} (chain ${mvChain.join(' > ')}), build dir build/mc${mvTarget}"
 
 // Replace versionRange in the [[dependencies.*]] block whose modId the key names ("minecraft", "neoforge").

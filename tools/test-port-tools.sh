@@ -464,6 +464,38 @@ python3 tools/ci-gates.py --repo "$T/lk" --modid m --work-dir "$T/lkw2" >/dev/nu
 kill $HOLD 2>/dev/null; wait $HOLD 2>/dev/null
 out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
 [ $code = 10 ] || [ $code = 2 ] && [ ! -e "$T/lk/build/.fork-port.lock" ] && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
+
+out="$(python3 tools/layer-sync.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "layer-sync: classification (untouched / touch-up / rework), overlay shadowing, table, stop block" || bad "layer-sync self-check: $out"
+out="$(python3 tools/test-layer-sync.py 2>&1)"
+grep -q 'test-layer-sync: OK' <<<"$out" && ok "keep-current on a layer fork: merge commit (no force), per-target class + table, rework stops with RESIDUE (exit 10), single-version fork untouched" || bad "test-layer-sync: $out"
+out="$(python3 tools/test-port-publish.py 2>&1)"
+grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; layer forks publish one file per green target, refuse non-green / stale / unpublished-dependency targets" || bad "test-port-publish: $out"
+out="$(python3 tools/fix-ledger.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fix-ledger: a ledger without a layer section renders as before; the layer table renders and validates" || bad "fix-ledger self-check: $out"
+if command -v gradle >/dev/null 2>&1; then
+  G="$T/gj"; mkdir -p "$G"
+  printf "rootProject.name = 'scratch'\n" > "$G/settings.gradle"
+  cat > "$G/build.gradle" <<'GR'
+plugins { id 'java' }
+version = '1.0'
+tasks.register('embedded', Jar) { archiveFileName.set('helper.jar'); destinationDirectory = layout.buildDirectory.dir('embedded') }
+tasks.register('mrJar', Jar) { archiveFileName.set("scratch-${project.version}_mr.jar") }
+tasks.jar { archiveFileName.set("scratch-${project.version}_base.jar"); destinationDirectory = layout.buildDirectory.dir('intermediates') }
+tasks.register('plain', Jar) { }
+def mvTarget = project.findProperty('mc')?.toString()
+if (mvTarget == null) return
+layout.buildDirectory = file("build/mc${mvTarget}")
+GR
+  sed -n '/BEGIN-JAR-NAMES/,/END-JAR-NAMES/p' templates/fork-layer/layer.gradle >> "$G/build.gradle"
+  (cd "$G" && gradle -q --offline mrJar jar plain embedded >/dev/null 2>&1; gradle -q --offline mrJar jar plain embedded -Pmc=1.21.4 >/dev/null 2>&1)
+  base="$(cd "$G/build" && find . -name '*.jar' -not -path './mc*' | sort | tr '\n' ' ')"
+  mc="$(cd "$G/build/mc1.21.4" && find . -name '*.jar' | sort | tr '\n' ' ')"
+  [ "$base" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0.jar ./libs/scratch-1.0_mr.jar " ] \
+    && [ "$mc" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0-mc1.21.4.jar ./libs/scratch-1.0_mr-mc1.21.4.jar " ] \
+    && ok "layer.gradle: with -Pmc the jars in libs are named -mc<target>; without it, and for embedded/intermediate jars, names are unchanged" \
+    || bad "layer.gradle jar names: base=[$base] mc=[$mc]"
+fi
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script" || bad "port-ci self-check: $out"
 python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"

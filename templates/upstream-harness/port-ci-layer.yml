@@ -164,6 +164,7 @@
             ${{ runner.temp }}/layer-gates/*.jsonl
             ${{ runner.temp }}/layer-gates/shipped/**
             ${{ runner.temp }}/layer-gates.md
+            build/mc${{ needs.layer-plan.outputs.newest }}/libs/*.jar   # the target's own file (named -mc<target>): what publish-port uploads
           if-no-files-found: ignore
 
   layer-gates-extra:

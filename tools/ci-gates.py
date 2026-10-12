@@ -103,6 +103,15 @@ def data_rejections(log, modid):
     return list(dict.fromkeys(out))
 
 
+def target_jar_glob(pat, mc):
+    """The shipped-jar glob for a layer target. The layer names the jars it builds for target T "<name>-mcT.jar"
+    (templates/fork-layer/layer.gradle, only with -Pmc), so ".multiversion/shipped-jar.txt"'s "*_mr.jar" is
+    "*_mr-mcT.jar" there. A glob already naming the target, or with no .jar ending, is left alone; no --mc: unchanged."""
+    if not pat or not mc or not pat.endswith(".jar") or pat.endswith(f"-mc{mc}.jar"):
+        return pat
+    return pat[:-4] + f"-mc{mc}.jar"
+
+
 def green_detail(text):
     """What a green gate log proves, in one line: the GameTest count, or the client's PASS line and spawns."""
     m = re.search(r"All (\d+) required tests passed", text) or re.search(r"BOOT_TEST: (PASS[^\n]*)", text)
@@ -141,6 +150,9 @@ def self_check():
            "java.lang.IllegalArgumentException: Invalid recipe m:b: No key id in MapLike\n"
            "[x] ERROR Couldn't parse data file 'other:x': No key id\n[x] INFO loaded m:fine")
     ok &= len(data_rejections(rej, "m")) == 3 and data_rejections(rej, "zz") == []
+    ok &= target_jar_glob("*_mr.jar", "1.21.4") == "*_mr-mc1.21.4.jar" and target_jar_glob("*_mr.jar", None) == "*_mr.jar"
+    ok &= target_jar_glob("*_mr-mc1.21.4.jar", "1.21.4") == "*_mr-mc1.21.4.jar" and target_jar_glob("mod", "1.21.4") == "mod"
+    ok &= target_jar_glob(None, "1.21.4") is None
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -321,6 +333,7 @@ def main():
             libs = bdir / "libs"
             pat = a.shipped_jar or ((repo / ".multiversion/shipped-jar.txt").read_text(encoding="utf-8").split() or [""])[0] \
                 if (a.shipped_jar or (repo / ".multiversion/shipped-jar.txt").is_file()) else None
+            pat = target_jar_glob(pat, a.mc)
             found = sorted(libs.glob(pat)) if pat and libs.is_dir() else (sorted(libs.glob("*.jar")) if libs.is_dir() else [])
             label = "Shipped jar -- the built jar boots in a real server, the mod's own logs show its subsystems ran"
             if len(found) != 1:

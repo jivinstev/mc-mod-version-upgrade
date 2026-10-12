@@ -38,6 +38,16 @@ a table for people and the JSON it was rendered from, so the next run reads it b
                                              "by": "ours <sha> | upstream <owner/repo>@<sha> | dependency <owner/repo>@<tag>",
                                              "evidence": "<run, log line, test>", "decision": "keep|drop|adjust|accept"}}}]}
 
+A MULTI-VERSION fork (the opt-in .multiversion/ layer) may add, beside "modes", the per-target outcome of a
+keep-current run (tools/layer-sync.py ledger writes it):
+
+  "layer": {"column": "keep-current/2026-10-12",
+            "targets": [{"target": "1.21.4", "before": 0, "after": 0, "class": "untouched|touch-up|rework",
+                         "residue": ".multiversion/targets/1.21.4/RESIDUE.md"}]}
+
+`render` shows it as a table under the ledger and `check` validates its shape; a ledger without it renders and
+checks exactly as before.
+
 Taking or re-implementing an upstream fix (decision drop / accept / adjust) needs an A/B with TWO arms, recorded as
   "ab": {"control": "<our fix absent, nothing else changed: the mode SHOWN>", "treatment": "<their fix: mode absent>"}
 -- a control that does not show the mode means the repro does not reproduce, not that the mode is gone -- or, when
@@ -145,6 +155,19 @@ def worksheet(repo, port, upstream, deps=(), ledgers=()):
     return "\n".join(L)
 
 
+LAYER_CLASSES = ("untouched", "touch-up", "rework")
+
+
+def layer_table(layer):
+    cell = lambda v: "-" if v is None else str(v)
+    rows = [f"Layer targets at `{layer.get('column', '?')}` (tools/layer-sync.py):", "",
+            "| target | errors before | errors after | class | residue |", "|---|---|---|---|---|"]
+    for t in layer.get("targets", []):
+        rows.append(f"| {t.get('target')} | {cell(t.get('before'))} | {cell(t.get('after'))} | {t.get('class')} | "
+                    f"{('`' + t['residue'] + '`') if t.get('residue') else '-'} |")
+    return rows
+
+
 def render(led):
     rows = ["| failure mode | severity | " + " | ".join(sorted({b for m in led["modes"] for b in m["status"]})) + " |"]
     branches = sorted({b for m in led["modes"] for b in m["status"]})
@@ -158,9 +181,10 @@ def render(led):
         rows.append(f"| {m['what']} | {m['severity']} | " + " | ".join(cells) + " |")
     ev = [f"- `{m['id']}` on `{b}`: {s['evidence']}" for m in led["modes"] for b, s in m["status"].items()
           if s.get("evidence")]
+    lay = [*layer_table(led["layer"]), ""] if led.get("layer") else []
     return "\n".join([BEGIN, f"**Fix ledger** for {led['issue']}: where each failure mode is fixed, by whom, on which "
                       "branch. Updated by every reconcile; edit the JSON, not the table.", "", *rows, "",
-                      "Evidence:", *(ev or ["- (none yet)"]), "", "<details><summary>ledger JSON</summary>", "",
+                      "Evidence:", *(ev or ["- (none yet)"]), "", *lay, "<details><summary>ledger JSON</summary>", "",
                       "```json", json.dumps(led, ensure_ascii=False, separators=(",", ":")), "```", "", "</details>", END])
 
 
@@ -206,6 +230,15 @@ def check(led, release=None):
                 errs.append(f"{m.get('id')} on {b}: fixed by whom? (ours <sha> / upstream <repo>@<sha> / dependency)")
             if release and column_matches(b, release) and m.get("severity") == "S1" and s.get("state") == "open":
                 errs.append(f"{m.get('id')}: S1 ({SEVERITIES['S1']}) is open on {b} -- it must not be released")
+    lay = led.get("layer")
+    if lay is not None:
+        if not lay.get("column"):
+            errs.append("layer: no \"column\" (the reconcile or release the per-target outcome belongs to)")
+        for t in lay.get("targets", []):
+            if t.get("class") not in LAYER_CLASSES:
+                errs.append(f"layer {t.get('target')}: class must be one of {', '.join(LAYER_CLASSES)}")
+            elif t["class"] == "rework" and not t.get("residue"):
+                errs.append(f"layer {t.get('target')}: a rework target names its RESIDUE.md (the person it stops for needs it)")
     if release and not any(column_matches(b, release) for m in led.get("modes", []) for b in m.get("status", {})):
         cols = sorted({b for m in led.get("modes", []) for b in m.get("status", {})})
         errs.append(f"--release {release!r} names no column of this ledger (columns: {', '.join(cols)}) -- a check "
@@ -214,7 +247,8 @@ def check(led, release=None):
 
 
 def warnings(led, release=None):
-    return [f"{m.get('id')} on {b}: S1 fixed but not confirmed by re-running its repro ({s.get('evidence', '')[:80]})"
+    return [f"layer target {t['target']} is rework: it stops for a person ({t.get('residue')}) and must not be released"
+            for t in (led.get("layer") or {}).get("targets", []) if t.get("class") == "rework"] + [f"{m.get('id')} on {b}: S1 fixed but not confirmed by re-running its repro ({s.get('evidence', '')[:80]})"
             for m in led.get("modes", []) for b, s in m.get("status", {}).items()
             if m.get("severity") == "S1" and s.get("state") == "fixed-unconfirmed" and (not release or column_matches(b, release))]
 
@@ -274,6 +308,19 @@ def self_check():
         sha = subprocess.run(["git", "-C", d, "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, encoding="utf-8").stdout.strip()
         lp.write_text(json.dumps({"issue": "o/r#9", "modes": [{"status": {"x": {"by": "ours " + sha}}}]}), encoding="utf-8")
         ok &= "o/r#9 (from its ledger)" in worksheet(r, "port", "up", ledgers=[lp])
+    # the layer section: absent = byte-identical render; present = a table, validated
+    ok &= "Layer targets" not in render(led) and render(led) == render({k: v for k, v in led.items() if k != "layer"})
+    lay = json.loads(json.dumps(led))
+    lay["layer"] = {"column": "keep-current/2026-10-12", "targets": [
+        {"target": "1.21.4", "before": 0, "after": 0, "class": "untouched", "residue": ""},
+        {"target": "1.21.5", "before": 7, "after": 0, "class": "touch-up", "residue": ""},
+        {"target": "1.21.8", "before": 12, "after": 3, "class": "rework", "residue": ".multiversion/targets/1.21.8/RESIDUE.md"}]}
+    r = render(lay)
+    ok &= "| 1.21.5 | 7 | 0 | touch-up | - |" in r and "`.multiversion/targets/1.21.8/RESIDUE.md`" in r and parse(r) == lay
+    ok &= check(lay) == [] and any("rework" in w for w in warnings(lay))
+    lay["layer"]["targets"][0]["class"] = "fine"; lay["layer"]["targets"][2]["residue"] = ""
+    errs = check(lay)
+    ok &= any("class must be one of" in e for e in errs) and any("names its RESIDUE.md" in e for e in errs)
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

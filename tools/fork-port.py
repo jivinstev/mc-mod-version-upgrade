@@ -119,14 +119,23 @@ def lost_log_files(prev_dir, cur_dir, known_absent=()):
     return sorted(mod_log_files(prev_dir) - mod_log_files(cur_dir) - set(known_absent))
 
 
-def select_stages(from_stage):
-    """(skipped, to_run) for --from-stage."""
+def select_stages(from_stage, to_stage=None):
+    """(skipped, to_run) for --from-stage, and --to-stage (stop after that stage: tools/layer-sync.py measures a
+    target with `--from-stage stage --to-stage measure` and audits it with `--from-stage audit --to-stage audit`)."""
     if from_stage is None:
-        return [], list(STAGES)
-    if from_stage not in STAGES:
+        skipped, run = [], list(STAGES)
+    elif from_stage not in STAGES:
         raise ValueError(f"unknown stage {from_stage!r}; stages: {', '.join(STAGES)}")
-    i = STAGES.index(from_stage)
-    return STAGES[:i], STAGES[i:]
+    else:
+        i = STAGES.index(from_stage)
+        skipped, run = STAGES[:i], STAGES[i:]
+    if to_stage is not None:
+        if to_stage not in STAGES:
+            raise ValueError(f"unknown stage {to_stage!r}; stages: {', '.join(STAGES)}")
+        if STAGES.index(to_stage) < STAGES.index(run[0]):
+            raise ValueError(f"--to-stage {to_stage} comes before --from-stage {from_stage}")
+        run = run[:STAGES.index(to_stage) - STAGES.index(run[0]) + 1]
+    return skipped, run
 
 
 def read_props(path):
@@ -773,6 +782,7 @@ def main():
     ap.add_argument("--budget", type=float, default=15.0, help="dollars the compile loop's workers may spend")
     ap.add_argument("--gates", default="ab", choices=["none", "ab", "full"])
     ap.add_argument("--json"); ap.add_argument("--from-stage"); ap.add_argument("--modid")
+    ap.add_argument("--to-stage", help="stop after this stage (default: run to the end)")
     ap.add_argument("--base", default="origin/neoforge-1.21.1", help="the authors' ref, for ci-gates.py --base")
     ap.add_argument("--max-errors", type=int, help="the loop refuses to start above this many errors (default: 100 per dollar of --budget)")
     ap.add_argument("--confirm-spend", action="store_true", help="start the loop although the error count exceeds the spend guard")
@@ -788,7 +798,7 @@ def main():
     if not pathlib.Path(a.repo).is_dir():
         print(f"fork-port: no such directory: {a.repo}"); return 2
     try:
-        skipped, todo = select_stages(a.from_stage)
+        skipped, todo = select_stages(a.from_stage, a.to_stage)
     except ValueError as e:
         print(f"fork-port: {e}"); return 2
     run = Run(a)
@@ -816,6 +826,9 @@ def drive(run, a, skipped, todo):
         run.summary["stages"].setdefault(s, {"skipped": f"before --from-stage {a.from_stage}"})
     stop = execute(run, todo)
     run.summary["done"] = stop is None
+    partial = bool(a.to_stage) and todo[-1] != STAGES[-1]          # a partial run is not "the port is done"
+    if partial:
+        run.summary["to_stage"] = a.to_stage
     if stop:
         stop.setdefault("spent", 0)
         resume = run.resume_cmd(stop["stage"])
@@ -833,10 +846,10 @@ def drive(run, a, skipped, todo):
         print(f"fork-port: summary in {run.jpath}")
         return stop["code"]
     r = run.tdir / "RESIDUE.md"
-    if r.is_file():
+    if r.is_file() and not partial:           # only a run to the end clears an earlier stop's report
         r.unlink()
     run.save()
-    print(f"fork-port {a.target}: done -- summary in {run.jpath}")
+    print(f"fork-port {a.target}: {'stages ' + ', '.join(todo) + ' ok' if partial else 'done'} -- summary in {run.jpath}")
     return 0
 
 
@@ -849,6 +862,15 @@ def self_check():
             ok = False; print("FAIL:", msg)
     # stage selection
     expect(select_stages(None) == ([], STAGES), "no --from-stage runs everything")
+    expect(select_stages(None, None) == ([], STAGES), "--to-stage absent changes nothing")
+    expect(select_stages("stage", "measure") == (["setup"], ["stage", "moves", "measure"]), "from stage to measure")
+    expect(select_stages("audit", "audit") == (STAGES[:5], ["audit"]), "a single stage")
+    expect(select_stages(None, "moves") == ([], ["setup", "stage", "moves"]), "to-stage alone")
+    for bad_ in (("loop", "stage"), ("loop", "nope")):
+        try:
+            select_stages(*bad_); expect(False, f"{bad_} must raise")
+        except ValueError:
+            pass
     sk, td = select_stages("loop")
     expect(sk == ["setup", "stage", "moves", "measure"] and td[0] == "loop" and td[-1] == "cost", "from-stage loop")
     try:
