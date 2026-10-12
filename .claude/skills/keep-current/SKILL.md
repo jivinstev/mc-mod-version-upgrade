@@ -159,16 +159,22 @@ directory is not there when it fires: put the fleet JSON in the routine's prompt
 in its repository scope and the build hosts in its allowed domains (`cloud/allowed-domains.txt`). Cheap nights
 matter: step 1 exits with no model work.
 
-**A routine session cannot add repositories: they must be configured ON THE ROUTINE.** Measured twice: a fired
-routine session searched for `add_repo` at 8 s, and in a second run polled for it for over 3 minutes -- it never
-appears in a routine session, while the routine's own config showed `sources: []`. The tool that creates a routine
-from a session (`create_trigger`) has no way to set its repositories, so:
+**A routine session cannot add repositories: the ones it pushes to must be configured ON THE ROUTINE.** Measured
+twice: a fired routine session searched for `add_repo` at 8 s, and in a second run polled for it for over 3 minutes --
+it never appears in a routine session, while the routine's own config showed `sources: []`. The tools a cloud session
+creates routines with (`create_trigger`/`update_trigger`) have no repository field; the web form and the local CLI's
+`/schedule` (not available inside a cloud session) do. So:
 
-- **The user adds the repositories to the routine.** Give them the exact link and steps, never just "the Routines
-  page": open https://claude.ai/code/routines, click the routine by name, open the menu next to its name, choose
-  **Edit**, then use the small **Select a repository** control at the bottom-left of the **Instructions** box (easy to
-  miss: it is not a separate section of the form) to add each repository (list them as `owner/repo`), and save. Each one is cloned on every run. Until they
-  have, the routine cannot work, however its prompt is written.
+- **Attach only what the run pushes to: the user's forks.** This repository is public and the run only reads it, so
+  the prompt clones it itself (`git clone --depth 1 https://github.com/<owner>/mc-mod-version-upgrade`); never ask the
+  user to attach it -- another user of this skill has no write access to it and does not need any.
+- **When a cloud session created the routine, the user adds the forks.** Give them the exact link and steps, never just
+  "the Routines page": open https://claude.ai/code/routines, click the routine by name, open the menu next to its
+  name, choose **Edit**, then use the small **Select a repository** control at the bottom-left of the **Instructions**
+  box (easy to miss: it is not a separate section of the form) to add each fork (list them as `owner/repo`), and save.
+  Each one is cloned on every run. If they have the edit form open while you change the prompt with `update_trigger`,
+  ask them to close and reopen it first, or saving the form writes the old prompt back. Until the forks are added the
+  routine cannot work, however its prompt is written. (A user setting up from a local CLI can do this in `/schedule`.)
 - **The prompt checks, it does not wait.** It looks for the clones it expects; if one is missing, it still does step
   1, then stops and names the missing repository and where to add it. It never polls for `add_repo`.
 - **Step 1 needs no repository.** The "anything new?" check only reads: `git ls-remote` the public repositories over
