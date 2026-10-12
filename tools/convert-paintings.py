@@ -90,13 +90,13 @@ def self_check():
         report, flags, changed = run(pathlib.Path(d) / "java", "m")
         p = (j / "Paintings.java").read_text(encoding="utf-8")
         res = pathlib.Path(d) / "resources/data"
-        album = json.loads((res / "m/painting_variant/album.json").read_text())
-        ship = json.loads((res / "m/painting_variant/flying_ship.json").read_text())
-        tag = json.loads((res / "minecraft/tags/painting_variant/placeable.json").read_text())
+        album = json.loads((res / "m/painting_variant/album.json").read_text(encoding="utf-8"))
+        ship = json.loads((res / "m/painting_variant/flying_ship.json").read_text(encoding="utf-8"))
+        tag = json.loads((res / "minecraft/tags/painting_variant/placeable.json").read_text(encoding="utf-8"))
         ok = (album == {"asset_id": "m:album", "width": 2, "height": 1} and ship["height"] == 3 and "ALBUM" not in p
               and "SHIP" in p and len(flags) == 1 and tag == {"replace": False, "values": ["m:album", "m:flying_ship"]})
         run(pathlib.Path(d) / "java", "m")
-        ok &= json.loads((res / "minecraft/tags/painting_variant/placeable.json").read_text()) == tag
+        ok &= json.loads((res / "minecraft/tags/painting_variant/placeable.json").read_text(encoding="utf-8")) == tag
         if not ok:
             print(p, album, ship, tag, flags)
     print("self-check:", "OK" if ok else "FAIL")

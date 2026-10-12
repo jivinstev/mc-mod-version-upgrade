@@ -753,7 +753,7 @@ def self_check():
                               "   public static Conf INSTANCE;\n   public boolean eat = true;\n}\n"}.items():
             (j / rel).parent.mkdir(parents=True, exist_ok=True); (j / rel).write_text(body, encoding="utf-8")
         import subprocess
-        subprocess.run([sys.executable, __file__, "--work", str(w)], capture_output=True, text=True)
+        subprocess.run([sys.executable, __file__, "--work", str(w)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         stub = (j / "terra/TerraInit.java").read_text(encoding="utf-8") if (j / "terra/TerraInit.java").exists() else ""
         ok7 = ("public static void enable() {\n    }" in stub and "public static boolean on(List<String> l) {\n        return false;" in stub
                and "public static final int MAX = 3;" in stub and "Regions" not in stub and "helper" not in stub

@@ -594,7 +594,7 @@ def self_check():
         for i in range(12, 40):
             (j / f"C{i}.java").write_text("class C {}", encoding="utf-8")
         ok &= quarantine_unparseable(w, log) == 2 and not (j / "C3.java").exists() \
-            and (w / "parked/unparseable/src/main/java/p/C3.java").exists() and "C4.java" in (w / "MIGRATION.md").read_text() \
+            and (w / "parked/unparseable/src/main/java/p/C3.java").exists() and "C4.java" in (w / "MIGRATION.md").read_text(encoding="utf-8") \
             and (j / "C5.java").exists()
     with tempfile.TemporaryDirectory() as d:        # a NeoGradle cache entry naming a deleted workspace is healed
         d = pathlib.Path(d)

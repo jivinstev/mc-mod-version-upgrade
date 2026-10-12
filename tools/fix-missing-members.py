@@ -298,7 +298,7 @@ def record_accessors(jars, owners):
             hits = [n[:-6].replace("/", ".") for n in names if n.endswith(f"/{o}.class") and n.startswith("net/minecraft/")]
             for fq in hits[:3]:
                 try:
-                    jp = subprocess.run(["javap", "-cp", str(j), fq], capture_output=True, text=True, timeout=60).stdout
+                    jp = subprocess.run(["javap", "-cp", str(j), fq], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60).stdout
                 except Exception:
                     continue
                 if "extends java.lang.Record" in jp:
@@ -422,10 +422,10 @@ def self_check():
         log = (f"{f}:2: error: cannot find symbol\n  void t() {{ this.setSecondsOnFire(3); }}\n"
                "                 ^\n  symbol: method setSecondsOnFire(int)\n  location: class N\n")
         got, _ = run(d, log, {("Entity", "setSecondsOnFire"): "igniteForSeconds"}, jars=[])
-        ok &= got.get("N.setSecondsOnFire") is None and "igniteForSeconds" not in f.read_text()   # Monster unknown: no hit
+        ok &= got.get("N.setSecondsOnFire") is None and "igniteForSeconds" not in f.read_text(encoding="utf-8")   # Monster unknown: no hit
         (pathlib.Path(d) / "Monster.java").write_text("abstract class Monster extends Entity {}\n", encoding="utf-8")
         got, _ = run(d, log, {("Entity", "setSecondsOnFire"): "igniteForSeconds"}, jars=[])
-        ok &= sum(got.values()) == 1 and "this.igniteForSeconds(3)" in f.read_text()
+        ok &= sum(got.values()) == 1 and "this.igniteForSeconds(3)" in f.read_text(encoding="utf-8")
     with tempfile.TemporaryDirectory() as d:          # a PROTECTED field whose accessor has another name (X108)
         f = pathlib.Path(d) / "R.java"
         line = "  int t(ServerLevel w) { return w.random.nextInt(w.random.nextInt(3) + 1); }"
@@ -441,7 +441,7 @@ def self_check():
         log = (f"{f}:2: error: cannot find symbol\n  void t() {{ this.teleportToWithTicket(1.0, 2.0, 3.0); }}\n"
                "                 ^\n  symbol: method teleportToWithTicket(double,double,double)\n")
         got, _ = run(d, log, {("Entity", "teleportToWithTicket"): "teleportTo"}, jars=[])
-        ok &= sum(got.values()) == 1 and "this.teleportTo(1.0, 2.0, 3.0)" in f.read_text()
+        ok &= sum(got.values()) == 1 and "this.teleportTo(1.0, 2.0, 3.0)" in f.read_text(encoding="utf-8")
     import shutil, subprocess, zipfile
     if shutil.which("javac") and shutil.which("javap"):
         with tempfile.TemporaryDirectory() as d:      # X130: a record owner needs no row
