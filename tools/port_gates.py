@@ -132,6 +132,13 @@ def harness(c):
         t = t.replace("PACKAGE_PLACEHOLDER", pkg).replace("MODID.mixins.json", cfg)
         parked = author_unlisted_mixins(c["repo"], c["args"].base)
         t = t.replace("/*AUTHOR_UNLISTED*/", ", ".join(f'"{n}"' for n in parked))
+        if layer_target():
+            # a fork's layer builds target <t> into build/mc<t>/ (layer.gradle), and its mixin config is the one
+            # processResources wrote there (the layer adds the target's mixins at that step): read both from there,
+            # or the test looks at build/classes/java/main, finds nothing, and fails every layer target (measured)
+            bd = build_dir_name()
+            t = t.replace('DIR.resolve("build/classes/java/main")', f'DIR.resolve("{bd}/classes/java/main")')
+            t = t.replace('DIR.resolve("src/main/resources/', f'DIR.resolve("{bd}/resources/main/')
         (h / "test" / pkg.replace(".", "/")).mkdir(parents=True)
         (h / "test" / pkg.replace(".", "/") / "MixinConfigIntegrityTest.java").write_text(t, encoding="utf-8")
     if tg.gametest == "registration":

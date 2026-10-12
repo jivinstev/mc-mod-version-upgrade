@@ -19,7 +19,7 @@ The harness is generated OUTSIDE the author's tree (--work-dir, default a temp d
 --init-script, exactly as during the port. The summary (markdown) lists what ran and what passed, and is
 what the release notes quote. Standard library only.
 """
-import argparse, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, types, zipfile
+import argparse, shutil, importlib.util, json, os, pathlib, re, subprocess, sys, tempfile, types, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -208,6 +208,11 @@ def main():
             print(f"[ci-gates] minimal environment: leaving out {ex or 'nothing'}", flush=True)
     if not a.skip_author_build and a.env == "full":
         jars = ss.author_jar_tasks(repo)
+        # the harness' Gate A test classes of an earlier run on this checkout are still in the build dir, and with no test
+        # source of the author's Gradle reports compileTestJava NO-SOURCE but `test` runs what is left there: the author's
+        # build "failed" on our own harness (measured: a second ci-gates run on the same checkout). CI is always fresh.
+        shutil.rmtree(bdir / "classes/java/test", ignore_errors=True)
+        shutil.rmtree(bdir / "test-results", ignore_errors=True)
         r = pu.gradle(repo, ["build", *jars], work / "author-build.log")
         built = sorted(p.name for p in (bdir / "libs").glob("*.jar")) if (bdir / "libs").is_dir() else []
         passed = r.returncode == 0 and bool(built)

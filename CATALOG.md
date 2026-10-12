@@ -915,6 +915,7 @@ Shared rows/helpers: `templates/fork-layer/shared/1.21.8/`. Each line says which
 - **M41. 3-argument bidirectional payloads register only the server handler** — a shared row repeats the handler; client sends via `ClientPacketDistributor` (L27). Arrives at 21.8, filed under 26.2 as §V81.
 ### 1.21.8 → 1.21.10 (fork multi-version layer, Epic Core API) — M42; details as L28 in `references/minor-version-deltas.md`
 - **M42. FML 10 (NeoForge 21.9+) has no ModLauncher: coremods are `ClassProcessor`s found through `ClassProcessorProvider`** — the `ITransformationService` services file is inert; a per-target provider plus a `META-INF/services/net.neoforged.neoforgespi.transformation.ClassProcessorProvider` resource registers the processor; a jar FML loads as a mod is not scanned for it (L28). Compile-clean, Gate A/B green, caught only by diffing the mod's own log files (X53). Arrives at 21.9, filed under 26.2 as §V2/§X53 (no dedicated entry).
+- **M43. A shipped jar cannot register an FML 10 class processor (1.21.10)** — only dev runs see it; prove the shipped path with tools/shipped-gate.py (L29).
 
 ## S. Silent-resource patterns (compile clean, run clean, *silently wrong*)
 > **Axis:** neither the compiler nor the crash gates can see these. Java has a compiler; resources do

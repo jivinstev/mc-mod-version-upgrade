@@ -442,6 +442,17 @@ calling `collector.add(new EcaCoreTransformer())`, plus the services resource in
 ASM `Type` (`getClassName()` is dotted); `processClass` edits the passed `ClassNode` in place and returns the `ComputeFlags` to recompute.
 · **Anticipates:** arrives at 21.9 (1.21.9/1.21.10); 26.x inherits it unchanged (no dedicated 26.2 entry).
 
+L29. **A SHIPPED jar cannot register an FML 10 class processor at all** · `ClassProcessorProvider` is found with
+`ServiceLoader` while the thread context loader is the EARLY-SERVICES loader, which holds only top-level `mods/` jars
+declaring one of five early services (candidate locator, file reader, dependency locator, graphics bootstrapper,
+immediate window). A jarJar'd library is never scanned for them, and making the mod jar itself an early-service jar
+masks it out of the transforming loader (its mixins stop applying). So a coremod that worked from `mods/` on 1.21.1
+(ModLauncher scanned the mods dir) runs on 1.21.10 only in DEV. · **Measured with `tools/shipped-gate.py`** (a real
+server, the built jar in mods/): 1.21.1 and 1.21.8 PASS, 1.21.10 FAIL while every dev gate was green. · **Fix used
+for a mod that also has an agent backend:** initialise the backend from `FMLConstructModEvent` (the agent retransforms,
+so it need only be selected before the first transformed class loads) -- restores 1.21.1's shipped behaviour; a
+coremod-only mod has no shipped path on FML 10 and should say so loudly.
+
 **Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
 §X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
 no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:
