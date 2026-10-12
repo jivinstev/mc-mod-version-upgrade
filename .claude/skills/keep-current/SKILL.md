@@ -7,7 +7,10 @@ description: Keep a fork port current with its authors, unattended or on request
 
 **Which fork:** a single-version fork (one `neoforge-1.21.1`-style branch) is the default and the proven path; everything in
 "Run" below is for it. A fork with the opt-in multi-version layer (`.multiversion/`) gets the extra step in "A fork
-with the layer" after step 6, and nothing else changes for it. `tools/layer-sync.py detect --repo DIR` says which.
+with the layer" after step 6, and nothing else changes for it. `tools/layer-sync.py detect --repo DIR --ref <layer_branch>`
+says which: pass the fleet entry's `layer_branch` when it has one, since the clone is usually checked out on the port
+branch, which has no `.multiversion/`. Without `--ref`, detect exits 3 (not 0) when the checked-out branch has no layer
+but another branch does, so a layer fork can never read as single-version and skip its layer step.
 
 The port-fork skill makes a port; this one keeps it alive. A community fork is judged by the people who install
 it: **if it crashes them, kicks them from a server, hangs, damages a save or breaks their other mods, the fork is
@@ -131,7 +134,7 @@ until its dependency's run is green, and it is then gated against the dependency
 
 ## A fork with the layer (opt-in; skip this for a single-version fork)
 
-Only when `layer-sync.py detect` says `layer=true`. The port branch's PR (steps 1-6) is the authors' code at the base
+Only when `layer-sync.py detect --ref <layer_branch>` says `layer=true` (exit 3 from a bare `detect` means the same thing: rerun with `--ref`). The port branch's PR (steps 1-6) is the authors' code at the base
 version; the layer branch must carry it to every target, and nothing fixes a middle target unless this is run.
 
 1. Cut `keep-current/<date>-layer` from the layer branch and `python3 tools/layer-sync.py merge --repo DIR --port-ref

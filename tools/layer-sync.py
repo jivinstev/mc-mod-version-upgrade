@@ -134,9 +134,42 @@ def not_a_layer(repo):
     return 0
 
 
+def ref_targets(repo, ref):
+    """Layer targets on REF without checking it out (a target is a .multiversion/targets/<t>/target.properties)."""
+    r = git(repo, "ls-tree", "-r", "--name-only", ref, "--", ".multiversion/targets")
+    if r.returncode:
+        return None
+    ts = {m.group(1) for m in (re.fullmatch(r"\.multiversion/targets/([^/]+)/target\.properties", l)
+                               for l in r.stdout.split()) if m}
+    return sorted(ts, key=lambda t: [int(x) if x.isdigit() else x for x in re.split(r"[.]", t)])
+
+
+def layer_refs(repo):
+    """Every local or remote branch that carries a layer target (so a check of the wrong branch cannot pass silently)."""
+    out = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes").stdout.split()
+    return [r for r in out if not r.endswith("/HEAD") and ref_targets(repo, r)]
+
+
 def cmd_detect(a):
-    ts = layer_targets(a.repo)
+    repo = pathlib.Path(a.repo).resolve()
+    if a.ref:
+        ts = ref_targets(repo, a.ref)
+        if ts is None:
+            print(f"layer-sync: unknown ref {a.ref}")
+            return 2
+    else:
+        ts = layer_targets(repo)
     print(f"layer={'true' if ts else 'false'}" + (f" targets={','.join(ts)}" if ts else ""))
+    if ts or a.ref:
+        return 0
+    # The checked-out branch has no layer. On a single-version fork no branch has one either, so nothing changes; but
+    # a layer fork checked out on its port branch would otherwise read as single-version and skip the layer step.
+    others = layer_refs(repo)
+    if others:
+        print(f"layer-sync: the checked-out branch has no layer, but {', '.join(others)} carr"
+              f"{'ies' if len(others) == 1 else 'y'} .multiversion/ -- this fork HAS a layer; rerun with --ref <layer branch>"
+              " (the fleet entry's layer_branch)")
+        return 3
     return 0
 
 
@@ -329,6 +362,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1] if __doc__ else "")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("detect"); p.add_argument("--repo", default=".")
+    p.add_argument("--ref", help="read the layer from this branch/ref (the fleet's layer_branch) without checking it out")
     p = sub.add_parser("merge"); p.add_argument("--repo", default="."); p.add_argument("--port-ref", required=True)
     p.add_argument("--layer-branch")
     p = sub.add_parser("run"); p.add_argument("--repo", default="."); p.add_argument("--targets")
