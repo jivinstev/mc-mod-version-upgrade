@@ -64,6 +64,11 @@ ranges (`[1.21.3,1.21.4)`), so a skipped version is never claimed.
    - an **overlay** (whole file, `targets/<t>/java/...`) only for a real semantic change. Derive it from the
      PREPARED file (`build/mc<t>/mv/java`, already renamed): overlays are not run through the table.
    - a mixin new to the target: add it with `mixin_add.<config>=client:Name` in target.properties.
+   - **Every source set** goes through the table (`mvPrepare<Set>Sources`): a mod that builds `cf`/`pro`
+     variants needs them compiled too, and their overlays live at `targets/<t>/<set>/java`. A target is not at
+     0 errors until `compile<Set>Java` is, for every set.
+   - After a run of failed compiles, delete `build/mc<t>/classes` before trusting a green compile: a partial
+     class dir (33 of 864 classes once) makes every set built on main fail with `package ... does not exist`.
    - Read the dead-rule line every build: a row that went dead when its file became an overlay is deleted; a row
      that never fired is usually written against already-renamed text.
 5. **Mixins**: at 0 errors, `audit-mixin-targets.py DIR <target sources.jar> --sources=build/mc<t>/mv/java` must say
@@ -73,7 +78,7 @@ ranges (`[1.21.3,1.21.4)`), so a skipped version is never claimed.
    that is red on the base too is not the target's. Read the mod's own logs on green runs (an agent or coremod
    that degrades silently). A harness compile error on a new target is fixed once in
    `templates/upstream-harness/versions/<t>.renames.tsv`, for every fork.
-7. **Record the cost** (required): `python3 tools/port-cost.py <modid> --path DIR --since <start> --print` for the
+7. **Record the cost** (required): `python3 tools/port-cost.py <modid> --path DIR --target <t> --since <start> --print` for the
    target's work window; put the block in `.multiversion/targets/<t>/COST.md` with what the window covered
    (port only, or port + tooling) and the model mix. The figure is what tells us whether the library and the
    cheaper models are making targets cheaper.

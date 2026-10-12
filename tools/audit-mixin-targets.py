@@ -443,7 +443,7 @@ def resolve_target(workspace, target):
 
 
 def paren_units(text, opener):
-    """The text inside each `<opener> ... )`, with the parens balanced QUOTE-AWARE.
+    r"""The text inside each `<opener> ... )`, with the parens balanced QUOTE-AWARE.
 
     Both callers need this and neither can use a plain regex: a mixin annotation's `target` carries
     a METHOD DESCRIPTOR, so the parentheses that matter are inside a string literal --
@@ -645,6 +645,7 @@ def main():
             # one of the two that had silently stopped being checked.
             # A package segment starts lowercase, which is what separates a fully-qualified name
             # from a nested one written `Outer.Inner.class`.
+            binary_name = None
             if "." in target and target.split(".", 1)[0][:1].islower():
                 entry = target.replace(".", "/") + ".java"
             else:
@@ -669,6 +670,10 @@ def main():
                     if not head.rsplit("/", 1)[-1][:1].isupper():
                         break
                     entry = head + ".java"
+                if entry != imp.group(1).replace(".", "/") + ".java":
+                    # nested: the bytecode lives in Outer$Inner, not in Outer
+                    outer = entry[:-len(".java")].replace("/", ".")
+                    binary_name = outer + "$" + imp.group(1)[len(outer) + 1:].replace(".", "$")
         else:
             # `@Mixin(targets = {"a.b.Outer$Inner"})` — the ONLY way to name a package-private or
             # inner class, so it is not an exotic spelling: a mod that touches a vanilla goal or a
@@ -685,6 +690,7 @@ def main():
             if not m:
                 continue
             entry = m.group(1).split("$", 1)[0].replace(".", "/") + ".java"
+            binary_name = m.group(1)
         if entry not in have:
             continue                      # not a vanilla class
         src = z.read(entry).decode("utf-8", "replace")
@@ -831,9 +837,14 @@ def main():
         # and unparsed-shape all SKIP rather than report: a checker that is wrong in the accusing
         # direction costs the same trust its silence does (X10).
         if class_jar:
-            fqcn = entry[:-len(".java")].replace("/", ".")
+            # ⚠ FAULT #23: for a NESTED target this read the OUTER class's bytecode, so an @At
+            # inside `ItemStackRenderState$LayerRenderState.render` was looked for in
+            # `ItemStackRenderState.render` -- a different method -- and reported as a missing
+            # call (a false positive, measured on a 1.21.4 fork layer). The source search above
+            # stays loose on purpose; the bytecode read must name the class Mixin really targets.
+            fqcn = binary_name or entry[:-len(".java")].replace("/", ".")
             refs = bytecode_refs(class_jar, fqcn)
-            owner_internal = entry[:-len(".java")]
+            owner_internal = fqcn.replace(".", "/")
             for ann in paren_units(
                     s,
                     r'@(?:Inject|Redirect|ModifyVariable|ModifyArg|ModifyArgs|ModifyConstant'

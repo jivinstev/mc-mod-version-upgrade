@@ -5092,6 +5092,15 @@ parameter. **A/B'd both ways** (the pre-fix tree exits 1 naming `memories`; the 
 and **swept over all 11 ports that ship mixins × both targets: zero new findings**, which is §X10's
 condition for letting it gate.
 
+⚠ **AUGMENT — fault TWENTY-THREE, a FALSE POSITIVE from fault #9's own looseness.** Fault #9 reads the
+OUTER class's source for a `targets = "Outer$Inner"` mixin, deliberately loose. The `@At` bytecode check then
+reused that same file name for `javap`, so an `@At` inside `ItemStackRenderState$LayerRenderState.render` was
+looked for in `ItemStackRenderState.render` (a different method), and the tool reported `no call of that name
+anywhere in render` over a mixin that applies fine. The source search may stay loose; the bytecode read must name
+the class Mixin really targets (`Outer$Inner`, also for a nested class reached through a dotted import). A/B'd
+both ways on a 1.21.4 fork layer: 146 checked with 1 false mismatch became 148 checked and clean (Gate C
+`launch` confirmed the mixin applies), and a planted `@At` is still caught, naming the inner class's real call.
+
 **The fix that makes the next one visible is neither of those: `checked == 0` now EXITS 2 and says
 "NO TARGETS CHECKED -- this is NOT a pass."** Six independent faults in one instrument, five of
 which reported *all targets match*, is not six unlucky bugs — it is one missing invariant, and the
