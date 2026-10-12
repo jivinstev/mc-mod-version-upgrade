@@ -37,4 +37,39 @@ re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\
 re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:11|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntArrayTag)
 re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:12|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongArrayTag)
 re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:99|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_ANY_NUMERIC)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.NumericTag)
+# ---- 1.21.4 -> 1.21.5 package moves
+com.mojang.blaze3d.platform.GlConst	com.mojang.blaze3d.opengl.GlConst
+com.mojang.blaze3d.platform.GlDebug	com.mojang.blaze3d.opengl.GlDebug
+com.mojang.blaze3d.platform.GlStateManager	com.mojang.blaze3d.opengl.GlStateManager
+com.mojang.blaze3d.shaders.AbstractUniform	com.mojang.blaze3d.opengl.AbstractUniform
+net.neoforged.neoforge.client.model.data.ModelData	net.neoforged.neoforge.model.data.ModelData
+net.neoforged.neoforge.client.model.data.ModelDataManager	net.neoforged.neoforge.model.data.ModelDataManager
+net.neoforged.neoforge.client.model.data.ModelProperty	net.neoforged.neoforge.model.data.ModelProperty
+net.minecraft.world.entity.animal.Sheep	net.minecraft.world.entity.animal.sheep.Sheep
+net.minecraft.world.entity.animal.Wolf	net.minecraft.world.entity.animal.wolf.Wolf
+net.minecraft.world.entity.animal.WolfVariant	net.minecraft.world.entity.animal.wolf.WolfVariant
+net.minecraft.world.entity.animal.WolfVariants	net.minecraft.world.entity.animal.wolf.WolfVariants
+net.minecraft.world.entity.animal.FrogVariant	net.minecraft.world.entity.animal.frog.FrogVariant
+net.minecraft.core.component.DataComponentPredicate	net.minecraft.core.component.predicates.DataComponentPredicate
+net.neoforged.neoforge.client.event.AddAttributeTooltipsEvent	net.neoforged.neoforge.event.AddAttributeTooltipsEvent
+net.neoforged.neoforge.client.event.GatherSkippedAttributeTooltipsEvent	net.neoforged.neoforge.event.GatherSkippedAttributeTooltipsEvent
+net.neoforged.neoforge.event.entity.player.PlayerHeartTypeEvent	net.neoforged.neoforge.client.event.PlayerHeartTypeEvent
+# ---- the RenderPipeline rewrite: immediate-mode GL on LegacyGl, 1.21.4 RenderType.create on LegacyRenderType
+# (the rest of the layer is java/Legacy*.java, ShaderInstance, ShaderShard, Uniform, RawGlTexture)
+net.minecraft.client.renderer.RenderStateShard.ShaderStateShard	@MVPKG@.ShaderShard
+re:\bRenderStateShard\.ShaderStateShard\b	@MVPKG@.ShaderShard
+re:\bShaderStateShard\b	@MVPKG@.ShaderShard
+com.mojang.blaze3d.shaders.Uniform	@MVPKG@.Uniform
+re:\bGlStateManager\.(SourceFactor|DestFactor)\b	com.mojang.blaze3d.platform.\1
+re:\bRenderSystem\.(enableBlend|disableBlend|defaultBlendFunc|blendFuncSeparate|blendFunc|blendEquation|enableDepthTest|disableDepthTest|depthFunc|depthMask|colorMask|enableCull|disableCull|recordRenderCall)\(	@MVPKG@.LegacyGl.\1(
+re:\bRenderSystem\.setShader\(	@MVPKG@.LegacyGl.setShader(
+re:\bRenderSystem\.setShaderTexture\(	@MVPKG@.LegacyGl.setShaderTexture(
+re:\bBufferUploader\.drawWithShader\(	@MVPKG@.LegacyGl.drawWithShader(
+re:\bCoreShaders\.(POSITION_TEX_COLOR|POSITION_TEX|POSITION_COLOR|POSITION)\b	@MVPKG@.LegacyGl.Vanilla.\1
+re:\bRenderType\.create\(	@MVPKG@.LegacyRenderType.create(
+re:\bRenderType\.CompositeState\.builder\(\)	@MVPKG@.LegacyRenderType.state()
+re:\bRenderType\.CompositeState\b	@MVPKG@.LegacyRenderType.State
+re:\b(?:RenderStateShard|RenderType)\.(NO_TRANSPARENCY|ADDITIVE_TRANSPARENCY|LIGHTNING_TRANSPARENCY|GLINT_TRANSPARENCY|CRUMBLING_TRANSPARENCY|OVERLAY_TRANSPARENCY|VIGNETTE_TRANSPARENCY|TRANSLUCENT_TRANSPARENCY|NO_DEPTH_TEST|EQUAL_DEPTH_TEST|LEQUAL_DEPTH_TEST|GREATER_DEPTH_TEST|COLOR_DEPTH_WRITE|COLOR_WRITE|DEPTH_WRITE|CULL|NO_CULL|POLYGON_OFFSET_LAYERING)\b	@MVPKG@.LegacyRenderType.\1
+re:import com\.mojang\.blaze3d\.vertex\.BufferUploader;\n?	
+re:import net\.minecraft\.client\.renderer\.CoreShaders;\n?	
 #!strict
