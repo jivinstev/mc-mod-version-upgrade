@@ -199,6 +199,295 @@ from `state.pickParticleIcon(...)`.
 `checked=17 dead=0`; 19 pairs, 17 rows, 8 main + 1 test recorded drops. The burn-down, in commits:
 332 → 285 → 186 → 145 → 106 → 73 → 53 → 1 → 0.
 
+### 1.21.1 → 1.21.3 (fork multi-version layer) — from Epic Core API, an ~89k-line library with its own shader engine
+Measured with every stable NeoForge line compiled against the 1.21.1 source (issue #49): 1.21.3 **282**,
+1.21.4 **342**, 1.21.5 ≥1028, 1.21.8 ≥1132, 1.21.10 ≥1346, 1.21.11 ≥2300 unique error sites. Carried in a
+**fork layer** (`.multiversion/`, templates/fork-layer): the authors' `src/` is never edited, so every
+difference is a rename row, a whole-file overlay or a helper class. The generic rows and helpers are the
+shared library `templates/fork-layer/shared/1.21.3/` that every fork inherits. U2/U3/U4/U6/U11 above apply
+unchanged; these are the NEW ones. ⚠ **Read the U section before starting a 1.21.2+ hop** — this port
+re-derived five of its rows by hand.
+
+L1. **`ShaderInstance` is gone; programs are `CompiledShaderProgram`s the vanilla `ShaderManager` compiles
+from `ShaderProgram` keys** · **Error:** `cannot find symbol: class ShaderInstance` (85 sites), then
+`ShaderProgram is not a functional interface` on `ShaderStateShard(() -> shader)` and
+`RegisterShadersEvent.getResourceProvider()` missing · **Fix (shared helper, no rewrite):** a
+`ShaderInstance extends CompiledShaderProgram` that links its own program from the 1.21.1-format JSON through
+any `ResourceProvider` (a mod's preset provider included), `#moj_import` via `GlslPreprocessor`, and applies
+the JSON `blend` in `apply()` (1.21.2 has no `BlendMode`); its private `CompiledShaderProgram(int)` is widened
+by the target's AT. A `RegisterShadersEvent` stand-in posted on the mod's bus at every client reload
+(`ResourceManagerReloadListener`) keeps the authors' listeners; a `ShaderStateShard` subclass binds the
+program in `setupRenderState`. The old-format JSON still PARSES in 1.21.2's codec (unknown keys ignored), so
+leftover `shaders/core/*.json` do not break the reload.
+
+L2. **Render types and projection** · `TextureStateShard(rl, boolean blur, boolean mipmap)` →
+`(rl, TriState, boolean)` · `RenderSystem.setProjectionMatrix(m, VertexSorting.DISTANCE_TO_ORIGIN |
+ORTHOGRAPHIC_Z)` → `ProjectionType.PERSPECTIVE | ORTHOGRAPHIC` · `RenderSystem.applyModelViewMatrix()` removed
+(delete the call) · `GameRenderer::getPositionColorShader` & co. → `CoreShaders.POSITION_COLOR` (a
+`ShaderProgram`, passed as a value) · `GlStateManager._clear(mask, boolean)` → `_clear(mask)` ·
+`LevelRenderer.renderLineBox` → `ShapeRenderer.renderLineBox` · `FastColor.ARGB32` → `ARGB` ·
+`RenderSystem.runAsFancy` removed (just run the draw) · `GuiGraphics.bufferSource()` → the field (AT).
+
+L3. **Fog is one `FogParameters` value** · `RenderSystem.get/setShaderFogStart/End/Shape` → `getShaderFog()` /
+`setShaderFog(FogParameters)` · a `FogRenderer` mixin: `setupColor` (static `fogRed/Green/Blue` @Shadows) →
+`computeFogColor` RETURNS a `Vector4f` (LevelRenderer clears with it); `setupFog` RETURNS `FogParameters` and
+gained a `Vector4f fogColor` arg — modify the return value at RETURN instead of writing RenderSystem state.
+
+L4. **Entity render state reaches the authors' layers** · `RenderLayer.render(pose, buf, light, S state,
+yRot, xRot)`; `LivingEntityRenderer<T, S, M>` · a layer that decides from the ENTITY reads it from the state:
+park it with `RegisterRenderStateModifiersEvent` against `EntityRenderer.class` (§V65b: data set in
+`extractRenderState` is wiped) — shared helper `EntityOf`. `getOverlayCoords(state, f)` takes the state.
+`EntityRenderer<? super E>` → `<? super E, ?>`; `Entity.getBoundingBoxForCulling()` moved to the renderer as
+`protected` — ⚠ widening it by AT breaks the RECOMPILE (every vanilla override "assigns weaker access"); call
+it reflectively. `EntityRenderDispatcher.render` dropped its yaw argument.
+
+L5. **The frame graph: sky and clouds are passes that run LATER** · `LevelRenderer.renderSky`/`renderClouds`
+are gone; `addSkyPass`/`addCloudsPass` only RECORD. A hook at `addSkyPass` draws before the sky; a flag set
+while rendering entities is not yet set when `addCloudsPass` runs. Draw after the sky from
+`RenderLevelStageEvent` `AFTER_SKY` (fired inside the sky pass); skip clouds with a mixin on
+`CloudRenderer.render` (runs inside the cloud pass, after the entities). `renderLevel` gained a leading
+`GraphicsResourceAllocator`.
+
+L6. **Mixin targets javac cannot see (16 in one mod)** · `LivingEntity.hurt` → `hurtServer(ServerLevel, …)`;
+`actuallyHurt` gained `ServerLevel` first · `Entity.changeDimension(DimensionTransition)` →
+`teleport(TeleportTransition)` (and `ServerPlayer`'s returns `ServerPlayer`: its descriptor differs) ·
+`ServerPlayer.teleportTo(ServerLevel,DDDFF)V` → `(ServerLevel,DDD,Set,FF,Z)Z` (U6) · `ItemRenderer.render`'s
+push/transform/pop moved to `renderItemModelRaw(…, boolean, float)` · `FallingBlockRenderer.render` takes a
+`FallingBlockRenderState`. Run `audit-mixin-targets.py` against the target's sources jar after every compile
+that reaches 0 — a mod with `defaultRequire: 1` dies at load on each.
+
+L7. **Small ones** · `DummySavedData` removed: `DimensionDataStorage.cache` is `Map<String, Optional<SavedData>>`
+(empty = failed read) · `NativeImage.asByteArray()` removed (write a temp PNG) · GeckoLib 4.7.3/4.8.5
+`GeoRenderLayer.preRender/render` gained a trailing `int` colour · `Minecraft.getTimer()` → `getDeltaTracker()`.
+
+### 1.21.3 → 1.21.4 (fork multi-version layer) — the same library, its second target (62 errors after 1.21.3's work)
+Shared rows/helpers: `templates/fork-layer/shared/1.21.4/` (a 1.21.4 target inherits 1.21.3's as well).
+
+L8. **Client reload listeners are a named graph** · `RegisterClientReloadListenersEvent.registerReloadListener(l)` →
+`AddClientReloadListenersEvent.addListener(ResourceLocation id, l)`; a unique id per listener (shared `ReloadIds`:
+the listener's class name).
+
+L9. **Things NeoForge 21.4 / Minecraft 1.21.4 dropped that a mod reached into** · `ClientLevel.partEntities` (id →
+part map) → only `dragonParts()` (a list; shared `PartEntities.byId`) · `TicketType.POST_TELEPORT` → gone (shared
+`Tickets` recreates it: Integer key, 5 ticks) · `TextureManager.register(String prefix, DynamicTexture)` (it NAMED the
+texture, `minecraft:dynamic/<prefix>_<n>`) → only `register(ResourceLocation, AbstractTexture)` (shared `Textures`
+keeps the naming) · `SkullBlockRenderer.createSkullRenderers(models)` → per-type `createModel(models, type)` ·
+`InventoryMenu.BLOCK_ATLAS` → `TextureAtlas.LOCATION_BLOCKS` · FML 6's `SimpleBufferBuilder(int)` → `(String, int)` ·
+`LevelRenderer.renderLevel` lost its `LightTexture` (a mixin `@At` descriptor and every `@Inject` callback).
+
+L10. **Item rendering is an `ItemStackRenderState` (U12's mechanism, from the renderer's side)** · `ItemRenderer.render(
+stack, …, BakedModel)` and `getModel(stack, level, entity, seed)` are gone; `renderStatic(...)` resolves and draws.
+A hook that decided from the STACK while drawing has no stack: record it at `ItemModelResolver.appendItemLayers` (a
+one-line mixin) and read it where the layer draws — `ItemStackRenderState$LayerRenderState.render`, before its
+`popPose` — once per item, not per layer (shared `ItemStacks`). `ItemRenderer.renderModelLists` is private static and
+takes the layer's resolved `int[]` tints instead of the stack. Shared `ItemModels.resolve` answers the old
+`getModel` from a resolved state's first layer.
+
+L11. **GUI** · `AbstractScrollWidget` → `AbstractTextAreaWidget` / `AbstractScrollArea` (`getMaxScrollAmount` →
+`maxScrollAmount`, `withinContentAreaPoint` gone, `updateWidgetNarration` protected; the scrollbar is the
+superclass's — 6 px wide, its own sprites) · `AbstractWidget.clicked(x,y)` → `isMouseOver(x,y)` (same test) ·
+`AbstractSelectionList.getScrollbarPosition()` → `scrollBarX()`.
+
+L12. **Animation metadata is a record with a codec** · `AnimationMetadataSection.forEachFrame`/`getDefaultFrameTime`/
+`isInterpolatedFrames`/`EMPTY`/`SERIALIZER` → `frames()` (Optional list of `AnimationFrame`, `timeOr(default)`),
+`defaultFrameTime()`, `interpolatedFrames()`, `CODEC`/`TYPE`; `MetadataSectionSerializer` → `MetadataSectionType`.
+`EMPTY` overrode `calculateFrameSize` to answer the whole image; the record cannot, so "no metadata" has to be
+handled by the caller. The codec rejects malformed `.mcmeta` the old serializer skipped.
+
+L13. **The layer itself: every source set, and a clean class dir after failed compiles** · a mod with more than
+`main` (Epic Core API builds `cf`, `pro`, `jvmti` variants against main's classes) needs each `src/<set>/java`
+through the same table — the first 1.21.3 pass prepared only main, and `pro` met a 1.21.4 change. And after a
+string of failed compiles a target's incremental state can leave `classes/` partial (33 of 864 classes): the next
+compile "succeeds" and every set built on main fails with `package … does not exist`. Delete `build/mc<t>/classes`
+and recompile before believing either.
+
+### 1.21.4 → 1.21.5 (fork multi-version layer) — the RenderPipeline hop (888 errors at the start)
+Shared rows/helpers: `templates/fork-layer/shared/1.21.5/` (NBT Optional rows, `Nbt`, the render compat classes).
+
+L14. **NBT getters return `Optional`** · the same change 26.2 carries (CATALOG §V12), arriving here. The 26.2 rows
+match `.getInt(<anything>)` and so also rewrite a `ByteBuffer` read (`bytes.getInt(at)`); the shared 1.21.5 rows
+anchor on a string-literal or CONSTANT key instead. A key in a variable, and a ListTag index, need the fork's own
+rows (a shared row cannot know the receiver's type). `getUUID/putUUID/hasUUID` are gone: `Nbt` (UUIDUtil.CODEC).
+
+L15. **Immediate-mode GL → `RenderPipeline` + `RenderPass`** · `RenderSystem.enableBlend/blendFunc/depthMask/
+enable(Disable)DepthTest/Cull/colorMask/setShader`, `BufferUploader`, `CoreShaders`, `ShaderStateShard`, and the
+transparency/depth/write/cull shards are gone; blend, depth, cull and masks are fixed per pipeline, and a draw is a
+RenderPass. Custom uniforms are set on the pass by name; the standard ones (`GlProgram.BUILT_IN_UNIFORMS`) are
+filled automatically; every sampler the program declares must be bound. A mod can compile its own shader sources
+into a pipeline with `GpuDevice.precompilePipeline(pipeline, sourceFunction)` (public, cached by pipeline) — no
+mixin. The shared compat (`LegacyGl`, `LegacyRenderType`, `ShaderInstance`, `ShaderShard`, `Uniform`,
+`RawGlTexture`) keeps the 1.21.4 surface. Not expressible: a blend equation other than ADD (logged).
+`GlTexture` gained an `external` constructor (NeoForge 21.5): a mod's own GL texture id wraps as a GpuTexture.
+
+L16. **Mixin targets that moved (found by the audit, fixed per mod)** · `CloudRenderer.render` dropped its two
+`Matrix4f` parameters (`(int, CloudStatus, float, Vec3, float)`); `Player` no longer declares `setItemSlot` (only
+`LivingEntity`/`Mob` do, through `EntityEquipment`) — retarget to `LivingEntity` with an `instanceof Player` guard.
+Deliberately NOT shared rows: a regex over a handler's parameter list cannot tell a handler that uses the matrices.
+
+### 1.21.5 → 1.21.8 (fork multi-version layer) — uniform blocks, ValueOutput, the 2D GUI (185 errors at the start)
+Shared rows/helpers: `templates/fork-layer/shared/1.21.8/` (renames.tsv, `ShaderInstance`/`Uniform`/`LegacyGl` blocks, `Mv`,
+`EntityOf`, `ShaderReloader`). Measured on Epic Core API (369 shared files, 56 overlays at the end, 93 `@OnlyIn` stripped);
+every gate green. NeoForge 21.6/21.7 are beta-only, so 1.21.6 and 1.21.7 changes ALL arrive here. Each entry names the 26.2
+entry it anticipates ("arrives at 1.21.x, filed under 26.2 as §V..") -- see the tally at the end.
+
+L17. **Plain GLSL uniforms → std140 uniform BLOCKS (1.21.6)** · `uniform mat4 ModelViewMat;` is no longer a program
+uniform: a pipeline declares uniform BUFFERS (`withUniform("X", UniformType.UNIFORM_BUFFER)`) and the vanilla ones live in
+`DynamicTransforms` (ModelViewMat, ColorModulator, ModelOffset, TextureMat, LineWidth), `Projection`, `Fog`, `Globals`
+(ScreenSize, GlintAlpha, GameTime, MenuBlurRadius) and `Lighting`; `FogStart/FogEnd/FogShape` became differently named
+members. · **What breaks:** compile-clean (the shader is a resource) and load-clean: the program links, then every draw fails
+GL validation (`Missing uniform`) or reads zeros. · **Fix:** the shared `ShaderInstance` rewrites the shader SOURCE when it
+reads it (`legacyUniforms`): a built-in declaration becomes the vanilla block (member ORDER is the std140 layout, spelled out,
+not `#moj_import`ed, so a generated-shader provider still compiles), a fog name becomes a `#define`, any other
+`uniform vec4 X;` becomes a one-member block `MV_X` that `Uniform` uploads per draw. 1.21.1 semantics kept: `setDefaultUniforms`
+overwrote every built-in right before `apply()`, so a built-in written BEFORE a draw (ECA writes `GameTime` in a shard's
+setupRenderState) is vanilla's on 1.21.1 AND here; one written in the mod's own `apply()` override wins (`ShaderInstance.
+setDefaultUniforms/globalsBuffer/projectionBuffer`); light and fog writes cannot be honoured (logged once). · **Anticipates:**
+arrives at 1.21.6, filed under 26.2 as §V93 (a custom ShaderInstance → pipeline + std140 block) and §V6/§V54 (state lives
+in the pipeline).
+
+L18. **`DynamicTransforms` and `CompositeRenderType.draw` (1.21.6)** · a draw is `createRenderPass(label, colorView, ..)`,
+`RenderSystem.bindDefaultUniforms(pass)`, `pass.setUniform("DynamicTransforms", RenderSystem.getDynamicUniforms().
+writeTransform(modelView, colour, modelOffset, textureMatrix, lineWidth))`, `drawIndexed(0, 0, count, 1)`; views replace
+textures, and an `outputColorTextureOverride` (post-effect pass) wins over the target's. · **What breaks:** the 1.21.5
+`LegacyGl.draw` (`pass.bindSampler(name, GpuTexture)`, no DynamicTransforms) → `cannot find symbol` / `NoSuchMethodError`.
+· **Fix:** the shared 1.21.8 `LegacyGl.draw` mirrors `CompositeRenderType.draw` line for line and keeps the 1.21.5 surface
+(`setShaderTexture(slot, GpuTextureView)`, scissor via `getScissorStateForRenderTypeDraws`); a mod-written ColorModulator
+feeds the transform. · **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V6 (recorded render state) and §V92
+(`RenderType.create` → `RenderSetup`).
+
+L19. **`RenderLevelStageEvent` is ABSTRACT; one subclass per stage (1.21.6+)** · `getStage()` and the `Stage` enum are
+gone; `AfterSky`, `AfterOpaqueBlocks`, `AfterEntities`, `AfterBlockEntities`, `AfterTranslucentBlocks`, `AfterTripwireBlocks`,
+`AfterParticles`, `AfterWeather`, `AfterLevel` are concrete. · **What breaks:** `@SubscribeEvent onX(RenderLevelStageEvent e)`
+compiles, then `IllegalArgumentException: Cannot register listeners for abstract class` at client load (§X33 caught by
+`tools/audit-event-listeners.py`). · **Fix:** name the stage class and drop the `getStage()` test; a listener that tested two
+stages becomes two. **Unlike 26.2, the 1.21.8 event STILL carries `getPoseStack()`, `getCamera()` and the modelview matrix**
+(`javap` the class: 1.21.8 has all three, 26.2 has none and passes `null` to its posts), so the listener body is unchanged
+and the §X33 augment ("compiles, registers, draws nothing") does NOT apply here; verify before assuming it does on 1.21.10+.
+ECA: 55 listeners audited clean, the stage ones in `EcaClientLifecycle`/`BossShowEditorClientEvents`/`GlobalSkyboxHook`.
+· **Anticipates:** arrives at 1.21.6, filed under 26.2 as §X33 (and its augment, which is the 26.2-only half).
+
+L20. **`SoundManager.play(SoundInstance)` returns `SoundEngine.PlayResult` (by 1.21.8)** · void → `PlayResult`; a mixin
+`@Inject(method = "play")` with `CallbackInfo` no longer binds. · **What breaks:** mixin APPLY failure at client load;
+compile-clean (R17 shape (f)); `audit-mixin-targets.py`'s callback-kind check reports it. · **Fix:** per-target overlay of the
+mixin: `CallbackInfoReturnable<PlayResult>` and `setReturnValue(PlayResult.NOT_STARTED)`. **Choosing the value:** the only
+consumer of the result, `MusicManager.startPlaying`, shows the "now playing" toast on `STARTED`. A mixin that blocks a sound
+and starts nothing in its place answers `NOT_STARTED` (ECA's combat-music lock: its own track plays through a separate
+call); one that starts a replacement answers `STARTED`. · **Anticipates:** arrives by 1.21.8, filed under 26.2 as R17 (f)
+(the 26.2 entry already names this exact target).
+
+L21. **`@OnlyIn` is a mod-LOADING ERROR in dev from 1.21.6 (`loadwarning.neoforge.onlyin`)** · NeoForge stopped stripping
+`@OnlyIn` members and warns on every use; in a dev run that stops Gate B before a test runs and puts `LoadingErrorScreen` up
+on a client. Production jars are inert, which is why nobody ships it as a bug. · **Fix:** the layer's `strip_onlyin=true`
+target property removes the annotation from the whole PREPARED tree (shared files and overlays alike -- a rename row cannot
+reach an overlay); ECA: 93 stripped. Nothing is lost: the strip bought nothing on the common classes. ·
+**Anticipates:** arrives at 1.21.6, filed under 26.2 as §V79.
+
+L22. **`@EventBusSubscriber` lost `bus()` (FML 9, 21.6+)** · the bus follows from the event class (a mod-bus event is
+delivered on the mod bus, anything else on the game bus). · **What breaks:** `cannot find symbol: bus` / `Bus`. ·
+**Fix:** three shared rows drop `bus = Bus.MOD|GAME` (either argument position) and the `EventBusSubscriber.Bus` import; the
+subscriber stays where it was because the event type decides. The class is in the FML `loader` jar, not in `neoforge-universal`.
+· **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V38b.
+
+L23. **Entity (and LivingEntity) save/load → `ValueOutput` / `ValueInput` (1.21.6)** · `addAdditionalSaveData(CompoundTag)`
+→ `(ValueOutput)`, `readAdditionalSaveData(CompoundTag)` → `(ValueInput)` (BlockEntity moved too). · **What breaks:** `does not
+override`, then `CompoundTag cannot be converted to ValueOutput` through the body; a mixin `@Inject` into either mismatches its
+descriptor at apply. · **Fix:** two shared rows retype the mixin handler's parameter; a body that only PUTS scalars keeps
+its text (`putInt/putString/putBoolean` exist), one that reads needs `ValueInput`'s `Optional`/`...Or` getters and has no
+`contains()` -- that one is a per-fork overlay. · **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V31.
+
+L24. **GUI drawing is 2D: `GuiGraphics.pose()` is a `Matrix3x2fStack` (1.21.6)** · `pose().pushPose()/translate(x,y,z)/
+scale(x,y,z)/mulPose(..)` → `pushMatrix()/translate(x,y)/scale(x,y)/rotate(angle)`; z is gone (draw order is submission order).
+· **What breaks:** `incompatible types` on every GUI/HUD render with a `PoseStack`. · **Fix:** no shared row (a GUI's z use
+is a design decision); the fork's GUI files become overlays or are rewritten to the 2D calls; `Screenshot.grab` and the Gate C
+harness's GUI hooks need the same treatment. · **Anticipates:** arrives at 1.21.6, filed under 26.2 as §V6 (`pose()` returns
+a 2D `Matrix3x2fStack`).
+
+L25. **`LevelRenderer.renderLevel` has a new signature (1.21.5-1.21.8 frame graph + fog buffer)** · `(DeltaTracker, boolean,
+Camera, GameRenderer, LightTexture, Matrix4f, Matrix4f)` → `(GraphicsResourceAllocator, DeltaTracker, boolean, Camera, Matrix4f,
+Matrix4f, GpuBufferSlice, Vector4f, boolean)`: the GameRenderer and LightTexture are gone, and the fog buffer, fog colour and a
+"render the sky" flag arrived. · **What breaks:** mixin APPLY (`Invalid descriptor … Expected … found`), compile-clean (R17
+(a)). · **Fix:** two shared rows rewrite the `method = "renderLevel(...)"` descriptor and an `@Inject` handler's nine-parameter
+list in one go (the handler may keep ignoring the new parameters). · **Anticipates:** arrives at 1.21.6, filed under 26.2 as R17
+(a)/(e) and M20 (the frame graph).
+
+L26. **`ServerCommonPacketListenerImpl.send` takes a netty `ChannelFutureListener` (1.21.6)** · was `PacketSendListener`.
+· **What breaks:** a mixin on `send(Packet, PacketSendListener)` fails at apply; callers passing a `PacketSendListener` do not
+compile. · **Fix:** two shared rows retype the descriptor and the handler parameter (`io.netty.channel.ChannelFutureListener`).
+· **Anticipates:** arrives at 1.21.6; **no 26.2 entry exists** (a 26.2 port should expect the same row).
+
+L27. **Bidirectional payloads register only the SERVER handler from the 3-argument form (21.8; CATALOG §V81)** ·
+`playBidirectional / commonBidirectional / configurationBidirectional(type, codec, serverHandler)` now delegates with a null
+client handler; the client's `ClientNetworkRegistry` refuses to load: "Some clientbound payloads are missing client-side
+handlers: [..]". Compile-clean, Gate B green (a dedicated server never validates it), found by Gate C `launch`. ·
+**Fix:** a shared row repeats the handler (method reference, or an expression lambda -- block lambdas are left to the author)
+on the 3-argument shape only, so `playBidirectional(T, C, H)` → `(T, C, H, H)`; a handler for a bidirectional payload already
+branches on `ctx.flow()`. ECA's per-fork `NetworkHandler.java` overlay is gone: the row plus a second one
+(`PacketDistributor.sendToServer` → `net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer`, fully
+qualified because a row cannot add an import) reproduce it exactly (diff of the prepared file against the old overlay: the
+import and a comment). · **Anticipates:** arrives at 21.8 (1.21.8), filed under 26.2 as §V81.
+
+L28. **FML 10 removed ModLauncher: a coremod is a `ClassProcessor`, registered by a `ClassProcessorProvider` (21.9; CATALOG M42, X53)** ·
+`cpw.mods.modlauncher.api.ITransformationService` / `ITransformer` and `META-INF/services/cpw.mods.modlauncher.api.ITransformationService`
+are gone. The replacement is `net.neoforged.neoforgespi.transformation.ClassProcessor` (`name()`, `handlesClass(SelectionContext)`,
+`processClass(TransformationContext)`, ordering via `runsBefore/runsAfter/orderingHint`) handed to FML by a
+`ClassProcessorProvider.createProcessors(Context, Collector)`; FML builds the processor set in `FMLLoader.createClassProcessorSet`
+with `ServiceLoader.load(ClassProcessorProvider.class)` on the launch class loader, i.e. BEFORE the game layer exists, so the provider is
+found only where that loader can see a `META-INF/services/net.neoforged.neoforgespi.transformation.ClassProcessorProvider` file: the dev
+classpath, or a jar FML appends to it (manifest `FMLModType: LIBRARY`, which `FMLLoader.loadPlugins` appends; a `MOD` jar's services are
+NOT scanned for this interface, and the early-service jar scan does not list it). · **What breaks:** nothing at compile or load. The old
+services file is simply never read, so the mod boots without its transformations; Gate A and B pass. Found only because the mod's own
+`EcaBootstrap.log` was missing from the Gate B run (X53). · **Fix:** a per-target provider class (`EcaClassProcessorProvider`, an overlay
+file with no counterpart in the authors' tree) touching the old service class first (its static initialiser starts the bootstrap log) and
+calling `collector.add(new EcaCoreTransformer())`, plus the services resource in the target's `resources/`. `SelectionContext.type()` is an
+ASM `Type` (`getClassName()` is dotted); `processClass` edits the passed `ClassNode` in place and returns the `ComputeFlags` to recompute.
+· **Anticipates:** arrives at 21.9 (1.21.9/1.21.10); 26.x inherits it unchanged (no dedicated 26.2 entry).
+
+L29. **A SHIPPED jar cannot register an FML 10 class processor at all** · `ClassProcessorProvider` is found with
+`ServiceLoader` while the thread context loader is the EARLY-SERVICES loader, which holds only top-level `mods/` jars
+declaring one of five early services (candidate locator, file reader, dependency locator, graphics bootstrapper,
+immediate window). A jarJar'd library is never scanned for them, and making the mod jar itself an early-service jar
+masks it out of the transforming loader (its mixins stop applying). So a coremod that worked from `mods/` on 1.21.1
+(ModLauncher scanned the mods dir) runs on 1.21.10 only in DEV. · **Measured with `tools/shipped-gate.py`** (a real
+server, the built jar in mods/): 1.21.1 and 1.21.8 PASS, 1.21.10 FAIL while every dev gate was green. · **Fix used
+for a mod that also has an agent backend:** initialise the backend from `FMLConstructModEvent` (the agent retransforms,
+so it need only be selected before the first transformed class loads) -- restores 1.21.1's shipped behaviour; a
+coremod-only mod has no shipped path on FML 10 and should say so loudly.
+
+L30. **GeckoLib 5.3 (1.21.10 line): `GeoRenderEvent.*` render-layer events are INTERFACES (CATALOG M44)** ·
+`GeoRenderEvent.Entity/ReplacedEntity/Block.CompileRenderLayers` are interfaces; the postable events are the concrete classes
+`software.bernie.geckolib.event.entity.CompileEntityRenderLayersEvent`, `…event.replacedentity.CompileReplacedEntityRenderLayersEvent`,
+`…event.block.CompileBlockRenderLayersEvent`. · **Symptom:** `addListener` on the interface compiles; the bus calls `getSuperclass()`
+on it, gets null and NPEs, so mod loading breaks on the CLIENT only. A secondary `IllegalStateException: No value present` from a
+mod-container lookup in a reload listener was fallout. Found by Gate C `launch`, not Gate B. · **Fix:** listen on the concrete classes.
+· **Guard:** `tools/audit-event-listeners.py` now flags an interface parameter as well as an abstract class, checks every
+event type a dependency jar declares (it was `net.neoforged`/`net.minecraft` only, so GeckoLib's were never looked at), and
+resolves nested types (`GeoRenderEvent.Entity.CompileRenderLayers` → `…$Entity$CompileRenderLayers`). A/B'd on ECA 1.21.10:
+the pre-fix file is caught (3 listeners, exit 1), the fixed one is clean; 1.21.5–1.21.11 sweep: no new findings.
+
+L31. **1.21.11: `ResourceLocation` → `Identifier` and 329 class moves (CATALOG M45)** · `net.minecraft.resources.Identifier` is a pure
+rename (§V4 arrives here, not at 26.x); `FriendlyByteBuf.readResourceLocation/writeResourceLocation` → `readIdentifier/writeIdentifier`;
+`ResourceKey.location()` → `identifier()`; **`TagKey.location()` is unchanged**, so never a bare `.location()` row. 329 classes moved
+(the start of the 26.x sub-package split). Mixin descriptors name classes in slash form (`Lnet/minecraft/...;`), which a dotted move
+row cannot reach: give those moves slash-form rows. Shared helpers and inherited overlays are not rewritten by the rows (CATALOG X54).
+· **Anticipates:** §V4, §V3.
+
+L32. **1.21.11 signature changes found by the mixin audit (CATALOG M46)** · `Camera.setup(Level, …)` (was `BlockGetter`);
+`CloudRenderer.render` has a `long gameTime` before the partial tick; `FogRenderer.setupFog` lost `boolean thickFog`;
+`LevelRenderer.isSectionCompiled` → `isSectionCompiledAndVisible`; `RenderType` → `net.minecraft.client.renderer.rendertype`
+(`RenderTypes.*`; here `entityCutout`/`entityCutoutNoCull` still mean what they did, §V60's swap comes later); `SkullModelBase` →
+`client.model.object.skull`; `SavedDataType.Factory` takes a `ServerLevel` and `SavedData.Context` is gone; command
+`hasPermission(2)` → `Commands.hasPermission(Commands.LEVEL_GAMEMASTERS)`. · **Anticipates:** §V15, §V60.
+
+L33. **GeckoLib 5.4.5 (1.21.11): no hidden state on `GeoBone`; hooks take `RenderPassInfo<R>` (CATALOG M47)** · `setHidden`,
+`getChildBones`, `renderBone` and `buildRenderTask` are gone; layer hooks take `RenderPassInfo<R>`; `frameSnapshot` is live only
+inside `RenderPassInfo.renderPosed`. · **Fix:** hide bones with a `BoneUpdater` added in `preRender`; draw with
+`renderPassInfo.model().render(...)` inside `renderPosed`. · **Anticipates:** extends §V18d.
+
+**Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
+§X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
+no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:
+the era jump is partly a reading of the four unreleased 1.21.x lines in between.
+
 ### Runtime deltas (Gate B over a clean compile, 1.21.1 → 1.21.4)
 **Measured:** the first 1.21.4 Gate B run was **27 red** with main + test compiling clean on both targets.
 Every one was one of the six below. After them: `ci,default` 613 passed, batch composition identical to the

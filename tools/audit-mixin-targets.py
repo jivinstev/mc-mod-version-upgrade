@@ -202,6 +202,15 @@ def matches(vanilla, want, want_return=None):
     return want_return is None or same(vanilla_return, want_return)
 
 
+def ci_kind(params):
+    """'CallbackInfo' / 'CallbackInfoReturnable' as named by a handler's parameters, else None."""
+    for prm in params:
+        ty = simple(prm.rsplit(" ", 1)[0])
+        if ty in ("CallbackInfo", "CallbackInfoReturnable"):
+            return ty
+    return None
+
+
 def show(decl):
     """A vanilla declaration as it reads in a report line."""
     return "%s (%s)" % (decl[0], ", ".join(decl[1]))
@@ -443,7 +452,7 @@ def resolve_target(workspace, target):
 
 
 def paren_units(text, opener):
-    """The text inside each `<opener> ... )`, with the parens balanced QUOTE-AWARE.
+    r"""The text inside each `<opener> ... )`, with the parens balanced QUOTE-AWARE.
 
     Both callers need this and neither can use a plain regex: a mixin annotation's `target` carries
     a METHOD DESCRIPTOR, so the parentheses that matter are inside a string literal --
@@ -645,6 +654,7 @@ def main():
             # one of the two that had silently stopped being checked.
             # A package segment starts lowercase, which is what separates a fully-qualified name
             # from a nested one written `Outer.Inner.class`.
+            binary_name = None
             if "." in target and target.split(".", 1)[0][:1].islower():
                 entry = target.replace(".", "/") + ".java"
             else:
@@ -669,6 +679,10 @@ def main():
                     if not head.rsplit("/", 1)[-1][:1].isupper():
                         break
                     entry = head + ".java"
+                if entry != imp.group(1).replace(".", "/") + ".java":
+                    # nested: the bytecode lives in Outer$Inner, not in Outer
+                    outer = entry[:-len(".java")].replace("/", ".")
+                    binary_name = outer + "$" + imp.group(1)[len(outer) + 1:].replace(".", "$")
         else:
             # `@Mixin(targets = {"a.b.Outer$Inner"})` — the ONLY way to name a package-private or
             # inner class, so it is not an exotic spelling: a mod that touches a vanilla goal or a
@@ -685,6 +699,7 @@ def main():
             if not m:
                 continue
             entry = m.group(1).split("$", 1)[0].replace(".", "/") + ".java"
+            binary_name = m.group(1)
         if entry not in have:
             continue                      # not a vanilla class
         src = z.read(entry).decode("utf-8", "replace")
@@ -714,8 +729,20 @@ def main():
                 r'[@\w.<>\[\], ?]+\s+[\w$]+\s*\((?P<params>[^)]*)\)', s):
             ann = mm.group("ann")
             spec = re.search(r'method\s*=\s*\{?\s*"([^"]+)"', ann)
-            if not spec or "(" in spec.group(1):
-                continue                  # no target, or a pinned descriptor the block below reads
+            if not spec:
+                continue                  # no target
+            if "(" in spec.group(1):
+                # Pinned descriptor: the block below compares parameters and return. FAULT #24
+                # (below) needs the HANDLER's callback kind checked against that return too.
+                pname, pdesc = strip_owner(spec.group(1)).split("(", 1)
+                pret = parse_return("(" + pdesc)
+                ci = ci_kind(split_params(mm.group("params")))
+                if (ci and pret and not pname.startswith("lambda$")
+                        and pname not in ("<init>", "<clinit>") and "*" not in pname
+                        and (ci == "CallbackInfoReturnable") != (pret != "void")):
+                    problems.append((rel, "@Inject " + pname + " (callback kind)",
+                                     ci, "target returns " + pret))
+                continue                  # the parameter comparison is the block below
             name = strip_owner(spec.group(1))
             # `<clinit>` joins `<init>` here: a class initializer is not a declared method in
             # source, so `declarations()` can never find one and every @Inject into a static
@@ -757,6 +784,14 @@ def main():
             elif not any(matches(d, want) for d in decls):
                 problems.append((rel, "@Inject " + name, "(%s)" % ", ".join(want),
                                  " | ".join(show(d) for d in decls)))
+            # FAULT #24 (§X27): Mixin also requires the callback to be CallbackInfo for a void
+            # target and CallbackInfoReturnable otherwise -- `CallbackInfoReturnable is required!`.
+            ci = ci_kind(params)
+            cand = [d for d in decls if not want or matches(d, want)]
+            if ci and cand and all((ci == "CallbackInfoReturnable") != (d[0] != "void")
+                                   for d in cand):
+                problems.append((rel, "@Inject " + name + " (callback kind)", ci,
+                                 " | ".join(show(d) for d in cand)))
 
         # ── @Inject / @Redirect / @ModifyVariable targets carrying an explicit descriptor ──
         # ⚠ The pattern here was `r'method = \{?"([^"]+)"'` -- single literal spaces, and the
@@ -831,9 +866,14 @@ def main():
         # and unparsed-shape all SKIP rather than report: a checker that is wrong in the accusing
         # direction costs the same trust its silence does (X10).
         if class_jar:
-            fqcn = entry[:-len(".java")].replace("/", ".")
+            # ⚠ FAULT #23: for a NESTED target this read the OUTER class's bytecode, so an @At
+            # inside `ItemStackRenderState$LayerRenderState.render` was looked for in
+            # `ItemStackRenderState.render` -- a different method -- and reported as a missing
+            # call (a false positive, measured on a 1.21.4 fork layer). The source search above
+            # stays loose on purpose; the bytecode read must name the class Mixin really targets.
+            fqcn = binary_name or entry[:-len(".java")].replace("/", ".")
             refs = bytecode_refs(class_jar, fqcn)
-            owner_internal = entry[:-len(".java")]
+            owner_internal = fqcn.replace(".", "/")
             for ann in paren_units(
                     s,
                     r'@(?:Inject|Redirect|ModifyVariable|ModifyArg|ModifyArgs|ModifyConstant'

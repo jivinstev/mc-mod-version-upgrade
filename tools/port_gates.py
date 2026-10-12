@@ -35,6 +35,9 @@ def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
     cmd = ["bash", "gradlew", "--console=plain", "-I", str(ROOT / "tools/central-mirror.init.gradle")]
     for i in extra_init:
         cmd += ["-I", str(i)]
+    # a fork's multi-version layer builds another Minecraft from the same tree (.multiversion/build.sh's -P set,
+    # which tools/ci-gates.py --mc puts here); every Gradle call of a gate run must carry it, or the run tests 1.21.1
+    cmd += gradle_target_args(env)
     return sh(cmd + list(args) + ["-Dorg.gradle.jvmargs=-Xmx6g"], cwd=repo, env=env, timeout=timeout, log=log)
 
 
@@ -59,6 +62,20 @@ def compile_log(repo, tasks, log, extra_init=(), env=None, timeout=2400):
         fh.write("\n# --- the capped compile hit %d errors; uncapped recount (portFullErrors) ---\n" % GRADLE_ERROR_CAP)
         fh.write(full.read_text(encoding="utf-8", errors="replace"))
     return r2 if r2.returncode else r
+
+
+def build_dir_name(env=None):
+    """The build directory of this run: a fork layer builds target <t> into build/mc<t>/ (layer.gradle)."""
+    for a in gradle_target_args(env):
+        if a.startswith("-Pmc="):
+            return "build/mc" + a[len("-Pmc="):]
+    return "build"
+
+
+def gradle_target_args(env=None):
+    """PORT_GRADLE_ARGS: extra Gradle arguments for every call of a gate run, newline-separated."""
+    raw = (env if env is not None else os.environ).get("PORT_GRADLE_ARGS", "")
+    return [a for a in raw.splitlines() if a.strip()]
 
 
 def tgt(c):
@@ -103,8 +120,12 @@ def author_unlisted_mixins(repo, base):
 def harness(c):
     """The external harness: a baseline GameTest, its structure, the mixin integrity test."""
     h, modid = c["dir"] / "harness", c["args"].modid
-    if h.exists():
+    # reuse a harness only when it was built for this target by this harness code: a stale one fails the same way
+    # on every later run (measured: a pre-1.21.5-adapter harness, reused through a persistent --work-dir)
+    stamp = f"{layer_target() or 'base'}\n{_harness_code_hash()}"
+    if h.exists() and (h / ".built-for").is_file() and (h / ".built-for").read_text(encoding="utf-8") == stamp:
         return h
+    shutil.rmtree(h, ignore_errors=True)
     pkg = (re.search(r"(?m)^package\s+([\w.]+)\s*;", next((c["repo"] / "src/main/java").rglob("*.java")).read_text(
         encoding="utf-8")) or [None, modid])[1].split(".")
     pkg = ".".join(pkg[:2]) if len(pkg) > 1 else pkg[0]
@@ -134,11 +155,110 @@ def harness(c):
         t = t.replace("PACKAGE_PLACEHOLDER", pkg).replace("MODID.mixins.json", cfg)
         parked = author_unlisted_mixins(c["repo"], c["args"].base)
         t = t.replace("/*AUTHOR_UNLISTED*/", ", ".join(f'"{n}"' for n in parked))
+        if layer_target():
+            # a fork's layer builds target <t> into build/mc<t>/ (layer.gradle), and its mixin config is the one
+            # processResources wrote there (the layer adds the target's mixins at that step): read both from there,
+            # or the test looks at build/classes/java/main, finds nothing, and fails every layer target (measured)
+            bd = build_dir_name()
+            t = t.replace('DIR.resolve("build/classes/java/main")', f'DIR.resolve("{bd}/classes/java/main")')
+            t = t.replace('DIR.resolve("src/main/resources/', f'DIR.resolve("{bd}/resources/main/')
         (h / "test" / pkg.replace(".", "/")).mkdir(parents=True)
         (h / "test" / pkg.replace(".", "/") / "MixinConfigIntegrityTest.java").write_text(t, encoding="utf-8")
     if tg.gametest == "registration":
         harness_registration(c, h, pkg)
+    layer = layer_target()
+    if layer:
+        harness_layer_target(h, layer)
+        if no_gametest_annotation(layer):
+            harness_layer_registration(c, h, pkg, layer)
+    (h / ".built-for").write_text(stamp, encoding="utf-8")
     return h
+
+
+def _harness_code_hash():
+    """What the harness is built from: this module, the harness templates and the GameTest adapter."""
+    import hashlib
+    d = hashlib.sha256()
+    for p in [pathlib.Path(__file__), ROOT / "templates/multi-version/tools/gametest_adapter.py",
+              *sorted((ROOT / "templates/upstream-harness").rglob("*"))]:
+        if p.is_file():
+            d.update(p.read_bytes())
+    return d.hexdigest()[:16]
+
+
+def mc_tuple(mc):
+    return tuple(int(x) for x in re.findall(r"\d+", mc))
+
+
+def no_gametest_annotation(mc):
+    """1.21.5 removed the annotation-driven GameTest API (net.minecraft.gametest.framework.GameTest,
+    neoforge's GameTestHolder / PrefixGameTestTemplate): tests are data-driven GameTestInstances from there on
+    (CATALOG V5, V20, V47). 1.21.1-1.21.4 keep the annotations, so their harness is left byte-identical."""
+    return mc_tuple(mc) >= (1, 21, 5)
+
+
+def harness_layer_registration(c, h, pkg, mc):
+    """A layer target past 1.21.5: the (already renamed) harness tests are wired by the generated registrar and
+    their dead annotations stripped, by the same templates/multi-version/tools/gametest_adapter.py the 26.x route uses.
+    The 1.21.5 dialect keeps ResourceLocation and FML's @EventBusSubscriber bus attribute; 1.21.6+ (FML 9) drops the attribute; 1.21.11 writes Identifier (the 26.x rename) over a non-generic TestEnvironmentDefinition; 26.x is the adapter's default."""
+    dialect = ("26" if mc_tuple(mc) >= (26,) else "1.21.11" if mc_tuple(mc) >= (1, 21, 11)
+               else "1.21.8" if mc_tuple(mc) >= (1, 21, 6) else "1.21.5")
+    r = subprocess.run([sys.executable, str(ROOT / "templates/multi-version/tools/gametest_adapter.py"), "--root",
+                        str(h / "java"), "--modid", c["args"].modid, "--package", f"{pkg}.gatetest", "--structure",
+                        "empty_test", "--dialect", dialect],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode or "wired 0 tests" in r.stdout:
+        raise Fail(f"wiring the harness GameTests for {mc} failed: {(r.stderr or r.stdout)[-400:]}")
+
+
+def layer_target(env=None):
+    """The Minecraft target a fork's multi-version layer builds in this run (-Pmc in PORT_GRADLE_ARGS), or None."""
+    for a in gradle_target_args(env):
+        if a.startswith("-Pmc="):
+            return a[len("-Pmc="):]
+    return None
+
+
+def harness_table(mc, seen=()):
+    """templates/upstream-harness/versions/<mc>.renames.tsv, with any `#!inherit <mc>` line expanded in place."""
+    p = ROOT / "templates/upstream-harness/versions" / f"{mc}.renames.tsv"
+    if not p.is_file() and not seen:
+        # a new 1.21.x target with no table yet inherits the nearest lower 1.21.x table (a hop inside one family
+        # mostly needs no harness rows; any it does need still show up as Gate A compile errors). Never across
+        # families: a 26.x target without its own table is still refused.
+        fam = mc_tuple(mc)[:2]
+        lower = sorted((mc_tuple(q.name[:-len(".renames.tsv")]), q) for q in p.parent.glob("*.renames.tsv")
+                       if mc_tuple(q.name[:-len(".renames.tsv")])[:2] == fam
+                       and mc_tuple(q.name[:-len(".renames.tsv")]) < mc_tuple(mc))
+        if lower:
+            print(f"[port_gates] no harness table for {mc}: inheriting {lower[-1][1].name}", file=sys.stderr)
+            return harness_table(lower[-1][1].name[:-len(".renames.tsv")], (mc,))
+    if not p.is_file():
+        raise Fail(f"the gate harness has no rename table for Minecraft {mc} "
+                   f"(templates/upstream-harness/versions/{mc}.renames.tsv): it is written for 1.21.1")
+    if mc in seen:
+        raise Fail(f"#!inherit loop at {mc}")
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#!inherit "):
+            out.append(harness_table(line.split()[1], (*seen, mc)))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def harness_layer_target(h, mc):
+    """A fork's multi-version layer builds the author's tree for another 1.21.x; the harness (written for 1.21.1)
+    gets that target's own rename table, the same mechanism as the layer's."""
+    table = h.parent / f"harness-{mc}.renames.tsv"
+    table.write_text(harness_table(mc) + "\n", encoding="utf-8")
+    out = h / "java.renamed"
+    r = subprocess.run([sys.executable, str(ROOT / "templates/multi-version/tools/prepare-sources.py"), "--src",
+                        str(h / "java"), "--renames", str(table), "--out", str(out)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode:
+        raise Fail(f"renaming the harness for {mc} failed: {(r.stderr or r.stdout)[-400:]}")
+    shutil.rmtree(h / "java"); out.rename(h / "java")
 
 
 def read_patch(text):
@@ -217,11 +337,13 @@ def gate_a(c, log):
         raise Fail(f"mixin config(s) declared in no neoforge.mods.toml [[mixins]] -- they never load: {lost}")
     env = gate_env(c)
     r = gradle(c["repo"], ["test"], log, extra_init=[env["PORT_GRADLE_INIT"]], env=env)
-    res = list((c["repo"] / "build/test-results/test").glob("*.xml"))
+    res = list((c["repo"] / build_dir_name() / "test-results/test").glob("*.xml"))
     ran = sum(int(m) for f in res for m in re.findall(r'tests="(\d+)"', f.read_text(encoding="utf-8")))
     bad = sum(int(m) for f in res for m in re.findall(r'(?:failures|errors)="(\d+)"', f.read_text(encoding="utf-8")))
     if r.returncode or bad:
-        raise Fail(f"Gate A failed ({bad} failure(s)); see {log}")
+        errs = list(dict.fromkeys(f"{'/'.join(m[0].split('/')[-3:])}:{m[1]}: {m[2].strip()}" for m in re.findall(
+            r"(?m)^\s*(\S+\.java):(\d+): error: (.+)$", pathlib.Path(log).read_text(encoding="utf-8", errors="replace"))))[:3]
+        raise Fail(f"Gate A failed ({bad} failure(s)); see {log}" + (f" -- first compile error(s): {' | '.join(errs)}" if errs else ""))
     if not ran:
         raise Fail("Gate A ran no tests -- that is not a pass")
     return ran

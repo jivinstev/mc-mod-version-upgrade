@@ -63,11 +63,134 @@ RULE: <if one mechanical rewrite would fix this same error wherever it occurs, a
 `from<TAB>to` (plain name, `member:name`, or `re:<regex>`), else none>"""
 
 
+# Fork-layer mode (--layer <t>, skill fork-versions): the authors' src/ is never edited. The build compiles a
+# PREPARED copy (build/mc<t>/mv/<set>-java, renamed by the target's table); a worker edits that target's OVERLAY
+# (.multiversion/targets/<t>/[<set>/]java/<rel>), copied from the prepared file the moment a worker is given it --
+# not earlier, because an overlay is not run through the table and would block a row that fixes the file.
+LAYER = None   # {"target", "args", "build", "created": {overlay path: prepared text}}
+
+
+def layer_setup(work, target):
+    r = subprocess.run([sys.executable, str(work / ".multiversion/tools/layer.py"), "props", "--target", target],
+                       cwd=work, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    args = [l.strip() for l in r.stdout.splitlines() if l.strip().startswith("-P")]
+    if r.returncode != 0 or f"-Pmc={target}" not in args:
+        sys.exit(f"file-loop: no layer target {target} in {work} ({(r.stdout + r.stderr).strip()[-200:]})")
+    props = dict(a[2:].split("=", 1) for a in args)
+    return {"target": target, "args": args, "build": f"build/mc{target}", "neo": props.get("neo_version"),
+            "created": {}, "src_of": {}}
+
+
+def layer_overlay(work, prepared):
+    """build/mc<t>/mv/<set>-java/<rel> -> (.multiversion/targets/<t>/[<set>/]java/<rel>, source set), or None."""
+    pre = (pathlib.Path(work) / LAYER["build"] / "mv").resolve()
+    try:
+        tail = pathlib.Path(prepared).resolve().relative_to(pre)
+    except ValueError:
+        return None
+    head, rest = tail.parts[0], pathlib.Path(*tail.parts[1:])
+    sub = "java" if head == "java" else (f"{head[:-len('-java')]}/java" if head.endswith("-java") else None)
+    if sub is None:
+        return None
+    return pathlib.Path(work) / ".multiversion/targets" / LAYER["target"] / sub / rest
+
+
+def layer_is_shared(work, overlay):
+    """Is this overlay path a class the shared library supplies (.multiversion/shared/<t>/java/<same path>)?"""
+    parts = pathlib.Path(overlay).relative_to(pathlib.Path(work) / ".multiversion/targets" / LAYER["target"]).parts
+    rel = pathlib.Path(*parts[1:]) if parts and parts[0] == "java" else None
+    return rel is not None and any((pathlib.Path(work) / ".multiversion/shared").glob(f"*/java/{rel.as_posix()}"))
+
+
+def layer_materialize(work, files):
+    """Give each prepared-tree file its overlay (a copy of the prepared text) before a worker edits it."""
+    out = []
+    for f in files:
+        ov = pathlib.Path(f)
+        if not ov.exists():
+            ov.parent.mkdir(parents=True, exist_ok=True)
+            text = pathlib.Path(LAYER["src_of"][f]).read_text(encoding="utf-8", errors="replace")
+            ov.write_text(text, encoding="utf-8")
+            LAYER["created"][str(ov)] = text
+        out.append(str(ov))
+    return out
+
+
+def layer_prune(work):
+    """An overlay a worker created and left unchanged is deleted, so the table keeps reaching that file."""
+    gone = []
+    for ov, text in list(LAYER["created"].items()):
+        p = pathlib.Path(ov)
+        if p.exists() and p.read_text(encoding="utf-8", errors="replace") == text:
+            p.unlink(); del LAYER["created"][ov]; gone.append(ov)
+            d = p.parent
+            while d != pathlib.Path(work) / ".multiversion" and d.is_dir() and not any(d.iterdir()):
+                d.rmdir(); d = d.parent
+    return gone
+
+
+def layer_tracked(work, ov):
+    return subprocess.run(["git", "-C", str(work), "ls-files", "--error-unmatch", os.path.relpath(ov, work)],
+                          capture_output=True).returncode == 0
+
+
+def layer_drop_unneeded(work, log, heap, limit, candidates=None):
+    """After a row went in: move every overlay THIS RUN created (never a committed one) aside in ONE compile; those
+    whose file now has no error are unnecessary (the row reaches the file again) and are dropped, the rest are
+    restored. Nothing is dropped unless the final count stays <= limit. Returns (dropped paths, count)."""
+    cand = [ov for ov in LAYER["created"] if pathlib.Path(ov).exists() and (candidates is None or ov in candidates)
+            and not layer_tracked(work, ov)]
+    if not cand:
+        return [], None
+    saved = {ov: pathlib.Path(ov).read_text(encoding="utf-8", errors="replace") for ov in cand}
+    for ov in cand:
+        pathlib.Path(ov).unlink()
+
+    def restore(which):
+        for ov in which:
+            pathlib.Path(ov).write_text(saved[ov], encoding="utf-8")
+    n, errs = compile_(work, log, heap)
+    if n is None:
+        restore(cand); return [], None
+    needed = [ov for ov in cand if ov in {f for f, _l, _m in errs}]
+    restore(needed)
+    dropped = [ov for ov in cand if ov not in needed]
+    if dropped and needed:
+        n, _e = compile_(work, log, heap)
+    if not dropped or n is None or (limit is not None and n > limit):
+        restore(dropped); return [], None
+    for ov in dropped:
+        del LAYER["created"][ov]
+        d = pathlib.Path(ov).parent
+        while d != pathlib.Path(work) / ".multiversion" and d.is_dir() and not any(d.iterdir()):
+            d.rmdir(); d = d.parent
+    return dropped, n
+
+
+def layer_guard(work, before):
+    """Undo anything a worker changed outside .multiversion/ (the authors' tree and the base port stay theirs)."""
+    undone = []
+    for p, code in singleshot._status(pathlib.Path(work)).items():
+        if p.startswith(".multiversion/") or p in before:
+            continue
+        f = pathlib.Path(work) / p
+        if code == "??":
+            if f.is_dir():
+                shutil.rmtree(f)
+            else:
+                f.unlink(missing_ok=True)
+        else:
+            subprocess.run(["git", "-C", str(work), "checkout", "-q", "--", p], capture_output=True)
+        undone.append(p)
+    return undone
+
+
 def compile_(work, log, heap):
     init = ROOT / "tools/maxerrs.init.gradle"
     with open(log, "w", encoding="utf-8") as fh:
         # every source set the author builds, not just main (tools/srcsets.py); --continue so all report
-        subprocess.run([BASH, "gradlew", *srcsets.compile_tasks(work), "--continue", "--console=plain", "--init-script", str(init),
+        subprocess.run([BASH, "gradlew", *srcsets.compile_tasks(work), *(LAYER["args"] if LAYER else []),
+                        "--continue", "--console=plain", "--init-script", str(init),
                         "--init-script", str(ROOT / "tools/central-mirror.init.gradle"),
                         f"-Dorg.gradle.jvmargs=-Xmx{heap}"], cwd=work, stdout=fh, stderr=subprocess.STDOUT)
     text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
@@ -85,6 +208,23 @@ def compile_(work, log, heap):
                        encoding="utf-8", errors="replace")
     if r.returncode != 0:   # a capped, parse-aborted, OOM'd or never-compiled log is not a count
         return None, r.stdout.strip().splitlines()[:3]
+    if LAYER:
+        # keyed by the OVERLAY path whether or not it exists yet, so a file keeps its tier once it has one;
+        # an error outside the prepared tree (a gate harness) is counted but not routed to a worker
+        errs, n_all = [], 0
+        for f, l, msg in rb.parse_errors(text):
+            n_all += 1
+            ov = layer_overlay(work, f)
+            if ov is not None and layer_is_shared(work, ov):
+                # an error inside a SHARED-library helper is library work: a per-fork overlay of it forks the library
+                # and hides the fix from every other fork (measured: 8 helpers overlaid on one unattended target).
+                # Counted, never routed to a worker; tools/fork-port.py reports it as residue.
+                LAYER.setdefault("shared_errors", set()).add(str(ov.relative_to(work)))
+                continue
+            if ov is not None:
+                LAYER["src_of"][str(ov)] = str(pathlib.Path(f).resolve())
+                errs.append((str(ov), l, msg))
+        return n_all, errs
     return len(errs := [(rb_rel(f), l, msg) for f, l, msg in rb.parse_errors(text)]), errs
 
 
@@ -139,10 +279,10 @@ def find_sources(work):
     On 26.x the Minecraft sources jar holds no NeoForge API, so NeoForge's own sources jar is added
     from the Gradle cache. None if nothing matches yet (compile first)."""
     for d in sorted(work.glob("build/neoForm/*/steps/transformSource/transformed")):
-        if any(d.rglob("Minecraft.java")):
+        if any(d.rglob("Minecraft.java")) and not LAYER:
             return d
-    neo = target_neo_version(work)
-    jars = sorted(work.glob("build/moddev/artifacts/*sources*.jar"))
+    neo = LAYER["neo"] if LAYER else target_neo_version(work)
+    jars = sorted(work.glob(f"{LAYER['build'] if LAYER else 'build'}/moddev/artifacts/*sources*.jar"))
     if neo:
         jars = [j for j in jars if neo in j.name]
         home = pathlib.Path(os.environ.get("GRADLE_USER_HOME") or pathlib.Path.home() / ".gradle")
@@ -297,12 +437,40 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
             "rule": rule, "result": res[-600:]}
 
 
-def try_rule(work, src, row, n_before, log, heap, n_rule):
-    """Apply one proposed row tree-wide; keep it only if the error count falls."""
+def norm_row(row):
+    row = row.strip()
     if "\t" not in row:
         row = re.sub(r'\s{2,}|\s*->\s*|\s*→\s*', "\t", row, count=1)
+    return row
+
+
+def try_rule(work, src, row, n_before, log, heap, n_rule, tried=None):
+    """Apply one proposed row tree-wide; keep it only if the error count falls -- or, in layer mode, stays equal while
+    it makes an overlay this run created unnecessary. A row already tried in this run (same from/to) is skipped."""
+    row = norm_row(row)
     if "\t" not in row:
         return False, "no TAB in the row"
+    if tried is not None:
+        key = tuple(x.strip() for x in row.split("\t")[:2])
+        if key in tried:
+            return False, "skipped: this row was already tried in this run"
+        tried.add(key)
+    if LAYER:   # a row goes into the target's own table, never over the authors' tree
+        table = pathlib.Path(work) / ".multiversion/targets" / LAYER["target"] / "renames.tsv"
+        before = table.read_text(encoding="utf-8") if table.exists() else ""
+        table.write_text(before + ("" if before.endswith("\n") or not before else "\n")
+                         + f"# X{n_rule}: proposed by a file-loop worker, kept because the error count fell\n{row}\n",
+                         encoding="utf-8")
+        n, _e = compile_(work, log, heap)
+        if n is not None and n == n_before:
+            dropped, n2 = layer_drop_unneeded(work, log, heap, n_before)
+            if dropped:
+                return True, (f"{n_before} -> {n2}: dropped {len(dropped)} loop overlay(s) the row makes "
+                              f"unnecessary ({', '.join(os.path.relpath(x, work) for x in dropped[:3])})")
+        if n is None or n >= n_before:
+            table.write_text(before, encoding="utf-8")
+            return False, f"compile {n} >= {n_before}: reverted"
+        return True, f"{n_before} -> {n}"
     snap = pathlib.Path(tempfile.mkdtemp()) / "src"
     shutil.copytree(src, snap)
     pack = pathlib.Path(tempfile.mkdtemp()) / "p.recipes.tsv"
@@ -565,6 +733,10 @@ def main():
     ap.add_argument("--subsystem", action="store_true",
                     help="workers may edit any file (for cross-file rewrites the per-file rounds cannot finish: "
                          "capabilities, networking); use with a large --batch-files")
+    ap.add_argument("--layer", metavar="TARGET",
+                    help="a fork's multi-version layer target (skill fork-versions): compile that target, and fix each "
+                         "error in its overlay (.multiversion/targets/<t>/...) or with a row in its renames.tsv; "
+                         "the authors' tree is never edited")
     ap.add_argument("--no-probe", action="store_true",
                     help="skip the override probe at 0 errors (dead overrides compile clean; catalogue R-class)")
     a = ap.parse_args()
@@ -574,6 +746,17 @@ def main():
         ap.error("--work is required")
     work = pathlib.Path(a.work).resolve(); src = work / "src/main/java"
     all_java = lambda: (f for d in srcsets.java_dirs(work) for f in d.rglob("*.java"))
+    global LAYER
+    if a.layer:
+        LAYER = layer_setup(work, a.layer)
+        tdir = work / ".multiversion/targets" / a.layer
+        all_java = lambda: tdir.rglob("*.java")
+        if a.target is None:
+            a.target = (f"NeoForge {LAYER['neo']} (Minecraft {a.layer}). The file you edit is a per-version OVERLAY "
+                        f"under .multiversion/: the mod's own file already renamed for {a.layer}, which replaces the "
+                        f"original on that version only. Change only what the errors need")
+        a.no_probe = True   # the post-compile checks of a layer are its gates and the mixin audit (fork-versions)
+        status0 = set(singleshot._status(work))
     if a.target is None:   # the build says what it targets; a default here once told 26.2 workers "1.21.1"
         a.target = srcsets.target(work) or "NeoForge 1.21.1"
     logf = open(a.log, "a", encoding="utf-8")
@@ -581,7 +764,8 @@ def main():
     sigs = rb.signatures()
     entries = {i: b for i, b in rb.catalogue_entries((ROOT / "CATALOG.md").read_text(encoding="utf-8"))}
     # an upstream port must not write into the author's tree: PORT_LOG_DIR (tools/port-upstream.py) moves the log
-    clog = pathlib.Path(os.environ.get("PORT_LOG_DIR") or work) / "file-loop-compile.log"
+    clog = pathlib.Path(os.environ.get("PORT_LOG_DIR") or (work / LAYER["build"] if LAYER else work)) / "file-loop-compile.log"
+    clog.parent.mkdir(parents=True, exist_ok=True)
     n, errs = compile_(work, clog, a.heap)
     if a.sources == "auto":
         found = find_sources(work)
@@ -589,7 +773,7 @@ def main():
     note(event="start", errors=n, sources=a.sources)
     if n is None:
         print("the start does not compile to a count:", errs); return 2
-    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}, "xtries": {}, "cost_of": {}}
+    state = {"spent": 0.0, "rules": 0, "tier_of": {}, "needs": {}, "xtries": {}, "cost_of": {}, "tried": set()}
     # the escalation ladder: (model, single-shot?). Single-shot tiers go first in --mode single (the
     # default): one request per file with script-gathered context; agent tiers are the fallback.
     ladder = ([(m, True) for m in ("haiku", "sonnet")] if a.mode == "single" else []) + [(m, False) for m in TIERS]
@@ -597,6 +781,41 @@ def main():
     lo = next(i for i, (m, _s) in enumerate(ladder) if m == a.first_model)
     hi = len(ladder) - 1
     idx = singleshot.SourceIndex(a.sources) if a.mode == "single" else None
+
+    def run_rule(rnd, row, n, errs):
+        """Try one proposed row (once per run) and log it; returns the new (count, errs)."""
+        state["rules"] += 1
+        ok, why = try_rule(work, src, row, n, clog, a.heap, state["rules"], state["tried"])
+        if ok:
+            n, errs = compile_(work, clog, a.heap)
+        note(event="rule-skipped" if str(why).startswith("skipped") else "rule", round=rnd, row=row, kept=ok,
+             why=str(why), errors=n)
+        return n, errs
+
+    def rows_first(rnd, results, n, pre_created):
+        """Layer mode, before a worker's overlay edits are kept: a worker that proposed a row gets it tried while the
+        files it would touch are still shared text (a row never reaches an overlay, CATALOG W8), against the count
+        the round started at. Then the overlays are put back and the ones the row made unnecessary are dropped."""
+        new = {ov: pathlib.Path(ov).read_text(encoding="utf-8", errors="replace") for ov in LAYER["created"]
+               if ov not in pre_created and pathlib.Path(ov).exists()}
+        for ov in new:
+            pathlib.Path(ov).unlink()
+        cur, kept_any = n, False
+        for res in results:
+            if res["rule"] and cur:
+                c2, _e = run_rule(rnd, res["rule"], cur, [])
+                kept_any = kept_any or (c2 is not None and c2 < cur)
+                cur = c2 if c2 is not None else cur
+        for ov, text in new.items():
+            pathlib.Path(ov).write_text(text, encoding="utf-8")
+        if not kept_any or not new:
+            return cur
+        c, _e = compile_(work, clog, a.heap)
+        dropped, c2 = layer_drop_unneeded(work, clog, a.heap, c, candidates=set(new))
+        if dropped:
+            note(event="rows-first-dropped-overlays", round=rnd, overlays=[os.path.relpath(x, work) for x in dropped])
+            return c2
+        return c if c is not None else cur
 
     def fix_errors(n, errs):
         """Compile rounds until 0, the budget, the last tier, or a plateau."""
@@ -646,6 +865,11 @@ def main():
                      est=round(cost, 3))
             multi = multi if any(k == "m" for k, _ in kept) else None
             jobs = [i for k, i in kept if k == "j"]; singles = [i for k, i in kept if k == "s"]
+            pre_created = set(LAYER["created"]) if LAYER else set()
+            start_n = n
+            if LAYER:
+                layer_materialize(work, [f for files, _m, _s in jobs for f in files] + [f for f, _m in singles]
+                                  + (multi or []))
             snap = {str(f): f.read_text(encoding="utf-8", errors="replace") for f in all_java()}
             from concurrent.futures import ThreadPoolExecutor
 
@@ -666,17 +890,25 @@ def main():
             if multi:
                 jobs.insert(0, (multi, "sonnet", True)); results.insert(0, mfut.result())
             sresults = [fu.result() for fu in sfuts]
+            if LAYER:
+                undone, pruned = layer_guard(work, status0), layer_prune(work)
+                if undone or pruned:
+                    note(event="layer-guard", round=rnd, undone_outside_layer=undone,
+                         pruned_unchanged_overlays=[os.path.relpath(x, work) for x in pruned])
             jobs += [([f], m, "single") for f, m in singles]
             results += sresults
             for res in results:
                 state["spent"] += res["usd"]; note(event="worker", round=rnd, **res)
                 c_ = state["cost_of"].setdefault(res.get("model") or "?", [0, 0.0]); c_[0] += 1; c_[1] += res["usd"] or 0
-            before = n
+            if LAYER and n and any(res["rule"] for res in results):
+                n = rows_first(rnd, results, start_n, pre_created)
+            before = start_n
             n, errs = compile_(work, clog, a.heap)
             if n is None and any("PARSE ABORT" in l for l in errs):
                 # a worker's edit broke a file's syntax: revert just those files to this round's start,
                 # move them up a tier, and count again (one bad edit must not stop the round)
-                broken = {rb_rel(f) for f, _l, _m in rb.parse_errors(clog.read_text(encoding="utf-8", errors="replace"))}
+                broken = {(str(layer_overlay(work, f)) if LAYER and layer_overlay(work, f) else rb_rel(f))
+                          for f, _l, _m in rb.parse_errors(clog.read_text(encoding="utf-8", errors="replace"))}
                 for f in broken:
                     if f in snap:
                         pathlib.Path(f).write_text(snap[f], encoding="utf-8")
@@ -710,11 +942,7 @@ def main():
                             tier_of[f] = max(tier_of.get(f, lo), cur) + 1
             for res in results:
                 if res["rule"] and n:
-                    state["rules"] += 1
-                    ok, why = try_rule(work, src, res["rule"], n, clog, a.heap, state["rules"])
-                    if ok:
-                        n, errs = compile_(work, clog, a.heap)
-                    note(event="rule", round=rnd, row=res["rule"], kept=ok, why=str(why), errors=n)
+                    n, errs = run_rule(rnd, res["rule"], n, errs)
             # a round that fixed nothing has already moved its files up a tier; stop only when the next one
             # also fails (measured: stopping at the first such round left 2 errors with Sonnet/Opus untried)
             stalled = stalled + 1 if n >= before and not state["needs"] else 0
@@ -728,7 +956,7 @@ def main():
         print("compile no longer counts:", errs); return 3
     # at 0 errors: the load-crash scans, then the dead-override probe; each finding round may break the
     # compile, which the error rounds then repair
-    finders = [("scan", lambda: static_scan(work)), ("scan", lambda: mixin_audit(work))]
+    finders = [] if LAYER else [("scan", lambda: static_scan(work)), ("scan", lambda: mixin_audit(work))]
     if not a.no_probe:
         finders.append(("probe", lambda: probe(work, a.sources)))
     for kind, find in finders:
@@ -752,6 +980,8 @@ def main():
             by_model[e["model"]][0] += 1; by_model[e["model"]][1] += e["usd"]
     # the end-of-loop audit: every file a worker changed -- agents included, whose edits no guard saw --
     # compared with where it started. A removed feature makes errors go away just as well as a fix does.
+    if LAYER:   # an overlay a worker created is audited against the prepared copy it started from
+        orig.update(LAYER["created"])
     stubs = []
     for path, before in orig.items():
         f = pathlib.Path(path)
@@ -775,6 +1005,10 @@ def main():
             stubs.append({"file": os.path.relpath(path, work), "why": "; ".join(why)})
     if stubs:
         note(event="stub-signals", files=stubs)
+    if LAYER:
+        note(event="layer-end", target=LAYER["target"],
+             overlays_created=sorted(os.path.relpath(x, work) for x in LAYER["created"]),
+             shared_helper_errors=sorted(LAYER.get("shared_errors", ())))
     note(event="end", errors=n, spent=round(spent, 4), stubs=len(stubs),
          by_model={k: [v[0], round(v[1], 4)] for k, v in by_model.items()})
     return 0 if n == 0 else 1
@@ -847,6 +1081,69 @@ def self_check():
                       "  public static a.b.Foo of(int);\n  public java.util.List<a.c.Bar> bars();\n}")
     ok = ok and "public new Foo(Foo.Props);" in stub and "public static Foo of(int);" in stub \
         and "List<Bar> bars();" in stub and "class Foo extends Base {" in stub
+    # fork-layer mode: the prepared tree maps to the target's overlays, an overlay is made only when a worker is
+    # given the file, an unchanged one is pruned, and nothing outside .multiversion/ survives a round
+    global LAYER
+    with tempfile.TemporaryDirectory() as d:
+        w = pathlib.Path(d)
+        subprocess.run("git init -q && touch README && git add -A && git -c user.email=a@b -c user.name=a commit -qm i",
+                       shell=True, cwd=w, check=True)
+        LAYER = {"target": "1.21.4", "build": "build/mc1.21.4", "args": [], "neo": "21.4.1", "created": {}, "src_of": {}}
+        pre = w / "build/mc1.21.4/mv/java/a/B.java"; pre.parent.mkdir(parents=True); pre.write_text("class B {}\n", encoding="utf-8")
+        pro = w / "build/mc1.21.4/mv/pro-java/a/C.java"; pro.parent.mkdir(parents=True); pro.write_text("class C {}\n", encoding="utf-8")
+        ov_b, ov_c = layer_overlay(w, pre), layer_overlay(w, pro)
+        ok &= ov_b == w / ".multiversion/targets/1.21.4/java/a/B.java"
+        ok &= ov_c == w / ".multiversion/targets/1.21.4/pro/java/a/C.java"
+        ok &= layer_overlay(w, w / "harness/X.java") is None
+        sh = w / ".multiversion/shared/1.21.4/java/a/Shared.java"; sh.parent.mkdir(parents=True); sh.write_text("class S {}\n", encoding="utf-8")
+        ok &= layer_is_shared(w, w / ".multiversion/targets/1.21.4/java/a/Shared.java") \
+            and not layer_is_shared(w, ov_b)
+        LAYER["src_of"] = {str(ov_b): str(pre), str(ov_c): str(pro)}
+        layer_materialize(w, [str(ov_b), str(ov_c)])
+        ok &= ov_b.read_text(encoding="utf-8") == "class B {}\n" and ov_c.exists()
+        ov_b.write_text("class B { int x; }\n", encoding="utf-8")                    # a worker changed B, left C alone
+        pruned = layer_prune(w)
+        ok &= pruned == [str(ov_c)] and not ov_c.exists() and ov_b.exists() \
+            and not (w / ".multiversion/targets/1.21.4/pro").exists()
+        (w / "README").write_text("edited by a worker\n", encoding="utf-8"); (w / "src").mkdir(); (w / "src/New.java").write_text("x", encoding="utf-8")
+        undone = layer_guard(w, set())
+        ok &= (w / "README").read_text(encoding="utf-8") == "" and not (w / "src/New.java").exists() and ov_b.exists() \
+            and "README" in undone
+        # a row already tried in this run is skipped, not compiled again
+        tbl = w / ".multiversion/targets/1.21.4/renames.tsv"
+        real_compile, calls = compile_, []
+        try:
+            globals()["compile_"] = lambda *x, **k: (calls.append(1), (5, []))[1]
+            tried = set(); LAYER["created"] = {}
+            r1 = try_rule(w, None, "A\tB", 5, w / "l.log", "1g", 1, tried)
+            r2 = try_rule(w, None, "A  B", 5, w / "l.log", "1g", 2, tried)
+            ok &= r1[0] is False and r2 == (False, "skipped: this row was already tried in this run") and len(calls) == 1
+            # an EQUAL count is accepted when it makes an overlay this run created unnecessary: the overlay is
+            # compiled without, its file is clean, so it goes; one whose file would error stays; a committed one
+            # is never touched
+            ov_need, ov_gone = w / ".multiversion/targets/1.21.4/java/a/Need.java", ov_b
+            kept = w / ".multiversion/targets/1.21.4/java/a/Kept.java"
+            kept.parent.mkdir(parents=True, exist_ok=True); kept.write_text("committed\n", encoding="utf-8")
+            subprocess.run("git add -f .multiversion/targets/1.21.4/java/a/Kept.java && "
+                           "git -c user.email=a@b -c user.name=a commit -qm k", shell=True, cwd=w, check=True)
+            for o in (ov_need, ov_gone):
+                o.write_text("class X { int y; }\n", encoding="utf-8")
+            LAYER["created"] = {str(ov_need): "class X {}\n", str(ov_gone): "class X {}\n", str(kept): "committed\n"}
+
+            def fake(work_, log_, heap_):   # without ov_need the compile reports an error in it; Kept would too
+                have = {o for o in (ov_need, ov_gone, kept) if o.exists()}
+                return (6 if ov_need not in have else 5), ([(str(ov_need), 1, "m")] if ov_need not in have else [])
+            globals()["compile_"] = fake
+            r3 = try_rule(w, None, "C\tD", 5, w / "l.log", "1g", 3, tried)
+            ok &= r3[0] is True and "dropped 1" in r3[1] and not ov_gone.exists() and ov_need.exists() \
+                and kept.exists() and str(ov_gone) not in LAYER["created"] and tbl.read_text(encoding="utf-8").rstrip().endswith("C\tD")
+            # no loop overlay to drop: an equal count is still a revert
+            LAYER["created"] = {}
+            r4 = try_rule(w, None, "E\tF", 5, w / "l.log", "1g", 4, tried)
+            ok &= r4[0] is False and "E\tF" not in tbl.read_text(encoding="utf-8")
+        finally:
+            globals()["compile_"] = real_compile
+    LAYER = None
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
     return 0 if ok else 1
 

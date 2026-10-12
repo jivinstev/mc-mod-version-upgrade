@@ -1,0 +1,10 @@
+# 1.21.8 (NeoForge 21.8, FML 9): the harness renames are those of 1.21.5, plus the rows below.
+#!inherit 1.21.5
+# Measured against the 1.21.8 sources. 1.21.6 made GuiGraphics.pose() a 2D JOML Matrix3x2fStack (CATALOG V6): pushMatrix/popMatrix,
+# translate/scale of two floats.
+re:g\.pose\(\)\.pushPose\(\)	g.pose().pushMatrix()
+re:g\.pose\(\)\.popPose\(\)	g.pose().popMatrix()
+re:g\.pose\(\)\.translate\(8, 8, 0\)	g.pose().translate(8f, 8f)
+re:g\.pose\(\)\.scale\(s, s, 1f\)	g.pose().scale(s, s)
+# Screenshot.grab gained the downscale factor (1 = none): grab(File, String, RenderTarget, int, Consumer).
+re:(Screenshot\.grab\(mc\.gameDirectory, "gatec-" \+ name \+ "\.png",\s*)mc\.getMainRenderTarget\(\), msg	\1mc.getMainRenderTarget(), 1, msg

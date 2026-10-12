@@ -382,6 +382,95 @@ grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CA
   && grep -q '1,?000 errors' tools/burndown-count.sh && grep -q '1,?000 errors' tools/file-loop.py \
   && ok "the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count" || bad "the Gradle error cap disagrees between its four copies"
 
+out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges" \
+  || bad "make-fork-layer self-check: $out"
+out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest" \
+  || bad "layer.py self-check: $out"
+out="$(python3 tools/fork-port.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, the generated moves table (no duplicate froms, block closed), residue report, STOP block, layer.py patch" \
+  || bad "fork-port self-check: $out"
+out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
+  || bad "gametest_adapter self-check: $out"
+out="$(python3 - <<'PY' 2>&1
+import importlib.util, pathlib
+s = importlib.util.spec_from_file_location("pg", "tools/port_gates.py"); m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+assert [m.no_gametest_annotation(v) for v in ("1.21.1", "1.21.4", "1.21.5", "1.21.10", "26.2")] == [False, False, True, True, True]
+assert pathlib.Path("templates/upstream-harness/versions/1.21.5.renames.tsv").read_text().count("snapTo") >= 1
+print("self-check: OK")
+PY
+)"
+grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
+  || bad "port_gates check: $out"
+
+echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, layer mode"
+if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+  E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \
+    "$E/src/net/neoforged/neoforge/client/event" "$E/tree/a/b" "$E/classes"
+  echo 'package net.minecraft.world.item; public class Item {}' > "$E/src/net/minecraft/world/item/Item.java"
+  echo 'package net.neoforged.neoforge.common; public class NeoForge {}' > "$E/src/net/neoforged/neoforge/common/NeoForge.java"
+  echo 'package net.neoforged.bus.api; public @interface SubscribeEvent {}' > "$E/src/net/neoforged/bus/api/SubscribeEvent.java"
+  cat > "$E/src/net/neoforged/neoforge/client/event/Stage.java" <<'J'
+package net.neoforged.neoforge.client.event;
+public abstract class Stage { public static class After extends Stage {} }
+J
+  (cd "$E" && javac -d classes $(find src -name '*.java') && jar cf fake.jar -C classes .) >/dev/null 2>&1
+  EW="$E"; command -v cygpath >/dev/null 2>&1 && EW="$(cygpath -m "$E")"   # python on Windows cannot open /tmp/... paths
+  echo "$EW/fake.jar" > "$E/cp.txt"
+  cat > "$E/tree/a/b/Hook.java" <<'J'
+package a.b;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.client.event.Stage;
+public class Hook {
+    @SubscribeEvent
+    public static void onStage(Stage event) { if (!(event instanceof Stage.After)) return; }
+    static void init(Object bus) { bus.addListener(Hook::viaRef); }
+    private static void viaRef(Stage event) { }
+}
+J
+  out="$(python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" 2>&1)"; rc=$?
+  [ "$rc" = 1 ] && [ "$(grep -c 'is ABSTRACT' <<<"$out")" = 2 ] \
+    && ok "audit-event-listeners: the abstract parameter is reported for the annotated listener AND the Cls::method one" \
+    || bad "audit-event-listeners did not report both abstract listeners (rc=$rc): $out"
+  sed -i 's/Stage event) { if (!(event instanceof Stage.After)) return; }/Stage.After event) { }/; s/viaRef(Stage event)/viaRef(Stage.After event)/' "$E/tree/a/b/Hook.java"
+  out="$(python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && grep -q 'checked 2 event listener' <<<"$out" \
+    && ok "audit-event-listeners: naming the concrete subclass passes, with the listener count printed" \
+    || bad "audit-event-listeners failed the fixed listeners (rc=$rc): $out"
+  echo 'package a.b; public class Empty {}' > "$E/tree/a/b/Hook.java"
+  python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" >/dev/null 2>&1; rc=$?
+  [ "$rc" = 2 ] && ok "audit-event-listeners: zero listeners checked exits 2, never a pass" \
+    || bad "audit-event-listeners zero-listener exit was $rc, expected 2"
+else
+  echo "  SKIP  audit-event-listeners (no javac/jar)"
+fi
+out="$(python3 tools/gate-loop.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause" || bad "gate-loop self-check: $out"
+out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick and crash-cause self-check" || bad "shipped-gate self-check: $out"
+python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
+printf 'x' > "$T/notjar.jar"; python3 tools/shipped-gate.py --jar "$T/notjar.jar" --neo 21.1.228 >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a file that is not a jar exits 2" || bad "shipped-gate non-jar exit"
+python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1],'w').writestr('a','b')" "$T/ok.jar"
+python3 tools/shipped-gate.py --jar "$T/ok.jar" --neo 21.1.228 --expect-log 'bad/path:x' >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a malformed --expect-log exits 2 before anything is downloaded" || bad "shipped-gate bad expectation exit"
+out="$(python3 tools/layer-ci.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "layer-ci: targets are VERSION-sorted (1.21.11 is newer than 1.21.8), java follows inherits, hook stripping" || bad "layer-ci self-check: $out"
+mkdir -p "$T/lay/.multiversion/targets"/{1.21.8,1.21.10,1.21.11,1.21.3}; echo x=1 > "$T/lay/.multiversion/base.properties"
+for t in 1.21.8 1.21.10 1.21.11 1.21.3; do echo "java_version=21" > "$T/lay/.multiversion/targets/$t/target.properties"; done
+out="$(python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho" 2>&1)"
+grep -q '^newest=1.21.11$' "$T/gho" && grep -q '"1.21.8"' <<<"$out" && ! grep -q '"t":"1.21.11"' "$T/gho" \
+  && ok "layer-ci plan: newest target is 1.21.11 (not the lexically last 1.21.8) and it is not in the compile matrix" || bad "layer-ci plan: $out $(cat "$T/gho")"
+out="$(python3 tools/layer-ci.py plan --repo "$T/nolayer" 2>&1)"
+grep -q '"layer": "false"' <<<"$out" && ok "layer-ci plan: a fork without .multiversion/ plans no layer job" || bad "layer-ci plan (no layer): $out"
+out="$(python3 tools/port-ci.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script" || bad "port-ci self-check: $out"
+python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"
+import re,sys
+src=open("tools/ci-gates.py").read()
+assert 'if q and q != "none"' in src
+PY
+
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

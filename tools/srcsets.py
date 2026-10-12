@@ -22,7 +22,10 @@ def java_dirs(repo):
         name = d.parent.name
         if name == "test":
             continue
-        if name == "main" or re.search(r"(?<![\w.])%s\s*\{" % re.escape(name), gradle):
+        # declared as `name {`, as a bare `name` line in the sourceSets block, or referenced as sourceSets.name
+        if name == "main" or re.search(r"(?<![\w.])%s\s*\{" % re.escape(name), gradle) \
+                or re.search(r"(?m)^\s*%s\s*$" % re.escape(name), gradle) \
+                or re.search(r"\bsourceSets\.(?:named\(['\"])?%s\b" % re.escape(name), gradle):
             out.append(d)
     return out
 
@@ -117,7 +120,13 @@ def self_check():
         ok &= undeclared_mixin_configs(r) == []
         ok &= (compile_tasks(r) == ["compileCfJava", "compileJava"] and author_jar_tasks(r) == ["cfJar"]
               and target(r) == "NeoForge 26.2.0.75 (Minecraft 26.2)")
-    print("self-check:", "OK" if ok else f"FAIL {compile_tasks(r)} {author_jar_tasks(r)} {target(r)}")
+        # a set declared as a bare line (`sourceSets { main {...}\n    jvmti\n }`) -- measured: a fork's jvmti set was
+        # missed, so a layer target was "0 errors" over three of its four source sets
+        (r / "src" / "jvmti" / "java").mkdir(parents=True)
+        (r / "build.gradle").write_text("sourceSets {\n    main {}\n    jvmti\n}\n", encoding="utf-8")
+        ok &= compile_tasks(r) == ["compileJvmtiJava", "compileJava"]
+        msg = "OK" if ok else f"FAIL {compile_tasks(r)} {author_jar_tasks(r)} {target(r)}"   # inside: r is gone after
+    print("self-check:", msg)
     return 0 if ok else 1
 
 

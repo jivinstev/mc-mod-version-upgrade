@@ -1,0 +1,27 @@
+{
+  "_doc": [
+    "Which Minecraft 1.21.x versions a fork's multi-version layer targets, and why the others are skipped.",
+    "NeoForge numbers its lines after the Minecraft minor: NeoForge 21.N builds Minecraft 1.21.N.",
+    "A line is TARGETED only if NeoForge published a stable (non-beta) build for it: players install stable",
+    "NeoForge, and a mod built on a beta line pins a loader few people run. Measured 2026-10-12 from",
+    "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml (newest non-'-beta' version",
+    "per line). Re-measure with: make-fork-layer.py versions --refresh. The neo version below is the one the",
+    "port was measured and gated against, not necessarily the newest.",
+    "gate: 'full' runs every gate; 'compile' only compiles (a middle target between two fully gated ones)."
+  ],
+  "base": "1.21.1",
+  "lines": [
+    {"mc": "1.21.1", "neo": "21.1.228", "stable": true, "java": 21, "geckolib": "4.8.4"},
+    {"mc": "1.21.2", "neo": null, "stable": false,
+     "skip": "NeoForge 21.2 never left beta (1.21.3, a hotfix of 1.21.2, followed within two weeks); a 1.21.2 player would need a beta loader"},
+    {"mc": "1.21.3", "neo": "21.3.97", "stable": true, "java": 21, "geckolib": "4.7.3"},
+    {"mc": "1.21.4", "neo": "21.4.158", "stable": true, "java": 21, "geckolib": "4.8.5"},
+    {"mc": "1.21.5", "neo": "21.5.98", "stable": true, "java": 21, "geckolib": "5.1.0"},
+    {"mc": "1.21.6", "neo": null, "stable": false, "skip": "NeoForge 21.6 is beta-only (superseded by 21.8 within weeks)"},
+    {"mc": "1.21.7", "neo": null, "stable": false, "skip": "NeoForge 21.7 is beta-only (superseded by 21.8)"},
+    {"mc": "1.21.8", "neo": "21.8.54", "stable": true, "java": 21, "geckolib": "5.2.2"},
+    {"mc": "1.21.9", "neo": null, "stable": false, "skip": "NeoForge 21.9 is beta-only (superseded by 21.10)"},
+    {"mc": "1.21.10", "neo": "21.10.64", "stable": true, "java": 21, "geckolib": "5.3-alpha-3"},
+    {"mc": "1.21.11", "neo": "21.11.45", "stable": true, "java": 21, "geckolib": "5.4.5"}
+  ]
+}
