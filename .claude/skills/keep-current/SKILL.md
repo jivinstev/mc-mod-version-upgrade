@@ -159,19 +159,28 @@ directory is not there when it fires: put the fleet JSON in the routine's prompt
 in its repository scope and the build hosts in its allowed domains (`cloud/allowed-domains.txt`). Cheap nights
 matter: step 1 exits with no model work.
 
-**A routine session starts with no repositories, and its remote tools may still be connecting.** A fired session
-attaches the forks itself with `add_repo` (push for the forks, read for this repository). Measured on a real nightly
-run: the session searched for `add_repo` 8 s after it started, found nothing, and stopped -- while its own tool list
-held `add_repo` by then. "The tool is not loaded yet" is not "the attach was refused". So the routine's prompt must
-say, in these words or stronger:
+**A routine session cannot add repositories: the ones it pushes to must be configured ON THE ROUTINE.** Measured
+twice: a fired routine session searched for `add_repo` at 8 s, and in a second run polled for it for over 3 minutes --
+it never appears in a routine session, while the routine's own config showed `sources: []`. The tools a cloud session
+creates routines with (`create_trigger`/`update_trigger`) have no repository field; the web form and the local CLI's
+`/schedule` (not available inside a cloud session) do. So:
 
-- **Attach preflight.** Search for `add_repo` (`ToolSearch`); if it is not found, search again every 15 s for up to
-  3 minutes before deciding it is missing. Then attach each repository. Report the two failures differently: "the
-  tool never appeared" (an environment problem) versus "attach refused: <the tool's own reason>" (access).
-- **Step 1 needs no attach.** The "anything new?" check only reads: fetch public repositories over plain HTTPS (the
-  session's git proxy serves public reads) and compare. A night with nothing new ends there, attached or not.
+- **Attach only what the run pushes to: the user's forks.** This repository is public and the run only reads it, so
+  the prompt clones it itself (`git clone --depth 1 https://github.com/<owner>/mc-mod-version-upgrade`); never ask the
+  user to attach it -- another user of this skill has no write access to it and does not need any.
+- **When a cloud session created the routine, the user adds the forks.** Give them the exact link and steps, never just
+  "the Routines page": open https://claude.ai/code/routines, click the routine by name, open the menu next to its
+  name, choose **Edit**, then use the small **Select a repository** control at the bottom-left of the **Instructions**
+  box (easy to miss: it is not a separate section of the form) to add each fork (list them as `owner/repo`), and save.
+  Each one is cloned on every run. If they have the edit form open while you change the prompt with `update_trigger`,
+  ask them to close and reopen it first, or saving the form writes the old prompt back. Until the forks are added the
+  routine cannot work, however its prompt is written. (A user setting up from a local CLI can do this in `/schedule`.)
+- **The prompt checks, it does not wait.** It looks for the clones it expects; if one is missing, it still does step
+  1, then stops and names the missing repository and where to add it. It never polls for `add_repo`.
+- **Step 1 needs no repository.** The "anything new?" check only reads: `git ls-remote` the public repositories over
+  HTTPS (the session's git proxy serves public reads). A night with nothing new ends there either way.
 - **After creating or editing the routine, fire it once** (`fire_trigger`) and read the run's first events: it must
-  get past the attach step. A routine that has never fired cleanly is not set up.
+  find its repositories. A routine that has never fired cleanly is not set up.
 
 **A time like "2am" means the user's local time, and a cloud session runs in UTC.** Do not ask for the zone;
 read it from git. The user's own commits keep the offset of the machine they were made on, while commits made in
