@@ -20,6 +20,7 @@ PROBES = {
     'api.modrinth.com': 'https://api.modrinth.com/v2/',
     'cdn.modrinth.com': 'https://cdn.modrinth.com/',
     'api.curseforge.com': 'https://api.curseforge.com/',
+    'cursemaven.com': 'https://cursemaven.com/',
     '*.forgecdn.net': 'https://edge.forgecdn.net/',
     'maven.parchmentmc.org': 'https://maven.parchmentmc.org/',
     'maven.fabricmc.net': 'https://maven.fabricmc.net/',
