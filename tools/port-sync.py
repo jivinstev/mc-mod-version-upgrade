@@ -55,7 +55,8 @@ def sync(repo, port, upstream, dry=False, out=print):
     if git(repo, "status", "--porcelain").strip():
         sys.exit("port-sync: the working tree has uncommitted changes; commit or stash them first")
     git(repo, "checkout", "-q", port)
-    r = git(repo, "merge", "--no-ff", "-m", f"Merge {upstream} into {port}", upstream, check=False)
+    head = git(repo, "rev-parse", "--short", upstream).strip()          # name the commit merged: the authors can
+    r = git(repo, "merge", "--no-ff", "-m", f"Merge {upstream} at {head} into {port}", upstream, check=False)  # push mid-run
     if r.returncode:
         files = git(repo, "diff", "--name-only", "--diff-filter=U").split()
         out(f"port-sync: CONFLICT in {len(files)} file(s) -- both the author and the port changed the same lines:")

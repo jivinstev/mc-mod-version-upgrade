@@ -283,7 +283,7 @@ def main():
             out = work / (tree + ".era")
             shutil.rmtree(out, ignore_errors=True)
             r = subprocess.run([sys.executable, str(prep), "--src", str(work / tree), "--renames", str(table),
-                                "--out", str(out)], stdout=fh, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+                                "--out", str(out), "--hits-json", str(work / f"era-rule-hits-{tree.split('/')[1]}.json")], stdout=fh, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
             if r.returncode != 0:
                 step(f"FAILED applying the table to {tree} (see {log.name})"); return 6
             shutil.rmtree(work / tree); out.rename(work / tree)
@@ -301,12 +301,12 @@ def main():
     step(f"data files: {len(changed)} rewritten to the {T} format"
          + (f"; {len(refused)} REFUSED and left as they were (listed in {log.name}; they will not load on {T} "
             f"until fixed): " + "; ".join(r.split(' (')[0] for r in refused[:6]) if refused else ""))
-    n_items = client_items(work, mod_namespaces(work))
-    step(f"client item definitions: {n_items} written (an item without one renders as the missing cube on {T})")
-    # 26.x parses JSON strictly and skips a lenient-only file (§S8): repair the shapes with one meaning
+    # 26.x parses JSON strictly and skips a lenient-only file (§S8): repair -- BEFORE the client items, which parse every model (X165) -- the shapes with one meaning
     r = subprocess.run([sys.executable, str(ROOT / "tools/fix-json-strict.py"), "--work", str(work)],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     step(r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "fix-json-strict: no output")
+    n_items = client_items(work, mod_namespaces(work))
+    step(f"client item definitions: {n_items} written (an item without one renders as the missing cube on {T})")
     # the target is now the canonical one: an empty table, the default target, and no 1.21.1 build
     # keep the table that was applied: code written LATER in the old dialect (a generated behaviour test)
     # is passed through it too, instead of failing on every renamed name (measured: EntityType.COW, §V21)

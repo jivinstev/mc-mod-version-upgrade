@@ -1,0 +1,47 @@
+# Member moves Forge 1.20.x -> NeoForge 1.21.1, applied by tools/fix-missing-members.py ONLY where javac reports the
+# owner type (so a same-named member on another class is never touched). <owner simple name> <old member> <new form>.
+# Each row checked against the 1.21.1 jar (javap) -- an arity-dependent rename (VertexConsumer.overlayCoords/uv2/normal,
+# whose 1- and 2-int forms map to different methods) is left to tools/forge-shapes.py, which sees the arguments.
+Builder	saturationMod	saturationModifier
+Builder	alwaysEat	alwaysEdible
+Properties	defaultDurability	durability
+VertexConsumer	color	setColor
+VertexConsumer	uv	setUv
+Operation	ADDITION	ADD_VALUE
+Operation	MULTIPLY_BASE	ADD_MULTIPLIED_BASE
+Operation	MULTIPLY_TOTAL	ADD_MULTIPLIED_TOTAL
+Entity	setSecondsOnFire	igniteForSeconds
+Entity	onAddedToWorld	onAddedToLevel
+Explosion	getExploder	getDirectSourceEntity
+Minecraft	getFrameTime	{recv}.getTimer().getGameTimeDeltaPartialTick(true){()}
+Minecraft	getPartialTick	{recv}.getTimer().getGameTimeDeltaPartialTick(true){()}
+Minecraft	getDeltaFrameTime	{recv}.getTimer().getGameTimeDeltaPartialTick(false){()}
+ItemStack	setHoverName	{recv}.set(net.minecraft.core.component.DataComponents.CUSTOM_NAME, {a0})
+Holder	get	value
+Reference	get	value
+Player	getEntityReach	entityInteractionRange
+Player	getBlockReach	blockInteractionRange
+LocalPlayer	getEntityReach	entityInteractionRange
+LocalPlayer	getBlockReach	blockInteractionRange
+ServerPlayer	getEntityReach	entityInteractionRange
+ServerPlayer	getBlockReach	blockInteractionRange
+EntityDimensions	width	width()
+EntityDimensions	height	height()
+# 1.20.5 renames (21.1 jar): getFeetBlockState -> getInBlockState; teleportToWithTicket folded into teleportTo
+# (the ticket is the server's job now -- a judgement row, X111)
+Entity	getFeetBlockState	getInBlockState
+Entity	teleportToWithTicket	teleportTo
+# 1.20.5 folded the permanent/transient removal into one (21.1 jar: boolean removeModifier(ResourceLocation)) -- X124
+AttributeInstance	removePermanentModifier	removeModifier
+# X157 (1.21.1 jar): the listener's Connection field is protected; getConnection() is public
+ServerCommonPacketListenerImpl	connection	getConnection()
+# X161 (1.21.1 jar): registry lookups are still get(ResourceLocation) in 1.21.1 (getValue is 1.21.2+, catalog #70)
+Registry	getValue	get
+DefaultedRegistry	getValue	get
+Registry	getCodec	byNameCodec
+DefaultedRegistry	getCodec	byNameCodec
+# X161: food is a data component; an Item is edible when its default components carry one
+Item	isEdible	{recv}.components().has(net.minecraft.core.component.DataComponents.FOOD){()}
+ItemStack	isEdible	{recv}.has(net.minecraft.core.component.DataComponents.FOOD){()}
+# X161: item tags are components now
+ItemStack	isSameItemSameTags	isSameItemSameComponents

@@ -38,7 +38,10 @@ import argparse, glob, os, re, shutil, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-def load_renames(path):
+GUARDS, RX_GUARDS = {}, {}     # '#? only-if' scopes: by table key, and by compiled pattern
+
+
+def load_renames(path, guards=False):
     """TSV of `from<TAB>to`. Blank lines and #-comments ignored.
 
     Three kinds of row:
@@ -60,6 +63,7 @@ def load_renames(path):
     out = []
     rows = []
     exhaustive, exhaustive_line = False, 0
+    pending_guard = None
     if not path or not os.path.isfile(path):
         return out
     for lineno, raw in enumerate(open(path, encoding='utf-8'), 1):
@@ -84,13 +88,28 @@ def load_renames(path):
         if marker.split()[0:1] == ['!strict']:
             exhaustive = False
             continue
+        # `#? only-if <regex>` (guards=True: a rename table; a recipe pack's apply-recipes owns its own group guards)
+        # scopes the NEXT row to files whose (original) text matches the regex -- for a
+        # LIBRARY's renamed class whose simple name a mod may also use for its own class (X173: a mod's own
+        # `PlatformHelper` must not be rewritten because cristellib's moved). Only on re:/member: rows: plain rows
+        # are merged into one pattern.
+        if guards and line.lstrip().startswith('#? only-if'):
+            pending_guard = (re.compile(line.split('only-if', 1)[1].strip()), lineno)
+            continue
         if not line.strip() or line.lstrip().startswith('#'):
             continue
         if '\t' not in line:
             sys.exit(f"{path}: expected 'from<TAB>to', got: {line!r}")
         frm, to = line.split('\t', 1)
+        if pending_guard:
+            if not frm.strip().startswith(('re:', 'member:')):
+                sys.exit(f"{path}:{pending_guard[1]}: '#? only-if' guards only re:/member: rows, not {frm.strip()!r}")
+            GUARDS[frm.strip()] = pending_guard[0]
+            pending_guard = None
         out.append((frm.strip(), to.strip(), exhaustive))
         rows.append((lineno, out[-1]))
+    if pending_guard:
+        sys.exit(f"{path}:{pending_guard[1]}: '#? only-if' guards no row")
     if exhaustive:
         sys.exit(f"{path}:{exhaustive_line}: '#!exhaustive' block was never closed with "
                  f"'#!strict' -- every rule after it would be silently exempt from the "
@@ -151,6 +170,9 @@ def split_rules(renames):
             regexes.append((re.compile(r'(?<=\.)' + re.escape(name) + r'\b'), to, exhaustive))
         else:
             tokens.append((frm, to, exhaustive))
+            continue
+        if frm in GUARDS:
+            RX_GUARDS[regexes[-1][0].pattern] = GUARDS[frm]
     return tokens, regexes
 
 
@@ -186,6 +208,9 @@ def main():
     ap.add_argument('--hits-out', metavar='FILE',
                     help='write this root\'s matched rules here and skip the dead-rule report '
                          '(for a root that shares its table with a later one)')
+    ap.add_argument('--hits-json', metavar='FILE',
+                    help='also write {rule: rewrites} here (does not change the dead-rule report): '
+                         'measures how many mods each rule serves across a sweep')
     ap.add_argument('--hits-in', metavar='FILE',
                     help='merge rules matched by an earlier root before reporting dead ones')
     # A file the NEW target must not compile AT ALL. The motivating case is a mixin whose
@@ -224,7 +249,7 @@ def main():
             sys.exit('%s names %d path(s) that are not in %s: %s'
                      % (a.drop, len(missing), a.src, ', '.join(missing)))
 
-    token_rules, regex_rules = split_rules(load_renames(a.renames))
+    token_rules, regex_rules = split_rules(load_renames(a.renames, guards=True))
     pattern, table = build_pattern(token_rules)
 
     if os.path.isdir(a.out):
@@ -259,7 +284,11 @@ def main():
         # first, the shape rules can never match -- the type in them has already been
         # renamed -- so they quietly do nothing and the call site stays broken in a new
         # way. Specific before general.
+        original = text
         for rx, repl, _ex in regex_rules:
+            guard = RX_GUARDS.get(rx.pattern)
+            if guard is not None and not guard.search(original):
+                continue
             text, n = rx.subn(repl, text)
             if n:
                 hits[rx.pattern] = hits.get(rx.pattern, 0) + n
@@ -310,6 +339,10 @@ def main():
         print(f"  note: overlay-only file (shadows nothing in --src, and no sibling overlay "
               f"has it either -- stale path?): {rel}")
 
+    if a.hits_json:
+        import json
+        with open(a.hits_json, 'w', encoding='utf-8') as fh:
+            json.dump(dict(sorted(hits.items())), fh, indent=0)
     if a.hits_out:
         with open(a.hits_out, 'w', encoding='utf-8') as fh:
             for k in sorted(hits):

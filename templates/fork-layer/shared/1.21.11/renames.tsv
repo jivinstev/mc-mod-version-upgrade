@@ -1,0 +1,53 @@
+# Shared fork-layer rename table: NeoForge 21.10 -> 21.11 (Minecraft 1.21.11; NeoForge 21.11). Applied FIRST (nearest) on the
+# 1.21.1 text, then the 1.21.10/1.21.8/... tables on whatever it left. 1.21.11 is where the 26.x split starts: Mojang renamed
+# ResourceLocation to Identifier here (CATALOG §V4, a pure type rename) and moved ~330 classes (the fork's generated
+# moves.generated.tsv carries those; they are derived from the staged jars and are not copied into this library).
+# A rename row reaches the AUTHORS' files only. It never reaches an overlay (CATALOG §W8) and never reaches a shared HELPER
+# (layer.py copies helpers into the prepared tree AFTER the rename pass), so helpers in shared/1.21.11/java are written
+# in the 1.21.11 dialect by hand.
+#!exhaustive  # shared library: most forks use only some of these rows
+net.minecraft.resources.ResourceLocation	net.minecraft.resources.Identifier
+ResourceLocation	Identifier
+# ---- ResourceLocation -> Identifier, and the members that followed it (each read from the 1.21.11 sources, not guessed)
+# FriendlyByteBuf.readResourceLocation()/writeResourceLocation(rl) -> readIdentifier()/writeIdentifier(id). The method names exist on
+# FriendlyByteBuf only, so a call-shape row is safe without a receiver.
+re:\.readResourceLocation\(\)	.readIdentifier()
+re:\.writeResourceLocation\(	.writeIdentifier(
+# ResourceKey.location() -> identifier(). NOT a bare `.location()` row: TagKey.location() is STILL location() in 1.21.11 (a record
+# component) and a mod's own records have `location()` accessors too (this fork has two). Anchor on what returns a ResourceKey.
+re:\.dimension\(\)\.location\(\)	.dimension().identifier()
+re:\bResourceKey::location\b	ResourceKey::identifier
+# ---- Camera: getX() -> x() (xRot/yRot/position/blockPosition/entity). Anchored on getMainCamera(), the one receiver whose TYPE is
+# certain; a variable named `camera` is a guess (CATALOG X40) and stays a per-file fix.
+re:\.getMainCamera\(\)\.getYRot\(\)	.getMainCamera().yRot()
+re:\.getMainCamera\(\)\.getXRot\(\)	.getMainCamera().xRot()
+re:\.getMainCamera\(\)\.getPosition\(\)	.getMainCamera().position()
+re:\.getMainCamera\(\)\.getBlockPosition\(\)	.getMainCamera().blockPosition()
+re:\.getMainCamera\(\)\.getEntity\(\)	.getMainCamera().entity()
+# ---- RenderType.<factory>(..) -> RenderTypes.<factory>(..). The static factories left RenderType (whose only static is now
+# create(name, RenderSetup)) for RenderTypes. ONLY names that exist in 1.21.1 with the same arguments and the same culling:
+# entityCutout still culls and entityCutoutNoCull still does not on 1.21.11 (it is 26.2 that swaps them, CATALOG V60). Written
+# fully qualified so no import has to be added.
+re:\bRenderType\.(entitySolid|entityCutout|entityCutoutNoCull|entityCutoutNoCullZOffset|entityTranslucent|entityTranslucentEmissive|entitySmoothCutout|entityDecal|entityNoOutline|entityShadow|entityGlint|armorCutoutNoCull|armorEntityGlint|eyes|energySwirl|lightning|lines|leash)\(	net.minecraft.client.renderer.rendertype.RenderTypes.\1(
+# ---- numeric permission levels (CATALOG V15, the same shape as 26.2): level 2 is Commands.LEVEL_GAMEMASTERS. Fully qualified.
+re:\.requires\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*->\s*\1\.hasPermission\(2\)\s*\)	.requires(net.minecraft.commands.Commands.hasPermission(net.minecraft.commands.Commands.LEVEL_GAMEMASTERS))
+# ---- GeckoLib 4.x text -> 5.4: the baked-model types left cache.object and the built-in layers got a `builtin` package (same
+# simple names; diffed from the 5.3-alpha-3 and 5.4.5 jars, each simple name unique on the new side)
+software.bernie.geckolib.cache.object.BakedGeoModel	software.bernie.geckolib.cache.model.BakedGeoModel
+software.bernie.geckolib.cache.object.GeoBone	software.bernie.geckolib.cache.model.GeoBone
+software.bernie.geckolib.cache.object.GeoCube	software.bernie.geckolib.cache.model.cuboid.GeoCube
+software.bernie.geckolib.cache.object.GeoQuad	software.bernie.geckolib.cache.model.GeoQuad
+software.bernie.geckolib.cache.object.GeoVertex	software.bernie.geckolib.cache.model.GeoVertex
+software.bernie.geckolib.renderer.layer.AutoGlowingGeoLayer	software.bernie.geckolib.renderer.layer.builtin.AutoGlowingGeoLayer
+software.bernie.geckolib.renderer.layer.BlockAndItemGeoLayer	software.bernie.geckolib.renderer.layer.builtin.BlockAndItemGeoLayer
+software.bernie.geckolib.renderer.layer.ItemArmorGeoLayer	software.bernie.geckolib.renderer.layer.builtin.ItemArmorGeoLayer
+software.bernie.geckolib.renderer.layer.ItemInHandGeoLayer	software.bernie.geckolib.renderer.layer.builtin.ItemInHandGeoLayer
+# ---- mixin targets (found by tools/audit-mixin-targets.py; javac cannot see them)
+# Camera.setup(BlockGetter, Entity, boolean, boolean, float) takes a Level on 1.21.11. A callback that mirrors the vanilla parameter list
+# has to follow, or Mixin refuses the descriptor. Fully qualified so no import is needed.
+re:(@Inject\(method = "setup"[\s\S]{0,200}?private void [\w$]+\()BlockGetter (\w+), Entity (\w+),	\1net.minecraft.world.level.Level \2, Entity \3,
+# A mixin DESCRIPTOR names classes with slashes (`Lnet/minecraft/...;`), which neither the dotted moves.generated.tsv rows nor the
+# type rows above can reach. The two that matter for a client mod: RenderType moved into `rendertype`, ResourceLocation is Identifier.
+re:Lnet/minecraft/client/renderer/RenderType;	Lnet/minecraft/client/renderer/rendertype/RenderType;
+re:Lnet/minecraft/resources/ResourceLocation;	Lnet/minecraft/resources/Identifier;
+#!strict

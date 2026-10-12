@@ -151,8 +151,17 @@ def load_models():
             continue
         for name in os.listdir(d):
             if name.endswith(".json"):
-                with open(os.path.join(d, name), encoding="utf-8") as fh:
-                    models[name[:-5]] = json.load(fh)
+                with open(os.path.join(d, name), encoding="utf-8-sig") as fh:
+                    text = fh.read()
+                try:
+                    models[name[:-5]] = json.loads(text)
+                except ValueError:
+                    # a model 1.21.1 loaded leniently (a stray trailing `}`): its first object is the model, as
+                    # Gson read it; anything worse is skipped with a word, not a crash of the whole hop (X165)
+                    try:
+                        models[name[:-5]] = json.JSONDecoder().raw_decode(text.lstrip())[0]
+                    except ValueError as e:
+                        print(f"gen-client-items: {os.path.join(d, name)} does not parse ({e}); skipped", file=sys.stderr)
     return models
 
 

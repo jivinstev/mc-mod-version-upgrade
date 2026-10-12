@@ -118,7 +118,7 @@ echo "7. the encoding gate (Windows reads and writes cp1252 unless told otherwis
 ( python3 "$ROOT/tools/check-encoding.py" >/dev/null 2>&1 )
 [ $? = 0 ] && { echo "  PASS  the real tree names every encoding"; pass=$((pass+1)); } \
            || { echo "  FAIL  the real tree fails its own encoding gate"; fail=$((fail+1)); }
-ecase() {  # ecase <wanted-exit> <label> <python-line>
+expcase() {  # expcase <wanted-exit> <label> <python-line>
    plant; printf 'import pathlib, subprocess\np = pathlib.Path("x")\n%s\n' "$3" > "$T/e.py"
    # a crash also exits 1, so a FAIL counts only with the gate's own verdict line
    local log; log="$(python3 "$ROOT/tools/check-encoding.py" "$T/e.py" 2>&1)"
@@ -127,15 +127,15 @@ ecase() {  # ecase <wanted-exit> <label> <python-line>
    if [ "$got" = "$1" ]; then echo "  PASS  $2 (exit $got)"; pass=$((pass+1))
    else echo "  FAIL  $2 — wanted exit $1, got $got"; fail=$((fail+1)); fi
 }
-ecase 1 "open() in text mode"                 'open("x").read()'
-ecase 1 "open(..., \"w\")"                    'open("x", "w").write("→")'
-ecase 1 "Path.read_text()"                    'p.read_text()'
-ecase 1 "Path.write_text()"                   'p.write_text("⚠")'
-ecase 1 "Path.open() in text mode"            'p.open("a")'
-ecase 1 "subprocess.run(text=True)"           'subprocess.run(["git"], text=True)'
-ecase 0 "binary open is fine"                 'open("x", "rb").read()'
-ecase 0 "encoding= named"                     'p.read_text(encoding="utf-8")'
-ecase 0 "a marked exception"                  'p.read_text()  # encoding-ok: test'
+expcase 1 "open() in text mode"                 'open("x").read()'
+expcase 1 "open(..., \"w\")"                    'open("x", "w").write("→")'
+expcase 1 "Path.read_text()"                    'p.read_text()'
+expcase 1 "Path.write_text()"                   'p.write_text("⚠")'
+expcase 1 "Path.open() in text mode"            'p.open("a")'
+expcase 1 "subprocess.run(text=True)"           'subprocess.run(["git"], text=True)'
+expcase 0 "binary open is fine"                 'open("x", "rb").read()'
+expcase 0 "encoding= named"                     'p.read_text(encoding="utf-8")'
+expcase 0 "a marked exception"                  'p.read_text()  # encoding-ok: test'
 
 echo "8. the README gate (a skill change is a README change)"
 ( python3 "$ROOT/tools/check-readme.py" >/dev/null 2>&1 )
@@ -144,6 +144,27 @@ echo "8. the README gate (a skill change is a README change)"
 ( python3 "$ROOT/tools/check-readme.py" --self-check | grep -q "self-check: OK" )
 [ $? = 0 ] && { echo "  PASS  a skill with no row, a missing path, and a skill change without a README change all FAIL; 'nothing checked' is not a pass"; pass=$((pass+1)); } \
            || { echo "  FAIL  check-readme.py --self-check"; fail=$((fail+1)); }
+
+echo "9. the pre-push hook name-checks what the push publishes (FORBIDDEN_NAMES_FILE, no names in the repo)"
+H="$(mktemp -d)"; ( cd "$H" && git init -q . && git config user.email t@example.com && git config user.name t \
+  && mkdir tools && cp -r "$ROOT"/tools/. tools/ \
+  && cp -r "$ROOT/README.md" "$ROOT/CATALOG.md" "$ROOT/CONTRIBUTING.md" "$ROOT/LICENSE" "$ROOT/SUPPORTED_VERSIONS.md" "$ROOT/docs" "$ROOT/.claude" . && ./tools/install-hooks.sh >/dev/null \
+  && git add -A && git commit -qm "base" ) >/dev/null 2>&1
+FAKE="Example""craft"   # built at run time so this file does not itself name it
+printf '%s\n' "$FAKE" > "$H/../names.$$"
+hook_case() {  # hook_case <wanted-exit> <label> <file-content> <commit-message>
+   ( cd "$H" && printf '%s\n' "$3" > note.txt && git add -A && git commit -qm "$4" )
+   local sha; sha="$(git -C "$H" rev-parse HEAD)"
+   local base; base="$(git -C "$H" rev-parse HEAD~1)"
+   ( cd "$H" && echo "refs/heads/x $sha refs/heads/x $base" | FORBIDDEN_NAMES_FILE="$H/../names.$$" .git/hooks/pre-push origin url >/dev/null 2>&1 )
+   local got=$?
+   if [ "$got" = "$1" ]; then echo "  PASS  $2 (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $2 -- wanted exit $1, got $got"; fail=$((fail+1)); fi
+}
+hook_case 0 "no forbidden name in the push passes"           "plain text"                      "plain commit"
+hook_case 1 "a forbidden name in an ADDED line blocks"      "we ported $FAKE"          "innocent message"
+hook_case 1 "a forbidden name in a commit MESSAGE blocks"   "plain again"                     "port of ${FAKE,,}"
+rm -rf "$H" "$H/../names.$$"
 
 echo
 echo "gates self-test: $pass passed, $fail failed"

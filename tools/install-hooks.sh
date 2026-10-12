@@ -12,7 +12,9 @@ cat > .git/hooks/pre-push <<'HOOK'
 #!/usr/bin/env bash
 set -uo pipefail
 root="$(git rev-parse --show-toplevel)"
-while read -r local_ref _ remote_ref _; do
+pushes=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  pushes="$pushes$local_sha $remote_sha"$'\n'
   case "$remote_ref" in
     refs/heads/main)
       echo "pre-push: REFUSED — this repository takes pull requests only." >&2
@@ -25,8 +27,8 @@ echo "pre-push: running the IP gate before anything leaves this machine..."
 # The forbidden-name list lives OUTSIDE this repository (it must never be published). If .env.local
 # names a file (FORBIDDEN_NAMES_FILE=...), the name check runs in --strict mode and a missing file
 # fails the push; otherwise every other check still runs and the skip is announced.
-names=""
-[ -f "$root/.env.local" ] && names="$(sed -n 's/^FORBIDDEN_NAMES_FILE=//p' "$root/.env.local" | tail -1)"
+names="${FORBIDDEN_NAMES_FILE:-}"   # the environment wins; every agent working on forks sets it (CLAUDE.md)
+[ -z "$names" ] && [ -f "$root/.env.local" ] && names="$(sed -n 's/^FORBIDDEN_NAMES_FILE=//p' "$root/.env.local" | tail -1)"
 names="${names/#\~/$HOME}"
 set -- --root "$root"
 [ -n "$names" ] && set -- "$@" --names "$names" --strict
@@ -35,6 +37,19 @@ python3 "$root/tools/check-no-ip.py" "$@" || {
   echo "pre-push: REFUSED — the IP gate failed. Nothing has been pushed." >&2
   exit 1
 }
+# With a name list, also check what THIS push publishes: commit messages and added lines of the pushed
+# commits (the tree scan above cannot see a message, or a name added and removed within the push).
+if [ -n "$names" ]; then
+  zero="0000000000000000000000000000000000000000"
+  while read -r lsha rsha; do
+    [ -z "$lsha" ] || [ "$lsha" = "$zero" ] && continue
+    if [ "$rsha" = "$zero" ]; then range=("$lsha" --not --remotes); else range=("$rsha..$lsha"); fi
+    python3 "$root/tools/check-no-ip.py" --root "$root" --names "$names" --push-range "${range[@]}" || {
+      echo "pre-push: REFUSED — the push names a forbidden name (see above). Nothing has been pushed." >&2
+      exit 1
+    }
+  done <<< "$pushes"
+fi
 # A skill change is a README change (CLAUDE.md): compared with origin/main when this clone has it.
 base=""; git -C "$root" rev-parse -q --verify origin/main >/dev/null && base="--base origin/main"
 python3 "$root/tools/check-readme.py" --root "$root" $base || {

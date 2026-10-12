@@ -199,12 +199,17 @@ def tag_suffix(repo, branch, mc):
     return m.group(1) if m else ""
 
 
-def own_release(fork, modid, mc, suffix=""):
-    rels = _api(f"https://api.github.com/repos/{fork}/releases?per_page=30") or []
-    for r in rels:
-        if is_port_tag(r.get("tag_name", ""), modid, mc, suffix):     # newest first: a -r2 re-release wins
-            return r["html_url"], [(a["name"], a["browser_download_url"]) for a in r.get("assets", [])]
-    return None, []
+def own_release(fork, modid, mc, suffix="", rels=None):
+    """(url, assets, prerelease) of the release to install: the newest FULL Release (a person played it and
+    port-ci.py promote made it one -- the fork's official baseline), else the newest pre-release, flagged so the
+    install text says it is not yet played. Releases come newest first, so a -r2 re-release wins within each kind."""
+    if rels is None:
+        rels = _api(f"https://api.github.com/repos/{fork}/releases?per_page=30") or []
+    ours = [r for r in rels if not r.get("draft") and is_port_tag(r.get("tag_name", ""), modid, mc, suffix)]
+    r = next((r for r in ours if not r.get("prerelease")), None) or (ours[0] if ours else None)
+    if not r:
+        return None, [], False
+    return r["html_url"], [(a["name"], a["browser_download_url"]) for a in r.get("assets", [])], bool(r.get("prerelease"))
 
 
 def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=None):
@@ -224,7 +229,9 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
     def add(role, mid, name, url, page=None, port=None):
         man["files"].append({k: v for k, v in (("role", role), ("modid", mid), ("name", name), ("url", url),
                                                 ("page", page), ("port", port)) if v})
-    rel, assets = own_release(fork, ownid, mc, tag_suffix(repo, branch, mc))
+    rel, assets, pre = own_release(fork, ownid, mc, tag_suffix(repo, branch, mc))
+    if assets:
+        man["release"] = {"url": rel, "prerelease": pre}
     if assets:
         pick = [a for a in assets if variant and variant[0] in a[0]] or assets
         add("self", ownid, pick[0][0], pick[0][1]) if (len(assets) == 1 or len(pick) == 1) else None
@@ -234,6 +241,9 @@ def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=
         else:
             L.append(f"1. **This mod:** one of the jars on [the release]({rel}): "
                      + ", ".join(f"`{n}`" for n, _ in assets) + " (the build makes one per platform)")
+        if pre:
+            L.append(f"   (a **pre-release**: it passed every gate but no one has played it yet; once someone has, "
+                     "`tools/port-ci.py promote` makes it a full Release)")
     else:
         L.append("1. **This mod:** no release yet -- run the fork's CI with release=true first")
     toml = toml_deps(git(repo, "show", f"{tip}:src/main/resources/META-INF/neoforge.mods.toml", check=False))
@@ -427,6 +437,14 @@ def self_check():
     ok &= not is_port_tag("m-2.2.1-mc1.21.10", "m", "1.21.1") and not is_port_tag("mx-1-mc1.21.1", "m", "1.21.1")
     ok &= is_port_tag("m-2-mc1.21.1-release-r2", "m", "1.21.1", "-release") and not is_port_tag("m-2-mc1.21.1-r5", "m", "1.21.1", "-release")
     ok &= not is_port_tag("m-2-mc1.21.1-release", "m", "1.21.1")      # a release-aligned jar never passes for the dev port
+    def rel(tag, pre, draft=False):
+        return {"tag_name": tag, "prerelease": pre, "draft": draft, "html_url": "u/" + tag,
+                "assets": [{"name": tag + ".jar", "browser_download_url": "d/" + tag}]}
+    newest_first = [rel("m-1-mc1.21.1-r3", True), rel("m-1-mc1.21.1-r2", False), rel("m-1-mc1.21.1", False)]
+    ok &= own_release("o/r", "m", "1.21.1", rels=newest_first) == ("u/m-1-mc1.21.1-r2", [("m-1-mc1.21.1-r2.jar", "d/m-1-mc1.21.1-r2")], False)
+    ok &= own_release("o/r", "m", "1.21.1", rels=newest_first[:1])[2] is True     # only a pre-release: it, flagged
+    ok &= own_release("o/r", "m", "1.21.1", rels=[rel("m-1-mc1.21.1-r4", False, draft=True)]) == (None, [], False)
+    ok &= own_release("o/r", "m", "1.21.1", rels=[rel("x-1-mc1.21.1", False)])[0] is None
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@e"], ["config", "user.name", "t"]):

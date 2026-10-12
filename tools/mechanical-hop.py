@@ -3,7 +3,9 @@
 
   --stage forge  (Forge 1.20.x -> NeoForge 1.21.1, after the remap, codemods and recipe pack): the access
                  transformer made valid (official names, override widenings, one compile per subclass level),
-                 forge-shapes, convert-simplechannel, then fix-holders until a compile round fixes nothing.
+                 forge-shapes, convert-simplechannel, convert-mcreator-variables, convert-gui-overlays,
+                 convert-capabilities (X146), then fix-holders, the member renames and
+                 fix-block-codecs (X151) until a compile round fixes nothing.
   --stage era    (1.21.1 -> 26.x, after the rename table): the access transformer re-pointed through the class-move
                  map, the member pass, then every converter, then the member pass again.
 
@@ -26,22 +28,44 @@ NOT FOR a two-target (§W, `era-hop --keep-old`) tree: converters write target-o
 which would break the other target. Refused when the tree still has a versions/1.21.1.properties.
 Standard library only (the converters it runs are too).
 """
-import argparse, hashlib, importlib.util, json, pathlib, re, subprocess, sys, tempfile
+import argparse, os, hashlib, importlib.util, json, pathlib, re, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 # (label, script, how to call it per source root; a condition key or None). The ONE list both routes run.
 CONVERTERS = [
     ("gui-hooks", "convert-gui-hooks.py", None),
+    ("removed-types", "convert-removed-types.py", None),
     ("valueio", "convert-valueio.py", None),
     ("attachment-io", "convert-attachment-io.py", None),
     ("override-signatures", "convert-override-signatures.py", None),
+    ("reload-weighted", "convert-reload-weighted.py", "modid"),
+    ("client-hooks", "convert-client-hooks.py", "modid"),
+    ("saved-data", "convert-saved-data.py", "modid"),
     ("gear-tiers", "convert-gear-tiers.py", "assets"),
     ("rendertypes", "convert-rendertypes.py", "rendertypes"),
     ("core-shaders", "convert-core-shaders.py", "shaders"),
     ("entity-renderstate", "convert-entity-renderstate.py", "context"),
     ("geckolib", "convert-geckolib.py", "geckolib"),
+    # last: the converters above pattern-match render hooks by their MultiBufferSource parameter
+    ("buffer-seam", "convert-buffer-seam.py", "modid"),
 ]
+
+
+TAKES_PACKAGE = {"convert-attachment-io.py", "convert-buffer-seam.py", "convert-client-hooks.py", "convert-gear-tiers.py",
+                 "convert-reload-weighted.py", "convert-saved-data.py"}
+
+
+def mod_package(dirs):
+    """The @Mod class's package, searched across every source set. None when there is none."""
+    for d in dirs:
+        for f in sorted(pathlib.Path(d).rglob("*.java")):
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"(?m)^\s*@(?:net\.neoforged\.fml\.common\.)?Mod\s*\(", text):
+                m = re.search(r"(?m)^package\s+([\w.]+)\s*;", text)
+                if m:
+                    return m.group(1)
+    return None
 
 
 def _load(name, file):
@@ -119,6 +143,8 @@ def plan(repo, dirs, modid, render_state_type=None, render_state_factory=None, s
                            "(26.x reads no program JSON and binds uniform blocks; the Java that fills the block is the port's to write)")
                 continue
             fn = lambda d, i, sh_dir=sh_dir: ["--shaders", sh_dir, "--ns", modid, "--block", shader_block] if i == 0 else None
+        elif cond == "modid":
+            fn = lambda d, i: ["--src", d, "--modid", modid]
         elif cond == "context":
             fn = lambda d, i: ["--src", d, *ctx]
         elif cond == "geckolib":
@@ -149,7 +175,11 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
             got = 0
             for d in dirs:
                 _rc, o = run("fix-missing-members.py", "--src", d, "--log", log, "--table", members_table)
+                if _rc:   # X170: a table that does not load must stop the hop, not read as "0 renamed"
+                    raise RuntimeError(f"fix-missing-members failed on {members_table}: {(o or '').strip().splitlines()[-1:]}")
                 got += sum(int(x) for x in re.findall(r"(\d+) site\(s\) rewritten", o))
+                for cnt, row in re.findall(r"(?m)^\s+(\d+)\s+(\w+\.\w+)\s*$", o or ""):
+                    say(f"  member-row: {row} {cnt}")    # per-row hits, for measuring how many mods a row serves
             fixed += got
             if not got:
                 break
@@ -160,12 +190,20 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
     member_loop("members")
     todo, advisories = plan(repo, dirs, modid, render_state_type, render_state_factory, shader_block, lib_trees)
     print_fp = [fp(repo)]
+    # the generated helpers' package, found ONCE across every source set: a converter run on a source set that
+    # holds no @Mod class (a client or datagen set) otherwise stops with "no @Mod class found"
+    pkg = mod_package(dirs)
+    if not pkg:                     # no @Mod class in the compiled tree: the scaffold's group is the mod's package
+        gp = pathlib.Path(repo) / "gradle.properties"
+        pkg = (re.findall(r"(?m)^mod_group_id\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) or [None])[0] if gp.exists() else None
     for label, script, args_for in todo:
         outs = []
         for i, d in enumerate(dirs):
             args = args_for(d, i)
             if args is None:
                 continue
+            if pkg and script in TAKES_PACKAGE:
+                args = [*args, "--package", pkg + ".compat"]
             rc, o = run(script, *args)
             if rc not in (0, 1):
                 raise RuntimeError(f"{script} failed: {o[-600:]}")
@@ -177,14 +215,16 @@ def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_er
         changed, print_fp[0] = now != print_fp[0], now
         nref = sum(1 for l in joined.splitlines() if "REFUSED" in l and not re.search(r"REFUSED \d+ site", l))
         summary = " | ".join(heads) + (f"; {nref} REFUSED (see era-{label}.out)" if nref else "")
-        n = last["n"]
+        n = before = last["n"]
         if changed:
             n, _ = compile_count(workdir / f"era-{len(steps)}-{label}.log")
             if n is None:
                 raise RuntimeError(f"compile did not run after {label}")
         last["n"] = n
-        steps.append({"step": label, "summary": summary, "errors": n})
-        say(f"{label}: {summary}" + (f" -> {n} errors" if changed else " (no change, no recount)"))
+        steps.append({"step": label, "summary": summary, "errors": n, **({"raised_from": before} if n > before else {})})
+        say(f"{label}: {summary}" + (f" -> {n} errors" if changed else " (no change, no recount)")
+            + (f"  ** RAISED from {before}: a converter regression, or errors it unmasked -- compare "
+               f"era-{len(steps) - 1}-{label}.log with the previous log **" if n > before else ""))
     member_loop("members-after-converters")
     return steps, advisories
 
@@ -193,9 +233,7 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
     """The access transformer has to be valid before Minecraft recompiles at all. Override widenings appear one
     subclass level per compile: compile, widen what the log names, repeat. -> errors, or None if it never compiled.
     A dependency that does not resolve is reported as that, not blamed on the AT."""
-    if not any(pathlib.Path(repo).glob("src/*/resources/META-INF/accesstransformer.cfg")):
-        n, _ = compile_count(pathlib.Path(workdir) / "at-0.log")
-        return n
+    has_at = any(pathlib.Path(repo).glob("src/*/resources/META-INF/accesstransformer.cfg"))
     for k in range(4):
         log = pathlib.Path(workdir) / f"at-{k}.log"
         n, _ = compile_count(log)
@@ -206,13 +244,61 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
         if unresolved:
             raise RuntimeError("dependencies do not resolve: " + ", ".join(unresolved[:6]) + " -- wrong coordinates for "
                                "the target, or a maven this machine cannot reach (tools/local-maven.py); see " + log.name)
+        if "NoSuchFileException" in text and "/.gradle/repositories/" in text:
+            healed = heal_ng_cache(repo)
+            if healed:                                  # the daemon holds the old entry in memory: stop it, then retry
+                subprocess.run(["bash", "gradlew", "--stop"], cwd=repo, capture_output=True)
+                continue
+        if not has_at:      # the stale-cache heal above is the only repair that applies without an AT (X75)
+            return None
         if "daemon has disappeared" in text or "OutOfMemoryError" in text:   # not the AT's fault: say so
             raise RuntimeError(f"the Gradle daemon died while recompiling Minecraft (memory?), not an AT problem; "
                                f"rerun the stage (see {log.name})")
+        src_err = re.search(r"(\S+\.java:\d+: error: [^\n]+)", text)
+        if src_err and "neoForm" not in src_err.group(1):     # Minecraft compiled; the MOD's own sources did not
+            raise RuntimeError(f"the mod's own sources do not compile (Minecraft's recompile is not the problem): "
+                               f"{src_err.group(1)[-220:]} -- see {log.name}")
         _rc, out = run("fix-access-transformer.py", "--work", repo, "--overrides-from", log)
         if " 0 override" in out:
             raise RuntimeError(f"Minecraft's recompile fails and no access-transformer override explains it (see {log.name})")
     return None
+
+
+def heal_ng_cache(repo, home=None):
+    """NeoGradle caches a recompile step machine-wide (<gradle home>/caches/ng_execute/<hash>/libraries.txt), and
+    that list names files inside the .gradle/repositories/ of whichever workspace first ran it. Delete that
+    workspace and every later port whose access transformer forces the step dies with NoSuchFileException on a
+    path in a project that no longer exists. The file is the same in every workspace of that Minecraft version
+    (a dummy repository of Minecraft's own jars), so copy this workspace's file to a STABLE place in the Gradle
+    home and point the stale entries there -- pointing them at this workspace would only move the bug to the day
+    this workspace is deleted. The caller must stop the Gradle daemon before retrying: a running daemon keeps
+    the entry in memory and never rereads the file (measured: the rewrite alone left the retry failing).
+    -> number of paths rewritten (0: nothing to heal, the failure is something else)."""
+    home = pathlib.Path(home or os.environ.get("GRADLE_USER_HOME") or pathlib.Path.home() / ".gradle")
+    stable = home / "caches/ng-heal"
+    n = 0
+    # the cache entry, and every copy of it a workspace's own build already made (a retry reads that copy)
+    libs = list((home / "caches/ng_execute").glob("*/libraries.txt")) + list(pathlib.Path(repo).glob("build/neoForm/**/libraries.txt"))
+    for lib in libs:
+        text = lib.read_text(encoding="utf-8", errors="replace")
+        def fix(m):
+            nonlocal n
+            path = m.group(0)
+            if pathlib.Path(path).exists():
+                return path
+            rel = path.split("/.gradle/repositories/", 1)[1]
+            mine, keep = pathlib.Path(repo) / ".gradle/repositories" / rel, stable / rel
+            if not keep.exists():
+                if not mine.exists():
+                    return path
+                keep.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(mine, keep)
+            n += 1
+            return str(keep)
+        new = re.sub(r"[^\s=]+/\.gradle/repositories/[^\s]+", fix, text)
+        if new != text:
+            lib.write_text(new, encoding="utf-8")
+    return n
 
 
 def era_access_transformer(repo, moves, run=run_tool):
@@ -222,12 +308,52 @@ def era_access_transformer(repo, moves, run=run_tool):
     return run("fix-access-transformer.py", "--work", repo, "--class-map", moves)[1]
 
 
-FORGE_STEPS = [("shapes", "forge-shapes.py"), ("net", "convert-simplechannel.py")]
+FORGE_STEPS = [("shapes", "forge-shapes.py"), ("net", "convert-simplechannel.py"), ("vars", "convert-mcreator-variables.py"),
+               ("overlays", "convert-gui-overlays.py"), ("caps", "convert-capabilities.py"),
+               ("paintings", "convert-paintings.py")]
+
+
+FORGE_MEMBERS = "tools/recipes/forge-1.21.1-members.tsv"
+
+
+# X157: access 1.21 NARROWED, which a 1.20 mod used from outside the class. Each row: the source pattern that needs it,
+# a guard for files where it is already legal (a subclass), and the AT lines. Written BEFORE the access-transformer loop
+# so Minecraft is recompiled once; at runtime FML loads META-INF/accesstransformer.cfg by default.
+AT_WIDEN = [
+    (r"\bMoveControl\.Operation\b", r"\bextends\s+(?:[\w.]+\.)?MoveControl\b",
+     ["public net.minecraft.world.entity.ai.control.MoveControl$Operation",
+      "public net.minecraft.world.entity.ai.control.MoveControl operation # X157"]),
+]
+
+
+def at_widenings(repo, dirs):
+    """-> AT lines added for the AT_WIDEN rows the source needs (X157)."""
+    need = []
+    for pat, legal, lines in AT_WIDEN:
+        for d in dirs:
+            for f in pathlib.Path(d).rglob("*.java"):
+                tx = f.read_text(encoding="utf-8", errors="replace")
+                if re.search(pat, tx) and not re.search(legal, tx):
+                    need += [l for l in lines if l not in need]
+                    break
+    if not need:
+        return []
+    at = pathlib.Path(repo) / "src/main/resources/META-INF/accesstransformer.cfg"
+    have = at.read_text(encoding="utf-8") if at.exists() else ""
+    norm = {re.sub(r"\s*#.*$", "", l).strip() for l in have.splitlines()}
+    add = [l for l in need if re.sub(r"\s*#.*$", "", l).strip() not in norm]
+    if add:
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text(have + ("" if not have or have.endswith("\n") else "\n") + "\n".join(add) + "\n", encoding="utf-8")
+    return add
 
 
 def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg_map=None, say=print):
     """Forge -> NeoForge 1.21.1, after the remap, codemods and recipe pack. -> {at, shapes, net, errors}"""
     repo, rep = pathlib.Path(repo), {}
+    widened = at_widenings(repo, dirs)
+    if widened:
+        say(f"access transformer: {len(widened)} line(s) for access 1.21 narrowed (X157)")
     if any(repo.glob("src/*/resources/META-INF/accesstransformer.cfg")):
         rep["at"] = run("fix-access-transformer.py", "--work", repo, *(["--srg-map", srg_map] if srg_map else []))[1]
         say(f"access transformer: {headline(rep['at'], 'fix-access-transformer', 'at')}")
@@ -249,20 +375,72 @@ def run_forge_stage(repo, dirs, modid, workdir, compile_count, run=run_tool, srg
             raise RuntimeError(f"compile did not run: {line}")
         counts.append(n)
         outs = [run("fix-holders.py", "--src", d, "--log", log, "--sites", 0)[1] for d in dirs]
-        if all(" 0 site" in (o.splitlines() or [""])[0] for o in outs):
+        # the owner-resolved member renames (X77): javac names the owner, so a same-named member elsewhere is safe
+        mruns = [run("fix-missing-members.py", "--src", d, "--log", log, "--table", ROOT / FORGE_MEMBERS)
+                 for d in dirs] if (ROOT / FORGE_MEMBERS).exists() else []
+        for mrc, mo in mruns:     # X170: a table that does not load must stop the stage, not read as "0 rewritten"
+            if mrc:
+                raise RuntimeError(f"fix-missing-members failed on {FORGE_MEMBERS}: {(mo or '').strip().splitlines()[-1:]}")
+        mouts = [mo for _, mo in mruns]
+        for mo in mouts:
+            for cnt, row in re.findall(r"(?m)^\s+(\d+)\s+(\w+\.\w+)\s*$", mo or ""):
+                say(f"  member-row: {row} {cnt}")
+        rep.setdefault("members", []).extend(mouts)
+        # X151: a concrete subclass of an abstract vanilla block must implement codec() since 1.20.3
+        couts = [run("fix-block-codecs.py", "--src", d, "--log", log)[1] for d in dirs]
+        rep.setdefault("codecs", []).extend(couts)
+        if all(" 0 site" in (o.splitlines() or [""])[0] for o in outs) and \
+                all(re.search(r"\b0 site\(s\) rewritten", o or "") for o in mouts + couts):
             break
     rep["errors"] = counts
-    say(f"holders: {' -> '.join(map(str, counts))} errors")
+    say(f"holders+members: {' -> '.join(map(str, counts))} errors")
     return rep
 
 
 # ---------------------------------------------------------------------------------------------- CLI (jar route)
 
+PARSE_ERR = re.compile(r"^(\S+\.java):\d+: error: (?:[^ ]+(?: or [^ ]+)* expected\s*$|illegal start of|class, interface, enum, "
+                       r"or record expected|reached end of file while parsing|not a statement|initializers not allowed "
+                       r"in interfaces|enum constant expected here)", re.M)
+
+
+def quarantine_unparseable(work, log, cap=10):
+    """javac stops at PARSE errors before it attributes anything, so one file the decompiler left unparseable hides
+    every other error and stops the stage (each new decompile artifact did, until a fix landed: X88). Move such
+    files (at most `cap`, and at most a tenth of the tree) to parked/unparseable/, record them for the compile loop,
+    and let the count go on. -> files moved (0: nothing to do, or too many to be a decompile artifact)"""
+    work = pathlib.Path(work)
+    text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace") if pathlib.Path(log).exists() else ""
+    files = sorted({pathlib.Path(m.group(1)) for m in PARSE_ERR.finditer(text)})
+    srcs = [work / d for d in ("src/main/java", "src/test/java")]
+    files = [f for f in files if f.exists() and any(r in f.parents for r in srcs)]
+    total = sum(1 for r in srcs if r.exists() for _ in r.rglob("*.java"))
+    if not files or len(files) > cap or len(files) * 10 > max(total, 10):
+        return 0
+    dest = work / "parked/unparseable"
+    for f in files:
+        root = next(r for r in srcs if r in f.parents)
+        t = dest / root.relative_to(work) / f.relative_to(root)
+        t.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(f), str(t))
+    print(f"mechanical-hop: QUARANTINED {len(files)} unparseable file(s) to parked/unparseable/: "
+          + ", ".join(f.name for f in files), flush=True)
+    with open(work / "MIGRATION.md", "a", encoding="utf-8") as fh:
+        fh.write("\n## Unparseable after decompile (parked/unparseable/)\n\nThese did not parse, which stops javac before it "
+                 "reports anything else; fix them by hand (or re-decompile with CFR) and move them back:\n"
+                 + "".join(f"- {f.relative_to(work).as_posix()}\n" for f in files))
+    return len(files)
+
+
 def gradle_count(work, log):
     """Compile the port's own source sets and count unique errors (burndown-count.sh refuses a run that never
     reached javac, which a bare grep would read as 0)."""
     srcsets, pg = _load("srcsets", "srcsets.py"), _load("port_gates", "port_gates.py")
-    pg.gradle(work, ["-I", str(ROOT / "tools/maxerrs.init.gradle"), *srcsets.compile_tasks(work), "--continue"], log)
+    pg.compile_log(work, srcsets.compile_tasks(work), log)
+    for _ in range(3):
+        if not quarantine_unparseable(work, log):
+            break
+        pg.compile_log(work, srcsets.compile_tasks(work), log)
     r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     m = re.search(r"errors = (\d+)", r.stdout)
@@ -293,11 +471,14 @@ def main_cli(a):
     logs = work / "mechanical-hop"
     logs.mkdir(exist_ok=True)
     n0, _ = gradle_count(work, logs / "start.log")
-    if n0 is None:
+    moves = _load("era_hop", "era-hop.py").ws_moves() / f"moves-1.21.1-to-{a.target}.tsv"
+    has_at = any(work.glob("src/*/resources/META-INF/accesstransformer.cfg")) and moves.exists()
+    # An AT that widens a vanilla method breaks Minecraft's own recompile, so the START compile never reaches javac:
+    # that is exactly the case the AT loop below repairs, so it must not be a stop (X75).
+    if n0 is None and not has_at:
         print("mechanical-hop: the start compile never reached javac; see mechanical-hop/start.log")
         return 2
-    moves = _load("era_hop", "era-hop.py").ws_moves() / f"moves-1.21.1-to-{a.target}.tsv"
-    if any(work.glob("src/*/resources/META-INF/accesstransformer.cfg")) and moves.exists():
+    if has_at:
         out = era_access_transformer(work, moves)
         print(f"mechanical-hop:   access transformer: {headline(out, 'fix-access-transformer', 'at')}", flush=True)
         try:
@@ -362,9 +543,12 @@ def self_check():
                                lambda log: (next(counts), "ok"), 9, say=lambda s: None, run=fake_run)
         names = [s["step"] for s in steps]
         ok &= names[0] == "members" and names[-1] == "members-after-converters"
-        ok &= [c for c in calls if c.startswith("convert-")] == ["convert-gui-hooks.py", "convert-valueio.py",
+        ok &= [c for c in calls if c.startswith("convert-")] == ["convert-gui-hooks.py", "convert-removed-types.py", "convert-valueio.py",
                                                                     "convert-attachment-io.py", "convert-override-signatures.py",
-                                                                    "convert-gear-tiers.py", "convert-entity-renderstate.py"]
+                                                                    "convert-reload-weighted.py", "convert-client-hooks.py",
+                                                                    "convert-saved-data.py",
+                                                                    "convert-gear-tiers.py", "convert-entity-renderstate.py",
+                                                                    "convert-buffer-seam.py"]
         recount = [s for s in steps if s["step"] == "valueio"][0]
         ok &= recount["errors"] == 3 and [s for s in steps if s["step"] == "gui-hooks"][0]["errors"] == 5
         (repo / "src/main/resources/assets/x/shaders/core").mkdir(parents=True)
@@ -380,12 +564,55 @@ def self_check():
         def frun(name, *args):
             calls.append(name)
             return 0, {"fix-access-transformer.py": "fix-access-transformer: 1 override widened",
-                       "fix-holders.py": "fix-holders: 0 site(s)"}.get(name, f"{name[:-3]}: ok")
+                       "fix-holders.py": "fix-holders: 0 site(s)",
+                       "fix-missing-members.py": "fix-missing-members: 0 site(s) rewritten",
+                       "fix-block-codecs.py": "fix-block-codecs: 0 file(s) changed, 0 site(s) rewritten"}.get(name, f"{name[:-3]}: ok")
         rep = run_forge_stage(repo, [repo / "src/main/java"], "x", repo, lambda log: (next(seq), "line"), run=frun,
                               say=lambda s: None)
         ok &= calls[0] == "fix-access-transformer.py" and calls.count("fix-access-transformer.py") == 2
         ok &= calls.index("forge-shapes.py") < calls.index("convert-simplechannel.py") < calls.index("fix-holders.py")
-        ok &= rep["errors"] == [30]
+        ok &= rep["errors"] == [30] and "fix-missing-members.py" in calls and "fix-block-codecs.py" in calls
+        ok &= calls.index("convert-capabilities.py") < calls.index("fix-holders.py")
+    with tempfile.TemporaryDirectory() as d:        # X157: narrowed access is widened by AT, once, not for a subclass
+        w = pathlib.Path(d); j = w / "src/main/java/p"; j.mkdir(parents=True)
+        (j / "Fly.java").write_text("class Fly { void f() { if (m.operation == MoveControl.Operation.WAIT) {} } }", encoding="utf-8")
+        (j / "Ctl.java").write_text("class Ctl extends MoveControl { void f() { this.operation = MoveControl.Operation.WAIT; } }", encoding="utf-8")
+        a1 = at_widenings(w, [w / "src/main/java"]); a2 = at_widenings(w, [w / "src/main/java"])
+        cfg = (w / "src/main/resources/META-INF/accesstransformer.cfg").read_text(encoding="utf-8")
+        ok &= len(a1) == 2 and a2 == [] and cfg.count("MoveControl$Operation") == 1
+        (j / "Fly.java").unlink(); (w / "src/main/resources/META-INF/accesstransformer.cfg").unlink()
+        ok &= at_widenings(w, [w / "src/main/java"]) == []
+    with tempfile.TemporaryDirectory() as d:        # an unparseable file is set aside, a mass of them is not
+        w = pathlib.Path(d); j = w / "src/main/java/p"; j.mkdir(parents=True)
+        for i in range(12):
+            (j / f"C{i}.java").write_text("class C {}", encoding="utf-8")
+        log = w / "b.log"
+        log.write_text(f"{j / 'C3.java'}:13: error: enum constant expected here\n{j / 'C4.java'}:2: error: ';' expected\n"
+                       f"{j / 'C5.java'}:5: error: interface expected here\n", encoding="utf-8")   # C5: a TYPE error
+        ok &= quarantine_unparseable(w, log) == 0      # 2 of 12 > a tenth: refused
+        ok &= (j / "C3.java").exists()
+        for i in range(12, 40):
+            (j / f"C{i}.java").write_text("class C {}", encoding="utf-8")
+        ok &= quarantine_unparseable(w, log) == 2 and not (j / "C3.java").exists() \
+            and (w / "parked/unparseable/src/main/java/p/C3.java").exists() and "C4.java" in (w / "MIGRATION.md").read_text(encoding="utf-8") \
+            and (j / "C5.java").exists()
+    with tempfile.TemporaryDirectory() as d:        # a NeoGradle cache entry naming a deleted workspace is healed
+        d = pathlib.Path(d)
+        rel = ".gradle/repositories/ng_dummy_ng/net/minecraft/client/1.21.1/client-1.21.1-client-extra.jar"
+        (d / "repo" / rel).parent.mkdir(parents=True)
+        (d / "repo" / rel).write_bytes(b"jar")
+        lib = d / "home/caches/ng_execute/abc/libraries.txt"
+        lib.parent.mkdir(parents=True)
+        lib.write_text(f"-e={d}/gone/{rel}\n-e=/does/not/matter.jar\n", encoding="utf-8")
+        ok &= heal_ng_cache(d / "repo", home=d / "home") == 1
+        ok &= str(d / "home/caches/ng-heal" / rel.split(".gradle/repositories/", 1)[1]) in lib.read_text(encoding="utf-8")
+        ok &= (d / "home/caches/ng-heal" / rel.split(".gradle/repositories/", 1)[1]).exists()   # survives the workspace
+        ok &= "/does/not/matter.jar" in lib.read_text(encoding="utf-8")
+        ok &= heal_ng_cache(d / "repo", home=d / "home") == 0      # idempotent
+        copy = d / "repo/build/neoForm/x/steps/listTransformLibraries/libraries.txt"   # the workspace's own copy
+        copy.parent.mkdir(parents=True)
+        copy.write_text(f"-e={d}/gone/{rel}\n", encoding="utf-8")
+        ok &= heal_ng_cache(d / "repo", home=d / "home") == 1 and "/gone/" not in copy.read_text(encoding="utf-8")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

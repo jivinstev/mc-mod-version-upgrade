@@ -145,6 +145,14 @@ python3 tools/zipls.py -p "$J" META-INF/MANIFEST.MF | grep -q '^Manifest-Version
   && ok "zipls -p prints a member" || bad "zipls -p"
 X="$T/zx"; python3 tools/zipls.py -o -q "$J" 'META-INF/*' -d "$X" && [ -f "$X/META-INF/MANIFEST.MF" ] \
   && ok "zipls extracts the matching members" || bad "zipls extract"
+# X170: a member table that fails to load made the fixer exit 1, which the hop read as "0 rewritten" for weeks
+for MT in tools/recipes/*members*.tsv; do
+  python3 -c "import importlib.util,sys; s=importlib.util.spec_from_file_location('m','tools/fix-missing-members.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.table(sys.argv[1])" "$MT" \
+    && ok "member table loads: $(basename "$MT")" || bad "member table does not load: $MT"
+done
+printf 'Item\tx\t{recv}.y(z)\n' > "$T/bad-members.tsv"
+python3 tools/fix-missing-members.py --src "$T" --log /dev/null --table "$T/bad-members.tsv" >/dev/null 2>&1 \
+  && bad "a broken member table must exit non-zero" || ok "a broken member table exits non-zero"
 if command -v unzip >/dev/null 2>&1 && ! grep -q "mc-mod-version-upgrade's setup" "$(command -v unzip)" 2>/dev/null; then
   [ "$(unzip -Z1 "$J")" = "$(python3 tools/zipls.py -Z1 "$J")" ] && ok "zipls -Z1 matches unzip -Z1" || bad "zipls differs from unzip"
 fi
@@ -244,12 +252,20 @@ done
 
 echo "13. file-loop.py (model-free parts: load-crash scans, supertype filter, generated-path mapping, batching)"
 out="$(python3 tools/file-loop.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching" \
+grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching, rows_first (layer mode: a worker row is tried before its overlay is kept; a dropped overlay's directory is recreated)" \
   || bad "file-loop self-check: $out"
 
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gate loop: the deepest load-crash cause and the mod's own frames go to the worker" \
   || bad "gate-loop self-check: $out"
+
+out="$(python3 tools/port-publish.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "publish: refuses without permission, for a pre-release or foreign release, an open S1, an unknown tag, an unpublished dependency" \
+  || bad "port-publish self-check: $out"
+
+out="$(python3 tools/fix-ledger.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fix ledger: A/B required to drop a fix, S1 open blocks a release, a joined column matches either tag" \
+  || bad "fix-ledger self-check: $out"
 
 out="$(python3 tools/scaffold-gatec.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "scaffold-gatec: the client harness template becomes a mod's harness with no example names left" \
@@ -268,6 +284,9 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "forge-shapes.py|forge-shapes: tick phases, DistExecutor, modifiers, item NBT, hooks, GeckoLib colour rewritten idempotently" \
             "fix-holders.py|fix-holders: the expression under javac's caret is unwrapped, retyped or resolved, never guessed" \
             "fix-missing-members.py|fix-missing-members: a moved member is renamed only where javac names its owner type (incl. record fields gone private)" \
+            "fix-block-codecs.py|fix-block-codecs: a concrete block subclass gets codec() -- simpleCodec when it has a (Properties) constructor" \
+            "convert-capabilities.py|convert-capabilities: Forge capability code keeps its shape through a compat layer wired into NeoForge" \
+            "convert-paintings.py|convert-paintings: a code-registered painting becomes a painting_variant data file + the placeable tag" \
             "convert-rendertypes.py|convert-rendertypes: a CompositeState becomes a pipeline + RenderSetup; reverse-Z depth, unknown shards refused" \
             "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
             "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
@@ -298,6 +317,10 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port-sync.py|port-sync: the author's new commits merge into the dev port branch; a conflict stops with the files named" \
             "convert-attachment-io.py|convert-attachment-io: attachment serializers onto ValueInput/ValueOutput through the CompoundTag bridge, bodies unchanged" \
             "convert-gear-tiers.py|convert-gear-tiers: the 1.21.1 tool-tier and armour classes re-supplied on 26.2 components; instanceof widened only where safe" \
+            "convert-reload-weighted.py|convert-reload-weighted: reload listeners named, JSON listeners on the raw map, Weight/WeightedEntry re-supplied; idempotent" \
+            "convert-client-hooks.py|convert-client-hooks: TextureSheetParticle re-supplied, initializeClient through RegisterClientExtensionsEvent, ItemProperties a logged no-op" \
+            "convert-saved-data.py|convert-saved-data: SavedData.Factory + name onto SavedDataType through the CompoundTag bridge; load/save unchanged, a 1.21.1 file read once" \
+            "convert-buffer-seam.py|convert-buffer-seam: MultiBufferSource as an interface over the recording seam; lambdas and nested types keep their shape" \
             "local-maven.py|local-maven: a jar a blocked maven would serve is laid out locally, sha1 from the registry" \
             "convert-simplechannel.py|convert-simplechannel: a SimpleChannel becomes payloads; directions inferred, handlers kept" \
             "normalise-imports.py|normalise-imports: inline names a port wrote become imports; the author's own and colliding names are kept" \
@@ -323,12 +346,12 @@ import pathlib, re, sys
 t = pathlib.Path("tools")
 mh = (t / "mechanical-hop.py").read_text(encoding="utf-8")
 listed = set(re.findall(r'"(convert-[\w-]+\.py)"', mh.split("CONVERTERS = [", 1)[1].split("]", 1)[0]))
-on_disk = {p.name for p in t.glob("convert-*.py")} - {"convert-simplechannel.py"}   # a 1.21.1 converter, not an era one
+forge = set(re.findall(r'"([\w-]+\.py)"', mh.split("FORGE_STEPS = [", 1)[1].split("]\n", 1)[0]))   # the 1.21.1 converters
+on_disk = {p.name for p in t.glob("convert-*.py")} - forge
 problems = []
 if on_disk - listed:
-    problems.append(f"era converters not in CONVERTERS (so neither route runs them): {sorted(on_disk - listed)}")
-shared = on_disk | {"convert-simplechannel.py", "forge-shapes.py", "fix-holders.py", "fix-access-transformer.py",
-                    "fix-missing-members.py"}
+    problems.append(f"converters in neither CONVERTERS nor FORGE_STEPS (so neither route runs them): {sorted(on_disk - listed)}")
+shared = on_disk | forge | {"fix-holders.py", "fix-access-transformer.py", "fix-missing-members.py", "fix-block-codecs.py"}
 needs = {"port-upstream.py": ["mh.run_stage(", "mh.run_forge_stage(", "mh.at_loop(", "mh.era_access_transformer("],
          "port.py": ['"--stage", "forge"', '"--stage", "era"']}
 for route, need in needs.items():
@@ -344,6 +367,176 @@ PY
 )"
 grep -q '^parity OK$' <<<"$out" && ok "port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs a stage tool itself; every era converter is listed" \
   || bad "route parity: $out"
+
+echo "burndown-count.sh: a log that hit the capped Gradle compile is refused unless recounted (X5g)"
+printf '> Task :compileJava FAILED\n/w/A.java:3: error: cannot find symbol\n1,000 errors\n' > "$T/gcap.log"
+bash tools/burndown-count.sh "$T/gcap.log" >/dev/null 2>&1; code=$?
+[ $code = 6 ] && ok "a Gradle compile stopped at its 1000-error cap is NOT a count (X5g)" || bad "gradle-capped log exited $code, wanted 6"
+printf '> Task :compileJava FAILED\n/w/A.java:3: error: cannot find symbol\n1,000 errors\nPORT_FULL_ERRORS compileJava: uncapped javac over 2 file(s)\n/w/A.java:3: error: cannot find symbol\n/w/B.java:9: error: cannot find symbol\n2 errors\nPORT_FULL_ERRORS compileJava: javac exit 1\n' > "$T/gfull.log"
+out="$(bash tools/burndown-count.sh "$T/gfull.log" 2>&1)"
+grep -q 'errors = 2 ' <<<"$out" && ok "the uncapped recount is read from the same log (union of unique file:line)" || bad "recounted log: $out"
+printf '> Task :compileJava\n/w/A.java:61: error: : expected\n1 error\n' > "$T/colon.log"
+bash tools/burndown-count.sh "$T/colon.log" >/dev/null 2>&1; code=$?
+[ $code = 4 ] && ok "javac's ': expected' (no quotes) is a parse abort, not a count of 1" || bad "colon-expected log exited $code, wanted 4"
+grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CAP = '1000'" tools/maxerrs.init.gradle \
+  && grep -q '1,?000 errors' tools/burndown-count.sh && grep -q '1,?000 errors' tools/file-loop.py \
+  && ok "the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count" || bad "the Gradle error cap disagrees between its four copies"
+
+out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges, add-target --direct writes shared_chain (default off)" \
+  || bad "make-fork-layer self-check: $out"
+out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest, a direct jump (shared_chain) prepares the hop-by-hop chain's tree" \
+  || bad "layer.py self-check: $out"
+out="$(python3 tools/fork-port.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py" \
+  || bad "fork-port self-check: $out"
+out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
+  || bad "gametest_adapter self-check: $out"
+out="$(python3 - <<'PY' 2>&1
+import importlib.util, pathlib
+s = importlib.util.spec_from_file_location("pg", "tools/port_gates.py"); m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+assert [m.no_gametest_annotation(v) for v in ("1.21.1", "1.21.4", "1.21.5", "1.21.10", "26.2")] == [False, False, True, True, True]
+assert pathlib.Path("templates/upstream-harness/versions/1.21.5.renames.tsv").read_text().count("snapTo") >= 1
+print("self-check: OK")
+PY
+)"
+grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
+  || bad "port_gates check: $out"
+
+echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, layer mode"
+if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+  E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \
+    "$E/src/net/neoforged/neoforge/client/event" "$E/tree/a/b" "$E/classes"
+  echo 'package net.minecraft.world.item; public class Item {}' > "$E/src/net/minecraft/world/item/Item.java"
+  echo 'package net.neoforged.neoforge.common; public class NeoForge {}' > "$E/src/net/neoforged/neoforge/common/NeoForge.java"
+  echo 'package net.neoforged.bus.api; public @interface SubscribeEvent {}' > "$E/src/net/neoforged/bus/api/SubscribeEvent.java"
+  cat > "$E/src/net/neoforged/neoforge/client/event/Stage.java" <<'J'
+package net.neoforged.neoforge.client.event;
+public abstract class Stage { public static class After extends Stage {} }
+J
+  (cd "$E" && javac -d classes $(find src -name '*.java') && jar cf fake.jar -C classes .) >/dev/null 2>&1
+  EW="$E"; command -v cygpath >/dev/null 2>&1 && EW="$(cygpath -m "$E")"   # python on Windows cannot open /tmp/... paths
+  echo "$EW/fake.jar" > "$E/cp.txt"
+  cat > "$E/tree/a/b/Hook.java" <<'J'
+package a.b;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.client.event.Stage;
+public class Hook {
+    @SubscribeEvent
+    public static void onStage(Stage event) { if (!(event instanceof Stage.After)) return; }
+    static void init(Object bus) { bus.addListener(Hook::viaRef); }
+    private static void viaRef(Stage event) { }
+}
+J
+  out="$(python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" 2>&1)"; rc=$?
+  [ "$rc" = 1 ] && [ "$(grep -c 'is ABSTRACT' <<<"$out")" = 2 ] \
+    && ok "audit-event-listeners: the abstract parameter is reported for the annotated listener AND the Cls::method one" \
+    || bad "audit-event-listeners did not report both abstract listeners (rc=$rc): $out"
+  sed -i 's/Stage event) { if (!(event instanceof Stage.After)) return; }/Stage.After event) { }/; s/viaRef(Stage event)/viaRef(Stage.After event)/' "$E/tree/a/b/Hook.java"
+  out="$(python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && grep -q 'checked 2 event listener' <<<"$out" \
+    && ok "audit-event-listeners: naming the concrete subclass passes, with the listener count printed" \
+    || bad "audit-event-listeners failed the fixed listeners (rc=$rc): $out"
+  echo 'package a.b; public class Empty {}' > "$E/tree/a/b/Hook.java"
+  python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" >/dev/null 2>&1; rc=$?
+  [ "$rc" = 2 ] && ok "audit-event-listeners: zero listeners checked exits 2, never a pass" \
+    || bad "audit-event-listeners zero-listener exit was $rc, expected 2"
+else
+  echo "  SKIP  audit-event-listeners (no javac/jar)"
+fi
+out="$(python3 tools/gate-loop.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause" || bad "gate-loop self-check: $out"
+out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick and crash-cause self-check" || bad "shipped-gate self-check: $out"
+python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
+printf 'x' > "$T/notjar.jar"; python3 tools/shipped-gate.py --jar "$T/notjar.jar" --neo 21.1.228 >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a file that is not a jar exits 2" || bad "shipped-gate non-jar exit"
+python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1],'w').writestr('a','b')" "$T/ok.jar"
+python3 tools/shipped-gate.py --jar "$T/ok.jar" --neo 21.1.228 --expect-log 'bad/path:x' >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a malformed --expect-log exits 2 before anything is downloaded" || bad "shipped-gate bad expectation exit"
+out="$(python3 tools/layer-ci.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "layer-ci: targets are VERSION-sorted (1.21.11 is newer than 1.21.8), java follows inherits, hook stripping" || bad "layer-ci self-check: $out"
+mkdir -p "$T/lay/.multiversion/targets"/{1.21.8,1.21.10,1.21.11,1.21.3}; echo x=1 > "$T/lay/.multiversion/base.properties"
+for t in 1.21.8 1.21.10 1.21.11 1.21.3; do echo "java_version=21" > "$T/lay/.multiversion/targets/$t/target.properties"; done
+out="$(python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho" 2>&1)"
+grep -q '^newest=1.21.11$' "$T/gho" && grep -q '"1.21.8"' <<<"$out" && ! grep -q '"t":"1.21.11"' "$T/gho" \
+  && ok "layer-ci plan: newest target is 1.21.11 (not the lexically last 1.21.8) and it is not in the compile matrix" || bad "layer-ci plan: $out $(cat "$T/gho")"
+out="$(python3 tools/layer-ci.py plan --repo "$T/nolayer" 2>&1)"
+grep -q '"layer": "false"' <<<"$out" && ok "layer-ci plan: a fork without .multiversion/ plans no layer job" || bad "layer-ci plan (no layer): $out"
+# CI policy: full_gates is opt-in (default none), a typo is an error, and a single-version fork never sees it
+out="$(python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho0" 2>&1)"
+grep -q '^has_full=false$' "$T/gho0" && ok "layer-ci plan: no ci.properties means no extra full-gate target (the default)" || bad "layer-ci plan default has_full: $out"
+printf 'full_gates=1.21.8\n' > "$T/lay/.multiversion/ci.properties"
+python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho1" >/dev/null 2>&1
+grep -q '^has_full=true$' "$T/gho1" && grep -q '^full_matrix=.*"t":"1.21.8"' "$T/gho1" && ! grep -q '"t":"1.21.11"' <(grep '^full_matrix=' "$T/gho1") \
+  && ok "layer-ci plan: full_gates=1.21.8 gets the released middle target a full-gate job" || bad "layer-ci plan full_gates: $(cat "$T/gho1")"
+printf 'full_gates=1.21.9\n' > "$T/lay/.multiversion/ci.properties"
+python3 tools/layer-ci.py plan --repo "$T/lay" >/dev/null 2>&1; [ $? != 0 ] && ok "layer-ci plan: a full_gates typo fails the plan instead of meaning 'no gates'" || bad "full_gates typo accepted"
+rm "$T/lay/.multiversion/ci.properties"
+mkdir -p "$T/single"; printf 'full_gates=1.21.4\n' > "$T/single/ci.properties"
+python3 tools/layer-ci.py plan --repo "$T/single" --github-output "$T/gho2" >/dev/null 2>&1
+grep -q '^layer=false$' "$T/gho2" && grep -q '^has_full=false$' "$T/gho2" && ok "layer-ci plan: a single-version fork (no .multiversion/) plans nothing, whatever files it has" || bad "single-version plan: $(cat "$T/gho2")"
+# one run per checkout: a live holder refuses a second layer run (exit 14); a single-version run takes no lock at all
+mkdir -p "$T/lk/build" "$T/lk/.multiversion/targets/1.21.4" "$T/lk/.multiversion/tools"; : > "$T/lk/.multiversion/tools/layer.py"
+# the holder is a Python process writing its OWN pid: under Git Bash on Windows `$!` is an MSYS pid, not the native pid
+# the lock code checks, so a shell-written pid reads as dead there
+python3 -c 'import json,os,sys,time; open(sys.argv[1],"w",encoding="utf-8").write(json.dumps({"pid": os.getpid(), "tool": "fork-port.py", "target": "1.21.3", "started": "2026-01-01T00:00:00Z"})); time.sleep(30)' "$T/lk/build/.fork-port.lock" & HOLDJOB=$!
+for _ in $(seq 50); do [ -s "$T/lk/build/.fork-port.lock" ] && break; sleep 0.1; done
+HOLD="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["pid"])' "$T/lk/build/.fork-port.lock")"
+out="$(python3 tools/ci-gates.py --repo "$T/lk" --modid m --mc 1.21.4 --work-dir "$T/lkw" 2>&1)"; code=$?
+[ $code = 14 ] && grep -q "$HOLD" <<<"$out" && ok "ci-gates --mc: a second run on a busy checkout is refused (exit 14) naming the holder" || bad "ci-gates lock exit $code: $out"
+out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
+[ $code = 14 ] && ok "fork-port: a second run on a busy checkout is refused (exit 14)" || bad "fork-port lock exit $code: $out"
+python3 tools/ci-gates.py --repo "$T/lk" --modid m --work-dir "$T/lkw2" >/dev/null 2>&1; code=$?
+[ $code != 14 ] && grep -q "\"pid\": $HOLD" "$T/lk/build/.fork-port.lock" && ok "ci-gates without --mc (a single-version fork) ignores the lock entirely" || bad "single-version ci-gates touched the lock (exit $code)"
+kill $HOLDJOB 2>/dev/null; wait $HOLDJOB 2>/dev/null
+out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
+[ $code = 10 ] || [ $code = 2 ] && [ ! -e "$T/lk/build/.fork-port.lock" ] && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
+
+out="$(python3 tools/layer-sync.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "layer-sync: classification (untouched / touch-up / rework), overlay shadowing, table, stop block" || bad "layer-sync self-check: $out"
+out="$(python3 tools/test-layer-sync.py 2>&1)"
+grep -q 'test-layer-sync: OK' <<<"$out" && ok "keep-current on a layer fork: merge commit (no force), per-target class + table, rework stops with RESIDUE (exit 10), single-version fork untouched" || bad "test-layer-sync: $out"
+out="$(python3 tools/test-port-publish.py 2>&1)"
+grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; layer forks publish one file per green target, refuse non-green / stale / unpublished-dependency targets" || bad "test-port-publish: $out"
+out="$(python3 tools/fix-ledger.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fix-ledger: a ledger without a layer section renders as before; the layer table renders and validates" || bad "fix-ledger self-check: $out"
+if command -v gradle >/dev/null 2>&1; then
+  G="$T/gj"; mkdir -p "$G"
+  printf "rootProject.name = 'scratch'\n" > "$G/settings.gradle"
+  cat > "$G/build.gradle" <<'GR'
+plugins { id 'java' }
+version = '1.0'
+tasks.register('embedded', Jar) { archiveFileName.set('helper.jar'); destinationDirectory = layout.buildDirectory.dir('embedded') }
+tasks.register('mrJar', Jar) { archiveFileName.set("scratch-${project.version}_mr.jar") }
+tasks.jar { archiveFileName.set("scratch-${project.version}_base.jar"); destinationDirectory = layout.buildDirectory.dir('intermediates') }
+tasks.register('plain', Jar) { }
+def mvTarget = project.findProperty('mc')?.toString()
+if (mvTarget == null) return
+layout.buildDirectory = file("build/mc${mvTarget}")
+GR
+  sed -n '/BEGIN-JAR-NAMES/,/END-JAR-NAMES/p' templates/fork-layer/layer.gradle >> "$G/build.gradle"
+  (cd "$G" && gradle -q --offline mrJar jar plain embedded >/dev/null 2>&1; gradle -q --offline mrJar jar plain embedded -Pmc=1.21.4 >/dev/null 2>&1)
+  base="$(cd "$G/build" && find . -name '*.jar' -not -path './mc*' | sort | tr '\n' ' ')"
+  mc="$(cd "$G/build/mc1.21.4" && find . -name '*.jar' | sort | tr '\n' ' ')"
+  [ "$base" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0.jar ./libs/scratch-1.0_mr.jar " ] \
+    && [ "$mc" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0-mc1.21.4.jar ./libs/scratch-1.0_mr-mc1.21.4.jar " ] \
+    && ok "layer.gradle: with -Pmc the jars in libs are named -mc<target>; without it, and for embedded/intermediate jars, names are unchanged" \
+    || bad "layer.gradle jar names: base=[$base] mc=[$mc]"
+fi
+out="$(python3 tools/port-ci.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script" || bad "port-ci self-check: $out"
+python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"
+import re,sys
+src=open("tools/ci-gates.py").read()
+assert 'if q and q != "none"' in src
+PY
+python3 - <<'PY' && ok "shared tables: every '#!exhaustive' is closed by '#!strict' (a chain ending at any version loads)" || bad "a shared renames.tsv leaves '#!exhaustive' open"
+import glob,sys
+for f in sorted(glob.glob("templates/fork-layer/shared/*/renames.tsv")):
+    marks=[l.strip().split()[0] for l in open(f) if l.startswith(("#!exhaustive","#!strict"))]
+    if marks and marks[-1]!="#!strict": sys.exit(f"{f}: unclosed")
+PY
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"

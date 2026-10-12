@@ -1,0 +1,39 @@
+# Shared fork-layer rename table: NeoForge 1.21.5 -> 1.21.8 (Minecraft 1.21.8; NeoForge 21.8; FML 9). Applied FIRST (nearest
+# target) on the 1.21.1 text, then the 1.21.5/1.21.4/1.21.3 tables on whatever it left, so a row here that rewrites
+# something those rows also rewrite has to write the 1.21.8 form itself. Measured against neoforge-21.8.54-sources.jar
+# on the first layer-fork port (the unattended 1.21.8 loop's residue, which put every one of these in a per-fork overlay).
+#!exhaustive  # shared library: most forks use only some of these rows
+# ---- FML 9: @EventBusSubscriber has no `bus` any more; the bus follows from the event class (a mod-bus event is
+# delivered on the mod bus, anything else on the game bus), so dropping the argument keeps every subscriber where it was.
+re:,\s*bus\s*=\s*(?:EventBusSubscriber\.)?Bus\.(?:MOD|GAME)\b	
+re:\bbus\s*=\s*(?:EventBusSubscriber\.)?Bus\.(?:MOD|GAME)\s*,\s*	
+re:import net\.neoforged\.fml\.common\.EventBusSubscriber\.Bus;\n	
+# ---- mixin targets (invisible to javac; tools/audit-mixin-targets.py checks them against the target's sources)
+# LevelRenderer.renderLevel(DeltaTracker, boolean, Camera, GameRenderer, LightTexture, Matrix4f, Matrix4f) became
+# (GraphicsResourceAllocator, DeltaTracker, boolean, Camera, Matrix4f, Matrix4f, GpuBufferSlice, Vector4f, boolean): the
+# GameRenderer and LightTexture are gone, and the fog buffer, the fog colour and a "render the sky" flag arrived.
+# This row runs on the 1.21.1 text, before the 1.21.4/1.21.3 rows, so it writes the whole 1.21.8 descriptor itself.
+re:LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/renderer/LightTexture;Lorg/joml/Matrix4f;Lorg/joml/Matrix4f;\)V	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lorg/joml/Matrix4f;Lorg/joml/Matrix4f;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;Lorg/joml/Vector4f;Z)V
+# ... and the callback of an @Inject into it (the same eight 1.21.1 parameters, then the CallbackInfo)
+re:(@Inject\(method = "renderLevel"[\s\S]{0,300}?private void [\w$]+\()DeltaTracker (\w+), boolean (\w+), Camera (\w+),\s*GameRenderer \w+, LightTexture \w+,\s*Matrix4f (\w+), Matrix4f (\w+), CallbackInfo (\w+)\)	\1com.mojang.blaze3d.resource.GraphicsResourceAllocator mv$allocator, DeltaTracker \2, boolean \3, Camera \4,\n            Matrix4f \5, Matrix4f \6, com.mojang.blaze3d.buffers.GpuBufferSlice mv$fog, org.joml.Vector4f mv$fogColor, boolean mv$sky, CallbackInfo \7)
+# Entity.addAdditionalSaveData / readAdditionalSaveData (and LivingEntity's) take a ValueOutput / ValueInput (1.21.6). A handler
+# that only PUTS scalars keeps its body (ValueOutput has putInt/putString/putBoolean/...); one that reads needs
+# ValueInput's Optional/`...Or` getters and has no contains() -- see the fork's overlay of it for the shape.
+re:(@Inject\(method = "addAdditionalSaveData"[\s\S]{0,300}?private void [\w$]+\()CompoundTag (\w+)	\1net.minecraft.world.level.storage.ValueOutput \2
+re:(@Inject\(method = "readAdditionalSaveData"[\s\S]{0,300}?private void [\w$]+\()CompoundTag (\w+)	\1net.minecraft.world.level.storage.ValueInput \2
+# ServerCommonPacketListenerImpl.send(Packet, PacketSendListener) takes a netty ChannelFutureListener (1.21.6)
+re:(\bsend\(Lnet/minecraft/network/protocol/Packet;)Lnet/minecraft/network/PacketSendListener;\)V	\1Lio/netty/channel/ChannelFutureListener;)V
+re:(\bPacket<\?> \w+, )PacketSendListener (\w+)(, CallbackInfo)	\1io.netty.channel.ChannelFutureListener \2\3
+
+# ---- CATALOG V81: the 3-argument playBidirectional / commonBidirectional / configurationBidirectional(type, codec, handler)
+# registers only the SERVER handler on NeoForge 21.8 (the 4-argument form takes the client one, @Nullable), and the client then
+# refuses to load: "Some clientbound payloads are missing client-side handlers". 1.21.1's 3-argument form served both
+# directions, and a handler for a bidirectional payload already branches on ctx.flow(), so passing the SAME handler twice
+# restores that exactly. The rows fire only on the 3-argument shape (a 4-argument call has a second top-level comma before its
+# closing paren, which the handler group cannot cross). Two rows: a method reference (the usual shape), and an EXPRESSION lambda
+# (the text is repeated; a block lambda is not handled -- write that one by hand, or hoist it to a method).
+re:(\b(?:play|common|configuration)Bidirectional\(\s*(?:[^,()]|\([^()]*\))+,\s*(?:[^,()]|\([^()]*\))+,\s*)([\w.$]+(?:<[^>()]*>)?::[\w$]+)(\s*\))	\1\2, \2\3
+re:(\b(?:play|common|configuration)Bidirectional\(\s*(?:[^,()]|\([^()]*\))+,\s*(?:[^,()]|\([^()]*\))+,\s*)((?:\w+|\([^()]*\))\s*->\s*(?:[^(),;{}]|\((?:[^()]|\([^()]*\))*\))+)(\s*\))	\1\2, \2\3
+# PacketDistributor.sendToServer moved to the client-only ClientPacketDistributor (NeoForge 21.6+); written fully qualified (a row cannot add an import).
+re:\bPacketDistributor\.sendToServer\(	net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer(
+#!strict

@@ -129,6 +129,22 @@ def load_names(path):
     return out
 
 
+def push_range_text(root, rev_args):
+    """The text a push would publish: every commit message plus the added lines (and the paths) of the
+    diff, for `git log`/`git diff` over REV_ARGS (e.g. ["old..new"] or ["new", "--not", "--remotes"])."""
+    def git(*args):
+        r = subprocess.run(["git", "-C", str(root), *args], capture_output=True)
+        if r.returncode != 0:
+            raise RuntimeError("git " + " ".join(args) + ": " + r.stderr.decode("utf-8", "replace").strip())
+        return r.stdout.decode("utf-8", "replace")
+    out = [git("log", "--format=%H%n%B", *rev_args)]
+    for sha in git("rev-list", *rev_args).split():
+        d = git("show", "--format=", "--no-renames", "-U0", sha)
+        out.append("\n".join(l for l in d.splitlines()
+                             if (l.startswith("+") and not l.startswith("+++")) or l.startswith("+++ b/")))
+    return "\n".join(out)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -136,6 +152,9 @@ def main():
     ap.add_argument("--names", default=None,
                     help="file of third-party mod names to forbid (lives in the PRIVATE repo). "
                          "Required when --strict is set.")
+    ap.add_argument("--push-range", nargs="+", metavar="REV", default=None,
+                    help="instead of the tree, name-check what a push would publish: the commit messages and "
+                         "added lines of this git revision selection (e.g. NEW --not --remotes). Needs --names.")
     ap.add_argument("--strict", action="store_true",
                     help="fail if the name list is unavailable. Use on any push to main/CI.")
     a = ap.parse_args()
@@ -144,6 +163,24 @@ def main():
     if not root.is_dir():
         print(f"check-no-ip: no such directory: {root}", file=sys.stderr)
         return 2
+
+    if a.push_range is not None:
+        names = load_names(a.names)
+        if names is None:
+            print("check-no-ip: FAIL -- --push-range needs a readable --names list", file=sys.stderr)
+            return 2
+        try:
+            text = push_range_text(root, a.push_range)
+        except RuntimeError as e:
+            print(f"check-no-ip: FAIL -- could not read the push range: {e}", file=sys.stderr)
+            return 2
+        hits = sorted({n for n, rx in names if rx.search(text)})
+        print(f"check-no-ip: push range ({len(text)} chars of messages and added lines) checked against "
+              f"{len(names)} forbidden name(s)")
+        if hits:
+            print(f"check-no-ip: FAIL -- the push names a forbidden name: {hits}", file=sys.stderr)
+            return 1
+        return 0
 
     files, how = tracked_files(root)
     files = [f for f in files if f.is_file()]

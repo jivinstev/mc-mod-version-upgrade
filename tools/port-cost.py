@@ -91,13 +91,21 @@ def read_env():
     return env
 
 
-def port_size(port):
+def port_size(port, target=None):
     java = list((port / "src").rglob("*.java")) if (port / "src").is_dir() else []
+    if target is not None:                 # a layer target's own work is its overlay files
+        java = list((port / ".multiversion" / "targets" / target).rglob("*.java"))
     props = {}
-    for f in [port / "gradle.properties"] + sorted((port / "versions").glob("*.properties")):
+    # A fork layer (.multiversion/) states each target's versions as `prop.<key>=` in its target.properties.
+    layer = sorted((port / ".multiversion" / "targets").glob("*/target.properties")) if target is None \
+        else [port / ".multiversion" / "targets" / target / "target.properties"]
+    files = [port / "gradle.properties"] + sorted((port / "versions").glob("*.properties"))
+    if target is not None:
+        files = []                         # a single layer target: its own versions, not the base's
+    for f in files + layer:
         if f.is_file():
             for k, v in re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S*)", f.read_text(errors="replace", encoding="utf-8")):
-                props.setdefault(k, []).append(v)
+                props.setdefault(k[len("prop."):] if k.startswith("prop.") else k, []).append(v)
     return {
         "minecraft": sorted(set(props.get("minecraft_version", []))),
         "neoforge": sorted(set(props.get("neo_version", []))),
@@ -159,7 +167,7 @@ def collect(modid, projects, path=None, labels=()):
     return sessions
 
 
-def summarise(modid, sessions, port):
+def summarise(modid, sessions, port, target=None):
     per_model = collections.defaultdict(collections.Counter)
     effort, times = collections.Counter(), []
     for s in sessions.values():
@@ -195,11 +203,11 @@ def summarise(modid, sessions, port):
     totals = collections.Counter()
     for c in per_model.values():
         totals.update(c)
-    day = lambda x: datetime.datetime.utcfromtimestamp(x).strftime("%Y-%m-%dT%H:%MZ")
+    day = lambda x: datetime.datetime.fromtimestamp(x, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
     return {
         "schema": 1,
         "modid": modid,
-        "recorded_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%MZ"),
+        "recorded_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "sessions": len(sessions),
         "start": day(times[0]) if times else None,
         "end": day(times[-1]) if times else None,
@@ -214,7 +222,7 @@ def summarise(modid, sessions, port):
         "claude_code": sorted({v for s in sessions.values() for v in s["versions"]}),
         "entrypoint": sorted({e for s in sessions.values() for e in s["entry"]}),
         "contamination": {sid[:8]: dict(s["others"].most_common(5)) for sid, s in sessions.items() if s["others"]},
-        "size": port_size(port),
+        "size": port_size(port, target),
     }
 
 
@@ -286,11 +294,12 @@ def main():
                                     "that ever touched the port")
     ap.add_argument("--session", help="count only sessions whose id starts with this")
     ap.add_argument("--path", help="match sessions by this checkout path instead of mods/<modid> (upstream ports)")
+    ap.add_argument("--target", help="a fork layer target (.multiversion/targets/<t>): size its overlays and versions")
     ap.add_argument("--label", action="append", default=[], metavar="NAME=PATH",
                     help="split the cost by which path each request worked in, e.g. port=/src/fork tools=/src/migrator")
     a = ap.parse_args()
     ws = pathlib.Path(os.path.expanduser(a.workspace or read_env().get("MIGRATE_WORKSPACE", "") or "."))
-    port = ws / "mods" / a.modid
+    port = pathlib.Path(a.path) if a.path else ws / "mods" / a.modid
     projects = pathlib.Path(a.projects).expanduser() if a.projects else projects_dir()
     if not projects.is_dir():
         print(f"port-cost: no transcripts at {projects} -- nothing recorded", file=sys.stderr)
@@ -314,7 +323,7 @@ def main():
     if not sessions:
         print(f"port-cost: no session in {projects} touched mods/{a.modid} -- nothing recorded", file=sys.stderr)
         return 2
-    c = summarise(a.modid, sessions, port)
+    c = summarise(a.modid, sessions, port, a.target)
     sec = migration_section(c)
     print(sec, end="")
     if labels:
@@ -324,7 +333,7 @@ def main():
                     for k, v in sessions.items()}
             part = {k: v for k, v in part.items() if v["reqs"]}
             if part:
-                s = summarise(a.modid, part, port)
+                s = summarise(a.modid, part, port, a.target)
                 print(f"  {name}: {s['totals'].get('requests', 0)} requests, "
                       f"{'$%.2f' % s['usd'] if s['usd'] is not None else 'unpriced'}")
     if a.print:

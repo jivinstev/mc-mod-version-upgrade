@@ -48,3 +48,30 @@ Level	blockUpdated	updateNeighborsAt
 ServerLevel	blockUpdated	updateNeighborsAt
 LevelAccessor	blockUpdated	updateNeighborsAt
 Minecraft	getTimer	getDeltaTracker
+# 1.21.2 replaced LootContextParam with util.context.ContextKey and renamed the LootContext accessors with it
+# (same parameters; getParamOrNull's nullable read is getOptionalParameter).
+LootContext	getParam	getParameter
+LootContext	hasParam	hasParameter
+LootContext	getParamOrNull	getOptionalParameter
+# 26.2: SoundEvent.getLocation() -> location() (checked in the 26.2 jar: Identifier location())
+SoundEvent	getLocation	location
+# 26.2 made Level.random protected (26.2 jar: protected final RandomSource random; public getRandom()) -- X112
+Level	random	getRandom()
+# X137 (26.2 jar): the HUD and the toast manager moved off the god objects -- Gui.getChat is Hud.getChat (Gui.hud,
+# §V28), Minecraft.getToasts is Gui.toastManager()
+Gui	getChat	{recv}.hud.getChat(){()}
+Minecraft	getToasts	{recv}.gui.toastManager(){()}
+# X139 (26.2 jar): the GLFW window handle accessor
+Window	getWindow	handle
+# X150 (26.2 jar): Inventory.items is private; the main-inventory list is getNonEquipmentItems()
+Inventory	items	getNonEquipmentItems()
+# X162 (26.2 jar): Item tooltips take a Consumer<Component> (accept, not add)
+Consumer	add	accept
+# X162: the moveTo -> snapTo rename (V39) is for Entity; PathNavigation.moveTo(x, y, z, speed) is unchanged (X7b)
+PathNavigation	snapTo	moveTo
+# X162 (26.2 jar): Minecraft.cameraEntity is private; getCameraEntity() is public
+Minecraft	cameraEntity	getCameraEntity()
+# X162 (26.2 jar): Item.getDescription() is gone; the item name comes from a stack
+Item	getDescription	{recv}.getName({recv}.getDefaultInstance()){()}
+# X162 (26.2 jar): food is a data component
+ItemStack	getFoodProperties	{recv}.get(net.minecraft.core.component.DataComponents.FOOD){(..)}

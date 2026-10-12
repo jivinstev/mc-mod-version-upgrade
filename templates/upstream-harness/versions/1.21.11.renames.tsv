@@ -1,0 +1,14 @@
+# 1.21.11 (NeoForge 21.11, FML 11): the harness renames are those of 1.21.10, plus the rows below.
+#!inherit 1.21.10
+# Measured against the 1.21.11 sources (neoforge-21.11.45-sources.jar) on the first layer-fork port's Gate A.
+# The 26.x split starts here: ResourceLocation is Identifier (CATALOG V4, a pure type rename). The harness uses only this table,
+# not the fork's generated moves (tools/port_gates.py harness_layer_target), so a class that MOVED needs its row here too.
+net.minecraft.resources.ResourceLocation	net.minecraft.resources.Identifier
+ResourceLocation	Identifier
+# GameRules moved into its own package (the harness builds a LevelSettings with one; the 7-argument LevelSettings constructor is unchanged).
+net.minecraft.world.level.GameRules	net.minecraft.world.level.gamerules.GameRules
+# ResourceKey.location() -> identifier(), anchored on the two producers the harness iterates (registry-entry keys and holder keys).
+re:\.getKey\(\)\.location\(\)	.getKey().identifier()
+re:\.key\(\)\.location\(\)	.key().identifier()
+# DataLivenessGameTest names the ResourceKey it is checking `key`.
+re:\bkey\.location\(\)	key.identifier()

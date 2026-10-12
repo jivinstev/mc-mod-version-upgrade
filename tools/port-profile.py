@@ -19,7 +19,7 @@ PAT=[ # (name, regex over file text, covered-by)
  ('custom RenderType', r'RenderType\.create\s*\(|CompositeState', 'convert-rendertypes'),
  ('custom shader program', r'ShaderInstance|RegisterShadersEvent', 'convert-core-shaders / runtime seam'),
  ('GUI screen/widget', r'extends\s+(Abstract\w*)?(Screen|Widget|ContainerScreen|SelectionList)\b', 'convert-gui-hooks'),
- ('particle class', r'extends\s+(TextureSheet|SimpleAnimated|\w*)Particle\b', 'none'),
+ ('particle class', r'extends\s+(TextureSheet|SimpleAnimated|\w*)Particle\b', 'convert-client-hooks'),
  ('capability', r'ICapabilityProvider|ICapabilitySerializable|LazyOptional|AttachCapabilitiesEvent|CapabilityToken', 'forge-shapes partial; worker'),
  ('SimpleChannel packet', r'SimpleChannel|NetworkEvent\.Context', 'convert-simplechannel'),
  ('mixin', r'@Mixin\s*\(', 'audit-mixin-targets (verify only)'),
@@ -29,7 +29,7 @@ PAT=[ # (name, regex over file text, covered-by)
  ('armor/tool tier', r'implements\s+(ArmorMaterial|Tier)\b|new\s+ArmorMaterial\s*\(|extends\s+(ArmorItem|SwordItem|PickaxeItem|DiggerItem|TieredItem)\b', 'convert-gear-tiers'),
  ('attachment serializer', r'IAttachmentSerializer<\s*CompoundTag|INBTSerializable<', 'convert-attachment-io'),
  ('entity hurt/save', r'boolean\s+hurt\s*\(DamageSource|addAdditionalSaveData|readAdditionalSaveData', 'convert-valueio'),
- ('SavedData', r'extends\s+SavedData', 'none'),
+ ('SavedData', r'extends\s+SavedData', 'convert-saved-data'),
  ('config spec', r'ForgeConfigSpec', 'recipes'),
 ]
 

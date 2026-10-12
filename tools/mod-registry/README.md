@@ -15,6 +15,9 @@ python3 modreg.py search --query "giant squid" [--limit 20]
 python3 modreg.py versions --provider curseforge --id 123456 [--loader neoforge --mc 1.21.1]
 #   classification: native | needs-migrate | needs-downport | none
 
+# every file of a project, newest first, with its declared loaders and Minecraft versions
+python3 modreg.py files --provider modrinth --id examplemod [--mc 1.20.1]
+
 # required/optional dependencies of a specific file
 python3 modreg.py deps --provider modrinth --id geckolib --file <versionId>
 

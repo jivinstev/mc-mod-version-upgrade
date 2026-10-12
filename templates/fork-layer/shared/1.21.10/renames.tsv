@@ -1,0 +1,15 @@
+# Shared fork-layer rename table: NeoForge 21.8 -> 21.10 (Minecraft 1.21.10; NeoForge 21.10; FML 10). Applied FIRST (nearest
+# target) on the 1.21.1 text, then the 1.21.8/1.21.5/1.21.4/1.21.3 tables on whatever it left, so a row here that rewrites
+# something those rows also rewrite has to write the 1.21.10 form itself. Measured against neoforge-21.10.64-sources.jar and
+# tools/audit-mixin-targets.py on the first layer-fork port (the mixin audit is what finds these: javac cannot see them).
+#!exhaustive  # shared library: most forks use only some of these rows
+# ---- mixin targets
+# LevelRenderer.renderLevel(GraphicsResourceAllocator, DeltaTracker, boolean, Camera, Matrix4f, Matrix4f, GpuBufferSlice, Vector4f, boolean)
+# (the 1.21.6-1.21.8 shape) gained a third Matrix4f, the culling projection, after the other two (1.21.9). The 1.21.10 rows write
+# the whole descriptor / parameter list from the 1.21.1 text, as the 1.21.8 ones do. Both rows below carry an inert lookbehind (`(?<=/)`, `(?<![\w$])`):
+# the table loader refuses two rows with the same `from` (CATALOG X31), and these match exactly what the 1.21.8 rows match; being
+# nearer they run first and the 1.21.8 pair never fires on a 1.21.10 build.
+re:(?<=/)LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/renderer/LightTexture;Lorg/joml/Matrix4f;Lorg/joml/Matrix4f;\)V	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lorg/joml/Matrix4f;Lorg/joml/Matrix4f;Lorg/joml/Matrix4f;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;Lorg/joml/Vector4f;Z)V
+# ... and the callback of an @Inject into it (the same eight 1.21.1 parameters, then the CallbackInfo)
+re:(?<![\w$])(@Inject\(method = "renderLevel"[\s\S]{0,300}?private void [\w$]+\()DeltaTracker (\w+), boolean (\w+), Camera (\w+),\s*GameRenderer \w+, LightTexture \w+,\s*Matrix4f (\w+), Matrix4f (\w+), CallbackInfo (\w+)\)	\1com.mojang.blaze3d.resource.GraphicsResourceAllocator mv$allocator, DeltaTracker \2, boolean \3, Camera \4,\n            Matrix4f \5, Matrix4f \6, Matrix4f mv$cullMatrix, com.mojang.blaze3d.buffers.GpuBufferSlice mv$fog, org.joml.Vector4f mv$fogColor, boolean mv$sky, CallbackInfo \7)
+#!strict
