@@ -444,6 +444,10 @@ def stub_for(text, simple, unsafe):
         if depth == 0:
             break
     flat = _flatten(text[i + 1:j])
+    # a class that carries STATE others read (a config POJO: `public boolean eatMelons = true;`) cannot be a no-op stand-in:
+    # its values ARE its behaviour, and defaults would change them silently. Leave it unstubbed (X168 regression, 37 -> 212).
+    if re.search(r"(?m)^\s*(?:@[\w.]+(?:\([^()]*\))?\s*)*(?:public|protected)\s+(?!static\b)(?:final\s+)?[\w.<>\[\], ?]+\s+\w+\s*[=;]", flat):
+        return None
     tok = lambda s: not (set(re.findall(r"[A-Za-z_]\w*", s)) & unsafe)
     members = []
     for mm in re.finditer(r"(?:@[\w.]+(?:\([^()]*\))?\s*)*(?P<mods>" + MODS + r")(?P<tp><[^(){};=]*?>\s+)?"
@@ -743,7 +747,10 @@ def self_check():
                                     "   public static final int MAX = 3;\n   public static void enable() {\n      Regions.register(new Reg());\n   }\n"
                                     "   public static boolean on(List<String> l) { return true; }\n"
                                     "   public static void add(Regions r) {}\n   private static void helper() {}\n}\n",
-            "terra/Reg.java": "package com.ex.t.terra;\nimport terrablender.api.Region;\nclass Reg extends Region {}\n"}.items():
+            "terra/Reg.java": "package com.ex.t.terra;\nimport terrablender.api.Region;\nclass Reg extends Region {}\n",
+            "Cfg.java": "package com.ex.t;\nimport com.ex.t.conf.Conf;\nclass Cfg { boolean b = Conf.INSTANCE.eat; }\n",
+            "conf/Conf.java": "package com.ex.t.conf;\nimport me.shedaniel.autoconfig.ConfigData;\npublic class Conf implements ConfigData {\n"
+                              "   public static Conf INSTANCE;\n   public boolean eat = true;\n}\n"}.items():
             (j / rel).parent.mkdir(parents=True, exist_ok=True); (j / rel).write_text(body, encoding="utf-8")
         import subprocess
         subprocess.run([sys.executable, __file__, "--work", str(w)], capture_output=True, text=True)
@@ -751,7 +758,8 @@ def self_check():
         ok7 = ("public static void enable() {\n    }" in stub and "public static boolean on(List<String> l) {\n        return false;" in stub
                and "public static final int MAX = 3;" in stub and "Regions" not in stub and "helper" not in stub
                and not (j / "terra/Reg.java").exists() and (w / "parked/src/main/java/com/ex/t/terra/TerraInit.java").exists()
-               and "X168" in (w / "MIGRATION.md").read_text(encoding="utf-8"))
+               and "X168" in (w / "MIGRATION.md").read_text(encoding="utf-8")
+               and not (j / "conf/Conf.java").exists())     # a stateful (config) class is never a no-op stub
         if not ok7:
             print("self-check X168:", stub)
         ok = ok and ok7

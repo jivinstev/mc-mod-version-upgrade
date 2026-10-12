@@ -6765,3 +6765,11 @@ commonly have their own class with that name, and unguarded it rewrote one. prep
 A guard on a plain row, or one that guards no row, is a hard error. The rows are scoped to files importing
 cristellib's class. A port carrying an older copy of prepare-sources would read the guard as a comment, so its rename
 table should be recomposed together with the tool.
+
+**X170. X168's stubs must not stand in for a class that carries state.** Measured over the full rerun, 56 mods got
+stubs and 55 improved (Create Steam 'n' Rails 2875 -> 669, Diet 110 -> 57). The one that got worse is the lesson: its
+parked class was a Cloth AutoConfig POJO (`public boolean villagersEatMelons = true;`, nested sub-configs), read field by
+field from main code. The stub kept no fields, so each read became its own error (37 -> 212). Worse, a stub that DID
+keep fields with type defaults would have silently turned `true` into `false`: for a data class, the values are the
+behaviour. park-optional now refuses to stub a class with a non-private instance field, so it stays parked and listed,
+as it was before X168.
