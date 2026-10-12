@@ -28,7 +28,36 @@
 #   * A member rename must name its OWNER unless the member name is globally unique.
 #     `MobEffects.MOVEMENT_SPEED` became SPEED; `Attributes.MOVEMENT_SPEED` did not.
 #   * `prepare-sources.py` reports every rule that matched NOTHING. Drive that to zero and keep
-#     it there, marking a genuinely-unused block `#!exhaustive` ... `#!strict` WITH A REASON.
+#     it there, marking a genuinely-unused block `#!exhaustive` ... `# -- X138: KeyMapping's category is a KeyMapping.Category record, not a translation key. The vanilla
+# -- categories map to its constants (a mod's OWN category needs Category.register -- left for a worker).
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.movement"	\1net.minecraft.client.KeyMapping.Category.MOVEMENT
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.misc"	\1net.minecraft.client.KeyMapping.Category.MISC
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.multiplayer"	\1net.minecraft.client.KeyMapping.Category.MULTIPLAYER
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.gameplay"	\1net.minecraft.client.KeyMapping.Category.GAMEPLAY
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.inventory"	\1net.minecraft.client.KeyMapping.Category.INVENTORY
+re:(new KeyMapping\((?:[^()]|\([^()]*\))*?)"key\.categories\.creative"	\1net.minecraft.client.KeyMapping.Category.CREATIVE
+
+# -- X150: ItemCooldowns is keyed by the STACK (or a cooldown-group id) on 26.x. An Item argument -- `this` in an
+# -- Item subclass, a registry `.get()`, an Items constant -- becomes a stack of it (its group is the item's own id
+# -- unless a USE_COOLDOWN component says otherwise); `stack.getItem()` passes the stack itself.
+re:(getCooldowns\(\)\s*\.\s*(?:isOnCooldown|getCooldownPercent|addCooldown)\(\s*)([\w.()]+?)\.getItem\(\)(?=\s*[,)])	\1\2
+re:(getCooldowns\(\)\s*\.\s*(?:isOnCooldown|getCooldownPercent|addCooldown)\(\s*)(this|[\w.]+\.get\(\)|Items\.\w+)(?=\s*[,)])	\1new net.minecraft.world.item.ItemStack(\2)
+re:(getCooldowns\(\)\s*\.\s*removeCooldown\(\s*)(this|[\w.]+\.get\(\)|Items\.\w+)(?=\s*\))	\1net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(\2)
+# -- X150: teleportTo(ServerLevel, x, y, z, yaw, pitch) is gone: the one left takes the relative-movement set and a
+# -- trailing setCamera (what the old player form did).
+re:(\.teleportTo\(\s*)(?=[^,]*(?:[Ll]evel|[Ww]orld|[Dd]im|[Ss]erver))((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	\1\2, \3, \4, \5, java.util.Set.of(), \6, \7, true)
+re:(\.teleportTo\(\s*)(?=[^,]*(?:[Ll]evel|[Ww]orld|[Dd]im|[Ss]erver))((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?=[^,]*(?:Set|Relative|Movement))(?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	\1\2, \3, \4, \5, \6, \7, \8, true)
+
+# -- X164 (26.2 sources): LivingEntity.knockback(power, x, z) takes the DamageSource and damage that caused it. The
+# -- base body uses neither, but an override does (SulfurCube reads source.getEntity()), so not null: the receiver's
+# -- own generic source, damage 0.
+re:(?<![\w$.])((?:this|[\w$]+)(?:\.[\w$]+(?:\(\))?)*)\.knockback\(\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+),\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	\1.knockback(\2, \3, \4, \1.damageSources().generic(), 0.0F)
+# -- X164: BlockState.getOffset(level, pos) -> getOffset(pos) (the offset function no longer reads the level)
+re:\.getOffset\(\s*(?:this\.)?(?:level|world|getter|reader|blockGetter|levelReader|\w+\.level\(\)|level\(\))\s*,\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	.getOffset(\1)
+# -- X164: EventHooks.canEntityGrief takes a ServerLevel on 26.x; a client level answers false (no client-side grief)
+re:(?<![\w.])EventHooks\.canEntityGrief\(\s*(?!_griefLevel\b)([\w$.()]+?)\s*,\s*((?:[^(),]|\((?:[^()]|\([^()]*\))*\))+)\s*\)	(\1 instanceof net.minecraft.server.level.ServerLevel _griefLevel && net.neoforged.neoforge.event.EventHooks.canEntityGrief(_griefLevel, \2))
+
+#!strict` WITH A REASON.
 #     A warning that is never zero is decoration.
 #
 # Rows carrying a judgement rather than a pure rename are commented as such -- keep those notes,
@@ -60,6 +89,9 @@
 #             # where a dead rule IS a real bug.
 net.minecraft.resources.ResourceLocation	net.minecraft.resources.Identifier
 ResourceLocation	Identifier
+# X110: the command argument followed the type (26.2 jar: IdentifierArgument.id() / getId(ctx, name), same shape)
+net.minecraft.commands.arguments.ResourceLocationArgument	net.minecraft.commands.arguments.IdentifierArgument
+ResourceLocationArgument	IdentifierArgument
 
 # -- sub-package reorganisation: same simple name, new home.
 net.neoforged.neoforge.client.model.data.ModelData	net.neoforged.neoforge.model.data.ModelData
@@ -262,6 +294,10 @@ software.bernie.geckolib.util.RenderUtil	com.geckolib.util.RenderUtil
 # -- 1.21.2 change this project's migrator catalog records as M4). Written fully
 # -- qualified on purpose: a rewrite that needed three new imports per file would have
 # -- to edit import blocks, and this table only ever rewrites expressions.
+# -- X163: only the forms that carry the FULL id are rewritten -- on 26.x the key is the type's identity (its
+# -- translation key and loot table), so a bare "name" with no namespace is left for a worker rather than guessed.
+re:\.build\(\s*((?:Identifier|ResourceLocation)\.(?:fromNamespaceAndPath|parse)\((?:[^()]|\([^()]*\))*\))\.toString\(\)\s*\)	.build(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENTITY_TYPE, \1))
+re:\.build\(\s*"([a-z0-9_.-]+:[a-z0-9_./-]+)"\s*\)	.build(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.ENTITY_TYPE, net.minecraft.resources.Identifier.parse("\1")))
 
 # -- GameRules was overhauled: constants lost the RULE_ prefix, are typed GameRule<T>,
 # -- and their serialized ids changed too (advance_time / spawn_mobs, not the old
@@ -338,15 +374,15 @@ re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\
 # -- 26.x collapsed the three interaction-result types into one InteractionResult.
 # -- The Holder forms carried a payload (the resulting ItemStack) that the new API does not
 # -- take, so the argument is dropped -- vanilla now reads the stack back from the player.
-re:InteractionResultHolder\.success\([^;]*\)	InteractionResult.SUCCESS
-re:InteractionResultHolder\.pass\([^;]*\)	InteractionResult.PASS
-re:InteractionResultHolder\.fail\([^;]*\)	InteractionResult.FAIL
-re:InteractionResultHolder\.consume\([^;]*\)	InteractionResult.CONSUME
+re:InteractionResultHolder\.success\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.SUCCESS
+re:InteractionResultHolder\.pass\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.PASS
+re:InteractionResultHolder\.fail\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.FAIL
+re:InteractionResultHolder\.consume\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.CONSUME
 # NOTE, behavioural: 1.21.1's sidedSuccess(x, isClientSide) meant "SUCCESS on the client, CONSUME on the
 # server". 26.x folds that decision into SUCCESS itself, so this is the faithful mapping --
 # but it is the one rule here that is a judgement rather than a pure rename, so it is worth
 # eyeballing in-game (the arm-swing on use) rather than trusting the compile.
-re:InteractionResultHolder\.sidedSuccess\([^;]*\)	InteractionResult.SUCCESS
+re:InteractionResultHolder\.sidedSuccess\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)	InteractionResult.SUCCESS
 net.minecraft.world.InteractionResultHolder	net.minecraft.world.InteractionResult
 re:InteractionResultHolder<[^>]*>	InteractionResult
 
@@ -479,7 +515,7 @@ re:super\.loadAdditional\((\w+), \w+\)	super.loadAdditional(\1)
 # Anchored on the ARGUMENT NAME rather than the receiver, because a receiver pattern cannot
 # tell EntityType.create apart from ClientboundBlockEntityDataPacket.create(this) (8 sites),
 # IceCreamItem.create(s) or CoffeeDrinkItem.create(brew) — all of which must not be touched.
-re:\.create\((level|serverLevel|targetLevel|serverWorld|server|here|helper\.getLevel\(\)|\w+\.level\(\))\)	.create(\1, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
+re:\.create\((level|world|serverLevel|targetLevel|serverWorld|server|here|helper\.getLevel\(\)|\w+\.level\(\)|(?:Minecraft\.getInstance\(\)|mc|client|minecraft)\.level)\)	.create(\1, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
 
 # --- GameTestHelper.getBlockEntity now takes the expected class -------------------------
 # 26.x: `<T extends BlockEntity> T getBlockEntity(BlockPos, Class<T>)`. The cast the call site
@@ -510,7 +546,11 @@ re:\bBlocks\.CHAIN\b	Blocks.IRON_CHAIN
 # 26.x: `BlockEntityType(BlockEntitySupplier<? extends T>, Block...)`. `.build(null)` is a
 # unique enough anchor to make the non-greedy capture safe over an argument list that itself
 # contains parentheses (`X::new, FOO.get()`).
-re:BlockEntityType\s*\.Builder\s*\.of\(([^;]*?)\)\s*\.build\(null\)	new BlockEntityType<>(\1)
+re:BlockEntityType\s*\.Builder\s*\.of\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*\.build\(null\)	new BlockEntityType<>(\1)
+# X115: Vineflower imports the nested class and writes it BARE (`import ...BlockEntityType.Builder;` +
+# `Builder.of(...).build(null)`); `.build(null)` still anchors it -- EntityType.Builder.build takes a key.
+re:(?<![\w$.])Builder\s*\.of\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*\.build\(null\)	new net.minecraft.world.level.block.entity.BlockEntityType<>(\1)
+re:(?m)^import net\.minecraft\.world\.level\.block\.entity\.BlockEntityType\.Builder;[ \t]*\n	
 
 # --- Entity.getTags() -> entityTags() ----------------------------------------------------
 # Renamed to stop colliding with EntityType.getTags()/Registry.getTags(), which return TAG
@@ -582,7 +622,7 @@ re:new ServerBossEvent\(	new ServerBossEvent(java.util.UUID.randomUUID(),
 # the "test.error.tick" message. Our sites all throw from inside a `helper.succeedWhen`
 # retry, where the helper's own tick is not reachable -- vanilla passes
 # `testInfo.getTick()`, we cannot, and 0 is the honest placeholder rather than a wrong number.
-re:new GameTestAssertException\(([^;]*?)\)	new GameTestAssertException(net.minecraft.network.chat.Component.literal(\1), 0)
+re:new GameTestAssertException\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)	new GameTestAssertException(net.minecraft.network.chat.Component.literal(\1), 0)
 
 # -- SoundEvents is a MIX on both versions: sounds with variants are Holder.Reference, the rest are
 # -- plain SoundEvent. So a blanket ".value()" rule is wrong -- measured, it created 67 errors by
@@ -635,9 +675,154 @@ re:new AnimationController<>\(this, 	new AnimationController<>(
 # -- weathering()/waxed() and then unaffected()/exposed()/weathered()/oxidized(). Order matters
 # -- here (X4): the WAXED_ and OXIDIZED_ forms must be rewritten before the bare COPPER_BLOCK
 # -- rule, or it clips their prefixes.
+# -- X116: generated for every 1.21.1 family that became a WeatheringCopperCollection (26.2 jar), Blocks AND Items;
+# -- the original three rows covered only COPPER_BLOCK.
+re:\bBlocks\.WAXED_EXPOSED_COPPER\b	Blocks.COPPER_BLOCK.waxed().exposed()
+re:\bBlocks\.WAXED_EXPOSED_CUT_COPPER\b	Blocks.CUT_COPPER.waxed().exposed()
+re:\bBlocks\.WAXED_EXPOSED_CHISELED_COPPER\b	Blocks.CHISELED_COPPER.waxed().exposed()
+re:\bBlocks\.WAXED_EXPOSED_CUT_COPPER_STAIRS\b	Blocks.CUT_COPPER_STAIRS.waxed().exposed()
+re:\bBlocks\.WAXED_EXPOSED_CUT_COPPER_SLAB\b	Blocks.CUT_COPPER_SLAB.waxed().exposed()
+re:\bBlocks\.WAXED_EXPOSED_COPPER_DOOR\b	Blocks.COPPER_DOOR.waxed().exposed()
+re:\bBlocks\.WAXED_EXPOSED_COPPER_TRAPDOOR\b	Blocks.COPPER_TRAPDOOR.waxed().exposed()
+re:\bBlocks\.WAXED_EXPOSED_COPPER_GRATE\b	Blocks.COPPER_GRATE.waxed().exposed()
+re:\bBlocks\.WAXED_EXPOSED_COPPER_BULB\b	Blocks.COPPER_BULB.waxed().exposed()
+re:\bBlocks\.WAXED_WEATHERED_COPPER\b	Blocks.COPPER_BLOCK.waxed().weathered()
+re:\bBlocks\.WAXED_WEATHERED_CUT_COPPER\b	Blocks.CUT_COPPER.waxed().weathered()
+re:\bBlocks\.WAXED_WEATHERED_CHISELED_COPPER\b	Blocks.CHISELED_COPPER.waxed().weathered()
+re:\bBlocks\.WAXED_WEATHERED_CUT_COPPER_STAIRS\b	Blocks.CUT_COPPER_STAIRS.waxed().weathered()
+re:\bBlocks\.WAXED_WEATHERED_CUT_COPPER_SLAB\b	Blocks.CUT_COPPER_SLAB.waxed().weathered()
+re:\bBlocks\.WAXED_WEATHERED_COPPER_DOOR\b	Blocks.COPPER_DOOR.waxed().weathered()
+re:\bBlocks\.WAXED_WEATHERED_COPPER_TRAPDOOR\b	Blocks.COPPER_TRAPDOOR.waxed().weathered()
+re:\bBlocks\.WAXED_WEATHERED_COPPER_GRATE\b	Blocks.COPPER_GRATE.waxed().weathered()
+re:\bBlocks\.WAXED_WEATHERED_COPPER_BULB\b	Blocks.COPPER_BULB.waxed().weathered()
+re:\bBlocks\.WAXED_OXIDIZED_COPPER\b	Blocks.COPPER_BLOCK.waxed().oxidized()
+re:\bBlocks\.WAXED_OXIDIZED_CUT_COPPER\b	Blocks.CUT_COPPER.waxed().oxidized()
+re:\bBlocks\.WAXED_OXIDIZED_CHISELED_COPPER\b	Blocks.CHISELED_COPPER.waxed().oxidized()
+re:\bBlocks\.WAXED_OXIDIZED_CUT_COPPER_STAIRS\b	Blocks.CUT_COPPER_STAIRS.waxed().oxidized()
+re:\bBlocks\.WAXED_OXIDIZED_CUT_COPPER_SLAB\b	Blocks.CUT_COPPER_SLAB.waxed().oxidized()
+re:\bBlocks\.WAXED_OXIDIZED_COPPER_DOOR\b	Blocks.COPPER_DOOR.waxed().oxidized()
+re:\bBlocks\.WAXED_OXIDIZED_COPPER_TRAPDOOR\b	Blocks.COPPER_TRAPDOOR.waxed().oxidized()
+re:\bBlocks\.WAXED_OXIDIZED_COPPER_GRATE\b	Blocks.COPPER_GRATE.waxed().oxidized()
+re:\bBlocks\.WAXED_OXIDIZED_COPPER_BULB\b	Blocks.COPPER_BULB.waxed().oxidized()
 re:\bBlocks\.WAXED_COPPER_BLOCK\b	Blocks.COPPER_BLOCK.waxed().unaffected()
+re:\bBlocks\.WAXED_CUT_COPPER\b	Blocks.CUT_COPPER.waxed().unaffected()
+re:\bBlocks\.WAXED_CHISELED_COPPER\b	Blocks.CHISELED_COPPER.waxed().unaffected()
+re:\bBlocks\.WAXED_CUT_COPPER_STAIRS\b	Blocks.CUT_COPPER_STAIRS.waxed().unaffected()
+re:\bBlocks\.WAXED_CUT_COPPER_SLAB\b	Blocks.CUT_COPPER_SLAB.waxed().unaffected()
+re:\bBlocks\.WAXED_COPPER_DOOR\b	Blocks.COPPER_DOOR.waxed().unaffected()
+re:\bBlocks\.WAXED_COPPER_TRAPDOOR\b	Blocks.COPPER_TRAPDOOR.waxed().unaffected()
+re:\bBlocks\.WAXED_COPPER_GRATE\b	Blocks.COPPER_GRATE.waxed().unaffected()
+re:\bBlocks\.WAXED_COPPER_BULB\b	Blocks.COPPER_BULB.waxed().unaffected()
+re:\bBlocks\.EXPOSED_COPPER\b	Blocks.COPPER_BLOCK.weathering().exposed()
+re:\bBlocks\.EXPOSED_CUT_COPPER\b	Blocks.CUT_COPPER.weathering().exposed()
+re:\bBlocks\.EXPOSED_CHISELED_COPPER\b	Blocks.CHISELED_COPPER.weathering().exposed()
+re:\bBlocks\.EXPOSED_CUT_COPPER_STAIRS\b	Blocks.CUT_COPPER_STAIRS.weathering().exposed()
+re:\bBlocks\.EXPOSED_CUT_COPPER_SLAB\b	Blocks.CUT_COPPER_SLAB.weathering().exposed()
+re:\bBlocks\.EXPOSED_COPPER_DOOR\b	Blocks.COPPER_DOOR.weathering().exposed()
+re:\bBlocks\.EXPOSED_COPPER_TRAPDOOR\b	Blocks.COPPER_TRAPDOOR.weathering().exposed()
+re:\bBlocks\.EXPOSED_COPPER_GRATE\b	Blocks.COPPER_GRATE.weathering().exposed()
+re:\bBlocks\.EXPOSED_COPPER_BULB\b	Blocks.COPPER_BULB.weathering().exposed()
+re:\bBlocks\.WEATHERED_COPPER\b	Blocks.COPPER_BLOCK.weathering().weathered()
+re:\bBlocks\.WEATHERED_CUT_COPPER\b	Blocks.CUT_COPPER.weathering().weathered()
+re:\bBlocks\.WEATHERED_CHISELED_COPPER\b	Blocks.CHISELED_COPPER.weathering().weathered()
+re:\bBlocks\.WEATHERED_CUT_COPPER_STAIRS\b	Blocks.CUT_COPPER_STAIRS.weathering().weathered()
+re:\bBlocks\.WEATHERED_CUT_COPPER_SLAB\b	Blocks.CUT_COPPER_SLAB.weathering().weathered()
+re:\bBlocks\.WEATHERED_COPPER_DOOR\b	Blocks.COPPER_DOOR.weathering().weathered()
+re:\bBlocks\.WEATHERED_COPPER_TRAPDOOR\b	Blocks.COPPER_TRAPDOOR.weathering().weathered()
+re:\bBlocks\.WEATHERED_COPPER_GRATE\b	Blocks.COPPER_GRATE.weathering().weathered()
+re:\bBlocks\.WEATHERED_COPPER_BULB\b	Blocks.COPPER_BULB.weathering().weathered()
 re:\bBlocks\.OXIDIZED_COPPER\b	Blocks.COPPER_BLOCK.weathering().oxidized()
+re:\bBlocks\.OXIDIZED_CUT_COPPER\b	Blocks.CUT_COPPER.weathering().oxidized()
+re:\bBlocks\.OXIDIZED_CHISELED_COPPER\b	Blocks.CHISELED_COPPER.weathering().oxidized()
+re:\bBlocks\.OXIDIZED_CUT_COPPER_STAIRS\b	Blocks.CUT_COPPER_STAIRS.weathering().oxidized()
+re:\bBlocks\.OXIDIZED_CUT_COPPER_SLAB\b	Blocks.CUT_COPPER_SLAB.weathering().oxidized()
+re:\bBlocks\.OXIDIZED_COPPER_DOOR\b	Blocks.COPPER_DOOR.weathering().oxidized()
+re:\bBlocks\.OXIDIZED_COPPER_TRAPDOOR\b	Blocks.COPPER_TRAPDOOR.weathering().oxidized()
+re:\bBlocks\.OXIDIZED_COPPER_GRATE\b	Blocks.COPPER_GRATE.weathering().oxidized()
+re:\bBlocks\.OXIDIZED_COPPER_BULB\b	Blocks.COPPER_BULB.weathering().oxidized()
 re:\bBlocks\.COPPER_BLOCK\b(?!\.(waxed|weathering)\()	Blocks.COPPER_BLOCK.weathering().unaffected()
+re:\bBlocks\.CUT_COPPER\b(?!\.(waxed|weathering)\()	Blocks.CUT_COPPER.weathering().unaffected()
+re:\bBlocks\.CHISELED_COPPER\b(?!\.(waxed|weathering)\()	Blocks.CHISELED_COPPER.weathering().unaffected()
+re:\bBlocks\.CUT_COPPER_STAIRS\b(?!\.(waxed|weathering)\()	Blocks.CUT_COPPER_STAIRS.weathering().unaffected()
+re:\bBlocks\.CUT_COPPER_SLAB\b(?!\.(waxed|weathering)\()	Blocks.CUT_COPPER_SLAB.weathering().unaffected()
+re:\bBlocks\.COPPER_DOOR\b(?!\.(waxed|weathering)\()	Blocks.COPPER_DOOR.weathering().unaffected()
+re:\bBlocks\.COPPER_TRAPDOOR\b(?!\.(waxed|weathering)\()	Blocks.COPPER_TRAPDOOR.weathering().unaffected()
+re:\bBlocks\.COPPER_GRATE\b(?!\.(waxed|weathering)\()	Blocks.COPPER_GRATE.weathering().unaffected()
+re:\bBlocks\.COPPER_BULB\b(?!\.(waxed|weathering)\()	Blocks.COPPER_BULB.weathering().unaffected()
+re:\bBlocks\.LIGHTNING_ROD\b(?!\.(waxed|weathering)\()	Blocks.LIGHTNING_ROD.weathering().unaffected()
+re:\bItems\.WAXED_EXPOSED_COPPER\b	Items.COPPER_BLOCK.waxed().exposed()
+re:\bItems\.WAXED_EXPOSED_CUT_COPPER\b	Items.CUT_COPPER.waxed().exposed()
+re:\bItems\.WAXED_EXPOSED_CHISELED_COPPER\b	Items.CHISELED_COPPER.waxed().exposed()
+re:\bItems\.WAXED_EXPOSED_CUT_COPPER_STAIRS\b	Items.CUT_COPPER_STAIRS.waxed().exposed()
+re:\bItems\.WAXED_EXPOSED_CUT_COPPER_SLAB\b	Items.CUT_COPPER_SLAB.waxed().exposed()
+re:\bItems\.WAXED_EXPOSED_COPPER_DOOR\b	Items.COPPER_DOOR.waxed().exposed()
+re:\bItems\.WAXED_EXPOSED_COPPER_TRAPDOOR\b	Items.COPPER_TRAPDOOR.waxed().exposed()
+re:\bItems\.WAXED_EXPOSED_COPPER_GRATE\b	Items.COPPER_GRATE.waxed().exposed()
+re:\bItems\.WAXED_EXPOSED_COPPER_BULB\b	Items.COPPER_BULB.waxed().exposed()
+re:\bItems\.WAXED_WEATHERED_COPPER\b	Items.COPPER_BLOCK.waxed().weathered()
+re:\bItems\.WAXED_WEATHERED_CUT_COPPER\b	Items.CUT_COPPER.waxed().weathered()
+re:\bItems\.WAXED_WEATHERED_CHISELED_COPPER\b	Items.CHISELED_COPPER.waxed().weathered()
+re:\bItems\.WAXED_WEATHERED_CUT_COPPER_STAIRS\b	Items.CUT_COPPER_STAIRS.waxed().weathered()
+re:\bItems\.WAXED_WEATHERED_CUT_COPPER_SLAB\b	Items.CUT_COPPER_SLAB.waxed().weathered()
+re:\bItems\.WAXED_WEATHERED_COPPER_DOOR\b	Items.COPPER_DOOR.waxed().weathered()
+re:\bItems\.WAXED_WEATHERED_COPPER_TRAPDOOR\b	Items.COPPER_TRAPDOOR.waxed().weathered()
+re:\bItems\.WAXED_WEATHERED_COPPER_GRATE\b	Items.COPPER_GRATE.waxed().weathered()
+re:\bItems\.WAXED_WEATHERED_COPPER_BULB\b	Items.COPPER_BULB.waxed().weathered()
+re:\bItems\.WAXED_OXIDIZED_COPPER\b	Items.COPPER_BLOCK.waxed().oxidized()
+re:\bItems\.WAXED_OXIDIZED_CUT_COPPER\b	Items.CUT_COPPER.waxed().oxidized()
+re:\bItems\.WAXED_OXIDIZED_CHISELED_COPPER\b	Items.CHISELED_COPPER.waxed().oxidized()
+re:\bItems\.WAXED_OXIDIZED_CUT_COPPER_STAIRS\b	Items.CUT_COPPER_STAIRS.waxed().oxidized()
+re:\bItems\.WAXED_OXIDIZED_CUT_COPPER_SLAB\b	Items.CUT_COPPER_SLAB.waxed().oxidized()
+re:\bItems\.WAXED_OXIDIZED_COPPER_DOOR\b	Items.COPPER_DOOR.waxed().oxidized()
+re:\bItems\.WAXED_OXIDIZED_COPPER_TRAPDOOR\b	Items.COPPER_TRAPDOOR.waxed().oxidized()
+re:\bItems\.WAXED_OXIDIZED_COPPER_GRATE\b	Items.COPPER_GRATE.waxed().oxidized()
+re:\bItems\.WAXED_OXIDIZED_COPPER_BULB\b	Items.COPPER_BULB.waxed().oxidized()
+re:\bItems\.WAXED_COPPER_BLOCK\b	Items.COPPER_BLOCK.waxed().unaffected()
+re:\bItems\.WAXED_CUT_COPPER\b	Items.CUT_COPPER.waxed().unaffected()
+re:\bItems\.WAXED_CHISELED_COPPER\b	Items.CHISELED_COPPER.waxed().unaffected()
+re:\bItems\.WAXED_CUT_COPPER_STAIRS\b	Items.CUT_COPPER_STAIRS.waxed().unaffected()
+re:\bItems\.WAXED_CUT_COPPER_SLAB\b	Items.CUT_COPPER_SLAB.waxed().unaffected()
+re:\bItems\.WAXED_COPPER_DOOR\b	Items.COPPER_DOOR.waxed().unaffected()
+re:\bItems\.WAXED_COPPER_TRAPDOOR\b	Items.COPPER_TRAPDOOR.waxed().unaffected()
+re:\bItems\.WAXED_COPPER_GRATE\b	Items.COPPER_GRATE.waxed().unaffected()
+re:\bItems\.WAXED_COPPER_BULB\b	Items.COPPER_BULB.waxed().unaffected()
+re:\bItems\.EXPOSED_COPPER\b	Items.COPPER_BLOCK.weathering().exposed()
+re:\bItems\.EXPOSED_CUT_COPPER\b	Items.CUT_COPPER.weathering().exposed()
+re:\bItems\.EXPOSED_CHISELED_COPPER\b	Items.CHISELED_COPPER.weathering().exposed()
+re:\bItems\.EXPOSED_CUT_COPPER_STAIRS\b	Items.CUT_COPPER_STAIRS.weathering().exposed()
+re:\bItems\.EXPOSED_CUT_COPPER_SLAB\b	Items.CUT_COPPER_SLAB.weathering().exposed()
+re:\bItems\.EXPOSED_COPPER_DOOR\b	Items.COPPER_DOOR.weathering().exposed()
+re:\bItems\.EXPOSED_COPPER_TRAPDOOR\b	Items.COPPER_TRAPDOOR.weathering().exposed()
+re:\bItems\.EXPOSED_COPPER_GRATE\b	Items.COPPER_GRATE.weathering().exposed()
+re:\bItems\.EXPOSED_COPPER_BULB\b	Items.COPPER_BULB.weathering().exposed()
+re:\bItems\.WEATHERED_COPPER\b	Items.COPPER_BLOCK.weathering().weathered()
+re:\bItems\.WEATHERED_CUT_COPPER\b	Items.CUT_COPPER.weathering().weathered()
+re:\bItems\.WEATHERED_CHISELED_COPPER\b	Items.CHISELED_COPPER.weathering().weathered()
+re:\bItems\.WEATHERED_CUT_COPPER_STAIRS\b	Items.CUT_COPPER_STAIRS.weathering().weathered()
+re:\bItems\.WEATHERED_CUT_COPPER_SLAB\b	Items.CUT_COPPER_SLAB.weathering().weathered()
+re:\bItems\.WEATHERED_COPPER_DOOR\b	Items.COPPER_DOOR.weathering().weathered()
+re:\bItems\.WEATHERED_COPPER_TRAPDOOR\b	Items.COPPER_TRAPDOOR.weathering().weathered()
+re:\bItems\.WEATHERED_COPPER_GRATE\b	Items.COPPER_GRATE.weathering().weathered()
+re:\bItems\.WEATHERED_COPPER_BULB\b	Items.COPPER_BULB.weathering().weathered()
+re:\bItems\.OXIDIZED_COPPER\b	Items.COPPER_BLOCK.weathering().oxidized()
+re:\bItems\.OXIDIZED_CUT_COPPER\b	Items.CUT_COPPER.weathering().oxidized()
+re:\bItems\.OXIDIZED_CHISELED_COPPER\b	Items.CHISELED_COPPER.weathering().oxidized()
+re:\bItems\.OXIDIZED_CUT_COPPER_STAIRS\b	Items.CUT_COPPER_STAIRS.weathering().oxidized()
+re:\bItems\.OXIDIZED_CUT_COPPER_SLAB\b	Items.CUT_COPPER_SLAB.weathering().oxidized()
+re:\bItems\.OXIDIZED_COPPER_DOOR\b	Items.COPPER_DOOR.weathering().oxidized()
+re:\bItems\.OXIDIZED_COPPER_TRAPDOOR\b	Items.COPPER_TRAPDOOR.weathering().oxidized()
+re:\bItems\.OXIDIZED_COPPER_GRATE\b	Items.COPPER_GRATE.weathering().oxidized()
+re:\bItems\.OXIDIZED_COPPER_BULB\b	Items.COPPER_BULB.weathering().oxidized()
+re:\bItems\.COPPER_BLOCK\b(?!\.(waxed|weathering)\()	Items.COPPER_BLOCK.weathering().unaffected()
+re:\bItems\.CUT_COPPER\b(?!\.(waxed|weathering)\()	Items.CUT_COPPER.weathering().unaffected()
+re:\bItems\.CHISELED_COPPER\b(?!\.(waxed|weathering)\()	Items.CHISELED_COPPER.weathering().unaffected()
+re:\bItems\.CUT_COPPER_STAIRS\b(?!\.(waxed|weathering)\()	Items.CUT_COPPER_STAIRS.weathering().unaffected()
+re:\bItems\.CUT_COPPER_SLAB\b(?!\.(waxed|weathering)\()	Items.CUT_COPPER_SLAB.weathering().unaffected()
+re:\bItems\.COPPER_DOOR\b(?!\.(waxed|weathering)\()	Items.COPPER_DOOR.weathering().unaffected()
+re:\bItems\.COPPER_TRAPDOOR\b(?!\.(waxed|weathering)\()	Items.COPPER_TRAPDOOR.weathering().unaffected()
+re:\bItems\.COPPER_GRATE\b(?!\.(waxed|weathering)\()	Items.COPPER_GRATE.weathering().unaffected()
+re:\bItems\.COPPER_BULB\b(?!\.(waxed|weathering)\()	Items.COPPER_BULB.weathering().unaffected()
+re:\bItems\.LIGHTNING_ROD\b(?!\.(waxed|weathering)\()	Items.LIGHTNING_ROD.weathering().unaffected()
 
 # -- I18n kept only get(String, Object...); exists() is gone. Language.getInstance().has(key) is
 # -- what I18n.exists delegated to (catalog #163), so this is the same question asked one layer down.
@@ -730,9 +915,13 @@ re:\.isSolidRender\((?:[^()]|\([^()]*\))*\)	.isSolidRender()
 
 # -- ClickEvent became an interface with a record per action, so the Action enum is no longer an
 # -- argument -- it is the type you construct.
-re:new ClickEvent\(\s*ClickEvent\.Action\.SUGGEST_COMMAND,\s*("[^"]*")\)	new ClickEvent.SuggestCommand(\1)
-re:new ClickEvent\(\s*ClickEvent\.Action\.RUN_COMMAND,\s*("[^"]*")\s*\)	new ClickEvent.RunCommand(\1)
-re:new ClickEvent\(\s*ClickEvent\.Action\.OPEN_URL,\s*("[^"]*")\)	new ClickEvent.OpenUrl(java.net.URI.create(\1))
+# -- X138: any argument (not only a literal), the bare `Action.X` a nested import produces, and every action.
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.SUGGEST_COMMAND,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.SuggestCommand(\1)
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.RUN_COMMAND,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.RunCommand(\1)
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.OPEN_URL,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.OpenUrl(java.net.URI.create(\1))
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.OPEN_FILE,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.OpenFile(\1)
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.COPY_TO_CLIPBOARD,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.CopyToClipboard(\1)
+re:new ClickEvent\(\s*(?:ClickEvent\.)?Action\.CHANGE_PAGE,\s*((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?)\s*\)	new ClickEvent.ChangePage(Integer.parseInt(\1))
 
 # -- authlib's GameProfile is a record now, so getName() is gone. Player.nameAndId() is 26.x's own
 # -- accessor for the same pair and reads better than profile.name().
@@ -1024,6 +1213,8 @@ re:\n[ \t]*@OnlyIn\([^)]*\)[ \t]*
 re:(@EventBusSubscriber\((?:[^()]|\([^()]*\))*?),\s*bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+	\1
 re:(@EventBusSubscriber\(\s*)bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+\s*,\s*	\1
 re:@EventBusSubscriber\(\s*bus\s*=\s*(?:[\w.]+\.)?Bus\.\w+\s*\)	@EventBusSubscriber
+# X119: ...and the nested Bus import the decompile writes for it, which names a class 26.2 no longer has
+re:(?m)^import net\.neoforged\.fml\.common\.(?:Mod\.)?EventBusSubscriber\.Bus;[ \t]*\n	
 
 # --- Removed 1.21.1 helpers, found by the zero-model 26.2 baselines of four Forge-origin ports -------------
 # ResourceKey::location as a METHOD REFERENCE: the `.location()` row above only matches a call.
@@ -1094,15 +1285,77 @@ re:\bBlockStateProperties\.CHISELED_BOOKSHELF_SLOT_5_OCCUPIED\b	BlockStateProper
 # moves, and a super call inside it follows (a judgement row, §W6: a super.isAlliedTo outside an override would
 # skip the team check -- the ports' sites were all inside the override).
 re:\bFMLLoader\.getDist\(\)	net.neoforged.fml.loading.FMLEnvironment.getDist()
+# -- X139: the other FMLLoader statics a mod reaches for are instance methods on 26.x (FMLLoader.getCurrent());
+# -- FMLEnvironment and FMLPaths keep static forms.
+re:\bFMLLoader\.isProduction\(\)	net.neoforged.fml.loading.FMLEnvironment.isProduction()
+re:\bFMLLoader\.getGamePath\(\)	net.neoforged.fml.loading.FMLPaths.GAMEDIR.get()
 re:\bFMLEnvironment\.production\b	FMLEnvironment.isProduction()
 re:\bLevelRenderer\.getLightColor\(	net.minecraft.util.LightCoordsUtil.getLightCoords(
+# 26.2 moved RenderType's static factories to rendertype.RenderTypes. Only the 23 whose 26.2 pipeline matches
+# the 1.21.1 state on cull, blend and depth write are mapped here (compared from both sources, §V60's rule: a
+# same-named factory can change meaning). Unmapped and left for review: createArmorDecalCutoutNoCull, crumbling,
+# debugFilledBox, debugQuads, dragonRays, outline, textBackgroundSeeThrough, translucentMovingBlock, waterMask.
+# Covers calls and method references alike; not after a dot, so an FQ use is left whole.
+re:(?<![\w.])RenderType(\.|::)(armorCutoutNoCull|armorEntityGlint|beaconBeam|breezeEyes|breezeWind|endGateway|endPortal|energySwirl|entityGlint|entityShadow|entitySolid|entityTranslucent|entityTranslucentEmissive|eyes|glint|glintTranslucent|leash|lightning|lines|text|textBackground|textPolygonOffset|textSeeThrough)\b	net.minecraft.client.renderer.rendertype.RenderTypes\1\2
 re:\bRenderType\.entityCutout\(	net.minecraft.client.renderer.rendertype.RenderTypes.entityCutoutCull(
 re:\bRenderType\.entityCutoutNoCull\(	net.minecraft.client.renderer.rendertype.RenderTypes.entityCutout(
 re:\bpublic boolean isAlliedTo\(Entity (\w+)\)	protected boolean considersEntityAsAlly(Entity \1)
 re:\bsuper\.isAlliedTo\(	super.considersEntityAsAlly(
+# 1.21.2 dropped the LootItemConditionType/LootItemFunctionType records: the loot registries hold the MapCodec
+# itself and a condition/function overrides codec() where it overrode getType(). So the override is renamed with
+# its declared type (regexes run before the type rows), `new X(codec)` unwraps to the codec, the <?> registry
+# element widens to what Registries.LOOT_FUNCTION_TYPE declares, and the import becomes MapCodec (an import
+# carries no type argument, §X5b). LootContextParam is ContextKey; LootContext's accessors are member rows.
+re:\bpublic\s+(LootItemConditionType|LootItemFunctionType(?:<[^;{(]*?>)?)\s+getType\(\)	public \1 codec()
+re:\bnew\s+LootItemConditionType\(	(
+re:\bnew\s+LootItemFunctionType(?:<[^>]*>)?\(	(
+re:\bLootItemFunctionType<\?>	com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.storage.loot.functions.LootItemFunction>
+net.minecraft.world.level.storage.loot.predicates.LootItemConditionType	com.mojang.serialization.MapCodec
+LootItemConditionType	com.mojang.serialization.MapCodec<? extends net.minecraft.world.level.storage.loot.predicates.LootItemCondition>
+net.minecraft.world.level.storage.loot.functions.LootItemFunctionType	com.mojang.serialization.MapCodec
+LootItemFunctionType	com.mojang.serialization.MapCodec
+net.minecraft.world.level.storage.loot.parameters.LootContextParam	net.minecraft.util.context.ContextKey
+LootContextParam	net.minecraft.util.context.ContextKey
+# 1.21.2 removed DirectionProperty: a direction property is EnumProperty<Direction>. create() gains the enum
+# class (Direction.Plane is a Predicate<Direction>, so the HORIZONTAL form resolves to that overload). The FQ row
+# rewrites the import WITHOUT a type argument (an import cannot carry one, §X5b); the bare row adds it at uses.
+# X123: also the ONE-argument form (every direction) -- left alone it met the token row below and became
+# `EnumProperty<Direction>.create(...)`, which does not parse and stopped a whole mechanical stage.
+re:\bDirectionProperty\.create\(\s*("[^"]*")\s*([,)])	EnumProperty.create(\1, net.minecraft.core.Direction.class\2
+net.minecraft.world.level.block.state.properties.DirectionProperty	net.minecraft.world.level.block.state.properties.EnumProperty
+DirectionProperty	EnumProperty<net.minecraft.core.Direction>
 net.minecraft.world.level.portal.DimensionTransition	net.minecraft.world.level.portal.TeleportTransition
 DimensionTransition	TeleportTransition
 net.neoforged.neoforge.event.level.BlockEvent.BreakEvent	net.neoforged.neoforge.event.level.block.BreakBlockEvent
 BlockEvent.BreakEvent	net.neoforged.neoforge.event.level.block.BreakBlockEvent
+
+# X112: ItemBlockRenderTypes is declared nowhere on 26.2, and nothing replaces it because nothing needs to: the chunk
+# layer is chosen per quad from the sprite's own alpha (ChunkSectionLayer.byTransparency). The call is left as a comment.
+re:(?m)^([ \t]*)(ItemBlockRenderTypes\.setRenderLayer\([^;\n]*\);)	\1// 26.2 (X112): the chunk layer follows the sprite's transparency; dropped: \2
+re:(?m)^import net\.minecraft\.client\.renderer\.ItemBlockRenderTypes;[ \t]*\n	
+# X115: net.minecraft.MethodsReturnNonnullByDefault / FieldsAreNonnullByDefault are gone on 26.2 (no class in the jar);
+# they were nullness hints for tooling, so a package-info or class that carries one just loses it.
+re:(?m)^[ \t]*@(?:net\.minecraft\.)?(?:MethodsReturnNonnullByDefault|FieldsAreNonnullByDefault)\b[ \t]*\n?	
+re:(?m)^import net\.minecraft\.(?:MethodsReturnNonnullByDefault|FieldsAreNonnullByDefault);[ \t]*\n	
+# X125: a 3-argument playBidirectional registers the SERVER handler only on 26.2 (§V81: the client then refuses a
+# clientbound payload with no handler, at load). 1.21.1's one handler served both sides: pass it twice. MCreator's
+# generated loop also loses inference over its wildcard map, so its two accessor calls get raw casts.
+re:\.playBidirectional\(\s*(\w+)\s*,\s*(\w+)\.reader\(\)\s*,\s*\2\.handler\(\)\s*\)	.playBidirectional(\1, (net.minecraft.network.codec.StreamCodec) \2.reader(), (net.neoforged.neoforge.network.handling.IPayloadHandler) \2.handler(), (net.neoforged.neoforge.network.handling.IPayloadHandler) \2.handler())
+# X136: three MCreator NeoForge 1.21.1 shapes (26.2 jar): Player.displayClientMessage(text, bool) split into
+# sendOverlayMessage(text) / sendSystemMessage(text) -- a LITERAL boolean picks the method, anything else is left;
+# the CommandSourceStack constructor's permission level is a PermissionSet -- level 4 (owners) is exactly
+# ALL_PERMISSIONS and 0 exactly NO_PERMISSIONS, other levels have no 1:1 set and are left; and ThrownPotion is
+# abstract AbstractThrownPotion now (splash and lingering are separate classes), so an instanceof test names that.
+re:\.displayClientMessage\(((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*),\s*true\s*\)	.sendOverlayMessage(\1)
+re:\.displayClientMessage\(((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*),\s*false\s*\)	.sendSystemMessage(\1)
+re:(new\s+(?:[\w.]+\.)?CommandSourceStack\((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,\s*)4(\s*,)	\1net.minecraft.server.permissions.PermissionSet.ALL_PERMISSIONS\2
+re:(new\s+(?:[\w.]+\.)?CommandSourceStack\((?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,(?:[^,()]|\((?:[^()]|\([^()]*\))*\))*,\s*)0(\s*,)	\1net.minecraft.server.permissions.PermissionSet.NO_PERMISSIONS\2
+re:\binstanceof\s+(?:net\.minecraft\.world\.entity\.projectile\.)?ThrownPotion\b	instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.AbstractThrownPotion
+re:(?m)^import net\.minecraft\.world\.entity\.projectile\.ThrownPotion;[ \t]*\n(?![\s\S]*\bThrownPotion\b)	
+# X173: cristellib 26.x moved its static PlatformHelper behind a ServiceLoader holder (platform.Services.PLATFORM).
+# Guarded: a mod may have its own class called PlatformHelper.
+#? only-if import de\.cristelknight\.cristellib\.PlatformHelper;
+re:(?<![\w.])PlatformHelper\.	de.cristelknight.cristellib.platform.Services.PLATFORM.
+de.cristelknight.cristellib.PlatformHelper	de.cristelknight.cristellib.platform.Services
 
 #!strict  # ---- below here rules ARE checked: add your mod's own rows here ----

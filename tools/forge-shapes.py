@@ -254,10 +254,47 @@ TICK = {  # old nested type -> (new fqn, accessor renames)
 PHASE_CMP = r"%s\.phase\s*(==|!=)\s*(?:TickEvent\.)?Phase\.(START|END)"
 
 
+def _skip_else_chain(body, i):
+    """i just past a block's '}': -> the index past any `else {..}` / `else if (..) {..}` chain that follows."""
+    while True:
+        m = re.match(r"\s*else\s*", body[i:])
+        if not m:
+            return i
+        j = i + m.end()
+        c = re.match(r"if\s*\(", body[j:])
+        if c:
+            j = match(body, j + c.end() - 1) + 1
+            j += len(body[j:]) - len(body[j:].lstrip())
+        if j >= len(body) or body[j] != "{":
+            return i                         # an unbraced branch: leave the whole thing alone
+        k = match(body, j)
+        if k < 0:
+            return i
+        i = k + 1
+
+
 def _simplify(body):
-    """Fold the constants a removed phase check leaves behind. Only the shapes it produces."""
-    for _ in range(4):
+    """Fold the constants a removed phase check leaves behind. Only the shapes it produces, including the
+    else-chain a two-phase handler leaves (`if (true) {A} else if (false) {B}` and its mirror)."""
+    for _ in range(8):
         b = body
+        # if (false) {X} else REST  ->  REST
+        m = re.search(r"\bif\s*\(\s*false\s*\)\s*\{", body)
+        if m:
+            k = match(body, m.end() - 1)
+            e = re.match(r"\s*else\s*", body[k + 1:]) if k > 0 else None
+            if e:
+                body = body[:m.start()] + body[k + 1 + e.end():]
+                continue
+        # if (true) {X} else <chain>  ->  if (true) {X}   (folded to X below)
+        m = re.search(r"\bif\s*\(\s*true\s*\)\s*\{", body)
+        if m:
+            k = match(body, m.end() - 1)
+            if k > 0 and re.match(r"\s*else\b", body[k + 1:]):
+                end = _skip_else_chain(body, k + 1)
+                if end > k + 1:
+                    body = body[:k + 1] + body[end:]
+                    continue
         body = re.sub(r"\(\s*true\s*&&\s*", "(", body)
         body = re.sub(r"\(\s*false\s*\|\|\s*", "(", body)
         body = re.sub(r"\s*&&\s*true\s*\)", ")", body)
@@ -280,11 +317,26 @@ def _simplify(body):
                     ind = re.match(r"[ \t]*", body[body.rfind("\n", 0, m.start()) + 1:]).group(0)
                     inner = re.sub(r"(?m)^" + re.escape(ind) + r"    ", ind, inner).lstrip("\n").rstrip()
                     line_start = body.rfind("\n", 0, m.start()) + 1
+                    if body[line_start:m.start()].strip():        # code before the `if` on its line: keep it
+                        line_start = m.start()
                     body = body[:line_start] + inner + body[k + 1:]
             else:
                 body = body[:m.start()] + body[j:]
         if body == b:
             break
+    return body
+
+
+def norm_phase(body, name):
+    """`e.phase.equals((Object)TickEvent.Phase.START)` / `Phase.END.equals(e.phase)` -> `e.phase == ...` (X117: the
+    author compared the enum with equals; PHASE_CMP only knew == / !=)."""
+    ph = r"((?:TickEvent\.)?Phase\.(?:START|END))"
+    n = re.escape(name)
+    for neg, op in (("!\\s*", "!="), ("", "==")):
+        body = re.sub(r"%s(?<![\w$.])%s\.phase\.equals\(\s*(?:\(Object\)\s*)?%s\s*\)" % (neg, n, ph),
+                      lambda q: f"{name}.phase {op} {q.group(1)}", body)
+        body = re.sub(r"%s(?<![\w$.])%s\.equals\(\s*%s\.phase\s*\)" % (neg, ph, n),
+                      lambda q: f"{name}.phase {op} {q.group(1)}", body)
     return body
 
 
@@ -312,7 +364,7 @@ def t_tick(path, text, ctx, res):
             continue
         kind = m.group(1)
         fqn, acc = TICK[kind]
-        body = text[mt.body_open:mt.body_close + 1]
+        body = norm_phase(text[mt.body_open:mt.body_close + 1], name)
         phases = {(a, b) for a, b in re.findall(PHASE_CMP % re.escape(name), body)}
         used = {b for _a, b in phases}
         if len(used) > 1:
@@ -353,7 +405,7 @@ def t_tick(path, text, ctx, res):
                                      f"rewritten to {kind}.Post (check it did not rely on START)")
         new_simple = fqn.rsplit(".", 1)[-1]
         edits.append((mt.params_open + 1, mt.params_close, p.replace(typ, f"{new_simple}.{sub}")))
-        if nb != body:
+        if nb != text[mt.body_open:mt.body_close + 1]:
             edits.append((mt.body_open, mt.body_close + 1, nb))
         ctx["imports"].add(fqn)
         res.count["tick"] += 1
@@ -363,12 +415,48 @@ def t_tick(path, text, ctx, res):
         text = remove_import_if_unused(text, "net.neoforged.neoforge.event.TickEvent")
         text = remove_import_if_unused(text, "net.minecraftforge.event.TickEvent")
         text = remove_import_if_unused(text, "net.neoforged.neoforge.event.entity.living.LivingEvent")
+        # X131: Vineflower's nested form of the living tick event, which the rewrite above leaves unused
+        if not re.search(r"(?<![\w.])LivingTickEvent\b", re.sub(r"(?m)^import .*$", "", text)):
+            text = re.sub(r"(?m)^import\s+net\.(?:neoforged\.neoforge|minecraftforge)\.event\.entity\.living\.LivingEvent"
+                          r"\.LivingTickEvent\s*;[ \t]*\n", "", text)
     return text
 
 
 # --------------------------------------------------------------------------- T2 DistExecutor (§6)
 
+def _dist_value(sup):
+    """The value a DistExecutor supplier-of-supplier yields, as an expression, or None."""
+    s = sup.strip()
+    m = re.fullmatch(r"\(\)\s*->\s*([\w.$]+)::new", s)
+    if m:
+        return f"new {m.group(1)}()"
+    m = re.fullmatch(r"\(\)\s*->\s*([\w.$]+)::(\w+)", s)
+    if m:
+        return f"{m.group(1)}.{m.group(2)}()"
+    m = re.fullmatch(r"\(\)\s*->\s*\(\)\s*->\s*(.+)", s, re.S)
+    if m and not m.group(1).strip().startswith("{"):
+        return m.group(1).strip()
+    return None
+
+
 def t_dist(path, text, ctx, res):
+    # X124: DistExecutor.runForDist(clientSupplier, serverSupplier) -- the proxy idiom -- is a VALUE
+    n0 = 0
+    for m in reversed(list(re.finditer(r"DistExecutor\.(?:unsafeRunForDist|safeRunForDist|runForDist)\(", text))):
+        p1 = match(text, m.end() - 1)
+        args = split_args(text[m.end():p1]) if p1 > 0 else []
+        vals = [_dist_value(a) for a in args] if len(args) == 2 else [None]
+        if None in vals:
+            res.flags["dist"].append(f"{path}:{line_of(text, m.start())} DistExecutor.runForDist shape not recognised")
+            continue
+        text = text[:m.start()] + f"(FMLEnvironment.dist == Dist.CLIENT ? {vals[0]} : {vals[1]})" + text[p1 + 1:]
+        n0 += 1
+    if n0:
+        res.count["dist"] += n0
+        ctx["imports"].add("net.neoforged.fml.loading.FMLEnvironment")
+        ctx["imports"].add("net.neoforged.api.distmarker.Dist")
+        for f in ("net.neoforged.fml.DistExecutor", "net.minecraftforge.fml.DistExecutor"):
+            text = remove_import_if_unused(text, f)
     out, i, n = [], 0, 0
     pat = re.compile(r"DistExecutor\.(unsafeRunWhenOn|safeRunWhenOn|runWhenOn)\(")
     while True:
@@ -512,6 +600,43 @@ public final class ItemNbt {{
         CompoundTag tag = getTag(stack);
         return tag != null && tag.contains(key, 10) ? tag.getCompound(key) : null;
     }}
+
+    /** 1.20's ItemStack.of(tag): empty when the tag is empty or names nothing. */
+    public static ItemStack of(CompoundTag tag) {{
+        return ItemStack.parseOptional(registries(), tag);
+    }}
+
+    /** 1.20's stack.save(new CompoundTag()). */
+    public static CompoundTag save(ItemStack stack) {{
+        return save(stack, new CompoundTag());
+    }}
+
+    /** 1.20's stack.save(tag): writes into the tag and returns it. 1.21 refuses to encode an EMPTY stack (R21), so an
+     *  empty one leaves the tag as it was, which of(..) reads back as empty. */
+    public static CompoundTag save(ItemStack stack, CompoundTag into) {{
+        if (stack.isEmpty()) return into;
+        return stack.save(registries(), into) instanceof CompoundTag c ? c : into;
+    }}
+
+    /** The registries for the CALLING thread (R24): a holder from the other side's copy cannot be sent. */
+    static net.minecraft.core.HolderLookup.Provider registries() {{
+        net.minecraft.server.MinecraftServer server = net.neoforged.neoforge.server.ServerLifecycleHooks.getCurrentServer();
+        if (server != null && server.isSameThread()) return server.registryAccess();
+        if (net.neoforged.fml.loading.FMLEnvironment.dist.isClient()) {{
+            net.minecraft.core.HolderLookup.Provider client = Client.registries();
+            if (client != null) return client;
+        }}
+        if (server != null) return server.registryAccess();
+        return net.minecraft.core.RegistryAccess.fromRegistryOfRegistries(net.minecraft.core.registries.BuiltInRegistries.REGISTRY);
+    }}
+
+    /** Loaded only when called, so a dedicated server never resolves the client class. */
+    private static final class Client {{
+        static net.minecraft.core.HolderLookup.Provider registries() {{
+            net.minecraft.client.multiplayer.ClientLevel level = net.minecraft.client.Minecraft.getInstance().level;
+            return level == null ? null : level.registryAccess();
+        }}
+    }}
 }}
 """
 
@@ -542,6 +667,12 @@ def t_nbt(path, text, ctx, res):
     rw(recv + r"\.setTag\(", lambda m: f"{H}.setTag({m.group('r')}, ")
     rw(recv + r"\.getTagElement\(", lambda m: f"{H}.getTagElement({m.group('r')}, ")
     rw(recv + r"\.removeTagKey\((?P<a>[^()]*)\)", lambda m: f"{H}.update({m.group('r')}, t -> t.remove({m.group('a')}))")
+    # X171: ItemStack.of(tag) and stack.save(tag) took no registries in 1.20; 1.21 needs a HolderLookup.Provider
+    rw(r"(?<![\w$.])(?:net\.minecraft\.world\.item\.)?ItemStack\s*(?:\.\s*of\s*(?=\()|::\s*of\b)",
+       lambda m: f"{H}::of" if "::" in m.group(0) else f"{H}.of")
+    rw(recv + r"\.save\(\s*new\s+CompoundTag\(\)\s*\)", lambda m: f"{H}.save({m.group('r')})")
+    rw(recv + r"\.save\((?P<a>(?!\s*(?:\w+\.)?(?:registryAccess|registries|provider|lookup)\b)[\w$]+)\)",
+       lambda m: f"{H}.save({m.group('r')}, {m.group('a')})")
     # an ItemNbt.setTag(x, ) left by a no-arg setTag cannot happen; a getOrCreateTag() stored and then mutated can:
     for m in re.finditer(r"CompoundTag\s+(\w+)\s*=\s*ItemNbt\.getOrCreateTag\((\w+)\)\s*;", text):
         tail = text[m.end():m.end() + 4000]
@@ -698,7 +829,10 @@ def t_hooks(path, text, ctx, res):
             res.count["hooks"] += 1
         elif mt.name == "use" and types == ["BlockState", "Level", "BlockPos", "Player", "InteractionHand", "BlockHitResult"]:
             hand = names[4]
-            if re.search(r"(?<![\w$.])%s(?![\w$])" % re.escape(hand), body):
+            # the super forward carries the hand on to vanilla and is rewritten below: it is not a READ of it
+            # (MCreator's every Block.use opens with `super.use(blockstate, world, pos, entity, hand, hit);`, X118)
+            rest = re.sub(r"super\.use\(([^,()]+),([^,()]+),([^,()]+),([^,()]+),[^,()]+,([^,()]+)\)", "", body)
+            if re.search(r"(?<![\w$.])%s(?![\w$])" % re.escape(hand), rest):
                 flag(mt.start, "Block.use reads its hand: port to useItemOn (returns ItemInteractionResult, §127)"); continue
             nb = re.sub(r"super\.use\(([^,()]+),([^,()]+),([^,()]+),([^,()]+),[^,()]+,([^,()]+)\)",
                         r"super.useWithoutItem(\1,\2,\3,\4,\5)", body)
@@ -811,7 +945,8 @@ def t_vc(path, text, ctx, res):
 # --------------------------------------------------------------------------- T8 source shapes the pack leaves
 
 DEAD_IMPORTS = ("net.neoforged.neoforge.registries.ForgeRegistries", "net.neoforged.neoforge.common.capabilities.ForgeCapabilities",
-                "net.neoforged.neoforge.network.NetworkHooks", "net.minecraft.world.entity.MobType",
+                "net.neoforged.neoforge.network.NetworkHooks", "net.minecraftforge.network.NetworkHooks",
+                "net.minecraft.world.entity.MobType",
                 "net.neoforged.neoforge.event.TickEvent", "net.neoforged.fml.DistExecutor")
 
 
@@ -1035,21 +1170,274 @@ def t_misc(path, text, ctx, res):
 
 TAG_OF_MOBTYPE = {"UNDEAD": "UNDEAD", "ARTHROPOD": "ARTHROPOD", "ILLAGER": "ILLAGER", "WATER": "AQUATIC"}
 
+# --------------------------------------------------------------------------- ImageButton (X153)
+
+def t_imagebutton(path, text, ctx, res):
+    """X153: 1.20's texture-region ImageButton constructors -- (x, y, w, h, u, v, [yDiff,] texture, [texW, texH,] onPress
+    [, message]) -- are gone; 1.21.1 takes WidgetSprites, which name sprites in the GUI atlas a 1.20 mod never shipped.
+    So the button keeps its own texture: the 1.21.1 constructor (sprites = the texture, unused) plus a renderWidget that
+    blits the same region 1.20's renderTexture did -- v + yDiff when hovered or focused, + 2*yDiff when inactive.
+    A button that already has a body (an anonymous subclass) is LISTED: its own render code decides what it draws."""
+    if "new ImageButton(" not in text:
+        return text
+    edits = []
+    for m in re.finditer(r"\bnew\s+ImageButton\s*\(", text):
+        p0 = m.end() - 1; p1 = match(text, p0)
+        if p1 < 0:
+            continue
+        a = [x.strip() for x in split_args(text[p0 + 1:p1])]
+        if len(a) == 8:
+            x, y, w, h, u, v, tex, press = a; yd, tw, th, msg = h, "256", "256", None
+        elif len(a) == 9:
+            x, y, w, h, u, v, yd, tex, press = a; tw, th, msg = "256", "256", None
+        elif len(a) in (11, 12):
+            x, y, w, h, u, v, yd, tex, tw, th, press = a[:11]; msg = a[11] if len(a) == 12 else None
+        else:
+            continue
+        if re.match(r"\s*\{", text[p1 + 1:]):
+            res.flags["imagebutton"].append(f"{path}:{line_of(text, m.start())} ImageButton already has a body; args left")
+            continue
+        ls = text.rfind("\n", 0, m.start()) + 1
+        ind = re.match(r"[ \t]*", text[ls:]).group(0)
+        i1, i2 = ind + "   ", ind + "      "
+        sprites = f"new net.minecraft.client.gui.components.WidgetSprites({tex}, {tex})"
+        head = f"new ImageButton({x}, {y}, {w}, {h}, {sprites}, {press}" + (f", {msg}" if msg else "") + ")"
+        body = (f" {{\n{i1}@Override\n{i1}public void renderWidget(net.minecraft.client.gui.GuiGraphics guiGraphics, int mouseX, int mouseY, "
+                f"float partialTick) {{\n{i2}int _v = ({v}) + (!this.isActive() ? ({yd}) * 2 : this.isHoveredOrFocused() ? ({yd}) : 0);\n"
+                f"{i2}guiGraphics.blit({tex}, this.getX(), this.getY(), (float) ({u}), (float) _v, this.width, this.height, {tw}, {th});\n"
+                f"{i1}}}\n{ind}}}")
+        edits.append((m.start(), p1 + 1, head + body))
+        res.count["imagebutton"] += 1
+    return edit_spans(text, edits)
+
+
+# --------------------------------------------------------------------------- MobEffect entity hooks (X160)
+
+_EVT = "net.neoforged.neoforge.event.entity.living.MobEffectEvent"
+
+
+def t_effecthooks(path, text, ctx, res):
+    """X160: MobEffect.add/removeAttributeModifiers(LivingEntity, AttributeMap, int) lost the entity in 1.21.1. An
+    effect used them as its 'started' / 'ended' hooks (MCreator runs its procedures there).
+      add    -> onEffectStarted(LivingEntity, int), the 1.21.1 hook for exactly that; the map is the entity's own
+                (`e.getAttributes()`), and the super call goes (vanilla still applies the modifiers itself).
+      remove -> a plain onEffectRemoved(LivingEntity, int), which every constructor subscribes to NeoForge's
+                MobEffectEvent.Remove / Expired for this effect (lowest priority, not when cancelled) -- 1.21.1 has
+                no entity-aware removal hook on the effect."""
+    if "AttributeModifiers(LivingEntity" not in text and not re.search(r"AttributeModifiers\(\s*LivingEntity", text):
+        return text
+    cm = re.search(r"\bclass\s+(\w+)\b[^{]*\bextends\s+[\w.]*MobEffect\b", text)
+    if not cm:
+        return text
+    cls = cm.group(1)
+    removed = False
+    for mt in sorted(methods(text), key=lambda x: -x.start):
+        if mt.name not in ("addAttributeModifiers", "removeAttributeModifiers") or len(mt.params) != 3 \
+                or "LivingEntity" not in mt.params[0] or "AttributeMap" not in mt.params[1]:
+            continue
+        e, m_, a = pname(mt.params[0]), pname(mt.params[1]), pname(mt.params[2])
+        body = text[mt.body_open:mt.body_close + 1]
+        body = re.sub(r"\n[ \t]*super\s*\.\s*%s\s*\([^;]*\)\s*;[ \t]*" % mt.name, "", body)
+        body = re.sub(r"(?<![\w$.])%s(?![\w$])" % re.escape(m_), f"{e}.getAttributes()", body)
+        new_name = "onEffectStarted" if mt.name == "addAttributeModifiers" else "onEffectRemoved"
+        head = text[mt.start:mt.params_open]
+        head = re.sub(r"\b%s\s*$" % mt.name, new_name, head)
+        text = text[:mt.start] + head + f"({mt.params[0]}, {mt.params[2]})" + text[mt.params_close + 1:mt.body_open] + body \
+            + text[mt.body_close + 1:]
+        if new_name == "onEffectRemoved":
+            s = decl_span_start(text, mt.start)
+            seg = re.sub(r"(?m)^[ \t]*@Override[ \t]*\n", "", text[s:mt.start])
+            text = text[:s] + seg + text[mt.start:]
+            removed = True
+        res.count["effecthooks"] += 1
+    if removed:
+        wire = ("{EV}.addListener(net.neoforged.bus.api.EventPriority.LOWEST, false, " + _EVT + ".{K}.class, _ev -> {{ "
+                "if (_ev.getEffectInstance() != null && _ev.getEffectInstance().getEffect().value() == this) "
+                "this.onEffectRemoved(_ev.getEntity(), _ev.getEffectInstance().getAmplifier()); }});")
+        EV = "net.neoforged.neoforge.common.NeoForge.EVENT_BUS"
+        edits = []
+        for cm2 in re.finditer(r"(?<![\w$.])(?:(?:public|protected|private)\s+)?%s\s*\(" % re.escape(cls), text):
+            p0 = cm2.end() - 1; p1 = match(text, p0)
+            bm = re.match(r"\s*\{", text[p1 + 1:])
+            if p1 < 0 or not bm:
+                continue
+            b0 = p1 + 1 + bm.end() - 1
+            sm = re.match(r"\s*super\s*\(", text[b0 + 1:])
+            if not sm:
+                continue
+            q0 = b0 + 1 + sm.end() - 1; q1 = match(text, q0)
+            semi = text.find(";", q1)
+            ind = re.match(r"[ \t]*", text[text.rfind("\n", 0, q0) + 1:]).group(0)
+            ins = "".join(f"\n{ind}" + wire.format(EV=EV, K=k) for k in ("Remove", "Expired"))
+            edits.append((semi + 1, semi + 1, ins))
+        if not edits:
+            res.flags["effecthooks"].append(f"{path}: {cls}.onEffectRemoved has no constructor calling super(...) to subscribe it")
+        text = edit_spans(text, edits)
+    return text
+
+
+# --------------------------------------------------------------------------- global loot modifiers (X166)
+
+def t_lootmod(path, text, ctx, res):
+    """X166: a global loot modifier's serializer is a MapCodec in 1.21.1 -- IGlobalLootModifier.codec() returns
+    MapCodec<? extends IGlobalLootModifier> and GLOBAL_LOOT_MODIFIER_SERIALIZERS holds MapCodecs. So every
+    Codec<? extends IGlobalLootModifier> (the codec() override, the DeferredRegister, its holders) becomes a MapCodec, and
+    in a class extending LootModifier its own Codec<X> becomes MapCodec<X>, built with RecordCodecBuilder.mapCodec where
+    the builder starts from codecStart(..)."""
+    if "IGlobalLootModifier" not in text and "LootModifier" not in text:
+        return text
+    n0 = text
+    text, n1 = re.subn(r"(?<![\w.])(?:com\.mojang\.serialization\.)?Codec<\s*\?\s*extends\s+((?:[\w.]+\.)?IGlobalLootModifier)\s*>",
+                       r"com.mojang.serialization.MapCodec<? extends \1>", text)
+    cm = re.search(r"\bclass\s+(\w+)\b[^{]*\bextends\s+(?:[\w.]+\.)?LootModifier\b", text)
+    n2 = n3 = 0
+    if cm:
+        x = cm.group(1)
+        text, n2 = re.subn(r"(?<![\w.])(?:com\.mojang\.serialization\.)?Codec<\s*%s\s*>" % re.escape(x),
+                           f"com.mojang.serialization.MapCodec<{x}>", text)
+        text, n3 = re.subn(r"\bRecordCodecBuilder\s*\.\s*create\((?=[^;]*?codecStart\()", "RecordCodecBuilder.mapCodec(", text)
+    if text != n0:
+        res.count["lootmod"] += 1
+    return text
+
+
+def t_syncinject(path, text, ctx, res):
+    """X168: a mixin @Inject into defineSynchedData. 1.21 passes a SynchedEntityData.Builder and the entity's own
+    entityData does not exist yet (R8), so the handler gains the Builder parameter and every
+    `<entity>.getEntityData().define(` / `this.entityData.define(` in its body becomes `builder.define(`. A pinned
+    `defineSynchedData()V` descriptor is updated too (§136: javac cannot see a mixin's parameters)."""
+    if "defineSynchedData" not in text or "@Inject" not in text:
+        return text
+    out, pos, n = [], 0, 0
+    for m in re.finditer(r"@Inject\s*\(", text):
+        if m.start() < pos:
+            continue
+        a1 = match(text, m.end() - 1)
+        if a1 < 0 or "defineSynchedData" not in text[m.start():a1]:
+            continue
+        h = re.compile(r"\s*(?:(?:private|public|protected|static|final)\s+)*void\s+\w+\s*\(\s*((?:final\s+)?CallbackInfo\s+\w+)\s*\)\s*\{").match(text, a1 + 1)
+        if not h:
+            continue
+        b1 = match(text, h.end() - 1)
+        if b1 < 0:
+            continue
+        ann = re.sub(r"defineSynchedData\(\)V", "defineSynchedData(Lnet/minecraft/network/syncher/SynchedEntityData$Builder;)V",
+                     text[m.start():a1 + 1])
+        head = text[a1 + 1:h.end()].replace(h.group(1), "net.minecraft.network.syncher.SynchedEntityData.Builder builder, " + h.group(1), 1)
+        body = re.sub(r"(?:\(\(\s*[\w.]+\s*\)\s*\(\s*Object\s*\)\s*this\)|\bthis|(?<![\w.])\w+)\s*\.\s*getEntityData\(\)\s*\.\s*define\("
+                      r"|\bthis\.entityData\.define\(", "builder.define(", text[h.end():b1])
+        out.append(text[pos:m.start()] + ann + head + body)
+        pos = b1
+        n += 1
+    if not n:
+        return text
+    res.count["syncinject"] += n
+    return "".join(out) + text[pos:]
+
+
 TRANSFORMS = [("modctor", t_modctor), ("tick", t_tick), ("dist", t_dist), ("attrmod", t_attrmod), ("nbt", t_nbt), ("hooks", t_hooks),
               ("geo", t_geo), ("vc", t_vc), ("source", t_source),
-              ("sigs", t_sigs), ("misc", t_misc)]
+              ("sigs", t_sigs), ("misc", t_misc), ("imagebutton", t_imagebutton),
+              ("effecthooks", t_effecthooks), ("lootmod", t_lootmod), ("syncinject", t_syncinject)]
+
+
+# --------------------------------------------------------------------------- menu screens (X145), cross-file
+
+MENU_EVT = "net.neoforged.neoforge.client.event.RegisterMenuScreensEvent"
+
+
+def t_menus(src, res, dry=False):
+    """X145: `MenuScreens.register(type, Screen::new)` is private in 1.21.1; screens are bound on the mod-bus
+    RegisterMenuScreensEvent. Each method holding such statements (a client-setup handler, often inside enqueueWork)
+    loses them to a new sibling `registerMenuScreens(RegisterMenuScreensEvent event)`, wired the way the old method
+    was: `@SubscribeEvent` if it carried one, else an `addListener(X::registerMenuScreens)` beside the one that
+    registers it. A method with neither wiring is LISTED and left alone -- an unwired listener would be a silent
+    loss of every screen. Cross-file (the wiring may live in the @Mod constructor), so it runs after the per-file
+    transforms."""
+    files = {f: f.read_text(encoding="utf-8", errors="replace") for f in sorted(pathlib.Path(src).rglob("*.java"))}
+    for f in list(files):
+        text = files[f]
+        if "MenuScreens.register(" not in text:
+            continue
+        rel = f.relative_to(src).as_posix()
+        cls = f.stem
+        for mth in sorted(methods(text), key=lambda x: -x.start):
+            body = text[mth.body_open:mth.body_close]
+            stmts, bad = [], False
+            for m in re.finditer(r"(?<![\w$.])(?:net\.minecraft\.client\.gui\.screens\.)?MenuScreens\s*\.\s*register\(", body):
+                p0 = m.end() - 1; p1 = match(body, p0)
+                ls = body.rfind("\n", 0, m.start()) + 1
+                semi = re.match(r"\s*;[ \t]*\n?", body[p1 + 1:])
+                if p1 < 0 or body[ls:m.start()].strip() or not semi:
+                    bad = True; break
+                stmts.append((ls, p1 + 1 + semi.end(), body[p0 + 1:p1]))
+            if not stmts:
+                continue
+            if bad:
+                res.flags["menus"].append(f"{rel}:{line_of(text, mth.body_open)} MenuScreens.register not a plain statement; left")
+                continue
+            static = bool(re.search(r"\bstatic\b", text[mth.start:mth.params_open]))
+            subscribed = "@SubscribeEvent" in text[decl_span_start(text, mth.start):mth.start]
+            name = fresh("registerMenuScreens", text)
+            wire = []
+            if not subscribed:
+                for g, gt in files.items():
+                    for am in re.finditer(r"(?m)^([ \t]*)([\w.()]+)\.addListener\(\s*(this|%s|[\w.]+\.%s)::%s\s*\)\s*;"
+                                          % (re.escape(cls), re.escape(cls), re.escape(mth.name)), gt):
+                        wire.append((g, am))
+                if not wire:
+                    res.flags["menus"].append(f"{rel}:{line_of(text, mth.body_open)} {mth.name} registers screens but is "
+                                              "not @SubscribeEvent and no addListener names it; left")
+                    continue
+            ind = re.match(r"[ \t]*", text[text.rfind("\n", 0, mth.start) + 1:]).group(0)
+            inner = ind + (ind or "    ")
+            new_m = ("\n\n" + (f"{ind}@SubscribeEvent\n" if subscribed else "") + f"{ind}public {'static ' if static else ''}void {name}("
+                     + f"{MENU_EVT} event) {{\n" + "".join(f"{inner}event.register({a.strip()});\n" for _s, _e, a in stmts) + f"{ind}}}")
+            nb = body
+            for s, e, _a in sorted(stmts, reverse=True):
+                nb = nb[:s] + nb[e:]
+            text = text[:mth.body_open] + nb + text[mth.body_close:mth.body_close + 1] + new_m + text[mth.body_close + 1:]
+            res.count["menus"] += len(stmts)
+            files[f] = text
+            for g, am in wire:
+                gt = files[g] if g != f else text
+                mm = re.search(re.escape(am.group(0)), gt)
+                if mm:
+                    line = f"\n{am.group(1)}{am.group(2)}.addListener({am.group(3)}::{name});"
+                    gt = gt[:mm.end()] + line + gt[mm.end():]
+                    files[g] = gt
+                    if g == f:
+                        text = gt
+        files[f] = remove_import_if_unused(files[f] if files[f] != text else text, "net.minecraft.client.gui.screens.MenuScreens")
+    if not dry:
+        for f, t in files.items():
+            if f.read_text(encoding="utf-8", errors="replace") != t:
+                f.write_text(t, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- driver
 
 def root_package(src):
-    pkgs = []
+    """The mod's root package: the @Mod class's, else the common prefix of the largest group of packages sharing
+    a first segment. A plain common prefix over EVERY file is "" as soon as one stray class sits elsewhere (an
+    Architectury-injected `architectury_inject_<mod>_...` class did), and a helper generated there is then
+    `import ItemNbt;`, which does not parse."""
+    pkgs, mod = [], None
     for f in src.rglob("*.java"):
-        m = re.search(r"(?m)^package\s+([\w.]+)\s*;", f.read_text(encoding="utf-8", errors="replace"))
+        text = f.read_text(encoding="utf-8", errors="replace")
+        m = re.search(r"(?m)^package\s+([\w.]+)\s*;", text)
         if m:
             pkgs.append(m.group(1).split("."))
+            if mod is None and re.search(r"(?m)^\s*@(?:net\.\w+\.fml\.common\.)?Mod\s*\(", text):
+                mod = m.group(1)
+    if mod:
+        return mod
     if not pkgs:
         return ""
+    groups = {}
+    for p in pkgs:
+        groups.setdefault(p[0], []).append(p)
+    pkgs = max(groups.values(), key=len)
     pre = pkgs[0]
     for p in pkgs[1:]:
         k = 0
@@ -1073,7 +1461,7 @@ def inline_small_nbt(src, nbt_fqn, res):
     users = {f: f.read_text(encoding="utf-8") for f in pathlib.Path(src).rglob("*.java")}
     users = {f: t for f, t in users.items() if "ItemNbt." in t}
     sites = sum(t.count("ItemNbt.") for t in users.values())
-    if sites >= 3 or any(re.search(r"ItemNbt\.(setTag|getTagElement)\(|ItemNbt\.getTag\([^()]+\)(?!\.)", t)
+    if sites >= 3 or any(re.search(r"ItemNbt\.(setTag|getTagElement|of|save)\(|ItemNbt::of|ItemNbt\.getTag\([^()]+\)(?!\.)", t)
                          for t in users.values()):
         return False
     for f, t in users.items():
@@ -1112,6 +1500,8 @@ def run(src, modid, only=None, dry=False):
             need_helper |= bool(ctx.get("need_nbt_helper"))
             if not dry:
                 f.write_text(text, encoding="utf-8")
+    if not only or "menus" in only:
+        t_menus(src, res, dry)
     if need_helper and not dry:
         need_helper = not inline_small_nbt(src, nbt_fqn, res)
     if need_helper:
@@ -1138,7 +1528,7 @@ def main():
         print(json.dumps({"files": changed, "rewrites": dict(res.count), "flags": {k: v for k, v in res.flags.items()}}))
         return 0
     print(f"forge-shapes: {changed} file(s) changed" + (" (dry run)" if a.dry_run else ""))
-    for name, _fn in TRANSFORMS:
+    for name, _fn in TRANSFORMS + [("menus", None)]:
         if only and name not in only:
             continue
         fl = res.flags.get(name, [])
@@ -1157,6 +1547,90 @@ def main():
 # --------------------------------------------------------------------------- self-check
 
 CASES = [
+    ("nbt", """package a;
+public class Bag extends Item {
+   void f(CompoundTag tag, ListTag list) {
+      ItemStack itemstack = ItemStack.of(tag);
+      list.add(0, itemstack.save(new CompoundTag()));
+      itemstack.save(tag);
+      list.stream().map(CompoundTag.class::cast).map(ItemStack::of);
+   }
+}
+""", ["ItemStack itemstack = ItemNbt.of(tag);", "list.add(0, ItemNbt.save(itemstack));", "ItemNbt.save(itemstack, tag);",
+      ".map(ItemNbt::of)"], ["ItemStack.of", "ItemStack::of"]),
+    ("syncinject", """package a;
+@Mixin({Wolf.class})
+public abstract class WolfEntityMixin {
+   @Inject(
+      method = {"defineSynchedData"},
+      at = {@At("TAIL")}
+   )
+   private void defineSynchedData(CallbackInfo ci) {
+      Wolf wolf = (Wolf)this;
+      wolf.getEntityData().define(VARIANT, "pale");
+      ((Wolf)(Object)this).getEntityData().define(SOUND, "classic");
+   }
+   @Inject(method = "defineSynchedData()V", at = @At("RETURN"))
+   private void more(CallbackInfo info) {
+      this.entityData.define(X, 1);
+   }
+   @Inject(method = "tick", at = @At("HEAD"))
+   private void tick(CallbackInfo ci) {
+      wolf.getEntityData().define(Y, 2);
+   }
+}
+""", ["private void defineSynchedData(net.minecraft.network.syncher.SynchedEntityData.Builder builder, CallbackInfo ci) {",
+      "builder.define(VARIANT, \"pale\");", "builder.define(SOUND, \"classic\");", "builder.define(X, 1);",
+      "defineSynchedData(Lnet/minecraft/network/syncher/SynchedEntityData$Builder;)V",
+      "private void more(net.minecraft.network.syncher.SynchedEntityData.Builder builder, CallbackInfo info)",
+      "wolf.getEntityData().define(Y, 2);"], []),
+    ("lootmod", """package a;
+public class RingsLootModifier extends LootModifier {
+   public static final Supplier<Codec<RingsLootModifier>> CODEC = Suppliers.memoize(() -> RecordCodecBuilder.create(inst -> codecStart(inst)
+      .and(Codec.STRING.fieldOf("item").forGetter(m -> m.item)).apply(inst, RingsLootModifier::new)));
+   public static final DeferredRegister<Codec<? extends IGlobalLootModifier>> REGISTER = DeferredRegister.create(NeoForgeRegistries.Keys.GLOBAL_LOOT_MODIFIER_SERIALIZERS, "m");
+   public Codec<? extends IGlobalLootModifier> codec() {
+      return CODEC.get();
+   }
+}
+""", ["Supplier<com.mojang.serialization.MapCodec<RingsLootModifier>> CODEC", "RecordCodecBuilder.mapCodec(inst -> codecStart(inst)",
+      "Codec.STRING.fieldOf", "DeferredRegister<com.mojang.serialization.MapCodec<? extends IGlobalLootModifier>> REGISTER",
+      "public com.mojang.serialization.MapCodec<? extends IGlobalLootModifier> codec() {"], ["RecordCodecBuilder.create("]),
+    ("effecthooks", """package a;
+public class CrittersMobEffect extends MobEffect {
+   public CrittersMobEffect() {
+      super(MobEffectCategory.HARMFUL, -16777216);
+   }
+   @Override
+   public void addAttributeModifiers(LivingEntity entity, AttributeMap attributeMap, int amplifier) {
+      super.addAttributeModifiers(entity, attributeMap, amplifier);
+      StartProcedure.execute(entity.level(), entity, attributeMap);
+   }
+   @Override
+   public void removeAttributeModifiers(LivingEntity entity, AttributeMap attributeMap, int amplifier) {
+      super.removeAttributeModifiers(entity, attributeMap, amplifier);
+      EndProcedure.execute(entity.level(), entity);
+   }
+}
+""", ["public void onEffectStarted(LivingEntity entity, int amplifier) {", "StartProcedure.execute(entity.level(), entity, entity.getAttributes());",
+      "   public void onEffectRemoved(LivingEntity entity, int amplifier) {",
+      "net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.LOWEST, false, net.neoforged.neoforge.event.entity.living.MobEffectEvent.Remove.class, _ev -> { if (_ev.getEffectInstance() != null && _ev.getEffectInstance().getEffect().value() == this) this.onEffectRemoved(_ev.getEntity(), _ev.getEffectInstance().getAmplifier()); });",
+      "MobEffectEvent.Expired.class"],
+     ["super.addAttributeModifiers", "super.removeAttributeModifiers", "@Override\n   public void onEffectRemoved"]),
+    ("imagebutton", """package a;
+class S {
+   void init() {
+      this.b = new ImageButton(this.leftPos + 10, this.topPos + 5, 16, 16, 0, 0, 16, ResourceLocation.parse("m:textures/screens/b.png"), 16, 32, e -> {
+         if (true) { PacketDistributor.sendToServer(new M(0, x, y, z)); M.handle(entity, 0, x, y, z); }
+      });
+      this.c = new ImageButton(1, 2, 3, 4, 5, 6, TEX, e -> {});
+   }
+}
+""", ["new ImageButton(this.leftPos + 10, this.topPos + 5, 16, 16, new net.minecraft.client.gui.components.WidgetSprites(ResourceLocation.parse(\"m:textures/screens/b.png\"), ResourceLocation.parse(\"m:textures/screens/b.png\")), e -> {",
+      "int _v = (0) + (!this.isActive() ? (16) * 2 : this.isHoveredOrFocused() ? (16) : 0);",
+      "guiGraphics.blit(ResourceLocation.parse(\"m:textures/screens/b.png\"), this.getX(), this.getY(), (float) (0), (float) _v, this.width, this.height, 16, 32);",
+      "new ImageButton(1, 2, 3, 4, new net.minecraft.client.gui.components.WidgetSprites(TEX, TEX), e -> {})",
+      "this.isHoveredOrFocused() ? (4) : 0", "this.width, this.height, 256, 256);"], []),
     ("sigs", """package a;
 class A extends AbstractIllager {
     public void applyRaidBuffs(int wave, boolean unused) { super.applyRaidBuffs(wave, unused); }
@@ -1208,6 +1682,60 @@ class A {
 }
 """, ["ServerTickEvent.Post event", "if (++ticks < 20) {", "PlayerTickEvent.Post event", "        event.getEntity().tick();\n    }",
       "ClientTickEvent.Pre event", "import net.neoforged.neoforge.event.tick.ServerTickEvent;"], ["TickEvent.Phase", "import net.neoforged.neoforge.event.TickEvent;"]),
+    ("tick", """package a;
+import net.neoforged.neoforge.event.TickEvent;
+class A {
+    @SubscribeEvent
+    public static void onClientTick(TickEvent.ClientTickEvent event) {
+        if (event.phase == TickEvent.Phase.START) {
+            start();
+        } else if (event.phase == TickEvent.Phase.END) {
+            end();
+        }
+    }
+
+    @SubscribeEvent
+    public static void after(Object o) {
+    }
+}
+""", ["onClientTickPre(ClientTickEvent.Pre event) {", "onClientTick(ClientTickEvent.Post event) {",
+      "public static void after(Object o) {"], ["else", "if (true)", "if (false)"]),
+    ("tick", """package a;
+import net.neoforged.neoforge.event.TickEvent.ClientTickEvent;
+import net.neoforged.neoforge.event.TickEvent.Phase;
+class A {
+    public static void onClientTick(ClientTickEvent event) {
+        if (event.phase.equals((Object)Phase.START)) {
+            tick();
+        }
+    }
+}
+""", ["onClientTick(ClientTickEvent.Pre event) {", "        tick();"], [".phase", "Phase", "if ("]),
+    ("hooks", """package a;
+class B extends Block {
+    public InteractionResult use(BlockState blockstate, Level world, BlockPos pos, Player entity, InteractionHand hand, BlockHitResult hit) {
+        super.use(blockstate, world, pos, entity, hand, hit);
+        Proc.execute(world, pos.getX(), entity);
+        return InteractionResult.SUCCESS;
+    }
+}
+""", ["InteractionResult useWithoutItem(BlockState blockstate, Level world, BlockPos pos, Player entity, BlockHitResult hit)",
+      "super.useWithoutItem(blockstate, world, pos, entity, hit);"], ["super.use(", "InteractionHand"]),
+    ("dist", """package a;
+import net.neoforged.fml.DistExecutor;
+public class M {
+   public static CommonProxy PROXY = (CommonProxy)DistExecutor.runForDist(() -> ClientProxy::new, () -> CommonProxy::new);
+}
+""", ["(CommonProxy)(FMLEnvironment.dist == Dist.CLIENT ? new ClientProxy() : new CommonProxy());"], ["DistExecutor"]),
+    ("tick", """package a;
+import net.neoforged.neoforge.event.entity.living.LivingEvent.LivingTickEvent;
+class L {
+    @SubscribeEvent
+    public static void onTick(LivingTickEvent event) {
+        event.getEntity().heal(1.0F);
+    }
+}
+""", ["onTick(EntityTickEvent.Pre event)"], ["LivingTickEvent"]),
     ("modctor", """package a;
 import net.neoforged.fml.javafmlmod.FMLJavaModLoadingContext;
 @Mod(MyMod.MOD_ID)
@@ -1373,6 +1901,35 @@ class I {}
 def self_check():
     import tempfile
     bad = []
+    with tempfile.TemporaryDirectory() as d:       # a stray class elsewhere must not empty the root package
+        d = pathlib.Path(d)
+        for rel, pk in (("a/A.java", "uk.co.x.a"), ("b/B.java", "uk.co.x.b"), ("z/Z.java", "architectury_inject_x_1")):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text(f"package {pk};\nclass C {{}}\n", encoding="utf-8")
+        if root_package(d) != "uk.co.x":
+            bad.append(f"root_package: {root_package(d)!r}")
+    with tempfile.TemporaryDirectory() as d:       # X145: screens move to RegisterMenuScreensEvent, wired like their method
+        d = pathlib.Path(d); (d / "a").mkdir()
+        (d / "a/M.java").write_text("package a;\npublic class M {\n   public M(IEventBus bus) {\n      bus.addListener(C::setup);\n"
+                                    "   }\n}\n", encoding="utf-8")
+        (d / "a/C.java").write_text("package a;\nimport net.minecraft.client.gui.screens.MenuScreens;\npublic class C {\n"
+                                    "   public static void setup(FMLClientSetupEvent e) {\n      e.enqueueWork(() -> {\n"
+                                    "         MenuScreens.register((MenuType)R.A.get(), SA::new);\n         MenuScreens.register(\n"
+                                    "            R.B.get(), SB::new\n         );\n      });\n   }\n"
+                                    "   @SubscribeEvent\n   public static void s2(FMLClientSetupEvent e) {\n"
+                                    "      MenuScreens.register(R.C, SC::new);\n   }\n"
+                                    "   public static void lost(FMLClientSetupEvent e) {\n      MenuScreens.register(R.D, SD::new);\n   }\n}\n",
+                                    encoding="utf-8")
+        res, _ = run(d, "m", {"menus"})
+        c, m = (d / "a/C.java").read_text(encoding="utf-8"), (d / "a/M.java").read_text(encoding="utf-8")
+        run(d, "m", {"menus"})
+        ok = (res.count["menus"] == 3 and "event.register((MenuType)R.A.get(), SA::new);" in c
+              and "event.register(R.B.get(), SB::new);" in c and "event.register(R.C, SC::new);" in c
+              and "MenuScreens.register(R.D, SD::new);" in c and len(res.flags["menus"]) == 1
+              and "bus.addListener(C::registerMenuScreens2);" in m and "@SubscribeEvent\n   public static void registerMenuScreens(" in c
+              and (d / "a/C.java").read_text(encoding="utf-8") == c)
+        if not ok:
+            bad.append(("menus", ["X145"], c + m))
     for name, src, want, gone in CASES:
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d) / "my" / "X.java"

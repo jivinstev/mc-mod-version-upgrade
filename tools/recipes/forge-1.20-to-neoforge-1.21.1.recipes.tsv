@@ -42,6 +42,9 @@ re:\bForgeRegistries\.POTIONS\b	net.minecraft.core.registries.BuiltInRegistries.
 re:\bForgeRegistries\.FLUIDS\b	net.minecraft.core.registries.BuiltInRegistries.FLUID
 re:\bForgeRegistries\.MENU_TYPES\b	net.minecraft.core.registries.BuiltInRegistries.MENU
 re:\bForgeRegistries\.RECIPE_SERIALIZERS\b	net.minecraft.core.registries.BuiltInRegistries.RECIPE_SERIALIZER
+re:\bForgeRegistries\.POI_TYPES\.getHolder\(poiType\)\.get\(\)	net.minecraft.core.registries.BuiltInRegistries.POINT_OF_INTEREST_TYPE.wrapAsHolder(poiType)
+re:\bForgeRegistries\.POI_TYPES\b	net.minecraft.core.registries.BuiltInRegistries.POINT_OF_INTEREST_TYPE
+re:\bForgeRegistries\.VILLAGER_PROFESSIONS\b	net.minecraft.core.registries.BuiltInRegistries.VILLAGER_PROFESSION
 re:(BuiltInRegistries\.[A-Z_]+)\.getValue\(	\1.get(
 
 #@ 22 auto  LivingHurtEvent and LivingAttackEvent are LivingIncomingDamageEvent
@@ -81,27 +84,48 @@ re:void defineSynchedData\(\)\s*\{	void defineSynchedData(net.minecraft.network.
 re:\bsuper\.defineSynchedData\(\)	super.defineSynchedData(builder)
 re:\bthis\.entityData\.define\(	builder.define(
 
+#@ X169 auto  Architectury on NeoForge has no EventBuses: NeoForge hands every mod its own bus, so the Forge-side
+#             registration call (and its import) is deleted
+re:[ \t]*\bEventBuses\.registerModEventBus\([^;]*\);[ \t]*\n	
+re:import dev\.architectury\.platform\.forge\.EventBuses;[ \t]*\n	
+
 #@ 98 auto  getDimensions is final; override getDefaultDimensions
 re:public EntityDimensions getDimensions\(Pose (\w+)\)	protected EntityDimensions getDefaultDimensions(Pose \1)
 re:\bsuper\.getDimensions\(	super.getDefaultDimensions(
 
+#@ 97 auto  ...and the pressure plates: the sensitivity moved INTO the BlockSetType (a JUDGEMENT row: a plate whose
+#           sensitivity differed from its set type's now uses the set type's), the weight stays first
+re:\bnew\s+PressurePlateBlock\(\s*(?:(?:PressurePlateBlock\.)?Sensitivity\.\w+)\s*,\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)[\w.]*)\s*\)	new PressurePlateBlock(\2, \1)
+re:\bnew\s+WeightedPressurePlateBlock\(\s*([^(),]+),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)[\w.]*)\s*\)	new WeightedPressurePlateBlock(\1, \3, \2)
+
+#@ 97 auto  ...and a SUBCLASS's super(...) call, in files that extend one of those blocks (X148)
+#? only-if	\bextends\s+(?:DoorBlock|TrapDoorBlock|StandingSignBlock|WallSignBlock|CeilingHangingSignBlock|WallHangingSignBlock|FenceGateBlock|ButtonBlock|PressurePlateBlock|WeightedPressurePlateBlock)\b
+re:\bsuper\(\s*([\w.]*(?i:propert|settings|props)[\w.]*|(?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*([\w.]*(?i:woodtype|settype|blockset|_wood|type)[\w.]*)\s*\)\s*;	super(\2, \1);
+re:\bsuper\(\s*([\w.]*(?i:propert|settings|props)[\w.]*),\s*([\w.]*(?i:settype|blockset|type)[\w.]*),\s*([\w.]+),\s*(?:true|false|[\w.]+)\s*\)\s*;	super(\2, \3, \1);
+re:\bsuper\(\s*(?:(?:PressurePlateBlock\.)?Sensitivity\.\w+|\w*[sS]ensitivity\w*)\s*,\s*([\w.]*(?i:propert|settings|props)[\w.]*),\s*([\w.]*(?i:settype|blockset|type)[\w.]*)\s*\)\s*;	super(\2, \1);
+
 #@ 32 auto  hurtAndBreak takes the slot, not a break callback
 re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?(\w+)\)?\s*->\s*\3\.broadcastBreakEvent\(\3\.getUsedItemHand\(\)\)\)	.hurtAndBreak(\1, \2, net.minecraft.world.entity.LivingEntity.getSlotForHand(\2.getUsedItemHand()))
-re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]*[hH]and(?:\(\))?)\)\)	.hurtAndBreak(\1, \2, net.minecraft.world.entity.LivingEntity.getSlotForHand(\3))
+re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]*[hH]and\w*(?:\(\))?)\)\)	.hurtAndBreak(\1, \2, net.minecraft.world.entity.LivingEntity.getSlotForHand(\3))
 re:\.hurtAndBreak\(([^,()]+),\s*([\w.()]+),\s*\(?\w+\)?\s*->\s*\w+\.broadcastBreakEvent\(([\w.]+)\)\)	.hurtAndBreak(\1, \2, \3)
 
 #@ 113 auto  setMaxUpStep is the STEP_HEIGHT attribute (not on known non-living bases: a plain Entity has no attribute map)
 #? only-if	\bextends (?!(?:Entity|Projectile|AbstractArrow|Arrow|ThrowableProjectile|ThrowableItemProjectile|AbstractHurtingProjectile|Fireball|AbstractMinecart|Boat|PartEntity|ItemEntity)\b)\w+
 re:\bthis\.setMaxUpStep\(([^;]*)\);	this.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(\1);
 
-#@ 36 auto  ForgeMod reach attributes are vanilla; the rest of ForgeMod is NeoForgeMod
+#@ 36 auto  ForgeMod reach + step-height attributes are vanilla (X167); the rest of ForgeMod is NeoForgeMod
 re:(?:\(Attribute\)\s*)?\bForgeMod\.ENTITY_REACH\.get\(\)	net.minecraft.world.entity.ai.attributes.Attributes.ENTITY_INTERACTION_RANGE
 re:(?:\(Attribute\)\s*)?\bForgeMod\.BLOCK_REACH\.get\(\)	net.minecraft.world.entity.ai.attributes.Attributes.BLOCK_INTERACTION_RANGE
+re:(?:\(Attribute\)\s*)?\b(?:Neo)?ForgeMod\.STEP_HEIGHT(?:_ADDITION)?\.get\(\)	net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT
 net.neoforged.neoforge.common.ForgeMod	net.neoforged.neoforge.common.NeoForgeMod
 ForgeMod	NeoForgeMod
 
 #@ 134 auto  SpawnPlacements.Type constants are SpawnPlacementTypes
 re:\bSpawnPlacements\.Type\.(ON_GROUND|IN_WATER|IN_LAVA|NO_RESTRICTIONS)\b	net.minecraft.world.entity.SpawnPlacementTypes.\1
+# Vineflower imports the nested type and writes it bare (`import ...SpawnPlacements.Type;` + `Type.NO_RESTRICTIONS`);
+# those four constant names are SpawnPlacements.Type's alone in vanilla, so the bare form is safe to rewrite too.
+re:(?<![\w.])Type\.(ON_GROUND|IN_WATER|IN_LAVA|NO_RESTRICTIONS)\b	net.minecraft.world.entity.SpawnPlacementTypes.\1
+re:import net\.minecraft\.world\.entity\.SpawnPlacements\.Type;\n	
 
 #@ 138 auto  GeckoLib 4.8 flattened the core packages (bare names only where GeckoLib is imported: mods ship their own RenderUtils)
 #? only-if	import software\.bernie\.geckolib\.
@@ -131,6 +155,7 @@ re:import net\.minecraftforge\.network\.PlayMessages(?:\.SpawnEntity)?;\n
 
 #@ 117 auto  appendHoverText takes an Item.TooltipContext, not a Level
 re:void appendHoverText\(ItemStack (\w+), (?:@Nullable )?Level (\w+), List<Component> (\w+), TooltipFlag (\w+)\)	void appendHoverText(ItemStack \1, net.minecraft.world.item.Item.TooltipContext \2, List<Component> \3, TooltipFlag \4)
+re:void appendHoverText\(ItemStack (\w+), (?:@Nullable )?BlockGetter (\w+), List<Component> (\w+), TooltipFlag (\w+)\)	void appendHoverText(ItemStack \1, net.minecraft.world.item.Item.TooltipContext \2, List<Component> \3, TooltipFlag \4)
 
 #@ 105 auto  VertexConsumer builder renamed; endVertex is gone (only in files using the vertex API)
 #? only-if	import com\.mojang\.blaze3d\.vertex\.
@@ -243,6 +268,14 @@ re:(?m)^import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.client\.ConfigScre
 #@ 133 auto  Raid.RaiderType.create is gone (raider types are an enum extension): the call is left as a comment
 re:(?m)^([ \t]*)((?:Raid\.)?RaiderType\.create\([^;\n]*\);)	\1// 1.21 MIGRATION (catalogue #133): raider types are an enum extension now (enumextensions.json); dropped: \2
 
+#@ X109 auto  ForgeRegistries.Keys split: NeoForge-owned keys are NeoForgeRegistries.Keys, the rest are vanilla Registries
+#? only-if	ForgeRegistries\.Keys\b
+re:(?<![\w$.])(?:ForgeRegistries\.)?Keys\.(ENTITY_DATA_SERIALIZERS|GLOBAL_LOOT_MODIFIER_SERIALIZERS|BIOME_MODIFIER_SERIALIZERS|STRUCTURE_MODIFIER_SERIALIZERS|FLUID_TYPES|HOLDER_SET_TYPES|BIOME_MODIFIERS|STRUCTURE_MODIFIERS)\b	net.neoforged.neoforge.registries.NeoForgeRegistries.Keys.\1
+re:(?<![\w$.])(?:ForgeRegistries\.)?Keys\.CONDITION_SERIALIZERS\b	net.neoforged.neoforge.registries.NeoForgeRegistries.Keys.CONDITION_CODECS
+re:(?<![\w$.])(?:ForgeRegistries\.)?Keys\.INGREDIENT_SERIALIZERS\b	net.neoforged.neoforge.registries.NeoForgeRegistries.Keys.INGREDIENT_TYPES
+re:(?<![\w$.])(?:ForgeRegistries\.)?Keys\.([A-Z][A-Z_]+)\b	net.minecraft.core.registries.Registries.\1
+re:(?m)^import\s+net\.(?:minecraftforge|neoforged\.neoforge)\.registries\.ForgeRegistries\.Keys\s*;[ \t]*\n	
+
 #@ 10 auto  registry keys are singular (ForgeRegistries.Keys.X became Registries.X with the plural kept)
 #? only-if	net\.minecraft\.core\.registries\.Registries|ForgeRegistries
 re:(?<![\w$])Registries\.BLOCKS\b	Registries.BLOCK
@@ -269,6 +302,8 @@ re:(?<![\w$])Registries\.SENSOR_TYPES\b	Registries.SENSOR_TYPE
 re:(?<![\w$])Registries\.ACTIVITIES\b	Registries.ACTIVITY
 re:(?<![\w$])Registries\.COMMAND_ARGUMENT_TYPES\b	Registries.COMMAND_ARGUMENT_TYPE
 re:(?<![\w$])Registries\.ENCHANTMENTS\b	Registries.ENCHANTMENT
+re:(?<![\w$])Registries\.SCHEDULES\b	Registries.SCHEDULE
+re:(?<![\w$])Registries\.DECORATED_POT_PATTERNS\b	Registries.DECORATED_POT_PATTERN
 re:(?<![\w$])Registries\.BIOMES\b	Registries.BIOME
 re:(?<![\w$])Registries\.STRUCTURE_TYPES\b	Registries.STRUCTURE_TYPE
 re:(?<![\w$])Registries\.CHUNK_GENERATORS\b	Registries.CHUNK_GENERATOR
@@ -311,6 +346,18 @@ ToolAction	ItemAbility
 #? only-if	IEntityWithComplexSpawn|IEntityAdditionalSpawnData
 re:\b(writeSpawnData|readSpawnData)\(\s*(?:net\.minecraft\.network\.)?FriendlyByteBuf\b	\1(net.minecraft.network.RegistryFriendlyByteBuf
 
+#@ X161 auto  MCreator's event template, `if (event != null && event.isCancelable()) { event.setCanceled(true); } else if (event
+#           != null && event.hasResult()) { event.setResult(Event.Result.DENY); }` on a `@Nullable Event event`: NeoForge's
+#           Event has neither. Cancelling goes through ICancellableEvent; there is no generic result any more, so that
+#           branch goes (a JUDGEMENT row: an event whose 1.21 form has its own result API needs a worker). Runs before §135.
+re:\bif\s*\(\s*(\w+)\s*!=\s*null\s*&&\s*\1\.isCancelable\(\)\s*\)\s*\{\s*\1\.setCanceled\(\s*(true|false)\s*\)\s*;\s*\}	if (\1 instanceof net.neoforged.bus.api.ICancellableEvent _cancellable) { _cancellable.setCanceled(\2); }
+re:\bif\s*\(\s*(\w+)\s*!=\s*null\s*&&\s*\1\.isCancelable\(\)\s*\)\s*\1\.setCanceled\(\s*(true|false)\s*\)\s*;	if (\1 instanceof net.neoforged.bus.api.ICancellableEvent _cancellable) _cancellable.setCanceled(\2);
+re:\s*else\s+if\s*\(\s*(\w+)\s*!=\s*null\s*&&\s*\1\.hasResult\(\)\s*\)\s*\{\s*\1\.setResult\(\s*(?:[\w.]*Event\.)?Result\.\w+\s*\)\s*;\s*\}	
+
+#@ X161 auto  MCreator's projectile procedure sets knockback on the arrow it spawns; 1.21 removed it (knockback is the
+#           weapon's enchantment now), so the call goes (a JUDGEMENT row: the projectile knocks back by its default)
+re:(?m)^([ \t]*)([\w$.]+)\.setKnockback\(([^;]*)\)\s*;	\1/* 1.21 MIGRATION (X161): \2.setKnockback(\3) -- arrow knockback is the weapon's enchantment now */
+
 #@ 135 auto  Event.isCancelable is gone: a cancellable event is so by type, so the guard is dropped
 re:\s*&&\s*\w+\.isCancelable\(\)	
 re:(?<![\w$.])\w+\.isCancelable\(\)\s*&&\s*	
@@ -319,9 +366,9 @@ re:(?<![\w$.])\w+\.isCancelable\(\)\s*&&\s*
 re:\.getType\(\s*(\w+)\.getTag\(\)\s*\)	.getType(\1)
 
 #@ 97 auto  wood/set-type blocks take the type FIRST, then Properties
-re:\bnew\s+(DoorBlock|TrapDoorBlock|StandingSignBlock|WallSignBlock|CeilingHangingSignBlock|WallHangingSignBlock)\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType|WoodType)\.\w+|[\w.]*(?:SET_TYPE|WOOD_TYPE|_WOOD|BlockSetType|WoodType)\w*)\s*\)	new \1(\3, \2)
-re:\bnew\s+FenceGateBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:WoodType)\.\w+|[\w.]*(?:WOOD_TYPE|_WOOD|WoodType)\w*)\s*\)	new FenceGateBlock(\2, \1)
-re:\bnew\s+ButtonBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)\w*),\s*(\d+),\s*(?:true|false)\s*\)	new ButtonBlock(\2, \3, \1)
+re:\bnew\s+(DoorBlock|TrapDoorBlock|StandingSignBlock|WallSignBlock|CeilingHangingSignBlock|WallHangingSignBlock)\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType|WoodType)\.\w+|[\w.]*(?:SET_TYPE|WOOD_TYPE|_WOOD|BlockSetType|WoodType)[\w.]*)\s*\)	new \1(\3, \2)
+re:\bnew\s+FenceGateBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:WoodType)\.\w+|[\w.]*(?:WOOD_TYPE|_WOOD|WoodType)[\w.]*)\s*\)	new FenceGateBlock(\2, \1)
+re:\bnew\s+ButtonBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:BlockSetType)\.\w+|[\w.]*(?:SET_TYPE|BlockSetType)[\w.]*),\s*(\d+),\s*(?:true|false)\s*\)	new ButtonBlock(\2, \3, \1)
 
 #@ 35 manual  RecordItem is gone: music discs are an Item with the JUKEBOX_PLAYABLE component + a jukebox_song datapack entry
 #? detect	\bRecordItem\b
@@ -340,3 +387,221 @@ re:\bnew\s+ButtonBlock\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+
 
 #@ 100 manual  ProjectileWeaponItem.customArrow takes the projectile and weapon stacks
 #? detect	\.customArrow\(\s*\w+\s*\)
+
+#@ X100 auto  NeoForge renamed every IForgeX extension interface to IXExtension (IForgeMenuType -> IMenuTypeExtension,
+#           IForgeItem -> IItemExtension, ...). Generated from the 21.1 jar: a row exists only where IXExtension does.
+net.neoforged.neoforge.client.extensions.IForgeAbstractWidget	net.neoforged.neoforge.client.extensions.IAbstractWidgetExtension
+IForgeAbstractWidget	IAbstractWidgetExtension
+net.neoforged.neoforge.client.extensions.IForgeBakedModel	net.neoforged.neoforge.client.extensions.IBakedModelExtension
+IForgeBakedModel	IBakedModelExtension
+net.neoforged.neoforge.client.extensions.IForgeBlockEntityRenderer	net.neoforged.neoforge.client.extensions.IBlockEntityRendererExtension
+IForgeBlockEntityRenderer	IBlockEntityRendererExtension
+net.neoforged.neoforge.client.extensions.IForgeDimensionSpecialEffects	net.neoforged.neoforge.client.extensions.IDimensionSpecialEffectsExtension
+IForgeDimensionSpecialEffects	IDimensionSpecialEffectsExtension
+net.neoforged.neoforge.client.extensions.IForgeFont	net.neoforged.neoforge.client.extensions.IFontExtension
+IForgeFont	IFontExtension
+net.neoforged.neoforge.client.extensions.IForgeGuiGraphics	net.neoforged.neoforge.client.extensions.IGuiGraphicsExtension
+IForgeGuiGraphics	IGuiGraphicsExtension
+net.neoforged.neoforge.client.extensions.IForgeKeyMapping	net.neoforged.neoforge.client.extensions.IKeyMappingExtension
+IForgeKeyMapping	IKeyMappingExtension
+net.neoforged.neoforge.client.extensions.IForgeMenuProvider	net.neoforged.neoforge.client.extensions.IMenuProviderExtension
+IForgeMenuProvider	IMenuProviderExtension
+net.neoforged.neoforge.client.extensions.IForgeMinecraft	net.neoforged.neoforge.client.extensions.IMinecraftExtension
+IForgeMinecraft	IMinecraftExtension
+net.neoforged.neoforge.client.extensions.IForgeModelBaker	net.neoforged.neoforge.client.extensions.IModelBakerExtension
+IForgeModelBaker	IModelBakerExtension
+net.neoforged.neoforge.client.extensions.IForgePoseStack	net.neoforged.neoforge.client.extensions.IPoseStackExtension
+IForgePoseStack	IPoseStackExtension
+net.neoforged.neoforge.client.extensions.IForgeVertexConsumer	net.neoforged.neoforge.client.extensions.IVertexConsumerExtension
+IForgeVertexConsumer	IVertexConsumerExtension
+net.neoforged.neoforge.common.extensions.IForgeAbstractMinecart	net.neoforged.neoforge.common.extensions.IAbstractMinecartExtension
+IForgeAbstractMinecart	IAbstractMinecartExtension
+net.neoforged.neoforge.common.extensions.IForgeAdvancementBuilder	net.neoforged.neoforge.common.extensions.IAdvancementBuilderExtension
+IForgeAdvancementBuilder	IAdvancementBuilderExtension
+net.neoforged.neoforge.common.extensions.IForgeAttribute	net.neoforged.neoforge.common.extensions.IAttributeExtension
+IForgeAttribute	IAttributeExtension
+net.neoforged.neoforge.common.extensions.IForgeBaseRailBlock	net.neoforged.neoforge.common.extensions.IBaseRailBlockExtension
+IForgeBaseRailBlock	IBaseRailBlockExtension
+net.neoforged.neoforge.common.extensions.IForgeBlockAndTintGetter	net.neoforged.neoforge.common.extensions.IBlockAndTintGetterExtension
+IForgeBlockAndTintGetter	IBlockAndTintGetterExtension
+net.neoforged.neoforge.common.extensions.IForgeBlockEntity	net.neoforged.neoforge.common.extensions.IBlockEntityExtension
+IForgeBlockEntity	IBlockEntityExtension
+net.neoforged.neoforge.common.extensions.IForgeBlock	net.neoforged.neoforge.common.extensions.IBlockExtension
+IForgeBlock	IBlockExtension
+net.neoforged.neoforge.common.extensions.IForgeBlockGetter	net.neoforged.neoforge.common.extensions.IBlockGetterExtension
+IForgeBlockGetter	IBlockGetterExtension
+net.neoforged.neoforge.common.extensions.IForgeBlockState	net.neoforged.neoforge.common.extensions.IBlockStateExtension
+IForgeBlockState	IBlockStateExtension
+net.neoforged.neoforge.common.extensions.IForgeBoat	net.neoforged.neoforge.common.extensions.IBoatExtension
+IForgeBoat	IBoatExtension
+net.neoforged.neoforge.common.extensions.IForgeBucketPickup	net.neoforged.neoforge.common.extensions.IBucketPickupExtension
+IForgeBucketPickup	IBucketPickupExtension
+net.neoforged.neoforge.common.extensions.IForgeClientCommonPacketListener	net.neoforged.neoforge.common.extensions.IClientCommonPacketListenerExtension
+IForgeClientCommonPacketListener	IClientCommonPacketListenerExtension
+net.neoforged.neoforge.common.extensions.IForgeCommandSourceStack	net.neoforged.neoforge.common.extensions.ICommandSourceStackExtension
+IForgeCommandSourceStack	ICommandSourceStackExtension
+net.neoforged.neoforge.common.extensions.IForgeDataComponentHolder	net.neoforged.neoforge.common.extensions.IDataComponentHolderExtension
+IForgeDataComponentHolder	IDataComponentHolderExtension
+net.neoforged.neoforge.common.extensions.IForgeDispensibleContainerItem	net.neoforged.neoforge.common.extensions.IDispensibleContainerItemExtension
+IForgeDispensibleContainerItem	IDispensibleContainerItemExtension
+net.neoforged.neoforge.common.extensions.IForgeEnchantment	net.neoforged.neoforge.common.extensions.IEnchantmentExtension
+IForgeEnchantment	IEnchantmentExtension
+net.neoforged.neoforge.common.extensions.IForgeEntity	net.neoforged.neoforge.common.extensions.IEntityExtension
+IForgeEntity	IEntityExtension
+net.neoforged.neoforge.common.extensions.IForgeFluid	net.neoforged.neoforge.common.extensions.IFluidExtension
+IForgeFluid	IFluidExtension
+net.neoforged.neoforge.common.extensions.IForgeFluidState	net.neoforged.neoforge.common.extensions.IFluidStateExtension
+IForgeFluidState	IFluidStateExtension
+net.neoforged.neoforge.common.extensions.IForgeFriendlyByteBuf	net.neoforged.neoforge.common.extensions.IFriendlyByteBufExtension
+IForgeFriendlyByteBuf	IFriendlyByteBufExtension
+net.neoforged.neoforge.common.extensions.IForgeHolder	net.neoforged.neoforge.common.extensions.IHolderExtension
+IForgeHolder	IHolderExtension
+net.neoforged.neoforge.common.extensions.IForgeHolderLookupProvider	net.neoforged.neoforge.common.extensions.IHolderLookupProviderExtension
+IForgeHolderLookupProvider	IHolderLookupProviderExtension
+net.neoforged.neoforge.common.extensions.IForgeHolderSet	net.neoforged.neoforge.common.extensions.IHolderSetExtension
+IForgeHolderSet	IHolderSetExtension
+net.neoforged.neoforge.common.extensions.IForgeIntrinsicHolderTagAppender	net.neoforged.neoforge.common.extensions.IIntrinsicHolderTagAppenderExtension
+IForgeIntrinsicHolderTagAppender	IIntrinsicHolderTagAppenderExtension
+net.neoforged.neoforge.common.extensions.IForgeItem	net.neoforged.neoforge.common.extensions.IItemExtension
+IForgeItem	IItemExtension
+net.neoforged.neoforge.common.extensions.IForgeItemStack	net.neoforged.neoforge.common.extensions.IItemStackExtension
+IForgeItemStack	IItemStackExtension
+net.neoforged.neoforge.common.extensions.IForgeLevel	net.neoforged.neoforge.common.extensions.ILevelExtension
+IForgeLevel	ILevelExtension
+net.neoforged.neoforge.common.extensions.IForgeLevelReader	net.neoforged.neoforge.common.extensions.ILevelReaderExtension
+IForgeLevelReader	ILevelReaderExtension
+net.neoforged.neoforge.common.extensions.IForgeLivingEntity	net.neoforged.neoforge.common.extensions.ILivingEntityExtension
+IForgeLivingEntity	ILivingEntityExtension
+net.neoforged.neoforge.common.extensions.IForgeMenuType	net.neoforged.neoforge.common.extensions.IMenuTypeExtension
+IForgeMenuType	IMenuTypeExtension
+net.neoforged.neoforge.common.extensions.IForgeMobEffect	net.neoforged.neoforge.common.extensions.IMobEffectExtension
+IForgeMobEffect	IMobEffectExtension
+net.neoforged.neoforge.common.extensions.IForgePackResources	net.neoforged.neoforge.common.extensions.IPackResourcesExtension
+IForgePackResources	IPackResourcesExtension
+net.neoforged.neoforge.common.extensions.IForgePacketFlow	net.neoforged.neoforge.common.extensions.IPacketFlowExtension
+IForgePacketFlow	IPacketFlowExtension
+net.neoforged.neoforge.common.extensions.IForgePlayer	net.neoforged.neoforge.common.extensions.IPlayerExtension
+IForgePlayer	IPlayerExtension
+net.neoforged.neoforge.common.extensions.IForgePlayerList	net.neoforged.neoforge.common.extensions.IPlayerListExtension
+IForgePlayerList	IPlayerListExtension
+net.neoforged.neoforge.common.extensions.IForgeRecipeOutput	net.neoforged.neoforge.common.extensions.IRecipeOutputExtension
+IForgeRecipeOutput	IRecipeOutputExtension
+net.neoforged.neoforge.common.extensions.IForgeServerChunkCache	net.neoforged.neoforge.common.extensions.IServerChunkCacheExtension
+IForgeServerChunkCache	IServerChunkCacheExtension
+net.neoforged.neoforge.common.extensions.IForgeServerCommonPacketListener	net.neoforged.neoforge.common.extensions.IServerCommonPacketListenerExtension
+IForgeServerCommonPacketListener	IServerCommonPacketListenerExtension
+net.neoforged.neoforge.common.extensions.IForgeServerConfigurationPacketListener	net.neoforged.neoforge.common.extensions.IServerConfigurationPacketListenerExtension
+IForgeServerConfigurationPacketListener	IServerConfigurationPacketListenerExtension
+net.neoforged.neoforge.common.extensions.IForgeServerGamePacketListener	net.neoforged.neoforge.common.extensions.IServerGamePacketListenerExtension
+IForgeServerGamePacketListener	IServerGamePacketListenerExtension
+net.neoforged.neoforge.common.extensions.IForgeTagAppender	net.neoforged.neoforge.common.extensions.ITagAppenderExtension
+IForgeTagAppender	ITagAppenderExtension
+net.neoforged.neoforge.common.extensions.IForgeTagBuilder	net.neoforged.neoforge.common.extensions.ITagBuilderExtension
+IForgeTagBuilder	ITagBuilderExtension
+net.neoforged.neoforge.common.extensions.IForgeTransformation	net.neoforged.neoforge.common.extensions.ITransformationExtension
+IForgeTransformation	ITransformationExtension
+
+#@ X109 auto  MCreator 1.20 call shapes whose 1.21.1 signature changed: the effect packet gained a blend flag (false: no
+#           darkness fade, what a re-send wants), dropExperience takes the killer (none known here), and the raw
+#           ArrayList over players() erases the element type so the enhanced for over Entity cannot compile
+re:new ClientboundUpdateMobEffectPacket\(((?:[^(),]|\([^()]*\))+),\s*((?:[^(),]|\([^()]*\))+)\)	new ClientboundUpdateMobEffectPacket(\1, \2, false)
+re:(?<!void )(?<![\w$])dropExperience\(\)	dropExperience(null)
+re:new ArrayList\(((?:\w+\.)*\w+)\.players\(\)\)	new ArrayList<>(\1.players())
+
+#@ X111 auto  1.20.3-1.20.5 type renames a 1.20.1 source still names (each checked in the 21.1 jar): GlassBlock is
+#           TransparentBlock (same Properties ctor); LiteralContents moved inside PlainTextContents
+net.minecraft.world.level.block.GlassBlock	net.minecraft.world.level.block.TransparentBlock
+GlassBlock	TransparentBlock
+net.minecraft.network.chat.contents.LiteralContents	net.minecraft.network.chat.contents.PlainTextContents.LiteralContents
+
+#@ X114 auto  1.20.3-1.20.5 GUI signatures (21.1 jar): a widget's tooltip delay is a java.time.Duration, and the
+#           dirt screen background became the menu background (Screen.renderMenuBackground(GuiGraphics))
+re:\bsetTooltipDelay\((\d+)\)	setTooltipDelay(java.time.Duration.ofMillis(\1))
+re:(?<![\w$])renderDirtBackground\(	renderMenuBackground(
+
+#@ X118 auto  BonemealableBlock.isValidBonemealTarget lost its isClient flag in 1.20.2 (21.1 jar: (LevelReader, BlockPos, BlockState))
+re:(boolean\s+isValidBonemealTarget\(\s*(?:final\s+)?LevelReader\s+\w+,\s*(?:final\s+)?BlockPos\s+\w+,\s*(?:final\s+)?BlockState\s+\w+),\s*(?:final\s+)?boolean\s+\w+\)	\1)
+
+#@ X127 auto  five call shapes every MCreator 1.20.1 mod carries, each checked in the 21.1 jar:
+#           ForgeSoundType is NeoForge's DeferredSoundType (same seven-argument constructor);
+#           Tier.getLevel() is gone (a tier is its incorrect-for-drops block tag now): MCreator's `canHarvestBlock` test
+#           `tier.getLevel() >= N` holds exactly when the tier's tag is none of the tiers below N (vanilla's order:
+#           wooden/gold 0, stone 1, iron 2, diamond 3, netherite 4) -- a custom tier with its own tag passes;
+#           ServerAdvancementManager.getAdvancement(rl) is get(rl) and returns an AdvancementHolder;
+#           Vineflower's guava UnmodifiableIterator over a block state's getValues() is a plain Iterator now;
+#           a render event's getWindow() is gone -- the window is Minecraft's
+net.neoforged.neoforge.common.util.ForgeSoundType	net.neoforged.neoforge.common.util.DeferredSoundType
+net.minecraftforge.common.util.ForgeSoundType	net.neoforged.neoforge.common.util.DeferredSoundType
+ForgeSoundType	DeferredSoundType
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*(?:-\d+|0)\b	true
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*1\b	!java.util.Set.of(net.minecraft.tags.BlockTags.INCORRECT_FOR_WOODEN_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_GOLD_TOOL).contains(\1.getTier().getIncorrectBlocksForDrops())
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*2\b	!java.util.Set.of(net.minecraft.tags.BlockTags.INCORRECT_FOR_WOODEN_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_GOLD_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_STONE_TOOL).contains(\1.getTier().getIncorrectBlocksForDrops())
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*3\b	!java.util.Set.of(net.minecraft.tags.BlockTags.INCORRECT_FOR_WOODEN_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_GOLD_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_STONE_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_IRON_TOOL).contains(\1.getTier().getIncorrectBlocksForDrops())
+re:(\w+)\.getTier\(\)\.getLevel\(\)\s*>=\s*4\b	!java.util.Set.of(net.minecraft.tags.BlockTags.INCORRECT_FOR_WOODEN_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_GOLD_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_STONE_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_IRON_TOOL, net.minecraft.tags.BlockTags.INCORRECT_FOR_DIAMOND_TOOL).contains(\1.getTier().getIncorrectBlocksForDrops())
+re:\bAdvancement(\s+\w+\s*=\s*[\w.()]+?\.getAdvancements\(\)\.)getAdvancement\(	net.minecraft.advancements.AdvancementHolder\1get(
+re:(\.getAdvancements\(\)\.)getAdvancement\(	\1get(
+re:\bUnmodifiableIterator(\s+\w+\s*=\s*[\w.()]+?\.getValues\(\)\.entrySet\(\)\.iterator\(\))	java.util.Iterator\1
+re:(?<![\w$.])event\.getWindow\(\)	net.minecraft.client.Minecraft.getInstance().getWindow()
+
+#@ X129 auto  NetworkHooks.openScreen(player, provider[, pos | buf -> ...]) is the player's own openMenu in 1.21.1
+#           (IPlayerExtension.openMenu(MenuProvider, BlockPos) / (MenuProvider, Consumer<RegistryFriendlyByteBuf>), 21.1 jar)
+re:(?<![\w$])(?:[\w.]+\.)?NetworkHooks\.openScreen\(\s*((?:\([\w.]+\)\s*)?[\w.]+(?:\(\))?)\s*,\s*	(\1).openMenu(
+
+#@ X132 auto  three more MCreator 1.20.1 shapes (21.1 jar): LevelData's spawn is one BlockPos (getSpawnPos); step height is
+#           the STEP_HEIGHT attribute (§113; a receiver may be a plain Entity, which has none, so it is guarded); and ItemStack.hurt(n, random, player) -- "add n damage, true if it broke" --
+#           is gone. It is rewritten in place as that same test: add the damage, report >= max. A JUDGEMENT row: the old
+#           call also applied Unbreaking, which needs a ServerLevel the call site does not have.
+re:\.getXSpawn\(\)	.getSpawnPos().getX()
+re:\.getYSpawn\(\)	.getSpawnPos().getY()
+re:\.getZSpawn\(\)	.getSpawnPos().getZ()
+re:(?<![\w$.])(?!this\.)([\w$]+(?:\.[\w$]+)*)\.setMaxUpStep\(([^;]+?)\)\s*;	if (\1 instanceof net.minecraft.world.entity.LivingEntity _stepLe) _stepLe.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(\2);
+re:(?<![\w$.])([\w$]+)\.hurt\(\s*(\w+)\s*,\s*RandomSource\.create\(\)\s*,\s*(?:null|\(?\s*(?:ServerPlayer\s*\)\s*)?[\w$.]+)\s*\)	(\1.isDamageableItem() && ((java.util.function.IntPredicate) d -> { \1.setDamageValue(d); return d >= \1.getMaxDamage(); }).test(\1.getDamageValue() + \2))
+
+#@ X133 auto  Forge's IExtensionPoint.DisplayTest registration is gone: NeoForge reads the display test from
+#           neoforge.mods.toml (`displayTest = "IGNORE_SERVER_VERSION"` and friends). The call is left as a comment.
+re:(?m)^([ \t]*)((?:ModLoadingContext\.get\(\)|[\w.]+)\s*\.\s*registerExtensionPoint\(\s*(?:[\w.]*IExtensionPoint\.)?DisplayTest\.class[^;]*;)	\1/* 1.21 MIGRATION (X133): the display test is neoforge.mods.toml's displayTest field now; dropped: \2 */
+re:(?m)^import\s+net\.(?:minecraftforge|neoforged)\.fml\.IExtensionPoint\.DisplayTest\s*;[ \t]*\n	
+
+#@ X143 auto  Forge's StairBlock(Supplier<BlockState>, Properties) is gone; vanilla's StairBlock(BlockState, Properties)
+#           is what remains. The supplier's body becomes the argument, evaluated when the stair's own registry supplier
+#           runs -- after the base block, which a DeferredRegister registers first.
+re:new StairBlock\(\s*\(\)\s*->\s*	new StairBlock(
+
+#@ X144 auto  RecipeManager.getAllRecipesFor returns List<RecipeHolder<T>> since 1.20.2: unwrap to the recipes a 1.20.1
+#           caller iterates. Only in files that never name RecipeHolder (code already written for holders is left).
+#? only-if	\A(?![\s\S]*\bRecipeHolder\b)[\s\S]*\.getAllRecipesFor\(
+re:\.getAllRecipesFor\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)	.getAllRecipesFor(\1).stream().map(net.minecraft.world.item.crafting.RecipeHolder::value).toList()
+
+#@ X152 auto  InventoryScreen's entity preview takes a BOX since 1.20.2: renderEntityInInventoryFollowsAngle/Mouse(g, x1, y1,
+#           x2, y2, scale, yOffset, ...). 1.21.1 centres the entity in the box and lifts it by half its height, where the
+#           1.20 form put its feet at (x, y) -- so the box is centred on x and on y - height*scale/2, with a scale of margin
+#           (it is also the scissor). FollowsMouse took mouse OFFSETS from (x, y); the 1.21.1 one takes the mouse position,
+#           so it becomes FollowsAngle with the 1.20 atan(offset / 40) angles.
+re:\bInventoryScreen\.renderEntityInInventoryFollowsAngle\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?)\s*\)	InventoryScreen.renderEntityInInventoryFollowsAngle(\1, (\2) - 3 * (\4), (int) ((\3) - (\7).getBbHeight() * (\4)) - (\4), (\2) + 3 * (\4), (\3) + (\4), \4, 0.0F, \5, \6, \7)
+re:\bInventoryScreen\.renderEntityInInventoryFollowsMouse\(\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?)\s*\)	InventoryScreen.renderEntityInInventoryFollowsAngle(\1, (\2) - 3 * (\4), (int) ((\3) - (\7).getBbHeight() * (\4)) - (\4), (\2) + 3 * (\4), (\3) + (\4), \4, 0.0F, (float) Math.atan((\5) / 40.0F), (float) Math.atan((\6) / 40.0F), \7)
+
+#@ X152 auto  ServerPlayer.awardRecipesByKey takes a List since 1.20.2; MCreator passes a one-element array
+re:\.awardRecipesByKey\(\s*new\s+ResourceLocation\[\]\s*\{([^{}]*)\}\s*\)	.awardRecipesByKey(java.util.List.of(\1))
+
+#@ X155 auto  AbstractArrow's shooter / position constructors gained (ItemStack pickup, @Nullable ItemStack weapon) in 1.21.
+#           A subclass's super(type, shooter, level) / super(type, x, y, z, level): pickup a vanilla arrow (never EMPTY --
+#           it cannot be saved, R21), weapon null (EMPTY throws "Invalid weapon firing an arrow", R21). What a player picks
+#           up is still the class's own getPickupItem() override.
+#? only-if	\bextends\s+AbstractArrow\b
+re:\bsuper\((?![^;]*ItemStack)\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?)\s*\)\s*;	super(\1, \2, \3, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ARROW), null);
+re:\bsuper\((?![^;]*ItemStack)\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?),\s*((?:[^(),]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))+?)\s*\)\s*;	super(\1, \2, \3, \4, \5, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.ARROW), null);
+
+#@ X155 auto  ...and the abstract pickup hook is getDefaultPickupItem() now; a 1.20 arrow overrode getPickupItem(), which 1.21
+#           keeps as a plain method -- so the new hook answers what the old override did.
+#? only-if	\A(?![\s\S]*\bgetDefaultPickupItem\b)[\s\S]*\bextends\s+AbstractArrow\b[\s\S]*ItemStack\s+getPickupItem\(\)\s*\{
+re:(\n([ \t]*)(?:@Override\s*\n[ \t]*)?(?:public|protected)\s+ItemStack\s+getPickupItem\(\)\s*\{)	\n\2@Override\n\2protected ItemStack getDefaultPickupItem() {\n\2   return this.getPickupItem();\n\2}\n\1
+
+#@ X156 auto  Forge's ForgeFlowingFluid is NeoForge's BaseFlowingFluid, with the same nested Properties / Source / Flowing
+#           (and the same Properties(Supplier<FluidType>, Supplier<Fluid>, Supplier<Fluid>) constructor)
+net.neoforged.neoforge.fluids.ForgeFlowingFluid	net.neoforged.neoforge.fluids.BaseFlowingFluid
+net.minecraftforge.fluids.ForgeFlowingFluid	net.neoforged.neoforge.fluids.BaseFlowingFluid
+ForgeFlowingFluid	BaseFlowingFluid
+
+#@ X156 auto  LiquidBlock and BucketItem take the fluid itself, not Forge's supplier: the lambda's body becomes the argument.
+#           Fluids register before blocks and items (registry order), so it is bound when the block or item is built.
+re:\bnew\s+(LiquidBlock|BucketItem)\(\s*\(\)\s*->\s*	new \1(

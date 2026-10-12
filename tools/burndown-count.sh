@@ -49,12 +49,12 @@ N=$(grep -oE '^[^ ]+\.java:[0-9]+: error:' "$LOG" | sort -u | wc -l | tr -d ' ')
 # X5b: javac stops at PARSE when a file will not parse, so it never attributes and never sees
 # the rest. Three parse errors in three files then read as a 99.8% burn-down. Distinguish by
 # error KIND: parse errors are a broken file, not progress.
-PARSE=$(grep -oE "^[^ ]+\.java:[0-9]+: error: ('[^']*' expected|<identifier> expected|illegal start of|class, interface, enum, or record expected|reached end of file while parsing|not a statement)" "$LOG" \
+PARSE=$(grep -oE "^[^ ]+\.java:[0-9]+: error: ([^ ]+( or [^ ]+)* expected$|enum constant expected here|illegal start of|class, interface, enum, or record expected|reached end of file while parsing|not a statement|initializers not allowed in interfaces)" "$LOG" \
         | sed -E 's/: error:.*//' | sort -u | wc -l | tr -d ' ')
 if [ "$N" -gt 0 ] && [ "$PARSE" -gt 0 ] && [ $((PARSE * 2)) -ge "$N" ]; then
   echo "PARSE ABORT -- $PARSE of $N errors are SYNTAX. javac stopped before attribution, so this"
   echo "is NOT a count: a rewrite broke a file. Offending files:"
-  grep -oE "^[^ ]+\.java:[0-9]+: error: ('[^']*' expected|<identifier> expected|illegal start of|class, interface, enum, or record expected|reached end of file while parsing)" "$LOG" | sort -u | head -6
+  grep -oE "^[^ ]+\.java:[0-9]+: error: ([^ ]+( or [^ ]+)* expected$|enum constant expected here|illegal start of|class, interface, enum, or record expected|reached end of file while parsing|initializers not allowed in interfaces)" "$LOG" | sort -u | head -6
   exit 4
 fi
 # X5c: a FIFTH way to read zero. javac can die with an INTERNAL exception (a StackOverflowError
@@ -79,6 +79,14 @@ fi
 if grep -qE 'only showing the first [0-9]+ errors' "$LOG"; then
   echo "NOT A COUNT -- javac's error cap: $(grep -oE 'only showing the first [0-9]+ errors, of [0-9]+ total' "$LOG" | tail -1)."
   echo "Re-run with --init-script tools/maxerrs.init.gradle; a capped list is a prefix, not a total."
+  exit 6
+fi
+# X5g: tools/maxerrs.init.gradle caps the GRADLE-integrated compile at 1000 (Gradle's diagnostics are
+# quadratic in the error count and hang past a few thousand), and recounts a capped run with javac
+# directly. A log that hit that cap with no recount is a prefix, exactly like X5f.
+if grep -qE '^\s*1,?000 errors\s*$' "$LOG" && ! grep -qE '^PORT_FULL_ERRORS .*javac exit' "$LOG"; then
+  echo "NOT A COUNT -- the capped Gradle compile hit 1000 errors and nothing recounted it."
+  echo "Use tools/port_gates.py compile_log(), or run ./gradlew portFullErrors with tools/maxerrs.init.gradle."
   exit 6
 fi
 # X5d: the task can START and fail before javac runs -- an unresolvable dependency fails

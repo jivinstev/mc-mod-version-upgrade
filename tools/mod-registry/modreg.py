@@ -21,7 +21,7 @@ Design notes:
       needs-downport— only NEWER 1.21.x builds exist → ask the user, then downport
       none          — nothing usable found
 """
-import argparse
+import argparse, pathlib
 import json
 import urllib.error
 import os
@@ -165,6 +165,18 @@ def cmd_versions(args):
            **result})
 
 
+def cmd_files(args):
+    """Every file of a project, newest first, with its declared loaders and Minecraft versions (a caller that found
+    the chosen file mislabelled looks here for the build that really is its loader)."""
+    prov = providers.get_provider(args.provider)
+    files = prov.list_files(args.id)
+    if args.mc:
+        files = [f for f in files if args.mc in (f.get("mcs") or [])]
+    files.sort(key=lambda f: f.get("datePublished") or "", reverse=True)
+    _emit({"provider": args.provider, "id": args.id, "files": [
+        {k: f.get(k) for k in ("fileId", "fileName", "loaders", "mcs", "datePublished")} for f in files]})
+
+
 def cmd_deps(args):
     prov = providers.get_provider(args.provider)
     deps = prov.file_deps(args.id, args.file)
@@ -180,6 +192,25 @@ def cmd_download(args):
         sys.exit(3)  # author opted out — orchestrator surfaces the manual link
     if res.get("status") == "ok" and res.get("sha1_ok") is False:
         sys.exit(4)  # hash mismatch
+
+
+# ── identify (which registry file IS this jar?) ──────────────────────────────
+def cmd_identify(args):
+    """A jar path carries no exact Minecraft version (a toml range like [1.21,) names none), no project id and
+    no file id. Modrinth indexes every file by hash, so the jar's sha1 answers all three. Exit 5 when no
+    registry knows the file (a hand-built or CurseForge-only jar): the caller falls back to the toml."""
+    import hashlib
+    sha1 = hashlib.sha1(pathlib.Path(args.jar).read_bytes()).hexdigest()
+    prov = providers.get_provider("modrinth")
+    try:
+        v = prov._get(f"/version_file/{sha1}?algorithm=sha1")
+    except Exception as e:                             # 404: unknown file
+        _emit({"jar": args.jar, "sha1": sha1, "found": False, "error": str(e)[:200]})
+        sys.exit(5)
+    proj = prov.project(v["project_id"])
+    _emit({"jar": args.jar, "sha1": sha1, "found": True, "provider": "modrinth", "id": proj["slug"],
+           "name": proj["name"], "fileId": v["id"], "fileName": pathlib.Path(args.jar).name,
+           "loaders": v.get("loaders", []), "mcs": v.get("game_versions", [])})
 
 
 # ── resolve-modid (jar introspection, no network) ────────────────────────────
@@ -198,9 +229,16 @@ def cmd_resolve_modid(args):
             info["loader"] = "forge"
             toml_txt = z.read("META-INF/mods.toml").decode("utf-8", "replace")
         if toml_txt:
-            info["modIds"] = re.findall(r'^\s*modId\s*=\s*"([^"]+)"', toml_txt, re.M)
+            info["modIds"] = re.findall(r"""^\s*modId\s*=\s*["']([^"'\n]+)["']""", toml_txt, re.M)
+            try:                       # inline `mods = [ { modId = ... } ]` is legal TOML too
+                import tomllib
+                d = tomllib.loads(toml_txt)
+                own = [m["modId"] for m in d.get("mods", []) if isinstance(m, dict) and isinstance(m.get("modId"), str)]
+                info["modIds"] = own + [x for x in info["modIds"] if x not in own]
+            except Exception:  # noqa: BLE001
+                pass
             # first minecraft dependency versionRange, if any
-            mrange = re.search(r'modId\s*=\s*"minecraft".*?versionRange\s*=\s*"([^"]+)"',
+            mrange = re.search(r"""modId\s*=\s*["']minecraft["'].*?versionRange\s*=\s*["']([^"'\n]+)["']""",
                                toml_txt, re.S)
             if mrange:
                 info["mcRange"] = mrange.group(1)
@@ -228,7 +266,7 @@ def _read_modids_from_jar(path):
                 if fj.get("id"):
                     ids = [fj["id"]]
             if txt:
-                ids = re.findall(r'^\s*modId\s*=\s*"([^"]+)"', txt, re.M)
+                ids = re.findall(r"""^\s*modId\s*=\s*["']([^"'\n]+)["']""", txt, re.M)
     except Exception:
         pass
     return loader, ids
@@ -272,6 +310,12 @@ def main():
     v.add_argument("--mc", default=DEFAULT_MC)
     v.set_defaults(func=cmd_versions)
 
+    fl = sub.add_parser("files")
+    fl.add_argument("--provider", required=True)
+    fl.add_argument("--id", required=True)
+    fl.add_argument("--mc", default=None, help="only files declaring this Minecraft version")
+    fl.set_defaults(func=cmd_files)
+
     d = sub.add_parser("deps")
     d.add_argument("--provider", required=True)
     d.add_argument("--id", required=True)
@@ -284,6 +328,10 @@ def main():
     dl.add_argument("--file", required=True)
     dl.add_argument("--out", required=True)
     dl.set_defaults(func=cmd_download)
+
+    idf = sub.add_parser("identify")
+    idf.add_argument("--jar", required=True)
+    idf.set_defaults(func=cmd_identify)
 
     rm = sub.add_parser("resolve-modid")
     rm.add_argument("--jar", required=True)

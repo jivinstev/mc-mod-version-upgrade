@@ -8,6 +8,12 @@ s{net\.minecraftforge\.client\.model\.data}{net.neoforged.neoforge.client.model.
 s{net\.minecraftforge\.client\.extensions}{net.neoforged.neoforge.client.extensions}g;
 s{net\.minecraftforge\.client\.gui\.overlay}{net.neoforged.neoforge.client.gui.overlay}g;
 s{net\.minecraftforge\.client\.event}{net.neoforged.neoforge.client.event}g;
+# X171: client packages NeoForge kept under the same class names (ForgeSlider was renamed ExtendedSlider)
+s{net\.minecraftforge\.client\.settings}{net.neoforged.neoforge.client.settings}g;
+s{net\.minecraftforge\.client\.gui\.widget\.ForgeSlider\b}{net.neoforged.neoforge.client.gui.widget.ExtendedSlider}g;
+s{\bForgeSlider\b}{ExtendedSlider}g;
+s{net\.minecraftforge\.client\.gui\.widget}{net.neoforged.neoforge.client.gui.widget}g;
+s{net\.minecraftforge\.client\.textures}{net.neoforged.neoforge.client.textures}g;
 s{net\.minecraftforge\.fml}{net.neoforged.fml}g;
 s{net\.minecraftforge\.registries}{net.neoforged.neoforge.registries}g;
 s{net\.minecraftforge\.event}{net.neoforged.neoforge.event}g;
