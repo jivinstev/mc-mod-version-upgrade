@@ -209,33 +209,44 @@ def platforms(cfg):
 # ---------------------------------------------------------------- release notes
 
 def notes(cfg, tag, release, repo_slug):
+    """The changelog players see. Deliberately says nothing about defects in the original: bugs are tracked in the
+    fork's GitHub issues, and a public page listing the original's bugs reads as disparaging the authors whose
+    work this is. Only differences a player would notice ("differences" in the config) are stated, neutrally."""
     body = release.get("body") or ""
     played = re.search(r"Played by @[^\n]*", body)
-    first = body.split("\n\n")[0].strip()
-    rows = []
-    fl = _ledger_mod()
-    for ref in cfg.get("ledger_issues", []):
-        owner_repo, n = ref.split("#")
-        try:
-            led = fl.parse(gh("GET", f"/repos/{owner_repo}/issues/{n}")["body"] or "")
-        except SystemExit:
-            continue
-        for m in led.get("modes", []):
-            for col, s in m.get("status", {}).items():
-                if fl.column_matches(col, tag) and s.get("state") in ("fixed", "fixed-unconfirmed"):
-                    rows.append(f"| {m.get('severity')} | {m.get('what', m.get('id'))[:140]} | "
-                                f"[{ref.split('/')[-1]}](https://github.com/{owner_repo}/issues/{n}) |")
-    out = [f"**Unofficial community port** to NeoForge {minecraft_of(tag)}. {first}" if not first.startswith(
-        "**Unofficial") else first, ""]
-    if rows:
-        out += ["Fixed in this build (compared with the original):", "", "| severity | what | issue |",
-                "|---|---|---|", *dict.fromkeys(rows), ""]
-    out += [f"Every build passes this port's gates (it builds, loads on a server and in a real client) and is played "
-            f"by a person before release. {played.group(0) if played else ''}".strip(), "",
-            f"Release on GitHub: https://github.com/{repo_slug}/releases/tag/{tag} -- report problems with this "
-            f"port at https://github.com/{repo_slug}/issues, not to the original author.",
+    out = [f"**Unofficial community port** of {cfg.get('original_name', 'the original mod')} to NeoForge "
+           f"{minecraft_of(tag)}, based on the original's version {version_of(tag, cfg.get('modid', '')).split('+')[0]}.", ""]
+    diffs = cfg.get("differences", [])
+    if diffs:
+        out += ["Differences from the original:", *[f"- {d}" for d in diffs], ""]
+    out += [f"Every build passes this port's checks (it builds, loads on a server and in a real client) and is "
+            f"played by a person before release. {played.group(0) if played else ''}".strip(), "",
+            f"Report problems with this port at https://github.com/{repo_slug}/issues, not to the original author.",
             f"Published with the original author's permission: {cfg['permission']}"]
     return "\n".join(out)
+
+
+# The public pages and changelogs must not advertise the original's defects (see notes()). Enforced, not just
+# remembered: publish and the Modrinth page sync refuse text that names defects or links numbered issues.
+# Exempt: the authors' own words (the "Credits" and "The original" sections -- "Bug reports and fix suggestions:
+# ...", "the blade lies broken") and the permission link, which is an issue URL by nature.
+PUBLIC_WORDS = re.compile(r"\b(pre-existing|defects?|bugs?|bugfix|crash\w*|broken|disconnect\w*|hangs?|"
+                          r"workaround|fixes|fixed)\b", re.I)
+
+
+def public_text_problems(text, permission=""):
+    probs, section = [], ""
+    for line in text.splitlines():
+        if line.startswith("#"):
+            section = line.lower()
+        if "credits" in section or ("the original" in section and "differs" not in section):
+            continue
+        if re.search(r"/issues/\d+", line.replace(permission, "") if permission else line):
+            probs.append(f"links a numbered issue: {line.strip()[:120]}")
+        w = PUBLIC_WORDS.search(line)
+        if w:
+            probs.append(f"names a defect ('{w.group(0)}'): {line.strip()[:120]}")
+    return probs
 
 
 # ---------------------------------------------------------------- platforms
@@ -331,6 +342,12 @@ def publish(repo, tag, dry=False, manual=False):
         return 1
     done = published(release.get("body"))
     text, links, missing = notes(cfg, tag, release, repo_slug), [], []
+    bad = public_text_problems(text, cfg.get("permission", ""))
+    if bad:
+        for b in bad:
+            print(f"::error::will not publish {tag}: the release notes {b} -- public text describes differences, "
+                  "not the original's defects (edit \"differences\" in the config)")
+        return 1
     for plat in ("modrinth", "curseforge"):
         if plat not in platforms(cfg):
             print(f"::notice::{plat}: no project configured yet -- skipped"); continue
@@ -363,14 +380,22 @@ def modrinth_create(repo):
         sys.exit(f"no modrinth slug in {CONFIG}")
     if not cfg.get("permission", "").startswith("https://"):
         sys.exit("no permission link in the config -- will not create a project")
+    body_md = (pathlib.Path(repo) / cfg.get("body_file", BODY)).read_text(encoding="utf-8")
+    bad = public_text_problems(body_md, cfg["permission"]) + public_text_problems(cfg.get("summary", ""))
+    if bad:
+        sys.exit("will not put this page up: " + "; ".join(bad) + " -- public text describes differences, not the "
+                 "original's defects")
     try:
         p = modrinth("GET", f"/project/{cfg['modrinth']['slug']}")
-        print(f"modrinth project {p['slug']} already exists ({p['id']}, status {p['status']}) -- nothing to create")
-        return 0
     except SystemExit as e:
         if "HTTP 404" not in str(e):
             raise
-    body_md = (pathlib.Path(repo) / cfg.get("body_file", BODY)).read_text(encoding="utf-8")
+        p = None
+    if p:                                   # exists: keep its page in step with the fork's files
+        modrinth("PATCH", f"/project/{p['id']}", {"title": cfg["title"], "description": cfg["summary"], "body": body_md})
+        print(f"modrinth project {p['slug']} ({p['id']}, status {p['status']}) exists -- title, summary and page "
+              "updated from the fork's files")
+        return 0
     data = {"project_type": "mod", "slug": cfg["modrinth"]["slug"], "title": cfg["title"], "description": cfg["summary"],
             "body": body_md, "categories": cfg.get("categories", []), "additional_categories": cfg.get("additional_categories", []),
             "client_side": "required", "server_side": "required", "license_id": cfg.get("license", "MIT"),
@@ -389,7 +414,7 @@ def modrinth_create(repo):
     return 0
 
 
-def setup(repo, permission, branch, out=None, ledgers=()):
+def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
     repo = pathlib.Path(repo).expanduser()
     ref = f"origin/{branch}"
     if git(repo, "rev-parse", "--verify", ref).returncode:
@@ -444,19 +469,11 @@ def setup(repo, permission, branch, out=None, ledgers=()):
            "body_file": BODY, "icon": f"src/main/resources/{mod['logoFile']}" if mod.get("logoFile") else None,
            "license": toml.get("license", "MIT"), "categories": (orig or {}).get("categories", []),
            "additional_categories": (orig or {}).get("additional_categories", []),
-           "ledger_issues": list(ledgers), "dependencies": deps,
+           "ledger_issues": list(ledgers), "differences": list(differences), "original_name": name,
+           "dependencies": deps,
            "modrinth": {"slug": f"{oslug}-neoforge", "asset": variant("_mr.jar")},
            "curseforge": {"project_id": None, "slug": f"{oslug}-neoforge", "asset": variant("_cf.jar")}}
     credits = str(mod.get("credits", "")).strip()
-    fixes = []
-    for ref in ledgers:
-        o, n = ref.split("#")
-        try:
-            t = http("GET", f"{GITHUB}/repos/{o}/issues/{n}")["title"]
-        except SystemExit:
-            t = ref
-        fixes.append(f"  - [{t}](https://github.com/{o}/issues/{n})")
-    fixes = fixes or [f"  - https://github.com/{fork}/issues"]
     lines = [f"# {title}", "",
              f"**Unofficial.** A community-maintained port of **{name}** by **{authors}** to NeoForge {mc}. "
              f"It is not made or supported by {authors}: please report problems with this port "
@@ -467,10 +484,9 @@ def setup(repo, permission, branch, out=None, ledgers=()):
              *([f"- {orig['description']}"] if orig else []),
              *([f"- Source: {up}"] if up else []),
              *([f"- On Modrinth: https://modrinth.com/mod/{orig['slug']} (Forge, {', '.join(orig['game_versions'][-1:])})"] if orig else []), "",
-             "## What this port changes", "",
+             "## How it differs from the original", "",
              f"- Runs on **NeoForge {mc}**.",
-             "- Carries fixes for defects found while porting and playing it. Each is tracked, with its evidence and "
-             "which release fixes it, in an issue:", *fixes, "",
+             *[f"- {d}" for d in differences], "",
              "## Requirements", ""]
     for d in deps:
         what = (f"the community port of https://github.com/{d['port']} (the same NeoForge {mc} port, published "
@@ -513,6 +529,21 @@ def self_check():
     expect(version_of("the_last_sword-1.1.1-fix-fix-mc1.21.1-r6", "the_last_sword") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
     body = "notes\n\nPublished on Modrinth: x " + MARK.format(platform="modrinth", ref="AbCd1234")
     expect(published(body) == {"modrinth": "AbCd1234"}, "markers parse")
+    # public text: no defects of the original, no numbered issues; the authors' own credits are exempt
+    expect(public_text_problems("- Pre-existing: force-removal aborts half-way") != [], "pre-existing is flagged")
+    expect(public_text_problems("- [x](https://github.com/o/f/issues/3)") != [], "a numbered issue is flagged")
+    expect(public_text_problems("## Credits\n- Bug reports and fix suggestions: someone") == [], "credits exempt")
+    expect(public_text_problems("- Runs on **NeoForge 1.21.1**.\nReport problems at https://github.com/o/f/issues")
+           == [], "a neutral page passes")
+    nt = notes({"permission": "https://example.invalid/ok", "modid": "m", "original_name": "M",
+                "differences": ["The test sword's lockdown mode leaves other mods running."]},
+               "m-2-mc1.21.1", {"body": "x\n\nPlayed by @someone on 2026-10-12."}, "o/f")
+    expect(public_text_problems(nt, "https://example.invalid/ok") == [] and "Differences from the original" in nt and "Played by @someone" in nt,
+           f"notes are neutral and carry differences: {public_text_problems(nt, 'https://example.invalid/ok')}")
+    expect(public_text_problems("Permission: https://github.com/a/b/issues/9", "https://github.com/a/b/issues/9") == [],
+           "the permission link is exempt")
+    expect(public_text_problems("## The original\n- the blade lies broken\n## How it differs from the original\n"
+                                "- fixed a bug") != [], "the original's own words are exempt, our section is not")
     rel = {"assets": [{"name": "m-1_mr.jar"}, {"name": "m-1_cf.jar"}, {"name": "m-1-sources.txt"}]}
     expect(pick_asset(rel, "_mr.jar")["name"] == "m-1_mr.jar", "asset by suffix")
     try:
@@ -571,7 +602,10 @@ def main():
     sub = ap.add_subparsers(dest="cmd")
     s = sub.add_parser("setup"); s.add_argument("--repo", required=True); s.add_argument("--permission", required=True)
     s.add_argument("--branch", default="neoforge-1.21.1")
-    s.add_argument("--ledger-issue", action="append", default=[], help="owner/repo#n carrying a fix ledger; repeat"); s.add_argument("--out", help="write here instead of into the clone")
+    s.add_argument("--ledger-issue", action="append", default=[], help="owner/repo#n carrying a fix ledger; repeat "
+                   "(gates publishing; never shown to players)")
+    s.add_argument("--difference", action="append", default=[], help="a difference from the original a player "
+                   "would notice, stated neutrally; repeat"); s.add_argument("--out", help="write here instead of into the clone")
     c = sub.add_parser("modrinth-create"); c.add_argument("--repo", default=".")
     p = sub.add_parser("publish"); p.add_argument("--repo", default="."); p.add_argument("--tag", required=True)
     p.add_argument("--dry-run", action="store_true"); p.add_argument("--manual", action="store_true",
@@ -582,7 +616,7 @@ def main():
     if a.cmd == "setup":
         if not a.permission.startswith("https://"):
             sys.exit("--permission must be the https link where the authors agreed")
-        return setup(a.repo, a.permission, a.branch, a.out, a.ledger_issue)
+        return setup(a.repo, a.permission, a.branch, a.out, a.ledger_issue, a.difference)
     if a.cmd == "modrinth-create":
         return modrinth_create(a.repo)
     if a.cmd == "publish":
