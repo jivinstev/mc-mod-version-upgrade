@@ -453,15 +453,18 @@ python3 tools/layer-ci.py plan --repo "$T/single" --github-output "$T/gho2" >/de
 grep -q '^layer=false$' "$T/gho2" && grep -q '^has_full=false$' "$T/gho2" && ok "layer-ci plan: a single-version fork (no .multiversion/) plans nothing, whatever files it has" || bad "single-version plan: $(cat "$T/gho2")"
 # one run per checkout: a live holder refuses a second layer run (exit 14); a single-version run takes no lock at all
 mkdir -p "$T/lk/build" "$T/lk/.multiversion/targets/1.21.4" "$T/lk/.multiversion/tools"; : > "$T/lk/.multiversion/tools/layer.py"
-sleep 30 & HOLD=$!
-printf '{"pid": %s, "tool": "fork-port.py", "target": "1.21.3", "started": "2026-01-01T00:00:00Z"}' "$HOLD" > "$T/lk/build/.fork-port.lock"
+# the holder is a Python process writing its OWN pid: under Git Bash on Windows `$!` is an MSYS pid, not the native pid
+# the lock code checks, so a shell-written pid reads as dead there
+python3 -c 'import json,os,sys,time; open(sys.argv[1],"w",encoding="utf-8").write(json.dumps({"pid": os.getpid(), "tool": "fork-port.py", "target": "1.21.3", "started": "2026-01-01T00:00:00Z"})); time.sleep(30)' "$T/lk/build/.fork-port.lock" & HOLDJOB=$!
+for _ in $(seq 50); do [ -s "$T/lk/build/.fork-port.lock" ] && break; sleep 0.1; done
+HOLD="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["pid"])' "$T/lk/build/.fork-port.lock")"
 out="$(python3 tools/ci-gates.py --repo "$T/lk" --modid m --mc 1.21.4 --work-dir "$T/lkw" 2>&1)"; code=$?
 [ $code = 14 ] && grep -q "$HOLD" <<<"$out" && ok "ci-gates --mc: a second run on a busy checkout is refused (exit 14) naming the holder" || bad "ci-gates lock exit $code: $out"
 out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
 [ $code = 14 ] && ok "fork-port: a second run on a busy checkout is refused (exit 14)" || bad "fork-port lock exit $code: $out"
 python3 tools/ci-gates.py --repo "$T/lk" --modid m --work-dir "$T/lkw2" >/dev/null 2>&1; code=$?
 [ $code != 14 ] && grep -q "\"pid\": $HOLD" "$T/lk/build/.fork-port.lock" && ok "ci-gates without --mc (a single-version fork) ignores the lock entirely" || bad "single-version ci-gates touched the lock (exit $code)"
-kill $HOLD 2>/dev/null; wait $HOLD 2>/dev/null
+kill $HOLDJOB 2>/dev/null; wait $HOLDJOB 2>/dev/null
 out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
 [ $code = 10 ] || [ $code = 2 ] && [ ! -e "$T/lk/build/.fork-port.lock" ] && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
 
