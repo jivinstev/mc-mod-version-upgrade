@@ -437,7 +437,7 @@ class Run:
         if n is None:
             return {"stop": "the compile does not count: " + why, "code": 10, "errors": None, "detail": [why],
                     "choices": ["read build/mc%s/fork-port/measure.log; fix what keeps javac from attributing" % self.t]}
-        return {"done": f"{n} error(s) across {len(tasks)} compile task(s)", "errors": n, "log": str(log)}
+        return {"done": f"{n} error(s) across {len(tasks)} compile task(s)", "errors": n, "log": str(log), "this_run": True}
 
     def error_view(self, log):
         cs = load("compile_summary", "compile-summary.py")
@@ -461,7 +461,7 @@ class Run:
         end = next((e for e in reversed(ev) if e.get("event") == "end"), None)
         n = end.get("errors") if end else None
         clog = self.repo / "build" / f"mc{self.t}" / "file-loop-compile.log"
-        res = {"errors": n, "start_errors": start, "exit": r.returncode, "log": str(flog)}
+        res = {"errors": n, "start_errors": start, "exit": r.returncode, "log": str(flog), "this_run": True}
         if n == 0:
             # 0 errors is not done when a worker got there by emptying code or by forking the shared library: the
             # loop's own stub audit, and any overlay of a shared helper, are residue (measured on the first
@@ -494,10 +494,31 @@ class Run:
         root = self.tdir / "java" / mv_pkg.replace(".", "/")
         return sorted(str(p.relative_to(self.repo)) for p in root.glob("*.java") if p.name in names) if mv_pkg else []
 
+    def compile_errors(self):
+        """The compile count the audit and gates rely on, FROM THIS RUN. A count carried over from an earlier run's
+        summary is not trusted: measured, a resume from 'audit' read a stale count, skipped the audit and every
+        gate, and reported the target done. So unless this run measured (or looped), measure again now."""
+        st = self.summary["stages"]
+        for k in ("loop", "measure"):
+            v = st.get(k, {})
+            if v.get("this_run") and isinstance(v.get("errors"), int):
+                return v["errors"]
+        res = self.s_measure()
+        res["this_run"] = True
+        st["measure"] = {k: v for k, v in res.items() if k not in ("view", "esc", "stop", "choices", "code", "detail")}
+        self.say("measure", res.get("done") or res.get("stop") or "re-measured")
+        return res.get("errors")
+
+    def not_compiled(self, n, stage):
+        """Never skip the audit or the gates quietly: a target that does not compile is not done."""
+        return {"stop": f"{stage} needs a clean compile; this run measured {n if n is not None else 'no count'}",
+                "code": 10, "detail": [f"compile errors: {n}"],
+                "choices": [f"resume from measure: {self.resume_cmd('measure')}"]}
+
     def s_audit(self):
-        m = self.summary["stages"]
-        if (m.get("loop", {}).get("errors", m.get("measure", {}).get("errors"))) not in (0,):
-            return {"skipped": "compile not at 0"}
+        n = self.compile_errors()
+        if n != 0:
+            return self.not_compiled(n, "audit")
         neo = read_props(self.tdir / "target.properties").get("prop.neo_version", "")
         jars = [j for j in self.artifacts()[1] if neo in j.name] or self.artifacts()[1]
         if not jars:
@@ -577,9 +598,9 @@ class Run:
     def s_gates(self):
         if self.a.gates == "none":
             return {"skipped": "--gates none"}
-        m = self.summary["stages"]
-        if m.get("loop", {}).get("errors", m.get("measure", {}).get("errors")) != 0:
-            return {"skipped": "compile not at 0"}
+        n = self.compile_errors()
+        if n != 0:
+            return self.not_compiled(n, "gates")
         modid = self.modid()
         if not modid:
             return {"stop": "cannot read the mod id from neoforge.mods.toml (pass --modid)", "code": 2, "choices": ["--modid ID"]}
@@ -673,7 +694,9 @@ def main():
     if run.jpath.is_file() and skipped:    # a resume keeps what the earlier stages found
         try:
             old = json.loads(run.jpath.read_text(encoding="utf-8"))
-            run.summary["stages"] = {k: v for k, v in old.get("stages", {}).items() if k in skipped}
+            # carried-over results are an earlier run's: drop this_run so compile_errors() re-measures
+            run.summary["stages"] = {k: {x: y for x, y in v.items() if x != "this_run"}
+                                     for k, v in old.get("stages", {}).items() if k in skipped}
             run.summary["started"] = old.get("started", run.summary["started"])
         except ValueError:
             pass
@@ -804,6 +827,18 @@ def self_check():
             (cur / n).write_text("x")
         expect(lost_log_files(prev, cur) == [], "B: after the fix (same set, plus a new file) it passes")
         expect(lost_log_files(None, cur) == [] and lost_log_files(pathlib.Path(d, "nope"), cur) == [], "no previous run: nothing to compare")
+    # a resume must not trust a carried-over compile count (measured: it skipped audit + gates and said "done")
+    r_ = object.__new__(Run)
+    r_.summary = {"stages": {"measure": {"errors": 0}}}            # an earlier run's 0, no this_run
+    r_.s_measure = lambda: {"done": "5 error(s)", "errors": 5, "this_run": True}
+    r_.say = lambda *a_: None
+    r_.resume_cmd = lambda st: "resume " + st
+    expect(r_.compile_errors() == 5, "a stale count is re-measured")
+    res_ = Run.not_compiled(r_, 5, "audit")
+    expect(res_.get("code") == 10 and "stop" in res_, "not compiled is a stop, never a skip")
+    r_.summary = {"stages": {"measure": {"errors": 0, "this_run": True}}}
+    r_.s_measure = lambda: (_ for _ in ()).throw(AssertionError("must not re-measure"))
+    expect(r_.compile_errors() == 0, "this run's own count is used as is")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
