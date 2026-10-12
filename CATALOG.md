@@ -883,6 +883,15 @@ Full details + the exact 1.21.1 signatures are in `references/minor-version-delt
 - **M13. Loot/lock/id API (1.21.2)** — `Properties.setId` (drop), `LockCode.fromTag/addToTag` are 1-arg (no Provider), `EntitySpawnReason`→`MobSpawnType`.
 - **M14. Datagen reorg (1.21.4)** — `net.minecraft.client.data.models` / `net.minecraft.util.context` don't exist in 1.21.1; exclude the build-time datagen tree (`sourceSets.main.java.exclude`).
 - **M15. `getCloneItemStack` (1.21.2)** — 1.21.1 has no trailing `boolean includeData`.
+### 1.21.1 → 1.21.3 (fork multi-version layer, Epic Core API) — M16-M22; details as L1-L7 in `references/minor-version-deltas.md`
+Shared rows/helpers every fork inherits: `templates/fork-layer/shared/1.21.3/`. Version policy (stable NeoForge only; 1.21.2/.6/.7/.9 skipped as beta-only): `templates/fork-layer/versions.json`.
+- **M16. `ShaderInstance` → `CompiledShaderProgram` (1.21.2)** — `cannot find symbol: ShaderInstance` / `RegisterShadersEvent.getResourceProvider`; keep the mod's API with the shared `ShaderInstance extends CompiledShaderProgram` (own linking, 1.21.1 JSON + blend) and a `RegisterShadersEvent` stand-in fired at each client reload.
+- **M17. Render-type shards (1.21.2)** — `TextureStateShard(rl, TriState, mipmap)`; `VertexSorting` → `ProjectionType` in `setProjectionMatrix`; `applyModelViewMatrix` gone; `GameRenderer::getXShader` → `CoreShaders.X`; `_clear(mask)`.
+- **M18. Fog (1.21.2)** — `FogParameters`: `computeFogColor`/`setupFog` RETURN values replace FogRenderer's static colour and RenderSystem's fog state; modify the return at RETURN.
+- **M19. Layers read the entity from the render state (1.21.2)** — park it via `RegisterRenderStateModifiersEvent` (§V65b); `getBoundingBoxForCulling` moved to the renderer, protected — **an AT widening it breaks the Minecraft recompile**, call it reflectively.
+- **M20. Frame graph (1.21.2)** — sky/clouds are recorded passes: draw after the sky from `RenderLevelStageEvent.AFTER_SKY`, skip clouds in `CloudRenderer.render`; `renderLevel` gains `GraphicsResourceAllocator`.
+- **M21. Mixin targets (1.21.2)** — `hurt` → `hurtServer(ServerLevel,…)`, `actuallyHurt(ServerLevel,…)`, `changeDimension` → `teleport(TeleportTransition)`, `ItemRenderer.render` body → `renderItemModelRaw`, `FallingBlockRenderer.render(state,…)`: compile-clean, load-fatal — audit them.
+- **M22. Read the U section first** — `references/minor-version-deltas.md` U2-U12 (1.21.1 → 1.21.4) already held five of this port's rows; the shared table now carries them.
 
 ## S. Silent-resource patterns (compile clean, run clean, *silently wrong*)
 > **Axis:** neither the compiler nor the crash gates can see these. Java has a compiler; resources do

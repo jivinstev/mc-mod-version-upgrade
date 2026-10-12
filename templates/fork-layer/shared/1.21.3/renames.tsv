@@ -21,6 +21,10 @@ re:\bminecraft\.getTimer\(\)	minecraft.getDeltaTracker()
 re:\.getToasts\(\)	.getToastManager()
 re:\.input\.jumping\b	.input.keyPresses.jump()
 re:\.input\.shiftKeyDown\b	.input.keyPresses.shift()
+# from references/minor-version-deltas.md U11 (1.21.1 -> 1.21.4, all 1.21.2 changes)
+net.minecraft.client.ParticleStatus	net.minecraft.server.level.ParticleStatus
+re:\bDirection\.getNearest\(	Direction.getApproximateNearest(
+re:\.isSolidRender\(\w+, \w+\)	.isSolidRender()
 # ---- render system
 re:VertexSorting\.DISTANCE_TO_ORIGIN\)	com.mojang.blaze3d.ProjectionType.PERSPECTIVE)
 re:VertexSorting\.ORTHOGRAPHIC_Z\)	com.mojang.blaze3d.ProjectionType.ORTHOGRAPHIC)

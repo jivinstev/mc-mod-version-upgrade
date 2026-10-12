@@ -199,6 +199,67 @@ from `state.pickParticleIcon(...)`.
 `checked=17 dead=0`; 19 pairs, 17 rows, 8 main + 1 test recorded drops. The burn-down, in commits:
 332 → 285 → 186 → 145 → 106 → 73 → 53 → 1 → 0.
 
+### 1.21.1 → 1.21.3 (fork multi-version layer) — from Epic Core API, an ~89k-line library with its own shader engine
+Measured with every stable NeoForge line compiled against the 1.21.1 source (issue #49): 1.21.3 **282**,
+1.21.4 **342**, 1.21.5 ≥1028, 1.21.8 ≥1132, 1.21.10 ≥1346, 1.21.11 ≥2300 unique error sites. Carried in a
+**fork layer** (`.multiversion/`, templates/fork-layer): the authors' `src/` is never edited, so every
+difference is a rename row, a whole-file overlay or a helper class. The generic rows and helpers are the
+shared library `templates/fork-layer/shared/1.21.3/` that every fork inherits. U2/U3/U4/U6/U11 above apply
+unchanged; these are the NEW ones. ⚠ **Read the U section before starting a 1.21.2+ hop** — this port
+re-derived five of its rows by hand.
+
+L1. **`ShaderInstance` is gone; programs are `CompiledShaderProgram`s the vanilla `ShaderManager` compiles
+from `ShaderProgram` keys** · **Error:** `cannot find symbol: class ShaderInstance` (85 sites), then
+`ShaderProgram is not a functional interface` on `ShaderStateShard(() -> shader)` and
+`RegisterShadersEvent.getResourceProvider()` missing · **Fix (shared helper, no rewrite):** a
+`ShaderInstance extends CompiledShaderProgram` that links its own program from the 1.21.1-format JSON through
+any `ResourceProvider` (a mod's preset provider included), `#moj_import` via `GlslPreprocessor`, and applies
+the JSON `blend` in `apply()` (1.21.2 has no `BlendMode`); its private `CompiledShaderProgram(int)` is widened
+by the target's AT. A `RegisterShadersEvent` stand-in posted on the mod's bus at every client reload
+(`ResourceManagerReloadListener`) keeps the authors' listeners; a `ShaderStateShard` subclass binds the
+program in `setupRenderState`. The old-format JSON still PARSES in 1.21.2's codec (unknown keys ignored), so
+leftover `shaders/core/*.json` do not break the reload.
+
+L2. **Render types and projection** · `TextureStateShard(rl, boolean blur, boolean mipmap)` →
+`(rl, TriState, boolean)` · `RenderSystem.setProjectionMatrix(m, VertexSorting.DISTANCE_TO_ORIGIN |
+ORTHOGRAPHIC_Z)` → `ProjectionType.PERSPECTIVE | ORTHOGRAPHIC` · `RenderSystem.applyModelViewMatrix()` removed
+(delete the call) · `GameRenderer::getPositionColorShader` & co. → `CoreShaders.POSITION_COLOR` (a
+`ShaderProgram`, passed as a value) · `GlStateManager._clear(mask, boolean)` → `_clear(mask)` ·
+`LevelRenderer.renderLineBox` → `ShapeRenderer.renderLineBox` · `FastColor.ARGB32` → `ARGB` ·
+`RenderSystem.runAsFancy` removed (just run the draw) · `GuiGraphics.bufferSource()` → the field (AT).
+
+L3. **Fog is one `FogParameters` value** · `RenderSystem.get/setShaderFogStart/End/Shape` → `getShaderFog()` /
+`setShaderFog(FogParameters)` · a `FogRenderer` mixin: `setupColor` (static `fogRed/Green/Blue` @Shadows) →
+`computeFogColor` RETURNS a `Vector4f` (LevelRenderer clears with it); `setupFog` RETURNS `FogParameters` and
+gained a `Vector4f fogColor` arg — modify the return value at RETURN instead of writing RenderSystem state.
+
+L4. **Entity render state reaches the authors' layers** · `RenderLayer.render(pose, buf, light, S state,
+yRot, xRot)`; `LivingEntityRenderer<T, S, M>` · a layer that decides from the ENTITY reads it from the state:
+park it with `RegisterRenderStateModifiersEvent` against `EntityRenderer.class` (§V65b: data set in
+`extractRenderState` is wiped) — shared helper `EntityOf`. `getOverlayCoords(state, f)` takes the state.
+`EntityRenderer<? super E>` → `<? super E, ?>`; `Entity.getBoundingBoxForCulling()` moved to the renderer as
+`protected` — ⚠ widening it by AT breaks the RECOMPILE (every vanilla override "assigns weaker access"); call
+it reflectively. `EntityRenderDispatcher.render` dropped its yaw argument.
+
+L5. **The frame graph: sky and clouds are passes that run LATER** · `LevelRenderer.renderSky`/`renderClouds`
+are gone; `addSkyPass`/`addCloudsPass` only RECORD. A hook at `addSkyPass` draws before the sky; a flag set
+while rendering entities is not yet set when `addCloudsPass` runs. Draw after the sky from
+`RenderLevelStageEvent` `AFTER_SKY` (fired inside the sky pass); skip clouds with a mixin on
+`CloudRenderer.render` (runs inside the cloud pass, after the entities). `renderLevel` gained a leading
+`GraphicsResourceAllocator`.
+
+L6. **Mixin targets javac cannot see (16 in one mod)** · `LivingEntity.hurt` → `hurtServer(ServerLevel, …)`;
+`actuallyHurt` gained `ServerLevel` first · `Entity.changeDimension(DimensionTransition)` →
+`teleport(TeleportTransition)` (and `ServerPlayer`'s returns `ServerPlayer`: its descriptor differs) ·
+`ServerPlayer.teleportTo(ServerLevel,DDDFF)V` → `(ServerLevel,DDD,Set,FF,Z)Z` (U6) · `ItemRenderer.render`'s
+push/transform/pop moved to `renderItemModelRaw(…, boolean, float)` · `FallingBlockRenderer.render` takes a
+`FallingBlockRenderState`. Run `audit-mixin-targets.py` against the target's sources jar after every compile
+that reaches 0 — a mod with `defaultRequire: 1` dies at load on each.
+
+L7. **Small ones** · `DummySavedData` removed: `DimensionDataStorage.cache` is `Map<String, Optional<SavedData>>`
+(empty = failed read) · `NativeImage.asByteArray()` removed (write a temp PNG) · GeckoLib 4.7.3/4.8.5
+`GeoRenderLayer.preRender/render` gained a trailing `int` colour · `Minecraft.getTimer()` → `getDeltaTracker()`.
+
 ### Runtime deltas (Gate B over a clean compile, 1.21.1 → 1.21.4)
 **Measured:** the first 1.21.4 Gate B run was **27 red** with main + test compiling clean on both targets.
 Every one was one of the six below. After them: `ci,default` 613 passed, batch composition identical to the
