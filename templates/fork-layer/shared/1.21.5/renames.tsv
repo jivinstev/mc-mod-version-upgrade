@@ -1,0 +1,115 @@
+# Shared rows for a fork layer's 1.21.5 target (and every later one that inherits it).
+# 1.21.5 is where CompoundTag/ListTag getters started returning Optional -- the same change 26.2 carries
+# (CATALOG §V12), so these rows come from templates/multi-version/versions/26.2.renames.hand.tsv.
+# ⚠ NOT copied verbatim: the 26.2 rows matched `.getInt(<anything without a comma>)`, which also rewrites a
+# ByteBuffer read (`bytes.getInt(at)` -> `bytes.getIntOr(at, 0)`) -- Battle of Lord had no binary readers, the
+# first fork that went through here (a Blender/glTF loader) has eight. A shared row cannot know the receiver's
+# type, so it anchors on what the NBT API guarantees and a byte offset never is: a string literal key, or an
+# UPPER_CASE constant (bare or Class.CONST). A key held in a variable, and a ListTag index, are left to the
+# fork's own rows or its workers.
+#!exhaustive  # shared library: most forks use only some of these rows
+re:\.getInt\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getIntOr(\1, 0)
+re:\.getString\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getStringOr(\1, "")
+re:(?<!Boolean)\.getBoolean\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getBooleanOr(\1, false)
+re:\.getLong\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getLongOr(\1, 0L)
+re:\.getDouble\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getDoubleOr(\1, 0.0)
+re:\.getFloat\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getFloatOr(\1, 0.0F)
+re:\.getCompound\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getCompoundOrEmpty(\1)
+re:\.getList\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*),\s*[A-Za-z0-9_.]+\)	.getListOrEmpty(\1)
+# CompoundTag.getAllKeys() -> keySet() (same Set<String>)
+member:getAllKeys	keySet
+# CompoundTag.getUUID/putUUID/hasUUID are gone; a UUID goes through UUIDUtil.CODEC (the same int[4] on disk).
+# Each needs an argument, so the many no-arg Entity.getUUID() calls are untouched.
+re:([\w.]+(?:\(\))?)\.getUUID\(([^()]+)\)	@MVPKG@.Nbt.getUuid(\1, \2)
+re:([\w.]+(?:\(\))?)\.putUUID\(([^(),]+),\s*([^()]+)\)	@MVPKG@.Nbt.putUuid(\1, \2, \3)
+re:([\w.]+(?:\(\))?)\.hasUUID\(([^()]+)\)	@MVPKG@.Nbt.hasUuid(\1, \2)
+# CompoundTag.contains(key, type) lost its type argument (from the 26.2 table, verbatim: anchored on a tag id).
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:1|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_BYTE)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ByteTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:2|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_SHORT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ShortTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:3|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:4|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:5|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_FLOAT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.FloatTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:6|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_DOUBLE)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.DoubleTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:7|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_BYTE_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ByteArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:8|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_STRING)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.StringTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:9|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LIST)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ListTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:10|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_COMPOUND)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.CompoundTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:11|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:12|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:99|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_ANY_NUMERIC)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.NumericTag)
+# ---- 1.21.4 -> 1.21.5 package moves
+com.mojang.blaze3d.platform.GlConst	com.mojang.blaze3d.opengl.GlConst
+com.mojang.blaze3d.platform.GlDebug	com.mojang.blaze3d.opengl.GlDebug
+com.mojang.blaze3d.platform.GlStateManager	com.mojang.blaze3d.opengl.GlStateManager
+com.mojang.blaze3d.shaders.AbstractUniform	com.mojang.blaze3d.opengl.AbstractUniform
+net.neoforged.neoforge.client.model.data.ModelData	net.neoforged.neoforge.model.data.ModelData
+net.neoforged.neoforge.client.model.data.ModelDataManager	net.neoforged.neoforge.model.data.ModelDataManager
+net.neoforged.neoforge.client.model.data.ModelProperty	net.neoforged.neoforge.model.data.ModelProperty
+net.minecraft.world.entity.animal.Sheep	net.minecraft.world.entity.animal.sheep.Sheep
+net.minecraft.world.entity.animal.Wolf	net.minecraft.world.entity.animal.wolf.Wolf
+net.minecraft.world.entity.animal.WolfVariant	net.minecraft.world.entity.animal.wolf.WolfVariant
+net.minecraft.world.entity.animal.WolfVariants	net.minecraft.world.entity.animal.wolf.WolfVariants
+net.minecraft.world.entity.animal.FrogVariant	net.minecraft.world.entity.animal.frog.FrogVariant
+net.minecraft.core.component.DataComponentPredicate	net.minecraft.core.component.predicates.DataComponentPredicate
+net.neoforged.neoforge.client.event.AddAttributeTooltipsEvent	net.neoforged.neoforge.event.AddAttributeTooltipsEvent
+net.neoforged.neoforge.client.event.GatherSkippedAttributeTooltipsEvent	net.neoforged.neoforge.event.GatherSkippedAttributeTooltipsEvent
+net.neoforged.neoforge.event.entity.player.PlayerHeartTypeEvent	net.neoforged.neoforge.client.event.PlayerHeartTypeEvent
+# ---- the RenderPipeline rewrite: immediate-mode GL on LegacyGl, 1.21.4 RenderType.create on LegacyRenderType
+# (the rest of the layer is java/Legacy*.java, ShaderInstance, ShaderShard, Uniform, RawGlTexture)
+net.minecraft.client.renderer.RenderStateShard.ShaderStateShard	@MVPKG@.ShaderShard
+re:\bRenderStateShard\.ShaderStateShard\b	@MVPKG@.ShaderShard
+re:\bShaderStateShard\b	@MVPKG@.ShaderShard
+com.mojang.blaze3d.shaders.Uniform	@MVPKG@.Uniform
+re:\bGlStateManager\.(SourceFactor|DestFactor)\b	com.mojang.blaze3d.platform.\1
+re:\bRenderSystem\.(enableBlend|disableBlend|defaultBlendFunc|blendFuncSeparate|blendFunc|blendEquation|enableDepthTest|disableDepthTest|depthFunc|depthMask|colorMask|enableCull|disableCull|recordRenderCall)\(	@MVPKG@.LegacyGl.\1(
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionColorShader\s*\)	@MVPKG@.LegacyGl.setShader(@MVPKG@.LegacyGl.Vanilla.POSITION_COLOR)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionTexShader\s*\)	@MVPKG@.LegacyGl.setShader(@MVPKG@.LegacyGl.Vanilla.POSITION_TEX)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionTexColorShader\s*\)	@MVPKG@.LegacyGl.setShader(@MVPKG@.LegacyGl.Vanilla.POSITION_TEX_COLOR)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionShader\s*\)	@MVPKG@.LegacyGl.setShader(@MVPKG@.LegacyGl.Vanilla.POSITION)
+re:\bRenderSystem\.setShader\(	@MVPKG@.LegacyGl.setShader(
+re:\bRenderSystem\.setShaderTexture\(	@MVPKG@.LegacyGl.setShaderTexture(
+re:\bBufferUploader\.drawWithShader\(	@MVPKG@.LegacyGl.drawWithShader(
+re:\bCoreShaders\.(POSITION_TEX_COLOR|POSITION_TEX|POSITION_COLOR|POSITION)\b	@MVPKG@.LegacyGl.Vanilla.\1
+re:\bRenderType\.create\(	@MVPKG@.LegacyRenderType.create(
+re:\bRenderType\.CompositeState\.builder\(\)	@MVPKG@.LegacyRenderType.state()
+re:\bRenderType\.CompositeState\b	@MVPKG@.LegacyRenderType.State
+re:\b(?:RenderStateShard|RenderType)\.(NO_TRANSPARENCY|ADDITIVE_TRANSPARENCY|LIGHTNING_TRANSPARENCY|GLINT_TRANSPARENCY|CRUMBLING_TRANSPARENCY|OVERLAY_TRANSPARENCY|VIGNETTE_TRANSPARENCY|TRANSLUCENT_TRANSPARENCY|NO_DEPTH_TEST|EQUAL_DEPTH_TEST|LEQUAL_DEPTH_TEST|GREATER_DEPTH_TEST|COLOR_DEPTH_WRITE|COLOR_WRITE|DEPTH_WRITE|CULL|NO_CULL|POLYGON_OFFSET_LAYERING)\b	@MVPKG@.LegacyRenderType.\1
+re:import com\.mojang\.blaze3d\.vertex\.BufferUploader;\n?	
+re:import net\.minecraft\.client\.renderer\.CoreShaders;\n?	
+# DynamicTexture(NativeImage) gained a name supplier (debug label only)
+re:new DynamicTexture\(([^(),]+)\)	new DynamicTexture(() -> "@MVPKG@", \1)
+# ---- Entity.moveTo(...) is snapTo(...) (CATALOG §V39: same body; NOT absSnapTo). A receiver that is a PathNavigation
+# keeps its own moveTo(x, y, z, speed) -- X7b: this guesses at the receiver's spelling, it cannot see its type.
+re:(?<!Navigation\(\))(?<!avigation)(?<!avigator)\.moveTo\(	.snapTo(
+# ---- chunk tickets lost their value type: addRegionTicket(type, pos, radius, value) -> addTicketWithRadius(type, pos, radius)
+# (the value only told two tickets of one type apart; vanilla 1.21.5 keeps one ticket per type, pos and level)
+re:\.addRegionTicket\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*(?:[^,()]|\([^()]*\))+\)	.addTicketWithRadius(\1, \2, \3)
+re:\.removeRegionTicket\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*(?:[^,()]|\([^()]*\))+\)	.removeTicketWithRadius(\1, \2, \3)
+# ---- ClientInput lost forwardImpulse/leftImpulse/jumping/shiftKeyDown
+re:\binput\.forwardImpulse\b	input.getMoveVector().y
+re:\binput\.leftImpulse\b	input.getMoveVector().x
+re:\binput\.jumping\b	input.keyPresses.jump()
+re:\binput\.shiftKeyDown\b	input.keyPresses.shift()
+# ---- OwnableEntity.getOwnerUUID() -> getOwnerReference() (a nullable EntityReference)
+re:([\w.]+(?:\(\))?)\.getOwnerUUID\(\)	@MVPKG@.Owners.uuid(\1)
+# ---- SavedData is a SavedDataType (id + constructor + codec) now; Factory is gone, and save() overrides nothing.
+# The helper keeps the mod's own save(CompoundTag, Provider)/load(CompoundTag[, Provider]) and the on-disk layout.
+re:([\w.]+(?:\(\))?)\.computeIfAbsent\(\s*new SavedData\.Factory<>\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+)(?:,\s*null)?\s*\),\s*((?:[^,()]|\([^()]*\))+)\s*\)	@MVPKG@.SavedDatas.computeIfAbsent(\1, \2, \3, \4)
+re:@Override(\s+public CompoundTag save\(CompoundTag \w+, HolderLookup\.Provider \w+\))	\1
+# ---- Screenshot.takeScreenshot(target) is callback-based now (the GL backend completes it before returning)
+re:\bScreenshot\.takeScreenshot\(\s*((?:[^,()]|\([^()]*\))+)\s*\)	@MVPKG@.Screenshots.take(\1)
+# ---- BakedQuad became a record: getSprite()/getVertices()/getDirection()/getTintIndex()/isShade()/getLightEmission()
+# are sprite()/vertices()/direction()/tintIndex()/shade()/lightEmission(). Anchored on the receiver names a quad is
+# conventionally held in (X7b: a guess at spelling, not at type; getSprite() alone belongs to far too many classes).
+re:\b(quad|bakedQuad|q)\.getSprite\(\)	\1.sprite()
+re:\b(quad|bakedQuad|q)\.getVertices\(\)	\1.vertices()
+re:\b(quad|bakedQuad|q)\.getDirection\(\)	\1.direction()
+re:\b(quad|bakedQuad|q)\.getTintIndex\(\)	\1.tintIndex()
+re:\b(quad|bakedQuad|q)\.isShade\(\)	\1.shade()
+re:\b(quad|bakedQuad|q)\.getLightEmission\(\)	\1.lightEmission()
+# ---- RenderTarget is textures, not a framebuffer: frameBufferId / bindWrite(viewport) ask the backend for the FBO
+re:([\w.]+(?:\(\))?)\.frameBufferId\b	@MVPKG@.LegacyTargets.fbo(\1)
+re:([\w.]+(?:\(\))?)\.bindWrite\(\s*(true|false)\s*\)	@MVPKG@.LegacyTargets.bindWrite(\1, \2)
+# GlStateManager no longer tracks the clear colour; the GL call is the same
+re:\bGlStateManager\._clearColor\(	org.lwjgl.opengl.GL11.glClearColor(
+#!strict

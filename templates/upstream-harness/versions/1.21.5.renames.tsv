@@ -1,0 +1,15 @@
+# 1.21.5 (NeoForge 21.5): the harness renames are those of 1.21.4, plus any rows below.
+#!inherit 1.21.4
+# Measured against neoforge-21.5.98-sources.jar. The annotation-driven GameTest API is gone in 1.21.5 (CATALOG V5/V20/V47):
+# that is not a rename -- tools/port_gates.py runs templates/multi-version/tools/gametest_adapter.py (--dialect 1.21.5) over the harness.
+# Entity.moveTo -> snapTo (CATALOG V39: all five overloads moved together).
+re:\be\.moveTo\(	e.snapTo(
+# GameTestHelper.getBlockEntity now takes the expected class; GameTestHelper.fail takes a Component.
+re:helper\.getBlockEntity\(AT\)	helper.getBlockEntity(AT, net.minecraft.world.level.block.entity.BlockEntity.class)
+re:helper\.fail\(msg\.length\(\) > 500 \? msg\.substring\(0, 500\) \+ "\.\.\." : msg\)	helper.fail(net.minecraft.network.chat.Component.literal(msg.length() > 500 ? msg.substring(0, 500) + "..." : msg))
+# MobEffects.DAMAGE_RESISTANCE -> RESISTANCE (CATALOG V22).
+re:MobEffects\.DAMAGE_RESISTANCE\b	MobEffects.RESISTANCE
+# ArmorItem is gone: the slot an armour piece goes in is its EQUIPPABLE component's. (Runs after 1.21.3's `armor.getEquipmentSlot()` row.)
+re:import net\.minecraft\.world\.item\.ArmorItem;	import net.minecraft.world.item.equipment.Equippable;
+re:if \(item instanceof ArmorItem armor\) \{	if (item.components().get(net.minecraft.core.component.DataComponents.EQUIPPABLE) instanceof Equippable armor) {
+re:armor\.getEquipmentSlot\(new ItemStack\(item\)\)	armor.slot()

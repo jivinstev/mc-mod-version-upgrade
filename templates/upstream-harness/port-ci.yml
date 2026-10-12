@@ -22,14 +22,20 @@
 # in the GitHub UI publishes too, and publish = <tag> publishes one by hand. publish_setup = true creates the
 # Modrinth draft project once. Publishing refuses a pre-release, a build with an open S1 in its fix ledger, and
 # a dependency not yet published; it never runs on a pull request.
+#
+# Layer branch: when the fork has a multi-version layer branch (.multiversion/, templates/fork-layer), this SAME
+# file is installed on both branches -- the layer branch may differ from the port branch only inside .multiversion/
+# and one commented line in build.gradle, so it cannot carry a workflow of its own. The layer-* jobs at the end run
+# only on the layer branch (and only where .multiversion/ exists): isolation, inertness, a compile-only pass of
+# every middle target, and the full gates on the newest target (tools/layer-ci.py, tools/port-ci.py --layer-branch).
 name: Port CI ({{TARGET}})
 
 on:
   push:
-    branches: ["{{BRANCH}}"]
+    branches: ["{{BRANCH}}"{{LAYER_BRANCH_ITEM}}]
     tags: ["*-mc{{MC}}{{TAG_SUFFIX}}"]
   pull_request:
-    branches: ["{{BRANCH}}"]
+    branches: ["{{BRANCH}}"{{LAYER_BRANCH_ITEM}}]
   release:
     types: [released]
   workflow_dispatch:
@@ -263,3 +269,4 @@ jobs:
         env:
           MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
         run: python3 .port-tools/tools/port-publish.py modrinth-create --repo .
+{{LAYER_JOBS}}

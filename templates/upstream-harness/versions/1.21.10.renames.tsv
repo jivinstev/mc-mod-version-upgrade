@@ -1,0 +1,6 @@
+# 1.21.10 (NeoForge 21.10, FML 10): the harness renames are those of 1.21.8, plus the rows below.
+#!inherit 1.21.8
+# Measured against the 1.21.10 sources (neoforge-21.10.64-sources.jar) on the Epic Core API port's Gate A.
+# 1.21.9 put SpawnEggItem.getType back to getType(ItemStack) (the entity type is read from the stack's own components again), so the row the
+# 1.21.4 table adds -- getType(HolderLookup.Provider, ItemStack) -- is undone here. A later row, so it matches the inherited row's output.
+re:egg\.getType\(helper\.getLevel\(\)\.registryAccess\(\), new ItemStack\(item\)\)	egg.getType(new ItemStack(item))

@@ -28,6 +28,7 @@ import argparse, pathlib, re, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "templates/upstream-harness/port-ci.yml"
+LAYER_TEMPLATE = ROOT / "templates/upstream-harness/port-ci-layer.yml"
 WORKFLOW = ".github/workflows/port-ci.yml"
 
 
@@ -83,6 +84,18 @@ def kit_pin(repo, version=None, sha=None):
     if not re.fullmatch(r"[0-9a-f]{64}", sha):
         sys.exit(f"not a sha256: {sha!r}")
     return int(version), sha
+
+
+def layer_values(values, layer_branch):
+    """The two placeholders of the multi-version layer: the layer branch in the triggers, and the layer-* jobs (a
+    second template, rendered with the same values). Without --layer-branch both are empty and the workflow is
+    exactly the layer-free one."""
+    if not layer_branch:
+        return dict(values, LAYER_BRANCH_ITEM="", LAYER_JOBS="")
+    if not re.fullmatch(r"[\w.\-/]+", layer_branch) or layer_branch == values["BRANCH"]:
+        raise SystemExit(f"--layer-branch must be a branch name other than the port branch ({values['BRANCH']}), got {layer_branch!r}")
+    v = dict(values, LAYER_BRANCH=layer_branch)
+    return dict(values, LAYER_BRANCH_ITEM=f', "{layer_branch}"', LAYER_JOBS=render(LAYER_TEMPLATE.read_text(encoding="utf-8"), v))
 
 
 def render(text, values):
@@ -207,7 +220,10 @@ def self_check():
     t = TEMPLATE.read_text(encoding="utf-8")
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
     v["PRE_BUILD"] = pre_build(["owner/lib@neoforge-1.21.1"])
-    out = render(t, v)
+    v["BRANCH"], v["BASE"] = "neoforge-1.21.1", "master"
+    plain = render(t, layer_values(v, None))
+    out = plain
+    lay = render(t, layer_values(v, "neoforge-1.21.x"))
     ok = "${{ github.sha }}" in out and "{{" not in out.replace("${{", "")    # GitHub's own ${{ }} survive
     ok &= "repository: owner/lib" in out and "path: .port-deps/lib" in out and "publishToMavenLocal" in out
     import tempfile
@@ -257,6 +273,28 @@ def self_check():
             promote_dispatch(*bad); ok = False
         except SystemExit:
             pass
+    # layer branch: without --layer-branch the workflow has no layer text at all; with it the SAME file gains the
+    # triggers and five layer-* jobs, each skipped on the port branch and without .multiversion/
+    ok &= "layer-plan" not in plain and "layer-gates" not in plain and "neoforge-1.21.x" not in plain and 'branches: ["neoforge-1.21.1"]' in plain
+    ok &= plain.endswith("modrinth-create --repo .\n") and "{{" not in plain.replace("${{", "")
+    ok &= "{{" not in lay.replace("${{", "") and lay.count("\n  gates:\n") == 1
+    ok &= lay.count('branches: ["neoforge-1.21.1", "neoforge-1.21.x"]') == 2
+    for j in ("layer-plan", "layer-isolation", "layer-inertness", "layer-compile", "layer-gates"):
+        ok &= f"\n  {j}:\n" in lay
+    ljobs = lay.split("\n  layer-plan:\n", 1)[1]
+    ok &= "github.ref_name == 'neoforge-1.21.x' || github.base_ref == 'neoforge-1.21.x'" in ljobs.split("steps:", 1)[0]
+    for j in ("layer-isolation", "layer-inertness", "layer-compile", "layer-gates"):
+        body = ljobs.split(f"\n  {j}:\n", 1)[1].split("\n  layer-", 1)[0]
+        ok &= "needs: layer-plan" in body and "needs.layer-plan.outputs.layer == 'true'" in body and not any("always()" in l for l in body.splitlines() if l.startswith("    if:"))
+    ok &= "python3 .multiversion/tools/layer.py isolation --base \"origin/neoforge-1.21.1\"" in lay
+    ok &= "layer-ci.py inertness" in lay and "layer-ci.py compile" in lay and "--mc \"$NEWEST\"" in lay
+    ok &= "fromJson(needs.layer-plan.outputs.matrix)" in lay and "java-version: ${{ matrix.java }}" in lay
+    ok &= "run: |" in ljobs and "${{ needs" not in "\n".join(l for l in ljobs.splitlines() if l.lstrip().startswith(("python3", "extra=", "git fetch", "curl")))
+    for bad in ("neoforge-1.21.1", "x y"):         # the port branch itself, or not a branch name
+        try:
+            layer_values(v, bad); ok = False
+        except SystemExit:
+            pass
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -275,6 +313,9 @@ def main():
     ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet"); ap.add_argument("--no-commit", action="store_true")
     ap.add_argument("--tag-suffix", default="", help="a tag series of its own, e.g. -release for a release-aligned "
                     "branch, so its JARs never share tags with the development port's")
+    ap.add_argument("--layer-branch", help="the fork's multi-version layer branch (e.g. neoforge-1.21.x): the same workflow "
+                    "then also runs on it and carries the layer-* jobs (isolation, inertness, compile-only middle "
+                    "targets, full gates on the newest target); skipped on the port branch")
     ap.add_argument("--trailer", action="append", default=[])
     ap.add_argument("--kit-version", type=int, help="Port CI kit to pin (default: the newest published)")
     ap.add_argument("--kit-sha", help="its sha256 (default: read from the release's SHA256SUMS)")
@@ -292,7 +333,7 @@ def main():
     values = {"TARGET": f"NeoForge {neo} (Minecraft {mc})", "BRANCH": branch, "MC": mc, "MODID": a.modid,
               "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
               "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
-    out = render(TEMPLATE.read_text(encoding="utf-8"), values)
+    out = render(TEMPLATE.read_text(encoding="utf-8"), layer_values(values, a.layer_branch))
     if a.print:
         print(out); return 0
     f = repo / WORKFLOW
