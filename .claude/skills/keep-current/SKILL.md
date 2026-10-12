@@ -164,9 +164,10 @@ routine session searched for `add_repo` at 8 s, and in a second run polled for i
 appears in a routine session, while the routine's own config showed `sources: []`. The tool that creates a routine
 from a session (`create_trigger`) has no way to set its repositories, so:
 
-- **The user adds the repositories to the routine** in the claude.ai Routines page (edit the routine, select the
-  forks and this repository). Say exactly which ones in one line; it takes them a minute. Until then the routine
-  cannot work, however its prompt is written.
+- **The user adds the repositories to the routine.** Give them the exact link and steps, never just "the Routines
+  page": open https://claude.ai/code/routines, click the routine by name, open the menu next to its name, choose
+  **Edit**, add each repository (list them as `owner/repo`), and save. Each one is cloned on every run. Until they
+  have, the routine cannot work, however its prompt is written.
 - **The prompt checks, it does not wait.** It looks for the clones it expects; if one is missing, it still does step
   1, then stops and names the missing repository and where to add it. It never polls for `add_repo`.
 - **Step 1 needs no repository.** The "anything new?" check only reads: `git ls-remote` the public repositories over
