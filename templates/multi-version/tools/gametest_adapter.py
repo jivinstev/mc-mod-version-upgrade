@@ -57,6 +57,9 @@ DIALECTS = {
     # 1.21.5: FML's @EventBusSubscriber still has a bus() (no auto-detection), and both events are mod-bus events.
     '1.21.5': dict(ident='ResourceLocation', ident_import='net.minecraft.resources.ResourceLocation',
                    envt='TestEnvironmentDefinition', bus=', bus = EventBusSubscriber.Bus.MOD'),
+    # 1.21.6+ (FML 9): @EventBusSubscriber has no bus() any more (inferred from the event type); otherwise as 1.21.5.
+    '1.21.8': dict(ident='ResourceLocation', ident_import='net.minecraft.resources.ResourceLocation',
+                   envt='TestEnvironmentDefinition', bus=''),
 }
 
 TIMEOUT_RE = re.compile(r'timeoutTicks\s*=\s*(\d+)')
@@ -303,7 +306,8 @@ def self_check():
            'import net.neoforged.neoforge.gametest.GameTestHolder;\n@GameTestHolder("m")\npublic class A {\n'
            '    @GameTest(template = "empty_test", timeoutTicks = 50)\n    public static void fooBar(GameTestHelper h) {}\n'
            '    @GameTest\n    public void baz(GameTestHelper h) {}\n}\n')
-    for dialect, ident, bus in (('26', 'Identifier', False), ('1.21.5', 'ResourceLocation', True)):
+    for dialect, ident, bus in (('26', 'Identifier', False), ('1.21.5', 'ResourceLocation', True),
+                              ('1.21.8', 'ResourceLocation', False)):
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(os.path.join(d, 'p/t'))
             open(os.path.join(d, 'p/t/A.java'), 'w').write(src)
@@ -337,7 +341,8 @@ if __name__ == '__main__':
                     help='Class name for the generated registrar')
     ap.add_argument('--structure', default='empty_test')
     ap.add_argument('--dialect', choices=sorted(DIALECTS), default='26',
-                    help="'26' (26.x: Identifier, generic environment) or '1.21.5' (ResourceLocation, FML bus attribute)")
+                    help="'26' (26.x: Identifier, generic environment), '1.21.5' (ResourceLocation, FML bus attribute) "
+                         "or '1.21.8' (1.21.6+: ResourceLocation, no bus attribute)")
     a = ap.parse_args()
     if not a.package:
         a.package = a.modid + '.compat'
