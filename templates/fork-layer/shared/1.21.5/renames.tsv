@@ -1,0 +1,40 @@
+# Shared rows for a fork layer's 1.21.5 target (and every later one that inherits it).
+# 1.21.5 is where CompoundTag/ListTag getters started returning Optional -- the same change 26.2 carries
+# (CATALOG §V12), so these rows come from templates/multi-version/versions/26.2.renames.hand.tsv.
+# ⚠ NOT copied verbatim: the 26.2 rows matched `.getInt(<anything without a comma>)`, which also rewrites a
+# ByteBuffer read (`bytes.getInt(at)` -> `bytes.getIntOr(at, 0)`) -- Battle of Lord had no binary readers, the
+# first fork that went through here (a Blender/glTF loader) has eight. A shared row cannot know the receiver's
+# type, so it anchors on what the NBT API guarantees and a byte offset never is: a string literal key, or an
+# UPPER_CASE constant (bare or Class.CONST). A key held in a variable, and a ListTag index, are left to the
+# fork's own rows or its workers.
+#!exhaustive  # shared library: most forks use only some of these rows
+re:\.getInt\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getIntOr(\1, 0)
+re:\.getString\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getStringOr(\1, "")
+re:(?<!Boolean)\.getBoolean\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getBooleanOr(\1, false)
+re:\.getLong\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getLongOr(\1, 0L)
+re:\.getDouble\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getDoubleOr(\1, 0.0)
+re:\.getFloat\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getFloatOr(\1, 0.0F)
+re:\.getCompound\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getCompoundOrEmpty(\1)
+re:\.getList\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*),\s*[A-Za-z0-9_.]+\)	.getListOrEmpty(\1)
+# CompoundTag.getAllKeys() -> keySet() (same Set<String>)
+member:getAllKeys	keySet
+# CompoundTag.getUUID/putUUID/hasUUID are gone; a UUID goes through UUIDUtil.CODEC (the same int[4] on disk).
+# Each needs an argument, so the many no-arg Entity.getUUID() calls are untouched.
+re:([\w.]+(?:\(\))?)\.getUUID\(([^()]+)\)	@MVPKG@.Nbt.getUuid(\1, \2)
+re:([\w.]+(?:\(\))?)\.putUUID\(([^(),]+),\s*([^()]+)\)	@MVPKG@.Nbt.putUuid(\1, \2, \3)
+re:([\w.]+(?:\(\))?)\.hasUUID\(([^()]+)\)	@MVPKG@.Nbt.hasUuid(\1, \2)
+# CompoundTag.contains(key, type) lost its type argument (from the 26.2 table, verbatim: anchored on a tag id).
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:1|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_BYTE)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ByteTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:2|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_SHORT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ShortTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:3|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:4|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:5|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_FLOAT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.FloatTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:6|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_DOUBLE)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.DoubleTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:7|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_BYTE_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ByteArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:8|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_STRING)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.StringTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:9|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LIST)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ListTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:10|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_COMPOUND)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.CompoundTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:11|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:12|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:99|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_ANY_NUMERIC)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.NumericTag)
+#!strict
