@@ -506,6 +506,12 @@ import re,sys
 src=open("tools/ci-gates.py").read()
 assert 'if q and q != "none"' in src
 PY
+python3 - <<'PY' && ok "shared tables: every '#!exhaustive' is closed by '#!strict' (a chain ending at any version loads)" || bad "a shared renames.tsv leaves '#!exhaustive' open"
+import glob,sys
+for f in sorted(glob.glob("templates/fork-layer/shared/*/renames.tsv")):
+    marks=[l.strip().split()[0] for l in open(f) if l.startswith(("#!exhaustive","#!strict"))]
+    if marks and marks[-1]!="#!strict": sys.exit(f"{f}: unclosed")
+PY
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"
