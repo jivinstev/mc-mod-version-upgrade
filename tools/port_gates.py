@@ -42,10 +42,10 @@ def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
 
 
 def build_dir_name(env=None):
-    """The build directory of this run: a fork layer builds target <t> into build-mc<t>/ (layer.gradle)."""
+    """The build directory of this run: a fork layer builds target <t> into build/mc<t>/ (layer.gradle)."""
     for a in gradle_target_args(env):
         if a.startswith("-Pmc="):
-            return "build-mc" + a[len("-Pmc="):]
+            return "build/mc" + a[len("-Pmc="):]
     return "build"
 
 

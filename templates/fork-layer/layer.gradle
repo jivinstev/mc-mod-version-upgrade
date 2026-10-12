@@ -12,7 +12,7 @@
 //     Minecraft version: vanilla moves the classes it names).
 //   * The Java toolchain, neoforge.mods.toml version ranges and dependency substitutions follow the
 //     target's target.properties.
-//   * Everything builds into build-mc<t>/, so one target's classes never mix with another's.
+//   * Everything builds into build/mc<t>/, so one target's classes never mix with another's.
 // Versions are NOT changed here: run through .multiversion/build.sh <t>, which passes the target's
 // versions as -P (they override gradle.properties) along with -Pmc.
 
@@ -43,7 +43,7 @@ mvProps.stringPropertyNames().findAll { it.startsWith('prop.') }.each { k ->
 }
 
 def mvPython = System.getProperty('os.name').toLowerCase().contains('windows') ? 'python' : 'python3'
-layout.buildDirectory = file("build-mc${mvTarget}")
+layout.buildDirectory = file("build/mc${mvTarget}")   // inside build/: every authors' .gitignore ignores it
 
 // ---- sources -----------------------------------------------------------------------------------
 def mvPrepared = layout.buildDirectory.dir('mv/java')
@@ -127,7 +127,7 @@ configurations.configureEach {
         mvSubs.each { k -> substitute(module(k.substring(11))).using(module(mvProps.getProperty(k))) }
     }
 }
-println "multiversion: target ${mvTarget} (chain ${mvChain.join(' > ')}), build dir build-mc${mvTarget}"
+println "multiversion: target ${mvTarget} (chain ${mvChain.join(' > ')}), build dir build/mc${mvTarget}"
 
 // Replace versionRange in the [[dependencies.*]] block whose modId the key names ("minecraft", "neoforge").
 String mvRewriteToml(String text, Map ranges) {
