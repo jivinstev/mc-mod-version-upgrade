@@ -121,6 +121,21 @@ def green_detail(text):
     return head + (f"; {spawned.group(1)} entity types spawned" if spawned else "")
 
 
+def log_tails(paths, n=40, cap=12000):
+    """The last n lines of each log, for printing into a CI job log when a check fails. CI artifacts cannot be
+    downloaded from a cloud session (the egress proxy blocks their storage host), so a failure must carry its own
+    evidence in the job output. Printed only on failure: a passing run's output is unchanged."""
+    out = []
+    for f in sorted(pathlib.Path(x) for x in paths):
+        if not f.is_file():
+            continue
+        lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+        out.append(f"----- tail of {f.name} ({min(n, len(lines))} of {len(lines)} lines) -----")
+        out += lines[-n:]
+    text = "\n".join(out)
+    return text[-cap:] if len(text) > cap else text
+
+
 def self_check():
     ok = green_detail("[x] All 4 required tests passed :)") == "4 required test(s) passed"
     ok &= green_detail("M_BOOT_TEST: spawned 40 creature type(s): [a]\nM_BOOT_TEST: PASS — ticked 200").startswith(
@@ -153,6 +168,11 @@ def self_check():
     ok &= target_jar_glob("*_mr.jar", "1.21.4") == "*_mr-mc1.21.4.jar" and target_jar_glob("*_mr.jar", None) == "*_mr.jar"
     ok &= target_jar_glob("*_mr-mc1.21.4.jar", "1.21.4") == "*_mr-mc1.21.4.jar" and target_jar_glob("mod", "1.21.4") == "mod"
     ok &= target_jar_glob(None, "1.21.4") is None
+    with _t.TemporaryDirectory() as d:
+        (pathlib.Path(d) / "a.log").write_text("\n".join(f"l{i}" for i in range(100)), encoding="utf-8")
+        t = log_tails([pathlib.Path(d) / "a.log", pathlib.Path(d) / "missing.log"], n=3)
+        ok &= t.splitlines() == ["----- tail of a.log (3 of 100 lines) -----", "l97", "l98", "l99"]
+        ok &= log_tails([pathlib.Path(d) / "missing.log"]) == ""
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -218,6 +238,7 @@ def main():
                 if l.startswith("PORT_RT ")]
         if r.returncode or not arts:
             record("minimal environment", False, "could not list the runtime's mods (see runtime-artifacts.log)")
+            print(log_tails([lst], n=60), flush=True)
             arts = []
         toml = repo / "src/main/resources/META-INF/neoforge.mods.toml"
         ex, excluded = minimal_exclusions(toml.read_text(encoding="utf-8") if toml.is_file() else "", arts)
@@ -354,7 +375,9 @@ def main():
                             cmd += ["--expect-file", str(repo / ".multiversion" / n)]
                 r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
                 (work / "shipped-gate.log").write_text(r.stdout + r.stderr, encoding="utf-8")
-                print(r.stdout[-4000:], flush=True)
+                print(r.stdout[-4000:] if r.returncode == 0 else r.stdout + r.stderr, flush=True)
+                if r.returncode != 0:   # the mod's own logs and latest.log: why an agent/coremod did not run (#88)
+                    print(log_tails(sorted((work / "shipped" / "server" / "logs").glob("*.log"))), flush=True)
                 rl = [l.replace("[shipped-gate] ", "") for l in r.stdout.splitlines() if "FAIL" in l or "PASS" in l]
                 bad = [l for l in rl if l.startswith("FAIL")]
                 record(label, r.returncode == 0,

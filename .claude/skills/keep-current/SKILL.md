@@ -122,7 +122,12 @@ until its dependency's run is green, and it is then gated against the dependency
    open on a branch that ships blocks the PR, and the run stops and reports.
    **Auto-merge** (fleet entry `"automerge": true`): wait for the PR's own CI -- every gate, full and minimal --
    and merge with a merge commit (never squash or rebase: the authors' commits must stay commits). A red or
-   missing check is not merged: fix it on the work branch, or stop and report. After merging, start the fork's
+   missing check is not merged: fix it on the work branch, or stop and report. **Then wait for the CI run the merge
+   itself triggers on the target branch** (a push run on the port branch, or the layer branch for a layer PR) and
+   report its result: a green PR does not prove the merged branch is green. A job that failed before any gate body
+   ran (setup, dependency download -- e.g. "could not list the runtime's mods") is re-run once; a second failure, or
+   any failure inside a gate, is reported as waiting on the user with the failing job's summary line. Never report
+   a merge as done while its push run is red or still running. After merging, start the fork's
    release run (`release=true`): it cuts a pre-release, which dependents re-pin to (step 7). Promotion stays a
    person's (stop 4). Without `automerge`, leave the PR open for the user.
    Once the pre-release exists, rename this reconcile's ledger column (`keep-current/<date>`) to its tag (joined
@@ -154,7 +159,8 @@ version; the layer branch must carry it to every target, and nothing fixes a mid
 4. Put `t.md` (target | errors before | errors after | class | residue) in the layer PR body and link it from the port
    PR; `layer-sync.py ledger --ledger L.json --json t.json --column keep-current/<date>` then `fix-ledger.py render
    --ledger L.json --into BODY` puts the same table in the fix ledger's issue.
-5. Gates: the layer's CI runs the full gates on the base and the newest target and compile + audits on the middle
+5. Merging the layer PR follows step 6's rule: wait for the push run on the layer branch and report it.
+6. Gates: the layer's CI runs the full gates on the base and the newest target and compile + audits on the middle
    ones; a target you intend to release gets `ci-gates.py --mc <t>` (full) first.
 
 ## Setup: run it nightly on the user's subscription
