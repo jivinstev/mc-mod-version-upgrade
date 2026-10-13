@@ -11,6 +11,14 @@ pass. Everything is read from the repository rather than guessed: the target fro
 Java toolchain from build.gradle, the author's branch from origin/HEAD. --dep names a sibling port this one
 compiles against (published to mavenLocal by its own build first, as during the port).
 
+Per-platform jars (both opt-in; without them the workflow is byte-for-byte what it was, tools/golden/port-ci-*.yml):
+  --variant-jar GLOB (repeat)  a mod whose build ships several jars (e.g. '*_mr.jar', '*_cf.jar'): a `shipped jars`
+                               job builds once and boots EACH in a real NeoForge server (tools/shipped-gate.py, the
+                               --dep-jar jars as --deps); the release needs it like the gates.
+  --dep-jar-variant SPEC       a dependent of such a mod: another asset of a --dep-jar dependency (same repo, tag and
+                               G:A:V), sha256-pinned; one more leg `gates (full, <label>)` runs the build and every
+                               gate with it in mavenLocal instead of the default asset.
+
     python3 tools/port-ci.py promote --fork <owner/repo> --tag <release tag> --played-by <github login>
                              [--notes "<what was played>"] [--branch <port branch>] [--print]
 
@@ -29,6 +37,8 @@ import argparse, pathlib, re, subprocess, sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "templates/upstream-harness/port-ci.yml"
 LAYER_TEMPLATE = ROOT / "templates/upstream-harness/port-ci-layer.yml"
+SHIPPED_TEMPLATE = ROOT / "templates/upstream-harness/port-ci-shipped.yml"
+GOLDEN = ROOT / "tools/golden"
 WORKFLOW = ".github/workflows/port-ci.yml"
 
 
@@ -152,6 +162,148 @@ def dep_jars(specs, sha_of=None):
     return "\n".join(steps)
 
 
+VARIANT_GLOB = re.compile(r"[\w.*?+\[\]-]+\.jar")
+SAFE_ASSET = re.compile(r"[\w.+-]+\.jar")
+
+
+def _m2_jar(g, art, ver):
+    return ".m2/repository/" + g.replace(".", "/") + f"/{art}/{ver}/{art}-{ver}.jar"
+
+
+def variant_label(default_asset, asset):
+    """A short, stable name for an alternate asset: what its file name has that the default's does not
+    (lib-1.0_mr.jar / lib-1.0_cf.jar -> "cf"), so the check name survives a re-pin to a new version."""
+    a, b = default_asset[:-4], asset[:-4]
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    j = 0
+    while j < min(len(a), len(b)) - i and a[-1 - j] == b[-1 - j]:
+        j += 1
+    return b[i:len(b) - j].strip("_.-+") or b
+
+
+def dep_jar_variants(variants, dep_specs, sha_of=None):
+    """--dep-jar-variant: [(label, steps)] -- per alternate asset of a --dep-jar dependency, a step that overwrites the
+    default jar in mavenLocal (same coordinates, so the build and every gate run against it) on that matrix leg only.
+    Pinned by sha256 exactly as dep_jars() pins the default. The curl line is written URL-first on purpose:
+    tools/port-offer.py reads the DEFAULT pins (`curl -fsSL -o ... URL`) as the sibling jar to install."""
+    defaults = [DEP_JAR.fullmatch(d).groups() for d in dep_specs if DEP_JAR.fullmatch(d)]
+    out, seen = [], {}
+    for d in variants:
+        m = DEP_JAR.fullmatch(d)
+        if not m:
+            raise SystemExit(f"--dep-jar-variant must be owner/repo@tag/asset.jar=group:artifact:version, got {d!r}")
+        repo, tag, asset, g, art, ver = m.groups()
+        if not SAFE_ASSET.fullmatch(asset):
+            raise SystemExit(f"--dep-jar-variant: asset {asset!r} has characters outside [A-Za-z0-9_.+-]")
+        same = [x for x in defaults if (x[0], x[3], x[4], x[5]) == (repo, g, art, ver)]
+        if not same:
+            raise SystemExit(f"--dep-jar-variant {d}: no --dep-jar for {repo} with coordinates {g}:{art}:{ver}; a variant "
+                             "names an ALTERNATE asset of a dependency already given with --dep-jar")
+        if same[0][1] != tag:
+            raise SystemExit(f"--dep-jar-variant {d}: the tag {tag!r} is not the --dep-jar's ({same[0][1]!r}); "
+                             "re-pin both to the same release")
+        if same[0][2] == asset:
+            raise SystemExit(f"--dep-jar-variant {d}: {asset} is already the default --dep-jar asset; name the other one")
+        if (repo, asset) in seen:
+            raise SystemExit(f"--dep-jar-variant {d}: given twice")
+        label = variant_label(same[0][2], asset)
+        if label in seen.values():          # two libraries with a "_cf" variant each: fall back to the asset's name
+            label = asset[:-4]
+        if not re.fullmatch(r"[\w.+-]+", label) or label in seen.values():
+            raise SystemExit(f"--dep-jar-variant {d}: cannot name its matrix leg uniquely (got {label!r})")
+        seen[(repo, asset)] = label
+        url = f"https://github.com/{repo}/releases/download/{tag}/{asset}"
+        sha = (sha_of or _sha_url)(url)
+        jar = "$HOME/" + _m2_jar(g, art, ver)
+        out.append((label, "\n".join([
+            f"      - name: {art} {ver} -- the {asset} variant from the {tag} release instead (pinned by sha256)",
+            f"        if: matrix.variant == '{label}'",
+            f"        run: |",
+            f'          curl -fsSL "{url}" -o "{jar}"',
+            f'          echo "{sha}  {jar}" | sha256sum -c -'])))
+    return out
+
+
+def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_of=None):
+    """The placeholders of the two opt-in variant options. With neither, every one is empty (RELEASE_NEEDS stays
+    `gates`) and the workflow is byte-for-byte the variant-free one (self-check: tools/golden/port-ci-*.yml).
+      --variant-jar GLOB: a `shipped jars` job (templates/upstream-harness/port-ci-shipped.yml) that boots each built
+        jar as shipped; the release needs it.
+      --dep-jar-variant SPEC: one more gates leg per alternate dependency asset, `gates (full, <label>)`."""
+    v = dict(values, GATES_VARIANTS="", GATES_VARIANT_NAME="", GATES_VARIANT_ARTIFACT="", GATES_VARIANT_JARS_IF="",
+             VARIANT_STEPS="", SHIPPED_JOB="", RELEASE_NEEDS="gates")
+    legs = dep_jar_variants(dep_variants, dep_specs, sha_of)
+    if legs:
+        v.update(GATES_VARIANTS='\n        variant: [""]\n        include:' + "".join(
+                     f'\n          - env: full\n            variant: "{label}"' for label, _ in legs),
+                 GATES_VARIANT_NAME="${{ matrix.variant && format(', {0}', matrix.variant) || '' }}",
+                 GATES_VARIANT_ARTIFACT="${{ matrix.variant && format('-{0}', matrix.variant) || '' }}",
+                 GATES_VARIANT_JARS_IF=" && !matrix.variant",
+                 VARIANT_STEPS="".join("\n" + steps for _, steps in legs))
+    if variant_jars:
+        for gl in variant_jars:
+            if not VARIANT_GLOB.fullmatch(gl):
+                raise SystemExit(f"--variant-jar must be a file glob under build/libs ending in .jar, of [A-Za-z0-9_.*?+[]-] "
+                                 f"(e.g. '*_mr.jar'), got {gl!r}")
+        if len(set(variant_jars)) != len(variant_jars):
+            raise SystemExit("--variant-jar: the same glob given twice")
+        deps = " ".join(_m2_jar(*DEP_JAR.fullmatch(d).groups()[3:]) for d in dep_specs if DEP_JAR.fullmatch(d))
+        sv = dict(v, VARIANT_JARS=" ".join(variant_jars), SHIPPED_DEPS=deps)
+        v.update(SHIPPED_JOB="\n\n" + render(SHIPPED_TEMPLATE.read_text(encoding="utf-8"), sv).rstrip("\n"),
+                 RELEASE_NEEDS="[gates, shipped]")
+    return v
+
+
+def recover_args(text):
+    """The port-ci.py arguments an installed workflow was generated with, read back from its text: what a re-pin or a
+    new option regenerates from, so nothing else moves. Not arguments (read from the checkout instead): the port
+    branch (HEAD), the authors' branch (origin/HEAD), the target (gradle.properties) and the Java toolchain."""
+    out = []
+    one = lambda rx: (re.search(rx, text) or [None, None])[1]
+    out += ["--modid", one(r'ci-gates\.py --repo \. --modid "([^"]+)"')]
+    up = one(r'echo "\*\*Unofficial port\*\* of (.*) to [^"]*\."')
+    if up and up != "the original":
+        out += ["--upstream", up]
+    seen = []
+    for m in re.finditer(r'- name: ([\w.-]+) ([\w.+-]+) from the [^\n]* release into mavenLocal \(pinned by sha256\)\n'
+                         r'        run: \|\n          mkdir -p "\$HOME/\.m2/repository/([^"]+)"\n'
+                         r'          curl -fsSL -o "[^"]+" "https://github\.com/([^/"]+/[^/"]+)/releases/download/([^/"]+)/([^/"]+)"', text):
+        art, ver, path, repo, tag, asset = m.groups()
+        spec = f"{repo}@{tag}/{asset}=" + path[:-len(f"/{art}/{ver}")].replace("/", ".") + f":{art}:{ver}"
+        if spec not in seen:
+            seen.append(spec); out += ["--dep-jar", spec]
+    seen = []
+    for m in re.finditer(r'- name: ([\w.-]+) ([\w.+-]+) -- the ([^ ]+) variant from the [^\n]* release instead[^\n]*\n'
+                         r'        if: [^\n]*\n        run: \|\n'
+                         r'          curl -fsSL "https://github\.com/([^/"]+/[^/"]+)/releases/download/([^/"]+)/[^"]+" '
+                         r'-o "\$HOME/\.m2/repository/([^"]+)/[^/"]+/[^/"]+/[^/"]+\.jar"', text):
+        art, ver, asset, repo, tag, gpath = m.groups()
+        spec = f"{repo}@{tag}/{asset}=" + gpath.replace("/", ".") + f":{art}:{ver}"
+        if spec not in seen:
+            seen.append(spec); out += ["--dep-jar-variant", spec]
+    vj = one(r'\n          VARIANT_JARS: "([^"]*)"\n')
+    for g in (vj or "").split():
+        out += ["--variant-jar", g]
+    seen = []
+    for m in re.finditer(r'\n          repository: (\S+)\n          ref: (\S+)\n          path: \.port-deps/', text):
+        d = f"{m.group(1)}@{m.group(2)}"
+        if d not in seen:
+            seen.append(d); out += ["--dep", d]
+    out += ["--gatec", one(r'--gatec "([^"]*)"')]
+    mc_suffix = re.search(r'tags: \["\*-mc([\d.]+)([^"]*)"\]', text)
+    if mc_suffix and mc_suffix.group(2):
+        out.append(f"--tag-suffix={mc_suffix.group(2)}")
+    layer = one(r'push:\n    branches: \["[^"]+", "([^"]+)"\]')
+    if layer:
+        out += ["--layer-branch", layer]
+    out += ["--kit-version", one(r"port-ci-kit-v(\d+)\.tar\.gz"), "--kit-sha", one(r'echo "([0-9a-f]{64})  \$RUNNER_TEMP/kit\.tar\.gz"')]
+    if None in out:
+        raise SystemExit("this does not look like a workflow port-ci.py generated (no --modid, --gatec or kit pin found)")
+    return out
+
+
 def _sha_url(url):
     import hashlib, urllib.request
     with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "port-ci"}), timeout=120) as r:
@@ -216,11 +368,172 @@ def promote(argv):
     return r.returncode
 
 
+GOLDEN_CASES = (("single-nodeps", False, None), ("single-deps", True, None), ("layer-deps", True, "neoforge-1.21.x"))
+FIX_DEP = "o/lib@lib-1.0-mc1.21.1/lib-1.0_mr.jar=com.example.lib:lib:1.0"
+
+
+def fixture(deps=True, layer=None, variant_jars=(), dep_variants=()):
+    """The workflow for fixed, invented values (no network: every sha256 is fake). The three option-free cases are
+    recorded in tools/golden/port-ci-<case>.yml, captured from port-ci.py BEFORE --variant-jar/--dep-jar-variant
+    existed: an option a fork does not use must not change one byte of its workflow."""
+    sha = lambda u: ("c" if "_cf" in u else "a") * 64
+    pre = "\n".join(x for x in (dep_jars([FIX_DEP], sha_of=sha) if deps else "",
+                                pre_build(["o/other@neoforge-1.21.1"]) if deps else "") if x)
+    values = {"TARGET": "NeoForge 21.1.100 (Minecraft 1.21.1)", "BRANCH": "neoforge-1.21.1", "MC": "1.21.1",
+              "MODID": "examplemod", "BASE": "master", "JAVA": "21", "MIGRATOR_REPO": "owner/migrator", "KIT_VERSION": "7",
+              "KIT_SHA256": "b" * 64, "GATEC": "launch,spawn", "TAG_SUFFIX": "", "PRE_BUILD": pre,
+              "UPSTREAM": "https://github.com/a/examplemod"}
+    values = variant_values(values, list(variant_jars), list(dep_variants), [FIX_DEP] if deps else [], sha)
+    return render(TEMPLATE.read_text(encoding="utf-8"), layer_values(values, layer))
+
+
+def regen_golden():
+    for name, deps, layer in GOLDEN_CASES:
+        (GOLDEN / f"port-ci-{name}.yml").write_text(fixture(deps, layer), encoding="utf-8")
+        print(f"wrote tools/golden/port-ci-{name}.yml")
+    return 0
+
+
+def variant_check():
+    """--variant-jar / --dep-jar-variant: off by default (byte-identical goldens), and what each adds when given."""
+    ok = True
+    for name, deps, layer in GOLDEN_CASES:            # neither option: today's workflow, byte for byte, both fork kinds
+        ok &= fixture(deps, layer) == (GOLDEN / f"port-ci-{name}.yml").read_text(encoding="utf-8")
+    cf = FIX_DEP.replace("_mr.jar", "_cf.jar")
+    for layer in (None, "neoforge-1.21.x"):
+        base = fixture(True, layer)
+        # --variant-jar: one more job, the release needs it, globs only through env, the dep jar passed as --deps
+        s = fixture(True, layer, variant_jars=["*_mr.jar", "*_cf.jar"])
+        job = s.split("\n  shipped:\n", 1)[1].split("\n  release:\n", 1)[0]
+        ok &= s.count("\n  shipped:\n") == 1 and "    name: shipped jars\n" in job
+        ok &= "needs: [gates, shipped]" in s and "needs: gates\n" not in s.split("\n  release:\n", 1)[1].split("steps:", 1)[0]
+        ok &= 'VARIANT_JARS: "*_mr.jar *_cf.jar"' in job and 'DEP_JARS: ".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar"' in job
+        ok &= "shipped-gate.py" in job and "--deps" in job and "log_tails" in job and "::error::shipped jar" in job
+        ok &= "!inputs.promote" in job.split("steps:", 1)[0] and "github.event_name != 'release'" in job.split("steps:", 1)[0]
+        ok &= "a" * 64 + "  " in job and "b" * 64 + "  " in job          # dependency and kit sha256-checked here too
+        ok &= "${{" not in job.split("run: |\n          python3", 1)[1].split("\n      - name: Shipped-jar summary", 1)[0]
+        ok &= s.replace(s[s.index("\n\n  shipped:\n"):s.index("\n\n  release:\n")], "").replace(
+            "needs: [gates, shipped]", "needs: gates") == base        # nothing else moved
+        # --dep-jar-variant: one more leg, named; default legs keep their check and artifact names; sha256 pinned
+        d = fixture(True, layer, dep_variants=[cf])
+        g = d.split("\n  gates:\n", 1)[1].split("\n  release:\n", 1)[0]
+        ok &= 'env: [full, minimal]\n        variant: [""]\n        include:\n          - env: full\n            variant: "cf"\n' in g
+        ok &= "name: gates (${{ matrix.env }}${{ matrix.variant && format(', {0}', matrix.variant) || '' }})" in g
+        ok &= "name: gate-logs-${{ matrix.env }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}" in g
+        ok &= "if: matrix.env == 'full' && !matrix.variant" in g
+        step = g.split("the lib-1.0_cf.jar variant", 1)[1].split("\n      - ", 1)[0]
+        ok &= "if: matrix.variant == 'cf'" in step and "c" * 64 + "  $HOME/.m2/repository/com/example/lib/lib/1.0/lib-1.0.jar" in step
+        ok &= "sha256sum -c -" in step and "releases/download/lib-1.0-mc1.21.1/lib-1.0_cf.jar" in step and "${{" not in step
+        ok &= g.index("lib-1.0_mr.jar") < g.index("lib-1.0_cf.jar") < g.index("- name: Build and gates")
+        ok &= "needs: gates\n" in d and "\n  shipped:\n" not in d
+        both = fixture(True, layer, variant_jars=["*_mr.jar"], dep_variants=[cf])
+        ok &= "\n  shipped:\n" in both and 'variant: "cf"' in both and "needs: [gates, shipped]" in both
+    # tools/port-offer.py reads the default pin only: the variant's curl is written URL-first
+    d = fixture(True, None, dep_variants=[cf])
+    ok &= [m.group(1) for m in re.finditer(r'curl -fsSL -o "[^"]*/([\w.+-]+\.jar)" "(https://github\.com/[^"]+/releases/download/[^"]+)"', d)
+           if "o/lib" in m.group(2)] == ["lib-1.0.jar"]
+    ok &= variant_label("lib-1.0_mr.jar", "lib-1.0_cf.jar") == "cf" and variant_label("lib-2.3.jar", "lib-2.3-fabric.jar") == "fabric"
+    sha = lambda u: "a" * 64
+    for bad in ([FIX_DEP], [cf.replace("@lib-1.0-mc1.21.1/", "@lib-1.1-mc1.21.1/")],      # same asset; another tag
+                [cf.replace("o/lib@", "o/other@")], [cf.replace(":1.0", ":1.1")], ["not-a-spec"], [cf, cf],
+                [cf.replace("_cf.jar", "_c f.jar")]):
+        try:
+            dep_jar_variants(bad, [FIX_DEP], sha); ok = False
+        except SystemExit:
+            pass
+    try:
+        dep_jar_variants([cf], [], sha); ok = False                 # a variant of no --dep-jar
+    except SystemExit:
+        pass
+    for bad in (["*_mr.jar", "*_mr.jar"], ['*"; rm -rf ~; ".jar'], ["$X.jar"], ["libs/*.jar"], ["*_mr"]):
+        try:
+            variant_values({}, bad); ok = False
+        except SystemExit:
+            pass
+    two = dep_jar_variants([cf, "o/b@b-1-mc1.21.1/b-1_cf.jar=com.example.b:b:1"],
+                           [FIX_DEP, "o/b@b-1-mc1.21.1/b-1_mr.jar=com.example.b:b:1"], sha)
+    ok &= [l for l, _ in two] == ["cf", "b-1_cf"]                 # two libraries with a "_cf" each: distinct legs
+    # `args` reads every option back from a generated workflow, both fork kinds, with and without the variant options
+    kit = ["--gatec", "launch,spawn"]
+    pin = ["--kit-version", "7", "--kit-sha", "b" * 64]
+    deps = ["--dep-jar", FIX_DEP]
+    ok &= recover_args(fixture(False)) == ["--modid", "examplemod", "--upstream", "https://github.com/a/examplemod", *kit, *pin]
+    ok &= recover_args(fixture(True)) == ["--modid", "examplemod", "--upstream", "https://github.com/a/examplemod", *deps,
+                                          "--dep", "o/other@neoforge-1.21.1", *kit, *pin]
+    ok &= recover_args(fixture(True, "neoforge-1.21.x", ["*_mr.jar", "*_cf.jar"], [cf])) == [
+        "--modid", "examplemod", "--upstream", "https://github.com/a/examplemod", *deps, "--dep-jar-variant", cf,
+        "--variant-jar", "*_mr.jar", "--variant-jar", "*_cf.jar", "--dep", "o/other@neoforge-1.21.1", *kit,
+        "--layer-branch", "neoforge-1.21.x", *pin]
+    sfx = render(TEMPLATE.read_text(encoding="utf-8"), layer_values(variant_values(dict(
+        {k: "x" for k in re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", TEMPLATE.read_text(encoding="utf-8"))},
+        MC="1.21.1", TAG_SUFFIX="-release", MODID="m", GATEC="launch", KIT_VERSION="3", KIT_SHA256="d" * 64,
+        UPSTREAM="the original", PRE_BUILD="", BRANCH="neoforge-1.21.1")), None))
+    ok &= recover_args(sfx) == ["--modid", "m", "--gatec", "launch", "--tag-suffix=-release", "--kit-version", "3", "--kit-sha", "d" * 64]
+    try:
+        recover_args("name: something else\n"); ok = False
+    except SystemExit:
+        pass
+    return ok and shipped_script_check()
+
+
+def shipped_script_check():
+    """Run the `shipped jars` job's own script on a fake fork: a gradlew that builds x_mr.jar and x_cf.jar, and a
+    stand-in shipped-gate.py that boots _mr and fails _cf. The job must build once, pass the dependency as --deps,
+    fail naming the failing variant with its server log tail, and refuse a glob that matches no jar."""
+    import os, shutil, tempfile
+    wf =fixture(True, None, variant_jars=["*_mr.jar", "*_cf.jar", "*_none.jar"])
+    body = wf.split("python3 - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
+    script = "\n".join(l[10:] for l in body.splitlines())
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        repo, tools, home, tmp = d / "repo", d / "repo/.port-tools/tools", d / "home", d / "tmp"
+        for p in (tools, home, tmp):
+            p.mkdir(parents=True)
+        # the kit's own files, as the job loads them; port_gates runs gradlew through gitbash's BASH (Git Bash on
+        # Windows, where plain "bash" is WSL's launcher), so this fake fork's shell-script gradlew runs on every OS
+        for f in ("port_gates.py", "srcsets.py", "targets.py", "gitbash.py", "ci-gates.py", "central-mirror.init.gradle"):
+            shutil.copy(ROOT / "tools" / f, tools / f)
+        (repo / "build.gradle").write_text("tasks.register('cfJar', Jar) {}\n", encoding="utf-8")
+        (repo / "gradlew").write_text('echo "$@" >> gradle-calls.txt; mkdir -p build/libs; '
+                                      'echo x > build/libs/x_mr.jar; echo x > build/libs/x_cf.jar\n', encoding="utf-8")
+        (tools / "shipped-gate.py").write_text(
+            "import pathlib, sys\n"
+            "a = sys.argv\n"
+            "w = pathlib.Path(a[a.index('--work-dir') + 1]); (w / 'server/logs').mkdir(parents=True)\n"
+            "(w / 'server/logs/latest.log').write_text('server log line\\n', encoding='utf-8')\n"
+            "print('[shipped-gate] deps ' + ' '.join(a[a.index('--deps') + 1:]))\n"
+            "bad = a[a.index('--jar') + 1].endswith('_cf.jar')\n"
+            "print('[shipped-gate] ' + ('FAIL boot -- exited before Done' if bad else 'PASS boot -- started'))\n"
+            "sys.exit(1 if bad else 0)\n", encoding="utf-8")
+        env = dict(os.environ, RUNNER_TEMP=str(tmp), HOME=str(home), USERPROFILE=str(home), VARIANT_JARS="*_mr.jar *_cf.jar *_none.jar",
+                   DEP_JARS=".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar")
+        env.pop("PORT_GRADLE_ARGS", None)
+        r = subprocess.run([sys.executable, "-"], input=script, cwd=repo, env=env, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        out = r.stdout + r.stderr
+        gc, mdf = repo / "gradle-calls.txt", tmp / "shipped.md"
+        if not gc.is_file() or not mdf.is_file():   # the fake gradlew never ran (Windows: WSL's bash, not Git Bash)
+            print("shipped-jars script check: the job's script did not build or report:\n" + out[-3000:])
+            return False
+        calls = gc.read_text(encoding="utf-8").splitlines()
+        md = mdf.read_text(encoding="utf-8")
+        ok &= r.returncode != 0 and len(calls) == 1 and " build cfJar " in f" {calls[0]} "
+        ok &= "| *_mr.jar | PASS | x_mr.jar: 1 check(s) green |" in md
+        ok &= "| *_cf.jar | FAIL | x_cf.jar: FAIL boot -- exited before Done |" in md
+        ok &= "| *_none.jar | FAIL | 0 built jar(s) match *_none.jar in build/libs (none); exactly one must |" in md
+        ok &= "::error::shipped jar *_cf.jar (x_cf.jar) failed" in out and "tail of latest.log" in out
+        ok &= "deps " + str(home / ".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar") in out
+        ok &= "shipped jars failed: *_cf.jar, *_none.jar" in out
+    return ok
+
+
 def self_check():
     t = TEMPLATE.read_text(encoding="utf-8")
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
     v["PRE_BUILD"] = pre_build(["owner/lib@neoforge-1.21.1"])
     v["BRANCH"], v["BASE"] = "neoforge-1.21.1", "master"
+    v = variant_values(v)
     plain = render(t, layer_values(v, None))
     out = plain
     lay = render(t, layer_values(v, "neoforge-1.21.x"))
@@ -297,6 +610,7 @@ def self_check():
             layer_values(v, bad); ok = False
         except SystemExit:
             pass
+    ok &= variant_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -304,14 +618,31 @@ def self_check():
 def main():
     if "--self-check" in sys.argv:
         return self_check()
+    if "--regen-golden" in sys.argv:         # only after reading the diff: the goldens are what forks get today
+        return regen_golden()
     if sys.argv[1:2] == ["promote"]:
         return promote(sys.argv[2:])
+    if sys.argv[1:2] == ["args"]:
+        ap = argparse.ArgumentParser(prog="port-ci.py args", description="print the port-ci.py command that regenerates "
+                                     "a fork's installed workflow (add or change one option, then --print and diff)")
+        ap.add_argument("--repo", required=True); ap.add_argument("--file", help=f"default: <repo>/{WORKFLOW}")
+        a = ap.parse_args(sys.argv[2:])
+        import shlex
+        f = pathlib.Path(a.file) if a.file else pathlib.Path(a.repo) / WORKFLOW
+        print(shlex.join(["python3", "tools/port-ci.py", "--repo", a.repo, *recover_args(f.read_text(encoding="utf-8"))]))
+        return 0
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", required=True); ap.add_argument("--modid", required=True)
     ap.add_argument("--upstream", default="", help="the author's repository URL, for the release notes")
     ap.add_argument("--dep", action="append", default=[], help="owner/repo@branch built into mavenLocal first")
     ap.add_argument("--dep-jar", action="append", default=[], metavar="OWNER/REPO@TAG/ASSET.jar=G:A:V",
                     help="a sibling port's released jar, put into mavenLocal (pinned by sha256) -- preferred to --dep")
+    ap.add_argument("--dep-jar-variant", action="append", default=[], metavar="OWNER/REPO@TAG/ASSET.jar=G:A:V",
+                    help="an ALTERNATE asset of a --dep-jar dependency (same repo, tag and coordinates; e.g. its other "
+                         "platform's jar): one more gates leg, `gates (full, <label>)`, runs everything against it")
+    ap.add_argument("--variant-jar", action="append", default=[], metavar="GLOB",
+                    help="a jar the author's build ships (a glob under build/libs, e.g. '*_mr.jar'; repeat per platform): "
+                         "a `shipped jars` job boots each in a real NeoForge server, and the release needs it")
     ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet"); ap.add_argument("--no-commit", action="store_true")
     ap.add_argument("--tag-suffix", default="", help="a tag series of its own, e.g. -release for a release-aligned "
                     "branch, so its JARs never share tags with the development port's")
@@ -335,6 +666,7 @@ def main():
     values = {"TARGET": f"NeoForge {neo} (Minecraft {mc})", "BRANCH": branch, "MC": mc, "MODID": a.modid,
               "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
               "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
+    values = variant_values(values, a.variant_jar, a.dep_jar_variant, a.dep_jar)
     out = render(TEMPLATE.read_text(encoding="utf-8"), layer_values(values, a.layer_branch))
     if a.print:
         print(out); return 0

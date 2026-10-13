@@ -13,6 +13,9 @@ The fleet file lives OUTSIDE this repository (it names other people's mods). JSO
       "upstream": "https://github.com/author/a", "upstream_name": "A by author",
       "dep_jar": ["owner/fork@tag/x.jar=g:a:v"], "variant": ["_mr=why"], "gatec": "launch,spawn,battle,gauntlet",
       "tag_suffix": "-release" (a release-aligned branch), "release": "<author's released commit>",
+      "variant_jar": ["*_mr.jar", "*_cf.jar"] (a mod shipping one jar per platform: CI boots each),
+      "dep_jar_variant": ["owner/fork@tag/x_cf.jar=g:a:v"] (another platform's asset of a dep_jar, same tag:
+                         re-pin it together with its dep_jar -- port-ci.py refuses a tag mismatch),
       "work_dir": "~/.mc-mod-upgrade/upstream/<dir>"}]}   # work_dir: only if the clone's folder name differs
 
 Steps, run in the file's order (put a library before the mods that use it):
@@ -55,6 +58,8 @@ def commands(fleet, step, push=False, env="full", work=None):
             if p.get("upstream"):
                 argv += ["--upstream", p["upstream"]]
             argv += [x for d in p.get("dep_jar", []) for x in ("--dep-jar", d)]
+            argv += [x for d in p.get("dep_jar_variant", []) for x in ("--dep-jar-variant", d)]
+            argv += [x for g in p.get("variant_jar", []) for x in ("--variant-jar", g)]
             argv += [x for d in p.get("dep", []) for x in ("--dep", d)]
             if p.get("gatec"):
                 argv += ["--gatec", p["gatec"]]
@@ -103,6 +108,15 @@ def self_check():
         {"repo": "/r/mod", "modid": "mod", "base": "origin/master", "dep_jar": ["o/lib@t/lib.jar=g:lib:1"],
          "variant": ["_mr=why"], "upstream": "https://github.com/a/mod", "gatec": "launch", "work_dir": "/w/mod"}]}
     ok = True
+    # the per-platform keys reach port-ci.py only when set: an entry without them gets the same argv as before
+    plain = commands(fleet, "ci")
+    ok &= not any("variant" in x for c in plain for x in c[2])
+    vf = dict(fleet, ports=[dict(fleet["ports"][0], variant_jar=["*_mr.jar", "*_cf.jar"]),
+                            dict(fleet["ports"][1], dep_jar_variant=["o/lib@t/lib_cf.jar=g:lib:1"])])
+    va = commands(vf, "ci")
+    ok &= va[0][2][-4:] == ["--variant-jar", "*_mr.jar", "--variant-jar", "*_cf.jar"] and va[0][2][:-4] == plain[0][2]
+    ok &= va[1][2][va[1][2].index("--dep-jar-variant") + 1] == "o/lib@t/lib_cf.jar=g:lib:1"
+    ok &= [x for x in va[1][2] if x not in ("--dep-jar-variant", "o/lib@t/lib_cf.jar=g:lib:1")] == plain[1][2]
     ci = commands(fleet, "ci", push=True)
     ok &= [c[2][0] for c in ci] == [sys.executable, "git", sys.executable, "git"]          # order kept, push after each
     ok &= "--dep-jar" in ci[2][2] and "--dep-jar" not in ci[0][2] and ci[2][2][-2:] == ["--gatec", "launch"]

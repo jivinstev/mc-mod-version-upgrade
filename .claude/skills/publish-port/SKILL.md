@@ -64,7 +64,9 @@ own words -- their description and credits -- and the permission link are exempt
    - the mod's own metadata (name, authors, credits, logo, licence, its required/optional dependencies);
    - the authors' own Modrinth project (summary, categories, which versions it covers);
    - the fork's newest release (which jar each platform gets: `_mr` to Modrinth and `_cf` to CurseForge when the
-     build makes variants, the only jar otherwise);
+     build makes variants, the only jar otherwise). Each platform's jar should be one CI tested: a fork with
+     variants has `port-ci.py --variant-jar` per platform glob (its `shipped jars` job), and a dependent of one has
+     `--dep-jar-variant` for the platform asset its `--dep-jar` does not pin (port-fork skill, step 6);
    - `--ledger-issue`: every issue carrying a fix ledger that covers this mod's builds, including a shared one in a
      dependency's fork. They gate publishing; they are never shown on the page;
    - `--difference`: each difference from the original a player would notice (see above). Usually none beyond the
