@@ -481,9 +481,7 @@ def shipped_script_check():
     stand-in shipped-gate.py that boots _mr and fails _cf. The job must build once, pass the dependency as --deps,
     fail naming the failing variant with its server log tail, and refuse a glob that matches no jar."""
     import os, shutil, tempfile
-    if not shutil.which("bash"):
-        return True
-    wf = fixture(True, None, variant_jars=["*_mr.jar", "*_cf.jar", "*_none.jar"])
+    wf =fixture(True, None, variant_jars=["*_mr.jar", "*_cf.jar", "*_none.jar"])
     body = wf.split("python3 - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
     script = "\n".join(l[10:] for l in body.splitlines())
     ok = True
@@ -492,7 +490,9 @@ def shipped_script_check():
         repo, tools, home, tmp = d / "repo", d / "repo/.port-tools/tools", d / "home", d / "tmp"
         for p in (tools, home, tmp):
             p.mkdir(parents=True)
-        for f in ("port_gates.py", "srcsets.py", "targets.py", "ci-gates.py", "central-mirror.init.gradle"):
+        # the kit's own files, as the job loads them; port_gates runs gradlew through gitbash's BASH (Git Bash on
+        # Windows, where plain "bash" is WSL's launcher), so this fake fork's shell-script gradlew runs on every OS
+        for f in ("port_gates.py", "srcsets.py", "targets.py", "gitbash.py", "ci-gates.py", "central-mirror.init.gradle"):
             shutil.copy(ROOT / "tools" / f, tools / f)
         (repo / "build.gradle").write_text("tasks.register('cfJar', Jar) {}\n", encoding="utf-8")
         (repo / "gradlew").write_text('echo "$@" >> gradle-calls.txt; mkdir -p build/libs; '
@@ -512,8 +512,12 @@ def shipped_script_check():
         r = subprocess.run([sys.executable, "-"], input=script, cwd=repo, env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
         out = r.stdout + r.stderr
-        calls = (repo / "gradle-calls.txt").read_text(encoding="utf-8").splitlines()
-        md = (tmp / "shipped.md").read_text(encoding="utf-8")
+        gc, mdf = repo / "gradle-calls.txt", tmp / "shipped.md"
+        if not gc.is_file() or not mdf.is_file():   # the fake gradlew never ran (Windows: WSL's bash, not Git Bash)
+            print("shipped-jars script check: the job's script did not build or report:\n" + out[-3000:])
+            return False
+        calls = gc.read_text(encoding="utf-8").splitlines()
+        md = mdf.read_text(encoding="utf-8")
         ok &= r.returncode != 0 and len(calls) == 1 and " build cfJar " in f" {calls[0]} "
         ok &= "| *_mr.jar | PASS | x_mr.jar: 1 check(s) green |" in md
         ok &= "| *_cf.jar | FAIL | x_cf.jar: FAIL boot -- exited before Done |" in md
