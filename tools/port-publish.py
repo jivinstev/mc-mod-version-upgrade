@@ -713,7 +713,7 @@ def original_curseforge(name):
     """The original's CurseForge page, found by exact name through the registry tool (needs its CurseForge key);
     None when it cannot be found, and the page then links Modrinth and the source only."""
     r = subprocess.run([sys.executable, str(ROOT / "mod-registry" / "modreg.py"), "search", "--query", name],
-                       capture_output=True, text=True, check=False)
+                       capture_output=True, text=True, encoding="utf-8", check=False)
     try:
         hits = json.loads(r.stdout)["results"]
     except (ValueError, KeyError):
