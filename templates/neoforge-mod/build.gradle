@@ -195,14 +195,17 @@ def deployedJarName() {
 tasks.register('deployToMods') {
     dependsOn 'build'
     doLast {
-        def modsDir = readEnvLocal('MINECRAFT_MODS_DIR')
+        // setup records one mods folder per Minecraft version (MINECRAFT_MODS_DIR_1_21_1); an
+        // environment MINECRAFT_MODS_DIR overrides it for one run; older checkouts have the single key.
+        def versionKey = 'MINECRAFT_MODS_DIR_' + minecraft_version.replace('.', '_')
+        def modsDir = System.getenv('MINECRAFT_MODS_DIR') ?: readEnvLocal(versionKey) ?: readEnvLocal('MINECRAFT_MODS_DIR')
         if (!modsDir) {
-            println "WARNING: MINECRAFT_MODS_DIR not in .env.local — skipping deploy"
+            println "WARNING: no ${versionKey} in .env.local (./setup records it) — skipping deploy"
             return
         }
         def target = new File(modsDir)
         if (!target.isDirectory()) {
-            println "WARNING: MINECRAFT_MODS_DIR is not a directory: ${modsDir} — skipping deploy"
+            println "WARNING: the mods folder for Minecraft ${minecraft_version} is not a directory: ${modsDir} — skipping deploy"
             return
         }
         def src = file("build/libs/${deployedJarName()}")

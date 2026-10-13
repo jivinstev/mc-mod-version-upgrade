@@ -62,5 +62,39 @@ class OutPath(unittest.TestCase):
             self.assertEqual(os.path.dirname(path), d)
 
 
+class ModsDir(unittest.TestCase):
+    """setup records one mods folder per Minecraft version (MINECRAFT_MODS_DIR_1_21_1); a reader of the old
+    single MINECRAFT_MODS_DIR found nothing on a machine set up since, and scan-instance stopped there."""
+
+    def resolve(self, env_lines, mc="1.21.1", environ=None):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env.local")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(env_lines) + "\n")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("MINECRAFT_MODS_DIR")}
+            env.update(environ or {})
+            with mock.patch.object(providers, "find_env_local", return_value=[path]), \
+                 mock.patch.dict(os.environ, env, clear=True):
+                return providers.read_mods_dir(mc)
+
+    def test_the_per_version_key_setup_writes(self):
+        self.assertEqual(self.resolve(["MINECRAFT_MODS_DIR_1_21_1=/game-1.21.1/mods", "MINECRAFT_MODS_DIR_26_2="]),
+                         "/game-1.21.1/mods")
+
+    def test_a_version_recorded_empty_is_none(self):
+        self.assertIsNone(self.resolve(["MINECRAFT_MODS_DIR_1_21_1=/a/mods", "MINECRAFT_MODS_DIR_26_2="], mc="26.2"))
+
+    def test_the_old_single_key_still_works(self):
+        self.assertEqual(self.resolve(["MINECRAFT_MODS_DIR=/old/mods"]), "/old/mods")
+
+    def test_the_version_key_wins_over_the_old_key(self):
+        self.assertEqual(self.resolve(["MINECRAFT_MODS_DIR=/old/mods", "MINECRAFT_MODS_DIR_1_21_1=/new/mods"]),
+                         "/new/mods")
+
+    def test_the_environment_overrides_for_one_run(self):
+        self.assertEqual(self.resolve(["MINECRAFT_MODS_DIR_1_21_1=/new/mods"], environ={"MINECRAFT_MODS_DIR": "/run/mods"}),
+                         "/run/mods")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
