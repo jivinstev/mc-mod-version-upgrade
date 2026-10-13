@@ -65,7 +65,7 @@ def fakes(pp, release, git, lib_body="<!-- port-publish:modrinth:A1 --> <!-- por
             return {"body": lib_body}
         if "/releases/tags/" in path:
             return release
-        if path.endswith("/contents/.github/port-publish.json"):
+        if path.split("?")[0].endswith("/contents/.github/port-publish.json"):
             return json.dumps({"modrinth": {"slug": "lib-nf"}, "curseforge": {"slug": "lib-nf"}}).encode()
         return {}
 
@@ -116,7 +116,7 @@ def single_version(path):
                     return {"body": "<!-- port-publish:modrinth:A1 --> <!-- port-publish:curseforge:9 -->"}
                 if "/releases/tags/" in path:
                     return rel
-                if path.endswith("/contents/.github/port-publish.json"):
+                if path.split("?")[0].endswith("/contents/.github/port-publish.json"):
                     return json.dumps({"modrinth": {"slug": "lib-nf"}, "curseforge": {"slug": "lib-nf"}}).encode()
                 return {}
 
@@ -135,7 +135,7 @@ def single_version(path):
                 if p == "/game/versions":
                     return [{"id": 10, "name": "1.21.1", "gameVersionTypeID": 1}, {"id": 11, "name": "NeoForge", "gameVersionTypeID": 2}]
                 return {"id": 77}
-            pp.gh, pp.git, pp.modrinth, pp.curseforge = gh, (lambda repo, *a: R(0)), modrinth, curseforge
+            pp.gh, pp.git, pp.modrinth, pp.curseforge = gh, (lambda repo, *a: R(0, "neoforge-1.21.1\n") if a[:2] == ("rev-parse", "--abbrev-ref") else R(0)), modrinth, curseforge
             pp.download = lambda asset: b"JAR"
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -166,6 +166,8 @@ def layer_git(changed=("README.md",), gates41=GATES_41, with_layer=True, targets
                 return R(0, gates41) if "1.21.4" in ref and gates41 is not None else R(128)
         if a[0] == "ls-tree":
             return R(0, "\n".join(targets) + "\n")
+        if a[:2] == ["rev-parse", "--abbrev-ref"]:      # CI checks out the port branch
+            return R(0, "neoforge-1.21.1\n")
         if a[0] == "rev-parse":
             return R(0, "c0ffee0\n")
         if a[0] == "cat-file":
