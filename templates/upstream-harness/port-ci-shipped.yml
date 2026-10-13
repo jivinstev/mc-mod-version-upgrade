@@ -1,0 +1,97 @@
+  shipped:
+    # Only with tools/port-ci.py --variant-jar: the author's build makes several player-facing jars (one per platform,
+    # built by different tasks with different contents), and the gates above run the mod from the DEV classpath, so
+    # none of them proves a jar a player downloads. This job runs the author's build once, then for each variant glob
+    # requires exactly one built jar in build/libs and boots it ALONE (plus the pinned dependency jars) in a real
+    # NeoForge server (tools/shipped-gate.py, from the Port CI kit). A failing variant fails the job, and the release
+    # needs it as it needs the gates. The globs reach the script only through env, never spliced into it.
+    name: shipped jars
+    if: ${{ github.event_name != 'release' && !inputs.promote && !inputs.publish && !inputs.publish_setup }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Port CI kit v{{KIT_VERSION}} (pinned by sha256)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \
+            "https://github.com/{{MIGRATOR_REPO}}/releases/download/port-ci-kit-v{{KIT_VERSION}}/port-ci-kit-v{{KIT_VERSION}}.tar.gz"
+          echo "{{KIT_SHA256}}  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "{{JAVA}}"
+{{PRE_BUILD}}
+      - name: Author's build, then boot each shipped jar in a real server
+        env:
+          VARIANT_JARS: "{{VARIANT_JARS}}"
+          DEP_JARS: "{{SHIPPED_DEPS}}"
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os, pathlib, re, subprocess, sys
+          tools = pathlib.Path(".port-tools/tools").resolve()
+          if not (tools / "shipped-gate.py").is_file():
+              sys.exit("::error::this Port CI kit has no tools/shipped-gate.py: regenerate the workflow with a newer kit")
+          def load(name, file):
+              spec = importlib.util.spec_from_file_location(name, tools / file)
+              m = importlib.util.module_from_spec(spec); sys.modules.setdefault(name, m); spec.loader.exec_module(m)
+              return m
+          pu, ss, cg = load("port_gates", "port_gates.py"), load("srcsets", "srcsets.py"), load("ci_gates", "ci-gates.py")
+          repo, work = pathlib.Path(".").resolve(), pathlib.Path(os.environ["RUNNER_TEMP"]) / "shipped"
+          work.mkdir(parents=True, exist_ok=True)
+          libs = repo / "build" / "libs"
+          deps = [str(pathlib.Path.home() / d) for d in os.environ["DEP_JARS"].split()]
+          tasks = ["build", *ss.author_jar_tasks(repo)]
+          rows, bad = [], []
+          r = pu.gradle(repo, tasks, work / "author-build.log")
+          if r.returncode:
+              print(cg.log_tails([work / "author-build.log"], n=80), flush=True)
+              rows.append("| author's build (`" + " ".join(tasks) + "`) | FAIL | see author-build.log |")
+              bad.append("the author's build")
+          else:
+              for pat in os.environ["VARIANT_JARS"].split():
+                  found = sorted(p for p in libs.glob(pat) if p.is_file()) if libs.is_dir() else []
+                  if len(found) != 1:
+                      why = (str(len(found)) + " built jar(s) match " + pat + " in build/libs ("
+                             + (", ".join(p.name for p in found) or "none") + "); exactly one must")
+                      print("::error::shipped jar " + pat + ": " + why, flush=True)
+                      rows.append("| " + pat + " | FAIL | " + why + " |"); bad.append(pat)
+                      continue
+                  jar = found[0]
+                  vw = work / re.sub(r"[^\w.-]", "_", pat)
+                  vw.mkdir(parents=True, exist_ok=True)
+                  cmd = [sys.executable, str(tools / "shipped-gate.py"), "--repo", str(repo), "--jar", str(jar),
+                         "--work-dir", str(vw)] + (["--deps", *deps] if deps else [])
+                  g = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
+                  (vw / "shipped-gate.log").write_text(g.stdout + g.stderr, encoding="utf-8")
+                  print("===== shipped jar " + pat + ": " + jar.name + " =====", flush=True)
+                  print(g.stdout + g.stderr, flush=True)
+                  checks = [l.replace("[shipped-gate] ", "") for l in g.stdout.splitlines() if "FAIL" in l or "PASS" in l]
+                  if g.returncode:
+                      print(cg.log_tails(sorted((vw / "server" / "logs").glob("*.log"))), flush=True)
+                      fails = [l[:160] for l in checks if l.startswith("FAIL")]
+                      why = "; ".join(fails[:2]) or ((g.stdout + g.stderr).strip().splitlines() or ["no output"])[-1][:200]
+                      print("::error::shipped jar " + pat + " (" + jar.name + ") failed: " + why, flush=True)
+                      rows.append("| " + pat + " | FAIL | " + jar.name + ": " + why + " |"); bad.append(pat)
+                  else:
+                      n = len([l for l in checks if l.startswith("PASS")])
+                      rows.append("| " + pat + " | PASS | " + jar.name + ": " + str(n) + " check(s) green |")
+          md = ["Shipped jars -- each built jar booted alone in a real NeoForge server"
+                + (" with " + ", ".join(pathlib.Path(d).name for d in deps) if deps else "") + ":", "",
+                "| variant | result | detail |", "|---|---|---|", *rows, ""]
+          (pathlib.Path(os.environ["RUNNER_TEMP"]) / "shipped.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+          print("\n".join(md), flush=True)
+          if bad:
+              sys.exit("shipped jars failed: " + ", ".join(bad))
+          PY
+      - name: Shipped-jar summary
+        if: always()
+        run: cat "$RUNNER_TEMP/shipped.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shipped-logs
+          path: |
+            ${{ runner.temp }}/shipped/**/*.log
+            ${{ runner.temp }}/shipped.md
+          if-no-files-found: ignore

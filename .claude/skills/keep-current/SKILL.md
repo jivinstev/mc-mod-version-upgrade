@@ -136,7 +136,9 @@ until its dependency's run is green, and it is then gated against the dependency
 7. **Dependents next.** Gate each dependent locally against this build (its `_mr`-style jar put into mavenLocal
    the way its CI does). Its pin (`port-ci.py --dep-jar`, a release asset + sha256) can only move once this
    dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
-   PR as a blocking item, and re-pin then. A pre-release may be pinned for CI; the dependent's own release waits
+   PR as a blocking item, and re-pin then (`port-ci.py args --repo DIR` gives the current command; change the tag
+   and asset of `--dep-jar` AND of any `--dep-jar-variant` together -- a mismatch is refused -- and rerun it).
+   A pre-release may be pinned for CI; the dependent's own release waits
    for the dependency's to be promoted.
 8. **Report once** on the fleet's tracking issue: what came in, what was decided, what is waiting for a person
    (a PR to merge, a build to play and promote). Silent when nothing changed.

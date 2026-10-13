@@ -185,6 +185,16 @@ with the coordinates the dependent's `build.gradle` asks for. `--dep <user>/<lib
 dependency's branch first) works only when that build publishes those exact coordinates. A build with no
 `rootProject.name` publishes under its checkout directory's name, so it breaks quietly; prefer `--dep-jar`.
 
+**One jar per platform.** The gates run the mod from the dev classpath, and a platform's jar can differ in content
+(one library's CurseForge jar leaves out the Java agent its Modrinth jar carries), so test each jar that is
+published. A mod whose build makes several: add `--variant-jar '*_mr.jar' --variant-jar '*_cf.jar'` (one glob per
+platform, exactly one built jar each); a `shipped jars` job boots each in a real server and the release needs it.
+Its dependents: keep `--dep-jar` on the default asset and add `--dep-jar-variant` with the other platform's asset of
+the SAME release (same tag and coordinates), which adds a `gates (full, <label>)` leg. A re-pin moves both to the
+new tag together (port-ci.py refuses a mismatch). To change one option of an installed workflow and nothing else,
+`python3 tools/port-ci.py args --repo DIR` prints the command it was generated with (kit pin included); add the
+option, run it with `--print`, and diff against the installed file before committing.
+
 ## 7. Offer it to the authors (nothing is sent)
 
 ```bash
