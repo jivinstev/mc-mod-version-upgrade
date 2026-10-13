@@ -28,7 +28,7 @@ seen by a chat session, and CurseForge's upload host is not reachable from a clo
    - Each fork's secret form: `https://github.com/<owner>/<fork>/settings/secrets/actions/new`, names
      `MODRINTH_TOKEN` and `CURSEFORGE_TOKEN`. Tell them never to paste a token into the chat.
    - CurseForge has no API to create a project: give them the fields `setup` printed (name, summary, the
-     description file, licence, source and issues links, logo, categories) and ask for the project ID back.
+     description file, licence, source and issues links, logo, categories) and ask for the project ID back, and the project's public URL (CurseForge makes the slug from the name).
 3. **Never**: publish a pre-release, upload from the chat session, post on the authors' repository (the authors
    may invite a link in their issue: offer to draft it, the user posts it), weaken a gate to get a build out.
 
@@ -81,7 +81,9 @@ own words -- their description and credits -- and the permission link are exempt
 4. Modrinth: once merged, dispatch the fork's Port CI with `publish_setup = true`. It creates the **draft**
    project, or, when it exists, updates its title, summary and page from the fork's files (so a page edit is a PR
    plus one dispatch). CurseForge: the user creates it on the website; put the
-   project ID into `curseforge.project_id` in a small PR.
+   project ID into `curseforge.project_id` and the slug from its public URL
+   (`curseforge.com/minecraft/mc-mods/<slug>`) into `curseforge.slug` in a small PR -- `setup` only guesses the slug,
+   and the release notes link the uploaded file through it.
 
 ## Part 2: publish a promoted release
 
