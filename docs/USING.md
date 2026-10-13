@@ -42,13 +42,19 @@ size is likely to take.
 
 | | macOS | Windows | Debian / Ubuntu | Fedora |
 |---|---|---|---|---|
-| git | `xcode-select --install` | `winget install --id Git.Git` | `sudo apt install git` | `sudo dnf install git` |
-| Python 3 | `brew install python` | `winget install --id Python.Python.3.12` | `sudo apt install python3` | `sudo dnf install python3` |
-| JDK 21 *(migrate only)* | `brew install --cask temurin@21` | `winget install --id EclipseAdoptium.Temurin.21.JDK` | `sudo apt install openjdk-21-jdk` | `sudo dnf install java-21-openjdk-devel` |
+| git | `xcode-select --install` | `winget install -e --source winget --id Git.Git` | `sudo apt install git` | `sudo dnf install git` |
+| Python 3 | `brew install python` | `winget install -e --source winget --id Python.Python.3.12` | `sudo apt install python3` | `sudo dnf install python3` |
+| Claude Code | `curl -fsSL https://claude.ai/install.sh \| bash` | `irm https://claude.ai/install.ps1 \| iex` | `curl -fsSL https://claude.ai/install.sh \| bash` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| JDK 21 *(migrate only)* | `brew install --cask temurin@21` | `winget install -e --source winget --id EclipseAdoptium.Temurin.21.JDK` | `sudo apt install openjdk-21-jdk` | `sudo dnf install java-21-openjdk-devel` |
+
+`./setup --install-missing` runs the installs in this table that need no `sudo`: Claude Code on every OS,
+and the JDK 21 (for migration) and `gh` through Homebrew or winget. git and Python have to be there
+before setup can run.
 
 Minecraft 26.x targets need Java **25** as well. On Windows, see the README's
-[Windows quick start](../README.md#on-windows-experimental) (experimental): the tooling runs in Git Bash (part of Git for
-Windows, which Claude Code needs anyway), and `setup.cmd` starts setup from cmd or PowerShell.
+[Windows quick start](../README.md#on-windows-experimental) (experimental): one line in PowerShell
+(`install.ps1`) installs git and Python, clones this repository and runs `setup.cmd --install-missing`.
+The tooling runs in Git Bash (part of Git for Windows), and `setup.cmd` starts setup from cmd or PowerShell.
 
 ## In a Claude Code cloud session
 

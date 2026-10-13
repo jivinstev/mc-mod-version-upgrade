@@ -260,6 +260,26 @@ grep -q '^TRAINING_OPTOUT=confirmed$' "$R/.env.local" && out2="$(tty_run '')" \
   && echo "$out2" | grep -q 'kept: you confirmed model training is turned off' \
   && ok "typing 'confirmed' records it, and a re-run keeps it without asking" || bad "confirmed: $(grep TRAINING "$R/.env.local")"
 
+echo "19. --install-missing installs Claude Code through its native installer (the path install.ps1 takes)"
+# A fake curl hands bash the "installer": it puts claude in ~/.local/bin, which is not on PATH -- as the
+# real one leaves it until a new shell. setup must re-read PATH and find it there.
+C="$(mktemp -d)"; for f in "$NOJAVA"/*; do ln -s "$(readlink "$f")" "$C/$(basename "$f")"; done
+for t in mkdir chmod; do ln -sf "$(command -v $t)" "$C/$t"; done
+printf '#!/bin/sh\necho %s\n' "'mkdir -p \"\$HOME/.local/bin\" && printf \"#!/bin/sh\\\\n\" > \"\$HOME/.local/bin/claude\" && chmod +x \"\$HOME/.local/bin/claude\"'" > "$C/curl"
+chmod +x "$C/curl"
+fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --check --install-missing)"
+[ ! -e "$H/.local/bin/claude" ] && echo "$out" | grep -q "Claude Code is not installed" \
+  && ok "--check wins over --install-missing: nothing is installed" || bad "--check installed: $(ls "$H/.local/bin" 2>&1)"
+fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --install-missing)"
+{ [ -x "$H/.local/bin/claude" ] && echo "$out" | grep -q "claude: installing" && echo "$out" | grep -q "claude: ok" \
+  && ! echo "$out" | grep -q "Claude Code is not installed"; } \
+  && ok "claude installed by the native installer and found in ~/.local/bin in the same run" \
+  || bad "--install-missing: $(echo "$out" | grep -i claude | head -3)"
+fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes)"
+[ ! -e "$H/.local/bin/claude" ] && echo "$out" | grep -q "or ./setup --install-missing" \
+  && ok "without the flag nothing is installed, and the note names the flag" || bad "no flag: $(echo "$out" | grep -i claude | head -3)"
+rm -rf "$C"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"

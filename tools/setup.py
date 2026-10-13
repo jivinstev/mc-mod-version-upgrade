@@ -5,6 +5,8 @@
     ./setup --yes           first run: take every recommendation.  RE-RUN: keep every decision.
     ./setup --review        ask every question again (a plain re-run asks only new ones)
     ./setup --check         change nothing; print what setup WOULD change, and verify prerequisites
+    ./setup --install-missing   also install what is missing and needs no sudo: Claude Code, the JDK
+                            for migration (Homebrew/winget) and gh; on Windows, git core.longpaths
     ./setup --migrate       add the migration add-on (same as --path migrate; adds keys, never removes any)
     ./setup --mods-dir 26.2=/path/to/minecraft-26.2   add one more deploy target (a set, not a value)
     ./setup --remove KEY    the ONLY way setup ever deletes a setting
@@ -48,23 +50,37 @@ IN_CLOUD = os.environ.get("CLAUDE_CODE_REMOTE") == "true"   # a Claude Code clou
 DEFAULT_TARGET = "1.21.1"
 SECRET_KEYS = {"CURSEFORGE_API_KEY"}
 
+# winget searches every source it has, and when the Microsoft Store source fails (0x8a15005e: its
+# certificate pinning, behind TLS inspection or on a VM with a wrong clock) it installs nothing at all.
+# Nothing here needs the Store, so every winget line names its source.
+WINGET = ["winget", "install", "-e", "--source", "winget", "--accept-package-agreements",
+          "--accept-source-agreements", "--id"]
+CLAUDE_SH = "curl -fsSL https://claude.ai/install.sh | bash"      # Claude Code's native installers
+CLAUDE_PS = "irm https://claude.ai/install.ps1 | iex"
 INSTALL_HINTS = {  # tool -> {platform: command}
     "git": {"Darwin": "xcode-select --install   (or: brew install git)",
-            "Windows": "winget install --id Git.Git",
+            "Windows": "winget install -e --source winget --id Git.Git",
             "Linux": "sudo apt install git   (Fedora: sudo dnf install git)"},
     "python3": {"Darwin": "brew install python",
-                "Windows": "winget install --id Python.Python.3.12",
+                "Windows": "winget install -e --source winget --id Python.Python.3.12",
                 "Linux": "sudo apt install python3   (Fedora: sudo dnf install python3)"},
     "java": {"Darwin": "brew install --cask temurin@21   (MC 26.x also needs 25: temurin@25)",
-             "Windows": "winget install --id EclipseAdoptium.Temurin.21.JDK",
+             "Windows": "winget install -e --source winget --id EclipseAdoptium.Temurin.21.JDK",
              "Linux": "sudo apt install openjdk-21-jdk   (Fedora: sudo dnf install java-21-openjdk-devel)"},
-    "claude": {"Darwin": "brew install --cask claude-code   (or, with Node 18+: npm install -g @anthropic-ai/claude-code)",
-               "Windows": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)",
-               "Linux": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)"},
+    "claude": {"Darwin": CLAUDE_SH, "Windows": CLAUDE_PS + "   (in PowerShell)", "Linux": CLAUDE_SH},
 }
-INSTALL_HINTS["gh"] = {"Darwin": "brew install gh", "Windows": "winget install --id GitHub.cli",
+INSTALL_HINTS["gh"] = {"Darwin": "brew install gh", "Windows": "winget install -e --source winget --id GitHub.cli",
                        "Linux": "sudo apt install gh   (Fedora: sudo dnf install gh; or https://cli.github.com)"}
-CLAUDE_DOCS = "https://docs.claude.com/en/docs/claude-code/setup"
+# What --install-missing runs (and the gh offer). One table for every OS, so a new prerequisite is added
+# once. Nothing that needs sudo: on Linux the system package manager stays the user's call, and git and
+# Python must exist before setup can run at all (install.ps1 brings them on Windows).
+INSTALLERS = {
+    "claude": {"Darwin": ["bash", "-c", CLAUDE_SH], "Linux": ["bash", "-c", CLAUDE_SH],
+               "Windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", CLAUDE_PS]},
+    "java": {"Darwin": ["brew", "install", "--cask", "temurin@21"], "Windows": WINGET + ["EclipseAdoptium.Temurin.21.JDK"]},
+    "gh": {"Darwin": ["brew", "install", "gh"], "Windows": WINGET + ["GitHub.cli"]},
+}
+CLAUDE_DOCS = "https://code.claude.com/docs/en/setup"
 
 
 # ── .env.local + state ──────────────────────────────────────────────────────────────────────
@@ -192,7 +208,69 @@ def bash_shim(name, why, command, check, notes, problems):
         problems.append(f"could not write {shim}: {e}")
 
 
-def long_paths(notes):
+def refresh_path():
+    """An installer changes PATH for NEW shells (the registry on Windows, a shell profile elsewhere), not
+    for this process. Pick its changes up, so the check after an install finds what it installed."""
+    have = os.environ.get("PATH", "").split(os.pathsep)
+    new = []
+    if SYS == "Windows":
+        try:
+            import winreg
+            for hive, key in ((winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                              (winreg.HKEY_CURRENT_USER, "Environment")):
+                try:
+                    with winreg.OpenKey(hive, key) as k:
+                        new += [os.path.expandvars(x) for x in winreg.QueryValueEx(k, "Path")[0].split(";")]
+                except OSError:
+                    pass
+        except ImportError:
+            pass
+    local_bin = pathlib.Path.home() / ".local" / "bin"          # where Claude Code's native installer puts it
+    if local_bin.is_dir():
+        new.append(str(local_bin))
+    os.environ["PATH"] = os.pathsep.join(have + [x for x in dict.fromkeys(new) if x and x not in have])
+
+
+def windows_user_path_add(folder, notes):
+    """Put a folder on the user's PATH for every new window (what Claude Code's install docs ask people
+    to do by hand when `claude` is not found). Through .NET, which also tells Explorer; setx would cut
+    a long PATH at 1024 characters."""
+    folder = str(folder)
+    code, cur = run(["powershell", "-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"])
+    if code != 0 or folder.lower() in [x.lower().rstrip("\\") for x in cur.strip().split(";")]:
+        return
+    quoted = folder.replace("'", "''")                         # a PowerShell single-quoted string
+    script = ("$p=[Environment]::GetEnvironmentVariable('Path','User'); "
+              f"[Environment]::SetEnvironmentVariable('Path', (@($p, '{quoted}') | Where-Object {{ $_ }}) -join ';', 'User')")
+    code, out = run(["powershell", "-NoProfile", "-Command", script], timeout=60)
+    notes.append(f"added {folder} to your PATH (new windows find claude there)" if code == 0
+                 else f"could not add {folder} to your PATH: {out.strip()[:200]}")
+
+
+def install_missing(tool, why):
+    """--install-missing: run the tool's installer from INSTALLERS, then re-read PATH. Returns whether
+    it is now found; the caller reports what is still missing, as it would have without the flag."""
+    cmd = INSTALLERS.get(tool, {}).get(SYS)
+    if not cmd or not shutil.which(cmd[0]):
+        return shutil.which(tool) is not None
+    print(f"   {tool}: installing ({why}): {' '.join(cmd)}", flush=True)
+    try:
+        subprocess.run(cmd)
+    except OSError as e:
+        print(f"   {tool}: the installer did not run: {e}")
+    refresh_path()
+    return shutil.which(tool) is not None
+
+
+def is_windows_admin():
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (ImportError, AttributeError, OSError):
+        return False
+
+
+def long_paths(notes, fix=False):
     """Windows' 260-character path limit. Gradle's caches, NeoForm's work tree and a decompiled mod
     under it run past it, and the failure (a file 'not found' that is there) does not say why. Java
     itself copes; git and some Python file calls do not, unless both switches are on."""
@@ -211,8 +289,11 @@ def long_paths(notes):
                      "Turn them on (PowerShell as Administrator): New-ItemProperty -Path "
                      "'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem' -Name LongPathsEnabled -Value 1 "
                      "-PropertyType DWORD -Force")
-    if not git_long:
-        notes.append("git core.longpaths is off: run  git config --global core.longpaths true")
+    if not git_long and fix and run(["git", "config", "--global", "core.longpaths", "true"])[0] == 0:
+        notes.append("turned on git core.longpaths (git config --global core.longpaths true)")
+    elif not git_long:
+        notes.append("git core.longpaths is off: run  git config --global core.longpaths true  "
+                     "(or ./setup --install-missing)")
 
 
 def windows_shims(check, notes, problems):
@@ -422,16 +503,16 @@ def confirm(question):
     return input(question).strip().lower() in ("", "y", "yes")
 
 
-def gh_setup(interactive, notes, no_network):
+def gh_setup(interactive, notes, no_network, install=False):
     """Make `gh` usable for lessons PRs: installed (with consent), signed in, and able to push -- to
-    this repository, or to the user's fork of it. Nothing happens without a yes, and a --yes/--check run
-    only reports."""
+    this repository, or to the user's fork of it. Nothing happens without a yes (or --install-missing),
+    and a --yes/--check run only reports."""
     gh = shutil.which("gh")
     if not gh:
-        cmd = {"Darwin": ["brew", "install", "gh"], "Windows": ["winget", "install", "--id", "GitHub.cli"]}.get(SYS)
-        if interactive and cmd and shutil.which(cmd[0]) and \
-                confirm(f"   gh is not installed. Install it now with `{' '.join(cmd)}`? [Y/n]: "):
-            subprocess.run(cmd)
+        cmd = INSTALLERS["gh"].get(SYS)
+        if cmd and shutil.which(cmd[0]) and (install or (interactive and
+                confirm(f"   gh is not installed. Install it now with `{' '.join(cmd)}`? [Y/n]: "))):
+            install_missing("gh", "to share lessons")
             gh = shutil.which("gh")
         if not gh:
             notes.append(f"sharing lessons needs the GitHub CLI: {hint('gh')}, then `gh auth login` "
@@ -558,6 +639,9 @@ def main():
                     help="ask EVERY question again, with your earlier answers as the defaults "
                          "(a plain re-run asks only questions it has not asked before)")
     ap.add_argument("--no-network", action="store_true", help="skip the git reachability probe")
+    ap.add_argument("--install-missing", action="store_true",
+                    help="install what is missing and needs no sudo: Claude Code, the JDK for migration "
+                         "(Homebrew/winget), gh; on Windows also turn on git core.longpaths")
     a = ap.parse_args()
 
     if not (a.yes or a.check) and not sys.stdin.isatty():
@@ -600,31 +684,42 @@ def main():
         else:
             problems.append(f"{tool} is missing -- install it: {hint(tool)}")
     print(f"   python3: ok ({platform.python_version()})")
-    # Claude Code drives the skills (installing, migrating). Detected, never installed: a global
-    # install is the user's call, like git/python/JDK above. Not a PROBLEM -- the tools run without it.
+    # Claude Code drives the skills (installing, migrating). Installed only with --install-missing
+    # (install.ps1 passes it): otherwise a global install is the user's call. Not a PROBLEM -- the tools
+    # run without it.
+    fix = a.install_missing and not a.check
     has_claude = shutil.which("claude") is not None
+    if not has_claude and fix:
+        has_claude = install_missing("claude", "it is what you talk to")
+        if has_claude and SYS == "Windows":
+            windows_user_path_add(pathlib.Path(shutil.which("claude")).parent, notes)
     if has_claude:
         print("   claude: ok (Claude Code)")
     else:
         notes.append(f"Claude Code is not installed -- it is what you talk to. Install: {hint('claude')}  "
-                     f"(details: {CLAUDE_DOCS})")
+                     f"(or ./setup --install-missing; details: {CLAUDE_DOCS})")
     if sys.version_info < (3, 8):
         problems.append(f"python 3.8+ needed -- {hint('python3')}")
     if path == "migrate":
         jm = java_major()
+        if (jm is None or jm < 21) and fix and install_missing("java", "migration needs Java 21"):
+            jm = java_major()
         if jm is None:
             problems.append(f"no JDK found (migration needs Java 21; MC 26.x needs 25) -- {hint('java')}")
         elif jm < 21:
             problems.append(f"Java {jm} found; migration needs 21+ -- {hint('java')}")
         else:
             print(f"   java: ok (Java {jm}{'' if jm >= 25 else '; MC 26.x targets also need Java 25'})")
+    if SYS == "Windows" and is_windows_admin():
+        notes.append("this is an Administrator window: the ~/bin shims and Claude Code settings it writes "
+                     "go where an elevated shell looks. Run setup from a normal PowerShell instead.")
     if SYS == "Windows":
         notes.append("Windows support is EXPERIMENTAL: it passes on GitHub's Windows runners but is not yet "
                      "confirmed on a real PC. Report anything that differs: "
                      "https://github.com/jivinstev/mc-mod-version-upgrade/issues/32")
         windows_shims(a.check, notes, problems)
         if path == "migrate":
-            long_paths(notes)
+            long_paths(notes, fix)
         if not shutil.which("bash"):
             notes.append("the tooling is bash + Python: run it from Git Bash (part of Git for Windows, "
                          "which Claude Code needs too)")
@@ -818,7 +913,7 @@ def main():
         share = ask.decide("CONTRIBUTE_LEARNINGS", "yes", "Share your lessons as pull requests? (yes/no)",
                            choices={"yes": "yes", "y": "yes", "no": "no", "n": "no"})
         if share == "yes":
-            gh_setup(ask.interactive and not a.check, notes, a.no_network)
+            gh_setup(ask.interactive and not a.check, notes, a.no_network, a.install_missing and not a.check)
 
     # 9. Claude Code sandbox permissions -----------------------------------------------------------
     f = claude_settings_file()

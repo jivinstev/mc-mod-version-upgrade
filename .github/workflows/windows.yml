@@ -218,6 +218,60 @@ jobs:
       # last: it re-runs a changed self-test (test-cycle.sh) on base and head, so that one must work first
       - run: ./tools/test-review.sh
 
+  bootstrap:
+    name: windows install.ps1 (the one-line install)
+    if: github.event.action != 'labeled'
+    runs-on: windows-latest
+    env:
+      MCMU_REF: ci-bootstrap
+      MCMU_NO_LAUNCH: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # install.ps1 clones a branch; this checkout is a detached PR merge, so name it, and clone from here
+      # rather than from GitHub, so the code under test is this commit's.
+      - name: name this commit as a branch to clone
+        run: git branch ci-bootstrap HEAD
+      # Windows PowerShell 5.1 (`shell: powershell`), what a fresh PC has, and `| iex`, as the README says.
+      - name: it refuses an Administrator window, and installs nothing
+        shell: powershell
+        run: |
+          $env:MCMU_REPO = $env:GITHUB_WORKSPACE; $env:MCMU_DIR = "$env:RUNNER_TEMP\refused"
+          Get-Content install.ps1 -Raw | Invoke-Expression
+          if ($global:MCMU_RESULT -ne 'failed' -or (Test-Path $env:MCMU_DIR)) { throw "ran elevated: $global:MCMU_RESULT" }
+          exit 0
+      # The runner has git and Python, but not Claude Code: this is the --install-missing path, with
+      # Claude Code's real native installer.
+      - name: install.ps1 clones, runs setup.cmd --install-missing, and leaves claude on PATH in this window
+        shell: powershell
+        run: |
+          $env:MCMU_ALLOW_ADMIN = '1'; $env:MCMU_REPO = $env:GITHUB_WORKSPACE; $env:MCMU_DIR = "$env:RUNNER_TEMP\mcmu"
+          $env:MCMU_SETUP_ARGS = '--yes --no-network'
+          if (Get-Command claude -ErrorAction SilentlyContinue) { throw 'claude is already on the runner: this proves nothing' }
+          Get-Content install.ps1 -Raw | Invoke-Expression
+          if ($global:MCMU_RESULT -ne 'ok') { throw "install.ps1: $global:MCMU_RESULT" }
+          claude --version; if ($LASTEXITCODE -ne 0) { throw 'claude does not run in this window' }
+          if (-not (Test-Path "$env:MCMU_DIR\.env.local")) { throw 'setup wrote no .env.local' }
+          if ((Get-Location).Path -ne $env:MCMU_DIR) { throw "left in $((Get-Location).Path), not the clone" }
+          exit 0
+      - name: a NEW window finds claude (the user PATH, not only this session's)
+        shell: powershell
+        run: |
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          claude --version; if ($LASTEXITCODE -ne 0) { throw 'claude is not on the persisted PATH' }
+          exit 0
+      - name: running the line again is safe (skips, updates the clone, setup changes nothing)
+        shell: powershell
+        run: |
+          $env:MCMU_ALLOW_ADMIN = '1'; $env:MCMU_REPO = $env:GITHUB_WORKSPACE; $env:MCMU_DIR = "$env:RUNNER_TEMP\mcmu"
+          $env:MCMU_SETUP_ARGS = '--yes --no-network'
+          $out = Get-Content install.ps1 -Raw | Invoke-Expression *>&1 | Out-String
+          Write-Host $out
+          if ($global:MCMU_RESULT -ne 'ok') { throw "second run: $global:MCMU_RESULT" }
+          if ($out -notmatch 'Updating' -or $out -notmatch 'already installed') { throw 'the second run did not skip and update' }
+          exit 0
+
   build:
     name: windows build + Gate B (template mod)
     if: >-

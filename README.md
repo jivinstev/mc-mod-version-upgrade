@@ -128,13 +128,14 @@ a mod of that size is likely to take.
 
 ```bash
 git clone https://github.com/jivinstev/mc-mod-version-upgrade
-cd mc-mod-version-upgrade && ./setup
+cd mc-mod-version-upgrade && ./setup --install-missing
 claude
 ```
 
 `./setup` finds your Minecraft, recommends an answer to every question, and ends by telling you what
-to type. Installing needs Python 3. Porting is an add-on: say yes when `./setup` offers it, or run
-`./setup --migrate` later; it needs Java 21 (and 25 for Minecraft 26.x).
+to type. It needs git and Python 3. `--install-missing` also installs Claude Code if you don't have it,
+and, for porting on macOS, Java 21 through Homebrew. Porting is an add-on: say yes when `./setup` offers
+it, or run `./setup --migrate` later; it needs Java 21 (and 25 for Minecraft 26.x).
 Details: [docs/USING.md](docs/USING.md).
 
 Setup also asks you to turn off **"Help improve Claude"** at
@@ -144,25 +145,46 @@ records it once you type `confirmed`.
 
 ### On Windows (experimental)
 
-Native Windows, no WSL. Claude Code on Windows already needs Git for Windows, whose Git Bash runs
-everything here. Install the prerequisites, then run setup from cmd or PowerShell:
+Native Windows, no WSL. Open **PowerShell as yourself, not as Administrator**: from the Start menu,
+a plain click (not "Run as administrator"). If the title bar says *Administrator:*, or the prompt
+starts in `C:\WINDOWS\system32`, close it and open a normal one. Then paste:
 
-```bat
-winget install --id Git.Git
-winget install --id Python.Python.3.12
-winget install --id EclipseAdoptium.Temurin.21.JDK
+```powershell
+irm https://raw.githubusercontent.com/jivinstev/mc-mod-version-upgrade/main/install.ps1 | iex
+```
+
+[`install.ps1`](install.ps1) installs Git for Windows and Python 3.12 if they are missing (Windows may
+ask for permission: click Yes), clones this repository to `~\mc-mod-version-upgrade`, and runs
+`setup.cmd --install-missing`. That is the same setup as on macOS and Linux, and it installs Claude Code
+and, if you say yes to porting, the Temurin JDK 21. Then it starts Claude Code in the clone. No new
+window is needed: it picks up the new commands itself. Next time, open PowerShell and run
+`cd ~\mc-mod-version-upgrade; claude`. Running the line again is safe: it skips what is already there
+and updates the clone. It refuses to run as Administrator, because the tools and settings would then
+land where your normal shell and Claude Code don't look.
+
+<details><summary>The same steps by hand</summary>
+
+```powershell
+winget install -e --source winget --id Git.Git
+winget install -e --source winget --id Python.Python.3.12
+# close PowerShell and open a new (not Administrator) one, so it finds git and Python
 git clone https://github.com/jivinstev/mc-mod-version-upgrade
 cd mc-mod-version-upgrade
-setup.cmd
+.\setup.cmd --install-missing
 claude
 ```
 
-The Temurin JDK is only for porting. In Git Bash, `./setup` works the same as `setup.cmd`.
+`--source winget` matters: without it winget also asks the Microsoft Store, and if that fails
+(`0x8a15005e`, "The server certificate did not match", common on VMs and behind network filtering) it
+installs nothing. In PowerShell it is `.\setup.cmd`; in cmd, `setup.cmd`; in Git Bash, `./setup`.
+</details>
+
 Python from python.org has no `python3` command, so setup adds one to Git Bash (and an `unzip`), and
 tells Claude Code which Python to use. Open a new Git Bash window after the first run.
 
-Native Windows has no Claude Code sandbox, so Claude asks before running commands. For porting, turn
-on long paths if setup says they're off, and keep the workspace on the same drive as this folder.
+Native Windows has no Claude Code sandbox, so Claude asks before running commands. For porting, setup
+turns on git's long paths; turn on Windows' too if setup says they're off (that one needs an
+Administrator PowerShell, once: setup prints the line), and keep the workspace on the same drive as this folder.
 The real-client test opens a Minecraft window on your desktop; nothing else is needed.
 
 > **Experimental.** Windows support passes on GitHub's Windows runners (setup, every check, a full
