@@ -45,7 +45,7 @@ release notes. Tokens come from the environment (MODRINTH_TOKEN, CURSEFORGE_TOKE
 arguments, never printed. A platform with no project yet (CurseForge before the person has created it) is
 skipped with a notice, not failed. Standard library only.
 """
-import argparse, datetime, importlib.util, json, os, pathlib, re, subprocess, sys, tomllib, urllib.error
+import argparse, datetime, importlib.util, json, os, pathlib, re, subprocess, sys, urllib.error
 import urllib.parse, urllib.request, uuid
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -136,6 +136,11 @@ def mods_toml(repo, ref="HEAD"):
     for p in ("src/main/resources/META-INF/neoforge.mods.toml", "src/main/resources/META-INF/mods.toml"):
         r = git(repo, "show", f"{ref}:{p}")
         if r.returncode == 0:
+            try:
+                import tomllib
+            except ImportError:                 # Python < 3.11 (setup runs on the user's machine; CI never reads TOML)
+                sys.path.insert(0, str(ROOT))
+                import minitoml as tomllib
             return tomllib.loads(r.stdout)
     raise SystemExit("no neoforge.mods.toml in the port branch")
 
