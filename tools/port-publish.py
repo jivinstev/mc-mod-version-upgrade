@@ -337,9 +337,10 @@ def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
     asset = asset or pick_asset(release, cf.get("asset", ""))
     kinds = {"required": "requiredDependency", "optional": "optionalDependency"}
     meta = {"changelog": text, "changelogType": "markdown", "displayName": f"{version_of(tag, cfg.get('modid', ''), mc)} (NeoForge {mc})",
-            "releaseType": "release",
-            "relations": {"projects": [{"slug": s, "type": kinds.get(t, "requiredDependency")}
-                                       for s, t in dep_entries(cfg, "curseforge")]}}
+            "releaseType": "release"}
+    rel = [{"slug": s, "type": kinds.get(t, "requiredDependency")} for s, t in dep_entries(cfg, "curseforge")]
+    if rel:         # CurseForge rejects an empty list ("Array item count 0 is less than minimum count of 1")
+        meta["relations"] = {"projects": rel}
     if dry:
         print("curseforge file:", json.dumps({**meta, "changelog": "<notes>", "file": asset["name"],
                                               "project_id": cf["project_id"]}, indent=1))
@@ -861,6 +862,12 @@ def self_check():
             ok = False; print("FAIL:", msg)
     expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
     expect(page_title("Epic Core API", "1.21.1") == "Epic Core API - Community Port (1.21.1+)", "title carries the scope")
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        curseforge_file({"modid": "m", "curseforge": {"project_id": 1, "asset": ""}}, "m-1.0.0-mc1.21.1",
+                        {"assets": [{"name": "m-1.0.0.jar"}]}, "notes", True)
+    expect('"relations"' not in buf.getvalue(), "a mod with no dependencies sends no relations (CurseForge rejects an empty list)")
     expect(len(page_title("A Very Long Mod Name That Goes On And On Forever", "1.21.1")) <= 64
            and page_title("A Very Long Mod Name That Goes On And On Forever", "1.21.1").endswith("(1.21.1+)"),
            "a long title is cut to Modrinth's 64 characters, keeping the scope")
