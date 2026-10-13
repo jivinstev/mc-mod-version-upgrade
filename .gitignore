@@ -40,3 +40,6 @@ moves-*.tsv
 moves-*.ambiguous.txt
 moves-*.removed.txt
 colors-*.tsv
+
+# agent worktrees (Claude Code isolation); never part of the repository
+.claude/worktrees/
