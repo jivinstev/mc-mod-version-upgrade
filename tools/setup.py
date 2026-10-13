@@ -251,9 +251,12 @@ def windows_user_path_add(folder, notes):
 def install_missing(tool, why):
     """--install-missing: run the tool's installer from INSTALLERS, then re-read PATH. Returns whether
     it is now found; the caller reports what is still missing, as it would have without the flag."""
+    refresh_path()          # installed already, from a window opened before (this one's PATH is stale)?
+    if shutil.which(tool):
+        return True
     cmd = INSTALLERS.get(tool, {}).get(SYS)
     if not cmd or not shutil.which(cmd[0]):
-        return shutil.which(tool) is not None
+        return False
     print(f"   {tool}: installing ({why}): {' '.join(cmd)}", flush=True)
     try:
         subprocess.run(cmd)

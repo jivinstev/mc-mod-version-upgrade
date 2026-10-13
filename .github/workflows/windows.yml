@@ -331,6 +331,8 @@ jobs:
           Write-Host $out
           if ($global:MCMU_RESULT -ne 'ok') { throw "second run: $global:MCMU_RESULT" }
           if ($out -notmatch 'Updating' -or $out -notmatch 'already installed') { throw 'the second run did not skip and update' }
+          # This step's PATH predates the install (as an old window's would): setup must re-read it, not reinstall.
+          if ($out -match 'claude: installing') { throw 'the second run installed Claude Code again' }
           exit 0
 
   build:
