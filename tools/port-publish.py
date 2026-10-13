@@ -281,12 +281,26 @@ def download(asset):
                 headers={"Accept": "application/octet-stream"}, raw=True)
 
 
+def port_config(cfg, port):
+    """A port dependency's own publish config. It lives on that fork's port branch, not its default branch (the
+    authors' branch, which never carries it), so it is read from the branch this publish checked out: sibling
+    ports share the port-branch name (neoforge-<mc>). No branch known (a detached checkout): the default branch."""
+    ref = cfg.get("port_branch")
+    q = f"?ref={urllib.parse.quote(ref, safe='')}" if ref else ""
+    return json.loads(gh("GET", f"/repos/{port}/contents/{CONFIG}{q}", accept="application/vnd.github.raw", raw=True))
+
+
+def checked_out_branch(repo):
+    r = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    b = (r.stdout or "").strip() if r.returncode == 0 else ""
+    return b if b and b != "HEAD" else None
+
+
 def dep_entries(cfg, plat):
     out = []
     for d in cfg.get("dependencies", []):
         if d.get("port"):
-            other = json.loads(gh("GET", f"/repos/{d['port']}/contents/{CONFIG}",
-                                  accept="application/vnd.github.raw", raw=True))
+            other = port_config(cfg, d["port"])
             ref = (other.get(plat) or {}).get("slug")
         else:
             ref = d.get(plat)
@@ -519,8 +533,7 @@ def layer_dep_versions(repo, tag, cfg, t):
         name = (d.get("port") or "").split("/")[-1]
         if not d.get("port") or not pins.get(name):
             continue
-        other = json.loads(gh("GET", f"/repos/{d['port']}/contents/{CONFIG}", accept="application/vnd.github.raw", raw=True))
-        slug = (other.get("modrinth") or {}).get("slug")
+        slug = (port_config(cfg, d["port"]).get("modrinth") or {}).get("slug")
         hit = [v for v in (modrinth("GET", f"/project/{slug}/version") or []) if v["version_number"] == pins[name]]
         if hit:
             out[hit[0]["project_id"]] = hit[0]["id"]
@@ -620,6 +633,7 @@ def publish(repo, tag, dry=False, manual=False):
     if not cfg:
         print(f"::notice::no {CONFIG}: this fork is not set up to publish (port-publish.py setup)"); return 0
     repo_slug = slug_of(repo)
+    cfg["port_branch"] = checked_out_branch(repo)       # where a port dependency's own config is read (port_config)
     release = gh("GET", f"/repos/{repo_slug}/releases/tags/{tag}")
     info = layer_of(repo, tag, cfg)
     if info:            # a multi-version release: one file per green target
@@ -861,7 +875,7 @@ def self_check():
         if not c:
             ok = False; print("FAIL:", msg)
     expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
-    expect(page_title("Epic Core API", "1.21.1") == "Epic Core API - Community Port (1.21.1+)", "title carries the scope")
+    expect(page_title("Example Mod", "1.21.1") == "Example Mod - Community Port (1.21.1+)", "title carries the scope")
     import contextlib, io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -875,8 +889,8 @@ def self_check():
            "minecraft from a 26.x tag")
     expect(sorted(["26.2", "1.21.11", "26.1.2"], key=mc_key) == ["1.21.11", "26.1.2", "26.2"], "26.x sorts after 1.21.11")
     expect(version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod") == "1.0.0+1.21.1-r2", version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod"))
-    expect(version_of("the_last_sword-1.1.2-mc1.21.1", "the_last_sword") == "1.1.2+1.21.1", "version, no suffix")
-    expect(version_of("the_last_sword-1.1.1-fix-fix-mc1.21.1-r6", "the_last_sword") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
+    expect(version_of("examplemod-1.1.2-mc1.21.1", "examplemod") == "1.1.2+1.21.1", "version, no suffix")
+    expect(version_of("examplemod-1.1.1-fix-fix-mc1.21.1-r6", "examplemod") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
     body = "notes\n\nPublished on Modrinth: x " + MARK.format(platform="modrinth", ref="AbCd1234")
     expect(published(body) == {"modrinth": "AbCd1234"}, "markers parse")
     # public text: no defects of the original, no numbered issues; the authors' own credits are exempt
@@ -942,6 +956,16 @@ def self_check():
         expect(any("not an ancestor" in w for w in gate(".", cfg, "m-2-mc1.21.1", good)), "foreign tag refuses")
     finally:
         gh, git = real_gh, real_git
+    seen, real_gh0 = [], gh
+    gh = lambda method, path, data=None, raw=False, accept=None: (seen.append(path), json.dumps({"curseforge": {"slug": "lib-cf"}}))[1]
+    try:
+        dc = {"dependencies": [{"port": "o/lib", "type": "required"}], "port_branch": "neoforge-1.21.1"}
+        expect(dep_entries(dc, "curseforge") == [("lib-cf", "required")] and seen[-1].endswith("?ref=neoforge-1.21.1"),
+               f"a port dependency's config is read from the port branch, not the default branch: {seen}")
+        dep_entries({"dependencies": [{"port": "o/lib", "type": "required"}]}, "curseforge")
+        expect("?ref=" not in seen[-1], "no branch known: the default branch, as before")
+    finally:
+        gh = real_gh0
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
