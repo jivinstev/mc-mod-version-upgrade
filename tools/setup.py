@@ -355,11 +355,15 @@ def likely_output_repos():
 WORKSPACE_LINKS = ("tools", "templates", ".env.local")
 
 
-def ensure_workspace(ws, notes, problems, dry):
+def ensure_workspace(ws, notes, problems, dry, deferred):
     """Make $MIGRATE_WORKSPACE look like the root every tool expects: `mods/<modid>/` for the
     ports, with `tools/`, `templates/` and `.env.local` beside it. The last three are SYMLINKS
     back into this checkout, so there is one copy of the tooling and an update reaches every
-    workspace. Idempotent; never replaces anything that is not already our own link."""
+    workspace. Idempotent; never replaces anything that is not already our own link.
+    A link to a file that does not exist yet (.env.local, on a first run: it is written after the
+    'write these changes?' question) goes on `deferred`, made by link_workspace() once it exists --
+    on every OS, though only Windows needs it: without Developer Mode the fallback is a hard link,
+    and a hard link needs its target to exist."""
     root = pathlib.Path(ws).expanduser()
     if dry:
         return
@@ -374,20 +378,28 @@ def ensure_workspace(ws, notes, problems, dry):
             if not (link.is_file() and target.is_file() and os.path.samefile(link, target)):  # a hard link is ours
                 problems.append(f"{link} exists and is not a link to this checkout -- left alone")
             continue
-        try:
-            link.symlink_to(target)
-            notes.append(f"workspace: linked {link} -> {target}")
-        except OSError as e:
-            if SYS == "Windows" and windows_link(link, target):
-                notes.append(f"workspace: linked {link} -> {target} "
-                             f"({'junction' if target.is_dir() else 'hard link'}: symlinks need Developer Mode)")
-            elif SYS == "Windows" and target.is_file() and \
-                    os.path.splitdrive(str(link.resolve()))[0].lower() != os.path.splitdrive(str(target.resolve()))[0].lower():
-                problems.append(f"could not link {link}: without Developer Mode a file link must be a hard link, "
-                                f"and those cannot cross drives. Put the workspace on the same drive as {ROOT}, "
-                                "or turn on Developer Mode (Settings > System > For developers)")
-            else:
-                problems.append(f"could not link {link}: {e} (copy it by hand)")
+        if not target.exists():
+            deferred.append((link, target))
+            continue
+        link_workspace(link, target, notes, problems)
+
+
+def link_workspace(link, target, notes, problems):
+    """One workspace link: a symlink, or on Windows without Developer Mode a junction / hard link."""
+    try:
+        link.symlink_to(target)
+        notes.append(f"workspace: linked {link} -> {target}")
+    except OSError as e:
+        if SYS == "Windows" and windows_link(link, target):
+            notes.append(f"workspace: linked {link} -> {target} "
+                         f"({'junction' if target.is_dir() else 'hard link'}: symlinks need Developer Mode)")
+        elif SYS == "Windows" and target.is_file() and \
+                os.path.splitdrive(str(link.resolve()))[0].lower() != os.path.splitdrive(str(target.resolve()))[0].lower():
+            problems.append(f"could not link {link}: without Developer Mode a file link must be a hard link, "
+                            f"and those cannot cross drives. Put the workspace on the same drive as {ROOT}, "
+                            "or turn on Developer Mode (Settings > System > For developers)")
+        else:
+            problems.append(f"could not link {link}: {e} (copy it by hand)")
 
 
 def is_junction(p):
@@ -654,6 +666,7 @@ def main():
     promoted = reconcile(env, state)
     ask = Asker(a, state, first_run)
     problems, notes = [], []
+    deferred_links = []     # workspace links to files written below (ensure_workspace)
 
     print(f"setup: {'first run' if first_run else 're-run'} on {SYS}  ({ROOT})")
     if promoted:
@@ -827,7 +840,7 @@ def main():
             problems.append(f"MIGRATE_WORKSPACE {ws} is inside a git repository: one `git add -A` would "
                             "publish somebody's decompiled mod. Choose a path outside any checkout.")
         if ws and not inside_git_repo(ws):
-            ensure_workspace(ws, notes, problems, dry=a.check)
+            ensure_workspace(ws, notes, problems, dry=a.check, deferred=deferred_links)
         if ws:
             try:
                 free = shutil.disk_usage(pathlib.Path(ws).expanduser().anchor or "/").free / 2**30
@@ -1034,6 +1047,15 @@ def main():
             state["keys"].pop(k, None)
     state["schema"] = SCHEMA
     write_lf(STATE, json.dumps(state, indent=2, sort_keys=True) + "\n")
+    late_notes, late_problems = [], []
+    for link, target in deferred_links:
+        if target.exists():
+            link_workspace(link, target, late_notes, late_problems)
+    for n in late_notes:
+        print(f"   note: {n}")
+    for p in late_problems:
+        print(f"   PROBLEM: {p}")
+    problems += late_problems
 
     if ask.kept:
         print(f"\nKept {ask.kept} earlier answer(s) without asking; ./setup --review goes through them all again.")

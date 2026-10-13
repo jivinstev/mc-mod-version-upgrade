@@ -176,13 +176,38 @@ jobs:
               assert (ws / "tools/setup.py").is_file(), "the junction does not reach the checkout"
               assert os.path.samefile(ws / ".env.local", env)
               notes, problems = [], []
-              m.ensure_workspace(str(ws), notes, problems, dry=False)
+              m.ensure_workspace(str(ws), notes, problems, dry=False, deferred=[])
               print("notes:", notes, "problems:", problems)
               assert not problems and not notes, "a re-run did not recognise its own links"
           finally:
               env.unlink()
           print("junctions + hard link: ok")
           PY
+
+      # What a real PC without Developer Mode hit (#32): a FIRST `setup --migrate`, where symlinks are
+      # refused (WinError 1314) and .env.local is not written yet when the workspace is made. Its hard
+      # link has to wait for the write.
+      - name: first setup --migrate without symlink rights links .env.local after writing it
+        run: |
+          H="$(cygpath -u "$RUNNER_TEMP")/home-nosymlink"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          rm -f .env.local .env.local.bak .setup-state.json
+          HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
+            LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" python3 - <<'PY'
+          import importlib.util, os, pathlib, sys
+          def no_symlinks(self, *a, **k):
+              raise OSError(1314, "A required privilege is not held by the client")
+          pathlib.Path.symlink_to = no_symlinks
+          spec = importlib.util.spec_from_file_location("setup", "tools/setup.py")
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          assert not (m.ROOT / ".env.local").exists(), "not a first run"
+          sys.argv = ["setup", "--yes", "--migrate", "--no-network"]
+          code = m.main()
+          ws = pathlib.Path(os.environ["USERPROFILE"]) / ".mc-mod-upgrade" / "work"
+          assert m.is_junction(ws / "tools") and m.is_junction(ws / "templates"), "no junctions"
+          assert os.path.samefile(ws / ".env.local", m.ROOT / ".env.local"), ".env.local is not hard-linked"
+          print("setup exit:", code)
+          PY
+          rm -f .env.local .env.local.bak .setup-state.json
 
       # Git for Windows runs hooks through its own bash. Prove it does with ours, through a real
       # `git push`: a push to main is refused, a push to a branch runs the IP gate and goes through.
