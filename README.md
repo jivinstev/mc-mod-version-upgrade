@@ -146,7 +146,7 @@ Setup also asks you to turn off **"Help improve Claude"** at
 reads what you work on here, including decompiled mod code. Setup can't change that setting, so it only
 records it once you type `confirmed`.
 
-### On Windows (experimental)
+### On Windows
 
 Native Windows, no WSL. Open **PowerShell as yourself, not as Administrator**: from the Start menu,
 a plain click (not "Run as administrator"). If the title bar says *Administrator:*, close it and open
@@ -193,10 +193,6 @@ Native Windows has no Claude Code sandbox, so Claude asks before running command
 turns on git's long paths; turn on Windows' too if setup says they're off (that one needs an
 Administrator PowerShell, once: setup prints the line), and keep the workspace on the same drive as this folder.
 The real-client test opens a Minecraft window on your desktop; nothing else is needed.
-
-> **Experimental.** Windows support passes on GitHub's Windows runners (setup, every check, a full
-> mod build and the real client), but it has not yet been confirmed on a real Windows PC. Please report
-> anything that differs in [#32](https://github.com/jivinstev/mc-mod-version-upgrade/issues/32).
 
 ## Quick start: in the cloud
 

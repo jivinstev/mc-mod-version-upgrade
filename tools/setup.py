@@ -791,9 +791,6 @@ def main():
         notes.append("this is an Administrator window: the ~/bin shims and Claude Code settings it writes "
                      "go where an elevated shell looks. Run setup from a normal PowerShell instead.")
     if SYS == "Windows":
-        notes.append("Windows support is EXPERIMENTAL: it passes on GitHub's Windows runners but is not yet "
-                     "confirmed on a real PC. Report anything that differs: "
-                     "https://github.com/jivinstev/mc-mod-version-upgrade/issues/32")
         windows_shims(a.check, notes, problems)
         if path == "migrate":
             long_paths(notes, fix)
