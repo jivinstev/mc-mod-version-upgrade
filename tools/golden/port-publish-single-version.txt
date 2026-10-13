@@ -18,6 +18,7 @@ modrinth version: {
   "1.21.1"
  ],
  "version_type": "release",
+ "environment": "client_and_server",
  "loaders": [
   "neoforge"
  ],

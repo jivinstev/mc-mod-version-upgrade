@@ -105,6 +105,11 @@ def modrinth(method, path, data=None, headers=None):
     return http(method, MODRINTH + path, "Authorization", os.environ.get("MODRINTH_TOKEN"), data, headers)
 
 
+def modrinth_v3(method, path, data=None):
+    """Modrinth's v3 API: the only place content disclosures can be set (v2 has no field for them)."""
+    return http(method, MODRINTH.replace("/v2", "/v3") + path, "Authorization", os.environ.get("MODRINTH_TOKEN"), data)
+
+
 def curseforge(method, path, data=None, headers=None):
     return http(method, CURSEFORGE + path, "X-Api-Token", os.environ.get("CURSEFORGE_TOKEN"), data, headers)
 
@@ -326,6 +331,9 @@ def modrinth_version(cfg, tag, release, text, dry, mc=None, asset=None, dep_vers
             d["version_id"] = pinned
     data = {"project_id": proj["id"], "name": f"{number} (NeoForge {mc})", "version_number": number,
             "changelog": text, "dependencies": deps, "game_versions": [mc], "version_type": "release",
+            # Modrinth keeps the environment PER VERSION; a version created without one copies an earlier version's,
+            # so the first one would be "unknown" and block the project's review checklist
+            "environment": cfg.get("environment", "client_and_server"),
             "loaders": ["neoforge"], "featured": True, "file_parts": ["file"], "primary_file": "file"}
     if dry:
         print("modrinth version:", json.dumps({**data, "changelog": "<notes>", "file": asset["name"]}, indent=1))
@@ -677,6 +685,27 @@ def publish(repo, tag, dry=False, manual=False):
     return 1 if missing else 0
 
 
+def set_disclosures(cfg, project_id):
+    """Modrinth's content disclosures (mandatory where they apply): the config's "disclosures", written by setup --
+    a port is always a derivative work, and this tool's ports and pages are made with an AI assistant."""
+    d = cfg.get("disclosures") or []
+    if d:
+        modrinth_v3("PATCH", f"/project/{project_id}/disclosures", {"set": d, "remove": []})
+        print("modrinth disclosures set: " + ", ".join(x["type"] for x in d))
+
+
+def disclosures_for(name, authors, mc, orig_link):
+    """The disclosures every port made with this tool needs on Modrinth: derivative work (the original, linked) and
+    AI-generated content (the port's code changes and the page text). The user reviews them in the config."""
+    return [{"type": "derivative_work",
+             "sources": [{"label": f"{name} by {authors}", "link": orig_link,
+                          "note": f"An unofficial port of the original to NeoForge {mc}, with the original's content."}]},
+            {"type": "ai_content", "uses": ["code", "text"],
+             "note": f"The changes that port the original to NeoForge {mc}, and this page's text, were made with an AI "
+                     "coding assistant and checked by automated gates and a person playing it. The mod's content, "
+                     "art and design are the original author's."}]
+
+
 def modrinth_create(repo):
     cfg = load_config(repo)
     if not cfg or not cfg.get("modrinth", {}).get("slug"):
@@ -698,6 +727,7 @@ def modrinth_create(repo):
         modrinth("PATCH", f"/project/{p['id']}", {"title": cfg["title"], "description": cfg["summary"], "body": body_md})
         print(f"modrinth project {p['slug']} ({p['id']}, status {p['status']}) exists -- title, summary and page "
               "updated from the fork's files")
+        set_disclosures(cfg, p["id"])
         return 0
     data = {"project_type": "mod", "slug": cfg["modrinth"]["slug"], "title": cfg["title"], "description": cfg["summary"],
             "body": body_md, "categories": cfg.get("categories", []), "additional_categories": cfg.get("additional_categories", []),
@@ -712,6 +742,7 @@ def modrinth_create(repo):
             files["icon"] = (pathlib.Path(icon).name, r.stdout, "image/png")
     body, h = multipart({"data": json.dumps(data)}, files)
     p = modrinth("POST", "/project", body, h)
+    set_disclosures(cfg, p["id"])
     print(f"created the Modrinth DRAFT project {p['slug']} ({p['id']}): https://modrinth.com/mod/{p['slug']} -- "
           "it stays a draft until a version is uploaded and it is submitted for review on the website")
     return 0
@@ -815,6 +846,8 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
            "license": toml.get("license", "MIT"), "categories": (orig or {}).get("categories", []),
            "additional_categories": (orig or {}).get("additional_categories", []),
            "ledger_issues": list(ledgers), "differences": list(differences), "original_name": name,
+           "environment": "client_and_server",
+           "disclosures": disclosures_for(name, authors, mc, f"https://modrinth.com/mod/{orig['slug']}" if orig else up),
            "dependencies": deps,
            "modrinth": {"slug": f"{oslug}-neoforge", "asset": variant("_mr.jar")},
            "curseforge": {"project_id": None, "slug": f"{oslug}-neoforge", "asset": variant("_cf.jar")}}
@@ -966,6 +999,19 @@ def self_check():
         expect("?ref=" not in seen[-1], "no branch known: the default branch, as before")
     finally:
         gh = real_gh0
+    dsc = disclosures_for("Example Mod", "Someone", "1.21.1", "https://modrinth.com/mod/examplemod")
+    expect([x["type"] for x in dsc] == ["derivative_work", "ai_content"] and dsc[0]["sources"][0]["link"].endswith("examplemod")
+           and dsc[1]["uses"] == ["code", "text"], "setup's disclosures: derivative work (linked) and AI-generated code/text")
+    global modrinth_v3
+    sent, real_v3 = [], modrinth_v3
+    modrinth_v3 = lambda method, path, data=None: sent.append((method, path, data))
+    try:
+        set_disclosures({"disclosures": dsc}, "PID")
+        set_disclosures({}, "PID")
+        expect(sent == [("PATCH", "/project/PID/disclosures", {"set": dsc, "remove": []})],
+               f"disclosures go to the v3 endpoint once, and nothing is sent without any: {sent}")
+    finally:
+        modrinth_v3 = real_v3
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
