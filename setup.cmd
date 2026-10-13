@@ -10,7 +10,7 @@ python3 -c "import sys; sys.exit(sys.version_info[0] != 3)" >nul 2>&1 && set "PY
 if not defined PY (python -c "import sys; sys.exit(sys.version_info[0] != 3)" >nul 2>&1 && set "PY=python")
 if not defined PY (py -3 -c "import sys" >nul 2>&1 && set "PY=py -3")
 if not defined PY (
-  echo setup: no Python 3 found. Install it with:  winget install --id Python.Python.3.12
+  echo setup: no Python 3 found. Install it with:  winget install -e --source winget --id Python.Python.3.12
   exit /b 1
 )
 %PY% "%~dp0tools\setup.py" %*

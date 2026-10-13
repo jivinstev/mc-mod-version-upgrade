@@ -260,6 +260,37 @@ grep -q '^TRAINING_OPTOUT=confirmed$' "$R/.env.local" && out2="$(tty_run '')" \
   && echo "$out2" | grep -q 'kept: you confirmed model training is turned off' \
   && ok "typing 'confirmed' records it, and a re-run keeps it without asking" || bad "confirmed: $(grep TRAINING "$R/.env.local")"
 
+echo "19. --install-missing is Windows' (install.ps1 passes it): on macOS/Linux it installs no Claude Code or JDK"
+# Every installer a run could reach is a fake that leaves a mark; setup there must stay what it was before
+# the flag existed -- prerequisites are hints, never run.
+C="$(mktemp -d)"; for f in "$NOJAVA"/*; do ln -s "$(readlink "$f")" "$C/$(basename "$f")"; done
+for t in curl brew npm winget; do printf '#!/bin/sh\necho "$0 $*" >> "%s/ran"\n' "$C" > "$C/$t"; chmod +x "$C/$t"; done
+fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --migrate --install-missing)"; code=$?
+{ [ ! -e "$C/ran" ] && echo "$out" | grep -q "Claude Code is not installed" && echo "$out" | grep -q "no JDK found" \
+  && ! echo "$out" | grep -q "setup.cmd --install-missing"; } \
+  && ok "no installer ran; Claude Code and the JDK are reported with their usual hints" \
+  || bad "--install-missing on $(uname): $(cat "$C/ran" 2>/dev/null; echo "$out" | grep -iE 'claude|jdk' | head -3)"
+rm -rf "$C"
+
+echo "20. a workspace linked to ANOTHER clone (re-cloned or moved checkout) is re-pointed only when asked"
+fresh; st --yes >/dev/null; WS="$H/ws"
+sed -i.orig "s#^SETUP_PATH=.*#SETUP_PATH=migrate#" "$R/.env.local"; echo "MIGRATE_WORKSPACE=$WS" >> "$R/.env.local"
+st --yes >/dev/null; mkdir -p "$WS/mods/demo"; R1="$R"
+R2="$(mktemp -d)/repo"; mkdir -p "$R2"
+( git ls-files -z | tar --null -T - -cf - ) | ( cd "$R2" && tar -xf - )
+( cd "$R2" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm t )
+cp "$R1/.env.local" "$R1/.setup-state.json" "$R2/"; R="$R2"
+out="$(st --yes)"
+{ echo "$out" | grep -q "is linked to another clone" && [ "$(readlink "$WS/tools")" = "$R1/tools" ]; } \
+  && ok "--yes reports the other clone and leaves the links alone" || bad "--yes relink: $(echo "$out" | grep -i 'workspace\|clone' | head -3)"
+out="$(tty_run 'y')"
+{ [ "$(readlink "$WS/tools")" = "$R2/tools" ] && [ "$(readlink "$WS/templates")" = "$R2/templates" ] \
+  && [ "$(readlink "$WS/.env.local")" = "$R2/.env.local" ] && [ -d "$WS/mods/demo" ] && [ -f "$R1/tools/setup.py" ] \
+  && ! echo "$out" | grep -qE "PROBLEM.*(link|workspace|clone)"; } \
+  && ok "answering y re-points all three links; the ports in mods/ and the other clone are untouched" \
+  || bad "relink: $(ls -la "$WS"; echo "$out" | grep -E 'PROBLEM|note: workspace' | head -5)"
+rm -rf "$(dirname "$R2")"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"

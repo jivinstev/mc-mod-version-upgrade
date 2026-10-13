@@ -29,7 +29,7 @@ released jar and every dependency CI tested it with, each with a URL and sha256:
 
 ```bash
 python3 tools/install-port.py owner/RepoA owner/RepoB --dry-run      # show the plan
-python3 tools/install-port.py owner/RepoA owner/RepoB                # install into MINECRAFT_MODS_DIR
+python3 tools/install-port.py owner/RepoA owner/RepoB                # install into the mods folder setup recorded for --mc (MINECRAFT_MODS_DIR_1_21_1)
 ```
 
 It follows sibling ports a port depends on, installs each mod once (newest file when ports

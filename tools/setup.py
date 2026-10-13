@@ -5,6 +5,9 @@
     ./setup --yes           first run: take every recommendation.  RE-RUN: keep every decision.
     ./setup --review        ask every question again (a plain re-run asks only new ones)
     ./setup --check         change nothing; print what setup WOULD change, and verify prerequisites
+    ./setup --install-missing   Windows (install.ps1 passes it): also install what is missing with
+                            winget -- Claude Code, the JDK for migration, gh -- and turn on git
+                            core.longpaths. Elsewhere it only installs gh, through Homebrew on macOS.
     ./setup --migrate       add the migration add-on (same as --path migrate; adds keys, never removes any)
     ./setup --mods-dir 26.2=/path/to/minecraft-26.2   add one more deploy target (a set, not a value)
     ./setup --remove KEY    the ONLY way setup ever deletes a setting
@@ -48,23 +51,37 @@ IN_CLOUD = os.environ.get("CLAUDE_CODE_REMOTE") == "true"   # a Claude Code clou
 DEFAULT_TARGET = "1.21.1"
 SECRET_KEYS = {"CURSEFORGE_API_KEY"}
 
+# winget searches every source it has, and when the Microsoft Store source fails (0x8a15005e: its
+# certificate pinning, behind TLS inspection or on a VM with a wrong clock) it installs nothing at all.
+# Nothing here needs the Store, so every winget line names its source.
+WINGET = ["winget", "install", "-e", "--source", "winget", "--accept-package-agreements",
+          "--accept-source-agreements", "--id"]
 INSTALL_HINTS = {  # tool -> {platform: command}
     "git": {"Darwin": "xcode-select --install   (or: brew install git)",
-            "Windows": "winget install --id Git.Git",
+            "Windows": "winget install -e --source winget --id Git.Git",
             "Linux": "sudo apt install git   (Fedora: sudo dnf install git)"},
     "python3": {"Darwin": "brew install python",
-                "Windows": "winget install --id Python.Python.3.12",
+                "Windows": "winget install -e --source winget --id Python.Python.3.12",
                 "Linux": "sudo apt install python3   (Fedora: sudo dnf install python3)"},
     "java": {"Darwin": "brew install --cask temurin@21   (MC 26.x also needs 25: temurin@25)",
-             "Windows": "winget install --id EclipseAdoptium.Temurin.21.JDK",
+             "Windows": "winget install -e --source winget --id EclipseAdoptium.Temurin.21.JDK",
              "Linux": "sudo apt install openjdk-21-jdk   (Fedora: sudo dnf install java-21-openjdk-devel)"},
     "claude": {"Darwin": "brew install --cask claude-code   (or, with Node 18+: npm install -g @anthropic-ai/claude-code)",
-               "Windows": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)",
+               "Windows": "winget install -e --source winget --id Anthropic.ClaudeCode",
                "Linux": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)"},
 }
-INSTALL_HINTS["gh"] = {"Darwin": "brew install gh", "Windows": "winget install --id GitHub.cli",
+INSTALL_HINTS["gh"] = {"Darwin": "brew install gh", "Windows": "winget install -e --source winget --id GitHub.cli",
                        "Linux": "sudo apt install gh   (Fedora: sudo dnf install gh; or https://cli.github.com)"}
-CLAUDE_DOCS = "https://docs.claude.com/en/docs/claude-code/setup"
+# What --install-missing runs (and the gh offer), one table for every OS. Only package managers that
+# verify what they download (winget checks each installer's hash against its manifest), never a script
+# piped into a shell. Windows only, apart from gh's opt-in Homebrew line that predates this: install.ps1
+# is what calls --install-missing, and macOS/Linux setup stays as it was (their prerequisites are hints).
+INSTALLERS = {
+    "claude": {"Windows": WINGET + ["Anthropic.ClaudeCode"]},
+    "java": {"Windows": WINGET + ["EclipseAdoptium.Temurin.21.JDK"]},
+    "gh": {"Darwin": ["brew", "install", "gh"], "Windows": WINGET + ["GitHub.cli"]},
+}
+CLAUDE_DOCS = "https://code.claude.com/docs/en/setup"
 
 
 # ── .env.local + state ──────────────────────────────────────────────────────────────────────
@@ -192,7 +209,72 @@ def bash_shim(name, why, command, check, notes, problems):
         problems.append(f"could not write {shim}: {e}")
 
 
-def long_paths(notes):
+def refresh_path():
+    """An installer changes PATH for NEW shells (the registry on Windows, a shell profile elsewhere), not
+    for this process. Pick its changes up, so the check after an install finds what it installed."""
+    have = os.environ.get("PATH", "").split(os.pathsep)
+    new = []
+    if SYS == "Windows":
+        try:
+            import winreg
+            for hive, key in ((winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                              (winreg.HKEY_CURRENT_USER, "Environment")):
+                try:
+                    with winreg.OpenKey(hive, key) as k:
+                        new += [os.path.expandvars(x) for x in winreg.QueryValueEx(k, "Path")[0].split(";")]
+                except OSError:
+                    pass
+        except ImportError:
+            pass
+    local_bin = pathlib.Path.home() / ".local" / "bin"          # where Claude Code's native installer puts it
+    if local_bin.is_dir():
+        new.append(str(local_bin))
+    os.environ["PATH"] = os.pathsep.join(have + [x for x in dict.fromkeys(new) if x and x not in have])
+
+
+def windows_user_path_add(folder, notes):
+    """Put a folder on the user's PATH for every new window (what Claude Code's install docs ask people
+    to do by hand when `claude` is not found). Through .NET, which also tells Explorer; setx would cut
+    a long PATH at 1024 characters."""
+    folder = str(folder)
+    code, cur = run(["powershell", "-NoProfile", "-Command", "[Environment]::GetEnvironmentVariable('Path','User')"])
+    if code != 0 or folder.lower() in [x.lower().rstrip("\\") for x in cur.strip().split(";")]:
+        return
+    quoted = folder.replace("'", "''")                         # a PowerShell single-quoted string
+    script = ("$p=[Environment]::GetEnvironmentVariable('Path','User'); "
+              f"[Environment]::SetEnvironmentVariable('Path', (@($p, '{quoted}') | Where-Object {{ $_ }}) -join ';', 'User')")
+    code, out = run(["powershell", "-NoProfile", "-Command", script], timeout=60)
+    notes.append(f"added {folder} to your PATH (new windows find claude there)" if code == 0
+                 else f"could not add {folder} to your PATH: {out.strip()[:200]}")
+
+
+def install_missing(tool, why):
+    """--install-missing: run the tool's installer from INSTALLERS, then re-read PATH. Returns whether
+    it is now found; the caller reports what is still missing, as it would have without the flag."""
+    refresh_path()          # installed already, from a window opened before (this one's PATH is stale)?
+    if shutil.which(tool):
+        return True
+    cmd = INSTALLERS.get(tool, {}).get(SYS)
+    if not cmd or not shutil.which(cmd[0]):
+        return False
+    print(f"   {tool}: installing ({why}): {' '.join(cmd)}", flush=True)
+    try:
+        subprocess.run(cmd)
+    except OSError as e:
+        print(f"   {tool}: the installer did not run: {e}")
+    refresh_path()
+    return shutil.which(tool) is not None
+
+
+def is_windows_admin():
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (ImportError, AttributeError, OSError):
+        return False
+
+
+def long_paths(notes, fix=False):
     """Windows' 260-character path limit. Gradle's caches, NeoForm's work tree and a decompiled mod
     under it run past it, and the failure (a file 'not found' that is there) does not say why. Java
     itself copes; git and some Python file calls do not, unless both switches are on."""
@@ -211,8 +293,11 @@ def long_paths(notes):
                      "Turn them on (PowerShell as Administrator): New-ItemProperty -Path "
                      "'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem' -Name LongPathsEnabled -Value 1 "
                      "-PropertyType DWORD -Force")
-    if not git_long:
-        notes.append("git core.longpaths is off: run  git config --global core.longpaths true")
+    if not git_long and fix and run(["git", "config", "--global", "core.longpaths", "true"])[0] == 0:
+        notes.append("turned on git core.longpaths (git config --global core.longpaths true)")
+    elif not git_long:
+        notes.append("git core.longpaths is off: run  git config --global core.longpaths true  "
+                     "(or ./setup --install-missing)")
 
 
 def windows_shims(check, notes, problems):
@@ -274,15 +359,75 @@ def likely_output_repos():
 WORKSPACE_LINKS = ("tools", "templates", ".env.local")
 
 
-def ensure_workspace(ws, notes, problems, dry):
+def other_checkout(root):
+    """The checkout a workspace is linked to, when that is not this one but another clone of this
+    repository (it has tools/setup.py) or one since deleted -- what re-cloning or moving the checkout
+    leaves behind. None for this checkout, no link, or a link to something else."""
+    link = root / "tools"
+    if not (link.is_symlink() or is_junction(link)):
+        return None
+    other = pathlib.Path(os.path.realpath(link)).parent
+    if os.path.realpath(other) == os.path.realpath(ROOT):
+        return None
+    return other if (other / "tools" / "setup.py").is_file() or not other.exists() else None
+
+
+def remove_link(p):
+    """Remove a link and never what it points to: os.rmdir takes away a junction or a directory
+    symlink on Windows and refuses a real folder; unlink takes a file or POSIX symlink."""
+    if SYS == "Windows" and (is_junction(p) or p.is_dir()):
+        os.rmdir(p)
+    else:
+        try:
+            p.unlink()
+        except (IsADirectoryError, PermissionError):      # a dangling directory symlink on Windows
+            os.rmdir(p)
+
+
+def relink_workspace(root, other, notes):
+    """Point a workspace linked to another clone (other_checkout) at this one. Only links are removed;
+    a .env.local that is not the other clone's own file is kept as .env.local.old."""
+    for name in ("tools", "templates"):
+        p = root / name
+        if p.is_symlink() or is_junction(p):
+            remove_link(p)
+    env = root / ".env.local"
+    if env.is_symlink():
+        remove_link(env)
+    elif env.is_file():
+        theirs = other / ".env.local"
+        if theirs.is_file() and os.path.samefile(env, theirs):    # a hard link: the other clone keeps its copy
+            env.unlink()
+        else:
+            env.replace(root / ".env.local.old")
+            notes.append(f"workspace: kept the old {env} as .env.local.old")
+    notes.append(f"workspace: {root} was linked to {other}; now linked to {ROOT}")
+
+
+def ensure_workspace(ws, notes, problems, dry, deferred, interactive=False):
     """Make $MIGRATE_WORKSPACE look like the root every tool expects: `mods/<modid>/` for the
     ports, with `tools/`, `templates/` and `.env.local` beside it. The last three are SYMLINKS
     back into this checkout, so there is one copy of the tooling and an update reaches every
-    workspace. Idempotent; never replaces anything that is not already our own link."""
+    workspace. Idempotent; never replaces anything that is not already our own link.
+    A link to a file that does not exist yet (.env.local, on a first run: it is written after the
+    'write these changes?' question) goes on `deferred`, made by link_workspace() once it exists --
+    on every OS, though only Windows needs it: without Developer Mode the fallback is a hard link,
+    and a hard link needs its target to exist."""
     root = pathlib.Path(ws).expanduser()
     if dry:
         return
     (root / "mods").mkdir(parents=True, exist_ok=True)
+    other = other_checkout(root)
+    if other:
+        # Its ports in mods/ stay; only which checkout's tools it uses changes. Asked, never assumed:
+        # someone may keep two clones on purpose.
+        if interactive and confirm(f"   The workspace {root} is linked to another clone of this repository,\n"
+                                   f"   {other}. Link it to this one ({ROOT})? [Y/n]: "):
+            relink_workspace(root, other, notes)
+        else:
+            problems.append(f"the workspace {root} is linked to another clone, {other}. Run setup without "
+                            "--yes and answer y to link it to this one, or choose another MIGRATE_WORKSPACE")
+            return
     for name in WORKSPACE_LINKS:
         link, target = root / name, ROOT / name
         if link.is_symlink() or is_junction(link):
@@ -293,20 +438,28 @@ def ensure_workspace(ws, notes, problems, dry):
             if not (link.is_file() and target.is_file() and os.path.samefile(link, target)):  # a hard link is ours
                 problems.append(f"{link} exists and is not a link to this checkout -- left alone")
             continue
-        try:
-            link.symlink_to(target)
-            notes.append(f"workspace: linked {link} -> {target}")
-        except OSError as e:
-            if SYS == "Windows" and windows_link(link, target):
-                notes.append(f"workspace: linked {link} -> {target} "
-                             f"({'junction' if target.is_dir() else 'hard link'}: symlinks need Developer Mode)")
-            elif SYS == "Windows" and target.is_file() and \
-                    os.path.splitdrive(str(link.resolve()))[0].lower() != os.path.splitdrive(str(target.resolve()))[0].lower():
-                problems.append(f"could not link {link}: without Developer Mode a file link must be a hard link, "
-                                f"and those cannot cross drives. Put the workspace on the same drive as {ROOT}, "
-                                "or turn on Developer Mode (Settings > System > For developers)")
-            else:
-                problems.append(f"could not link {link}: {e} (copy it by hand)")
+        if not target.exists():
+            deferred.append((link, target))
+            continue
+        link_workspace(link, target, notes, problems)
+
+
+def link_workspace(link, target, notes, problems):
+    """One workspace link: a symlink, or on Windows without Developer Mode a junction / hard link."""
+    try:
+        link.symlink_to(target)
+        notes.append(f"workspace: linked {link} -> {target}")
+    except OSError as e:
+        if SYS == "Windows" and windows_link(link, target):
+            notes.append(f"workspace: linked {link} -> {target} "
+                         f"({'junction' if target.is_dir() else 'hard link'}: symlinks need Developer Mode)")
+        elif SYS == "Windows" and target.is_file() and \
+                os.path.splitdrive(str(link.resolve()))[0].lower() != os.path.splitdrive(str(target.resolve()))[0].lower():
+            problems.append(f"could not link {link}: without Developer Mode a file link must be a hard link, "
+                            f"and those cannot cross drives. Put the workspace on the same drive as {ROOT}, "
+                            "or turn on Developer Mode (Settings > System > For developers)")
+        else:
+            problems.append(f"could not link {link}: {e} (copy it by hand)")
 
 
 def is_junction(p):
@@ -389,6 +542,9 @@ def claude_settings_wanted(path, write_dirs):
         # templates' build.gradle reads $PYTHON on Windows) and UTF-8 output from the tools.
         want["env.PYTHON"] = sys.executable
         want["env.PYTHONUTF8"] = "1"
+        # setup installs Claude Code with winget, and a winget install does not update itself; this has
+        # Claude Code run `winget upgrade` when a new version is out (it does nothing for other installs).
+        want["env.CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE"] = "1"
     return want
 
 
@@ -422,16 +578,16 @@ def confirm(question):
     return input(question).strip().lower() in ("", "y", "yes")
 
 
-def gh_setup(interactive, notes, no_network):
+def gh_setup(interactive, notes, no_network, install=False):
     """Make `gh` usable for lessons PRs: installed (with consent), signed in, and able to push -- to
-    this repository, or to the user's fork of it. Nothing happens without a yes, and a --yes/--check run
-    only reports."""
+    this repository, or to the user's fork of it. Nothing happens without a yes (or --install-missing),
+    and a --yes/--check run only reports."""
     gh = shutil.which("gh")
     if not gh:
-        cmd = {"Darwin": ["brew", "install", "gh"], "Windows": ["winget", "install", "--id", "GitHub.cli"]}.get(SYS)
-        if interactive and cmd and shutil.which(cmd[0]) and \
-                confirm(f"   gh is not installed. Install it now with `{' '.join(cmd)}`? [Y/n]: "):
-            subprocess.run(cmd)
+        cmd = INSTALLERS["gh"].get(SYS)
+        if cmd and shutil.which(cmd[0]) and (install or (interactive and
+                confirm(f"   gh is not installed. Install it now with `{' '.join(cmd)}`? [Y/n]: "))):
+            install_missing("gh", "to share lessons")
             gh = shutil.which("gh")
         if not gh:
             notes.append(f"sharing lessons needs the GitHub CLI: {hint('gh')}, then `gh auth login` "
@@ -558,6 +714,9 @@ def main():
                     help="ask EVERY question again, with your earlier answers as the defaults "
                          "(a plain re-run asks only questions it has not asked before)")
     ap.add_argument("--no-network", action="store_true", help="skip the git reachability probe")
+    ap.add_argument("--install-missing", action="store_true",
+                    help="Windows: install what is missing with winget (Claude Code, the JDK for migration, "
+                         "gh) and turn on git core.longpaths; elsewhere only gh, through Homebrew on macOS")
     a = ap.parse_args()
 
     if not (a.yes or a.check) and not sys.stdin.isatty():
@@ -570,6 +729,7 @@ def main():
     promoted = reconcile(env, state)
     ask = Asker(a, state, first_run)
     problems, notes = [], []
+    deferred_links = []     # workspace links to files written below (ensure_workspace)
 
     print(f"setup: {'first run' if first_run else 're-run'} on {SYS}  ({ROOT})")
     if promoted:
@@ -600,31 +760,43 @@ def main():
         else:
             problems.append(f"{tool} is missing -- install it: {hint(tool)}")
     print(f"   python3: ok ({platform.python_version()})")
-    # Claude Code drives the skills (installing, migrating). Detected, never installed: a global
-    # install is the user's call, like git/python/JDK above. Not a PROBLEM -- the tools run without it.
+    # Claude Code drives the skills (installing, migrating). Installed only with --install-missing on
+    # Windows (install.ps1 passes it): otherwise a global install is the user's call. Not a PROBLEM --
+    # the tools run without it.
+    fix = a.install_missing and not a.check
     has_claude = shutil.which("claude") is not None
+    if not has_claude and fix:
+        has_claude = install_missing("claude", "it is what you talk to")
+        if has_claude and SYS == "Windows":
+            windows_user_path_add(pathlib.Path(shutil.which("claude")).parent, notes)
     if has_claude:
         print("   claude: ok (Claude Code)")
     else:
         notes.append(f"Claude Code is not installed -- it is what you talk to. Install: {hint('claude')}  "
-                     f"(details: {CLAUDE_DOCS})")
+                     + ("(or setup.cmd --install-missing; " if SYS == "Windows" else "(")
+                     + f"details: {CLAUDE_DOCS})")
     if sys.version_info < (3, 8):
         problems.append(f"python 3.8+ needed -- {hint('python3')}")
     if path == "migrate":
         jm = java_major()
+        if (jm is None or jm < 21) and fix and install_missing("java", "migration needs Java 21"):
+            jm = java_major()
         if jm is None:
             problems.append(f"no JDK found (migration needs Java 21; MC 26.x needs 25) -- {hint('java')}")
         elif jm < 21:
             problems.append(f"Java {jm} found; migration needs 21+ -- {hint('java')}")
         else:
             print(f"   java: ok (Java {jm}{'' if jm >= 25 else '; MC 26.x targets also need Java 25'})")
+    if SYS == "Windows" and is_windows_admin():
+        notes.append("this is an Administrator window: the ~/bin shims and Claude Code settings it writes "
+                     "go where an elevated shell looks. Run setup from a normal PowerShell instead.")
     if SYS == "Windows":
         notes.append("Windows support is EXPERIMENTAL: it passes on GitHub's Windows runners but is not yet "
                      "confirmed on a real PC. Report anything that differs: "
                      "https://github.com/jivinstev/mc-mod-version-upgrade/issues/32")
         windows_shims(a.check, notes, problems)
         if path == "migrate":
-            long_paths(notes)
+            long_paths(notes, fix)
         if not shutil.which("bash"):
             notes.append("the tooling is bash + Python: run it from Git Bash (part of Git for Windows, "
                          "which Claude Code needs too)")
@@ -732,7 +904,8 @@ def main():
             problems.append(f"MIGRATE_WORKSPACE {ws} is inside a git repository: one `git add -A` would "
                             "publish somebody's decompiled mod. Choose a path outside any checkout.")
         if ws and not inside_git_repo(ws):
-            ensure_workspace(ws, notes, problems, dry=a.check)
+            ensure_workspace(ws, notes, problems, dry=a.check, deferred=deferred_links,
+                             interactive=ask.interactive and not a.check)
         if ws:
             try:
                 free = shutil.disk_usage(pathlib.Path(ws).expanduser().anchor or "/").free / 2**30
@@ -818,7 +991,7 @@ def main():
         share = ask.decide("CONTRIBUTE_LEARNINGS", "yes", "Share your lessons as pull requests? (yes/no)",
                            choices={"yes": "yes", "y": "yes", "no": "no", "n": "no"})
         if share == "yes":
-            gh_setup(ask.interactive and not a.check, notes, a.no_network)
+            gh_setup(ask.interactive and not a.check, notes, a.no_network, a.install_missing and not a.check)
 
     # 9. Claude Code sandbox permissions -----------------------------------------------------------
     f = claude_settings_file()
@@ -939,6 +1112,15 @@ def main():
             state["keys"].pop(k, None)
     state["schema"] = SCHEMA
     write_lf(STATE, json.dumps(state, indent=2, sort_keys=True) + "\n")
+    late_notes, late_problems = [], []
+    for link, target in deferred_links:
+        if target.exists():
+            link_workspace(link, target, late_notes, late_problems)
+    for n in late_notes:
+        print(f"   note: {n}")
+    for p in late_problems:
+        print(f"   PROBLEM: {p}")
+    problems += late_problems
 
     if ask.kept:
         print(f"\nKept {ask.kept} earlier answer(s) without asking; ./setup --review goes through them all again.")
