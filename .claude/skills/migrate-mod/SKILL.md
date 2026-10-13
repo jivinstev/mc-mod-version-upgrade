@@ -501,7 +501,7 @@ tracks what the port actually rewrote. The templates are the *shape*; `test-targ
   phase, and re-run the watcher. Repeat until `RESULT=ALL-DONE` (exit 0). Run it as a background watch so you're
   notified per crash, not polling.
 - Then `./gradlew deployToMods` (runs `build`, which includes Gate A's JUnit tests — **not** Gate B, which you
-  run separately with `runGameTestServer` — then copies to `$MINECRAFT_MODS_DIR`; **atomic rename, so it's safe
+  run separately with `runGameTestServer` — then copies to the mods folder setup recorded for the mod's `minecraft_version` (`MINECRAFT_MODS_DIR_1_21_1`; `$MINECRAFT_MODS_DIR` overrides it for one run); **atomic rename, so it's safe
   to deploy while a game is open** — MC just needs a restart to pick it up).
 - Client-only surface (rendering, client mixins, GUIs) still needs a real client: launch
   `./gradlew runClient` or read `$MINECRAFT_LOGS_DIR/latest.log`, then tick the P0 items in

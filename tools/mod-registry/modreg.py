@@ -274,13 +274,14 @@ def _read_modids_from_jar(path):
 
 def cmd_scan_instance(args):
     """List modIds already present in the target instance, so the resolver can skip
-    dependencies that are already installed. Reads MINECRAFT_MODS_DIR from .env.local
-    unless --dir is given."""
+    dependencies that are already installed. Reads the mods folder setup recorded for --mc
+    (MINECRAFT_MODS_DIR_1_21_1 in .env.local) unless --dir is given."""
     import glob
-    directory = args.dir or providers.read_env_key("MINECRAFT_MODS_DIR")
+    directory = args.dir or providers.read_mods_dir(args.mc)
     result = {"dir": directory, "mods": [], "modIds": []}
     if not directory:
-        _emit({**result, "error": "MINECRAFT_MODS_DIR not set and --dir not given"})
+        _emit({**result, "error": f"no mods folder for Minecraft {args.mc}: {providers.mods_dir_key(args.mc)} "
+                                  "is not set in .env.local (./setup --mods-dir) and --dir was not given"})
         sys.exit(2)
     seen = set()
     for jar in sorted(glob.glob(os.path.join(directory, "*.jar"))):
@@ -338,7 +339,9 @@ def main():
     rm.set_defaults(func=cmd_resolve_modid)
 
     si = sub.add_parser("scan-instance")
-    si.add_argument("--dir", default=None, help="mods dir (default: MINECRAFT_MODS_DIR from .env.local)")
+    si.add_argument("--dir", default=None,
+                    help="mods dir (default: the one setup recorded for --mc, MINECRAFT_MODS_DIR_<mc> in .env.local)")
+    si.add_argument("--mc", default="1.21.1", help="Minecraft version whose mods folder to scan (default 1.21.1)")
     si.set_defaults(func=cmd_scan_instance)
 
     args = ap.parse_args()

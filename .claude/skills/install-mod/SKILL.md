@@ -11,7 +11,7 @@ compatible build exists. You resolve dependencies recursively, and you **keep a 
 so a long dependency/migration chain never loses its place.
 
 ## Target & tools
-- **Default target:** `neoforge` / `1.21.1` (the player's live instance at `MINECRAFT_MODS_DIR`).
+- **Default target:** `neoforge` / `1.21.1` (the player's live instance: the mods folder setup recorded for the target (`MINECRAFT_MODS_DIR_<mc>` in `.env.local`, e.g. `MINECRAFT_MODS_DIR_1_21_1`); `modreg.py scan-instance --mc <mc>` prints it as `dir`).
   Everything is parameterized `(loader, mc)` — if the user names a different target, use it.
 - **Registry CLI:** `tools/mod-registry/modreg.py` — `search | versions | deps | download |
   resolve-modid | scan-instance`. JSON to stdout; honors the CurseForge ToS (no disk cache,
@@ -130,8 +130,8 @@ Work them in order; `references/pipeline.md` has the exact commands.
   (`./gradlew build` in `mods/<modid>/`, since the harness loads it as an external jar), `touch
   $SIG/fix.done` to relaunch. **Catalog every new §R runtime pattern you fix** (Step-4b protocol) — the
   battle/gauntlet phases are exactly where the compile-clean-but-crashes patterns hide.
-- **(f) INSTALL — the outward change, last.** Copy the smoke-tested jars into `MINECRAFT_MODS_DIR`
-  (atomic). Confirm with the user first unless they pre-authorized. Mark nodes `done`; final
+- **(f) INSTALL — the outward change, last.** Copy the smoke-tested jars into the target's mods folder
+  (scan-instance's `dir`; atomic). Confirm with the user first unless they pre-authorized. Mark nodes `done`; final
   `plan.py render`.
 
 ## Invoking migrate-mod (stage e handoff)

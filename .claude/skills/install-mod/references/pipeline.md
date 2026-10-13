@@ -33,9 +33,10 @@ Read `classification`: `native | needs-migrate | needs-downport | none`. `chosen
 
 ## (c) DEPENDENCY CHECK (recursive)
 ```bash
-python3 $REG/modreg.py scan-instance                       # modIds already in MINECRAFT_MODS_DIR
+python3 $REG/modreg.py scan-instance --mc <mc>             # modIds already installed; "dir" = the mods folder ($MODS)
 python3 $REG/modreg.py deps --provider <p> --id <id> --file <fileId>
 ```
+`scan-instance` reads the mods folder setup recorded for the target (`MINECRAFT_MODS_DIR_<mc>` in `.env.local`, e.g. `MINECRAFT_MODS_DIR_1_21_1`); its `dir` is the folder every step below calls `$MODS`.
 For each **required** dep: if its modId ∈ scan-instance → node `compat=present-in-instance` (skip
 download+migrate); else `versions`-classify it, add a `dependency` node with `requiredBy:[parent]`,
 and recurse `deps` on ITS chosen file. Dedup by modId; guard cycles. Write nodes deps-first.
@@ -61,7 +62,7 @@ Collect the final jars (native downloads + migrated outputs) and their target mo
 isolated from the real instance, so a dep that's already installed there (e.g. geckolib) is NOT on the
 harness classpath — omitting it fails the boot with `NoClassDefFoundError`/`ClassNotFoundException` for
 the dep's classes. `present-in-instance` means "don't re-download/install it," NOT "skip it in the test."
-Pass every required dep jar (grab the installed one from `MINECRAFT_MODS_DIR`, or the one you downloaded)
+Pass every required dep jar (grab the installed one from `$MODS`, or the one you downloaded)
 alongside the mod: `-Psmokejars="<mod>.jar,<dep1>.jar,<dep2>.jar"`. (Only `-Psmokens` = the mod's own
 namespace(s) to drive.) In-place is fine (its `run/` + `build/`
 are gitignored); copy it under `installs/$SLUG/` if you need isolation from a concurrent run.
@@ -104,7 +105,7 @@ client gate as `skipped` in the node and rely on headless + migrate-mod's own Ga
 
 ## (f) INSTALL (last; outward change — confirm first)
 ```bash
-cp installs/$SLUG/jars/<final>.jar "$MINECRAFT_MODS_DIR"/      # atomic; safe while game closed
+cp installs/$SLUG/jars/<final>.jar "$MODS"/      # $MODS = scan-instance's "dir"; atomic; safe while game closed
 # for a migrated node, the final jar is mods/<modid>/build/libs/<modid>-<ver>.jar
 ```
 Or use each migrated mod's `./gradlew deployToMods`. Mark nodes `install.status=deployed`, `status=done`;

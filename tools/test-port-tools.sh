@@ -173,6 +173,21 @@ kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
 [ "${seen:-0}" -ge 1 ] && ok "boot-smoke sees a client already running on the instance" \
   || bad "boot-smoke's process probe missed a running client (saw ${seen:-nothing})"
 
+# boot-smoke finds the instance from the mods folders setup records: per version (MINECRAFT_MODS_DIR_1_21_1),
+# with '' for a version that has no install -- not only the single key older checkouts carry.
+B="$T/bs"; mkdir -p "$B/repo/tools" "$B/game-1.21.1/mods"; cp tools/boot-smoke.py "$B/repo/tools/"
+printf 'MINECRAFT_MODS_DIR_26_2=\nMINECRAFT_MODS_DIR_1_21_1=%s\n' "$B/game-1.21.1/mods" > "$B/repo/.env.local"
+found="$(env -u MINECRAFT_DIR python3 - "$B" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("bs", sys.argv[1] + "/repo/tools/boot-smoke.py")
+bs = importlib.util.module_from_spec(spec); spec.loader.exec_module(bs)
+bs.DEFAULT_INSTANCE = sys.argv[1] + "/no-default"
+print(bs.find_instance(None))
+PY
+)"
+[ "$found" = "$B/game-1.21.1" ] && ok "boot-smoke finds the instance from setup's per-version mods key" \
+  || bad "boot-smoke instance from MINECRAFT_MODS_DIR_1_21_1: got '${found}'"
+
 echo "6. recipe-bench.py (bucketer A/B, and it refuses to count a build that never compiled)"
 out="$(python3 tools/recipe-bench.py --self-check 2>&1)"
 grep -q 'self-check: PASS' <<<"$out" && ok "bucketer: specific entries matched, generic + near-miss names left unmatched" \

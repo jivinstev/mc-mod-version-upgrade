@@ -67,9 +67,9 @@ def die(msg, code=2):
 
 # ── instance discovery ──────────────────────────────────────────────────────────────────────
 def find_instance(explicit):
-    """An explicit path wins; then $MINECRAFT_DIR; then the parent of MINECRAFT_MODS_DIR in any
-    sibling repo's .env.local (which is where both mod repos already record it); then the
-    platform default."""
+    """An explicit path wins; then $MINECRAFT_DIR; then the parent of each mods folder recorded in any
+    sibling repo's .env.local -- setup's per-version MINECRAFT_MODS_DIR_<mc> keys, and the single
+    MINECRAFT_MODS_DIR older checkouts carry; then the platform default."""
     cands = []
     if explicit:
         cands.append(pathlib.Path(explicit).expanduser())
@@ -79,9 +79,10 @@ def find_instance(explicit):
     for env in list(here.parent.glob("*/.env.local")) + [here / ".env.local"]:
         try:
             for line in env.read_text(encoding="utf-8").splitlines():
-                if line.startswith("MINECRAFT_MODS_DIR="):
-                    p = pathlib.Path(line.split("=", 1)[1].strip().strip('"')).expanduser()
-                    cands.append(p.parent)
+                m = re.match(r"MINECRAFT_MODS_DIR(?:_\w+)?=(.*)$", line)
+                v = m.group(1).strip().strip('"') if m else ""
+                if v:                                   # setup records '' for a version with no install
+                    cands.append(pathlib.Path(v).expanduser().parent)
         except OSError:
             pass
     cands.append(pathlib.Path(DEFAULT_INSTANCE).expanduser())
