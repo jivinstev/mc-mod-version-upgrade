@@ -337,9 +337,10 @@ def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
     asset = asset or pick_asset(release, cf.get("asset", ""))
     kinds = {"required": "requiredDependency", "optional": "optionalDependency"}
     meta = {"changelog": text, "changelogType": "markdown", "displayName": f"{version_of(tag, cfg.get('modid', ''), mc)} (NeoForge {mc})",
-            "releaseType": "release",
-            "relations": {"projects": [{"slug": s, "type": kinds.get(t, "requiredDependency")}
-                                       for s, t in dep_entries(cfg, "curseforge")]}}
+            "releaseType": "release"}
+    rel = [{"slug": s, "type": kinds.get(t, "requiredDependency")} for s, t in dep_entries(cfg, "curseforge")]
+    if rel:         # CurseForge rejects an empty list ("Array item count 0 is less than minimum count of 1")
+        meta["relations"] = {"projects": rel}
     if dry:
         print("curseforge file:", json.dumps({**meta, "changelog": "<notes>", "file": asset["name"],
                                               "project_id": cf["project_id"]}, indent=1))
@@ -702,6 +703,48 @@ def modrinth_create(repo):
     return 0
 
 
+def page_title(name, mc):
+    """'<name> - Community Port (<mc>+)': the scope is in the title. Modrinth caps titles at 64 characters, so a
+    long name is cut to fit rather than the scope dropped."""
+    suffix = f" - Community Port ({mc}+)"
+    return name + suffix if len(name + suffix) <= 64 else name[:64 - len(suffix)].rstrip() + suffix
+
+
+def original_curseforge(name):
+    """The original's CurseForge page, found by exact name through the registry tool (needs its CurseForge key);
+    None when it cannot be found, and the page then links Modrinth and the source only."""
+    r = subprocess.run([sys.executable, str(ROOT / "mod-registry" / "modreg.py"), "search", "--query", name],
+                       capture_output=True, text=True, encoding="utf-8", check=False)
+    try:
+        hits = json.loads(r.stdout)["results"]
+    except (ValueError, KeyError):
+        return None
+    for h in hits:
+        if h.get("name", "").lower() == name.lower():
+            for p in h.get("providers", []):
+                if p.get("provider") == "curseforge" and p.get("url"):
+                    return p["url"]
+    return None
+
+
+def original_credits_file(up):
+    """(file name, URL) of the metadata file holding the original's credits, on the original repository's default
+    branch -- the page says where its credits come from."""
+    m = re.match(r"https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?/?$", up or "")
+    if not m:
+        return None
+    tok = os.environ.get("GITHUB_TOKEN")
+    for path in ("src/main/resources/META-INF/mods.toml", "src/main/resources/META-INF/neoforge.mods.toml",
+                 "src/main/templates/META-INF/mods.toml", "src/main/templates/META-INF/neoforge.mods.toml"):
+        try:
+            f = http("GET", f"{GITHUB}/repos/{m.group(1)}/contents/{path}", "Authorization",
+                     f"Bearer {tok}" if tok else None)
+            return pathlib.Path(path).name, f["html_url"]
+        except SystemExit:
+            continue
+    return None
+
+
 def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
     repo = pathlib.Path(repo).expanduser()
     ref = f"origin/{branch}"
@@ -740,9 +783,9 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
             print(f"WARNING: dependency {dep} has no Modrinth project of that name -- set its slugs by hand")
             deps.append({"modrinth": None, "curseforge": None, "type": kind, "modid": dep})
     fork = slug_of(repo)
-    title = f"{name} - Community Port"
-    if len(title) > 64:
-        title = f"{name[:50]} - Community Port"
+    title = page_title(name, mc)
+    orig_cf = original_curseforge(name)
+    credits_src = original_credits_file(up)
     oslug = (orig or {}).get("slug") or modid.replace("_", "-")
     fork_slug = slug_of(repo)
     try:
@@ -762,16 +805,19 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
            "modrinth": {"slug": f"{oslug}-neoforge", "asset": variant("_mr.jar")},
            "curseforge": {"project_id": None, "slug": f"{oslug}-neoforge", "asset": variant("_cf.jar")}}
     credits = str(mod.get("credits", "")).strip()
+    where = [*([f"[Modrinth](https://modrinth.com/mod/{orig['slug']})"] if orig else []),
+             *([f"[CurseForge]({orig_cf})"] if orig_cf else []), *([f"[source]({up})"] if up else [])]
     lines = [f"# {title}", "",
+             *([f"**The original:** {name} by {authors} -- {' · '.join(where)}", ""] if where else []),
              f"**Unofficial.** A community-maintained port of **{name}** by **{authors}** to NeoForge {mc}. "
              f"It is not made or supported by {authors}: please report problems with this port "
              f"[on its own issue tracker](https://github.com/{fork}/issues), not to the original author.", "",
+             f"**Scope:** NeoForge, Minecraft {mc} and newer. Builds are published for Minecraft {mc}.", "",
              f"Published with the original author's permission ({permission}), under the original "
              f"{cfg['license']} licence with its copyright notice kept.", "",
              "## The original", "",
              *([f"- {orig['description']}"] if orig else []),
-             *([f"- Source: {up}"] if up else []),
-             *([f"- On Modrinth: https://modrinth.com/mod/{orig['slug']} (Forge, {', '.join(orig['game_versions'][-1:])})"] if orig else []), "",
+             *([f"- Made for Forge {', '.join(orig['game_versions'][-1:])}."] if orig else []), "",
              "## How it differs from the original", "",
              f"- Runs on **NeoForge {mc}**.",
              *[f"- {d}" for d in differences], "",
@@ -788,7 +834,10 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
               "automated checks (it builds, loads on a dedicated server, runs in a real client), and is played by a "
               "person before it is published here.", ""]
     if credits:
-        lines += ["## Credits", "", *[f"- {c.strip()}" for c in re.split(r"[\n,]", credits) if c.strip()], ""]
+        src = f"[{credits_src[0]}]({credits_src[1]})" if credits_src else "mods.toml"
+        lines += ["## Credits", "",
+                  f"Exactly as {authors} wrote them in the original mod's own credits ({src}), unchanged:", "",
+                  *[f"- {c.strip()}" for c in re.split(r"[\n,]", credits) if c.strip()], ""]
     lines += ["## Licence", "", f"{cfg['license']}, copyright {authors}. See LICENSE.txt in the source."]
     target = pathlib.Path(out) if out else repo
     (target / BODY).parent.mkdir(parents=True, exist_ok=True)
@@ -812,6 +861,16 @@ def self_check():
         if not c:
             ok = False; print("FAIL:", msg)
     expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
+    expect(page_title("Epic Core API", "1.21.1") == "Epic Core API - Community Port (1.21.1+)", "title carries the scope")
+    import contextlib, io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        curseforge_file({"modid": "m", "curseforge": {"project_id": 1, "asset": ""}}, "m-1.0.0-mc1.21.1",
+                        {"assets": [{"name": "m-1.0.0.jar"}]}, "notes", True)
+    expect('"relations"' not in buf.getvalue(), "a mod with no dependencies sends no relations (CurseForge rejects an empty list)")
+    expect(len(page_title("A Very Long Mod Name That Goes On And On Forever", "1.21.1")) <= 64
+           and page_title("A Very Long Mod Name That Goes On And On Forever", "1.21.1").endswith("(1.21.1+)"),
+           "a long title is cut to Modrinth's 64 characters, keeping the scope")
     expect(minecraft_of("examplemod-1.0.0-mc26.1.2-r2") == "26.1.2" and minecraft_of("examplemod-1.0.0-mc26.2") == "26.2",
            "minecraft from a 26.x tag")
     expect(sorted(["26.2", "1.21.11", "26.1.2"], key=mc_key) == ["1.21.11", "26.1.2", "26.2"], "26.x sorts after 1.21.11")
