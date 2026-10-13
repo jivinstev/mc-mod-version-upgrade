@@ -347,7 +347,15 @@ def modrinth_version(cfg, tag, release, text, dry, mc=None, asset=None, dep_vers
     return proj, modrinth("POST", "/version", body, h)
 
 
-def curseforge_ids(mc):
+# Modrinth's environment (the config's "environment") as CurseForge's environment versions. CurseForge refuses a file
+# with none ("You must select at least one version from the environment group of versions", errorCode 1021).
+CF_SIDES = {"client_and_server": ("Client", "Server"), "singleplayer_only": ("Client", "Server"),
+            "client_or_server": ("Client", "Server"), "client_or_server_prefers_both": ("Client", "Server"),
+            "client_only": ("Client",), "client_only_server_optional": ("Client",),
+            "server_only": ("Server",), "server_only_client_optional": ("Server",), "dedicated_server_only": ("Server",)}
+
+
+def curseforge_ids(mc, environment="client_and_server"):
     types = curseforge("GET", "/game/version-types")
     vers = curseforge("GET", "/game/versions")
     tslug = {t["id"]: t["slug"] for t in types}
@@ -355,7 +363,17 @@ def curseforge_ids(mc):
     loader = [v["id"] for v in vers if v["name"] == "NeoForge" and tslug.get(v["gameVersionTypeID"]) == "modloader"]
     if len(mcid) != 1 or len(loader) != 1:
         raise SystemExit(f"CurseForge game versions: {len(mcid)} match Minecraft {mc}, {len(loader)} match NeoForge")
-    return mcid + loader
+    sides = CF_SIDES.get(environment, ("Client", "Server"))
+    env = []
+    for side in sides:     # CurseForge's docs name them only by name ("Client", "Server"); prefer an environment type
+        hits = [v for v in vers if v["name"] == side]
+        if len(hits) > 1:
+            hits = [v for v in hits if "environment" in tslug.get(v["gameVersionTypeID"], "")]
+        if len(hits) != 1:
+            raise SystemExit(f"CurseForge game versions: {len(hits)} environment versions named {side!r} "
+                             f"(needed for environment {environment})")
+        env.append(hits[0]["id"])
+    return mcid + loader + env
 
 
 def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
@@ -372,7 +390,7 @@ def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
         print("curseforge file:", json.dumps({**meta, "changelog": "<notes>", "file": asset["name"],
                                               "project_id": cf["project_id"]}, indent=1))
         return None
-    meta["gameVersions"] = curseforge_ids(mc)
+    meta["gameVersions"] = curseforge_ids(mc, cfg.get("environment", "client_and_server"))
     body, h = multipart({"metadata": json.dumps(meta)}, {"file": (asset["name"], download(asset), "application/java-archive")})
     return curseforge("POST", f"/projects/{cf['project_id']}/upload-file", body, h)
 
@@ -1017,6 +1035,27 @@ def self_check():
                f"disclosures go to the v3 endpoint once, and nothing is sent without any: {sent}")
     finally:
         modrinth_v3 = real_v3
+    global curseforge
+    real_cf = curseforge
+    def fake_cf(with_env):
+        def f(method, path, data=None, headers=None):
+            if path == "/game/version-types":
+                return [{"id": 1, "slug": "minecraft-1-21"}, {"id": 2, "slug": "modloader"}, {"id": 3, "slug": "environment"}, {"id": 4, "slug": "other"}]
+            return [{"id": 10, "name": "1.21.1", "gameVersionTypeID": 1}, {"id": 11, "name": "NeoForge", "gameVersionTypeID": 2}] + (
+                [{"id": 12, "name": "Client", "gameVersionTypeID": 3}, {"id": 13, "name": "Server", "gameVersionTypeID": 3},
+                 {"id": 14, "name": "Client", "gameVersionTypeID": 4}] if with_env else [])   # a same-named version of another type
+        return f
+    try:
+        curseforge = fake_cf(True)
+        expect(curseforge_ids("1.21.1") == [10, 11, 12, 13], "CurseForge: Minecraft, NeoForge, and Client + Server for client_and_server")
+        expect(curseforge_ids("1.21.1", "client_only") == [10, 11, 12], "CurseForge: a client-only mod is tagged Client only")
+        curseforge = fake_cf(False)
+        try:
+            curseforge_ids("1.21.1"); expect(False, "no environment versions on CurseForge must stop the upload")
+        except SystemExit as e:
+            expect("environment versions" in str(e), f"the stop names the missing environment versions: {e}")
+    finally:
+        curseforge = real_cf
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
