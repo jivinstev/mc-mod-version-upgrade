@@ -108,6 +108,25 @@ problems (the fork, never the original author) and the permission link -- never 
 **Expect the first run against an old release to be refused** if its ledger shows an open S1: that is the gate
 working, and the answer is to promote and publish the build that fixes it, not to edit the ledger.
 
+**A library and the ports that need it -- the order that works:**
+1. **Gate and play what each platform gets.** When the build makes a jar per platform (`_mr` for Modrinth, `_cf` for
+   CurseForge, built by different tasks), Port CI must boot every one as shipped (`port-ci.py --variant-jar`, and
+   `--dep-jar-variant` on each port that depends on it), and the person plays the jar each platform will receive --
+   a `_cf` jar nobody launched can crash every start while the `_mr` jar is fine. The dev-classpath gates cannot see
+   that (a ModLauncher service in the jar is only discovered in a real launch).
+2. **Promote the library first, then the port that needs it**, each with its own column in every ledger it is
+   checked against (a column carried from the previous tag cites the diff between the two tags). When the person
+   played the port with a sibling's pre-release, that sibling is promoted too, with the same note -- otherwise the
+   port's publish is refused because its dependency is not published.
+3. **CurseForge waits for approval.** A file on CurseForge cannot name a project that is not approved yet
+   (errorCode 1018 "Invalid slug in project relations ... does not exist, is not accessible"). A new library's
+   first CurseForge file puts its project into moderation; publish the dependent port to CurseForge only after the
+   library's project is approved -- re-run `publish = <tag>`: what is already on Modrinth is skipped (its version
+   number is found there), so only CurseForge uploads. Modrinth has no such wait.
+
+**A publish that stops half-way is re-run, not repaired by hand:** Modrinth uploads first; when CurseForge then fails,
+fix the cause (often a new CurseForge requirement -- the error names it) and dispatch `publish = <tag>` again.
+
 ## Part 3: publish on promotion
 
 Nothing to do once Part 1 is merged: the `publish` job runs `needs: promote`, in the same run as a
