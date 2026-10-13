@@ -146,8 +146,9 @@ records it once you type `confirmed`.
 ### On Windows (experimental)
 
 Native Windows, no WSL. Open **PowerShell as yourself, not as Administrator**: from the Start menu,
-a plain click (not "Run as administrator"). If the title bar says *Administrator:*, or the prompt
-starts in `C:\WINDOWS\system32`, close it and open a normal one. `cd` to the folder you keep code in
+a plain click (not "Run as administrator"). If the title bar says *Administrator:*, close it and open
+a normal one. (Don't go by the starting folder: a normal window can open in `C:\WINDOWS\system32` too.
+The script checks for you and stops if the window is elevated.) `cd` to the folder you keep code in
 (for example `cd ~\dev`), then paste:
 
 ```powershell

@@ -63,7 +63,7 @@
 
     # Where the clone goes. MCMU_DIR wins; a clone you are standing in is used as it is; otherwise ask,
     # offering <this folder>\mc-mod-version-upgrade -- or <home>\... when this folder is a Windows
-    # system folder (an elevated window opens in C:\WINDOWS\system32).
+    # system folder (elevated windows, and some normal ones, open in C:\WINDOWS\system32).
     function Get-CloneDir {
         if ($env:MCMU_DIR) { return [Environment]::ExpandEnvironmentVariables($env:MCMU_DIR) }
         $here = (Get-Location).ProviderPath
