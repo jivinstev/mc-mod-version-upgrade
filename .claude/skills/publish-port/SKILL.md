@@ -29,6 +29,9 @@ seen by a chat session, and CurseForge's upload host is not reachable from a clo
      `MODRINTH_TOKEN` and `CURSEFORGE_TOKEN`. Tell them never to paste a token into the chat.
    - CurseForge has no API to create a project: give them the fields `setup` printed (name, summary, the
      description file, licence, source and issues links, logo, categories) and ask for the project ID back, and the project's public URL (CurseForge makes the slug from the name).
+     The CurseForge name must not contain game version numbers -- moderation refuses it (`<name> - Community Port
+     (NeoForge)`, as setup prints it; the Modrinth title keeps `(<mc>+)`). A rename changes the slug: update
+     `curseforge.slug`, and every port that depends on this one reads it from here.
 3. **Never**: publish a pre-release, upload from the chat session, post on the authors' repository (the authors
    may invite a link in their issue: offer to draft it, the user posts it), weaken a gate to get a build out.
 
