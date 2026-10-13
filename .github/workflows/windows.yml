@@ -209,6 +209,39 @@ jobs:
           PY
           rm -f .env.local .env.local.bak .setup-state.json
 
+      # A re-cloned or moved checkout (#32): the workspace's junctions and hard link lead to the OLD
+      # clone. Re-pointing must remove only the links -- a junction removed the wrong way deletes the
+      # folder it points to -- and leave the old clone whole.
+      - name: a workspace linked to another clone is re-pointed without touching that clone
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os, pathlib, tempfile
+          spec = importlib.util.spec_from_file_location("setup", "tools/setup.py")
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          base = pathlib.Path(tempfile.mkdtemp(dir=os.environ["RUNNER_TEMP"]))
+          old = base / "old-clone"; (old / "tools").mkdir(parents=True); (old / "templates").mkdir()
+          (old / "tools/setup.py").write_text("# old\n", encoding="utf-8"); (old / "templates/t").write_text("t", encoding="utf-8")
+          (old / ".env.local").write_text("OLD=1\n", encoding="utf-8")
+          ws = base / "ws"; (ws / "mods/demo").mkdir(parents=True)
+          for name in m.WORKSPACE_LINKS:
+              assert m.windows_link(ws / name, old / name), f"could not link {name}"
+          assert m.other_checkout(ws) == old, m.other_checkout(ws)
+          notes, problems, deferred = [], [], []
+          m.relink_workspace(ws, old, notes)
+          assert (old / "tools/setup.py").is_file() and (old / "templates/t").is_file(), "the old clone lost files"
+          assert (old / ".env.local").read_text(encoding="utf-8") == "OLD=1\n", "the old .env.local changed"
+          env = m.ROOT / ".env.local"; env.write_text("X=1\n", encoding="utf-8")
+          try:
+              m.ensure_workspace(str(ws), notes, problems, dry=False, deferred=deferred)
+              print("notes:", notes, "problems:", problems)
+              assert not problems and m.other_checkout(ws) is None
+              assert (ws / "tools/setup.py").is_file() and os.path.samefile(ws / ".env.local", env)
+              assert (ws / "mods/demo").is_dir(), "the ports were touched"
+          finally:
+              env.unlink()
+          print("re-pointed; the old clone is whole")
+          PY
+
       # Git for Windows runs hooks through its own bash. Prove it does with ours, through a real
       # `git push`: a push to main is refused, a push to a branch runs the IP gate and goes through.
       - name: the pre-push hook works under Git for Windows

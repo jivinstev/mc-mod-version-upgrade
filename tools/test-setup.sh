@@ -280,6 +280,25 @@ fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes)"
   && ok "without the flag nothing is installed, and the note names the flag" || bad "no flag: $(echo "$out" | grep -i claude | head -3)"
 rm -rf "$C"
 
+echo "20. a workspace linked to ANOTHER clone (re-cloned or moved checkout) is re-pointed only when asked"
+fresh; st --yes >/dev/null; WS="$H/ws"
+sed -i.orig "s#^SETUP_PATH=.*#SETUP_PATH=migrate#" "$R/.env.local"; echo "MIGRATE_WORKSPACE=$WS" >> "$R/.env.local"
+st --yes >/dev/null; mkdir -p "$WS/mods/demo"; R1="$R"
+R2="$(mktemp -d)/repo"; mkdir -p "$R2"
+( git ls-files -z | tar --null -T - -cf - ) | ( cd "$R2" && tar -xf - )
+( cd "$R2" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm t )
+cp "$R1/.env.local" "$R1/.setup-state.json" "$R2/"; R="$R2"
+out="$(st --yes)"
+{ echo "$out" | grep -q "is linked to another clone" && [ "$(readlink "$WS/tools")" = "$R1/tools" ]; } \
+  && ok "--yes reports the other clone and leaves the links alone" || bad "--yes relink: $(echo "$out" | grep -i 'workspace\|clone' | head -3)"
+out="$(tty_run 'y')"
+{ [ "$(readlink "$WS/tools")" = "$R2/tools" ] && [ "$(readlink "$WS/templates")" = "$R2/templates" ] \
+  && [ "$(readlink "$WS/.env.local")" = "$R2/.env.local" ] && [ -d "$WS/mods/demo" ] && [ -f "$R1/tools/setup.py" ] \
+  && ! echo "$out" | grep -q "PROBLEM"; } \
+  && ok "answering y re-points all three links; the ports in mods/ and the other clone are untouched" \
+  || bad "relink: $(ls -l "$WS"; echo "$out" | grep -iE 'PROBLEM|clone' | head -3)"
+rm -rf "$(dirname "$R2")"
+
 rm -rf "$NOJAVA"
 echo
 echo "setup self-test: $pass passed, $fail failed"

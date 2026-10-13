@@ -355,7 +355,52 @@ def likely_output_repos():
 WORKSPACE_LINKS = ("tools", "templates", ".env.local")
 
 
-def ensure_workspace(ws, notes, problems, dry, deferred):
+def other_checkout(root):
+    """The checkout a workspace is linked to, when that is not this one but another clone of this
+    repository (it has tools/setup.py) or one since deleted -- what re-cloning or moving the checkout
+    leaves behind. None for this checkout, no link, or a link to something else."""
+    link = root / "tools"
+    if not (link.is_symlink() or is_junction(link)):
+        return None
+    other = pathlib.Path(os.path.realpath(link)).parent
+    if os.path.realpath(other) == os.path.realpath(ROOT):
+        return None
+    return other if (other / "tools" / "setup.py").is_file() or not other.exists() else None
+
+
+def remove_link(p):
+    """Remove a link and never what it points to: os.rmdir takes away a junction or a directory
+    symlink on Windows and refuses a real folder; unlink takes a file or POSIX symlink."""
+    if SYS == "Windows" and (is_junction(p) or p.is_dir()):
+        os.rmdir(p)
+    else:
+        try:
+            p.unlink()
+        except (IsADirectoryError, PermissionError):      # a dangling directory symlink on Windows
+            os.rmdir(p)
+
+
+def relink_workspace(root, other, notes):
+    """Point a workspace linked to another clone (other_checkout) at this one. Only links are removed;
+    a .env.local that is not the other clone's own file is kept as .env.local.old."""
+    for name in ("tools", "templates"):
+        p = root / name
+        if p.is_symlink() or is_junction(p):
+            remove_link(p)
+    env = root / ".env.local"
+    if env.is_symlink():
+        remove_link(env)
+    elif env.is_file():
+        theirs = other / ".env.local"
+        if theirs.is_file() and os.path.samefile(env, theirs):    # a hard link: the other clone keeps its copy
+            env.unlink()
+        else:
+            env.replace(root / ".env.local.old")
+            notes.append(f"workspace: kept the old {env} as .env.local.old")
+    notes.append(f"workspace: {root} was linked to {other}; now linked to {ROOT}")
+
+
+def ensure_workspace(ws, notes, problems, dry, deferred, interactive=False):
     """Make $MIGRATE_WORKSPACE look like the root every tool expects: `mods/<modid>/` for the
     ports, with `tools/`, `templates/` and `.env.local` beside it. The last three are SYMLINKS
     back into this checkout, so there is one copy of the tooling and an update reaches every
@@ -368,6 +413,17 @@ def ensure_workspace(ws, notes, problems, dry, deferred):
     if dry:
         return
     (root / "mods").mkdir(parents=True, exist_ok=True)
+    other = other_checkout(root)
+    if other:
+        # Its ports in mods/ stay; only which checkout's tools it uses changes. Asked, never assumed:
+        # someone may keep two clones on purpose.
+        if interactive and confirm(f"   The workspace {root} is linked to another clone of this repository,\n"
+                                   f"   {other}. Link it to this one ({ROOT})? [Y/n]: "):
+            relink_workspace(root, other, notes)
+        else:
+            problems.append(f"the workspace {root} is linked to another clone, {other}. Run setup without "
+                            "--yes and answer y to link it to this one, or choose another MIGRATE_WORKSPACE")
+            return
     for name in WORKSPACE_LINKS:
         link, target = root / name, ROOT / name
         if link.is_symlink() or is_junction(link):
@@ -840,7 +896,8 @@ def main():
             problems.append(f"MIGRATE_WORKSPACE {ws} is inside a git repository: one `git add -A` would "
                             "publish somebody's decompiled mod. Choose a path outside any checkout.")
         if ws and not inside_git_repo(ws):
-            ensure_workspace(ws, notes, problems, dry=a.check, deferred=deferred_links)
+            ensure_workspace(ws, notes, problems, dry=a.check, deferred=deferred_links,
+                             interactive=ask.interactive and not a.check)
         if ws:
             try:
                 free = shutil.disk_usage(pathlib.Path(ws).expanduser().anchor or "/").free / 2**30
