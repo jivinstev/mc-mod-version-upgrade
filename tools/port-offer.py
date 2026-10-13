@@ -185,31 +185,22 @@ def sibling_releases(repo, branch):
         r'curl -fsSL -o "[^"]*/([\w.+-]+\.jar)" "(https://github\.com/[^"]+/releases/download/[^"]+)"', wf)]
 
 
-def is_port_tag(tag, modid, mc, suffix=""):
-    """<modid>-<version>-mc<mc><suffix>, or a re-release of it (-r2, -r3: the port changed, the author's version did
-    not). The suffix is the branch's own tag series (port-ci --tag-suffix): a release-aligned branch's jars never
-    pass for the development port's, nor the other way round."""
-    return bool(re.fullmatch(re.escape(modid) + r"-.+-mc" + re.escape(mc) + re.escape(suffix) + r"(?:-r\d+)?", tag))
+def _port_manifest():
+    """tools/port-manifest.py: the tag series and newest-release logic, shared with the manifest refresh that keeps
+    the install manifest this writes current after a promotion or a re-pin."""
+    import importlib.util
+    sp = importlib.util.spec_from_file_location("port_manifest", pathlib.Path(__file__).resolve().parent / "port-manifest.py")
+    m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+    return m
+
+
+_pm = _port_manifest()
+is_port_tag, own_release = _pm.is_port_tag, _pm.own_release
 
 
 def tag_suffix(repo, branch, mc):
     """The tag series this branch's CI releases under, read from its workflow's tag filter."""
-    wf = git(repo, "show", f"{branch}:.github/workflows/port-ci.yml", check=False)
-    m = re.search(r'tags:\s*\["\*-mc' + re.escape(mc) + r'([^"]*)"\]', wf)
-    return m.group(1) if m else ""
-
-
-def own_release(fork, modid, mc, suffix="", rels=None):
-    """(url, assets, prerelease) of the release to install: the newest FULL Release (a person played it and
-    port-ci.py promote made it one -- the fork's official baseline), else the newest pre-release, flagged so the
-    install text says it is not yet played. Releases come newest first, so a -r2 re-release wins within each kind."""
-    if rels is None:
-        rels = _api(f"https://api.github.com/repos/{fork}/releases?per_page=30") or []
-    ours = [r for r in rels if not r.get("draft") and is_port_tag(r.get("tag_name", ""), modid, mc, suffix)]
-    r = next((r for r in ours if not r.get("prerelease")), None) or (ours[0] if ours else None)
-    if not r:
-        return None, [], False
-    return r["html_url"], [(a["name"], a["browser_download_url"]) for a in r.get("assets", [])], bool(r.get("prerelease"))
+    return _pm.workflow_tag_suffix(git(repo, "show", f"{branch}:.github/workflows/port-ci.yml", check=False), mc)
 
 
 def install_section(repo, tip, branch, fork, modid, mc, neo, variant=None, deps=None):

@@ -166,7 +166,11 @@ python3 tools/port-ci.py promote --fork <user>/<repo> --tag <release tag> --play
 ```
 It dispatches the fork's own Port CI workflow with `promote=<tag>` (no gates run). The workflow refuses a tag that
 is not a pre-release it published from that branch, makes it a full Release marked latest, and replaces
-"Pre-release until played by a person." with who played it and when. Without a logged-in `gh` it prints the
+"Pre-release until played by a person." with who played it and when. Where the port branch has an install
+manifest (step 7), the same run then points it at the promoted jar and the sibling jars the workflow pins
+(`tools/port-manifest.py refresh`, a `[skip ci]` commit on the port branch, never the layer branch); a workflow
+generated before this step existed does not, so re-render it with the newest kit (`port-ci.py args --repo DIR`,
+drop its `--kit-version`/`--kit-sha`, rerun). Without a logged-in `gh` it prints the
 dispatch instead: send it through the GitHub connector (workflow `port-ci.yml`, ref = the port branch, inputs
 `promote`, `played_by`, `played_notes`). A fork whose workflow predates the `promote` input needs it re-rendered
 first: `port-ci.py --print` with the same `--dep-jar`/`--kit-version`/`--kit-sha` it was installed with, diff
@@ -215,6 +219,10 @@ ports from the exact release asset CI installed, optional integrations, and the 
 `--variant <substring>=<why>`: platform builds can differ in content, not only packaging (one library's
 CurseForge jar leaves out the Java agent its Modrinth jar carries), so a dependent must be installed with the
 variant its CI tested. An install list the user cannot follow end to end on a fresh instance is a bug.
+With `--push` the same list is committed to the port branch as `.github/port-install.json` (data, `[skip ci]`), which
+`tools/install-port.py` installs from. It must keep naming the newest full Release: the Port CI promote job refreshes
+it, and after anything else that moves it (a sibling re-pin, a promotion in the GitHub UI) run
+`python3 tools/port-manifest.py refresh --repo ~/forks/<repo> --commit` on the port branch and push.
 
 `OFFER.md` lives in the work dir, outside both repositories: it is never committed and nothing reads it
 back. Once the `-upstream` branch is pushed (so its links resolve), offer to publish it as a **private

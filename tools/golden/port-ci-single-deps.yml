@@ -14,7 +14,9 @@
 # Promote: once a person has played a pre-release, run this workflow with promote = <that tag> and played_by =
 # <their GitHub login> (tools/port-ci.py promote does it). It runs no gates and builds nothing: it checks the tag
 # is a pre-release this workflow published from this branch, then makes it a full Release, marked latest, and
-# replaces "Pre-release until played by a person." in its notes with who played it and when.
+# replaces "Pre-release until played by a person." in its notes with who played it and when. When the port branch
+# carries an install manifest (.github/port-install.json), it then points that at the promoted jar and the sibling
+# jars this workflow pins, in a data-only [skip ci] commit on the port branch (tools/port-manifest.py refresh).
 #
 # Publish: when the fork has .github/port-publish.json, a promoted Release is then uploaded to Modrinth and
 # CurseForge (tools/port-publish.py, MODRINTH_TOKEN / CURSEFORGE_TOKEN repository secrets) -- in the SAME run as
@@ -231,6 +233,42 @@ jobs:
           PY
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest --notes-file notes.md
           echo "Promoted $TAG (played by @$WHO)" >> "$GITHUB_STEP_SUMMARY"
+      # The install manifest (.github/port-install.json, what install-port.py installs) then names the promoted jar and
+      # the sibling jars this workflow pins: tools/port-manifest.py refresh, committed as data ([skip ci]) to the port
+      # branch only -- never the layer branch -- and only where the branch has a manifest. The commit sits on top of the
+      # tag, so publish (needs: promote) still finds the tag in the branch's history. A failure here is reported and
+      # never stops publish.
+      - name: Port CI kit v7 (pinned by sha256)
+        if: ${{ github.ref_name == 'neoforge-1.21.1' && hashFiles('.github/port-install.json') != '' }}
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \
+            "https://github.com/owner/migrator/releases/download/port-ci-kit-v7/port-ci-kit-v7.tar.gz"
+          echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
+      - name: Refresh the install manifest
+        if: ${{ github.ref_name == 'neoforge-1.21.1' && hashFiles('.github/port-install.json') != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.promote }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._+-]+$'; then echo "::error::not a release tag: $TAG"; exit 1; fi
+          if [ ! -f .port-tools/tools/port-manifest.py ]; then
+            echo "::warning::Port CI kit v7 has no port-manifest.py: regenerate this workflow with a newer kit"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do              # the branch can move under us: refresh again on its new tip
+            git fetch --no-tags -q origin "neoforge-1.21.1"
+            git checkout -q -B "neoforge-1.21.1" FETCH_HEAD
+            python3 .port-tools/tools/port-manifest.py refresh --repo . --tag "$TAG" --commit
+            if [ "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" ]; then exit 0; fi
+            if git push -q origin "HEAD:refs/heads/neoforge-1.21.1"; then
+              echo "Install manifest refreshed for $TAG" >> "$GITHUB_STEP_SUMMARY"; exit 0
+            fi
+          done
+          echo "::error::could not push the refreshed install manifest to neoforge-1.21.1"; exit 1
 
   publish:
     # Upload a promoted Release to Modrinth and CurseForge. needs: promote, so a Claude- or CLI-driven promote
