@@ -260,24 +260,16 @@ grep -q '^TRAINING_OPTOUT=confirmed$' "$R/.env.local" && out2="$(tty_run '')" \
   && echo "$out2" | grep -q 'kept: you confirmed model training is turned off' \
   && ok "typing 'confirmed' records it, and a re-run keeps it without asking" || bad "confirmed: $(grep TRAINING "$R/.env.local")"
 
-echo "19. --install-missing installs Claude Code through its native installer (the path install.ps1 takes)"
-# A fake curl hands bash the "installer": it puts claude in ~/.local/bin, which is not on PATH -- as the
-# real one leaves it until a new shell. setup must re-read PATH and find it there.
+echo "19. --install-missing is Windows' (install.ps1 passes it): on macOS/Linux it installs no Claude Code or JDK"
+# Every installer a run could reach is a fake that leaves a mark; setup there must stay what it was before
+# the flag existed -- prerequisites are hints, never run.
 C="$(mktemp -d)"; for f in "$NOJAVA"/*; do ln -s "$(readlink "$f")" "$C/$(basename "$f")"; done
-for t in mkdir chmod; do ln -sf "$(command -v $t)" "$C/$t"; done
-printf '#!/bin/sh\necho %s\n' "'mkdir -p \"\$HOME/.local/bin\" && printf \"#!/bin/sh\\\\n\" > \"\$HOME/.local/bin/claude\" && chmod +x \"\$HOME/.local/bin/claude\"'" > "$C/curl"
-chmod +x "$C/curl"
-fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --check --install-missing)"
-[ ! -e "$H/.local/bin/claude" ] && echo "$out" | grep -q "Claude Code is not installed" \
-  && ok "--check wins over --install-missing: nothing is installed" || bad "--check installed: $(ls "$H/.local/bin" 2>&1)"
-fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --install-missing)"
-{ [ -x "$H/.local/bin/claude" ] && echo "$out" | grep -q "claude: installing" && echo "$out" | grep -q "claude: ok" \
-  && ! echo "$out" | grep -q "Claude Code is not installed"; } \
-  && ok "claude installed by the native installer and found in ~/.local/bin in the same run" \
-  || bad "--install-missing: $(echo "$out" | grep -i claude | head -3)"
-fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes)"
-[ ! -e "$H/.local/bin/claude" ] && echo "$out" | grep -q "or ./setup --install-missing" \
-  && ok "without the flag nothing is installed, and the note names the flag" || bad "no flag: $(echo "$out" | grep -i claude | head -3)"
+for t in curl brew npm winget; do printf '#!/bin/sh\necho "$0 $*" >> "%s/ran"\n' "$C" > "$C/$t"; chmod +x "$C/$t"; done
+fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --migrate --install-missing)"; code=$?
+{ [ ! -e "$C/ran" ] && echo "$out" | grep -q "Claude Code is not installed" && echo "$out" | grep -q "no JDK found" \
+  && ! echo "$out" | grep -q "setup.cmd --install-missing"; } \
+  && ok "no installer ran; Claude Code and the JDK are reported with their usual hints" \
+  || bad "--install-missing on $(uname): $(cat "$C/ran" 2>/dev/null; echo "$out" | grep -iE 'claude|jdk' | head -3)"
 rm -rf "$C"
 
 echo "20. a workspace linked to ANOTHER clone (re-cloned or moved checkout) is re-pointed only when asked"

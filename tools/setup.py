@@ -5,8 +5,9 @@
     ./setup --yes           first run: take every recommendation.  RE-RUN: keep every decision.
     ./setup --review        ask every question again (a plain re-run asks only new ones)
     ./setup --check         change nothing; print what setup WOULD change, and verify prerequisites
-    ./setup --install-missing   also install what is missing and needs no sudo: Claude Code, the JDK
-                            for migration (Homebrew/winget) and gh; on Windows, git core.longpaths
+    ./setup --install-missing   Windows (install.ps1 passes it): also install what is missing with
+                            winget -- Claude Code, the JDK for migration, gh -- and turn on git
+                            core.longpaths. Elsewhere it only installs gh, through Homebrew on macOS.
     ./setup --migrate       add the migration add-on (same as --path migrate; adds keys, never removes any)
     ./setup --mods-dir 26.2=/path/to/minecraft-26.2   add one more deploy target (a set, not a value)
     ./setup --remove KEY    the ONLY way setup ever deletes a setting
@@ -55,8 +56,6 @@ SECRET_KEYS = {"CURSEFORGE_API_KEY"}
 # Nothing here needs the Store, so every winget line names its source.
 WINGET = ["winget", "install", "-e", "--source", "winget", "--accept-package-agreements",
           "--accept-source-agreements", "--id"]
-CLAUDE_SH = "curl -fsSL https://claude.ai/install.sh | bash"      # Claude Code's native installers
-CLAUDE_PS = "irm https://claude.ai/install.ps1 | iex"
 INSTALL_HINTS = {  # tool -> {platform: command}
     "git": {"Darwin": "xcode-select --install   (or: brew install git)",
             "Windows": "winget install -e --source winget --id Git.Git",
@@ -67,17 +66,19 @@ INSTALL_HINTS = {  # tool -> {platform: command}
     "java": {"Darwin": "brew install --cask temurin@21   (MC 26.x also needs 25: temurin@25)",
              "Windows": "winget install -e --source winget --id EclipseAdoptium.Temurin.21.JDK",
              "Linux": "sudo apt install openjdk-21-jdk   (Fedora: sudo dnf install java-21-openjdk-devel)"},
-    "claude": {"Darwin": CLAUDE_SH, "Windows": CLAUDE_PS + "   (in PowerShell)", "Linux": CLAUDE_SH},
+    "claude": {"Darwin": "brew install --cask claude-code   (or, with Node 18+: npm install -g @anthropic-ai/claude-code)",
+               "Windows": "winget install -e --source winget --id Anthropic.ClaudeCode",
+               "Linux": "npm install -g @anthropic-ai/claude-code   (needs Node 18+)"},
 }
 INSTALL_HINTS["gh"] = {"Darwin": "brew install gh", "Windows": "winget install -e --source winget --id GitHub.cli",
                        "Linux": "sudo apt install gh   (Fedora: sudo dnf install gh; or https://cli.github.com)"}
-# What --install-missing runs (and the gh offer). One table for every OS, so a new prerequisite is added
-# once. Nothing that needs sudo: on Linux the system package manager stays the user's call, and git and
-# Python must exist before setup can run at all (install.ps1 brings them on Windows).
+# What --install-missing runs (and the gh offer), one table for every OS. Only package managers that
+# verify what they download (winget checks each installer's hash against its manifest), never a script
+# piped into a shell. Windows only, apart from gh's opt-in Homebrew line that predates this: install.ps1
+# is what calls --install-missing, and macOS/Linux setup stays as it was (their prerequisites are hints).
 INSTALLERS = {
-    "claude": {"Darwin": ["bash", "-c", CLAUDE_SH], "Linux": ["bash", "-c", CLAUDE_SH],
-               "Windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", CLAUDE_PS]},
-    "java": {"Darwin": ["brew", "install", "--cask", "temurin@21"], "Windows": WINGET + ["EclipseAdoptium.Temurin.21.JDK"]},
+    "claude": {"Windows": WINGET + ["Anthropic.ClaudeCode"]},
+    "java": {"Windows": WINGET + ["EclipseAdoptium.Temurin.21.JDK"]},
     "gh": {"Darwin": ["brew", "install", "gh"], "Windows": WINGET + ["GitHub.cli"]},
 }
 CLAUDE_DOCS = "https://code.claude.com/docs/en/setup"
@@ -538,6 +539,9 @@ def claude_settings_wanted(path, write_dirs):
         # templates' build.gradle reads $PYTHON on Windows) and UTF-8 output from the tools.
         want["env.PYTHON"] = sys.executable
         want["env.PYTHONUTF8"] = "1"
+        # setup installs Claude Code with winget, and a winget install does not update itself; this has
+        # Claude Code run `winget upgrade` when a new version is out (it does nothing for other installs).
+        want["env.CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE"] = "1"
     return want
 
 
@@ -708,8 +712,8 @@ def main():
                          "(a plain re-run asks only questions it has not asked before)")
     ap.add_argument("--no-network", action="store_true", help="skip the git reachability probe")
     ap.add_argument("--install-missing", action="store_true",
-                    help="install what is missing and needs no sudo: Claude Code, the JDK for migration "
-                         "(Homebrew/winget), gh; on Windows also turn on git core.longpaths")
+                    help="Windows: install what is missing with winget (Claude Code, the JDK for migration, "
+                         "gh) and turn on git core.longpaths; elsewhere only gh, through Homebrew on macOS")
     a = ap.parse_args()
 
     if not (a.yes or a.check) and not sys.stdin.isatty():
@@ -753,9 +757,9 @@ def main():
         else:
             problems.append(f"{tool} is missing -- install it: {hint(tool)}")
     print(f"   python3: ok ({platform.python_version()})")
-    # Claude Code drives the skills (installing, migrating). Installed only with --install-missing
-    # (install.ps1 passes it): otherwise a global install is the user's call. Not a PROBLEM -- the tools
-    # run without it.
+    # Claude Code drives the skills (installing, migrating). Installed only with --install-missing on
+    # Windows (install.ps1 passes it): otherwise a global install is the user's call. Not a PROBLEM --
+    # the tools run without it.
     fix = a.install_missing and not a.check
     has_claude = shutil.which("claude") is not None
     if not has_claude and fix:
@@ -766,7 +770,8 @@ def main():
         print("   claude: ok (Claude Code)")
     else:
         notes.append(f"Claude Code is not installed -- it is what you talk to. Install: {hint('claude')}  "
-                     f"(or ./setup --install-missing; details: {CLAUDE_DOCS})")
+                     + ("(or setup.cmd --install-missing; " if SYS == "Windows" else "(")
+                     + f"details: {CLAUDE_DOCS})")
     if sys.version_info < (3, 8):
         problems.append(f"python 3.8+ needed -- {hint('python3')}")
     if path == "migrate":

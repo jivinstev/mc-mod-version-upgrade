@@ -128,14 +128,13 @@ a mod of that size is likely to take.
 
 ```bash
 git clone https://github.com/jivinstev/mc-mod-version-upgrade
-cd mc-mod-version-upgrade && ./setup --install-missing
+cd mc-mod-version-upgrade && ./setup
 claude
 ```
 
 `./setup` finds your Minecraft, recommends an answer to every question, and ends by telling you what
-to type. It needs git and Python 3. `--install-missing` also installs Claude Code if you don't have it,
-and, for porting on macOS, Java 21 through Homebrew. Porting is an add-on: say yes when `./setup` offers
-it, or run `./setup --migrate` later; it needs Java 21 (and 25 for Minecraft 26.x).
+to type. Installing needs Python 3. Porting is an add-on: say yes when `./setup` offers it, or run
+`./setup --migrate` later; it needs Java 21 (and 25 for Minecraft 26.x).
 Details: [docs/USING.md](docs/USING.md).
 
 Setup also asks you to turn off **"Help improve Claude"** at
@@ -158,8 +157,8 @@ irm https://raw.githubusercontent.com/jivinstev/mc-mod-version-upgrade/main/inst
 [`install.ps1`](install.ps1) installs Git for Windows and Python 3.12 if they are missing (Windows may
 ask for permission: click Yes), asks where to put this repository (press Enter for
 `mc-mod-version-upgrade` inside the folder you ran it from, or type another folder), clones it, and runs
-`setup.cmd --install-missing`. That is the same setup as on macOS and Linux, and it installs Claude Code
-and, if you say yes to porting, the Temurin JDK 21. Then it starts Claude Code in the clone. No new
+`setup.cmd --install-missing`: the same setup as on macOS and Linux, which on Windows also installs
+Claude Code and, if you say yes to porting, the Temurin JDK 21, with winget. Then it starts Claude Code in the clone. No new
 window is needed: it picks up the new commands itself. Next time, open PowerShell, `cd` to the clone
 and run `claude`. Running the line again is safe: it skips what is already there and updates the clone
 (run it from inside the clone and it uses that one without asking). It refuses to run as Administrator,

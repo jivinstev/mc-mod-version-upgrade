@@ -4,10 +4,11 @@
 #
 # This is only the part that has to happen before setup can run: it refuses an elevated window,
 # installs Git for Windows and Python if they are missing, asks where the clone should go (default:
-# the folder you ran it from), clones this repository there (or updates an existing clone), and runs `setup.cmd --install-missing`. Everything else -- Claude Code, the JDK, gh, long
-# paths -- is installed by tools/setup.py, the same code macOS and Linux run with
-# `./setup --install-missing`, so the platforms cannot drift apart. Then it starts Claude Code in
-# the clone. Re-running it is safe: what is already there is skipped.
+# the folder you ran it from), clones this repository there (or updates an existing clone), and runs
+# `setup.cmd --install-missing`. Everything else -- Claude Code, the JDK and gh (with winget), long
+# paths -- is done by tools/setup.py, the same setup macOS and Linux run as `./setup`, so the platforms
+# cannot drift apart. Then it starts Claude Code in the clone. Re-running it is safe: what is already
+# there is skipped.
 #
 # Why each step is here, from the first real-PC run (issue #32):
 #   - winget searches every source, and when the Microsoft Store source fails (0x8a15005e, a certificate
@@ -132,7 +133,7 @@
     }
 
     # ---- 0. not elevated ---------------------------------------------------------------------------
-    if ($env:OS -ne 'Windows_NT') { Fail 'this installer is for Windows. On macOS or Linux: git clone the repository, then ./setup --install-missing'; return }
+    if ($env:OS -ne 'Windows_NT') { Fail 'this installer is for Windows. On macOS or Linux: git clone the repository, then ./setup'; return }
     Say 'Checking this window'
     if ((Test-Elevated) -and $env:MCMU_ALLOW_ADMIN -ne '1') {
         Fail ("this PowerShell is running as Administrator. Nothing was installed.`n" +
@@ -175,7 +176,7 @@
         return
     }
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
-        Fail 'Claude Code is still not installed (see setup''s notes above). Install it with: irm https://claude.ai/install.ps1 | iex'
+        Fail 'Claude Code is still not installed (see setup''s notes above). Install it with: winget install -e --source winget --id Anthropic.ClaudeCode'
         return
     }
     $global:MCMU_RESULT = 'ok'

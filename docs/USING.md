@@ -44,12 +44,12 @@ size is likely to take.
 |---|---|---|---|---|
 | git | `xcode-select --install` | `winget install -e --source winget --id Git.Git` | `sudo apt install git` | `sudo dnf install git` |
 | Python 3 | `brew install python` | `winget install -e --source winget --id Python.Python.3.12` | `sudo apt install python3` | `sudo dnf install python3` |
-| Claude Code | `curl -fsSL https://claude.ai/install.sh \| bash` | `irm https://claude.ai/install.ps1 \| iex` | `curl -fsSL https://claude.ai/install.sh \| bash` | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | JDK 21 *(migrate only)* | `brew install --cask temurin@21` | `winget install -e --source winget --id EclipseAdoptium.Temurin.21.JDK` | `sudo apt install openjdk-21-jdk` | `sudo dnf install java-21-openjdk-devel` |
 
-`./setup --install-missing` runs the installs in this table that need no `sudo`: Claude Code on every OS,
-and the JDK 21 (for migration) and `gh` through Homebrew or winget. git and Python have to be there
-before setup can run.
+On Windows, `setup.cmd --install-missing` (what `install.ps1` runs) installs what is missing with winget:
+Claude Code (`winget install -e --source winget --id Anthropic.ClaudeCode`), the JDK 21 for migration,
+and `gh`. git and Python have to be there before setup can run. For Claude Code on macOS and Linux, see
+[its install guide](https://code.claude.com/docs/en/setup).
 
 Minecraft 26.x targets need Java **25** as well. On Windows, see the README's
 [Windows quick start](../README.md#on-windows-experimental) (experimental): one line in PowerShell
