@@ -176,16 +176,20 @@ kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
 # boot-smoke finds the instance from the mods folders setup records: per version (MINECRAFT_MODS_DIR_1_21_1),
 # with '' for a version that has no install -- not only the single key older checkouts carry.
 B="$T/bs"; mkdir -p "$B/repo/tools" "$B/game-1.21.1/mods"; cp tools/boot-smoke.py "$B/repo/tools/"
-printf 'MINECRAFT_MODS_DIR_26_2=\nMINECRAFT_MODS_DIR_1_21_1=%s\n' "$B/game-1.21.1/mods" > "$B/repo/.env.local"
+# The file holds the path as setup writes it: native (D:/a/... on Windows). Git Bash converts the
+# arguments it hands Windows Python, never a file's contents, so /d/a/... in .env.local would not resolve.
+W="$B"; command -v cygpath >/dev/null 2>&1 && W="$(cygpath -m "$B")"
+printf 'MINECRAFT_MODS_DIR_26_2=\nMINECRAFT_MODS_DIR_1_21_1=%s\n' "$W/game-1.21.1/mods" > "$B/repo/.env.local"
 found="$(env -u MINECRAFT_DIR python3 - "$B" <<'PY'
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("bs", sys.argv[1] + "/repo/tools/boot-smoke.py")
 bs = importlib.util.module_from_spec(spec); spec.loader.exec_module(bs)
 bs.DEFAULT_INSTANCE = sys.argv[1] + "/no-default"
-print(bs.find_instance(None))
+found = bs.find_instance(None)
+print(found.as_posix() if found else None)
 PY
 )"
-[ "$found" = "$B/game-1.21.1" ] && ok "boot-smoke finds the instance from setup's per-version mods key" \
+[ "$found" = "$W/game-1.21.1" ] && ok "boot-smoke finds the instance from setup's per-version mods key" \
   || bad "boot-smoke instance from MINECRAFT_MODS_DIR_1_21_1: got '${found}'"
 
 echo "6. recipe-bench.py (bucketer A/B, and it refuses to count a build that never compiled)"
