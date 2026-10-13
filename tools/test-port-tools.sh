@@ -298,7 +298,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
             "port-offer.py|port-offer: the authors see the port without our CI commit; port commits after a CI commit are replayed without it; only what state.json verified is claimed" \
             "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
-            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict" \
+            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict; a manifest behind its fork's newest full Release is installed as tested and named NOT THE NEWEST RELEASE" \
+            "port-manifest.py|port-manifest: refresh points the install manifest at the newest full Release (same platform variant) and the workflow's sibling pins, leaves registry entries alone, says unchanged, refuses a pre-release, an older tag, an ambiguous jar or an unfetchable pin" \
             "optional-dep-scan.py|optional-dep-scan: a listener class naming an optional mod in a method type blocks; a mixin reaching one through the mod is reported" \
             "port-fleet.py|port-fleet: one fleet file runs ci/gates/offer over every fork in order, flags per fork, push after each" \
             "fix-datapack-layout.py|fix-datapack-layout: Forge-only data (biome/structure/loot modifiers, forge: ids, conditional recipes, forge tags) converted to NeoForge; unknown ones refused and fail --verify" \
@@ -543,7 +544,7 @@ GR
     || bad "layer.gradle jar names: base=[$base] mc=[$mc]"
 fi
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script; without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (single-version and layer fork); --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back" || bad "port-ci self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script; without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (single-version and layer fork); --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back; promote refreshes the install manifest on the port branch only (its script run on a fake fork, single-version and layer: pushed on top of the tag, retried when the branch moved, nothing pushed when unchanged, a bad tag refused)" || bad "port-ci self-check: $out"
 python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"
 import re,sys
 src=open("tools/ci-gates.py").read()

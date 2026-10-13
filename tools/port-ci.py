@@ -473,7 +473,71 @@ def variant_check():
         recover_args("name: something else\n"); ok = False
     except SystemExit:
         pass
-    return ok and shipped_script_check()
+    return ok and shipped_script_check() and manifest_script_check()
+
+
+def manifest_script_check():
+    """Run the promote job's manifest-refresh script on a fake fork (a bare origin, a stand-in port-manifest.py), for
+    a single-version and a layer fork's workflow: a changed manifest is committed on top of the port branch and
+    pushed there (the tag stays in its history); a push the branch moved under is retried on the new tip; an
+    unchanged manifest pushes nothing; a tag that is not a tag name never reaches git."""
+    import os, tempfile
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gitbash import BASH
+    ok = True
+    for layer in (None, "neoforge-1.21.x"):
+        wf = fixture(True, layer)
+        body = wf.split("      - name: Refresh the install manifest\n", 1)[1].split("        run: |\n", 1)[1]
+        body = body.split("\n\n", 1)[0]
+        script = "\n".join(l[10:] for l in body.splitlines()).replace("python3 ", f'"{pathlib.Path(sys.executable).as_posix()}" ')
+        for case in ("changed", "race", "unchanged", "bad-tag"):
+            with tempfile.TemporaryDirectory() as d:
+                d = pathlib.Path(d)
+                origin, repo, tmp = d / "origin.git", d / "repo", d / "tmp"
+                tmp.mkdir()
+                def g(*a, cwd=repo):
+                    return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+                g("init", "-q", "--bare", str(origin), cwd=d)
+                g("init", "-q", str(repo), cwd=d)
+                for k, v in (("user.email", "t@e"), ("user.name", "t"), ("core.autocrlf", "false")):
+                    g("config", k, v)
+                (repo / ".github").mkdir()
+                (repo / ".github/port-install.json").write_text('{"v": 1}\n', encoding="utf-8")
+                g("add", "-A"); g("commit", "-qm", "port"); g("tag", "m-1-mc1.21.1")
+                g("remote", "add", "origin", str(origin)); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1")
+                tools = repo / ".port-tools/tools"
+                tools.mkdir(parents=True)
+                (tools / "port-manifest.py").write_text(
+                    "import pathlib, subprocess, sys\n"
+                    "calls = pathlib.Path(sys.argv[0]).with_name('calls.txt')\n"
+                    "calls.write_text(calls.read_text(encoding='utf-8') + ' '.join(sys.argv[1:]) + '\\n' if calls.exists() "
+                    "else ' '.join(sys.argv[1:]) + '\\n', encoding='utf-8')\n"
+                    f"if {case != 'unchanged'}:\n"
+                    "    pathlib.Path('.github/port-install.json').write_text('{\"v\": 2}\\n', encoding='utf-8')\n"
+                    "    subprocess.run(['git', 'commit', '-qam', 'Install manifest [skip ci]'], check=True)\n",
+                    encoding="utf-8")
+                if case == "race":       # the branch moves once under the first push: rejected, then refreshed again
+                    hook = origin / "hooks/pre-receive"
+                    hook.write_text('#!/bin/sh\nif [ ! -f "$GIT_DIR/raced" ]; then touch "$GIT_DIR/raced"; '
+                                    'echo "moved" >&2; exit 1; fi\nexit 0\n', encoding="utf-8")
+                    hook.chmod(0o755)
+                env = dict(os.environ, RUNNER_TEMP=str(tmp), GITHUB_STEP_SUMMARY=(tmp / "summary.md").as_posix(),
+                           TAG="m-1-mc1.21.1; touch pwned" if case == "bad-tag" else "m-1-mc1.21.1")
+                r = subprocess.run([BASH, "-c", script], cwd=repo, env=env, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace")
+                calls = (tools / "calls.txt").read_text(encoding="utf-8").splitlines() if (tools / "calls.txt").exists() else []
+                tip = g("rev-parse", "neoforge-1.21.1", cwd=origin).stdout.strip()
+                pushed = g("show", f"{tip}:.github/port-install.json", cwd=origin).stdout
+                anc = g("merge-base", "--is-ancestor", "m-1-mc1.21.1", tip).returncode == 0
+                want = {"changed": (0, 1, '{"v": 2}\n'), "race": (0, 2, '{"v": 2}\n'),
+                        "unchanged": (0, 1, '{"v": 1}\n'), "bad-tag": (1, 0, '{"v": 1}\n')}[case]
+                good = (r.returncode, len(calls), pushed) == want and anc and not (repo / "pwned").exists()
+                good &= all(c == "refresh --repo . --tag m-1-mc1.21.1 --commit" for c in calls)
+                if not good:
+                    print(f"manifest script check ({'layer' if layer else 'single-version'}, {case}): exit {r.returncode}, "
+                          f"{len(calls)} call(s), origin has {pushed!r}\n{(r.stdout + r.stderr)[-1500:]}")
+                ok &= good
+    return ok
 
 
 def shipped_script_check():
@@ -528,6 +592,22 @@ def shipped_script_check():
     return ok
 
 
+def run_blocks(text):
+    """The body of every `run: |` script in a workflow fragment: inputs reach a script only through env, so none of
+    these may contain `${{ }}`."""
+    out, cur, ind = [], None, 0
+    for line in text.splitlines():
+        m = re.match(r"( *)(?:- )?run: \|$", line)
+        if m:
+            cur, ind = [], len(m.group(1))
+            out.append(cur)
+        elif cur is not None and line.strip() and len(line) - len(line.lstrip()) <= ind:
+            cur = None
+        elif cur is not None:
+            cur.append(line)
+    return ["\n".join(b) for b in out]
+
+
 def self_check():
     t = TEMPLATE.read_text(encoding="utf-8")
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
@@ -566,7 +646,16 @@ def self_check():
     ok &= "if: ${{ inputs.promote }}" in out
     job = out.split("\n  promote:\n", 1)[-1].split("\n  publish:\n", 1)[0]
     ok &= "TAG: ${{ inputs.promote }}" in job and "--prerelease=false --latest" in job
-    ok &= "run: |" in job and "${{" not in job.split("run: |", 1)[1]        # nothing spliced into the script
+    ok &= len(run_blocks(job)) == 3 and not any("${{" in b for b in run_blocks(job))   # nothing spliced into a script
+    # then the install manifest: refreshed for the promoted tag and pushed to the PORT branch only, only where one
+    # exists, its tag validated, and a failure never stops publish (both fork kinds: the layer file is the same job)
+    for w in (plain, lay):
+        pj = w.split("\n  promote:\n", 1)[-1].split("\n  publish:\n", 1)[0]
+        refresh = pj.split("- name: Refresh the install manifest\n", 1)[-1]
+        ok &= "    permissions:\n      contents: write\n" in pj and "continue-on-error: true" in refresh
+        ok &= pj.count("if: ${{ github.ref_name == 'neoforge-1.21.1' && hashFiles('.github/port-install.json') != '' }}") == 2
+        ok &= 'port-manifest.py refresh --repo . --tag "$TAG" --commit' in refresh and "grep -Eq '^[A-Za-z0-9._+-]+$'" in refresh
+        ok &= 'git push -q origin "HEAD:refs/heads/neoforge-1.21.1"' in refresh and "refs/heads/neoforge-1.21.x" not in w
     ok &= "Pre-release until played by a person." in out          # the marker promote rewrites
     # publish: runs in the promote's own run (GITHUB_TOKEN edits start no other workflow), never gates on a
     # release event, takes its tag only through env, and the tokens reach only that job
