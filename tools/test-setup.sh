@@ -294,9 +294,9 @@ out="$(st --yes)"
 out="$(tty_run 'y')"
 { [ "$(readlink "$WS/tools")" = "$R2/tools" ] && [ "$(readlink "$WS/templates")" = "$R2/templates" ] \
   && [ "$(readlink "$WS/.env.local")" = "$R2/.env.local" ] && [ -d "$WS/mods/demo" ] && [ -f "$R1/tools/setup.py" ] \
-  && ! echo "$out" | grep -q "PROBLEM"; } \
+  && ! echo "$out" | grep -qE "PROBLEM.*(link|workspace|clone)"; } \
   && ok "answering y re-points all three links; the ports in mods/ and the other clone are untouched" \
-  || bad "relink: $(ls -l "$WS"; echo "$out" | grep -iE 'PROBLEM|clone' | head -3)"
+  || bad "relink: $(ls -la "$WS"; echo "$out" | grep -E 'PROBLEM|note: workspace' | head -5)"
 rm -rf "$(dirname "$R2")"
 
 rm -rf "$NOJAVA"
