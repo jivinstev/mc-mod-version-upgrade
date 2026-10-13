@@ -52,7 +52,7 @@ def release_at(repo, ref, published):
     t = datetime.fromisoformat(published.replace("Z", "+00:00")).astimezone(timezone.utc)
     for line in git(repo, "log", "--first-parent", "--format=%H %cI", ref).splitlines():
         sha, when = line.split(" ", 1)
-        if datetime.fromisoformat(when).astimezone(timezone.utc) <= t:
+        if datetime.fromisoformat(when.replace("Z", "+00:00")).astimezone(timezone.utc) <= t:   # "Z": Python < 3.11
             return sha
     sys.exit(f"no commit on {ref} at or before {published}")
 

@@ -140,7 +140,11 @@ def parse_mods_toml(text):
     `mods = [ { modId = ... } ]` inline form are both legal, and single quotes too. None when it does not parse
     (callers keep their regex reading). mods: [dict]; deps: [(owner, dict)]."""
     try:
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:                     # Python < 3.11 (macOS ships 3.9): the small reader next to this file
+            sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+            import minitoml as tomllib
         d = tomllib.loads(text)
     except Exception:  # noqa: BLE001 -- unparseable (a template placeholder, a typo): the regex path reads it
         return None
