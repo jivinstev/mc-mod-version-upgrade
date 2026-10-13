@@ -52,7 +52,7 @@ and `gh`. git and Python have to be there before setup can run. For Claude Code 
 [its install guide](https://code.claude.com/docs/en/setup).
 
 Minecraft 26.x targets need Java **25** as well. On Windows, see the README's
-[Windows quick start](../README.md#on-windows-experimental) (experimental): one line in PowerShell
+[Windows quick start](../README.md#on-windows): one line in PowerShell
 (`install.ps1`) installs git and Python, clones this repository and runs `setup.cmd --install-missing`.
 The tooling runs in Git Bash (part of Git for Windows), and `setup.cmd` starts setup from cmd or PowerShell.
 
