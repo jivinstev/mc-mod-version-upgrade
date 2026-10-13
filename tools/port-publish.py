@@ -771,6 +771,13 @@ def modrinth_create(repo):
     return 0
 
 
+def curseforge_name(name):
+    """The name to type into CurseForge's create-project form. CurseForge moderation refuses a project name with game
+    version numbers in it ("contains words or phrases that are not allowed: Game version numbers"), so the scope
+    there is the loader, not the Minecraft version; the slug CurseForge derives from it goes into curseforge.slug."""
+    return f"{name} - Community Port (NeoForge)"
+
+
 def page_title(name, mc):
     """'<name> - Community Port (<mc>+)': the scope is in the title. Modrinth caps titles at 64 characters, so a
     long name is cut to fit rather than the scope dropped."""
@@ -916,7 +923,7 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
     print(f"wrote {target / CONFIG} and {target / BODY} -- review both; curseforge.project_id is set after the "
           "project is created on the website")
     print("\nCurseForge create-project form (https://authors.curseforge.com, Create Project, Minecraft, Mods):")
-    print(f"  Name:        {title}\n  Summary:     {cfg['summary']}\n  Description: paste {BODY}\n"
+    print(f"  Name:        {curseforge_name(name)}   (no version numbers: CurseForge refuses them in a name)\n  Summary:     {cfg['summary']}\n  Description: paste {BODY}\n"
           f"  License:     {cfg['license']}\n  Source URL:  https://github.com/{fork}\n  Issues URL:  https://github.com/{fork}/issues\n"
           f"  Logo:        {cfg['icon']}\n  Categories:  closest to {', '.join(cfg['categories'] + cfg['additional_categories'])}")
     return 0
@@ -932,6 +939,7 @@ def self_check():
             ok = False; print("FAIL:", msg)
     expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
     expect(page_title("Example Mod", "1.21.1") == "Example Mod - Community Port (1.21.1+)", "title carries the scope")
+    expect(not re.search(r"\d+\.\d+", curseforge_name("Example Mod")), "the CurseForge name has no game version number")
     import contextlib, io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
