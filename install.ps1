@@ -3,8 +3,8 @@
 #   irm https://raw.githubusercontent.com/jivinstev/mc-mod-version-upgrade/main/install.ps1 | iex
 #
 # This is only the part that has to happen before setup can run: it refuses an elevated window,
-# installs Git for Windows and Python if they are missing, clones this repository (or updates the
-# clone), and runs `setup.cmd --install-missing`. Everything else -- Claude Code, the JDK, gh, long
+# installs Git for Windows and Python if they are missing, asks where the clone should go (default:
+# the folder you ran it from), clones this repository there (or updates an existing clone), and runs `setup.cmd --install-missing`. Everything else -- Claude Code, the JDK, gh, long
 # paths -- is installed by tools/setup.py, the same code macOS and Linux run with
 # `./setup --install-missing`, so the platforms cannot drift apart. Then it starts Claude Code in
 # the clone. Re-running it is safe: what is already there is skipped.
@@ -14,12 +14,16 @@
 #     pinning error behind TLS inspection, a wrong clock or old root certificates) it installs nothing.
 #     Neither package needs the Store, so both installs name `--source winget`.
 #   - an elevated window puts the per-user installs, ~\bin shims and ~\.claude settings under the admin
-#     context, where the user's everyday shell and Claude Code do not look. So it refuses to run elevated.
+#     context, where the user's everyday shell and Claude Code do not look. So it refuses to run elevated,
+#     and says what it checked: the Administrators role, and the window's integrity level (High = elevated).
+#   - people keep their code in a folder of their own (~\dev, D:\src). The clone goes where they say,
+#     never to a place they were not asked about.
 #   - an install changes PATH in the registry, not in the running shell. The script re-reads it, so the
 #     next step, and this window afterwards, see the new commands without opening a new window.
 #
 # Settings, as environment variables set before the line above (all optional):
-#   MCMU_DIR          where the clone goes                 (default: $HOME\mc-mod-version-upgrade)
+#   MCMU_DIR          the clone's folder; skips the question (default: ask, offering
+#                     <the folder you ran it from>\mc-mod-version-upgrade)
 #   MCMU_REF          branch to clone                      (default: main; an existing clone keeps its own)
 #   MCMU_REPO         repository URL, e.g. your fork       (default: this repository)
 #   MCMU_SETUP_ARGS   more arguments for setup.cmd, e.g. --migrate
@@ -34,11 +38,57 @@
     $ErrorActionPreference = 'Continue'
     $repo = if ($env:MCMU_REPO) { $env:MCMU_REPO } else { 'https://github.com/jivinstev/mc-mod-version-upgrade' }
     $ref  = if ($env:MCMU_REF)  { $env:MCMU_REF }  else { 'main' }
-    $dir  = if ($env:MCMU_DIR)  { $env:MCMU_DIR }  else { Join-Path $HOME 'mc-mod-version-upgrade' }
+    $name = 'mc-mod-version-upgrade'
     $global:MCMU_RESULT = 'failed'
 
     function Say($msg)  { Write-Host "==> $msg" -ForegroundColor Cyan }
-    function Fail($msg) { Write-Host "install: $msg" -ForegroundColor Red }
+    function Fail($msg) {
+        Write-Host ''
+        Write-Host '==================================================================' -ForegroundColor Red
+        Write-Host "STOPPED: $msg" -ForegroundColor Red
+        Write-Host '==================================================================' -ForegroundColor Red
+    }
+
+    # Elevated = in the Administrators role, OR a High/System integrity level. The role check alone can
+    # miss an elevated window (a token the role check does not see as admin); the integrity level is
+    # what "Run as administrator" actually changes.
+    function Test-Elevated {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $role = ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $groups = (whoami /groups 2>$null) | Out-String
+        $high = ($groups -match 'S-1-16-12288') -or ($groups -match 'S-1-16-16384')
+        Write-Host "    user: $($id.Name); Administrators role: $(if ($role) {'yes'} else {'no'}); integrity: $(if ($high) {'High (elevated)'} elseif ($groups) {'Medium (normal)'} else {'unknown'})"
+        return ($role -or $high)
+    }
+
+    # Where the clone goes. MCMU_DIR wins; a clone you are standing in is used as it is; otherwise ask,
+    # offering <this folder>\mc-mod-version-upgrade -- or <home>\... when this folder is a Windows
+    # system folder (an elevated window opens in C:\WINDOWS\system32).
+    function Get-CloneDir {
+        if ($env:MCMU_DIR) { return [Environment]::ExpandEnvironmentVariables($env:MCMU_DIR) }
+        $here = (Get-Location).ProviderPath
+        if ((Test-Path (Join-Path $here '.git')) -and (Test-Path (Join-Path $here 'tools\setup.py')) -and (Test-Path (Join-Path $here 'setup.cmd'))) {
+            Write-Host "    using the clone you are in: $here"
+            return $here
+        }
+        $parent = $here
+        if (-not $parent -or ($env:windir -and $parent.StartsWith($env:windir, [StringComparison]::OrdinalIgnoreCase))) { $parent = $HOME }
+        $suggest = Join-Path $parent $name
+        Write-Host ''
+        Write-Host "Where should the $name folder go? Press Enter for the suggestion, or type a folder."
+        Write-Host '(A folder that already has other things in it gets the clone inside it.)'
+        $answer = Read-Host "Folder [$suggest]"
+        if (-not $answer) { return $suggest }
+        $answer = $answer.Trim().Trim('"')
+        if ($answer.StartsWith('~')) { $answer = $HOME + $answer.Substring(1) }
+        $answer = [Environment]::ExpandEnvironmentVariables($answer)
+        if (-not [IO.Path]::IsPathRooted($answer)) { $answer = Join-Path $here $answer }
+        # Typed an existing folder of their own (C:\Users\me\dev)? Put the clone in it, as `git clone` would.
+        if ((Test-Path $answer) -and -not (Test-Path (Join-Path $answer '.git')) -and (Get-ChildItem -Force $answer | Select-Object -First 1)) {
+            $answer = Join-Path $answer $name
+        }
+        return $answer
+    }
 
     # PATH as a new window would see it (Machine, then User, then Claude Code's ~\.local\bin), keeping
     # anything this session added itself.
@@ -83,10 +133,12 @@
 
     # ---- 0. not elevated ---------------------------------------------------------------------------
     if ($env:OS -ne 'Windows_NT') { Fail 'this installer is for Windows. On macOS or Linux: git clone the repository, then ./setup --install-missing'; return }
-    $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -and $env:MCMU_ALLOW_ADMIN -ne '1') {
-        Fail 'this PowerShell is running as Administrator. Close it, open PowerShell from the Start menu with a plain click (not "Run as administrator"), and paste the line again.'
-        Fail '(Installed as Administrator, the tools and settings land where your normal shell and Claude Code do not look.)'
+    Say 'Checking this window'
+    if ((Test-Elevated) -and $env:MCMU_ALLOW_ADMIN -ne '1') {
+        Fail ("this PowerShell is running as Administrator. Nothing was installed.`n" +
+              "Close it, open PowerShell from the Start menu with a plain click (not `"Run as administrator`"),`n" +
+              "and paste the line again. (Installed as Administrator, the tools and settings land where your`n" +
+              "normal shell and Claude Code do not look.)")
         return
     }
 
@@ -96,12 +148,13 @@
     if (-not (Install-WithWinget 'Python 3.12' 'Python.Python.3.12' { Test-Python })) { return }
 
     # ---- 2. the repository ------------------------------------------------------------------------
+    $dir = Get-CloneDir
     if (Test-Path (Join-Path $dir '.git')) {
         Say "Updating $dir"
         git -C $dir pull --ff-only
         if ($LASTEXITCODE -ne 0) { Write-Host "    (could not fast-forward $dir; using it as it is)" -ForegroundColor Yellow }
     } elseif (Test-Path $dir) {
-        Fail "$dir exists and is not a git clone. Move it aside, or set MCMU_DIR to another folder, and run this again."
+        Fail "$dir exists and is not a git clone. Move it aside or pick another folder, and run this again."
         return
     } else {
         Say "Cloning into $dir"

@@ -238,8 +238,11 @@ jobs:
         shell: powershell
         run: |
           $env:MCMU_REPO = $env:GITHUB_WORKSPACE; $env:MCMU_DIR = "$env:RUNNER_TEMP\refused"
-          Get-Content install.ps1 -Raw | Invoke-Expression
+          $out = Get-Content install.ps1 -Raw | Invoke-Expression *>&1 | Out-String
+          Write-Host $out
           if ($global:MCMU_RESULT -ne 'failed' -or (Test-Path $env:MCMU_DIR)) { throw "ran elevated: $global:MCMU_RESULT" }
+          # The runner's window is elevated both ways; the output must say what was checked, and stop loudly.
+          if ($out -notmatch 'integrity: High' -or $out -notmatch 'STOPPED: this PowerShell is running as Administrator') { throw 'the refusal does not say why' }
           exit 0
       # The runner has git and Python, but not Claude Code: this is the --install-missing path, with
       # Claude Code's real native installer.

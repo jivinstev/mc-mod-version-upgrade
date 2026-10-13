@@ -147,20 +147,23 @@ records it once you type `confirmed`.
 
 Native Windows, no WSL. Open **PowerShell as yourself, not as Administrator**: from the Start menu,
 a plain click (not "Run as administrator"). If the title bar says *Administrator:*, or the prompt
-starts in `C:\WINDOWS\system32`, close it and open a normal one. Then paste:
+starts in `C:\WINDOWS\system32`, close it and open a normal one. `cd` to the folder you keep code in
+(for example `cd ~\dev`), then paste:
 
 ```powershell
 irm https://raw.githubusercontent.com/jivinstev/mc-mod-version-upgrade/main/install.ps1 | iex
 ```
 
 [`install.ps1`](install.ps1) installs Git for Windows and Python 3.12 if they are missing (Windows may
-ask for permission: click Yes), clones this repository to `~\mc-mod-version-upgrade`, and runs
+ask for permission: click Yes), asks where to put this repository (press Enter for
+`mc-mod-version-upgrade` inside the folder you ran it from, or type another folder), clones it, and runs
 `setup.cmd --install-missing`. That is the same setup as on macOS and Linux, and it installs Claude Code
 and, if you say yes to porting, the Temurin JDK 21. Then it starts Claude Code in the clone. No new
-window is needed: it picks up the new commands itself. Next time, open PowerShell and run
-`cd ~\mc-mod-version-upgrade; claude`. Running the line again is safe: it skips what is already there
-and updates the clone. It refuses to run as Administrator, because the tools and settings would then
-land where your normal shell and Claude Code don't look.
+window is needed: it picks up the new commands itself. Next time, open PowerShell, `cd` to the clone
+and run `claude`. Running the line again is safe: it skips what is already there and updates the clone
+(run it from inside the clone and it uses that one without asking). It refuses to run as Administrator,
+because the tools and settings would then land where your normal shell and Claude Code don't look, and
+prints what it checked.
 
 <details><summary>The same steps by hand</summary>
 
