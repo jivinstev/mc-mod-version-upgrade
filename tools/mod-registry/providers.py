@@ -147,6 +147,19 @@ def read_env_key(key):
     return read_env_local_key(key) or _clean_env_value(os.environ.get(key) or "")
 
 
+def mods_dir_key(mc):
+    """setup records one mods folder per Minecraft version: MINECRAFT_MODS_DIR_1_21_1."""
+    return "MINECRAFT_MODS_DIR_" + mc.replace(".", "_")
+
+
+def read_mods_dir(mc="1.21.1"):
+    """The player's mods folder for this Minecraft version: $MINECRAFT_MODS_DIR (a one-run override),
+    then the per-version key setup records (mods_dir_key), then the single MINECRAFT_MODS_DIR an older
+    setup wrote. None when there is none -- setup records '' for a version with no install."""
+    return (_clean_env_value(os.environ.get("MINECRAFT_MODS_DIR") or "")
+            or read_env_key(mods_dir_key(mc)) or read_env_local_key("MINECRAFT_MODS_DIR"))
+
+
 def write_download(out_path, file_name, data):
     """Write a downloaded file and return where it went. `--out` may be a file path, or an
     existing folder (or one written with a trailing slash), in which case the file keeps its

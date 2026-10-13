@@ -365,7 +365,7 @@ drives the REAL client with no manual input, escalating through 4 modes. Set it 
 
 ## 7. Deploy + client verification
 ```bash
-./gradlew deployToMods          # runs build (=> both test gates) then copies the jar to $MINECRAFT_MODS_DIR
+./gradlew deployToMods          # runs build (=> both test gates) then copies the jar to MINECRAFT_MODS_DIR_<minecraft_version> from .env.local
 ```
 GameTest proves server-side load + core gameplay. Rendering, client-only mixins, and GUIs
 still need a real client — the user launches it; you read the log:

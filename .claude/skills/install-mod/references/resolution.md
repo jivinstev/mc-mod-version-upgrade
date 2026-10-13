@@ -14,7 +14,7 @@
 
 ## Recursive dependency algorithm (stage c)
 ```
-installed = set(modreg scan-instance)          # modIds already in MINECRAFT_MODS_DIR
+installed = set(modreg scan-instance --mc mc)  # modIds already in the target's mods folder (MINECRAFT_MODS_DIR_<mc>)
 queue = [ root ]                                 # the user-chosen mod
 seen  = {}                                       # modId -> node (dedup + cycle guard)
 while queue:
