@@ -41,7 +41,10 @@ instance; it also adds what an optional mod itself requires (read from that mod'
 file for (a required one, or an optional one with `--with-untested`) comes from Modrinth/CurseForge (the same
 registry tool as below), checked to declare that mod id and labelled "not tested by CI"; an optional mod whose own requirement cannot be found is left out, and NeoForge is
 raised within its line when an added mod needs newer. The output leads with SUCCEEDED/FAILED per port and
-`RESULT: OK` (exit 0); warnings about optional mods never change it. `--full` installs
+`RESULT: OK` (exit 0); warnings about optional mods never change it. When a port's manifest names an older
+release than its fork's newest full Release (a manifest nobody refreshed), the output opens with `NOT THE NEWEST
+RELEASE`, naming both, and still installs the manifest's set -- the files CI tested together; tell the user, and
+say the fork's maintainer refreshes it with `tools/port-manifest.py refresh`. `--full` installs
 exactly what CI's full pass loaded. Before writing to the real instance (confirm first, as below), install
 into a scratch folder and boot it:
 

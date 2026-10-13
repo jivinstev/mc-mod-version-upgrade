@@ -15,6 +15,9 @@ on, raised within the same line when an added mod needs newer, with NeoForge's o
 
 The output leads with the result: SUCCEEDED / FAILED per requested port (the port plus every mod it needs),
 then optional extras, then warnings about optional mods, which never change the result. Exit 0 = every port in.
+Above all of it, NOT THE NEWEST RELEASE names each port whose manifest names an older release than its fork's
+newest full Release (a manifest nobody refreshed, tools/port-manifest.py): the manifest's set -- what CI tested
+together -- is still what is installed, but never silently in place of the newer release.
 
   --with-optional   also the optional mods CI tested with the ports (and what they need)
   --with-untested   also the optional integrations CI never loaded, from Modrinth/CurseForge, labelled as such
@@ -215,10 +218,11 @@ def registry_lookup(modid, mc, get=fetch):
 UNTESTED = "not tested by CI"
 
 
-def plan(repos, branch, with_optional, full, get=fetch, mc="1.21.1", lookup=None, untested=False):
+def plan(repos, branch, with_optional, full, get=fetch, mc="1.21.1", lookup=None, untested=False, manifests=None):
     """-> (files, notes, problems, neo, ports, missing). A mod named twice is installed once (the newest tested
     file); a mod CI had no file for comes from the registries; an added mod's own requirements come too.
-    ports: per requested repo, the mod ids it needs (its siblings' included). missing: modid -> why not found."""
+    ports: per requested repo, the mod ids it needs (its siblings' included). missing: modid -> why not found.
+    manifests: a dict to fill with every manifest read (repo -> manifest), for stale_manifests()."""
     lookup = lookup or (lambda m: registry_lookup(m, mc, get))
     with_optional = with_optional or full or untested   # each flag includes the CI-tested optional mods
     roles = {"self", "required"} | ({"optional"} if with_optional else set()) | ({"extra"} if full else set())
@@ -238,6 +242,8 @@ def plan(repos, branch, with_optional, full, get=fetch, mc="1.21.1", lookup=None
             mans[repo] = None
             continue
         mans[repo] = man
+        if manifests is not None:
+            manifests[repo] = man
         port = man.get("port", repo)
         if not any(f.get("role") == "self" for f in man.get("files", [])):
             problems.append(f"{port}: its release has several jars and the manifest names none")
@@ -440,8 +446,9 @@ STATUS_TAG = {"updated": "updated", "would update": "would update", "present": "
               "other build": "different build kept"}
 
 
-def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
-    """The result first: per requested port, succeeded or failed; then optional extras; then warnings."""
+def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry, stale=()):
+    """The result first: per requested port, succeeded or failed; then optional extras; then warnings. stale
+    (stale_manifests()) goes above all of it: an install that is not the newest release must never read as one."""
     by_id = {f["modid"]: f for f in files}
     def label(m):
         f = by_id.get(m, {})
@@ -469,6 +476,14 @@ def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
     warn = [f"{m}: {why}" for m, why in sorted(missing.items()) if m not in required and why != UNTESTED]
     warn += [x for x in bad if x.split(":")[0] not in required]
     out = []
+    if stale:
+        out += ["NOT THE NEWEST RELEASE: " + ("this port's" if len(stale) == 1 else f"{len(stale)} ports'")
+                + " install manifest names an older release than the fork's newest full Release:"]
+        out += [f"  {p}: the manifest names {name} from {old}, but the newest release is {new}" + (f" ({url})" if url else "")
+                for p, old, name, new, url in stale]
+        out += ["  Installing the manifest's set anyway: those are the files CI tested together. The newer jar has not been",
+                "  tested with these dependencies here; the fork's manifest is behind (its maintainer refreshes it with",
+                "  tools/port-manifest.py refresh; a promotion through Port CI does it by itself).", ""]
     if lines:
         out.append("WOULD SUCCEED:" if dry else "SUCCEEDED:")
         out += lines
@@ -494,7 +509,40 @@ def summarise(ports, files, status, missing, bad, neo_line, neo_ok, dry):
     out.append("")
     out.append(f"RESULT: OK -- {n} of {n} port(s) {verb}." + ("" if dry else " Start Minecraft with the NeoForge profile.")
                if good else f"RESULT: FAILED -- {n - len(failed)} of {n} port(s) {verb}. See FAILED above.")
+    if stale:
+        out[-1] += (f" {len(stale)} manifest(s) not on the newest release: see NOT THE NEWEST RELEASE above.")
     return out, good
+
+
+def _port_manifest():
+    import importlib.util
+    sp = importlib.util.spec_from_file_location("port_manifest", pathlib.Path(__file__).resolve().parent / "port-manifest.py")
+    m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+    return m
+
+
+def stale_manifests(manifests, releases=None):
+    """-> (stale, unchecked). stale: [(port, manifest tag, self file, newest tag, newest url)] for each manifest read
+    whose self jar is not on the newest full Release of its fork's tag series (tools/port-manifest.py); unchecked:
+    [port] whose releases GitHub did not give (offline, rate-limited). A manifest is the tested set, so it is still
+    what gets installed -- but never silently in place of a newer release."""
+    pm = _port_manifest()
+    releases = releases or (lambda fork: pm.api(f"{pm.API}/repos/{fork}/releases?per_page=100"))
+    stale, unchecked = [], []
+    for repo, man in manifests.items():
+        if not man:
+            continue
+        s = next((f for f in man.get("files") or [] if f.get("role") == "self" and f.get("url")), None)
+        m = pm.RELEASE_URL.fullmatch((s or {}).get("url") or "")
+        if not m:
+            continue
+        rels = releases(m.group(1))
+        if rels is None:
+            unchecked.append(man.get("port", repo)); continue
+        hit = pm.stale(man, rels)
+        if hit:
+            stale.append((man.get("port", repo), hit[0], s.get("name") or m.group(3), hit[1], hit[2]))
+    return stale, unchecked
 
 
 NEO_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
@@ -797,6 +845,52 @@ def self_check():
             ok &= _chk(launcher_dir(per, env, default=d / "none") == per.parent, 167)     # its own launcher wins
         finally:
             os.environ.update(saved)
+    with tempfile.TemporaryDirectory() as d:     # a manifest behind its fork's newest full Release: installed, said loudly
+        d = pathlib.Path(d)
+        def gh(repo, tag, name):
+            return f"https://github.com/{repo}/releases/download/{tag}/{name}"
+        def rel(repo, tag, pre=False):
+            return {"tag_name": tag, "prerelease": pre, "draft": False, "html_url": f"https://github.com/{repo}/releases/tag/{tag}",
+                    "assets": []}
+        blobs = {}
+        def jarb(url, modid):
+            p = d / url.rsplit("/", 1)[-1]
+            with zipfile.ZipFile(p, "w") as z:
+                z.writestr("META-INF/neoforge.mods.toml", f'[[mods]]\nmodId="{modid}"\n')
+            blobs[url] = p.read_bytes()
+            return hashlib.sha256(blobs[url]).hexdigest()
+        lib_u = gh("o/lib", "lib-1.1.8-mc1.21.1", "lib-1.1.8_mr.jar")
+        dep_u = gh("o/dep", "dep-1.1.1-mc1.21.1", "dep-1.1.1.jar")
+        mans = {manifest_url("o/dep", "b"): {"port": "o/dep", "modid": "dep", "minecraft": "1.21.1", "files": [
+                    {"role": "self", "modid": "dep", "name": "dep-1.1.1.jar", "url": dep_u, "sha256": jarb(dep_u, "dep")},
+                    {"role": "required", "modid": "lib", "name": "lib-1.1.8_mr.jar", "url": lib_u, "sha256": jarb(lib_u, "lib"),
+                     "port": "o/lib"}]},
+                manifest_url("o/lib", "b"): {"port": "o/lib", "modid": "lib", "minecraft": "1.21.1", "files": [
+                    {"role": "self", "modid": "lib", "name": "lib-1.1.8_mr.jar", "url": lib_u,
+                     "sha256": hashlib.sha256(blobs[lib_u]).hexdigest()}]}}
+        gs = lambda u: json.dumps(mans[u]).encode() if u in mans else blobs[u]
+        rels = {"o/dep": [rel("o/dep", "dep-1.1.3-mc1.21.1", pre=True), rel("o/dep", "dep-1.1.2-mc1.21.1"),
+                          rel("o/dep", "dep-1.1.1-mc1.21.1")],
+                "o/lib": [rel("o/lib", "lib-1.1.8-mc1.21.1")]}
+        read = {}
+        fs, _n, _p, _ne, pts, ms = plan(["o/dep"], "b", False, False, gs, lookup=lookup, manifests=read)
+        ok &= _chk(sorted(read) == ["o/dep", "o/lib"], 170)                            # siblings' manifests are read too
+        st, unc = stale_manifests(read, lambda f: rels.get(f))
+        ok &= _chk(st == [("o/dep", "dep-1.1.1-mc1.21.1", "dep-1.1.1.jar", "dep-1.1.2-mc1.21.1",
+                           "https://github.com/o/dep/releases/tag/dep-1.1.2-mc1.21.1")] and not unc, 171)
+        _d, _s, bd, sts = install(fs, d / "inst/mods", dry=True, get=gs)
+        out, good = summarise(pts, fs, sts, ms, bd, "", True, True, st)
+        ok &= _chk(good and out[0].startswith("NOT THE NEWEST RELEASE: this port's install manifest names an older")
+                   and "o/dep: the manifest names dep-1.1.1.jar from dep-1.1.1-mc1.21.1, but the newest release is "
+                   "dep-1.1.2-mc1.21.1" in out[1] and "Installing the manifest's set anyway" in out[2]
+                   and "WOULD SUCCEED:" in out and "see NOT THE NEWEST RELEASE above" in out[-1], 172)
+        ok &= _chk([x["name"] for x in fs] == ["dep-1.1.1.jar", "lib-1.1.8_mr.jar"], 173)   # still the tested set
+        st2, unc2 = stale_manifests(read, lambda f: None)                                   # offline: unchecked, not stale
+        ok &= _chk(st2 == [] and unc2 == ["o/dep", "o/lib"], 174)
+        current = {"o/dep": dict(read["o/dep"], files=[dict(read["o/dep"]["files"][0],
+                                                             url=gh("o/dep", "dep-1.1.2-mc1.21.1", "dep-1.1.2.jar"))])}
+        ok &= _chk(stale_manifests(current, lambda f: rels.get(f)) == ([], []), 176)
+        ok &= _chk(summarise(pts, fs, sts, ms, bd, "", True, True)[0][0] == "WOULD SUCCEED:", 177)   # none stale: as before
     ok &= _chk(vkey("geckolib-neoforge-1.21.1-4.8.4.jar") > vkey("geckolib-neoforge-1.21.1-4.7.1.jar"), 159)
     ok &= _chk(vkey("curios-neoforge-9.5.1+1.21.1.jar") == (9, 5, 1), 160)
     print("self-check:", "OK" if ok else f"FAIL (checks at self_check lines {failed})")
@@ -827,8 +921,12 @@ def main():
             cache[u] = fetch(u)
         return cache[u]
     print(f"install-port: {', '.join(a.repos)} -> {mods}" + (" (dry run)" if a.dry_run else ""), flush=True)
+    read = {}
     files, notes, problems, neo, ports, missing = plan(a.repos, a.branch or f"neoforge-{a.mc}", a.with_optional,
-                                                       a.full, get, a.mc, untested=a.with_untested)
+                                                       a.full, get, a.mc, untested=a.with_untested, manifests=read)
+    stale, unchecked = stale_manifests(read)
+    for p in unchecked:      # said every time: an unchecked manifest may be behind
+        print(f"(could not check whether {p}'s manifest names its newest release: GitHub did not answer)", flush=True)
     done, skipped, bad, status = install(files, mods, a.dry_run, get, replace=a.replace)
     nnotes, nprob = ([], []) if (a.no_neoforge or not neo) else ensure_neoforge(neo, mods, a.dry_run, get,
                                                                                     mc_dir=launcher_dir(mods, env))
@@ -838,7 +936,7 @@ def main():
         neo_line += f" (newer than the {tested} the ports were tested on: {neo[-1][2]})"
     if a.verbose:
         print("\n".join(["  " + x for x in done + skipped] + ["  note: " + x for x in nnotes + notes + problems]) + "\n")
-    out, good = summarise(ports, files, status, missing, bad, neo_line, not nprob, a.dry_run)
+    out, good = summarise(ports, files, status, missing, bad, neo_line, not nprob, a.dry_run, stale)
     print("\n".join(out))
     return 0 if good else 1
 

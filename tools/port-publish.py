@@ -45,7 +45,7 @@ release notes. Tokens come from the environment (MODRINTH_TOKEN, CURSEFORGE_TOKE
 arguments, never printed. A platform with no project yet (CurseForge before the person has created it) is
 skipped with a notice, not failed. Standard library only.
 """
-import argparse, datetime, importlib.util, json, os, pathlib, re, subprocess, sys, tomllib, urllib.error
+import argparse, datetime, importlib.util, json, os, pathlib, re, subprocess, sys, urllib.error
 import urllib.parse, urllib.request, uuid
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -136,6 +136,11 @@ def mods_toml(repo, ref="HEAD"):
     for p in ("src/main/resources/META-INF/neoforge.mods.toml", "src/main/resources/META-INF/mods.toml"):
         r = git(repo, "show", f"{ref}:{p}")
         if r.returncode == 0:
+            try:
+                import tomllib
+            except ImportError:                 # Python < 3.11 (setup runs on the user's machine; CI never reads TOML)
+                sys.path.insert(0, str(ROOT))
+                import minitoml as tomllib
             return tomllib.loads(r.stdout)
     raise SystemExit("no neoforge.mods.toml in the port branch")
 
@@ -342,7 +347,15 @@ def modrinth_version(cfg, tag, release, text, dry, mc=None, asset=None, dep_vers
     return proj, modrinth("POST", "/version", body, h)
 
 
-def curseforge_ids(mc):
+# Modrinth's environment (the config's "environment") as CurseForge's environment versions. CurseForge refuses a file
+# with none ("You must select at least one version from the environment group of versions", errorCode 1021).
+CF_SIDES = {"client_and_server": ("Client", "Server"), "singleplayer_only": ("Client", "Server"),
+            "client_or_server": ("Client", "Server"), "client_or_server_prefers_both": ("Client", "Server"),
+            "client_only": ("Client",), "client_only_server_optional": ("Client",),
+            "server_only": ("Server",), "server_only_client_optional": ("Server",), "dedicated_server_only": ("Server",)}
+
+
+def curseforge_ids(mc, environment="client_and_server"):
     types = curseforge("GET", "/game/version-types")
     vers = curseforge("GET", "/game/versions")
     tslug = {t["id"]: t["slug"] for t in types}
@@ -350,7 +363,17 @@ def curseforge_ids(mc):
     loader = [v["id"] for v in vers if v["name"] == "NeoForge" and tslug.get(v["gameVersionTypeID"]) == "modloader"]
     if len(mcid) != 1 or len(loader) != 1:
         raise SystemExit(f"CurseForge game versions: {len(mcid)} match Minecraft {mc}, {len(loader)} match NeoForge")
-    return mcid + loader
+    sides = CF_SIDES.get(environment, ("Client", "Server"))
+    env = []
+    for side in sides:     # CurseForge's docs name them only by name ("Client", "Server"); prefer an environment type
+        hits = [v for v in vers if v["name"] == side]
+        if len(hits) > 1:
+            hits = [v for v in hits if "environment" in tslug.get(v["gameVersionTypeID"], "")]
+        if len(hits) != 1:
+            raise SystemExit(f"CurseForge game versions: {len(hits)} environment versions named {side!r} "
+                             f"(needed for environment {environment})")
+        env.append(hits[0]["id"])
+    return mcid + loader + env
 
 
 def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
@@ -367,7 +390,7 @@ def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
         print("curseforge file:", json.dumps({**meta, "changelog": "<notes>", "file": asset["name"],
                                               "project_id": cf["project_id"]}, indent=1))
         return None
-    meta["gameVersions"] = curseforge_ids(mc)
+    meta["gameVersions"] = curseforge_ids(mc, cfg.get("environment", "client_and_server"))
     body, h = multipart({"metadata": json.dumps(meta)}, {"file": (asset["name"], download(asset), "application/java-archive")})
     return curseforge("POST", f"/projects/{cf['project_id']}/upload-file", body, h)
 
@@ -748,6 +771,13 @@ def modrinth_create(repo):
     return 0
 
 
+def curseforge_name(name):
+    """The name to type into CurseForge's create-project form. CurseForge moderation refuses a project name with game
+    version numbers in it ("contains words or phrases that are not allowed: Game version numbers"), so the scope
+    there is the loader, not the Minecraft version; the slug CurseForge derives from it goes into curseforge.slug."""
+    return f"{name} - Community Port (NeoForge)"
+
+
 def page_title(name, mc):
     """'<name> - Community Port (<mc>+)': the scope is in the title. Modrinth caps titles at 64 characters, so a
     long name is cut to fit rather than the scope dropped."""
@@ -893,7 +923,7 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
     print(f"wrote {target / CONFIG} and {target / BODY} -- review both; curseforge.project_id is set after the "
           "project is created on the website")
     print("\nCurseForge create-project form (https://authors.curseforge.com, Create Project, Minecraft, Mods):")
-    print(f"  Name:        {title}\n  Summary:     {cfg['summary']}\n  Description: paste {BODY}\n"
+    print(f"  Name:        {curseforge_name(name)}   (no version numbers: CurseForge refuses them in a name)\n  Summary:     {cfg['summary']}\n  Description: paste {BODY}\n"
           f"  License:     {cfg['license']}\n  Source URL:  https://github.com/{fork}\n  Issues URL:  https://github.com/{fork}/issues\n"
           f"  Logo:        {cfg['icon']}\n  Categories:  closest to {', '.join(cfg['categories'] + cfg['additional_categories'])}")
     return 0
@@ -909,6 +939,7 @@ def self_check():
             ok = False; print("FAIL:", msg)
     expect(minecraft_of("examplemod-1.0.0-mc1.21.1") == "1.21.1", "minecraft from tag")
     expect(page_title("Example Mod", "1.21.1") == "Example Mod - Community Port (1.21.1+)", "title carries the scope")
+    expect(not re.search(r"\d+\.\d+", curseforge_name("Example Mod")), "the CurseForge name has no game version number")
     import contextlib, io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -1012,6 +1043,27 @@ def self_check():
                f"disclosures go to the v3 endpoint once, and nothing is sent without any: {sent}")
     finally:
         modrinth_v3 = real_v3
+    global curseforge
+    real_cf = curseforge
+    def fake_cf(with_env):
+        def f(method, path, data=None, headers=None):
+            if path == "/game/version-types":
+                return [{"id": 1, "slug": "minecraft-1-21"}, {"id": 2, "slug": "modloader"}, {"id": 3, "slug": "environment"}, {"id": 4, "slug": "other"}]
+            return [{"id": 10, "name": "1.21.1", "gameVersionTypeID": 1}, {"id": 11, "name": "NeoForge", "gameVersionTypeID": 2}] + (
+                [{"id": 12, "name": "Client", "gameVersionTypeID": 3}, {"id": 13, "name": "Server", "gameVersionTypeID": 3},
+                 {"id": 14, "name": "Client", "gameVersionTypeID": 4}] if with_env else [])   # a same-named version of another type
+        return f
+    try:
+        curseforge = fake_cf(True)
+        expect(curseforge_ids("1.21.1") == [10, 11, 12, 13], "CurseForge: Minecraft, NeoForge, and Client + Server for client_and_server")
+        expect(curseforge_ids("1.21.1", "client_only") == [10, 11, 12], "CurseForge: a client-only mod is tagged Client only")
+        curseforge = fake_cf(False)
+        try:
+            curseforge_ids("1.21.1"); expect(False, "no environment versions on CurseForge must stop the upload")
+        except SystemExit as e:
+            expect("environment versions" in str(e), f"the stop names the missing environment versions: {e}")
+    finally:
+        curseforge = real_cf
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

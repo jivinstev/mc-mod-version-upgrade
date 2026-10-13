@@ -81,10 +81,11 @@ def fakes(pp, release, git, lib_body="<!-- port-publish:modrinth:A1 --> <!-- por
     def curseforge(method, path, data=None, headers=None):
         calls.append(("curseforge", method, path))
         if path == "/game/version-types":
-            return [{"id": 1, "slug": "minecraft-1-21"}, {"id": 2, "slug": "modloader"}]
+            return [{"id": 1, "slug": "minecraft-1-21"}, {"id": 2, "slug": "modloader"}, {"id": 3, "slug": "environment"}]
         if path == "/game/versions":
             return [{"id": i, "name": n, "gameVersionTypeID": 1} for n, i in mc_ids.items()] + \
-                   [{"id": 99, "name": "NeoForge", "gameVersionTypeID": 2}]
+                   [{"id": 99, "name": "NeoForge", "gameVersionTypeID": 2},
+                    {"id": 97, "name": "Client", "gameVersionTypeID": 3}, {"id": 98, "name": "Server", "gameVersionTypeID": 3}]
         uploads.append(("curseforge", json.loads(data)))
         return {"id": 700 + len(uploads)}
 
@@ -131,9 +132,10 @@ def single_version(path):
             def curseforge(method, p, data=None, headers=None):
                 calls.append(("curseforge", method, p))
                 if p == "/game/version-types":
-                    return [{"id": 1, "slug": "minecraft-1-21"}, {"id": 2, "slug": "modloader"}]
+                    return [{"id": 1, "slug": "minecraft-1-21"}, {"id": 2, "slug": "modloader"}, {"id": 3, "slug": "environment"}]
                 if p == "/game/versions":
-                    return [{"id": 10, "name": "1.21.1", "gameVersionTypeID": 1}, {"id": 11, "name": "NeoForge", "gameVersionTypeID": 2}]
+                    return [{"id": 10, "name": "1.21.1", "gameVersionTypeID": 1}, {"id": 11, "name": "NeoForge", "gameVersionTypeID": 2},
+                            {"id": 12, "name": "Client", "gameVersionTypeID": 3}, {"id": 13, "name": "Server", "gameVersionTypeID": 3}]
                 return {"id": 77}
             pp.gh, pp.git, pp.modrinth, pp.curseforge = gh, (lambda repo, *a: R(0, "neoforge-1.21.1\n") if a[:2] == ("rev-parse", "--abbrev-ref") else R(0)), modrinth, curseforge
             pp.download = lambda asset: b"JAR"

@@ -48,8 +48,8 @@ J
   ! grep -qE 'onTick|notProbed' <<<"$out" && ok "event handlers and static methods are not probed" || bad "probed a handler/static"
   grep -q '1 multi-line header' <<<"$out" && ok "an unprobed multi-line header is counted, not silently skipped" || bad "multi-line not counted: $out"
   [ "$(cat "$S"/*.java | sha1sum)" = "$before" ] && ok "every source file is restored byte-for-byte" || bad "sources not restored"
-  sed -i 's/getLightBlock(Object state)/getLightBlock(Object state, Object level, Object pos)/; s/    public void helper/    public void helperX/' "$S/Block.java"
-  sed -i '/@Deprecated/d; /helperX/d' "$S/Block.java"
+  sed -i.bak 's/getLightBlock(Object state)/getLightBlock(Object state, Object level, Object pos)/; s/    public void helper/    public void helperX/' "$S/Block.java" && rm -f "$S/Block.java.bak"   # -i.bak: BSD (macOS) sed and GNU sed both take it
+  sed -i.bak '/@Deprecated/d; /helperX/d' "$S/Block.java" && rm -f "$S/Block.java.bak"   # -i.bak: BSD (macOS) sed and GNU sed both take it
   out="$(python3 tools/override-probe.py "$P" --compile "javac -d $T/out2 src/main/java/org/fake/Base.java src/main/java/org/fake/Block.java src/main/java/org/fake/Events.java" 2>&1)"; code=$?
   [ $code = 0 ] && grep -qE 'probing [1-9][0-9]* method' <<<"$out" && ok "CONTROL: once fixed, the probe reports nothing (exit 0) -- and it did probe something" || bad "control exit $code: $out"
 elif [ -n "${CI:-}" ]; then bad "no javac in CI -- the probe was NOT tested"
@@ -298,7 +298,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
             "port-offer.py|port-offer: the authors see the port without our CI commit; port commits after a CI commit are replayed without it; only what state.json verified is claimed" \
             "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
-            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict" \
+            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict; a manifest behind its fork's newest full Release is installed as tested and named NOT THE NEWEST RELEASE" \
+            "port-manifest.py|port-manifest: refresh points the install manifest at the newest full Release (same platform variant) and the workflow's sibling pins, leaves registry entries alone, says unchanged, refuses a pre-release, an older tag, an ambiguous jar or an unfetchable pin" \
             "optional-dep-scan.py|optional-dep-scan: a listener class naming an optional mod in a method type blocks; a mixin reaching one through the mod is reported" \
             "port-fleet.py|port-fleet: one fleet file runs ci/gates/offer over every fork in order, flags per fork, push after each" \
             "fix-datapack-layout.py|fix-datapack-layout: Forge-only data (biome/structure/loot modifiers, forge: ids, conditional recipes, forge tags) converted to NeoForge; unknown ones refused and fail --verify" \
@@ -313,6 +314,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "mechanical-hop.py|mechanical-hop: members, then every converter in order, then members; a converter that changed nothing is not recounted; one needing the port's input is an advisory" \
             "manual-tests.py|manual-tests: the 10 manual tests no gate reaches, one per kind first (music, client packets, bosses, keys...), with steps naming real ids" \
             "offer-page.py|offer-page: the handoff page shows each fork's install, distance from release, checks and its manual tests" \
+            "minitoml.py|minitoml: the TOML reader for Pythons without tomllib reads mods.toml forms (inline tables, every string kind) as tomllib does, and refuses broken TOML" \
             "port-provenance.py|port-provenance: the release commit is matched by publish time and the unreleased commits on top are counted and listed" \
             "port-sync.py|port-sync: the author's new commits merge into the dev port branch; a conflict stops with the files named" \
             "convert-attachment-io.py|convert-attachment-io: attachment serializers onto ValueInput/ValueOutput through the CompoundTag bridge, bodies unchanged" \
@@ -451,7 +453,7 @@ J
   [ "$rc" = 1 ] && [ "$(grep -c 'is ABSTRACT' <<<"$out")" = 2 ] \
     && ok "audit-event-listeners: the abstract parameter is reported for the annotated listener AND the Cls::method one" \
     || bad "audit-event-listeners did not report both abstract listeners (rc=$rc): $out"
-  sed -i 's/Stage event) { if (!(event instanceof Stage.After)) return; }/Stage.After event) { }/; s/viaRef(Stage event)/viaRef(Stage.After event)/' "$E/tree/a/b/Hook.java"
+  sed -i.bak 's/Stage event) { if (!(event instanceof Stage.After)) return; }/Stage.After event) { }/; s/viaRef(Stage event)/viaRef(Stage.After event)/' "$E/tree/a/b/Hook.java" && rm -f "$E/tree/a/b/Hook.java.bak"   # -i.bak: BSD (macOS) sed and GNU sed both take it
   out="$(python3 tools/audit-event-listeners.py "$EW" --cp-file="$EW/cp.txt" --tree="$EW/tree" 2>&1)"; rc=$?
   [ "$rc" = 0 ] && grep -q 'checked 2 event listener' <<<"$out" \
     && ok "audit-event-listeners: naming the concrete subclass passes, with the listener count printed" \
@@ -542,7 +544,7 @@ GR
     || bad "layer.gradle jar names: base=[$base] mc=[$mc]"
 fi
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script" || bad "port-ci self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script; without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (single-version and layer fork); --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back; promote refreshes the install manifest on the port branch only (its script run on a fake fork, single-version and layer: pushed on top of the tag, retried when the branch moved, nothing pushed when unchanged, a bad tag refused)" || bad "port-ci self-check: $out"
 python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"
 import re,sys
 src=open("tools/ci-gates.py").read()

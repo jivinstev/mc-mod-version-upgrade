@@ -29,6 +29,9 @@ seen by a chat session, and CurseForge's upload host is not reachable from a clo
      `MODRINTH_TOKEN` and `CURSEFORGE_TOKEN`. Tell them never to paste a token into the chat.
    - CurseForge has no API to create a project: give them the fields `setup` printed (name, summary, the
      description file, licence, source and issues links, logo, categories) and ask for the project ID back, and the project's public URL (CurseForge makes the slug from the name).
+     The CurseForge name must not contain game version numbers -- moderation refuses it (`<name> - Community Port
+     (NeoForge)`, as setup prints it; the Modrinth title keeps `(<mc>+)`). A rename changes the slug: update
+     `curseforge.slug`, and every port that depends on this one reads it from here.
 3. **Never**: publish a pre-release, upload from the chat session, post on the authors' repository (the authors
    may invite a link in their issue: offer to draft it, the user posts it), weaken a gate to get a build out.
 
@@ -64,7 +67,9 @@ own words -- their description and credits -- and the permission link are exempt
    - the mod's own metadata (name, authors, credits, logo, licence, its required/optional dependencies);
    - the authors' own Modrinth project (summary, categories, which versions it covers);
    - the fork's newest release (which jar each platform gets: `_mr` to Modrinth and `_cf` to CurseForge when the
-     build makes variants, the only jar otherwise);
+     build makes variants, the only jar otherwise). Each platform's jar should be one CI tested: a fork with
+     variants has `port-ci.py --variant-jar` per platform glob (its `shipped jars` job), and a dependent of one has
+     `--dep-jar-variant` for the platform asset its `--dep-jar` does not pin (port-fork skill, step 6);
    - `--ledger-issue`: every issue carrying a fix ledger that covers this mod's builds, including a shared one in a
      dependency's fork. They gate publishing; they are never shown on the page;
    - `--difference`: each difference from the original a player would notice (see above). Usually none beyond the
@@ -105,6 +110,25 @@ problems (the fork, never the original author) and the permission link -- never 
 
 **Expect the first run against an old release to be refused** if its ledger shows an open S1: that is the gate
 working, and the answer is to promote and publish the build that fixes it, not to edit the ledger.
+
+**A library and the ports that need it -- the order that works:**
+1. **Gate and play what each platform gets.** When the build makes a jar per platform (`_mr` for Modrinth, `_cf` for
+   CurseForge, built by different tasks), Port CI must boot every one as shipped (`port-ci.py --variant-jar`, and
+   `--dep-jar-variant` on each port that depends on it), and the person plays the jar each platform will receive --
+   a `_cf` jar nobody launched can crash every start while the `_mr` jar is fine. The dev-classpath gates cannot see
+   that (a ModLauncher service in the jar is only discovered in a real launch).
+2. **Promote the library first, then the port that needs it**, each with its own column in every ledger it is
+   checked against (a column carried from the previous tag cites the diff between the two tags). When the person
+   played the port with a sibling's pre-release, that sibling is promoted too, with the same note -- otherwise the
+   port's publish is refused because its dependency is not published.
+3. **CurseForge waits for approval.** A file on CurseForge cannot name a project that is not approved yet
+   (errorCode 1018 "Invalid slug in project relations ... does not exist, is not accessible"). A new library's
+   first CurseForge file puts its project into moderation; publish the dependent port to CurseForge only after the
+   library's project is approved -- re-run `publish = <tag>`: what is already on Modrinth is skipped (its version
+   number is found there), so only CurseForge uploads. Modrinth has no such wait.
+
+**A publish that stops half-way is re-run, not repaired by hand:** Modrinth uploads first; when CurseForge then fails,
+fix the cause (often a new CurseForge requirement -- the error names it) and dispatch `publish = <tag>` again.
 
 ## Part 3: publish on promotion
 

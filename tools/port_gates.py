@@ -16,6 +16,7 @@ def _load_tool(name, file):
 
 srcsets = _load_tool("srcsets", "srcsets.py")
 targets = _load_tool("targets", "targets.py")
+BASH = _load_tool("gitbash", "gitbash.py").BASH   # Git Bash on Windows, where plain "bash" is WSL's launcher
 
 
 class Fail(Exception):
@@ -32,7 +33,7 @@ def sh(cmd, cwd=None, env=None, timeout=None, log=None):
 
 
 def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
-    cmd = ["bash", "gradlew", "--console=plain", "-I", str(ROOT / "tools/central-mirror.init.gradle")]
+    cmd = [BASH, "gradlew","--console=plain", "-I", str(ROOT / "tools/central-mirror.init.gradle")]
     for i in extra_init:
         cmd += ["-I", str(i)]
     # a fork's multi-version layer builds another Minecraft from the same tree (.multiversion/build.sh's -P set,

@@ -1,0 +1,309 @@
+# Port CI: proves this unofficial port builds, loads and runs, and publishes the JAR on a version tag.
+#
+# Installed by tools/port-ci.py into a fork's port branch, as a commit of its own so it can be dropped if
+# the port is ever offered upstream. It runs the author's own build, then the same gates the port was held
+# to (mixin-config integrity, a headless server running GameTests, a real client under Xvfb) with NO model
+# and no automatic fixes -- a plain pass/fail. The gate harness is not part of this repository: it comes from
+# the Port CI kit, a release asset of owner/migrator holding only the gate runner and what it needs,
+# pinned here by version and sha256, and is generated outside the source tree.
+#
+# Release: run this workflow by hand (Actions -> Port CI -> Run workflow) with release = true, or push a tag
+# named <mod>-<version>-mc<minecraft>. If every gate passes, the JARs the author's build produced are published
+# as a PRE-release tagged <mod>-<version>-mc<minecraft> (the version read from gradle.properties).
+#
+# Promote: once a person has played a pre-release, run this workflow with promote = <that tag> and played_by =
+# <their GitHub login> (tools/port-ci.py promote does it). It runs no gates and builds nothing: it checks the tag
+# is a pre-release this workflow published from this branch, then makes it a full Release, marked latest, and
+# replaces "Pre-release until played by a person." in its notes with who played it and when. When the port branch
+# carries an install manifest (.github/port-install.json), it then points that at the promoted jar and the sibling
+# jars this workflow pins, in a data-only [skip ci] commit on the port branch (tools/port-manifest.py refresh).
+#
+# Publish: when the fork has .github/port-publish.json, a promoted Release is then uploaded to Modrinth and
+# CurseForge (tools/port-publish.py, MODRINTH_TOKEN / CURSEFORGE_TOKEN repository secrets) -- in the SAME run as
+# the promote, because a release edited with GITHUB_TOKEN starts no other workflow. A release promoted by hand
+# in the GitHub UI publishes too, and publish = <tag> publishes one by hand. publish_setup = true creates the
+# Modrinth draft project once. Publishing refuses a pre-release, a build with an open S1 in its fix ledger, and
+# a dependency not yet published; it never runs on a pull request.
+#
+# Layer branch: when the fork has a multi-version layer branch (.multiversion/, templates/fork-layer), this SAME
+# file is installed on both branches -- the layer branch may differ from the port branch only inside .multiversion/
+# and one commented line in build.gradle, so it cannot carry a workflow of its own. The layer-* jobs at the end run
+# only on the layer branch (and only where .multiversion/ exists): isolation, inertness, a compile-only pass of
+# every middle target, and the full gates on the newest target (tools/layer-ci.py, tools/port-ci.py --layer-branch).
+name: Port CI (NeoForge 21.1.100 (Minecraft 1.21.1))
+
+on:
+  push:
+    branches: ["neoforge-1.21.1"]
+    tags: ["*-mc1.21.1"]
+  pull_request:
+    branches: ["neoforge-1.21.1"]
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a pre-release if every gate passes"
+        type: boolean
+        default: false
+      promote:
+        description: "Promote this pre-release tag to a full Release (no gates run)"
+        type: string
+        default: ""
+      played_by:
+        description: "With promote: GitHub login of the person who played the build (required)"
+        type: string
+        default: ""
+      played_notes:
+        description: "With promote: optional one line on what was played or tested"
+        type: string
+        default: ""
+      publish:
+        description: "Publish this already-promoted Release to Modrinth/CurseForge (no gates run)"
+        type: string
+        default: ""
+      publish_setup:
+        description: "Create the Modrinth draft project from .github/port-publish.json (once)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    # Two passes, in parallel. full: every mod the build puts on the game's runtime (the setup the port was
+    # developed in). minimal: only what neoforge.mods.toml requires -- optional integrations and dev-only mods
+    # removed from the runtime (still compiled against), which is what catches a mod that uses another mod
+    # without declaring it. The minimal pass checks FML's own mod list to prove the removal took.
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [full, minimal]
+    name: gates (${{ matrix.env }})
+    if: ${{ github.event_name != 'release' && !inputs.promote && !inputs.publish && !inputs.publish_setup }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the author's branch is needed: mixins they left unlisted stay exempt
+      - name: Port CI kit v7 (pinned by sha256)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \
+            "https://github.com/owner/migrator/releases/download/port-ci-kit-v7/port-ci-kit-v7.tar.gz"
+          echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Software OpenGL for the client gate
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
+
+      - name: Build and gates
+        run: |
+          git fetch --no-tags origin "master"
+          python3 .port-tools/tools/ci-gates.py --repo . --modid "examplemod" --base "origin/master" \
+            --gatec "launch,spawn" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md"
+      - name: Gate summary
+        if: always()
+        run: cat "$RUNNER_TEMP/gates.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gate-logs-${{ matrix.env }}
+          path: |
+            ${{ runner.temp }}/port-ci/*.log
+            ${{ runner.temp }}/port-ci/*.jsonl
+            ${{ runner.temp }}/gates.md
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: matrix.env == 'full'
+        with:
+          name: jars
+          path: |
+            build/libs/*.jar
+            !build/libs/*-sources.jar
+
+  release:
+    needs: gates
+    if: github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || inputs.release)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: gradle.properties
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: jars
+          path: jars
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gate-logs-*
+          path: logs
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then TAG="${{ github.ref_name }}"; else
+            v=$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
+            TAG="examplemod-${v}-mc1.21.1"
+            # the port was fixed but the author's version did not move: release it as -r2, -r3, ...
+            base="$TAG"; n=2
+            while gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+              TAG="${base}-r${n}"; n=$((n+1))
+            done
+          fi
+          {
+            echo "**Unofficial port** of https://github.com/a/examplemod to NeoForge 21.1.100 (Minecraft 1.21.1)."
+            echo "Same licence and credits as the original; not an official release by the author."
+            echo
+            for e in full minimal; do
+              cat "logs/gate-logs-$e/gates.md" 2>/dev/null || echo "(gate summary for the $e environment missing)"
+              echo
+            done
+            echo
+            echo "Built from \`${{ github.sha }}\` by the author's own Gradle build. Pre-release until played by a person."
+          } > notes.md
+          gh release create "$TAG" jars/*.jar --repo "${{ github.repository }}" --prerelease \
+            --title "$TAG (unofficial NeoForge 21.1.100 (Minecraft 1.21.1) port)" --notes-file notes.md --target "${{ github.sha }}"
+
+  promote:
+    # A person played this pre-release: make it a full Release. Inputs reach the script only through env, never
+    # spliced into it, so a tag or name cannot inject shell.
+    if: ${{ inputs.promote }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # tags and history, to prove the tag was built from this branch
+      - name: Promote to a full Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.promote }}
+          WHO: ${{ inputs.played_by }}
+          WHAT: ${{ inputs.played_notes }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$WHO" | grep -Eq '^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$'; then
+            echo "::error::played_by must be the GitHub login of the person who played this build"; exit 1
+          fi
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+               --json tagName,isPrerelease,isDraft,author,body > rel.json; then
+            echo "::error::no release named $TAG in $GITHUB_REPOSITORY"; exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/$TAG" HEAD; then
+            echo "::error::$TAG was not built from ${GITHUB_REF_NAME}; promote it from the branch it was built on"; exit 1
+          fi
+          python3 - <<'PY'
+          import datetime, json, os, sys
+          r = json.load(open("rel.json"))
+          why = ("it is already a full Release" if not r["isPrerelease"] else
+                 "it is a draft" if r["isDraft"] else
+                 "it was not published by this workflow" if r["author"]["login"] != "github-actions[bot]" else None)
+          if why:
+              sys.exit(f"::error::will not promote {os.environ['TAG']}: {why}")
+          mark = "Pre-release until played by a person."
+          if mark not in r["body"]:
+              sys.exit(f"::error::{os.environ['TAG']}'s notes lack {mark!r}; not a release this workflow made")
+          day = datetime.date.today().isoformat()
+          line = f"Played by @{os.environ['WHO']} on {day}"
+          what = os.environ["WHAT"].strip().rstrip(".")
+          line += (f": {what}." if what else ".") + f" Promoted to a full Release by [this run]({os.environ['RUN_URL']})."
+          open("notes.md", "w").write(r["body"].replace(mark, line))
+          PY
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest --notes-file notes.md
+          echo "Promoted $TAG (played by @$WHO)" >> "$GITHUB_STEP_SUMMARY"
+      # The install manifest (.github/port-install.json, what install-port.py installs) then names the promoted jar and
+      # the sibling jars this workflow pins: tools/port-manifest.py refresh, committed as data ([skip ci]) to the port
+      # branch only -- never the layer branch -- and only where the branch has a manifest. The commit sits on top of the
+      # tag, so publish (needs: promote) still finds the tag in the branch's history. A failure here is reported and
+      # never stops publish.
+      - name: Port CI kit v7 (pinned by sha256)
+        if: ${{ github.ref_name == 'neoforge-1.21.1' && hashFiles('.github/port-install.json') != '' }}
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \
+            "https://github.com/owner/migrator/releases/download/port-ci-kit-v7/port-ci-kit-v7.tar.gz"
+          echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
+      - name: Refresh the install manifest
+        if: ${{ github.ref_name == 'neoforge-1.21.1' && hashFiles('.github/port-install.json') != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.promote }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._+-]+$'; then echo "::error::not a release tag: $TAG"; exit 1; fi
+          if [ ! -f .port-tools/tools/port-manifest.py ]; then
+            echo "::warning::Port CI kit v7 has no port-manifest.py: regenerate this workflow with a newer kit"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do              # the branch can move under us: refresh again on its new tip
+            git fetch --no-tags -q origin "neoforge-1.21.1"
+            git checkout -q -B "neoforge-1.21.1" FETCH_HEAD
+            python3 .port-tools/tools/port-manifest.py refresh --repo . --tag "$TAG" --commit
+            if [ "$(git rev-parse HEAD)" = "$(git rev-parse FETCH_HEAD)" ]; then exit 0; fi
+            if git push -q origin "HEAD:refs/heads/neoforge-1.21.1"; then
+              echo "Install manifest refreshed for $TAG" >> "$GITHUB_STEP_SUMMARY"; exit 0
+            fi
+          done
+          echo "::error::could not push the refreshed install manifest to neoforge-1.21.1"; exit 1
+
+  publish:
+    # Upload a promoted Release to Modrinth and CurseForge. needs: promote, so a Claude- or CLI-driven promote
+    # publishes in the same run; also a release promoted in the GitHub UI, or publish = <tag> by hand.
+    needs: promote
+    if: ${{ always() && (needs.promote.result == 'success' || github.event_name == 'release' || inputs.publish) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write             # appends the Modrinth/CurseForge links to the release notes
+      issues: read                # reads the fix ledgers
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "neoforge-1.21.1"
+          fetch-depth: 0          # tags and history, to prove the tag was built from this branch
+      - name: Port CI kit v7 (pinned by sha256)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \
+            "https://github.com/owner/migrator/releases/download/port-ci-kit-v7/port-ci-kit-v7.tar.gz"
+          echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
+      - name: Publish to Modrinth and CurseForge
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+          CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+          TAG: ${{ inputs.promote || inputs.publish || github.event.release.tag_name }}
+          MANUAL: ${{ inputs.publish && 'yes' || '' }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._+-]+$'; then echo "::error::not a release tag: $TAG"; exit 1; fi
+          python3 .port-tools/tools/port-publish.py publish --repo . --tag "$TAG" ${MANUAL:+--manual}
+
+  publish-setup:
+    if: ${{ inputs.publish_setup }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "neoforge-1.21.1"
+      - name: Port CI kit v7 (pinned by sha256)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" \
+            "https://github.com/owner/migrator/releases/download/port-ci-kit-v7/port-ci-kit-v7.tar.gz"
+          echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -
+          mkdir -p .port-tools && tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C .port-tools
+      - name: Create the Modrinth draft project
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+        run: python3 .port-tools/tools/port-publish.py modrinth-create --repo .
