@@ -176,12 +176,70 @@ jobs:
               assert (ws / "tools/setup.py").is_file(), "the junction does not reach the checkout"
               assert os.path.samefile(ws / ".env.local", env)
               notes, problems = [], []
-              m.ensure_workspace(str(ws), notes, problems, dry=False)
+              m.ensure_workspace(str(ws), notes, problems, dry=False, deferred=[])
               print("notes:", notes, "problems:", problems)
               assert not problems and not notes, "a re-run did not recognise its own links"
           finally:
               env.unlink()
           print("junctions + hard link: ok")
+          PY
+
+      # What a real PC without Developer Mode hit (#32): a FIRST `setup --migrate`, where symlinks are
+      # refused (WinError 1314) and .env.local is not written yet when the workspace is made. Its hard
+      # link has to wait for the write.
+      - name: first setup --migrate without symlink rights links .env.local after writing it
+        run: |
+          H="$(cygpath -u "$RUNNER_TEMP")/home-nosymlink"; mkdir -p "$H/AppData/Roaming" "$H/AppData/Local"
+          rm -f .env.local .env.local.bak .setup-state.json
+          HOME="$H" USERPROFILE="$(cygpath -w "$H")" APPDATA="$(cygpath -w "$H/AppData/Roaming")" \
+            LOCALAPPDATA="$(cygpath -w "$H/AppData/Local")" python3 - <<'PY'
+          import importlib.util, os, pathlib, sys
+          def no_symlinks(self, *a, **k):
+              raise OSError(1314, "A required privilege is not held by the client")
+          pathlib.Path.symlink_to = no_symlinks
+          spec = importlib.util.spec_from_file_location("setup", "tools/setup.py")
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          assert not (m.ROOT / ".env.local").exists(), "not a first run"
+          sys.argv = ["setup", "--yes", "--migrate", "--no-network"]
+          code = m.main()
+          ws = pathlib.Path(os.environ["USERPROFILE"]) / ".mc-mod-upgrade" / "work"
+          assert m.is_junction(ws / "tools") and m.is_junction(ws / "templates"), "no junctions"
+          assert os.path.samefile(ws / ".env.local", m.ROOT / ".env.local"), ".env.local is not hard-linked"
+          print("setup exit:", code)
+          PY
+          rm -f .env.local .env.local.bak .setup-state.json
+
+      # A re-cloned or moved checkout (#32): the workspace's junctions and hard link lead to the OLD
+      # clone. Re-pointing must remove only the links -- a junction removed the wrong way deletes the
+      # folder it points to -- and leave the old clone whole.
+      - name: a workspace linked to another clone is re-pointed without touching that clone
+        run: |
+          python3 - <<'PY'
+          import importlib.util, os, pathlib, tempfile
+          spec = importlib.util.spec_from_file_location("setup", "tools/setup.py")
+          m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+          base = pathlib.Path(tempfile.mkdtemp(dir=os.environ["RUNNER_TEMP"]))
+          old = base / "old-clone"; (old / "tools").mkdir(parents=True); (old / "templates").mkdir()
+          (old / "tools/setup.py").write_text("# old\n", encoding="utf-8"); (old / "templates/t").write_text("t", encoding="utf-8")
+          (old / ".env.local").write_text("OLD=1\n", encoding="utf-8")
+          ws = base / "ws"; (ws / "mods/demo").mkdir(parents=True)
+          for name in m.WORKSPACE_LINKS:
+              assert m.windows_link(ws / name, old / name), f"could not link {name}"
+          assert m.other_checkout(ws) == old, m.other_checkout(ws)
+          notes, problems, deferred = [], [], []
+          m.relink_workspace(ws, old, notes)
+          assert (old / "tools/setup.py").is_file() and (old / "templates/t").is_file(), "the old clone lost files"
+          assert (old / ".env.local").read_text(encoding="utf-8") == "OLD=1\n", "the old .env.local changed"
+          env = m.ROOT / ".env.local"; env.write_text("X=1\n", encoding="utf-8")
+          try:
+              m.ensure_workspace(str(ws), notes, problems, dry=False, deferred=deferred)
+              print("notes:", notes, "problems:", problems)
+              assert not problems and m.other_checkout(ws) is None
+              assert (ws / "tools/setup.py").is_file() and os.path.samefile(ws / ".env.local", env)
+              assert (ws / "mods/demo").is_dir(), "the ports were touched"
+          finally:
+              env.unlink()
+          print("re-pointed; the old clone is whole")
           PY
 
       # Git for Windows runs hooks through its own bash. Prove it does with ours, through a real
@@ -217,6 +275,65 @@ jobs:
       - run: ./tools/test-port-tools.sh
       # last: it re-runs a changed self-test (test-cycle.sh) on base and head, so that one must work first
       - run: ./tools/test-review.sh
+
+  bootstrap:
+    name: windows install.ps1 (the one-line install)
+    if: github.event.action != 'labeled'
+    runs-on: windows-latest
+    env:
+      MCMU_REF: ci-bootstrap
+      MCMU_NO_LAUNCH: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # install.ps1 clones a branch; this checkout is a detached PR merge, so name it, and clone from here
+      # rather than from GitHub, so the code under test is this commit's.
+      - name: name this commit as a branch to clone
+        run: git branch ci-bootstrap HEAD
+      # Windows PowerShell 5.1 (`shell: powershell`), what a fresh PC has, and `| iex`, as the README says.
+      - name: it refuses an Administrator window, and installs nothing
+        shell: powershell
+        run: |
+          $env:MCMU_REPO = $env:GITHUB_WORKSPACE; $env:MCMU_DIR = "$env:RUNNER_TEMP\refused"
+          $out = Get-Content install.ps1 -Raw | Invoke-Expression *>&1 | Out-String
+          Write-Host $out
+          if ($global:MCMU_RESULT -ne 'failed' -or (Test-Path $env:MCMU_DIR)) { throw "ran elevated: $global:MCMU_RESULT" }
+          # The runner's window is elevated both ways; the output must say what was checked, and stop loudly.
+          if ($out -notmatch 'integrity: High' -or $out -notmatch 'STOPPED: this PowerShell is running as Administrator') { throw 'the refusal does not say why' }
+          exit 0
+      # The runner has git and Python, but not Claude Code: this is the --install-missing path, with
+      # Claude Code's real native installer.
+      - name: install.ps1 clones, runs setup.cmd --install-missing, and leaves claude on PATH in this window
+        shell: powershell
+        run: |
+          $env:MCMU_ALLOW_ADMIN = '1'; $env:MCMU_REPO = $env:GITHUB_WORKSPACE; $env:MCMU_DIR = "$env:RUNNER_TEMP\mcmu"
+          $env:MCMU_SETUP_ARGS = '--yes --no-network'
+          if (Get-Command claude -ErrorAction SilentlyContinue) { throw 'claude is already on the runner: this proves nothing' }
+          Get-Content install.ps1 -Raw | Invoke-Expression
+          if ($global:MCMU_RESULT -ne 'ok') { throw "install.ps1: $global:MCMU_RESULT" }
+          claude --version; if ($LASTEXITCODE -ne 0) { throw 'claude does not run in this window' }
+          if (-not (Test-Path "$env:MCMU_DIR\.env.local")) { throw 'setup wrote no .env.local' }
+          if ((Get-Location).Path -ne $env:MCMU_DIR) { throw "left in $((Get-Location).Path), not the clone" }
+          exit 0
+      - name: a NEW window finds claude (the user PATH, not only this session's)
+        shell: powershell
+        run: |
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+          claude --version; if ($LASTEXITCODE -ne 0) { throw 'claude is not on the persisted PATH' }
+          exit 0
+      - name: running the line again is safe (skips, updates the clone, setup changes nothing)
+        shell: powershell
+        run: |
+          $env:MCMU_ALLOW_ADMIN = '1'; $env:MCMU_REPO = $env:GITHUB_WORKSPACE; $env:MCMU_DIR = "$env:RUNNER_TEMP\mcmu"
+          $env:MCMU_SETUP_ARGS = '--yes --no-network'
+          $out = Get-Content install.ps1 -Raw | Invoke-Expression *>&1 | Out-String
+          Write-Host $out
+          if ($global:MCMU_RESULT -ne 'ok') { throw "second run: $global:MCMU_RESULT" }
+          if ($out -notmatch 'Updating' -or $out -notmatch 'already installed') { throw 'the second run did not skip and update' }
+          # This step's PATH predates the install (as an old window's would): setup must re-read it, not reinstall.
+          if ($out -match 'claude: installing') { throw 'the second run installed Claude Code again' }
+          exit 0
 
   build:
     name: windows build + Gate B (template mod)

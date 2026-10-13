@@ -19,7 +19,7 @@ elif _py_ok python; then
 elif _py_ok py -3; then
   PYTHON="$(py -3 -c 'import sys; print(sys.executable)')"
 else
-  echo "no Python 3 found (tried python3, python, py -3). Install it -- Windows: winget install --id Python.Python.3.12" >&2
+  echo "no Python 3 found (tried python3, python, py -3). Install it -- Windows: winget install -e --source winget --id Python.Python.3.12" >&2
   unset -f _py_ok
   return 1 2>/dev/null || exit 1
 fi

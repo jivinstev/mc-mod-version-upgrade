@@ -26,24 +26,52 @@ together -- is still what is installed, but never silently in place of the newer
   --no-neoforge     leave NeoForge alone
   -v, --verbose     also every file and every note
 
-The mods folder defaults to $MINECRAFT_MODS_DIR, then the platform's default instance (macOS
+The mods folder defaults to $MINECRAFT_MODS_DIR, then the one setup recorded for --mc in .env.local
+(MINECRAFT_MODS_DIR_1_21_1), then the platform's default instance (macOS
 ~/Library/Application Support/minecraft/mods, Linux ~/.minecraft/mods, Windows %APPDATA%/.minecraft/mods).
+NeoForge is installed into the folder that has the launcher (launcher_profiles.json): the mods folder's
+parent, or else MINECRAFT_DIR -- a separate game directory per version (minecraft-1.21.1/mods) has none.
 Standard library only.
 """
-import argparse, hashlib, json, os, pathlib, platform, re, shutil, sys, tempfile, urllib.error, urllib.request, zipfile
+import argparse, hashlib, importlib.util, json, os, pathlib, re, shutil, sys, tempfile, urllib.error, urllib.request, zipfile
 
 UA = {"User-Agent": "install-port"}
 
 
-def default_mods_dir():
+def _find_minecraft():
+    """tools/find-minecraft.py, for its .env.local reader and the launcher's default folder (one copy)."""
+    spec = importlib.util.spec_from_file_location("find_minecraft", pathlib.Path(__file__).resolve().parent / "find-minecraft.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+def read_env():
+    fm = _find_minecraft()
+    return fm.read_env_local(fm.ROOT / ".env.local")
+
+
+def default_mods_dir(mc="1.21.1", env=None):
+    """$MINECRAFT_MODS_DIR (one run's override), then the folder setup recorded for this Minecraft version,
+    then the official launcher's. Setup writes one key per version (MINECRAFT_MODS_DIR_1_21_1), so a
+    separate instance per version is found too."""
     if os.environ.get("MINECRAFT_MODS_DIR"):
         return pathlib.Path(os.environ["MINECRAFT_MODS_DIR"]).expanduser()
-    home = pathlib.Path.home()
-    if platform.system() == "Darwin":
-        return home / "Library/Application Support/minecraft/mods"
-    if platform.system() == "Windows":
-        return pathlib.Path(os.environ.get("APPDATA", home)) / ".minecraft/mods"
-    return home / ".minecraft/mods"
+    env = read_env() if env is None else env
+    v = env.get("MINECRAFT_MODS_DIR_" + mc.replace(".", "_")) or env.get("MINECRAFT_MODS_DIR")
+    if v:
+        return pathlib.Path(v).expanduser()
+    return _find_minecraft().official_default() / "mods"
+
+
+def launcher_dir(mods_dir, env=None, default=None):
+    """Where NeoForge's installer must go: the folder with launcher_profiles.json. Usually the mods
+    folder's parent; a separate game directory per version (minecraft-1.21.1/mods) has no launcher of its
+    own, and its profile lives in MINECRAFT_DIR (setup's "main Minecraft folder") or the default one."""
+    env = read_env() if env is None else env
+    cands = [mods_dir.parent] + [pathlib.Path(v).expanduser() for v in
+                                 (os.environ.get("MINECRAFT_DIR"), env.get("MINECRAFT_DIR")) if v]
+    cands.append(default if default is not None else _find_minecraft().official_default())
+    return next((c for c in cands if (c / "launcher_profiles.json").is_file()), mods_dir.parent)
 
 
 def fetch(url, timeout=120):
@@ -550,9 +578,10 @@ def find_java(mc_dir):
     return next((c for c in cands if c.is_file() and java_works(c)), None)
 
 
-def ensure_neoforge(neo, mods_dir, dry=False, get=fetch, run=None):
+def ensure_neoforge(neo, mods_dir, dry=False, get=fetch, run=None, mc_dir=None):
     """One instance has one NeoForge: the newest version any port was tested on (newer in the same line is
-    fine). Install it with its own installer, headless, when it is missing. -> (notes, problems)."""
+    fine). Install it with its own installer, headless, when it is missing, into mc_dir (the launcher's
+    folder; default the mods folder's parent). -> (notes, problems)."""
     if not neo:
         return [], []
     mc, v, _p = neo[-1]
@@ -560,7 +589,10 @@ def ensure_neoforge(neo, mods_dir, dry=False, get=fetch, run=None):
     if len({n[1] for n in neo}) > 1:
         notes.append("tested on different NeoForge versions (" + "; ".join(f"{p}: {n}" for _m, n, p in neo)
                      + f") -- using the newest, {v}")
-    mc_dir = mods_dir.parent
+    mc_dir = mc_dir or mods_dir.parent
+    if os.path.realpath(mc_dir) != os.path.realpath(mods_dir.parent):
+        notes.append(f"the mods went to {mods_dir}, a separate game directory: in the Launcher, set the NeoForge "
+                     f"profile's Game Directory to {mods_dir.parent}")
     have = neoforge_installed(mc_dir, v)
     if have:
         notes.append(f"NeoForge {have} (Minecraft {mc}) is installed -- pick it in the Launcher")
@@ -793,6 +825,26 @@ def self_check():
         shutil.rmtree(mc / "versions")
         _n, pr = ensure_neoforge(neo, mods, get=bad, run=fake_run)
         ok &= _chk(any("sha256" in x for x in pr) and len(calls) == 1, 158)
+    with tempfile.TemporaryDirectory() as d:     # the folders setup recorded: per version, and the launcher's
+        d = pathlib.Path(d); saved = {k: os.environ.pop(k) for k in ("MINECRAFT_MODS_DIR", "MINECRAFT_DIR") if k in os.environ}
+        try:
+            per = d / "minecraft-1.21.1/mods"; main_dir = d / "minecraft"
+            env = {"MINECRAFT_MODS_DIR_1_21_1": str(per), "MINECRAFT_MODS_DIR_26_2": "", "MINECRAFT_DIR": str(main_dir)}
+            ok &= _chk(default_mods_dir("1.21.1", env) == per, 161)                      # the per-version key
+            ok &= _chk(default_mods_dir("1.21.1", {"MINECRAFT_MODS_DIR": str(d)}) == d, 162)   # the old single key
+            ok &= _chk(default_mods_dir("26.2", env).name == "mods" and "1.21.1" not in str(default_mods_dir("26.2", env)), 163)
+            os.environ["MINECRAFT_MODS_DIR"] = str(d / "x")
+            ok &= _chk(default_mods_dir("1.21.1", env) == d / "x", 164)                  # the environment wins
+            del os.environ["MINECRAFT_MODS_DIR"]
+            main_dir.mkdir(); (main_dir / "launcher_profiles.json").write_text("{}", encoding="utf-8")
+            ok &= _chk(launcher_dir(per, env, default=d / "none") == main_dir, 165)       # NeoForge: the launcher's folder
+            n, _pr = ensure_neoforge([("1.21.1", "21.1.9", "o/a")], per, dry=True, mc_dir=main_dir)
+            ok &= _chk(any("Game Directory" in x and str(per.parent) in x for x in n), 166)
+            (per.parent / "launcher_profiles.json").parent.mkdir(parents=True)
+            (per.parent / "launcher_profiles.json").write_text("{}", encoding="utf-8")
+            ok &= _chk(launcher_dir(per, env, default=d / "none") == per.parent, 167)     # its own launcher wins
+        finally:
+            os.environ.update(saved)
     with tempfile.TemporaryDirectory() as d:     # a manifest behind its fork's newest full Release: installed, said loudly
         d = pathlib.Path(d)
         def gh(repo, tag, name):
@@ -861,7 +913,8 @@ def main():
     ap.add_argument("--no-neoforge", action="store_true", help="do not install NeoForge when it is missing")
     ap.add_argument("-v", "--verbose", action="store_true", help="also every file and every note")
     a = ap.parse_args()
-    mods = pathlib.Path(a.mods_dir).expanduser() if a.mods_dir else default_mods_dir()
+    env = read_env()
+    mods = pathlib.Path(a.mods_dir).expanduser() if a.mods_dir else default_mods_dir(a.mc, env)
     cache = {}
     def get(u):                                      # each file is downloaded once, however often it is read
         if u not in cache:
@@ -875,7 +928,8 @@ def main():
     for p in unchecked:      # said every time: an unchecked manifest may be behind
         print(f"(could not check whether {p}'s manifest names its newest release: GitHub did not answer)", flush=True)
     done, skipped, bad, status = install(files, mods, a.dry_run, get, replace=a.replace)
-    nnotes, nprob = ([], []) if (a.no_neoforge or not neo) else ensure_neoforge(neo, mods, a.dry_run, get)
+    nnotes, nprob = ([], []) if (a.no_neoforge or not neo) else ensure_neoforge(neo, mods, a.dry_run, get,
+                                                                                    mc_dir=launcher_dir(mods, env))
     neo_line = nprob[0] if nprob else next((x for x in nnotes if not x.startswith("tested on")), "")
     if neo_line and not nprob and neo and "needs at least" in neo[-1][2]:
         tested = max((n[1] for n in neo[:-1]), key=vkey, default="?")
