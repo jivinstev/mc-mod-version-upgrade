@@ -167,6 +167,13 @@ version; the layer branch must carry it to every target, and nothing fixes a mid
 5. Merging the layer PR follows step 6's rule: wait for the push run on the layer branch and report it.
 6. Gates: the layer's CI runs the full gates on the base and the newest target and compile + audits on the middle
    ones; a target you intend to release gets `ci-gates.py --mc <t>` (full) first.
+7. **A shipped-jar expectation that fails right after an upstream merge is not yet a regression.** The authors may
+   have reworded the log line the expectation reads (e.g. a class logged by its internal name,
+   `net/minecraft/server/level/ServerLevel`, where it was `ServerLevel`). Before deciding, bisect it with the same
+   file: `tools/shipped-gate.py --jar <previous release's jar> --expect-file .multiversion/shipped-expect.txt` and the
+   same for the new build, then read both runs' mod logs (`<work>/server/logs/`). The line there in another form: the
+   subsystem ran -- widen the pattern to accept both forms, still anchored to the effect (the same class, a count),
+   prove it on both jars, and say so in the commit. The line absent: a regression -- a fix-ledger mode, as in step 3.
 
 ## Setup: run it nightly on the user's subscription
 
