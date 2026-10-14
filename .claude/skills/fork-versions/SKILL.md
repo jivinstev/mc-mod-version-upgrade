@@ -103,6 +103,12 @@ layer branch: they are its 1.21.1 bookend.
 | `layer-gates` | after plan | `ci-gates.py --mc <newest>`: author's build, Gate A, data, payloads, Gate B and Gate C under Xvfb, plus `--shipped` when `.multiversion/shipped-expect*.txt` exists; the gate summary is uploaded as `layer-gates-<newest>` |
 | `layer-gates-extra` (matrix, `full_gates` only) | after plan | the same gates for each released middle target in `.multiversion/ci.properties`; no job when the list is empty |
 
+**Writing `.multiversion/shipped-expect*.txt`:** each `FILE:REGEX` line proves a subsystem ran in the jar a player
+installs, so match the effect, not the exact wording: the class it acted on and what it did, accepting the forms a
+mod logs a class by (`(net/minecraft/server/level/)?ServerLevel\b`, a dotted or slashed package). An upstream update
+that only rewords a line must not turn the gate red; a line that disappears must. When it does turn red after an
+upstream merge, keep-current's layer step 7 says how to tell the two apart.
+
 **CI policy (data, not memory).** The bookends -- the base branch's 1.21.1 and the newest target -- get every gate on every
 push. Every middle target gets compile + mixin audit + event-listener audit only, because Gate C costs about 10 minutes of
 runner time per target and a middle target that stopped applying shows in the compile in minutes. **A middle target that is
