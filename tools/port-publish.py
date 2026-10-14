@@ -176,8 +176,24 @@ def ledger_errors(cfg, tag):
     return errs
 
 
-def pinned_dependency_tag(repo, dep_repo):
-    """The release tag of dep_repo this port's CI builds against (its --dep-jar pin)."""
+def pinned_dependency_tag(repo, dep_repo, tag=None):
+    """The release tag of dep_repo that release `tag` goes out with. The install manifest (.github/port-install.json,
+    refreshed when a release is promoted) records it when it describes `tag`: the dependency the person played the
+    release with. Otherwise the workflow's --dep-jar pin -- which moves on when keep-current re-pins the dependency
+    to a newer pre-release, so a promoted release must not be judged by it."""
+    man = pathlib.Path(repo) / ".github/port-install.json"
+    if tag and man.exists():
+        try:
+            m = json.loads(man.read_text(encoding="utf-8"))
+        except ValueError:
+            m = {}
+        own = next((f.get("url", "") for f in m.get("files", []) if f.get("role") == "self"), "")
+        if f"/releases/download/{tag}/" in own:
+            for f in m.get("files", []):
+                if (f.get("port") or "").lower() == dep_repo.lower():
+                    hit = re.search(r"/releases/download/([^/]+)/", f.get("url", ""))
+                    if hit:
+                        return hit.group(1)
     wf = (pathlib.Path(repo) / ".github/workflows/port-ci.yml")
     if not wf.exists():
         return None
@@ -212,7 +228,7 @@ def gate(repo, cfg, tag, release, manual=False, layer_branch=None):
     why += ledger_errors(cfg, tag)
     for d in ([] if layer_branch else cfg.get("dependencies", [])):
         if d.get("port") and d.get("type") == "required":
-            dtag = pinned_dependency_tag(repo, d["port"])
+            dtag = pinned_dependency_tag(repo, d["port"], tag)
             if not dtag:
                 why.append(f"{d['port']}: no pinned release in port-ci.yml to check is published"); continue
             dbody = gh("GET", f"/repos/{d['port']}/releases/tags/{dtag}").get("body")
@@ -1011,7 +1027,7 @@ def self_check():
         dep = {**cfg, "dependencies": [{"port": "o/lib", "type": "required"}]}
         global pinned_dependency_tag
         real_pin = pinned_dependency_tag
-        pinned_dependency_tag = lambda repo, d: "lib-1-mc1.21.1"
+        pinned_dependency_tag = lambda repo, d, tag=None: "lib-1-mc1.21.1"
         try:
             expect(any("not published on modrinth" in w for w in gate(".", dep, "m-2-mc1.21.1", good)), "unpublished dependency refuses")
         finally:
@@ -1064,6 +1080,20 @@ def self_check():
             expect("environment versions" in str(e), f"the stop names the missing environment versions: {e}")
     finally:
         curseforge = real_cf
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        (pathlib.Path(d) / ".github/workflows").mkdir(parents=True)
+        (pathlib.Path(d) / ".github/workflows/port-ci.yml").write_text(
+            'curl -fsSL -o "x.jar" "https://github.com/o/lib/releases/download/lib-1.0-mc1.21.1-r4/lib_mr.jar"\n', encoding="utf-8")
+        (pathlib.Path(d) / ".github/port-install.json").write_text(json.dumps({"files": [
+            {"role": "self", "url": "https://github.com/o/mod/releases/download/mod-2.0-mc1.21.1/mod.jar"},
+            {"role": "required", "port": "o/lib", "url": "https://github.com/o/lib/releases/download/lib-1.0-mc1.21.1-r3/lib_mr.jar"}]}),
+            encoding="utf-8")
+        expect(pinned_dependency_tag(d, "o/lib", "mod-2.0-mc1.21.1") == "lib-1.0-mc1.21.1-r3",
+               "a promoted release is published with the dependency its manifest records, not a newer re-pin")
+        expect(pinned_dependency_tag(d, "o/lib", "mod-2.1-mc1.21.1") == "lib-1.0-mc1.21.1-r4",
+               "a release the manifest does not describe falls back to the workflow's pin")
+        expect(pinned_dependency_tag(d, "o/lib") == "lib-1.0-mc1.21.1-r4", "no tag: the workflow's pin, as before")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

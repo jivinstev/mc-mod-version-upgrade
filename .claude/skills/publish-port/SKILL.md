@@ -103,7 +103,9 @@ Dispatch Port CI with `publish = <tag>`. The job refuses, and uploads nothing, u
 - every listed fix ledger has a column naming this tag (a column can be `<lib tag> + <mod tag>`) and no S1 mode is
   open in it -- `fix-ledger.py check`. A tag no column names is refused too: a check against nothing checks nothing;
 - a dependency that is another fork port already has its pinned release published on that platform (so publish
-  the library first).
+  the library first). "Pinned" means the dependency the release was promoted with, as the install manifest records
+  it when it describes this tag -- not the workflow's current pin, which keep-current moves to a newer pre-release
+  (so an overnight re-pin never blocks publishing a release that was played with the previous one).
 It is idempotent: what is already published (a marker it appends to the release notes) is skipped. The notes
 uploaded say which version of the original it is based on, any `differences`, who played it, where to report
 problems (the fork, never the original author) and the permission link -- never the fixes it carries.
