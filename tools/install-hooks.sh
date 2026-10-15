@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Install the local git hooks. Run once after cloning.
 #
-# The pre-push hook does two things CI cannot: it refuses a direct push to `main` (this repository
-# takes pull requests only), and it runs the IP gate BEFORE anything leaves the machine. CI is the
+# The pre-push hook does three things CI cannot: it refuses a direct push to `main` (this repository
+# takes pull requests only), it runs the IP gate BEFORE anything leaves the machine, and it compares the
+# pushed template Java with the third-party sources on this machine (tools/check-similarity.py), which CI
+# cannot hold. The pre-commit hook runs that last check on each commit. CI is the
 # authority, but by the time CI speaks the content is already on GitHub -- and for the one thing this
 # gate guards, that is too late.
 set -uo pipefail
@@ -50,6 +52,30 @@ if [ -n "$names" ]; then
     }
   done <<< "$pushes"
 fi
+# Similarity to third-party sources: the template Java this push publishes, compared with the NeoForge, Minecraft and
+# GeckoLib sources on THIS machine (tools/check-similarity.py; CI cannot hold them, so this hook is where it runs).
+# 1 refuses; 2 (no reference corpus here) refuses only with MMVU_SIMILARITY_STRICT=1, else the skip is announced.
+if [ -f "$root/tools/check-similarity.py" ]; then
+  strict="${MMVU_SIMILARITY_STRICT:-}"
+  [ -z "$strict" ] && [ -f "$root/.env.local" ] && strict="$(sed -n 's/^MMVU_SIMILARITY_STRICT=//p' "$root/.env.local" | tail -1)"
+  zero="0000000000000000000000000000000000000000"
+  while read -r lsha rsha; do
+    [ -z "$lsha" ] || [ "$lsha" = "$zero" ] && continue
+    if [ "$rsha" = "$zero" ]; then sel=(--unpushed "$lsha"); else sel=(--range "$rsha..$lsha"); fi
+    python3 "$root/tools/check-similarity.py" "${sel[@]}"; rc=$?
+    if [ "$rc" = 2 ]; then
+      if [ "$strict" = 1 ]; then
+        echo "pre-push: REFUSED — the similarity check could not run and MMVU_SIMILARITY_STRICT=1. Nothing has been pushed." >&2
+        exit 1
+      fi
+      echo "pre-push: WARNING — the similarity check did NOT run (see above): this push's template Java was NOT compared" >&2
+      echo "          with third-party sources. Set MMVU_SIMILARITY_STRICT=1 to refuse instead." >&2
+    elif [ "$rc" != 0 ]; then
+      echo "pre-push: REFUSED — template Java looks transcribed from third-party source (see above). Nothing has been pushed." >&2
+      exit 1
+    fi
+  done <<< "$pushes"
+fi
 # A skill change is a README change (CLAUDE.md): compared with origin/main when this clone has it.
 base=""; git -C "$root" rev-parse -q --verify origin/main >/dev/null && base="--base origin/main"
 python3 "$root/tools/check-readme.py" --root "$root" $base || {
@@ -58,4 +84,31 @@ python3 "$root/tools/check-readme.py" --root "$root" $base || {
 }
 HOOK
 chmod +x .git/hooks/pre-push
-echo "installed: .git/hooks/pre-push  (refuses pushes to main; runs check-no-ip.py and check-readme.py)"
+echo "installed: .git/hooks/pre-push  (refuses pushes to main; runs check-no-ip.py, check-similarity.py and check-readme.py)"
+# The pre-commit hook runs the similarity check on what the commit records, so an agent finds out at commit time rather
+# than at push time. A commit with no template Java staged returns before Python starts.
+cat > .git/hooks/pre-commit <<'HOOK'
+#!/usr/bin/env bash
+set -uo pipefail
+root="$(git rev-parse --show-toplevel)"
+[ -f "$root/tools/check-similarity.py" ] || exit 0   # a branch from before the gate
+git diff --cached --name-only --diff-filter=AMRC -- templates/ | grep -qE '\.java(\.example|\.template)?$' || exit 0
+. "$root/tools/python.sh" || exit 1   # python3 on Windows too
+strict="${MMVU_SIMILARITY_STRICT:-}"
+[ -z "$strict" ] && [ -f "$root/.env.local" ] && strict="$(sed -n 's/^MMVU_SIMILARITY_STRICT=//p' "$root/.env.local" | tail -1)"
+python3 "$root/tools/check-similarity.py" --staged; rc=$?
+if [ "$rc" = 2 ]; then
+  if [ "$strict" = 1 ]; then
+    echo "pre-commit: REFUSED — the similarity check could not run and MMVU_SIMILARITY_STRICT=1. Nothing was committed." >&2
+    exit 1
+  fi
+  echo "pre-commit: WARNING — the similarity check did NOT run (see above): the staged template Java was NOT compared" >&2
+  echo "            with third-party sources. Set MMVU_SIMILARITY_STRICT=1 to refuse instead." >&2
+elif [ "$rc" != 0 ]; then
+  echo "pre-commit: REFUSED — staged template Java looks transcribed from third-party source (see above). Nothing was committed." >&2
+  exit 1
+fi
+exit 0
+HOOK
+chmod +x .git/hooks/pre-commit
+echo "installed: .git/hooks/pre-commit  (runs check-similarity.py --staged when template Java is staged)"

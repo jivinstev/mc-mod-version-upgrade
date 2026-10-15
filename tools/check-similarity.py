@@ -58,7 +58,7 @@ found -- what was searched is printed -- or git failed). The hooks refuse on 1; 
 skipped, and refuse only with MMVU_SIMILARITY_STRICT=1. Standard library only.
 """
 from collections import deque
-import argparse, hashlib, multiprocessing, os, pathlib, re, sqlite3, subprocess, sys, tempfile, time, zipfile, zlib
+import argparse, array, hashlib, multiprocessing, os, pathlib, re, sqlite3, subprocess, sys, tempfile, time, zipfile, zlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -305,22 +305,31 @@ def source_stamp(p):
 
 
 def source_entries(p):
-    """Yield (entry name, bytes) of every .java file in a jar or directory."""
+    """Yield (entry name, bytes, (header offset, compressed size, method) or None) of every .java file in a jar or
+    directory. The jar location lets a later run read one entry without parsing the jar's whole directory."""
     if p.is_file():
         with zipfile.ZipFile(p) as z:
             for i in z.infolist():
                 if i.filename.endswith(".java") and not i.is_dir():
-                    yield i.filename, z.read(i)
+                    yield i.filename, z.read(i), (i.header_offset, i.compress_size, i.compress_type)
     else:
         for f in sorted(p.rglob("*.java")):
-            yield f.relative_to(p).as_posix(), f.read_bytes()
+            yield f.relative_to(p).as_posix(), f.read_bytes(), None
 
 
-def read_entry(p, name, _zips={}):
-    if p.is_file():
-        z = _zips.get(p) or _zips.setdefault(p, zipfile.ZipFile(p))
+def read_entry(p, name, loc=None):
+    if not p.is_file():
+        return (p / name).read_bytes()
+    if loc and loc[0] is not None and loc[2] in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        with open(p, "rb") as f:     # straight to the local header: no central-directory parse
+            f.seek(loc[0])
+            head = f.read(30)
+            if len(head) == 30 and head[:4] == b"PK\x03\x04":
+                f.seek(loc[0] + 30 + int.from_bytes(head[26:28], "little") + int.from_bytes(head[28:30], "little"))
+                data = f.read(loc[1])
+                return data if loc[2] == zipfile.ZIP_STORED else zlib.decompress(data, -15)
+    with zipfile.ZipFile(p) as z:
         return z.read(name)
-    return (p / name).read_bytes()
 
 
 def cache_dir():
@@ -332,12 +341,12 @@ def cache_dir():
 
 def open_index(cdir):
     cdir.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(str(cdir / f"index-t{TOKENIZER}-k{K}-w{W}.sqlite"), timeout=600)
+    db = sqlite3.connect(str(cdir / f"index-s2-t{TOKENIZER}-k{K}-w{W}.sqlite"), timeout=600)
     db.executescript("""
         PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS sources(id INTEGER PRIMARY KEY, path TEXT UNIQUE, size INT, mtime INT, files INT);
         CREATE TABLE IF NOT EXISTS docs(id INTEGER PRIMARY KEY, sha1 BLOB UNIQUE, ntok INT);
-        CREATE TABLE IF NOT EXISTS entries(source INT, name TEXT, doc INT);
+        CREATE TABLE IF NOT EXISTS entries(source INT, name TEXT, doc INT, off INT, csize INT, method INT);
         CREATE INDEX IF NOT EXISTS entries_doc ON entries(doc);
         CREATE INDEX IF NOT EXISTS entries_source ON entries(source);
         CREATE TABLE IF NOT EXISTS fp(h INT, doc INT, PRIMARY KEY(h, doc)) WITHOUT ROWID;
@@ -371,9 +380,9 @@ def update_index(db, sources, jobs=None, log=print):
             cur = db.execute("INSERT INTO sources(path, size, mtime, files) VALUES (?,?,?,0)", (str(p), size, mt))
             sid = cur.lastrowid
             entries, new = [], {}
-            for name, data in source_entries(p):
+            for name, data, loc in source_entries(p):
                 h = hashlib.sha1(data).digest()
-                entries.append((name, h))
+                entries.append((name, h, loc or (None, None, None)))
                 if h not in known and h not in new:
                     new[h] = data
             if new:
@@ -386,10 +395,10 @@ def update_index(db, sources, jobs=None, log=print):
                     db.executemany("INSERT OR IGNORE INTO fp(h, doc) VALUES (?,?)", ((h, did) for h in fps))
                     known.add(sha)
             ids = dict(db.execute("SELECT sha1, id FROM docs WHERE sha1 IN (%s)" % ",".join("?" * len(entries)),
-                                  [h for _, h in entries]).fetchall()) if len(entries) < 30000 else \
+                                  [e[1] for e in entries]).fetchall()) if len(entries) < 30000 else \
                 dict(db.execute("SELECT sha1, id FROM docs").fetchall())
-            db.executemany("INSERT INTO entries(source, name, doc) VALUES (?,?,?)",
-                           ((sid, name, ids[h]) for name, h in entries))
+            db.executemany("INSERT INTO entries(source, name, doc, off, csize, method) VALUES (?,?,?,?,?,?)",
+                           ((sid, name, ids[h], *loc) for name, h, loc in entries))
             db.execute("UPDATE sources SET files=? WHERE id=?", (len(entries), sid))
             db.commit()
             active[sid] = p
@@ -403,25 +412,58 @@ def update_index(db, sources, jobs=None, log=print):
 
 # --- comparison -------------------------------------------------------------------------------------------------
 class Prepared:
-    def __init__(self, text):
-        self.seq = body_tokens(tokenize(text))
-        self.ids = token_ids(self.seq)
-        self.hashes = kgram_hashes(self.ids)
+    """A file's body token ids, their source lines and k-gram hashes (all plain lists)."""
+    def __init__(self, text=None, ids=None, lines=None, hashes=None):
+        if text is not None:
+            seq = body_tokens(tokenize(text))
+            ids, lines = token_ids(seq), [ln for _, ln in seq]
+            hashes = kgram_hashes(ids)
+        self.ids, self.lines, self.hashes = ids, lines, hashes
+        self._set = None
+
+    def hashset(self):
+        if self._set is None:
+            self._set = set(self.hashes)
+        return self._set
+
+
+def prepared_ref(cdir, sha, src, name, loc):
+    """A reference file's Prepared, cached on disk by content (sha1) so a repeat run does not re-tokenise it."""
+    f = cdir / f"prep-t{TOKENIZER}-k{K}" / sha[:2] / f"{sha}.bin"
+    try:
+        raw = f.read_bytes()
+        n = int.from_bytes(raw[:8], "little")
+        ids, lines, hashes = array.array("I"), array.array("I"), array.array("Q")
+        ids.frombytes(raw[8:8 + 4 * n]); lines.frombytes(raw[8 + 4 * n:8 + 8 * n]); hashes.frombytes(raw[8 + 8 * n:])
+        return Prepared(ids=ids.tolist(), lines=lines.tolist(), hashes=hashes.tolist())
+    except (OSError, ValueError):
+        pass
+    r = Prepared(read_entry(src, name, loc).decode("utf-8", "replace"))
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_bytes(len(r.ids).to_bytes(8, "little") + array.array("I", r.ids).tobytes()
+                        + array.array("I", r.lines).tobytes() + array.array("Q", r.hashes).tobytes())
+        os.replace(tmp, f)
+    except OSError:
+        pass
+    return r
 
 
 def compare(q, r, min_segment):
     """(longest run, coverage, segments) of query q against reference r. A segment is (qi, rj, length)."""
     if not q.hashes or not r.hashes:
         return 0, 0.0, []
+    common = q.hashset().intersection(r.hashes)     # C speed: most reference files share few k-grams
+    if not common:
+        return 0, 0.0, []
     where = {}
-    for j, h in enumerate(r.hashes):
-        where.setdefault(h, []).append(j)
+    for j in [j for j, h in enumerate(r.hashes) if h in common]:
+        where.setdefault(r.hashes[j], []).append(j)
     Q, R = q.ids, r.ids
     segs = []
-    for i, h in enumerate(q.hashes):
-        js = where.get(h)
-        if not js:
-            continue
+    for i in [i for i, h in enumerate(q.hashes) if h in common]:
+        js = where[q.hashes[i]]
         for j in js[:200]:
             if i and j and Q[i - 1] == R[j - 1]:
                 continue                       # inside a run that started earlier
@@ -456,10 +498,13 @@ def candidates(db, q, active_docs):
 
 
 def doc_location(db, doc, active):
-    for sid, name in db.execute("SELECT source, name FROM entries WHERE doc=?", (doc,)):
+    """(source path, entry name, jar location, sha1 hex) of a reference doc in a source found this run."""
+    for sid, name, off, csize, method, sha in db.execute(
+            "SELECT e.source, e.name, e.off, e.csize, e.method, d.sha1 FROM entries e JOIN docs d ON d.id = e.doc "
+            "WHERE e.doc=?", (doc,)):
         if sid in active:
-            return active[sid], name
-    return None, None
+            return active[sid], name, (off, csize, method), sha.hex()
+    return None, None, None, None
 
 
 # --- what to check ----------------------------------------------------------------------------------------------
@@ -522,7 +567,7 @@ def select(a):
 
 
 def lines_of(prep, start, length):
-    return prep.seq[start][1], prep.seq[start + length - 1][1]
+    return prep.lines[start], prep.lines[start + length - 1]
 
 
 # --- main -------------------------------------------------------------------------------------------------------
@@ -544,7 +589,12 @@ def run(a, log=print, err=None):
         err("  Build a fork (its build stages Minecraft's sources), or set MMVU_REFERENCE_SOURCES to sources jars/dirs.")
         return 2
     t0 = time.time()
-    db = open_index(pathlib.Path(a.cache_dir) if a.cache_dir else cache_dir())
+    cdir = pathlib.Path(a.cache_dir) if a.cache_dir else cache_dir()
+    if a.rebuild:
+        import shutil
+        shutil.rmtree(cdir, ignore_errors=True)
+        log(f"check-similarity: --rebuild: removed {cdir}")
+    db = open_index(cdir)
     try:
         active = update_index(db, sources, jobs=a.jobs, log=log)
         active_docs = {d for (d,) in db.execute(
@@ -563,11 +613,13 @@ def run(a, log=print, err=None):
             q = Prepared(text)
             best = (0, 0.0, None, None, [])
             for d in candidates(db, q, active_docs):
-                src, name = doc_location(db, d, active)
+                src, name, loc, sha = doc_location(db, d, active)
                 if src is None:
                     continue
                 if d not in cache:
-                    cache[d] = Prepared(read_entry(src, name).decode("utf-8", "replace"))
+                    if len(cache) >= 48:            # bounded: --all would otherwise hold every big reference file
+                        cache.pop(next(iter(cache)))
+                    cache[d] = prepared_ref(cdir, sha, src, name, loc)
                 r = cache[d]
                 run_len, cov, segs = compare(q, r, a.min_segment)
                 if (run_len >= a.max_run or cov >= a.max_coverage, run_len + 100 * cov) > \
@@ -821,6 +873,8 @@ def parse(argv=None):
                     help="an extra reference source (repeatable), like MMVU_REFERENCE_SOURCES")
     ap.add_argument("--no-auto", action="store_true", help="skip discovery: only MMVU_REFERENCE_SOURCES and --reference")
     ap.add_argument("--cache-dir", default=None, help="index location (default MMVU_SIMILARITY_CACHE or ~/.cache/mmvu-similarity)")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="delete the index first (it keeps files of sources that later disappeared; this drops them)")
     ap.add_argument("--jobs", type=int, default=None, help="indexing processes (default: CPUs - 1)")
     ap.add_argument("--self-check", action="store_true", help="run the tool's own tests (invented code only)")
     return ap.parse_args(argv)
