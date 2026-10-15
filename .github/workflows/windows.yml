@@ -74,6 +74,27 @@ jobs:
       - name: encoding= on every text open (Windows defaults to cp1252)
         run: python tools/check-encoding.py
 
+      - name: no command list starts with "bash", "sh", "./script" or "python3" (issue #109)
+        run: python tools/check-exec.py
+
+      # What check-exec guards against, shown on this runner: from native Python, a bare "bash" is not Git
+      # Bash (CreateProcess searches System32 first, where bash.exe is WSL's launcher), while gitbash.BASH
+      # runs a tools/*.sh script exactly as the tools call it ([BASH, script, args]).
+      - name: gitbash.BASH is Git Bash and runs a tools/*.sh script from native Python
+        run: |
+          printf '> Task :compileJava\nsrc/A.java:3: error: cannot find symbol\nsrc/A.java:3: error: cannot find symbol\n' > "$RUNNER_TEMP/b.log"
+          python - "$(cygpath -w "$RUNNER_TEMP/b.log")" <<'PY'
+          import shutil, subprocess, sys
+          sys.path.insert(0, "tools")
+          from gitbash import BASH
+          print("gitbash.BASH =", BASH, "| a bare bash from native Python =", shutil.which("bash"))
+          assert BASH != "bash" and "system32" not in BASH.lower(), "BASH is not Git Bash: " + BASH
+          r = subprocess.run([BASH, "tools/burndown-count.sh", sys.argv[1]], capture_output=True, text=True, encoding="utf-8")
+          print(r.stdout, r.stderr)
+          assert "errors = " in r.stdout, "burndown-count.sh did not run under BASH"
+          print("BASH ran tools/burndown-count.sh: ok")
+          PY
+
       - name: setup.cmd --check, from cmd.exe, in an empty home
         shell: cmd
         run: |

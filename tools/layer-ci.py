@@ -42,6 +42,8 @@ cannot drift apart. Standard library only.
 import argparse, datetime, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from gitbash import BASH   # noqa: E402  Git Bash on Windows, where a bare "bash" is WSL's launcher (#109)
 HOOK_MARK = "apply from: '.multiversion/layer.gradle'"
 DEFAULT_JAVA = "21"
 
@@ -293,7 +295,7 @@ def cmd_inertness(a):
     try:
         for label, text in (("with-hook", original), ("without-hook", stripped)):
             bg.write_text(text, encoding="utf-8", newline="")
-            cmd = ["bash", "gradlew", "--console=plain", "clean", *tasks]   # clean both: classes an earlier run left in build/ are not the hook's doing
+            cmd = [BASH, "gradlew", "--console=plain", "clean", *tasks]   # clean both: classes an earlier run left in build/ are not the hook's doing
             log = work / f"inertness-{label}.log"
             work.mkdir(parents=True, exist_ok=True)
             if _run(cmd, repo, log):
@@ -338,7 +340,7 @@ def cmd_compile(a):
         print(f"[layer-ci] {t} {name}: {'PASS' if passed else 'FAIL'} -- {detail}", flush=True)
 
     log = work / f"compile-{t}.log"
-    rc = _run(["bash", str(repo / ".multiversion/build.sh"), t, *tasks, "--console=plain"], repo, log, no_ci_env())
+    rc = _run([BASH, str(repo / ".multiversion/build.sh"), t, *tasks, "--console=plain"], repo, log, no_ci_env())
     compiled = rc == 0
     record(f"compile ({' '.join(tasks)})", rc == 0, "0 errors" if rc == 0 else "see the log")
     if rc:

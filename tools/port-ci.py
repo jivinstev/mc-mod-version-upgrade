@@ -741,7 +741,7 @@ def self_check():
     extra = ljobs.split("\n  layer-gates-extra:\n", 1)[1]
     ok &= "has_full == 'true'" in extra.split("steps:", 1)[0] and "fromJson(needs.layer-plan.outputs.full_matrix)" in extra
     ok &= "fromJson(needs.layer-plan.outputs.matrix)" in lay and "java-version: ${{ matrix.java }}" in lay
-    ok &= "run: |" in ljobs and "${{ needs" not in "\n".join(l for l in ljobs.splitlines() if l.lstrip().startswith(("python3", "extra=", "git fetch", "curl")))
+    ok &= "run: |" in ljobs and "${{ needs" not in "\n".join(l for l in ljobs.splitlines() if l.lstrip().startswith(("python3", "extra=", "git fetch", "curl")))   # exec-ok: line prefixes to match, not a command
     for bad in ("neoforge-1.21.1", "x y"):         # the port branch itself, or not a branch name
         try:
             layer_values(v, bad); ok = False
@@ -766,7 +766,7 @@ def main():
         a = ap.parse_args(sys.argv[2:])
         import shlex
         f = pathlib.Path(a.file) if a.file else pathlib.Path(a.repo) / WORKFLOW
-        print(shlex.join(["python3", "tools/port-ci.py", "--repo", a.repo, *recover_args(f.read_text(encoding="utf-8"))]))
+        print(shlex.join(["python3", "tools/port-ci.py", "--repo", a.repo, *recover_args(f.read_text(encoding="utf-8"))]))   # exec-ok: a command printed for a person's shell (setup's python3 shim)
         return 0
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo", required=True); ap.add_argument("--modid", required=True)

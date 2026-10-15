@@ -532,7 +532,7 @@ def claude_settings_wanted(path, write_dirs):
         want["sandbox.filesystem.allowWrite"] = sorted(set(want["sandbox.filesystem.allowWrite"]) | {"~/.gradle"})
         # Java ignores the proxy variables the sandbox relies on, so Gradle's downloads cannot go through
         # it: the build runs outside the sandbox, and is allowed without a prompt.
-        want["sandbox.excludedCommands"] = ["./gradlew"]
+        want["sandbox.excludedCommands"] = ["./gradlew"]   # exec-ok: a Claude Code sandbox setting, not a command
         want["permissions.allow"] = ["Bash(./gradlew:*)"]
     if SYS == "Windows":
         # Claude Code's sandbox runs on macOS, Linux and WSL, not native Windows: entries for it would

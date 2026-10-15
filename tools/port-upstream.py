@@ -53,6 +53,8 @@ model stages need the `claude` CLI.
 import argparse, json, os, pathlib, re, shutil, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # noqa: E402  Git Bash on Windows, where a bare "bash" is WSL's launcher (#109)
 import importlib.util  # noqa: E402
 def _load_tool(name, file):
     spec = importlib.util.spec_from_file_location(name, ROOT / "tools" / file)
@@ -94,7 +96,7 @@ def claude(prompt, cwd, tools, model=SONNET, timeout=2400):
 
 def compile_count(repo, log):
     _pg.compile_log(repo, srcsets.compile_tasks(repo), log)
-    r = sh(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)])
+    r = sh([BASH, str(ROOT / "tools/burndown-count.sh"), str(log)])
     m = re.search(r"errors = (\d+)", r.stdout)
     if not m or "compileJava: yes" not in r.stdout:
         return None, r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "no count"

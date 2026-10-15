@@ -33,6 +33,8 @@ Nothing is pushed. Standard library only.
 import argparse, json, pathlib, re, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # noqa: E402  Git Bash on Windows, where a bare "bash" is WSL's launcher (#109)
 SONNET = "claude-sonnet-5-5"
 RESOLVE_PROMPT = """You are finishing a Minecraft mod port. The file {path} is the author's RELEASED source with a
 NeoForge 1.21.1 port applied by replaying commits that were made on a newer, UNRELEASED development branch. It fails
@@ -262,7 +264,7 @@ def compile_errors(repo, log):
     sys.path.insert(0, str(ROOT / "tools"))
     import port_gates, srcsets  # noqa: E402
     port_gates.compile_log(repo, srcsets.compile_tasks(repo), log)
-    r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True, encoding="utf-8")
+    r = subprocess.run([BASH, str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True, encoding="utf-8")
     m = re.search(r"errors = (\d+)", r.stdout)
     if not m or "compileJava: yes" not in r.stdout:
         raise SystemExit(f"the compile did not run: {r.stdout.strip()[-300:]}")

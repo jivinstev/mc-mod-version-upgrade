@@ -25,6 +25,8 @@ for the compile loop; non-zero, with the failing step, otherwise. Standard libra
 import argparse, os, pathlib, re, shutil, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # noqa: E402  Git Bash on Windows, where a bare "bash" is WSL's launcher (#109)
 TPL = ROOT / "templates/multi-version"
 
 
@@ -36,10 +38,10 @@ def gradle_classpath(work, target, out):
     """One target's resolved compile classpath, via Gradle (never a hand-built one, X25b-ii). ModDevGradle
     lists its Minecraft jars on the classpath before it has staged them, so they are created first, and
     a classpath naming a file that does not exist is refused: a map built from it is silently partial."""
-    subprocess.run(["./gradlew", "-I", str(ROOT / "tools/central-mirror.init.gradle"), "-q",
+    subprocess.run([BASH, "gradlew", "-I", str(ROOT / "tools/central-mirror.init.gradle"), "-q",
                     "createMinecraftArtifacts", f"-Pmc={target}", "--console=plain"], cwd=work,
                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
-    r = subprocess.run(["./gradlew", "-I", str(ROOT / "tools/qtc-init.gradle"), "-I",
+    r = subprocess.run([BASH, "gradlew", "-I", str(ROOT / "tools/qtc-init.gradle"), "-I",
                         str(ROOT / "tools/central-mirror.init.gradle"), "-q", "qtcClasspath", f"-Pmc={target}",
                         "--console=plain"], cwd=work, capture_output=True, text=True, encoding="utf-8",
                        errors="replace", timeout=3600)
@@ -240,7 +242,7 @@ def main():
     if (work / "versions/1.21.1.properties").exists() or (work / f"versions/{T}.properties").exists():
         step("already multi-version; nothing to frame");
     else:
-        r = subprocess.run(["bash", str(ROOT / "tools/make-multiversion.sh"), str(work), T],
+        r = subprocess.run([BASH, str(ROOT / "tools/make-multiversion.sh"), str(work), T],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             print(r.stdout[-1500:] + r.stderr[-800:]); step("FAILED building the multi-version frame"); return 3

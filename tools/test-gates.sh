@@ -273,6 +273,27 @@ out="$(FORBIDDEN_NAMES_FILE="$G/names.txt" python3 "$ROOT/tools/guard-names.py" 
   || { echo "  FAIL  guard-names on this repository: exit $rc"; fail=$((fail+1)); }
 rm -rf "$G"
 
+echo "13. check-exec: no command list starts with a program name only Linux and macOS resolve (issue #109)"
+( python3 "$ROOT/tools/check-exec.py" >/dev/null 2>&1 )
+[ $? = 0 ] && { echo "  PASS  the real tree starts every command with a portable program"; pass=$((pass+1)); } \
+           || { echo "  FAIL  the real tree fails its own exec gate"; fail=$((fail+1)); }
+xcase() {  # xcase <wanted-exit> <label> <python-line>
+   plant; printf 'import subprocess, sys\nfrom gitbash import BASH\n%s\n' "$3" > "$T/x.py"
+   local log; log="$(python3 "$ROOT/tools/check-exec.py" "$T/x.py" 2>&1)"
+   local got=$?
+   [ "$got" = 1 ] && ! grep -q '^check-exec: FAIL' <<<"$log" && got="crash"
+   if [ "$got" = "$1" ]; then echo "  PASS  $2 (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $2 — wanted exit $1, got $got"; fail=$((fail+1)); fi
+}
+xcase 1 'a bare "bash"'                       'subprocess.run(["bash", "tools/x.sh"])'
+xcase 1 'a bare "sh" in a tuple'              'subprocess.run(("sh", "-c", "true"))'
+xcase 1 'a script path run directly'          'cmd = ["./gradlew", "build"]'
+xcase 1 'a bare "python3"'                    'subprocess.run(["python3", "tools/x.py"])'
+xcase 0 'BASH from tools/gitbash.py'          'subprocess.run([BASH, "gradlew", "build"])'
+xcase 0 'sys.executable'                      'subprocess.run([sys.executable, "tools/x.py"])'
+xcase 0 'a program that resolves everywhere'  'subprocess.run(["git", "status"])'
+xcase 0 'a marked exception'                  'print(["python3", "x.py"])   # exec-ok: printed for a person'
+
 echo
 echo "gates self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

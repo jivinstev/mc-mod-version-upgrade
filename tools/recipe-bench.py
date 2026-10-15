@@ -338,7 +338,7 @@ def main():
         init.write_text(MAXERRS_INIT % a.javac_heap if not a.in_process else
                         MAXERRS_INIT.replace("options.fork = true; options.forkOptions.memoryMaximumSize = '%s'",
                                              "options.fork = false"), encoding="utf-8")
-        cmd = ["./gradlew", "compileJava", "--console=plain", "--no-daemon", "--init-script", str(init)]
+        cmd = [BASH, "gradlew", "compileJava", "--console=plain", "--no-daemon", "--init-script", str(init)]
         for s in a.init_script:
             cmd += ["--init-script", str(pathlib.Path(s).resolve())]
         # The Gradle side holds every diagnostic the javac worker sends back, so a raw start with
