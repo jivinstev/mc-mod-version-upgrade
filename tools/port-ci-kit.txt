@@ -21,6 +21,9 @@ templates/upstream-harness/versions/1.21.3.renames.tsv
 templates/upstream-harness/versions/1.21.4.renames.tsv
 templates/upstream-harness/versions/1.21.5.renames.tsv
 templates/upstream-harness/versions/1.21.8.renames.tsv
+templates/upstream-harness/versions/26.1.2.renames.tsv
+templates/upstream-harness/versions/26.2.renames.tsv
+templates/upstream-harness/versions/26.3.renames.tsv
 tools/audit-event-listeners.py
 tools/audit-mixin-targets.py
 tools/audit-unit-codecs.py
