@@ -80,7 +80,9 @@ has -- the shared libraries for 26.x start empty and grow from measured hops.
   and without the hook line: `layer.py compare-jars` must say identical for every jar.
 - **Isolated**: `layer.py isolation --base origin/neoforge-1.21.1` -- only `.multiversion/` and the appended
   commented hook differ. Every merge from the base branch is then conflict-free.
-- **Per-target build dir** `build/mc<t>/` (inside the authors' ignored `build/`): targets never share classes.
+- **Per-target build dir** `build/mc<t>/` (inside the authors' ignored `build/`): targets never share classes, and the
+  client runs in `build/mc<t>/run`, so one target's mod configs never reach another's client (a single-version build
+  and the base keep the authors' `run/`).
 - **Versions come from `-P`**: `.multiversion/build.sh <t> <tasks>` passes the target's set; `layer.gradle`
   refuses a `-Pmc` whose versions did not arrive.
 

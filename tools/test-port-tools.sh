@@ -576,6 +576,27 @@ GR
   [ $good = 0 ] && [ $badkey != 0 ] && grep -q 'escape the' <<<"$out" \
     && ok "layer.gradle: an escaped exclude.<group:module> applies; an unescaped one (no ':' left in the key) stops the build" \
     || bad "layer.gradle exclude keys: escaped exit $good, unescaped exit $badkey: $out"
+  # issue #114: each layer target's client gets its own game directory; without -Pmc the authors' run/ is unchanged
+  # (a stand-in for ModDevGradle's neoForge.runs: no plugin download, no Minecraft)
+  GR="$T/gr"; mkdir -p "$GR"; printf "rootProject.name = 'scratch'\n" > "$GR/settings.gradle"
+  { cat <<'GR'
+class FakeRun { String name; def gameDirectory; FakeRun(String n) { name = n } }
+def runs = project.container(FakeRun) { n -> new FakeRun(n) }
+extensions.add('neoForge', [runs: runs])
+neoForge.runs.create('client') { gameDirectory = file('run') }
+neoForge.runs.create('gameTestServer') { gameDirectory = file('harness/run') }
+tasks.register('printRunDirs') { doLast { neoForge.runs.each { println "RUNDIR ${it.name}=${projectDir.toPath().relativize(file(it.gameDirectory).toPath())}" } } }
+def mvTarget = project.findProperty('mc')?.toString()
+if (mvTarget == null) return
+GR
+    sed -n '/BEGIN-RUN-DIRS/,/END-RUN-DIRS/p' templates/fork-layer/layer.gradle; } > "$GR/build.gradle"
+  rd() { (cd "$GR" && gradle -q --offline printRunDirs "$@" 2>&1) | grep '^RUNDIR' | sort | tr '\n' ' '; }
+  r0="$(rd)"; r4="$(rd -Pmc=1.21.4)"; r26="$(rd -Pmc=26.2)"
+  [ "$r0" = "RUNDIR client=run RUNDIR gameTestServer=harness/run " ] \
+    && [ "$r4" = "RUNDIR client=build/mc1.21.4/run RUNDIR gameTestServer=harness/run " ] \
+    && [ "$r26" = "RUNDIR client=build/mc26.2/run RUNDIR gameTestServer=harness/run " ] \
+    && ok "layer.gradle: -Pmc=1.21.4 and -Pmc=26.2 run the client in their own build/mc<t>/run; without -Pmc the run directory is unchanged, and the gates' GameTest server keeps its own" \
+    || bad "layer.gradle run dirs: base=[$r0] 1.21.4=[$r4] 26.2=[$r26]"
 fi
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script; without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (single-version and layer fork); --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back; promote refreshes the install manifest on the port branch only (its script run on a fake fork, single-version and layer: pushed on top of the tag, retried when the branch moved, nothing pushed when unchanged, a bad tag refused)" || bad "port-ci self-check: $out"
