@@ -136,6 +136,27 @@ def log_tails(paths, n=40, cap=12000):
     return text[-cap:] if len(text) > cap else text
 
 
+GATE_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "STUBS.json")   # what a gate run itself writes into a target
+
+
+def tested_tree(repo, mc):
+    """The commit a layer target's GATES.md certifies. A run on an edited checkout tested more than HEAD, so the record
+    says so ("<sha> + uncommitted: a, b") instead of naming a commit that does not hold the code that went green; only
+    changes to tracked files count, and the run's own outputs do not. Without --mc (a single-version fork, CI's clean
+    checkout) it is HEAD, as before."""
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                          encoding="utf-8").stdout.strip()
+    if not mc:
+        return head
+    st = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"], capture_output=True,
+                        text=True, encoding="utf-8").stdout
+    dirty = sorted(f for f in (l[3:].strip() for l in st.splitlines() if len(l) > 3)
+                   if f.rsplit("/", 1)[-1] not in GATE_OUTPUTS)
+    if not dirty:
+        return head
+    return f"{head} + uncommitted: {', '.join(dirty[:6])}{f' (+{len(dirty) - 6} more)' if len(dirty) > 6 else ''}"
+
+
 def self_check():
     ok = green_detail("[x] All 4 required tests passed :)") == "4 required test(s) passed"
     ok &= green_detail("M_BOOT_TEST: spawned 40 creature type(s): [a]\nM_BOOT_TEST: PASS — ticked 200").startswith(
@@ -173,6 +194,19 @@ def self_check():
         t = log_tails([pathlib.Path(d) / "a.log", pathlib.Path(d) / "missing.log"], n=3)
         ok &= t.splitlines() == ["----- tail of a.log (3 of 100 lines) -----", "l97", "l98", "l99"]
         ok &= log_tails([pathlib.Path(d) / "missing.log"]) == ""
+    with _t.TemporaryDirectory() as d:   # tested_tree: a layer run names the edits it tested; HEAD alone when clean
+        g = lambda *x: subprocess.run(["git", "-C", d, *x], capture_output=True, check=True)
+        g("init", "-q"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
+        t = pathlib.Path(d) / ".multiversion/targets/1.21.4"; t.mkdir(parents=True)
+        (t / "A.java").write_text("a", encoding="utf-8"); (t / "GATES.md").write_text("g", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "c")
+        h = subprocess.run(["git", "-C", d, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                           encoding="utf-8").stdout.strip()
+        (t / "GATES.md").write_text("g2", encoding="utf-8")
+        ok &= tested_tree(d, "1.21.4") == h                      # the run's own output is not an edit
+        (t / "A.java").write_text("b", encoding="utf-8")
+        ok &= tested_tree(d, "1.21.4") == f"{h} + uncommitted: .multiversion/targets/1.21.4/A.java"
+        ok &= tested_tree(d, None) == h                          # single-version: HEAD, exactly as before
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -385,8 +419,7 @@ def main():
                                                   else f"{len([l for l in rl if l.startswith('PASS')])} check(s) green"
                                                        if r.returncode == 0 else (r.stdout + r.stderr).strip().splitlines()[-1][:200]))
 
-    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
-                          encoding="utf-8").stdout.strip()
+    head = tested_tree(repo, a.mc)
     md = [f"Gates for `{a.modid}` at `{head}`{f' for Minecraft {a.mc}' if a.mc else ''} ({a.env} environment) -- run by CI with no model and no fixes applied:", "",
           "| check | result | detail |", "|---|---|---|", *rows, "",
           "Not covered by any automated gate: gameplay by a person."]

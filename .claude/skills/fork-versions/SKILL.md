@@ -200,6 +200,11 @@ file (the same record publish-port's layer path reads), and a full run that is n
 `auto` run is full again. After that a re-run is A/B. CI keeps its own policy (bookends in
 full, middle targets compile + audits): this is the port's one look at each version in a real client, not a CI cost.
 
+**Commit a fix before the gate run that certifies it.** `GATES.md` names the commit it tested; a run on an edited
+checkout records `<sha> + uncommitted: <files>` (the run's own GATES.md/COST.md/RESIDUE.md/STUBS.json do not count),
+because the bare parent commit does not hold the code that went green. So a residue fixer commits its edits (locally
+is enough), then runs the gates, and the GATES.md the run writes is committed after it, naming the fix's commit.
+
 ## Procedure
 
 0. **Read first**: CATALOG §M and `references/minor-version-deltas.md` (the U and L sections). The first layer
