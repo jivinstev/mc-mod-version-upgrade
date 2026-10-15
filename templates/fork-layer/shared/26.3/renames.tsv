@@ -1,0 +1,28 @@
+# Shared fork-layer rename table: NeoForge 26.2 -> 26.3 (Minecraft 26.3; NeoForge 26.3.0). Applied FIRST (nearest) on the
+# 1.21.1 text, then the 26.2/26.1.2/... tables on whatever it left -- so a row here is written against the ORIGINAL 1.21
+# spelling. The 26.3 class moves (com.mojang.blaze3d.* -> com.mojang.renderpearl.*, CATALOG §V101) are generated per fork
+# from the staged jars (moves.generated.tsv); a rename row reaches the AUTHORS' files only, never an overlay (CATALOG §W8)
+# nor a shared helper, so the helpers in shared/26.3/java are written in the 26.3 dialect by hand.
+#!exhaustive  # shared library: most forks use only some of these rows
+# ---- 26.3 input is SDL, not GLFW (CATALOG §V102): org.lwjgl.glfw.GLFW is off the classpath and every key / modifier /
+# mouse-button number changed. The helper keeps the GLFW_* names with the 26.3 values; raw numbers need the overlay.
+org.lwjgl.glfw.GLFW	@MVPKG@.GLFW
+# InputConstants.isKeyDown(window, key) -> isKeyDown(key): SDL keeps the keyboard state globally (the window argument is gone).
+re:\bInputConstants\.isKeyDown\((?:[^,()]|\((?:[^()]|\([^()]*\))*\))+,\s*	InputConstants.isKeyDown(
+# ---- PoseStack.mulPose(Quaternionf) is gone (26.3 keeps mulPose(Matrix4fc) / mulPose(Transformation)); a quaternion goes
+# through rotate(Quaternionfc). 1.21's idiom is mulPose(Axis.XP.rotationDegrees(a)); a quaternion held in a variable cannot
+# be told from a matrix by a row and is left to the compile error.
+re:\.mulPose\(\s*(?=(?:com\.mojang\.math\.)?Axis\.[XYZ][PN]\.rotation)	.rotate(
+re:\.mulPose\(\s*(?=new\s+(?:org\.joml\.)?Quaternionf\()	.rotate(
+# ---- AbortableIterationConsumer.Continuation is the top-level net.minecraft.util.Continuation (same constants). A nested
+# class's move is not in the generated moves (they map top-level classes), and a mixin descriptor names it with '$'.
+re:\bnet\.minecraft\.util\.AbortableIterationConsumer\.Continuation\b	net.minecraft.util.Continuation
+re:\bAbortableIterationConsumer\.Continuation\b	net.minecraft.util.Continuation
+re:Lnet/minecraft/util/AbortableIterationConsumer\$Continuation;	Lnet/minecraft/util/Continuation;
+# ---- NeoForge 26.3 deleted the legacy net.neoforged.neoforge.energy package (IEnergyStorage, EnergyStorage, the
+# EnergyHandler adapter; deprecated for removal since 1.21.9) -- CATALOG §V105. The helpers are the same interface, the
+# same IEnergyStorage.of(EnergyHandler) adapter and the same reference EnergyStorage. ComponentEnergyStorage and
+# EmptyEnergyStorage have no helper: port them to ItemAccessEnergyHandler / EmptyEnergyHandler.
+net.neoforged.neoforge.energy.IEnergyStorage	@MVPKG@.IEnergyStorage
+net.neoforged.neoforge.energy.EnergyStorage	@MVPKG@.EnergyStorage
+#!strict

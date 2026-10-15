@@ -1,0 +1,51 @@
+# Shared fork-layer rename table: NeoForge 26.1.2 -> 26.2 (Minecraft 26.2; NeoForge 26.2.0). Applied FIRST (nearest) on the
+# 1.21.1 text, then the 26.1.2/1.21.11/... tables on whatever it left -- so a row here is written against the ORIGINAL
+# 1.21 spelling, and a row that must beat an older table's rewrite of the same text is a regex (regexes run in table
+# order, nearest first, before the type sweep). A rename row reaches the AUTHORS' files only: never an overlay (CATALOG
+# §W8) nor a shared helper, so the helpers in shared/26.2/java are written in the 26.2 dialect by hand.
+#!exhaustive  # shared library: most forks use only some of these rows
+# ---- 26.2 render API (CATALOG §V100): VertexFormat.Mode -> com.mojang.blaze3d.PrimitiveTopology (same constants:
+# QUADS, TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN, LINES, DEBUG_LINES, DEBUG_LINE_STRIP, POINTS), VertexFormat.IndexType ->
+# com.mojang.blaze3d.IndexType, and MeshData.DrawState.mode() -> primitiveTopology().
+re:\bcom\.mojang\.blaze3d\.vertex\.VertexFormat\.Mode\b	com.mojang.blaze3d.PrimitiveTopology
+re:\bVertexFormat\.Mode\b	com.mojang.blaze3d.PrimitiveTopology
+re:\bcom\.mojang\.blaze3d\.vertex\.VertexFormat\.IndexType\b	com.mojang.blaze3d.IndexType
+re:\bVertexFormat\.IndexType\b	com.mojang.blaze3d.IndexType
+re:\.drawState\(\)\.mode\(\)	.drawState().primitiveTopology()
+# GlStateManager.SourceFactor / DestFactor (1.21.5+: com.mojang.blaze3d.platform.SourceFactor / DestFactor) are ONE enum,
+# com.mojang.blaze3d.platform.BlendFactor, with the same constant names. Every spelling at once: a 1.21.5 row turns the
+# GlStateManager form into the platform form, but it runs after this one and would leave a type 26.2 does not have.
+re:(?:\bcom\.mojang\.blaze3d\.platform\.)?(?:\bGlStateManager\.)?\b(?:SourceFactor|DestFactor)\b	com.mojang.blaze3d.platform.BlendFactor
+# Tesselator is gone: the shared helper keeps 1.21's getInstance().begin(mode, format) over one shared ByteBufferBuilder.
+re:\bcom\.mojang\.blaze3d\.vertex\.Tesselator\b	@MVPKG@.Tesselator
+# MultiBufferSource (and its immediate BufferSource) is gone (26.2 records into a StagedVertexBuffer); the shared helper is
+# the 1.21 interface drawing at endBatch. Minecraft.renderBuffers().bufferSource() is its main() instance.
+re:\bnet\.minecraft\.client\.renderer\.MultiBufferSource\b	@MVPKG@.MultiBufferSource
+# The WHOLE receiver chain is matched (`Minecraft.getInstance().gameRenderer.renderBuffers()`), never its tail.
+re:(?<![\w$.])(?!super\b)[\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*\.renderBuffers\(\)\.bufferSource\(\)	@MVPKG@.MultiBufferSource.main()
+# Minecraft.getMainRenderTarget() -> GameRenderer.mainRenderTarget(); getMainRenderTarget is a Minecraft method only.
+re:\.getMainRenderTarget\(\)	.gameRenderer.mainRenderTarget()
+# RenderSystem.getModelViewMatrix() -> getModelViewMatrixCopy() (a Matrix4f copy; the Matrix4fc view is gone).
+re:\bRenderSystem\.getModelViewMatrix\(\)	RenderSystem.getModelViewMatrixCopy()
+# GameRenderer.getMainCamera() -> mainCamera(). 1.21.11's rows rewrite .getMainCamera().getYRot() etc. into the record-style
+# accessors but run AFTER this table, so the accessor rows are repeated here on the original text (anchored on the bare
+# method name, not the dot, so they are not the 1.21.11 rows' patterns).
+re:\bgetMainCamera\(\)\.getYRot\(\)	mainCamera().yRot()
+re:\bgetMainCamera\(\)\.getXRot\(\)	mainCamera().xRot()
+re:\bgetMainCamera\(\)\.getPosition\(\)	mainCamera().position()
+re:\bgetMainCamera\(\)\.getBlockPosition\(\)	mainCamera().blockPosition()
+re:\bgetMainCamera\(\)\.getEntity\(\)	mainCamera().entity()
+re:\bgetMainCamera\(\)	mainCamera()
+# Minecraft.setScreen(screen) -> Minecraft.gui.setScreen(screen) (Minecraft keeps only setScreenAndShow). Anchored on the
+# receivers that are a Minecraft: Minecraft.getInstance(), and the conventional minecraft / mc / client fields.
+re:(\bMinecraft\.getInstance\(\)|\b(?:this\.)?minecraft|\bmc|\bclient)\.setScreen\(	\1.gui.setScreen(
+# EditBox.setFilter(Predicate) is gone in 26.2 (NeoForge's re-added filter left EditBox); the helper restores it with a
+# responder that puts the last accepted value back (CATALOG V100: it takes the responder slot). Only a ONE-argument call
+# that is an EditBox's: a lambda or method-reference argument, or a receiver named like a box/field/input -- never
+# AbstractTexture.setFilter(blur, mipmap). The receiver is the whole chain (`this.screen.box`), never its tail.
+re:((?<![\w$.])(?!super\b)[\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*)\.setFilter\(\s*(?=(?:\([\w$\s,]*\)|[\w$]+)\s*->|[\w$.]+::[\w$]+\s*\))([^\s)])	@MVPKG@.EditBoxes.setFilter(\1, \2
+re:((?<![\w$.])(?!super\b)(?![\w$.]*EditBoxes\.)(?:[\w$]+(?:\(\))?\.)*[\w$]*(?i:box|field|input|edit)[\w$]*(?:\(\))?)\.setFilter\(\s*(?=(?:[^(),;]|\((?:[^()]|\([^()]*\))*\))*\))([^\s)])	@MVPKG@.EditBoxes.setFilter(\1, \2
+# Font.drawInBatch(...) is gone (world text is a submitText node); the helper draws it into the caller's MultiBufferSource.
+# the receiver is the whole chain: `Minecraft.getInstance().font.drawInBatch(` -> `Fonts.drawInBatch(Minecraft.getInstance().font, `
+re:((?<![\w$.])(?!super\b)[\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*)\.drawInBatch\(\s*([^\s)])	@MVPKG@.Fonts.drawInBatch(\1, \2
+#!strict

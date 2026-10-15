@@ -1,0 +1,13 @@
+# 26.1.2 (NeoForge 26.1.2, the first 26.x line): the harness renames are those of 1.21.11, plus the rows below.
+#!inherit 1.21.11
+# Measured against the 26.1.2 sources (minecraft-patched-26.1.2.116-sources.jar) on the first layer-fork port's Gate A.
+# Regex rows run before the type rows and after every inherited row, so they are written against the text the inherited
+# rows leave (1.21.3's turned `new GameRules()` into `new GameRules(FeatureFlags.DEFAULT_FLAGS)`; `[^)]*` takes either).
+# LevelSettings lost its GameRules and takes a DifficultySettings(difficulty, hardcore, locked) record (same shape as 26.2's).
+re:false,(\s*// hardcore)\n(\s*)Difficulty\.NORMAL,(\s*//[^\n]*)\n(\s*)true,(\s*// allow commands)\n\s*new GameRules\([^)]*(?:\([^)]*\))?[^)]*\),\n	new LevelSettings.DifficultySettings(Difficulty.NORMAL, false, false),\3; not hardcore, not locked\n\4true,\5\n
+# 26.1 GUI is EXTRACTED: GuiGraphics is GuiGraphicsExtractor, Screen.render is extractRenderState, renderItem / renderItemDecorations are item / itemDecorations.
+re:public void render\(GuiGraphics (\w+), int mouseX, int mouseY, float partialTick\)	public void extractRenderState(GuiGraphics \1, int mouseX, int mouseY, float partialTick)
+re:\.renderItemDecorations\(this\.font,	.itemDecorations(this.font,
+re:\b(\w+)\.renderItem\((\w+), 	\1.item(\2, 
+net.minecraft.client.gui.GuiGraphics	net.minecraft.client.gui.GuiGraphicsExtractor
+GuiGraphics	GuiGraphicsExtractor

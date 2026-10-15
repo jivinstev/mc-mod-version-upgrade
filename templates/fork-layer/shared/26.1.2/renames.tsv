@@ -1,0 +1,16 @@
+# Shared fork-layer rename table: NeoForge 21.11 -> 26.1.2 (Minecraft 26.1.2; NeoForge 26.1.2). Applied FIRST (nearest) on the
+# 1.21.1 text, then the 1.21.11/1.21.10/... tables on whatever it left -- so a row here is written against the ORIGINAL
+# 1.21.1 spelling. A rename row reaches the AUTHORS' files only: never an overlay (CATALOG §W8) nor a shared helper, so an
+# overlay inherited from a parent target that still has the 1.21.x shape is fixed by hand in targets/26.1.2/java.
+#!exhaustive  # shared library: most forks use only some of these rows
+# ---- Block light (CATALOG M64): 1.21.2 dropped getLightBlock's BlockGetter/BlockPos and 26.1 renamed it getLightDampening
+# (BlockBehaviour and BlockStateBase alike; unchanged through 26.3). An override left as getLightBlock overrides nothing
+# and vanilla's default runs (15 for a solid render, else 0 if it propagates skylight, else 1). A body that read the
+# dropped level/pos fails to compile, loudly, rather than being guessed at.
+re:\bint getLightBlock\(BlockState (\w+), BlockGetter \w+, BlockPos \w+\)	int getLightDampening(BlockState \1)
+re:\.getLightBlock\(\s*[^(),]+,\s*[^(),]+\)	.getLightDampening()
+# ---- Properties.hasPostProcess(StatePredicate) is postProcess(PostProcess) in 26.1: the hook returns the position to
+# post-process after world generation (vanilla's Blocks.postProcessSelf returns pos) or null for none. Only the
+# always-true predicate is rewritten; any other predicate is left for the compiler to name.
+re:\.hasPostProcess\(\((\w+), (\w+), (\w+)\) -> true\)	.postProcess((\1, \2, \3) -> \3)
+#!strict

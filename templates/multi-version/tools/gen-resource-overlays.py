@@ -392,11 +392,240 @@ def advancement_display_icon_as_stack(doc, rel, spec):
     return out
 
 
+# --------------------------------------------------------------------------------------------
+# Transform: a block state in data JSON (26.2 -> 26.3, catalog §V106). 26.3's BlockState codec is
+# a bare id or {"id": ..., "properties": {...}} -- StateHolder dispatches on "id" -- and refuses
+# 1.21's {"Name": ..., "Properties": {...}} ("Not a string" / "No key id"), after which the
+# template pool, processor list or feature holding it fails and the registry load stops the server.
+# Only an object whose keys are exactly Name[/Properties] with a string Name is a block state;
+# anything else named "Name" is left alone. NBT structures are not JSON: the datafixer upgrades
+# their palettes.
+# --------------------------------------------------------------------------------------------
+def block_states_as_id(doc, rel, spec):
+    def walk(node):
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if not isinstance(node, dict):
+            return node
+        if isinstance(node.get("Name"), str) and set(node) <= {"Name", "Properties"}:
+            props = node.get("Properties")
+            if props is not None and not isinstance(props, dict):
+                raise Refused("%s: block state %r has Properties that are not an object" % (rel, node))
+            out = {"id": node["Name"]}
+            if props:
+                out["properties"] = props
+            return out
+        return {k: walk(v) for k, v in node.items()}
+    return walk(doc)
+
+
+# --------------------------------------------------------------------------------------------
+# Transform: a trim material (26.2 -> 26.3, catalog §V106). 26.3's TrimMaterial is
+# {palette_id, description}: the colour palette is named directly (textures/palettes/<path>.png,
+# vanilla's "minecraft:trim/amethyst"), where 1.21 named an asset suffix the atlases' paletted
+# permutations mapped to a palette. spec["palette_of"] maps the 1.21 asset name to the 26.3
+# palette id (the caller moves the palette PNG); a per-armour override map (override_armor_assets)
+# has no field here any more (it is the equipment asset's trim overrides) and is refused.
+# --------------------------------------------------------------------------------------------
+def trim_material_palette(doc, rel, spec):
+    if "palette_id" in doc or "asset_name" not in doc:
+        return doc
+    if doc.get("override_armor_assets") or doc.get("override_armor_materials"):
+        raise Refused("%s: per-armour trim overrides have no 26.3 trim_material field "
+                      "(the equipment asset's trim_overrides) -- port them by hand" % rel)
+    name = doc["asset_name"]
+    palette = spec["palette_of"](name, rel)
+    if palette is None:
+        raise Refused("%s: no colour palette found for asset_name %r" % (rel, name))
+    out = {"palette_id": palette}
+    out.update({k: v for k, v in doc.items() if k not in ("asset_name", "override_armor_assets",
+                                                          "override_armor_materials", "ingredient",
+                                                          "item_model_index")})
+    return out
+
+
+# --------------------------------------------------------------------------------------------
+# Transform: the 26.3 loot / predicate grammar (catalog §V107), for loot tables and advancements.
+# 26.3 re-keyed every loot dispatch on "type" and made condition and function lists single values:
+#   a condition {"condition": X, ...} is {"type": X, ...}; a "conditions" list is one "condition"
+#   (two or more: minecraft:all_of with "terms"); a function {"function": X} is {"type": X}; a
+#   "functions" list is one "modifier" (a list of two or more is the inline sequence form); a number
+#   provider {"min", "max"} needs "type": "minecraft:uniform" (ints and floats are separate codecs,
+#   and an int field refuses 2.0) -- this types the ones it knows, a pool's rolls / bonus_rolls and a
+#   function's count (an int for set_count), and REFUSES an untyped {"min"/"max"} anywhere else in a
+#   function (set_damage's damage, enchant_with_levels' levels, ...), which it does not convert;
+#   limit_count's "limit" is an IntLimit ({min?, max?} of int providers), kept untyped with its bounds typed; a
+#   condition's, predicate's or item_filter's {"min", "max"} is a range, not a provider, and is left alone;
+#   a tag entry names its tag in "items" ("#ns:tag"), not "name";
+#   and an advancement criterion's "player" / "entity" is ONE loot condition, so 1.21's entity
+#   predicate shorthand is wrapped in minecraft:entity_properties (entity "this"). An unknown key is
+#   IGNORED by 26.3's codecs, not refused -- a left-over "functions" silently drops every set_count --
+#   so this refuses an entry or condition shape it does not know rather than passing it through.
+#   Also: 26.3 refuses a background on a non-root advancement (26.2 ignored it), so it is dropped.
+# --------------------------------------------------------------------------------------------
+LOOT_ENTRY_TYPES = {"item", "tag", "empty", "loot_table", "dynamic", "alternatives", "sequence", "group"}
+INT_NUMBER_FIELDS = {"rolls"}
+CRITERION_ENTITY_CONDITIONS = {"player", "entity", "villager", "zombie", "parent", "partner", "child", "projectile",
+                               "shooter", "source", "lightning", "bystander", "victim", "pet"}
+
+
+def _bare(t):
+    return t.split(":", 1)[1] if isinstance(t, str) and t.startswith("minecraft:") else t
+
+
+def _number(v, where, as_int=False):
+    if isinstance(v, float) and as_int and v.is_integer():
+        return int(v)
+    if isinstance(v, dict):
+        out = {k: (_number(x, where, as_int) if k in ("min", "max", "n", "p", "value") else x) for k, x in v.items()}
+        if "type" not in out and ("min" in out or "max" in out):
+            out = {"type": "minecraft:uniform", **out}
+        return out
+    return v
+
+
+def _condition(c, where):
+    if not isinstance(c, dict):
+        raise Refused("%s: a loot condition that is not an object: %r" % (where, c))
+    out = {}
+    for k, v in c.items():
+        if k == "condition":
+            out["type"] = v
+        elif k == "terms":
+            out[k] = [_condition(t, where) for t in v]
+        elif k == "term":
+            out[k] = _condition(v, where)
+        else:
+            out[k] = v
+    if "type" not in out:
+        raise Refused("%s: a loot condition with no type: %r" % (where, c))
+    return {"type": out.pop("type"), **out}
+
+
+def _conditions(lst, where):
+    conds = [_condition(c, where) for c in lst]
+    return conds[0] if len(conds) == 1 else {"type": "minecraft:all_of", "terms": conds}
+
+
+# Keys under which a function argument holds a condition, predicate or item filter: their {"min", "max"} are
+# ranges (MinMaxBounds), not number providers, so the untyped-provider search does not look inside them
+# (minecraft:filtered's item_filter is an item predicate whose count is such a range).
+RANGE_SUBTREES = ("conditions", "condition", "predicate", "predicates", "term", "terms", "item_filter")
+
+
+def _untyped_provider(v):
+    """The first untyped {"min"/"max"} object in a function argument (a number provider 26.3 would read wrongly),
+    not looking into conditions, predicates or item filters (whose {"min", "max"} are ranges); None when there is
+    none."""
+    if isinstance(v, dict):
+        if ("min" in v or "max" in v) and "type" not in v:
+            return v
+        return next((u for k, x in v.items() if k not in RANGE_SUBTREES
+                     for u in [_untyped_provider(x)] if u is not None), None)
+    if isinstance(v, list):
+        return next((u for x in v for u in [_untyped_provider(x)] if u is not None), None)
+    return None
+
+
+def _function(f, where):
+    if not isinstance(f, dict) or not ("function" in f or "type" in f):
+        raise Refused("%s: a loot function with no function/type: %r" % (where, f))
+    out = {}
+    for k, v in f.items():
+        if k == "function":
+            out["type"] = v
+        elif k == "conditions":
+            out["condition"] = _conditions(v, where)
+        elif k == "count":
+            out[k] = _number(v, where, as_int=_bare(f.get("function", f.get("type"))) == "set_count")
+        elif k == "limit" and _bare(f.get("function", f.get("type"))) == "limit_count" and isinstance(v, dict):
+            # an IntLimit, not a provider: {min?, max?} stays untyped; each bound is an int provider (a bare int,
+            # or an object typed here as a count is)
+            out[k] = {b: (_number(x, where, as_int=True) if b in ("min", "max") else x) for b, x in v.items()}
+        else:
+            u = None if k in RANGE_SUBTREES else _untyped_provider(v)
+            if u is not None:     # 26.3 ignores what it does not know: refuse rather than ship a provider it misreads
+                raise Refused("%s: loot function %r field %r has an untyped number provider %r this transform does "
+                              "not convert" % (where, f.get("function", f.get("type")), k, u))
+            out[k] = v
+    return {"type": out.pop("type"), **out}
+
+
+def _common(node, where):
+    out = {}
+    for k, v in node.items():
+        if k == "conditions":
+            if v:
+                out["condition"] = _conditions(v, where)
+        elif k == "functions":
+            fs = [_function(f, where) for f in v]
+            if fs:
+                out["modifier"] = fs[0] if len(fs) == 1 else fs
+        else:
+            out[k] = v
+    return out
+
+
+def _entry(e, where):
+    t = _bare(e.get("type"))
+    if t not in LOOT_ENTRY_TYPES:
+        raise Refused("%s: loot entry type %r is not one this transform knows" % (where, e.get("type")))
+    out = _common(e, where)
+    if t == "tag" and "name" in out:
+        name = out.pop("name")
+        out["items"] = name if name.startswith("#") else "#" + name
+    if "children" in out:
+        out["children"] = [_entry(c, where) for c in out["children"]]
+    return out
+
+
+def _criterion_conditions(conds, where):
+    out = dict(conds)
+    for k, v in conds.items():
+        if k not in CRITERION_ENTITY_CONDITIONS:
+            continue
+        if isinstance(v, list):
+            out[k] = _conditions(v, where)
+        elif isinstance(v, dict) and "condition" not in v and "type" not in v:
+            out[k] = {"type": "minecraft:entity_properties", "entity": "this", "predicate": v}
+        elif isinstance(v, dict):
+            out[k] = _condition(v, where)
+    return out
+
+
+def loot_grammar_263(doc, rel, spec):
+    if "/advancement/" in "/" + rel:
+        out = dict(doc)
+        if "criteria" in doc:
+            out["criteria"] = {n: ({**c, "conditions": _criterion_conditions(c["conditions"], rel)}
+                                   if isinstance(c, dict) and isinstance(c.get("conditions"), dict) else c)
+                               for n, c in doc["criteria"].items()}
+        disp = doc.get("display")
+        if doc.get("parent") and isinstance(disp, dict) and "background" in disp:
+            out["display"] = {k: v for k, v in disp.items() if k != "background"}
+        return out
+    out = _common(doc, rel)
+    if "pools" in out:
+        pools = []
+        for p in out["pools"]:
+            q = _common(p, rel)
+            for k in ("rolls", "bonus_rolls"):
+                if k in q:
+                    q[k] = _number(q[k], rel, as_int=k in INT_NUMBER_FIELDS)
+            q["entries"] = [_entry(e, rel) for e in q.get("entries", [])]
+            pools.append(q)
+        out["pools"] = pools
+    return out
+
+
 TRANSFORMS = {
     "ingredients_as_strings": ingredients_as_strings,
     "advancement_display_icon_as_stack": advancement_display_icon_as_stack,
     "entity_predicates_as_dispatched_map": entity_predicates_as_dispatched_map,
     "rename_ids": rename_ids,
+    "block_states_as_id": block_states_as_id,
+    "trim_material_palette": trim_material_palette,
+    "loot_grammar_263": loot_grammar_263,
 }
 
 

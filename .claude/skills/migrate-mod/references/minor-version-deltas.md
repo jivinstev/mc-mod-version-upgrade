@@ -483,6 +483,32 @@ L33. **GeckoLib 5.4.5 (1.21.11): no hidden state on `GeoBone`; hooks take `Rende
 inside `RenderPassInfo.renderPosed`. · **Fix:** hide bones with a `BoneUpdater` added in `preRender`; draw with
 `renderPassInfo.model().render(...)` inside `renderPosed`. · **Anticipates:** extends §V18d.
 
+L34. **GeckoLib 4.x → 5.1 at 1.21.5: render-state renderers without interface injection (CATALOG M49)** · 5.1.0's
+`GeoEntityRenderer<T, R extends EntityRenderState & GeoRenderState>` closes only at runtime (a mixin), and its jar has no
+`interface_injections.json`. · **Fix:** keep `R` a type variable on each renderer and layer (`<R extends EntityRenderState &
+GeoRenderState>`, `new Layer<>(this)`); capture entity data in `addRenderData` as `DataTicket`s; `renderForBone` →
+`addPerBoneRender`; `BlockAndItemGeoLayer.getRelevantBones`. Class moves (`renderer.GeoRenderer` → `renderer.base`,
+`animation.AnimatableManager`/`AnimationController` → `animatable.manager`/`animatable.processing`, `animation.AnimationState`
+→ `animatable.processing.AnimationTest`) and `getControllerState()` → `getAnimationState()` are shared 1.21.5 rows. ·
+**Anticipates:** §V18b (5.5 on 26.x, where the jar does ship the injection).
+
+L35. **1.21.8 residue from a fork port (CATALOG M50-M52)** · Jade 19's `Element` sizes by the `width`/`height` fields
+(`getSize()` gone); `ScreenEffectRenderer.renderScreenEffect(boolean, float)` is an instance method that also draws the
+totem animation; and with `@OnlyIn` stripped, a common class's former client-only method that widens
+`Minecraft.getInstance().player`/`.level` to `Player`/`Level` fails server verification -- shared rows route it through
+`ClientRefs`. · **Anticipates:** §V79.
+
+L36. **1.21.10 residue from a fork port: GeckoLib 5.3 layer hooks and the 1.21.9 submit pipeline (CATALOG M53, M54)** ·
+`renderStackForBone` → `submitItemStackRender` (+ render colour), which 5.3 calls WITHOUT the bone-pivot transform 5.1/5.2
+applied; `addPerBoneRender` gains `didRenderModel`; `getGeoArmorRenderer(ItemStack, EquipmentSlot)`. Mixins: `render` →
+`submit` on entity renderers and `EntityRenderDispatcher`, `setupRender` → `cullTerrain`, `renderScreenEffect(..., SubmitNodeCollector)`;
+a see-through-entity `MultiBufferSource` wrapper becomes a `SubmitNodeCollector` wrapper. · **Anticipates:** §V6 (26.x).
+
+L37. **GeckoLib 5.4.5 (1.21.11), from a fork port (CATALOG M55)** · `GeoModel.setCustomAnimations` gone (head look →
+renderer `adjustModelBonesForRender(RenderPassInfo, BoneSnapshots)`); `preRender`/layer hooks take `RenderPassInfo`; no
+controller `State` (`GeoControllers.isStopped`: `getPlayState() == STOP || hasAnimationFinished()`, read BEFORE any `reset()`), `forceAnimationReset()` → `reset()` (which sets STOP); `buildRenderTask` →
+`GeoPasses.submitModel`; `GeoBone.isHidden()` → `frameSnapshot.isHidden()`. · **Anticipates:** §V18d.
+
 **Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
 §X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
 no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:

@@ -38,7 +38,8 @@ re:RenderSystem\.setShader\(GameRenderer::getPositionShader\)	RenderSystem.setSh
 re:GlStateManager\._clear\(([^;]*), false\);	GlStateManager._clear(\1);
 re:\bLevelRenderer\.renderLineBox\(	net.minecraft.client.renderer.ShapeRenderer.renderLineBox(
 re:RenderSystem\.runAsFancy\(	@MVPKG@.Mv.run(
-re:(\w+)\.getBoundingBoxForCulling\(\)	@MVPKG@.Mv.cullingBox(\1)
+# the receiver is the whole chain (`this.entity`, `a.b()`), never its tail; a bare super./this. receiver is left alone
+re:((?<![\w$.])(?!(?:super|this)\.getBoundingBoxForCulling\b)[\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*)\.getBoundingBoxForCulling\(\)	@MVPKG@.Mv.cullingBox(\1)
 re:\(EntityRenderer<\? super (\w+)>	(EntityRenderer<? super \1, ?>
 re:EntityRenderer<\? super (\w+)> (\w+) =	EntityRenderer<? super \1, ?> \2 =
 # 1.21.2 dropped the yaw argument of EntityRenderDispatcher.render(entity, x, y, z, yaw, partialTick, ...)
@@ -62,13 +63,30 @@ re:new RenderStateShard\.ShaderStateShard\(	new @MVPKG@.ShaderShard(
 re:\b(\w+)\.create\((\w*[lL]evel)\)	\1.create(\2, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
 re:EntityType\.loadEntityRecursive\(([^,]+), (\w+), 	EntityType.loadEntityRecursive(\1, \2, net.minecraft.world.entity.EntitySpawnReason.LOAD, 
 re:import net\.neoforged\.neoforge\.common\.util\.DummySavedData;\n	
+# ---- registry ids in Properties (CATALOG R25; 1.21.2): a registration supplier names what it builds, and every
+# Properties a Block or Item is built from takes that name (@MVPKG@.RegIds). Prefix-only on the supplier, so no row
+# has to find a closing parenthesis. A registration by constructor reference (`REG.register("name", Y::new)`, Y a Supplier-shaped no-arg
+# constructor) becomes the same entering supplier; without it Y builds its Properties with no name recorded
+re:(\.register\(\s*"([a-z0-9_./-]+)"\s*,\s*)([A-Za-z_][\w.$]*)::new\b	\1() -> @MVPKG@.RegIds.enter("\2") ? null : new \3()
+re:(\.register\(\s*"([a-z0-9_./-]+)"\s*,\s*\(\)\s*->\s*)(new\s)	\1@MVPKG@.RegIds.enter("\2") ? null : \3
+re:\bnew ((?:Item\.)?Properties\(\))	@MVPKG@.RegIds.stamp(new \1)
+# the same, written fully qualified (the bare rows above cannot see past the package prefix)
+re:\bnew (net\.minecraft\.world\.item\.Item\.Properties\(\))	@MVPKG@.RegIds.stamp(new \1)
+re:(?<![\w.])(net\.minecraft\.world\.level\.block\.(?:state\.BlockBehaviour|Block)\.Properties\.of(?:(?:Full|Legacy)Copy)?\((?:[^()]|\([^()]*\))*\))	@MVPKG@.RegIds.stamp(\1)
+re:(?<![\w.])((?:BlockBehaviour\.|Block\.)?Properties\.of\(\))	@MVPKG@.RegIds.stamp(\1)
+re:(?<![\w.])((?:BlockBehaviour\.|Block\.)?Properties\.of(?:Full|Legacy)Copy\((?:[^()]|\([^()]*\))*\))	@MVPKG@.RegIds.stamp(\1)
 # ---- mixin targets (invisible to javac; audit-mixin-targets.py checks them against the target's sources)
 re:@Inject\(method = "hurt",([^\n]*)\n(\s*)private void ([\w$]+)\(DamageSource (\w+),	@Inject(method = "hurtServer",\1\n\2private void \3(net.minecraft.server.level.ServerLevel mv$hurtLevel, DamageSource \4,
 re:@Inject\(method = "actuallyHurt",([^\n]*)\n(\s*)private void ([\w$]+)\(DamageSource (\w+),	@Inject(method = "actuallyHurt",\1\n\2private void \3(net.minecraft.server.level.ServerLevel mv$hurtLevel, DamageSource \4,
 re:"changeDimension\(Lnet/minecraft/world/level/portal/DimensionTransition;\)Lnet/minecraft/world/entity/Entity;"	"teleport(Lnet/minecraft/world/level/portal/TeleportTransition;)Lnet/minecraft/world/entity/Entity;"
+# EnderDragon.hurt(List<Entity>) (the head/body contact damage) became hurt(ServerLevel, List<Entity>) in 1.21.2
+re:"hurt\(Ljava/util/List;\)V"	"hurt(Lnet/minecraft/server/level/ServerLevel;Ljava/util/List;)V"
 re:LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;
 re:@Inject\(method = "render",(\s*at = @At\(value = "INVOKE",\s*target = "Lcom/mojang/blaze3d/vertex/PoseStack;popPose\(\)V")	@Inject(method = "renderItemModelRaw",\1
 re:(int \w+, int \w+, BakedModel \w+,)(\s*)CallbackInfo ci\)	\1 boolean mv$flat, float mv$depth,\2CallbackInfo ci)
+# SmithingTransformRecipe/SmithingTrimRecipe hold Optional<Ingredient> template/base/addition since 1.21.2: an
+# @Accessor returning Ingredient no longer matches the field (callers then fail to compile and get .orElse(null))
+re:(@Accessor\("(?:template|base|addition)"\)\s*)Ingredient\b	\1java.util.Optional<Ingredient>
 # GeckoLib 4.7.3 (1.21.3) / 4.8.5 (1.21.4): GeoRenderLayer preRender/render gained a trailing int colour
 re:(VertexConsumer \w+, float \w+,\s*int \w+, int \w+)\) \{	\1, int renderColor) {
 #!strict

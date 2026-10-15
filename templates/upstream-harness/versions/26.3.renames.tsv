@@ -1,0 +1,6 @@
+# 26.3 (NeoForge 26.3.0): the harness renames are those of 26.2, plus the rows below.
+#!inherit 26.2
+# Measured against the 26.3 sources (minecraft-patched-26.3.0.76-sources.jar) on the first layer-fork port's Gate A.
+# Entity.setInvulnerable(b) is setPermanentlyInvulnerable(b) (26.3 splits permanent and temporary invulnerability;
+# isInvulnerable() is either). The harness calls it on its server player only.
+re:\bsp\.setInvulnerable\(	sp.setPermanentlyInvulnerable(

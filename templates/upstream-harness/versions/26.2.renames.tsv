@@ -1,0 +1,9 @@
+# 26.2 (NeoForge 26.2.0): the harness renames are those of 26.1.2, plus the rows below.
+#!inherit 26.1.2
+# Measured against the 26.2 sources (minecraft-patched-26.2.0.90-sources.jar) on the first layer-fork port's Gate A.
+# Minecraft lost its screen field, setScreen and toast manager to Gui (CATALOG V100): mc.gui.screen(), mc.gui.setScreen(..),
+# mc.gui.toastManager(); getMainRenderTarget() is GameRenderer.mainRenderTarget() (V99). The harness names its client `mc`.
+re:\bmc\.screen\b	mc.gui.screen()
+re:\bmc\.setScreen\(	mc.gui.setScreen(
+re:\bmc\.getToastManager\(\)	mc.gui.toastManager()
+re:\bmc\.getMainRenderTarget\(\)	mc.gameRenderer.mainRenderTarget()

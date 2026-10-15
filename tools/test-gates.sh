@@ -41,9 +41,26 @@ plant; printf 'PK\x03\x04not-gradle' > "$T/gradle-wrapper.jar";                 
 
 echo "3. a skipped name check must FAIL under --strict, never pass"
 plant; printf 'hello\n' > "$T/E.md"
-( python3 "$ROOT/tools/check-no-ip.py" --root "$T" --strict >/dev/null 2>&1 )
+( env -u FORBIDDEN_NAMES_FILE python3 "$ROOT/tools/check-no-ip.py" --root "$T" --strict >/dev/null 2>&1 )
 [ $? = 2 ] && { echo "  PASS  --strict without --names exits 2"; pass=$((pass+1)); } \
            || { echo "  FAIL  --strict without --names did not exit 2"; fail=$((fail+1)); }
+
+echo "3b. without --names, FORBIDDEN_NAMES_FILE (environment, else <root>/.env.local) is the list; unreadable is a failure"
+plant; printf 'we ported SomeMod last week\n' > "$T/F.md"; printf 'somemod\n' > "$T/../envnames.$$"
+( FORBIDDEN_NAMES_FILE="$T/../envnames.$$" python3 "$ROOT/tools/check-no-ip.py" --root "$T" --strict >/dev/null 2>&1 )
+[ $? = 1 ] && { echo "  PASS  the environment's list is used without --names"; pass=$((pass+1)); } \
+           || { echo "  FAIL  FORBIDDEN_NAMES_FILE was not used"; fail=$((fail+1)); }
+# a path written INTO .env.local is read by Python as is: on Windows (Git Bash) it must be a native path, which the
+# shell converts only for arguments and environment variables, never for file contents
+envpath="$T/../envnames.$$"; command -v cygpath >/dev/null 2>&1 && envpath="$(cygpath -m "$envpath")"
+printf 'FORBIDDEN_NAMES_FILE=%s\n' "$envpath" > "$T/.env.local"
+( env -u FORBIDDEN_NAMES_FILE python3 "$ROOT/tools/check-no-ip.py" --root "$T" --strict >/dev/null 2>&1 )
+[ $? = 1 ] && { echo "  PASS  <root>/.env.local's list is used without --names"; pass=$((pass+1)); } \
+           || { echo "  FAIL  .env.local's FORBIDDEN_NAMES_FILE was not used"; fail=$((fail+1)); }
+rm -f "$T/.env.local" "$T/../envnames.$$"
+( FORBIDDEN_NAMES_FILE="$T/../no-such-names.$$" python3 "$ROOT/tools/check-no-ip.py" --root "$T" >/dev/null 2>&1 )
+[ $? = 2 ] && { echo "  PASS  a configured list that is missing exits 2 (not a silent skip)"; pass=$((pass+1)); } \
+           || { echo "  FAIL  a missing FORBIDDEN_NAMES_FILE was skipped"; fail=$((fail+1)); }
 
 echo "4. the name list, when supplied, must actually match"
 plant; printf 'we ported SomeMod last week\n' > "$T/F.md"; printf 'somemod\n' > "$T/names.txt"

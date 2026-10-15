@@ -18,7 +18,7 @@ EXIT CODES     0 clean    1 violation found    2 could not run
 A "could not run" is a FAILURE, never a pass. A gate that quietly did not run reports identically
 to one that passed, and this tool guards something unrecoverable.
 """
-import argparse, hashlib, pathlib, re, subprocess, sys
+import argparse, hashlib, os, pathlib, re, subprocess, sys
 
 # --- 1. binaries -------------------------------------------------------------------------------
 # A jar IS the thing we must never ship. Class files are compiled third-party code. Minecraft
@@ -47,6 +47,8 @@ ALLOWED_PACKAGE_ROOTS = (
     "com.google", "org.apache", "org.slf4j", "it.unimi", "org.lwjgl", "io.netty", "com.electronwill",
     "org.objectweb", "org.joml", "oshi",
     "mezz.jei",                                           # a published maven API (plan decision 6)
+    "software.bernie.geckolib", "com.geckolib",           # GeckoLib's published API (MIT; 5.5+ uses com.geckolib):
+                                                          # imports and calls only -- never its method bodies or source
     "com.example",                                        # the placeholder package the templates use
     "com.forgeupgrade",                                   # our own smoke-harness package
 )
@@ -107,6 +109,21 @@ def tracked_files(root):
 SUBSTRING_MIN_LEN = 6
 
 
+def default_names(root):
+    """(path, where) of the name list when --names is not given: FORBIDDEN_NAMES_FILE in the environment, else in
+    <root>/.env.local -- where CLAUDE.md has every agent put it (tools/install-hooks.sh reads the same two). (None, None)
+    when neither names one."""
+    if os.environ.get("FORBIDDEN_NAMES_FILE"):
+        return os.path.expanduser(os.environ["FORBIDDEN_NAMES_FILE"]), "FORBIDDEN_NAMES_FILE"
+    env = root / ".env.local"
+    try:
+        hits = [l.split("=", 1)[1].strip() for l in env.read_text(encoding="utf-8").splitlines()
+                if l.startswith("FORBIDDEN_NAMES_FILE=")]
+    except OSError:
+        hits = []
+    return (os.path.expanduser(hits[-1]), f"{env}") if hits and hits[-1] else (None, None)
+
+
 def load_names(path):
     """One name per line. `re:<regex>` lines are matched as regular expressions (case-insensitive),
     for a mod whose id is also an ordinary English word and can only be recognised in context."""
@@ -163,6 +180,14 @@ def main():
     if not root.is_dir():
         print(f"check-no-ip: no such directory: {root}", file=sys.stderr)
         return 2
+    if a.names is None:
+        # the list an agent configured (CLAUDE.md): a configured list that cannot be read is a failure, never a skip
+        a.names, where = default_names(root)
+        if a.names and not pathlib.Path(a.names).is_file():
+            print(f"check-no-ip: FAIL -- {where} names {a.names}, which is not a readable file", file=sys.stderr)
+            return 2
+        if a.names:
+            print(f"check-no-ip: names from {where}")
 
     if a.push_range is not None:
         names = load_names(a.names)

@@ -12,7 +12,9 @@ CATALOG.md entries those errors match -> recompile. A worker cannot compile; the
 Model tiers (plan step 6): a batch is worked by --first-model; a file still failing after that goes
 to the next tier (haiku -> sonnet -> opus). Every worker's exact dollar cost (Claude Code's own
 `total_cost_usd`) and tokens are logged per batch, with the model, so the run answers "which tier
-fixed what, for how much".
+fixed what, for how much". A worker that returns no result (timed out) has no such figure: it is charged an
+estimate against --budget (the larger of this run's average for its model and the model's prior), and its log
+line says so (`usd_unknown`, `usd_note`).
 
 Propagation (plan step 7, H1): a worker may end with `RULE: <from><TAB><to>` (a rename-table row,
 plain / member: / re:). The loop applies each proposed row to the whole tree through
@@ -134,7 +136,7 @@ def layer_tracked(work, ov):
                           capture_output=True).returncode == 0
 
 
-def layer_drop_unneeded(work, log, heap, limit, candidates=None):
+def layer_drop_unneeded(work, log, heap, limit, candidates=None, syntax_base=None):
     """After a row went in: move every overlay THIS RUN created (never a committed one) aside in ONE compile; those
     whose file now has no error are unnecessary (the row reaches the file again) and are dropped, the rest are
     restored. Nothing is dropped unless the final count stays <= limit. Returns (dropped paths, count)."""
@@ -143,6 +145,8 @@ def layer_drop_unneeded(work, log, heap, limit, candidates=None):
     if not cand:
         return [], None
     saved = {ov: pathlib.Path(ov).read_text(encoding="utf-8", errors="replace") for ov in cand}
+    # a syntax error that was there before (the last compile's log) is not one the drop made
+    base = syntax_errors(log) if syntax_base is None else syntax_base
     for ov in cand:
         pathlib.Path(ov).unlink()
 
@@ -150,14 +154,14 @@ def layer_drop_unneeded(work, log, heap, limit, candidates=None):
         for ov in which:
             pathlib.Path(ov).write_text(saved[ov], encoding="utf-8")
     n, errs = compile_(work, log, heap)
-    if n is None:
+    if n is None or syntax_errors(log) > base:     # the drop breaks a file the overlay was covering: keep every overlay
         restore(cand); return [], None
     needed = [ov for ov in cand if ov in {f for f, _l, _m in errs}]
     restore(needed)
     dropped = [ov for ov in cand if ov not in needed]
     if dropped and needed:
         n, _e = compile_(work, log, heap)
-    if not dropped or n is None or (limit is not None and n > limit):
+    if not dropped or n is None or (limit is not None and n > limit) or syntax_errors(log) > base:
         restore(dropped); return [], None
     for ov in dropped:
         del LAYER["created"][ov]
@@ -414,16 +418,21 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
     t0 = time.time()
     extra = ["--add-dir", srcs] if srcs else []
-    snap = singleshot.sibling_snapshot(work)
-    r = subprocess.run(["claude", "-p", prompt, "--model", MODELS[model], "--output-format", "json",
-                        "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Grep,Glob", *extra],
-                       cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       timeout=timeout)
-    outside = singleshot.restore_siblings(snap)
+    try:
+        r = subprocess.run(["claude", "-p", prompt, "--model", MODELS[model], "--output-format", "json",
+                            *singleshot.worker_permissions(work), *extra],
+                           cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # a worker that overran is a failed attempt, not the end of the loop: raised inside the round's thread pool it
+        # used to take the whole run down with it, without a count (measured: a Sonnet subsystem job, 323 errors left).
+        # Whatever it edited before the timeout is judged by the next compile like any other edit.
+        r = subprocess.CompletedProcess([], 124, "", f"worker timed out after {timeout}s")
     try:
         d = json.loads(r.stdout)
     except ValueError:
-        d = {"result": (r.stdout + r.stderr)[-500:], "total_cost_usd": 0, "is_error": True}
+        # no result (timed out, or claude died): its cost is unknown, not $0 -- charge_unknown() prices it
+        d = {"result": (r.stdout + r.stderr)[-500:], "total_cost_usd": 0, "is_error": True, "usd_unknown": True}
     res = d.get("result") or ""
     rule = re.search(r'^RULE:\s*(.+)$', res, re.M)
     rule = rule.group(1).strip() if rule and not rule.group(1).strip().lower().startswith("none") else None
@@ -433,8 +442,8 @@ def run_worker(work, files, by, sigs, entries, model, target, srcs, timeout, sub
     return {"model": model, "files": [rel(f) for f in files], "errors_in": sum(len(by[f]) for f in files),
             "entries": ids, "usd": d.get("total_cost_usd") or 0, "usage": d.get("usage"),
             "turns": d.get("num_turns"), "secs": round(time.time() - t0), "is_error": d.get("is_error"),
-            "reverted_outside": outside or None,
-            "rule": rule, "result": res[-600:]}
+            "denied_outside": singleshot.denied_outside(d),
+            "rule": rule, "result": res[-600:], "usd_unknown": bool(d.get("usd_unknown"))}
 
 
 def norm_row(row):
@@ -444,12 +453,64 @@ def norm_row(row):
     return row
 
 
+SYNTAX = re.compile(r"(?m)^\S+\.java:\d+: error: (?:\S+(?: or \S+)* expected$|enum constant expected here|illegal start of|"
+                    r"class, interface, enum, or record expected|reached end of file while parsing|not a statement)")
+PROPOSED = "proposed by a file-loop worker"
+
+
+def lint_row(row):
+    """Why a worker's proposed row is not a row (None when it is one). A worker answers in prose; what it calls a row
+    can carry its explanation, a `<placeholder>` or markdown into the replacement, and the table would then write that
+    text into source files."""
+    parts = row.split("\t")
+    if len(parts) < 2:
+        return "no TAB in the row"
+    to = parts[1]
+    if "`" in row or "→" in row:
+        return "markdown or an arrow in the row (a worker's explanation, not a replacement)"
+    if re.search(r"<[a-z][a-zA-Z]*>", to) and not re.search(r"\w<[a-z][a-zA-Z]*>", to):
+        return "a <placeholder> in the replacement"
+    if re.search(r"[a-z]\.\s+[A-Z][a-z]+\s+[a-z]+\s+[a-z]+", to) or len(parts) > 3 or (len(parts) == 3 and parts[2].strip()):
+        return "prose after the replacement"
+    if re.search(r"\s\(\w[^()]*\b(?:verify|judgement|judgment|check|note)\b", to, re.I):
+        return "a remark in the replacement"
+    return None
+
+
+def syntax_errors(log):
+    """javac's syntax-family errors in a compile log. A row that breaks a file's syntax LOWERS the count (javac stops
+    attributing that compile, CATALOG X5b) -- below burndown-count.sh's half-the-errors guard it still reads as a count."""
+    try:
+        return len(SYNTAX.findall(pathlib.Path(log).read_text(encoding="utf-8", errors="replace")))
+    except OSError:
+        return 0
+
+
+def lint_table(table):
+    """Drop rows a worker proposed (`# X<n>: proposed by ...` above them) that lint_row rejects. -> [(row, why)]."""
+    if not table.exists():
+        return []
+    lines, out, dropped = table.read_text(encoding="utf-8").splitlines(), [], []
+    i = 0
+    while i < len(lines):
+        if PROPOSED in lines[i] and i + 1 < len(lines) and (why := lint_row(lines[i + 1])):
+            dropped.append((lines[i + 1], why)); i += 2; continue
+        out.append(lines[i]); i += 1
+    if dropped:
+        table.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return dropped
+
+
 def try_rule(work, src, row, n_before, log, heap, n_rule, tried=None):
     """Apply one proposed row tree-wide; keep it only if the error count falls -- or, in layer mode, stays equal while
-    it makes an overlay this run created unnecessary. A row already tried in this run (same from/to) is skipped."""
+    it makes an overlay this run created unnecessary. A row already tried in this run (same from/to) is skipped.
+    A row is reverted when it ADDS syntax errors: counted against the log of the compile before it (`log` as it stands
+    on entry), so a syntax error already in the tree does not fail every row."""
     row = norm_row(row)
-    if "\t" not in row:
-        return False, "no TAB in the row"
+    syn0 = syntax_errors(log)
+    why = lint_row(row)
+    if why:
+        return False, why
     if tried is not None:
         key = tuple(x.strip() for x in row.split("\t")[:2])
         if key in tried:
@@ -462,8 +523,11 @@ def try_rule(work, src, row, n_before, log, heap, n_rule, tried=None):
                          + f"# X{n_rule}: proposed by a file-loop worker, kept because the error count fell\n{row}\n",
                          encoding="utf-8")
         n, _e = compile_(work, log, heap)
+        if n is not None and syntax_errors(log) > syn0:
+            table.write_text(before, encoding="utf-8")
+            return False, f"the row broke a file's syntax ({syntax_errors(log)} syntax error(s), {syn0} before): reverted"
         if n is not None and n == n_before:
-            dropped, n2 = layer_drop_unneeded(work, log, heap, n_before)
+            dropped, n2 = layer_drop_unneeded(work, log, heap, n_before, syntax_base=syn0)
             if dropped:
                 return True, (f"{n_before} -> {n2}: dropped {len(dropped)} loop overlay(s) the row makes "
                               f"unnecessary ({', '.join(os.path.relpath(x, work) for x in dropped[:3])})")
@@ -481,9 +545,9 @@ def try_rule(work, src, row, n_before, log, heap, n_rule, tried=None):
         shutil.rmtree(src); shutil.copytree(snap, src)
         return False, (r.stdout + r.stderr).strip().splitlines()[-1:] or ["no change"]
     n, _e = compile_(work, log, heap)
-    if n is None or n >= n_before:
+    if n is None or n >= n_before or syntax_errors(log) > syn0:
         shutil.rmtree(src); shutil.copytree(snap, src)
-        return False, f"compile {n} >= {n_before}: reverted"
+        return False, f"compile {n} >= {n_before} or the row broke a file's syntax: reverted"
     return True, f"{n_before} -> {n}"
 
 
@@ -686,6 +750,7 @@ def finding_round(a, work, sigs, entries, note, kind, hits, idx=None):
                                                    a.target, a.sources, a.timeout, False), groups))
     spent = 0.0
     for r_ in res:
+        charge_unknown(r_)
         spent += r_["usd"]; note(event="worker", round=kind, **r_)
     return spent
 
@@ -704,6 +769,18 @@ def trim_round(plan, left):
 # what one worker request costs before this run has measured its own (per model; a batch job is priced
 # per file): measured means from the ports in docs/EVALS.md, rounded up
 PRIOR_USD = {"haiku": 0.05, "sonnet": 0.08, "opus": 0.40}
+
+
+def charge_unknown(res, avg=None):
+    """A worker with no result (it timed out, or claude died) spent an unknown amount -- never $0, or a run of timeouts
+    spends past --budget unseen. It is charged the larger of this run's average for its model (`avg`) and the
+    model's prior, and its log line says the figure is an estimate. -> res (usd set)."""
+    if res.get("usd_unknown"):
+        m = res.get("model") or "?"
+        est = max(avg or 0.0, PRIOR_USD.get(m, max(PRIOR_USD.values())))
+        res["usd"] = round(est, 4)
+        res["usd_note"] = f"cost unknown (no result: timed out or failed); charged ${est:.3f}, an estimate for {m}"
+    return res
 
 
 def rows_first(work, clog, heap, note, run_rule, rnd, results, n, pre_created):
@@ -778,6 +855,8 @@ def main():
     if a.layer:
         LAYER = layer_setup(work, a.layer)
         tdir = work / ".multiversion/targets" / a.layer
+        for row_, why_ in lint_table(tdir / "renames.tsv"):   # an earlier run's bad row is not this run's starting point
+            print(f"file-loop: dropped an earlier worker row from {a.layer}/renames.tsv ({why_}): {row_[:120]}")
         all_java = lambda: tdir.rglob("*.java")
         if a.target is None:
             a.target = (f"NeoForge {LAYER['neo']} (Minecraft {a.layer}). The file you edit is a per-version OVERLAY "
@@ -901,8 +980,10 @@ def main():
             jobs += [([f], m, "single") for f, m in singles]
             results += sresults
             for res in results:
+                charge_unknown(res, avg(res.get("model") or "?"))
                 state["spent"] += res["usd"]; note(event="worker", round=rnd, **res)
-                c_ = state["cost_of"].setdefault(res.get("model") or "?", [0, 0.0]); c_[0] += 1; c_[1] += res["usd"] or 0
+                if not res.get("usd_unknown"):       # the average is of measured costs only, never of estimates
+                    c_ = state["cost_of"].setdefault(res.get("model") or "?", [0, 0.0]); c_[0] += 1; c_[1] += res["usd"] or 0
             if LAYER and n and any(res["rule"] for res in results):
                 n = rows_first(work, clog, a.heap, note, run_rule, rnd, results, start_n, pre_created)
             before = start_n
@@ -991,14 +1072,14 @@ def main():
         after = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
         if after == before:
             continue
-        why = singleshot.stub_signals(before, after)
+        why = singleshot.stub_signals(before, after, audit=True)
         # a signal must also hold against the AUTHOR's file (git HEAD: the port is uncommitted while the loop
         # runs), or an earlier deterministic stage's reshuffle reads as a worker emptying a method the author
         # had already left empty (measured: an upstream no-op event handler flagged as a stub)
         authored = subprocess.run(["git", "-C", work, "show", f"HEAD:{os.path.relpath(path, work)}"],
                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
         if why and authored.returncode == 0:
-            kinds = {w.split()[0] for w in singleshot.stub_signals(authored.stdout, after)}
+            kinds = {w.split()[0] for w in singleshot.stub_signals(authored.stdout, after, audit=True)}
             why = [w for w in why if w.split()[0] in kinds]
         if not f.exists() and singleshot.REMOVED_API.search(before):
             why = []   # a file built on removed Forge API (§13) is meant to go
@@ -1110,6 +1191,86 @@ def self_check_rows_first():
         globals()["compile_"] = real_compile
         LAYER = saved
     print("self-check rows_first:", "OK" if ok else "FAIL")
+    return ok
+
+
+def self_check_row_lint():
+    """A worker's prose, placeholder or markdown never becomes a row; a syntax error hides errors and is not progress;
+    an earlier run's bad worker row is dropped from the table, a person's row and a good worker row are kept."""
+    import tempfile
+    ok = True
+
+    def expect(c, msg):
+        nonlocal ok
+        if not c:
+            ok = False; print("FAIL:", msg)
+    good = ["UseAnim\tItemUseAnimation", "member:getHolderOrThrow\tgetOrThrow", "List<Foo>\tList<Bar>",
+            "RecipeSerializer<?> getSerializer()\tRecipeSerializer<? extends CustomRecipe> getSerializer()",
+            "re:(VertexConsumer \\w+,\\s*int \\w+)\\) \\{\t\\1, int renderColor) {"]
+    bad = [".sendSystemMessage(\t.displayClientMessage(<msg>, false)",
+           "re:\\.recipeAccess\\(\\)\\.byKey\\(\t`getSingleplayerServer().x()`. This rewrite is not purely mechanical.",
+           "A.sided(s, c)\tB.SUCCESS  (behavioural judgement: verify arm swing)",
+           "a\tb. Then check that it compiles\textra", "no tab here"]
+    expect(all(lint_row(r) is None for r in good), f"good rows pass: {[(r, lint_row(r)) for r in good if lint_row(r)]}")
+    expect(all(lint_row(r) for r in bad), f"bad rows rejected: {[r for r in bad if not lint_row(r)]}")
+    with tempfile.TemporaryDirectory() as d:
+        log = pathlib.Path(d) / "c.log"
+        log.write_text("/w/A.java:3: error: ';' expected\n/w/B.java:4: error: cannot find symbol\n2 errors\n", encoding="utf-8")
+        expect(syntax_errors(log) == 1, "a syntax error is seen even at 1 of 2 (under burndown-count's half guard)")
+        log.write_text("/w/B.java:4: error: cannot find symbol\n1 error\n", encoding="utf-8")
+        expect(syntax_errors(log) == 0, "control: an attribution error is not a syntax error")
+        # a worker with no result (timed out) is charged an estimate, never $0; a measured cost is left as it is
+        expect(charge_unknown({"usd": 0, "usd_unknown": True, "model": "opus"}, 0.9)["usd"] == 0.9
+               and charge_unknown({"usd": 0, "usd_unknown": True, "model": "opus"}, 0.1)["usd"] == PRIOR_USD["opus"]
+               and "estimate" in charge_unknown({"usd": 0, "usd_unknown": True, "model": "haiku"})["usd_note"]
+               and charge_unknown({"usd": 0.02, "usd_unknown": False, "model": "opus"}, 0.9)["usd"] == 0.02,
+               "an unknown (timed-out) worker cost is charged max(run average, prior); a known one is kept")
+        # a syntax error already in the tree (in the compile before the row) does not fail every row; a row that
+        # ADDS one is still reverted -- both on the single-version path (apply-recipes over src) and in layer mode
+        global LAYER
+        real_compile, saved_layer = compile_, LAYER
+        pre_syn = "/w/Z.java:9: error: ';' expected\n"
+        try:
+            for layer in (False, True):
+                w = pathlib.Path(d) / ("lay" if layer else "sv")
+                src = w / "src/main/java"; src.mkdir(parents=True)
+                (src / "A.java").write_text("class A { Foo x; }\n", encoding="utf-8")
+                tbl = w / ".multiversion/targets/1.21.4/renames.tsv"
+                if layer:
+                    tbl.parent.mkdir(parents=True); tbl.write_text("# t\n", encoding="utf-8")
+                LAYER = {"target": "1.21.4", "build": "b", "args": [], "neo": "x", "created": {}, "src_of": {}} if layer else None
+                applied = lambda: (tbl.is_file() and "Foo\tBar" in tbl.read_text(encoding="utf-8")) or \
+                    "Bar" in (src / "A.java").read_text(encoding="utf-8")
+                breaks = [False]
+
+                def fake(work_, log_, heap_):
+                    extra = "/w/A.java:1: error: illegal start of expression\n" if breaks[0] and applied() else ""
+                    n = 2 if applied() else 3
+                    pathlib.Path(log_).write_text(pre_syn + extra + "/w/B.java:4: error: cannot find symbol\n", encoding="utf-8")
+                    return n, []
+                globals()["compile_"] = fake
+                lg = w / "c.log"; lg.write_text(pre_syn + "/w/B.java:4: error: cannot find symbol\n", encoding="utf-8")
+                kept, why = try_rule(w, src, "Foo\tBar", 3, lg, "1g", 1)
+                expect(kept, f"{'layer' if layer else 'single-version'}: a pre-existing syntax error fails the row: {why}")
+                if layer:
+                    tbl.write_text("# t\n", encoding="utf-8")
+                else:
+                    (src / "A.java").write_text("class A { Foo x; }\n", encoding="utf-8")
+                breaks[0] = True
+                lg.write_text(pre_syn + "/w/B.java:4: error: cannot find symbol\n", encoding="utf-8")
+                kept, why = try_rule(w, src, "Foo\tBar", 3, lg, "1g", 2)
+                expect(not kept and not applied(), f"{'layer' if layer else 'single-version'}: a row adding a syntax error is kept: {why}")
+        finally:
+            globals()["compile_"] = real_compile
+            LAYER = saved_layer
+        t = pathlib.Path(d) / "renames.tsv"
+        t.write_text("# a person's row\nFoo\tBar\n# X1: proposed by a file-loop worker, kept because the error count fell\n"
+                     + bad[0] + "\n# X2: proposed by a file-loop worker, kept because the error count fell\nUseAnim\tItemUseAnimation\n",
+                     encoding="utf-8")
+        dropped = lint_table(t)
+        txt = t.read_text(encoding="utf-8")
+        expect(len(dropped) == 1 and "<msg>" not in txt and "Foo\tBar" in txt and "UseAnim\tItemUseAnimation" in txt
+               and "X1:" not in txt, f"lint_table drops only the bad worker row and its comment: {txt!r}")
     return ok
 
 
@@ -1244,6 +1405,7 @@ def self_check():
             globals()["compile_"] = real_compile
     LAYER = None
     ok = self_check_rows_first() and ok
+    ok = self_check_row_lint() and ok
     print("self-check:", "OK" if ok else f"FAIL {sorted(found)} {sorted(inh)} {b}")
     return 0 if ok else 1
 

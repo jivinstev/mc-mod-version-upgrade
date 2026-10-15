@@ -206,6 +206,13 @@ public final class LegacyGl {
         }
     }
 
+    /** The missing-texture sprite: what a declared but never-bound sampler reads (see ShaderInstance.bind). */
+    static GpuTexture missingTexture() {
+        net.minecraft.client.renderer.texture.AbstractTexture t = net.minecraft.client.Minecraft.getInstance().getTextureManager()
+                .getTexture(net.minecraft.client.renderer.texture.MissingTextureAtlasSprite.getLocation());
+        return t == null ? null : t.getTexture();
+    }
+
     /** A sampler named SamplerN with nothing bound to it explicitly takes RenderSystem's texture slot N. */
     static GpuTexture slotTexture(String sampler) {
         if (sampler.startsWith("Sampler")) {

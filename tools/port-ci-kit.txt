@@ -3,6 +3,7 @@
 # Not a release of the migrator -- only what tools/ci-gates.py opens or passes on a command line.
 # Added by hand (not traced; a green run on a layer fork's CI is the check): the layer branch's jobs and what they run --
 # layer-ci.py, the event-listener audit it calls, qtc-init.gradle (Gradle's own classpath), ci-gates --shipped's shipped-gate.py,
+# layer-deps.py (each layer job's `fetch` of the sibling ports' per-target jars its target.properties pins),
 # and the harness rename table of each layer target (port_gates.harness_table reads templates/upstream-harness/versions/<mc>.renames.tsv).
 # Also by hand: the promote job's install-manifest refresh, port-manifest.py (standard library only, self-contained).
 templates/multi-version/tools/gametest_adapter.py
@@ -33,6 +34,7 @@ tools/gate-loop.py
 tools/gen-empty-structure.py
 tools/gitbash.py
 tools/layer-ci.py
+tools/layer-deps.py
 tools/optional-dep-scan.py
 tools/port-manifest.py
 tools/port-publish.py

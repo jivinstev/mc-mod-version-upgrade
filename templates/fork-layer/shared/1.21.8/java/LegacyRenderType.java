@@ -1,4 +1,7 @@
 // OVERLAY-ONLY: shared fork-layer helper from mc-mod-version-upgrade templates/fork-layer/shared (not the authors' code).
+// MV-REQUIRES: LegacyGl
+// MV-REQUIRES: ShaderInstance
+// MV-REQUIRES: ShaderShard
 package @MVPKG@;
 
 import com.mojang.blaze3d.pipeline.BlendFunction;

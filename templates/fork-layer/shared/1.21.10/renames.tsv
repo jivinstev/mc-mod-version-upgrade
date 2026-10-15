@@ -12,4 +12,11 @@
 re:(?<=/)LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/renderer/LightTexture;Lorg/joml/Matrix4f;Lorg/joml/Matrix4f;\)V	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lorg/joml/Matrix4f;Lorg/joml/Matrix4f;Lorg/joml/Matrix4f;Lcom/mojang/blaze3d/buffers/GpuBufferSlice;Lorg/joml/Vector4f;Z)V
 # ... and the callback of an @Inject into it (the same eight 1.21.1 parameters, then the CallbackInfo)
 re:(?<![\w$])(@Inject\(method = "renderLevel"[\s\S]{0,300}?private void [\w$]+\()DeltaTracker (\w+), boolean (\w+), Camera (\w+),\s*GameRenderer \w+, LightTexture \w+,\s*Matrix4f (\w+), Matrix4f (\w+), CallbackInfo (\w+)\)	\1com.mojang.blaze3d.resource.GraphicsResourceAllocator mv$allocator, DeltaTracker \2, boolean \3, Camera \4,\n            Matrix4f \5, Matrix4f \6, Matrix4f mv$cullMatrix, com.mojang.blaze3d.buffers.GpuBufferSlice mv$fog, org.joml.Vector4f mv$fogColor, boolean mv$sky, CallbackInfo \7)
+# ---- harvested from a dependent fork's 1.21.10 (1.21.9 API): Level.isClientSide is a method; FMLEnvironment.dist is
+# getDist(); Screen.hasShiftDown moved to the Minecraft instance; GeckoLib 5.3's renderer addRenderLayer is withRenderLayer
+# (a mod that already calls the 1.21.1 isClientSide() method must not get a second pair of parentheses)
+re:\.isClientSide\b(?!\s*\()	.isClientSide()
+FMLEnvironment.dist	FMLEnvironment.getDist()
+Screen.hasShiftDown	Minecraft.getInstance().hasShiftDown
+addRenderLayer	withRenderLayer
 #!strict

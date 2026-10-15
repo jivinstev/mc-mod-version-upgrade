@@ -383,8 +383,9 @@ def boot(inst, version, log_path, timeout, expect, game_dir=None):
             # Never silently skip. The same rule as a sibling mod's Gate C launcher:
             # a gate that quietly did not run reports identically to one that passed.
             die("headless Linux needs Xvfb:\n"
-                "  apt-get update && apt-get install -y xvfb mesa-utils libgl1-mesa-dri", 2)
+                "  apt-get update && apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0", 2)
         env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+        env.setdefault("SDL_VIDEO_FORCE_EGL", "1")   # 26.3+ (SDL): Xvfb's GLX has no sRGB visual; EGL does (CATALOG §V103)
         cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x720x24"] + cmd
 
     proc = subprocess.Popen(cmd, cwd=str(inst), stdout=subprocess.PIPE,

@@ -70,6 +70,14 @@ def load_failed(text):
 
 
 STALL_SECONDS = 420   # a client whose log has not grown for this long, with no verdict, is stuck, not slow
+# A run that has GIVEN its verdict is done: the client's <MODID>_BOOT_TEST line, the GameTest server's "N required
+# tests passed/failed". Measured: both then often never exit (a JVM that hangs at shutdown after saving the world),
+# and the run sat out the full STALL_SECONDS -- 7 of every 8 minutes of Gate B and of each Gate C phase was that wait.
+# The verdict is read from the log afterwards either way; a run that has not exited this long after it is stopped.
+VERDICT_GRACE = 20
+# the GameTest server's summary only ("All 6 required tests passed :)", "1 required tests failed :(") -- a count, then
+# the words, on word boundaries: a test's own "my_test failed!" is not the verdict (and would cut the run short)
+SERVER_VERDICT = re.compile(r"\b\d+ (?:required |optional )?tests? (?:passed|failed)\b", re.I)
 # Gate B: a STARTED GameTest server that goes quiet this long is stuck too. Measured on a fork's CI: a server
 # hung after start (an exception in a native-callback thread) and sat to the full timeout, 25 minutes, every
 # time. The clock starts only once the server is up, so a long silent compile before it cannot trip it.
@@ -91,6 +99,44 @@ def _stop(proc):
                 proc.kill()
         except Exception:  # noqa: BLE001
             pass
+
+
+def _names_checkout(cmd, work):
+    """Whether a command line names the checkout `work` itself or a path under it -- not a sibling sharing its prefix
+    (/x/fork-b is not /x/fork)."""
+    return re.search(re.escape(work) + r"(?=[/\\\s]|$)", cmd) is not None
+
+
+def _reap(work, since):
+    """Kill every JVM this gate started that outlived its stop: with --no-daemon Gradle forks a single-use daemon in its
+    own session, and the Minecraft client it runs is beyond _stop's process group -- a hung client then kept running,
+    held its Gradle daemon and kept rewriting run/config, so later runs of other targets in the same checkout failed or
+    never went silent (measured: four hung clients across 1.21.8-1.21.11, each needing kill -9). Linux only (/proc);
+    only processes STARTED after `since` (this gate's start, epoch seconds) whose command line names this checkout.
+    -> the pids killed."""
+    if not sys.platform.startswith("linux"):
+        return []
+    work = str(pathlib.Path(work).resolve())
+    try:
+        boot = next(float(l.split()[1]) for l in open("/proc/stat", encoding="utf-8") if l.startswith("btime"))
+        hz = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+    except (OSError, StopIteration, KeyError, ValueError):
+        return []
+    killed = []
+    for d in pathlib.Path("/proc").iterdir():
+        if not d.name.isdigit() or int(d.name) == os.getpid():
+            continue
+        try:
+            cmd = (d / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+            started = boot + int((d / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]) / hz
+        except (OSError, ValueError, IndexError):
+            continue
+        if "java" in cmd and _names_checkout(cmd, work) and started >= since - 1:
+            try:
+                os.kill(int(d.name), 9); killed.append(int(d.name))
+            except OSError:
+                pass
+    return killed
 
 
 def LOG_DIR(work):
@@ -116,11 +162,15 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
         if sys.platform.startswith("linux") and not env.get("DISPLAY"):
             cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x720x24"] + cmd
             env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+            # 26.3+ opens its window with SDL, which asks for an sRGB-capable framebuffer; Xvfb's GLX offers none
+            # ("Couldn't find matching GLX visual", CATALOG V103), so SDL creates the context through EGL on the same
+            # X display instead (needs libegl1 + libegl-mesa0). GLFW (every earlier version) does not read it.
+            env.setdefault("SDL_VIDEO_FORCE_EGL", "1")
     import time
     with open(log, "w", encoding="utf-8") as fh:
         proc = subprocess.Popen(cmd, cwd=work, stdout=fh, stderr=subprocess.STDOUT, env=env,
                                 start_new_session=hasattr(os, "killpg"))
-        start = last_growth = time.time(); size = 0; failed_at = None; why = None; server_up = False
+        start = last_growth = time.time(); size = 0; failed_at = None; why = None; server_up = False; verdict_at = None
         while proc.poll() is None:
             time.sleep(2)
             now = time.time()
@@ -135,7 +185,14 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
                 with open(log, encoding="utf-8", errors="replace") as rd:
                     if load_failed(rd.read()):
                         failed_at = now      # give it a few seconds to finish printing the stack trace
-            if failed_at and now - failed_at > 8:
+            if verdict_at is None and cur:
+                with open(log, encoding="utf-8", errors="replace") as rd:
+                    txt = rd.read()
+                if (BOOT.search(txt) if phase else (server_up and SERVER_VERDICT.search(txt))):
+                    verdict_at = now
+            if verdict_at and now - verdict_at > VERDICT_GRACE:
+                why = f"the run gave its verdict and had not exited {VERDICT_GRACE}s later (a shutdown hang, not a failure)"
+            elif failed_at and now - failed_at > 8:
                 why = "mod loading failed; the client shows the error screen and would wait for a click"
             elif phase and now - last_growth > STALL_SECONDS:
                 why = f"the client's log has not grown for {STALL_SECONDS}s and it has given no verdict"
@@ -148,6 +205,9 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
                 break
         if why:
             fh.write(f"\n[gate-loop] stopped the run: {why}\n")
+            reaped = _reap(work, start)
+            if reaped:
+                fh.write(f"[gate-loop] killed {len(reaped)} leftover JVM(s) of this run (a client beyond the process group): {reaped}\n")
     return pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
 
 
@@ -458,22 +518,21 @@ def call_worker(a, work, srcs, text, phase, note, run):
     prompt = PROMPT.format(target=a.target, failure=text, catalog=ROOT, srcs=srcs or "(none)")
     if phase:
         prompt = prompt.replace("its headless GameTest server (Gate B) fails", f"its real client (Gate C, phase {phase}) fails")
-    snap = _fl().singleshot.sibling_snapshot(work)
+    # a fix belongs in THIS mod: the worker may read the migrator and the sources, but writes only in its own repo
+    # (an edit to the library it depends on, in a sibling repo, is denied and recorded, so the failure surfaces as the
+    # library's own bug instead of a silent half-fix in someone else's tree)
     r = subprocess.run(["claude", "-p", prompt,
-                        "--model", _fl().MODELS[a.model], "--output-format", "json", "--permission-mode", "acceptEdits",
-                        "--allowedTools", "Read,Edit,Write,Grep,Glob", "--add-dir", str(ROOT),
+                        "--model", _fl().MODELS[a.model], "--output-format", "json",
+                        *_fl().singleshot.worker_permissions(work), "--add-dir", str(ROOT),
                         *(["--add-dir", srcs] if srcs else [])],
                        cwd=work, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                        timeout=a.timeout, stdin=subprocess.DEVNULL)
-    # a fix belongs in THIS mod: an edit to a sibling repo (the library it depends on) is undone and recorded,
-    # so the failure surfaces as the library's own bug instead of a silent half-fix in someone else's tree
-    outside = _fl().singleshot.restore_siblings(snap)
     try:
         d = json.loads(r.stdout)
     except ValueError:
         d = {"total_cost_usd": 0, "result": (r.stdout + r.stderr)[-300:]}
     note(event="worker", run=run, phase=phase, model=a.model, usd=d.get("total_cost_usd"), turns=d.get("num_turns"),
-         result=(d.get("result") or "")[-300:], reverted_outside=outside or None)
+         result=(d.get("result") or "")[-300:], denied_outside=_fl().singleshot.denied_outside(d))
     return d.get("total_cost_usd") or 0
 
 
@@ -592,6 +651,47 @@ def self_check():
           and "net.neoforged" not in text and failure_of("All 6 required tests passed :)") is None)
     ok = ok and failure_of("x\nMY_MOD_BOOT_TEST: PASS mode=spawn\n", client=True) is None
     import tempfile
+    if sys.platform.startswith("linux"):   # a run that gave its verdict and then hangs is stopped after the grace, still PASS
+        import time
+        global VERDICT_GRACE
+        saved, VERDICT_GRACE = VERDICT_GRACE, 1
+        try:
+            with tempfile.TemporaryDirectory() as w:
+                g = pathlib.Path(w) / "gradlew"
+                g.write_text("#!/usr/bin/env bash\necho 'EXAMPLEMOD_BOOT_TEST: PASS mode=spawn'\nsleep 120\n", encoding="utf-8")
+                g.chmod(0o755)
+                env_display = os.environ.get("DISPLAY")
+                os.environ["DISPLAY"] = ":0"           # no xvfb-run wrapper for the fake
+                t0 = time.time()
+                text = run_gate(w, "runClient", "1g", str(pathlib.Path(w) / "c.log"), phase="spawn", timeout=60)
+                took = time.time() - t0
+                if env_display is None:
+                    os.environ.pop("DISPLAY", None)
+                else:
+                    os.environ["DISPLAY"] = env_display
+                ok = ok and took < 15 and "gave its verdict" in text and failure_of(text, client=True) is None
+        finally:
+            VERDICT_GRACE = saved
+    if sys.platform.startswith("linux"):   # _reap kills only this checkout's JVMs started after the gate began
+        import time
+        with tempfile.TemporaryDirectory() as w, tempfile.TemporaryDirectory() as other:
+            nap = [sys.executable, "-c", "import time; time.sleep(60)"]
+            old_ = subprocess.Popen(nap + ["java", w], start_new_session=True)
+            time.sleep(1.2); since = time.time()
+            new_ = subprocess.Popen(nap + ["java", w], start_new_session=True)
+            far = subprocess.Popen(nap + ["java", other], start_new_session=True)
+            sib = subprocess.Popen(nap + ["java", w + "-b/run"], start_new_session=True)    # a sibling with w's prefix
+            time.sleep(0.5)
+            got = _reap(w, since)
+            time.sleep(0.3)
+            ok = ok and got == [new_.pid] and new_.poll() is not None and old_.poll() is None and far.poll() is None \
+                and sib.poll() is None
+            for x in (old_, new_, far, sib):
+                x.kill(); x.wait()
+    ok = ok and all(SERVER_VERDICT.search(t) for t in ("All 6 required tests passed :)", "1 required tests failed :(")) \
+        and not any(SERVER_VERDICT.search(t) for t in ("my_test failed!", "examplemod:block_tests failed at 3", "latest failed"))
+    ok = ok and _names_checkout("java -cp /x/fork/build/a.jar ", "/x/fork") and _names_checkout("java /x/fork", "/x/fork") \
+        and not _names_checkout("java -cp /x/fork-b/build/a.jar ", "/x/fork") and not _names_checkout("java /x/forkb ", "/x/fork")
     with tempfile.TemporaryDirectory() as d:                       # Gate B's saved world never outlives a run
         (pathlib.Path(d) / "run/world/data").mkdir(parents=True)
         (pathlib.Path(d) / "run/world/data/bans.dat").write_bytes(b"x")

@@ -106,8 +106,18 @@ def shared_files(repo, target):
     out = {}
     if (src / "renames.tsv").exists():
         out[f".multiversion/shared/{target}/renames.tsv"] = sub((src / "renames.tsv").read_text(encoding="utf-8"))
+    if (src / "accesstransformer.cfg").exists():   # lines the helpers need; fork-port.py's stage adds them to a target's AT
+        out[f".multiversion/shared/{target}/accesstransformer.cfg"] = sub((src / "accesstransformer.cfg").read_text(encoding="utf-8"))
+    build = "".join((repo / n).read_text(encoding="utf-8", errors="replace") for n in ("build.gradle", "gradle.properties")
+                    if (repo / n).is_file())
     for f in sorted((src / "java").glob("*.java")) if (src / "java").is_dir() else []:
-        out[f".multiversion/shared/{target}/java/{pkg.replace('.', '/')}/{f.name}"] = sub(f.read_text(encoding="utf-8"))
+        text = f.read_text(encoding="utf-8")
+        # `// REQUIRES: <token>` -- a helper built on a mod library (GeckoLib) compiles only in a fork whose build names
+        # it; every helper is otherwise installed into every fork, and one that cannot compile breaks the target
+        need = re.findall(r"(?m)^// REQUIRES: (\S+)", text)
+        if any(n not in build for n in need):
+            continue
+        out[f".multiversion/shared/{target}/java/{pkg.replace('.', '/')}/{f.name}"] = sub(text)
     return out
 
 
@@ -130,7 +140,60 @@ def direct_chain(target):
             if l["stable"] and mc_key(base) < mc_key(l["mc"]) <= mc_key(target)]
 
 
+# The layer's machinery: init copies it once; sync-shared keeps it current, so a fork whose layer predates a
+# layer.gradle change (a target's nfrt_version, exclude. lines) builds the way this migrator's targets now assume.
+# A fork's copy is replaced only when it is missing or a verbatim copy of a version this migrator once shipped (its
+# git history); a copy someone edited is reported and left alone -- a human merges it (fork-port's layer_patch guard
+# for tools/layer.py relies on that).
+MACHINERY = ("layer.gradle", "build.sh", "tools/layer.py", "tools/prepare-sources.py")
+_HISTORY = {}
+
+
+def template_history(f):
+    """Every committed version of templates/fork-layer/<f> in this migrator's git history (newline-normalised bytes);
+    an empty set without git."""
+    if f not in _HISTORY:
+        rel = (TPL / f).relative_to(ROOT).as_posix()
+        out = set()
+        try:
+            r = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "--", rel], capture_output=True)
+            for h in r.stdout.decode().split() if r.returncode == 0 else []:
+                s = subprocess.run(["git", "-C", str(ROOT), "show", f"{h}:{rel}"], capture_output=True)
+                if s.returncode == 0:
+                    out.add(s.stdout.replace(b"\r\n", b"\n"))
+        except OSError:
+            pass
+        _HISTORY[f] = out
+    return _HISTORY[f]
+
+
+def sync_machinery(repo, check=False):
+    """(refreshed, diverged): machinery files that differ from the templates. A missing file or a verbatim older
+    template copy is written over (mode kept) unless check; an edited copy is only reported."""
+    drift, diverged = [], []
+    for f in MACHINERY:
+        tpl, mine = TPL / f, repo / ".multiversion" / f
+        if not tpl.is_file():
+            continue
+        if mine.is_file():
+            have = mine.read_bytes().replace(b"\r\n", b"\n")
+            if have == tpl.read_bytes().replace(b"\r\n", b"\n"):
+                continue
+            if have not in template_history(f):
+                diverged.append(f".multiversion/{f}")
+                continue
+        drift.append(f)
+    for f in [] if check else drift:
+        (repo / ".multiversion" / f).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(TPL / f, repo / ".multiversion" / f)
+    return [f".multiversion/{f}" for f in drift], diverged
+
+
 def sync_shared(repo, check=False):
+    machinery, diverged = sync_machinery(repo, check) if (repo / ".multiversion").is_dir() else ([], [])
+    for k in diverged:
+        print(f"sync-shared: DIVERGED {k} is not a copy of any template version this migrator shipped; left alone "
+              f"(merge templates/fork-layer/{k.split('/', 1)[1]} into it by hand)")
     targets = sorted({p.name for p in (repo / ".multiversion/targets").iterdir() if p.is_dir()} | shared_chain_names(repo)) \
         if (repo / ".multiversion/targets").is_dir() else []
     want = {}
@@ -141,17 +204,21 @@ def sync_shared(repo, check=False):
     stale = sorted(set(have) - set(want))
     drift = sorted(k for k, v in want.items() if k not in have or have[k].read_text(encoding="utf-8") != v)
     if check:
+        for k in machinery:
+            print(f"sync-shared: {k} differs from the migrator's layer template")
         for k in drift + stale:
             print(f"sync-shared: {k} differs from the migrator's shared library")
         print(f"sync-shared: {len(want)} file(s) for {', '.join(targets) or 'no targets'}: "
-              f"{'DRIFT' if drift or stale else 'current'}")
-        return 1 if drift or stale else 0
+              f"{'DRIFT' if drift or stale or machinery or diverged else 'current'}")
+        return 1 if drift or stale or machinery or diverged else 0
     for k in stale:
         (repo / k).unlink()
     for k in drift:
         (repo / k).parent.mkdir(parents=True, exist_ok=True)
         (repo / k).write_text(want[k], encoding="utf-8")
     print(f"sync-shared: wrote {len(drift)}, removed {len(stale)}, {len(want)} file(s) in .multiversion/shared")
+    if machinery:
+        print(f"sync-shared: refreshed the layer machinery from the template: {', '.join(machinery)}")
     return 0
 
 
