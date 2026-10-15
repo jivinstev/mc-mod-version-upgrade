@@ -903,7 +903,25 @@ def stop_block(stop):
     return "\n".join(lines)
 
 
-def residue_report(stage, left, errors_view, esc, audit, gates, resume):
+# A red gate that is the MACHINE's, not the code's (issue #113): tools/gate-loop.py's `killed` (the JVM was SIGKILLed with no
+# verdict, usually the OOM killer) and its pre-Gate-C free-memory guard. Re-run when memory is free; never a fixer's job.
+ENVIRONMENTAL = re.compile(r"JVM killed \(exit \d+|not enough free memory \(")
+
+
+def environmental_stop(failed, code, resume, free_now=None):
+    """-> the stop for gates that are ALL red for an environmental reason, or None when any is a code failure."""
+    if not failed or not all(ENVIRONMENTAL.search(l) for l in failed):
+        return None
+    evidence = [l[:300] for l in failed]
+    if free_now:
+        evidence.append(f"free memory now: {free_now[0]} MB ({free_now[1]})")
+    return {"stop": "environmental, not a code failure: " + "; ".join(l[:120] for l in failed[:2]), "code": code,
+            "gates": [l[:200] for l in failed], "detail": evidence, "environment": evidence,
+            "choices": [f"re-run when memory is free (stop other Gradle/Minecraft runs on this machine first): {resume}",
+                        "do NOT send a fixer after the code or exclude a dependency for this: nothing in the code failed"]}
+
+
+def residue_report(stage, left, errors_view, esc, audit, gates, resume, environment=None):
     """RESIDUE.md and its JSON twin. Bounded by construction: groups and the top files, never the raw log."""
     md = [f"# Residue: {stage}", "", f"Stopped at **{stage}**: {left}.", ""]
     if errors_view:
@@ -920,13 +938,21 @@ def residue_report(stage, left, errors_view, esc, audit, gates, resume):
         md.append("")
     if audit:
         md += ["## Mixin audit mismatches", "", "```"] + audit[:14] + ["```", ""]
-    if gates:
+    if environment:
+        md += ["## Environmental: re-run when memory is free", "",
+               "The run was killed or refused for lack of memory; nothing in the code failed. Do not send a fixer after "
+               "it and do not exclude a dependency for it. Evidence:", ""] + [f"- {e}" for e in environment[:8]] + [""]
+    elif gates:
         md += ["## Failing gates", ""] + [f"- {g}" for g in gates[:10]] + [""]
     md += ["## To resume", "", f"`{resume}`", "",
+           "Re-run this when memory is free (stop other Gradle daemons and Minecraft runs on the machine first)."
+           if environment else
            "Fix what is listed here, and put every fix in the shared library "
            "(templates/fork-layer/shared/<t>) or a converter, not in one fork.", ""]
     data = {"stage": stage, "left": left, "errors": errors_view, "loop": esc, "audit": audit, "gates": gates,
             "resume": resume}
+    if environment:
+        data["environment"] = environment
     return "\n".join(md), data
 
 
@@ -1416,6 +1442,10 @@ class Run:
                                     "\"reviewed\" in targets/<t>/STUBS.json to why; then resume with --from-stage loop"]}
             return {"done": f"{len(passed)} gate(s) green ({self.a.gates}){note}"}
         code = 12 if any("Gate C" in l for l in failed) else 11
+        env = environmental_stop(failed, code, self.resume_cmd("gates"),
+                                 load("gl", "gate-loop.py").mem_available_mb() if sys.platform.startswith("linux") else None)
+        if env:
+            return env
         evidence = []       # why each red gate is red: its own log's first compile errors / failing tests
         for l in failed[:2]:
             lp = re.search(r"see (\S+?)(?:[;)\s]|$)", l)
@@ -1553,7 +1583,8 @@ def drive(run, a, skipped, todo):
         resume = run.resume_cmd(stop["stage"])
         view = stop.get("view") or stop.get("detail") or []
         md, data = residue_report(stop["stage"], stop["left"], view if stop["stage"] in ("loop", "measure", "stage", "moves") else [],
-                                  stop.get("esc"), stop.get("audit") or [], stop.get("gates") or [], resume)
+                                  stop.get("esc"), stop.get("audit") or [], stop.get("gates") or [], resume,
+                                  environment=stop.get("environment"))
         rpath = run.tdir / "RESIDUE.md"
         if run.tdir.is_dir():
             rpath.write_text(md, encoding="utf-8")
@@ -2094,6 +2125,35 @@ def self_check():
             run.s_gates()
             expect((td / "GATES.md").is_file() == want_record and gates_auto(td) == ("ab" if want_record else "full"),
                    f"--gates {gates} exit {code}: GATES.md {'kept/written' if want_record else 'removed'}")
+    # ---- issue #113: a Gate C client the OOM killer killed is environmental -- RESIDUE.md says re-run, no fixer
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="full", modid="m", base="x",
+                                direct=False, from_stage="gates", to_stage=None, max_errors=None, confirm_spend=False,
+                                port_checkout=[])
+        for row, env_want in (("JVM killed (exit 137, OOM confirmed: cgroup oom_kill 3 -> 4) after M_BOOT_TEST: spawned 11; "
+                               "2900 MB free at start -- environmental, not a code failure: re-run when memory is free", True),
+                              ("not enough free memory (900 MB free, need 3584; read from MemAvailable): ...", True),
+                              ("java.lang.IllegalStateException: Missing registry: x", False)):
+            run = Run(a_); run.compile_errors = lambda: 0; run.modid = lambda: "m"
+            def ksh(cmd, log=None, cwd=None, row=row):
+                pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
+                pathlib.Path(log).write_text(f"[ci-gates] Gate C -- real client, `spawn`: FAIL -- {row}\n", encoding="utf-8")
+                return CompletedProcess(cmd, 1, "", "")
+            run.sh = ksh
+            st = run.s_gates()
+            expect(st.get("code") == 12 and bool(st.get("environment")) == env_want,
+                   f"a Gate C row {row[:30]!r}: environmental={env_want} (got {st.get('environment')!r})")
+            if env_want:
+                md, data = residue_report("gates", st["stop"], [], None, [], st["gates"], "python3 tools/fork-port.py x",
+                                          environment=st["environment"])
+                expect("re-run when memory is free" in md and "Fix what is listed here" not in md
+                       and "## Failing gates" not in md and data.get("environment")
+                       and not any("fix" in c.lower() and "not" not in c.lower() for c in st["choices"]),
+                       "RESIDUE.md for a killed client: re-run when memory is free, with the evidence, no fixer")
+                expect(any("free" in e for e in st["environment"]), "the evidence carries the free-memory figure")
+    md, _d = residue_report("gates", "x", [], None, [], ["Gate B: FAIL -- tests"], "r")
+    expect("Fix what is listed here" in md and "Environmental" not in md, "a code failure's RESIDUE.md is unchanged")
     # ---- --gates auto: full until GATES.md records a green Gate C
     with tempfile.TemporaryDirectory() as d:
         td = pathlib.Path(d)

@@ -30,7 +30,10 @@ from a port you already finished (say, a 1.21.1 one) instead of a jar, and keeps
 Either way the port runs hop by hop (for example Forge 1.20.1 → NeoForge 1.21.1 → 26.2). Each hop
 applies its recipe pack of known rewrites first, then sends what's left to small per-file workers
 (Haiku first, Sonnet and Opus only as needed). The port must then pass the gates: a headless server,
-behaviour tests written for the mod, a real client, and a screenshot review.
+behaviour tests written for the mod, a real client, and a screenshot review. A real-client run the machine kills (the
+OOM killer: exit 137 and no verdict) is reported as `killed` -- environmental, "re-run when memory is free", with the
+evidence -- never as a crash for a fix worker, and a client is not started with less than 3.5 GB free
+(`MMVU_GATEC_MIN_FREE_MB` overrides; `tools/gate-loop.py`, on every route, single-version and layer forks alike).
 
 ## Porting a mod in its own repository
 

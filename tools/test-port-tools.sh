@@ -431,7 +431,7 @@ out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest, a direct jump (shared_chain) prepares the hop-by-hop chain's tree" \
   || bad "layer.py self-check: $out"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command" \
   || bad "fork-port self-check: $out"
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
@@ -489,7 +489,7 @@ else
   echo "  SKIP  audit-event-listeners (no javac/jar)"
 fi
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b)" || bad "gate-loop self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b); a client killed with exit 137 and no verdict is 'killed' (OOM said only when the cgroup or dmesg confirms it), a caught WARN trace is never the stop reason, and Gate C does not start below the free-memory floor (faked meminfo and cgroup)" || bad "gate-loop self-check: $out"
 out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick and crash-cause self-check" || bad "shipped-gate self-check: $out"
 python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
