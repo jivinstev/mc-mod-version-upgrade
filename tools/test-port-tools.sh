@@ -431,7 +431,7 @@ out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest, a direct jump (shared_chain) prepares the hop-by-hop chain's tree" \
   || bad "layer.py self-check: $out"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command" \
   || bad "fork-port self-check: $out"
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
@@ -489,7 +489,7 @@ else
   echo "  SKIP  audit-event-listeners (no javac/jar)"
 fi
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b)" || bad "gate-loop self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b); a client killed with exit 137 and no verdict is 'killed' (OOM said only when the cgroup or dmesg confirms it), a caught WARN trace is never the stop reason, and Gate C does not start below the free-memory floor (faked meminfo and cgroup)" || bad "gate-loop self-check: $out"
 out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick and crash-cause self-check" || bad "shipped-gate self-check: $out"
 python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
@@ -576,6 +576,27 @@ GR
   [ $good = 0 ] && [ $badkey != 0 ] && grep -q 'escape the' <<<"$out" \
     && ok "layer.gradle: an escaped exclude.<group:module> applies; an unescaped one (no ':' left in the key) stops the build" \
     || bad "layer.gradle exclude keys: escaped exit $good, unescaped exit $badkey: $out"
+  # issue #114: each layer target's client gets its own game directory; without -Pmc the authors' run/ is unchanged
+  # (a stand-in for ModDevGradle's neoForge.runs: no plugin download, no Minecraft)
+  GR="$T/gr"; mkdir -p "$GR"; printf "rootProject.name = 'scratch'\n" > "$GR/settings.gradle"
+  { cat <<'GR'
+class FakeRun { String name; def gameDirectory; FakeRun(String n) { name = n } }
+def runs = project.container(FakeRun) { n -> new FakeRun(n) }
+extensions.add('neoForge', [runs: runs])
+neoForge.runs.create('client') { gameDirectory = file('run') }
+neoForge.runs.create('gameTestServer') { gameDirectory = file('harness/run') }
+tasks.register('printRunDirs') { doLast { neoForge.runs.each { println "RUNDIR ${it.name}=${projectDir.toPath().relativize(file(it.gameDirectory).toPath())}" } } }
+def mvTarget = project.findProperty('mc')?.toString()
+if (mvTarget == null) return
+GR
+    sed -n '/BEGIN-RUN-DIRS/,/END-RUN-DIRS/p' templates/fork-layer/layer.gradle; } > "$GR/build.gradle"
+  rd() { (cd "$GR" && gradle -q --offline printRunDirs "$@" 2>&1) | grep '^RUNDIR' | tr '\\' '/' | sort | tr '\n' ' '; }   # Windows prints build\mc<t>\run
+  r0="$(rd)"; r4="$(rd -Pmc=1.21.4)"; r26="$(rd -Pmc=26.2)"
+  [ "$r0" = "RUNDIR client=run RUNDIR gameTestServer=harness/run " ] \
+    && [ "$r4" = "RUNDIR client=build/mc1.21.4/run RUNDIR gameTestServer=harness/run " ] \
+    && [ "$r26" = "RUNDIR client=build/mc26.2/run RUNDIR gameTestServer=harness/run " ] \
+    && ok "layer.gradle: -Pmc=1.21.4 and -Pmc=26.2 run the client in their own build/mc<t>/run; without -Pmc the run directory is unchanged, and the gates' GameTest server keeps its own" \
+    || bad "layer.gradle run dirs: base=[$r0] 1.21.4=[$r4] 26.2=[$r26]"
 fi
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script; without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (single-version and layer fork); --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back; promote refreshes the install manifest on the port branch only (its script run on a fake fork, single-version and layer: pushed on top of the tag, retried when the branch moved, nothing pushed when unchanged, a bad tag refused)" || bad "port-ci self-check: $out"

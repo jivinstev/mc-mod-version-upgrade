@@ -219,6 +219,60 @@ sim_hook 1 "pre-push: a pushed copy is REFUSED" pre-push "$corpus"
 rm -rf "$SR"
 rm -rf "$H" "$H/../names.$$"
 
+echo "11. gate-loop: a killed client is 'killed', not a crash; a caught WARN trace is never the stop reason (issue #113)"
+# gate-loop is shared by single-version and layer forks and reads no .multiversion/: these cases hold for both
+GL="$(mktemp -d)"
+gl_kind() {  # gl_kind <wanted-kind> <label> <log-file> -- the kind tools/gate-loop.py's classifier gives a client log
+   local got; got="$(python3 -c "import importlib.util as u,sys; s=u.spec_from_file_location('gl', sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); f=m.failure_of(open(sys.argv[2], encoding='utf-8').read(), client=True); print(f[0] if f else 'green')" "$ROOT/tools/gate-loop.py" "$3" 2>&1)"
+   if [ "$got" = "$1" ]; then echo "  PASS  $2 ($got)"; pass=$((pass+1))
+   else echo "  FAIL  $2 -- wanted $1, got $got"; fail=$((fail+1)); fi
+}
+cat > "$GL/warn.txt" <<'LOG'
+[12:00:01] [Render thread/WARN] [o.e.Info/]: Error during loading of villager trades
+java.lang.IllegalStateException: Missing registry: ResourceKey[minecraft:root / minecraft:trade_set]
+	at TRANSFORMER/othermod@1/b.o.Trades.load(Trades.java:3)
+LOG
+{ cat "$GL/warn.txt"; printf 'EXAMPLEMOD_BOOT_TEST: spawned 11 creature type(s)\n'
+  printf "Process 'command '/usr/bin/java'' finished with non-zero exit value 137\n"; } > "$GL/killed.log"
+gl_kind killed "a caught WARN trace, then exit value 137, no verdict" "$GL/killed.log"
+{ cat "$GL/warn.txt"; printf '[12:00:05] [Render thread/ERROR] [minecraft/Minecraft]: Unreported exception thrown!\n'
+  printf 'java.lang.NullPointerException: boom\n\tat TRANSFORMER/examplemod@1/a.m.Spawner.tick(Spawner.java:42)\n'
+  printf "Process 'command '/usr/bin/java'' finished with non-zero exit value 1\n"; } > "$GL/crash.log"
+gl_kind crash "control: a real uncaught crash before the verdict" "$GL/crash.log"
+python3 -c "import importlib.util as u,sys; s=u.spec_from_file_location('gl', sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); f=m.failure_of(open(sys.argv[2], encoding='utf-8').read(), client=True); sys.exit(0 if 'NullPointerException' in f[1] and 'Missing registry' not in f[1] else 1)" "$ROOT/tools/gate-loop.py" "$GL/crash.log" \
+  && { echo "  PASS  the crash reported is the uncaught one, not the caught WARN trace"; pass=$((pass+1)); } \
+  || { echo "  FAIL  the caught WARN trace was reported as the crash"; fail=$((fail+1)); }
+printf 'MemTotal: 16000000 kB\nMemAvailable: 1024000 kB\n' > "$GL/meminfo"; printf '0::/\n' > "$GL/cgroup"
+out="$(env -u MMVU_GATEC_MIN_FREE_MB python3 -c "import importlib.util as u,sys; s=u.spec_from_file_location('gl', sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.memory_guard(sys.argv[2], sys.argv[3], sys.argv[4], linux=True))" "$ROOT/tools/gate-loop.py" "$GL/meminfo" "$GL/nocg" "$GL/cgroup" 2>&1)"
+grep -q '^not enough free memory (1000 MB free, need ' <<<"$out" \
+  && { echo "  PASS  the pre-Gate-C guard stops on a faked 1000 MB MemAvailable"; pass=$((pass+1)); } \
+  || { echo "  FAIL  the free-memory guard did not stop: $out"; fail=$((fail+1)); }
+rm -rf "$GL"
+
+echo "12. guard-names: the forbidden-names guard set up in one command (issue #107)"
+gn_out="$(python3 "$ROOT/tools/guard-names.py" --self-check 2>&1)"
+grep -q "self-check: OK" <<<"$gn_out" \
+  && { echo "  PASS  guard-names --self-check: derivation, a re: line for a short id, merge keeps every line, idempotent, a list inside a repo refused, hooks installed"; pass=$((pass+1)); } \
+  || { echo "  FAIL  guard-names.py --self-check"; tail -15 <<<"$gn_out" | sed 's/^/        /'; fail=$((fail+1)); }
+# no false hits on THIS repository's own text: a fixture mod with an invented id (built at run time, so this file does
+# not name it) and ordinary-word display name, authors and archives name, checked with a scratch list (--dry-run)
+G="$(mktemp -d)"; mkdir -p "$G/mod/src/main/resources/META-INF"
+python3 - "$G/mod" <<'PY'
+import pathlib, sys
+d = pathlib.Path(sys.argv[1]); mid = "qzv" + "exmod"; pkg = "com.qzv" + "ex.ex"
+(d / "src/main/java" / pkg.replace(".", "/")).mkdir(parents=True)
+(d / "src/main/resources/META-INF/neoforge.mods.toml").write_text(
+    '[[mods]]\nmodId="%s"\ndisplayName="Storage"\nauthors="Team, Magic and Arena"\n' % mid, encoding="utf-8")
+(d / "gradle.properties").write_text("mod_id=%s\nmod_group_id=%s\narchives_name=storage\n" % (mid, pkg), encoding="utf-8")
+(d / "src/main/java" / pkg.replace(".", "/") / "M.java").write_text('package %s;\n@Mod("x")\nclass M {}\n' % pkg, encoding="utf-8")
+PY
+: > "$G/names.txt"
+out="$(FORBIDDEN_NAMES_FILE="$G/names.txt" python3 "$ROOT/tools/guard-names.py" ensure --mod-repo "$G/mod" --dry-run 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'would add' <<<"$out" && [ ! -s "$G/names.txt" ] \
+  && { echo "  PASS  ordinary-word names make no false hit on this repository (dry run, scratch list untouched)"; pass=$((pass+1)); } \
+  || { echo "  FAIL  guard-names on this repository: exit $rc"; fail=$((fail+1)); }
+rm -rf "$G"
+
 echo
 echo "gates self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

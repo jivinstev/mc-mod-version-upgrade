@@ -80,7 +80,9 @@ has -- the shared libraries for 26.x start empty and grow from measured hops.
   and without the hook line: `layer.py compare-jars` must say identical for every jar.
 - **Isolated**: `layer.py isolation --base origin/neoforge-1.21.1` -- only `.multiversion/` and the appended
   commented hook differ. Every merge from the base branch is then conflict-free.
-- **Per-target build dir** `build/mc<t>/` (inside the authors' ignored `build/`): targets never share classes.
+- **Per-target build dir** `build/mc<t>/` (inside the authors' ignored `build/`): targets never share classes, and the
+  client runs in `build/mc<t>/run`, so one target's mod configs never reach another's client (a single-version build
+  and the base keep the authors' `run/`).
 - **Versions come from `-P`**: `.multiversion/build.sh <t> <tasks>` passes the target's set; `layer.gradle`
   refuses a `-Pmc` whose versions did not arrive.
 
@@ -202,6 +204,9 @@ full, middle targets compile + audits): this is the port's one look at each vers
 
 0. **Read first**: CATALOG §M and `references/minor-version-deltas.md` (the U and L sections). The first layer
    port re-derived five rows that were already there.
+0b. **Guard the names**: `python3 tools/guard-names.py ensure --mod-repo DIR` plus one `--mod-repo` per fork it depends on (its names go into
+   the list outside this repository; the hook refuses them in shared rows, helpers and catalogue entries). Before a
+   commit here, `guard-names.py check` with the same arguments must pass.
 1. **Measure** every targeted line against the base source before porting anything (one compile per line with
    `-Pminecraft_version/-Pneo_version` and the AT re-derived, `burndown-count.sh`): the counts decide the order
    and set expectations. Post them on the fork's tracking issue.

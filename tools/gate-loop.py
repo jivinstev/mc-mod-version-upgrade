@@ -16,6 +16,13 @@ look in, the Minecraft/NeoForge sources to check APIs, and Read/Edit/Grep/Glob o
 the game; this loop does. Every worker's exact dollars are logged. Stops at "All N required tests
 passed", at --budget, at --max-runs, or when a run fails the same way twice (a fix that did nothing).
 Standard library only; needs the `claude` CLI.
+
+A run the kernel killed (Gradle's "finished with non-zero exit value 137/143", no verdict) is kind `killed`, never a
+crash: no worker is called, and the verdict says "re-run when memory is free" with the evidence (the cgroup's oom_kill
+count and dmesg, read before and after the run where readable, and the free memory at its start). An exception logged
+at WARN/INFO was caught and is never chosen as a stop reason. Before each Gate C client, on Linux, the run stops with
+"not enough free memory" below GATEC_MIN_FREE_MB (3584; MMVU_GATEC_MIN_FREE_MB overrides, 0 = off). These hold for
+single-version and layer forks alike (issue #113).
 """
 import collections, argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys
 
@@ -82,6 +89,171 @@ SERVER_VERDICT = re.compile(r"\b\d+ (?:required |optional )?tests? (?:passed|fai
 # hung after start (an exception in a native-callback thread) and sat to the full timeout, 25 minutes, every
 # time. The clock starts only once the server is up, so a long silent compile before it cannot trip it.
 SERVER_UP = re.compile(r"Started game test server|tests are now running")
+
+
+# A client the kernel KILLED did not crash (issue #113). Measured: other Gradle daemons held ~9 GB of a 15 GB container,
+# the OOM killer SIGKILLed a Gate C client mid-phase (Gradle: "finished with non-zero exit value 137", no verdict), and
+# the classifier reported a third-party mod's exception that was only caught and logged at WARN -- an exception also
+# present on green runs -- as the crash, for a fixer to chase. 137 = 128 + SIGKILL (the OOM killer, or kill -9),
+# 143 = 128 + SIGTERM. A run THIS loop stopped (stall, timeout, verdict grace) says so in its log and is not a kill.
+KILLED = re.compile(r"finished with non-zero exit value (137|143)\b")
+# What a Gate C client needs free before it starts. Measured on the cloud container (dmesg, OOM-killed Gate C clients):
+# anon-rss 2.0, 2.8 and 3.1 GB at the moment of the kill, and still growing; the --no-daemon Gradle JVM that launches it
+# and Xvfb + Mesa's software renderer come on top. 3.5 GB leaves a client room to finish a phase; below it the run is
+# likely to be killed part-way and to cost a full phase timeout for nothing. MMVU_GATEC_MIN_FREE_MB overrides (0 = off).
+GATEC_MIN_FREE_MB = 3584
+LOGGER_CAUGHT = re.compile(r"^\s*\[[^\]]*\]\s*\[[^\]]*/(?:WARN|INFO|DEBUG|TRACE)\]")   # log4j "[time] [thread/WARN] ..."
+TRACE_LINE = re.compile(r"^\s+at |^\s*\.\.\. \d+ (?:more|common frames omitted)|^\s*(?:Caused by|Suppressed): ")
+
+
+def caught(lines, i):
+    """Whether the exception at lines[i] was CAUGHT and logged, not what stopped the run: it is itself a WARN/INFO
+    logger line, or the logger line just before its trace's head is one ("Error during loading of X" at WARN, then the
+    trace). A logged ERROR/FATAL, or a trace with no logger line before it (a crash report, stderr), still counts."""
+    if LOGGER_CAUGHT.match(lines[i]):
+        return True
+    j = i
+    while j > 0 and TRACE_LINE.match(lines[j]) and not LOGGER_CAUGHT.match(lines[j - 1]):
+        j -= 1            # walk up the trace (Caused by / at / ... more) to its head
+    return j > 0 and bool(LOGGER_CAUGHT.match(lines[j - 1]))
+
+
+def _read(path):
+    try:
+        return pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _memcg_dirs(cgroup_root="/sys/fs/cgroup", proc_cgroup="/proc/self/cgroup"):
+    """This process's memory cgroup directories, own first then each ancestor: [(dir, 'v1'|'v2')]. [] when unreadable."""
+    txt, out = _read(proc_cgroup), []
+    for line in (txt or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        if parts[0] == "0" and parts[1] == "":
+            base, ver = pathlib.Path(cgroup_root), "v2"
+        elif "memory" in parts[1].split(","):
+            base, ver = pathlib.Path(cgroup_root) / "memory", "v1"
+        else:
+            continue
+        rel = pathlib.PurePosixPath(parts[2].strip() or "/")
+        chain = [rel] + list(rel.parents)
+        dirs = [base / str(c).lstrip("/") if str(c) != "/" else base for c in chain]
+        out += [(d, ver) for d in dirs if d.is_dir()]
+        if not any(d.is_dir() for d in dirs) and base.is_dir():   # a namespaced view: the root IS this cgroup
+            out.append((base, ver))
+    v1 = [x for x in out if x[1] == "v1"]
+    return v1 or out        # a hybrid host enforces memory in v1 when it has the memory controller there
+
+
+def _stat_field(text, *keys):
+    for l in (text or "").splitlines():
+        k, _, v = l.partition(" ")
+        if k in keys and v.strip().isdigit():
+            return int(v)
+    return 0
+
+
+def mem_available_mb(meminfo="/proc/meminfo", cgroup_root="/sys/fs/cgroup", proc_cgroup="/proc/self/cgroup"):
+    """-> (MB a new process can still get, how it was read) or None when it cannot be read (not Linux). The lower of
+    the kernel's MemAvailable and the memory cgroup's headroom (limit - usage + reclaimable page cache): a container's
+    /proc/meminfo is often the host's, and its cgroup limit is what the OOM killer enforces."""
+    txt = _read(meminfo)
+    m = re.search(r"(?m)^MemAvailable:\s+(\d+)\s*kB", txt or "")
+    if not m:
+        return None
+    best, how = int(m.group(1)) // 1024, "MemAvailable"
+    for d, ver in _memcg_dirs(cgroup_root, proc_cgroup):
+        lim = _read(d / ("memory.max" if ver == "v2" else "memory.limit_in_bytes"))
+        use = _read(d / ("memory.current" if ver == "v2" else "memory.usage_in_bytes"))
+        if not lim or not use or not lim.strip().isdigit() or not use.strip().isdigit() or int(lim) >= 1 << 60:
+            continue          # "max", or v1's "no limit" (a page-rounded 2^63)
+        cache = _stat_field(_read(d / "memory.stat"), "inactive_file", "total_inactive_file")
+        head = max(0, int(lim) - int(use) + cache) // (1 << 20)
+        if head < best:
+            best, how = head, f"memory cgroup headroom ({int(lim) >> 20} MB limit)"
+    return best, how
+
+
+def gatec_min_free_mb():
+    v = os.environ.get("MMVU_GATEC_MIN_FREE_MB", "").strip()
+    return int(v) if v.isdigit() else GATEC_MIN_FREE_MB
+
+
+def memory_guard(meminfo="/proc/meminfo", cgroup_root="/sys/fs/cgroup", proc_cgroup="/proc/self/cgroup", linux=None):
+    """Before a Gate C client starts: -> a "not enough free memory" message, or None to go ahead. Silent (None) where
+    free memory cannot be read -- off Linux, or no /proc/meminfo -- and when MMVU_GATEC_MIN_FREE_MB=0."""
+    if not (sys.platform.startswith("linux") if linux is None else linux):
+        return None
+    need = gatec_min_free_mb()
+    got = mem_available_mb(meminfo, cgroup_root, proc_cgroup) if need else None
+    if got is None or got[0] >= need:
+        return None
+    return (f"not enough free memory ({got[0]} MB free, need {need}; read from {got[1]}): a Gate C client needs about "
+            f"3 GB and would be killed part-way. Environmental, not the code: stop other Gradle/Minecraft runs on this "
+            f"machine (other checkouts' gates, idle Gradle daemons) and re-run, or set MMVU_GATEC_MIN_FREE_MB to override")
+
+
+def oom_snapshot(cgroup_root="/sys/fs/cgroup", proc_cgroup="/proc/self/cgroup"):
+    """What says the OOM killer fired, read before and after a run: {"cgroup": oom_kill count or None, "dmesg": count
+    of kill lines or None, "last": the newest kill line}. Each part is None where it cannot be read (dmesg is often
+    restricted); Linux only."""
+    snap = {"cgroup": None, "dmesg": None, "last": ""}
+    if not sys.platform.startswith("linux"):
+        return snap
+    for d, ver in _memcg_dirs(cgroup_root, proc_cgroup)[:1]:
+        t = _read(d / ("memory.events" if ver == "v2" else "memory.oom_control"))
+        m = re.search(r"(?m)^oom_kill (\d+)", t or "")
+        if m:
+            snap["cgroup"] = int(m.group(1))
+    try:
+        r = subprocess.run(["dmesg"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        if r.returncode == 0:
+            kills = [l.strip() for l in r.stdout.splitlines() if re.search(r"Killed process \d+|Out of memory", l)]
+            snap["dmesg"], snap["last"] = len(kills), (kills[-1] if kills else "")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return snap
+
+
+def oom_note(before, after):
+    """The log line run_gate writes when the OOM killer fired during the run, or None."""
+    ev = []
+    if before.get("cgroup") is not None and after.get("cgroup") is not None and after["cgroup"] > before["cgroup"]:
+        ev.append(f"cgroup oom_kill {before['cgroup']} -> {after['cgroup']}")
+    if before.get("dmesg") is not None and after.get("dmesg") is not None and after["dmesg"] > before["dmesg"]:
+        last = re.sub(r"^\[[^\]]*\]\s*", "", after["last"])      # drop the kernel timestamp
+        ev.append(f"dmesg: {last[:240]}")
+    return f"[gate-loop] OOM killer fired during this run: {'; '.join(ev)}" if ev else None
+
+
+def killed_of(text, client):
+    """A run with no verdict that the kernel killed (exit 137/143), not one that crashed: -> (kind 'killed', text,
+    signature) or None. The text's first line carries the evidence (OOM confirmed or not, the free memory at start)."""
+    if "[gate-loop] stopped the run:" in text:
+        return None       # this loop stopped it (SIGTERM, then SIGKILL): a stall or timeout, judged as before
+    hits = list(KILLED.finditer(text))
+    if not hits or (not client and SERVER_VERDICT.search(text)):
+        return None
+    code = hits[-1].group(1)
+    before = text[:hits[-1].start()].splitlines()
+    phase_line = next((l.strip() for l in reversed(before) if "_BOOT_TEST" in l), None) or \
+        next((l.strip() for l in reversed(before) if re.match(r"^\s*\[[^\]]*\]\s*\[[^\]]*/(?:INFO|WARN|ERROR)\]", l)),
+             "the start of the run")
+    oom = re.search(r"(?m)^\[gate-loop\] OOM killer fired during this run: (.*)$", text)
+    free = re.search(r"(?m)^\[gate-loop\] memory: (\d+) MB free at start", text)
+    sig = f"JVM killed (exit {code}, {'SIGKILL/OOM' if code == '137' else 'SIGTERM'}) after {phase_line[:120]}"
+    how = (f"OOM confirmed: {oom.group(1)}" if oom else
+           "OOM not confirmed (no cgroup oom_kill rise or dmesg line readable)" if code == "137" else
+           "terminated by a signal from outside this loop")
+    first = (f"JVM killed (exit {code}, {how}) after {phase_line[:160]}"
+             + (f"; {free.group(1)} MB free at start" if free else "")
+             + " -- environmental, not a code failure: re-run when memory is free")
+    # the last lines before the kill, without any logged trace: an exception caught earlier is not what ended the run
+    tail = [l.strip() for l in before if l.strip() and not TRACE_LINE.match(l) and not EXC_HEAD.match(l.strip())][-6:]
+    return "killed", "\n".join([first] + tail), sig[:200]
 
 
 def _stop(proc):
@@ -167,6 +339,8 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
             # X display instead (needs libegl1 + libegl-mesa0). GLFW (every earlier version) does not read it.
             env.setdefault("SDL_VIDEO_FORCE_EGL", "1")
     import time
+    oom0 = oom_snapshot()
+    free0 = mem_available_mb() if sys.platform.startswith("linux") else None
     with open(log, "w", encoding="utf-8") as fh:
         proc = subprocess.Popen(cmd, cwd=work, stdout=fh, stderr=subprocess.STDOUT, env=env,
                                 start_new_session=hasattr(os, "killpg"))
@@ -208,6 +382,11 @@ def run_gate(work, task, heap, log, phase=None, timeout=1500):
             reaped = _reap(work, start)
             if reaped:
                 fh.write(f"[gate-loop] killed {len(reaped)} leftover JVM(s) of this run (a client beyond the process group): {reaped}\n")
+        if free0:
+            fh.write(f"\n[gate-loop] memory: {free0[0]} MB free at start ({free0[1]})\n")
+        oom = oom_note(oom0, oom_snapshot())
+        if oom:
+            fh.write(oom + "\n")
     return pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
 
 
@@ -476,8 +655,12 @@ def failure_of(text, client=False, ns=None, work=None):
         body = [f"{len(bad)} of this mod's own data files fail to parse at load (each is then silently missing):"]
         body += [f"  {n}x like: {next(l for k2, l in bad if k2 == k)}" for k, n in kinds.most_common(8)]
         return "data", "\n".join(body), f"data:{len(bad)}:{kinds.most_common(1)[0][0][:120]}"
+    k = killed_of(text, client)
+    if k:
+        return k
     for i, l in enumerate(lines):
-        if l.startswith("Caused by:") and not is_noise(l):   # the deepest cause is the last top-level one
+        # the deepest cause is the last top-level one; a trace logged at WARN/INFO was caught, it stopped nothing
+        if l.startswith("Caused by:") and not is_noise(l) and not caught(lines, i):
             last = i
     if "last" in locals():
         frames = [x.strip() for x in lines[last + 1:last + 60] if MOD_FRAME.match(x)][:8]
@@ -507,7 +690,7 @@ def failure_of(text, client=False, ns=None, work=None):
     # the LAST one: a game log carries many harmless logged exceptions before the one that stopped it
     for i in range(len(lines) - 1, -1, -1):
         l = lines[i]
-        if TOP_EXC.search(l) and not l.lstrip().startswith("at ") and not is_noise(l):
+        if TOP_EXC.search(l) and not l.lstrip().startswith("at ") and not is_noise(l) and not caught(lines, i):
             frames = [x.strip() for x in lines[i + 1:i + 80] if MOD_FRAME.match(x)][:8]
             return "crash", "\n".join([l.strip()[:400]] + frames), TOP_EXC.search(l).group(0)[:200]
     return "unknown", "\n".join(lines[-40:]), lines[-1][:200] if lines else ""
@@ -594,6 +777,12 @@ def main():
             if spent >= a.budget:
                 note(event="budget", spent=round(spent, 4)); return 1
             continue
+        if phase:
+            low = memory_guard()
+            if low:     # a client started now would be killed part-way: stop, never hand it to a worker
+                note(event="low-memory", run=run, phase=phase, note=low)
+                print(f"GATE C/{phase} FAILED:\n{low}", flush=True)
+                return 1
         if not phase:
             gone = fresh_world(work)
             if gone:
@@ -608,6 +797,9 @@ def main():
             continue
         kind, text, sig = f
         note(event="red", run=run, phase=phase, kind=kind, sig=sig)
+        if kind == "killed":   # environmental: no worker can fix memory pressure, and no rerun here frees any
+            note(event="killed", run=run, phase=phase, spent=round(spent, 4), note=text.splitlines()[0][:300])
+            return verdict_red(note, run, phase, text)
         if sig == last_sig:
             note(event="stuck", run=run, spent=round(spent, 4)); return 1
         if spent >= a.budget:
@@ -774,6 +966,70 @@ def self_check():
     ok = ok and k5 and k5[0] == "crash"
     k6 = failure_of("src/main/java/a/B.java:12: error: cannot find symbol\n")
     ok = ok and k6 and k6[0] == "compile"
+    # issue #113: a client the OOM killer SIGKILLed is `killed`, never the caught WARN exception logged before it
+    warn_trace = ("[12:00:01] [Render thread/WARN] [o.r.Info/]: Error during loading of villager trades\n"
+                  "java.lang.IllegalStateException: Missing registry: ResourceKey[minecraft:root / minecraft:trade_set]\n"
+                  "\tat TRANSFORMER/other@1/b.o.Trades.load(Trades.java:3)\n"
+                  "Caused by: java.lang.RuntimeException: inner\n\tat b.o.Trades.x(Trades.java:9)\n\t... 4 more\n")
+    oomlog = (warn_trace + "EXAMPLEMOD_BOOT_TEST: spawned 11 creature type(s)\n"
+              "> Task :runClient FAILED\nProcess 'command '/usr/bin/java'' finished with non-zero exit value 137\n"
+              "\n[gate-loop] memory: 2900 MB free at start (MemAvailable)\n")
+    kk = failure_of(oomlog, client=True)
+    ok &= kk is not None and kk[0] == "killed" and kk[2].startswith("JVM killed (exit 137, SIGKILL/OOM) after EXAMPLEMOD_BOOT_TEST: spawned 11") \
+        and "2900 MB free" in kk[1] and "re-run when memory is free" in kk[1] and "Missing registry" not in kk[1] \
+        and "OOM not confirmed" in kk[1]
+    kk = failure_of(oomlog + "[gate-loop] OOM killer fired during this run: cgroup oom_kill 3 -> 4\n", client=True)
+    ok &= kk[0] == "killed" and "OOM confirmed: cgroup oom_kill 3 -> 4" in kk[1].splitlines()[0]
+    ok &= failure_of(oomlog.replace("value 137", "value 143"), client=False)[0] == "killed"      # a server run too
+    # a run THIS loop stopped is judged as before, not as a kill
+    ok &= failure_of(oomlog + "[gate-loop] stopped the run: TIMEOUT after 9s with no verdict\n", client=True)[0] != "killed"
+    # control: a real uncaught crash before any verdict is still a crash (exit 1, not a kill), and the caught one is not it
+    real_crash = (warn_trace + "[12:00:05] [Render thread/ERROR] [minecraft/Minecraft]: Unreported exception thrown!\n"
+                  "java.lang.NullPointerException: Cannot invoke \"a.m.Thing.go()\" because \"t\" is null\n"
+                  "\tat TRANSFORMER/examplemod@1/a.m.Spawner.tick(Spawner.java:42)\n"
+                  "Process 'command '/usr/bin/java'' finished with non-zero exit value 1\n")
+    kc = failure_of(real_crash, client=True)
+    ok &= kc[0] == "crash" and "NullPointerException" in kc[1] and "Missing registry" not in kc[1]
+    # a caught WARN trace alone, after the real cause: never chosen as the stop reason
+    kc = failure_of("[x] [main/ERROR] [m/]: boom\njava.lang.IllegalStateException: Registry is already frozen\n"
+                    "\tat a.b.Stats.init(Stats.java:9)\n" + warn_trace)
+    ok &= kc[0] == "crash" and "already frozen" in kc[1] and "inner" not in kc[1]
+    ok &= caught(warn_trace.splitlines(), 3) and caught(warn_trace.splitlines(), 1) \
+        and not caught(["Caused by: java.lang.X: y", "\tat a.b(C.java:1)"], 0)
+    # the pre-Gate-C free-memory guard, on a faked /proc/meminfo and memory cgroup
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d); mi = d / "meminfo"; pc = d / "cgroup"
+        mi.write_text("MemTotal:       16000000 kB\nMemAvailable:    1024000 kB\n", encoding="utf-8")
+        pc.write_text("0::/\n", encoding="utf-8")
+        old_env = os.environ.pop("MMVU_GATEC_MIN_FREE_MB", None)
+        low = memory_guard(str(mi), str(d / "cg"), str(pc), linux=True)
+        ok &= bool(low) and low.startswith("not enough free memory (1000 MB free, need %d" % GATEC_MIN_FREE_MB)
+        ok &= memory_guard(str(mi), str(d / "cg"), str(pc), linux=False) is None          # other OSes: skipped silently
+        ok &= memory_guard(str(d / "missing"), str(d / "cg"), str(pc), linux=True) is None  # unreadable: skipped
+        os.environ["MMVU_GATEC_MIN_FREE_MB"] = "512"
+        ok &= memory_guard(str(mi), str(d / "cg"), str(pc), linux=True) is None           # overridden lower: goes ahead
+        os.environ["MMVU_GATEC_MIN_FREE_MB"] = "0"
+        ok &= memory_guard(str(mi), str(d / "cg"), str(pc), linux=True) is None           # 0 = off
+        os.environ.pop("MMVU_GATEC_MIN_FREE_MB")
+        # plenty of MemAvailable, but the container's cgroup (v1) has 2 GB of headroom: the cgroup decides
+        mi.write_text("MemAvailable:   12000000 kB\n", encoding="utf-8")
+        pc.write_text("4:memory:/box\n0::/\n", encoding="utf-8")
+        (d / "cg/memory/box").mkdir(parents=True)
+        (d / "cg/memory/box/memory.limit_in_bytes").write_text(str(8 << 30), encoding="utf-8")
+        (d / "cg/memory/box/memory.usage_in_bytes").write_text(str(7 << 30), encoding="utf-8")
+        (d / "cg/memory/box/memory.stat").write_text("cache 1\ntotal_inactive_file %d\n" % (1 << 30), encoding="utf-8")
+        (d / "cg/memory/box/memory.oom_control").write_text("oom_kill_disable 0\nunder_oom 0\noom_kill 4\n", encoding="utf-8")
+        got = mem_available_mb(str(mi), str(d / "cg"), str(pc))
+        ok &= got is not None and got[0] == 2048 and "cgroup" in got[1]
+        ok &= "2048 MB free" in (memory_guard(str(mi), str(d / "cg"), str(pc), linux=True) or "")
+        ok &= _memcg_dirs(str(d / "cg"), str(pc))[0] == (d / "cg/memory/box", "v1")
+        if old_env is not None:
+            os.environ["MMVU_GATEC_MIN_FREE_MB"] = old_env
+    ok &= oom_note({"cgroup": 3, "dmesg": None}, {"cgroup": 4, "dmesg": None}) == \
+        "[gate-loop] OOM killer fired during this run: cgroup oom_kill 3 -> 4"
+    ok &= oom_note({"cgroup": 4, "dmesg": 2, "last": ""}, {"cgroup": 4, "dmesg": 2, "last": "x"}) is None
+    ok &= "Killed process 9 (java)" in (oom_note({"cgroup": None, "dmesg": 1}, {"cgroup": None, "dmesg": 2,
+                                                  "last": "[1.0] Memory cgroup out of memory: Killed process 9 (java)"}) or "")
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
 

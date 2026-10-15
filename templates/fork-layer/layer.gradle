@@ -12,7 +12,8 @@
 //     Minecraft version: vanilla moves the classes it names).
 //   * The Java toolchain, neoforge.mods.toml version ranges and dependency substitutions follow the
 //     target's target.properties.
-//   * Everything builds into build/mc<t>/, so one target's classes never mix with another's.
+//   * Everything builds into build/mc<t>/, so one target's classes never mix with another's, and the client runs in
+//     build/mc<t>/run, so one target's mod configs never reach another's client.
 //     The jars it writes to libs carry the target in their name (-mc<t>), so a release can hold one per target.
 // Versions are NOT changed here: run through .multiversion/build.sh <t>, which passes the target's
 // versions as -P (they override gradle.properties) along with -Pmc.
@@ -45,6 +46,18 @@ mvProps.stringPropertyNames().findAll { it.startsWith('prop.') }.each { k ->
 
 def mvPython = System.getProperty('os.name').toLowerCase().contains('windows') ? 'python' : 'python3'
 layout.buildDirectory = file("build/mc${mvTarget}")   // inside build/: every authors' .gitignore ignores it
+
+// ---- the client's game directory ---------------------------------------------------------------------------------
+// One per target (issue #114): build/mc<t>/run. Mods write their configs into the game directory in the format of the
+// version that ran last, so with one shared run/ a newer target's mod config (a toggle written as the string "ON")
+// crashed an older target's client reading it as a boolean -- a Gate C red on a port whose code was not involved.
+// The client's only: the gates' GameTest server keeps the harness's own run directory. Without -Pmc this script
+// returned above, so a single-version build (and the base) keeps the authors' run directory exactly as it was.
+// BEGIN-RUN-DIRS (tools/test-port-tools.sh runs this block)
+if (extensions.findByName('neoForge') != null) {
+    neoForge.runs.matching { it.name == 'client' }.configureEach { r -> r.gameDirectory = file("build/mc${mvTarget}/run") }
+}
+// END-RUN-DIRS
 
 // ---- sources -----------------------------------------------------------------------------------
 // Every source set's own src/<set>/java goes through the same table (a mod can have more than main: an extra

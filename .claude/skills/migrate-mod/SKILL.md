@@ -16,6 +16,8 @@ For "Port <mod> to <version>" (or a jar path), **start here, not at Step 0**:
 ```
 python3 tools/port.py "<exact mod name, or path to the jar>" --to <1.21.1 | 26.2>
 ```
+**First** (once per mod, before anything is committed here): `python3 tools/guard-names.py ensure --jar <the jar>`
+(`--mod-repo DIR` for a checkout), which puts the mod's names in the forbidden-names list outside this repository.
 To take a FINISHED single-target port further (e.g. a 1.21.1 port to 26.2), start from it, not from the
 jar, so its fixes carry over: `python3 tools/port.py --from-port mods/<modid> --to 26.2` (the workspace is
 copied, setup is treated as done, and only the remaining hops run).
@@ -172,6 +174,9 @@ later request (7–24%). Two rules, neither of which changes what gets ported:
    `cat` a log, and never re-read one you already summarised.
 
 ## Step 0 — Locate the JAR and triage difficulty
+0. **Guard the names** before anything is committed in this repository: `python3 tools/guard-names.py ensure --jar <the input jar>` (and
+   `--mod-repo DIR` for a checkout). The mod's names go into the list outside this repository and the pre-push
+   hook refuses them.
 1. Resolve the input jar. If given a bare name, look in `$MODS_SOURCE_DIR`
    (from `.env.local`) and the CurseForge instances under it.
 2. Inspect it WITHOUT decompiling yet (fast): `unzip -l` the jar and read
