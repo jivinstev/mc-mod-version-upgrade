@@ -43,6 +43,8 @@ until its dependency's run is green, and it is then gated against the dependency
 
 ## Run (per fork, in fleet order)
 
+0. **Guard the names** (once per session, single-version and layer forks alike): `python3 tools/guard-names.py ensure --mod-repo <clone>` with one
+   `--mod-repo` per fleet fork it depends on. A run that commits learnings here first passes `guard-names.py check`.
 1. **Nothing new? Stop cheaply.** `port-sync.py --dry-run` for the authors' branch, and for each dependency
    "has it a newer green build than the dependent pins?". For a fork with a `layer_branch`, also
    `layer-sync.py detect --repo DIR --ref origin/<layer_branch> --port-ref origin/<branch>` after a `git fetch`:

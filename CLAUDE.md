@@ -40,7 +40,10 @@ when every check is green and even when the merge is needed to publish a kit.
 ## Keep fork identities out of this repository
 
 This repository names no mod, mod id, mod package, author or mod repository: not in files, fixtures, comments or
-commit messages. Every agent working on a fork must set `FORBIDDEN_NAMES_FILE` (in the environment, or in
-`.env.local`) to a list OUTSIDE this repository naming that fork, and run `tools/install-hooks.sh`; the pre-push
+commit messages. Every agent working on a mod or fork runs, before its first commit here, one command for the mod
+and every fork it depends on: `python3 tools/guard-names.py ensure --mod-repo DIR [--mod-repo DIR ...]` (or `--jar JAR`). It merges
+their names into the list OUTSIDE this repository (`FORBIDDEN_NAMES_FILE`, default `~/.mmvu/forbidden-names.txt`),
+sets `FORBIDDEN_NAMES_FILE` in `.env.local` when unset and installs the hooks (`tools/install-hooks.sh`); the pre-push
 hook then refuses a push whose commit messages or added lines contain any listed name, and the IP gate scans the
-whole tree for them. Use invented placeholders (`examplemod`, `com/example/mod`) in fixtures and self-checks.
+whole tree for them. `guard-names.py check` with the same arguments must pass before committing or pushing here.
+Use invented placeholders (`examplemod`, `com/example/mod`) in fixtures and self-checks.

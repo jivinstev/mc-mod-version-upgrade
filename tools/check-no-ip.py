@@ -132,8 +132,13 @@ def load_names(path):
     p = pathlib.Path(path)
     if not p.is_file():
         return None
+    return load_names_lines(p.read_text(errors="replace", encoding="utf-8").splitlines())
+
+
+def load_names_lines(lines):
+    """[(name, compiled pattern)] for a list's lines (tools/guard-names.py reads lists through this too)."""
     out = []
-    for line in p.read_text(errors="replace", encoding="utf-8").splitlines():
+    for line in lines:
         line = line.strip()
         if not line or line.startswith("#"):
             continue

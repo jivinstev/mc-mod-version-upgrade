@@ -136,6 +136,8 @@ Work them in order; `references/pipeline.md` has the exact commands.
 
 ## Invoking migrate-mod (stage e handoff)
 For a node needing a port, invoke the **migrate-mod skill** with a prompt of this shape:
+First, for each jar it will migrate, `python3 tools/guard-names.py ensure --jar installs/<slug>/jars/<file>.jar` (migrate-mod's step 0), so the
+mod's names are guarded before anything is committed in this repository.
 
 > Migrate `installs/<slug>/jars/<file>.jar` from `<srcLoader> <srcMC>` to `<dstLoader> <dstMC>`.
 > Use workspace `mods/<modid>`. On a green build + gates, the jar is at

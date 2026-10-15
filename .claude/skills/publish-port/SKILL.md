@@ -62,6 +62,8 @@ own words -- their description and credits -- and the permission link are exempt
 
 ## Part 1: set up
 
+0. **Guard the names**: `python3 tools/guard-names.py ensure --mod-repo <fork clone>` plus one `--mod-repo` per fork it depends on, before
+   anything is written or committed here.
 1. `port-publish.py setup --repo <fork clone> --permission <url> --ledger-issue owner/fork#n ...` writes
    `.github/port-publish.json` and `.github/port-publish/description.md` from what the port already has:
    - the mod's own metadata (name, authors, credits, logo, licence, its required/optional dependencies);

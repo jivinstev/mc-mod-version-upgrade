@@ -249,6 +249,29 @@ grep -q '^not enough free memory (1000 MB free, need ' <<<"$out" \
   || { echo "  FAIL  the free-memory guard did not stop: $out"; fail=$((fail+1)); }
 rm -rf "$GL"
 
+echo "12. guard-names: the forbidden-names guard set up in one command (issue #107)"
+( python3 "$ROOT/tools/guard-names.py" --self-check | grep -q "self-check: OK" ) \
+  && { echo "  PASS  guard-names --self-check: derivation, a re: line for a short id, merge keeps every line, idempotent, a list inside a repo refused, hooks installed"; pass=$((pass+1)); } \
+  || { echo "  FAIL  guard-names.py --self-check"; fail=$((fail+1)); }
+# no false hits on THIS repository's own text: a fixture mod with an invented id (built at run time, so this file does
+# not name it) and ordinary-word display name, authors and archives name, checked with a scratch list (--dry-run)
+G="$(mktemp -d)"; mkdir -p "$G/mod/src/main/resources/META-INF"
+python3 - "$G/mod" <<'PY'
+import pathlib, sys
+d = pathlib.Path(sys.argv[1]); mid = "qzv" + "exmod"; pkg = "com.qzv" + "ex.ex"
+(d / "src/main/java" / pkg.replace(".", "/")).mkdir(parents=True)
+(d / "src/main/resources/META-INF/neoforge.mods.toml").write_text(
+    '[[mods]]\nmodId="%s"\ndisplayName="Storage"\nauthors="Team, Magic and Arena"\n' % mid, encoding="utf-8")
+(d / "gradle.properties").write_text("mod_id=%s\nmod_group_id=%s\narchives_name=storage\n" % (mid, pkg), encoding="utf-8")
+(d / "src/main/java" / pkg.replace(".", "/") / "M.java").write_text('package %s;\n@Mod("x")\nclass M {}\n' % pkg, encoding="utf-8")
+PY
+: > "$G/names.txt"
+out="$(FORBIDDEN_NAMES_FILE="$G/names.txt" python3 "$ROOT/tools/guard-names.py" ensure --mod-repo "$G/mod" --dry-run 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'would add' <<<"$out" && [ ! -s "$G/names.txt" ] \
+  && { echo "  PASS  ordinary-word names make no false hit on this repository (dry run, scratch list untouched)"; pass=$((pass+1)); } \
+  || { echo "  FAIL  guard-names on this repository: exit $rc"; fail=$((fail+1)); }
+rm -rf "$G"
+
 echo
 echo "gates self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

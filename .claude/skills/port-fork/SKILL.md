@@ -41,6 +41,10 @@ mod's code never enters it:
 ```bash
 git clone https://github.com/<user>/<repo> ~/forks/<repo> && cd ~/forks/<repo> && git fetch --all
 ```
+**Guard the names next** (before any commit in this repository): `python3 tools/guard-names.py ensure --mod-repo ~/forks/<repo>` plus one
+`--mod-repo` per fork it depends on. It merges their names into the list outside this repository
+(`FORBIDDEN_NAMES_FILE`, default `~/.mmvu/forbidden-names.txt`), installs the pre-push hook and checks this tree;
+before committing or pushing here, `guard-names.py check` with the same arguments must pass.
 **Turn Issues on in the new fork** (GitHub turns them off for forks): Settings > General > Features >
 Issues. Step 4b files the authors' pre-existing defects there, and no tool here can change that setting --
 ask the user to tick it. `tools/port-offer.py` reminds you when it is still off.
