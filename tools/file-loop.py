@@ -311,7 +311,7 @@ def find_sources(work):
 
 def compile_classpath(work):
     """Gradle's own resolved compile classpath (tools/qtc-init.gradle), never one rebuilt from the cache."""
-    r = subprocess.run(["bash", "gradlew", "-q", "qtcClasspath", "--init-script", str(ROOT / "tools/qtc-init.gradle"),
+    r = subprocess.run([BASH, "gradlew", "-q", "qtcClasspath", "--init-script", str(ROOT / "tools/qtc-init.gradle"),
                         "--init-script", str(ROOT / "tools/central-mirror.init.gradle")], cwd=work, capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=900)
     m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", r.stdout, re.S)

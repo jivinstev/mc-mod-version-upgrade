@@ -37,6 +37,7 @@ import argparse, collections, json, os, pathlib, re, shutil, subprocess, sys, zi
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # noqa: E402  Git Bash on Windows, where a bare "bash" is WSL's launcher (#109)
 import importlib.util  # noqa: E402
 
 _s = importlib.util.spec_from_file_location("route", ROOT / "tools/route.py")
@@ -352,7 +353,7 @@ def setup(work, jar, src_loader, src_mc, setup_kind, meta, log):
     # decompile
     vf = ROOT / "tools/vineflower.jar"
     if not vf.exists():
-        run(["bash", str(ROOT / "tools/download-tools.sh")], log=log)
+        run([BASH, str(ROOT / "tools/download-tools.sh")], log=log)
     raw = work / "decompiled-raw"
     shutil.rmtree(raw, ignore_errors=True); raw.mkdir(parents=True)
     # an explicit heap and stack: the JVM default heap ran out on a 3-MB mod jar, and Vineflower then silently skips
@@ -1826,7 +1827,7 @@ def stop_daemons():
     ("Gradle build daemon disappeared unexpectedly"). Stop this run's daemons when it ends, however it ends."""
     for w in WORKS:
         if (w / "gradlew").exists():
-            subprocess.run(["bash", "gradlew", "--stop"], cwd=w, capture_output=True, timeout=120)
+            subprocess.run([BASH, "gradlew", "--stop"], cwd=w, capture_output=True, timeout=120)
 
 
 if __name__ == "__main__":

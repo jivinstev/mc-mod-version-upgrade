@@ -31,6 +31,8 @@ Standard library only (the converters it runs are too).
 import argparse, os, hashlib, importlib.util, json, pathlib, re, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+from gitbash import BASH   # noqa: E402  Git Bash on Windows, where a bare "bash" is WSL's launcher (#109)
 
 # (label, script, how to call it per source root; a condition key or None). The ONE list both routes run.
 CONVERTERS = [
@@ -247,7 +249,7 @@ def at_loop(repo, compile_count, workdir, run=run_tool):
         if "NoSuchFileException" in text and "/.gradle/repositories/" in text:
             healed = heal_ng_cache(repo)
             if healed:                                  # the daemon holds the old entry in memory: stop it, then retry
-                subprocess.run(["bash", "gradlew", "--stop"], cwd=repo, capture_output=True)
+                subprocess.run([BASH, "gradlew", "--stop"], cwd=repo, capture_output=True)
                 continue
         if not has_at:      # the stale-cache heal above is the only repair that applies without an AT (X75)
             return None
@@ -441,7 +443,7 @@ def gradle_count(work, log):
         if not quarantine_unparseable(work, log):
             break
         pg.compile_log(work, srcsets.compile_tasks(work), log)
-    r = subprocess.run(["bash", str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True,
+    r = subprocess.run([BASH, str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     m = re.search(r"errors = (\d+)", r.stdout)
     if not m or "compileJava: yes" not in r.stdout:
