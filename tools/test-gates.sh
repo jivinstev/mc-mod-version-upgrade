@@ -250,9 +250,10 @@ grep -q '^not enough free memory (1000 MB free, need ' <<<"$out" \
 rm -rf "$GL"
 
 echo "12. guard-names: the forbidden-names guard set up in one command (issue #107)"
-( python3 "$ROOT/tools/guard-names.py" --self-check | grep -q "self-check: OK" ) \
+gn_out="$(python3 "$ROOT/tools/guard-names.py" --self-check 2>&1)"
+grep -q "self-check: OK" <<<"$gn_out" \
   && { echo "  PASS  guard-names --self-check: derivation, a re: line for a short id, merge keeps every line, idempotent, a list inside a repo refused, hooks installed"; pass=$((pass+1)); } \
-  || { echo "  FAIL  guard-names.py --self-check"; fail=$((fail+1)); }
+  || { echo "  FAIL  guard-names.py --self-check"; tail -15 <<<"$gn_out" | sed 's/^/        /'; fail=$((fail+1)); }
 # no false hits on THIS repository's own text: a fixture mod with an invented id (built at run time, so this file does
 # not name it) and ordinary-word display name, authors and archives name, checked with a scratch list (--dry-run)
 G="$(mktemp -d)"; mkdir -p "$G/mod/src/main/resources/META-INF"

@@ -31,6 +31,7 @@ Standard library only.
 import argparse, importlib.util, os, pathlib, re, shutil, subprocess, sys, tempfile, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))   # tools/gitbash.py (Git Bash on Windows)
 DEFAULT_LIST = "~/.mmvu/forbidden-names.txt"
 _s = importlib.util.spec_from_file_location("check_no_ip", ROOT / "tools/check-no-ip.py")
 cni = importlib.util.module_from_spec(_s); _s.loader.exec_module(cni)
@@ -376,7 +377,8 @@ def ensure(a, root):
         print(f"guard-names: wrote FORBIDDEN_NAMES_FILE={lst} into {env}")
     stale = stale_hooks(root) if (root / ".git").is_dir() else []
     if stale:
-        r = subprocess.run(["bash", str(root / "tools/install-hooks.sh")], capture_output=True, text=True,
+        from gitbash import BASH   # Git Bash on Windows, where a bare "bash" is WSL's launcher (#109)
+        r = subprocess.run([BASH, str(root / "tools/install-hooks.sh")], capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
         print(f"guard-names: hooks {', '.join(stale)} were missing or stale: ran tools/install-hooks.sh "
               f"({'ok' if r.returncode == 0 else 'FAILED: ' + (r.stdout + r.stderr)[-300:]})")
