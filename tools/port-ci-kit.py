@@ -158,6 +158,14 @@ def self_check():
     names = tarfile.open(fileobj=io.BytesIO(a), mode="r:gz").getnames()
     ok &= names[0] == "MANIFEST.txt" and set(names[1:]) == set(read_list())
     ok &= not any(n.startswith(("mods/", "docs/", "CATALOG")) for n in names)
+    # every layer target's harness rename table ships: a layer fork's CI gates its newest target from the kit alone,
+    # and a table left off the list fails there ("the gate harness has no rename table for Minecraft <t>") -- as the
+    # three 26.x tables did, added to the repo after the list was last traced
+    tables = {f"templates/upstream-harness/versions/{q.name}" for q in (ROOT / "templates/upstream-harness/versions").glob("*.renames.tsv")}
+    missing = sorted(tables - set(read_list()))
+    if missing:
+        print("not in tools/port-ci-kit.txt:", ", ".join(missing))
+    ok &= not missing
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
