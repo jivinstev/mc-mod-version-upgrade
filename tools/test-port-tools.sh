@@ -590,7 +590,7 @@ def mvTarget = project.findProperty('mc')?.toString()
 if (mvTarget == null) return
 GR
     sed -n '/BEGIN-RUN-DIRS/,/END-RUN-DIRS/p' templates/fork-layer/layer.gradle; } > "$GR/build.gradle"
-  rd() { (cd "$GR" && gradle -q --offline printRunDirs "$@" 2>&1) | grep '^RUNDIR' | sort | tr '\n' ' '; }
+  rd() { (cd "$GR" && gradle -q --offline printRunDirs "$@" 2>&1) | grep '^RUNDIR' | tr '\\' '/' | sort | tr '\n' ' '; }   # Windows prints build\mc<t>\run
   r0="$(rd)"; r4="$(rd -Pmc=1.21.4)"; r26="$(rd -Pmc=26.2)"
   [ "$r0" = "RUNDIR client=run RUNDIR gameTestServer=harness/run " ] \
     && [ "$r4" = "RUNDIR client=build/mc1.21.4/run RUNDIR gameTestServer=harness/run " ] \
