@@ -1,6 +1,7 @@
 // OVERLAY-ONLY: shared fork-layer helper from mc-mod-version-upgrade templates/fork-layer/shared (not the authors' code).
 package @MVPKG@;
 
+import com.google.common.collect.MapMaker;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.minecraft.client.renderer.entity.ItemRenderer;
@@ -11,7 +12,6 @@ import net.minecraft.world.item.ItemStack;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
-import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -24,7 +24,8 @@ import java.util.WeakHashMap;
  */
 public final class ItemStacks {
     private static final Map<ItemStackRenderState, ItemStack> STACKS = Collections.synchronizedMap(new WeakHashMap<>());
-    private static final Map<ItemStackRenderState, Boolean> CLAIMED = Collections.synchronizedMap(new IdentityHashMap<>());
+    /** Weak and by identity (Guava's weakKeys map compares keys with ==): a render state that is dropped is not kept. */
+    private static final Map<ItemStackRenderState, Boolean> CLAIMED = new MapMaker().weakKeys().makeMap();
 
     private ItemStacks() {
     }

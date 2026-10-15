@@ -102,6 +102,18 @@ layer branch: they are its 1.21.1 bookend.
 | `layer-compile` (matrix: every target except the newest) | after plan | `layer-ci.py compile`: `.multiversion/build.sh <t>` over every source set's compile task (`srcsets.py`), then `audit-mixin-targets.py` against that target's staged sources jar and `audit-event-listeners.py` against Gradle's own resolved classpath |
 | `layer-gates` | after plan | `ci-gates.py --mc <newest>`: author's build, Gate A, data, payloads, Gate B and Gate C under Xvfb, plus `--shipped` when `.multiversion/shipped-expect*.txt` exists; the gate summary is uploaded as `layer-gates-<newest>` |
 | `layer-gates-extra` (matrix, `full_gates` only) | after plan | the same gates for each released middle target in `.multiversion/ci.properties`; no job when the list is empty |
+| `layer-release` | `release` dispatched on the layer branch | after the base gates, `layer-isolation`, `layer-inertness`, `layer-gates` and `layer-gates-extra` are green (`layer-compile` and `layer-gates-extra` may be skipped -- no middle target, no `full_gates` -- never red): ONE pre-release holding the base jars and each target's `<name>-mc<t>.jar` (built by `layer-compile`/`layer-gates` when releasing) -- the release publish-port's layer path uploads per target. The main `release` job steps aside on the layer branch |
+
+**A dependent fork's sibling jars in CI.** Every layer job first runs `layer-deps.py fetch --repo . --target <t>`: it installs
+into mavenLocal each sibling port's per-target jar the target's `target.properties` pins (`port_jar.<g:a>=<url> <sha256>`),
+checked against its sha256 -- a no-op for a target that pins none. The pins are written by
+`layer-deps.py resolve --port-release owner/repo@TAG` against the sibling's layer release (its `layer-release` job);
+locally `--port-checkout owner/repo=DIR` builds the jar from a checkout instead and pins nothing, so CI cannot fetch
+it -- re-resolve with `--port-release` before the dependent's layer CI can go green. `fork-port.py` passes both through
+(`--port-release owner/repo@TAG`, kept in its resume command), and a later resolve that names the sibling with neither
+keeps the existing `port_jar.` pin while it still pins the version `port-ci.yml` installs. `resolve --dry-run` builds,
+fetches and installs no sibling jar. A dependency the fork's `port-install.json` does not name is required when it is
+`implementation`/`api` (fail closed); a Modrinth pin by slug is matched to the manifest's project id.
 
 **Writing `.multiversion/shipped-expect*.txt`:** each `FILE:REGEX` line proves a subsystem ran in the jar a player
 installs, so match the effect, not the exact wording: the class it acted on and what it did, accepting the forms a
@@ -142,7 +154,7 @@ in minutes); a full run of every target's gates is `fork-port.py --gates full`, 
 
 ## Run the tool; handle only the residue
 
-`python3 tools/fork-port.py --repo DIR --target <t> [--budget 15] [--gates none|ab|full]` runs steps 2-7 below
+`python3 tools/fork-port.py --repo DIR --target <t> [--budget 15] [--gates auto|none|ab|full]` runs steps 2-7 below
 as stages (setup, stage, moves, measure, loop, audit, gates, cost) and prints one line per stage. It stops
 only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11 (Gate A/B), 12 (Gate C) or 13 (mixin
 audit), and `.multiversion/targets/<t>/RESIDUE.md` -- the remaining errors by CATALOG entry, what the compile
@@ -152,6 +164,30 @@ logs -- and **every fix you make goes into the shared library (`templates/fork-l
 not into one fork** (step 8). The class moves between versions are generated, not written: `moves.generated.tsv`
 is rebuilt per fork per target from the two staged Minecraft jars and is never committed upstream as a map.
 The steps below are the reference for what each stage does and for fixing its residue by hand.
+
+**One fresh residue fixer per Minecraft version.** When the residue goes to a worker agent (rather than being fixed
+in your own session), start a NEW agent for each target, with only that target's `RESIDUE.md` / `STUBS.json`, the
+rules (edit only `.multiversion/targets/<t>/`, generic shapes to the shared library, no commits) and the resume command.
+Resume that agent only for the same target's next round (its Gate C phases, a stub review); never carry one agent
+from target to target. Its context compounds: measured, one fixer resumed across six targets of a dependent fork
+grew to ~650k tokens and cost about $120 -- most of it re-reading earlier targets' work. What a later target
+needs from an earlier one is already in the tree (the parent's overlays, `STUBS.json` reviews it inherits) and in the
+catalogue entries the earlier fixer wrote.
+
+**A version is done only after Gates A, B AND C.** Gates A/B and the audits cannot see what only a client builds --
+models, render layers, shaders -- and every dependent-fork version so far that was green at A/B still failed in a real
+client (a missing model part at launch, a missing shader sampler at spawn). So `fork-port.py` never reports a target
+done without a green Gate C recorded in its `GATES.md`: a run that ends green at A/B exits 17 ("A/B green, Gate C not
+run -- NOT done") with the command that runs the full gates, and so does a run with `--gates none`. Nor with a stub
+signal in `STUBS.json` still unreviewed: every run to the end then stops with exit 10, from whatever `--from-stage` it
+resumed (even `cost`). This is the development loop, not CI: CI stays
+bookends-in-full, middle targets compile + audits.
+
+**One real-client run per version, on the initial port.** `--gates auto` (the default) runs the FULL gates -- Gate C
+under Xvfb -- until the target's `.multiversion/targets/<t>/GATES.md` records a green Gate C; a green full run writes that
+file (the same record publish-port's layer path reads), and a full run that is not green removes it, so the next
+`auto` run is full again. After that a re-run is A/B. CI keeps its own policy (bookends in
+full, middle targets compile + audits): this is the port's one look at each version in a real client, not a CI cost.
 
 ## Procedure
 
@@ -163,7 +199,11 @@ The steps below are the reference for what each stage does and for fixing its re
 2. **Set up**: `make-fork-layer.py init --repo DIR` (once), then `add-target --repo DIR --target <t>` -- versions,
    Java, GeckoLib and `inherits` (the nearest lower target) come from versions.json, and `sync-shared` installs the
    shared library (`.multiversion/shared/<t>/`: rows every fork inherits + helper classes in the fork's
-   `mv_package`). `sync-shared --check` fails when the fork's copy drifted. A target that jumps over middle versions is added with
+   `mv_package`) and refreshes the layer's machinery (`layer.gradle`, `build.sh`, `.multiversion/tools/`) from the
+   template when the fork's copy is a verbatim earlier template version (this migrator's git history), so a layer made
+   before a `layer.gradle` change (a target's `nfrt_version`) still builds the way new targets assume; a copy someone
+   edited is reported (`DIVERGED`) and left alone for a human to merge. `sync-shared --check` fails when the fork's copy
+   of either drifted or diverged. A target that jumps over middle versions is added with
    `--direct` (see "Direct jumps" above); the default is one hop.
    **CI, once per fork, before the first target lands:** `python3 tools/port-ci.py --repo DIR --modid ID --layer-branch
    <layer branch>`, as a PR on the port branch, then merged into the layer branch (see "CI on the layer branch"). From

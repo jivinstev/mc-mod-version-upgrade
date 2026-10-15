@@ -1,4 +1,5 @@
 // OVERLAY-ONLY: shared fork-layer helper from mc-mod-version-upgrade templates/fork-layer/shared (not the authors' code).
+// MV-REQUIRES: ShaderInstance
 package @MVPKG@;
 // MV-REQUIRES: ShaderReloader  (posts this event at every client resource reload)
 

@@ -258,20 +258,52 @@ WIRING = re.compile(r'\.(?:register\w*|playTo(?:Server|Client)|playBidirectional
                     r'send\w*|addListener)\s*\(|PacketDistributor\.\w+\(')
 
 
-def stub_signals(before, after):
+def _ask(model_id, prompt, work, env, timeout):
+    """One single-shot request. A worker that overruns its timeout is a failed attempt (is_error), never an exception:
+    raised inside the loop's thread pool it ended the whole run without a count."""
+    try:
+        return subprocess.run(["claude", "-p", "--model", model_id, "--system-prompt", SYSTEM, "--tools", "",
+                               "--output-format", "json"], input=prompt, cwd=work, env=env, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess([], 124, "", f"worker timed out after {timeout}s")
+
+
+def stub_signals(before, after, audit=False):
     """Ways an edit can make an error go away by removing the feature, each a one-line reason. Measured on a
     real port: a worker left a packet unregistered and its send method empty, and every gate stayed green.
       - a method body emptied (even one)
       - registrations, listeners or packet sends removed and not put back elsewhere in the file
     A wiring call that MOVES (SimpleChannel -> PayloadRegistrar) keeps or raises the count, so it passes."""
     out = []
-    emptied = len(re.findall(r'\)\s*(?:throws\s+[\w.,\s]+)?\{\s*\}', after)) - len(re.findall(r'\)\s*(?:throws\s+[\w.,\s]+)?\{\s*\}', before))
+    # a mixin @Shadow method's empty body is the point (Mixin binds it to vanilla's), never a stub
+    shadow = lambda t: re.sub(r'@Shadow\b[^;{]*\{\s*\}', '', t or "")
+    emptied = len(re.findall(r'\)\s*(?:throws\s+[\w.,\s]+)?\{\s*\}', shadow(after))) - \
+        len(re.findall(r'\)\s*(?:throws\s+[\w.,\s]+)?\{\s*\}', shadow(before)))
     if emptied >= 1:
         out.append(f"empties {emptied} method bod{'y' if emptied == 1 else 'ies'}")
     lost = len(WIRING.findall(before)) - len(WIRING.findall(after))
     if lost >= 1:
         out.append(f"removes {lost} registration/listener/send call(s)")
     dropped = sorted(_overridden(before) - _overridden(after) & _declared(after))
+    # an override deleted OUTRIGHT is the same loss with less to see: a client-extension or renderer hook removed because
+    # its interface changed leaves no method behind, and nothing (measured: five items' renderers) said so
+    # -- counted, not named: porting an override to a renamed vanilla method (getLightBlock -> getLightDampening)
+    # also makes a name disappear, and that is the fix, not a loss
+    gone = sorted(_overridden(before) - _overridden(after) - _declared(after))
+    n_lost = len(_OVERRIDE.findall(COMMENTS.sub("", before or ""))) - len(_OVERRIDE.findall(COMMENTS.sub("", after or ""))) \
+        - len(_overridden(before) - _overridden(after) & _declared(after))
+    # AUDIT ONLY: the per-edit guard accepts a deletion (the right fix when vanilla removed the method); the end-of-loop
+    # stub audit asks a person to confirm it
+    # a mixin handler is not an override, so the count above never sees one go: moving or deleting an @Inject/@Redirect/
+    # @Modify* handler removes an effect just as surely (measured: two injections moved to another mixin, unflagged)
+    inj = r'@(?:Inject|Redirect|ModifyArg|ModifyArgs|ModifyVariable|ModifyConstant|ModifyReturnValue|ModifyExpressionValue|WrapOperation|WrapWithCondition)\b'
+    n_inj = len(re.findall(inj, COMMENTS.sub("", before or ""))) - len(re.findall(inj, COMMENTS.sub("", after or "")))
+    if audit and n_inj > 0:
+        out.append(f"removes {n_inj} mixin injection handler(s): check each still applies somewhere, with the same effect")
+    if audit and gone and n_lost > 0:
+        out.append(f"deletes overriding method(s) {', '.join(gone[:4])}: whatever they did is gone -- port each to "
+                   "the new API, or say why vanilla no longer needs it")
     if dropped:
         out.append(f"drops @Override from {', '.join(dropped[:4])} and keeps the method: it then overrides nothing and "
                    "never runs -- port it to the new signature, or delete it and say what vanilla now does instead")
@@ -303,41 +335,30 @@ def _status(repo):
     return out
 
 
-def sibling_snapshot(work):
-    """Every OTHER git repo beside `work` (the session's other ports), with the exact bytes of each file that is
-    already dirty there -- so a worker's edit outside its own repo can be undone without touching anyone's
-    uncommitted work. Measured: a Gate B worker on one mod edited the library it depends on, in a sibling repo."""
-    work = pathlib.Path(work).resolve()
-    snap = {}
-    for g in sorted(work.parent.glob("*/.git")):
-        repo = g.parent
-        if repo == work:
-            continue
-        st = _status(repo)
-        snap[repo] = {p: (repo / p).read_bytes() if (repo / p).is_file() else None for p in st}
-    return snap
+def rule_path(p):
+    """An absolute path in Claude Code's permission-rule form: `//` then the path. POSIX /abs -> //abs; Windows
+    C:\\Users\\x -> //c/Users/x (drive letter lower-cased, colon dropped) -- `C:/...` matches nothing. A pure path
+    (PureWindowsPath in the self-check) is taken as is; anything else is resolved first."""
+    p = p if isinstance(p, pathlib.PurePath) and not isinstance(p, pathlib.Path) else pathlib.Path(p).resolve()
+    if len(p.drive) == 2 and p.drive[1] == ":":
+        return "//" + p.drive[0].lower() + "/" + "/".join(p.parts[1:])
+    posix = p.as_posix()
+    return posix if posix.startswith("//") else "/" + posix
 
 
-def restore_siblings(snap):
-    """Undo anything changed in a sibling repo since sibling_snapshot(); returns the paths restored."""
-    undone = []
-    for repo, before in snap.items():
-        for p, code in _status(repo).items():
-            f = repo / p
-            now = f.read_bytes() if f.is_file() else None
-            if p in before:
-                if now != before[p]:
-                    if before[p] is None:
-                        f.unlink(missing_ok=True)
-                    else:
-                        f.write_bytes(before[p])
-                    undone.append(str(f))
-            elif code == "??":
-                f.unlink(missing_ok=True); undone.append(str(f))
-            else:
-                subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--", p], capture_output=True)
-                undone.append(str(f))
-    return undone
+def worker_permissions(work):
+    """The `claude -p` flags that let a worker read anywhere it is pointed but write only inside its own repo. A write
+    elsewhere is denied (and listed in the result's permission_denials), so nothing needs undoing afterwards.
+    This replaced a snapshot of every sibling repo and a revert of whatever changed there during the call, which also
+    reverted a concurrent residue fixer's work in progress in the sibling (measured twice in one target)."""
+    w = rule_path(work)
+    return ["--permission-mode", "dontAsk", "--allowedTools", f"Read,Grep,Glob,Edit({w}/**),Write({w}/**)"]
+
+
+def denied_outside(result):
+    """The file paths a worker tried to write outside its repo, from `claude -p --output-format json`'s result."""
+    return [d.get("tool_input", {}).get("file_path") for d in (result or {}).get("permission_denials") or []
+            if d.get("tool_name") in ("Edit", "Write")] or None
 
 
 def run_single(work, f, errs_of_f, entry_text, idx, model_id, target, timeout=300, thinking=0):
@@ -355,13 +376,12 @@ def run_single(work, f, errs_of_f, entry_text, idx, model_id, target, timeout=30
     # the first tier fixes most files without it; the next tier gets a budget
     env["MAX_THINKING_TOKENS"] = str(thinking)
     t0 = time.time()
-    r = subprocess.run(["claude", "-p", "--model", model_id, "--system-prompt", SYSTEM, "--tools", "",
-                        "--output-format", "json"], input=prompt, cwd=work, env=env, capture_output=True,
-                       text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    r = _ask(model_id, prompt, work, env, timeout)
     try:
         d = json.loads(r.stdout)
     except ValueError:
-        d = {"result": (r.stdout + r.stderr)[-400:], "total_cost_usd": 0, "is_error": True}
+        # no result (timed out, or claude died): what it spent is unknown, NOT $0 -- the loop charges an estimate
+        d = {"result": (r.stdout + r.stderr)[-400:], "total_cost_usd": 0, "is_error": True, "usd_unknown": True}
     ans = d.get("result") or ""
     new, why = apply_blocks(text, parse_blocks(ans))
     if new is not None:
@@ -373,12 +393,49 @@ def run_single(work, f, errs_of_f, entry_text, idx, model_id, target, timeout=30
     return {"mode": "single", "files": [rel], "errors_in": len(errs_of_f), "usd": d.get("total_cost_usd") or 0,
             "usage": d.get("usage"), "turns": d.get("num_turns"), "secs": round(time.time() - t0),
             "applied": why is None and new is not None, "rejected": why, "rule": rule, "result": ans[-600:],
-            "prompt_chars": len(prompt)}
+            "prompt_chars": len(prompt), "usd_unknown": bool(d.get("usd_unknown"))}
 
 
 def self_check():
     import tempfile
     ok = True
+    # an override deleted outright is a stub signal; an untouched file and a renamed-but-kept override are not
+    b = "class A extends B {\n @Override\n public void initializeClient(Consumer<X> c) { c.accept(R); }\n @Override\n public int f() { return 1; }\n}"
+    ok &= any("deletes overriding method(s) initializeClient" in w
+              for w in stub_signals(b, "class A extends B {\n @Override\n public int f() { return 2; }\n}", audit=True))
+    ok &= stub_signals(b, "class A extends B {\n @Override\n public int f() { return 2; }\n}") == []   # the guard allows it
+    ok &= stub_signals(b, b) == []
+    # a worker writes only inside its own repo (absolute-path rules), and its denied writes are reported
+    perm = worker_permissions("/x/work")
+    w_ = rule_path("/x/work")       # //x/work on POSIX; on Windows /x/work resolves onto the current drive: //c/x/work
+    ok &= perm[:2] == ["--permission-mode", "dontAsk"] and f"Edit({w_}/**)" in perm[3] and f"Write({w_}/**)" in perm[3]
+    ok &= os.name == "nt" or w_ == "//x/work"
+    # on Windows the rule form is //c/Users/... (drive lower-cased, no colon): C:/... matches nothing
+    ok &= rule_path(pathlib.PureWindowsPath(r"C:\Users\dev\work")) == "//c/Users/dev/work"
+    ok &= rule_path(pathlib.PurePosixPath("/x/work")) == "//x/work"
+    ok &= denied_outside({"permission_denials": [{"tool_name": "Write", "tool_input": {"file_path": "/x/sib/a"}},
+                                                 {"tool_name": "Bash", "tool_input": {}}]}) == ["/x/sib/a"]
+    ok &= denied_outside({}) is None
+    # a worker that overruns is a failed attempt, not an exception
+    real = subprocess.run
+    def _late(*a_, **k_):
+        raise subprocess.TimeoutExpired("claude", 1)
+    subprocess.run = _late
+    try:
+        r_ = _ask("m", "p", ".", {}, 1)
+        ok &= r_.returncode == 124 and "timed out" in r_.stderr
+        # ... and its cost is unknown, not $0 (the loop charges an estimate for it: file-loop charge_unknown)
+        with tempfile.TemporaryDirectory() as d_:
+            f_ = pathlib.Path(d_) / "A.java"; f_.write_text("class A {\n  int x;\n}\n", encoding="utf-8")
+            rs = run_single(d_, str(f_), [(2, "cannot find symbol")], "", SourceIndex(None), "m", "1.21.4", timeout=1)
+            ok &= rs["usd"] == 0 and rs["usd_unknown"] is True
+    finally:
+        subprocess.run = real
+    ok &= stub_signals(b, b.replace("initializeClient", "registerClientExtensions"), audit=True) == []
+    m_ = "@Mixin(P.class)\nclass M {\n @Inject(method = \"a\", at = @At(\"HEAD\"))\n void h(CallbackInfo c) {}\n}"
+    ok &= any("removes 1 mixin injection" in w for w in stub_signals(m_, "@Mixin(P.class)\nclass M {\n}", audit=True))
+    ok &= stub_signals(m_, m_.replace('"a"', '"b"'), audit=True) == []          # retargeted, not removed
+    ok &= stub_signals("class M {\n}", "class M {\n @Shadow\n private void renderX(PoseStack p, float f) {}\n}") == []   # a @Shadow stub   # ported to a new name
     t = "class A {\n  void f() {\n    old(1);\n  }\n  void g() { x(); }\n}\n"
     new, why = apply_blocks(t, parse_blocks("<<<<<<< SEARCH\n    old(1);\n=======\n    renamed(1);\n>>>>>>> REPLACE\nNEEDS: none"))
     ok &= why is None and "renamed(1);" in new
@@ -412,20 +469,6 @@ def self_check():
         ok &= "net.x.Entity" in facts and "LivingHurtEvent: NOT in the target's sources" in facts
         body, part = numbered("\n".join(f"l{i}" for i in range(1000)), [500])
         ok &= part != "" and "  500| l499" in body and "(lines omitted)" in body and "  900|" not in body
-    with tempfile.TemporaryDirectory() as d:          # sibling-repo guard: undo the worker, keep the owner's work
-        d = pathlib.Path(d)
-        for n in ("work", "sib"):
-            (d / n).mkdir(); (d / n / "a.txt").write_text("a\n", encoding="utf-8"); (d / n / "b.txt").write_text("b\n", encoding="utf-8")
-            subprocess.run("git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm i",
-                           shell=True, cwd=d / n, check=True)
-        (d / "sib/a.txt").write_text("owner's uncommitted edit\n", encoding="utf-8")
-        snap = sibling_snapshot(d / "work")
-        (d / "sib/a.txt").write_text("worker\n", encoding="utf-8"); (d / "sib/b.txt").write_text("worker\n", encoding="utf-8"); (d / "sib/new.txt").write_text("x", encoding="utf-8")
-        (d / "work/a.txt").write_text("worker in its own repo\n", encoding="utf-8")
-        undone = restore_siblings(snap)
-        ok &= ((d / "sib/a.txt").read_text(encoding="utf-8") == "owner's uncommitted edit\n" and (d / "sib/b.txt").read_text(encoding="utf-8") == "b\n"
-               and not (d / "sib/new.txt").exists() and len(undone) == 3
-               and (d / "work/a.txt").read_text(encoding="utf-8") == "worker in its own repo\n")
     return ok
 
 
@@ -565,13 +608,11 @@ def run_multi(work, files_errs, needs_text, entry_text, idx, model_id, target, t
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"}
     env["MAX_THINKING_TOKENS"] = str(thinking)
     t0 = time.time()
-    r = subprocess.run(["claude", "-p", "--model", model_id, "--system-prompt", SYSTEM, "--tools", "",
-                        "--output-format", "json"], input=prompt, cwd=work, env=env, capture_output=True,
-                       text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    r = _ask(model_id, prompt, work, env, timeout)
     try:
         d = json.loads(r.stdout)
     except ValueError:
-        d = {"result": (r.stdout + r.stderr)[-400:], "total_cost_usd": 0}
+        d = {"result": (r.stdout + r.stderr)[-400:], "total_cost_usd": 0, "usd_unknown": True}
     ans = d.get("result") or ""
     results, skipped = apply_multi(work, ans, shown)
     for p_, text in results.items():
@@ -585,7 +626,7 @@ def run_multi(work, files_errs, needs_text, entry_text, idx, model_id, target, t
             "usd": d.get("total_cost_usd") or 0, "usage": d.get("usage"), "secs": round(time.time() - t0),
             "applied": why is None, "rejected": why, "rule": None, "result": ans[-600:], "prompt_chars": len(prompt),
             "edited": [rel(p_) for p_ in results], "deleted": [rel(p_) for p_, v in results.items() if v is None],
-            "skipped": skipped}
+            "skipped": skipped, "usd_unknown": bool(d.get("usd_unknown"))}
 
 
 def self_check_multi():

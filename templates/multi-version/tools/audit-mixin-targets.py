@@ -86,6 +86,40 @@ def parse_return(desc):
     return name
 
 
+def missing_classes(spec, have):
+    """Classes a pinned descriptor names that the target's sources jar does not have.
+
+    The descriptor comparison below reads SIMPLE names (`CameraRenderState`), so a class that only MOVED package keeps
+    "matching": 26.1 moved `client.renderer.state.CameraRenderState` to `client.renderer.state.level`, the class-move
+    rows rewrote the import and left the slash-form string in `method = "submit(...Lnet/minecraft/client/renderer/state/
+    CameraRenderState;)V"`, and this audit said "all targets match" over an injection Gate C then died on at launch
+    (`InvalidInjectionException: Critical injection failure`, CATALOG M65). Only the packages the jar actually ships are
+    checked, so a mod's or a library's own types are never reported; a nested `Outer$Inner` is looked up as Outer.java.
+    """
+    out = []
+    for cls in re.findall(r"L([\w/$]+);", spec):
+        root = "/".join(cls.split("/")[:2]) + "/"
+        if root not in roots_of(have):
+            continue
+        if cls.split("$", 1)[0] + ".java" not in have:
+            out.append(cls.replace("/", "."))
+    return out
+
+
+_ROOTS = {}
+
+
+def roots_of(have):
+    """The two-segment package roots (`net/minecraft/`, `com/mojang/`) a sources jar ships. Cached per `have` object:
+    the entry keeps that object and its size, so a later object that reuses its id(), or the same one grown, is
+    computed afresh rather than answered with another jar's roots."""
+    hit = _ROOTS.get(id(have))
+    if hit is None or hit[0] is not have or hit[1] != len(have):
+        hit = _ROOTS[id(have)] = (have, len(have), {"/".join(n.split("/")[:2]) + "/" for n in have
+                                                     if n.endswith(".java") and n.count("/") >= 2})
+    return hit[2]
+
+
 def parse_descriptor(desc):
     """'(Lnet/minecraft/X;FDD)V' -> ['X', 'float', 'double', 'double']."""
     params, i = [], 0
@@ -117,9 +151,11 @@ def simple(java_type):
     space. That compares unequal to a mixin's plain 'Axis', which is a FALSE POSITIVE: the tool
     reports a mismatch whose two sides read identically in its own output, and the reader is
     invited to "fix" a mixin that was already right. A checker's noise costs the same trust its
-    silence does (X10).
+    silence does (X10). The annotation's own name can be qualified too -- 26.x writes
+    `@Block.UpdateFlags int flags` -- and stripping only `@Block` left 'UpdateFlags int' (the same
+    false positive, measured on two ClientLevel injectors), so the annotation name may contain dots.
     """
-    t = re.sub(r'@\w+(\([^)]*\))?', '', java_type).strip()
+    t = re.sub(r'@[\w.]+(\([^)]*\))?', '', java_type).strip()
     arrays = t.count("[]")
     t = t.replace("[]", "").split("<")[0].strip().split(".")[-1].strip()
     return t + "[]" * arrays
@@ -640,7 +676,10 @@ def main():
         candidates.update(glob.glob(os.path.join(root, "**/%s/*.java" % seg), recursive=True))
     for path in sorted(candidates):
         s = strip_comments(open(path, encoding="utf-8").read())
-        m = re.search(r'@Mixin\(\{?([\w.]+)\.class', s)
+        # `value =` too: `@Mixin(value = X.class, priority = 1024)` -- the form a mixin with a priority or `remap` must
+        # use -- read as no target, and the whole FILE went unchecked (measured: a pinned @ModifyConstant descriptor that
+        # vanilla had changed passed this audit and failed Gate B)
+        m = re.search(r'@Mixin\s*\(\s*(?:value\s*=\s*)?\{?\s*([\w.]+)\.class', s)
         if m:
             target = m.group(1)
             # ⚠ X27 fault #13: a target may be written FULLY QUALIFIED inline —
@@ -792,6 +831,21 @@ def main():
                                    for d in cand):
                 problems.append((rel, "@Inject " + name + " (callback kind)", ci,
                                  " | ".join(show(d) for d in cand)))
+            # FAULT #26 (§X27): the RETURN TYPE moved under a CallbackInfoReturnable<T> that still names the old
+            # one. Generics are erased, so Mixin applies it and nothing fails until getReturnValue() is cast:
+            # 26.1's FogRenderer.setupFog went from returning the clear colour (Vector4f) to a FogData, and a
+            # handler on CallbackInfoReturnable<Vector4f> compiled, audited clean and loaded, and would throw
+            # ClassCastException the first frame its fog applied. Judged only when both sides are plain names.
+            gm = next((re.search(r'CallbackInfoReturnable\s*<\s*([\w.]+)\s*>', q) for q in params
+                       if "CallbackInfoReturnable" in q), None)
+            box = {"boolean": "Boolean", "int": "Integer", "float": "Float", "double": "Double", "long": "Long",
+                   "short": "Short", "byte": "Byte", "char": "Character"}
+            rets = [box.get(d[0], d[0]) for d in cand if d[0] != "void"]
+            if gm and rets and not any(len(r) == 1 or r in ("Object",) for r in rets):
+                g = simple(gm.group(1))
+                if g not in rets and g != "Object":
+                    problems.append((rel, "@Inject " + name + " (callback type)",
+                                     "CallbackInfoReturnable<" + g + ">", "returns " + " | ".join(sorted(set(rets)))))
 
         # ── @Inject / @Redirect / @ModifyVariable targets carrying an explicit descriptor ──
         # ⚠ The pattern here was `r'method = \{?"([^"]+)"'` -- single literal spaces, and the
@@ -813,7 +867,11 @@ def main():
             want = parse_descriptor("(" + desc)
             want_return = parse_return("(" + desc)
             decls = declarations(src, name)
-            if not decls:
+            gone = missing_classes(spec, have)
+            if gone:
+                problems.append((rel, name, "descriptor names a class this version does not have: " + ", ".join(gone),
+                                 "(moved or removed; rewrite the slash-form name)"))
+            elif not decls:
                 problems.append((rel, name, "no such method in vanilla", ""))
             elif not any(matches(d, want, want_return) for d in decls):
                 problems.append((rel, name,
@@ -845,9 +903,33 @@ def main():
             if name.startswith("lambda$") or name == "<init>" or "*" in name:
                 continue
             checked += 1
-            if not declarations(src, name):
+            decls = declarations(src, name)
+            if not decls:
                 problems.append((rel, "@Modify/@Redirect " + name,
                                  "no such method in vanilla", ""))
+                continue
+            # FAULT #25 (§X27): an argsOnly @ModifyVariable whose name-only target became an OVERLOAD.
+            # Mixin binds a selector with no descriptor to the FIRST method of that name, so when 26.1 put a
+            # public updateBuffer(FogData) in front of the private updateBuffer(ByteBuffer, int, Vector4f,
+            # float...) the handler modifying "the Vector4f argument" bound to the overload that has none:
+            # `Critical injection failure ... (0/1) succeeded. Scanned 0 target(s)` at client launch, with
+            # this tool reporting "all targets match" because SOME overload still had the argument. Only the
+            # argsOnly shape is judged: its value type and ordinal are plain facts of the parameter list.
+            if mm.group(0).startswith("@ModifyVariable") and re.search(r'argsOnly\s*=\s*true', mm.group("ann")):
+                hm = re.match(r'\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|static|final)\s+)*'
+                              r'[\w.<>\[\], ?]+\s+[\w$]+\s*\((?P<params>[^)]*)\)', s[mm.end():])
+                hp = split_params(hm.group("params")) if hm else []
+                if hp and not re.search(r'\b(?:index|name)\s*=', mm.group("ann")):
+                    vt = simple(hp[0].rsplit(" ", 1)[0])
+                    om = re.search(r'ordinal\s*=\s*(\d+)', mm.group("ann"))
+                    first = decls[0][1].count(vt)
+                    fits = first > int(om.group(1)) if om else first == 1
+                    if not fits:
+                        want = f"{vt} argument #{om.group(1)}" if om else f"exactly one {vt} argument"
+                        problems.append((rel, "@ModifyVariable " + name,
+                                         f"needs {want} of the FIRST declared {name} (Mixin binds a name-only "
+                                         f"target to it)", "(" + ", ".join(decls[0][1]) + ")"
+                                         + (f"; {len(decls)} overloads -- pin a descriptor" if len(decls) > 1 else "")))
 
         # ── @At(target = "Lowner;name(desc)ret"): the INJECTION POINT, not the target method ──
         # FAULT #17 (§X27). Every block above asks "does the METHOD I am injecting into still

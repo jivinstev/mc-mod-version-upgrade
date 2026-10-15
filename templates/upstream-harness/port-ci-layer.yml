@@ -9,6 +9,11 @@
   #   layer-gates      the NEWEST target: all gates, Gate C included, plus the shipped jar when the fork records one
   #   layer-gates-extra  a RELEASED middle target the fork lists in .multiversion/ci.properties (full_gates=1.21.4,...):
   #                    the same full gates. Absent or empty = this job never runs (the default).
+  #   layer-release    `release` run from {{LAYER_BRANCH}}: the pre-release holds the base jars AND one jar per target
+  #                    (<name>-mc<t>.jar, built by layer-compile / layer-gates), once isolation, inertness, layer-compile,
+  #                    layer-gates and layer-gates-extra are all green (layer-compile / -extra may be skipped, never red).
+  #                    The release job above steps aside on {{LAYER_BRANCH}}. Each job first fetches the sibling
+  #                    ports' per-target jars its target.properties pins (tools/layer-deps.py fetch).
   # The {{BRANCH}} gates above also run on the layer branch: they are its 1.21.1 bookend.
   layer-plan:
     name: layer plan
@@ -102,6 +107,10 @@
           distribution: temurin
           java-version: ${{ matrix.java }}
 {{PRE_BUILD}}
+      - name: Sibling ports' jars for this target (pinned in its target.properties by tools/layer-deps.py)
+        env:
+          TARGET: ${{ matrix.t }}
+        run: python3 .port-tools/tools/layer-deps.py fetch --repo . --target "$TARGET"
       - name: Compile every source set, then the mixin and event-listener audits
         env:
           TARGET: ${{ matrix.t }}
@@ -111,6 +120,17 @@
         env:
           TARGET: ${{ matrix.t }}
         run: cat "$RUNNER_TEMP/layer-$TARGET.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - name: This target's jars, for the layer release
+        if: ${{ inputs.release }}
+        env:
+          TARGET: ${{ matrix.t }}
+        run: bash .multiversion/build.sh "$TARGET" build -x test --console=plain
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.release }}
+        with:
+          name: layer-jars-${{ matrix.t }}
+          path: build/mc${{ matrix.t }}/libs/*-mc${{ matrix.t }}.jar
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -141,8 +161,12 @@
           distribution: temurin
           java-version: ${{ needs.layer-plan.outputs.newest_java }}
       - name: Software OpenGL for the client gate
-        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
 {{PRE_BUILD}}
+      - name: Sibling ports' jars for this target (pinned in its target.properties by tools/layer-deps.py)
+        env:
+          TARGET: ${{ needs.layer-plan.outputs.newest }}
+        run: python3 .port-tools/tools/layer-deps.py fetch --repo . --target "$TARGET"
       - name: All gates on the newest target
         env:
           NEWEST: ${{ needs.layer-plan.outputs.newest }}
@@ -166,6 +190,12 @@
             ${{ runner.temp }}/layer-gates.md
             build/mc${{ needs.layer-plan.outputs.newest }}/libs/*.jar   # the target's own file (named -mc<target>): what publish-port uploads
           if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.release }}
+        with:
+          name: layer-jars-${{ needs.layer-plan.outputs.newest }}
+          path: build/mc${{ needs.layer-plan.outputs.newest }}/libs/*-mc${{ needs.layer-plan.outputs.newest }}.jar
+          if-no-files-found: error
 
   layer-gates-extra:
     # CI policy: bookends fully gated, middle targets compile + audits; a middle target that is RELEASED is also fully
@@ -193,8 +223,12 @@
           distribution: temurin
           java-version: ${{ matrix.java }}
       - name: Software OpenGL for the client gate
-        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
 {{PRE_BUILD}}
+      - name: Sibling ports' jars for this target (pinned in its target.properties by tools/layer-deps.py)
+        env:
+          TARGET: ${{ matrix.t }}
+        run: python3 .port-tools/tools/layer-deps.py fetch --repo . --target "$TARGET"
       - name: All gates on this target
         env:
           TARGET: ${{ matrix.t }}

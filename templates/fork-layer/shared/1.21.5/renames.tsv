@@ -108,8 +108,31 @@ re:\b(quad|bakedQuad|q)\.getTintIndex\(\)	\1.tintIndex()
 re:\b(quad|bakedQuad|q)\.isShade\(\)	\1.shade()
 re:\b(quad|bakedQuad|q)\.getLightEmission\(\)	\1.lightEmission()
 # ---- RenderTarget is textures, not a framebuffer: frameBufferId / bindWrite(viewport) ask the backend for the FBO
-re:([\w.]+(?:\(\))?)\.frameBufferId\b	@MVPKG@.LegacyTargets.fbo(\1)
+# the receiver is the whole chain (`Minecraft.getInstance().getMainRenderTarget()`), never its tail
+re:((?<![\w$.])(?!super\.frameBufferId\b)[\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*)\.frameBufferId\b	@MVPKG@.LegacyTargets.fbo(\1)
 re:([\w.]+(?:\(\))?)\.bindWrite\(\s*(true|false)\s*\)	@MVPKG@.LegacyTargets.bindWrite(\1, \2)
 # GlStateManager no longer tracks the clear colour; the GL call is the same
 re:\bGlStateManager\._clearColor\(	org.lwjgl.opengl.GL11.glClearColor(
+# ---- Inventory.items is private in 1.21.5; the same NonNullList is getNonEquipmentItems()
+re:\.getInventory\(\)\.items\b	.getInventory().getNonEquipmentItems()
+# ---- GeckoLib: its only 1.21.5 line is 5.x. These classes only MOVED from 4.x (the predicate's AnimationState<T> is
+# AnimationTest<T> now; 5.x's own processing.AnimationState is a different class). The render-state rewrite itself
+# (GeoEntityRenderer<T, R extends EntityRenderState & GeoRenderState>, layers' addRenderData/addPerBoneRender,
+# BlockAndItemGeoLayer.getRelevantBones) is per file: CATALOG M49.
+software.bernie.geckolib.renderer.GeoRenderer	software.bernie.geckolib.renderer.base.GeoRenderer
+software.bernie.geckolib.animation.AnimatableManager	software.bernie.geckolib.animatable.manager.AnimatableManager
+software.bernie.geckolib.animation.AnimationController	software.bernie.geckolib.animatable.processing.AnimationController
+software.bernie.geckolib.animation.AnimationState	software.bernie.geckolib.animatable.processing.AnimationTest
+# AnimationController.getControllerState() is getAnimationState() (same State enum)
+re:\.getControllerState\(\)	.getAnimationState()
+# ---- GeckoLib 5 resource ids: a model/animation id is the BARE name under geckolib/{models,animations}/ (tools/fork-port.py
+# setup copies the 4.x geo/ and animations/ files there). The 4.x file-path ids do not survive every 5.x line's lookup:
+# 5.1-5.3 strip only geckolib/... and the suffix ("geo/x.geo.json" asks for "geo/x"), and 5.4.5's animation lookup strips
+# "animations/" and ".json" but not ".animation" (asks for "x.animation") -- so write the bare name everywhere.
+re:"geo/([\w/.-]+?)\.geo\.json"	"\1"
+re:"animations/([\w/.-]+?)\.animation\.json"	"\1"
+re:"([a-z0-9_.-]+):geo/([\w/.-]+?)\.geo\.json"	"\1:\2"
+re:"([a-z0-9_.-]+):animations/([\w/.-]+?)\.animation\.json"	"\1:\2"
+re:"geo/"\s*\+\s*([\w.()]+)\s*\+\s*"\.geo\.json"	\1
+re:"animations/"\s*\+\s*([\w.()]+)\s*\+\s*"\.animation\.json"	\1
 #!strict

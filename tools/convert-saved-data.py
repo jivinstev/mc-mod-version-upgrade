@@ -62,6 +62,8 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.datafix.DataFixTypes;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
@@ -114,11 +116,21 @@ public final class SavedDataCompat {{
                                       data -> data.save(new CompoundTag(), registries(level)));
     }}
 
+    /** Where 1.21.1 kept a dimension's saved data. NOT 26.x's DimensionType.getStorageFolder for the vanilla three:
+     *  26.1 moved those to dimensions/minecraft/&lt;dim&gt;/ and its world-upgrade file fix moves only vanilla's own
+     *  stores, so a mod's file stays in data/ (overworld), DIM-1/data (nether) or DIM1/data (end). */
+    static Path legacyDataFolder(ResourceKey<Level> dimension, Path worldRoot) {{
+        if (Level.OVERWORLD.equals(dimension)) return worldRoot.resolve("data");
+        if (Level.NETHER.equals(dimension)) return worldRoot.resolve("DIM-1").resolve("data");
+        if (Level.END.equals(dimension)) return worldRoot.resolve("DIM1").resolve("data");
+        return DimensionType.getStorageFolder(dimension, worldRoot).resolve("data");
+    }}
+
     /** A fresh store, or the one a 1.21.1 world saved at data/&lt;name&gt;.dat in this dimension. */
     private static <T extends Base> T create(Factory<T> factory, String name, ServerLevel level) {{
         if (level != null) {{
-            Path legacy = DimensionType.getStorageFolder(level.dimension(), level.getServer().getWorldPath(LevelResource.ROOT))
-                .resolve("data").resolve(name + ".dat");
+            Path legacy = legacyDataFolder(level.dimension(), level.getServer().getWorldPath(LevelResource.ROOT))
+                .resolve(name + ".dat");
             if (Files.isRegularFile(legacy)) {{
                 try {{
                     CompoundTag root = level.getDataStorage().readTagFromDisk(legacy, null,
@@ -461,6 +473,9 @@ def self_check():
         gen = (src / "a/compat/SavedDataCompat.java").read_text(encoding="utf-8")
         expect('NAMESPACE = "x"' in gen and "package a.compat;" in gen, "compat generated")
         expect(gen.count("{") == gen.count("}"), "compat braces balance")
+        expect('if (Level.OVERWORLD.equals(dimension)) return worldRoot.resolve("data");' in gen
+               and 'worldRoot.resolve("DIM-1").resolve("data")' in gen and "legacyDataFolder(level.dimension()" in gen,
+               "the 1.21.1 file is looked for where 1.21.1 kept it (data/, DIM-1/data, DIM1/data), not in 26.x's dimension folder")
         snap = {p: p.read_text(encoding="utf-8") for p in src.rglob("*.java")}
         convert(src, "x")
         expect(snap == {p: p.read_text(encoding="utf-8") for p in src.rglob("*.java")}, "idempotent")

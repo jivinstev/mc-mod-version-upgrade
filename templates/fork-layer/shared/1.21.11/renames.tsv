@@ -50,4 +50,12 @@ re:(@Inject\(method = "setup"[\s\S]{0,200}?private void [\w$]+\()BlockGetter (\w
 # type rows above can reach. The two that matter for a client mod: RenderType moved into `rendertype`, ResourceLocation is Identifier.
 re:Lnet/minecraft/client/renderer/RenderType;	Lnet/minecraft/client/renderer/rendertype/RenderType;
 re:Lnet/minecraft/resources/ResourceLocation;	Lnet/minecraft/resources/Identifier;
+# ---- GeckoLib 5.4 controllers (1.21.11): forceAnimationReset() is reset(). The State enum is gone too (a STOPPED check
+# is per file, CATALOG M55). ⚠ reset() now sets PlayState.STOP: a STOPPED check AFTER a reset in the same predicate
+# reads true at once, where forceAnimationReset() left the state alone -- read the state first.
+re:\.forceAnimationReset\(\)	.reset()
+# The State enum is gone: a STOPPED comparison (4.x getControllerState() or 5.x getAnimationState()) becomes
+# @MVPKG@.GeoControllers.isStopped(controller) -- read it before any reset() in the same predicate.
+re:([\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*)\.(?:getControllerState|getAnimationState)\(\)\s*!=\s*(?:[\w.]*\.)?(?:State|ControllerState)\.STOPPED	!@MVPKG@.GeoControllers.isStopped(\1)
+re:([\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*)\.(?:getControllerState|getAnimationState)\(\)\s*==\s*(?:[\w.]*\.)?(?:State|ControllerState)\.STOPPED	@MVPKG@.GeoControllers.isStopped(\1)
 #!strict

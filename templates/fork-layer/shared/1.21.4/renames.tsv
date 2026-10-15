@@ -22,4 +22,7 @@ re:new SimpleBufferBuilder\((\d+)\)	new SimpleBufferBuilder("@MODID@", \1)
 # ---- LevelRenderer.renderLevel lost its LightTexture argument (1.21.4); this row runs before the 1.21.3 one, on the
 # 1.21.1 text, so it writes the full 1.21.4 descriptor itself
 re:LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/renderer/LightTexture;	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;
+# ---- mixin targets: ScreenEffectRenderer.renderScreenEffect(Minecraft, PoseStack) gained a MultiBufferSource
+# (measured on neoforge-21.4.158); an @Inject handler needs the extra parameter before its CallbackInfo
+re:(method = "renderScreenEffect"[^;{]*?\(\s*Minecraft \w+,\s*PoseStack \w+,)(\s*CallbackInfo\b)	\1 net.minecraft.client.renderer.MultiBufferSource mv$bufferSource,\2
 #!strict

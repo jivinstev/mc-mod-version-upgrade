@@ -1,4 +1,6 @@
 // OVERLAY-ONLY: shared fork-layer helper from mc-mod-version-upgrade templates/fork-layer/shared (not the authors' code).
+// MV-REQUIRES: LegacyGl
+// MV-REQUIRES: Uniform
 package @MVPKG@;
 
 import com.google.gson.JsonArray;
@@ -182,6 +184,12 @@ public class ShaderInstance implements AutoCloseable {
         for (String s : samplers) {
             GpuTexture t = boundSamplers.get(s);
             if (t == null) t = LegacyGl.slotTexture(s);
+            // 1.21.1's GL let a declared sampler stay unset: its uniform is 0, so it read texture unit 0. From 1.21.5 the
+            // command encoder refuses the draw instead ("Missing sampler X", thrown from the frame), so a sampler the
+            // mod only binds on some paths (a mask set only when a mask source is chosen) takes unit 0's texture, and
+            // with nothing there the missing-texture sprite -- never an unbound sampler
+            if (t == null) t = LegacyGl.slotTexture("Sampler0");
+            if (t == null) t = LegacyGl.missingTexture();
             if (t != null) pass.bindSampler(s, t);
         }
     }

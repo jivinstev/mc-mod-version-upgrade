@@ -101,11 +101,43 @@ def layer_values(values, layer_branch):
     second template, rendered with the same values). Without --layer-branch both are empty and the workflow is
     exactly the layer-free one."""
     if not layer_branch:
-        return dict(values, LAYER_BRANCH_ITEM="", LAYER_JOBS="")
+        return dict(values, LAYER_BRANCH_ITEM="", LAYER_JOBS="", RELEASE_NOT_LAYER="")
     if not re.fullmatch(r"[\w.\-/]+", layer_branch) or layer_branch == values["BRANCH"]:
         raise SystemExit(f"--layer-branch must be a branch name other than the port branch ({values['BRANCH']}), got {layer_branch!r}")
     v = dict(values, LAYER_BRANCH=layer_branch)
-    return dict(values, LAYER_BRANCH_ITEM=f', "{layer_branch}"', LAYER_JOBS=render(LAYER_TEMPLATE.read_text(encoding="utf-8"), v))
+    jobs = render(LAYER_TEMPLATE.read_text(encoding="utf-8"), v) + render(layer_release_job(v), v)
+    return dict(values, LAYER_BRANCH_ITEM=f', "{layer_branch}"', LAYER_JOBS=jobs,
+                RELEASE_NOT_LAYER=f" && github.ref_name != '{layer_branch}'")
+
+
+def layer_release_job(v):
+    """The `release` job of the main template, made the layer branch's: it also waits for the layer's compile and gate
+    jobs and puts every target's jar (layer-jars-<t>) beside the base jars, so ONE pre-release holds the file
+    publish-port's layer path uploads per target. Derived from the release job's own text, so the release script has
+    one home; the main release job steps aside on the layer branch (RELEASE_NOT_LAYER)."""
+    t = TEMPLATE.read_text(encoding="utf-8")
+    job = t[t.index("\n  release:\n    needs:") + 1:]          # the JOB (the first `release:` is the trigger)
+    nxt = re.search(r"\n\n  (?:#|[a-z][\w-]*:\n)", job)       # the next job (or its comment), not a blank line in a script
+    job = job[:nxt.start() + 1] if nxt else job
+    needs = [x.strip() for x in v["RELEASE_NEEDS"].strip("[]").split(",")]
+    ok = " && ".join(f"needs.{n}.result == 'success'" for n in needs)
+    job = job.replace("  release:\n", "  layer-release:\n    name: layer release (the base jars and one jar per layer target)\n", 1)
+    # every layer job that can fail is a need: isolation and inertness (the base build untouched) must pass; the jobs
+    # a fork may legitimately not run (no middle target, no full_gates= list) may be skipped, never failed
+    layer = ["layer-plan", "layer-isolation", "layer-inertness", "layer-compile", "layer-gates", "layer-gates-extra"]
+    job = re.sub(r"(?m)^    needs: .*$", "    needs: [" + ", ".join(needs + layer) + "]", job, count=1)
+    job = re.sub(r"(?m)^    if: .*$", "    if: ${{ !cancelled() && " + ok + " && needs.layer-plan.outputs.layer == 'true'"
+                 " && needs.layer-isolation.result == 'success' && needs.layer-inertness.result == 'success'"
+                 " && needs.layer-gates.result == 'success' && (needs.layer-compile.result == 'success'"
+                 " || needs.layer-compile.result == 'skipped') && (needs.layer-gates-extra.result == 'success'"
+                 " || needs.layer-gates-extra.result == 'skipped') && github.ref_name == '{{LAYER_BRANCH}}' && inputs.release }}",
+                 job, count=1)
+    jars = "      - uses: actions/download-artifact@v4\n        with:\n          name: jars\n          path: jars\n"
+    if jars not in job:
+        raise SystemExit("port-ci: the release job no longer downloads `jars`; layer_release_job needs updating")
+    job = job.replace(jars, jars + "      - uses: actions/download-artifact@v4\n        with:\n          pattern: layer-jars-*\n"
+                                   "          merge-multiple: true\n          path: jars\n", 1)
+    return "\n" + job
 
 
 def render(text, values):
@@ -413,7 +445,9 @@ def variant_check():
         ok &= "a" * 64 + "  " in job and "b" * 64 + "  " in job          # dependency and kit sha256-checked here too
         ok &= "${{" not in job.split("run: |\n          python3", 1)[1].split("\n      - name: Shipped-jar summary", 1)[0]
         ok &= s.replace(s[s.index("\n\n  shipped:\n"):s.index("\n\n  release:\n")], "").replace(
-            "needs: [gates, shipped]", "needs: gates") == base        # nothing else moved
+            "needs: [gates, shipped]", "needs: gates").replace(          # (the layer release waits for it too)
+            "needs: [gates, shipped, layer-plan", "needs: [gates, layer-plan").replace(
+            " && needs.shipped.result == 'success'", "") == base        # nothing else moved
         # --dep-jar-variant: one more leg, named; default legs keep their check and artifact names; sha256 pinned
         d = fixture(True, layer, dep_variants=[cf])
         g = d.split("\n  gates:\n", 1)[1].split("\n  release:\n", 1)[0]
@@ -688,6 +722,20 @@ def self_check():
     for j in ("layer-isolation", "layer-inertness", "layer-compile", "layer-gates", "layer-gates-extra"):
         body = ljobs.split(f"\n  {j}:\n", 1)[1].split("\n  layer-", 1)[0]
         ok &= "needs: layer-plan" in body and "needs.layer-plan.outputs.layer == 'true'" in body and not any("always()" in l for l in body.splitlines() if l.startswith("    if:"))
+    # layer-release: the release job made the layer branch's -- base jars plus every target's, after every layer gate;
+    # the main release steps aside there; each layer job fetches its pinned sibling jars first
+    rel = lay.split("\n  layer-release:\n", 1)[1]
+    ok &= ("needs: [gates, layer-plan, layer-isolation, layer-inertness, layer-compile, layer-gates, layer-gates-extra]" in rel
+           and "github.ref_name == 'neoforge-1.21.x' && inputs.release" in rel)
+    # every layer job gates the release: isolation/inertness/gates must succeed; compile and gates-extra may be skipped
+    rif = next(l for l in rel.splitlines() if l.startswith("    if:"))
+    ok &= all(f"needs.{j}.result == 'success'" in rif for j in ("layer-isolation", "layer-inertness", "layer-gates"))
+    ok &= all(f"(needs.{j}.result == 'success' || needs.{j}.result == 'skipped')" in rif for j in ("layer-compile", "layer-gates-extra"))
+    ok &= "needs.layer-isolation.result == 'skipped'" not in rif and "needs.layer-inertness.result == 'skipped'" not in rif
+    ok &= "pattern: layer-jars-*" in rel and "merge-multiple: true" in rel and "gh release create" in rel
+    ok &= "github.ref_name != 'neoforge-1.21.x'" in lay.split("\n  release:\n    needs:", 1)[1].split("steps:", 1)[0]
+    ok &= "github.ref_name !=" not in plain and "layer-release" not in plain and "layer-deps.py" not in plain
+    ok &= lay.count("layer-deps.py fetch --repo . --target") == 3 and lay.count("name: layer-jars-") == 2
     ok &= "python3 .multiversion/tools/layer.py isolation --base \"origin/neoforge-1.21.1\"" in lay
     ok &= "layer-ci.py inertness" in lay and "layer-ci.py compile" in lay and "--mc \"$NEWEST\"" in lay
     extra = ljobs.split("\n  layer-gates-extra:\n", 1)[1]

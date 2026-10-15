@@ -140,7 +140,7 @@ jobs:
 
   release:
     needs: gates
-    if: github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || inputs.release)
+    if: github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || inputs.release) && github.ref_name != 'neoforge-1.21.x'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -330,6 +330,11 @@ jobs:
   #   layer-gates      the NEWEST target: all gates, Gate C included, plus the shipped jar when the fork records one
   #   layer-gates-extra  a RELEASED middle target the fork lists in .multiversion/ci.properties (full_gates=1.21.4,...):
   #                    the same full gates. Absent or empty = this job never runs (the default).
+  #   layer-release    `release` run from neoforge-1.21.x: the pre-release holds the base jars AND one jar per target
+  #                    (<name>-mc<t>.jar, built by layer-compile / layer-gates), once isolation, inertness, layer-compile,
+  #                    layer-gates and layer-gates-extra are all green (layer-compile / -extra may be skipped, never red).
+  #                    The release job above steps aside on neoforge-1.21.x. Each job first fetches the sibling
+  #                    ports' per-target jars its target.properties pins (tools/layer-deps.py fetch).
   # The neoforge-1.21.1 gates above also run on the layer branch: they are its 1.21.1 bookend.
   layer-plan:
     name: layer plan
@@ -447,6 +452,10 @@ jobs:
           path: .port-deps/other
       - name: Build other (neoforge-1.21.1) into mavenLocal
         run: cd .port-deps/other && bash gradlew --console=plain publishToMavenLocal
+      - name: Sibling ports' jars for this target (pinned in its target.properties by tools/layer-deps.py)
+        env:
+          TARGET: ${{ matrix.t }}
+        run: python3 .port-tools/tools/layer-deps.py fetch --repo . --target "$TARGET"
       - name: Compile every source set, then the mixin and event-listener audits
         env:
           TARGET: ${{ matrix.t }}
@@ -456,6 +465,17 @@ jobs:
         env:
           TARGET: ${{ matrix.t }}
         run: cat "$RUNNER_TEMP/layer-$TARGET.md" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - name: This target's jars, for the layer release
+        if: ${{ inputs.release }}
+        env:
+          TARGET: ${{ matrix.t }}
+        run: bash .multiversion/build.sh "$TARGET" build -x test --console=plain
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.release }}
+        with:
+          name: layer-jars-${{ matrix.t }}
+          path: build/mc${{ matrix.t }}/libs/*-mc${{ matrix.t }}.jar
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -486,7 +506,7 @@ jobs:
           distribution: temurin
           java-version: ${{ needs.layer-plan.outputs.newest_java }}
       - name: Software OpenGL for the client gate
-        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
       - name: lib 1.0 from the lib-1.0-mc1.21.1 release into mavenLocal (pinned by sha256)
         run: |
           mkdir -p "$HOME/.m2/repository/com/example/lib/lib/1.0"
@@ -500,6 +520,10 @@ jobs:
           path: .port-deps/other
       - name: Build other (neoforge-1.21.1) into mavenLocal
         run: cd .port-deps/other && bash gradlew --console=plain publishToMavenLocal
+      - name: Sibling ports' jars for this target (pinned in its target.properties by tools/layer-deps.py)
+        env:
+          TARGET: ${{ needs.layer-plan.outputs.newest }}
+        run: python3 .port-tools/tools/layer-deps.py fetch --repo . --target "$TARGET"
       - name: All gates on the newest target
         env:
           NEWEST: ${{ needs.layer-plan.outputs.newest }}
@@ -523,6 +547,12 @@ jobs:
             ${{ runner.temp }}/layer-gates.md
             build/mc${{ needs.layer-plan.outputs.newest }}/libs/*.jar   # the target's own file (named -mc<target>): what publish-port uploads
           if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.release }}
+        with:
+          name: layer-jars-${{ needs.layer-plan.outputs.newest }}
+          path: build/mc${{ needs.layer-plan.outputs.newest }}/libs/*-mc${{ needs.layer-plan.outputs.newest }}.jar
+          if-no-files-found: error
 
   layer-gates-extra:
     # CI policy: bookends fully gated, middle targets compile + audits; a middle target that is RELEASED is also fully
@@ -550,7 +580,7 @@ jobs:
           distribution: temurin
           java-version: ${{ matrix.java }}
       - name: Software OpenGL for the client gate
-        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
       - name: lib 1.0 from the lib-1.0-mc1.21.1 release into mavenLocal (pinned by sha256)
         run: |
           mkdir -p "$HOME/.m2/repository/com/example/lib/lib/1.0"
@@ -564,6 +594,10 @@ jobs:
           path: .port-deps/other
       - name: Build other (neoforge-1.21.1) into mavenLocal
         run: cd .port-deps/other && bash gradlew --console=plain publishToMavenLocal
+      - name: Sibling ports' jars for this target (pinned in its target.properties by tools/layer-deps.py)
+        env:
+          TARGET: ${{ matrix.t }}
+        run: python3 .port-tools/tools/layer-deps.py fetch --repo . --target "$TARGET"
       - name: All gates on this target
         env:
           TARGET: ${{ matrix.t }}
@@ -588,3 +622,55 @@ jobs:
             ${{ runner.temp }}/layer-gates-${{ matrix.t }}/shipped/**
             ${{ runner.temp }}/layer-gates-${{ matrix.t }}.md
           if-no-files-found: ignore
+
+  layer-release:
+    name: layer release (the base jars and one jar per layer target)
+    needs: [gates, layer-plan, layer-isolation, layer-inertness, layer-compile, layer-gates, layer-gates-extra]
+    if: ${{ !cancelled() && needs.gates.result == 'success' && needs.layer-plan.outputs.layer == 'true' && needs.layer-isolation.result == 'success' && needs.layer-inertness.result == 'success' && needs.layer-gates.result == 'success' && (needs.layer-compile.result == 'success' || needs.layer-compile.result == 'skipped') && (needs.layer-gates-extra.result == 'success' || needs.layer-gates-extra.result == 'skipped') && github.ref_name == 'neoforge-1.21.x' && inputs.release }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: gradle.properties
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: jars
+          path: jars
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: layer-jars-*
+          merge-multiple: true
+          path: jars
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gate-logs-*
+          path: logs
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then TAG="${{ github.ref_name }}"; else
+            v=$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
+            TAG="examplemod-${v}-mc1.21.1"
+            # the port was fixed but the author's version did not move: release it as -r2, -r3, ...
+            base="$TAG"; n=2
+            while gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+              TAG="${base}-r${n}"; n=$((n+1))
+            done
+          fi
+          {
+            echo "**Unofficial port** of https://github.com/a/examplemod to NeoForge 21.1.100 (Minecraft 1.21.1)."
+            echo "Same licence and credits as the original; not an official release by the author."
+            echo
+            for e in full minimal; do
+              cat "logs/gate-logs-$e/gates.md" 2>/dev/null || echo "(gate summary for the $e environment missing)"
+              echo
+            done
+            echo
+            echo "Built from \`${{ github.sha }}\` by the author's own Gradle build. Pre-release until played by a person."
+          } > notes.md
+          gh release create "$TAG" jars/*.jar --repo "${{ github.repository }}" --prerelease \
+            --title "$TAG (unofficial NeoForge 21.1.100 (Minecraft 1.21.1) port)" --notes-file notes.md --target "${{ github.sha }}"

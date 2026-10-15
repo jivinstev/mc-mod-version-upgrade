@@ -403,6 +403,10 @@ grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CA
   && grep -q '1,?000 errors' tools/burndown-count.sh && grep -q '1,?000 errors' tools/file-loop.py \
   && ok "the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count" || bad "the Gradle error cap disagrees between its four copies"
 
+out="$(python3 tools/layer-deps.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "layer-deps: pinned mods resolved per target, a required miss stops (exit 15) and writes nothing, an optional miss is excluded and recorded, a slug-pinned Modrinth mod matches the manifest by project id, an unlisted implementation dependency is required (fail closed), an earlier --port-release pin survives a re-resolve, --dry-run builds no sibling, a single-version fork is untouched" \
+  || bad "layer-deps self-check: $out"
+
 out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges, add-target --direct writes shared_chain (default off)" \
   || bad "make-fork-layer self-check: $out"
@@ -427,7 +431,7 @@ out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest, a direct jump (shared_chain) prepares the hop-by-hop chain's tree" \
   || bad "layer.py self-check: $out"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command" \
   || bad "fork-port self-check: $out"
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
@@ -485,7 +489,7 @@ else
   echo "  SKIP  audit-event-listeners (no javac/jar)"
 fi
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause" || bad "gate-loop self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b)" || bad "gate-loop self-check: $out"
 out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick and crash-cause self-check" || bad "shipped-gate self-check: $out"
 python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
@@ -561,6 +565,17 @@ GR
     && [ "$mc" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0-mc1.21.4.jar ./libs/scratch-1.0_mr-mc1.21.4.jar " ] \
     && ok "layer.gradle: with -Pmc the jars in libs are named -mc<target>; without it, and for embedded/intermediate jars, names are unchanged" \
     || bad "layer.gradle jar names: base=[$base] mc=[$mc]"
+  # an exclude. key with no ':' (unescaped, so java.util.Properties cut it there) is refused, never a whole-group exclude
+  GE="$T/ge"; mkdir -p "$GE"; printf "rootProject.name = 'scratch'\n" > "$GE/settings.gradle"
+  { printf "plugins { id 'java' }\ndef mvProps = new Properties()\nfile('t.properties').withInputStream { mvProps.load(it) }\n"
+    sed -n '/BEGIN-EXCLUDES/,/END-EXCLUDES/p' templates/fork-layer/layer.gradle; } > "$GE/build.gradle"
+  printf 'exclude.com.example\\:lib=no build\n' > "$GE/t.properties"
+  (cd "$GE" && gradle -q --offline help >/dev/null 2>&1); good=$?
+  printf 'exclude.com.example:lib=no build\n' > "$GE/t.properties"
+  out="$(cd "$GE" && gradle -q --offline help 2>&1)"; badkey=$?
+  [ $good = 0 ] && [ $badkey != 0 ] && grep -q 'escape the' <<<"$out" \
+    && ok "layer.gradle: an escaped exclude.<group:module> applies; an unescaped one (no ':' left in the key) stops the build" \
+    || bad "layer.gradle exclude keys: escaped exit $good, unescaped exit $badkey: $out"
 fi
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script; without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (single-version and layer fork); --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back; promote refreshes the install manifest on the port branch only (its script run on a fake fork, single-version and layer: pushed on top of the tag, retried when the branch moved, nothing pushed when unchanged, a bad tag refused)" || bad "port-ci self-check: $out"
@@ -569,11 +584,315 @@ import re,sys
 src=open("tools/ci-gates.py").read()
 assert 'if q and q != "none"' in src
 PY
+# the mixin audit reads `@Mixin(value = X.class, priority = N)` (it once skipped every such FILE in silence)
+MX="$T/mixin-value"; mkdir -p "$MX/src/main/java/com/example/mod/mixin" "$MX/src/main/resources" "$MX/jar/net/x"
+printf 'package net.x;\npublic class Dragon {\n    private void hurt(Level l, java.util.List<Object> e) {}\n}\n' > "$MX/jar/net/x/Dragon.java"
+( cd "$MX/jar" && python3 -c 'import zipfile; z=zipfile.ZipFile("../src.jar","w"); z.write("net/x/Dragon.java"); z.close()' )
+printf '{"package":"com.example.mod.mixin","mixins":["DragonMixin"]}' > "$MX/src/main/resources/examplemod.mixins.json"
+printf 'package com.example.mod.mixin;\nimport net.x.Dragon;\n@Mixin(value = Dragon.class, priority = 1024)\npublic abstract class DragonMixin {\n    @ModifyConstant(method = "hurt(Ljava/util/List;)V", constant = @Constant(floatValue = 10.0F))\n    private float f(float v) { return v; }\n}\n' > "$MX/src/main/java/com/example/mod/mixin/DragonMixin.java"
+out="$(python3 tools/audit-mixin-targets.py "$MX" "$MX/src.jar" 2>&1)"
+grep -q '1 MISMATCH' <<<"$out" && cmp -s tools/audit-mixin-targets.py templates/multi-version/tools/audit-mixin-targets.py \
+  && ok "mixin audit: a @Mixin(value = X.class, priority = N) file is checked (its stale pinned descriptor is a mismatch); both copies agree" \
+  || bad "mixin audit skipped a value= @Mixin, or its two copies differ: $(tail -3 <<<"$out")"
+# the mixin audit: an argsOnly @ModifyVariable binds to the FIRST declared overload of a name-only target, and a
+# CallbackInfoReturnable<T> must still name the target's return type (26.1's FogRenderer: both loaded "all match")
+MO="$T/mixin-overload"; mkdir -p "$MO/src/main/java/com/example/mod/mixin" "$MO/src/main/resources" "$MO/jar/net/x"
+mo_jar() {
+  printf 'package net.x;\npublic class Fog {\n    public Data setup(int a) { return null; }\n%s\n}\n' "$1" > "$MO/jar/net/x/Fog.java"
+  ( cd "$MO/jar" && python3 -c 'import zipfile; z=zipfile.ZipFile("../src.jar","w"); z.write("net/x/Fog.java"); z.close()' )
+}
+printf '{"package":"com.example.mod.mixin","client":["FogMixin"]}' > "$MO/src/main/resources/examplemod.mixins.json"
+printf 'package com.example.mod.mixin;\nimport net.x.Fog;\n@Mixin(Fog.class)\npublic class FogMixin {\n    @Inject(method = "setup", at = @At("RETURN"))\n    private void a(int a, CallbackInfoReturnable<Vec> cir) {}\n\n    @ModifyVariable(method = "upload", at = @At("HEAD"), argsOnly = true, ordinal = 0)\n    private static Vec b(Vec v) { return v; }\n}\n' > "$MO/src/main/java/com/example/mod/mixin/FogMixin.java"
+mo_jar '    public void upload(Data d) {}
+    private void upload(java.nio.ByteBuffer b, int o, Vec c, float s) {}'
+out="$(python3 tools/audit-mixin-targets.py "$MO" "$MO/src.jar" 2>&1)"
+sed -i 's/CallbackInfoReturnable<Vec>/CallbackInfoReturnable<Data>/' "$MO/src/main/java/com/example/mod/mixin/FogMixin.java"
+mo_jar '    private void upload(java.nio.ByteBuffer b, int o, Vec c, float s) {}
+    public void upload(Data d) {}'
+ctl="$(python3 tools/audit-mixin-targets.py "$MO" "$MO/src.jar" 2>&1)"
+grep -q '2 MISMATCH' <<<"$out" && grep -q 'callback type' <<<"$out" && grep -q 'FIRST declared upload' <<<"$out" \
+  && grep -q 'all targets match' <<<"$ctl" \
+  && ok "mixin audit: an argsOnly @ModifyVariable on a name-only overload is judged against the FIRST declared one, and a stale CallbackInfoReturnable<T> is a mismatch; the matching shapes pass" \
+  || bad "mixin audit overload/callback-type: $(tail -4 <<<"$out") | control: $(tail -2 <<<"$ctl")"
+# the mixin audit: a pinned descriptor naming a class that only MOVED package (same simple name) is a mismatch --
+# 26.1's CameraRenderState move passed "all targets match" and Gate C died at launch on the injection
+MP="$T/mixin-moved"; mkdir -p "$MP/src/main/java/com/example/mod/mixin" "$MP/src/main/resources" "$MP/jar/net/x/state/level"
+printf 'package net.x;\npublic class Rend {\n    public void submit(net.x.state.level.Cam c, com.example.mod.Own o) {}\n}\n' > "$MP/jar/net/x/Rend.java"
+printf 'package net.x.state.level;\npublic class Cam {}\n' > "$MP/jar/net/x/state/level/Cam.java"
+( cd "$MP/jar" && python3 -c 'import zipfile; z=zipfile.ZipFile("../src.jar","w"); z.write("net/x/Rend.java"); z.write("net/x/state/level/Cam.java"); z.close()' )
+printf '{"package":"com.example.mod.mixin","client":["RendMixin"]}' > "$MP/src/main/resources/examplemod.mixins.json"
+printf 'package com.example.mod.mixin;\nimport net.x.Rend;\n@Mixin(Rend.class)\npublic class RendMixin {\n    @Inject(method = "submit(Lnet/x/state/Cam;Lcom/example/mod/Own;)V", at = @At("HEAD"))\n    private void a(Cam c, Own o, CallbackInfo ci) {}\n}\n' > "$MP/src/main/java/com/example/mod/mixin/RendMixin.java"
+out="$(python3 tools/audit-mixin-targets.py "$MP" "$MP/src.jar" 2>&1)"
+sed -i 's#Lnet/x/state/Cam;#Lnet/x/state/level/Cam;#' "$MP/src/main/java/com/example/mod/mixin/RendMixin.java"
+ctl="$(python3 tools/audit-mixin-targets.py "$MP" "$MP/src.jar" 2>&1)"
+grep -q '1 MISMATCH' <<<"$out" && grep -q 'does not have: net.x.state.Cam' <<<"$out" && grep -q 'all targets match' <<<"$ctl" \
+  && ok "mixin audit: a pinned descriptor naming a class that moved package (same simple name) is a mismatch; the moved name, and a mod's own type, pass" \
+  || bad "mixin audit moved-class descriptor: $(tail -4 <<<"$out") | control: $(tail -2 <<<"$ctl")"
+
+# 1.21.9: isClientSide is a method; a mod that already calls the method keeps ONE pair of parentheses
+python3 - <<'PY' && ok "shared rows: isClientSide becomes a call, an existing call is left alone" || bad "the isClientSide row doubles an existing call"
+import re, pathlib, sys
+row = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.10/renames.tsv").read_text(encoding="utf-8").splitlines()
+       if l.startswith("re:") and "isClientSide" in l][0]
+pat, rep = row[3:].split("\t")
+f = lambda t: re.sub(pat, rep, t)
+sys.exit(0 if f("if (level.isClientSide) {") == "if (level.isClientSide()) {" and f("level.isClientSide()") == "level.isClientSide()" else 1)
+PY
+# a shared helper marked `// REQUIRES: <token>` is installed only in a fork whose build names the token (GeckoLib helpers)
+python3 - <<'PY' && ok "sync-shared: a REQUIRES-gated helper is skipped in a fork without the library, installed in one with it" || bad "a REQUIRES-gated shared helper reached a fork without its library (or missed one with it)"
+import importlib.util, pathlib, sys, tempfile
+sys.argv = ["x"]
+spec = importlib.util.spec_from_file_location("m", "tools/make-fork-layer.py"); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+d = pathlib.Path(tempfile.mkdtemp()); (d / ".multiversion").mkdir()
+(d / "gradle.properties").write_text("mod_id=examplemod\n", encoding="utf-8")
+(d / "src/main/resources/META-INF").mkdir(parents=True)
+(d / "src/main/resources/META-INF/neoforge.mods.toml").write_text('[[mods]]\nmodId="examplemod"\n', encoding="utf-8")
+(d / "build.gradle").write_text("dependencies {}\n", encoding="utf-8")
+sh = pathlib.Path(tempfile.mkdtemp()); (sh / "9.9/java").mkdir(parents=True); m.SHARED = sh
+(sh / "9.9/java/Needs.java").write_text("// OVERLAY-ONLY\n// REQUIRES: geckolib\npackage @MVPKG@;\nclass Needs {}\n", encoding="utf-8")
+(sh / "9.9/java/Plain.java").write_text("// OVERLAY-ONLY\npackage @MVPKG@;\nclass Plain {}\n", encoding="utf-8")
+names = lambda: sorted(k.rsplit("/", 1)[1] for k in m.shared_files(d, "9.9"))
+without = names()
+(d / "build.gradle").write_text('dependencies { implementation "com.geckolib:geckolib-neoforge-1.21.11:5.4.5" }\n', encoding="utf-8")
+with_ = names()
+sys.exit(0 if without == ["Plain.java"] and with_ == ["Needs.java", "Plain.java"] else 1)
+PY
+# a layer made before a layer.gradle change gets the current machinery from sync-shared (--check reports it first);
+# a copy someone edited (not any version the migrator shipped) is reported, fails --check, and is never written over
+python3 - <<'PY' && ok "sync-shared: a verbatim older layer.gradle is refreshed, a missing build.sh installed, an edited layer.py reported (--check fails) and left alone" || bad "sync-shared overwrote an edited machinery file (or left a verbatim older one stale)"
+import importlib.util, io, contextlib, pathlib, sys, tempfile
+sys.argv = ["x"]
+spec = importlib.util.spec_from_file_location("m", "tools/make-fork-layer.py"); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+d = pathlib.Path(tempfile.mkdtemp()); (d / ".multiversion/tools").mkdir(parents=True); (d / ".multiversion/targets").mkdir()
+(d / "gradle.properties").write_text("mod_id=examplemod\n", encoding="utf-8")
+for f in m.MACHINERY:
+    (d / ".multiversion" / f).write_bytes((m.TPL / f).read_bytes())
+older = b"// an older layer.gradle the migrator shipped\n"
+m._HISTORY["layer.gradle"] = {older}   # the template's git history, without git (CI clones shallow)
+(d / ".multiversion/layer.gradle").write_bytes(older)
+(d / ".multiversion/build.sh").unlink()
+edited = (m.TPL / "tools/layer.py").read_text(encoding="utf-8") + "# a hand edit\n"
+(d / ".multiversion/tools/layer.py").write_text(edited, encoding="utf-8")
+out = io.StringIO()
+with contextlib.redirect_stdout(out): rc_check = m.sync_shared(d, check=True)
+untouched = (d / ".multiversion/layer.gradle").read_bytes() == older
+with contextlib.redirect_stdout(out): m.sync_shared(d)
+with contextlib.redirect_stdout(out): rc_after = m.sync_shared(d, check=True)
+cur = lambda f: (d / ".multiversion" / f).read_bytes() == (m.TPL / f).read_bytes()
+log = out.getvalue()
+sys.exit(0 if rc_check == 1 and untouched and cur("layer.gradle") and cur("build.sh")
+         and (d / ".multiversion/tools/layer.py").read_text(encoding="utf-8") == edited
+         and rc_after == 1 and "DIVERGED .multiversion/tools/layer.py" in log else 1)
+PY
+# audit-mixin-targets roots_of: its cache never answers with another jar's roots (an id() reused, or the set grown)
+python3 - <<'PY' && ok "audit-mixin-targets: roots_of is recomputed for a new object reusing an id() and for a grown one (both copies identical)" || bad "audit-mixin-targets roots_of answered from a stale cache entry"
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("a", "tools/audit-mixin-targets.py"); m = importlib.util.module_from_spec(spec)
+sys.argv = ["x"]; spec.loader.exec_module(m)
+a = {"net/minecraft/A.java"}
+first = m.roots_of(a)
+a.add("com/mojang/B.java")
+grown = m.roots_of(a)
+m._ROOTS[id(b := {"org/example/C.java"})] = (object(), 1, {"net/minecraft/"})   # an entry left by a dead object with b's id
+sys.exit(0 if first == {"net/minecraft/"} and grown == {"net/minecraft/", "com/mojang/"} and m.roots_of(b) == {"org/example/"} else 1)
+PY
+# R25: a registration supplier names what it builds and every Block/Item Properties takes that name (prefix-only rows)
+python3 - <<'PY' && ok "shared rows: R25 registry ids -- suppliers enter their name, Item/Block Properties are stamped, a constructor reference becomes an entering supplier" || bad "the R25 RegIds rows rewrite the wrong shapes"
+import re, pathlib, sys
+rows = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
+        if l.startswith("re:") and "RegIds" in l]
+src = ('ITEMS.register("blade", () -> new BladeItem());\n'
+       'BLOCKS.register("t", () -> new T(BlockBehaviour.Properties.of().strength(2f)));\n'
+       'super(new Properties().stacksTo(1));\nBlock.Properties.ofFullCopy(Blocks.STONE)\nx.register("y", Foo::new);\n')
+for r in rows:
+    pat, rep = r[3:].split("\t")
+    src = re.sub(pat, rep.replace("@MVPKG@", "p"), src)
+want = ('ITEMS.register("blade", () -> p.RegIds.enter("blade") ? null : new BladeItem());\n'
+        'BLOCKS.register("t", () -> p.RegIds.enter("t") ? null : new T(p.RegIds.stamp(BlockBehaviour.Properties.of()).strength(2f)));\n'
+        'super(p.RegIds.stamp(new Properties()).stacksTo(1));\np.RegIds.stamp(Block.Properties.ofFullCopy(Blocks.STONE))\n'
+        'x.register("y", () -> p.RegIds.enter("y") ? null : new Foo());\n')
+sys.exit(0 if len(rows) >= 4 and src == want else 1)
+PY
+# a row that routes a CALL through a static helper must leave `super.`/`this.` alone: a helper cannot make a super call
+# (CATALOG W5b), and `Mv.cullingBox(super)` does not even parse -- it once stopped a dependent fork's measure as a parse abort
+python3 - <<'PY' && ok "shared rows: the culling-box helper row skips super./this. receivers (and still rewrites e.x())" || bad "the culling-box row rewrites super./this. (or no longer rewrites e.x())"
+import re, pathlib, sys
+row = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
+       if "getBoundingBoxForCulling" in l][0]
+pat, rep = row[3:].split("\t")
+f = lambda s: re.sub(pat, rep.replace("@MVPKG@", "p"), s)
+sys.exit(0 if f("super.getBoundingBoxForCulling()") == "super.getBoundingBoxForCulling()"
+         and f("this.getBoundingBoxForCulling()") == "this.getBoundingBoxForCulling()"
+         and f("e.getBoundingBoxForCulling()") == "p.Mv.cullingBox(e)" else 1)
+PY
+# a row that routes a call through a static helper takes the WHOLE receiver chain, never its tail:
+# `Minecraft.getInstance().font.drawInBatch(` once became `Minecraft.getInstance().p.Fonts.drawInBatch(font, `
+python3 - <<'PY' && ok "shared rows: receiver-chain rows (26.2 drawInBatch/setFilter/bufferSource, 1.21.3 culling box, 1.21.5 frameBufferId) take the whole chain; setFilter leaves AbstractTexture.setFilter(blur, mip) alone" || bad "a receiver row rewrites mid-chain, or setFilter catches a non-EditBox call"
+import re, pathlib, sys
+def f(ver, key, s):
+    for l in pathlib.Path(f"templates/fork-layer/shared/{ver}/renames.tsv").read_text(encoding="utf-8").splitlines():
+        if l.startswith("re:") and key in l.split("\t")[0]:
+            pat, rep = l[3:].split("\t"); s = re.sub(pat, rep.strip().replace("@MVPKG@", "p"), s)
+    return s
+cases = [
+    ("26.2", "drawInBatch", "Minecraft.getInstance().font.drawInBatch(text, x, y);", "p.Fonts.drawInBatch(Minecraft.getInstance().font, text, x, y);"),
+    ("26.2", "drawInBatch", "this.font.drawInBatch(t, 0, 0)", "p.Fonts.drawInBatch(this.font, t, 0, 0)"),
+    ("26.2", "drawInBatch", "super.drawInBatch(t, 0, 0)", "super.drawInBatch(t, 0, 0)"),
+    ("26.2", "setFilter", "this.screen.box.setFilter(s -> s.length() < 5);", "p.EditBoxes.setFilter(this.screen.box, s -> s.length() < 5);"),
+    ("26.2", "setFilter", "this.input.setFilter(Util::isNumeric);", "p.EditBoxes.setFilter(this.input, Util::isNumeric);"),
+    ("26.2", "setFilter", "nameField.setFilter(FILTER);", "p.EditBoxes.setFilter(nameField, FILTER);"),
+    ("26.2", "setFilter", "texture.setFilter(true, false);", "texture.setFilter(true, false);"),
+    ("26.2", "setFilter", "handler.setFilter(LOG_FILTER);", "handler.setFilter(LOG_FILTER);"),
+    ("26.2", "bufferSource", "this.minecraft.gameRenderer.renderBuffers().bufferSource().getBuffer(t)", "p.MultiBufferSource.main().getBuffer(t)"),
+    ("26.2", "bufferSource", "event.getMinecraft().renderBuffers().bufferSource()", "p.MultiBufferSource.main()"),
+    ("1.21.3", "getBoundingBoxForCulling", "this.entity.getBoundingBoxForCulling()", "p.Mv.cullingBox(this.entity)"),
+    ("1.21.3", "getBoundingBoxForCulling", "a.get().getBoundingBoxForCulling().inflate(1)", "p.Mv.cullingBox(a.get()).inflate(1)"),
+    ("1.21.5", "frameBufferId", "Minecraft.getInstance().getMainRenderTarget().frameBufferId", "p.LegacyTargets.fbo(Minecraft.getInstance().getMainRenderTarget())"),
+    ("1.21.5", "frameBufferId", "this.target.frameBufferId", "p.LegacyTargets.fbo(this.target)"),
+]
+bad = [(c, f(*c[:3])) for c in cases if f(*c[:3]) != c[3]]
+print(*bad, sep="\n")
+sys.exit(1 if bad else 0)
+PY
+# 1.21.8 drops a leading renderBackground(...) from render() only in a Screen (a file with an `extends ...Screen`)
+python3 - <<'PY' && ok "shared rows: the 1.21.6 renderBackground row applies in a Screen subclass only, not to another Renderable's render()" || bad "the renderBackground row misses a Screen or deletes a non-Screen's call"
+import re, pathlib, sys
+row = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.8/renames.tsv").read_text(encoding="utf-8").splitlines()
+       if l.startswith("re:") and "renderBackground" in l][0]
+pat, rep = row[3:].split("\t")
+body = (" {\n    @Override\n    public void render(GuiGraphics g, int mx, int my, float pt) {\n"
+        "        renderBackground(g, mx, my, pt);\n        super.render(g, mx, my, pt);\n    }\n}\n")
+f = lambda s: re.sub(pat, rep, s)
+scr, ctr, wid = "class S extends Screen" + body, "class C extends AbstractContainerScreen<M>" + body, "class W extends AbstractWidget" + body
+gone = lambda s: "renderBackground" not in f(s) and "super.render(g, mx, my, pt);" in f(s)
+sys.exit(0 if gone(scr) and gone(ctr) and f(wid) == wid else 1)
+PY
+# R25: the name RegIds.enter records lasts only while ITS supplier runs -- a registration that never entered a name used to
+# take the previous registration's id silently; it now gets none (vanilla's loud "Item id not set")
+if command -v javac >/dev/null 2>&1; then
+  for v in 1.21.3 1.21.11; do
+    W="$T/regids-$v"; mkdir -p "$W/p" "$W/net/minecraft/core/registries" "$W/net/minecraft/resources" "$W/net/minecraft/world/item" "$W/net/minecraft/world/level/block/state"
+    sed -e 's/@MVPKG@/p/g' -e 's/@MODID@/examplemod/g' "templates/fork-layer/shared/$v/java/RegIds.java" > "$W/p/RegIds.java"
+    printf 'package net.minecraft.core.registries;\npublic class BuiltInRegistries { public static final R BLOCK = new R(); public static class R { public boolean containsKey(Object o) { return false; } } }\n' > "$W/net/minecraft/core/registries/BuiltInRegistries.java"
+    printf 'package net.minecraft.core.registries;\npublic class Registries { public static final Object ITEM = "item", BLOCK = "block"; }\n' > "$W/net/minecraft/core/registries/Registries.java"
+    printf 'package net.minecraft.resources;\npublic class ResourceKey { public final String s; ResourceKey(String s) { this.s = s; } public static ResourceKey create(Object r, Object id) { return new ResourceKey(r + "/" + id); } }\n' > "$W/net/minecraft/resources/ResourceKey.java"
+    for n in ResourceLocation Identifier; do printf 'package net.minecraft.resources;\npublic class %s { final String s; %s(String s) { this.s = s; } public static %s fromNamespaceAndPath(String a, String b) { return new %s(a + ":" + b); } public String toString() { return s; } }\n' $n $n $n $n > "$W/net/minecraft/resources/$n.java"; done
+    printf 'package net.minecraft.world.item;\npublic class Item { public static class Properties { public String id; public Properties setId(net.minecraft.resources.ResourceKey k) { id = k.s; return this; } public Properties useBlockDescriptionPrefix() { return this; } } }\n' > "$W/net/minecraft/world/item/Item.java"
+    printf 'package net.minecraft.world.level.block.state;\npublic class BlockBehaviour { public static class Properties { public String id; public static Properties of() { return new Properties(); } public Properties setId(net.minecraft.resources.ResourceKey k) { id = k.s; return this; } } }\n' > "$W/net/minecraft/world/level/block/state/BlockBehaviour.java"
+    cat > "$W/p/Main.java" <<'J'
+package p;
+import java.util.function.Supplier;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.level.block.state.BlockBehaviour;
+public class Main {
+    static Object reg(String n, Supplier<Object> s) { return s.get(); }
+    static class Blade { Item.Properties p = RegIds.stamp(new Item.Properties()); }
+    static class Pair { Item.Properties a = RegIds.stamp(new Item.Properties()); BlockBehaviour.Properties b = RegIds.stamp(BlockBehaviour.Properties.of()); }
+    static Object helper(String name) { return reg(name, () -> new Blade()); }
+    public static void main(String[] x) {
+        Blade b = (Blade) reg("blade", () -> RegIds.enter("blade") ? null : new Blade());
+        Pair p = (Pair) reg("pair", () -> RegIds.enter("pair") ? null : new Pair());
+        Blade h = (Blade) helper("unentered");
+        java.util.Properties u = RegIds.stamp(new java.util.Properties());
+        System.out.println(b.p.id + " " + p.a.id + " " + p.b.id + " " + h.p.id + " " + (u != null));
+    }
+}
+J
+    out="$(javac -d "$W/out" $(find "$W" -name '*.java') 2>&1 | grep -v JAVA_TOOL_OPTIONS; java -cp "$W/out" p.Main 2>&1 | grep -v JAVA_TOOL_OPTIONS)"
+    [ "$out" = "item/examplemod:blade item/examplemod:pair block/examplemod:pair null true" ] \
+      && ok "RegIds ($v): the entered name holds for every Properties its supplier builds, an un-entered registration gets none (not the previous id), java.util.Properties passes through" \
+      || bad "RegIds ($v) name scoping: $out"
+  done
+elif [ -n "${CI:-}" ]; then bad "no javac in CI -- RegIds was NOT tested"
+else echo "  SKIP  no javac (CI runs it; a skip is not a pass)"; fi
+# EditBoxes (26.2): a rejected edit puts the last accepted value back; that setValue re-enters the responder, and the
+# chained responder must not hear the old value again
+if command -v javac >/dev/null 2>&1; then
+  W="$T/editboxes"; mkdir -p "$W/p" "$W/net/minecraft/client/gui/components" "$W/com/mojang/logging" "$W/org/slf4j"
+  sed -e 's/@MVPKG@/p/g' -e 's/@MODID@/examplemod/g' templates/fork-layer/shared/26.2/java/EditBoxes.java > "$W/p/EditBoxes.java"
+  printf 'package org.slf4j;\npublic interface Logger { void warn(String f, Object a); }\n' > "$W/org/slf4j/Logger.java"
+  printf 'package com.mojang.logging;\npublic class LogUtils { public static org.slf4j.Logger getLogger() { return (f, a) -> System.out.println("WARN " + f); } }\n' > "$W/com/mojang/logging/LogUtils.java"
+  printf 'package net.minecraft.client.gui.components;\npublic class EditBox { private String value = ""; private java.util.function.Consumer<String> responder;\n public void setResponder(java.util.function.Consumer<String> r) { responder = r; }\n public String getValue() { return value; }\n public void setValue(String v) { if (!v.equals(value)) { value = v; if (responder != null) responder.accept(v); } } }\n' > "$W/net/minecraft/client/gui/components/EditBox.java"
+  cat > "$W/p/Main.java" <<'J'
+package p;
+import net.minecraft.client.gui.components.EditBox;
+public class Main {
+    public static void main(String[] x) {
+        EditBox box = new EditBox();
+        StringBuilder heard = new StringBuilder();
+        box.setResponder(v -> heard.append('[').append(v).append(']'));
+        EditBoxes.setFilter(box, s -> s.length() < 3);
+        box.setValue("ab");
+        box.setValue("abcd");
+        box.setValue("a");
+        System.out.println(box.getValue() + " " + heard);
+    }
+}
+J
+  out="$(javac -d "$W/out" $(find "$W" -name '*.java') 2>&1 | grep -v JAVA_TOOL_OPTIONS; java -cp "$W/out" p.Main 2>&1 | grep -v JAVA_TOOL_OPTIONS)"
+  [ "$out" = "a [ab][a]" ] \
+    && ok "EditBoxes (26.2): a rejected edit restores the last accepted value without calling the earlier responder again" \
+    || bad "EditBoxes restore re-invoked the chained responder: $out"
+elif [ -n "${CI:-}" ]; then bad "no javac in CI -- EditBoxes was NOT tested"
+else echo "  SKIP  no javac (CI runs it; a skip is not a pass)"; fi
+# add_shared_helpers copies a helper only when its FQN or an `MV-REQUIRES: Name` line is in the tree; a helper naming
+# another by its simple name (same package) needs the tag, or a mod using one helper gets a set that does not compile
+python3 - <<'PY' && ok "shared helpers: for every target and every helper used alone, the copied set is closed under simple-name references (MV-REQUIRES tags complete)" || bad "a shared helper names another by simple name without an MV-REQUIRES tag"
+import importlib.util, io, contextlib, pathlib, re, sys, tempfile
+spec = importlib.util.spec_from_file_location("layer", "templates/fork-layer/tools/layer.py")
+L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
+key = lambda v: tuple(int(x) for x in v.split("."))
+src = pathlib.Path("templates/fork-layer/shared")
+allv = sorted([d.name for d in src.iterdir() if (d / "java").is_dir()], key=key)
+PKG = "com.example.mod.mv"
+def strip(t):
+    t = re.sub(r"//[^\n]*|/\*.*?\*/", "", t, flags=re.S); t = re.sub(r'"(?:\\.|[^"\\])*"', '""', t)
+    return re.sub(r"^import [^\n]*\n", "", t, flags=re.M)
+problems = []
+for target in allv:
+    vers = [v for v in reversed(allv) if key(v) <= key(target)]
+    mv = pathlib.Path(tempfile.mkdtemp()) / ".multiversion"
+    for v in vers:
+        d = mv / "shared" / v / "java" / PKG.replace(".", "/"); d.mkdir(parents=True)
+        for f in (src / v / "java").glob("*.java"):
+            (d / f.name).write_text(f.read_text(encoding="utf-8").replace("@MVPKG@", PKG).replace("@MODID@", "examplemod"), encoding="utf-8")
+    L.MV = mv
+    pool = sorted({f.stem for v in vers for f in (src / v / "java").glob("*.java")})
+    for seed in pool:
+        out = mv.parent / f"out-{seed}"; (out / "com/example/mod").mkdir(parents=True)
+        (out / "com/example/mod/Use.java").write_text(f"package com.example.mod;\nclass Use {{ {PKG}.{seed} x; }}\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()): L.add_shared_helpers(vers, out)
+        got = {f.stem: f.read_text(encoding="utf-8") for f in (out / PKG.replace(".", "/")).glob("*.java")}
+        for n, t in got.items():
+            for o in set(pool) - set(got):
+                if not re.search(r"^import [\w.]*\." + o + ";", t, re.M) and re.search(r"(?<![\w.])" + o + r"\b", strip(t)):
+                    problems.append(f"{target}: {seed} -> {n} names {o}")
+print(*sorted(set(problems)), sep="\n")
+sys.exit(1 if problems else 0)
+PY
 python3 - <<'PY' && ok "shared tables: every '#!exhaustive' is closed by '#!strict' (a chain ending at any version loads)" || bad "a shared renames.tsv leaves '#!exhaustive' open"
 import glob,sys
 for f in sorted(glob.glob("templates/fork-layer/shared/*/renames.tsv")):
     marks=[l.strip().split()[0] for l in open(f) if l.startswith(("#!exhaustive","#!strict"))]
     if marks and marks[-1]!="#!strict": sys.exit(f"{f}: unclosed")
+PY
+
+python3 - <<'PY' && ok "shared MultiBufferSource (26.2, 26.3): a non-consolidating type's started builder is drawn before a fresh one is handed out; a sortOnUpload type's quads are sorted before the draw" || bad "shared MultiBufferSource lost the non-consolidating split or the sort-on-upload step"
+import pathlib, re, sys
+bad = []
+for v in ("26.2", "26.3"):
+    t = pathlib.Path(f"templates/fork-layer/shared/{v}/java/MultiBufferSource.java").read_text(encoding="utf-8")
+    t = re.sub(r"//[^\n]*|/\*.*?\*/", "", t, flags=re.S)
+    gb = re.search(r"public VertexConsumer getBuffer\(RenderType type\) \{(.*?)\n        \}", t, re.S)
+    eb = re.search(r"public void endBatch\(RenderType type\) \{(.*?)\n        \}", t, re.S)
+    if not gb or not re.search(r"if \(open != null\) \{\s*if \(type\.canConsolidateConsecutiveGeometry\(\)\) \{\s*return open;\s*\}\s*endBatch\(type\);", gb.group(1)):
+        bad.append(f"{v}: getBuffer does not end a non-consolidating type's started builder")
+    if not eb or not re.search(r"if \(type\.sortOnUpload\(\)\) \{.*?mesh\.sortQuads\(\w+, RenderSystem\.getProjectionType\(\)\.vertexSorting\(\)\);.*?\}\s*draw\(type, mesh\);", eb.group(1), re.S):
+        bad.append(f"{v}: endBatch(type) does not sort a sortOnUpload type's quads before drawing")
+    if "import com.mojang.blaze3d.systems.RenderSystem;" not in t:
+        bad.append(f"{v}: RenderSystem not imported")
+print(*bad, sep="\n")
+sys.exit(1 if bad else 0)
 PY
 
 echo

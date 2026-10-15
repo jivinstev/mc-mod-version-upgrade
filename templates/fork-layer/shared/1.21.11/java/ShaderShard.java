@@ -1,4 +1,7 @@
 // OVERLAY-ONLY: shared fork-layer helper from mc-mod-version-upgrade templates/fork-layer/shared (not the authors' code).
+// MV-REQUIRES: LegacyGl
+// MV-REQUIRES: LegacyRenderType
+// MV-REQUIRES: ShaderInstance
 package @MVPKG@;
 
 import java.util.function.Supplier;

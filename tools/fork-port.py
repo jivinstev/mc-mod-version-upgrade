@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: MIT
 """Port one fork-layer target in one command, and hand back only the residue.
 
-    python3 tools/fork-port.py --repo DIR --target 1.21.5 [--budget 15] [--gates none|ab|full]
+    python3 tools/fork-port.py --repo DIR --target 1.21.5 [--budget 15] [--gates auto|none|ab|full]
                                [--json out.json] [--from-stage <name>] [--base REF] [--modid ID] [--direct]
+                               [--port-checkout owner/repo=DIR] [--port-release owner/repo@TAG]
                                [--max-errors N] [--confirm-spend] [--self-check]
 
 The fork-versions skill's procedure (steps 1-9) as stages, the way tools/run-port.py is the jar-port procedure.
@@ -11,9 +12,13 @@ The orchestrating session starts this and then reads ONE summary (the last lines
 .multiversion/targets/<t>/RESIDUE.md when it stopped) -- never the workers' transcripts or the build logs.
 
 Stages, each logged as one line and skipped with a reason when it does not apply:
-  setup    make-fork-layer.py add-target (when the target dir is missing; --direct passes `add-target --direct`: a jump
+  setup    layer-deps.py resolve --dry-run first, when the authors' build pins dependencies (a required one with no
+           build for the target stops here, exit 15, before anything is written; --port-checkout passes a sibling
+           layer fork's checkout for its per-target jar, --port-release its release, pinned for CI), then
+           make-fork-layer.py add-target (when the target dir is missing; --direct passes `add-target --direct`: a jump
            that inherits nothing but still takes the shared library of every targeted version in between, see the
-           fork-versions skill) + sync-shared; installs layer.py's support for the generated moves table and for
+           fork-versions skill) + sync-shared + layer-deps.py resolve (the target's own build of each dependency into
+           target.properties, the drops into DEPS.md); installs layer.py's support for the generated moves table and for
            shared_chain when the fork's copy is a verbatim older copy of the template
   stage    one `.multiversion/build.sh <t> compileJava` to stage Minecraft; while createMinecraftArtifacts fails
            on the access transformer, fix-access-transformer.py --overrides-from <log> on the TARGET's own AT
@@ -46,7 +51,11 @@ compile count the loop, audit and gates rely on is always one this run measured 
 every gate and reported the target done).
 
 Exit codes: 0 done; 10 stopped before/in the compile (stage, moves, measure, loop); 11 Gate A/B (or the author's
-build) red; 12 Gate C red; 13 mixin / event-listener audit; 14 the checkout is in use by another run; 2 bad input.
+build) red; 12 Gate C red; 13 mixin / event-listener audit; 14 the checkout is in use by another run; 15 a required dependency has no build for
+the target (DEPS.md / the STOPPED block name it); 17 every stage passed but the target has no green Gate C recorded
+(GATES.md), or the gates were not run (--gates none): A/B green is not done -- a version is done only after its
+real-client run. A full gate run that is not green removes GATES.md. Every run to the end (from any --from-stage)
+stops with exit 10 while STUBS.json holds an unreviewed stub signal; 2 bad input.
 Standard library only.
 """
 import argparse, datetime, importlib.util, json, pathlib, re, shutil, subprocess, sys, tempfile
@@ -197,6 +206,556 @@ def shared_chain(mv, target):
     return sorted(set(names) | set(extra), key=mc_key, reverse=True) if extra else names
 
 
+def drop_harvested_rows(mv, target):
+    """Rows in targets/<t>/renames.tsv that a shared library the target applies now carries word for word (a row
+    harvested into templates/fork-layer/shared, fork-versions step 8). Left in both places they are a duplicate rule,
+    which layer.py refuses at table load. Removes them (with a `# X<n>` comment line right above, if it is the loop's).
+    -> the rows removed."""
+    table = mv / "targets" / target / "renames.tsv"
+    if not table.is_file():
+        return []
+    shared = set()
+    for v in shared_chain(mv, target):
+        f = mv / "shared" / v / "renames.tsv"
+        if f.is_file():
+            shared |= {ln.strip() for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip() and not ln.startswith("#")}
+    regexes = []
+    for r in shared:
+        if r.startswith("re:") and "\t" in r:
+            pat, rep = r[3:].split("\t", 1)
+            try:
+                regexes.append((re.compile(pat), rep))
+            except re.error:
+                pass
+
+    def subsumed(row):
+        """A plain target row whose `to` a shared regex already makes of its `from`: both would apply, and the second
+        rewrites the first one's result (measured: isClientSide()() from a target row plus the shared row that replaced it)."""
+        if row.startswith(("re:", "member:")) or "\t" not in row:
+            return False
+        frm, to = row.split("\t", 1)
+        return any(rx.sub(rep, frm) == to for rx, rep in regexes if rx.search(frm))
+    lines, out, gone = table.read_text(encoding="utf-8").splitlines(), [], []
+    for ln in lines:
+        if ln.strip() and not ln.startswith("#") and (ln.strip() in shared or subsumed(ln.strip())):
+            gone.append(ln)
+            if out and out[-1].startswith("# X") and "proposed by a file-loop worker" in out[-1]:
+                out.pop()
+            continue
+        out.append(ln)
+    if gone:
+        table.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return gone
+
+
+def gates_auto(tdir):
+    """`--gates auto`: "full" until targets/<t>/GATES.md records a green Gate C (a PASS row naming Gate C, no FAIL row),
+    then "ab". Every Minecraft version a fork supports gets one real-client run on its initial port."""
+    g = tdir / "GATES.md"
+    text = g.read_text(encoding="utf-8", errors="replace") if g.is_file() else ""
+    rows = [l for l in text.splitlines() if l.startswith("|")]
+    green_c = any("Gate C" in l and "| PASS |" in l for l in rows) and not any("| FAIL |" in l for l in rows)
+    return "ab" if green_c else "full"
+
+
+def drop_shadowing_overlays(mv, target):
+    """Overlays in targets/<t>/java that are byte-for-byte a shared helper the target applies (the same file name in a
+    shared/<v>/java tree of its shared_chain): written while the shared library was not synced yet, they then SHADOW it,
+    and a later fix to the shared helper never reaches this fork. -> the overlays removed."""
+    tj = mv / "targets" / target / "java"
+    if not tj.is_dir():
+        return []
+    shared = {}
+    for v in shared_chain(mv, target):
+        for f in (mv / "shared" / v / "java").rglob("*.java") if (mv / "shared" / v / "java").is_dir() else []:
+            shared.setdefault(f.relative_to(mv / "shared" / v / "java").as_posix(), f.read_bytes())
+    gone = []
+    for rel, data in shared.items():
+        ov = tj / rel
+        if ov.is_file() and ov.read_bytes() == data:
+            ov.unlink(); gone.append(rel)
+    return gone
+
+
+def layer_client_items(repo, tdir, target):
+    """1.21.2+ binds an item to its model through assets/<ns>/items/<id>.json; without one an item is the magenta cube,
+    and no gate before Gate C sees it (CATALOG V42b). Write the missing definitions into the TARGET's resource overlay
+    (never the authors' tree) with the multi-version generator era-hop.py uses: it skips parent templates and counts
+    layers. A definition the overlay or the authors already have (a special renderer's) is never touched. -> written."""
+    if mc_key(target) < mc_key("1.21.2"):
+        return 0
+    import runpy
+    written = 0
+    for nsdir in sorted((repo / "src/main/resources/assets").glob("*")) if (repo / "src/main/resources/assets").is_dir() else []:
+        ns = nsdir.name
+        if not (nsdir / "models/item").is_dir():
+            continue
+        argv, sys.argv = sys.argv, ["gen-client-items.py", "--ns", ns, "--root", str(repo)]
+        try:
+            g = runpy.run_path(str(ROOT / "templates/multi-version/tools/gen-client-items.py"), run_name="gen_client_items")
+        finally:
+            sys.argv = argv
+        models = g["load_models"]()
+        parented = {m.get("parent", "").split("/", 1)[1] for m in models.values()
+                    if (m.get("parent") or "").startswith(ns + ":item/")}
+        out = tdir / "resources/assets" / ns / "items"
+        for item_id in sorted(models):
+            if (out / f"{item_id}.json").exists() or (nsdir / "items" / f"{item_id}.json").exists() \
+                    or (item_id in parented and not models[item_id].get("textures")):
+                continue
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f"{item_id}.json").write_text(
+                g["render"](g["definition"](item_id, g["layer_count"](item_id, models), {})), encoding="utf-8")
+            written += 1
+    return written
+
+
+def overlay_stubs(repo, tdir):
+    """Stub signals of every Java overlay of the target against the authors' file it replaces (src/<set>/java/<same
+    path>). The loop's own audit sees only the files ITS run changed, so an earlier run's loss -- or a person's -- was
+    never compared again (measured: five client-extension overrides deleted with their renderers, unflagged). Counts,
+    not text, are compared, so the renames an overlay carries do not read as a change. -> [{file, why}]"""
+    ss = load("singleshot", "singleshot.py")
+    out = []
+    for ov in sorted(tdir.rglob("*.java")):
+        rel = ov.relative_to(tdir).as_posix()
+        if rel.startswith("java/"):
+            src = repo / "src/main/java" / rel[5:]
+        elif "/java/" in rel:
+            sset, tail = rel.split("/java/", 1)
+            src = repo / "src" / sset / "java" / tail
+        else:
+            continue
+        if not src.is_file():
+            continue
+        why = ss.stub_signals(src.read_text(encoding="utf-8", errors="replace"),
+                              ov.read_text(encoding="utf-8", errors="replace"), audit=True)
+        if why:
+            out.append({"file": ov.relative_to(repo).as_posix(), "why": "; ".join(why)})
+    return out
+
+
+def layer_recipes(repo, tdir, target):
+    """1.21.2 made a recipe ingredient "id" / "#tag" where 1.21.1 wrote {"item": id} / {"tag": tag}; a 1.21.1 recipe then
+    fails to parse and the recipe is gone (measured: 17 of a mod's recipes at Gate B). Derive the 1.21.2 form of every
+    authors' recipe into the TARGET's resource overlay with the multi-version template's transform
+    (gen-resource-overlays.py ingredients_as_strings). A recipe it refuses (an unknown type, an ingredient beside
+    other keys) is left for the residue; an overlay this did not write (no line in targets/<t>/GENERATED.txt) is never
+    touched, and one it did write is rewritten each run, so an authors' edit reaches it. -> (written, refused paths)"""
+    if mc_key(target) < mc_key("1.21.2"):
+        return 0, []
+    import runpy
+    g = runpy.run_path(str(ROOT / "templates/multi-version/tools/gen-resource-overlays.py"), run_name="gen_resource_overlays")
+    res = repo / "src/main/resources"
+    own = sorted(p.name for p in (res / "data").glob("*")) if (res / "data").is_dir() else []
+    ledger = tdir / "GENERATED.txt"
+    mine = set(ledger.read_text(encoding="utf-8").split()) if ledger.is_file() else set()
+    written, refused, keep = 0, [], set()
+    for f in sorted(res.glob("data/*/recipe/**/*.json")):
+        rel = f.relative_to(res).as_posix()
+        out = tdir / "resources" / rel
+        if out.exists() and rel not in mine:
+            continue                      # a person's (or an earlier fixer's) overlay
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+            new = g["ingredients_as_strings"](json.loads(json.dumps(doc)), rel, {"own_namespaces": own})
+        except g["Refused"] as e:
+            refused.append(f"{rel}: {e}"); continue
+        except ValueError:
+            continue
+        if new == doc:
+            if rel in mine and out.exists():
+                out.unlink()              # the authors moved to the new form themselves
+            continue
+        text = g["rendered"](new)
+        keep.add(rel)
+        if not out.exists() or out.read_text(encoding="utf-8") != text:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text, encoding="utf-8"); written += 1
+    if keep or mine:          # exactly the recipes this run derived: one the authors fixed themselves drops out
+        write_ledger(ledger, keep, owns=lambda r: r.startswith("data/") and "/recipe/" in r)
+    return written, refused
+
+
+ENTITY_PREDICATE_DATA = ("advancement", "loot_table")
+
+
+def layer_entity_predicates(repo, tdir, target, mv=None):
+    """26.2 made EntityPredicate a `Codec.dispatchedMap` over the entity_sub_predicate_type registry (CATALOG V68): a
+    1.21 predicate's `type` is `entity_type` and `type_specific` folds into its own key, else the advancement or loot
+    table fails to parse at load and is silently missing (measured: a boss-kill advancement's
+    `conditions.entity.type` at Gate B). Derive the 26.2 form of every authors' advancement and loot table into the
+    TARGET's resource overlay with the multi-version template's transform (gen-resource-overlays.py
+    entity_predicates_as_dispatched_map, both carriers: a criterion field and an entity_properties condition). The
+    input is the nearest inherited target's overlay of that file, else the authors' file. A file it refuses (a key
+    with no 26.2 id, an unknown carrier) is left for the residue; an overlay this did not write (no line in
+    GENERATED.txt) is never touched. -> (written, refused paths)"""
+    if mc_key(target) < mc_key("26.2") or mc_key(target) >= mc_key("26.3"):
+        return 0, []                          # from 26.3 layer_263_data derives these files (this transform first)
+    import runpy
+    g = runpy.run_path(str(ROOT / "templates/multi-version/tools/gen-resource-overlays.py"), run_name="gen_resource_overlays")
+    res = repo / "src/main/resources"
+    mv = mv or tdir.parent.parent
+    parents = [mv / "targets" / x / "resources" for x in chain(mv, tdir.name)[1:]]
+    ledger = tdir / "GENERATED.txt"
+    mine = set(ledger.read_text(encoding="utf-8").split()) if ledger.is_file() else set()
+    owns = lambda r: r.startswith("data/") and len(r.split("/")) > 3 and r.split("/")[2] in ENTITY_PREDICATE_DATA
+    written, refused, keep = 0, [], set()
+    for kind in ENTITY_PREDICATE_DATA:
+        for f in sorted(res.glob(f"data/*/{kind}/**/*.json")):
+            rel = f.relative_to(res).as_posix()
+            out = tdir / "resources" / rel
+            if out.exists() and rel not in mine:
+                continue                      # a person's (or an earlier fixer's) overlay
+            base = next((p / rel for p in parents if (p / rel).is_file()), f)
+            try:
+                doc = json.loads(base.read_text(encoding="utf-8"))
+                new = g["entity_predicates_as_dispatched_map"](json.loads(json.dumps(doc)), rel, {})
+            except g["Refused"] as e:
+                refused.append(f"{rel}: {e}"); continue
+            except ValueError:
+                continue
+            if new == doc:
+                if rel in mine and out.exists():
+                    out.unlink()              # nothing to change any more (the authors moved to the new form)
+                continue
+            text = g["rendered"](new)
+            keep.add(rel)
+            if not out.exists() or out.read_text(encoding="utf-8") != text:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(text, encoding="utf-8"); written += 1
+    if keep or any(owns(r) for r in mine):
+        write_ledger(ledger, keep, owns)
+    return written, refused
+
+
+TRIM_PALETTE_KEY_121 = "trims/color_palettes/trim_palette"
+VANILLA_TRIM_PALETTES = {"amethyst", "copper", "diamond", "emerald", "gold", "iron", "lapis", "netherite", "quartz",
+                         "redstone", "resin"}
+
+
+def _owns_263(r):
+    p = r.split("/")
+    return (r.startswith("data/") and len(p) > 3 and p[2] in ("worldgen", "trim_material") + ENTITY_PREDICATE_DATA) \
+        or r in ("assets/minecraft/atlases/items.json", "assets/minecraft/atlases/blocks.json",
+                 "assets/minecraft/atlases/armor_trims.json") \
+        or (r.startswith("assets/") and "/textures/palettes/trim/" in r)
+
+
+def layer_263_data(repo, tdir, target, mv=None):
+    """26.3 re-spelled two data shapes a 1.21 datapack writes, and a parse failure in either stops the server at
+    registry load (CATALOG V106): a block state in JSON is a bare id or {"id", "properties"} (1.21: {"Name",
+    "Properties"} -- template pools' processors, processor lists, features), and a trim material is {palette_id,
+    description}, its palette a PNG under textures/palettes/ (1.21: an asset_name the atlases' paletted permutations
+    mapped to textures/trims/color_palettes/<x>.png). Derive the 26.3 form into the TARGET's resource overlay with the
+    multi-version template's transforms (block_states_as_id, trim_material_palette), the input being the nearest
+    inherited overlay of the file else the authors' file, and with the trims: copy each palette PNG to
+    textures/palettes/trim/, move the item-trim permutation source of the authors' blocks atlas to the items atlas
+    (palette key minecraft:trim_base), and empty the armor_trims atlas 26.3 no longer has (armour trims read the
+    material's palette directly). And every advancement and loot table in 26.3's loot grammar (CATALOG V107,
+    loot_grammar_263, after 26.2's entity_predicates_as_dispatched_map, whose job this step takes over from 26.3): a
+    dispatch keyed on "type", one condition / modifier where 1.21 had lists, typed number providers, criterion entity
+    conditions as loot conditions. A file it refuses is left for the residue; an overlay this did not write (no line in
+    GENERATED.txt) is never touched. -> (written, refused paths)"""
+    if mc_key(target) < mc_key("26.3"):
+        return 0, []
+    import runpy
+    g = runpy.run_path(str(ROOT / "templates/multi-version/tools/gen-resource-overlays.py"), run_name="gen_resource_overlays")
+    res = repo / "src/main/resources"
+    mv = mv or tdir.parent.parent
+    parents = [mv / "targets" / x / "resources" for x in chain(mv, tdir.name)[1:]]
+    ledger = tdir / "GENERATED.txt"
+    mine = set(ledger.read_text(encoding="utf-8").split()) if ledger.is_file() else set()
+    written, refused, keep = 0, [], set()
+
+    def base(rel):
+        return next((p / rel for p in parents if (p / rel).is_file()), res / rel)
+
+    def put(rel, data):
+        nonlocal written
+        out = tdir / "resources" / rel
+        if out.exists() and rel not in mine:
+            return False                      # a person's (or an earlier fixer's) overlay
+        keep.add(rel)
+        if not out.exists() or out.read_bytes() != data:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(data); written += 1
+        return True
+
+    def load_json(rel):
+        try:
+            return json.loads(base(rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    # the 1.21 palette permutations: asset name -> "ns:trims/color_palettes/x", from every atlas the authors ship
+    perms, atlases = {}, {}
+    for f in sorted(res.glob("assets/*/atlases/*.json")):
+        rel = f.relative_to(res).as_posix()
+        doc = load_json(rel)
+        if isinstance(doc, dict) and isinstance(doc.get("sources"), list):
+            atlases[rel] = doc
+            for src in doc["sources"]:
+                if isinstance(src, dict) and str(src.get("type", "")).removeprefix("minecraft:") == "paletted_permutations":
+                    perms.update({k: v for k, v in (src.get("permutations") or {}).items() if isinstance(v, str)})
+    moved = {}                                # old palette texture id -> new palette id
+
+    def palette_of(name, where):
+        old = perms.get(name)
+        if old is None:
+            return f"minecraft:trim/{name}" if name in VANILLA_TRIM_PALETTES else None
+        ns, _, path = old.rpartition(":")
+        ns = ns or "minecraft"
+        if ns == "minecraft":
+            return f"minecraft:trim/{path.rsplit('/', 1)[-1]}"
+        png = f"assets/{ns}/textures/{path}.png"
+        src = base(png)
+        if not src.is_file():
+            return None
+        new = f"{ns}:trim/{path.rsplit('/', 1)[-1]}"
+        if put(f"assets/{ns}/textures/palettes/trim/{path.rsplit('/', 1)[-1]}.png", src.read_bytes()):
+            moved[old] = new
+        return new
+
+    jobs = [(f, "block_states_as_id") for f in sorted(res.glob("data/*/worldgen/**/*.json"))] \
+        + [(f, "trim_material_palette") for f in sorted(res.glob("data/*/trim_material/*.json"))] \
+        + [(f, "loot_grammar_263") for kind in ENTITY_PREDICATE_DATA for f in sorted(res.glob(f"data/*/{kind}/**/*.json"))]
+    for f, tf in jobs:
+        rel = f.relative_to(res).as_posix()
+        doc = load_json(rel)
+        if doc is None:
+            continue
+        try:
+            new = json.loads(json.dumps(doc))
+            if tf == "loot_grammar_263":      # 26.2's entity predicates first (a no-op on an inherited 26.2 overlay)
+                new = g["entity_predicates_as_dispatched_map"](new, rel, {})
+            new = g[tf](new, rel, {"palette_of": palette_of})
+        except g["Refused"] as e:
+            refused.append(f"{rel}: {e}"); continue
+        if new != doc:
+            put(rel, g["rendered"](new).encode("utf-8"))
+
+    if moved:                                 # the atlases, only when a trim palette moved
+        item_srcs = []
+        for rel in ("assets/minecraft/atlases/blocks.json", "assets/minecraft/atlases/armor_trims.json"):
+            doc = atlases.get(rel)
+            if doc is None:
+                continue
+            rest = []
+            for src in doc["sources"]:
+                ptype = str(src.get("type", "")).removeprefix("minecraft:") if isinstance(src, dict) else ""
+                if ptype == "paletted_permutations" and str(src.get("palette_key", "")).removeprefix("minecraft:") == TRIM_PALETTE_KEY_121:
+                    if rel.endswith("blocks.json"):  # 1.21 item trims lived in the blocks atlas; 26.3's are in items
+                        item_srcs.append({"type": "minecraft:paletted_permutations", "palette_key": "minecraft:trim_base",
+                                          "permutations": {k: moved.get(v, v) for k, v in src["permutations"].items()},
+                                          "textures": src.get("textures", [])})
+                    continue                 # armour trims: no atlas on 26.3, the material's palette is read directly
+                rest.append(src)
+            if rest != doc["sources"]:
+                put(rel, g["rendered"]({**doc, "sources": rest}).encode("utf-8"))
+        if item_srcs:
+            rel = "assets/minecraft/atlases/items.json"
+            doc = atlases.get(rel) or {"sources": []}
+            put(rel, g["rendered"]({**doc, "sources": doc["sources"] + item_srcs}).encode("utf-8"))
+
+    for rel in sorted(r for r in mine if _owns_263(r) and r not in keep):
+        (tdir / "resources" / rel).unlink(missing_ok=True)   # nothing to derive any more
+    if keep or any(_owns_263(r) for r in mine):
+        write_ledger(ledger, keep, _owns_263)
+    return written, refused
+
+
+def write_ledger(ledger, keep, owns):
+    """targets/<t>/GENERATED.txt is shared by every derived-resource step: rewrite only the lines this step OWNS (`owns`
+    says which), so one step's run never drops another step's record -- a dropped line would turn that step's own
+    generated file into a "hand overlay" it may no longer refresh."""
+    other = {r for r in (ledger.read_text(encoding="utf-8").split() if ledger.is_file() else []) if not owns(r)}
+    ledger.write_text("".join(f"{r}\n" for r in sorted(other | set(keep))), encoding="utf-8")
+
+
+GECKO_VERSION = (re.compile(r"geckolib[\w-]*?-1\.\d+(?:\.\d+)?-(\d+)\.\d+"),        # a jar name: geckolib-neoforge-1.21.5-5.1.0.jar
+                 re.compile(r"geckolib[\w-]*?-1\.\d+(?:\.\d+)?:(\d+)\.\d+"),        # a maven coordinate: ...-1.21.5:5.1.0
+                 re.compile(r"\bgeckolib_version\s*=\s*(\d+)\.\d+"))                   # a -P / gradle property
+
+
+def target_geckolib_major(tdir):
+    """The GeckoLib major version a target builds against, read from what layer-deps.py resolved (DEPS.md) or the
+    target's own properties; None when the target names no GeckoLib (or names it without a version)."""
+    for f in (tdir / "DEPS.md", tdir / "target.properties"):
+        text = f.read_text(encoding="utf-8", errors="replace") if f.is_file() else ""
+        for line in text.splitlines():
+            if "geckolib" not in line.lower():
+                continue
+            for rx in GECKO_VERSION:
+                m = rx.search(line)
+                if m:
+                    return int(m.group(1))
+    return None
+
+
+GECKO_ASSETS = (("geo", ".geo.json", "geckolib/models"), ("animations", ".animation.json", "geckolib/animations"))
+
+
+def layer_geckolib_assets(repo, tdir, target):
+    """GeckoLib 5 (the 1.21.5+ lines) loads models and animations ONLY from assets/<ns>/geckolib/{models,animations}/
+    (GeckoLibResources lists exactly those two folders; the id is the path under them without .geo.json /
+    .animation.json); 4.x's assets/<ns>/geo/ and animations/ are never scanned, so every GeckoLib entity is drawn with no
+    model and nothing crashes (CATALOG V18c, M60). Copy each authors' 4.x file, byte for byte, into the TARGET's
+    resource overlay at the 5.x path (sub-folders kept). The ids the code asks for are the shared rows' job (the bare
+    name). A file the overlay has that this step did not write (no line in GENERATED.txt) is a person's and never
+    touched; a generated one is rewritten when the authors' file changes and removed when it is gone. A target whose
+    GeckoLib is 4.x, or that has none, gets nothing. -> files written"""
+    major = target_geckolib_major(tdir)
+    if major is None or major < 5:
+        return 0
+    res = repo / "src/main/resources"
+    ledger = tdir / "GENERATED.txt"
+    mine = set(ledger.read_text(encoding="utf-8").split()) if ledger.is_file() else set()
+    owns = lambda r: r.startswith("assets/") and "/geckolib/" in r
+    written, keep = 0, set()
+    for nsdir in sorted((res / "assets").glob("*")) if (res / "assets").is_dir() else []:
+        for old_dir, suffix, new_dir in GECKO_ASSETS:
+            src_dir = nsdir / old_dir
+            for f in sorted(src_dir.rglob("*" + suffix)) if src_dir.is_dir() else []:
+                rel = f"assets/{nsdir.name}/{new_dir}/{f.relative_to(src_dir).as_posix()}"
+                if (res / rel).exists():
+                    continue                  # the authors ship the 5.x path themselves
+                out = tdir / "resources" / rel
+                if out.exists() and rel not in mine:
+                    continue                  # a person's overlay
+                keep.add(rel)
+                data = f.read_bytes()
+                if not out.exists() or out.read_bytes() != data:
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(data); written += 1
+    for rel in sorted(r for r in mine if owns(r) and r not in keep):
+        (tdir / "resources" / rel).unlink(missing_ok=True)   # its authors' file is gone
+    if keep or any(owns(r) for r in mine):
+        write_ledger(ledger, keep, owns)
+    return written
+
+
+CLIENT_WIDEN = re.compile(r"\b(?:Player|Level)\s+\w+\s*=\s*(?:net\.minecraft\.client\.)?Minecraft\.getInstance\(\)\.(?:player|level)\s*;")
+CLASS_ONLYIN = re.compile(r"@OnlyIn\(\s*(?:Dist\.)?CLIENT\s*\)\s*(?:@[\w.]+(?:\([^)]*\))?\s*)*(?:public\s+|final\s+|abstract\s+)*"
+                          r"(?:class|interface|enum|record)\b")
+
+
+CLIENT_ONLY_CLASS = re.compile(r"@(?:EventBusSubscriber|Mod)\s*\([^)]*\b(?:value|dist)\s*=\s*(?:\{\s*)?(?:Dist\.)?CLIENT\b")
+
+
+def client_mixin(text):
+    """A mixin whose @Mixin target is a net.minecraft.client class (by its import or written in full)."""
+    m = re.search(r"@Mixin\s*\(\s*(?:value\s*=\s*)?\{?\s*([\w.]+)\.class", text)
+    if not m:
+        return False
+    name = m.group(1)
+    if name.startswith("net.minecraft.client."):
+        return True
+    imp = re.search(r"(?m)^import\s+([\w.]+)\." + re.escape(name.split(".")[0]) + r"\s*;", text)
+    return bool(imp and imp.group(1).startswith("net.minecraft.client"))
+
+
+def client_refs_in_common(repo, prepared):
+    """From 1.21.6 strip_onlyin removes @OnlyIn, so a former @OnlyIn(CLIENT) method of a COMMON class is verified on a
+    dedicated server, and `Player p = Minecraft.getInstance().player;` there loads LocalPlayer: NoClassDefFoundError in
+    RegisterEvent (CATALOG M52). The shared rows route that through ClientRefs, but rows never reach an overlay, and
+    Gate B names one class per run. -> ["<file>:<line>"] for every such assignment outside client code (a path with a
+    `client` segment, or a class the authors marked @OnlyIn(CLIENT) as a whole)."""
+    out = []
+    for f in sorted(pathlib.Path(prepared).rglob("*.java")):
+        rel = f.relative_to(prepared).as_posix()
+        if "/client/" in f"/{rel}":
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        if not CLIENT_WIDEN.search(text):
+            continue
+        orig = repo / "src/main/java" / rel
+        if orig.is_file() and CLASS_ONLYIN.search(orig.read_text(encoding="utf-8", errors="replace")):
+            continue
+        if CLIENT_ONLY_CLASS.search(text) or client_mixin(text):
+            continue                # registered for the client only, or a mixin into a client class: never on a server
+        out += [f"{rel}:{text.count(chr(10), 0, m.start()) + 1}" for m in CLIENT_WIDEN.finditer(text)]
+    return out
+
+
+def unreviewed_stubs(tdir):
+    """The entries of tdir/STUBS.json nobody has reviewed yet."""
+    try:
+        have = json.loads((tdir / "STUBS.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [e for e in have if isinstance(e, dict) and not e.get("reviewed")]
+
+
+def record_stubs(tdir, found, parents=()):
+    """Merge this run's stub signals into tdir/STUBS.json ([{file, why, reviewed}]) and return every entry. An entry a
+    reviewer marked ("reviewed": "<why the change is right>") stays reviewed unless a later run flags the file again
+    for a new reason. A NEW entry whose every signal, word for word (counts included), was already reviewed for the
+    same file in a target this one inherits (parents: their target dirs, nearest first) takes that review, marked as
+    inherited: the same loss re-flagged one version on is not a new question (measured: six of a target's eight)."""
+    path = tdir / "STUBS.json"
+    try:
+        have = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    except ValueError:
+        have = []
+    by = {e["file"]: e for e in have}
+    rel = lambda f: re.sub(r"/targets/[^/]+/", "/targets/*/", f)
+    prior = {}
+    for pd in parents:
+        try:
+            for e in json.loads((pd / "STUBS.json").read_text(encoding="utf-8")) if (pd / "STUBS.json").is_file() else []:
+                if e.get("reviewed"):
+                    prior.setdefault(rel(e["file"]), (pd.name, e))
+        except ValueError:
+            continue
+    for s in found:
+        e = by.get(s["file"])
+        if e is None or s["why"] not in e.get("why", ""):
+            why = s["why"] if e is None else e["why"] + "; " + s["why"]
+            src = prior.get(rel(s["file"]))
+            inherited = None
+            if src and all(part in src[1]["why"] for part in why.split("; ")):
+                r = src[1]["reviewed"]
+                inherited = r if r.startswith("(inherited") else f"(inherited from {src[0]}) {r}"
+            by[s["file"]] = {"file": s["file"], "why": why, "reviewed": inherited}
+    out = sorted(by.values(), key=lambda e: e["file"])
+    if out:
+        tdir.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
+    return out
+
+
+def merge_shared_at(mv, target, at):
+    """Add every access-transformer line the target's shared libraries need (.multiversion/shared/<v>/accesstransformer.cfg
+    for each version in shared_chain) to the target's own AT, unless an equal line (comment aside) is there. A helper
+    that extends a constructor vanilla made private compiles only with its line; inheriting the line from the previous
+    target's AT misses a direct jump, which has no previous target. -> the lines added."""
+    want = []
+    for v in shared_chain(mv, target):
+        f = mv / "shared" / v / "accesstransformer.cfg"
+        if f.is_file():
+            for ln in f.read_text(encoding="utf-8").splitlines():
+                if not ln.strip() or ln.lstrip().startswith("#"):
+                    continue
+                # `# until <version>`: a line for a class that a later Minecraft removed reaches targets up to that version
+                # only (measured: a 1.21.3 constructor line was merged into every target through 26.3)
+                until = re.search(r"#.*\buntil (\d[\w.]*)", ln)
+                if until and mc_key(target) > mc_key(until.group(1)):
+                    continue
+                want.append(ln)
+    have = at.read_text(encoding="utf-8") if at.exists() else ""
+    rule = lambda ln: " ".join(ln.split("#", 1)[0].split())
+    known = {rule(ln) for ln in have.splitlines()}
+    add = []
+    for ln in want:
+        if rule(ln) not in known:
+            known.add(rule(ln)); add.append(ln)
+    if add:
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.write_text(have + ("" if have.endswith("\n") or not have else "\n") + "\n".join(add) + "\n", encoding="utf-8")
+    return add
+
+
 SHARED_DIR = ROOT / "templates/fork-layer/shared"
 ERRORS_PER_DOLLAR = 100      # measured hops cleared 76-144 errors per dollar of workers (issue #49); the guard's default
 
@@ -295,14 +854,15 @@ def below_java(p):
     return p.replace("\\", "/").rsplit("/java/", 1)[-1]
 
 
-def loop_events(log):
-    """The events of the LAST run in a (resumable, appended-to) file-loop log."""
+def loop_events(log, all_runs=False):
+    """The events of the LAST run in a (resumable, appended-to) file-loop log; every run's with all_runs (stub signals:
+    an earlier run's are still residue)."""
     p = pathlib.Path(log)
     if not p.is_file():
         return []
     ev = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     starts = [i for i, e in enumerate(ev) if e.get("event") == "start"]
-    return ev[starts[-1]:] if starts else ev
+    return ev[starts[-1]:] if starts and not all_runs else ev
 
 
 def escalation(events, failing_files, top="opus"):
@@ -322,6 +882,16 @@ def escalation(events, failing_files, top="opus"):
     return {"top_tier_still_failing": still, "rows_kept": kept, "rows_reverted": reverted,
             "stubs": [s["file"] for e in events if e.get("event") == "stub-signals" for s in e.get("files", [])],
             "spent": spent}
+
+
+def pins_dependencies(repo):
+    """True when the authors' build.gradle pins a mod tools/layer-deps.py re-resolves per target (cursemaven, Modrinth's
+    maven, or a sibling port the fork's CI installs into mavenLocal)."""
+    b = repo / "build.gradle"
+    text = b.read_text(encoding="utf-8", errors="replace") if b.is_file() else ""
+    wf = repo / ".github/workflows/port-ci.yml"
+    return bool(re.search(r"[\"'](curse\.maven|maven\.modrinth):", text)) or (
+        wf.is_file() and "release into mavenLocal (pinned by sha256)" in wf.read_text(encoding="utf-8", errors="replace"))
 
 
 def stop_block(stop):
@@ -400,7 +970,8 @@ class Run:
         r = subprocess.run([BASH, str(ROOT / "tools/burndown-count.sh"), str(log)], capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
         if r.returncode != 0:
-            return None, " ".join(r.stdout.strip().splitlines()[:2])
+            lines = r.stdout.strip().splitlines()      # the verdict, then (parse abort) the files that broke: keep both
+            return None, " ".join(lines[:2] + [re.sub(r"^.*/mv/", "mv/", x) for x in lines[2:8]])
         m = re.search(r"errors = (\d+)", r.stdout)
         return (int(m.group(1)) if m else None), ""
 
@@ -411,7 +982,8 @@ class Run:
     def resume_cmd(self, stage):
         a = self.a
         return (f"python3 tools/fork-port.py --repo {a.repo} --target {self.t} --from-stage {stage} "
-                f"--budget {a.budget} --gates {a.gates}")
+                f"--budget {a.budget} --gates {a.gates}" + "".join(f" --port-checkout {c}" for c in getattr(a, "port_checkout", []))
+                + "".join(f" --port-release {c}" for c in getattr(a, "port_release", [])))
 
     def save(self):
         self.jpath.parent.mkdir(parents=True, exist_ok=True)
@@ -424,6 +996,18 @@ class Run:
             return {"stop": "no .multiversion/ in the fork", "code": 2,
                     "choices": [f"python3 tools/make-fork-layer.py init --repo {self.repo}"]}
         did = []
+        deps = [self.py, str(ROOT / "tools/layer-deps.py"), "resolve", "--repo", str(self.repo), "--target", self.t,
+                *[x for c in getattr(self.a, "port_checkout", []) for x in ("--port-checkout", c)],
+                *[x for c in getattr(self.a, "port_release", []) for x in ("--port-release", c)]]
+        if pins_dependencies(self.repo):
+            r = self.sh([*deps, "--dry-run"])
+            if r.returncode == 15:
+                stop = next((ln for ln in (r.stdout or "").splitlines() if "STOP" in ln), "a required dependency has no build")
+                return {"stop": stop.replace("layer-deps: STOP ", "")[:600], "code": 15,
+                        "choices": [f"skip {self.t}: the next target jumps over it (fork-port.py --direct)",
+                                    "or find a build for it and pin it in the target's target.properties by hand"]}
+            if r.returncode != 0:
+                return {"stop": "layer-deps.py failed: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:300], "code": 2}
         if not self.tdir.is_dir():
             r = self.sh([self.py, str(ROOT / "tools/make-fork-layer.py"), "add-target", "--repo", str(self.repo),
                          "--target", self.t, *(["--direct"] if self.a.direct else [])])
@@ -433,6 +1017,40 @@ class Run:
             did.append("add-target")
         r = self.sh([self.py, str(ROOT / "tools/make-fork-layer.py"), "sync-shared", "--repo", str(self.repo)])
         did.append("sync-shared")
+        div = [ln.split("DIVERGED ", 1)[1].split(" ", 1)[0] for ln in (r.stdout or "").splitlines() if "DIVERGED " in ln]
+        if div:   # an edited machinery file is never written over: say so, and the layer_patch guard below decides layer.py
+            did.append(f"left alone (edited, not a template copy -- merge by hand): {', '.join(div)}")
+        # every table in the inherits chain: a row harvested from a parent target is a duplicate in this target's merge too
+        gone = [r for x in chain(self.mv, self.t) if (self.mv / "targets" / x).is_dir() for r in drop_harvested_rows(self.mv, x)]
+        if gone:
+            did.append(f"{len(gone)} row(s) now in the shared library dropped from the target's table")
+        shadow = drop_shadowing_overlays(self.mv, self.t)
+        if shadow:
+            did.append(f"{len(shadow)} overlay(s) identical to a shared helper dropped")
+        n_rec, refused = layer_recipes(self.repo, self.tdir, self.t)
+        if n_rec or refused:
+            did.append(f"{n_rec} recipe(s) in the 1.21.2 ingredient form" + (f", {len(refused)} refused (Gate B will name them)"
+                                                                               if refused else ""))
+        n_pred, refused = layer_entity_predicates(self.repo, self.tdir, self.t, self.mv)
+        if n_pred or refused:
+            did.append(f"{n_pred} advancement/loot table(s) with 26.2 entity predicates"
+                       + (f", {len(refused)} refused (Gate B will name them)" if refused else ""))
+        n_263, refused = layer_263_data(self.repo, self.tdir, self.t, self.mv)
+        if n_263 or refused:
+            did.append(f"{n_263} file(s) in the 26.3 data form (block states, trim palettes, loot grammar)"
+                       + (f", {len(refused)} refused (Gate B will name them)" if refused else ""))
+        n_items = layer_client_items(self.repo, self.tdir, self.t)
+        if n_items:
+            did.append(f"{n_items} client item definition(s)")
+        if pins_dependencies(self.repo):
+            r = self.sh(deps)
+            if r.returncode != 0:
+                return {"stop": "layer-deps.py resolve: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:600],
+                        "code": 15 if r.returncode == 15 else 2}
+            did.append("layer-deps: " + ((r.stdout or "").strip().splitlines() or [""])[-1].split(": ", 2)[-1])
+        n_geo = layer_geckolib_assets(self.repo, self.tdir, self.t)
+        if n_geo:
+            did.append(f"{n_geo} GeckoLib model/animation file(s) at the 5.x paths")
         lp, tp = self.mv / "tools/layer.py", ROOT / "templates/fork-layer/tools/layer.py"
         need_sc = any("shared_chain" in read_props(self.mv / "targets" / x / "target.properties")
                       for x in chain(self.mv, self.t) if (self.mv / "targets" / x / "target.properties").is_file())
@@ -459,6 +1077,7 @@ class Run:
             if src.exists():
                 at.parent.mkdir(parents=True, exist_ok=True)
                 at.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        merge_shared_at(self.mv, self.t, at)
         self.work.mkdir(parents=True, exist_ok=True)
         for rnd in range(1, STAGE_ROUNDS + 1):
             log = self.work / f"stage-{rnd}.log"
@@ -573,6 +1192,19 @@ class Run:
     def s_loop(self):
         start = self.compile_errors()      # a count THIS run measured; a resume re-measures rather than trusting the last run's
         if start == 0:
+            # an earlier run's loop may have left stub signals: they are still residue at 0 errors
+            flog = self.work / "file-loop.jsonl"
+            open_ = [e for e in record_stubs(self.tdir, [x for e in (loop_events(flog, all_runs=True) if flog.is_file() else [])
+                                                         if e.get("event") == "stub-signals" for x in e.get("files", [])]
+                                                    + overlay_stubs(self.repo, self.tdir),
+                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]])
+                     if not e.get("reviewed")]
+            if open_:
+                detail = [f"stub: {e['file']}: {e['why'][:200]}" for e in open_]
+                return {"stop": f"0 errors, but {len(open_)} unreviewed stub signal(s) from earlier runs (STUBS.json)",
+                        "code": 10, "errors": 0, "detail": detail, "view": detail,
+                        "choices": ["port each flagged file's lost behaviour, or set its \"reviewed\" in "
+                                    "targets/<t>/STUBS.json to why the change is right; then resume with --from-stage loop"]}
             return {"skipped": "already at 0 errors", "errors": 0}
         why = spend_guard(start, self.a.budget, self.a.max_errors, self.a.confirm_spend)
         if why:
@@ -592,18 +1224,25 @@ class Run:
         n = end.get("errors") if end else None
         clog = self.repo / "build" / f"mc{self.t}" / "file-loop-compile.log"
         res = {"errors": n, "start_errors": start, "exit": r.returncode, "log": str(flog), "this_run": True}
+        # every run's stub signals are kept in targets/<t>/STUBS.json until someone reviews them: a resumed run used to
+        # forget the previous run's (measured: ten flagged files vanished from RESIDUE.md on the next --from-stage loop)
+        stubs_all = record_stubs(self.tdir, [s for e in loop_events(flog, all_runs=True) if e.get("event") == "stub-signals"
+                                             for s in e.get("files", [])] + overlay_stubs(self.repo, self.tdir),
+                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]])
         if n == 0:
             # 0 errors is not done when a worker got there by emptying code or by forking the shared library: the
             # loop's own stub audit, and any overlay of a shared helper, are residue (measured on the first
             # unattended target: both happened at "0 errors" and the run went on to the audit)
-            stubs = [s for e in ev if e.get("event") == "stub-signals" for s in e.get("files", [])]
+            stubs = [s for s in stubs_all if not s.get("reviewed")]
             shared = self.shared_helper_overlays()
             if stubs or shared:
                 detail = [f"stub: {s['file']}: {s['why'][:200]}" for s in stubs] + \
                          [f"shared helper overlaid in this fork: {f}" for f in shared]
                 res.update({"stop": f"0 errors, but {len(stubs)} stub signal(s) and {len(shared)} overlay(s) of the "
                                     f"shared library", "code": 10, "detail": detail, "view": detail,
-                            "choices": ["port each flagged method to the new signature (never drop @Override)",
+                            "spent": end.get("spent", 0),     # the loop did spend to get to 0: report it, not $0
+                            "choices": ["port each flagged method to the new signature (never drop @Override), or, when the "
+                                    "change is right, set its \"reviewed\" in targets/<t>/STUBS.json to why",
                                         "fix a shared helper in templates/fork-layer/shared/<t> and delete the "
                                         "fork's overlay of it; then resume with --from-stage loop"]})
                 return res
@@ -658,6 +1297,15 @@ class Run:
                      f"--sources={prepared}"])
         lines = (r.stdout or "").strip().splitlines()
         if r.returncode == 0:
+            if read_props(self.tdir / "target.properties").get("strip_onlyin") == "true" or any(
+                    read_props(self.mv / "targets" / x / "target.properties").get("strip_onlyin") == "true"
+                    for x in chain(self.mv, self.t)[1:]):
+                hits = client_refs_in_common(self.repo, prepared)
+                if hits:
+                    return {"stop": f"{len(hits)} client lookup(s) in common classes will crash a dedicated server once "
+                                    "@OnlyIn is stripped (CATALOG M52)", "code": 13, "audit": hits, "detail": hits[:6],
+                            "choices": ["in each overlay: call @MVPKG@.ClientRefs.player()/level() (the shared rows' form), "
+                                        "or move the lookup into a nested client-only class"]}
             ev = self.audit_event_listeners()
             if ev.get("stop"):
                 return ev
@@ -735,6 +1383,10 @@ class Run:
         if any((self.repo / ".multiversion").glob("shipped-expect*.txt")):    # the fork lists what its shipped jar must log
             cmd += ["--shipped"]
         r = self.sh(cmd, self.work / "ci-gates.log")
+        if self.a.gates == "full":
+            # a full run that is not green leaves no Gate C record behind: an older GATES.md would make the next
+            # `--gates auto` drop to A/B and report the target done on a client that just failed
+            (self.tdir / "GATES.md").unlink(missing_ok=True)
         lines = (self.work / "ci-gates.log").read_text(encoding="utf-8", errors="replace").splitlines()
         rows = [re.sub(r"^\[ci-gates\] ", "", l) for l in lines if l.startswith("[ci-gates]") and ": " in l]
         failed = [l for l in rows if re.search(r": FAIL\b", l)]
@@ -749,6 +1401,19 @@ class Run:
                                     "(CATALOG X47: a registration the new loader ignores is the usual cause)",
                                     "if the file is gone on purpose, list it in .multiversion/targets/%s/logs-known-absent.txt with the reason" % self.t]}
             note = f"; log files match {prev}" if prev else ""
+            if self.a.gates == "full" and summ.is_file():
+                # the record port-publish.py's layer path reads (and `--gates auto` reads): this target had its real-client run
+                (self.tdir / "GATES.md").write_text(summ.read_text(encoding="utf-8"), encoding="utf-8")
+                note += "; recorded in GATES.md"
+            # green gates are not done while a stub signal is unreviewed: only the loop stage asked, so a run resumed
+            # past it (--from-stage audit/gates) reported a target done with one open (measured on a 26.x target)
+            open_ = unreviewed_stubs(self.tdir)
+            if open_:
+                detail = [f"stub: {s['file']}: {s['why'][:200]}" for s in open_]
+                return {"stop": f"{len(passed)} gate(s) green{note}, but {len(open_)} unreviewed stub signal(s) in STUBS.json",
+                        "code": 10, "detail": detail, "view": detail,
+                        "choices": ["port each flagged method to the new signature, or, when the change is right, set its "
+                                    "\"reviewed\" in targets/<t>/STUBS.json to why; then resume with --from-stage loop"]}
             return {"done": f"{len(passed)} gate(s) green ({self.a.gates}){note}"}
         code = 12 if any("Gate C" in l for l in failed) else 11
         evidence = []       # why each red gate is red: its own log's first compile errors / failing tests
@@ -813,7 +1478,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo"); ap.add_argument("--target")
     ap.add_argument("--budget", type=float, default=15.0, help="dollars the compile loop's workers may spend")
-    ap.add_argument("--gates", default="ab", choices=["none", "ab", "full"])
+    ap.add_argument("--gates", default="auto", choices=["auto", "none", "ab", "full"],
+                    help="auto (default): full -- Gate C, a real client, included -- until the target's GATES.md records a "
+                         "green Gate C, then ab. A target gets one real-client run on its initial port; CI keeps its own policy")
     ap.add_argument("--json"); ap.add_argument("--from-stage"); ap.add_argument("--modid")
     ap.add_argument("--to-stage", help="stop after this stage (default: run to the end)")
     ap.add_argument("--base", default="origin/neoforge-1.21.1", help="the authors' ref, for ci-gates.py --base")
@@ -822,6 +1489,12 @@ def main():
     ap.add_argument("--direct", action="store_true",
                     help="a NEW target that jumps: no inherits, shared_chain= pulls the shared library of every targeted version "
                          "in between (make-fork-layer.py add-target --direct); ignored when the target already exists")
+    ap.add_argument("--port-checkout", action="append", default=[],
+                    help="owner/repo=DIR: a sibling layer fork this one depends on; its per-target jar comes from DIR "
+                         "(tools/layer-deps.py)")
+    ap.add_argument("--port-release", action="append", default=[],
+                    help="owner/repo@TAG: a sibling layer fork's release holding its per-target jar; pinned (url + sha256) "
+                         "in the target's target.properties for CI's `layer-deps.py fetch` (tools/layer-deps.py)")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -835,6 +1508,9 @@ def main():
     except ValueError as e:
         print(f"fork-port: {e}"); return 2
     run = Run(a)
+    if a.gates == "auto":
+        a.gates = gates_auto(run.tdir)
+        print(f"fork-port: gates: auto -> {a.gates} ({'Gate C already recorded in GATES.md' if a.gates == 'ab' else 'no recorded Gate C pass yet: one real-client run on the initial port'})")
     lock = load("layer_ci", "layer-ci.py").CheckoutLock(run.repo, "fork-port.py", a.target)
     busy = lock.acquire()
     if busy:
@@ -858,6 +1534,16 @@ def drive(run, a, skipped, todo):
     for s in skipped:
         run.summary["stages"].setdefault(s, {"skipped": f"before --from-stage {a.from_stage}"})
     stop = execute(run, todo)
+    open_ = unreviewed_stubs(run.tdir) if not stop and not (bool(a.to_stage) and todo[-1] != STAGES[-1]) else []
+    if open_:
+        # every successful end asks, not only the gates stage: a run resumed past it (--from-stage cost) with an older
+        # GATES.md on record otherwise ended done with an unreviewed stub signal open
+        detail = [f"stub: {e.get('file')}: {str(e.get('why', ''))[:200]}" for e in open_]
+        stop = {"stage": todo[-1], "left": f"{len(open_)} unreviewed stub signal(s) in STUBS.json", "code": 10,
+                "detail": detail, "view": detail,
+                "choices": ["port each flagged method to the new signature, or, when the change is right, set its "
+                            "\"reviewed\" in targets/<t>/STUBS.json to why; then resume with --from-stage loop"]}
+        stop["stop"] = stop["left"]
     run.summary["done"] = stop is None
     partial = bool(a.to_stage) and todo[-1] != STAGES[-1]          # a partial run is not "the port is done"
     if partial:
@@ -881,7 +1567,23 @@ def drive(run, a, skipped, todo):
     r = run.tdir / "RESIDUE.md"
     if r.is_file() and not partial:           # only a run to the end clears an earlier stop's report
         r.unlink()
+    # a version is DONE only after its real-client run: green A/B with no Gate C on record is reported as such, never as done
+    no_gates = not partial and a.gates == "none"      # no gates is not done either: the same exit as A/B without Gate C
+    pending_c = not partial and (no_gates or gates_auto(run.tdir) != "ab")
+    if pending_c:
+        run.summary["done"] = False
+        run.summary["gate_c"] = "not run"
+    if no_gates:
+        run.summary["gates"] = "not run (--gates none)"
     run.save()
+    if no_gates:
+        print(f"fork-port {a.target}: stages ok, gates not run (--gates none) -- NOT done: "
+              f"{run.resume_cmd('gates').replace(' --gates none', ' --gates full')} -- summary in {run.jpath}")
+        return 17
+    if pending_c:
+        print(f"fork-port {a.target}: A/B green, Gate C not run -- NOT done until a real client has run it: "
+              f"{run.resume_cmd('gates').replace(' --gates ' + a.gates, ' --gates full')} -- summary in {run.jpath}")
+        return 17
     print(f"fork-port {a.target}: {'stages ' + ', '.join(todo) + ' ok' if partial else 'done'} -- summary in {run.jpath}")
     return 0
 
@@ -1085,6 +1787,395 @@ def self_check():
         (mv / "targets/1.21.4").mkdir(); (mv / "targets/1.21.4/target.properties").write_text("x=1\n", encoding="utf-8")
         (mv / "targets/1.21.5").mkdir(); (mv / "targets/1.21.5/target.properties").write_text("inherits=1.21.4\n", encoding="utf-8")
         expect(skipped_shared(mv, "1.21.5", sh) == [], "an ordinary hop (inherits the nearest lower target) skips nothing")
+    # ---- a row harvested into the shared library leaves the target's table (else: a duplicate rule at table load)
+    with tempfile.TemporaryDirectory() as d:
+        mv = pathlib.Path(d); (mv / "targets/1.21.4").mkdir(parents=True); (mv / "shared/1.21.4").mkdir(parents=True)
+        (mv / "shared/1.21.4/renames.tsv").write_text("re:a\tb\n", encoding="utf-8")
+        (mv / "targets/1.21.4/renames.tsv").write_text("# head\nKeep\tMe\n# X3: proposed by a file-loop worker, kept\nre:a\tb\n",
+                                                       encoding="utf-8")
+        expect(drop_harvested_rows(mv, "1.21.4") == ["re:a\tb"]
+               and (mv / "targets/1.21.4/renames.tsv").read_text(encoding="utf-8") == "# head\nKeep\tMe\n",
+               "a harvested row (and its loop comment) leaves the target's table; the rest stays")
+        (mv / "shared/1.21.4/renames.tsv").write_text("re:\\.isClientSide\\b(?!\\s*\\()\t.isClientSide()\n", encoding="utf-8")
+        (mv / "targets/1.21.4/renames.tsv").write_text("e.level().isClientSide\te.level().isClientSide()\nKeep\tMe\n", encoding="utf-8")
+        expect(drop_harvested_rows(mv, "1.21.4") == ["e.level().isClientSide\te.level().isClientSide()"],
+               "a target row a shared regex already makes is dropped (else the two rewrite each other)")
+    # ---- recipes: derived into the overlay, a hand overlay never touched, an authors' edit reaches a generated one
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); rd = repo / "src/main/resources/data/examplemod/recipe"; rd.mkdir(parents=True)
+        (rd / "a.json").write_text(json.dumps({"type": "minecraft:crafting_shapeless", "ingredients": [{"item": "minecraft:stick"}],
+                                               "result": {"id": "examplemod:a"}}), encoding="utf-8")
+        (rd / "b.json").write_text(json.dumps({"type": "minecraft:crafting_shapeless", "ingredients": [{"item": "minecraft:dirt"}],
+                                               "result": {"id": "examplemod:b"}}), encoding="utf-8")
+        td = repo / ".multiversion/targets/1.21.4"; hand = td / "resources/data/examplemod/recipe/b.json"
+        hand.parent.mkdir(parents=True); hand.write_text("{\"hand\": true}", encoding="utf-8")
+        n, ref = layer_recipes(repo, td, "1.21.4")
+        a_ = json.loads((td / "resources/data/examplemod/recipe/a.json").read_text(encoding="utf-8"))
+        expect(n == 1 and a_["ingredients"] == ["minecraft:stick"] and "hand" in hand.read_text(encoding="utf-8") and not ref,
+               f"recipes: a.json derived, the hand overlay b.json kept ({n}, {ref})")
+        (rd / "a.json").write_text(json.dumps({"type": "minecraft:crafting_shapeless", "ingredients": [{"item": "minecraft:bone"}],
+                                               "result": {"id": "examplemod:a"}}), encoding="utf-8")
+        layer_recipes(repo, td, "1.21.4")
+        expect(json.loads((td / "resources/data/examplemod/recipe/a.json").read_text(encoding="utf-8"))["ingredients"] == ["minecraft:bone"],
+               "recipes: an authors' edit reaches the generated overlay")
+        expect(layer_recipes(repo, td, "1.21.1") == (0, []), "control: no recipe overlay before 1.21.2")
+    # ---- 26.2 entity predicates: advancement + loot table derived (from the nearest parent overlay), hand overlay kept
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); res = repo / "src/main/resources/data/examplemod"
+        (res / "advancement").mkdir(parents=True); (res / "loot_table/entities").mkdir(parents=True)
+        adv = {"criteria": {"k": {"trigger": "minecraft:player_killed_entity",
+                                  "conditions": {"entity": {"type": "examplemod:boss"}}}}}
+        (res / "advancement/a.json").write_text(json.dumps(adv), encoding="utf-8")
+        (res / "advancement/b.json").write_text(json.dumps(adv), encoding="utf-8")
+        (res / "advancement/plain.json").write_text(json.dumps({"criteria": {"t": {"trigger": "minecraft:tick"}}}), encoding="utf-8")
+        loot = {"pools": [{"conditions": [{"condition": "minecraft:entity_properties", "entity": "this",
+                                           "predicate": {"type": "minecraft:player"}}]}]}
+        (res / "loot_table/entities/boss.json").write_text(json.dumps(loot), encoding="utf-8")
+        mv = repo / ".multiversion"
+        for t, inh in (("26.1.2", ""), ("26.2", "26.1.2")):
+            (mv / "targets" / t).mkdir(parents=True)
+            (mv / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "", encoding="utf-8")
+        par = mv / "targets/26.1.2/resources/data/examplemod/advancement/a.json"; par.parent.mkdir(parents=True)
+        par.write_text(json.dumps({"criteria": {"k": {"trigger": "minecraft:player_killed_entity",
+                                                      "conditions": {"entity": {"type": "examplemod:other"}}}}}), encoding="utf-8")
+        td = mv / "targets/26.2"; hand = td / "resources/data/examplemod/advancement/b.json"
+        hand.parent.mkdir(parents=True); hand.write_text("{\"hand\": true}", encoding="utf-8")
+        n, ref = layer_entity_predicates(repo, td, "26.2", mv)
+        a_ = json.loads((td / "resources/data/examplemod/advancement/a.json").read_text(encoding="utf-8"))
+        l_ = json.loads((td / "resources/data/examplemod/loot_table/entities/boss.json").read_text(encoding="utf-8"))
+        expect(n == 2 and not ref and a_["criteria"]["k"]["conditions"]["entity"] == {"entity_type": "examplemod:other"}
+               and l_["pools"][0]["conditions"][0]["predicate"] == {"entity_type": "minecraft:player"}
+               and "hand" in hand.read_text(encoding="utf-8")
+               and not (td / "resources/data/examplemod/advancement/plain.json").exists(),
+               f"26.2 entity predicates: criterion + loot carriers derived from the parent overlay, hand overlay kept ({n}, {ref})")
+        expect(layer_entity_predicates(repo, td, "26.2", mv) == (0, []), "26.2 entity predicates: idempotent")
+        expect(layer_entity_predicates(repo, mv / "targets/26.1.2", "26.1.2", mv) == (0, []),
+               "control: no entity-predicate overlay before 26.2")
+    # ---- 26.3 data: block states as {id, properties}, trim material palette_id + palette PNG + item-trim atlas moved
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); res = repo / "src/main/resources"
+        pool = res / "data/examplemod/worldgen/template_pool/p.json"; pool.parent.mkdir(parents=True)
+        pool.write_text(json.dumps({"elements": [{"element": {"processors": {"processors": [
+            {"processor_type": "minecraft:block_ignore", "blocks": [{"Name": "minecraft:structure_block"}]}]}}}]}),
+            encoding="utf-8")
+        (res / "data/examplemod/worldgen/template_pool/plain.json").write_text('{"elements": []}', encoding="utf-8")
+        tm = res / "data/examplemod/trim_material/gem.json"; tm.parent.mkdir(parents=True)
+        tm.write_text(json.dumps({"asset_name": "gem", "description": {"translate": "x"}, "ingredient": "examplemod:gem"}),
+                      encoding="utf-8")
+        pal = res / "assets/examplemod/textures/trims/color_palettes/gem.png"; pal.parent.mkdir(parents=True)
+        pal.write_bytes(b"\x89PNGfake")
+        at = res / "assets/minecraft/atlases"; at.mkdir(parents=True)
+        perm = {"type": "paletted_permutations", "palette_key": "trims/color_palettes/trim_palette",
+                "permutations": {"gem": "examplemod:trims/color_palettes/gem"}}
+        (at / "blocks.json").write_text(json.dumps({"sources": [dict(perm, textures=["trims/items/helmet_trim"])]}), encoding="utf-8")
+        (at / "armor_trims.json").write_text(json.dumps({"sources": [dict(perm, textures=["trims/models/armor/coast"])]}), encoding="utf-8")
+        lt = res / "data/examplemod/loot_table/chests/c.json"; lt.parent.mkdir(parents=True)
+        lt.write_text(json.dumps({"type": "minecraft:chest", "pools": [{"rolls": {"min": 1, "max": 2}, "conditions": [
+            {"condition": "minecraft:survives_explosion"}], "entries": [
+            {"type": "minecraft:item", "name": "minecraft:stone", "functions": [{"function": "set_count", "count": {"min": 1.0, "max": 3}}]},
+            {"type": "minecraft:tag", "name": "examplemod:gems", "expand": True}]}]}), encoding="utf-8")
+        adv = res / "data/examplemod/advancement/a.json"; adv.parent.mkdir(parents=True)
+        adv.write_text(json.dumps({"parent": "examplemod:root", "display": {"background": "x", "title": "t"}, "criteria": {
+            "k": {"trigger": "minecraft:player_killed_entity", "conditions": {"entity": {"type": "examplemod:boss"}}}}}),
+            encoding="utf-8")
+        (res / "data/examplemod/loot_table/weird.json").write_text(json.dumps({"pools": [{"rolls": 1, "entries": [
+            {"type": "examplemod:custom"}]}]}), encoding="utf-8")
+        mv = repo / ".multiversion"
+        for t, inh in (("26.2", ""), ("26.3", "26.2")):
+            (mv / "targets" / t).mkdir(parents=True)
+            (mv / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "", encoding="utf-8")
+        td = mv / "targets/26.3"; o = td / "resources"
+        n, ref = layer_263_data(repo, td, "26.3", mv)
+        p_ = json.loads((o / "data/examplemod/worldgen/template_pool/p.json").read_text(encoding="utf-8"))
+        t_ = json.loads((o / "data/examplemod/trim_material/gem.json").read_text(encoding="utf-8"))
+        i_ = json.loads((o / "assets/minecraft/atlases/items.json").read_text(encoding="utf-8"))
+        l_ = json.loads((o / "data/examplemod/loot_table/chests/c.json").read_text(encoding="utf-8"))
+        a_ = json.loads((o / "data/examplemod/advancement/a.json").read_text(encoding="utf-8"))
+        expect(l_["pools"] == [{"rolls": {"type": "minecraft:uniform", "min": 1, "max": 2},
+                                "condition": {"type": "minecraft:survives_explosion"}, "entries": [
+            {"type": "minecraft:item", "name": "minecraft:stone",
+             "modifier": {"type": "set_count", "count": {"type": "minecraft:uniform", "min": 1, "max": 3}}},
+            {"type": "minecraft:tag", "expand": True, "items": "#examplemod:gems"}]}]
+               and a_["display"] == {"title": "t"}
+               and a_["criteria"]["k"]["conditions"]["entity"] == {"type": "minecraft:entity_properties", "entity": "this",
+                                                                    "predicate": {"entity_type": "examplemod:boss"}}
+               and [r.split(":")[0] for r in ref] == ["data/examplemod/loot_table/weird.json"]
+               and not (o / "data/examplemod/loot_table/weird.json").exists(),
+               f"26.3 loot grammar: conditions/functions/numbers/tag entry/criterion entity derived, an unknown entry refused ({ref})")
+        ref = [r for r in ref if "weird" not in r]
+        # an untyped {min,max} the transform does not convert (set_damage's damage) is refused, not passed through;
+        # a predicate's range in a condition is not a number provider and is left alone
+        import runpy
+        gro = runpy.run_path(str(ROOT / "templates/multi-version/tools/gen-resource-overlays.py"), run_name="gro")
+        try:
+            gro["loot_grammar_263"]({"pools": [{"rolls": 1, "entries": [{"type": "minecraft:item", "name": "x:y", "functions": [
+                {"function": "minecraft:set_damage", "damage": {"min": 0.1, "max": 0.5}}]}]}]}, "data/x/loot_table/d.json", {})
+            refused_dmg = False
+        except gro["Refused"]:
+            refused_dmg = True
+        rng = gro["loot_grammar_263"]({"pools": [{"rolls": 1, "entries": [{"type": "minecraft:item", "name": "x:y", "functions": [
+            {"function": "minecraft:set_count", "count": 2, "conditions": [{"condition": "minecraft:entity_properties",
+             "entity": "this", "predicate": {"distance": {"absolute": {"min": 1}}}}]}]}]}]}, "data/x/loot_table/r.json", {})
+        expect(refused_dmg and rng["pools"][0]["entries"][0]["modifier"]["condition"]["predicate"] == {"distance": {"absolute": {"min": 1}}},
+               "26.3 loot grammar: an unconverted untyped number provider is refused; a predicate range is kept")
+        # a glowstone-shaped table: limit_count's limit is an IntLimit (bounds are int providers, so untyped and bare
+        # ints are right), and minecraft:filtered's item_filter count is a range -- both convert; an untyped
+        # {min,max} provider nested in limit_count's bound is still a provider and is typed
+        glow = gro["loot_grammar_263"]({"pools": [{"rolls": 1, "entries": [{"type": "minecraft:item", "name": "x:y", "functions": [
+            {"function": "minecraft:set_count", "count": {"min": 2.0, "max": 4.0, "type": "minecraft:uniform"}},
+            {"function": "minecraft:limit_count", "limit": {"min": 1, "max": 4}},
+            {"function": "minecraft:limit_count", "limit": {"max": {"min": 2, "max": 3}}},
+            {"function": "minecraft:filtered", "item_filter": {"items": "x:y", "count": {"min": 1, "max": 8}},
+             "modifier": {"type": "minecraft:set_count", "count": 1}}]}]}]}, "data/x/loot_table/g.json", {})
+        gm = glow["pools"][0]["entries"][0]["modifier"]
+        try:
+            gro["loot_grammar_263"]({"pools": [{"rolls": 1, "entries": [{"type": "minecraft:item", "name": "x:y", "functions": [
+                {"function": "minecraft:enchant_with_levels", "levels": {"min": 5, "max": 10}}]}]}]}, "data/x/loot_table/e.json", {})
+            refused_lv = False
+        except gro["Refused"]:
+            refused_lv = True
+        expect(gm[1] == {"type": "minecraft:limit_count", "limit": {"min": 1, "max": 4}}
+               and gm[2]["limit"] == {"max": {"type": "minecraft:uniform", "min": 2, "max": 3}}
+               and gm[3]["item_filter"] == {"items": "x:y", "count": {"min": 1, "max": 8}} and refused_lv,
+               "26.3 loot grammar: limit_count's IntLimit and filtered's item_filter range convert; an untyped provider elsewhere is still refused")
+        expect(not ref and p_["elements"][0]["element"]["processors"]["processors"][0]["blocks"] == [{"id": "minecraft:structure_block"}]
+               and not (o / "data/examplemod/worldgen/template_pool/plain.json").exists()
+               and t_ == {"palette_id": "examplemod:trim/gem", "description": {"translate": "x"}}
+               and (o / "assets/examplemod/textures/palettes/trim/gem.png").read_bytes() == b"\x89PNGfake"
+               and i_["sources"] == [{"type": "minecraft:paletted_permutations", "palette_key": "minecraft:trim_base",
+                                      "permutations": {"gem": "examplemod:trim/gem"}, "textures": ["trims/items/helmet_trim"]}]
+               and json.loads((o / "assets/minecraft/atlases/blocks.json").read_text(encoding="utf-8")) == {"sources": []}
+               and json.loads((o / "assets/minecraft/atlases/armor_trims.json").read_text(encoding="utf-8")) == {"sources": []},
+               f"26.3 data: block state, trim palette, atlases derived ({n}, {ref})")
+        n2, ref2 = layer_263_data(repo, td, "26.3", mv)
+        expect(n2 == 0 and len(ref2) == 1, f"26.3 data: idempotent ({n2}, {ref2})")
+        expect(layer_entity_predicates(repo, td, "26.3", mv) == (0, []), "26.3: the 26.2 entity-predicate step steps aside")
+        expect(layer_263_data(repo, mv / "targets/26.2", "26.2", mv) == (0, []) and not (mv / "targets/26.2/resources").exists(),
+               "control: no 26.3 data overlay before 26.3")
+    # ---- client item definitions: written into the target's overlay, an existing one is never touched, 1.21.1 gets none
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); md = repo / "src/main/resources/assets/examplemod/models/item"; md.mkdir(parents=True)
+        (md / "sword.json").write_text('{"parent": "item/handheld", "textures": {"layer0": "examplemod:item/sword"}}', encoding="utf-8")
+        (md / "special.json").write_text('{"parent": "item/generated", "textures": {"layer0": "examplemod:item/special"}}', encoding="utf-8")
+        td = repo / ".multiversion/targets/1.21.4"
+        keep = td / "resources/assets/examplemod/items/special.json"; keep.parent.mkdir(parents=True)
+        keep.write_text('{"model": {"type": "minecraft:special"}}', encoding="utf-8")
+        n = layer_client_items(repo, td, "1.21.4")
+        expect(n == 1 and (keep.parent / "sword.json").is_file() and "special" in keep.read_text(encoding="utf-8"),
+               f"client items: the missing one written, the overlay's own kept ({n})")
+        expect(layer_client_items(repo, td, "1.21.4") == 0, "client items: idempotent")
+        expect(layer_client_items(repo, repo / ".multiversion/targets/1.21.1x", "1.21.1") == 0, "control: none before 1.21.2")
+    # ---- GeckoLib 5 assets: copied to geckolib/{models,animations}, a hand overlay kept, other ledger lines kept, 4.x gets none
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); ad = repo / "src/main/resources/assets/examplemod"
+        (ad / "geo").mkdir(parents=True); (ad / "animations/armor").mkdir(parents=True)
+        (ad / "geo/mob.geo.json").write_text('{"m": 1}', encoding="utf-8")
+        (ad / "geo/hand.geo.json").write_text('{"m": 2}', encoding="utf-8")
+        (ad / "animations/armor/cape.animation.json").write_text('{"a": 1}', encoding="utf-8")
+        td = repo / ".multiversion/targets/1.21.5"; td.mkdir(parents=True)
+        (td / "DEPS.md").write_text("| `curse.maven:geckolib-388172` | required | `1` | curse.maven:geckolib-388172:2 | "
+                                    "CurseForge file 2 (geckolib-neoforge-1.21.5-5.1.0.jar) |\n", encoding="utf-8")
+        gm = td / "resources/assets/examplemod/geckolib/models"
+        (gm / "hand.geo.json").parent.mkdir(parents=True); (gm / "hand.geo.json").write_text('{"hand": true}', encoding="utf-8")
+        (td / "GENERATED.txt").write_text("data/examplemod/recipe/a.json\n", encoding="utf-8")
+        n = layer_geckolib_assets(repo, td, "1.21.5")
+        led = (td / "GENERATED.txt").read_text(encoding="utf-8").split()
+        expect(n == 2 and (gm / "mob.geo.json").read_text(encoding="utf-8") == '{"m": 1}'
+               and (td / "resources/assets/examplemod/geckolib/animations/armor/cape.animation.json").is_file()
+               and "hand" in (gm / "hand.geo.json").read_text(encoding="utf-8")
+               and "data/examplemod/recipe/a.json" in led and "assets/examplemod/geckolib/models/mob.geo.json" in led
+               and "assets/examplemod/geckolib/models/hand.geo.json" not in led,
+               f"geckolib 5: copied to the 5.x paths (sub-folder kept), the hand overlay and the recipe ledger line kept ({n}, {led})")
+        expect(layer_geckolib_assets(repo, td, "1.21.5") == 0, "geckolib 5: idempotent")
+        (ad / "geo/mob.geo.json").write_text('{"m": 3}', encoding="utf-8")
+        layer_geckolib_assets(repo, td, "1.21.5")
+        expect((gm / "mob.geo.json").read_text(encoding="utf-8") == '{"m": 3}', "geckolib 5: an authors' edit reaches the copy")
+        (ad / "geo/mob.geo.json").unlink()
+        layer_geckolib_assets(repo, td, "1.21.5")
+        expect(not (gm / "mob.geo.json").exists() and (gm / "hand.geo.json").exists(),
+               "geckolib 5: a copy whose authors' file is gone is removed; the hand overlay stays")
+        t4 = repo / ".multiversion/targets/1.21.4"; t4.mkdir(parents=True)
+        (t4 / "DEPS.md").write_text("| `curse.maven:geckolib-388172` | required | `1` | curse.maven:geckolib-388172:3 | "
+                                    "CurseForge file 3 (geckolib-neoforge-1.21.4-4.8.5.jar) |\n", encoding="utf-8")
+        expect(layer_geckolib_assets(repo, t4, "1.21.4") == 0 and not (t4 / "resources").exists(),
+               "control: a GeckoLib 4.x target gets no 5.x copies")
+        t0 = repo / ".multiversion/targets/1.21.3"; t0.mkdir(parents=True)
+        expect(layer_geckolib_assets(repo, t0, "1.21.3") == 0, "control: a target that names no GeckoLib gets none")
+        for line_, want in (("geckolib-neoforge-1.21.10-5.3-alpha-3.jar", 5), ("software.bernie.geckolib:geckolib-neoforge-1.21.1:4.7.1", 4),
+                            ("prop.geckolib_version=5.2.2", 5)):
+            (t0 / "target.properties").write_text(line_ + "\n", encoding="utf-8")
+            expect(target_geckolib_major(t0) == want, f"geckolib version from {line_!r}: {target_geckolib_major(t0)}")
+    # ---- the overlay audit: an overlay that deleted an authors' override is flagged, a renamed copy is not
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); sd = repo / "src/main/java/m"; sd.mkdir(parents=True)
+        (sd / "A.java").write_text("class A extends B {\n @Override\n public void initializeClient(C c) { c.x(); }\n"
+                                   " @Override\n public int f() { return 1; }\n}\n", encoding="utf-8")
+        (sd / "Same.java").write_text("class S extends B {\n @Override\n public int f() { return 1; }\n}\n", encoding="utf-8")
+        td = repo / ".multiversion/targets/1.21.4"; od = td / "java/m"; od.mkdir(parents=True)
+        (od / "A.java").write_text("class A extends B {\n @Override\n public int f() { return 2; }\n}\n", encoding="utf-8")
+        (od / "Same.java").write_text("class S extends Bee {\n @Override\n public int g() { return 1; }\n}\n", encoding="utf-8")
+        got = overlay_stubs(repo, td)
+        expect([g["file"] for g in got] == [".multiversion/targets/1.21.4/java/m/A.java"] and "initializeClient" in got[0]["why"],
+               f"overlay audit: a deleted override is flagged, a renamed one is not: {got}")
+    # ---- a shared AT line marked `# until <v>` reaches targets up to <v> only
+    with tempfile.TemporaryDirectory() as td:
+        mvd = pathlib.Path(td) / ".multiversion"
+        (mvd / "shared/1.21.3").mkdir(parents=True)
+        for t, inh in (("1.21.3", None), ("1.21.4", "1.21.3"), ("1.21.5", "1.21.4")):
+            (mvd / "targets" / t).mkdir(parents=True)
+            (mvd / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "x=1\n", encoding="utf-8")
+        (mvd / "shared/1.21.3/accesstransformer.cfg").write_text(
+            "public a.B <init>(I)V # helper (until 1.21.4)\npublic a.C f\n", encoding="utf-8")
+        got = {t: merge_shared_at(mvd, t, pathlib.Path(td) / f"at-{t}.cfg") for t in ("1.21.4", "1.21.5")}
+        expect(len(got["1.21.4"]) == 2 and got["1.21.5"] == ["public a.C f"], f"AT until ceiling: {got}")
+    # ---- green gates are not done with an unreviewed stub (a resume past the loop never asked)
+    with tempfile.TemporaryDirectory() as td:
+        td = pathlib.Path(td)
+        expect(unreviewed_stubs(td) == [], "no STUBS.json: nothing open")
+        (td / "STUBS.json").write_text(json.dumps([{"file": "A.java", "why": "x", "reviewed": None},
+                                                   {"file": "B.java", "why": "y", "reviewed": "fine"}]), encoding="utf-8")
+        expect([e["file"] for e in unreviewed_stubs(td)] == ["A.java"], "only the unreviewed entry is open")
+    # ---- stub signals survive a resume and stay a stop until reviewed
+    with tempfile.TemporaryDirectory() as d:
+        td = pathlib.Path(d)
+        record_stubs(td, [{"file": "A.java", "why": "emptied a method"}])
+        got = record_stubs(td, [])
+        expect([e["file"] for e in got] == ["A.java"] and got[0]["reviewed"] is None, "a resumed run keeps an earlier run's stub")
+        e = json.loads((td / "STUBS.json").read_text(encoding="utf-8")); e[0]["reviewed"] = "the API is gone; same effect"
+        (td / "STUBS.json").write_text(json.dumps(e), encoding="utf-8")
+        expect(record_stubs(td, [{"file": "A.java", "why": "emptied a method"}])[0]["reviewed"], "a reviewed entry stays reviewed")
+        expect(record_stubs(td, [{"file": "A.java", "why": "deleted a file"}])[0]["reviewed"] is None, "a new reason reopens it")
+    # ---- a version is done only after its real-client run: green A/B without a Gate C record exits 17, with one 0
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
+                                direct=False, from_stage="cost", to_stage=None, max_errors=None, confirm_spend=False, port_checkout=[])
+        run = Run(a_); run.s_cost = lambda: {"skipped": "fake"}
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc_ab = drive(run, a_, [s_ for s_ in STAGES if s_ != "cost"], ["cost"])
+            (repo / ".multiversion/targets/1.21.4/GATES.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n",
+                                                                          encoding="utf-8")
+            rc_c = drive(run, a_, [s_ for s_ in STAGES if s_ != "cost"], ["cost"])
+        expect(rc_ab == 17 and rc_c == 0, f"done needs a recorded Gate C: A/B only -> {rc_ab}, with Gate C -> {rc_c}")
+        # --from-stage cost over an older GATES.md with an unreviewed stub: not done (exit 10, the stub named)
+        (repo / ".multiversion/targets/1.21.4/STUBS.json").write_text(json.dumps([{"file": "A.java", "why": "emptied f()",
+                                                                                  "reviewed": None}]), encoding="utf-8")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_stub = drive(run, a_, [s_ for s_ in STAGES if s_ != "cost"], ["cost"])
+        expect(rc_stub == 10 and "A.java" in buf.getvalue(), f"a run resumed past the gates with an open stub: exit {rc_stub}")
+        (repo / ".multiversion/targets/1.21.4/STUBS.json").unlink()
+        # --gates none is not done, even with a Gate C on record; a partial run (--to-stage) still ends 0
+        a_.gates = "none"
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc_none = drive(run, a_, [], list(STAGES[-2:]))
+            a_.to_stage = "audit"; run.s_audit = lambda: {"done": "fake"}
+            rc_part = drive(run, a_, [], ["audit"])
+        a_.to_stage, a_.gates = None, "ab"
+        expect(rc_none == 17 and rc_part == 0, f"--gates none: exit {rc_none} (want 17); --to-stage audit: {rc_part} (want 0)")
+    # ---- a full gate run that is not green removes the Gate C record, so `--gates auto` runs full again
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
+        for gates, code, want_record in (("full", 1, False), ("ab", 1, True), ("full", 0, True)):
+            (td / "GATES.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
+            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates=gates, modid="m", base="x",
+                                    direct=False, from_stage="gates", to_stage=None, max_errors=None, confirm_spend=False,
+                                    port_checkout=[])
+            run = Run(a_); run.compile_errors = lambda: 0; run.modid = lambda: "m"; run.lost_logs = lambda: ([], None)
+            def gsh(cmd, log=None, cwd=None, code=code, gates=gates):
+                pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
+                pathlib.Path(log).write_text("[ci-gates] Gate C -- real client: " + ("PASS" if code == 0 else "FAIL") + "\n",
+                                             encoding="utf-8")
+                if code == 0:
+                    (run.work / "ci-gates-summary.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
+                return CompletedProcess(cmd, code, "", "")
+            run.sh = gsh
+            run.s_gates()
+            expect((td / "GATES.md").is_file() == want_record and gates_auto(td) == ("ab" if want_record else "full"),
+                   f"--gates {gates} exit {code}: GATES.md {'kept/written' if want_record else 'removed'}")
+    # ---- --gates auto: full until GATES.md records a green Gate C
+    with tempfile.TemporaryDirectory() as d:
+        td = pathlib.Path(d)
+        expect(gates_auto(td) == "full", "no GATES.md: full")
+        (td / "GATES.md").write_text("| Gate B -- server | PASS | x |\n", encoding="utf-8")
+        expect(gates_auto(td) == "full", "an A/B-only record: still full")
+        (td / "GATES.md").write_text("| Gate B -- server | PASS | x |\n| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
+        expect(gates_auto(td) == "ab", "a green Gate C recorded: ab")
+        (td / "GATES.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n| Gate C -- real client, `spawn` | FAIL | x |\n", encoding="utf-8")
+        expect(gates_auto(td) == "full", "a red row: full again")
+    # ---- an overlay identical to a shared helper is dropped (it would shadow later fixes); a changed one stays
+    with tempfile.TemporaryDirectory() as d:
+        mv = pathlib.Path(d); (mv / "targets/26.1.2/java/p/mv").mkdir(parents=True); (mv / "shared/26.1.2/java/p/mv").mkdir(parents=True)
+        for n, body in (("Same.java", "class Same {}\n"), ("Mine.java", "class Mine {}\n")):
+            (mv / "shared/26.1.2/java/p/mv" / n).write_text(body, encoding="utf-8")
+        (mv / "targets/26.1.2/java/p/mv/Same.java").write_text("class Same {}\n", encoding="utf-8")
+        (mv / "targets/26.1.2/java/p/mv/Mine.java").write_text("class Mine { int x; }\n", encoding="utf-8")
+        expect(drop_shadowing_overlays(mv, "26.1.2") == ["p/mv/Same.java"] and (mv / "targets/26.1.2/java/p/mv/Mine.java").is_file(),
+               "a byte-identical overlay of a shared helper is dropped, a changed one kept")
+    # ---- a client lookup widened to a common type in a common class is found before Gate B; client code is not
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); pr = repo / "build/mc1.21.8/mv/java/m"; (pr / "client").mkdir(parents=True)
+        (pr / "Item.java").write_text("class Item {\n void t() {\n  Player p = Minecraft.getInstance().player;\n }\n}\n", encoding="utf-8")
+        (pr / "client/Hud.java").write_text("class Hud { void t() { Player p = Minecraft.getInstance().player; } }\n", encoding="utf-8")
+        (pr / "Ok.java").write_text("class Ok { void t() { Player p = p.mv.ClientRefs.player(); } }\n", encoding="utf-8")
+        src = repo / "src/main/java/m"; src.mkdir(parents=True)
+        (src / "Screen.java").write_text("@OnlyIn(Dist.CLIENT)\npublic class Screen {}\n", encoding="utf-8")
+        (pr / "Screen.java").write_text("public class Screen { void t() { Level l = Minecraft.getInstance().level; } }\n", encoding="utf-8")
+        (pr / "Ev.java").write_text("@EventBusSubscriber(modid = \"m\", value = Dist.CLIENT)\nclass Ev { void t() { Player p = Minecraft.getInstance().player; } }\n", encoding="utf-8")
+        (pr / "GrMixin.java").write_text("import net.minecraft.client.renderer.GameRenderer;\n@Mixin(GameRenderer.class)\nclass GrMixin { void t() { Player p = Minecraft.getInstance().player; } }\n", encoding="utf-8")
+        (pr / "EnMixin.java").write_text("import net.minecraft.world.entity.Entity;\n@Mixin(Entity.class)\nclass EnMixin { void t() { Player p = Minecraft.getInstance().player; } }\n", encoding="utf-8")
+        hits = client_refs_in_common(repo, repo / "build/mc1.21.8/mv/java")
+        expect(hits == ["m/EnMixin.java:3", "m/Item.java:3"], f"client lookups in common classes: {hits}")
+    # ---- a review carries one version on when the file and every signal are the same; a changed count does not
+    with tempfile.TemporaryDirectory() as d:
+        mv = pathlib.Path(d); a, b = mv / "1.21.5", mv / "1.21.8"; a.mkdir(); b.mkdir()
+        (a / "STUBS.json").write_text(json.dumps([{"file": ".multiversion/targets/1.21.5/java/X.java", "why": "removes 3 call(s)",
+                                                   "reviewed": "same message API"}]), encoding="utf-8")
+        got = record_stubs(b, [{"file": ".multiversion/targets/1.21.8/java/X.java", "why": "removes 3 call(s)"},
+                               {"file": ".multiversion/targets/1.21.8/java/Y.java", "why": "removes 3 call(s)"}], parents=[a])
+        expect(got[0]["reviewed"] == "(inherited from 1.21.5) same message API" and got[1]["reviewed"] is None,
+               f"an identical signal inherits the parent's review, another file does not: {got}")
+        got = record_stubs(mv / "1.21.10", [{"file": ".multiversion/targets/1.21.10/java/X.java", "why": "removes 4 call(s)"}],
+                           parents=[b, a])
+        expect(got[0]["reviewed"] is None, "control: a different count is a new question")
+    # ---- the shared libraries' access-transformer lines reach a direct jump's AT, once, comment aside
+    with tempfile.TemporaryDirectory() as d:
+        mv = pathlib.Path(d)
+        (mv / "targets/1.21.4").mkdir(parents=True)
+        (mv / "targets/1.21.4/target.properties").write_text("shared_chain=1.21.3,1.21.4\n", encoding="utf-8")
+        (mv / "shared/1.21.3").mkdir(parents=True)
+        (mv / "shared/1.21.3/accesstransformer.cfg").write_text("# why\npublic a.B <init>(I)V # helper\n", encoding="utf-8")
+        at = mv / "targets/1.21.4/resources/META-INF/accesstransformer.cfg"
+        at.parent.mkdir(parents=True); at.write_text("public c.D e()V\n", encoding="utf-8")
+        expect(merge_shared_at(mv, "1.21.4", at) == ["public a.B <init>(I)V # helper"] and merge_shared_at(mv, "1.21.4", at) == []
+               and at.read_text(encoding="utf-8") == "public c.D e()V\npublic a.B <init>(I)V # helper\n",
+               "a direct jump's AT gets its shared libraries' lines, once")
+        (mv / "targets/1.21.4/target.properties").write_text("x=1\n", encoding="utf-8")
+        at.write_text("public c.D e()V\n", encoding="utf-8")
+        expect(merge_shared_at(mv, "1.21.4", at) == [], "control: a target whose chain lacks that version gets nothing")
+    # ---- setup: pinned dependencies are resolved per target; a required one with no build stops before add-target
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); (repo / ".multiversion/tools").mkdir(parents=True)
+        (repo / ".multiversion/base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (repo / "build.gradle").write_text('dependencies {\n    implementation "curse.maven:somelib-1:2"\n}\n', encoding="utf-8")
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
+                                direct=False, from_stage=None, max_errors=None, confirm_spend=False,
+                                port_checkout=["owner/lib=/x/lib"], port_release=["owner/rel@v1"])
+        run = Run(a_); ran = []
+        def sh15(cmd, log=None, cwd=None):
+            ran.append(" ".join(map(str, cmd)))
+            return CompletedProcess(cmd, 15 if "layer-deps.py" in ran[-1] else 0, "layer-deps: STOP required: curse.maven:somelib-1\n", "")
+        run.sh = sh15
+        res = run.s_setup()
+        expect(res.get("code") == 15 and "somelib" in res["stop"] and len(ran) == 1 and "--dry-run" in ran[0]
+               and "--port-checkout owner/lib=/x/lib" in ran[0] and "--port-release owner/rel@v1" in ran[0],
+               f"a required dependency with no build stops setup first: {res} {ran}")
+        expect("--port-checkout owner/lib=/x/lib" in run.resume_cmd("setup") and "--port-release owner/rel@v1" in run.resume_cmd("setup"),
+               "the resume command keeps --port-checkout and --port-release")
+        expect(pins_dependencies(repo), "a cursemaven pin is a pinned dependency")
+        (repo / "build.gradle").write_text('dependencies {\n    implementation "net.example:lib:${lib_version}"\n}\n', encoding="utf-8")
+        expect(not pins_dependencies(repo), "control: a build with no pinned mod resolves nothing (setup runs as before)")
     # the guard stops the loop stage before any worker runs
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
