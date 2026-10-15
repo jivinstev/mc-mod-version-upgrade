@@ -186,6 +186,37 @@ hook_case 0 "a NEW branch (no remote ref) with no name passes" "new branch text"
 hook_case 1 "a forbidden name in an ADDED line blocks"      "we ported $FAKE"          "innocent message"
 hook_case 1 "a forbidden name in a commit MESSAGE blocks"   "plain again"                     "port of ${FAKE,,}"
 hook_case 1 "a NEW branch carrying a name blocks"            "new $FAKE"                       "new branch named"   new
+
+echo "10. the similarity gate (invented code only: the real corpus is third-party and never in CI)"
+( python3 "$ROOT/tools/check-similarity.py" --self-check | grep -q "self-check: OK" )
+[ $? = 0 ] && { echo "  PASS  check-similarity.py --self-check: a renamed copy FLAGS, an API-only caller passes, no corpus exits 2"; pass=$((pass+1)); } \
+           || { echo "  FAIL  check-similarity.py --self-check"; fail=$((fail+1)); }
+SR="$(mktemp -d)"; mkdir -p "$SR/corpus" "$SR/gradle" "$SR/cache"
+fixture() { python3 -c "import importlib.util as u,sys; s=u.spec_from_file_location('cs', sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); sys.stdout.write(getattr(m, sys.argv[2]))" "$ROOT/tools/check-similarity.py" "$1"; }
+fixture LIBRARY > "$SR/corpus/Library.java"
+corpus="$SR/corpus"; command -v cygpath >/dev/null 2>&1 && corpus="$(cygpath -m "$corpus")"
+sim_hook() {  # sim_hook <wanted-exit> <label> <hook> <corpus or empty> [strict] -- runs a hook in $H on what is staged/pushed
+   local want="$1" label="$2" hook="$3" ref="$4" strict="${5:-}"
+   local sha; sha="$(git -C "$H" rev-parse HEAD)"; local base; base="$(git -C "$H" rev-parse HEAD~1)"
+   ( cd "$H" && echo "refs/heads/x $sha refs/heads/x $base" | GRADLE_USER_HOME="$SR/gradle" MMVU_SIMILARITY_CACHE="$SR/cache" \
+       MMVU_REFERENCE_SOURCES="$ref" MMVU_SIMILARITY_STRICT="$strict" ".git/hooks/$hook" origin url >/dev/null 2>&1 )
+   local got=$?
+   if [ "$got" = "$want" ]; then echo "  PASS  $label (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $label -- wanted exit $want, got $got"; fail=$((fail+1)); fi
+}
+( cd "$H" && printf 'plain\n' > note2.txt && git add note2.txt )
+sim_hook 0 "pre-commit: nothing under templates/ staged passes (and does not need a corpus)" pre-commit "" 1
+( cd "$H" && git reset -q && mkdir -p templates/shared && fixture COPY > templates/shared/Slots.java && git add templates )
+sim_hook 1 "pre-commit: a staged renamed copy of a reference file is REFUSED" pre-commit "$corpus"
+sim_hook 0 "pre-commit: no corpus on this machine warns and lets the commit through" pre-commit ""
+sim_hook 1 "pre-commit: no corpus with MMVU_SIMILARITY_STRICT=1 is REFUSED" pre-commit "" 1
+( cd "$H" && git reset -q && fixture CALLER > templates/shared/Slots.java && git add templates )
+sim_hook 0 "pre-commit: a file that only calls the same API passes" pre-commit "$corpus"
+( cd "$H" && git commit -q --no-verify -m "caller" )
+sim_hook 0 "control: pre-push of the API-only caller passes (so the next refusal is the similarity gate's)" pre-push "$corpus"
+( cd "$H" && fixture COPY > templates/shared/Slots.java && git add templates && git commit -q --no-verify -m "copy" )
+sim_hook 1 "pre-push: a pushed copy is REFUSED" pre-push "$corpus"
+rm -rf "$SR"
 rm -rf "$H" "$H/../names.$$"
 
 echo

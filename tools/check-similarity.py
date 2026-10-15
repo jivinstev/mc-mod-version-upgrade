@@ -4,6 +4,7 @@
     python3 tools/check-similarity.py                      # templates/ Java changed since origin/main (working tree)
     python3 tools/check-similarity.py --staged             # what `git commit` would record (the pre-commit hook)
     python3 tools/check-similarity.py --range A..B         # what a push publishes (the pre-push hook)
+    python3 tools/check-similarity.py --unpushed REV       # ... for a new branch: REV's commits on no remote
     python3 tools/check-similarity.py --all                # every templates/**/*.java[.example|.template]
     python3 tools/check-similarity.py --files X.java ...   # any files
     python3 tools/check-similarity.py --self-check         # its own tests, on invented code only
@@ -31,15 +32,17 @@ THE REFERENCE CORPUS (discovered, then indexed once into a cache)
     c. every jar or directory in MMVU_REFERENCE_SOURCES (os.pathsep-separated), and every --reference.
     The index lives in MMVU_SIMILARITY_CACHE, else $XDG_CACHE_HOME/mmvu-similarity, else ~/.cache/mmvu-similarity.
     A source is re-indexed only when its path, size or mtime changes; identical files in several jars are indexed
-    once. The first run indexes everything (about two minutes for ~30 jars) and says so; later runs take seconds.
+    once. The first run indexes everything (under a minute for ~30 jars; see COST) and says so.
 
 THE METHOD (MOSS-style)
     A Java-aware tokenizer drops comments and whitespace and normalises every identifier and literal to one
     placeholder token each (I, N, S, C, B) -- a copy renames locals, fields and the @MVPKG@ package -- keeping
     keywords, operators and punctuation. Package and import statements and every declaration at class level
     (fields, abstract and interface methods, method signatures up to their body, enum constants, annotations; also
-    inside anonymous classes) are left out: an API forces those, so two independent wrappers of one API share
-    them. What remains is the code inside bodies. k-grams of it are winnowed into fingerprints; the files sharing
+    inside anonymous classes), and bodies of fewer than 12 tokens (getters, one-line delegations) are left out: an
+    API forces those, so two independent wrappers of one API share them. What remains is the code inside bodies,
+    with the style a transcription changes without changing a statement also dropped: block braces, `else`,
+    `final` and `this.` qualifiers. k-grams of it are winnowed into fingerprints; the files sharing
     the most fingerprints with a checked file are then compared token by token, and per reference file:
       run       the longest contiguous run of identical normalised body tokens;
       coverage  the fraction of the checked file's body tokens inside matching runs of >= --min-segment tokens.
@@ -48,10 +51,20 @@ THE METHOD (MOSS-style)
     threshold here (with the measurement that justifies it) or by rewriting the file, never by marking it.
 
 CALIBRATION (the defaults; measured 2026-10 against NeoForge 21.1-26.3 and Minecraft 1.21.1-26.3 sources)
-    Five helpers known to be transcribed (from Minecraft's MultiBufferSource.BufferSource x2, InventoryScreen's
-    entity rendering, NeoForge's EnergyStorage and IEnergyStorage) measured run 79-253 tokens and coverage
-    0.66-0.98. Their independent rewrites, and every other templates/ Java file (92), measured run <= 40 and
-    coverage <= 0.21. Defaults: --max-run 60, --max-coverage 0.45, --min-segment 20.
+    Five helpers known to be transcribed (two MultiBufferSource versions from Minecraft's
+    MultiBufferSource.BufferSource, one from InventoryScreen's entity rendering, NeoForge's EnergyStorage and
+    IEnergyStorage) measured run 173/173/174/130/78 and coverage 0.53/0.44/0.85/1.00/0.82: each passes at least one
+    limit with >= 26% margin. Their independent rewrites, and all 99 templates/ Java files on main, measured
+    run <= 85 (an API-forced 10-line render-pass sequence in a 1,200-token helper) and coverage <= 0.51.
+    Defaults: --max-run 120, --max-coverage 0.65, --min-segment 30. Change them only with a new measurement.
+
+COST (4-CPU Linux, 30 jars / 34k distinct reference files, warm unless said)
+    first run (cold index)  ~43 s, peak RSS ~105 MB, cache ~55 MB (grows to ~90 MB as reference files are compared)
+    commit with no template Java staged       0.01 s (the hook returns before Python starts)
+    one / eleven helper files staged          0.3 s / 0.7 s, 50-110 MB
+    a 59-file push range / --all (99 files)   1.7 s / 2.3 s, 90-120 MB
+    a new jar: ~5 s per 10k new files (files already indexed from another jar cost nothing); a changed jar
+    (mtime) is re-read, ~0.7 s; a tokenizer change (TOKENIZER below) or --rebuild is a cold run again.
 
 EXIT CODES     0 clean (or nothing to check)    1 a file is flagged    2 could not run (no reference corpus
 found -- what was searched is printed -- or git failed). The hooks refuse on 1; on 2 they warn that the check was

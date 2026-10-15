@@ -38,6 +38,14 @@ a jar name, a CurseForge/Modrinth id, a path from someone's workspace or home. P
 (GeckoLib, JEI, Registrate, Curios, Mixin, …) and the decompilers may be named — they are how porters
 search. Everything else is described ("a small MCreator food mod", "a ~750-file boss mod").
 
+**Similarity to third-party sources.** Template Java (above all `templates/fork-layer/shared/`) must not be a
+transcription of NeoForge, Minecraft or GeckoLib code, renamed or not. CI cannot check this (the sources cannot be
+held there), so run it where they are: `python3 tools/check-similarity.py --range origin/main..pr-<N>` (exit 1 names
+the reference jar, entry and matching line ranges; exit 2 means this machine has no sources -- build a fork or set
+`MMVU_REFERENCE_SOURCES`, and say in the review that it did not run). A flagged file is REQUEST CHANGES (rewrite
+from the API: signatures and `javap`, not the implementation); a transcription already pushed is in the history, so
+tell the owner. A PR that raises the tool's thresholds needs the measurement that justifies it.
+
 **Security.** For every added or changed script: what does it download, from where, and is it pinned by
 sha1 and verified before use? Does it execute anything it fetched? Write outside the workspace, the
 checkout or `$TMPDIR`? Read credentials or environment it does not need? For workflows: any new

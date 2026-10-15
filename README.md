@@ -106,6 +106,18 @@ routes; `tools/test-port-tools.sh` fails if a route stops going through it. Two
 gates guard bug classes found in shipped ports: a field-less network payload behind `StreamCodec.unit`
 (`tools/audit-unit-codecs.py`), and data files the server silently rejected (a row of `tools/ci-gates.py`).
 
+The shared helper library (`templates/fork-layer/shared/<version>/java`) is written next to third-party sources --
+NeoForge's sources jars, the Minecraft sources every fork build stages, GeckoLib -- so one more gate runs **only on
+your machine**: `python3 tools/check-similarity.py` compares template Java with those sources (comments dropped,
+identifiers and literals normalised, API-forced declarations and one-line bodies left out) and refuses a file whose
+longest matching run or matched fraction passes a calibrated limit, printing the reference jar, entry and line
+ranges. It finds the sources by itself (the Gradle cache, `build/*/moddev/artifacts` in the git checkouts next to
+this one, and `MMVU_REFERENCE_SOURCES`) and indexes them once into `~/.cache/mmvu-similarity` (under a minute; then
+well under a second per commit). `./tools/install-hooks.sh` installs a pre-commit hook that runs it on the staged
+template Java (`--staged`; a commit with none returns at once), and the pre-push hook runs it on the pushed range.
+Where no sources are found it warns that it did not run, and refuses only with `MMVU_SIMILARITY_STRICT=1`. CI does
+not run it -- the licences of those sources keep them out of CI -- only its `--self-check`, on invented code.
+
 ## Measured ports
 
 Every port here was run from this repository alone:

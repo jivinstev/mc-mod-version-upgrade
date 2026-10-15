@@ -35,8 +35,10 @@ cannot be recalled.
 gh repo fork jivinstev/mc-mod-version-upgrade --clone
 ```
 
-Install the hook once after cloning: `./tools/install-hooks.sh`. It refuses direct pushes to `main`
-and runs the IP gate before anything leaves your machine. Optionally, `FORBIDDEN_NAMES_FILE=` in
+Install the hooks once after cloning: `./tools/install-hooks.sh`. The pre-push hook refuses direct pushes to `main`
+and runs the IP gate before anything leaves your machine. The pre-commit and pre-push hooks also run
+`tools/check-similarity.py`, which refuses template Java transcribed from the NeoForge, Minecraft or GeckoLib
+sources on your machine; CI cannot hold those sources, so this check exists only locally. Optionally, `FORBIDDEN_NAMES_FILE=` in
 `.env.local` can name a private list of mods you have ported, and the hook then refuses those names too.
 
 **The easiest contribution is a lesson from your own migration:** the skill's retrospective collects

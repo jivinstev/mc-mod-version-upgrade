@@ -174,6 +174,15 @@ grew to ~650k tokens and cost about $120 -- most of it re-reading earlier target
 needs from an earlier one is already in the tree (the parent's overlays, `STUBS.json` reviews it inherits) and in the
 catalogue entries the earlier fixer wrote.
 
+**Clean-room rule for shared helpers.** A fixer that writes or rewrites a shared helper re-implementing a third-party
+class (a Minecraft or NeoForge class a version removed, a GeckoLib type) may read that class's API -- its signatures,
+`javap -p` output, its javadoc -- but not its implementation bodies, and writes the bodies from the API and the
+behaviour it needs. Three helpers were once transcribed statement-for-statement from NeoForge and Minecraft sources
+with the licence notice stripped. Reading implementations stays fine for porting the authors' own code into a
+fork's overlays: that code is theirs, ported in their fork. The similarity gate (`tools/check-similarity.py`) runs in
+the pre-commit and pre-push hooks and refuses template Java that matches the NeoForge/Minecraft/GeckoLib sources on
+the machine; a refusal is fixed by rewriting from the API, never by an annotation. Give a worker fixer this rule.
+
 **A version is done only after Gates A, B AND C.** Gates A/B and the audits cannot see what only a client builds --
 models, render layers, shaders -- and every dependent-fork version so far that was green at A/B still failed in a real
 client (a missing model part at launch, a missing shader sampler at spawn). So `fork-port.py` never reports a target
