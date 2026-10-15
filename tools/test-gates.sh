@@ -166,7 +166,7 @@ echo "9. the pre-push hook name-checks what the push publishes (FORBIDDEN_NAMES_
 H="$(mktemp -d)"; ( cd "$H" && git init -q . && git config user.email t@example.com && git config user.name t \
   && mkdir tools && cp -r "$ROOT"/tools/. tools/ \
   && git -C "$ROOT" ls-files -z | tr '\0' '\n' | grep -v / | while IFS= read -r f; do cp "$ROOT/$f" .; done \
-  && cp -r "$ROOT/docs" "$ROOT/.claude" . && ./tools/install-hooks.sh >/dev/null \
+  && cp -r "$ROOT/docs" "$ROOT/.claude" "$ROOT/templates" . && ./tools/install-hooks.sh >/dev/null \
   && git add -A && git commit -qm "base" ) >/dev/null 2>&1
 FAKE="Example""craft"   # built at run time so this file does not itself name it
 printf '%s\n' "$FAKE" > "$H/../names.$$"
