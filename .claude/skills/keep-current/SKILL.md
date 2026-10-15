@@ -22,7 +22,8 @@ Tools: `tools/port-sync.py` (bring the authors' commits in), `tools/fix-ledger.p
 
 ## Stops -- ask the user
 
-1. Setting up the schedule (once): which forks, the time, what may be pushed unattended.
+1. Setting up the schedule (once): which forks, the time, what may be pushed unattended, and the routine's model
+   (Opus recommended; see "Setup").
 2. A reconcile decision the rule below does not settle (both outcomes would ship an S1 mode, or the only fix is a
    design change of the authors' feature).
 3. Merging a keep-current PR into the port branch -- unless that fork's fleet entry says `"automerge": true`. The
@@ -186,6 +187,18 @@ directory is not there when it fires: put the fleet JSON in the routine's prompt
 in its repository scope and the build hosts in its allowed domains (`cloud/allowed-domains.txt`). Cheap nights
 matter: step 1 exits with no model work.
 
+**Set the routine's model; never leave it on the account default.** A routine created without one runs on whatever
+the account defaults to (measured: a nightly routine created without one ran on Sonnet), and
+the routine-creating tool a cloud session has (`create_trigger`) takes no model -- set it right after creating, with
+`update_trigger` `model`, to the model the user chose at stop 1. Recommend Opus: the session's own model does all of
+this skill's judgement -- the anything-new check, the merges, the reconcile (take theirs, keep or shrink ours, the
+A/B), the ledgers, the layer classes and every merge-on-green call -- and no skill steps it down or up. The mechanical
+work keeps its own models whatever the session runs on: the compile loop (`tools/file-loop.py`, also inside
+`layer-sync.py run`) climbs Haiku -> Sonnet -> Opus only on failure, `tools/port-upstream.py` and `tools/gate-loop.py`
+default to Sonnet, the visual review to Haiku. A night with nothing new ends at step 1, so the session model barely
+changes its cost; it is the nights with real merges, where a wrong call ships, that it decides. Say in one line which
+model was set. (Changing an existing routine's model is the user's call: ask, then `update_trigger`.)
+
 **A routine session cannot add repositories: the ones it pushes to must be configured ON THE ROUTINE.** Measured
 twice: a fired routine session searched for `add_repo` at 8 s, and in a second run polled for it for over 3 minutes --
 it never appears in a routine session, while the routine's own config showed `sources: []`. The tools a cloud session
@@ -207,7 +220,7 @@ creates routines with (`create_trigger`/`update_trigger`) have no repository fie
 - **Step 1 needs no repository.** The "anything new?" check only reads: `git ls-remote` the public repositories over
   HTTPS (the session's git proxy serves public reads). A night with nothing new ends there either way.
 - **After creating or editing the routine, fire it once** (`fire_trigger`) and read the run's first events: it must
-  find its repositories. A routine that has never fired cleanly is not set up.
+  find its repositories, and its session (`get_session`) must show the model that was set. A routine that has never fired cleanly is not set up.
 
 **A time like "2am" means the user's local time, and a cloud session runs in UTC.** Do not ask for the zone;
 read it from git. The user's own commits keep the offset of the machine they were made on, while commits made in
