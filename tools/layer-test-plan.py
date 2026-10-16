@@ -580,6 +580,7 @@ def self_check():
         for t in ("1.21.3", "1.21.4", "1.21.5"):
             w(lf / f"build/mc{t}/mv/java/com/example/mod/client/SkyRenderer.java", "class SkyRenderer { void draw() {} }\n")
             w(lf / f"build/mc{t}/mv/java/com/example/mod/Util.java", "class Util { Object o = RenderType.cutout(); }\n")
+            w(lf / f"build/mc{t}/mv/cf-java/com/example/mod/cf/Extra.java", "class Extra {}\n")   # every set is prepared
         p3 = plan_fork(lf, cat)
         beh = [g for g in p3["layer"]["items"] if g["kind"] == "behaviour"]
         expect([(g["item"].rsplit(":", 1)[-1], g["status"], g["range"]) for g in beh] == [("RenderType.sky", "unaccounted", "1.21.3-1.21.5")],
