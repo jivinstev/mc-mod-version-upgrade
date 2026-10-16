@@ -138,7 +138,8 @@ def log_tails(paths, n=40, cap=12000):
 
 GATE_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md",   # what a gate run (and
                 "INVENTORY-CHECK.json",      # fork-port.py's done record, layer-inventory.py's account) writes into a target
-                "DEPS.md")                   # (and layer-deps.py resolve's table, rewritten by fork-port.py's every setup)
+                "DEPS.md",                   # (and layer-deps.py resolve's table, rewritten by fork-port.py's every setup)
+                "DRIFT.md")                  # (and the --accept-upstream-drift line fork-port.py appends before the gates)
 
 
 def tested_tree(repo, mc):
@@ -203,12 +204,14 @@ def self_check():
         (t / "A.java").write_text("a", encoding="utf-8"); (t / "GATES.md").write_text("g", encoding="utf-8")
         (t / "INVENTORY-CHECK.json").write_text("{}", encoding="utf-8")
         (t / "DEPS.md").write_text("# Dependencies\n", encoding="utf-8")
+        (t.parent.parent / "DRIFT.md").write_text("- accepted\n", encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "c")
         h = subprocess.run(["git", "-C", d, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                            encoding="utf-8").stdout.strip()
         (t / "GATES.md").write_text("g2", encoding="utf-8")
         (t / "INVENTORY-CHECK.json").write_text("{\"x\": 1}", encoding="utf-8")   # layer-inventory.py's account: an output
         (t / "DEPS.md").write_text("# Dependencies\n\nresolved here\n", encoding="utf-8")   # setup's layer-deps resolve
+        (t.parent.parent / "DRIFT.md").write_text("- accepted\n- accepted again\n", encoding="utf-8")   # this run's drift line
         ok &= tested_tree(d, "1.21.4") == h                      # the run's own output is not an edit
         (t / "A.java").write_text("b", encoding="utf-8")
         ok &= tested_tree(d, "1.21.4") == f"{h} + uncommitted: .multiversion/targets/1.21.4/A.java"
