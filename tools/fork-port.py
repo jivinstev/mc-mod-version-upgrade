@@ -5,7 +5,7 @@
     python3 tools/fork-port.py --repo DIR --target 1.21.5 [--budget 15] [--gates auto|none|ab|full]
                                [--json out.json] [--from-stage <name>] [--base REF] [--modid ID] [--direct]
                                [--port-checkout owner/repo=DIR] [--port-release owner/repo@TAG]
-                               [--max-errors N] [--confirm-spend] [--allow-undone-parent]
+                               [--max-errors N] [--confirm-spend] [--allow-undone-parent] [--allow-undone-library]
                                [--upstream REMOTE/BRANCH] [--accept-upstream-drift] [--self-check]
     python3 tools/fork-port.py --repo DIR --target <t> --check-done
     python3 tools/fork-port.py --repo DIR --chain FROM..TO [--from-stage gates] [--gates auto|ab|full]
@@ -15,8 +15,12 @@ The orchestrating session starts this and then reads ONE summary (the last lines
 .multiversion/targets/<t>/RESIDUE.md when it stopped) -- never the workers' transcripts or the build logs.
 
 Stages, each logged as one line and skipped with a reason when it does not apply:
-  setup    layer-deps.py resolve --dry-run first, when the authors' build pins dependencies (a required one with no
-           build for the target stops here, exit 15, before anything is written; --port-checkout passes a sibling
+  setup    layer-inventory.py build first when .multiversion/INVENTORY.json is missing (once per layer: the base build's
+           behaviour inventory the done list accounts for), then
+           layer-deps.py resolve --dry-run, when the authors' build pins dependencies (a required one with no
+           build for the target stops here, exit 15, before anything is written; a sibling library whose target is not
+           done stops it with exit 18 and layer-deps' reason -- --allow-undone-library, development only, is passed
+           through, recorded in DEPS.md and the summary, and kept in the resume command; --port-checkout passes a sibling
            layer fork's checkout for its per-target jar, --port-release its release, pinned for CI), then
            make-fork-layer.py add-target (when the target dir is missing; --direct passes `add-target --direct`: a jump
            that inherits nothing but still takes the shared library of every targeted version in between, see the
@@ -64,8 +68,10 @@ every gate and reported the target done).
 DONE IS ONE FIXED LIST (target_done(), the fork-versions skill's "Done"): a green Gate C in GATES.md, no unreviewed
 STUBS.json entry, REVIEW.md complete for the commit it names (an independent fresh-context reviewer's verdict + note on
 every STUBS.json entry and every whole-file overlay, with reviewer, date and commit; nothing in the target's directory
-changed since), and TEST-ITEMS.md (the target's manual-test items, from tools/layer-test-plan.py, written by a run to the
-end). A run whose gates are green but that lacks the rest exits 18 and adds a `?` row to REVIEW.md for every item without
+changed since), TEST-ITEMS.md (the target's manual-test items, from tools/layer-test-plan.py, written by a run to the
+end), every item of .multiversion/INVENTORY.json accounted for on the target (tools/layer-inventory.py, its account in
+the target's INVENTORY-CHECK.json -- a run output like GATES.md, never "changed since the review"), and no dependency
+resolved against an undone library target (--allow-undone-library in DEPS.md). A run whose gates are green but that lacks the rest exits 18 and adds a `?` row to REVIEW.md for every item without
 one; `--check-done` only asks. A NEW target is refused (exit 18, before anything is written; make-fork-layer.py
 add-target refuses it too) while the target it stands on is not done; `--allow-undone-parent` is the development escape,
 recorded as allowed_undone_parent= in the new target's target.properties, and that target is not done until its parent is.
@@ -89,7 +95,8 @@ the target (DEPS.md / the STOPPED block name it); 17 every stage passed but the 
 (GATES.md), or the gates were not run (--gates none): A/B green is not done -- a version is done only after its
 real-client run. A full gate run that is not green removes GATES.md. Every run to the end (from any --from-stage)
 stops with exit 10 while STUBS.json holds an unreviewed stub signal; 18 Gate C green but not done (REVIEW.md /
-TEST-ITEMS.md / an undone parent, listed), or a new target over an undone parent; 19 the authors' branch or a recorded
+TEST-ITEMS.md / the behaviour inventory / an undone parent or library, listed), a new target over an undone parent, or
+a sibling library's target that is not done (layer-deps.py resolve's exit 18); 19 the authors' branch or a recorded
 library release moved since the buildout's freeze; 2 bad input.
 Standard library only.
 """
@@ -348,20 +355,12 @@ def layer_client_items(repo, tdir, target):
 def whole_file_overlays(repo, tdir):
     """The target's own Java overlays that replace a whole authors' file: targets/<t>/java/<path> for
     src/main/java/<path>, targets/<t>/<set>/java/<path> for src/<set>/java/<path>. An overlay-only file (a helper the
-    authors do not have) is not one. -> [(overlay, authors' file)] as paths."""
-    out = []
-    for ov in sorted(tdir.rglob("*.java")) if tdir.is_dir() else []:
-        rel = ov.relative_to(tdir).as_posix()
-        if rel.startswith("java/"):
-            src = repo / "src/main/java" / rel[5:]
-        elif "/java/" in rel:
-            sset, tail = rel.split("/java/", 1)
-            src = repo / "src" / sset / "java" / tail
-        else:
-            continue
-        if src.is_file():
-            out.append((ov, src))
-    return out
+    authors do not have) is not one. One definition, tools/layer-sync.py whole_file_overlays(): the files its overlay
+    report counts against the budget are the files REVIEW.md needs a row for. -> [(overlay, authors' file)] as paths."""
+    if not tdir.is_dir():
+        return []
+    ls = load("layer_sync", "layer-sync.py")
+    return [(ov, src) for _s, _rel, ov, src in ls.whole_file_overlays(pathlib.Path(repo), tdir.name)]
 
 
 def overlay_stubs(repo, tdir):
@@ -737,12 +736,15 @@ def unreviewed_stubs(tdir):
 # (2) no unreviewed STUBS.json entry, (3) REVIEW.md complete for the reviewed commit: an independent fresh-context
 # reviewer's verdict on every STUBS.json entry and every whole-file overlay (against the authors' file), with the
 # reviewer, the date and the commit reviewed, nothing in the target's directory changed since that commit, (4) the
-# target's manual-test items generated (TEST-ITEMS.md, from tools/layer-test-plan.py), and (5) a parent that was skipped
-# with --allow-undone-parent done by now. Compile and the audits are implied: the gates stage runs only at 0 errors and
+# target's manual-test items generated (TEST-ITEMS.md, from tools/layer-test-plan.py), (5) a parent that was skipped
+# with --allow-undone-parent done by now, (6) every item of the base build's behaviour inventory accounted for
+# (tools/layer-inventory.py inventory_unaccounted(), its account in INVENTORY-CHECK.json), and (7) no dependency
+# resolved against a library target that is not done (--allow-undone-library, DEPS.md). Compile and the audits are implied: the gates stage runs only at 0 errors and
 # after the audit. Every file here is Markdown: written after the gates, it must not make port-publish.py read the
 # target's GATES.md as stale (a *.md is not in a player's jar).
 
-REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md")   # not what a review judged
+REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md",   # not what a review judged
+                  "INVENTORY-CHECK.json")      # layer-inventory.py's account, rewritten by every done check
 VERDICTS = ("ok", "not-ok")
 REVIEW_FIELDS = ("reviewer", "date", "commit")
 REVIEW_HEAD = ("# Review: Minecraft {t}\n\n"
@@ -902,6 +904,14 @@ def target_done(repo, t, _seen=None):
     out += review_problems(repo, tdir)
     if not (tdir / "TEST-ITEMS.md").is_file():
         out.append("manual-test items not generated (TEST-ITEMS.md: a run of fork-port.py to the end writes it)")
+    # (6) every base behaviour item accounted for (tools/layer-inventory.py; [] on a single-version fork). It writes
+    # the target's INVENTORY-CHECK.json, a run output like GATES.md (REVIEW_OUTPUTS)
+    out += load("layer_inventory", "layer-inventory.py").inventory_unaccounted(repo, t)
+    # (7) R3: a target resolved against a library target that was not done (--allow-undone-library) is development only
+    deps_md = tdir / "DEPS.md"
+    if deps_md.is_file() and UNDONE_LIBRARY_MARK in deps_md.read_text(encoding="utf-8", errors="replace"):
+        out.append("built against a library target that is not done (--allow-undone-library, DEPS.md \"Development only\"): "
+                   "re-resolve with --port-release once the library's target is done")
     allowed = read_props(tdir / "target.properties").get("allowed_undone_parent", "")
     if allowed:
         p = allowed.split()[0]
@@ -909,6 +919,9 @@ def target_done(repo, t, _seen=None):
         if p not in seen and (mv / "targets" / p).is_dir() and target_done(repo, p, seen):
             out.append(f"its parent {p} is still not done (added with --allow-undone-parent: {allowed})")
     return out
+
+
+UNDONE_LIBRARY_MARK = "**Development only (`--allow-undone-library`):**"     # tools/layer-deps.py render_md()
 
 
 def undone_parent_stop(repo, t, allow=False):
@@ -1542,7 +1555,8 @@ class Run:
         a = self.a
         return (f"python3 tools/fork-port.py --repo {a.repo} --target {self.t} --from-stage {stage} "
                 f"--budget {a.budget} --gates {a.gates}" + "".join(f" --port-checkout {c}" for c in getattr(a, "port_checkout", []))
-                + "".join(f" --port-release {c}" for c in getattr(a, "port_release", [])))
+                + "".join(f" --port-release {c}" for c in getattr(a, "port_release", []))
+                + (" --allow-undone-library" if getattr(a, "allow_undone_library", False) else ""))
 
     def save(self):
         self.jpath.parent.mkdir(parents=True, exist_ok=True)
@@ -1555,6 +1569,15 @@ class Run:
             return {"stop": "no .multiversion/ in the fork", "code": 2,
                     "choices": [f"python3 tools/make-fork-layer.py init --repo {self.repo}"]}
         did = []
+        if not (self.mv / "INVENTORY.json").is_file():
+            # R2: the base build's behaviour inventory, once per layer (a layer made before it existed gets one here);
+            # done (target_done) needs every item accounted for, so it is built before the parent's done check
+            r = self.sh([self.py, str(ROOT / "tools/layer-inventory.py"), "build", "--repo", str(self.repo)])
+            if r.returncode != 0:
+                return {"stop": "layer-inventory.py build failed: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:300],
+                        "code": 2, "choices": [f"python3 tools/layer-inventory.py build --repo {self.repo}"]}
+            did.append("behaviour inventory: " + ((r.stdout or "").strip().splitlines() or ["built"])[-1]
+                       .replace("layer-inventory: ", "").split(" -> ")[0] + " (commit .multiversion/INVENTORY.json)")
         if not self.tdir.is_dir():          # R1: never start target N+1 before N is done
             und = undone_parent_stop(self.repo, self.t)
             if und and not getattr(self.a, "allow_undone_parent", False):
@@ -1567,11 +1590,17 @@ class Run:
                                     f"target.properties; {self.t} is then not done until {p} is)"]}
             if und:
                 did.append(f"WARNING parent {und[0]} not done, allowed (--allow-undone-parent, recorded)")
+        allow_lib = getattr(self.a, "allow_undone_library", False)
         deps = [self.py, str(ROOT / "tools/layer-deps.py"), "resolve", "--repo", str(self.repo), "--target", self.t,
                 *[x for c in getattr(self.a, "port_checkout", []) for x in ("--port-checkout", c)],
-                *[x for c in getattr(self.a, "port_release", []) for x in ("--port-release", c)]]
+                *[x for c in getattr(self.a, "port_release", []) for x in ("--port-release", c)],
+                *(["--allow-undone-library"] if allow_lib else [])]
+        if allow_lib:     # R3's development escape: recorded in the summary here, in DEPS.md by layer-deps.py
+            self.summary["allow_undone_library"] = True
         if pins_dependencies(self.repo):
             r = self.sh([*deps, "--dry-run"])
+            if r.returncode == UNDONE_EXIT:
+                return self.library_stop(r)
             if r.returncode == 15:
                 stop = next((ln for ln in (r.stdout or "").splitlines() if "STOP" in ln), "a required dependency has no build")
                 return {"stop": stop.replace("layer-deps: STOP ", "")[:600], "code": 15,
@@ -1617,10 +1646,15 @@ class Run:
             did.append(f"{n_items} client item definition(s)")
         if pins_dependencies(self.repo):
             r = self.sh(deps)
+            if r.returncode == UNDONE_EXIT:
+                return self.library_stop(r)
             if r.returncode != 0:
                 return {"stop": "layer-deps.py resolve: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:600],
                         "code": 15 if r.returncode == 15 else 2}
             did.append("layer-deps: " + ((r.stdout or "").strip().splitlines() or [""])[-1].split(": ", 2)[-1])
+            if allow_lib and "LIBRARY NOT DONE" in (r.stdout or ""):
+                did.append("WARNING built against a library target that is not done (--allow-undone-library, recorded "
+                           "in DEPS.md; this target is not done until it is re-resolved with --port-release)")
         n_geo = layer_geckolib_assets(self.repo, self.tdir, self.t)
         if n_geo:
             did.append(f"{n_geo} GeckoLib model/animation file(s) at the 5.x paths")
@@ -1643,6 +1677,15 @@ class Run:
             return {"stop": f"{self.t}'s chain uses mixin_add_only/mixin_remove_only and {', '.join(stale)} does not read them",
                     "code": 2, "choices": ["merge templates/fork-layer's layer.gradle / tools/layer.py (mixin_add_only) into the fork's copy"]}
         return {"done": ", ".join(did)}
+
+    def library_stop(self, r):
+        """layer-deps.py exit 18: a sibling library's target is not done (R3, library first). -> the stop, code 18."""
+        stop = next((ln for ln in (r.stdout or "").splitlines() if "STOP" in ln), "a sibling library's target is not done")
+        return {"stop": stop.replace("layer-deps: STOP ", "")[:600], "code": UNDONE_EXIT,
+                "choices": ["finish and release the library's target first (its fork-port.py run to done, then its "
+                            "layer-release), then resume with --port-release owner/repo@TAG",
+                            "development only, against a --port-checkout: the same command with --allow-undone-library "
+                            f"(recorded in DEPS.md; {self.t} is then not done until it is re-resolved with --port-release)"]}
 
     def s_stage(self):
         ch = chain(self.mv, self.t)
@@ -2157,7 +2200,8 @@ def sweep(a, runner=None, out=print):
                    "--from-stage", stage, "--gates", a.gates, "--budget", "0", "--max-errors", "0", "--base", a.base,
                    *(["--to-stage", a.to_stage] if a.to_stage else []), *(["--modid", a.modid] if a.modid else []),
                    *[x for c in a.port_checkout for x in ("--port-checkout", c)],
-                   *[x for c in a.port_release for x in ("--port-release", c)]]
+                   *[x for c in a.port_release for x in ("--port-release", c)],
+                   *(["--allow-undone-library"] if getattr(a, "allow_undone_library", False) else [])]
             out(f"fork-port: chain: {t} ...")
             rc = runner(cmd, env)
             try:
@@ -2215,6 +2259,10 @@ def main():
     ap.add_argument("--allow-undone-parent", action="store_true",
                     help="development only: add a NEW target although the target it stands on is not done (recorded in its "
                          "target.properties as allowed_undone_parent; the new target is then not done until its parent is)")
+    ap.add_argument("--allow-undone-library", action="store_true",
+                    help="development only: resolve against a sibling library's --port-checkout whose target is not done "
+                         "(passed to layer-deps.py resolve, recorded in DEPS.md and the summary; the target is then not done "
+                         "until it is re-resolved with --port-release)")
     ap.add_argument("--upstream", help="<remote>/<branch>: the authors' branch, recorded with the commit the buildout starts "
                                        "from in .multiversion/base.properties (default: the recorded one, else the clone's "
                                        "`upstream` remote HEAD)")
@@ -2225,7 +2273,8 @@ def main():
                     help="sweep: re-run --from-stage (default gates) onward for every target from FROM up TO's inherits chain, "
                          "oldest first, no model; stops at the first red target with its RESIDUE.md and prints the table")
     ap.add_argument("--check-done", action="store_true",
-                    help="only say whether --target is done (Gate C, stubs, REVIEW.md, TEST-ITEMS.md): exit 0, or 18 with the reasons")
+                    help="only say whether --target is done (Gate C, stubs, REVIEW.md, TEST-ITEMS.md, the behaviour inventory): "
+                         "exit 0, or 18 with the reasons")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -3118,6 +3167,7 @@ def self_check():
         repo = pathlib.Path(d); (repo / ".multiversion/tools").mkdir(parents=True)
         (repo / ".multiversion/base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
         (repo / "build.gradle").write_text('dependencies {\n    implementation "curse.maven:somelib-1:2"\n}\n', encoding="utf-8")
+        (repo / ".multiversion/INVENTORY.json").write_text('{"items": []}\n', encoding="utf-8")   # built: no build call
         a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
                                 direct=False, from_stage=None, max_errors=None, confirm_spend=False,
                                 port_checkout=["owner/lib=/x/lib"], port_release=["owner/rel@v1"])
@@ -3269,6 +3319,10 @@ def self_check_done_freeze_sweep():
         w(td / "STUBS.json", json.dumps([{"file": ".multiversion/targets/1.21.4/java/com/example/mod/A.java",
                                           "why": "removes 1 call(s)", "reviewed": "same effect"}]))
         w(td / "target.properties", "x=1\n"); w(td / "GATES.md", green_c.format(t="1.21.4"))
+        li = load("layer_inventory", "layer-inventory.py")       # R2: the base inventory (nothing hooked here) and a
+        with contextlib.redirect_stdout(io.StringIO()):         # prepared tree, so the done list's item (6) holds
+            li.cmd_build(argparse.Namespace(repo=str(repo), dry_run=False, out=None))
+        (repo / "build/mc1.21.4/mv/java").mkdir(parents=True)
         items = review_items(repo, td)
         expect(items == [("overlay", ".multiversion/targets/1.21.4/java/com/example/mod/A.java"),
                          ("stub", ".multiversion/targets/1.21.4/java/com/example/mod/A.java")],
@@ -3418,6 +3472,121 @@ def self_check_done_freeze_sweep():
         sa.chain = "1.21.9..1.21.8"
         expect(sweep(sa, runner, out=lines.append) == 2, "FROM outside TO's chain: bad input")
         expect(not (repo / "build/.fork-port.lock").exists(), "the sweep releases its checkout lock")
+    # ---- wiring (1): done includes the base behaviour inventory (layer-inventory.py) -- a layer fixture and a
+    # single-version one
+    mixin_src = ("package com.example.mod.mixin;\n@Mixin(Foo.class)\npublic class FooMixin {\n"
+                 "    @Inject(method = \"tick\", at = @At(\"HEAD\"))\n    private void onTick(CallbackInfo ci) {}\n}\n")
+    for layer in (True, False):
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"
+            w(repo / "src/main/java/com/example/mod/mixin/FooMixin.java", mixin_src)
+            w(td / "target.properties", "x=1\n"); w(td / "GATES.md", green_c.format(t="1.21.4"))
+            w(repo / "build/mc1.21.4/mv/java/com/example/mod/mixin/FooMixin.java", "package com.example.mod.mixin;\npublic class FooMixin {}\n")
+            if layer:
+                w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
+                inv_why = [x for x in target_done(repo, "1.21.4") if x.startswith("behaviour inventory")]
+                expect(len(inv_why) == 1 and "layer-inventory.py build" in inv_why[0],
+                       f"layer: no INVENTORY.json is not done, naming the build: {inv_why}")
+                li = load("layer_inventory", "layer-inventory.py")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    li.cmd_build(argparse.Namespace(repo=str(repo), dry_run=False, out=None))
+            why = target_done(repo, "1.21.4")
+            inv_why = [x for x in why if x.startswith("behaviour inventory")]
+            if layer:
+                expect(len(inv_why) == 2 and all("unaccounted" in x and "FooMixin" in x for x in inv_why)
+                       and (td / "INVENTORY-CHECK.json").is_file(),
+                       f"layer: a mixin and an injection the prepared tree lost are unaccounted: not done: {inv_why}")
+                w(td / "BEHAVIOUR.json", json.dumps([{"item": "main:com/example/mod/mixin/FooMixin.java#*",
+                                                      "status": "dropped", "reason": "the hook is gone on 1.21.4"}]))
+                expect(not [x for x in target_done(repo, "1.21.4") if x.startswith("behaviour inventory")],
+                       "layer: each item recorded in BEHAVIOUR.json: the inventory is accounted for")
+                expect("INVENTORY-CHECK.json" in REVIEW_OUTPUTS, "INVENTORY-CHECK.json is a run output, not a reviewed file")
+            else:
+                expect(not inv_why and not (td / "INVENTORY-CHECK.json").exists(),
+                       f"single-version: no inventory requirement, nothing written: {why}")
+    # ---- wiring (2): setup builds .multiversion/INVENTORY.json once when it is missing (layer fork only)
+    for layer in (True, False):
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d); (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+            if layer:
+                w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
+            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
+                                    direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
+                                    port_checkout=[], port_release=[], allow_undone_parent=False, allow_undone_library=False)
+            run = Run(a_); ran = []
+            def ish(cmd, log=None, cwd=None, code=0):
+                ran.append(" ".join(map(str, cmd)))
+                return CompletedProcess(cmd, code, "layer-inventory: 3 item(s) from the base (mixin 1) -> x\n", "")
+            run.sh = ish
+            for _ in range(2):
+                try:
+                    res = run.s_setup()   # past sync-shared the fixture has no layer machinery: only the calls matter
+                except OSError:
+                    res = {}
+                if layer:
+                    (repo / ".multiversion/INVENTORY.json").write_text("{}\n", encoding="utf-8")   # what the build wrote
+            builds = [c for c in ran if "layer-inventory.py build" in c]
+            if layer:
+                expect(len(builds) == 1 and ran[0] == builds[0], f"layer: the inventory is built once, first: {ran}")
+                (repo / ".multiversion/INVENTORY.json").unlink(); ran.clear()
+                run.sh = lambda cmd, log=None, cwd=None: ish(cmd, log, cwd, code=2)
+                try:
+                    res = run.s_setup()
+                except OSError as e:     # went on past it: not stopped
+                    res = {"went_on": str(e)}
+                expect(res.get("code") == 2 and "layer-inventory.py build failed" in res["stop"] and len(ran) == 1,
+                       f"layer: a failed inventory build stops setup: {res}")
+            else:
+                expect(not ran and res.get("code") == 2 and "no .multiversion" in res["stop"],
+                       f"single-version: setup stops as before, no inventory build: {res} {ran}")
+    # ---- wiring (3): layer-deps exit 18 (a library target not done) stops setup with 18 and its message;
+    # --allow-undone-library is passed through, recorded, kept in the resume command, and keeps the target not done
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
+        w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
+        w(repo / ".multiversion/INVENTORY.json", '{"items": []}\n')
+        w(repo / "build.gradle", 'dependencies {\n    implementation "curse.maven:somelib-1:2"\n}\n')
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
+                                direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
+                                port_checkout=["owner/lib=/x/lib"], port_release=[], allow_undone_parent=False,
+                                allow_undone_library=False)
+        run = Run(a_); ran = []
+        msg18 = "layer-deps: STOP library first: sibling library targets not done: owner/lib 1.21.4 (A/B only)\n"
+        def sh18(cmd, log=None, cwd=None, on_dry=True):
+            ran.append(" ".join(map(str, cmd)))
+            hit = "layer-deps.py" in ran[-1] and (("--dry-run" in ran[-1]) == on_dry)
+            return CompletedProcess(cmd, 18 if hit else 0, msg18 if hit else "", "")
+        run.sh = sh18
+        def setup_or_crash():
+            try:
+                return run.s_setup()
+            except OSError as e:      # went on past the resolve into the (absent) layer machinery: not stopped
+                return {"went_on": str(e)}
+        res = setup_or_crash()
+        expect(res.get("code") == UNDONE_EXIT and res["stop"].startswith("library first") and "owner/lib" in res["stop"]
+               and any("--allow-undone-library" in c for c in res["choices"]) and len(ran) == 1,
+               f"the dry run's exit 18 stops setup with 18 and layer-deps' reason: {res} {ran}")
+        ran.clear(); run.sh = lambda cmd, log=None, cwd=None: sh18(cmd, log, cwd, on_dry=False)
+        res = setup_or_crash()
+        expect(res.get("code") == UNDONE_EXIT and "library first" in res["stop"],
+               f"the resolve's own exit 18 stops setup with 18 too (was 2): {res}")
+        a_.allow_undone_library = True; ran.clear()
+        run.sh = lambda cmd, log=None, cwd=None: (ran.append(" ".join(map(str, cmd))), CompletedProcess(cmd, 0, "", ""))[1]
+        try:
+            run.s_setup()
+        except OSError:
+            pass
+        deps_calls = [c for c in ran if "layer-deps.py resolve" in c]
+        expect(len(deps_calls) == 2 and all("--allow-undone-library" in c for c in deps_calls)
+               and run.summary.get("allow_undone_library") is True and "--allow-undone-library" in run.resume_cmd("setup"),
+               f"--allow-undone-library: passed to layer-deps, recorded, in the resume command: {deps_calls} {run.resume_cmd('setup')}")
+        a_.allow_undone_library = False
+        expect("--allow-undone-library" not in run.resume_cmd("setup"), "control: no flag, not in the resume command")
+        w(td / "DEPS.md", "# Dependencies\n\n" + UNDONE_LIBRARY_MARK + " `com.example:lib` was built from a checkout\n")
+        expect(any("--allow-undone-library" in x for x in target_done(repo, "1.21.4")),
+               "a target resolved against an undone library is not done")
+        w(td / "DEPS.md", "# Dependencies\n")
+        expect(not any("--allow-undone-library" in x for x in target_done(repo, "1.21.4")), "control: a released library")
     # ---- single-version fork: no .multiversion/ -- no freeze, no review, no sweep; fork-port stops at setup as before
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); git_repo(repo)

@@ -477,6 +477,17 @@ out="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --from-stage cost
 out="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --from-stage cost --gates none --accept-upstream-drift 2>&1)"; code=$?
 [ $code = 17 ] && grep -q 'accepted' "$RF/.multiversion/DRIFT.md" \
   && ok "fork-port --accept-upstream-drift continues (here to exit 17) and records the drift in DRIFT.md" || bad "--accept-upstream-drift: exit $code: $out"
+# done includes the base behaviour inventory (layer-inventory.py): a layer without INVENTORY.json, then one whose target
+# has no prepared tree yet, is not done -- each named in --check-done's reasons
+out="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --check-done 2>&1)"; code=$?
+echo x=1 > "$RF/.multiversion/targets/1.21.3/target.properties"
+mkdir -p "$RF/src/main/java/com/example/mod"; echo 'class A {}' > "$RF/src/main/java/com/example/mod/A.java"
+python3 tools/layer-inventory.py build --repo "$RF" >/dev/null 2>&1
+out2="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --check-done 2>&1)"; code2=$?
+[ $code = 18 ] && grep -q 'behaviour inventory: no .multiversion/INVENTORY.json: run tools/layer-inventory.py build' <<<"$out" \
+  && [ $code2 = 18 ] && grep -q 'behaviour inventory: no prepared tree build/mc1.21.3/mv/java' <<<"$out2" \
+  && ok "fork-port --check-done on a layer: the behaviour inventory is on the done list (no INVENTORY.json, then no prepared tree: exit 18, named)" \
+  || bad "inventory in --check-done: $code: $out / $code2: $out2"
 # single-version: no .multiversion/ -- fork-port stops at setup exactly as before; --chain and --check-done are bad input
 SV="$T/r145-single"; mkdir -p "$SV"; cp "$RL/gradle.properties" "$RL/build.gradle" "$SV/"
 out="$(python3 tools/fork-port.py --repo "$SV" --target 1.21.4 2>&1)"; code=$?
@@ -486,7 +497,7 @@ python3 tools/fork-port.py --repo "$SV" --chain 1.21.3..1.21.4 >/dev/null 2>&1; 
 python3 tools/fork-port.py --repo "$SV" --target 1.21.4 --check-done >/dev/null 2>&1; c2=$?
 [ $c1 = 2 ] && [ $c2 = 2 ] && [ ! -e "$SV/.multiversion" ] && ok "single-version: --chain and --check-done are bad input (exit 2), nothing written" || bad "single-version --chain $c1 / --check-done $c2"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command, done needs REVIEW.md (for the commit reviewed) and TEST-ITEMS.md, a new target over an undone parent is refused, the upstream freeze stops a run when the authors moved, --chain sweeps up and stops at the first red -- each also on a single-version fixture" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command, done needs REVIEW.md (for the commit reviewed), TEST-ITEMS.md and every base behaviour inventory item accounted for (layer-inventory.py; none on single-version), setup builds INVENTORY.json once when missing (layer only), a library target not done stops setup with exit 18 and --allow-undone-library is passed through, recorded and resumed, a new target over an undone parent is refused, the upstream freeze stops a run when the authors moved, --chain sweeps up and stops at the first red -- each also on a single-version fixture" \
   || bad "fork-port self-check: $out"
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \

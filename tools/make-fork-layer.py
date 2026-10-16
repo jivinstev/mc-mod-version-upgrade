@@ -529,6 +529,9 @@ def self_check_done_parent():
         (t3 / "GATES.md").write_text("# Gates for Minecraft 1.21.3 at `x`\n\n| Gate C -- real client, `launch` | PASS | ok |\n",
                                      encoding="utf-8")
         (t3 / "TEST-ITEMS.md").write_text("# Manual-test items: Minecraft 1.21.3\n\n- none\n", encoding="utf-8")
+        r = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve().parent / "layer-inventory.py"), "build",
+                            "--repo", str(repo)], capture_output=True, text=True, encoding="utf-8")   # done item (6)
+        expect(r.returncode == 0, f"the base behaviour inventory is built: {r.stdout}")
         g(repo, "add", "-A"); g(repo, "commit", "-qm", "1.21.3")
         (t3 / "REVIEW.md").write_text(f"- reviewer: fresh agent\n- date: 2026-10-16\n- commit: {g(repo, 'rev-parse', 'HEAD')}\n",
                                       encoding="utf-8")

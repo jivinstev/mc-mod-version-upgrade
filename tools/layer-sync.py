@@ -305,6 +305,17 @@ def src_path(s, rel):
     return f"src/{s}/java/{rel}"
 
 
+def whole_file_overlays(repo, t):
+    """THE definition of a whole-file overlay, one for every tool: a .java file target t itself carries in
+    targets/<t>/java (main) or targets/<t>/<set>/java that replaces the authors' src/<set>/java/<same path>. An own
+    overlay whose authors' file does not exist replaces nothing (overlay-only: a compat class), inherited or not.
+    overlay_report() counts these against the budget; tools/fork-port.py gives each one a REVIEW.md row and audits it
+    for stub signals. -> [(set, rel, overlay path, authors' path)], sorted."""
+    repo = pathlib.Path(repo)
+    return [(s, rel, f, repo / src_path(s, rel)) for (s, rel), f in sorted(own_overlays(repo / ".multiversion", t).items())
+            if (repo / src_path(s, rel)).is_file()]
+
+
 def overlay_path(t, s, rel):
     return f".multiversion/targets/{t}/{'java' if s == 'main' else s + '/java'}/{rel}"
 
@@ -342,12 +353,14 @@ def overlay_report(repo, t, prep=None):
       renamed-copy  differs from the overlay it inherits only by names: a copy kept because overlays are not run
                   through the table (rows cannot reach it)
       redundant   identical to it: delete the overlay
-      overlay-only  replaces nothing (a compat class): listed, not counted against the budget
+      overlay-only  replaces no authors' file (a compat class; whole_file_overlays() is the one definition):
+                  listed, not counted against the budget, and not a REVIEW.md row
     plus lines, and which are mixins / client code. `overlays` (counted against the budget) excludes overlay-only."""
     repo = pathlib.Path(repo); mv = repo / ".multiversion"
     prep = prep or Preparer(repo)
     chain = prep.chain(t)[1:]
     own = own_overlays(mv, t)
+    whole = {(s, rel) for s, rel, _f, _src in whole_file_overlays(repo, t)}
     inherited = {}
     for k in own:
         anc = next((a for a in chain if (mv.parent / overlay_path(a, *k)).is_file()), None)
@@ -359,7 +372,9 @@ def overlay_report(repo, t, prep=None):
     files = []
     for (s, rel), f in sorted(own.items()):
         ours = _read(f)
-        if (s, rel) in inherited:
+        if (s, rel) not in whole:
+            ref, against = None, ""                       # replaces no authors' file: overlay-only, as fork-port.py reads it
+        elif (s, rel) in inherited:
             ref, against = _read(mv.parent / overlay_path(inherited[(s, rel)], s, rel)), f"overlay of {inherited[(s, rel)]}"
         else:
             ref, against = prepared.get(f"{s}/{rel}"), "authors' file"

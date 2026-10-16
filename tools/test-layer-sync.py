@@ -126,6 +126,8 @@ def remerge_checks():
         (ov4 / "E.java").write_text(prepared["E"].replace("Thing", "Other"), encoding="utf-8")  # names only: should be rows
         (ov5 / "B.java").write_text(prepared["B"].replace("2", "3"), encoding="utf-8")    # redundant: what it inherits
         (ov4 / "Compat.java").write_text("// OVERLAY-ONLY: x\nclass Compat {}\n", encoding="utf-8")
+        # 1.21.5's own copy of the inherited compat class: still replaces no authors' file, so overlay-only too
+        (ov5 / "Compat.java").write_text("// OVERLAY-ONLY: x\nclass Compat { int v; }\n", encoding="utf-8")
         git(f, "add", "-A"); git(f, "commit", "-qm", "layer")
         # the overlay budget, before anything moves
         r = sh(sys.executable, str(LS), "overlays", "--repo", str(f), "--json", str(tmp / "ov.json"))
@@ -136,6 +138,15 @@ def remerge_checks():
         expect((o["1.21.5"]["overlays"], o["1.21.5"]["redundant"], o["1.21.5"]["real"]) == (2, 1, 1)
                and "E.java" in r.stdout and "rename rows" in r.stdout and "OVER" not in r.stdout,
                f"budget: an overlay identical to the one it inherits is redundant; the mechanical one is named: {r.stdout}")
+        expect(o["1.21.5"]["overlay_only"] == 1, f"an inherited compat class replaces nothing: overlay-only: {o['1.21.5']}")
+        # one definition of a whole-file overlay: the budget's counted files are exactly fork-port.py's REVIEW.md rows
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fork_port_t", HERE / "fork-port.py")
+        fp = importlib.util.module_from_spec(spec); spec.loader.exec_module(fp)
+        for tg in ("1.21.4", "1.21.5"):
+            counted = sorted(x["file"] for x in o[tg]["files"] if x["kind"] != "overlay-only")
+            rows = sorted(x for k, x in fp.review_items(f, mv / "targets" / tg) if k == "overlay")
+            expect(counted == rows, f"{tg}: overlay report and REVIEW.md rows agree: {counted} vs {rows}")
         (mv / "ci.properties").write_text("overlay_budget=4\n", encoding="utf-8")
         git(f, "add", "-A"); git(f, "commit", "-qm", "budget")
         r = sh(sys.executable, str(LS), "overlays", "--repo", str(f), "--target", "1.21.4")

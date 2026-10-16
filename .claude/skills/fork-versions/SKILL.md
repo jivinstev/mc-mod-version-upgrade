@@ -40,14 +40,32 @@ A target is **done** when, and only when, all of these hold (`tools/fork-port.py
 4. `.multiversion/targets/<t>/REVIEW.md` is complete for the commit it names: an **independent fresh-context review**
    with one verdict (`ok` / `not-ok`) and a note per `STUBS.json` entry and per whole-file overlay (read against the
    authors' file it replaces), plus `reviewer`, `date` and `commit`; nothing in the target's directory has changed
-   since that commit (the run's own `GATES.md`/`COST.md`/`RESIDUE.md`/`REVIEW.md`/`TEST-ITEMS.md` aside);
+   since that commit (the run's own `GATES.md`/`COST.md`/`RESIDUE.md`/`REVIEW.md`/`TEST-ITEMS.md`/`INVENTORY-CHECK.json`
+   aside). A whole-file overlay is one definition, `tools/layer-sync.py` `whole_file_overlays()`: a `.java` file of the
+   target's own `java/` (or `<set>/java/`) that replaces an authors' file -- exactly the files `layer-sync.py overlays`
+   counts against the budget; an overlay-only helper is neither;
 5. the target's manual-test items are generated (`TEST-ITEMS.md`, from `tools/layer-test-plan.py`; a run of
-   `fork-port.py` to the end writes it).
+   `fork-port.py` to the end writes it);
+6. every item of the base build's behaviour inventory (`.multiversion/INVENTORY.json`) is accounted for on the
+   target -- `tools/layer-inventory.py`'s check, run by `target_done()` itself and written to the target's
+   `INVENTORY-CHECK.json` (see "A version accounts for the base's behaviour"); a layer with no `INVENTORY.json`, or a
+   target with no prepared tree yet, is not done;
+7. no dependency of the target was resolved against a library target that is not done (`--allow-undone-library`,
+   recorded under "Development only" in its `DEPS.md`): re-resolve with `--port-release` once the library's is.
 
-A run whose gates are green but that misses 4 or 5 exits **18** ("Gate C green, NOT done") and adds a `?` row to
+A run whose gates are green but that misses 4-7 exits **18** ("Gate C green, NOT done") and adds a `?` row to
 `REVIEW.md` for every item without a verdict; it never writes a verdict. **The list does not grow during a buildout**:
 each bar added after targets were done swept every finished target again (measured: 3-7 reopenings per target). A new
 requirement is a change to `target_done()` and to this section, made between buildouts.
+
+Four rules around the list keep a done target done: **library first** (a dependent's target resolves only against a
+library target that is done and released: `layer-deps.py resolve` exit 18, which `fork-port.py` stops on with 18; see
+"Library first"); **upstream frozen** (the buildout records the authors' commit and each library release it started
+from, and a run to the end stops with exit 19 when either moved: Procedure step 0); **fix lowest, then sweep** (a late
+bug class is fixed at the lowest target and re-gated upward with `fork-port.py --chain`, one fixer only where it goes
+red: "A bug class found late"); **few, self-updating overlays** (`layer-sync.py overlays` reports each target's
+overlays against `overlay_budget`, and `layer-sync.py run` re-merges each whole-file overlay three ways when the
+authors' code moves: Procedure step 4).
 
 **Never start target N+1 before N is done.** `make-fork-layer.py add-target` and `fork-port.py --target <new>` refuse a
 new target (exit 18, nothing written) while the target it stands on (its `inherits`, or for `--direct` the nearest
@@ -167,7 +185,9 @@ edited tree, a file that can change the jar changed since the gated commit, an u
 `--port-release owner/repo@TAG`) asks the same question alone (exit 0 done, 18 not). Developing the two together on
 purpose is `--allow-undone-library`, for a `--port-checkout` only: the resolve goes ahead and `DEPS.md` records the
 override ("Development only"); never release a target resolved that way -- re-resolve with `--port-release` once the
-library's target is done.
+library's target is done. `fork-port.py`'s setup stage stops with the same exit 18 and layer-deps' reason, takes
+`--allow-undone-library` and passes it through (recorded in its summary and kept in its resume command), and such a
+target is not done ("Done", item 7).
 
 **Writing `.multiversion/shipped-expect*.txt`:** each `FILE:REGEX` line proves a subsystem ran in the jar a player
 installs, so match the effect, not the exact wording: the class it acted on and what it did, accepting the forms a
@@ -211,7 +231,8 @@ in minutes); a full run of every target's gates is `fork-port.py --gates full`, 
 `python3 tools/fork-port.py --repo DIR --target <t> [--budget 15] [--gates auto|none|ab|full]` runs steps 2-7 below
 as stages (setup, stage, moves, measure, loop, audit, gates, cost) and prints one line per stage. It stops
 only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11 (Gate A/B), 12 (Gate C), 13 (mixin
-audit), 18 (a new target over an undone parent) or 19 (the authors' branch moved since the freeze: step 0), and `.multiversion/targets/<t>/RESIDUE.md` -- the remaining errors by CATALOG entry, what the compile
+audit), 18 (a new target over an undone parent, or a library target it resolves against is not done --
+`--allow-undone-library` is the recorded development escape, passed to `layer-deps.py` and kept in the resume command) or 19 (the authors' branch moved since the freeze: step 0), and `.multiversion/targets/<t>/RESIDUE.md` -- the remaining errors by CATALOG entry, what the compile
 loop tried (files still failing at the top model tier, rows it reverted), the audit mismatches or failing gates,
 and the `--from-stage` command that resumes. **You handle only what RESIDUE.md lists** -- do not read the build
 logs -- and **every fix you make goes into the shared library (`templates/fork-layer/shared/<t>`) or a converter,
@@ -252,7 +273,10 @@ in `.multiversion/targets/<t>/BEHAVIOUR.json` (`[{"item": "<id from the list>", 
 `"status": "moved", "where": "...", "review": "..."`; an `item` with `*` covers a group); a later target inherits its
 parents' entries. Up to 1.21.4 a core shader's json declares its uniforms and samplers; from 1.21.5 the json is no longer
 read, so each must be named by the target's Java (its `RenderPipeline`) unless vanilla supplies it -- the check that
-finds a missing sampler before a client does. `fork-port.py` does not run it yet: run it yourself at 0 errors.
+finds a missing sampler before a client does. `fork-port.py` runs both: its setup stage builds `INVENTORY.json` when the
+layer has none (an existing layer gets one on its next run; commit it), and its done check (`target_done()`: the end
+of every run, `--check-done`, and the parent check before a new target) runs the check and lists each unaccounted item
+as a not-done reason (exit 18). Running `check` yourself at 0 errors shows the same list sooner.
 
 **Why Gate C is on the list ("Done", item 2).** Gates A/B and the audits cannot see what only a client builds --
 models, render layers, shaders -- and every dependent-fork version so far that was green at A/B still failed in a real
