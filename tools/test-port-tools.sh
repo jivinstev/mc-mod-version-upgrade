@@ -598,6 +598,68 @@ GR
     && ok "layer.gradle: -Pmc=1.21.4 and -Pmc=26.2 run the client in their own build/mc<t>/run; without -Pmc the run directory is unchanged, and the gates' GameTest server keeps its own" \
     || bad "layer.gradle run dirs: base=[$r0] 1.21.4=[$r4] 26.2=[$r26]"
 fi
+# issue #119: per-target-only mixins on a layer fork. A three-target chain 1.21.3 < 1.21.4 < 1.21.5: 1.21.3 adds
+# PlainMixin (mixin_add, inherited by every later target); 1.21.4 adds OnlyMixin with mixin_add_only and takes the
+# authors' AuthorsMixin off with mixin_remove_only, both for 1.21.4 alone. layer.py (the prepared tree that compiles and
+# that the mixin audit reads: layer-ci.py and fork-port.py audit build/mc<t>/mv/java) and layer.gradle (the config at
+# processResources) must resolve the same set. A single-version fork has no .multiversion/ and never applies
+# layer.gradle; the base build (no -Pmc) below keeps the authors' config byte-for-byte.
+MXO="$T/mixin-only"; mkdir -p "$MXO/.multiversion/tools" "$MXO/src/main/java/com/example/mod/mixin" "$MXO/src/main/resources"
+cp templates/fork-layer/tools/layer.py templates/fork-layer/tools/prepare-sources.py "$MXO/.multiversion/tools/"
+for t in 1.21.3 1.21.4 1.21.5; do mkdir -p "$MXO/.multiversion/targets/$t"; done
+printf 'mixin_add.examplemod.mixins.json=mixins:PlainMixin\n' > "$MXO/.multiversion/targets/1.21.3/target.properties"
+printf 'inherits=1.21.3\nmixin_add_only.examplemod.mixins.json=client:OnlyMixin\nmixin_remove_only.examplemod.mixins.json=mixins:AuthorsMixin\n' \
+  > "$MXO/.multiversion/targets/1.21.4/target.properties"
+printf 'inherits=1.21.4\n' > "$MXO/.multiversion/targets/1.21.5/target.properties"
+for t in 1.21.3:PlainMixin 1.21.4:OnlyMixin; do
+  d="$MXO/.multiversion/targets/${t%%:*}/java/com/example/mod/mixin"; mkdir -p "$d"
+  printf 'package com.example.mod.mixin;\npublic class %s {}\n' "${t#*:}" > "$d/${t#*:}.java"
+done
+printf 'package com.example.mod.mixin;\npublic class AuthorsMixin {}\n' > "$MXO/src/main/java/com/example/mod/mixin/AuthorsMixin.java"
+printf 'package com.example.mod;\npublic class Mod {}\n' > "$MXO/src/main/java/com/example/mod/Mod.java"
+printf '{"package":"com.example.mod.mixin","mixins":["AuthorsMixin"]}' > "$MXO/src/main/resources/examplemod.mixins.json"
+trees=""
+for t in 1.21.3 1.21.4 1.21.5; do
+  (cd "$MXO" && python3 .multiversion/tools/layer.py prepare --target "$t" --src src/main/java --out "build/mc$t/mv/java" >/dev/null 2>&1)
+  trees="$trees$t=$(cd "$MXO/build/mc$t/mv/java/com/example/mod/mixin" 2>/dev/null && ls | tr '\n' ',') "
+done
+[ "$trees" = "1.21.3=AuthorsMixin.java,PlainMixin.java, 1.21.4=OnlyMixin.java,PlainMixin.java, 1.21.5=AuthorsMixin.java,PlainMixin.java, " ] \
+  && ok "layer.py: a mixin_add_only class is in its own target's prepared tree and not in the next one's (it inherits the overlay); a mixin_remove_only class is off its own target alone; a plain mixin_add still reaches every later target" \
+  || bad "layer.py per-target-only mixins, prepared trees: $trees"
+if command -v gradle >/dev/null 2>&1; then
+  printf "rootProject.name = 'scratch'\n" > "$MXO/settings.gradle"
+  { cat <<'GR'
+plugins { id 'java' }
+def mvTarget = project.findProperty('mc')?.toString()
+if (mvTarget == null) return
+def mvChain = []
+for (def t = mvTarget; t; ) {
+    mvChain.add(0, t)
+    def p = new Properties()
+    file(".multiversion/targets/${t}/target.properties").withInputStream { p.load(it) }
+    t = p.getProperty('inherits')
+}
+def mvRanges = [:]
+layout.buildDirectory = file("build/mc${mvTarget}")
+GR
+    sed -n '/BEGIN-MIXINS/,/END-MIXINS/p' templates/fork-layer/layer.gradle; } > "$MXO/build.gradle"
+  cfg() { local f="$1"; shift; (cd "$MXO" && gradle -q --offline processResources "$@" >/dev/null 2>&1) || { echo "BUILD-FAILED"; return; }
+          python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print(";".join(k + ":" + ",".join(sorted(v)) for k, v in sorted(j.items()) if isinstance(v, list)))' "$f"; }
+  c0="$(cfg "$MXO/build/resources/main/examplemod.mixins.json")"
+  base_same=no; cmp -s "$MXO/build/resources/main/examplemod.mixins.json" "$MXO/src/main/resources/examplemod.mixins.json" && base_same=yes
+  c3="$(cfg "$MXO/build/mc1.21.3/resources/main/examplemod.mixins.json" -Pmc=1.21.3)"
+  c4="$(cfg "$MXO/build/mc1.21.4/resources/main/examplemod.mixins.json" -Pmc=1.21.4)"
+  c5="$(cfg "$MXO/build/mc1.21.5/resources/main/examplemod.mixins.json" -Pmc=1.21.5)"
+  agree="$(cd "$MXO" && for t in 1.21.3 1.21.4 1.21.5; do python3 .multiversion/tools/layer.py mixins --target "$t" --config src/main/resources/examplemod.mixins.json 2>&1; done | tr '\n' ' ')"
+  # a mixin_remove_only naming a class the config does not list (a typo) stops the build, never silently removes nothing
+  sed -i 's/mixins:AuthorsMixin/mixins:AuthorMixin/' "$MXO/.multiversion/targets/1.21.4/target.properties"
+  typo="$(cd "$MXO" && gradle -q --offline processResources -Pmc=1.21.4 2>&1)"; typo_rc=$?
+  [ "$base_same" = yes ] && [ "$c0" = "mixins:AuthorsMixin" ] && [ "$c3" = "mixins:AuthorsMixin,PlainMixin" ] \
+    && [ "$c4" = "client:OnlyMixin;mixins:PlainMixin" ] && [ "$c5" = "mixins:AuthorsMixin,PlainMixin" ] \
+    && [ "$agree" = "$c3 $c4 $c5 " ] && [ $typo_rc != 0 ] && grep -q 'does not list' <<<"$typo" \
+    && ok "layer.gradle: mixin_add_only/mixin_remove_only change their own target's mixin config alone (1.21.4 has OnlyMixin, not AuthorsMixin; 1.21.5 has neither change), plain mixin_add inherits, the set equals layer.py mixins, a remove naming nothing stops the build; without -Pmc the authors' config is byte-for-byte unchanged" \
+    || bad "layer.gradle per-target-only mixins: base=[$c0 same=$base_same] 1.21.3=[$c3] 1.21.4=[$c4] 1.21.5=[$c5] layer.py=[$agree] typo rc=$typo_rc"
+fi
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script; without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (single-version and layer fork); --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back; promote refreshes the install manifest on the port branch only (its script run on a fake fork, single-version and layer: pushed on top of the tag, retried when the branch moved, nothing pushed when unchanged, a bad tag refused)" || bad "port-ci self-check: $out"
 python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"

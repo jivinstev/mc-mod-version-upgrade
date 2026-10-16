@@ -120,34 +120,64 @@ if (mvProps.getProperty('nfrt_version')) {
 }
 
 def mvRanges = mvProps.stringPropertyNames().findAll { it.startsWith('toml.') }.collectEntries { [(it.substring(5)): mvProps.getProperty(it)] }
+// BEGIN-MIXINS (tools/test-port-tools.sh runs this block; `.multiversion/tools/layer.py mixins` resolves the same set)
 // mixin_add.<config file>=<array>:<Class>,<Class>;<array>:<Class> -- mixins that exist only on this target (and
 // those it inherits), added to the authors' config at processResources so the config itself is never copied.
+// mixin_add_only.<config file>=... and mixin_remove_only.<config file>=... (same form) apply to THIS target alone,
+// after the inherited mixin_add chain: a target that inherits this one gets neither. For a hook that only this
+// version's method shape takes. layer.py leaves such a class out of every other target's prepared tree (the one that
+// compiles and that the mixin audit reads), and a mixin_remove_only class out of this target's. A mixin_remove_only
+// naming a class the config does not list stops the build: a typo must not leave the mixin on in silence.
 def mvMixinAdds = [:]
+def mvMixinRemoves = [:]
+def mvMixinPut = { Map into, String cfg, String value ->
+    value.split(';').each { spec ->
+        def (array, classes) = spec.split(':', 2) as List
+        classes.split(',').each { c -> ((into[cfg] ?: (into[cfg] = [:]))[array.trim()] ?: (into[cfg][array.trim()] = [])).add(c.trim()) }
+    }
+}
 mvChain.each { t ->
     def p = new Properties()
     file(".multiversion/targets/${t}/target.properties").withInputStream { p.load(it) }
     p.stringPropertyNames().findAll { it.startsWith('mixin_add.') }.each { k ->
-        def cfg = k.substring('mixin_add.'.length())
-        p.getProperty(k).split(';').each { spec ->
-            def (array, classes) = spec.split(':', 2) as List
-            classes.split(',').each { c -> ((mvMixinAdds[cfg] ?: (mvMixinAdds[cfg] = [:]))[array.trim()] ?: (mvMixinAdds[cfg][array.trim()] = [])).add(c.trim()) }
+        mvMixinPut(mvMixinAdds, k.substring('mixin_add.'.length()), p.getProperty(k))
+    }
+    if (t == mvTarget) {           // the chain is farthest first, so these come after every inherited mixin_add
+        p.stringPropertyNames().findAll { it.startsWith('mixin_add_only.') }.each { k ->
+            mvMixinPut(mvMixinAdds, k.substring('mixin_add_only.'.length()), p.getProperty(k))
+        }
+        p.stringPropertyNames().findAll { it.startsWith('mixin_remove_only.') }.each { k ->
+            mvMixinPut(mvMixinRemoves, k.substring('mixin_remove_only.'.length()), p.getProperty(k))
         }
     }
 }
 tasks.withType(ProcessResources).configureEach {
     inputs.property('mvRanges', mvRanges.toString())
     inputs.property('mvMixinAdds', mvMixinAdds.toString())
+    if (mvMixinRemoves) {
+        inputs.property('mvMixinRemoves', mvMixinRemoves.toString())
+    }
     doLast {
         destinationDir.eachFileRecurse { f ->
             if (f.name == 'neoforge.mods.toml') {
                 f.text = mvRewriteToml(f.text, mvRanges)
             }
             def adds = mvMixinAdds[f.name]
-            if (adds) {
+            def removes = mvMixinRemoves[f.name]
+            if (adds || removes) {
                 def json = new groovy.json.JsonSlurper().parseText(f.getText('UTF-8'))
-                adds.each { array, classes ->
+                adds?.each { array, classes ->
                     def list = (json[array] ?: []) as List
                     classes.each { c -> if (!list.contains(c)) list.add(c) }
+                    json[array] = list
+                }
+                removes?.each { array, classes ->
+                    def list = (json[array] ?: []) as List
+                    classes.each { c ->
+                        if (!list.removeAll([c])) {
+                            throw new GradleException("target.properties of ${mvTarget}: mixin_remove_only.${f.name} names ${array}:${c}, which ${f.name} does not list")
+                        }
+                    }
                     json[array] = list
                 }
                 f.setText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(json)), 'UTF-8')
@@ -155,6 +185,7 @@ tasks.withType(ProcessResources).configureEach {
         }
     }
 }
+// END-MIXINS
 
 // ---- toolchain and dependencies ----------------------------------------------------------------
 if (mvProps.getProperty('java_version')) {
