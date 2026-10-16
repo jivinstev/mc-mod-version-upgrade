@@ -591,9 +591,9 @@ out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
 [ $code = 10 ] || [ $code = 2 ] && [ ! -e "$T/lk/build/.fork-port.lock" ] && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
 
 out="$(python3 tools/layer-sync.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "layer-sync: classification (untouched / touch-up / rework), overlay shadowing, table, stop block" || bad "layer-sync self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "layer-sync: classification (untouched / touch-up / rework), overlay shadowing, table, stop block, overlay helpers (names-only, three-way merge, duplicate member, RESIDUE section)" || bad "layer-sync self-check: $out"
 out="$(python3 tools/test-layer-sync.py 2>&1)"
-grep -q 'test-layer-sync: OK' <<<"$out" && ok "keep-current on a layer fork: merge commit (no force), per-target class + table, rework stops with RESIDUE (exit 10), single-version fork untouched" || bad "test-layer-sync: $out"
+grep -q 'test-layer-sync: OK' <<<"$out" && ok "keep-current on a layer fork: merge commit (no force), overlays re-merged three ways (clean rewrite, inherited, retired, conflict + duplicate member left with hunks in RESIDUE, hand resolution kept), overlay budget, per-target class + table, rework stops with RESIDUE (exit 10), single-version fork untouched" || bad "test-layer-sync: $out"
 out="$(python3 tools/test-port-publish.py 2>&1)"
 grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; layer forks publish one file per green target, refuse non-green / stale / unpublished-dependency targets" || bad "test-port-publish: $out"
 out="$(python3 tools/fix-ledger.py --self-check 2>&1)"

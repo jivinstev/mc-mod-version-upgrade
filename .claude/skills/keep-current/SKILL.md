@@ -162,6 +162,16 @@ version; the layer branch must carry it to every target, and nothing fixes a mid
    **untouched** (0 errors, clean audits right after the merge), **touch-up** (the loop cleared it) or **rework**
    (residue left: `.multiversion/targets/<t>/RESIDUE.md`). It also lists the upstream-changed files each target
    OVERLAYS: an overlay replaces the whole file, so read it against upstream's new version even when it compiles.
+   **Before measuring, `run` re-merges those overlays** when HEAD is the merge (or `--changed-from` is given): per
+   overlay, a three-way `git merge-file` with base = the authors' file before the merge, ours = the overlay,
+   theirs = the authors' file now, both PREPARED for that target (its rename chain, no overlay); an overlay of a
+   path an older target also overlays follows that target's re-merged copy. A clean merge rewrites the overlay (the
+   target is at least a touch-up), one that merges into exactly what it replaces is deleted, and a conflict -- or
+   a clean merge that declares a member twice -- leaves the overlay as it was (no conflict marker reaches the tree),
+   writes its hunks to the target's RESIDUE.md and makes the target rework. `layer-sync.py remerge --repo DIR --old
+   REF [--new REF] [--targets T] --dry-run` shows the same without writing; after you merge an overlay by hand,
+   `remerge` leaves it alone and drops it from RESIDUE.md. The table's notes also give each target's overlay
+   budget (see `layer-sync.py overlays` in fork-versions).
 3. **A rework target stops the run (exit 10) for a person.** It is never skipped, never released as is, and never
    reported as done; fix what its RESIDUE.md lists in the shared library, then `layer-sync.py run --targets <t>`.
 4. Put `t.md` (target | errors before | errors after | class | residue) in the layer PR body and link it from the port

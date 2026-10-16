@@ -331,7 +331,14 @@ review again ("Done", item 4).
      `TeleportTransition`); identifiers can contain `$` (`[\w$]+`, mixin handler names).
    - a **helper** class when a removed method can be stood in for (`net.<mod>.mv`, overlay-only).
    - an **overlay** (whole file, `targets/<t>/java/...`) only for a real semantic change. Derive it from the
-     PREPARED file (`build/mc<t>/mv/java`, already renamed): overlays are not run through the table.
+     PREPARED file (`build/mc<t>/mv/java`, already renamed): overlays are not run through the table. Every overlay
+     is a copy of the authors' file that their next release must be merged into, so keep few:
+     `python3 tools/layer-sync.py overlays --repo DIR [--target <t>]` counts each target's whole-file overlays and
+     lines, classes each against what it replaces (the authors' file through the rename table alone, or the overlay
+     it inherits) as **real**, **mechanical** (differs only in names: make it rename rows and delete it) or
+     **redundant** (identical: delete it), says how many are mixins / client code, and warns above the budget
+     (default 30 per target; `overlay_budget=N` in `.multiversion/ci.properties`). When the authors' code moves,
+     `layer-sync.py run` re-merges each overlay of a changed file three ways (keep-current, "A fork with the layer").
    - a mixin new to the target: add it with `mixin_add.<config>=client:Name` in target.properties.
      `mixin_add` reaches every target that inherits this one too. A hook that only THIS version's method shape takes
      (the next target changes the method) uses `mixin_add_only.<config>=client:Name` instead, and an authors' mixin
