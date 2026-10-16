@@ -934,10 +934,13 @@ def remerge_open(root, t, files):
     except (ValueError, AttributeError, AssertionError):
         return [f"{rel} is not readable: cannot tell which files the authors' change did not merge into"]
     out = []
+    dropped = dropped_deps(read_file(rec_dir(root, t) / "DEPS.md"))
     for c in conflicts:
         path = str((c or {}).get("overlay", ""))
         if not path or path not in files:
             continue          # the file is gone: removed by a person, nothing left to merge into
+        if c.get("deferred") and c["deferred"] in dropped:
+            continue          # kept while the integration is dropped here: not against done; re-opens when it returns
         if hashlib.sha256(files[path]).hexdigest() == str(c.get("digest", "")).lower():
             out.append(f"the authors' change did not merge into {path} ({c.get('reason') or 'conflict'}, "
                        f"{c.get('since') or '?'}; {rel}): apply it by hand through this version's rows (the diff is in "
@@ -1772,6 +1775,25 @@ def diff_size(diff):
     return sum(1 for ln in diff.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---")))
 
 
+def dropped_deps(deps_text):
+    """{group:module} of the dependencies a version's DEPS.md records as dropped (no build for that version)."""
+    return {m.group(1) for m in re.finditer(r"(?m)^\|\s*`([^`]+:[^`]+)`\s*\|[^\n]*\|\s*dropped:", deps_text or "")}
+
+
+def integration_dep(f, text, deps_text):
+    """The dropped dependency (group:module) a file is the integration of: it names the mod -- its module as a word
+    (an isLoaded("<id>") check, a class or package of that name) or its group as a package -- and DEPS.md records that
+    dependency dropped. None when the file names no dropped dependency (an unrelated dropped row never counts)."""
+    for dep in sorted(dropped_deps(deps_text)):
+        group, _sep, module = dep.partition(":")
+        mod = re.sub(r"[-_.]?(neoforge|forge|fabric|common|mod|api)$", "", module, flags=re.I) or module
+        hay = f + "\n" + text
+        if re.search(rf"(?i)(?<![A-Za-z0-9]){re.escape(mod)}(?![A-Za-z0-9])", hay) or (
+                "." in group and re.search(rf"\b{re.escape(group)}\.", hay)):
+            return dep
+    return None
+
+
 def classify(f, t, t_pre, diff, read, budget):
     """The decision class of an authors' change version t could not take mechanically (the policy fork-versions states):
     -> (class, escalated, default text, recommended choice, reasoning). Mechanical rules only: no model."""
@@ -1779,17 +1801,18 @@ def classify(f, t, t_pre, diff, read, budget):
     deps = read(f"{REC}/{t}/DEPS.md")
     ours = (t_pre or b"").decode("utf-8", "replace")
     integ = "/compat/" in f or "/integration/" in f or "isLoaded(" in ours
-    absent = integ and re.search(r"\|\s*dropped:", deps)
+    absent = integ and integration_dep(f, ours + "\n" + diff, deps)
     added = [ln[1:] for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++")]
     gone = sorted({pathlib.PurePosixPath(x).stem for x in drops_of(read, chain_read(read, t))}
                   - {pathlib.PurePosixPath(f).stem})
     uses = [n for n in gone if any(re.search(rf"\b{re.escape(n)}\b", ln) for ln in added)]
     size = diff_size(diff)
     if absent:
-        return ("optional-integration", False, "keep ours: the integration is absent at this version (DEPS.md: dropped), "
-                "its calls stubbed so it works once it is available", "keep",
-                f"{t} has no build of the integrated mod; our file already runs without it, and the authors' change "
-                "reaches it again when the integration returns")
+        return ("optional-integration", False, f"keep ours while {absent} is dropped at this version (DEPS.md), its "
+                "calls stubbed so it just works when the integration returns; the authors' change is held as a deferred "
+                "REMERGE.json entry", "keep",
+                f"{t} has no build of {absent}; our file runs without it. The authors' change stays recorded (a deferred "
+                f"entry, not counted against done) and becomes an open entry once {absent} is no longer dropped at {t}")
     if uses:
         return ("escalate", True, "", "keep",
                 f"the authors' change uses {', '.join(uses)}, which {t} drops (drops.txt): their intent cannot be kept here as is")
@@ -2038,14 +2061,26 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             item = {"id": did, "file": f, "version": t, "class": klass, "escalate": esc, "default": default,
                     "choice": choice, "reasoning": why, "diff": diff, "source": source, "from": frm, "to": port_new,
                     "ours": (t_pre or b"").decode("utf-8", "replace")[:6000]}
-            if klass == "optional-integration" and choice == "keep":
-                item["executed"] = True             # a default the tool carries out itself: logged, no open entry
-                decided.append({"id": did, "file": f, "version": t, "choice": "keep", "by": "cascade default",
+            dep = integration_dep(f, (t_pre or b"").decode("utf-8", "replace") + "\n" + diff,
+                                  read_t(f"{REC}/{t}/DEPS.md")) if klass == "optional-integration" and choice == "keep" else None
+            if dep:
+                # a default the tool carries out itself: ours kept while the dependency is dropped here, logged, and the
+                # authors' change held as a DEFERRED entry -- not counted against done until the dependency returns
+                item["executed"] = True
+                item["deferred"] = dep
+                decided.append({"id": did, "file": f, "version": t, "choice": "keep (deferred)", "by": "cascade default",
                                 "reasoning": why})
+                new_entries.append(entry(f, frm, diff, {"id": did, "class": klass, "escalate": False, "default": default,
+                                                         "choice": "take", "reasoning": why, "source": source,
+                                                         "deferred": dep,
+                                                         "reason": f"deferred: {dep} is dropped at {t} (DEPS.md); ours "
+                                                                   "kept, the authors' change waits for it"}))
             else:
                 new_entries.append(entry(f, frm, diff, {"id": did, "class": klass, "escalate": esc,
                                                          "default": default, "choice": choice, "reasoning": why,
-                                                         "source": source}))
+                                                         "source": source, **({} if carried else {
+                                                             "reason": f"a conflict with {t}'s own change: kept as {t} "
+                                                                       f"had it, a {'decision for the owner' if esc else 'default decision'}"})}))
             items.append(item)
         if decided:
             append_decisions(work, decided)
@@ -2274,7 +2309,9 @@ def plan_of(spec, rows, items, mech, elapsed, budget):
         if it["version"] not in g_["versions"]:
             g_["versions"].append(it["version"])
         g_["per_version"][it["version"]] = {k: it.get(k) for k in ("class", "default", "choice", "reasoning", "ours",
-                                                                     "inherited_from", "executed")}
+                                                                     "inherited_from", "executed", "deferred")}
+        if it.get("deferred"):
+            g_["deferred"] = it["deferred"]
         g_["executed"] = g_["executed"] and bool(it.get("executed"))
         if it["escalate"]:
             g_["escalate"] = True
@@ -2283,6 +2320,8 @@ def plan_of(spec, rows, items, mech, elapsed, budget):
     decisions = sorted(groups.values(), key=lambda x: (not x["escalate"], x["file"]))
     for d in decisions:
         d["status"] = ("escalated: the owner decides (ISSUE.md)" if d["escalate"] else
+                       (f"decided by the cascade: ours kept while {d['deferred']} is dropped, the authors' change a "
+                        "deferred REMERGE.json entry (logged in DECISIONS.md)") if d["executed"] and d.get("deferred") else
                        "decided by the cascade (logged in DECISIONS.md)" if d["executed"] else
                        "default: the fixer agent carries it out (cascade --apply-decisions) and logs it")
     return {"tool": "tools/fork-branches.py cascade", "range": spec, "elapsed_s": round(elapsed, 3), "budget_lines": budget,
@@ -3224,6 +3263,25 @@ def _check_port_taken(expect):
                f"{out[-400:]} {why}")
 
 
+def _check_deferred_integration(expect):
+    """Review finding t8: an unrelated dropped dependency does not make a file an absent integration -- the authors'
+    change to it is an open decision, never dropped silently."""
+    em = "src/main/java/com/example/mod/ExampleMod.java"
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w5, _w = worktree_for(r, "1.21.5")
+        _hand(w5, {".port/1.21.5/DEPS.md": "| dependency | role | base pin | for this target | from |\n|---|---|---|---|---|\n"
+                   "| `x:jeiish` | optional | `1` | dropped: no build for 1.21.5 | - |\n",
+                   em: ("Thing t;", "Thing t; boolean h5 = ModList.get().isLoaded(\"other\");")}, "1.21.5 hand change")
+        _authors(r, g, {em: ("Thing t;", "Thing t; int AUTHORS_FIX;")}, "authors fix")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply")
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        ents = [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == em]
+        expect(rc == 0 and len(ents) == 1 and not ents[0].get("deferred") and "AUTHORS_FIX" in ents[0].get("diff", "")
+               and any("did not merge into " + em in w for w in target_done(r, "1.21.5")),
+               f"t8: an unrelated dropped dependency: the authors' change is an open entry, 1.21.5 not done: {ents}")
+
+
 def _check_cascade_plan(expect):
     """cascade --plan / --apply / --apply-decisions on a 4-version fixture: one conflict at two versions grouped into one
     decision, a mechanical one resolved, an optional integration absent at a version decided by default (logged), an
@@ -3285,8 +3343,9 @@ def _check_cascade_plan(expect):
         expect(any(m["file"] == mf and m["version"] == "1.21.8" for m in plan.get("mechanical", [])) and mf not in by_file,
                f"a difference only 1.21.8's rows make (Foo->Bar) plus a hand edit elsewhere: merged mechanically: {plan.get('mechanical')}")
         o_ = by_file.get(oc, {})
-        expect(o_.get("class") == "optional-integration" and o_.get("executed") and o_.get("versions") == ["1.21.8"],
-               f"the integration absent at 1.21.8: decided by default (keep, stubbed), not open: {o_}")
+        expect(o_.get("class") == "optional-integration" and o_.get("executed") and o_.get("versions") == ["1.21.8"]
+               and o_.get("deferred") == "com.example:other",
+               f"the integration absent at 1.21.8: decided by default (keep, stubbed), deferred on its dependency: {o_}")
         b_ = by_file.get(bg, {})
         expect(b_.get("escalate") and set(b_.get("versions", [])) == {"1.21.5", "1.21.8"} and plan.get("escalated") == 1,
                f"an authors' change over the budget: escalated, at 1.21.5 and carried to 1.21.8: {b_.get('versions')}")
@@ -3313,6 +3372,19 @@ def _check_cascade_plan(expect):
                "only the versions with an open entry are held by it")
         expect(oc in f8.get(".port/DECISIONS.md", b"").decode() and "cascade default" in f8.get(".port/DECISIONS.md", b"").decode(),
                "the default decision is logged in .port/DECISIONS.md with its reasoning")
+        def8 = [c for c in remerge_entries(f8.get(".port/1.21.8/REMERGE.json", b"")) if c.get("overlay") == oc]
+        expect(len(def8) == 1 and def8[0].get("deferred") == "com.example:other" and "Other.more()" in def8[0].get("diff", "")
+               and not any(oc in w for w in target_done(r, "1.21.8")),
+               f"the authors' change to the integration is kept as a deferred entry, not counted against done: {def8}")
+        # the integration returns at 1.21.8 (DEPS.md no longer drops it): the deferred entry is an open one again
+        w8b, _w = worktree_for(r, "1.21.8")
+        dp = w8b / ".port/1.21.8/DEPS.md"
+        saved_deps = dp.read_text(encoding="utf-8")
+        dp.write_text(saved_deps.replace("dropped: no build for 1.21.8", "com.example:other:2.0"), encoding="utf-8")
+        git(w8b, "commit", "-qam", "1.21.8: the integration has a build again", check=True)
+        expect(any("did not merge into " + oc in w for w in target_done(r, "1.21.8")),
+               "once the dependency is no longer dropped at 1.21.8, the deferred entry counts as open")
+        git(w8b, "reset", "-q", "--hard", "HEAD~1")
         # the answers: the owner's (Big: our value kept, by content) and the fixer's default (AMixin: take)
         block = read_decisions(pdir / "ISSUE.md")
         for x in block["decisions"]:
@@ -3326,7 +3398,7 @@ def _check_cascade_plan(expect):
         files = {t: ref_files(r, resolve_branch(r, branch_name(t))) for t in ("1.21.3", "1.21.5", "1.21.8")}
         left_ = {t: remerge_entries(fl.get(f".port/{t}/REMERGE.json", b"")) for t, fl in files.items()}
         plan2 = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8"))
-        expect(rc == 0 and not any(left_.values()) and all(b"authors();" in fl[am] and b"three()" not in fl[am]
+        expect(rc == 0 and not any(c for v in left_.values() for c in v if not c.get("deferred")) and all(b"authors();" in fl[am] and b"three()" not in fl[am]
                                                            and b"five()" not in fl[am] for fl in files.values())
                and b"Bar.class" in files["1.21.8"][am] and b"ours kept" in files["1.21.8"][bg] and b"ours kept" in files["1.21.5"][bg]
                and plan2.get("open") == 0 and not (pdir / "ISSUE.md").exists(),
@@ -3715,6 +3787,7 @@ def self_check():
                f"a resource the parent dropped and 1.21.5 keeps: the authors' change reaches 1.21.5: {f5.get(rj)!r} {out[-400:]}")
     _check_port_taken(expect)
     _check_cascade_plan(expect)
+    _check_deferred_integration(expect)
     if not os.environ.get("FB_SELF_CHECK_CRLF"):
         # the same checks with core.autocrlf=true (a Windows checkout's default): a version branch checked out with CRLF
         # line endings must read as its blobs (root_files), and a layer's prepare must see the blobs' bytes (Layer)
