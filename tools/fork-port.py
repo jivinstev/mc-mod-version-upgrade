@@ -796,12 +796,13 @@ NOT_JAR_FILES = frozenset(REVIEW_OUTPUTS) | {"STUBS.json", "BEHAVIOUR.json", "IN
 COMMIT_ID = re.compile(r"^[0-9a-f]{7,40}$")
 VERDICTS = ("ok", "not-ok")
 # REVIEW.md row kinds: stub / overlay / resources / renames are what review_items() requires a verdict on (a version
-# branch's `changed` file stands for a layer's `overlay`: tools/fork-branches.py); `item` names one behaviour-inventory
+# branch's `changed` file stands for a layer's `overlay`, and `deleted` names a file it lacks that its parent has:
+# tools/fork-branches.py); `item` names one behaviour-inventory
 # item id (review_skeleton lists the unaccounted ones; layer-inventory.py reads it); a reviewer adds `missing` for a
 # file that should exist and does not (a repair tag, a model) and `shared` for a shared-library helper the target uses.
 # Any row a reviewer marks not-ok keeps the target not done, whatever its kind; a `missing` or `shared` row needs a
 # verdict once written.
-REVIEW_KINDS = ("stub", "overlay", "resources", "renames", "item", "changed", "missing", "shared")
+REVIEW_KINDS = ("stub", "overlay", "resources", "renames", "item", "changed", "deleted", "missing", "shared")
 REVIEWER_KINDS = ("missing", "shared")
 REVIEW_FIELDS = ("reviewer", "date", "commit")
 REVIEW_HEAD = ("# Review: Minecraft {t}\n\n"

@@ -669,8 +669,17 @@ def review_items(repo, root, t, ref, work, files=None, mechanical=None):
     authors = set(tree_entries(repo, pr, "src")) if pr else set()
     items = set()
     groups = {}
+    gone_ok = None
     for p in sorted(set(blobs) | set(base)):
-        if p not in blobs or p.startswith(REC + "/") or GATES_DOC.match(p):
+        if p.startswith(REC + "/") or GATES_DOC.match(p):
+            continue
+        if p not in blobs:
+            # a file the parent has and this version does not: a `deleted` row, unless drops.txt or the version's
+            # mixin_remove. key accounts for it (review finding M1: the layer never let a target lose a file silently)
+            if gone_ok is None:
+                gone_ok = accounted_deletions(root, t, files, props)
+            if p not in gone_ok:
+                items.add(("deleted", p))
             continue
         if p in base and base[p][1] == blobs[p]:
             continue
@@ -711,6 +720,29 @@ def review_items(repo, root, t, ref, work, files=None, mechanical=None):
     return sorted(items)
 
 
+def accounted_deletions(root, t, files, props):
+    """The paths version t may lack although its parent has them, each with its reason on record: the chain's
+    drops.txt (src/main/java/<rel>), and each class a `mixin_remove.<config>` key takes off (its package from the
+    config, any source set)."""
+    out = {f"src/main/java/{rel}" for rel in drops_of(reader_of_root(root), chain(root, t))}
+    for k, v in props.items():
+        if not k.startswith("mixin_remove."):
+            continue
+        cfg = k[len("mixin_remove."):]
+        pkgs = set()
+        for p, data in files.items():
+            if p.startswith("src/") and p.endswith("/" + cfg):
+                try:
+                    pkgs.add(json.loads(data.decode("utf-8-sig")).get("package") or "")
+                except (ValueError, AttributeError):
+                    pass
+        for _array, c in mixin_spec(v):
+            for pkg in pkgs - {""}:
+                rel = pkg.replace(".", "/") + "/" + c.replace(".", "/") + ".java"
+                out |= {f"src/{d.split('/')[1]}/java/{rel}" for d in files if d.startswith("src/") and d.count("/") > 1}
+    return out
+
+
 def port_ref_of(repo, root, t, ref):
     """The port branch commit this version branch carries (the merge-base of `ref` and the port branch)."""
     pb = info(root, t).get("port_branch") or branch_name(info(root, t).get("base_minecraft_version", "1.21.1"))
@@ -735,7 +767,8 @@ REVIEW_HEAD = ("# Review: Minecraft {t} (version branch {b})\n\n"
                "file, its STUBS.json and .port/{t}/renames.tsv. One row per STUBS.json entry, per `changed` file, per\n"
                "resource group (`resources`: a directory with the digest of its changed files -- an edit makes it a new\n"
                "row) and for renames.tsv (`renames`, with its digest); the files the rename rows alone made, the build\n"
-               "settings tools/fork-branches.py derives and added helper classes need no row. Verdict `ok` (the change keeps\n"
+               "settings tools/fork-branches.py derives and added helper classes need no row; a file deleted here is a `deleted`\n"
+               "row unless drops.txt or a mixin_remove key accounts for it. Verdict `ok` (the change keeps\n"
                "the behaviour, or the difference is right and the note says why) or `not-ok`. A hook item of the behaviour\n"
                "inventory is accounted for only by a row whose note names its id, or by an `item` row for the id; a\n"
                "reviewer may add `missing` (a file that should exist) and `shared` (a shared helper) rows. `reviewer` names\n"
@@ -2417,6 +2450,12 @@ def self_check():
         expect(any(w.startswith("GATES.md") and ("changed since" in w or "no longer equals" in w) for w in why)
                and "no verdict: changed src/main/java/com/example/mod/ExampleMod.java" in why,
                f"an edited file: Gate C stale, and the file (no longer the rows' alone) needs a review row: {why}")
+        # a file the parent has and this version deletes is a review row; one drops.txt or a mixin_remove key accounts
+        # for needs none (the migrated 1.21.4 lacks AMixin by its mixin_remove key and is done, above)
+        (r / "src/main/resources/data/examplemod/recipe/r.json").unlink()
+        why = target_done(r, "1.21.4")
+        expect("no verdict: deleted src/main/resources/data/examplemod/recipe/r.json" in why
+               and not any("AMixin" in w for w in why), f"a deleted recipe needs a review row; AMixin (mixin_remove) none: {why}")
         g("checkout", "-q", "--", "."); g("checkout", "-q", "neoforge-1.21.x")
         # cascade: the authors' change arrives on the port branch; each version's mechanical files are re-made from it
         # through that version's rows (a conflict git alone would have on the renamed line resolved), a new file too
