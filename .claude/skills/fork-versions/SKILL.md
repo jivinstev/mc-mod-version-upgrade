@@ -35,13 +35,18 @@ A target is **done** when, and only when, all of these hold (`tools/fork-port.py
 
 1. it compiles at 0 errors in every source set and the mixin and event-listener audits are clean (the gates stage runs
    only then);
-2. the full gates are green **including Gate C**, recorded in `.multiversion/targets/<t>/GATES.md`;
+2. the full gates are green **including Gate C**, recorded in `.multiversion/targets/<t>/GATES.md` at a commit (not
+   an edited tree) that HEAD carries, with nothing that can change the target's jar changed since -- the authors'
+   `src/`, its chain's `targets/` and `shared/` (documents and run outputs aside): the rule `layer-deps.py` applies to a
+   library's checkout;
 3. no `STUBS.json` entry is unreviewed;
 4. `.multiversion/targets/<t>/REVIEW.md` is complete for the commit it names: an **independent fresh-context review**
    with one verdict (`ok` / `not-ok`) and a note per `STUBS.json` entry and per whole-file overlay (read against the
-   authors' file it replaces), plus `reviewer`, `date` and `commit`; nothing in the target's directory has changed
-   since that commit (the run's own `GATES.md`/`COST.md`/`RESIDUE.md`/`REVIEW.md`/`TEST-ITEMS.md`/`INVENTORY-CHECK.json`
-   aside). A whole-file overlay is one definition, `tools/layer-sync.py` `whole_file_overlays()`: a `.java` file of the
+   authors' file it replaces), plus `reviewer`, `date` and `commit` (a commit id: `HEAD` or a branch name is
+   refused); nothing the target is built from has changed since that commit -- its directory, the authors' `src/`, its
+   chain's `targets/` and `shared/` (the run's own `GATES.md`/`COST.md`/`RESIDUE.md`/`REVIEW.md`/`TEST-ITEMS.md`/
+   `INVENTORY-CHECK.json`/`DEPS.md` aside); and no overlay `layer-sync.py` recorded in the target's `REMERGE.json` as not
+   taking the authors' change still has the bytes it had then. A whole-file overlay is one definition, `tools/layer-sync.py` `whole_file_overlays()`: a `.java` file of the
    target's own `java/` (or `<set>/java/`) that replaces an authors' file -- exactly the files `layer-sync.py overlays`
    counts against the budget; an overlay-only helper is neither;
 5. the target's manual-test items are generated (`TEST-ITEMS.md`, from `tools/layer-test-plan.py`; a run of
@@ -49,7 +54,9 @@ A target is **done** when, and only when, all of these hold (`tools/fork-port.py
 6. every item of the base build's behaviour inventory (`.multiversion/INVENTORY.json`) is accounted for on the
    target -- `tools/layer-inventory.py`'s check, run by `target_done()` itself and written to the target's
    `INVENTORY-CHECK.json` (see "A version accounts for the base's behaviour"); a layer with no `INVENTORY.json`, or a
-   target with no prepared tree yet, is not done;
+   target whose prepared tree (`build/mc<t>/mv/java`) is missing or older than what it is prepared from, is not done
+   -- a run of `fork-port.py` re-prepares it (no compile), `--check-done` names the `layer.py prepare` command and writes
+   nothing;
 7. no dependency of the target was resolved against a library target that is not done (`--allow-undone-library`,
    recorded under "Development only" in its `DEPS.md`): re-resolve with `--port-release` once the library's is.
 
@@ -306,7 +313,8 @@ exists (and in the shared library when it is generic), commit, then re-gate the 
 It runs `--from-stage gates` (any stage may be named) for each target from `<lowest>` up `<newest>`'s inherits chain,
 oldest first, with `--budget 0 --max-errors 0` (no worker can start), checks the upstream once, stops at the **first red**
 target naming its `RESIDUE.md` and the command that sweeps on from there, and prints a table (target | exit | result |
-residue). A green-but-not-done target (exit 17/18) does not stop it; the table says what it still needs. **Start one
+residue). A green-but-not-done target (exit 17/18) does not stop it; the table says what it still needs. An 18 that is a
+refusal before anything was built (a library target not done, an undone parent) does stop it. **Start one
 fixer only where the sweep went red** -- never one per target per wave. A target whose files the fix changed needs a fresh
 review again ("Done", item 4).
 
@@ -317,11 +325,13 @@ review again ("Done", item 4).
    bring in what it finds with the keep-current skill -- a ladder started on stale code carries the authors' later
    changes into every whole-file overlay by hand. Then record where the buildout starts:
    `python3 tools/make-fork-layer.py freeze --repo DIR --upstream <remote>/<branch> [--library owner/repo@TAG ...]`
-   (or `init --upstream`; `fork-port.py` writes it itself when it adds the layer's first target and the clone has an
-   `upstream` remote). `.multiversion/base.properties` then holds `upstream=`, `upstream_commit=` and one
+   (or `init --upstream`; `fork-port.py` writes it itself when it adds the layer's first target and exactly one branch
+   of the clone's `upstream` remote is carried by HEAD -- not the remote's default branch as such; `freeze` refuses a
+   branch HEAD lacks commits of). `.multiversion/base.properties` then holds `upstream=`, `upstream_commit=` and one
    `library.<owner>/<repo>=<tag>` per library release. Every `fork-port.py` run to the end fetches that branch and
-   **stops with exit 19** when it holds commits the checkout lacks (or a `--port-release` names another release of a
-   recorded library), naming the keep-current command; `--accept-upstream-drift` continues knowingly and appends the
+   **stops with exit 19** when it has commits after the recorded one that the checkout lacks (or, frozen upstream or
+   not, a `--port-release` names another release of a recorded library; a fetch that fails never prompts, it says so
+   and compares with the last fetch), naming the keep-current command; `--accept-upstream-drift` continues knowingly and appends the
    drift to `.multiversion/DRIFT.md`. After keep-current merged the new code, `freeze` again.
 0a. **Read first**: CATALOG §M and `references/minor-version-deltas.md` (the U and L sections). The first layer
    port re-derived five rows that were already there.

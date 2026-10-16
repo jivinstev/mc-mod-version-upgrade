@@ -49,8 +49,9 @@ complete REVIEW.md for the reviewed commit, TEST-ITEMS.md); `--allow-undone-pare
 `allowed_undone_parent=<parent> <date>: <first reason>` in its target.properties (development only).
 
 `freeze` (and `init --upstream`) records the buildout's starting point in base.properties: `upstream=<remote>/<branch>`,
-`upstream_commit=` (the merge-base of HEAD and that branch) and `library.<owner>/<repo>=<tag>` per --library; run it
-again after keep-current brought the authors' new code in. tools/fork-port.py stops (exit 19) when the branch moved.
+`upstream_commit=` (the merge-base of HEAD and that branch; refused while HEAD lacks commits of it) and
+`library.<owner>/<repo>=<tag>` per --library; run it again after keep-current brought the authors' new code in.
+tools/fork-port.py stops (exit 19) when the branch moved since the freeze.
 Standard library only.
 """
 import argparse, datetime, subprocess, json, pathlib, re, shutil, sys, tempfile, urllib.request
@@ -382,7 +383,7 @@ def add_target(repo, a):
     allowed = read_kv(t / "target.properties").get("allowed_undone_parent")
     if not t.is_dir():          # never start target N+1 before N is done (fork-versions skill, "Done")
         fp = fork_port()
-        und = fp.undone_parent_stop(repo, a.target)
+        und = fp.undone_parent_stop(repo, a.target, parent=a.inherits)   # the parent it WILL inherit (--inherits)
         if und:
             p, why = und
             if not getattr(a, "allow_undone_parent", False):
@@ -526,13 +527,13 @@ def self_check_done_parent():
         with contextlib.redirect_stdout(io.StringIO()):
             add_target(repo, argparse.Namespace(target="1.21.3", neo=None, inherits=None, java=None, prop=[], substitute=[]))
         t3 = repo / ".multiversion/targets/1.21.3"
-        (t3 / "GATES.md").write_text("# Gates for Minecraft 1.21.3 at `x`\n\n| Gate C -- real client, `launch` | PASS | ok |\n",
-                                     encoding="utf-8")
         (t3 / "TEST-ITEMS.md").write_text("# Manual-test items: Minecraft 1.21.3\n\n- none\n", encoding="utf-8")
         r = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve().parent / "layer-inventory.py"), "build",
                             "--repo", str(repo)], capture_output=True, text=True, encoding="utf-8")   # done item (6)
         expect(r.returncode == 0, f"the base behaviour inventory is built: {r.stdout}")
         g(repo, "add", "-A"); g(repo, "commit", "-qm", "1.21.3")
+        (t3 / "GATES.md").write_text(f"Gates for `examplemod` at `{g(repo, 'rev-parse', '--short', 'HEAD')}` for Minecraft 1.21.3 "
+                                     "(local environment):\n\n| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
         (t3 / "REVIEW.md").write_text(f"- reviewer: fresh agent\n- date: 2026-10-16\n- commit: {g(repo, 'rev-parse', 'HEAD')}\n",
                                       encoding="utf-8")
         buf = io.StringIO()
@@ -541,6 +542,31 @@ def self_check_done_parent():
         p4 = (repo / ".multiversion/targets/1.21.4/target.properties").read_text(encoding="utf-8")
         expect("inherits=1.21.3" in p4 and "allowed_undone_parent" not in p4 and "WARNING" not in buf.getvalue(),
                f"a done parent: the next target is added as before, nothing recorded: {p4}")
+        # --inherits names the parent the done check judges: 1.21.5 on the done 1.21.3 is let in although the nearest
+        # lower target (1.21.4, just added) is not done; 1.21.8 on the undone 1.21.4 is refused, and the escape
+        # records 1.21.4
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                add_target(repo, argparse.Namespace(target="1.21.5", neo=None, inherits="1.21.3", java=None, prop=[], substitute=[]))
+            p5 = (repo / ".multiversion/targets/1.21.5/target.properties").read_text(encoding="utf-8")
+        except SystemExit as e:
+            p5 = f"refused: exit {e.code}: {buf.getvalue()}"
+        expect("inherits=1.21.3" in p5 and "allowed_undone_parent" not in p5,
+               f"--inherits 1.21.3 (done) is judged, not the nearest lower 1.21.4: {p5}")
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                add_target(repo, argparse.Namespace(target="1.21.8", neo=None, inherits="1.21.4", java=None, prop=[], substitute=[]))
+            refused = None
+        except SystemExit as e:
+            refused = e.code
+        expect(refused == 18 and "1.21.4" in buf.getvalue(), f"--inherits 1.21.4 (not done) is refused: {refused} {buf.getvalue()}")
+        with contextlib.redirect_stdout(io.StringIO()):
+            add_target(repo, argparse.Namespace(target="1.21.8", neo=None, inherits="1.21.4", java=None, prop=[], substitute=[],
+                                                allow_undone_parent=True))
+        p8 = (repo / ".multiversion/targets/1.21.8/target.properties").read_text(encoding="utf-8")
+        expect("allowed_undone_parent=1.21.4 " in p8 and "inherits=1.21.4" in p8, f"the escape records the --inherits parent: {p8}")
     return ok
 
 
@@ -624,7 +650,7 @@ def main():
     p.add_argument("--allow-undone-parent", action="store_true",
                    help="development only: add a new target although the target it stands on is not done (recorded)")
     p = sub.add_parser("freeze"); p.add_argument("--repo", required=True)
-    p.add_argument("--upstream", help="<remote>/<branch> (default: the recorded one, else the `upstream` remote's HEAD)")
+    p.add_argument("--upstream", help="<remote>/<branch> (default: the recorded one, else the one `upstream` remote branch HEAD carries)")
     p.add_argument("--library", action="append", default=[], help="owner/repo@TAG: a sibling library's layer release")
     p = sub.add_parser("sync-shared"); p.add_argument("--repo", required=True); p.add_argument("--check", action="store_true")
     p = sub.add_parser("versions"); p.add_argument("--refresh", action="store_true")

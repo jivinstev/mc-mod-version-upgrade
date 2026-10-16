@@ -100,7 +100,7 @@ a sibling library's target that is not done (layer-deps.py resolve's exit 18); 1
 library release moved since the buildout's freeze; 2 bad input.
 Standard library only.
 """
-import argparse, datetime, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
+import argparse, datetime, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -732,10 +732,13 @@ def unreviewed_stubs(tdir):
 
 # ---------------------------------------------------------------- a target's done record (R1)
 #
-# DONE is one fixed list, the same for every target, checked by target_done(): (1) a green Gate C recorded in GATES.md,
-# (2) no unreviewed STUBS.json entry, (3) REVIEW.md complete for the reviewed commit: an independent fresh-context
-# reviewer's verdict on every STUBS.json entry and every whole-file overlay (against the authors' file), with the
-# reviewer, the date and the commit reviewed, nothing in the target's directory changed since that commit, (4) the
+# DONE is one fixed list, the same for every target, checked by target_done(): (1) a green Gate C recorded in GATES.md
+# at a commit HEAD carries, nothing that can change the jar changed since (gates_current: port-publish.py's
+# listed_green, the rule layer-deps.py applies to a library), (2) no unreviewed STUBS.json entry, (3) REVIEW.md
+# complete for the reviewed commit: an independent fresh-context reviewer's verdict on every STUBS.json entry and every
+# whole-file overlay (against the authors' file), with the reviewer, the date and the commit id reviewed, nothing the
+# target is built from (its directory, src/, its chain's targets/ and shared/) changed since that commit, and no
+# overlay layer-sync.py recorded in REMERGE.json as not taking the authors' change still unedited, (4) the
 # target's manual-test items generated (TEST-ITEMS.md, from tools/layer-test-plan.py), (5) a parent that was skipped
 # with --allow-undone-parent done by now, (6) every item of the base build's behaviour inventory accounted for
 # (tools/layer-inventory.py inventory_unaccounted(), its account in INVENTORY-CHECK.json), and (7) no dependency
@@ -744,7 +747,13 @@ def unreviewed_stubs(tdir):
 # target's GATES.md as stale (a *.md is not in a player's jar).
 
 REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md",   # not what a review judged
-                  "INVENTORY-CHECK.json")      # layer-inventory.py's account, rewritten by every done check
+                  "INVENTORY-CHECK.json",      # layer-inventory.py's account, rewritten by every done check
+                  "DEPS.md")                   # layer-deps.py resolve's table, rewritten by every setup (machine paths)
+# Files of a target's directory that are not in a player's jar: a change to them does not make GATES.md stale
+# (tools/layer-deps.py NOT_JAR, the same list). REMERGE.json is layer-sync's record of an overlay the authors' change
+# did not merge into: a reviewed input (it is not in REVIEW_OUTPUTS), but not jar content.
+NOT_JAR_FILES = frozenset(REVIEW_OUTPUTS) | {"STUBS.json", "BEHAVIOUR.json", "INVENTORY.json", "REMERGE.json"}
+COMMIT_ID = re.compile(r"^[0-9a-f]{7,40}$")
 VERDICTS = ("ok", "not-ok")
 REVIEW_FIELDS = ("reviewer", "date", "commit")
 REVIEW_HEAD = ("# Review: Minecraft {t}\n\n"
@@ -756,13 +765,170 @@ REVIEW_HEAD = ("# Review: Minecraft {t}\n\n"
                "- reviewer: ?\n- date: ?\n- commit: ?\n\n| kind | file | verdict | note |\n|---|---|---|---|\n")
 
 
-def _git(repo, *args):
+def _git(repo, *args, env=None, timeout=120):
     try:
         r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=120)
-        return r.returncode, r.stdout.strip()
+                           errors="replace", timeout=timeout, **({"env": env} if env is not None else {}))
+        return r.returncode, (r.stdout.strip() if r.returncode == 0 or r.stdout.strip() else (r.stderr or "").strip())
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
+
+
+def jar_chain(mv, t):
+    """t, its inherits chain, then every `shared_chain` version: the targets whose targets/<c>/ and shared/<c>/ can
+    change t's jar (tools/layer-deps.py _chain_of, the same rule)."""
+    out = chain(mv, t)
+    for x in list(out):
+        out += [s.strip() for s in read_props(mv / "targets" / x / "target.properties").get("shared_chain", "").split(",")
+                if s.strip() and s.strip() not in out]
+    return out
+
+
+def changed_since(repo, sha, paths=()):
+    """Files that differ between commit `sha` and the working tree (committed since, edited, or untracked under src/
+    or .multiversion/: an untracked overlay or source is built into the jar), limited to `paths` when given.
+    -> sorted list, or None when git cannot tell."""
+    rc, diff = _git(repo, "diff", "--name-only", sha, "--", *paths)
+    rc2, new = _git(repo, "ls-files", "--others", "--exclude-standard", "--", *(paths or ("src", ".multiversion")))
+    if rc or rc2:
+        return None
+    return sorted({x for x in (diff + "\n" + new).splitlines() if x})
+
+
+def gates_current(repo, t):
+    """(current, why) for targets/<t>/GATES.md against the checkout: it names the commit it tested (not an edited
+    tree), that commit is HEAD or an ancestor, and nothing that can change t's jar changed since -- port-publish.py's
+    listed_green() on the files changed since that commit, with this file list's documents and run outputs aside: the
+    rule tools/layer-deps.py applies to a sibling library's checkout, so a library and its dependents agree."""
+    repo = pathlib.Path(repo)
+    g = repo / ".multiversion/targets" / t / "GATES.md"
+    text = g.read_text(encoding="utf-8", errors="replace") if g.is_file() else ""
+    if not text:
+        return False, "no GATES.md"
+    m = re.search(r"at `([^`]+)`", text.splitlines()[0])
+    if not m:
+        return False, "GATES.md names no commit it tested"
+    if "uncommitted" in m.group(1):
+        return False, (f"GATES.md certifies an edited tree ({m.group(1)[:120]}), not a commit: commit, then re-run the "
+                       "full gates (--from-stage gates --gates full)")
+    sha = m.group(1).split()[0]
+    if not COMMIT_ID.match(sha) or _git(repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")[0] != 0:
+        return False, f"GATES.md names {sha}, which is not a commit in this checkout"
+    if _git(repo, "merge-base", "--is-ancestor", sha, "HEAD")[0] != 0:
+        return False, f"GATES.md names {sha}, which is not an ancestor of HEAD"
+    changed = changed_since(repo, sha)
+    if changed is not None:
+        changed = [f for f in changed if f.rsplit("/", 1)[-1] not in NOT_JAR_FILES]
+    green, why = load("port_publish", "port-publish.py").listed_green(t, text, changed, jar_chain(repo / ".multiversion", t))
+    return green, ("GATES.md (at " + sha + "): " + why) if not green else why
+
+
+SYNC_RESIDUE_SECTION = "## Overlays the authors' change did not merge into (layer-sync)"   # tools/layer-sync.py RESIDUE_SECTION
+
+
+def _split_residue(text):
+    """RESIDUE.md -> (fork-port's part, layer-sync's section or "")."""
+    i = text.find(SYNC_RESIDUE_SECTION)
+    if i < 0:
+        return text, ""
+    j = text.find("\n## ", i + len(SYNC_RESIDUE_SECTION))
+    sec = text[i:j + 1] if j >= 0 else text[i:]
+    return (text[:i] + (text[j + 1:] if j >= 0 else "")).rstrip("\n"), sec.rstrip("\n") + "\n"
+
+
+def put_residue(tdir, t, md):
+    """Write fork-port's stop report to tdir/RESIDUE.md, keeping layer-sync's section (an overlay the authors' change
+    did not merge into) when the file holds one."""
+    f = tdir / "RESIDUE.md"
+    _mine, sec = _split_residue(f.read_text(encoding="utf-8") if f.is_file() else "")
+    f.write_text(md.rstrip("\n") + "\n" + (f"\n{sec}" if sec else ""), encoding="utf-8")
+
+
+def clear_residue(tdir, t):
+    """A run that ended clears its own report: tdir/RESIDUE.md goes, unless it holds layer-sync's section, which stays
+    (alone, under layer-sync's header) until layer-sync removes it."""
+    f = tdir / "RESIDUE.md"
+    if not f.is_file():
+        return
+    _mine, sec = _split_residue(f.read_text(encoding="utf-8"))
+    if not sec:
+        f.unlink()
+        return
+    text = f"# {t}: residue\n\n{sec}"
+    if f.read_text(encoding="utf-8") != text:
+        f.write_text(text, encoding="utf-8")
+
+
+def remerge_open(repo, tdir):
+    """The overlays tools/layer-sync.py recorded in tdir/REMERGE.json as not taking the authors' change, still with
+    the bytes they had then (a person who merged one changed it). -> one reason each; an unreadable file is one."""
+    f = tdir / "REMERGE.json"
+    if not f.is_file():
+        return []
+    rel = f.relative_to(repo).as_posix()
+    try:
+        conflicts = json.loads(f.read_text(encoding="utf-8")).get("conflicts", [])
+        assert isinstance(conflicts, list)
+    except (ValueError, AttributeError, AssertionError):
+        return [f"{rel} is not readable: cannot tell which overlays the authors' change did not merge into"]
+    out = []
+    for c in conflicts:
+        ov = repo / str((c or {}).get("overlay", ""))
+        if not (c or {}).get("overlay") or not ov.is_file():
+            continue          # the overlay is gone: removed by a person, nothing left to merge into
+        if hashlib.sha256(ov.read_bytes()).hexdigest() == str(c.get("digest", "")).lower():
+            out.append(f"the authors' change did not merge into {c['overlay']} ({c.get('reason') or 'conflict'}, "
+                       f"{c.get('since') or '?'}; {rel}): merge it by hand (the hunks are in RESIDUE.md), then re-review it")
+    return out
+
+
+PREPARE_INPUTS = ("java", "renames.tsv", "moves.generated.tsv", "drops.txt", "target.properties")
+
+
+def prepared_tree(repo, t, prepare=False):
+    """[] when build/mc<t>/mv/java (what the behaviour inventory reads) exists and is newer than every file it is
+    prepared from; else the one reason it is not. prepare: re-prepare it (layer.py prepare, no compile) when missing
+    or stale -- only for a caller that holds the checkout (fork-port.py's own run)."""
+    repo = pathlib.Path(repo)
+    mv = repo / ".multiversion"
+    src = repo / "src/main/java"
+    if not src.is_dir() or not (mv / "INVENTORY.json").is_file():
+        return []        # nothing prepared to judge (layer-inventory.py says what is missing)
+    out = repo / "build" / f"mc{t}" / "mv/java"
+    cmd = f"python3 .multiversion/tools/layer.py prepare --target {t} --src src/main/java --out build/mc{t}/mv/java"
+
+    def newest():
+        roots = [src, mv / "tools/layer.py", mv / "tools/prepare-sources.py"]
+        for c in jar_chain(mv, t):
+            roots += [mv / "targets" / c / x for x in PREPARE_INPUTS] + [mv / "shared" / c / "java", mv / "shared" / c / "renames.tsv"]
+        best = (0, None)
+        for r in roots:
+            for f in ([r] if r.is_file() else r.rglob("*") if r.is_dir() else []):
+                if f.is_file() and f.stat().st_mtime_ns > best[0]:
+                    best = (f.stat().st_mtime_ns, f)
+        return best
+
+    def tree_time():
+        return max([out.stat().st_mtime_ns] + [f.stat().st_mtime_ns for f in out.rglob("*") if f.is_file()])
+    n_time, n_file = newest()
+    why = None if out.is_dir() and tree_time() >= n_time else (
+        "missing" if not out.is_dir() else f"older than {n_file.relative_to(repo).as_posix()}")
+    if why and prepare and (mv / "tools/layer.py").is_file():
+        r = subprocess.run([sys.executable, str(mv / "tools/layer.py"), "prepare", "--target", t, "--src", str(src),
+                            "--out", str(out)], cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=900)
+        if r.returncode == 0 and out.is_dir():
+            print(f"fork-port: {t}: re-prepared build/mc{t}/mv/java ({why}; layer.py prepare, no compile) for the done check")
+            return []
+        return [f"behaviour inventory: re-preparing build/mc{t}/mv/java failed (exit {r.returncode}): "
+                + " ".join((r.stdout + r.stderr).strip().splitlines()[-2:])[:300]]
+    if not why:
+        return []
+    if why == "missing":
+        return [f"behaviour inventory: no prepared tree build/mc{t}/mv/java (a fresh clone, or never built here), so it "
+                f"cannot be judged: prepare it (no compile): {cmd}"]
+    return [f"behaviour inventory: the prepared tree build/mc{t}/mv/java is {why}, so its account would be about older "
+            f"code: re-prepare it (no compile): {cmd}"]
 
 
 def review_items(repo, tdir):
@@ -814,19 +980,27 @@ def review_problems(repo, tdir):
     c = fields.get("commit", "?")
     if c not in ("", "?"):
         rel = tdir.relative_to(repo).as_posix()
-        if _git(repo, "rev-parse", "--verify", "--quiet", f"{c}^{{commit}}")[0] != 0:
+        mv = repo / ".multiversion"
+        jc = jar_chain(mv, tdir.name) if tdir.parent == mv / "targets" else [tdir.name]
+        paths = ["src", *[f".multiversion/targets/{x}" for x in jc], *[f".multiversion/shared/{x}" for x in jc]]
+        if not COMMIT_ID.match(c):
+            out.append(f"REVIEW.md names commit {c!r}, which is not a commit id (a name such as HEAD or a branch moves): "
+                       "name the reviewed commit with `git rev-parse --short HEAD`")
+        elif _git(repo, "rev-parse", "--verify", "--quiet", f"{c}^{{commit}}")[0] != 0:
             out.append(f"REVIEW.md names commit {c}, which is not in this checkout")
         elif _git(repo, "merge-base", "--is-ancestor", c, "HEAD")[0] != 0:
             out.append(f"REVIEW.md names commit {c}, which is not an ancestor of HEAD")
         else:
-            rc, diff = _git(repo, "diff", "--name-only", c, "--", rel)
-            rc2, new = _git(repo, "ls-files", "--others", "--exclude-standard", "--", rel)
-            changed = sorted({x for x in (diff + "\n" + new).splitlines() if x and x.rsplit("/", 1)[-1] not in REVIEW_OUTPUTS})
-            if rc or rc2:
+            # the target's own files, and what it is built from: the authors' src/, its chain's overlays and shared
+            # library (the target's own run outputs aside; another target's not-jar files aside)
+            changed = changed_since(repo, c, paths)
+            changed = None if changed is None else [
+                x for x in changed if x.rsplit("/", 1)[-1] not in (REVIEW_OUTPUTS if x.startswith(rel + "/") else NOT_JAR_FILES)]
+            if changed is None:
                 out.append(f"cannot compare {rel} with the reviewed commit {c} (git failed)")
             elif changed:
-                out.append(f"{len(changed)} file(s) of the target changed since the reviewed commit {c}, e.g. {changed[0]}: "
-                           "re-review them and name the new commit")
+                out.append(f"{len(changed)} file(s) the target is built from changed since the reviewed commit {c}, e.g. "
+                           f"{changed[0]}: re-review them and name the new commit")
     for kind, file in items:
         v = rows.get((kind, file))
         if not v or v[0] not in VERDICTS:
@@ -888,8 +1062,10 @@ def parent_target(mv, t):
     return lower[-1] if lower else None
 
 
-def target_done(repo, t, _seen=None):
-    """[] when target t is DONE by the one definition above; else every reason it is not, one line each."""
+def target_done(repo, t, _seen=None, write=True, prepare=False):
+    """[] when target t is DONE by the one definition above; else every reason it is not, one line each.
+    write=False: nothing is written (--check-done only asks). prepare: re-prepare a missing or stale prepared tree for
+    the inventory check (no compile) -- only a caller holding the checkout passes it."""
     repo = pathlib.Path(repo)
     mv = repo / ".multiversion"
     tdir = mv / "targets" / t
@@ -898,15 +1074,22 @@ def target_done(repo, t, _seen=None):
     out = []
     if gates_auto(tdir) != "ab":
         out.append("no green Gate C recorded in GATES.md")
+    else:
+        cur, why = gates_current(repo, t)
+        if not cur:
+            out.append(why)
     n_open = len(unreviewed_stubs(tdir))
     if n_open:
         out.append(f"{n_open} unreviewed stub signal(s) in STUBS.json")
     out += review_problems(repo, tdir)
+    out += remerge_open(repo, tdir)       # layer-sync.py: an overlay the authors' change did not merge into
     if not (tdir / "TEST-ITEMS.md").is_file():
         out.append("manual-test items not generated (TEST-ITEMS.md: a run of fork-port.py to the end writes it)")
     # (6) every base behaviour item accounted for (tools/layer-inventory.py; [] on a single-version fork). It writes
-    # the target's INVENTORY-CHECK.json, a run output like GATES.md (REVIEW_OUTPUTS)
-    out += load("layer_inventory", "layer-inventory.py").inventory_unaccounted(repo, t)
+    # the target's INVENTORY-CHECK.json, a run output like GATES.md (REVIEW_OUTPUTS), unless write=False. Its prepared
+    # tree must be current, or its answer is about older code
+    tree = prepared_tree(repo, t, prepare=prepare)
+    out += tree or load("layer_inventory", "layer-inventory.py").inventory_unaccounted(repo, t, write=write)
     # (7) R3: a target resolved against a library target that was not done (--allow-undone-library) is development only
     deps_md = tdir / "DEPS.md"
     if deps_md.is_file() and UNDONE_LIBRARY_MARK in deps_md.read_text(encoding="utf-8", errors="replace"):
@@ -916,7 +1099,7 @@ def target_done(repo, t, _seen=None):
     if allowed:
         p = allowed.split()[0]
         seen = (_seen or set()) | {t}
-        if p not in seen and (mv / "targets" / p).is_dir() and target_done(repo, p, seen):
+        if p not in seen and (mv / "targets" / p).is_dir() and target_done(repo, p, seen, write=write):
             out.append(f"its parent {p} is still not done (added with --allow-undone-parent: {allowed})")
     return out
 
@@ -924,16 +1107,18 @@ def target_done(repo, t, _seen=None):
 UNDONE_LIBRARY_MARK = "**Development only (`--allow-undone-library`):**"     # tools/layer-deps.py render_md()
 
 
-def undone_parent_stop(repo, t, allow=False):
+def undone_parent_stop(repo, t, allow=False, parent=None, prepare=False):
     """Before a NEW target is added: (parent, reasons) when the target it would stand on is not done, else None.
-    With allow, the same answer, for the caller to record."""
+    With allow, the same answer, for the caller to record. parent: the target it will inherit, when the caller has
+    resolved it (make-fork-layer.py add-target --inherits); else parent_target(). Read-only (write=False); prepare as
+    target_done()."""
     mv = pathlib.Path(repo) / ".multiversion"
     if (mv / "targets" / t).is_dir():
         return None
-    p = parent_target(mv, t)
+    p = parent or parent_target(mv, t)
     if not p or not (mv / "targets" / p).is_dir():
         return None
-    why = target_done(repo, p)
+    why = target_done(repo, p, write=False, prepare=prepare)
     return (p, why) if why else None
 
 
@@ -941,11 +1126,14 @@ def undone_parent_stop(repo, t, allow=False):
 #
 # .multiversion/base.properties records `upstream=<remote>/<branch>` (the authors' branch, as port-sync.py --upstream
 # names it), `upstream_commit=<sha>` (the authors' commit the layer branch carried when the buildout started: the
-# merge-base of HEAD and that branch) and `library.<owner>/<repo>=<tag>` (each sibling library's layer release the
-# buildout resolves against, from --port-release). Recorded at `make-fork-layer.py init --upstream` / `freeze`, or by
-# fork-port.py when it adds the first target of a layer that has no record. A run to the end then stops with exit 19
-# when the authors' branch holds commits the checkout does not (the upstream moved: keep-current first), or when a
-# --port-release names another release of a recorded library; --accept-upstream-drift continues and records it in
+# merge-base of HEAD and that branch, which HEAD must carry in full: freeze refuses a branch HEAD lacks commits of) and
+# `library.<owner>/<repo>=<tag>` (each sibling library's layer release the buildout resolves against, from
+# --port-release). Recorded at `make-fork-layer.py init --upstream` / `freeze`, or by fork-port.py when it adds the
+# first target of a layer that has no record (the branch: --upstream, else the one `upstream` remote branch HEAD
+# carries -- never the remote's default branch as such). A run to the end then stops with exit 19 when the authors'
+# branch has commits after the recorded one that the checkout does not carry (the upstream moved: keep-current first),
+# or -- frozen upstream or not -- when a --port-release names another release of a recorded library; the fetch never
+# prompts. --accept-upstream-drift continues and records it in
 # .multiversion/DRIFT.md. A single-version fork has no .multiversion/: nothing here runs.
 
 DRIFT_EXIT = 19
@@ -953,13 +1141,19 @@ UNDONE_EXIT = 18
 
 
 def detect_upstream(repo):
-    """The authors' branch as `<remote>/<branch>` when the clone has an `upstream` remote whose HEAD is known, else None."""
-    rc, out = _git(repo, "symbolic-ref", "--quiet", "--short", "refs/remotes/upstream/HEAD")
-    if rc == 0 and out:
-        return out
+    """The authors' branch the port follows, as `<remote>/<branch>`: the one branch of the clone's `upstream` remote
+    whose tip HEAD carries (the branch keep-current / port-sync.py merge into the port). Not the remote's HEAD: that is
+    the authors' default branch, often not the one the port is based on, and freezing it would stop every run (19).
+    None when no branch, or more than one, qualifies: the caller then names it with --upstream."""
     rc, out = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/remotes/upstream/")
-    refs = [x for x in out.splitlines() if x and not x.endswith("/HEAD")] if rc == 0 else []
-    return refs[0] if len(refs) == 1 else None
+    refs = [x for x in out.splitlines() if x and x != "upstream" and not x.endswith("/HEAD")] if rc == 0 else []
+    carried = [r for r in refs if _git(repo, "merge-base", "--is-ancestor", r, "HEAD")[0] == 0]
+    return carried[0] if len(carried) == 1 else None
+
+
+# a fetch must never wait for a password: no terminal prompt, no askpass helper, and a short timeout
+FETCH_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "echo", "SSH_ASKPASS": "echo"}
+FETCH_TIMEOUT = 45
 
 
 def upstream_drift(repo, ref, recorded=None, fetch=True):
@@ -968,7 +1162,10 @@ def upstream_drift(repo, ref, recorded=None, fetch=True):
     out = {"ref": ref, "fetched": False}
     if fetch and "/" in ref:
         remote, branch = ref.split("/", 1)
-        out["fetched"] = _git(repo, "fetch", "--quiet", remote, branch)[0] == 0
+        rc, msg = _git(repo, "fetch", "--quiet", remote, branch, env={**os.environ, **FETCH_ENV}, timeout=FETCH_TIMEOUT)
+        out["fetched"] = rc == 0
+        if rc:
+            out["fetch_error"] = (msg.strip().splitlines() or [f"exit {rc}"])[-1][:200]
     rc, tip = _git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
     if rc != 0:
         out["error"] = f"{ref} is not a branch this clone knows (git fetch {ref.split('/', 1)[0]})"
@@ -1008,13 +1205,19 @@ def freeze_upstream(repo, ref=None, libraries=()):
         rc, base = _git(repo, "merge-base", "HEAD", ref)
         if rc != 0 or not base:
             return None, f"no common commit between HEAD and {ref} (fetch it first: git fetch {ref.split('/', 1)[0]})"
+        rc, n = _git(repo, "rev-list", "--count", f"HEAD..{ref}")
+        if rc == 0 and n.isdigit() and int(n):
+            return None, (f"HEAD lacks {n} commit(s) of {ref}: a buildout frozen there would stop at once (exit 19). Bring "
+                          "them in with keep-current first (port-sync.py), or name the authors' branch the port actually "
+                          "follows with --upstream <remote>/<branch>")
         rec.update({"upstream": ref, "upstream_commit": base})
     for lib in libraries:
         name, _, tag = lib.partition("@")
         if name and tag:
             rec[f"library.{name}"] = tag
     if not rec:
-        return None, "no authors' branch to record: pass --upstream <remote>/<branch> (the clone has no `upstream` remote HEAD)"
+        return None, ("no authors' branch to record: pass --upstream <remote>/<branch> (no single branch of the clone's "
+                      "`upstream` remote is carried by HEAD)")
     write_props(bp, rec)
     return rec, None
 
@@ -1038,28 +1241,36 @@ def drift_stop(repo, a, fetch=True):
         print(f"fork-port: upstream: " + (f"froze the buildout at {', '.join(f'{k}={v}' for k, v in rec.items())} "
                                           "(.multiversion/base.properties)" if rec else f"NOT frozen: {why}"))
         props = read_props(mv / "base.properties")
-    if not props.get("upstream_commit"):
+    ref, rec = props.get("upstream"), props.get("upstream_commit")
+    port = a.base.split("/", 1)[1] if "/" in a.base else a.base
+    kc = (f"keep-current for this fork first (Claude Code: \"keep this fork current\"; command line: python3 "
+          f"tools/port-sync.py --repo {repo} --port {port} --upstream {ref or '<remote>/<branch>'} --dry-run, then the "
+          f"keep-current skill), then make-fork-layer.py freeze --repo {repo}")
+    reasons = []
+    if not rec:
         print("fork-port: upstream: WARNING no authors' commit recorded for this buildout (.multiversion/base.properties "
               "upstream/upstream_commit): an upstream that moves mid-ladder goes unseen -- make-fork-layer.py freeze --repo "
               f"{repo} --upstream <remote>/<branch>")
-        return None
-    ref, rec = props.get("upstream"), props["upstream_commit"]
-    st = upstream_drift(repo, ref, rec, fetch=fetch)
-    port = a.base.split("/", 1)[1] if "/" in a.base else a.base
-    kc = (f"keep-current for this fork first (Claude Code: \"keep this fork current\"; command line: python3 "
-          f"tools/port-sync.py --repo {repo} --port {port} --upstream {ref} --dry-run, then the keep-current skill), "
-          f"then make-fork-layer.py freeze --repo {repo}")
-    reasons = []
-    if st.get("error"):
-        print(f"fork-port: upstream: WARNING cannot compare with the authors' branch: {st['error']}")
-    elif st.get("behind"):
-        reasons.append(f"the authors' {ref} has {st['behind']} commit(s) this checkout does not carry "
-                       f"(buildout frozen at {rec[:12]}, {ref} now at {st['tip'][:12]}"
-                       + ("" if st["fetched"] else "; not fetched now, compared with the last fetch") + ")")
-    elif st.get("tip") and st.get("since"):
-        print(f"fork-port: upstream: the checkout carries {ref} at {st['tip'][:12]}, newer than the freeze {rec[:12]} "
-              f"(keep-current merged it): record it with make-fork-layer.py freeze --repo {repo}")
-    for lib in getattr(a, "port_release", []):
+    else:
+        st = upstream_drift(repo, ref, rec, fetch=fetch)
+        if st.get("fetch_error"):
+            print(f"fork-port: upstream: could not fetch {ref} ({st['fetch_error']}): comparing with the last fetch")
+        # the authors moved since the freeze (rec..tip), not "HEAD lacks commits of the branch" (HEAD..tip): a freeze
+        # records what the buildout started from, which HEAD may never have carried in full
+        since = st.get("since") if st.get("since") is not None else st.get("behind")
+        if st.get("error"):
+            print(f"fork-port: upstream: WARNING cannot compare with the authors' branch: {st['error']}")
+        elif since and st.get("behind"):
+            reasons.append(f"the authors' {ref} has {since} commit(s) since the freeze that this checkout does not carry "
+                           f"(buildout frozen at {rec[:12]}, {ref} now at {st['tip'][:12]}"
+                           + ("" if st["fetched"] else "; not fetched now, compared with the last fetch") + ")")
+        elif since:
+            print(f"fork-port: upstream: the checkout carries {ref} at {st['tip'][:12]}, newer than the freeze {rec[:12]} "
+                  f"(keep-current merged it): record it with make-fork-layer.py freeze --repo {repo}")
+        elif st.get("behind"):
+            print(f"fork-port: upstream: note: {ref} has {st['behind']} commit(s) this checkout does not carry, none of "
+                  f"them after the freeze {rec[:12]}: not a stop")
+    for lib in getattr(a, "port_release", []):     # a library release is compared whether or not an upstream is frozen
         name, _, tag = lib.partition("@")
         had = props.get(f"library.{name}")
         if had and tag and had != tag:
@@ -1579,7 +1790,7 @@ class Run:
             did.append("behaviour inventory: " + ((r.stdout or "").strip().splitlines() or ["built"])[-1]
                        .replace("layer-inventory: ", "").split(" -> ")[0] + " (commit .multiversion/INVENTORY.json)")
         if not self.tdir.is_dir():          # R1: never start target N+1 before N is done
-            und = undone_parent_stop(self.repo, self.t)
+            und = undone_parent_stop(self.repo, self.t, prepare=True)    # this run holds the checkout lock
             if und and not getattr(self.a, "allow_undone_parent", False):
                 p, why = und
                 return {"stop": f"{p}, the target {self.t} would stand on, is not done: {'; '.join(why[:3])}"[:600],
@@ -2147,12 +2358,21 @@ def chain_targets(mv, frm, to):
     return ch[ch.index(frm):]
 
 
+def sweep_green(rc, summ):
+    """Did the target's stages run green? 0 and 17 say so; an 18 only when the child ended "Gate C green, NOT done"
+    (its summary lists not_done, no stop) -- an 18 with a stop is a refusal before anything was built (a library
+    target not done, an undone parent), and an 18 with no summary written this run cannot say: both are red."""
+    if rc == UNDONE_EXIT:
+        return bool(summ) and "stop" not in summ and summ.get("not_done") is not None
+    return rc in SWEEP_GREEN
+
+
 def sweep_result(rc, summ):
     if rc == 0:
         return "done"
     if rc == 17:
         return "green, NOT done: Gate C not run"
-    if rc == UNDONE_EXIT:
+    if rc == UNDONE_EXIT and sweep_green(rc, summ):
         nd = summ.get("not_done") or []
         return f"green, NOT done: {nd[0] if nd else 'review / test items'}" + (f" (+{len(nd) - 1})" if len(nd) > 1 else "")
     st = summ.get("stop") or {}
@@ -2203,15 +2423,18 @@ def sweep(a, runner=None, out=print):
                    *[x for c in a.port_release for x in ("--port-release", c)],
                    *(["--allow-undone-library"] if getattr(a, "allow_undone_library", False) else [])]
             out(f"fork-port: chain: {t} ...")
+            jp = repo / "build" / f"mc{t}" / "fork-port" / "fork-port.json"
+            before = jp.stat().st_mtime_ns if jp.is_file() else None
             rc = runner(cmd, env)
-            try:
-                summ = json.loads((repo / "build" / f"mc{t}" / "fork-port" / "fork-port.json").read_text(encoding="utf-8"))
+            try:      # only the summary this child wrote: an older run's (a child that stopped before saving) misleads
+                summ = json.loads(jp.read_text(encoding="utf-8")) if jp.stat().st_mtime_ns != before else {}
             except (OSError, ValueError):
                 summ = {}
+            green = sweep_green(rc, summ)
             res = (mv / "targets" / t / "RESIDUE.md")
             rows.append((t, rc, sweep_result(rc, summ),
-                         res.relative_to(repo).as_posix() if rc not in SWEEP_GREEN and res.is_file() else ""))
-            if rc not in SWEEP_GREEN:
+                         res.relative_to(repo).as_posix() if not green and res.is_file() else ""))
+            if not green:
                 first_bad = rc
                 break
             if rc and first_nd is None:
@@ -2264,8 +2487,8 @@ def main():
                          "(passed to layer-deps.py resolve, recorded in DEPS.md and the summary; the target is then not done "
                          "until it is re-resolved with --port-release)")
     ap.add_argument("--upstream", help="<remote>/<branch>: the authors' branch, recorded with the commit the buildout starts "
-                                       "from in .multiversion/base.properties (default: the recorded one, else the clone's "
-                                       "`upstream` remote HEAD)")
+                                       "from in .multiversion/base.properties (default: the recorded one, else the one branch "
+                                       "of the clone's `upstream` remote that HEAD carries)")
     ap.add_argument("--accept-upstream-drift", action="store_true",
                     help="continue although the authors' branch (or a recorded library release) moved since the buildout's "
                          "freeze (exit 19 otherwise); recorded in .multiversion/DRIFT.md")
@@ -2274,7 +2497,7 @@ def main():
                          "oldest first, no model; stops at the first red target with its RESIDUE.md and prints the table")
     ap.add_argument("--check-done", action="store_true",
                     help="only say whether --target is done (Gate C, stubs, REVIEW.md, TEST-ITEMS.md, the behaviour inventory): "
-                         "exit 0, or 18 with the reasons")
+                         "exit 0, or 18 with the reasons; writes nothing")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -2292,7 +2515,7 @@ def main():
     if a.check_done:
         if not (pathlib.Path(a.repo) / ".multiversion/base.properties").is_file():
             print("fork-port: --check-done needs a layer fork (.multiversion/)"); return 2
-        why = target_done(a.repo, a.target)
+        why = target_done(a.repo, a.target, write=False)      # only asks: writes nothing
         print(f"fork-port {a.target}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
         return UNDONE_EXIT if why else 0
     try:
@@ -2363,7 +2586,7 @@ def drive(run, a, skipped, todo):
                                   environment=stop.get("environment"))
         rpath = run.tdir / "RESIDUE.md"
         if run.tdir.is_dir():
-            rpath.write_text(md, encoding="utf-8")
+            put_residue(run.tdir, a.target, md)       # layer-sync.py's section (an unmerged overlay) stays
         stop["residue"] = str(rpath.relative_to(run.repo)) if run.tdir.is_dir() else "(no target dir)"
         run.summary["residue"] = data
         run.summary["stop"] = {"stage": stop["stage"], "code": stop["code"], "left": stop["left"], "resume": resume}
@@ -2371,9 +2594,8 @@ def drive(run, a, skipped, todo):
         print(stop_block(stop))
         print(f"fork-port: summary in {run.jpath}")
         return stop["code"]
-    r = run.tdir / "RESIDUE.md"
-    if r.is_file() and not partial:           # only a run to the end clears an earlier stop's report
-        r.unlink()
+    if not partial:           # only a run to the end clears an earlier stop's report (never layer-sync's section)
+        clear_residue(run.tdir, a.target)
     # a version is DONE only after its real-client run: green A/B with no Gate C on record is reported as such, never as done
     no_gates = not partial and a.gates == "none"      # no gates is not done either: the same exit as A/B without Gate C
     pending_c = not partial and (no_gates or gates_auto(run.tdir) != "ab")
@@ -2395,7 +2617,7 @@ def drive(run, a, skipped, todo):
         # R1: Gate C green is not done either until the target's manual-test items are generated and an independent
         # fresh-context review of every stub and whole-file overlay is recorded in REVIEW.md for the reviewed commit
         n_items, why = write_test_items(run.repo, run.tdir, a.target)
-        problems = (["manual-test items: " + why] if why else []) + target_done(run.repo, a.target)
+        problems = (["manual-test items: " + why] if why else []) + target_done(run.repo, a.target, prepare=True)
         if problems:
             added = review_skeleton(run.repo, run.tdir, a.target)
             run.summary.update({"done": False, "not_done": problems})
@@ -2411,7 +2633,7 @@ def drive(run, a, skipped, todo):
         if n_items is not None:
             run.summary["test_items"] = n_items
             run.save()
-    print(f"fork-port {a.target}:{'stages ' + ', '.join(todo) + ' ok' if partial else 'done'} -- summary in {run.jpath}")
+    print(f"fork-port {a.target}: {'stages ' + ', '.join(todo) + ' ok' if partial else 'done'} -- summary in {run.jpath}")
     return 0
 
 
@@ -2899,7 +3121,11 @@ def self_check():
         expect(rc_ab == 17 and rc_c == UNDONE_EXIT, f"done needs a recorded Gate C and the review: A/B only -> {rc_ab}, "
                                                     f"with Gate C but no REVIEW.md -> {rc_c} (want {UNDONE_EXIT})")
         g_ = lambda *x: subprocess.run(["git", "-C", str(repo), *x], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")      # as every fork's
         g_("init", "-q"); g_("config", "user.email", "a@b"); g_("config", "user.name", "a"); g_("add", "-A"); g_("commit", "-qm", "t")
+        (repo / ".multiversion/targets/1.21.4/GATES.md").write_text(       # the gates ran at that commit
+            f"Gates for `m` at `{g_('rev-parse', '--short', 'HEAD')}` for Minecraft 1.21.4 (local environment):\n\n| Gate C -- real client, `launch` | PASS | ok |\n",
+            encoding="utf-8")
         rv = repo / ".multiversion/targets/1.21.4/REVIEW.md"
         rv.write_text(rv.read_text(encoding="utf-8").replace("- reviewer: ?", "- reviewer: fresh agent r1")
                       .replace("- date: ?", "- date: 2026-10-16").replace("- commit: ?", "- commit: " + g_("rev-parse", "--short", "HEAD")),
@@ -2907,7 +3133,7 @@ def self_check():
         with contextlib.redirect_stdout(io.StringIO()):
             rc_rev = drive(run, a_, [s_ for s_ in STAGES if s_ != "cost"], ["cost"])
         expect(rc_rev == 0 and (repo / ".multiversion/targets/1.21.4/TEST-ITEMS.md").is_file(),
-               f"Gate C + a complete review (nothing to judge) + test items generated: done, exit {rc_rev}")
+               f"Gate C + a complete review (nothing to judge) + test items generated: done, exit {rc_rev} {target_done(repo, '1.21.4')}")
         # --from-stage cost over an older GATES.md with an unreviewed stub: not done (exit 10, the stub named)
         (repo / ".multiversion/targets/1.21.4/STUBS.json").write_text(json.dumps([{"file": "A.java", "why": "emptied f()",
                                                                                   "reviewed": None}]), encoding="utf-8")
@@ -3281,6 +3507,7 @@ def self_check():
     if len(hist) >= 2:
         expect(layer_patch(hist[-1], tpl, hist, True)[0] in ("replace", "current"), "the oldest committed template copy is replaceable")
     ok = self_check_done_freeze_sweep() and ok
+    ok = self_check_review131() and ok
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -3306,7 +3533,7 @@ def self_check_done_freeze_sweep():
     def w(p, text):
         p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text, encoding="utf-8")
 
-    green_c = "# Gates for Minecraft {t} at `x`\n\n| Gate C -- real client, `launch` | PASS | ok |\n"
+    green_c = "Gates for `m` at `{at}` for Minecraft {t} (local environment):\n\n| Gate C -- real client, `launch` | PASS | ok |\n"
     # ---- R1: REVIEW.md -- one verdict per STUBS.json entry and per whole-file overlay, for the commit reviewed
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); g = git_repo(repo)
@@ -3318,7 +3545,7 @@ def self_check_done_freeze_sweep():
         w(td / "java/com/example/mod/mv/Helper.java", "class Helper {}\n")                    # overlay-only: not reviewed
         w(td / "STUBS.json", json.dumps([{"file": ".multiversion/targets/1.21.4/java/com/example/mod/A.java",
                                           "why": "removes 1 call(s)", "reviewed": "same effect"}]))
-        w(td / "target.properties", "x=1\n"); w(td / "GATES.md", green_c.format(t="1.21.4"))
+        w(td / "target.properties", "x=1\n"); w(td / "GATES.md", green_c.format(t="1.21.4", at="x"))
         li = load("layer_inventory", "layer-inventory.py")       # R2: the base inventory (nothing hooked here) and a
         with contextlib.redirect_stdout(io.StringIO()):         # prepared tree, so the done list's item (6) holds
             li.cmd_build(argparse.Namespace(repo=str(repo), dry_run=False, out=None))
@@ -3334,6 +3561,7 @@ def self_check_done_freeze_sweep():
         expect(sum(p.startswith("no verdict") for p in pr) == 2 and any("no reviewer" in p for p in pr)
                and any("no commit" in p for p in pr), f"a skeleton is not a review: {pr}")
         g("add", "-A"); g("commit", "-qm", "port 1.21.4"); head = g("rev-parse", "--short", "HEAD")
+        w(td / "GATES.md", green_c.format(t="1.21.4", at=head))      # the gates ran at the committed port
         txt = (td / "REVIEW.md").read_text(encoding="utf-8")
         txt = (txt.replace("- reviewer: ?", "- reviewer: fresh agent (session x)").replace("- date: ?", "- date: 2026-10-16")
                .replace("- commit: ?", f"- commit: {head}")
@@ -3354,7 +3582,8 @@ def self_check_done_freeze_sweep():
         (td / "java/com/example/mod/A.java").write_text("class A { void f() { z(); } }\n", encoding="utf-8")
         expect(any("changed since the reviewed commit" in p for p in target_done(repo, "1.21.4")),
                "an overlay edited after the review: not done (re-review, name the new commit)")
-        g("checkout", "-q", "--", "."); w(td / "GATES.md", green_c.format(t="1.21.4"))
+        g("checkout", "-q", "--", "."); w(td / "GATES.md", green_c.format(t="1.21.4", at=head))
+        os.utime(repo / "build/mc1.21.4/mv/java")      # the overlay is as built again: the prepared tree is current
         (td / "REVIEW.md").write_text(txt.replace("| ok | the call moved", "| not-ok | the call moved"), encoding="utf-8")
         expect(any(p.startswith("reviewer says not-ok") for p in target_done(repo, "1.21.4")), "a not-ok verdict: not done")
         (td / "REVIEW.md").write_text(txt.replace(f"- commit: {head}", "- commit: 0123456"), encoding="utf-8")
@@ -3383,7 +3612,7 @@ def self_check_done_freeze_sweep():
         expect(undone_parent_stop(repo, "1.21.5") is None and undone_parent_stop(repo, "1.21.4") is None,
                "a done parent (and an existing target) is never refused")
         w(repo / ".multiversion/targets/1.21.5/target.properties", "inherits=1.21.4\nallowed_undone_parent=1.21.4 2026-10-16: x\n")
-        w(repo / ".multiversion/targets/1.21.5/GATES.md", green_c.format(t="1.21.5"))
+        w(repo / ".multiversion/targets/1.21.5/GATES.md", green_c.format(t="1.21.5", at=head))
         (td / "TEST-ITEMS.md").unlink()
         expect(any("parent 1.21.4 is still not done" in p for p in target_done(repo, "1.21.5")),
                "a target added over an undone parent is not done while that parent is not")
@@ -3480,7 +3709,7 @@ def self_check_done_freeze_sweep():
         with tempfile.TemporaryDirectory() as d:
             repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"
             w(repo / "src/main/java/com/example/mod/mixin/FooMixin.java", mixin_src)
-            w(td / "target.properties", "x=1\n"); w(td / "GATES.md", green_c.format(t="1.21.4"))
+            w(td / "target.properties", "x=1\n"); w(td / "GATES.md", green_c.format(t="1.21.4", at="x"))
             w(repo / "build/mc1.21.4/mv/java/com/example/mod/mixin/FooMixin.java", "package com.example.mod.mixin;\npublic class FooMixin {}\n")
             if layer:
                 w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
@@ -3608,6 +3837,348 @@ def self_check_done_freeze_sweep():
         out_ = buf.getvalue()
         expect(rc == 2 and "no .multiversion/ in the fork" in out_ and not any(k in out_ for k in ("upstream", "REVIEW", "NOT done"))
                and not (repo / ".multiversion").exists(), f"single-version: setup stops as before, exit 2, nothing new said: {out_}")
+    return ok
+
+
+def self_check_review131():
+    """The PR #131 review's fork-port findings, each on a layer fixture, plus the single-version path (no .multiversion/:
+    nothing of this runs). Every case is wrapped, so a missing function is a FAIL line, not a crash."""
+    import contextlib, hashlib, io, types
+    from subprocess import CompletedProcess
+    ok = True
+
+    def expect(c, msg):
+        nonlocal ok
+        if not c:
+            ok = False; print("FAIL:", msg)
+
+    def case(name, fn):
+        nonlocal ok
+        try:
+            fn()
+        except Exception as e:      # noqa: BLE001 -- a case that cannot run is a failed case
+            ok = False; print(f"FAIL: {name}: {type(e).__name__}: {e}")
+
+    def git_repo(d):
+        pathlib.Path(d).mkdir(parents=True, exist_ok=True)
+        g = lambda *x: subprocess.run(["git", "-C", str(d), *x], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        g("init", "-q", "-b", "main"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
+        return g
+
+    def w(p, text):
+        p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text, encoding="utf-8")
+
+    def gates_md(t, at):
+        return (f"Gates for `examplemod` at `{at}` for Minecraft {t} (local environment) -- run by CI:\n\n"
+                "| check | result | detail |\n|---|---|---|\n| Gate C -- real client, `launch` | PASS | ok |\n")
+
+    def done_fixture(d):
+        """A layer with 1.21.3 and 1.21.4 (inherits 1.21.3), each DONE: gates at HEAD, a complete review, test items,
+        the inventory, a prepared tree. -> (repo, git)"""
+        repo = pathlib.Path(d); g = git_repo(repo); mv = repo / ".multiversion"
+        w(mv / "base.properties", "minecraft_version=1.21.1\n"); w(repo / ".gitignore", "build/\n")
+        w(repo / "src/main/java/com/example/mod/A.java", "class A { void f() { x(); } }\n")
+        w(repo / "src/main/java/com/example/mod/B.java", "class B {}\n")
+        w(mv / "shared/1.21.4/renames.tsv", "# shared rows\n")
+        for t, inh in (("1.21.3", None), ("1.21.4", "1.21.3")):
+            td = mv / "targets" / t
+            w(td / "target.properties", f"inherits={inh}\n" if inh else "x=1\n")
+            w(td / "java/com/example/mod/A.java", "class A { void f() { y" + t.replace(".", "") + "(); } }\n")
+            w(td / "TEST-ITEMS.md", f"# Manual-test items: Minecraft {t}\n\n- none\n")
+        li = load("layer_inventory", "layer-inventory.py")
+        with contextlib.redirect_stdout(io.StringIO()):
+            li.cmd_build(argparse.Namespace(repo=str(repo), dry_run=False, out=None))
+        g("add", "-A"); g("commit", "-qm", "port"); head = g("rev-parse", "--short", "HEAD")
+        for t in ("1.21.3", "1.21.4"):
+            td = mv / "targets" / t
+            w(td / "GATES.md", gates_md(t, head))
+            w(td / "REVIEW.md", REVIEW_HEAD.format(t=t).replace("- reviewer: ?", "- reviewer: fresh agent")
+              .replace("- date: ?", "- date: 2026-10-16").replace("- commit: ?", f"- commit: {head}")
+              + f"| overlay | .multiversion/targets/{t}/java/com/example/mod/A.java | ok | the call's {t} name |\n")
+            w(repo / f"build/mc{t}/mv/java/com/example/mod/A.java", "class A {}\n")
+        return repo, g
+
+    def baseline(repo):
+        for t in ("1.21.3", "1.21.4"):
+            expect(target_done(repo, t) == [], f"the fixture's {t} is done: {target_done(repo, t)}")
+
+    # ---- finding 1: a re-merge conflict layer-sync recorded in REMERGE.json keeps the target not done until the
+    # overlay changed (a person merged it); fork-port keeps layer-sync's RESIDUE.md section
+    def f1():
+        with tempfile.TemporaryDirectory() as d:
+            repo, g = done_fixture(d); baseline(repo)
+            ov = repo / ".multiversion/targets/1.21.4/java/com/example/mod/A.java"
+            rel = ov.relative_to(repo).as_posix()
+            w(repo / ".multiversion/targets/1.21.4/REMERGE.json", json.dumps({"conflicts": [
+                {"overlay": rel, "digest": hashlib.sha256(ov.read_bytes()).hexdigest(), "reason": "a hunk did not apply",
+                 "since": "o1..n1"}]}))
+            why = target_done(repo, "1.21.4")
+            expect(any("did not merge" in x and rel in x for x in why), f"an unmerged overlay on record: not done: {why}")
+            expect("REMERGE.json" not in REVIEW_OUTPUTS, "REMERGE.json is a reviewed input, not a run output")
+            ov.write_text("class A { void f() { merged(); } }\n", encoding="utf-8")
+            expect(not any("did not merge" in x for x in target_done(repo, "1.21.4")),
+                   "the overlay changed since the conflict was recorded (a person merged it): no longer a reason")
+            (repo / ".multiversion/targets/1.21.4/REMERGE.json").write_text("{not json", encoding="utf-8")
+            expect(any("REMERGE.json" in x for x in target_done(repo, "1.21.4")), "an unreadable REMERGE.json fails closed")
+        with tempfile.TemporaryDirectory() as d:
+            td = pathlib.Path(d) / "t"; td.mkdir()
+            sec = SYNC_RESIDUE_SECTION + "\n\n- `F.java` (digest abc123): 1 hunk\n"
+            w(td / "RESIDUE.md", "# 1.21.4: residue\n\n" + sec)
+            put_residue(td, "1.21.4", "# Residue: gates\n\nfork-port's part\n")
+            txt = (td / "RESIDUE.md").read_text(encoding="utf-8")
+            expect("fork-port's part" in txt and sec.strip() in txt, f"fork-port's report keeps layer-sync's section: {txt}")
+            put_residue(td, "1.21.4", "# Residue: loop\n\nnewer\n")
+            txt = (td / "RESIDUE.md").read_text(encoding="utf-8")
+            expect("newer" in txt and "fork-port's part" not in txt and txt.count(SYNC_RESIDUE_SECTION) == 1,
+                   f"a second report replaces fork-port's part only: {txt}")
+            clear_residue(td, "1.21.4")
+            txt = (td / "RESIDUE.md").read_text(encoding="utf-8") if (td / "RESIDUE.md").is_file() else ""
+            expect(sec.strip() in txt and "newer" not in txt, f"a run that ends clears its part, never layer-sync's: {txt!r}")
+            put_residue(td, "1.21.4", "# Residue: x\n"); (td / "RESIDUE.md").write_text("# Residue: x\n", encoding="utf-8")
+            clear_residue(td, "1.21.4")
+            expect(not (td / "RESIDUE.md").exists(), "a RESIDUE.md that holds only fork-port's part is removed, as before")
+            ls = load("layer_sync", "layer-sync.py")
+            expect(getattr(ls, "RESIDUE_SECTION", SYNC_RESIDUE_SECTION) == SYNC_RESIDUE_SECTION,
+                   "fork-port's copy of layer-sync's section heading matches layer-sync.py")
+    case("finding 1", f1)
+
+    # ---- finding 3: done follows GATES.md's commit like listed_green (src/, a parent's overlay, shared/ invalidate
+    # it; documents do not), and the review is stale on the same files
+    def f3():
+        with tempfile.TemporaryDirectory() as d:
+            repo, g = done_fixture(d); baseline(repo)
+            w(repo / "README.md", "docs\n"); g("add", "README.md"); g("commit", "-qm", "docs")
+            expect(target_done(repo, "1.21.4") == [], f"a documentation commit after the gates keeps it done: {target_done(repo, '1.21.4')}")
+            for path, text in (("src/main/java/com/example/mod/B.java", "class B { int authors; }\n"),
+                               (".multiversion/targets/1.21.3/java/com/example/mod/A.java", "class A { void f() { p(); } }\n"),
+                               (".multiversion/shared/1.21.4/renames.tsv", "# shared rows\nOld\tNew\n")):
+                g("checkout", "-q", "main"); g("checkout", "-q", "-B", "probe")
+                w(repo / path, text); g("commit", "-qam", f"change {path}")
+                why = target_done(repo, "1.21.4")
+                expect(any("GATES.md" in x and "changed since" in x for x in why),
+                       f"{path} committed after the gates ran: the gates are stale: {why}")
+                expect(any("since the reviewed commit" in x for x in why), f"{path} changed after the review: re-review: {why}")
+            g("checkout", "-q", "main")
+            w(repo / "src/main/java/com/example/mod/C.java", "class C {}\n")
+            expect(any("GATES.md" in x for x in target_done(repo, "1.21.4")), "an untracked source file is built in: stale")
+            (repo / "src/main/java/com/example/mod/C.java").unlink()
+            head = g("rev-parse", "--short", "HEAD")
+            w(repo / ".multiversion/targets/1.21.4/GATES.md", gates_md("1.21.4", f"{head} + uncommitted: src/x.java"))
+            expect(any("edited tree" in x for x in target_done(repo, "1.21.4")), "gates on an edited tree certify no commit")
+    case("finding 3", f3)
+
+    # ---- finding 4: REVIEW.md's commit must be a commit id, not a name that moves (HEAD, a branch)
+    def f4():
+        with tempfile.TemporaryDirectory() as d:
+            repo, g = done_fixture(d); baseline(repo)
+            rv = repo / ".multiversion/targets/1.21.4/REVIEW.md"
+            txt = rv.read_text(encoding="utf-8")
+            for name in ("HEAD", "main"):
+                rv.write_text(re.sub(r"- commit: \S+", f"- commit: {name}", txt), encoding="utf-8")
+                expect(any("commit id" in x for x in target_done(repo, "1.21.4")), f"commit: {name} is refused")
+    case("finding 4", f4)
+
+    # ---- finding 5: auto-detection takes the authors' branch the checkout carries, not their default; freeze refuses
+    # a branch the checkout lacks commits of; the stop is "moved since the freeze", not HEAD..tip
+    def f5():
+        with tempfile.TemporaryDirectory() as d:
+            up, fork = pathlib.Path(d) / "authors", pathlib.Path(d) / "fork"
+            gu = git_repo(up); w(up / "A.java", "a\n"); gu("add", "-A"); gu("commit", "-qm", "authors 1")
+            gu("branch", "port-base"); w(up / "A.java", "a2\n"); gu("commit", "-qam", "authors 2 (default branch only)")
+            subprocess.run(["git", "clone", "-q", "-o", "upstream", str(up), str(fork)], check=True, capture_output=True)
+            gf = lambda *x: subprocess.run(["git", "-C", str(fork), *x], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+            gf("config", "user.email", "a@b"); gf("config", "user.name", "a")
+            gf("checkout", "-q", "-b", "port", "upstream/port-base")
+            w(fork / ".multiversion/base.properties", "minecraft_version=1.21.1\n"); gf("add", "-A"); gf("commit", "-qm", "layer")
+            expect(detect_upstream(fork) == "upstream/port-base", f"the branch the port carries, not upstream/HEAD: {detect_upstream(fork)}")
+            rec, why = freeze_upstream(fork, "upstream/main")
+            expect(rec is None and "keep-current" in (why or ""), f"freeze refuses a branch HEAD lacks commits of: {rec} {why}")
+            expect("upstream_commit" not in read_props(fork / ".multiversion/base.properties"), "nothing recorded")
+            (fork / ".multiversion/targets/1.21.3").mkdir(parents=True)
+            write_props(fork / ".multiversion/base.properties",
+                        {"upstream": "upstream/main", "upstream_commit": gu("rev-parse", "main")})
+            a_ = argparse.Namespace(repo=str(fork), target="1.21.3", base="origin/neoforge-1.21.1", port_release=[],
+                                    upstream=None, accept_upstream_drift=False)
+            with contextlib.redirect_stdout(io.StringIO()):
+                st = drift_stop(fork, a_, fetch=False)
+            expect(st is None, f"nothing moved since the recorded commit: no stop, though HEAD lacks it: {st}")
+            gu("checkout", "-q", "main"); w(up / "A.java", "a3\n"); gu("commit", "-qam", "authors 3")
+            with contextlib.redirect_stdout(io.StringIO()):
+                st = drift_stop(fork, a_, fetch=True)
+            expect(st and st["code"] == DRIFT_EXIT and "1 commit(s)" in st["stop"], f"the authors moved since the freeze: 19: {st}")
+    case("finding 5", f5)
+
+    # ---- finding 6: a library-only freeze still stops on another --port-release
+    def f6():
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d)
+            w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\nlibrary.owner/lib=v1\n")
+            (repo / ".multiversion/targets/1.21.3").mkdir(parents=True)
+            a_ = argparse.Namespace(repo=str(repo), target="1.21.3", base="x", port_release=["owner/lib@v2"],
+                                    upstream=None, accept_upstream_drift=False)
+            with contextlib.redirect_stdout(io.StringIO()):
+                st = drift_stop(repo, a_, fetch=False)
+            expect(st and st["code"] == DRIFT_EXIT and "owner/lib" in st["stop"], f"a library-only freeze: 19 on v2: {st}")
+            a_.port_release = ["owner/lib@v1"]
+            with contextlib.redirect_stdout(io.StringIO()):
+                expect(drift_stop(repo, a_, fetch=False) is None, "the recorded release: no stop")
+    case("finding 6", f6)
+
+    # ---- finding 7: DEPS.md (rewritten by every setup) is a run output: it does not make a review stale
+    def f7():
+        expect("DEPS.md" in REVIEW_OUTPUTS, "DEPS.md is a run output")
+        with tempfile.TemporaryDirectory() as d:
+            repo, g = done_fixture(d)
+            w(repo / ".multiversion/targets/1.21.4/DEPS.md", "# Dependencies\n\nresolved on this machine\n")
+            g("add", "-A"); g("commit", "-qm", "deps")
+            w(repo / ".multiversion/targets/1.21.4/DEPS.md", "# Dependencies\n\nresolved on another machine\n")
+            expect(target_done(repo, "1.21.4") == [], f"a rewritten DEPS.md keeps the review current: {target_done(repo, '1.21.4')}")
+    case("finding 7", f7)
+
+    # ---- finding 11: --check-done writes nothing; a missing or stale prepared tree is said precisely, or re-prepared
+    # (no compile) where the caller holds the checkout
+    def f11():
+        with tempfile.TemporaryDirectory() as d:
+            repo, g = done_fixture(d)
+            chk = repo / ".multiversion/targets/1.21.4/INVENTORY-CHECK.json"
+            chk.unlink(missing_ok=True)
+            expect(target_done(repo, "1.21.4", write=False) == [] and not chk.exists(), "write=False: nothing written")
+            shutil.rmtree(repo / "build/mc1.21.4")
+            why = target_done(repo, "1.21.4", write=False)
+            expect(len(why) == 1 and "layer.py prepare" in why[0] and "no compile" in why[0],
+                   f"a fresh clone: the reason names the prepare command: {why}")
+            for f in ("layer.py", "prepare-sources.py"):
+                w(repo / ".multiversion/tools" / f, (ROOT / "templates/fork-layer/tools" / f).read_text(encoding="utf-8"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                why = target_done(repo, "1.21.4", prepare=True)
+            expect((repo / "build/mc1.21.4/mv/java/com/example/mod/A.java").is_file(), f"prepare=True re-prepares the tree: {why}")
+            past = (repo / "build/mc1.21.4/mv/java").stat().st_mtime - 3600
+            for f in [repo / "build/mc1.21.4/mv/java", *(repo / "build/mc1.21.4/mv/java").rglob("*")]:
+                os.utime(f, (past, past))        # built an hour before the overlay's last edit
+            why = target_done(repo, "1.21.4")
+            expect(any("older than" in x for x in why), f"sources newer than the prepared tree: stale: {why}")
+            with contextlib.redirect_stdout(io.StringIO()):
+                target_done(repo, "1.21.4", prepare=True)
+            expect(not any("older than" in x for x in target_done(repo, "1.21.4")), "re-prepared: current again")
+            buf, real_argv = io.StringIO(), sys.argv
+            chk.unlink(missing_ok=True)
+            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4", "--check-done"]
+            try:
+                with contextlib.redirect_stdout(buf):
+                    main()
+            finally:
+                sys.argv = real_argv
+            expect(not chk.exists(), f"--check-done only asks: no INVENTORY-CHECK.json written: {buf.getvalue()}")
+    case("finding 11", f11)
+
+    # ---- finding 12: a sweep stops on a refusal 18 (a stop, nothing built) and never reads an older run's summary
+    def f12():
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d); mv = repo / ".multiversion"
+            w(mv / "base.properties", "minecraft_version=1.21.1\n")
+            for t_, inh in (("1.21.3", None), ("1.21.4", "1.21.3"), ("1.21.5", "1.21.4")):
+                w(mv / "targets" / t_ / "target.properties", f"inherits={inh}\n" if inh else "x=1\n")
+            w(repo / "build/mc1.21.4/fork-port/fork-port.json", json.dumps({"stop": {"stage": "gates", "left": "OLD RUN"}}))
+            seen = []
+
+            def runner(cmd, env):
+                t_ = cmd[cmd.index("--target") + 1]; seen.append(t_)
+                if t_ == "1.21.3":
+                    w(repo / "build/mc1.21.3/fork-port/fork-port.json", json.dumps(
+                        {"stop": {"stage": "setup", "code": UNDONE_EXIT, "left": "library first: owner/lib 1.21.3"}}))
+                return UNDONE_EXIT
+            sa = argparse.Namespace(repo=str(repo), chain="1.21.3..1.21.5", from_stage="setup", to_stage=None, gates="ab",
+                                    base="x", modid=None, port_checkout=[], port_release=[], upstream=None,
+                                    accept_upstream_drift=False, target=None)
+            lines = []
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = sweep(sa, runner, out=lines.append)
+            expect(rc == UNDONE_EXIT and seen == ["1.21.3"] and "RED at setup" in "\n".join(lines),
+                   f"a library refusal (18 with a stop) is red: the sweep stops: {rc} {seen} {lines}")
+            seen.clear(); lines.clear(); sa.chain = "1.21.4..1.21.5"
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = sweep(sa, lambda cmd, env: (seen.append(1), 14)[1], out=lines.append)
+            expect(rc == 14 and "OLD RUN" not in "\n".join(lines), f"a child that wrote no summary: no stale reason: {lines}")
+    case("finding 12", f12)
+
+    # ---- findings 1 + 13 in drive(): the end message, and RESIDUE.md handling around layer-sync's section
+    def f13():
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"
+            w(td / "GATES.md", gates_md("1.21.4", "abc1234"))
+            sec = SYNC_RESIDUE_SECTION + "\n\n- `F.java` (digest abc): 1 hunk\n"
+            w(td / "RESIDUE.md", "# Residue: gates\n\nold fork-port part\n\n" + sec)
+            run = types.SimpleNamespace(repo=repo, tdir=td, jpath=repo / "fp.json", summary={"stages": {}},
+                                        save=lambda: None, resume_cmd=lambda s: f"resume {s}")
+            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", from_stage=None, to_stage=None, gates="ab")
+            g_ = globals(); keep = {k: g_[k] for k in ("execute", "drift_stop", "write_test_items", "target_done")}
+            g_.update(execute=lambda r, t: None, drift_stop=lambda r, a: None, write_test_items=lambda r, t, x: (0, None),
+                      target_done=lambda *x, **k: [])
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = drive(run, a_, [], list(STAGES))
+                txt = (td / "RESIDUE.md").read_text(encoding="utf-8") if (td / "RESIDUE.md").is_file() else ""
+                expect(rc == 0 and "fork-port 1.21.4: done" in buf.getvalue(), f"the end message: {buf.getvalue()}")
+                expect(sec.strip() in txt and "old fork-port part" not in txt, f"done keeps layer-sync's section: {txt!r}")
+                a_.to_stage = "moves"; buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    drive(run, a_, [], ["setup", "stage", "moves"])
+                expect("fork-port 1.21.4: stages setup, stage, moves ok" in buf.getvalue(), f"partial: {buf.getvalue()}")
+                a_.to_stage = None
+                g_["execute"] = lambda r, t: {"stage": "gates", "left": "1 gate(s) red", "stop": "1 gate(s) red", "code": 12,
+                                               "choices": ["fix it"]}
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = drive(run, a_, [], list(STAGES))
+                txt = (td / "RESIDUE.md").read_text(encoding="utf-8")
+                expect(rc == 12 and "1 gate(s) red" in txt and sec.strip() in txt, f"a stop's report keeps the section: {txt}")
+            finally:
+                g_.update(keep)
+    case("finding 13", f13)
+
+    # ---- finding 14: the fetch never prompts (GIT_TERMINAL_PROMPT=0, a short timeout) and says it could not fetch
+    def f14():
+        with tempfile.TemporaryDirectory() as d:
+            up, fork = pathlib.Path(d) / "authors", pathlib.Path(d) / "fork"
+            gu = git_repo(up); w(up / "A.java", "a\n"); gu("add", "-A"); gu("commit", "-qm", "authors 1")
+            subprocess.run(["git", "clone", "-q", "-o", "upstream", str(up), str(fork)], check=True, capture_output=True)
+            w(fork / ".multiversion/base.properties", f"upstream=upstream/main\nupstream_commit={gu('rev-parse', 'HEAD')}\n")
+            (fork / ".multiversion/targets/1.21.3").mkdir(parents=True)
+            real, calls = subprocess.run, []
+
+            def fake(cmd, *x, **k):
+                if "fetch" in cmd:
+                    calls.append(k)
+                    return CompletedProcess(cmd, 128, "", "fatal: could not read Username")
+                return real(cmd, *x, **k)
+            a_ = argparse.Namespace(repo=str(fork), target="1.21.3", base="x", port_release=[], upstream=None,
+                                    accept_upstream_drift=False)
+            subprocess.run = fake
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    st = drift_stop(fork, a_)
+            finally:
+                subprocess.run = real
+            env = (calls[0].get("env") or {}) if calls else {}
+            expect(calls and env.get("GIT_TERMINAL_PROMPT") == "0" and (calls[0].get("timeout") or 999) <= 60,
+                   f"the fetch cannot prompt and gives up quickly: {calls}")
+            expect(st is None and "could not fetch" in buf.getvalue(), f"says so and compares with the last fetch: {buf.getvalue()}")
+    case("finding 14", f14)
+
+    # ---- single-version: no .multiversion/ -- none of it runs, the same answers as before
+    def single():
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d); git_repo(repo)
+            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", base="x", port_release=["owner/lib@v2"], upstream=None,
+                                    accept_upstream_drift=False)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                st = drift_stop(repo, a_)
+            expect(st is None and not buf.getvalue() and not (repo / ".multiversion").exists(), "single-version: no drift check")
+            expect(target_done(repo, "1.21.4") == ["1.21.4 is not a target of this layer"], "single-version: no target")
+            expect(detect_upstream(repo) is None, "single-version clone with no upstream remote: nothing detected")
+    case("single-version", single)
     return ok
 
 

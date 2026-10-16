@@ -190,7 +190,7 @@ version; the layer branch must carry it to every target, and nothing fixes a mid
 8. **Move the buildout's freeze** once the layer PR is merged: on the updated layer branch, `python3
    tools/make-fork-layer.py freeze --repo DIR` (and `--library owner/repo@TAG` for a re-pinned library release), and
    commit `.multiversion/base.properties`. Only a layer that has a freeze (`upstream_commit=` there) needs it. `fork-port.py` compares every run to the end with
-   the authors' branch and stops with exit 19 while that branch holds commits the layer branch lacks; that exit, from a
+   the authors' branch and stops with exit 19 while that branch holds commits after the freeze that the layer branch lacks; that exit, from a
    fork-versions buildout, means "run this skill for the fork (and its libraries) first".
 
 ## Setup: run it nightly on the user's subscription
