@@ -170,6 +170,11 @@ with `--port-release`. Once the dependent's T passes Gate C against the library'
 branches; it reads the dependent's green GATES.md and its pin of this library's release) -- commit the library's
 `.port/T/DEPENDENTS.json`; that is what makes the library's version done.
 
+**Don't exceed your dependency.** A dependent's version T may cut its pre-release pinned to the library's T
+pre-release (that pair is what the owner plays; the library is only really tested through it). The dependent's T must
+not be promoted to a full Release, nor published, while the library release it pins is still a pre-release; promote
+both together (`port-ci.py promote --with-dependency owner/lib`, the library promoted too), or the library first.
+
 ## CI per version branch
 
 Each version branch gets the same workflow as a single-version port, at its version and with the full gate set:
@@ -285,10 +290,14 @@ goes up the chain this way:
 2. **The classes** (the tool's mechanical rules; the agent applies the policy behind them):
    - **mechanical** -- resolved by the tool: `git merge-file` of ours with the authors' change, over the version's rows,
      is clean (line drift, or a difference only the rows make).
-   - **optional integration** -- a file under `compat/` or `integration/`, or one calling `isLoaded(`. Absent at that
-     version (its `DEPS.md` records the mod dropped): the tool keeps ours (our stubbed calls work now, and the authors'
-     code arrives when the integration does) and logs it in `.port/DECISIONS.md`. Present: keep it, apply the authors'
-     change around it.
+   - **optional integration** -- a file under `compat/` or `integration/`, or one calling `isLoaded(`. **Absent** at that
+     version -- the file names a dependency (its module as a word, e.g. `isLoaded("<id>")`, or its group as a package)
+     that the version's `DEPS.md` records as `dropped:`; an unrelated dropped row does not count: the tool keeps ours
+     (our stubbed calls work now), logs it in `.port/DECISIONS.md`, and holds the authors' change as a **deferred**
+     `REMERGE.json` entry (`"deferred": "<group:module>"`). A deferred entry does not count against done while that
+     dependency stays dropped there; once the version's `DEPS.md` no longer drops it, the entry counts as open like any
+     other, so the authors' change is applied when the integration returns (answer it with `--apply-decisions`).
+     **Present**: keep it, apply the authors' change around it.
    - **port change** -- the file has a `STUBS.json` entry (a stand-in, an API rewrite of ours): keep ours, apply the
      authors' change around it.
    - **authors' fix** -- anything else: take their change, adapted through the rows, ours re-applied around it.

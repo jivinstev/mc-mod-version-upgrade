@@ -145,8 +145,12 @@ until its dependency's run is green, and it is then gated against the dependency
    dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
    PR as a blocking item, and re-pin then (`port-ci.py args --repo DIR` gives the current command; change the tag
    and asset of `--dep-jar` AND of any `--dep-jar-variant` together -- a mismatch is refused -- and rerun it).
-   A pre-release may be pinned for CI; the dependent's own release waits
-   for the dependency's to be promoted. The install manifest (`.github/port-install.json`) must follow: a promotion
+   **Don't exceed your dependency.** A dependent MAY cut its own pre-release pinned to the dependency's
+   pre-release -- do it: a library is only really tested through a dependent, so that pair of pre-releases is what
+   the owner plays. A dependent MUST NOT be promoted to a full Release, nor published, while a dependency it pins
+   is still a pre-release; promoting both together is fine (`port-ci.py promote --with-dependency <owner/repo>`, and
+   the dependency promoted too). `port-ci.py promote` refuses otherwise, and publishing refuses a dependency that is
+   not published. The install manifest (`.github/port-install.json`) must follow: a promotion
    through Port CI refreshes it by itself; a re-pin without a promotion does not, so once the re-pinned workflow is
    on the port branch run `python3 tools/port-manifest.py refresh --repo DIR --commit` there and push (it says
    "unchanged" when nothing moved; it refuses, writing nothing, when the newest full Release cannot be named).
@@ -169,8 +173,9 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    at -- with the authors' diff, our code at each affected version, its class and the default decision with its
    reasoning (fork-versions, "Planning the cascade"). With an escalated item it also writes `ISSUE.md`.
 2. **Apply, decide, ask once.** `cascade ... --apply --gates ab` runs the same merges on the real branches: mechanical
-   items resolved; a default the tool can carry out itself (an optional integration absent at that version: kept)
-   logged in `.port/DECISIONS.md`; every other decision file merged without the authors' change and recorded open in
+   items resolved; a default the tool can carry out itself (an optional integration whose dependency that version's
+   DEPS.md drops: ours kept, logged in `.port/DECISIONS.md`, the authors' change a deferred REMERGE.json entry that
+   counts against done again once the dependency returns); every other decision file merged without the authors' change and recorded open in
    `.port/<v>/REMERGE.json` (the entry travels up with the file) -- every other file and every version above goes
    on, gates included, and only a version with an open entry stays not done. Then:
    - the **default decisions** are yours (the fixer agent's), by the policy: keep the authors' design intent; their fix

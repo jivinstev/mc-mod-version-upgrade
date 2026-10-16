@@ -126,8 +126,11 @@ working, and the answer is to promote and publish the build that fixes it, not t
    `--dep-jar-variant` on each port that depends on it), and the person plays the jar each platform will receive --
    a `_cf` jar nobody launched can crash every start while the `_mr` jar is fine. The dev-classpath gates cannot see
    that (a ModLauncher service in the jar is only discovered in a real launch).
-2. **Promote the library first, then the port that needs it**, each with its own column in every ledger it is
-   checked against (a column carried from the previous tag cites the diff between the two tags). When the person
+2. **Promote the library first, then the port that needs it** (or both together), each with its own column in every
+   ledger it is checked against (a column carried from the previous tag cites the diff between the two tags). Don't
+   exceed your dependency: the port MAY cut pre-releases pinned to the library's pre-release -- the pair is what gets
+   played -- but it is never promoted or published while a library release it pins is still a pre-release
+   (`port-ci.py promote` refuses unless `--with-dependency owner/lib` says the library is promoted alongside). When the person
    played the port with a sibling's pre-release, that sibling is promoted too, with the same note -- otherwise the
    port's publish is refused because its dependency is not published.
 3. **CurseForge waits for approval.** A file on CurseForge cannot name a project that is not approved yet
