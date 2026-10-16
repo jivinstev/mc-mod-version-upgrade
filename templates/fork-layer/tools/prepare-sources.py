@@ -168,7 +168,9 @@ def java_files(root):
         for fn in files:
             if fn.endswith('.java'):
                 full = os.path.join(dirpath, fn)
-                yield full, os.path.relpath(full, root)
+                # '/' on every OS: drop lists and overlay paths are written with '/', and Windows' relpath
+                # would give '\\' -- a drop that never matched there
+                yield full, os.path.relpath(full, root).replace(os.sep, '/')
 
 
 def main():

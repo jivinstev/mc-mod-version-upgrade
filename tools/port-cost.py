@@ -137,7 +137,9 @@ def collect(modid, projects, path=None, labels=(), attr=None):
     `labels`: [(name, path)] -- each request is labelled with the first path its tool calls touch, and a request
     touching none inherits the previous one's label (its reading and thinking belong to that work).
     `attr`: an attribute() labeller -- replaces `labels`; each transcript file is labelled on its own."""
-    rx = re.compile(re.escape(path) if path else r"mods/" + re.escape(modid) + r"(?:/|\b)")
+    # the tool calls are matched as JSON text, where a Windows path's backslashes are doubled: match both forms
+    rx = re.compile("|".join(re.escape(f) for f in sorted({path, json.dumps(path)[1:-1]}, key=len, reverse=True))
+                    if path else r"mods/" + re.escape(modid) + r"(?:/|\b)")
     other_rx = re.compile(r"mods/([A-Za-z0-9_-]+)(?=/)")
     files = collections.defaultdict(list)                    # session -> [jsonl files]
     for f in projects.rglob("*.jsonl"):
