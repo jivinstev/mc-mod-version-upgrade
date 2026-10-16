@@ -899,7 +899,7 @@ def gates_problems(repo, root, t, ref, work, files):
     return [] if good else [f"GATES.md {why}"]
 
 
-def remerge_problems(repo, root, t, work):
+def remerge_problems(repo, root, t, work, files=None):
     out = []
     if work:
         u = git(root, "ls-files", "-u")
@@ -907,7 +907,32 @@ def remerge_problems(repo, root, t, work):
             out.append("an unresolved merge in the checkout (git ls-files -u lists conflicted files): resolve or abort it")
         if git(root, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
             out.append("a merge is in progress (MERGE_HEAD): finish or abort it")
-    out += fp().remerge_open(pathlib.Path(root), rec_dir(root, t))
+    out += remerge_open(root, t, files if files is not None else root_files(repo, root, work))
+    return out
+
+
+def remerge_open(root, t, files):
+    """The open entries of .port/<t>/REMERGE.json: a file the authors changed that this version could not take by
+    itself (the cascade, or the layer's re-merge before the migration), still with the bytes it had then -- judged on
+    the blob form ({path: bytes}), so a CRLF checkout reads as git stores it. -> one reason each."""
+    f = rec_dir(root, t) / "REMERGE.json"
+    if not f.is_file():
+        return []
+    rel = f"{REC}/{t}/REMERGE.json"
+    try:
+        conflicts = jload(f.read_bytes()).get("conflicts", [])
+        assert isinstance(conflicts, list)
+    except (ValueError, AttributeError, AssertionError):
+        return [f"{rel} is not readable: cannot tell which files the authors' change did not merge into"]
+    out = []
+    for c in conflicts:
+        path = str((c or {}).get("overlay", ""))
+        if not path or path not in files:
+            continue          # the file is gone: removed by a person, nothing left to merge into
+        if hashlib.sha256(files[path]).hexdigest() == str(c.get("digest", "")).lower():
+            out.append(f"the authors' change did not merge into {path} ({c.get('reason') or 'conflict'}, "
+                       f"{c.get('since') or '?'}; {rel}): apply it by hand through this version's rows (the diff is in "
+                       f"{rel}), commit, then remove the entry and re-review the file")
     return out
 
 
@@ -961,7 +986,7 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
             out.append(f"{n_open} unreviewed stub signal(s) in STUBS.json")
         items = review_items(repo, root, t, ref, work, files, mech)
         out += review_problems(repo, root, t, ref, work, files, items)
-        out += remerge_problems(repo, root, t, work)
+        out += remerge_problems(repo, root, t, work, files)
         if not (rec_dir(root, t) / "TEST-ITEMS.md").is_file():
             out.append(f"manual-test items not generated (TEST-ITEMS.md): python3 tools/fork-port.py --repo {repo} "
                        f"--target {t} --write-test-items")
@@ -1697,10 +1722,26 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     java = sorted(f for f in changed if re.match(r"^src/[^/]+/java/.+\.java$", f))
     # the authors' own change since t last took the port branch: a file the PARENT does not carry (it drops it, or
     # removes its mixin) never shows in the parent's merge, yet t has it and must take the change (review finding H2)
-    port_java = [] if port_old == port_new else sorted(
+    port_diff = [] if port_old == port_new else [
         f for f in git(repo, "diff", "--name-only", port_old, port_new).stdout.splitlines()
-        if re.match(r"^src/[^/]+/java/.+\.java$", f) and f not in java and blob_at(repo, parent_ref, f) is None)
+        if f not in changed and blob_at(repo, parent_ref, f) is None]
+    port_java = sorted(f for f in port_diff if re.match(r"^src/[^/]+/java/.+\.java$", f))
+    port_res = sorted(f for f in port_diff if re.match(r"^src/[^/]+/resources/", f))
     resolved, unmerged = set(), []
+    for f in port_res:              # a resource the parent dropped and t keeps: no rows, so t's copy is the authors' or not
+        t_pre, o, n = blob_at(repo, pre, f), blob_at(repo, port_old, f), blob_at(repo, port_new, f)
+        if t_pre is None:
+            continue                                            # dropped on t, or new and dropped by the parent: not added
+        if t_pre == o:
+            if n is None:
+                git(work, "rm", "-q", "-f", "--", f)
+            else:
+                (work / f).parent.mkdir(parents=True, exist_ok=True)
+                (work / f).write_bytes(n)
+                git(work, "add", "--", f)
+            notes.append(f"{f}: the authors' change taken ({parent_name} does not carry the file)")
+        else:
+            unmerged.append(f)
     if java or port_java:
         read_new = reader_of_root(work) if not conflicted & {f for f in changed if f.startswith(REC + "/")} else reader_of_ref(repo, pre)
         ch_new = chain_read(read_new, t)
@@ -1754,6 +1795,11 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                          f"hand: {', '.join(unmerged[:4])}")
     props = parse_props(read_file(work / REC / t / BRANCH_PROPS))
     for f in sorted(conflicted - resolved):
+        if re.match(r"^src/[^/]+/resources/", f) and blob_at(repo, pre, f) is None and blob_at(repo, port_old, f) is not None:
+            git(work, "rm", "-q", "-f", "--", f)                 # t dropped the resource, as for a .java file: stays dropped
+            resolved.add(f)
+            notes.append(f"{f}: dropped on {t} (the authors changed it): kept dropped")
+            continue
         theirs = blob_at(repo, parent_ref, f)
         name = f.rsplit("/", 1)[-1]
         if theirs is None:
@@ -1784,16 +1830,38 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             resolved.add(f)
             notes.append(f"{f}: {t}'s own kept (regenerate it on {branch_name(t)} with tools/fork-branches.py ci if {parent_name} "
                          "changed it on purpose)")
-    left = sorted((conflicted - resolved) | set(unmerged))
+    left = sorted(conflicted - resolved)
+    pending = {f: git(repo, "diff", port_old, port_new, "--", f).stdout for f in sorted(set(unmerged))}
     if left:
         git(work, "merge", "--abort")
-        return False, notes, left
+        return False, notes, left, pending
+    if pending:
+        # the merge itself is clean, but these files the authors changed reach t through no merge (the parent does not
+        # carry them) and t changed them by hand: the merge is committed with t's file as it was, and each is an open
+        # REMERGE.json entry with the authors' diff -- t is not done until a person applies it (the next cascade's
+        # port range starts after this one, so it would never be offered again)
+        rm = work / REC / t / "REMERGE.json"
+        try:
+            data = jload(rm.read_bytes()) if rm.is_file() else {}
+        except ValueError:
+            data = {}
+        conflicts = [c for c in data.get("conflicts", []) if c.get("overlay") not in pending]
+        for f, diff in pending.items():
+            body = blob_at(repo, pre, f) or b""
+            conflicts.append({"overlay": f, "digest": hashlib.sha256(body).hexdigest(),
+                              "reason": f"the authors changed it; {parent_name} does not carry it and {t} changed it by hand",
+                              "since": f"{port_old[:12]}..{port_new[:12]}", "diff": diff})
+        data["conflicts"] = conflicts
+        rm.parent.mkdir(parents=True, exist_ok=True)
+        rm.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        git(work, "add", "--", rm.relative_to(work).as_posix())
+        notes.append(f"{len(pending)} file(s) recorded in .port/{t}/REMERGE.json with the authors' diff: apply by hand")
     r = git(work, "commit", "-q", "--no-edit", "-m", msg)
     if r.returncode:
         if "nothing to commit" in r.stdout + r.stderr:
-            return True, notes + ["nothing changed"], []
-        return False, notes + [f"commit failed: {(r.stdout + r.stderr).strip()[-200:]}"], []
-    return True, notes, []
+            return True, notes + ["nothing changed"], [], pending
+        return False, notes + [f"commit failed: {(r.stdout + r.stderr).strip()[-200:]}"], [], pending
+    return True, notes, [], pending
 
 
 def worktree_for(repo, t):
@@ -1877,16 +1945,33 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None):
         work, why = worktree_for(repo, t)
         if work is None:
             rows.append((t, "STOPPED", why)); break
-        ok, notes, left = merge_up(repo, work, t, pname, pref, port, pv, say)
+        ok, notes, left, pending = merge_up(repo, work, t, pname, pref, port, pv, say)
         for n in notes:
             say(f"fork-branches: cascade: {t}: {n}")
+
+        def show_pending():
+            for f, diff in pending.items():
+                say(f"fork-branches: the authors' change to {f} ({pname} does not carry it, {t} changed it by hand) -- "
+                    f"apply it by hand through {t}'s rows (the diff is in the port branch's names):")
+                for ln in diff.splitlines():
+                    say("    " + ln)
         if not ok:
-            rows.append((t, "STOPPED: conflict", ", ".join(left[:6]) or "; ".join(notes[-1:])))
+            rows.append((t, "STOPPED: conflict", ", ".join((left or list(pending))[:6]) or "; ".join(notes[-1:])))
             say(f"fork-branches: cascade STOPPED at {t}: {pname} does not merge into {branch_name(t)} by itself -- "
-                f"{', '.join(left[:6])}. Merge it by hand (git checkout {branch_name(t)} && git merge {pname}), resolve, "
-                f"commit, then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}")
+                f"{', '.join(left[:6])}. Merge it by hand (git checkout {branch_name(t)} && git merge {pname}), resolve"
+                + (", apply the authors' change below to each file listed (no merge brings it), " if pending else ", ")
+                + f"commit, then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}")
+            show_pending()
             break
         merged.append(t)
+        if pending:
+            rows.append((t, "STOPPED: merged, the authors' change to re-apply by hand", ", ".join(list(pending)[:6])))
+            say(f"fork-branches: cascade STOPPED at {t}: merged, but the authors' change to {', '.join(list(pending)[:6])} "
+                f"reaches {t} through no merge and {t} changed the file by hand. On {branch_name(t)}: apply each diff "
+                f"below through {t}'s rows, commit, remove its entry from .port/{t}/REMERGE.json (the done check lists it "
+                f"until the file changes), commit, then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}")
+            show_pending()
+            break
         rc = runner(work, t, gates, say)
         if rc not in (0, 17, UNDONE_EXIT):
             rows.append((t, f"merged, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
@@ -2673,8 +2758,10 @@ def self_check():
                f"the fix is 1.21.3's change: on 1.21.4 the file equals its parent's, so no row there: {why}")
         why3 = target_done(r, "1.21.3")
         expect("no verdict: changed src/main/java/com/example/mod/Plain.java" in why3, f"... and a row on 1.21.3, where it was made: {why3}")
-        # ... but where 1.21.5 changed that class by hand, the authors' change cannot arrive through 1.21.4: a stop
+        # ... but where 1.21.5 changed that class by hand, the authors' change cannot arrive through 1.21.4: the merge is
+        # committed with 1.21.5's file as it was, the authors' diff recorded open in REMERGE.json and printed, and a stop
         w5, _why = worktree_for(r, "1.21.5")
+        pre_edit5 = resolve_branch(r, "neoforge-1.21.5")
         (w5 / amixin).write_text((w5 / amixin).read_text(encoding="utf-8").replace("fixed();", "fixed(); mine();"), encoding="utf-8")
         git(w5, "commit", "-qam", "1.21.5's own AMixin edit", check=True)
         g("checkout", "-q", "neoforge-1.21.1")
@@ -2683,9 +2770,28 @@ def self_check():
         g("checkout", "-q", "neoforge-1.21.x")
         before5 = resolve_branch(r, "neoforge-1.21.5")
         rc, out = _quiet(cascade, r, "port..1.21.5", "none")
-        expect(rc == 1 and "STOPPED at 1.21.5" in out and amixin in out and resolve_branch(r, "neoforge-1.21.5") == before5,
-               f"the authors' change to a class the parent does not carry and 1.21.5 changed by hand: a stop, nothing committed: {out[-600:]}")
-        git(w5, "reset", "-q", "--hard", "HEAD~1")
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        rm5 = jload(f5.get(".port/1.21.5/REMERGE.json", b"{}")).get("conflicts", [])
+        expect(rc == 1 and "STOPPED at 1.21.5" in out and amixin in out and "+" in out and "again();" in out
+               and resolve_branch(r, "neoforge-1.21.5") != before5 and b"mine();" in f5[amixin] and b"again();" not in f5[amixin]
+               and [c["overlay"] for c in rm5] == [amixin] and "again();" in rm5[0].get("diff", ""),
+               f"the authors' change to a class the parent does not carry and 1.21.5 changed by hand: merged without it, "
+               f"recorded open in REMERGE.json with the diff, printed, a stop: {out[-700:]}")
+        why = target_done(r, "1.21.5")
+        expect(any("did not merge into " + amixin in w for w in why), f"... and 1.21.5 is not done while it is open: {why}")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+        expect(rc == 0 and "| 1.21.5 | up to date" in out and any("did not merge into " + amixin in w for w in target_done(r, "1.21.5")),
+               f"a later cascade has nothing more to merge, and the entry stays open (the change is not lost): {out[-300:]}")
+        # the person applies it through 1.21.5's rows, removes the entry, commits: the cascade goes on, nothing open
+        (w5 / amixin).write_text((w5 / amixin).read_text(encoding="utf-8").replace("fixed(); mine();", "fixed(); again(); mine();"),
+                                 encoding="utf-8")
+        (w5 / ".port/1.21.5/REMERGE.json").write_text(json.dumps({"conflicts": []}) + "\n", encoding="utf-8")
+        git(w5, "commit", "-qam", "1.21.5: the authors' AMixin change applied by hand", check=True)
+        why = target_done(r, "1.21.5")
+        rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none")
+        expect(not any("did not merge into" in w for w in why) and rc == 0 and "| 1.21.5 | up to date" in out,
+               f"applied and the entry removed: nothing open, the cascade resumes: {why} {out[-200:]}")
+        git(w5, "reset", "-q", "--hard", pre_edit5)
         before5 = resolve_branch(r, "neoforge-1.21.5")
         # a conflict in a file a person changed stops the cascade there, the merge undone
         g("checkout", "-q", "neoforge-1.21.1")
@@ -2806,6 +2912,21 @@ def self_check():
             u3 = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))["src/main/java/com/example/mod/UsesHelper.java"]
             expect(rc == 0 and b"newer.Shared" in u3 and b"later" not in u3,
                    f"sync-shared from a checkout of the port branch ahead: the rows-only file re-made from 1.21.3's own port commit: {u3!r} {out[-300:]}")
+        # a resource 1.21.4 deletes (kept dropped there when the authors change it) and 1.21.5 keeps still takes the
+        # authors' later change (no merge carries it)
+        rj = "src/main/resources/data/examplemod/recipe/r.json"
+        w4, _w = worktree_for(r, "1.21.4")
+        git(w4, "rm", "-q", rj, check=True); git(w4, "commit", "-qm", "1.21.4 drops the recipe", check=True)
+        rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none")
+        w5, _w = worktree_for(r, "1.21.5")
+        git(w5, "checkout", "neoforge-1.21.1~1", "--", rj, check=True)
+        git(w5, "commit", "-qm", "1.21.5 keeps the recipe", check=True)
+        (r / rj).write_text('{"type": "authors-new"}\n', encoding="utf-8")
+        g("commit", "-qam", "authors: the recipe changed")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        expect(rc == 0 and f5.get(rj) == b'{"type": "authors-new"}\n' and rj not in ref_files(r, resolve_branch(r, "neoforge-1.21.4")),
+               f"a resource the parent dropped and 1.21.5 keeps: the authors' change reaches 1.21.5: {f5.get(rj)!r} {out[-400:]}")
     if not os.environ.get("FB_SELF_CHECK_CRLF"):
         # the same checks with core.autocrlf=true (a Windows checkout's default): a version branch checked out with CRLF
         # line endings must read as its blobs (root_files), and a layer's prepare must see the blobs' bytes (Layer)
