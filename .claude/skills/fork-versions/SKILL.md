@@ -173,7 +173,7 @@ rules (edit only `.multiversion/targets/<t>/`, generic shapes to the shared libr
 Resume that agent only for the same target's next round (its Gate C phases, a stub review); never carry one agent
 from target to target. Its context compounds: measured, one fixer resumed across six targets of a dependent fork
 grew to ~650k tokens and cost about $120 -- most of it re-reading earlier targets' work. What a later target
-needs from an earlier one is already in the tree (the parent's overlays, `STUBS.json` reviews it inherits) and in the
+needs from an earlier one is already in the tree (the parent's overlays, `STUBS.json` reviews it inherits -- only while the flagged file hooks the same mixin targets, `@At`s and events; a changed hook set reopens the entry as `re-justify: hook targets changed ...`) and in the
 catalogue entries the earlier fixer wrote.
 
 **Clean-room rule for shared helpers.** A fixer that writes or rewrites a shared helper re-implementing a third-party

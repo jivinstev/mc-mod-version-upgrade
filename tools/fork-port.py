@@ -687,12 +687,95 @@ def unreviewed_stubs(tdir):
     return [e for e in have if isinstance(e, dict) and not e.get("reviewed")]
 
 
-def record_stubs(tdir, found, parents=()):
-    """Merge this run's stub signals into tdir/STUBS.json ([{file, why, reviewed}]) and return every entry. An entry a
-    reviewer marked ("reviewed": "<why the change is right>") stays reviewed unless a later run flags the file again
-    for a new reason. A NEW entry whose every signal, word for word (counts included), was already reviewed for the
-    same file in a target this one inherits (parents: their target dirs, nearest first) takes that review, marked as
-    inherited: the same loss re-flagged one version on is not a new question (measured: six of a target's eight)."""
+INJECTORS = r'(?:Inject|Redirect|ModifyArg|ModifyArgs|ModifyVariable|ModifyConstant|ModifyReturnValue|' \
+            r'ModifyExpressionValue|WrapOperation|WrapWithCondition)'
+
+
+def _paren(text, i):
+    """The text inside the parenthesis that opens at text[i] (balanced, strings skipped)."""
+    depth, j, q = 0, i, None
+    while j < len(text):
+        c = text[j]
+        if q:
+            if c == "\\":
+                j += 1
+            elif c == q:
+                q = None
+        elif c in "\"'":
+            q = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1:j]
+        j += 1
+    return text[i + 1:]
+
+
+def hook_targets(text):
+    """What a file hooks, as a sorted list of one-line strings: each mixin class target (@Mixin), each injector
+    (@Inject/@Redirect/@Modify*/@Wrap*) as its kind, method= and every @At (value, target, shift, ordinal...), each
+    @Overwrite by name, and each @SubscribeEvent handler by its event type. A stub review is a judgement about where an
+    effect is hooked, and this is that: when it differs, the review no longer speaks for the file (measured: a "moved,
+    same effect" review inherited across six targets after the handler had moved from HEAD/TAIL injections to an event
+    that does not fire in every dimension). Handler BODIES are deliberately not hashed: an overlay's body carries that
+    target's renames, so a hash would change on nearly every hop and reopen every review (losing the measured saving)
+    while saying nothing about where the code runs. Whitespace and comments are ignored."""
+    ss = load("singleshot", "singleshot.py")
+    t = ss.COMMENTS.sub("", text or "")
+    sq = lambda x: re.sub(r"\s+", "", x)
+    out = []
+    for m in re.finditer(r"@Mixin\s*\(", t):
+        body = _paren(t, m.end() - 1)
+        out += [f"@Mixin {c}" for c in re.findall(r"([\w.$]+)\.class", body)]
+        tg = re.search(r'\btargets\s*=\s*(\{[^}]*\}|"[^"]*")', body)
+        out += [f"@Mixin {c}" for c in re.findall(r'"([^"]*)"', tg.group(1))] if tg else []
+    for m in re.finditer(r"@(" + INJECTORS + r")\s*\(", t):
+        body = _paren(t, m.end() - 1)
+        meth = re.search(r'\bmethod\s*=\s*(\{[^}]*\}|"[^"]*")', body)
+        methods = ",".join(sorted(re.findall(r'"([^"]*)"', meth.group(1)))) if meth else ""
+        ats = []
+        for a in re.finditer(r"@At\s*\(", body):
+            at = sq(_paren(body, a.end() - 1))
+            ats.append("@At(" + ("value=" + at if at.startswith('"') else at) + ")")   # @At("X") is @At(value="X")
+        out.append(f"@{m.group(1)} method={methods} " + " ".join(sorted(ats)))
+    out += [f"@Overwrite {n}" for n in re.findall(r"@Overwrite\b(?:\s+@[\w.]+(?:\([^)]*\))?)*\s+(?:(?:public|private|"
+                                                   r"protected|static|final)\s+)*[\w.<>\[\], ?]+\s+(\w+)\s*\(", t)]
+    out += [f"@SubscribeEvent {e}" for e in re.findall(
+        r"@SubscribeEvent\b(?:\s*\([^)]*\))?(?:\s+@[\w.]+(?:\([^)]*\))?)*\s+(?:(?:public|private|protected|static|final|"
+        r"synchronized)\s+)*[\w.<>\[\], ?]+\s+\w+\s*\(\s*(?:final\s+)?([\w.$]+)", t)]
+    return sorted(out)
+
+
+def _hooks_of(repo, rel_file):
+    """hook_targets of repo/rel_file; a file that is gone hooks nothing ([]); None when there is no repo to look in."""
+    if repo is None:
+        return None
+    f = pathlib.Path(repo) / rel_file
+    try:
+        return hook_targets(f.read_text(encoding="utf-8", errors="replace")) if f.is_file() else []
+    except OSError:
+        return None
+
+
+def stub_line(e):
+    """One residue line for a STUBS.json entry: its file, its signals and, when an inherited review was reopened, why."""
+    return f"stub: {e.get('file')}: {str(e.get('why', ''))[:200]}" + (f" -- {e['recheck'][:300]}" if e.get("recheck") else "")
+
+
+def record_stubs(tdir, found, parents=(), repo=None):
+    """Merge this run's stub signals into tdir/STUBS.json ([{file, why, reviewed, hooks}]) and return every entry. An
+    entry a reviewer marked ("reviewed": "<why the change is right>") stays reviewed unless a later run flags the file
+    again for a new reason. A NEW entry whose every signal, word for word (counts included), was already reviewed for
+    the same file in a target this one inherits (parents: their target dirs, nearest first) takes that review, marked
+    as inherited: the same loss re-flagged one version on is not a new question (measured: six of a target's eight).
+    With repo (the fork checkout the entries' paths are relative to), each entry also records "hooks", the file's
+    hook_targets() when it was recorded -- what a review of it is made against -- and an inherited review is taken
+    only when this target's file hooks the same: otherwise the entry stays unreviewed with "inherited_review" and
+    "recheck" ("re-justify: hook targets changed from ... to ..."). A parent entry recorded before "hooks" existed is
+    compared through the parent's file on disk; only when that file is gone too is the hook set unknown, and the
+    review is inherited as before. Without repo, nothing about hooks is read or written."""
     path = tdir / "STUBS.json"
     try:
         have = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
@@ -713,11 +796,26 @@ def record_stubs(tdir, found, parents=()):
         if e is None or s["why"] not in e.get("why", ""):
             why = s["why"] if e is None else e["why"] + "; " + s["why"]
             src = prior.get(rel(s["file"]))
-            inherited = None
+            new = {"file": s["file"], "why": why, "reviewed": None}
+            now = _hooks_of(repo, s["file"])
+            if now is not None:
+                new["hooks"] = now
             if src and all(part in src[1]["why"] for part in why.split("; ")):
                 r = src[1]["reviewed"]
-                inherited = r if r.startswith("(inherited") else f"(inherited from {src[0]}) {r}"
-            by[s["file"]] = {"file": s["file"], "why": why, "reviewed": inherited}
+                r = r if r.startswith("(inherited") else f"(inherited from {src[0]}) {r}"
+                then = src[1].get("hooks")
+                if then is None and repo is not None and (pathlib.Path(repo) / src[1]["file"]).is_file():
+                    then = _hooks_of(repo, src[1]["file"])      # recorded before "hooks": the parent's file as it is
+                if now is not None and then is not None and sorted(then) != sorted(now):
+                    new.update({"inherited_review": r, "recheck": f"re-justify: hook targets changed from "
+                                f"{'; '.join(sorted(then)) or '(none)'} to {'; '.join(now) or '(none)'}"})
+                else:
+                    new["reviewed"] = r
+            by[s["file"]] = new
+        elif repo is not None and not e.get("reviewed") and not e.get("recheck"):
+            now = _hooks_of(repo, s["file"])                   # still open: a review will be made against the file as it is now
+            if now is not None:
+                e["hooks"] = now
     out = sorted(by.values(), key=lambda e: e["file"])
     if out:
         tdir.mkdir(parents=True, exist_ok=True)
@@ -1227,10 +1325,10 @@ class Run:
             open_ = [e for e in record_stubs(self.tdir, [x for e in (loop_events(flog, all_runs=True) if flog.is_file() else [])
                                                          if e.get("event") == "stub-signals" for x in e.get("files", [])]
                                                     + overlay_stubs(self.repo, self.tdir),
-                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]])
+                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]], repo=self.repo)
                      if not e.get("reviewed")]
             if open_:
-                detail = [f"stub: {e['file']}: {e['why'][:200]}" for e in open_]
+                detail = [stub_line(e) for e in open_]
                 return {"stop": f"0 errors, but {len(open_)} unreviewed stub signal(s) from earlier runs (STUBS.json)",
                         "code": 10, "errors": 0, "detail": detail, "view": detail,
                         "choices": ["port each flagged file's lost behaviour, or set its \"reviewed\" in "
@@ -1258,7 +1356,7 @@ class Run:
         # forget the previous run's (measured: ten flagged files vanished from RESIDUE.md on the next --from-stage loop)
         stubs_all = record_stubs(self.tdir, [s for e in loop_events(flog, all_runs=True) if e.get("event") == "stub-signals"
                                              for s in e.get("files", [])] + overlay_stubs(self.repo, self.tdir),
-                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]])
+                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]], repo=self.repo)
         if n == 0:
             # 0 errors is not done when a worker got there by emptying code or by forking the shared library: the
             # loop's own stub audit, and any overlay of a shared helper, are residue (measured on the first
@@ -1266,7 +1364,7 @@ class Run:
             stubs = [s for s in stubs_all if not s.get("reviewed")]
             shared = self.shared_helper_overlays()
             if stubs or shared:
-                detail = [f"stub: {s['file']}: {s['why'][:200]}" for s in stubs] + \
+                detail = [stub_line(s) for s in stubs] + \
                          [f"shared helper overlaid in this fork: {f}" for f in shared]
                 res.update({"stop": f"0 errors, but {len(stubs)} stub signal(s) and {len(shared)} overlay(s) of the "
                                     f"shared library", "code": 10, "detail": detail, "view": detail,
@@ -1439,7 +1537,7 @@ class Run:
             # past it (--from-stage audit/gates) reported a target done with one open (measured on a 26.x target)
             open_ = unreviewed_stubs(self.tdir)
             if open_:
-                detail = [f"stub: {s['file']}: {s['why'][:200]}" for s in open_]
+                detail = [stub_line(e) for e in open_]
                 return {"stop": f"{len(passed)} gate(s) green{note}, but {len(open_)} unreviewed stub signal(s) in STUBS.json",
                         "code": 10, "detail": detail, "view": detail,
                         "choices": ["port each flagged method to the new signature, or, when the change is right, set its "
@@ -1572,7 +1670,7 @@ def drive(run, a, skipped, todo):
     if open_:
         # every successful end asks, not only the gates stage: a run resumed past it (--from-stage cost) with an older
         # GATES.md on record otherwise ended done with an unreviewed stub signal open
-        detail = [f"stub: {e.get('file')}: {str(e.get('why', ''))[:200]}" for e in open_]
+        detail = [stub_line(e) for e in open_]
         stop = {"stage": todo[-1], "left": f"{len(open_)} unreviewed stub signal(s) in STUBS.json", "code": 10,
                 "detail": detail, "view": detail,
                 "choices": ["port each flagged method to the new signature, or, when the change is right, set its "
@@ -2203,6 +2301,65 @@ def self_check():
         got = record_stubs(mv / "1.21.10", [{"file": ".multiversion/targets/1.21.10/java/X.java", "why": "removes 4 call(s)"}],
                            parents=[b, a])
         expect(got[0]["reviewed"] is None, "control: a different count is a new question")
+        expect(all("hooks" not in e for e in json.loads((b / "STUBS.json").read_text(encoding="utf-8"))),
+               "without a repo nothing about hooks is read or written: STUBS.json keeps its earlier shape")
+    # ---- an inherited review is re-opened when what the file hooks changed (issue #111); the same hooks keep it
+    expect(hook_targets('@Mixin(LevelRenderer.class) class M { // @Inject(method = "gone", at = @At("HEAD"))\n'
+                        '@Inject(method = "renderLevel", at = @At("HEAD")) void a(CallbackInfo ci) { x(); } }')
+           == hook_targets('@Mixin( LevelRenderer.class )\nclass M {\n  @Inject(method="renderLevel",\n   at=@At(value = "HEAD"))\n'
+                           '  private void a(CallbackInfo c) { y(); z(); } }')
+           == ["@Inject method=renderLevel @At(value=\"HEAD\")", "@Mixin LevelRenderer"],
+           f"hooks ignore comments, layout, bodies and @At's value= shorthand: {hook_targets('@Mixin(A.class) class M {}')}")
+    expect(hook_targets('@Redirect(method = {"b", "a"}, at = @At(value = "INVOKE", target = "Lx;y()V", ordinal = 1)) void r() {}\n'
+                        '@SubscribeEvent public static void on(final RenderLevelStageEvent e) {}\n@Overwrite public void tick() {}')
+           == ["@Overwrite tick", "@Redirect method=a,b @At(value=\"INVOKE\",target=\"Lx;y()V\",ordinal=1)",
+               "@SubscribeEvent RenderLevelStageEvent"], "redirect targets, event handlers and overwrites are hooks")
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); mv = repo / ".multiversion/targets"
+        mix = lambda at, meth="renderLevel", body="a();": ("@Mixin(LevelRenderer.class)\nclass LrMixin {\n"
+                                                         f'  @Inject(method = "{meth}", at = @At("{at}"))\n'
+                                                         f"  void h(CallbackInfo ci) {{ {body} }}\n}}\n")
+        sig = "removes 2 mixin injection handler(s): check each still applies somewhere, with the same effect"
+        def target(t, text, inh=()):
+            f = mv / t / "java/m/LrMixin.java"; f.parent.mkdir(parents=True, exist_ok=True)
+            if text is None:
+                f.unlink(missing_ok=True)
+            else:
+                f.write_text(text, encoding="utf-8")
+            return record_stubs(mv / t, [{"file": f".multiversion/targets/{t}/java/m/LrMixin.java", "why": sig}],
+                                parents=[mv / x for x in inh], repo=repo)
+        got = target("1.21.3", mix("HEAD"))
+        expect(got[0]["reviewed"] is None and got[0]["hooks"] == ["@Inject method=renderLevel @At(value=\"HEAD\")",
+                                                                 "@Mixin LevelRenderer"], f"a new entry records its hooks: {got}")
+        e = json.loads((mv / "1.21.3/STUBS.json").read_text(encoding="utf-8")); e[0]["reviewed"] = "moved, same effect"
+        (mv / "1.21.3/STUBS.json").write_text(json.dumps(e), encoding="utf-8")
+        got = target("1.21.4", mix("HEAD", body="b(); c();"), ["1.21.3"])
+        expect(got[0]["reviewed"] == "(inherited from 1.21.3) moved, same effect" and not got[0].get("recheck")
+               and unreviewed_stubs(mv / "1.21.4") == [], f"same signal, same hooks (body renamed): inherited: {got}")
+        got = target("1.21.5", mix("TAIL"), ["1.21.4", "1.21.3"])
+        expect(got[0]["reviewed"] is None and got[0]["inherited_review"] == "(inherited from 1.21.3) moved, same effect"
+               and got[0]["recheck"].startswith("re-justify: hook targets changed from @Inject method=renderLevel "
+                                                "@At(value=\"HEAD\")") and "@At(value=\"TAIL\")" in got[0]["recheck"]
+               and [x["file"] for x in unreviewed_stubs(mv / "1.21.5")] == [got[0]["file"]]
+               and "re-justify" in stub_line(got[0]), f"same signal, changed @At: flagged and unreviewed: {got}")
+        got2 = target("1.21.5", mix("TAIL"), ["1.21.4", "1.21.3"])
+        expect(got2 == got, "a resumed run keeps the flag rather than re-inheriting")
+        got = target("1.21.6", mix("HEAD", meth="renderSky"), ["1.21.4", "1.21.3"])
+        expect(got[0]["reviewed"] is None and "renderSky" in got[0]["recheck"], f"same signal, changed method: flagged: {got}")
+        # a STUBS.json from before "hooks": the parent's file on disk is what its review was made against
+        (mv / "1.21.7").mkdir(); (mv / "1.21.7/java/m").mkdir(parents=True)
+        (mv / "1.21.7/java/m/LrMixin.java").write_text(mix("HEAD"), encoding="utf-8")
+        (mv / "1.21.7/STUBS.json").write_text(json.dumps([{"file": ".multiversion/targets/1.21.7/java/m/LrMixin.java",
+                                                            "why": sig, "reviewed": "moved, same effect"}]), encoding="utf-8")
+        expect(target("1.21.8", mix("HEAD"), ["1.21.7"])[0]["reviewed"] == "(inherited from 1.21.7) moved, same effect",
+               "an old entry without hooks, the same hooks on disk: inherited")
+        expect(target("1.21.9", mix("RETURN"), ["1.21.7"])[0]["recheck"].startswith("re-justify"),
+               "an old entry without hooks, changed hooks on disk: flagged, never silently passed")
+        (mv / "1.21.7/java/m/LrMixin.java").unlink()
+        expect(target("1.21.10", mix("RETURN"), ["1.21.7"])[0]["reviewed"] == "(inherited from 1.21.7) moved, same effect",
+               "an old entry whose file is gone too: hooks unknown, inherited as before")
+        expect(target("1.21.11", None, ["1.21.3"])[0]["recheck"].endswith("to (none)"),
+               "the file gone on the inheriting target: it hooks nothing, flagged")
     # ---- the shared libraries' access-transformer lines reach a direct jump's AT, once, comment aside
     with tempfile.TemporaryDirectory() as d:
         mv = pathlib.Path(d)
