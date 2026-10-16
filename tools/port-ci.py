@@ -771,6 +771,12 @@ def self_check():
     extra = ljobs.split("\n  layer-gates-extra:\n", 1)[1]
     ok &= "has_full == 'true'" in extra.split("steps:", 1)[0] and "fromJson(needs.layer-plan.outputs.full_matrix)" in extra
     ok &= "fromJson(needs.layer-plan.outputs.matrix)" in lay and "java-version: ${{ matrix.java }}" in lay
+    # every needs.<job>.outputs.<name> a job reads is one <job> declares: GitHub reads an undeclared output as '', so a
+    # missing line silently skips its job (layer-gates-extra never ran while has_full/full_matrix were undeclared)
+    for wf in (plain, lay, dep):
+        for job, name in set(re.findall(r"needs\.([\w-]+)\.outputs\.(\w+)", wf)):
+            head = wf.split(f"\n  {job}:\n", 1)[1].split("\n    steps:", 1)[0]
+            ok &= f"\n      {name}: ${{{{ steps." in head
     ok &= "run: |" in ljobs and "${{ needs" not in "\n".join(l for l in ljobs.splitlines() if l.lstrip().startswith(("python3", "extra=", "git fetch", "curl")))   # exec-ok: line prefixes to match, not a command
     for bad in ("neoforge-1.21.1", "x y"):         # the port branch itself, or not a branch name
         try:

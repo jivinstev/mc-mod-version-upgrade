@@ -350,6 +350,8 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       shipped: ${{ steps.plan.outputs.shipped }}
       preview: ${{ steps.plan.outputs.preview }}
+      has_full: ${{ steps.plan.outputs.has_full }}
+      full_matrix: ${{ steps.plan.outputs.full_matrix }}
     steps:
       - uses: actions/checkout@v4
       - name: Plan the layer's jobs
