@@ -27,7 +27,9 @@ single-version and layer forks alike (issue #113).
 ONE GATE C CLIENT PER MACHINE (issue #133, gap 11). Two Gate C clients on one machine share the CPU, the memory guard's
 headroom and Xvfb, and each one's result stops being its own. Each Gate C phase takes a machine-wide lock first (an
 OS file lock on ~/.mmvu/locks/gatec.lock, MMVU_GATEC_LOCK names another file) and a second client WAITS for it, saying
-whose run holds it; the lock goes with the process, so a killed run never leaves it held. Gate B takes no lock. On a
+whose run holds it (gatec.lock.holder beside it), for at most MMVU_GATEC_LOCK_TIMEOUT seconds (default 3 h: then
+the phase stops as environmental, naming the holder); the lock goes with the process, so a killed run never leaves it
+held. Gate B takes no lock. On a
 CI runner (one job per machine) it is always free, so nothing there changes.
 """
 import collections, argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys
