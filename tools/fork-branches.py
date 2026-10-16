@@ -1607,17 +1607,32 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     port_new = parent_ref if parent_version is None else git(repo, "merge-base", parent_ref, port_tip).stdout.strip()
     port_old = git(repo, "merge-base", pre, port_tip).stdout.strip()
     java = sorted(f for f in changed if re.match(r"^src/[^/]+/java/.+\.java$", f))
-    resolved = set()
-    if java:
+    # the authors' own change since t last took the port branch: a file the PARENT does not carry (it drops it, or
+    # removes its mixin) never shows in the parent's merge, yet t has it and must take the change (review finding H2)
+    port_java = [] if port_old == port_new else sorted(
+        f for f in git(repo, "diff", "--name-only", port_old, port_new).stdout.splitlines()
+        if re.match(r"^src/[^/]+/java/.+\.java$", f) and f not in java and blob_at(repo, parent_ref, f) is None)
+    resolved, unmerged = set(), []
+    if java or port_java:
         read_new = reader_of_root(work) if not conflicted & {f for f in changed if f.startswith(REC + "/")} else reader_of_ref(repo, pre)
         ch_new = chain_read(read_new, t)
         rows_new = rows_tree(repo, port_new, read_new, t, ch_new)
         read_old = reader_of_ref(repo, pre)
         rows_old = rows_tree(repo, port_old, read_old, t, chain_read(read_old, t))
-        if parent_version is not None:
+        if parent_version is not None and java:
             read_p = reader_of_ref(repo, parent_ref)
             rows_p = rows_tree(repo, port_new, read_p, parent_version, chain_read(read_p, parent_version))
         remade = 0
+
+        def remake(f):
+            new = rows_new.get(f)
+            if new is None:
+                if (work / f).exists() or f in conflicted:
+                    git(work, "rm", "-q", "-f", "--", f)
+            else:
+                (work / f).parent.mkdir(parents=True, exist_ok=True)
+                (work / f).write_bytes(new)
+                git(work, "add", "--", f)
         for f in java:
             t_pre, p_new = blob_at(repo, pre, f), blob_at(repo, parent_ref, f)
             if t_pre is None and blob_at(repo, port_old, f) is not None:
@@ -1629,18 +1644,26 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             p_mech = parent_version is None or p_new == rows_p.get(f)
             t_mech = t_pre == rows_old.get(f)
             if p_mech and t_mech:
-                new = rows_new.get(f)
-                if new is None:
-                    if (work / f).exists() or f in conflicted:
-                        git(work, "rm", "-q", "-f", "--", f)
-                else:
-                    (work / f).parent.mkdir(parents=True, exist_ok=True)
-                    (work / f).write_bytes(new)
-                    git(work, "add", "--", f)
+                remake(f)
                 resolved.add(f)
                 remade += 1
+        for f in port_java:
+            t_pre = blob_at(repo, pre, f)
+            if t_pre is None:
+                if blob_at(repo, port_old, f) is not None:
+                    continue                                    # dropped on t as well: stays dropped
+                if f in rows_new:                               # a new authors' file t's rows keep
+                    remake(f); remade += 1
+                continue
+            if t_pre == rows_old.get(f):
+                remake(f); remade += 1
+            else:
+                unmerged.append(f)        # t changed it by hand and the parent cannot carry the change: a person's
         if remade:
             notes.append(f"{remade} file(s) the rows alone make re-made from {port_name}'s code through {t}'s rows")
+        if unmerged:
+            notes.append(f"{len(unmerged)} file(s) the authors changed that {parent_name} does not carry and {t} changed by "
+                         f"hand: {', '.join(unmerged[:4])}")
     props = parse_props(read_file(work / REC / t / BRANCH_PROPS))
     for f in sorted(conflicted - resolved):
         theirs = blob_at(repo, parent_ref, f)
@@ -1673,7 +1696,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             resolved.add(f)
             notes.append(f"{f}: {t}'s own kept (regenerate it on {branch_name(t)} with tools/fork-branches.py ci if {parent_name} "
                          "changed it on purpose)")
-    left = sorted(conflicted - resolved)
+    left = sorted((conflicted - resolved) | set(unmerged))
     if left:
         git(work, "merge", "--abort")
         return False, notes, left
@@ -2266,6 +2289,8 @@ def _fixture(d):
     w(".multiversion/targets/1.21.4/cf/java/com/example/mod/cf/Cf.java",
       "package com.example.mod.cf;\nimport new.Thing;\nclass Cf {\n    @OnlyIn(Dist.CLIENT)\n    Thing t;\n}\n")
     with open(mv / "targets/1.21.5/target.properties", "a", encoding="utf-8") as f: f.write("strip_onlyin=true\n")
+    # 1.21.4 alone takes an authors' mixin off (mixin_remove_only): the class is absent there, present again at 1.21.5
+    with open(mv / "targets/1.21.4/target.properties", "a", encoding="utf-8") as f: f.write("mixin_remove_only.examplemod.mixins.json=mixins:AMixin\n")
     run(str(ROOT / "tools/layer-inventory.py"), "build", "--repo", str(r))
     g("add", "-A"); g("commit", "-qm", "layer: three targets")
     return r, g, run
@@ -2401,6 +2426,8 @@ def self_check():
             encoding="utf-8")
         (r / "src/main/java/com/example/mod/NewOne.java").write_text("package com.example.mod;\nimport old.Thing;\nclass NewOne { Thing t; }\n",
                                                                     encoding="utf-8")
+        amixin = "src/main/java/com/example/mod/mixin/AMixin.java"
+        (r / amixin).write_text((r / amixin).read_text(encoding="utf-8").replace("void h() {}", "void h() { fixed(); }"), encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "authors: a field and a class")
         g("checkout", "-q", "neoforge-1.21.x")
         rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none")
@@ -2409,6 +2436,8 @@ def self_check():
                and e5["src/main/java/com/example/mod/ExampleMod.java"] == b"package com.example.mod;\nimport new.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.newCall(); } }\n"
                and b"import new.Thing;" in e5["src/main/java/com/example/mod/NewOne.java"] and b"keep = 5" in e5["src/main/java/com/example/mod/Over.java"],
                f"cascade port..1.21.5: the authors' change reaches every version through its rows, overlays kept: {out[-500:]}")
+        expect(b"fixed();" in e5[amixin] and amixin not in ref_files(r, resolve_branch(r, "neoforge-1.21.4"), "src"),
+               "the authors' fix to a class 1.21.4 takes off (mixin_remove_only) still reaches 1.21.5, which has it")
         why = target_done(r, "1.21.5")
         expect(any(w.startswith("GATES.md") for w in why) and not any(w.startswith("no verdict") for w in why),
                f"after the merge the gates are stale, and no rows-only file needs a review row: {why}")
@@ -2425,6 +2454,20 @@ def self_check():
                f"the fix is 1.21.3's change: on 1.21.4 the file equals its parent's, so no row there: {why}")
         why3 = target_done(r, "1.21.3")
         expect("no verdict: changed src/main/java/com/example/mod/Plain.java" in why3, f"... and a row on 1.21.3, where it was made: {why3}")
+        # ... but where 1.21.5 changed that class by hand, the authors' change cannot arrive through 1.21.4: a stop
+        w5, _why = worktree_for(r, "1.21.5")
+        (w5 / amixin).write_text((w5 / amixin).read_text(encoding="utf-8").replace("fixed();", "fixed(); mine();"), encoding="utf-8")
+        git(w5, "commit", "-qam", "1.21.5's own AMixin edit", check=True)
+        g("checkout", "-q", "neoforge-1.21.1")
+        (r / amixin).write_text((r / amixin).read_text(encoding="utf-8").replace("fixed();", "fixed(); again();"), encoding="utf-8")
+        g("commit", "-qam", "authors: AMixin again")
+        g("checkout", "-q", "neoforge-1.21.x")
+        before5 = resolve_branch(r, "neoforge-1.21.5")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+        expect(rc == 1 and "STOPPED at 1.21.5" in out and amixin in out and resolve_branch(r, "neoforge-1.21.5") == before5,
+               f"the authors' change to a class the parent does not carry and 1.21.5 changed by hand: a stop, nothing committed: {out[-600:]}")
+        git(w5, "reset", "-q", "--hard", "HEAD~1")
+        before5 = resolve_branch(r, "neoforge-1.21.5")
         # a conflict in a file a person changed stops the cascade there, the merge undone
         g("checkout", "-q", "neoforge-1.21.1")
         (r / "src/main/java/com/example/mod/Over.java").write_text("package com.example.mod;\nimport old.Thing;\npublic class Over { Thing t; int keep = 9; }\n",
@@ -2437,7 +2480,8 @@ def self_check():
                and resolve_branch(r, "neoforge-1.21.3") == before and not git(w3, "status", "--porcelain").stdout.strip(),
                f"a conflict on a version's own change stops the cascade, nothing committed, the worktree clean: {out[-500:]}")
         rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none", dry_run=True)
-        expect(rc == 0 and "| 1.21.5 | up to date |" in out, f"cascade --dry-run: {out[-200:]}")
+        expect(rc == 0 and "| 1.21.5 | would merge neoforge-1.21.4" in out and resolve_branch(r, "neoforge-1.21.5") == before5,
+               f"cascade --dry-run (1.21.5 still lacks what stopped it): rc {rc}: {out[-300:]!r}")
         for t in ("1.21.3", "1.21.4", "1.21.5"):
             git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / t))
         # a new version branch: refused over an undone parent (nothing written), made with the escape (recorded)
