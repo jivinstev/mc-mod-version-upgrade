@@ -951,9 +951,15 @@ def prepared_tree(repo, t, prepare=False):
         return []        # nothing prepared to judge (layer-inventory.py says what is missing)
     out = repo / "build" / f"mc{t}" / "mv/java"
     cmd = f"python3 .multiversion/tools/layer.py prepare --target {t} --src src/main/java --out build/mc{t}/mv/java"
+    # every other source set with its own src/<set>/java is prepared too (layer.gradle does: build/mc<t>/mv/<set>-java),
+    # and the inventory reads each one's prepared tree, so a missing one cannot be judged
+    others = sorted(d.parent.name for d in (repo / "src").glob("*/java") if d.is_dir() and d.parent.name != "main")
+    set_out = lambda s_: out.parent / f"{s_}-java"
+    set_cmd = lambda s_: (f"python3 .multiversion/tools/layer.py prepare --target {t} --set {s_} --src src/{s_}/java "
+                          f"--out build/mc{t}/mv/{s_}-java")
 
     def newest():
-        roots = [src, mv / "tools/layer.py", mv / "tools/prepare-sources.py"]
+        roots = [src, mv / "tools/layer.py", mv / "tools/prepare-sources.py"] + [repo / "src" / s_ / "java" for s_ in others]
         for c in jar_chain(mv, t):
             roots += [mv / "targets" / c / x for x in PREPARE_INPUTS] + [mv / "shared" / c / "java", mv / "shared" / c / "renames.tsv"]
         best = (0, None)
@@ -980,16 +986,25 @@ def prepared_tree(repo, t, prepare=False):
     if not why and on_now != on_tree:
         why = (f"prepared with inherited_overlay_rows {'on' if on_tree else 'off'}, and the layer now has it "
                f"{'on' if on_now else 'off'}")
-    if why and prepare and (mv / "tools/layer.py").is_file():
-        stamp.unlink(missing_ok=True)          # layer.py writes a new one when it prepares on
-        r = subprocess.run([sys.executable, str(mv / "tools/layer.py"), "prepare", "--target", t, "--src", str(src),
-                            "--out", str(out)], cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=900)
-        if r.returncode == 0 and out.is_dir():
-            print(f"fork-port: {t}: re-prepared build/mc{t}/mv/java ({why}; layer.py prepare, no compile) for the done check")
-            return []
-        return [f"behaviour inventory: re-preparing build/mc{t}/mv/java failed (exit {r.returncode}): "
-                + " ".join((r.stdout + r.stderr).strip().splitlines()[-2:])[:300]]
+    missing_sets = [s_ for s_ in others if not set_out(s_).is_dir()]
+    if (why or missing_sets) and prepare and (mv / "tools/layer.py").is_file():
+        jobs = ([("main", src, out)] if why else []) + [(s_, repo / "src" / s_ / "java", set_out(s_))
+                                                         for s_ in others if why or s_ in missing_sets]
+        if why:
+            stamp.unlink(missing_ok=True)      # layer.py writes a new one when it prepares on
+        for s_, sd, od in jobs:
+            r = subprocess.run([sys.executable, str(mv / "tools/layer.py"), "prepare", "--target", t, "--set", s_,
+                                "--src", str(sd), "--out", str(od)], cwd=str(repo), capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=900)
+            if r.returncode or not od.is_dir():
+                return [f"behaviour inventory: re-preparing build/mc{t}/mv/{od.name} failed (exit {r.returncode}): "
+                        + " ".join((r.stdout + r.stderr).strip().splitlines()[-2:])[:300]]
+        print(f"fork-port: {t}: re-prepared " + ", ".join(f"build/mc{t}/mv/{od.name}" for _s, _d, od in jobs)
+              + f" ({why or 'missing'}; layer.py prepare, no compile) for the done check")
+        return []
+    if not why and missing_sets:
+        return [f"behaviour inventory: no prepared tree build/mc{t}/mv/{s_}-java (the {s_} source set), so it cannot be "
+                f"judged: prepare it (no compile): {set_cmd(s_)}" for s_ in missing_sets]
     if not why:
         return []
     if why == "missing":

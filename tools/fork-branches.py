@@ -2539,6 +2539,22 @@ def self_check():
         for t in ("1.21.3", "1.21.4", "1.21.5"):
             why = _quiet(_fixture_done, r, g, t)[0]
             expect(not why, f"fixture: layer target {t} done: {why}")
+        # layer mode, a fresh clone (no build/): the done check's re-prepare makes every source set's tree, the cf set's
+        # too; without it the inventory refuses rather than read the raw src/cf/java (every cf overlay item "same")
+        shutil.rmtree(r / "build/mc1.21.5")
+        expect(fp().prepared_tree(r, "1.21.5", prepare=True) == [] and (r / "build/mc1.21.5/mv/cf-java").is_dir()
+               and b"@OnlyIn" not in (r / "build/mc1.21.5/mv/cf-java/com/example/mod/cf/Cf.java").read_bytes(),
+               "layer re-prepare for the done check: main and the cf source set (its overlay, @OnlyIn stripped)")
+        shutil.rmtree(r / "build/mc1.21.5/mv/cf-java")
+        miss = fp().prepared_tree(r, "1.21.5", prepare=False)
+        li_ = _mod("layer_inventory_fb", "layer-inventory.py")
+        try:
+            li_.account(r, "1.21.5"); raised = ""
+        except ValueError as e:
+            raised = str(e)
+        expect(any("mv/cf-java" in m for m in miss) and "mv/cf-java" in raised,
+               f"a missing prepared cf set: the done check and the inventory refuse to judge it: {miss} {raised!r}")
+        fp().prepared_tree(r, "1.21.5", prepare=True)
         refs0 = g("for-each-ref", "--format=%(refname) %(objectname)")
         head0 = g("rev-parse", "HEAD")
         rc, out = _quiet(migrate, r, dry_run=True)

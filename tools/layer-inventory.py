@@ -331,14 +331,15 @@ def _behaviour_for(beh, iid):
 
 
 def prepared_dirs(repo, target, sets):
-    """{set: prepared java dir} for target; a non-main set the layer does not prepare compiles from src/<set>/java."""
+    """{set: prepared java dir} for target (layer.gradle prepares every set's src/<set>/java); None for one not prepared
+    here -- never the raw src/<set>/java, which would read every item an overlay of that set changed as "same"."""
     b = repo / "build" / f"mc{target}" / "mv"
     out = {}
     for s in sets:
         if not (repo / "src" / s / "java").is_dir():
             continue
         p = b / ("java" if s == "main" else f"{s}-java")
-        out[s] = p if p.is_dir() else (None if s == "main" else repo / "src" / s / "java")
+        out[s] = p if p.is_dir() else None
     return out
 
 
@@ -372,6 +373,10 @@ def account(repo, target, inv=None):
     pdirs = prepared_dirs(repo, target, sets)
     if pdirs.get("main", 1) is None:
         raise ValueError(f"no prepared tree build/mc{target}/mv/java: run .multiversion/build.sh {target} compileJava first")
+    for s in sorted(k for k, v in pdirs.items() if v is None):
+        raise ValueError(f"no prepared tree build/mc{target}/mv/{s}-java (the {s} source set): run .multiversion/build.sh "
+                         f"{target} compileJava first, or .multiversion/tools/layer.py prepare --target {target} --set {s} "
+                         f"--src src/{s}/java --out build/mc{target}/mv/{s}-java")
     res = {s: [mv / "targets" / c / "resources" for c in names if s == "main"] + [repo / "src" / s / "resources"]
            for s in sets}
     res = {s: [d for d in v if d.is_dir()] for s, v in res.items()}
