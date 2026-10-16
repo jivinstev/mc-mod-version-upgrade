@@ -152,7 +152,7 @@ def parse_props(text):
     return out
 
 
-def read_text(p):
+def read_file(p):
     p = pathlib.Path(p)
     return p.read_text(encoding="utf-8", errors="surrogateescape") if p.is_file() else ""
 
@@ -183,12 +183,12 @@ def checkout_version(root):
     """The Minecraft version of a version branch checked out (or exported) at `root`: gradle.properties'
     minecraft_version when .port/<it>/branch.properties exists there; else None (the port branch, a single-version fork,
     a layer branch)."""
-    mc = parse_props(read_text(pathlib.Path(root) / "gradle.properties")).get("minecraft_version")
+    mc = parse_props(read_file(pathlib.Path(root) / "gradle.properties")).get("minecraft_version")
     return mc if mc and (rec_dir(root, mc) / BRANCH_PROPS).is_file() else None
 
 
 def info(root, t):
-    return parse_props(read_text(rec_dir(root, t) / BRANCH_PROPS))
+    return parse_props(read_file(rec_dir(root, t) / BRANCH_PROPS))
 
 
 def chain(root, t):
@@ -401,7 +401,7 @@ def rows_tree(repo, port_ref, read, t, chain_=None, strip=None):
 
 def reader_of_root(root):
     root = pathlib.Path(root)
-    return lambda p: read_text(root / p)
+    return lambda p: read_file(root / p)
 
 
 def reader_of_ref(repo, ref):
@@ -560,7 +560,7 @@ def changes_since(repo, root, t, c, ref, work):
     props = f"{REC}/{t}/{BRANCH_PROPS}"
     if props in names:
         old = git(repo, "show", f"{c}:{props}")
-        if build_keys(old.stdout if old.returncode == 0 else "") == build_keys(read_text(pathlib.Path(root) / props)):
+        if build_keys(old.stdout if old.returncode == 0 else "") == build_keys(read_file(pathlib.Path(root) / props)):
             names.discard(props)
     jar = sorted(n for n in names if jar_relevant(n, t))
     review = sorted(set(jar) | {n for n in names if n.startswith(f"{REC}/{t}/") and n.rsplit("/", 1)[-1] in REVIEWED_INPUTS})
@@ -569,7 +569,7 @@ def changes_since(repo, root, t, c, ref, work):
 
 def migrated(root, t):
     try:
-        return json.loads(read_text(rec_dir(root, t) / "MIGRATED.json") or "{}")
+        return json.loads(read_file(rec_dir(root, t) / "MIGRATED.json") or "{}")
     except ValueError:
         return {}
 
@@ -631,7 +631,7 @@ def helper_map(text):
 
 def helper_blobs(root, t):
     """{path: blob} of .port/<t>/shared-helpers.txt: the shared-library helpers this version carries, as installed."""
-    return helper_map(read_text(rec_dir(root, t) / "shared-helpers.txt"))
+    return helper_map(read_file(rec_dir(root, t) / "shared-helpers.txt"))
 
 
 def review_items(repo, root, t, ref, work, files=None, mechanical=None):
@@ -726,7 +726,7 @@ def review_skeleton(repo, root, t, ref, work, unaccounted=()):
     items = review_items(repo, root, t, ref, work)
     f = rec_dir(root, t) / "REVIEW.md"
     p = info(root, t)
-    text = read_text(f) or REVIEW_HEAD.format(t=t, b=p.get("branch", branch_name(t)), p=p.get("parent", "?"))
+    text = read_file(f) or REVIEW_HEAD.format(t=t, b=p.get("branch", branch_name(t)), p=p.get("parent", "?"))
     _fields, rows = f_.parse_review(text)
     add = [(k, x) for k, x in items if (k, x) not in rows] + [("item", i) for i in sorted(unaccounted) if ("item", i) not in rows]
     if add or not f.is_file():
@@ -741,7 +741,7 @@ def review_problems(repo, root, t, ref, work, files, items):
     f = rec_dir(root, t) / "REVIEW.md"
     if not f.is_file():
         return [f"no REVIEW.md: {len(items)} item(s) need an independent reviewer's verdict (.port/{t}/REVIEW.md)"]
-    fields, rows = f_.parse_review(read_text(f))
+    fields, rows = f_.parse_review(read_file(f))
     out = [f"REVIEW.md has no {k}" for k in f_.REVIEW_FIELDS if fields.get(k, "?") in ("", "?")]
     if fields.get("date", "?") not in ("", "?") and not re.match(r"^\d{4}-\d\d-\d\d\b", fields["date"]):
         out.append(f"REVIEW.md date {fields['date']!r} is not YYYY-MM-DD")
@@ -765,7 +765,7 @@ def review_problems(repo, root, t, ref, work, files, items):
 def gates_problems(repo, root, t, ref, work, files):
     """[] when .port/<t>/GATES.md records a green Gate C for Minecraft t at a commit this branch carries with nothing
     jar-relevant changed since (or a layer commit MIGRATED.json maps to this tree)."""
-    text = read_text(rec_dir(root, t) / "GATES.md")
+    text = read_file(rec_dir(root, t) / "GATES.md")
     if not text:
         return ["no green Gate C recorded in GATES.md"]
     head = text.splitlines()[0]
@@ -808,7 +808,7 @@ def inventory_problems(repo, root, t, ref, work, files, write, mechanical):
         return [ln.replace("layer-inventory: ", "behaviour inventory: ") for ln in lines] if code else []
     want = li.check_text(rep)
     p = rec_dir(root, t) / li.CHECK_FILE
-    if write and read_text(p) != want:
+    if write and read_file(p) != want:
         p.write_text(want, encoding="utf-8")
     out = [f"behaviour inventory: unaccounted {r['id']} ({r['detail']})" for r in rep["items"] if r["status"] == "unaccounted"]
     committed = git(repo, "show", f"{ref}:{REC}/{t}/{li.CHECK_FILE}")
@@ -852,10 +852,10 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
         if not (rec_dir(root, t) / "TEST-ITEMS.md").is_file():
             out.append(f"manual-test items not generated (TEST-ITEMS.md): python3 tools/fork-port.py --repo {repo} "
                        f"--target {t} --write-test-items")
-        rv = read_text(rec_dir(root, t) / "REVIEW.md")
+        rv = read_file(rec_dir(root, t) / "REVIEW.md")
         out += fp().drop_reported_items(inventory_problems(repo, root, t, ref, work, files, write, mech),
                                         fp().not_ok_items(rv) if rv else {})
-        deps = read_text(rec_dir(root, t) / "DEPS.md")
+        deps = read_file(rec_dir(root, t) / "DEPS.md")
         if fp().UNDONE_LIBRARY_MARK in deps:
             out.append("built against a library version that is not done (--allow-undone-library, DEPS.md \"Development "
                        "only\"): re-resolve with --port-release once the library's version is done")
@@ -883,7 +883,7 @@ def library_tested(repo, root, t, ref, work, files):
     """Does .port/<t>/DEPENDENTS.json name a dependent that passed Gate C against a jar built from a library commit
     this branch carries, with nothing jar-relevant changed since (so the same jar)?"""
     try:
-        deps = json.loads(read_text(rec_dir(root, t) / "DEPENDENTS.json") or "[]")
+        deps = json.loads(read_file(rec_dir(root, t) / "DEPENDENTS.json") or "[]")
     except ValueError:
         return False
     for d in deps if isinstance(deps, list) else []:
@@ -909,7 +909,7 @@ class Layer:
         sys.dont_write_bytecode = True
         self.lp = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.lp)
-        self.base = parse_props(read_text(self.mv / "base.properties"))
+        self.base = parse_props(read_file(self.mv / "base.properties"))
 
     def close(self):
         git(self.repo, "worktree", "remove", "--force", str(self.dir))
@@ -920,10 +920,10 @@ class Layer:
         return sorted((p.name for p in d.iterdir() if (p / "target.properties").is_file()), key=mc_key) if d.is_dir() else []
 
     def props(self, t):
-        return parse_props(read_text(self.mv / "targets" / t / "target.properties"))
+        return parse_props(read_file(self.mv / "targets" / t / "target.properties"))
 
     def raw_props(self, t):
-        return read_text(self.mv / "targets" / t / "target.properties")
+        return read_file(self.mv / "targets" / t / "target.properties")
 
     def chain(self, t):
         return self.lp.chain(t)
@@ -1116,16 +1116,16 @@ def records_of(lay, t, parent, port_commit, raw, deltas, files, ch):
         if (tdir / name).is_file():
             out[f"{rd}/{name}"] = (tdir / name).read_bytes()
     if (tdir / "STUBS.json").is_file():
-        out[f"{rd}/STUBS.json"] = translate_stubs(read_text(tdir / "STUBS.json")).encode("utf-8")
+        out[f"{rd}/STUBS.json"] = translate_stubs(read_file(tdir / "STUBS.json")).encode("utf-8")
     for n in (f"shipped-expect-{t}.txt", "shipped-expect.txt"):
         if (lay.mv / n).is_file():
             out[f"{rd}/shipped-expect.txt"] = (lay.mv / n).read_bytes(); break
     if (lay.mv / "shipped-jar.txt").is_file():
         out[f"{rd}/shipped-jar.txt"] = (lay.mv / "shipped-jar.txt").read_bytes()
-    drift = [l for l in read_text(lay.mv / "DRIFT.md").splitlines() if re.match(rf"^- \S+ {re.escape(t)}: ", l)]
+    drift = [l for l in read_file(lay.mv / "DRIFT.md").splitlines() if re.match(rf"^- \S+ {re.escape(t)}: ", l)]
     if drift:
         out[f"{rd}/DRIFT.md"] = ("\n".join(drift) + "\n").encode("utf-8")
-    shared = [f"# ---- shared {s}\n" + read_text(lay.mv / "shared" / s / "renames.tsv") for s in sc
+    shared = [f"# ---- shared {s}\n" + read_file(lay.mv / "shared" / s / "renames.tsv") for s in sc
               if (lay.mv / "shared" / s / "renames.tsv").is_file()]
     if shared:
         out[f"{rd}/shared-renames.tsv"] = ("\n".join(shared) + "\n").encode("utf-8")
@@ -1145,7 +1145,7 @@ def records_of(lay, t, parent, port_commit, raw, deltas, files, ch):
     rm = tdir / "REMERGE.json"
     if rm.is_file():
         try:
-            data = json.loads(read_text(rm))
+            data = json.loads(read_file(rm))
             for c in data.get("conflicts", []):
                 ov = lay.dir / str(c.get("overlay", ""))
                 new = translate_path(str(c.get("overlay", "")))
@@ -1173,7 +1173,7 @@ def translate_review(lay, t, items_now, layer_items):
     src = lay.mv / "targets" / t / "REVIEW.md"
     if not src.is_file():
         return None
-    text = read_text(src)
+    text = read_file(src)
     fields, rows = f_.parse_review(text)
     current = set(layer_items)
     out = {}
@@ -1276,7 +1276,7 @@ def verify_target(lay, t, branch_ref, parent, port_commit, parent_files=None):
                         (lay.mv / "targets" / v / "resources" / p.split("/resources/", 1)[1]).is_file()), lay.dir / p)
             if not src.is_file():
                 continue
-            layer_arrays = lay.lp.apply_mixins(json.loads(read_text(src)), cfg, adds, removes)
+            layer_arrays = lay.lp.apply_mixins(json.loads(read_file(src)), cfg, adds, removes)
             got = json.loads(have[p].decode("utf-8"))
             mine = {k: sorted(v) for k, v in got.items() if isinstance(v, list)}
             if {k: v for k, v in layer_arrays.items() if v or k in mine} != {k: v for k, v in mine.items() if v or k in layer_arrays}:
@@ -1370,7 +1370,7 @@ def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None,
             recorded = {}
             named = set()
             for name in ("GATES.md", "REVIEW.md"):
-                txt = read_text(lay.mv / "targets" / t / name)
+                txt = read_file(lay.mv / "targets" / t / name)
                 m = re.search(r"at `([0-9a-f]{7,40})", txt.splitlines()[0]) if name == "GATES.md" and txt else None
                 if m:
                     named.add(m.group(1))
@@ -1583,7 +1583,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                 remade += 1
         if remade:
             notes.append(f"{remade} file(s) the rows alone make re-made from {port_name}'s code through {t}'s rows")
-    props = parse_props(read_text(work / REC / t / BRANCH_PROPS))
+    props = parse_props(read_file(work / REC / t / BRANCH_PROPS))
     for f in sorted(conflicted - resolved):
         theirs = blob_at(repo, parent_ref, f)
         name = f.rsplit("/", 1)[-1]
@@ -1734,6 +1734,49 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None):
         say(f"fork-branches: nothing was pushed: git push origin {' '.join(branch_name(t) for t in merged)}")
     return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED")) else 0
 
+
+
+
+def write_test_items(repo, t):
+    """.port/<t>/TEST-ITEMS.md on version t's checkout: what a person must look at on this version because no gate
+    judges it (no model): each STUBS.json entry, each file changed from the parent branch (flagged mixin / client),
+    each dependency DEPS.md says was dropped, a preview version, and each base behaviour item that is not the same
+    here. Rewritten only when it changed. -> (count, None) or (None, why)."""
+    repo = pathlib.Path(repo).resolve()
+    try:
+        files = root_files(repo, repo, True)
+        items = review_items(repo, repo, t, "HEAD", True, files)
+        lines = [f"# Manual-test items: Minecraft {t}", "",
+                 "Generated by tools/fork-port.py on the version branch (no model): what a person must look at on this",
+                 "version because no gate judges it. The fork-versions skill's step 11 turns them into the test plan.", ""]
+        n = 0
+        for kind, f in items:
+            if kind == "renames":
+                continue
+            text = files.get(f, b"").decode("utf-8", "replace")
+            flags = [x for x, hit in (("mixin", "@Mixin" in text), ("client", "/client/" in f or "net.minecraft.client" in text)) if hit]
+            lines.append(f"- {'stub' if kind == 'stub' else 'changed' if kind == 'changed' else kind}: `{f}`"
+                         + (f" ({', '.join(flags)})" if flags else ""))
+            n += 1
+        for row in read_file(rec_dir(repo, t) / "DEPS.md").splitlines():
+            if row.startswith("|") and re.search(r"\|\s*(?:excluded|dropped)\b", row, re.I):
+                lines.append(f"- dropped-dep: {row.strip()[:200]}"); n += 1
+        if info(repo, t).get("preview") == "true":
+            lines.append("- preview: this version is a preview (never published)"); n += 1
+        li = _mod("layer_inventory_fb", "layer-inventory.py")
+        _c, rep, _l = li.check_branch(repo, repo, t, files=files)
+        for r in (rep or {}).get("items", []):
+            if r.get("status") != "same":
+                lines.append(f"- behaviour: `{r['id']}` ({r.get('status')}: {str(r.get('detail', ''))[:160]})"); n += 1
+    except Exception as e:      # noqa: BLE001 -- a broken plan is a stop with its reason, never a silent pass
+        return None, f"{type(e).__name__}: {e}"[:300]
+    if not n:
+        lines.append("- none: no stub, changed file, dropped integration or behaviour change applies to this version")
+    text = "\n".join(lines) + "\n"
+    f = rec_dir(repo, t) / "TEST-ITEMS.md"
+    if read_file(f) != text:
+        f.write_text(text, encoding="utf-8")
+    return n, None
 
 
 # ---------------------------------------------------------------- a new version branch
@@ -1976,7 +2019,7 @@ def library_record(lib, t, dependent, slug=None, say=print):
     g = gates_problems(dep, dep, t, head, True, files)
     if g:
         say(f"fork-branches: the dependent's Gate C is not green and current: {g[0]}"); return 2
-    gates_commit = re.search(r"at `([0-9a-f]{7,40})", read_text(rec_dir(dep, t) / "GATES.md")).group(1)
+    gates_commit = re.search(r"at `([0-9a-f]{7,40})", read_file(rec_dir(dep, t) / "GATES.md")).group(1)
     pins = [(k, v) for k, v in info(dep, t).items() if k.startswith("port_jar.")]
     hit = None
     for k, v in pins:
@@ -1994,7 +2037,7 @@ def library_record(lib, t, dependent, slug=None, say=print):
         say(f"fork-branches: the library clone has no tag {tag} (git fetch --tags)"); return 2
     f = rec_dir(lib, t) / "DEPENDENTS.json"
     try:
-        data = json.loads(read_text(f) or "[]")
+        data = json.loads(read_file(f) or "[]")
     except ValueError:
         data = []
     entry = {"dependent": origin_slug(dep) or str(dep), "dependent_commit": head, "gates_commit": gates_commit,
@@ -2256,7 +2299,7 @@ def self_check():
         expect(checkout_version(r) == "1.21.4" and target_done(r, "1.21.4") == [], "checked out: done in place")
         # the library rule: a library version is done only once a dependent passed Gate C against its jar
         bp = r / REC / "1.21.4" / BRANCH_PROPS
-        bp.write_text(read_text(bp) + "library=true\n", encoding="utf-8")
+        bp.write_text(read_file(bp) + "library=true\n", encoding="utf-8")
         why = target_done(r, "1.21.4")
         expect(len(why) == 1 and why[0].startswith(LIBRARY_PENDING), f"library=true and no dependent recorded: not done: {why}")
         (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",

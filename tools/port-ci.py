@@ -53,6 +53,11 @@ def props(repo):
 
 
 def java_version(repo, mc):
+    # a fork's version branch (tools/fork-branches.py) sets its toolchain in .port/<mc>/branch.properties (branch.gradle)
+    bp = pathlib.Path(repo) / ".port" / mc / "branch.properties"
+    jv = re.search(r"(?m)^java_version\s*=\s*(\d+)\s*$", bp.read_text(encoding="utf-8")) if bp.is_file() else None
+    if jv:
+        return jv.group(1)
     g = (pathlib.Path(repo) / "build.gradle").read_text(encoding="utf-8", errors="replace")
     m = re.search(r"JavaLanguageVersion\.of\(\s*(\d+)\s*\)", g)
     return m.group(1) if m else ("21" if mc.startswith("1.21") else "25")

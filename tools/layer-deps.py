@@ -68,6 +68,15 @@ LIBRARY FIRST
   --port-checkout through for development only -- DEPS.md records it under "Development only" -- never a release.
   `library-done` asks the same question alone. A pin kept from an earlier --port-release is not re-checked.
 
+VERSION BRANCHES (tools/fork-branches.py). On a fork of stacked version branches the same commands run on the checkout
+of branch neoforge-<t>: the block above goes into .port/<t>/branch.properties (.port/branch.gradle applies it) and
+DEPS.md into .port/<t>/. A sibling library that is a version-branch fork releases each version from its own branch
+(Port CI's tag <mod>-<ver>-mc<t>); --port-release takes the jar from that release, pinned by sha256, and the library's
+done list is tools/fork-branches.py's, run on the tag's tree with the library's history (a bare clone under
+~/.mmvu/cache/git/), so the release and a checkout answer alike; the library rule's own reason (no dependent recorded
+yet) never blocks a dependent. A dependent never builds a sibling's checkout: --port-checkout copies the jar the checkout
+built and pins it as `port_jar_dev.` -- development only, refused by the dependent's done check.
+
 Exit codes: 0 resolved (written unless --dry-run); 15 a required dependency has no build for the target; 18 a sibling
 library's target is not done (library-done: 0 done, 18 not); 2 bad input.
 Standard library only.
@@ -169,6 +178,40 @@ def _neg(s):
     return "".join(chr(0x10FFFF - ord(c)) for c in s)
 
 
+# ---------------------------------------------------------------- a version branch (tools/fork-branches.py)
+#
+# On a fork of stacked version branches, target T is the branch neoforge-T: its build keys (this block) live in
+# .port/T/branch.properties and DEPS.md in .port/T/, the checkout being on that branch. A sibling library is a version
+# branch fork too: its release for T is Port CI's per-version release on its neoforge-T branch (tag <mod>-<ver>-mcT,
+# the jar named as its build names it); its done check is tools/fork-branches.py's, read at the tag. ISOLATION: a
+# dependent never builds a sibling's checkout -- --port-checkout copies the jar the checkout already built and pins
+# its sha256 as development only (port_jar_dev.), which the dependent's done check refuses.
+
+def _fb():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fork_branches_for_layer_deps", ROOT / "tools/fork-branches.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def branch_target(repo, target):
+    """True when `repo` is checked out on version branch `target` (not a layer)."""
+    repo = pathlib.Path(repo)
+    return not (repo / ".multiversion/base.properties").is_file() and (repo / ".port" / target / "branch.properties").is_file() \
+        and _fb().checkout_version(repo) == target
+
+
+def target_dir(repo, target):
+    repo = pathlib.Path(repo)
+    return repo / ".port" / target if branch_target(repo, target) else repo / ".multiversion/targets" / target
+
+
+def props_file(repo, target):
+    d = target_dir(repo, target)
+    return d / ("branch.properties" if d.parent.name == ".port" else "target.properties")
+
+
 def key(coord):
     """`group:module` escaped as a java.util.Properties key (':' ends an unescaped key)."""
     return coord.replace(":", "\\:")
@@ -185,6 +228,8 @@ def render_block(rows):
             lines.append(f"exclude.{key(ga)}={r['drop']}")
         if r.get("pin"):            # a sibling port's released per-target jar: CI fetches it by this (`fetch`)
             lines.append(f"port_jar.{key(ga)}={r['pin']}")
+        if r.get("pin_dev"):        # a jar copied from a sibling's checkout (version branches): development only
+            lines.append(f"port_jar_dev.{key(ga)}={r['pin_dev']}")
     lines.append(END)
     return "\n".join(lines) + "\n"
 
@@ -361,13 +406,25 @@ def resolve_port(ga, spec, target, checkouts):
         try:
             data = _get(url)
         except Exception as e:
-            return {"missing": f"{repo}'s release {co} has no {stem}-mc{target}.jar ({e})", "source": repo}
+            # a version-branch library releases ONE version per tag (<mod>-<ver>-mc<t>), its jar named as its build
+            # names it; only a tag of exactly that version may fall back to the plain name (a layer release's plain
+            # jar is the base version's)
+            if not co.endswith(f"-mc{target}"):
+                return {"missing": f"{repo}'s release {co} has no {stem}-mc{target}.jar ({e})", "source": repo}
+            url = f"https://github.com/{repo}/releases/download/{co}/{spec['asset']}"
+            try:
+                data = _get(url)
+            except Exception as e2:
+                return {"missing": f"{repo}'s release {co} has neither {stem}-mc{target}.jar nor {spec['asset']} ({e2})",
+                        "source": repo}
         install_m2(ga, ver, data)
         sha = hashlib.sha256(data).hexdigest()
         return {"to": f"{ga}:{ver}", "pin": f"{url} {sha}", "source": f"{repo} release {co}: {stem}-mc{target}.jar (sha256 {sha[:16]}…)"}
     if not co:
         return {"missing": f"no --port-checkout {repo}=DIR or --port-release {repo}@TAG to take its {target} jar from",
                 "source": repo}
+    if not (co / ".multiversion").is_dir() and (co / ".port" / target / "branch.properties").exists():
+        return checkout_jar(ga, spec, target, co, ver)
     jar = co / "build" / f"mc{target}" / "libs" / f"{stem}-mc{target}.jar"
     # build EVERY time, not only when the jar is missing: Gradle's up-to-date checks make it cheap when nothing changed,
     # and a jar left from before the sibling re-synced a fixed shared helper carries the old bug into this fork's gates
@@ -403,6 +460,27 @@ def resolve_port(ga, spec, target, checkouts):
     install_m2(ga, ver, jar.read_bytes())
     sha = hashlib.sha256(jar.read_bytes()).hexdigest()[:16]
     return {"to": f"{ga}:{ver}", "source": f"{repo} layer jar {jar.name} (sha256 {sha}…) into mavenLocal"}
+
+
+def checkout_jar(ga, spec, target, co, ver):
+    """--port-checkout of a VERSION-BRANCH sibling: never build there (its checkout is another run's). Take the jar
+    that checkout already built for `target` (it must be on that branch, its build/libs holding the release asset's
+    name), copy it into mavenLocal, and pin its sha256 as development only: CI cannot fetch it and the dependent's
+    done check refuses it until it is re-resolved against a release (--port-release)."""
+    fb = _fb()
+    if fb.checkout_version(co) != target:
+        return {"missing": f"{spec['repo']}'s checkout {co} is not on {fb.branch_name(target)}", "source": spec["repo"]}
+    jar = co / "build/libs" / spec["asset"]
+    if not jar.is_file():
+        return {"missing": f"{spec['repo']}'s checkout has no {jar.relative_to(co).as_posix()} (build it there first; a "
+                           "dependent never builds a sibling's checkout)", "source": spec["repo"]}
+    data = jar.read_bytes()
+    install_m2(ga, ver, data)
+    sha = hashlib.sha256(data).hexdigest()
+    head = _git(co, "rev-parse", "--short", "HEAD").stdout.strip()
+    return {"to": f"{ga}:{ver}", "pin_dev": f"{sha} {spec['repo']}@{head}",
+            "source": f"{spec['repo']} checkout {head}: {spec['asset']} (sha256 {sha[:16]}...) copied into mavenLocal -- "
+                      "development only, re-resolve with --port-release"}
 
 
 # ---------------------------------------------------------------- library first (a sibling's target must be done)
@@ -712,7 +790,84 @@ def library_done_release(repo, tag, target, get=None, _seen=None):
 
 def library_done(repo, co, target):
     """resolve()'s check for a sibling named by --port-checkout (co a Path) or --port-release (co a tag)."""
-    return library_done_release(repo, co, target) if isinstance(co, str) else library_done_checkout(co, target)
+    if isinstance(co, str):
+        if branch_release(repo, co, target):
+            return library_done_branch_release(repo, co, target)
+        return library_done_release(repo, co, target)
+    if not (pathlib.Path(co) / ".multiversion").is_dir() and _fb().is_branch_fork(co, target):
+        return library_done_branch(co, target)
+    return library_done_checkout(co, target)
+
+
+def _library_first(why):
+    """The library's done reasons that block a dependent: all but the library rule's own (a dependent passing Gate C
+    against the library's jar is what that rule waits for -- the dependent cannot wait for itself)."""
+    fb = _fb()
+    return [w for w in why if not w.startswith(fb.LIBRARY_PENDING)]
+
+
+def library_done_branch(co, target):
+    """A version-branch sibling checkout: tools/fork-branches.py target_done() on its neoforge-<target> branch (read
+    from the branch's commit when the checkout is elsewhere), never writing. -> (done, why, notes)"""
+    fb = _fb()
+    why = _library_first(fb.target_done(co, target))
+    if why:
+        return False, f"fork-branches.py's done list says not done: {_reasons(why)}", []
+    return True, f"version branch {fb.branch_name(target)} done", ["tools/fork-branches.py target_done(): done"]
+
+
+def branch_release(repo, tag, target, get=None):
+    """Is release `tag` of `repo` a version branch's (its tree holds .port/<target>/branch.properties)?"""
+    import urllib.error
+    get = get or _get
+    try:
+        get(f"https://raw.githubusercontent.com/{repo}/{tag}/.port/{target}/branch.properties")
+        return True
+    except urllib.error.HTTPError:
+        return False
+    except Exception:          # noqa: BLE001 -- unreachable: the layer path's own reads report it
+        return False
+
+
+GIT_URL_ENV = "LAYER_DEPS_GIT_URL"          # a format with {repo} (tests: a local path); default GitHub over https
+
+
+def library_clone(repo):
+    """A bare clone of `repo` under ~/.mmvu/cache/git/ (fetched each call): the library's history and tags, read
+    without a checkout of anyone's."""
+    url = os.environ.get(GIT_URL_ENV, "https://github.com/{repo}.git").format(repo=repo)
+    d = pathlib.Path.home() / ".mmvu/cache/git" / repo.replace("/", "__")
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if not (d / "HEAD").is_file():
+        d.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["git", "clone", "-q", "--bare", url, str(d)], capture_output=True, text=True, encoding="utf-8",
+                           env=env)
+        if r.returncode:
+            return None, f"cannot clone {url}: {r.stderr.strip()[-200:]}"
+    r = subprocess.run(["git", "-C", str(d), "fetch", "-q", "--prune", "origin", "+refs/heads/*:refs/heads/*",
+                        "+refs/tags/*:refs/tags/*"], capture_output=True, text=True, encoding="utf-8", env=env)
+    if r.returncode:
+        return None, f"cannot fetch {url}: {r.stderr.strip()[-200:]}"
+    return d, None
+
+
+def library_done_branch_release(repo, tag, target):
+    """A version-branch library's release: the same done list (tools/fork-branches.py target_done) run on the tag's
+    tree with the library's own history -- so the release-side answer and the checkout's agree (issue #133, gap 1).
+    -> (done, why, notes)"""
+    fb = _fb()
+    d, err = library_clone(repo)
+    if d is None:
+        return False, err, []
+    c = _git(d, "rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}").stdout.strip()
+    if not c:
+        return False, f"{repo} has no tag {tag}", []
+    with tempfile.TemporaryDirectory() as t:
+        root = fb.export(d, c, pathlib.Path(t) / "tree")
+        why = _library_first(fb.target_done(d, target, root=root, ref=c))
+    if why:
+        return False, f"its {target} at {tag} is not done: {_reasons(why)}", []
+    return True, f"version branch {fb.branch_name(target)} done at {tag}", [f"release {tag} ({c[:12]})"]
 
 
 # configurations that put a mod on the runtime classpath: one the manifest does not name is taken as required (fail
@@ -777,6 +932,9 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
                 co = checkouts[spec["repo"]]
                 row.update({"to": ver, "source": f"{spec['repo']}: would build {target} in {co} and install it (dry run)"}
                            if (co / ".multiversion/targets" / target / "target.properties").exists()
+                           else {"to": ver, "source": f"{spec['repo']}: would copy {co}'s built {spec['asset']} (version "
+                                                      f"branch {target}; development only) into mavenLocal (dry run)"}
+                           if (co / ".port" / target / "branch.properties").exists()
                            else {"missing": f"{spec['repo']} has no {target} target", "source": spec["repo"]})
             else:
                 row.update(lk["port"](ga, spec, target, checkouts))
@@ -815,7 +973,7 @@ PIN_LINE = re.compile(r"(?m)^(substitute|port_jar)\.(.+?)=(.*?)\s*$")
 
 def current_pins(repo, target):
     """{group:module: (substitute coordinate, port_jar value)} for each port_jar pin in the target's layer-deps block."""
-    tp = repo / ".multiversion/targets" / target / "target.properties"
+    tp = props_file(repo, target)
     text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
     if BEGIN not in text or END not in text:
         return {}
@@ -826,20 +984,20 @@ def current_pins(repo, target):
 
 
 def write(repo, target, rows, stop):
-    t = repo / ".multiversion/targets" / target
+    t = target_dir(repo, target)
     if not t.is_dir():
         return False
     (t / "DEPS.md").write_text(render_md(target, rows, stop), encoding="utf-8")
     if stop:
         return True
-    p = t / "target.properties"
+    p = props_file(repo, target)
     p.write_text(splice(p.read_text(encoding="utf-8"), render_block(rows)), encoding="utf-8")
     return True
 
 
 def cmd_resolve(a):
     repo = pathlib.Path(a.repo).resolve()
-    if not (repo / ".multiversion/base.properties").exists():
+    if not (repo / ".multiversion/base.properties").exists() and not branch_target(repo, a.target):
         print("layer-deps: no .multiversion/ in the fork (a single-version fork has nothing to resolve)")
         return 2
     checkouts = {}
@@ -1322,7 +1480,7 @@ def sibling_substitutes(repo, target):
     per-target jar: a coordinate the fork's port-ci.yml installs from a sibling's release (`--dep-jar`), substituted with
     version <v>-mc<target> (resolve_port's form). A fork with no sibling port, or a target with no block: {}."""
     repo = pathlib.Path(repo)
-    tp = repo / ".multiversion/targets" / target / "target.properties"
+    tp = props_file(repo, target)
     text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
     if BEGIN not in text or END not in text:
         return {}
@@ -1358,7 +1516,7 @@ def cmd_fetch(a):
     --port-checkout) fails here, naming the re-resolve: CI has no checkout to build it from, and the build would
     otherwise stop later on an unresolvable dependency with no word of why. -> 0, or 1 on a checksum mismatch, a failed
     download or an unpinned sibling."""
-    tp = pathlib.Path(a.repo) / ".multiversion/targets" / a.target / "target.properties"
+    tp = props_file(a.repo, a.target)
     text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
     pins = PORT_JAR.findall(text)
     pinned = {k.replace("\\:", ":") for k, _u, _s in pins}

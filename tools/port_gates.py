@@ -81,9 +81,12 @@ def gradle_target_args(env=None):
 
 def tgt(c):
     """The Target of this run: from --branch normally; from gradle.properties for a caller that never parsed
-    arguments (tools/ci-gates.py builds the same context to reuse the harness and Gate A)."""
+    arguments (tools/ci-gates.py builds the same context to reuse the harness and Gate A). On a fork's version branch
+    (PORT_BRANCH_MC, set by ci-gates.py) the base version's, exactly as a layer target's run has it: the harness is
+    then renamed for the branch's version (layer_target)."""
     if "target" not in c:
-        c["target"] = targets.target_of_repo(c["repo"])
+        base = os.environ.get("PORT_BRANCH_BASE") if os.environ.get("PORT_BRANCH_MC") else None
+        c["target"] = targets.TARGETS[base] if base in targets.TARGETS else targets.target_of_repo(c["repo"])
     return c["target"]
 
 
@@ -213,11 +216,13 @@ def harness_layer_registration(c, h, pkg, mc):
 
 
 def layer_target(env=None):
-    """The Minecraft target a fork's multi-version layer builds in this run (-Pmc in PORT_GRADLE_ARGS), or None."""
+    """The Minecraft target a fork's multi-version layer builds in this run (-Pmc in PORT_GRADLE_ARGS), or a version
+    branch's version (PORT_BRANCH_MC: tools/fork-branches.py; its build needs no -P, its harness the same renaming),
+    or None."""
     for a in gradle_target_args(env):
         if a.startswith("-Pmc="):
             return a[len("-Pmc="):]
-    return None
+    return (env if env is not None else os.environ).get("PORT_BRANCH_MC") or None
 
 
 def harness_table(mc, seen=()):

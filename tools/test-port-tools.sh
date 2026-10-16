@@ -524,6 +524,66 @@ PY
 grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
   || bad "port_gates check: $out"
 
+# ---- stacked version branches (tools/fork-branches.py, the default for a multi-version fork): migrating a layer fork, the
+# branch-mode done check through fork-port.py's own CLI, the cascade, the library's release-side done check -- on a layer
+# fixture; a single-version fork is untouched (its own checks above and below run unchanged)
+echo "fork-branches: stacked version branches (migrate, done, cascade, library release, CLI)"
+out="$(python3 tools/fork-branches.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork-branches self-check: a 3-target layer fixture migrates to byte-identical branches (every source set, resources, mixin arrays, toml ranges, versions), each done as its layer target was; the checkout untouched; without MIGRATED.json the layer records do not count; an edit stales gates and review; cascade carries the authors' change through each version's rows and a lower fix upward, and stops on a conflict; add-target refused over an undone parent; the library rule; a single-version fork refused, nothing written" \
+  || bad "fork-branches self-check: $(tail -5 <<<"$out")"
+out="$(python3 - "$T/fb" <<'PY' 2>&1
+import importlib.util, json, os, pathlib, subprocess, sys
+d = pathlib.Path(sys.argv[1]); d.mkdir()
+s = importlib.util.spec_from_file_location("fb", "tools/fork-branches.py"); fb = importlib.util.module_from_spec(s); s.loader.exec_module(fb)
+r, g, _ = fb._fixture(d / "a"); fb._fixture_shared(r, g)
+for t in ("1.21.3", "1.21.4", "1.21.5"):
+    fb._quiet(fb._fixture_done, r, g, t)
+assert fb._quiet(fb.migrate, r)[0] == 0
+bad = []
+def fp(*a):
+    x = subprocess.run([sys.executable, "tools/fork-port.py", "--repo", str(r), *a], capture_output=True, text=True, encoding="utf-8")
+    return x.returncode, x.stdout + x.stderr
+# the library's release-side check is the same done list, run on the tag's tree with the library's history (gap 1)
+g("checkout", "-q", "neoforge-1.21.1")
+g("tag", "lib-1.0-mc1.21.5", "neoforge-1.21.5")
+os.environ["LAYER_DEPS_GIT_URL"] = str(r); os.environ["HOME"] = str(d / "home")
+s2 = importlib.util.spec_from_file_location("ld", "tools/layer-deps.py"); ld = importlib.util.module_from_spec(s2); s2.loader.exec_module(ld)
+done, why, _n = ld.library_done_branch_release("owner/lib", "lib-1.0-mc1.21.5", "1.21.5")
+done or bad.append(f"a released, done library version reads done at its tag: {why}")
+g("checkout", "-q", "neoforge-1.21.1")
+rc, out = fp("--target", "1.21.4", "--check-done")
+rc and bad.append(f"--check-done on a migrated version (checkout elsewhere): {rc} {out}")
+rc, out = fp("--target", "1.21.4", "--from-stage", "cost", "--gates", "none")
+(rc != 2 or "check it out first" not in out) and bad.append(f"a resume off the branch: {rc} {out}")
+g("checkout", "-q", "neoforge-1.21.4")
+rc, out = fp("--target", "1.21.4", "--write-test-items")
+(rc or not (r / ".port/1.21.4/TEST-ITEMS.md").is_file()) and bad.append(f"--write-test-items on the branch: {rc} {out}")
+g("checkout", "-q", "--", ".")
+(r / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain { int v = 7; }\n", encoding="utf-8")
+g("commit", "-qam", "edit on 1.21.4")
+g("tag", "lib-1.1-mc1.21.4", "HEAD")
+done, why, _n = ld.library_done_branch_release("owner/lib", "lib-1.1-mc1.21.4", "1.21.4")
+(done or "not done" not in why) and bad.append(f"control: a tag after an unreviewed edit is not done: {why}")
+rc, out = fp("--target", "1.21.4", "--check-done")
+(rc != 18 or "GATES.md" not in out or "no verdict: changed src/main/java/com/example/mod/Plain.java" not in out) and \
+    bad.append(f"after an edit: not done, gates stale, the file a review row: {rc} {out}")
+g("checkout", "-q", "neoforge-1.21.3")
+(r / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain {\n int v = 1;\n}\n", encoding="utf-8")
+g("commit", "-qam", "fix at 1.21.3")
+rc, out = fp("--chain", "1.21.3..1.21.5", "--gates", "none")
+(rc != 1 or "cascade" not in out or "STOPPED at 1.21.4" not in out) and \
+    bad.append(f"--chain on version branches is the cascade, and stops where 1.21.4's own edit conflicts: {rc} {out}")
+class E(Exception): pass
+import urllib.error
+def get(u):
+    if ".port/1.21.5/branch.properties" in u: return b"x"
+    raise urllib.error.HTTPError(u, 404, "nf", {}, None)
+(ld.branch_release("o/l", "t", "1.21.5", get) and not ld.branch_release("o/l", "t", "1.21.4", get)) or bad.append("branch_release")
+print("\n".join(bad) or "OK")
+PY
+)"
+[ "$out" = "OK" ] && ok "fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write-test-items on it, an edit makes it not done (gates stale, a review row), --chain is the cascade and stops at a conflict; layer-deps' release-side done check on a tag agrees with the checkout's" \
+  || bad "fork-port / layer-deps on version branches: $out"
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, layer mode"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
   E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \
