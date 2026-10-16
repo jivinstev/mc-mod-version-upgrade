@@ -160,26 +160,41 @@ Only for a fleet entry with `"version_branches": true` (or a clone whose `neofor
 each version branch must take it, in chain order, and nothing fixes a version unless this is run. There is no R6
 re-merge here: git's own merge does it, with the rename rows applied as a tool.
 
-1. Once the port branch has the authors' code (its PR merged into it -- the cascade starts from the port branch itself,
-   so a `keep-current/<date>` work branch is not accepted as the start; for a look before the merge, run the cascade
-   with `--dry-run` once it is merged, which prints what each version would merge and changes nothing):
-   `python3 tools/fork-branches.py cascade --repo DIR neoforge-1.21.1..<newest version> --gates ab`. It merges the port
-   branch into the first version branch, that into the next, ... (a merge commit each, never a rebase or a force-push).
-   Each file the merge changed that both sides had from the rows alone is re-made from the authors' new file through
-   that version's rows (so a change to a renamed line arrives renamed, a new authors' file in the version's names); a
-   conflicting derived file (gradle.properties' versions, the mods.toml ranges, a mixin config) is the lower branch's
-   with the version's build keys; the version's own workflow and install manifest are kept. Then the no-model gates run
-   on each merged branch (fork-port.py from the measure stage, no budget).
-2. **A stop is for a person.** A conflict in a file a version itself changed aborts that merge (the branch as it was)
-   and names the files; an authors' change to a file the version changed by hand and its parent does not carry is
-   merged without it, recorded open in `.port/<v>/REMERGE.json` with the authors' diff and printed (apply it through
-   the version's rows, commit, remove the entry, commit); a red branch names its `.port/<v>/RESIDUE.md`. Either way: on that branch (`git checkout
-   neoforge-<v>`), merge by hand or run `python3 tools/fork-port.py --repo DIR --target <v> --from-stage measure` with a
-   budget (the compile loop), commit, and cascade on from there (`cascade <v>..<newest>`). Never skip a version.
+1. **Plan the whole chain first, in one pass.** Once the port branch has the authors' code (its PR merged into it -- the
+   cascade starts from the port branch itself; a `keep-current/<date>` work branch is not accepted as the start):
+   `python3 tools/fork-branches.py cascade --repo DIR neoforge-1.21.1..<newest version> --plan`. It runs every merge,
+   port branch through the newest version, on a throwaway clone (no real branch changes, no model, git and the rows
+   only), never stops at a conflict, and writes `build/fork-branches/plan/CASCADE-PLAN.json` and `CASCADE-PLAN.md`:
+   the files merged mechanically, and each decision -- one per file and authors' hunk, however many versions it shows
+   at -- with the authors' diff, our code at each affected version, its class and the default decision with its
+   reasoning (fork-versions, "Planning the cascade"). With an escalated item it also writes `ISSUE.md`.
+2. **Apply, decide, ask once.** `cascade ... --apply --gates ab` runs the same merges on the real branches: mechanical
+   items resolved; a default the tool can carry out itself (an optional integration absent at that version: kept)
+   logged in `.port/DECISIONS.md`; every other decision file merged without the authors' change and recorded open in
+   `.port/<v>/REMERGE.json` (the entry travels up with the file) -- every other file and every version above goes
+   on, gates included, and only a version with an open entry stays not done. Then:
+   - the **default decisions** are yours (the fixer agent's), by the policy: keep the authors' design intent; their fix
+     is taken, adapted through the rows; a deliberate port change of ours (a stand-in, an API rewrite) is kept and
+     their change applied around it; an optional integration is kept (stubbed where it is absent). Write each as an
+     answer (`take`, `keep`, `patch` with a diff in the port branch's names, or `content`) with its reasoning;
+   - the **escalated items** -- keeping the authors' intent is not feasible at that version, or the change is over
+     `--budget-lines` (default 80) -- go to the owner as ONE issue on the fork: file `ISSUE.md` as its body. Never one
+     issue per version, never a question per stop.
+   - When the answers are in (the issue's `cascade-decisions` block saved to a file, plus your own):
+     `cascade --repo DIR --apply-decisions FILE --gates ab` applies each one at every version that holds it, oldest
+     first, clears the entries, logs them in `.port/DECISIONS.md`, merges up and writes the new plan; an answer that
+     raises a new conflict higher up (rare) comes back as at most one follow-up issue.
+   A red branch still stops the apply: it names its `.port/<v>/RESIDUE.md`; on that branch run `python3
+   tools/fork-port.py --repo DIR --target <v> --from-stage measure` with a budget, commit, and apply on from there.
+   Never skip a version. (Plain `cascade` without `--plan`/`--apply` still stops at the first conflict, for a fix
+   carried up by hand; an authors' change it could not take is offered again by the next run, from the version's
+   `port_taken`.)
 3. Push each merged version branch as a work branch and open its PR into the version branch (`git push origin
    neoforge-<v>:keep-current/<date>-<v>`), with the cascade's table in the body; merge them in chain order by step 6's
    rule (wait for each one's push run). Every version whose gated files changed reads not done until its gates (`--gates
-   full` once before a release) and, where its own files changed, a fresh review are run again.
+   full` once before a release) run again; where its own files changed it needs a fresh review, and where it took the
+   authors' change through the rows only, one review of that change covers every such version (`python3
+   tools/fork-branches.py review-authors --repo DIR --range <old port commit>..<new port commit> --reviewer ...`).
 4. **Move each version's freeze** once merged: on its checkout, `python3 tools/fork-branches.py freeze --repo DIR --target
    <v>` (and `--library owner/repo@TAG` for a re-pinned library release), and commit `.port/<v>/branch.properties`.
 5. **Dependents.** A library's version releases from its own branch (Port CI's `release` on `neoforge-<v>`); re-pin the

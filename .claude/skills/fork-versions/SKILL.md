@@ -17,7 +17,7 @@ description: Make a fork port build for more Minecraft versions as stacked versi
   that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
   fork moves to version branches with `tools/fork-branches.py migrate` when the maintainer decides it for that fork.
 
-Tools: `tools/fork-branches.py` (migrate, verify, add-target, cascade, check-done, freeze, library-record, ci),
+Tools: `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions` --, review-authors, sync-shared, check-done, freeze, library-record, ci),
 `tools/fork-port.py` (the stages and the done list, on a version branch), `tools/layer-inventory.py`,
 `tools/layer-deps.py`, `tools/ci-gates.py --mc`, `tools/port-ci.py`, `tools/audit-mixin-targets.py`,
 `tools/fix-access-transformer.py`, `tools/burndown-count.sh`, `tools/port-cost.py`.
@@ -268,6 +268,60 @@ version from the base up to each branch's own counts, so a version whose library
 too. Without `--target` it syncs every version (the default, and the safe one): a version left out keeps its old copy
 of the tables, so a cascade from below re-makes the synced files back through them, and a partial run names those
 versions in a WARNING. Then cascade.
+
+## Planning the cascade: every decision in one pass, the owner asked once
+
+A cascade must never become "stop at one version, ask, resume, stop at the next". The authors' new code (keep-current)
+goes up the chain this way:
+
+1. `python3 tools/fork-branches.py cascade --repo DIR neoforge-1.21.1..<newest> --plan [--budget-lines 80] [--out DIR]`
+   -- every merge, the port branch through the newest version, on a throwaway bare clone (the real branches and the
+   checkout untouched; no model: git and the rows only, a few seconds on the self-check's four versions). It never stops
+   at a conflict: a version above an unresolved file is planned with that file still open. It writes
+   `CASCADE-PLAN.json` and `CASCADE-PLAN.md` (default `build/fork-branches/plan/`): the files merged mechanically, and
+   one **decision** per file and authors' hunk, however many versions it shows at, each with the authors' diff, our code
+   at each affected version, its class and the default decision with its reasoning; and `ISSUE.md` when anything is
+   escalated.
+2. **The classes** (the tool's mechanical rules; the agent applies the policy behind them):
+   - **mechanical** -- resolved by the tool: `git merge-file` of ours with the authors' change, over the version's rows,
+     is clean (line drift, or a difference only the rows make).
+   - **optional integration** -- a file under `compat/` or `integration/`, or one calling `isLoaded(`. Absent at that
+     version (its `DEPS.md` records the mod dropped): the tool keeps ours (our stubbed calls work now, and the authors'
+     code arrives when the integration does) and logs it in `.port/DECISIONS.md`. Present: keep it, apply the authors'
+     change around it.
+   - **port change** -- the file has a `STUBS.json` entry (a stand-in, an API rewrite of ours): keep ours, apply the
+     authors' change around it.
+   - **authors' fix** -- anything else: take their change, adapted through the rows, ours re-applied around it.
+   - **escalated** -- keeping the authors' intent is not feasible at that version (their added code names a class the
+     version drops in `drops.txt`), or the change is over `--budget-lines` changed lines (default 80). Only these go to
+     the owner. The agent may escalate a default too when it finds the intent infeasible, saying why.
+   The rule behind every default: **keep the authors' design intent**. The fixer agent makes the defaults and records
+   each with its reasoning (the answers file below; the tool writes them to `.port/DECISIONS.md`, append-only).
+3. `cascade ... --apply [--gates ab]` -- the same merges on the real branches. Mechanical items are resolved; a default
+   the tool can carry out is carried out and logged; every other decision file is merged **without** the authors'
+   change and gets an open `.port/<v>/REMERGE.json` entry (the id, class, default, the diff). Everything else goes on,
+   the versions above included: blocking is per file, not per version. An open entry travels up with its file (a
+   higher version that takes the file from its parent carries the entry open too, never a silent loss), and only a
+   version with an open entry stays not done. A red branch still stops (start one fixer there).
+4. **Ask once.** File `ISSUE.md` as ONE issue on the fork: each escalated item with its versions, the authors' change,
+   ours at each version, the options (`take`: the authors' file through each version's rows; `keep`: ours, their change
+   not taken; `patch`: a diff in the port branch's names, applied through each version's rows; `content`: the file, per
+   version or for all) and a recommendation, plus a machine-readable `cascade-decisions` block.
+5. **Resume in one shot.** `cascade --repo DIR --apply-decisions FILE` (the block saved to a file, the agent's own
+   default answers added to its `decisions` list with `by` and `reason`) applies each answer at every version holding
+   that decision, oldest first, clears the entries, logs each in `.port/DECISIONS.md`, then runs `--apply` over the
+   range (merging the answers up) and writes the new plan. An answer that makes a new conflict higher up comes back
+   through the same flow as at most one follow-up issue.
+6. **Review once.** A version that took the authors' change through its rows only (no file of it a review row) needs
+   no fresh full review: `python3 tools/fork-branches.py review-authors --repo DIR --range <port A>..<port B> --reviewer
+   "fresh agent <id>, not the fixer" --note ...` records one review of that diff (by digest) in
+   `.port/AUTHORS-REVIEWS.md` on every version branch, and each such version's done check accepts its `REVIEW.md` as
+   current through it. A version whose own files changed still needs its fresh review. Gate C still runs per version.
+
+`port_taken=` in `.port/<v>/branch.properties` (written by migrate, add-target and every cascade merge) is the port
+commit the version has fully taken: the carry of the authors' change to files the parent does not carry starts there,
+so a change a run did not take (a merge undone, then merged by hand) is offered again by the next run, and an open
+entry spans from the earliest change it has not taken. A branch written before the key starts from its merge-base.
 
 ## Procedure
 
