@@ -46,6 +46,12 @@ ONE RUN PER CHECKOUT (CATALOG X44). The run takes build/.fork-port.lock (pid, st
 second run on the same checkout is refused at once with a message naming the holder; its own children (ci-gates.py)
 are let through. A lock whose process is gone is taken over. tools/layer-ci.py CheckoutLock is the code.
 
+NO RESIDENT GRADLE (issue #122). Every Gradle the run starts (its own, and its children's: layer-deps, file-loop,
+ci-gates) runs with -Dorg.gradle.daemon=false added to GRADLE_OPTS (unless GRADLE_OPTS already sets org.gradle.daemon),
+so none of the run's daemons is still resident when Gate C's free-memory guard measures. Other checkouts' daemons are
+never stopped. When Gate C is still refused (or killed) for memory, RESIDUE.md lists the processes holding the most
+resident memory (PID, RSS, command).
+
 A RESUME RE-MEASURES. `--from-stage S` keeps the earlier stages' results for the summary but never their numbers: the
 compile count the loop, audit and gates rely on is always one this run measured (a stale 0 once skipped the audit and
 every gate and reported the target done).
@@ -58,7 +64,7 @@ real-client run. A full gate run that is not green removes GATES.md. Every run t
 stops with exit 10 while STUBS.json holds an unreviewed stub signal; 2 bad input.
 Standard library only.
 """
-import argparse, datetime, importlib.util, json, pathlib, re, shutil, subprocess, sys, tempfile
+import argparse, datetime, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -1006,13 +1012,70 @@ def stop_block(stop):
 ENVIRONMENTAL = re.compile(r"JVM killed \(exit \d+|not enough free memory \(")
 
 
-def environmental_stop(failed, code, resume, free_now=None):
-    """-> the stop for gates that are ALL red for an environmental reason, or None when any is a code failure."""
+# Issue #122: a layer run's own Gradle invocations before Gate C (stage, measure, the loop's compiles, the audit's
+# classpath, ci-gates' builds) left resident daemons and workers (measured: ~2.3 GB) and Gate C's free-memory guard then
+# refused. Every Gradle this run starts runs daemon-less: each exits when its build ends, so nothing the run started is
+# resident when the client needs the memory. Not `gradlew --stop`: that stops other checkouts' daemons too (#113).
+NO_DAEMON = "-Dorg.gradle.daemon=false"
+
+
+def gradle_env(env, layer):
+    """-> the environment for the run's subprocesses: on a layer fork `env` with NO_DAEMON in GRADLE_OPTS (unless
+    GRADLE_OPTS already sets org.gradle.daemon: the person's choice stands); otherwise None (inherit, unchanged)."""
+    if not layer:
+        return None
+    env = dict(env)
+    opts = env.get("GRADLE_OPTS", "")
+    if "org.gradle.daemon" not in opts:
+        env["GRADLE_OPTS"] = f"{opts} {NO_DAEMON}".strip()
+    return env
+
+
+GRADLE_MAINS = re.compile(r"(?:^|[./])(GradleDaemon|GradleWorkerMain|GradleMain|KotlinCompileDaemon|GradleStart\w*)$")
+
+
+def memory_holders(proc="/proc", top=5):
+    """-> the processes holding the most resident memory, largest first, as "PID 123 2300 MB <command>" ([] where
+    there is no /proc). A Java command is named by its main class (GradleDaemon, GradleWorkerMain, ...) when it has one."""
+    rows = []
+    for d in pathlib.Path(proc).glob("[0-9]*"):
+        try:
+            st = (d / "status").read_text(encoding="utf-8", errors="replace")
+            argv = [x for x in (d / "cmdline").read_bytes().decode("utf-8", "replace").split("\0") if x]
+        except OSError:
+            continue
+        m = re.search(r"(?m)^VmRSS:\s+(\d+)\s*kB", st)
+        if not m or not argv:
+            continue
+        main = next((g.group(1) for x in argv if (g := GRADLE_MAINS.search(x))), None)
+        exe = pathlib.PurePath(argv[0]).name
+        if not main and exe.startswith("java"):      # a JVM's flags say nothing: its main class (or -jar) does
+            it = iter(argv[1:])
+            for x in it:
+                if x in ("-cp", "-classpath", "--class-path", "-p", "--module-path"):
+                    next(it, None)
+                elif x == "-jar":
+                    main = "-jar " + pathlib.PurePath(next(it, "")).name
+                    break
+                elif not x.startswith("-") and not x.startswith("@"):
+                    main = x
+                    break
+        cmd = " ".join((f"{exe} ... {main}" if main else " ".join([exe] + argv[1:])).split())
+        rows.append((int(m.group(1)) // 1024, int(d.name), cmd[:100]))
+    rows.sort(key=lambda r: (-r[0], r[1]))
+    return [f"PID {pid} {mb} MB {cmd}" for mb, pid, cmd in rows[:top]]
+
+
+def environmental_stop(failed, code, resume, free_now=None, holders=None):
+    """-> the stop for gates that are ALL red for an environmental reason, or None when any is a code failure.
+    `holders` (memory_holders()) names what held the memory, so the next step is obvious."""
     if not failed or not all(ENVIRONMENTAL.search(l) for l in failed):
         return None
     evidence = [l[:300] for l in failed]
     if free_now:
         evidence.append(f"free memory now: {free_now[0]} MB ({free_now[1]})")
+    if holders:
+        evidence.append("memory held by (largest resident first): " + "; ".join(holders))
     return {"stop": "environmental, not a code failure: " + "; ".join(l[:120] for l in failed[:2]), "code": code,
             "gates": [l[:200] for l in failed], "detail": evidence, "environment": evidence,
             "choices": [f"re-run when memory is free (stop other Gradle/Minecraft runs on this machine first): {resume}",
@@ -1068,6 +1131,7 @@ class Run:
                         "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")}
         self.jpath = pathlib.Path(a.json) if a.json else self.work / "fork-port.json"
         self.py = sys.executable
+        self.env = gradle_env(os.environ, (self.mv / "base.properties").exists())    # None: not a layer fork, inherit
 
     def say(self, stage, msg):
         print(f"fork-port: {stage}: {msg}", flush=True)
@@ -1075,7 +1139,7 @@ class Run:
     def sh(self, cmd, log=None, cwd=None):
         out = open(log, "w", encoding="utf-8") if log else subprocess.PIPE
         r = subprocess.run(cmd, cwd=cwd or self.repo, stdout=out, stderr=subprocess.STDOUT, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace", env=self.env)
         if log:
             out.close()
         return r
@@ -1544,8 +1608,10 @@ class Run:
                                     "\"reviewed\" in targets/<t>/STUBS.json to why; then resume with --from-stage loop"]}
             return {"done": f"{len(passed)} gate(s) green ({self.a.gates}){note}"}
         code = 12 if any("Gate C" in l for l in failed) else 11
+        linux = sys.platform.startswith("linux")
         env = environmental_stop(failed, code, self.resume_cmd("gates"),
-                                 load("gl", "gate-loop.py").mem_available_mb() if sys.platform.startswith("linux") else None)
+                                 load("gl", "gate-loop.py").mem_available_mb() if linux else None,
+                                 memory_holders() if linux else None)
         if env:
             return env
         evidence = []       # why each red gate is red: its own log's first compile errors / failing tests
@@ -1640,6 +1706,8 @@ def main():
     except ValueError as e:
         print(f"fork-port: {e}"); return 2
     run = Run(a)
+    if run.env:     # the in-process helpers (target_classpath: layer-ci.py) start Gradle too: daemon-less as well
+        os.environ["GRADLE_OPTS"] = run.env["GRADLE_OPTS"]
     if a.gates == "auto":
         a.gates = gates_auto(run.tdir)
         print(f"fork-port: gates: auto -> {a.gates} ({'Gate C already recorded in GATES.md' if a.gates == 'ab' else 'no recorded Gate C pass yet: one real-client run on the initial port'})")
@@ -2256,6 +2324,76 @@ def self_check():
                 expect(any("free" in e for e in st["environment"]), "the evidence carries the free-memory figure")
     md, _d = residue_report("gates", "x", [], None, [], ["Gate B: FAIL -- tests"], "r")
     expect("Fix what is listed here" in md and "Environmental" not in md, "a code failure's RESIDUE.md is unchanged")
+    # ---- issue #122: the run's own Gradle leaves no resident daemon before Gate C (layer forks only), and a refused
+    # Gate C names what holds the memory
+    with tempfile.TemporaryDirectory() as d:
+        for layer in (True, False):
+            repo = pathlib.Path(d) / ("layer" if layer else "single"); repo.mkdir()
+            if layer:
+                (repo / ".multiversion").mkdir(); (repo / ".multiversion/base.properties").write_text("mc=1.21.1\n", encoding="utf-8")
+            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
+                                    direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
+                                    port_checkout=[])
+            seen = []
+            real_run = subprocess.run
+            subprocess.run = lambda cmd, **k: (seen.append((cmd, k)), CompletedProcess(cmd, 0, "", ""))[1]
+            try:
+                Run(a_).gradle(["compileJava"], str(repo / "g.log"))
+            finally:
+                subprocess.run = real_run
+            cmd, kw = seen[0]
+            opts = (kw.get("env") or {}).get("GRADLE_OPTS", "")
+            if layer:
+                expect("-Dorg.gradle.daemon=false" in opts and kw["env"].get("PATH") == os.environ.get("PATH"),
+                       f"a layer fork's Gradle runs daemon-less (GRADLE_OPTS), with the rest of the environment: {opts!r}")
+            else:
+                expect(kw.get("env") is None and "--no-daemon" not in cmd,
+                       f"a single-version checkout's environment is inherited unchanged: {kw.get('env')!r}")
+    if "gradle_env" in globals():
+        e_ = gradle_env({"GRADLE_OPTS": "-Xmx1g -Dorg.gradle.daemon=true", "A": "1"}, True)
+        expect(e_["GRADLE_OPTS"] == "-Xmx1g -Dorg.gradle.daemon=true", "an explicit org.gradle.daemon in GRADLE_OPTS stands")
+        expect(gradle_env({"GRADLE_OPTS": "-Xmx1g"}, True)["GRADLE_OPTS"] == "-Xmx1g -Dorg.gradle.daemon=false"
+               and gradle_env({}, True)["GRADLE_OPTS"] == "-Dorg.gradle.daemon=false", "NO_DAEMON is appended to GRADLE_OPTS")
+    with tempfile.TemporaryDirectory() as d:
+        proc = pathlib.Path(d) / "proc"
+        for pid, rss, argv in ((4242, 2300 * 1024, ["/usr/lib/jvm/bin/java", "-Xmx6g", "-cp", "/x/gradle-daemon.jar",
+                                                      "org.gradle.launcher.daemon.bootstrap.GradleDaemon", "8.10"]),
+                               (4250, 700 * 1024, ["java", "-cp", "a.jar", "worker.org.gradle.process.internal.worker.GradleWorkerMain", "w1"]),
+                               (5000, 900 * 1024, ["/opt/jdk/bin/java", "-Xmx4g", "-cp", "c.jar", "net.example.client.Main", "--x"]),
+                               (6000, 50 * 1024, ["/usr/bin/fakeproc", "--a", "b\nc"]),
+                               (7000, None, ["kthread"])):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / "status").write_text("Name:\tx\n" + (f"VmRSS:\t {rss} kB\n" if rss else ""), encoding="utf-8")
+            (proc / str(pid) / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+        (proc / "self").mkdir()
+        fake = None
+        if "memory_holders" in globals():
+            fake = memory_holders(str(proc), top=3)
+            expect(fake == ["PID 4242 2300 MB java ... GradleDaemon", "PID 5000 900 MB java ... net.example.client.Main",
+                            "PID 4250 700 MB java ... GradleWorkerMain"], f"memory_holders: largest first, named by main class: {fake}")
+        repo = pathlib.Path(d) / "r"; (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="full", modid="m", base="x",
+                                direct=False, from_stage="gates", to_stage=None, max_errors=None, confirm_spend=False,
+                                port_checkout=[])
+        run = Run(a_); run.compile_errors = lambda: 0; run.modid = lambda: "m"
+        def gsh(cmd, log=None, cwd=None):
+            pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(log).write_text("[ci-gates] Gate C -- real client, `spawn`: FAIL -- not enough free memory (3230 MB "
+                                         "free, need 3584; read from MemAvailable): ...\n", encoding="utf-8")
+            return CompletedProcess(cmd, 1, "", "")
+        run.sh = gsh
+        real_mh = globals().get("memory_holders")
+        if real_mh:
+            globals()["memory_holders"] = lambda *x, **k: fake
+        try:
+            st = run.s_gates()
+        finally:
+            if real_mh:
+                globals()["memory_holders"] = real_mh
+        md, _d = residue_report("gates", st["stop"], [], None, [], st.get("gates", []), "r", environment=st.get("environment"))
+        held = [l for l in md.splitlines() if "memory held by" in l]
+        expect(sys.platform != "linux" or (held and "PID 4242 2300 MB java ... GradleDaemon" in held[0]),
+               f"a refused Gate C's RESIDUE.md names what holds the memory (PID, RSS, command): {held}")
     # ---- --gates auto: full until GATES.md records a green Gate C
     with tempfile.TemporaryDirectory() as d:
         td = pathlib.Path(d)
