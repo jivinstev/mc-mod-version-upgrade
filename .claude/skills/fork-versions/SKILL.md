@@ -240,6 +240,13 @@ is enough), then runs the gates, and the GATES.md the run writes is committed af
    - an **overlay** (whole file, `targets/<t>/java/...`) only for a real semantic change. Derive it from the
      PREPARED file (`build/mc<t>/mv/java`, already renamed): overlays are not run through the table.
    - a mixin new to the target: add it with `mixin_add.<config>=client:Name` in target.properties.
+     `mixin_add` reaches every target that inherits this one too. A hook that only THIS version's method shape takes
+     (the next target changes the method) uses `mixin_add_only.<config>=client:Name` instead, and an authors' mixin
+     that fails on this version alone is taken off with `mixin_remove_only.<config>=mixins:Name`: both apply to that
+     target alone, after the inherited `mixin_add` chain. `layer.py` leaves such a class out of every other
+     target's prepared tree (so their compile and mixin audit never see it) and a removed one out of this target's;
+     `layer.py mixins --target <t>` prints what a target resolves. A `mixin_remove_only` the config does not list
+     stops the build. Single-version forks have no `.multiversion/`: none of this applies.
    - **Every source set** goes through the table (`mvPrepare<Set>Sources`): a mod that builds `cf`/`pro`
      variants needs them compiled too, and their overlays live at `targets/<t>/<set>/java`. A target is not at
      0 errors until `compile<Set>Java` is, for every set.

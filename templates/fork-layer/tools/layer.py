@@ -5,6 +5,11 @@
   layer.py prepare   --target T --src src/main/java --out DIR
         Merge T's chain (T, its `inherits`, theirs ...) into one rename table, one overlay tree and one
         drop list -- the nearer target wins -- and run prepare-sources.py over the authors' tree.
+  layer.py mixins    --target T [--config FILE]
+        Print T's mixin changes per config file (mixin_add over the chain, then T's own mixin_add_only and
+        mixin_remove_only; layer.gradle applies the same set at processResources), or, with --config, the
+        arrays that config ends up with on T. prepare leaves out of T's tree each mixin class that T's chain adds
+        only for another target, and each class T itself removes, so the compile and the mixin audit see that set.
   layer.py props     --target T
         Print the -P arguments T builds with (one per line), from its target.properties `prop.*` keys.
   layer.py isolation --base REF
@@ -15,7 +20,7 @@
         CI builds the base jar with and without the hook line and compares them: the layer must be inert.
   layer.py --self-check
 """
-import re, argparse, hashlib, os, pathlib, shutil, subprocess, sys, tempfile, zipfile
+import re, argparse, hashlib, json, os, pathlib, shutil, subprocess, sys, tempfile, zipfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 MV = HERE.parent
@@ -46,6 +51,127 @@ def chain(target, root=None):
         out.append(t)
         t = load_props(p).get("inherits")
     return out  # nearest first
+
+
+def _mixin_spec(value):
+    """`client:A,B;mixins:C` -> [(array, class), ...] (layer.gradle reads the same form)."""
+    out = []
+    for spec in value.split(";"):
+        array, _, classes = spec.partition(":")
+        out += [(array.strip(), c.strip()) for c in classes.split(",") if c.strip()]
+    return out
+
+
+def mixin_set(target, root=None):
+    """(adds, removes) for `target`, each {config file: {array: [class, ...]}}: every mixin_add of its chain
+    (farthest first), then its OWN mixin_add_only; removes are its own mixin_remove_only. The _only keys of the
+    targets it inherits are not read: they apply to that target alone (issue #119)."""
+    root = root or MV
+    adds, removes = {}, {}
+    def put(into, cfg, value):
+        for array, c in _mixin_spec(value):
+            lst = into.setdefault(cfg, {}).setdefault(array, [])
+            if c not in lst:
+                lst.append(c)
+    for t in reversed(chain(target, root)):
+        props = load_props(root / "targets" / t / "target.properties")
+        for k, v in sorted(props.items()):
+            if k.startswith("mixin_add."):
+                put(adds, k[len("mixin_add."):], v)
+        if t == target:
+            for k, v in sorted(props.items()):
+                if k.startswith("mixin_add_only."):
+                    put(adds, k[len("mixin_add_only."):], v)
+                elif k.startswith("mixin_remove_only."):
+                    put(removes, k[len("mixin_remove_only."):], v)
+    return adds, removes
+
+
+def mixins_off(target, root=None):
+    """{config file: {class, ...}}: the mixin classes `target`'s prepared tree leaves out -- each one an inherited
+    target added with mixin_add_only and `target` does not add itself, and each one `target` takes off with
+    mixin_remove_only. Their sources would otherwise reach the target through the overlay chain (or the authors'
+    tree) and be compiled and audited as if they applied."""
+    root = root or MV
+    adds, removes = mixin_set(target, root)
+    on = {(cfg, c) for cfg, arrs in adds.items() for cs in arrs.values() for c in cs}
+    off = set()
+    for t in chain(target, root)[1:]:
+        for k, v in load_props(root / "targets" / t / "target.properties").items():
+            if k.startswith("mixin_add_only."):
+                off |= {(k[len("mixin_add_only."):], c) for _, c in _mixin_spec(v)}
+    off = (off - on) | {(cfg, c) for cfg, arrs in removes.items() for cs in arrs.values() for c in cs}
+    out = {}
+    for cfg, c in off:
+        out.setdefault(cfg, set()).add(c)
+    return out
+
+
+def mixin_config(cfg, names, root=None):
+    """The JSON of mixin config `cfg` as the target's resources see it: a target overlay's copy (nearest first),
+    else the authors' src/<set>/resources/<cfg>; None when there is none."""
+    root = root or MV
+    for p in [root / "targets" / t / "resources" / cfg for t in names] + sorted((root.parent / "src").glob(f"*/resources/{cfg}")):
+        if p.is_file():
+            return json.loads(p.read_text(encoding="utf-8"))
+    return None
+
+
+def apply_mixins(config, cfg, adds, removes):
+    """`config` (the parsed JSON) with layer.gradle's processResources changes applied: the arrays, sorted."""
+    out = {}
+    for array, classes in (adds.get(cfg) or {}).items():
+        out.setdefault(array, list(config.get(array) or []))
+        out[array] += [c for c in classes if c not in out[array]]
+    for array, classes in (removes.get(cfg) or {}).items():
+        lst = out.setdefault(array, list(config.get(array) or []))
+        for c in classes:
+            if c not in lst:
+                sys.exit(f"mixin_remove_only.{cfg} names {array}:{c}, which {cfg} does not list")
+            lst[:] = [x for x in lst if x != c]
+    for array, v in config.items():
+        if isinstance(v, list):
+            out.setdefault(array, list(v))
+    return {k: sorted(v) for k, v in sorted(out.items())}
+
+
+def cmd_mixins(a):
+    adds, removes = mixin_set(a.target)
+    if a.config:
+        cfgpath = pathlib.Path(a.config)
+        config = json.loads(cfgpath.read_text(encoding="utf-8"))
+        arrays = apply_mixins(config, cfgpath.name, adds, removes)
+        print(";".join(f"{k}:{','.join(v)}" for k, v in arrays.items()))
+        return 0
+    for cfg in sorted(set(adds) | set(removes)):
+        for array, cs in sorted((adds.get(cfg) or {}).items()):
+            print(f"{cfg} {array} + {','.join(cs)}")
+        for array, cs in sorted((removes.get(cfg) or {}).items()):
+            print(f"{cfg} {array} - {','.join(cs)}")
+    return 0
+
+
+def drop_mixins_off(target, names, overlay, src):
+    """Leave `mixins_off(target)` out of the prepared tree: delete it from the merged overlay, and return the
+    authors' files (relative to `src`) to add to the drop list. A class with no source in this set is skipped (a
+    mixin of another source set)."""
+    drops = set()
+    for cfg, classes in sorted(mixins_off(target).items()):
+        config = mixin_config(cfg, names)
+        if config is None or not config.get("package"):
+            sys.exit(f"layer: {target}: a mixin_*_only key names {cfg}, which has no `package` in targets/*/resources "
+                     f"or src/*/resources -- cannot find its classes")
+        for c in sorted(classes):
+            rel = config["package"].replace(".", "/") + "/" + c.replace(".", "/") + ".java"
+            hit = False
+            if (overlay / rel).is_file():
+                (overlay / rel).unlink(); hit = True
+            if (pathlib.Path(src) / rel).is_file():
+                drops.add(rel); hit = True
+            if hit:
+                print(f"layer: {target} leaves mixin {c} out (mixin_add_only of an inherited target, or this "
+                      f"target's mixin_remove_only)")
+    return drops
 
 
 def mc_key(v):
@@ -86,6 +212,7 @@ def cmd_prepare(a):
             d = MV / "targets" / t / sub
             if d.is_dir():
                 shutil.copytree(d, overlay, dirs_exist_ok=True)
+        mixin_drops = drop_mixins_off(a.target, names, overlay, a.src)
         # rename rows: nearer target's rows FIRST so a correction to an inherited row is applied before it; the
         # shared tables (mc-mod-version-upgrade, synced into .multiversion/shared/) after every fork row
         rows = []
@@ -107,6 +234,7 @@ def cmd_prepare(a):
             d = MV / "targets" / t / "drops.txt"
             if d.exists():
                 drops |= {l.split("#", 1)[0].strip() for l in d.read_text(encoding="utf-8").splitlines()} - {""}
+        drops |= mixin_drops
         args = [sys.executable, str(HERE / "prepare-sources.py"), "--src", a.src, "--out", a.out,
                 "--overlay", str(overlay), "--renames", str(renames)]
         if drops:
@@ -351,13 +479,15 @@ def main():
     p = sub.add_parser("prepare"); p.add_argument("--target", required=True)
     p.add_argument("--src", required=True); p.add_argument("--out", required=True)
     p.add_argument("--set", default="main", help="the source set (overlays for a non-main set: targets/<t>/<set>/java)")
+    p = sub.add_parser("mixins"); p.add_argument("--target", required=True)
+    p.add_argument("--config", help="a mixin config JSON: print the arrays it ends up with on the target")
     p = sub.add_parser("props"); p.add_argument("--target", required=True)
     p = sub.add_parser("isolation"); p.add_argument("--base", required=True)
     p = sub.add_parser("compare-jars"); p.add_argument("a"); p.add_argument("b")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
-    return {"prepare": cmd_prepare, "props": cmd_props, "isolation": cmd_isolation,
+    return {"prepare": cmd_prepare, "mixins": cmd_mixins, "props": cmd_props, "isolation": cmd_isolation,
             "compare-jars": cmd_compare}[a.cmd](a)
 
 

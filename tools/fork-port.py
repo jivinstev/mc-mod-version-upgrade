@@ -1091,6 +1091,10 @@ class Run:
                             " support and is not a verbatim older copy of the template, so it cannot be replaced safely",
                     "code": 2,
                     "choices": ["merge templates/fork-layer/tools/layer.py's changes (generated moves, shared_chain) into the fork's copy"]}
+        stale = load("layer_ci", "layer-ci.py").only_mixins_unsupported(self.repo, self.t)
+        if stale:   # issue #119: an edited (so not synced) copy would keep an _only mixin on every later target in silence
+            return {"stop": f"{self.t}'s chain uses mixin_add_only/mixin_remove_only and {', '.join(stale)} does not read them",
+                    "code": 2, "choices": ["merge templates/fork-layer's layer.gradle / tools/layer.py (mixin_add_only) into the fork's copy"]}
         return {"done": ", ".join(did)}
 
     def s_stage(self):
@@ -1346,7 +1350,7 @@ class Run:
         bad = [l for l in lines if l.strip() and not l.strip().startswith(("ok ", "checked ")) and "all targets" not in l] or lines
         return {"stop": f"{len([l for l in lines if 'mixin:' in l]) or len(bad)} mixin target(s) do not match vanilla",
                 "code": 13, "audit": bad, "detail": bad[:6],
-                "choices": ["retarget each mixin in a per-target overlay or with mixin_add (fork-versions step 5)",
+                "choices": ["retarget each mixin in a per-target overlay or with mixin_add, or keep it to one target with mixin_add_only / mixin_remove_only (fork-versions step 5)",
                             "a recurring shape belongs in the shared library"]}
 
     def target_classpath(self):

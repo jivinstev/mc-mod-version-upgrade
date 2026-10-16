@@ -72,6 +72,26 @@ def read_props(path):
     return out
 
 
+ONLY_MIXIN_KEYS = ("mixin_add_only.", "mixin_remove_only.")
+
+
+def only_mixins_unsupported(repo, target):
+    """The fork's machinery files that ignore a mixin_add_only / mixin_remove_only key in `target`'s inherits chain
+    (issue #119): a layer.gradle or layer.py older than the keys would keep the mixin on every later target, or the
+    removed one on, in silence. [] when no target in the chain uses them, or when both files read them."""
+    mv = pathlib.Path(repo) / ".multiversion"
+    seen, t, uses = set(), target, False
+    while t and t not in seen:
+        seen.add(t)
+        props = read_props(mv / "targets" / t / "target.properties")
+        uses |= any(k.startswith(ONLY_MIXIN_KEYS) for k in props)
+        t = props.get("inherits")
+    if not uses:
+        return []
+    return [f".multiversion/{f}" for f in ("layer.gradle", "tools/layer.py")
+            if "mixin_add_only." not in ((mv / f).read_text(encoding="utf-8") if (mv / f).is_file() else "")]
+
+
 def java_of(mv, target):
     """java_version of a layer target, following `inherits`; the base's 21 when nothing says."""
     seen, t = set(), target
@@ -339,6 +359,10 @@ def cmd_compile(a):
         rows.append(f"| {name} | {'PASS' if passed else 'FAIL'} | {detail} |")
         print(f"[layer-ci] {t} {name}: {'PASS' if passed else 'FAIL'} -- {detail}", flush=True)
 
+    stale = only_mixins_unsupported(repo, t)
+    if stale:
+        record("mixin _only keys", False, f"{t}'s chain uses mixin_add_only/mixin_remove_only and {', '.join(stale)} "
+               f"does not read them (make-fork-layer.py sync-shared, or merge templates/fork-layer by hand)")
     log = work / f"compile-{t}.log"
     rc = _run([BASH, str(repo / ".multiversion/build.sh"), t, *tasks, "--console=plain"], repo, log, no_ci_env())
     compiled = rc == 0
@@ -510,6 +534,20 @@ def self_check():
     t, n = strip_hook(f"a\n// c\n{HOOK_MARK}\n")
     expect(n == 1 and HOOK_MARK not in t and "// c" in t, "strip_hook removes the hook line, keeps comments")
     expect(strip_hook("a\n")[1] == 0, "no hook: counted 0")
+    with tempfile.TemporaryDirectory() as d:   # issue #119: _only mixin keys need machinery that reads them
+        mv = pathlib.Path(d) / ".multiversion"
+        for t, body in (("1.21.3", "mixin_add.x.mixins.json=client:A\n"), ("1.21.4", "inherits=1.21.3\nmixin_add_only.x.mixins.json=client:B\n"),
+                        ("1.21.5", "inherits=1.21.4\n")):
+            (mv / "targets" / t).mkdir(parents=True)
+            (mv / "targets" / t / "target.properties").write_text(body, encoding="utf-8")
+        (mv / "tools").mkdir()
+        (mv / "layer.gradle").write_text("// mixin_add.\n", encoding="utf-8")
+        (mv / "tools/layer.py").write_text("# mixin_add_only.\n", encoding="utf-8")
+        expect(only_mixins_unsupported(d, "1.21.3") == [], "no _only key in the chain: nothing to say (an old layer.gradle is fine)")
+        expect(only_mixins_unsupported(d, "1.21.5") == [".multiversion/layer.gradle"],
+               "an inherited _only key with a layer.gradle that does not read it is named")
+        (mv / "layer.gradle").write_text("// mixin_add_only.\n", encoding="utf-8")
+        expect(only_mixins_unsupported(d, "1.21.4") == [], "machinery that reads the keys passes")
     os.environ["CI"] = "true"
     expect("CI" not in no_ci_env() and "PATH" in no_ci_env(), "no_ci_env drops CI only")
     print("self-check:", "OK" if ok else "FAIL")
