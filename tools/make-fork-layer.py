@@ -349,8 +349,8 @@ def fork_port():
     return m
 
 
-def freeze(repo, upstream=None, libraries=()):
-    rec, why = fork_port().freeze_upstream(repo, upstream, libraries)
+def freeze(repo, upstream=None, libraries=(), accept_drift=False):
+    rec, why = fork_port().freeze_upstream(repo, upstream, libraries, accept_drift=accept_drift)
     if not rec:
         print(f"freeze: {why}"); return 2
     print("freeze: " + ", ".join(f"{k}={v}" for k, v in rec.items()) + " (.multiversion/base.properties)")
@@ -523,6 +523,23 @@ def self_check_done_parent():
                            capture_output=True, text=True, encoding="utf-8")
         expect(r.returncode == 0 and read_kv(repo / ".multiversion/base.properties").get("library.owner/lib") == "v3",
                f"freeze --library records a sibling library's release: {r.stdout}")
+        # issue #133 gap 3: the authors push; a library pin alone still records (and leaves the upstream record alone),
+        # a re-freeze of the upstream is refused unless --accept-upstream-drift
+        frozen = read_kv(repo / ".multiversion/base.properties").get("upstream_commit")
+        (up / "A.txt").write_text("new\n", encoding="utf-8"); g(up, "add", "-A"); g(up, "commit", "-qm", "moved")
+        g(repo, "fetch", "-q", "upstream")
+        r = subprocess.run([sys.executable, __file__, "freeze", "--repo", str(repo), "--library", "owner/lib@v4"],
+                           capture_output=True, text=True, encoding="utf-8")
+        bp = read_kv(repo / ".multiversion/base.properties")
+        expect(r.returncode == 0 and bp.get("library.owner/lib") == "v4" and bp.get("upstream_commit") == frozen,
+               f"freeze --library after the authors moved: pinned, the upstream record untouched: {r.stdout}")
+        r = subprocess.run([sys.executable, __file__, "freeze", "--repo", str(repo), "--upstream", "upstream/main"],
+                           capture_output=True, text=True, encoding="utf-8")
+        r2 = subprocess.run([sys.executable, __file__, "freeze", "--repo", str(repo), "--upstream", "upstream/main",
+                             "--accept-upstream-drift"], capture_output=True, text=True, encoding="utf-8")
+        expect(r.returncode == 2 and "lacks 1 commit" in r.stdout and r2.returncode == 0
+               and read_kv(repo / ".multiversion/base.properties").get("upstream_commit") == frozen,
+               f"re-freezing a moved upstream: refused, then recorded with --accept-upstream-drift: {r.stdout} {r2.stdout}")
         import contextlib, io
         with contextlib.redirect_stdout(io.StringIO()):
             add_target(repo, argparse.Namespace(target="1.21.3", neo=None, inherits=None, java=None, prop=[], substitute=[]))
@@ -653,6 +670,9 @@ def main():
     p = sub.add_parser("freeze"); p.add_argument("--repo", required=True)
     p.add_argument("--upstream", help="<remote>/<branch> (default: the recorded one, else the one `upstream` remote branch HEAD carries)")
     p.add_argument("--library", action="append", default=[], help="owner/repo@TAG: a sibling library's layer release")
+    p.add_argument("--accept-upstream-drift", action="store_true",
+                   help="record the authors' commit although HEAD lacks commits of their branch (a --library pin alone "
+                        "never re-freezes the upstream, so it needs no flag)")
     p = sub.add_parser("sync-shared"); p.add_argument("--repo", required=True); p.add_argument("--check", action="store_true")
     p = sub.add_parser("versions"); p.add_argument("--refresh", action="store_true")
     a = ap.parse_args()
@@ -669,7 +689,7 @@ def main():
     if a.cmd == "sync-shared":
         return sync_shared(repo, a.check)
     if a.cmd == "freeze":
-        return freeze(repo, a.upstream, a.library)
+        return freeze(repo, a.upstream, a.library, a.accept_upstream_drift)
     if a.cmd == "init":
         init(repo, a.mv_package)
         if a.upstream:

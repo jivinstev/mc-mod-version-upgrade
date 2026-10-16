@@ -1362,24 +1362,31 @@ def write_props(path, updates):
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def freeze_upstream(repo, ref=None, libraries=()):
+def freeze_upstream(repo, ref=None, libraries=(), accept_drift=False, props_file=None):
     """Record the authors' commit the buildout starts from (the merge-base of HEAD and `ref`, default the recorded or
-    detected `upstream` branch) and each `owner/repo@TAG` library release in base.properties. -> (what was recorded,
-    None) or (None, why not)."""
+    detected `upstream` branch) and each `owner/repo@TAG` library release in base.properties (props_file: another
+    properties file -- a version branch's .port/<t>/branch.properties). -> (what was recorded, None) or (None, why not).
+    Pinning a library only (libraries, no `ref`, an upstream already recorded) leaves the upstream record as it is, so a
+    moved authors' branch never blocks a library pin (issue #133, gap 3); accept_drift records the merge-base although
+    HEAD lacks commits of the branch (the run then stops with 19 until keep-current, or continues with
+    --accept-upstream-drift)."""
     repo = pathlib.Path(repo)
-    bp = repo / ".multiversion/base.properties"
+    bp = pathlib.Path(props_file) if props_file else repo / ".multiversion/base.properties"
     props = read_props(bp)
-    ref = ref or props.get("upstream") or detect_upstream(repo)
+    if libraries and not ref and props.get("upstream_commit"):
+        ref = None                              # a library pin alone: the upstream record stays
+    else:
+        ref = ref or props.get("upstream") or detect_upstream(repo)
     rec = {}
     if ref:
         rc, base = _git(repo, "merge-base", "HEAD", ref)
         if rc != 0 or not base:
             return None, f"no common commit between HEAD and {ref} (fetch it first: git fetch {ref.split('/', 1)[0]})"
         rc, n = _git(repo, "rev-list", "--count", f"HEAD..{ref}")
-        if rc == 0 and n.isdigit() and int(n):
+        if rc == 0 and n.isdigit() and int(n) and not accept_drift:
             return None, (f"HEAD lacks {n} commit(s) of {ref}: a buildout frozen there would stop at once (exit 19). Bring "
                           "them in with keep-current first (port-sync.py), or name the authors' branch the port actually "
-                          "follows with --upstream <remote>/<branch>")
+                          "follows with --upstream <remote>/<branch>, or record it anyway with --accept-upstream-drift")
         rec.update({"upstream": ref, "upstream_commit": base})
     for lib in libraries:
         name, _, tag = lib.partition("@")
