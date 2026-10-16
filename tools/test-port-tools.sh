@@ -413,7 +413,7 @@ grep -q 'self-check: OK' <<<"$out" && ok "layer-deps: pinned mods resolved per t
   || bad "layer-deps self-check: $out"
 
 out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges, add-target --direct writes shared_chain (default off)" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges, add-target --direct writes shared_chain (default off), add-target refuses a new target over an undone parent (exit 18) unless --allow-undone-parent (recorded), init --upstream / freeze record the authors' commit" \
   || bad "make-fork-layer self-check: $out"
 # the 26.x calendar line, through the real command line on a single-version fixture turned layer: 26.1.2 one hop on from
 # 1.21.11, Java 25, ranges to the next patch release, GeckoLib's new group as an ESCAPED substitution (Properties keys end
@@ -422,7 +422,7 @@ L26="$T/layer26"; mkdir -p "$L26/src/main/java/com/example/mod"
 echo 'package com.example.mod; class A {}' > "$L26/src/main/java/com/example/mod/A.java"
 printf 'minecraft_version=1.21.1\nneo_version=21.1.228\ngeckolib_version=4.8.4\n' > "$L26/gradle.properties"; echo 'plugins {}' > "$L26/build.gradle"
 python3 tools/make-fork-layer.py init --repo "$L26" >/dev/null 2>&1
-for t26 in 1.21.11 26.1.2 26.2 26.3; do python3 tools/make-fork-layer.py add-target --repo "$L26" --target "$t26" >/dev/null 2>&1; done
+for t26 in 1.21.11 26.1.2 26.2 26.3; do python3 tools/make-fork-layer.py add-target --repo "$L26" --target "$t26" --allow-undone-parent >/dev/null 2>&1; done
 P26="$L26/.multiversion/targets/26.1.2/target.properties"
 grep -qx 'inherits=1.21.11' "$P26" && grep -qx 'java_version=25' "$P26" && grep -qx 'toml.minecraft=\[26.1.2,26.1.3)' "$P26" \
   && grep -qxF 'substitute.software.bernie.geckolib\:geckolib-neoforge-26.1.2=com.geckolib:geckolib-neoforge-26.1.2:5.5.2' "$P26" \
@@ -435,8 +435,57 @@ python3 -c 'import json,sys; p=json.load(sys.stdin); sys.exit(not (p["newest"] =
 out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest, a direct jump (shared_chain) prepares the hop-by-hop chain's tree" \
   || bad "layer.py self-check: $out"
+# R1/R4/R5 through the real command line (no Gradle, no model): a target is done only with a complete REVIEW.md, a new
+# target over an undone parent is refused, a moved authors' branch stops a run to the end (exit 19), and --chain sweeps a
+# range oldest first and stops at the first red target with its RESIDUE.md. Each on a layer fixture AND a single-version one.
+echo "fork-port: the done record (R1), the upstream freeze (R4), the fix-lowest sweep (R5)"
+RL="$T/r145"; mkdir -p "$RL"
+printf 'minecraft_version=1.21.1\nneo_version=21.1.228\n' > "$RL/gradle.properties"; echo 'plugins {}' > "$RL/build.gradle"
+python3 tools/make-fork-layer.py init --repo "$RL" >/dev/null 2>&1
+python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.3 >/dev/null 2>&1
+out="$(python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.4 2>&1)"; code=$?
+[ $code = 18 ] && grep -q 'REFUSED 1.21.4' <<<"$out" && [ ! -e "$RL/.multiversion/targets/1.21.4" ] \
+  && ok "add-target: a new target over an undone parent is refused (exit 18) and nothing is written" || bad "add-target over an undone parent: exit $code: $out"
+python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.4 --allow-undone-parent >/dev/null 2>&1
+grep -q '^allowed_undone_parent=1.21.3 ' "$RL/.multiversion/targets/1.21.4/target.properties" \
+  && ok "add-target --allow-undone-parent: added, and the escape is recorded in target.properties" || bad "--allow-undone-parent not recorded"
+python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.5 --allow-undone-parent >/dev/null 2>&1
+out="$(python3 tools/fork-port.py --repo "$RL" --target 1.21.3 --check-done 2>&1)"; code=$?
+[ $code = 18 ] && grep -q 'no green Gate C' <<<"$out" && grep -q 'no REVIEW.md' <<<"$out" \
+  && ok "fork-port --check-done: not done without Gate C and REVIEW.md (exit 18, each reason listed)" || bad "--check-done: exit $code: $out"
+# the sweep: --from-stage cost --gates none runs no Gradle; 1.21.3 is green-but-not-done (17), 1.21.4 has an open stub (red, 10)
+printf '[{"file": "x/A.java", "why": "emptied f()", "reviewed": null}]\n' > "$RL/.multiversion/targets/1.21.4/STUBS.json"
+out="$(python3 tools/fork-port.py --repo "$RL" --chain 1.21.3..1.21.5 --from-stage cost --gates none 2>&1)"; code=$?
+[ $code = 10 ] && grep -q '^| 1.21.3 | 17 | green, NOT done' <<<"$out" && grep -q '^| 1.21.4 | 10 | RED at cost.*| .multiversion/targets/1.21.4/RESIDUE.md |$' <<<"$out" \
+  && grep -q '^| 1.21.5 | - | not run' <<<"$out" && grep -q -- '--chain 1.21.4..1.21.5' <<<"$out" && [ ! -e "$RL/build/.fork-port.lock" ] \
+  && ok "fork-port --chain: oldest first, stops at the first red target naming its RESIDUE.md, the table and the command to sweep on" \
+  || bad "fork-port --chain: exit $code: $out"
+# the freeze: the authors push after the buildout started -> a run to the end stops with exit 19 naming keep-current
+UP="$T/r145-authors"; mkdir -p "$UP"; git -C "$UP" init -q -b main; git -C "$UP" config user.email a@b; git -C "$UP" config user.name a
+echo a > "$UP/A.java"; git -C "$UP" add -A; git -C "$UP" commit -qm one
+git clone -q -o upstream "$UP" "$T/r145-fork"; RF="$T/r145-fork"; git -C "$RF" config user.email a@b; git -C "$RF" config user.name a
+cp "$RL/gradle.properties" "$RL/build.gradle" "$RF/"
+python3 tools/make-fork-layer.py init --repo "$RF" --upstream upstream/main >/dev/null 2>&1
+grep -q "^upstream_commit=$(git -C "$UP" rev-parse HEAD)$" "$RF/.multiversion/base.properties" \
+  && ok "make-fork-layer init --upstream records the authors' commit the buildout starts from" || bad "init --upstream: $(cat "$RF/.multiversion/base.properties")"
+mkdir -p "$RF/.multiversion/targets/1.21.3"; git -C "$RF" add -A; git -C "$RF" commit -qm layer
+echo b > "$UP/A.java"; git -C "$UP" commit -qam two
+out="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --from-stage cost --gates none 2>&1)"; code=$?
+[ $code = 19 ] && grep -q 'upstream moved' <<<"$out" && grep -q 'port-sync.py' <<<"$out" \
+  && ok "fork-port: the authors' branch moved since the freeze -> exit 19, naming the keep-current command" || bad "upstream drift: exit $code: $out"
+out="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --from-stage cost --gates none --accept-upstream-drift 2>&1)"; code=$?
+[ $code = 17 ] && grep -q 'accepted' "$RF/.multiversion/DRIFT.md" \
+  && ok "fork-port --accept-upstream-drift continues (here to exit 17) and records the drift in DRIFT.md" || bad "--accept-upstream-drift: exit $code: $out"
+# single-version: no .multiversion/ -- fork-port stops at setup exactly as before; --chain and --check-done are bad input
+SV="$T/r145-single"; mkdir -p "$SV"; cp "$RL/gradle.properties" "$RL/build.gradle" "$SV/"
+out="$(python3 tools/fork-port.py --repo "$SV" --target 1.21.4 2>&1)"; code=$?
+[ $code = 2 ] && grep -q 'no .multiversion/ in the fork' <<<"$out" && ! grep -qi 'upstream\|review\|NOT done' <<<"$out" && [ ! -e "$SV/.multiversion" ] \
+  && ok "fork-port on a single-version fork: stops at setup (exit 2) as before; no freeze, no review, nothing written" || bad "single-version fork-port: exit $code: $out"
+python3 tools/fork-port.py --repo "$SV" --chain 1.21.3..1.21.4 >/dev/null 2>&1; c1=$?
+python3 tools/fork-port.py --repo "$SV" --target 1.21.4 --check-done >/dev/null 2>&1; c2=$?
+[ $c1 = 2 ] && [ $c2 = 2 ] && [ ! -e "$SV/.multiversion" ] && ok "single-version: --chain and --check-done are bad input (exit 2), nothing written" || bad "single-version --chain $c1 / --check-done $c2"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command, done needs REVIEW.md (for the commit reviewed) and TEST-ITEMS.md, a new target over an undone parent is refused, the upstream freeze stops a run when the authors moved, --chain sweeps up and stops at the first red -- each also on a single-version fixture" \
   || bad "fork-port self-check: $out"
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \

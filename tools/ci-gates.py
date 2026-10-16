@@ -136,7 +136,7 @@ def log_tails(paths, n=40, cap=12000):
     return text[-cap:] if len(text) > cap else text
 
 
-GATE_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "STUBS.json")   # what a gate run itself writes into a target
+GATE_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md")   # what a gate run (and fork-port.py's done record) writes into a target
 
 
 def tested_tree(repo, mc):

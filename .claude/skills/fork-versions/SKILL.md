@@ -28,6 +28,41 @@ helpers, catalogue entries and a cost figure; the next fork, and the next versio
 3. **Never**: edit anything outside `.multiversion/` and the hook line on the layer branch, promote or publish a
    release, push to the authors' repository.
 
+## Done: one definition, fixed before the buildout starts
+
+A target is **done** when, and only when, all of these hold (`tools/fork-port.py` `target_done()`; ask it with
+`python3 tools/fork-port.py --repo DIR --target <t> --check-done`, exit 0 or 18 with every open reason):
+
+1. it compiles at 0 errors in every source set and the mixin and event-listener audits are clean (the gates stage runs
+   only then);
+2. the full gates are green **including Gate C**, recorded in `.multiversion/targets/<t>/GATES.md`;
+3. no `STUBS.json` entry is unreviewed;
+4. `.multiversion/targets/<t>/REVIEW.md` is complete for the commit it names: an **independent fresh-context review**
+   with one verdict (`ok` / `not-ok`) and a note per `STUBS.json` entry and per whole-file overlay (read against the
+   authors' file it replaces), plus `reviewer`, `date` and `commit`; nothing in the target's directory has changed
+   since that commit (the run's own `GATES.md`/`COST.md`/`RESIDUE.md`/`REVIEW.md`/`TEST-ITEMS.md` aside);
+5. the target's manual-test items are generated (`TEST-ITEMS.md`, from `tools/layer-test-plan.py`; a run of
+   `fork-port.py` to the end writes it).
+
+A run whose gates are green but that misses 4 or 5 exits **18** ("Gate C green, NOT done") and adds a `?` row to
+`REVIEW.md` for every item without a verdict; it never writes a verdict. **The list does not grow during a buildout**:
+each bar added after targets were done swept every finished target again (measured: 3-7 reopenings per target). A new
+requirement is a change to `target_done()` and to this section, made between buildouts.
+
+**Never start target N+1 before N is done.** `make-fork-layer.py add-target` and `fork-port.py --target <new>` refuse a
+new target (exit 18, nothing written) while the target it stands on (its `inherits`, or for `--direct` the nearest
+lower target) is not done, naming what is open. `--allow-undone-parent` is for development only: it is recorded as
+`allowed_undone_parent=<parent> <date>: <reason>` in the new target's `target.properties`, and that target is not done
+until its parent is.
+
+**The reviewer is a fresh agent with only that target's files**: `.multiversion/targets/<t>/` (`REVIEW.md` lists every
+item, `STUBS.json`, the overlays) and the authors' files the overlays replace -- never the agent that ported or fixed the
+target, never one carried over from another target, and not shown the parent's reviews (an inherited "moved, same effect"
+review that was wrong reached eight targets before anyone looked again). It fills `reviewer` (its own identity: the
+session link), `date` and `commit` (`git rev-parse --short HEAD` of the committed state it read), gives each row a
+verdict and a note that says what it compared, and the result is committed. A `not-ok` goes to the target's fixer; after
+the fix, a fresh reviewer reviews again against the new commit.
+
 ## Direct jumps (opt-in per target)
 
 By default a target is one hop: `add-target` points `inherits` at the nearest lower target, and `layer.py prepare`
@@ -160,8 +195,8 @@ in minutes); a full run of every target's gates is `fork-port.py --gates full`, 
 
 `python3 tools/fork-port.py --repo DIR --target <t> [--budget 15] [--gates auto|none|ab|full]` runs steps 2-7 below
 as stages (setup, stage, moves, measure, loop, audit, gates, cost) and prints one line per stage. It stops
-only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11 (Gate A/B), 12 (Gate C) or 13 (mixin
-audit), and `.multiversion/targets/<t>/RESIDUE.md` -- the remaining errors by CATALOG entry, what the compile
+only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11 (Gate A/B), 12 (Gate C), 13 (mixin
+audit), 18 (a new target over an undone parent) or 19 (the authors' branch moved since the freeze: step 0), and `.multiversion/targets/<t>/RESIDUE.md` -- the remaining errors by CATALOG entry, what the compile
 loop tried (files still failing at the top model tier, rows it reverted), the audit mismatches or failing gates,
 and the `--from-stage` command that resumes. **You handle only what RESIDUE.md lists** -- do not read the build
 logs -- and **every fix you make goes into the shared library (`templates/fork-layer/shared/<t>`) or a converter,
@@ -172,8 +207,8 @@ The steps below are the reference for what each stage does and for fixing its re
 **One fresh residue fixer per Minecraft version.** When the residue goes to a worker agent (rather than being fixed
 in your own session), start a NEW agent for each target, with only that target's `RESIDUE.md` / `STUBS.json`, the
 rules (edit only `.multiversion/targets/<t>/`, generic shapes to the shared library, no commits) and the resume command.
-Resume that agent only for the same target's next round (its Gate C phases, a stub review); never carry one agent
-from target to target. Its context compounds: measured, one fixer resumed across six targets of a dependent fork
+Resume that agent only for the same target's next round (its Gate C phases); never carry one agent
+from target to target, and never let it write the target's `REVIEW.md` (that is another fresh agent: "Done"). Its context compounds: measured, one fixer resumed across six targets of a dependent fork
 grew to ~650k tokens and cost about $120 -- most of it re-reading earlier targets' work. What a later target
 needs from an earlier one is already in the tree (the parent's overlays, `STUBS.json` reviews it inherits -- only while the flagged file hooks the same mixin targets, `@At`s and events; a changed hook set reopens the entry as `re-justify: hook targets changed ...`) and in the
 catalogue entries the earlier fixer wrote.
@@ -187,7 +222,7 @@ fork's overlays: that code is theirs, ported in their fork. The similarity gate 
 the pre-commit and pre-push hooks and refuses template Java that matches the NeoForge/Minecraft/GeckoLib sources on
 the machine; a refusal is fixed by rewriting from the API, never by an annotation. Give a worker fixer this rule.
 
-**A version is done only after Gates A, B AND C.** Gates A/B and the audits cannot see what only a client builds --
+**Why Gate C is on the list ("Done", item 2).** Gates A/B and the audits cannot see what only a client builds --
 models, render layers, shaders -- and every dependent-fork version so far that was green at A/B still failed in a real
 client (a missing model part at launch, a missing shader sampler at spawn). So `fork-port.py` never reports a target
 done without a green Gate C recorded in its `GATES.md`: a run that ends green at A/B exits 17 ("A/B green, Gate C not
@@ -207,9 +242,32 @@ checkout records `<sha> + uncommitted: <files>` (the run's own GATES.md/COST.md/
 because the bare parent commit does not hold the code that went green. So a residue fixer commits its edits (locally
 is enough), then runs the gates, and the GATES.md the run writes is committed after it, naming the fix's commit.
 
+**A bug class found late: fix it at the lowest target, then sweep up.** Fix it once, at the lowest target where it
+exists (and in the shared library when it is generic), commit, then re-gate the inherited range with no model:
+
+    python3 tools/fork-port.py --repo DIR --chain <lowest>..<newest> --from-stage gates [--gates full]
+
+It runs `--from-stage gates` (any stage may be named) for each target from `<lowest>` up `<newest>`'s inherits chain,
+oldest first, with `--budget 0 --max-errors 0` (no worker can start), checks the upstream once, stops at the **first red**
+target naming its `RESIDUE.md` and the command that sweeps on from there, and prints a table (target | exit | result |
+residue). A green-but-not-done target (exit 17/18) does not stop it; the table says what it still needs. **Start one
+fixer only where the sweep went red** -- never one per target per wave. A target whose files the fix changed needs a fresh
+review again ("Done", item 4).
+
 ## Procedure
 
-0. **Read first**: CATALOG §M and `references/minor-version-deltas.md` (the U and L sections). The first layer
+0. **Upstream first, then freeze it** (before a buildout, single fork or library + dependents): run keep-current's
+   detect for the fork AND each library fork it depends on (`port-sync.py --dry-run`, `layer-sync.py detect`), and
+   bring in what it finds with the keep-current skill -- a ladder started on stale code carries the authors' later
+   changes into every whole-file overlay by hand. Then record where the buildout starts:
+   `python3 tools/make-fork-layer.py freeze --repo DIR --upstream <remote>/<branch> [--library owner/repo@TAG ...]`
+   (or `init --upstream`; `fork-port.py` writes it itself when it adds the layer's first target and the clone has an
+   `upstream` remote). `.multiversion/base.properties` then holds `upstream=`, `upstream_commit=` and one
+   `library.<owner>/<repo>=<tag>` per library release. Every `fork-port.py` run to the end fetches that branch and
+   **stops with exit 19** when it holds commits the checkout lacks (or a `--port-release` names another release of a
+   recorded library), naming the keep-current command; `--accept-upstream-drift` continues knowingly and appends the
+   drift to `.multiversion/DRIFT.md`. After keep-current merged the new code, `freeze` again.
+0a. **Read first**: CATALOG §M and `references/minor-version-deltas.md` (the U and L sections). The first layer
    port re-derived five rows that were already there.
 0b. **Guard the names**: `python3 tools/guard-names.py ensure --mod-repo DIR` plus one `--mod-repo` per fork it depends on (its names go into
    the list outside this repository; the hook refuses them in shared rows, helpers and catalogue entries). Before a
@@ -284,8 +342,8 @@ is enough), then runs the gates, and the GATES.md the run writes is committed af
    `layer-sync.py detect --repo DIR --ref origin/<layer branch> --port-ref origin/<port branch>` must print
    `layer=true` with every target and `layer_behind=0` (or the count the next run will merge).
 
-11. **Done: hand off a manual test plan** (when the last target of a buildout is green -- one fork, or a library fork
-   and the forks that depend on it). The gates never look at what a port changed on screen, so the maintainer needs to
+11. **Hand off a manual test plan** (when the last target of a buildout is done -- one fork, or a library fork
+   and the forks that depend on it; each target's own `TEST-ITEMS.md` is already written, "Done" item 5). The gates never look at what a port changed on screen, so the maintainer needs to
    know what to test on which version. Run `python3 tools/layer-test-plan.py --repo DIR [--repo DIR ...] --json` (no
    model, no network). Per fork it gives the versions and, for a layer fork, items per target, each with its sources,
    the targets it applies to, their range and the version where it first appears (a change shared by several targets is
