@@ -173,7 +173,7 @@ rules (edit only `.multiversion/targets/<t>/`, generic shapes to the shared libr
 Resume that agent only for the same target's next round (its Gate C phases, a stub review); never carry one agent
 from target to target. Its context compounds: measured, one fixer resumed across six targets of a dependent fork
 grew to ~650k tokens and cost about $120 -- most of it re-reading earlier targets' work. What a later target
-needs from an earlier one is already in the tree (the parent's overlays, `STUBS.json` reviews it inherits) and in the
+needs from an earlier one is already in the tree (the parent's overlays, `STUBS.json` reviews it inherits -- only while the flagged file hooks the same mixin targets, `@At`s and events; a changed hook set reopens the entry as `re-justify: hook targets changed ...`) and in the
 catalogue entries the earlier fixer wrote.
 
 **Clean-room rule for shared helpers.** A fixer that writes or rewrites a shared helper re-implementing a third-party
@@ -240,6 +240,13 @@ is enough), then runs the gates, and the GATES.md the run writes is committed af
    - an **overlay** (whole file, `targets/<t>/java/...`) only for a real semantic change. Derive it from the
      PREPARED file (`build/mc<t>/mv/java`, already renamed): overlays are not run through the table.
    - a mixin new to the target: add it with `mixin_add.<config>=client:Name` in target.properties.
+     `mixin_add` reaches every target that inherits this one too. A hook that only THIS version's method shape takes
+     (the next target changes the method) uses `mixin_add_only.<config>=client:Name` instead, and an authors' mixin
+     that fails on this version alone is taken off with `mixin_remove_only.<config>=mixins:Name`: both apply to that
+     target alone, after the inherited `mixin_add` chain. `layer.py` leaves such a class out of every other
+     target's prepared tree (so their compile and mixin audit never see it) and a removed one out of this target's;
+     `layer.py mixins --target <t>` prints what a target resolves. A `mixin_remove_only` the config does not list
+     stops the build. Single-version forks have no `.multiversion/`: none of this applies.
    - **Every source set** goes through the table (`mvPrepare<Set>Sources`): a mod that builds `cf`/`pro`
      variants needs them compiled too, and their overlays live at `targets/<t>/<set>/java`. A target is not at
      0 errors until `compile<Set>Java` is, for every set.
@@ -255,8 +262,12 @@ is enough), then runs the gates, and the GATES.md the run writes is committed af
    that degrades silently). A harness compile error on a new target is fixed once in
    `templates/upstream-harness/versions/<t>.renames.tsv`, for every fork.
 7. **Record the cost** (required): `python3 tools/port-cost.py <modid> --path DIR --target <t> --since <start> --print` for the
-   target's work window; put the block in `.multiversion/targets/<t>/COST.md` with what the window covered
-   (port only, or port + tooling) and the model mix. The figure is what tells us whether the library and the
+   target's work window (`fork-port.py`'s cost stage does this itself, starting where the target's last record ended);
+   put the block in `.multiversion/targets/<t>/COST.md` with what the window covered (port only, or port + tooling)
+   and the model mix. With `--target`, each request is charged to one target at most, by what its own tool calls
+   touched (a subagent or loop worker by its prompt); this checkout's shared work and other targets' are listed on the
+   `- attribution:` line, not in the total, so concurrent targets' and forks' records add up instead of each holding
+   the whole session. The figure is what tells us whether the library and the
    cheaper models are making targets cheaper.
 8. **Harvest** (required, before calling the target done): move every row and helper that is not specific to this
    mod into `templates/fork-layer/shared/<t>/` (`@MVPKG@`/`@MODID@` placeholders), re-sync the fork and show its

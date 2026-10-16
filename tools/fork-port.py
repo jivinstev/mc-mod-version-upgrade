@@ -33,7 +33,9 @@ Stages, each logged as one line and skipped with a reason when it does not apply
   gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases. After a green run, the
            mod's own log files (harness/run/logs, minus vanilla's) are compared with the inherited target's last gate run: a file
            it wrote there and not here is residue (exit 11) -- a subsystem stopped running (CATALOG X47)
-  cost     port-cost.py --target <t> --since <start of this port> appended to targets/<t>/COST.md
+  cost     port-cost.py --target <t> appended to targets/<t>/COST.md: only the requests that worked on <t> (one target per
+           request, by what its tool calls touched; shared work on its own line), from where the target's last record ended
+           (no record: all of them on this machine), plus the loop workers' own recorded dollars when the loop ran
 
 THE STOP CONTRACT. When a stage cannot finish this does not hand the rest to anyone silently: it prints a
 STOPPED block and writes the RESIDUE REPORT (into --json and .multiversion/targets/<t>/RESIDUE.md): the
@@ -45,6 +47,12 @@ Whoever picks it up fixes what RESIDUE.md lists, and puts each fix in the shared
 ONE RUN PER CHECKOUT (CATALOG X44). The run takes build/.fork-port.lock (pid, stale-pid aware) for its whole length and a
 second run on the same checkout is refused at once with a message naming the holder; its own children (ci-gates.py)
 are let through. A lock whose process is gone is taken over. tools/layer-ci.py CheckoutLock is the code.
+
+NO RESIDENT GRADLE (issue #122). Every Gradle the run starts (its own, and its children's: layer-deps, file-loop,
+ci-gates) runs with -Dorg.gradle.daemon=false added to GRADLE_OPTS (unless GRADLE_OPTS already sets org.gradle.daemon),
+so none of the run's daemons is still resident when Gate C's free-memory guard measures. Other checkouts' daemons are
+never stopped. When Gate C is still refused (or killed) for memory, RESIDUE.md lists the processes holding the most
+resident memory (PID, RSS, command).
 
 A RESUME RE-MEASURES. `--from-stage S` keeps the earlier stages' results for the summary but never their numbers: the
 compile count the loop, audit and gates rely on is always one this run measured (a stale 0 once skipped the audit and
@@ -58,7 +66,7 @@ real-client run. A full gate run that is not green removes GATES.md. Every run t
 stops with exit 10 while STUBS.json holds an unreviewed stub signal; 2 bad input.
 Standard library only.
 """
-import argparse, datetime, importlib.util, json, pathlib, re, shutil, subprocess, sys, tempfile
+import argparse, datetime, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -687,12 +695,95 @@ def unreviewed_stubs(tdir):
     return [e for e in have if isinstance(e, dict) and not e.get("reviewed")]
 
 
-def record_stubs(tdir, found, parents=()):
-    """Merge this run's stub signals into tdir/STUBS.json ([{file, why, reviewed}]) and return every entry. An entry a
-    reviewer marked ("reviewed": "<why the change is right>") stays reviewed unless a later run flags the file again
-    for a new reason. A NEW entry whose every signal, word for word (counts included), was already reviewed for the
-    same file in a target this one inherits (parents: their target dirs, nearest first) takes that review, marked as
-    inherited: the same loss re-flagged one version on is not a new question (measured: six of a target's eight)."""
+INJECTORS = r'(?:Inject|Redirect|ModifyArg|ModifyArgs|ModifyVariable|ModifyConstant|ModifyReturnValue|' \
+            r'ModifyExpressionValue|WrapOperation|WrapWithCondition)'
+
+
+def _paren(text, i):
+    """The text inside the parenthesis that opens at text[i] (balanced, strings skipped)."""
+    depth, j, q = 0, i, None
+    while j < len(text):
+        c = text[j]
+        if q:
+            if c == "\\":
+                j += 1
+            elif c == q:
+                q = None
+        elif c in "\"'":
+            q = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1:j]
+        j += 1
+    return text[i + 1:]
+
+
+def hook_targets(text):
+    """What a file hooks, as a sorted list of one-line strings: each mixin class target (@Mixin), each injector
+    (@Inject/@Redirect/@Modify*/@Wrap*) as its kind, method= and every @At (value, target, shift, ordinal...), each
+    @Overwrite by name, and each @SubscribeEvent handler by its event type. A stub review is a judgement about where an
+    effect is hooked, and this is that: when it differs, the review no longer speaks for the file (measured: a "moved,
+    same effect" review inherited across six targets after the handler had moved from HEAD/TAIL injections to an event
+    that does not fire in every dimension). Handler BODIES are deliberately not hashed: an overlay's body carries that
+    target's renames, so a hash would change on nearly every hop and reopen every review (losing the measured saving)
+    while saying nothing about where the code runs. Whitespace and comments are ignored."""
+    ss = load("singleshot", "singleshot.py")
+    t = ss.COMMENTS.sub("", text or "")
+    sq = lambda x: re.sub(r"\s+", "", x)
+    out = []
+    for m in re.finditer(r"@Mixin\s*\(", t):
+        body = _paren(t, m.end() - 1)
+        out += [f"@Mixin {c}" for c in re.findall(r"([\w.$]+)\.class", body)]
+        tg = re.search(r'\btargets\s*=\s*(\{[^}]*\}|"[^"]*")', body)
+        out += [f"@Mixin {c}" for c in re.findall(r'"([^"]*)"', tg.group(1))] if tg else []
+    for m in re.finditer(r"@(" + INJECTORS + r")\s*\(", t):
+        body = _paren(t, m.end() - 1)
+        meth = re.search(r'\bmethod\s*=\s*(\{[^}]*\}|"[^"]*")', body)
+        methods = ",".join(sorted(re.findall(r'"([^"]*)"', meth.group(1)))) if meth else ""
+        ats = []
+        for a in re.finditer(r"@At\s*\(", body):
+            at = sq(_paren(body, a.end() - 1))
+            ats.append("@At(" + ("value=" + at if at.startswith('"') else at) + ")")   # @At("X") is @At(value="X")
+        out.append(f"@{m.group(1)} method={methods} " + " ".join(sorted(ats)))
+    out += [f"@Overwrite {n}" for n in re.findall(r"@Overwrite\b(?:\s+@[\w.]+(?:\([^)]*\))?)*\s+(?:(?:public|private|"
+                                                   r"protected|static|final)\s+)*[\w.<>\[\], ?]+\s+(\w+)\s*\(", t)]
+    out += [f"@SubscribeEvent {e}" for e in re.findall(
+        r"@SubscribeEvent\b(?:\s*\([^)]*\))?(?:\s+@[\w.]+(?:\([^)]*\))?)*\s+(?:(?:public|private|protected|static|final|"
+        r"synchronized)\s+)*[\w.<>\[\], ?]+\s+\w+\s*\(\s*(?:final\s+)?([\w.$]+)", t)]
+    return sorted(out)
+
+
+def _hooks_of(repo, rel_file):
+    """hook_targets of repo/rel_file; a file that is gone hooks nothing ([]); None when there is no repo to look in."""
+    if repo is None:
+        return None
+    f = pathlib.Path(repo) / rel_file
+    try:
+        return hook_targets(f.read_text(encoding="utf-8", errors="replace")) if f.is_file() else []
+    except OSError:
+        return None
+
+
+def stub_line(e):
+    """One residue line for a STUBS.json entry: its file, its signals and, when an inherited review was reopened, why."""
+    return f"stub: {e.get('file')}: {str(e.get('why', ''))[:200]}" + (f" -- {e['recheck'][:300]}" if e.get("recheck") else "")
+
+
+def record_stubs(tdir, found, parents=(), repo=None):
+    """Merge this run's stub signals into tdir/STUBS.json ([{file, why, reviewed, hooks}]) and return every entry. An
+    entry a reviewer marked ("reviewed": "<why the change is right>") stays reviewed unless a later run flags the file
+    again for a new reason. A NEW entry whose every signal, word for word (counts included), was already reviewed for
+    the same file in a target this one inherits (parents: their target dirs, nearest first) takes that review, marked
+    as inherited: the same loss re-flagged one version on is not a new question (measured: six of a target's eight).
+    With repo (the fork checkout the entries' paths are relative to), each entry also records "hooks", the file's
+    hook_targets() when it was recorded -- what a review of it is made against -- and an inherited review is taken
+    only when this target's file hooks the same: otherwise the entry stays unreviewed with "inherited_review" and
+    "recheck" ("re-justify: hook targets changed from ... to ..."). A parent entry recorded before "hooks" existed is
+    compared through the parent's file on disk; only when that file is gone too is the hook set unknown, and the
+    review is inherited as before. Without repo, nothing about hooks is read or written."""
     path = tdir / "STUBS.json"
     try:
         have = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
@@ -713,11 +804,26 @@ def record_stubs(tdir, found, parents=()):
         if e is None or s["why"] not in e.get("why", ""):
             why = s["why"] if e is None else e["why"] + "; " + s["why"]
             src = prior.get(rel(s["file"]))
-            inherited = None
+            new = {"file": s["file"], "why": why, "reviewed": None}
+            now = _hooks_of(repo, s["file"])
+            if now is not None:
+                new["hooks"] = now
             if src and all(part in src[1]["why"] for part in why.split("; ")):
                 r = src[1]["reviewed"]
-                inherited = r if r.startswith("(inherited") else f"(inherited from {src[0]}) {r}"
-            by[s["file"]] = {"file": s["file"], "why": why, "reviewed": inherited}
+                r = r if r.startswith("(inherited") else f"(inherited from {src[0]}) {r}"
+                then = src[1].get("hooks")
+                if then is None and repo is not None and (pathlib.Path(repo) / src[1]["file"]).is_file():
+                    then = _hooks_of(repo, src[1]["file"])      # recorded before "hooks": the parent's file as it is
+                if now is not None and then is not None and sorted(then) != sorted(now):
+                    new.update({"inherited_review": r, "recheck": f"re-justify: hook targets changed from "
+                                f"{'; '.join(sorted(then)) or '(none)'} to {'; '.join(now) or '(none)'}"})
+                else:
+                    new["reviewed"] = r
+            by[s["file"]] = new
+        elif repo is not None and not e.get("reviewed") and not e.get("recheck"):
+            now = _hooks_of(repo, s["file"])                   # still open: a review will be made against the file as it is now
+            if now is not None:
+                e["hooks"] = now
     out = sorted(by.values(), key=lambda e: e["file"])
     if out:
         tdir.mkdir(parents=True, exist_ok=True)
@@ -908,13 +1014,70 @@ def stop_block(stop):
 ENVIRONMENTAL = re.compile(r"JVM killed \(exit \d+|not enough free memory \(")
 
 
-def environmental_stop(failed, code, resume, free_now=None):
-    """-> the stop for gates that are ALL red for an environmental reason, or None when any is a code failure."""
+# Issue #122: a layer run's own Gradle invocations before Gate C (stage, measure, the loop's compiles, the audit's
+# classpath, ci-gates' builds) left resident daemons and workers (measured: ~2.3 GB) and Gate C's free-memory guard then
+# refused. Every Gradle this run starts runs daemon-less: each exits when its build ends, so nothing the run started is
+# resident when the client needs the memory. Not `gradlew --stop`: that stops other checkouts' daemons too (#113).
+NO_DAEMON = "-Dorg.gradle.daemon=false"
+
+
+def gradle_env(env, layer):
+    """-> the environment for the run's subprocesses: on a layer fork `env` with NO_DAEMON in GRADLE_OPTS (unless
+    GRADLE_OPTS already sets org.gradle.daemon: the person's choice stands); otherwise None (inherit, unchanged)."""
+    if not layer:
+        return None
+    env = dict(env)
+    opts = env.get("GRADLE_OPTS", "")
+    if "org.gradle.daemon" not in opts:
+        env["GRADLE_OPTS"] = f"{opts} {NO_DAEMON}".strip()
+    return env
+
+
+GRADLE_MAINS = re.compile(r"(?:^|[./])(GradleDaemon|GradleWorkerMain|GradleMain|KotlinCompileDaemon|GradleStart\w*)$")
+
+
+def memory_holders(proc="/proc", top=5):
+    """-> the processes holding the most resident memory, largest first, as "PID 123 2300 MB <command>" ([] where
+    there is no /proc). A Java command is named by its main class (GradleDaemon, GradleWorkerMain, ...) when it has one."""
+    rows = []
+    for d in pathlib.Path(proc).glob("[0-9]*"):
+        try:
+            st = (d / "status").read_text(encoding="utf-8", errors="replace")
+            argv = [x for x in (d / "cmdline").read_bytes().decode("utf-8", "replace").split("\0") if x]
+        except OSError:
+            continue
+        m = re.search(r"(?m)^VmRSS:\s+(\d+)\s*kB", st)
+        if not m or not argv:
+            continue
+        main = next((g.group(1) for x in argv if (g := GRADLE_MAINS.search(x))), None)
+        exe = pathlib.PurePath(argv[0]).name
+        if not main and exe.startswith("java"):      # a JVM's flags say nothing: its main class (or -jar) does
+            it = iter(argv[1:])
+            for x in it:
+                if x in ("-cp", "-classpath", "--class-path", "-p", "--module-path"):
+                    next(it, None)
+                elif x == "-jar":
+                    main = "-jar " + pathlib.PurePath(next(it, "")).name
+                    break
+                elif not x.startswith("-") and not x.startswith("@"):
+                    main = x
+                    break
+        cmd = " ".join((f"{exe} ... {main}" if main else " ".join([exe] + argv[1:])).split())
+        rows.append((int(m.group(1)) // 1024, int(d.name), cmd[:100]))
+    rows.sort(key=lambda r: (-r[0], r[1]))
+    return [f"PID {pid} {mb} MB {cmd}" for mb, pid, cmd in rows[:top]]
+
+
+def environmental_stop(failed, code, resume, free_now=None, holders=None):
+    """-> the stop for gates that are ALL red for an environmental reason, or None when any is a code failure.
+    `holders` (memory_holders()) names what held the memory, so the next step is obvious."""
     if not failed or not all(ENVIRONMENTAL.search(l) for l in failed):
         return None
     evidence = [l[:300] for l in failed]
     if free_now:
         evidence.append(f"free memory now: {free_now[0]} MB ({free_now[1]})")
+    if holders:
+        evidence.append("memory held by (largest resident first): " + "; ".join(holders))
     return {"stop": "environmental, not a code failure: " + "; ".join(l[:120] for l in failed[:2]), "code": code,
             "gates": [l[:200] for l in failed], "detail": evidence, "environment": evidence,
             "choices": [f"re-run when memory is free (stop other Gradle/Minecraft runs on this machine first): {resume}",
@@ -970,6 +1133,7 @@ class Run:
                         "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")}
         self.jpath = pathlib.Path(a.json) if a.json else self.work / "fork-port.json"
         self.py = sys.executable
+        self.env = gradle_env(os.environ, (self.mv / "base.properties").exists())    # None: not a layer fork, inherit
 
     def say(self, stage, msg):
         print(f"fork-port: {stage}: {msg}", flush=True)
@@ -977,7 +1141,7 @@ class Run:
     def sh(self, cmd, log=None, cwd=None):
         out = open(log, "w", encoding="utf-8") if log else subprocess.PIPE
         r = subprocess.run(cmd, cwd=cwd or self.repo, stdout=out, stderr=subprocess.STDOUT, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace", env=self.env)
         if log:
             out.close()
         return r
@@ -1091,6 +1255,10 @@ class Run:
                             " support and is not a verbatim older copy of the template, so it cannot be replaced safely",
                     "code": 2,
                     "choices": ["merge templates/fork-layer/tools/layer.py's changes (generated moves, shared_chain) into the fork's copy"]}
+        stale = load("layer_ci", "layer-ci.py").only_mixins_unsupported(self.repo, self.t)
+        if stale:   # issue #119: an edited (so not synced) copy would keep an _only mixin on every later target in silence
+            return {"stop": f"{self.t}'s chain uses mixin_add_only/mixin_remove_only and {', '.join(stale)} does not read them",
+                    "code": 2, "choices": ["merge templates/fork-layer's layer.gradle / tools/layer.py (mixin_add_only) into the fork's copy"]}
         return {"done": ", ".join(did)}
 
     def s_stage(self):
@@ -1223,10 +1391,10 @@ class Run:
             open_ = [e for e in record_stubs(self.tdir, [x for e in (loop_events(flog, all_runs=True) if flog.is_file() else [])
                                                          if e.get("event") == "stub-signals" for x in e.get("files", [])]
                                                     + overlay_stubs(self.repo, self.tdir),
-                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]])
+                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]], repo=self.repo)
                      if not e.get("reviewed")]
             if open_:
-                detail = [f"stub: {e['file']}: {e['why'][:200]}" for e in open_]
+                detail = [stub_line(e) for e in open_]
                 return {"stop": f"0 errors, but {len(open_)} unreviewed stub signal(s) from earlier runs (STUBS.json)",
                         "code": 10, "errors": 0, "detail": detail, "view": detail,
                         "choices": ["port each flagged file's lost behaviour, or set its \"reviewed\" in "
@@ -1254,7 +1422,7 @@ class Run:
         # forget the previous run's (measured: ten flagged files vanished from RESIDUE.md on the next --from-stage loop)
         stubs_all = record_stubs(self.tdir, [s for e in loop_events(flog, all_runs=True) if e.get("event") == "stub-signals"
                                              for s in e.get("files", [])] + overlay_stubs(self.repo, self.tdir),
-                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]])
+                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]], repo=self.repo)
         if n == 0:
             # 0 errors is not done when a worker got there by emptying code or by forking the shared library: the
             # loop's own stub audit, and any overlay of a shared helper, are residue (measured on the first
@@ -1262,7 +1430,7 @@ class Run:
             stubs = [s for s in stubs_all if not s.get("reviewed")]
             shared = self.shared_helper_overlays()
             if stubs or shared:
-                detail = [f"stub: {s['file']}: {s['why'][:200]}" for s in stubs] + \
+                detail = [stub_line(s) for s in stubs] + \
                          [f"shared helper overlaid in this fork: {f}" for f in shared]
                 res.update({"stop": f"0 errors, but {len(stubs)} stub signal(s) and {len(shared)} overlay(s) of the "
                                     f"shared library", "code": 10, "detail": detail, "view": detail,
@@ -1346,7 +1514,7 @@ class Run:
         bad = [l for l in lines if l.strip() and not l.strip().startswith(("ok ", "checked ")) and "all targets" not in l] or lines
         return {"stop": f"{len([l for l in lines if 'mixin:' in l]) or len(bad)} mixin target(s) do not match vanilla",
                 "code": 13, "audit": bad, "detail": bad[:6],
-                "choices": ["retarget each mixin in a per-target overlay or with mixin_add (fork-versions step 5)",
+                "choices": ["retarget each mixin in a per-target overlay or with mixin_add, or keep it to one target with mixin_add_only / mixin_remove_only (fork-versions step 5)",
                             "a recurring shape belongs in the shared library"]}
 
     def target_classpath(self):
@@ -1435,15 +1603,17 @@ class Run:
             # past it (--from-stage audit/gates) reported a target done with one open (measured on a 26.x target)
             open_ = unreviewed_stubs(self.tdir)
             if open_:
-                detail = [f"stub: {s['file']}: {s['why'][:200]}" for s in open_]
+                detail = [stub_line(e) for e in open_]
                 return {"stop": f"{len(passed)} gate(s) green{note}, but {len(open_)} unreviewed stub signal(s) in STUBS.json",
                         "code": 10, "detail": detail, "view": detail,
                         "choices": ["port each flagged method to the new signature, or, when the change is right, set its "
                                     "\"reviewed\" in targets/<t>/STUBS.json to why; then resume with --from-stage loop"]}
             return {"done": f"{len(passed)} gate(s) green ({self.a.gates}){note}"}
         code = 12 if any("Gate C" in l for l in failed) else 11
+        linux = sys.platform.startswith("linux")
         env = environmental_stop(failed, code, self.resume_cmd("gates"),
-                                 load("gl", "gate-loop.py").mem_available_mb() if sys.platform.startswith("linux") else None)
+                                 load("gl", "gate-loop.py").mem_available_mb() if linux else None,
+                                 memory_holders() if linux else None)
         if env:
             return env
         evidence = []       # why each red gate is red: its own log's first compile errors / failing tests
@@ -1473,16 +1643,47 @@ class Run:
         modid = self.modid()
         if not modid:
             return {"skipped": "no mod id"}
-        since = self.summary["started"]
-        r = self.sh([self.py, str(ROOT / "tools/port-cost.py"), modid, "--path", str(self.repo), "--target", self.t,
-                     "--since", since, "--print"])
-        if r.returncode != 0 or not (r.stdout or "").strip():
-            return {"skipped": "no transcripts for this checkout (port-cost exit %d)" % r.returncode}
         f = self.tdir / "COST.md"
         old = f.read_text(encoding="utf-8") if f.is_file() else ""
-        f.write_text(old.rstrip("\n") + ("\n\n" if old else "") + f"## fork-port.py run since {since}\n\n" + r.stdout.strip() + "\n",
-                     encoding="utf-8")
+        # port-cost charges each request to one target by what it touched, so the window need not be this run's: it
+        # starts where the target's last record ended (none: every request on this machine that worked on the target),
+        # which counts a fixer's own work between runs once, and never a resumed run's requests twice
+        since = cost_since(old)
+        cmd = [self.py, str(ROOT / "tools/port-cost.py"), modid, "--path", str(self.repo), "--target", self.t, "--print"]
+        r = self.sh(cmd + (["--since", since] if since else []))
+        if r.returncode != 0 or not (r.stdout or "").strip():
+            return {"skipped": "no transcripts for this checkout (port-cost exit %d)" % r.returncode}
+        extra = loop_spend_line(loop_events(self.work / "file-loop.jsonl")) if self.summary["stages"].get("loop", {}).get("this_run") else ""
+        f.write_text(old.rstrip("\n") + ("\n\n" if old else "") + f"## fork-port.py run since {self.summary['started']}\n\n"
+                     + r.stdout.strip() + "\n" + extra, encoding="utf-8")
         return {"done": f"appended to {f.relative_to(self.repo)}"}
+
+
+def cost_since(cost_md):
+    """Where the next COST.md record starts: just after the last record's `- window: ... to <end>` (port-cost.py's exact
+    end), or a minute after an older record's `(<start> to <end>)`; None when the target has no record yet."""
+    w = re.findall(r"(?m)^- window: requests .*? to (\d{4}-\d\d-\d\dT[\d:.]+Z)", cost_md)
+    o = re.findall(r"\((\d{4}-\d\d-\d\dT\d\d:\d\dZ) to (\d{4}-\d\d-\d\dT\d\d:\d\dZ)\)", cost_md)
+    if w:
+        end, step = w[-1], datetime.timedelta(milliseconds=1)
+    elif o:
+        end, step = o[-1][1], datetime.timedelta(minutes=1)
+    else:
+        return None
+    t = datetime.datetime.fromisoformat(end.replace("Z", "+00:00")) + step
+    return t.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def loop_spend_line(events):
+    """The compile loop's workers' own recorded dollars (file-loop.jsonl), as one line: the most exact figure there is.
+    Their transcripts are among those port-cost.py priced above, so it is a part of that total, not added to it."""
+    w = [e for e in events if e.get("event") == "worker"]
+    if not w:
+        return ""
+    usd = sum(e.get("usd") or 0 for e in w)
+    est = sum(1 for e in w if e.get("usd_unknown"))
+    return (f"- of which this run's compile-loop workers recorded ${usd:.2f} over {len(w)} worker(s) (file-loop.jsonl"
+            + (f"; {est} with no result, charged an estimate" if est else "") + ") -- their transcripts, when on this machine, are among those priced above, so it is not added\n")
 
 
 def carry_over(old_stages, skipped):
@@ -1538,6 +1739,8 @@ def main():
     except ValueError as e:
         print(f"fork-port: {e}"); return 2
     run = Run(a)
+    if run.env:     # the in-process helpers (target_classpath: layer-ci.py) start Gradle too: daemon-less as well
+        os.environ["GRADLE_OPTS"] = run.env["GRADLE_OPTS"]
     if a.gates == "auto":
         a.gates = gates_auto(run.tdir)
         print(f"fork-port: gates: auto -> {a.gates} ({'Gate C already recorded in GATES.md' if a.gates == 'ab' else 'no recorded Gate C pass yet: one real-client run on the initial port'})")
@@ -1568,7 +1771,7 @@ def drive(run, a, skipped, todo):
     if open_:
         # every successful end asks, not only the gates stage: a run resumed past it (--from-stage cost) with an older
         # GATES.md on record otherwise ended done with an unreviewed stub signal open
-        detail = [f"stub: {e.get('file')}: {str(e.get('why', ''))[:200]}" for e in open_]
+        detail = [stub_line(e) for e in open_]
         stop = {"stage": todo[-1], "left": f"{len(open_)} unreviewed stub signal(s) in STUBS.json", "code": 10,
                 "detail": detail, "view": detail,
                 "choices": ["port each flagged method to the new signature, or, when the change is right, set its "
@@ -1626,6 +1829,17 @@ def self_check():
         nonlocal ok
         if not c:
             ok = False; print("FAIL:", msg)
+    # cost: each record starts where the last one ended, so a resumed run never counts a request twice
+    expect(cost_since("") is None, "a target with no COST.md record counts every request that worked on it")
+    expect(cost_since("## r\n- **≈ $1.00** over 1 session(s): 0.1 h active, 0.2 h wall (2026-10-01T10:00Z to 2026-10-01T11:30Z)\n")
+           == "2026-10-01T11:31:00.000Z", "an older record (no window line) ends a minute after its last request")
+    expect(cost_since("## a\n- window: requests from x to 2026-10-01T09:00:00.000Z (r)\n## b\n- (2026-10-01T10:00Z to 2026-10-01T12:00Z)\n"
+                      "- window: requests from 2026-10-01T09:00:00.001Z to 2026-10-02T08:15:30.250Z (r)\n")
+           == "2026-10-02T08:15:30.251Z", "the next record starts 1 ms after the last record's exact window end")
+    ln = loop_spend_line([{"event": "start"}, {"event": "worker", "usd": 0.5}, {"event": "worker", "usd": 0.25, "usd_unknown": True},
+                          {"event": "multi-rejected", "multi_usd": 9}])
+    expect("$0.75 over 2 worker(s)" in ln and "1 with no result" in ln and loop_spend_line([{"event": "start"}]) == "",
+           f"the loop workers' own recorded dollars are one line, and none without workers: {ln!r}")
     # stage selection
     expect(hit_cap("> Task :compileJava\n1,000 errors\n") and hit_cap("1000 errors\n") and not hit_cap("999 errors\n")
            and not hit_cap("21,000 errors\n"), "hit_cap reads javac's capped total, with or without the comma")
@@ -2154,6 +2368,76 @@ def self_check():
                 expect(any("free" in e for e in st["environment"]), "the evidence carries the free-memory figure")
     md, _d = residue_report("gates", "x", [], None, [], ["Gate B: FAIL -- tests"], "r")
     expect("Fix what is listed here" in md and "Environmental" not in md, "a code failure's RESIDUE.md is unchanged")
+    # ---- issue #122: the run's own Gradle leaves no resident daemon before Gate C (layer forks only), and a refused
+    # Gate C names what holds the memory
+    with tempfile.TemporaryDirectory() as d:
+        for layer in (True, False):
+            repo = pathlib.Path(d) / ("layer" if layer else "single"); repo.mkdir()
+            if layer:
+                (repo / ".multiversion").mkdir(); (repo / ".multiversion/base.properties").write_text("mc=1.21.1\n", encoding="utf-8")
+            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
+                                    direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
+                                    port_checkout=[])
+            seen = []
+            real_run = subprocess.run
+            subprocess.run = lambda cmd, **k: (seen.append((cmd, k)), CompletedProcess(cmd, 0, "", ""))[1]
+            try:
+                Run(a_).gradle(["compileJava"], str(repo / "g.log"))
+            finally:
+                subprocess.run = real_run
+            cmd, kw = seen[0]
+            opts = (kw.get("env") or {}).get("GRADLE_OPTS", "")
+            if layer:
+                expect("-Dorg.gradle.daemon=false" in opts and kw["env"].get("PATH") == os.environ.get("PATH"),
+                       f"a layer fork's Gradle runs daemon-less (GRADLE_OPTS), with the rest of the environment: {opts!r}")
+            else:
+                expect(kw.get("env") is None and "--no-daemon" not in cmd,
+                       f"a single-version checkout's environment is inherited unchanged: {kw.get('env')!r}")
+    if "gradle_env" in globals():
+        e_ = gradle_env({"GRADLE_OPTS": "-Xmx1g -Dorg.gradle.daemon=true", "A": "1"}, True)
+        expect(e_["GRADLE_OPTS"] == "-Xmx1g -Dorg.gradle.daemon=true", "an explicit org.gradle.daemon in GRADLE_OPTS stands")
+        expect(gradle_env({"GRADLE_OPTS": "-Xmx1g"}, True)["GRADLE_OPTS"] == "-Xmx1g -Dorg.gradle.daemon=false"
+               and gradle_env({}, True)["GRADLE_OPTS"] == "-Dorg.gradle.daemon=false", "NO_DAEMON is appended to GRADLE_OPTS")
+    with tempfile.TemporaryDirectory() as d:
+        proc = pathlib.Path(d) / "proc"
+        for pid, rss, argv in ((4242, 2300 * 1024, ["/usr/lib/jvm/bin/java", "-Xmx6g", "-cp", "/x/gradle-daemon.jar",
+                                                      "org.gradle.launcher.daemon.bootstrap.GradleDaemon", "8.10"]),
+                               (4250, 700 * 1024, ["java", "-cp", "a.jar", "worker.org.gradle.process.internal.worker.GradleWorkerMain", "w1"]),
+                               (5000, 900 * 1024, ["/opt/jdk/bin/java", "-Xmx4g", "-cp", "c.jar", "net.example.client.Main", "--x"]),
+                               (6000, 50 * 1024, ["/usr/bin/fakeproc", "--a", "b\nc"]),
+                               (7000, None, ["kthread"])):
+            (proc / str(pid)).mkdir(parents=True)
+            (proc / str(pid) / "status").write_text("Name:\tx\n" + (f"VmRSS:\t {rss} kB\n" if rss else ""), encoding="utf-8")
+            (proc / str(pid) / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+        (proc / "self").mkdir()
+        fake = None
+        if "memory_holders" in globals():
+            fake = memory_holders(str(proc), top=3)
+            expect(fake == ["PID 4242 2300 MB java ... GradleDaemon", "PID 5000 900 MB java ... net.example.client.Main",
+                            "PID 4250 700 MB java ... GradleWorkerMain"], f"memory_holders: largest first, named by main class: {fake}")
+        repo = pathlib.Path(d) / "r"; (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="full", modid="m", base="x",
+                                direct=False, from_stage="gates", to_stage=None, max_errors=None, confirm_spend=False,
+                                port_checkout=[])
+        run = Run(a_); run.compile_errors = lambda: 0; run.modid = lambda: "m"
+        def gsh(cmd, log=None, cwd=None):
+            pathlib.Path(log).parent.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(log).write_text("[ci-gates] Gate C -- real client, `spawn`: FAIL -- not enough free memory (3230 MB "
+                                         "free, need 3584; read from MemAvailable): ...\n", encoding="utf-8")
+            return CompletedProcess(cmd, 1, "", "")
+        run.sh = gsh
+        real_mh = globals().get("memory_holders")
+        if real_mh:
+            globals()["memory_holders"] = lambda *x, **k: fake
+        try:
+            st = run.s_gates()
+        finally:
+            if real_mh:
+                globals()["memory_holders"] = real_mh
+        md, _d = residue_report("gates", st["stop"], [], None, [], st.get("gates", []), "r", environment=st.get("environment"))
+        held = [l for l in md.splitlines() if "memory held by" in l]
+        expect(sys.platform != "linux" or (held and "PID 4242 2300 MB java ... GradleDaemon" in held[0]),
+               f"a refused Gate C's RESIDUE.md names what holds the memory (PID, RSS, command): {held}")
     # ---- --gates auto: full until GATES.md records a green Gate C
     with tempfile.TemporaryDirectory() as d:
         td = pathlib.Path(d)
@@ -2199,6 +2483,65 @@ def self_check():
         got = record_stubs(mv / "1.21.10", [{"file": ".multiversion/targets/1.21.10/java/X.java", "why": "removes 4 call(s)"}],
                            parents=[b, a])
         expect(got[0]["reviewed"] is None, "control: a different count is a new question")
+        expect(all("hooks" not in e for e in json.loads((b / "STUBS.json").read_text(encoding="utf-8"))),
+               "without a repo nothing about hooks is read or written: STUBS.json keeps its earlier shape")
+    # ---- an inherited review is re-opened when what the file hooks changed (issue #111); the same hooks keep it
+    expect(hook_targets('@Mixin(LevelRenderer.class) class M { // @Inject(method = "gone", at = @At("HEAD"))\n'
+                        '@Inject(method = "renderLevel", at = @At("HEAD")) void a(CallbackInfo ci) { x(); } }')
+           == hook_targets('@Mixin( LevelRenderer.class )\nclass M {\n  @Inject(method="renderLevel",\n   at=@At(value = "HEAD"))\n'
+                           '  private void a(CallbackInfo c) { y(); z(); } }')
+           == ["@Inject method=renderLevel @At(value=\"HEAD\")", "@Mixin LevelRenderer"],
+           f"hooks ignore comments, layout, bodies and @At's value= shorthand: {hook_targets('@Mixin(A.class) class M {}')}")
+    expect(hook_targets('@Redirect(method = {"b", "a"}, at = @At(value = "INVOKE", target = "Lx;y()V", ordinal = 1)) void r() {}\n'
+                        '@SubscribeEvent public static void on(final RenderLevelStageEvent e) {}\n@Overwrite public void tick() {}')
+           == ["@Overwrite tick", "@Redirect method=a,b @At(value=\"INVOKE\",target=\"Lx;y()V\",ordinal=1)",
+               "@SubscribeEvent RenderLevelStageEvent"], "redirect targets, event handlers and overwrites are hooks")
+    with tempfile.TemporaryDirectory() as d:
+        repo = pathlib.Path(d); mv = repo / ".multiversion/targets"
+        mix = lambda at, meth="renderLevel", body="a();": ("@Mixin(LevelRenderer.class)\nclass LrMixin {\n"
+                                                         f'  @Inject(method = "{meth}", at = @At("{at}"))\n'
+                                                         f"  void h(CallbackInfo ci) {{ {body} }}\n}}\n")
+        sig = "removes 2 mixin injection handler(s): check each still applies somewhere, with the same effect"
+        def target(t, text, inh=()):
+            f = mv / t / "java/m/LrMixin.java"; f.parent.mkdir(parents=True, exist_ok=True)
+            if text is None:
+                f.unlink(missing_ok=True)
+            else:
+                f.write_text(text, encoding="utf-8")
+            return record_stubs(mv / t, [{"file": f".multiversion/targets/{t}/java/m/LrMixin.java", "why": sig}],
+                                parents=[mv / x for x in inh], repo=repo)
+        got = target("1.21.3", mix("HEAD"))
+        expect(got[0]["reviewed"] is None and got[0]["hooks"] == ["@Inject method=renderLevel @At(value=\"HEAD\")",
+                                                                 "@Mixin LevelRenderer"], f"a new entry records its hooks: {got}")
+        e = json.loads((mv / "1.21.3/STUBS.json").read_text(encoding="utf-8")); e[0]["reviewed"] = "moved, same effect"
+        (mv / "1.21.3/STUBS.json").write_text(json.dumps(e), encoding="utf-8")
+        got = target("1.21.4", mix("HEAD", body="b(); c();"), ["1.21.3"])
+        expect(got[0]["reviewed"] == "(inherited from 1.21.3) moved, same effect" and not got[0].get("recheck")
+               and unreviewed_stubs(mv / "1.21.4") == [], f"same signal, same hooks (body renamed): inherited: {got}")
+        got = target("1.21.5", mix("TAIL"), ["1.21.4", "1.21.3"])
+        expect(got[0]["reviewed"] is None and got[0]["inherited_review"] == "(inherited from 1.21.3) moved, same effect"
+               and got[0]["recheck"].startswith("re-justify: hook targets changed from @Inject method=renderLevel "
+                                                "@At(value=\"HEAD\")") and "@At(value=\"TAIL\")" in got[0]["recheck"]
+               and [x["file"] for x in unreviewed_stubs(mv / "1.21.5")] == [got[0]["file"]]
+               and "re-justify" in stub_line(got[0]), f"same signal, changed @At: flagged and unreviewed: {got}")
+        got2 = target("1.21.5", mix("TAIL"), ["1.21.4", "1.21.3"])
+        expect(got2 == got, "a resumed run keeps the flag rather than re-inheriting")
+        got = target("1.21.6", mix("HEAD", meth="renderSky"), ["1.21.4", "1.21.3"])
+        expect(got[0]["reviewed"] is None and "renderSky" in got[0]["recheck"], f"same signal, changed method: flagged: {got}")
+        # a STUBS.json from before "hooks": the parent's file on disk is what its review was made against
+        (mv / "1.21.7").mkdir(); (mv / "1.21.7/java/m").mkdir(parents=True)
+        (mv / "1.21.7/java/m/LrMixin.java").write_text(mix("HEAD"), encoding="utf-8")
+        (mv / "1.21.7/STUBS.json").write_text(json.dumps([{"file": ".multiversion/targets/1.21.7/java/m/LrMixin.java",
+                                                            "why": sig, "reviewed": "moved, same effect"}]), encoding="utf-8")
+        expect(target("1.21.8", mix("HEAD"), ["1.21.7"])[0]["reviewed"] == "(inherited from 1.21.7) moved, same effect",
+               "an old entry without hooks, the same hooks on disk: inherited")
+        expect(target("1.21.9", mix("RETURN"), ["1.21.7"])[0]["recheck"].startswith("re-justify"),
+               "an old entry without hooks, changed hooks on disk: flagged, never silently passed")
+        (mv / "1.21.7/java/m/LrMixin.java").unlink()
+        expect(target("1.21.10", mix("RETURN"), ["1.21.7"])[0]["reviewed"] == "(inherited from 1.21.7) moved, same effect",
+               "an old entry whose file is gone too: hooks unknown, inherited as before")
+        expect(target("1.21.11", None, ["1.21.3"])[0]["recheck"].endswith("to (none)"),
+               "the file gone on the inheriting target: it hooks nothing, flagged")
     # ---- the shared libraries' access-transformer lines reach a direct jump's AT, once, comment aside
     with tempfile.TemporaryDirectory() as d:
         mv = pathlib.Path(d)

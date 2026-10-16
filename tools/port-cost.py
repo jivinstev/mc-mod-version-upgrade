@@ -3,6 +3,7 @@
 
     python3 tools/port-cost.py <modid>              # writes mods/<modid>/COST.json + MIGRATION.md "## Cost"
     python3 tools/port-cost.py <modid> --print      # show it, write nothing
+    python3 tools/port-cost.py --self-check         # fixture transcripts: attribution and the default path
 
 tools/finish-port.py runs this for you. Numbers are read from Claude Code's own transcripts
 (~/.claude/projects, or $CLAUDE_CONFIG_DIR/projects). Tokens are never estimated; dollars are
@@ -14,6 +15,22 @@ WHICH REQUESTS COUNT
     counted ONCE: usage is repeated on every content block of a response, so counting lines doubles it.
     A session that also WORKED on other mods (edits, commands -- not just reading one for reference) is
     listed under `contamination`, so a mixed session is visible rather than silently inflating this port.
+
+ONE TARGET OF A FORK LAYER (--path DIR --target T)
+    A session that works on several targets of a fork, or on two forks, at once is NOT charged in full to each:
+    every request is charged to at most one target, by what its own tool calls touched (attribute() below):
+      - a request naming a target of this checkout (.multiversion/targets/<t>, build/mc<t>, -mc<t>, --target/--mc/
+        -Pmc <t>, "target <t>", build.sh <t>) is that target's;
+      - one touching a path in another git work tree (another fork, another worktree) and not the checkout is
+        `elsewhere`;
+      - one touching the checkout without naming a target, or touching nothing (thinking, reading the migrator,
+        a scratch file), keeps the label of the request before it in the SAME transcript; with nothing before it in this
+        checkout it is `shared` (this fork's base, orchestration);
+      - each transcript (a session, each subagent, each loop worker) starts from what its first prompt names, so a
+        subagent sent to fix one target is charged to that target, never to every target its parent touched.
+    The record counts only this target's requests (dollars estimated from their tokens); the shared requests are
+    reported on their own line and are not in the total, so the records of concurrent targets add up to at most
+    the real spend. Without --target nothing of this applies: every request of a matching session counts.
 
 WHAT IS RECORDED (so costs can be normalised later)
     per model   requests, input, output (and the thinking part of it), cache reads, cache writes (5-minute
@@ -115,11 +132,14 @@ def port_size(port, target=None):
     }
 
 
-def collect(modid, projects, path=None, labels=()):
+def collect(modid, projects, path=None, labels=(), attr=None):
     """`path`: match sessions by a checkout path instead of mods/<modid> (an upstream fork lives elsewhere).
     `labels`: [(name, path)] -- each request is labelled with the first path its tool calls touch, and a request
-    touching none inherits the previous one's label (its reading and thinking belong to that work)."""
-    rx = re.compile(re.escape(path) if path else r"mods/" + re.escape(modid) + r"(?:/|\b)")
+    touching none inherits the previous one's label (its reading and thinking belong to that work).
+    `attr`: an attribute() labeller -- replaces `labels`; each transcript file is labelled on its own."""
+    # the tool calls are matched as JSON text, where a Windows path's backslashes are doubled: match both forms
+    rx = re.compile("|".join(re.escape(f) for f in sorted({path, json.dumps(path)[1:-1]}, key=len, reverse=True))
+                    if path else r"mods/" + re.escape(modid) + r"(?:/|\b)")
     other_rx = re.compile(r"mods/([A-Za-z0-9_-]+)(?=/)")
     files = collections.defaultdict(list)                    # session -> [jsonl files]
     for f in projects.rglob("*.jsonl"):
@@ -131,6 +151,7 @@ def collect(modid, projects, path=None, labels=()):
         lab, current = {}, "other"
         versions, entry = set(), set()
         for f in fs:
+            prev = None                                      # attr: each transcript starts from its own prompt
             for line in open(f, errors="replace", encoding="utf-8"):
                 try:
                     d = json.loads(line)
@@ -138,6 +159,8 @@ def collect(modid, projects, path=None, labels=()):
                     continue
                 if d.get("type") == "cost-state" and f.parent.name != "subagents":
                     cost = max(cost or 0, d.get("totalCostUSD") or 0)
+                if attr and prev is None and d.get("type") == "user":
+                    prev = attr(json.dumps(first_prompt(d)), d.get("cwd"), None)
                 if d.get("type") != "assistant":
                     continue
                 m = d.get("message") or {}
@@ -145,6 +168,10 @@ def collect(modid, projects, path=None, labels=()):
                 calls = json.dumps([c.get("input") for c in uses])
                 if rx.search(calls):
                     touches = True
+                if attr:
+                    if uses:
+                        prev = attr(calls, d.get("cwd"), prev)
+                    current = prev or "elsewhere"
                 for name, lp in labels:
                     if lp in calls:
                         current = name
@@ -165,6 +192,70 @@ def collect(modid, projects, path=None, labels=()):
             sessions[sid] = dict(reqs=list(reqs.values()), labels=[lab[r] for r in reqs], cost=cost, others=others,
                                  versions=versions - {None}, entry=entry - {None})
     return sessions
+
+
+NEUTRAL = ("/dev/", "/proc/", "/usr/", "/bin/", "/etc/")
+
+
+def _in_other_repo(p, home, cache={}):
+    """True when the path lies in a git work tree (another fork, another worktree) -- the evidence that a request worked
+    somewhere else. A scratch file, a config or a path that no longer exists is no evidence either way."""
+    q = pathlib.Path(p)
+    for d in [q] + list(q.parents):
+        k = str(d)
+        if k not in cache:
+            try:
+                cache[k] = (d / ".git").exists()
+            except OSError:
+                cache[k] = False
+        if cache[k]:
+            return k != home
+    return False
+ABS_RX = re.compile(r"(?<![\w.~/:\\-])(/[\w.@+-]+(?:/[\w.@+-]*)*|[A-Za-z]:(?:\\\\|/)[^\s\"']*)")
+
+
+def _target_rx(t):
+    """A target named in a tool call: its overlay or build dir, its jar suffix, or a target argument."""
+    T, B = re.escape(t), r"(?![0-9]|\.[0-9])"
+    return re.compile(r"(?:\.multiversion[/\\]+targets[/\\]+" + T + r"|(?<![A-Za-z])mc" + T
+                      + r"|(?:--mc|-Pmc|(?<![A-Za-z])[Tt]arget)[= :]+" + T + r"|build\.sh\s+" + T + ")" + B)
+
+
+def attribute(checkout, targets, migrator=ROOT):
+    """-> label(text, cwd, prev) -> label, for one checkout of a fork layer. Labels: 'target:<t>', 'shared' (this
+    checkout, no target named), 'elsewhere' (only paths outside it). `prev` is the label of the request before it in
+    the same transcript (None at its start). See the docstring, ONE TARGET OF A FORK LAYER."""
+    home = str(checkout).rstrip("/\\")
+    forms = {home, json.dumps(home)[1:-1]}
+    here_rx = re.compile("(?:" + "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True)) + r")(?![\w.-])")
+    neutral = NEUTRAL + tuple(f + "/" for f in {str(migrator).rstrip("/\\")})
+    trx = [(t, _target_rx(t)) for t in targets]
+
+    def label(text, cwd, prev):
+        here = bool(here_rx.search(text))
+        foreign = any(not here_rx.match(p) and not (p + "/").startswith(neutral) and _in_other_repo(p, home)
+                      for p in ABS_RX.findall(text))
+        in_cwd = bool(cwd) and bool(here_rx.match(str(cwd)))
+        if not here:
+            if foreign:
+                return "elsewhere"
+            if not (in_cwd or (prev or "elsewhere") != "elsewhere"):
+                return prev or "elsewhere"     # relative paths, or none, outside the checkout: no evidence
+        named = [(m.start(), t) for t, rx in trx for m in [rx.search(text)] if m]
+        if named:
+            return "target:" + min(named)[1]
+        if prev and prev.startswith("target:"):
+            return prev                        # reading the base or the migrator while working on a target
+        return "shared" if (here or in_cwd) else (prev or "elsewhere")
+    return label
+
+
+def first_prompt(d):
+    """The text of a transcript's first user message (a session's task, a subagent's or worker's prompt)."""
+    c = (d.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    return " ".join(x.get("text", "") for x in c or [] if isinstance(x, dict) and x.get("type") == "text")
 
 
 def summarise(modid, sessions, port, target=None):
@@ -283,6 +374,145 @@ def migration_section(c):
     return "\n".join(lines) + "\n"
 
 
+def attributed(sessions, want):
+    """Split attribute()-labelled sessions -> (only the `want` requests, priced from tokens; {kind: [requests, usd]}
+    for this target, 'shared', 'other' targets of the checkout and 'elsewhere')."""
+    mine, rest = {}, collections.defaultdict(list)
+    for k, v in sessions.items():
+        keep = [r for r, l in zip(v["reqs"], v["labels"]) if l == want]
+        for r, l in zip(v["reqs"], v["labels"]):
+            if l != want:
+                rest["shared" if l == "shared" else "elsewhere" if l == "elsewhere" else "other"].append((k, r))
+        if keep:   # a session's recorded total covers ALL of it: price only the requests charged here
+            mine[k] = dict(v, reqs=keep, labels=[want] * len(keep), cost=None)
+    last = max((r[0] for v in mine.values() for r in v["reqs"]), default=None)
+    split = {"target": [sum(len(v["reqs"]) for v in mine.values()), None],
+             "end": None if last is None else datetime.datetime.fromtimestamp(last, datetime.timezone.utc)
+             .isoformat(timespec="milliseconds").replace("+00:00", "Z")}
+    for kind in ("shared", "other", "elsewhere"):
+        part = collections.defaultdict(list)
+        for k, r in rest.get(kind, []):
+            part[k].append(r)
+        usd = None
+        if part:
+            per = summarise("", {k: dict(sessions[k], reqs=rs, cost=None) for k, rs in part.items()},
+                            pathlib.Path(os.devnull) / "none")   # dollars only: no port to size
+            usd = per["usd"]
+        split[kind] = [sum(len(x) for x in part.values()), usd]
+    return mine, split
+
+
+def attribution_lines(c, split, since):
+    """The COST.md lines that say how this record was attributed and what window it covers."""
+    usd = lambda x: "unpriced" if x[1] is None else f"≈ ${x[1]:.2f}"
+    window = f"from {since}" if since else "from the first transcript on this machine"
+    return (f"- attribution: each request is charged to one target at most, by the paths and target its own tool calls "
+            f"name (a request naming none keeps the label of the one before it in the same transcript; a subagent or "
+            f"loop worker starts from its prompt). Not in the total above: this checkout's shared/orchestration "
+            f"requests {split['shared'][0]} ({usd(split['shared'])}), other targets' {split['other'][0]}, "
+            f"outside this checkout {split['elsewhere'][0]}. Records of concurrent targets add up.\n"
+            f"- window: requests {window} to {split['end']} (requests before it are not in this record)\n")
+
+
+def self_check():
+    """Fixture transcripts: one session drives two targets of a layer fork (and a second fork), with one subagent per
+    target; a single-version checkout is matched as before. -> 0 when every case holds."""
+    import contextlib, io, tempfile
+    ok = True
+
+    def expect(c, msg):
+        nonlocal ok
+        if not c:
+            ok = False
+            print("FAIL:", msg)
+
+    def run(*argv):
+        out, err = io.StringIO(), io.StringIO()
+        old = sys.argv
+        sys.argv = ["port-cost.py", *argv]
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = main()
+        finally:
+            sys.argv = old
+        return code, out.getvalue() + err.getvalue()
+
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        fork, lib, sv = d / "fork", d / "fork-lib", d / "single"
+        for t in ("1.21.4", "1.21.5"):
+            (fork / ".multiversion/targets" / t).mkdir(parents=True)
+            (fork / ".multiversion/targets" / t / "target.properties").write_text(f"prop.minecraft_version={t}\n", encoding="utf-8")
+        (lib / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        (sv / "src").mkdir(parents=True)
+        for r in (fork, lib, sv):
+            (r / ".git").mkdir()
+        proj = d / "projects" / "p"
+        (proj / "S1" / "subagents").mkdir(parents=True)
+        n = [0]
+
+        def req(sid, path, out, cwd=None, tool="Edit", key="file_path"):
+            n[0] += 1
+            inp = {key: path} if path is not None else None
+            content = [{"type": "tool_use", "name": tool, "input": inp}] if inp else [{"type": "text", "text": "thinking"}]
+            return json.dumps({"type": "assistant", "sessionId": sid, "requestId": f"r{n[0]}", "cwd": cwd,
+                               "timestamp": f"2026-10-01T10:{n[0]:02d}:00Z", "message": {"model": "claude-opus-5-5",
+                               "content": content, "usage": {"input_tokens": 0, "output_tokens": out}}}) + "\n"
+
+        def prompt(text, cwd=None):
+            return json.dumps({"type": "user", "cwd": cwd, "message": {"role": "user", "content": text}}) + "\n"
+
+        o4, o5 = f"{fork}/.multiversion/targets/1.21.4/A.java", f"{fork}/.multiversion/targets/1.21.5/A.java"
+        main_s = (prompt("port the fork to 1.21.4 and 1.21.5")
+                  + req("S1", o4, 100) + req("S1", None, 10) + req("S1", o5, 1000)
+                  + req("S1", f"cd {fork} && .multiversion/build.sh 1.21.4 compileJava", 200, tool="Bash", key="command")
+                  + req("S1", f"{fork}/src/main/java/B.java", 20, tool="Read")       # base source while on 1.21.4
+                  + req("S1", f"{lib}/.multiversion/targets/1.21.4/C.java", 5000)    # the other fork's 1.21.4: not ours
+                  + req("S1", None, 7))                                                # thinking about that one
+        (proj / "S1.jsonl").write_text(main_s, encoding="utf-8")
+        (proj / "S1/subagents/a4.jsonl").write_text(prompt(f"fix target 1.21.4 in {fork}") + req("S1", None, 3)
+                                                   + req("S1", "ls build/mc1.21.4/x", 30, cwd=str(fork), tool="Bash", key="command"),
+                                                   encoding="utf-8")
+        (proj / "S1/subagents/a5.jsonl").write_text(prompt(f"fix target 1.21.5 in {fork}") + req("S1", "git status", 300,
+                                                   cwd=str(fork), tool="Bash", key="command"), encoding="utf-8")
+        (proj / "S2.jsonl").write_text(prompt(f"tidy {fork}") + req("S2", f"git -C {fork} log", 4, tool="Bash", key="command")
+                                       + req("S2", f"{sv}/src/D.java", 9), encoding="utf-8")
+        P = ["--projects", str(d / "projects")]
+        out = {}
+        for t in ("1.21.4", "1.21.5"):
+            code, text = run("examplemod", "--path", str(fork), "--target", t, "--print", *P)
+            out[t] = text
+            expect(code == 0, f"{t}: exit {code}: {text}")
+        sess = collect("examplemod", d / "projects", str(fork))
+        whole = summarise("examplemod", sess, fork)["totals"]
+        attr = attribute(str(fork), ["1.21.4", "1.21.5"])
+        lab = collect("examplemod", d / "projects", str(fork), (), attr)
+        per = collections.Counter()
+        for v in lab.values():
+            for r, l in zip(v["reqs"], v["labels"]):
+                per[l] += r[3].get("output_tokens", 0)
+        expect(per["target:1.21.4"] == 100 + 10 + 200 + 20 + 3 + 30 and per["target:1.21.5"] == 1000 + 300,
+               f"each request goes to the target it named (a subagent to its prompt's): {dict(per)}")
+        expect(per["elsewhere"] == 5000 + 7 + 9 and per["shared"] == 4, f"other fork / shared: {dict(per)}")
+        expect(sum(per.values()) == whole["output"], f"the labels partition the whole: {sum(per.values())} vs {whole['output']}")
+        expect("output 363 " in out["1.21.4"] and "output 1,300 " in out["1.21.5"],
+               f"COST.md counts only the target's own requests: {out}")
+        expect(all("- attribution: " in x and "- window: requests from the first transcript" in x for x in out.values())
+               and "shared/orchestration requests 1 " in out["1.21.4"], f"the record says how it was attributed: {out}")
+        expect(out["1.21.4"].startswith("## Cost (recorded by tools/port-cost.py"), "the record's format is kept")
+        code, text = run("examplemod", "--path", str(fork), "--target", "1.21.5", "--since", "2026-10-01T10:04", "--print", *P)
+        expect(code == 0 and "output 300 " in text and "from 2026-10-01T10:04" in text, f"--since still cuts: {text}")
+        # single-version (no --target): every request of a matching session counts, exactly as before
+        code, text = run("examplemod", "--path", str(sv), "--print", *P)
+        expect(code == 0 and "output 13 " in text and "attribution" not in text and "window" not in text,
+               f"single-version: the whole matching session, no attribution lines: {text}")
+        code, text = run("examplemod", "--path", str(fork), "--print", *P)
+        expect(code == 0 and f"output {whole['output']:,} " in text and "attribution" not in text,
+               f"a layer checkout without --target is counted whole, as before: {text}")
+    print("self-check: OK" if ok else "self-check: FAILED")
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("modid")
@@ -305,7 +535,12 @@ def main():
         print(f"port-cost: no transcripts at {projects} -- nothing recorded", file=sys.stderr)
         return 2
     labels = [tuple(x.split("=", 1)) for x in a.label]
-    sessions = collect(a.modid, projects, a.path, labels)
+    attr = None
+    if a.target and a.path:             # a fork layer target: charge each request to one target at most
+        tdir = port / ".multiversion" / "targets"
+        known = sorted({a.target} | ({d.name for d in tdir.iterdir() if d.is_dir()} if tdir.is_dir() else set()))
+        attr = attribute(os.path.abspath(a.path), known)
+    sessions = collect(a.modid, projects, a.path, labels, attr)
     if a.session:
         sessions = {k: v for k, v in sessions.items() if k.startswith(a.session)}
     if a.since:
@@ -323,8 +558,19 @@ def main():
     if not sessions:
         print(f"port-cost: no session in {projects} touched mods/{a.modid} -- nothing recorded", file=sys.stderr)
         return 2
+    split = None
+    if attr:
+        sessions, split = attributed(sessions, "target:" + a.target)
+        if not sessions:
+            print(f"port-cost: no request since {a.since or 'the first transcript'} worked on target {a.target} "
+                  f"(shared {split['shared'][0]}, other targets {split['other'][0]}, elsewhere {split['elsewhere'][0]} "
+                  f"request(s)) -- nothing recorded", file=sys.stderr)
+            return 2
     c = summarise(a.modid, sessions, port, a.target)
     sec = migration_section(c)
+    if split:
+        c["attribution"] = split
+        sec += attribution_lines(c, split, a.since)
     print(sec, end="")
     if labels:
         print("\nBy where the work happened (label: requests, est. USD):")
@@ -358,4 +604,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(self_check() if "--self-check" in sys.argv[1:] else main())
