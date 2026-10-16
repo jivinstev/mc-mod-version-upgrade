@@ -1016,8 +1016,9 @@ def all_versions_check():
         rc, txt = run(["o/dep"])
         chk(rc == 0, f"installs ({rc})\n{txt}")
         chk("also o/lib: o/dep depends on it" in txt, "a sibling port is followed")
+        # the checkout is printed resolved: a Windows temp dir is a short 8.3 path (RUNNER~1) until resolve() expands it
         chk("o/lib: 1.21.1, 1.21.4, 1.21.5, 26.2 (release lib-1.0-mc1.21.1-r2)" in txt
-            and f"o/dep: 1.21.1, 1.21.4, 26.2 (local layer build {co})" in txt, f"each fork's versions\n{txt}")
+            and f"o/dep: 1.21.1, 1.21.4, 26.2 (local layer build {co.resolve()})" in txt, f"each fork's versions\n{txt}")
         chk("1.21.8 not available: no 1.21.8 jar built" in txt and "o/lib also has 1.21.5: not every fork has it, skipped" in txt,
             "versions outside the intersection: printed and skipped")
         mods = lambda mc: sorted(p.name for p in (d / "inst" / f"minecraft-{mc}" / "mods").glob("*.jar"))
