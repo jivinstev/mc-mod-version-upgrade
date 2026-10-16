@@ -916,7 +916,7 @@ def inventory_problems(repo, root, t, ref, work, files, write, mechanical):
     accounted for AND the committed INVENTORY-CHECK.json says exactly what a fresh check says (issue #133, gap 1: the
     release-side check reads the committed file). write: rewrite the file (a run that holds the checkout)."""
     li = _mod("layer_inventory_fb", "layer-inventory.py")
-    code, rep, lines = li.check_branch(repo, root, t, mechanical=mechanical, files=files)
+    code, rep, lines = li.check_branch(repo, root, t, mechanical=mechanical, files=files, ref=ref)   # the branch judged, not HEAD
     if rep is None:
         return [ln.replace("layer-inventory: ", "behaviour inventory: ") for ln in lines] if code else []
     want = li.check_text(rep)
@@ -2189,7 +2189,7 @@ def sync_shared(repo, targets=None, say=print):
             else:
                 new_sections.append(body.rstrip("\n")); kept.append(ver)
         new_text = ("\n".join(x.rstrip("\n") for x in new_sections) + "\n") if new_sections else old_text
-        pr = port_ref_of(repo, work, t, "HEAD")
+        pr = port_ref_of(repo, work, t, git(work, "rev-parse", "HEAD", check=True).stdout.strip())   # work's HEAD, not the clone's
         read = reader_of_root(work)
         rows_old = rows_tree(repo, pr, read, t, chain(work, t)) if pr else {}
         changed = []
@@ -2756,6 +2756,40 @@ def self_check():
         expect(rc == 2 and "nothing to migrate" in out and gs("for-each-ref") == refs and not (sv / REC).exists()
                and checkout_version(sv) is None,
                f"single-version fork: migrate refuses (exit 2), no branch, no .port/: {out}")
+    # the port branch moved past the layer (the authors' new code not merged into it yet): each migrated version is
+    # judged against the port commit IT carries, never the clone's HEAD -- done from a checkout of the port branch too
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _fixture(pathlib.Path(d) / "a")
+        _fixture_shared(r, g)
+        _run(str(ROOT / "tools/layer-inventory.py"), "build", "--repo", str(r))     # current for the layer's port commit
+        g("add", "-A"); g("commit", "-qm", "layer: inventory current")
+        for t in ("1.21.3", "1.21.4", "1.21.5"):
+            _quiet(_fixture_done, r, g, t)
+        g("checkout", "-q", "neoforge-1.21.1")
+        (r / "src/main/java/com/example/mod/Later.java").write_text("package com.example.mod;\nclass Later {}\n", encoding="utf-8")
+        uh = r / "src/main/java/com/example/mod/UsesHelper.java"
+        uh.write_text(uh.read_text(encoding="utf-8").replace("Shared s;", "Shared s; int later;"), encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "authors: a newer commit on the port branch")
+        rc, out = _quiet(migrate, r, layer_ref="neoforge-1.21.x")       # run from the port branch's checkout
+        expect(rc == 0 and out.count("layer done, branch done") == 3,
+               f"migrate (from a checkout of the port branch, ahead of the layer): each branch done as on the layer: {out[-600:]}")
+        for t in ("1.21.3", "1.21.4", "1.21.5"):
+            why = target_done(r, t)
+            expect(why == [], f"{t} judged from a checkout of the port branch (ahead of it): done: {why}")
+        # sync-shared from that checkout: 1.21.3's rows-only file is judged against the port commit 1.21.3 carries
+        with tempfile.TemporaryDirectory() as e:
+            lib = pathlib.Path(e)
+            (lib / "1.21.3").mkdir(parents=True)
+            (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
+            saved = os.environ.get("MMVU_SHARED_DIR")
+            os.environ["MMVU_SHARED_DIR"] = str(lib)
+            try:
+                rc, out = _quiet(sync_shared, r, ["1.21.3"])
+            finally:
+                os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+            u3 = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))["src/main/java/com/example/mod/UsesHelper.java"]
+            expect(rc == 0 and b"newer.Shared" in u3 and b"later" not in u3,
+                   f"sync-shared from a checkout of the port branch ahead: the rows-only file re-made from 1.21.3's own port commit: {u3!r} {out[-300:]}")
     if not os.environ.get("FB_SELF_CHECK_CRLF"):
         # the same checks with core.autocrlf=true (a Windows checkout's default): a version branch checked out with CRLF
         # line endings must read as its blobs (root_files), and a layer's prepare must see the blobs' bytes (Layer)
