@@ -26,6 +26,18 @@ together -- is still what is installed, but never silently in place of the newer
   --no-neoforge     leave NeoForge alone
   -v, --verbose     also every file and every note
 
+    python3 tools/install-port.py owner/LibFork owner/DepFork --all-versions [--versions 1.21.4,26.2]
+                                  [--port-checkout owner/repo=DIR] [--instances-dir DIR] [--dry-run]
+
+--all-versions: every Minecraft version ALL the forks have (each fork's port branch version plus the targets of its
+newest layer pre-release, `<name>-mc<t>.jar` assets; the ports they depend on included), the rest printed and
+skipped. Per version: its own game directory minecraft-<mc>/mods (beside the launcher's folder, or --instances-dir),
+its NeoForge, a launcher profile "NeoForge <mc> (fork ports)". The base version installs as without the flag; a layer
+target installs each fork's -mc<t> jar (sha256 as GitHub records the asset) and the builds that target's
+target.properties substitutes (named as in DEPS.md; Modrinth checked by sha512, CurseForge by the mod id its jar
+declares), and looks up what it does not name. Ends with a table. --port-checkout owner/repo=DIR takes a fork's
+targets from a local layer build (DIR/build/mc<t>/libs, DIR/.multiversion/targets) and its manifest from DIR.
+
 The mods folder defaults to $MINECRAFT_MODS_DIR, then the one setup recorded for --mc in .env.local
 (MINECRAFT_MODS_DIR_1_21_1), then the platform's default instance (macOS
 ~/Library/Application Support/minecraft/mods, Linux ~/.minecraft/mods, Windows %APPDATA%/.minecraft/mods).
@@ -425,6 +437,14 @@ def install(files, mods_dir, dry=False, get=fetch, replace=False):
         if f.get("sha256") and hashlib.sha256(data).hexdigest() != f["sha256"]:
             bad.append(f"{mid}: sha256 mismatch -- not the file CI tested, not installed"); status[mid] = "failed"
             continue
+        # (--all-versions only: a layer target's Modrinth build is checked by its sha512, a CurseForge one -- for which
+        # nothing records a hash -- by the mod id its jar declares; a port branch's manifest has neither key)
+        if f.get("sha512") and hashlib.sha512(data).hexdigest() != f["sha512"]:
+            bad.append(f"{mid}: sha512 mismatch -- not the file Modrinth lists, not installed"); status[mid] = "failed"
+            continue
+        if f.get("check_modid") and f["check_modid"] not in jar_modids(data):
+            bad.append(f"{mid}: the downloaded jar declares no mod {f['check_modid']}, not installed"); status[mid] = "failed"
+            continue
         mods_dir.mkdir(parents=True, exist_ok=True)
         tmp = tempfile.NamedTemporaryFile(dir=mods_dir, suffix=".part", delete=False)
         tmp.write(data); tmp.close()
@@ -436,7 +456,7 @@ def install(files, mods_dir, dry=False, get=fetch, replace=False):
             os.replace(old, keep / old.name)
             moved = f" (moved {old.name} to {REPLACED_DIR}/)"
         done.append(f"{mid}: {'updated' if update else 'installed'} {name}{moved}"
-                    + ("" if f.get("sha256") else " (no sha256 in the manifest)"))
+                    + ("" if f.get("sha256") or f.get("sha512") else f" ({f.get('unverified') or 'no sha256 in the manifest'})"))
         status[mid] = "updated" if update else "installed"
     return done, skipped, bad, status
 
@@ -630,6 +650,419 @@ def ensure_neoforge(neo, mods_dir, dry=False, get=fetch, run=None, mc_dir=None):
         notes.append(f"installed NeoForge {v} (Minecraft {mc}) -- in the Launcher pick the \"NeoForge\" profile")
     return notes, problems
 
+
+
+# ---------------------------------------------------------------- --all-versions: every version the forks share (#117)
+
+LAYER_JAR = re.compile(r"^.+-mc(\d+\.\d+(?:\.\d+)?)\.jar$")
+GH_API = "https://api.github.com"
+FORK = re.compile(r"[\w.-]+/[\w.-]+")
+
+
+def target_jar(names, self_name, t):
+    """Of the jar file names a layer built for target t (<name>-mc<t>.jar, templates/fork-layer/layer.gradle), the one
+    that is the manifest's self jar for t: the only one, else <self stem>-mc<t>.jar, else the one of the same shape
+    (lib-1.2_mr-mc1.21.4.jar for a manifest naming lib-1.1_mr.jar). None when that cannot be told."""
+    c = [n for n in names if n.endswith(f"-mc{t}.jar") and not n.endswith(f"-sources-mc{t}.jar")]
+    if len(c) == 1:
+        return c[0]
+    exact = f"{(self_name or '')[:-4]}-mc{t}.jar"
+    if exact in c:
+        return exact
+    shape = lambda n: re.sub(r"\d+(?:\.\d+)*", "#", n)
+    same = [n for n in c if shape(n) == shape(exact)]
+    return same[0] if len(same) == 1 else None
+
+
+def layer_source(fork, man, get, checkout=None):
+    """Each layer target of a fork, with its own jar and the files that say what it needs:
+    -> ({t: {"jar": {name, url, sha256}, "props": target.properties text, "deps_md": DEPS.md text}}, {t: why skipped}, where)
+    From the fork's newest layer pre-release (a release with <name>-mc<t>.jar assets: Port CI's layer-release), each
+    asset's sha256 as GitHub records it and the target's files at the release's commit; or, with checkout, from a local
+    layer build (DIR/build/mc<t>/libs, DIR/.multiversion/targets/<t>). A single-version fork has none: ({}, {}, ...)."""
+    selfname = next((f.get("name") for f in (man or {}).get("files", []) if f.get("role") == "self"), None)
+    out, skipped = {}, {}
+    if checkout is not None:
+        co = pathlib.Path(checkout)
+        tdir = co / ".multiversion/targets"
+        for tp in sorted(tdir.glob("*/target.properties")) if tdir.is_dir() else []:
+            t = tp.parent.name
+            libs = co / "build" / f"mc{t}" / "libs"
+            name = target_jar([p.name for p in libs.glob("*.jar")] if libs.is_dir() else [], selfname, t)
+            if not name:
+                skipped[t] = f"no {t} jar built in {co} (run .multiversion/build.sh {t} build there)"
+                continue
+            jar = libs / name
+            md = tp.parent / "DEPS.md"
+            out[t] = {"jar": {"name": name, "url": jar.resolve().as_uri(), "sha256": hashlib.sha256(jar.read_bytes()).hexdigest()},
+                      "props": tp.read_text(encoding="utf-8"), "deps_md": md.read_text(encoding="utf-8") if md.is_file() else ""}
+        return out, skipped, f"local layer build {co}"
+    try:
+        rels = json.loads(get(f"{GH_API}/repos/{fork}/releases?per_page=100").decode("utf-8"))
+    except Exception as e:
+        return {}, {}, f"(its releases could not be read: {type(e).__name__}: {getattr(e, 'reason', e)})"
+    rel = next((r for r in rels if not r.get("draft") and any(LAYER_JAR.match(a.get("name", "")) for a in r.get("assets", []))), None)
+    if rel is None:
+        return {}, {}, "no layer release"
+    assets = {a["name"]: a for a in rel.get("assets", [])}
+    for t in sorted({LAYER_JAR.match(n).group(1) for n in assets if LAYER_JAR.match(n)}, key=vkey):
+        name = target_jar(list(assets), selfname, t)
+        if not name:
+            skipped[t] = f"release {rel['tag_name']} has several {t} jars and none is the manifest's {selfname}"
+            continue
+        dig = assets[name].get("digest") or ""
+        raw = f"https://raw.githubusercontent.com/{fork}/{rel.get('target_commitish')}/.multiversion/targets/{t}"
+        try:
+            props = get(f"{raw}/target.properties").decode("utf-8")
+        except Exception as e:
+            skipped[t] = f"its target.properties at {rel.get('target_commitish')} could not be read ({type(e).__name__})"
+            continue
+        try:
+            md = get(f"{raw}/DEPS.md").decode("utf-8")
+        except Exception:
+            md = ""
+        out[t] = {"jar": {"name": name, "url": assets[name].get("browser_download_url"),
+                          "sha256": dig[7:] if dig.startswith("sha256:") else None},
+                  "props": props, "deps_md": md}
+    return out, skipped, f"release {rel['tag_name']}"
+
+
+def _props(text):
+    return dict(re.findall(r"(?m)^\s*([\w.\\:-]+?)\s*=\s*(.*?)\s*$", text or ""))
+
+
+MR_API = "https://api.modrinth.com/v2"
+
+
+def target_manifest(fork, man, t, src, jars, get):
+    """The port-install.json a fork would have for layer target t: its own -mc<t> jar, each sibling port's -mc<t> jar
+    (jars: {(fork, t): file}), and every other manifest file swapped for the build that target's layer-deps block
+    names (substitute. lines; DEPS.md gives the file's name). A file the block drops (exclude.) is left out; one it
+    does not name has no file for t, and plan() looks it up by mod id for t, labelled not tested by CI."""
+    p = _props(src["props"])
+    sub = {k.replace("\\:", ":")[len("substitute."):]: v for k, v in p.items() if k.startswith("substitute.")}
+    drop = {k.replace("\\:", ":")[len("exclude."):]: v for k, v in p.items() if k.startswith("exclude.")}
+    names = dict(re.findall(r"(?m)^\| `([^`]+)` \|.*\(([^()|]+\.jar)\) \|\s*$", src.get("deps_md") or ""))
+    selff = next((f for f in man.get("files", []) if f.get("role") == "self"), {})
+    files = [dict(selff, **src["jar"], role="self")]
+    mr = {}
+    for ga, coord in sub.items():
+        if ga.startswith("maven.modrinth:"):
+            try:
+                v = json.loads(get(f"{MR_API}/version/{coord.rsplit(':', 1)[1]}").decode("utf-8"))
+                pf = next((x for x in v.get("files", []) if x.get("primary")), (v.get("files") or [None])[0])
+                if pf:
+                    mr[v["project_id"]] = {"name": pf["filename"], "url": pf["url"], "sha512": pf.get("hashes", {}).get("sha512")}
+            except Exception:
+                pass
+    for f in man.get("files", []):
+        if f.get("role") == "self":
+            continue
+        base = {k: f[k] for k in ("role", "modid", "page", "port") if k in f}
+        if f.get("port"):
+            got = jars.get((f["port"], t))
+            files.append(dict(base, **got) if got else base)
+            continue
+        url = f.get("url", "")
+        cf = re.search(r"curseforge\.com/api/v1/mods/(\d+)/files/", url)
+        mrid = re.search(r"cdn\.modrinth\.com/data/(\w+)/versions/", url)
+        ga = next((g for g in list(sub) + list(drop) if cf and re.fullmatch(rf"curse\.maven:.+-{cf.group(1)}", g)), None)
+        if ga in drop:
+            continue                      # no build for t, and not required (layer-deps resolve stops on a required one)
+        if ga:
+            fid = sub[ga].rsplit(":", 1)[1]
+            files.append(dict(base, name=names.get(ga) or f"{ga.split(':')[1]}-{fid}.jar", check_modid=f.get("modid"),
+                              url=f"https://www.curseforge.com/api/v1/mods/{cf.group(1)}/files/{fid}/download",
+                              unverified="no sha256 recorded for this target; checked to be the mod it names"))
+        elif mrid and mrid.group(1) in mr:
+            files.append(dict(base, **mr[mrid.group(1)]))
+        else:
+            files.append(base)            # no file for t: plan() asks the registries for the mod id, for t
+    return {"port": fork, "minecraft": p.get("prop.minecraft_version") or t, "neoforge": p.get("prop.neo_version"),
+            "files": files}
+
+
+def add_profile(launcher, mc, neo, game_dir, dry=False):
+    """A launcher profile for this version's game directory (launcher_profiles.json in the launcher's folder). -> (note, problem)"""
+    key, name = f"install-port-{mc}", f"NeoForge {mc} (fork ports)"
+    f = launcher / "launcher_profiles.json"
+    if dry:
+        return f"would add the launcher profile \"{name}\" (neoforge-{neo}, game directory {game_dir})", None
+    if not f.is_file():
+        return None, f"no launcher profile: {launcher} has no launcher_profiles.json -- open the Minecraft Launcher once"
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except ValueError as e:
+        return None, f"no launcher profile: {f} is not JSON ({e})"
+    import datetime
+    prof = data.setdefault("profiles", {}).get(key, {})
+    prof.update({"name": name, "type": "custom", "lastVersionId": f"neoforge-{neo}", "gameDir": str(game_dir),
+                 "icon": prof.get("icon", "Furnace")})
+    prof.setdefault("created", datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+    data["profiles"][key] = prof
+    tmp = f.with_suffix(".json.part")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, f)
+    return f"launcher profile \"{name}\" -> {game_dir}", None
+
+
+def all_versions(repos, a, get=fetch, env=None, lookup=None, run=None, launcher=None, out=print):
+    """--all-versions: install the forks into one game directory per Minecraft version they ALL have, each with its
+    NeoForge and a launcher profile. -> exit code (0 = every version in)."""
+    env = read_env() if env is None else env
+    checkouts = {}
+    for s in a.port_checkout:
+        k, _, v = s.partition("=")
+        if not FORK.fullmatch(k) or not v:
+            out(f"--port-checkout must be owner/repo=DIR, got {s!r}"); return 2
+        checkouts[k] = pathlib.Path(v).expanduser().resolve()
+    forks = [re.sub(r"^https://github\.com/", "", r).strip("/").removesuffix(".git") for r in repos]
+    bad = [r for r in forks if not FORK.fullmatch(r)]
+    if bad:
+        out(f"--all-versions takes owner/repo forks (their port branch and layer release), got {bad}"); return 2
+    branch = a.branch or f"neoforge-{a.mc}"
+    def mget(u):              # a --port-checkout fork's manifest is its checkout's
+        for k, co in checkouts.items():
+            if u == manifest_url(k, branch):
+                return (co / ".github/port-install.json").read_bytes()
+        return get(u)
+    mans, queue = {}, list(forks)
+    while queue:              # every port the named forks depend on is installed too, so it must have each version
+        r = queue.pop(0)
+        if r in mans:
+            continue
+        try:
+            mans[r] = json.loads(mget(manifest_url(r, branch)).decode("utf-8"))
+        except Exception as e:
+            out(f"{r}: no port manifest on {branch} ({type(e).__name__}: {getattr(e, 'reason', e)})"); return 1
+        for f in mans[r].get("files", []):
+            if f.get("port") and f.get("role") != "self" and f["port"] not in mans and f["port"] not in queue:
+                queue.append(f["port"])
+                if f["port"] not in forks:
+                    out(f"also {f['port']}: {r} depends on it")
+    srcs, have = {}, {}
+    for r, man in mans.items():
+        tg, skipped, where = layer_source(r, man, get, checkouts.get(r))
+        srcs[r] = tg
+        have[r] = {man.get("minecraft") or a.mc} | set(tg)
+        out(f"{r}: {', '.join(sorted(have[r], key=vkey))} ({where})")
+        for t, why in sorted(skipped.items()):
+            out(f"  {t} not available: {why}")
+    shared = set.intersection(*have.values())
+    for r in mans:
+        if have[r] - shared:
+            out(f"  {r} also has {', '.join(sorted(have[r] - shared, key=vkey))}: not every fork has it, skipped")
+    if a.versions:
+        want = [v.strip() for v in a.versions.split(",") if v.strip()]
+        for v in want:
+            if v not in shared:
+                out(f"  {v}: not a version every fork has, skipped")
+        shared &= set(want)
+    if not shared:
+        out("RESULT: FAILED -- no Minecraft version is shared by every fork named"); return 1
+    versions = sorted(shared, key=vkey)
+    jars = {(r, t): dict(src["jar"], modid=next((f.get("modid") for f in mans[r]["files"] if f.get("role") == "self"), None))
+            for r, tg in srcs.items() for t, src in tg.items()}
+    launcher = launcher or pathlib.Path(os.environ.get("MINECRAFT_DIR") or env.get("MINECRAFT_DIR") or _find_minecraft().official_default()).expanduser()
+    root = pathlib.Path(a.instances_dir).expanduser() if a.instances_dir else launcher.parent
+    rows, good_all = [], True
+    for mc in versions:
+        mods = pathlib.Path(env.get("MINECRAFT_MODS_DIR_" + mc.replace(".", "_")) or root / f"minecraft-{mc}" / "mods").expanduser()
+        out("")
+        out(f"== Minecraft {mc} -> {mods}" + (" (dry run)" if a.dry_run else ""))
+        base = all(mc == (m.get("minecraft") or a.mc) for m in mans.values())
+        if base:              # the port branches' own manifests: exactly what install-port does for one version
+            vbranch, vget = branch, mget
+        else:
+            vbranch = f"layer-mc{mc}"
+            synth = {manifest_url(r, vbranch): json.dumps(target_manifest(r, mans[r], mc, srcs[r][mc], jars, get)).encode()
+                     for r in mans}
+            vget = lambda u, s=synth: s[u] if u in s else get(u)
+        lk = lookup or (lambda m, v=mc: registry_lookup(m, v, get))
+        files, notes, problems, neo, ports, missing = plan(forks, vbranch, a.with_optional, a.full, vget, mc,
+                                                           lookup=lk, untested=a.with_untested)
+        done, skipped, bad, status = install(files, mods, a.dry_run, vget, replace=a.replace)
+        nnotes, nprob = ([], []) if (a.no_neoforge or not neo) else ensure_neoforge(neo, mods, a.dry_run, get, run=run,
+                                                                                        mc_dir=launcher)
+        nnotes = [x for x in nnotes if "Game Directory" not in x]      # the profile below points at it
+        neo_v = neoforge_installed(launcher, neo[-1][1]) if neo and not a.dry_run else None
+        neo_v = neo_v or (neo[-1][1] if neo else "?")
+        neo_line = nprob[0] if nprob else next((x for x in nnotes if not x.startswith("tested on")), "")
+        if a.verbose:
+            out("\n".join(["  " + x for x in done + skipped] + ["  note: " + x for x in nnotes + notes + problems]))
+        for x in bad:         # why a file was refused (a sha256 mismatch, not the mod it names): the summary only says failed
+            out(f"  refused: {x}")
+        summary, good = summarise(ports, files, status, missing, bad, neo_line, not nprob, a.dry_run)
+        pnote, pprob = add_profile(launcher, mc, neo_v, mods.parent, a.dry_run) if good else (None, "not added: the install failed")
+        out("\n".join(summary[:-1]))
+        out(f"  {pnote}" if pnote else f"  launcher profile {pprob}")
+        good = good and not pprob
+        good_all &= good
+        selfs = [jars[(r, mc)]["name"] if (r, mc) in jars else next((f.get("name") for f in mans[r].get("files", [])
+                 if f.get("role") == "self"), r) for r in mans]
+        ndeps = len([f for f in files if f.get("name") not in selfs])
+        rows.append((mc, neo_v, f"NeoForge {mc} (fork ports)", ", ".join(selfs) + (f" (+{ndeps} dependencies)" if ndeps else ""),
+                     ("would install" if a.dry_run else "OK") if good else "FAILED"))
+    out("")
+    out("| version | NeoForge | profile | jars | result |")
+    out("|---|---|---|---|---|")
+    for r in rows:
+        out("| " + " | ".join(r) + " |")
+    out("")
+    out(f"RESULT: {'OK' if good_all else 'FAILED'} -- {sum(1 for r in rows if r[4] != 'FAILED')} of {len(rows)} version(s) "
+        + ("would be installed." if a.dry_run else "installed: launch a profile for that version with every fork named."))
+    return 0 if good_all else 1
+
+def all_versions_check():
+    """--all-versions over fixtures (no network, no NeoForge): a library fork's layer release and a dependent fork's
+    local layer build (--port-checkout). The shared versions only, each in its own game directory with its profile,
+    every target jar and target dependency checked; and a single-version fork gives its one version."""
+    import contextlib, io
+    good = True
+    def chk(c, what):
+        nonlocal good
+        if not c:
+            print(f"all-versions check: {what}")
+            good = False
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        def jarbytes(modid):
+            b = io.BytesIO()
+            with zipfile.ZipFile(b, "w") as z:
+                z.writestr("META-INF/neoforge.mods.toml", f'[[mods]]\nmodId="{modid}"\n')
+            return b.getvalue()
+        web, sha = {}, (lambda b: hashlib.sha256(b).hexdigest())
+        def put(url, data):
+            web[url] = data if isinstance(data, bytes) else data.encode("utf-8")
+            return url
+        rel = lambda name: f"https://github.com/o/lib/releases/download/lib-1.0-mc1.21.1/{name}"
+        lib_base = put(rel("lib-1.0_mr.jar"), jarbytes("lib"))
+        cfu = lambda proj, fid: f"https://www.curseforge.com/api/v1/mods/{proj}/files/{fid}/download"
+        put(cfu(111, 222), jarbytes("base"))
+        mr_base = put("https://cdn.modrinth.com/data/MRID/versions/v1/mrdep-1.jar", jarbytes("mrdep"))
+        libman = {"port": "o/lib", "modid": "lib", "minecraft": "1.21.1", "neoforge": "21.1.9", "files": [
+            {"role": "self", "modid": "lib", "name": "lib-1.0_mr.jar", "url": lib_base, "sha256": sha(web[lib_base])},
+            {"role": "required", "modid": "base", "name": "base-1.jar", "url": cfu(111, 222), "sha256": sha(web[cfu(111, 222)])},
+            {"role": "required", "modid": "mrdep", "name": "mrdep-1.jar", "url": mr_base, "sha256": sha(web[mr_base])},
+            {"role": "extra", "modid": "x-333", "name": "x.jar", "url": cfu(333, 1)}]}
+        put(manifest_url("o/lib", "neoforge-1.21.1"), json.dumps(libman))
+        assets = []
+        for t in ("1.21.4", "1.21.5", "26.2"):
+            for v in ("_mr", "_cf"):
+                n = f"lib-1.0{v}-mc{t}.jar"
+                put(rel(n), jarbytes("lib"))
+                assets.append({"name": n, "browser_download_url": rel(n), "digest": "sha256:" + sha(web[rel(n)])})
+        assets += [{"name": "lib-1.0_mr.jar", "browser_download_url": lib_base},
+                   {"name": "lib-1.0-sources-mc1.21.4.jar", "browser_download_url": rel("src.jar")}]
+        releases = [{"tag_name": "lib-1.0-mc1.21.1-r2", "draft": False, "prerelease": True, "target_commitish": "abc123",
+                     "assets": assets},
+                    {"tag_name": "lib-1.0-mc1.21.1", "draft": False, "prerelease": False, "target_commitish": "old",
+                     "assets": [{"name": "lib-1.0_mr.jar"}]}]
+        put("https://api.github.com/repos/o/lib/releases?per_page=100", json.dumps(releases))
+        raw = lambda t, f: f"https://raw.githubusercontent.com/o/lib/abc123/.multiversion/targets/{t}/{f}"
+        blk = ("# BEGIN layer-deps (tools/layer-deps.py)\nsubstitute.curse.maven\\:base-111=curse.maven:base-111:{fid}\n"
+               "{mr}exclude.curse.maven\\:x-333=no {t} build (extra)\n# END layer-deps\n")
+        for t, fid, mr in (("1.21.4", 444, "substitute.maven.modrinth\\:mrdep=maven.modrinth:mrdep:VID4\n"), ("1.21.5", 555, ""),
+                           ("26.2", 262, "")):
+            put(raw(t, "target.properties"), f"prop.minecraft_version={t}\nprop.neo_version={t.replace('1.', '', 1)}.7\n"
+                + blk.format(fid=fid, mr=mr, t=t))
+            put(raw(t, "DEPS.md"), "| dependency | role | base pin | for this target | from |\n|---|---|---|---|---|\n"
+                f"| `curse.maven:base-111` | required | `222` | curse.maven:base-111:{fid} | CurseForge file {fid} (base-{t}.jar) |\n")
+            put(cfu(111, fid), jarbytes("base"))
+        mr4 = jarbytes("mrdep") + b""
+        put("https://cdn.modrinth.com/data/MRID/versions/VID4/mrdep-4.jar", mr4)
+        put("https://api.modrinth.com/v2/version/VID4", json.dumps({"project_id": "MRID", "files": [
+            {"primary": True, "filename": "mrdep-4.jar", "url": "https://cdn.modrinth.com/data/MRID/versions/VID4/mrdep-4.jar",
+             "hashes": {"sha512": hashlib.sha512(mr4).hexdigest()}}]}))
+        # the dependent fork: a local layer build (1.21.4 and 26.2 built, 1.21.8 not; no 1.21.5 target at all)
+        co = d / "dep"
+        dep_base = put("https://github.com/o/dep/releases/download/dep-2-mc1.21.1/dep-2.jar", jarbytes("dep"))
+        (co / ".github").mkdir(parents=True)
+        (co / ".github/port-install.json").write_text(json.dumps({"port": "o/dep", "modid": "dep", "minecraft": "1.21.1",
+            "neoforge": "21.1.9", "files": [
+                {"role": "self", "modid": "dep", "name": "dep-2.jar", "url": dep_base, "sha256": sha(web[dep_base])},
+                {"role": "required", "modid": "lib", "name": "lib-1.0_mr.jar", "url": lib_base, "sha256": sha(web[lib_base]),
+                 "port": "o/lib"}]}), encoding="utf-8")
+        for t in ("1.21.4", "26.2", "1.21.8"):
+            (co / ".multiversion/targets" / t).mkdir(parents=True)
+            (co / ".multiversion/targets" / t / "target.properties").write_text(
+                f"prop.minecraft_version={t}\nprop.neo_version={t.replace('1.', '', 1)}.7\n", encoding="utf-8")
+            if t != "1.21.8":
+                (co / "build" / f"mc{t}" / "libs").mkdir(parents=True)
+                (co / "build" / f"mc{t}" / "libs" / f"dep-2-mc{t}.jar").write_bytes(jarbytes("dep"))
+        def get(u):
+            if u.startswith("file:"):
+                return fetch(u)           # the local layer build's jars: read like any file: URL
+            if u not in web:
+                raise urllib.error.URLError(f"not in the fixture: {u}")
+            return web[u]
+        reg = jarbytes("mrdep")
+        put("https://cdn.modrinth.com/data/MRID/versions/V26/mrdep-26.jar", reg)
+        lookup = lambda m: (({"name": "mrdep-26.jar", "url": "https://cdn.modrinth.com/data/MRID/versions/V26/mrdep-26.jar",
+                              "sha256": sha(reg), "source": "modrinth", "page": "x"}, None) if m == "mrdep" else (None, "nowhere"))
+        launcher = d / "launcher"; launcher.mkdir()
+        (launcher / "launcher_profiles.json").write_text('{"profiles": {"keep": {"name": "mine"}}}', encoding="utf-8")
+        def args(**k):
+            base = dict(port_checkout=[f"o/dep={co}"], branch=None, mc="1.21.1", versions=None, dry_run=False,
+                        instances_dir=str(d / "inst"), with_optional=False, full=False, with_untested=False, replace=False,
+                        no_neoforge=True, verbose=False)
+            return argparse.Namespace(**dict(base, **k))
+        def run(repos, **k):
+            buf = io.StringIO()
+            rc = all_versions(repos, args(**k), get=get, env={}, lookup=lookup, launcher=launcher, out=lambda x: buf.write(x + "\n"))
+            return rc, buf.getvalue()
+        rc, txt = run(["o/dep"], dry_run=True)
+        chk(rc == 0 and not (d / "inst").exists() and "would add the launcher profile" in txt, f"dry run changes nothing ({rc})\n{txt}")
+        rc, txt = run(["o/dep"])
+        chk(rc == 0, f"installs ({rc})\n{txt}")
+        chk("also o/lib: o/dep depends on it" in txt, "a sibling port is followed")
+        # the checkout is printed resolved: a Windows temp dir is a short 8.3 path (RUNNER~1) until resolve() expands it
+        chk("o/lib: 1.21.1, 1.21.4, 1.21.5, 26.2 (release lib-1.0-mc1.21.1-r2)" in txt
+            and f"o/dep: 1.21.1, 1.21.4, 26.2 (local layer build {co.resolve()})" in txt, f"each fork's versions\n{txt}")
+        chk("1.21.8 not available: no 1.21.8 jar built" in txt and "o/lib also has 1.21.5: not every fork has it, skipped" in txt,
+            "versions outside the intersection: printed and skipped")
+        mods = lambda mc: sorted(p.name for p in (d / "inst" / f"minecraft-{mc}" / "mods").glob("*.jar"))
+        chk(mods("1.21.1") == ["base-1.jar", "dep-2.jar", "lib-1.0_mr.jar", "mrdep-1.jar"], f"1.21.1: {mods('1.21.1')}")
+        chk(mods("1.21.4") == ["base-1.21.4.jar", "dep-2-mc1.21.4.jar", "lib-1.0_mr-mc1.21.4.jar", "mrdep-4.jar"],
+            f"1.21.4: each fork's -mc jar (the manifest's _mr variant), the target's DEPS.md files: {mods('1.21.4')}")
+        chk(mods("26.2") == ["base-26.2.jar", "dep-2-mc26.2.jar", "lib-1.0_mr-mc26.2.jar", "mrdep-26.jar"]
+            and "from Modrinth, not tested by CI" in txt, f"26.2: a dependency the block does not name is looked up: {mods('26.2')}")
+        chk(not (d / "inst/minecraft-1.21.5").exists() and not (d / "inst/minecraft-1.21.8").exists(), "no directory for a skipped version")
+        prof = json.loads((launcher / "launcher_profiles.json").read_text(encoding="utf-8"))["profiles"]
+        chk(prof.get("keep") == {"name": "mine"} and prof.get("install-port-1.21.4", {}).get("gameDir") == str(d / "inst/minecraft-1.21.4")
+            and prof.get("install-port-26.2", {}).get("lastVersionId") == "neoforge-26.2.7" and "install-port-1.21.1" in prof,
+            f"a profile per version, the others kept: {sorted(prof)}")
+        chk("| 1.21.4 | 21.4.7 | NeoForge 1.21.4 (fork ports) | dep-2-mc1.21.4.jar, lib-1.0_mr-mc1.21.4.jar (+2 dependencies) | OK |"
+            in txt and "RESULT: OK -- 3 of 3 version(s) installed" in txt, f"the final table\n{txt}")
+        # --versions narrows; one not shared is said and skipped
+        rc, txt = run(["o/dep"], versions="1.21.4,1.21.5", dry_run=True)
+        chk(rc == 0 and "1.21.5: not a version every fork has, skipped" in txt and "== Minecraft 1.21.4" in txt
+            and "== Minecraft 1.21.1" not in txt and "== Minecraft 26.2" not in txt, f"--versions\n{txt}")
+        # a target jar whose sha256 is not GitHub's: that version fails, nothing of it is called installed
+        good_digest = assets[0]["digest"]
+        assets[0]["digest"] = "sha256:" + "0" * 64
+        put("https://api.github.com/repos/o/lib/releases?per_page=100", json.dumps(releases))
+        shutil.rmtree(d / "inst")
+        rc, txt = run(["o/dep"], versions="1.21.4")
+        chk(rc == 1 and "lib: sha256 mismatch" in txt and "lib-1.0_mr-mc1.21.4.jar" not in mods("1.21.4")
+            and "| FAILED |" in txt, f"a sha256 mismatch fails the version\n{txt}")
+        assets[0]["digest"] = good_digest
+        put("https://api.github.com/repos/o/lib/releases?per_page=100", json.dumps(releases))
+        # a CurseForge target file (no hash recorded) that is not the mod it names is refused
+        put(cfu(111, 444), jarbytes("other"))
+        shutil.rmtree(d / "inst")
+        rc, txt = run(["o/dep"], versions="1.21.4")
+        chk(rc == 1 and "declares no mod base" in txt and "base-1.21.4.jar" not in mods("1.21.4"), f"check_modid\n{txt}")
+        # a single-version fork: its one version, from its port branch, exactly the manifest's files
+        put("https://api.github.com/repos/o/lib/releases?per_page=100", json.dumps([releases[1]]))
+        shutil.rmtree(d / "inst")
+        rc, txt = run(["o/lib"], port_checkout=[])
+        chk(rc == 0 and "o/lib: 1.21.1 (no layer release)" in txt and mods("1.21.1") == ["base-1.jar", "lib-1.0_mr.jar", "mrdep-1.jar"]
+            and "RESULT: OK -- 1 of 1 version(s)" in txt, f"single-version fork\n{txt}")
+    chk(target_jar(["a-1_mr-mc1.21.4.jar", "a-1_cf-mc1.21.4.jar"], "a-0.9_cf.jar", "1.21.4") == "a-1_cf-mc1.21.4.jar"
+        and target_jar(["a-mc1.21.4.jar", "a-sources-mc1.21.4.jar"], "x.jar", "1.21.4") == "a-mc1.21.4.jar"
+        and target_jar(["a_mr-mc1.21.4.jar", "a_cf-mc1.21.4.jar"], "b.jar", "1.21.4") is None, "target_jar")
+    return good
 
 def self_check():
     failed = []
@@ -891,6 +1324,7 @@ def self_check():
                                                              url=gh("o/dep", "dep-1.1.2-mc1.21.1", "dep-1.1.2.jar"))])}
         ok &= _chk(stale_manifests(current, lambda f: rels.get(f)) == ([], []), 176)
         ok &= _chk(summarise(pts, fs, sts, ms, bd, "", True, True)[0][0] == "WOULD SUCCEED:", 177)   # none stale: as before
+    ok &= _chk(all_versions_check(), 200)
     ok &= _chk(vkey("geckolib-neoforge-1.21.1-4.8.4.jar") > vkey("geckolib-neoforge-1.21.1-4.7.1.jar"), 159)
     ok &= _chk(vkey("curios-neoforge-9.5.1+1.21.1.jar") == (9, 5, 1), 160)
     print("self-check:", "OK" if ok else f"FAIL (checks at self_check lines {failed})")
@@ -912,7 +1346,21 @@ def main():
                     help="replace a different build of a port's mod already in the mods folder (moved to mods-replaced/)")
     ap.add_argument("--no-neoforge", action="store_true", help="do not install NeoForge when it is missing")
     ap.add_argument("-v", "--verbose", action="store_true", help="also every file and every note")
+    ap.add_argument("--all-versions", action="store_true",
+                    help="every Minecraft version ALL the forks named have (port branch + layer release targets): one game "
+                         "directory (minecraft-<mc>/mods), NeoForge and launcher profile per version")
+    ap.add_argument("--versions", help="with --all-versions: only these (comma-separated), e.g. 1.21.4,26.2")
+    ap.add_argument("--port-checkout", action="append", default=[], metavar="OWNER/REPO=DIR",
+                    help="with --all-versions: take that fork's layer targets from a local layer build (DIR/build/mc<t>/libs)")
+    ap.add_argument("--instances-dir", help="with --all-versions: where the minecraft-<mc> game directories go "
+                                            "(default: next to the launcher's folder)")
     a = ap.parse_args()
+    if a.all_versions:
+        if a.mods_dir:
+            ap.error("--all-versions installs one game directory per version; --mods-dir names one folder")
+        return all_versions(a.repos, a)
+    if a.versions or a.port_checkout or a.instances_dir:
+        ap.error("--versions, --port-checkout and --instances-dir go with --all-versions")
     env = read_env()
     mods = pathlib.Path(a.mods_dir).expanduser() if a.mods_dir else default_mods_dir(a.mc, env)
     cache = {}

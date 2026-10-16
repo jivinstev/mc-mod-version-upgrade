@@ -104,14 +104,16 @@ layer branch: they are its 1.21.1 bookend.
 | `layer-compile` (matrix: every target except the newest) | after plan | `layer-ci.py compile`: `.multiversion/build.sh <t>` over every source set's compile task (`srcsets.py`), then `audit-mixin-targets.py` against that target's staged sources jar and `audit-event-listeners.py` against Gradle's own resolved classpath |
 | `layer-gates` | after plan | `ci-gates.py --mc <newest>`: author's build, Gate A, data, payloads, Gate B and Gate C under Xvfb, plus `--shipped` when `.multiversion/shipped-expect*.txt` exists; the gate summary is uploaded as `layer-gates-<newest>` |
 | `layer-gates-extra` (matrix, `full_gates` only) | after plan | the same gates for each released middle target in `.multiversion/ci.properties`; no job when the list is empty |
-| `layer-release` | `release` dispatched on the layer branch | after the base gates, `layer-isolation`, `layer-inertness`, `layer-gates` and `layer-gates-extra` are green (`layer-compile` and `layer-gates-extra` may be skipped -- no middle target, no `full_gates` -- never red): ONE pre-release holding the base jars and each target's `<name>-mc<t>.jar` (built by `layer-compile`/`layer-gates` when releasing) -- the release publish-port's layer path uploads per target. The main `release` job steps aside on the layer branch |
+| `layer-release` | `release` dispatched on the layer branch | after the base gates, `layer-isolation`, `layer-inertness`, `layer-gates` and `layer-gates-extra` are green (`layer-compile` and `layer-gates-extra` may be skipped -- no middle target, no `full_gates` -- never red): ONE pre-release holding the base jars and each target's `<name>-mc<t>.jar` (built by `layer-compile`/`layer-gates` when releasing) -- the release publish-port's layer path uploads per target. A target marked `preview=true` in its own `target.properties` (not inherited) is built, gated and attached the same way; the notes name it as a preview (`layer-ci.py plan` lists them), and publish-port never uploads it. The main `release` job steps aside on the layer branch |
 
 **A dependent fork's sibling jars in CI.** Every layer job first runs `layer-deps.py fetch --repo . --target <t>`: it installs
 into mavenLocal each sibling port's per-target jar the target's `target.properties` pins (`port_jar.<g:a>=<url> <sha256>`),
 checked against its sha256 -- a no-op for a target that pins none. The pins are written by
 `layer-deps.py resolve --port-release owner/repo@TAG` against the sibling's layer release (its `layer-release` job);
 locally `--port-checkout owner/repo=DIR` builds the jar from a checkout instead and pins nothing, so CI cannot fetch
-it -- re-resolve with `--port-release` before the dependent's layer CI can go green. `fork-port.py` passes both through
+it -- re-resolve with `--port-release` before the dependent's layer CI can go green (`fetch` fails on such an unpinned
+sibling substitute and prints the re-resolve command). A target's shipped-jar gate (`ci-gates.py --mc <t> --shipped`)
+boots the sibling ports' per-target jars from mavenLocal beside the built jar, as the port branch's `shipped jars` job does. `fork-port.py` passes both through
 (`--port-release owner/repo@TAG`, kept in its resume command), and a later resolve that names the sibling with neither
 keeps the existing `port_jar.` pin while it still pins the version `port-ci.yml` installs. `resolve --dry-run` builds,
 fetches and installs no sibling jar. A dependency the fork's `port-install.json` does not name is required when it is
@@ -281,6 +283,24 @@ is enough), then runs the gates, and the GATES.md the run writes is committed af
    reads the fork as single-version, and the layer falls behind. Then check it the way the run will:
    `layer-sync.py detect --repo DIR --ref origin/<layer branch> --port-ref origin/<port branch>` must print
    `layer=true` with every target and `layer_behind=0` (or the count the next run will merge).
+
+11. **Done: hand off a manual test plan** (when the last target of a buildout is green -- one fork, or a library fork
+   and the forks that depend on it). The gates never look at what a port changed on screen, so the maintainer needs to
+   know what to test on which version. Run `python3 tools/layer-test-plan.py --repo DIR [--repo DIR ...] --json` (no
+   model, no network). Per fork it gives the versions and, for a layer fork, items per target, each with its sources,
+   the targets it applies to, their range and the version where it first appears (a change shared by several targets is
+   one item): `stub` (each `STUBS.json` entry, with its review and its `hooks` / `recheck` fields), `overlay` (an
+   overlay that replaces a whole authors' file, flagged `mixin` / `client`), `catalogue` (a rename row whose note, or
+   the CATALOG entry it cites, says the gates do not cover it, and that fired on the target), `dropped-dep` (a `DEPS.md`
+   row that dropped an optional integration) and `preview` (a target marked `preview=true`). A single-version fork is
+   its one version with no layer section. Add the fork's open issues labelled for the layer (`gh issue list --repo
+   OWNER/FORK --label <label> --state open`). Then publish a **Claude Code artifact** (never checked in) for the
+   maintainer: per Minecraft version, the changes that need a human eye -- for each, **what changed** and which version
+   introduced it, **how to see it** (where to go in game, what to do, what correct and broken look like) and **why the
+   gates did not cover it** -- written by you from the item's sources (read the overlay against the authors' file, the
+   stub's review). Each shared change is listed once, at its first version, with its range. End each version with a
+   checklist of the four or five things to test, in the order an install session reaches them. A mechanical overlay
+   (renames only, no `mixin`/`client` flag, nothing drawn) needs no entry: say how many you left out.
 
 ## Models and cost
 

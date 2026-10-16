@@ -12,6 +12,8 @@
   #   layer-release    `release` run from {{LAYER_BRANCH}}: the pre-release holds the base jars AND one jar per target
   #                    (<name>-mc<t>.jar, built by layer-compile / layer-gates), once isolation, inertness, layer-compile,
   #                    layer-gates and layer-gates-extra are all green (layer-compile / -extra may be skipped, never red).
+  #                    A target marked preview (preview=true in its target.properties) is built, gated and attached
+  #                    like any other; the notes name it as a preview, and publish-port never uploads it.
   #                    The release job above steps aside on {{LAYER_BRANCH}}. Each job first fetches the sibling
   #                    ports' per-target jars its target.properties pins (tools/layer-deps.py fetch).
   # The {{BRANCH}} gates above also run on the layer branch: they are its 1.21.1 bookend.
@@ -26,6 +28,9 @@
       has_middle: ${{ steps.plan.outputs.has_middle }}
       matrix: ${{ steps.plan.outputs.matrix }}
       shipped: ${{ steps.plan.outputs.shipped }}
+      preview: ${{ steps.plan.outputs.preview }}
+      has_full: ${{ steps.plan.outputs.has_full }}
+      full_matrix: ${{ steps.plan.outputs.full_matrix }}
     steps:
       - uses: actions/checkout@v4
       - name: Plan the layer's jobs

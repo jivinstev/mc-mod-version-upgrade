@@ -321,7 +321,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
             "port-offer.py|port-offer: the authors see the port without our CI commit; port commits after a CI commit are replayed without it; only what state.json verified is claimed" \
             "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
-            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict; a manifest behind its fork's newest full Release is installed as tested and named NOT THE NEWEST RELEASE" \
+            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict; a manifest behind its fork's newest full Release is installed as tested and named NOT THE NEWEST RELEASE; --all-versions (fixtures: a library's layer release, a dependent's local layer build) installs only the versions every fork has, one game directory and launcher profile each, every target jar and dependency checked, a single-version fork its one version" \
             "port-manifest.py|port-manifest: refresh points the install manifest at the newest full Release (same platform variant) and the workflow's sibling pins, leaves registry entries alone, says unchanged, refuses a pre-release, an older tag, an ambiguous jar or an unfetchable pin" \
             "optional-dep-scan.py|optional-dep-scan: a listener class naming an optional mod in a method type blocks; a mixin reaching one through the mod is reported" \
             "port-fleet.py|port-fleet: one fleet file runs ci/gates/offer over every fork in order, flags per fork, push after each" \
@@ -335,6 +335,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-override-signatures.py|convert-override-signatures: a hook whose 26.2 signature changed keeps its body in a private 1.21.1-shaped copy" \
             "port-derive.py|port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handlers dropped" \
             "mechanical-hop.py|mechanical-hop: members, then every converter in order, then members; a converter that changed nothing is not recounted; one needing the port's input is an advisory" \
+            "layer-test-plan.py|layer-test-plan: per layer target, the reviewed/reopened stubs, whole-file overlays, fired rows with a no-gate note, dropped optional integrations and preview targets, a shared change once with its range; a single-version fork is its one version with no layer section" \
             "manual-tests.py|manual-tests: the 10 manual tests no gate reaches, one per kind first (music, client packets, bosses, keys...), with steps naming real ids" \
             "offer-page.py|offer-page: the handoff page shows each fork's install, distance from release, checks and its manual tests" \
             "minitoml.py|minitoml: the TOML reader for Pythons without tomllib reads mods.toml forms (inline tables, every string kind) as tomllib does, and refuses broken TOML" \
@@ -971,13 +972,108 @@ for v in ("26.2", "26.3"):
     t = pathlib.Path(f"templates/fork-layer/shared/{v}/java/MultiBufferSource.java").read_text(encoding="utf-8")
     t = re.sub(r"//[^\n]*|/\*.*?\*/", "", t, flags=re.S)
     gb = re.search(r"public VertexConsumer getBuffer\(RenderType type\) \{(.*?)\n        \}", t, re.S)
-    eb = re.search(r"public void endBatch\(RenderType type\) \{(.*?)\n        \}", t, re.S)
+    # 26.3's endBatch(type) delegates to endBatch(type, into) (into: an open pass, or null)
+    eb = re.search(r"public void endBatch\(RenderType type(?:, RenderPass into)?\) \{((?:(?!\n        \}).)*?sortOnUpload.*?)\n        \}", t, re.S)
     if not gb or not re.search(r"if \(open != null\) \{\s*if \(type\.canConsolidateConsecutiveGeometry\(\)\) \{\s*return open;\s*\}\s*endBatch\(type\);", gb.group(1)):
         bad.append(f"{v}: getBuffer does not end a non-consolidating type's started builder")
-    if not eb or not re.search(r"if \(type\.sortOnUpload\(\)\) \{.*?mesh\.sortQuads\(\w+, RenderSystem\.getProjectionType\(\)\.vertexSorting\(\)\);.*?\}\s*draw\(type, mesh\);", eb.group(1), re.S):
+    if not eb or not re.search(r"if \(type\.sortOnUpload\(\)\) \{.*?mesh\.sortQuads\(\w+, RenderSystem\.getProjectionType\(\)\.vertexSorting\(\)\);.*?\}\s*draw\(type, mesh(?:, into)?\);", eb.group(1), re.S):
         bad.append(f"{v}: endBatch(type) does not sort a sortOnUpload type's quads before drawing")
     if "import com.mojang.blaze3d.systems.RenderSystem;" not in t:
         bad.append(f"{v}: RenderSystem not imported")
+print(*bad, sep="\n")
+sys.exit(1 if bad else 0)
+PY
+
+# 26.3 render passes (#120): one command encoder refuses a second pass (and buffer writes) while one is open, and NeoForge
+# posts every RenderLevelStageEvent stage but AfterSky / AfterLevel inside the main pass. The rules live in a client-free
+# helper (RenderPasses), run here against stubs of the two GPU API types it names; the helpers' use of them is checked
+# in their sources.
+if command -v javac >/dev/null 2>&1; then
+  W="$T/renderpasses"; mkdir -p "$W/p" "$W/com/mojang/renderpearl/api/textures"
+  sed -e 's/@MVPKG@/p/g' -e 's/@MODID@/examplemod/g' templates/fork-layer/shared/26.3/java/RenderPasses.java > "$W/p/RenderPasses.java"
+  printf 'package com.mojang.renderpearl.api;\npublic enum GpuFormat { R8_UNORM, RG8_UNORM, RGB8_UNORM, RGBA8_UNORM, R16_FLOAT, R32_FLOAT, RGBA16_FLOAT, RGBA32_FLOAT, RGB10A2_UNORM, RG11B10_FLOAT, D32_FLOAT, D32_FLOAT_S8_UINT, D24_UNORM_S8_UINT, D16_UNORM }\n' > "$W/com/mojang/renderpearl/api/GpuFormat.java"
+  # the 26.3 constants (javap -constants com.mojang.renderpearl.api.textures.GpuTexture)
+  printf 'package com.mojang.renderpearl.api.textures;\npublic interface GpuTexture { int USAGE_COPY_DST = 1; int USAGE_COPY_SRC = 2; int USAGE_TEXTURE_BINDING = 4; int USAGE_RENDER_ATTACHMENT = 8; int USAGE_CUBEMAP_COMPATIBLE = 16; }\n' > "$W/com/mojang/renderpearl/api/textures/GpuTexture.java"
+  cat > "$W/p/Main.java" <<'J'
+package p;
+import com.mojang.renderpearl.api.GpuFormat;
+public class Main {
+    public static void main(String[] x) {
+        StringBuilder o = new StringBuilder();
+        RenderPasses.requireNoOpenPass(false, "LegacyGl.draw");
+        try { RenderPasses.requireNoOpenPass(true, "LegacyGl.draw"); o.append("no-throw"); }
+        catch (IllegalStateException e) {
+            String m = e.getMessage();
+            o.append(m.contains("LegacyGl.draw") && m.contains("AfterSky") && m.contains("AfterLevel")
+                    && m.contains("AfterTranslucentFeatures") && m.contains("getRenderPass()") ? "msg" : "bad-msg:" + m);
+        }
+        RenderPasses.Shape d = RenderPasses.glShape(854, 480, 0x8CAC);          // GL_DEPTH_COMPONENT32F
+        o.append(' ').append(d.width()).append('x').append(d.height()).append(' ').append(d.format())
+         .append(' ').append(d.attachable()).append(' ').append(d.bindable());
+        RenderPasses.Shape u = RenderPasses.glShape(16, 16, 0x81A6);            // GL_DEPTH_COMPONENT24: no GpuFormat
+        o.append(' ').append(u.format()).append(' ').append(u.attachable()).append(' ').append(u.bindable());
+        RenderPasses.Shape z = RenderPasses.glShape(0, 0, 0x8058);
+        o.append(' ').append(z.width()).append('x').append(z.height());
+        RenderPasses.Shape s = RenderPasses.shape(64, 32, GpuFormat.RGBA8_UNORM);
+        o.append(' ').append(s.attachable() && s.bindable()).append(' ').append(s.usage());
+        o.append(' ').append(RenderPasses.firstElement(24, 4)).append(' ').append(RenderPasses.firstElement(96, 32));
+        try { RenderPasses.firstElement(6, 4); o.append(" misaligned-ok"); } catch (IllegalStateException e) { o.append(" misaligned"); }
+        java.util.Set<String> all = new java.util.TreeSet<>(RenderPasses.PASS_FREE_STAGES);
+        all.addAll(RenderPasses.IN_PASS_STAGES);
+        o.append(' ').append(all.size());
+        System.out.println(o);
+    }
+}
+J
+  out="$(javac -d "$W/out" $(find "$W" -name '*.java') 2>&1 | grep -v JAVA_TOOL_OPTIONS; java -cp "$W/out" p.Main 2>&1 | grep -v JAVA_TOOL_OPTIONS)"
+  # 9 = NeoForge 26.3.0.76's RenderLevelStageEvent subclasses (AfterSky / AfterLevel have no getRenderPass())
+  [ "$out" = "msg 854x480 D32_FLOAT true true RGBA8_UNORM false true 1x1 true 15 6 3 misaligned 9" ] \
+    && ok "RenderPasses (26.3): an open pass is refused with a message naming the pass-free stages and getRenderPass(); a raw GL texture gets its real size, format and sample+attach usage (an unknown format: sample only); transient offsets become element indices" \
+    || bad "RenderPasses (26.3): $out"
+elif [ -n "${CI:-}" ]; then bad "no javac in CI -- RenderPasses was NOT tested"
+else echo "  SKIP  no javac (CI runs it; a skip is not a pass)"; fi
+python3 - <<'PY' && ok "shared 26.3 render helpers (#120): LegacyGl draws into an open pass or given views and asserts before opening its own; in-pass geometry goes to mapped transient memory; RawGlTexture has its real shape; MultiBufferSource ends the in-pass flush into the event's pass and defers the rest to a pass-free flush" || bad "shared 26.3 render helpers lost an in-pass / given-texture / real-shape path"
+import pathlib, re, sys
+d = pathlib.Path("templates/fork-layer/shared/26.3/java")
+strip = lambda s: re.sub(r"//[^\n]*|/\*.*?\*/", "", s, flags=re.S)
+gl = strip((d / "LegacyGl.java").read_text(encoding="utf-8"))
+mbs = strip((d / "MultiBufferSource.java").read_text(encoding="utf-8"))
+raw = strip((d / "RawGlTexture.java").read_text(encoding="utf-8"))
+lrt = strip((d / "LegacyRenderType.java").read_text(encoding="utf-8"))
+bad = []
+def need(cond, msg):
+    if not cond: bad.append(msg)
+need(re.search(r"public static void draw\(MeshData mesh, RenderPass into\)", gl), "LegacyGl.draw(mesh, RenderPass into) missing")
+need(re.search(r"public static void draw\(MeshData mesh, GpuTextureView colour, GpuTextureView depth\)", gl), "LegacyGl.draw(mesh, colour, depth) missing")
+core = re.search(r"static void draw\(MeshData mesh, Object shaderObj, Key key, GpuTextureView colorView, GpuTextureView depthView,\s*RenderPass into, GpuFormat colorFormat\) \{(.*?)\n    \}\n", gl, re.S)
+need(core, "LegacyGl's draw core (views or an open pass) missing")
+if core:
+    c = core.group(1)
+    a = c.find("RenderPasses.requireNoOpenPass(inRenderPass()"); u = c.find("Uploaded.of(m)"); o = c.find("createRenderPass(")
+    need(0 <= a < u and a < o and re.search(r"if \(into == null\) RenderPasses\.requireNoOpenPass", c), "the own-pass path does not assert (before uploading) that no pass is open")
+    need("into == null ? Uploaded.of(m) : Uploaded.inPass(m)" in c, "a draw into an open pass does not upload through Uploaded.inPass")
+    need(re.search(r"RenderPass pass = into != null \? into :", c) and re.search(r"if \(into == null\) pass\.close\(\);", c), "a pass handed in is replaced or closed")
+    need("drawIndexed(up.indexCount(), 1, up.firstIndex(), up.baseVertex(), 0)" in c, "the draw ignores the transient upload's first index / base vertex")
+inpass = re.search(r"static Uploaded inPass\(MeshData m\) \{(.*?)\n        \}\n", gl, re.S)
+tr = re.search(r"private static GpuBufferSlice transient_\(.*?\n        \}\n", gl, re.S)
+need(inpass and tr and "transientMemory()" in tr.group(0) and "allocateGpuMapped(" in tr.group(0) and "writeToBuffer" not in inpass.group(1) + tr.group(0),
+     "Uploaded.inPass does not write through a mapped transient allocation (an open pass refuses writeToBuffer)")
+need(re.search(r"f\.isInRenderPass\(\)", gl), "LegacyGl.inRenderPass does not ask the frontend encoder")
+need(re.search(r"super\(shape\.usage\(\), \"mv_raw_\" \+ id, shape\.format\(\), shape\.width\(\), shape\.height\(\), 1, 1, id,", raw), "RawGlTexture is not created with its real usage / format / size")
+need(not re.search(r"super\(0,", raw), "RawGlTexture still has usage 0")
+need(re.search(r"public static RawGlTexture of\(int glId, int width, int height, GpuFormat format\)", raw) and re.search(r"public static GpuTexture allocate\(", raw)
+     and re.search(r"public static int glId\(GpuTexture texture\)", raw), "RawGlTexture lacks of(id, w, h, format) / allocate / glId")
+need(re.search(r"_getTexLevelParameter\(0x0DE1, 0, 0x1000\)", raw) and re.search(r"_bindTexture\(previous\)", raw), "RawGlTexture.of(id) does not read the shape from GL and restore the binding")
+need(re.search(r"public void draw\(MeshData mesh, com\.mojang\.renderpearl\.api\.commands\.RenderPass into\)", lrt), "LegacyRenderType.draw(mesh, pass) missing")
+fl = re.search(r"final class Flush \{(.*?)\n    \}", mbs, re.S)
+need(fl and re.search(r"afterTranslucentFeatures\(RenderLevelStageEvent\.AfterTranslucentFeatures event\) \{\s*main\(\)\.endBatch\(event\.getRenderPass\(\)\);", fl.group(1)),
+     "Flush.afterTranslucentFeatures does not end the batch into the event's pass")
+need(fl and re.search(r"afterLevel\(RenderLevelStageEvent\.AfterLevel event\) \{\s*main\(\)\.endBatch\(\);", fl.group(1)), "Flush.afterLevel no longer ends the batch outside a pass")
+eb = re.search(r"public void endBatch\(RenderPass into\) \{(.*?)\n        \}", mbs, re.S)
+need(eb and re.search(r"if \(into == null\) \{\s*Deferred\.drawIfNoPassOpen\(\);", eb.group(1)), "a pass-free endBatch does not draw what an in-pass end deferred")
+dr = re.search(r"static void draw\(RenderType type, MeshData mesh, RenderPass into\) \{(.*?)\n        \}\n", mbs, re.S)
+need(dr and re.search(r"into == null \? LegacyGl\.inRenderPass\(\) :.*?Deferred\.add\(type, mesh\);", dr.group(1), re.S), "a batch ended while a pass is open is not deferred")
+need(dr and "Uploaded.inPass(m)" in dr.group(1) and "drawFromBuffer(" in dr.group(1), "a vanilla type is not drawn into the open pass from a transient upload")
 print(*bad, sep="\n")
 sys.exit(1 if bad else 0)
 PY

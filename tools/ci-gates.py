@@ -207,6 +207,9 @@ def self_check():
         (t / "A.java").write_text("b", encoding="utf-8")
         ok &= tested_tree(d, "1.21.4") == f"{h} + uncommitted: .multiversion/targets/1.21.4/A.java"
         ok &= tested_tree(d, None) == h                          # single-version: HEAD, exactly as before
+        # --shipped on a layer target boots the sibling ports' per-target jars beside it (layer-deps.sibling_jars, its
+        # own self-check covers a dependent fixture); a fork with no sibling substitute gets no --deps
+        ok &= _load("layer_deps", "layer-deps.py").sibling_jars(d, "1.21.4") == []
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -399,6 +402,11 @@ def main():
                        "--work-dir", str(work / "shipped")]
                 if a.mc:
                     cmd += ["--mc", a.mc]
+                    # a dependent fork's layer target: the sibling ports' per-target jars beside the built one (the
+                    # port branch's `shipped jars` job passes the --dep-jar jars the same way); none -> no --deps
+                    sib = _load("layer_deps", "layer-deps.py").sibling_jars(repo, a.mc)
+                    if sib:
+                        cmd += ["--deps", *sib]
                 else:
                     gp = repo / "gradle.properties"
                     m = re.search(r"^neo_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8"), re.M) if gp.is_file() else None

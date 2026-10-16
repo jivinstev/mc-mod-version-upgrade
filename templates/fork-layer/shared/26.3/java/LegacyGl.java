@@ -6,6 +6,7 @@ import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
 import com.mojang.renderpearl.api.buffers.GpuBuffer;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.renderpearl.backend.opengl.GlRenderPipeline;
+import com.mojang.renderpearl.frontend.FrontendCommandEncoder;
 import com.mojang.renderpearl.frontend.FrontendRenderPipeline;
 import com.mojang.renderpearl.api.pipeline.ShaderSource;
 import com.mojang.blaze3d.pipeline.PipelineCache;
@@ -112,9 +113,20 @@ import java.util.OptionalDouble;
  * <li>A compiled pipeline is a {@code FrontendRenderPipeline}; the GL program is its {@code backendRenderPipeline()}'s.</li>
  * </ul>
  *
+ * <p>26.3 has ONE command encoder, and it refuses to open a pass (or write a buffer) while one is open; NeoForge posts
+ * every {@code RenderLevelStageEvent} stage but AfterSky and AfterLevel inside the main pass ({@link RenderPasses}). So
+ * a draw has three forms: into a pass of its own on a target ({@link #drawWithShader(MeshData)}) or on given views
+ * ({@link #draw(MeshData, GpuTextureView, GpuTextureView)}), which asserts no pass is open with a message naming the
+ * stages it may run from; or INTO a pass that is already open ({@link #draw(MeshData, RenderPass)}): an in-pass stage
+ * event's {@code getRenderPass()}, or the pass vanilla opened on an offscreen texture (26.3 draws every GUI, tooltip,
+ * oversized and picture-in-picture item into an atlas texture, in a pass of its own). A draw into an open pass uploads
+ * its geometry into the encoder's transient memory (mapped: no encoder command, which an open pass would refuse) and
+ * takes the colour format of the pass's attachment for its pipeline.
+ *
  * <p>Not expressible on 1.21.8 and logged once: a blend equation other than ADD.
  */
 // MV-REQUIRES: RawGlTexture
+// MV-REQUIRES: RenderPasses
 // MV-REQUIRES: ShaderInstance
 // MV-REQUIRES: ShaderShard
 // MV-REQUIRES: Uniform
@@ -228,6 +240,56 @@ public final class LegacyGl {
         draw(mesh, shader, current(), Minecraft.getInstance().gameRenderer.mainRenderTarget());
     }
 
+    /**
+     * The current shader and state, drawn INTO a render pass that is already open (it stays open): an in-pass
+     * {@code RenderLevelStageEvent}'s {@code getRenderPass()}, or one vanilla opened on an offscreen texture (26.3's GUI
+     * item atlas). The pipeline takes the colour format of the pass's attachment.
+     */
+    public static void draw(MeshData mesh, RenderPass into) {
+        draw(mesh, into, passColorFormat(into));
+    }
+
+    /** As {@link #draw(MeshData, RenderPass)}, for a pass whose colour attachment has {@code colorFormat}. */
+    public static void draw(MeshData mesh, RenderPass into, GpuFormat colorFormat) {
+        if (into == null) throw new IllegalArgumentException("[mv] LegacyGl.draw into a null render pass");
+        draw(mesh, shader, current(), null, null, into, colorFormat);
+    }
+
+    /** The current shader and state, drawn into {@code colour} (and {@code depth}; null: no depth) in a pass of its own:
+     *  a texture other than the main target. No pass may be open ({@link RenderPasses#requireNoOpenPass}). */
+    public static void draw(MeshData mesh, GpuTextureView colour, GpuTextureView depth) {
+        if (colour == null) throw new IllegalArgumentException("[mv] LegacyGl.draw into a null colour view");
+        draw(mesh, shader, current(), colour, depth, null, colour.texture().getFormat());
+    }
+
+    /** Whether the device's command encoder has a render pass open (only a pass-free stage or code outside the level
+     *  may open one; see {@link RenderPasses}). */
+    public static boolean inRenderPass() {
+        return RenderSystem.getDevice().createCommandEncoder() instanceof FrontendCommandEncoder f && f.isInRenderPass();
+    }
+
+    private static java.lang.reflect.Field colorAttachments;
+
+    /** The colour format of an open pass's first attachment ({@code FrontendRenderPass} keeps its attachments private);
+     *  the main target's when it cannot be read. */
+    static GpuFormat passColorFormat(RenderPass pass) {
+        try {
+            if (colorAttachments == null || colorAttachments.getDeclaringClass() != pass.getClass()) {
+                java.lang.reflect.Field f = pass.getClass().getDeclaredField("colorAttachments");
+                f.setAccessible(true);
+                colorAttachments = f;
+            }
+            if (colorAttachments.get(pass) instanceof List<?> l && !l.isEmpty()
+                    && l.get(0) instanceof com.mojang.renderpearl.api.commands.RenderPassDescriptor.Attachment<?> a
+                    && a.textureView() != null) {
+                return a.textureView().texture().getFormat();
+            }
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+        }
+        GpuTexture main = Minecraft.getInstance().gameRenderer.mainRenderTarget().getColorTexture();
+        return main == null ? GpuFormat.RGBA8_UNORM : main.getFormat();
+    }
+
     // ---- state as a value -------------------------------------------------------------------------------------
     /** One draw's fixed-function state: what a pipeline bakes in. Part of the pipeline cache key. {@code depth} null is
      *  1.21.11's NO_DEPTH_TEST (the depth test disabled). */
@@ -336,15 +398,45 @@ public final class LegacyGl {
         return buffer;
     }
 
-    /** What a mesh is drawn from: its vertices (and indices: its own, or the sequential ones for its topology), uploaded. */
-    record Uploaded(GpuBuffer vertices, GpuBuffer indices, IndexType indexType, int indexCount) {
+    /** What a mesh is drawn from: its vertices (and indices: its own, or the sequential ones for its topology), uploaded.
+     *  {@code baseVertex} / {@code firstIndex} place the mesh in the buffers (0 except for a transient upload). */
+    record Uploaded(GpuBuffer vertices, GpuBuffer indices, IndexType indexType, int indexCount, int baseVertex, int firstIndex) {
         static Uploaded of(MeshData m) {
             GpuBuffer vertices = uploadVertices(m.vertexBuffer());
             if (m.indexBuffer() == null) {
                 RenderSystem.AutoStorageIndexBuffer seq = RenderSystem.getSequentialBuffer(m.drawState().primitiveTopology());
-                return new Uploaded(vertices, seq.getBuffer(m.drawState().indexCount()), seq.type(), m.drawState().indexCount());
+                return new Uploaded(vertices, seq.getBuffer(m.drawState().indexCount()), seq.type(), m.drawState().indexCount(), 0, 0);
             }
-            return new Uploaded(vertices, uploadIndices(m.indexBuffer()), m.drawState().indexType(), m.drawState().indexCount());
+            return new Uploaded(vertices, uploadIndices(m.indexBuffer()), m.drawState().indexType(), m.drawState().indexCount(), 0, 0);
+        }
+
+        /**
+         * For a draw into a pass that is already open, where the encoder refuses {@code writeToBuffer}: the geometry goes
+         * into the encoder's transient memory through a MAPPED allocation (a CPU write, no encoder command; valid for the
+         * frame). An index buffer binds without an offset, so the allocation's offset becomes the first index (and the
+         * vertex one the base vertex, for vanilla's {@code drawFromBuffer}, which binds the whole buffer).
+         */
+        static Uploaded inPass(MeshData m) {
+            int vertexSize = m.drawState().format().getVertexSize();
+            GpuBufferSlice v = transient_(m.vertexBuffer(), vertexSize, GpuBuffer.USAGE_VERTEX);
+            int baseVertex = RenderPasses.firstElement(v.offset(), vertexSize);
+            if (m.indexBuffer() == null) {
+                RenderSystem.AutoStorageIndexBuffer seq = RenderSystem.getSequentialBuffer(m.drawState().primitiveTopology());
+                // grows with device.createBuffer(initial data), which an open pass allows
+                return new Uploaded(v.buffer(), seq.getBuffer(m.drawState().indexCount()), seq.type(), m.drawState().indexCount(), baseVertex, 0);
+            }
+            IndexType type = m.drawState().indexType();
+            GpuBufferSlice i = transient_(m.indexBuffer(), Math.max(4, type.bytes), GpuBuffer.USAGE_INDEX);
+            return new Uploaded(v.buffer(), i.buffer(), type, m.drawState().indexCount(), baseVertex,
+                    RenderPasses.firstElement(i.offset(), type.bytes));
+        }
+
+        private static GpuBufferSlice transient_(ByteBuffer data, int alignment, int usage) {
+            try (GpuBufferSlice.MappedView view = RenderSystem.getDevice().createCommandEncoder().transientMemory()
+                    .allocateGpuMapped(data.remaining(), alignment, usage)) {
+                view.data().put(data.duplicate());
+                return view.slice();
+            }
         }
     }
 
@@ -369,20 +461,34 @@ public final class LegacyGl {
 
     static void draw(MeshData mesh, Object shaderObj, Key key, RenderTarget target) {
         if (mesh == null) return;
+        GpuTexture colorTexture = target.getColorTexture();
+        if (colorTexture == null) {
+            mesh.close();
+            return;
+        }
+        // 26.3 has no output override: the target's own views (no depth view when it has no depth)
+        draw(mesh, shaderObj, key, target.getColorTextureView(), target.getDepthTextureView(), null, colorTexture.getFormat());
+    }
+
+    /** A draw of {@code shaderObj} with {@code key}: into {@code into} when it is given (an open pass, left open), else in
+     *  a pass of its own on {@code colorView} / {@code depthView}. The pipeline is built for {@code colorFormat}. */
+    static void draw(MeshData mesh, Object shaderObj, Key key, GpuTextureView colorView, GpuTextureView depthView,
+                     RenderPass into, GpuFormat colorFormat) {
+        if (mesh == null) return;
         try (MeshData m = mesh) {
             if (shaderObj == null) {
                 LOGGER.warn("[mv] a draw with no shader set was skipped");
                 return;
             }
+            // before anything is compiled or uploaded, so the message is this one and not the encoder's
+            if (into == null) RenderPasses.requireNoOpenPass(inRenderPass(), "LegacyGl.draw");
             VertexFormat format = m.drawState().format();
             PrimitiveTopology topology = m.drawState().primitiveTopology();
             ShaderInstance own = shaderObj instanceof ShaderInstance s ? s : null;
-            GpuTexture colorTexture = target.getColorTexture();
-            if (colorTexture == null) return;
-            RenderPipeline pipeline = pipelineFor(shaderObj, format, topology, key, colorTexture.getFormat());
+            RenderPipeline pipeline = pipelineFor(shaderObj, format, topology, key, colorFormat);
             CompiledRenderPipeline compiled = compiled(pipeline, own);
             if (compiled == null) return;   // logged (or, for a vanilla shader, by the device)
-            Uploaded up = Uploaded.of(m);
+            Uploaded up = into == null ? Uploaded.of(m) : Uploaded.inPass(m);
             // 1.21.1's BufferUploader/RenderType draws called shader.apply() right before drawing and shader.clear()
             // after; a mod's ShaderInstance subclass overrides apply() to push its per-draw state (a mask, an opacity
             // written into COLOR_MODULATOR after super.apply()), so it has to run here too
@@ -392,12 +498,10 @@ public final class LegacyGl {
             }
             boolean override = own != null && own.COLOR_MODULATOR != null && own.COLOR_MODULATOR.touched();
             GpuBufferSlice transforms = transforms(own);
-            // 26.3 has no output override: the target's own views (no depth view when it has no depth)
-            GpuTextureView colorView = target.getColorTextureView();
-            GpuTextureView depthView = target.getDepthTextureView();
             java.util.List<GpuBuffer> temps = new java.util.ArrayList<>();
-            try (RenderPass pass = RenderSystem.getDevice().createCommandEncoder().createRenderPass(
-                    () -> "mv draw", colorView, Optional.empty(), depthView, OptionalDouble.empty())) {
+            RenderPass pass = into != null ? into : RenderSystem.getDevice().createCommandEncoder().createRenderPass(
+                    () -> "mv draw", colorView, Optional.empty(), depthView, OptionalDouble.empty());
+            try {
                 pass.setPipeline(compiled);
                 RenderSystem.bindDefaultUniforms(pass);
                 pass.setUniform("DynamicTransforms", transforms);
@@ -408,7 +512,7 @@ public final class LegacyGl {
                     GpuBuffer globals = own.globalsBuffer(temps);
                     if (globals != null) pass.setUniform("Globals", globals);
                 }
-                pass.setVertexBuffer(0, up.vertices().slice());
+                pass.setVertexBuffer(0, up.vertices().slice());   // the whole buffer: baseVertex places the mesh
                 var scissor = RenderSystem.getScissorStateForRenderTypeDraws();
                 if (scissor.enabled()) pass.enableScissor(scissor.x(), scissor.y(), scissor.width(), scissor.height());
                 for (int i = 0; i < 12; i++) {
@@ -420,12 +524,16 @@ public final class LegacyGl {
                             ? g.program().getProgramId() : -1, temps);
                 }
                 pass.setIndexBuffer(up.indices(), up.indexType());
-                pass.drawIndexed(up.indexCount(), 1, 0, 0, 0);
+                pass.drawIndexed(up.indexCount(), 1, up.firstIndex(), up.baseVertex(), 0);
             } finally {
-                for (GpuBuffer tb : temps) tb.close();
-                if (own != null) own.clear();
-                if (override) own.COLOR_MODULATOR.consume();   // 1.21.1 re-uploaded the default on every apply()
-                if (own != null) own.consumeBuiltIns();
+                try {
+                    if (into == null) pass.close();   // a pass handed in stays open: its owner closes it
+                } finally {
+                    for (GpuBuffer tb : temps) tb.close();
+                    if (own != null) own.clear();
+                    if (override) own.COLOR_MODULATOR.consume();   // 1.21.1 re-uploaded the default on every apply()
+                    if (own != null) own.consumeBuiltIns();
+                }
             }
         }
     }

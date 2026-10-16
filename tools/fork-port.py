@@ -1744,11 +1744,16 @@ def main():
     if a.gates == "auto":
         a.gates = gates_auto(run.tdir)
         print(f"fork-port: gates: auto -> {a.gates} ({'Gate C already recorded in GATES.md' if a.gates == 'ab' else 'no recorded Gate C pass yet: one real-client run on the initial port'})")
-    lock = load("layer_ci", "layer-ci.py").CheckoutLock(run.repo, "fork-port.py", a.target)
+    lc = load("layer_ci", "layer-ci.py")
+    lock = lc.CheckoutLock(run.repo, "fork-port.py", a.target)
     busy = lock.acquire()
     if busy:
         print(f"fork-port: {busy}")
         return 14
+    if run.env is not None and lc.LOCK_ENV in os.environ:
+        # run.env was copied before the lock was taken: the children (ci-gates.py --mc, layer-deps.py) must see the
+        # holder, or they refuse their own parent's checkout
+        run.env[lc.LOCK_ENV] = os.environ[lc.LOCK_ENV]
     try:
         return drive(run, a, skipped, todo)
     finally:
@@ -2626,6 +2631,29 @@ def self_check():
             sys.argv = real_argv
         expect(rc == 2 and not (repo / "build/.fork-port.lock").exists(),
                f"a dead holder's lock is taken over and released at the end: rc={rc}")
+    # ---- the children see the lock holder: on a layer fork they run with run.env (GRADLE_OPTS without a daemon),
+    # copied before the lock was taken; a single-version checkout's children inherit os.environ (run.env is None)
+    lc = load("layer_ci", "layer-ci.py")
+    for layer in (True, False):
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d)
+            if layer:
+                (repo / ".multiversion").mkdir()
+                (repo / ".multiversion/base.properties").write_text("mc=1.21.1\n", encoding="utf-8")
+            seen, real_drive, real_argv = {}, globals()["drive"], sys.argv
+            def fake_drive(run, *_):
+                seen["env"] = run.env
+                seen["holder"] = (run.env if run.env is not None else os.environ).get(lc.LOCK_ENV)
+                return 0
+            globals()["drive"] = fake_drive
+            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4", "--gates", "none"]
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    main()
+            finally:
+                globals()["drive"], sys.argv = real_drive, real_argv
+            expect(seen.get("holder") == str(os.getpid()) and (seen.get("env") is not None) == layer,
+                   f"{'layer' if layer else 'single-version'}: a child sees this run as the lock holder: {seen.get('holder')}")
     # ---- --direct and shared_chain: layer.py's rule and the tool's mirror of it agree
     lay = load("layer_tpl", "../templates/fork-layer/tools/layer.py")
     with tempfile.TemporaryDirectory() as d:

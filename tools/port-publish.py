@@ -24,7 +24,9 @@ A MULTI-VERSION fork (the opt-in `.multiversion/` layer, tools/make-fork-layer.p
 
 and then `publish` uploads ONE FILE PER GREEN TARGET (see publish_layer). Both are needed: the tag's commit must
 carry `.multiversion/base.properties` AND the config must have the "layer" section. A single-version fork has
-neither, and every code path below that is not named *layer* is byte-for-byte what it was.
+neither, and every code path below that is not named *layer* is byte-for-byte what it was. A layer target marked
+PREVIEW (`preview=true` in its .multiversion/targets/<t>/target.properties) is built and gated like any other but never
+published: the run lists it as "preview, not published", does not ask its gates, and never fails on it.
 
 `setup` writes that file and the project page from data the port already has (neoforge.mods.toml, the
 author's own project on Modrinth, the tested dependencies in .github/port-install.json, the fix ledgers), and
@@ -449,6 +451,12 @@ def layer_of(repo, tag, cfg):
             "commit": git(repo, "rev-parse", f"{tag}^{{commit}}").stdout.strip()}
 
 
+def layer_preview(repo, tag, t):
+    """True when target t is marked preview (`preview=true` in its target.properties at the tag): built and gated like
+    any target, but never published (issue #76). The base target has no target.properties, so it is never preview."""
+    return props_of(git(repo, "show", f"{tag}:.multiversion/targets/{t}/target.properties").stdout).get("preview", "").lower() == "true"
+
+
 def layer_chain(repo, tag, t):
     out = []
     while t and t not in out:
@@ -613,6 +621,13 @@ def publish_layer(repo, tag, cfg, release, repo_slug, info, dry=False, manual=Fa
     if not cand:
         print(f"::error::will not publish {tag}: the release holds no jar for any target of the layer")
         return 1
+    preview = [t for t in sorted(cand, key=mc_key) if t != info["base"] and layer_preview(repo, tag, t)]
+    for t in preview:       # a preview target is never published, never an error, and its gates are not asked
+        print(f"target {t}: preview, not published (preview=true in .multiversion/targets/{t}/target.properties)")
+    cand = [t for t in cand if t not in preview]
+    if not cand:
+        print(f"{tag}: every target asked is preview -- nothing to publish")
+        return 0
     runs = check_runs(repo_slug, info["commit"])
     done = published_pairs(release.get("body"), tag)
     errors, plan, dvs = [], [], {}

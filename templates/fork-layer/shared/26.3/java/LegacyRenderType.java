@@ -222,6 +222,25 @@ public class LegacyRenderType extends RenderType {
     }
 
     /**
+     * 26.3: {@link #draw(MeshData)} INTO a render pass that is already open (an in-pass {@code RenderLevelStageEvent}'s
+     * {@code getRenderPass()}, or one vanilla opened on an offscreen texture), which stays open. The pass is the caller's
+     * choice: the type's own output target ({@link #getRenderTarget}) is not consulted.
+     */
+    public void draw(MeshData mesh, com.mojang.renderpearl.api.commands.RenderPass into) {
+        setupRenderState();
+        try {
+            LegacyGl.draw(mesh, state.shader.shader(), state.key, null, null, into, LegacyGl.passColorFormat(into));
+        } finally {
+            clearRenderState();
+        }
+    }
+
+    /** Whether this type draws into the main target (no {@code setOutputState} target of its own). */
+    public boolean drawsIntoMainTarget() {
+        return state.output == null;
+    }
+
+    /**
      * 26.2's vanilla draw path (a feature renderer recording this type's geometry): the legacy pipeline, the
      * DynamicTransforms and the textures this type's shards and shader bind, taken now -- as vanilla's own
      * {@code RenderType.prepare()} snapshots its state when geometry is recorded, not when the frame draws.

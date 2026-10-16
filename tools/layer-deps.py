@@ -43,6 +43,8 @@ WHICH ONES MAY BE DROPPED
   installed into ~/.m2 by the same sha256-checked download `fetch` does (skipped when ~/.m2 already holds it; a failed
   download or a mismatch keeps the pin and says NOT installed in its row). `--dry-run` writes
   nothing, and neither builds a sibling checkout nor fetches or installs a sibling jar: its row says what it would do.
+  `fetch` (each layer CI job) fails on a sibling substitute with no pin -- one resolved from a local --port-checkout,
+  which CI cannot build -- and prints the --port-release re-resolve to run.
 
 Exit codes: 0 resolved (written unless --dry-run); 15 a required dependency has no build for the target; 2 bad input.
 Standard library only.
@@ -661,6 +663,31 @@ def self_check():
             expect(cmd_fetch(argparse.Namespace(repo=str(repo), target="1.21.4")) == 1, "fetch refuses a checksum mismatch")
             (t / "target.properties").write_text("x=1\n", encoding="utf-8")
             expect(cmd_fetch(argparse.Namespace(repo=str(repo), target="1.21.4")) == 0, "no pin: fetch is a no-op")
+            # a dependent fork (its port-ci.yml installs the sibling's release): a sibling substitute resolved from a
+            # local checkout has no pin, and CI cannot build it -- fetch fails naming the re-resolve; pinned, it passes;
+            # an unpinned NON-sibling substitute (a CurseForge build) is not fetch's business
+            (repo / ".github/workflows").mkdir(parents=True)
+            (repo / ".github/workflows/port-ci.yml").write_text(wf, encoding="utf-8")
+            unp = render_block([{"group": "com.example", "module": "lib", "to": "com.example:lib:1.0-mc1.21.4"},
+                                {"group": "curse.maven", "module": "somelib-111", "to": "curse.maven:somelib-111:5"}])
+            (t / "target.properties").write_text(unp, encoding="utf-8")
+            import contextlib, io
+            buf, n0 = io.StringIO(), len(got)
+            with contextlib.redirect_stdout(buf):
+                rc = cmd_fetch(argparse.Namespace(repo=str(repo), target="1.21.4"))
+            expect(rc == 1 and "--port-release owner/lib@" in buf.getvalue() and len(got) == n0,
+                   f"an unpinned sibling substitute fails fetch, naming --port-release ({rc}: {buf.getvalue()})")
+            expect(sibling_substitutes(repo, "1.21.4") == {"com.example:lib": "com.example:lib:1.0-mc1.21.4"},
+                   f"sibling_substitutes: {sibling_substitutes(repo, '1.21.4')}")
+            (t / "target.properties").write_text(render_block([{"group": "curse.maven", "module": "somelib-111",
+                                                                "to": "curse.maven:somelib-111:5"}]), encoding="utf-8")
+            expect(cmd_fetch(argparse.Namespace(repo=str(repo), target="1.21.4")) == 0, "a non-sibling substitute needs no pin")
+            (t / "target.properties").write_text(blk2.replace("a" * 64, good), encoding="utf-8")
+            expect(cmd_fetch(argparse.Namespace(repo=str(repo), target="1.21.4")) == 0 and len(got) == n0,
+                   "a pinned sibling: fetch passes (already in mavenLocal, not fetched again)")
+            # the shipped-jar gate boots the sibling's per-target jar beside the built one (ci-gates --mc --shipped)
+            expect(sibling_jars(repo, "1.21.4") == [str(jar)], f"sibling_jars: {sibling_jars(repo, '1.21.4')}")
+            expect(sibling_jars(repo, "1.21.5") == [], "no block for the target: no sibling jars")
             # resolve keeping a pin installs it the same way: verified download, none when mavenLocal already has it
             jar.unlink()
             ok1 = install_pin("com.example:lib", "1.0-mc1.21.4", "https://github.com/o/r/releases/download/t/x.jar " + good)
@@ -723,13 +750,64 @@ def self_check():
 PORT_JAR = re.compile(r"(?m)^port_jar\.(.+?)=(https://github\.com/[\w.-]+/[\w.-]+/releases/download/\S+\.jar) ([0-9a-f]{64})\s*$")
 
 
+SUBSTITUTE = re.compile(r"(?m)^substitute\.(.+?)=(\S+)\s*$")
+
+
+def sibling_substitutes(repo, target):
+    """{group:module: substitute coordinate} for each sibling port the target's layer-deps block swaps to that port's
+    per-target jar: a coordinate the fork's port-ci.yml installs from a sibling's release (`--dep-jar`), substituted with
+    version <v>-mc<target> (resolve_port's form). A fork with no sibling port, or a target with no block: {}."""
+    repo = pathlib.Path(repo)
+    tp = repo / ".multiversion/targets" / target / "target.properties"
+    text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
+    if BEGIN not in text or END not in text:
+        return {}
+    wf = repo / ".github/workflows/port-ci.yml"
+    ports = port_deps(wf.read_text(encoding="utf-8") if wf.is_file() else "")
+    out = {}
+    for k, coord in SUBSTITUTE.findall(text[text.index(BEGIN):text.index(END)]):
+        ga = k.replace("\\:", ":")
+        if ga in ports and coord == f"{ga}:{ports[ga]['version']}-mc{target}":
+            out[ga] = coord
+    return out
+
+
+def sibling_jars(repo, target, home=None):
+    """The sibling ports' per-target jars in mavenLocal (what `fetch`, or a local resolve, installed) for the target's
+    sibling substitutes: what a layer target's shipped-jar gate boots beside the built jar, as port-ci's `shipped jars`
+    job passes the --dep-jar jars on the port branch. A jar not in mavenLocal is left out (shipped-gate then names the
+    missing mod)."""
+    home = pathlib.Path(home) if home else pathlib.Path.home()
+    out = []
+    for ga, coord in sibling_substitutes(repo, target).items():
+        g, a, ver = coord.split(":", 2)
+        jar = home / ".m2/repository" / g.replace(".", "/") / a / ver / f"{a}-{ver}.jar"
+        if jar.is_file():
+            out.append(str(jar))
+    return out
+
+
 def cmd_fetch(a):
     """CI: install every sibling-port jar the target's block pins (port_jar.<g:a>=<url> <sha256>) into ~/.m2, checked
     against its sha256, under the version its substitute. line names. Needs no CurseForge or Modrinth access; a
-    target with no pin is a no-op. -> 0, or 1 on a checksum mismatch or a failed download."""
+    target with no sibling substitute is a no-op. A sibling substitute with NO pin (resolved from a local
+    --port-checkout) fails here, naming the re-resolve: CI has no checkout to build it from, and the build would
+    otherwise stop later on an unresolvable dependency with no word of why. -> 0, or 1 on a checksum mismatch, a failed
+    download or an unpinned sibling."""
     tp = pathlib.Path(a.repo) / ".multiversion/targets" / a.target / "target.properties"
     text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
     pins = PORT_JAR.findall(text)
+    pinned = {k.replace("\\:", ":") for k, _u, _s in pins}
+    wf = pathlib.Path(a.repo) / ".github/workflows/port-ci.yml"
+    ports = port_deps(wf.read_text(encoding="utf-8") if wf.is_file() else "")
+    unpinned = [(ga, c) for ga, c in sibling_substitutes(a.repo, a.target).items() if ga not in pinned]
+    for ga, coord in unpinned:
+        print(f"layer-deps: fetch {a.target}: {ga} is substituted with {coord} (the sibling port's {a.target} jar) but "
+              f"nothing pins where CI gets it (it was resolved from a local checkout). Re-resolve against the sibling's "
+              f"layer release and commit the target: tools/layer-deps.py resolve --repo . --target {a.target} "
+              f"--port-release {ports[ga]['repo']}@<its layer-release tag>")
+    if unpinned:
+        return 1
     for k, url, sha in pins:
         ga = k.replace("\\:", ":")
         m = re.search(r"(?m)^substitute\." + re.escape(k) + r"=" + re.escape(ga) + r":(\S+)\s*$", text)
