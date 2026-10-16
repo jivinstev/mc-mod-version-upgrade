@@ -266,12 +266,26 @@ def hash_blobs(files):
 
 
 def root_files(repo, root, work):
-    """{path: bytes} of the tree at `root`: a work tree of `repo` (work=True: tracked and untracked-not-ignored files),
-    or an exported directory (every file)."""
+    """{path: bytes} of the tree at `root`: a work tree of `repo` (work=True: tracked and untracked-not-ignored files,
+    each AS GIT WOULD STORE IT -- an unmodified file is its index blob, any other goes through git's clean filter, so a
+    Windows checkout with core.autocrlf=true reads as the blobs do, never as CRLF bytes), or an exported directory
+    (every file, the blobs' own bytes)."""
     root = pathlib.Path(root)
     if work:
-        r = git(root, "ls-files", "-z", "-c", "-o", "--exclude-standard", check=True)
-        paths = [p for p in r.stdout.split("\0") if p]
+        z = lambda *a: [x for x in git(root, *a, check=True).stdout.split("\0") if x]
+        index = {}
+        for ent in z("ls-files", "-z", "-s"):
+            meta, path = ent.split("\t", 1)
+            index[path] = meta.split()[1]
+        dirty = set(z("ls-files", "-z", "-m")) | set(z("ls-files", "-z", "-o", "--exclude-standard"))
+        blobs = {p: b for p, b in index.items() if p not in dirty and (root / p).is_file()}
+        rest = sorted(p for p in dirty if (root / p).is_file())
+        if rest:       # the clean form of an edited or new file: hash-object with the path's filters (written: catable)
+            r = subprocess.run(["git", "-C", str(root), "hash-object", "-w", "--stdin-paths"], input="".join(f"{x}\n" for x in rest),
+                               capture_output=True, text=True, encoding="utf-8", check=True)
+            blobs.update(zip(rest, r.stdout.split()))
+        data = cat_blobs(root, blobs.values())
+        return {p: data[b] for p, b in sorted(blobs.items())}
     else:
         paths = [p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and ".git" not in p.relative_to(root).parts]
     out = {}
@@ -907,14 +921,17 @@ def library_tested(repo, root, t, ref, work, files):
 # ---------------------------------------------------------------- migration: a layer fork -> version branches
 
 class Layer:
-    """The layer at one commit, checked out in a scratch worktree (its own .multiversion/tools/layer.py must run).
-    Removed with close(); the person's checkout is never touched."""
+    """The layer at one commit, written into a scratch directory from its blobs (its own .multiversion/tools/layer.py
+    must run there): the blobs' bytes, never a checkout's, so core.autocrlf or an eol attribute cannot change what is
+    prepared and committed. checkout() gives a git worktree of it for the layer's own done check (it needs git),
+    made with line-ending conversion off. close() removes both; the person's checkout is never touched."""
 
     def __init__(self, repo, commit, scratch):
         self.repo, self.commit = pathlib.Path(repo), commit
         self.dir = pathlib.Path(scratch) / f"layer-{commit[:12]}"
+        self.wt = None
         if not self.dir.is_dir():
-            git(repo, "worktree", "add", "--detach", "--force", str(self.dir), commit, check=True)
+            export(repo, commit, self.dir)
         self.mv = self.dir / ".multiversion"
         spec = importlib.util.spec_from_file_location(f"layer_{commit[:12]}", self.mv / "tools/layer.py")
         sys.dont_write_bytecode = True
@@ -922,8 +939,17 @@ class Layer:
         spec.loader.exec_module(self.lp)
         self.base = parse_props(read_file(self.mv / "base.properties"))
 
+    def checkout(self):
+        if self.wt is None:
+            self.wt = self.dir.parent / f"{self.dir.name}-wt"
+            git(self.repo, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "worktree", "add", "--detach", "--force",
+                str(self.wt), self.commit, check=True)
+        return self.wt
+
     def close(self):
-        git(self.repo, "worktree", "remove", "--force", str(self.dir))
+        if self.wt is not None:
+            git(self.repo, "worktree", "remove", "--force", str(self.wt))
+            shutil.rmtree(self.wt, ignore_errors=True)
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def targets(self):
@@ -1466,7 +1492,7 @@ def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None,
             bad += bool(diffs)
             done = target_done(repo, t)
             try:
-                layer_done = fp().target_done(lay.dir, t, write=False, prepare=True)
+                layer_done = fp().target_done(lay.checkout(), t, write=False, prepare=True)
             except Exception as e:      # noqa: BLE001
                 layer_done = [f"(the layer's own check failed: {e})"]
             row.update(result="made", commit=c2, migration_commit=c1, identical=not diffs, diffs=diffs[:20],
@@ -1490,7 +1516,6 @@ def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None,
     finally:
         if lay is not None:
             lay.close()
-        git(repo, "worktree", "prune")
         shutil.rmtree(scratch, ignore_errors=True)
 
 
@@ -1524,7 +1549,6 @@ def verify(repo, layer_ref=None, targets=None, tip=False, say=print):
         return 1 if bad else 0
     finally:
         lay.close()
-        git(repo, "worktree", "prune")
         shutil.rmtree(scratch, ignore_errors=True)
 
 
@@ -2446,6 +2470,17 @@ def self_check():
         expect(rc == 2 and "nothing to migrate" in out and gs("for-each-ref") == refs and not (sv / REC).exists()
                and checkout_version(sv) is None,
                f"single-version fork: migrate refuses (exit 2), no branch, no .port/: {out}")
+    if not os.environ.get("FB_SELF_CHECK_CRLF"):
+        # the same checks with core.autocrlf=true (a Windows checkout's default): a version branch checked out with CRLF
+        # line endings must read as its blobs (root_files), and a layer's prepare must see the blobs' bytes (Layer)
+        with tempfile.TemporaryDirectory() as d:
+            cfg = pathlib.Path(d) / "gitconfig"
+            cfg.write_text("[core]\n\tautocrlf = true\n[user]\n\tname = a\n\temail = a@b\n", encoding="utf-8")
+            r = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "--self-check"], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               env={**os.environ, "GIT_CONFIG_GLOBAL": str(cfg), "FB_SELF_CHECK_CRLF": "1"})
+            expect("self-check: OK" in r.stdout, "under core.autocrlf=true: " + " | ".join(
+                l for l in r.stdout.splitlines() if l.startswith("FAIL"))[:1500])
     print("self-check:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
