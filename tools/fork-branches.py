@@ -650,6 +650,9 @@ def review_items(repo, root, t, ref, work, files=None, mechanical=None):
     props = info(root, t)
     helpers = helper_blobs(root, t)
     mech = mechanical if mechanical is not None else mechanical_files(repo, root, t, ref, files)
+    own, strip = None, props.get("strip_onlyin") == "true"
+    pr = port_ref_of(repo, root, t, ref)
+    authors = set(tree_entries(repo, pr, "src")) if pr else set()
     items = set()
     groups = {}
     for p in sorted(set(blobs) | set(base)):
@@ -657,8 +660,8 @@ def review_items(repo, root, t, ref, work, files=None, mechanical=None):
             continue
         if p in base and base[p][1] == blobs[p]:
             continue
-        if p not in base and p.endswith(".java"):
-            continue
+        if p.endswith(".java") and p not in authors:
+            continue        # a class the authors do not have (a helper, an overlay-only file): no counterpart to read
         if helpers.get(p) == blobs[p] or p in mech:
             continue
         if p in base:
@@ -668,6 +671,14 @@ def review_items(repo, root, t, ref, work, files=None, mechanical=None):
                 base_data[p] = cat_blobs(repo, [base[p][1]])[base[p][1]]
             if derived_ok(p, base_data[p], files[p], props):
                 continue
+            if re.match(r"^src/[^/]+/java/.+\.java$", p):
+                # the parent's file through the rows this version adds (and @OnlyIn stripped from 1.21.6): an inherited
+                # overlay the version's rows renamed, never a change of its own -- the layer asked no row for it either
+                if own is None:
+                    own = rules_of(own_table(reader_of_root(root), t, pv))
+                text = apply_rules(base_data[p].decode("utf-8", "surrogateescape"), own)
+                if (ONLYIN.sub("", text) if strip else text).encode("utf-8", "surrogateescape") == files[p]:
+                    continue
         m = re.match(r"^(src/[^/]+)/resources/(.+)$", p)
         if m:
             groups.setdefault(m.group(1), []).append(("resources/" + m.group(2), blobs[p]))
@@ -939,6 +950,22 @@ class Layer:
             raise RuntimeError(f"layer.py prepare --target {t} --set {sset} failed: {(r.stdout + r.stderr).strip()[-600:]}")
 
 
+def layer_mixins(lay, t):
+    """(adds, removes) {config: {array: [class]}} the layer at that commit applies to t: its own layer.py's mixin_set(),
+    or, for a layer.py older than it, every mixin_add of the chain (farthest first), which is all such a layer read."""
+    if hasattr(lay.lp, "mixin_set"):
+        return lay.lp.mixin_set(t)
+    adds = {}
+    for v in reversed(lay.chain(t)):
+        for k, val in sorted(lay.props(v).items()):
+            if k.startswith("mixin_add."):
+                for array, c in mixin_spec(val):
+                    lst = adds.setdefault(k[len("mixin_add."):], {}).setdefault(array, [])
+                    if c not in lst:
+                        lst.append(c)
+    return adds, {}
+
+
 def ordered_targets(lay, only=None):
     """The layer's targets, each after the target it inherits (its parent's branch must exist first)."""
     names = lay.targets()
@@ -1046,7 +1073,7 @@ def expected_tree(lay, t, parent, port_commit, parent_files=None):
             files[p] = at.read_bytes()
             notes.append(f"{t}: the target's access transformer written to {p} too (the authors' build names it)")
     # the edits layer.gradle made at processResources: mixin configs, mods.toml ranges
-    adds, removes = lay.lp.mixin_set(t)
+    adds, removes = layer_mixins(lay, t)
     deltas = {}
     for p in sorted(files):
         name = p.rsplit("/", 1)[-1]
@@ -1268,7 +1295,7 @@ def verify_target(lay, t, branch_ref, parent, port_commit, parent_files=None):
     have = {p: d for p, d in have.items() if not p.startswith(REC + "/") or p == f"{REC}/branch.gradle"}
     want = {p: d for p, d in want.items() if not p.startswith(REC + "/") or p == f"{REC}/branch.gradle"}
     diffs = compare_trees(want, have)
-    adds, removes = lay.lp.mixin_set(t)
+    adds, removes = layer_mixins(lay, t)
     for cfg in sorted(set(adds) | set(removes)):
         for p in [p for p in have if p.rsplit("/", 1)[-1] == cfg and p.startswith("src/")]:
             src = next((lay.mv / "targets" / v / "resources" / p.split("/resources/", 1)[1] for v in lay.chain(t)
@@ -1276,6 +1303,8 @@ def verify_target(lay, t, branch_ref, parent, port_commit, parent_files=None):
                         (lay.mv / "targets" / v / "resources" / p.split("/resources/", 1)[1]).is_file()), lay.dir / p)
             if not src.is_file():
                 continue
+            if not hasattr(lay.lp, "apply_mixins"):
+                continue                # an older layer.py: the arrays were compared byte for byte above
             layer_arrays = lay.lp.apply_mixins(json.loads(read_file(src)), cfg, adds, removes)
             got = json.loads(have[p].decode("utf-8"))
             mine = {k: sorted(v) for k, v in got.items() if isinstance(v, list)}
@@ -1319,7 +1348,7 @@ def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None,
             say(f"fork-branches: {e}"); return 2
         say(f"fork-branches: layer {ref} at {lc[:12]}, port {pb} at {port_commit[:12]}; versions in chain order: "
             f"{' -> '.join(order)}" + (" (dry run: nothing is written)" if dry_run else ""))
-        made, expected_of, bad = {}, {}, 0
+        made, expected_of, bad, planned = {}, {}, 0, set()
         for t in order:
             inh = lay.props(t).get("inherits")
             parent = inh
@@ -1354,8 +1383,12 @@ def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None,
             if dry_run:
                 n_src = sum(1 for p in want if p.startswith("src/"))
                 rec = sorted(p.rsplit("/", 1)[-1] for p in want if p.startswith(f"{REC}/{t}/"))
-                say(f"fork-branches: {t}: would make {branch_name(t)} from {row['parent']} ({start[:12]}): {n_src} source "
+                rec += ["MIGRATED.json", "INVENTORY-CHECK.json (fresh)"] + \
+                    (["REVIEW.md (the layer's verdicts)"] if (lay.mv / "targets" / t / "REVIEW.md").is_file() else [])
+                at = f"{start[:12]}" if not inh or inh not in planned else "its tip once made"
+                say(f"fork-branches: {t}: would make {branch_name(t)} from {row['parent']} ({at}): {n_src} source "
                     f"file(s) from the layer's prepare, records {', '.join(rec)}")
+                planned.add(t)
                 made[t] = start
                 row["result"] = "planned"
                 report["targets"].append(row)
@@ -2202,6 +2235,13 @@ def _fixture(d):
     w(".multiversion/targets/1.21.4/resources/assets/examplemod/items/a.json", '{"model": {"type": "minecraft:model", "model": "examplemod:item/a"}}\n')
     w(".multiversion/targets/1.21.4/renames.tsv", "member:newCall\tnewerCall\n")
     w(".multiversion/targets/1.21.5/java/com/example/mod/Over.java", "package com.example.mod;\nimport new.Thing;\npublic class Over { Thing t; int keep = 5; }\n")
+    # an overlay-only class (the authors have none) changed at a later target, and @OnlyIn stripped at 1.21.5 from an
+    # overlay it inherits: neither is a review row on the layer, so neither may be one on the branch
+    w(".multiversion/targets/1.21.3/java/com/example/mod/OnlyHere.java", "package com.example.mod;\nclass OnlyHere { int v = 3; }\n")
+    w(".multiversion/targets/1.21.5/java/com/example/mod/OnlyHere.java", "package com.example.mod;\nclass OnlyHere { int v = 5; }\n")
+    w(".multiversion/targets/1.21.4/cf/java/com/example/mod/cf/Cf.java",
+      "package com.example.mod.cf;\nimport new.Thing;\nclass Cf {\n    @OnlyIn(Dist.CLIENT)\n    Thing t;\n}\n")
+    with open(mv / "targets/1.21.5/target.properties", "a", encoding="utf-8") as f: f.write("strip_onlyin=true\n")
     run(str(ROOT / "tools/layer-inventory.py"), "build", "--repo", str(r))
     g("add", "-A"); g("commit", "-qm", "layer: three targets")
     return r, g, run
@@ -2281,13 +2321,19 @@ def self_check():
                and LAYER_HOOK_LINE not in f5["build.gradle"].decode() and b"minecraft_version=1.21.5" in f5["gradle.properties"],
                "a version branch carries no .multiversion/, the branch hook instead of the layer's, and its own versions")
         expect(b"keep = 5" in f5["src/main/java/com/example/mod/Over.java"] and b"new.Thing" in f5["src/main/java/com/example/mod/ExampleMod.java"]
-               and b"c3" in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b'"[1.21.5,1.21.6)"' in f5["src/main/resources/META-INF/neoforge.mods.toml"]
+               and b"@OnlyIn" not in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b"Thing t;" in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b'"[1.21.5,1.21.6)"' in f5["src/main/resources/META-INF/neoforge.mods.toml"]
                and b"BMixin" in f5["src/main/resources/examplemod.mixins.json"] and b"v = 4" in f5["src/main/java/com/example/mod/mv/Helper.java"]
                and "src/main/resources/assets/examplemod/items/a.json" in f5,
                "1.21.5's tree: its own overlay, the rows, the cf set's inherited overlay, the toml range, the inherited mixin, the nearest helper, the inherited resource")
         expect(all(p in f5 for p in (".port/1.21.5/GATES.md", ".port/1.21.5/REVIEW.md", ".port/1.21.5/MIGRATED.json",
                                     ".port/1.21.5/INVENTORY-CHECK.json", ".port/1.21.5/TEST-ITEMS.md", ".port/1.21.4/GATES.md")),
                "records under .port/<version>/ (the lower versions' as carried copies)")
+        with tempfile.TemporaryDirectory() as e:
+            items = review_items(r, export(r, b5, pathlib.Path(e) / "t"), "1.21.5", b5, False)
+        expect(("changed", "src/main/java/com/example/mod/Over.java") in items
+               and not any("OnlyHere" in f or "Cf.java" in f for _k, f in items),
+               f"1.21.5's review rows: its own overlay of an authors' file; not an overlay-only class, not the parent's file "
+               f"with @OnlyIn stripped: {items}")
         rc, out = _quiet(verify, r)
         expect(rc == 0 and out.count("byte-identical") == 3, f"verify: the layer's prepare run again equals every branch: {out[-300:]}")
         rc, out = _quiet(migrate, r)
