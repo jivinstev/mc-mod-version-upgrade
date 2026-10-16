@@ -33,7 +33,9 @@ Stages, each logged as one line and skipped with a reason when it does not apply
   gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases. After a green run, the
            mod's own log files (harness/run/logs, minus vanilla's) are compared with the inherited target's last gate run: a file
            it wrote there and not here is residue (exit 11) -- a subsystem stopped running (CATALOG X47)
-  cost     port-cost.py --target <t> --since <start of this port> appended to targets/<t>/COST.md
+  cost     port-cost.py --target <t> appended to targets/<t>/COST.md: only the requests that worked on <t> (one target per
+           request, by what its tool calls touched; shared work on its own line), from where the target's last record ended
+           (no record: all of them on this machine), plus the loop workers' own recorded dollars when the loop ran
 
 THE STOP CONTRACT. When a stage cannot finish this does not hand the rest to anyone silently: it prints a
 STOPPED block and writes the RESIDUE REPORT (into --json and .multiversion/targets/<t>/RESIDUE.md): the
@@ -1473,16 +1475,47 @@ class Run:
         modid = self.modid()
         if not modid:
             return {"skipped": "no mod id"}
-        since = self.summary["started"]
-        r = self.sh([self.py, str(ROOT / "tools/port-cost.py"), modid, "--path", str(self.repo), "--target", self.t,
-                     "--since", since, "--print"])
-        if r.returncode != 0 or not (r.stdout or "").strip():
-            return {"skipped": "no transcripts for this checkout (port-cost exit %d)" % r.returncode}
         f = self.tdir / "COST.md"
         old = f.read_text(encoding="utf-8") if f.is_file() else ""
-        f.write_text(old.rstrip("\n") + ("\n\n" if old else "") + f"## fork-port.py run since {since}\n\n" + r.stdout.strip() + "\n",
-                     encoding="utf-8")
+        # port-cost charges each request to one target by what it touched, so the window need not be this run's: it
+        # starts where the target's last record ended (none: every request on this machine that worked on the target),
+        # which counts a fixer's own work between runs once, and never a resumed run's requests twice
+        since = cost_since(old)
+        cmd = [self.py, str(ROOT / "tools/port-cost.py"), modid, "--path", str(self.repo), "--target", self.t, "--print"]
+        r = self.sh(cmd + (["--since", since] if since else []))
+        if r.returncode != 0 or not (r.stdout or "").strip():
+            return {"skipped": "no transcripts for this checkout (port-cost exit %d)" % r.returncode}
+        extra = loop_spend_line(loop_events(self.work / "file-loop.jsonl")) if self.summary["stages"].get("loop", {}).get("this_run") else ""
+        f.write_text(old.rstrip("\n") + ("\n\n" if old else "") + f"## fork-port.py run since {self.summary['started']}\n\n"
+                     + r.stdout.strip() + "\n" + extra, encoding="utf-8")
         return {"done": f"appended to {f.relative_to(self.repo)}"}
+
+
+def cost_since(cost_md):
+    """Where the next COST.md record starts: just after the last record's `- window: ... to <end>` (port-cost.py's exact
+    end), or a minute after an older record's `(<start> to <end>)`; None when the target has no record yet."""
+    w = re.findall(r"(?m)^- window: requests .*? to (\d{4}-\d\d-\d\dT[\d:.]+Z)", cost_md)
+    o = re.findall(r"\((\d{4}-\d\d-\d\dT\d\d:\d\dZ) to (\d{4}-\d\d-\d\dT\d\d:\d\dZ)\)", cost_md)
+    if w:
+        end, step = w[-1], datetime.timedelta(milliseconds=1)
+    elif o:
+        end, step = o[-1][1], datetime.timedelta(minutes=1)
+    else:
+        return None
+    t = datetime.datetime.fromisoformat(end.replace("Z", "+00:00")) + step
+    return t.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def loop_spend_line(events):
+    """The compile loop's workers' own recorded dollars (file-loop.jsonl), as one line: the most exact figure there is.
+    Their transcripts are among those port-cost.py priced above, so it is a part of that total, not added to it."""
+    w = [e for e in events if e.get("event") == "worker"]
+    if not w:
+        return ""
+    usd = sum(e.get("usd") or 0 for e in w)
+    est = sum(1 for e in w if e.get("usd_unknown"))
+    return (f"- of which this run's compile-loop workers recorded ${usd:.2f} over {len(w)} worker(s) (file-loop.jsonl"
+            + (f"; {est} with no result, charged an estimate" if est else "") + ") -- their transcripts, when on this machine, are among those priced above, so it is not added\n")
 
 
 def carry_over(old_stages, skipped):
@@ -1626,6 +1659,17 @@ def self_check():
         nonlocal ok
         if not c:
             ok = False; print("FAIL:", msg)
+    # cost: each record starts where the last one ended, so a resumed run never counts a request twice
+    expect(cost_since("") is None, "a target with no COST.md record counts every request that worked on it")
+    expect(cost_since("## r\n- **≈ $1.00** over 1 session(s): 0.1 h active, 0.2 h wall (2026-10-01T10:00Z to 2026-10-01T11:30Z)\n")
+           == "2026-10-01T11:31:00.000Z", "an older record (no window line) ends a minute after its last request")
+    expect(cost_since("## a\n- window: requests from x to 2026-10-01T09:00:00.000Z (r)\n## b\n- (2026-10-01T10:00Z to 2026-10-01T12:00Z)\n"
+                      "- window: requests from 2026-10-01T09:00:00.001Z to 2026-10-02T08:15:30.250Z (r)\n")
+           == "2026-10-02T08:15:30.251Z", "the next record starts 1 ms after the last record's exact window end")
+    ln = loop_spend_line([{"event": "start"}, {"event": "worker", "usd": 0.5}, {"event": "worker", "usd": 0.25, "usd_unknown": True},
+                          {"event": "multi-rejected", "multi_usd": 9}])
+    expect("$0.75 over 2 worker(s)" in ln and "1 with no result" in ln and loop_spend_line([{"event": "start"}]) == "",
+           f"the loop workers' own recorded dollars are one line, and none without workers: {ln!r}")
     # stage selection
     expect(hit_cap("> Task :compileJava\n1,000 errors\n") and hit_cap("1000 errors\n") and not hit_cap("999 errors\n")
            and not hit_cap("21,000 errors\n"), "hit_cap reads javac's capped total, with or without the comma")

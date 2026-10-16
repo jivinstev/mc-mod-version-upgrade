@@ -255,8 +255,12 @@ is enough), then runs the gates, and the GATES.md the run writes is committed af
    that degrades silently). A harness compile error on a new target is fixed once in
    `templates/upstream-harness/versions/<t>.renames.tsv`, for every fork.
 7. **Record the cost** (required): `python3 tools/port-cost.py <modid> --path DIR --target <t> --since <start> --print` for the
-   target's work window; put the block in `.multiversion/targets/<t>/COST.md` with what the window covered
-   (port only, or port + tooling) and the model mix. The figure is what tells us whether the library and the
+   target's work window (`fork-port.py`'s cost stage does this itself, starting where the target's last record ended);
+   put the block in `.multiversion/targets/<t>/COST.md` with what the window covered (port only, or port + tooling)
+   and the model mix. With `--target`, each request is charged to one target at most, by what its own tool calls
+   touched (a subagent or loop worker by its prompt); this checkout's shared work and other targets' are listed on the
+   `- attribution:` line, not in the total, so concurrent targets' and forks' records add up instead of each holding
+   the whole session. The figure is what tells us whether the library and the
    cheaper models are making targets cheaper.
 8. **Harvest** (required, before calling the target done): move every row and helper that is not specific to this
    mod into `templates/fork-layer/shared/<t>/` (`@MVPKG@`/`@MODID@` placeholders), re-sync the fork and show its

@@ -274,6 +274,10 @@ out="$(python3 tools/file-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching, rows_first (layer mode: a worker row is tried before its overlay is kept; a dropped overlay's directory is recreated)" \
   || bad "file-loop self-check: $out"
 
+out="$(python3 tools/port-cost.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "port-cost: a session driving two layer targets and a second fork (one subagent per target) is charged once -- each target only its own requests, the parts sum to the session; a single-version checkout and a layer checkout without --target are counted whole, as before" \
+  || bad "port-cost self-check: $out"
+
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gate loop: the deepest load-crash cause and the mod's own frames go to the worker" \
   || bad "gate-loop self-check: $out"
