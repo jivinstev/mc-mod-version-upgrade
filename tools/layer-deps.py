@@ -198,8 +198,11 @@ def _fb():
 def branch_target(repo, target):
     """True when `repo` is checked out on version branch `target` (not a layer)."""
     repo = pathlib.Path(repo)
-    return not (repo / ".multiversion/base.properties").is_file() and (repo / ".port" / target / "branch.properties").is_file() \
-        and _fb().checkout_version(repo) == target
+    if (repo / ".multiversion/base.properties").is_file() or not (repo / ".port" / target / "branch.properties").is_file():
+        return False
+    gp = repo / "gradle.properties"        # read here, not through fork-branches.py: a fork's CI kit carries this file only
+    m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
+    return bool(m) and m.group(1) == target
 
 
 def target_dir(repo, target):
