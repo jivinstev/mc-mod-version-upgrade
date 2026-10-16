@@ -1491,6 +1491,246 @@ def verify(repo, layer_ref=None, targets=None, tip=False, say=print):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+
+# ---------------------------------------------------------------- cascade: merge a lower branch up the chain
+
+def chain_read(read, t):
+    """chain() through a reader (a tree that is not on disk)."""
+    out, v = [], t
+    while v and v not in out:
+        out.append(v)
+        p = parse_props(read(f"{REC}/{v}/{BRANCH_PROPS}"))
+        v = p.get("parent_minecraft_version") if p.get("parent") != p.get("port_branch") else None
+    return out
+
+
+def versions_to(repo, to):
+    """(port branch name, [versions oldest first]) of `to`'s chain, read from its branch tip."""
+    c = resolve_branch(repo, branch_name(to))
+    if not c:
+        raise ValueError(f"no branch {branch_name(to)}")
+    read = reader_of_ref(repo, c)
+    ch = chain_read(read, to)
+    if not ch or not read(f"{REC}/{to}/{BRANCH_PROPS}"):
+        raise ValueError(f"{branch_name(to)} is not a version branch (no {REC}/{to}/{BRANCH_PROPS})")
+    port = parse_props(read(f"{REC}/{ch[-1]}/{BRANCH_PROPS}")).get("port_branch")
+    return port, ch[::-1]
+
+
+def blob_at(repo, ref, path):
+    r = git(repo, "show", f"{ref}:{path}", binary=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+BRANCH_OWNED = (".github/workflows/port-ci.yml",)      # generated per branch (tools/port-ci.py on that branch)
+
+
+def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, say=print):
+    """Merge `parent_ref` into version t's branch checked out at `work` (a clean worktree), with the rows as a tool:
+    every .java file the merge changed that both sides had from the rows alone (the parent's equal to its rows over
+    the port branch it now carries, t's equal to t's rows over the port branch it carried) is re-made from the port
+    branch's new file through t's rows; a file t dropped stays dropped; a conflicting derived file (gradle.properties,
+    mods.toml, a mixin config) is the parent's with t's build keys applied; t's own generated workflow is kept. Any
+    other conflict aborts the merge. -> (ok, notes, unresolved files)."""
+    notes = []
+    pre = git(work, "rev-parse", "HEAD", check=True).stdout.strip()
+    port_tip = resolve_branch(repo, port_name)
+    msg = (f"Merge {parent_name} into {branch_name(t)} (tools/fork-branches.py cascade)\n\n"
+           f"Each file the rows alone made was re-made from {port_name}'s new code through {t}'s rows." + TRAILER)
+    r = git(work, "merge", "--no-ff", "--no-commit", "-m", msg, parent_ref)
+    if r.returncode not in (0, 1):
+        return False, [f"git merge failed: {(r.stdout + r.stderr).strip()[-300:]}"], []
+    conflicted = {x for x in git(work, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if x}
+    changed = {x for x in git(work, "diff", "--name-only", pre).stdout.splitlines() if x} | conflicted
+    port_new = parent_ref if parent_version is None else git(repo, "merge-base", parent_ref, port_tip).stdout.strip()
+    port_old = git(repo, "merge-base", pre, port_tip).stdout.strip()
+    java = sorted(f for f in changed if re.match(r"^src/[^/]+/java/.+\.java$", f))
+    resolved = set()
+    if java:
+        read_new = reader_of_root(work) if not conflicted & {f for f in changed if f.startswith(REC + "/")} else reader_of_ref(repo, pre)
+        ch_new = chain_read(read_new, t)
+        rows_new = rows_tree(repo, port_new, read_new, t, ch_new)
+        read_old = reader_of_ref(repo, pre)
+        rows_old = rows_tree(repo, port_old, read_old, t, chain_read(read_old, t))
+        if parent_version is not None:
+            read_p = reader_of_ref(repo, parent_ref)
+            rows_p = rows_tree(repo, port_new, read_p, parent_version, chain_read(read_p, parent_version))
+        remade = 0
+        for f in java:
+            t_pre, p_new = blob_at(repo, pre, f), blob_at(repo, parent_ref, f)
+            if t_pre is None and blob_at(repo, port_old, f) is not None:
+                if (work / f).exists() or f in conflicted:
+                    git(work, "rm", "-q", "-f", "--", f)
+                resolved.add(f)
+                notes.append(f"{f}: dropped on {t} (absent there, present on {port_name}): kept dropped")
+                continue
+            p_mech = parent_version is None or p_new == rows_p.get(f)
+            t_mech = t_pre == rows_old.get(f)
+            if p_mech and t_mech:
+                new = rows_new.get(f)
+                if new is None:
+                    if (work / f).exists() or f in conflicted:
+                        git(work, "rm", "-q", "-f", "--", f)
+                else:
+                    (work / f).parent.mkdir(parents=True, exist_ok=True)
+                    (work / f).write_bytes(new)
+                    git(work, "add", "--", f)
+                resolved.add(f)
+                remade += 1
+        if remade:
+            notes.append(f"{remade} file(s) the rows alone make re-made from {port_name}'s code through {t}'s rows")
+    props = parse_props(read_text(work / REC / t / BRANCH_PROPS))
+    for f in sorted(conflicted - resolved):
+        theirs = blob_at(repo, parent_ref, f)
+        name = f.rsplit("/", 1)[-1]
+        if theirs is None:
+            continue
+        text = theirs.decode("utf-8", "surrogateescape")
+        new = None
+        if f == "gradle.properties":
+            new = set_props_text(text, {k[5:]: v for k, v in props.items() if k.startswith("prop.")})
+        elif name == "neoforge.mods.toml" and f.startswith("src/"):
+            new = toml_rewrite(text, {k[5:]: v for k, v in props.items() if k.startswith("toml.")})
+        elif f.startswith("src/") and name.endswith(".json") and (f"mixin_add.{name}" in props or f"mixin_remove.{name}" in props):
+            try:
+                new = json_like(mixin_edit(json.loads(text), mixin_spec(props.get(f"mixin_add.{name}")),
+                                           mixin_spec(props.get(f"mixin_remove.{name}"))), text)
+            except ValueError:
+                new = None
+        if new is not None:
+            (work / f).write_text(new, encoding="utf-8", errors="surrogateescape")
+            git(work, "add", "--", f)
+            resolved.add(f)
+            notes.append(f"{f}: {parent_name}'s, with {t}'s build keys")
+    for f in BRANCH_OWNED:
+        if f in changed:
+            if blob_at(repo, pre, f) is not None:
+                git(work, "checkout", pre, "--", f)
+            else:
+                git(work, "rm", "-q", "-f", "--", f)
+            resolved.add(f)
+            notes.append(f"{f}: {t}'s own kept (regenerate it on {branch_name(t)} with tools/fork-branches.py ci if {parent_name} "
+                         "changed it on purpose)")
+    left = sorted(conflicted - resolved)
+    if left:
+        git(work, "merge", "--abort")
+        return False, notes, left
+    r = git(work, "commit", "-q", "--no-edit", "-m", msg)
+    if r.returncode:
+        if "nothing to commit" in r.stdout + r.stderr:
+            return True, notes + ["nothing changed"], []
+        return False, notes + [f"commit failed: {(r.stdout + r.stderr).strip()[-200:]}"], []
+    return True, notes, []
+
+
+def worktree_for(repo, t):
+    """A clean checkout of version t's branch: the person's checkout when it is on that branch and clean, else a
+    worktree under build/fork-branches/ (kept between runs, so its Gradle caches stay warm). -> (path, why not)."""
+    repo = pathlib.Path(repo).resolve()
+    b = branch_name(t)
+    cur = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if cur == b:
+        if git(repo, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return None, f"the checkout is on {b} with uncommitted changes: commit or stash them first"
+        return repo, None
+    w = repo / "build" / "fork-branches" / t
+    if w.is_dir() and (w / ".git").exists():
+        if git(w, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return None, f"the worktree {w} has uncommitted changes"
+        if git(w, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() != b:
+            r = git(w, "checkout", "-q", b)
+            if r.returncode:
+                return None, f"cannot check out {b} in {w}: {r.stderr.strip()[-200:]}"
+        return w, None
+    if not git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{b}").stdout.strip():
+        o = resolve_branch(repo, b)
+        if not o:
+            return None, f"no branch {b}"
+        git(repo, "branch", b, o)
+    w.parent.mkdir(parents=True, exist_ok=True)
+    r = git(repo, "worktree", "add", str(w), b)
+    if r.returncode:
+        return None, f"cannot make a worktree for {b}: {r.stderr.strip()[-300:]}"
+    return w, None
+
+
+def run_gates(work, t, gates, say=print):
+    """The no-model gates on version t's checkout: tools/fork-port.py from the measure stage with no budget."""
+    if gates == "none":
+        return 0
+    cmd = [sys.executable, str(ROOT / "tools/fork-port.py"), "--repo", str(work), "--target", t, "--from-stage", "measure",
+           "--budget", "0", "--max-errors", "0"]
+    cmd += ["--to-stage", "audit"] if gates == "compile" else ["--gates", gates]
+    say(f"fork-branches: cascade: {t}: {' '.join(cmd[1:])}")
+    return subprocess.run(cmd).returncode
+
+
+def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None):
+    """`FROM..TO`: merge FROM's branch into the next branch up TO's chain, then that one into the next, ... up to TO,
+    running the no-model gates on each branch a merge changed; stop at the first conflict or red branch. FROM is a
+    version or the port branch (its name, or `port`). Pushes nothing. -> 0, 1 (stopped), 2 (bad input)."""
+    repo = pathlib.Path(repo).resolve()
+    frm, sep, to = spec.partition("..")
+    try:
+        if not sep or not frm or not to:
+            raise ValueError(f"cascade wants FROM..TO (e.g. neoforge-1.21.1..26.3 or 1.21.3..1.21.5), not {spec!r}")
+        port, versions = versions_to(repo, to)
+        nodes = [None] + versions
+        if frm in ("port", port):
+            i = 0
+        elif frm in versions:
+            i = nodes.index(frm)
+        elif frm.startswith("neoforge-") and frm[len("neoforge-"):] in versions:
+            i = nodes.index(frm[len("neoforge-"):])
+        else:
+            raise ValueError(f"{frm} is not on {to}'s chain ({port} -> {' -> '.join(versions)})")
+    except ValueError as e:
+        say(f"fork-branches: {e}"); return 2
+    runner = runner or run_gates
+    rows, merged = [], []
+    for k in range(i, len(nodes) - 1):
+        pv, t = nodes[k], nodes[k + 1]
+        pname = port if pv is None else branch_name(pv)
+        pref, tref = resolve_branch(repo, pname), resolve_branch(repo, branch_name(t))
+        if not pref or not tref:
+            say(f"fork-branches: no branch {pname if not pref else branch_name(t)}"); return 2
+        if git(repo, "merge-base", "--is-ancestor", pref, tref).returncode == 0:
+            rows.append((t, "up to date", ""))
+            continue
+        if dry_run:
+            n = git(repo, "rev-list", "--count", f"{tref}..{pref}").stdout.strip()
+            rows.append((t, f"would merge {pname} ({n} commit(s))", ""))
+            continue
+        work, why = worktree_for(repo, t)
+        if work is None:
+            rows.append((t, "STOPPED", why)); break
+        ok, notes, left = merge_up(repo, work, t, pname, pref, port, pv, say)
+        for n in notes:
+            say(f"fork-branches: cascade: {t}: {n}")
+        if not ok:
+            rows.append((t, "STOPPED: conflict", ", ".join(left[:6]) or "; ".join(notes[-1:])))
+            say(f"fork-branches: cascade STOPPED at {t}: {pname} does not merge into {branch_name(t)} by itself -- "
+                f"{', '.join(left[:6])}. Merge it by hand (git checkout {branch_name(t)} && git merge {pname}), resolve, "
+                f"commit, then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}")
+            break
+        merged.append(t)
+        rc = runner(work, t, gates, say)
+        if rc not in (0, 17, UNDONE_EXIT):
+            rows.append((t, f"merged, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
+            say(f"fork-branches: cascade STOPPED at {t}: red after the merge -- start ONE fixer there (python3 tools/fork-port.py "
+                f"--repo {work} --target {t} --from-stage measure, with a budget), commit, then cascade {t}..{to}")
+            break
+        rows.append((t, "merged" + ("" if gates == "none" else f", gates exit {rc}"), ""))
+    say("")
+    say("| version | result | detail |")
+    say("|---|---|---|")
+    for t, res, det in rows:
+        say(f"| {t} | {res} | {det or '-'} |")
+    if merged:
+        say(f"fork-branches: nothing was pushed: git push origin {' '.join(branch_name(t) for t in merged)}")
+    return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED")) else 0
+
+
 # ---------------------------------------------------------------- CLI
 
 def main():
@@ -1504,7 +1744,13 @@ def main():
     v = sub.add_parser("verify"); v.add_argument("--repo", required=True); v.add_argument("--layer-ref")
     v.add_argument("--targets"); v.add_argument("--tip", action="store_true", help="compare the branch tips, not the migration commits")
     c = sub.add_parser("check-done"); c.add_argument("--repo", required=True); c.add_argument("--target", required=True)
+    k = sub.add_parser("cascade"); k.add_argument("--repo", required=True); k.add_argument("range", metavar="FROM..TO")
+    k.add_argument("--gates", default="ab", choices=["none", "compile", "ab", "full"],
+                   help="the no-model gates per merged branch (default ab: compile, audits, Gate A/B)")
+    k.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
+    if a.cmd == "cascade":
+        return cascade(a.repo, a.range, a.gates, a.dry_run)
     if a.cmd == "migrate":
         return migrate(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.dry_run, a.port_branch,
                        jpath=a.json)
@@ -1669,6 +1915,53 @@ def self_check():
                and "no verdict: changed src/main/java/com/example/mod/ExampleMod.java" in why,
                f"an edited file: Gate C stale, and the file (no longer the rows' alone) needs a review row: {why}")
         g("checkout", "-q", "--", "."); g("checkout", "-q", "neoforge-1.21.x")
+        # cascade: the authors' change arrives on the port branch; each version's mechanical files are re-made from it
+        # through that version's rows (a conflict git alone would have on the renamed line resolved), a new file too
+        g("checkout", "-q", "neoforge-1.21.1")
+        (r / "src/main/java/com/example/mod/ExampleMod.java").write_text(
+            "package com.example.mod;\nimport old.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.oldCall(); } }\n",
+            encoding="utf-8")
+        (r / "src/main/java/com/example/mod/NewOne.java").write_text("package com.example.mod;\nimport old.Thing;\nclass NewOne { Thing t; }\n",
+                                                                    encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "authors: a field and a class")
+        g("checkout", "-q", "neoforge-1.21.x")
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none")
+        e5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        expect(rc == 0 and out.count("| merged |") == 3
+               and e5["src/main/java/com/example/mod/ExampleMod.java"] == b"package com.example.mod;\nimport new.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.newCall(); } }\n"
+               and b"import new.Thing;" in e5["src/main/java/com/example/mod/NewOne.java"] and b"keep = 5" in e5["src/main/java/com/example/mod/Over.java"],
+               f"cascade port..1.21.5: the authors' change reaches every version through its rows, overlays kept: {out[-500:]}")
+        why = target_done(r, "1.21.5")
+        expect(any(w.startswith("GATES.md") for w in why) and not any(w.startswith("no verdict") for w in why),
+               f"after the merge the gates are stale, and no rows-only file needs a review row: {why}")
+        # a fix made at the lowest version reaches the higher ones by merge
+        w3, _why = worktree_for(r, "1.21.3")
+        (w3 / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain { int v = 2; }\n",
+                                                                     encoding="utf-8")
+        git(w3, "commit", "-qam", "fix at 1.21.3", check=True)
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+        expect(rc == 0 and all(b"v = 2" in ref_files(r, resolve_branch(r, branch_name(t)), "src")["src/main/java/com/example/mod/Plain.java"]
+                               for t in ("1.21.4", "1.21.5")), f"cascade 1.21.3..1.21.5 carries a fix up: {out[-400:]}")
+        why = target_done(r, "1.21.4")
+        expect("no verdict: changed src/main/java/com/example/mod/Plain.java" not in why,
+               f"the fix is 1.21.3's change: on 1.21.4 the file equals its parent's, so no row there: {why}")
+        why3 = target_done(r, "1.21.3")
+        expect("no verdict: changed src/main/java/com/example/mod/Plain.java" in why3, f"... and a row on 1.21.3, where it was made: {why3}")
+        # a conflict in a file a person changed stops the cascade there, the merge undone
+        g("checkout", "-q", "neoforge-1.21.1")
+        (r / "src/main/java/com/example/mod/Over.java").write_text("package com.example.mod;\nimport old.Thing;\npublic class Over { Thing t; int keep = 9; }\n",
+                                                                   encoding="utf-8")
+        g("commit", "-qam", "authors: Over changed")
+        g("checkout", "-q", "neoforge-1.21.x")
+        before = resolve_branch(r, "neoforge-1.21.3")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+        expect(rc == 1 and "STOPPED at 1.21.3" in out and "src/main/java/com/example/mod/Over.java" in out
+               and resolve_branch(r, "neoforge-1.21.3") == before and not git(w3, "status", "--porcelain").stdout.strip(),
+               f"a conflict on a version's own change stops the cascade, nothing committed, the worktree clean: {out[-500:]}")
+        rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none", dry_run=True)
+        expect(rc == 0 and "| 1.21.5 | up to date |" in out, f"cascade --dry-run: {out[-200:]}")
+        for t in ("1.21.3", "1.21.4", "1.21.5"):
+            git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / t))
         # a branch that exists with other content is refused, nothing moved
         g("branch", "-f", "neoforge-1.21.5", "neoforge-1.21.1")
         before = g("rev-parse", "neoforge-1.21.5")
