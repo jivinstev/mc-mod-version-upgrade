@@ -1244,6 +1244,55 @@ need(core and re.search(r"else if \(replacedDefaults\) \{\s*RenderSystem\.bindDe
 print(*bad, sep="\n")
 sys.exit(1 if bad else 0)
 PY
+python3 - <<'PY' && ok "shared 1.21.5 / 1.21.8 / 1.21.10 render helpers: a LegacyRenderType's setupRenderState loads its shader, blend / depth / write-mask / cull / bias state and output target into LegacyGl (so setupRenderState + drawWithShader draws as the type does) and clearRenderState restores it; draw() runs the shader shard once; 1.21.5's draw calls the shader's apply() before binding its uniforms and samplers, keeps no COLOR_MODULATOR written inside apply() (as on 1.21.1) and calls clear() after" || bad "shared 1.21.5-1.21.10 render helpers: a set-up LegacyRenderType no longer reaches drawWithShader, or 1.21.5's draw lost apply()"
+import pathlib, re, sys
+strip = lambda s: re.sub(r"//[^\n]*|/\*.*?\*/", "", s, flags=re.S)
+bad = []
+def need(c, msg):
+    if not c: bad.append(msg)
+def body(text, head):
+    m = re.search(head + r"\s*\{", text)
+    if not m: return None
+    i, depth = m.end(), 1
+    while depth and i < len(text):
+        depth += {"{": 1, "}": -1}.get(text[i], 0); i += 1
+    return text[m.end():i - 1]
+for v in ("1.21.5", "1.21.8", "1.21.10"):
+    d = pathlib.Path("templates/fork-layer/shared") / v / "java"
+    gl = strip((d / "LegacyGl.java").read_text(encoding="utf-8"))
+    lrt = strip((d / "LegacyRenderType.java").read_text(encoding="utf-8"))
+    setup = body(lrt, r"public void setupRenderState\(\)")
+    clear = body(lrt, r"public void clearRenderState\(\)")
+    draw = body(lrt, r"public void draw\(MeshData mesh\)")
+    need(setup and re.search(r"super\.setupRenderState\(\);.*LegacyGl\.load\(state\.key, state\.shader\.shader\(\), getRenderTarget\(\)\).*state\.shader\.setupRenderState\(\);", setup, re.S),
+         f"{v}: LegacyRenderType.setupRenderState does not run its shards, load its shader/state into LegacyGl and run the shader shard")
+    need(clear and re.search(r"state\.shader\.clearRenderState\(\);.*LegacyGl\.restore\(.*super\.clearRenderState\(\);", clear, re.S),
+         f"{v}: LegacyRenderType.clearRenderState does not restore LegacyGl's state")
+    need(draw and "setupRenderState();" in draw and "state.shader.setupRenderState" not in draw and "clearRenderState();" in draw,
+         f"{v}: LegacyRenderType.draw runs the shader shard twice or not inside setup/clear")
+    dws = body(gl, r"public static void drawWithShader\(MeshData mesh\)")
+    need(dws and re.search(r"draw\(mesh, shader, current\(\), target != null \? target :", dws),
+         f"{v}: LegacyGl.drawWithShader ignores a set-up type's output target")
+    cur = body(gl, r"static Key current\(\)")
+    need(cur and "biasScale, biasConstant" in cur, f"{v}: LegacyGl.current() drops a set-up type's depth bias")
+    load = body(gl, r"static Saved load\(Key key, Object shaderObj, RenderTarget into\)")
+    need(load and all(f in load for f in ("blend =", "depthTest =", "depthWrite =", "writeColor =", "writeAlpha =", "cull =",
+                                          "biasScale =", "biasConstant =", "shader = shaderObj", "target = into")),
+         f"{v}: LegacyGl.load does not set every piece of a type's state")
+    rest = body(gl, r"static void restore\(Saved s\)")
+    need(rest and "shader" not in rest and "target = s.target()" in rest and "blend = s.blend()" in rest,
+         f"{v}: LegacyGl.restore does not put the state back (or resets the shader, which 1.21.4's shard left set)")
+d = pathlib.Path("templates/fork-layer/shared/1.21.5/java")
+gl = strip((d / "LegacyGl.java").read_text(encoding="utf-8"))
+core = body(gl, r"static void draw\(MeshData mesh, Object shaderObj, Key key, RenderTarget target\)")
+need(core and 0 <= core.find("own.apply();") < core.find("COLOR_MODULATOR.touched()", core.find("own.apply();")) < core.find("own.bind("),
+     "1.21.5: LegacyGl.draw does not call the shader's apply() before the COLOR_MODULATOR check and bind()")
+need(core and re.search(r"own\.apply\(\);\s*if \(cm != null\) \{\s*if \(before != null\) cm\.set\(before\);\s*else if \(!wrote\) cm\.consume\(\);", core),
+     "1.21.5: a COLOR_MODULATOR written inside apply() reaches the draw (1.21.1 never uploaded it)")
+need(core and re.search(r"finally \{\s*if \(own != null\) own\.clear\(\);", core), "1.21.5: LegacyGl.draw does not call clear() after the draw")
+print(*bad, sep="\n")
+sys.exit(1 if bad else 0)
+PY
 
 echo
 echo "port-tools self-test: $pass passed, $fail failed"

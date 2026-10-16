@@ -59,6 +59,9 @@ public final class LegacyGl {
     private static boolean cull = true;
     private static Object shader;
     private static boolean warnedEquation;
+    // what a set-up LegacyRenderType adds (see load): its depth bias and its output target (null: the main target)
+    private static float biasScale, biasConstant;
+    private static RenderTarget target;
 
     private LegacyGl() {}
 
@@ -115,9 +118,10 @@ public final class LegacyGl {
         RenderSystem.setShaderTexture(slot, texture);
     }
 
-    /** BufferUploader.drawWithShader: the current shader and the state set above, into the main render target. */
+    /** BufferUploader.drawWithShader: the current shader and the state set above, into the main render target -- or,
+     *  while a {@link LegacyRenderType} is set up, with its shader and state into its output target (see {@link #load}). */
     public static void drawWithShader(MeshData mesh) {
-        draw(mesh, shader, current(), Minecraft.getInstance().getMainRenderTarget());
+        draw(mesh, shader, current(), target != null ? target : Minecraft.getInstance().getMainRenderTarget());
     }
 
     // ---- state as a value -------------------------------------------------------------------------------------
@@ -138,7 +142,52 @@ public final class LegacyGl {
 
     static Key current() {
         return new Key(blend ? blendFunction : null, depthTest ? depthFunction : DepthTestFunction.NO_DEPTH_TEST,
-                depthWrite, writeColor, writeAlpha, cull, 0, 0);
+                depthWrite, writeColor, writeAlpha, cull, biasScale, biasConstant);
+    }
+
+    /** The state {@link #load} replaced, put back by {@link #restore}. */
+    record Saved(boolean blend, BlendFunction blendFunction, boolean depthTest, DepthTestFunction depthFunction,
+                 boolean depthWrite, boolean writeColor, boolean writeAlpha, boolean cull, float biasScale,
+                 float biasConstant, RenderTarget target) {}
+
+    /**
+     * 1.21.4's RenderType.setupRenderState() ran every shard of its CompositeState: the ShaderStateShard set the shader,
+     * and the transparency / depth-test / write-mask / cull / layering shards set GL state. 1.21.1-1.21.4 code that sets
+     * a type up and then draws with BufferUploader.drawWithShader (a mod's own render queue) drew with all of it.
+     * {@link LegacyRenderType#setupRenderState} loads the type's shader and state here so {@link #drawWithShader} does
+     * too, into the type's output target; {@link LegacyRenderType#clearRenderState} restores the state (the shader stays
+     * set, as 1.21.4's ShaderStateShard left it).
+     */
+    static Saved load(Key key, Object shaderObj, RenderTarget into) {
+        Saved s = new Saved(blend, blendFunction, depthTest, depthFunction, depthWrite, writeColor, writeAlpha, cull,
+                biasScale, biasConstant, target);
+        blend = key.blend() != null;
+        if (blend) blendFunction = key.blend();
+        depthTest = key.depth() != DepthTestFunction.NO_DEPTH_TEST;
+        if (depthTest) depthFunction = key.depth();
+        depthWrite = key.depthWrite();
+        writeColor = key.writeColor();
+        writeAlpha = key.writeAlpha();
+        cull = key.cull();
+        biasScale = key.biasScale();
+        biasConstant = key.biasConstant();
+        shader = shaderObj;
+        target = into;
+        return s;
+    }
+
+    static void restore(Saved s) {
+        blend = s.blend();
+        blendFunction = s.blendFunction();
+        depthTest = s.depthTest();
+        depthFunction = s.depthFunction();
+        depthWrite = s.depthWrite();
+        writeColor = s.writeColor();
+        writeAlpha = s.writeAlpha();
+        cull = s.cull();
+        biasScale = s.biasScale();
+        biasConstant = s.biasConstant();
+        target = s.target();
     }
 
     // ---- drawing ----------------------------------------------------------------------------------------------
@@ -174,6 +223,22 @@ public final class LegacyGl {
                 indices = format.uploadImmediateIndexBuffer(m.indexBuffer());
                 indexType = m.drawState().indexType();
             }
+            if (own != null) {
+                // 1.21.1's VertexBuffer._drawWithShader called shader.apply() right before every draw and shader.clear()
+                // after; a mod's ShaderInstance subclass overrides apply() to push its per-draw state (a mask's uniforms
+                // and sampler), so it runs here, before bind() hands the uniforms and samplers to the pass. A
+                // COLOR_MODULATOR write made inside apply() (an opacity, after super.apply()) is not kept: on 1.21.1 it
+                // came after apply()'s upload and the next draw's setDefaultUniforms overwrote it, so it never reached
+                // the GPU. A write made before the draw is kept as before.
+                Uniform cm = own.COLOR_MODULATOR;
+                boolean wrote = cm != null && cm.touched();
+                float[] before = wrote && cm.floats() != null ? cm.floats().clone() : null;
+                own.apply();
+                if (cm != null) {
+                    if (before != null) cm.set(before);
+                    else if (!wrote) cm.consume();
+                }
+            }
             float[] savedColor = null;
             if (own != null && own.COLOR_MODULATOR != null && own.COLOR_MODULATOR.touched()) {
                 // 1.21.1's ShaderInstance.apply() uploaded RenderSystem's colour into COLOR_MODULATOR and a mod could
@@ -198,6 +263,7 @@ public final class LegacyGl {
                 pass.setIndexBuffer(indices, indexType);
                 pass.drawIndexed(0, m.drawState().indexCount());
             } finally {
+                if (own != null) own.clear();
                 if (savedColor != null) {
                     RenderSystem.setShaderColor(savedColor[0], savedColor[1], savedColor[2], savedColor[3]);
                     own.COLOR_MODULATOR.consume();   // 1.21.1 re-uploaded the default on every apply()
