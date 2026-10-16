@@ -48,11 +48,19 @@ target). The keep-current skill only calls this for a fork that has the layer.
           `merge`: its src/ is the port branch's), a three-way merge with `git merge-file` semantics: base = the
           authors' file at OLD PREPARED for the target (its rename chain and strip_onlyin, no overlay), ours = the
           overlay, theirs = the authors' file at NEW prepared the same way (an overlay of a path an older target in
-          its chain also overlays: that overlay before / after its own re-merge, renamed by the target's own rows). A
+          its chain also overlays: that overlay before / after its own re-merge, renamed by the target's own rows; when
+          that older overlay did not change in this run -- it conflicted, or its target is not in --targets -- the
+          authors' files prepared for this target, as for an overlay of its own, so the copy is never skipped). A
           clean merge rewrites the overlay; one that becomes what it replaces is deleted (retired); a conflict, or a
           clean merge that declares a member twice (the loop's stand-in plus the authors' own), leaves the overlay AS
-          IT WAS and writes its hunks to the target's RESIDUE.md (exit 10). An overlay edited since RESIDUE.md listed
-          it is a person's resolution: left alone and dropped from the list. --dry-run writes nothing.
+          IT WAS, writes its hunks to the target's RESIDUE.md and an entry to .multiversion/targets/<t>/REMERGE.json
+          ({"conflicts": [{"overlay", "digest" (sha256 of its bytes), "reason", "since": "<old>..<new>"}]}, deleted
+          when empty; fork-port.py does not call the target done while an entry's overlay is unedited) (exit 10). A
+          target that inherits an older target's overlay AS IT IS (no copy of its own) gets an entry naming that
+          overlay when it did not take the change ("inherits an overlay that did not take the authors' change"). An
+          overlay edited since it was recorded is a person's resolution: left alone and its entry dropped; an
+          unedited one is merged again against the authors' file at its `since`, and its entry goes when that merges.
+          --dry-run writes nothing.
   ledger  writes the table into a fix ledger's JSON ("layer"), so `fix-ledger.py render --into` puts it in the issue.
 
 Gates are not run here: the layer's CI runs the full gates on the bookends and compile + audits on every middle
@@ -460,105 +468,208 @@ def remerge(repo, old, new, targets=None, write=True, prep=None):
     """Carry the authors' change OLD -> NEW into every overlay that replaces a file it touched: a three-way merge per
     overlay (base = the authors' file at OLD prepared for the target, ours = the overlay, theirs = the authors' file at
     NEW prepared for the target; for an overlay of a path an older target in its chain also overlays, base/theirs are
-    that overlay before/after its own re-merge, renamed by this target's own rows -- hop_table). OLD/NEW: the layer
+    that overlay before/after its own re-merge in this run, renamed by this target's own rows -- hop_table -- and,
+    when that older overlay did not change in this run (it conflicted, it already carried the change, or its target is
+    outside `targets`), the authors' files prepared for this target, as for an overlay of its own). OLD/NEW: the layer
     branch before and after `merge` (its src/ is the port branch's at the last and at the new merge). Per target ->
       rewritten   merged cleanly: the overlay now holds the authors' change (a touch-up)
       retired     merged into exactly what it replaces: the overlay is deleted
       conflicts   did not merge (or merged into a duplicate member): the overlay is LEFT AS IT WAS (no conflict marker
-                  ever reaches the tree) and the hunks go to the target's RESIDUE.md -- rework
-    write=False is a dry run: nothing is written."""
+                  ever reaches the tree), its hunks go to the target's RESIDUE.md and an entry to its REMERGE.json --
+                  rework. Also an overlay the target INHERITS as it is (no copy of its own) when the older target's
+                  overlay did not take the change: the target's tree builds that overlay, so it is the target's too.
+      resolved    recorded by an earlier re-merge and edited since (its digest moved): a person's resolution, left alone
+    An overlay REMERGE.json still lists unedited is merged again against the authors' file at the commit it was recorded
+    against (its `since`), so a later range never drops the earlier change. write=False is a dry run: nothing is
+    written."""
     repo = pathlib.Path(repo); mv = repo / ".multiversion"
     prep = prep or Preparer(repo)
     ts = layer_targets(repo)
     want = set(targets or ts)
+    look = set(want)                      # an ancestor outside `targets` is looked at (never written): its children ask
+    for t in want:
+        look.update(prep.chain(t)[1:])
+    shorts = {}
+    sn = lambda ref: shorts.setdefault(ref, short(repo, ref))
+    commit = lambda ref: git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0
     orig, now, out = {}, {}, {}
+    took = {}                # (t, set, rel) -> True (the overlay carries the change) or why it does not
     for t in ts:
         own = own_overlays(mv, t)
         for k, f in own.items():
             orig[(t, *k)] = now[(t, *k)] = _read(f)
-        if t not in want:
+        if t not in look:
             continue
-        rec = out[t] = {"rewritten": [], "retired": [], "conflicts": [], "resolved": [], "checked": 0}
-        left = residue_left(repo, t)                   # what an earlier re-merge left for a person, and its digest then
+        live = t in want
+        rec = {"rewritten": [], "retired": [], "conflicts": [], "resolved": [], "checked": 0}
+        if live:
+            out[t] = rec
+        left = remerge_left(repo, t)                   # what an earlier re-merge left for a person, and its digest then
         chain = prep.chain(t)[1:]
         jobs, need_old, need_new, hop = [], {}, {}, {}
         for (s, rel) in sorted(own):
+            path, ours, key = overlay_path(t, s, rel), now[(t, s, rel)], f"{s}/{rel}"
             anc = next((a for a in chain if (a, s, rel) in orig), None)
-            if anc:
-                if orig[(anc, s, rel)] != now[(anc, s, rel)]:
-                    jobs.append((s, rel, ("o", anc), ("n", anc)))
-                    hop.setdefault(anc, ({}, {}))
-                    hop[anc][0][f"{s}/{rel}"] = orig[(anc, s, rel)]
-                    hop[anc][1][f"{s}/{rel}"] = now[(anc, s, rel)]
+            pend = left.get(path)
+            if pend and pend.get("digest") != digest(ours):
+                rec["checked"] += 1; rec["resolved"].append(path); took[(t, s, rel)] = True
+                continue                               # a person edited it since it was left: theirs now
+            since_old = (pend or {}).get("since", "").split("..")[0]
+            if pend and since_old and not commit(since_old):
+                rec["checked"] += 1; took[(t, s, rel)] = "it did not merge before"
+                rec["conflicts"].append({"file": path, "why": f"{pend.get('reason') or 'did not merge'} (recorded against "
+                                         f"{since_old}, which is not a commit here: not re-merged)", "hunks": [],
+                                         "digest": pend["digest"], "since": pend.get("since", "")})
                 continue
-            o, n = git_blob(repo, old, src_path(s, rel)), git_blob(repo, new, src_path(s, rel))
+            if anc and not pend and orig[(anc, s, rel)] != now[(anc, s, rel)]:
+                jobs.append({"s": s, "rel": rel, "anc": anc, "hop": True, "since": f"{sn(old)}..{sn(new)}"})
+                hop.setdefault(anc, ({}, {}))
+                hop[anc][0][key] = orig[(anc, s, rel)]
+                hop[anc][1][key] = now[(anc, s, rel)]
+                continue
+            # an own overlay, or a copy of an inherited one whose older overlay did not change in this run (it
+            # conflicted, already carried the change, or was not re-merged): against the authors' files for t
+            base_ref = since_old if pend and since_old else old
+            o, n = git_blob(repo, base_ref, src_path(s, rel)), git_blob(repo, new, src_path(s, rel))
             if o == n:
+                if pend:                               # nothing left to take: the entry goes
+                    rec["checked"] += 1; took[(t, s, rel)] = True
                 continue
             if o is not None:
-                need_old[f"{s}/{rel}"] = o
+                need_old.setdefault(base_ref, {})[key] = o
             if n is not None:
-                need_new[f"{s}/{rel}"] = n
-            jobs.append((s, rel, ("a", o is not None), ("a", n is not None)))
-        p_old, p_new = prep.prepare(t, need_old), prep.prepare(t, need_new)
+                need_new[key] = n
+            jobs.append({"s": s, "rel": rel, "anc": anc, "hop": False, "base_ref": base_ref, "o": o is not None,
+                         "n": n is not None, "since": f"{sn(base_ref)}..{sn(new)}"})
+        p_old = {ref: prep.prepare(t, files) for ref, files in need_old.items()}
+        p_new = prep.prepare(t, need_new)
         h_old, h_new = {}, {}       # an inherited overlay before / after its re-merge, renamed by t's own rows
         for anc, (bo, bn) in hop.items():
             tab = prep.hop_table(t, anc)
             h_old.update({(anc, k): v for k, v in prep.prepare(t, bo, tab).items()})
             h_new.update({(anc, k): v for k, v in prep.prepare(t, bn, tab).items()})
-        for s, rel, bspec, tspec in jobs:
+        for j in jobs:
             rec["checked"] += 1
+            s, rel, anc = j["s"], j["rel"], j["anc"]
             key, ours = f"{s}/{rel}", now[(t, s, rel)]
             path = overlay_path(t, s, rel)
-            if path in left and left[path] != digest(ours):
-                rec["resolved"].append(path)               # a person edited it since it was left: theirs now
-                continue
-            if bspec[0] == "o":
-                base, theirs = h_old[(bspec[1], key)], h_new[(tspec[1], key)]
+
+            def conflict(why, hunks=()):
+                rec["conflicts"].append({"file": path, "why": why, "hunks": list(hunks), "digest": digest(ours),
+                                         "since": j["since"]})
+                took[(t, s, rel)] = why
+
+            def change(kind, text):                    # outside `targets` nothing is written: it did not take it
+                took[(t, s, rel)] = True if live else f"{t} was not re-merged in this run (not in --targets)"
+                if not live:
+                    return
+                rec[kind].append(path); now[(t, s, rel)] = text
+                if write and kind == "retired":
+                    (repo / path).unlink()
+                elif write:
+                    _write(repo / path, text)
+            if j["hop"]:
+                base, theirs = h_old[(anc, key)], h_new[(anc, key)]
             else:
-                base, theirs = (p_old.get(key) if bspec[1] else None), (p_new.get(key) if tspec[1] else None)
+                base = p_old[j["base_ref"]].get(key) if j["o"] else None
+                theirs = p_new.get(key) if j["n"] else None
             if theirs is None:
-                rec["conflicts"].append({"file": path, "why": "the authors deleted the file this overlay replaces", "hunks": [],
-                                         "digest": digest(ours)})
+                conflict("the authors deleted the file this overlay replaces")
                 continue
             if base is None and _lf(ours) == _lf(theirs):
-                rec["retired"].append(path); now[(t, s, rel)] = theirs
-                if write:
-                    (repo / path).unlink()
+                if anc:
+                    took[(t, s, rel)] = True           # already the authors' file; the tree keeps this copy
+                else:
+                    change("retired", theirs)
                 continue
             if base is None:
-                rec["conflicts"].append({"file": path, "why": "the authors added a file at this overlay's path (it replaced "
-                                         "nothing before)", "hunks": [], "digest": digest(ours)})
+                conflict("the authors added a file at this overlay's path (it replaced nothing before)")
                 continue
             merged, n = merge_file(ours, base, theirs)
             if n:
-                rec["conflicts"].append({"file": path, "why": f"{n} conflicting hunk(s)", "hunks": conflict_hunks(merged),
-                                         "digest": digest(ours)})
+                conflict(f"{n} conflicting hunk(s)", conflict_hunks(merged))
                 continue
             dups = duplicate_members(merged, ours, theirs)
             if dups:
-                rec["conflicts"].append({"file": path, "why": "merged cleanly into a duplicate declaration (the overlay "
-                                         "already had it and the authors added it again): " + "; ".join(dups), "hunks": [],
-                                         "digest": digest(ours)})
+                conflict("merged cleanly into a duplicate declaration (the overlay already had it and the authors added "
+                         "it again): " + "; ".join(dups))
                 continue
             # retired: the target's tree gets the same file without this overlay -- the prepared authors' file, or the
             # inherited overlay VERBATIM (an inherited overlay is not renamed by this target's rows)
-            gets = now[(bspec[1], s, rel)] if bspec[0] == "o" else theirs
+            gets = now[(anc, s, rel)] if anc else theirs
             if _lf(merged) == _lf(gets):
-                rec["retired"].append(path); now[(t, s, rel)] = gets
-                if write:
-                    (repo / path).unlink()
+                change("retired", gets)
             elif _lf(merged) == _lf(ours):
-                continue                                   # already carries it (a re-run)
+                took[(t, s, rel)] = True               # already carries it (a re-run)
             else:
-                rec["rewritten"].append(path); now[(t, s, rel)] = merged
-                if write:
-                    _write(repo / path, merged)
+                change("rewritten", merged)
+        if not live:
+            continue
+        # an overlay t inherits AS IT IS (no copy of its own) is built into t's tree: when the nearest older overlay of
+        # that path did not take the authors' change, t did not either -- never skipped
+        inherited = {}
+        for a in chain:
+            for (s, rel) in own_overlays(mv, a):
+                if (s, rel) not in own and (s, rel) not in inherited and (a, s, rel) in orig:
+                    inherited[(s, rel)] = a
+        for (s, rel), a in sorted(inherited.items()):
+            apath, why = overlay_path(a, s, rel), took.get((a, s, rel))
+            pend = left.get(apath)
+            if why is True:
+                continue
+            if why is None:                            # untouched in this run: an earlier flag stays while unedited
+                if pend and (repo / apath).is_file() and pend.get("digest") == digest(_read(repo / apath)):
+                    rec["conflicts"].append({"file": apath, "why": pend.get("reason") or INHERITS, "hunks": [],
+                                             "digest": pend["digest"], "since": pend.get("since", "")})
+                continue
+            rec["conflicts"].append({"file": apath, "why": f"{INHERITS} ({a}: {why})", "hunks": [],
+                                     "digest": digest(now[(a, s, rel)]), "since": f"{sn(old)}..{sn(new)}"})
     return out
 
 
 def digest(text):
+    """sha256 of the overlay file's bytes (text as _read() returns it: line endings and all), as REMERGE.json records it
+    and tools/fork-port.py's target_done() compares it."""
     import hashlib
-    return hashlib.sha256(_lf(text).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    return hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+INHERITS = "inherits an overlay that did not take the authors' change"
+
+
+def remerge_file(repo, t):
+    return pathlib.Path(repo) / ".multiversion/targets" / t / "REMERGE.json"
+
+
+def remerge_left(repo, t):
+    """{overlay path: entry} an earlier re-merge left unmerged for target t: its REMERGE.json ({"conflicts": [{"overlay",
+    "digest", "reason", "since": "<old>..<new>"}]}), else the digests in its RESIDUE.md section. A malformed REMERGE.json
+    stops the run: it is a reviewed input, and reading it as empty would forget what it holds."""
+    f = remerge_file(repo, t)
+    if f.is_file():
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            return {c["overlay"]: c for c in data["conflicts"] if c.get("overlay") and c.get("digest")}
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise RuntimeError(f"{f}: not a REMERGE.json ({e}); fix or delete it by hand")
+    return {p: {"overlay": p, "digest": d, "reason": "", "since": ""} for p, d in residue_left(repo, t).items()}
+
+
+def put_remerge(repo, t, rec):
+    """Write target t's REMERGE.json from a remerge() record: one entry per overlay that did not take the authors'
+    change; the file is deleted when nothing is left."""
+    f = remerge_file(repo, t)
+    entries = {}
+    for c in (rec or {}).get("conflicts", []):
+        entries.setdefault(c["file"], {"overlay": c["file"], "digest": c["digest"], "reason": c["why"],
+                                       "since": c.get("since", "")})
+    if not entries:
+        if f.is_file():
+            f.unlink()
+        return
+    text = json.dumps({"conflicts": [entries[k] for k in sorted(entries)]}, indent=1) + "\n"
+    if not f.is_file() or f.read_text(encoding="utf-8") != text:
+        _write(f, text)
 
 
 DIGEST_LINE = re.compile(r"^<!-- layer-sync overlay (\S+) digest ([0-9a-f]+) -->$", re.M)
@@ -589,7 +700,7 @@ def residue_section(t, rec, old, new):
              f"--new {new} --targets {t}` (it leaves alone an overlay edited since it was listed here, and drops it from "
              f"this list) and `python3 tools/layer-sync.py run --repo DIR --targets {t}`.", ""]
     for c in rec["conflicts"]:
-        lines.append(f"### `{c['file']}` -- {c['why']}")
+        lines.append(f"### `{c['file']}` -- {c['why']}" + (f" (since {c['since']})" if c.get("since") else ""))
         lines.append(f"<!-- layer-sync overlay {c['file']} digest {c['digest']} -->")
         if c["hunks"]:
             body = "\n\n".join(c["hunks"]).split("\n")
@@ -812,7 +923,8 @@ def cmd_run(a):
                 rec["note"] = f"{rec['note']}; {left}" if rec["note"] else left
             elif rec["class"] == "untouched":
                 rec["class"] = "touch-up"             # the overlays changed, even though nothing failed to compile
-        if base:
+        if t in merged:          # the re-merge ran: its REMERGE.json and RESIDUE.md section say what it left
+            put_remerge(repo, t, rm)
             put_residue_section(repo, t, residue_section(t, rm, short(repo, base), short(repo, "HEAD")))
             if rec["class"] == "rework":
                 rec["residue"] = residue_of(repo, t)
@@ -890,6 +1002,7 @@ def cmd_remerge(a):
     res = remerge(repo, a.old, a.new, want, write=not a.dry_run)
     if not a.dry_run:
         for t in want:
+            put_remerge(repo, t, res.get(t))
             put_residue_section(repo, t, residue_section(t, res.get(t), short(repo, a.old), short(repo, a.new)))
     print("| target | overlays of changed files | rewritten | retired | resolved by hand | did not merge |")
     print("|---|---|---|---|---|---|")
@@ -904,7 +1017,7 @@ def cmd_remerge(a):
         pathlib.Path(a.json).write_text(json.dumps(res, indent=1), encoding="utf-8")
     n = sum(len(r["conflicts"]) for r in res.values())
     print(f"layer-sync: {'dry run, nothing written; ' if a.dry_run else ''}"
-          + (f"{n} overlay(s) did not merge -- a person's (RESIDUE.md)" if n else "every overlay merged"))
+          + (f"{n} overlay(s) did not merge -- a person's (REMERGE.json, RESIDUE.md)" if n else "every overlay merged"))
     return 10 if n else 0
 
 
@@ -996,6 +1109,23 @@ def self_check():
         put_residue_section(d, "1.21.4", residue_section("1.21.4", rec, "o1", "n1"))
         put_residue_section(d, "1.21.4", "")
         expect(not res.exists(), "a RESIDUE.md that held only the section is removed with it")
+        # REMERGE.json: the reviewed record tools/fork-port.py's target_done() reads
+        rj = remerge_file(d, "1.21.4")
+        two = {"conflicts": [dict(rec["conflicts"][0], since="o1..n1"),
+                             {"file": "A.java", "why": INHERITS + " (1.21.3: x)", "hunks": [], "digest": "d2", "since": "o1..n1"}]}
+        put_remerge(d, "1.21.4", two)
+        got = json.loads(rj.read_text(encoding="utf-8"))
+        expect(got == {"conflicts": [{"overlay": "A.java", "digest": "d2", "reason": INHERITS + " (1.21.3: x)", "since": "o1..n1"},
+                                     {"overlay": "F.java", "digest": "abc123", "reason": "1 conflicting hunk(s)", "since": "o1..n1"}]}
+               and set(remerge_left(d, "1.21.4")) == {"A.java", "F.java"}, f"REMERGE.json: one sorted entry per overlay: {got}")
+        put_remerge(d, "1.21.4", {"conflicts": []})
+        expect(not rj.exists(), "an empty REMERGE.json is deleted")
+        rj.write_text("{", encoding="utf-8")
+        try:
+            remerge_left(d, "1.21.4"); expect(False, "a malformed REMERGE.json is not read as empty")
+        except RuntimeError:
+            pass
+        expect(digest("a\r\nb") == __import__("hashlib").sha256(b"a\r\nb").hexdigest(), "digest: sha256 of the file's bytes")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

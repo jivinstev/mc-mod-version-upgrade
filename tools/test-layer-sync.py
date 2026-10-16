@@ -166,7 +166,7 @@ def remerge_checks():
                and {p: p.read_bytes() for p in mv.rglob("*") if p.is_file()} == snap,
                f"remerge --dry-run reports and writes nothing: {r.stdout}")
         expect((len(dry["1.21.4"]["rewritten"]), len(dry["1.21.4"]["retired"]), len(dry["1.21.4"]["conflicts"])) == (1, 1, 2)
-               and len(dry["1.21.5"]["rewritten"]) == 1 and not dry["1.21.5"]["conflicts"], f"dry-run counts: {dry}")
+               and len(dry["1.21.5"]["rewritten"]) == 1 and len(dry["1.21.5"]["conflicts"]) == 2, f"dry-run counts: {dry}")
         out_json, out_md = tmp / "o.json", tmp / "o.md"
         r = sh(sys.executable, str(LS), "run", "--repo", str(f), "--json", str(out_json), "--md", str(out_md), env=env)
         by = {x["target"]: x for x in json.loads(out_json.read_text(encoding="utf-8"))["targets"]}
@@ -188,8 +188,12 @@ def remerge_checks():
                and "D.java" in res and "method extra()" in res, f"the conflicting hunks are in RESIDUE.md: {res}")
         expect(by["1.21.4"]["class"] == "rework" and by["1.21.4"]["residue"].endswith("1.21.4/RESIDUE.md")
                and "did not merge" in by["1.21.4"]["note"] and r.returncode == 10, f"a conflicted target is rework: {by['1.21.4']}")
-        expect(by["1.21.5"]["class"] == "touch-up" and by["1.21.5"]["before"] == 0
-               and not (mv / "targets/1.21.5/RESIDUE.md").exists(), f"a target whose overlays merged is a touch-up: {by['1.21.5']}")
+        # 1.21.5's copy of B conflicts like 1.21.4's (it is the same overlay), and the D it inherits as is did not take
+        # the change: 1.21.5 is rework too, not skipped (the #131 review, finding 2); its A merged (above)
+        c5 = sorted(c["file"].rsplit("/", 1)[1] + ":" + c["file"].split("/")[2] for c in by["1.21.5"]["remerge"]["conflicts"])
+        expect(by["1.21.5"]["class"] == "rework" and by["1.21.5"]["before"] == 0 and c5 == ["B.java:1.21.5", "D.java:1.21.4"]
+               and "inherits an overlay" in (mv / "targets/1.21.5/RESIDUE.md").read_text(encoding="utf-8"),
+               f"a target whose inherited overlays did not take the change is rework: {by['1.21.5']}")
         md = out_md.read_text(encoding="utf-8")
         expect("1 rewritten, 1 retired" in md and "2 did not merge" in md and "4 whole-file overlay(s)" in md,
                f"the table notes the re-merge and the budget: {md}")
@@ -208,6 +212,110 @@ def remerge_checks():
                and "layer-sync" not in ((mv / "targets/1.21.4/RESIDUE.md").read_text(encoding="utf-8")
                                         if (mv / "targets/1.21.4/RESIDUE.md").exists() else ""),
                f"resolved: exit 0, the section is gone: {r.stdout}")
+
+
+def remerge_ledger_checks():
+    """Finding 1 and 2 of the #131 review: a re-merge that leaves an overlay unmerged records it in
+    .multiversion/targets/<t>/REMERGE.json ({"conflicts": [{overlay, digest (sha256 of the overlay's bytes), reason,
+    since}]}) as well as RESIDUE.md; an inherited overlay is never silently skipped (its ancestor conflicted, or was not
+    re-merged in this run, or was merged by hand later); an entry leaves the file when its overlay is edited or later
+    merges cleanly, and the file goes when it is empty."""
+    import hashlib
+    with tempfile.TemporaryDirectory() as t:
+        tmp = pathlib.Path(t)
+        stub = tmp / "stub-fork-port.py"; stub.write_text(STUB, encoding="utf-8")
+        env = {"LAYER_SYNC_FORK_PORT": str(stub)}
+        f = tmp / "fork"; f.mkdir()
+        git(f, "init", "-q", "-b", "port"); git(f, "config", "user.email", "a@a"); git(f, "config", "user.name", "a")
+        src = f / "src/main/java/net/m"; src.mkdir(parents=True)
+        body = lambda k, a=1, e=1, d="int d;": f"class {k} {{\n  int a = {a};\n  int b;\n  int c;\n  {d}\n  int e = {e};\n}}\n"
+        for k in "PQRS":
+            (src / f"{k}.java").write_text(body(k), encoding="utf-8")
+        (f / ".gitignore").write_text("build/\n", encoding="utf-8")
+        (f / "scenario.json").write_text(json.dumps({x: {"before": 0} for x in ("1.21.4", "1.21.5", "1.21.6")}), encoding="utf-8")
+        git(f, "add", "-A"); git(f, "commit", "-qm", "port")
+        git(f, "checkout", "-qb", "layer")
+        mv = f / ".multiversion"
+        for tg, inh in (("1.21.4", None), ("1.21.5", "1.21.4"), ("1.21.6", "1.21.5")):
+            (mv / "targets" / tg / "java/net/m").mkdir(parents=True)
+            (mv / "targets" / tg / "target.properties").write_text(f"inherits={inh}\n" if inh else "x=1\n", encoding="utf-8")
+        (mv / "targets/1.21.4/renames.tsv").write_text("Unused\tUnused2\n", encoding="utf-8")
+        (mv / "base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (mv / "tools").mkdir()
+        (mv / "tools/layer.py").write_text((HERE.parent / "templates/fork-layer/tools/layer.py").read_text(encoding="utf-8"), encoding="utf-8")
+        ov4, ov5 = mv / "targets/1.21.4/java/net/m", mv / "targets/1.21.5/java/net/m"
+        for k in "PQS":
+            (ov4 / f"{k}.java").write_text(body(k, a=9), encoding="utf-8")      # 1.21.4 changes the line the authors change
+        (ov4 / "R.java").write_text(body("R", e=7), encoding="utf-8")            # 1.21.4 changes another line: merges
+        (ov5 / "P.java").write_text(body("P", e=5), encoding="utf-8")            # 1.21.5's own copy: merges by itself
+        (ov5 / "R.java").write_text(body("R", e=7, d="long d;"), encoding="utf-8")
+        git(f, "add", "-A"); git(f, "commit", "-qm", "layer")
+        old = git(f, "rev-parse", "--short", "HEAD").strip()
+        git(f, "checkout", "-q", "port")
+        for k in "PQRS":
+            (src / f"{k}.java").write_text(body(k, a=2), encoding="utf-8")
+        git(f, "commit", "-qam", "upstream change"); git(f, "checkout", "-q", "layer")
+        r = sh(sys.executable, str(LS), "merge", "--repo", str(f), "--port-ref", "port")
+        expect(r.returncode == 0, f"merge: {r.stdout}{r.stderr}")
+        rj = lambda tg: mv / "targets" / tg / "REMERGE.json"
+        load = lambda tg: json.loads(rj(tg).read_text(encoding="utf-8")) if rj(tg).exists() else {"conflicts": []}
+        sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+        q4 = ".multiversion/targets/1.21.4/java/net/m/Q.java"
+        p4 = ".multiversion/targets/1.21.4/java/net/m/P.java"
+        s4 = ".multiversion/targets/1.21.4/java/net/m/S.java"
+        # 1. the child alone (--targets 1.21.5): its ancestor is not re-merged in this run
+        r = sh(sys.executable, str(LS), "run", "--repo", str(f), "--targets", "1.21.5", "--json", str(tmp / "o.json"), env=env)
+        by = {x["target"]: x for x in json.loads((tmp / "o.json").read_text(encoding="utf-8"))["targets"]}
+        p5, r5 = (ov5 / "P.java").read_text(encoding="utf-8"), (ov5 / "R.java").read_text(encoding="utf-8")
+        expect("int a = 2;" in p5 and "int e = 5;" in p5 and "int a = 2;" in r5 and "long d;" in r5 and "int e = 7;" in r5,
+               f"--targets child: its own copies of inherited overlays still take the authors' change: {p5} {r5}")
+        expect((ov4 / "P.java").read_text(encoding="utf-8") == body("P", a=9) and (ov4 / "R.java").read_text(encoding="utf-8")
+               == body("R", e=7) and not rj("1.21.4").exists() and not rj("1.21.6").exists(), "--targets 1.21.5 writes nothing else")
+        e5 = load("1.21.5")
+        expect(rj("1.21.5").exists() and [c["overlay"] for c in e5["conflicts"]] == [q4, s4]
+               and all("inherits an overlay that did not take the authors' change" in c["reason"] for c in e5["conflicts"])
+               and e5["conflicts"][:1] and e5["conflicts"][0]["digest"] == sha(f / q4) and e5["conflicts"][0]["since"].startswith(old + ".."),
+               f"--targets child: an overlay it inherits as is, unmerged in its ancestor, is recorded, not skipped: {e5}")
+        expect(r.returncode == 10 and by["1.21.5"]["class"] == "rework", f"so the child is rework: {by.get('1.21.5')} {r.stdout}")
+        res5 = (mv / "targets/1.21.5/RESIDUE.md").read_text(encoding="utf-8") if (mv / "targets/1.21.5/RESIDUE.md").exists() else ""
+        expect("Q.java" in res5 and "inherits an overlay" in res5, f"and listed in its RESIDUE.md section: {res5}")
+        git(f, "add", "-A"); git(f, "commit", "-qm", "1.21.5 re-merged", "--allow-empty")
+        # 2. every target: the ancestor conflicts on P, Q, S; the child is flagged for Q, S (it inherits them as they are)
+        r = sh(sys.executable, str(LS), "remerge", "--repo", str(f), "--old", "HEAD~1^1", "--json", str(tmp / "r.json"))
+        e4, e5, e6 = load("1.21.4"), load("1.21.5"), load("1.21.6")
+        expect(r.returncode == 10 and [c["overlay"] for c in e4["conflicts"]] == [p4, q4, s4]
+               and all(c["digest"] == sha(f / c["overlay"]) and "conflicting hunk" in c["reason"] for c in e4["conflicts"]),
+               f"a conflict is a REMERGE.json entry with the overlay's digest: {e4} {r.stdout}")
+        expect("int a = 2;" in (ov4 / "R.java").read_text(encoding="utf-8"), "the ancestor's clean overlay merged")
+        expect([c["overlay"] for c in e5["conflicts"]] == [q4, s4] and [c["overlay"] for c in e6["conflicts"]] == [q4, s4],
+               f"an ancestor's conflict flags every target that inherits that overlay as is, not the one with its own merged "
+               f"copy: {e5} {e6}")
+        # 3. a person merges 1.21.4's Q by hand: the re-run clears it there AND in every target that inherits it
+        (ov4 / "Q.java").write_text(body("Q", a=2, e=9), encoding="utf-8")
+        r = sh(sys.executable, str(LS), "remerge", "--repo", str(f), "--old", "HEAD~1^1")
+        e4, e5, e6 = load("1.21.4"), load("1.21.5"), load("1.21.6")
+        expect(r.returncode == 10 and [c["overlay"] for c in e4["conflicts"]] == [p4, s4] and "| 1.21.4 | 4 | 0 | 0 | 1 | 2 |" in r.stdout,
+               f"an overlay edited since it was recorded is a person's resolution: its entry goes: {e4} {r.stdout}")
+        expect([c["overlay"] for c in e5["conflicts"]] == [s4] and [c["overlay"] for c in e6["conflicts"]] == [s4],
+               f"the hand-merged ancestor: the targets that inherit it are handled on the re-run: {e5} {e6}")
+        # 4. the person resolves P too; S stays
+        (ov4 / "P.java").write_text(body("P", a=2, e=9), encoding="utf-8")
+        r = sh(sys.executable, str(LS), "remerge", "--repo", str(f), "--old", "HEAD~1^1")
+        expect(r.returncode == 10 and [c["overlay"] for c in load("1.21.4")["conflicts"]] == [s4], f"P resolved, S left: {load('1.21.4')}")
+        # 5. the authors move again and take back the line S conflicted on: S now merges against the authors' file the
+        # entry was recorded against (its `since`), so the entry goes, and an empty REMERGE.json is deleted
+        git(f, "add", "-A"); git(f, "commit", "-qm", "resolved by hand", "--allow-empty")
+        git(f, "checkout", "-q", "port")
+        (src / "S.java").write_text(body("S", a=1, d="int d = 4;"), encoding="utf-8")
+        git(f, "commit", "-qam", "upstream change 2"); git(f, "checkout", "-q", "layer")
+        r = sh(sys.executable, str(LS), "merge", "--repo", str(f), "--port-ref", "port")
+        expect(r.returncode == 0, f"second merge: {r.stdout}{r.stderr}")
+        r = sh(sys.executable, str(LS), "remerge", "--repo", str(f), "--old", "HEAD^1")
+        s4n = (ov4 / "S.java").read_text(encoding="utf-8")
+        expect(r.returncode == 0 and "int a = 9;" in s4n and "int d = 4;" in s4n and not rj("1.21.4").exists()
+               and not rj("1.21.5").exists() and not rj("1.21.6").exists(),
+               f"a later clean merge removes the entry; an empty REMERGE.json is deleted: {r.stdout} {s4n}")
+        expect(not [p for p in f.rglob("*.java") if "<<<<<<<" in p.read_text(encoding="utf-8")], "no conflict marker in the tree")
 
 
 def main():
@@ -312,6 +420,7 @@ def main():
         expect(r.returncode == 1 and "conflicts" in r.stdout and git(f, "rev-parse", "HEAD") == h
                and not git(f, "status", "--porcelain").strip(), f"conflict aborted cleanly: {r.stdout}")
     remerge_checks()
+    remerge_ledger_checks()
     print("test-layer-sync:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
