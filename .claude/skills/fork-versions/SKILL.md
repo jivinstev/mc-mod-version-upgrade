@@ -237,6 +237,23 @@ fork's overlays: that code is theirs, ported in their fork. The similarity gate 
 the pre-commit and pre-push hooks and refuses template Java that matches the NeoForge/Minecraft/GeckoLib sources on
 the machine; a refusal is fixed by rewriting from the API, never by an annotation. Give a worker fixer this rule.
 
+**A version accounts for the base's behaviour.** Before the first target, `python3 tools/layer-inventory.py build --repo
+DIR` writes `.multiversion/INVENTORY.json` from the authors' base sources: every mixin target and injection (method,
+`@At`), event listener by event type, render-path class, render API use, core shader with its uniforms and samplers,
+and registry the mod adds to (commit it; re-run it after a keep-current merge brings new authors' code -- `check`
+warns when `src/` changed since). For each target, once it compiles, `python3 tools/layer-inventory.py check --repo
+DIR --target <t>` reads the target's prepared tree and says, per item, `same` (also through the rename tables),
+`changed` / `moved` (accounted only by a reviewed `STUBS.json` entry for the file, the target's `REVIEW.md` naming it, or a
+`BEHAVIOUR.json` entry with a `where` and a `review`), `dropped` (a `drops.txt` comment, or a `BEHAVIOUR.json` entry with a
+`reason`) or `unaccounted`: exit 16 lists the unaccounted ones, and the target is not done until it exits 0 (the account
+is written to `.multiversion/targets/<t>/INVENTORY-CHECK.json`; a layer fork with no `INVENTORY.json` counts as not
+accounted). Record each
+in `.multiversion/targets/<t>/BEHAVIOUR.json` (`[{"item": "<id from the list>", "status": "dropped", "reason": "..."}]`, or
+`"status": "moved", "where": "...", "review": "..."`; an `item` with `*` covers a group); a later target inherits its
+parents' entries. Up to 1.21.4 a core shader's json declares its uniforms and samplers; from 1.21.5 the json is no longer
+read, so each must be named by the target's Java (its `RenderPipeline`) unless vanilla supplies it -- the check that
+finds a missing sampler before a client does. `fork-port.py` does not run it yet: run it yourself at 0 errors.
+
 **Why Gate C is on the list ("Done", item 2).** Gates A/B and the audits cannot see what only a client builds --
 models, render layers, shaders -- and every dependent-fork version so far that was green at A/B still failed in a real
 client (a missing model part at launch, a missing shader sampler at spawn). So `fork-port.py` never reports a target
@@ -290,7 +307,8 @@ review again ("Done", item 4).
 1. **Measure** every targeted line against the base source before porting anything (one compile per line with
    `-Pminecraft_version/-Pneo_version` and the AT re-derived, `burndown-count.sh`): the counts decide the order
    and set expectations. Post them on the fork's tracking issue.
-2. **Set up**: `make-fork-layer.py init --repo DIR` (once), then `add-target --repo DIR --target <t>` -- versions,
+2. **Set up**: `make-fork-layer.py init --repo DIR` (once) and `layer-inventory.py build --repo DIR` (once, see "A
+   version accounts for the base's behaviour"), then `add-target --repo DIR --target <t>` -- versions,
    Java, GeckoLib and `inherits` (the nearest lower target) come from versions.json, and `sync-shared` installs the
    shared library (`.multiversion/shared/<t>/`: rows every fork inherits + helper classes in the fork's
    `mv_package`) and refreshes the layer's machinery (`layer.gradle`, `build.sh`, `.multiversion/tools/`) from the
@@ -365,7 +383,9 @@ review again ("Done", item 4).
    one item): `stub` (each `STUBS.json` entry, with its review and its `hooks` / `recheck` fields), `overlay` (an
    overlay that replaces a whole authors' file, flagged `mixin` / `client`), `catalogue` (a rename row whose note, or
    the CATALOG entry it cites, says the gates do not cover it, and that fired on the target), `dropped-dep` (a `DEPS.md`
-   row that dropped an optional integration) and `preview` (a target marked `preview=true`). A single-version fork is
+   row that dropped an optional integration), `preview` (a target marked `preview=true`) and, when the fork has
+   `.multiversion/INVENTORY.json`, `behaviour` (each base inventory item that is not the same on the target --
+   changed, moved, dropped or unaccounted -- with its detail). A single-version fork is
    its one version with no layer section. Add the fork's open issues labelled for the layer (`gh issue list --repo
    OWNER/FORK --label <label> --state open`). Then publish a **Claude Code artifact** (never checked in) for the
    maintainer: per Minecraft version, the changes that need a human eye -- for each, **what changed** and which version
