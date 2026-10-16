@@ -21,6 +21,7 @@ Per-platform jars (both opt-in; without them the workflow is byte-for-byte what 
 
     python3 tools/port-ci.py promote --fork <owner/repo> --tag <release tag> --played-by <github login>
                              [--notes "<what was played>"] [--branch <port branch>] [--print]
+                             [--with-dependency <owner/repo> ...]
 
 `promote` turns a pre-release into a full Release once a person has played it. It does not edit the release itself:
 it dispatches the fork's own Port CI workflow with promote=<tag>, which checks the tag is a pre-release that
@@ -28,6 +29,9 @@ workflow published from that branch and rewrites "Pre-release until played by a 
 when. It runs `gh workflow run` when gh is logged in; otherwise (or with --print) it prints the dispatch, which an
 agent can send through its GitHub connector (workflow port-ci.yml, ref = the branch, inputs promote / played_by /
 played_notes). A nightly or unattended run must never promote: promotion is the "a person played it" gate.
+Don't exceed your dependency: a dependent may cut pre-releases pinned to a dependency's pre-release (the pair is what
+a person plays), but `promote` refuses while a dependency the branch's workflow pins (--dep-jar) is still a
+pre-release, unless --with-dependency names it -- the person promotes that dependency together with this one.
 
 The workflow downloads the Port CI kit (tools/port-ci-kit.py) -- a release asset holding only the gate runner and
 what it needs -- pinned by version and sha256, rather than checking this repository out. Standard library only.
@@ -384,14 +388,60 @@ def promote_dispatch(fork, tag, who, notes="", branch=None):
     return branch or branch_for(tag), {"promote": tag, "played_by": who, "played_notes": notes}
 
 
+PIN_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/releases/download/([^/\"'\s]+)/")
+
+
+def pinned_releases(workflow_text):
+    """[(owner/repo, tag)] of the dependency release assets a Port CI workflow pins (--dep-jar, --dep-jar-variant: the
+    jars it installs into mavenLocal; the Port CI kit's own download is not a dependency)."""
+    return sorted({m for ln in (workflow_text or "").splitlines() if ".m2/repository" in ln for m in PIN_RE.findall(ln)})
+
+
+def dependency_blockers(workflow_text, release_of, with_deps=(), own=None):
+    """Why promoting must wait for a dependency: each pinned dependency release that is still a pre-release (or that
+    cannot be read), unless it is named in with_deps (promoted together). release_of(repo, tag) -> the GitHub release
+    JSON, or raises. A workflow pinning nothing (a fork with no fork-port dependency) never waits."""
+    out, named = [], {d.lower() for d in with_deps}
+    for repo, tag in pinned_releases(workflow_text):
+        if own and repo.lower() == own.lower():
+            continue
+        if repo.lower() in named:
+            continue
+        try:
+            rel = release_of(repo, tag)
+        except Exception as e:                              # noqa: BLE001 -- unknown is not "a full Release"
+            out.append(f"{repo}@{tag}: cannot tell whether it is a full Release ({e})")
+            continue
+        if rel.get("prerelease") or rel.get("draft"):
+            out.append(f"{repo}@{tag} is still a pre-release")
+    return out
+
+
 def promote(argv):
     ap = argparse.ArgumentParser(prog="port-ci.py promote", description="promote a played pre-release to a Release")
     ap.add_argument("--fork", required=True); ap.add_argument("--tag", required=True)
     ap.add_argument("--played-by", required=True); ap.add_argument("--notes", default="")
     ap.add_argument("--branch"); ap.add_argument("--print", action="store_true")
+    ap.add_argument("--with-dependency", action="append", default=[], metavar="OWNER/REPO",
+                    help="a pinned dependency still a pre-release that the person promotes together with this one")
     a = ap.parse_args(argv)
     ref, inputs = promote_dispatch(a.fork, a.tag, a.played_by, a.notes, a.branch)
-    import json
+    import json, base64
+    try:
+        meta = json.loads(_get(f"https://api.github.com/repos/{a.fork}/contents/.github/workflows/port-ci.yml?ref={ref}"))
+        wf = base64.b64decode(meta.get("content", "")).decode("utf-8", "replace")
+    except Exception as e:                                  # noqa: BLE001
+        wf = None
+        why = [f"cannot read {a.fork}'s port-ci.yml on {ref} to check its pinned dependencies ({e})"]
+    if wf is not None:
+        why = dependency_blockers(wf, lambda r_, t_: json.loads(_get(f"https://api.github.com/repos/{r_}/releases/tags/{t_}")),
+                                  a.with_dependency, a.fork)
+    if why:
+        sys.exit("not promoting " + a.tag + ": a dependent is never a full Release ahead of its dependency --\n  "
+                 + "\n  ".join(why) + "\npromote the dependency first, or promote both together: pass "
+                 "--with-dependency <owner/repo> for each one the person promotes alongside (and promote it too)")
+    for d in a.with_dependency:
+        print(f"note: {d} must be promoted together with {a.tag} (port-ci.py promote --fork {d} ...)")
     try:
         rel = json.loads(_get(f"https://api.github.com/repos/{a.fork}/releases/tags/{a.tag}"))
     except Exception as e:                                  # no network, or no such release: say which
@@ -720,6 +770,20 @@ def self_check():
     ok &= branch_for("x_y-2.0+b3-mc1.21.1-release-r2") == "neoforge-1.21.1-release"
     ok &= promote_dispatch("o/r", "x-1.0-mc1.21.1", "some-one", "beat the boss") == (
         "neoforge-1.21.1", {"promote": "x-1.0-mc1.21.1", "played_by": "some-one", "played_notes": "beat the boss"})
+    # don't exceed your dependency: the release (a pre-release) may pin a dependency's pre-release -- the workflow
+    # renders it like any pin, and nothing on the release side reads the dependency's status -- but promote waits
+    # while a pinned dependency is a pre-release, unless the person promotes it alongside (--with-dependency). A fork
+    # whose workflow pins nothing (the single-version fork with no fork-port dependency) is unchanged: no blocker.
+    pre_pin = fixture(deps=True).replace("lib-1.0-mc1.21.1", "lib-1.1-mc1.21.1")
+    ok &= "o/lib/releases/download/lib-1.1-mc1.21.1/" in pre_pin and "--prerelease" in pre_pin
+    rels = {("o/lib", "lib-1.1-mc1.21.1"): {"prerelease": True}, ("o/lib", "lib-1.0-mc1.21.1"): {"prerelease": False}}
+    look = lambda r_, t_: rels[(r_, t_)]
+    ok &= pinned_releases(pre_pin) == [("o/lib", "lib-1.1-mc1.21.1")]
+    ok &= dependency_blockers(pre_pin, look) == ["o/lib@lib-1.1-mc1.21.1 is still a pre-release"]
+    ok &= dependency_blockers(pre_pin, look, ["o/lib"]) == []
+    ok &= dependency_blockers(fixture(deps=True), look) == []
+    ok &= dependency_blockers(fixture(deps=False), look) == [] and pinned_releases(fixture(deps=False)) == []
+    ok &= dependency_blockers(pre_pin, lambda r_, t_: (_ for _ in ()).throw(OSError("offline")))[0].startswith("o/lib@lib-1.1-mc1.21.1: cannot tell")
     for bad in (("o/r", "x-1.0-mc1.21.1", ""), ("o/r", "x-1.0-mc1.21.1", "a b"), ("o/r", "x-1.0-mc1.21.1", "-x"),
                 ("nope", "x-1.0-mc1.21.1", "me"), ("o/r", "not-a-tag", "me")):
         try:
