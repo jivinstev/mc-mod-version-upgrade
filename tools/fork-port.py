@@ -941,11 +941,16 @@ def prepared_tree(repo, t, prepare=False):
     # a tree prepared in the other mode than the layer now says is stale. Off and unstamped -- every default layer --
     # reads as before
     key_on, supported = load("layer_sync", "layer-sync.py").inherited_rows_setting(mv)
-    on_now, on_tree = key_on and supported, (out.parent / "java.inherited_overlay_rows").is_file()
+    stamp = out.parent / "java.inherited_overlay_rows"
+    # a stamp counts only when written after the tree it sits beside: a layer.py that predates the key re-prepares the
+    # tree without touching it, and an off tree it left behind must not read as on forever
+    on_tree = stamp.is_file() and out.is_dir() and stamp.stat().st_mtime_ns >= tree_time()
+    on_now = key_on and supported
     if not why and on_now != on_tree:
         why = (f"prepared with inherited_overlay_rows {'on' if on_tree else 'off'}, and the layer now has it "
                f"{'on' if on_now else 'off'}")
     if why and prepare and (mv / "tools/layer.py").is_file():
+        stamp.unlink(missing_ok=True)          # layer.py writes a new one when it prepares on
         r = subprocess.run([sys.executable, str(mv / "tools/layer.py"), "prepare", "--target", t, "--src", str(src),
                             "--out", str(out)], cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
                            errors="replace", timeout=900)
@@ -4349,6 +4354,26 @@ def self_check_review131():
             old_layer = tpl_layer.replace("def inherited_overlay_rows(", "def _gone_(")
             step("minecraft_version=1.21.1\ninherited_overlay_rows=true\n", None,
                  "a layer.py that predates the key ignores it: the off tree stays current", layer_text=old_layer)
+            # downgrade: an on-mode tree (stamped), then a layer.py that predates the key re-prepares it (as the Gradle
+            # build does) and never touches the stamp -- the tree is off now, and current, not stale forever
+            w(repo / ".multiversion/tools/layer.py", tpl_layer)
+            step("minecraft_version=1.21.1\ninherited_overlay_rows=true\n", None, "on again: current", reprep=True)
+            expect(stamp.is_file(), "stamped again")
+            older = (tpl_layer.replace("def inherited_overlay_rows(", "def _predates_it(")
+                     .replace("        if inherited_overlay_rows():", "        if False:")
+                     .replace("        if stamp is not None and stamp.is_file():\n            stamp.unlink()", "")
+                     .replace("        if rc == 0 and inherited_hits is not None and stamp is not None:\n"
+                              "            stamp.write_text(f\"{INHERITED_ROWS}=true\\n\", encoding=\"utf-8\")", ""))
+            expect(older.count("stamp.unlink()") == 0 and "stamp.write_text" not in older, "the older layer.py stand-in")
+            w(repo / ".multiversion/tools/layer.py", older)
+            __import__("time").sleep(0.05)
+            r = subprocess.run([sys.executable, str(repo / ".multiversion/tools/layer.py"), "prepare", "--target", "1.21.4",
+                                "--src", "src/main/java", "--out", "build/mc1.21.4/mv/java"], cwd=str(repo),
+                               capture_output=True, text=True, encoding="utf-8")
+            expect(r.returncode == 0 and stamp.is_file(), f"the older layer.py prepared and left the stamp: {r.stderr[-300:]}")
+            got = mode(target_done(repo, "1.21.4"))
+            expect(not [x for x in got if "inherited_overlay_rows" in x],
+                   f"a stamp older than the tree beside it is ignored (an older layer.py re-prepared it off): {got}")
             w(repo / ".multiversion/tools/layer.py", tpl_layer)
             if keep_bp is None:
                 bp.unlink()

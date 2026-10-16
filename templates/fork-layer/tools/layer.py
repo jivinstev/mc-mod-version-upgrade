@@ -7,7 +7,8 @@
         drop list -- the nearer target wins -- and run prepare-sources.py over the authors' tree. Overlays are
         copied as they are; with `inherited_overlay_rows=true` in .multiversion/base.properties (opt-in) an overlay
         T inherits from an older target A is first run through the rows of the targets after A up to T; such a
-        tree is stamped (<out>.inherited_overlay_rows beside it), and an off-mode prepare removes the stamp.
+        tree is stamped (build/mc<T>/mv/java.inherited_overlay_rows, for the main set's default --out only: the tree
+        tools/fork-port.py and the Gradle build use), and an off-mode prepare of it removes the stamp.
   layer.py mixins    --target T [--config FILE]
         Print T's mixin changes per config file (mixin_add over the chain, then T's own mixin_add_only and
         mixin_remove_only; layer.gradle applies the same set at processResources), or, with --config, the
@@ -354,10 +355,12 @@ def cmd_prepare(a):
         # records its hits next to its output; main (prepared last) merges every set's and reports once.
         out = pathlib.Path(a.out)
         hits_dir = out.parent
-        # the mode the tree is prepared in, beside it (tools/fork-port.py's staleness check reads it): written only
-        # when on, so a default layer's build directory is as before; a stamp left by an earlier on-mode run goes
-        stamp = out.parent / f"{out.name}.{INHERITED_ROWS}"
-        if stamp.is_file():
+        # the mode the tree is prepared in, beside it (tools/fork-port.py's staleness check reads it): only for the main
+        # set's default tree, build/mc<T>/mv/java (the Gradle build's and fork-port's), and written only when on, so a
+        # default layer's build directory is as before; a stamp left by an earlier on-mode run goes
+        default = (MV.parent / "build" / f"mc{a.target}" / "mv" / "java").resolve()
+        stamp = out.parent / f"{out.name}.{INHERITED_ROWS}" if a.set == "main" and out.resolve() == default else None
+        if stamp is not None and stamp.is_file():
             stamp.unlink()
         if a.set != "main":
             args += ["--hits-out", str(hits_dir / f"hits-{a.set}.txt")]
@@ -378,7 +381,7 @@ def cmd_prepare(a):
             add_shared_helpers(snames, out)
         if rc == 0 and load_props(MV / "targets" / a.target / "target.properties").get("strip_onlyin") == "true":
             strip_onlyin(out)
-        if rc == 0 and inherited_hits is not None:
+        if rc == 0 and inherited_hits is not None and stamp is not None:
             stamp.write_text(f"{INHERITED_ROWS}=true\n", encoding="utf-8")
         return rc
 
@@ -613,13 +616,19 @@ def check_inherited_rows(expect):
                     trees[(mode, t)] = (tree, "".join(out_log))
             expect(rows_after("1.21.5", "1.21.3", mv) == (["1.21.5", "1.21.4"], ["1.21.5", "1.21.4"]),
                    f"rows after A, nearest first: {rows_after('1.21.5', '1.21.3', mv)}")
-            stamps = {m: sorted(x.name for x in d.glob(f"out-{m}-*.{INHERITED_ROWS}")) for m in ("none", "false", "on")}
-            expect(stamps["none"] == stamps["false"] == [] and len(stamps["on"]) == 3
-                   and (d / f"out-on-1.21.5.{INHERITED_ROWS}").read_text(encoding="utf-8") == f"{INHERITED_ROWS}=true\n",
-                   f"an on-mode prepare stamps its tree, an off one writes nothing beside it: {stamps}")
+            # the stamp: beside the default main tree only (build/mc<t>/mv/java), written on, removed off
+            expect(not list(d.glob(f"*.{INHERITED_ROWS}")), "a custom --out gets no stamp beside it")
+            dflt = d / "build/mc1.21.5/mv/java"
+            st = d / f"build/mc1.21.5/mv/java.{INHERITED_ROWS}"
+            cmd_prepare(argparse.Namespace(target="1.21.5", src=str(src), out=str(dflt), set="main"))
+            expect(st.is_file() and st.read_text(encoding="utf-8") == f"{INHERITED_ROWS}=true\n",
+                   "an on-mode prepare of build/mc<t>/mv/java stamps it")
+            cmd_prepare(argparse.Namespace(target="1.21.5", src=str(src), out=str(d / "build/mc1.21.5/mv/cf-java"), set="cf"))
+            expect(not (d / f"build/mc1.21.5/mv/cf-java.{INHERITED_ROWS}").exists(), "another source set gets no stamp")
             (mv / "base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
-            cmd_prepare(argparse.Namespace(target="1.21.5", src=str(src), out=str(d / "out-on-1.21.5"), set="main"))
-            expect(not (d / f"out-on-1.21.5.{INHERITED_ROWS}").exists(), "re-prepared off: the stamp goes")
+            cmd_prepare(argparse.Namespace(target="1.21.5", src=str(src), out=str(dflt), set="main"))
+            expect(not st.exists() and not list((d / "build/mc1.21.5/mv").glob(f"*.{INHERITED_ROWS}")),
+                   "re-prepared off: the stamp goes, and nothing is written in its place")
             # a non-UTF-8 inherited overlay (prepare-sources stops on a non-UTF-8 authors' file; this stops the same way)
             (src / "m/L.java").write_text("class L {}\n", encoding="utf-8")       # it replaces an authors' file
             (mv / "targets/1.21.3/java/m/L.java").write_bytes(b"class L { String s = \"\xe9\"; }\n")

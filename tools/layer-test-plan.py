@@ -102,16 +102,14 @@ def shared_chain(mv, target):
 
 def inherited_overlay_rows(mv, warn=False):
     """.multiversion/base.properties `inherited_overlay_rows=true` (opt-in) AND the fork's .multiversion/tools/layer.py
-    knows the key -- an older copy prepares as if it were off, so the plan reads it as off too (tools/layer-sync.py
-    inherited_rows_setting(), the same test). warn: say so on stderr when the key is set and layer.py ignores it."""
-    p, lp = pathlib.Path(mv) / "base.properties", pathlib.Path(mv) / "tools" / "layer.py"
-    key_on = p.is_file() and read_props(p).get("inherited_overlay_rows", "").lower() == "true"
-    supported = lp.is_file() and "def inherited_overlay_rows(" in lp.read_text(encoding="utf-8", errors="replace")
-    if warn and key_on and not supported:
-        print("layer-test-plan: WARNING: .multiversion/base.properties sets inherited_overlay_rows=true, but "
-              ".multiversion/tools/layer.py predates inherited_overlay_rows and IGNORES it -- run sync-shared "
-              "(python3 tools/make-fork-layer.py sync-shared --repo DIR)", file=sys.stderr)
-    return key_on and supported
+    knows the key -- an older copy prepares as if it were off, so the plan reads it as off too: the one test,
+    tools/layer-sync.py inherited_rows_setting(). warn: say so on stderr when the key is set and layer.py ignores it."""
+    spec = importlib.util.spec_from_file_location("ltp_layer_sync", HERE / "layer-sync.py")
+    ls = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ls)
+    if warn and ls.inherited_rows_unsupported(mv):
+        print(f"layer-test-plan: {ls.inherited_rows_unsupported(mv)}", file=sys.stderr)
+    return all(ls.inherited_rows_setting(mv))
 
 
 def runs(targets, order):
@@ -621,6 +619,20 @@ def self_check():
         with contextlib.redirect_stderr(err):
             plan_fork(lf, cat)
         expect(err.getvalue() == "", f"no key: no warning, whatever layer.py is: {err.getvalue()!r}")
+        # one test of the setting, layer-sync's: the plan delegates to it, and agrees with it on every case here
+        import inspect
+        spec = importlib.util.spec_from_file_location("ltp_ls_check", HERE / "layer-sync.py")
+        lsm = importlib.util.module_from_spec(spec); spec.loader.exec_module(lsm)
+        agree = []
+        for body in ("minecraft_version=1.21.1\n", "inherited_overlay_rows=true\n", "inherited_overlay_rows = TRUE\n",
+                     "inherited_overlay_rows=false\n"):
+            for lt in (tpl_layer, tpl_layer.replace("def inherited_overlay_rows(", "def _predates_it(")):
+                w(mvd / "base.properties", body); w(mvd / "tools/layer.py", lt)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    agree.append(inherited_overlay_rows(mvd) == all(lsm.inherited_rows_setting(mvd)))
+        w(mvd / "base.properties", "minecraft_version=1.21.1\n")
+        expect(all(agree) and ".inherited_rows_setting(mv)" in inspect.getsource(inherited_overlay_rows),
+               f"layer-test-plan reads the setting through layer-sync's inherited_rows_setting(): {agree}")
         (mvd / "tools/layer.py").unlink()
         txt = render([p, plan_fork(sv, cat)])
         expect("## Minecraft 1.21.5: " in txt and "preview (built and gated, not published): 1.21.5" in txt

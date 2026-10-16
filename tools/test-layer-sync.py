@@ -519,6 +519,94 @@ def descendant_checks():
                f"an older overlay retired in the same run: the copy is kept (its tree would get new.A, not newer.A): {got}")
 
 
+def later_target_off_checks():
+    """Key absent (the default): a copy is redundant / retired only when deleting it changes no later target's tree,
+    judged by exactly what layer.py writes -- the overlay verbatim, then strip_onlyin of the later target (layer.py
+    strips its whole tree, overlays included). Also: layer-sync's strip is layer.py's own, CRLF files included."""
+    def fork(tmp, targets, x_old, copy, base="minecraft_version=1.21.1\n"):
+        f = tmp / "fork"; f.mkdir()
+        git(f, "init", "-q", "-b", "port"); git(f, "config", "user.email", "a@a"); git(f, "config", "user.name", "a")
+        src = f / "src/main/java/com/example/mod"; src.mkdir(parents=True)
+        with open(src / "X.java", "w", encoding="utf-8", newline="") as fh:
+            fh.write(x_old)
+        (f / ".gitignore").write_text("build/\n", encoding="utf-8")
+        git(f, "add", "-A"); git(f, "commit", "-qm", "port"); git(f, "checkout", "-qb", "layer")
+        mv = f / ".multiversion"
+        for tg, inh, row, extra in targets:
+            (mv / "targets" / tg / "java/com/example/mod").mkdir(parents=True)
+            (mv / "targets" / tg / "target.properties").write_text((f"inherits={inh}\n" if inh else "x=1\n") + extra,
+                                                                   encoding="utf-8")
+            if row:
+                (mv / "targets" / tg / "renames.tsv").write_text(row + "\n", encoding="utf-8")
+        (mv / "base.properties").write_text(base, encoding="utf-8")
+        (mv / "tools").mkdir()
+        for n in ("layer.py", "prepare-sources.py"):
+            (mv / "tools" / n).write_text((HERE.parent / "templates/fork-layer/tools" / n).read_text(encoding="utf-8"), encoding="utf-8")
+        with open(mv / "targets/1.21.5/java/com/example/mod/X.java", "w", encoding="utf-8", newline="") as fh:
+            fh.write(copy)
+        git(f, "add", "-A"); git(f, "commit", "-qm", "layer")
+        return f, src, mv
+
+    def kinds(f, tmp):
+        r = sh(sys.executable, str(LS), "overlays", "--repo", str(f), "--json", str(tmp / "ov.json"))
+        expect(r.returncode == 0, f"overlays ran: {r.stdout}{r.stderr}")
+        return {x["target"]: {pathlib.PurePosixPath(y["file"]).name: (y["kind"], y.get("kept_for")) for y in x["files"]}
+                for x in json.loads((tmp / "ov.json").read_text(encoding="utf-8"))}
+
+    def tree(f, tg, out):
+        r = sh(sys.executable, str(f / ".multiversion/tools/layer.py"), "prepare", "--target", tg, "--src", "src/main/java",
+               "--out", str(out), cwd=str(f))
+        expect(r.returncode == 0, f"prepare {tg}: {r.stdout}{r.stderr}")
+        return (out / "com/example/mod/X.java").read_bytes()
+
+    def remerge_retired(f, src, tmp, x_new):
+        git(f, "checkout", "-q", "port")
+        (src / "X.java").write_text(x_new, encoding="utf-8"); git(f, "commit", "-qam", "authors")
+        git(f, "checkout", "-q", "layer"); git(f, "merge", "-q", "--no-ff", "-m", "merge", "port")
+        r = sh(sys.executable, str(LS), "remerge", "--repo", str(f), "--old", "HEAD^1", "--dry-run", "--json", str(tmp / "rm.json"))
+        expect(r.returncode == 0, f"remerge: {r.stdout}{r.stderr}")
+        return json.loads((tmp / "rm.json").read_text(encoding="utf-8"))["1.21.5"]
+    p5 = ".multiversion/targets/1.21.5/java/com/example/mod/X.java"
+    # (a) a later strip_onlyin target, no copy of its own: deleting 1.21.5's copy (identical to the authors' file)
+    #     changes nothing there -- redundant, and the re-merge retires it
+    x = "package com.example.mod;\nclass X {\n    @OnlyIn(Dist.CLIENT)\n    void c() {}\n    int k1;\n    int k2;\n    int k3;\n    int v() { return 1; }\n}\n"
+    with tempfile.TemporaryDirectory() as t:
+        tmp = pathlib.Path(t)
+        f, src, mv = fork(tmp, [("1.21.5", None, "", ""), ("1.21.6", "1.21.5", "", "strip_onlyin=true\n")], x, x)
+        k = kinds(f, tmp)
+        w = tree(f, "1.21.6", tmp / "w"); (mv / "targets/1.21.5/java/com/example/mod/X.java").unlink()
+        wo = tree(f, "1.21.6", tmp / "wo"); git(f, "checkout", "-q", "--", ".")
+        expect(w == wo and k["1.21.5"]["X.java"] == ("redundant", None),
+               f"off, a later strip_onlyin target: the copy is redundant (deleting it changes nothing there): {k} {w == wo}")
+        got = remerge_retired(f, src, tmp, x.replace("return 1;", "return 2;"))
+        expect(p5 in got["retired"], f"off, a later strip_onlyin target: the re-merge retires the copy: {got}")
+    # (b) a later target with a row the copy (verbatim there) never takes: deleting the copy renames the file there
+    x = "package com.example.mod;\nclass X {\n    old.B b;\n    int k1;\n    int k2;\n    int k3;\n    int v() { return 1; }\n}\n"
+    with tempfile.TemporaryDirectory() as t:
+        tmp = pathlib.Path(t)
+        f, src, mv = fork(tmp, [("1.21.5", None, "", ""), ("1.21.6", "1.21.5", "old.B\tnew.B", "")], x, x)
+        k = kinds(f, tmp)
+        w = tree(f, "1.21.6", tmp / "w"); (mv / "targets/1.21.5/java/com/example/mod/X.java").unlink()
+        wo = tree(f, "1.21.6", tmp / "wo"); git(f, "checkout", "-q", "--", ".")
+        expect(w != wo and k["1.21.5"]["X.java"] == ("mechanical", ["1.21.6"]),
+               f"off, a later row: deleting the copy would change 1.21.6's tree, so it is kept for it: {k}")
+        got = remerge_retired(f, src, tmp, x.replace("return 1;", "return 2;"))
+        expect(p5 not in got["retired"] and p5 in got["rewritten"], f"off, a later row: the copy is not retired: {got}")
+    # (c) the strip is layer.py's own: a CRLF copy with @OnlyIn reads exactly as the prepared tree holds it
+    xc = "package com.example.mod;\r\nclass X {\r\n    @OnlyIn(Dist.CLIENT)\r\n    void c() {}\r\n}\r\n"
+    for base in ("minecraft_version=1.21.1\n", "minecraft_version=1.21.1\ninherited_overlay_rows=true\n"):
+      with tempfile.TemporaryDirectory() as t:
+        tmp = pathlib.Path(t)
+        f, src, mv = fork(tmp, [("1.21.5", None, "", "strip_onlyin=true\n")], xc, xc, base)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ls_t", LS); ls = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ls)
+        got = ls.Preparer(f).tree_files("1.21.5", "1.21.5", {"main/com/example/mod/X.java": xc})["main/com/example/mod/X.java"]
+        want = tree(f, "1.21.5", tmp / "w").decode("utf-8")
+        expect(got == want and "\r\r" not in got and "@OnlyIn" not in got,
+               f"strip_onlyin in layer-sync is layer.py's (CRLF, {base.strip()!r}): {got!r} vs {want!r}")
+
+
 def main():
     with tempfile.TemporaryDirectory() as t:
         tmp = pathlib.Path(t)
@@ -624,6 +712,7 @@ def main():
     remerge_ledger_checks()
     inherited_rows_checks()
     descendant_checks()
+    later_target_off_checks()
     print("test-layer-sync:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

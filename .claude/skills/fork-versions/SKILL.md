@@ -406,9 +406,11 @@ review again ("Done", item 4).
      after A up to the target -- their `renames.tsv` and `moves.generated.tsv`, then the shared tables the target has
      and A does not --, never A's or older rows; the target's own overlays are copied as they are. `layer-sync.py
      overlays` then reads each inherited path against that renamed overlay, so a renamed copy those rows produce is
-     **redundant** (delete it) -- unless a later target that takes the path from the copy has rows written against
-     it, so deleting it would change that target's tree: then it stays `renamed-copy` with `kept_for` naming those
-     targets --, the re-merge retires a copy only on the same condition, and `layer-test-plan.py` counts a row that
+     **redundant** (delete it), and the re-merge retires a copy that merges into it. In either mode an overlay is
+     redundant, or retired, only when deleting it changes no target's tree: a later target that takes the path from
+     it (no copy of its own) may have rows written against it, or strip `@OnlyIn`, so that target's tree is compared
+     as `layer.py` writes it; a copy it would change stays `renamed-copy` (`mechanical` against the authors' file)
+     with `kept_for` naming those targets. Also with the key on, `layer-test-plan.py` counts a row that
      fires in an inherited overlay as fired. An on-mode prepare stamps its tree (`build/mc<t>/mv/java.inherited_overlay_rows`),
      so `fork-port.py` re-prepares a tree prepared in the other mode. A `layer.py` older than the key ignores it:
      `layer-sync.py`, `layer-test-plan.py` and `fork-port.py` then read the layer as off and warn -- run

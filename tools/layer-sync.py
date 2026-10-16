@@ -317,15 +317,26 @@ class Preparer:
         return self.prepare(t, files, self.hop_table(t, anc)) if self.inherited_rows and files else dict(files)
 
     def tree_files(self, u, owner, files):
-        """{rel: owner's overlay text} -> {rel: what u's tree holds for that path when `owner` (u itself, or an older
-        target of u's chain) is its nearest owner: u's own overlay as it is (strip_onlyin too, with inherited_overlay_rows),
-        or Preparer.inherited()."""
-        if owner != u:
-            return self.inherited(u, owner, files)
-        onlyin = getattr(self.layer, "ONLYIN", None)
-        if self.inherited_rows and onlyin is not None and self.props(u).get("strip_onlyin") == "true":
-            return {k: onlyin.sub("", v) for k, v in files.items()}       # layer.py's strip_onlyin, on the text
-        return dict(files)
+        """{rel: owner's overlay text} -> {rel: exactly what u's tree holds for that path when `owner` (u itself, or an
+        older target of u's chain) is its nearest owner, in either mode: the overlay as it is -- or, with
+        inherited_overlay_rows=true and an older owner, through hop_table(u, owner) -- then strip_onlyin when u sets
+        it (layer.py strips u's whole prepared tree, every overlay in it included)."""
+        if owner != u and self.inherited_rows:
+            return self.inherited(u, owner, files)                       # prepare() strips too
+        return self.strip(u, files)
+
+    def strip(self, u, files):
+        """{rel: text} with layer.py's own strip_onlyin applied, on files in a temporary tree, when u sets
+        strip_onlyin=true (as prepare() does) -- the same bytes layer.py writes, CRLF files included."""
+        if not files or self.props(u).get("strip_onlyin") != "true" or not hasattr(self.layer, "strip_onlyin"):
+            return dict(files)
+        import contextlib, io
+        with tempfile.TemporaryDirectory() as d:
+            for rel, text in files.items():
+                _write(pathlib.Path(d) / rel, text)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.layer.strip_onlyin(d)
+            return {rel: _read(pathlib.Path(d) / rel) for rel in files}
 
     def targets(self):
         """Every layer target (a targets/<t>/target.properties), sorted by name."""
@@ -490,7 +501,7 @@ def overlay_report(repo, t, prep=None):
         ks = {f"{s}/{rel}": (s, rel) for s, rel in keys}
         with_ = prep.tree_files(u, t, {k: mine[k] for k in ks})
         if below:
-            without = prep.inherited(u, below, {k: _read(mv.parent / overlay_path(below, *ks[k])) for k in ks})
+            without = prep.tree_files(u, below, {k: _read(mv.parent / overlay_path(below, *ks[k])) for k in ks})
         else:
             without = prep.prepare(u, {k: _read(repo / src_path(*ks[k])) for k in ks})
         for k, sk in ks.items():
@@ -623,13 +634,16 @@ def remerge(repo, old, new, targets=None, write=True, prep=None):
         got = None
         for u in [t] + [x for x in prep.reach(t, s, rel, has) if x != t]:
             below = next((a for a in prep.chain(u)[prep.chain(u).index(t) + 1:] if has(a)), None)
+            # t itself is judged as before (off: the texts as they are); a later target by exactly what its tree holds
+            exact = u != t or prep.inherited_rows
             if below:
-                without = prep.inherited(u, below, {key: now[(below, s, rel)]})[key]
+                without = (prep.tree_files if exact else prep.inherited)(u, below, {key: now[(below, s, rel)]})[key]
             elif authors is None:
                 return None
             else:
                 without = prep.prepare(u, {key: authors})[key]
-            if _lf(prep.tree_files(u, t, {key: text})[key]) != _lf(without):
+            with_ = prep.tree_files(u, t, {key: text})[key] if exact else text
+            if _lf(with_) != _lf(without):
                 return None
             got = without if got is None else got
         return got
