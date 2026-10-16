@@ -795,9 +795,14 @@ REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.
 NOT_JAR_FILES = frozenset(REVIEW_OUTPUTS) | {"STUBS.json", "BEHAVIOUR.json", "INVENTORY.json", "REMERGE.json"}
 COMMIT_ID = re.compile(r"^[0-9a-f]{7,40}$")
 VERDICTS = ("ok", "not-ok")
-# REVIEW.md row kinds: stub / overlay / resources / renames are what review_items() requires a verdict on; `item`
-# names one behaviour-inventory item id (review_skeleton lists the unaccounted ones; layer-inventory.py reads it)
-REVIEW_KINDS = ("stub", "overlay", "resources", "renames", "item")
+# REVIEW.md row kinds: stub / overlay / resources / renames are what review_items() requires a verdict on (a version
+# branch's `changed` file stands for a layer's `overlay`: tools/fork-branches.py); `item` names one behaviour-inventory
+# item id (review_skeleton lists the unaccounted ones; layer-inventory.py reads it); a reviewer adds `missing` for a
+# file that should exist and does not (a repair tag, a model) and `shared` for a shared-library helper the target uses.
+# Any row a reviewer marks not-ok keeps the target not done, whatever its kind; a `missing` or `shared` row needs a
+# verdict once written.
+REVIEW_KINDS = ("stub", "overlay", "resources", "renames", "item", "changed", "missing", "shared")
+REVIEWER_KINDS = ("missing", "shared")
 REVIEW_FIELDS = ("reviewer", "date", "commit")
 REVIEW_HEAD = ("# Review: Minecraft {t}\n\n"
                "An independent review by a FRESH agent that was given only this target's files (STUBS.json, its overlays,\n"
@@ -1136,7 +1141,33 @@ def review_problems(repo, tdir):
             out.append(f"reviewer says not-ok: {kind} {file} -- {v[1][:200]}")
         elif not v[1] or v[1] == "?":
             out.append(f"a verdict without a note: {kind} {file}")
+    out += extra_row_problems(rows, items)
     return out
+
+
+def extra_row_problems(rows, items):
+    """The rows a reviewer wrote beyond the required items: a not-ok one of any kind (an `item` row too) is a reason
+    with its note -- never folded into "unaccounted" -- and a `missing` / `shared` row with no verdict is open."""
+    need = set(items)
+    out = []
+    for (kind, file), (verdict, note) in sorted(rows.items()):
+        if (kind, file) in need:
+            continue
+        if verdict == "not-ok":
+            out.append(f"reviewer says not-ok: {kind} {file} -- {note[:200]}")
+        elif kind in REVIEWER_KINDS and verdict not in VERDICTS:
+            out.append(f"no verdict: {kind} {file}")
+    return out
+
+
+def not_ok_items(text):
+    """{inventory item id: note} of REVIEW.md's `item` rows a reviewer marked not-ok."""
+    return {f: n for (k, f), (v, n) in parse_review(text)[1].items() if k == "item" and v == "not-ok"}
+
+
+def drop_reported_items(lines, ids):
+    """The behaviour-inventory reasons minus those for item ids a not-ok `item` row already reports (with its note)."""
+    return [ln for ln in lines if not any(ln.startswith(f"behaviour inventory: unaccounted {i} (") for i in ids)]
 
 
 def review_skeleton(repo, tdir, t):
@@ -1225,7 +1256,10 @@ def target_done(repo, t, _seen=None, write=True, prepare=False):
     # the target's INVENTORY-CHECK.json, a run output like GATES.md (REVIEW_OUTPUTS), unless write=False. Its prepared
     # tree must be current, or its answer is about older code
     tree = prepared_tree(repo, t, prepare=prepare)
-    out += tree or load("layer_inventory", "layer-inventory.py").inventory_unaccounted(repo, t, write=write)
+    rv = tdir / "REVIEW.md"
+    notok = not_ok_items(rv.read_text(encoding="utf-8", errors="replace")) if rv.is_file() else {}
+    out += tree or drop_reported_items(load("layer_inventory", "layer-inventory.py").inventory_unaccounted(repo, t, write=write),
+                                       notok)
     # (7) R3: a target resolved against a library target that was not done (--allow-undone-library) is development only
     deps_md = tdir / "DEPS.md"
     if deps_md.is_file() and UNDONE_LIBRARY_MARK in deps_md.read_text(encoding="utf-8", errors="replace"):
@@ -4528,6 +4562,23 @@ def self_check_review131():
             expect(target_done(repo, "1.21.4") == ["1.21.4 is not a target of this layer"], "single-version: no target")
             expect(detect_upstream(repo) is None, "single-version clone with no upstream remote: nothing detected")
     case("single-version", single)
+
+    def gap7():
+        # issue #133 gap 7: a not-ok `item` row is the reviewer's verdict with its note, not "unaccounted"; a `missing`
+        # (a file that should exist) or `shared` (a shared helper) row needs a verdict, and a not-ok one of any kind blocks
+        text = (REVIEW_HEAD.format(t="1.21.4") + "| item | main:A.java#mixin:X | not-ok | the hook is gone, behaviour lost |\n"
+                "| missing | src/main/resources/data/m/tags/item/repair.json | ? | ? |\n"
+                "| shared | LegacyGl | ok | read against 1.21.1's draw |\n| changed | src/main/java/B.java | not-ok | wrong id |\n")
+        _f, rows = parse_review(text)
+        got = extra_row_problems(rows, [("changed", "src/main/java/B.java")])
+        expect(got == ["reviewer says not-ok: item main:A.java#mixin:X -- the hook is gone, behaviour lost",
+                       "no verdict: missing src/main/resources/data/m/tags/item/repair.json"],
+               f"extra review rows: {got}")
+        inv = ["behaviour inventory: unaccounted main:A.java#mixin:X (not in the target's file)",
+               "behaviour inventory: unaccounted main:C.java#event:E (not in the target's file)"]
+        got = drop_reported_items(inv, not_ok_items(text))
+        expect(got == inv[1:], f"an item the reviewer marked not-ok is reported once, with its note: {got}")
+    case("gap 7 review rows", gap7)
     return ok
 
 
