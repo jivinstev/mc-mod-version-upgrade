@@ -23,6 +23,12 @@ count and dmesg, read before and after the run where readable, and the free memo
 at WARN/INFO was caught and is never chosen as a stop reason. Before each Gate C client, on Linux, the run stops with
 "not enough free memory" below GATEC_MIN_FREE_MB (3584; MMVU_GATEC_MIN_FREE_MB overrides, 0 = off). These hold for
 single-version and layer forks alike (issue #113).
+
+ONE GATE C CLIENT PER MACHINE (issue #133, gap 11). Two Gate C clients on one machine share the CPU, the memory guard's
+headroom and Xvfb, and each one's result stops being its own. Each Gate C phase takes a machine-wide lock first (an
+OS file lock on ~/.mmvu/locks/gatec.lock, MMVU_GATEC_LOCK names another file) and a second client WAITS for it, saying
+whose run holds it; the lock goes with the process, so a killed run never leaves it held. Gate B takes no lock. On a
+CI runner (one job per machine) it is always free, so nothing there changes.
 """
 import collections, argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys
 
@@ -309,6 +315,85 @@ def _reap(work, since):
             except OSError:
                 pass
     return killed
+
+
+GATEC_LOCK_ENV = "MMVU_GATEC_LOCK"
+
+
+def gatec_lock_path():
+    return pathlib.Path(os.environ.get(GATEC_LOCK_ENV) or (pathlib.Path.home() / ".mmvu/locks/gatec.lock"))
+
+
+class GateCLock:
+    """The machine-wide Gate C lock: an exclusive OS lock (flock; msvcrt on Windows) on gatec_lock_path(), holding
+    {"pid", "work", "phase", "started"} of its holder. acquire() blocks until it is free, printing who holds it when
+    it has to wait (then every `every` seconds); release() lets the next client go. A dead holder's lock is the OS's
+    to drop, so it is never stale."""
+
+    def __init__(self, work, phase, poll=2.0, every=60.0, say=None):
+        self.path, self.work, self.phase = gatec_lock_path(), str(work), phase
+        self.poll, self.every, self.say = poll, every, say or (lambda m: print(m, flush=True))
+        self.fh, self.waited = None, 0.0
+
+    def _try(self):
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.fh.seek(0)
+                msvcrt.locking(self.fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+
+    def acquire(self):
+        import time
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fh = open(self.path, "a+", encoding="utf-8")
+        start, told = time.monotonic(), None
+        while not self._try():
+            now = time.monotonic()
+            if told is None or now - told >= self.every:
+                try:
+                    with open(self.path, encoding="utf-8") as f:
+                        held = f.read().strip() or "?"
+                except OSError:
+                    held = "?"
+                self.say(f"[gate-loop] Gate C: another client holds the machine's Gate C lock ({self.path}: {held[:200]}); "
+                         f"waiting -- one Gate C client per machine")
+                told = now
+            time.sleep(self.poll)
+        self.waited = time.monotonic() - start
+        import datetime
+        self.fh.seek(0); self.fh.truncate()
+        self.fh.write(json.dumps({"pid": os.getpid(), "work": self.work, "phase": self.phase,
+                                  "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}))
+        self.fh.flush()
+        return self
+
+    def release(self):
+        if self.fh is None:
+            return
+        try:
+            self.fh.seek(0); self.fh.truncate(); self.fh.flush()
+            if os.name == "nt":
+                import msvcrt
+                self.fh.seek(0)
+                msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        self.fh.close(); self.fh = None
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
 
 
 def LOG_DIR(work):
@@ -777,18 +862,25 @@ def main():
             if spent >= a.budget:
                 note(event="budget", spent=round(spent, 4)); return 1
             continue
-        if phase:
-            low = memory_guard()
-            if low:     # a client started now would be killed part-way: stop, never hand it to a worker
-                note(event="low-memory", run=run, phase=phase, note=low)
-                print(f"GATE C/{phase} FAILED:\n{low}", flush=True)
-                return 1
-        if not phase:
-            gone = fresh_world(work)
-            if gone:
-                note(event="fresh-world", run=run, note=str(gone))
-        f = failure_of(run_gate(work, task, a.heap, LOG_DIR(work) / f"gate-loop{'-' + phase if phase else ''}.log", phase),
-                       client=bool(phase), ns=ns, work=work)
+        lock = GateCLock(work, phase).acquire() if phase else None     # one Gate C client per machine: wait for it
+        try:
+            if lock is not None and lock.waited >= 1:
+                note(event="gatec-lock", run=run, phase=phase, waited=round(lock.waited))
+            if phase:
+                low = memory_guard()
+                if low:     # a client started now would be killed part-way: stop, never hand it to a worker
+                    note(event="low-memory", run=run, phase=phase, note=low)
+                    print(f"GATE C/{phase} FAILED:\n{low}", flush=True)
+                    return 1
+            if not phase:
+                gone = fresh_world(work)
+                if gone:
+                    note(event="fresh-world", run=run, note=str(gone))
+            f = failure_of(run_gate(work, task, a.heap, LOG_DIR(work) / f"gate-loop{'-' + phase if phase else ''}.log", phase),
+                           client=bool(phase), ns=ns, work=work)
+        finally:
+            if lock is not None:
+                lock.release()
         if f is None:
             note(event="green", run=run, phase=phase, spent=round(spent, 4))
             phases.pop(0); last_sig = None
@@ -1030,8 +1122,49 @@ def self_check():
     ok &= oom_note({"cgroup": 4, "dmesg": 2, "last": ""}, {"cgroup": 4, "dmesg": 2, "last": "x"}) is None
     ok &= "Killed process 9 (java)" in (oom_note({"cgroup": None, "dmesg": 1}, {"cgroup": None, "dmesg": 2,
                                                   "last": "[1.0] Memory cgroup out of memory: Killed process 9 (java)"}) or "")
+    ok &= gatec_lock_check()
     print("self-check:", "OK" if ok else f"FAIL {k} {text!r}")
     return 0 if ok else 1
+
+
+def gatec_lock_check():
+    """Two Gate C clients on one machine: the second waits until the first releases the lock, saying who holds it;
+    a holder that dies releases it with its process."""
+    import tempfile, time
+    with tempfile.TemporaryDirectory() as d:
+        saved = os.environ.get(GATEC_LOCK_ENV)
+        os.environ[GATEC_LOCK_ENV] = str(pathlib.Path(d) / "gatec.lock")
+        try:
+            holder = subprocess.Popen([sys.executable, "-c", "import importlib.util, sys, time; "
+                                       f"s = importlib.util.spec_from_file_location('gl', {str(pathlib.Path(__file__).resolve())!r}); "
+                                       "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                                       "l = m.GateCLock('/w/first', 'launch').acquire(); print('held', flush=True); time.sleep(2.5); l.release()"],
+                                      stdout=subprocess.PIPE, text=True, env=dict(os.environ))
+            holder.stdout.readline()                 # "held": the first client has the lock
+            said = []
+            t0 = time.monotonic()
+            lk = GateCLock("/w/second", "spawn", poll=0.1, every=60, say=said.append).acquire()
+            waited = time.monotonic() - t0
+            lk.release(); holder.wait()
+            ok = waited >= 1.5 and len(said) == 1 and "/w/first" in said[0] and "waiting" in said[0]
+            # a holder killed while holding: the OS drops its lock, the next client goes straight in
+            holder = subprocess.Popen([sys.executable, "-c", "import importlib.util, time; "
+                                       f"s = importlib.util.spec_from_file_location('gl', {str(pathlib.Path(__file__).resolve())!r}); "
+                                       "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                                       "m.GateCLock('/w/x', 'launch').acquire(); print('held', flush=True); time.sleep(60)"],
+                                      stdout=subprocess.PIPE, text=True, env=dict(os.environ))
+            holder.stdout.readline(); holder.kill(); holder.wait()
+            t0 = time.monotonic()
+            GateCLock("/w/y", "launch", poll=0.1).acquire().release()
+            ok = ok and time.monotonic() - t0 < 1.0
+            if not ok:
+                print(f"FAIL gatec lock: waited {waited:.1f}s, said {said}")
+            return ok
+        finally:
+            if saved is None:
+                os.environ.pop(GATEC_LOCK_ENV, None)
+            else:
+                os.environ[GATEC_LOCK_ENV] = saved
 
 
 if __name__ == "__main__":
