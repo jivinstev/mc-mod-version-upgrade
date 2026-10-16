@@ -325,21 +325,27 @@ def gatec_lock_path():
 
 
 class GateCLock:
-    """The machine-wide Gate C lock: an exclusive OS lock (flock; msvcrt on Windows) on gatec_lock_path(), holding
-    {"pid", "work", "phase", "started"} of its holder. acquire() blocks until it is free, printing who holds it when
-    it has to wait (then every `every` seconds); release() lets the next client go. A dead holder's lock is the OS's
-    to drop, so it is never stale."""
+    """The machine-wide Gate C lock: an exclusive OS lock on gatec_lock_path() -- flock, or on Windows msvcrt on one byte
+    far past any data (LOCK_AT: Windows byte locks are mandatory, so a lock over the start would make the file unreadable
+    to the waiter) -- with its holder's {"pid", "work", "phase", "started"} in a file of its own beside it (`.holder`).
+    acquire() blocks until it is free, printing who holds it when it has to wait (then every `every` seconds), and gives
+    up after `timeout` seconds (MMVU_GATEC_LOCK_TIMEOUT, default 3 h) with TimeoutError naming the holder; release()
+    lets the next client go. A dead holder's lock is the OS's to drop, so it is never stale."""
+    LOCK_AT = 1 << 20
 
-    def __init__(self, work, phase, poll=2.0, every=60.0, say=None):
+    def __init__(self, work, phase, poll=2.0, every=60.0, say=None, timeout=None):
         self.path, self.work, self.phase = gatec_lock_path(), str(work), phase
+        self.holder = self.path.with_name(self.path.name + ".holder")
         self.poll, self.every, self.say = poll, every, say or (lambda m: print(m, flush=True))
+        env = os.environ.get("MMVU_GATEC_LOCK_TIMEOUT", "").strip()
+        self.timeout = timeout if timeout is not None else (float(env) if env.replace(".", "", 1).isdigit() else 3 * 3600.0)
         self.fh, self.waited = None, 0.0
 
     def _try(self):
         try:
             if os.name == "nt":
                 import msvcrt
-                self.fh.seek(0)
+                self.fh.seek(self.LOCK_AT)
                 msvcrt.locking(self.fh.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
@@ -348,39 +354,45 @@ class GateCLock:
         except OSError:
             return False
 
+    def held_by(self):
+        try:
+            return self.holder.read_text(encoding="utf-8").strip() or "?"
+        except OSError:
+            return "?"
+
     def acquire(self):
         import time
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.fh = open(self.path, "a+", encoding="utf-8")
+        self.fh = open(self.path, "a+b")
         start, told = time.monotonic(), None
         while not self._try():
             now = time.monotonic()
+            if now - start >= self.timeout:
+                held = self.held_by()
+                self.fh.close(); self.fh = None
+                raise TimeoutError(f"waited {round(now - start)} s for the machine's Gate C lock ({self.path}), still held by "
+                                   f"{held[:200]}: another Gate C run is using this machine -- wait for it or stop it, then "
+                                   f"re-run (MMVU_GATEC_LOCK_TIMEOUT sets the wait)")
             if told is None or now - told >= self.every:
-                try:
-                    with open(self.path, encoding="utf-8") as f:
-                        held = f.read().strip() or "?"
-                except OSError:
-                    held = "?"
-                self.say(f"[gate-loop] Gate C: another client holds the machine's Gate C lock ({self.path}: {held[:200]}); "
-                         f"waiting -- one Gate C client per machine")
+                self.say(f"[gate-loop] Gate C: another client holds the machine's Gate C lock ({self.path}: "
+                         f"{self.held_by()[:200]}); waiting -- one Gate C client per machine")
                 told = now
             time.sleep(self.poll)
         self.waited = time.monotonic() - start
         import datetime
-        self.fh.seek(0); self.fh.truncate()
-        self.fh.write(json.dumps({"pid": os.getpid(), "work": self.work, "phase": self.phase,
-                                  "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}))
-        self.fh.flush()
+        self.holder.write_text(json.dumps({"pid": os.getpid(), "work": self.work, "phase": self.phase,
+                                           "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}),
+                               encoding="utf-8")
         return self
 
     def release(self):
         if self.fh is None:
             return
         try:
-            self.fh.seek(0); self.fh.truncate(); self.fh.flush()
+            self.holder.write_text("", encoding="utf-8")
             if os.name == "nt":
                 import msvcrt
-                self.fh.seek(0)
+                self.fh.seek(self.LOCK_AT)
                 msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
@@ -862,7 +874,12 @@ def main():
             if spent >= a.budget:
                 note(event="budget", spent=round(spent, 4)); return 1
             continue
-        lock = GateCLock(work, phase).acquire() if phase else None     # one Gate C client per machine: wait for it
+        try:
+            lock = GateCLock(work, phase).acquire() if phase else None     # one Gate C client per machine: wait for it
+        except TimeoutError as e:      # environmental, like low memory: never a worker's
+            note(event="gatec-lock-timeout", run=run, phase=phase, note=str(e))
+            print(f"GATE C/{phase} FAILED:\n{e}", flush=True)
+            return 1
         try:
             if lock is not None and lock.waited >= 1:
                 note(event="gatec-lock", run=run, phase=phase, waited=round(lock.waited))
@@ -1128,8 +1145,9 @@ def self_check():
 
 
 def gatec_lock_check():
-    """Two Gate C clients on one machine: the second waits until the first releases the lock, saying who holds it;
-    a holder that dies releases it with its process."""
+    """Two Gate C clients on one machine: the second waits until the first releases the lock, saying who holds it (read
+    from the holder file beside the lock); one with a timeout gives up naming the holder; a holder that dies releases it
+    with its process."""
     import tempfile, time
     with tempfile.TemporaryDirectory() as d:
         saved = os.environ.get(GATEC_LOCK_ENV)
@@ -1147,11 +1165,25 @@ def gatec_lock_check():
             waited = time.monotonic() - t0
             lk.release(); holder.wait()
             ok = waited >= 1.5 and len(said) == 1 and "/w/first" in said[0] and "waiting" in said[0]
+            # a waiter that gives up says who holds the lock (read from the holder file, never the locked one)
+            holder = subprocess.Popen([sys.executable, "-c", "import importlib.util, time; "
+                                       f"s = importlib.util.spec_from_file_location('gl', {str(pathlib.Path(__file__).resolve())!r}); "
+                                       "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                                       "l = m.GateCLock('/w/held', 'spawn').acquire(); print('held', flush=True); time.sleep(60)"],
+                                      stdout=subprocess.PIPE, text=True, encoding="utf-8", env=dict(os.environ))
+            holder.stdout.readline()
+            try:
+                GateCLock("/w/late", "launch", poll=0.1, timeout=0.5, say=lambda m: None).acquire()
+                ok = False
+            except TimeoutError as e:
+                ok = ok and "/w/held" in str(e) and "MMVU_GATEC_LOCK_TIMEOUT" in str(e)
+            holder.kill(); holder.wait()
+            ok = ok and (pathlib.Path(d) / "gatec.lock.holder").is_file()
             # a holder killed while holding: the OS drops its lock, the next client goes straight in
             holder = subprocess.Popen([sys.executable, "-c", "import importlib.util, time; "
                                        f"s = importlib.util.spec_from_file_location('gl', {str(pathlib.Path(__file__).resolve())!r}); "
                                        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-                                       "m.GateCLock('/w/x', 'launch').acquire(); print('held', flush=True); time.sleep(60)"],
+                                       "l = m.GateCLock('/w/x', 'launch').acquire(); print('held', flush=True); time.sleep(60)"],
                                       stdout=subprocess.PIPE, text=True, encoding="utf-8", env=dict(os.environ))
             holder.stdout.readline(); holder.kill(); holder.wait()
             t0 = time.monotonic()
