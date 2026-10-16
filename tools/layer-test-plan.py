@@ -27,7 +27,9 @@ WHAT IT COLLECTS, per layer target (.multiversion/targets/<t>/):
               (`CATALOG V81`, `§X14`) -- and that FIRED on the target. Fired rows are not committed per target (the
               build keeps only the non-main source sets' hits, in build/mc<t>/mv/hits-*.txt), so a row counts as fired
               when its pattern matches an authors' file the target compiles (src/<set>/java, minus the files the
-              target overlays) or when a recorded hits file names it.
+              target overlays) or when a recorded hits file names it. With `inherited_overlay_rows=true` in
+              .multiversion/base.properties also when it matches an overlay the target inherits from an older target
+              whose rows come before it (layer.py runs that overlay through the later rows).
   dropped-dep a DEPS.md row (tools/layer-deps.py) whose dependency was dropped for the target: an optional
               integration that is off on that version.
   preview     a target marked `preview=true` in its own target.properties (built and gated, never published: #76).
@@ -96,6 +98,18 @@ def shared_chain(mv, target):
         extra += [s.strip() for s in read_props(mv / "targets" / x / "target.properties").get("shared_chain", "").split(",")
                   if s.strip()]
     return sorted(set(names) | set(extra), key=mc_key, reverse=True) if extra else names
+
+
+def inherited_overlay_rows(mv, warn=False):
+    """.multiversion/base.properties `inherited_overlay_rows=true` (opt-in) AND the fork's .multiversion/tools/layer.py
+    knows the key -- an older copy prepares as if it were off, so the plan reads it as off too: the one test,
+    tools/layer-sync.py inherited_rows_setting(). warn: say so on stderr when the key is set and layer.py ignores it."""
+    spec = importlib.util.spec_from_file_location("ltp_layer_sync", HERE / "layer-sync.py")
+    ls = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ls)
+    if warn and ls.inherited_rows_unsupported(mv):
+        print(f"layer-test-plan: {ls.inherited_rows_unsupported(mv)}", file=sys.stderr)
+    return all(ls.inherited_rows_setting(mv))
 
 
 def runs(targets, order):
@@ -248,6 +262,7 @@ def plan_fork(repo, catalog=CATALOG):
     sets = source_sets(repo)
     notes = catalogue_notes(catalog)
     ps = _prepare()
+    inherited_rows = inherited_overlay_rows(mv, warn=True)
     groups = {}            # key -> item
 
     def add(kind, key, t, item, source):
@@ -292,13 +307,14 @@ def plan_fork(repo, catalog=CATALOG):
                 f".multiversion/targets/{t}/target.properties")
         names = chain(mv, t)
         # overlays that replace an authors' file: the nearest target in the chain that has the path is the origin
-        overlaid = {}
+        overlaid, origins = {}, {}
         for sset, sdir in sets.items():
             seen = {}
             for c in reversed(names):            # farthest first, nearer overwrites
                 for rel in java_rels(overlay_dir(mv, c, sset)):
                     seen[rel] = c
             overlaid[sset] = set(seen)
+            origins[sset] = seen
             for rel, origin in sorted(seen.items()):
                 if (sdir / rel).is_file():
                     ov = overlay_dir(mv, origin, sset).relative_to(repo).as_posix() + "/" + rel
@@ -337,17 +353,32 @@ def plan_fork(repo, catalog=CATALOG):
                 if rel not in overlaid.get(sset, ()):
                     texts[f"src/{sset}/java/{rel}"] = (sdir / rel).read_text(encoding="utf-8", errors="replace")
         hits = recorded_hits(repo, t)
-        tables = [mv / "targets" / c / "renames.tsv" for c in names] + [mv / "shared" / s / "renames.tsv"
-                                                                         for s in shared_chain(mv, t)]
-        for tab in tables:
+        snames = shared_chain(mv, t)
+        tables = [(mv / "targets" / c / "renames.tsv", "target", c) for c in names] + [
+            (mv / "shared" / s / "renames.tsv", "shared", s) for s in snames]
+        # base.properties inherited_overlay_rows=true: layer.py runs an overlay t inherits from an older target through
+        # the rows of the targets after it (and the shared libraries t has and it does not), so those rows fire there too
+        inherited = {}
+        if inherited_rows:
+            for sset, seen in origins.items():
+                for rel, origin in seen.items():
+                    if origin != t:
+                        inherited.setdefault(origin, {})[f"{overlay_dir(mv, origin, sset).relative_to(repo).as_posix()}/{rel}"] = \
+                            (overlay_dir(mv, origin, sset) / rel).read_text(encoding="utf-8", errors="replace")
+        for tab, tkind, ver in tables:
             if not tab.is_file():
                 continue
+            seen_by = dict(texts)
+            for origin, ovs in inherited.items():
+                if (names.index(ver) < names.index(origin) if tkind == "target"
+                        else ver not in shared_chain(mv, origin)):
+                    seen_by.update(ovs)
             for line, frm, to, note in table_rows(tab):
                 cited = {c: notes[c] for c in dict.fromkeys(CITE.findall(note)) if c in notes}
                 own = KNOWN.search(note)
                 if not own and not cited:
                     continue
-                fired, where = row_fires(frm, to, texts, ps)
+                fired, where = row_fires(frm, to, seen_by, ps)
                 if not fired:
                     pat = frm[3:] if frm.startswith("re:") else frm
                     fired, where = (pat in hits or frm in hits), "build/mc%s/mv/hits-*.txt" % t
@@ -558,6 +589,51 @@ def self_check():
                f"per target: the inventory counts, or why it was not checked: {p3['layer']['targets']}")
         expect("unaccounted: " in render([p3]), "the text names the behaviour item's status and detail")
         (mvd / "INVENTORY.json").unlink()
+        # inherited_overlay_rows=true: a gates-note row of 1.21.4 that matches only 1.21.3's overlay fires on 1.21.4
+        # (layer.py runs the inherited overlay through it); a 1.21.3 row does not reach its own target's overlay; off,
+        # neither fires -- as before
+        w(mvd / "targets/1.21.3/java/com/example/mod/client/SkyRenderer.java",
+          "class SkyRenderer { void draw() { inOverlayOnly(); ownOnly(); } }\n")
+        w(mvd / "targets/1.21.4/renames.tsv", "# known limit: no gate sees it\nre:\\binOverlayOnly\\(\tnewCall(\n")
+        w(mvd / "targets/1.21.3/renames.tsv", "# known limit: no gate sees it\nre:\\bownOnly\\(\townCall(\n")
+        rows_of = lambda pl: sorted((g["row"].split("\t")[0], g["range"]) for g in pl["layer"]["items"]
+                                    if g["kind"] == "catalogue" and ("OverlayOnly" in g["row"] or "ownOnly" in g["row"]))
+        tpl_layer = (ROOT / "templates/fork-layer/tools/layer.py").read_text(encoding="utf-8")
+        w(mvd / "tools/layer.py", tpl_layer)
+        off_rows = rows_of(plan_fork(lf, cat))
+        w(mvd / "base.properties", "minecraft_version=1.21.1\ninherited_overlay_rows=true\n")
+        on_rows = rows_of(plan_fork(lf, cat))
+        expect(off_rows == [] and on_rows == [("re:\\binOverlayOnly\\(", "1.21.4-1.21.5")],
+               f"inherited_overlay_rows: a later target's row fires in the overlay it inherits (on only; never the owner's "
+               f"own row; 1.21.8 overlays the path itself): off {off_rows} on {on_rows}")
+        # a layer.py that predates the key prepares as if it were off: so does the plan, and it says why on stderr
+        import contextlib, io
+        w(mvd / "tools/layer.py", tpl_layer.replace("def inherited_overlay_rows(", "def _predates_it("))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            old_rows = rows_of(plan_fork(lf, cat))
+        expect(old_rows == [] and "predates inherited_overlay_rows and IGNORES it -- run sync-shared" in err.getvalue(),
+               f"key set, layer.py too old: off, with the warning: {old_rows} {err.getvalue()!r}")
+        err = io.StringIO()
+        w(mvd / "base.properties", "minecraft_version=1.21.1\n")
+        with contextlib.redirect_stderr(err):
+            plan_fork(lf, cat)
+        expect(err.getvalue() == "", f"no key: no warning, whatever layer.py is: {err.getvalue()!r}")
+        # one test of the setting, layer-sync's: the plan delegates to it, and agrees with it on every case here
+        import inspect
+        spec = importlib.util.spec_from_file_location("ltp_ls_check", HERE / "layer-sync.py")
+        lsm = importlib.util.module_from_spec(spec); spec.loader.exec_module(lsm)
+        agree = []
+        for body in ("minecraft_version=1.21.1\n", "inherited_overlay_rows=true\n", "inherited_overlay_rows = TRUE\n",
+                     "inherited_overlay_rows=false\n"):
+            for lt in (tpl_layer, tpl_layer.replace("def inherited_overlay_rows(", "def _predates_it(")):
+                w(mvd / "base.properties", body); w(mvd / "tools/layer.py", lt)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    agree.append(inherited_overlay_rows(mvd) == all(lsm.inherited_rows_setting(mvd)))
+        w(mvd / "base.properties", "minecraft_version=1.21.1\n")
+        expect(all(agree) and ".inherited_rows_setting(mv)" in inspect.getsource(inherited_overlay_rows),
+               f"layer-test-plan reads the setting through layer-sync's inherited_rows_setting(): {agree}")
+        (mvd / "tools/layer.py").unlink()
         txt = render([p, plan_fork(sv, cat)])
         expect("## Minecraft 1.21.5: " in txt and "preview (built and gated, not published): 1.21.5" in txt
                and txt.rstrip().endswith("single-version fork (Minecraft 1.21.1)") and "## Minecraft 1.21.1" not in txt,

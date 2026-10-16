@@ -4,7 +4,11 @@
 
   layer.py prepare   --target T --src src/main/java --out DIR
         Merge T's chain (T, its `inherits`, theirs ...) into one rename table, one overlay tree and one
-        drop list -- the nearer target wins -- and run prepare-sources.py over the authors' tree.
+        drop list -- the nearer target wins -- and run prepare-sources.py over the authors' tree. Overlays are
+        copied as they are; with `inherited_overlay_rows=true` in .multiversion/base.properties (opt-in) an overlay
+        T inherits from an older target A is first run through the rows of the targets after A up to T; such a
+        tree is stamped (build/mc<T>/mv/java.inherited_overlay_rows, for the main set's default --out only: the tree
+        tools/fork-port.py and the Gradle build use), and an off-mode prepare of it removes the stamp.
   layer.py mixins    --target T [--config FILE]
         Print T's mixin changes per config file (mixin_add over the chain, then T's own mixin_add_only and
         mixin_remove_only; layer.gradle applies the same set at processResources), or, with --config, the
@@ -197,6 +201,109 @@ def shared_chain(target, root=None):
     return sorted(set(names) | set(extra), key=mc_key, reverse=True)
 
 
+INHERITED_ROWS = "inherited_overlay_rows"
+
+
+def inherited_overlay_rows(root=None):
+    """True when .multiversion/base.properties says `inherited_overlay_rows=true` (opt-in, default off).
+
+    Off (the default, and every layer made before the key existed): an overlay reaches every later target VERBATIM --
+    rename rows apply to the authors' files only, so a later target that needs the overlay renamed carries its own
+    renamed copy. On: when preparing T, an overlay whose nearest owner is an older target A in T's chain (T has no copy
+    of its own) is run through the rows of the chain targets after A up to T -- their renames.tsv and
+    generated moves, then the shared tables of the versions T's libraries have and A's do not (rows_after) --,
+    never through A's or older rows, which it was written against. T's own overlays are copied as they are, either way."""
+    p = (root or MV) / "base.properties"
+    return p.is_file() and load_props(p).get(INHERITED_ROWS, "").lower() == "true"
+
+
+def rows_after(target, owner, root=None):
+    """(fork targets, shared libraries) whose rows an overlay `owner` wrote takes on its way to `target`: the targets of
+    target's chain strictly nearer than owner (owner's own and older rows are what the overlay was written against),
+    and the shared libraries of target that owner's own shared chain does not have. Both nearest first, the order
+    cmd_prepare's table has."""
+    root = root or MV
+    names, snames = chain(target, root), shared_chain(target, root)
+    older = set(shared_chain(owner, root))
+    return names[:names.index(owner)], [s for s in snames if s not in older]
+
+
+def _prepare_sources_module():
+    import importlib.util
+    sys.dont_write_bytecode = True        # never leave a __pycache__ in the fork's .multiversion/tools
+    spec = importlib.util.spec_from_file_location("layer_prepare_sources", HERE / "prepare-sources.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+def apply_rows(text, rules, hits):
+    """`text` rewritten by `rules` (prepare-sources.py's split_rules + build_pattern) exactly as prepare-sources.py
+    rewrites an authors' file: regex/member rules first, in table order, then the type-token sweep; CRLF kept."""
+    regex_rules, pattern, table = rules
+    crlf = "\r\n" in text
+    if crlf:
+        text = text.replace("\r\n", "\n")
+    for rx, repl, _ex in regex_rules:
+        text, n = rx.subn(repl, text)
+        if n:
+            hits.add(rx.pattern)
+    if pattern is not None:
+        def tok(m):
+            hits.add(m.group(1))
+            return table[m.group(1)]
+        text = pattern.sub(tok, text)
+    return text.replace("\n", "\r\n") if crlf else text
+
+
+def rename_inherited_overlays(target, names, sub, overlay, tmp, rows):
+    """inherited_overlay_rows=true: rewrite, in the merged `overlay` tree, every .java overlay whose nearest owner is
+    an older target of the chain by the sections of cmd_prepare's own table (`rows`, each starting `# ---- <what>`)
+    that rows_after(target, owner) names -- the same text, in the same order. -> the set of rules that fired (so the
+    dead-rule check counts a row that fires only in an inherited overlay as live)."""
+    owner = {}
+    for t in names:                        # nearest first: the nearest copy is the one in the merged tree
+        d = MV / "targets" / t / sub
+        if d.is_dir():
+            for f in d.rglob("*.java"):
+                owner.setdefault(f.relative_to(d).as_posix(), t)
+    by_owner = {}
+    for rel, t in sorted(owner.items()):
+        if t != target and (overlay / rel).is_file():
+            by_owner.setdefault(t, []).append(rel)
+    hits, n = set(), 0
+    if not by_owner:
+        return hits
+    ps = _prepare_sources_module()
+    for t in names:
+        if t not in by_owner:
+            continue
+        fork, shared = rows_after(target, t)
+        heads = {f"# ---- {x}" for x in fork} | {f"# ---- moves {x} (generated)" for x in fork} | {f"# ---- shared {x}" for x in shared}
+        table = tmp / f"rows-after-{t}.tsv"
+        table.write_text("\n".join(r for r in rows if r.split("\n", 1)[0] in heads) + "\n", encoding="utf-8")
+        token_rules, regex_rules = ps.split_rules(ps.load_renames(str(table)))
+        pattern, tab = ps.build_pattern(token_rules)
+        for rel in by_owner[t]:
+            f = overlay / rel
+            try:
+                with open(f, encoding="utf-8", newline="") as fh:
+                    text = fh.read()
+            except UnicodeDecodeError as e:
+                # prepare-sources.py reads every authors' file as UTF-8 and stops on one that is not; rows cannot be
+                # run over this overlay either, so stop the same way -- naming it -- rather than build it un-renamed
+                sys.exit(f"layer: {target}: the overlay {(MV / 'targets' / t / sub / rel).relative_to(MV.parent).as_posix()} "
+                         f"(inherited from {t}) is not UTF-8 ({e.reason} at byte {e.start}), so {INHERITED_ROWS}=true cannot "
+                         f"run the rows after {t} over it: save it as UTF-8 (every source the layer renames is read as UTF-8)")
+            new = apply_rows(text, (regex_rules, pattern, tab), hits)
+            if new != text:
+                with open(f, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(new)
+                n += 1
+    print(f"layer: {target} inherited overlays through the rows after their owner ({INHERITED_ROWS}=true): "
+          f"{sum(len(v) for v in by_owner.values())} inherited, {n} rewritten")
+    return hits
+
+
 def cmd_prepare(a):
     names = chain(a.target)
     snames = shared_chain(a.target)
@@ -229,6 +336,9 @@ def cmd_prepare(a):
                 rows.append(f"# ---- shared {t}\n" + r.read_text(encoding="utf-8"))
         renames = tmp / "renames.tsv"
         renames.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        inherited_hits = None
+        if inherited_overlay_rows():
+            inherited_hits = rename_inherited_overlays(a.target, names, sub, overlay, tmp, rows)
         drops = set()
         for t in names:
             d = MV / "targets" / t / "drops.txt"
@@ -245,20 +355,34 @@ def cmd_prepare(a):
         # records its hits next to its output; main (prepared last) merges every set's and reports once.
         out = pathlib.Path(a.out)
         hits_dir = out.parent
+        # the mode the tree is prepared in, beside it (tools/fork-port.py's staleness check reads it): only for the main
+        # set's default tree, build/mc<T>/mv/java (the Gradle build's and fork-port's), and written only when on, so a
+        # default layer's build directory is as before; a stamp left by an earlier on-mode run goes
+        default = (MV.parent / "build" / f"mc{a.target}" / "mv" / "java").resolve()
+        stamp = out.parent / f"{out.name}.{INHERITED_ROWS}" if a.set == "main" and out.resolve() == default else None
+        if stamp is not None and stamp.is_file():
+            stamp.unlink()
         if a.set != "main":
             args += ["--hits-out", str(hits_dir / f"hits-{a.set}.txt")]
         else:
             merged = sorted(hits_dir.glob("hits-*.txt"))
-            if merged:
+            if merged or inherited_hits:
                 allhits = tmp / "hits.txt"
-                allhits.write_text("".join(f.read_text(encoding="utf-8") for f in merged), encoding="utf-8")
+                allhits.write_text("".join(f.read_text(encoding="utf-8") for f in merged)
+                                   + "".join(h + "\n" for h in sorted(inherited_hits or ())), encoding="utf-8")
                 args += ["--hits-in", str(allhits)]
         print(f"layer: {a.target} [{a.set}] chain {' > '.join(names)}")
         rc = subprocess.call(args)
+        if rc == 0 and a.set != "main" and inherited_hits:     # a row that fired only in an inherited overlay is live
+            hf = hits_dir / f"hits-{a.set}.txt"
+            have = set(hf.read_text(encoding="utf-8").split("\n")) if hf.is_file() else set()
+            hf.write_text("".join(h + "\n" for h in sorted((have | set(inherited_hits)) - {""})), encoding="utf-8")
         if rc == 0 and a.set == "main":
             add_shared_helpers(snames, out)
         if rc == 0 and load_props(MV / "targets" / a.target / "target.properties").get("strip_onlyin") == "true":
             strip_onlyin(out)
+        if rc == 0 and inherited_hits is not None and stamp is not None:
+            stamp.write_text(f"{INHERITED_ROWS}=true\n", encoding="utf-8")
         return rc
 
 
@@ -267,7 +391,7 @@ ONLYIN = re.compile(r"\n[ \t]*@OnlyIn\([^)]*\)[ \t]*")
 
 def strip_onlyin(out):
     """CATALOG V79: from 1.21.6 (as on 26.x) @OnlyIn strips nothing, and in a DEV run any @OnlyIn in the mod is a
-    mod-loading error. A rename row cannot reach an overlay, so a target with `strip_onlyin=true` has the annotation
+    mod-loading error. A rename row cannot reach an own overlay, so a target with `strip_onlyin=true` has the annotation
     removed from its whole PREPARED tree -- the authors' files and every overlay the chain merged in. Earlier targets,
     where @OnlyIn still strips client classes on a server, keep it."""
     n = 0
@@ -434,6 +558,116 @@ def check_direct_jump(expect):
            "control: without shared_chain the intermediate libraries are NOT pulled in (the test can tell)")
 
 
+def check_inherited_rows(expect):
+    """inherited_overlay_rows: A < B < C (1.21.3 < 1.21.4 < 1.21.5), an overlay at A, a row at A, B, C and the shared
+    1.21.4 table. Off (no key, or =false): the overlay reaches B and C verbatim, as before. On: at B it takes B's rows
+    and the shared 1.21.4 row, at C also C's; never A's; A's own tree and C's own overlay are as they were."""
+    global MV
+    saved, real_call = MV, subprocess.call
+    out_log = []
+
+    def call(args, *k, **kw):                  # prepare-sources' report, for the dead-rule assertion
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
+        out_log.append(r.stdout + r.stderr)
+        return r.returncode
+    trees = {}
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        src = d / "src"; (src / "m").mkdir(parents=True)
+        (src / "m/O.java").write_text("package m;\nclass O { old.A a; old.B b; }\n", encoding="utf-8")
+        (src / "m/Own.java").write_text("package m;\nclass Own { old.B b; }\n", encoding="utf-8")
+        (src / "m/P.java").write_text("package m;\nclass P { old.A a; old.B b; old.C c; old.S s; }\n", encoding="utf-8")
+        mv = d / "mv"
+        for t, inh in (("1.21.3", None), ("1.21.4", "1.21.3"), ("1.21.5", "1.21.4")):
+            (mv / "targets" / t).mkdir(parents=True)
+            (mv / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "x=1\n", encoding="utf-8")
+        (mv / "targets/1.21.3/renames.tsv").write_text("old.A\tnew.A\n", encoding="utf-8")
+        (mv / "targets/1.21.4/renames.tsv").write_text("old.B\tnew.B\n", encoding="utf-8")
+        # the generated moves table (its file name spelled once in this file: tools/fork-port.py's layer_patch reads it)
+        (mv / "targets/1.21.5" / ("moves.generated" + ".tsv")).write_text("old.C\tnew.C\nre:oldOnlyInOverlay\tnewOnlyInOverlay\n",
+                                                               encoding="utf-8")
+        (mv / "shared/1.21.4").mkdir(parents=True)
+        (mv / "shared/1.21.4/renames.tsv").write_text("old.S\tnew.S\n", encoding="utf-8")
+        overlay_a = "package m;\r\nclass O { old.A a; old.B b; old.C c; old.S s; int oldOnlyInOverlay; }\r\n"
+        own_c = "package m;\nclass Own { old.B b; old.C c; /* C's own */ }\n"
+        (mv / "targets/1.21.3/java/m").mkdir(parents=True)
+        with open(mv / "targets/1.21.3/java/m/O.java", "w", encoding="utf-8", newline="") as fh:
+            fh.write(overlay_a)
+        (mv / "targets/1.21.5/java/m").mkdir(parents=True)
+        with open(mv / "targets/1.21.5/java/m/Own.java", "w", encoding="utf-8", newline="") as fh:
+            fh.write(own_c)               # these bytes on every OS (write_text would write CRLF on Windows)
+        try:
+            MV = mv
+            subprocess.call = call
+            for mode, props in (("none", None), ("false", "minecraft_version=1.21.1\ninherited_overlay_rows=false\n"),
+                                ("on", "minecraft_version=1.21.1\ninherited_overlay_rows=true\n")):
+                if props is None:
+                    (mv / "base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+                else:
+                    (mv / "base.properties").write_text(props, encoding="utf-8")
+                for t in ("1.21.3", "1.21.4", "1.21.5"):
+                    o = d / f"out-{mode}-{t}"
+                    out_log.clear()
+                    rc = cmd_prepare(argparse.Namespace(target=t, src=str(src), out=str(o), set="main"))
+                    expect(rc == 0, f"{mode} {t}: prepare ran")
+                    tree = {}
+                    for f in sorted(o.rglob("*.java")):
+                        with open(f, encoding="utf-8", newline="") as fh:
+                            tree[f.relative_to(o).as_posix()] = fh.read()
+                    trees[(mode, t)] = (tree, "".join(out_log))
+            expect(rows_after("1.21.5", "1.21.3", mv) == (["1.21.5", "1.21.4"], ["1.21.5", "1.21.4"]),
+                   f"rows after A, nearest first: {rows_after('1.21.5', '1.21.3', mv)}")
+            # the stamp: beside the default main tree only (build/mc<t>/mv/java), written on, removed off
+            expect(not list(d.glob(f"*.{INHERITED_ROWS}")), "a custom --out gets no stamp beside it")
+            dflt = d / "build/mc1.21.5/mv/java"
+            st = d / f"build/mc1.21.5/mv/java.{INHERITED_ROWS}"
+            cmd_prepare(argparse.Namespace(target="1.21.5", src=str(src), out=str(dflt), set="main"))
+            expect(st.is_file() and st.read_text(encoding="utf-8") == f"{INHERITED_ROWS}=true\n",
+                   "an on-mode prepare of build/mc<t>/mv/java stamps it")
+            cmd_prepare(argparse.Namespace(target="1.21.5", src=str(src), out=str(d / "build/mc1.21.5/mv/cf-java"), set="cf"))
+            expect(not (d / f"build/mc1.21.5/mv/cf-java.{INHERITED_ROWS}").exists(), "another source set gets no stamp")
+            (mv / "base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+            cmd_prepare(argparse.Namespace(target="1.21.5", src=str(src), out=str(dflt), set="main"))
+            expect(not st.exists() and not list((d / "build/mc1.21.5/mv").glob(f"*.{INHERITED_ROWS}")),
+                   "re-prepared off: the stamp goes, and nothing is written in its place")
+            # a non-UTF-8 inherited overlay (prepare-sources stops on a non-UTF-8 authors' file; this stops the same way)
+            (src / "m/L.java").write_text("class L {}\n", encoding="utf-8")       # it replaces an authors' file
+            (mv / "targets/1.21.3/java/m/L.java").write_bytes(b"class L { String s = \"\xe9\"; }\n")
+            for mode, body in (("off", "minecraft_version=1.21.1\n"), ("on", "minecraft_version=1.21.1\ninherited_overlay_rows=true\n")):
+                (mv / "base.properties").write_text(body, encoding="utf-8")
+                o = d / f"out-l-{mode}"
+                try:
+                    rc, msg = cmd_prepare(argparse.Namespace(target="1.21.4", src=str(src), out=str(o), set="main")), b""
+                    msg = (o / "m/L.java").read_bytes() if rc == 0 else b""
+                except SystemExit as e:
+                    rc, msg = 1, str(e)
+                trees[("non-utf8", mode)] = (rc, msg)
+            (mv / "targets/1.21.3/java/m/L.java").unlink(); (src / "m/L.java").unlink()
+        finally:
+            MV, subprocess.call = saved, real_call
+    off = {t: trees[("none", t)][0] for t in ("1.21.3", "1.21.4", "1.21.5")}
+    on = {t: trees[("on", t)][0] for t in ("1.21.3", "1.21.4", "1.21.5")}
+    for t in off:
+        expect(trees[("false", t)][0] == off[t], f"inherited_overlay_rows=false prepares what no key does ({t})")
+        expect(off[t]["m/O.java"] == overlay_a, f"off: the inherited overlay reaches {t} verbatim, as before")
+    expect(on["1.21.3"] == off["1.21.3"], "on: the root target's tree is unchanged (its overlay is its own)")
+    expect(on["1.21.4"]["m/O.java"] == overlay_a.replace("old.B", "new.B").replace("old.S", "new.S"),
+           f"on: at B the overlay takes B's row and the shared 1.21.4 row, never A's: {on['1.21.4']['m/O.java']!r}")
+    expect(on["1.21.5"]["m/O.java"] == overlay_a.replace("old.B", "new.B").replace("old.S", "new.S")
+           .replace("old.C", "new.C").replace("oldOnlyInOverlay", "newOnlyInOverlay"),
+           f"on: at C it takes B's and C's rows (and the shared row), never A's; CRLF kept: {on['1.21.5']['m/O.java']!r}")
+    expect(on["1.21.5"]["m/Own.java"] == off["1.21.5"]["m/Own.java"] == own_c, "C's own overlay is copied as it is")
+    for t in off:
+        expect(on[t]["m/P.java"] == off[t]["m/P.java"], f"the authors' files are prepared the same either way ({t})")
+    expect(trees[("non-utf8", "off")][0] == 0 and trees[("non-utf8", "off")][1] == b"class L { String s = \"\xe9\"; }\n"
+           and trees[("non-utf8", "on")][0] != 0 and "targets/1.21.3/java/m/L.java" in trees[("non-utf8", "on")][1]
+           and "is not UTF-8" in trees[("non-utf8", "on")][1],
+           f"a non-UTF-8 inherited overlay: copied byte-for-byte off; on, the prepare stops naming it: {trees[('non-utf8', 'off')]} {trees[('non-utf8', 'on')]}")
+    expect("DEAD RULE (matched nothing in any source root): oldOnlyInOverlay" in trees[("none", "1.21.5")][1]
+           and "DEAD RULE" not in trees[("on", "1.21.5")][1],
+           "a row that fires only in an inherited overlay is dead off and live on: " + trees[("on", "1.21.5")][1][-300:])
+
+
 def self_check():
     ok = True
     def expect(c, msg):
@@ -441,6 +675,7 @@ def self_check():
         if not c:
             ok = False; print("FAIL:", msg)
     check_direct_jump(expect)
+    check_inherited_rows(expect)
     hook = f"+// comment\n+{HOOK_MARK}\n"
     expect(not isolation_problems([".multiversion/a", "build.gradle"], hook), "clean layer passes")
     expect(isolation_problems(["src/main/java/X.java"], ""), "source edit fails")

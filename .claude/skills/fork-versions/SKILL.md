@@ -398,7 +398,24 @@ review again ("Done", item 4).
      `TeleportTransition`); identifiers can contain `$` (`[\w$]+`, mixin handler names).
    - a **helper** class when a removed method can be stood in for (`net.<mod>.mv`, overlay-only).
    - an **overlay** (whole file, `targets/<t>/java/...`) only for a real semantic change. Derive it from the
-     PREPARED file (`build/mc<t>/mv/java`, already renamed): overlays are not run through the table. Every overlay
+     PREPARED file (`build/mc<t>/mv/java`, already renamed): overlays are not run through the table. By default an
+     overlay a later target inherits reaches it verbatim, so a later target whose rows rename what it names carries a
+     renamed copy. A layer can opt in with `inherited_overlay_rows=true` in `.multiversion/base.properties` (off
+     unless set; do not set it without the maintainer's decision for that fork): `layer.py prepare` then runs an
+     overlay the target inherits from an older target A (no copy of its own) through the rows of the chain targets
+     after A up to the target -- their `renames.tsv` and `moves.generated.tsv`, then the shared tables the target has
+     and A does not --, never A's or older rows; the target's own overlays are copied as they are. `layer-sync.py
+     overlays` then reads each inherited path against that renamed overlay, so a renamed copy those rows produce is
+     **redundant** (delete it), and the re-merge retires a copy that merges into it. In either mode an overlay is
+     redundant, or retired, only when deleting it changes no target's tree: a later target that takes the path from
+     it (no copy of its own) may have rows written against it, or strip `@OnlyIn`, so that target's tree is compared
+     as `layer.py` writes it; a copy it would change stays `renamed-copy` (`mechanical` against the authors' file)
+     with `kept_for` naming those targets. Also with the key on, `layer-test-plan.py` counts a row that
+     fires in an inherited overlay as fired. An on-mode prepare stamps its tree (`build/mc<t>/mv/java.inherited_overlay_rows`),
+     so `fork-port.py` re-prepares a tree prepared in the other mode. A `layer.py` older than the key ignores it:
+     `layer-sync.py`, `layer-test-plan.py` and `fork-port.py` then read the layer as off and warn -- run
+     `make-fork-layer.py sync-shared`. An inherited overlay that is not UTF-8 stops an on-mode prepare, naming the
+     file. Every overlay
      is a copy of the authors' file that their next release must be merged into, so keep few:
      `python3 tools/layer-sync.py overlays --repo DIR [--target <t>]` counts each target's whole-file overlays and
      lines, classes each against what it replaces (the authors' file through the rename table alone, or the overlay
