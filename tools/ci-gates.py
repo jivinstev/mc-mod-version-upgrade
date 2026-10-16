@@ -177,6 +177,13 @@ def read_kv(path):
 LIBRARY_SKIP = ("spawn", "battle")
 
 
+def is_library(repo, bv):
+    """A version branch marked library=true (its .port/<bv>/branch.properties). Only a version branch: there the
+    library rule stands in for the skipped phases (a dependent's Gate C against the jar, tools/fork-branches.py); a
+    layer fork, which has no such rule, runs every phase as before."""
+    return bool(bv) and read_kv(pathlib.Path(repo) / ".port" / bv / "branch.properties").get("library") == "true"
+
+
 def library_phases(phases, library):
     """A library fork's Gate C phases: without spawn and battle, which spawn the mod's entities -- a library has none,
     so they check nothing there (issue #133); its versions are proven by a dependent's Gate C instead
@@ -265,6 +272,9 @@ def self_check():
         ok &= branch_version(r) == "1.21.4" and read_kv(r / ".port/1.21.4/branch.properties").get("library") == "true"
         ok &= library_phases(["launch", "spawn", "battle", "gauntlet"], True) == (["launch", "gauntlet"], ["spawn", "battle"])
         ok &= library_phases(["launch", "spawn"], False) == (["launch", "spawn"], [])
+        ok &= is_library(r, "1.21.4")
+        (r / ".multiversion").mkdir(); (r / ".multiversion/base.properties").write_text("library=true\n", encoding="utf-8")
+        ok &= not is_library(r, None)              # a layer fork marked library: every phase, as before
         libs = r / "libs"; libs.mkdir()
         for n in ("m-1_mr.jar", "m-1_cf.jar", "m-1_cf-sources.jar", "m-1_mr-mc1.21.4.jar", "m-1_cf-mc1.21.4.jar"):
             (libs / n).write_bytes(b"x")
@@ -417,8 +427,7 @@ def main():
                last.replace("optional-dep-scan: ", "")[:300])
 
     env = dict(os.environ, **pu.gate_env(c))
-    library = (read_kv(repo / ".port" / bv / "branch.properties").get("library") == "true") if bv else \
-        (bool(a.mc) and read_kv(repo / ".multiversion/base.properties").get("library") == "true")
+    library = is_library(repo, bv)
     phases, skipped = library_phases([q for q in a.gatec.split(",") if q and q != "none"], library)
     for q in skipped:
         rows.append(f"| Gate C -- real client, `{q}` | skipped | a library: no entity of its own to spawn; proven by a "
