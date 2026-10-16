@@ -620,14 +620,18 @@ def parent_base(repo, root, t, ref):
     return pv, mb or None
 
 
-def helper_blobs(root, t):
-    """{path: blob} of .port/<t>/shared-helpers.txt: the shared-library helpers this version carries, as installed."""
+def helper_map(text):
     out = {}
-    for line in read_text(rec_dir(root, t) / "shared-helpers.txt").splitlines():
+    for line in (text or "").splitlines():
         parts = line.split()
         if len(parts) == 2 and not line.startswith("#"):
             out[parts[0]] = parts[1]
     return out
+
+
+def helper_blobs(root, t):
+    """{path: blob} of .port/<t>/shared-helpers.txt: the shared-library helpers this version carries, as installed."""
+    return helper_map(read_text(rec_dir(root, t) / "shared-helpers.txt"))
 
 
 def review_items(repo, root, t, ref, work, files=None, mechanical=None):
@@ -1731,6 +1735,330 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None):
     return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED")) else 0
 
 
+
+# ---------------------------------------------------------------- a new version branch
+
+def version_branches(repo):
+    """{version: commit} of every version branch in the clone (local first, then origin's)."""
+    out = {}
+    for pat in ("refs/heads/neoforge-*", "refs/remotes/origin/neoforge-*"):
+        for line in git(repo, "for-each-ref", "--format=%(refname:short) %(objectname)", pat).stdout.splitlines():
+            name, c = line.rsplit(" ", 1)
+            v = name.split("neoforge-", 1)[1]
+            if v not in out and git(repo, "cat-file", "-e", f"{c}:{REC}/{v}/{BRANCH_PROPS}").returncode == 0:
+                out[v] = c
+    return out
+
+
+def shared_helpers_for(versions_, mv_pkg, modid, build_text):
+    """{rel path under src/main/java: text} of the shared library's helper classes for `versions_` (nearest first:
+    the nearest version's copy wins), placeholders filled; a helper whose `// REQUIRES: <token>` the build does not
+    name is left out (make-fork-layer.py's rule)."""
+    pool = {}
+    for v in reversed(versions_):
+        d = SHARED / v / "java"
+        for f in sorted(d.glob("*.java")) if d.is_dir() else []:
+            text = f.read_text(encoding="utf-8")
+            if any(n not in build_text for n in re.findall(r"(?m)^// REQUIRES: (\S+)", text)):
+                continue
+            pool[f"{mv_pkg.replace('.', '/')}/{f.name}"] = text.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
+    return pool
+
+
+def used_helpers(pool, java_texts):
+    """The helpers of `pool` the tree uses, transitively (templates/fork-layer/tools/layer.py add_shared_helpers)."""
+    text = "\n".join(java_texts)
+    fqn = lambda rel: rel[:-5].replace("/", ".")
+    added, changed = {}, True
+    while changed:
+        changed = False
+        for rel, body in pool.items():
+            if rel in added:
+                continue
+            name = rel.rsplit("/", 1)[-1][:-5]
+            if fqn(rel) in text or (fqn(rel).rsplit(".", 1)[0] + ".*") in text or f"MV-REQUIRES: {name}" in text:
+                added[rel] = body
+                text += "\n" + body
+                changed = True
+    return added
+
+
+def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None, say=print):
+    """Make version branch neoforge-<t> from its parent's (the nearest lower version branch, or --parent, else the port
+    branch): its versions from templates/fork-layer/versions.json written into gradle.properties, branch.properties
+    and the mods.toml ranges; the shared library of every targeted version above the parent up to t applied -- its
+    rows over the source (a file the rows alone made at the parent is re-made from the port branch through t's
+    whole chain, any other through the rows t adds), its helper classes the tree uses, its access-transformer lines;
+    @OnlyIn stripped from 1.21.6. Refused (exit 18, nothing written) while the parent version is not done, unless
+    allow_undone_parent (recorded). Plumbing only: no checkout is touched. -> exit code."""
+    repo = pathlib.Path(repo).resolve()
+    mfl = load("make_fork_layer_fb", "make-fork-layer.py")
+    ln = mfl.line(t)
+    if ln is None or not ln.get("stable"):
+        say(f"fork-branches: {t} is not a targeted line of templates/fork-layer/versions.json"
+            + (f": {ln['skip']}" if ln and ln.get("skip") else "")); return 2
+    if resolve_branch(repo, branch_name(t)):
+        say(f"fork-branches: {branch_name(t)} exists already"); return 2
+    have = version_branches(repo)
+    base_mc = mfl.versions()["base"]
+    pb = port_branch or (parse_props(reader_of_ref(repo, next(iter(have.values())))(f"{REC}/{next(iter(have))}/{BRANCH_PROPS}"))
+                         .get("port_branch") if have else None) or branch_name(base_mc)
+    if parent is None:
+        lower = sorted((v for v in have if mc_key(v) < mc_key(t)), key=mc_key)
+        parent = lower[-1] if lower else None
+    start = have.get(parent) if parent else resolve_branch(repo, pb)
+    if not start:
+        say(f"fork-branches: no branch {branch_name(parent) if parent else pb}"); return 2
+    allowed = ""
+    if parent:
+        why = target_done(repo, parent)
+        if why and not allow_undone_parent:
+            say(f"fork-branches: REFUSED {t}: the version it stands on, {parent}, is not done:")
+            for w in why[:12]:
+                say(f"  - {w}")
+            say(f"fork-branches: finish {parent} first (python3 tools/fork-port.py --repo {repo} --target {parent} --check-done), "
+                "or for development only pass --allow-undone-parent (recorded)")
+            return UNDONE_EXIT
+        if why:
+            allowed = f"{parent} {datetime.date.today().isoformat()}: {why[0][:160]}"
+    files = ref_files(repo, start)
+    modes = {p: m for p, (m, _b) in tree_entries(repo, start).items()}
+    port_now = git(repo, "merge-base", start, resolve_branch(repo, pb)).stdout.strip() if parent else start
+    pp = parse_props(files.get(f"{REC}/{parent}/{BRANCH_PROPS}", b"").decode()) if parent else {}
+    gp = parse_props(files.get("gradle.properties", b"").decode())
+    toml = next((files[p] for p in sorted(files) if p.endswith("META-INF/neoforge.mods.toml") and p.startswith("src/")), b"")
+    modid = (re.search(rb'(?m)^\s*modId\s*=\s*"([^"]+)"', toml) or [None, gp.get("mod_id", "").encode()])[1].decode()
+    first = next((files[p] for p in sorted(files) if p.startswith("src/main/java/") and p.endswith(".java")), b"")
+    pkg = re.search(rb"(?m)^package\s+([\w.]+)\s*;", first)
+    mv_pkg = pp.get("mv_package") or ".".join((pkg.group(1).decode().split(".") if pkg else ["mv"])[:2]) + ".mv"
+    order = [l["mc"] for l in mfl.versions()["lines"] if l.get("stable")]
+    lo = parent or base_mc
+    new_versions = [v for v in order if mc_key(lo) < mc_key(v) <= mc_key(t)][::-1]        # nearest first
+    neo = ln["neo"]
+    mc_range, neo_range = mfl.ranges(t, neo)
+    props = {"prop.minecraft_version": t, "prop.neo_version": neo}
+    if ln.get("geckolib") and "geckolib_version" in gp:
+        props["prop.geckolib_version"] = ln["geckolib"]
+    keys = [f"toml.minecraft={mc_range}", f"toml.neoforge={neo_range}", f"java_version={ln.get('java', 21)}"]
+    if ln.get("nfrt"):
+        keys.append(f"nfrt_version={ln['nfrt']}")
+    if ln.get("geckolib_group") and "geckolib_version" in gp:
+        old = f"software.bernie.geckolib:geckolib-neoforge-{t}"
+        keys.append("substitute." + mfl.substitute_line(f"{old}={ln['geckolib_group']}:geckolib-neoforge-{t}:{ln['geckolib']}"))
+    strip = mc_key(t) >= mc_key("1.21.6")
+    if strip:
+        keys.append("strip_onlyin=true")
+    head = [f"# Version branch {branch_name(t)} (tools/fork-branches.py add-target): Minecraft {t} on NeoForge {neo}.",
+            f"minecraft_version={t}", f"branch={branch_name(t)}", f"parent={branch_name(parent) if parent else pb}"]
+    if parent:
+        head.append(f"parent_minecraft_version={parent}")
+    head += [f"port_branch={pb}", f"base_minecraft_version={pp.get('base_minecraft_version', base_mc)}", f"mv_package={mv_pkg}"]
+    for k in ("upstream", "upstream_commit", "library"):
+        if pp.get(k):
+            head.append(f"{k}={pp[k]}")
+    head += [f"{k}={v}" for k, v in sorted(pp.items()) if k.startswith("library.")]
+    head += [f"{k}={v}" for k, v in props.items()] + keys
+    if allowed:
+        head.append(f"allowed_undone_parent={allowed}")
+    rd, rd_parent = f"{REC}/{t}", f"{REC}/{parent}"
+    sub = lambda x: x.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
+    sections = [f"# ---- shared {v}\n" + sub((SHARED / v / "renames.tsv").read_text(encoding="utf-8"))
+                for v in new_versions if (SHARED / v / "renames.tsv").is_file()]
+    inherited = files.get(f"{REC}/{parent}/shared-renames.tsv", b"").decode() if parent else ""
+    files[f"{rd}/{BRANCH_PROPS}"] = ("\n".join(head) + "\n").encode("utf-8")
+    files[f"{rd}/renames.tsv"] = f"# {t}: from<TAB>to (plain type, member:, re:) -- see prepare-sources.py\n".encode("utf-8")
+    shared_text = "\n".join(sections + ([inherited.rstrip("\n")] if inherited.strip() else [])) + "\n"
+    if shared_text.strip():
+        files[f"{rd}/shared-renames.tsv"] = shared_text.encode("utf-8")
+    read = lambda p: files[p].decode("utf-8", "surrogateescape") if p in files else ""
+    ch = [t] + (chain_read(read, parent) if parent else [])
+    rows_t = rows_tree(repo, port_now, read, t, ch, strip=strip)
+    rows_p = rows_tree(repo, port_now, read, parent, chain_read(read, parent)) if parent else None
+    own = rules_of(own_table(read, t, parent))
+    remade = moved = 0
+    for path in [p for p in files if re.match(r"^src/[^/]+/java/.+\.java$", p)]:
+        mech = rows_p is None or files[path] == rows_p.get(path)
+        if mech and path in rows_t:
+            new = rows_t[path]; remade += 1
+        else:
+            text = apply_rules(files[path].decode("utf-8", "surrogateescape"), own)
+            new = (ONLYIN.sub("", text) if strip else text).encode("utf-8", "surrogateescape"); moved += 1
+        files[path] = new
+    gp_text = files.get("gradle.properties", b"").decode("utf-8", "surrogateescape")
+    files["gradle.properties"] = set_props_text(gp_text, {k[5:]: v for k, v in props.items()}).encode("utf-8")
+    for p in [p for p in files if p.startswith("src/") and p.endswith("META-INF/neoforge.mods.toml")]:
+        files[p] = toml_rewrite(files[p].decode("utf-8", "surrogateescape"), {"minecraft": mc_range, "neoforge": neo_range}).encode("utf-8")
+    if not parent:
+        bg = files.get("build.gradle", b"").decode("utf-8", "surrogateescape")
+        if BRANCH_HOOK_LINE not in bg:
+            files["build.gradle"] = (bg.rstrip("\n") + "\n" + BRANCH_HOOK).encode("utf-8")
+        files[f"{REC}/branch.gradle"] = TPL.read_bytes()
+    build_text = files.get("build.gradle", b"").decode("utf-8", "replace") + files["gradle.properties"].decode("utf-8", "replace")
+    pool = shared_helpers_for(new_versions + [v for v in order if mc_key(v) <= mc_key(lo) and mc_key(v) > mc_key(base_mc)][::-1],
+                              mv_pkg, modid, build_text)
+    installed = helper_map(read(f"{rd_parent}/shared-helpers.txt")) if parent else {}
+    java = [files[p].decode("utf-8", "replace") for p in files if p.startswith("src/main/java/") and p.endswith(".java")]
+    helpers = []
+    for rel, body in used_helpers(pool, java).items():
+        dest = f"src/main/java/{rel}"
+        if dest in files and installed.get(dest) != hash_blobs({dest: files[dest]})[dest]:
+            continue                                    # the fork's own class of that name, or an edited helper, wins
+        files[dest] = body.encode("utf-8")
+        helpers.append(f"{dest} {hash_blobs({dest: files[dest]})[dest]}")
+    if helpers:
+        files[f"{rd}/shared-helpers.txt"] = ("# shared-library helpers as installed (path blob): tools/fork-branches.py\n"
+                                             + "\n".join(sorted(helpers)) + "\n").encode("utf-8")
+    at_lines = [l for v in new_versions if (SHARED / v / "accesstransformer.cfg").is_file()
+                for l in sub((SHARED / v / "accesstransformer.cfg").read_text(encoding="utf-8")).splitlines()
+                if l.strip() and not l.startswith("#")]
+    if at_lines:
+        cur = files.get(AT_DEFAULT, b"").decode("utf-8", "surrogateescape")
+        add = [l for l in at_lines if l not in cur.splitlines()]
+        if add:
+            files[AT_DEFAULT] = (cur.rstrip("\n") + ("\n" if cur.strip() else "") + "\n".join(add) + "\n").encode("utf-8")
+    if not parent and f"{REC}/INVENTORY.json" not in files:
+        li = _mod("layer_inventory_fb", "layer-inventory.py")
+        with tempfile.TemporaryDirectory() as d:
+            base = export(repo, start, pathlib.Path(d) / "b")
+            inv = li.build_inventory(base)
+        inv["base"] = base_mc
+        inv["src_tree"] = git(repo, "rev-parse", f"{start}:src").stdout.strip() or None
+        files[f"{REC}/INVENTORY.json"] = (json.dumps(inv, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+    c = commit_tree(repo, files, modes, start,
+                    f"Version branch {branch_name(t)}: Minecraft {t} from {branch_name(parent) if parent else pb}\n\n"
+                    f"Versions from versions.json (NeoForge {neo}); the shared library of {', '.join(new_versions) or 'no version'}"
+                    f" applied: {remade} file(s) re-made from {pb} through {t}'s rows, {moved} carried through the rows {t} adds,"
+                    f" {len(helpers)} helper(s)." + TRAILER)
+    git(repo, "branch", branch_name(t), c, check=True)
+    say(f"fork-branches: made {branch_name(t)} at {c[:12]} from {branch_name(parent) if parent else pb}: NeoForge {neo}, shared "
+        f"library {', '.join(new_versions) or '-'}, {len(helpers)} helper(s); next: git checkout {branch_name(t)} && python3 "
+        f"tools/fork-port.py --repo {repo} --target {t}")
+    return 0
+
+
+# ---------------------------------------------------------------- freeze, library record, CI
+
+def freeze(repo, t, upstream=None, libraries=(), accept_drift=False, say=print):
+    """The upstream freeze of version t's branch (tools/fork-port.py freeze_upstream into .port/<t>/branch.properties):
+    the checkout must be on that branch. A --library pin alone never re-checks the authors' branch (issue #133, gap 3)."""
+    repo = pathlib.Path(repo).resolve()
+    if checkout_version(repo) != t:
+        say(f"fork-branches: freeze writes .port/{t}/{BRANCH_PROPS}: check out {branch_name(t)} first"); return 2
+    rec, why = fp().freeze_upstream(repo, upstream, libraries, accept_drift=accept_drift,
+                                    props_file=rec_dir(repo, t) / BRANCH_PROPS)
+    if not rec:
+        say(f"fork-branches: freeze: {why}"); return 2
+    say("fork-branches: freeze: " + ", ".join(f"{k}={v}" for k, v in rec.items()) + f" (.port/{t}/{BRANCH_PROPS}; commit it)")
+    return 0
+
+
+def origin_slug(repo):
+    url = git(repo, "remote", "get-url", "origin").stdout.strip()
+    m = re.search(r"github\.com[/:]([\w.-]+/[\w.-]+?)(?:\.git)?$", url)
+    return m.group(1) if m else None
+
+
+def library_record(lib, t, dependent, slug=None, say=print):
+    """Record in library version t's DEPENDENTS.json that a dependent's version t passed Gate C against this
+    library's jar: the dependent's .port/<t>/GATES.md (green Gate C, current at its HEAD) and its pin of the
+    library's release jar (port_jar.<g:a>=<url> <sha256>, the URL naming this library's repository) -> the release
+    tag, the library commit it was built from, the jar's sha256. Both checkouts on their version-t branches. The
+    library version is done (the library rule) only with such an entry for a commit whose jar is current."""
+    lib, dep = pathlib.Path(lib).resolve(), pathlib.Path(dependent).resolve()
+    for d, what in ((lib, "library"), (dep, "dependent")):
+        if checkout_version(d) != t:
+            say(f"fork-branches: the {what} checkout {d} is not on {branch_name(t)}"); return 2
+    slug = slug or origin_slug(lib)
+    if not slug:
+        say("fork-branches: cannot read the library's GitHub repository from its origin: pass --slug owner/repo"); return 2
+    files = root_files(dep, dep, True)
+    head = git(dep, "rev-parse", "HEAD").stdout.strip()
+    g = gates_problems(dep, dep, t, head, True, files)
+    if g:
+        say(f"fork-branches: the dependent's Gate C is not green and current: {g[0]}"); return 2
+    gates_commit = re.search(r"at `([0-9a-f]{7,40})", read_text(rec_dir(dep, t) / "GATES.md")).group(1)
+    pins = [(k, v) for k, v in info(dep, t).items() if k.startswith("port_jar.")]
+    hit = None
+    for k, v in pins:
+        url, _, sha = v.partition(" ")
+        m = re.match(r"^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/", url)
+        if m and m.group(1).lower() == slug.lower():
+            hit = (k[len("port_jar."):], url, sha.strip(), m.group(2))
+    if not hit:
+        say(f"fork-branches: the dependent pins no jar of {slug}'s releases (port_jar.* in .port/{t}/{BRANCH_PROPS}): it was not "
+            "built against a release of this library"); return 2
+    ga, url, sha, tag = hit
+    git(lib, "fetch", "-q", "--tags", "origin", env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    lc = git(lib, "rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}").stdout.strip()
+    if not lc:
+        say(f"fork-branches: the library clone has no tag {tag} (git fetch --tags)"); return 2
+    f = rec_dir(lib, t) / "DEPENDENTS.json"
+    try:
+        data = json.loads(read_text(f) or "[]")
+    except ValueError:
+        data = []
+    entry = {"dependent": origin_slug(dep) or str(dep), "dependent_commit": head, "gates_commit": gates_commit,
+             "gate_c": "PASS", "library": ga, "library_tag": tag, "library_commit": lc, "jar_sha256": sha,
+             "recorded": datetime.date.today().isoformat()}
+    data = [e for e in data if not (e.get("dependent") == entry["dependent"] and e.get("library_commit") == lc)] + [entry]
+    f.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+    say(f"fork-branches: recorded in {f.relative_to(lib)}: {entry['dependent']} passed Gate C at {gates_commit} against "
+        f"{tag} ({sha[:16]}...); commit it on {branch_name(t)}")
+    return 0
+
+
+def ci_args(repo, t, modid):
+    """The tools/port-ci.py arguments that give version branch t the single-version workflow at its version: the port
+    branch's installed workflow read back (port-ci.py recover_args), without --layer-branch, its --dep-jar specs for
+    the sibling libraries replaced by this version's pins (the library's per-version release, installed under the
+    coordinate branch.gradle substitutes), and a library's Gate C without the spawn and battle phases."""
+    t_ref = resolve_branch(repo, branch_name(t))
+    read = reader_of_ref(repo, t_ref)
+    p = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
+    pc = load("port_ci_fb", "port-ci.py")
+    wf = git(repo, "show", f"{resolve_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
+    args = pc.recover_args(wf.stdout) if wf.returncode == 0 else ["--modid", modid, "--gatec", "launch,spawn,battle,gauntlet"]
+    out, i = [], 0
+    while i < len(args):
+        if args[i] == "--layer-branch":
+            i += 2; continue
+        if args[i] == "--modid":
+            out += ["--modid", modid or args[i + 1]]; i += 2; continue
+        if args[i] == "--dep-jar":
+            ga = ":".join(args[i + 1].rsplit("=", 1)[1].split(":")[:2])
+            pin = p.get(f"port_jar.{ga}")
+            subst = p.get(f"substitute.{ga}")
+            if pin and subst:
+                url = pin.split()[0]
+                m = re.match(r"^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/(.+)$", url)
+                out += ["--dep-jar", f"{m.group(1)}@{m.group(2)}/{m.group(3)}={subst}"]
+            else:
+                out += ["--dep-jar", args[i + 1]]
+            i += 2; continue
+        if args[i] == "--gatec" and p.get("library") == "true":
+            out += ["--gatec", ",".join(x for x in args[i + 1].split(",") if x not in ("spawn", "battle"))]; i += 2; continue
+        out.append(args[i]); i += 1
+    return out
+
+
+def ci(repo, t, modid, run=False, say=print):
+    repo = pathlib.Path(repo).resolve()
+    if not resolve_branch(repo, branch_name(t)):
+        say(f"fork-branches: no branch {branch_name(t)}"); return 2
+    args = ci_args(repo, t, modid)
+    say(f"fork-branches: {branch_name(t)}: python3 tools/port-ci.py --repo <its checkout> {' '.join(args)}")
+    if not run:
+        say(f"fork-branches: run it on a checkout of {branch_name(t)} (or pass --run: a worktree under build/fork-branches/), then push")
+        return 0
+    work, why = worktree_for(repo, t)
+    if work is None:
+        say(f"fork-branches: {why}"); return 2
+    rc = subprocess.run([sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(work), *args]).returncode
+    if rc == 0:
+        say(f"fork-branches: committed on {branch_name(t)} in {work}; nothing pushed: git push origin {branch_name(t)}")
+    return rc
+
+
 # ---------------------------------------------------------------- CLI
 
 def main():
@@ -1748,7 +2076,25 @@ def main():
     k.add_argument("--gates", default="ab", choices=["none", "compile", "ab", "full"],
                    help="the no-model gates per merged branch (default ab: compile, audits, Gate A/B)")
     k.add_argument("--dry-run", action="store_true")
+    n = sub.add_parser("add-target"); n.add_argument("--repo", required=True); n.add_argument("--target", required=True)
+    n.add_argument("--parent", help="the version it is made from (default: the nearest lower version branch, else the port branch)")
+    n.add_argument("--port-branch"); n.add_argument("--allow-undone-parent", action="store_true")
+    f = sub.add_parser("freeze"); f.add_argument("--repo", required=True); f.add_argument("--target", required=True)
+    f.add_argument("--upstream"); f.add_argument("--library", action="append", default=[])
+    f.add_argument("--accept-upstream-drift", action="store_true")
+    lr = sub.add_parser("library-record"); lr.add_argument("--repo", required=True); lr.add_argument("--target", required=True)
+    lr.add_argument("--dependent", required=True); lr.add_argument("--slug")
+    ci_ = sub.add_parser("ci"); ci_.add_argument("--repo", required=True); ci_.add_argument("--target", required=True)
+    ci_.add_argument("--modid", required=True); ci_.add_argument("--run", action="store_true")
     a = ap.parse_args()
+    if a.cmd == "add-target":
+        return add_target(a.repo, a.target, a.parent, a.allow_undone_parent, a.port_branch)
+    if a.cmd == "freeze":
+        return freeze(a.repo, a.target, a.upstream, a.library, a.accept_upstream_drift)
+    if a.cmd == "library-record":
+        return library_record(a.repo, a.target, a.dependent, a.slug)
+    if a.cmd == "ci":
+        return ci(a.repo, a.target, a.modid, a.run)
     if a.cmd == "cascade":
         return cascade(a.repo, a.range, a.gates, a.dry_run)
     if a.cmd == "migrate":
@@ -1908,6 +2254,19 @@ def self_check():
         # a change after the migration makes the gates and the review stale; a mechanical file edited becomes a review row
         g("checkout", "-q", "neoforge-1.21.4")
         expect(checkout_version(r) == "1.21.4" and target_done(r, "1.21.4") == [], "checked out: done in place")
+        # the library rule: a library version is done only once a dependent passed Gate C against its jar
+        bp = r / REC / "1.21.4" / BRANCH_PROPS
+        bp.write_text(read_text(bp) + "library=true\n", encoding="utf-8")
+        why = target_done(r, "1.21.4")
+        expect(len(why) == 1 and why[0].startswith(LIBRARY_PENDING), f"library=true and no dependent recorded: not done: {why}")
+        (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",
+                                                                         "library_commit": g("rev-parse", "HEAD")}]), encoding="utf-8")
+        expect(target_done(r, "1.21.4") == [], "a dependent recorded green against this jar's commit: done")
+        (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",
+                                                                         "library_commit": "0" * 40}]), encoding="utf-8")
+        expect(target_done(r, "1.21.4")[:1] and target_done(r, "1.21.4")[0].startswith(LIBRARY_PENDING),
+               "control: a dependent recorded against another commit does not count")
+        g("checkout", "-q", "--", "."); (r / REC / "1.21.4" / "DEPENDENTS.json").unlink()
         (r / "src/main/java/com/example/mod/ExampleMod.java").write_text("package com.example.mod;\nclass ExampleMod { int edited; }\n",
                                                                        encoding="utf-8")
         why = target_done(r, "1.21.4")
@@ -1962,6 +2321,19 @@ def self_check():
         expect(rc == 0 and "| 1.21.5 | up to date |" in out, f"cascade --dry-run: {out[-200:]}")
         for t in ("1.21.3", "1.21.4", "1.21.5"):
             git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / t))
+        # a new version branch: refused over an undone parent (nothing written), made with the escape (recorded)
+        refs = g("for-each-ref")
+        rc, out = _quiet(add_target, r, "1.21.8")
+        expect(rc == UNDONE_EXIT and "REFUSED 1.21.8" in out and g("for-each-ref") == refs,
+               f"add-target over an undone parent: exit 18, nothing written: {out[-300:]}")
+        rc, out = _quiet(add_target, r, "1.21.8", allow_undone_parent=True)
+        f8 = ref_files(r, resolve_branch(r, "neoforge-1.21.8")) if rc == 0 else {}
+        p8 = parse_props(f8.get(".port/1.21.8/branch.properties", b"").decode())
+        expect(rc == 0 and p8.get("parent") == "neoforge-1.21.5" and p8.get("prop.neo_version") == "21.8.54"
+               and p8.get("strip_onlyin") == "true" and p8.get("allowed_undone_parent", "").startswith("1.21.5 ")
+               and b"minecraft_version=1.21.8" in f8["gradle.properties"] and b'"[1.21.8,1.21.9)"' in f8["src/main/resources/META-INF/neoforge.mods.toml"]
+               and b"# ---- shared 1.21.8" in f8[".port/1.21.8/shared-renames.tsv"] and b"keep = 5" in f8["src/main/java/com/example/mod/Over.java"],
+               f"add-target 1.21.8 from 1.21.5: versions, ranges, the shared 1.21.8 table, the parent's own changes kept: {out[-300:]}")
         # a branch that exists with other content is refused, nothing moved
         g("branch", "-f", "neoforge-1.21.5", "neoforge-1.21.1")
         before = g("rev-parse", "neoforge-1.21.5")
