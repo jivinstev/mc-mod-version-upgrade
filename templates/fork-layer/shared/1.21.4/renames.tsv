@@ -25,4 +25,9 @@ re:LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft
 # ---- mixin targets: ScreenEffectRenderer.renderScreenEffect(Minecraft, PoseStack) gained a MultiBufferSource
 # (measured on neoforge-21.4.158); an @Inject handler needs the extra parameter before its CallbackInfo
 re:(method = "renderScreenEffect"[^;{]*?\(\s*Minecraft \w+,\s*PoseStack \w+,)(\s*CallbackInfo\b)	\1 net.minecraft.client.renderer.MultiBufferSource mv$bufferSource,\2
+# ---- RenderType.entityTranslucentCull is gone (1.21.2) and RenderType.entityTranslucent sets NO_CULL, so mapping one to
+# the other draws the model double-sided (compile-clean, gates green). NeoForgeRenderTypes.getItemLayeredTranslucent is
+# the 1.21.1 state: entity-translucent shader, default CULL, translucent, lightmap, overlay, sorted -- same signature on
+# 1.21.5 and 1.21.8 (NeoForgeRenderPipelines.ENTITY_TRANSLUCENT_CULL). Rows do not reach overlays. CATALOG M73.
+re:\bRenderType\.entityTranslucentCull\(	net.neoforged.neoforge.client.NeoForgeRenderTypes.getItemLayeredTranslucent(
 #!strict

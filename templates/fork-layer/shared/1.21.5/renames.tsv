@@ -8,9 +8,11 @@
 # UPPER_CASE constant (bare or Class.CONST). A key held in a variable, and a ListTag index, are left to the
 # fork's own rows or its workers.
 #!exhaustive  # shared library: most forks use only some of these rows
-re:\.getInt\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getIntOr(\1, 0)
+# GameRules.getBoolean/getInt(GameRules.Key) still return the value on 1.21.5 and take an UPPER_CASE key too: a call
+# on getGameRules() or with a GameRules.RULE_* argument is not an NBT read (CATALOG M74)
+re:(?<!getGameRules\(\))\.getInt\(("[^"]*"|(?!GameRules\.)(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getIntOr(\1, 0)
 re:\.getString\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getStringOr(\1, "")
-re:(?<!Boolean)\.getBoolean\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getBooleanOr(\1, false)
+re:(?<!Boolean)(?<!getGameRules\(\))\.getBoolean\(("[^"]*"|(?!GameRules\.)(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getBooleanOr(\1, false)
 re:\.getLong\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getLongOr(\1, 0L)
 re:\.getDouble\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getDoubleOr(\1, 0.0)
 re:\.getFloat\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getFloatOr(\1, 0.0F)
