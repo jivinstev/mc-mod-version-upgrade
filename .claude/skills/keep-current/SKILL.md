@@ -160,7 +160,9 @@ Only for a fleet entry with `"version_branches": true` (or a clone whose `neofor
 each version branch must take it, in chain order, and nothing fixes a version unless this is run. There is no R6
 re-merge here: git's own merge does it, with the rename rows applied as a tool.
 
-1. Once the port branch has the authors' code (its PR merged, or the work branch `keep-current/<date>` for a dry look):
+1. Once the port branch has the authors' code (its PR merged into it -- the cascade starts from the port branch itself,
+   so a `keep-current/<date>` work branch is not accepted as the start; for a look before the merge, run the cascade
+   with `--dry-run` once it is merged, which prints what each version would merge and changes nothing):
    `python3 tools/fork-branches.py cascade --repo DIR neoforge-1.21.1..<newest version> --gates ab`. It merges the port
    branch into the first version branch, that into the next, ... (a merge commit each, never a rebase or a force-push).
    Each file the merge changed that both sides had from the rows alone is re-made from the authors' new file through

@@ -84,7 +84,9 @@ every open reason; off the branch it reads the branch's own commit and writes no
      1.21.6 -- an inherited overlay the rows renamed), the build files the tool derives (gradle.properties' versions, the
      mods.toml ranges, a mixin config's `mixin_add`/`mixin_remove` arrays, the hook line), a `.java` file the port
      branch does not have (a helper or an overlay-only class: no authors' counterpart, as on the layer), a
-     shared-library helper as installed (`shared-helpers.txt`), deletions, documents and the records;
+     shared-library helper as installed (`shared-helpers.txt`), documents and the records;
+   - every file the parent has and this version **deletes** (kind `deleted`), except one the chain's `drops.txt`
+     names or a `mixin_remove.` / `mixin_remove_only.` key accounts for (a mixin class the version drops by its config);
    - every **resource group** that differs (kind `resources`: its first three directories, with the digest of its
      changed files -- an edit is a new row);
    - `.port/<v>/renames.tsv` as a whole (kind `renames`, with its digest).
@@ -222,7 +224,8 @@ recorded as `<sha> + uncommitted: <files>` (the run's own records aside).
 
 **One run per checkout, one Gate C per machine.** `fork-port.py` and `ci-gates.py --mc` take `build/.fork-port.lock`
 (exit 14 for a second run on the same checkout); every Gate C client takes the machine-wide lock
-(`~/.mmvu/locks/gatec.lock`) and a second one waits. One agent per checkout; agents on one machine use their own scratch
+(`~/.mmvu/locks/gatec.lock`, its holder named in `gatec.lock.holder`) and a second one waits -- at most
+`MMVU_GATEC_LOCK_TIMEOUT` seconds (default three hours), then stops as an environmental failure naming the holder. One agent per checkout; agents on one machine use their own scratch
 directories and PID files (a unique name per agent, and the command line checked before signalling a PID -- one agent
 once killed another's memory loop through a shared `dropcaches.pid`).
 
@@ -241,9 +244,20 @@ branch, then:
 the next one up, that into the next, ... with a merge commit each, re-makes the mechanical files through each version's
 rows, runs the no-model gates on each merged branch (fork-port.py from the measure stage, no budget; default `ab`), and
 stops at the first conflict (the merge undone, the files named) or red branch, naming the command that cascades on from
-there. Start **one fixer only where it stopped**. A version whose own files the fix changed needs a fresh review again;
-one that took the parent's file unchanged does not (the file equals its parent's). Nothing is pushed: push the merged
-branches (or open their PRs) yourself.
+there. A file the port branch's diff changed that is neither in the parent version nor one of the version's own
+hand-changed files is carried too: re-made through the version's rows when the rows alone made it, added when new,
+left out when the version dropped it; a hand-changed one stops the merge like a conflict. Start **one fixer only where
+it stopped**. Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
+`REVIEW.md` name a commit before the merge, so it needs a green full Gate C again and a fresh reviewer who re-reads the
+files the merge changed and names the merge commit (the tool carries no verdict forward by itself; its rows are still
+only the files that differ from the parent at the new merge-base, so a file the version took unchanged from its parent
+is no row). Nothing is pushed: push the merged branches (or open their PRs) yourself.
+
+**The shared library moved** (a row or a helper changed in `templates/fork-layer/shared/<v>/`): `python3
+tools/fork-branches.py sync-shared --repo DIR [--target <v> ...]` rewrites each version's `shared <v>` sections of
+`.port/<v>/shared-renames.tsv` from the library, re-makes the files the old tables alone made, updates each installed
+helper the version has not edited (an edited one is named and left alone), adds a helper the tree now uses and
+commits on each version branch (in its checkout, or `build/fork-branches/<v>`); it pushes nothing. Then cascade.
 
 ## Procedure
 
