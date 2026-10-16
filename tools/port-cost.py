@@ -227,7 +227,7 @@ def attribute(checkout, targets, migrator=ROOT):
     the same transcript (None at its start). See the docstring, ONE TARGET OF A FORK LAYER."""
     home = str(checkout).rstrip("/\\")
     forms = {home, json.dumps(home)[1:-1]}
-    here_rx = re.compile("|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True)) + r"(?![\w.-])")
+    here_rx = re.compile("(?:" + "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True)) + r")(?![\w.-])")
     neutral = NEUTRAL + tuple(f + "/" for f in {str(migrator).rstrip("/\\")})
     trx = [(t, _target_rx(t)) for t in targets]
 
