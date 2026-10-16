@@ -1526,7 +1526,8 @@ def blob_at(repo, ref, path):
     return r.stdout if r.returncode == 0 else None
 
 
-BRANCH_OWNED = (".github/workflows/port-ci.yml",)      # generated per branch (tools/port-ci.py on that branch)
+# generated per branch (tools/port-ci.py on that branch; the install manifest its promote job refreshes there)
+BRANCH_OWNED = (".github/workflows/port-ci.yml", ".github/port-install.json")
 
 
 def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, say=print):
@@ -1846,9 +1847,13 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     base_mc = mfl.versions()["base"]
     pb = port_branch or (parse_props(reader_of_ref(repo, next(iter(have.values())))(f"{REC}/{next(iter(have))}/{BRANCH_PROPS}"))
                          .get("port_branch") if have else None) or branch_name(base_mc)
-    if parent is None:
+    if parent in ("port", pb):
+        parent = None                                   # a jump from the port branch itself
+    elif parent is None:
         lower = sorted((v for v in have if mc_key(v) < mc_key(t)), key=mc_key)
         parent = lower[-1] if lower else None
+    elif parent not in have:
+        say(f"fork-branches: --parent {parent}: no version branch {branch_name(parent)}"); return 2
     start = have.get(parent) if parent else resolve_branch(repo, pb)
     if not start:
         say(f"fork-branches: no branch {branch_name(parent) if parent else pb}"); return 2
@@ -2120,7 +2125,8 @@ def main():
                    help="the no-model gates per merged branch (default ab: compile, audits, Gate A/B)")
     k.add_argument("--dry-run", action="store_true")
     n = sub.add_parser("add-target"); n.add_argument("--repo", required=True); n.add_argument("--target", required=True)
-    n.add_argument("--parent", help="the version it is made from (default: the nearest lower version branch, else the port branch)")
+    n.add_argument("--parent", help="the version it is made from, or `port` for the port branch (a jump; default: the "
+                                    "nearest lower version branch, else the port branch)")
     n.add_argument("--port-branch"); n.add_argument("--allow-undone-parent", action="store_true")
     f = sub.add_parser("freeze"); f.add_argument("--repo", required=True); f.add_argument("--target", required=True)
     f.add_argument("--upstream"); f.add_argument("--library", action="append", default=[])
