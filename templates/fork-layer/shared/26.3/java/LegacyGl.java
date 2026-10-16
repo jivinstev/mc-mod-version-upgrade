@@ -499,6 +499,7 @@ public final class LegacyGl {
             boolean override = own != null && own.COLOR_MODULATOR != null && own.COLOR_MODULATOR.touched();
             GpuBufferSlice transforms = transforms(own);
             java.util.List<GpuBuffer> temps = new java.util.ArrayList<>();
+            boolean replacedDefaults = false;
             RenderPass pass = into != null ? into : RenderSystem.getDevice().createCommandEncoder().createRenderPass(
                     () -> "mv draw", colorView, Optional.empty(), depthView, OptionalDouble.empty());
             try {
@@ -511,6 +512,7 @@ public final class LegacyGl {
                     if (projection != null) pass.setUniform("Projection", projection);
                     GpuBuffer globals = own.globalsBuffer(temps);
                     if (globals != null) pass.setUniform("Globals", globals);
+                    replacedDefaults = projection != null || globals != null;
                 }
                 pass.setVertexBuffer(0, up.vertices().slice());   // the whole buffer: baseVertex places the mesh
                 var scissor = RenderSystem.getScissorStateForRenderTypeDraws();
@@ -527,7 +529,14 @@ public final class LegacyGl {
                 pass.drawIndexed(up.indexCount(), 1, up.firstIndex(), up.baseVertex(), 0);
             } finally {
                 try {
-                    if (into == null) pass.close();   // a pass handed in stays open: its owner closes it
+                    if (into == null) {
+                        pass.close();   // a pass handed in stays open: its owner closes it
+                    } else if (replacedDefaults) {
+                        // a pass keeps its uniforms by name across pipelines (FrontendRenderPass re-applies them on
+                        // setPipeline), and the replacement blocks are closed just below: the owner's next draws
+                        // (translucent terrain binds no default uniforms of its own) would read a closed buffer
+                        RenderSystem.bindDefaultUniforms(into);
+                    }
                 } finally {
                     for (GpuBuffer tb : temps) tb.close();
                     if (own != null) own.clear();
