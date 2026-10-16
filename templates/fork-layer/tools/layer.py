@@ -594,7 +594,8 @@ def check_inherited_rows(expect):
         with open(mv / "targets/1.21.3/java/m/O.java", "w", encoding="utf-8", newline="") as fh:
             fh.write(overlay_a)
         (mv / "targets/1.21.5/java/m").mkdir(parents=True)
-        (mv / "targets/1.21.5/java/m/Own.java").write_text(own_c, encoding="utf-8")
+        with open(mv / "targets/1.21.5/java/m/Own.java", "w", encoding="utf-8", newline="") as fh:
+            fh.write(own_c)               # these bytes on every OS (write_text would write CRLF on Windows)
         try:
             MV = mv
             subprocess.call = call

@@ -718,20 +718,28 @@ ifail="$(iprep none)"
 printf 'minecraft_version=1.21.1\ninherited_overlay_rows=false\n' > "$MXI/.multiversion/base.properties"; ifail="$ifail$(iprep false)"
 printf 'minecraft_version=1.21.1\ninherited_overlay_rows=true\n' > "$MXI/.multiversion/base.properties"; ifail="$ifail$(iprep on)"
 U=com/example/mod/Uses.java; OV="$MXI/.multiversion/targets/1.21.3/java/$U"
-want4="$(sed 's/OldB/NewB/' "$OV" | od -c)"; want5="$(sed 's/OldB/NewB/; s/OldC/NewC/' "$OV" | od -c)"
+# the expected bytes from Python, not sed: Git for Windows' sed reads text mode and drops the overlay's CRs
+want() { python3 -c 'import sys; b = open(sys.argv[1], "rb").read()
+for r in sys.argv[2:]: b = b.replace(*(x.encode() for x in r.split(">")))
+sys.stdout.buffer.write(b)' "$OV" "$@" | od -c; }
+want4="$(want 'OldB>NewB')"; want5="$(want 'OldB>NewB' 'OldC>NewC')"
 # the old fixture's trees (prepared above with the key absent) against the same targets here with the key absent or false
 same_old=yes; for t in 1.21.3 1.21.4 1.21.5; do for m in none false; do
   diff -r "$MXO/build/mc$t/mv/java/com/example/mod/mixin" "$MXI/build/$m/mc$t/com/example/mod/mixin" >/dev/null || same_old=no
   diff -r "$MXI/build/none/mc$t" "$MXI/build/$m/mc$t" >/dev/null || same_old=no; done; done
-[ -z "$ifail" ] && [ "$same_old" = yes ] && cmp -s "$OV" "$MXI/build/none/mc1.21.4/$U" && cmp -s "$OV" "$MXI/build/none/mc1.21.5/$U" \
-  && diff -r "$MXI/build/none/mc1.21.3" "$MXI/build/on/mc1.21.3" >/dev/null \
-  && [ "$(od -c < "$MXI/build/on/mc1.21.4/$U")" = "$want4" ] && [ "$(od -c < "$MXI/build/on/mc1.21.5/$U")" = "$want5" ] \
-  && diff -r -x Uses.java "$MXI/build/none/mc1.21.5" "$MXI/build/on/mc1.21.5" >/dev/null \
-  && [ -z "$(ls "$MXI/build/none" "$MXI/build/false" "$MXI/build/on" | grep inherited_overlay_rows)" ] \
-  && (cd "$MXI" && python3 .multiversion/tools/layer.py prepare --target 1.21.5 --src src/main/java --out build/mc1.21.5/mv/java >/dev/null 2>&1) \
-  && [ -f "$MXI/build/mc1.21.5/mv/java.inherited_overlay_rows" ] \
+iwhy=""      # each condition on its own, so a failure names the one that failed
+[ -z "$ifail" ] || iwhy="$iwhy prepare-failed"; [ "$same_old" = yes ] || iwhy="$iwhy off-not-identical"
+{ cmp -s "$OV" "$MXI/build/none/mc1.21.4/$U" && cmp -s "$OV" "$MXI/build/none/mc1.21.5/$U"; } || iwhy="$iwhy off-overlay-not-verbatim"
+diff -r "$MXI/build/none/mc1.21.3" "$MXI/build/on/mc1.21.3" >/dev/null || iwhy="$iwhy root-tree-changed"
+[ "$(od -c < "$MXI/build/on/mc1.21.4/$U")" = "$want4" ] || iwhy="$iwhy on-1.21.4-bytes"
+[ "$(od -c < "$MXI/build/on/mc1.21.5/$U")" = "$want5" ] || iwhy="$iwhy on-1.21.5-bytes"
+diff -r -x Uses.java "$MXI/build/none/mc1.21.5" "$MXI/build/on/mc1.21.5" >/dev/null || iwhy="$iwhy on-other-files-changed"
+[ -z "$(ls "$MXI/build/none" "$MXI/build/false" "$MXI/build/on" | grep inherited_overlay_rows)" ] || iwhy="$iwhy stamp-beside-custom-out"
+(cd "$MXI" && python3 .multiversion/tools/layer.py prepare --target 1.21.5 --src src/main/java --out build/mc1.21.5/mv/java >/dev/null 2>&1) \
+  && [ -f "$MXI/build/mc1.21.5/mv/java.inherited_overlay_rows" ] || iwhy="$iwhy no-stamp-on-default-out"
+[ -z "$iwhy" ] \
   && ok "layer.py inherited_overlay_rows: off (no key, or =false) every prepared tree is byte-identical and the inherited overlay verbatim; on, 1.21.3's overlay is renamed at 1.21.4 by 1.21.4's row and at 1.21.5 by 1.21.4's and 1.21.5's, never by 1.21.3's (CRLF kept), the root target's tree and every other file unchanged; only an on-mode prepare of the default build/mc<t>/mv/java leaves its stamp beside it (a custom --out none)" \
-  || bad "layer.py inherited_overlay_rows: fail=[$ifail] same_old=$same_old 1.21.4 on: $(cat "$MXI/build/on/mc1.21.4/$U" 2>&1 | head -2 | tr '\r\n' '  ')"
+  || bad "layer.py inherited_overlay_rows:$iwhy; fail=[$ifail] same_old=$same_old 1.21.4 on: $(cat "$MXI/build/on/mc1.21.4/$U" 2>&1 | head -2 | tr '\r\n' '  ')"
 if command -v gradle >/dev/null 2>&1; then
   printf "rootProject.name = 'scratch'\n" > "$MXO/settings.gradle"
   { cat <<'GR'
