@@ -50,14 +50,20 @@ WHICH ONES MAY BE DROPPED
   which CI cannot build -- and prints the --port-release re-resolve to run.
 
 LIBRARY FIRST
-  A dependent's target T builds only against a sibling library's T that is DONE: its GATES.md (ci-gates.py --mc, kept
-  by fork-port.py only after a green full run) is for T, names a commit (not `+ uncommitted`), has a PASS row naming
-  Gate C and no FAIL row, and no file that can change the jar changed between that commit and the one used (the
-  checkout's HEAD plus its edited tracked files; for --port-release the tag, by GitHub's compare API) -- other targets'
-  directories and documents excepted, as port-publish.py's listed_green() judges a released middle target. When the
-  library has targets/<T>/REVIEW.md (fork-port.py's review record) it must be complete -- judged by fork-port.py's
-  review_problems() for a checkout when that exists, else by its form: reviewer/date/commit filled, every row `ok` with
-  a note -- and no STUBS.json entry may be unreviewed; a missing REVIEW.md is tolerated for now and said. A sibling named by --port-checkout or --port-release that is not done stops the resolve
+  A dependent's target T builds only against a sibling library's T that is DONE by tools/fork-port.py's one done list.
+  First the jar: its GATES.md (ci-gates.py --mc, kept by fork-port.py only after a green full run) is for T, names a
+  commit (not `+ uncommitted`), has a PASS row naming Gate C and no FAIL row, and no file that can change the jar
+  changed between that commit and the one used (the checkout's HEAD plus its edited tracked files and every untracked
+  file under .multiversion/; for --port-release the tag, by GitHub's compare API) -- other targets' directories and
+  documents excepted, as port-publish.py's listed_green() judges a released middle target. Then the list itself: for
+  a --port-checkout, fork-port.py's target_done(checkout, T) answers (no unreviewed STUBS.json entry, a complete
+  REVIEW.md for its commit, TEST-ITEMS.md, the behaviour inventory accounted for, no DEPS.md "Development only" mark,
+  an --allow-undone-parent parent done). For a --port-release the same list is read at the tag: REVIEW.md complete
+  with an `ok` row and a note for every STUBS.json entry and every whole-file overlay in the tag's tree (GitHub's tree
+  API), its commit a hex id that is the tag or an ancestor of it with nothing under src/, the chain's targets/ or
+  shared/ changed since; TEST-ITEMS.md; INVENTORY-CHECK.json with nothing unaccounted when the layer has
+  INVENTORY.json; no "Development only" mark; an allowed undone parent done at the tag. A library target with no
+  REVIEW.md is not done. A sibling named by --port-checkout or --port-release that is not done stops the resolve
   with exit 18 (dry run too; nothing is built, fetched or written but DEPS.md's reason). --allow-undone-library lets a
   --port-checkout through for development only -- DEPS.md records it under "Development only" -- never a release.
   `library-done` asks the same question alone. A pin kept from an earlier --port-release is not re-checked.
@@ -404,8 +410,6 @@ def resolve_port(ga, spec, target, checkouts):
 GATES_HEAD = re.compile(r"at `([^`]+)` for Minecraft (\S+)")
 NOT_JAR = {"GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md", "BEHAVIOUR.json", "DEPS.md",
            "INVENTORY.json", "INVENTORY-CHECK.json"}
-REVIEW_FIELDS = ("reviewer", "date", "commit")      # tools/fork-port.py's REVIEW.md (the done-list's review record)
-REVIEW_ROW = re.compile(r"^\s*\|\s*(stub|overlay)\s*\|\s*`?([^|`]+?)`?\s*\|\s*`?([^|`]*?)`?\s*\|(.*)\|\s*$")
 
 
 def gates_record(text, target):
@@ -425,35 +429,6 @@ def gates_record(text, target):
     if not any("Gate C" in ln and re.search(r"\|\s*PASS\s*\|", ln) for ln in rows):
         return False, "its GATES.md records no green Gate C (A/B green is not done)", None
     return True, f"green Gate C at {m.group(1)}", m.group(1)
-
-
-def review_record(text, target):
-    """(complete, why) for a sibling target's REVIEW.md, or None when it has none. The form is tools/fork-port.py's
-    (`- reviewer:`, `- date: YYYY-MM-DD`, `- commit:` and one `| stub|overlay | <file> | ok|not-ok | <note> |` row per
-    item): complete when every field is filled and every row is `ok` with a note. Which items need a row, and whether
-    the target changed since the reviewed commit, is fork-port.py's review_problems(), used for a checkout when the
-    migrator's fork-port.py has it."""
-    if text is None:
-        return None
-    fields = {}
-    for m in re.finditer(r"(?m)^\s*-\s*(reviewer|date|commit)\s*:\s*(.*?)\s*$", text):
-        fields.setdefault(m.group(1), m.group(2).strip("` "))
-    bad = [f"no {k}" for k in REVIEW_FIELDS if fields.get(k, "?") in ("", "?")]
-    if fields.get("date", "?") not in ("", "?") and not re.match(r"^\d{4}-\d\d-\d\d\b", fields["date"]):
-        bad.append(f"date {fields['date']!r} is not YYYY-MM-DD")
-    rows = [m.groups() for m in map(REVIEW_ROW.match, text.splitlines()) if m]
-    if not rows:
-        bad.append("no verdict rows")
-    for kind, f, verdict, note in rows:
-        v = verdict.strip().lower()
-        if v != "ok":
-            bad.append(f"{kind} {f.strip()}: {'not-ok' if v == 'not-ok' else 'no verdict'}")
-        elif note.strip() in ("", "?"):
-            bad.append(f"{kind} {f.strip()}: a verdict without a note")
-    if bad:
-        return False, f"its targets/{target}/REVIEW.md is not complete: " + "; ".join(bad[:4]) + \
-               (f" (+{len(bad) - 4} more)" if len(bad) > 4 else "")
-    return True, f"review recorded (REVIEW.md: {len(rows)} ok verdict(s), commit {fields['commit']})"
 
 
 def open_stubs(text):
@@ -504,37 +479,29 @@ def _git(co, *a):
                           env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
 
 
-def _done(target, gates, review, changed, chain, stubs="", review_problems=None):
-    """(done, why, notes) from what was read: the GATES.md text, the REVIEW.md text (None: absent), the files changed
-    between the commit GATES.md names and the one used (None: cannot tell), the target's chain."""
+def _gates_current(target, gates, changed, chain):
+    """(ok, why) for the jar: GATES.md a green Gate C for the target at a commit, and no file that can change the jar
+    changed between that commit and the one used (changed None: cannot tell), as port-publish.py's listed_green()."""
     ok, why, _sha = gates_record(gates, target)
     if not ok:
-        return False, why, []
+        return False, why
     green, cur = _publish().listed_green(target, gates, [f for f in changed if not _not_jar(f)] if changed is not None
                                          else None, chain)
-    if not green:
-        return False, f"{why}, but {cur}", []
-    if open_stubs(stubs):
-        return False, f"{why}, but its STUBS.json has {open_stubs(stubs)} unreviewed stub signal(s)", []
-    rv = review_record(review, target)
-    if rv is not None and review_problems is not None:
-        probs = review_problems()
-        rv = (False, f"its targets/{target}/REVIEW.md is not complete: " + "; ".join(probs[:4])) if probs else rv
-    if rv is None:
-        notes = [f"no targets/{target}/REVIEW.md (the review record): tolerated for now, not required yet"]
-    elif not rv[0]:
-        return False, rv[1], []
-    else:
-        notes = [rv[1]]
-    return True, why + ", current at the commit used", notes
+    return (True, why) if green else (False, f"{why}, but {cur}")
+
+
+def _reasons(why, more=6):
+    return "; ".join(why[:more]) + (f" (+{len(why) - more} more)" if len(why) > more else "")
 
 
 def library_done_checkout(co, target):
-    """Is a sibling checkout's target done at the commit its jar is built from (HEAD, and no edited tracked file that
-    can change the jar)? -> (done, why, notes)."""
+    """Is a sibling checkout's target done at the commit its jar is built from? The jar check first (GATES.md current
+    at HEAD plus its edited tracked files and every untracked file under .multiversion/ -- an untracked overlay is
+    built into the jar), then THE done list: tools/fork-port.py's target_done(co, target), the same definition a
+    `fork-port.py --check-done` in that checkout answers (a missing REVIEW.md is refused there). -> (done, why, notes)"""
     co = pathlib.Path(co)
     tdir = co / ".multiversion/targets" / target
-    gp, rp = tdir / "GATES.md", tdir / "REVIEW.md"
+    gp = tdir / "GATES.md"
     gates = gp.read_text(encoding="utf-8", errors="replace") if gp.is_file() else ""
     ok, why, sha = gates_record(gates, target)
     if not ok:
@@ -547,35 +514,104 @@ def library_done_checkout(co, target):
     else:
         d = _git(co, "diff", "--name-only", sha, "HEAD")
         st = _git(co, "status", "--porcelain", "--untracked-files=no")
-        changed = None if d.returncode else ([ln for ln in d.stdout.splitlines() if ln] +
-                                            [ln[3:].strip() for ln in st.stdout.splitlines() if len(ln) > 3])
+        new = _git(co, "ls-files", "--others", "--exclude-standard", "--", ".multiversion")
+        changed = None if d.returncode or new.returncode else (
+            [ln for ln in d.stdout.splitlines() if ln] + [ln[3:].strip() for ln in st.stdout.splitlines() if len(ln) > 3]
+            + [ln for ln in new.stdout.splitlines() if ln])
     chain = _chain_of(lambda t: _props((co / ".multiversion/targets" / t / "target.properties").read_text(encoding="utf-8")
                                        if (co / ".multiversion/targets" / t / "target.properties").is_file() else ""), target)
-    sp = tdir / "STUBS.json"
+    ok, why = _gates_current(target, gates, changed, chain)
+    if not ok:
+        return False, why, []
     fp = _fork_port()
-    rprob = (lambda: fp.review_problems(co, tdir)) if fp is not None and hasattr(fp, "review_problems") else None
-    return _done(target, gates, rp.read_text(encoding="utf-8", errors="replace") if rp.is_file() else None, changed, chain,
-                 sp.read_text(encoding="utf-8", errors="replace") if sp.is_file() else "", rprob)
+    if fp is None or not hasattr(fp, "target_done"):
+        return False, f"{why}, but tools/fork-port.py's target_done() could not be loaded: cannot judge the done list", []
+    try:
+        undone = fp.target_done(co, target)
+    except Exception as e:      # noqa: BLE001 -- fail closed: an unanswerable done check is not done
+        return False, f"{why}, but fork-port.py's target_done() failed ({type(e).__name__}: {e})", []
+    if undone:
+        return False, f"{why}, but fork-port.py's done list says not done: {_reasons(undone)}", []
+    rp = tdir / "REVIEW.md"
+    commit = fp.parse_review(rp.read_text(encoding="utf-8", errors="replace"))[0].get("commit", "?") if rp.is_file() else "?"
+    return True, why + ", current at the commit used", [f"fork-port.py target_done(): done (REVIEW.md commit {commit})"]
+
+
+_FP = []
 
 
 def _fork_port():
-    """tools/fork-port.py as a module (its review_problems() judges a REVIEW.md in a checkout), or None."""
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("fork_port_for_layer_deps", ROOT / "tools/fork-port.py")
-        m = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(m)
-        return m
-    except Exception:          # noqa: BLE001 -- the text-level review_record() still applies
-        return None
+    """tools/fork-port.py as a module (target_done(), parse_review(), REVIEW_OUTPUTS: one definition), or None."""
+    if not _FP:
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("fork_port_for_layer_deps", ROOT / "tools/fork-port.py")
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            _FP.append(m)
+        except Exception:          # noqa: BLE001 -- callers fail closed
+            return None
+    return _FP[0]
 
 
-def library_done_release(repo, tag, target, get=None):
-    """Is a sibling's target done at the commit its release `tag` was built from? Reads GATES.md, REVIEW.md and the
-    target chain's target.properties at the tag (raw.githubusercontent.com) and the files changed between the commit
-    GATES.md names and the tag (the GitHub compare API; GH_TOKEN/GITHUB_TOKEN is sent when set). -> (done, why, notes)."""
+HEX_COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def release_overlays(paths, target):
+    """The whole-file overlays target carries at a tag, from the tag's tree paths -- tools/layer-sync.py's
+    definition: targets/<t>/java/<rel>.java for src/main/java/<rel>, targets/<t>/<set>/java/<rel>.java for
+    src/<set>/java/<rel>, only when that authors' file exists. -> sorted overlay paths."""
+    pre, have, out = f".multiversion/targets/{target}/", set(paths), []
+    for p in paths:
+        if not p.startswith(pre) or not p.endswith(".java"):
+            continue
+        parts = p[len(pre):].split("/")
+        if parts[0] == "java" and len(parts) > 1:
+            s, rel = "main", parts[1:]
+        elif len(parts) > 2 and parts[1] == "java":
+            s, rel = parts[0], parts[2:]
+        else:
+            continue
+        if f"src/{s}/java/{'/'.join(rel)}" in have:
+            out.append(p)
+    return sorted(out)
+
+
+def release_review_problems(text, items, fp):
+    """fork-port.py's review_problems() for a REVIEW.md read at a tag: [] when complete, else one line each. items:
+    [(kind, file)] the tag needs a verdict on (its STUBS.json entries and whole-file overlays)."""
+    if text is None:
+        return [f"no REVIEW.md: {len(items)} item(s) need an independent reviewer's verdict"]
+    fields, rows = fp.parse_review(text)
+    out = [f"REVIEW.md has no {k}" for k in fp.REVIEW_FIELDS if fields.get(k, "?") in ("", "?")]
+    if fields.get("date", "?") not in ("", "?") and not re.match(r"^\d{4}-\d\d-\d\d\b", fields["date"]):
+        out.append(f"REVIEW.md date {fields['date']!r} is not YYYY-MM-DD")
+    c = fields.get("commit", "?")
+    if c not in ("", "?") and not HEX_COMMIT.match(c):
+        out.append(f"REVIEW.md commit {c!r} is not a commit id (7-40 hex digits): a name never goes stale")
+    for kind, file in items:
+        v = rows.get((kind, file))
+        if not v or v[0] not in fp.VERDICTS:
+            out.append(f"no verdict: {kind} {file}")
+        elif v[0] != "ok":
+            out.append(f"reviewer says not-ok: {kind} {file} -- {v[1][:200]}")
+        elif not v[1] or v[1] == "?":
+            out.append(f"a verdict without a note: {kind} {file}")
+    return out
+
+
+def library_done_release(repo, tag, target, get=None, _seen=None):
+    """Is a sibling's target done at the commit its release `tag` was built from? fork-port.py's done list, read at
+    the tag: GATES.md (green Gate C, current: the GitHub compare API from its commit to the tag), STUBS.json, REVIEW.md
+    (complete; a row for every STUBS.json entry and every whole-file overlay in the tag's tree -- the GitHub tree API;
+    its commit a hex id that is the tag or an ancestor of it, with nothing under src/, the chain's targets/ or shared/
+    changed between it and the tag), TEST-ITEMS.md, the inventory account (INVENTORY-CHECK.json, when the layer has
+    INVENTORY.json), no DEPS.md "Development only" mark, and a parent added with --allow-undone-parent done too.
+    raw.githubusercontent.com for files; GH_TOKEN/GITHUB_TOKEN is sent to the API when set. -> (done, why, notes)"""
     import urllib.error
     get = get or _get
+    tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    auth = {"Authorization": f"Bearer {tok}"} if tok else None
 
     def raw(path):
         try:
@@ -584,25 +620,87 @@ def library_done_release(repo, tag, target, get=None):
             if e.code == 404:
                 return None
             raise
+
+    def compare(base):
+        return json.loads(get(f"https://api.github.com/repos/{repo}/compare/{base}...{tag}", auth))
+    fp = _fork_port()
+    if fp is None or not hasattr(fp, "parse_review"):
+        return False, f"at release {tag}: tools/fork-port.py could not be loaded: cannot judge the done list", []
+    tdir = f".multiversion/targets/{target}"
     try:
-        gates = raw(f".multiversion/targets/{target}/GATES.md") or ""
+        gates = raw(f"{tdir}/GATES.md") or ""
         ok, why, sha = gates_record(gates, target)
         if not ok:
             return False, f"at release {tag}: {why}", []
-        review = raw(f".multiversion/targets/{target}/REVIEW.md")
-        stubs = raw(f".multiversion/targets/{target}/STUBS.json") or ""
-        chain = _chain_of(lambda t: _props(raw(f".multiversion/targets/{t}/target.properties")), target)
-        tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-        cmp_ = json.loads(get(f"https://api.github.com/repos/{repo}/compare/{sha.split()[0]}...{tag}",
-                              {"Authorization": f"Bearer {tok}"} if tok else None))
+        review = raw(f"{tdir}/REVIEW.md")
+        stubs = raw(f"{tdir}/STUBS.json") or ""
+        props = {}
+        chain = _chain_of(lambda t: props.setdefault(t, _props(raw(f".multiversion/targets/{t}/target.properties"))), target)
+        cmp_ = compare(sha.split()[0])
+        tree = json.loads(get(f"https://api.github.com/repos/{repo}/git/trees/{tag}?recursive=1", auth))
+        test_items = raw(f"{tdir}/TEST-ITEMS.md")
+        deps_md = raw(f"{tdir}/DEPS.md") or ""
+        paths = [e.get("path", "") for e in tree.get("tree", []) if e.get("type") == "blob"]
+        inv_check = raw(f"{tdir}/INVENTORY-CHECK.json") if ".multiversion/INVENTORY.json" in paths else ""
+        fields = fp.parse_review(review)[0] if review is not None else {}
+        rc = fields.get("commit", "?")
+        rcmp = compare(rc) if HEX_COMMIT.match(rc) else None
     except Exception as e:
         return False, f"could not read {repo}@{tag}'s {target} records ({e}): cannot prove its target is done", []
     if cmp_.get("status") not in ("ahead", "identical"):
         return False, f"at release {tag}: {why}, but {sha} is not an ancestor of the tag ({cmp_.get('status')})", []
     files = [f.get("filename", "") for f in cmp_.get("files", [])]
-    changed = None if len(files) >= 300 else files       # the compare API lists at most 300 files: cannot tell
-    done, why2, notes = _done(target, gates, review, changed, chain, stubs)
-    return done, (f"at release {tag}: " + why2), notes
+    ok, why = _gates_current(target, gates, None if len(files) >= 300 else files, chain)   # the API lists <= 300 files
+    if not ok:
+        return False, f"at release {tag}: {why}", []
+    out = []
+    if open_stubs(stubs):
+        out.append(f"{open_stubs(stubs)} unreviewed stub signal(s) in STUBS.json")
+    if tree.get("truncated"):
+        out.append("the tag's tree is truncated (GitHub's tree API): cannot list its overlays to check REVIEW.md's rows")
+    try:
+        sdata = json.loads(stubs) if stubs else []
+    except ValueError:
+        sdata = []
+    items = sorted({("stub", e["file"]) for e in sdata if isinstance(e, dict) and e.get("file")}
+                   | {("overlay", p) for p in release_overlays(paths, target)})
+    out += release_review_problems(review, items, fp)
+    if rcmp is not None:
+        if rcmp.get("status") not in ("ahead", "identical"):
+            out.append(f"REVIEW.md names commit {rc}, which is not the tag or an ancestor of it ({rcmp.get('status')})")
+        else:
+            rfiles = [f.get("filename", "") for f in rcmp.get("files", [])]
+            scope = ("src/", ".multiversion/shared/") + tuple(f".multiversion/targets/{t}/" for t in chain)
+            stale = sorted(f for f in rfiles if f.startswith(scope) and f.rsplit("/", 1)[-1] not in fp.REVIEW_OUTPUTS)
+            if len(rfiles) >= 300:
+                out.append(f"cannot tell what changed between the reviewed commit {rc} and the tag (300+ files)")
+            elif stale:
+                out.append(f"{len(stale)} file(s) changed between the reviewed commit {rc} and the tag, e.g. {stale[0]}: "
+                           "re-review them and name the new commit")
+    if test_items is None:
+        out.append("manual-test items not generated (no TEST-ITEMS.md at the tag)")
+    if inv_check is None:
+        out.append("behaviour inventory: the layer has INVENTORY.json but the tag has no INVENTORY-CHECK.json for the target")
+    elif inv_check:
+        try:
+            acc = json.loads(inv_check)
+            if acc.get("unaccounted") != [] or acc.get("target") != target:
+                out.append(f"behaviour inventory: {len(acc.get('unaccounted') or [])} item(s) unaccounted at the tag")
+        except (ValueError, AttributeError):
+            out.append("behaviour inventory: the tag's INVENTORY-CHECK.json cannot be read")
+    if fp.UNDONE_LIBRARY_MARK in deps_md:
+        out.append("built against a library target that is not done (--allow-undone-library, DEPS.md \"Development only\")")
+    allowed = props.get(target, {}).get("allowed_undone_parent", "")
+    seen = (_seen or set()) | {target}
+    if allowed and allowed.split()[0] not in seen:
+        p = allowed.split()[0]
+        pd = library_done_release(repo, tag, p, get, seen)
+        if not pd[0]:
+            out.append(f"its parent {p} is still not done (added with --allow-undone-parent): {pd[1]}")
+    if out:
+        return False, f"at release {tag}: {why}, but the done list says not done: {_reasons(out)}", []
+    return True, f"at release {tag}: {why}, current at the commit used", \
+        [f"review recorded (REVIEW.md: {len(items)} item(s) ok, commit {rc}, at or under the tag)"]
 
 
 def library_done(repo, co, target):
@@ -621,7 +719,7 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
     (its row says what would be). pins: {group:module: (substitute coord, port_jar value)} the target's block already
     holds -- a released sibling's pin is kept when no --port-checkout/--port-release names it this run.
     A sibling named by --port-checkout or --port-release is used only when its own `target` is done (library_done:
-    a green Gate C recorded in its GATES.md at the commit used, and its REVIEW.md complete when it has one); else its
+    a green Gate C recorded in its GATES.md at the commit used, then fork-port.py's done list); else its
     row is "refused" and the resolve stops -- unless allow_undone and it is a checkout, whose row then says
     "undone" (DEPS.md records the override)."""
     lk = {"curse": resolve_curse, "modrinth": resolve_modrinth, "port": resolve_port, "cf": cf_provider,
@@ -938,16 +1036,10 @@ def self_check():
     expect(not gates_record(head.replace("abc1234", "abc1234 + uncommitted: a.java") + gc, "1.21.4")[0], "an edited tree: not done")
     rv_ok = ("- reviewer: a fresh agent\n- date: 2026-10-16\n- commit: abc1234\n\n| kind | file | verdict | note |\n"
              "|---|---|---|---|\n| stub | .multiversion/targets/1.21.4/java/A.java | ok | same effect, checked |\n")
-    expect(review_record(None, "1.21.4") is None and review_record(rv_ok, "1.21.4")[0]
-           and not review_record(rv_ok.replace("| ok | same effect, checked |", "| ? | ? |"), "1.21.4")[0]
-           and not review_record(rv_ok.replace("| ok |", "| not-ok |"), "1.21.4")[0]
-           and not review_record(rv_ok.replace("- reviewer: a fresh agent\n", ""), "1.21.4")[0]
-           and not review_record(rv_ok.replace("2026-10-16", "today"), "1.21.4")[0]
-           and not review_record(rv_ok.split("\n|")[0], "1.21.4")[0],
-           "REVIEW.md (fork-port.py's form): absent, complete, a `?` row, not-ok, no reviewer, a bad date, no rows")
     expect(open_stubs('[{"file": "a", "reviewed": null}, {"file": "b", "reviewed": "ok"}]') == 1 and open_stubs("") == 0,
            "open stubs counted")
-    # a sibling checkout (a real git repo): done at HEAD while only documents changed since GATES.md's commit
+    # a sibling checkout (a real git repo): judged by fork-port.py's own target_done() -- the one done list -- after
+    # the jar check (GATES.md current at HEAD, edited tracked files and untracked .multiversion/ files included)
     with tempfile.TemporaryDirectory() as td:
         co = pathlib.Path(td)
         g = lambda *x: subprocess.run(["git", "-C", str(co), *x], capture_output=True, text=True, encoding="utf-8")
@@ -962,18 +1054,34 @@ def self_check():
         expect(not library_done_checkout(co, "1.21.4")[0], "a checkout with no GATES.md: not done")
         (t4 / "GATES.md").write_text(head.replace("abc1234", sha) + gc, encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "gates")
+        d0 = library_done_checkout(co, "1.21.4")
+        expect(not d0[0] and "REVIEW.md" in d0[1],
+               f"green Gate C but no REVIEW.md: not done (target_done refuses a missing review; no longer tolerated): {d0}")
+        rv_co = rv_ok.split("\n\n|")[0].replace("abc1234", g("rev-parse", "--short", "HEAD").stdout.strip()) + \
+            "\n\n| kind | file | verdict | note |\n|---|---|---|---|\n"
+        (t4 / "REVIEW.md").write_text(rv_co, encoding="utf-8")
+        d0 = library_done_checkout(co, "1.21.4")
+        expect(not d0[0] and "TEST-ITEMS" in d0[1], f"no TEST-ITEMS.md: not done, as target_done says: {d0}")
+        (t4 / "TEST-ITEMS.md").write_text("# Manual-test items\n\n- none\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "review")
         d1 = library_done_checkout(co, "1.21.4")
-        expect(d1[0] and any("no targets/1.21.4/REVIEW.md" in n for n in d1[2]),
-               f"green Gate C at an ancestor, only GATES.md since: done, no REVIEW.md tolerated and said: {d1}")
+        expect(d1[0], f"green Gate C, a complete review, the test items: done: {d1}")
         (t4 / "STUBS.json").write_text('[{"file": "x", "reviewed": null}]', encoding="utf-8")
         expect(not library_done_checkout(co, "1.21.4")[0], "an unreviewed stub signal: not done")
         (t4 / "STUBS.json").unlink()
-        (t4 / "REVIEW.md").write_text(rv_ok.replace("| ok |", "| ? |"), encoding="utf-8")
+        (t4 / "REVIEW.md").write_text(rv_co.replace("- reviewer: a fresh agent\n", ""), encoding="utf-8")
         expect(not library_done_checkout(co, "1.21.4")[0], "an incomplete REVIEW.md: not done")
-        if not hasattr(_fork_port(), "review_problems"):    # fork-port.py's own judge also checks the commit and coverage
-            (t4 / "REVIEW.md").write_text(rv_ok, encoding="utf-8")
-            expect(library_done_checkout(co, "1.21.4")[0], "a complete REVIEW.md: done")
-        (t4 / "REVIEW.md").unlink()
+        (t4 / "REVIEW.md").write_text(rv_co, encoding="utf-8")
+        (t4 / "DEPS.md").write_text("# deps\n\n**Development only (`--allow-undone-library`):** com.example:x\n", encoding="utf-8")
+        d0 = library_done_checkout(co, "1.21.4")
+        expect(not d0[0] and "allow-undone-library" in d0[1],
+               f"a library itself built against an undone library (DEPS.md \"Development only\"): not done: {d0}")
+        (t4 / "DEPS.md").unlink()
+        (co / ".multiversion/targets/1.21.3/java").mkdir(parents=True)
+        (co / ".multiversion/targets/1.21.3/java/X.java").write_text("class X {}\n", encoding="utf-8")
+        expect(not library_done_checkout(co, "1.21.4")[0], "an UNTRACKED overlay in the chain (built into the jar): not done")
+        shutil.rmtree(co / ".multiversion/targets/1.21.3/java")
+        expect(library_done_checkout(co, "1.21.4")[0], "back to done once the untracked overlay is gone")
         (co / "src/A.java").write_text("class A { int x; }\n", encoding="utf-8")
         expect(not library_done_checkout(co, "1.21.4")[0], "an edited tracked source since the gates: not done")
         g("commit", "-qam", "edit")
@@ -987,36 +1095,89 @@ def self_check():
         (co / ".multiversion/targets/1.21.5/x.java").write_text("x", encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "other target")
         expect(library_done_checkout(co, "1.21.4")[0], "a change in another target's dir: still done")
-    # a sibling release: the same records read at the tag, the changed files from GitHub's compare API
+    # a sibling release: the same list read at the tag -- GATES.md, REVIEW.md rows against the overlay list of the
+    # tag's tree (the GitHub tree API), the review commit against the tag, TEST-ITEMS.md, DEPS.md, the inventory
+    # account, an allowed undone parent -- and the files changed from GitHub's compare API
     import urllib.error
-    files = {".multiversion/targets/1.21.4/GATES.md": head + gc, ".multiversion/targets/1.21.4/target.properties": "x=1\n"}
-    cmp_ = {"status": "ahead", "files": [{"filename": "README.md"}]}
+    ovl = ".multiversion/targets/1.21.4/java/com/example/mod/A.java"
+    rv_rel = ("- reviewer: a fresh agent\n- date: 2026-10-16\n- commit: def5678\n\n| kind | file | verdict | note |\n"
+              f"|---|---|---|---|\n| overlay | {ovl} | ok | same effect, checked |\n")
+    files = {".multiversion/targets/1.21.4/GATES.md": head + gc, ".multiversion/targets/1.21.4/target.properties": "x=1\n",
+             ".multiversion/targets/1.21.4/REVIEW.md": rv_rel, ".multiversion/targets/1.21.4/TEST-ITEMS.md": "- none\n",
+             ovl: "class A {}\n", "src/main/java/com/example/mod/A.java": "class A {}\n"}
+    cmps = {"abc1234": {"status": "ahead", "files": [{"filename": "README.md"}]},
+            "def5678": {"status": "ahead", "files": [{"filename": ".multiversion/targets/1.21.4/REVIEW.md"}]}}
+    tree = {"truncated": False}
     seen = []
 
     def fake(url, headers=None):
         seen.append(url)
-        if "api.github.com" in url:
-            return json.dumps(cmp_).encode()
+        if "/compare/" in url:
+            base = url.rsplit("/compare/", 1)[1].split("...", 1)[0]
+            if base not in cmps:
+                raise urllib.error.HTTPError(url, 404, "nf", None, None)
+            return json.dumps(cmps[base]).encode()
+        if "/git/trees/" in url:
+            return json.dumps({**tree, "tree": [{"path": p, "type": "blob"} for p in sorted(files)]}).encode()
         path = url.split("/tag9/", 1)[1]
         if path in files:
             return files[path].encode()
         raise urllib.error.HTTPError(url, 404, "nf", None, None)
-    expect(library_done_release("owner/lib", "tag9", "1.21.4", fake)[0]
-           and any(u.endswith("/compare/abc1234...tag9") for u in seen), "a release whose GATES.md is current at the tag: done")
-    cmp_["files"].append({"filename": "src/main/java/A.java"})
-    expect(not library_done_release("owner/lib", "tag9", "1.21.4", fake)[0], "a release with a source change since: not done")
-    cmp_.update(status="diverged", files=[])
-    expect(not library_done_release("owner/lib", "tag9", "1.21.4", fake)[0], "GATES.md's commit not under the tag: not done")
-    cmp_["status"] = "ahead"
-    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_ok
-    expect(library_done_release("owner/lib", "tag9", "1.21.4", fake)[0], "a release with a complete REVIEW.md: done")
+
+    def rel_done(msg, want=True):
+        r = library_done_release("owner/lib", "tag9", "1.21.4", fake)
+        expect(r[0] == want, f"{msg}: {r}")
+        return r
+    rel_done("a release whose GATES.md is current at the tag, every overlay reviewed ok at an ancestor of the tag: done")
+    expect(any(u.endswith("/compare/abc1234...tag9") for u in seen) and any("/git/trees/tag9" in u for u in seen),
+           "the release check reads the compare API from GATES.md's commit and the tag's tree")
+    cmps["abc1234"]["files"].append({"filename": "src/main/java/A.java"})
+    rel_done("a release with a source change since the gates: not done", False)
+    cmps["abc1234"].update(status="diverged", files=[])
+    rel_done("GATES.md's commit not under the tag: not done", False)
+    cmps["abc1234"]["status"] = "ahead"
     files[".multiversion/targets/1.21.4/STUBS.json"] = '[{"file": "x", "reviewed": null}]'
-    expect(not library_done_release("owner/lib", "tag9", "1.21.4", fake)[0], "a release with an open stub: not done")
+    rel_done("a release with an open stub: not done", False)
     del files[".multiversion/targets/1.21.4/STUBS.json"]
-    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_ok.replace("| ok |", "| not-ok |")
-    expect(not library_done_release("owner/lib", "tag9", "1.21.4", fake)[0], "a release with an open REVIEW.md: not done")
+    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace("| ok |", "| not-ok |")
+    rel_done("a release with a not-ok REVIEW.md row: not done", False)
+    del files[".multiversion/targets/1.21.4/REVIEW.md"]
+    r = rel_done("a release with no REVIEW.md: not done (refused, not tolerated)", False)
+    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace(ovl, ".multiversion/targets/1.21.4/STUBS.json")
+    r = rel_done("one ok row, but the tag's overlay has no row: not done", False)
+    expect(ovl in r[1], f"the unrowed overlay is named: {r[1]}")
+    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace("def5678", "HEAD")
+    rel_done("a review commit that is not a hex commit (HEAD never goes stale): not done", False)
+    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel
+    cmps["def5678"]["status"] = "diverged"
+    rel_done("a review commit that is not an ancestor of the tag: not done", False)
+    cmps["def5678"]["status"] = "identical"
+    rel_done("a review commit equal to the tag: done")
+    cmps["def5678"].update(status="ahead", files=[{"filename": "src/main/java/com/example/mod/A.java"}])
+    rel_done("the authors' file an overlay replaces changed since the review: not done", False)
+    cmps["def5678"]["files"] = [{"filename": ".multiversion/targets/1.21.5/java/B.java"}]
+    rel_done("only another target changed since the review: done")
+    del files[".multiversion/targets/1.21.4/TEST-ITEMS.md"]
+    rel_done("a release with no TEST-ITEMS.md: not done", False)
+    files[".multiversion/targets/1.21.4/TEST-ITEMS.md"] = "- none\n"
+    files[".multiversion/targets/1.21.4/DEPS.md"] = "**Development only (`--allow-undone-library`):** x\n"
+    rel_done("a release itself built against an undone library: not done", False)
+    del files[".multiversion/targets/1.21.4/DEPS.md"]
+    files[".multiversion/INVENTORY.json"] = "{}"
+    rel_done("a layer with a behaviour inventory and no account at the tag: not done", False)
+    files[".multiversion/targets/1.21.4/INVENTORY-CHECK.json"] = json.dumps({"target": "1.21.4", "unaccounted": ["x"]})
+    rel_done("an account with unaccounted items: not done", False)
+    files[".multiversion/targets/1.21.4/INVENTORY-CHECK.json"] = json.dumps({"target": "1.21.4", "unaccounted": []})
+    rel_done("every inventory item accounted for at the tag: done")
+    files[".multiversion/targets/1.21.4/target.properties"] = "x=1\nallowed_undone_parent=1.21.3 (development)\n"
+    files[".multiversion/targets/1.21.3/target.properties"] = "x=1\n"
+    rel_done("a parent added with --allow-undone-parent that is still not done at the tag: not done", False)
+    files[".multiversion/targets/1.21.4/target.properties"] = "x=1\n"
+    tree["truncated"] = True
+    rel_done("a truncated tree (the overlay list cannot be read whole): not done", False)
+    tree["truncated"] = False
     del files[".multiversion/targets/1.21.4/GATES.md"]
-    expect(not library_done_release("owner/lib", "tag9", "1.21.4", fake)[0], "a release with no GATES.md: not done")
+    rel_done("a release with no GATES.md: not done", False)
     # a released sibling jar is pinned in the block, and `fetch` installs it only when the checksum matches
     blk2 = render_block([{"group": "com.example", "module": "lib", "to": "com.example:lib:1.0-mc1.21.4",
                           "pin": "https://github.com/owner/lib/releases/download/lib-1.0-mc1.21.1/lib-1.0_a-mc1.21.4.jar " + "a" * 64}])

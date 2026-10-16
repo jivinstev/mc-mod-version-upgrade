@@ -180,15 +180,19 @@ fetches and installs no sibling jar. A dependency the fork's `port-install.json`
 `implementation`/`api` (fail closed); a Modrinth pin by slug is matched to the manifest's project id.
 
 **Library first.** A dependent fork's target T is ported only after the library fork's T is **done** -- its
-`GATES.md` records a green Gate C at the commit the jar comes from (and its `REVIEW.md`, when the library has one, has no
-open item) -- and released: the dependent builds against the library's released per-target jar (`--port-release
+`GATES.md` records a green Gate C at the commit the jar comes from, and the rest of the done list ("Done") holds --
+and released: the dependent builds against the library's released per-target jar (`--port-release
 owner/repo@TAG`), never against a library target still being fixed (measured: porting the two in lockstep reopened
 every library target 3-7 times, each library fix re-gating the dependent). So finish the library's T first, then start
 the dependent's T. `layer-deps.py resolve` enforces it for a sibling named by `--port-checkout` or `--port-release`:
 a sibling target that is not done stops the resolve with exit 18, naming why (no `GATES.md`, A/B only, a FAIL row, an
-edited tree, a file that can change the jar changed since the gated commit, an unreviewed `STUBS.json` entry, a
-`REVIEW.md` that is not complete -- the same review record `fork-port.py` writes and judges); a missing
-`REVIEW.md` is tolerated for now and said. `layer-deps.py library-done --target T --port-checkout owner/repo=DIR` (or
+edited tree, a file that can change the jar changed since the gated commit -- an untracked file under `.multiversion/`
+in a checkout included -- then whatever `fork-port.py`'s done list says: for a `--port-checkout` it calls `fork-port.py`'s
+own `target_done()` in that checkout, so a library target with no `REVIEW.md` is not done; for a `--port-release` it
+reads the same list at the tag: an `ok` row with a note in `REVIEW.md` for every `STUBS.json` entry and every whole-file
+overlay in the tag's tree, the review's commit a hex id that is the tag or an ancestor of it with nothing under `src/`,
+the chain's `targets/` or `shared/` changed since, `TEST-ITEMS.md`, the inventory account, no "Development only" mark,
+an `--allow-undone-parent` parent done). `layer-deps.py library-done --target T --port-checkout owner/repo=DIR` (or
 `--port-release owner/repo@TAG`) asks the same question alone (exit 0 done, 18 not). Developing the two together on
 purpose is `--allow-undone-library`, for a `--port-checkout` only: the resolve goes ahead and `DEPS.md` records the
 override ("Development only"); never release a target resolved that way -- re-resolve with `--port-release` once the
@@ -271,8 +275,8 @@ DIR` writes `.multiversion/INVENTORY.json` from the authors' base sources: every
 and registry the mod adds to (commit it; re-run it after a keep-current merge brings new authors' code -- `check`
 warns when `src/` changed since). For each target, once it compiles, `python3 tools/layer-inventory.py check --repo
 DIR --target <t>` reads the target's prepared tree and says, per item, `same` (also through the rename tables),
-`changed` / `moved` (accounted only by a reviewed `STUBS.json` entry for the file, the target's `REVIEW.md` naming it, or a
-`BEHAVIOUR.json` entry with a `where` and a `review`), `dropped` (a `drops.txt` comment, or a `BEHAVIOUR.json` entry with a
+`changed` / `moved` (accounted only by a reviewed `STUBS.json` entry for the file, a row of the target's `REVIEW.md` with verdict `ok` and a
+note naming the file or the item id -- a `?` or `not-ok` row, or a mention in a note, does not -- or a `BEHAVIOUR.json` entry with a `where` and a `review`), `dropped` (a `drops.txt` comment, or a `BEHAVIOUR.json` entry with a
 `reason`) or `unaccounted`: exit 16 lists the unaccounted ones, and the target is not done until it exits 0 (the account
 is written to `.multiversion/targets/<t>/INVENTORY-CHECK.json`; a layer fork with no `INVENTORY.json` counts as not
 accounted). Record each

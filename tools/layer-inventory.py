@@ -35,7 +35,8 @@ effective resources (targets/<chain>/resources over src/<set>/resources). Per it
   changed     in a file a target OVERLAYS, a counterpart of the same kind with a different key: accounted only when a
               review names the file (below)
   moved       not there, and a REVIEWED STUBS.json entry of T for that file (no open `recheck`), a REVIEW.md of T naming
-              the file or the item id, or a BEHAVIOUR.json entry {"item", "status": "moved", "where", "review"}
+              the file or the item id in a row with verdict `ok` and a note (a `?` or not-ok row, or a mention
+              in a note, does not), or a BEHAVIOUR.json entry {"item", "status": "moved", "where", "review"}
   dropped     the file is in the chain's drops.txt under a comment (the comment is the reason), or a BEHAVIOUR.json entry
               {"item", "status": "dropped", "reason"}
   unaccounted none of the above: the target is not done. The list is printed (and given in --json).
@@ -82,6 +83,22 @@ def hook_targets(text):
     if _FP is None:
         _FP = _load("fork_port_for_inventory", "fork-port.py")
     return _FP.hook_targets(text)
+
+
+def review_ok_names(text):
+    """The files/ids of REVIEW.md's rows (fork-port.py's parse_review()) with verdict `ok` and a note: only these
+    account for an item. A `?` row (review_skeleton's), a not-ok row or a mention in a note accounts for nothing."""
+    global _FP
+    if _FP is None:
+        _FP = _load("fork_port_for_inventory", "fork-port.py")
+    _fields, rows = _FP.parse_review(text)
+    return {f for (_k, f), (v, note) in rows.items() if v == "ok" and note.strip() not in ("", "?")}
+
+
+def review_names(names, r):
+    """Does an ok row name item r: its id, its file, or a path ending in /<its file> (an overlay row's
+    .multiversion/targets/<t>/java/<file>)?"""
+    return any(n == r["id"] or n == r["file"] or n.endswith("/" + r["file"]) for n in names)
 
 
 def _plan():
@@ -346,7 +363,7 @@ def account(repo, target, inv=None):
     drops = _drops(mv, names)
     stubs = _stub_files(mv / "targets" / target)
     review_p = mv / "targets" / target / "REVIEW.md"
-    review = _read(review_p) if review_p.is_file() else ""
+    review = review_ok_names(_read(review_p)) if review_p.is_file() else set()
     beh, notes = _behaviour(mv, names)
     present = now
     java_text = None          # the prepared trees' Java, read once when a 1.21.5+ shader item needs it
@@ -465,9 +482,9 @@ def account(repo, target, inv=None):
             r.update(status="moved" if r["status"] == "missing" else "changed",
                      detail=f"{r['detail']}; reviewed in STUBS.json: {str(st[1])[:300]}", accounted=True)
             continue
-        if review and (r["id"] in review or r["file"] in review):
+        if review_names(review, r):
             r.update(status="moved" if r["status"] == "missing" else "changed",
-                     detail=f"{r['detail']}; named in REVIEW.md", accounted=True)
+                     detail=f"{r['detail']}; an ok row of REVIEW.md names it", accounted=True)
             continue
         if st:
             r["detail"] += f"; STUBS.json entry open: {str(st[1])[:200]}"
@@ -691,10 +708,29 @@ def self_check():
                f"a stub review is per target (1.21.5 has no STUBS.json of its own): {rep['unaccounted']}")
         mask = [r["id"] for r in rep["items"] if r["key"].endswith("MaskSampler")]
         w(mvd / "targets/1.21.4/BEHAVIOUR.json", json.dumps([{"item": i, "status": "dropped"} for i in mask]))
-        w(mvd / "targets/1.21.5/REVIEW.md", "- com/example/mod/client/GlowRenderer.java: reviewed against the authors' file\n")
+        # REVIEW.md accounts only through a parsed row with verdict ok (and a note) naming the file or the item id:
+        # a mention in a note, review_skeleton's `?` row (it contains the path) and a not-ok row do not
+        ovp = ".multiversion/targets/1.21.5/java/com/example/mod/client/GlowRenderer.java"
+        head = "- reviewer: r\n- date: 2026-01-01\n- commit: abc1234\n\n| kind | file | verdict | note |\n|---|---|---|---|\n"
+        for body, why in (("- com/example/mod/client/GlowRenderer.java: reviewed against the authors' file\n", "a mention in a note"),
+                          (f"| overlay | {ovp} | ? | ? |\n", "a `?` row (review_skeleton's)"),
+                          (f"| overlay | {ovp} | not-ok | loses the shader |\n", "a not-ok row"),
+                          (f"| overlay | {ovp} | ok | ? |\n", "an ok row without a note"),
+                          (f"| overlay | {ovp}.bak | ok | fine |\n", "an ok row for another file")):
+            w(mvd / "targets/1.21.5/REVIEW.md", head + body)
+            code, rep, _ = check(lf, "1.21.5")
+            expect(code == EXIT_UNACCOUNTED and len(rep["unaccounted"]) == 3,
+                   f"{why} in REVIEW.md does not account for the file's items: {rep['unaccounted']}")
+        w(mvd / "targets/1.21.5/REVIEW.md", head + f"| overlay | {ovp} | ok | the RenderType sets the shader now |\n")
         code, rep, _ = check(lf, "1.21.5")
         expect(code == EXIT_UNACCOUNTED and rep["unaccounted"] == mask,
-               f"a REVIEW.md naming the file accounts for it; a drop with no reason does not: {rep['unaccounted']}")
+               f"an ok REVIEW.md row naming the file accounts for it; a drop with no reason does not: {rep['unaccounted']}")
+        mid = [i for i in rep["items"] if i["key"] == "RenderSystem.setShader"]
+        w(mvd / "targets/1.21.5/REVIEW.md", head + f"| stub | {mid[0]['id']} | ok | moved to the RenderType |\n" if mid else head)
+        code, rep, _ = check(lf, "1.21.5")
+        expect(mid and mid[0]["id"] not in rep["unaccounted"] and len(rep["unaccounted"]) == 2,
+               f"an ok row naming an item id accounts for that item only: {rep['unaccounted']}")
+        w(mvd / "targets/1.21.5/REVIEW.md", head + f"| overlay | {ovp} | ok | the RenderType sets the shader now |\n")
         w(mvd / "targets/1.21.4/BEHAVIOUR.json", json.dumps([{"item": i, "status": "dropped", "reason": "the mask pass is gone"}
                                                               for i in mask]))
         code, rep, _ = check(lf, "1.21.5")
