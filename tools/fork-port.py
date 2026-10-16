@@ -323,7 +323,11 @@ def layer_client_items(repo, tdir, target):
     """1.21.2+ binds an item to its model through assets/<ns>/items/<id>.json; without one an item is the magenta cube,
     and no gate before Gate C sees it (CATALOG V42b). Write the missing definitions into the TARGET's resource overlay
     (never the authors' tree) with the multi-version generator era-hop.py uses: it skips parent templates and counts
-    layers. A definition the overlay or the authors already have (a special renderer's) is never touched. -> written."""
+    layers. A definition the overlay or the authors already have (a special renderer's) is never touched. A spawn egg
+    gets its two 1.21.1 colours as constant tints (read from the authors' registration call: DeferredSpawnEggItem is
+    gone, so nothing else colours it), and a model's 1.21.1 `overrides` become the select/condition that picks the
+    same variant (trim_type -> minecraft:trim_material; a mod predicate -> minecraft:condition); one it cannot
+    express is printed and keeps the plain model (CATALOG M67). -> written."""
     if mc_key(target) < mc_key("1.21.2"):
         return 0
     import runpy
@@ -338,6 +342,9 @@ def layer_client_items(repo, tdir, target):
         finally:
             sys.argv = argv
         models = g["load_models"]()
+        eggs = g["scan_egg_tints"](str(repo / "src/main/java"))
+        trims = g["trim_index"](str(repo))
+        unconverted = []
         parented = {m.get("parent", "").split("/", 1)[1] for m in models.values()
                     if (m.get("parent") or "").startswith(ns + ":item/")}
         out = tdir / "resources/assets" / ns / "items"
@@ -347,8 +354,11 @@ def layer_client_items(repo, tdir, target):
                 continue
             out.mkdir(parents=True, exist_ok=True)
             (out / f"{item_id}.json").write_text(
-                g["render"](g["definition"](item_id, g["layer_count"](item_id, models), {})), encoding="utf-8")
+                g["render"](g["definition_for"](item_id, models, eggs, trims, unconverted)), encoding="utf-8")
             written += 1
+        if unconverted:
+            print(f"fork-port: {len(unconverted)} item model(s) with 1.21.1 overrides no item-definition form was "
+                  f"written for (they show the plain model): {', '.join(unconverted[:8])}")
     return written
 
 
@@ -3025,6 +3035,39 @@ def self_check():
                f"client items: the missing one written, the overlay's own kept ({n})")
         expect(layer_client_items(repo, td, "1.21.4") == 0, "client items: idempotent")
         expect(layer_client_items(repo, repo / ".multiversion/targets/1.21.1x", "1.21.1") == 0, "control: none before 1.21.2")
+        # spawn-egg colours from the authors' registration (hex literals), 1.21.1 overrides as select/condition
+        jd = repo / "src/main/java/com/example/mod"; jd.mkdir(parents=True)
+        (jd / "ModItems.java").write_text('ITEMS.register("mob_spawn_egg",\n    () -> new DeferredSpawnEggItem(ModEntities.MOB, '
+                                          '0x4B0082, -1, new Item.Properties()));\n', encoding="utf-8")
+        (md / "mob_spawn_egg.json").write_text('{"parent": "item/template_spawn_egg"}', encoding="utf-8")
+        (md / "plate.json").write_text(json.dumps({"parent": "item/generated", "textures": {"layer0": "examplemod:item/plate"},
+            "overrides": [{"predicate": {"trim_type": 0.1}, "model": "examplemod:item/plate_quartz_trim"},
+                          {"predicate": {"trim_type": 0.6}, "model": "examplemod:item/plate_gold_trim"},
+                          {"predicate": {"trim_type": 1.1}, "model": "examplemod:item/plate_gem_trim"}]}), encoding="utf-8")
+        (md / "jar.json").write_text(json.dumps({"parent": "item/generated", "textures": {"layer0": "examplemod:item/jar"},
+            "overrides": [{"predicate": {"examplemod:full": 1}, "model": "examplemod:item/jar_full"}]}), encoding="utf-8")
+        (md / "bow.json").write_text(json.dumps({"parent": "item/generated", "textures": {"layer0": "examplemod:item/bow"},
+            "overrides": [{"predicate": {"pulling": 1}, "model": "examplemod:item/bow_pulling"}]}), encoding="utf-8")
+        tm = repo / "src/main/resources/data/examplemod/trim_material"; tm.mkdir(parents=True)
+        (tm / "gem.json").write_text('{"asset_name": "gem", "item_model_index": 1.1}', encoding="utf-8")
+        layer_client_items(repo, td, "1.21.4")
+        rd = lambda n: json.loads((keep.parent / f"{n}.json").read_text(encoding="utf-8"))["model"]
+        egg, plate, jar, bow = rd("mob_spawn_egg"), rd("plate"), rd("jar"), rd("bow")
+        when = {c["when"]: c["model"]["model"] for c in plate.get("cases", [])}
+        expect(egg.get("tints") == [{"type": "minecraft:constant", "value": 0x4B0082}, {"type": "minecraft:constant", "value": -1}],
+               f"client items: a spawn egg gets its two 1.21.1 colours, hex literals read ({egg})")
+        expect(plate.get("type") == "minecraft:select" and plate.get("property") == "minecraft:trim_material"
+               and when.get("minecraft:quartz") == "examplemod:item/plate_quartz_trim"
+               and when.get("minecraft:iron") == "examplemod:item/plate_quartz_trim"
+               and when.get("minecraft:diamond") == "examplemod:item/plate_gold_trim"
+               and when.get("examplemod:gem") == "examplemod:item/plate_gem_trim"
+               and plate["fallback"]["model"] == "examplemod:item/plate",
+               f"client items: trim_type overrides -> select on trim_material, 1.21.1's last-match-below rule ({when})")
+        expect(jar.get("type") == "minecraft:condition" and jar.get("property") == "examplemod:full"
+               and jar["on_true"]["model"] == "examplemod:item/jar_full" and jar["on_false"]["model"] == "examplemod:item/jar",
+               f"client items: a mod predicate -> condition on that property ({jar})")
+        expect(bow == {"type": "minecraft:model", "model": "examplemod:item/bow"},
+               f"control: a predicate with no item-definition form keeps the plain model ({bow})")
     # ---- GeckoLib 5 assets: copied to geckolib/{models,animations}, a hand overlay kept, other ledger lines kept, 4.x gets none
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); ad = repo / "src/main/resources/assets/examplemod"

@@ -122,8 +122,32 @@ EGG_CALL = re.compile(
     # construction. One nesting level of parens is allowed (§X10), which covers the cast and the
     # `.get()` without letting the match run across a comma.
     r'(?:[\w.]*\bspawnEgg|new\s+(?:Deferred)?SpawnEggItem)'
-    r'\(\s*(?:[^,()]|\([^()]*\))+,\s*(-?\d+)\s*,\s*(-?\d+)\s*,',
+    # the two colours as decimal (signed) OR hex literals: a mod writes `0x4B0082, 0x9932CC` as often as `-6711040`;
+    # a decimal-only pattern read none of a hex mod's eggs and every egg was a colourless template (CATALOG M67)
+    r'\(\s*(?:[^,()]|\([^()]*\))+,\s*(-?(?:0[xX][0-9a-fA-F]+|\d+))\s*,\s*(-?(?:0[xX][0-9a-fA-F]+|\d+))\s*,',
     re.S)
+
+
+def egg_colour(literal):
+    """An egg colour literal as the signed 32-bit int a `minecraft:constant` tint takes (hex literals are unsigned)."""
+    v = int(literal, 0) & 0xFFFFFFFF
+    return v - (1 << 32) if v >= 1 << 31 else v
+
+
+def scan_egg_tints(java_root):
+    """item id -> [background, highlight] over every .java file under java_root ({} when there is none). The
+    layer route's setup reads the authors' tree with this; an empty result is not an error there (a mod with no
+    eggs), unlike --egg-tints, which names one file that must register some."""
+    eggs = {}
+    if not java_root or not os.path.isdir(java_root):
+        return eggs
+    for dirpath, _dirs, files in os.walk(java_root):
+        for name in files:
+            if name.endswith(".java"):
+                with open(os.path.join(dirpath, name), encoding="utf-8", errors="replace") as fh:
+                    for m in EGG_CALL.finditer(fh.read()):
+                        eggs[m.group(1)] = [egg_colour(m.group(2)), egg_colour(m.group(3))]
+    return eggs
 
 
 def load_egg_tints(path):
@@ -134,7 +158,7 @@ def load_egg_tints(path):
         sys.exit("--egg-tints: no such file " + path)
     with open(path, encoding="utf-8") as fh:
         src = fh.read()
-    eggs = {m.group(1): [int(m.group(2)), int(m.group(3))] for m in EGG_CALL.finditer(src)}
+    eggs = {m.group(1): [egg_colour(m.group(2)), egg_colour(m.group(3))] for m in EGG_CALL.finditer(src)}
     if not eggs:
         # A silent zero here would ship every egg untinted and still read as success -- the
         # exact shape of a rule that matches nothing (catalog X1).
@@ -216,6 +240,85 @@ def definition(item_id, layers, egg_tints):
     elif layers and TINT:
         model["tints"] = [{"type": TINT, "layer": i} for i in range(layers)]
     return {"model": model}
+
+
+# 1.21.1 `trim_type` override thresholds of vanilla's trim materials (the item_model_index each one carried; 1.21.2
+# removed the field and the property). A mod's own materials add theirs from data/<ns>/trim_material/*.json.
+VANILLA_TRIM_INDEX = {"quartz": 0.1, "iron": 0.2, "netherite": 0.3, "redstone": 0.4, "copper": 0.5, "gold": 0.6,
+                      "emerald": 0.7, "diamond": 0.8, "lapis": 0.9, "amethyst": 1.0}
+
+
+def trim_index(root):
+    """material id -> 1.21.1 item_model_index: vanilla's, plus every trim material the mod's data declares one for."""
+    out = {f"minecraft:{k}": v for k, v in VANILLA_TRIM_INDEX.items()}
+    data = os.path.join(root, "src/main/resources/data")
+    if os.path.isdir(data):
+        for ns in sorted(os.listdir(data)):
+            d = os.path.join(data, ns, "trim_material")
+            if not os.path.isdir(d):
+                continue
+            for name in sorted(os.listdir(d)):
+                if name.endswith(".json"):
+                    try:
+                        with open(os.path.join(d, name), encoding="utf-8-sig") as fh:
+                            idx = json.load(fh).get("item_model_index")
+                    except ValueError:
+                        continue
+                    if isinstance(idx, (int, float)):
+                        out[f"{ns}:{name[:-5]}"] = float(idx)
+    return out
+
+
+def _plain(model_id):
+    return {"type": "minecraft:model", "model": model_id}
+
+
+def from_overrides(item_id, model, trims):
+    """1.21.1 model `overrides` -> the 1.21.2+ item-definition model that picks the same variant, or None when the
+    item has none or uses a predicate this cannot express (the caller then keeps the plain model and reports it).
+    1.21.1 picks the LAST override whose every predicate value is <= the property's value.
+
+    - `trim_type` alone -> minecraft:select on minecraft:trim_material: each known material (vanilla's, the mod's own)
+      gets the variant its old index selected; any other material falls back to the item's own model.
+    - one namespaced (mod-registered) predicate, every value 1 -> minecraft:condition on that property id. The mod's
+      Java must register it (RegisterConditionalItemModelPropertyEvent) -- an unregistered property fails to load.
+    """
+    overrides = model.get("overrides") or []
+    if not overrides:
+        return None
+    base = _plain(f"{NS}:item/{item_id}")
+    keys = {k for o in overrides for k in (o.get("predicate") or {})}
+    if keys == {"trim_type"} and all(len(o.get("predicate") or {}) == 1 for o in overrides):
+        cases = []
+        for material, idx in sorted(trims.items(), key=lambda kv: (kv[1], kv[0])):
+            chosen = None
+            for o in overrides:
+                if float(o["predicate"]["trim_type"]) <= idx + 1e-6:
+                    chosen = o.get("model")
+            if chosen:
+                cases.append({"when": material, "model": _plain(chosen)})
+        if not cases:
+            return None
+        return {"type": "minecraft:select", "property": "minecraft:trim_material", "cases": cases, "fallback": base}
+    if len(keys) == 1 and ":" in next(iter(keys)) and not next(iter(keys)).startswith("minecraft:"):
+        prop = next(iter(keys))
+        if all(len(o.get("predicate") or {}) == 1 and float(o["predicate"][prop]) == 1.0 for o in overrides):
+            return {"type": "minecraft:condition", "property": prop,
+                    "on_true": _plain(overrides[-1]["model"]), "on_false": base}
+    return None
+
+
+def definition_for(item_id, models, egg_tints, trims, unconverted=None):
+    """definition() for a layer target: the item's 1.21.1 `overrides` become the 1.21.2+ select/condition that picks
+    the same variant (from_overrides); an override this cannot express is appended to `unconverted` and the item keeps
+    its plain model, as before."""
+    model = models.get(item_id) or {}
+    picked = from_overrides(item_id, model, trims) if item_id not in SPECIAL else None
+    if picked is not None:
+        return {"model": picked}
+    if model.get("overrides") and unconverted is not None:
+        unconverted.append(item_id)
+    return definition(item_id, layer_count(item_id, models), egg_tints)
 
 
 def render(obj):
