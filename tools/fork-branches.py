@@ -164,7 +164,11 @@ def read_file(p):
 
 
 def set_props_text(text, updates):
-    """`text` (a .properties file) with each key of updates set, every other line kept as it is; new keys appended."""
+    """`text` (a .properties file) with each key of updates set, every other line kept as it is; new keys appended.
+    A CRLF file stays CRLF."""
+    crlf = "\r\n" in (text or "")
+    if crlf:
+        text = text.replace("\r\n", "\n")
     lines = text.split("\n") if text else []
     trail = bool(lines) and lines[-1] == ""
     if trail:
@@ -176,7 +180,8 @@ def set_props_text(text, updates):
             if k in left:
                 lines[i] = f"{k}={left.pop(k)}"
     lines += [f"{k}={v}" for k, v in left.items()]
-    return "\n".join(lines) + "\n"
+    out = "\n".join(lines) + "\n"
+    return out.replace("\n", "\r\n") if crlf else out
 
 
 # ---------------------------------------------------------------- what a checkout / tree is
@@ -343,6 +348,18 @@ def apply_rules(text, rules):
 ONLYIN = re.compile(r"\n[ \t]*@OnlyIn\([^)]*\)[ \t]*")      # templates/fork-layer/tools/layer.py's
 
 
+def apply_rules_to_files(paths, rules):
+    """Apply `rules` to each file of `paths` in place, as bytes (line endings, and any byte that is not UTF-8, kept
+    exactly). -> the number of files changed."""
+    n = 0
+    for f in paths:
+        old = pathlib.Path(f).read_bytes()
+        new = apply_rules(old.decode("utf-8", "surrogateescape"), rules).encode("utf-8", "surrogateescape")
+        if new != old:
+            pathlib.Path(f).write_bytes(new); n += 1
+    return n
+
+
 def chain_table(read, t, chain_):
     """The table a layer's prepare builds for t (fork rows nearest first: renames.tsv, then moves.generated.tsv, of
     each chain version; then the shared tables), from the .port/<v>/ files `read(path)` returns ("" when absent)."""
@@ -477,13 +494,23 @@ def mixin_edit(obj, adds, removes):
     return obj
 
 
+def jload(x):
+    """JSON from bytes or text that may start with a UTF-8 byte-order mark and need not be valid UTF-8 elsewhere."""
+    if isinstance(x, bytes):
+        x = x.decode("utf-8", "surrogateescape")
+    return json.loads(x.lstrip("\ufeff"))
+
+
 def json_like(obj, like):
-    """`obj` as JSON in the indentation of `like` (the file it replaces)."""
+    """`obj` as JSON in the indentation of `like` (the file it replaces), with its byte-order mark when it had one."""
     m = re.search(r"\n([ \t]+)\S", like or "")
     ind = m.group(1) if m else "  "
     ind = len(ind) if " " in ind else ind
     text = json.dumps(obj, indent=ind, ensure_ascii=False)
-    return text + ("\n" if (like or "\n").endswith("\n") else "")
+    if "\r\n" in (like or ""):
+        text = text.replace("\n", "\r\n")
+    nl = "\r\n" if "\r\n" in (like or "") else "\n"
+    return ("\ufeff" if (like or "").startswith("\ufeff") else "") + text + (nl if (like or "\n").endswith("\n") else "")
 
 
 def mixin_delta(base_obj, cur_obj):
@@ -523,9 +550,9 @@ def derived_ok(path, base, cur, props):
     if path.startswith("src/") and "/resources/" in path and name.endswith(".json") and \
             (f"mixin_add.{name}" in props or f"mixin_remove.{name}" in props):
         try:
-            want = mixin_edit(json.loads(b), mixin_spec(props.get(f"mixin_add.{name}")),
+            want = mixin_edit(jload(b), mixin_spec(props.get(f"mixin_add.{name}")),
                               mixin_spec(props.get(f"mixin_remove.{name}")))
-            return json.loads(c) == want
+            return jload(c) == want
         except ValueError:
             return False
     return False
@@ -1145,12 +1172,12 @@ def expected_tree(lay, t, parent, port_commit, parent_files=None):
         if not p.startswith("src/") or "/resources/" not in p and "/templates/" not in p:
             continue
         if name in adds or name in removes:
-            obj = json.loads(files[p].decode("utf-8"))
+            obj = jload(files[p])
             a = [(arr, c) for arr, cs in (adds.get(name) or {}).items() for c in cs]
             r = [(arr, c) for arr, cs in (removes.get(name) or {}).items() for c in cs]
             new = mixin_edit(obj, a, r)
             if new != obj:
-                files[p] = json_like(new, files[p].decode("utf-8")).encode("utf-8")
+                files[p] = json_like(new, files[p].decode("utf-8", "surrogateescape")).encode("utf-8", "surrogateescape")
         if name == "neoforge.mods.toml":
             ranges = {k[5:]: v for k, v in tprops.items() if k.startswith("toml.")}
             if ranges:
@@ -1161,7 +1188,7 @@ def expected_tree(lay, t, parent, port_commit, parent_files=None):
         if (name in adds or name in removes) and p.startswith("src/"):
             before = (parent_files or base).get(p)
             if before is not None:
-                a_, r_ = mixin_delta(json.loads(before.decode("utf-8")), json.loads(files[p].decode("utf-8")))
+                a_, r_ = mixin_delta(jload(before), jload(files[p]))
                 if a_:
                     deltas[f"mixin_add.{name}"] = spec_text(a_)
                 if r_:
@@ -1371,7 +1398,7 @@ def verify_target(lay, t, branch_ref, parent, port_commit, parent_files=None):
             if not hasattr(lay.lp, "apply_mixins"):
                 continue                # an older layer.py: the arrays were compared byte for byte above
             layer_arrays = lay.lp.apply_mixins(json.loads(read_file(src)), cfg, adds, removes)
-            got = json.loads(have[p].decode("utf-8"))
+            got = jload(have[p])
             mine = {k: sorted(v) for k, v in got.items() if isinstance(v, list)}
             if {k: v for k, v in layer_arrays.items() if v or k in mine} != {k: v for k, v in mine.items() if v or k in layer_arrays}:
                 diffs.append((p, f"mixin arrays differ from the layer's (layer.py mixins --target {t} --config): "
@@ -1717,12 +1744,12 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             new = toml_rewrite(text, {k[5:]: v for k, v in props.items() if k.startswith("toml.")})
         elif f.startswith("src/") and name.endswith(".json") and (f"mixin_add.{name}" in props or f"mixin_remove.{name}" in props):
             try:
-                new = json_like(mixin_edit(json.loads(text), mixin_spec(props.get(f"mixin_add.{name}")),
+                new = json_like(mixin_edit(jload(text), mixin_spec(props.get(f"mixin_add.{name}")),
                                            mixin_spec(props.get(f"mixin_remove.{name}"))), text)
             except ValueError:
                 new = None
         if new is not None:
-            (work / f).write_text(new, encoding="utf-8", errors="surrogateescape")
+            (work / f).write_bytes(new.encode("utf-8", "surrogateescape"))      # bytes: no newline translation
             git(work, "add", "--", f)
             resolved.add(f)
             notes.append(f"{f}: {parent_name}'s, with {t}'s build keys")
@@ -1991,13 +2018,13 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     files = ref_files(repo, start)
     modes = {p: m for p, (m, _b) in tree_entries(repo, start).items()}
     port_now = git(repo, "merge-base", start, resolve_branch(repo, pb)).stdout.strip() if parent else start
-    pp = parse_props(files.get(f"{REC}/{parent}/{BRANCH_PROPS}", b"").decode()) if parent else {}
-    gp = parse_props(files.get("gradle.properties", b"").decode())
+    pp = parse_props(files.get(f"{REC}/{parent}/{BRANCH_PROPS}", b"").decode("utf-8", "surrogateescape")) if parent else {}
+    gp = parse_props(files.get("gradle.properties", b"").decode("utf-8", "surrogateescape"))      # often ISO-8859-1
     toml = next((files[p] for p in sorted(files) if p.endswith("META-INF/neoforge.mods.toml") and p.startswith("src/")), b"")
-    modid = (re.search(rb'(?m)^\s*modId\s*=\s*"([^"]+)"', toml) or [None, gp.get("mod_id", "").encode()])[1].decode()
+    modid = (re.search(rb'(?m)^\s*modId\s*=\s*"([^"]+)"', toml) or [None, gp.get("mod_id", "").encode("utf-8", "surrogateescape")])[1].decode("utf-8", "replace")
     first = next((files[p] for p in sorted(files) if p.startswith("src/main/java/") and p.endswith(".java")), b"")
     pkg = re.search(rb"(?m)^package\s+([\w.]+)\s*;", first)
-    mv_pkg = pp.get("mv_package") or ".".join((pkg.group(1).decode().split(".") if pkg else ["mv"])[:2]) + ".mv"
+    mv_pkg = pp.get("mv_package") or ".".join((pkg.group(1).decode("utf-8", "replace").split(".") if pkg else ["mv"])[:2]) + ".mv"
     order = [l["mc"] for l in mfl.versions()["lines"] if l.get("stable")]
     lo = parent or base_mc
     new_versions = [v for v in order if mc_key(lo) < mc_key(v) <= mc_key(t)][::-1]        # nearest first
@@ -2031,7 +2058,7 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     sub = lambda x: x.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
     sections = [f"# ---- shared {v}\n" + sub((shared_dir() / v / "renames.tsv").read_text(encoding="utf-8"))
                 for v in new_versions if (shared_dir() / v / "renames.tsv").is_file()]
-    inherited = files.get(f"{REC}/{parent}/shared-renames.tsv", b"").decode() if parent else ""
+    inherited = files.get(f"{REC}/{parent}/shared-renames.tsv", b"").decode("utf-8", "surrogateescape") if parent else ""
     files[f"{rd}/{BRANCH_PROPS}"] = ("\n".join(head) + "\n").encode("utf-8")
     files[f"{rd}/renames.tsv"] = f"# {t}: from<TAB>to (plain type, member:, re:) -- see prepare-sources.py\n".encode("utf-8")
     shared_text = "\n".join(sections + ([inherited.rstrip("\n")] if inherited.strip() else [])) + "\n"
@@ -2052,9 +2079,9 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
             new = (ONLYIN.sub("", text) if strip else text).encode("utf-8", "surrogateescape"); moved += 1
         files[path] = new
     gp_text = files.get("gradle.properties", b"").decode("utf-8", "surrogateescape")
-    files["gradle.properties"] = set_props_text(gp_text, {k[5:]: v for k, v in props.items()}).encode("utf-8")
+    files["gradle.properties"] = set_props_text(gp_text, {k[5:]: v for k, v in props.items()}).encode("utf-8", "surrogateescape")
     for p in [p for p in files if p.startswith("src/") and p.endswith("META-INF/neoforge.mods.toml")]:
-        files[p] = toml_rewrite(files[p].decode("utf-8", "surrogateescape"), {"minecraft": mc_range, "neoforge": neo_range}).encode("utf-8")
+        files[p] = toml_rewrite(files[p].decode("utf-8", "surrogateescape"), {"minecraft": mc_range, "neoforge": neo_range}).encode("utf-8", "surrogateescape")
     if not parent:
         bg = files.get("build.gradle", b"").decode("utf-8", "surrogateescape")
         if BRANCH_HOOK_LINE not in bg:
@@ -2469,6 +2496,20 @@ def self_check():
         if not c:
             ok = False
             print("FAIL:", msg)
+    # a mixin config with a byte-order mark (and CRLF) is read, and written back with both
+    bom = "\ufeff{\r\n  \"package\": \"p\",\r\n  \"mixins\": [\"A\"]\r\n}\r\n"
+    got = json_like(mixin_edit(jload(bom.encode("utf-8")), [("mixins", "B")], []), bom)
+    expect(got.startswith("\ufeff{\r\n") and got.endswith("}\r\n") and jload(got)["mixins"] == ["A", "B"],
+           f"a BOM'd CRLF mixin config: read, edited, written in its own form: {got!r}")
+    # line endings: a CRLF gradle.properties stays CRLF, and rows applied to a CRLF source keep CRLF (the moves stage)
+    expect(set_props_text("a=1\r\nminecraft_version=1.21.1\r\n", {"minecraft_version": "1.21.4"})
+           == "a=1\r\nminecraft_version=1.21.4\r\n", "set_props_text keeps a CRLF file CRLF")
+    with tempfile.TemporaryDirectory() as e:
+        f = pathlib.Path(e) / "A.java"
+        f.write_bytes(b"import old.Thing;\r\nclass A { Thing t; String s = \"\xe9\"; }\r\n")
+        n = apply_rules_to_files([f], rules_of("old.Thing\tnew.Thing\n"))
+        expect(n == 1 and f.read_bytes() == b"import new.Thing;\r\nclass A { Thing t; String s = \"\xe9\"; }\r\n",
+               f"rows applied as bytes keep CRLF and a non-UTF-8 byte: {f.read_bytes()!r}")
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
         r, g, _run = _fixture(d / "a")
@@ -2629,6 +2670,22 @@ def self_check():
                and b"minecraft_version=1.21.8" in f8["gradle.properties"] and b'"[1.21.8,1.21.9)"' in f8["src/main/resources/META-INF/neoforge.mods.toml"]
                and b"# ---- shared 1.21.8" in f8[".port/1.21.8/shared-renames.tsv"] and b"keep = 5" in f8["src/main/java/com/example/mod/Over.java"],
                f"add-target 1.21.8 from 1.21.5: versions, ranges, the shared 1.21.8 table, the parent's own changes kept: {out[-300:]}")
+        # an ISO-8859-1 gradle.properties (a Latin-1 comment byte) on the port branch: add-target keeps the byte
+        lw = r / "build/latin"
+        git(r, "worktree", "add", "-q", "-b", "latin-port", str(lw), "neoforge-1.21.1", check=True)
+        gpl = lw / "gradle.properties"
+        gpl.write_bytes(b"# caf\xe9\n" + gpl.read_bytes())
+        git(lw, "commit", "-qam", "latin-1 comment", check=True)
+        try:
+            rc, out = _quiet(add_target, r, "1.21.10", parent="port", port_branch="latin-port", allow_undone_parent=True)
+        except UnicodeError as ex:
+            rc, out = 99, repr(ex)
+        fl = ref_files(r, resolve_branch(r, "neoforge-1.21.10")) if rc == 0 else {}
+        expect(rc == 0 and fl.get("gradle.properties", b"").startswith(b"# caf\xe9\n")
+               and b"minecraft_version=1.21.10" in fl.get("gradle.properties", b""),
+               f"add-target over an ISO-8859-1 gradle.properties: the byte kept, the versions written: rc {rc}: {out[-300:]}")
+        git(r, "worktree", "remove", "--force", str(lw))
+        g("branch", "-D", "latin-port", "neoforge-1.21.10")
         # sync-shared: the shared library moved (a row and a helper): 1.21.3 takes both, its rows-only files re-made
         with tempfile.TemporaryDirectory() as e:
             lib = pathlib.Path(e)

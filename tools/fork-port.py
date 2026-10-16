@@ -2694,13 +2694,7 @@ class BranchRun(Run):
         text, kept, dup = moves_table(read_pairs(raw), existing - plain_froms(had), pv, self.t)
         gen.write_text(text, encoding="utf-8")
         # rows as a tool: the moves are applied to the branch's source (a version branch holds its own source)
-        rules = fb.rules_of(text)
-        changed = 0
-        for f in sorted(self.repo.glob("src/*/java/**/*.java")):
-            old_t = f.read_text(encoding="utf-8", errors="surrogateescape")
-            new_t = fb.apply_rules(old_t, rules)
-            if new_t != old_t:
-                f.write_text(new_t, encoding="utf-8", errors="surrogateescape"); changed += 1
+        changed = fb.apply_rules_to_files(sorted(self.repo.glob("src/*/java/**/*.java")), fb.rules_of(text))
         self.sh([self.py, str(ROOT / "tools/fix-access-transformer.py"), "--work", str(self.repo), "--class-map", str(raw)])
         return {"done": f"{kept} unambiguous move(s) {pv}->{self.t} -> .port/{self.t}/moves.generated.tsv"
                         f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s)", "moves": kept}
