@@ -165,6 +165,12 @@ target**, each with its own game version (Modrinth `game_versions`, CurseForge `
   `publish.dep.<repo name>=<version number>` in its `target.properties`; a pin the dependency lacks refuses.
 - Idempotent per target and platform (markers `id@<mc>` in the release notes). The tag may be on the layer branch;
   "built from the branch" is judged against `origin/<layer branch>`.
+- **Preview targets.** A target whose own `target.properties` says `preview=true` is built, gated and attached to the
+  layer pre-release like any other (the pre-release notes name it as a preview), but `publish` never uploads it: it
+  prints `target <t>: preview, not published`, does not ask that target's gates, and never fails on it (a publish
+  whose every candidate is preview uploads nothing and exits 0). Use it for a target with a known gap that is not
+  ready for players; remove the key (or set `preview=false`) to publish it on the next release. The base target has no
+  `target.properties` and is never preview. A single-version fork has no targets and nothing here applies.
 
 ## After the first publish
 

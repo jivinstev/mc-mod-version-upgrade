@@ -7,7 +7,8 @@
      layer support existed. Multi-version publishing is opt-in (a "layer" config section + a .multiversion/ tag), so
      this is the guarantee that a fork without it publishes as it always did. A fork that has the layer in its tree
      but no "layer" section is checked too.
-  2. LAYER: one file per green target, refusals, per-target dependency checks, idempotence.
+  2. LAYER: one file per green target, refusals, per-target dependency checks, idempotence, and preview targets
+     (`preview=true` in a target's target.properties: listed as "preview, not published", never uploaded, never an error).
 
     python3 tools/test-port-publish.py            # exit 0 = all pass
     python3 tools/test-port-publish.py --regen    # rewrite the golden file (only after reading the diff)
@@ -152,7 +153,7 @@ GATES_41 = ("Gates for `m` at `abc1234` for Minecraft 1.21.4 (full environment) 
             "|---|---|---|\n| build | PASS | x |\n| Gate B | PASS | 5 |\n")
 
 
-def layer_git(changed=("README.md",), gates41=GATES_41, with_layer=True, targets=("1.21.11", "1.21.4"), pins=""):
+def layer_git(changed=("README.md",), gates41=GATES_41, with_layer=True, targets=("1.21.11", "1.21.4"), pins="", preview=()):
     files = {"base.properties": "minecraft_version=1.21.1\nmv_package=net.m.mv\n"}
 
     def git(repo, *a):
@@ -163,7 +164,8 @@ def layer_git(changed=("README.md",), gates41=GATES_41, with_layer=True, targets
                 return R(0, files["base.properties"]) if with_layer else R(128)
             if ref.endswith("/target.properties"):
                 t = ref.split("/")[-2]
-                return R(0, (f"inherits=1.21.4\n" if t == "1.21.11" else "x=1\n") + (pins if t == "1.21.4" else ""))
+                return R(0, (f"inherits=1.21.4\n" if t == "1.21.11" else "x=1\n") + (pins if t == "1.21.4" else "")
+                         + ("preview=true\n" if t in preview else ""))
             if ref.endswith("GATES.md"):
                 return R(0, gates41) if "1.21.4" in ref and gates41 is not None else R(128)
         if a[0] == "ls-tree":
@@ -322,6 +324,25 @@ def main():
     # an old-style single marker for the dependency counts for ITS minecraft only
     rc, out, _, up = layer_run({"layer": {"branch": "neoforge-1.21.x", "targets": ["1.21.1"]}}, deps=deps)
     expect(rc == 0 and len(up) == 2, f"a single-version dependency release covers the base target: {out}")
+    # preview targets (issue #76): built and gated, never published, never an error -- listed instead
+    rc, out, _, up = layer_run({"layer": {"branch": "neoforge-1.21.x", "released": ["1.21.4"]}}, deps=[],
+                               git=layer_git(preview=("1.21.4",)))
+    mr = sorted(u[1]["fields"]["data"]["game_versions"][0] for u in up if u[0] == "modrinth")
+    expect(rc == 0 and mr == ["1.21.1", "1.21.11"] and len(up) == 4 and "target 1.21.4: preview, not published" in out
+           and "m-2_mr-mc1.21.4.jar" not in json.dumps(up), f"a preview target is listed and not uploaded: rc={rc} {out}")
+    # ...even when its gates would refuse it (a compile-only middle target, not released): skipped, not an error
+    rc, out, _, up = layer_run({"layer": {"branch": "neoforge-1.21.x"}}, deps=[], git=layer_git(preview=("1.21.4",)))
+    expect(rc == 0 and len(up) == 4 and "gates are not green" not in out and "target 1.21.4: preview, not published" in out,
+           f"a preview target's gates are not asked: {out}")
+    # ...and when the config names it explicitly, or every target left is preview: nothing uploaded, exit 0
+    rc, out, _, up = layer_run({"layer": {"branch": "neoforge-1.21.x", "targets": ["1.21.11"]}}, deps=[],
+                               git=layer_git(preview=("1.21.11",)))
+    expect(rc == 0 and not up and "target 1.21.11: preview, not published" in out and "::error::" not in out,
+           f"only preview targets asked: listed, nothing published, no error: {out}")
+    # a target.properties without the key (or preview=false) publishes as before
+    rc, out, _, up = layer_run({"layer": {"branch": "neoforge-1.21.x", "released": ["1.21.4"]}}, deps=[],
+                               git=layer_git(pins="preview=false\n"))
+    expect(rc == 0 and len(up) == 6 and "preview" not in out, f"preview=false is not preview: {out}")
     # dry run uploads and patches nothing
     rc, out, calls, up = layer_run({"layer": {"branch": "neoforge-1.21.x", "released": ["1.21.4"]}}, deps=[], dry=True)
     expect(rc == 0 and not up and not [c for c in calls if c[1] == "PATCH"] and out.count("modrinth version:") == 3, "dry run is dry")

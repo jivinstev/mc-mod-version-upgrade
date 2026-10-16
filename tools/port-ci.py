@@ -137,6 +137,18 @@ def layer_release_job(v):
         raise SystemExit("port-ci: the release job no longer downloads `jars`; layer_release_job needs updating")
     job = job.replace(jars, jars + "      - uses: actions/download-artifact@v4\n        with:\n          pattern: layer-jars-*\n"
                                    "          merge-multiple: true\n          path: jars\n", 1)
+    # a preview target (preview=true in its target.properties; layer-ci.py plan lists them) keeps its jar on the
+    # pre-release, and the notes say it is a preview that publish-port will not upload. The list reaches the script
+    # through env only, never spliced into it.
+    env = "        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"
+    built = '            echo "Built from'
+    if job.count(env) != 1 or job.count(built) != 1:
+        raise SystemExit("port-ci: the release job's notes changed shape; layer_release_job's preview note needs updating")
+    job = job.replace(env, env + "          PREVIEW: ${{ needs.layer-plan.outputs.preview }}\n", 1)
+    job = job.replace(built, '            if [ -n "$PREVIEW" ]; then\n'
+                             '              echo "**Preview** (built and gated, not published to Modrinth or CurseForge): Minecraft ${PREVIEW//,/, }."\n'
+                             '              echo\n'
+                             '            fi\n' + built, 1)
     return "\n" + job
 
 
@@ -733,6 +745,11 @@ def self_check():
     ok &= all(f"(needs.{j}.result == 'success' || needs.{j}.result == 'skipped')" in rif for j in ("layer-compile", "layer-gates-extra"))
     ok &= "needs.layer-isolation.result == 'skipped'" not in rif and "needs.layer-inertness.result == 'skipped'" not in rif
     ok &= "pattern: layer-jars-*" in rel and "merge-multiple: true" in rel and "gh release create" in rel
+    # preview targets (issue #76): the plan's list reaches the notes through env, never spliced into the script
+    ok &= "      preview: ${{ steps.plan.outputs.preview }}\n" in ljobs.split("\n  layer-isolation:\n", 1)[0]
+    ok &= "PREVIEW: ${{ needs.layer-plan.outputs.preview }}" in rel and 'if [ -n "$PREVIEW" ]; then' in rel
+    ok &= "${{ needs.layer-plan.outputs.preview }}" not in rel.split("run: |", 1)[1]
+    ok &= "PREVIEW" not in plain and "preview" not in plain.lower()
     ok &= "github.ref_name != 'neoforge-1.21.x'" in lay.split("\n  release:\n    needs:", 1)[1].split("steps:", 1)[0]
     ok &= "github.ref_name !=" not in plain and "layer-release" not in plain and "layer-deps.py" not in plain
     ok &= lay.count("layer-deps.py fetch --repo . --target") == 3 and lay.count("name: layer-jars-") == 2

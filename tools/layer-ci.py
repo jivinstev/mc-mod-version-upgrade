@@ -33,13 +33,17 @@ gets the full gates too, and the fork says so in `.multiversion/ci.properties`:
 error (a typo must not quietly mean "no gates"); the newest target is always fully gated, so naming it is redundant.
 A fork without ci.properties behaves exactly as before.
 
+`plan` also prints `preview`: the targets whose own target.properties says `preview=true` (comma list, version order;
+not inherited). A preview target is built and gated exactly like any other; the layer release's notes name it as a
+preview, and tools/port-publish.py never publishes it (issue #76).
+
 One run per checkout (CATALOG X44): `acquire_lock()` is the lock tools/fork-port.py and `ci-gates.py --mc` take on
 build/.fork-port.lock (pid, stale-pid aware). Without a layer target the lock is never taken.
 
 target_classpath() and sources_jars() are shared with fork-port.py, so the CI audit and the port's audit stage
 cannot drift apart. Standard library only.
 """
-import argparse, datetime, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
+import argparse, contextlib, datetime, io, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -123,7 +127,8 @@ def plan(repo):
     if not (mv / "base.properties").is_file() or not targets:
         return {"layer": "false", "targets": [], "newest": "", "newest_java": DEFAULT_JAVA, "middle": [],
                 "has_middle": "false", "matrix": json.dumps({"include": []}, separators=(",", ":")), "shipped": "false",
-                "full_extra": [], "has_full": "false", "full_matrix": json.dumps({"include": []}, separators=(",", ":"))}
+                "full_extra": [], "has_full": "false", "full_matrix": json.dumps({"include": []}, separators=(",", ":")),
+                "preview": ""}
     newest, middle = targets[-1], targets[:-1]
     inc = [{"t": t, "java": java_of(mv, t)} for t in middle]
     full, problems = full_gate_targets(mv, targets)
@@ -135,7 +140,9 @@ def plan(repo):
             "matrix": json.dumps({"include": inc}, separators=(",", ":")),
             "shipped": "true" if list(mv.glob("shipped-expect*.txt")) else "false",
             "full_extra": full, "has_full": "true" if full else "false",
-            "full_matrix": json.dumps({"include": finc}, separators=(",", ":"))}
+            "full_matrix": json.dumps({"include": finc}, separators=(",", ":")),
+            "preview": ",".join(t for t in targets
+                                if read_props(tdir / t / "target.properties").get("preview", "").lower() == "true")}
 
 
 def strip_hook(text):
@@ -295,7 +302,7 @@ def cmd_plan(a):
     print(json.dumps(p, indent=1))
     if a.github_output:
         with open(a.github_output, "a", encoding="utf-8") as f:
-            for k in ("layer", "newest", "newest_java", "has_middle", "matrix", "shipped", "has_full", "full_matrix"):
+            for k in ("layer", "newest", "newest_java", "has_middle", "matrix", "shipped", "has_full", "full_matrix", "preview"):
                 f.write(f"{k}={p[k]}\n")
     return 0
 
@@ -433,6 +440,7 @@ def self_check():
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         expect(plan(r)["layer"] == "false" and plan(r)["matrix"] == '{"include":[]}', "no .multiversion: layer=false")
+        expect(plan(r)["preview"] == "", "no .multiversion: no preview target")
         mv = r / ".multiversion"
         (mv / "targets").mkdir(parents=True)
         (mv / "base.properties").write_text("x=1\n", encoding="utf-8")
@@ -472,6 +480,18 @@ def self_check():
         expect(p26["middle"] == ["1.21.10", "1.21.11", "26.1.2", "26.2"], f"26.x middle order: {p26['middle']}")
         expect({i["t"]: i["java"] for i in json.loads(p26["matrix"])["include"]}
                == {"1.21.10": "21", "1.21.11": "21", "26.1.2": "25", "26.2": "25"}, "per-target JDK; 26.2 inherits 25")
+        expect(p26["preview"] == "", "no preview=true anywhere: no preview target (the default)")
+        for t_, body in (("26.2", "inherits=26.1.2\npreview=true\n"), ("26.3", "java_version=25\ninherits=26.2\npreview = true\n")):
+            (mv / "targets" / t_ / "target.properties").write_text(body, encoding="utf-8")
+        pp = plan(r)
+        expect(pp["preview"] == "26.2,26.3" and pp["middle"] == p26["middle"] and pp["newest"] == "26.3"
+               and pp["matrix"] == p26["matrix"], f"preview targets listed in version order, built and gated as before: {pp}")
+        (mv / "targets" / "26.2" / "target.properties").write_text("inherits=26.1.2\npreview=false\n", encoding="utf-8")
+        expect(plan(r)["preview"] == "26.3", "preview is per target (not inherited); preview=false is not preview")
+        gh = r / "gh-out"
+        with contextlib.redirect_stdout(io.StringIO()):
+            cmd_plan(argparse.Namespace(repo=str(r), github_output=str(gh)))
+        expect("preview=26.3\n" in gh.read_text(encoding="utf-8"), "plan writes preview to the GitHub output")
     # CI policy: full_gates (ci.properties) names extra fully gated MIDDLE targets; default none; typos are errors
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d); mv = r / ".multiversion"
