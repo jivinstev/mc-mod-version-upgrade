@@ -1012,6 +1012,23 @@ scr, ctr, wid = "class S extends Screen" + body, "class C extends AbstractContai
 gone = lambda s: "renderBackground" not in f(s) and "super.render(g, mx, my, pt);" in f(s)
 sys.exit(0 if gone(scr) and gone(ctr) and f(wid) == wid else 1)
 PY
+# 1.21.6+ text draws skip a colour with alpha 0 (CATALOG M75): the shared 1.21.8 row makes a 6-digit literal colour opaque
+python3 - <<'PY' && ok "shared rows: the 1.21.6 text-colour row makes 0xRRGGBB opaque in drawString/drawCenteredString/drawWordWrap only, as a whole argument" || bad "the text-colour row is wrong"
+import importlib.util, pathlib, sys
+s = importlib.util.spec_from_file_location("ps", "templates/fork-layer/tools/prepare-sources.py"); ps = importlib.util.module_from_spec(s); s.loader.exec_module(ps)
+rows = [r for r in ps.load_renames("templates/fork-layer/shared/1.21.8/renames.tsv") if "drawCenteredString" in r[0]]
+_tok, rx = ps.split_rules(rows)
+f = lambda t: rx[0][0].sub(rx[0][1], t)
+cases = {"g.drawString(this.font, name, 4, 4, 0xFFFFFF);": "g.drawString(this.font, name, 4, 4, 0xFFFFFFFF);",
+         "g.drawString(font, s, x, y, 0x40ff40, false);": "g.drawString(font, s, x, y, 0xFF40ff40, false);",
+         "graphics.drawCenteredString(font, title, w / 2, 8, 0x404040);": "graphics.drawCenteredString(font, title, w / 2, 8, 0xFF404040);",
+         "g.drawWordWrap(font, txt, 2, 2, 100, 0xAAAAAA);": "g.drawWordWrap(font, txt, 2, 2, 100, 0xFFAAAAAA);",
+         "g.drawString(font, s, x, y, 0x80FFFFFF);": None, "g.drawString(font, s, x, y, color);": None,
+         "g.fill(0, 0, 4, 4, 0x202020);": None, "int c = 0x123456;": None}
+bad = [(k, f(k)) for k, v in cases.items() if f(k) != (v or k)]
+print(bad) if bad else None
+sys.exit(1 if len(rows) != 1 or bad else 0)
+PY
 # R25: the name RegIds.enter records lasts only while ITS supplier runs -- a registration that never entered a name used to
 # take the previous registration's id silently; it now gets none (vanilla's loud "Item id not set")
 if command -v javac >/dev/null 2>&1; then

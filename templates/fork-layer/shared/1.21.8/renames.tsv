@@ -48,4 +48,9 @@ re:\b((?:net\.minecraft\.world\.level\.)?Level \w+ = )(?:net\.minecraft\.client\
 # Only in a Screen: the match starts at an `extends ...Screen` and takes the first render(GuiGraphics, ...) after it, so a
 # widget or other Renderable's render() in a file with no Screen class is left alone.
 re:(\bextends\s+[\w$.]*Screen\b(?:(?!public void render\(GuiGraphics\b)[\s\S])*?public void render\(GuiGraphics (\w+),\s*int (\w+),\s*int (\w+),\s*float (\w+)\)\s*\{[ \t]*\n?(?:[ \t]*//[^\n]*\n)*)[ \t]*(?:this\.)?renderBackground\(\2,\s*\3,\s*\4,\s*\5\);[ \t]*\n	\1
+# ---- 1.21.6: the text draws (GuiGraphics.drawString / drawCenteredString / drawWordWrap) SKIP a colour whose alpha byte is
+# 0 -- Font.adjustColor, which made 0x00RRGGBB opaque on 1.21.1, is gone -- so a 6-digit literal colour draws nothing
+# (CATALOG M75). Write it opaque: 0xRRGGBB -> 0xFFRRGGBB, only where the literal is a whole argument of one of those
+# calls (followed by `,` or `)`). A COMPUTED colour (a variable, a mix) is the fork's: wrap it in ARGB.opaque(...).
+re:(\.(?:drawString|drawCenteredString|drawWordWrap)\([^;]*?,\s*)0x([0-9A-Fa-f]{6})(\s*[,)])	\g<1>0xFF\2\3
 #!strict
