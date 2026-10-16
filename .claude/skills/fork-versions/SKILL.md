@@ -86,7 +86,7 @@ every open reason; off the branch it reads the branch's own commit and writes no
      branch does not have (a helper or an overlay-only class: no authors' counterpart, as on the layer), a
      shared-library helper as installed (`shared-helpers.txt`), documents and the records;
    - every file the parent has and this version **deletes** (kind `deleted`), except one the chain's `drops.txt`
-     names or a `mixin_remove.` / `mixin_remove_only.` key accounts for (a mixin class the version drops by its config);
+     names or a `mixin_remove.` key in its `branch.properties` accounts for (a mixin class the version drops by its config);
    - every **resource group** that differs (kind `resources`: its first three directories, with the digest of its
      changed files -- an edit is a new row);
    - `.port/<v>/renames.tsv` as a whole (kind `renames`, with its digest).
@@ -244,10 +244,16 @@ branch, then:
 the next one up, that into the next, ... with a merge commit each, re-makes the mechanical files through each version's
 rows, runs the no-model gates on each merged branch (fork-port.py from the measure stage, no budget; default `ab`), and
 stops at the first conflict (the merge undone, the files named) or red branch, naming the command that cascades on from
-there. A file the port branch's diff changed that is neither in the parent version nor one of the version's own
-hand-changed files is carried too: re-made through the version's rows when the rows alone made it, added when new,
-left out when the version dropped it; a hand-changed one stops the merge like a conflict. Start **one fixer only where
-it stopped**. Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
+there. A file the authors changed (the port branch's diff) that the parent version does not carry reaches the version
+through no merge, so the cascade carries it itself: a `.java` file the rows alone made is re-made through the version's
+rows, a new one the rows keep is added, a resource whose copy is still the authors' takes their new one, and a file
+the version dropped stays dropped (a resource it dropped too, where git would stop on a modify/delete conflict). One
+the version **changed by hand** is not touched: the merge is committed with the version's file as it was, the file
+gets an open entry in `.port/<v>/REMERGE.json` holding the authors' diff, and the cascade stops there and prints that
+diff. Apply it by hand through the version's rows (the diff is in the port branch's names), commit, remove the entry
+(the done check lists it until the file changes), commit, and cascade on (`cascade <v>..<newest>`); a later cascade
+never offers the change again, so the entry is the only record of it. With a real conflict as well, the merge is undone
+and the same diffs are printed to apply after the hand merge. Start **one fixer only where it stopped**. Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
 `REVIEW.md` name a commit before the merge, so it needs a green full Gate C again and a fresh reviewer who re-reads the
 files the merge changed and names the merge commit (the tool carries no verdict forward by itself; its rows are still
 only the files that differ from the parent at the new merge-base, so a file the version took unchanged from its parent
@@ -257,7 +263,11 @@ is no row). Nothing is pushed: push the merged branches (or open their PRs) your
 tools/fork-branches.py sync-shared --repo DIR [--target <v> ...]` rewrites each version's `shared <v>` sections of
 `.port/<v>/shared-renames.tsv` from the library, re-makes the files the old tables alone made, updates each installed
 helper the version has not edited (an edited one is named and left alone), adds a helper the tree now uses and
-commits on each version branch (in its checkout, or `build/fork-branches/<v>`); it pushes nothing. Then cascade.
+commits on each version branch (in its checkout, or `build/fork-branches/<v>`); it pushes nothing. Every targeted
+version from the base up to each branch's own counts, so a version whose library has helpers and no table is synced
+too. Without `--target` it syncs every version (the default, and the safe one): a version left out keeps its old copy
+of the tables, so a cascade from below re-makes the synced files back through them, and a partial run names those
+versions in a WARNING. Then cascade.
 
 ## Procedure
 

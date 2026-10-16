@@ -171,7 +171,9 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    with the version's build keys; the version's own workflow and install manifest are kept. Then the no-model gates run
    on each merged branch (fork-port.py from the measure stage, no budget).
 2. **A stop is for a person.** A conflict in a file a version itself changed aborts that merge (the branch as it was)
-   and names the files; a red branch names its `.port/<v>/RESIDUE.md`. Either way: on that branch (`git checkout
+   and names the files; an authors' change to a file the version changed by hand and its parent does not carry is
+   merged without it, recorded open in `.port/<v>/REMERGE.json` with the authors' diff and printed (apply it through
+   the version's rows, commit, remove the entry, commit); a red branch names its `.port/<v>/RESIDUE.md`. Either way: on that branch (`git checkout
    neoforge-<v>`), merge by hand or run `python3 tools/fork-port.py --repo DIR --target <v> --from-stage measure` with a
    budget (the compile loop), commit, and cascade on from there (`cascade <v>..<newest>`). Never skip a version.
 3. Push each merged version branch as a work branch and open its PR into the version branch (`git push origin
