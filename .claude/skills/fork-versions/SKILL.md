@@ -406,8 +406,14 @@ review again ("Done", item 4).
      after A up to the target -- their `renames.tsv` and `moves.generated.tsv`, then the shared tables the target has
      and A does not --, never A's or older rows; the target's own overlays are copied as they are. `layer-sync.py
      overlays` then reads each inherited path against that renamed overlay, so a renamed copy those rows produce is
-     **redundant** (delete it), the re-merge retires a copy that merges into it, and `layer-test-plan.py` counts a
-     row that fires in an inherited overlay as fired. Every overlay
+     **redundant** (delete it) -- unless a later target that takes the path from the copy has rows written against
+     it, so deleting it would change that target's tree: then it stays `renamed-copy` with `kept_for` naming those
+     targets --, the re-merge retires a copy only on the same condition, and `layer-test-plan.py` counts a row that
+     fires in an inherited overlay as fired. An on-mode prepare stamps its tree (`build/mc<t>/mv/java.inherited_overlay_rows`),
+     so `fork-port.py` re-prepares a tree prepared in the other mode. A `layer.py` older than the key ignores it:
+     `layer-sync.py`, `layer-test-plan.py` and `fork-port.py` then read the layer as off and warn -- run
+     `make-fork-layer.py sync-shared`. An inherited overlay that is not UTF-8 stops an on-mode prepare, naming the
+     file. Every overlay
      is a copy of the authors' file that their next release must be merged into, so keep few:
      `python3 tools/layer-sync.py overlays --repo DIR [--target <t>]` counts each target's whole-file overlays and
      lines, classes each against what it replaces (the authors' file through the rename table alone, or the overlay

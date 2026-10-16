@@ -727,7 +727,8 @@ same_old=yes; for t in 1.21.3 1.21.4 1.21.5; do for m in none false; do
   && diff -r "$MXI/build/none/mc1.21.3" "$MXI/build/on/mc1.21.3" >/dev/null \
   && [ "$(od -c < "$MXI/build/on/mc1.21.4/$U")" = "$want4" ] && [ "$(od -c < "$MXI/build/on/mc1.21.5/$U")" = "$want5" ] \
   && diff -r -x Uses.java "$MXI/build/none/mc1.21.5" "$MXI/build/on/mc1.21.5" >/dev/null \
-  && ok "layer.py inherited_overlay_rows: off (no key, or =false) every prepared tree is byte-identical and the inherited overlay verbatim; on, 1.21.3's overlay is renamed at 1.21.4 by 1.21.4's row and at 1.21.5 by 1.21.4's and 1.21.5's, never by 1.21.3's (CRLF kept), the root target's tree and every other file unchanged" \
+  && [ -z "$(ls "$MXI/build/none" "$MXI/build/false" | grep inherited_overlay_rows)" ] && [ -f "$MXI/build/on/mc1.21.5.inherited_overlay_rows" ] \
+  && ok "layer.py inherited_overlay_rows: off (no key, or =false) every prepared tree is byte-identical and the inherited overlay verbatim; on, 1.21.3's overlay is renamed at 1.21.4 by 1.21.4's row and at 1.21.5 by 1.21.4's and 1.21.5's, never by 1.21.3's (CRLF kept), the root target's tree and every other file unchanged; only an on-mode prepare leaves its stamp beside the tree" \
   || bad "layer.py inherited_overlay_rows: fail=[$ifail] same_old=$same_old 1.21.4 on: $(cat "$MXI/build/on/mc1.21.4/$U" 2>&1 | head -2 | tr '\r\n' '  ')"
 if command -v gradle >/dev/null 2>&1; then
   printf "rootProject.name = 'scratch'\n" > "$MXO/settings.gradle"

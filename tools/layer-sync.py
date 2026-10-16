@@ -47,7 +47,10 @@ target). The keep-current skill only calls this for a fork that has the layer.
           .multiversion/ci.properties `overlay_budget=N`). Changes nothing. With `inherited_overlay_rows=true` in
           .multiversion/base.properties (opt-in; the fork's layer.py then runs an inherited overlay through the rows
           of the targets after its owner) the overlay it inherits is read through those rows, as the target's tree
-          gets it, so a renamed copy they produce is redundant; the re-merge retires a copy that merges into it.
+          gets it, so a renamed copy they produce is redundant -- in either mode only when deleting it changes no
+          target's tree (a later target that takes the path from it may have rows written against it: then it is
+          renamed-copy / mechanical with `kept_for`) --; the re-merge retires a copy on the same condition. A
+          layer.py older than the key ignores it: read as off, with a warning to run make-fork-layer.py sync-shared.
   remerge for each target overlay whose authors' file changed between OLD and NEW (the layer branch before and after
           `merge`: its src/ is the port branch's), a three-way merge with `git merge-file` semantics: base = the
           authors' file at OLD PREPARED for the target (its rename chain and strip_onlyin, no overlay), ours = the
@@ -210,6 +213,28 @@ def git_blob(repo, ref, path):
     return r.stdout.decode("utf-8", "surrogateescape") if r.returncode == 0 else None
 
 
+INHERITED_KEY = "inherited_overlay_rows"
+
+
+def inherited_rows_setting(mv):
+    """(key_on, supported): .multiversion/base.properties says `inherited_overlay_rows=true`, and the fork's
+    .multiversion/tools/layer.py knows the key (an older copy prepares as if it were off). The setting is in effect
+    only when both hold; Preparer, tools/layer-test-plan.py and tools/fork-port.py read it the same way."""
+    mv = pathlib.Path(mv)
+    bp, lp = mv / "base.properties", mv / "tools" / "layer.py"
+    key_on = bp.is_file() and _layer_ci().read_props(bp).get(INHERITED_KEY, "").lower() == "true"
+    supported = lp.is_file() and f"def {INHERITED_KEY}(" in lp.read_text(encoding="utf-8", errors="replace")
+    return key_on, supported
+
+
+def inherited_rows_unsupported(mv):
+    """The warning when base.properties sets the key and the fork's layer.py ignores it, else ""."""
+    key_on, supported = inherited_rows_setting(mv)
+    return (f"WARNING: .multiversion/base.properties sets {INHERITED_KEY}=true, but .multiversion/tools/layer.py "
+            f"predates {INHERITED_KEY} and IGNORES it -- run sync-shared (python3 tools/make-fork-layer.py sync-shared "
+            f"--repo DIR) to bring the template's layer.py in") if key_on and not supported else ""
+
+
 class Preparer:
     """Prepare single authors' files for one target as the fork's own `layer.py prepare` does for the whole tree --
     the same rename table (the target's chain, its generated moves and the shared tables), the fork's own
@@ -231,6 +256,9 @@ class Preparer:
         # than the key keeps it off): an overlay a target inherits reaches its tree through hop_table's rows
         opt = getattr(self.layer, "inherited_overlay_rows", None)
         self.inherited_rows = bool(opt and opt(self.mv))
+        warn = inherited_rows_unsupported(self.mv)
+        if warn:
+            print(f"layer-sync: {warn}", file=sys.stderr)
 
     def rename_table(self, t):
         if t in self.tables:
@@ -287,6 +315,32 @@ class Preparer:
         overlay verbatim (the default), or, with inherited_overlay_rows=true, run through hop_table(t, anc) as
         layer.py prepare does (then strip_onlyin when t sets it, as for any file of t's tree)."""
         return self.prepare(t, files, self.hop_table(t, anc)) if self.inherited_rows and files else dict(files)
+
+    def tree_files(self, u, owner, files):
+        """{rel: owner's overlay text} -> {rel: what u's tree holds for that path when `owner` (u itself, or an older
+        target of u's chain) is its nearest owner: u's own overlay as it is (strip_onlyin too, with inherited_overlay_rows),
+        or Preparer.inherited()."""
+        if owner != u:
+            return self.inherited(u, owner, files)
+        onlyin = getattr(self.layer, "ONLYIN", None)
+        if self.inherited_rows and onlyin is not None and self.props(u).get("strip_onlyin") == "true":
+            return {k: onlyin.sub("", v) for k, v in files.items()}       # layer.py's strip_onlyin, on the text
+        return dict(files)
+
+    def targets(self):
+        """Every layer target (a targets/<t>/target.properties), sorted by name."""
+        td = self.mv / "targets"
+        return sorted(d.name for d in td.iterdir() if (d / "target.properties").is_file()) if td.is_dir() else []
+
+    def reach(self, t, s, rel, owns):
+        """The targets whose tree takes path (s, rel) from target t's overlay: t, and every target that has t in its
+        chain with no nearer owner of the path (owns(x) -> True when target x has an overlay of it)."""
+        out = []
+        for u in self.targets():
+            ch = self.chain(u)
+            if t in ch and not any(owns(x) for x in ch[:ch.index(t)]):
+                out.append(u)
+        return out
 
     def prepare(self, t, files, table=None):
         """{rel: authors' text} -> {rel: that text prepared for t (renames + chain, no overlay)}; with `table`, those
@@ -367,6 +421,10 @@ def overlay_budget(mv):
     return int(raw) if raw.strip().isdigit() else DEFAULT_OVERLAY_BUDGET
 
 
+def _mc_key(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.findall(r"\d+|[A-Za-z]+", v))
+
+
 def overlay_report(repo, t, prep=None):
     """Target t's own whole-file overlays, each against what it replaces (the authors' file prepared for t by the
     rename table alone, or the overlay t inherits for the same path):
@@ -375,7 +433,11 @@ def overlay_report(repo, t, prep=None):
                   would do it
       renamed-copy  differs from the overlay it inherits only by names: a copy kept because overlays are not run
                   through the table (rows cannot reach it)
-      redundant   identical to it: delete the overlay
+      redundant   identical to it, and deleting it changes no target's tree: every later target that takes the path
+                  from this overlay (no nearer copy of its own) gets the same file from what it replaces -- rows of a
+                  later target can be written against this copy (they are then not applied to the older file the same
+                  way: the token sweep does not re-scan its own output), so a copy identical at its own target is
+                  `renamed-copy` (or, against the authors' file, `mechanical`) with `kept_for` naming those targets
     With .multiversion/base.properties `inherited_overlay_rows=true` what an inherited path is read against is the
     older overlay run through the rows after it (Preparer.inherited), as the target's tree would get it: a renamed copy
     those rows produce is then redundant.
@@ -399,7 +461,9 @@ def overlay_report(repo, t, prep=None):
     for (s, rel), a in inherited.items():
         anc_text.setdefault(a, {})[f"{s}/{rel}"] = _read(mv.parent / overlay_path(a, s, rel))
     via = {(a, k): v for a, fs in anc_text.items() for k, v in prep.inherited(t, a, fs).items()}
-    files = []
+    mine = {f"{s}/{rel}": _read(f) for (s, rel), f in own.items()}
+    at_t = prep.tree_files(t, t, mine) if prep.inherited_rows else mine     # t's own copies as t's tree holds them
+    files, kept_for = [], {}
     for (s, rel), f in sorted(own.items()):
         ours = _read(f)
         if (s, rel) not in whole:
@@ -408,12 +472,35 @@ def overlay_report(repo, t, prep=None):
             ref, against = via[(inherited[(s, rel)], f"{s}/{rel}")], f"overlay of {inherited[(s, rel)]}"
         else:
             ref, against = prepared.get(f"{s}/{rel}"), "authors' file"
-        kind = ("overlay-only" if ref is None else "redundant" if _lf(ref) == _lf(ours)
+        kind = ("overlay-only" if ref is None else "redundant" if _lf(ref) == _lf(at_t[f"{s}/{rel}"])
                 else ("renamed-copy" if (s, rel) in inherited else "mechanical") if rename_only(ref, ours) else "real")
         files.append({"file": overlay_path(t, s, rel), "lines": len(_lf(ours).splitlines()), "kind": kind,
                       "against": against if ref is not None else "",
                       "mixin": "@Mixin(" in ours or "/mixin/" in rel.lower(),
                       "client": "/client/" in rel.lower() or "Dist.CLIENT" in ours})
+    # redundant only when deleting it changes no later target's tree either (the targets that take the path from t)
+    cand = {(s, rel) for (s, rel) in own if overlay_path(t, s, rel) in {x["file"] for x in files if x["kind"] == "redundant"}}
+    later = {}                                          # (u, owner below t or None) -> {key: (copy, what replaces it)}
+    for (s, rel) in sorted(cand):
+        owns = lambda x, s=s, rel=rel: (mv.parent / overlay_path(x, s, rel)).is_file()
+        for u in prep.reach(t, s, rel, owns):
+            if u != t:
+                later.setdefault((u, inherited.get((s, rel))), set()).add((s, rel))
+    for (u, below), keys in sorted(later.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")):
+        ks = {f"{s}/{rel}": (s, rel) for s, rel in keys}
+        with_ = prep.tree_files(u, t, {k: mine[k] for k in ks})
+        if below:
+            without = prep.inherited(u, below, {k: _read(mv.parent / overlay_path(below, *ks[k])) for k in ks})
+        else:
+            without = prep.prepare(u, {k: _read(repo / src_path(*ks[k])) for k in ks})
+        for k, sk in ks.items():
+            if _lf(with_[k]) != _lf(without[k]):
+                kept_for.setdefault(sk, []).append(u)
+    for x in files:
+        sk = next(k for k in own if overlay_path(t, *k) == x["file"])
+        if sk in kept_for:
+            x["kind"] = "renamed-copy" if sk in inherited else "mechanical"
+            x["kept_for"] = sorted(kept_for[sk], key=_mc_key)
     counted = [x for x in files if x["kind"] != "overlay-only"]
     budget = overlay_budget(mv)
     n = lambda k: sum(1 for x in files if x["kind"] == k)
@@ -500,7 +587,8 @@ def remerge(repo, old, new, targets=None, write=True, prep=None):
     outside `targets`), the authors' files prepared for this target, as for an overlay of its own). OLD/NEW: the layer
     branch before and after `merge` (its src/ is the port branch's at the last and at the new merge). Per target ->
       rewritten   merged cleanly: the overlay now holds the authors' change (a touch-up)
-      retired     merged into exactly what it replaces: the overlay is deleted
+      retired     merged into exactly what it replaces, and deleting it changes no later target's tree either (one that
+                  takes the path from this overlay): the overlay is deleted
       conflicts   did not merge (or merged into a duplicate member): the overlay is LEFT AS IT WAS (no conflict marker
                   ever reaches the tree), its hunks go to the target's RESIDUE.md and an entry to its REMERGE.json --
                   rework. Also an overlay the target INHERITS as it is (no copy of its own) when the older target's
@@ -521,6 +609,30 @@ def remerge(repo, old, new, targets=None, write=True, prep=None):
     commit = lambda ref: git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0
     orig, now, out = {}, {}, {}
     took = {}                # (t, set, rel) -> True (the overlay carries the change) or why it does not
+    owned = {(x, *k) for x in ts for k in own_overlays(mv, x)}       # every overlay of the layer, before this run
+    gone = set()                                                       # (x, set, rel) retired in this run
+
+    def retire_to(t, s, rel, text):
+        """What t's tree gets for (s, rel) once t's overlay is deleted -- the nearest older overlay still there (one
+        retired in this run is not), through the rows after it, else the authors' file at NEW prepared for t -- when
+        deleting it (holding `text`) changes no tree: t's, and every later target's that takes the path from t's
+        overlay (rows of a later target can be written against t's copy). None when it would change one."""
+        key = f"{s}/{rel}"
+        has = lambda x: (x, s, rel) in owned and (x, s, rel) not in gone
+        authors = git_blob(repo, new, src_path(s, rel))
+        got = None
+        for u in [t] + [x for x in prep.reach(t, s, rel, has) if x != t]:
+            below = next((a for a in prep.chain(u)[prep.chain(u).index(t) + 1:] if has(a)), None)
+            if below:
+                without = prep.inherited(u, below, {key: now[(below, s, rel)]})[key]
+            elif authors is None:
+                return None
+            else:
+                without = prep.prepare(u, {key: authors})[key]
+            if _lf(prep.tree_files(u, t, {key: text})[key]) != _lf(without):
+                return None
+            got = without if got is None else got
+        return got
     for t in ts:
         own = own_overlays(mv, t)
         for k, f in own.items():
@@ -591,6 +703,8 @@ def remerge(repo, old, new, targets=None, write=True, prep=None):
                 if not live:
                     return
                 rec[kind].append(path); now[(t, s, rel)] = text
+                if kind == "retired":
+                    gone.add((t, s, rel))
                 if write and kind == "retired":
                     (repo / path).unlink()
                 elif write:
@@ -604,10 +718,11 @@ def remerge(repo, old, new, targets=None, write=True, prep=None):
                 conflict("the authors deleted the file this overlay replaces")
                 continue
             if base is None and _lf(ours) == _lf(theirs):
-                if anc:
+                gets = None if anc else retire_to(t, s, rel, ours)
+                if gets is None:
                     took[(t, s, rel)] = True           # already the authors' file; the tree keeps this copy
                 else:
-                    change("retired", theirs)
+                    change("retired", gets)
                 continue
             if base is None:
                 conflict("the authors added a file at this overlay's path (it replaced nothing before)")
@@ -621,11 +736,12 @@ def remerge(repo, old, new, targets=None, write=True, prep=None):
                 conflict("merged cleanly into a duplicate declaration (the overlay already had it and the authors added "
                          "it again): " + "; ".join(dups))
                 continue
-            # retired: the target's tree gets the same file without this overlay -- the prepared authors' file, or the
-            # inherited overlay VERBATIM (an inherited overlay is not renamed by this target's rows), or, with
-            # inherited_overlay_rows=true, the inherited overlay through the rows after it (Preparer.inherited)
-            gets = prep.inherited(t, anc, {key: now[(anc, s, rel)]})[key] if anc else theirs
-            if _lf(merged) == _lf(gets):
+            # retired: the target's tree -- and every later target's that takes the path from this overlay -- gets the
+            # same file without it: the prepared authors' file, or the nearest older overlay still there VERBATIM (an
+            # inherited overlay is not renamed by this target's rows), or, with inherited_overlay_rows=true, through the
+            # rows after it (Preparer.inherited); retire_to() says
+            gets = retire_to(t, s, rel, merged)
+            if gets is not None:
                 change("retired", gets)
             elif _lf(merged) == _lf(ours):
                 took[(t, s, rel)] = True               # already carries it (a re-run)

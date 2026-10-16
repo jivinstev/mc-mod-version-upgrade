@@ -100,10 +100,18 @@ def shared_chain(mv, target):
     return sorted(set(names) | set(extra), key=mc_key, reverse=True) if extra else names
 
 
-def inherited_overlay_rows(mv):
-    """.multiversion/base.properties `inherited_overlay_rows=true` (opt-in; layer.py's inherited_overlay_rows())."""
-    p = pathlib.Path(mv) / "base.properties"
-    return p.is_file() and read_props(p).get("inherited_overlay_rows", "").lower() == "true"
+def inherited_overlay_rows(mv, warn=False):
+    """.multiversion/base.properties `inherited_overlay_rows=true` (opt-in) AND the fork's .multiversion/tools/layer.py
+    knows the key -- an older copy prepares as if it were off, so the plan reads it as off too (tools/layer-sync.py
+    inherited_rows_setting(), the same test). warn: say so on stderr when the key is set and layer.py ignores it."""
+    p, lp = pathlib.Path(mv) / "base.properties", pathlib.Path(mv) / "tools" / "layer.py"
+    key_on = p.is_file() and read_props(p).get("inherited_overlay_rows", "").lower() == "true"
+    supported = lp.is_file() and "def inherited_overlay_rows(" in lp.read_text(encoding="utf-8", errors="replace")
+    if warn and key_on and not supported:
+        print("layer-test-plan: WARNING: .multiversion/base.properties sets inherited_overlay_rows=true, but "
+              ".multiversion/tools/layer.py predates inherited_overlay_rows and IGNORES it -- run sync-shared "
+              "(python3 tools/make-fork-layer.py sync-shared --repo DIR)", file=sys.stderr)
+    return key_on and supported
 
 
 def runs(targets, order):
@@ -256,6 +264,7 @@ def plan_fork(repo, catalog=CATALOG):
     sets = source_sets(repo)
     notes = catalogue_notes(catalog)
     ps = _prepare()
+    inherited_rows = inherited_overlay_rows(mv, warn=True)
     groups = {}            # key -> item
 
     def add(kind, key, t, item, source):
@@ -352,7 +361,7 @@ def plan_fork(repo, catalog=CATALOG):
         # base.properties inherited_overlay_rows=true: layer.py runs an overlay t inherits from an older target through
         # the rows of the targets after it (and the shared libraries t has and it does not), so those rows fire there too
         inherited = {}
-        if inherited_overlay_rows(mv):
+        if inherited_rows:
             for sset, seen in origins.items():
                 for rel, origin in seen.items():
                     if origin != t:
@@ -591,13 +600,28 @@ def self_check():
         w(mvd / "targets/1.21.3/renames.tsv", "# known limit: no gate sees it\nre:\\bownOnly\\(\townCall(\n")
         rows_of = lambda pl: sorted((g["row"].split("\t")[0], g["range"]) for g in pl["layer"]["items"]
                                     if g["kind"] == "catalogue" and ("OverlayOnly" in g["row"] or "ownOnly" in g["row"]))
+        tpl_layer = (ROOT / "templates/fork-layer/tools/layer.py").read_text(encoding="utf-8")
+        w(mvd / "tools/layer.py", tpl_layer)
         off_rows = rows_of(plan_fork(lf, cat))
         w(mvd / "base.properties", "minecraft_version=1.21.1\ninherited_overlay_rows=true\n")
         on_rows = rows_of(plan_fork(lf, cat))
-        w(mvd / "base.properties", "minecraft_version=1.21.1\n")
         expect(off_rows == [] and on_rows == [("re:\\binOverlayOnly\\(", "1.21.4-1.21.5")],
                f"inherited_overlay_rows: a later target's row fires in the overlay it inherits (on only; never the owner's "
                f"own row; 1.21.8 overlays the path itself): off {off_rows} on {on_rows}")
+        # a layer.py that predates the key prepares as if it were off: so does the plan, and it says why on stderr
+        import contextlib, io
+        w(mvd / "tools/layer.py", tpl_layer.replace("def inherited_overlay_rows(", "def _predates_it("))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            old_rows = rows_of(plan_fork(lf, cat))
+        expect(old_rows == [] and "predates inherited_overlay_rows and IGNORES it -- run sync-shared" in err.getvalue(),
+               f"key set, layer.py too old: off, with the warning: {old_rows} {err.getvalue()!r}")
+        err = io.StringIO()
+        w(mvd / "base.properties", "minecraft_version=1.21.1\n")
+        with contextlib.redirect_stderr(err):
+            plan_fork(lf, cat)
+        expect(err.getvalue() == "", f"no key: no warning, whatever layer.py is: {err.getvalue()!r}")
+        (mvd / "tools/layer.py").unlink()
         txt = render([p, plan_fork(sv, cat)])
         expect("## Minecraft 1.21.5: " in txt and "preview (built and gated, not published): 1.21.5" in txt
                and txt.rstrip().endswith("single-version fork (Minecraft 1.21.1)") and "## Minecraft 1.21.1" not in txt,

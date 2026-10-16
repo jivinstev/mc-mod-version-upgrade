@@ -6,7 +6,8 @@
         Merge T's chain (T, its `inherits`, theirs ...) into one rename table, one overlay tree and one
         drop list -- the nearer target wins -- and run prepare-sources.py over the authors' tree. Overlays are
         copied as they are; with `inherited_overlay_rows=true` in .multiversion/base.properties (opt-in) an overlay
-        T inherits from an older target A is first run through the rows of the targets after A up to T.
+        T inherits from an older target A is first run through the rows of the targets after A up to T; such a
+        tree is stamped (<out>.inherited_overlay_rows beside it), and an off-mode prepare removes the stamp.
   layer.py mixins    --target T [--config FILE]
         Print T's mixin changes per config file (mixin_add over the chain, then T's own mixin_add_only and
         mixin_remove_only; layer.gradle applies the same set at processResources), or, with --config, the
@@ -283,8 +284,15 @@ def rename_inherited_overlays(target, names, sub, overlay, tmp, rows):
         pattern, tab = ps.build_pattern(token_rules)
         for rel in by_owner[t]:
             f = overlay / rel
-            with open(f, encoding="utf-8", newline="") as fh:
-                text = fh.read()
+            try:
+                with open(f, encoding="utf-8", newline="") as fh:
+                    text = fh.read()
+            except UnicodeDecodeError as e:
+                # prepare-sources.py reads every authors' file as UTF-8 and stops on one that is not; rows cannot be
+                # run over this overlay either, so stop the same way -- naming it -- rather than build it un-renamed
+                sys.exit(f"layer: {target}: the overlay {(MV / 'targets' / t / sub / rel).relative_to(MV.parent).as_posix()} "
+                         f"(inherited from {t}) is not UTF-8 ({e.reason} at byte {e.start}), so {INHERITED_ROWS}=true cannot "
+                         f"run the rows after {t} over it: save it as UTF-8 (every source the layer renames is read as UTF-8)")
             new = apply_rows(text, (regex_rules, pattern, tab), hits)
             if new != text:
                 with open(f, "w", encoding="utf-8", newline="") as fh:
@@ -346,6 +354,11 @@ def cmd_prepare(a):
         # records its hits next to its output; main (prepared last) merges every set's and reports once.
         out = pathlib.Path(a.out)
         hits_dir = out.parent
+        # the mode the tree is prepared in, beside it (tools/fork-port.py's staleness check reads it): written only
+        # when on, so a default layer's build directory is as before; a stamp left by an earlier on-mode run goes
+        stamp = out.parent / f"{out.name}.{INHERITED_ROWS}"
+        if stamp.is_file():
+            stamp.unlink()
         if a.set != "main":
             args += ["--hits-out", str(hits_dir / f"hits-{a.set}.txt")]
         else:
@@ -365,6 +378,8 @@ def cmd_prepare(a):
             add_shared_helpers(snames, out)
         if rc == 0 and load_props(MV / "targets" / a.target / "target.properties").get("strip_onlyin") == "true":
             strip_onlyin(out)
+        if rc == 0 and inherited_hits is not None:
+            stamp.write_text(f"{INHERITED_ROWS}=true\n", encoding="utf-8")
         return rc
 
 
@@ -598,6 +613,26 @@ def check_inherited_rows(expect):
                     trees[(mode, t)] = (tree, "".join(out_log))
             expect(rows_after("1.21.5", "1.21.3", mv) == (["1.21.5", "1.21.4"], ["1.21.5", "1.21.4"]),
                    f"rows after A, nearest first: {rows_after('1.21.5', '1.21.3', mv)}")
+            stamps = {m: sorted(x.name for x in d.glob(f"out-{m}-*.{INHERITED_ROWS}")) for m in ("none", "false", "on")}
+            expect(stamps["none"] == stamps["false"] == [] and len(stamps["on"]) == 3
+                   and (d / f"out-on-1.21.5.{INHERITED_ROWS}").read_text(encoding="utf-8") == f"{INHERITED_ROWS}=true\n",
+                   f"an on-mode prepare stamps its tree, an off one writes nothing beside it: {stamps}")
+            (mv / "base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+            cmd_prepare(argparse.Namespace(target="1.21.5", src=str(src), out=str(d / "out-on-1.21.5"), set="main"))
+            expect(not (d / f"out-on-1.21.5.{INHERITED_ROWS}").exists(), "re-prepared off: the stamp goes")
+            # a non-UTF-8 inherited overlay (prepare-sources stops on a non-UTF-8 authors' file; this stops the same way)
+            (src / "m/L.java").write_text("class L {}\n", encoding="utf-8")       # it replaces an authors' file
+            (mv / "targets/1.21.3/java/m/L.java").write_bytes(b"class L { String s = \"\xe9\"; }\n")
+            for mode, body in (("off", "minecraft_version=1.21.1\n"), ("on", "minecraft_version=1.21.1\ninherited_overlay_rows=true\n")):
+                (mv / "base.properties").write_text(body, encoding="utf-8")
+                o = d / f"out-l-{mode}"
+                try:
+                    rc, msg = cmd_prepare(argparse.Namespace(target="1.21.4", src=str(src), out=str(o), set="main")), b""
+                    msg = (o / "m/L.java").read_bytes() if rc == 0 else b""
+                except SystemExit as e:
+                    rc, msg = 1, str(e)
+                trees[("non-utf8", mode)] = (rc, msg)
+            (mv / "targets/1.21.3/java/m/L.java").unlink(); (src / "m/L.java").unlink()
         finally:
             MV, subprocess.call = saved, real_call
     off = {t: trees[("none", t)][0] for t in ("1.21.3", "1.21.4", "1.21.5")}
@@ -614,6 +649,10 @@ def check_inherited_rows(expect):
     expect(on["1.21.5"]["m/Own.java"] == off["1.21.5"]["m/Own.java"] == own_c, "C's own overlay is copied as it is")
     for t in off:
         expect(on[t]["m/P.java"] == off[t]["m/P.java"], f"the authors' files are prepared the same either way ({t})")
+    expect(trees[("non-utf8", "off")][0] == 0 and trees[("non-utf8", "off")][1] == b"class L { String s = \"\xe9\"; }\n"
+           and trees[("non-utf8", "on")][0] != 0 and "targets/1.21.3/java/m/L.java" in trees[("non-utf8", "on")][1]
+           and "is not UTF-8" in trees[("non-utf8", "on")][1],
+           f"a non-UTF-8 inherited overlay: copied byte-for-byte off; on, the prepare stops naming it: {trees[('non-utf8', 'off')]} {trees[('non-utf8', 'on')]}")
     expect("DEAD RULE (matched nothing in any source root): oldOnlyInOverlay" in trees[("none", "1.21.5")][1]
            and "DEAD RULE" not in trees[("on", "1.21.5")][1],
            "a row that fires only in an inherited overlay is dead off and live on: " + trees[("on", "1.21.5")][1][-300:])
