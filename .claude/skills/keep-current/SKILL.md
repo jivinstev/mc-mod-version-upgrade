@@ -162,6 +162,22 @@ version; the layer branch must carry it to every target, and nothing fixes a mid
    **untouched** (0 errors, clean audits right after the merge), **touch-up** (the loop cleared it) or **rework**
    (residue left: `.multiversion/targets/<t>/RESIDUE.md`). It also lists the upstream-changed files each target
    OVERLAYS: an overlay replaces the whole file, so read it against upstream's new version even when it compiles.
+   **Before measuring, `run` re-merges those overlays** when HEAD is the merge (or `--changed-from` is given): per
+   overlay, a three-way `git merge-file` with base = the authors' file before the merge, ours = the overlay,
+   theirs = the authors' file now, both PREPARED for that target (its rename chain, no overlay); an overlay of a
+   path an older target also overlays follows that target's re-merged copy (or, when that older overlay conflicted
+   or its target is not in `--targets`, merges against the authors' files itself: it is never skipped). A clean
+   merge rewrites the overlay (the target is at least a touch-up), one that merges into exactly what it replaces is
+   deleted, and a conflict -- or a clean merge that declares a member twice -- leaves the overlay as it was (no
+   conflict marker reaches the tree), writes its hunks to the target's RESIDUE.md and an entry (overlay, digest,
+   reason, since) to `.multiversion/targets/<t>/REMERGE.json`, and makes the target rework; fork-port.py does not
+   call the target done while an entry's overlay is unedited. A target that inherits such an overlay as it is (no
+   copy of its own) gets an entry too: "inherits an overlay that did not take the authors' change".
+   `layer-sync.py remerge --repo DIR --old REF [--new REF] [--targets T] --dry-run` shows the same without writing;
+   after you merge an overlay by hand, `remerge` leaves it alone and drops its entry (and every inheriting
+   target's); an entry left unedited is merged again on the next run against the authors' file it was recorded
+   against, and goes when that merges. REMERGE.json is deleted when empty. The table's notes also give each
+   target's overlay budget (see `layer-sync.py overlays` in fork-versions).
 3. **A rework target stops the run (exit 10) for a person.** It is never skipped, never released as is, and never
    reported as done; fix what its RESIDUE.md lists in the shared library, then `layer-sync.py run --targets <t>`.
 4. Put `t.md` (target | errors before | errors after | class | residue) in the layer PR body and link it from the port
@@ -177,6 +193,11 @@ version; the layer branch must carry it to every target, and nothing fixes a mid
    same for the new build, then read both runs' mod logs (`<work>/server/logs/`). The line there in another form: the
    subsystem ran -- widen the pattern to accept both forms, still anchored to the effect (the same class, a count),
    prove it on both jars, and say so in the commit. The line absent: a regression -- a fix-ledger mode, as in step 3.
+8. **Move the buildout's freeze** once the layer PR is merged: on the updated layer branch, `python3
+   tools/make-fork-layer.py freeze --repo DIR` (and `--library owner/repo@TAG` for a re-pinned library release), and
+   commit `.multiversion/base.properties`. Only a layer that has a freeze (`upstream_commit=` there) needs it. `fork-port.py` compares every run to the end with
+   the authors' branch and stops with exit 19 while that branch holds commits after the freeze that the layer branch lacks; that exit, from a
+   fork-versions buildout, means "run this skill for the fork (and its libraries) first".
 
 ## Setup: run it nightly on the user's subscription
 

@@ -509,6 +509,16 @@ renderer `adjustModelBonesForRender(RenderPassInfo, BoneSnapshots)`); `preRender
 controller `State` (`GeoControllers.isStopped`: `getPlayState() == STOP || hasAnimationFinished()`, read BEFORE any `reset()`), `forceAnimationReset()` → `reset()` (which sets STOP); `buildRenderTask` →
 `GeoPasses.submitModel`; `GeoBone.isHidden()` → `frameSnapshot.isHidden()`. · **Anticipates:** §V18d.
 
+L38. **1.21.4 behaviour a compile-clean, gate-green fork port still changed (CATALOG M66-M72), found by review** · boolean
+`Entity.hurt` → `hurtServer`'s result (shared rows + `Hurt.server`, never a health comparison); a
+`getDefaultAttributeModifiers(ItemStack)` override is dead once the item has an `ATTRIBUTE_MODIFIERS` component
+(`AttributeOverrides`); spawn-egg colours and model `overrides` live in `items/*.json` (`fork-port.py` setup writes both);
+`SmithingTemplateItem` dropped its upgrade description (shifted args compile); client recipe lookups need
+`OnDatapackSyncEvent.sendRecipes`; a GeckoLib renderer bypasses `getOverlayCoords` mixins; and a root target's rows and
+overlays reach every later target (cut overlays only after preparing each later target before and after). · **Anticipates:**
+§V (26.x has `Player.sendSystemMessage` again and no `displayClientMessage`).
+L39. **1.21.2-1.21.4 render state a compile loop gets wrong, and a 1.21.5 row's false positive (CATALOG M73, M74)** · `RenderType.entityTranslucentCull` → `NeoForgeRenderTypes.getItemLayeredTranslucent` (keeps back-face culling; `entityTranslucent` does not); the 1.21.5 NBT `getBoolean`/`getInt` rows leave `GameRules` reads alone. · **Anticipates:** nothing on 26.x checked.
+
 **Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
 §X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,
 no 26.2 entry) the minor hops 1.21.6-1.21.8 carry roughly a dozen of the changes 26.2 then lists as "era jump" changes:

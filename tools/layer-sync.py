@@ -7,6 +7,8 @@ say, per target, what it did.
     python3 tools/layer-sync.py merge  --repo DIR --port-ref REF [--layer-branch neoforge-1.21.x]
     python3 tools/layer-sync.py run    --repo DIR [--targets 1.21.5,1.21.8] [--budget 15] [--changed-from REF]
                                        [--json out.json] [--md out.md]
+    python3 tools/layer-sync.py overlays --repo DIR [--targets 1.21.4] [--json out.json]
+    python3 tools/layer-sync.py remerge --repo DIR --old REF [--new HEAD] [--targets 1.21.4] [--dry-run] [--json out.json]
     python3 tools/layer-sync.py ledger --ledger ledger.json --json out.json --column keep-current/2026-10-12
     python3 tools/layer-sync.py --self-check
 
@@ -32,6 +34,34 @@ target). The keep-current skill only calls this for a fork that has the layer.
           file, so a clean compile does not say the overlay still does what upstream's new version does).
           Writes a JSON record and the markdown table (target | errors before | errors after | class | residue) that
           goes in the PR body.
+          When the authors' code moved (HEAD is the merge, or --changed-from), `run` first RE-MERGES the overlays
+          (`remerge` below, OLD = the merge's first parent, NEW = HEAD) so the compile sees them: a target with an
+          overlay that did not merge is rework (its hunks in RESIDUE.md), one whose overlays merged is at least a
+          touch-up. The table's notes add the re-merge and each target's overlay budget (`overlays` below); a target
+          with no overlay gets no such note, so the output is as before.
+  overlays  the overlay budget, per target: "whole-file overlays (N) + overlay-only files (M)" (the one wording, also
+          tools/fork-port.py's) and the whole-file ones' lines, each against what it replaces (the
+          authors' file through the rename table alone, or the overlay it inherits for the same path) -- real,
+          mechanical (names only: rename rows would do), redundant (identical), overlay-only (replaces nothing, not
+          counted) --, how many are mixins / client code, and a WARNING above the budget (default 30;
+          .multiversion/ci.properties `overlay_budget=N`). Changes nothing.
+  remerge for each target overlay whose authors' file changed between OLD and NEW (the layer branch before and after
+          `merge`: its src/ is the port branch's), a three-way merge with `git merge-file` semantics: base = the
+          authors' file at OLD PREPARED for the target (its rename chain and strip_onlyin, no overlay), ours = the
+          overlay, theirs = the authors' file at NEW prepared the same way (an overlay of a path an older target in
+          its chain also overlays: that overlay before / after its own re-merge, renamed by the target's own rows; when
+          that older overlay did not change in this run -- it conflicted, or its target is not in --targets -- the
+          authors' files prepared for this target, as for an overlay of its own, so the copy is never skipped). A
+          clean merge rewrites the overlay; one that becomes what it replaces is deleted (retired); a conflict, or a
+          clean merge that declares a member twice (the loop's stand-in plus the authors' own), leaves the overlay AS
+          IT WAS, writes its hunks to the target's RESIDUE.md and an entry to .multiversion/targets/<t>/REMERGE.json
+          ({"conflicts": [{"overlay", "digest" (sha256 of its bytes), "reason", "since": "<old>..<new>"}]}, deleted
+          when empty; fork-port.py does not call the target done while an entry's overlay is unedited) (exit 10). A
+          target that inherits an older target's overlay AS IT IS (no copy of its own) gets an entry naming that
+          overlay when it did not take the change ("inherits an overlay that did not take the authors' change"). An
+          overlay edited since it was recorded is a person's resolution: left alone and its entry dropped; an
+          unedited one is merged again against the authors' file at its `since`, and its entry goes when that merges.
+          --dry-run writes nothing.
   ledger  writes the table into a fix ledger's JSON ("layer"), so `fix-ledger.py render --into` puts it in the issue.
 
 Gates are not run here: the layer's CI runs the full gates on the bookends and compile + audits on every middle
@@ -110,6 +140,13 @@ def table(rows):
     notes = [f"- `{r['target']}` overlays {len(r['shadowed'])} file(s) upstream changed: {', '.join(r['shadowed'][:6])}"
              f"{' ...' if len(r['shadowed']) > 6 else ''} -- read each overlay against upstream's new version"
              for r in rows if r.get("shadowed")]
+    for r in rows:
+        rm = r.get("remerge")
+        if rm and (rm["rewritten"] or rm["retired"] or rm["conflicts"]):
+            notes.append(f"- `{r['target']}` overlays re-merged with the authors' change: {len(rm['rewritten'])} rewritten, "
+                         f"{len(rm['retired'])} retired (now identical to the prepared authors' file), "
+                         f"{len(rm['conflicts'])} did not merge" + (" (hunks in its RESIDUE.md)" if rm["conflicts"] else ""))
+    notes += [f"- `{r['target']}` overlay budget: {overlay_note(r['overlays'])}" for r in rows if overlay_note(r.get("overlays"))]
     notes += [f"- `{r['target']}`: {r['note']}" for r in rows if r.get("note")]
     return "\n".join(md + ([""] + notes if notes else []))
 
@@ -125,6 +162,577 @@ def stopped_block(rows):
               "converter -- not in one fork -- and resume with: python3 tools/layer-sync.py run --repo DIR --targets "
               + ",".join(r["target"] for r in bad)]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- overlays: the budget (R6a) and the re-merge (R6b)
+
+DEFAULT_OVERLAY_BUDGET = 30          # whole-file overlays per target; .multiversion/ci.properties `overlay_budget=N`
+TEMPLATE_TOOLS = HERE.parent / "templates" / "fork-layer" / "tools"
+RESIDUE_SECTION = "## Overlays the authors' change did not merge into (layer-sync)"
+JAVA_WORDS = set("""abstract assert boolean break byte case catch char class const continue default do double else enum
+extends final finally float for goto if implements import instanceof int interface long native new package private
+protected public return short static strictfp super switch synchronized this throw throws transient try void volatile
+while var record yield sealed permits true false null""".split())
+TOKEN = re.compile(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*|\S")
+MODS = r"(?:public|protected|private|static|final|abstract|synchronized|native|default|transient|volatile)"
+MEMBER = re.compile(rf"^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:{MODS}\s+)+(?:<[^>]*>\s+)?([\w$.<>\[\],?\s]+?)\s+([\w$]+)\s*"
+                    r"(\(([^)]*)\))?\s*(?:throws\s+[\w$.,\s]+)?(\{|;|=)")
+
+
+def _module(path, name):
+    sys.dont_write_bytecode = True        # never leave a __pycache__ in the fork's .multiversion/tools
+    spec = importlib.util.spec_from_file_location(name, path)
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+def _read(p):
+    with open(p, encoding="utf-8", errors="surrogateescape", newline="") as fh:
+        return fh.read()
+
+
+def _write(p, text):
+    p = pathlib.Path(p); p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+        fh.write(text)
+
+
+def _lf(text):
+    return None if text is None else text.replace("\r\n", "\n")
+
+
+def git_blob(repo, ref, path):
+    """The file at REF (bytes kept, CRLF and all), or None when REF has no such file."""
+    r = subprocess.run(["git", "-C", str(repo), "show", f"{ref}:{path}"], capture_output=True)
+    return r.stdout.decode("utf-8", "surrogateescape") if r.returncode == 0 else None
+
+
+class Preparer:
+    """Prepare single authors' files for one target as the fork's own `layer.py prepare` does for the whole tree --
+    the same rename table (the target's chain, its generated moves and the shared tables), the fork's own
+    prepare-sources.py, and strip_onlyin when the target sets it -- but with no overlay: the PREPARED authors' file an
+    overlay replaces. The table is the one the fork's layer.py hands prepare-sources.py: its cmd_prepare runs with that
+    one call caught, so whatever version of layer.py the fork carries, the table is its own."""
+
+    def __init__(self, repo):
+        self.repo = pathlib.Path(repo)
+        self.mv = self.repo / ".multiversion"
+        own = self.mv / "tools" / "layer.py"
+        if not own.is_file():
+            raise RuntimeError(f"{own} is missing: the layer cannot prepare a target")
+        self.layer = _module(own, "layer_fork_for_sync")
+        ps = self.mv / "tools" / "prepare-sources.py"
+        self.ps = ps if ps.is_file() else TEMPLATE_TOOLS / "prepare-sources.py"
+        self.tables = {}
+
+    def rename_table(self, t):
+        if t in self.tables:
+            return self.tables[t]
+        import contextlib, io, types
+        got = {}
+
+        def call(args, *_a, **_k):
+            if "--renames" in args:
+                got["table"] = pathlib.Path(args[args.index("--renames") + 1]).read_text(encoding="utf-8")
+            return 1                                      # stop cmd_prepare there: no tree is written
+        real, cwd = self.layer.subprocess, os.getcwd()
+        self.layer.subprocess = types.SimpleNamespace(call=call)
+        try:
+            os.chdir(self.repo)
+            with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
+                self.layer.cmd_prepare(argparse.Namespace(target=t, src="src/main/java", out=str(pathlib.Path(d) / "out"),
+                                                          set="main"))
+        except SystemExit as e:
+            raise RuntimeError(f"layer.py prepare --target {t}: {e}")
+        finally:
+            self.layer.subprocess = real
+            os.chdir(cwd)
+        if "table" not in got:
+            raise RuntimeError(f"layer.py prepare --target {t} never ran prepare-sources.py with a rename table")
+        self.tables[t] = got["table"]
+        return got["table"]
+
+    def chain(self, t):
+        return self.layer.chain(t, self.mv)
+
+    def props(self, t):
+        return _layer_ci().read_props(self.mv / "targets" / t / "target.properties")
+
+    def hop_table(self, t, anc):
+        """The rows t's table has and anc's (an older target in t's chain) does not -- the sections layer.py writes as
+        `# ---- <t>`, `# ---- moves <t> (generated)`, `# ---- shared <t>`: what turns a file prepared for anc into one
+        prepared for t. An overlay t inherits from anc reaches t's tree verbatim (overlays are not run through the
+        table), so t's own copy of the path is anc's overlay with these rows applied by hand, plus t's real changes."""
+        def sections(text):
+            out, cur = {}, None
+            for line in text.split("\n"):
+                if line.startswith("# ---- "):
+                    cur = line; out[cur] = []
+                elif cur is not None:
+                    out[cur].append(line)
+            return out
+        mine, theirs = sections(self.rename_table(t)), sections(self.rename_table(anc))
+        return "\n".join(h + "\n" + "\n".join(body) for h, body in mine.items() if h not in theirs) + "\n"
+
+    def prepare(self, t, files, table=None):
+        """{rel: authors' text} -> {rel: that text prepared for t (renames + chain, no overlay)}; with `table`, those
+        rows instead of t's whole table (hop_table)."""
+        if not files:
+            return {}
+        import contextlib, io
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            for rel, text in files.items():
+                _write(d / "src" / rel, text)
+            (d / "renames.tsv").write_text(self.rename_table(t) if table is None else table, encoding="utf-8")
+            r = subprocess.run([sys.executable, str(self.ps), "--src", str(d / "src"), "--out", str(d / "out"),
+                                "--renames", str(d / "renames.tsv")], capture_output=True, text=True, encoding="utf-8",
+                               errors="replace")
+            if r.returncode:
+                raise RuntimeError(f"prepare-sources for {t}: {(r.stderr or r.stdout).strip()[-300:]}")
+            if self.props(t).get("strip_onlyin") == "true" and hasattr(self.layer, "strip_onlyin"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.layer.strip_onlyin(d / "out")
+            return {rel: _read(d / "out" / rel) for rel in files}
+
+
+def overlay_sets(mv, t):
+    """[(source set, overlay dir)]: main's overlays are targets/<t>/java, another set's targets/<t>/<set>/java."""
+    td = pathlib.Path(mv) / "targets" / t
+    out = [("main", td / "java")] if (td / "java").is_dir() else []
+    if td.is_dir():
+        out += [(d.name, d / "java") for d in sorted(td.iterdir()) if d.name != "java" and (d / "java").is_dir()]
+    return out
+
+
+def own_overlays(mv, t):
+    """{(set, rel): file} for the whole-file .java overlays target t itself carries (not the ones it inherits)."""
+    return {(s, f.relative_to(d).as_posix()): f for s, d in overlay_sets(mv, t) for f in sorted(d.rglob("*.java"))}
+
+
+def src_path(s, rel):
+    return f"src/{s}/java/{rel}"
+
+
+def whole_file_overlays(repo, t):
+    """THE definition of a whole-file overlay, one for every tool: a .java file target t itself carries in
+    targets/<t>/java (main) or targets/<t>/<set>/java that replaces the authors' src/<set>/java/<same path>. An own
+    overlay whose authors' file does not exist replaces nothing (overlay-only: a compat class), inherited or not.
+    overlay_report() counts these against the budget; tools/fork-port.py gives each one a REVIEW.md row and audits it
+    for stub signals. -> [(set, rel, overlay path, authors' path)], sorted."""
+    repo = pathlib.Path(repo)
+    return [(s, rel, f, repo / src_path(s, rel)) for (s, rel), f in sorted(own_overlays(repo / ".multiversion", t).items())
+            if (repo / src_path(s, rel)).is_file()]
+
+
+def overlay_path(t, s, rel):
+    return f".multiversion/targets/{t}/{'java' if s == 'main' else s + '/java'}/{rel}"
+
+
+def rename_only(ref, ours):
+    """True when `ours` differs from `ref` only by identifiers swapped for identifiers, line for line -- what a rename
+    row (a `member:` row for `x.old` -> `x.new`) would produce, so the overlay is mechanical and should be rows."""
+    a, b = _lf(ref).split("\n"), _lf(ours).split("\n")
+    if len(a) != len(b) or a == b:
+        return False
+    for x, y in zip(a, b):
+        if x == y:
+            continue
+        tx, ty = TOKEN.findall(x), TOKEN.findall(y)
+        if len(tx) != len(ty):
+            return False
+        for p, q in zip(tx, ty):
+            if p != q and not (re.match(r"[A-Za-z_$]", p) and re.match(r"[A-Za-z_$]", q)
+                               and p not in JAVA_WORDS and q not in JAVA_WORDS):
+                return False
+    return True
+
+
+def overlay_budget(mv):
+    raw = _layer_ci().read_props(pathlib.Path(mv) / "ci.properties").get("overlay_budget", "")
+    return int(raw) if raw.strip().isdigit() else DEFAULT_OVERLAY_BUDGET
+
+
+def overlay_report(repo, t, prep=None):
+    """Target t's own whole-file overlays, each against what it replaces (the authors' file prepared for t by the
+    rename table alone, or the overlay t inherits for the same path):
+      real        differs from it in more than names: a real change (the reason overlays exist)
+      mechanical  differs from the prepared authors' file only by identifiers swapped for identifiers: rename rows
+                  would do it
+      renamed-copy  differs from the overlay it inherits only by names: a copy kept because overlays are not run
+                  through the table (rows cannot reach it)
+      redundant   identical to it: delete the overlay
+      overlay-only  replaces no authors' file (a compat class; whole_file_overlays() is the one definition):
+                  listed, not counted against the budget, and not a REVIEW.md row
+    plus lines, and which are mixins / client code. `overlays` (counted against the budget) excludes overlay-only."""
+    repo = pathlib.Path(repo); mv = repo / ".multiversion"
+    prep = prep or Preparer(repo)
+    chain = prep.chain(t)[1:]
+    own = own_overlays(mv, t)
+    whole = {(s, rel) for s, rel, _f, _src in whole_file_overlays(repo, t)}
+    inherited = {}
+    for k in own:
+        anc = next((a for a in chain if (mv.parent / overlay_path(a, *k)).is_file()), None)
+        if anc:
+            inherited[k] = anc
+    authors = {f"{s}/{rel}": _read(repo / src_path(s, rel)) for (s, rel) in own
+               if (s, rel) not in inherited and (repo / src_path(s, rel)).is_file()}
+    prepared = prep.prepare(t, authors)
+    files = []
+    for (s, rel), f in sorted(own.items()):
+        ours = _read(f)
+        if (s, rel) not in whole:
+            ref, against = None, ""                       # replaces no authors' file: overlay-only, as fork-port.py reads it
+        elif (s, rel) in inherited:
+            ref, against = _read(mv.parent / overlay_path(inherited[(s, rel)], s, rel)), f"overlay of {inherited[(s, rel)]}"
+        else:
+            ref, against = prepared.get(f"{s}/{rel}"), "authors' file"
+        kind = ("overlay-only" if ref is None else "redundant" if _lf(ref) == _lf(ours)
+                else ("renamed-copy" if (s, rel) in inherited else "mechanical") if rename_only(ref, ours) else "real")
+        files.append({"file": overlay_path(t, s, rel), "lines": len(_lf(ours).splitlines()), "kind": kind,
+                      "against": against if ref is not None else "",
+                      "mixin": "@Mixin(" in ours or "/mixin/" in rel.lower(),
+                      "client": "/client/" in rel.lower() or "Dist.CLIENT" in ours})
+    counted = [x for x in files if x["kind"] != "overlay-only"]
+    budget = overlay_budget(mv)
+    n = lambda k: sum(1 for x in files if x["kind"] == k)
+    return {"target": t, "overlays": len(counted), "lines": sum(x["lines"] for x in counted),
+            "real": n("real"), "mechanical": n("mechanical"), "renamed_copy": n("renamed-copy"), "redundant": n("redundant"),
+            "overlay_only": n("overlay-only"),
+            "mixin": sum(1 for x in counted if x["mixin"]), "client": sum(1 for x in counted if x["client"]),
+            "budget": budget, "over": len(counted) > budget, "files": files}
+
+
+def overlay_counts(o):
+    """The one wording of a target's overlay counts, here and in tools/fork-port.py: the whole-file overlays (budgeted,
+    one REVIEW.md row each) and the overlay-only files (replace nothing: neither)."""
+    return f"whole-file overlays ({o['overlays']}) + overlay-only files ({o['overlay_only']})"
+
+
+def overlay_note(o):
+    if not o or not (o["overlays"] or o["overlay_only"]):
+        return ""
+    s = (f"{overlay_counts(o)}; the whole-file ones {o['lines']} lines: {o['real']} real, {o['mechanical']} mechanical "
+         f"(rename rows would do), {o['renamed_copy']} renamed copies of an inherited overlay, {o['redundant']} redundant "
+         f"(identical to what they replace); {o['mixin']} mixin, {o['client']} client")
+    return s + (f" -- OVER the overlay budget of {o['budget']}" if o["over"] else "")
+
+
+def merge_file(ours, base, theirs):
+    """git merge-file semantics on LF text -> (merged text, conflict count). The overlay's own line endings are kept."""
+    crlf = "\r\n" in ours
+    with tempfile.TemporaryDirectory() as d:
+        paths = []
+        for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
+            p = pathlib.Path(d) / name; _write(p, _lf(text)); paths.append(str(p))
+        r = subprocess.run(["git", "merge-file", "-p", "--diff3", "-L", "overlay", "-L", "authors' file before (prepared)",
+                            "-L", "authors' file now (prepared)", *paths], capture_output=True)
+    if r.returncode < 0 or r.returncode > 127:
+        raise RuntimeError(f"git merge-file failed: {r.stderr.decode('utf-8', 'replace').strip()[:200]}")
+    out = r.stdout.decode("utf-8", "surrogateescape")
+    return (out.replace("\n", "\r\n") if crlf else out), r.returncode
+
+
+def conflict_hunks(merged):
+    hunks, cur = [], None
+    for line in _lf(merged).split("\n"):
+        if line.startswith("<<<<<<< "):
+            cur = [line]
+        elif cur is not None:
+            cur.append(line)
+            if line.startswith(">>>>>>> "):
+                hunks.append("\n".join(cur)); cur = None
+    return hunks
+
+
+def _members(text):
+    from collections import Counter
+    c = Counter()
+    lines = _lf(text).split("\n")
+    for i, line in enumerate(lines):
+        m = MEMBER.match(line)
+        if m:
+            if m.group(3) is not None:   # a method: name + parameter types
+                types = ",".join(" ".join(p.split()[:-1]) for p in m.group(4).split(",") if p.strip())
+                c[f"method {m.group(2)}({types})"] += 1
+            else:
+                c[f"field {m.group(2)}"] += 1
+        st = line.strip()
+        if st.startswith("@") and i + 1 < len(lines) and lines[i + 1].strip() == st:
+            c[f"annotation {st} twice in a row"] += 2
+    return c
+
+
+def duplicate_members(merged, ours, theirs):
+    """What a CLEAN merge declares more often than either side did: a member the overlay (the compile loop's stand-in)
+    already had and the authors' change added again, at another place -- the merge cannot see that, javac can."""
+    m, o, t = _members(merged), _members(ours), _members(theirs)
+    return sorted(k for k, n in m.items() if n > 1 and n > max(o[k], t[k]))
+
+
+def remerge(repo, old, new, targets=None, write=True, prep=None):
+    """Carry the authors' change OLD -> NEW into every overlay that replaces a file it touched: a three-way merge per
+    overlay (base = the authors' file at OLD prepared for the target, ours = the overlay, theirs = the authors' file at
+    NEW prepared for the target; for an overlay of a path an older target in its chain also overlays, base/theirs are
+    that overlay before/after its own re-merge in this run, renamed by this target's own rows -- hop_table -- and,
+    when that older overlay did not change in this run (it conflicted, it already carried the change, or its target is
+    outside `targets`), the authors' files prepared for this target, as for an overlay of its own). OLD/NEW: the layer
+    branch before and after `merge` (its src/ is the port branch's at the last and at the new merge). Per target ->
+      rewritten   merged cleanly: the overlay now holds the authors' change (a touch-up)
+      retired     merged into exactly what it replaces: the overlay is deleted
+      conflicts   did not merge (or merged into a duplicate member): the overlay is LEFT AS IT WAS (no conflict marker
+                  ever reaches the tree), its hunks go to the target's RESIDUE.md and an entry to its REMERGE.json --
+                  rework. Also an overlay the target INHERITS as it is (no copy of its own) when the older target's
+                  overlay did not take the change: the target's tree builds that overlay, so it is the target's too.
+      resolved    recorded by an earlier re-merge and edited since (its digest moved): a person's resolution, left alone
+    An overlay REMERGE.json still lists unedited is merged again against the authors' file at the commit it was recorded
+    against (its `since`), so a later range never drops the earlier change. write=False is a dry run: nothing is
+    written."""
+    repo = pathlib.Path(repo); mv = repo / ".multiversion"
+    prep = prep or Preparer(repo)
+    ts = layer_targets(repo)
+    want = set(targets or ts)
+    look = set(want)                      # an ancestor outside `targets` is looked at (never written): its children ask
+    for t in want:
+        look.update(prep.chain(t)[1:])
+    shorts = {}
+    sn = lambda ref: shorts.setdefault(ref, short(repo, ref))
+    commit = lambda ref: git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0
+    orig, now, out = {}, {}, {}
+    took = {}                # (t, set, rel) -> True (the overlay carries the change) or why it does not
+    for t in ts:
+        own = own_overlays(mv, t)
+        for k, f in own.items():
+            orig[(t, *k)] = now[(t, *k)] = _read(f)
+        if t not in look:
+            continue
+        live = t in want
+        rec = {"rewritten": [], "retired": [], "conflicts": [], "resolved": [], "checked": 0}
+        if live:
+            out[t] = rec
+        left = remerge_left(repo, t)                   # what an earlier re-merge left for a person, and its digest then
+        chain = prep.chain(t)[1:]
+        jobs, need_old, need_new, hop = [], {}, {}, {}
+        for (s, rel) in sorted(own):
+            path, ours, key = overlay_path(t, s, rel), now[(t, s, rel)], f"{s}/{rel}"
+            anc = next((a for a in chain if (a, s, rel) in orig), None)
+            pend = left.get(path)
+            if pend and pend.get("digest") != digest(ours):
+                rec["checked"] += 1; rec["resolved"].append(path); took[(t, s, rel)] = True
+                continue                               # a person edited it since it was left: theirs now
+            since_old = (pend or {}).get("since", "").split("..")[0]
+            if pend and since_old and not commit(since_old):
+                rec["checked"] += 1; took[(t, s, rel)] = "it did not merge before"
+                rec["conflicts"].append({"file": path, "why": f"{pend.get('reason') or 'did not merge'} (recorded against "
+                                         f"{since_old}, which is not a commit here: not re-merged)", "hunks": [],
+                                         "digest": pend["digest"], "since": pend.get("since", "")})
+                continue
+            if anc and not pend and orig[(anc, s, rel)] != now[(anc, s, rel)]:
+                jobs.append({"s": s, "rel": rel, "anc": anc, "hop": True, "since": f"{sn(old)}..{sn(new)}"})
+                hop.setdefault(anc, ({}, {}))
+                hop[anc][0][key] = orig[(anc, s, rel)]
+                hop[anc][1][key] = now[(anc, s, rel)]
+                continue
+            # an own overlay, or a copy of an inherited one whose older overlay did not change in this run (it
+            # conflicted, already carried the change, or was not re-merged): against the authors' files for t
+            base_ref = since_old if pend and since_old else old
+            o, n = git_blob(repo, base_ref, src_path(s, rel)), git_blob(repo, new, src_path(s, rel))
+            if o == n:
+                if pend:                               # nothing left to take: the entry goes
+                    rec["checked"] += 1; took[(t, s, rel)] = True
+                continue
+            if o is not None:
+                need_old.setdefault(base_ref, {})[key] = o
+            if n is not None:
+                need_new[key] = n
+            jobs.append({"s": s, "rel": rel, "anc": anc, "hop": False, "base_ref": base_ref, "o": o is not None,
+                         "n": n is not None, "since": f"{sn(base_ref)}..{sn(new)}"})
+        p_old = {ref: prep.prepare(t, files) for ref, files in need_old.items()}
+        p_new = prep.prepare(t, need_new)
+        h_old, h_new = {}, {}       # an inherited overlay before / after its re-merge, renamed by t's own rows
+        for anc, (bo, bn) in hop.items():
+            tab = prep.hop_table(t, anc)
+            h_old.update({(anc, k): v for k, v in prep.prepare(t, bo, tab).items()})
+            h_new.update({(anc, k): v for k, v in prep.prepare(t, bn, tab).items()})
+        for j in jobs:
+            rec["checked"] += 1
+            s, rel, anc = j["s"], j["rel"], j["anc"]
+            key, ours = f"{s}/{rel}", now[(t, s, rel)]
+            path = overlay_path(t, s, rel)
+
+            def conflict(why, hunks=()):
+                rec["conflicts"].append({"file": path, "why": why, "hunks": list(hunks), "digest": digest(ours),
+                                         "since": j["since"]})
+                took[(t, s, rel)] = why
+
+            def change(kind, text):                    # outside `targets` nothing is written: it did not take it
+                took[(t, s, rel)] = True if live else f"{t} was not re-merged in this run (not in --targets)"
+                if not live:
+                    return
+                rec[kind].append(path); now[(t, s, rel)] = text
+                if write and kind == "retired":
+                    (repo / path).unlink()
+                elif write:
+                    _write(repo / path, text)
+            if j["hop"]:
+                base, theirs = h_old[(anc, key)], h_new[(anc, key)]
+            else:
+                base = p_old[j["base_ref"]].get(key) if j["o"] else None
+                theirs = p_new.get(key) if j["n"] else None
+            if theirs is None:
+                conflict("the authors deleted the file this overlay replaces")
+                continue
+            if base is None and _lf(ours) == _lf(theirs):
+                if anc:
+                    took[(t, s, rel)] = True           # already the authors' file; the tree keeps this copy
+                else:
+                    change("retired", theirs)
+                continue
+            if base is None:
+                conflict("the authors added a file at this overlay's path (it replaced nothing before)")
+                continue
+            merged, n = merge_file(ours, base, theirs)
+            if n:
+                conflict(f"{n} conflicting hunk(s)", conflict_hunks(merged))
+                continue
+            dups = duplicate_members(merged, ours, theirs)
+            if dups:
+                conflict("merged cleanly into a duplicate declaration (the overlay already had it and the authors added "
+                         "it again): " + "; ".join(dups))
+                continue
+            # retired: the target's tree gets the same file without this overlay -- the prepared authors' file, or the
+            # inherited overlay VERBATIM (an inherited overlay is not renamed by this target's rows)
+            gets = now[(anc, s, rel)] if anc else theirs
+            if _lf(merged) == _lf(gets):
+                change("retired", gets)
+            elif _lf(merged) == _lf(ours):
+                took[(t, s, rel)] = True               # already carries it (a re-run)
+            else:
+                change("rewritten", merged)
+        if not live:
+            continue
+        # an overlay t inherits AS IT IS (no copy of its own) is built into t's tree: when the nearest older overlay of
+        # that path did not take the authors' change, t did not either -- never skipped
+        inherited = {}
+        for a in chain:
+            for (s, rel) in own_overlays(mv, a):
+                if (s, rel) not in own and (s, rel) not in inherited and (a, s, rel) in orig:
+                    inherited[(s, rel)] = a
+        for (s, rel), a in sorted(inherited.items()):
+            apath, why = overlay_path(a, s, rel), took.get((a, s, rel))
+            pend = left.get(apath)
+            if why is True:
+                continue
+            if why is None:                            # untouched in this run: an earlier flag stays while unedited
+                if pend and (repo / apath).is_file() and pend.get("digest") == digest(_read(repo / apath)):
+                    rec["conflicts"].append({"file": apath, "why": pend.get("reason") or INHERITS, "hunks": [],
+                                             "digest": pend["digest"], "since": pend.get("since", "")})
+                continue
+            rec["conflicts"].append({"file": apath, "why": f"{INHERITS} ({a}: {why})", "hunks": [],
+                                     "digest": digest(now[(a, s, rel)]), "since": f"{sn(old)}..{sn(new)}"})
+    return out
+
+
+def digest(text):
+    """sha256 of the overlay file's bytes (text as _read() returns it: line endings and all), as REMERGE.json records it
+    and tools/fork-port.py's target_done() compares it."""
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+INHERITS = "inherits an overlay that did not take the authors' change"
+
+
+def remerge_file(repo, t):
+    return pathlib.Path(repo) / ".multiversion/targets" / t / "REMERGE.json"
+
+
+def remerge_left(repo, t):
+    """{overlay path: entry} an earlier re-merge left unmerged for target t: its REMERGE.json ({"conflicts": [{"overlay",
+    "digest", "reason", "since": "<old>..<new>"}]}), else the digests in its RESIDUE.md section. A malformed REMERGE.json
+    stops the run: it is a reviewed input, and reading it as empty would forget what it holds."""
+    f = remerge_file(repo, t)
+    if f.is_file():
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            return {c["overlay"]: c for c in data["conflicts"] if c.get("overlay") and c.get("digest")}
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            raise RuntimeError(f"{f}: not a REMERGE.json ({e}); fix or delete it by hand")
+    return {p: {"overlay": p, "digest": d, "reason": "", "since": ""} for p, d in residue_left(repo, t).items()}
+
+
+def put_remerge(repo, t, rec):
+    """Write target t's REMERGE.json from a remerge() record: one entry per overlay that did not take the authors'
+    change; the file is deleted when nothing is left."""
+    f = remerge_file(repo, t)
+    entries = {}
+    for c in (rec or {}).get("conflicts", []):
+        entries.setdefault(c["file"], {"overlay": c["file"], "digest": c["digest"], "reason": c["why"],
+                                       "since": c.get("since", "")})
+    if not entries:
+        if f.is_file():
+            f.unlink()
+        return
+    text = json.dumps({"conflicts": [entries[k] for k in sorted(entries)]}, indent=1) + "\n"
+    if not f.is_file() or f.read_text(encoding="utf-8") != text:
+        _write(f, text)
+
+
+DIGEST_LINE = re.compile(r"^<!-- layer-sync overlay (\S+) digest ([0-9a-f]+) -->$", re.M)
+
+
+def residue_left(repo, t):
+    """{overlay path: digest} that the target's RESIDUE.md says an earlier re-merge left for a person. An overlay whose
+    content has changed since is a person's resolution: the re-merge does not touch it again (a hand merge would
+    otherwise conflict with the same base forever)."""
+    f = pathlib.Path(repo) / ".multiversion/targets" / t / "RESIDUE.md"
+    text = f.read_text(encoding="utf-8") if f.is_file() else ""
+    i = text.find(RESIDUE_SECTION)
+    if i < 0:
+        return {}
+    j = text.find("\n## ", i + len(RESIDUE_SECTION))
+    return dict(DIGEST_LINE.findall(text[i:j if j >= 0 else None]))
+
+
+def residue_section(t, rec, old, new):
+    if not rec or not rec["conflicts"]:
+        return ""
+    cap = 200
+    lines = [RESIDUE_SECTION, "",
+             f"The authors' code moved ({old} -> {new}). Each overlay below replaces a file they changed and was re-merged "
+             f"three ways (base = their file before, prepared for {t}; ours = the overlay; theirs = their file now, prepared "
+             f"for {t}). It did not merge, so it is UNCHANGED in the tree. Carry their change into the overlay by hand (or "
+             f"retire the overlay into rename rows), then rerun `python3 tools/layer-sync.py remerge --repo DIR --old {old} "
+             f"--new {new} --targets {t}` (it leaves alone an overlay edited since it was listed here, and drops it from "
+             f"this list) and `python3 tools/layer-sync.py run --repo DIR --targets {t}`.", ""]
+    for c in rec["conflicts"]:
+        lines.append(f"### `{c['file']}` -- {c['why']}" + (f" (since {c['since']})" if c.get("since") else ""))
+        lines.append(f"<!-- layer-sync overlay {c['file']} digest {c['digest']} -->")
+        if c["hunks"]:
+            body = "\n\n".join(c["hunks"]).split("\n")
+            lines += ["", "```"] + body[:cap] + (["", f"... {len(body) - cap} more line(s)"] if len(body) > cap else []) + ["```"]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def put_residue_section(repo, t, section):
+    """Replace (or remove) layer-sync's section of .multiversion/targets/<t>/RESIDUE.md; fork-port.py's part stays."""
+    f = pathlib.Path(repo) / ".multiversion/targets" / t / "RESIDUE.md"
+    text = f.read_text(encoding="utf-8") if f.is_file() else ""
+    i = text.find(RESIDUE_SECTION)
+    if i >= 0:
+        j = text.find("\n## ", i + len(RESIDUE_SECTION))
+        before, rest = text[:i].rstrip("\n"), (text[j + 1:] if j >= 0 else "")
+        text = before + ("\n\n" if before and rest else "\n" if before else "") + rest
+    header = f"# {t}: residue\n"
+    if section:
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else header + "\n") + section.rstrip("\n") + "\n"
+    if not text.strip() or text == header:
+        if f.is_file():
+            f.unlink()
+        return
+    if text != (f.read_text(encoding="utf-8") if f.is_file() else None):
+        f.write_text(text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------- commands
@@ -235,6 +843,10 @@ class Runner:
             return {"stages": {}}
 
 
+def short(repo, ref):
+    return git(repo, "rev-parse", "--short", ref).stdout.strip() or ref
+
+
 def residue_of(repo, t):
     f = pathlib.Path(repo) / ".multiversion/targets" / t / "RESIDUE.md"
     return f".multiversion/targets/{t}/RESIDUE.md" if f.is_file() else ""
@@ -295,11 +907,37 @@ def cmd_run(a):
     base = a.changed_from or default_changed_from(repo)
     changed = git(repo, "diff", "--name-only", base, "HEAD").stdout.split() if base else []
     runner = Runner(repo, a.budget)
+    prep = Preparer(repo)
+    # the authors' code moved (base -> HEAD): carry it into every overlay of a file it touched BEFORE measuring, so the
+    # compile sees the re-merged overlays; what did not merge stays as it was and makes its target rework
+    merged = remerge(repo, base, "HEAD", want, write=True, prep=prep) if base and changed else {}
+    for t, rm in merged.items():
+        if rm["rewritten"] or rm["retired"] or rm["conflicts"]:
+            print(f"layer-sync: {t}: overlays re-merged with the authors' change: {len(rm['rewritten'])} rewritten, "
+                  f"{len(rm['retired'])} retired, {len(rm['conflicts'])} did not merge", flush=True)
     rows = []
     for t in [x for x in ts if x in want]:
         print(f"layer-sync: {t} ...", flush=True)
         rec = run_target(repo, t, runner)
         rec["shadowed"] = shadowed(repo / ".multiversion", t, changed)
+        rm = merged.get(t)
+        if rm and (rm["rewritten"] or rm["retired"] or rm["conflicts"]):
+            rec["remerge"] = rm
+            if rm["conflicts"]:
+                rec["class"] = "rework"
+                left = f"{len(rm['conflicts'])} overlay(s) did not merge the authors' change"
+                rec["note"] = f"{rec['note']}; {left}" if rec["note"] else left
+            elif rec["class"] == "untouched":
+                rec["class"] = "touch-up"             # the overlays changed, even though nothing failed to compile
+        if t in merged:          # the re-merge ran: its REMERGE.json and RESIDUE.md section say what it left
+            put_remerge(repo, t, rm)
+            put_residue_section(repo, t, residue_section(t, rm, short(repo, base), short(repo, "HEAD")))
+            if rec["class"] == "rework":
+                rec["residue"] = residue_of(repo, t)
+        rec["overlays"] = overlay_report(repo, t, prep)
+        if rec["overlays"]["over"]:
+            print(f"layer-sync: WARNING {t}: {overlay_counts(rec['overlays'])}: the whole-file ones over the overlay budget "
+                  f"of {rec['overlays']['budget']} (.multiversion/ci.properties overlay_budget)", flush=True)
         print(f"layer-sync: {t}: {rec['before']} -> {rec['after']} errors, {rec['class']}", flush=True)
         rows.append(rec)
     head = git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
@@ -315,6 +953,79 @@ def cmd_run(a):
         print("\n" + stop)
         return 10
     return 0
+
+
+def _want(repo, a):
+    ts = layer_targets(repo)
+    want = [x for x in (a.targets or "").split(",") if x] or ts
+    bad = [x for x in want if x not in ts]
+    if bad:
+        print(f"layer-sync: no such target(s): {', '.join(bad)} (the layer has {', '.join(ts)})")
+        return None
+    return want
+
+
+def cmd_overlays(a):
+    repo = pathlib.Path(a.repo).resolve()
+    if not layer_targets(repo):
+        return not_a_layer(repo)
+    want = _want(repo, a)
+    if want is None:
+        return 2
+    prep = Preparer(repo)
+    reps = [overlay_report(repo, t, prep) for t in want]
+    print("| target | whole-file overlays | lines | real | mechanical | renamed copy | redundant | mixin | client | "
+          "overlay-only files | budget |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for o in reps:
+        print(f"| {o['target']} | {o['overlays']} | {o['lines']} | {o['real']} | {o['mechanical']} | {o['renamed_copy']} | "
+              f"{o['redundant']} | "
+              f"{o['mixin']} | {o['client']} | {o['overlay_only']} | {o['budget']}{' OVER' if o['over'] else ''} |")
+    for o in reps:
+        for k, what in (("redundant", "identical to what it replaces: delete it"),
+                        ("mechanical", "differs only in names: make it rename rows and delete it")):
+            fs = [x["file"] for x in o["files"] if x["kind"] == k]
+            if fs:
+                print(f"\n{o['target']}: {len(fs)} {k} overlay(s) -- {what}:\n  " + "\n  ".join(fs))
+        if o["over"]:
+            print(f"\nWARNING {o['target']}: {overlay_counts(o)}: the whole-file ones over the overlay budget of {o['budget']} "
+                  "(default %d; .multiversion/ci.properties overlay_budget=N)" % DEFAULT_OVERLAY_BUDGET)
+    if a.json:
+        pathlib.Path(a.json).write_text(json.dumps(reps, indent=1), encoding="utf-8")
+    return 0
+
+
+def cmd_remerge(a):
+    repo = pathlib.Path(a.repo).resolve()
+    if not layer_targets(repo):
+        return not_a_layer(repo)
+    want = _want(repo, a)
+    if want is None:
+        return 2
+    for ref in (a.old, a.new):
+        if git(repo, "rev-parse", "--verify", ref + "^{commit}").returncode:
+            print(f"layer-sync: unknown ref {ref}")
+            return 2
+    res = remerge(repo, a.old, a.new, want, write=not a.dry_run)
+    if not a.dry_run:
+        for t in want:
+            put_remerge(repo, t, res.get(t))
+            put_residue_section(repo, t, residue_section(t, res.get(t), short(repo, a.old), short(repo, a.new)))
+    print("| target | overlays of changed files | rewritten | retired | resolved by hand | did not merge |")
+    print("|---|---|---|---|---|---|")
+    for t in want:
+        r = res[t]
+        print(f"| {t} | {r['checked']} | {len(r['rewritten'])} | {len(r['retired'])} | {len(r['resolved'])} | "
+              f"{len(r['conflicts'])} |")
+    for t in want:
+        for c in res[t]["conflicts"]:
+            print(f"  {t}: {c['file']}: {c['why']}")
+    if a.json:
+        pathlib.Path(a.json).write_text(json.dumps(res, indent=1), encoding="utf-8")
+    n = sum(len(r["conflicts"]) for r in res.values())
+    print(f"layer-sync: {'dry run, nothing written; ' if a.dry_run else ''}"
+          + (f"{n} overlay(s) did not merge -- a person's (REMERGE.json, RESIDUE.md)" if n else "every overlay merged"))
+    return 10 if n else 0
 
 
 def cmd_ledger(a):
@@ -362,6 +1073,66 @@ def self_check():
     expect("| 1.21.4 | 0 | 0 | untouched | - |" in t and "| 1.21.8 | 12 | 3 | rework | `.multiversion/targets/1.21.8/RESIDUE.md` |" in t
            and "overlays 1 file(s)" in t, "table")
     expect("STOPPED for a person" in stopped_block(rows) and stopped_block(rows[:1]) == "", "stop block only for rework")
+    expect("re-merged" not in t and "overlay budget" not in t, "no overlay note for rows without overlays (output as before)")
+    # R6: the overlay helpers
+    ref = "class A {\n    Foo x = a.old();\n}\n"
+    expect(rename_only(ref, ref.replace("Foo", "Bar").replace("a.old", "a.renamed")), "names swapped only: mechanical")
+    expect(not rename_only(ref, ref.replace("a.old()", "a.old(1)")), "an argument added: real")
+    expect(not rename_only(ref, ref.replace("Foo x", "Foo x, y")), "a token added: real")
+    expect(not rename_only(ref, ref.replace("class", "interface")), "a keyword changed: real")
+    expect(not rename_only(ref, ref), "identical is redundant, not mechanical")
+    base = "class A {\n  int a;\n  int b;\n  int c;\n  int d;\n}\n"
+    m, n = merge_file(base.replace("int a;", "long a;"), base, base.replace("int d;", "long d;"))
+    expect(n == 0 and "long a;" in m and "long d;" in m, "merge_file: a clean three-way merge")
+    m, n = merge_file(base.replace("int a;", "long a;").replace("\n", "\r\n"), base, base.replace("int d;", "long d;"))
+    expect(n == 0 and m.count("\r\n") == m.count("\n"), "merge_file keeps the overlay's CRLF")
+    m, n = merge_file(base.replace("int a;", "long a;"), base, base.replace("int a;", "short a;"))
+    h = conflict_hunks(m)
+    expect(n == 1 and len(h) == 1 and "long a;" in h[0] and "short a;" in h[0] and h[0].startswith("<<<<<<< overlay"),
+           "merge_file: a conflict, and its hunk")
+    ours = base.replace("{\n", "{\n  public void x() {}\n", 1)
+    theirs = base.replace("int d;\n", "int d;\n  public void x() {}\n")
+    expect(duplicate_members(ours.replace("int d;\n", "int d;\n  public void x() {}\n"), ours, theirs) == ["method x()"],
+           "a member both sides added at different places: duplicate")
+    expect(duplicate_members(ours, ours, theirs) == [], "no duplicate")
+    expect(duplicate_members("  @Override\n  @Override\n  public void y() {}\n", "  @Override\n  public void y() {}\n", "")
+           == ["annotation @Override twice in a row"], "a doubled annotation")
+    expect(duplicate_members("  private int f = 1;\n  private int f = 2;\n", "  private int f = 1;\n", "  private int f = 2;\n")
+           == ["field f"], "a field declared twice")
+    with tempfile.TemporaryDirectory() as d:
+        (pathlib.Path(d) / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        res = pathlib.Path(d) / ".multiversion/targets/1.21.4/RESIDUE.md"
+        res.write_text("# Residue\n\n## Compile errors\nx\n", encoding="utf-8")
+        rec = {"conflicts": [{"file": "F.java", "why": "1 conflicting hunk(s)", "hunks": ["<<<<<<< overlay\na\n>>>>>>> b"],
+                              "digest": "abc123"}]}
+        put_residue_section(d, "1.21.4", residue_section("1.21.4", rec, "o1", "n1"))
+        put_residue_section(d, "1.21.4", residue_section("1.21.4", rec, "o1", "n1"))
+        txt = res.read_text(encoding="utf-8")
+        expect(txt.count(RESIDUE_SECTION) == 1 and "## Compile errors\nx" in txt and residue_left(d, "1.21.4") == {"F.java": "abc123"},
+               f"RESIDUE.md: one section, fork-port's part kept, the digest read back: {txt}")
+        put_residue_section(d, "1.21.4", "")
+        expect(res.read_text(encoding="utf-8") == "# Residue\n\n## Compile errors\nx\n", "the section removed, the rest as it was")
+        res.unlink()
+        put_residue_section(d, "1.21.4", residue_section("1.21.4", rec, "o1", "n1"))
+        put_residue_section(d, "1.21.4", "")
+        expect(not res.exists(), "a RESIDUE.md that held only the section is removed with it")
+        # REMERGE.json: the reviewed record tools/fork-port.py's target_done() reads
+        rj = remerge_file(d, "1.21.4")
+        two = {"conflicts": [dict(rec["conflicts"][0], since="o1..n1"),
+                             {"file": "A.java", "why": INHERITS + " (1.21.3: x)", "hunks": [], "digest": "d2", "since": "o1..n1"}]}
+        put_remerge(d, "1.21.4", two)
+        got = json.loads(rj.read_text(encoding="utf-8"))
+        expect(got == {"conflicts": [{"overlay": "A.java", "digest": "d2", "reason": INHERITS + " (1.21.3: x)", "since": "o1..n1"},
+                                     {"overlay": "F.java", "digest": "abc123", "reason": "1 conflicting hunk(s)", "since": "o1..n1"}]}
+               and set(remerge_left(d, "1.21.4")) == {"A.java", "F.java"}, f"REMERGE.json: one sorted entry per overlay: {got}")
+        put_remerge(d, "1.21.4", {"conflicts": []})
+        expect(not rj.exists(), "an empty REMERGE.json is deleted")
+        rj.write_text("{", encoding="utf-8")
+        try:
+            remerge_left(d, "1.21.4"); expect(False, "a malformed REMERGE.json is not read as empty")
+        except RuntimeError:
+            pass
+        expect(digest("a\r\nb") == __import__("hashlib").sha256(b"a\r\nb").hexdigest(), "digest: sha256 of the file's bytes")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -379,10 +1150,16 @@ def main():
     p = sub.add_parser("run"); p.add_argument("--repo", default="."); p.add_argument("--targets")
     p.add_argument("--budget", type=float, default=15.0); p.add_argument("--changed-from")
     p.add_argument("--json"); p.add_argument("--md")
+    p = sub.add_parser("overlays"); p.add_argument("--repo", default="."); p.add_argument("--targets", "--target")
+    p.add_argument("--json")
+    p = sub.add_parser("remerge"); p.add_argument("--repo", default="."); p.add_argument("--old", required=True)
+    p.add_argument("--new", default="HEAD"); p.add_argument("--targets", "--target"); p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--json")
     p = sub.add_parser("ledger"); p.add_argument("--ledger", required=True); p.add_argument("--json", required=True)
     p.add_argument("--column", required=True)
     a = ap.parse_args()
-    return {"detect": cmd_detect, "merge": cmd_merge, "run": cmd_run, "ledger": cmd_ledger}[a.cmd](a)
+    return {"detect": cmd_detect, "merge": cmd_merge, "run": cmd_run, "overlays": cmd_overlays, "remerge": cmd_remerge,
+            "ledger": cmd_ledger}[a.cmd](a)
 
 
 if __name__ == "__main__":

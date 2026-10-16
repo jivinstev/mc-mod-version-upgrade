@@ -31,6 +31,10 @@ WHAT IT COLLECTS, per layer target (.multiversion/targets/<t>/):
   dropped-dep a DEPS.md row (tools/layer-deps.py) whose dependency was dropped for the target: an optional
               integration that is off on that version.
   preview     a target marked `preview=true` in its own target.properties (built and gated, never published: #76).
+  behaviour   when the fork has .multiversion/INVENTORY.json (tools/layer-inventory.py build: what the base build hooks
+              and renders), every inventory item that is not "same" on the target -- changed in an overlay, moved,
+              dropped, or unaccounted -- with its detail (a target whose prepared tree is missing says so under
+              "inventory" in its targets entry). Without the file nothing is added: the output is as before.
 
 GROUPING. A change shared by a range of targets is ONE item, with the targets it applies to, their range(s) in version
 order and the version where it first appears: an inherited overlay, an inherited stub review (the "(inherited from X)"
@@ -55,7 +59,7 @@ KNOWN = re.compile(r"(?i)\bknown[- ]limit|\bnot covered by (?:any |the )?(?:auto
 CITE = re.compile(r"(?:CATALOG\s+(?:§\s*)?|§)([A-Z]{1,2}\d+[a-z]?)\b")
 ENTRY = re.compile(r"^(?:- )?\*\*([A-Z]{1,2}\d+[a-z]?)\.\s|^([A-Z]{1,2}\d+[a-z]?)\.\s+\*\*")
 CLIENT = re.compile(r"^import (?:net\.minecraft\.client|com\.mojang\.blaze3d)\.", re.M)   # draws or reads input
-KINDS = ("preview", "overlay", "stub", "catalogue", "dropped-dep")
+KINDS = ("preview", "overlay", "stub", "catalogue", "dropped-dep", "behaviour")
 
 
 def mc_key(v):
@@ -165,6 +169,13 @@ def table_rows(path):
     return rows
 
 
+def _inventory():
+    spec = importlib.util.spec_from_file_location("ltp_layer_inventory", HERE / "layer-inventory.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def _prepare():
     spec = importlib.util.spec_from_file_location("ltp_prepare_sources", PREPARE)
     m = importlib.util.module_from_spec(spec)
@@ -248,10 +259,34 @@ def plan_fork(repo, catalog=CATALOG):
         return g
 
     info = []
+    inv_path = mv / "INVENTORY.json"
+    inventory = _inventory() if inv_path.is_file() else None
+    inv = json.loads(inv_path.read_text(encoding="utf-8")) if inventory else None
     for t in targets:
         props = read_props(mv / "targets" / t / "target.properties")
         preview = props.get("preview", "").lower() == "true"
         info.append({"target": t, "inherits": props.get("inherits"), "preview": preview})
+        if inventory:
+            # the base build's behaviour inventory (tools/layer-inventory.py): every item that is not the same on this
+            # target -- changed in an overlay, moved, dropped, or not accounted for yet -- is a manual-test candidate
+            try:
+                acc = inventory.account(repo, t, inv)
+            except ValueError as e:
+                info[-1]["inventory"] = f"not checked: {e}"
+                acc = None
+            if acc:
+                info[-1]["inventory"] = acc["counts"]
+                for r in acc["items"]:
+                    if r["status"] == "same":
+                        continue
+                    detail = re.sub(r" \(inherited from [^)]+\)", "", r["detail"])
+                    g = add("behaviour", (r["id"], r["status"], detail), t,
+                            {"title": f"{r['kind']} {r['key'][:160]} ({r['file'].rsplit('/', 1)[-1]}): {r['status']}",
+                             "item": r["id"], "file": r["file"], "set": r["set"], "inventory_kind": r["kind"],
+                             "key": r["key"], "status": r["status"], "detail": detail, "now": {}},
+                            f".multiversion/INVENTORY.json: {r['id']}")
+                    if r.get("now"):
+                        g["now"][t] = r["now"]
         if preview:
             add("preview", (t,), t, {"title": f"Minecraft {t} is a preview target: built and gated, not published"},
                 f".multiversion/targets/{t}/target.properties")
@@ -377,6 +412,8 @@ def render(plans):
                         out.append(f"    note: {g['note'][:300]}")
                 if g["kind"] == "dropped-dep":
                     out.append("    reason: " + "; ".join(f"{k}: {v}" for k, v in g["reasons"].items())[:300])
+                if g["kind"] == "behaviour":
+                    out.append(f"    {g['status']}: {g['detail'][:300]}")
             out.append("")
     return "\n".join(out).rstrip() + "\n"
 
@@ -500,6 +537,27 @@ def self_check():
         hit = [g for g in p2["layer"]["items"] if g["kind"] == "catalogue" and g["row"].startswith("re:\\bfooSky")]
         expect(hit and hit[0]["targets"] == ["1.21.3"] and "hits-" in hit[0]["matched"]["1.21.3"],
                f"a row the build recorded as hit counts as fired where the source no longer shows it: {hit}")
+        expect(not any(g["kind"] == "behaviour" for g in p2["layer"]["items"]) and "inventory" not in p2["layer"]["targets"][0],
+               "no INVENTORY.json: no behaviour items, the targets entries as before")
+        # with the base build's behaviour inventory: a render use the 1.21.3 overlay lost is a candidate from 1.21.3 on
+        # (inherited overlay), and a target with no prepared tree says it was not checked
+        inv = {"items": [{"id": "main:com/example/mod/client/SkyRenderer.java#render-use:RenderType.sky", "set": "main",
+                          "file": "com/example/mod/client/SkyRenderer.java", "kind": "render-use", "key": "RenderType.sky"},
+                         {"id": "main:com/example/mod/Util.java#render-use:RenderType.cutout", "set": "main",
+                          "file": "com/example/mod/Util.java", "kind": "render-use", "key": "RenderType.cutout"}]}
+        w(mvd / "INVENTORY.json", json.dumps(inv))
+        for t in ("1.21.3", "1.21.4", "1.21.5"):
+            w(lf / f"build/mc{t}/mv/java/com/example/mod/client/SkyRenderer.java", "class SkyRenderer { void draw() {} }\n")
+            w(lf / f"build/mc{t}/mv/java/com/example/mod/Util.java", "class Util { Object o = RenderType.cutout(); }\n")
+        p3 = plan_fork(lf, cat)
+        beh = [g for g in p3["layer"]["items"] if g["kind"] == "behaviour"]
+        expect([(g["item"].rsplit(":", 1)[-1], g["status"], g["range"]) for g in beh] == [("RenderType.sky", "unaccounted", "1.21.3-1.21.5")],
+               f"an inventory item that is not the same is one candidate over its range; a same one is not listed: {beh}")
+        t8 = [x for x in p3["layer"]["targets"] if x["target"] == "1.21.8"][0]
+        expect(str(t8.get("inventory", "")).startswith("not checked") and p3["layer"]["targets"][0]["inventory"].get("same") == 1,
+               f"per target: the inventory counts, or why it was not checked: {p3['layer']['targets']}")
+        expect("unaccounted: " in render([p3]), "the text names the behaviour item's status and detail")
+        (mvd / "INVENTORY.json").unlink()
         txt = render([p, plan_fork(sv, cat)])
         expect("## Minecraft 1.21.5: " in txt and "preview (built and gated, not published): 1.21.5" in txt
                and txt.rstrip().endswith("single-version fork (Minecraft 1.21.1)") and "## Minecraft 1.21.1" not in txt,
