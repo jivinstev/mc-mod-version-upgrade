@@ -75,9 +75,10 @@ def migrator_repo():
     return m.group(1)
 
 
-def _get(url):
+def _get(url, accept=None):
     import urllib.request
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "port-ci"}), timeout=30) as r:
+    headers = {"User-Agent": "port-ci", **({"Accept": accept} if accept else {})}
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as r:
         return r.read().decode("utf-8")
 
 
@@ -426,10 +427,10 @@ def promote(argv):
                     help="a pinned dependency still a pre-release that the person promotes together with this one")
     a = ap.parse_args(argv)
     ref, inputs = promote_dispatch(a.fork, a.tag, a.played_by, a.notes, a.branch)
-    import json, base64
-    try:
-        meta = json.loads(_get(f"https://api.github.com/repos/{a.fork}/contents/.github/workflows/port-ci.yml?ref={ref}"))
-        wf = base64.b64decode(meta.get("content", "")).decode("utf-8", "replace")
+    import json
+    try:                                                    # the file itself (the raw media type), not an encoded copy
+        wf = _get(f"https://api.github.com/repos/{a.fork}/contents/.github/workflows/port-ci.yml?ref={ref}",
+                  "application/vnd.github.raw")
     except Exception as e:                                  # noqa: BLE001
         wf = None
         why = [f"cannot read {a.fork}'s port-ci.yml on {ref} to check its pinned dependencies ({e})"]
