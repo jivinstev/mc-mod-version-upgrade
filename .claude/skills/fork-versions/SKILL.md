@@ -79,10 +79,12 @@ every open reason; off the branch it reads the branch's own commit and writes no
    (`ok` / `not-ok`) and a note per row, and a row for each of:
    - every `STUBS.json` entry;
    - every **file that differs from the parent branch** at their merge-base (`git diff <merge-base>..neoforge-<v>`),
-     kind `changed`, read against the parent's file -- except the files the rows alone made (mechanical), the build
-     files the tool derives (gradle.properties' versions, the mods.toml ranges, a mixin config's `mixin_add`/
-     `mixin_remove` arrays, the hook line), a `.java` file added at this version (a helper with no counterpart),
-     a shared-library helper as installed (`shared-helpers.txt`), deletions, documents and the records;
+     kind `changed`, read against the parent's file -- except the files the rows alone made (mechanical: the version's
+     rows over the port branch's file, or the parent's file through the rows this version adds, `@OnlyIn` stripped from
+     1.21.6 -- an inherited overlay the rows renamed), the build files the tool derives (gradle.properties' versions, the
+     mods.toml ranges, a mixin config's `mixin_add`/`mixin_remove` arrays, the hook line), a `.java` file the port
+     branch does not have (a helper or an overlay-only class: no authors' counterpart, as on the layer), a
+     shared-library helper as installed (`shared-helpers.txt`), deletions, documents and the records;
    - every **resource group** that differs (kind `resources`: its first three directories, with the digest of its
      changed files -- an edit is a new row);
    - `.port/<v>/renames.tsv` as a whole (kind `renames`, with its digest).
