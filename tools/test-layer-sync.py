@@ -226,8 +226,10 @@ def main():
         expect(r.returncode == 0 and r.stdout.strip() == "layer=false", f"single-version detect --ref: layer=false, exit 0: {r.stdout}")
         for cmd in (["run"], ["overlays"], ["remerge", "--old", "HEAD"]):
             r = sh(sys.executable, str(LS), cmd[0], "--repo", str(s), *cmd[1:], env=env)
-            expect(r.stdout == f"layer-sync: {s} is not a multi-version fork (no .multiversion/ with a target): nothing to do, "
-                   "nothing changed\n" and r.returncode == 0, f"single-version {cmd[0]}: the one line, exit 0: {r.stdout!r}")
+            # the tool prints the checkout resolved: a Windows temp dir is a short 8.3 path (RUNNER~1) until resolve()
+            one = {f"layer-sync: {x} is not a multi-version fork (no .multiversion/ with a target): nothing to do, "
+                   "nothing changed\n" for x in (s, s.resolve())}
+            expect(r.stdout in one and r.returncode == 0, f"single-version {cmd[0]}: the one line, exit 0: {r.stdout!r}")
         expect(git(s, "rev-parse", "HEAD") == head and git(s, "status", "--porcelain=v1", "--ignored") == before
                and not (s / "build").exists(), "single-version fork: no commit, no file, no build dir")
         # layer fork: new upstream commit on the port branch, merged into the layer
