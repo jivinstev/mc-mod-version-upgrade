@@ -2252,6 +2252,13 @@ def sync_shared(repo, targets=None, say=print):
     todo = [t for t in order if not targets or t in targets]
     if targets and set(targets) - set(order):
         say(f"fork-branches: no version branch for {', '.join(sorted(set(targets) - set(order)))}"); return 2
+    above = [t for t in order if t not in todo and todo and mc_key(t) > mc_key(todo[0])]
+    if above:
+        say(f"fork-branches: sync-shared: WARNING: {', '.join(above)} not synced -- each keeps its old copy of the shared "
+            f"tables, so a cascade from below re-makes the synced files back through them; sync them too (run "
+            f"sync-shared without --target, the default: every version)")
+    mfl = load("make_fork_layer_fb", "make-fork-layer.py")
+    stable = [l["mc"] for l in mfl.versions()["lines"] if l.get("stable")]
     for t in todo:
         work, why = worktree_for(repo, t)
         if work is None:
@@ -2264,15 +2271,19 @@ def sync_shared(repo, targets=None, say=print):
         sub = lambda x: x.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
         sp = work / REC / t / "shared-renames.tsv"
         old_text = read_file(sp)
-        versions_ = [k.split(" ", 1)[1] for k in shared_sections(old_text)]
+        # every targeted version above the base up to t, nearest first (as add-target writes them): a version whose
+        # library gained a table since gets its section, and its helpers count even with no table at all
+        base_v = props.get("base_minecraft_version") or (stable[0] if stable else t)
+        span = [v for v in stable if mc_key(base_v) < mc_key(v) <= mc_key(t)][::-1]
+        old_secs = {k.split(" ", 1)[1]: b for k, b in shared_sections(old_text).items()}
+        versions_ = span + [v for v in old_secs if v not in span]
         new_sections, kept = [], []
-        for v, body in shared_sections(old_text).items():
-            ver = v.split(" ", 1)[1]
+        for ver in versions_:
             f = shared_dir() / ver / "renames.tsv"
             if f.is_file():
                 new_sections.append(f"# ---- shared {ver}\n" + sub(f.read_text(encoding="utf-8")))
-            else:
-                new_sections.append(body.rstrip("\n")); kept.append(ver)
+            elif ver in old_secs:
+                new_sections.append(old_secs[ver].rstrip("\n")); kept.append(ver)
         new_text = ("\n".join(x.rstrip("\n") for x in new_sections) + "\n") if new_sections else old_text
         pr = port_ref_of(repo, work, t, git(work, "rev-parse", "HEAD", check=True).stdout.strip())   # work's HEAD, not the clone's
         read = reader_of_root(work)
@@ -2295,7 +2306,11 @@ def sync_shared(repo, targets=None, say=print):
             dest = f"src/main/java/{rel}"
             data = body.encode("utf-8")
             if dest in cur and listed.get(dest) != hash_blobs({dest: cur[dest]})[dest]:
-                continue                     # the fork's own class of that name, or an edited helper: left alone
+                if cur[dest] != data:        # the fork's own class of that name, or an edited helper: left alone, said
+                    say(f"fork-branches: sync-shared {t}: {dest} "
+                        + ("was edited since it was installed" if dest in listed else "is the fork's own class, not the installed helper")
+                        + ": left alone (the library's copy differs; merge it by hand if wanted)")
+                continue
             if cur.get(dest) != data:
                 (work / dest).parent.mkdir(parents=True, exist_ok=True)
                 (work / dest).write_bytes(data); changed.append(dest)
@@ -2310,7 +2325,7 @@ def sync_shared(repo, targets=None, say=print):
         git(work, "add", "-A", "--", *sorted(set(changed)), check=True)
         mm = git(ROOT, "rev-parse", "--short", "HEAD").stdout.strip() or "?"
         r = git(work, "commit", "-q", "-m", f"{branch_name(t)}: the shared library at mc-mod-version-upgrade {mm}\n\n"
-                f"Tables {', '.join(versions_) or '-'} re-synced; the files the rows alone made re-made through them; the "
+                f"Tables {', '.join(v for v in versions_ if (shared_dir() / v / 'renames.tsv').is_file() or v in old_secs) or '-'} re-synced; the files the rows alone made re-made through them; the "
                 f"shared helpers as installed updated." + TRAILER)
         if r.returncode:
             say(f"fork-branches: sync-shared {t}: commit failed: {(r.stdout + r.stderr).strip()[-200:]}"); return 2
@@ -2860,6 +2875,30 @@ def self_check():
             why = target_done(r, "1.21.3")
             expect(any(w.startswith("REVIEW.md") and ("changed since" in w or "reviewed input" in w or "no longer equals" in w) for w in why),
                    f"the synced tables are reviewed inputs: the review goes stale: {why}")
+            expect("WARNING: 1.21.4, 1.21.5" in out and " not synced" in out, f"a partial sync-shared names the versions above it: {out[-400:]}")
+            # a version with helpers and no table (1.21.4) is synced too; an edited helper is named, never overwritten
+            (lib / "1.21.4/java").mkdir(parents=True)
+            (lib / "1.21.4/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 44; }\n", encoding="utf-8")
+            w5s, _w = worktree_for(r, "1.21.5")
+            pre5s = resolve_branch(r, "neoforge-1.21.5")
+            hp = w5s / "src/main/java/com/example/mod/mv/Helper.java"
+            hp.write_text(hp.read_text(encoding="utf-8").replace("int v", "int edited, v"), encoding="utf-8")
+            git(w5s, "commit", "-qam", "1.21.5 edits its helper", check=True)
+            os.environ["MMVU_SHARED_DIR"] = str(lib)
+            try:
+                rc, out = _quiet(sync_shared, r)
+            finally:
+                os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+            f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
+            f5s = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+            expect(rc == 0 and "WARNING" not in out and b"v = 44" in f4["src/main/java/com/example/mod/mv/Helper.java"]
+                   and b"int edited, v = 4;" in f5s["src/main/java/com/example/mod/mv/Helper.java"]
+                   and "sync-shared 1.21.5: src/main/java/com/example/mod/mv/Helper.java was edited since it was installed" in out,
+                   f"sync-shared (every version): 1.21.4's helper-only library synced, 1.21.5's edited helper named and kept: {out[-600:]}")
+            git(w5s, "reset", "-q", "--hard", pre5s)
+            for v in ("1.21.4", "1.21.5", "1.21.8"):
+                if (r / "build/fork-branches" / v).is_dir():
+                    git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / v))
         git(r, "worktree", "remove", "--force", str(r / "build/fork-branches/1.21.3"))
         # a branch that exists with other content is refused, nothing moved
         g("branch", "-f", "neoforge-1.21.5", "neoforge-1.21.1")
