@@ -282,6 +282,24 @@ is enough), then runs the gates, and the GATES.md the run writes is committed af
    `layer-sync.py detect --repo DIR --ref origin/<layer branch> --port-ref origin/<port branch>` must print
    `layer=true` with every target and `layer_behind=0` (or the count the next run will merge).
 
+11. **Done: hand off a manual test plan** (when the last target of a buildout is green -- one fork, or a library fork
+   and the forks that depend on it). The gates never look at what a port changed on screen, so the maintainer needs to
+   know what to test on which version. Run `python3 tools/layer-test-plan.py --repo DIR [--repo DIR ...] --json` (no
+   model, no network). Per fork it gives the versions and, for a layer fork, items per target, each with its sources,
+   the targets it applies to, their range and the version where it first appears (a change shared by several targets is
+   one item): `stub` (each `STUBS.json` entry, with its review and its `hooks` / `recheck` fields), `overlay` (an
+   overlay that replaces a whole authors' file, flagged `mixin` / `client`), `catalogue` (a rename row whose note, or
+   the CATALOG entry it cites, says the gates do not cover it, and that fired on the target), `dropped-dep` (a `DEPS.md`
+   row that dropped an optional integration) and `preview` (a target marked `preview=true`). A single-version fork is
+   its one version with no layer section. Add the fork's open issues labelled for the layer (`gh issue list --repo
+   OWNER/FORK --label <label> --state open`). Then publish a **Claude Code artifact** (never checked in) for the
+   maintainer: per Minecraft version, the changes that need a human eye -- for each, **what changed** and which version
+   introduced it, **how to see it** (where to go in game, what to do, what correct and broken look like) and **why the
+   gates did not cover it** -- written by you from the item's sources (read the overlay against the authors' file, the
+   stub's review). Each shared change is listed once, at its first version, with its range. End each version with a
+   checklist of the four or five things to test, in the order an install session reaches them. A mechanical overlay
+   (renames only, no `mixin`/`client` flag, nothing drawn) needs no entry: say how many you left out.
+
 ## Models and cost
 
 The per-error loop of a layer target is `tools/file-loop.py --layer <t>` (Haiku -> Sonnet -> Opus; a fix lands

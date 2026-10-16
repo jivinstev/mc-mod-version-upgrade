@@ -335,6 +335,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-override-signatures.py|convert-override-signatures: a hook whose 26.2 signature changed keeps its body in a private 1.21.1-shaped copy" \
             "port-derive.py|port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handlers dropped" \
             "mechanical-hop.py|mechanical-hop: members, then every converter in order, then members; a converter that changed nothing is not recounted; one needing the port's input is an advisory" \
+            "layer-test-plan.py|layer-test-plan: per layer target, the reviewed/reopened stubs, whole-file overlays, fired rows with a no-gate note, dropped optional integrations and preview targets, a shared change once with its range; a single-version fork is its one version with no layer section" \
             "manual-tests.py|manual-tests: the 10 manual tests no gate reaches, one per kind first (music, client packets, bosses, keys...), with steps naming real ids" \
             "offer-page.py|offer-page: the handoff page shows each fork's install, distance from release, checks and its manual tests" \
             "minitoml.py|minitoml: the TOML reader for Pythons without tomllib reads mods.toml forms (inline tables, every string kind) as tomllib does, and refuses broken TOML" \
