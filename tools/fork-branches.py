@@ -12,6 +12,7 @@
                                                [--accept-upstream-drift]
     python3 tools/fork-branches.py library-record --repo LIB --target T --dependent DIR [--slug owner/repo]
     python3 tools/fork-branches.py ci          --repo DIR --target T --modid ID [--run]
+    python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...]
     python3 tools/fork-branches.py --self-check
 
 THE SHAPE. The port branch `neoforge-1.21.1` stays exactly what it is (a single-version port). Each further Minecraft
@@ -72,7 +73,12 @@ import argparse, datetime, hashlib, importlib.util, json, os, pathlib, re, shuti
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TPL = ROOT / "templates/fork-branches/branch.gradle"
 PREPARE_SOURCES = ROOT / "templates/fork-layer/tools/prepare-sources.py"
-SHARED = ROOT / "templates/fork-layer/shared"
+SHARED_DEFAULT = ROOT / "templates/fork-layer/shared"
+
+
+def shared_dir():
+    """The shared library (templates/fork-layer/shared; MMVU_SHARED_DIR names another, for the self-check)."""
+    return pathlib.Path(os.environ.get("MMVU_SHARED_DIR") or SHARED_DEFAULT)
 REC = ".port"
 BRANCH_PROPS = "branch.properties"
 LAYER_HOOK_LINE = "apply from: '.multiversion/layer.gradle'"
@@ -1913,7 +1919,7 @@ def shared_helpers_for(versions_, mv_pkg, modid, build_text):
     name is left out (make-fork-layer.py's rule)."""
     pool = {}
     for v in reversed(versions_):
-        d = SHARED / v / "java"
+        d = shared_dir() / v / "java"
         for f in sorted(d.glob("*.java")) if d.is_dir() else []:
             text = f.read_text(encoding="utf-8")
             if any(n not in build_text for n in re.findall(r"(?m)^// REQUIRES: (\S+)", text)):
@@ -2023,8 +2029,8 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
         head.append(f"allowed_undone_parent={allowed}")
     rd, rd_parent = f"{REC}/{t}", f"{REC}/{parent}"
     sub = lambda x: x.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
-    sections = [f"# ---- shared {v}\n" + sub((SHARED / v / "renames.tsv").read_text(encoding="utf-8"))
-                for v in new_versions if (SHARED / v / "renames.tsv").is_file()]
+    sections = [f"# ---- shared {v}\n" + sub((shared_dir() / v / "renames.tsv").read_text(encoding="utf-8"))
+                for v in new_versions if (shared_dir() / v / "renames.tsv").is_file()]
     inherited = files.get(f"{REC}/{parent}/shared-renames.tsv", b"").decode() if parent else ""
     files[f"{rd}/{BRANCH_PROPS}"] = ("\n".join(head) + "\n").encode("utf-8")
     files[f"{rd}/renames.tsv"] = f"# {t}: from<TAB>to (plain type, member:, re:) -- see prepare-sources.py\n".encode("utf-8")
@@ -2069,8 +2075,8 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     if helpers:
         files[f"{rd}/shared-helpers.txt"] = ("# shared-library helpers as installed (path blob): tools/fork-branches.py\n"
                                              + "\n".join(sorted(helpers)) + "\n").encode("utf-8")
-    at_lines = [l for v in new_versions if (SHARED / v / "accesstransformer.cfg").is_file()
-                for l in sub((SHARED / v / "accesstransformer.cfg").read_text(encoding="utf-8")).splitlines()
+    at_lines = [l for v in new_versions if (shared_dir() / v / "accesstransformer.cfg").is_file()
+                for l in sub((shared_dir() / v / "accesstransformer.cfg").read_text(encoding="utf-8")).splitlines()
                 if l.strip() and not l.startswith("#")]
     if at_lines:
         cur = files.get(AT_DEFAULT, b"").decode("utf-8", "surrogateescape")
@@ -2094,6 +2100,89 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     say(f"fork-branches: made {branch_name(t)} at {c[:12]} from {branch_name(parent) if parent else pb}: NeoForge {neo}, shared "
         f"library {', '.join(new_versions) or '-'}, {len(helpers)} helper(s); next: git checkout {branch_name(t)} && python3 "
         f"tools/fork-port.py --repo {repo} --target {t}")
+    return 0
+
+
+
+def sync_shared(repo, targets=None, say=print):
+    """Bring version branches up to the shared library's current tables and helpers (make-fork-layer.py sync-shared's
+    job on a layer): per version, oldest first, on a clean checkout of its branch -- each `# ---- shared <v>` section of
+    .port/<t>/shared-renames.tsv rewritten from templates/fork-layer/shared/<v>/renames.tsv; every .java file the rows
+    alone made (equal to the old tables over the port branch) re-made through the new ones; each shared helper it carries
+    as installed (unedited since) replaced by the library's copy, and a helper the tree now uses added; committed on
+    the branch. The tables and shared-helpers.txt are reviewed inputs, so the version's review goes stale (re-review the
+    change); the next cascade remakes mechanical files through the new rows. Pushes nothing. -> exit code."""
+    repo = pathlib.Path(repo).resolve()
+    have = version_branches(repo)
+    order = sorted(have, key=mc_key)
+    todo = [t for t in order if not targets or t in targets]
+    if targets and set(targets) - set(order):
+        say(f"fork-branches: no version branch for {', '.join(sorted(set(targets) - set(order)))}"); return 2
+    for t in todo:
+        work, why = worktree_for(repo, t)
+        if work is None:
+            say(f"fork-branches: sync-shared {t}: {why}"); return 2
+        files = root_files(repo, work, True)
+        props = info(work, t)
+        mv_pkg = props.get("mv_package") or "mv"
+        toml = next((files[p] for p in sorted(files) if p.endswith("META-INF/neoforge.mods.toml") and p.startswith("src/")), b"")
+        modid = (re.search(rb'(?m)^\s*modId\s*=\s*"([^"]+)"', toml) or [None, b""])[1].decode("utf-8", "replace")
+        sub = lambda x: x.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
+        sp = work / REC / t / "shared-renames.tsv"
+        old_text = read_file(sp)
+        versions_ = [k.split(" ", 1)[1] for k in shared_sections(old_text)]
+        new_sections, kept = [], []
+        for v, body in shared_sections(old_text).items():
+            ver = v.split(" ", 1)[1]
+            f = shared_dir() / ver / "renames.tsv"
+            if f.is_file():
+                new_sections.append(f"# ---- shared {ver}\n" + sub(f.read_text(encoding="utf-8")))
+            else:
+                new_sections.append(body.rstrip("\n")); kept.append(ver)
+        new_text = ("\n".join(x.rstrip("\n") for x in new_sections) + "\n") if new_sections else old_text
+        pr = port_ref_of(repo, work, t, "HEAD")
+        read = reader_of_root(work)
+        rows_old = rows_tree(repo, pr, read, t, chain(work, t)) if pr else {}
+        changed = []
+        if new_text != old_text:
+            sp.write_bytes(new_text.encode("utf-8")); changed.append(sp.relative_to(work).as_posix())
+            rows_new = rows_tree(repo, pr, reader_of_root(work), t, chain(work, t)) if pr else {}
+            for p, data in rows_old.items():
+                if files.get(p) == data and rows_new.get(p) not in (None, data):
+                    (work / p).write_bytes(rows_new[p]); changed.append(p)
+        # helpers: an installed, unedited one follows the library; a newly used one is added
+        listed = helper_blobs(work, t)
+        build_text = files.get("build.gradle", b"").decode("utf-8", "replace") + files.get("gradle.properties", b"").decode("utf-8", "replace")
+        pool = shared_helpers_for(sorted(set(versions_), key=mc_key, reverse=True), mv_pkg, modid, build_text)
+        cur = root_files(repo, work, True)
+        java = [d.decode("utf-8", "replace") for p, d in cur.items() if p.startswith("src/main/java/") and p.endswith(".java")]
+        lines = dict(listed)
+        for rel, body in used_helpers(pool, java).items():
+            dest = f"src/main/java/{rel}"
+            data = body.encode("utf-8")
+            if dest in cur and listed.get(dest) != hash_blobs({dest: cur[dest]})[dest]:
+                continue                     # the fork's own class of that name, or an edited helper: left alone
+            if cur.get(dest) != data:
+                (work / dest).parent.mkdir(parents=True, exist_ok=True)
+                (work / dest).write_bytes(data); changed.append(dest)
+            lines[dest] = hash_blobs({dest: data})[dest]
+        if lines != listed:
+            (work / REC / t / "shared-helpers.txt").write_bytes(
+                ("# shared-library helpers as installed (path blob): tools/fork-branches.py\n"
+                 + "".join(f"{k} {v}\n" for k, v in sorted(lines.items()))).encode("utf-8"))
+            changed.append(f"{REC}/{t}/shared-helpers.txt")
+        if not changed:
+            say(f"fork-branches: sync-shared {t}: current"); continue
+        git(work, "add", "-A", "--", *sorted(set(changed)), check=True)
+        mm = git(ROOT, "rev-parse", "--short", "HEAD").stdout.strip() or "?"
+        r = git(work, "commit", "-q", "-m", f"{branch_name(t)}: the shared library at mc-mod-version-upgrade {mm}\n\n"
+                f"Tables {', '.join(versions_) or '-'} re-synced; the files the rows alone made re-made through them; the "
+                f"shared helpers as installed updated." + TRAILER)
+        if r.returncode:
+            say(f"fork-branches: sync-shared {t}: commit failed: {(r.stdout + r.stderr).strip()[-200:]}"); return 2
+        say(f"fork-branches: sync-shared {t}: {len(set(changed))} file(s) changed and committed on {branch_name(t)}"
+            + (f" (no library copy of {', '.join(kept)}: kept as it was)" if kept else "")
+            + "; its review is stale until a fresh reviewer reads the change")
     return 0
 
 
@@ -2246,6 +2335,8 @@ def main():
     f.add_argument("--accept-upstream-drift", action="store_true")
     lr = sub.add_parser("library-record"); lr.add_argument("--repo", required=True); lr.add_argument("--target", required=True)
     lr.add_argument("--dependent", required=True); lr.add_argument("--slug")
+    ss = sub.add_parser("sync-shared"); ss.add_argument("--repo", required=True)
+    ss.add_argument("--target", action="append", default=[], help="a version to sync (repeat; default every version branch)")
     ci_ = sub.add_parser("ci"); ci_.add_argument("--repo", required=True); ci_.add_argument("--target", required=True)
     ci_.add_argument("--modid", required=True); ci_.add_argument("--run", action="store_true")
     a = ap.parse_args()
@@ -2257,6 +2348,8 @@ def main():
         return library_record(a.repo, a.target, a.dependent, a.slug)
     if a.cmd == "ci":
         return ci(a.repo, a.target, a.modid, a.run)
+    if a.cmd == "sync-shared":
+        return sync_shared(a.repo, a.target or None)
     if a.cmd == "cascade":
         return cascade(a.repo, a.range, a.gates, a.dry_run)
     if a.cmd == "migrate":
@@ -2536,6 +2629,29 @@ def self_check():
                and b"minecraft_version=1.21.8" in f8["gradle.properties"] and b'"[1.21.8,1.21.9)"' in f8["src/main/resources/META-INF/neoforge.mods.toml"]
                and b"# ---- shared 1.21.8" in f8[".port/1.21.8/shared-renames.tsv"] and b"keep = 5" in f8["src/main/java/com/example/mod/Over.java"],
                f"add-target 1.21.8 from 1.21.5: versions, ranges, the shared 1.21.8 table, the parent's own changes kept: {out[-300:]}")
+        # sync-shared: the shared library moved (a row and a helper): 1.21.3 takes both, its rows-only files re-made
+        with tempfile.TemporaryDirectory() as e:
+            lib = pathlib.Path(e)
+            (lib / "1.21.3/java").mkdir(parents=True)
+            (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
+            (lib / "1.21.3/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 33; }\n", encoding="utf-8")
+            saved = os.environ.get("MMVU_SHARED_DIR")
+            os.environ["MMVU_SHARED_DIR"] = str(lib)
+            try:
+                rc, out = _quiet(sync_shared, r, ["1.21.3"])
+            finally:
+                os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+            f3 = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))
+            expect(rc == 0 and b"newer.Shared" in f3["src/main/java/com/example/mod/UsesHelper.java"]
+                   and b"v = 33" in f3["src/main/java/com/example/mod/mv/Helper.java"]
+                   and b"newer.Shared" in f3[".port/1.21.3/shared-renames.tsv"]
+                   and helper_map(f3[".port/1.21.3/shared-helpers.txt"].decode()).get("src/main/java/com/example/mod/mv/Helper.java")
+                   == hash_blobs({"x": f3["src/main/java/com/example/mod/mv/Helper.java"]})["x"],
+                   f"sync-shared 1.21.3: the new row re-makes the rows-only file, the installed helper follows the library: {out[-400:]}")
+            why = target_done(r, "1.21.3")
+            expect(any(w.startswith("REVIEW.md") and ("changed since" in w or "reviewed input" in w or "no longer equals" in w) for w in why),
+                   f"the synced tables are reviewed inputs: the review goes stale: {why}")
+        git(r, "worktree", "remove", "--force", str(r / "build/fork-branches/1.21.3"))
         # a branch that exists with other content is refused, nothing moved
         g("branch", "-f", "neoforge-1.21.5", "neoforge-1.21.1")
         before = g("rev-parse", "neoforge-1.21.5")
