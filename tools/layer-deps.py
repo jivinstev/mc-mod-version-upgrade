@@ -527,7 +527,7 @@ def library_done_checkout(co, target):
     if fp is None or not hasattr(fp, "target_done"):
         return False, f"{why}, but tools/fork-port.py's target_done() could not be loaded: cannot judge the done list", []
     try:
-        undone = fp.target_done(co, target)
+        undone = fp.target_done(co, target, write=False)   # judging a sibling library: never write into its checkout
     except Exception as e:      # noqa: BLE001 -- fail closed: an unanswerable done check is not done
         return False, f"{why}, but fork-port.py's target_done() failed ({type(e).__name__}: {e})", []
     if undone:
