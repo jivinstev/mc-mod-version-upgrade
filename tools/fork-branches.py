@@ -307,6 +307,25 @@ def root_files(repo, root, work):
     return out
 
 
+def root_modes(repo, root, ref, work):
+    """{path: git mode} of the tree root_files reads: work=True, the index's modes, an edited or new file's from the
+    file itself (its executable bit, where the file system has one); else commit `ref`'s."""
+    if not work:
+        return {p: m for p, (m, _b) in tree_entries(repo, ref).items()}
+    root = pathlib.Path(root)
+    z = lambda *a: [x for x in git(root, *a, check=True).stdout.split("\0") if x]
+    out = {}
+    for ent in z("ls-files", "-z", "-s"):
+        meta, path = ent.split("\t", 1)
+        out[path] = meta.split()[0]
+    if os.name != "nt":
+        for path in set(z("ls-files", "-z", "-m")) | set(z("ls-files", "-z", "-o", "--exclude-standard")):
+            f = root / path
+            if f.is_file() and not f.is_symlink():
+                out[path] = "100755" if os.stat(f).st_mode & 0o111 else "100644"
+    return out
+
+
 def export(repo, ref, dest):
     """Write commit `ref`'s tree into `dest` (no worktree, no index of the clone's is touched)."""
     dest = pathlib.Path(dest)
@@ -572,15 +591,18 @@ def build_keys(props_text):
     return "\n".join(sorted(f"{k}={v}" for k, v in parse_props(props_text).items() if BUILD_KEY.match(k)))
 
 
-def digests(files, t):
+def digests(files, t, modes=None):
     """(jar digest, review-inputs digest) of a version branch's tree {path: bytes}: what a gate run (the jar-relevant
-    files and the build keys) and a review (also the reviewed inputs of .port/<t>/) judged."""
+    files and the build keys) and a review (also the reviewed inputs of .port/<t>/) judged. With `modes` ({path:
+    mode}, a file without one 100644) a jar-relevant file's mode counts too, so an executable bit gained or lost
+    stales the record (MIGRATED.json says "with_modes"; a record written without them is read as it was)."""
     blobs = hash_blobs(files)
     props = f"{REC}/{t}/{BRANCH_PROPS}"
     h = hashlib.sha256()
     for p in sorted(blobs):
         if jar_relevant(p, t) and p != props:
-            h.update(f"{p}\0{blobs[p]}\n".encode("utf-8", "surrogateescape"))
+            mode = "" if modes is None else f"\0{modes.get(p, '100644')}"
+            h.update(f"{p}\0{blobs[p]}{mode}\n".encode("utf-8", "surrogateescape"))
     h.update(build_keys(files.get(props, b"").decode("utf-8", "surrogateescape")).encode("utf-8"))
     r = hashlib.sha256()
     for name in REVIEWED_INPUTS:
@@ -644,7 +666,7 @@ def commit_current(repo, root, t, c, ref, work, kind, files=None):
     if hit.get("error"):
         return False, f"names layer commit {c}, whose prepared tree could not be digested at migration: {hit['error']}"
     files = files if files is not None else root_files(repo, root, work)
-    jar, inputs = digests(files, t)
+    jar, inputs = digests(files, t, root_modes(repo, root, ref, work) if hit.get("with_modes") else None)
     if jar != hit.get("digest"):
         return False, f"names layer commit {c}: the branch's tree no longer equals what the layer prepared there (migrated)"
     if kind == "review" and inputs != hit.get("review_inputs"):
@@ -1531,12 +1553,12 @@ def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None,
                     except Exception as e:      # noqa: BLE001 -- recorded: that record then does not carry
                         recorded[full] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
                         continue
-                dj, dr = digests(files_c, t)
-                recorded[full] = {"digest": dj, "review_inputs": dr}
-            jar, inputs = digests(dict(tree, **extra), t)
+                dj, dr = digests(files_c, t, modes)
+                recorded[full] = {"digest": dj, "review_inputs": dr, "with_modes": True}
+            jar, inputs = digests(dict(tree, **extra), t, modes)
             mig = {"tool": "tools/fork-branches.py migrate", "layer_ref": ref, "layer_commit": lc, "target": t,
                    "port_commit": port_commit, "branch_commit": c1, "digest": jar, "review_inputs": inputs,
-                   "recorded": recorded}
+                   "with_modes": True, "recorded": recorded}
             extra[f"{REC}/{t}/MIGRATED.json"] = (json.dumps(mig, indent=1) + "\n").encode("utf-8")
             (stage / REC / t / "MIGRATED.json").write_bytes(extra[f"{REC}/{t}/MIGRATED.json"])
             # the inventory account, fresh, so the committed file is what a check says (gap 1)
@@ -2565,6 +2587,14 @@ def self_check():
         # a change after the migration makes the gates and the review stale; a mechanical file edited becomes a review row
         g("checkout", "-q", "neoforge-1.21.4")
         expect(checkout_version(r) == "1.21.4" and target_done(r, "1.21.4") == [], "checked out: done in place")
+        # a mode change alone (an executable bit) stales the migrated records too
+        if os.name != "nt":
+            pm = r / "src/main/java/com/example/mod/Plain.java"
+            pm.chmod(0o755)
+            why = target_done(r, "1.21.4")
+            expect(any(w.startswith("GATES.md") and "no longer equals" in w for w in why),
+                   f"a file made executable: the migrated Gate C record no longer matches: {why}")
+            pm.chmod(0o644)
         # the library rule: a library version is done only once a dependent passed Gate C against its jar
         bp = r / REC / "1.21.4" / BRANCH_PROPS
         bp.write_text(read_file(bp) + "library=true\n", encoding="utf-8")
