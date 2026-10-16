@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Stacked version branches: a multi-version fork as one real branch per Minecraft version (the default).
 
-    python3 tools/fork-branches.py migrate     --repo DIR [--layer-ref REF] [--port-branch B] [--targets T,T] [--dry-run]
+    python3 tools/fork-branches.py migrate     --repo DIR [--layer-ref REF] [--port-branch B] [--targets T,T] [--dry-run] [--library]
                                                [--json FILE]
     python3 tools/fork-branches.py verify      --repo DIR [--layer-ref REF] [--targets T,T] [--tip]
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO [--gates none|compile|ab|full] [--dry-run]
@@ -1466,8 +1466,10 @@ def verify_target(lay, t, branch_ref, parent, port_commit, parent_files=None):
     return diffs
 
 
-def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None, say=print, jpath=None):
-    """-> exit code. See the module docstring."""
+def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None, say=print, jpath=None, library=False):
+    """-> exit code. See the module docstring. library (--library), or a layer whose base.properties says
+    library=true: every branch made gets library=true in its branch.properties (the library rule: done only once a
+    dependent passed Gate C against its jar; its Gate C skips spawn and battle)."""
     repo = pathlib.Path(repo).resolve()
     ref, lc = layer_commit_of(repo, layer_ref)
     if not lc:
@@ -1478,6 +1480,10 @@ def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None,
     report = {"layer_ref": ref, "layer_commit": lc, "targets": []}
     try:
         lay = Layer(repo, lc, scratch)
+        if library or lay.base.get("library") == "true":
+            lay.base["library"] = "true"            # records_of writes it into every branch.properties
+            say("fork-branches: a library fork" + (" (--library)" if library else " (the layer's base.properties says "
+                "library=true)") + ": every version branch gets library=true")
         base_mc = lay.base.get("minecraft_version", "1.21.1")
         pb = port_branch or branch_name(base_mc)
         port_tip = resolve_branch(repo, pb)
@@ -3036,6 +3042,8 @@ def main():
     m = sub.add_parser("migrate"); m.add_argument("--repo", required=True); m.add_argument("--layer-ref")
     m.add_argument("--port-branch"); m.add_argument("--targets"); m.add_argument("--dry-run", action="store_true")
     m.add_argument("--json")
+    m.add_argument("--library", action="store_true", help="a library fork: library=true in every made branch's "
+                   "branch.properties (inferred when the layer's base.properties says library=true)")
     v = sub.add_parser("verify"); v.add_argument("--repo", required=True); v.add_argument("--layer-ref")
     v.add_argument("--targets"); v.add_argument("--tip", action="store_true", help="compare the branch tips, not the migration commits")
     c = sub.add_parser("check-done"); c.add_argument("--repo", required=True); c.add_argument("--target", required=True)
@@ -3093,7 +3101,7 @@ def main():
                        budget=a.budget_lines, out_dir=a.out)
     if a.cmd == "migrate":
         return migrate(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.dry_run, a.port_branch,
-                       jpath=a.json)
+                       jpath=a.json, library=a.library)
     if a.cmd == "verify":
         return verify(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.tip)
     if a.cmd == "check-done":
@@ -3261,6 +3269,31 @@ def _check_port_taken(expect):
                and any("did not merge into " + am in w for w in why),
                f"t7: after the hand merge the next cascade offers the authors' AMixin change again and records it open: "
                f"{out[-400:]} {why}")
+
+
+def _check_migrate_library(expect):
+    """migrate --library (or a layer whose base.properties says library=true) marks every branch a library."""
+    lib = lambda r, t: parse_props(ref_files(r, resolve_branch(r, branch_name(t))).get(f"{REC}/{t}/{BRANCH_PROPS}", b"").decode()).get("library")
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _fixture(pathlib.Path(d) / "a")
+        _fixture_shared(r, g)
+        rc, out = _quiet(migrate, r, library=True)
+        expect(rc == 0 and all(lib(r, t) == "true" for t in ("1.21.3", "1.21.4", "1.21.5"))
+               and LIBRARY_PENDING in "\n".join(target_done(r, "1.21.4")),
+               f"migrate --library: library=true on every branch, and the library rule applies: {out[-300:]}")
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _fixture(pathlib.Path(d) / "a")
+        _fixture_shared(r, g)
+        bp = r / ".multiversion/base.properties"
+        bp.write_text(read_file(bp) + "library=true\n", encoding="utf-8"); g("commit", "-qam", "layer: a library")
+        rc, out = _quiet(migrate, r)
+        expect(rc == 0 and all(lib(r, t) == "true" for t in ("1.21.3", "1.21.4", "1.21.5")),
+               f"migrate infers library=true from the layer's base.properties: {out[-300:]}")
+        r2, g2, _run2 = _fixture(pathlib.Path(d) / "b")
+        _fixture_shared(r2, g2)
+        rc, out = _quiet(migrate, r2)
+        expect(rc == 0 and all(lib(r2, t) is None for t in ("1.21.3", "1.21.4", "1.21.5")),
+               "control: a layer that is not a library migrates without library=true")
 
 
 def _check_deferred_integration(expect):
@@ -3788,6 +3821,7 @@ def self_check():
     _check_port_taken(expect)
     _check_cascade_plan(expect)
     _check_deferred_integration(expect)
+    _check_migrate_library(expect)
     if not os.environ.get("FB_SELF_CHECK_CRLF"):
         # the same checks with core.autocrlf=true (a Windows checkout's default): a version branch checked out with CRLF
         # line endings must read as its blobs (root_files), and a layer's prepare must see the blobs' bytes (Layer)

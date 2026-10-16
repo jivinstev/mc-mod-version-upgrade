@@ -397,7 +397,12 @@ entry spans from the earliest change it has not taken. A branch written before t
 When the maintainer decides it for a fork, on its clone (the layer branch fetched, the port branch present):
 
     python3 tools/fork-branches.py migrate --repo DIR --layer-ref origin/neoforge-1.21.x --dry-run    # the plan
-    python3 tools/fork-branches.py migrate --repo DIR --layer-ref origin/neoforge-1.21.x [--json migrate.json]
+    python3 tools/fork-branches.py migrate --repo DIR --layer-ref origin/neoforge-1.21.x [--json migrate.json] [--library]
+
+A **library** fork (one other forks pin) passes `--library` -- inferred when the layer's `base.properties` says
+`library=true` --, so every made branch carries `library=true` in its `branch.properties`: the library rule applies
+(a version is done only once a dependent passed Gate C against its jar, recorded with `library-record`; its own Gate
+C skips spawn and battle). Without it a migrated library reads as an ordinary fork.
 
 Per target, in inherits order, it makes `neoforge-<t>` from its parent's branch (the first from the port commit the layer
 carries) with git plumbing -- no checkout or work tree of yours is touched, nothing is pushed, no branch is moved or
