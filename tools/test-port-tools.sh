@@ -409,7 +409,7 @@ grep -q 'GRADLE_ERROR_CAP = 1000' tools/port_gates.py && grep -q "PORT_GRADLE_CA
   && ok "the Gradle error cap agrees in the init script, port_gates, file-loop and burndown-count" || bad "the Gradle error cap disagrees between its four copies"
 
 out="$(python3 tools/layer-deps.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "layer-deps: pinned mods resolved per target, a required miss stops (exit 15) and writes nothing, an optional miss is excluded and recorded, a slug-pinned Modrinth mod matches the manifest by project id, an unlisted implementation dependency is required (fail closed), an earlier --port-release pin survives a re-resolve, --dry-run builds no sibling, a single-version fork is untouched" \
+grep -q 'self-check: OK' <<<"$out" && ok "layer-deps: pinned mods resolved per target, a required miss stops (exit 15) and writes nothing, an optional miss is excluded and recorded, a slug-pinned Modrinth mod matches the manifest by project id, an unlisted implementation dependency is required (fail closed), an earlier --port-release pin survives a re-resolve, --dry-run builds no sibling, a single-version fork is untouched, library first: a sibling target with no green Gate C / an open REVIEW.md / a jar-changing file since its gated commit is refused (checkout or release), --allow-undone-library passes a checkout only and DEPS.md says so" \
   || bad "layer-deps self-check: $out"
 
 out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"

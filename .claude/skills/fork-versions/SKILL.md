@@ -154,6 +154,21 @@ keeps the existing `port_jar.` pin while it still pins the version `port-ci.yml`
 fetches and installs no sibling jar. A dependency the fork's `port-install.json` does not name is required when it is
 `implementation`/`api` (fail closed); a Modrinth pin by slug is matched to the manifest's project id.
 
+**Library first.** A dependent fork's target T is ported only after the library fork's T is **done** -- its
+`GATES.md` records a green Gate C at the commit the jar comes from (and its `REVIEW.md`, when the library has one, has no
+open item) -- and released: the dependent builds against the library's released per-target jar (`--port-release
+owner/repo@TAG`), never against a library target still being fixed (measured: porting the two in lockstep reopened
+every library target 3-7 times, each library fix re-gating the dependent). So finish the library's T first, then start
+the dependent's T. `layer-deps.py resolve` enforces it for a sibling named by `--port-checkout` or `--port-release`:
+a sibling target that is not done stops the resolve with exit 18, naming why (no `GATES.md`, A/B only, a FAIL row, an
+edited tree, a file that can change the jar changed since the gated commit, an unreviewed `STUBS.json` entry, a
+`REVIEW.md` that is not complete -- the same review record `fork-port.py` writes and judges); a missing
+`REVIEW.md` is tolerated for now and said. `layer-deps.py library-done --target T --port-checkout owner/repo=DIR` (or
+`--port-release owner/repo@TAG`) asks the same question alone (exit 0 done, 18 not). Developing the two together on
+purpose is `--allow-undone-library`, for a `--port-checkout` only: the resolve goes ahead and `DEPS.md` records the
+override ("Development only"); never release a target resolved that way -- re-resolve with `--port-release` once the
+library's target is done.
+
 **Writing `.multiversion/shipped-expect*.txt`:** each `FILE:REGEX` line proves a subsystem ran in the jar a player
 installs, so match the effect, not the exact wording: the class it acted on and what it did, accepting the forms a
 mod logs a class by (`(net/minecraft/server/level/)?ServerLevel\b`, a dotted or slashed package). An upstream update
