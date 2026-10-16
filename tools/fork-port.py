@@ -710,6 +710,31 @@ def client_mixin(text):
     return bool(imp and imp.group(1).startswith("net.minecraft.client"))
 
 
+def blank_comments(text):
+    """`text` with every // and /* */ comment (javadoc included) replaced by spaces, newlines kept, string and char
+    literals left alone: a scan for code shapes must not match an example in a comment (CATALOG M52's audit once
+    flagged a javadoc line of the shared ClientRefs helper), and line numbers stay right."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1]); i = j + 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i)); i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append("".join(ch if ch == "\n" else " " for ch in text[i:j])); i = j
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+
+
 def client_refs_in_common(repo, prepared):
     """From 1.21.6 strip_onlyin removes @OnlyIn, so a former @OnlyIn(CLIENT) method of a COMMON class is verified on a
     dedicated server, and `Player p = Minecraft.getInstance().player;` there loads LocalPlayer: NoClassDefFoundError in
@@ -721,7 +746,7 @@ def client_refs_in_common(repo, prepared):
         rel = f.relative_to(prepared).as_posix()
         if "/client/" in f"/{rel}":
             continue
-        text = f.read_text(encoding="utf-8", errors="replace")
+        text = blank_comments(f.read_text(encoding="utf-8", errors="replace"))
         if not CLIENT_WIDEN.search(text):
             continue
         orig = repo / "src/main/java" / rel
@@ -3477,8 +3502,13 @@ def self_check():
         (pr / "Ev.java").write_text("@EventBusSubscriber(modid = \"m\", value = Dist.CLIENT)\nclass Ev { void t() { Player p = Minecraft.getInstance().player; } }\n", encoding="utf-8")
         (pr / "GrMixin.java").write_text("import net.minecraft.client.renderer.GameRenderer;\n@Mixin(GameRenderer.class)\nclass GrMixin { void t() { Player p = Minecraft.getInstance().player; } }\n", encoding="utf-8")
         (pr / "EnMixin.java").write_text("import net.minecraft.world.entity.Entity;\n@Mixin(Entity.class)\nclass EnMixin { void t() { Player p = Minecraft.getInstance().player; } }\n", encoding="utf-8")
+        # an example in a javadoc or a comment is not code (issue #133 gap 8: the shared ClientRefs helper's javadoc)
+        (pr / "Doc.java").write_text("/**\n * Player p = Minecraft.getInstance().player;\n */\nclass Doc {\n"
+                                     " // Level l = Minecraft.getInstance().level;\n String s = \"/* not a comment\";\n"
+                                     " void t() { Player q = Minecraft.getInstance().player; }\n}\n", encoding="utf-8")
         hits = client_refs_in_common(repo, repo / "build/mc1.21.8/mv/java")
-        expect(hits == ["m/EnMixin.java:3", "m/Item.java:3"], f"client lookups in common classes: {hits}")
+        expect(hits == ["m/Doc.java:7", "m/EnMixin.java:3", "m/Item.java:3"],
+               f"client lookups in common classes (comments and javadoc ignored, a string with /* kept as code): {hits}")
     # ---- a review carries one version on when the file and every signal are the same; a changed count does not
     with tempfile.TemporaryDirectory() as d:
         mv = pathlib.Path(d); a, b = mv / "1.21.5", mv / "1.21.8"; a.mkdir(); b.mkdir()
