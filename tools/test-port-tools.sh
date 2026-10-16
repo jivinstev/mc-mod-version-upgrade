@@ -546,10 +546,17 @@ def fp(*a):
 # the library's release-side check is the same done list, run on the tag's tree with the library's history (gap 1)
 g("checkout", "-q", "neoforge-1.21.1")
 g("tag", "lib-1.0-mc1.21.5", "neoforge-1.21.5")
-os.environ["LAYER_DEPS_GIT_URL"] = str(r); os.environ["HOME"] = str(d / "home")
+os.environ["MMVU_CACHE_DIR"] = str(d / "cache")      # not HOME: Windows' home is USERPROFILE
 s2 = importlib.util.spec_from_file_location("ld", "tools/layer-deps.py"); ld = importlib.util.module_from_spec(s2); s2.loader.exec_module(ld)
+os.environ["LAYER_DEPS_GIT_URL"] = str(d / "nowhere")    # a first, wrong URL: cached nothing
+ld.library_clone("owner/lib")[0] is None or bad.append("a clone from a missing URL")
+subprocess.run(["git", "clone", "-q", "--bare", str(r), str(d / "old")], check=True)
+subprocess.run(["git", "-C", str(d / "old"), "tag", "-d", "lib-1.0-mc1.21.5"], check=True, capture_output=True)
+os.environ["LAYER_DEPS_GIT_URL"] = str(d / "old"); ld.library_clone("owner/lib")
+os.environ["LAYER_DEPS_GIT_URL"] = str(r)                # the URL changed: the cached clone follows it
 done, why, _n = ld.library_done_branch_release("owner/lib", "lib-1.0-mc1.21.5", "1.21.5")
-done or bad.append(f"a released, done library version reads done at its tag: {why}")
+done or bad.append(f"a released, done library version reads done at its tag (fetched from the URL as it now is): {why}")
+(d / "cache/git/owner__lib/HEAD").is_file() or bad.append("the clone is under $MMVU_CACHE_DIR")
 g("checkout", "-q", "neoforge-1.21.1")
 rc, out = fp("--target", "1.21.4", "--check-done")
 rc and bad.append(f"--check-done on a migrated version (checkout elsewhere): {rc} {out}")
@@ -582,7 +589,7 @@ def get(u):
 print("\n".join(bad) or "OK")
 PY
 )"
-[ "$out" = "OK" ] && ok "fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write-test-items on it, an edit makes it not done (gates stale, a review row), --chain is the cascade and stops at a conflict; layer-deps' release-side done check on a tag agrees with the checkout's" \
+[ "$out" = "OK" ] && ok "fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write-test-items on it, an edit makes it not done (gates stale, a review row), --chain is the cascade and stops at a conflict; layer-deps' release-side done check on a tag agrees with the checkout's (its clone under \$MMVU_CACHE_DIR, re-pointed when the URL changes)" \
   || bad "fork-port / layer-deps on version branches: $out"
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, layer mode"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then

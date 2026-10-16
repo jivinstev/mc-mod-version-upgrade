@@ -73,7 +73,7 @@ of branch neoforge-<t>: the block above goes into .port/<t>/branch.properties (.
 DEPS.md into .port/<t>/. A sibling library that is a version-branch fork releases each version from its own branch
 (Port CI's tag <mod>-<ver>-mc<t>); --port-release takes the jar from that release, pinned by sha256, and the library's
 done list is tools/fork-branches.py's, run on the tag's tree with the library's history (a bare clone under
-~/.mmvu/cache/git/), so the release and a checkout answer alike; the library rule's own reason (no dependent recorded
+$MMVU_CACHE_DIR/git/, default ~/.mmvu/cache/git/), so the release and a checkout answer alike; the library rule's own reason (no dependent recorded
 yet) never blocks a dependent. A dependent never builds a sibling's checkout: --port-checkout copies the jar the checkout
 built and pins it as `port_jar_dev.` -- development only, refused by the dependent's done check.
 
@@ -835,11 +835,20 @@ def branch_release(repo, tag, target, get=None):
 GIT_URL_ENV = "LAYER_DEPS_GIT_URL"          # a format with {repo} (tests: a local path); default GitHub over https
 
 
+CACHE_ENV = "MMVU_CACHE_DIR"                # where library clones are cached; default ~/.mmvu/cache
+
+
+def cache_dir():
+    """The cache directory: $MMVU_CACHE_DIR, else ~/.mmvu/cache (the home directory as Python finds it on each OS)."""
+    return pathlib.Path(os.environ.get(CACHE_ENV) or pathlib.Path.home() / ".mmvu/cache")
+
+
 def library_clone(repo):
-    """A bare clone of `repo` under ~/.mmvu/cache/git/ (fetched each call): the library's history and tags, read
-    without a checkout of anyone's."""
+    """A bare clone of `repo` under <cache>/git/ ($MMVU_CACHE_DIR, default ~/.mmvu/cache), fetched each call from the
+    URL as it is now (a cached clone's origin is re-pointed when the URL changed): the library's history and tags,
+    read without a checkout of anyone's."""
     url = os.environ.get(GIT_URL_ENV, "https://github.com/{repo}.git").format(repo=repo)
-    d = pathlib.Path.home() / ".mmvu/cache/git" / repo.replace("/", "__")
+    d = cache_dir() / "git" / repo.replace("/", "__")
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     if not (d / "HEAD").is_file():
         d.parent.mkdir(parents=True, exist_ok=True)
@@ -847,6 +856,9 @@ def library_clone(repo):
                            env=env)
         if r.returncode:
             return None, f"cannot clone {url}: {r.stderr.strip()[-200:]}"
+    else:
+        subprocess.run(["git", "-C", str(d), "remote", "set-url", "origin", url], capture_output=True, text=True,
+                       encoding="utf-8", env=env)
     r = subprocess.run(["git", "-C", str(d), "fetch", "-q", "--prune", "origin", "+refs/heads/*:refs/heads/*",
                         "+refs/tags/*:refs/tags/*"], capture_output=True, text=True, encoding="utf-8", env=env)
     if r.returncode:
