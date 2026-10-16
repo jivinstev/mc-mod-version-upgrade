@@ -534,8 +534,9 @@ def self_check_done_parent():
         g(repo, "add", "-A"); g(repo, "commit", "-qm", "1.21.3")
         (t3 / "GATES.md").write_text(f"Gates for `examplemod` at `{g(repo, 'rev-parse', '--short', 'HEAD')}` for Minecraft 1.21.3 "
                                      "(local environment):\n\n| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
-        (t3 / "REVIEW.md").write_text(f"- reviewer: fresh agent\n- date: 2026-10-16\n- commit: {g(repo, 'rev-parse', 'HEAD')}\n",
-                                      encoding="utf-8")
+        (t3 / "REVIEW.md").write_text(f"- reviewer: fresh agent\n- date: 2026-10-16\n- commit: {g(repo, 'rev-parse', 'HEAD')}\n\n"
+                                      + "".join(f"| {k} | {x} | ok | checked |\n" for k, x in fork_port().review_items(repo, t3)),
+                                      encoding="utf-8")          # add-target's renames.tsv is a review item too
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             add_target(repo, argparse.Namespace(target="1.21.4", neo=None, inherits=None, java=None, prop=[], substitute=[]))

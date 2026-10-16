@@ -59,8 +59,8 @@ LIBRARY FIRST
   a --port-checkout, fork-port.py's target_done(checkout, T) answers (no unreviewed STUBS.json entry, a complete
   REVIEW.md for its commit, TEST-ITEMS.md, the behaviour inventory accounted for, no DEPS.md "Development only" mark,
   an --allow-undone-parent parent done). For a --port-release the same list is read at the tag: REVIEW.md complete
-  with an `ok` row and a note for every STUBS.json entry and every whole-file overlay in the tag's tree (GitHub's tree
-  API), its commit a hex id that is the tag or an ancestor of it with nothing under src/, the chain's targets/ or
+  with an `ok` row and a note for every STUBS.json entry, every whole-file overlay, resource group and renames.tsv in
+  the tag's tree (GitHub's tree API), its commit a hex id that is the tag or an ancestor of it with nothing under src/, the chain's targets/ or
   shared/ changed since; TEST-ITEMS.md; INVENTORY-CHECK.json with nothing unaccounted when the layer has
   INVENTORY.json; no "Development only" mark; an allowed undone parent done at the tag. A library target with no
   REVIEW.md is not done. A sibling named by --port-checkout or --port-release that is not done stops the resolve
@@ -579,7 +579,8 @@ def release_overlays(paths, target):
 
 def release_review_problems(text, items, fp):
     """fork-port.py's review_problems() for a REVIEW.md read at a tag: [] when complete, else one line each. items:
-    [(kind, file)] the tag needs a verdict on (its STUBS.json entries and whole-file overlays)."""
+    [(kind, file)] the tag needs a verdict on (its STUBS.json entries, whole-file overlays, resource groups and
+    renames.tsv)."""
     if text is None:
         return [f"no REVIEW.md: {len(items)} item(s) need an independent reviewer's verdict"]
     fields, rows = fp.parse_review(text)
@@ -603,7 +604,8 @@ def release_review_problems(text, items, fp):
 def library_done_release(repo, tag, target, get=None, _seen=None):
     """Is a sibling's target done at the commit its release `tag` was built from? fork-port.py's done list, read at
     the tag: GATES.md (green Gate C, current: the GitHub compare API from its commit to the tag), STUBS.json, REVIEW.md
-    (complete; a row for every STUBS.json entry and every whole-file overlay in the tag's tree -- the GitHub tree API;
+    (complete; a row for every STUBS.json entry, every whole-file overlay, resource group and renames.tsv in the tag's
+    tree -- the GitHub tree API, whose blob ids give the same digests a checkout's do;
     its commit a hex id that is the tag or an ancestor of it, with nothing under src/, the chain's targets/ or shared/
     changed between it and the tag), TEST-ITEMS.md, the inventory account (INVENTORY-CHECK.json, when the layer has
     INVENTORY.json), no DEPS.md "Development only" mark, and a parent added with --allow-undone-parent done too.
@@ -641,6 +643,7 @@ def library_done_release(repo, tag, target, get=None, _seen=None):
         test_items = raw(f"{tdir}/TEST-ITEMS.md")
         deps_md = raw(f"{tdir}/DEPS.md") or ""
         paths = [e.get("path", "") for e in tree.get("tree", []) if e.get("type") == "blob"]
+        blobs = {e.get("path", ""): e.get("sha", "") for e in tree.get("tree", []) if e.get("type") == "blob"}
         inv_check = raw(f"{tdir}/INVENTORY-CHECK.json") if ".multiversion/INVENTORY.json" in paths else ""
         fields = fp.parse_review(review)[0] if review is not None else {}
         rc = fields.get("commit", "?")
@@ -663,7 +666,11 @@ def library_done_release(repo, tag, target, get=None, _seen=None):
     except ValueError:
         sdata = []
     items = sorted({("stub", e["file"]) for e in sdata if isinstance(e, dict) and e.get("file")}
-                   | {("overlay", p) for p in release_overlays(paths, target)})
+                   | {("overlay", p) for p in release_overlays(paths, target)}
+                   # the target's resource groups and renames.tsv, each with its digest of the tree's blob ids: the
+                   # same items fork-port.py review_items() gives a checkout
+                   | (fp.review_file_items(tdir, [(p[len(tdir) + 1:], b) for p, b in blobs.items() if p.startswith(tdir + "/")])
+                      if hasattr(fp, "review_file_items") else set()))
     out += release_review_problems(review, items, fp)
     if rcmp is not None:
         if rcmp.get("status") not in ("ahead", "identical"):
@@ -1109,6 +1116,7 @@ def self_check():
             "def5678": {"status": "ahead", "files": [{"filename": ".multiversion/targets/1.21.4/REVIEW.md"}]}}
     tree = {"truncated": False}
     seen = []
+    blob = lambda text: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()   # a git blob id
 
     def fake(url, headers=None):
         seen.append(url)
@@ -1118,7 +1126,7 @@ def self_check():
                 raise urllib.error.HTTPError(url, 404, "nf", None, None)
             return json.dumps(cmps[base]).encode()
         if "/git/trees/" in url:
-            return json.dumps({**tree, "tree": [{"path": p, "type": "blob"} for p in sorted(files)]}).encode()
+            return json.dumps({**tree, "tree": [{"path": p, "type": "blob", "sha": blob(files[p])} for p in sorted(files)]}).encode()
         path = url.split("/tag9/", 1)[1]
         if path in files:
             return files[path].encode()
@@ -1169,6 +1177,24 @@ def self_check():
     rel_done("an account with unaccounted items: not done", False)
     files[".multiversion/targets/1.21.4/INVENTORY-CHECK.json"] = json.dumps({"target": "1.21.4", "unaccounted": []})
     rel_done("every inventory item accounted for at the tag: done")
+    # the tag's resource overlays and renames.tsv need their rows too, with the digest a checkout's review_items gives
+    egg = ".multiversion/targets/1.21.4/resources/assets/examplemod/items/egg.json"
+    files[egg] = '{"model": {}}\n'; files[".multiversion/targets/1.21.4/renames.tsv"] = "a\tb\n"
+    r = rel_done("a release with an unreviewed resource group and renames.tsv: not done", False)
+    expect("no verdict: resources .multiversion/targets/1.21.4/resources/assets/examplemod/items @" in r[1]
+           and "no verdict: renames .multiversion/targets/1.21.4/renames.tsv @" in r[1], f"both named: {r[1]}")
+    fpm = _fork_port()
+    with tempfile.TemporaryDirectory() as td:
+        co = pathlib.Path(td); tdc = co / ".multiversion/targets/1.21.4"
+        for p_ in (egg, ".multiversion/targets/1.21.4/renames.tsv"):
+            (co / p_).parent.mkdir(parents=True, exist_ok=True); (co / p_).write_bytes(files[p_].encode())
+        local = [x for x in fpm.review_items(co, tdc) if x[0] in ("resources", "renames")]
+    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel + "".join(f"| {k} | {x} | ok | checked |\n" for k, x in local)
+    rel_done("rows with a checkout's digests for the same bytes: done (one definition)")
+    files[egg] = '{"model": {"tints": [1]}}\n'
+    rel_done("a resource group changed at the tag: its old row does not count: not done", False)
+    del files[egg]; del files[".multiversion/targets/1.21.4/renames.tsv"]
+    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel
     files[".multiversion/targets/1.21.4/target.properties"] = "x=1\nallowed_undone_parent=1.21.3 (development)\n"
     files[".multiversion/targets/1.21.3/target.properties"] = "x=1\n"
     rel_done("a parent added with --allow-undone-parent that is still not done at the tag: not done", False)

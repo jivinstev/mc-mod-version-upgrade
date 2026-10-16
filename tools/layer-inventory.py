@@ -36,7 +36,9 @@ effective resources (targets/<chain>/resources over src/<set>/resources). Per it
               review names the file (below)
   moved       not there, and a REVIEWED STUBS.json entry of T for that file (no open `recheck`), a REVIEW.md of T naming
               the file or the item id in a row with verdict `ok` and a note (a `?` or not-ok row, or a mention
-              in a note, does not), or a BEHAVIOUR.json entry {"item", "status": "moved", "where", "review"}
+              in a note, does not) -- for a hook (mixin, injection, overwrite, event, shader-uniform/-sampler) a row
+              naming the file accounts only when its note names the item id; an `item` row naming the id always does --
+              or a BEHAVIOUR.json entry {"item", "status": "moved", "where", "review"}
   dropped     the file is in the chain's drops.txt under a comment (the comment is the reason), or a BEHAVIOUR.json entry
               {"item", "status": "dropped", "reason"}
   unaccounted none of the above: the target is not done. The list is printed (and given in --json).
@@ -86,19 +88,30 @@ def hook_targets(text):
 
 
 def review_ok_names(text):
-    """The files/ids of REVIEW.md's rows (fork-port.py's parse_review()) with verdict `ok` and a note: only these
+    """{file or id: note} of REVIEW.md's rows (fork-port.py's parse_review()) with verdict `ok` and a note: only these
     account for an item. A `?` row (review_skeleton's), a not-ok row or a mention in a note accounts for nothing."""
     global _FP
     if _FP is None:
         _FP = _load("fork_port_for_inventory", "fork-port.py")
     _fields, rows = _FP.parse_review(text)
-    return {f for (_k, f), (v, note) in rows.items() if v == "ok" and note.strip() not in ("", "?")}
+    return {f: note for (_k, f), (v, note) in rows.items() if v == "ok" and note.strip() not in ("", "?")}
+
+
+# the items a file-level row cannot account for: a hook a reviewer must have looked at by name (measured: one ok row
+# per file accounted for every injection in it, those the reviewer never looked at too)
+REVIEW_HOOK_KINDS = HOOK_KINDS + ("shader-uniform", "shader-sampler")
 
 
 def review_names(names, r):
-    """Does an ok row name item r: its id, its file, or a path ending in /<its file> (an overlay row's
-    .multiversion/targets/<t>/java/<file>)?"""
-    return any(n == r["id"] or n == r["file"] or n.endswith("/" + r["file"]) for n in names)
+    """Does an ok row account for item r? A row naming its id (an `item` row) always does. A row naming its file (or a
+    path ending in /<its file>: an overlay row's .multiversion/targets/<t>/java/<file>) does for a non-hook item, and
+    for a hook (REVIEW_HOOK_KINDS) only when its note names the item's id. names: review_ok_names()."""
+    if r["id"] in names:
+        return True
+    rows = [note for n, note in names.items() if n == r["file"] or n.endswith("/" + r["file"])]
+    if r["kind"] in REVIEW_HOOK_KINDS:
+        return any(r["id"] in note for note in rows)
+    return bool(rows)
 
 
 def _plan():
@@ -363,7 +376,7 @@ def account(repo, target, inv=None):
     drops = _drops(mv, names)
     stubs = _stub_files(mv / "targets" / target)
     review_p = mv / "targets" / target / "REVIEW.md"
-    review = review_ok_names(_read(review_p)) if review_p.is_file() else set()
+    review = review_ok_names(_read(review_p)) if review_p.is_file() else {}
     beh, notes = _behaviour(mv, names)
     present = now
     java_text = None          # the prepared trees' Java, read once when a 1.21.5+ shader item needs it
@@ -749,6 +762,42 @@ def self_check():
         expect(inventory_unaccounted(sv, "1.21.4") == [] and not (sv / ".multiversion").exists(),
                "single-version: inventory_unaccounted is [] and writes nothing")
         expect(src_tree(lf) is None, "not a git repo: no src tree recorded")
+    # ---- a file-level ok row accounts for a file's non-hook items only: a hook (mixin target, injection, event
+    # listener, shader uniform/sampler) needs its id named, in the row's note or as an `item` row's file
+    with tempfile.TemporaryDirectory() as d:
+        lf = pathlib.Path(d) / "layer"
+        mvd = lf / ".multiversion"
+        w(mvd / "base.properties", "minecraft_version=1.21.1\n")
+        w(mvd / "targets/1.21.4/target.properties", "x=1\n")
+        base = mixin.replace("private void sky(CallbackInfo ci) {}",
+                             "private void sky(CallbackInfo ci) { RenderSystem.setShader(GameRenderer::getPositionTexShader); }")
+        w(lf / "src/main/java/com/example/mod/mixin/LevelRendererMixin.java", base)
+        cmd_build(argparse.Namespace(repo=str(lf), dry_run=False))
+        ov = (base.replace(' RenderSystem.setShader(GameRenderer::getPositionTexShader);', "")
+              .replace('  @Inject(method = "renderClouds", at = @At("HEAD"), cancellable = true)\n  private void clouds(CallbackInfo ci) {}\n', ""))
+        w(mvd / "targets/1.21.4/java/com/example/mod/mixin/LevelRendererMixin.java", ov)
+        w(lf / "build/mc1.21.4/mv/java/com/example/mod/mixin/LevelRendererMixin.java", ov)
+        code, rep, _ = check(lf, "1.21.4")
+        lost = {r["kind"]: r["id"] for r in rep["items"] if r["status"] == "unaccounted"}
+        expect(code == EXIT_UNACCOUNTED and set(lost) >= {"injection", "render-use"},
+               f"the overlay lost an injection and a render use: {rep['unaccounted']}")
+        ovp = ".multiversion/targets/1.21.4/java/com/example/mod/mixin/LevelRendererMixin.java"
+        head = "- reviewer: r\n- date: 2026-01-01\n- commit: abc1234\n\n| kind | file | verdict | note |\n|---|---|---|---|\n"
+        w(mvd / "targets/1.21.4/REVIEW.md", head + f"| overlay | {ovp} | ok | the sky hook is the same |\n")
+        code, rep, _ = check(lf, "1.21.4")
+        expect(lost["injection"] in rep["unaccounted"] and not any(":render-use:" in i for i in rep["unaccounted"]),
+               f"a file-level ok row accounts for the render use, not for the injection it never names: {rep['unaccounted']}")
+        w(mvd / "targets/1.21.4/REVIEW.md", head + f"| overlay | {ovp} | ok | sky same; {lost['injection']}: the clouds "
+                                                   "hook is vanilla's own option now |\n")
+        code, rep, _ = check(lf, "1.21.4")
+        expect(code == 0 and not rep["unaccounted"], f"an ok row whose note names the hook's id accounts for it: {rep['unaccounted']}")
+        w(mvd / "targets/1.21.4/REVIEW.md", head + f"| overlay | {ovp} | ok | sky same |\n"
+                                                   f"| item | {lost['injection']} | ok | the clouds hook is vanilla's own option now |\n")
+        code, rep, _ = check(lf, "1.21.4")
+        expect(code == 0, f"an ok `item` row for the hook's id accounts for it: {rep['unaccounted']}")
+        w(mvd / "targets/1.21.4/REVIEW.md", head + f"| overlay | {ovp} | ok | sky same |\n"
+                                                   f"| item | {lost['injection']} | ? | ? |\n")
+        expect(check(lf, "1.21.4")[0] == EXIT_UNACCOUNTED, "a `?` item row (review_skeleton's) accounts for nothing")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

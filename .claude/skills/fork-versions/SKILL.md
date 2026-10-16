@@ -41,16 +41,37 @@ A target is **done** when, and only when, all of these hold (`tools/fork-port.py
    library's checkout;
 3. no `STUBS.json` entry is unreviewed;
 4. `.multiversion/targets/<t>/REVIEW.md` is complete for the commit it names: an **independent fresh-context review**
-   with one verdict (`ok` / `not-ok`) and a note per `STUBS.json` entry and per whole-file overlay (read against the
-   authors' file it replaces), plus `reviewer`, `date` and `commit` (a commit id: `HEAD` or a branch name is
-   refused); nothing the target is built from has changed since that commit -- its directory, the authors' `src/`, its
-   chain's `targets/` and `shared/` (the run's own `GATES.md`/`COST.md`/`RESIDUE.md`/`REVIEW.md`/`TEST-ITEMS.md`/
-   `INVENTORY-CHECK.json`/`DEPS.md` aside); and no overlay `layer-sync.py` recorded in the target's `REMERGE.json` as not
-   taking the authors' change still has the bytes it had then. A whole-file overlay is one definition, `tools/layer-sync.py` `whole_file_overlays()`: a `.java` file of the
-   target's own `java/` (or `<set>/java/`) that replaces an authors' file -- exactly the files `layer-sync.py overlays`
-   counts against the budget; an overlay-only helper is neither;
+   with one verdict (`ok` / `not-ok`) and a note per row, and a row for each of:
+   - every `STUBS.json` entry and every whole-file overlay (read against the authors' file it replaces). A whole-file
+     overlay is one definition, `tools/layer-sync.py` `whole_file_overlays()`: a `.java` file of the target's own
+     `java/` (or `<set>/java/`) that replaces an authors' file -- exactly the files `layer-sync.py overlays` counts
+     against the budget, reported everywhere as "whole-file overlays (N) + overlay-only files (M)"; an overlay-only
+     file (a helper the authors do not have) needs no row and is not budgeted;
+   - every **resource group** of the target's own `resources/` (kind `resources`): its first three directories
+     (`assets/<ns>/items`, `data/<ns>/recipe`, `data/<ns>/tags`, ...), or the file itself when it is shallower, with
+     the digest of the group's files in the row (`<path> @<12 hex>`, written by `fork-port.py`'s skeleton) -- read each
+     file against the authors' 1.21.1 resource it stands for (an item definition against the model, its `overrides`
+     and the spawn egg's colours; a recipe or tag against the code that uses it);
+   - the target's `renames.tsv` as a whole (kind `renames`, with its digest): every row read as a rename the target
+     needs. An edit to a group or to `renames.tsv` changes its digest, so it is a new row with no verdict even when
+     `commit` was moved on. One row per group rather than per file: a root target carried ~150 resource files, ~130 of
+     them generated item definitions with no ledger line, and four of the ten regressions its first review found (a
+     missing repair tag, spawn-egg tints, an item-model condition, trim selects) were in those files -- a "generated,
+     no row" exemption would have hidden three of them, a row per file is ~150 notes, and a digested group row makes
+     the reviewer read them and every later edit re-reviewed. (A file that is missing, like that repair tag, is found
+     from the overlay that uses it; the group's row is how the fix gets reviewed.)
+
+   Plus `reviewer`, `date` and `commit`: `reviewer` names the reviewing agent, distinct from the fixer (e.g. `fresh
+   agent <session id>, not the fixer`); `commit` is the full or abbreviated hex sha of the commit reviewed, 7 to 40
+   hex digits (`git rev-parse --short HEAD`) -- `HEAD`, a branch or a tag name is refused. Nothing the target is built
+   from has changed since that commit -- its directory, the authors' `src/`, its chain's `targets/` and `shared/` (the
+   run's own `GATES.md`/`COST.md`/`RESIDUE.md`/`TEST-ITEMS.md`/`INVENTORY-CHECK.json`/`DEPS.md` and the reviewer's own
+   `REVIEW.md`/`BEHAVIOUR.json` aside; `BEHAVIOUR.json` is still what the inventory account reads); and no overlay
+   `layer-sync.py` recorded in the target's `REMERGE.json` as not taking the authors' change still has the bytes it had
+   then;
 5. the target's manual-test items are generated (`TEST-ITEMS.md`, from `tools/layer-test-plan.py`; a run of
-   `fork-port.py` to the end writes it);
+   `fork-port.py` to the end writes it, and `python3 tools/fork-port.py --repo DIR --target <t> --write-test-items`
+   writes it alone -- no stage or gate, under the checkout lock -- which `--check-done` names when it is missing);
 6. every item of the base build's behaviour inventory (`.multiversion/INVENTORY.json`) is accounted for on the
    target -- `tools/layer-inventory.py`'s check, run by `target_done()` itself and written to the target's
    `INVENTORY-CHECK.json` (see "A version accounts for the base's behaviour"); a layer with no `INVENTORY.json`, or a
@@ -61,7 +82,8 @@ A target is **done** when, and only when, all of these hold (`tools/fork-port.py
    recorded under "Development only" in its `DEPS.md`): re-resolve with `--port-release` once the library's is.
 
 A run whose gates are green but that misses 4-7 exits **18** ("Gate C green, NOT done") and adds a `?` row to
-`REVIEW.md` for every item without a verdict; it never writes a verdict. **The list does not grow during a buildout**:
+`REVIEW.md` for every item without a verdict, and an `item` row (`| item | <inventory id> | ? | ? |`, a file's ids
+together) for every behaviour-inventory item the target leaves unaccounted; it never writes a verdict. **The list does not grow during a buildout**:
 each bar added after targets were done swept every finished target again (measured: 3-7 reopenings per target). A new
 requirement is a change to `target_done()` and to this section, made between buildouts.
 
@@ -81,11 +103,16 @@ lower target) is not done, naming what is open. `--allow-undone-parent` is for d
 until its parent is.
 
 **The reviewer is a fresh agent with only that target's files**: `.multiversion/targets/<t>/` (`REVIEW.md` lists every
-item, `STUBS.json`, the overlays) and the authors' files the overlays replace -- never the agent that ported or fixed the
-target, never one carried over from another target, and not shown the parent's reviews (an inherited "moved, same effect"
-review that was wrong reached eight targets before anyone looked again). It fills `reviewer` (its own identity: the
-session link), `date` and `commit` (`git rev-parse --short HEAD` of the committed state it read), gives each row a
-verdict and a note that says what it compared, and the result is committed. A `not-ok` goes to the target's fixer; after
+item, `STUBS.json`, the overlays, `resources/`, `renames.tsv`) and the authors' files the overlays and resources stand
+for -- never the agent that ported or fixed the target, never one carried over from another target, and not shown the
+parent's reviews (an inherited "moved, same effect" review that was wrong reached eight targets before anyone looked
+again). **The coordinator starts it** with only those files in its prompt; no tool can check that it did, so it is the
+coordinator's job, and `reviewer:` must name the reviewing agent distinctly from the fixer (e.g. `fresh agent <session
+id>, not the fixer`). It fills `reviewer`, `date` and `commit` (`git rev-parse --short HEAD` of the committed state it
+read: a full or abbreviated hex sha, 7-40 digits), gives each row a verdict and a note that says what it compared --
+and for each hook it accounts for (a mixin target, an injection, an event listener, a shader uniform or sampler of the
+behaviour inventory) names the item id in the file's note or fills that id's `item` row: an `ok` row for a file accounts
+for its non-hook items only -- and the result is committed. A `not-ok` goes to the target's fixer; after
 the fix, a fresh reviewer reviews again against the new commit.
 
 ## Direct jumps (opt-in per target)
@@ -189,8 +216,8 @@ a sibling target that is not done stops the resolve with exit 18, naming why (no
 edited tree, a file that can change the jar changed since the gated commit -- an untracked file under `.multiversion/`
 in a checkout included -- then whatever `fork-port.py`'s done list says: for a `--port-checkout` it calls `fork-port.py`'s
 own `target_done()` in that checkout, so a library target with no `REVIEW.md` is not done; for a `--port-release` it
-reads the same list at the tag: an `ok` row with a note in `REVIEW.md` for every `STUBS.json` entry and every whole-file
-overlay in the tag's tree, the review's commit a hex id that is the tag or an ancestor of it with nothing under `src/`,
+reads the same list at the tag: an `ok` row with a note in `REVIEW.md` for every `STUBS.json` entry, every whole-file
+overlay, resource group and `renames.tsv` in the tag's tree (the digests from the tree's blob ids, as a checkout's), the review's commit a hex id that is the tag or an ancestor of it with nothing under `src/`,
 the chain's `targets/` or `shared/` changed since, `TEST-ITEMS.md`, the inventory account, no "Development only" mark,
 an `--allow-undone-parent` parent done). `layer-deps.py library-done --target T --port-checkout owner/repo=DIR` (or
 `--port-release owner/repo@TAG`) asks the same question alone (exit 0 done, 18 not). Developing the two together on
@@ -276,7 +303,9 @@ and registry the mod adds to (commit it; re-run it after a keep-current merge br
 warns when `src/` changed since). For each target, once it compiles, `python3 tools/layer-inventory.py check --repo
 DIR --target <t>` reads the target's prepared tree and says, per item, `same` (also through the rename tables),
 `changed` / `moved` (accounted only by a reviewed `STUBS.json` entry for the file, a row of the target's `REVIEW.md` with verdict `ok` and a
-note naming the file or the item id -- a `?` or `not-ok` row, or a mention in a note, does not -- or a `BEHAVIOUR.json` entry with a `where` and a `review`), `dropped` (a `drops.txt` comment, or a `BEHAVIOUR.json` entry with a
+note naming the file or the item id -- a `?` or `not-ok` row, or a mention in a note, does not; for a hook item (mixin,
+injection, overwrite, event, shader uniform/sampler) a file's row accounts only when its note names the item id, an
+`item` row for the id always does -- or a `BEHAVIOUR.json` entry with a `where` and a `review`), `dropped` (a `drops.txt` comment, or a `BEHAVIOUR.json` entry with a
 `reason`) or `unaccounted`: exit 16 lists the unaccounted ones, and the target is not done until it exits 0 (the account
 is written to `.multiversion/targets/<t>/INVENTORY-CHECK.json`; a layer fork with no `INVENTORY.json` counts as not
 accounted). Record each

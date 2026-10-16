@@ -39,7 +39,8 @@ target). The keep-current skill only calls this for a fork that has the layer.
           overlay that did not merge is rework (its hunks in RESIDUE.md), one whose overlays merged is at least a
           touch-up. The table's notes add the re-merge and each target's overlay budget (`overlays` below); a target
           with no overlay gets no such note, so the output is as before.
-  overlays  the overlay budget, per target: its whole-file overlays (and lines), each against what it replaces (the
+  overlays  the overlay budget, per target: "whole-file overlays (N) + overlay-only files (M)" (the one wording, also
+          tools/fork-port.py's) and the whole-file ones' lines, each against what it replaces (the
           authors' file through the rename table alone, or the overlay it inherits for the same path) -- real,
           mechanical (names only: rename rows would do), redundant (identical), overlay-only (replaces nothing, not
           counted) --, how many are mixins / client code, and a WARNING above the budget (default 30;
@@ -402,13 +403,18 @@ def overlay_report(repo, t, prep=None):
             "budget": budget, "over": len(counted) > budget, "files": files}
 
 
+def overlay_counts(o):
+    """The one wording of a target's overlay counts, here and in tools/fork-port.py: the whole-file overlays (budgeted,
+    one REVIEW.md row each) and the overlay-only files (replace nothing: neither)."""
+    return f"whole-file overlays ({o['overlays']}) + overlay-only files ({o['overlay_only']})"
+
+
 def overlay_note(o):
     if not o or not (o["overlays"] or o["overlay_only"]):
         return ""
-    s = (f"{o['overlays']} whole-file overlay(s), {o['lines']} lines: {o['real']} real, {o['mechanical']} mechanical "
+    s = (f"{overlay_counts(o)}; the whole-file ones {o['lines']} lines: {o['real']} real, {o['mechanical']} mechanical "
          f"(rename rows would do), {o['renamed_copy']} renamed copies of an inherited overlay, {o['redundant']} redundant "
          f"(identical to what they replace); {o['mixin']} mixin, {o['client']} client")
-    s += f"; {o['overlay_only']} overlay-only" if o["overlay_only"] else ""
     return s + (f" -- OVER the overlay budget of {o['budget']}" if o["over"] else "")
 
 
@@ -930,7 +936,7 @@ def cmd_run(a):
                 rec["residue"] = residue_of(repo, t)
         rec["overlays"] = overlay_report(repo, t, prep)
         if rec["overlays"]["over"]:
-            print(f"layer-sync: WARNING {t}: {rec['overlays']['overlays']} whole-file overlays, over the overlay budget "
+            print(f"layer-sync: WARNING {t}: {overlay_counts(rec['overlays'])}: the whole-file ones over the overlay budget "
                   f"of {rec['overlays']['budget']} (.multiversion/ci.properties overlay_budget)", flush=True)
         print(f"layer-sync: {t}: {rec['before']} -> {rec['after']} errors, {rec['class']}", flush=True)
         rows.append(rec)
@@ -968,7 +974,8 @@ def cmd_overlays(a):
         return 2
     prep = Preparer(repo)
     reps = [overlay_report(repo, t, prep) for t in want]
-    print("| target | overlays | lines | real | mechanical | renamed copy | redundant | mixin | client | overlay-only | budget |")
+    print("| target | whole-file overlays | lines | real | mechanical | renamed copy | redundant | mixin | client | "
+          "overlay-only files | budget |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
     for o in reps:
         print(f"| {o['target']} | {o['overlays']} | {o['lines']} | {o['real']} | {o['mechanical']} | {o['renamed_copy']} | "
@@ -981,7 +988,7 @@ def cmd_overlays(a):
             if fs:
                 print(f"\n{o['target']}: {len(fs)} {k} overlay(s) -- {what}:\n  " + "\n  ".join(fs))
         if o["over"]:
-            print(f"\nWARNING {o['target']}: {o['overlays']} whole-file overlays, over the overlay budget of {o['budget']} "
+            print(f"\nWARNING {o['target']}: {overlay_counts(o)}: the whole-file ones over the overlay budget of {o['budget']} "
                   "(default %d; .multiversion/ci.properties overlay_budget=N)" % DEFAULT_OVERLAY_BUDGET)
     if a.json:
         pathlib.Path(a.json).write_text(json.dumps(reps, indent=1), encoding="utf-8")

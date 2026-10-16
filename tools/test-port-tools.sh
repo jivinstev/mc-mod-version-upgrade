@@ -454,6 +454,15 @@ python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.5 --allow
 out="$(python3 tools/fork-port.py --repo "$RL" --target 1.21.3 --check-done 2>&1)"; code=$?
 [ $code = 18 ] && grep -q 'no green Gate C' <<<"$out" && grep -q 'no REVIEW.md' <<<"$out" \
   && ok "fork-port --check-done: not done without Gate C and REVIEW.md (exit 18, each reason listed)" || bad "--check-done: exit $code: $out"
+# TEST-ITEMS.md: --check-done names the command that writes it alone; --write-test-items writes it and nothing else
+grep -q -- "--target 1.21.3 --write-test-items" <<<"$out" || bad "--check-done does not name --write-test-items: $out"
+before="$(cd "$RL" && find . -path ./.git -prune -o -type f -print | sort)"
+out="$(python3 tools/fork-port.py --repo "$RL" --target 1.21.3 --write-test-items 2>&1)"; code=$?
+after="$(cd "$RL" && find . -path ./.git -prune -o -type f -print | sort)"
+[ $code = 0 ] && [ "$(comm -13 <(echo "$before") <(echo "$after"))" = "./.multiversion/targets/1.21.3/TEST-ITEMS.md" ] \
+  && [ ! -e "$RL/build/.fork-port.lock" ] && ! grep -q 'TEST-ITEMS' <<<"$(python3 tools/fork-port.py --repo "$RL" --target 1.21.3 --check-done 2>&1)" \
+  && ok "fork-port --write-test-items: writes only TEST-ITEMS.md (no stage, no gate), releases the lock; --check-done no longer lists it" \
+  || bad "--write-test-items: exit $code: $out"
 # the sweep: --from-stage cost --gates none runs no Gradle; 1.21.3 is green-but-not-done (17), 1.21.4 has an open stub (red, 10)
 printf '[{"file": "x/A.java", "why": "emptied f()", "reviewed": null}]\n' > "$RL/.multiversion/targets/1.21.4/STUBS.json"
 out="$(python3 tools/fork-port.py --repo "$RL" --chain 1.21.3..1.21.5 --from-stage cost --gates none 2>&1)"; code=$?
@@ -495,7 +504,9 @@ out="$(python3 tools/fork-port.py --repo "$SV" --target 1.21.4 2>&1)"; code=$?
   && ok "fork-port on a single-version fork: stops at setup (exit 2) as before; no freeze, no review, nothing written" || bad "single-version fork-port: exit $code: $out"
 python3 tools/fork-port.py --repo "$SV" --chain 1.21.3..1.21.4 >/dev/null 2>&1; c1=$?
 python3 tools/fork-port.py --repo "$SV" --target 1.21.4 --check-done >/dev/null 2>&1; c2=$?
-[ $c1 = 2 ] && [ $c2 = 2 ] && [ ! -e "$SV/.multiversion" ] && ok "single-version: --chain and --check-done are bad input (exit 2), nothing written" || bad "single-version --chain $c1 / --check-done $c2"
+python3 tools/fork-port.py --repo "$SV" --target 1.21.4 --write-test-items >/dev/null 2>&1; c3=$?
+[ $c1 = 2 ] && [ $c2 = 2 ] && [ $c3 = 2 ] && [ ! -e "$SV/.multiversion" ] && [ -z "$(find "$SV" -name TEST-ITEMS.md -o -name .fork-port.lock)" ] \
+  && ok "single-version: --chain, --check-done and --write-test-items are bad input (exit 2), nothing written" || bad "single-version --chain $c1 / --check-done $c2 / --write-test-items $c3"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command, done needs REVIEW.md (for the commit reviewed), TEST-ITEMS.md and every base behaviour inventory item accounted for (layer-inventory.py; none on single-version), setup builds INVENTORY.json once when missing (layer only), a library target not done stops setup with exit 18 and --allow-undone-library is passed through, recorded and resumed, a new target over an undone parent is refused, the upstream freeze stops a run when the authors moved, --chain sweeps up and stops at the first red -- each also on a single-version fixture" \
   || bad "fork-port self-check: $out"

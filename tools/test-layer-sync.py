@@ -136,7 +136,8 @@ def remerge_checks():
                                       o["1.21.4"]["redundant"], o["1.21.4"]["real"]) == (5, 1, 1, 0, 4),
                f"budget: 1.21.4 counts its 5 whole-file overlays (1 mechanical), not its overlay-only class: {o['1.21.4']} {r.stdout}")
         expect((o["1.21.5"]["overlays"], o["1.21.5"]["redundant"], o["1.21.5"]["real"]) == (2, 1, 1)
-               and "E.java" in r.stdout and "rename rows" in r.stdout and "OVER" not in r.stdout,
+               and "E.java" in r.stdout and "rename rows" in r.stdout and "OVER" not in r.stdout
+               and "| whole-file overlays |" in r.stdout and "| overlay-only files |" in r.stdout,
                f"budget: an overlay identical to the one it inherits is redundant; the mechanical one is named: {r.stdout}")
         expect(o["1.21.5"]["overlay_only"] == 1, f"an inherited compat class replaces nothing: overlay-only: {o['1.21.5']}")
         # one definition of a whole-file overlay: the budget's counted files are exactly fork-port.py's REVIEW.md rows
@@ -195,7 +196,7 @@ def remerge_checks():
                and "inherits an overlay" in (mv / "targets/1.21.5/RESIDUE.md").read_text(encoding="utf-8"),
                f"a target whose inherited overlays did not take the change is rework: {by['1.21.5']}")
         md = out_md.read_text(encoding="utf-8")
-        expect("1 rewritten, 1 retired" in md and "2 did not merge" in md and "4 whole-file overlay(s)" in md,
+        expect("1 rewritten, 1 retired" in md and "2 did not merge" in md and "whole-file overlays (4) + overlay-only files (" in md,
                f"the table notes the re-merge and the budget: {md}")
         # a re-run changes nothing more and still reports what is left
         before = {p: p.read_bytes() for p in mv.rglob("*.java")}

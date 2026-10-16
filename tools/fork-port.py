@@ -8,6 +8,7 @@
                                [--max-errors N] [--confirm-spend] [--allow-undone-parent] [--allow-undone-library]
                                [--upstream REMOTE/BRANCH] [--accept-upstream-drift] [--self-check]
     python3 tools/fork-port.py --repo DIR --target <t> --check-done
+    python3 tools/fork-port.py --repo DIR --target <t> --write-test-items
     python3 tools/fork-port.py --repo DIR --chain FROM..TO [--from-stage gates] [--gates auto|ab|full]
 
 The fork-versions skill's procedure (steps 1-9) as stages, the way tools/run-port.py is the jar-port procedure.
@@ -67,12 +68,13 @@ every gate and reported the target done).
 
 DONE IS ONE FIXED LIST (target_done(), the fork-versions skill's "Done"): a green Gate C in GATES.md, no unreviewed
 STUBS.json entry, REVIEW.md complete for the commit it names (an independent fresh-context reviewer's verdict + note on
-every STUBS.json entry and every whole-file overlay, with reviewer, date and commit; nothing in the target's directory
-changed since), TEST-ITEMS.md (the target's manual-test items, from tools/layer-test-plan.py, written by a run to the
-end), every item of .multiversion/INVENTORY.json accounted for on the target (tools/layer-inventory.py, its account in
+every STUBS.json entry, every whole-file overlay, each group of its resource overlays and its renames.tsv -- the last
+two with a digest of their files, so an edit is a new row -- with reviewer, date and commit; nothing in the target's
+directory changed since, its run outputs and the reviewer's BEHAVIOUR.json aside), TEST-ITEMS.md (the target's
+manual-test items, from tools/layer-test-plan.py, written by a run to the end or alone by `--write-test-items`), every item of .multiversion/INVENTORY.json accounted for on the target (tools/layer-inventory.py, its account in
 the target's INVENTORY-CHECK.json -- a run output like GATES.md, never "changed since the review"), and no dependency
 resolved against an undone library target (--allow-undone-library in DEPS.md). A run whose gates are green but that lacks the rest exits 18 and adds a `?` row to REVIEW.md for every item without
-one; `--check-done` only asks. A NEW target is refused (exit 18, before anything is written; make-fork-layer.py
+one (and an `item` row for each inventory item left unaccounted); `--check-done` only asks. A NEW target is refused (exit 18, before anything is written; make-fork-layer.py
 add-target refuses it too) while the target it stands on is not done; `--allow-undone-parent` is the development escape,
 recorded as allowed_undone_parent= in the new target's target.properties, and that target is not done until its parent is.
 
@@ -745,8 +747,8 @@ def unreviewed_stubs(tdir):
 # DONE is one fixed list, the same for every target, checked by target_done(): (1) a green Gate C recorded in GATES.md
 # at a commit HEAD carries, nothing that can change the jar changed since (gates_current: port-publish.py's
 # listed_green, the rule layer-deps.py applies to a library), (2) no unreviewed STUBS.json entry, (3) REVIEW.md
-# complete for the reviewed commit: an independent fresh-context reviewer's verdict on every STUBS.json entry and every
-# whole-file overlay (against the authors' file), with the reviewer, the date and the commit id reviewed, nothing the
+# complete for the reviewed commit: an independent fresh-context reviewer's verdict on every STUBS.json entry, every
+# whole-file overlay (against the authors' file), each resource group and renames.tsv (review_file_items), with the reviewer, the date and the commit id reviewed, nothing the
 # target is built from (its directory, src/, its chain's targets/ and shared/) changed since that commit, and no
 # overlay layer-sync.py recorded in REMERGE.json as not taking the authors' change still unedited, (4) the
 # target's manual-test items generated (TEST-ITEMS.md, from tools/layer-test-plan.py), (5) a parent that was skipped
@@ -757,6 +759,9 @@ def unreviewed_stubs(tdir):
 # target's GATES.md as stale (a *.md is not in a player's jar).
 
 REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md",   # not what a review judged
+                  "BEHAVIOUR.json",            # the reviewer's own record beside REVIEW.md (a moved/dropped item and
+                                               # why): writing it must not make the review it belongs to stale; it is
+                                               # still read as a reviewed input by layer-inventory.py's account
                   "INVENTORY-CHECK.json",      # layer-inventory.py's account, rewritten by every done check
                   "DEPS.md")                   # layer-deps.py resolve's table, rewritten by every setup (machine paths)
 # Files of a target's directory that are not in a player's jar: a change to them does not make GATES.md stale
@@ -765,13 +770,22 @@ REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.
 NOT_JAR_FILES = frozenset(REVIEW_OUTPUTS) | {"STUBS.json", "BEHAVIOUR.json", "INVENTORY.json", "REMERGE.json"}
 COMMIT_ID = re.compile(r"^[0-9a-f]{7,40}$")
 VERDICTS = ("ok", "not-ok")
+# REVIEW.md row kinds: stub / overlay / resources / renames are what review_items() requires a verdict on; `item`
+# names one behaviour-inventory item id (review_skeleton lists the unaccounted ones; layer-inventory.py reads it)
+REVIEW_KINDS = ("stub", "overlay", "resources", "renames", "item")
 REVIEW_FIELDS = ("reviewer", "date", "commit")
 REVIEW_HEAD = ("# Review: Minecraft {t}\n\n"
                "An independent review by a FRESH agent that was given only this target's files (STUBS.json, its overlays,\n"
-               "the authors' files they replace). One row per STUBS.json entry and per whole-file overlay; verdict `ok`\n"
-               "(the change keeps the authors' behaviour, or the difference is right and the note says why) or `not-ok`\n"
-               "(it does not: the target is not done). `commit` is the commit reviewed (`git rev-parse --short HEAD`).\n"
-               "tools/fork-port.py adds a `?` row for every item it finds unreviewed; it never changes a verdict.\n\n"
+               "the authors' files they replace, its resource overlays and renames.tsv). One row per STUBS.json entry,\n"
+               "per whole-file overlay, per resource group (`resources`: a directory of the target's resources/, with the\n"
+               "digest of its files -- an edit makes it a new row) and for renames.tsv (`renames`, with its digest);\n"
+               "verdict `ok` (the change keeps the authors' behaviour, or the difference is right and the note says why)\n"
+               "or `not-ok` (it does not: the target is not done). A hook item of the behaviour inventory (a mixin target,\n"
+               "an injection, an event listener, a shader uniform/sampler) is accounted for only by a row whose note names\n"
+               "its id, or by an `item` row for the id. `reviewer` names the reviewing agent, distinct from the fixer\n"
+               "(e.g. `fresh agent <id>, not the fixer`). `commit` is the commit reviewed, a hex id of 7-40 digits\n"
+               "(`git rev-parse --short HEAD`). tools/fork-port.py adds a `?` row for every item it finds unreviewed\n"
+               "(an `item` row for every unaccounted inventory item); it never changes a verdict.\n\n"
                "- reviewer: ?\n- date: ?\n- commit: ?\n\n| kind | file | verdict | note |\n|---|---|---|---|\n")
 
 
@@ -941,9 +955,58 @@ def prepared_tree(repo, t, prepare=False):
             f"code: re-prepare it (no compile): {cmd}"]
 
 
+def blob_ids(repo, files):
+    """{file: git blob id} -- what git stores for each file (`git hash-object`, so the checkout's line-ending
+    conversion applies and a Windows checkout gets the ids the GitHub tree lists); outside a git repo, the id of the
+    bytes as they are."""
+    files = list(files)
+    if not files:
+        return {}
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "hash-object", "--stdin-paths"], capture_output=True, text=True,
+                           input="".join(f"{f}\n" for f in files), encoding="utf-8", errors="replace", timeout=120)
+        ids = r.stdout.split()
+        if r.returncode == 0 and len(ids) == len(files):
+            return dict(zip(files, ids))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    out = {}
+    for f in files:
+        data = pathlib.Path(f).read_bytes()
+        out[f] = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    return out
+
+
+def resource_group(rel):
+    """The REVIEW.md group of a file of a target's resources/ (rel: its path under resources/): its first three
+    directories (assets/<ns>/items, data/<ns>/recipe, data/<ns>/tags), or the file itself when it is shallower."""
+    parts = rel.split("/")
+    return "/".join(parts[:3]) if len(parts) > 3 else rel
+
+
+def review_file_items(tprefix, entries):
+    """The `resources` and `renames` review items of a target from its files: entries [(path under the target's
+    directory, git blob id)], tprefix `.multiversion/targets/<t>`. One `resources` item per resource group, one
+    `renames` item for renames.tsv, each `<path> @<digest>` (12 hex of a sha256 over the group's paths and blob ids):
+    an edit gives a new item, so a verdict on the old bytes never counts for the new ones. One definition, used on a
+    checkout (review_items) and on a release's tree (tools/layer-deps.py). -> {(kind, file)}"""
+    groups = {}
+    for rel, blob in entries:
+        if rel.startswith("resources/"):
+            groups.setdefault(("resources", "resources/" + resource_group(rel[len("resources/"):])), []).append((rel, blob))
+        elif rel == "renames.tsv":
+            groups[("renames", rel)] = [(rel, blob)]
+    out = set()
+    for (kind, g), fs in groups.items():
+        dig = hashlib.sha256("".join(f"{r}\0{b}\n" for r, b in sorted(fs)).encode("utf-8")).hexdigest()[:12]
+        out.add((kind, f"{tprefix}/{g} @{dig}"))
+    return out
+
+
 def review_items(repo, tdir):
-    """What the reviewer must give a verdict on: every STUBS.json entry and every whole-file overlay of the target.
-    -> sorted [(kind, file relative to the repo)]."""
+    """What the reviewer must give a verdict on: every STUBS.json entry, every whole-file overlay of the target, each
+    group of its resource overlays and its renames.tsv (review_file_items). -> sorted [(kind, file relative to the
+    repo)]."""
     items = set()
     try:
         stubs = json.loads((tdir / "STUBS.json").read_text(encoding="utf-8")) if (tdir / "STUBS.json").is_file() else []
@@ -951,7 +1014,22 @@ def review_items(repo, tdir):
         stubs = []
     items |= {("stub", e["file"]) for e in stubs if isinstance(e, dict) and e.get("file")}
     items |= {("overlay", ov.relative_to(repo).as_posix()) for ov, _src in whole_file_overlays(repo, tdir)}
+    files = sorted(p for p in (tdir / "resources").rglob("*") if p.is_file()) if (tdir / "resources").is_dir() else []
+    files += [tdir / "renames.tsv"] if (tdir / "renames.tsv").is_file() else []
+    ids = blob_ids(repo, files)
+    items |= review_file_items(tdir.relative_to(repo).as_posix(), [(f.relative_to(tdir).as_posix(), ids[f]) for f in files])
     return sorted(items)
+
+
+def review_counts(repo, tdir, items):
+    """'S stub(s), whole-file overlays (N) + overlay-only files (M) (those need no row), R resource group(s),
+    renames.tsv' for a message: the overlay words are tools/layer-sync.py overlay_counts()'s."""
+    n = lambda k: sum(1 for kk, _ in items if kk == k)
+    ls = load("layer_sync", "layer-sync.py")
+    own = len(ls.own_overlays(pathlib.Path(repo) / ".multiversion", tdir.name))
+    s = (f"{n('stub')} stub(s), {ls.overlay_counts({'overlays': n('overlay'), 'overlay_only': max(own - n('overlay'), 0)})}"
+         " (those need no row)")
+    return s + f", {n('resources')} resource group(s)" + (", renames.tsv" if n("renames") else "")
 
 
 def _cells(line):
@@ -971,7 +1049,7 @@ def parse_review(text):
             fields[m.group(1)] = m.group(2).strip("` ")
         elif line.lstrip().startswith("|"):
             c = _cells(line)
-            if len(c) >= 4 and c[0] in ("stub", "overlay"):
+            if len(c) >= 4 and c[0] in REVIEW_KINDS:
                 rows[(c[0], c[1].strip("`"))] = (c[2].strip("` ").lower(), "|".join(c[3:]).strip())
     return fields, rows
 
@@ -982,7 +1060,8 @@ def review_problems(repo, tdir):
     items = review_items(repo, tdir)
     f = tdir / "REVIEW.md"
     if not f.is_file():
-        return [f"no REVIEW.md: {len(items)} item(s) need an independent reviewer's verdict"]
+        return [f"no REVIEW.md: {len(items)} item(s) need an independent reviewer's verdict "
+                f"({review_counts(repo, tdir, items)})"]
     fields, rows = parse_review(f.read_text(encoding="utf-8", errors="replace"))
     out = [f"REVIEW.md has no {k}" for k in REVIEW_FIELDS if fields.get(k, "?") in ("", "?")]
     if fields.get("date", "?") not in ("", "?") and not re.match(r"^\d{4}-\d\d-\d\d\b", fields["date"]):
@@ -1023,16 +1102,24 @@ def review_problems(repo, tdir):
 
 
 def review_skeleton(repo, tdir, t):
-    """Give REVIEW.md a `?` row for every item that has none (the header too when the file is new). Never changes a
-    verdict a reviewer wrote. -> rows added."""
+    """Give REVIEW.md a `?` row for every item that has none (the header too when the file is new), and an `item` row
+    for every behaviour-inventory item the target leaves unaccounted (tools/layer-inventory.py's account; sorted by id,
+    so a file's items stand together): the hooks a file-level row does not account for are named, so the reviewer
+    sees them. Never changes a verdict a reviewer wrote. -> rows added."""
     items = review_items(pathlib.Path(repo), tdir)
     f = tdir / "REVIEW.md"
     text = f.read_text(encoding="utf-8") if f.is_file() else REVIEW_HEAD.format(t=t)
     _fields, rows = parse_review(text)
-    add = [(k, x) for k, x in items if (k, x) not in rows]
+    try:
+        _code, rep, _lines = load("layer_inventory", "layer-inventory.py").check(repo, t)
+    except Exception:          # noqa: BLE001 -- the skeleton is a help; the done check itself reports the inventory
+        rep = None
+    unacc = sorted((rep or {}).get("unaccounted") or [])
+    add = [(k, x) for k, x in items if (k, x) not in rows] + [("item", i) for i in unacc if ("item", i) not in rows]
     if add or not f.is_file():
         tdir.mkdir(parents=True, exist_ok=True)
-        f.write_text(text.rstrip("\n") + "\n" + "".join(f"| {k} | {x} | ? | ? |\n" for k, x in add), encoding="utf-8")
+        f.write_text(text.rstrip("\n") + "\n" + "".join(f"| {k} | {x.replace('|', chr(92) + '|')} | ? | ? |\n"
+                                                         for k, x in add), encoding="utf-8")
     return len(add)
 
 
@@ -1094,7 +1181,8 @@ def target_done(repo, t, _seen=None, write=True, prepare=False):
     out += review_problems(repo, tdir)
     out += remerge_open(repo, tdir)       # layer-sync.py: an overlay the authors' change did not merge into
     if not (tdir / "TEST-ITEMS.md").is_file():
-        out.append("manual-test items not generated (TEST-ITEMS.md: a run of fork-port.py to the end writes it)")
+        out.append(f"manual-test items not generated (TEST-ITEMS.md): write them, no gate run: "
+                   f"python3 tools/fork-port.py --repo {repo} --target {t} --write-test-items")
     # (6) every base behaviour item accounted for (tools/layer-inventory.py; [] on a single-version fork). It writes
     # the target's INVENTORY-CHECK.json, a run output like GATES.md (REVIEW_OUTPUTS), unless write=False. Its prepared
     # tree must be current, or its answer is about older code
@@ -2508,6 +2596,9 @@ def main():
     ap.add_argument("--check-done", action="store_true",
                     help="only say whether --target is done (Gate C, stubs, REVIEW.md, TEST-ITEMS.md, the behaviour inventory): "
                          "exit 0, or 18 with the reasons; writes nothing")
+    ap.add_argument("--write-test-items", action="store_true",
+                    help="only write --target's TEST-ITEMS.md (its manual-test items, from tools/layer-test-plan.py, no "
+                         "model), holding the checkout lock; no stage or gate runs (layer forks only)")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -2528,6 +2619,8 @@ def main():
         why = target_done(a.repo, a.target, write=False)      # only asks: writes nothing
         print(f"fork-port {a.target}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
         return UNDONE_EXIT if why else 0
+    if a.write_test_items:
+        return write_test_items_only(a)
     try:
         skipped, todo = select_stages(a.from_stage, a.to_stage)
     except ValueError as e:
@@ -2552,6 +2645,29 @@ def main():
         return drive(run, a, skipped, todo)
     finally:
         lock.release()
+
+
+def write_test_items_only(a):
+    """--write-test-items: TEST-ITEMS.md for --target and nothing else, under the checkout lock (a run in progress
+    owns the target's files). Exit 0 written, 14 the checkout is in use, 2 not a layer target or the plan failed."""
+    repo = pathlib.Path(a.repo)
+    tdir = repo / ".multiversion/targets" / a.target
+    if not (repo / ".multiversion/base.properties").is_file():
+        print("fork-port: --write-test-items needs a layer fork (.multiversion/)"); return 2
+    if not tdir.is_dir():
+        print(f"fork-port: {a.target} is not a target of this layer"); return 2
+    lock = load("layer_ci", "layer-ci.py").CheckoutLock(repo, "fork-port.py", a.target)
+    busy = lock.acquire()
+    if busy:
+        print(f"fork-port: {busy}"); return 14
+    try:
+        n, why = write_test_items(repo, tdir, a.target)
+    finally:
+        lock.release()
+    if why:
+        print(f"fork-port {a.target}: manual-test items not written: {why}"); return 2
+    print(f"fork-port {a.target}: {n} manual-test item(s) -> {(tdir / 'TEST-ITEMS.md').relative_to(repo).as_posix()}")
+    return 0
 
 
 def drive(run, a, skipped, todo):
@@ -2634,9 +2750,11 @@ def drive(run, a, skipped, todo):
             run.save()
             print(f"fork-port {a.target}: Gate C green, NOT done ({len(problems)} open):")
             print("\n".join(f"  - {p}" for p in problems[:20]) + (f"\n  ... and {len(problems) - 20} more" if len(problems) > 20 else ""))
-            print(f"  Next: start a FRESH reviewer agent with only .multiversion/targets/{a.target}/ (REVIEW.md lists every item"
-                  f"{f', {added} new' if added else ''}; STUBS.json, the overlays and the authors' files they replace); it fills "
-                  f"REVIEW.md (reviewer, date, commit, one verdict + note per row) and commits it. Then: "
+            print(f"  Next: start a FRESH reviewer agent, not the fixer, with only .multiversion/targets/{a.target}/ "
+                  f"(REVIEW.md lists every item{f', {added} new' if added else ''}: {review_counts(run.repo, run.tdir, review_items(run.repo, run.tdir))}; "
+                  f"STUBS.json, the overlays and the authors' files they replace); it fills REVIEW.md (reviewer: the "
+                  f"reviewing agent, e.g. `fresh agent <id>, not the fixer`; date; commit; one verdict + note per row, "
+                  f"naming each hook `item` id it accounts for) and commits it. Then: "
                   f"python3 tools/fork-port.py --repo {a.repo} --target {a.target} --check-done")
             print(f"fork-port: summary in {run.jpath}")
             return UNDONE_EXIT
@@ -3597,7 +3715,9 @@ def self_check_done_freeze_sweep():
         expect(items == [("overlay", ".multiversion/targets/1.21.4/java/com/example/mod/A.java"),
                          ("stub", ".multiversion/targets/1.21.4/java/com/example/mod/A.java")],
                f"review items: every stub entry and every whole-file overlay, no overlay-only helper: {items}")
-        expect(review_problems(repo, td)[0].startswith("no REVIEW.md"), "no REVIEW.md: not done")
+        expect(review_problems(repo, td) == ["no REVIEW.md: 2 item(s) need an independent reviewer's verdict (1 stub(s), "
+                                             "whole-file overlays (1) + overlay-only files (1) (those need no row), "
+                                             "0 resource group(s))"], f"no REVIEW.md: not done: {review_problems(repo, td)}")
         expect(review_skeleton(repo, td, "1.21.4") == 2 and review_skeleton(repo, td, "1.21.4") == 0,
                "the skeleton gets a ? row per item, once")
         pr = review_problems(repo, td)
@@ -3616,12 +3736,82 @@ def self_check_done_freeze_sweep():
         expect(review_problems(repo, td) == [], f"a complete review for HEAD: {review_problems(repo, td)}")
         expect(parse_review(txt)[1][("overlay", ".multiversion/targets/1.21.4/java/com/example/mod/A.java")][1]
                == "y() is x()'s 1.21.4 name | same", "an escaped bar stays in the note")
-        expect(target_done(repo, "1.21.4") == ["manual-test items not generated (TEST-ITEMS.md: a run of fork-port.py to "
-                                               "the end writes it)"], f"done also needs the test items: {target_done(repo, '1.21.4')}")
+        expect(target_done(repo, "1.21.4") == [f"manual-test items not generated (TEST-ITEMS.md): write them, no gate run: "
+                                               f"python3 tools/fork-port.py --repo {repo} --target 1.21.4 --write-test-items"],
+               f"done also needs the test items, naming the command that writes them: {target_done(repo, '1.21.4')}")
+        # --write-test-items: TEST-ITEMS.md only, under the checkout lock; refused (14) while another run holds it
+        lc_ = load("layer_ci", "layer-ci.py")
+        held = lc_.CheckoutLock(repo, "fork-port.py", "1.21.5", pid=os.getppid(), env={})    # another live run
+        expect(held.acquire() is None, "the fixture takes the checkout lock")
+        argv_ = sys.argv
+        try:
+            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4", "--write-test-items"]
+            with contextlib.redirect_stdout(io.StringIO()) as buf_:
+                rc_busy = main()
+            held.release()
+            expect(rc_busy == 14 and not (td / "TEST-ITEMS.md").exists(), f"--write-test-items waits for the checkout: "
+                                                                          f"{rc_busy} {buf_.getvalue()}")
+            before_ = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*") if ".git" not in p.parts)
+            with contextlib.redirect_stdout(io.StringIO()) as buf_:
+                rc_w = main()
+            after_ = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*") if ".git" not in p.parts)
+        finally:
+            sys.argv = argv_
+        expect(rc_w == 0 and set(after_) - set(before_) == {".multiversion/targets/1.21.4/TEST-ITEMS.md"}
+               and "A.java" in (td / "TEST-ITEMS.md").read_text(encoding="utf-8") and not (repo / "build/.fork-port.lock").exists(),
+               f"--write-test-items writes TEST-ITEMS.md from layer-test-plan.py and nothing else: {rc_w} "
+               f"{set(after_) - set(before_)} {buf_.getvalue()}")
         n_, why_ = write_test_items(repo, td, "1.21.4")
-        expect(why_ is None and n_ >= 1 and "A.java" in (td / "TEST-ITEMS.md").read_text(encoding="utf-8"),
-               f"test items generated from layer-test-plan.py: {n_} {why_}")
+        expect(why_ is None and n_ >= 1, f"test items generated from layer-test-plan.py: {n_} {why_}")
         expect(target_done(repo, "1.21.4") == [], f"done: {target_done(repo, '1.21.4')}")
+        # BEHAVIOUR.json is the reviewer's own record beside REVIEW.md: writing it after the review is not a change
+        # the review missed (it is still what the inventory account reads)
+        w(td / "BEHAVIOUR.json", json.dumps([{"item": "main:com/example/mod/B.java#*", "status": "dropped", "reason": "x"}]))
+        expect(target_done(repo, "1.21.4") == [] and "BEHAVIOUR.json" in REVIEW_OUTPUTS,
+               f"a BEHAVIOUR.json written after the review leaves it current: {target_done(repo, '1.21.4')}")
+        (td / "BEHAVIOUR.json").unlink()
+        # resource overlays and renames.tsv are review items: one row per resource group and one for renames.tsv, each
+        # with its digest -- an edit (a spawn-egg tint, a missing tag added) is a new row, never covered by the old verdict
+        w(td / "resources/assets/examplemod/items/egg.json", '{"model": {"type": "minecraft:model"}}\n')
+        w(td / "resources/assets/examplemod/items/sub/b.json", '{"model": {}}\n')
+        w(td / "resources/examplemod.mixins.json", '{}\n')
+        w(td / "renames.tsv", "x\ty\n")
+        g("add", "-A"); g("commit", "-qm", "resources"); head2 = g("rev-parse", "--short", "HEAD")
+        w(td / "GATES.md", green_c.format(t="1.21.4", at=head2))
+        os.utime(repo / "build/mc1.21.4/mv/java")     # prepared after renames.tsv: the inventory reads a current tree
+        ri = [x for x in review_items(repo, td) if x[0] in ("resources", "renames")]
+        expect([(k, x.rsplit(" @", 1)[0]) for k, x in ri] == [
+            ("renames", ".multiversion/targets/1.21.4/renames.tsv"),
+            ("resources", ".multiversion/targets/1.21.4/resources/assets/examplemod/items"),
+            ("resources", ".multiversion/targets/1.21.4/resources/examplemod.mixins.json")]
+               and all(re.fullmatch(r"[0-9a-f]{12}", x.rsplit(" @", 1)[1]) for _k, x in ri),
+               f"one row per resource group (sub-folders in it) and one for renames.tsv, each with a digest: {ri}")
+        txt2 = txt.replace(f"- commit: {head}", f"- commit: {head2}")
+        (td / "REVIEW.md").write_text(txt2, encoding="utf-8")
+        pr = target_done(repo, "1.21.4")
+        expect(sorted(p.split(" @")[0] for p in pr) == [
+            "no verdict: renames .multiversion/targets/1.21.4/renames.tsv",
+            "no verdict: resources .multiversion/targets/1.21.4/resources/assets/examplemod/items",
+            "no verdict: resources .multiversion/targets/1.21.4/resources/examplemod.mixins.json"],
+               f"an unreviewed resource overlay or renames.tsv: not done: {pr}")
+        expect(review_skeleton(repo, td, "1.21.4") == 3, "the skeleton gives each its `?` row")
+        txt2 = txt2 + "".join(f"| {k} | {x} | ok | compared with the authors' 1.21.1 files |\n" for k, x in ri)
+        (td / "REVIEW.md").write_text(txt2, encoding="utf-8")
+        expect(target_done(repo, "1.21.4") == [], f"every group and renames.tsv reviewed: done: {target_done(repo, '1.21.4')}")
+        w(td / "resources/assets/examplemod/items/egg.json", '{"model": {"type": "minecraft:model", "tints": [1]}}\n')
+        g("add", "-A"); g("commit", "-qm", "tint"); head3 = g("rev-parse", "--short", "HEAD")
+        w(td / "GATES.md", green_c.format(t="1.21.4", at=head3))
+        (td / "REVIEW.md").write_text(txt2.replace(f"- commit: {head2}", f"- commit: {head3}"), encoding="utf-8")
+        pr = target_done(repo, "1.21.4")
+        expect(len(pr) == 1 and pr[0].startswith("no verdict: resources .multiversion/targets/1.21.4/resources/assets/examplemod/items @")
+               and pr[0] not in [f"no verdict: {k} {x}" for k, x in ri],
+               f"a group edited after its verdict (the commit moved on): its new digest has no verdict: {pr}")
+        (td / "REVIEW.md").write_text(txt, encoding="utf-8")
+        g("rm", "-rq", ".multiversion/targets/1.21.4/resources", ".multiversion/targets/1.21.4/renames.tsv")
+        g("commit", "-qm", "drop the fixture's resources"); head4 = g("rev-parse", "--short", "HEAD")
+        txt = txt.replace(f"- commit: {head}", f"- commit: {head4}"); head = head4
+        (td / "REVIEW.md").write_text(txt, encoding="utf-8"); w(td / "GATES.md", green_c.format(t="1.21.4", at=head))
+        expect(target_done(repo, "1.21.4") == [], f"back to the plain fixture: done: {target_done(repo, '1.21.4')}")
         (td / "java/com/example/mod/A.java").write_text("class A { void f() { z(); } }\n", encoding="utf-8")
         expect(any("changed since the reviewed commit" in p for p in target_done(repo, "1.21.4")),
                "an overlay edited after the review: not done (re-review, name the new commit)")
@@ -3768,6 +3958,14 @@ def self_check_done_freeze_sweep():
                 expect(len(inv_why) == 2 and all("unaccounted" in x and "FooMixin" in x for x in inv_why)
                        and (td / "INVENTORY-CHECK.json").is_file(),
                        f"layer: a mixin and an injection the prepared tree lost are unaccounted: not done: {inv_why}")
+                # the skeleton names each unaccounted item in an `item` row, a file's items together, so the reviewer
+                # sees the hooks a file-level row does not account for
+                review_skeleton(repo, td, "1.21.4")
+                rows_ = [k for k in parse_review((td / "REVIEW.md").read_text(encoding="utf-8"))[1] if k[0] == "item"]
+                expect(rows_ == [("item", "main:com/example/mod/mixin/FooMixin.java#injection:@Inject method=tick @At(value=\"HEAD\")"),
+                                 ("item", "main:com/example/mod/mixin/FooMixin.java#mixin:@Mixin Foo")],
+                       f"layer: review_skeleton lists the unaccounted item ids: {rows_}")
+                (td / "REVIEW.md").unlink()
                 w(td / "BEHAVIOUR.json", json.dumps([{"item": "main:com/example/mod/mixin/FooMixin.java#*",
                                                       "status": "dropped", "reason": "the hook is gone on 1.21.4"}]))
                 expect(not [x for x in target_done(repo, "1.21.4") if x.startswith("behaviour inventory")],
@@ -3776,6 +3974,9 @@ def self_check_done_freeze_sweep():
             else:
                 expect(not inv_why and not (td / "INVENTORY-CHECK.json").exists(),
                        f"single-version: no inventory requirement, nothing written: {why}")
+                review_skeleton(repo, td, "1.21.4")
+                expect(not [k for k in parse_review((td / "REVIEW.md").read_text(encoding="utf-8"))[1] if k[0] == "item"],
+                       "single-version: no inventory, so the skeleton names no item")
     # ---- wiring (2): setup builds .multiversion/INVENTORY.json once when it is missing (layer fork only)
     for layer in (True, False):
         with tempfile.TemporaryDirectory() as d:
