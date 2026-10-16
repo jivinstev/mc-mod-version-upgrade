@@ -58,9 +58,17 @@ net.minecraft.client.renderer.ShaderInstance	@MVPKG@.ShaderInstance
 net.neoforged.neoforge.client.event.RegisterShadersEvent	@MVPKG@.RegisterShadersEvent
 re:RenderSystem\.setShader\(\(\) -> (\w+)\)	RenderSystem.setShader(\1)
 re:RenderSystem\.setShader\((\w+)::(\w+)\)	RenderSystem.setShader(\1.\2())
+# a shard over a VANILLA core shader names its CoreShaders key (M71); written fully qualified, so the helper row below
+# does not take it again (it would wrap a ShaderProgram as a Supplier). These must stay ABOVE that row.
+re:new RenderStateShard\.ShaderStateShard\(GameRenderer::getPositionColorShader\)	new net.minecraft.client.renderer.RenderStateShard.ShaderStateShard(net.minecraft.client.renderer.CoreShaders.POSITION_COLOR)
+re:new RenderStateShard\.ShaderStateShard\(GameRenderer::getPositionTexShader\)	new net.minecraft.client.renderer.RenderStateShard.ShaderStateShard(net.minecraft.client.renderer.CoreShaders.POSITION_TEX)
+re:new RenderStateShard\.ShaderStateShard\(GameRenderer::getPositionTexColorShader\)	new net.minecraft.client.renderer.RenderStateShard.ShaderStateShard(net.minecraft.client.renderer.CoreShaders.POSITION_TEX_COLOR)
+re:new RenderStateShard\.ShaderStateShard\(GameRenderer::getPositionShader\)	new net.minecraft.client.renderer.RenderStateShard.ShaderStateShard(net.minecraft.client.renderer.CoreShaders.POSITION)
 re:new RenderStateShard\.ShaderStateShard\(	new @MVPKG@.ShaderShard(
 # ---- entities and saved data
 re:\b(\w+)\.create\((\w*[lL]evel)\)	\1.create(\2, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
+# the same through a holder (`ModEntities.X.get().create(level)`), which the bare receiver above cannot see
+re:(\.get\(\))\.create\((\w*[lL]evel)\)	\1.create(\2, net.minecraft.world.entity.EntitySpawnReason.TRIGGERED)
 re:EntityType\.loadEntityRecursive\(([^,]+), (\w+), 	EntityType.loadEntityRecursive(\1, \2, net.minecraft.world.entity.EntitySpawnReason.LOAD, 
 re:import net\.neoforged\.neoforge\.common\.util\.DummySavedData;\n	
 # ---- registry ids in Properties (CATALOG R25; 1.21.2): a registration supplier names what it builds, and every
@@ -89,4 +97,55 @@ re:(int \w+, int \w+, BakedModel \w+,)(\s*)CallbackInfo ci\)	\1 boolean mv$flat,
 re:(@Accessor\("(?:template|base|addition)"\)\s*)Ingredient\b	\1java.util.Optional<Ingredient>
 # GeckoLib 4.7.3 (1.21.3) / 4.8.5 (1.21.4): GeoRenderLayer preRender/render gained a trailing int colour
 re:(VertexConsumer \w+, float \w+,\s*int \w+, int \w+)\) \{	\1, int renderColor) {
+# ---- entities: Entity.hurt is `final void` since 1.21.2 (M66). A BOOLEAN use of it (`if (x.hurt(..))`, `b = x.hurt(..)`,
+# `&& x.hurt(..)`, a lambda's value) is hurtServer's result through the helper -- never a "did health drop?" comparison,
+# which miscounts an absorbed, blocked or cancelled hit. A statement call stays (it still compiles); a capitalised receiver
+# (a static `Api.hurt(e, s, a)`) and `super.` are left alone.
+re:([(&|!=?]\s*|\breturn\s+|->\s*)((?!super\.)(?![A-Z])[\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*)\.hurt\(	\1@MVPKG@.Hurt.server(\2, 
+# an Entity.hurt OVERRIDE is a hurtServer override (the server is the only side 1.21.2 calls it on)
+re:public boolean hurt\(((?:@\w+ )?)DamageSource (\w+), float (\w+)\)	public boolean hurtServer(net.minecraft.server.level.ServerLevel mv$hurtLevel, \1DamageSource \2, float \3)
+re:\bsuper\.hurt\((\w+), (\w+)\)	super.hurtServer(mv$hurtLevel, \1, \2)
+# Mob.doHurtTarget and MobEffect.applyEffectTick take the ServerLevel (1.21.2)
+re:(public boolean doHurtTarget\()(Entity \w+\))	\1net.minecraft.server.level.ServerLevel mv$level, \2
+re:\bsuper\.doHurtTarget\((\w+)\)	super.doHurtTarget(mv$level, \1)
+re:(?m)^([ \t]*)((?!super\b)[a-z][\w$]*)\.doHurtTarget\((\w+)\);	\1{ if (\2.level() instanceof net.minecraft.server.level.ServerLevel mv$sl) \2.doHurtTarget(mv$sl, \3); }
+re:(public boolean applyEffectTick\()(LivingEntity \w+, int \w+\))	\1net.minecraft.server.level.ServerLevel mv$level, \2
+re:\bsuper\.applyEffectTick\((\w+), (\w+)\)	super.applyEffectTick(mv$level, \1, \2)
+# Recipe.canCraftInDimensions and Entity.getBoundingBoxForCulling are no longer overridable: keep the method, drop @Override
+re:@Override(\s*public boolean canCraftInDimensions\()	\1
+re:@Override(\s*public AABB getBoundingBoxForCulling\(\)\s*\{)	\1
+# ---- items: InteractionResultHolder is gone; an item's use returns an InteractionResult. A success or consume carrying a
+# stack keeps it (heldItemTransformedTo; for the held stack itself that is the plain result)
+re:\bInteractionResultHolder<ItemStack>	InteractionResult
+re:\bInteractionResultHolder\.pass\((?:[^()]|\([^()]*\))*\)	InteractionResult.PASS
+re:\bInteractionResultHolder\.fail\((?:[^()]|\([^()]*\))*\)	InteractionResult.FAIL
+re:\bInteractionResultHolder\.sidedSuccess\(((?:[^(),]|\([^()]*\))*),(?:[^()]|\([^()]*\))*\)	InteractionResult.SUCCESS.heldItemTransformedTo(\1)
+re:\bInteractionResultHolder\.success\(((?:[^()]|\([^()]*\))*)\)	InteractionResult.SUCCESS.heldItemTransformedTo(\1)
+re:\bInteractionResultHolder\.consume\(((?:[^()]|\([^()]*\))*)\)	InteractionResult.CONSUME.heldItemTransformedTo(\1)
+re:\bInteractionResult\.sidedSuccess\((?:[^()]|\([^()]*\))*\)	InteractionResult.SUCCESS
+net.minecraft.world.InteractionResultHolder	net.minecraft.world.InteractionResult
+# ItemCooldowns is keyed by stack (its cooldown group) since 1.21.2
+re:(getCooldowns\(\)\.(?:isOnCooldown|addCooldown|getCooldownPercent|removeCooldown)\(\s*)((?:[\w$]+(?:\(\))?\.)*[\w$]+(?:\(\))?)\.getItem\(\)	\1\2
+re:(getCooldowns\(\)\.(?:isOnCooldown|addCooldown|getCooldownPercent)\(\s*)([A-Z]\w*\.[A-Z_]+\.get\(\))	\1new net.minecraft.world.item.ItemStack(\2)
+# Ingredient.of(ItemStack...) is gone; an ingredient of one stack's item is Ingredient.of(item)
+re:\bIngredient\.of\(new ItemStack\(((?:[^()]|\([^()]*\))*)\)\)	Ingredient.of(\1)
+# GeckoLib 4.7+ (4.7.3 on 1.21.3, 4.8.5 on 1.21.4): GeoModel's resource getters and GeoRenderLayer.getDefaultBakedModel
+# take the renderer; GeoEntityRenderer.getDeathMaxRotation takes the partial tick (a GeckoLib 5 GeoRenderState getter is left)
+re:\b(ResourceLocation (?:getModelResource|getTextureResource)\()((?!GeoRenderState\b)[\w.$]+(?:<[^<>()]*>)?) (\w+)\)	\1\2 \3, software.bernie.geckolib.renderer.GeoRenderer<\2> renderer)
+re:(float getDeathMaxRotation\([\w.$<>?]+ \w+)\)	\1, float partialTick)
+re:\bgetDefaultBakedModel\((\w+)\)	getDefaultBakedModel(\1, getRenderer())
+# ---- items whose 1.21.1 getDefaultAttributeModifiers override no longer runs (M68): its `super` base is the item's own
+# ATTRIBUTE_MODIFIERS component, and the stack form is applied by the AttributeOverrides helper (named in a comment so
+# prepare pulls it in)
+re:\bsuper\.getDefaultAttributeModifiers\((?:\w+)?\)	@MVPKG@.AttributeOverrides.base(this)
+re:(public ItemAttributeModifiers getDefaultAttributeModifiers\(ItemStack \w+\)\s*\{)	\1 // MV-REQUIRES: AttributeOverrides
+# ---- blocks: light queries lost their BlockGetter/BlockPos; neighborChanged takes the redstone Orientation; the
+# BlockEntityType.Builder is gone
+re:(public (?:boolean propagatesSkylightDown|int getLightBlock)\(BlockState \w+), BlockGetter \w+, BlockPos \w+\)	\1)
+re:(void neighborChanged\(BlockState \w+, Level \w+, BlockPos \w+, Block \w+), BlockPos (\w+), boolean (\w+)\)	\1, @org.jetbrains.annotations.Nullable net.minecraft.world.level.redstone.Orientation \2, boolean \3)
+re:BlockEntityType\.Builder\.of\(\s*([\w$.]+::new),\s*((?:[^()]|\([^()]*\))+?)\s*\)\s*\.build\(null\)	new BlockEntityType<>(\1, java.util.Set.of(\2))
+# ---- client: GuiGraphics.blit takes the render type first also when the texture is built in place; the profiler is per
+# thread (Minecraft/Level.getProfiler() are gone) -- the whole receiver chain goes
+re:(\w+)\.blit\((ResourceLocation\.(?:parse|fromNamespaceAndPath|withDefaultNamespace)\()	\1.blit(net.minecraft.client.renderer.RenderType::guiTextured, \2
+re:(?<![\w$.])(?:[\w$]+(?:\(\))?\.)+getProfiler\(\)	net.minecraft.util.profiling.Profiler.get()
 #!strict

@@ -874,6 +874,54 @@ sys.exit(0 if f("super.getBoundingBoxForCulling()") == "super.getBoundingBoxForC
          and f("this.getBoundingBoxForCulling()") == "this.getBoundingBoxForCulling()"
          and f("e.getBoundingBoxForCulling()") == "p.Mv.cullingBox(e)" else 1)
 PY
+# M66/M68/M71 (1.21.2 API, shared/1.21.3): a boolean Entity.hurt use is hurtServer's result through Hurt.server (never a
+# health comparison), hurt overrides become hurtServer, InteractionResultHolder/cooldowns/Ingredient/GeckoLib 4.7/
+# doHurtTarget/profiler/BlockEntityType.Builder shapes, and a vanilla core-shader shard is named before the helper row
+# takes it. Layer forks only: a single-version fork has no .multiversion/ and never reads these tables.
+python3 - <<'PY' && ok "shared rows (1.21.3): boolean hurt -> Hurt.server, hurt overrides, InteractionResult, cooldowns, GeckoLib 4.7, doHurtTarget, profiler, BE builder, core-shader shards (and their controls)" || bad "a 1.21.3 shared row for the 1.21.2 entity/item/client API rewrites the wrong shape"
+import re, pathlib, sys
+rows = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
+        if l.startswith("re:")]
+def f(s):
+    for r in rows:
+        pat, rep = r[3:].split("\t")
+        s = re.sub(pat, rep.replace("@MVPKG@", "p"), s)
+    return s
+P = "net.minecraft.server.level.ServerLevel"
+cases = [
+    ("if (target.hurt(src, 2.0F)) {", "if (p.Hurt.server(target, src, 2.0F)) {"),
+    ("boolean b = this.target.hurt(s, a);", "boolean b = p.Hurt.server(this.target, s, a);"),
+    ("ok = ok && e.getTarget().hurt(s, a);", "ok = ok && p.Hurt.server(e.getTarget(), s, a);"),
+    ("target.hurt(src, 1.0F);", "target.hurt(src, 1.0F);"),                                   # a statement still compiles
+    ("if (DamageApi.hurt(t, s, a)) {", "if (DamageApi.hurt(t, s, a)) {"),                         # a static helper, not an entity
+    ("public boolean hurt(@NotNull DamageSource source, float amount) {\n    return super.hurt(source, amount);",
+     f"public boolean hurtServer({P} mv$hurtLevel, @NotNull DamageSource source, float amount) {{\n    return super.hurtServer(mv$hurtLevel, source, amount);"),
+    ("public InteractionResultHolder<ItemStack> use(Level l, Player p, InteractionHand h) {", "public InteractionResult use(Level l, Player p, InteractionHand h) {"),
+    ("return InteractionResultHolder.sidedSuccess(stack, level.isClientSide());", "return InteractionResult.SUCCESS.heldItemTransformedTo(stack);"),
+    ("return InteractionResultHolder.pass(player.getItemInHand(hand));", "return InteractionResult.PASS;"),
+    ("return InteractionResult.sidedSuccess(level.isClientSide);", "return InteractionResult.SUCCESS;"),
+    ("player.getCooldowns().isOnCooldown(target.getUseItem().getItem())", "player.getCooldowns().isOnCooldown(target.getUseItem())"),
+    ("player.getCooldowns().addCooldown(ModItems.WAND.get(), 20);", "player.getCooldowns().addCooldown(new net.minecraft.world.item.ItemStack(ModItems.WAND.get()), 20);"),
+    ("return Ingredient.of(new ItemStack(Items.DIAMOND));", "return Ingredient.of(Items.DIAMOND);"),
+    ("public ResourceLocation getModelResource(MobEntity animatable) {", "public ResourceLocation getModelResource(MobEntity animatable, software.bernie.geckolib.renderer.GeoRenderer<MobEntity> renderer) {"),
+    ("public ResourceLocation getTextureResource(GeoRenderState renderState) {", "public ResourceLocation getTextureResource(GeoRenderState renderState) {"),
+    ("protected float getDeathMaxRotation(MobEntity e) {", "protected float getDeathMaxRotation(MobEntity e, float partialTick) {"),
+    ("        mob.doHurtTarget(target);", f"        {{ if (mob.level() instanceof {P} mv$sl) mob.doHurtTarget(mv$sl, target); }}"),
+    ("        boolean b = mob.doHurtTarget(t);", "        boolean b = mob.doHurtTarget(t);"),
+    ("this.minecraft.getProfiler().push(\"x\");", "net.minecraft.util.profiling.Profiler.get().push(\"x\");"),
+    ("() -> BlockEntityType.Builder.of(\n    TableEntity::new,\n    ModBlocks.TABLE.get()).build(null)", "() -> new BlockEntityType<>(TableEntity::new, java.util.Set.of(ModBlocks.TABLE.get()))"),
+    (".setShaderState(new RenderStateShard.ShaderStateShard(GameRenderer::getPositionColorShader))",
+     ".setShaderState(new net.minecraft.client.renderer.RenderStateShard.ShaderStateShard(net.minecraft.client.renderer.CoreShaders.POSITION_COLOR))"),
+    (".setShaderState(new RenderStateShard.ShaderStateShard(ModShaders::glow))", ".setShaderState(new p.ShaderShard(ModShaders::glow))"),
+    ("for (var e : super.getDefaultAttributeModifiers().modifiers())", "for (var e : p.AttributeOverrides.base(this).modifiers())"),
+    ("public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack stack) {", "public ItemAttributeModifiers getDefaultAttributeModifiers(ItemStack stack) { // MV-REQUIRES: AttributeOverrides"),
+]
+bad = [(s, f(s), w) for s, w in cases if f(s) != w]
+for b in bad:
+    print("  in:  %r\n  got: %r\n  want:%r" % b, file=sys.stderr)
+helpers = pathlib.Path("templates/fork-layer/shared/1.21.3/java")
+sys.exit(0 if not bad and all("package @MVPKG@;" in (helpers / n).read_text(encoding="utf-8") for n in ("Hurt.java", "AttributeOverrides.java")) else 1)
+PY
 # a row that routes a call through a static helper takes the WHOLE receiver chain, never its tail:
 # `Minecraft.getInstance().font.drawInBatch(` once became `Minecraft.getInstance().p.Fonts.drawInBatch(font, `
 python3 - <<'PY' && ok "shared rows: receiver-chain rows (26.2 drawInBatch/setFilter/bufferSource, 1.21.3 culling box, 1.21.5 frameBufferId) take the whole chain; setFilter leaves AbstractTexture.setFilter(blur, mip) alone" || bad "a receiver row rewrites mid-chain, or setFilter catches a non-EditBox call"
