@@ -1032,7 +1032,7 @@ J
     || bad "RenderPasses (26.3): $out"
 elif [ -n "${CI:-}" ]; then bad "no javac in CI -- RenderPasses was NOT tested"
 else echo "  SKIP  no javac (CI runs it; a skip is not a pass)"; fi
-python3 - <<'PY' && ok "shared 26.3 render helpers (#120): LegacyGl draws into an open pass or given views and asserts before opening its own; in-pass geometry goes to mapped transient memory; RawGlTexture has its real shape; MultiBufferSource ends the in-pass flush into the event's pass and defers the rest to a pass-free flush" || bad "shared 26.3 render helpers lost an in-pass / given-texture / real-shape path"
+python3 - <<'PY' && ok "shared 26.3 render helpers (#120): LegacyGl draws into an open pass or given views and asserts before opening its own; in-pass geometry goes to mapped transient memory; RawGlTexture has its real shape; MultiBufferSource ends the in-pass flush into the event's pass (and a drawingInto scope's ends into its pass) and defers the rest to a pass-free flush; an in-pass draw that replaced Projection / Globals rebinds the defaults" || bad "shared 26.3 render helpers lost an in-pass / given-texture / real-shape path"
 import pathlib, re, sys
 d = pathlib.Path("templates/fork-layer/shared/26.3/java")
 strip = lambda s: re.sub(r"//[^\n]*|/\*.*?\*/", "", s, flags=re.S)
@@ -1052,7 +1052,7 @@ if core:
     a = c.find("RenderPasses.requireNoOpenPass(inRenderPass()"); u = c.find("Uploaded.of(m)"); o = c.find("createRenderPass(")
     need(0 <= a < u and a < o and re.search(r"if \(into == null\) RenderPasses\.requireNoOpenPass", c), "the own-pass path does not assert (before uploading) that no pass is open")
     need("into == null ? Uploaded.of(m) : Uploaded.inPass(m)" in c, "a draw into an open pass does not upload through Uploaded.inPass")
-    need(re.search(r"RenderPass pass = into != null \? into :", c) and re.search(r"if \(into == null\) pass\.close\(\);", c), "a pass handed in is replaced or closed")
+    need(re.search(r"RenderPass pass = into != null \? into :", c) and re.search(r"if \(into == null\) \{?\s*pass\.close\(\);", c), "a pass handed in is replaced or closed")
     need("drawIndexed(up.indexCount(), 1, up.firstIndex(), up.baseVertex(), 0)" in c, "the draw ignores the transient upload's first index / base vertex")
 inpass = re.search(r"static Uploaded inPass\(MeshData m\) \{(.*?)\n        \}\n", gl, re.S)
 tr = re.search(r"private static GpuBufferSlice transient_\(.*?\n        \}\n", gl, re.S)
@@ -1074,6 +1074,16 @@ need(eb and re.search(r"if \(into == null\) \{\s*Deferred\.drawIfNoPassOpen\(\);
 dr = re.search(r"static void draw\(RenderType type, MeshData mesh, RenderPass into\) \{(.*?)\n        \}\n", mbs, re.S)
 need(dr and re.search(r"into == null \? LegacyGl\.inRenderPass\(\) :.*?Deferred\.add\(type, mesh\);", dr.group(1), re.S), "a batch ended while a pass is open is not deferred")
 need(dr and "Uploaded.inPass(m)" in dr.group(1) and "drawFromBuffer(" in dr.group(1), "a vanilla type is not drawn into the open pass from a transient upload")
+# a handler at an in-pass stage that mixes types: its type switches and ends go into the scope's pass, not to AfterLevel
+sc = re.search(r"public Scope drawingInto\(RenderPass pass\) \{(.*?)\n        \}\n", mbs, re.S)
+need(sc and re.search(r"scopePass = pass;", sc.group(1)) and re.search(r"endBatch\(pass\);\s*scopePass = outer;", sc.group(1)),
+     "BufferSource.drawingInto does not set the scope's pass, end its batch into it on close and restore the outer scope")
+ebt = re.search(r"public void endBatch\(RenderType type, RenderPass into\) \{(.*?)\n        \}", mbs, re.S)
+need(eb and re.search(r"^\s*if \(into == null\) \{\s*into = scopePass;", eb.group(1)) and ebt and re.search(r"^\s*if \(into == null\) \{\s*into = scopePass;", ebt.group(1)),
+     "an endBatch with no pass does not fall back to the drawingInto scope's pass first")
+need(core and re.search(r"else if \(replacedDefaults\) \{\s*RenderSystem\.bindDefaultUniforms\(into\);", core.group(1))
+     and core.group(1).find("bindDefaultUniforms(into)") < core.group(1).find("tb.close()"),
+     "an in-pass draw that replaced Projection / Globals leaves the owner's pass bound to blocks it then closes")
 print(*bad, sep="\n")
 sys.exit(1 if bad else 0)
 PY
