@@ -1139,7 +1139,7 @@ def gatec_lock_check():
                                        f"s = importlib.util.spec_from_file_location('gl', {str(pathlib.Path(__file__).resolve())!r}); "
                                        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
                                        "l = m.GateCLock('/w/first', 'launch').acquire(); print('held', flush=True); time.sleep(2.5); l.release()"],
-                                      stdout=subprocess.PIPE, text=True, env=dict(os.environ))
+                                      stdout=subprocess.PIPE, text=True, encoding="utf-8", env=dict(os.environ))
             holder.stdout.readline()                 # "held": the first client has the lock
             said = []
             t0 = time.monotonic()
@@ -1152,7 +1152,7 @@ def gatec_lock_check():
                                        f"s = importlib.util.spec_from_file_location('gl', {str(pathlib.Path(__file__).resolve())!r}); "
                                        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
                                        "m.GateCLock('/w/x', 'launch').acquire(); print('held', flush=True); time.sleep(60)"],
-                                      stdout=subprocess.PIPE, text=True, env=dict(os.environ))
+                                      stdout=subprocess.PIPE, text=True, encoding="utf-8", env=dict(os.environ))
             holder.stdout.readline(); holder.kill(); holder.wait()
             t0 = time.monotonic()
             GateCLock("/w/y", "launch", poll=0.1).acquire().release()
