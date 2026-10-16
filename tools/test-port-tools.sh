@@ -703,6 +703,32 @@ done
 [ "$trees" = "1.21.3=AuthorsMixin.java,PlainMixin.java, 1.21.4=OnlyMixin.java,PlainMixin.java, 1.21.5=AuthorsMixin.java,PlainMixin.java, " ] \
   && ok "layer.py: a mixin_add_only class is in its own target's prepared tree and not in the next one's (it inherits the overlay); a mixin_remove_only class is off its own target alone; a plain mixin_add still reaches every later target" \
   || bad "layer.py per-target-only mixins, prepared trees: $trees"
+# inherited_overlay_rows (opt-in, .multiversion/base.properties): on the same three-target layer fixture, plus an
+# overlay at 1.21.3 that names OldA/OldB/OldC and rows 1.21.3 OldA, 1.21.4 OldB, 1.21.5 OldC. Without the key (and
+# with =false) every prepared tree is byte-for-byte what the fixture prepared above with no key and the inherited
+# overlay is the 1.21.3 file verbatim; with it 1.21.4 renames it by its row, 1.21.5 by 1.21.4's and its own, never by
+# 1.21.3's, and 1.21.3's own tree is unchanged. A single-version fork has no .multiversion/: no layer.py runs there.
+MXI="$T/inherited-rows"; cp -r "$MXO" "$MXI"; rm -rf "$MXI/build"
+printf 'package com.example.mod;\npublic class Uses { OldA a; OldB b; OldC c; }\n' > "$MXI/src/main/java/com/example/mod/Uses.java"
+printf 'package com.example.mod;\r\npublic class Uses { OldA a; OldB b; OldC c; int real; }\r\n' > "$MXI/.multiversion/targets/1.21.3/java/com/example/mod/Uses.java"
+i=0; for t in 1.21.3 1.21.4 1.21.5; do i=$((i+1)); n=$(printf 'ABC' | cut -c$i); printf 'Old%s\tNew%s\n' "$n" "$n" > "$MXI/.multiversion/targets/$t/renames.tsv"; done
+printf 'minecraft_version=1.21.1\n' > "$MXI/.multiversion/base.properties"
+iprep() { for t in 1.21.3 1.21.4 1.21.5; do (cd "$MXI" && python3 .multiversion/tools/layer.py prepare --target "$t" --src src/main/java --out "build/$1/mc$t" >/dev/null 2>&1) || echo "PREPARE-FAILED $1 $t"; done; }
+ifail="$(iprep none)"
+printf 'minecraft_version=1.21.1\ninherited_overlay_rows=false\n' > "$MXI/.multiversion/base.properties"; ifail="$ifail$(iprep false)"
+printf 'minecraft_version=1.21.1\ninherited_overlay_rows=true\n' > "$MXI/.multiversion/base.properties"; ifail="$ifail$(iprep on)"
+U=com/example/mod/Uses.java; OV="$MXI/.multiversion/targets/1.21.3/java/$U"
+want4="$(sed 's/OldB/NewB/' "$OV" | od -c)"; want5="$(sed 's/OldB/NewB/; s/OldC/NewC/' "$OV" | od -c)"
+# the old fixture's trees (prepared above with the key absent) against the same targets here with the key absent or false
+same_old=yes; for t in 1.21.3 1.21.4 1.21.5; do for m in none false; do
+  diff -r "$MXO/build/mc$t/mv/java/com/example/mod/mixin" "$MXI/build/$m/mc$t/com/example/mod/mixin" >/dev/null || same_old=no
+  diff -r "$MXI/build/none/mc$t" "$MXI/build/$m/mc$t" >/dev/null || same_old=no; done; done
+[ -z "$ifail" ] && [ "$same_old" = yes ] && cmp -s "$OV" "$MXI/build/none/mc1.21.4/$U" && cmp -s "$OV" "$MXI/build/none/mc1.21.5/$U" \
+  && diff -r "$MXI/build/none/mc1.21.3" "$MXI/build/on/mc1.21.3" >/dev/null \
+  && [ "$(od -c < "$MXI/build/on/mc1.21.4/$U")" = "$want4" ] && [ "$(od -c < "$MXI/build/on/mc1.21.5/$U")" = "$want5" ] \
+  && diff -r -x Uses.java "$MXI/build/none/mc1.21.5" "$MXI/build/on/mc1.21.5" >/dev/null \
+  && ok "layer.py inherited_overlay_rows: off (no key, or =false) every prepared tree is byte-identical and the inherited overlay verbatim; on, 1.21.3's overlay is renamed at 1.21.4 by 1.21.4's row and at 1.21.5 by 1.21.4's and 1.21.5's, never by 1.21.3's (CRLF kept), the root target's tree and every other file unchanged" \
+  || bad "layer.py inherited_overlay_rows: fail=[$ifail] same_old=$same_old 1.21.4 on: $(cat "$MXI/build/on/mc1.21.4/$U" 2>&1 | head -2 | tr '\r\n' '  ')"
 if command -v gradle >/dev/null 2>&1; then
   printf "rootProject.name = 'scratch'\n" > "$MXO/settings.gradle"
   { cat <<'GR'

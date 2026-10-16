@@ -44,7 +44,10 @@ target). The keep-current skill only calls this for a fork that has the layer.
           authors' file through the rename table alone, or the overlay it inherits for the same path) -- real,
           mechanical (names only: rename rows would do), redundant (identical), overlay-only (replaces nothing, not
           counted) --, how many are mixins / client code, and a WARNING above the budget (default 30;
-          .multiversion/ci.properties `overlay_budget=N`). Changes nothing.
+          .multiversion/ci.properties `overlay_budget=N`). Changes nothing. With `inherited_overlay_rows=true` in
+          .multiversion/base.properties (opt-in; the fork's layer.py then runs an inherited overlay through the rows
+          of the targets after its owner) the overlay it inherits is read through those rows, as the target's tree
+          gets it, so a renamed copy they produce is redundant; the re-merge retires a copy that merges into it.
   remerge for each target overlay whose authors' file changed between OLD and NEW (the layer branch before and after
           `merge`: its src/ is the port branch's), a three-way merge with `git merge-file` semantics: base = the
           authors' file at OLD PREPARED for the target (its rename chain and strip_onlyin, no overlay), ours = the
@@ -224,6 +227,10 @@ class Preparer:
         ps = self.mv / "tools" / "prepare-sources.py"
         self.ps = ps if ps.is_file() else TEMPLATE_TOOLS / "prepare-sources.py"
         self.tables = {}
+        # base.properties `inherited_overlay_rows=true` (opt-in; read by the fork's own layer.py, so a layer.py older
+        # than the key keeps it off): an overlay a target inherits reaches its tree through hop_table's rows
+        opt = getattr(self.layer, "inherited_overlay_rows", None)
+        self.inherited_rows = bool(opt and opt(self.mv))
 
     def rename_table(self, t):
         if t in self.tables:
@@ -262,7 +269,8 @@ class Preparer:
         """The rows t's table has and anc's (an older target in t's chain) does not -- the sections layer.py writes as
         `# ---- <t>`, `# ---- moves <t> (generated)`, `# ---- shared <t>`: what turns a file prepared for anc into one
         prepared for t. An overlay t inherits from anc reaches t's tree verbatim (overlays are not run through the
-        table), so t's own copy of the path is anc's overlay with these rows applied by hand, plus t's real changes."""
+        table), so t's own copy of the path is anc's overlay with these rows applied by hand, plus t's real changes.
+        With inherited_overlay_rows=true layer.py runs anc's overlay through exactly these rows (inherited())."""
         def sections(text):
             out, cur = {}, None
             for line in text.split("\n"):
@@ -273,6 +281,12 @@ class Preparer:
             return out
         mine, theirs = sections(self.rename_table(t)), sections(self.rename_table(anc))
         return "\n".join(h + "\n" + "\n".join(body) for h, body in mine.items() if h not in theirs) + "\n"
+
+    def inherited(self, t, anc, files):
+        """{rel: anc's overlay text} -> {rel: what t's tree gets for that path when t has no copy of its own}: the
+        overlay verbatim (the default), or, with inherited_overlay_rows=true, run through hop_table(t, anc) as
+        layer.py prepare does (then strip_onlyin when t sets it, as for any file of t's tree)."""
+        return self.prepare(t, files, self.hop_table(t, anc)) if self.inherited_rows and files else dict(files)
 
     def prepare(self, t, files, table=None):
         """{rel: authors' text} -> {rel: that text prepared for t (renames + chain, no overlay)}; with `table`, those
@@ -362,6 +376,9 @@ def overlay_report(repo, t, prep=None):
       renamed-copy  differs from the overlay it inherits only by names: a copy kept because overlays are not run
                   through the table (rows cannot reach it)
       redundant   identical to it: delete the overlay
+    With .multiversion/base.properties `inherited_overlay_rows=true` what an inherited path is read against is the
+    older overlay run through the rows after it (Preparer.inherited), as the target's tree would get it: a renamed copy
+    those rows produce is then redundant.
       overlay-only  replaces no authors' file (a compat class; whole_file_overlays() is the one definition):
                   listed, not counted against the budget, and not a REVIEW.md row
     plus lines, and which are mixins / client code. `overlays` (counted against the budget) excludes overlay-only."""
@@ -378,13 +395,17 @@ def overlay_report(repo, t, prep=None):
     authors = {f"{s}/{rel}": _read(repo / src_path(s, rel)) for (s, rel) in own
                if (s, rel) not in inherited and (repo / src_path(s, rel)).is_file()}
     prepared = prep.prepare(t, authors)
+    anc_text = {}
+    for (s, rel), a in inherited.items():
+        anc_text.setdefault(a, {})[f"{s}/{rel}"] = _read(mv.parent / overlay_path(a, s, rel))
+    via = {(a, k): v for a, fs in anc_text.items() for k, v in prep.inherited(t, a, fs).items()}
     files = []
     for (s, rel), f in sorted(own.items()):
         ours = _read(f)
         if (s, rel) not in whole:
             ref, against = None, ""                       # replaces no authors' file: overlay-only, as fork-port.py reads it
         elif (s, rel) in inherited:
-            ref, against = _read(mv.parent / overlay_path(inherited[(s, rel)], s, rel)), f"overlay of {inherited[(s, rel)]}"
+            ref, against = via[(inherited[(s, rel)], f"{s}/{rel}")], f"overlay of {inherited[(s, rel)]}"
         else:
             ref, against = prepared.get(f"{s}/{rel}"), "authors' file"
         kind = ("overlay-only" if ref is None else "redundant" if _lf(ref) == _lf(ours)
@@ -601,8 +622,9 @@ def remerge(repo, old, new, targets=None, write=True, prep=None):
                          "it again): " + "; ".join(dups))
                 continue
             # retired: the target's tree gets the same file without this overlay -- the prepared authors' file, or the
-            # inherited overlay VERBATIM (an inherited overlay is not renamed by this target's rows)
-            gets = now[(anc, s, rel)] if anc else theirs
+            # inherited overlay VERBATIM (an inherited overlay is not renamed by this target's rows), or, with
+            # inherited_overlay_rows=true, the inherited overlay through the rows after it (Preparer.inherited)
+            gets = prep.inherited(t, anc, {key: now[(anc, s, rel)]})[key] if anc else theirs
             if _lf(merged) == _lf(gets):
                 change("retired", gets)
             elif _lf(merged) == _lf(ours):

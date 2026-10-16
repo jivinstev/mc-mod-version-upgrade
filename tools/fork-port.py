@@ -923,6 +923,9 @@ def prepared_tree(repo, t, prepare=False):
 
     def newest():
         roots = [src, mv / "tools/layer.py", mv / "tools/prepare-sources.py"]
+        bp = mv / "base.properties"            # inherited_overlay_rows (opt-in) changes what the tree holds
+        if bp.is_file() and "inherited_overlay_rows" in bp.read_text(encoding="utf-8", errors="replace"):
+            roots.append(bp)
         for c in jar_chain(mv, t):
             roots += [mv / "targets" / c / x for x in PREPARE_INPUTS] + [mv / "shared" / c / "java", mv / "shared" / c / "renames.tsv"]
         best = (0, None)
@@ -4304,6 +4307,21 @@ def self_check_review131():
             with contextlib.redirect_stdout(io.StringIO()):
                 target_done(repo, "1.21.4", prepare=True)
             expect(not any("older than" in x for x in target_done(repo, "1.21.4")), "re-prepared: current again")
+            # base.properties is an input of the tree only once it says inherited_overlay_rows (opt-in): an edit of
+            # any other key (freeze's upstream=) leaves a default layer's tree current, as before
+            bp = repo / ".multiversion/base.properties"
+            keep_bp = bp.read_text(encoding="utf-8") if bp.is_file() else None
+            later = (repo / "build/mc1.21.4/mv/java").stat().st_mtime + 60
+            for body, stale in (("minecraft_version=1.21.1\nupstream=origin/x\n", False),
+                                ("minecraft_version=1.21.1\ninherited_overlay_rows=true\n", True)):
+                w(bp, body); os.utime(bp, (later, later))
+                why = target_done(repo, "1.21.4")
+                expect(any("older than .multiversion/base.properties" in x for x in why) == stale,
+                       f"base.properties {'with' if stale else 'without'} inherited_overlay_rows: stale={stale}: {why}")
+            if keep_bp is None:
+                bp.unlink()
+            else:
+                w(bp, keep_bp)
             buf, real_argv = io.StringIO(), sys.argv
             chk.unlink(missing_ok=True)
             sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4", "--check-done"]
