@@ -753,6 +753,19 @@ def self_check():
     ok &= "github.ref_name != 'neoforge-1.21.x'" in lay.split("\n  release:\n    needs:", 1)[1].split("steps:", 1)[0]
     ok &= "github.ref_name !=" not in plain and "layer-release" not in plain and "layer-deps.py" not in plain
     ok &= lay.count("layer-deps.py fetch --repo . --target") == 3 and lay.count("name: layer-jars-") == 2
+    # a DEPENDENT fork's layer (#78; tools/golden/port-ci-layer-deps.yml is one: --dep-jar on a library's release): each
+    # job that builds a target first puts the library's 1.21.1 jar in mavenLocal, then fetches the library's per-target
+    # jars its target.properties pins (url + sha256, from the library's layer-release), the target only through env --
+    # and only then builds; the single-version workflow fetches nothing
+    dep = fixture(True, "neoforge-1.21.x")
+    for j, build in (("layer-compile", "layer-ci.py compile"), ("layer-gates", "ci-gates.py --repo . --modid"),
+                     ("layer-gates-extra", "ci-gates.py --repo . --modid")):
+        body = dep.split(f"\n  {j}:\n", 1)[1].split("\n\n  ", 1)[0]
+        i_lib = body.find("releases/download/lib-1.0-mc1.21.1/lib-1.0_mr.jar")
+        i_fetch = body.find('layer-deps.py fetch --repo . --target "$TARGET"')
+        ok &= 0 < i_lib < i_fetch < body.find(build) and "sha256sum -c -" in body[i_lib:i_fetch]
+        ok &= "--target ${{" not in body and "TARGET: ${{ " in body[:i_fetch]
+    ok &= "layer-deps.py" not in fixture(True, None) and "layer-deps.py" not in fixture(False, None)
     ok &= "python3 .multiversion/tools/layer.py isolation --base \"origin/neoforge-1.21.1\"" in lay
     ok &= "layer-ci.py inertness" in lay and "layer-ci.py compile" in lay and "--mc \"$NEWEST\"" in lay
     extra = ljobs.split("\n  layer-gates-extra:\n", 1)[1]

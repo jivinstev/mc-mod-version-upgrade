@@ -111,7 +111,9 @@ into mavenLocal each sibling port's per-target jar the target's `target.properti
 checked against its sha256 -- a no-op for a target that pins none. The pins are written by
 `layer-deps.py resolve --port-release owner/repo@TAG` against the sibling's layer release (its `layer-release` job);
 locally `--port-checkout owner/repo=DIR` builds the jar from a checkout instead and pins nothing, so CI cannot fetch
-it -- re-resolve with `--port-release` before the dependent's layer CI can go green. `fork-port.py` passes both through
+it -- re-resolve with `--port-release` before the dependent's layer CI can go green (`fetch` fails on such an unpinned
+sibling substitute and prints the re-resolve command). A target's shipped-jar gate (`ci-gates.py --mc <t> --shipped`)
+boots the sibling ports' per-target jars from mavenLocal beside the built jar, as the port branch's `shipped jars` job does. `fork-port.py` passes both through
 (`--port-release owner/repo@TAG`, kept in its resume command), and a later resolve that names the sibling with neither
 keeps the existing `port_jar.` pin while it still pins the version `port-ci.yml` installs. `resolve --dry-run` builds,
 fetches and installs no sibling jar. A dependency the fork's `port-install.json` does not name is required when it is
