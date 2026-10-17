@@ -345,7 +345,8 @@ def step_fetch(config, repo, work, now=None, clone=None):
         d = pathlib.Path(repo) if i == 0 else work / "forks" / str(i)
         if i and not (d / ".git").exists():
             url = clone(f["repo"]) if clone else f"https://github.com/{f['repo']}.git"
-            r = subprocess.run(["git", "clone", "-q", url, str(d)], capture_output=True, text=True)
+            r = subprocess.run(["git", "clone", "-q", url, str(d)], capture_output=True, text=True, encoding="utf-8",
+                               errors="replace")
             if r.returncode:
                 raise Fail(f"cannot clone {f['repo']} (it must be public): {r.stderr.strip()[-300:]}")
         ref, hc = head_ref(d, f["head"])
@@ -750,7 +751,8 @@ def self_check():
         with contextlib.redirect_stdout(io.StringIO()):
             step_previous(w, api, "o/lib")
         rp = subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "render-plan", "--input",
-                             str(w / "plan-input.json"), "--out", str(w / "issue.json")], capture_output=True, text=True)
+                             str(w / "plan-input.json"), "--out", str(w / "issue.json")], capture_output=True, text=True,
+                            encoding="utf-8")
         expect(rp.returncode == 0, f"render-plan: {rp.stderr}")
         with contextlib.redirect_stdout(io.StringIO()):
             step_open(w, api, "o/lib")

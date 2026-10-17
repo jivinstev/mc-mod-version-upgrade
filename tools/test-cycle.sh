@@ -217,9 +217,9 @@ dsec = max(i for i, l in enumerate(L[:d]) if l.startswith("## "))
 sys.exit(0 if L[sec].startswith("## R.") and m6 < aug < nxt and L[dsec].startswith("## D.") else 1)
 PY
 row="$(git -C "$M" show HEAD:docs/port-costs.tsv | tail -1)"
-{ git -C "$M" log -1 --format=%B | grep -q '^Cost: \$1.50' && grep -q 'claude-test-1' <<<"$row" \
+{ git -C "$M" log -1 --format=%B | grep -q '^Cost: \$1.50' && grep -q 'unpriced' <<<"$row" && ! grep -q 'claude-test-1' <<<"$row" \
   && ! grep -qi 'fake' <<<"$row" && [ "$(git -C "$M" show HEAD:docs/port-costs.tsv | grep -vc '^#')" -ge 2 ]; } \
-  && ok "the learnings PR adds the port's cost row to docs/port-costs.tsv, with no mod identity, and says it" \
+  && ok "the learnings PR adds the port's cost row to docs/port-costs.tsv, with no mod identity and no model name (a price tier), and says it" \
   || bad "cost row: $row / $(git -C "$M" log -1 --format=%B | grep Cost)"
 grep -q "^CATALOG.md::R99	" "$M/docs/catalog-census.tsv" && ok "the census now inventories R99 (a later PR cannot silently drop it)" \
   || bad "R99 missing from the census"
