@@ -4240,6 +4240,17 @@ def self_check():
         g("add", "-A"); g("commit", "-qm", "layer: inventory current")
         for t in ("1.21.3", "1.21.4", "1.21.5"):
             _quiet(_fixture_done, r, g, t)
+        if "migrated" not in _FIXTURES and os.environ.get("FB_FIXTURE_CACHE"):
+            # the --platform leg built no migrated fixture: migrate a copy of this one (every target done, its
+            # inventory current) once, for the blocks of test-port-tools.sh that copy it from FB_FIXTURE_CACHE
+            seed = pathlib.Path(os.environ["FB_FIXTURE_CACHE"]) / "migrated" / "fork"
+            if not (seed / ".fixture-complete").is_file():
+                shutil.rmtree(seed, ignore_errors=True)
+                shutil.copytree(r, seed, symlinks=True)
+                if _quiet(migrate, seed)[0] == 0:
+                    (seed / ".fixture-complete").write_bytes(b"")
+            if (seed / ".fixture-complete").is_file():
+                _FIXTURES["migrated"] = seed
         g("checkout", "-q", "neoforge-1.21.1")
         (r / "src/main/java/com/example/mod/Later.java").write_text("package com.example.mod;\nclass Later {}\n", encoding="utf-8")
         uh = r / "src/main/java/com/example/mod/UsesHelper.java"
