@@ -17,7 +17,7 @@ description: Make a fork port build for more Minecraft versions as stacked versi
   that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
   fork moves to version branches with `tools/fork-branches.py migrate` when the maintainer decides it for that fork.
 
-Tools: `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions` --, review-authors, sync-shared, check-done, freeze, library-record, ci),
+Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions` --, review-authors, sync-shared, check-done, freeze, library-record, ci),
 `tools/fork-port.py` (the stages and the done list, on a version branch), `tools/layer-inventory.py`,
 `tools/layer-deps.py`, `tools/ci-gates.py --mc`, `tools/port-ci.py`, `tools/audit-mixin-targets.py`,
 `tools/fix-access-transformer.py`, `tools/burndown-count.sh`, `tools/port-cost.py`.
@@ -279,6 +279,60 @@ version from the base up to each branch's own counts, so a version whose library
 too. Without `--target` it syncs every version (the default, and the safe one): a version left out keeps its old copy
 of the tables, so a cascade from below re-makes the synced files back through them, and a partial run names those
 versions in a WARNING. Then cascade.
+
+## Known issues: one ledger at the head, graded S1-S4
+
+Every known defect of the fork lives in **one ledger**, `.port/KNOWN-ISSUES.json`, committed on the **head branch**
+(the root port branch, `neoforge-1.21.1`; a single-version fork's only branch). A multi-mod repository keeps one per
+mod, `.port/<mod>/KNOWN-ISSUES.json` (`--mod <mod>`). `tools/known-issues.py` writes it (atomically, sorted keys,
+2-space indent); nobody edits it by hand. It is a record, not port code: Port CI's push trigger `paths-ignore`s it,
+it never makes gates or a review stale, and `fork-branches.py cascade` never carries it to a version branch, so a
+ledger-only commit goes straight onto the head branch. README and ledger edits never trigger CI or make gates
+stale (the root `README.md` only; a README under `src/` is jar content). Read it from there: `--repo DIR --ref neoforge-1.21.1`.
+
+Each entry: id, title, the severity and the rubric inputs it came from, an owner `override` (recorded with its
+reason), the lowest affected version, a status per Minecraft version (`open`, `fixed@<commit>`, `wontfix:<reason>`,
+`n/a`; a version not listed is not affected), the source (authors, review, gate, player) and notes. `grade` derives
+the severity from the inputs:
+
+| Severity | Rubric inputs | Meaning |
+|---|---|---|
+| **S1** | failure crash, kick, data, hang, security or build (anything else aside) | a crash, kick/disconnect, world or player data lost, a hang, a security hole, a version that does not build; blocks publishing |
+| **S2** | failure functional, reach normal, visibility always/common, no workaround | a core feature broken in normal play, e.g. invisible GUI text |
+| **S3** | anything else: cosmetic (S3 at most), rare, one specific feature, or a workaround | cosmetic, an uncommon path, or avoidable |
+| **S4** | visibility invisible, or reach unusual | invisible to players, or needs an unusual setup, other mods or debug options |
+
+`security`: an exposed credential or secret, a token leak, or an exploit or privilege path. `build`: the version does
+not compile or produce a jar. `functional`: a feature does not work, or information or controls the player needs are missing, unreadable or
+unusable (invisible text, a missing UI element). `cosmetic`: the look is wrong but nothing the player needs is lost
+(a wrong colour tint, a texture seam); it is S3 at most.
+
+An entry may be scoped to one platform's jar, `"platforms": ["cf"]` (or `["mr"]`; `add --platform cf`): only that
+jar is affected. Without the key, every platform is. `list` and `release-notes` take `--platform`; `known-issues.py
+blocks-publish --version V --platform P` prints the open S1s against that platform's jar and exits 1 when there is
+one. `reopens` ignores platforms.
+
+**Only an S1 reopens a done version.** A finding at a version that is already done (`fork-port.py --check-done`)
+reopens it only when it is an S1: fix it at the lowest affected version and cascade only that fix. Anything else goes
+into the ledger at its lowest affected version and the run goes on. `known-issues.py reopens --version V --severity S`
+(or `--id ID`) answers: exit 0 yes, exit 1 no.
+
+    python3 tools/known-issues.py add     --repo DIR --title T --failure crash|kick|data|hang|security|build|functional|cosmetic \
+        --visibility always|common|rare|invisible --reach normal|feature|unusual --workaround yes|no \
+        --lowest 1.21.4 --status 1.21.4=open --status 1.21.5=open [--source review] [--file PATH] [--notes N]
+    python3 tools/known-issues.py grade   --repo DIR KI-3 [--reach feature] [--override S2 --reason WHY --by owner]
+    python3 tools/known-issues.py status  --repo DIR KI-3 --set 1.21.4=fixed@<commit> --set 1.21.5=wontfix:<reason>
+    python3 tools/known-issues.py list    --repo DIR --ref neoforge-1.21.1 [--version 1.21.5] [--min S2] [--open]
+    python3 tools/known-issues.py select  --repo DIR [--budget 3] [--touched PATH ...] [--version V ...] [--add ID] [--remove ID]
+    python3 tools/known-issues.py render-issue  --repo DIR          # the pinned issue: issue by version, by severity
+    python3 tools/known-issues.py release-notes --repo DIR --version 1.21.5 --tag <tag> [--min S3] [--platform mr|cf]
+    python3 tools/known-issues.py blocks-publish --repo DIR --version 1.21.5 --platform mr|cf   # exit 1: an open S1
+
+`select` is the default choice of what a run takes: every open S1, then S2s lowest affected version first up to
+`--budget`, then any S3 in a file the run already touches; the owner's `--add` / `--remove` apply last and the output
+says who chose each item. `release-notes` lists the issues open for that version at the tag, S1-S3 by default (with
+`--repo`, a `fixed@<commit>` that is not in the tag counts as open there). The cascade and the weekly routine do not
+call these yet (issue #135, part 2): run them by hand.
 
 ## Planning the cascade: every decision in one pass, the owner asked once
 

@@ -1765,6 +1765,9 @@ def blob_at(repo, ref, path):
 
 # generated per branch (tools/port-ci.py on that branch; the install manifest its promote job refreshes there)
 BRANCH_OWNED = (".github/workflows/port-ci.yml", ".github/port-install.json")
+# the known-issues ledger (tools/known-issues.py) lives on the head branch only; tools read it from there
+# (`git show <head>:.port/KNOWN-ISSUES.json`), so a merge up the chain never carries a copy (issue #135, section 3)
+LEDGER_PATH = re.compile(r"^\.port/(?:[^/]+/)?KNOWN-ISSUES\.json$")
 
 
 UNION_FILES = (f"{REC}/DECISIONS.md", f"{REC}/AUTHORS-REVIEWS.md")      # append-only records: a conflict is a union
@@ -2109,6 +2112,13 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             git(work, "add", "--", f)
             resolved.add(f)
             notes.append(f"{f}: {parent_name}'s, with {t}'s build keys")
+    for f in sorted(x for x in changed if LEDGER_PATH.match(x)):
+        if blob_at(repo, pre, f) is not None:
+            git(work, "checkout", pre, "--", f)
+        else:
+            git(work, "rm", "-q", "-f", "--", f)
+        resolved.add(f)
+        notes.append(f"{f}: the known-issues ledger stays on the head branch, not carried to {t}")
     for f in BRANCH_OWNED:
         if f in changed:
             if blob_at(repo, pre, f) is not None:
@@ -4151,6 +4161,10 @@ def self_check():
                                                                         encoding="utf-8")
             amixin = "src/main/java/com/example/mod/mixin/AMixin.java"
             (r / amixin).write_text((r / amixin).read_text(encoding="utf-8").replace("void h() {}", "void h() { fixed(); }"), encoding="utf-8")
+            ledgers = (".port/KNOWN-ISSUES.json", ".port/examplemod/KNOWN-ISSUES.json")    # the head branch's ledgers
+            for lf in ledgers:
+                (r / lf).parent.mkdir(parents=True, exist_ok=True)
+                (r / lf).write_text('{"issues": [], "schema": 1}\n', encoding="utf-8")
             g("add", "-A"); g("commit", "-qm", "authors: a field and a class")
             g("checkout", "-q", "neoforge-1.21.x")
             rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none")
@@ -4159,6 +4173,8 @@ def self_check():
                    and e5["src/main/java/com/example/mod/ExampleMod.java"] == b"package com.example.mod;\nimport new.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.newCall(); } }\n"
                    and b"import new.Thing;" in e5["src/main/java/com/example/mod/NewOne.java"] and b"keep = 5" in e5["src/main/java/com/example/mod/Over.java"],
                    f"cascade port..1.21.5: the authors' change reaches every version through its rows, overlays kept: {out[-500:]}")
+            expect(not any(lf in ref_files(r, resolve_branch(r, branch_name(t)), ".port") for lf in ledgers for t in ("1.21.3", "1.21.4", "1.21.5")),
+                   "the cascade never carries the known-issues ledger (.port/KNOWN-ISSUES.json, .port/<mod>/) to a version branch")
             expect(b"fixed();" in e5[amixin] and amixin not in ref_files(r, resolve_branch(r, "neoforge-1.21.4"), "src"),
                    "the authors' fix to a class 1.21.4 takes off (mixin_remove_only) still reaches 1.21.5, which has it")
             why = target_done(r, "1.21.5")

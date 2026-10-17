@@ -490,7 +490,7 @@ def checkout_jar(ga, spec, target, co, ver):
 
 GATES_HEAD = re.compile(r"at `([^`]+)` for Minecraft (\S+)")
 NOT_JAR = {"GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md", "BEHAVIOUR.json", "DEPS.md",
-           "INVENTORY.json", "INVENTORY-CHECK.json"}
+           "INVENTORY.json", "INVENTORY-CHECK.json", "KNOWN-ISSUES.json"}
 
 
 def gates_record(text, target):
@@ -521,8 +521,11 @@ def open_stubs(text):
     return sum(1 for e in data if isinstance(e, dict) and not e.get("reviewed")) if isinstance(data, list) else 0
 
 
+ROOT_RECORDS = ("README.md",)       # by path from the repository root: a README under src/ is jar content
+
+
 def _not_jar(f):
-    return f.rsplit("/", 1)[-1] in NOT_JAR
+    return f.rsplit("/", 1)[-1] in NOT_JAR or f in ROOT_RECORDS
 
 
 def _chain_of(props_of, target):

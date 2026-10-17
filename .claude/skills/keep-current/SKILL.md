@@ -140,6 +140,12 @@ until its dependency's run is green, and it is then gated against the dependency
    Once the pre-release exists, rename this reconcile's ledger column (`keep-current/<date>`) to its tag (joined
    with ` + ` in a ledger shared with a dependency): publishing (the publish-port skill) judges the column that
    names the tag it uploads, and refuses a tag no column names.
+   **Known-issues ledger** (a fork with `.port/KNOWN-ISSUES.json` on its head branch; the fork-versions skill,
+   "Known issues"): grade each new finding into it with `tools/known-issues.py add` (only an S1 reopens a version
+   that is done: `known-issues.py reopens`), commit the ledger alone on the head branch (Port CI ignores a
+   ledger-only push), and take the release notes' known-issues section from it: `known-issues.py release-notes
+   --repo <fork> --version <mc> --tag <tag>` (S1-S3; S4 omitted). A fork without the file keeps the fix ledgers
+   above, unchanged.
 7. **Dependents next.** Gate each dependent locally against this build (its `_mr`-style jar put into mavenLocal
    the way its CI does). Its pin (`port-ci.py --dep-jar`, a release asset + sha256) can only move once this
    dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
