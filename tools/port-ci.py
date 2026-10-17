@@ -21,7 +21,7 @@ Per-platform jars (both opt-in; without them the workflow is byte-for-byte what 
 
     python3 tools/port-ci.py promote --fork <owner/repo> --tag <release tag> --played-by <github login>
                              [--notes "<what was played>"] [--branch <port branch>] [--print]
-                             [--with-dependency <owner/repo> ...]
+                             [--with-dependency <owner/repo> ...] [--repo <local clone>]
 
 `promote` turns a pre-release into a full Release once a person has played it. It does not edit the release itself:
 it dispatches the fork's own Port CI workflow with promote=<tag>, which checks the tag is a pre-release that
@@ -31,7 +31,9 @@ agent can send through its GitHub connector (workflow port-ci.yml, ref = the bra
 played_notes). A nightly or unattended run must never promote: promotion is the "a person played it" gate.
 Don't exceed your dependency: a dependent may cut pre-releases pinned to a dependency's pre-release (the pair is what
 a person plays), but `promote` refuses while a dependency the branch's workflow pins (--dep-jar) is still a
-pre-release, unless --with-dependency names it -- the person promotes that dependency together with this one.
+pre-release, unless --with-dependency names it -- the person promotes that dependency together with this one. The
+check is best effort: it reads the workflow with `gh api` when gh is logged in, else from a local clone of the fork
+(--repo, default the current directory); when neither can, it says so and dispatches as before.
 
 The workflow downloads the Port CI kit (tools/port-ci-kit.py) -- a release asset holding only the gate runner and
 what it needs -- pinned by version and sha256, rather than checking this repository out. Standard library only.
@@ -399,23 +401,49 @@ def pinned_releases(workflow_text):
 
 
 def dependency_blockers(workflow_text, release_of, with_deps=(), own=None):
-    """Why promoting must wait for a dependency: each pinned dependency release that is still a pre-release (or that
-    cannot be read), unless it is named in with_deps (promoted together). release_of(repo, tag) -> the GitHub release
-    JSON, or raises. A workflow pinning nothing (a fork with no fork-port dependency) never waits."""
-    out, named = [], {d.lower() for d in with_deps}
+    """(blockers, notes) for promoting: each pinned dependency release that is still a pre-release blocks, unless it
+    is named in with_deps (promoted together); one that cannot be read is a note (the check is best effort).
+    release_of(repo, tag) -> the GitHub release JSON, or raises. A workflow pinning nothing (a fork with no fork-port
+    dependency) never waits."""
+    out, notes, named = [], [], {d.lower() for d in with_deps}
     for repo, tag in pinned_releases(workflow_text):
-        if own and repo.lower() == own.lower():
-            continue
-        if repo.lower() in named:
+        if (own and repo.lower() == own.lower()) or repo.lower() in named:
             continue
         try:
             rel = release_of(repo, tag)
-        except Exception as e:                              # noqa: BLE001 -- unknown is not "a full Release"
-            out.append(f"{repo}@{tag}: cannot tell whether it is a full Release ({e})")
+        except Exception as e:                              # noqa: BLE001 -- best effort: said, not refused
+            notes.append(f"{repo}@{tag}: could not tell whether it is a full Release ({e}); check it before promoting")
             continue
         if rel.get("prerelease") or rel.get("draft"):
             out.append(f"{repo}@{tag} is still a pre-release")
-    return out
+    return out, notes
+
+
+def gh_logged_in():
+    import shutil
+    return bool(shutil.which("gh")) and subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0
+
+
+def fork_workflow(fork, ref, repo_dir=None, gh=None):
+    """The fork's port-ci.yml on `ref`, best effort: `gh api` when gh is logged in (a private fork reads too), else
+    `git show` from a local clone of that fork (--repo, default the current directory) -> (text or None, how)."""
+    gh = gh_logged_in() if gh is None else gh
+    if gh:
+        r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github.raw",
+                            f"repos/{fork}/contents/.github/workflows/port-ci.yml?ref={ref}"],
+                           capture_output=True, text=True, encoding="utf-8")
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout, "gh api"
+    d = repo_dir or "."
+    url = subprocess.run(["git", "-C", d, "remote", "get-url", "origin"], capture_output=True, text=True,
+                         encoding="utf-8").stdout.strip()
+    if re.search(rf"[/:]{re.escape(fork)}(\.git)?/?$", url, re.I):
+        for rev in (f"origin/{ref}", ref):
+            r = subprocess.run(["git", "-C", d, "show", f"{rev}:.github/workflows/port-ci.yml"], capture_output=True,
+                               text=True, encoding="utf-8")
+            if r.returncode == 0:
+                return r.stdout, f"git show {rev}"
+    return None, "neither gh nor a local clone could read it"
 
 
 def promote(argv):
@@ -423,24 +451,34 @@ def promote(argv):
     ap.add_argument("--fork", required=True); ap.add_argument("--tag", required=True)
     ap.add_argument("--played-by", required=True); ap.add_argument("--notes", default="")
     ap.add_argument("--branch"); ap.add_argument("--print", action="store_true")
+    ap.add_argument("--repo", help="a local clone of the fork, read when gh is not logged in (default: the current directory)")
     ap.add_argument("--with-dependency", action="append", default=[], metavar="OWNER/REPO",
                     help="a pinned dependency still a pre-release that the person promotes together with this one")
     a = ap.parse_args(argv)
     ref, inputs = promote_dispatch(a.fork, a.tag, a.played_by, a.notes, a.branch)
     import json
-    try:                                                    # the file itself (the raw media type), not an encoded copy
-        wf = _get(f"https://api.github.com/repos/{a.fork}/contents/.github/workflows/port-ci.yml?ref={ref}",
-                  "application/vnd.github.raw")
-    except Exception as e:                                  # noqa: BLE001
-        wf = None
-        why = [f"cannot read {a.fork}'s port-ci.yml on {ref} to check its pinned dependencies ({e})"]
-    if wf is not None:
-        why = dependency_blockers(wf, lambda r_, t_: json.loads(_get(f"https://api.github.com/repos/{r_}/releases/tags/{t_}")),
-                                  a.with_dependency, a.fork)
-    if why:
-        sys.exit("not promoting " + a.tag + ": a dependent is never a full Release ahead of its dependency --\n  "
-                 + "\n  ".join(why) + "\npromote the dependency first, or promote both together: pass "
-                 "--with-dependency <owner/repo> for each one the person promotes alongside (and promote it too)")
+    # best effort, never a reason a fork without fork-port pins cannot promote: the workflow is read with gh or from a
+    # local clone; when neither can, a note and the dispatch as before
+    gh = gh_logged_in()
+    wf, how = fork_workflow(a.fork, ref, a.repo, gh)
+    if wf is None:
+        print(f"note: could not read {a.fork}'s port-ci.yml on {ref} ({how}): the pinned dependencies are not checked "
+              "here -- make sure none is still a pre-release (a dependent is never promoted ahead of its dependency)")
+    else:
+        def release_of(r_, t_):
+            if gh:
+                x = subprocess.run(["gh", "api", f"repos/{r_}/releases/tags/{t_}"], capture_output=True, text=True,
+                                   encoding="utf-8")
+                if x.returncode == 0:
+                    return json.loads(x.stdout)
+            return json.loads(_get(f"https://api.github.com/repos/{r_}/releases/tags/{t_}"))
+        why, notes = dependency_blockers(wf, release_of, a.with_dependency, a.fork)
+        for n in notes:
+            print("note: " + n)
+        if why:
+            sys.exit("not promoting " + a.tag + ": a dependent is never a full Release ahead of its dependency --\n  "
+                     + "\n  ".join(why) + "\npromote the dependency first, or promote both together: pass "
+                     "--with-dependency <owner/repo> for each one the person promotes alongside (and promote it too)")
     for d in a.with_dependency:
         print(f"note: {d} must be promoted together with {a.tag} (port-ci.py promote --fork {d} ...)")
     try:
@@ -453,8 +491,8 @@ def promote(argv):
     cmd = ["gh", "workflow", "run", "port-ci.yml", "--repo", a.fork, "--ref", ref]
     for k, v in inputs.items():
         cmd += ["-f", f"{k}={v}"]
-    import shlex, shutil
-    logged_in = shutil.which("gh") and subprocess.run(["gh", "auth", "status"], capture_output=True).returncode == 0
+    import shlex
+    logged_in = gh
     if a.print or not logged_in:
         print("Dispatch the fork's Port CI workflow (port-ci.yml) on ref", ref, "with inputs", json.dumps(inputs))
         print("  " + shlex.join(cmd))
@@ -780,11 +818,39 @@ def self_check():
     rels = {("o/lib", "lib-1.1-mc1.21.1"): {"prerelease": True}, ("o/lib", "lib-1.0-mc1.21.1"): {"prerelease": False}}
     look = lambda r_, t_: rels[(r_, t_)]
     ok &= pinned_releases(pre_pin) == [("o/lib", "lib-1.1-mc1.21.1")]
-    ok &= dependency_blockers(pre_pin, look) == ["o/lib@lib-1.1-mc1.21.1 is still a pre-release"]
-    ok &= dependency_blockers(pre_pin, look, ["o/lib"]) == []
-    ok &= dependency_blockers(fixture(deps=True), look) == []
-    ok &= dependency_blockers(fixture(deps=False), look) == [] and pinned_releases(fixture(deps=False)) == []
-    ok &= dependency_blockers(pre_pin, lambda r_, t_: (_ for _ in ()).throw(OSError("offline")))[0].startswith("o/lib@lib-1.1-mc1.21.1: cannot tell")
+    ok &= dependency_blockers(pre_pin, look) == (["o/lib@lib-1.1-mc1.21.1 is still a pre-release"], [])
+    ok &= dependency_blockers(pre_pin, look, ["o/lib"]) == ([], [])
+    ok &= dependency_blockers(fixture(deps=True), look) == ([], [])
+    ok &= dependency_blockers(fixture(deps=False), look) == ([], []) and pinned_releases(fixture(deps=False)) == []
+    unread = dependency_blockers(pre_pin, lambda r_, t_: (_ for _ in ()).throw(OSError("offline")))
+    ok &= unread[0] == [] and unread[1][0].startswith("o/lib@lib-1.1-mc1.21.1: could not tell")
+    # t10 (a single-version fork, no pins, its workflow unreadable -- private, rate-limited, offline): promote prints
+    # the dispatch exactly as before the check existed; nothing exits
+    import contextlib, io, urllib.error
+    saved_get, saved_fw, saved_gh = _get, fork_workflow, gh_logged_in
+    def no_net(url, accept=None):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+    globals().update(_get=no_net, gh_logged_in=lambda: False)
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_ = promote(["--fork", "o/private-fork", "--tag", "x-1.0-mc1.21.1", "--played-by", "someone", "--print",
+                           "--repo", str(pathlib.Path(__file__).resolve().parent)])
+        ok &= rc_ == 0 and "gh workflow run port-ci.yml --repo o/private-fork" in buf.getvalue() and "note: could not read" in buf.getvalue()
+        # a readable workflow pinning a pre-release still refuses, and --with-dependency lets it through
+        globals().update(fork_workflow=lambda *a_, **k_: (pre_pin, "test"), _get=lambda url, accept=None: (
+            '{"prerelease": true}' if "/o/lib/" in url else '{"prerelease": true}'))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                promote(["--fork", "o/r", "--tag", "x-1.0-mc1.21.1", "--played-by", "someone", "--print"])
+            ok = False
+        except SystemExit as e:
+            ok &= "still a pre-release" in str(e)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ok &= promote(["--fork", "o/r", "--tag", "x-1.0-mc1.21.1", "--played-by", "someone", "--print",
+                           "--with-dependency", "o/lib"]) == 0
+    finally:
+        globals().update(_get=saved_get, fork_workflow=saved_fw, gh_logged_in=saved_gh)
     for bad in (("o/r", "x-1.0-mc1.21.1", ""), ("o/r", "x-1.0-mc1.21.1", "a b"), ("o/r", "x-1.0-mc1.21.1", "-x"),
                 ("nope", "x-1.0-mc1.21.1", "me"), ("o/r", "not-a-tag", "me")):
         try:
