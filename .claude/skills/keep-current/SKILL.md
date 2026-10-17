@@ -1,6 +1,6 @@
 ---
 name: keep-current
-description: Keep a fork port current with its authors, unattended or on request -- bring in their new commits and releases (and new releases of the forks it depends on), reconcile every defect fix the port carries against what the authors changed (take their fix when it is proven to cover ours, keep or shrink ours when not), port the new code, gate it, and push it as a PR on the fork, with each fork issue's fix ledger kept current. Also sets this up as a nightly Claude Code routine on the user's own subscription. Use when the user asks to update, sync or keep current a fork port, to reconcile with the authors' new version, to check whether the authors fixed a bug we fixed, or to schedule that.
+description: Keep a fork port current with its authors, unattended or on request -- bring in their new commits and releases (and new releases of the forks it depends on), reconcile every defect fix the port carries against what the authors changed (take their fix when it is proven to cover ours, keep or shrink ours when not), port the new code, gate it, and push it as a PR on the fork, with the known-issues ledger and each fork issue's fix ledger kept current. Also sets up the weekly cycle on the user's own accounts: a zero-model GitHub Actions plan issue every Tuesday 08:00 Pacific addressed to the fork owner, and the Wednesday-morning round as a Claude scheduled task that reads it. Use when the user asks to update, sync or keep current a fork port, to reconcile with the authors' new version, to check whether the authors fixed a bug we fixed, to run this week's round, or to schedule that.
 ---
 
 # Keep a fork port current
@@ -22,12 +22,16 @@ it: **if it crashes them, kicks them from a server, hangs, damages a save or bre
 
 Tools: `tools/port-sync.py` (bring the authors' commits in), `tools/fix-ledger.py` (the worksheet and the ledger),
 `tools/port-upstream.py` + the file loop (port the new code), `tools/ci-gates.py` (gates, no model),
-`tools/port-ci.py` (CI; `promote` is never run here), `tools/port-fleet.py` (every fork, dependency order).
+`tools/port-ci.py` (CI; `promote` is never run here), `tools/port-fleet.py` (every fork, dependency order),
+`tools/weekly-plan.py` (the weekly cycle's setup and its plan workflow), `tools/known-issues.py` (the ledger, the plan
+issue: `render-plan`, `read-plan`; the README Ports block: `render-ports`), `tools/port-cost.py` (cost records, the
+round's table).
 
 ## Stops -- ask the user
 
-1. Setting up the schedule (once): which forks, the time, what may be pushed unattended, and the routine's model
-   (Opus recommended; see "Setup").
+1. Setting up the weekly cycle (once, and whenever it changes): which forks (the library first), what may be pushed
+   unattended, and the round's model (Opus recommended; see "Setup"). The days and times are fixed by the tools:
+   the plan Tuesday 08:00 America/Los_Angeles, the round Wednesday morning there.
 2. A reconcile decision the rule below does not settle (both outcomes would ship an S1 mode, or the only fix is a
    design change of the authors' feature).
 3. Merging a keep-current PR into the port branch -- unless that fork's fleet entry says `"automerge": true`. The
@@ -53,7 +57,7 @@ until its dependency's run is green, and it is then gated against the dependency
 1. **Nothing new? Stop cheaply.** `port-sync.py --dry-run` for the authors' branch, and for each dependency
    "has it a newer green build than the dependent pins?". For a fork with a `layer_branch`, also
    `layer-sync.py detect --repo DIR --ref origin/<layer_branch> --port-ref origin/<branch>` after a `git fetch`:
-   `layer_behind=N` above 0 is new work even when the authors pushed nothing (a fix of ours, or a night whose layer
+   `layer_behind=N` above 0 is new work even when the authors pushed nothing (a fix of ours, or a run whose layer
    step did not run). Then skip steps 2-7 for that fork and go straight to "A fork with the layer", merging the port
    branch itself. No change anywhere: exit, no model work.
 2. **Merge** on a work branch `keep-current/<date>` cut from the port branch: `port-sync.py` (a merge, never a
@@ -145,7 +149,7 @@ until its dependency's run is green, and it is then gated against the dependency
    that is done: `known-issues.py reopens`), commit the ledger alone on the head branch (Port CI ignores a
    ledger-only push), and take the release notes' known-issues section from it: `known-issues.py release-notes
    --repo <fork> --version <mc> --tag <tag>` (S1-S3; S4 omitted). A fork without the file keeps the fix ledgers
-   above, unchanged.
+   above, unchanged. In the weekly round these steps run inside "The weekly round" below, on its frozen input.
 7. **Dependents next.** Gate each dependent locally against this build (its `_mr`-style jar put into mavenLocal
    the way its CI does). Its pin (`port-ci.py --dep-jar`, a release asset + sha256) can only move once this
    dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
@@ -264,61 +268,139 @@ version; the layer branch must carry it to every target, and nothing fixes a mid
    the authors' branch and stops with exit 19 while that branch holds commits after the freeze that the layer branch lacks; that exit, from a
    fork-versions buildout, means "run this skill for the fork (and its libraries) first".
 
-## Setup: run it nightly on the user's subscription
+## The weekly cycle (both halves installed only by "Setup" below)
 
-A Claude Code routine fires a fresh cloud session on a schedule under the user's own account. Create one (with
-the user's go-ahead, stop 1) whose prompt is: run the keep-current skill over the fleet, in run mode, with the
-pushes the user allowed. A cloud routine starts from a fresh container, so a fleet file in this session's home
-directory is not there when it fires: put the fleet JSON in the routine's prompt. The environment needs the forks
-in its repository scope and the build hosts in its allowed domains (`cloud/allowed-domains.txt`). Cheap nights
-matter: step 1 exits with no model work.
+The cycle is weekly, not nightly, for every fork set (a library and its dependents, or one fork alone), single-version
+and version-branch forks alike:
 
-**Set the routine's model; never leave it on the account default.** A routine created without one runs on whatever
-the account defaults to (measured: a nightly routine created without one ran on Sonnet), and
-the routine-creating tool a cloud session has (`create_trigger`) takes no model -- set it right after creating, with
-`update_trigger` `model`, to the model the user chose at stop 1. Recommend Opus: the session's own model does all of
-this skill's judgement -- the anything-new check, the merges, the reconcile (take theirs, keep or shrink ours, the
-A/B), the ledgers, the layer classes and every merge-on-green call -- and no skill steps it down or up. The mechanical
-work keeps its own models whatever the session runs on: the compile loop (`tools/file-loop.py`, also inside
-`layer-sync.py run`) climbs Haiku -> Sonnet -> Opus only on failure, `tools/port-upstream.py` and `tools/gate-loop.py`
-default to Sonnet, the visual review to Haiku. A night with nothing new ends at step 1, so the session model barely
-changes its cost; it is the nights with real merges, where a wrong call ships, that it decides. Say in one line which
-model was set. (Changing an existing routine's model is the user's call: ask, then `update_trigger`.)
+- **Tuesday 08:00 America/Los_Angeles: the plan, with no model.** A GitHub Actions workflow on the first fork's head
+  branch (`.github/workflows/weekly-plan.yml`, from `templates/weekly-plan.yml`; config `.github/weekly-plan.json`)
+  fetches each fork's authors' upstream, runs `fork-branches.py cascade --plan` for each version-branch fork (with the
+  authors' commits merged into the head on the runner's throwaway checkout), `known-issues.py select`, `known-issues.py
+  render-plan`, and opens **one plan issue** on the library's repository with a section per fork, assigned to the fork
+  owner with an @mention. Its first line is the deadline: the round's start, Wednesday morning Pacific; with no answer
+  the defaults apply. It lists the authors' new commits (a box to take them), the known issues as checkboxes pre-ticked
+  for the defaults (every open S1, then S2s up to the budget), the escalated cascade decisions with their options
+  (`/decide <id> <choice>`) and grade overrides (`/grade <ID> <S1-S4> [reason]`); its title starts `[decision needed]`
+  when the plan escalates something. It costs no model quota, so it opens whether or not the owner has any left.
+- **Wednesday morning America/Los_Angeles: the round** ("The weekly round" below), a Claude scheduled task with a fresh
+  session each fire. It reads the plan issue once, at its start, posts progress on it and closes it with the outcome.
+- **No answer:** the defaults apply. **No round** (no quota, the session never started): nothing is lost -- next
+  Tuesday's workflow sees the plan issue no round closed, carries its ticks and replies into the new issue, says "last
+  week's round did not run", and closes the old one as superseded.
+- **A failed plan run** fails visibly in Actions (GitHub emails the owner) and opens no issue; fix the cause (usually a
+  fork that is no longer public, or a renamed branch: re-run setup) and run it by hand (Actions -> Weekly plan -> Run
+  workflow; a second run in the same week opens no second issue).
 
-**A routine session cannot add repositories: the ones it pushes to must be configured ON THE ROUTINE.** Measured
-twice: a fired routine session searched for `add_repo` at 8 s, and in a second run polled for it for over 3 minutes --
-it never appears in a routine session, while the routine's own config showed `sources: []`. The tools a cloud session
-creates routines with (`create_trigger`/`update_trigger`) have no repository field; the web form and the local CLI's
-`/schedule` (not available inside a cloud session) do. So:
+Who "the owner" is: `plan_owner` in `.github/weekly-plan.json` (setup writes the login of whoever ran it, or an
+`@org/team`), else the repository's owner when that is a user. The same owner is @mentioned by the round's comments, and
+`read-plan` counts replies only from them (or members of the owner team) and from users with write access; anything
+else is listed as ignored.
 
-- **Attach only what the run pushes to: the user's forks.** This repository is public and the run only reads it, so
-  the prompt clones it itself (`git clone --depth 1 https://github.com/<owner>/mc-mod-version-upgrade`); never ask the
-  user to attach it -- another user of this skill has no write access to it and does not need any.
-- **When a cloud session created the routine, the user adds the forks.** Give them the exact link and steps, never just
-  "the Routines page": open https://claude.ai/code/routines, click the routine by name, open the menu next to its
-  name, choose **Edit**, then use the small **Select a repository** control at the bottom-left of the **Instructions**
-  box (easy to miss: it is not a separate section of the form) to add each fork (list them as `owner/repo`), and save.
-  Each one is cloned on every run. If they have the edit form open while you change the prompt with `update_trigger`,
-  ask them to close and reopen it first, or saving the form writes the old prompt back. Until the forks are added the
-  routine cannot work, however its prompt is written. (A user setting up from a local CLI can do this in `/schedule`.)
-- **The prompt checks, it does not wait.** It looks for the clones it expects; if one is missing, it still does step
-  1, then stops and names the missing repository and where to add it. It never polls for `add_repo`.
-- **Step 1 needs no repository.** The "anything new?" check only reads: `git ls-remote` the public repositories over
-  HTTPS (the session's git proxy serves public reads). A night with nothing new ends there either way.
-- **After creating or editing the routine, fire it once** (`fire_trigger`) and read the run's first events: it must
-  find its repositories, and its session (`get_session`) must show the model that was set. A routine that has never fired cleanly is not set up.
+## The weekly round (what the Wednesday task runs; a fresh agent follows this alone)
 
-**A time like "2am" means the user's local time, and a cloud session runs in UTC.** Do not ask for the zone;
-read it from git. The user's own commits keep the offset of the machine they were made on, while commits made in
-a cloud session or on github.com say `+0000`:
+Say first which kinds of fork the set holds (single-version unless `.port/<v>/branch.properties` branches exist). The
+"Run" steps above are the per-fork mechanics; this is the order and the rules around them.
 
-    git log --all --author=<user's email> --format='%ad' --date=format:'%Y-%m %z' | grep -v '+0000' | sort | uniq -c
+1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
+   round/frozen.json --decisions-dir round/decisions` (`gh` or GITHUB_TOKEN reads it). No open plan issue: stop and
+   report. Per fork, `frozen.json` says whether to take the authors' commits (`take_authors`, and the exact
+   `upstream_commit` the plan saw), which known issues are `selected`, the decisions with their choices, and the grade
+   overrides. **These are the run's only inputs.** Nothing new enters the run except an S1 found during it; the
+   authors' commits pushed after the plan wait for next week (merge `upstream_commit`, not the branch tip). Apply each
+   grade override first: `known-issues.py grade --repo <fork> <ID> --override <S> --reason "<reason> (plan #N)" --by
+   <who>` on the head branch, committed alone. Post a first comment on the plan issue: the frozen selection, @owner.
+2. **Order: the library first, then each dependent.** A dependent starts only once the library's versions it pins are
+   green and released (Run step 7, "Don't exceed your dependency").
+3. **Per fork:** when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (merge, reconcile, port, gate, PR
+   into the head). For a version-branch fork, then "A fork with version branches", with
+   `cascade --apply-decisions round/decisions/<owner>__<repo>.decisions.json` for the plan's decisions (every default and
+   escalated one, with the owner's answers). Each **selected known issue** is fixed at its **lowest affected version**
+   and moved up with `fork-branches.py cascade <lowest>..<newest>`, never fixed version by version. Work the versions in
+   ladder order, oldest affected first.
+4. **Per version, in ladder order**, once its code is in:
+   - gates A/B/C in full (`fork-port.py --repo DIR --target <v> --gates full`, or `ci-gates.py --env full` and `minimal`
+     on a single-version fork), the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`);
+   - **one full review against the fixed rubric**: a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
+     "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
+     **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
+     the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5);
+   - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote);
+   - a library's version: `fork-branches.py library-record --repo LIB --target <v> --dependent DEP` once the dependent's
+     same version passed Gate C on that exact released jar;
+   - its cost: `fork-port.py`'s cost stage appends to `.port/<v>/COST.md` (tokens, dollars, wall time and a price tier,
+     never a model name); work done outside it is appended with `python3 tools/port-cost.py <modid> --path DIR --target
+     <v> --since <round start> --print >> .port/<v>/COST.md`, committed with the version's records.
+   Post a progress comment on the plan issue as each version finishes (gates, review, the pre-release tag).
+5. **New findings.** Grade each with `known-issues.py add` (the rubric's inputs, `--lowest` its lowest affected
+   version). At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
+   reopens it (fixed at its lowest version, only that fix cascaded); anything else stays in the ledger with its lowest
+   version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap and local, S4 ledgered.
+6. **Close.** On the plan issue, one closing comment with the outcome -- per fork: the merged PRs, the pre-releases cut,
+   the ledger changes and the new findings with their grades -- and the **cost and time table**:
+   `python3 tools/port-cost.py round-table --since <round start> --fork <owner/repo>=<checkout> ...` (per fork, per
+   version, with totals); then close the issue (state completed). An issue the round closed is never carried forward.
+7. **Afterwards:** set the ledger statuses on each head branch (`known-issues.py status <ID> --set <v>=fixed@<commit>`
+   for every version a fix reached, committed alone), then refresh the README Ports block ("README Ports block" below).
 
-Map the offset, together with the months it was seen in, to an IANA zone. Daylight saving changes the offset, so
-an offset seen in both summer and winter months narrows it down. If more than one zone still fits (`-0700` in
-October is both Los Angeles and Phoenix), pick the most populous one, write the cron as
-`CRON_TZ=<zone> <min> <hour> * * *` so daylight saving is handled, and say in one line which zone was assumed and
-why. The user corrects it if wrong. Ask only when no commit carries a non-UTC offset.
+## README Ports block
+
+`python3 tools/known-issues.py render-ports --repo DIR --head neoforge-1.21.1 --fetch-releases --write` writes one row
+per Minecraft version (its branch, newest pre-release or release, done state from `check-done`) and the links to the
+known issues (the pinned issue with `--pinned-issue N`, and `.port/KNOWN-ISSUES.json` on the head branch) between
+`<!-- ports:begin -->` and `<!-- ports:end -->` in the fork's root README; it never changes a byte outside the markers
+(the authors' README text merges as before), and a root README edit runs no Port CI and stales no gate. When it runs:
+on the **head branch** after every round and every release; on the fork's **default branch** (where visitors land) only
+once the chain reaches its newest version, and after that on every release. Commit it alone.
+
+## Setup: the weekly cycle on the user's accounts
+
+Setup makes both halves, and re-running it recreates both and removes stale ones. Never create, edit or delete the
+workflow or the round task by hand: a schedule change is a change to `tools/weekly-plan.py` or this section.
+
+1. **The plan workflow** (with the user's go-ahead, stop 1), on a checkout of the first fork's head branch:
+
+       python3 tools/weekly-plan.py install --repo <library checkout> \
+           --fork <owner/lib>@neoforge-1.21.1=<authors' repo URL>#<their branch> \
+           --fork <owner/dep>@neoforge-1.21.1=<authors' repo URL>#<their branch> \
+           --plan-owner <login of the person running setup>
+
+   One `--fork` per fork, the library first (a fork alone: one). It commits `.github/workflows/weekly-plan.yml` (this
+   repository pinned at origin/main's commit) and `.github/weekly-plan.json` in one `[skip ci]` commit; an unchanged
+   set commits nothing. It refuses an organization-owned fork without `--plan-owner`, and exits 3 when the head branch
+   is not the repository's default branch (GitHub runs a schedule only from the default branch): ask the user to make
+   the head branch the default, or rerun with `--default-branch-too`, which commits the same workflow file to the
+   default branch too. Push what it names. The other forks must be public (the workflow reads them without a token).
+2. **The round task:** `python3 tools/weekly-plan.py round-task --repo <library checkout>` prints the task as JSON.
+   List the scheduled tasks (`list_triggers`) and delete every one whose name is in its `replaces` list (the same
+   round from an earlier setup, and a keep-current nightly routine of an older setup), then `create_trigger` with its
+   `name`, `cron_expression` (`CRON_TZ=America/Los_Angeles <minute> 8 * * 3`, the minute jittered below 08:30),
+   `create_new_session_on_fire: true`, `notifications` (push and email on), `initiation` and `prompt`, unchanged.
+   Say in one line that the round is Wednesday at that time Pacific.
+3. **Set the round's model; never leave it on the account default.** A task created without one runs on whatever the
+   account defaults to (measured: a routine created without one ran on Sonnet), and `create_trigger` takes no model --
+   set it right after creating, with `update_trigger` `model`, to the model the user chose at stop 1. Recommend Opus:
+   the session's own model does all of this skill's judgement -- the merges, the reconcile (take theirs, keep or shrink
+   ours, the A/B), the reviews it starts, the grades and every merge-on-green call. The mechanical work keeps its own
+   models whatever the session runs on: the compile loop (`tools/file-loop.py`) climbs Haiku -> Sonnet -> Opus only on
+   failure, `tools/port-upstream.py` and `tools/gate-loop.py` default to Sonnet, the visual review to Haiku. Say in one
+   line which model was set. (Changing an existing task's model is the user's call: ask, then `update_trigger`.)
+4. **Repositories on the task.** A scheduled session cannot add repositories (measured twice: `add_repo` never appears
+   in one), and `create_trigger`/`update_trigger` have no repository field. So:
+   - **Attach only what the round pushes to: the user's forks** (`repositories` in the JSON). This repository is
+     public and only read: the prompt clones it itself; never ask the user to attach it.
+   - **The user adds the forks.** Give them the exact link and steps: open https://claude.ai/code/routines, click the
+     task by name, open the menu next to its name, choose **Edit**, then use the small **Select a repository** control
+     at the bottom-left of the **Instructions** box (easy to miss: it is not a separate section of the form) to add each
+     fork (`owner/repo`), and save. If they have the edit form open while you change the prompt with `update_trigger`,
+     ask them to close and reopen it first, or saving the form writes the old prompt back. (From a local CLI,
+     `/schedule` does this.)
+   - **The prompt checks, it does not wait:** a missing clone is named and the round stops after freezing its input.
+5. **Check it.** Run the plan workflow once by hand (Actions -> Weekly plan -> Run workflow, or `gh workflow run
+   weekly-plan.yml --repo <owner/lib> --ref neoforge-1.21.1`): it costs no model and must open the plan issue, assigned
+   to the owner. Read the round task back (`get_trigger`): cron, a fresh session per fire, notifications and the model
+   that was set. Do not fire the round to test it -- a fire is a whole round; it runs on Wednesday against the plan.
+   The environment needs the build hosts in its allowed domains (`cloud/allowed-domains.txt`).
 
 ## Evidence that this is needed (and the mistake it prevents)
 

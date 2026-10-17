@@ -1,0 +1,115 @@
+# Weekly plan: the plan of this fork set's keep-current round, opened as ONE issue for the fork owner -- no model,
+# no secrets, no cost.
+#
+# Installed on the head branch by tools/weekly-plan.py install (the keep-current skill's setup) from
+# owner/migrator's templates/weekly-plan.yml; re-running setup regenerates it, so do not edit it by hand. The forks,
+# the owner the plan is addressed to and the round's time are in .github/weekly-plan.json beside it.
+#
+# Every Tuesday at 08:00 in America/Los_Angeles (Actions cron is UTC with no daylight saving, so it is scheduled at
+# both 15:00 and 16:00 UTC and the first step lets through only the run that is 08:00 there) it:
+#   1. fetches each fork's authors' upstream and lists their new commits;
+#   2. plans each version-branch fork's cascade (tools/fork-branches.py cascade --plan: git and the rename rows only,
+#      on a throwaway copy, with the authors' commits merged into the head there);
+#   3. selects the known issues the round takes (tools/known-issues.py select: every S1, S2s up to the budget);
+#   4. renders the plan issue (tools/known-issues.py render-plan) -- the deadline first, checkboxes pre-ticked for the
+#      defaults, escalated decisions answered by `/decide <id> <choice>`, grade overrides by `/grade <ID> <S1-S4>`;
+#   5. opens it on this repository, assigned to the fork owner with an @mention. A previous plan issue no round closed
+#      is carried forward (its ticks and replies) and closed as superseded.
+# The Wednesday round (a Claude scheduled task, made by the same setup) reads the issue once at its start; with no
+# answer the defaults apply. The tools come from owner/migrator at the pinned commit below. A failed step fails the
+# run (GitHub emails the owner about a failed scheduled workflow) and no half-finished issue is opened.
+name: Weekly plan
+
+on:
+  schedule:
+    - cron: "0 15 * * 2"    # 08:00 in America/Los_Angeles on daylight saving time (UTC-7)
+    - cron: "0 16 * * 2"    # 08:00 there on standard time (UTC-8)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: weekly-plan
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Continue only at 08:00 in America/Los_Angeles
+        id: when
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          python3 - <<'PY'
+          import datetime, os
+
+          def la_offset_hours(now):
+              """UTC offset of America/Los_Angeles at `now` (aware, UTC): -7 on daylight saving time, -8 otherwise."""
+              try:
+                  import zoneinfo
+                  return int(now.astimezone(zoneinfo.ZoneInfo("America/Los_Angeles")).utcoffset().total_seconds() // 3600)
+              except Exception:   # no tz database: the US rule (2nd Sunday of March to 1st Sunday of November, 02:00)
+                  y = now.year
+                  start = datetime.datetime(y, 3, 8 + (6 - datetime.date(y, 3, 8).weekday()) % 7, 10, tzinfo=datetime.timezone.utc)
+                  end = datetime.datetime(y, 11, 1 + (6 - datetime.date(y, 11, 1).weekday()) % 7, 9, tzinfo=datetime.timezone.utc)
+                  return -7 if start <= now < end else -8
+
+          def go(event, schedule, now):
+              """A manual run always plans; a scheduled one only from the cron slot that is 08:00 in Los Angeles today
+              (judged by the slot, not the clock, so a run GitHub starts late still plans, and only once)."""
+              if event != "schedule":
+                  return True
+              f = schedule.split()
+              return len(f) == 5 and f[1] == str((8 - la_offset_hours(now)) % 24)
+
+          if __name__ == "__main__":
+              now = datetime.datetime.now(datetime.timezone.utc)
+              ok = go(os.environ.get("EVENT", ""), os.environ.get("SCHEDULE", ""), now)
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+                  out.write(f"go={'true' if ok else 'false'}\n")
+              print(("planning" if ok else "not 08:00 in America/Los_Angeles: this slot does nothing")
+                    + f" ({os.environ.get('EVENT')} {os.environ.get('SCHEDULE', '')}, UTC offset there {la_offset_hours(now)})")
+          PY
+      - name: Check out the head branch
+        if: steps.when.outputs.go == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: neoforge-1.21.1
+          fetch-depth: 0          # every version branch, for the cascade plan
+          path: fork
+          persist-credentials: false
+      - name: The planner tools (owner/migrator at a pinned commit)
+        if: steps.when.outputs.go == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: owner/migrator
+          ref: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          path: mmvu
+          persist-credentials: false
+      - name: 1. Fetch the authors' upstream
+        if: steps.when.outputs.go == 'true'
+        run: python3 mmvu/tools/weekly-plan.py fetch --config fork/.github/weekly-plan.json --repo fork --work plan
+      - name: 2. Plan the cascade (fork-branches.py cascade --plan)
+        if: steps.when.outputs.go == 'true'
+        run: python3 mmvu/tools/weekly-plan.py cascade --work plan
+      - name: 3. Select the known issues (known-issues.py select)
+        if: steps.when.outputs.go == 'true'
+        run: python3 mmvu/tools/weekly-plan.py select --work plan
+      - name: The owner, and last week's plan issue if no round closed it
+        if: steps.when.outputs.go == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 mmvu/tools/weekly-plan.py previous --work plan
+      - name: 4. Render the plan (known-issues.py render-plan)
+        if: steps.when.outputs.go == 'true'
+        run: python3 mmvu/tools/known-issues.py render-plan --input plan/plan-input.json --out plan/issue.json
+      - name: 5. Open the plan issue
+        if: steps.when.outputs.go == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 mmvu/tools/weekly-plan.py open --work plan

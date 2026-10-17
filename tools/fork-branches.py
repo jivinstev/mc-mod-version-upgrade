@@ -1245,7 +1245,8 @@ def expected_tree(lay, t, parent, port_commit, parent_files=None):
     (for its mixin configs; None for the first version)."""
     repo, notes = lay.repo, []
     base = ref_files(repo, port_commit)
-    files = {p: d for p, d in base.items() if not p.startswith(".multiversion/") and not p.startswith(REC + "/")}
+    files = {p: d for p, d in base.items() if not p.startswith(".multiversion/") and not p.startswith(REC + "/")
+             and not head_only(p)}
     tprops, raw = lay.props(t), lay.raw_props(t)
     ch = lay.chain(t)
     # sources: the layer's own prepare, per source set (main last, as layer.gradle does)
@@ -1568,14 +1569,15 @@ def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None,
                 say(f"fork-branches: {n}")
             carried = {p: d for p, d in (ref_files(repo, start, REC) if git(repo, "cat-file", "-e", f"{start}:{REC}").returncode == 0
                                          else {}).items() if not p.startswith(f"{REC}/{t}/")
-                       and p not in (f"{REC}/branch.gradle", f"{REC}/INVENTORY.json")}
+                       and p not in (f"{REC}/branch.gradle", f"{REC}/INVENTORY.json") and not head_only(p)}
             tree = dict(carried, **want)
             modes = {p: m for p, (m, _b) in tree_entries(repo, port_commit).items()}
             existing = resolve_branch(repo, branch_name(t))
             if existing:
                 have = ref_files(repo, existing)
                 diff = [d for d in compare_trees({p: v for p, v in tree.items() if not p.startswith(f"{REC}/{t}/")},
-                                                 {p: v for p, v in have.items() if not p.startswith(f"{REC}/{t}/")})]
+                                                 {p: v for p, v in have.items() if not p.startswith(f"{REC}/{t}/")
+                                                  and not head_only(p)})]     # a copy an older migrate carried
                 if diff:
                     say(f"fork-branches: REFUSED {t}: {branch_name(t)} already exists with other content ({len(diff)} "
                         f"file(s), e.g. {diff[0][0]}: {diff[0][1]}); it is never moved or deleted -- rename it, or migrate "
@@ -1768,6 +1770,13 @@ BRANCH_OWNED = (".github/workflows/port-ci.yml", ".github/port-install.json")
 # the known-issues ledger (tools/known-issues.py) lives on the head branch only; tools read it from there
 # (`git show <head>:.port/KNOWN-ISSUES.json`), so a merge up the chain never carries a copy (issue #135, section 3)
 LEDGER_PATH = re.compile(r"^\.port/(?:[^/]+/)?KNOWN-ISSUES\.json$")
+# the weekly plan workflow and its config (tools/weekly-plan.py install) belong to the head branch alone, like the ledger
+HEAD_ONLY = (".github/workflows/weekly-plan.yml", ".github/weekly-plan.json")
+
+
+def head_only(path):
+    """A file of the head branch that no version branch carries: the known-issues ledger, the weekly plan's files."""
+    return bool(LEDGER_PATH.match(path)) or path in HEAD_ONLY
 
 
 UNION_FILES = (f"{REC}/DECISIONS.md", f"{REC}/AUTHORS-REVIEWS.md")      # append-only records: a conflict is a union
@@ -2112,13 +2121,14 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             git(work, "add", "--", f)
             resolved.add(f)
             notes.append(f"{f}: {parent_name}'s, with {t}'s build keys")
-    for f in sorted(x for x in changed if LEDGER_PATH.match(x)):
+    for f in sorted(x for x in changed if head_only(x)):
         if blob_at(repo, pre, f) is not None:
             git(work, "checkout", pre, "--", f)
         else:
             git(work, "rm", "-q", "-f", "--", f)
         resolved.add(f)
-        notes.append(f"{f}: the known-issues ledger stays on the head branch, not carried to {t}")
+        notes.append(f"{f}: " + ("the known-issues ledger" if LEDGER_PATH.match(f) else "the weekly plan's")
+                     + f" stays on the head branch, not carried to {t}")
     for f in BRANCH_OWNED:
         if f in changed:
             if blob_at(repo, pre, f) is not None:
@@ -2861,7 +2871,7 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
             return UNDONE_EXIT
         if why:
             allowed = f"{parent} {datetime.date.today().isoformat()}: {why[0][:160]}"
-    files = ref_files(repo, start)
+    files = {p: d for p, d in ref_files(repo, start).items() if not head_only(p)}   # the head's ledger stays there
     modes = {p: m for p, (m, _b) in tree_entries(repo, start).items()}
     port_now = git(repo, "merge-base", start, resolve_branch(repo, pb)).stdout.strip() if parent else start
     pp = parse_props(files.get(f"{REC}/{parent}/{BRANCH_PROPS}", b"").decode("utf-8", "surrogateescape")) if parent else {}
@@ -4162,7 +4172,7 @@ def self_check():
             amixin = "src/main/java/com/example/mod/mixin/AMixin.java"
             (r / amixin).write_text((r / amixin).read_text(encoding="utf-8").replace("void h() {}", "void h() { fixed(); }"), encoding="utf-8")
             ledgers = (".port/KNOWN-ISSUES.json", ".port/examplemod/KNOWN-ISSUES.json")    # the head branch's ledgers
-            for lf in ledgers:
+            for lf in ledgers + HEAD_ONLY:          # and the weekly plan's workflow and config, head-only too
                 (r / lf).parent.mkdir(parents=True, exist_ok=True)
                 (r / lf).write_text('{"issues": [], "schema": 1}\n', encoding="utf-8")
             g("add", "-A"); g("commit", "-qm", "authors: a field and a class")
@@ -4173,8 +4183,10 @@ def self_check():
                    and e5["src/main/java/com/example/mod/ExampleMod.java"] == b"package com.example.mod;\nimport new.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.newCall(); } }\n"
                    and b"import new.Thing;" in e5["src/main/java/com/example/mod/NewOne.java"] and b"keep = 5" in e5["src/main/java/com/example/mod/Over.java"],
                    f"cascade port..1.21.5: the authors' change reaches every version through its rows, overlays kept: {out[-500:]}")
-            expect(not any(lf in ref_files(r, resolve_branch(r, branch_name(t)), ".port") for lf in ledgers for t in ("1.21.3", "1.21.4", "1.21.5")),
-                   "the cascade never carries the known-issues ledger (.port/KNOWN-ISSUES.json, .port/<mod>/) to a version branch")
+            expect(not any(lf in ref_files(r, resolve_branch(r, branch_name(t))) for lf in ledgers + HEAD_ONLY
+                           for t in ("1.21.3", "1.21.4", "1.21.5")),
+                   "the cascade never carries the known-issues ledger (.port/KNOWN-ISSUES.json, .port/<mod>/) or the weekly "
+                   "plan's files to a version branch")
             expect(b"fixed();" in e5[amixin] and amixin not in ref_files(r, resolve_branch(r, "neoforge-1.21.4"), "src"),
                    "the authors' fix to a class 1.21.4 takes off (mixin_remove_only) still reaches 1.21.5, which has it")
             why = target_done(r, "1.21.5")
@@ -4271,6 +4283,13 @@ def self_check():
             expect(rc == 0 and fl.get("gradle.properties", b"").startswith(b"# caf\xe9\n")
                    and b"minecraft_version=1.21.10" in fl.get("gradle.properties", b""),
                    f"add-target over an ISO-8859-1 gradle.properties: the byte kept, the versions written: rc {rc}: {out[-300:]}")
+            expect(all(lf in ref_files(r, "latin-port") for lf in ledgers + HEAD_ONLY)
+                   and not any(lf in fl for lf in ledgers + HEAD_ONLY),
+                   "add-target from a head that has the ledger and the weekly plan's files: the new branch carries neither")
+            expect(all(head_only(x) for x in (".port/KNOWN-ISSUES.json", ".port/examplemod/KNOWN-ISSUES.json") + HEAD_ONLY)
+                   and not any(head_only(x) for x in (".port/1.21.4/branch.properties", ".github/workflows/port-ci.yml",
+                                                     "src/main/resources/KNOWN-ISSUES.json")),
+                   "head_only: the ledgers and the weekly plan's files, nothing else (migrate's carried records use it too)")
             git(r, "worktree", "remove", "--force", str(lw))
             g("branch", "-D", "latin-port", "neoforge-1.21.10")
             # sync-shared: the shared library moved (a row and a helper): 1.21.3 takes both, its rows-only files re-made

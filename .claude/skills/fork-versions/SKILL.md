@@ -331,8 +331,15 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
 `select` is the default choice of what a run takes: every open S1, then S2s lowest affected version first up to
 `--budget`, then any S3 in a file the run already touches; the owner's `--add` / `--remove` apply last and the output
 says who chose each item. `release-notes` lists the issues open for that version at the tag, S1-S3 by default (with
-`--repo`, a `fixed@<commit>` that is not in the tag counts as open there). The cascade and the weekly routine do not
-call these yet (issue #135, part 2): run them by hand.
+`--repo`, a `fixed@<commit>` that is not in the tag counts as open there).
+
+The ledger stays on the head branch everywhere: `cascade` never merges it up, and `add-target` and `migrate` never copy
+it (nor the weekly plan's `.github/workflows/weekly-plan.yml` and `.github/weekly-plan.json`) onto a version branch
+they make from a head that has it. The weekly cycle (keep-current, "The weekly cycle") runs `select` every Tuesday in
+a zero-model plan issue (`known-issues.py render-plan`) that the owner answers, and the Wednesday round starts from
+`known-issues.py read-plan`; `known-issues.py render-ports --write` keeps the README's Ports block (one row per
+version, between `<!-- ports:begin -->` and `<!-- ports:end -->`) current. `port-publish.py publish` holds back a
+platform an open S1 blocks (`blocks-publish`) and uploads the other.
 
 ## Planning the cascade: every decision in one pass, the owner asked once
 
@@ -444,8 +451,9 @@ entry spans from the earliest change it has not taken. A branch written before t
 9. Commit on the version branch, push it (a PR when the fork's rules want one), and report: errors before/after, gates
    with the control, cost, what was harvested, what is left.
 10. **Keep it current** (once per fork, when its first version is green): give the fork's keep-current fleet entry
-   `"version_branches": true`, and put it in the nightly routine's fleet JSON too. keep-current then merges the authors'
-   code into the port branch and cascades it up every version branch ("A fork with version branches").
+   `"version_branches": true`, and re-run keep-current's setup for its fork set (the weekly plan workflow and the
+   Wednesday round). keep-current then merges the authors' code into the port branch and cascades it up every version
+   branch ("A fork with version branches"), from the plan issue's frozen input ("The weekly round").
 11. **Hand off a manual test plan** (when the last version of a buildout is done): each version's `TEST-ITEMS.md` lists
    what no gate judges (its stubs, its changed files flagged mixin / client, dropped integrations, behaviour items that
    are not the same). Publish a **Claude Code artifact** (never checked in) for the maintainer: per Minecraft version, the

@@ -5,7 +5,8 @@
 # layer-ci.py, the event-listener audit it calls, qtc-init.gradle (Gradle's own classpath), ci-gates --shipped's shipped-gate.py,
 # layer-deps.py (each layer job's `fetch` of the sibling ports' per-target jars its target.properties pins),
 # and the harness rename table of each layer target (port_gates.harness_table reads templates/upstream-harness/versions/<mc>.renames.tsv).
-# Also by hand: the promote job's install-manifest refresh, port-manifest.py (standard library only, self-contained).
+# Also by hand: the promote job's install-manifest refresh, port-manifest.py (standard library only, self-contained),
+# and the publish job's known-issues check, known-issues.py (port-publish.py's per-platform blocks-publish; standard library only).
 templates/multi-version/tools/gametest_adapter.py
 templates/multi-version/tools/prepare-sources.py
 templates/multi-version/versions/26.2.renames.hand.tsv
@@ -36,6 +37,7 @@ tools/fix-ledger.py
 tools/gate-loop.py
 tools/gen-empty-structure.py
 tools/gitbash.py
+tools/known-issues.py
 tools/layer-ci.py
 tools/layer-deps.py
 tools/optional-dep-scan.py
