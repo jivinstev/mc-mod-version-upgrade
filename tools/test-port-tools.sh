@@ -555,7 +555,9 @@ subprocess.run(["git", "-C", str(d / "old"), "tag", "-d", "lib-1.0-mc1.21.5"], c
 os.environ["LAYER_DEPS_GIT_URL"] = str(d / "old"); ld.library_clone("owner/lib")
 os.environ["LAYER_DEPS_GIT_URL"] = str(r)                # the URL changed: the cached clone follows it
 done, why, _n = ld.library_done_branch_release("owner/lib", "lib-1.0-mc1.21.5", "1.21.5")
-done or bad.append(f"a released, done library version reads done at its tag (fetched from the URL as it now is): {why}")
+done or bad.append(f"a released, done library version reads done at its tag (fetched from the URL as it now is): {why} "
+                  + " / ".join(fb.explain_changed(r, "1.21.5", "lib-1.0-mc1.21.5", w.split()[-1])
+                               for w in why.split("; ") if "no verdict: changed " in w))
 (d / "cache/git/owner__lib/HEAD").is_file() or bad.append("the clone is under $MMVU_CACHE_DIR")
 g("checkout", "-q", "neoforge-1.21.1")
 rc, out = fp("--target", "1.21.4", "--check-done")

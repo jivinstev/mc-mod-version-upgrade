@@ -703,6 +703,35 @@ def commit_current(repo, root, t, c, ref, work, kind, files=None, items=None):
 
 # ---------------------------------------------------------------- review items: the files that differ from the parent
 
+def first_difference(a, b, width=40):
+    """repr of about `width` bytes around the first byte where a and b differ (a self-check's failure message)."""
+    if a is None or b is None:
+        return f"{'missing' if a is None else len(a)} vs {'missing' if b is None else len(b)} bytes"
+    i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]), min(len(a), len(b)))
+    lo = max(0, i - width // 2)
+    return f"at byte {i}: {a[lo:i + width // 2]!r} vs {b[lo:i + width // 2]!r}"
+
+
+def explain_changed(repo, t, ref, path):
+    """Why version t's `path` at commit `ref` reads as changed (a review row): its bytes against what the rows alone
+    make of the port branch's file, and against the parent's file through the rows t adds (@OnlyIn stripped when t
+    strips it) -- the first differing bytes of each, for a failure message."""
+    with tempfile.TemporaryDirectory() as d:
+        root = export(repo, ref, pathlib.Path(d) / "t")
+        have = (root / path).read_bytes() if (root / path).is_file() else None
+        read = reader_of_root(root)
+        pr = port_ref_of(repo, root, t, ref)
+        rows_f = rows_tree(repo, pr, read, t, chain(root, t)).get(path) if pr else None
+        pv, mb = parent_base(repo, root, t, ref)
+        par = blob_at(repo, mb, path) if mb else None
+        if par is not None and pv:
+            text = apply_rules(par.decode("utf-8", "surrogateescape"), rules_of(own_table(read, t, pv)))
+            strip = info(root, t).get("strip_onlyin") == "true"
+            par = (strip_onlyin_text(text) if strip else text).encode("utf-8", "surrogateescape")
+        return (f"{path} at {t}: vs the rows' file {first_difference(have, rows_f)}; vs the parent's through the rows "
+                f"{first_difference(have, par)}")
+
+
 def parent_base(repo, root, t, ref):
     """(parent version or None, commit of the parent branch this branch was last merged with) -- the merge-base of
     `ref` and the parent's branch tip, or ref's first parent when the parent's branch is not in this clone."""
@@ -3911,7 +3940,8 @@ def self_check():
         expect(("changed", "src/main/java/com/example/mod/Over.java") in items
                and not any("OnlyHere" in f or "Cf.java" in f for _k, f in items),
                f"1.21.5's review rows: its own overlay of an authors' file; not an overlay-only class, not the parent's file "
-               f"with @OnlyIn stripped: {items}")
+               f"with @OnlyIn stripped: {items} "
+               + " / ".join(explain_changed(r, "1.21.5", b5, f) for k, f in items if k == "changed" and "Cf.java" in f))
         rc, out = _quiet(verify, r)
         expect(rc == 0 and out.count("byte-identical") == 3, f"verify: the layer's prepare run again equals every branch: {out[-300:]}")
         rc, out = _quiet(migrate, r)
@@ -4160,7 +4190,9 @@ def self_check():
                f"migrate (from a checkout of the port branch, ahead of the layer): each branch done as on the layer: {out[-600:]}")
         for t in ("1.21.3", "1.21.4", "1.21.5"):
             why = target_done(r, t)
-            expect(why == [], f"{t} judged from a checkout of the port branch (ahead of it): done: {why}")
+            expect(why == [], f"{t} judged from a checkout of the port branch (ahead of it): done: {why} "
+                   + " / ".join(explain_changed(r, t, resolve_branch(r, branch_name(t)), w.split()[-1])
+                                for w in why if w.startswith("no verdict: changed ")))
         # sync-shared from that checkout: 1.21.3's rows-only file is judged against the port commit 1.21.3 carries
         with tempfile.TemporaryDirectory() as e:
             lib = pathlib.Path(e)

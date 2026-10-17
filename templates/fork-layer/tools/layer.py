@@ -396,10 +396,11 @@ def strip_onlyin(out):
     where @OnlyIn still strips client classes on a server, keep it."""
     n = 0
     for f in pathlib.Path(out).rglob("*.java"):
-        t = f.read_text(encoding="utf-8")
-        new, k = ONLYIN.subn("", t)
+        t = f.read_bytes().decode("utf-8", "surrogateescape")     # bytes: a text-mode write would turn LF into CRLF
+        crlf = "\r\n" in t                                       # on Windows, and a read would hide a CRLF file
+        new, k = ONLYIN.subn("", t.replace("\r\n", "\n") if crlf else t)
         if k:
-            f.write_text(new, encoding="utf-8"); n += k
+            f.write_bytes((new.replace("\n", "\r\n") if crlf else new).encode("utf-8", "surrogateescape")); n += k
     if n:
         print(f"layer: stripped {n} @OnlyIn (strip_onlyin=true)")
 
@@ -430,8 +431,9 @@ def add_shared_helpers(names, out):
             if fqn(rel) in text or (fqn(rel).rsplit(".", 1)[0] + ".*") in text or f"MV-REQUIRES: {name}" in text:
                 dest = out / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                body = f.read_text(encoding="utf-8")
-                dest.write_text(body, encoding="utf-8")
+                data = f.read_bytes()                                # the helper's bytes, on every OS
+                dest.write_bytes(data)
+                body = data.decode("utf-8", "replace")
                 text += "\n" + body
                 added.add(rel); changed = True
     if added:
@@ -703,6 +705,14 @@ def self_check():
         strip_onlyin(d)
         t = f.read_text(encoding="utf-8")
         expect("@OnlyIn(" not in t and 'String s = "@OnlyIn";' in t and "void m() {}" in t, "strip_onlyin")
+        # byte-exact on every OS: an LF file stays LF (a text-mode write made it CRLF on Windows, so the stripped file
+        # never equalled its parent's through the rows), a CRLF file stays CRLF with no stray \r
+        f.write_bytes(b"class A {\n    @OnlyIn(Dist.CLIENT)\n    int x;\n}\n")
+        g = pathlib.Path(d) / "B.java"
+        g.write_bytes(b"class B {\r\n    @OnlyIn(Dist.CLIENT)\r\n    int x;\r\n}\r\n")
+        strip_onlyin(d)
+        expect(f.read_bytes() == b"class A {\n    int x;\n}\n" and g.read_bytes() == b"class B {\r\n    int x;\r\n}\r\n",
+               f"strip_onlyin keeps each file's line endings: {f.read_bytes()!r} {g.read_bytes()!r}")
     print("self-check:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
