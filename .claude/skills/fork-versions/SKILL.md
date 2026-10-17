@@ -180,8 +180,10 @@ both together (`port-ci.py promote --with-dependency owner/lib`, the library pro
 Each version branch gets the same workflow as a single-version port, at its version and with the full gate set:
 `python3 tools/fork-branches.py ci --repo DIR --target <v> --modid ID` prints the `tools/port-ci.py` command (the port
 branch's workflow read back, without `--layer-branch`, each sibling `--dep-jar` replaced by this version's pinned
-library release, a library's Gate C without spawn and battle); `--run` runs it in a worktree of the branch and commits
-there. Push the branch; nothing is pushed for you. The layer jobs (layer-compile, layer-isolation, layer-inertness, ...)
+library release and each `--dep-jar-variant` of it moved to the same release and coordinates -- refused, exit 2, when
+the release's asset names do not show which asset the variant is -- a library's Gate C without spawn and battle, and
+the newest published Port CI kit rather than the port branch's older pin; `--kit-version N` pins kit N); `--run` runs
+it in a worktree of the branch and commits there. Push the branch; nothing is pushed for you. The layer jobs (layer-compile, layer-isolation, layer-inertness, ...)
 do not apply. A tag `<mod>-<ver>-mc<v>` on the branch releases that version (publish-port's single-version path). The
 cascade keeps each branch's own `.github/workflows/port-ci.yml` and install manifest when it merges the lower branch:
 regenerate them with `ci` when a lower branch's change to them should reach this one.
