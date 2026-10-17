@@ -682,8 +682,10 @@ def manifest_script_check():
 
 def shipped_script_check():
     """Run the `shipped jars` job's own script on a fake fork: a gradlew that builds x_mr.jar and x_cf.jar, and a
-    stand-in shipped-gate.py that boots _mr and fails _cf. The job must build once, pass the dependency as --deps,
-    fail naming the failing variant with its server log tail, and refuse a glob that matches no jar."""
+    stand-in shipped-gate.py (the real one, its main replaced) that boots _mr and fails _cf. The job must build once,
+    pass the dependency as --deps, pass each variant its own .port/<mc>/shipped-expect[-<variant>].txt as
+    --expect-file (_cf its suffixed file, _mr the unsuffixed one, none when there is none), fail naming the failing
+    variant with its server log tail, and refuse a glob that matches no jar."""
     import os, shutil, tempfile
     wf =fixture(True, None, variant_jars=["*_mr.jar", "*_cf.jar", "*_none.jar"])
     body = wf.split("python3 - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
@@ -701,15 +703,25 @@ def shipped_script_check():
         (repo / "build.gradle").write_text("tasks.register('cfJar', Jar) {}\n", encoding="utf-8")
         (repo / "gradlew").write_text('echo "$@" >> gradle-calls.txt; mkdir -p build/libs; '
                                       'echo x > build/libs/x_mr.jar; echo x > build/libs/x_cf.jar\n', encoding="utf-8")
-        (tools / "shipped-gate.py").write_text(
-            "import pathlib, sys\n"
-            "a = sys.argv\n"
-            "w = pathlib.Path(a[a.index('--work-dir') + 1]); (w / 'server/logs').mkdir(parents=True)\n"
-            "(w / 'server/logs/latest.log').write_text('server log line\\n', encoding='utf-8')\n"
-            "print('[shipped-gate] deps ' + ' '.join(a[a.index('--deps') + 1:]))\n"
-            "bad = a[a.index('--jar') + 1].endswith('_cf.jar')\n"
-            "print('[shipped-gate] ' + ('FAIL boot -- exited before Done' if bad else 'PASS boot -- started'))\n"
-            "sys.exit(1 if bad else 0)\n", encoding="utf-8")
+        real = (ROOT / "tools/shipped-gate.py").read_text(encoding="utf-8")
+        main_call = 'if __name__ == "__main__":\n    sys.exit(main())\n'
+        if main_call not in real:
+            print("shipped-jars script check: tools/shipped-gate.py no longer ends with its main call")
+            return False
+        (tools / "shipped-gate.py").write_text(real.replace(main_call, "".join("    " * bool(i) + l + "\n" for i, l in enumerate((
+            'if __name__ == "__main__":',
+            "a = sys.argv",
+            "print('[shipped-gate] expect ' + (a[a.index('--expect-file') + 1] if '--expect-file' in a else 'none'))",
+            "w = pathlib.Path(a[a.index('--work-dir') + 1]); (w / 'server/logs').mkdir(parents=True)",
+            "(w / 'server/logs/latest.log').write_text('server log line\\n', encoding='utf-8')",
+            "print('[shipped-gate] deps ' + ' '.join(a[a.index('--deps') + 1:]))",
+            "bad = a[a.index('--jar') + 1].endswith('_cf.jar')",
+            "print('[shipped-gate] ' + ('FAIL boot -- exited before Done' if bad else 'PASS boot -- started'))",
+            "sys.exit(1 if bad else 0)")))), encoding="utf-8")
+        (repo / "gradle.properties").write_text("minecraft_version=1.21.4\n", encoding="utf-8")
+        (repo / ".port/1.21.4").mkdir(parents=True)
+        for n in ("shipped-expect.txt", "shipped-expect-cf.txt"):
+            (repo / ".port/1.21.4" / n).write_text("A.log:x\n", encoding="utf-8")
         env = dict(os.environ, RUNNER_TEMP=str(tmp), HOME=str(home), USERPROFILE=str(home), VARIANT_JARS="*_mr.jar *_cf.jar *_none.jar",
                    DEP_JARS=".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar")
         env.pop("PORT_GRADLE_ARGS", None)
@@ -729,6 +741,16 @@ def shipped_script_check():
         ok &= "::error::shipped jar *_cf.jar (x_cf.jar) failed" in out and "tail of latest.log" in out
         ok &= "deps " + str(home / ".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar") in out
         ok &= "shipped jars failed: *_cf.jar, *_none.jar" in out
+        pe = repo / ".port/1.21.4"
+        ok &= out.count("expect ") == 2 and f"expect {pe / 'shipped-expect-cf.txt'}" in out \
+            and f"expect {pe / 'shipped-expect.txt'}" in out                    # _cf its own, _mr the unsuffixed
+        (pe / "shipped-expect.txt").unlink()
+        for f in (tmp / "shipped").glob("*"):
+            shutil.rmtree(f) if f.is_dir() else f.unlink()
+        r = subprocess.run([sys.executable, "-"], input=script, cwd=repo, env=env, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        out = r.stdout + r.stderr                                              # _mr with no file: no expectations
+        ok &= f"expect {pe / 'shipped-expect-cf.txt'}" in out and "expect none" in out and out.count("expect ") == 2
     return ok
 
 

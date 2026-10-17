@@ -3,8 +3,11 @@
     # built by different tasks with different contents), and the gates above run the mod from the DEV classpath, so
     # none of them proves a jar a player downloads. This job runs the author's build once, then for each variant glob
     # requires exactly one built jar in build/libs and boots it ALONE (plus the pinned dependency jars) in a real
-    # NeoForge server (tools/shipped-gate.py, from the Port CI kit). A failing variant fails the job, and the release
-    # needs it as it needs the gates. The globs reach the script only through env, never spliced into it.
+    # NeoForge server (tools/shipped-gate.py, from the Port CI kit), checking the fork's own log expectations for that
+    # variant when it has them (.port/<mc>/shipped-expect-<variant>.txt, else .port/<mc>/shipped-expect.txt, else the
+    # layer's .multiversion/shipped-expect.txt; the variant is the glob's suffix, cf for '*_cf.jar'). A failing variant
+    # fails the job, and the release needs it as it needs the gates. The globs reach the script only through env,
+    # never spliced into it.
     name: shipped jars
     if: ${{ github.event_name != 'release' && !inputs.promote && !inputs.publish && !inputs.publish_setup }}
     runs-on: ubuntu-24.04
@@ -37,6 +40,7 @@
               m = importlib.util.module_from_spec(spec); sys.modules.setdefault(name, m); spec.loader.exec_module(m)
               return m
           pu, ss, cg = load("port_gates", "port_gates.py"), load("srcsets", "srcsets.py"), load("ci_gates", "ci-gates.py")
+          sg = load("shipped_gate", "shipped-gate.py")
           repo, work = pathlib.Path(".").resolve(), pathlib.Path(os.environ["RUNNER_TEMP"]) / "shipped"
           work.mkdir(parents=True, exist_ok=True)
           libs = repo / "build" / "libs"
@@ -60,8 +64,9 @@
                   jar = found[0]
                   vw = work / re.sub(r"[^\w.-]", "_", pat)
                   vw.mkdir(parents=True, exist_ok=True)
+                  ef = sg.expect_file(repo, None, sg.variant_of(pat))
                   cmd = [sys.executable, str(tools / "shipped-gate.py"), "--repo", str(repo), "--jar", str(jar),
-                         "--work-dir", str(vw)] + (["--deps", *deps] if deps else [])
+                         "--work-dir", str(vw)] + (["--deps", *deps] if deps else []) + (["--expect-file", str(ef)] if ef else [])
                   g = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
                   (vw / "shipped-gate.log").write_text(g.stdout + g.stderr, encoding="utf-8")
                   print("===== shipped jar " + pat + ": " + jar.name + " =====", flush=True)

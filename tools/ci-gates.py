@@ -282,6 +282,12 @@ def self_check():
             (libs / n).write_bytes(b"x")
         ok &= [j.name for j in cf_jars(libs, libs / "m-1_mr.jar")] == ["m-1_cf-mc1.21.4.jar", "m-1_cf.jar"]
         ok &= [j.name for j in cf_jars(libs, libs / "m-1_mr-mc1.21.4.jar", "1.21.4")] == ["m-1_cf-mc1.21.4.jar"]
+    with tempfile.TemporaryDirectory() as d:      # --shipped on a version branch: the variant's expectations file
+        r, sg = pathlib.Path(d), _load("shipped_gate", "shipped-gate.py")
+        (r / ".port/1.21.4").mkdir(parents=True)
+        (r / ".port/1.21.4/shipped-expect-cf.txt").write_text("A.log:x\n", encoding="utf-8")
+        ok &= sg.expect_file(r, "1.21.4", "cf") == r / ".port/1.21.4/shipped-expect-cf.txt"
+        ok &= sg.expect_file(r, "1.21.4", sg.variant_of("*_mr.jar")) is None
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -300,7 +306,8 @@ def main():
                          "requires (optional integrations and dev-only mods removed from the runtime, not the compile)")
     ap.add_argument("--shipped", action="store_true",
                     help="also boot the BUILT jar in a real NeoForge server and read the mod's own logs (tools/shipped-gate.py); "
-                         "expectations come from the fork's .multiversion/shipped-expect[-<target>].txt")
+                         "expectations come from the fork's .port/<mc>/shipped-expect[-<variant>].txt on a version branch, "
+                         "else .multiversion/shipped-expect[-<target>].txt")
     ap.add_argument("--shipped-jar", help="glob (under the build's libs dir) naming the jar a player installs; default: "
                                           ".multiversion/shipped-jar.txt, else the only jar there")
     ap.add_argument("--mc", help="a Minecraft target of the fork's multi-version layer (.multiversion/targets/<mc>); "
@@ -503,8 +510,11 @@ def main():
                     gp = repo / "gradle.properties"
                     m = re.search(r"^neo_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8"), re.M) if gp.is_file() else None
                     cmd += ["--mc", bv] + (["--neo", m.group(1)] if m else [])
-                    if (repo / ".port" / bv / "shipped-expect.txt").is_file():
-                        cmd += ["--expect-file", str(repo / ".port" / bv / "shipped-expect.txt")]
+                    # .port/<bv>/shipped-expect-<variant>.txt (cf for a *_cf*.jar beside it), else the unsuffixed one
+                    sg = _load("shipped_gate", "shipped-gate.py")
+                    ef = sg.expect_file(repo, bv, sg.variant_of(pat) if first else "cf")
+                    if ef:
+                        cmd += ["--expect-file", str(ef)]
                     sib = _load("layer_deps", "layer-deps.py").sibling_jars(repo, bv)
                     if sib:
                         cmd += ["--deps", *sib]
