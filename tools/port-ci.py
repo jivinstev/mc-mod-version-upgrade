@@ -711,7 +711,8 @@ def shipped_script_check():
         (tools / "shipped-gate.py").write_text(real.replace(main_call, "".join("    " * bool(i) + l + "\n" for i, l in enumerate((
             'if __name__ == "__main__":',
             "a = sys.argv",
-            "print('[shipped-gate] expect ' + (a[a.index('--expect-file') + 1] if '--expect-file' in a else 'none'))",
+            "print('[shipped-gate] expect ' + pathlib.Path(a[a.index('--jar') + 1]).name + ' '"
+            " + (a[a.index('--expect-file') + 1] if '--expect-file' in a else 'none'))",
             "w = pathlib.Path(a[a.index('--work-dir') + 1]); (w / 'server/logs').mkdir(parents=True)",
             "(w / 'server/logs/latest.log').write_text('server log line\\n', encoding='utf-8')",
             "print('[shipped-gate] deps ' + ' '.join(a[a.index('--deps') + 1:]))",
@@ -734,23 +735,42 @@ def shipped_script_check():
             return False
         calls = gc.read_text(encoding="utf-8").splitlines()
         md = mdf.read_text(encoding="utf-8")
-        ok &= r.returncode != 0 and len(calls) == 1 and " build cfJar " in f" {calls[0]} "
-        ok &= "| *_mr.jar | PASS | x_mr.jar: 1 check(s) green |" in md
-        ok &= "| *_cf.jar | FAIL | x_cf.jar: FAIL boot -- exited before Done |" in md
-        ok &= "| *_none.jar | FAIL | 0 built jar(s) match *_none.jar in build/libs (none); exactly one must |" in md
-        ok &= "::error::shipped jar *_cf.jar (x_cf.jar) failed" in out and "tail of latest.log" in out
-        ok &= "deps " + str(home / ".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar") in out
-        ok &= "shipped jars failed: *_cf.jar, *_none.jar" in out
-        pe = repo / ".port/1.21.4"
-        ok &= out.count("expect ") == 2 and f"expect {pe / 'shipped-expect-cf.txt'}" in out \
-            and f"expect {pe / 'shipped-expect.txt'}" in out                    # _cf its own, _mr the unsuffixed
+
+        def want(case, good, expected, actual):
+            """One named assertion; a failure prints what was expected and what came, so a red CI log names it."""
+            if not good:
+                print(f"shipped-jars script check FAIL [{case}]: expected {expected!r}, got {actual!r}")
+            return bool(good)
+
+        def expects(text):
+            """{jar name: the --expect-file the job passed it, resolved, or 'none'}. Compared as resolved paths:
+            the job resolves the checkout, and on Windows that turns an 8.3 temp path (RUNNER~1) into the long one."""
+            got = {}
+            for m in re.finditer(r"^\[shipped-gate\] expect (\S+) (.+?)\s*$", text, re.M):
+                got[m.group(1)] = m.group(2) if m.group(2) == "none" else str(pathlib.Path(m.group(2)).resolve())
+            return got
+
+        ok &= want("one build, failing", r.returncode != 0 and len(calls) == 1 and " build cfJar " in f" {calls[0]} ",
+                   "exit != 0 and one `build cfJar` call", (r.returncode, calls))
+        for row in ("| *_mr.jar | PASS | x_mr.jar: 1 check(s) green |",
+                    "| *_cf.jar | FAIL | x_cf.jar: FAIL boot -- exited before Done |",
+                    "| *_none.jar | FAIL | 0 built jar(s) match *_none.jar in build/libs (none); exactly one must |"):
+            ok &= want("summary row", row in md, row, md)
+        for line in ("::error::shipped jar *_cf.jar (x_cf.jar) failed", "tail of latest.log",
+                     "deps " + str(home / ".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar"),
+                     "shipped jars failed: *_cf.jar, *_none.jar"):
+            ok &= want("job output", line in out, line, out[-3000:])
+        pe = (repo / ".port/1.21.4").resolve()
+        exp = {"x_cf.jar": str(pe / "shipped-expect-cf.txt"), "x_mr.jar": str(pe / "shipped-expect.txt")}
+        ok &= want("expect-file per variant (_cf its own, _mr the unsuffixed)", expects(out) == exp, exp, expects(out))
         (pe / "shipped-expect.txt").unlink()
         for f in (tmp / "shipped").glob("*"):
             shutil.rmtree(f) if f.is_dir() else f.unlink()
         r = subprocess.run([sys.executable, "-"], input=script, cwd=repo, env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
         out = r.stdout + r.stderr                                              # _mr with no file: no expectations
-        ok &= f"expect {pe / 'shipped-expect-cf.txt'}" in out and "expect none" in out and out.count("expect ") == 2
+        exp = {"x_cf.jar": str(pe / "shipped-expect-cf.txt"), "x_mr.jar": "none"}
+        ok &= want("expect-file, no unsuffixed file (_mr: none)", expects(out) == exp, exp, expects(out) or out[-3000:])
     return ok
 
 
