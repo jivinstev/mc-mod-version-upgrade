@@ -197,6 +197,8 @@ dependency's branch first) works only when that build publishes those exact coor
 (one library's CurseForge jar leaves out the Java agent its Modrinth jar carries), so test each jar that is
 published. A mod whose build makes several: add `--variant-jar '*_mr.jar' --variant-jar '*_cf.jar'` (one glob per
 platform, exactly one built jar each); a `shipped jars` job boots each in a real server and the release needs it.
+Each jar is checked against its own log expectations when the fork lists them: `.port/<mc>/shipped-expect-cf.txt`
+for the `*_cf.jar` one, else `.port/<mc>/shipped-expect.txt` (one `FILE:REGEX` per line).
 Its dependents: keep `--dep-jar` on the default asset and add `--dep-jar-variant` with the other platform's asset of
 the SAME release (same tag and coordinates), which adds a `gates (full, <label>)` leg. A re-pin moves both to the
 new tag together (port-ci.py refuses a mismatch). To change one option of an installed workflow and nothing else,

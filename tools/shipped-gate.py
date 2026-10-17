@@ -3,20 +3,26 @@
 mod's own logs.
 
     python3 tools/shipped-gate.py --repo DIR --jar BUILT.jar [--mc 1.21.8 --neo 21.8.54] [--java-home DIR]
-                                  [--expect-log FILE:REGEX ...] [--expect-file FILE] [--deps JAR ...]
-                                  [--work-dir DIR] [--cache-dir DIR] [--timeout SECONDS]
+                                  [--expect-log FILE:REGEX ...] [--expect-file FILE] [--variant NAME] [--deps JAR ...]
+                                  [--work-dir DIR] [--cache-dir DIR] [--timeout SECONDS] [--settle SECONDS]
 
 Every other gate (Gate A/B/C) runs the mod from the DEV classpath. FML discovers some things only on the launch
 class loader there -- a coremod's ClassProcessorProvider, a service file -- and discovers them differently from a
 jar in mods/. So a subsystem can run in every dev gate and be inert in the file a player downloads, and no dev gate
 can see it. This one installs a real NeoForge server (installer from maven.neoforged.net, cached per version),
-puts ONLY the built jar (+ --deps) in mods/, starts it, waits for "Done (", sends `stop`, and then checks each
---expect-log FILE:REGEX against <server>/logs/FILE (the mod's own log, e.g. ExampleBootstrap.log). A missing
-expectation is a FAIL: that is the point.
+puts ONLY the built jar (+ --deps) in mods/, starts it, waits for "Done (", lets it run --settle seconds more
+(default 10, about 200 ticks: a crash on the first world tick comes after "Done ("), sends `stop`, and then checks
+each --expect-log FILE:REGEX against <server>/logs/FILE (the mod's own log, e.g. ExampleBootstrap.log). A missing
+expectation is a FAIL: that is the point. So is any crash report (a file in crash-reports/, "Exception in server
+tick loop", "Encountered an unexpected exception") and a server that exits after "Done (" before it is told to stop.
 
---expect-file reads one expectation per line (FILE:REGEX, '#' comments); a fork lists its own in
-.multiversion/shipped-expect.txt (or shipped-expect-<target>.txt). --mc/--neo default from the fork layer's
-target when --repo has .multiversion and --mc names a target (tools: layer.py props).
+--expect-file reads one expectation per line (FILE:REGEX, '#' comments). Without it the fork's own list is used,
+the first that exists of: .port/<mc>/shipped-expect-<variant>.txt (a version branch, per shipped jar variant:
+--variant cf for the `*_cf.jar` one), .port/<mc>/shipped-expect.txt, then the layer's
+.multiversion/shipped-expect-<target>.txt (only with --mc) and .multiversion/shipped-expect.txt; <mc> is --mc or
+else the checkout's gradle.properties minecraft_version. None of them: no expectations, the jar is only booted.
+--mc/--neo default from the fork layer's target when --repo has .multiversion and --mc names a target (tools:
+layer.py props).
 The JDK is the one the Minecraft version needs (1.21.x: 21, 26.x: 25; a version branch's own java_version in
 .port/<mc>/branch.properties first), the version being --mc or else the checkout's gradle.properties.
 Exit 0 pass, 1 fail, 2 bad input. --self-check runs the model-free parts. Standard library only.
@@ -81,6 +87,40 @@ def parse_expect(lines):
             raise ValueError(f"expectation must be FILE:REGEX with FILE a bare name under logs/, got {s!r}")
         out.append((f, re.compile(rx)))
     return out
+
+
+def variant_of(glob):
+    """The variant a shipped-jar glob names: '*_cf.jar' -> 'cf', '*-fabric.jar' -> 'fabric', '*.jar' -> None."""
+    m = re.search(r"[_-]([A-Za-z0-9]+)[*?]*\.jar$", glob or "")
+    return m.group(1).lower() if m else None
+
+
+def expect_file(repo, mc=None, variant=None):
+    """The fork's own expectations file for this jar, or None: .port/<mc>/shipped-expect-<variant>.txt, then
+    .port/<mc>/shipped-expect.txt (<mc>: the given one, else gradle.properties'), then the layer's
+    .multiversion/shipped-expect-<mc>.txt (only for a given mc) and .multiversion/shipped-expect.txt."""
+    repo = pathlib.Path(repo)
+    pmc = mc or gradle_prop(repo, "minecraft_version")
+    names = []
+    if pmc:
+        names += ([f".port/{pmc}/shipped-expect-{variant}.txt"] if variant else []) + [f".port/{pmc}/shipped-expect.txt"]
+    names += ([f".multiversion/shipped-expect-{mc}.txt"] if mc else []) + [".multiversion/shipped-expect.txt"]
+    return next((repo / n for n in names if (repo / n).is_file()), None)
+
+
+CRASH = re.compile(r"Exception in server tick loop|Encountered an unexpected exception|---- Minecraft Crash Report ----"
+                   r"|This crash report has been saved to")
+
+
+def crash_seen(run, text):
+    """A crash the server reported, as one line, or None: a file in <run>/crash-reports/, else a crash line in the
+    console/latest.log text. "Done (" is no proof: a server can crash on its first tick after it."""
+    cr = pathlib.Path(run) / "crash-reports"
+    reports = sorted(p.name for p in cr.iterdir() if p.is_file()) if cr.is_dir() else []
+    if reports:
+        return f"crash report crash-reports/{reports[0]}"
+    hit = next((l.strip() for l in text.splitlines() if CRASH.search(l)), None)
+    return hit[:300] if hit else None
 
 
 def check_expect(logs_dir, expects):
@@ -178,19 +218,21 @@ def prepare(work, cache_srv, jar, deps, port):
     return run
 
 
-def boot(run, java, timeout):
-    """-> (ok, reason, console text). Start, wait for 'Done (', send stop, wait for exit."""
+def boot(run, java, timeout, settle=10.0, poll=1.0):
+    """-> (ok, reason, console text). Start, wait for 'Done (', let it tick `settle` seconds, send stop, wait for
+    exit. A crash report, or an exit before `stop` was sent, fails it even after 'Done ('."""
     args = sorted(run.glob("libraries/net/neoforged/neoforge/*/unix_args.txt"))[0]
     cmd = [java, "@user_jvm_args.txt", f"@{args.relative_to(run)}", "nogui"]
     console = run / "console.log"
     with open(console, "wb") as out:
         p = subprocess.Popen(cmd, cwd=str(run), stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT,
                              start_new_session=True)
-        t0, done, sent = time.time(), False, None
+        t0, done, sent = time.time(), None, None
         while time.time() - t0 < timeout:
             text = console.read_text(encoding="utf-8", errors="replace")
-            if not done and re.search(r"Done \(\d", text):
-                done = True
+            if done is None and re.search(r"Done \(\d", text):
+                done = time.time()
+            if done is not None and sent is None and time.time() - done >= settle:
                 try:
                     p.stdin.write(b"stop\n"); p.stdin.flush()
                 except OSError:
@@ -200,7 +242,7 @@ def boot(run, java, timeout):
                 break
             if sent and time.time() - sent > 90:      # asked to stop, never did
                 break
-            time.sleep(1)
+            time.sleep(poll)
         timed_out = p.poll() is None
         if timed_out:
             try:
@@ -212,13 +254,19 @@ def boot(run, java, timeout):
     latest = run / "logs" / "latest.log"
     full = text + ("\n" + latest.read_text(encoding="utf-8", errors="replace") if latest.is_file() else "")
     problems = load_problems(full)
-    if not done:
+    if done is None:
         why = ("timed out before 'Done (' appeared" if timed_out else
                f"the server exited ({p.returncode}) before 'Done ('") + ": " + crash_cause(full)
         return False, why, full
+    crash = crash_seen(run, full)
+    if crash:
+        return False, "Done, then the server crashed: " + crash, full
     if problems:
         return False, "server started but reported mod-loading problems: " + problems[0], full
-    if timed_out and sent:
+    if sent is None:
+        return False, ("Done, but the server was still settling when the timeout hit" if timed_out else
+                       f"Done, then the server exited ({p.returncode}) before it was told to stop: {crash_cause(full)}"), full
+    if timed_out:
         return False, "Done, but the server did not exit within 90 s of `stop`", full
     return True, f"started and stopped cleanly in {time.time() - t0:.0f} s", full
 
@@ -240,6 +288,8 @@ def main():
     ap.add_argument("--deps", nargs="*", default=[]); ap.add_argument("--expect-log", nargs="*", default=[])
     ap.add_argument("--expect-file"); ap.add_argument("--work-dir"); ap.add_argument("--cache-dir")
     ap.add_argument("--java-home"); ap.add_argument("--timeout", type=int, default=420)
+    ap.add_argument("--variant", help="the shipped jar's variant (cf for *_cf.jar): picks .port/<mc>/shipped-expect-<variant>.txt")
+    ap.add_argument("--settle", type=float, default=10.0, help="seconds the server runs after 'Done (' before `stop`")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
     jar = pathlib.Path(a.jar).resolve()
@@ -257,10 +307,8 @@ def main():
         say("no NeoForge version: pass --neo (or --mc naming a .multiversion target)"); return 2
     exp_lines = list(a.expect_log)
     ef = pathlib.Path(a.expect_file) if a.expect_file else None
-    if ef is None:     # the fork's own list: per target first, then the shared one
-        for n in ((f"shipped-expect-{a.mc}.txt",) if a.mc else ()) + ("shipped-expect.txt",):
-            if (repo / ".multiversion" / n).is_file():
-                ef = repo / ".multiversion" / n; break
+    if ef is None:     # the fork's own list: the version branch's (per variant first), then the layer's
+        ef = expect_file(repo, a.mc, a.variant)
     if ef:
         if not ef.is_file():
             say(f"--expect-file {ef}: no such file"); return 2
@@ -284,7 +332,7 @@ def main():
     say(f"jar {jar.name}; NeoForge {neo}; JDK {major}; deps {[pathlib.Path(d).name for d in a.deps] or 'none'}")
     srv = installer(neo, cache, java)
     run = prepare(work, srv, jar, [pathlib.Path(d).resolve() for d in a.deps], free_port())
-    ok, why, full = boot(run, java, a.timeout)
+    ok, why, full = boot(run, java, a.timeout, a.settle)
     say(f"{'PASS' if ok else 'FAIL'} boot -- {why}")
     allok = ok
     for f, rx, hit, reason in check_expect(run / "logs", expects):
@@ -330,8 +378,79 @@ def self_check():
         ok &= jdk_for(r / "none", None) == 21
     free = free_port()
     ok &= 1024 < free < 65536
+    ok &= expect_check() and boot_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
+
+
+def expect_check():
+    """Which expectations file a jar gets: single-version (none, or .port/<mc>/), version branch per variant, layer."""
+    ok = True
+    ok &= [variant_of(g) for g in ("*_cf.jar", "*_mr.jar", "*-fabric.jar", "*.jar", None)] == ["cf", "mr", "fabric", None, None]
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d)
+        (r / "gradle.properties").write_text("minecraft_version=1.21.4\nneo_version=21.4.1\n", encoding="utf-8")
+        ok &= expect_file(r) is None and expect_file(r, None, "cf") is None       # single-version, no file: as before
+        (r / ".port/1.21.4").mkdir(parents=True)
+        (r / ".port/1.21.4/shipped-expect-cf.txt").write_text("A.log:cf ran\n", encoding="utf-8")
+        ok &= expect_file(r, None, "mr") is None and expect_file(r) is None       # only the cf variant has one
+        ok &= expect_file(r, None, "cf") == r / ".port/1.21.4/shipped-expect-cf.txt"
+        (r / ".port/1.21.4/shipped-expect.txt").write_text("A.log:ran\n", encoding="utf-8")
+        ok &= expect_file(r, None, "cf") == r / ".port/1.21.4/shipped-expect-cf.txt"   # _cf: its own
+        ok &= expect_file(r, None, "mr") == r / ".port/1.21.4/shipped-expect.txt"      # _mr: the unsuffixed one
+        ok &= expect_file(r, "1.21.4") == r / ".port/1.21.4/shipped-expect.txt"
+        ok &= expect_file(r, "1.21.5") is None                                       # another version's: not this one
+        (r / ".multiversion").mkdir()                                               # a layer fork, as before
+        (r / ".multiversion/shipped-expect.txt").write_text("A.log:x\n", encoding="utf-8")
+        (r / ".multiversion/shipped-expect-1.21.5.txt").write_text("A.log:y\n", encoding="utf-8")
+        ok &= expect_file(r, "1.21.5") == r / ".multiversion/shipped-expect-1.21.5.txt"
+        ok &= expect_file(r, "1.21.6") == r / ".multiversion/shipped-expect.txt"
+        ok &= expect_file(r / "none") is None
+        # a variant whose expected line is missing from its log fails
+        lg = r / "logs"; lg.mkdir()
+        (lg / "A.log").write_text("ran\n", encoding="utf-8")
+        rows = check_expect(lg, parse_expect(expect_file(r, None, "cf").read_text(encoding="utf-8").splitlines()))
+        ok &= [x[2] for x in rows] == [None]
+        rows = check_expect(lg, parse_expect(expect_file(r, None, "mr").read_text(encoding="utf-8").splitlines()))
+        ok &= [x[2] for x in rows] == ["ran"]
+    if not ok:
+        print("self-check: expectations-file lookup FAIL")
+    return ok
+
+
+FAKE_SERVER = """import pathlib, sys, time
+mode = pathlib.Path("mode.txt").read_text(encoding="utf-8")
+print("[Server thread/INFO]: Done (0.1s)! For help, type \\"help\\"", flush=True)
+time.sleep(0.2)
+if mode == "crash":
+    pathlib.Path("crash-reports").mkdir()
+    pathlib.Path("crash-reports/crash-server.txt").write_text("---- Minecraft Crash Report ----", encoding="utf-8")
+    print("[Server thread/ERROR]: Encountered an unexpected exception", flush=True)
+    sys.exit(255)
+if mode == "exit":
+    sys.exit(0)
+sys.exit(0 if sys.stdin.readline().strip() == "stop" else 3)
+"""
+
+
+def boot_check():
+    """boot() on a stand-in server (Python running '@user_jvm_args.txt' as its script, no Minecraft, about a second
+    each): a clean one passes; one that crashes on its first tick after 'Done (', or exits unasked, fails."""
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        for mode, want in (("clean", True), ("crash", False), ("exit", False)):
+            run = pathlib.Path(d) / mode
+            (run / "libraries/net/neoforged/neoforge/0").mkdir(parents=True)
+            (run / "libraries/net/neoforged/neoforge/0/unix_args.txt").write_text("", encoding="utf-8")
+            (run / "@user_jvm_args.txt").write_text(FAKE_SERVER, encoding="utf-8")
+            (run / "mode.txt").write_text(mode, encoding="utf-8")
+            got, why, _ = boot(run, sys.executable, 30, settle=0.5, poll=0.1)
+            good = got == want and (mode != "crash" or "crashed: crash report crash-reports/crash-server.txt" in why) \
+                and (mode != "exit" or "before it was told to stop" in why)
+            if not good:
+                print(f"self-check: boot {mode}: {got} {why}")
+            ok &= good
+    return ok
 
 
 if __name__ == "__main__":
