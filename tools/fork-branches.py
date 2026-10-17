@@ -3136,45 +3136,108 @@ def library_record(lib, t, dependent, slug=None, say=print):
     return 0
 
 
-def ci_args(repo, t, modid):
+def ci_args(repo, t, modid, kit_version=None):
     """The tools/port-ci.py arguments that give version branch t the single-version workflow at its version: the port
-    branch's installed workflow read back (port-ci.py recover_args), without --layer-branch, its --dep-jar specs for
-    the sibling libraries replaced by this version's pins (the library's per-version release, installed under the
-    coordinate branch.gradle substitutes), and a library's Gate C without the spawn and battle phases."""
+    branch's installed workflow read back (port-ci.py recover_args), then remap_ci_args."""
     t_ref = resolve_branch(repo, branch_name(t))
     read = reader_of_ref(repo, t_ref)
     p = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
     pc = load("port_ci_fb", "port-ci.py")
     wf = git(repo, "show", f"{resolve_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
     args = pc.recover_args(wf.stdout) if wf.returncode == 0 else ["--modid", modid, "--gatec", "launch,spawn,battle,gauntlet"]
-    out, i = [], 0
+    return remap_ci_args(args, p, modid, kit_version)
+
+
+PIN_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/(.+)$")
+
+
+def variant_asset(default, variant, pinned):
+    """The alternate asset of the pinned release that `variant` is of `default` on the port branch's release: the part
+    the variant's name has in place of the default's (lib-1.0_mr.jar / lib-1.0_cf.jar: `_mr` -> `_cf`), swapped in the
+    pinned asset's name wherever it stands (a version branch's release lib-1.1_mr.jar -> lib-1.1_cf.jar; a layer
+    release's lib-1.1_mr-mc1.21.4.jar -> lib-1.1_cf-mc1.21.4.jar). None when the pinned name does not hold that part
+    exactly once, as a whole word."""
+    a, b = default[:-4], variant[:-4]
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    j = 0
+    while j < min(len(a), len(b)) - i and a[-1 - j] == b[-1 - j]:
+        j += 1
+    # widen the differing part to whole words (lib-1.0_m1 / lib-1.0_m2: `m1` / `m2`, not `1` / `2`)
+    i = len(re.match(r"^(.*?)[A-Za-z0-9]*$", a[:i]).group(1))
+    j = len(re.match(r"^[A-Za-z0-9]*(.*)$", a[len(a) - j:] if j else "").group(1))
+    d, v = a[i:len(a) - j], b[i:len(b) - j]
+    if not d or not pinned.endswith(".jar"):
+        return None
+    hits = [m for m in re.finditer(r"(?<![A-Za-z0-9])" + re.escape(d) + r"(?![A-Za-z0-9])", pinned[:-4])]
+    if len(hits) != 1:
+        return None
+    return pinned[:hits[0].start()] + v + pinned[hits[0].end():]
+
+
+def remap_ci_args(args, p, modid, kit_version=None):
+    """The port branch's port-ci.py arguments `args` for the version branch whose branch.properties are `p`: without
+    --layer-branch; each --dep-jar of a sibling library replaced by this version's pin (port_jar.<g:a>: the library's
+    per-version release, installed under the coordinate substitute.<g:a> names), and each --dep-jar-variant of it
+    moved to the same release and coordinates (variant_asset; ValueError when it cannot be); a library's Gate C
+    without the spawn and battle phases; and the Port CI kit: --kit-version N when given, else no pin, so port-ci.py
+    takes the newest published kit (the port branch's pin predates the version branches, and its kit may not know
+    this Minecraft version)."""
+    remap, out, i = {}, [], 0
     while i < len(args):
-        if args[i] == "--layer-branch":
+        if args[i] in ("--layer-branch", "--kit-version", "--kit-sha"):
             i += 2; continue
         if args[i] == "--modid":
             out += ["--modid", modid or args[i + 1]]; i += 2; continue
         if args[i] == "--dep-jar":
-            ga = ":".join(args[i + 1].rsplit("=", 1)[1].split(":")[:2])
+            spec = args[i + 1]
+            ga = ":".join(spec.rsplit("=", 1)[1].split(":")[:2])
             pin = p.get(f"port_jar.{ga}")
             subst = p.get(f"substitute.{ga}")
-            if pin and subst:
-                url = pin.split()[0]
-                m = re.match(r"^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/(.+)$", url)
+            m = PIN_URL.match(pin.split()[0]) if pin and subst else None
+            if m:
+                head, coord = spec.rsplit("=", 1)
+                remap[(head.split("@", 1)[0], coord)] = (m.group(1), m.group(2), m.group(3), subst, head.rsplit("/", 1)[1])
                 out += ["--dep-jar", f"{m.group(1)}@{m.group(2)}/{m.group(3)}={subst}"]
             else:
-                out += ["--dep-jar", args[i + 1]]
+                out += ["--dep-jar", spec]
             i += 2; continue
         if args[i] == "--gatec" and p.get("library") == "true":
             out += ["--gatec", ",".join(x for x in args[i + 1].split(",") if x not in ("spawn", "battle"))]; i += 2; continue
         out.append(args[i]); i += 1
-    return out
+    res, i = [], 0
+    while i < len(out):
+        if out[i] == "--dep-jar-variant":
+            spec = out[i + 1]
+            head, coord = spec.rsplit("=", 1)
+            hit = remap.get((head.split("@", 1)[0], coord))
+            if hit:
+                repo_, tag, pinned, subst, default = hit
+                asset = variant_asset(default, head.rsplit("/", 1)[1], pinned)
+                if not asset:
+                    raise ValueError(f"--dep-jar-variant {spec}: its --dep-jar is re-pinned to {repo_}@{tag}/{pinned}, and "
+                                     f"which asset of that release stands for {head.rsplit('/', 1)[1]} (of {default}) cannot "
+                                     "be told from the names; give the version branch's workflow its variant by hand")
+                spec = f"{repo_}@{tag}/{asset}={subst}"
+            res += ["--dep-jar-variant", spec]; i += 2; continue
+        res.append(out[i]); i += 1
+    if kit_version is not None:
+        res += ["--kit-version", str(kit_version)]
+    return res
 
 
-def ci(repo, t, modid, run=False, say=print):
+def ci(repo, t, modid, run=False, say=print, kit_version=None):
     repo = pathlib.Path(repo).resolve()
     if not resolve_branch(repo, branch_name(t)):
         say(f"fork-branches: no branch {branch_name(t)}"); return 2
-    args = ci_args(repo, t, modid)
+    try:
+        args = ci_args(repo, t, modid, kit_version)
+    except ValueError as e:
+        say(f"fork-branches: {e}"); return 2
+    if kit_version is None:
+        say("fork-branches: Port CI kit: the newest published (port-ci.py's default; the port branch's pin is not "
+            "carried over); --kit-version N pins another")
     say(f"fork-branches: {branch_name(t)}: python3 tools/port-ci.py --repo <its checkout> {' '.join(args)}")
     if not run:
         say(f"fork-branches: run it on a checkout of {branch_name(t)} (or pass --run: a worktree under build/fork-branches/), then push")
@@ -3235,6 +3298,8 @@ def main():
     ss.add_argument("--target", action="append", default=[], help="a version to sync (repeat; default every version branch)")
     ci_ = sub.add_parser("ci"); ci_.add_argument("--repo", required=True); ci_.add_argument("--target", required=True)
     ci_.add_argument("--modid", required=True); ci_.add_argument("--run", action="store_true")
+    ci_.add_argument("--kit-version", type=int, help="the Port CI kit to pin (default: the newest published, not the "
+                     "port branch's pin)")
     a = ap.parse_args()
     if a.cmd == "add-target":
         return add_target(a.repo, a.target, a.parent, a.allow_undone_parent, a.port_branch)
@@ -3243,7 +3308,7 @@ def main():
     if a.cmd == "library-record":
         return library_record(a.repo, a.target, a.dependent, a.slug)
     if a.cmd == "ci":
-        return ci(a.repo, a.target, a.modid, a.run)
+        return ci(a.repo, a.target, a.modid, a.run, kit_version=a.kit_version)
     if a.cmd == "sync-shared":
         return sync_shared(a.repo, a.target or None)
     if a.cmd == "review-authors":
@@ -3908,6 +3973,31 @@ def self_check():
         if not c:
             ok = False
             print("FAIL:", msg)
+    # ci: the port branch's workflow arguments remapped for a version branch (pure, no fixture). The --dep-jar-variant
+    # follows its --dep-jar to the version's release and coordinates; the port branch's kit pin is not carried over.
+    dj = "owner/lib@lib-1.1-fix-mc1.21.1/lib-1.1-fix_mr.jar=com.example:lib:1.1-fix"
+    port_args = ["--modid", "examplemod", "--dep-jar", dj,
+                 "--dep-jar-variant", "owner/lib@lib-1.1-fix-mc1.21.1/lib-1.1-fix_cf.jar=com.example:lib:1.1-fix",
+                 "--gatec", "launch,spawn", "--layer-branch", "neoforge-1.21.x", "--kit-version", "28", "--kit-sha", "a" * 64]
+    vp = {"port_jar.com.example:lib": "https://github.com/owner/lib/releases/download/lib-1.1-mc1.21.4/lib-1.1_mr.jar " + "b" * 64,
+          "substitute.com.example:lib": "com.example:lib:1.1-mc1.21.4"}
+    got = remap_ci_args(port_args, vp, "examplemod")
+    expect(got == ["--modid", "examplemod", "--dep-jar", "owner/lib@lib-1.1-mc1.21.4/lib-1.1_mr.jar=com.example:lib:1.1-mc1.21.4",
+                   "--dep-jar-variant", "owner/lib@lib-1.1-mc1.21.4/lib-1.1_cf.jar=com.example:lib:1.1-mc1.21.4",
+                   "--gatec", "launch,spawn"], f"ci: variant remapped with its --dep-jar, no layer branch, no kit pin: {got}")
+    expect(remap_ci_args(port_args, vp, "examplemod", 31)[-2:] == ["--kit-version", "31"], "ci --kit-version N pins kit N")
+    expect(variant_asset("lib-1.1-fix_mr.jar", "lib-1.1-fix_cf.jar", "lib-1.1_mr-mc1.21.4.jar") == "lib-1.1_cf-mc1.21.4.jar"
+           and variant_asset("lib-2.0.jar", "lib-2.0-fabric.jar", "lib-2.1.jar") is None
+           and variant_asset("lib-1.0_m1.jar", "lib-1.0_m2.jar", "lib-1.1_m1.jar") == "lib-1.1_m2.jar"
+           and variant_asset("lib-1.0_mr.jar", "lib-1.0_cf.jar", "lib-1.1.jar") is None,
+           "variant_asset: the variant's word swapped in the pinned name, wherever it stands; None when it is not there")
+    try:
+        remap_ci_args(port_args, dict(vp, **{"port_jar.com.example:lib": vp["port_jar.com.example:lib"].replace("lib-1.1_mr.jar", "lib-1.1.jar")}), "x")
+        expect(False, "ci: a variant with no matching asset in the re-pinned release is refused")
+    except ValueError:
+        pass
+    unpinned = remap_ci_args(port_args, {}, "examplemod")
+    expect(unpinned[:6] == port_args[:6], f"ci: with no version pin the --dep-jar and its variant stay as they are: {unpinned}")
     # @OnlyIn stripped from a CRLF file (a Windows checkout's overlay) exactly as layer.py strips it: no stray \r
     crlf = "class Cf {\r\n    @OnlyIn(Dist.CLIENT)\r\n    Thing t;\r\n}\r\n"
     expect(strip_onlyin_text(crlf) == "class Cf {\r\n    Thing t;\r\n}\r\n"

@@ -17,6 +17,8 @@ expectation is a FAIL: that is the point.
 --expect-file reads one expectation per line (FILE:REGEX, '#' comments); a fork lists its own in
 .multiversion/shipped-expect.txt (or shipped-expect-<target>.txt). --mc/--neo default from the fork layer's
 target when --repo has .multiversion and --mc names a target (tools: layer.py props).
+The JDK is the one the Minecraft version needs (1.21.x: 21, 26.x: 25; a version branch's own java_version in
+.port/<mc>/branch.properties first), the version being --mc or else the checkout's gradle.properties.
 Exit 0 pass, 1 fail, 2 bad input. --self-check runs the model-free parts. Standard library only.
 """
 import argparse, importlib.util, os, pathlib, re, shutil, socket, subprocess, sys, tempfile, time, urllib.request, zipfile
@@ -32,6 +34,22 @@ def say(msg):
 def java_major(mc):
     """The JDK a Minecraft version needs: 1.21.x -> 21, 26.x -> 25."""
     return 25 if re.match(r"26\.", mc or "") else 21
+
+
+def gradle_prop(repo, key):
+    gp = pathlib.Path(repo) / "gradle.properties"
+    m = re.search(rf"^{key}\s*=\s*(\S+)", gp.read_text(encoding="utf-8"), re.M) if gp.is_file() else None
+    return m and m.group(1)
+
+
+def jdk_for(repo, mc):
+    """The JDK to boot the server on: a version branch's own java_version (.port/<mc>/branch.properties, as the gates
+    job's toolchain reads it), else the one its Minecraft version needs. With no --mc the Minecraft version is the
+    checkout's gradle.properties minecraft_version, not a 1.21 default: a 26.x branch's server is Java 25 bytecode."""
+    mc = mc or gradle_prop(repo, "minecraft_version") or "1.21"
+    bp = pathlib.Path(repo) / ".port" / mc / "branch.properties"
+    jv = re.search(r"(?m)^java_version\s*=\s*(\d+)\s*$", bp.read_text(encoding="utf-8")) if bp.is_file() else None
+    return int(jv.group(1)) if jv else java_major(mc)
 
 
 def find_java(major, explicit=None):
@@ -233,9 +251,8 @@ def main():
     props = layer_props(repo, a.mc) if a.mc else {}
     mc = a.mc and props.get("minecraft_version", a.mc)
     neo = a.neo or props.get("neo_version")
-    if not neo and (repo / "gradle.properties").is_file():
-        m = re.search(r"^neo_version\s*=\s*(\S+)", (repo / "gradle.properties").read_text(encoding="utf-8"), re.M)
-        neo = m and m.group(1)
+    if not neo:
+        neo = gradle_prop(repo, "neo_version")
     if not neo:
         say("no NeoForge version: pass --neo (or --mc naming a .multiversion target)"); return 2
     exp_lines = list(a.expect_log)
@@ -255,7 +272,7 @@ def main():
         say(str(e)); return 2
     if not expects:
         say("no expectations: the gate would only prove the jar boots (still checked, but weak)")
-    major = java_major(mc or "1.21")
+    major = jdk_for(repo, mc)
     java = find_java(major, a.java_home)
     if not java:
         say(f"no JDK {major} found (looked in /usr/lib/jvm, JAVA_HOME); pass --java-home"); return 2
@@ -301,6 +318,16 @@ def self_check():
     ok &= load_problems("[x/INFO] ok\n[y/ERROR] Mod loading has failed\n[z/DEBUG] ModLoadingException") != []
     ok &= len(load_problems("[z/DEBUG] ModLoadingException\n[x/INFO] fine")) == 0
     ok &= find_java(99) is None
+    with tempfile.TemporaryDirectory() as d:      # the JDK pick, with no --mc: the checkout's own Minecraft version
+        r = pathlib.Path(d)
+        (r / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.1\n", encoding="utf-8")
+        ok &= jdk_for(r, None) == 21 and gradle_prop(r, "neo_version") == "21.1.1"
+        (r / "gradle.properties").write_text("minecraft_version=26.3\nneo_version=26.3.0.1\n", encoding="utf-8")
+        ok &= jdk_for(r, None) == 25 and jdk_for(r, "1.21.4") == 21
+        (r / ".port/26.3").mkdir(parents=True)
+        (r / ".port/26.3/branch.properties").write_text("minecraft_version=26.3\njava_version=26\n", encoding="utf-8")
+        ok &= jdk_for(r, None) == 26
+        ok &= jdk_for(r / "none", None) == 21
     free = free_port()
     ok &= 1024 < free < 65536
     print("self-check:", "OK" if ok else "FAIL")
