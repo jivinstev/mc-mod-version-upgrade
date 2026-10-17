@@ -342,8 +342,18 @@ def export(repo, ref, dest):
 
 # ---------------------------------------------------------------- rename rows as a tool
 
+_RULES_CACHE = {}
+
+
 def rules_of(table_text):
-    """prepare-sources.py's rules for a table text: (regex rules, token pattern, token table)."""
+    """prepare-sources.py's rules for a table text: (regex rules, token pattern, token table). Cached by the text."""
+    hit = _RULES_CACHE.get(table_text)
+    if hit is None:
+        hit = _RULES_CACHE[table_text] = _rules_of(table_text)
+    return hit
+
+
+def _rules_of(table_text):
     ps = _ps()
     with tempfile.TemporaryDirectory() as d:
         f = pathlib.Path(d) / "t.tsv"
@@ -368,6 +378,14 @@ def apply_rules(text, rules):
 
 
 ONLYIN = re.compile(r"\n[ \t]*@OnlyIn\([^)]*\)[ \t]*")      # templates/fork-layer/tools/layer.py's
+
+
+def strip_onlyin_text(text):
+    """@OnlyIn removed as layer.py's strip_onlyin does -- it reads the file as text, so a CRLF file is stripped line
+    for line and stays CRLF (the bare pattern on CRLF text would leave a stray \\r behind each removed annotation)."""
+    if "\r\n" not in text:
+        return ONLYIN.sub("", text)
+    return ONLYIN.sub("", text.replace("\r\n", "\n")).replace("\n", "\r\n")
 
 
 def apply_rules_to_files(paths, rules):
@@ -453,7 +471,7 @@ def rows_tree(repo, port_ref, read, t, chain_=None, strip=None):
             continue
         text = apply_rules(data.decode("utf-8", "surrogateescape"), rules)
         if strip:
-            text = ONLYIN.sub("", text)
+            text = strip_onlyin_text(text)
         out[path] = text.encode("utf-8", "surrogateescape")
     return out
 
@@ -764,7 +782,7 @@ def review_items(repo, root, t, ref, work, files=None, mechanical=None):
                 if own is None:
                     own = rules_of(own_table(reader_of_root(root), t, pv))
                 text = apply_rules(base_data[p].decode("utf-8", "surrogateescape"), own)
-                if (ONLYIN.sub("", text) if strip else text).encode("utf-8", "surrogateescape") == files[p]:
+                if (strip_onlyin_text(text) if strip else text).encode("utf-8", "surrogateescape") == files[p]:
                     continue
         m = re.match(r"^(src/[^/]+)/resources/(.+)$", p)
         if m:
@@ -935,16 +953,17 @@ def remerge_open(root, t, files):
         return [f"{rel} is not readable: cannot tell which files the authors' change did not merge into"]
     out = []
     dropped = dropped_deps(read_file(rec_dir(root, t) / "DEPS.md"))
+    rules, strip = version_rules(reader_of_root(root), t)
     for c in conflicts:
         path = str((c or {}).get("overlay", ""))
-        if not path or path not in files:
-            continue          # the file is gone: removed by a person, nothing left to merge into
-        if c.get("deferred") and c["deferred"] in dropped:
-            continue          # kept while the integration is dropped here: not against done; re-opens when it returns
-        if hashlib.sha256(files[path]).hexdigest() == str(c.get("digest", "")).lower():
+        if not path:
+            continue
+        st = entry_status(c, files.get(path), rules, strip, dropped)
+        if st == "open":      # taken: the change is in the file; deferred: kept while its integration is dropped here
             out.append(f"the authors' change did not merge into {path} ({c.get('reason') or 'conflict'}, "
-                       f"{c.get('since') or '?'}; {rel}): apply it by hand through this version's rows (the diff is in "
-                       f"{rel}), commit, then remove the entry and re-review the file")
+                       f"{c.get('since') or '?'}; {rel}): apply it through this version's rows (the diff is in {rel}; "
+                       f"it counts as taken once its added lines are in the file) and re-review the file, or clear it "
+                       f"explicitly (cascade --apply-decisions, or remove the entry)")
     return out
 
 
@@ -1747,6 +1766,74 @@ def remerge_entries(data):
         return []
 
 
+# ---- the one invariant: an authors' change counts as TAKEN at a version only when (a) the change itself is in the
+# version's file (its added lines, through the version's rows, in order) or (b) an explicit clear names it
+# (cascade --apply-decisions, or removing its REMERGE.json entry). Entries never close by a digest, and port_taken
+# never moves past a change that is neither. Every path -- cascade, --apply, a deferred default, a conflict, a stop --
+# goes through change_taken() / entry_status() / record_untaken().
+TRIVIAL_LINE = re.compile(r"^[\s{}()\[\];,]*$")
+TRACKED_CHANGE = re.compile(r"^src/[^/]+/(java/.+\.java|resources/.+)$")
+DERIVED_FILE = re.compile(r"(^|/)(neoforge\.mods\.toml|mods\.toml|pack\.mcmeta|[^/]*mixins[^/]*\.json)$")
+
+
+def tracked_change(f):
+    """A file whose authors' changes a version must take or record (sources and resources; not the derived build
+    files, which each version writes with its own keys)."""
+    return bool(TRACKED_CHANGE.match(f)) and not DERIVED_FILE.search(f)
+
+
+def diff_lines(diff):
+    added, removed = [], []
+    for ln in (diff or "").splitlines():
+        if ln.startswith(("+++", "---")):
+            continue
+        if ln[:1] == "+":
+            added.append(ln[1:])
+        elif ln[:1] == "-":
+            removed.append(ln[1:])
+    return added, removed
+
+
+def version_rules(read, t):
+    """(the rename rules of t's chain, strip_onlyin) -- what turns an authors' line into the version's line."""
+    return (rules_of(chain_table(read, t, chain_read(read, t))),
+            parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}")).get("strip_onlyin") == "true")
+
+
+def change_taken(data, diff, f, rules=None, strip=False):
+    """(a): is the authors' change `diff` (in the port branch's names) in the version's file `data`? Its non-trivial
+    added lines, through the version's rows, appear in the file in order; a change that adds nothing is taken when
+    none of the lines it removes is left. A missing file has taken nothing."""
+    if data is None:
+        return False
+    have = [x.strip() for x in data.decode("utf-8", "surrogateescape").replace("\r\n", "\n").split("\n")]
+    added, removed = diff_lines(diff)
+    tr = (lambda x: apply_rules(x, rules).strip()) if rules is not None and f.endswith(".java") else (lambda x: x.strip())
+    want = [tr(x) for x in added if not (strip and "@OnlyIn(" in x)]
+    want = [w for w in want if w and not TRIVIAL_LINE.match(w)]
+    if want:
+        i = 0
+        for x in have:
+            if i < len(want) and x == want[i]:
+                i += 1
+        return i == len(want)
+    left = set(have)
+    gone = [tr(x) for x in removed if x.strip() and not TRIVIAL_LINE.match(x)]
+    return not any(g in left for g in gone)
+
+
+def entry_status(c, data, rules, strip, dropped):
+    """"taken" (the change is in the file: (a)), "deferred" (an absent integration's change, its dependency still
+    dropped here) or "open". Never by a digest: an entry without its diff (carried from a layer) stays open until it
+    is cleared explicitly."""
+    f = str(c.get("overlay", ""))
+    if c.get("diff") and change_taken(data, c["diff"], f, rules, strip):
+        return "taken"
+    if c.get("deferred") and c["deferred"] in dropped:
+        return "deferred"
+    return "open"
+
+
 def write_remerge(work, t, new):
     """Replace the entries for the files in `new` (a list of entries) in work's .port/<t>/REMERGE.json, keep the rest."""
     rm = work / REC / t / "REMERGE.json"
@@ -2004,11 +2091,13 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                          "changed it on purpose)")
     old_entries = {c.get("overlay"): c for c in remerge_entries(blob_at(repo, pre, f"{REC}/{t}/REMERGE.json"))}
 
+    rules_pre = version_rules(read_t, t)
+    dropped_pre = dropped_deps(read_t(f"{REC}/{t}/DEPS.md"))
+
     def span(f, frm):
-        """(from commit, the authors' diff from it to port_new): an entry still open for f keeps its earlier start."""
+        """(from commit, the authors' diff from it to port_new): an entry not taken for f keeps its earlier start."""
         c = old_entries.get(f)
-        t_pre = blob_at(repo, pre, f) or b""
-        if c and c.get("from") and hashlib.sha256(t_pre).hexdigest() == str(c.get("digest", "")).lower() \
+        if c and c.get("from") and entry_status(c, blob_at(repo, pre, f), *rules_pre, dropped_pre) != "taken" \
                 and git(repo, "merge-base", "--is-ancestor", c["from"], frm).returncode == 0:
             frm = c["from"]
         return frm, git(repo, "diff", frm, port_new, "--", f).stdout
@@ -2022,10 +2111,6 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     pending = {}
     new_entries = []
     if resolve is None:
-        for f in sorted(set(unmerged)):
-            frm, diff = span(f, port_from)
-            pending[f] = diff
-            new_entries.append(entry(f, frm, diff))
         if left:
             git(work, "merge", "--abort")         # nothing committed: port_taken stays, so the carry is offered again
             return False, notes, left, pending, [], []
@@ -2091,24 +2176,30 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
         if decided:
             append_decisions(work, decided)
         left = []
-    # the parent's open entries travel up with their file: t carries the file without the authors' change too
+    staged = lambda f: (git(work, "show", f":{f}", binary=True).stdout
+                        if git(work, "ls-files", "--error-unmatch", "--", f).returncode == 0 else None)
+    rn_ = reader_of_root(work)
+    rules_now = version_rules(rn_, t)
+    dropped_now = dropped_deps(rn_(f"{REC}/{t}/DEPS.md"))
+    # the parent's entries not taken there travel up with their file: t carries the file without the change too
     if parent_version is not None:
         mine = {c["overlay"] for c in new_entries}
+        rp_ = reader_of_ref(repo, parent_ref)
+        rules_p, dropped_p = version_rules(rp_, parent_version), dropped_deps(rp_(f"{REC}/{parent_version}/DEPS.md"))
         for c in remerge_entries(blob_at(repo, parent_ref, f"{REC}/{parent_version}/REMERGE.json")):
             f = c.get("overlay", "")
-            pb = blob_at(repo, parent_ref, f)
-            if not f or f in mine or pb is None or hashlib.sha256(pb).hexdigest() != str(c.get("digest", "")).lower():
+            if not f or f in mine or not c.get("diff"):
                 continue
-            if not (work / f).exists():
+            if entry_status(c, blob_at(repo, parent_ref, f), *rules_p, dropped_p) == "taken":
                 continue
+            body = staged(f)
+            if body is None or change_taken(body, c["diff"], f, *rules_now):
+                continue                                # t lacks the file, or has the authors' change after all
             old = old_entries.get(f)
-            if old and old.get("diff") == c.get("diff") and hashlib.sha256(blob_at(repo, pre, f) or b"").hexdigest() == old.get("digest"):
-                continue                                # carried already, still open
-            if f.endswith(".java") and git(work, "show", f":{f}", binary=True).stdout == rows("new").get(f):
-                continue                                # t has the authors' change after all
+            if old and old.get("diff") == c.get("diff"):
+                continue                                # carried already
             inh = {k: v for k, v in c.items() if k not in ("digest",)}
             inh["inherited_from"] = parent_version
-            body = git(work, "show", f":{f}", binary=True).stdout
             inh["digest"] = hashlib.sha256(body).hexdigest()
             new_entries.append(inh)
             if resolve is not None:
@@ -2118,15 +2209,47 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                               "choice": c.get("choice", "patch"), "reasoning": c.get("reasoning", c.get("reason", "")),
                               "diff": c.get("diff", ""), "source": c.get("source", "authors"), "inherited_from": parent_version,
                               "ours": body.decode("utf-8", "replace")[:6000]})
+    # record_untaken: every authors' change from port_from to port_new to a file t has is taken (a) or recorded --
+    # whatever path got here (a clean merge, a hand merge, a carry, a conflict kept as t had it, a default)
+    mine = {c["overlay"] for c in new_entries}
+    if port_from != port_new:
+        for f in git(repo, "diff", "--name-only", port_from, port_new).stdout.splitlines():
+            if not tracked_change(f) or f in mine:
+                continue
+            body = staged(f)
+            if body is None or (f.endswith(".java") and body == rows("new").get(f)):
+                continue                                # t does not have the file, or has exactly the rows' file
+            if change_taken(body, git(repo, "diff", port_from, port_new, "--", f).stdout, f, *rules_now):
+                continue
+            old = old_entries.get(f)
+            if old and old.get("from") and old.get("to") == port_new \
+                    and entry_status(old, body, *rules_now, dropped_now) != "taken" \
+                    and git(repo, "merge-base", "--is-ancestor", old["from"], port_from).returncode == 0:
+                continue                                # recorded already, over this whole range
+            frm, diff = span(f, port_from)
+            extra = {"reason": f"the authors' change is not in {t}'s file (no merge brought it, or a merge kept {t}'s)"}
+            if resolve is not None:
+                klass, esc, default, choice, why = classify(f, t, body, diff, rn_, resolve.get("budget", DEFAULT_BUDGET_LINES))
+                did = hashlib.sha1(f"{f}\0{diff}".encode("utf-8", "surrogateescape")).hexdigest()[:12]
+                extra.update({"id": did, "class": klass, "escalate": esc, "default": default, "choice": choice,
+                              "reasoning": why, "source": "authors"})
+                items.append({"id": did, "file": f, "version": t, "class": klass, "escalate": esc, "default": default,
+                              "choice": choice, "reasoning": why, "diff": diff, "source": "authors", "from": frm,
+                              "to": port_new, "ours": body.decode("utf-8", "replace")[:6000]})
+            else:
+                pending[f] = diff
+            new_entries.append(entry(f, frm, diff, extra))
+            mine.add(f)
     if new_entries:
         write_remerge(work, t, new_entries)
         if pending:
             notes.append(f"{len(pending)} file(s) recorded in .port/{t}/REMERGE.json with the authors' diff: apply by hand")
-    # this version has now taken the port branch up to port_new (an open entry carries its own start)
+    # port_taken moves to port_new only here, after record_untaken: every change in the range is taken, or held by an
+    # entry (whose removal, or --apply-decisions, is the explicit clear). A merge undone commits nothing, so it stays.
+    new_taken = port_new
     bp = work / REC / t / BRANCH_PROPS
-    if bp.is_file() and props.get("port_taken") != port_new and (resolved or new_entries or not already or remade
-                                                                  or git(work, "diff", "--cached", "--quiet").returncode):
-        bp.write_bytes(set_props_text(read_file(bp), {"port_taken": port_new}).encode("utf-8", "surrogateescape"))
+    if bp.is_file() and props.get("port_taken") != new_taken:
+        bp.write_bytes(set_props_text(read_file(bp), {"port_taken": new_taken}).encode("utf-8", "surrogateescape"))
         git(work, "add", "--", bp.relative_to(work).as_posix())
     if already and git(work, "diff", "--cached", "--quiet").returncode == 0:
         return True, notes + ["nothing changed"], [], pending, items, mech
@@ -2250,6 +2373,10 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         ok, notes, left, pending, its, mm = merge_up(repo, work, t, pname, pref, port, pv, say, resolve)
         items += its
         mech += mm
+        if ok and not pending and not its and "nothing changed" in notes and \
+                git(repo, "merge-base", "--is-ancestor", pref, tref).returncode == 0:
+            rows.append((t, "up to date", ""))          # carried, nothing new: every untaken change already recorded
+            continue
         for n in notes:
             say(f"fork-branches: cascade: {t}: {n}")
 
@@ -2757,7 +2884,7 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
             new = rows_t[path]; remade += 1
         else:
             text = apply_rules(files[path].decode("utf-8", "surrogateescape"), own)
-            new = (ONLYIN.sub("", text) if strip else text).encode("utf-8", "surrogateescape"); moved += 1
+            new = (strip_onlyin_text(text) if strip else text).encode("utf-8", "surrogateescape"); moved += 1
         files[path] = new
     gp_text = files.get("gradle.properties", b"").decode("utf-8", "surrogateescape")
     files["gradle.properties"] = set_props_text(gp_text, {k[5:]: v for k, v in props.items()}).encode("utf-8", "surrogateescape")
@@ -3271,6 +3398,227 @@ def _check_port_taken(expect):
                f"{out[-400:]} {why}")
 
 
+def _check_random_sequences(expect, n=None, seed=20261017, say=None):
+    """The invariant, under random sequences: after EVERY step, each authors' change a version has reached (its port
+    commit at or under the version's port_taken) is in that version's file, or held there by an entry the done check
+    lists (or a deferred one whose dependency is still dropped there). Steps: an authors' edit, a hand edit on a
+    version, a plain cascade whose conflict a person resolves by keeping ours, a dependency dropped or back, a plain
+    cascade, a cascade --apply. Self-contained (it runs against older code too: FB_RANDOM_SEQUENCES sets the count)."""
+    import inspect, random
+    entries_of = globals().get("remerge_entries") or (lambda data: (json.loads(data or b"{}") or {}).get("conflicts", []))
+    # about 2.5 s each on Linux (200: some 9 minutes); Windows starts processes several times slower, so 50 there
+    n = int(os.environ.get("FB_RANDOM_SEQUENCES", "50" if os.name == "nt" else "200")) if n is None else n
+    if n <= 0:
+        return []
+    rnd = random.Random(seed)
+    has_apply = "mode" in inspect.signature(cascade).parameters
+    versions = ("1.21.3", "1.21.4", "1.21.5", "1.21.8")
+    files = {"E": "src/main/java/com/example/mod/ExampleMod.java", "A": "src/main/java/com/example/mod/mixin/AMixin.java",
+             "P": "src/main/java/com/example/mod/Plain.java", "C": "src/main/java/com/example/mod/compat/OtherCompat.java"}
+    slot_re = re.compile(r"int slot(\d) = (\w+) \+ (\w+);")
+    deps_row = {"other": "| `com.example:other` | optional | `1` | dropped: no build | - |",
+                "jeiish": "| `x:jeiish` | optional | `1` | dropped: no build | - |"}
+    violations = []
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        r, g, _run = _fixture(d / "a")
+        _fixture_shared(r, g)
+        for t in ("1.21.3", "1.21.4", "1.21.5"):
+            _quiet(_fixture_done, r, g, t)
+        assert _quiet(migrate, r)[0] == 0
+        _quiet(add_target, r, "1.21.8", allow_undone_parent=True)
+
+        def port_edit(fn, msg):
+            g("checkout", "-q", "-f", "neoforge-1.21.1")
+            fn()
+            g("add", "-A"); g("commit", "-qm", msg)
+            g("checkout", "-q", "-f", "neoforge-1.21.x")
+        slots = "\n int slot0 = 0 + 0;\n\n\n int slot1 = 0 + 0;\n}\n"
+
+        def setup():
+            for k in ("E", "A", "P"):
+                f = r / files[k]
+                text = f.read_text(encoding="utf-8").rstrip("\n")
+                f.write_text(text[:text.rindex("}")].rstrip() + slots, encoding="utf-8")
+            (r / files["C"]).parent.mkdir(parents=True, exist_ok=True)
+            (r / files["C"]).write_text("package com.example.mod.compat;\nclass OtherCompat {\n boolean on() { return "
+                                        "ModList.get().isLoaded(\"other\"); }" + slots, encoding="utf-8")
+        port_edit(setup, "authors: slots")
+        rc, out = _quiet(cascade, r, "port..1.21.8", "none")
+        assert rc == 0, out[-500:]
+        heads = {ln.split()[1]: ln.split()[0] for ln in g("for-each-ref", "--format=%(objectname) %(refname)",
+                                                        "refs/heads").splitlines()}
+
+        def reset():
+            for ref, sha in heads.items():
+                git(r, "update-ref", ref, sha, check=True)
+            for t in versions:
+                w = r / "build/fork-branches" / t
+                if w.is_dir():
+                    git(w, "merge", "--abort"); git(w, "checkout", "-q", "-f", branch_name(t))
+                    git(w, "reset", "-q", "--hard", heads[f"refs/heads/{branch_name(t)}"]); git(w, "clean", "-fdq")
+            g("checkout", "-q", "-f", "neoforge-1.21.x"); g("reset", "-q", "--hard", heads["refs/heads/neoforge-1.21.x"])
+            g("clean", "-fdq")
+        counter = [0]
+
+        def fresh():
+            counter[0] += 1
+            return str(1000 + counter[0])
+
+        def line_edit(text, slot, part, value):
+            def sub(m):
+                if m.group(1) != str(slot):
+                    return m.group(0)
+                a, b = m.group(2), m.group(3)
+                return f"int slot{slot} = {value if part == 0 else a} + {value if part == 1 else b};"
+            return slot_re.sub(sub, text)
+        changes = []        # (key, slot, part, value, port commit, its parent)
+
+        focus = {}             # per sequence: the version, file and slot most steps act on, so the steps meet
+
+        def pick_file():
+            return focus["k"] if rnd.random() < 0.7 else rnd.choice("EAPC")
+
+        def pick_version():
+            return focus["t"] if rnd.random() < 0.7 else rnd.choice(versions)
+
+        def pick_slot():
+            return focus["slot"] if rnd.random() < 0.6 else rnd.randrange(2)
+
+        def authors():
+            k, slot, part = pick_file(), pick_slot(), rnd.randrange(2)
+            value = fresh()
+            f = r / files[k]
+            base = resolve_branch(r, "neoforge-1.21.1")
+            port_edit(lambda: f.write_text(line_edit(f.read_text(encoding="utf-8"), slot, part, value), encoding="utf-8"),
+                      f"authors: {k}{slot}.{part}={value}")
+            changes.append((k, slot, part, value, resolve_branch(r, "neoforge-1.21.1"), base))
+            return f"authors {k}{slot}.{part}={value}"
+
+        def hand():
+            t, k, slot, part = pick_version(), pick_file(), pick_slot(), rnd.randrange(2)
+            w, _why = worktree_for(r, t)
+            if w is None or not (w / files[k]).is_file():
+                return f"hand {t} {k}: no file"
+            f = w / files[k]
+            value = "h" + fresh()
+            f.write_text(line_edit(f.read_text(encoding="utf-8"), slot, part, value), encoding="utf-8")
+            git(w, "commit", "-qam", f"{t}: hand {k}{slot}.{part}", check=True)
+            return f"hand {t} {k}{slot}.{part}={value}"
+
+        def deps():
+            t, which = (focus["t"] if rnd.random() < 0.85 else rnd.choice(versions)), ("other" if rnd.random() < 0.8 else "jeiish")
+            w, _why = worktree_for(r, t)
+            p = w / REC / t / "DEPS.md"
+            text = read_file(p) or "| dependency | role | base pin | for this target | from |\n|---|---|---|---|---|\n"
+            row = deps_row[which]
+            text = text.replace(row + "\n", "") if row in text else text + row + "\n"
+            p.write_text(text, encoding="utf-8")
+            git(w, "add", "-A"); git(w, "commit", "-qm", f"{t}: deps {which}", check=True)
+            return f"deps {t} {which} {'dropped' if row in text else 'back'}"
+
+        def plain():
+            rc, out = _quiet(cascade, r, "port..1.21.8", "none")
+            return f"cascade rc {rc}"
+
+        def manual():
+            rc, out = _quiet(cascade, r, "port..1.21.8", "none")
+            m = re.search(r"cascade STOPPED at (\S+): (\S+) does not merge into", out)
+            if not m:
+                return f"cascade rc {rc} (no conflict)"
+            t, pname = m.group(1), m.group(2)
+            w, _why = worktree_for(r, t)
+            git(w, "merge", "--no-edit", pname)
+            for f in [x for x in git(w, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if x]:
+                if git(w, "checkout", "--ours", "--", f).returncode == 0:
+                    git(w, "add", "--", f)
+                else:
+                    git(w, "rm", "-q", "--", f)
+            git(w, "commit", "-qm", f"{t}: merged {pname} by hand, ours kept")
+            return f"manual merge at {t}"
+
+        def apply_():
+            if not has_apply:
+                return plain()
+            rc, out = _quiet(cascade, r, "port..1.21.8", "none", mode="apply", out_dir=d / "plan")
+            return f"apply rc {rc}"
+        steps = [(authors, 30), (hand, 20), (manual, 10), (deps, 10), (plain, 15), (apply_, 15)]
+
+        anc = {}
+
+        def is_anc(a_, b_):
+            if (a_, b_) not in anc:
+                anc[(a_, b_)] = git(r, "merge-base", "--is-ancestor", a_, b_).returncode == 0
+            return anc[(a_, b_)]
+
+        def check(trail):
+            for t in versions:
+                tip = resolve_branch(r, branch_name(t))
+                fl = ref_files(r, tip)
+                props_ = parse_props(fl.get(f"{REC}/{t}/{BRANCH_PROPS}", b"").decode("utf-8", "replace"))
+                taken = props_.get("port_taken") or git(r, "merge-base", tip, resolve_branch(r, "neoforge-1.21.1")).stdout.strip()
+                reached = [c for c in changes if is_anc(c[4], taken)]
+                if not reached:
+                    continue
+                with tempfile.TemporaryDirectory() as e:
+                    root = pathlib.Path(e)              # the records are all the done check's entry test reads
+                    for p_, data_ in fl.items():
+                        if p_.startswith(REC + "/"):
+                            (root / p_).parent.mkdir(parents=True, exist_ok=True)
+                            (root / p_).write_bytes(data_)
+                    listed = "\n".join(remerge_open(root, t, fl))
+                ents = entries_of(fl.get(f"{REC}/{t}/REMERGE.json", b""))
+                dropped = {m.group(1) for m in re.finditer(r"`([^`]+)` \| optional \| `1` \| dropped:",
+                                                           fl.get(f"{REC}/{t}/DEPS.md", b"").decode("utf-8", "replace"))}
+                for (k, slot, part) in {(c[0], c[1], c[2]) for c in reached}:
+                    path = files[k]
+                    data = fl.get(path)
+                    if data is None:
+                        continue
+                    m = [x for x in slot_re.finditer(data.decode("utf-8", "replace")) if x.group(1) == str(slot)]
+                    have = m[0].group(2 + part) if m else None
+                    mine = [c for c in reached if (c[0], c[1], c[2]) == (k, slot, part)]
+                    if have == mine[-1][3]:
+                        for c in mine:
+                            took.add((t, c))
+                        continue
+                    missing = [c for c in mine if (t, c) not in took]
+                    if not missing:
+                        continue                        # the version changed it itself after taking every change
+                    first = missing[0]
+                    cover = [c for c in ents if c.get("overlay") == path and c.get("from")
+                             and is_anc(c["from"], first[5])
+                             and (f"did not merge into {path}" in listed or c.get("deferred") in dropped)]
+                    if not cover:
+                        return (f"{t}: the authors' {k}{slot}.{part}={first[3]} (and later) is not in {path} "
+                                f"(it has {have}) and no listed entry holds it from {first[5][:8]}: "
+                                f"{[(c.get('since'), c.get('deferred')) for c in ents if c.get('overlay') == path]}")
+            return None
+        t0 = time.monotonic()
+        for i in range(n):
+            reset()
+            changes.clear()
+            took = set()
+            focus.update(t=rnd.choice(versions[1:]), k=rnd.choice("CCCAEP"), slot=rnd.randrange(2))
+            trail = [f"focus {focus['t']} {focus['k']}{focus['slot']}"]
+            # a random start: the focus version may already have its own change to the focus slot, and drop a dependency
+            if rnd.random() < 0.6:
+                trail.append(hand())
+            if rnd.random() < 0.5:
+                trail.append(deps())
+            for _j in range(rnd.randint(3, 6)):
+                fn = rnd.choices([s_ for s_, _w in steps], [w_ for _s, w_ in steps])[0]
+                trail.append(fn())
+                why = check(trail)
+                if why:
+                    violations.append(f"sequence {i}: {' / '.join(trail)} -> {why}")
+                    break
+        (say or (lambda x: None))(f"random sequences: {n} in {time.monotonic() - t0:.0f} s, {len(violations)} violation(s)")
+    expect(not violations, f"the taken-or-recorded invariant holds under {n} random sequences (seed {seed}): "
+                           + " || ".join(violations[:3]))
+    return violations
+
+
 def _check_migrate_library(expect):
     """migrate --library (or a layer whose base.properties says library=true) marks every branch a library."""
     lib = lambda r, t: parse_props(ref_files(r, resolve_branch(r, branch_name(t))).get(f"{REC}/{t}/{BRANCH_PROPS}", b"").decode()).get("library")
@@ -3313,6 +3661,25 @@ def _check_deferred_integration(expect):
         expect(rc == 0 and len(ents) == 1 and not ents[0].get("deferred") and "AUTHORS_FIX" in ents[0].get("diff", "")
                and any("did not merge into " + em in w for w in target_done(r, "1.21.5")),
                f"t8: an unrelated dropped dependency: the authors' change is an open entry, 1.21.5 not done: {ents}")
+    # t11: a deferred entry never closes by an unrelated edit of its file; it opens again when the dependency returns
+    deps = ("| dependency | role | base pin | for this target | from |\n|---|---|---|---|---|\n"
+            "| `com.example:other` | optional | `1` | {} | - |\n")
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w5, _w = worktree_for(r, "1.21.5")
+        _hand(w5, {".port/1.21.5/DEPS.md": deps.format("dropped: no build for 1.21.5"),
+                   em: ("Thing t;", "Thing t; boolean h5 = ModList.get().isLoaded(\"other\");")}, "1.21.5 hand change")
+        _authors(r, g, {em: ("Thing t;", "Thing t; int AUTHORS_FIX;")}, "authors")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply")
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        ents = [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == em]
+        quiet = not any("did not merge into " + em in w for w in target_done(r, "1.21.5"))
+        _hand(w5, {em: ("void a()", "void a2() {} void a()")}, "an unrelated fix to the same file")
+        _hand(w5, {".port/1.21.5/DEPS.md": deps.format("com.example:other:2.0")}, "the integration is back")
+        why = target_done(r, "1.21.5")
+        expect(rc == 0 and len(ents) == 1 and ents[0].get("deferred") == "com.example:other" and quiet
+               and any("did not merge into " + em in w for w in why),
+               f"t11: a deferred entry survives an unrelated edit and opens again when its dependency returns: {why}")
 
 
 def _check_cascade_plan(expect):
@@ -3470,6 +3837,11 @@ def self_check():
         if not c:
             ok = False
             print("FAIL:", msg)
+    # @OnlyIn stripped from a CRLF file (a Windows checkout's overlay) exactly as layer.py strips it: no stray \r
+    crlf = "class Cf {\r\n    @OnlyIn(Dist.CLIENT)\r\n    Thing t;\r\n}\r\n"
+    expect(strip_onlyin_text(crlf) == "class Cf {\r\n    Thing t;\r\n}\r\n"
+           and strip_onlyin_text(crlf.replace("\r\n", "\n")) == "class Cf {\n    Thing t;\n}\n",
+           f"@OnlyIn stripped from a CRLF file keeps it CRLF, line for line: {strip_onlyin_text(crlf)!r}")
     # a mixin config with a byte-order mark (and CRLF) is read, and written back with both
     bom = "\ufeff{\r\n  \"package\": \"p\",\r\n  \"mixins\": [\"A\"]\r\n}\r\n"
     got = json_like(mixin_edit(jload(bom.encode("utf-8")), [("mixins", "B")], []), bom)
@@ -3822,6 +4194,7 @@ def self_check():
     _check_cascade_plan(expect)
     _check_deferred_integration(expect)
     _check_migrate_library(expect)
+    _check_random_sequences(expect, say=print)
     if not os.environ.get("FB_SELF_CHECK_CRLF"):
         # the same checks with core.autocrlf=true (a Windows checkout's default): a version branch checked out with CRLF
         # line endings must read as its blobs (root_files), and a layer's prepare must see the blobs' bytes (Layer)
@@ -3830,7 +4203,8 @@ def self_check():
             cfg.write_text("[core]\n\tautocrlf = true\n[user]\n\tname = a\n\temail = a@b\n", encoding="utf-8")
             r = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "--self-check"], capture_output=True,
                                text=True, encoding="utf-8", errors="replace",
-                               env={**os.environ, "GIT_CONFIG_GLOBAL": str(cfg), "FB_SELF_CHECK_CRLF": "1"})
+                               env={"FB_RANDOM_SEQUENCES": "20", **os.environ, "GIT_CONFIG_GLOBAL": str(cfg),
+                                    "FB_SELF_CHECK_CRLF": "1"})
             expect("self-check: OK" in r.stdout, "under core.autocrlf=true: " + " | ".join(
                 l for l in r.stdout.splitlines() if l.startswith("FAIL"))[:1500])
     print("self-check:", "OK" if ok else "FAILED")
