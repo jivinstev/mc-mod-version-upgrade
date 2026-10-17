@@ -16,7 +16,7 @@
     python3 tools/fork-branches.py library-record --repo LIB --target T --dependent DIR [--slug owner/repo]
     python3 tools/fork-branches.py ci          --repo DIR --target T --modid ID [--run]
     python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...]
-    python3 tools/fork-branches.py --self-check [--deep]   # --deep (or FB_RANDOM_SEQUENCES=N): before a release of the tool
+    python3 tools/fork-branches.py --self-check [--deep | --platform]   # --deep: before a release; --platform: an OS-only leg
 
 THE SHAPE. The port branch `neoforge-1.21.1` stays exactly what it is (a single-version port). Each further Minecraft
 version is a branch of its own, made from the one below it along the chain: `neoforge-1.21.3` from `neoforge-1.21.1`,
@@ -3927,305 +3927,310 @@ def self_check():
         n = apply_rules_to_files([f], rules_of("old.Thing\tnew.Thing\n"))
         expect(n == 1 and f.read_bytes() == b"import new.Thing;\r\nclass A { Thing t; String s = \"\xe9\"; }\r\n",
                f"rows applied as bytes keep CRLF and a non-UTF-8 byte: {f.read_bytes()!r}")
-    with tempfile.TemporaryDirectory() as d:
-        d = pathlib.Path(d)
-        r, g, _run = _fixture(d / "a")
-        _fixture_shared(r, g)
-        for t in ("1.21.3", "1.21.4", "1.21.5"):
-            why = _quiet(_fixture_done, r, g, t)[0]
-            expect(not why, f"fixture: layer target {t} done: {why}")
-        # layer mode, a fresh clone (no build/): the done check's re-prepare makes every source set's tree, the cf set's
-        # too; without it the inventory refuses rather than read the raw src/cf/java (every cf overlay item "same")
-        shutil.rmtree(r / "build/mc1.21.5")
-        expect(fp().prepared_tree(r, "1.21.5", prepare=True) == [] and (r / "build/mc1.21.5/mv/cf-java").is_dir()
-               and b"@OnlyIn" not in (r / "build/mc1.21.5/mv/cf-java/com/example/mod/cf/Cf.java").read_bytes(),
-               "layer re-prepare for the done check: main and the cf source set (its overlay, @OnlyIn stripped)")
-        shutil.rmtree(r / "build/mc1.21.5/mv/cf-java")
-        miss = fp().prepared_tree(r, "1.21.5", prepare=False)
-        li_ = _mod("layer_inventory_fb", "layer-inventory.py")
-        try:
-            li_.account(r, "1.21.5"); raised = ""
-        except ValueError as e:
-            raised = str(e)
-        expect(any("mv/cf-java" in m for m in miss) and "mv/cf-java" in raised,
-               f"a missing prepared cf set: the done check and the inventory refuse to judge it: {miss} {raised!r}")
-        fp().prepared_tree(r, "1.21.5", prepare=True)
-        refs0 = g("for-each-ref", "--format=%(refname) %(objectname)")
-        head0 = g("rev-parse", "HEAD")
-        rc, out = _quiet(migrate, r, dry_run=True)
-        expect(rc == 0 and "would make neoforge-1.21.4" in out and g("for-each-ref", "--format=%(refname) %(objectname)") == refs0,
-               f"migrate --dry-run prints the plan and writes nothing: {out[-400:]}")
-        rc, out = _quiet(migrate, r)
-        expect(rc == 0 and out.count("byte-identical to the layer's prepare") == 3 and out.count("layer done, branch done") == 3,
-               f"migrate: three byte-identical branches, each done as its layer target was: {out[-900:]}")
-        expect(g("rev-parse", "HEAD") == head0 and not g("status", "--porcelain"),
-               "migrate never touches the checkout (HEAD and the work tree are as they were)")
-        expect(all(resolve_branch(r, branch_name(t)) for t in ("1.21.3", "1.21.4", "1.21.5")), "the three branches exist")
-        if rc == 0 and "migrated" not in _FIXTURES:             # this is what _migrated_fixture builds: reuse it
-            shared_ = os.environ.get("FB_FIXTURE_CACHE")
-            seed = (pathlib.Path(shared_) / "migrated" / "fork") if shared_ else \
-                pathlib.Path(tempfile.mkdtemp(prefix="fb-fixture-migrated-")) / "fork"
-            if not (seed / ".fixture-complete").is_file():
-                shutil.rmtree(seed, ignore_errors=True)
-                shutil.copytree(r, seed, symlinks=True)
-                if shared_:
-                    (seed / ".fixture-complete").write_bytes(b"")
-                else:
-                    import atexit
-                    atexit.register(shutil.rmtree, seed.parent, True)
-            _FIXTURES["migrated"] = seed
-        b4, b5 = resolve_branch(r, "neoforge-1.21.4"), resolve_branch(r, "neoforge-1.21.5")
-        expect(git(r, "merge-base", "--is-ancestor", b4, b5).returncode == 0
-               and git(r, "merge-base", "--is-ancestor", resolve_branch(r, "neoforge-1.21.1"), resolve_branch(r, "neoforge-1.21.3")).returncode == 0,
-               "stacked: each branch is made from the one below it, the first from the port branch")
-        f5 = ref_files(r, b5)
-        expect(not any(p.startswith(".multiversion/") for p in f5) and BRANCH_HOOK_LINE in f5["build.gradle"].decode()
-               and LAYER_HOOK_LINE not in f5["build.gradle"].decode() and b"minecraft_version=1.21.5" in f5["gradle.properties"],
-               "a version branch carries no .multiversion/, the branch hook instead of the layer's, and its own versions")
-        expect(b"keep = 5" in f5["src/main/java/com/example/mod/Over.java"] and b"new.Thing" in f5["src/main/java/com/example/mod/ExampleMod.java"]
-               and b"@OnlyIn" not in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b"Thing t;" in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b'"[1.21.5,1.21.6)"' in f5["src/main/resources/META-INF/neoforge.mods.toml"]
-               and b"BMixin" in f5["src/main/resources/examplemod.mixins.json"] and b"v = 4" in f5["src/main/java/com/example/mod/mv/Helper.java"]
-               and "src/main/resources/assets/examplemod/items/a.json" in f5,
-               "1.21.5's tree: its own overlay, the rows, the cf set's inherited overlay, the toml range, the inherited mixin, the nearest helper, the inherited resource")
-        expect(all(p in f5 for p in (".port/1.21.5/GATES.md", ".port/1.21.5/REVIEW.md", ".port/1.21.5/MIGRATED.json",
-                                    ".port/1.21.5/INVENTORY-CHECK.json", ".port/1.21.5/TEST-ITEMS.md", ".port/1.21.4/GATES.md")),
-               "records under .port/<version>/ (the lower versions' as carried copies)")
-        with tempfile.TemporaryDirectory() as e:
-            items = review_items(r, export(r, b5, pathlib.Path(e) / "t"), "1.21.5", b5, False)
-        expect(("changed", "src/main/java/com/example/mod/Over.java") in items
-               and not any("OnlyHere" in f or "Cf.java" in f for _k, f in items),
-               f"1.21.5's review rows: its own overlay of an authors' file; not an overlay-only class, not the parent's file "
-               f"with @OnlyIn stripped: {items} "
-               + " / ".join(explain_changed(r, "1.21.5", b5, f) for k, f in items if k == "changed" and "Cf.java" in f))
-        rc, out = _quiet(verify, r)
-        expect(rc == 0 and out.count("byte-identical") == 3, f"verify: the layer's prepare run again equals every branch: {out[-300:]}")
-        rc, out = _quiet(migrate, r)
-        expect(rc == 0 and out.count("exists with the same content") == 3, f"migrate again: nothing to do: {out[-300:]}")
-        # the digest mapping is what keeps a moved target done: without it, its layer-commit records do not count
-        with tempfile.TemporaryDirectory() as e:
-            root = export(r, b5, pathlib.Path(e) / "t")
-            (root / REC / "1.21.5/MIGRATED.json").unlink()
-            why = target_done(r, "1.21.5", root=root, ref=b5)
-            expect(any("GATES.md names" in w and "MIGRATED.json does not map it" in w for w in why)
-                   and any(w.startswith("REVIEW.md names") for w in why),
-                   f"control: without MIGRATED.json the layer commits in GATES.md/REVIEW.md do not count: {why}")
-        # a change after the migration makes the gates and the review stale; a mechanical file edited becomes a review row
-        g("checkout", "-q", "neoforge-1.21.4")
-        expect(checkout_version(r) == "1.21.4" and target_done(r, "1.21.4") == [], "checked out: done in place")
-        # a mode change alone (an executable bit) stales the migrated records too
-        if os.name != "nt":
-            pm = r / "src/main/java/com/example/mod/Plain.java"
-            pm.chmod(0o755)
+    # --platform (FB_SELF_CHECK_PLATFORM): only what an OS can break by itself -- the line-ending unit cases above and
+    # the port-ahead migration below (the case that failed natively on Windows), for a CI leg whose logic the
+    # default run already covers on another OS
+    platform = "--platform" in sys.argv or bool(os.environ.get("FB_SELF_CHECK_PLATFORM"))
+    if not platform:
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            r, g, _run = _fixture(d / "a")
+            _fixture_shared(r, g)
+            for t in ("1.21.3", "1.21.4", "1.21.5"):
+                why = _quiet(_fixture_done, r, g, t)[0]
+                expect(not why, f"fixture: layer target {t} done: {why}")
+            # layer mode, a fresh clone (no build/): the done check's re-prepare makes every source set's tree, the cf set's
+            # too; without it the inventory refuses rather than read the raw src/cf/java (every cf overlay item "same")
+            shutil.rmtree(r / "build/mc1.21.5")
+            expect(fp().prepared_tree(r, "1.21.5", prepare=True) == [] and (r / "build/mc1.21.5/mv/cf-java").is_dir()
+                   and b"@OnlyIn" not in (r / "build/mc1.21.5/mv/cf-java/com/example/mod/cf/Cf.java").read_bytes(),
+                   "layer re-prepare for the done check: main and the cf source set (its overlay, @OnlyIn stripped)")
+            shutil.rmtree(r / "build/mc1.21.5/mv/cf-java")
+            miss = fp().prepared_tree(r, "1.21.5", prepare=False)
+            li_ = _mod("layer_inventory_fb", "layer-inventory.py")
+            try:
+                li_.account(r, "1.21.5"); raised = ""
+            except ValueError as e:
+                raised = str(e)
+            expect(any("mv/cf-java" in m for m in miss) and "mv/cf-java" in raised,
+                   f"a missing prepared cf set: the done check and the inventory refuse to judge it: {miss} {raised!r}")
+            fp().prepared_tree(r, "1.21.5", prepare=True)
+            refs0 = g("for-each-ref", "--format=%(refname) %(objectname)")
+            head0 = g("rev-parse", "HEAD")
+            rc, out = _quiet(migrate, r, dry_run=True)
+            expect(rc == 0 and "would make neoforge-1.21.4" in out and g("for-each-ref", "--format=%(refname) %(objectname)") == refs0,
+                   f"migrate --dry-run prints the plan and writes nothing: {out[-400:]}")
+            rc, out = _quiet(migrate, r)
+            expect(rc == 0 and out.count("byte-identical to the layer's prepare") == 3 and out.count("layer done, branch done") == 3,
+                   f"migrate: three byte-identical branches, each done as its layer target was: {out[-900:]}")
+            expect(g("rev-parse", "HEAD") == head0 and not g("status", "--porcelain"),
+                   "migrate never touches the checkout (HEAD and the work tree are as they were)")
+            expect(all(resolve_branch(r, branch_name(t)) for t in ("1.21.3", "1.21.4", "1.21.5")), "the three branches exist")
+            if rc == 0 and "migrated" not in _FIXTURES:             # this is what _migrated_fixture builds: reuse it
+                shared_ = os.environ.get("FB_FIXTURE_CACHE")
+                seed = (pathlib.Path(shared_) / "migrated" / "fork") if shared_ else \
+                    pathlib.Path(tempfile.mkdtemp(prefix="fb-fixture-migrated-")) / "fork"
+                if not (seed / ".fixture-complete").is_file():
+                    shutil.rmtree(seed, ignore_errors=True)
+                    shutil.copytree(r, seed, symlinks=True)
+                    if shared_:
+                        (seed / ".fixture-complete").write_bytes(b"")
+                    else:
+                        import atexit
+                        atexit.register(shutil.rmtree, seed.parent, True)
+                _FIXTURES["migrated"] = seed
+            b4, b5 = resolve_branch(r, "neoforge-1.21.4"), resolve_branch(r, "neoforge-1.21.5")
+            expect(git(r, "merge-base", "--is-ancestor", b4, b5).returncode == 0
+                   and git(r, "merge-base", "--is-ancestor", resolve_branch(r, "neoforge-1.21.1"), resolve_branch(r, "neoforge-1.21.3")).returncode == 0,
+                   "stacked: each branch is made from the one below it, the first from the port branch")
+            f5 = ref_files(r, b5)
+            expect(not any(p.startswith(".multiversion/") for p in f5) and BRANCH_HOOK_LINE in f5["build.gradle"].decode()
+                   and LAYER_HOOK_LINE not in f5["build.gradle"].decode() and b"minecraft_version=1.21.5" in f5["gradle.properties"],
+                   "a version branch carries no .multiversion/, the branch hook instead of the layer's, and its own versions")
+            expect(b"keep = 5" in f5["src/main/java/com/example/mod/Over.java"] and b"new.Thing" in f5["src/main/java/com/example/mod/ExampleMod.java"]
+                   and b"@OnlyIn" not in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b"Thing t;" in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b'"[1.21.5,1.21.6)"' in f5["src/main/resources/META-INF/neoforge.mods.toml"]
+                   and b"BMixin" in f5["src/main/resources/examplemod.mixins.json"] and b"v = 4" in f5["src/main/java/com/example/mod/mv/Helper.java"]
+                   and "src/main/resources/assets/examplemod/items/a.json" in f5,
+                   "1.21.5's tree: its own overlay, the rows, the cf set's inherited overlay, the toml range, the inherited mixin, the nearest helper, the inherited resource")
+            expect(all(p in f5 for p in (".port/1.21.5/GATES.md", ".port/1.21.5/REVIEW.md", ".port/1.21.5/MIGRATED.json",
+                                        ".port/1.21.5/INVENTORY-CHECK.json", ".port/1.21.5/TEST-ITEMS.md", ".port/1.21.4/GATES.md")),
+                   "records under .port/<version>/ (the lower versions' as carried copies)")
+            with tempfile.TemporaryDirectory() as e:
+                items = review_items(r, export(r, b5, pathlib.Path(e) / "t"), "1.21.5", b5, False)
+            expect(("changed", "src/main/java/com/example/mod/Over.java") in items
+                   and not any("OnlyHere" in f or "Cf.java" in f for _k, f in items),
+                   f"1.21.5's review rows: its own overlay of an authors' file; not an overlay-only class, not the parent's file "
+                   f"with @OnlyIn stripped: {items} "
+                   + " / ".join(explain_changed(r, "1.21.5", b5, f) for k, f in items if k == "changed" and "Cf.java" in f))
+            rc, out = _quiet(verify, r)
+            expect(rc == 0 and out.count("byte-identical") == 3, f"verify: the layer's prepare run again equals every branch: {out[-300:]}")
+            rc, out = _quiet(migrate, r)
+            expect(rc == 0 and out.count("exists with the same content") == 3, f"migrate again: nothing to do: {out[-300:]}")
+            # the digest mapping is what keeps a moved target done: without it, its layer-commit records do not count
+            with tempfile.TemporaryDirectory() as e:
+                root = export(r, b5, pathlib.Path(e) / "t")
+                (root / REC / "1.21.5/MIGRATED.json").unlink()
+                why = target_done(r, "1.21.5", root=root, ref=b5)
+                expect(any("GATES.md names" in w and "MIGRATED.json does not map it" in w for w in why)
+                       and any(w.startswith("REVIEW.md names") for w in why),
+                       f"control: without MIGRATED.json the layer commits in GATES.md/REVIEW.md do not count: {why}")
+            # a change after the migration makes the gates and the review stale; a mechanical file edited becomes a review row
+            g("checkout", "-q", "neoforge-1.21.4")
+            expect(checkout_version(r) == "1.21.4" and target_done(r, "1.21.4") == [], "checked out: done in place")
+            # a mode change alone (an executable bit) stales the migrated records too
+            if os.name != "nt":
+                pm = r / "src/main/java/com/example/mod/Plain.java"
+                pm.chmod(0o755)
+                why = target_done(r, "1.21.4")
+                expect(any(w.startswith("GATES.md") and "no longer equals" in w for w in why),
+                       f"a file made executable: the migrated Gate C record no longer matches: {why}")
+                pm.chmod(0o644)
+            # the library rule: a library version is done only once a dependent passed Gate C against its jar
+            bp = r / REC / "1.21.4" / BRANCH_PROPS
+            bp.write_text(read_file(bp) + "library=true\n", encoding="utf-8")
             why = target_done(r, "1.21.4")
-            expect(any(w.startswith("GATES.md") and "no longer equals" in w for w in why),
-                   f"a file made executable: the migrated Gate C record no longer matches: {why}")
-            pm.chmod(0o644)
-        # the library rule: a library version is done only once a dependent passed Gate C against its jar
-        bp = r / REC / "1.21.4" / BRANCH_PROPS
-        bp.write_text(read_file(bp) + "library=true\n", encoding="utf-8")
-        why = target_done(r, "1.21.4")
-        expect(len(why) == 1 and why[0].startswith(LIBRARY_PENDING), f"library=true and no dependent recorded: not done: {why}")
-        (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",
-                                                                         "library_commit": g("rev-parse", "HEAD")}]), encoding="utf-8")
-        expect(target_done(r, "1.21.4") == [], "a dependent recorded green against this jar's commit: done")
-        (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",
-                                                                         "library_commit": "0" * 40}]), encoding="utf-8")
-        expect(target_done(r, "1.21.4")[:1] and target_done(r, "1.21.4")[0].startswith(LIBRARY_PENDING),
-               "control: a dependent recorded against another commit does not count")
-        g("checkout", "-q", "--", "."); (r / REC / "1.21.4" / "DEPENDENTS.json").unlink()
-        (r / "src/main/java/com/example/mod/ExampleMod.java").write_text("package com.example.mod;\nclass ExampleMod { int edited; }\n",
+            expect(len(why) == 1 and why[0].startswith(LIBRARY_PENDING), f"library=true and no dependent recorded: not done: {why}")
+            (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",
+                                                                             "library_commit": g("rev-parse", "HEAD")}]), encoding="utf-8")
+            expect(target_done(r, "1.21.4") == [], "a dependent recorded green against this jar's commit: done")
+            (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",
+                                                                             "library_commit": "0" * 40}]), encoding="utf-8")
+            expect(target_done(r, "1.21.4")[:1] and target_done(r, "1.21.4")[0].startswith(LIBRARY_PENDING),
+                   "control: a dependent recorded against another commit does not count")
+            g("checkout", "-q", "--", "."); (r / REC / "1.21.4" / "DEPENDENTS.json").unlink()
+            (r / "src/main/java/com/example/mod/ExampleMod.java").write_text("package com.example.mod;\nclass ExampleMod { int edited; }\n",
+                                                                           encoding="utf-8")
+            why = target_done(r, "1.21.4")
+            expect(any(w.startswith("GATES.md") and ("changed since" in w or "no longer equals" in w) for w in why)
+                   and "no verdict: changed src/main/java/com/example/mod/ExampleMod.java" in why,
+                   f"an edited file: Gate C stale, and the file (no longer the rows' alone) needs a review row: {why}")
+            # a file the parent has and this version deletes is a review row; one drops.txt or a mixin_remove key accounts
+            # for needs none (the migrated 1.21.4 lacks AMixin by its mixin_remove key and is done, above)
+            (r / "src/main/resources/data/examplemod/recipe/r.json").unlink()
+            why = target_done(r, "1.21.4")
+            expect("no verdict: deleted src/main/resources/data/examplemod/recipe/r.json" in why
+                   and not any("AMixin" in w for w in why), f"a deleted recipe needs a review row; AMixin (mixin_remove) none: {why}")
+            g("checkout", "-q", "--", "."); g("checkout", "-q", "neoforge-1.21.x")
+            # cascade: the authors' change arrives on the port branch; each version's mechanical files are re-made from it
+            # through that version's rows (a conflict git alone would have on the renamed line resolved), a new file too
+            g("checkout", "-q", "neoforge-1.21.1")
+            (r / "src/main/java/com/example/mod/ExampleMod.java").write_text(
+                "package com.example.mod;\nimport old.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.oldCall(); } }\n",
+                encoding="utf-8")
+            (r / "src/main/java/com/example/mod/NewOne.java").write_text("package com.example.mod;\nimport old.Thing;\nclass NewOne { Thing t; }\n",
+                                                                        encoding="utf-8")
+            amixin = "src/main/java/com/example/mod/mixin/AMixin.java"
+            (r / amixin).write_text((r / amixin).read_text(encoding="utf-8").replace("void h() {}", "void h() { fixed(); }"), encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "authors: a field and a class")
+            g("checkout", "-q", "neoforge-1.21.x")
+            rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none")
+            e5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+            expect(rc == 0 and out.count("| merged |") == 3
+                   and e5["src/main/java/com/example/mod/ExampleMod.java"] == b"package com.example.mod;\nimport new.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.newCall(); } }\n"
+                   and b"import new.Thing;" in e5["src/main/java/com/example/mod/NewOne.java"] and b"keep = 5" in e5["src/main/java/com/example/mod/Over.java"],
+                   f"cascade port..1.21.5: the authors' change reaches every version through its rows, overlays kept: {out[-500:]}")
+            expect(b"fixed();" in e5[amixin] and amixin not in ref_files(r, resolve_branch(r, "neoforge-1.21.4"), "src"),
+                   "the authors' fix to a class 1.21.4 takes off (mixin_remove_only) still reaches 1.21.5, which has it")
+            why = target_done(r, "1.21.5")
+            expect(any(w.startswith("GATES.md") for w in why) and not any(w.startswith("no verdict") for w in why),
+                   f"after the merge the gates are stale, and no rows-only file needs a review row: {why}")
+            # a fix made at the lowest version reaches the higher ones by merge
+            w3, _why = worktree_for(r, "1.21.3")
+            (w3 / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain { int v = 2; }\n",
+                                                                         encoding="utf-8")
+            git(w3, "commit", "-qam", "fix at 1.21.3", check=True)
+            rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+            expect(rc == 0 and all(b"v = 2" in ref_files(r, resolve_branch(r, branch_name(t)), "src")["src/main/java/com/example/mod/Plain.java"]
+                                   for t in ("1.21.4", "1.21.5")), f"cascade 1.21.3..1.21.5 carries a fix up: {out[-400:]}")
+            why = target_done(r, "1.21.4")
+            expect("no verdict: changed src/main/java/com/example/mod/Plain.java" not in why,
+                   f"the fix is 1.21.3's change: on 1.21.4 the file equals its parent's, so no row there: {why}")
+            why3 = target_done(r, "1.21.3")
+            expect("no verdict: changed src/main/java/com/example/mod/Plain.java" in why3, f"... and a row on 1.21.3, where it was made: {why3}")
+            # ... but where 1.21.5 changed that class by hand, the authors' change cannot arrive through 1.21.4: the merge is
+            # committed with 1.21.5's file as it was, the authors' diff recorded open in REMERGE.json and printed, and a stop
+            w5, _why = worktree_for(r, "1.21.5")
+            pre_edit5 = resolve_branch(r, "neoforge-1.21.5")
+            (w5 / amixin).write_text((w5 / amixin).read_text(encoding="utf-8").replace("fixed();", "fixed(); mine();"), encoding="utf-8")
+            git(w5, "commit", "-qam", "1.21.5's own AMixin edit", check=True)
+            g("checkout", "-q", "neoforge-1.21.1")
+            (r / amixin).write_text((r / amixin).read_text(encoding="utf-8").replace("fixed();", "fixed(); again();"), encoding="utf-8")
+            g("commit", "-qam", "authors: AMixin again")
+            g("checkout", "-q", "neoforge-1.21.x")
+            before5 = resolve_branch(r, "neoforge-1.21.5")
+            rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+            f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+            rm5 = jload(f5.get(".port/1.21.5/REMERGE.json", b"{}")).get("conflicts", [])
+            expect(rc == 1 and "STOPPED at 1.21.5" in out and amixin in out and "+" in out and "again();" in out
+                   and resolve_branch(r, "neoforge-1.21.5") != before5 and b"mine();" in f5[amixin] and b"again();" not in f5[amixin]
+                   and [c["overlay"] for c in rm5] == [amixin] and "again();" in rm5[0].get("diff", ""),
+                   f"the authors' change to a class the parent does not carry and 1.21.5 changed by hand: merged without it, "
+                   f"recorded open in REMERGE.json with the diff, printed, a stop: {out[-700:]}")
+            why = target_done(r, "1.21.5")
+            expect(any("did not merge into " + amixin in w for w in why), f"... and 1.21.5 is not done while it is open: {why}")
+            rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+            expect(rc == 0 and "| 1.21.5 | up to date" in out and any("did not merge into " + amixin in w for w in target_done(r, "1.21.5")),
+                   f"a later cascade has nothing more to merge, and the entry stays open (the change is not lost): {out[-300:]}")
+            # the person applies it through 1.21.5's rows, removes the entry, commits: the cascade goes on, nothing open
+            (w5 / amixin).write_text((w5 / amixin).read_text(encoding="utf-8").replace("fixed(); mine();", "fixed(); again(); mine();"),
+                                     encoding="utf-8")
+            (w5 / ".port/1.21.5/REMERGE.json").write_text(json.dumps({"conflicts": []}) + "\n", encoding="utf-8")
+            git(w5, "commit", "-qam", "1.21.5: the authors' AMixin change applied by hand", check=True)
+            why = target_done(r, "1.21.5")
+            rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none")
+            expect(not any("did not merge into" in w for w in why) and rc == 0 and "| 1.21.5 | up to date" in out,
+                   f"applied and the entry removed: nothing open, the cascade resumes: {why} {out[-200:]}")
+            git(w5, "reset", "-q", "--hard", pre_edit5)
+            before5 = resolve_branch(r, "neoforge-1.21.5")
+            # a conflict in a file a person changed stops the cascade there, the merge undone
+            g("checkout", "-q", "neoforge-1.21.1")
+            (r / "src/main/java/com/example/mod/Over.java").write_text("package com.example.mod;\nimport old.Thing;\npublic class Over { Thing t; int keep = 9; }\n",
                                                                        encoding="utf-8")
-        why = target_done(r, "1.21.4")
-        expect(any(w.startswith("GATES.md") and ("changed since" in w or "no longer equals" in w) for w in why)
-               and "no verdict: changed src/main/java/com/example/mod/ExampleMod.java" in why,
-               f"an edited file: Gate C stale, and the file (no longer the rows' alone) needs a review row: {why}")
-        # a file the parent has and this version deletes is a review row; one drops.txt or a mixin_remove key accounts
-        # for needs none (the migrated 1.21.4 lacks AMixin by its mixin_remove key and is done, above)
-        (r / "src/main/resources/data/examplemod/recipe/r.json").unlink()
-        why = target_done(r, "1.21.4")
-        expect("no verdict: deleted src/main/resources/data/examplemod/recipe/r.json" in why
-               and not any("AMixin" in w for w in why), f"a deleted recipe needs a review row; AMixin (mixin_remove) none: {why}")
-        g("checkout", "-q", "--", "."); g("checkout", "-q", "neoforge-1.21.x")
-        # cascade: the authors' change arrives on the port branch; each version's mechanical files are re-made from it
-        # through that version's rows (a conflict git alone would have on the renamed line resolved), a new file too
-        g("checkout", "-q", "neoforge-1.21.1")
-        (r / "src/main/java/com/example/mod/ExampleMod.java").write_text(
-            "package com.example.mod;\nimport old.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.oldCall(); } }\n",
-            encoding="utf-8")
-        (r / "src/main/java/com/example/mod/NewOne.java").write_text("package com.example.mod;\nimport old.Thing;\nclass NewOne { Thing t; }\n",
-                                                                    encoding="utf-8")
-        amixin = "src/main/java/com/example/mod/mixin/AMixin.java"
-        (r / amixin).write_text((r / amixin).read_text(encoding="utf-8").replace("void h() {}", "void h() { fixed(); }"), encoding="utf-8")
-        g("add", "-A"); g("commit", "-qm", "authors: a field and a class")
-        g("checkout", "-q", "neoforge-1.21.x")
-        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none")
-        e5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
-        expect(rc == 0 and out.count("| merged |") == 3
-               and e5["src/main/java/com/example/mod/ExampleMod.java"] == b"package com.example.mod;\nimport new.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.newCall(); } }\n"
-               and b"import new.Thing;" in e5["src/main/java/com/example/mod/NewOne.java"] and b"keep = 5" in e5["src/main/java/com/example/mod/Over.java"],
-               f"cascade port..1.21.5: the authors' change reaches every version through its rows, overlays kept: {out[-500:]}")
-        expect(b"fixed();" in e5[amixin] and amixin not in ref_files(r, resolve_branch(r, "neoforge-1.21.4"), "src"),
-               "the authors' fix to a class 1.21.4 takes off (mixin_remove_only) still reaches 1.21.5, which has it")
-        why = target_done(r, "1.21.5")
-        expect(any(w.startswith("GATES.md") for w in why) and not any(w.startswith("no verdict") for w in why),
-               f"after the merge the gates are stale, and no rows-only file needs a review row: {why}")
-        # a fix made at the lowest version reaches the higher ones by merge
-        w3, _why = worktree_for(r, "1.21.3")
-        (w3 / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain { int v = 2; }\n",
-                                                                     encoding="utf-8")
-        git(w3, "commit", "-qam", "fix at 1.21.3", check=True)
-        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
-        expect(rc == 0 and all(b"v = 2" in ref_files(r, resolve_branch(r, branch_name(t)), "src")["src/main/java/com/example/mod/Plain.java"]
-                               for t in ("1.21.4", "1.21.5")), f"cascade 1.21.3..1.21.5 carries a fix up: {out[-400:]}")
-        why = target_done(r, "1.21.4")
-        expect("no verdict: changed src/main/java/com/example/mod/Plain.java" not in why,
-               f"the fix is 1.21.3's change: on 1.21.4 the file equals its parent's, so no row there: {why}")
-        why3 = target_done(r, "1.21.3")
-        expect("no verdict: changed src/main/java/com/example/mod/Plain.java" in why3, f"... and a row on 1.21.3, where it was made: {why3}")
-        # ... but where 1.21.5 changed that class by hand, the authors' change cannot arrive through 1.21.4: the merge is
-        # committed with 1.21.5's file as it was, the authors' diff recorded open in REMERGE.json and printed, and a stop
-        w5, _why = worktree_for(r, "1.21.5")
-        pre_edit5 = resolve_branch(r, "neoforge-1.21.5")
-        (w5 / amixin).write_text((w5 / amixin).read_text(encoding="utf-8").replace("fixed();", "fixed(); mine();"), encoding="utf-8")
-        git(w5, "commit", "-qam", "1.21.5's own AMixin edit", check=True)
-        g("checkout", "-q", "neoforge-1.21.1")
-        (r / amixin).write_text((r / amixin).read_text(encoding="utf-8").replace("fixed();", "fixed(); again();"), encoding="utf-8")
-        g("commit", "-qam", "authors: AMixin again")
-        g("checkout", "-q", "neoforge-1.21.x")
-        before5 = resolve_branch(r, "neoforge-1.21.5")
-        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
-        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
-        rm5 = jload(f5.get(".port/1.21.5/REMERGE.json", b"{}")).get("conflicts", [])
-        expect(rc == 1 and "STOPPED at 1.21.5" in out and amixin in out and "+" in out and "again();" in out
-               and resolve_branch(r, "neoforge-1.21.5") != before5 and b"mine();" in f5[amixin] and b"again();" not in f5[amixin]
-               and [c["overlay"] for c in rm5] == [amixin] and "again();" in rm5[0].get("diff", ""),
-               f"the authors' change to a class the parent does not carry and 1.21.5 changed by hand: merged without it, "
-               f"recorded open in REMERGE.json with the diff, printed, a stop: {out[-700:]}")
-        why = target_done(r, "1.21.5")
-        expect(any("did not merge into " + amixin in w for w in why), f"... and 1.21.5 is not done while it is open: {why}")
-        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
-        expect(rc == 0 and "| 1.21.5 | up to date" in out and any("did not merge into " + amixin in w for w in target_done(r, "1.21.5")),
-               f"a later cascade has nothing more to merge, and the entry stays open (the change is not lost): {out[-300:]}")
-        # the person applies it through 1.21.5's rows, removes the entry, commits: the cascade goes on, nothing open
-        (w5 / amixin).write_text((w5 / amixin).read_text(encoding="utf-8").replace("fixed(); mine();", "fixed(); again(); mine();"),
-                                 encoding="utf-8")
-        (w5 / ".port/1.21.5/REMERGE.json").write_text(json.dumps({"conflicts": []}) + "\n", encoding="utf-8")
-        git(w5, "commit", "-qam", "1.21.5: the authors' AMixin change applied by hand", check=True)
-        why = target_done(r, "1.21.5")
-        rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none")
-        expect(not any("did not merge into" in w for w in why) and rc == 0 and "| 1.21.5 | up to date" in out,
-               f"applied and the entry removed: nothing open, the cascade resumes: {why} {out[-200:]}")
-        git(w5, "reset", "-q", "--hard", pre_edit5)
-        before5 = resolve_branch(r, "neoforge-1.21.5")
-        # a conflict in a file a person changed stops the cascade there, the merge undone
-        g("checkout", "-q", "neoforge-1.21.1")
-        (r / "src/main/java/com/example/mod/Over.java").write_text("package com.example.mod;\nimport old.Thing;\npublic class Over { Thing t; int keep = 9; }\n",
-                                                                   encoding="utf-8")
-        g("commit", "-qam", "authors: Over changed")
-        g("checkout", "-q", "neoforge-1.21.x")
-        before = resolve_branch(r, "neoforge-1.21.3")
-        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
-        expect(rc == 1 and "STOPPED at 1.21.3" in out and "src/main/java/com/example/mod/Over.java" in out
-               and resolve_branch(r, "neoforge-1.21.3") == before and not git(w3, "status", "--porcelain").stdout.strip(),
-               f"a conflict on a version's own change stops the cascade, nothing committed, the worktree clean: {out[-500:]}")
-        rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none", dry_run=True)
-        expect(rc == 0 and "| 1.21.5 | would merge neoforge-1.21.4" in out and resolve_branch(r, "neoforge-1.21.5") == before5,
-               f"cascade --dry-run (1.21.5 still lacks what stopped it): rc {rc}: {out[-300:]!r}")
-        for t in ("1.21.3", "1.21.4", "1.21.5"):
-            git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / t))
-        # a new version branch: refused over an undone parent (nothing written), made with the escape (recorded)
-        refs = g("for-each-ref")
-        rc, out = _quiet(add_target, r, "1.21.8")
-        expect(rc == UNDONE_EXIT and "REFUSED 1.21.8" in out and g("for-each-ref") == refs,
-               f"add-target over an undone parent: exit 18, nothing written: {out[-300:]}")
-        rc, out = _quiet(add_target, r, "1.21.8", allow_undone_parent=True)
-        f8 = ref_files(r, resolve_branch(r, "neoforge-1.21.8")) if rc == 0 else {}
-        p8 = parse_props(f8.get(".port/1.21.8/branch.properties", b"").decode())
-        expect(rc == 0 and p8.get("parent") == "neoforge-1.21.5" and p8.get("prop.neo_version") == "21.8.54"
-               and p8.get("strip_onlyin") == "true" and p8.get("allowed_undone_parent", "").startswith("1.21.5 ")
-               and b"minecraft_version=1.21.8" in f8["gradle.properties"] and b'"[1.21.8,1.21.9)"' in f8["src/main/resources/META-INF/neoforge.mods.toml"]
-               and b"# ---- shared 1.21.8" in f8[".port/1.21.8/shared-renames.tsv"] and b"keep = 5" in f8["src/main/java/com/example/mod/Over.java"],
-               f"add-target 1.21.8 from 1.21.5: versions, ranges, the shared 1.21.8 table, the parent's own changes kept: {out[-300:]}")
-        # an ISO-8859-1 gradle.properties (a Latin-1 comment byte) on the port branch: add-target keeps the byte
-        lw = r / "build/latin"
-        git(r, "worktree", "add", "-q", "-b", "latin-port", str(lw), "neoforge-1.21.1", check=True)
-        gpl = lw / "gradle.properties"
-        gpl.write_bytes(b"# caf\xe9\n" + gpl.read_bytes())
-        git(lw, "commit", "-qam", "latin-1 comment", check=True)
-        try:
-            rc, out = _quiet(add_target, r, "1.21.10", parent="port", port_branch="latin-port", allow_undone_parent=True)
-        except UnicodeError as ex:
-            rc, out = 99, repr(ex)
-        fl = ref_files(r, resolve_branch(r, "neoforge-1.21.10")) if rc == 0 else {}
-        expect(rc == 0 and fl.get("gradle.properties", b"").startswith(b"# caf\xe9\n")
-               and b"minecraft_version=1.21.10" in fl.get("gradle.properties", b""),
-               f"add-target over an ISO-8859-1 gradle.properties: the byte kept, the versions written: rc {rc}: {out[-300:]}")
-        git(r, "worktree", "remove", "--force", str(lw))
-        g("branch", "-D", "latin-port", "neoforge-1.21.10")
-        # sync-shared: the shared library moved (a row and a helper): 1.21.3 takes both, its rows-only files re-made
-        with tempfile.TemporaryDirectory() as e:
-            lib = pathlib.Path(e)
-            (lib / "1.21.3/java").mkdir(parents=True)
-            (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
-            (lib / "1.21.3/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 33; }\n", encoding="utf-8")
-            saved = os.environ.get("MMVU_SHARED_DIR")
-            os.environ["MMVU_SHARED_DIR"] = str(lib)
+            g("commit", "-qam", "authors: Over changed")
+            g("checkout", "-q", "neoforge-1.21.x")
+            before = resolve_branch(r, "neoforge-1.21.3")
+            rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+            expect(rc == 1 and "STOPPED at 1.21.3" in out and "src/main/java/com/example/mod/Over.java" in out
+                   and resolve_branch(r, "neoforge-1.21.3") == before and not git(w3, "status", "--porcelain").stdout.strip(),
+                   f"a conflict on a version's own change stops the cascade, nothing committed, the worktree clean: {out[-500:]}")
+            rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none", dry_run=True)
+            expect(rc == 0 and "| 1.21.5 | would merge neoforge-1.21.4" in out and resolve_branch(r, "neoforge-1.21.5") == before5,
+                   f"cascade --dry-run (1.21.5 still lacks what stopped it): rc {rc}: {out[-300:]!r}")
+            for t in ("1.21.3", "1.21.4", "1.21.5"):
+                git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / t))
+            # a new version branch: refused over an undone parent (nothing written), made with the escape (recorded)
+            refs = g("for-each-ref")
+            rc, out = _quiet(add_target, r, "1.21.8")
+            expect(rc == UNDONE_EXIT and "REFUSED 1.21.8" in out and g("for-each-ref") == refs,
+                   f"add-target over an undone parent: exit 18, nothing written: {out[-300:]}")
+            rc, out = _quiet(add_target, r, "1.21.8", allow_undone_parent=True)
+            f8 = ref_files(r, resolve_branch(r, "neoforge-1.21.8")) if rc == 0 else {}
+            p8 = parse_props(f8.get(".port/1.21.8/branch.properties", b"").decode())
+            expect(rc == 0 and p8.get("parent") == "neoforge-1.21.5" and p8.get("prop.neo_version") == "21.8.54"
+                   and p8.get("strip_onlyin") == "true" and p8.get("allowed_undone_parent", "").startswith("1.21.5 ")
+                   and b"minecraft_version=1.21.8" in f8["gradle.properties"] and b'"[1.21.8,1.21.9)"' in f8["src/main/resources/META-INF/neoforge.mods.toml"]
+                   and b"# ---- shared 1.21.8" in f8[".port/1.21.8/shared-renames.tsv"] and b"keep = 5" in f8["src/main/java/com/example/mod/Over.java"],
+                   f"add-target 1.21.8 from 1.21.5: versions, ranges, the shared 1.21.8 table, the parent's own changes kept: {out[-300:]}")
+            # an ISO-8859-1 gradle.properties (a Latin-1 comment byte) on the port branch: add-target keeps the byte
+            lw = r / "build/latin"
+            git(r, "worktree", "add", "-q", "-b", "latin-port", str(lw), "neoforge-1.21.1", check=True)
+            gpl = lw / "gradle.properties"
+            gpl.write_bytes(b"# caf\xe9\n" + gpl.read_bytes())
+            git(lw, "commit", "-qam", "latin-1 comment", check=True)
             try:
-                rc, out = _quiet(sync_shared, r, ["1.21.3"])
-            finally:
-                os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
-            f3 = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))
-            expect(rc == 0 and b"newer.Shared" in f3["src/main/java/com/example/mod/UsesHelper.java"]
-                   and b"v = 33" in f3["src/main/java/com/example/mod/mv/Helper.java"]
-                   and b"newer.Shared" in f3[".port/1.21.3/shared-renames.tsv"]
-                   and helper_map(f3[".port/1.21.3/shared-helpers.txt"].decode()).get("src/main/java/com/example/mod/mv/Helper.java")
-                   == hash_blobs({"x": f3["src/main/java/com/example/mod/mv/Helper.java"]})["x"],
-                   f"sync-shared 1.21.3: the new row re-makes the rows-only file, the installed helper follows the library: {out[-400:]}")
-            why = target_done(r, "1.21.3")
-            expect(any(w.startswith("REVIEW.md") and ("changed since" in w or "reviewed input" in w or "no longer equals" in w) for w in why),
-                   f"the synced tables are reviewed inputs: the review goes stale: {why}")
-            expect("WARNING: 1.21.4, 1.21.5" in out and " not synced" in out, f"a partial sync-shared names the versions above it: {out[-400:]}")
-            # a version with helpers and no table (1.21.4) is synced too; an edited helper is named, never overwritten
-            (lib / "1.21.4/java").mkdir(parents=True)
-            (lib / "1.21.4/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 44; }\n", encoding="utf-8")
-            w5s, _w = worktree_for(r, "1.21.5")
-            pre5s = resolve_branch(r, "neoforge-1.21.5")
-            hp = w5s / "src/main/java/com/example/mod/mv/Helper.java"
-            hp.write_text(hp.read_text(encoding="utf-8").replace("int v", "int edited, v"), encoding="utf-8")
-            git(w5s, "commit", "-qam", "1.21.5 edits its helper", check=True)
-            os.environ["MMVU_SHARED_DIR"] = str(lib)
-            try:
-                rc, out = _quiet(sync_shared, r)
-            finally:
-                os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
-            f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
-            f5s = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
-            expect(rc == 0 and "WARNING" not in out and b"v = 44" in f4["src/main/java/com/example/mod/mv/Helper.java"]
-                   and b"int edited, v = 4;" in f5s["src/main/java/com/example/mod/mv/Helper.java"]
-                   and "sync-shared 1.21.5: src/main/java/com/example/mod/mv/Helper.java was edited since it was installed" in out,
-                   f"sync-shared (every version): 1.21.4's helper-only library synced, 1.21.5's edited helper named and kept: {out[-600:]}")
-            git(w5s, "reset", "-q", "--hard", pre5s)
-            for v in ("1.21.4", "1.21.5", "1.21.8"):
-                if (r / "build/fork-branches" / v).is_dir():
-                    git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / v))
-        git(r, "worktree", "remove", "--force", str(r / "build/fork-branches/1.21.3"))
-        # a branch that exists with other content is refused, nothing moved
-        g("branch", "-f", "neoforge-1.21.5", "neoforge-1.21.1")
-        before = g("rev-parse", "neoforge-1.21.5")
-        rc, out = _quiet(migrate, r, targets=["1.21.5"])
-        expect(rc == 2 and "REFUSED 1.21.5" in out and g("rev-parse", "neoforge-1.21.5") == before,
-               f"an existing branch with other content: refused, never moved: {out[-300:]}")
-        # a single-version fork: nothing to migrate, nothing written
-        sv = d / "single"; sv.mkdir()
-        gs = lambda *a: subprocess.run(["git", "-C", str(sv), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
-        gs("init", "-q", "-b", "neoforge-1.21.1"); gs("config", "user.email", "a@b"); gs("config", "user.name", "a")
-        (sv / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
-        gs("add", "-A"); gs("commit", "-qm", "port")
-        refs = gs("for-each-ref")
-        rc, out = _quiet(migrate, sv)
-        expect(rc == 2 and "nothing to migrate" in out and gs("for-each-ref") == refs and not (sv / REC).exists()
-               and checkout_version(sv) is None,
-               f"single-version fork: migrate refuses (exit 2), no branch, no .port/: {out}")
+                rc, out = _quiet(add_target, r, "1.21.10", parent="port", port_branch="latin-port", allow_undone_parent=True)
+            except UnicodeError as ex:
+                rc, out = 99, repr(ex)
+            fl = ref_files(r, resolve_branch(r, "neoforge-1.21.10")) if rc == 0 else {}
+            expect(rc == 0 and fl.get("gradle.properties", b"").startswith(b"# caf\xe9\n")
+                   and b"minecraft_version=1.21.10" in fl.get("gradle.properties", b""),
+                   f"add-target over an ISO-8859-1 gradle.properties: the byte kept, the versions written: rc {rc}: {out[-300:]}")
+            git(r, "worktree", "remove", "--force", str(lw))
+            g("branch", "-D", "latin-port", "neoforge-1.21.10")
+            # sync-shared: the shared library moved (a row and a helper): 1.21.3 takes both, its rows-only files re-made
+            with tempfile.TemporaryDirectory() as e:
+                lib = pathlib.Path(e)
+                (lib / "1.21.3/java").mkdir(parents=True)
+                (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
+                (lib / "1.21.3/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 33; }\n", encoding="utf-8")
+                saved = os.environ.get("MMVU_SHARED_DIR")
+                os.environ["MMVU_SHARED_DIR"] = str(lib)
+                try:
+                    rc, out = _quiet(sync_shared, r, ["1.21.3"])
+                finally:
+                    os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+                f3 = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))
+                expect(rc == 0 and b"newer.Shared" in f3["src/main/java/com/example/mod/UsesHelper.java"]
+                       and b"v = 33" in f3["src/main/java/com/example/mod/mv/Helper.java"]
+                       and b"newer.Shared" in f3[".port/1.21.3/shared-renames.tsv"]
+                       and helper_map(f3[".port/1.21.3/shared-helpers.txt"].decode()).get("src/main/java/com/example/mod/mv/Helper.java")
+                       == hash_blobs({"x": f3["src/main/java/com/example/mod/mv/Helper.java"]})["x"],
+                       f"sync-shared 1.21.3: the new row re-makes the rows-only file, the installed helper follows the library: {out[-400:]}")
+                why = target_done(r, "1.21.3")
+                expect(any(w.startswith("REVIEW.md") and ("changed since" in w or "reviewed input" in w or "no longer equals" in w) for w in why),
+                       f"the synced tables are reviewed inputs: the review goes stale: {why}")
+                expect("WARNING: 1.21.4, 1.21.5" in out and " not synced" in out, f"a partial sync-shared names the versions above it: {out[-400:]}")
+                # a version with helpers and no table (1.21.4) is synced too; an edited helper is named, never overwritten
+                (lib / "1.21.4/java").mkdir(parents=True)
+                (lib / "1.21.4/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 44; }\n", encoding="utf-8")
+                w5s, _w = worktree_for(r, "1.21.5")
+                pre5s = resolve_branch(r, "neoforge-1.21.5")
+                hp = w5s / "src/main/java/com/example/mod/mv/Helper.java"
+                hp.write_text(hp.read_text(encoding="utf-8").replace("int v", "int edited, v"), encoding="utf-8")
+                git(w5s, "commit", "-qam", "1.21.5 edits its helper", check=True)
+                os.environ["MMVU_SHARED_DIR"] = str(lib)
+                try:
+                    rc, out = _quiet(sync_shared, r)
+                finally:
+                    os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+                f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
+                f5s = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+                expect(rc == 0 and "WARNING" not in out and b"v = 44" in f4["src/main/java/com/example/mod/mv/Helper.java"]
+                       and b"int edited, v = 4;" in f5s["src/main/java/com/example/mod/mv/Helper.java"]
+                       and "sync-shared 1.21.5: src/main/java/com/example/mod/mv/Helper.java was edited since it was installed" in out,
+                       f"sync-shared (every version): 1.21.4's helper-only library synced, 1.21.5's edited helper named and kept: {out[-600:]}")
+                git(w5s, "reset", "-q", "--hard", pre5s)
+                for v in ("1.21.4", "1.21.5", "1.21.8"):
+                    if (r / "build/fork-branches" / v).is_dir():
+                        git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / v))
+            git(r, "worktree", "remove", "--force", str(r / "build/fork-branches/1.21.3"))
+            # a branch that exists with other content is refused, nothing moved
+            g("branch", "-f", "neoforge-1.21.5", "neoforge-1.21.1")
+            before = g("rev-parse", "neoforge-1.21.5")
+            rc, out = _quiet(migrate, r, targets=["1.21.5"])
+            expect(rc == 2 and "REFUSED 1.21.5" in out and g("rev-parse", "neoforge-1.21.5") == before,
+                   f"an existing branch with other content: refused, never moved: {out[-300:]}")
+            # a single-version fork: nothing to migrate, nothing written
+            sv = d / "single"; sv.mkdir()
+            gs = lambda *a: subprocess.run(["git", "-C", str(sv), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+            gs("init", "-q", "-b", "neoforge-1.21.1"); gs("config", "user.email", "a@b"); gs("config", "user.name", "a")
+            (sv / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+            gs("add", "-A"); gs("commit", "-qm", "port")
+            refs = gs("for-each-ref")
+            rc, out = _quiet(migrate, sv)
+            expect(rc == 2 and "nothing to migrate" in out and gs("for-each-ref") == refs and not (sv / REC).exists()
+                   and checkout_version(sv) is None,
+                   f"single-version fork: migrate refuses (exit 2), no branch, no .port/: {out}")
     # the port branch moved past the layer (the authors' new code not merged into it yet): each migrated version is
     # judged against the port commit IT carries, never the clone's HEAD -- done from a checkout of the port branch too
     with tempfile.TemporaryDirectory() as d:
@@ -4248,42 +4253,44 @@ def self_check():
             expect(why == [], f"{t} judged from a checkout of the port branch (ahead of it): done: {why} "
                    + " / ".join(explain_changed(r, t, resolve_branch(r, branch_name(t)), w.split()[-1])
                                 for w in why if w.startswith("no verdict: changed ")))
-        # sync-shared from that checkout: 1.21.3's rows-only file is judged against the port commit 1.21.3 carries
-        with tempfile.TemporaryDirectory() as e:
-            lib = pathlib.Path(e)
-            (lib / "1.21.3").mkdir(parents=True)
-            (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
-            saved = os.environ.get("MMVU_SHARED_DIR")
-            os.environ["MMVU_SHARED_DIR"] = str(lib)
-            try:
-                rc, out = _quiet(sync_shared, r, ["1.21.3"])
-            finally:
-                os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
-            u3 = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))["src/main/java/com/example/mod/UsesHelper.java"]
-            expect(rc == 0 and b"newer.Shared" in u3 and b"later" not in u3,
-                   f"sync-shared from a checkout of the port branch ahead: the rows-only file re-made from 1.21.3's own port commit: {u3!r} {out[-300:]}")
-        # a resource 1.21.4 deletes (kept dropped there when the authors change it) and 1.21.5 keeps still takes the
-        # authors' later change (no merge carries it)
-        rj = "src/main/resources/data/examplemod/recipe/r.json"
-        w4, _w = worktree_for(r, "1.21.4")
-        git(w4, "rm", "-q", rj, check=True); git(w4, "commit", "-qm", "1.21.4 drops the recipe", check=True)
-        rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none")
-        w5, _w = worktree_for(r, "1.21.5")
-        git(w5, "checkout", "neoforge-1.21.1~1", "--", rj, check=True)
-        git(w5, "commit", "-qm", "1.21.5 keeps the recipe", check=True)
-        (r / rj).write_text('{"type": "authors-new"}\n', encoding="utf-8")
-        g("commit", "-qam", "authors: the recipe changed")
-        rc, out = _quiet(cascade, r, "port..1.21.5", "none")
-        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
-        expect(rc == 0 and f5.get(rj) == b'{"type": "authors-new"}\n' and rj not in ref_files(r, resolve_branch(r, "neoforge-1.21.4")),
-               f"a resource the parent dropped and 1.21.5 keeps: the authors' change reaches 1.21.5: {f5.get(rj)!r} {out[-400:]}")
+        if not platform:      # logic the default run covers; the platform leg stops at the judging above
+            # sync-shared from that checkout: 1.21.3's rows-only file is judged against the port commit 1.21.3 carries
+            with tempfile.TemporaryDirectory() as e:
+                lib = pathlib.Path(e)
+                (lib / "1.21.3").mkdir(parents=True)
+                (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
+                saved = os.environ.get("MMVU_SHARED_DIR")
+                os.environ["MMVU_SHARED_DIR"] = str(lib)
+                try:
+                    rc, out = _quiet(sync_shared, r, ["1.21.3"])
+                finally:
+                    os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+                u3 = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))["src/main/java/com/example/mod/UsesHelper.java"]
+                expect(rc == 0 and b"newer.Shared" in u3 and b"later" not in u3,
+                       f"sync-shared from a checkout of the port branch ahead: the rows-only file re-made from 1.21.3's own port commit: {u3!r} {out[-300:]}")
+            # a resource 1.21.4 deletes (kept dropped there when the authors change it) and 1.21.5 keeps still takes the
+            # authors' later change (no merge carries it)
+            rj = "src/main/resources/data/examplemod/recipe/r.json"
+            w4, _w = worktree_for(r, "1.21.4")
+            git(w4, "rm", "-q", rj, check=True); git(w4, "commit", "-qm", "1.21.4 drops the recipe", check=True)
+            rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none")
+            w5, _w = worktree_for(r, "1.21.5")
+            git(w5, "checkout", "neoforge-1.21.1~1", "--", rj, check=True)
+            git(w5, "commit", "-qm", "1.21.5 keeps the recipe", check=True)
+            (r / rj).write_text('{"type": "authors-new"}\n', encoding="utf-8")
+            g("commit", "-qam", "authors: the recipe changed")
+            rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+            f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+            expect(rc == 0 and f5.get(rj) == b'{"type": "authors-new"}\n' and rj not in ref_files(r, resolve_branch(r, "neoforge-1.21.4")),
+                   f"a resource the parent dropped and 1.21.5 keeps: the authors' change reaches 1.21.5: {f5.get(rj)!r} {out[-400:]}")
     # the deep passes (--self-check --deep, or FB_RANDOM_SEQUENCES / FB_DEEP set) -- not run in CI, run them before a
     # release of the tool: the 4-version cascade plan/apply/decisions flow and migrate --library (each builds and
     # migrates its own fixtures), 200 random cascade sequences against the invariant, and the whole self-check again
     # under core.autocrlf=true. The default run keeps every named case (t6/t7/t8/t11 included) and the CRLF unit cases.
     deep = "--deep" in sys.argv or bool(os.environ.get("FB_DEEP"))
-    _check_port_taken(expect)
-    _check_deferred_integration(expect)
+    if not platform:
+        _check_port_taken(expect)
+        _check_deferred_integration(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)
