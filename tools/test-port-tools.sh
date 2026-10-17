@@ -6,8 +6,11 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
-ok()  { echo "  PASS  $1"; pass=$((pass+1)); }
-bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
+# each result line says how long its test took (since the previous result), so a slow CI run shows where the time goes
+_t_last=$(date +%s)
+_took() { local now; now=$(date +%s); printf '%4ss' "$((now - _t_last))"; _t_last=$now; }
+ok()  { echo "  PASS $(_took)  $1"; pass=$((pass+1)); }
+bad() { echo "  FAIL $(_took)  $1"; fail=$((fail+1)); }
 
 echo "1. override-probe.py"
 if command -v javac >/dev/null 2>&1; then

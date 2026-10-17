@@ -438,6 +438,15 @@ three ways, overlay budget), `tools/layer-deps.py`, `tools/layer-ci.py` and `por
 `build/mc<t>/mv/java` for the inventory, `inherits` for the chain. Every behaviour of overlay mode is gated on the fork
 having `.multiversion/` at HEAD; removing overlay mode is a later issue. Do not make a new fork a layer.
 
+## Testing the tool itself
+
+`python3 tools/fork-branches.py --self-check` is the fast suite CI runs: every named case (the review findings
+t6, t7, t8 and t11 included), the line-ending unit cases and one migration on a shared fixture built once per run.
+Before a release of the tool (or after changing the cascade, the REMERGE records or `port_taken`) run it with
+`--deep`: 200 random cascade sequences on a four-version fixture, each step checked against the invariant
+(`FB_RANDOM_SEQUENCES=N` for another count), and the whole self-check again under `core.autocrlf=true`. CI never
+runs these.
+
 ## Models and cost
 
 The compile loop is `tools/file-loop.py` (Haiku -> Sonnet -> Opus; on a version branch it edits the branch's source),

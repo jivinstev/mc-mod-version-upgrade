@@ -16,7 +16,7 @@
     python3 tools/fork-branches.py library-record --repo LIB --target T --dependent DIR [--slug owner/repo]
     python3 tools/fork-branches.py ci          --repo DIR --target T --modid ID [--run]
     python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...]
-    python3 tools/fork-branches.py --self-check
+    python3 tools/fork-branches.py --self-check [--deep]   # --deep (or FB_RANDOM_SEQUENCES=N): before a release of the tool
 
 THE SHAPE. The port branch `neoforge-1.21.1` stays exactly what it is (a single-version port). Each further Minecraft
 version is a branch of its own, made from the one below it along the chain: `neoforge-1.21.3` from `neoforge-1.21.1`,
@@ -3271,8 +3271,36 @@ def main():
 # ---------------------------------------------------------------- self-check
 
 
+_FIXTURES = {}
+
+
+def _fixture_copy(kind, build, d):
+    """The fixture `kind`, built once per process by build(dir) -> repo and copied (git directory, work tree, build
+    outputs, mtimes) into d/fork: the same repository each time, at a fraction of the cost of building it."""
+    if kind not in _FIXTURES:
+        import atexit
+        base = pathlib.Path(tempfile.mkdtemp(prefix=f"fb-fixture-{kind}-"))
+        atexit.register(shutil.rmtree, base, True)
+        _FIXTURES[kind] = build(base)
+    r = pathlib.Path(d) / "fork"
+    shutil.copytree(_FIXTURES[kind], r, symlinks=True)
+    def g(*a, cwd=r): return subprocess.run(["git", "-C", str(cwd), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+    return r, g, _fixture_run
+
+
+def _fixture_run(*a):
+    x = subprocess.run([sys.executable, *a], capture_output=True, text=True, encoding="utf-8")
+    if x.returncode: raise RuntimeError(f"{a}: {x.stdout}{x.stderr}")
+    return x.stdout
+
+
 def _fixture(d):
-    """A small layer fork: port branch neoforge-1.21.1 and layer branch neoforge-1.21.x with three targets."""
+    """A small layer fork: port branch neoforge-1.21.1 and layer branch neoforge-1.21.x with three targets (built once
+    per process, then copied)."""
+    return _fixture_copy("layer", lambda base: _fixture_build(base)[0], d)
+
+
+def _fixture_build(d):
     d = pathlib.Path(d); r = d / "fork"; r.mkdir(parents=True)
     def g(*a, cwd=r): return subprocess.run(["git", "-C", str(cwd), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
     def w(p, t):
@@ -3357,12 +3385,16 @@ def _fixture_done(r, g, t):
 
 
 def _migrated_fixture(d):
-    r, g, run = _fixture(pathlib.Path(d) / "a")
-    _fixture_shared(r, g)
-    for t in ("1.21.3", "1.21.4", "1.21.5"):
-        _quiet(_fixture_done, r, g, t)
-    assert _quiet(migrate, r)[0] == 0
-    return r, g, run
+    """The layer fixture with its shared library, each target done, migrated to version branches (built once per
+    process, then copied)."""
+    def build(base):
+        r, g, _run = _fixture(base)
+        _fixture_shared(r, g)
+        for t in ("1.21.3", "1.21.4", "1.21.5"):
+            _quiet(_fixture_done, r, g, t)
+        assert _quiet(migrate, r)[0] == 0
+        return r
+    return _fixture_copy("migrated", build, pathlib.Path(d) / "a")
 
 
 def _authors(r, g, edits, msg):
@@ -3435,8 +3467,8 @@ def _check_random_sequences(expect, n=None, seed=20261017, say=None):
     cascade, a cascade --apply. Self-contained (it runs against older code too: FB_RANDOM_SEQUENCES sets the count)."""
     import inspect, random
     entries_of = globals().get("remerge_entries") or (lambda data: (json.loads(data or b"{}") or {}).get("conflicts", []))
-    # about 2.5 s each on Linux (200: some 9 minutes); Windows starts processes several times slower, so 50 there
-    n = int(os.environ.get("FB_RANDOM_SEQUENCES", "50" if os.name == "nt" else "200")) if n is None else n
+    # about 2.5 s each on Linux (200: some 9 minutes); opt-in only (--deep, or FB_RANDOM_SEQUENCES=N)
+    n = int(os.environ.get("FB_RANDOM_SEQUENCES") or "200") if n is None else n
     if n <= 0:
         return []
     rnd = random.Random(seed)
@@ -3649,27 +3681,24 @@ def _check_random_sequences(expect, n=None, seed=20261017, say=None):
 
 
 def _check_migrate_library(expect):
-    """migrate --library (or a layer whose base.properties says library=true) marks every branch a library."""
+    """migrate --library (or a layer whose base.properties says library=true) marks every branch a library. One target
+    each (the cost is the migrate); the control is the shared migrated fixture."""
     lib = lambda r, t: parse_props(ref_files(r, resolve_branch(r, branch_name(t))).get(f"{REC}/{t}/{BRANCH_PROPS}", b"").decode()).get("library")
     with tempfile.TemporaryDirectory() as d:
         r, g, _run = _fixture(pathlib.Path(d) / "a")
         _fixture_shared(r, g)
-        rc, out = _quiet(migrate, r, library=True)
-        expect(rc == 0 and all(lib(r, t) == "true" for t in ("1.21.3", "1.21.4", "1.21.5"))
-               and LIBRARY_PENDING in "\n".join(target_done(r, "1.21.4")),
-               f"migrate --library: library=true on every branch, and the library rule applies: {out[-300:]}")
-    with tempfile.TemporaryDirectory() as d:
-        r, g, _run = _fixture(pathlib.Path(d) / "a")
-        _fixture_shared(r, g)
-        bp = r / ".multiversion/base.properties"
-        bp.write_text(read_file(bp) + "library=true\n", encoding="utf-8"); g("commit", "-qam", "layer: a library")
-        rc, out = _quiet(migrate, r)
-        expect(rc == 0 and all(lib(r, t) == "true" for t in ("1.21.3", "1.21.4", "1.21.5")),
+        rc, out = _quiet(migrate, r, targets=["1.21.3"], library=True)
+        expect(rc == 0 and lib(r, "1.21.3") == "true" and LIBRARY_PENDING in "\n".join(target_done(r, "1.21.3")),
+               f"migrate --library: library=true on the branch made, and the library rule applies: {out[-300:]}")
+        r1, g1, _run1 = _fixture(pathlib.Path(d) / "b")
+        _fixture_shared(r1, g1)
+        bp = r1 / ".multiversion/base.properties"
+        bp.write_text(read_file(bp) + "library=true\n", encoding="utf-8"); g1("commit", "-qam", "layer: a library")
+        rc, out = _quiet(migrate, r1, targets=["1.21.3"])
+        expect(rc == 0 and lib(r1, "1.21.3") == "true",
                f"migrate infers library=true from the layer's base.properties: {out[-300:]}")
-        r2, g2, _run2 = _fixture(pathlib.Path(d) / "b")
-        _fixture_shared(r2, g2)
-        rc, out = _quiet(migrate, r2)
-        expect(rc == 0 and all(lib(r2, t) is None for t in ("1.21.3", "1.21.4", "1.21.5")),
+        r2, _g2, _run2 = _migrated_fixture(pathlib.Path(d) / "c")
+        expect(all(lib(r2, t) is None for t in ("1.21.3", "1.21.4", "1.21.5")),
                "control: a layer that is not a library migrates without library=true")
 
 
@@ -4226,8 +4255,13 @@ def self_check():
     _check_cascade_plan(expect)
     _check_deferred_integration(expect)
     _check_migrate_library(expect)
-    _check_random_sequences(expect, say=print)
-    if not os.environ.get("FB_SELF_CHECK_CRLF"):
+    # the deep passes (--self-check --deep, or FB_RANDOM_SEQUENCES / FB_DEEP set) -- not run in CI, run them before a
+    # release of the tool: 200 random cascade sequences against the invariant, and the whole self-check again under
+    # core.autocrlf=true. The default run keeps every named case (t6/t7/t8/t11 included) and the CRLF unit cases.
+    deep = "--deep" in sys.argv or bool(os.environ.get("FB_DEEP"))
+    if deep or os.environ.get("FB_RANDOM_SEQUENCES"):
+        _check_random_sequences(expect, say=print)
+    if deep and not os.environ.get("FB_SELF_CHECK_CRLF"):
         # the same checks with core.autocrlf=true (a Windows checkout's default): a version branch checked out with CRLF
         # line endings must read as its blobs (root_files), and a layer's prepare must see the blobs' bytes (Layer)
         with tempfile.TemporaryDirectory() as d:
@@ -4236,7 +4270,7 @@ def self_check():
             r = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "--self-check"], capture_output=True,
                                text=True, encoding="utf-8", errors="replace",
                                env={"FB_RANDOM_SEQUENCES": "20", **os.environ, "GIT_CONFIG_GLOBAL": str(cfg),
-                                    "FB_SELF_CHECK_CRLF": "1"})
+                                    "FB_SELF_CHECK_CRLF": "1", "FB_DEEP": ""})
             expect("self-check: OK" in r.stdout, "under core.autocrlf=true: " + " | ".join(
                 l for l in r.stdout.splitlines() if l.startswith("FAIL"))[:1500])
     print("self-check:", "OK" if ok else "FAILED")

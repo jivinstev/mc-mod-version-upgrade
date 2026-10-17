@@ -118,6 +118,9 @@ display name or author, left out -- each reported.
 | **review-contribution**: review a pull request to this repository | `> Review PR 42` or `/review-contribution 42` | `python3 tools/review-pr.py --base origin/main --head HEAD` (the mechanical checks; the judgement half is the skill) |
 
 Each script prints its options with `--help`. Most also have `--self-check`, which runs their own tests.
+`python3 tools/fork-branches.py --self-check --deep` adds the passes CI does not run -- 200 random cascade
+sequences checked against the taken-or-recorded invariant (`FB_RANDOM_SEQUENCES=N` sets the count) and the whole
+self-check again under `core.autocrlf=true`, about 12 minutes: run it before a release of the tool.
 
 Both routes run the same deterministic stage after each hop's rename tables and before any worker sees an
 error (`tools/mechanical-hop.py`, called by `port.py` and `port-upstream.py`): on a Forge → 1.21.1 hop the
