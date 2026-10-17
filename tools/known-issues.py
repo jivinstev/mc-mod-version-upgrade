@@ -34,7 +34,7 @@ is atomic, with sorted keys, a 2-space indent and a trailing newline, so a chang
 THE SCHEMA (schema 1):
   {"schema": 1,
    "issues": [{"id": "KI-1", "title": "...",
-               "rubric": {"failure": "crash|kick|data|hang|functional|visual",
+               "rubric": {"failure": "crash|kick|data|hang|functional|cosmetic",
                           "visibility": "always|common|rare|invisible",
                           "reach": "normal|feature|unusual", "workaround": false},
                "severity": "S1".."S4",          # the rubric's grade, or the override's when there is one
@@ -51,10 +51,12 @@ THE RUBRIC (grade derives the severity from the recorded inputs; an owner overri
   S1  failure crash, kick (or network disconnect), data (world or player data lost or corrupted) or hang -- whatever
       else. It blocks publishing (publish-port refuses an open S1).
   S4  otherwise: visibility invisible, or reach unusual (an unusual setup, other mods, debug options).
-  S2  otherwise: a functional failure (a core feature broken or clearly wrong; a display defect that makes a feature
-      unusable, such as invisible GUI text, is functional) with reach normal, visibility always or common and no
-      workaround.
-  S3  everything else: visual (cosmetic), rare, a specific feature only, or a workaround exists.
+  S2  otherwise: a functional failure with reach normal, visibility always or common and no workaround.
+  S3  everything else: cosmetic, rare, a specific feature only, or a workaround exists. Cosmetic is S3 at most.
+  The failure types beside the four S1 ones:
+    functional  a feature does not work, or information or controls the player needs are missing, unreadable or
+                unusable -- invisible GUI text and a missing UI element are functional;
+    cosmetic    the look is wrong, but nothing the player needs is lost (a wrong colour tint, a texture seam).
 
 ONLY S1 GOES BACK. A finding at a version that is already done reopens it only when it is an S1 (`reopens` answers
 yes, exit 0); any other finding goes into the ledger at its lowest affected version (exit 1).
@@ -77,7 +79,7 @@ import tempfile
 SCHEMA = 1
 LEDGER_NAME = "KNOWN-ISSUES.json"
 SEVERITIES = ("S1", "S2", "S3", "S4")
-FAILURES = ("crash", "kick", "data", "hang", "functional", "visual")
+FAILURES = ("crash", "kick", "data", "hang", "functional", "cosmetic")
 BLOCKING = ("crash", "kick", "data", "hang")
 VISIBILITY = ("always", "common", "rare", "invisible")
 REACH = ("normal", "feature", "unusual")
@@ -159,7 +161,9 @@ def validate(data):
             raise Invalid(f"{where}: rubric must hold exactly failure, visibility, reach and workaround")
         for k, allowed in (("failure", FAILURES), ("visibility", VISIBILITY), ("reach", REACH)):
             if r[k] not in allowed:
-                raise Invalid(f"{where}: rubric {k} {r[k]!r} is not one of {', '.join(allowed)}")
+                raise Invalid(f"{where}: rubric {k} {r[k]!r} is not one of {', '.join(allowed)}"
+                              + (" (`visual` is now `cosmetic`, or `functional` when the player loses something "
+                                 "they need)" if r[k] == "visual" else ""))
         if not isinstance(r["workaround"], bool):
             raise Invalid(f"{where}: rubric workaround must be true or false")
         o = e.get("override")
@@ -612,8 +616,12 @@ def self_check():
     expect(derive(R("functional", w=True)) == "S3", "a workaround makes it S3")
     expect(derive(R("functional", "rare")) == "S3", "rare is S3")
     expect(derive(R("functional", r="feature")) == "S3", "a specific feature only is S3")
-    expect(derive(R("visual", "always")) == "S3", "cosmetic is S3")
-    expect(derive(R("functional", "invisible")) == "S4" and derive(R("visual", r="unusual")) == "S4", "S4")
+    expect(derive(R("cosmetic", "always")) == "S3", "cosmetic is S3 at most")
+    expect(derive(R("functional", "invisible")) == "S4" and derive(R("cosmetic", r="unusual")) == "S4", "S4")
+    # the spec's own examples: invisible GUI text is a functional failure (S2), a wrong colour tint cosmetic (S3)
+    expect(derive(R("functional", "common", "normal", False)) == "S2", "invisible text (functional, common, normal, "
+           "no workaround) grades S2")
+    expect(derive(R("cosmetic", "common", "normal", False)) == "S3", "a wrong colour tint (cosmetic, common) grades S3")
     expect(reopens("S1") and not any(reopens(s) for s in ("S2", "S3", "S4")), "only S1 reopens a done version")
 
     with tempfile.TemporaryDirectory() as d:
@@ -630,11 +638,11 @@ def self_check():
         expect(rc == 0 and "KI-2: S2" in o, f"add an S2: {rc} {o}")
         cli("add", *L, "--title", "S2 lower down", "--failure", "functional", "--visibility", "common", "--reach",
             "normal", "--workaround", "no", "--lowest", "1.21.1", "--status", "1.21.1=open", "--status", "1.21.4=open")
-        cli("add", *L, "--title", "a texture seam", "--failure", "visual", "--visibility", "common", "--reach", "normal",
+        cli("add", *L, "--title", "a texture seam", "--failure", "cosmetic", "--visibility", "common", "--reach", "normal",
             "--workaround", "no", "--lowest", "1.21.4", "--status", "1.21.4=open", "--file", "src/a/Seam.java")
         cli("add", *L, "--title", "a debug log line", "--failure", "functional", "--visibility", "invisible",
             "--reach", "unusual", "--workaround", "yes", "--lowest", "1.21.4", "--status", "1.21.4=open")
-        cli("add", *L, "--title", "another texture", "--failure", "visual", "--visibility", "rare", "--reach", "normal",
+        cli("add", *L, "--title", "another texture", "--failure", "cosmetic", "--visibility", "rare", "--reach", "normal",
             "--workaround", "no", "--lowest", "1.21.5", "--status", "1.21.5=open", "--file", "src/a/Other.java")
         text = led.read_text(encoding="utf-8")
         data = json.loads(text)
