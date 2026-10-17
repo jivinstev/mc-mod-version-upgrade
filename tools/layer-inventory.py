@@ -598,8 +598,14 @@ def check_text(rep):
 
 # ---------------------------------------------------------------- a version branch (tools/fork-branches.py)
 
+_FB = None
+
+
 def _fb():
-    return _load("fork_branches_for_inventory", "fork-branches.py")
+    global _FB
+    if _FB is None:                 # loaded once: a done check asks for it per version, and it is a large module
+        _FB = _load("fork_branches_for_inventory", "fork-branches.py")
+    return _FB
 
 
 def account_branch(repo, root, target, mechanical, inv=None, ref="HEAD"):

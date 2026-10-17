@@ -7,10 +7,10 @@ ROOT="$PWD"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
 # each result line says how long its test took (since the previous result), so a slow CI run shows where the time goes
-_t_last=$(date +%s)
-_took() { local now; now=$(date +%s); printf '%4ss' "$((now - _t_last))"; _t_last=$now; }
-ok()  { echo "  PASS $(_took)  $1"; pass=$((pass+1)); }
-bad() { echo "  FAIL $(_took)  $1"; fail=$((fail+1)); }
+_t_last=$SECONDS
+_took() { _dt=$((SECONDS - _t_last)); _t_last=$SECONDS; }    # in this shell, not a $(...) subshell
+ok()  { _took; printf '  PASS %4ss  %s\n' "$_dt" "$1"; pass=$((pass+1)); }
+bad() { _took; printf '  FAIL %4ss  %s\n' "$_dt" "$1"; fail=$((fail+1)); }
 
 echo "1. override-probe.py"
 if command -v javac >/dev/null 2>&1; then
@@ -531,6 +531,7 @@ grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest h
 # branch-mode done check through fork-port.py's own CLI, the cascade, the library's release-side done check -- on a layer
 # fixture; a single-version fork is untouched (its own checks above and below run unchanged)
 echo "fork-branches: stacked version branches (migrate, done, cascade, library release, CLI)"
+export FB_FIXTURE_CACHE="$T/fb-fixtures"    # the fork-branches fixtures, built once for every block below
 out="$(python3 tools/fork-branches.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork-branches self-check: a 3-target layer fixture migrates to byte-identical branches (every source set, resources, mixin arrays, toml ranges, versions), each done as its layer target was; the checkout untouched; without MIGRATED.json the layer records do not count; an edit stales gates and review; cascade carries the authors' change through each version's rows and a lower fix upward, and stops on a conflict; add-target refused over an undone parent; the library rule; a single-version fork refused, nothing written; cascade --plan on a throwaway clone (one decision per file and hunk across versions, mechanical ones merged, a default logged, an escalated one in the one issue), --apply holding only the decision files open while the versions above go on, --apply-decisions clearing them everywhere; port_taken re-offers a change no run took" \
   || bad "fork-branches self-check: $(tail -5 <<<"$out")"
@@ -538,10 +539,7 @@ out="$(python3 - "$T/fb" <<'PY' 2>&1
 import importlib.util, json, os, pathlib, subprocess, sys
 d = pathlib.Path(sys.argv[1]); d.mkdir()
 s = importlib.util.spec_from_file_location("fb", "tools/fork-branches.py"); fb = importlib.util.module_from_spec(s); s.loader.exec_module(fb)
-r, g, _ = fb._fixture(d / "a"); fb._fixture_shared(r, g)
-for t in ("1.21.3", "1.21.4", "1.21.5"):
-    fb._quiet(fb._fixture_done, r, g, t)
-assert fb._quiet(fb.migrate, r)[0] == 0
+r, g, _ = fb._migrated_fixture(d)          # shared, each target done, migrated (built once: FB_FIXTURE_CACHE)
 bad = []
 def fp(*a):
     x = subprocess.run([sys.executable, "tools/fork-port.py", "--repo", str(r), *a], capture_output=True, text=True, encoding="utf-8")

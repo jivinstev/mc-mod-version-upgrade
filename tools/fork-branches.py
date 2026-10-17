@@ -3278,12 +3278,25 @@ def _fixture_copy(kind, build, d):
     """The fixture `kind`, built once per process by build(dir) -> repo and copied (git directory, work tree, build
     outputs, mtimes) into d/fork: the same repository each time, at a fraction of the cost of building it."""
     if kind not in _FIXTURES:
-        import atexit
-        base = pathlib.Path(tempfile.mkdtemp(prefix=f"fb-fixture-{kind}-"))
-        atexit.register(shutil.rmtree, base, True)
-        _FIXTURES[kind] = build(base)
+        shared = os.environ.get("FB_FIXTURE_CACHE")   # a directory several processes share (test-port-tools.sh's)
+        done = pathlib.Path(shared) / kind / "fork" if shared else None
+        if done is not None and (done / ".fixture-complete").is_file():
+            _FIXTURES[kind] = done
+        elif done is not None:
+            if done.parent.exists():
+                shutil.rmtree(done.parent, ignore_errors=True)
+            built = build(done.parent / "build")
+            shutil.copytree(built, done, symlinks=True)
+            (done / ".fixture-complete").write_bytes(b"")
+            shutil.rmtree(done.parent / "build", ignore_errors=True)
+            _FIXTURES[kind] = done
+        else:
+            import atexit
+            base = pathlib.Path(tempfile.mkdtemp(prefix=f"fb-fixture-{kind}-"))
+            atexit.register(shutil.rmtree, base, True)
+            _FIXTURES[kind] = build(base)
     r = pathlib.Path(d) / "fork"
-    shutil.copytree(_FIXTURES[kind], r, symlinks=True)
+    shutil.copytree(_FIXTURES[kind], r, symlinks=True, ignore=shutil.ignore_patterns(".fixture-complete"))
     def g(*a, cwd=r): return subprocess.run(["git", "-C", str(cwd), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
     return r, g, _fixture_run
 
@@ -3948,6 +3961,19 @@ def self_check():
         expect(g("rev-parse", "HEAD") == head0 and not g("status", "--porcelain"),
                "migrate never touches the checkout (HEAD and the work tree are as they were)")
         expect(all(resolve_branch(r, branch_name(t)) for t in ("1.21.3", "1.21.4", "1.21.5")), "the three branches exist")
+        if rc == 0 and "migrated" not in _FIXTURES:             # this is what _migrated_fixture builds: reuse it
+            shared_ = os.environ.get("FB_FIXTURE_CACHE")
+            seed = (pathlib.Path(shared_) / "migrated" / "fork") if shared_ else \
+                pathlib.Path(tempfile.mkdtemp(prefix="fb-fixture-migrated-")) / "fork"
+            if not (seed / ".fixture-complete").is_file():
+                shutil.rmtree(seed, ignore_errors=True)
+                shutil.copytree(r, seed, symlinks=True)
+                if shared_:
+                    (seed / ".fixture-complete").write_bytes(b"")
+                else:
+                    import atexit
+                    atexit.register(shutil.rmtree, seed.parent, True)
+            _FIXTURES["migrated"] = seed
         b4, b5 = resolve_branch(r, "neoforge-1.21.4"), resolve_branch(r, "neoforge-1.21.5")
         expect(git(r, "merge-base", "--is-ancestor", b4, b5).returncode == 0
                and git(r, "merge-base", "--is-ancestor", resolve_branch(r, "neoforge-1.21.1"), resolve_branch(r, "neoforge-1.21.3")).returncode == 0,
@@ -4251,14 +4277,16 @@ def self_check():
         f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
         expect(rc == 0 and f5.get(rj) == b'{"type": "authors-new"}\n' and rj not in ref_files(r, resolve_branch(r, "neoforge-1.21.4")),
                f"a resource the parent dropped and 1.21.5 keeps: the authors' change reaches 1.21.5: {f5.get(rj)!r} {out[-400:]}")
-    _check_port_taken(expect)
-    _check_cascade_plan(expect)
-    _check_deferred_integration(expect)
-    _check_migrate_library(expect)
     # the deep passes (--self-check --deep, or FB_RANDOM_SEQUENCES / FB_DEEP set) -- not run in CI, run them before a
-    # release of the tool: 200 random cascade sequences against the invariant, and the whole self-check again under
-    # core.autocrlf=true. The default run keeps every named case (t6/t7/t8/t11 included) and the CRLF unit cases.
+    # release of the tool: the 4-version cascade plan/apply/decisions flow and migrate --library (each builds and
+    # migrates its own fixtures), 200 random cascade sequences against the invariant, and the whole self-check again
+    # under core.autocrlf=true. The default run keeps every named case (t6/t7/t8/t11 included) and the CRLF unit cases.
     deep = "--deep" in sys.argv or bool(os.environ.get("FB_DEEP"))
+    _check_port_taken(expect)
+    _check_deferred_integration(expect)
+    if deep:
+        _check_cascade_plan(expect)
+        _check_migrate_library(expect)
     if deep or os.environ.get("FB_RANDOM_SEQUENCES"):
         _check_random_sequences(expect, say=print)
     if deep and not os.environ.get("FB_SELF_CHECK_CRLF"):
