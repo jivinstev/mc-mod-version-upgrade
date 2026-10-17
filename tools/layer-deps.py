@@ -1218,165 +1218,171 @@ def self_check():
              "|---|---|---|---|\n| stub | .multiversion/targets/1.21.4/java/A.java | ok | same effect, checked |\n")
     expect(open_stubs('[{"file": "a", "reviewed": null}, {"file": "b", "reviewed": "ok"}]') == 1 and open_stubs("") == 0,
            "open stubs counted")
-    # a sibling checkout (a real git repo): judged by fork-port.py's own target_done() -- the one done list -- after
-    # the jar check (GATES.md current at HEAD, edited tracked files and untracked .multiversion/ files included)
-    with tempfile.TemporaryDirectory() as td:
-        co = pathlib.Path(td)
-        g = lambda *x: subprocess.run(["git", "-C", str(co), *x], capture_output=True, text=True, encoding="utf-8")
-        g("init", "-q"); g("config", "user.email", "x@example.com"); g("config", "user.name", "x")
-        t4 = co / ".multiversion/targets/1.21.4"; t4.mkdir(parents=True)
-        (t4 / "target.properties").write_text("inherits=1.21.3\n", encoding="utf-8")
-        (co / ".multiversion/targets/1.21.3").mkdir(parents=True)
-        (co / ".multiversion/targets/1.21.3/target.properties").write_text("x=1\n", encoding="utf-8")
-        (co / "src").mkdir(); (co / "src/A.java").write_text("class A {}\n", encoding="utf-8")
-        g("add", "-A"); g("commit", "-qm", "port")
-        sha = g("rev-parse", "--short", "HEAD").stdout.strip()
-        expect(not library_done_checkout(co, "1.21.4")[0], "a checkout with no GATES.md: not done")
-        (t4 / "GATES.md").write_text(head.replace("abc1234", sha) + gc, encoding="utf-8")
-        g("add", "-A"); g("commit", "-qm", "gates")
-        d0 = library_done_checkout(co, "1.21.4")
-        expect(not d0[0] and "REVIEW.md" in d0[1],
-               f"green Gate C but no REVIEW.md: not done (target_done refuses a missing review; no longer tolerated): {d0}")
-        rv_co = rv_ok.split("\n\n|")[0].replace("abc1234", g("rev-parse", "--short", "HEAD").stdout.strip()) + \
-            "\n\n| kind | file | verdict | note |\n|---|---|---|---|\n"
-        (t4 / "REVIEW.md").write_text(rv_co, encoding="utf-8")
-        d0 = library_done_checkout(co, "1.21.4")
-        expect(not d0[0] and "TEST-ITEMS" in d0[1], f"no TEST-ITEMS.md: not done, as target_done says: {d0}")
-        (t4 / "TEST-ITEMS.md").write_text("# Manual-test items\n\n- none\n", encoding="utf-8")
-        g("add", "-A"); g("commit", "-qm", "review")
-        d1 = library_done_checkout(co, "1.21.4")
-        expect(d1[0], f"green Gate C, a complete review, the test items: done: {d1}")
-        (t4 / "STUBS.json").write_text('[{"file": "x", "reviewed": null}]', encoding="utf-8")
-        expect(not library_done_checkout(co, "1.21.4")[0], "an unreviewed stub signal: not done")
-        (t4 / "STUBS.json").unlink()
-        (t4 / "REVIEW.md").write_text(rv_co.replace("- reviewer: a fresh agent\n", ""), encoding="utf-8")
-        expect(not library_done_checkout(co, "1.21.4")[0], "an incomplete REVIEW.md: not done")
-        (t4 / "REVIEW.md").write_text(rv_co, encoding="utf-8")
-        (t4 / "DEPS.md").write_text("# deps\n\n**Development only (`--allow-undone-library`):** com.example:x\n", encoding="utf-8")
-        d0 = library_done_checkout(co, "1.21.4")
-        expect(not d0[0] and "allow-undone-library" in d0[1],
-               f"a library itself built against an undone library (DEPS.md \"Development only\"): not done: {d0}")
-        (t4 / "DEPS.md").unlink()
-        (co / ".multiversion/targets/1.21.3/java").mkdir(parents=True)
-        (co / ".multiversion/targets/1.21.3/java/X.java").write_text("class X {}\n", encoding="utf-8")
-        expect(not library_done_checkout(co, "1.21.4")[0], "an UNTRACKED overlay in the chain (built into the jar): not done")
-        shutil.rmtree(co / ".multiversion/targets/1.21.3/java")
-        expect(library_done_checkout(co, "1.21.4")[0], "back to done once the untracked overlay is gone")
-        (co / "src/A.java").write_text("class A { int x; }\n", encoding="utf-8")
-        expect(not library_done_checkout(co, "1.21.4")[0], "an edited tracked source since the gates: not done")
-        g("commit", "-qam", "edit")
-        expect(not library_done_checkout(co, "1.21.4")[0], "a committed source change since the gates: not done")
-        g("reset", "-q", "--hard", "HEAD~1")
-        (co / ".multiversion/targets/1.21.3/x.java").write_text("x", encoding="utf-8")
-        g("add", "-A"); g("commit", "-qm", "parent overlay")
-        expect(not library_done_checkout(co, "1.21.4")[0], "a change in an inherited target's dir: not done")
-        g("reset", "-q", "--hard", "HEAD~1")
-        (co / ".multiversion/targets/1.21.5").mkdir(parents=True)
-        (co / ".multiversion/targets/1.21.5/x.java").write_text("x", encoding="utf-8")
-        g("add", "-A"); g("commit", "-qm", "other target")
-        expect(library_done_checkout(co, "1.21.4")[0], "a change in another target's dir: still done")
-    # a sibling release: the same list read at the tag -- GATES.md, REVIEW.md rows against the overlay list of the
-    # tag's tree (the GitHub tree API), the review commit against the tag, TEST-ITEMS.md, DEPS.md, the inventory
-    # account, an allowed undone parent -- and the files changed from GitHub's compare API
-    import urllib.error
-    ovl = ".multiversion/targets/1.21.4/java/com/example/mod/A.java"
-    rv_rel = ("- reviewer: a fresh agent\n- date: 2026-10-16\n- commit: def5678\n\n| kind | file | verdict | note |\n"
-              f"|---|---|---|---|\n| overlay | {ovl} | ok | same effect, checked |\n")
-    files = {".multiversion/targets/1.21.4/GATES.md": head + gc, ".multiversion/targets/1.21.4/target.properties": "x=1\n",
-             ".multiversion/targets/1.21.4/REVIEW.md": rv_rel, ".multiversion/targets/1.21.4/TEST-ITEMS.md": "- none\n",
-             ovl: "class A {}\n", "src/main/java/com/example/mod/A.java": "class A {}\n"}
-    cmps = {"abc1234": {"status": "ahead", "files": [{"filename": "README.md"}]},
-            "def5678": {"status": "ahead", "files": [{"filename": ".multiversion/targets/1.21.4/REVIEW.md"}]}}
-    tree = {"truncated": False}
-    seen = []
-    blob = lambda text: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()   # a git blob id
+    # the done-list cases need tools/fork-port.py (the one done list); the Port CI kit ships layer-deps.py without
+    # it (its jobs only fetch pinned jars), so its self-check from the unpacked kit skips them -- the repository's
+    # own run always has it and runs them
+    if _fork_port() is None:
+        print("  skipped: the sibling done-list cases (tools/fork-port.py is not in this tree)")
+    else:
+        # a sibling checkout (a real git repo): judged by fork-port.py's own target_done() -- the one done list -- after
+        # the jar check (GATES.md current at HEAD, edited tracked files and untracked .multiversion/ files included)
+        with tempfile.TemporaryDirectory() as td:
+            co = pathlib.Path(td)
+            g = lambda *x: subprocess.run(["git", "-C", str(co), *x], capture_output=True, text=True, encoding="utf-8")
+            g("init", "-q"); g("config", "user.email", "x@example.com"); g("config", "user.name", "x")
+            t4 = co / ".multiversion/targets/1.21.4"; t4.mkdir(parents=True)
+            (t4 / "target.properties").write_text("inherits=1.21.3\n", encoding="utf-8")
+            (co / ".multiversion/targets/1.21.3").mkdir(parents=True)
+            (co / ".multiversion/targets/1.21.3/target.properties").write_text("x=1\n", encoding="utf-8")
+            (co / "src").mkdir(); (co / "src/A.java").write_text("class A {}\n", encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "port")
+            sha = g("rev-parse", "--short", "HEAD").stdout.strip()
+            expect(not library_done_checkout(co, "1.21.4")[0], "a checkout with no GATES.md: not done")
+            (t4 / "GATES.md").write_text(head.replace("abc1234", sha) + gc, encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "gates")
+            d0 = library_done_checkout(co, "1.21.4")
+            expect(not d0[0] and "REVIEW.md" in d0[1],
+                   f"green Gate C but no REVIEW.md: not done (target_done refuses a missing review; no longer tolerated): {d0}")
+            rv_co = rv_ok.split("\n\n|")[0].replace("abc1234", g("rev-parse", "--short", "HEAD").stdout.strip()) + \
+                "\n\n| kind | file | verdict | note |\n|---|---|---|---|\n"
+            (t4 / "REVIEW.md").write_text(rv_co, encoding="utf-8")
+            d0 = library_done_checkout(co, "1.21.4")
+            expect(not d0[0] and "TEST-ITEMS" in d0[1], f"no TEST-ITEMS.md: not done, as target_done says: {d0}")
+            (t4 / "TEST-ITEMS.md").write_text("# Manual-test items\n\n- none\n", encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "review")
+            d1 = library_done_checkout(co, "1.21.4")
+            expect(d1[0], f"green Gate C, a complete review, the test items: done: {d1}")
+            (t4 / "STUBS.json").write_text('[{"file": "x", "reviewed": null}]', encoding="utf-8")
+            expect(not library_done_checkout(co, "1.21.4")[0], "an unreviewed stub signal: not done")
+            (t4 / "STUBS.json").unlink()
+            (t4 / "REVIEW.md").write_text(rv_co.replace("- reviewer: a fresh agent\n", ""), encoding="utf-8")
+            expect(not library_done_checkout(co, "1.21.4")[0], "an incomplete REVIEW.md: not done")
+            (t4 / "REVIEW.md").write_text(rv_co, encoding="utf-8")
+            (t4 / "DEPS.md").write_text("# deps\n\n**Development only (`--allow-undone-library`):** com.example:x\n", encoding="utf-8")
+            d0 = library_done_checkout(co, "1.21.4")
+            expect(not d0[0] and "allow-undone-library" in d0[1],
+                   f"a library itself built against an undone library (DEPS.md \"Development only\"): not done: {d0}")
+            (t4 / "DEPS.md").unlink()
+            (co / ".multiversion/targets/1.21.3/java").mkdir(parents=True)
+            (co / ".multiversion/targets/1.21.3/java/X.java").write_text("class X {}\n", encoding="utf-8")
+            expect(not library_done_checkout(co, "1.21.4")[0], "an UNTRACKED overlay in the chain (built into the jar): not done")
+            shutil.rmtree(co / ".multiversion/targets/1.21.3/java")
+            expect(library_done_checkout(co, "1.21.4")[0], "back to done once the untracked overlay is gone")
+            (co / "src/A.java").write_text("class A { int x; }\n", encoding="utf-8")
+            expect(not library_done_checkout(co, "1.21.4")[0], "an edited tracked source since the gates: not done")
+            g("commit", "-qam", "edit")
+            expect(not library_done_checkout(co, "1.21.4")[0], "a committed source change since the gates: not done")
+            g("reset", "-q", "--hard", "HEAD~1")
+            (co / ".multiversion/targets/1.21.3/x.java").write_text("x", encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "parent overlay")
+            expect(not library_done_checkout(co, "1.21.4")[0], "a change in an inherited target's dir: not done")
+            g("reset", "-q", "--hard", "HEAD~1")
+            (co / ".multiversion/targets/1.21.5").mkdir(parents=True)
+            (co / ".multiversion/targets/1.21.5/x.java").write_text("x", encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "other target")
+            expect(library_done_checkout(co, "1.21.4")[0], "a change in another target's dir: still done")
+        # a sibling release: the same list read at the tag -- GATES.md, REVIEW.md rows against the overlay list of the
+        # tag's tree (the GitHub tree API), the review commit against the tag, TEST-ITEMS.md, DEPS.md, the inventory
+        # account, an allowed undone parent -- and the files changed from GitHub's compare API
+        import urllib.error
+        ovl = ".multiversion/targets/1.21.4/java/com/example/mod/A.java"
+        rv_rel = ("- reviewer: a fresh agent\n- date: 2026-10-16\n- commit: def5678\n\n| kind | file | verdict | note |\n"
+                  f"|---|---|---|---|\n| overlay | {ovl} | ok | same effect, checked |\n")
+        files = {".multiversion/targets/1.21.4/GATES.md": head + gc, ".multiversion/targets/1.21.4/target.properties": "x=1\n",
+                 ".multiversion/targets/1.21.4/REVIEW.md": rv_rel, ".multiversion/targets/1.21.4/TEST-ITEMS.md": "- none\n",
+                 ovl: "class A {}\n", "src/main/java/com/example/mod/A.java": "class A {}\n"}
+        cmps = {"abc1234": {"status": "ahead", "files": [{"filename": "README.md"}]},
+                "def5678": {"status": "ahead", "files": [{"filename": ".multiversion/targets/1.21.4/REVIEW.md"}]}}
+        tree = {"truncated": False}
+        seen = []
+        blob = lambda text: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()   # a git blob id
 
-    def fake(url, headers=None):
-        seen.append(url)
-        if "/compare/" in url:
-            base = url.rsplit("/compare/", 1)[1].split("...", 1)[0]
-            if base not in cmps:
-                raise urllib.error.HTTPError(url, 404, "nf", None, None)
-            return json.dumps(cmps[base]).encode()
-        if "/git/trees/" in url:
-            return json.dumps({**tree, "tree": [{"path": p, "type": "blob", "sha": blob(files[p])} for p in sorted(files)]}).encode()
-        path = url.split("/tag9/", 1)[1]
-        if path in files:
-            return files[path].encode()
-        raise urllib.error.HTTPError(url, 404, "nf", None, None)
+        def fake(url, headers=None):
+            seen.append(url)
+            if "/compare/" in url:
+                base = url.rsplit("/compare/", 1)[1].split("...", 1)[0]
+                if base not in cmps:
+                    raise urllib.error.HTTPError(url, 404, "nf", None, None)
+                return json.dumps(cmps[base]).encode()
+            if "/git/trees/" in url:
+                return json.dumps({**tree, "tree": [{"path": p, "type": "blob", "sha": blob(files[p])} for p in sorted(files)]}).encode()
+            path = url.split("/tag9/", 1)[1]
+            if path in files:
+                return files[path].encode()
+            raise urllib.error.HTTPError(url, 404, "nf", None, None)
 
-    def rel_done(msg, want=True):
-        r = library_done_release("owner/lib", "tag9", "1.21.4", fake)
-        expect(r[0] == want, f"{msg}: {r}")
-        return r
-    rel_done("a release whose GATES.md is current at the tag, every overlay reviewed ok at an ancestor of the tag: done")
-    expect(any(u.endswith("/compare/abc1234...tag9") for u in seen) and any("/git/trees/tag9" in u for u in seen),
-           "the release check reads the compare API from GATES.md's commit and the tag's tree")
-    cmps["abc1234"]["files"].append({"filename": "src/main/java/A.java"})
-    rel_done("a release with a source change since the gates: not done", False)
-    cmps["abc1234"].update(status="diverged", files=[])
-    rel_done("GATES.md's commit not under the tag: not done", False)
-    cmps["abc1234"]["status"] = "ahead"
-    files[".multiversion/targets/1.21.4/STUBS.json"] = '[{"file": "x", "reviewed": null}]'
-    rel_done("a release with an open stub: not done", False)
-    del files[".multiversion/targets/1.21.4/STUBS.json"]
-    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace("| ok |", "| not-ok |")
-    rel_done("a release with a not-ok REVIEW.md row: not done", False)
-    del files[".multiversion/targets/1.21.4/REVIEW.md"]
-    r = rel_done("a release with no REVIEW.md: not done (refused, not tolerated)", False)
-    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace(ovl, ".multiversion/targets/1.21.4/STUBS.json")
-    r = rel_done("one ok row, but the tag's overlay has no row: not done", False)
-    expect(ovl in r[1], f"the unrowed overlay is named: {r[1]}")
-    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace("def5678", "HEAD")
-    rel_done("a review commit that is not a hex commit (HEAD never goes stale): not done", False)
-    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel
-    cmps["def5678"]["status"] = "diverged"
-    rel_done("a review commit that is not an ancestor of the tag: not done", False)
-    cmps["def5678"]["status"] = "identical"
-    rel_done("a review commit equal to the tag: done")
-    cmps["def5678"].update(status="ahead", files=[{"filename": "src/main/java/com/example/mod/A.java"}])
-    rel_done("the authors' file an overlay replaces changed since the review: not done", False)
-    cmps["def5678"]["files"] = [{"filename": ".multiversion/targets/1.21.5/java/B.java"}]
-    rel_done("only another target changed since the review: done")
-    del files[".multiversion/targets/1.21.4/TEST-ITEMS.md"]
-    rel_done("a release with no TEST-ITEMS.md: not done", False)
-    files[".multiversion/targets/1.21.4/TEST-ITEMS.md"] = "- none\n"
-    files[".multiversion/targets/1.21.4/DEPS.md"] = "**Development only (`--allow-undone-library`):** x\n"
-    rel_done("a release itself built against an undone library: not done", False)
-    del files[".multiversion/targets/1.21.4/DEPS.md"]
-    files[".multiversion/INVENTORY.json"] = "{}"
-    rel_done("a layer with a behaviour inventory and no account at the tag: not done", False)
-    files[".multiversion/targets/1.21.4/INVENTORY-CHECK.json"] = json.dumps({"target": "1.21.4", "unaccounted": ["x"]})
-    rel_done("an account with unaccounted items: not done", False)
-    files[".multiversion/targets/1.21.4/INVENTORY-CHECK.json"] = json.dumps({"target": "1.21.4", "unaccounted": []})
-    rel_done("every inventory item accounted for at the tag: done")
-    # the tag's resource overlays and renames.tsv need their rows too, with the digest a checkout's review_items gives
-    egg = ".multiversion/targets/1.21.4/resources/assets/examplemod/items/egg.json"
-    files[egg] = '{"model": {}}\n'; files[".multiversion/targets/1.21.4/renames.tsv"] = "a\tb\n"
-    r = rel_done("a release with an unreviewed resource group and renames.tsv: not done", False)
-    expect("no verdict: resources .multiversion/targets/1.21.4/resources/assets/examplemod/items @" in r[1]
-           and "no verdict: renames .multiversion/targets/1.21.4/renames.tsv @" in r[1], f"both named: {r[1]}")
-    fpm = _fork_port()
-    with tempfile.TemporaryDirectory() as td:
-        co = pathlib.Path(td); tdc = co / ".multiversion/targets/1.21.4"
-        for p_ in (egg, ".multiversion/targets/1.21.4/renames.tsv"):
-            (co / p_).parent.mkdir(parents=True, exist_ok=True); (co / p_).write_bytes(files[p_].encode())
-        local = [x for x in fpm.review_items(co, tdc) if x[0] in ("resources", "renames")]
-    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel + "".join(f"| {k} | {x} | ok | checked |\n" for k, x in local)
-    rel_done("rows with a checkout's digests for the same bytes: done (one definition)")
-    files[egg] = '{"model": {"tints": [1]}}\n'
-    rel_done("a resource group changed at the tag: its old row does not count: not done", False)
-    del files[egg]; del files[".multiversion/targets/1.21.4/renames.tsv"]
-    files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel
-    files[".multiversion/targets/1.21.4/target.properties"] = "x=1\nallowed_undone_parent=1.21.3 (development)\n"
-    files[".multiversion/targets/1.21.3/target.properties"] = "x=1\n"
-    rel_done("a parent added with --allow-undone-parent that is still not done at the tag: not done", False)
-    files[".multiversion/targets/1.21.4/target.properties"] = "x=1\n"
-    tree["truncated"] = True
-    rel_done("a truncated tree (the overlay list cannot be read whole): not done", False)
-    tree["truncated"] = False
-    del files[".multiversion/targets/1.21.4/GATES.md"]
-    rel_done("a release with no GATES.md: not done", False)
+        def rel_done(msg, want=True):
+            r = library_done_release("owner/lib", "tag9", "1.21.4", fake)
+            expect(r[0] == want, f"{msg}: {r}")
+            return r
+        rel_done("a release whose GATES.md is current at the tag, every overlay reviewed ok at an ancestor of the tag: done")
+        expect(any(u.endswith("/compare/abc1234...tag9") for u in seen) and any("/git/trees/tag9" in u for u in seen),
+               "the release check reads the compare API from GATES.md's commit and the tag's tree")
+        cmps["abc1234"]["files"].append({"filename": "src/main/java/A.java"})
+        rel_done("a release with a source change since the gates: not done", False)
+        cmps["abc1234"].update(status="diverged", files=[])
+        rel_done("GATES.md's commit not under the tag: not done", False)
+        cmps["abc1234"]["status"] = "ahead"
+        files[".multiversion/targets/1.21.4/STUBS.json"] = '[{"file": "x", "reviewed": null}]'
+        rel_done("a release with an open stub: not done", False)
+        del files[".multiversion/targets/1.21.4/STUBS.json"]
+        files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace("| ok |", "| not-ok |")
+        rel_done("a release with a not-ok REVIEW.md row: not done", False)
+        del files[".multiversion/targets/1.21.4/REVIEW.md"]
+        r = rel_done("a release with no REVIEW.md: not done (refused, not tolerated)", False)
+        files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace(ovl, ".multiversion/targets/1.21.4/STUBS.json")
+        r = rel_done("one ok row, but the tag's overlay has no row: not done", False)
+        expect(ovl in r[1], f"the unrowed overlay is named: {r[1]}")
+        files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel.replace("def5678", "HEAD")
+        rel_done("a review commit that is not a hex commit (HEAD never goes stale): not done", False)
+        files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel
+        cmps["def5678"]["status"] = "diverged"
+        rel_done("a review commit that is not an ancestor of the tag: not done", False)
+        cmps["def5678"]["status"] = "identical"
+        rel_done("a review commit equal to the tag: done")
+        cmps["def5678"].update(status="ahead", files=[{"filename": "src/main/java/com/example/mod/A.java"}])
+        rel_done("the authors' file an overlay replaces changed since the review: not done", False)
+        cmps["def5678"]["files"] = [{"filename": ".multiversion/targets/1.21.5/java/B.java"}]
+        rel_done("only another target changed since the review: done")
+        del files[".multiversion/targets/1.21.4/TEST-ITEMS.md"]
+        rel_done("a release with no TEST-ITEMS.md: not done", False)
+        files[".multiversion/targets/1.21.4/TEST-ITEMS.md"] = "- none\n"
+        files[".multiversion/targets/1.21.4/DEPS.md"] = "**Development only (`--allow-undone-library`):** x\n"
+        rel_done("a release itself built against an undone library: not done", False)
+        del files[".multiversion/targets/1.21.4/DEPS.md"]
+        files[".multiversion/INVENTORY.json"] = "{}"
+        rel_done("a layer with a behaviour inventory and no account at the tag: not done", False)
+        files[".multiversion/targets/1.21.4/INVENTORY-CHECK.json"] = json.dumps({"target": "1.21.4", "unaccounted": ["x"]})
+        rel_done("an account with unaccounted items: not done", False)
+        files[".multiversion/targets/1.21.4/INVENTORY-CHECK.json"] = json.dumps({"target": "1.21.4", "unaccounted": []})
+        rel_done("every inventory item accounted for at the tag: done")
+        # the tag's resource overlays and renames.tsv need their rows too, with the digest a checkout's review_items gives
+        egg = ".multiversion/targets/1.21.4/resources/assets/examplemod/items/egg.json"
+        files[egg] = '{"model": {}}\n'; files[".multiversion/targets/1.21.4/renames.tsv"] = "a\tb\n"
+        r = rel_done("a release with an unreviewed resource group and renames.tsv: not done", False)
+        expect("no verdict: resources .multiversion/targets/1.21.4/resources/assets/examplemod/items @" in r[1]
+               and "no verdict: renames .multiversion/targets/1.21.4/renames.tsv @" in r[1], f"both named: {r[1]}")
+        fpm = _fork_port()
+        with tempfile.TemporaryDirectory() as td:
+            co = pathlib.Path(td); tdc = co / ".multiversion/targets/1.21.4"
+            for p_ in (egg, ".multiversion/targets/1.21.4/renames.tsv"):
+                (co / p_).parent.mkdir(parents=True, exist_ok=True); (co / p_).write_bytes(files[p_].encode())
+            local = [x for x in fpm.review_items(co, tdc) if x[0] in ("resources", "renames")]
+        files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel + "".join(f"| {k} | {x} | ok | checked |\n" for k, x in local)
+        rel_done("rows with a checkout's digests for the same bytes: done (one definition)")
+        files[egg] = '{"model": {"tints": [1]}}\n'
+        rel_done("a resource group changed at the tag: its old row does not count: not done", False)
+        del files[egg]; del files[".multiversion/targets/1.21.4/renames.tsv"]
+        files[".multiversion/targets/1.21.4/REVIEW.md"] = rv_rel
+        files[".multiversion/targets/1.21.4/target.properties"] = "x=1\nallowed_undone_parent=1.21.3 (development)\n"
+        files[".multiversion/targets/1.21.3/target.properties"] = "x=1\n"
+        rel_done("a parent added with --allow-undone-parent that is still not done at the tag: not done", False)
+        files[".multiversion/targets/1.21.4/target.properties"] = "x=1\n"
+        tree["truncated"] = True
+        rel_done("a truncated tree (the overlay list cannot be read whole): not done", False)
+        tree["truncated"] = False
+        del files[".multiversion/targets/1.21.4/GATES.md"]
+        rel_done("a release with no GATES.md: not done", False)
     # a released sibling jar is pinned in the block, and `fetch` installs it only when the checksum matches
     blk2 = render_block([{"group": "com.example", "module": "lib", "to": "com.example:lib:1.0-mc1.21.4",
                           "pin": "https://github.com/owner/lib/releases/download/lib-1.0-mc1.21.1/lib-1.0_a-mc1.21.4.jar " + "a" * 64}])
