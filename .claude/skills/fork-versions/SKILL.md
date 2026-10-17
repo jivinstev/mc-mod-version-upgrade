@@ -297,21 +297,27 @@ the severity from the inputs:
 
 | Severity | Rubric inputs | Meaning |
 |---|---|---|
-| **S1** | failure crash, kick, data or hang (anything else aside) | a crash, kick/disconnect, world or player data lost, a hang; blocks publishing |
+| **S1** | failure crash, kick, data, hang, security or build (anything else aside) | a crash, kick/disconnect, world or player data lost, a hang, a security hole, a version that does not build; blocks publishing |
 | **S2** | failure functional, reach normal, visibility always/common, no workaround | a core feature broken in normal play, e.g. invisible GUI text |
 | **S3** | anything else: cosmetic (S3 at most), rare, one specific feature, or a workaround | cosmetic, an uncommon path, or avoidable |
 | **S4** | visibility invisible, or reach unusual | invisible to players, or needs an unusual setup, other mods or debug options |
 
-`functional`: a feature does not work, or information or controls the player needs are missing, unreadable or
+`security`: an exposed credential or secret, a token leak, or an exploit or privilege path. `build`: the version does
+not compile or produce a jar. `functional`: a feature does not work, or information or controls the player needs are missing, unreadable or
 unusable (invisible text, a missing UI element). `cosmetic`: the look is wrong but nothing the player needs is lost
 (a wrong colour tint, a texture seam); it is S3 at most.
+
+An entry may be scoped to one platform's jar, `"platforms": ["cf"]` (or `["mr"]`; `add --platform cf`): only that
+jar is affected. Without the key, every platform is. `list` and `release-notes` take `--platform`; `known-issues.py
+blocks-publish --version V --platform P` prints the open S1s against that platform's jar and exits 1 when there is
+one. `reopens` ignores platforms.
 
 **Only an S1 reopens a done version.** A finding at a version that is already done (`fork-port.py --check-done`)
 reopens it only when it is an S1: fix it at the lowest affected version and cascade only that fix. Anything else goes
 into the ledger at its lowest affected version and the run goes on. `known-issues.py reopens --version V --severity S`
 (or `--id ID`) answers: exit 0 yes, exit 1 no.
 
-    python3 tools/known-issues.py add     --repo DIR --title T --failure crash|kick|data|hang|functional|cosmetic \
+    python3 tools/known-issues.py add     --repo DIR --title T --failure crash|kick|data|hang|security|build|functional|cosmetic \
         --visibility always|common|rare|invisible --reach normal|feature|unusual --workaround yes|no \
         --lowest 1.21.4 --status 1.21.4=open --status 1.21.5=open [--source review] [--file PATH] [--notes N]
     python3 tools/known-issues.py grade   --repo DIR KI-3 [--reach feature] [--override S2 --reason WHY --by owner]
@@ -319,7 +325,8 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
     python3 tools/known-issues.py list    --repo DIR --ref neoforge-1.21.1 [--version 1.21.5] [--min S2] [--open]
     python3 tools/known-issues.py select  --repo DIR [--budget 3] [--touched PATH ...] [--version V ...] [--add ID] [--remove ID]
     python3 tools/known-issues.py render-issue  --repo DIR          # the pinned issue: issue by version, by severity
-    python3 tools/known-issues.py release-notes --repo DIR --version 1.21.5 --tag <tag> [--min S3]
+    python3 tools/known-issues.py release-notes --repo DIR --version 1.21.5 --tag <tag> [--min S3] [--platform mr|cf]
+    python3 tools/known-issues.py blocks-publish --repo DIR --version 1.21.5 --platform mr|cf   # exit 1: an open S1
 
 `select` is the default choice of what a run takes: every open S1, then S2s lowest affected version first up to
 `--budget`, then any S3 in a file the run already touches; the owner's `--add` / `--remove` apply last and the output

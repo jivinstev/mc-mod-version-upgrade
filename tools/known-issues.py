@@ -5,15 +5,17 @@ each Minecraft version (issue #135, part 1).
 
     python3 tools/known-issues.py add     [LEDGER] --title T --failure F --visibility V --reach R --workaround yes|no
                                           --lowest MC [--status MC=STATE ...] [--id ID] [--source S] [--notes N]
-                                          [--file PATH ...]
+                                          [--file PATH ...] [--platform mr|cf ...]
     python3 tools/known-issues.py grade   [LEDGER] ID [--failure F] [--visibility V] [--reach R] [--workaround yes|no]
                                           [--override S --reason WHY [--by WHO] | --clear-override]
     python3 tools/known-issues.py status  [LEDGER] ID --set MC=STATE [--set ...] [--lowest MC]
-    python3 tools/known-issues.py list    [LEDGER] [--version MC] [--severity S1,S2] [--min S] [--open] [--json]
+    python3 tools/known-issues.py list    [LEDGER] [--version MC] [--severity S1,S2] [--min S] [--open] [--platform P]
+                                          [--json]
     python3 tools/known-issues.py select  [LEDGER] [--budget N] [--touched PATH ...] [--version MC ...]
                                           [--add ID ...] [--remove ID ...] [--json]
     python3 tools/known-issues.py render-issue  [LEDGER]
-    python3 tools/known-issues.py release-notes [LEDGER] --version MC --tag TAG [--min S3] [--repo DIR]
+    python3 tools/known-issues.py release-notes [LEDGER] --version MC --tag TAG [--min S3] [--platform P] [--repo DIR]
+    python3 tools/known-issues.py blocks-publish [LEDGER] --version MC --platform mr|cf
     python3 tools/known-issues.py reopens [LEDGER] --version MC (--severity S | --id ID)
     python3 tools/known-issues.py --self-check
 
@@ -34,7 +36,7 @@ is atomic, with sorted keys, a 2-space indent and a trailing newline, so a chang
 THE SCHEMA (schema 1):
   {"schema": 1,
    "issues": [{"id": "KI-1", "title": "...",
-               "rubric": {"failure": "crash|kick|data|hang|functional|cosmetic",
+               "rubric": {"failure": "crash|kick|data|hang|security|build|functional|cosmetic",
                           "visibility": "always|common|rare|invisible",
                           "reach": "normal|feature|unusual", "workaround": false},
                "severity": "S1".."S4",          # the rubric's grade, or the override's when there is one
@@ -43,17 +45,21 @@ THE SCHEMA (schema 1):
                "status": {"1.21.1": "open", "1.21.3": "fixed@<commit>", "1.21.4": "wontfix:<reason>", "1.21.5": "n/a"},
                "source": "authors|review|gate|player",
                "files": ["src/main/java/..."],  # optional: the files the defect is in (select's S3 rule)
+               "platforms": ["cf"],             # optional: only that platform's jar (mr Modrinth, cf CurseForge);
+                                                # absent: every platform
                "notes": "..."}]}
   A version missing from status is not affected. Which releases contain an issue is never stored: release-notes works
   it out from the tag (with --repo, a fixed@<commit> that is not in the tag counts as open there).
 
 THE RUBRIC (grade derives the severity from the recorded inputs; an owner override wins and is recorded):
-  S1  failure crash, kick (or network disconnect), data (world or player data lost or corrupted) or hang -- whatever
-      else. It blocks publishing (publish-port refuses an open S1).
+  S1  failure crash, kick (or network disconnect), data (world or player data lost or corrupted), hang, security
+      (an exposed credential or secret, a token leak, an exploit or privilege path) or build (the version does not
+      compile or produce a jar) -- whatever else. It blocks publishing (publish-port refuses an open S1; for an issue
+      scoped to one platform, that platform's upload only: `blocks-publish`).
   S4  otherwise: visibility invisible, or reach unusual (an unusual setup, other mods, debug options).
   S2  otherwise: a functional failure with reach normal, visibility always or common and no workaround.
   S3  everything else: cosmetic, rare, a specific feature only, or a workaround exists. Cosmetic is S3 at most.
-  The failure types beside the four S1 ones:
+  The failure types beside the six S1 ones:
     functional  a feature does not work, or information or controls the player needs are missing, unreadable or
                 unusable -- invisible GUI text and a missing UI element are functional;
     cosmetic    the look is wrong, but nothing the player needs is lost (a wrong colour tint, a texture seam).
@@ -65,7 +71,8 @@ SELECT (the default policy before a run): every issue still open at a version of
 affected version first, up to --budget (default 3); then any S3 in a file the run already touches (--touched). The
 owner's --add and --remove apply last, and the output says who chose each item.
 
-Exit codes: 0 ok (reopens: it reopens); 1 reopens: it does not reopen; 2 bad input or an invalid ledger.
+Exit codes: 0 ok (reopens: it reopens; blocks-publish: nothing blocks); 1 reopens: it does not reopen;
+blocks-publish: an open S1 applies to that platform; 2 bad input or an invalid ledger.
 """
 import argparse
 import json
@@ -79,8 +86,9 @@ import tempfile
 SCHEMA = 1
 LEDGER_NAME = "KNOWN-ISSUES.json"
 SEVERITIES = ("S1", "S2", "S3", "S4")
-FAILURES = ("crash", "kick", "data", "hang", "functional", "cosmetic")
-BLOCKING = ("crash", "kick", "data", "hang")
+FAILURES = ("crash", "kick", "data", "hang", "security", "build", "functional", "cosmetic")
+BLOCKING = ("crash", "kick", "data", "hang", "security", "build")
+PLATFORMS = ("mr", "cf")                     # the Modrinth and CurseForge jars (port-ci.py --variant-jar)
 VISIBILITY = ("always", "common", "rare", "invisible")
 REACH = ("normal", "feature", "unusual")
 SOURCES = ("authors", "review", "gate", "player")
@@ -90,7 +98,7 @@ MC_RE = re.compile(r"^\d+(?:\.\d+){1,3}$")
 STATE_RE = re.compile(r"^(?:open|n/a|fixed@[0-9a-f]{7,40}|wontfix:\S.*)$")
 DEFAULT_BUDGET = 3
 TOP_KEYS = {"schema", "issues"}
-ISSUE_KEYS = {"id", "title", "rubric", "severity", "override", "lowest", "status", "source", "files", "notes"}
+ISSUE_KEYS = {"id", "title", "rubric", "severity", "override", "lowest", "status", "source", "files", "platforms", "notes"}
 
 
 class Invalid(Exception):
@@ -191,6 +199,10 @@ def validate(data):
             raise Invalid(f"{where}: source {e['source']!r} is not one of {', '.join(SOURCES)}")
         if "files" in e and (not isinstance(e["files"], list) or not all(isinstance(f, str) and f for f in e["files"])):
             raise Invalid(f"{where}: files must be a list of paths")
+        pl = e.get("platforms", PLATFORMS)
+        if "platforms" in e and (not isinstance(pl, list) or not pl or len(set(pl)) != len(pl)
+                                 or not set(pl) <= set(PLATFORMS)):
+            raise Invalid(f"{where}: platforms must be a non-empty list of {', '.join(PLATFORMS)} (absent: all)")
         if "notes" in e and not isinstance(e["notes"], str):
             raise Invalid(f"{where}: notes must be text")
     return data
@@ -299,6 +311,21 @@ def select(data, budget=DEFAULT_BUDGET, touched=(), run_versions=(), add=(), rem
     return [(e, why) for e, why in out if e["id"] not in gone]
 
 
+def applies(e, platform):
+    """Does the issue affect that platform's jar? (no platforms key: every platform)"""
+    return platform is None or platform in e.get("platforms", PLATFORMS)
+
+
+def scope(e):
+    return f" ({'/'.join(e['platforms'])} only)" if e.get("platforms") and set(e["platforms"]) != set(PLATFORMS) else ""
+
+
+def blocks_publish(data, version, platform):
+    """The open S1s at `version` that apply to `platform`'s jar."""
+    return [e for e in sorted(data["issues"], key=order)
+            if e["severity"] == "S1" and e["status"].get(version) == "open" and applies(e, platform)]
+
+
 def reopens(severity):
     return severity == "S1"
 
@@ -309,10 +336,10 @@ def fixed_in(repo, commit, tag):
     return {0: True, 1: False}.get(r.returncode)
 
 
-def release_notes(data, version, tag, min_sev="S3", repo=None):
+def release_notes(data, version, tag, min_sev="S3", repo=None, platform=None):
     rows = []
     for e in sorted(data["issues"], key=order):
-        if sev_rank(e["severity"]) > sev_rank(min_sev):
+        if sev_rank(e["severity"]) > sev_rank(min_sev) or not applies(e, platform):
             continue
         s = e["status"].get(version, "n/a")
         if s == "open":
@@ -322,11 +349,11 @@ def release_notes(data, version, tag, min_sev="S3", repo=None):
             if inside is not True:
                 rows.append((e, " (fixed after this release)" if inside is False else
                              " (its fix commit is not in this clone: listed as open)"))
-    lines = [f"### Known issues in {tag} (Minecraft {version})", ""]
+    lines = [f"### Known issues in {tag} (Minecraft {version}{', ' + platform + ' jar' if platform else ''})", ""]
     if not rows:
         lines.append(f"No known issues at {min_sev} or above.")
     for e, extra in rows:
-        lines.append(f"- **{e['severity']}** {e['title']} ({e['id']}){extra}")
+        lines.append(f"- **{e['severity']}** {e['title']} ({e['id']}){'' if platform else scope(e)}{extra}")
     lines += ["", f"_From the port's known-issues ledger; {'S1' if min_sev == 'S1' else 'S1-' + min_sev} listed._"]
     return "\n".join(lines) + "\n"
 
@@ -358,7 +385,7 @@ def render_issue(data):
     out.append("|---|---|---| " + " | ".join("---" for _ in vs) + " |")
     for e in issues:
         sev = e["severity"] + ("\\*" if e.get("override") else "")
-        out.append(f"| {sev} | {e['id']} | {md(e['title'])} | " + " | ".join(cell(e["status"].get(v)) for v in vs) + " |")
+        out.append(f"| {sev} | {e['id']} | {md(e['title'] + scope(e))} | " + " | ".join(cell(e["status"].get(v)) for v in vs) + " |")
     notes = [f"- {e['id']}: graded {e['override']['severity']} by {e['override'].get('by', 'owner')} "
              f"(the rubric gives {derive(e['rubric'])}): {md(e['override']['reason'])}" for e in issues if e.get("override")]
     notes += [f"- {e['id']} at {v}: won't fix: {md(s[8:])}" for e in issues
@@ -438,6 +465,8 @@ def build_parser():
     p.add_argument("--source", choices=SOURCES, default="review")
     p.add_argument("--notes", default="")
     p.add_argument("--file", action="append", dest="files", metavar="PATH")
+    p.add_argument("--platform", action="append", dest="platforms", choices=PLATFORMS,
+                   help="only this platform's jar is affected (repeatable; default: every platform)")
     p = common(sub.add_parser("grade", help="re-grade an issue; an owner override wins and is recorded"))
     p.add_argument("id")
     rubric_args(p, False)
@@ -450,6 +479,7 @@ def build_parser():
     p.add_argument("--version"); p.add_argument("--severity", help="comma-separated, e.g. S1,S2")
     p.add_argument("--min", choices=SEVERITIES, help="this severity or worse")
     p.add_argument("--open", action="store_true", help="only issues open (at --version, or anywhere)")
+    p.add_argument("--platform", choices=PLATFORMS, help="only issues that affect this platform's jar")
     p.add_argument("--json", action="store_true")
     p = common(sub.add_parser("select", help="the issues a run takes (the default policy, then the owner's changes)"))
     p.add_argument("--budget", type=int, default=DEFAULT_BUDGET, help=f"S2s taken (default {DEFAULT_BUDGET})")
@@ -462,6 +492,9 @@ def build_parser():
     p = common(sub.add_parser("release-notes", help="the open issues of one version at a tag"))
     p.add_argument("--version", required=True); p.add_argument("--tag", required=True)
     p.add_argument("--min", choices=SEVERITIES, default="S3", help="the threshold (default S3: S4 omitted)")
+    p.add_argument("--platform", choices=PLATFORMS, help="the notes of this platform's upload (its issues only)")
+    p = common(sub.add_parser("blocks-publish", help="exit 1 when an open S1 applies to this platform at this version"))
+    p.add_argument("--version", required=True); p.add_argument("--platform", choices=PLATFORMS, required=True)
     p = common(sub.add_parser("reopens", help="may a finding at a done version reopen it? (S1 only)"))
     p.add_argument("--version", required=True)
     g = p.add_mutually_exclusive_group(required=True)
@@ -499,6 +532,8 @@ def run(argv):
             e["notes"] = a.notes
         if a.files:
             e["files"] = sorted(set(a.files))
+        if a.platforms:
+            e["platforms"] = sorted(set(a.platforms), key=PLATFORMS.index)
         e["severity"] = effective(e)
         data["issues"].append(e)
         write_ledger(path, data)
@@ -533,6 +568,8 @@ def run(argv):
                 continue
             if a.version and e["status"].get(a.version, "n/a") == "n/a":
                 continue
+            if not applies(e, a.platform):
+                continue
             if a.open and (e["status"].get(a.version) != "open" if a.version else not open_versions(e)):
                 continue
             rows.append(e)
@@ -541,7 +578,7 @@ def run(argv):
         for e in ([] if a.json else rows):
             st = e["status"].get(a.version) if a.version else ", ".join(
                 f"{v}={s}" for v, s in sorted(e["status"].items(), key=lambda x: mc_key(x[0])))
-            out(f"{e['id']}\t{e['severity']}{'*' if e.get('override') else ''}\tlowest {e['lowest']}\t{st}\t{e['title']}")
+            out(f"{e['id']}\t{e['severity']}{'*' if e.get('override') else ''}\tlowest {e['lowest']}\t{st}\t{e['title']}{scope(e)}")
         return 0
     if a.cmd == "select":
         picked = select(data, a.budget, a.touched, a.version, a.add, a.remove)
@@ -558,9 +595,16 @@ def run(argv):
         out(render_issue(data), end="")
         return 0
     if a.cmd == "release-notes":
-        text = release_notes(data, a.version, a.tag, a.min, repo if a.repo else None)
+        text = release_notes(data, a.version, a.tag, a.min, repo if a.repo else None, a.platform)
         out(text, end="")
         return 0
+    if a.cmd == "blocks-publish":
+        hit = blocks_publish(data, a.version, a.platform)
+        for e in hit:
+            out(f"{e['id']}\tS1\t{a.version}\t{a.platform}{scope(e)}\t{e['title']}")
+        out(f"blocks-publish: {len(hit)} open S1 at {a.version} against the {a.platform} jar: do not upload it"
+            if hit else f"blocks-publish: no open S1 at {a.version} against the {a.platform} jar")
+        return 1 if hit else 0
     if a.cmd == "reopens":
         sev = a.severity or find(data, a.id)["severity"]
         if reopens(sev):
@@ -630,6 +674,8 @@ def self_check():
     expect(derive(R("functional", "common", "normal", False)) == "S2", "invisible text (functional, common, normal, "
            "no workaround) grades S2")
     expect(derive(R("cosmetic", "common", "normal", False)) == "S3", "a wrong colour tint (cosmetic, common) grades S3")
+    expect(derive(R("security", "invisible", "unusual", True)) == "S1", "security (a leaked token) grades S1")
+    expect(derive(R("build", "rare", "feature", True)) == "S1", "build (the version does not compile) grades S1")
     expect(reopens("S1") and not any(reopens(s) for s in ("S2", "S3", "S4")), "only S1 reopens a done version")
 
     with tempfile.TemporaryDirectory() as d:
@@ -741,6 +787,27 @@ def self_check():
                f"release notes at a tag holding the fix, threshold S1: {o}")
         rc, o = cli("release-notes", *L, "--version", "1.21.1", "--tag", "t", "--min", "S1")
         expect(rc == 0 and "No known issues at S1 or above." in o, f"no issues: {o}")
+        # per-platform scope: a cf-only S1 blocks the cf upload, not mr; mr's notes omit it
+        rc, o = cli("add", *L, "--title", "crash on the CurseForge jar only", "--failure", "crash", "--visibility",
+                    "common", "--reach", "normal", "--workaround", "no", "--lowest", "1.21.8", "--platform", "cf")
+        expect(rc == 0 and find(read_ledger(led), "KI-7")["platforms"] == ["cf"], f"add --platform cf: {o}")
+        rc, o = cli("blocks-publish", *L, "--version", "1.21.8", "--platform", "cf")
+        expect(rc == 1 and "KI-7" in o and "do not upload" in o, f"a cf-only S1 blocks cf: {rc} {o}")
+        rc, o = cli("blocks-publish", *L, "--version", "1.21.8", "--platform", "mr")
+        expect(rc == 0 and "no open S1" in o, f"... and not mr: {rc} {o}")
+        rc, o = cli("blocks-publish", *L, "--version", "1.21.5", "--platform", "mr")
+        expect(rc == 1 and "KI-1" in o, f"an S1 with no platforms blocks every platform: {rc} {o}")
+        rc, o = cli("release-notes", *L, "--version", "1.21.8", "--tag", "t", "--platform", "mr")
+        expect(rc == 0 and "CurseForge jar only" not in o and "No known issues" in o, f"mr's notes omit a cf-only issue: {o}")
+        rc, o = cli("release-notes", *L, "--version", "1.21.8", "--tag", "t", "--platform", "cf")
+        expect(rc == 0 and "**S1** crash on the CurseForge jar only (KI-7)" in o, f"cf's notes list it: {o}")
+        rc, o = cli("release-notes", *L, "--version", "1.21.8", "--tag", "t")
+        expect(rc == 0 and "(KI-7) (cf only)" in o, f"notes for every platform name the scope: {o}")
+        rc, o = cli("list", *L, "--platform", "mr", "--json")
+        expect(rc == 0 and "KI-7" not in [x["id"] for x in json.loads(o)] and len(json.loads(o)) == 6, f"list --platform: {o}")
+        rc, o = cli("reopens", *L, "--version", "1.21.8", "--id", "KI-7")
+        expect(rc == 0, f"reopens is unchanged by platforms: {o}")
+        cli("status", *L, "KI-7", "--set", "1.21.8=fixed@abcdef1")
         # a multi-mod repository: one ledger per mod
         rc, o = cli("add", *L, "--mod", "examplemod", "--title", "t", "--failure", "kick", "--visibility", "rare",
                     "--reach", "normal", "--workaround", "no", "--lowest", "1.21.1")
@@ -760,6 +827,8 @@ def self_check():
             (lambda x: x["issues"][0].update(extra=1), "unknown key"),
             (lambda x: x["issues"][0].update(override={"severity": "S2"}), "override"),
             (lambda x: x["issues"][0].update(source="forum"), "source"),
+            (lambda x: x["issues"][0].update(platforms=["gh"]), "platforms"),
+            (lambda x: x["issues"][0].update(platforms=[]), "platforms"),
         ]
         for mutate, why in cases:
             x = json.loads(json.dumps(good))
