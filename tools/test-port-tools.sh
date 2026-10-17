@@ -6,8 +6,11 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
-ok()  { echo "  PASS  $1"; pass=$((pass+1)); }
-bad() { echo "  FAIL  $1"; fail=$((fail+1)); }
+# each result line says how long its test took (since the previous result), so a slow CI run shows where the time goes
+_t_last=$SECONDS
+_took() { _dt=$((SECONDS - _t_last)); _t_last=$SECONDS; }    # in this shell, not a $(...) subshell
+ok()  { _took; printf '  PASS %4ss  %s\n' "$_dt" "$1"; pass=$((pass+1)); }
+bad() { _took; printf '  FAIL %4ss  %s\n' "$_dt" "$1"; fail=$((fail+1)); }
 
 echo "1. override-probe.py"
 if command -v javac >/dev/null 2>&1; then
@@ -524,6 +527,76 @@ PY
 grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
   || bad "port_gates check: $out"
 
+# ---- stacked version branches (tools/fork-branches.py, the default for a multi-version fork): migrating a layer fork, the
+# branch-mode done check through fork-port.py's own CLI, the cascade, the library's release-side done check -- on a layer
+# fixture; a single-version fork is untouched (its own checks above and below run unchanged)
+echo "fork-branches: stacked version branches (migrate, done, cascade, library release, CLI)"
+export FB_FIXTURE_CACHE="$T/fb-fixtures"    # the fork-branches fixtures, built once for every block below
+# On Windows (Git Bash: msys/cygwin) only the platform leg: the line-ending cases and the port-ahead migration that
+# failed natively there. The full default self-check -- every named case -- runs on Linux on every PR.
+fb_mode=""; case "${OSTYPE:-}" in msys*|cygwin*|win*) fb_mode="--platform" ;; esac
+out="$(python3 tools/fork-branches.py --self-check $fb_mode 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork-branches self-check${fb_mode:+ $fb_mode, the OS leg -- Linux runs all of}: a 3-target layer fixture migrates to byte-identical branches (every source set, resources, mixin arrays, toml ranges, versions), each done as its layer target was; the checkout untouched; without MIGRATED.json the layer records do not count; an edit stales gates and review; cascade carries the authors' change through each version's rows and a lower fix upward, and stops on a conflict; add-target refused over an undone parent; the library rule; a single-version fork refused, nothing written; cascade --plan on a throwaway clone (one decision per file and hunk across versions, mechanical ones merged, a default logged, an escalated one in the one issue), --apply holding only the decision files open while the versions above go on, --apply-decisions clearing them everywhere; port_taken re-offers a change no run took" \
+  || bad "fork-branches self-check: $(tail -5 <<<"$out")"
+out="$(python3 - "$T/fb" <<'PY' 2>&1
+import importlib.util, json, os, pathlib, subprocess, sys
+d = pathlib.Path(sys.argv[1]); d.mkdir()
+s = importlib.util.spec_from_file_location("fb", "tools/fork-branches.py"); fb = importlib.util.module_from_spec(s); s.loader.exec_module(fb)
+r, g, _ = fb._migrated_fixture(d)          # shared, each target done, migrated (built once: FB_FIXTURE_CACHE)
+bad = []
+def fp(*a):
+    x = subprocess.run([sys.executable, "tools/fork-port.py", "--repo", str(r), *a], capture_output=True, text=True, encoding="utf-8")
+    return x.returncode, x.stdout + x.stderr
+# the library's release-side check is the same done list, run on the tag's tree with the library's history (gap 1)
+g("checkout", "-q", "neoforge-1.21.1")
+g("tag", "lib-1.0-mc1.21.5", "neoforge-1.21.5")
+os.environ["MMVU_CACHE_DIR"] = str(d / "cache")      # not HOME: Windows' home is USERPROFILE
+s2 = importlib.util.spec_from_file_location("ld", "tools/layer-deps.py"); ld = importlib.util.module_from_spec(s2); s2.loader.exec_module(ld)
+os.environ["LAYER_DEPS_GIT_URL"] = str(d / "nowhere")    # a first, wrong URL: cached nothing
+ld.library_clone("owner/lib")[0] is None or bad.append("a clone from a missing URL")
+subprocess.run(["git", "clone", "-q", "--bare", str(r), str(d / "old")], check=True)
+subprocess.run(["git", "-C", str(d / "old"), "tag", "-d", "lib-1.0-mc1.21.5"], check=True, capture_output=True)
+os.environ["LAYER_DEPS_GIT_URL"] = str(d / "old"); ld.library_clone("owner/lib")
+os.environ["LAYER_DEPS_GIT_URL"] = str(r)                # the URL changed: the cached clone follows it
+done, why, _n = ld.library_done_branch_release("owner/lib", "lib-1.0-mc1.21.5", "1.21.5")
+done or bad.append(f"a released, done library version reads done at its tag (fetched from the URL as it now is): {why} "
+                  + " / ".join(fb.explain_changed(r, "1.21.5", "lib-1.0-mc1.21.5", w.split()[-1])
+                               for w in why.split("; ") if "no verdict: changed " in w))
+(d / "cache/git/owner__lib/HEAD").is_file() or bad.append("the clone is under $MMVU_CACHE_DIR")
+g("checkout", "-q", "neoforge-1.21.1")
+rc, out = fp("--target", "1.21.4", "--check-done")
+rc and bad.append(f"--check-done on a migrated version (checkout elsewhere): {rc} {out}")
+rc, out = fp("--target", "1.21.4", "--from-stage", "cost", "--gates", "none")
+(rc != 2 or "check it out first" not in out) and bad.append(f"a resume off the branch: {rc} {out}")
+g("checkout", "-q", "neoforge-1.21.4")
+rc, out = fp("--target", "1.21.4", "--write-test-items")
+(rc or not (r / ".port/1.21.4/TEST-ITEMS.md").is_file()) and bad.append(f"--write-test-items on the branch: {rc} {out}")
+g("checkout", "-q", "--", ".")
+(r / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain { int v = 7; }\n", encoding="utf-8")
+g("commit", "-qam", "edit on 1.21.4")
+g("tag", "lib-1.1-mc1.21.4", "HEAD")
+done, why, _n = ld.library_done_branch_release("owner/lib", "lib-1.1-mc1.21.4", "1.21.4")
+(done or "not done" not in why) and bad.append(f"control: a tag after an unreviewed edit is not done: {why}")
+rc, out = fp("--target", "1.21.4", "--check-done")
+(rc != 18 or "GATES.md" not in out or "no verdict: changed src/main/java/com/example/mod/Plain.java" not in out) and \
+    bad.append(f"after an edit: not done, gates stale, the file a review row: {rc} {out}")
+g("checkout", "-q", "neoforge-1.21.3")
+(r / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain {\n int v = 1;\n}\n", encoding="utf-8")
+g("commit", "-qam", "fix at 1.21.3")
+rc, out = fp("--chain", "1.21.3..1.21.5", "--gates", "none")
+(rc != 1 or "cascade" not in out or "STOPPED at 1.21.4" not in out) and \
+    bad.append(f"--chain on version branches is the cascade, and stops where 1.21.4's own edit conflicts: {rc} {out}")
+class E(Exception): pass
+import urllib.error
+def get(u):
+    if ".port/1.21.5/branch.properties" in u: return b"x"
+    raise urllib.error.HTTPError(u, 404, "nf", {}, None)
+(ld.branch_release("o/l", "t", "1.21.5", get) and not ld.branch_release("o/l", "t", "1.21.4", get)) or bad.append("branch_release")
+print("\n".join(bad) or "OK")
+PY
+)"
+[ "$out" = "OK" ] && ok "fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write-test-items on it, an edit makes it not done (gates stale, a review row), --chain is the cascade and stops at a conflict; layer-deps' release-side done check on a tag agrees with the checkout's (its clone under \$MMVU_CACHE_DIR, re-pointed when the URL changes)" \
+  || bad "fork-port / layer-deps on version branches: $out"
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, layer mode"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
   E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \
@@ -566,7 +639,7 @@ else
   echo "  SKIP  audit-event-listeners (no javac/jar)"
 fi
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b); a client killed with exit 137 and no verdict is 'killed' (OOM said only when the cgroup or dmesg confirms it), a caught WARN trace is never the stop reason, and Gate C does not start below the free-memory floor (faked meminfo and cgroup)" || bad "gate-loop self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b); a client killed with exit 137 and no verdict is 'killed' (OOM said only when the cgroup or dmesg confirms it), a caught WARN trace is never the stop reason, and Gate C does not start below the free-memory floor (faked meminfo and cgroup); a second Gate C client on the machine waits for the first's lock (saying who holds it) and a killed holder's lock is free" || bad "gate-loop self-check: $out"
 out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick and crash-cause self-check" || bad "shipped-gate self-check: $out"
 python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
@@ -1012,6 +1085,23 @@ scr, ctr, wid = "class S extends Screen" + body, "class C extends AbstractContai
 gone = lambda s: "renderBackground" not in f(s) and "super.render(g, mx, my, pt);" in f(s)
 sys.exit(0 if gone(scr) and gone(ctr) and f(wid) == wid else 1)
 PY
+# 1.21.6+ text draws skip a colour with alpha 0 (CATALOG M75): the shared 1.21.8 row makes a 6-digit literal colour opaque
+python3 - <<'PY' && ok "shared rows: the 1.21.6 text-colour row makes 0xRRGGBB opaque in drawString/drawCenteredString/drawWordWrap only, as a whole argument" || bad "the text-colour row is wrong"
+import importlib.util, pathlib, sys
+s = importlib.util.spec_from_file_location("ps", "templates/fork-layer/tools/prepare-sources.py"); ps = importlib.util.module_from_spec(s); s.loader.exec_module(ps)
+rows = [r for r in ps.load_renames("templates/fork-layer/shared/1.21.8/renames.tsv") if "drawCenteredString" in r[0]]
+_tok, rx = ps.split_rules(rows)
+f = lambda t: rx[0][0].sub(rx[0][1], t)
+cases = {"g.drawString(this.font, name, 4, 4, 0xFFFFFF);": "g.drawString(this.font, name, 4, 4, 0xFFFFFFFF);",
+         "g.drawString(font, s, x, y, 0x40ff40, false);": "g.drawString(font, s, x, y, 0xFF40ff40, false);",
+         "graphics.drawCenteredString(font, title, w / 2, 8, 0x404040);": "graphics.drawCenteredString(font, title, w / 2, 8, 0xFF404040);",
+         "g.drawWordWrap(font, txt, 2, 2, 100, 0xAAAAAA);": "g.drawWordWrap(font, txt, 2, 2, 100, 0xFFAAAAAA);",
+         "g.drawString(font, s, x, y, 0x80FFFFFF);": None, "g.drawString(font, s, x, y, color);": None,
+         "g.fill(0, 0, 4, 4, 0x202020);": None, "int c = 0x123456;": None}
+bad = [(k, f(k)) for k, v in cases.items() if f(k) != (v or k)]
+print(bad) if bad else None
+sys.exit(1 if len(rows) != 1 or bad else 0)
+PY
 # R25: the name RegIds.enter records lasts only while ITS supplier runs -- a registration that never entered a name used to
 # take the previous registration's id silently; it now gets none (vanilla's loud "Item id not set")
 if command -v javac >/dev/null 2>&1; then
@@ -1241,6 +1331,55 @@ need(eb and re.search(r"^\s*if \(into == null\) \{\s*into = scopePass;", eb.grou
 need(core and re.search(r"else if \(replacedDefaults\) \{\s*RenderSystem\.bindDefaultUniforms\(into\);", core.group(1))
      and core.group(1).find("bindDefaultUniforms(into)") < core.group(1).find("tb.close()"),
      "an in-pass draw that replaced Projection / Globals leaves the owner's pass bound to blocks it then closes")
+print(*bad, sep="\n")
+sys.exit(1 if bad else 0)
+PY
+python3 - <<'PY' && ok "shared 1.21.5 / 1.21.8 / 1.21.10 render helpers: a LegacyRenderType's setupRenderState loads its shader, blend / depth / write-mask / cull / bias state and output target into LegacyGl (so setupRenderState + drawWithShader draws as the type does) and clearRenderState restores it; draw() runs the shader shard once; 1.21.5's draw calls the shader's apply() before binding its uniforms and samplers, keeps no COLOR_MODULATOR written inside apply() (as on 1.21.1) and calls clear() after" || bad "shared 1.21.5-1.21.10 render helpers: a set-up LegacyRenderType no longer reaches drawWithShader, or 1.21.5's draw lost apply()"
+import pathlib, re, sys
+strip = lambda s: re.sub(r"//[^\n]*|/\*.*?\*/", "", s, flags=re.S)
+bad = []
+def need(c, msg):
+    if not c: bad.append(msg)
+def body(text, head):
+    m = re.search(head + r"\s*\{", text)
+    if not m: return None
+    i, depth = m.end(), 1
+    while depth and i < len(text):
+        depth += {"{": 1, "}": -1}.get(text[i], 0); i += 1
+    return text[m.end():i - 1]
+for v in ("1.21.5", "1.21.8", "1.21.10"):
+    d = pathlib.Path("templates/fork-layer/shared") / v / "java"
+    gl = strip((d / "LegacyGl.java").read_text(encoding="utf-8"))
+    lrt = strip((d / "LegacyRenderType.java").read_text(encoding="utf-8"))
+    setup = body(lrt, r"public void setupRenderState\(\)")
+    clear = body(lrt, r"public void clearRenderState\(\)")
+    draw = body(lrt, r"public void draw\(MeshData mesh\)")
+    need(setup and re.search(r"super\.setupRenderState\(\);.*LegacyGl\.load\(state\.key, state\.shader\.shader\(\), getRenderTarget\(\)\).*state\.shader\.setupRenderState\(\);", setup, re.S),
+         f"{v}: LegacyRenderType.setupRenderState does not run its shards, load its shader/state into LegacyGl and run the shader shard")
+    need(clear and re.search(r"state\.shader\.clearRenderState\(\);.*LegacyGl\.restore\(.*super\.clearRenderState\(\);", clear, re.S),
+         f"{v}: LegacyRenderType.clearRenderState does not restore LegacyGl's state")
+    need(draw and "setupRenderState();" in draw and "state.shader.setupRenderState" not in draw and "clearRenderState();" in draw,
+         f"{v}: LegacyRenderType.draw runs the shader shard twice or not inside setup/clear")
+    dws = body(gl, r"public static void drawWithShader\(MeshData mesh\)")
+    need(dws and re.search(r"draw\(mesh, shader, current\(\), target != null \? target :", dws),
+         f"{v}: LegacyGl.drawWithShader ignores a set-up type's output target")
+    cur = body(gl, r"static Key current\(\)")
+    need(cur and "biasScale, biasConstant" in cur, f"{v}: LegacyGl.current() drops a set-up type's depth bias")
+    load = body(gl, r"static Saved load\(Key key, Object shaderObj, RenderTarget into\)")
+    need(load and all(f in load for f in ("blend =", "depthTest =", "depthWrite =", "writeColor =", "writeAlpha =", "cull =",
+                                          "biasScale =", "biasConstant =", "shader = shaderObj", "target = into")),
+         f"{v}: LegacyGl.load does not set every piece of a type's state")
+    rest = body(gl, r"static void restore\(Saved s\)")
+    need(rest and "shader" not in rest and "target = s.target()" in rest and "blend = s.blend()" in rest,
+         f"{v}: LegacyGl.restore does not put the state back (or resets the shader, which 1.21.4's shard left set)")
+d = pathlib.Path("templates/fork-layer/shared/1.21.5/java")
+gl = strip((d / "LegacyGl.java").read_text(encoding="utf-8"))
+core = body(gl, r"static void draw\(MeshData mesh, Object shaderObj, Key key, RenderTarget target\)")
+need(core and 0 <= core.find("own.apply();") < core.find("COLOR_MODULATOR.touched()", core.find("own.apply();")) < core.find("own.bind("),
+     "1.21.5: LegacyGl.draw does not call the shader's apply() before the COLOR_MODULATOR check and bind()")
+need(core and re.search(r"own\.apply\(\);\s*if \(cm != null\) \{\s*if \(before != null\) cm\.set\(before\);\s*else if \(!wrote\) cm\.consume\(\);", core),
+     "1.21.5: a COLOR_MODULATOR written inside apply() reaches the draw (1.21.1 never uploaded it)")
+need(core and re.search(r"finally \{\s*if \(own != null\) own\.clear\(\);", core), "1.21.5: LegacyGl.draw does not call clear() after the draw")
 print(*bad, sep="\n")
 sys.exit(1 if bad else 0)
 PY

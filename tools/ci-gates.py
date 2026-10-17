@@ -138,7 +138,8 @@ def log_tails(paths, n=40, cap=12000):
 
 GATE_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md",   # what a gate run (and
                 "INVENTORY-CHECK.json",      # fork-port.py's done record, layer-inventory.py's account) writes into a target
-                "DEPS.md")                   # (and layer-deps.py resolve's table, rewritten by fork-port.py's every setup)
+                "DEPS.md",                   # (and layer-deps.py resolve's table, rewritten by fork-port.py's every setup)
+                "DRIFT.md")                  # (and the --accept-upstream-drift line fork-port.py appends before the gates)
 
 
 def tested_tree(repo, mc):
@@ -157,6 +158,47 @@ def tested_tree(repo, mc):
     if not dirty:
         return head
     return f"{head} + uncommitted: {', '.join(dirty[:6])}{f' (+{len(dirty) - 6} more)' if len(dirty) > 6 else ''}"
+
+
+def branch_version(repo):
+    """The Minecraft version of a fork's VERSION BRANCH checked out at `repo` (tools/fork-branches.py: gradle.properties'
+    minecraft_version, with .port/<it>/branch.properties beside it), else None -- the port branch, a layer branch and
+    every single-version fork."""
+    gp = pathlib.Path(repo) / "gradle.properties"
+    m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
+    return m.group(1) if m and (pathlib.Path(repo) / ".port" / m.group(1) / "branch.properties").is_file() else None
+
+
+def read_kv(path):
+    p = pathlib.Path(path)
+    return dict(re.findall(r"(?m)^\s*([\w.:\\-]+)\s*=\s*(.*?)\s*$", p.read_text(encoding="utf-8"))) if p.is_file() else {}
+
+
+LIBRARY_SKIP = ("spawn", "battle")
+
+
+def is_library(repo, bv):
+    """A version branch marked library=true (its .port/<bv>/branch.properties). Only a version branch: there the
+    library rule stands in for the skipped phases (a dependent's Gate C against the jar, tools/fork-branches.py); a
+    layer fork, which has no such rule, runs every phase as before."""
+    return bool(bv) and read_kv(pathlib.Path(repo) / ".port" / bv / "branch.properties").get("library") == "true"
+
+
+def library_phases(phases, library):
+    """A library fork's Gate C phases: without spawn and battle, which spawn the mod's entities -- a library has none,
+    so they check nothing there (issue #133); its versions are proven by a dependent's Gate C instead
+    (tools/fork-branches.py library-record). -> (phases kept, phases skipped)."""
+    if not library:
+        return phases, []
+    return [p for p in phases if p not in LIBRARY_SKIP], [p for p in phases if p in LIBRARY_SKIP]
+
+
+def cf_jars(libs, found, mc=None):
+    """The CurseForge variant jar(s) a build writes beside the shipped one (`*_cf*.jar`, for a layer target the ones
+    named for it): each is booted by the shipped-jar gate too, since players install it."""
+    pat = f"*_cf*-mc{mc}.jar" if mc else "*_cf*.jar"
+    return [j for j in sorted(pathlib.Path(libs).glob(pat)) if j != found and "-sources" not in j.name] \
+        if pathlib.Path(libs).is_dir() else []
 
 
 def self_check():
@@ -203,12 +245,14 @@ def self_check():
         (t / "A.java").write_text("a", encoding="utf-8"); (t / "GATES.md").write_text("g", encoding="utf-8")
         (t / "INVENTORY-CHECK.json").write_text("{}", encoding="utf-8")
         (t / "DEPS.md").write_text("# Dependencies\n", encoding="utf-8")
+        (t.parent.parent / "DRIFT.md").write_text("- accepted\n", encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "c")
         h = subprocess.run(["git", "-C", d, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                            encoding="utf-8").stdout.strip()
         (t / "GATES.md").write_text("g2", encoding="utf-8")
         (t / "INVENTORY-CHECK.json").write_text("{\"x\": 1}", encoding="utf-8")   # layer-inventory.py's account: an output
         (t / "DEPS.md").write_text("# Dependencies\n\nresolved here\n", encoding="utf-8")   # setup's layer-deps resolve
+        (t.parent.parent / "DRIFT.md").write_text("- accepted\n- accepted again\n", encoding="utf-8")   # this run's drift line
         ok &= tested_tree(d, "1.21.4") == h                      # the run's own output is not an edit
         (t / "A.java").write_text("b", encoding="utf-8")
         ok &= tested_tree(d, "1.21.4") == f"{h} + uncommitted: .multiversion/targets/1.21.4/A.java"
@@ -216,6 +260,26 @@ def self_check():
         # --shipped on a layer target boots the sibling ports' per-target jars beside it (layer-deps.sibling_jars, its
         # own self-check covers a dependent fixture); a fork with no sibling substitute gets no --deps
         ok &= _load("layer_deps", "layer-deps.py").sibling_jars(d, "1.21.4") == []
+    # a version branch (tools/fork-branches.py) is known by .port/<its gradle.properties version>/; a single-version
+    # fork and a layer branch are not one; a library's Gate C drops spawn and battle; the _cf jar is booted too
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d)
+        (r / "gradle.properties").write_text("minecraft_version=1.21.4\nneo_version=21.4.158\n", encoding="utf-8")
+        ok &= branch_version(r) is None                                   # single-version fork: unchanged path
+        (r / ".port/1.21.3").mkdir(parents=True); (r / ".port/1.21.3/branch.properties").write_text("x=1\n", encoding="utf-8")
+        ok &= branch_version(r) is None                                   # only a parent's carried records: not this one
+        (r / ".port/1.21.4").mkdir(); (r / ".port/1.21.4/branch.properties").write_text("library=true\n", encoding="utf-8")
+        ok &= branch_version(r) == "1.21.4" and read_kv(r / ".port/1.21.4/branch.properties").get("library") == "true"
+        ok &= library_phases(["launch", "spawn", "battle", "gauntlet"], True) == (["launch", "gauntlet"], ["spawn", "battle"])
+        ok &= library_phases(["launch", "spawn"], False) == (["launch", "spawn"], [])
+        ok &= is_library(r, "1.21.4")
+        (r / ".multiversion").mkdir(); (r / ".multiversion/base.properties").write_text("library=true\n", encoding="utf-8")
+        ok &= not is_library(r, None)              # a layer fork marked library: every phase, as before
+        libs = r / "libs"; libs.mkdir()
+        for n in ("m-1_mr.jar", "m-1_cf.jar", "m-1_cf-sources.jar", "m-1_mr-mc1.21.4.jar", "m-1_cf-mc1.21.4.jar"):
+            (libs / n).write_bytes(b"x")
+        ok &= [j.name for j in cf_jars(libs, libs / "m-1_mr.jar")] == ["m-1_cf-mc1.21.4.jar", "m-1_cf.jar"]
+        ok &= [j.name for j in cf_jars(libs, libs / "m-1_mr-mc1.21.4.jar", "1.21.4")] == ["m-1_cf-mc1.21.4.jar"]
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -242,7 +306,25 @@ def main():
                                  "a second run on the same checkout is refused, exit 14)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
-    if a.mc:
+    bv = branch_version(repo)        # a version branch (tools/fork-branches.py): a plain build at its own version
+    if bv:
+        bprops = read_kv(repo / ".port" / bv / "branch.properties")
+        # the harness is written for the base version and renamed for this one, as for a layer target (port_gates.py)
+        os.environ["PORT_BRANCH_MC"] = bv
+        os.environ["PORT_BRANCH_BASE"] = bprops.get("base_minecraft_version", "1.21.1")
+    if a.mc and bv and a.mc != bv:
+        print(f"[ci-gates] --mc {a.mc}: the checkout is version branch {bv}", flush=True)
+        return 2
+    if a.mc and bv:
+        # one gate run per checkout (CATALOG X44), as for a layer target; no -P arguments: the branch builds its version
+        lock = _load("layer_ci", "layer-ci.py").CheckoutLock(repo, "ci-gates.py", a.mc)
+        busy = lock.acquire()
+        if busy:
+            print(f"[ci-gates] {busy}", flush=True)
+            return 14
+        atexit.register(lock.release)
+        print(f"[ci-gates] version branch {bv} (.port/{bv}/branch.properties)", flush=True)
+    elif a.mc:
         layer = repo / ".multiversion/tools/layer.py"
         if not (repo / ".multiversion/targets" / a.mc).is_dir() or not layer.is_file():
             print(f"[ci-gates] --mc {a.mc}: no .multiversion/targets/{a.mc} in {repo}", flush=True)
@@ -345,8 +427,14 @@ def main():
                last.replace("optional-dep-scan: ", "")[:300])
 
     env = dict(os.environ, **pu.gate_env(c))
+    library = is_library(repo, bv)
+    phases, skipped = library_phases([q for q in a.gatec.split(",") if q and q != "none"], library)
+    for q in skipped:
+        rows.append(f"| Gate C -- real client, `{q}` | skipped | a library: no entity of its own to spawn; proven by a "
+                    "dependent's Gate C against this jar (tools/fork-branches.py library-record) |")
+        print(f"[ci-gates] Gate C {q}: skipped (library)", flush=True)
     for label, extra in [("Gate B -- headless server loads the mod, GameTests", [])] + \
-            [(f"Gate C -- real client, `{p}`", ["--gatec", p]) for p in (q for q in a.gatec.split(",") if q and q != "none")]:
+            [(f"Gate C -- real client, `{p}`", ["--gatec", p]) for p in phases]:
         if not ok:
             rows.append(f"| {label} | not run | an earlier gate failed |")
             continue
@@ -395,18 +483,30 @@ def main():
             rows.append("| Shipped jar -- the built jar boots in a real server | not run | an earlier gate failed |")
         else:
             libs = bdir / "libs"
-            pat = a.shipped_jar or ((repo / ".multiversion/shipped-jar.txt").read_text(encoding="utf-8").split() or [""])[0] \
-                if (a.shipped_jar or (repo / ".multiversion/shipped-jar.txt").is_file()) else None
-            pat = target_jar_glob(pat, a.mc)
+            sj = repo / (f".port/{bv}" if bv else ".multiversion") / "shipped-jar.txt"
+            pat = a.shipped_jar or (sj.read_text(encoding="utf-8").split() or [""])[0] \
+                if (a.shipped_jar or sj.is_file()) else None
+            pat = target_jar_glob(pat, None if bv else a.mc)
             found = sorted(libs.glob(pat)) if pat and libs.is_dir() else (sorted(libs.glob("*.jar")) if libs.is_dir() else [])
             label = "Shipped jar -- the built jar boots in a real server, the mod's own logs show its subsystems ran"
             if len(found) != 1:
                 record(label, False, f"cannot tell which jar a player installs: {len(found)} match(es) in {libs}"
                                      f"{' for ' + pat if pat else ''}; pass --shipped-jar GLOB or write .multiversion/shipped-jar.txt")
-            else:
-                cmd = [sys.executable, str(ROOT / "tools/shipped-gate.py"), "--repo", str(repo), "--jar", str(found[0]),
-                       "--work-dir", str(work / "shipped")]
-                if a.mc:
+            for jar in ([found[0]] + (cf_jars(libs, found[0], None if bv else a.mc) if a.mc else [])) if len(found) == 1 else []:
+                first = jar == found[0]
+                log_name = "shipped-gate.log" if first else f"shipped-gate-{jar.stem}.log"
+                cmd = [sys.executable, str(ROOT / "tools/shipped-gate.py"), "--repo", str(repo), "--jar", str(jar),
+                       "--work-dir", str(work / ("shipped" if jar == found[0] else f"shipped-{jar.stem}"))]
+                if bv:
+                    gp = repo / "gradle.properties"
+                    m = re.search(r"^neo_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8"), re.M) if gp.is_file() else None
+                    cmd += ["--mc", bv] + (["--neo", m.group(1)] if m else [])
+                    if (repo / ".port" / bv / "shipped-expect.txt").is_file():
+                        cmd += ["--expect-file", str(repo / ".port" / bv / "shipped-expect.txt")]
+                    sib = _load("layer_deps", "layer-deps.py").sibling_jars(repo, bv)
+                    if sib:
+                        cmd += ["--deps", *sib]
+                elif a.mc:
                     cmd += ["--mc", a.mc]
                     # a dependent fork's layer target: the sibling ports' per-target jars beside the built one (the
                     # port branch's `shipped jars` job passes the --dep-jar jars the same way); none -> no --deps
@@ -422,14 +522,14 @@ def main():
                         if (repo / ".multiversion" / n).is_file():
                             cmd += ["--expect-file", str(repo / ".multiversion" / n)]
                 r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
-                (work / "shipped-gate.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+                (work / log_name).write_text(r.stdout + r.stderr, encoding="utf-8")
                 print(r.stdout[-4000:] if r.returncode == 0 else r.stdout + r.stderr, flush=True)
                 if r.returncode != 0:   # the mod's own logs and latest.log: why an agent/coremod did not run (#88)
-                    print(log_tails(sorted((work / "shipped" / "server" / "logs").glob("*.log"))), flush=True)
+                    print(log_tails(sorted((work / ("shipped" if first else f"shipped-{jar.stem}") / "server" / "logs").glob("*.log"))), flush=True)
                 rl = [l.replace("[shipped-gate] ", "") for l in r.stdout.splitlines() if "FAIL" in l or "PASS" in l]
                 bad = [l for l in rl if l.startswith("FAIL")]
-                record(label, r.returncode == 0,
-                       f"{found[0].name}: " + ("; ".join(l[:160] for l in bad[:2]) + f" (see {work / 'shipped-gate.log'})" if bad
+                record(label if first else f"{label} ({jar.name})", r.returncode == 0,
+                       f"{jar.name}: " + ("; ".join(l[:160] for l in bad[:2]) + f" (see {work / log_name})" if bad
                                                   else f"{len([l for l in rl if l.startswith('PASS')])} check(s) green"
                                                        if r.returncode == 0 else (r.stdout + r.stderr).strip().splitlines()[-1][:200]))
 

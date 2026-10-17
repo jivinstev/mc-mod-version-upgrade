@@ -256,11 +256,12 @@ def build_inventory(repo):
 
 # ---------------------------------------------------------------- per-target account
 
-def _drops(mv, names):
-    """{rel: reason or ""} over the chain's drops.txt (a comment block above a run of entries is their reason)."""
+def _drops(mv, names, dir_of=None):
+    """{rel: reason or ""} over the chain's drops.txt (a comment block above a run of entries is their reason).
+    dir_of(t): the directory holding t's drops.txt (default the layer's targets/<t>)."""
     out = {}
     for t in reversed(names):
-        p = mv / "targets" / t / "drops.txt"
+        p = (dir_of(t) if dir_of else mv / "targets" / t) / "drops.txt"
         if not p.is_file():
             continue
         note, pending = "", []
@@ -279,8 +280,9 @@ def _drops(mv, names):
     return out
 
 
-def _stub_files(tdir):
-    """{(set, rel): (reviewed?, review or open reason)} for T's STUBS.json entries."""
+def _stub_files(tdir, branch=False):
+    """{(set, rel): (reviewed?, review or open reason)} for T's STUBS.json entries (branch: a version branch's, whose
+    entries name src/<set>/java/<rel>)."""
     out = {}
     try:
         entries = json.loads(_read(tdir / "STUBS.json")) if (tdir / "STUBS.json").is_file() else []
@@ -290,6 +292,8 @@ def _stub_files(tdir):
         if not isinstance(e, dict) or not e.get("file"):
             continue
         m = re.search(r"/targets/[^/]+/(?:([\w-]+)/)?java/(.+)$", e["file"])
+        if not m and branch:
+            m = re.match(r"^src/([\w-]+)/java/(.+)$", e["file"])
         if not m:
             continue
         ok = bool(e.get("reviewed")) and not e.get("recheck")
@@ -297,11 +301,11 @@ def _stub_files(tdir):
     return out
 
 
-def _behaviour(mv, names):
-    """{item id: (entry, from target)} over the chain's BEHAVIOUR.json, nearest first; [problems]."""
+def _behaviour(mv, names, dir_of=None):
+    """{item id: (entry, from target)} over the chain's BEHAVIOUR.json, nearest first; [problems]. dir_of as _drops."""
     out, bad = {}, []
     for t in names:
-        p = mv / "targets" / t / "BEHAVIOUR.json"
+        p = (dir_of(t) if dir_of else mv / "targets" / t) / "BEHAVIOUR.json"
         if not p.is_file():
             continue
         try:
@@ -327,14 +331,15 @@ def _behaviour_for(beh, iid):
 
 
 def prepared_dirs(repo, target, sets):
-    """{set: prepared java dir} for target; a non-main set the layer does not prepare compiles from src/<set>/java."""
+    """{set: prepared java dir} for target (layer.gradle prepares every set's src/<set>/java); None for one not prepared
+    here -- never the raw src/<set>/java, which would read every item an overlay of that set changed as "same"."""
     b = repo / "build" / f"mc{target}" / "mv"
     out = {}
     for s in sets:
         if not (repo / "src" / s / "java").is_dir():
             continue
         p = b / ("java" if s == "main" else f"{s}-java")
-        out[s] = p if p.is_dir() else (None if s == "main" else repo / "src" / s / "java")
+        out[s] = p if p.is_dir() else None
     return out
 
 
@@ -368,6 +373,10 @@ def account(repo, target, inv=None):
     pdirs = prepared_dirs(repo, target, sets)
     if pdirs.get("main", 1) is None:
         raise ValueError(f"no prepared tree build/mc{target}/mv/java: run .multiversion/build.sh {target} compileJava first")
+    for s in sorted(k for k, v in pdirs.items() if v is None):
+        raise ValueError(f"no prepared tree build/mc{target}/mv/{s}-java (the {s} source set): run .multiversion/build.sh "
+                         f"{target} compileJava first, or .multiversion/tools/layer.py prepare --target {target} --set {s} "
+                         f"--src src/{s}/java --out build/mc{target}/mv/{s}-java")
     res = {s: [mv / "targets" / c / "resources" for c in names if s == "main"] + [repo / "src" / s / "resources"]
            for s in sets}
     res = {s: [d for d in v if d.is_dir()] for s, v in res.items()}
@@ -378,6 +387,16 @@ def account(repo, target, inv=None):
     review_p = mv / "targets" / target / "REVIEW.md"
     review = review_ok_names(_read(review_p)) if review_p.is_file() else {}
     beh, notes = _behaviour(mv, names)
+    src_moved = bool(inv.get("src_tree") and src_tree(repo) and inv["src_tree"] != src_tree(repo))
+    return _account(target, inv, pdirs, res, sets, now, overlaid, drops, stubs, review, beh, notes, src_moved)
+
+
+def _account(target, inv, pdirs, res, sets, now, overlaid, drops, stubs, review, beh, notes, src_moved):
+    """The account itself, from what account() (a layer target) or account_branch() (a version branch) gathered:
+    pdirs {set: java dir}, res {set: [resource dirs, nearest first]}, now scan_tree(pdirs), overlaid {(set, rel)} (files
+    a person changed, not the rename tables alone), drops {rel: reason}, stubs _stub_files(), review review_ok_names(),
+    beh _behaviour(), notes [..], src_moved: the base's sources changed since the inventory was built."""
+    lp = _plan()
     present = now
     java_text = None          # the prepared trees' Java, read once when a 1.21.5+ shader item needs it
 
@@ -504,7 +523,7 @@ def account(repo, target, inv=None):
         r["was"] = r["status"]
         r["status"] = "unaccounted"
         unacc.append(r["id"])
-    if inv.get("src_tree") and src_tree(repo) and inv["src_tree"] != src_tree(repo):
+    if src_moved:
         notes.append(f"the authors' src/ changed since {INV} was built: re-run tools/layer-inventory.py build")
     counts = {}
     for r in out:
@@ -520,6 +539,16 @@ def is_layer(repo):
 
 def cmd_build(a):
     repo = pathlib.Path(a.repo).resolve()
+    if not is_layer(repo) and _fb().checkout_version(repo):
+        try:
+            dest, inv = build_branch_inventory(repo)
+        except ValueError as e:
+            print(f"layer-inventory: {e}"); return 2
+        dest = pathlib.Path(a.out) if getattr(a, "out", None) else dest
+        if not a.dry_run:
+            dest.write_text(json.dumps(inv, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"layer-inventory: {len(inv['items'])} item(s) from the port branch" + ("" if a.dry_run else f" -> {dest}"))
+        return 0
     if not is_layer(repo):
         print("layer-inventory: no .multiversion/ in the fork (a single-version fork has no inventory requirement)")
         return 2
@@ -562,6 +591,99 @@ def check(repo, target, inventory=None):
 CHECK_FILE = "INVENTORY-CHECK.json"
 
 
+def check_text(rep):
+    """The account as INVENTORY-CHECK.json holds it (deterministic)."""
+    return json.dumps(rep, indent=1, ensure_ascii=False) + "\n"
+
+
+# ---------------------------------------------------------------- a version branch (tools/fork-branches.py)
+
+_FB = None
+
+
+def _fb():
+    global _FB
+    if _FB is None:                 # loaded once: a done check asks for it per version, and it is a large module
+        _FB = _load("fork_branches_for_inventory", "fork-branches.py")
+    return _FB
+
+
+def account_branch(repo, root, target, mechanical, inv=None, ref="HEAD"):
+    """account() for version branch `target` checked out (or exported) at `root`: its own src/<set>/java and
+    src/<set>/resources are what it builds; a file is `overlaid` (a person changed it) unless it is one of `mechanical`
+    (the rows alone made it: tools/fork-branches.py mechanical_files); drops.txt and BEHAVIOUR.json are read over the
+    chain's .port/<v>/ copies, STUBS.json and REVIEW.md from .port/<target>/; the inventory is .port/INVENTORY.json."""
+    root = pathlib.Path(root)
+    rec = root / ".port"
+    if inv is None:
+        p = rec / INV
+        if not p.is_file():
+            raise ValueError(f"no .port/{INV}: run tools/layer-inventory.py build --repo {root} on the version branch")
+        inv = json.loads(_read(p))
+    fb = _fb()
+    names = fb.chain(root, target)
+    sets = _sets(root)
+    pdirs = {s: root / "src" / s / "java" for s in sets if (root / "src" / s / "java").is_dir()}
+    res = {s: [root / "src" / s / "resources"] for s in sets if (root / "src" / s / "resources").is_dir()}
+    now = scan_tree(pdirs, {})
+    overlaid = {(s, rel) for s, d in pdirs.items() for rel in _rels(d, "*.java")
+                if f"src/{s}/java/{rel}" not in mechanical}
+    dir_of = lambda t: rec / t
+    drops = _drops(None, names, dir_of)
+    stubs = _stub_files(rec / target, branch=True)
+    review_p = rec / target / "REVIEW.md"
+    review = review_ok_names(_read(review_p)) if review_p.is_file() else {}
+    beh, notes = _behaviour(root / ".port-unused", names, dir_of)
+    pr = fb.port_ref_of(repo, root, target, ref)
+    now_src = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{pr}:src"], capture_output=True, text=True,
+                             encoding="utf-8").stdout.strip() if pr else ""
+    src_moved = bool(inv.get("src_tree") and now_src and inv["src_tree"] != now_src)
+    return _account(target, inv, pdirs, res, sets, now, overlaid, drops, stubs, review, beh, notes, src_moved)
+
+
+def check_branch(repo, root, target, mechanical=None, files=None, ref="HEAD"):
+    """check() for a version branch: (exit code, report or None, message lines)."""
+    root = pathlib.Path(root)
+    if mechanical is None:
+        fb = _fb()
+        files = files if files is not None else fb.root_files(repo, root, (root / ".git").exists())
+        mechanical = fb.mechanical_files(repo, root, target, ref, files)
+    try:
+        rep = account_branch(repo, root, target, mechanical, ref=ref)
+    except ValueError as e:
+        return 2, None, [f"layer-inventory: {e}"]
+    lines = [f"layer-inventory: {target}: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["counts"].items()))]
+    lines += [f"layer-inventory: note: {n}" for n in rep["notes"]]
+    lines += [f"layer-inventory: UNACCOUNTED {r['id']} ({r['detail']})" for r in rep["items"] if r["status"] == "unaccounted"]
+    if rep["unaccounted"]:
+        lines.append(f"layer-inventory: {target} is NOT done: {len(rep['unaccounted'])} base behaviour item(s) unaccounted for; "
+                     f"record each in .port/{target}/BEHAVIOUR.json, or review the file's STUBS.json entry")
+        return EXIT_UNACCOUNTED, rep, lines
+    return 0, rep, lines
+
+
+def build_branch_inventory(repo):
+    """.port/INVENTORY.json for a version branch checkout: built from the PORT branch's sources (the base build),
+    which a version branch does not hold. -> (path, inventory)."""
+    repo = pathlib.Path(repo)
+    fb = _fb()
+    t = fb.checkout_version(repo)
+    pr = fb.port_ref_of(repo, repo, t, "HEAD")
+    if not pr:
+        raise ValueError(f"the port branch {fb.info(repo, t).get('port_branch')} is not in this clone")
+    with tempfile.TemporaryDirectory() as d:
+        base = pathlib.Path(d) / "base"
+        for path, data in fb.ref_files(repo, pr, "src").items():
+            f = base / path
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(data)
+        inv = build_inventory(base)
+    inv["base"] = fb.info(repo, t).get("base_minecraft_version", "")
+    inv["src_tree"] = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{pr}:src"], capture_output=True, text=True,
+                                     encoding="utf-8").stdout.strip() or None
+    return repo / ".port" / INV, inv
+
+
 def write_check(repo, target, rep):
     """The target's account into .multiversion/targets/<t>/INVENTORY-CHECK.json (deterministic: rewritten only when it
     changed). A run output like GATES.md: what fork-port.py's done check and a reviewer read, not a reviewed input."""
@@ -584,6 +706,12 @@ def inventory_unaccounted(repo, target, write=True):
 
 
 def cmd_check(a):
+    if not is_layer(a.repo) and _fb().checkout_version(pathlib.Path(a.repo)) == a.target:
+        code, rep, lines = check_branch(pathlib.Path(a.repo).resolve(), pathlib.Path(a.repo).resolve(), a.target)
+        if rep is not None and not a.no_write:
+            (pathlib.Path(a.repo) / ".port" / a.target / CHECK_FILE).write_text(check_text(rep), encoding="utf-8")
+        print(json.dumps(rep, indent=1, ensure_ascii=False) if a.json and rep is not None else "\n".join(lines))
+        return code
     code, rep, lines = check(a.repo, a.target, a.inventory)
     if rep is not None and not a.inventory and not a.no_write:
         write_check(a.repo, a.target, rep)

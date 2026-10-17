@@ -1,0 +1,52 @@
+// Version-branch build settings for a community fork port (mc-mod-version-upgrade: templates/fork-branches).
+//
+// Applied by ONE line at the end of the authors' build.gradle on a fork's version branches (neoforge-1.21.3,
+// neoforge-1.21.4, ... -- tools/fork-branches.py), never on the port branch neoforge-1.21.1 nor on a single-version
+// fork. A version branch holds the full source for its Minecraft version and its own gradle.properties versions, so a
+// plain `./gradlew build` builds that version. This script adds only what gradle.properties cannot say, read from
+// .port/<minecraft_version>/branch.properties (the same keys a .multiversion/ layer target's target.properties had):
+//   java_version=N               the Java toolchain and --release (26.x needs 25)
+//   nfrt_version=V               the NeoForm runtime that stages this Minecraft (when ModDevGradle's own cannot)
+//   substitute.<g\:a>=<g:a:v>    a dependency's build for this Minecraft (tools/layer-deps.py writes these)
+//   exclude.<g\:a>=<reason>      a dependency with no build for this Minecraft that the port does not require
+// and runs the client in build/mc<version>/run, so one version's mod configs never reach another's client when one
+// checkout switches between version branches. Without that file (any other branch) it does nothing.
+
+def pbMc = project.findProperty('minecraft_version')?.toString()
+def pbFile = pbMc ? file(".port/${pbMc}/branch.properties") : null
+if (pbFile == null || !pbFile.exists()) {
+    return
+}
+def pbProps = new Properties()
+pbFile.withInputStream { pbProps.load(it) }
+
+if (extensions.findByName('neoForge') != null) {
+    neoForge.runs.matching { it.name == 'client' }.configureEach { r -> r.gameDirectory = file("build/mc${pbMc}/run") }
+}
+if (pbProps.getProperty('java_version')) {
+    def jv = pbProps.getProperty('java_version') as int
+    java.toolchain.languageVersion = JavaLanguageVersion.of(jv)
+    tasks.withType(JavaCompile).configureEach { options.release = jv }
+}
+if (pbProps.getProperty('nfrt_version')) {
+    neoFormRuntime.version = pbProps.getProperty('nfrt_version')
+}
+def pbSubs = pbProps.stringPropertyNames().findAll { it.startsWith('substitute.') }
+configurations.configureEach {
+    resolutionStrategy.dependencySubstitution {
+        pbSubs.each { k -> substitute(module(k.substring(11))).using(module(pbProps.getProperty(k))) }
+    }
+}
+pbProps.stringPropertyNames().findAll { it.startsWith('exclude.') }.each { k ->
+    def ga = k.substring(8).split(':', 2)
+    if (ga.length != 2 || !ga[0] || !ga[1]) {
+        throw new GradleException(".port/${pbMc}/branch.properties: ${k} is not exclude.<group>\\:<module> (escape the ':')")
+    }
+    configurations.configureEach { exclude group: ga[0], module: ga[1] }
+}
+if (pbSubs.any { pbProps.getProperty(it).startsWith('maven.modrinth:') }) {
+    repositories {
+        maven { url = 'https://api.modrinth.com/maven'; content { includeGroup 'maven.modrinth' } }
+    }
+}
+println "version branch: Minecraft ${pbMc} (.port/${pbMc}/branch.properties)"

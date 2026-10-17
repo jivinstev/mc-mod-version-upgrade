@@ -5,9 +5,14 @@ description: Publish a fork port as an unofficial community version on Modrinth 
 
 # Publish a fork port on Modrinth and CurseForge
 
-**Which fork:** a single-version fork is the default and the proven path, and Parts 1-3 below are exactly it. A fork with
-the opt-in multi-version layer adds "Part 4" and only when its config has a `layer` section; without that section
-`port-publish.py` behaves byte-for-byte as before (a test compares its output and API calls with a recorded golden).
+**Which fork:** a single-version fork is the default and the proven path, and Parts 1-3 below are exactly it. A fork of
+**version branches** (the default for a multi-version fork: `neoforge-1.21.3`, `neoforge-1.21.4`, ..., each with
+`.port/<version>/`) is published the same way, one version at a time: every version branch is a single-version port at
+its own Minecraft version, with its own CI, its own release (tag `<mod>-<ver>-mc<version>`) and Parts 1-3 run on that
+branch ("Version branches" below). An existing fork with the opt-in multi-version **layer** adds "Part 4" and only when its
+config has a `layer` section; without that section `port-publish.py` behaves byte-for-byte as before (a test compares its
+output and API calls with a recorded golden). Never set up a new multi-version fork for Part 4: it is for layer forks
+that have not migrated (fork-versions, "Migrating a layer fork").
 
 The step after `port-fork` and `keep-current`: a fork whose release a person has played and promoted goes onto
 the platforms players install from. Tool: `tools/port-publish.py`. The upload itself always runs in the fork's
@@ -121,8 +126,11 @@ working, and the answer is to promote and publish the build that fixes it, not t
    `--dep-jar-variant` on each port that depends on it), and the person plays the jar each platform will receive --
    a `_cf` jar nobody launched can crash every start while the `_mr` jar is fine. The dev-classpath gates cannot see
    that (a ModLauncher service in the jar is only discovered in a real launch).
-2. **Promote the library first, then the port that needs it**, each with its own column in every ledger it is
-   checked against (a column carried from the previous tag cites the diff between the two tags). When the person
+2. **Promote the library first, then the port that needs it** (or both together), each with its own column in every
+   ledger it is checked against (a column carried from the previous tag cites the diff between the two tags). Don't
+   exceed your dependency: the port MAY cut pre-releases pinned to the library's pre-release -- the pair is what gets
+   played -- but it is never promoted or published while a library release it pins is still a pre-release
+   (`port-ci.py promote` refuses unless `--with-dependency owner/lib` says the library is promoted alongside). When the person
    played the port with a sibling's pre-release, that sibling is promoted too, with the same note -- otherwise the
    port's publish is refused because its dependency is not published.
 3. **CurseForge waits for approval.** A file on CurseForge cannot name a project that is not approved yet
@@ -145,7 +153,18 @@ Nothing to do once Part 1 is merged: the `publish` job runs `needs: promote`, in
 the pre-release, rename that reconcile's column (`keep-current/<date>`) to the tag, joined with ` + ` for a shared
 ledger. Publishing judges exactly that column.
 
-## Part 4: a multi-version release (opt-in; layer forks only)
+## Version branches: one release per version
+
+Each version branch publishes its own promoted release through Parts 1-3, unchanged: the config
+(`.github/port-publish.json`, made once on the port branch) reaches every version branch with the cascade, so all versions
+go to the same Modrinth and CurseForge projects; the tag's `-mc<version>` gives each upload its game version and its
+version number `<ver>+<version>`. Dispatch Port CI **on that version's branch** (ref `neoforge-<version>`) with
+`publish = <tag>`: "built from the branch" is judged against the checked-out branch, so a version's tag must be on its own
+branch. A version's ledger column names its own tag; a port dependency must have published its release for the same
+Minecraft version first (the version branch's workflow pins that release, `fork-branches.py ci`). Only a version that is
+done (fork-versions "Done": `fork-port.py --check-done` on that branch) and has been played is promoted.
+
+## Part 4: a multi-version release (opt-in; existing layer forks only)
 
 Config: `"layer": {"branch": "<layer branch>", "targets": [optional explicit list], "released": [targets whose full
 gates were run]}`, AND the tag's commit must carry `.multiversion/`. `publish` then uploads **one file per green

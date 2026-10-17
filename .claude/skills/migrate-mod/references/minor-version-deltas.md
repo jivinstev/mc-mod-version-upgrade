@@ -279,7 +279,10 @@ L10. **Item rendering is an `ItemStackRenderState` (U12's mechanism, from the re
 stack, …, BakedModel)` and `getModel(stack, level, entity, seed)` are gone; `renderStatic(...)` resolves and draws.
 A hook that decided from the STACK while drawing has no stack: record it at `ItemModelResolver.appendItemLayers` (a
 one-line mixin) and read it where the layer draws — `ItemStackRenderState$LayerRenderState.render`, before its
-`popPose` — once per item, not per layer (shared `ItemStacks`). `ItemRenderer.renderModelLists` is private static and
+`popPose` — once per item, not per layer, and once per RENDER of the state, not per fill: one filled state is
+rendered several times (an item entity's `renderMultipleFromCount` draws up to five copies), so run only for the
+state's first layer (`@Accessor` for `layers`, `this == layers[0]`) and read the stack with shared `ItemStacks.get`
+(`claim`, once per fill, loses the pass on every copy after the first). `ItemRenderer.renderModelLists` is private static and
 takes the layer's resolved `int[]` tints instead of the stack. Shared `ItemModels.resolve` answers the old
 `getModel` from a resolved state's first layer.
 
@@ -518,6 +521,7 @@ L38. **1.21.4 behaviour a compile-clean, gate-green fork port still changed (CAT
 overlays reach every later target (cut overlays only after preparing each later target before and after). · **Anticipates:**
 §V (26.x has `Player.sendSystemMessage` again and no `displayClientMessage`).
 L39. **1.21.2-1.21.4 render state a compile loop gets wrong, and a 1.21.5 row's false positive (CATALOG M73, M74)** · `RenderType.entityTranslucentCull` → `NeoForgeRenderTypes.getItemLayeredTranslucent` (keeps back-face culling; `entityTranslucent` does not); the 1.21.5 NBT `getBoolean`/`getInt` rows leave `GameRules` reads alone. · **Anticipates:** nothing on 26.x checked.
+L40. **1.21.6 GUI: alpha-0 text colours draw nothing, and the GUI is deferred (CATALOG M75, M76)** · text draws skip a colour with no alpha byte (`0xRRGGBB` → `0xFFRRGGBB`, the shared 1.21.8 row for literals; `ARGB.opaque(c)` for a computed one); immediate draws during GUI rendering (`endBatch`, `drawWithShader`) need a `PictureInPictureRenderer`; time-animated GUI items need `ItemStackRenderState.setAnimated()`; a screen's own `renderBackground` is M61. · **Anticipates:** §V (26.x keeps the deferred GUI).
 
 **Tally (1.21.5 → 1.21.8 against the 26.2 era jump):** of the 11 changes above, 10 have a 26.2 counterpart (§V93, §V6, §V92,
 §X33, R17 (f), §V79, §V38b, §V31, §V6, R17 (a), §V81); 1 does not (L26, `send`'s listener). Adding L16 (Player.setItemSlot,

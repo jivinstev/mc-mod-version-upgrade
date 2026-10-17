@@ -6,11 +6,15 @@ description: Keep a fork port current with its authors, unattended or on request
 # Keep a fork port current
 
 **Which fork:** a single-version fork (one `neoforge-1.21.1`-style branch) is the default and the proven path; everything in
-"Run" below is for it. A fork with the opt-in multi-version layer (`.multiversion/`) gets the extra step in "A fork
-with the layer" after step 6, and nothing else changes for it. `tools/layer-sync.py detect --repo DIR --ref <layer_branch>`
-says which: pass the fleet entry's `layer_branch` when it has one, since the clone is usually checked out on the port
-branch, which has no `.multiversion/`. Without `--ref`, detect exits 3 (not 0) when the checked-out branch has no layer
-but another branch does, so a layer fork can never read as single-version and skip its layer step.
+"Run" below is for it. A multi-version fork is one of two kinds, and each gets one extra step after step 6, nothing else
+changing for it: **version branches** (the default for a multi-version fork: one branch per version, `neoforge-1.21.3`,
+`neoforge-1.21.4`, ..., each carrying `.port/<version>/branch.properties`; the fleet entry says `"version_branches": true`)
+get "A fork with version branches"; an existing **layer** fork (`.multiversion/` on a `layer_branch`) gets "A fork with the
+layer". `git ls-remote --heads origin 'neoforge-*'` lists the version branches; `tools/layer-sync.py detect --repo DIR
+--ref <layer_branch>` says whether a layer exists: pass the fleet entry's `layer_branch` when it has one, since the clone
+is usually checked out on the port branch, which has no `.multiversion/`. Without `--ref`, detect exits 3 (not 0) when the
+checked-out branch has no layer but another branch does, so a layer fork can never read as single-version and skip its
+layer step.
 
 The port-fork skill makes a port; this one keeps it alive. A community fork is judged by the people who install
 it: **if it crashes them, kicks them from a server, hangs, damages a save or breaks their other mods, the fork is
@@ -141,15 +145,70 @@ until its dependency's run is green, and it is then gated against the dependency
    dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
    PR as a blocking item, and re-pin then (`port-ci.py args --repo DIR` gives the current command; change the tag
    and asset of `--dep-jar` AND of any `--dep-jar-variant` together -- a mismatch is refused -- and rerun it).
-   A pre-release may be pinned for CI; the dependent's own release waits
-   for the dependency's to be promoted. The install manifest (`.github/port-install.json`) must follow: a promotion
+   **Don't exceed your dependency.** A dependent MAY cut its own pre-release pinned to the dependency's
+   pre-release -- do it: a library is only really tested through a dependent, so that pair of pre-releases is what
+   the owner plays. A dependent MUST NOT be promoted to a full Release, nor published, while a dependency it pins
+   is still a pre-release; promoting both together is fine (`port-ci.py promote --with-dependency <owner/repo>`, and
+   the dependency promoted too). `port-ci.py promote` refuses otherwise, and publishing refuses a dependency that is
+   not published. The install manifest (`.github/port-install.json`) must follow: a promotion
    through Port CI refreshes it by itself; a re-pin without a promotion does not, so once the re-pinned workflow is
    on the port branch run `python3 tools/port-manifest.py refresh --repo DIR --commit` there and push (it says
    "unchanged" when nothing moved; it refuses, writing nothing, when the newest full Release cannot be named).
 8. **Report once** on the fleet's tracking issue: what came in, what was decided, what is waiting for a person
    (a PR to merge, a build to play and promote). Silent when nothing changed.
 
-## A fork with the layer (opt-in; skip this for a single-version fork)
+## A fork with version branches (skip this for a single-version fork)
+
+Only for a fleet entry with `"version_branches": true` (or a clone whose `neoforge-<version>` branches carry
+`.port/<version>/branch.properties`). The port branch's PR (steps 1-6) brings the authors' code in at the base version;
+each version branch must take it, in chain order, and nothing fixes a version unless this is run. There is no R6
+re-merge here: git's own merge does it, with the rename rows applied as a tool.
+
+1. **Plan the whole chain first, in one pass.** Once the port branch has the authors' code (its PR merged into it -- the
+   cascade starts from the port branch itself; a `keep-current/<date>` work branch is not accepted as the start):
+   `python3 tools/fork-branches.py cascade --repo DIR neoforge-1.21.1..<newest version> --plan`. It runs every merge,
+   port branch through the newest version, on a throwaway clone (no real branch changes, no model, git and the rows
+   only), never stops at a conflict, and writes `build/fork-branches/plan/CASCADE-PLAN.json` and `CASCADE-PLAN.md`:
+   the files merged mechanically, and each decision -- one per file and authors' hunk, however many versions it shows
+   at -- with the authors' diff, our code at each affected version, its class and the default decision with its
+   reasoning (fork-versions, "Planning the cascade"). With an escalated item it also writes `ISSUE.md`.
+2. **Apply, decide, ask once.** `cascade ... --apply --gates ab` runs the same merges on the real branches: mechanical
+   items resolved; a default the tool can carry out itself (an optional integration whose dependency that version's
+   DEPS.md drops: ours kept, logged in `.port/DECISIONS.md`, the authors' change a deferred REMERGE.json entry that
+   counts against done again once the dependency returns); every other decision file merged without the authors' change and recorded open in
+   `.port/<v>/REMERGE.json` (the entry travels up with the file) -- every other file and every version above goes
+   on, gates included, and only a version with an open entry stays not done. Then:
+   - the **default decisions** are yours (the fixer agent's), by the policy: keep the authors' design intent; their fix
+     is taken, adapted through the rows; a deliberate port change of ours (a stand-in, an API rewrite) is kept and
+     their change applied around it; an optional integration is kept (stubbed where it is absent). Write each as an
+     answer (`take`, `keep`, `patch` with a diff in the port branch's names, or `content`) with its reasoning;
+   - the **escalated items** -- keeping the authors' intent is not feasible at that version, or the change is over
+     `--budget-lines` (default 80) -- go to the owner as ONE issue on the fork: file `ISSUE.md` as its body. Never one
+     issue per version, never a question per stop.
+   - When the answers are in (the issue's `cascade-decisions` block saved to a file, plus your own):
+     `cascade --repo DIR --apply-decisions FILE --gates ab` applies each one at every version that holds it, oldest
+     first, clears the entries, logs them in `.port/DECISIONS.md`, merges up and writes the new plan; an answer that
+     raises a new conflict higher up (rare) comes back as at most one follow-up issue.
+   A red branch still stops the apply: it names its `.port/<v>/RESIDUE.md`; on that branch run `python3
+   tools/fork-port.py --repo DIR --target <v> --from-stage measure` with a budget, commit, and apply on from there.
+   Never skip a version. (Plain `cascade` without `--plan`/`--apply` still stops at the first conflict, for a fix
+   carried up by hand; an authors' change it could not take is offered again by the next run, from the version's
+   `port_taken`.)
+3. Push each merged version branch as a work branch and open its PR into the version branch (`git push origin
+   neoforge-<v>:keep-current/<date>-<v>`), with the cascade's table in the body; merge them in chain order by step 6's
+   rule (wait for each one's push run). Every version whose gated files changed reads not done until its gates (`--gates
+   full` once before a release) run again; where its own files changed it needs a fresh review, and where it took the
+   authors' change through the rows only, one review of that change covers every such version (`python3
+   tools/fork-branches.py review-authors --repo DIR --range <old port commit>..<new port commit> --reviewer ...`).
+4. **Move each version's freeze** once merged: on its checkout, `python3 tools/fork-branches.py freeze --repo DIR --target
+   <v>` (and `--library owner/repo@TAG` for a re-pinned library release), and commit `.port/<v>/branch.properties`.
+5. **Dependents.** A library's version releases from its own branch (Port CI's `release` on `neoforge-<v>`); re-pin the
+   dependent's same version to it (`layer-deps.py resolve --repo DEP --target <v> --port-release owner/lib@<tag>` on the
+   dependent's checkout of that branch, then `fork-branches.py ci --repo DEP --target <v> --modid ID` for its workflow), and
+   once the dependent's Gate C is green against it, `fork-branches.py library-record` in the library (fork-versions,
+   "Library first").
+
+## A fork with the layer (opt-in, existing layer forks only; skip this for a single-version fork)
 
 Only when `layer-sync.py detect --ref <layer_branch>` says `layer=true` (exit 3 from a bare `detect` means the same thing: rerun with `--ref`). The port branch's PR (steps 1-6) is the authors' code at the base
 version; the layer branch must carry it to every target, and nothing fixes a middle target unless this is run.
