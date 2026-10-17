@@ -36,6 +36,9 @@ on:
   push:
     branches: ["{{BRANCH}}"{{LAYER_BRANCH_ITEM}}]
     tags: ["*-mc{{MC}}{{TAG_SUFFIX}}"]
+    # the known-issues ledger (tools/known-issues.py) is a record, not port code: a ledger-only push runs nothing
+    # (GitHub evaluates path filters on branch pushes only, so a release tag still runs)
+    paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json"]
   pull_request:
     branches: ["{{BRANCH}}"{{LAYER_BRANCH_ITEM}}]
   release:

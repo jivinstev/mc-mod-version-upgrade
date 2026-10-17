@@ -527,6 +527,11 @@ PY
 grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
   || bad "port_gates check: $out"
 
+# ---- the known-issues ledger (tools/known-issues.py, issue #135 part 1): in-process, one tiny git repo -- seconds
+echo "known-issues.py: the S1-S4 ledger at the head branch"
+out="$(python3 tools/known-issues.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "known-issues self-check (in $(grep -o '[0-9.]* s)$' <<<"$out" | tr -d ')')): the rubric grades S1-S4 from its inputs and an owner override wins and is recorded; only an S1 reopens a done version; add/grade/status write atomically with sorted keys and a small diff; a bad entry exits 2; list filters by version and severity; select takes every S1, S2s lowest version first up to the budget, S3 only in touched files, then the owner's add/remove; render-issue sorts by severity; release-notes lists S1-S3 open at the tag (a fix after the tag still open); the ledger read from the head ref; a ledger edit stales no gate (ci-gates layer tree, single-version HEAD unchanged; port-publish, fork-port, fork-branches) and Port CI's push trigger ignores it" \
+  || bad "known-issues self-check: $(tail -5 <<<"$out")"
 # ---- stacked version branches (tools/fork-branches.py, the default for a multi-version fork): migrating a layer fork, the
 # branch-mode done check through fork-port.py's own CLI, the cascade, the library's release-side done check -- on a layer
 # fixture; a single-version fork is untouched (its own checks above and below run unchanged)
@@ -536,7 +541,7 @@ export FB_FIXTURE_CACHE="$T/fb-fixtures"    # the fork-branches fixtures, built 
 # failed natively there. The full default self-check -- every named case -- runs on Linux on every PR.
 fb_mode=""; case "${OSTYPE:-}" in msys*|cygwin*|win*) fb_mode="--platform" ;; esac
 out="$(python3 tools/fork-branches.py --self-check $fb_mode 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-branches self-check${fb_mode:+ $fb_mode, the OS leg -- Linux runs all of}: a 3-target layer fixture migrates to byte-identical branches (every source set, resources, mixin arrays, toml ranges, versions), each done as its layer target was; the checkout untouched; without MIGRATED.json the layer records do not count; an edit stales gates and review; cascade carries the authors' change through each version's rows and a lower fix upward, and stops on a conflict; add-target refused over an undone parent; the library rule; a single-version fork refused, nothing written; cascade --plan on a throwaway clone (one decision per file and hunk across versions, mechanical ones merged, a default logged, an escalated one in the one issue), --apply holding only the decision files open while the versions above go on, --apply-decisions clearing them everywhere; port_taken re-offers a change no run took" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-branches self-check${fb_mode:+ $fb_mode, the OS leg -- Linux runs all of}: a 3-target layer fixture migrates to byte-identical branches (every source set, resources, mixin arrays, toml ranges, versions), each done as its layer target was; the checkout untouched; without MIGRATED.json the layer records do not count; an edit stales gates and review; cascade carries the authors' change through each version's rows and a lower fix upward (never the head branch's known-issues ledger), and stops on a conflict; add-target refused over an undone parent; the library rule; a single-version fork refused, nothing written; cascade --plan on a throwaway clone (one decision per file and hunk across versions, mechanical ones merged, a default logged, an escalated one in the one issue), --apply holding only the decision files open while the versions above go on, --apply-decisions clearing them everywhere; port_taken re-offers a change no run took" \
   || bad "fork-branches self-check: $(tail -5 <<<"$out")"
 out="$(python3 - "$T/fb" <<'PY' 2>&1
 import importlib.util, json, os, pathlib, subprocess, sys

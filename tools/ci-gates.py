@@ -139,7 +139,8 @@ def log_tails(paths, n=40, cap=12000):
 GATE_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md",   # what a gate run (and
                 "INVENTORY-CHECK.json",      # fork-port.py's done record, layer-inventory.py's account) writes into a target
                 "DEPS.md",                   # (and layer-deps.py resolve's table, rewritten by fork-port.py's every setup)
-                "DRIFT.md")                  # (and the --accept-upstream-drift line fork-port.py appends before the gates)
+                "DRIFT.md",                  # (and the --accept-upstream-drift line fork-port.py appends before the gates)
+                "KNOWN-ISSUES.json")         # (and the known-issues ledger, tools/known-issues.py: a record, never port code)
 
 
 def tested_tree(repo, mc):

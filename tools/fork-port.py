@@ -788,7 +788,8 @@ REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.
                                                # why): writing it must not make the review it belongs to stale; it is
                                                # still read as a reviewed input by layer-inventory.py's account
                   "INVENTORY-CHECK.json",      # layer-inventory.py's account, rewritten by every done check
-                  "DEPS.md")                   # layer-deps.py resolve's table, rewritten by every setup (machine paths)
+                  "DEPS.md",                   # layer-deps.py resolve's table, rewritten by every setup (machine paths)
+                  "KNOWN-ISSUES.json")         # the known-issues ledger (tools/known-issues.py): a record of findings
 # Files of a target's directory that are not in a player's jar: a change to them does not make GATES.md stale
 # (tools/layer-deps.py NOT_JAR, the same list). REMERGE.json is layer-sync's record of an overlay the authors' change
 # did not merge into: a reviewed input (it is not in REVIEW_OUTPUTS), but not jar content.

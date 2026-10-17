@@ -490,7 +490,7 @@ def checkout_jar(ga, spec, target, co, ver):
 
 GATES_HEAD = re.compile(r"at `([^`]+)` for Minecraft (\S+)")
 NOT_JAR = {"GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md", "BEHAVIOUR.json", "DEPS.md",
-           "INVENTORY.json", "INVENTORY-CHECK.json"}
+           "INVENTORY.json", "INVENTORY-CHECK.json", "KNOWN-ISSUES.json"}
 
 
 def gates_record(text, target):

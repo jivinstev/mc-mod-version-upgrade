@@ -117,6 +117,13 @@ It is idempotent: what is already published (a marker it appends to the release 
 uploaded say which version of the original it is based on, any `differences`, who played it, where to report
 problems (the fork, never the original author) and the permission link -- never the fixes it carries.
 
+**Known issues** (a fork with `.port/KNOWN-ISSUES.json` on its head branch, `tools/known-issues.py`): the notes'
+known-issues section comes from the ledger -- `known-issues.py release-notes --repo <fork> --ref <head branch>
+--version <mc> --tag <tag>` lists what is open for that version at the tag, S1-S3. Publishing still refuses an open
+S1: `port-publish.py` checks the fix ledgers above and does not read this file yet, so before dispatching, run
+`known-issues.py list --repo <fork> --ref <head branch> --version <mc> --severity S1 --open`; any line it prints is
+an open S1 and a stop.
+
 **Expect the first run against an old release to be refused** if its ledger shows an open S1: that is the gate
 working, and the answer is to promote and publish the build that fixes it, not to edit the ledger.
 

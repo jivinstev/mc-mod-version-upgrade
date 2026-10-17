@@ -419,7 +419,8 @@ def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
 # branch). Nothing here runs for a single-version fork -- publish() asks layer_of() first and, on None, takes the
 # unchanged single-version path.
 
-GATES_DOC = re.compile(r"^((?!src/)[^\n]*\.md|LICENSE[^/]*|\.github/.*)$")     # nothing a player's jar contains
+GATES_DOC = re.compile(r"^((?!src/)[^\n]*\.md|LICENSE[^/]*|\.github/.*|\.port/(?:[^/]+/)?KNOWN-ISSUES\.json)$")  # nothing in a jar
+# (the last: the known-issues ledger, tools/known-issues.py -- a record of findings, never port code)
 
 
 def mc_key(v):
