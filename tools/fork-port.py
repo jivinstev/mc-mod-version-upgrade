@@ -794,6 +794,9 @@ REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.
 # (tools/layer-deps.py NOT_JAR, the same list). REMERGE.json is layer-sync's record of an overlay the authors' change
 # did not merge into: a reviewed input (it is not in REVIEW_OUTPUTS), but not jar content.
 NOT_JAR_FILES = frozenset(REVIEW_OUTPUTS) | {"STUBS.json", "BEHAVIOUR.json", "INVENTORY.json", "REMERGE.json"}
+# records matched by their path from the repository root, not their name: the fork's README (a README under src/ is
+# jar content). A change to one makes neither gates nor a review stale.
+ROOT_RECORDS = ("README.md",)
 COMMIT_ID = re.compile(r"^[0-9a-f]{7,40}$")
 VERDICTS = ("ok", "not-ok")
 # REVIEW.md row kinds: stub / overlay / resources / renames are what review_items() requires a verdict on (a version
@@ -874,7 +877,7 @@ def gates_current(repo, t):
         return False, f"GATES.md names {sha}, which is not an ancestor of HEAD"
     changed = changed_since(repo, sha)
     if changed is not None:
-        changed = [f for f in changed if f.rsplit("/", 1)[-1] not in NOT_JAR_FILES]
+        changed = [f for f in changed if f.rsplit("/", 1)[-1] not in NOT_JAR_FILES and f not in ROOT_RECORDS]
     green, why = load("port_publish", "port-publish.py").listed_green(t, text, changed, jar_chain(repo / ".multiversion", t))
     return green, ("GATES.md (at " + sha + "): " + why) if not green else why
 
@@ -1144,7 +1147,8 @@ def review_problems(repo, tdir):
             # library (the target's own run outputs aside; another target's not-jar files aside)
             changed = changed_since(repo, c, paths)
             changed = None if changed is None else [
-                x for x in changed if x.rsplit("/", 1)[-1] not in (REVIEW_OUTPUTS if x.startswith(rel + "/") else NOT_JAR_FILES)]
+                x for x in changed if x not in ROOT_RECORDS
+                and x.rsplit("/", 1)[-1] not in (REVIEW_OUTPUTS if x.startswith(rel + "/") else NOT_JAR_FILES)]
             if changed is None:
                 out.append(f"cannot compare {rel} with the reviewed commit {c} (git failed)")
             elif changed:

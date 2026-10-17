@@ -582,6 +582,14 @@ def main(argv=None):
 
 # ---------------------------------------------------------------- self-check (seconds: one tiny git repo)
 
+def gh_glob(pattern):
+    """A GitHub Actions path filter as a regex: `**` crosses directories, `*` does not."""
+    out = ""
+    for tok in re.split(r"(\*\*/?|\*)", pattern):
+        out += {"**/": "(?:.*/)?", "**": ".*", "*": "[^/]*"}.get(tok, re.escape(tok))
+    return re.compile(f"^{out}$")
+
+
 def self_check():
     import importlib.util
     import io
@@ -770,27 +778,54 @@ def self_check():
         head = g("rev-parse", "--short", "HEAD")
         expect(cg.tested_tree(d, "1.21.5") == head, "ci-gates: a ledger edit does not make a layer target's tree edited")
         expect(cg.tested_tree(d, None) == head, "ci-gates: a single-version fork's tested tree is HEAD, as before")
+        (d / "README.md").write_text("# a generated Ports block\n", encoding="utf-8")       # a root README edit
+        g("add", "README.md")
+        expect(cg.tested_tree(d, "1.21.5") == head, "ci-gates: a root README edit does not make the tree edited")
+        res = d / "src/main/resources"
+        res.mkdir(parents=True)
+        (res / "README.md").write_text("in the jar\n", encoding="utf-8")
+        g("add", "src")
+        expect("uncommitted: src/main/resources/README.md" in cg.tested_tree(d, "1.21.5"),
+               "control: a README under src/main/resources is jar content and still counts")
         (d / "f.txt").write_text("3\n", encoding="utf-8")
-        expect("uncommitted: f.txt" in cg.tested_tree(d, "1.21.5"), "control: a code edit still counts")
+        expect("f.txt" in cg.tested_tree(d, "1.21.5"), "control: a code edit still counts")
         fpm = load("fork_port_ki", "fork-port.py")
         expect(LEDGER_NAME in fpm.REVIEW_OUTPUTS and LEDGER_NAME in fpm.NOT_JAR_FILES, "fork-port: a run output")
+        expect("README.md" in fpm.ROOT_RECORDS and "README.md" not in fpm.NOT_JAR_FILES,
+               "fork-port: the root README is a record by path, not by name (a README in src/ stays jar content)")
+        ldm = load("layer_deps_ki", "layer-deps.py")
+        expect(ldm._not_jar("README.md") and ldm._not_jar(".port/KNOWN-ISSUES.json")
+               and not ldm._not_jar("src/main/resources/README.md"), "layer-deps: the root README is not jar content")
         pp = load("port_publish_ki", "port-publish.py")
         expect(all(pp.GATES_DOC.match(f) for f in (".port/KNOWN-ISSUES.json", ".port/examplemod/KNOWN-ISSUES.json"))
+               and pp.GATES_DOC.match("README.md")
                and not any(pp.GATES_DOC.match(f) for f in ("src/main/resources/KNOWN-ISSUES.json", ".port/a/b/KNOWN-ISSUES.json",
+                                                          "src/main/resources/README.md",
                                                           ".port/1.21.4/renames.tsv", "build.gradle")),
-               "port-publish: the ledger is not jar content (and nothing else changed)")
+               "port-publish: the ledger and the root README are not jar content (a README in src/ is)")
         green, why = pp.listed_green("1.21.4", "# Gates at `abc1234` for Minecraft 1.21.4\n| A | PASS |\n",
-                                     [".port/KNOWN-ISSUES.json"], ["1.21.4"])
-        expect(green, f"a released layer target stays green after a ledger-only commit: {why}")
+                                     [".port/KNOWN-ISSUES.json", "README.md"], ["1.21.4"])
+        expect(green, f"a released layer target stays green after a ledger and README commit: {why}")
+        green, why = pp.listed_green("1.21.4", "# Gates at `abc1234` for Minecraft 1.21.4\n| A | PASS |\n",
+                                     ["src/main/resources/README.md"], ["1.21.4"])
+        expect(not green, "control: a README under src/main/resources makes the gates stale")
         fb = load("fork_branches_ki", "fork-branches.py")
         expect(all(fb.LEDGER_PATH.match(f) and not fb.jar_relevant(f, "1.21.4")
                    for f in (".port/KNOWN-ISSUES.json", ".port/examplemod/KNOWN-ISSUES.json"))
-               and not fb.LEDGER_PATH.match(".port/1.21.4/branch.properties"),
+               and not fb.LEDGER_PATH.match(".port/1.21.4/branch.properties")
+               and not fb.jar_relevant("README.md", "1.21.4") and fb.jar_relevant("src/main/resources/README.md", "1.21.4"),
                "fork-branches: the ledger is no version branch's jar input, and the cascade skips it (LEDGER_PATH)")
         tpl = (root / "templates/upstream-harness/port-ci.yml").read_text(encoding="utf-8")
         push = tpl[tpl.index("  push:"):tpl.index("  pull_request:")]
-        expect('paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json"]' in push,
-               "Port CI's push trigger paths-ignores the ledger")
+        m = re.search(r"paths-ignore: (\[.*\])", push)
+        ignore = json.loads(m.group(1)) if m else []
+        expect(ignore == [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"],
+               f"Port CI's push trigger paths-ignores the ledgers and the root README: {ignore}")
+        ignored = lambda f: any(gh_glob(p).match(f) for p in ignore)
+        expect(all(ignored(f) for f in (".port/KNOWN-ISSUES.json", ".port/examplemod/KNOWN-ISSUES.json", "README.md"))
+               and not any(ignored(f) for f in ("src/main/resources/README.md", "docs/README.md", "build.gradle",
+                                               ".port/a/b/KNOWN-ISSUES.json")),
+               "paths-ignore matches the root README and the ledgers only (GitHub's glob: * stops at /)")
     took = time.monotonic() - t0
     for b in bad:
         print("FAIL:", b)

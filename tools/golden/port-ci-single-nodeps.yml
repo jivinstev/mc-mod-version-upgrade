@@ -36,9 +36,9 @@ on:
   push:
     branches: ["neoforge-1.21.1"]
     tags: ["*-mc1.21.1"]
-    # the known-issues ledger (tools/known-issues.py) is a record, not port code: a ledger-only push runs nothing
-    # (GitHub evaluates path filters on branch pushes only, so a release tag still runs)
-    paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json"]
+    # the known-issues ledger (tools/known-issues.py) and the root README are records, not port code: a push of only
+    # those runs nothing (GitHub evaluates path filters on branch pushes only, so a release tag still runs)
+    paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"]
   pull_request:
     branches: ["neoforge-1.21.1"]
   release:

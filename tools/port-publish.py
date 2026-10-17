@@ -420,7 +420,8 @@ def curseforge_file(cfg, tag, release, text, dry, mc=None, asset=None):
 # unchanged single-version path.
 
 GATES_DOC = re.compile(r"^((?!src/)[^\n]*\.md|LICENSE[^/]*|\.github/.*|\.port/(?:[^/]+/)?KNOWN-ISSUES\.json)$")  # nothing in a jar
-# (the last: the known-issues ledger, tools/known-issues.py -- a record of findings, never port code)
+# (the last: the known-issues ledger, tools/known-issues.py -- a record of findings, never port code; the root
+# README.md is a record through the first: any .md outside src/, while src/main/resources/README.md stays jar content)
 
 
 def mc_key(v):

@@ -287,7 +287,8 @@ Every known defect of the fork lives in **one ledger**, `.port/KNOWN-ISSUES.json
 mod, `.port/<mod>/KNOWN-ISSUES.json` (`--mod <mod>`). `tools/known-issues.py` writes it (atomically, sorted keys,
 2-space indent); nobody edits it by hand. It is a record, not port code: Port CI's push trigger `paths-ignore`s it,
 it never makes gates or a review stale, and `fork-branches.py cascade` never carries it to a version branch, so a
-ledger-only commit goes straight onto the head branch. Read it from there: `--repo DIR --ref neoforge-1.21.1`.
+ledger-only commit goes straight onto the head branch. README and ledger edits never trigger CI or make gates
+stale (the root `README.md` only; a README under `src/` is jar content). Read it from there: `--repo DIR --ref neoforge-1.21.1`.
 
 Each entry: id, title, the severity and the rubric inputs it came from, an owner `override` (recorded with its
 reason), the lowest affected version, a status per Minecraft version (`open`, `fixed@<commit>`, `wontfix:<reason>`,

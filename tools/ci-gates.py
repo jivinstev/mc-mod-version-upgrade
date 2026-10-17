@@ -141,6 +141,7 @@ GATE_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", 
                 "DEPS.md",                   # (and layer-deps.py resolve's table, rewritten by fork-port.py's every setup)
                 "DRIFT.md",                  # (and the --accept-upstream-drift line fork-port.py appends before the gates)
                 "KNOWN-ISSUES.json")         # (and the known-issues ledger, tools/known-issues.py: a record, never port code)
+ROOT_RECORDS = ("README.md",)   # records by their path from the repository root (a README in src/ is jar content)
 
 
 def tested_tree(repo, mc):
@@ -155,7 +156,7 @@ def tested_tree(repo, mc):
     st = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"], capture_output=True,
                         text=True, encoding="utf-8").stdout
     dirty = sorted(f for f in (l[3:].strip() for l in st.splitlines() if len(l) > 3)
-                   if f.rsplit("/", 1)[-1] not in GATE_OUTPUTS)
+                   if f.rsplit("/", 1)[-1] not in GATE_OUTPUTS and f not in ROOT_RECORDS)
     if not dirty:
         return head
     return f"{head} + uncommitted: {', '.join(dirty[:6])}{f' (+{len(dirty) - 6} more)' if len(dirty) > 6 else ''}"
