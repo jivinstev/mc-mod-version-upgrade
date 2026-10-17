@@ -255,10 +255,14 @@ rows, a new one the rows keep is added, a resource whose copy is still the autho
 the version dropped stays dropped (a resource it dropped too, where git would stop on a modify/delete conflict). One
 the version **changed by hand** is not touched: the merge is committed with the version's file as it was, the file
 gets an open entry in `.port/<v>/REMERGE.json` holding the authors' diff, and the cascade stops there and prints that
-diff. Apply it by hand through the version's rows (the diff is in the port branch's names), commit, remove the entry
-(the done check lists it until the file changes), commit, and cascade on (`cascade <v>..<newest>`); a later cascade
-never offers the change again, so the entry is the only record of it. With a real conflict as well, the merge is undone
-and the same diffs are printed to apply after the hand merge. Start **one fixer only where it stopped**. Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
+diff. Apply it by hand through the version's rows (the diff is in the port branch's names), commit, and cascade on
+(`cascade <v>..<newest>`). **One invariant decides when an authors' change counts as taken at a version**: its added
+lines, through the version's rows, are in the version's file (in order), or an explicit clear names it
+(`cascade --apply-decisions`, or removing its entry). An entry never closes because its file changed for another
+reason, and `port_taken=` (below) moves on only after every change in the range is taken or held by an entry: a merge
+that is undone commits nothing, so the next run offers the change again, and a merge a person makes by hand (keeping
+ours) is caught by the next cascade, which records the change it lacks. With a real conflict as well, the merge is
+undone and the same diffs are printed to apply after the hand merge. Start **one fixer only where it stopped**. Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
 `REVIEW.md` name a commit before the merge, so it needs a green full Gate C again and a fresh reviewer who re-reads the
 files the merge changed and names the merge commit (the tool carries no verdict forward by itself; its rows are still
 only the files that differ from the parent at the new merge-base, so a file the version took unchanged from its parent
@@ -295,7 +299,8 @@ goes up the chain this way:
      that the version's `DEPS.md` records as `dropped:`; an unrelated dropped row does not count: the tool keeps ours
      (our stubbed calls work now), logs it in `.port/DECISIONS.md`, and holds the authors' change as a **deferred**
      `REMERGE.json` entry (`"deferred": "<group:module>"`). A deferred entry does not count against done while that
-     dependency stays dropped there; once the version's `DEPS.md` no longer drops it, the entry counts as open like any
+     dependency stays dropped there (an unrelated edit of the file never closes it); once the version's `DEPS.md` no
+     longer drops it, the entry counts as open like any
      other, so the authors' change is applied when the integration returns (answer it with `--apply-decisions`).
      **Present**: keep it, apply the authors' change around it.
    - **port change** -- the file has a `STUBS.json` entry (a stand-in, an API rewrite of ours): keep ours, apply the
