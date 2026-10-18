@@ -218,11 +218,22 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    Never skip a version. (Plain `cascade` without `--plan`/`--apply` still stops at the first conflict, for a fix
    carried up by hand; an authors' change it could not take is offered again by the next run, from the version's
    `port_taken`.)
-3. Push each merged version branch as a work branch and open its PR into the version branch (`git push origin
-   neoforge-<v>:keep-current/<date>-<v>`), with the cascade's table in the body; merge them in chain order by step 6's
-   rule (wait for each one's push run). Every version whose gated files changed reads not done until its gates (`--gates
-   full` once before a release) run again; where its own files changed it needs a fresh review, and where it took the
-   authors' change through the rows only, one review of that change covers every such version (`python3
+3. **One version at a time, lowest first, each waiting for the one below it.** For version v: its gates and its review
+   (the round's step 4) on the merged branch, then push it as a work branch and open its PR into the version branch
+   (`git push origin neoforge-<v>:keep-current/<date>-<v>`, the cascade's table in the body), merge it by step 6's rule
+   and wait for that merge's push run. **`keep-current/<date>-<v>` is pushed only after the PR of the version below it is
+   merged and its push run is green** -- never stacked on an unmerged lower PR: a higher PR that carries a lower
+   version's unmerged merge would merge that version's code past its own review and CI. After the lower merge, `git
+   fetch origin` (the done check and the review rows read origin's branch when the local one is behind) and continue the
+   cascade from there (`cascade --repo DIR <lower>..<newest>`: what is already merged is up to date, a merge it left
+   ungated is gated first). **The 1.21.x -> 26.x boundary** (the rename between 1.21.11 and 26.1.2 changes method and
+   class names the rows do not cover) usually conflicts: the cascade stops at 26.1.2 with the files named; resolve them
+   by hand inside the cascade -- in that version's worktree (`build/fork-branches/26.1.2`), `git merge
+   neoforge-1.21.11`, resolve each file through 26.1.2's rows and the rename (the 26.x name, the lower version's
+   change), commit, then `cascade --repo DIR 26.1.2..<newest>` -- and say in its PR which files were resolved by hand
+   (they are review rows). Every version whose gated files changed reads not done until its gates (`--gates full` once
+   before a release) run again; where its own files changed it needs a fresh review, and where it took the authors'
+   change through the rows only, one review of that change covers every such version (`python3
    tools/fork-branches.py review-authors --repo DIR --range <old port commit>..<new port commit> --reviewer ...`).
 4. **Move each version's freeze** once merged: on its checkout, `python3 tools/fork-branches.py freeze --repo DIR --target
    <v>` (and `--library owner/repo@TAG` for a re-pinned library release), and commit `.port/<v>/branch.properties`.

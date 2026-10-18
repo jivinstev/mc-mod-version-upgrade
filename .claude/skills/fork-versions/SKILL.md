@@ -288,7 +288,10 @@ the clone's git directory), so the next run gates that version before it calls i
 `REVIEW.md` name a commit before the merge, so it needs a green full Gate C again and a fresh reviewer who re-reads the
 files the merge changed and names the merge commit (the tool carries no verdict forward by itself; its rows are still
 only the files that differ from the parent at the new merge-base, so a file the version took unchanged from its parent
-is no row). Nothing is pushed: push the merged branches (or open their PRs) yourself.
+is no row). Nothing is pushed: push the merged branches (or open their PRs) yourself -- one version at a time,
+lowest first, a version's PR opened only after the one below it merged (keep-current, "A fork with version branches"
+step 3). A conflict at the 1.21.x -> 26.x boundary (the rename between 1.21.11 and 26.1.2) is expected: resolve it by hand
+in that version's worktree, through its rows, commit, and cascade on.
 
 **The shared library moved** (a row or a helper changed in `templates/fork-layer/shared/<v>/`): `python3
 tools/fork-branches.py sync-shared --repo DIR [--target <v> ...]` rewrites each version's `shared <v>` sections of

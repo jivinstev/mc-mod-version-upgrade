@@ -536,6 +536,16 @@ grep -q 'self-check: OK' <<<"$out" && ok "known-issues self-check (in $(grep -o 
 # both sides of daylight saving, install / round-task, and the steps against a fake GitHub on two tiny single-version
 # forks -- no network, seconds
 echo "weekly-plan.py: the Tuesday plan workflow and the Wednesday round task"
+# a version's work branch waits for the lower version's merge, and the 1.21.x -> 26.x conflicts are resolved by hand inside
+# the cascade (dry run, 2026-10-18: the skill did not say either)
+python3 - <<'PY' && ok "keep-current, version branches: keep-current/<date>-<v> is pushed only after the lower version's PR merged; the 1.21.x -> 26.x rename conflicts resolved by hand inside the cascade" || bad "keep-current no longer says a version's work branch waits for the lower merge, or how the 26.x boundary is crossed"
+import pathlib, sys
+s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf-8")
+v = s[s.index("## A fork with version branches"):s.index("## A fork with the layer")]
+need = ("is pushed only after the PR of the version below it is\n   merged", "never stacked on an unmerged lower PR",
+        "resolve them\n   by hand inside the cascade", "26.1.2..<newest>")
+sys.exit(0 if all(n in v for n in need) and "merge them in chain order by step 6's" not in v else 1)
+PY
 # the weekly round's per-version order (dry run, 2026-10-18: the round reviewed each version after it merged): the review
 # comes before the merge and the pre-release, and a not-ok row graded S1/S2 at that version blocks both
 python3 - <<'PY' && ok "keep-current, the weekly round: gates, then the review, then the merge, then the pre-release; an S1/S2 not-ok row at the version blocks its merge and pre-release" || bad "keep-current's weekly round no longer reviews each version before its merge and pre-release"
