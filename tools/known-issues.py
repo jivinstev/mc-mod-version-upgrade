@@ -8,7 +8,7 @@ each Minecraft version (issue #135, part 1).
                                           [--file PATH ...] [--platform mr|cf ...]
     python3 tools/known-issues.py grade   [LEDGER] ID [--failure F] [--visibility V] [--reach R] [--workaround yes|no]
                                           [--override S --reason WHY [--by WHO] | --clear-override]
-    python3 tools/known-issues.py status  [LEDGER] ID --set MC=STATE [--set ...] [--lowest MC]
+    python3 tools/known-issues.py status  [LEDGER] ID --set MC[,MC...|FROM..TO]=STATE [--set ...] [--lowest MC]
     python3 tools/known-issues.py list    [LEDGER] [--version MC] [--severity S1,S2] [--min S] [--open] [--platform P]
                                           [--json]
     python3 tools/known-issues.py select  [LEDGER] [--budget N] [--touched PATH ...] [--version MC ...]
@@ -104,6 +104,7 @@ Exit codes: 0 ok (reopens: it reopens; blocks-publish: nothing blocks); 1 reopen
 blocks-publish: an open S1 applies to that platform; 2 bad input or an invalid ledger.
 """
 import argparse
+import collections
 import json
 import os
 import pathlib
@@ -719,13 +720,18 @@ def read_plan(issue, comments, allowed, now=None):
                     continue
                 grades[hit[0]] = {"fork": hit[0][0], "id": hit[0][1], "severity": val.upper(), "by": who,
                                   "reason": rest or f"owner override in plan issue #{issue.get('number')}"}
-    out_forks = []
+    out_forks, said_by = [], {}
     for r, f in forks.items():
         t = ticks[r]
         sel = [i for i in f["defaults"] + f["candidates"] if t.get(i, i in f["defaults"])]
         casc = f.get("cascade")
         has = bool(f.get("new_count")) or bool(f.get("untaken_count"))
         take = has and authors.get(r, True)
+        # who decided: the plan pre-ticks the box, so an unticked box is the owner's (or a writer's) decision
+        take_by = ("nothing to take (no new or untaken authors' commits)" if not has else
+                   "default (the box was found ticked, as the plan pre-ticks it)" if authors.get(r) is True else
+                   "owner (the box was unticked)" if r in authors else "default (no box found in the issue)")
+        said_by[r] = take_by
         out_forks.append({
             "repo": r, "head": f["head"], "role": f.get("role", ""), "upstream": f.get("upstream"),
             "upstream_branch": f.get("upstream_branch"), "upstream_commit": f.get("upstream_commit"),
@@ -743,36 +749,84 @@ def read_plan(issue, comments, allowed, now=None):
             # is none of it); without it the plan's decisions -- all about that cascade -- do not apply
             head_cascade = take or not has
             o = out_forks[-1]
+            o["take_authors_by"] = take_by       # a version-branch fork's only: a single-version fork's input stays as it was
             o["head_cascade"] = head_cascade
             if not head_cascade:
                 o["cascade"] = {"range": casc["range"], "decisions": [],
                                 "not_applied": [d["id"] for d in casc["decisions"]],
                                 "why": "the authors' code is not taken this round: no head cascade, so no decision of it applies"}
             o["fixes"] = fix_plan(f, sel, head_cascade)
+    read_plan.take_by = said_by           # read-plan says it for every fork (stderr), the JSON keeps its form
     return {"schema": 1, "issue": issue.get("number"), "repo": data["repo"], "week": data["week"],
             "deadline": data["deadline"], "owner": data["owner"], "frozen_at": now, "forks": out_forks,
             "decisions": [dict({"fork": r, "id": i}, **v) for (r, i), v in sorted(decisions.items())],
             "grades": [grades[k] for k in sorted(grades)], "ignored": ignored, "carried_from": data.get("carried_from")}
 
 
-def gh_api(path, method="GET", data=None):
-    """GitHub's REST API: GITHUB_TOKEN / GH_TOKEN when set, else the `gh` command line. -> parsed JSON."""
-    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+GH_TIMEOUT_ENV = "MMVU_GH_TIMEOUT"       # seconds one GitHub call may take (gh or REST); default 60
+
+
+def gh_timeout():
+    try:
+        return max(1.0, float(os.environ.get(GH_TIMEOUT_ENV) or 60))
+    except ValueError:
+        return 60.0
+
+
+def gh_rest(path, method="GET", data=None, tok=None):
+    """One REST call to api.github.com (urllib, a timeout on every socket operation); tok None: anonymous (a public
+    repository's issues and releases read without one). -> parsed JSON."""
+    import urllib.request
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "mmvu-weekly-plan", "Content-Type": "application/json"}
     if tok:
-        import urllib.request
-        req = urllib.request.Request("https://api.github.com" + path, method=method,
-                                     data=None if data is None else json.dumps(data).encode("utf-8"),
-                                     headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json",
-                                              "User-Agent": "mmvu-weekly-plan", "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            text = r.read().decode("utf-8")
-        return json.loads(text) if text.strip() else {}
+        headers["Authorization"] = f"Bearer {tok}"
+    req = urllib.request.Request("https://api.github.com" + path, method=method,
+                                 data=None if data is None else json.dumps(data).encode("utf-8"), headers=headers)
+    with urllib.request.urlopen(req, timeout=min(30.0, gh_timeout())) as r:
+        text = r.read().decode("utf-8")
+    return json.loads(text) if text.strip() else {}
+
+
+def gh_source():
+    """Which way gh_api reaches GitHub, said once by the commands that read it."""
+    if os.environ.get("GITHUB_TOKEN"):
+        return "GITHUB_TOKEN over REST (gh is not used, so a broken gh login does not matter)"
+    if os.environ.get("GH_TOKEN"):
+        return "GH_TOKEN over REST (gh is not used)"
+    return "the gh command line (no GITHUB_TOKEN or GH_TOKEN set), anonymous REST if gh fails or times out"
+
+
+def gh_api(path, method="GET", data=None):
+    """GitHub's REST API: GITHUB_TOKEN (else GH_TOKEN) over REST when set; else the `gh` command line. Every call is
+    bounded (MMVU_GH_TIMEOUT, default 60 s; `gh` hung where its GraphQL endpoint was blocked), and a read whose way
+    failed falls back -- a token's REST call to `gh`, `gh` to anonymous REST -- before it fails. -> parsed JSON."""
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    errs = []
+    if tok:
+        try:
+            return gh_rest(path, method, data, tok)
+        except Exception as e:          # noqa: BLE001 -- a bad token or a blocked call: try the next way for a read
+            if method != "GET":
+                raise
+            errs.append(f"REST with the token: {e}")
     cmd = ["gh", "api", "-X", method, path] + (["--input", "-"] if data is not None else [])
-    r = subprocess.run(cmd, input=None if data is None else json.dumps(data), capture_output=True, text=True,
-                       encoding="utf-8")
-    if r.returncode:
-        raise Invalid(f"gh api {path}: {(r.stderr or r.stdout).strip()[-300:]} (set GITHUB_TOKEN or log in with gh)")
-    return json.loads(r.stdout) if r.stdout.strip() else {}
+    try:
+        r = subprocess.run(cmd, input=None if data is None else json.dumps(data), capture_output=True, text=True,
+                           encoding="utf-8", timeout=gh_timeout())
+        if r.returncode == 0:
+            return json.loads(r.stdout) if r.stdout.strip() else {}
+        errs.append(f"gh: {(r.stderr or r.stdout).strip()[-300:]}")
+    except subprocess.TimeoutExpired:
+        errs.append(f"gh: no answer in {gh_timeout():.0f} s ({GH_TIMEOUT_ENV})"
+                    + ("" if method == "GET" else f" -- this {method} may have been posted: check before re-running it"))
+    except OSError as e:
+        errs.append(f"gh: {e}")
+    if method == "GET":
+        try:
+            return gh_rest(path, method, None, None)
+        except Exception as e:          # noqa: BLE001
+            errs.append(f"anonymous REST: {e}")
+    raise Invalid(f"gh api {path}: " + "; ".join(errs) + " (set GITHUB_TOKEN or log in with gh)")
 
 
 def gh_pages(path, api=gh_api):
@@ -910,8 +964,63 @@ def parse_states(items):
 
 
 def next_id(data):
-    n = [int(m.group(1)) for e in data["issues"] for m in [re.match(r"^KI-(\d+)$", e["id"])] if m]
-    return f"KI-{max(n, default=0) + 1}"
+    """The next id in the ledger's own numbering: its most used `<PREFIX>-<n>` prefix, zero-padded as its widest number
+    is (`EXM-024` -> `EXM-025`); `KI-1` for an empty ledger, as before."""
+    got = [(m.group(1), m.group(2)) for e in data["issues"] for m in [re.match(r"^([A-Za-z][A-Za-z0-9]*)-(\d+)$", e["id"])] if m]
+    if not got:
+        return "KI-1"
+    count = collections.Counter(p for p, _n in got)
+    prefix = max(count, key=lambda p: (count[p], p == "KI"))
+    nums = [n for p, n in got if p == prefix]
+    width = max(len(n) for n in nums) if any(n.startswith("0") for n in nums) else 0
+    return f"{prefix}-{max(int(n) for n in nums) + 1:0{width}d}"
+
+
+def similar_titles(a, b):
+    """0..1: how alike two issue titles read (difflib's ratio over the lower-cased words)."""
+    import difflib
+    w = lambda t: " ".join(re.findall(r"[a-z0-9]+", t.lower()))
+    return difflib.SequenceMatcher(None, w(a), w(b)).ratio()
+
+
+def likely_duplicates(data, title, files):
+    """Existing entries a new one probably repeats: one that names a file the new one names and has a similar title
+    (similar_titles >= 0.5), or any whose title is nearly the same (>= 0.85). -> [(id, title, why)]."""
+    out = []
+    for e in data["issues"]:
+        sim = similar_titles(title, e.get("title", ""))
+        same = sorted(set(files or ()) & set(e.get("files") or ()))
+        if same and sim >= 0.5:
+            out.append((e["id"], e.get("title", ""), f"same file {same[0]}, similar title"))
+        elif sim >= 0.85:
+            out.append((e["id"], e.get("title", ""), "nearly the same title"))
+    return out
+
+
+def expand_states(items, have=()):
+    """`--set` values, each `MC=STATE`, `MC,MC,...=STATE` or `FROM..TO=STATE` (FROM, TO and every version the entry
+    already lists between them) -> {MC: STATE}."""
+    out = {}
+    for it in items or ():
+        vs, sep, st = it.partition("=")
+        if not sep:
+            raise Invalid(f"--set/--status {it!r}: MC=STATE")
+        for v in (x.strip() for x in vs.split(",")):
+            lo, dots, hi = v.partition("..")
+            if dots:
+                for x in (lo, hi):
+                    if not MC_RE.match(x):
+                        raise Invalid(f"--set {it!r}: {x!r} is not a Minecraft version")
+                if mc_key(lo) > mc_key(hi):
+                    raise Invalid(f"--set {it!r}: the range runs backwards ({lo} is after {hi}): write {hi}..{lo}")
+                span = {lo, hi} | {x for x in have if mc_key(lo) <= mc_key(x) <= mc_key(hi)}
+                for x in span:
+                    out[x] = st.strip()
+            elif not MC_RE.match(v):
+                raise Invalid(f"--set {it!r}: {v!r} is not a Minecraft version")
+            else:
+                out[v] = st.strip()
+    return out
 
 
 def regrade(e, a):
@@ -965,7 +1074,9 @@ def build_parser():
     p.add_argument("--override", choices=SEVERITIES); p.add_argument("--reason"); p.add_argument("--by")
     p.add_argument("--clear-override", action="store_true")
     p = common(sub.add_parser("status", help="set an issue's state at Minecraft versions"))
-    p.add_argument("id"); p.add_argument("--set", action="append", required=True, metavar="MC=STATE")
+    p.add_argument("id"); p.add_argument("--set", action="append", required=True, metavar="MC[,MC...|FROM..TO]=STATE",
+                                         help="one version, a comma list, or FROM..TO (both ends and every version the "
+                                              "entry lists between them); repeatable")
     p.add_argument("--lowest")
     p = common(sub.add_parser("list", help="the issues, filtered by version and severity"))
     p.add_argument("--version"); p.add_argument("--severity", help="comma-separated, e.g. S1,S2")
@@ -1055,6 +1166,9 @@ def run(argv):
         i = a.id or next_id(data)
         if any(e["id"] == i for e in data["issues"]):
             raise Invalid(f"issue {i} exists already")
+        for d_id, d_title, why in likely_duplicates(data, a.title.strip(), a.files):
+            print(f"known-issues: WARNING {i} may repeat {d_id} ({why}: {d_title!r}): if it is the same defect, drop "
+                  f"{i} and add to {d_id} instead (known-issues.py status/grade)", file=sys.stderr)
         e = {"id": i, "title": a.title.strip(), "override": None, "lowest": a.lowest, "source": a.source,
              "rubric": {"failure": a.failure, "visibility": a.visibility, "reach": a.reach,
                         "workaround": yesno(a.workaround)},
@@ -1083,7 +1197,7 @@ def run(argv):
         return 0
     if a.cmd == "status":
         e = find(data, a.id)
-        e["status"].update(parse_states(a.set))
+        e["status"].update(expand_states(a.set, e["status"]))
         if a.lowest:
             e["lowest"] = a.lowest
         write_ledger(path, data)
@@ -1178,6 +1292,8 @@ def cmd_read_plan(a, out):
     slug = a.slug or slug_of(a.repo or ".")
     if not slug:
         raise Invalid("no --slug and no GitHub origin remote to read it from")
+    if not a.from_json:
+        print(f"read-plan: GitHub through {gh_source()}", file=sys.stderr)
     if a.latest:
         found = open_plan_issues(slug, api)
         if not found:
@@ -1222,6 +1338,9 @@ def cmd_read_plan(a, out):
                 p = d / (f["repo"].replace("/", "__") + ".decisions.json")
                 p.write_text(json.dumps(f["cascade"], indent=1) + "\n", encoding="utf-8")
                 out(f"read-plan: {f['repo']}: {len(f['cascade']['decisions'])} decision(s) -> {p}")
+    for f in frozen["forks"]:
+        print(f"read-plan: {f['repo']}: take_authors {str(f['take_authors']).lower()} -- "
+              f"{getattr(read_plan, 'take_by', {}).get(f['repo'], '?')}", file=sys.stderr)
     if a.out:
         pathlib.Path(a.out).write_text(text, encoding="utf-8")
         sel = sum(len(f["selected"]) for f in frozen["forks"])
@@ -1244,6 +1363,7 @@ def cmd_render_ports(a, repo, out):
     elif a.fetch_releases:
         if not slug:
             raise Invalid("--fetch-releases needs --slug or a GitHub origin remote")
+        print(f"render-ports: GitHub through {gh_source()}", file=sys.stderr)
         releases = gh_pages(f"/repos/{slug}/releases")
     fb = None
     try:
@@ -1469,6 +1589,55 @@ def self_check():
         rc, o = cli("reopens", *L, "--version", "1.21.8", "--id", "KI-7")
         expect(rc == 0, f"reopens is unchanged by platforms: {o}")
         cli("status", *L, "KI-7", "--set", "1.21.8=fixed@abcdef1")
+        # weekly-round dry run (2026-10-18): new ids follow the ledger's own numbering, one --set takes several versions,
+        # and an entry that repeats one (the same file, a similar title) is warned about
+        led2 = d / "other"
+        L2 = ("--ledger", str(led2 / LEDGER_NAME))
+        base = ("--failure", "functional", "--visibility", "common", "--reach", "feature", "--workaround", "no")
+        cli("add", *L2, "--id", "EXM-023", "--title", "the panel closes on its own", *base, "--lowest", "1.21.10",
+            "--file", "src/main/java/com/example/mod/Panel.java")
+        cli("add", *L2, "--id", "EXM-024", "--title", "fog drawn with the wrong shape", *base, "--lowest", "1.21.10",
+            "--status", "1.21.10=open", "--status", "1.21.11=open", "--status", "26.1.2=open", "--status", "26.3=open")
+        rc, o = cli("add", *L2, "--title", "a cursor drawn transparent", *base, "--lowest", "26.3")
+        expect(rc == 0 and o.startswith("EXM-025: ") and "WARNING" not in o, f"add follows the ledger's prefix: {o}")
+        rc, o = cli("add", *L2, "--title", "The panel closes on its own again", *base, "--lowest", "26.3",
+                    "--file", "src/main/java/com/example/mod/Panel.java")
+        expect(rc == 0 and "EXM-026" in o and "WARNING EXM-026 may repeat EXM-023" in o, f"a likely duplicate is warned about: {o}")
+        rc, o = cli("status", *L2, "EXM-024", "--set", "1.21.10,1.21.11=fixed@abc1234", "--set", "26.1.2..26.3=fixed@def5678")
+        st = find(read_ledger(led2 / LEDGER_NAME), "EXM-024")["status"]
+        expect(rc == 0 and st == {"1.21.10": "fixed@abc1234", "1.21.11": "fixed@abc1234", "26.1.2": "fixed@def5678",
+                                  "26.3": "fixed@def5678"}, f"status --set takes a list and a range in one call: {st} {o}")
+        rc, o = cli("status", *L2, "EXM-024", "--set", "1.21.10..x=open")
+        expect(rc == 2, f"a bad range is refused: {o}")
+        rc, o = cli("status", *L2, "EXM-024", "--set", "26.3..1.21.10=open")
+        expect(rc == 2 and "backwards" in o and find(read_ledger(led2 / LEDGER_NAME), "EXM-024")["status"]["26.3"] == "fixed@def5678",
+               f"a reversed range is refused and nothing is written: {o}")
+        expect(next_id({"issues": []}) == "KI-1" and next_id({"issues": [{"id": "KI-9"}]}) == "KI-10",
+               "an empty ledger and a KI- ledger number as before")
+        # GitHub calls are bounded and fall back (weekly-round dry run: render-ports --fetch-releases hung where gh's
+        # GraphQL was blocked): gh timing out, then anonymous REST for a read; a write is never retried anonymously
+        saved_env = {k: os.environ.pop(k, None) for k in ("GITHUB_TOKEN", "GH_TOKEN")}
+        real_run, real_rest, seen = subprocess.run, globals()["gh_rest"], []
+        try:
+            def slow(cmd, **k):
+                seen.append(("gh", k.get("timeout")))
+                raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+            subprocess.run = slow
+            globals()["gh_rest"] = lambda path, method="GET", data=None, tok=None: (seen.append(("rest", tok)), [{"tag_name": "t"}])[1]
+            got = gh_api("/repos/owner/examplemod/releases?per_page=100&page=1")
+            try:
+                gh_api("/repos/owner/examplemod/issues", "POST", {"title": "x"})
+                wrote = True
+            except Invalid as e:
+                wrote = "no answer in" not in str(e) or "may have been posted" not in str(e)
+            src = gh_source()
+        finally:
+            subprocess.run, globals()["gh_rest"] = real_run, real_rest
+            for k, v in saved_env.items():
+                if v is not None:
+                    os.environ[k] = v
+        expect(got == [{"tag_name": "t"}] and seen[:2] == [("gh", gh_timeout()), ("rest", None)] and not wrote
+               and "gh command line" in src, f"gh bounded, a read falls back to REST, a write does not: {seen} {wrote}")
         # a multi-mod repository: one ledger per mod
         rc, o = cli("add", *L, "--mod", "examplemod", "--title", "t", "--failure", "kick", "--visibility", "rare",
                     "--reach", "normal", "--workaround", "no", "--lowest", "1.21.1")
@@ -1641,8 +1810,12 @@ def plan_untaken_check(expect, cli):
                and fx.get("KI-4", {}).get("cascade", "").endswith(" neoforge-1.21.1..1.21.5") and "early_start" not in fr,
                f"ticked: the authors' code is taken, the head cascade runs with its decisions; each fix at its lowest open "
                f"version: {f} {o}")
+        expect(f.get("take_authors_by", "").startswith("default") and "take_authors true -- default" in o,
+               f"read-plan says a ticked box is the plan's default: {f.get('take_authors_by')} {o}")
         rc, o, fr, f = freeze(b.replace("- [x] Take the authors' code", "- [ ] Take the authors' code"), *late)
         fx = {x["id"]: x for x in f.get("fixes", [])}
+        expect(f.get("take_authors_by", "").startswith("owner") and "take_authors false -- owner" in o,
+               f"read-plan says the owner unticked the authors' box: {f.get('take_authors_by')} {o}")
         expect(rc == 0 and f.get("take_authors") is False and f.get("head_cascade") is False
                and f.get("cascade", {}).get("decisions") == [] and f["cascade"].get("not_applied") == ["d1e2f3a4b5c6", "a1b2c3d4e5f6"]
                and not (d / "dec" / "o__lib.decisions.json").exists() and "no head cascade" in o

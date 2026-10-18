@@ -17,7 +17,7 @@ description: Make a fork port build for more Minecraft versions as stacked versi
   that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
   fork moves to version branches with `tools/fork-branches.py migrate` when the maintainer decides it for that fork.
 
-Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, ci),
+Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, ci, ci-check),
 `tools/fork-port.py` (the stages and the done list, on a version branch), `tools/layer-inventory.py`,
 `tools/layer-deps.py`, `tools/ci-gates.py --mc`, `tools/port-ci.py`, `tools/audit-mixin-targets.py`,
 `tools/fix-access-transformer.py`, `tools/burndown-count.sh`, `tools/port-cost.py`.
@@ -67,7 +67,9 @@ helpers, catalogue entries and a cost figure; the next fork, and the next versio
 
 A version is **done** when, and only when, all of these hold (`fork-branches.py target_done()`; ask it with
 `python3 tools/fork-port.py --repo DIR --target <v> --check-done` -- or `fork-branches.py check-done` -- exit 0 or 18 with
-every open reason; off the branch it reads the branch's own commit and writes nothing):
+every open reason; on the branch's own checkout it also adds a `?` row to `REVIEW.md` for every item without one (and an
+`item` row per unaccounted inventory id) for the fresh reviewer, never a verdict; off the branch it reads the branch's
+own commit and writes nothing; the parent branch is read from origin when the local one is behind it, after a fetch):
 
 1. it compiles at 0 errors in every source set and the mixin and event-listener audits are clean (the gates stage runs
    only then);
@@ -145,7 +147,9 @@ refuses them; `make-fork-layer.py versions` prints the table, `versions --refres
 version's jar declares exactly its own Minecraft and NeoForge ranges (`[1.21.3,1.21.4)`), so a skipped version is never
 claimed. **The 26.x calendar line** follows 1.21.11: 26.1.2, 26.2 and 26.3 are targeted; NeoForge numbers them by the
 whole Minecraft version, so both ranges stop at the next patch release (`[26.2,26.2.1)`); they need Java 25 (CATALOG §V1,
-`java_version=25`); GeckoLib 5.5+ is `com.geckolib:geckolib-neoforge-<mc>` (a `substitute.` line); 26.2 and 26.3 need
+`java_version=25`: a JDK 25 on the machine -- `shipped-gate.py` finds it at `JAVA_HOME_25`, `/usr/lib/jvm`, `/opt`,
+`~/.gradle/jdks`, ...; the 26.3 client also needs `libEGL.so.1` (`libegl1`) and every client an `XDG_RUNTIME_DIR`:
+`tools/round-preflight.py` says what is missing); GeckoLib 5.5+ is `com.geckolib:geckolib-neoforge-<mc>` (a `substitute.` line); 26.2 and 26.3 need
 `nfrt_version=2.0.31`. `add-target` writes each of these from versions.json. Read CATALOG §V before porting a 26.x version.
 
 **Direct jumps.** A version whose middle versions will never ship can stand on a lower branch directly (`add-target
@@ -171,7 +175,15 @@ branches; it reads the dependent's green GATES.md and its pin of this library's 
 `.port/T/DEPENDENTS.json`; that is what makes the library's version done.
 
 **Don't exceed your dependency.** A dependent's version T may cut its pre-release pinned to the library's T
-pre-release (that pair is what the owner plays; the library is only really tested through it). The dependent's T must
+pre-release (that pair is what the owner plays; the library is only really tested through it). This is how the library
+rule's loop is broken: `layer-deps.py resolve --port-release owner/lib@<tag>` takes a version-branch library's
+**pre-release whose gates are green at the tag** (GATES.md, a green Gate C) although that version is not done yet -- no
+`--allow-undone-library` -- and marks it in the dependent's `DEPS.md` ("Library pre-release (not done)"). The dependent
+then gates and cuts its pre-release against it, `library-record` records its Gate C in the library (which makes the
+library's version done once the rest of its list holds), and the dependent re-resolves the same tag: its version is not
+done while the mark stands, and `port-ci.py promote` and `port-publish.py` refuse a tag built with it -- `--with-dependency`
+does not lift that (promoting the library does not make its version done). A full Release, or a pre-release with red
+gates, is still refused. The dependent's T must
 not be promoted to a full Release, nor published, while the library release it pins is still a pre-release; promote
 both together (`port-ci.py promote --with-dependency owner/lib`, the library promoted too), or the library first.
 
@@ -186,7 +198,12 @@ the newest published Port CI kit rather than the port branch's older pin; `--kit
 it in a worktree of the branch and commits there. Push the branch; nothing is pushed for you. The layer jobs (layer-compile, layer-isolation, layer-inertness, ...)
 do not apply. A tag `<mod>-<ver>-mc<v>` on the branch releases that version (publish-port's single-version path). The
 cascade keeps each branch's own `.github/workflows/port-ci.yml` and install manifest when it merges the lower branch:
-regenerate them with `ci` when a lower branch's change to them should reach this one.
+regenerate them with `ci` when a lower branch's change to them should reach this one. `ci` adds a `--variant-jar
+*_<v>.jar` for each `.port/<v>/shipped-expect-<v>.txt` the branch keeps (`cf` for `shipped-expect-cf.txt`), so the
+workflow's `shipped jars` job boots that jar too -- a workflow that boots only `_mr` is green while the local `_cf`
+check is red. `ci --all` does every version branch; `ci-check --repo DIR` warns about each branch whose workflow pins an
+older kit than the newest published one or lacks such a job (the weekly round runs it); `sync-shared --ci MODID`
+regenerates the synced branches' workflows, and without `--ci` prints the same warnings.
 
 ## Run the tool; handle only the residue
 
@@ -195,7 +212,7 @@ regenerate them with `ci` when a lower branch's change to them should reach this
 the stages -- setup (the behaviour inventory from the port branch when missing, `layer-deps.py resolve`, the data
 conversions a version needs written into its own resources), stage (Minecraft staged, the access transformer fixed in
 place), moves (the class moves from the parent version, staged in a worktree, kept in `moves.generated.tsv` AND applied
-to the source), measure, loop (the compile loop edits the branch's source; a row it keeps joins `renames.tsv`), audit,
+to the source: a file the rows alone made is re-made whole, a hand-changed file in its code only, its comments as written), measure, loop (the compile loop edits the branch's source; a row it keeps joins `renames.tsv`), audit,
 gates (`ci-gates.py --mc <v>`), cost. It stops only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11
 (Gate A/B), 12 (Gate C), 13 (mixin audit), 14 (the checkout is in use), 18 (an undone parent or library) or 19 (the
 authors' branch moved since the freeze), and `.port/<v>/RESIDUE.md` with the remaining errors by CATALOG entry and the
@@ -224,7 +241,9 @@ the port branch's. Record each in `.port/<v>/BEHAVIOUR.json`; a version reads it
 
 **Why Gate C is on the list.** Gates A/B and the audits cannot see what only a client builds (models, render layers,
 shaders); every dependent version so far that was green at A/B still failed in a real client. `--gates auto` runs the full
-gates until the version's GATES.md records a green Gate C, then A/B; a full run that is not green removes GATES.md.
+gates until the version's GATES.md records a green Gate C, then A/B; a full run that is not green is written to
+`GATES-RED.md` and never touches GATES.md (the last green record stays): while GATES-RED.md is there the version is not
+done and `auto` runs full again; a green full run deletes it.
 
 **Commit a fix before the gate run that certifies it**: GATES.md names the commit it tested, and an edited checkout is
 recorded as `<sha> + uncommitted: <files>` (the run's own records aside).
@@ -264,11 +283,19 @@ lines, through the version's rows, are in the version's file (in order), or an e
 reason, and `port_taken=` (below) moves on only after every change in the range is taken or held by an entry: a merge
 that is undone commits nothing, so the next run offers the change again, and a merge a person makes by hand (keeping
 ours) is caught by the next cascade, which records the change it lacks. With a real conflict as well, the merge is
-undone and the same diffs are printed to apply after the hand merge. Start **one fixer only where it stopped**. Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
+undone and the same diffs are printed to apply after the hand merge. Start **one fixer only where it stopped**. A merge the cascade made and did not gate green (red, or stopped for a hand re-apply) stays
+on that version's branch and worktree (`build/fork-branches/<v>`); the cascade records it (`mmvu-cascade-ungated.json` in
+the clone's git directory), so the next run gates that version before it calls it up to date, and clears it once green
+(`--gates none` says "NOT gated" and leaves it). Its worktree is reused as the stopped run left it when the only
+uncommitted changes are that run's own records in `.port/<v>/` (GATES.md, GATES-RED.md, RESIDUE.md, COST.md, ...); a
+worktree whose directory was removed is pruned and made again; any other edit there is refused, naming the files. Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
 `REVIEW.md` name a commit before the merge, so it needs a green full Gate C again and a fresh reviewer who re-reads the
 files the merge changed and names the merge commit (the tool carries no verdict forward by itself; its rows are still
 only the files that differ from the parent at the new merge-base, so a file the version took unchanged from its parent
-is no row). Nothing is pushed: push the merged branches (or open their PRs) yourself.
+is no row). Nothing is pushed: push the merged branches (or open their PRs) yourself -- one version at a time,
+lowest first, a version's PR opened only after the one below it merged (keep-current, "A fork with version branches"
+step 3). A conflict at the 1.21.x -> 26.x boundary (the rename between 1.21.11 and 26.1.2) is expected: resolve it by hand
+in that version's worktree, through its rows, commit, and cascade on.
 
 **The shared library moved** (a row or a helper changed in `templates/fork-layer/shared/<v>/`): `python3
 tools/fork-branches.py sync-shared --repo DIR [--target <v> ...]` rewrites each version's `shared <v>` sections of
@@ -322,11 +349,18 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
         --lowest 1.21.4 --status 1.21.4=open --status 1.21.5=open [--source review] [--file PATH] [--notes N]
     python3 tools/known-issues.py grade   --repo DIR KI-3 [--reach feature] [--override S2 --reason WHY --by owner]
     python3 tools/known-issues.py status  --repo DIR KI-3 --set 1.21.4=fixed@<commit> --set 1.21.5=wontfix:<reason>
+    python3 tools/known-issues.py status  --repo DIR KI-3 --set 1.21.10,1.21.11=fixed@<commit> --set 26.1.2..26.3=fixed@<c2>
     python3 tools/known-issues.py list    --repo DIR --ref neoforge-1.21.1 [--version 1.21.5] [--min S2] [--open]
     python3 tools/known-issues.py select  --repo DIR [--budget 3] [--touched PATH ...] [--version V ...] [--add ID] [--remove ID]
     python3 tools/known-issues.py render-issue  --repo DIR          # the pinned issue: issue by version, by severity
     python3 tools/known-issues.py release-notes --repo DIR --version 1.21.5 --tag <tag> [--min S3] [--platform mr|cf]
     python3 tools/known-issues.py blocks-publish --repo DIR --version 1.21.5 --platform mr|cf   # exit 1: an open S1
+
+`add` numbers a new entry in the ledger's own numbering (its most used prefix, zero-padded as it is: `EXM-025` after
+`EXM-024`; `KI-1` for a new ledger) unless `--id` names it, and warns on stderr about a likely duplicate -- an entry that
+names the same `--file` with a similar title, or any with nearly the same title: read it, and add to that entry instead
+when it is the same defect. `status --set` takes one version, a comma list or `FROM..TO` (both ends and every version
+the entry lists between them).
 
 `select` is the default choice of what a run takes: every open S1, then S2s lowest affected version first up to
 `--budget`, then any S3 in a file the run already touches; the owner's `--add` / `--remove` apply last and the output
@@ -417,8 +451,12 @@ entry spans from the earliest change it has not taken. A branch written before t
    [--upstream <remote>/<branch>] [--library owner/repo@TAG ...]` (the checkout on that branch; a new version inherits
    its parent's record). Every run to the end stops with exit 19 when the authors' branch has commits after the
    recorded one, or a `--port-release` names another release of a recorded library; `--accept-upstream-drift` continues
-   and appends to `.port/<v>/DRIFT.md`. A `--library` pin alone never re-checks the authors' branch; re-freezing a moved
-   upstream needs `--accept-upstream-drift`.
+   and appends to `.port/<v>/DRIFT.md`. A freeze whose authors' branch cannot be read (the remote missing or never fetched)
+   stops the same way: never remove a remote to get past it. A weekly round that does not take the authors' code (its
+   `round/frozen.json` says `take_authors: false`) is not drift: `fork-port.py` reads `round/frozen.json` from the working
+   directory (or `--untaken-ok FILE`), records the drift in `DRIFT.md` as left out by the plan and goes on, and `cascade
+   --untaken-ok round/frozen.json` passes it to each version's gates; another library release still stops. A `--library`
+   pin alone never re-checks the authors' branch; re-freezing a moved upstream needs `--accept-upstream-drift`.
 0a. **Read first**: CATALOG §M and `references/minor-version-deltas.md` (the U and L sections). The first port re-derived
    five rows that were already there.
 0b. **Guard the names**: `python3 tools/guard-names.py ensure --mod-repo DIR` plus one `--mod-repo` per fork it depends

@@ -136,7 +136,7 @@ def log_tails(paths, n=40, cap=12000):
     return text[-cap:] if len(text) > cap else text
 
 
-GATE_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md",   # what a gate run (and
+GATE_OUTPUTS = ("GATES.md", "GATES-RED.md", "COST.md", "RESIDUE.md", "STUBS.json", "REVIEW.md", "TEST-ITEMS.md",   # what a gate run (and
                 "INVENTORY-CHECK.json",      # fork-port.py's done record, layer-inventory.py's account) writes into a target
                 "DEPS.md",                   # (and layer-deps.py resolve's table, rewritten by fork-port.py's every setup)
                 "DRIFT.md",                  # (and the --accept-upstream-drift line fork-port.py appends before the gates)

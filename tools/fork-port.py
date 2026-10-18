@@ -6,7 +6,8 @@
                                [--json out.json] [--from-stage <name>] [--base REF] [--modid ID] [--direct]
                                [--port-checkout owner/repo=DIR] [--port-release owner/repo@TAG]
                                [--max-errors N] [--confirm-spend] [--allow-undone-parent] [--allow-undone-library]
-                               [--upstream REMOTE/BRANCH] [--accept-upstream-drift] [--self-check]
+                               [--upstream REMOTE/BRANCH] [--accept-upstream-drift] [--untaken-ok FROZEN_JSON]
+                               [--self-check]
     python3 tools/fork-port.py --repo DIR --target <t> --check-done
     python3 tools/fork-port.py --repo DIR --target <t> --write-test-items
     python3 tools/fork-port.py --repo DIR --chain FROM..TO [--from-stage gates] [--gates auto|ab|full]
@@ -74,7 +75,8 @@ directory changed since, its run outputs and the reviewer's BEHAVIOUR.json aside
 manual-test items, from tools/layer-test-plan.py, written by a run to the end or alone by `--write-test-items`), every item of .multiversion/INVENTORY.json accounted for on the target (tools/layer-inventory.py, its account in
 the target's INVENTORY-CHECK.json -- a run output like GATES.md, never "changed since the review"), and no dependency
 resolved against an undone library target (--allow-undone-library in DEPS.md). A run whose gates are green but that lacks the rest exits 18 and adds a `?` row to REVIEW.md for every item without
-one (and an `item` row for each inventory item left unaccounted); `--check-done` only asks. A NEW target is refused (exit 18, before anything is written; make-fork-layer.py
+one (and an `item` row for each inventory item left unaccounted); `--check-done` only asks (on a version branch's own
+checkout it adds the same `?` rows, never a verdict). A NEW target is refused (exit 18, before anything is written; make-fork-layer.py
 add-target refuses it too) while the target it stands on is not done; `--allow-undone-parent` is the development escape,
 recorded as allowed_undone_parent= in the new target's target.properties, and that target is not done until its parent is.
 
@@ -83,8 +85,12 @@ started from (upstream_commit=, the merge-base of HEAD and that branch) and each
 (library.<owner>/<repo>=<tag>, from --port-release). make-fork-layer.py init --upstream / freeze writes it; a run that adds
 the layer's first target writes it when it is missing. Every run to the end fetches the branch and stops (exit 19) when it
 holds commits the checkout lacks, or when --port-release names another release of a recorded library, naming the
-keep-current command; --accept-upstream-drift continues and appends the drift to .multiversion/DRIFT.md. A --to-stage
-run (layer-sync.py's measuring) is not checked.
+keep-current command; --accept-upstream-drift continues and appends the drift to .multiversion/DRIFT.md. A freeze whose
+authors' branch cannot be read (no such remote, never fetched) stops the same way: removing the remote is never a way
+past it. A weekly round whose frozen input does not take the authors' code (`take_authors: false` in round/frozen.json,
+read from the working directory, or the file --untaken-ok names) goes on: the drift is recorded in DRIFT.md as left out
+by the plan (with take_authors true, only what came after the plan's upstream_commit, once the checkout carries it).
+A library release other than the frozen one still stops. A --to-stage run (layer-sync.py's measuring) is not checked.
 
 THE SWEEP. `--chain FROM..TO --from-stage S` (default gates) runs this tool for every target from FROM up TO's inherits
 chain, oldest first, from stage S with no model (--budget 0 --max-errors 0), checks the upstream once, stops at the first
@@ -95,7 +101,8 @@ Exit codes: 0 done; 10 stopped before/in the compile (stage, moves, measure, loo
 build) red; 12 Gate C red; 13 mixin / event-listener audit; 14 the checkout is in use by another run; 15 a required dependency has no build for
 the target (DEPS.md / the STOPPED block name it); 17 every stage passed but the target has no green Gate C recorded
 (GATES.md), or the gates were not run (--gates none): A/B green is not done -- a version is done only after its
-real-client run. A full gate run that is not green removes GATES.md. Every run to the end (from any --from-stage)
+real-client run. A full gate run that is not green is written to GATES-RED.md, never over GATES.md (the last green
+record stays); while it is there the target is not done and `--gates auto` runs full; a green full run deletes it. Every run to the end (from any --from-stage)
 stops with exit 10 while STUBS.json holds an unreviewed stub signal; 18 Gate C green but not done (REVIEW.md /
 TEST-ITEMS.md / the behaviour inventory / an undone parent or library, listed), a new target over an undone parent, or
 a sibling library's target that is not done (layer-deps.py resolve's exit 18); 19 the authors' branch or a recorded
@@ -292,9 +299,15 @@ def drop_harvested_rows(mv, target):
     return gone
 
 
+RED_GATES = "GATES-RED.md"       # a full gate run that was not green, kept apart from the last green GATES.md
+
+
 def gates_auto(tdir):
     """`--gates auto`: "full" until targets/<t>/GATES.md records a green Gate C (a PASS row naming Gate C, no FAIL row),
-    then "ab". Every Minecraft version a fork supports gets one real-client run on its initial port."""
+    then "ab". Every Minecraft version a fork supports gets one real-client run on its initial port. A red full run on
+    record (GATES-RED.md) means "full" again, whatever GATES.md says."""
+    if (tdir / RED_GATES).is_file():
+        return "full"
     g = tdir / "GATES.md"
     text = g.read_text(encoding="utf-8", errors="replace") if g.is_file() else ""
     rows = [l for l in text.splitlines() if l.startswith("|")]
@@ -783,7 +796,7 @@ def unreviewed_stubs(tdir):
 # after the audit. Every file here is Markdown: written after the gates, it must not make port-publish.py read the
 # target's GATES.md as stale (a *.md is not in a player's jar).
 
-REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md",   # not what a review judged
+REVIEW_OUTPUTS = ("GATES.md", "GATES-RED.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md",   # not what a review judged
                   "BEHAVIOUR.json",            # the reviewer's own record beside REVIEW.md (a moved/dropped item and
                                                # why): writing it must not make the review it belongs to stale; it is
                                                # still read as a reviewed input by layer-inventory.py's account
@@ -1259,7 +1272,10 @@ def target_done(repo, t, _seen=None, write=True, prepare=False):
     if not tdir.is_dir():
         return [f"{t} is not a target of this layer"]
     out = []
-    if gates_auto(tdir) != "ab":
+    if (tdir / RED_GATES).is_file():
+        out.append(f"the last full gate run was red ({RED_GATES}); GATES.md's older green record does not count until a "
+                   "full run is green again")
+    elif gates_auto(tdir) != "ab":
         out.append("no green Gate C recorded in GATES.md")
     else:
         cur, why = gates_current(repo, t)
@@ -1442,6 +1458,76 @@ def freeze_upstream(repo, ref=None, libraries=(), accept_drift=False, props_file
     return rec, None
 
 
+# A weekly round that does not take the authors' code (keep-current, "The weekly round": `take_authors: false` in its
+# frozen input) leaves their branch ahead of every freeze ON PURPOSE. The guard reads that decision instead of being
+# got past (a deleted remote is never the way): --untaken-ok <frozen.json>, or the round's own round/frozen.json in the
+# working directory, names this fork; its drift is then recorded in DRIFT.md as left out by the plan, and the run goes
+# on. Only the authors' branch: a library release other than the frozen one still stops. A frozen input older than
+# FROZEN_MAX_DAYS (7: a week -- last week's round) or more is not this round's decision and is ignored.
+FROZEN_DEFAULT = pathlib.Path("round/frozen.json")
+FROZEN_MAX_DAYS = 7
+
+
+def origin_slug(repo):
+    """owner/repo of the clone's origin remote (GitHub https or ssh), or None."""
+    rc, url = _git(repo, "remote", "get-url", "origin")
+    m = re.search(r"github\.com[/:]([\w.-]+/[\w.-]+?)(?:\.git)?/?$", url.strip()) if rc == 0 else None
+    return m.group(1) if m else None
+
+
+def frozen_entry(repo, path=None, now=None):
+    """(entry of this fork in a round's frozen input, the file, None) or (None, file or None, why not). path: an
+    explicit --untaken-ok file; without one, round/frozen.json in the working directory when it exists."""
+    explicit = path is not None
+    f = pathlib.Path(path) if explicit else FROZEN_DEFAULT
+    if not f.is_file():
+        return None, (f if explicit else None), (f"--untaken-ok {f}: no such file" if explicit else None)
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        forks = data.get("forks") or []
+    except (OSError, ValueError, AttributeError) as e:
+        return None, f, f"{f} is not a frozen round input ({e})"
+    at = data.get("frozen_at") if isinstance(data, dict) else None
+    if not isinstance(at, str) or not at:
+        return None, f, f"{f} has no frozen_at: not a round's frozen input"
+    try:
+        when = datetime.datetime.fromisoformat(at.replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        age = ((now or datetime.datetime.now(datetime.timezone.utc)) - when).total_seconds() / 86400
+    except ValueError:
+        return None, f, f"{f} has no frozen_at: not a round's frozen input"
+    if age >= FROZEN_MAX_DAYS:
+        return None, f, f"{f} was frozen {at} ({int(age)} days ago): not this round's input"
+    slug = origin_slug(repo)
+    hit = [x for x in forks if isinstance(x, dict) and slug and str(x.get("repo", "")).lower() == slug.lower()]
+    if not hit:
+        return None, f, f"{f} has no entry for this fork ({slug or 'no GitHub origin remote'})"
+    return dict(hit[0], _issue=data.get("issue")), f, None
+
+
+def untaken_ok(repo, a, rec, compared=True):
+    """-> (note, None) when the round's frozen input left the authors' drift out on purpose, else (None, why not / None).
+    take_authors false: every commit of theirs waits (the plan did not take them). take_authors true: only what came
+    after the plan's upstream_commit, once the checkout carries that commit (pushed after the plan: next week)."""
+    e, f, why = frozen_entry(repo, getattr(a, "untaken_ok", None))
+    if e is None:
+        return None, why
+    src = f"the frozen plan {f.as_posix()}" + (f" (plan issue #{e['_issue']})" if e.get("_issue") else "")
+    if e.get("take_authors") is False:
+        return f"left out on purpose by {src}: take_authors false for {e.get('repo')}", None
+    uc = e.get("upstream_commit")
+    if not compared:
+        # the plan takes the authors' code: only commits after its upstream_commit may wait, and that can be told only
+        # when their branch could be read
+        return None, (f"{src} takes the authors' code for {e.get('repo')}, and their branch could not be compared: "
+                      "make it readable (the remote, a fetch) first")
+    if uc and _git(repo, "merge-base", "--is-ancestor", uc, "HEAD")[0] == 0:
+        return (f"pushed after {src} saw {uc[:12]} (taken): waits for next week's plan", None)
+    return None, (f"{src} takes the authors' code for {e.get('repo')} and this checkout does not carry its "
+                  f"upstream_commit {str(uc or '?')[:12]} yet: merge it first")
+
+
 def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
     """The R4 check for a run to the end on a layer fork: None, or the stop for an authors' branch (or a recorded
     library release) that moved since the buildout's freeze. Records the freeze first when the layer has none and this
@@ -1472,7 +1558,7 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
           f"tools/port-sync.py --repo {repo} --port {port} --upstream {ref or '<remote>/<branch>'} --dry-run, then the "
           f"keep-current skill), then " + (f"fork-branches.py freeze --repo {repo} --target {a.target}" if props_file
                                              else f"make-fork-layer.py freeze --repo {repo}"))
-    reasons = []
+    reasons, upstream_reasons, compared = [], [], True
     if not rec:
         print(f"fork-port: upstream: WARNING no authors' commit recorded for this buildout ({bp.relative_to(repo).as_posix()} "
               "upstream/upstream_commit): an upstream that moves mid-ladder goes unseen -- "
@@ -1486,12 +1572,14 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
         # records what the buildout started from, which HEAD may never have carried in full
         since = st.get("since") if st.get("since") is not None else st.get("behind")
         if st.get("error"):
-            print(f"fork-port: upstream: WARNING cannot compare with the authors' branch: {st['error']}"
-                  + (add_remote_hint(repo, ref) or ""))
+            compared = False
+            # a freeze that cannot be compared is a stop, not a warning: deleting the remote must never get a run
+            # past the guard (the frozen plan's decision does, below)
+            upstream_reasons.append(f"cannot compare with the authors' branch: {st['error']}" + (add_remote_hint(repo, ref) or ""))
         elif since and st.get("behind"):
-            reasons.append(f"the authors' {ref} has {since} commit(s) since the freeze that this checkout does not carry "
-                           f"(buildout frozen at {rec[:12]}, {ref} now at {st['tip'][:12]}"
-                           + ("" if st["fetched"] else "; not fetched now, compared with the last fetch") + ")")
+            upstream_reasons.append(f"the authors' {ref} has {since} commit(s) since the freeze that this checkout does not carry "
+                                    f"(buildout frozen at {rec[:12]}, {ref} now at {st['tip'][:12]}"
+                                    + ("" if st["fetched"] else "; not fetched now, compared with the last fetch") + ")")
         elif since:
             print(f"fork-port: upstream: the checkout carries {ref} at {st['tip'][:12]}, newer than the freeze {rec[:12]} "
                   f"(keep-current merged it): record it with "
@@ -1500,6 +1588,19 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
         elif st.get("behind"):
             print(f"fork-port: upstream: note: {ref} has {st['behind']} commit(s) this checkout does not carry, none of "
                   f"them after the freeze {rec[:12]}: not a stop")
+    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    df = pathlib.Path(drift_file) if drift_file else mv / "DRIFT.md"
+    if upstream_reasons and not getattr(a, "accept_upstream_drift", False):
+        note, why_not = untaken_ok(repo, a, rec, compared)
+        if note:
+            with open(df, "a", encoding="utf-8") as fh:
+                fh.write(f"- {day} {a.target}: {note}: {'; '.join(upstream_reasons)}\n")
+            print(f"fork-port: upstream: drift not taken on purpose ({note}; recorded in "
+                  f"{df.relative_to(repo).as_posix()}): {'; '.join(upstream_reasons)}")
+            upstream_reasons = []
+        elif why_not:
+            print(f"fork-port: upstream: the round's frozen input does not cover this drift: {why_not}")
+    reasons += upstream_reasons
     for lib in getattr(a, "port_release", []):     # a library release is compared whether or not an upstream is frozen
         name, _, tag = lib.partition("@")
         had = props.get(f"library.{name}")
@@ -1508,14 +1609,14 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
     if not reasons:
         return None
     if getattr(a, "accept_upstream_drift", False):
-        day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        df = pathlib.Path(drift_file) if drift_file else mv / "DRIFT.md"
         with open(df, "a", encoding="utf-8") as fh:
             fh.write(f"- {day} {a.target}: accepted with --accept-upstream-drift: {'; '.join(reasons)}\n")
         print(f"fork-port: upstream: drift ACCEPTED (--accept-upstream-drift, recorded in {df.relative_to(repo).as_posix()}): {'; '.join(reasons)}")
         return None
     return {"stop": "upstream moved since the buildout started: " + "; ".join(reasons), "code": DRIFT_EXIT,
             "detail": reasons, "choices": [f"bring it in: {kc}",
+                                           "a weekly round whose frozen plan does not take the authors' code: the same command "
+                                           "with --untaken-ok round/frozen.json (recorded in DRIFT.md)",
                                            "or continue knowingly on the frozen code: the same command with --accept-upstream-drift (recorded in .multiversion/DRIFT.md)"]}
 
 
@@ -1824,12 +1925,17 @@ def pins_dependencies(repo):
         wf.is_file() and "release into mavenLocal (pinned by sha256)" in wf.read_text(encoding="utf-8", errors="replace"))
 
 
+DEPS_CHOICE = ("read the layer-deps.py lines above (the setup log in the run's work directory has them all), fix the pin "
+               "or the release it names, and resume from setup")
+
+
 def stop_block(stop):
     lines = [f"STOPPED at {stop['stage']}: {stop['left']} (spent ${stop.get('spent', 0)} here)."]
     lines += [f"  {d}" for d in stop.get("detail", [])]
     lines.append(f"Residue: {stop.get('residue', '(none)')}")
     lines.append("Choices (ask the person; do not pick one silently):")
-    lines += [f"  - {c}" for c in stop["choices"]]
+    lines += [f"  - {c}" for c in stop.get("choices") or ["read the detail above and the residue file; resume with "
+                                                          "--from-stage <stage> once it is fixed"]]
     return "\n".join(lines)
 
 
@@ -2038,7 +2144,8 @@ class Run:
         return (f"python3 tools/fork-port.py --repo {a.repo} --target {self.t} --from-stage {stage} "
                 f"--budget {a.budget} --gates {a.gates}" + "".join(f" --port-checkout {c}" for c in getattr(a, "port_checkout", []))
                 + "".join(f" --port-release {c}" for c in getattr(a, "port_release", []))
-                + (" --allow-undone-library" if getattr(a, "allow_undone_library", False) else ""))
+                + (" --allow-undone-library" if getattr(a, "allow_undone_library", False) else "")
+                + (f" --untaken-ok {a.untaken_ok}" if getattr(a, "untaken_ok", None) else ""))
 
     def save(self):
         self.jpath.parent.mkdir(parents=True, exist_ok=True)
@@ -2089,7 +2196,8 @@ class Run:
                         "choices": [f"skip {self.t}: the next target jumps over it (fork-port.py --direct)",
                                     "or find a build for it and pin it in the target's target.properties by hand"]}
             if r.returncode != 0:
-                return {"stop": "layer-deps.py failed: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:300], "code": 2}
+                return {"stop": "layer-deps.py failed: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:300], "code": 2,
+                        "choices": [DEPS_CHOICE]}
         if not self.tdir.is_dir():
             r = self.sh([self.py, str(ROOT / "tools/make-fork-layer.py"), "add-target", "--repo", str(self.repo),
                          "--target", self.t, *(["--direct"] if self.a.direct else []),
@@ -2132,7 +2240,7 @@ class Run:
                 return self.library_stop(r)
             if r.returncode != 0:
                 return {"stop": "layer-deps.py resolve: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:600],
-                        "code": 15 if r.returncode == 15 else 2}
+                        "code": 15 if r.returncode == 15 else 2, "choices": [DEPS_CHOICE]}
             did.append("layer-deps: " + ((r.stdout or "").strip().splitlines() or [""])[-1].split(": ", 2)[-1])
             if allow_lib and "LIBRARY NOT DONE" in (r.stdout or ""):
                 did.append("WARNING built against a library target that is not done (--allow-undone-library, recorded "
@@ -2487,6 +2595,7 @@ class Run:
         # older version of the tooling (measured: one from before the 1.21.5 GameTest adapter) fails the same way
         # forever while the tool that would fix it is never asked
         shutil.rmtree(self.work / "gates", ignore_errors=True)
+        summ.unlink(missing_ok=True)      # an earlier run's summary must never stand for this run's (GATES.md, GATES-RED.md)
         cmd = [self.py, str(ROOT / "tools/ci-gates.py"), "--repo", str(self.repo), "--modid", modid, "--base",
                self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates")]
         if self.a.gates == "ab":
@@ -2494,18 +2603,21 @@ class Run:
         if self.shipped_expected():    # the fork lists what its shipped jar must log
             cmd += ["--shipped"]
         r = self.sh(cmd, self.work / "ci-gates.log")
-        if self.a.gates == "full":
-            # a full run that is not green leaves no Gate C record behind: an older GATES.md would make the next
-            # `--gates auto` drop to A/B and report the target done on a client that just failed
-            (self.tdir / "GATES.md").unlink(missing_ok=True)
         lines = (self.work / "ci-gates.log").read_text(encoding="utf-8", errors="replace").splitlines()
         rows = [re.sub(r"^\[ci-gates\] ", "", l) for l in lines if l.startswith("[ci-gates]") and ": " in l]
         failed = [l for l in rows if re.search(r": FAIL\b", l)]
         passed = [l for l in rows if re.search(r": PASS\b", l)]
+        if r.returncode != 0 and self.a.gates == "full":
+            # a full run that is not green is recorded on its own (GATES-RED.md), never over the last green record:
+            # GATES.md stays as it was, and while GATES-RED.md is there `--gates auto` runs full and the target is not
+            # done (an older green record must not report done on a client that just failed)
+            self.record_red(summ, failed)
         if r.returncode == 0:
             lost, prev = self.lost_logs()
             if lost:
                 msg = "; ".join(f"the mod wrote {f} on {prev} and not on {self.t}: a subsystem stopped running" for f in lost)
+                if self.a.gates == "full":
+                    self.record_red(summ, [f"log file {f} written on {prev}, absent on {self.t}" for f in lost])
                 return {"stop": f"gates green but {msg}", "code": 11, "gates": [f"log file {f} (written on {prev}, absent on {self.t})" for f in lost],
                         "detail": [msg[:240]],
                         "choices": ["find what writes that file (grep the source for its name), and why it no longer runs on this target "
@@ -2515,6 +2627,7 @@ class Run:
             if self.a.gates == "full" and summ.is_file():
                 # the record port-publish.py's layer path reads (and `--gates auto` reads): this target had its real-client run
                 (self.tdir / "GATES.md").write_text(summ.read_text(encoding="utf-8"), encoding="utf-8")
+                (self.tdir / RED_GATES).unlink(missing_ok=True)
                 note += "; recorded in GATES.md"
             # green gates are not done while a stub signal is unreviewed: only the loop stage asked, so a run resumed
             # past it (--from-stage audit/gates) reported a target done with one open (measured on a 26.x target)
@@ -2543,6 +2656,18 @@ class Run:
                 "gates": [l[:200] for l in failed], "detail": [l[:200] for l in failed[:4]] + [e[:240] for e in evidence],
                 "choices": ["run the same gates without --mc as the control: a red that is red on the base is not this target's",
                             "read build/mc%s/fork-port/ci-gates.log and the gate's own log" % self.t]}
+
+    def record_red(self, summ, failed):
+        """Write the red full gate run to GATES-RED.md: the commit tested, when, and its summary (or the failed rows)."""
+        head = _git(self.repo, "rev-parse", "--short", "HEAD")[1].strip() or "?"
+        when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+        body = summ.read_text(encoding="utf-8", errors="replace") if summ.is_file() else \
+            "".join(f"- {l}\n" for l in failed) or "- (no gate rows: read the run's ci-gates.log)\n"
+        self.tdir.mkdir(parents=True, exist_ok=True)
+        (self.tdir / RED_GATES).write_text(
+            f"Red full gate run at `{head}` for Minecraft {self.t} ({when}). GATES.md, the last green record, is kept as it "
+            "was; while this file is here the target is not done and `--gates auto` runs the full gates. A green full run "
+            "deletes it.\n\n" + body, encoding="utf-8")
 
     def lost_logs(self):
         """(files, previous target) -- the mod's own log files from the inherited target's last gate run that this run lacks."""
@@ -2686,7 +2811,7 @@ class BranchRun(Run):
                 return self.library_stop(r)
             if r.returncode != 0:
                 return {"stop": "layer-deps.py resolve: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:600],
-                        "code": 15 if r.returncode == 15 else 2}
+                        "code": 15 if r.returncode == 15 else 2, "choices": [DEPS_CHOICE]}
             did.append("layer-deps: " + ((r.stdout or "").strip().splitlines() or [""])[-1].split(": ", 2)[-1])
         n = self.data_forms()
         if n:
@@ -2775,6 +2900,13 @@ class BranchRun(Run):
             return {"stop": "build-class-move-map.py failed: " + (r.stdout or "").strip()[-200:], "code": 10,
                     "choices": ["see build-class-move-map.py's usage; check both jars hold net.minecraft classes"]}
         read = fb.reader_of_root(self.repo)
+        # the files the rows alone make now (before this version's new moves): re-made whole below, so they stay
+        # mechanical for the cascade; every other file gets the moves in its code only, its comments untouched
+        try:
+            mech = {str(self.repo / p) for p in fb.mechanical_files(self.repo, self.repo, self.t, "HEAD",
+                                                                    fb.root_files(self.repo, self.repo, True))}
+        except Exception:      # noqa: BLE001 -- no port commit to compare with: every file is treated as changed by hand
+            mech = set()
         existing = set()
         for v in fb.chain(self.repo, self.t):
             for name in ("renames.tsv", "moves.generated.tsv"):
@@ -2785,7 +2917,7 @@ class BranchRun(Run):
         text, kept, dup = moves_table(read_pairs(raw), existing - plain_froms(had), pv, self.t)
         gen.write_text(text, encoding="utf-8")
         # rows as a tool: the moves are applied to the branch's source (a version branch holds its own source)
-        changed = fb.apply_rules_to_files(sorted(self.repo.glob("src/*/java/**/*.java")), fb.rules_of(text))
+        changed = fb.apply_moves_to_files(sorted(self.repo.glob("src/*/java/**/*.java")), fb.rules_of(text), mech)
         self.sh([self.py, str(ROOT / "tools/fix-access-transformer.py"), "--work", str(self.repo), "--class-map", str(raw)])
         return {"done": f"{kept} unambiguous move(s) {pv}->{self.t} -> .port/{self.t}/moves.generated.tsv"
                         f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s)", "moves": kept}
@@ -3171,12 +3303,17 @@ def main():
     ap.add_argument("--accept-upstream-drift", action="store_true",
                     help="continue although the authors' branch (or a recorded library release) moved since the buildout's "
                          "freeze (exit 19 otherwise); recorded in .multiversion/DRIFT.md")
+    ap.add_argument("--untaken-ok", metavar="FROZEN_JSON",
+                    help="a weekly round's frozen input (known-issues.py read-plan --out): the authors' commits it leaves "
+                         "out on purpose (take_authors false, or pushed after the plan) do not stop the run; recorded in "
+                         "DRIFT.md (default: round/frozen.json in the working directory, when it exists)")
     ap.add_argument("--chain", metavar="FROM..TO",
                     help="sweep: re-run --from-stage (default gates) onward for every target from FROM up TO's inherits chain, "
                          "oldest first, no model; stops at the first red target with its RESIDUE.md and prints the table")
     ap.add_argument("--check-done", action="store_true",
                     help="only say whether --target is done (Gate C, stubs, REVIEW.md, TEST-ITEMS.md, the behaviour inventory): "
-                         "exit 0, or 18 with the reasons; writes nothing")
+                         "exit 0, or 18 with the reasons; on a version branch's own checkout it adds REVIEW.md's `?` rows "
+                         "for the reviewer (never a verdict); otherwise it writes nothing")
     ap.add_argument("--write-test-items", action="store_true",
                     help="only write --target's TEST-ITEMS.md (its manual-test items, from tools/layer-test-plan.py, no "
                          "model), holding the checkout lock; no stage or gate runs (layer forks only)")
@@ -3193,7 +3330,7 @@ def main():
             # version branches: the sweep is a cascade (merge each branch into the next, no-model gates per branch)
             print("fork-port: --chain on version branches is tools/fork-branches.py cascade (merge upward, then gates)")
             gates = {"auto": "ab", "none": "none"}.get(a.gates, a.gates)
-            return fork_branches().cascade(a.repo, a.chain, gates)
+            return fork_branches().cascade(a.repo, a.chain, gates, untaken_ok=a.untaken_ok)
         return sweep(a)        # --gates auto passes through: each target is full until its own GATES.md records Gate C
     if not a.repo or not a.target:
         ap.error("--repo and --target are required")
@@ -3205,9 +3342,8 @@ def main():
         print(f"fork-port: --from-stage {a.from_stage} runs on {fork_branches().branch_name(a.target)}'s checkout: check it "
               "out first (or start from setup, which does)"); return 2
     if branch and a.check_done:
-        why = fork_branches().target_done(a.repo, a.target)      # only asks: writes nothing
-        print(f"fork-port {a.target}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
-        return UNDONE_EXIT if why else 0
+        # the done list; on the branch's own checkout it also adds REVIEW.md's `?` rows (no verdict), off it nothing
+        return fork_branches().check_done(a.repo, a.target, "fork-port")
     if branch and a.write_test_items:
         return write_test_items_branch(a)
     if a.check_done:
@@ -3953,11 +4089,15 @@ def self_check():
             rc_part = drive(run, a_, [], ["audit"])
         a_.to_stage, a_.gates = None, "ab"
         expect(rc_none == 17 and rc_part == 0, f"--gates none: exit {rc_none} (want 17); --to-stage audit: {rc_part} (want 0)")
-    # ---- a full gate run that is not green removes the Gate C record, so `--gates auto` runs full again
+    # ---- a full gate run that is not green is recorded apart (GATES-RED.md) and never removes or rewrites the last green
+    # GATES.md (weekly-round dry run, 2026-10-18); while it is there `--gates auto` runs full again and the target is not
+    # done; a green full run deletes it
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
-        for gates, code, want_record in (("full", 1, False), ("ab", 1, True), ("full", 0, True)):
-            (td / "GATES.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
+        green_md = "Gates at `abc1234` for Minecraft 1.21.4\n\n| Gate C -- real client, `launch` | PASS | ok |\n"
+        for gates, code, want_red in (("full", 1, True), ("ab", 1, True), ("full", 0, False)):
+            if code:
+                (td / "GATES.md").write_text(green_md, encoding="utf-8")
             a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates=gates, modid="m", base="x",
                                     direct=False, from_stage="gates", to_stage=None, max_errors=None, confirm_spend=False,
                                     port_checkout=[])
@@ -3970,9 +4110,21 @@ def self_check():
                     (run.work / "ci-gates-summary.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
                 return CompletedProcess(cmd, code, "", "")
             run.sh = gsh
+            run.work.mkdir(parents=True, exist_ok=True)
+            (run.work / "ci-gates-summary.md").write_text("STALE summary of an earlier run\n", encoding="utf-8")
             run.s_gates()
-            expect((td / "GATES.md").is_file() == want_record and gates_auto(td) == ("ab" if want_record else "full"),
-                   f"--gates {gates} exit {code}: GATES.md {'kept/written' if want_record else 'removed'}")
+            red = td / RED_GATES
+            expect((td / "GATES.md").is_file() and red.is_file() == want_red
+                   and (code == 0 or (td / "GATES.md").read_text(encoding="utf-8") == green_md)
+                   and gates_auto(td) == ("full" if want_red else "ab")
+                   and (not want_red or "Red full gate run" in red.read_text(encoding="utf-8"))
+                   and "STALE" not in (td / "GATES.md").read_text(encoding="utf-8")
+                   and (not red.is_file() or "STALE" not in red.read_text(encoding="utf-8")),
+                   f"--gates {gates} exit {code}: GATES.md kept{' byte for byte' if code else ''}, "
+                   f"GATES-RED.md {'written' if want_red else 'gone'}")
+            if want_red:
+                expect(any("GATES-RED.md" in x for x in target_done(repo, "1.21.4", write=False)),
+                       "a red full run on record: the target is not done, whatever GATES.md says")
     # ---- issue #113: a Gate C client the OOM killer killed is environmental -- RESIDUE.md says re-run, no fixer
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
@@ -4545,11 +4697,104 @@ def self_check_done_freeze_sweep():
         w(vbp, "minecraft_version=1.21.3\nupstream=authors/main\nupstream_commit=" + bp.get("upstream_commit", "") + "\n")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=fork / ".port/1.21.3/DRIFT.md")
-        expect("no `authors` remote" in buf.getvalue() and "git remote add authors" in buf.getvalue()
-               and "git remote set-url --push authors DISABLED" in buf.getvalue(),
-               f"upstream=authors/... with no authors remote: how to add it, fetch-only: {buf.getvalue()}")
+            st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=fork / ".port/1.21.3/DRIFT.md")
+        said = buf.getvalue() + (st or {}).get("stop", "")
+        expect("no `authors` remote" in said and "git remote add authors" in said
+               and "git remote set-url --push authors DISABLED" in said,
+               f"upstream=authors/... with no authors remote: how to add it, fetch-only: {said}")
         expect(add_remote_hint(fork, "upstream/main") is None, "an existing remote gets no hint")
+        # the weekly round's dry run (2026-10-18): a missing remote is a stop, never the way past the guard; a round whose
+        # frozen plan does not take the authors' code goes on, the drift recorded in DRIFT.md as left out by the plan
+        vdrift = fork / ".port/1.21.3/DRIFT.md"
+        with contextlib.redirect_stdout(io.StringIO()):
+            st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
+        expect(st and st["code"] == DRIFT_EXIT and "no `authors` remote" in st["stop"] and not vdrift.exists()
+               and any("--untaken-ok" in c for c in st["choices"]),
+               f"a freeze naming a remote the clone lacks: exit 19 (removing the remote is no escape), nothing recorded: {st}")
+        gf("remote", "add", "origin", "https://github.com/owner/examplemod.git")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        frozen = pathlib.Path(d) / "frozen.json"
+
+        def freeze_file(take, at=now, repo_="owner/examplemod", uc=None):
+            frozen.write_text(json.dumps({"issue": 7, "frozen_at": at.isoformat(timespec="seconds"), "forks": [
+                {"repo": repo_, "take_authors": take, "upstream_commit": uc}]}), encoding="utf-8")
+        head_ = gf("rev-parse", "HEAD")
+        for case, args_, want_stop in (("take_authors false", dict(take=False), False),
+                                       ("another fork's entry", dict(take=False, repo_="owner/other"), True),
+                                       ("last week's frozen input", dict(take=False, at=now - datetime.timedelta(days=30)), True),
+                                       ("frozen exactly 7 days ago", dict(take=False, at=now - datetime.timedelta(days=7)), True),
+                                       ("take_authors true, upstream_commit not carried", dict(take=True, uc="f" * 40), True),
+                                       ("take_authors true, carried, but the branch cannot be compared",
+                                        dict(take=True, uc=head_), True)):
+            freeze_file(**args_)
+            a_.untaken_ok = str(frozen)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
+            expect((st is not None) == want_stop and (st is None or st["code"] == DRIFT_EXIT),
+                   f"--untaken-ok, {case}: {'a stop' if want_stop else 'goes on'}: {st} {buf.getvalue()}")
+        frozen.write_text(json.dumps({"frozen_at": 20261018, "forks": [{"repo": "owner/examplemod", "take_authors": False}]}),
+                          encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
+        expect(st and st["code"] == DRIFT_EXIT, f"a frozen_at that is not a string is no frozen input: {st}")
+        freeze_file(False, at=now - datetime.timedelta(days=6, hours=23))
+        with contextlib.redirect_stdout(io.StringIO()):
+            st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
+        expect(st is None, f"a frozen input under a week old is this round's: {st}")
+        rec_ = vdrift.read_text(encoding="utf-8") if vdrift.exists() else ""
+        expect(rec_.count("\n") == 2 and "left out on purpose by the frozen plan" in rec_ and "plan issue #7" in rec_,
+               f"the accepted drift is recorded once in the version's DRIFT.md, naming the plan: {rec_!r}")
+        # round/frozen.json in the working directory is read without the flag
+        a_.untaken_ok = None
+        freeze_file(False)
+        (pathlib.Path(d) / "round").mkdir(exist_ok=True)
+        shutil.copy(frozen, pathlib.Path(d) / "round/frozen.json")
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(d)
+            with contextlib.redirect_stdout(io.StringIO()):
+                st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
+        finally:
+            os.chdir(old_cwd)
+        expect(st is None and vdrift.read_text(encoding="utf-8").count("\n") == 3,
+               f"the round's round/frozen.json is read from the working directory: {st}")
+        # a real authors' branch ahead of the freeze (the remote exists and is fetched): a plan that does not take their
+        # code goes on; one that takes it goes on only for what came after the commit it took, once that is carried
+        rbp = fork / ".port/1.21.4/branch.properties"
+        rdrift = fork / ".port/1.21.4/DRIFT.md"
+        w(rbp, f"minecraft_version=1.21.4\nupstream=upstream/main\nupstream_commit={gf('rev-parse', 'upstream/main')}\n")
+        w(up / "A.java", "a3\n"); gu("commit", "-qam", "authors 3")
+        a_.untaken_ok = str(frozen)
+        for case, args_, want_stop in (("take_authors false, the authors ahead", dict(take=False), False),
+                                       ("take_authors true, their new tip not carried", dict(take=True, uc=gu("rev-parse", "HEAD")), True),
+                                       ("take_authors true, the plan's commit carried", dict(take=True, uc=gf("rev-parse", "HEAD")), False)):
+            freeze_file(**args_)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                st = drift_stop(fork, a_, fetch=True, props_file=rbp, drift_file=rdrift)
+            expect((st is not None) == want_stop and "1 commit(s)" in (buf.getvalue() + (st or {}).get("stop", "")),
+                   f"--untaken-ok against a real authors' branch, {case}: {st} {buf.getvalue()}")
+        rbp.unlink(); rdrift.unlink(missing_ok=True); a_.untaken_ok = None
+        freeze_file(False)
+        # a library release other than the frozen one still stops, whatever the plan says about the authors
+        a_.untaken_ok, a_.port_release = str(frozen), ["owner/lib@v9"]
+        w(vbp, vbp.read_text(encoding="utf-8") + "library.owner/lib=v1\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
+        expect(st and st["code"] == DRIFT_EXIT and "owner/lib" in st["stop"] and "authors" not in st["stop"],
+               f"--untaken-ok covers the authors' branch only, never another library release: {st}")
+        a_.untaken_ok, a_.port_release = None, ["owner/lib@v1"]
+        gf("remote", "remove", "origin")
+        # a stop without choices (a layer-deps failure did this on a dependent) prints instead of raising KeyError
+        expect("Choices" in stop_block({"stage": "setup", "left": "layer-deps.py resolve: x", "code": 2}),
+               "stop_block: a stop with no choices still prints")
+        import ast
+        tree = ast.parse((ROOT / "tools/fork-port.py").read_text(encoding="utf-8"))
+        bare = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Dict)
+                and {"stop", "code"} <= {k.value for k in n.keys if isinstance(k, ast.Constant)}
+                and "choices" not in {k.value for k in n.keys if isinstance(k, ast.Constant)}]
+        expect(not bare, f"every stop this tool returns names its choices (lines {bare})")
         vbp.unlink()
         a_.port_release = ["owner/lib@v2"]
         with contextlib.redirect_stdout(io.StringIO()):
@@ -4733,6 +4978,12 @@ def self_check_done_freeze_sweep():
         a_ = argparse.Namespace(repo=str(repo), target="1.21.4", base="origin/neoforge-1.21.1", port_release=[],
                                 upstream="upstream/main", accept_upstream_drift=False)
         expect(drift_stop(repo, a_) is None and not (repo / ".multiversion").exists(), "single-version: no upstream check, nothing written")
+        (repo / "frozen.json").write_text(json.dumps({"frozen_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                                      "forks": [{"repo": "owner/examplemod", "take_authors": False}]}),
+                                          encoding="utf-8")
+        a_.untaken_ok = str(repo / "frozen.json")
+        expect(drift_stop(repo, a_) is None and not list(repo.rglob("DRIFT.md")) and not (repo / ".port").exists(),
+               "single-version with --untaken-ok: still no upstream check, nothing written")
         lines = []
         sa = argparse.Namespace(repo=str(repo), chain="1.21.3..1.21.4", from_stage=None, to_stage=None, gates="auto",
                                 base="x", modid=None, port_checkout=[], port_release=[], target=None)

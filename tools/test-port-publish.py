@@ -174,8 +174,9 @@ def layer_git(changed=("README.md",), gates41=GATES_41, with_layer=True, targets
             return R(0, "neoforge-1.21.1\n")
         if a[0] == "rev-parse":
             return R(0, "c0ffee0\n")
-        if a[0] == "cat-file":
-            return R(0)
+        if a[0] == "cat-file":   # per path: a commit is there; a file only when this stub serves it (no red record)
+            ref = a[-1]
+            return R(128) if ":" in ref and ref.endswith("GATES-RED.md") else R(0)
         if a[0] == "diff":
             return R(0, "\n".join(changed) + "\n")
         if a[0] == "merge-base":

@@ -278,7 +278,7 @@ grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans,
   || bad "file-loop self-check: $out"
 
 out="$(python3 tools/port-cost.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "port-cost: a session driving two layer targets and a second fork (one subagent per target) is charged once -- each target only its own requests, the parts sum to the session; a single-version checkout and a layer checkout without --target are counted whole, as before; records carry a price tier and no model name; round-table sums each version branch's COST.md records since the round's start and measures a single-version fork, with totals" \
+grep -q 'self-check: OK' <<<"$out" && ok "port-cost: a session driving two layer targets and a second fork (one subagent per target) is charged once -- each target only its own requests, the parts sum to the session; a single-version checkout and a layer checkout without --target are counted whole, as before; records carry a price tier and no model name; round-table sums each version branch's COST.md records since the round's start and measures a single-version fork, with totals; round-table --session-cwd charges a scheduled session's own requests (its subagents included, another cwd not) per version at the round's marks" \
   || bad "port-cost self-check: $out"
 
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
@@ -511,7 +511,7 @@ python3 tools/fork-port.py --repo "$SV" --target 1.21.4 --write-test-items >/dev
 [ $c1 = 2 ] && [ $c2 = 2 ] && [ $c3 = 2 ] && [ ! -e "$SV/.multiversion" ] && [ -z "$(find "$SV" -name TEST-ITEMS.md -o -name .fork-port.lock)" ] \
   && ok "single-version: --chain, --check-done and --write-test-items are bad input (exit 2), nothing written" || bad "single-version --chain $c1 / --check-done $c2 / --write-test-items $c3"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run removes GATES.md, a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command, done needs REVIEW.md (for the commit reviewed), TEST-ITEMS.md and every base behaviour inventory item accounted for (layer-inventory.py; none on single-version), setup builds INVENTORY.json once when missing (layer only), a library target not done stops setup with exit 18 and --allow-undone-library is passed through, recorded and resumed, a new target over an undone parent is refused, the upstream freeze stops a run when the authors moved, --chain sweeps up and stops at the first red -- each also on a single-version fixture" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run is written to GATES-RED.md and keeps GATES.md byte for byte (not done, auto runs full, a green run deletes it), a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command, done needs REVIEW.md (for the commit reviewed), TEST-ITEMS.md and every base behaviour inventory item accounted for (layer-inventory.py; none on single-version), setup builds INVENTORY.json once when missing (layer only), a library target not done stops setup with exit 18 and --allow-undone-library is passed through, recorded and resumed, a new target over an undone parent is refused, the upstream freeze stops a run when the authors moved, --chain sweeps up and stops at the first red -- each also on a single-version fixture" \
   || bad "fork-port self-check: $out"
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
@@ -536,6 +536,47 @@ grep -q 'self-check: OK' <<<"$out" && ok "known-issues self-check (in $(grep -o 
 # both sides of daylight saving, install / round-task, and the steps against a fake GitHub on two tiny single-version
 # forks -- no network, seconds
 echo "weekly-plan.py: the Tuesday plan workflow and the Wednesday round task"
+# the README names the weekly round's new flags and limits (review of #147)
+python3 - <<'PY' && ok "README: round-table --session DIR, MMVU_GH_TIMEOUT and the REST fallback, round-preflight --versions/--no-client, the JDK search" || bad "the README no longer names the round's new flags (round-table --session, MMVU_GH_TIMEOUT, preflight --versions/--no-client, the JDK search)"
+import pathlib, sys
+r = " ".join(pathlib.Path("README.md").read_text(encoding="utf-8").split())
+sys.exit(0 if all(x in r for x in ("`--session DIR`", "MMVU_GH_TIMEOUT", "falls back to REST", "[--versions 1.21.1,26.3] [--no-client]",
+                                   "`JAVA_HOME` first, then `JAVA_HOME_<n>`")) else 1)
+PY
+# a version's work branch waits for the lower version's merge, and the 1.21.x -> 26.x conflicts are resolved by hand inside
+# the cascade (dry run, 2026-10-18: the skill did not say either)
+python3 - <<'PY' && ok "keep-current, version branches: keep-current/<date>-<v> is pushed only after the lower version's PR merged; the 1.21.x -> 26.x rename conflicts resolved by hand inside the cascade" || bad "keep-current no longer says a version's work branch waits for the lower merge, or how the 26.x boundary is crossed"
+import pathlib, sys
+s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf-8")
+v = s[s.index("## A fork with version branches"):s.index("## A fork with the layer")]
+need = ("is pushed only after the PR of the version below it is\n   merged", "never stacked on an unmerged lower PR",
+        "resolve them\n   by hand inside the cascade", "26.1.2..<newest>")
+need += ("With the **plain cascade**", "answered through step 2's decisions")
+setup = s[s.index("## Setup: the weekly cycle"):]
+flat = lambda x: " ".join(x.split())                 # the wording, not where its lines wrap
+sys.exit(0 if all(flat(n) in flat(v) for n in need) and "merge them in chain order by step 6's" not in flat(v)
+         and "outside every fork checkout" in flat(setup) else 1)
+PY
+# the weekly round's per-version order (dry run, 2026-10-18: the round reviewed each version after it merged): the review
+# comes before the merge and the pre-release, and a not-ok row graded S1/S2 at that version blocks both
+python3 - <<'PY' && ok "keep-current, the weekly round: gates, then the review, then the merge, then the pre-release; an S1/S2 not-ok row at the version blocks its merge and pre-release" || bad "keep-current's weekly round no longer reviews each version before its merge and pre-release"
+import pathlib, sys
+s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf-8")
+r = s[s.index("## The weekly round"):s.index("## README Ports block")]
+step = r[r.index("4. **Per version, in ladder order**"):r.index("5. **New findings.**")]
+pos = [step.find(x) for x in ("gates A/B/C in full", "one full review against the fixed rubric, before the merge",
+                              "blocks that version's merge and its pre-release", "the merge of the version's PR",
+                              "a pre-release through Port CI")]
+run6 = s[s.index("6. **Push the work branch and open a PR"):s.index("7. **Dependents next.**")]
+sv = r[r.index("   - **A single-version fork:**"):r.index("   - **A version-branch fork with `head_cascade: true`**")]
+hc = r[r.index("   - **A version-branch fork with `head_cascade: true`**"):r.index("   - **A version-branch fork with `head_cascade: false`**")]
+# review of #147: Run step 6 (auto-merge, release=true) must not run ahead of the round's review, for a single-version
+# fork as for a version-branch one, and the review has a single-version form
+ok6 = ("In the weekly round the merge and the release run wait for the round's step 4" in run6
+       and "only after step 4" in sv and "only after step 4" in hc and "the cascade after that merge" in hc
+       and "git diff --name-only" in step and "single-version fork" in step)
+sys.exit(0 if all(p >= 0 for p in pos) and pos == sorted(pos) and "The order is fixed" in step and ok6 else 1)
+PY
 out="$(python3 tools/weekly-plan.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "weekly-plan self-check (in $(grep -o '[0-9.]* s)$' <<<"$out" | tr -d ')')): the workflow equals tools/golden/weekly-plan.yml (Tuesdays 15:00 and 16:00 UTC plus workflow_dispatch, contents: read and issues: write, no secrets, the tools at a pinned commit, no model); its first step lets only the 08:00 Los Angeles slot through on both sides of daylight saving (and with no tz database); the deadline is the next Wednesday round; install refuses an org-owned fork without plan_owner, a checkout off the head branch and a head that is not the default branch (unless --default-branch-too), and is idempotent; the round task is CRON_TZ=America/Los_Angeles with a jittered minute, a fresh session, push and email on; the allow list is empty by default (the round asks) and rendered verbatim into the prompt, automerge follows merge-fork-prs; the round's own work branches and PRs fall under merge-fork-prs, the ledger and README Ports block under push-version-branches, plan-issue comments and ledger-issue edits are always allowed and the migrator repository is only read; the round clones current main and says the plan ran at migrator_sha, which install records; a re-install over an existing config (a single-version fork and a layer fork with layer_branch in one set) warns on stderr for each allow, ledger_issues, depends_on and layer_branch its flags drop, naming the flag, keeps the default result otherwise unchanged (no warning on a fresh install or with every value re-passed), and --keep-existing keeps them while a flag given still wins; replaces lists exact task names (its own, --replace-task, existing keep-current names of this set); the authors' upstream comes from the fork parent when omitted; --trailer lines end the install commit; the plan issue has the deadline first, is assigned to the owner, a section per fork; a second run the same week opens nothing; an unclosed plan is carried forward (ticks and the owner's replies, not a drive-by's) and closed as superseded; an incomplete plan opens no issue" \
   || bad "weekly-plan self-check: $(tail -5 <<<"$out")"
@@ -592,6 +633,10 @@ done, why, _n = ld.library_done_branch_release("owner/lib", "lib-1.1-mc1.21.4", 
 rc, out = fp("--target", "1.21.4", "--check-done")
 (rc != 18 or "GATES.md" not in out or "no verdict: changed src/main/java/com/example/mod/Plain.java" not in out) and \
     bad.append(f"after an edit: not done, gates stale, the file a review row: {rc} {out}")
+# on the branch's own checkout --check-done also writes the reviewer's `?` row (never a verdict)
+"| changed | src/main/java/com/example/mod/Plain.java | ? | ? |" in (r / ".port/1.21.4/REVIEW.md").read_text(encoding="utf-8") \
+    or bad.append(f"--check-done on the branch writes REVIEW.md's `?` row: {out}")
+g("checkout", "-q", "--", ".")
 g("checkout", "-q", "neoforge-1.21.3")
 (r / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain {\n int v = 1;\n}\n", encoding="utf-8")
 g("commit", "-qam", "fix at 1.21.3")
@@ -652,8 +697,11 @@ else
 fi
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b); a client killed with exit 137 and no verdict is 'killed' (OOM said only when the cgroup or dmesg confirms it), a caught WARN trace is never the stop reason, and Gate C does not start below the free-memory floor (faked meminfo and cgroup); a second Gate C client on the machine waits for the first's lock (saying who holds it) and a killed holder's lock is free" || bad "gate-loop self-check: $out"
+out="$(python3 tools/round-preflight.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "round-preflight: a missing fork clone says to attach it to the scheduled task; the GitHub way named (GITHUB_TOKEN wins over gh); a JDK per version (25 for 26.x); libEGL.so.1 for a 26.3 client and XDG_RUNTIME_DIR, skipped with --no-client or off Linux" \
+  || bad "round-preflight self-check: $out"
 out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick and crash-cause self-check; the expectations file (single-version with none: none, as before; version branch .port/<mc>/shipped-expect-cf.txt for _cf, the unsuffixed one for _mr; layer .multiversion/), a variant missing its expected line fails; boot() on a stand-in server, no Minecraft: clean passes, a crash after Done fails, an exit before stop fails" || bad "shipped-gate self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick (JAVA_HOME first, then JAVA_HOME_<n>, /usr/lib/jvm, /opt, the Gradle toolchain downloads; java.exe too) and crash-cause self-check; the expectations file (single-version with none: none, as before; version branch .port/<mc>/shipped-expect-cf.txt for _cf, the unsuffixed one for _mr; layer .multiversion/), a variant missing its expected line fails; boot() on a stand-in server, no Minecraft: clean passes, a crash after Done fails, an exit before stop fails" || bad "shipped-gate self-check: $out"
 python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
 printf 'x' > "$T/notjar.jar"; python3 tools/shipped-gate.py --jar "$T/notjar.jar" --neo 21.1.228 >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a file that is not a jar exits 2" || bad "shipped-gate non-jar exit"
 python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1],'w').writestr('a','b')" "$T/ok.jar"
@@ -977,6 +1025,29 @@ a.add("com/mojang/B.java")
 grown = m.roots_of(a)
 m._ROOTS[id(b := {"org/example/C.java"})] = (object(), 1, {"net/minecraft/"})   # an entry left by a dead object with b's id
 sys.exit(0 if first == {"net/minecraft/"} and grown == {"net/minecraft/", "com/mojang/"} and m.roots_of(b) == {"org/example/"} else 1)
+PY
+# audit-mixin-targets find_sources_jar: the build's own NeoForge version's jar, never the first one sorted (a version
+# branch keeps the previous version's staged jars beside its own); a lone jar (single-version) as before
+python3 - <<'PY' && ok "audit-mixin-targets: the sources jar of the build's neo_version is picked over an older version's left beside it; a lone jar and no gradle.properties as before" || bad "audit-mixin-targets find_sources_jar picked another version's sources jar"
+import importlib.util, os, pathlib, sys, tempfile, time
+spec = importlib.util.spec_from_file_location("a", "tools/audit-mixin-targets.py"); m = importlib.util.module_from_spec(spec)
+sys.argv = ["x"]; spec.loader.exec_module(m)
+ok = True
+same = lambda got, want: got is not None and pathlib.Path(got).resolve() == pathlib.Path(want).resolve()   # Windows: glob's
+# path joins the workspace and the pattern with mixed separators (and may keep an 8.3 short name), so compare files
+with tempfile.TemporaryDirectory() as d:
+    art = pathlib.Path(d) / "build/moddev/artifacts"; art.mkdir(parents=True)
+    new = art / "neoforge-21.11.5-sources.jar"; new.write_bytes(b"x")
+    ok &= same(m.find_sources_jar(d), new)                                   # single-version: its one jar
+    old = art / "neoforge-21.10.40-sources.jar"; old.write_bytes(b"x")
+    t = time.time(); os.utime(new, (t - 60, t - 60)); os.utime(old, (t, t))   # the stale one even newer on disk
+    (pathlib.Path(d) / "gradle.properties").write_text("minecraft_version=1.21.11\nneo_version=21.11.5\n", encoding="utf-8")
+    ok &= same(m.find_sources_jar(d), new)
+    (pathlib.Path(d) / "gradle.properties").write_text("neo_version=21.10.40\n", encoding="utf-8")
+    ok &= same(m.find_sources_jar(d), old)
+    (pathlib.Path(d) / "gradle.properties").write_text("neo_version=21.10.4\n", encoding="utf-8")   # a prefix is no match
+    ok &= same(m.find_sources_jar(d), old)                                   # none matches: the newest, said on stderr
+sys.exit(0 if ok else 1)
 PY
 # R25: a registration supplier names what it builds and every Block/Item Properties takes that name (prefix-only rows)
 python3 - <<'PY' && ok "shared rows: R25 registry ids -- suppliers enter their name, Item/Block Properties are stamped, a constructor reference becomes an entering supplier" || bad "the R25 RegIds rows rewrite the wrong shapes"

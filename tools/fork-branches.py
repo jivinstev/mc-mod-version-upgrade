@@ -108,6 +108,7 @@ REVIEWED_INPUTS = ("renames.tsv", "STUBS.json", "REMERGE.json", "moves.generated
                    "shared-helpers.txt")
 GATES_DOC = re.compile(r"^((?!src/)[^\n]*\.md|LICENSE[^/]*|\.github/.*)$")     # port-publish.py's: nothing in a jar
 LIBRARY_PENDING = "library: no dependent has passed Gate C against this library version's jar yet"
+LIBRARY_PRERELEASE_MARK = "**Library pre-release (not done):**"      # tools/layer-deps.py render_md() writes it
 DEV_JAR_MARK = "port_jar_dev."
 
 
@@ -231,6 +232,17 @@ def resolve_branch(repo, name):
         if r.returncode == 0:
             return r.stdout.strip()
     return None
+
+
+def fresh_branch(repo, name):
+    """A commit for branch `name`, the newer of the local branch and origin's: origin's when the local branch is behind
+    it (a fetch after the parent's PR merged), the local one when it is ahead or has diverged (a merge not pushed yet).
+    None when neither exists."""
+    loc = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}^{{commit}}").stdout.strip()
+    org = git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{name}^{{commit}}").stdout.strip()
+    if loc and org and loc != org and git(repo, "merge-base", "--is-ancestor", loc, org).returncode == 0:
+        return org
+    return loc or org or None
 
 
 def is_branch_fork(repo, t):
@@ -403,6 +415,65 @@ def apply_rules_to_files(paths, rules):
     for f in paths:
         old = pathlib.Path(f).read_bytes()
         new = apply_rules(old.decode("utf-8", "surrogateescape"), rules).encode("utf-8", "surrogateescape")
+        if new != old:
+            pathlib.Path(f).write_bytes(new); n += 1
+    return n
+
+
+def java_segments(text):
+    """`text` (Java source) cut into [(is_comment, piece)] that join back to it exactly: `//` comments (to the end of
+    the line, the line break not included), `/* ... */` and `/** ... */` comments; everything else -- code, string
+    and char literals, text blocks -- is code (a `//` inside a string is no comment)."""
+    out, i, n, start = [], 0, len(text), 0
+    while i < n:
+        c = text[i]
+        if text.startswith('"""', i):
+            j = text.find('"""', i + 3)
+            while j != -1 and text[j - 1] == "\\":
+                j = text.find('"""', j + 1)
+            i = n if j == -1 else j + 3
+        elif c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+        elif text.startswith("//", i) or text.startswith("/*", i):
+            if i > start:
+                out.append((False, text[start:i]))
+            if text[i + 1] == "/":
+                j = i
+                while j < n and text[j] not in "\r\n":
+                    j += 1
+            else:
+                j = text.find("*/", i + 2)
+                j = n if j == -1 else j + 2
+            out.append((True, text[i:j]))
+            i = start = j
+        else:
+            i += 1
+    if start < n:
+        out.append((False, text[start:]))
+    return out
+
+
+def apply_rules_code(text, rules):
+    """apply_rules() on the code of a Java file only: every comment kept byte for byte (a javadoc naming a class by
+    its old package stays as written). String literals are code here, as for apply_rules()."""
+    return "".join(piece if comment else apply_rules(piece, rules) for comment, piece in java_segments(text))
+
+
+def apply_moves_to_files(paths, rules, mechanical=()):
+    """The moves stage's rows over the branch's source: a file the rows alone made (`mechanical`, by path) is re-made
+    whole, comments included -- it must stay exactly what the rows make of the port branch's file, which is what the
+    cascade compares -- and every other file (changed by hand: a review row already) in its code only, its comments
+    untouched. Bytes kept as apply_rules_to_files() keeps them. -> the number of files changed."""
+    mech = {str(pathlib.Path(m)) for m in mechanical}
+    n = 0
+    for f in paths:
+        old = pathlib.Path(f).read_bytes()
+        text = old.decode("utf-8", "surrogateescape")
+        new = (apply_rules(text, rules) if str(pathlib.Path(f)) in mech else apply_rules_code(text, rules)) \
+            .encode("utf-8", "surrogateescape")
         if new != old:
             pathlib.Path(f).write_bytes(new); n += 1
     return n
@@ -745,7 +816,7 @@ def parent_base(repo, root, t, ref):
     `ref` and the parent's branch tip, or ref's first parent when the parent's branch is not in this clone."""
     p = info(root, t)
     parent = p.get("parent") or ""
-    tip = resolve_branch(repo, parent) if parent else None
+    tip = fresh_branch(repo, parent) if parent else None      # a local parent left behind by a fetch is stale
     mb = git(repo, "merge-base", ref, tip).stdout.strip() if tip else ""
     if not mb:
         mb = git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^1").stdout.strip()
@@ -942,6 +1013,9 @@ def review_problems(repo, root, t, ref, work, files, items):
 def gates_problems(repo, root, t, ref, work, files):
     """[] when .port/<t>/GATES.md records a green Gate C for Minecraft t at a commit this branch carries with nothing
     jar-relevant changed since (or a layer commit MIGRATED.json maps to this tree)."""
+    if (rec_dir(root, t) / "GATES-RED.md").is_file():
+        return ["the last full gate run was red (GATES-RED.md); GATES.md's older green record does not count until a full "
+                "run is green again"]
     text = read_file(rec_dir(root, t) / "GATES.md")
     if not text:
         return ["no green Gate C recorded in GATES.md"]
@@ -1065,6 +1139,10 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
         if fp().UNDONE_LIBRARY_MARK in deps:
             out.append("built against a library version that is not done (--allow-undone-library, DEPS.md \"Development "
                        "only\"): re-resolve with --port-release once the library's version is done")
+        if LIBRARY_PRERELEASE_MARK in deps or any(k.startswith("port_jar_prerelease.") for k in info(root, t)):
+            out.append("built against a library pre-release whose version is not done (DEPS.md \"Library pre-release\"): "
+                       "fine for this version's pre-release; done, a full Release and promotion wait until the library's "
+                       "version is done -- then re-resolve with --port-release")
         p = info(root, t)
         dev = sorted(k[len(DEV_JAR_MARK):] for k in p if k.startswith(DEV_JAR_MARK))
         if dev:
@@ -1083,6 +1161,25 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
     finally:
         if tmp is not None:
             tmp.cleanup()
+
+
+def check_done(repo, t, who="fork-branches", say=print):
+    """`check-done` (and fork-port.py --check-done on a version branch): the done list, and -- on the checkout of t's own
+    branch -- a `?` row in REVIEW.md for every item without one and an `item` row for each unaccounted inventory id, for
+    the fresh reviewer to fill (never a verdict). Off the branch it reads the branch's commit and writes nothing.
+    -> 0 done, 18 not done."""
+    repo = pathlib.Path(repo).resolve()
+    why = target_done(repo, t)
+    say(f"{who} {t}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
+    if checkout_version(repo) == t and (rec_dir(repo, t) / BRANCH_PROPS).is_file():
+        unacc = [m.group(1) for w in why for m in [re.match(r"behaviour inventory: unaccounted (\S+) \(", w)] if m]
+        n = review_skeleton(repo, repo, t, "HEAD", True, unacc)
+        if n:
+            say(f"{who} {t}: added {n} `?` row(s) to .port/{t}/REVIEW.md for the fresh reviewer (no verdict written; "
+                "commit it with the review)")
+    elif why:
+        say(f"{who} {t}: not on {branch_name(t)}'s checkout: nothing written (check it out for REVIEW.md's `?` rows)")
+    return UNDONE_EXIT if why else 0
 
 
 def library_tested(repo, root, t, ref, work, files):
@@ -2418,8 +2515,16 @@ def worktree_for(repo, t):
         return repo, None
     w = repo / "build" / "fork-branches" / t
     if w.is_dir() and (w / ".git").exists():
-        if git(w, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-            return None, f"the worktree {w} has uncommitted changes"
+        dirty = [ln[3:].strip().strip('"') for ln in git(w, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
+                 if len(ln) > 3]
+        # a run that stopped here (red gates, a stop before its cost stage) leaves its own records edited: the next run
+        # reuses the worktree with them (they are what that run found); anything else is a person's edit and is refused
+        left = [f for f in dirty if not run_output(f, t)]
+        if left:
+            return None, (f"the worktree {w} has uncommitted changes ({', '.join(left[:4])}): commit or discard them "
+                          f"(git -C {w} checkout -- .), or remove the worktree (git worktree remove --force {w})")
+        if dirty:
+            print(f"fork-branches: reusing {w} as a stopped run left it, its own records uncommitted: {', '.join(dirty)}")
         if git(w, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() != b:
             r = git(w, "checkout", "-q", b)
             if r.returncode:
@@ -2431,21 +2536,76 @@ def worktree_for(repo, t):
             return None, f"no branch {b}"
         git(repo, "branch", b, o)
     w.parent.mkdir(parents=True, exist_ok=True)
+    # a worktree whose directory is gone (removed by hand, a cleaned build/) stays registered and makes `worktree add`
+    # fail: prune the stale registrations first
+    git(repo, "worktree", "prune")
     r = git(repo, "worktree", "add", str(w), b)
     if r.returncode:
         return None, f"cannot make a worktree for {b}: {r.stderr.strip()[-300:]}"
     return w, None
 
 
-def run_gates(work, t, gates, say=print):
-    """The no-model gates on version t's checkout: tools/fork-port.py from the measure stage with no budget."""
+RUN_OUTPUT_NAMES = ("GATES.md", "GATES-RED.md", "RESIDUE.md", "COST.md", "TEST-ITEMS.md", "INVENTORY-CHECK.json",
+                    "DRIFT.md", "DEPS.md", "REVIEW.md")
+
+
+def run_output(path, t):
+    """Is `path` one of the records a fork-port.py run writes into version t's .port/<t>/ (never jar content)?"""
+    return path.replace("\\", "/").startswith(f"{REC}/{t}/") and path.rsplit("/", 1)[-1] in RUN_OUTPUT_NAMES \
+        and path.count("/") == 2
+
+
+def run_gates(work, t, gates, say=print, untaken_ok=None):
+    """The no-model gates on version t's checkout: tools/fork-port.py from the measure stage with no budget.
+    untaken_ok: a weekly round's frozen input, passed on (fork-port.py --untaken-ok: the authors' commits the plan does
+    not take do not stop the gates at the upstream freeze)."""
     if gates == "none":
         return 0
     cmd = [sys.executable, str(ROOT / "tools/fork-port.py"), "--repo", str(work), "--target", t, "--from-stage", "measure",
            "--budget", "0", "--max-errors", "0"]
     cmd += ["--to-stage", "audit"] if gates == "compile" else ["--gates", gates]
+    if untaken_ok:
+        cmd += ["--untaken-ok", str(pathlib.Path(untaken_ok).resolve())]
     say(f"fork-branches: cascade: {t}: {' '.join(cmd[1:])}")
     return subprocess.run(cmd).returncode
+
+
+# A merge the cascade made whose gates did not pass (red, or stopped for a hand re-apply) stays on the local branch and
+# in its worktree. The next run used to see that branch already carrying its parent and report it "up to date" without
+# gating it. The cascade records each such merge here (in the clone's git directory: shared by every worktree, never in
+# a tree) and a later run gates it before it calls it up to date; a green gate run clears it.
+UNGATED_FILE = "mmvu-cascade-ungated.json"
+
+
+def _ungated_path(repo):
+    d = git(repo, "rev-parse", "--git-common-dir").stdout.strip()
+    p = pathlib.Path(d) if d else pathlib.Path(repo) / ".git"
+    return p if p.is_absolute() else pathlib.Path(repo) / p
+
+
+def ungated(repo):
+    """{version: {"commit", "why"}} of the merges an earlier cascade made and did not gate green."""
+    try:
+        data = json.loads((_ungated_path(repo) / UNGATED_FILE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def mark_ungated(repo, t, commit=None, why=None):
+    """Record (commit given) or clear (commit None) version t's ungated merge."""
+    data = ungated(repo)
+    if commit:
+        data[t] = {"commit": commit, "why": why or ""}
+    elif t not in data:
+        return
+    else:
+        data.pop(t)
+    f = _ungated_path(repo) / UNGATED_FILE
+    if data:
+        f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        f.unlink(missing_ok=True)
 
 
 def cascade_nodes(repo, spec):
@@ -2505,7 +2665,7 @@ def port_ref_refused(repo, tip, name, first, upstream=None):
 
 
 def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=None, budget=DEFAULT_BUDGET_LINES,
-            out_dir=None, port_ref=None, upstream=None, _guarded=False):
+            out_dir=None, port_ref=None, upstream=None, _guarded=False, untaken_ok=None):
     """`FROM..TO`: merge FROM's branch into the next branch up TO's chain, then that one into the next, ... up to TO,
     running the no-model gates on each branch a merge changed. FROM is a version or the port branch (its name, or
     `port`). Pushes nothing.
@@ -2536,7 +2696,8 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
             say(f"fork-branches: cascade --port-ref REFUSED: {why}"); return 2
     if mode == "plan":
         return cascade_plan(repo, spec, budget, out_dir, say, port_ref=port_tip)
-    runner = runner or run_gates
+    if runner is None:
+        runner = (lambda w_, t_, g_, s_=print: run_gates(w_, t_, g_, s_, untaken_ok=untaken_ok)) if untaken_ok else run_gates
     rows, merged, items, mech = [], [], [], []
     resolve = {"budget": budget} if mode in ("apply", "plan-run") else None
     for k in range(i, len(nodes) - 1):
@@ -2548,7 +2709,30 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         if not pref or not tref:
             say(f"fork-branches: no branch {pname if not pref else branch_name(t)}"); return 2
         if git(repo, "merge-base", "--is-ancestor", pref, tref).returncode == 0 and not needs_carry(repo, t, tref, pref, pv, port, port_tip):
-            rows.append((t, "up to date", ""))
+            earlier = ungated(repo).get(t) if mode not in ("plan", "plan-run") else None
+            if earlier and git(repo, "merge-base", "--is-ancestor", earlier["commit"], tref).returncode != 0:
+                mark_ungated(repo, t)        # the branch no longer carries that merge (reset by hand): nothing to gate
+                earlier = None
+            if not earlier:
+                rows.append((t, "up to date", ""))
+                continue
+            what = f"merged by an earlier cascade at {earlier['commit'][:12]} and not gated green ({earlier['why']})"
+            if dry_run:
+                rows.append((t, f"would gate: {what}", "")); continue
+            if gates == "none":
+                rows.append((t, f"up to date, NOT gated: {what}", "run the cascade with --gates to gate it")); continue
+            work, why = worktree_for(repo, t)
+            if work is None:
+                rows.append((t, "STOPPED", why)); break
+            say(f"fork-branches: cascade: {t}: {what}: gating it now")
+            rc = runner(work, t, gates, say)          # the record stays until this run is green
+            if rc not in (0, 17, UNDONE_EXIT):
+                rows.append((t, f"merged earlier, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
+                say(f"fork-branches: cascade STOPPED at {t}: still red -- start ONE fixer there (python3 tools/fork-port.py "
+                    f"--repo {work} --target {t} --from-stage measure, with a budget), commit, then cascade {t}..{to}")
+                break
+            mark_ungated(repo, t)
+            rows.append((t, f"merged earlier, gated now, gates exit {rc}", ""))
             continue
         if dry_run:
             n = git(repo, "rev-list", "--count", f"{tref}..{pref}").stdout.strip()
@@ -2586,18 +2770,26 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         merged.append(t)
         if pending and resolve is None:
             rows.append((t, "STOPPED: merged, the authors' change to re-apply by hand", ", ".join(list(pending)[:6])))
+            mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(), "stopped for the authors' change by hand")
             say(f"fork-branches: cascade STOPPED at {t}: merged, but the authors' change to {', '.join(list(pending)[:6])} "
                 f"reaches {t} through no merge and {t} changed the file by hand. On {branch_name(t)}: apply each diff "
                 f"below through {t}'s rows, commit, remove its entry from .port/{t}/REMERGE.json (the done check lists it "
                 f"until the file changes), commit, then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}")
             show_pending()
             break
+        if gates != "none" and mode != "plan-run":
+            # recorded BEFORE the gates run: a run that is killed or times out leaves the merge recorded as ungated
+            mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(),
+                         "merged; its gates did not finish (killed, timed out, or still running)")
         rc = runner(work, t, gates, say) if mode != "plan-run" else 0
         if rc not in (0, 17, UNDONE_EXIT):
             rows.append((t, f"merged, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
+            mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(), f"red after the merge, fork-port exit {rc}")
             say(f"fork-branches: cascade STOPPED at {t}: red after the merge -- start ONE fixer there (python3 tools/fork-port.py "
                 f"--repo {work} --target {t} --from-stage measure, with a budget), commit, then cascade {t}..{to}")
             break
+        if gates != "none" and mode != "plan-run":
+            mark_ungated(repo, t)
         n_open = sum(1 for x in its if not x.get("executed"))
         rows.append((t, "merged" + ("" if gates == "none" or mode == "plan-run" else f", gates exit {rc}")
                      + (f", {n_open} decision(s) open" if n_open else ""), ""))
@@ -2613,7 +2805,7 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         write_plan(repo, plan, out_dir, say)
     if merged and mode != "plan-run":
         say(f"fork-branches: nothing was pushed: git push origin {' '.join(branch_name(t) for t in merged)}")
-    return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED")) else 0
+    return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED", "merged earlier, RED")) else 0
 
 
 cascade_run_result = {}
@@ -2746,7 +2938,8 @@ def read_decisions(path):
     return data if isinstance(data, dict) else {"decisions": data}
 
 
-def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LINES, out_dir=None, runner=None):
+def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LINES, out_dir=None, runner=None,
+                    untaken_ok=None):
     """cascade --apply-decisions FILE: each answer (by decision id) applied at every version whose REMERGE.json holds
     that decision, oldest first -- take (the authors' file through the version's rows), keep, patch (a diff in the port
     branch's names, through the version's rows) or content -- its entry cleared, the choice logged in that branch's
@@ -2776,7 +2969,8 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     if set(answers) - held():
         say(f"fork-branches: --apply-decisions: {len(set(answers) - held())} answer(s) with no REMERGE.json entry yet "
             "(no earlier --apply): running cascade --apply first")
-        rc0 = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner)
+        rc0 = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner,
+                      untaken_ok=untaken_ok)
         if rc0:
             say("fork-branches: --apply-decisions: the cascade --apply stopped; no decision applied"); return rc0
     done_ids, failed, waiting = set(), [], []
@@ -2849,7 +3043,8 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     if missing:
         say(f"fork-branches: --apply-decisions: no open entry holds {', '.join(missing)} (answered already, or a stale block)")
     say("fork-branches: --apply-decisions: merging the decisions up and re-planning (cascade --apply)")
-    rc = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner)
+    rc = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner,
+                 untaken_ok=untaken_ok)
     return 1 if failed or rc else 0
 
 
@@ -3147,7 +3342,7 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
 
 
 
-def sync_shared(repo, targets=None, say=print):
+def sync_shared(repo, targets=None, say=print, ci_modid=None):
     """Bring version branches up to the shared library's current tables and helpers (make-fork-layer.py sync-shared's
     job on a layer): per version, oldest first, on a clean checkout of its branch -- each `# ---- shared <v>` section of
     .port/<t>/shared-renames.tsv rewritten from templates/fork-layer/shared/<v>/renames.tsv; every .java file the rows
@@ -3241,6 +3436,19 @@ def sync_shared(repo, targets=None, say=print):
         say(f"fork-branches: sync-shared {t}: {len(set(changed))} file(s) changed and committed on {branch_name(t)}"
             + (f" (no library copy of {', '.join(kept)}: kept as it was)" if kept else "")
             + "; its review is stale until a fresh reviewer reads the change")
+    if ci_modid:
+        # each synced version's workflow regenerated too (the variant shipped-jar job a shipped-expect-<v>.txt asks
+        # for, the newest kit): a branch keeps its own port-ci.yml through every merge
+        for t in todo:
+            rc = ci(repo, t, ci_modid, run=True, say=say)
+            if rc:
+                return rc
+    else:
+        # the variants only (offline): a workflow that boots no jar its branch keeps expectations for
+        for line in ci_check(repo, todo, kit_version=False):
+            if "boots no" in line:
+                say(line.replace("ci-check: WARNING ", "sync-shared: CI not current: ")
+                    + f" -- regenerate: sync-shared --ci <modid>, or ci --repo {repo} --all --modid <modid> --run")
     return 0
 
 
@@ -3324,7 +3532,63 @@ def ci_args(repo, t, modid, kit_version=None):
     pc = load("port_ci_fb", "port-ci.py")
     wf = git(repo, "show", f"{resolve_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
     args = pc.recover_args(wf.stdout) if wf.returncode == 0 else ["--modid", modid, "--gatec", "launch,spawn,battle,gauntlet"]
-    return remap_ci_args(args, p, modid, kit_version)
+    return add_variant_jars(remap_ci_args(args, p, modid, kit_version), shipped_variants(repo, t_ref, t))
+
+
+def shipped_variants(repo, ref, t):
+    """The variants version t's branch keeps shipped-jar expectations for: `cf` for .port/<t>/shipped-expect-cf.txt."""
+    r = git(repo, "ls-tree", "--name-only", f"{ref}:{REC}/{t}/") if ref else None
+    names = r.stdout.splitlines() if r is not None and r.returncode == 0 else []
+    return sorted(m.group(1) for n in names for m in [re.fullmatch(r"shipped-expect-([A-Za-z0-9]+)\.txt", n)] if m)
+
+
+def add_variant_jars(args, variants):
+    """port-ci.py args with a `--variant-jar *_<v>.jar` for each variant that has expectations and no glob yet: the
+    workflow's `shipped jars` job then boots that jar too (an old workflow booted only `_mr` while `_cf` was red)."""
+    have = {args[i + 1] for i in range(len(args) - 1) if args[i] == "--variant-jar"}
+    return list(args) + [x for v in variants if f"*_{v}.jar" not in have for x in ("--variant-jar", f"*_{v}.jar")]
+
+
+def ci_check(repo, versions=None, kit_version=None):
+    """Lines for the round (and sync-shared): each version branch whose .github/workflows/port-ci.yml is older than the
+    Port CI kit (kit_version: the newest published when None, not compared when False) or lacks the shipped-jar glob of a
+    variant its .port/<v>/shipped-expect-<variant>.txt names. Read from each branch's newest commit (origin's when the
+    local branch is behind). -> [lines], the last one the summary."""
+    repo = pathlib.Path(repo).resolve()
+    have = version_branches(repo)
+    todo = [t for t in sorted(have, key=mc_key) if not versions or t in versions]
+    newest, out = None, []
+    if kit_version is None:
+        try:
+            pc = load("port_ci_fb", "port-ci.py")
+            newest = pc.kit_pin(pc.migrator_repo())[0]
+        except (Exception, SystemExit) as e:    # noqa: BLE001 -- offline: say so, compare the variants only
+            out.append(f"fork-branches: ci-check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
+    elif kit_version is not False:
+        newest = int(kit_version)
+    stale = 0
+    for t in todo:
+        ref = fresh_branch(repo, branch_name(t)) or have[t]
+        wf = git(repo, "show", f"{ref}:.github/workflows/port-ci.yml")
+        why = []
+        if wf.returncode:
+            why.append("no .github/workflows/port-ci.yml")
+        else:
+            kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf.stdout)]    # the kit's release the workflow downloads
+            if newest is not None and (not kits or min(kits) < newest):
+                why.append(f"its workflow pins Port CI kit {min(kits) if kits else '?'}, older than kit {newest}")
+            vj = (re.search(r'\n\s*VARIANT_JARS: "([^"]*)"', wf.stdout) or [None, ""])[1].split()
+            miss = [v for v in shipped_variants(repo, ref, t) if f"*_{v}.jar" not in vj]
+            if miss:
+                why.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
+                           + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
+        if why:
+            stale += 1
+            out.append(f"fork-branches: ci-check: WARNING {branch_name(t)}: " + "; ".join(why))
+    out.append(f"fork-branches: ci-check: {len(todo)} version branch(es), {stale} with an outdated workflow"
+               + (f" -- regenerate: python3 tools/fork-branches.py ci --repo {repo} --all --modid <modid> --run, then push"
+                  if stale else ""))
+    return out
 
 
 PIN_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/(.+)$")
@@ -3408,6 +3672,12 @@ def remap_ci_args(args, p, modid, kit_version=None):
 
 def ci(repo, t, modid, run=False, say=print, kit_version=None):
     repo = pathlib.Path(repo).resolve()
+    if t is None:                       # --all: every version branch, oldest first
+        for v in sorted(version_branches(repo), key=mc_key):
+            rc = ci(repo, v, modid, run, say, kit_version)
+            if rc:
+                return rc
+        return 0
     if not resolve_branch(repo, branch_name(t)):
         say(f"fork-branches: no branch {branch_name(t)}"); return 2
     try:
@@ -3466,6 +3736,9 @@ def main():
                    "version has not taken")
     k.add_argument("--upstream", metavar="REMOTE/BRANCH", help="the authors' branch --port-ref is checked against "
                    "(default: the lowest version's upstream= in its branch.properties)")
+    k.add_argument("--untaken-ok", metavar="FROZEN_JSON", help="a weekly round's frozen input (round/frozen.json), passed "
+                   "to each version's gates (fork-port.py --untaken-ok): the authors' commits the plan does not take do "
+                   "not stop them at the upstream freeze; recorded in that version's DRIFT.md")
     un = sub.add_parser("untaken", help="the authors' code the head carries that a version branch has not taken")
     un.add_argument("--repo", required=True); un.add_argument("--upstream", required=True, metavar="REF",
                                                               help="the authors' branch (e.g. authors/main)")
@@ -3485,8 +3758,16 @@ def main():
     lr.add_argument("--dependent", required=True); lr.add_argument("--slug")
     ss = sub.add_parser("sync-shared"); ss.add_argument("--repo", required=True)
     ss.add_argument("--target", action="append", default=[], help="a version to sync (repeat; default every version branch)")
-    ci_ = sub.add_parser("ci"); ci_.add_argument("--repo", required=True); ci_.add_argument("--target", required=True)
+    ss.add_argument("--ci", metavar="MODID", help="also regenerate each synced version branch's Port CI workflow "
+                    "(ci --run: the variant shipped-jar jobs, the newest kit); without it, ci-check's warnings are printed")
+    ci_ = sub.add_parser("ci"); ci_.add_argument("--repo", required=True)
+    cit = ci_.add_mutually_exclusive_group(required=True)
+    cit.add_argument("--target"); cit.add_argument("--all", action="store_true", help="every version branch")
     ci_.add_argument("--modid", required=True); ci_.add_argument("--run", action="store_true")
+    cc = sub.add_parser("ci-check", help="warn about version branches whose Port CI workflow is older than the kit or "
+                        "boots no jar of a variant they keep shipped-jar expectations for")
+    cc.add_argument("--repo", required=True); cc.add_argument("--target", action="append", default=[])
+    cc.add_argument("--kit-version", type=int, help="the kit to compare with (default: the newest published)")
     ci_.add_argument("--kit-version", type=int, help="the Port CI kit to pin (default: the newest published, not the "
                      "port branch's pin)")
     a = ap.parse_args()
@@ -3497,9 +3778,13 @@ def main():
     if a.cmd == "library-record":
         return library_record(a.repo, a.target, a.dependent, a.slug)
     if a.cmd == "ci":
-        return ci(a.repo, a.target, a.modid, a.run, kit_version=a.kit_version)
+        return ci(a.repo, None if a.all else a.target, a.modid, a.run, kit_version=a.kit_version)
+    if a.cmd == "ci-check":
+        for line in ci_check(a.repo, a.target or None, a.kit_version):
+            print(line)
+        return 0
     if a.cmd == "sync-shared":
-        return sync_shared(a.repo, a.target or None)
+        return sync_shared(a.repo, a.target or None, ci_modid=a.ci)
     if a.cmd == "review-authors":
         return review_authors(a.repo, a.range, a.reviewer, a.note, a.verdict)
     if a.cmd == "untaken":
@@ -3510,20 +3795,20 @@ def main():
         if a.upstream and not a.port_ref:
             ap.error("--upstream is what --port-ref is checked against: pass --port-ref too")
         if a.apply_decisions:
-            return apply_decisions(a.repo, a.apply_decisions, a.gates, budget=a.budget_lines, out_dir=a.out)
+            return apply_decisions(a.repo, a.apply_decisions, a.gates, budget=a.budget_lines, out_dir=a.out,
+                                   untaken_ok=a.untaken_ok)
         if not a.range:
             ap.error("cascade needs FROM..TO")
         return cascade(a.repo, a.range, a.gates, a.dry_run, mode="plan" if a.plan else "apply" if a.apply else None,
-                       budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream)
+                       budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream,
+                       untaken_ok=a.untaken_ok)
     if a.cmd == "migrate":
         return migrate(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.dry_run, a.port_branch,
                        jpath=a.json, library=a.library)
     if a.cmd == "verify":
         return verify(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.tip)
     if a.cmd == "check-done":
-        why = target_done(a.repo, a.target)
-        print(f"fork-branches {a.target}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
-        return UNDONE_EXIT if why else 0
+        return check_done(a.repo, a.target, "fork-branches")
     ap.print_help()
     return 2
 
@@ -3730,6 +4015,178 @@ def _check_port_taken(expect):
                and any("did not merge into " + am in w for w in why),
                f"t7: after the hand merge the next cascade offers the authors' AMixin change again and records it open: "
                f"{out[-400:]} {why}")
+
+
+def _check_ungated_rerun(expect):
+    """A cascade stopped red at a version leaves the merge on its branch; the next run gates it instead of calling it
+    up to date, and once it is green the run after says up to date and gates nothing."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        _authors(r, g, {"src/main/java/com/example/mod/Plain.java": ("int v = 1;", "int v = 2;")}, "authors: v = 2")
+        calls = []
+
+        def runner(red):
+            return lambda w, t, gates, say=print: (calls.append(t), 12 if t in red else 0)[1]
+
+        def killed(w, t, gates, say=print):
+            raise KeyboardInterrupt("killed")
+        # a gates run that never returns (killed, timed out): the record is written before the gates, so it is there
+        try:
+            _quiet(cascade, r, "port..1.21.3", "ab", runner=killed)
+            died = False
+        except KeyboardInterrupt:
+            died = True
+        rec0 = dict(ungated(r))
+        expect(died and "1.21.3" in rec0 and "did not finish" in rec0["1.21.3"]["why"],
+               f"a killed gates run leaves the merge recorded as ungated: {rec0}")
+        rc1, out1 = _quiet(cascade, r, "port..1.21.5", "ab", runner=runner({"1.21.4"}))
+        first, calls[:] = list(calls), []
+        marked = set(ungated(r))
+        rc2, out2 = _quiet(cascade, r, "port..1.21.5", "ab", runner=runner(set()))
+        second, calls[:] = list(calls), []
+        rc3, out3 = _quiet(cascade, r, "port..1.21.5", "ab", runner=runner(set()))
+        expect(rc1 == 1 and first == ["1.21.3", "1.21.4"] and marked == {"1.21.4"} and rc2 == 0
+               and second == ["1.21.4", "1.21.5"] and "merged earlier, gated now" in out2 and rc3 == 0 and calls == []
+               and not ungated(r) and "| 1.21.4 | up to date |" in out3,
+               f"a re-run after a red stop gates the earlier merge, then says up to date: {first} {second} {calls} "
+               f"{out2[-500:]} {out3[-300:]}")
+
+
+def _check_check_done_rows(expect):
+    """fork-port.py --check-done on a version branch's checkout writes REVIEW.md's `?` rows (the skill and the REVIEW.md
+    header say so; reviewers called review_skeleton by hand); off the branch it writes nothing. And the parent is read
+    from origin when the local parent branch is behind it (after a fetch), so the rows are not stale."""
+    import contextlib, io
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w4, _w = worktree_for(r, "1.21.4")
+        _hand(w4, {"src/main/java/com/example/mod/Plain.java": ("int v = 1;", "int v = 41;")}, "1.21.4: its own change")
+        rv = w4 / ".port/1.21.4/REVIEW.md"
+        before = rv.read_text(encoding="utf-8")
+        w3, _w = worktree_for(r, "1.21.3")               # a checkout on another version branch: off 1.21.4's
+        old = sys.argv
+        try:
+            sys.argv = ["fork-port.py", "--repo", str(w3), "--target", "1.21.4", "--check-done"]
+            with contextlib.redirect_stdout(io.StringIO()) as off:
+                rc_off = fp().main()
+            sys.argv = ["fork-port.py", "--repo", str(w4), "--target", "1.21.4", "--check-done"]
+            with contextlib.redirect_stdout(io.StringIO()) as on:
+                rc_on = fp().main()
+        finally:
+            sys.argv = old
+        after = rv.read_text(encoding="utf-8")
+        expect(rc_off == UNDONE_EXIT and rc_on == UNDONE_EXIT and before != after
+               and "| changed | src/main/java/com/example/mod/Plain.java | ? | ? |" in after
+               and after.startswith(before.rstrip("\n")) and "nothing written" in off.getvalue(),
+               f"--check-done on the branch's checkout adds the `?` row, off it nothing: {on.getvalue()[-300:]} {off.getvalue()[-200:]}")
+        # a stale local parent: origin's neoforge-1.21.3 has a commit the local branch lacks, and 1.21.4 merged it
+        _hand(w3, {"src/main/java/com/example/mod/Extra3.java": "package com.example.mod;\nclass Extra3 {}\n"}, "1.21.3: merged PR")
+        x = git(w3, "rev-parse", "HEAD").stdout.strip()
+        git(r, "update-ref", "refs/remotes/origin/neoforge-1.21.3", x, check=True)
+        git(w3, "reset", "-q", "--hard", "HEAD~1", check=True)            # the local branch left behind by a fetch
+        git(w4, "merge", "-q", "--no-edit", x, check=True)
+        head4 = git(w4, "rev-parse", "HEAD").stdout.strip()
+        expect(parent_base(r, w4, "1.21.4", head4)[1] == x and fresh_branch(r, "neoforge-1.21.3") == x,
+               f"the parent is origin's when the local branch is behind it: {parent_base(r, w4, '1.21.4', head4)} {x}")
+        git(w3, "reset", "-q", "--hard", x, check=True)
+        _hand(w3, {"src/main/java/com/example/mod/Extra3.java": "package com.example.mod;\nclass Extra3 { int a; }\n"}, "local")
+        expect(fresh_branch(r, "neoforge-1.21.3") == git(w3, "rev-parse", "HEAD").stdout.strip(),
+               "the local parent when it is ahead of origin (a merge not pushed yet)")
+
+
+def _check_ci_check(expect):
+    """ci-check warns about a version branch whose workflow pins an older kit or boots no `_cf` jar although the branch
+    keeps .port/<v>/shipped-expect-cf.txt; ci_args adds that variant's --variant-jar."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w4, _w = worktree_for(r, "1.21.4")
+        wf = (ROOT / "tools/golden/port-ci-single-deps.yml").read_text(encoding="utf-8")    # a real workflow: kit v7
+        _hand(w4, {".github/workflows/port-ci.yml": wf, ".port/1.21.4/shipped-expect-cf.txt": "A.log:cf ran\n"}, "1.21.4: CI")
+        lines = ci_check(r, kit_version=8)
+        w14 = [l for l in lines if "neoforge-1.21.4" in l]
+        same = [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "kit" in l and "WARNING" in l]
+        expect(not same, f"a workflow on the newest kit (the golden's v7) is not called old: {same}")
+        expect(len(w14) == 1 and "kit 7, older than kit 8" in w14[0] and "*_cf.jar" in w14[0]
+               and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines) and "--all" in lines[-1],
+               f"ci-check names the outdated kit and the missing _cf job: {lines}")
+        expect(not [l for l in ci_check(r, ["1.21.4"], kit_version=False) if "WARNING" in l and "kit" in l]
+               and shipped_variants(r, resolve_branch(r, "neoforge-1.21.4"), "1.21.4") == ["cf"],
+               "kit_version=False compares the variants only")
+    expect(add_variant_jars(["--modid", "m", "--variant-jar", "*_mr.jar"], ["cf"]) == ["--modid", "m", "--variant-jar", "*_mr.jar",
+                                                                                     "--variant-jar", "*_cf.jar"]
+           and add_variant_jars(["--modid", "m", "--variant-jar", "*_cf.jar"], ["cf"]) == ["--modid", "m", "--variant-jar", "*_cf.jar"]
+           and add_variant_jars(["--modid", "m"], []) == ["--modid", "m"],
+           "add_variant_jars: a variant with expectations gets its glob once; none, nothing added")
+
+
+def _check_stopped_worktree(expect):
+    """A cascade stopped at a version leaves its worktree under build/fork-branches/ with the run's records edited, or a
+    registration whose directory is gone; the next run reuses or re-makes it instead of refusing (weekly-round dry run).
+    A person's edit there is still refused. A single-version fork has no version branch: nothing is made for it."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w4, _w = worktree_for(r, "1.21.4")
+        (w4 / ".port/1.21.4/INVENTORY-CHECK.json").write_text("{}\n", encoding="utf-8")       # a stopped run's record
+        (w4 / ".port/1.21.4/GATES.md").unlink()
+        (again, why), said = _quiet(lambda: worktree_for(r, "1.21.4"))
+        expect(again == w4 and why is None, f"a worktree holding only the stopped run's records is reused: {why}")
+        expect("reusing" in said and "INVENTORY-CHECK.json" in said and "GATES.md" in said,
+               f"the reuse names the uncommitted records it carries: {said}")
+        (w4 / "src/main/java/com/example/mod/Plain.java").write_text("class Plain { int hand; }\n", encoding="utf-8")
+        none_, why = worktree_for(r, "1.21.4")
+        expect(none_ is None and "Plain.java" in (why or ""), f"a person's edit in it is still refused: {why}")
+        shutil.rmtree(w4)                                   # the directory gone, the worktree still registered
+        made, why = worktree_for(r, "1.21.4")
+        expect(made == w4 and why is None and (w4 / ".git").exists(), f"a stale registration is pruned and re-made: {why}")
+    with tempfile.TemporaryDirectory() as d:
+        sv = pathlib.Path(d) / "solo"; sv.mkdir()
+        git(sv, "init", "-q", "-b", "neoforge-1.21.1", check=True)
+        (sv / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        git(sv, "add", "-A", check=True)
+        git(sv, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "port", check=True)
+        rc, out = _quiet(cascade, sv, "neoforge-1.21.1..1.21.3", "none")
+        w_, why = worktree_for(sv, "1.21.3")
+        expect(rc == 2 and w_ is None and "no branch" in (why or "") and not (sv / "build").exists(),
+               f"a single-version fork: no cascade, no worktree made: {rc} {out[-200:]} {why}")
+    expect(run_output(".port/1.21.4/RESIDUE.md", "1.21.4") and not run_output(".port/1.21.4/renames.tsv", "1.21.4")
+           and not run_output(".port/1.21.3/RESIDUE.md", "1.21.4") and not run_output("src/RESIDUE.md", "1.21.4"),
+           "run_output: only this version's run records")
+
+
+def _check_prerelease_pin(expect):
+    """A dependent version pinned to a library pre-release (tools/layer-deps.py writes the mark into DEPS.md) is not
+    done: its pre-release may ship with it, its full Release and promotion wait for the library's version."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        before = target_done(r, "1.21.4")
+        w4, _w = worktree_for(r, "1.21.4")
+        (w4 / ".port/1.21.4/DEPS.md").write_text("# Dependencies for Minecraft 1.21.4\n\n" + LIBRARY_PRERELEASE_MARK
+                                                 + " `com.example:lib` is pinned to a library pre-release\n", encoding="utf-8")
+        git(w4, "add", "-A", check=True); git(w4, "commit", "-qm", "1.21.4: pinned to the library's pre-release", check=True)
+        after = target_done(r, "1.21.4")
+        expect(not any("library pre-release" in x for x in before) and any("library pre-release" in x for x in after),
+               f"a version pinned to a library pre-release is not done (control: without the mark it was not said): {after}")
+        w5, _w = worktree_for(r, "1.21.5")                  # the mark kept beside the pin in branch.properties counts too
+        bp = w5 / f"{REC}/1.21.5/{BRANCH_PROPS}"
+        bp.write_text(bp.read_text(encoding="utf-8") + "port_jar_prerelease.com.example\\:lib=lib-1.0-mc1.21.5 not done\n",
+                      encoding="utf-8")
+        git(w5, "commit", "-qam", "1.21.5: the pin's pre-release mark", check=True)
+        expect(any("library pre-release" in x for x in target_done(r, "1.21.5")),
+               "the pre-release mark beside the pin in branch.properties keeps the version not done")
+        # a red full run on record (GATES-RED.md beside an older green GATES.md) keeps a version branch not done
+        w3, _w = worktree_for(r, "1.21.3")
+        before3 = target_done(r, "1.21.3")
+        (w3 / f"{REC}/1.21.3/GATES-RED.md").write_text("Red full gate run at `abc1234` for Minecraft 1.21.3\n", encoding="utf-8")
+        git(w3, "add", "-A", check=True); git(w3, "commit", "-qm", "1.21.3: a red full run", check=True)
+        after3 = target_done(r, "1.21.3")
+        expect(not any("GATES-RED.md" in x for x in before3) and any("GATES-RED.md" in x for x in after3),
+               f"version branch: GATES-RED.md keeps it not done (gates_problems): {after3}")
+    # the run records a reused worktree may carry are records for ci-gates.py too (never jar content)
+    import ast
+    names = {e.value for n in ast.parse((ROOT / "tools/ci-gates.py").read_text(encoding="utf-8")).body
+             if isinstance(n, ast.Assign) and any(getattr(x, "id", "") == "GATE_OUTPUTS" for x in n.targets)
+             for e in getattr(n.value, "elts", [])}
+    expect(set(RUN_OUTPUT_NAMES) <= names, f"RUN_OUTPUT_NAMES are all ci-gates.py GATE_OUTPUTS: {set(RUN_OUTPUT_NAMES) - names}")
 
 
 def _check_untaken_head(expect):
@@ -4300,6 +4757,35 @@ def self_check():
         pass
     unpinned = remap_ci_args(port_args, {}, "examplemod")
     expect(unpinned[:6] == port_args[:6], f"ci: with no version pin the --dep-jar and its variant stay as they are: {unpinned}")
+    # the moves stage (weekly-round dry run, 2026-10-18: it rewrote javadoc package names in a hand-changed file at 26.3):
+    # a hand-changed file's comments are left alone, its code (strings included) rewritten; a file the rows alone made is
+    # re-made whole, so it stays what the rows make of the port branch's file
+    src = ('package p;\n/** See {@link a.b.Old} -- a.b.Old moved. */\nclass X { a.b.Old o; // a.b.Old here\n'
+           '  String s = "a.b.Old // not a comment"; char c = \'"\'; String t = """\n  a.b.Old\n  """; /* a.b.Old */ a.b.Old p; }\n')
+    mv = rules_of("a.b.Old\tc.d.Old\n")
+    want = ('package p;\n/** See {@link a.b.Old} -- a.b.Old moved. */\nclass X { c.d.Old o; // a.b.Old here\n'
+            '  String s = "c.d.Old // not a comment"; char c = \'"\'; String t = """\n  c.d.Old\n  """; /* a.b.Old */ c.d.Old p; }\n')
+    expect("".join(x for _c, x in java_segments(src)) == src and apply_rules_code(src, mv) == want
+           and apply_rules_code(src.replace("\n", "\r\n"), mv) == want.replace("\n", "\r\n"),
+           f"apply_rules_code: comments kept, code and literals rewritten, CRLF kept: {apply_rules_code(src, mv)!r}")
+    with tempfile.TemporaryDirectory() as e:
+        hand, mech = pathlib.Path(e) / "Hand.java", pathlib.Path(e) / "Mech.java"
+        hand.write_text(src, encoding="utf-8"); mech.write_text(src, encoding="utf-8")
+        n = apply_moves_to_files([hand, mech], mv, [mech])
+        expect(n == 2 and hand.read_text(encoding="utf-8") == want and mech.read_text(encoding="utf-8") == apply_rules(src, mv),
+               "apply_moves_to_files: a hand-changed file's comments kept, a mechanical file re-made whole")
+    # cascade --untaken-ok: the round's frozen input reaches each version's fork-port.py gates; without it the command
+    # is exactly what it was
+    calls, real_run = [], subprocess.run
+    try:
+        subprocess.run = lambda cmd, *a_, **k_: (calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1]
+        run_gates("w", "1.21.3", "ab", say=lambda *_: None)
+        run_gates("w", "1.21.3", "ab", say=lambda *_: None, untaken_ok="round/frozen.json")
+    finally:
+        subprocess.run = real_run
+    expect(len(calls) == 2 and "--untaken-ok" not in calls[0] and calls[1][:len(calls[0])] == calls[0]
+           and calls[1][len(calls[0]):] == ["--untaken-ok", str(pathlib.Path("round/frozen.json").resolve())],
+           f"cascade --untaken-ok is passed to the gates run, and only then: {calls}")
     # @OnlyIn stripped from a CRLF file (a Windows checkout's overlay) exactly as layer.py strips it: no stray \r
     crlf = "class Cf {\r\n    @OnlyIn(Dist.CLIENT)\r\n    Thing t;\r\n}\r\n"
     expect(strip_onlyin_text(crlf) == "class Cf {\r\n    Thing t;\r\n}\r\n"
@@ -4710,6 +5196,11 @@ def self_check():
         _check_port_taken(expect)
         _check_deferred_integration(expect)
         _check_untaken_head(expect)
+        _check_prerelease_pin(expect)
+        _check_ungated_rerun(expect)
+        _check_check_done_rows(expect)
+        _check_ci_check(expect)
+        _check_stopped_worktree(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)

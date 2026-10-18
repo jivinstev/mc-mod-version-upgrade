@@ -296,6 +296,15 @@ def gate(repo, cfg, tag, release, manual=False, layer_branch=None):
     elif git(repo, "merge-base", "--is-ancestor", f"refs/tags/{tag}", "HEAD").returncode != 0:
         why.append(f"{tag} is not an ancestor of the checked-out branch")
     why += ledger_errors(cfg, tag)
+    m_ = re.search(r"-mc(\d[\d.]*?)(?:-r\d+)?$", tag)
+    if m_:   # a version branch built against a library pre-release that was not done (tools/layer-deps.py's mark)
+        mc_ = m_.group(1)
+        deps_ = git(repo, "show", f"{tag}:.port/{mc_}/DEPS.md")
+        props_ = git(repo, "show", f"{tag}:.port/{mc_}/branch.properties")
+        if (deps_.returncode == 0 and "**Library pre-release (not done):**" in deps_.stdout) or \
+                (props_.returncode == 0 and re.search(r"(?m)^port_jar_prerelease\.", props_.stdout)):
+            why.append(f"{tag} is built against a library pre-release whose {mc_} was not done (.port/{mc_}/DEPS.md): "
+                       "re-resolve the pin once the library's version is done, and publish that release")
     for d in ([] if layer_branch else cfg.get("dependencies", [])):
         if d.get("port") and d.get("type") == "required":
             dtag = pinned_dependency_tag(repo, d["port"], tag)
@@ -598,6 +607,9 @@ def check_runs(repo_slug, sha):
 
 
 def target_green(repo, tag, info, t, lc, runs):
+    if git(repo, "cat-file", "-e", f"{tag}:.multiversion/targets/{t}/GATES-RED.md").returncode == 0:
+        # a full gate run after the green record was red (fork-port.py writes GATES-RED.md and keeps GATES.md)
+        return False, f"the last full gate run of {t} was red (.multiversion/targets/{t}/GATES-RED.md at {tag})"
     green, why = ci_green(t, info["base"], info["targets"][-1] if info["targets"] else info["base"], runs)
     if green or t not in lc.get("released", []):
         return green, why
@@ -1068,6 +1080,24 @@ def self_check():
     expect(minecraft_of("examplemod-1.0.0-mc26.1.2-r2") == "26.1.2" and minecraft_of("examplemod-1.0.0-mc26.2") == "26.2",
            "minecraft from a 26.x tag")
     expect(sorted(["26.2", "1.21.11", "26.1.2"], key=mc_key) == ["1.21.11", "26.1.2", "26.2"], "26.x sorts after 1.21.11")
+    # a layer target whose last full gate run was red (GATES-RED.md beside its older green GATES.md, review of #147)
+    # is not green at the tag; a single-version tag (no .multiversion/) is judged as before
+    import subprocess, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        r_ = pathlib.Path(d)
+        g_ = lambda *a_: subprocess.run(["git", "-C", str(r_), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a_],
+                                        capture_output=True, text=True, encoding="utf-8", check=True)
+        g_("init", "-q")
+        td_ = r_ / ".multiversion/targets/1.21.4"; td_.mkdir(parents=True)
+        (td_ / "GATES.md").write_text("Gates at `abc1234` for Minecraft 1.21.4\n\n| Gate C | PASS | ok |\n", encoding="utf-8")
+        g_("add", "-A"); g_("commit", "-qm", "green"); g_("tag", "t-green")
+        (td_ / "GATES-RED.md").write_text("Red full gate run\n", encoding="utf-8")
+        g_("add", "-A"); g_("commit", "-qm", "red"); g_("tag", "t-red")
+        info_ = {"base": "1.21.1", "targets": ["1.21.4"], "commit": "HEAD"}
+        red = target_green(r_, "t-red", info_, "1.21.4", {"released": ["1.21.4"]}, [])
+        green = target_green(r_, "t-green", info_, "1.21.4", {"released": ["1.21.4"]}, [])
+        expect(not red[0] and "GATES-RED.md" in red[1] and "GATES-RED.md" not in green[1],
+               f"port-publish's layer path reads GATES-RED.md at the tag: {red} / control {green}")
     expect(version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod") == "1.0.0+1.21.1-r2", version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod"))
     expect(version_of("examplemod-1.1.2-mc1.21.1", "examplemod") == "1.1.2+1.21.1", "version, no suffix")
     expect(version_of("examplemod-1.1.1-fix-fix-mc1.21.1-r6", "examplemod") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
@@ -1120,6 +1150,15 @@ def self_check():
         expect(any("must not be released" in w for w in why), f"open S1 refuses: {why}")
         expect(any("names no column" in w for w in gate(".", cfg, "m-3-mc1.21.1", good)), "unknown tag refuses")
         expect(any("pre-release" in w for w in gate(".", cfg, "m-2-mc1.21.1", {**good, "prerelease": True})), "pre-release refuses")
+        class RS:
+            def __init__(self, rc, out): self.returncode, self.stdout = rc, out
+        real_git = git
+        git = lambda repo, *a: RS(0, "**Library pre-release (not done):** `com.example:lib`\n") if a[:1] == ("show",) \
+            and a[1].endswith("/DEPS.md") else RS(0, "")
+        why_pre = gate(".", cfg, "m-2-mc1.21.1", good)
+        git = real_git
+        expect(any("library pre-release" in w for w in why_pre),
+               f"a release built against a library pre-release that was not done is not published: {why_pre}")
         expect(any("not published by" in w for w in gate(".", cfg, "m-2-mc1.21.1", {**good, "author": {"login": "x"}})), "foreign author refuses")
         expect(any("permission" in w for w in gate(".", {**cfg, "permission": ""}, "m-2-mc1.21.1", good)), "no permission refuses")
         expect(any("auto is off" in w for w in gate(".", {**cfg, "auto": False}, "m-2-mc1.21.1", good)), "auto off refuses unattended")

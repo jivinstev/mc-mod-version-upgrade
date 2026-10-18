@@ -25,7 +25,7 @@ it: **if it crashes them, kicks them from a server, hangs, damages a save or bre
 
 Tools: `tools/port-sync.py` (bring the authors' commits in), `tools/fix-ledger.py` (the worksheet and the ledger),
 `tools/port-upstream.py` + the file loop (port the new code), `tools/ci-gates.py` (gates, no model),
-`tools/port-ci.py` (CI; `promote` is never run here), `tools/port-fleet.py` (an older fleet file: only a migration input here),
+`tools/port-ci.py` (CI; `promote` is never run here), `tools/round-preflight.py` (what the round needs, checked first), `tools/port-fleet.py` (an older fleet file: only a migration input here),
 `tools/weekly-plan.py` (the weekly cycle's setup and its plan workflow), `tools/known-issues.py` (the ledger, the plan
 issue: `render-plan`, `read-plan`; the README Ports block: `render-ports`), `tools/port-cost.py` (cost records, the
 round's table).
@@ -141,7 +141,13 @@ run is green, and it is then gated against the dependency's NEW build.
    gate tables, the ledger changes. Merge the port branch into the work branch first if it moved (a CI-only
    commit, say), so the PR is current. Run `fix-ledger.py check --release keep-current/<date>` first: an S1 mode
    open on a branch that ships blocks the PR, and the run stops and reports.
-   **Auto-merge** (the fork's `"automerge": true` in `.github/weekly-plan.json`): wait for the PR's own CI -- every gate, full and minimal --
+   **In the weekly round the merge and the release run wait for the round's step 4** for that version: its gates, its
+   fresh review and the grading of the review's `not-ok` rows (an S1/S2 there blocks both). Green CI alone is never
+   enough there. For a version-branch fork this holds for the head's PR too, which still merges before the cascade
+   starts -- the cascade starts from the merged port branch ("A fork with version branches" step 1) -- so the head is
+   gated, reviewed, merged, then cascaded, and each version above in turn.
+   **Auto-merge** (the fork's `"automerge": true` in `.github/weekly-plan.json`; in the weekly round only once step 4
+   allows it, above): wait for the PR's own CI -- every gate, full and minimal --
    and merge with a merge commit (never squash or rebase: the authors' commits must stay commits). A red or
    missing check is not merged: fix it on the work branch, or stop and report. **Then wait for the CI run the merge
    itself triggers on the target branch** (a push run on the port branch, or the layer branch for a layer PR) and
@@ -218,11 +224,24 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    Never skip a version. (Plain `cascade` without `--plan`/`--apply` still stops at the first conflict, for a fix
    carried up by hand; an authors' change it could not take is offered again by the next run, from the version's
    `port_taken`.)
-3. Push each merged version branch as a work branch and open its PR into the version branch (`git push origin
-   neoforge-<v>:keep-current/<date>-<v>`), with the cascade's table in the body; merge them in chain order by step 6's
-   rule (wait for each one's push run). Every version whose gated files changed reads not done until its gates (`--gates
-   full` once before a release) run again; where its own files changed it needs a fresh review, and where it took the
-   authors' change through the rows only, one review of that change covers every such version (`python3
+3. **One version at a time, lowest first, each waiting for the one below it.** For version v: its gates and its review
+   (the round's step 4) on the merged branch, then push it as a work branch and open its PR into the version branch
+   (`git push origin neoforge-<v>:keep-current/<date>-<v>`, the cascade's table in the body), merge it by step 6's rule
+   and wait for that merge's push run. **`keep-current/<date>-<v>` is pushed only after the PR of the version below it is
+   merged and its push run is green** -- never stacked on an unmerged lower PR: a higher PR that carries a lower
+   version's unmerged merge would merge that version's code past its own review and CI. After the lower merge, `git
+   fetch origin` (the done check and the review rows read origin's branch when the local one is behind) and continue the
+   cascade from there (`cascade --repo DIR <lower>..<newest>`: what is already merged is up to date, a merge it left
+   ungated is gated first). **The 1.21.x -> 26.x boundary** (the rename between 1.21.11 and 26.1.2 changes method and
+   class names the rows do not cover) usually conflicts. With the **plain cascade** (a fix carried up, `cascade
+   <at>..<newest>`) it stops at 26.1.2 with the files named; resolve them by hand inside the cascade -- in that version's worktree (`build/fork-branches/26.1.2`), `git merge
+   neoforge-1.21.11`, resolve each file through 26.1.2's rows and the rename (the 26.x name, the lower version's
+   change), commit, then `cascade --repo DIR 26.1.2..<newest>` -- and say in its PR which files were resolved by hand
+   (they are review rows). With `--apply` (the head cascade of the authors' code) nothing stops there: a file it cannot
+   merge becomes a decision with an open REMERGE.json entry, answered through step 2's decisions (`--apply-decisions`),
+   never by hand. Every version whose gated files changed reads not done until its gates (`--gates full` once
+   before a release) run again; where its own files changed it needs a fresh review, and where it took the authors'
+   change through the rows only, one review of that change covers every such version (`python3
    tools/fork-branches.py review-authors --repo DIR --range <old port commit>..<new port commit> --reviewer ...`).
 4. **Move each version's freeze** once merged: on its checkout, `python3 tools/fork-branches.py freeze --repo DIR --target
    <v>` (and `--library owner/repo@TAG` for a re-pinned library release), and commit `.port/<v>/branch.properties`.
@@ -230,7 +249,9 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    dependent's same version to it (`layer-deps.py resolve --repo DEP --target <v> --port-release owner/lib@<tag>` on the
    dependent's checkout of that branch, then `fork-branches.py ci --repo DEP --target <v> --modid ID` for its workflow), and
    once the dependent's Gate C is green against it, `fork-branches.py library-record` in the library (fork-versions,
-   "Library first").
+   "Library first"). The library's version is not done before that record, and that is expected: `resolve` takes its
+   pre-release when the gates are green at the tag (marked in the dependent's DEPS.md), never `--allow-undone-library`;
+   the dependent's version is done, and may be promoted, only once the library's is.
 
 ## A fork with the layer (opt-in, existing layer forks only; skip this for a single-version fork)
 
@@ -340,11 +361,25 @@ through the plan issue:** a comment @mentioning the owner with the action and wh
 with what the list allows and names it in the closing comment. An empty list means every push (the work branches
 included), PR, pre-release and merge asks.
 
+0. **Preflight, before anything else:** `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...` (every fork of
+   the set; read-only). It prints one line per need and `MISSING` with what to do: **each fork's clone** (a scheduled
+   session cannot attach a repository -- `add_repo` is refused there -- so a fork that is not in the task's repositories
+   has no clone: stop now, before freezing, with one comment on the plan issue that names the repository and says to add
+   it to the scheduled task's repositories; the plan issue stays open for the next run), the GitHub way it will use
+   (GITHUB_TOKEN wins, then GH_TOKEN, both over REST; `gh` only when neither is set, so a broken `gh` login does not matter
+   when a token is set), a JDK for each version (21 for 1.21.x, **25 for 26.x**: found at `JAVA_HOME_25`, `/usr/lib/jvm`,
+   `/opt`, `~/.gradle/jdks`, ...), and for the client gates **`libEGL.so.1`** (the 26.3 client loads it: `libegl1`) and
+   **`XDG_RUNTIME_DIR`** (unset in a cloud session: `export XDG_RUNTIME_DIR=$(mktemp -d) && chmod 700
+   "$XDG_RUNTIME_DIR"`). Install or set what it names that the session can (apt, an export) and run it again; anything
+   left missing other than a clone is reported in the first comment and the versions that need it wait.
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
-   round/frozen.json --decisions-dir round/decisions` (`gh` or GITHUB_TOKEN reads it). No open plan issue: stop and
-   report. Per fork, `frozen.json` says whether to take the authors' commits (`take_authors`, and the exact
+   round/frozen.json --decisions-dir round/decisions`. It reads GitHub through `GITHUB_TOKEN` when that is set (REST), else
+   `GH_TOKEN`, else the `gh` command line -- so a `gh` whose own login is broken does not matter while `GITHUB_TOKEN` is
+   set; it says on stderr which one it used. No open plan issue: stop and report. Per fork, `frozen.json` says whether to take the authors' commits (`take_authors`, and the exact
    `upstream_commit` the plan saw), which known issues are `selected`, the decisions with their choices, and the grade
-   overrides. **These are the run's only inputs.** Nothing new enters the run except an S1 found during it; the
+   overrides; read-plan says per fork whether `take_authors` is the plan's default (the box found ticked), the owner's
+   (unticked) or nothing to take, and a version-branch fork's entry records it as `take_authors_by` -- put it in the first
+   comment. **These are the run's only inputs.** Nothing new enters the run except an S1 found during it; the
    authors' commits pushed after the plan wait for next week (merge `upstream_commit`, not the branch tip). **Freeze at
    the deadline, not before:** read-plan run before the plan's deadline warns -- the plan workflow and the round are
    normally 24 hours apart, and an early freeze cuts the owner's window to tick and reply. Only when the owner asked to
@@ -357,10 +392,11 @@ included), PR, pre-release and merge asks.
 3. **Per fork**, from its entry in `frozen.json`; say which case it is. **The authors' code is taken only when the plan
    says so (`take_authors`), and a done version is reopened only for an S1.**
    - **A single-version fork:** when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (merge, reconcile,
-     port, gate, PR into the head). Each selected known issue is fixed on the port branch. Nothing else changes for it.
+     port, gate, PR into the head), with step 6's merge and release run only after step 4 below (review and grading). Each selected known issue is fixed on the port branch. Nothing else changes for it.
    - **A version-branch fork with `head_cascade: true`** (the authors' box ticked, or the head has none of their code
      untaken): when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (when only the head's untaken code is
-     to take and nothing is new upstream, the merge is empty: go on). Then "A fork with version branches" from the head:
+     to take and nothing is new upstream, the merge is empty: go on), step 6's merge only after step 4 below for the
+     head's version (its review and grading), and the cascade after that merge. Then "A fork with version branches" from the head:
      write the default decisions' `patch` diffs into `round/decisions/<owner>__<repo>.decisions.json` (its step 2), then
      `cascade --repo DIR --apply-decisions round/decisions/<owner>__<repo>.decisions.json --gates ab` -- the head cascade
      `<head>..<newest>`; with no earlier `--apply` it runs that `--apply` first, then the answers. A `patch` left without
@@ -368,6 +404,12 @@ included), PR, pre-release and merge asks.
    - **A version-branch fork with `head_cascade: false`** (the owner unticked the box while the head has authors' code
      no version took): **no cascade from the head, and no `--apply-decisions`** -- read-plan wrote no decisions file,
      since every decision of the plan is about the head cascade (`cascade.not_applied`). Only the selected fixes move.
+   - **The upstream freeze when the authors' code is not taken** (`take_authors: false`, either case): every version's
+     freeze is behind the authors' branch on purpose. `fork-port.py` reads `round/frozen.json` from the round's working
+     directory and records that drift in the version's `DRIFT.md` as left out by the plan instead of stopping (exit 19);
+     pass `--untaken-ok round/frozen.json` to every `fork-branches.py cascade` and to a `fork-port.py` run started
+     elsewhere. Never remove or rename the `authors` remote to get past the guard (a freeze that cannot be compared stops
+     too), and never use `--accept-upstream-drift` in a round.
    - **Each selected known issue** (a version-branch fork, either case) goes where `frozen.json`'s `fixes` says: it is
      made at `at`, the **lowest version whose ledger status is `open`** (not the `lowest` field: an issue first seen at
      1.21.1 may be open only at 26.3), and carried up by the one cascade named there, never fixed version by version:
@@ -381,10 +423,24 @@ included), PR, pre-release and merge asks.
      into the head too, by its own PR. Work the versions in ladder order, oldest affected first.
      `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
      has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
-4. **Per version, in ladder order**, once its code is in:
+4. **Per version, in ladder order**, once its code is in -- first `python3 tools/port-cost.py mark --fork <owner/repo>
+   --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks):
+   - (a version-branch fork, once per round before the first version) `python3 tools/fork-branches.py ci-check --repo DIR`:
+     a WARNING names a branch whose Port CI workflow is older than the kit or boots no jar of a variant its
+     `.port/<v>/shipped-expect-<variant>.txt` expects -- CI green there proves nothing about that jar. Regenerate it
+     (`fork-branches.py ci --repo DIR --all --modid ID --run`, pushed under `push-version-branches`; else ask) before
+     trusting a green PR run, and name it in the closing comment;
+   **The order is fixed: gates, then the review, then the findings graded, then the merge, then the pre-release.** The
+   review is of the version's work branch (`keep-current/<date>-<v>`, or the version branch's checkout before it is
+   pushed), never of what is already merged: a reviewer who reads a version after its PR merged reviews code players can
+   already have.
    - gates A/B/C in full (`fork-port.py --repo DIR --target <v> --gates full`, or `ci-gates.py --env full` and `minimal`
      on a single-version fork), the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`);
-   - **one full review against the fixed rubric**: a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
+   - **one full review against the fixed rubric, before the merge**: on a version branch, `fork-port.py --repo DIR --target
+     <v> --check-done` on the version's checkout writes REVIEW.md's `?` rows (it refuses a single-version fork, which has
+     no `.port/`: there the fresh reviewer gets the work branch's changes, `git diff --name-only
+     <port branch>...keep-current/<date>`, one row per file with `ok`/`not-ok` and a note, written into the PR body's
+     review table, and the same rule below applies); a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
      "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
      **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
      the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5).
@@ -392,9 +448,15 @@ included), PR, pre-release and merge asks.
      its own work; a scheduled task's cloud session can. If this session cannot start one, stop at the review step for
      that version: comment on the plan issue (@owner) that the version is gated and waits for its review, go on only with
      what does not depend on it, and name it in the closing comment. Never skip the review, and never fill `REVIEW.md`
-     yourself;
+     yourself. Commit REVIEW.md on the work branch, so the PR carries it;
+   - **a `not-ok` row blocks by its grade**: each `not-ok` row the re-check leaves is a finding, graded with
+     `known-issues.py add` (step 5) at its lowest affected version. One graded **S1 or S2 at the version being worked**
+     blocks that version's merge and its pre-release until it is fixed (and the re-check passes) or re-graded below S2
+     with the rubric's inputs (`known-issues.py grade`, the reason recorded; an owner's `/grade` from the plan counts);
+     the versions above it wait too (they carry it by the cascade). An S3/S4 row is ledgered and does not block;
+   - the merge of the version's PR (step 6's rule and "A fork with version branches" step 3), then its push run green;
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
-     `pre-release` in `allow`; without it, ask on the plan issue;
+     `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above;
    - a library's version: `fork-branches.py library-record --repo LIB --target <v> --dependent DEP` once the dependent's
      same version passed Gate C on that exact released jar;
    - its cost: `fork-port.py`'s cost stage appends to `.port/<v>/COST.md` (tokens, dollars, wall time and a price tier,
@@ -402,17 +464,22 @@ included), PR, pre-release and merge asks.
      <v> --since <round start> --print >> .port/<v>/COST.md`, committed with the version's records.
    Post a progress comment on the plan issue as each version finishes (gates, review, the pre-release tag).
 5. **New findings.** Grade each with `known-issues.py add` (the rubric's inputs, `--lowest` its lowest affected
-   version). At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
+   version, `--file` each file it is in); a WARNING that it may repeat an entry means read that entry first and record
+   the finding there when it is the same defect. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
    reopens it (fixed at its lowest open version, only that fix cascaded, by step 3's rule: from a version branch, or
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
    ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
    and local, S4 ledgered.
+   **A round that stops** (a missing clone, a stop that needs the owner, no quota) **leaves the plan issue open**: say why in
+   one comment; next Tuesday's plan carries its ticks and replies forward. Only step 6 closes it.
 6. **Close.** On the plan issue, one closing comment with the outcome -- per fork: the merged PRs, the pre-releases cut,
    the ledger changes and the new findings with their grades -- and the **cost and time table**:
-   `python3 tools/port-cost.py round-table --since <round start> --fork <owner/repo>=<checkout> ...` (per fork, per
-   version, with totals); then close the issue (state completed). An issue the round closed is never carried forward.
-7. **Afterwards:** set the ledger statuses on each head branch (`known-issues.py status <ID> --set <v>=fixed@<commit>`
-   for every version a fix reached, committed alone), then refresh the README Ports block ("README Ports block" below).
+   `python3 tools/port-cost.py round-table --since <round start> --session-cwd <the round's working directory>` (this
+   session's own requests, its subagents included, per fork and version at the `mark`s, with totals; the COST.md form,
+   `--fork <owner/repo>=<checkout> ...`, measures only what fork-port's cost stage recorded, which a scheduled session's
+   transcripts may not reach -- it read $0.00 for every version); then close the issue (state completed). An issue the round closed is never carried forward.
+7. **Afterwards:** set the ledger statuses on each head branch (`known-issues.py status <ID> --set <v>,<v>=fixed@<commit>`,
+   or `--set <from>..<to>=fixed@<commit>`, for every version a fix reached, in one call per issue, committed alone), then refresh the README Ports block ("README Ports block" below).
 
 ## README Ports block
 
@@ -422,7 +489,9 @@ known issues (the pinned issue with `--pinned-issue N`, and `.port/KNOWN-ISSUES.
 `<!-- ports:begin -->` and `<!-- ports:end -->` in the fork's root README; it never changes a byte outside the markers
 (the authors' README text merges as before), and a root README edit runs no Port CI and stales no gate. When it runs:
 on the **head branch** after every round and every release; on the fork's **default branch** (where visitors land) only
-once the chain reaches its newest version, and after that on every release. Commit it alone.
+once the chain reaches its newest version, and after that on every release. Commit it alone. Every GitHub call it
+makes is bounded (`MMVU_GH_TIMEOUT`, default 60 s) and a read falls back (a token's REST call to `gh`, `gh` to
+anonymous REST): where `gh` hangs (its GraphQL blocked) it fails or answers in bounded time, never hangs the round.
 
 ## Setup: the weekly cycle on the user's accounts
 
@@ -482,20 +551,26 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    exactly one of them -- no match, no deletion -- then `create_trigger` with its `name`, `cron_expression`
    (`CRON_TZ=America/Los_Angeles <minute> 8 * * 3`, the minute jittered per fork set below 08:30), `create_new_session_on_fire:
    true`, `notifications` (push and email on), `initiation` and `prompt` (the fork set and the `allow` list in it),
-   unchanged. Say in one line that the round is Wednesday at `round.time` from `.github/weekly-plan.json`, Pacific.
+   unchanged. The JSON also holds `model` -- the model to set in step 3, the most capable one priced in
+   `tools/model-prices.tsv`, read from that file -- and `repositories`, the forks to attach in step 4. Say in one line that the round is Wednesday at `round.time` from `.github/weekly-plan.json`, Pacific.
    **When the owner defers the task** (they will create it later, or have it created another time): create nothing;
-   write the `round-task` JSON to a file and give its path, and put in the report the model they chose at stop 1 and
+   write the `round-task` JSON to a file outside every fork checkout (the session's scratch directory, never a clone that
+   a commit could pick it up from) and give its path, and put in the report the model they chose at stop 1 and
    the repositories to attach (`repositories` in the JSON); then stop. Do steps 3 to 5 when the task is created.
 3. **Set the round's model; never leave it on the account default.** A task created without one runs on whatever the
-   account defaults to (measured: a routine created without one ran on Sonnet), and `create_trigger` takes no model --
-   set it right after creating, with `update_trigger` `model`, to the model the user chose at stop 1. Recommend Opus:
+   account defaults to (measured: a routine created without one ran on Sonnet, and the first dry run ran on the default
+   because the field was empty), and `create_trigger` takes no model -- set it right after creating, with `update_trigger`
+   `model`, to the `model` of the round-task JSON unless the user chose another at stop 1; when the owner creates the task
+   themselves (it is deferred, or a connector cannot set it), tell them to set that model on it. Recommend Opus:
    the session's own model does all of this skill's judgement -- the merges, the reconcile (take theirs, keep or shrink
    ours, the A/B), the reviews it starts, the grades and every merge-on-green call. The mechanical work keeps its own
    models whatever the session runs on: the compile loop (`tools/file-loop.py`) climbs Haiku -> Sonnet -> Opus only on
    failure, `tools/port-upstream.py` and `tools/gate-loop.py` default to Sonnet, the visual review to Haiku. Say in one
    line which model was set. (Changing an existing task's model is the user's call: ask, then `update_trigger`.)
-4. **Repositories on the task.** A scheduled session cannot add repositories (measured twice: `add_repo` never appears
-   in one), and `create_trigger`/`update_trigger` have no repository field. So:
+4. **Repositories on the task -- every fork of the set must be attached.** A scheduled session cannot add
+   repositories (measured three times: `add_repo` never appears in one, or the session's permission check refuses it),
+   and `create_trigger`/`update_trigger` have no repository field. So the setup checklist has one line per fork, and is
+   not done until each is attached:
    - **Attach only what the round pushes to: the user's forks** (`repositories` in the JSON). This repository is
      public and only read: the prompt clones it itself; never ask the user to attach it.
    - **The user adds the forks.** Give them the exact link and steps: open https://claude.ai/code/routines, click the
@@ -504,12 +579,16 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
      fork (`owner/repo`), and save. If they have the edit form open while you change the prompt with `update_trigger`,
      ask them to close and reopen it first, or saving the form writes the old prompt back. (From a local CLI,
      `/schedule` does this.)
-   - **The prompt checks, it does not wait:** a missing clone is named and the round stops after freezing its input.
+   - **The prompt checks first, it does not wait:** its first step is `round-preflight.py`; a missing clone is named in
+     one comment on the plan issue and the round stops before freezing anything, the plan issue left open.
 5. **Check it.** Run the plan workflow once by hand (Actions -> Weekly plan -> Run workflow, or `gh workflow run
    weekly-plan.yml --repo <owner/lib> --ref neoforge-1.21.1`): it costs no model and must open the plan issue, assigned
    to the owner. Read the round task back (`get_trigger`): cron, a fresh session per fire, notifications and the model
    that was set. Do not fire the round to test it -- a fire is a whole round; it runs on Wednesday against the plan.
-   The environment needs the build hosts in its allowed domains (`cloud/allowed-domains.txt`).
+   The environment needs the build hosts in its allowed domains (`cloud/allowed-domains.txt`), and what the round's
+   gates run on: JDK 21 and JDK 25 (every 26.x version builds and boots on 25), `libegl1` (the 26.3 client) and an
+   `XDG_RUNTIME_DIR`, in the environment's setup script; `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...`
+   says what is missing (the round runs it first).
 
 ## Evidence that this is needed (and the mistake it prevents)
 
