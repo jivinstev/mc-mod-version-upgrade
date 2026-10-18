@@ -17,7 +17,7 @@ description: Make a fork port build for more Minecraft versions as stacked versi
   that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
   fork moves to version branches with `tools/fork-branches.py migrate` when the maintainer decides it for that fork.
 
-Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions` --, review-authors, sync-shared, check-done, freeze, library-record, ci),
+Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, ci),
 `tools/fork-port.py` (the stages and the done list, on a version branch), `tools/layer-inventory.py`,
 `tools/layer-deps.py`, `tools/ci-gates.py --mc`, `tools/port-ci.py`, `tools/audit-mixin-targets.py`,
 `tools/fix-access-transformer.py`, `tools/burndown-count.sh`, `tools/port-cost.py`.
@@ -388,12 +388,21 @@ goes up the chain this way:
    default answers added to its `decisions` list with `by` and `reason`) applies each answer at every version holding
    that decision, oldest first, clears the entries, logs each in `.port/DECISIONS.md`, then runs `--apply` over the
    range (merging the answers up) and writes the new plan. An answer that makes a new conflict higher up comes back
-   through the same flow as at most one follow-up issue.
+   through the same flow as at most one follow-up issue. With no earlier `--apply` (the weekly round runs it straight
+   after `read-plan`), it runs `--apply` first, so each decision has its entry; a `patch` with no diff (read-plan's
+   default for an unanswered decision) leaves its entry open, as `--apply` does, until the fixer writes the diff.
 6. **Review once.** A version that took the authors' change through its rows only (no file of it a review row) needs
    no fresh full review: `python3 tools/fork-branches.py review-authors --repo DIR --range <port A>..<port B> --reviewer
    "fresh agent <id>, not the fixer" --note ...` records one review of that diff (by digest) in
    `.port/AUTHORS-REVIEWS.md` on every version branch, and each such version's done check accepts its `REVIEW.md` as
    current through it. A version whose own files changed still needs its fresh review. Gate C still runs per version.
+7. **Carry a fix, not the head.** A cascade from a version branch (`cascade --repo DIR 1.21.4..26.3`) carries only what
+   that branch took: each merge's port commit is its merge-base with the port branch, so the head's untaken code (the
+   authors' release merged into the head and not cascaded yet: `fork-branches.py untaken --repo DIR --upstream
+   REMOTE/BRANCH` lists it) reaches no version. A fix at the head's own version, made while that code is not to be
+   taken, goes on a branch cut from the lowest version's `port_taken` and up with `cascade --repo DIR
+   neoforge-1.21.1..26.3 --port-ref fix/<id>` (refused while the branch holds authors' code that version has not taken),
+   then into the head by its own PR.
 
 `port_taken=` in `.port/<v>/branch.properties` (written by migrate, add-target and every cascade merge) is the port
 commit the version has fully taken: the carry of the authors' change to files the parent does not carry starts there,

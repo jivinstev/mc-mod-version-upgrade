@@ -8,6 +8,8 @@
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO [--gates none|compile|ab|full] [--dry-run]
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO --plan|--apply [--budget-lines N] [--out DIR]
     python3 tools/fork-branches.py cascade     --repo DIR --apply-decisions FILE [--gates ...] [--out DIR]
+    python3 tools/fork-branches.py cascade     --repo DIR PORT..TO --port-ref REF [--upstream REMOTE/BRANCH] [...]
+    python3 tools/fork-branches.py untaken     --repo DIR --upstream REF [--head B] [--json]
     python3 tools/fork-branches.py review-authors --repo DIR --range A..B --reviewer WHO [--note N] [--verdict ok|not-ok]
     python3 tools/fork-branches.py add-target  --repo DIR --target T [--parent V] [--allow-undone-parent]
     python3 tools/fork-branches.py check-done  --repo DIR --target T
@@ -67,6 +69,12 @@ layer carries -- whose source is exactly what the layer's own `layer.py prepare`
 and the resources, with that target's records moved into .port/<t>/. It never pushes, never deletes or moves an
 existing branch, and refuses a target branch that already exists with other content (one with the same content is
 left as it is). `verify` re-runs the layer's prepare and compares; migrate runs it on every branch it made.
+
+THE HEAD'S UNTAKEN CODE. `untaken` lists the authors' commits the port branch has that a version branch has not taken
+(in that version's port_taken..head and reachable from their branch, or a merge of it). A cascade from a version branch
+never carries them (each merge's port commit is its merge-base with the port branch); a fix at the port branch's own
+version that must not carry them goes on a branch cut from the lowest version's port_taken and up with `--port-ref`,
+which refuses a ref holding any. The weekly round uses both when its plan does not take the authors' code.
 
 Exit codes: 0 ok; 1 a difference (verify) or a red branch (cascade); 18 not done (check-done); 2 bad input.
 Standard library only.
@@ -1800,6 +1808,94 @@ def port_taken(read, t):
     return parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}")).get("port_taken") or None
 
 
+def taken_base(repo, t, head):
+    """The port branch commit version t has taken, as an ancestor of `head`: its port_taken, else (a branch written
+    before the key, or a port_taken the head does not contain) the merge-base of its tip and the head. None: no branch."""
+    tip = resolve_branch(repo, branch_name(t))
+    if not tip:
+        return None
+    pt = port_taken(reader_of_ref(repo, tip), t)
+    if pt and git(repo, "merge-base", "--is-ancestor", pt, head).returncode == 0:
+        return git(repo, "rev-parse", pt).stdout.strip() or None
+    return git(repo, "merge-base", tip if not pt else pt, head).stdout.strip() or None
+
+
+def authors_in(repo, ref, base, upstream):
+    """The authors' code `ref` has over `base` (a commit it contains): each commit of base..ref reachable from the
+    authors' branch `upstream`, and each merge in that range with a parent other than its first among them (the merge
+    that brought them in). -> [{"sha", "subject", "merge"}], newest first. Deterministic: git only."""
+    if not base or not upstream:
+        return []
+    theirs = set(git(repo, "rev-list", upstream, f"^{base}").stdout.split())
+    out = []
+    for ln in git(repo, "log", "--format=%H%x09%P%x09%s", ref, f"^{base}").stdout.splitlines():
+        sha, parents, subject = (ln.split("\t", 2) + ["", ""])[:3]
+        ps = parents.split()
+        if sha in theirs:
+            out.append({"sha": sha, "subject": subject, "merge": len(ps) > 1})
+        elif len(ps) > 1 and any(p in theirs for p in ps[1:]):
+            out.append({"sha": sha, "subject": subject, "merge": True})
+    return out
+
+
+def untaken_authors(repo, head, upstream, versions=None):
+    """The authors' code the head already carries that a version branch has not taken (issue #135, the weekly round):
+    per version, authors_in(head, its taken_base) -- so a version-branch fork whose head merged the authors' release
+    earlier, with no cascade since, shows it although the head has nothing new from upstream. -> [{"sha", "subject",
+    "merge", "versions": [the versions lacking it]}], newest first; [] for a fork with no version branches."""
+    repo = pathlib.Path(repo)
+    hc = git(repo, "rev-parse", "--verify", "--quiet", f"{head}^{{commit}}").stdout.strip()
+    up = git(repo, "rev-parse", "--verify", "--quiet", f"{upstream}^{{commit}}").stdout.strip() if upstream else ""
+    if not hc or not up:
+        return []
+    found = {}           # insertion order: the lowest version's list (newest first), then what only higher ones lack
+    for t in sorted(versions if versions is not None else version_branches(repo), key=mc_key):
+        for c in authors_in(repo, hc, taken_base(repo, t, hc), up):
+            found.setdefault(c["sha"], dict(c, versions=[]))["versions"].append(t)
+    return list(found.values())
+
+
+def untaken_cmd(repo, upstream, head=None, as_json=False, say=print):
+    """`untaken`: untaken_authors() of the head, printed (or JSON). Exit 0; 2 for a fork with no version branches or a
+    ref this clone does not know."""
+    repo = pathlib.Path(repo)
+    vs = sorted(version_branches(repo), key=mc_key)
+    if not vs:
+        say("fork-branches: untaken: no version branches (a single-version fork): nothing to take"); return 2
+    head = head or (info_ref(repo, vs[0]).get("port_branch") or "neoforge-1.21.1")
+    hc = resolve_branch(repo, head) or git(repo, "rev-parse", "--verify", "--quiet", f"{head}^{{commit}}").stdout.strip()
+    up = next((r for r in (f"refs/remotes/{upstream}", upstream)
+               if git(repo, "rev-parse", "--verify", "--quiet", f"{r}^{{commit}}").returncode == 0), None)
+    if not hc or not up:
+        say(f"fork-branches: untaken: {'no ' + head if not hc else upstream + ' is not a branch this clone knows'}"); return 2
+    got = untaken_authors(repo, hc, up, vs)
+    if as_json:
+        say(json.dumps(got, indent=1))
+        return 0
+    say(f"fork-branches: untaken: {len(got)} commit(s) of the authors' on {head} that a version branch has not taken"
+        + (":" if got else ""))
+    for c in got:
+        say(f"  {c['sha'][:12]} {'(merge) ' if c['merge'] else ''}{c['subject']}  -- not in {', '.join(c['versions'])}")
+    return 0
+
+
+def info_ref(repo, t):
+    """branch.properties of version t read from its branch tip (no checkout)."""
+    tip = resolve_branch(repo, branch_name(t))
+    return parse_props(reader_of_ref(repo, tip)(f"{REC}/{t}/{BRANCH_PROPS}")) if tip else {}
+
+
+def upstream_of(repo, t):
+    """The authors' branch version t's freeze names (`upstream=<remote>/<branch>` in its branch.properties), as a ref
+    this clone resolves, or None."""
+    tip = resolve_branch(repo, branch_name(t))
+    up = info_ref(repo, t).get("upstream") if tip else None
+    for ref in ([f"refs/remotes/{up}", up] if up else []):
+        if git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0:
+            return ref
+    return None
+
+
 def remerge_entries(data):
     try:
         return [c for c in (jload(data).get("conflicts", []) if data else []) if isinstance(c, dict)]
@@ -1964,7 +2060,7 @@ def classify(f, t, t_pre, diff, read, budget):
             "their fix, adapted through the rows (the authors' design intent)")
 
 
-def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, say=print, resolve=None):
+def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, say=print, resolve=None, port_tip=None):
     """Merge `parent_ref` into version t's branch checked out at `work` (a clean worktree), with the rows as a tool:
     every .java file the merge changed that both sides had from the rows alone (the parent's equal to its rows over
     the port branch it now carries, t's equal to t's rows over the port branch it carried) is re-made from the port
@@ -1980,7 +2076,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     -> (ok, notes, unresolved files, pending {file: diff}, items, mechanical)."""
     notes, items, mech = [], [], []
     pre = git(work, "rev-parse", "HEAD", check=True).stdout.strip()
-    port_tip = resolve_branch(repo, port_name)
+    port_tip = port_tip or resolve_branch(repo, port_name)     # cascade --port-ref: that commit, not the tip
     already = git(repo, "merge-base", "--is-ancestor", parent_ref, pre).returncode == 0
     port_new = parent_ref if parent_version is None else git(repo, "merge-base", parent_ref, port_tip).stdout.strip()
     port_mb = git(repo, "merge-base", pre, port_tip).stdout.strip()
@@ -2371,18 +2467,45 @@ def cascade_nodes(repo, spec):
     return port, nodes, i, to
 
 
-def needs_carry(repo, t, tref, pref, pv, port):
+def needs_carry(repo, t, tref, pref, pv, port, port_tip=None):
     """Is t up to date with its parent but short of the port commit the parent carries (port_taken behind it)? Then
     the cascade still carries the authors' change to the files the parent does not carry."""
     taken = port_taken(reader_of_ref(repo, tref), t)
     if not taken:
         return False
-    port_new = pref if pv is None else git(repo, "merge-base", pref, resolve_branch(repo, port)).stdout.strip()
+    port_new = pref if pv is None else git(repo, "merge-base", pref, port_tip or resolve_branch(repo, port)).stdout.strip()
     return taken != port_new and git(repo, "merge-base", "--is-ancestor", taken, port_new).returncode == 0
 
 
+def port_ref_refused(repo, tip, name, first, upstream=None):
+    """cascade --port-ref REF: None, or why REF may not be carried. REF stands in for the port branch (a fix branch cut
+    from what the lowest version took), so it must hold none of the authors' code that version has not taken -- the
+    weekly round's rule when the plan does not take the authors' code. The authors' branch: --upstream, else the
+    `upstream=` of that version's freeze."""
+    up = None
+    if upstream:
+        up = next((r for r in (f"refs/remotes/{upstream}", upstream)
+                   if git(repo, "rev-parse", "--verify", "--quiet", f"{r}^{{commit}}").returncode == 0), None)
+        if not up:
+            return f"--upstream {upstream} is not a branch this clone knows (git fetch {upstream.split('/', 1)[0]})"
+    up = up or upstream_of(repo, first)
+    if not up:
+        return (f"cannot check that {name} carries none of the authors' code {first} has not taken: no authors' branch "
+                f"(.port/{first}/{BRANCH_PROPS} upstream=, or --upstream REMOTE/BRANCH). Add it as a fetch-only remote: "
+                "git remote add authors <the authors' repository URL> && git remote set-url --push authors DISABLED && "
+                "git fetch authors")
+    base = taken_base(repo, first, tip)
+    hit = authors_in(repo, tip, base, up)
+    if hit:
+        return (f"{name} carries {len(hit)} commit(s) of the authors' that {first} has not taken (from "
+                f"{(base or '?')[:12]}): " + ", ".join(f"{c['sha'][:12]} {c['subject'][:60]}" for c in hit[:5])
+                + (" ..." if len(hit) > 5 else "") + f". Cut the fix branch from {first}'s port_taken instead "
+                f"(git checkout -b fix/<id> {(base or '<port_taken>')[:12]}), or take the authors' code (the plan's box)")
+    return None
+
+
 def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=None, budget=DEFAULT_BUDGET_LINES,
-            out_dir=None):
+            out_dir=None, port_ref=None, upstream=None, _guarded=False):
     """`FROM..TO`: merge FROM's branch into the next branch up TO's chain, then that one into the next, ... up to TO,
     running the no-model gates on each branch a merge changed. FROM is a version or the port branch (its name, or
     `port`). Pushes nothing.
@@ -2391,14 +2514,28 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
     CASCADE-PLAN.json / CASCADE-PLAN.md / ISSUE.md under out_dir (default build/fork-branches/plan). mode "apply": the
     same merges on the real branches, each decision file merged without the authors' change and an open REMERGE.json
     entry (or a default the tool carries out, logged in .port/DECISIONS.md); everything else goes on, the versions
-    above included; a red branch still stops. -> 0, 1 (stopped), 2 (bad input)."""
+    above included; a red branch still stops. port_ref (FROM the port branch only): carry that commit in place of the
+    port branch's tip -- a fix made on a branch cut from what the versions took, so none of the head's untaken authors'
+    code goes with it (port_ref_refused). A cascade FROM a version branch carries only what that branch took (each
+    merge's port commit is its merge-base with the port branch), never the head's untaken code.
+    -> 0, 1 (stopped), 2 (bad input)."""
     repo = pathlib.Path(repo).resolve()
     try:
         port, nodes, i, to = cascade_nodes(repo, spec)
     except ValueError as e:
         say(f"fork-branches: {e}"); return 2
+    port_tip = None
+    if port_ref:
+        if i != 0:
+            say(f"fork-branches: --port-ref stands in for the port branch: the range starts at {port} (not {spec})"); return 2
+        port_tip = git(repo, "rev-parse", "--verify", "--quiet", f"{port_ref}^{{commit}}").stdout.strip()
+        if not port_tip:
+            say(f"fork-branches: --port-ref {port_ref} is not a commit"); return 2
+        why = None if _guarded else port_ref_refused(repo, port_tip, port_ref, nodes[1], upstream)
+        if why:
+            say(f"fork-branches: cascade --port-ref REFUSED: {why}"); return 2
     if mode == "plan":
-        return cascade_plan(repo, spec, budget, out_dir, say)
+        return cascade_plan(repo, spec, budget, out_dir, say, port_ref=port_tip)
     runner = runner or run_gates
     rows, merged, items, mech = [], [], [], []
     resolve = {"budget": budget} if mode in ("apply", "plan-run") else None
@@ -2406,9 +2543,11 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         pv, t = nodes[k], nodes[k + 1]
         pname = port if pv is None else branch_name(pv)
         pref, tref = resolve_branch(repo, pname), resolve_branch(repo, branch_name(t))
+        if pv is None and port_tip:
+            pname, pref = port_ref, port_tip
         if not pref or not tref:
             say(f"fork-branches: no branch {pname if not pref else branch_name(t)}"); return 2
-        if git(repo, "merge-base", "--is-ancestor", pref, tref).returncode == 0 and not needs_carry(repo, t, tref, pref, pv, port):
+        if git(repo, "merge-base", "--is-ancestor", pref, tref).returncode == 0 and not needs_carry(repo, t, tref, pref, pv, port, port_tip):
             rows.append((t, "up to date", ""))
             continue
         if dry_run:
@@ -2419,7 +2558,7 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         work, why = worktree_for(repo, t)
         if work is None:
             rows.append((t, "STOPPED", why)); break
-        ok, notes, left, pending, its, mm = merge_up(repo, work, t, pname, pref, port, pv, say, resolve)
+        ok, notes, left, pending, its, mm = merge_up(repo, work, t, pname, pref, port, pv, say, resolve, port_tip=port_tip)
         items += its
         mech += mm
         if ok and not pending and not its and "nothing changed" in notes and \
@@ -2570,7 +2709,7 @@ def write_plan(repo, plan, out_dir, say=print):
     return out
 
 
-def cascade_plan(repo, spec, budget, out_dir, say=print):
+def cascade_plan(repo, spec, budget, out_dir, say=print, port_ref=None):
     """cascade --plan: the whole chain merged on a throwaway bare clone (its objects shared, its refs its own), no gates,
     nothing stopped by a decision; the real branches untouched. Writes the plan files. -> 0, 1 (a merge could not run)."""
     t0 = time.monotonic()
@@ -2585,7 +2724,8 @@ def cascade_plan(repo, spec, budget, out_dir, say=print):
         git(clone, "config", "user.email", git(repo, "config", "user.email").stdout.strip() or "cascade-plan@localhost")
         cascade_run_result.clear()
         lines = []
-        rc = cascade(clone, spec, "none", say=lines.append, mode="plan-run", budget=budget)
+        rc = cascade(clone, spec, "none", say=lines.append, mode="plan-run", budget=budget, port_ref=port_ref,
+                     _guarded=True)
         res = dict(cascade_run_result)
     plan = plan_of(spec, res.get("rows", []), res.get("items", []), res.get("mech", []), time.monotonic() - t0, budget)
     for ln in lines:
@@ -2611,7 +2751,11 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     that decision, oldest first -- take (the authors' file through the version's rows), keep, patch (a diff in the port
     branch's names, through the version's rows) or content -- its entry cleared, the choice logged in that branch's
     .port/DECISIONS.md, one commit per version; then the cascade --apply over the range, which merges the commits up
-    and writes the new plan (a new decision it raises goes into a follow-up ISSUE.md). Pushes nothing. -> exit code."""
+    and writes the new plan (a new decision it raises goes into a follow-up ISSUE.md). Pushes nothing. -> exit code.
+    Run straight after read-plan (no earlier --apply): an answer no REMERGE.json entry holds yet makes it run the
+    cascade --apply first, so every decision has its entry. A `patch` with no diff (read-plan's default for a decision
+    the fixer has not written yet) is what --apply itself does with it: the file stays merged without the authors'
+    change, its entry open, the version not done, until the fixer answers it with the diff (or take/keep/content)."""
     repo = pathlib.Path(repo).resolve()
     try:
         data = read_decisions(path)
@@ -2626,7 +2770,16 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     bad = [i for i, d in answers.items() if d["choice"] not in ("take", "keep", "patch", "content")]
     if bad:
         say(f"fork-branches: --apply-decisions: unknown choice for {', '.join(bad)} (take, keep, patch or content)"); return 2
-    done_ids, failed = set(), []
+    def held():
+        return {c.get("id") for t in nodes[1:] for c in remerge_entries(
+            blob_at(repo, resolve_branch(repo, branch_name(t)) or "HEAD", f"{REC}/{t}/REMERGE.json"))}
+    if set(answers) - held():
+        say(f"fork-branches: --apply-decisions: {len(set(answers) - held())} answer(s) with no REMERGE.json entry yet "
+            "(no earlier --apply): running cascade --apply first")
+        rc0 = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner)
+        if rc0:
+            say("fork-branches: --apply-decisions: the cascade --apply stopped; no decision applied"); return rc0
+    done_ids, failed, waiting = set(), [], []
     for t in nodes[1:]:
         tref = resolve_branch(repo, branch_name(t))
         ents = remerge_entries(blob_at(repo, tref, f"{REC}/{t}/REMERGE.json"))
@@ -2662,6 +2815,8 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
             elif choice == "patch":
                 patch = a.get("patch") or ""
                 patch = patch.get(t, "") if isinstance(patch, dict) else patch
+                if not patch.strip():
+                    waiting.append(f"{c['id']} at {t} ({f})"); done_ids.add(c["id"]); continue
                 if f.endswith(".java"):
                     patch = apply_rules(patch, rules_of(chain_table(read, t, chain(work, t))))
                 r = git(work, "apply", "--recount", "-", input=patch)
@@ -2686,6 +2841,10 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
         say(f"fork-branches: --apply-decisions {t}: {len(logged)} decision(s) applied, their entries cleared")
     for x in failed:
         say(f"fork-branches: --apply-decisions: NOT applied: {x}")
+    if waiting:
+        say(f"fork-branches: --apply-decisions: left open, `patch` with no diff (the default's patch is the fixer's to "
+            f"write: the authors' diff is in the entry and CASCADE-PLAN.md): {', '.join(waiting)}. Answer each with its "
+            "`patch` (or take/keep/content) and run --apply-decisions again; until then that version is not done")
     missing = sorted(set(answers) - done_ids)
     if missing:
         say(f"fork-branches: --apply-decisions: no open entry holds {', '.join(missing)} (answered already, or a stale block)")
@@ -3302,6 +3461,16 @@ def main():
     k.add_argument("--budget-lines", type=int, default=DEFAULT_BUDGET_LINES,
                    help=f"an authors' change larger than this (changed lines) is escalated, not a default (default {DEFAULT_BUDGET_LINES})")
     k.add_argument("--out", help="where the plan files go (default build/fork-branches/plan)")
+    k.add_argument("--port-ref", metavar="REF", help="FROM the port branch: carry REF (a fix branch cut from the lowest "
+                   "version's port_taken) in place of the port branch's tip; refused when REF holds authors' code that "
+                   "version has not taken")
+    k.add_argument("--upstream", metavar="REMOTE/BRANCH", help="the authors' branch --port-ref is checked against "
+                   "(default: the lowest version's upstream= in its branch.properties)")
+    un = sub.add_parser("untaken", help="the authors' code the head carries that a version branch has not taken")
+    un.add_argument("--repo", required=True); un.add_argument("--upstream", required=True, metavar="REF",
+                                                              help="the authors' branch (e.g. authors/main)")
+    un.add_argument("--head", help="the port branch (default: the version branches' port_branch)")
+    un.add_argument("--json", action="store_true")
     ra = sub.add_parser("review-authors"); ra.add_argument("--repo", required=True); ra.add_argument("--range", required=True)
     ra.add_argument("--reviewer", required=True); ra.add_argument("--note", default="")
     ra.add_argument("--verdict", default="ok", choices=["ok", "not-ok"])
@@ -3333,13 +3502,19 @@ def main():
         return sync_shared(a.repo, a.target or None)
     if a.cmd == "review-authors":
         return review_authors(a.repo, a.range, a.reviewer, a.note, a.verdict)
+    if a.cmd == "untaken":
+        return untaken_cmd(a.repo, a.upstream, a.head, a.json)
     if a.cmd == "cascade":
+        if (a.port_ref or a.upstream) and (a.apply_decisions or a.dry_run):
+            ap.error("--port-ref/--upstream go with a cascade FROM..TO (plain, --plan or --apply)")
+        if a.upstream and not a.port_ref:
+            ap.error("--upstream is what --port-ref is checked against: pass --port-ref too")
         if a.apply_decisions:
             return apply_decisions(a.repo, a.apply_decisions, a.gates, budget=a.budget_lines, out_dir=a.out)
         if not a.range:
             ap.error("cascade needs FROM..TO")
         return cascade(a.repo, a.range, a.gates, a.dry_run, mode="plan" if a.plan else "apply" if a.apply else None,
-                       budget=a.budget_lines, out_dir=a.out)
+                       budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream)
     if a.cmd == "migrate":
         return migrate(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.dry_run, a.port_branch,
                        jpath=a.json, library=a.library)
@@ -3555,6 +3730,113 @@ def _check_port_taken(expect):
                and any("did not merge into " + am in w for w in why),
                f"t7: after the hand merge the next cascade offers the authors' AMixin change again and records it open: "
                f"{out[-400:]} {why}")
+
+
+def _check_untaken_head(expect):
+    """The weekly round's first dry run: the head already carries the authors' release (merged earlier, no cascade
+    since: every port_taken older). `untaken` names it; a fix cascaded from a version branch, or from a fix branch cut
+    from port_taken (--port-ref), carries none of it to any version; --port-ref on the head itself is refused."""
+    pl = "src/main/java/com/example/mod/Plain.java"
+    em = "src/main/java/com/example/mod/ExampleMod.java"
+    an = "src/main/java/com/example/mod/AuthorsNew.java"
+    vs = ("1.21.3", "1.21.4", "1.21.5")
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        x = resolve_branch(r, "neoforge-1.21.1")
+        taken0 = {t: port_taken(reader_of_ref(r, resolve_branch(r, branch_name(t))), t) for t in vs}
+        g("checkout", "-q", "-b", "authors-side", x)
+        (r / an).write_text("package com.example.mod;\nclass AuthorsNew { int authorsRelease = 2; }\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "authors: release 2")
+        a_sha = g("rev-parse", "HEAD")
+        g("update-ref", "refs/remotes/authors/main", a_sha)
+        g("checkout", "-q", "neoforge-1.21.1"); g("merge", "-q", "--no-ff", "--no-edit", "authors-side")
+        g("branch", "-q", "-D", "authors-side")
+        m_sha = g("rev-parse", "HEAD")
+        got = untaken_authors(r, "neoforge-1.21.1", "refs/remotes/authors/main")
+        expect([(c["sha"], c["merge"], c["versions"]) for c in got] == [(m_sha, True, list(vs)), (a_sha, False, list(vs))]
+               and all(taken0[t] == x for t in vs),
+               f"untaken: the authors' commit the head has and its merge, at every version (port_taken older): {got} {taken0}")
+        rc, out = _quiet(untaken_cmd, r, "authors/main")
+        expect(rc == 0 and a_sha[:12] in out and "(merge)" in out and "2 commit(s)" in out, f"untaken (command): {out}")
+        nowhere = lambda: all(an not in ref_files(r, resolve_branch(r, branch_name(t)))
+                              and git(r, "merge-base", "--is-ancestor", a_sha, resolve_branch(r, branch_name(t))).returncode == 1
+                              for t in vs)
+        # a fix at the lowest OPEN version (1.21.4), cascaded from that version branch
+        w4, _w = worktree_for(r, "1.21.4")
+        _hand(w4, {pl: ("int v = 1;", "int v = 1; int fixAt4;")}, "fix KI-3 at 1.21.4")
+        rc, out = _quiet(cascade, r, "1.21.4..1.21.5", "none")
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        taken = {t: port_taken(reader_of_ref(r, resolve_branch(r, branch_name(t))), t) for t in vs}
+        expect(rc == 0 and b"fixAt4" in f5[pl] and b"fixAt4" not in ref_files(r, resolve_branch(r, "neoforge-1.21.3"))[pl]
+               and nowhere() and taken == taken0,
+               f"cascade 1.21.4..1.21.5: the fix reaches 1.21.5, the head's untaken authors' code no version: {taken} {out[-400:]}")
+        # a fix at the head's version without the authors' code: a fix branch from port_taken, --port-ref
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none", port_ref="neoforge-1.21.1",
+                         upstream="authors/main")
+        expect(rc == 2 and "REFUSED" in out and a_sha[:12] in out and nowhere(),
+               f"--port-ref on the head (it has the untaken authors' commit): refused, nothing merged: {out[-400:]}")
+        g("checkout", "-q", "-b", "fix/KI-4", x)
+        (r / em).write_text((r / em).read_text(encoding="utf-8").replace("void a()", "void fixHead() {} void a()"),
+                            encoding="utf-8")
+        g("commit", "-qam", "fix KI-4 at the head's version")
+        f_sha = g("rev-parse", "HEAD")
+        g("checkout", "-q", "neoforge-1.21.1")
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none", port_ref="fix/KI-4")
+        expect(rc == 2 and "git remote add authors" in out and "set-url --push authors" in out,
+               f"--port-ref with no authors' branch to check against: refused, says how to add a fetch-only remote: {out[-300:]}")
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none", port_ref="fix/KI-4", upstream="authors/main")
+        expect(rc == 2 and "starts at" in out, f"--port-ref only from the port branch: {out[-200:]}")
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none", port_ref="fix/KI-4", upstream="authors/main")
+        fl = {t: ref_files(r, resolve_branch(r, branch_name(t))) for t in vs}
+        taken = {t: port_taken(reader_of_ref(r, resolve_branch(r, branch_name(t))), t) for t in vs}
+        expect(rc == 0 and all(b"void fixHead() {}" in fl[t][em] and b"new.Thing" in fl[t][em] for t in vs)
+               and b"fixAt4" in fl["1.21.5"][pl] and nowhere() and taken["1.21.3"] == f_sha,
+               f"--port-ref fix/KI-4: the fix through each version's rows, the untaken authors' code nowhere, port_taken the "
+               f"fix: {taken} {out[-500:]}")
+        got = untaken_authors(r, "neoforge-1.21.1", "refs/remotes/authors/main")
+        expect({c["sha"] for c in got} == {m_sha, a_sha}, f"untaken after the fixes: the authors' code still offered: {got}")
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", "none")
+        expect(rc == 0 and not nowhere() and not untaken_authors(r, "neoforge-1.21.1", "refs/remotes/authors/main"),
+               f"control: the head cascade (the authors' box ticked) does carry it, and then nothing is untaken: {out[-300:]}")
+    # cascade --apply-decisions straight after read-plan (no earlier --apply): a default `patch` with no diff
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w5, _w = worktree_for(r, "1.21.5")
+        _hand(w5, {em: ("Thing t;", "Thing t; int h5;")}, "1.21.5 hand change")
+        _authors(r, g, {em: ("Thing t;", "Thing t; int AUTHORS_FIX;"), pl: ("int v = 1;", "int v = 2;")}, "authors")
+        pdir = pathlib.Path(d) / "plan"
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", mode="plan", out_dir=pdir)
+        plan = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8"))
+        ids = [x["id"] for x in plan["decisions"] if x["file"] == em]
+        dec = pathlib.Path(d) / "o__lib.decisions.json"        # what read-plan --decisions-dir writes for no answer
+        dec.write_text(json.dumps({"range": "neoforge-1.21.1..1.21.5", "decisions": [
+            {"id": i, "file": em, "versions": ["1.21.5"], "recommended": "patch", "choice": "patch", "by": "default",
+             "reason": ""} for i in ids]}), encoding="utf-8")
+        rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir)
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        ents = [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == em]
+        expect(len(ids) == 1 and rc == 0 and "running cascade --apply first" in out and "left open" in out
+               and "does not apply" not in out and b"v = 2" in f5[pl] and len(ents) == 1 and ents[0].get("id") == ids[0]
+               and any("did not merge into " + em in w for w in target_done(r, "1.21.5")),
+               f"--apply-decisions with read-plan's default (patch, no diff) and no earlier --apply: the merge runs, the "
+               f"entry is made and left open (what --apply does), no empty patch fed to git apply: {ents} {out[-600:]}")
+        dec.write_text(json.dumps({"range": "neoforge-1.21.1..1.21.5", "decisions": [
+            {"id": ids[0] if ids else "?", "choice": "take", "by": "fixer agent", "reason": "their fix"}]}), encoding="utf-8")
+        rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir)
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        expect(rc == 0 and "running cascade --apply first" not in out and b"AUTHORS_FIX" in f5[em]
+               and not [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == em],
+               f"--apply-decisions again with the fixer's answer: applied, the entry cleared: {out[-400:]}")
+    # a single-version fork: no version branches, nothing untaken to name
+    with tempfile.TemporaryDirectory() as d:
+        sv = pathlib.Path(d)
+        gs = lambda *a: subprocess.run(["git", "-C", str(sv), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        gs("init", "-q", "-b", "neoforge-1.21.1"); gs("config", "user.email", "a@b"); gs("config", "user.name", "a")
+        (sv / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        gs("add", "-A"); gs("commit", "-qm", "port"); gs("update-ref", "refs/remotes/authors/main", "HEAD")
+        rc, out = _quiet(untaken_cmd, sv, "authors/main")
+        expect(rc == 2 and "single-version" in out and untaken_authors(sv, "neoforge-1.21.1", "authors/main") == [],
+               f"a single-version fork: untaken names nothing: {out}")
 
 
 def _check_random_sequences(expect, n=None, seed=20261017, say=None):
@@ -4427,6 +4709,7 @@ def self_check():
     if not platform:
         _check_port_taken(expect)
         _check_deferred_integration(expect)
+        _check_untaken_head(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)

@@ -1370,6 +1370,28 @@ def upstream_drift(repo, ref, recorded=None, fetch=True):
     return out
 
 
+def add_remote_hint(repo, ref):
+    """When the freeze's `upstream=<remote>/<branch>` names a remote this clone does not have: how to add it, fetch-only
+    (no push URL: nothing here ever pushes to the authors). The URL from the head's .github/weekly-plan.json when it
+    names this fork's authors, else a placeholder. None when the remote exists (a fetch problem, not a missing remote)."""
+    remote = (ref or "").split("/", 1)[0]
+    if not remote or _git(repo, "remote", "get-url", remote)[0] == 0:
+        return None
+    url = "<the authors' repository URL>"
+    for b in ("origin/HEAD", "HEAD"):
+        rc, cfg = _git(repo, "show", f"{b}:.github/weekly-plan.json")
+        if rc == 0:
+            try:
+                ups = [f.get("upstream") for f in json.loads(cfg).get("forks", []) if f.get("upstream")]
+            except ValueError:
+                ups = []
+            if len(set(ups)) == 1:
+                url = ups[0]
+            break
+    return (f" -- this clone has no `{remote}` remote. Add it once, fetch-only: git remote add {remote} {url} && "
+            f"git remote set-url --push {remote} DISABLED && git fetch {remote}")
+
+
 def write_props(path, updates):
     """Set keys in a .properties file, keeping every other line (and the order) as it is."""
     p = pathlib.Path(path)
@@ -1464,14 +1486,17 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
         # records what the buildout started from, which HEAD may never have carried in full
         since = st.get("since") if st.get("since") is not None else st.get("behind")
         if st.get("error"):
-            print(f"fork-port: upstream: WARNING cannot compare with the authors' branch: {st['error']}")
+            print(f"fork-port: upstream: WARNING cannot compare with the authors' branch: {st['error']}"
+                  + (add_remote_hint(repo, ref) or ""))
         elif since and st.get("behind"):
             reasons.append(f"the authors' {ref} has {since} commit(s) since the freeze that this checkout does not carry "
                            f"(buildout frozen at {rec[:12]}, {ref} now at {st['tip'][:12]}"
                            + ("" if st["fetched"] else "; not fetched now, compared with the last fetch") + ")")
         elif since:
             print(f"fork-port: upstream: the checkout carries {ref} at {st['tip'][:12]}, newer than the freeze {rec[:12]} "
-                  f"(keep-current merged it): record it with make-fork-layer.py freeze --repo {repo}")
+                  f"(keep-current merged it): record it with "
+                  + (f"fork-branches.py freeze --repo {repo} --target {a.target}" if props_file
+                     else f"make-fork-layer.py freeze --repo {repo}"))
         elif st.get("behind"):
             print(f"fork-port: upstream: note: {ref} has {st['behind']} commit(s) this checkout does not carry, none of "
                   f"them after the freeze {rec[:12]}: not a stop")
@@ -1883,9 +1908,47 @@ def environmental_stop(failed, code, resume, free_now=None, holders=None):
                         "do NOT send a fixer after the code or exclude a dependency for this: nothing in the code failed"]}
 
 
-def residue_report(stage, left, errors_view, esc, audit, gates, resume, environment=None):
+RESIDUE_ERRORS_SHOWN = 25
+
+
+def compile_error_lines(log, root=None, cap=RESIDUE_ERRORS_SHOWN):
+    """The compile errors of a measure log as `file:line: message`, unique (Gradle echoes javac's output; a capped
+    compile's uncapped recount follows RECOUNT_MARK, and only that part counts then), paths relative to `root` (the
+    checkout), the first `cap` and a last line saying how many more. [] when the log has none or is missing."""
+    p = pathlib.Path(log)
+    if not p.is_file():
+        return []
+    text = p.read_text(encoding="utf-8", errors="replace")
+    if RECOUNT_MARK in text:
+        text = text.split(RECOUNT_MARK, 1)[1]
+    # the log may name the checkout as given or resolved (a Windows 8.3 short temp path resolves to the long one)
+    pres = sorted({str(q).replace("\\", "/").rstrip("/") + "/" for q in (pathlib.Path(root), pathlib.Path(root).resolve())},
+                  key=len, reverse=True) if root else []
+    fold = (lambda x: x.lower()) if os.name == "nt" else (lambda x: x)
+    seen, out = set(), []
+    for ln in text.splitlines():
+        ln = ln.replace("\\", "/")
+        m = re.match(r"^(.+?\.java):(\d+): error: (.+?)\s*$", ln.strip())
+        if not m:
+            continue
+        f = m.group(1)
+        for pre in pres:
+            if fold(f).startswith(fold(pre)):
+                f = f[len(pre):]
+                break
+        key = (f, m.group(2), m.group(3))
+        if key not in seen:
+            seen.add(key)
+            out.append(f"{f}:{m.group(2)}: {m.group(3)}")
+    return out[:cap] + ([f"... and {len(out) - cap} more in {p.name}"] if len(out) > cap else [])
+
+
+def residue_report(stage, left, errors_view, esc, audit, gates, resume, environment=None, compile_errors=None):
     """RESIDUE.md and its JSON twin. Bounded by construction: groups and the top files, never the raw log."""
     md = [f"# Residue: {stage}", "", f"Stopped at **{stage}**: {left}.", ""]
+    if compile_errors:
+        md += [f"## The compile errors (file:line: message, from the measure log; the first {RESIDUE_ERRORS_SHOWN})", "", "```"]
+        md += compile_errors + ["```", ""]
     if errors_view:
         md += ["## Remaining compile errors (compile-summary.py, grouped by CATALOG entry / family)", "", "```"]
         md += errors_view + ["```", ""]
@@ -1915,6 +1978,8 @@ def residue_report(stage, left, errors_view, esc, audit, gates, resume, environm
             "resume": resume}
     if environment:
         data["environment"] = environment
+    if compile_errors:
+        data["compile_errors"] = compile_errors
     return "\n".join(md), data
 
 
@@ -2214,11 +2279,16 @@ class Run:
         if n is None:
             return {"stop": "the compile does not count: " + why, "code": 10, "errors": None, "detail": [why],
                     "choices": ["read build/mc%s/fork-port/measure.log; fix what keeps javac from attributing" % self.t]}
-        sk = skipped_shared(self.mv, self.t)
-        if sk:
-            self.say("measure", f"WARNING {self.t} skips shared librar{'y' if len(sk) == 1 else 'ies'} {', '.join(sk)} "
-                                f"and has no shared_chain: their rows and helpers are NOT applied (add-target --direct)")
+        gap = self.shared_gap()
+        if gap:
+            self.say("measure", gap)
         return {"done": f"{n} error(s) across {len(tasks)} compile task(s) (starting count)", "errors": n, "log": str(log), "this_run": True}
+
+    def shared_gap(self):
+        """A warning, or None: a layer target that skips versions without shared_chain misses their shared library."""
+        sk = skipped_shared(self.mv, self.t)
+        return (f"WARNING {self.t} skips shared librar{'y' if len(sk) == 1 else 'ies'} {', '.join(sk)} "
+                f"and has no shared_chain: their rows and helpers are NOT applied (add-target --direct)") if sk else None
 
     def error_view(self, log):
         cs = load("compile_summary", "compile-summary.py")
@@ -2250,6 +2320,7 @@ class Run:
         if why:
             skipped = skipped_shared(self.mv, self.t)
             return {"stop": "spend guard: " + why, "code": 10, "errors": start, "this_run": True,
+                    "compile_errors": compile_error_lines(self.work / "measure.log", self.repo),
                     "detail": [why] + ([f"the target skips shared librar{'y' if len(skipped) == 1 else 'ies'} {', '.join(skipped)}: "
                                         f"a direct jump needs shared_chain (add-target --direct)"] if skipped else []),
                     "choices": [f"raise it on purpose: {self.resume_cmd('loop')} --confirm-spend (or --max-errors N / a larger --budget)",
@@ -2736,8 +2807,11 @@ class BranchRun(Run):
             return {"skipped": "already at 0 errors", "errors": 0}
         why = spend_guard(start, self.a.budget, self.a.max_errors, self.a.confirm_spend)
         if why:
-            return {"stop": "spend guard: " + why, "code": 10, "errors": start, "this_run": True, "detail": [why],
-                    "choices": [f"raise it on purpose: {self.resume_cmd('loop')} --confirm-spend (or --max-errors N / a larger --budget)"]}
+            errs = compile_error_lines(self.work / "measure.log", self.repo)
+            return {"stop": "spend guard: " + why, "code": 10, "errors": start, "this_run": True,
+                    "detail": [why] + errs[:5], "compile_errors": errs,
+                    "choices": [f"raise it on purpose: {self.resume_cmd('loop')} --confirm-spend (or --max-errors N / a larger --budget)",
+                                "or fix the listed errors by hand on the branch (RESIDUE.md lists them), then resume"]}
         out = self.work / "file-loop.out"
         r = self.sh([self.py, str(ROOT / "tools/file-loop.py"), "--work", str(self.repo), "--budget", str(self.a.budget),
                      "--log", str(flog)], out)
@@ -2875,6 +2949,30 @@ class BranchRun(Run):
 
     def drift(self, a):
         return drift_stop(self.repo, a, props_file=self.tdir / "branch.properties", drift_file=self.tdir / "DRIFT.md")
+
+    def shared_gap(self):
+        """A version branch has no shared_chain: its shared tables are the `# ---- shared <v>` sections of
+        .port/<t>/shared-renames.tsv, one per library version above the base up to t (fork-branches.py add-target /
+        sync-shared). The layer's warning was false here (no .multiversion/ to read); the real gap is a library version
+        with a table that the branch has no section of."""
+        return branch_shared_gap(self.repo, self.t, self.props(), self.fb)
+
+
+def branch_shared_gap(repo, t, props, fb, shared_root=None, stable=None):
+    """The version-branch check behind BranchRun.shared_gap: a warning naming the stable shared library versions in
+    (base, t] that have a renames.tsv and no section in .port/<t>/shared-renames.tsv (sync-shared's span), or None."""
+    base = props.get("base_minecraft_version") or "1.21.1"
+    shared_root = pathlib.Path(shared_root) if shared_root else fb.shared_dir()
+    if stable is None:
+        stable = [l["mc"] for l in load("make_fork_layer_fp", "make-fork-layer.py").versions()["lines"] if l.get("stable")]
+    have = {k.split(" ", 1)[1] for k in fb.shared_sections(fb.read_file(pathlib.Path(repo) / ".port" / t / "shared-renames.tsv"))}
+    vs = [v for v in stable if (shared_root / v / "renames.tsv").is_file()]
+    miss = sorted((v for v in vs if mc_key(base) < mc_key(v) <= mc_key(t) and v not in have), key=mc_key)
+    if not miss:
+        return None
+    return (f"WARNING .port/{t}/shared-renames.tsv has no section for the shared librar{'y' if len(miss) == 1 else 'ies'} "
+            f"{', '.join(miss)}: their rows are NOT applied (python3 tools/fork-branches.py sync-shared --repo {repo} "
+            f"--target {t}, then review the change)")
 
 
 def cost_since(cost_md):
@@ -3228,7 +3326,7 @@ def drive(run, a, skipped, todo):
         view = stop.get("view") or stop.get("detail") or []
         md, data = residue_report(stop["stage"], stop["left"], view if stop["stage"] in ("loop", "measure", "stage", "moves") else [],
                                   stop.get("esc"), stop.get("audit") or [], stop.get("gates") or [], resume,
-                                  environment=stop.get("environment"))
+                                  environment=stop.get("environment"), compile_errors=stop.get("compile_errors"))
         rpath = run.tdir / "RESIDUE.md"
         if run.tdir.is_dir():
             put_residue(run.tdir, a.target, md)       # layer-sync.py's section (an unmerged overlay) stays
@@ -3311,6 +3409,32 @@ def self_check():
                       "/w/B.java:2: error: cannot find symbol\n2 errors\nPORT_FULL_ERRORS compileJava: javac exit 1\nBUILD SUCCESSFUL in 3s\n", encoding="utf-8")
         n_, _w = Run.count(None, lg)
         expect(n_ == 2, f"a recounted log is counted, not read as clean from the recount run's BUILD SUCCESSFUL: {n_}")
+    with tempfile.TemporaryDirectory() as d_:
+        lg = pathlib.Path(d_) / "measure.log"
+        rows = "".join(f"{d_}/w/src/main/java/a/F{i}.java:{i}: error: cannot find symbol\n" for i in range(30))
+        lg.write_text("> Task :compileJava\n" + rows + rows + "30 errors\n", encoding="utf-8")
+        ce = compile_error_lines(lg, pathlib.Path(d_) / "w")
+        md, data = residue_report("loop", "spend guard: 30 errors against a $0 budget", ["30 errors against a $0 budget"], None,
+                                  [], [], "r", compile_errors=ce)
+        expect(len(ce) == RESIDUE_ERRORS_SHOWN + 1 and ce[0] == "src/main/java/a/F0.java:0: cannot find symbol"
+               and ce[-1] == "... and 5 more in measure.log" and "src/main/java/a/F24.java:24: cannot find symbol" in md
+               and "## The compile errors (file:line: message" in md and data["compile_errors"] == ce
+               and compile_error_lines(pathlib.Path(d_) / "none.log") == [],
+               f"a spend-guard stop's RESIDUE.md lists the compile errors (file:line: message, unique, capped): {ce[:3]} {md[:400]}")
+    with tempfile.TemporaryDirectory() as d_:
+        fb_ = fork_branches()
+        sh = pathlib.Path(d_) / "shared"
+        for v in ("1.21.3", "1.21.4", "1.21.6"):
+            (sh / v).mkdir(parents=True); (sh / v / "renames.tsv").write_text("a\tb\n", encoding="utf-8")
+        (pathlib.Path(d_) / ".port/1.21.5").mkdir(parents=True)
+        srt = pathlib.Path(d_) / ".port/1.21.5/shared-renames.tsv"
+        srt.write_text("# ---- shared 1.21.3\na\tb\n", encoding="utf-8")
+        st_ = ["1.21.3", "1.21.4", "1.21.5", "1.21.6"]
+        gap = branch_shared_gap(d_, "1.21.5", {"base_minecraft_version": "1.21.1"}, fb_, sh, st_)
+        srt.write_text("# ---- shared 1.21.4\na\tb\n# ---- shared 1.21.3\na\tb\n", encoding="utf-8")
+        expect(gap and "1.21.4" in gap and "1.21.6" not in gap and "sync-shared" in gap and "shared_chain" not in gap
+               and branch_shared_gap(d_, "1.21.5", {"base_minecraft_version": "1.21.1"}, fb_, sh, st_) is None,
+               f"a version branch: no shared_chain warning; a missing shared-renames.tsv section is named (sync-shared): {gap}")
     expect(capped_tasks("> Task :compileJava\nA.java:1: error: x\n1,000 errors\n> Task :compileJava FAILED\n> Task :compileJvmtiJava\n"
                         "B.java:1: error: y\n1 error\n") == ["compileJava"], "only the task that hit the cap is recounted")
     expect(select_stages(None) == ([], STAGES), "no --from-stage runs everything")
@@ -4408,6 +4532,25 @@ def self_check_done_freeze_sweep():
         with contextlib.redirect_stdout(buf):
             st = drift_stop(fork, a_)
         expect(st is None and "newer than the freeze" in buf.getvalue(), f"after keep-current merged it: no stop, a re-freeze hint: {buf.getvalue()}")
+        # a version branch's freeze (.port/<t>/branch.properties): the hints name fork-branches.py freeze, and a freeze
+        # naming a remote the clone lacks says how to add it, fetch-only
+        vbp = fork / ".port/1.21.3/branch.properties"
+        w(vbp, f"minecraft_version=1.21.3\nupstream=upstream/main\nupstream_commit={bp.get('upstream_commit')}\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            st = drift_stop(fork, a_, props_file=vbp, drift_file=fork / ".port/1.21.3/DRIFT.md")
+        expect(st is None and f"fork-branches.py freeze --repo {fork} --target 1.21.3" in buf.getvalue()
+               and "make-fork-layer.py" not in buf.getvalue(),
+               f"a version branch: the re-freeze hint is fork-branches.py freeze, not make-fork-layer.py: {buf.getvalue()}")
+        w(vbp, "minecraft_version=1.21.3\nupstream=authors/main\nupstream_commit=" + bp.get("upstream_commit", "") + "\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=fork / ".port/1.21.3/DRIFT.md")
+        expect("no `authors` remote" in buf.getvalue() and "git remote add authors" in buf.getvalue()
+               and "git remote set-url --push authors DISABLED" in buf.getvalue(),
+               f"upstream=authors/... with no authors remote: how to add it, fetch-only: {buf.getvalue()}")
+        expect(add_remote_hint(fork, "upstream/main") is None, "an existing remote gets no hint")
+        vbp.unlink()
         a_.port_release = ["owner/lib@v2"]
         with contextlib.redirect_stdout(io.StringIO()):
             st = drift_stop(fork, a_)

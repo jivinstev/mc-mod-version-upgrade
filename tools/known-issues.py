@@ -89,6 +89,11 @@ THE WEEKLY PLAN ISSUE (issue #135, part 2a; tools/weekly-plan.py runs it as a Gi
                access count; every other comment is listed under `ignored`. A checkbox is part of the issue body, which
                only the bot and users with write access can edit. Each fork's `cascade` block is what
                `fork-branches.py cascade --apply-decisions` reads (--decisions-dir writes one file per fork).
+               A version-branch fork's entry also says whether the head is cascaded (`head_cascade`: false when the
+               plan does not take the authors' code the head has -- new or untaken -- and then no decision applies and
+               no decisions file is written) and, per selected issue, `fixes`: the lowest version still open (the
+               status map, not `lowest`) and the one cascade that carries the fix. Run before the plan's deadline it
+               warns (the owner's window is cut short); --now records an early start the owner asked for.
   render-ports the fork README's Ports block, between `<!-- ports:begin -->` and `<!-- ports:end -->`: one row per
                Minecraft version (branch, newest pre-release or release, done state) and the known-issues links. With
                --write it replaces only the marked block (appended at the end when the README has none); every byte
@@ -474,6 +479,45 @@ def _q(fork_repo, i, multi, clash):
     return f"{fork_repo}:{i}" if multi and i in clash else i
 
 
+def _where(r):
+    """An issue's versions on its plan line: the lowest version still open (the status map: where the round makes the
+    fix) when it is not the first affected one, else `lowest` as before."""
+    lo = r.get("lowest_open")
+    return f"lowest open {lo} (first affected {r['lowest']})" if lo and lo != r["lowest"] else f"lowest {r['lowest']}"
+
+
+def _commit_line(c):
+    return (f"- `{c['sha'][:12]}` {md(c['subject'])}" + (" (a merge of the authors' branch)" if c.get("merge") else "")
+            + (f" -- not in {', '.join(c['versions'])}" if c.get("versions") else ""))
+
+
+def fix_plan(f, selected, head_cascade):
+    """Per selected issue of a version-branch fork: the version its fix is made at (the lowest one still open at plan
+    time, `fix_at`) and the one cascade that carries it up -- never the head's untaken authors' code unless the plan
+    takes it (head_cascade). -> [{"id", "at", "how", "cascade"}]."""
+    rng = (f.get("cascade") or {}).get("range", "")
+    head, newest = (rng.split("..", 1) + [""])[:2] if ".." in rng else (f["head"], "")
+    base = f.get("base_version") or (head[len("neoforge-"):] if head.startswith("neoforge-") else None)
+    out = []
+    for i in selected:
+        at = (f.get("fix_at") or {}).get(i)
+        tool = "python3 tools/fork-branches.py cascade --repo <checkout>"
+        if not at:
+            how, cmd = "no open version in the plan's ledger: read the ledger's status map", None
+        elif at == base and head_cascade:
+            how, cmd = f"on the head {head}; the head cascade carries it", f"{tool} {head}..{newest}"
+        elif at == base:
+            how = (f"on a branch fix/{i} cut from the lowest version's port_taken, not on the head (the head has authors' "
+                   f"code this plan does not take); merged into {head} too")
+            cmd = f"{tool} {head}..{newest} --port-ref fix/{i}"
+        elif at == newest:
+            how, cmd = f"on neoforge-{at}, the newest version: nothing to cascade", None
+        else:
+            how, cmd = f"on neoforge-{at}, then cascaded from that version branch", f"{tool} {at}..{newest}"
+        out.append({"id": i, "at": at, "how": how, "cascade": cmd})
+    return out
+
+
 def render_plan(inp):
     """PLAN-INPUT (tools/weekly-plan.py) -> {"title", "body", "decision_needed"}."""
     forks = inp["forks"]
@@ -505,15 +549,33 @@ def render_plan(inp):
         lines += [f"## {repo}" + (f" ({f['role']})" if f.get("role") else "") + f" -- head `{f['head']}`", "",
                   "### The authors' new commits", ""]
         n = f.get("new_count", 0)
+        un = f.get("untaken") or []          # a version-branch fork's head: the authors' code no version has taken
         take = pauth.get(repo) if pauth.get(repo) is not None else True
+        if n or un:
+            what = ("the authors' new commits" if not un else "the authors' code the head already has" if not n else
+                    "the authors' new commits and the code the head already has")
+            lines.append(f"- [{'x' if take else ' '}] Take {what} this round <!-- authors:{repo} default -->")
         if n:
-            lines.append(f"- [{'x' if take else ' '}] Take the authors' new commits this round <!-- authors:{repo} default -->")
             lines += ["", f"`{f['upstream']}` `{f['upstream_branch']}` at `{f['upstream_commit'][:12]}`: {n} new commit(s) "
                       f"the head does not have:", ""]
             lines += [f"- `{c['sha'][:12]}` {md(c['subject'])}" for c in f.get("new_commits", [])[:SHOWN_COMMITS]]
             if n > SHOWN_COMMITS:
                 lines.append(f"- ... and {n - SHOWN_COMMITS} more")
-        else:
+        if un:
+            if not n:
+                lines += ["", f"No new commits from the authors upstream (`{f['upstream']}` `{f['upstream_branch']}` at "
+                          f"`{(f.get('upstream_commit') or '?')[:12]}`), but the head `{f['head']}` is ahead of the version "
+                          "branches with the authors' code below: merged into the head earlier, never cascaded."]
+            lines += ["", f"{len(un)} commit(s) of the authors' that the head has and a version branch has not taken (in "
+                      f"that version's `port_taken..{f['head']}`):", ""]
+            lines += [_commit_line(c) for c in un[:SHOWN_COMMITS]]
+            if len(un) > SHOWN_COMMITS:
+                lines.append(f"- ... and {len(un) - SHOWN_COMMITS} more")
+        if (n or un) and f.get("cascade") is not None:
+            lines += ["", "Ticked, the round cascades the head into every version branch, taking the authors' code (the "
+                      "decisions below apply). Unticked, no version takes it this week: the head is not cascaded, and each "
+                      "selected known issue is fixed at its lowest open version and cascaded up from there."]
+        if not n and not un:
             lines.append(f"No new commits from the authors: the head has `{f['upstream']}` `{f['upstream_branch']}` "
                          f"at `{(f.get('upstream_commit') or '?')[:12]}`.")
         lines += ["", "### Known issues", ""]
@@ -522,11 +584,11 @@ def render_plan(inp):
         for r in sel:
             on = ticks.get(r["id"], True)
             lines.append(f"- [{'x' if on else ' '}] **{r['severity']}** `{_q(repo, r['id'], multi, clash)}` "
-                         f"{md(r.get('title', ''))} -- lowest {r['lowest']}; {r['why']} <!-- ki:{repo}:{r['id']} default -->")
+                         f"{md(r.get('title', ''))} -- {_where(r)}; {r['why']} <!-- ki:{repo}:{r['id']} default -->")
         for r in cand:
             on = ticks.get(r["id"], False)
             lines.append(f"- [{'x' if on else ' '}] **{r['severity']}** `{_q(repo, r['id'], multi, clash)}` "
-                         f"{md(r.get('title', ''))} -- lowest {r['lowest']}; not in the default selection "
+                         f"{md(r.get('title', ''))} -- {_where(r)}; not in the default selection "
                          f"<!-- ki:{repo}:{r['id']} candidate -->")
         if not sel and not cand:
             lines.append(f"No open known issues in the ledger (`.port/{LEDGER_NAME}` on `{f['head']}`).")
@@ -543,6 +605,9 @@ def render_plan(inp):
             lines.append(f"The cascade plan (`fork-branches.py cascade {c['range']} --plan`, git and the rename rows "
                          f"only): {len(plan.get('mechanical', []))} file(s) merged mechanically, {len(ds)} decision(s), "
                          f"{len(esc)} escalated to you.")
+            if (n or un) and ds:
+                lines.append("They are the head cascade's, which carries the authors' code: they apply only with the box "
+                             "above ticked; unticked, the round runs no head cascade and none of them applies.")
             for d in esc:
                 lines += ["", f"- **`{d['id']}`** `{d['file']}` at {', '.join(d['versions'])}: {md(d.get('reasoning', ''))} "
                           f"Options: {', '.join('`' + x + '`' for x in CHOICES)}. Recommended: `{d['choice']}` (the "
@@ -560,6 +625,9 @@ def render_plan(inp):
                            "defaults": [r["id"] for r in sel], "candidates": [r["id"] for r in cand],
                            "ids": sorted(set(f.get("ledger_ids", [])) | {r["id"] for r in sel + cand}, key=natural),
                            "cascade": None if c is None else {"range": c["range"], "decisions": decs}})
+        if c is not None:            # a version-branch fork only: a single-version fork's data block stays as it was
+            data_forks[-1].update({"untaken_count": len(un), "base_version": f.get("base_version"),
+                                   "fix_at": {r["id"]: r.get("lowest_open") or r["lowest"] for r in sel + cand}})
     lines += ["## Grade overrides", "",
               "Each issue above shows its grade (S1 crash, kick, data loss, hang, security or build; S2 a core feature "
               "broken in normal play with no workaround; S3 cosmetic, uncommon or with a workaround; S4 invisible or an "
@@ -656,10 +724,12 @@ def read_plan(issue, comments, allowed, now=None):
         t = ticks[r]
         sel = [i for i in f["defaults"] + f["candidates"] if t.get(i, i in f["defaults"])]
         casc = f.get("cascade")
+        has = bool(f.get("new_count")) or bool(f.get("untaken_count"))
+        take = has and authors.get(r, True)
         out_forks.append({
             "repo": r, "head": f["head"], "role": f.get("role", ""), "upstream": f.get("upstream"),
             "upstream_branch": f.get("upstream_branch"), "upstream_commit": f.get("upstream_commit"),
-            "take_authors": bool(f.get("new_count")) and authors.get(r, True),
+            "take_authors": take,
             "selected": sel, "ticks": {i: i in sel for i in f["defaults"] + f["candidates"]},
             "added": [i for i in sel if i not in f["defaults"]],
             "removed": [i for i in f["defaults"] if i not in sel],
@@ -668,6 +738,17 @@ def read_plan(issue, comments, allowed, now=None):
                 "decisions": [{"id": d["id"], "file": d["file"], "versions": d["versions"], "recommended": d["recommended"],
                                "choice": decisions[(r, d["id"])]["choice"], "by": decisions[(r, d["id"])]["by"],
                                "reason": decisions[(r, d["id"])]["reason"]} for d in casc["decisions"]]}})
+        if casc is not None:
+            # the head cascade carries the head's untaken authors' code: it runs only when the plan takes it (or there
+            # is none of it); without it the plan's decisions -- all about that cascade -- do not apply
+            head_cascade = take or not has
+            o = out_forks[-1]
+            o["head_cascade"] = head_cascade
+            if not head_cascade:
+                o["cascade"] = {"range": casc["range"], "decisions": [],
+                                "not_applied": [d["id"] for d in casc["decisions"]],
+                                "why": "the authors' code is not taken this round: no head cascade, so no decision of it applies"}
+            o["fixes"] = fix_plan(f, sel, head_cascade)
     return {"schema": 1, "issue": issue.get("number"), "repo": data["repo"], "week": data["week"],
             "deadline": data["deadline"], "owner": data["owner"], "frozen_at": now, "forks": out_forks,
             "decisions": [dict({"fork": r, "id": i}, **v) for (r, i), v in sorted(decisions.items())],
@@ -920,6 +1001,9 @@ def build_parser():
     p.add_argument("--owner", help="the fork owner (default: the one the plan was addressed to)")
     p.add_argument("--from-json", help="read the issue, comments and permissions from this file (offline)")
     p.add_argument("--out"); p.add_argument("--decisions-dir", help="write each fork's cascade --apply-decisions file here")
+    p.add_argument("--now", action="store_true", help="the owner asked the round to start now: freeze before the plan's "
+                   "deadline on purpose (recorded in frozen.json as early_start); without it an early freeze warns")
+    p.add_argument("--clock", help=argparse.SUPPRESS)        # the self-check's fixed "now" (ISO 8601)
     p = common(sub.add_parser("render-ports", help="the README's Ports block (one row per Minecraft version)"))
     p.add_argument("--head", help="the head branch (default: the checked-out branch)")
     p.add_argument("--slug", help="owner/repo for the links (default: the origin remote)")
@@ -1106,14 +1190,35 @@ def cmd_read_plan(a, out):
     comments = gh_pages(f"/repos/{slug}/issues/{n}/comments", api)
     data = plan_data(issue.get("body") or "")
     owner = resolve_owner(a.owner, None, None) if a.owner else data["owner"]
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    clock = (datetime.datetime.fromisoformat(a.clock) if a.clock else datetime.datetime.now(datetime.timezone.utc))
+    now = clock.isoformat(timespec="seconds")
     frozen = read_plan(issue, comments, owner_check(slug, owner, api), now)
+    try:
+        ahead = (datetime.datetime.fromisoformat(data["deadline"]) - clock).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        ahead = 0
+    if ahead > 0:
+        left = f"{int(ahead // 3600)}h{int(ahead % 3600 // 60):02d}m"
+        frozen["early_start"] = {"requested": bool(a.now), "deadline": data["deadline"], "frozen_at": now, "before_deadline": left}
+        if a.now:
+            print(f"read-plan: an early start the owner asked for (--now): frozen {left} before the deadline {data['deadline']}; "
+                "recorded as early_start in the frozen input", file=sys.stderr)
+        else:
+            print(f"read-plan: WARNING frozen {left} before the plan's deadline {data['deadline']}: the owner's window to "
+                  "tick boxes and reply is cut short (the plan workflow and the round are normally 24 hours apart). If the "
+                  "owner asked to start now, run read-plan again with --now (recorded in frozen.json); otherwise wait for "
+                  "the deadline.", file=sys.stderr)
+    elif a.now:
+        print(f"read-plan: --now: the deadline {data['deadline']} has passed already; nothing early to record", file=sys.stderr)
     text = json.dumps(frozen, indent=1, ensure_ascii=False) + "\n"
     if a.decisions_dir:
         d = pathlib.Path(a.decisions_dir)
         d.mkdir(parents=True, exist_ok=True)
         for f in frozen["forks"]:
-            if f["cascade"]:
+            if f["cascade"] and f.get("head_cascade") is False:
+                out(f"read-plan: {f['repo']}: no head cascade this round (the authors' code is not taken): no decisions "
+                    f"file; {len(f['cascade']['not_applied'])} plan decision(s) do not apply")
+            elif f["cascade"]:
                 p = d / (f["repo"].replace("/", "__") + ".decisions.json")
                 p.write_text(json.dumps(f["cascade"], indent=1) + "\n", encoding="utf-8")
                 out(f"read-plan: {f['repo']}: {len(f['cascade']['decisions'])} decision(s) -> {p}")
@@ -1457,11 +1562,105 @@ def self_check():
                                                    ".port/a/b/KNOWN-ISSUES.json")),
                    "paths-ignore matches the root README and the ledgers only (GitHub's glob: * stops at /)")
     plan_check(expect, cli)
+    plan_untaken_check(expect, cli)
     took = time.monotonic() - t0
     for b in bad:
         print("FAIL:", b)
     print(f"self-check: {'OK' if not bad else 'FAIL'} ({took:.1f} s)")
     return 0 if not bad else 1
+
+
+def plan_untaken_check(expect, cli):
+    """The first weekly-round dry run's findings: the head's untaken authors' code in the plan, the round's cascades
+    when it is not taken, the lowest open version, the early start -- and a single-version fork's plan byte for byte."""
+    import hashlib
+    import shutil
+    h = lambda x: hashlib.sha256(json.dumps(x, sort_keys=True).encode()).hexdigest()[:16]
+    sv = {"repo": "o/solo", "week": "2026-10-20", "deadline": "2026-10-21T08:21-07:00",
+          "deadline_text": "Wednesday 2026-10-21 at 08:21 America/Los_Angeles (PDT)", "owner": {"login": "someone"},
+          "forks": [{"repo": "o/solo", "head": "neoforge-1.21.1", "role": "", "upstream": "https://example.invalid/s",
+                     "upstream_branch": "main", "upstream_commit": "a" * 40, "head_commit": "b" * 40, "new_count": 2,
+                     "new_commits": [{"sha": "1" * 40, "subject": "one"}, {"sha": "2" * 40, "subject": "two"}], "cascade": None,
+                     "selection": [{"id": "KI-1", "severity": "S2", "lowest": "1.21.1", "lowest_open": "1.21.1",
+                                    "why": "S2 within the budget of 3, lowest affected version first", "title": "a"}],
+                     "candidates": [{"id": "KI-2", "severity": "S3", "lowest": "1.21.1", "lowest_open": "1.21.1", "title": "b"}],
+                     "ledger_ids": ["KI-1", "KI-2"]}]}
+    res = render_plan(json.loads(json.dumps(sv)))
+    fr = read_plan({"number": 3, "body": res["body"]}, [], lambda w: True, "2026-10-21T16:00:00+00:00")
+    sv0 = json.loads(json.dumps(sv))
+    sv0["forks"][0].update(new_count=0, new_commits=[])
+    # pinned from the tool before this change: a single-version fork's plan issue and frozen input, byte for byte
+    expect((h(res), h(fr), h(render_plan(sv0))) == ("b227e0c3c432bf78", "af5159d1b42a19c3", "9b9ceb2f13e3497b"),
+           f"a single-version fork's plan and frozen input are unchanged: {(h(res), h(fr), h(render_plan(sv0)))}")
+    dec = {"id": "d1e2f3a4b5c6", "file": "src/main/java/com/example/mod/A.java", "versions": ["1.21.4", "1.21.5"],
+           "escalate": True, "choice": "keep", "reasoning": "over the budget."}
+    dflt = {"id": "a1b2c3d4e5f6", "file": "src/main/java/com/example/mod/B.java", "versions": ["1.21.4"],
+            "escalate": False, "choice": "patch", "reasoning": "the authors' fix."}
+    un = [{"sha": "f" * 40, "subject": "Merge the authors' 2.0", "merge": True, "versions": ["1.21.3", "1.21.4", "1.21.5"]},
+          {"sha": "e" * 40, "subject": "authors: 2.0", "merge": False, "versions": ["1.21.3", "1.21.4", "1.21.5"]}]
+    vb = {"repo": "o/lib", "week": "2026-10-20", "deadline": "2026-10-21T08:21-07:00",
+          "deadline_text": "Wednesday 2026-10-21 at 08:21 America/Los_Angeles (PDT)", "owner": {"login": "someone"},
+          "forks": [{"repo": "o/lib", "head": "neoforge-1.21.1", "role": "library", "upstream": "https://example.invalid/a",
+                     "upstream_branch": "main", "upstream_commit": "c" * 40, "head_commit": "d" * 40, "new_count": 0,
+                     "untaken": un, "base_version": "1.21.1",
+                     "cascade": {"range": "neoforge-1.21.1..1.21.5", "plan": {"mechanical": [], "decisions": [dec, dflt]}},
+                     "selection": [{"id": "KI-3", "severity": "S1", "lowest": "1.21.1", "lowest_open": "1.21.4",
+                                    "why": "S1: always taken", "title": "a crash"},
+                                   {"id": "KI-4", "severity": "S1", "lowest": "1.21.1", "lowest_open": "1.21.1",
+                                    "why": "S1: always taken", "title": "a kick"}],
+                     "candidates": [{"id": "KI-5", "severity": "S3", "lowest": "1.21.1", "lowest_open": "26.3", "title": "c"}],
+                     "ledger_ids": ["KI-3", "KI-4", "KI-5"]}]}
+    b = render_plan(vb)["body"]
+    expect("- [x] Take the authors' code the head already has this round <!-- authors:o/lib default -->" in b
+           and "No new commits from the authors upstream" in b and "is ahead of the version branches" in b
+           and "- `ffffffffffff` Merge the authors' 2.0 (a merge of the authors' branch) -- not in 1.21.3, 1.21.4, 1.21.5" in b
+           and "- `eeeeeeeeeeee` authors: 2.0 -- not in" in b and "Unticked, no version takes it this week" in b
+           and "No new commits from the authors: the head has" not in b,
+           f"the head's untaken authors' code: listed with its own box (default ticked, as for new commits): {b}")
+    expect("`KI-3` a crash -- lowest open 1.21.4 (first affected 1.21.1);" in b and "`KI-4` a kick -- lowest 1.21.1;" in b
+           and "`KI-5` c -- lowest open 26.3 (first affected 1.21.1);" in b,
+           "each issue shows its lowest open version when the first affected one is fixed already")
+    expect("they apply only with the box above ticked" in b, "the cascade decisions are the head cascade's: conditional on the box")
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+
+        def freeze(body, *extra):
+            (d / "fx.json").write_text(json.dumps({"issue": {"number": 9, "body": body}, "comments": []}), encoding="utf-8")
+            for x in ("frozen.json", "dec"):
+                shutil.rmtree(d / x, ignore_errors=True) if x == "dec" else (d / x).unlink(missing_ok=True)
+            rc, o = cli("read-plan", "--issue", "9", "--slug", "o/lib", "--owner", "someone", "--from-json", str(d / "fx.json"),
+                        "--out", str(d / "frozen.json"), "--decisions-dir", str(d / "dec"), *extra)
+            fr = json.loads((d / "frozen.json").read_text(encoding="utf-8")) if rc == 0 else {}
+            return rc, o, fr, (fr.get("forks") or [{}])[0]
+        late = ("--clock", "2026-10-21T16:00:00+00:00")
+        rc, o, fr, f = freeze(b, *late)
+        fx = {x["id"]: x for x in f.get("fixes", [])}
+        expect(rc == 0 and f.get("take_authors") is True and f.get("head_cascade") is True
+               and len(f.get("cascade", {}).get("decisions", [])) == 2 and (d / "dec" / "o__lib.decisions.json").is_file()
+               and fx.get("KI-3", {}).get("cascade", "").endswith(" 1.21.4..1.21.5")
+               and fx.get("KI-4", {}).get("cascade", "").endswith(" neoforge-1.21.1..1.21.5") and "early_start" not in fr,
+               f"ticked: the authors' code is taken, the head cascade runs with its decisions; each fix at its lowest open "
+               f"version: {f} {o}")
+        rc, o, fr, f = freeze(b.replace("- [x] Take the authors' code", "- [ ] Take the authors' code"), *late)
+        fx = {x["id"]: x for x in f.get("fixes", [])}
+        expect(rc == 0 and f.get("take_authors") is False and f.get("head_cascade") is False
+               and f.get("cascade", {}).get("decisions") == [] and f["cascade"].get("not_applied") == ["d1e2f3a4b5c6", "a1b2c3d4e5f6"]
+               and not (d / "dec" / "o__lib.decisions.json").exists() and "no head cascade" in o
+               and fx.get("KI-3", {}).get("at") == "1.21.4" and fx["KI-3"]["cascade"].endswith(" 1.21.4..1.21.5")
+               and fx.get("KI-4", {}).get("cascade", "").endswith(" neoforge-1.21.1..1.21.5 --port-ref fix/KI-4"),
+               f"unticked: no head cascade, no decision applies, no decisions file; the fixes cascade from their lowest open "
+               f"version (the head's version through a fix branch, --port-ref): {f} {o}")
+        early = ("--clock", "2026-10-20T18:00:00+00:00")
+        rc, o, fr, f = freeze(b, *early)
+        es = fr.get("early_start") or {}
+        expect(rc == 0 and "WARNING frozen 21h21m before the plan's deadline" in o and "24 hours apart" in o and "--now" in o
+               and es.get("requested") is False and es.get("before_deadline") == "21h21m",
+               f"read-plan before the deadline warns and records the early freeze: {es} {o}")
+        rc, o, fr, f = freeze(b, *early, "--now")
+        es = fr.get("early_start") or {}
+        expect(rc == 0 and "WARNING" not in o and "early start the owner asked for" in o and es.get("requested") is True
+               and es.get("deadline") == "2026-10-21T08:21-07:00",
+               f"read-plan --now: the owner's early start, recorded in frozen.json: {es} {o}")
 
 
 def plan_check(expect, cli):

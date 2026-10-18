@@ -208,7 +208,11 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    - When the answers are in (the issue's `cascade-decisions` block saved to a file, plus your own):
      `cascade --repo DIR --apply-decisions FILE --gates ab` applies each one at every version that holds it, oldest
      first, clears the entries, logs them in `.port/DECISIONS.md`, merges up and writes the new plan; an answer that
-     raises a new conflict higher up (rare) comes back as at most one follow-up issue.
+     raises a new conflict higher up (rare) comes back as at most one follow-up issue. Run straight after `read-plan`
+     (the weekly round: no `--apply` before it), it runs this step's `--apply` first so each decision has its entry. A
+     `patch` with no diff -- read-plan's default for a decision nobody answered -- is what `--apply` does with it: the
+     file stays merged without the authors' change and its entry open (the version not done); write the diff (in the
+     port branch's names, from the entry or `CASCADE-PLAN.md`) or choose take/keep/content, and run it again.
    A red branch still stops the apply: it names its `.port/<v>/RESIDUE.md`; on that branch run `python3
    tools/fork-port.py --repo DIR --target <v> --from-stage measure` with a budget, commit, and apply on from there.
    Never skip a version. (Plain `cascade` without `--plan`/`--apply` still stops at the first conflict, for a fix
@@ -290,8 +294,13 @@ and version-branch forks alike:
   authors' commits merged into the head on the runner's throwaway checkout), `known-issues.py select`, `known-issues.py
   render-plan`, and opens **one plan issue** on the library's repository with a section per fork, assigned to the fork
   owner with an @mention. Its first line is the deadline: the round's start, Wednesday morning Pacific; with no answer
-  the defaults apply. It lists the authors' new commits (a box to take them), the known issues as checkboxes pre-ticked
-  for the defaults (every open S1, then S2s up to the budget), the escalated cascade decisions with their options
+  the defaults apply. It lists the authors' new commits (a box to take them, ticked by default) -- for a version-branch
+  fork also the authors' code the head already has that a version branch has not taken (`fork-branches.py untaken`:
+  commits of some version's `port_taken..head` reachable from their branch, or merges of it; a head that merged their
+  release earlier, with no cascade since, shows it with nothing new upstream), under the same box -- the known issues as
+  checkboxes pre-ticked for the defaults (every open S1, then S2s up to the budget), each with its lowest open version
+  (the status map; `lowest` is only the first affected one), the escalated cascade decisions (the head cascade's: they
+  apply only with the authors' box ticked) with their options
   (`/decide <id> <choice>`) and grade overrides (`/grade <ID> <S1-S4> [reason]`); its title starts `[decision needed]`
   when the plan escalates something. It costs no model quota, so it opens whether or not the owner has any left.
 - **Wednesday morning America/Los_Angeles: the round** ("The weekly round" below), a Claude scheduled task with a fresh
@@ -336,24 +345,54 @@ included), PR, pre-release and merge asks.
    report. Per fork, `frozen.json` says whether to take the authors' commits (`take_authors`, and the exact
    `upstream_commit` the plan saw), which known issues are `selected`, the decisions with their choices, and the grade
    overrides. **These are the run's only inputs.** Nothing new enters the run except an S1 found during it; the
-   authors' commits pushed after the plan wait for next week (merge `upstream_commit`, not the branch tip). Apply each
+   authors' commits pushed after the plan wait for next week (merge `upstream_commit`, not the branch tip). **Freeze at
+   the deadline, not before:** read-plan run before the plan's deadline warns -- the plan workflow and the round are
+   normally 24 hours apart, and an early freeze cuts the owner's window to tick and reply. Only when the owner asked to
+   start now (on the plan issue, or in this session) add `--now`: `frozen.json` records it as `early_start`, and the first
+   comment says so. Apply each
    grade override first: `known-issues.py grade --repo <fork> <ID> --override <S> --reason "<reason> (plan #N)" --by
    <who>` on the head branch, committed alone. Post a first comment on the plan issue: the frozen selection, @owner.
 2. **Order: the library first, then each dependent.** A dependent starts only once the library's versions it pins are
    green and released (Run step 7, "Don't exceed your dependency").
-3. **Per fork:** when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (merge, reconcile, port, gate, PR
-   into the head). For a version-branch fork, then "A fork with version branches", with
-   `cascade --apply-decisions round/decisions/<owner>__<repo>.decisions.json` for the plan's decisions (every default and
-   escalated one, with the owner's answers). Each **selected known issue** is fixed at its **lowest affected version**
-   and moved up with `fork-branches.py cascade <lowest>..<newest>`, never fixed version by version. Work the versions in
-   ladder order, oldest affected first.
+3. **Per fork**, from its entry in `frozen.json`; say which case it is. **The authors' code is taken only when the plan
+   says so (`take_authors`), and a done version is reopened only for an S1.**
+   - **A single-version fork:** when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (merge, reconcile,
+     port, gate, PR into the head). Each selected known issue is fixed on the port branch. Nothing else changes for it.
+   - **A version-branch fork with `head_cascade: true`** (the authors' box ticked, or the head has none of their code
+     untaken): when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (when only the head's untaken code is
+     to take and nothing is new upstream, the merge is empty: go on). Then "A fork with version branches" from the head:
+     write the default decisions' `patch` diffs into `round/decisions/<owner>__<repo>.decisions.json` (its step 2), then
+     `cascade --repo DIR --apply-decisions round/decisions/<owner>__<repo>.decisions.json --gates ab` -- the head cascade
+     `<head>..<newest>`; with no earlier `--apply` it runs that `--apply` first, then the answers. A `patch` left without
+     a diff stays open (what `--apply` does with it) until you write it and run `--apply-decisions` again.
+   - **A version-branch fork with `head_cascade: false`** (the owner unticked the box while the head has authors' code
+     no version took): **no cascade from the head, and no `--apply-decisions`** -- read-plan wrote no decisions file,
+     since every decision of the plan is about the head cascade (`cascade.not_applied`). Only the selected fixes move.
+   - **Each selected known issue** (a version-branch fork, either case) goes where `frozen.json`'s `fixes` says: it is
+     made at `at`, the **lowest version whose ledger status is `open`** (not the `lowest` field: an issue first seen at
+     1.21.1 may be open only at 26.3), and carried up by the one cascade named there, never fixed version by version:
+     at a version branch, the fix on `neoforge-<at>` and `python3 tools/fork-branches.py cascade --repo DIR
+     <at>..<newest>` (from a version branch, a cascade carries only what that branch took -- each merge's port commit is
+     its merge-base with the head -- never the head's untaken code); at the head's own version with `head_cascade: true`,
+     the fix on the head and the head cascade carries it; at the head's version with `head_cascade: false`, cut `fix/<ID>`
+     from the lowest version's `port_taken` (`.port/<v>/branch.properties`), fix there, `cascade --repo DIR
+     <head>..<newest> --port-ref fix/<ID>` (refused while `fix/<ID>` holds authors' code that version has not taken;
+     `--upstream REMOTE/BRANCH` names their branch when the freeze's `upstream=` does not resolve), and merge `fix/<ID>`
+     into the head too, by its own PR. Work the versions in ladder order, oldest affected first.
+     `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
+     has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
 4. **Per version, in ladder order**, once its code is in:
    - gates A/B/C in full (`fork-port.py --repo DIR --target <v> --gates full`, or `ci-gates.py --env full` and `minimal`
      on a single-version fork), the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`);
    - **one full review against the fixed rubric**: a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
      "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
      **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
-     the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5);
+     the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5).
+     **The round must run where it can start subagents** -- one fresh reviewer per version, never the fixer reviewing
+     its own work; a scheduled task's cloud session can. If this session cannot start one, stop at the review step for
+     that version: comment on the plan issue (@owner) that the version is gated and waits for its review, go on only with
+     what does not depend on it, and name it in the closing comment. Never skip the review, and never fill `REVIEW.md`
+     yourself;
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
      `pre-release` in `allow`; without it, ask on the plan issue;
    - a library's version: `fork-branches.py library-record --repo LIB --target <v> --dependent DEP` once the dependent's
@@ -364,8 +403,10 @@ included), PR, pre-release and merge asks.
    Post a progress comment on the plan issue as each version finishes (gates, review, the pre-release tag).
 5. **New findings.** Grade each with `known-issues.py add` (the rubric's inputs, `--lowest` its lowest affected
    version). At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
-   reopens it (fixed at its lowest version, only that fix cascaded); anything else stays in the ledger with its lowest
-   version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap and local, S4 ledgered.
+   reopens it (fixed at its lowest open version, only that fix cascaded, by step 3's rule: from a version branch, or
+   `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
+   ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
+   and local, S4 ledgered.
 6. **Close.** On the plan issue, one closing comment with the outcome -- per fork: the merged PRs, the pre-releases cut,
    the ledger changes and the new findings with their grades -- and the **cost and time table**:
    `python3 tools/port-cost.py round-table --since <round start> --fork <owner/repo>=<checkout> ...` (per fork, per
