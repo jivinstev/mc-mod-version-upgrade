@@ -63,28 +63,28 @@ JDK_ROOTS = ("/usr/lib/jvm", "/opt", "/opt/java", "/usr/local", "~/.gradle/jdks"
 
 
 def java_candidates(major, explicit=None, env=None, roots=JDK_ROOTS):
-    """The JDK homes to try for `major`, in order: --java-home; JAVA_HOME_<major> (and the _X64/_ARM64 forms that
+    """The JDK homes to try for `major`, in order: --java-home; JAVA_HOME (the one the person set, used when its java
+    -version is that major -- find_java checks every candidate); JAVA_HOME_<major> (and the _X64/_ARM64 forms that
     setup-java and the hosted runners set); each directory of the usual install roots whose name carries the version
-    as a whole number (/usr/lib/jvm, /opt, the Gradle toolchain downloads in ~/.gradle/jdks, ~/.jdks, SDKMAN, macOS);
-    then JAVA_HOME. Each is checked by running its java -version."""
+    as a whole number (/usr/lib/jvm, /opt, the Gradle toolchain downloads in ~/.gradle/jdks, ~/.jdks, SDKMAN, macOS)."""
     env = os.environ if env is None else env
     cands = [explicit] if explicit else []
+    if env.get("JAVA_HOME"):
+        cands.append(env["JAVA_HOME"])
     cands += [env[k] for k in (f"JAVA_HOME_{major}", f"JAVA_HOME_{major}_X64", f"JAVA_HOME_{major}_ARM64") if env.get(k)]
     for root in roots:
         r = pathlib.Path(os.path.expanduser(root))
         for d in sorted(r.glob("*")) if r.is_dir() else []:
             if d.is_dir() and re.search(rf"(?:^|[^0-9.]){major}(?:[.+_-]|$)", d.name):
                 cands.append(str(d / "Contents/Home") if (d / "Contents/Home/bin").is_dir() else str(d))
-    if env.get("JAVA_HOME"):
-        cands.append(env["JAVA_HOME"])
     return list(dict.fromkeys(cands))
 
 
 def find_java(major, explicit=None):
     cands = java_candidates(major, explicit)
     for c in cands:
-        j = pathlib.Path(c) / "bin" / "java"
-        if j.is_file():
+        j = next((x for x in (pathlib.Path(c) / "bin" / "java", pathlib.Path(c) / "bin" / "java.exe") if x.is_file()), None)
+        if j is not None:
             out = subprocess.run([str(j), "-version"], capture_output=True, text=True, encoding="utf-8").stderr
             m = re.search(r'version "(\d+)', out)
             if m and int(m.group(1)) == major:
@@ -391,9 +391,19 @@ def self_check():
             (r / n).mkdir(parents=True)
         got = java_candidates(25, None, {"JAVA_HOME_25_X64": "/hosted/25", "JAVA_HOME": "/default"},
                               (str(r / "jvm"), str(r / "opt"), str(r / "gradle/jdks")))
-        ok &= got == ["/hosted/25", str(r / "jvm/java-25-openjdk-amd64"), str(r / "opt/jdk-25.0.1+9"),
-                      str(r / "gradle/jdks/eclipse_adoptium-25-amd64-linux.2"), "/default"]
+        ok &= got == ["/default", "/hosted/25", str(r / "jvm/java-25-openjdk-amd64"), str(r / "opt/jdk-25.0.1+9"),
+                      str(r / "gradle/jdks/eclipse_adoptium-25-amd64-linux.2")]
         ok &= java_candidates(21, "/explicit", {}, (str(r / "opt"),)) == ["/explicit", str(r / "opt/jdk-21.0.4")]
+        # a JDK home with only bin/java.exe (Windows) is found; the major is still checked by running it
+        exe = r / "winjdk/bin"; exe.mkdir(parents=True); (exe / "java.exe").write_bytes(b"")
+        seen_ = []
+        real_run = subprocess.run
+        try:
+            subprocess.run = lambda cmd, **k: (seen_.append(cmd[0]), subprocess.CompletedProcess(cmd, 0, "", 'version "25.0.1"'))[1]
+            got_exe = find_java(25, str(r / "winjdk"))
+        finally:
+            subprocess.run = real_run
+        ok &= got_exe == str(exe / "java.exe") and seen_ == [str(exe / "java.exe")]
     with tempfile.TemporaryDirectory() as d:      # the JDK pick, with no --mc: the checkout's own Minecraft version
         r = pathlib.Path(d)
         (r / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.1\n", encoding="utf-8")
