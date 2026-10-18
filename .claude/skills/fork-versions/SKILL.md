@@ -203,7 +203,7 @@ regenerate them with `ci` when a lower branch's change to them should reach this
 the stages -- setup (the behaviour inventory from the port branch when missing, `layer-deps.py resolve`, the data
 conversions a version needs written into its own resources), stage (Minecraft staged, the access transformer fixed in
 place), moves (the class moves from the parent version, staged in a worktree, kept in `moves.generated.tsv` AND applied
-to the source), measure, loop (the compile loop edits the branch's source; a row it keeps joins `renames.tsv`), audit,
+to the source: a file the rows alone made is re-made whole, a hand-changed file in its code only, its comments as written), measure, loop (the compile loop edits the branch's source; a row it keeps joins `renames.tsv`), audit,
 gates (`ci-gates.py --mc <v>`), cost. It stops only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11
 (Gate A/B), 12 (Gate C), 13 (mixin audit), 14 (the checkout is in use), 18 (an undone parent or library) or 19 (the
 authors' branch moved since the freeze), and `.port/<v>/RESIDUE.md` with the remaining errors by CATALOG entry and the
@@ -232,7 +232,9 @@ the port branch's. Record each in `.port/<v>/BEHAVIOUR.json`; a version reads it
 
 **Why Gate C is on the list.** Gates A/B and the audits cannot see what only a client builds (models, render layers,
 shaders); every dependent version so far that was green at A/B still failed in a real client. `--gates auto` runs the full
-gates until the version's GATES.md records a green Gate C, then A/B; a full run that is not green removes GATES.md.
+gates until the version's GATES.md records a green Gate C, then A/B; a full run that is not green is written to
+`GATES-RED.md` and never touches GATES.md (the last green record stays): while GATES-RED.md is there the version is not
+done and `auto` runs full again; a green full run deletes it.
 
 **Commit a fix before the gate run that certifies it**: GATES.md names the commit it tested, and an edited checkout is
 recorded as `<sha> + uncommitted: <files>` (the run's own records aside).

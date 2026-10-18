@@ -420,6 +420,65 @@ def apply_rules_to_files(paths, rules):
     return n
 
 
+def java_segments(text):
+    """`text` (Java source) cut into [(is_comment, piece)] that join back to it exactly: `//` comments (to the end of
+    the line, the line break not included), `/* ... */` and `/** ... */` comments; everything else -- code, string
+    and char literals, text blocks -- is code (a `//` inside a string is no comment)."""
+    out, i, n, start = [], 0, len(text), 0
+    while i < n:
+        c = text[i]
+        if text.startswith('"""', i):
+            j = text.find('"""', i + 3)
+            while j != -1 and text[j - 1] == "\\":
+                j = text.find('"""', j + 1)
+            i = n if j == -1 else j + 3
+        elif c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            i = j + 1
+        elif text.startswith("//", i) or text.startswith("/*", i):
+            if i > start:
+                out.append((False, text[start:i]))
+            if text[i + 1] == "/":
+                j = i
+                while j < n and text[j] not in "\r\n":
+                    j += 1
+            else:
+                j = text.find("*/", i + 2)
+                j = n if j == -1 else j + 2
+            out.append((True, text[i:j]))
+            i = start = j
+        else:
+            i += 1
+    if start < n:
+        out.append((False, text[start:]))
+    return out
+
+
+def apply_rules_code(text, rules):
+    """apply_rules() on the code of a Java file only: every comment kept byte for byte (a javadoc naming a class by
+    its old package stays as written). String literals are code here, as for apply_rules()."""
+    return "".join(piece if comment else apply_rules(piece, rules) for comment, piece in java_segments(text))
+
+
+def apply_moves_to_files(paths, rules, mechanical=()):
+    """The moves stage's rows over the branch's source: a file the rows alone made (`mechanical`, by path) is re-made
+    whole, comments included -- it must stay exactly what the rows make of the port branch's file, which is what the
+    cascade compares -- and every other file (changed by hand: a review row already) in its code only, its comments
+    untouched. Bytes kept as apply_rules_to_files() keeps them. -> the number of files changed."""
+    mech = {str(pathlib.Path(m)) for m in mechanical}
+    n = 0
+    for f in paths:
+        old = pathlib.Path(f).read_bytes()
+        text = old.decode("utf-8", "surrogateescape")
+        new = (apply_rules(text, rules) if str(pathlib.Path(f)) in mech else apply_rules_code(text, rules)) \
+            .encode("utf-8", "surrogateescape")
+        if new != old:
+            pathlib.Path(f).write_bytes(new); n += 1
+    return n
+
+
 def chain_table(read, t, chain_):
     """The table a layer's prepare builds for t (fork rows nearest first: renames.tsv, then moves.generated.tsv, of
     each chain version; then the shared tables), from the .port/<v>/ files `read(path)` returns ("" when absent)."""
@@ -954,6 +1013,9 @@ def review_problems(repo, root, t, ref, work, files, items):
 def gates_problems(repo, root, t, ref, work, files):
     """[] when .port/<t>/GATES.md records a green Gate C for Minecraft t at a commit this branch carries with nothing
     jar-relevant changed since (or a layer commit MIGRATED.json maps to this tree)."""
+    if (rec_dir(root, t) / "GATES-RED.md").is_file():
+        return ["the last full gate run was red (GATES-RED.md); GATES.md's older green record does not count until a full "
+                "run is green again"]
     text = read_file(rec_dir(root, t) / "GATES.md")
     if not text:
         return ["no green Gate C recorded in GATES.md"]
@@ -4491,6 +4553,23 @@ def self_check():
         pass
     unpinned = remap_ci_args(port_args, {}, "examplemod")
     expect(unpinned[:6] == port_args[:6], f"ci: with no version pin the --dep-jar and its variant stay as they are: {unpinned}")
+    # the moves stage (weekly-round dry run, 2026-10-18: it rewrote javadoc package names in a hand-changed file at 26.3):
+    # a hand-changed file's comments are left alone, its code (strings included) rewritten; a file the rows alone made is
+    # re-made whole, so it stays what the rows make of the port branch's file
+    src = ('package p;\n/** See {@link a.b.Old} -- a.b.Old moved. */\nclass X { a.b.Old o; // a.b.Old here\n'
+           '  String s = "a.b.Old // not a comment"; char c = \'"\'; String t = """\n  a.b.Old\n  """; /* a.b.Old */ a.b.Old p; }\n')
+    mv = rules_of("a.b.Old\tc.d.Old\n")
+    want = ('package p;\n/** See {@link a.b.Old} -- a.b.Old moved. */\nclass X { c.d.Old o; // a.b.Old here\n'
+            '  String s = "c.d.Old // not a comment"; char c = \'"\'; String t = """\n  c.d.Old\n  """; /* a.b.Old */ c.d.Old p; }\n')
+    expect("".join(x for _c, x in java_segments(src)) == src and apply_rules_code(src, mv) == want
+           and apply_rules_code(src.replace("\n", "\r\n"), mv) == want.replace("\n", "\r\n"),
+           f"apply_rules_code: comments kept, code and literals rewritten, CRLF kept: {apply_rules_code(src, mv)!r}")
+    with tempfile.TemporaryDirectory() as e:
+        hand, mech = pathlib.Path(e) / "Hand.java", pathlib.Path(e) / "Mech.java"
+        hand.write_text(src, encoding="utf-8"); mech.write_text(src, encoding="utf-8")
+        n = apply_moves_to_files([hand, mech], mv, [mech])
+        expect(n == 2 and hand.read_text(encoding="utf-8") == want and mech.read_text(encoding="utf-8") == apply_rules(src, mv),
+               "apply_moves_to_files: a hand-changed file's comments kept, a mechanical file re-made whole")
     # cascade --untaken-ok: the round's frozen input reaches each version's fork-port.py gates; without it the command
     # is exactly what it was
     calls, real_run = [], subprocess.run

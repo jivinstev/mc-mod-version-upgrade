@@ -101,7 +101,8 @@ Exit codes: 0 done; 10 stopped before/in the compile (stage, moves, measure, loo
 build) red; 12 Gate C red; 13 mixin / event-listener audit; 14 the checkout is in use by another run; 15 a required dependency has no build for
 the target (DEPS.md / the STOPPED block name it); 17 every stage passed but the target has no green Gate C recorded
 (GATES.md), or the gates were not run (--gates none): A/B green is not done -- a version is done only after its
-real-client run. A full gate run that is not green removes GATES.md. Every run to the end (from any --from-stage)
+real-client run. A full gate run that is not green is written to GATES-RED.md, never over GATES.md (the last green
+record stays); while it is there the target is not done and `--gates auto` runs full; a green full run deletes it. Every run to the end (from any --from-stage)
 stops with exit 10 while STUBS.json holds an unreviewed stub signal; 18 Gate C green but not done (REVIEW.md /
 TEST-ITEMS.md / the behaviour inventory / an undone parent or library, listed), a new target over an undone parent, or
 a sibling library's target that is not done (layer-deps.py resolve's exit 18); 19 the authors' branch or a recorded
@@ -298,9 +299,15 @@ def drop_harvested_rows(mv, target):
     return gone
 
 
+RED_GATES = "GATES-RED.md"       # a full gate run that was not green, kept apart from the last green GATES.md
+
+
 def gates_auto(tdir):
     """`--gates auto`: "full" until targets/<t>/GATES.md records a green Gate C (a PASS row naming Gate C, no FAIL row),
-    then "ab". Every Minecraft version a fork supports gets one real-client run on its initial port."""
+    then "ab". Every Minecraft version a fork supports gets one real-client run on its initial port. A red full run on
+    record (GATES-RED.md) means "full" again, whatever GATES.md says."""
+    if (tdir / RED_GATES).is_file():
+        return "full"
     g = tdir / "GATES.md"
     text = g.read_text(encoding="utf-8", errors="replace") if g.is_file() else ""
     rows = [l for l in text.splitlines() if l.startswith("|")]
@@ -789,7 +796,7 @@ def unreviewed_stubs(tdir):
 # after the audit. Every file here is Markdown: written after the gates, it must not make port-publish.py read the
 # target's GATES.md as stale (a *.md is not in a player's jar).
 
-REVIEW_OUTPUTS = ("GATES.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md",   # not what a review judged
+REVIEW_OUTPUTS = ("GATES.md", "GATES-RED.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md",   # not what a review judged
                   "BEHAVIOUR.json",            # the reviewer's own record beside REVIEW.md (a moved/dropped item and
                                                # why): writing it must not make the review it belongs to stale; it is
                                                # still read as a reviewed input by layer-inventory.py's account
@@ -1265,7 +1272,10 @@ def target_done(repo, t, _seen=None, write=True, prepare=False):
     if not tdir.is_dir():
         return [f"{t} is not a target of this layer"]
     out = []
-    if gates_auto(tdir) != "ab":
+    if (tdir / RED_GATES).is_file():
+        out.append(f"the last full gate run was red ({RED_GATES}); GATES.md's older green record does not count until a "
+                   "full run is green again")
+    elif gates_auto(tdir) != "ab":
         out.append("no green Gate C recorded in GATES.md")
     else:
         cur, why = gates_current(repo, t)
@@ -2584,18 +2594,21 @@ class Run:
         if self.shipped_expected():    # the fork lists what its shipped jar must log
             cmd += ["--shipped"]
         r = self.sh(cmd, self.work / "ci-gates.log")
-        if self.a.gates == "full":
-            # a full run that is not green leaves no Gate C record behind: an older GATES.md would make the next
-            # `--gates auto` drop to A/B and report the target done on a client that just failed
-            (self.tdir / "GATES.md").unlink(missing_ok=True)
         lines = (self.work / "ci-gates.log").read_text(encoding="utf-8", errors="replace").splitlines()
         rows = [re.sub(r"^\[ci-gates\] ", "", l) for l in lines if l.startswith("[ci-gates]") and ": " in l]
         failed = [l for l in rows if re.search(r": FAIL\b", l)]
         passed = [l for l in rows if re.search(r": PASS\b", l)]
+        if r.returncode != 0 and self.a.gates == "full":
+            # a full run that is not green is recorded on its own (GATES-RED.md), never over the last green record:
+            # GATES.md stays as it was, and while GATES-RED.md is there `--gates auto` runs full and the target is not
+            # done (an older green record must not report done on a client that just failed)
+            self.record_red(summ, failed)
         if r.returncode == 0:
             lost, prev = self.lost_logs()
             if lost:
                 msg = "; ".join(f"the mod wrote {f} on {prev} and not on {self.t}: a subsystem stopped running" for f in lost)
+                if self.a.gates == "full":
+                    self.record_red(summ, [f"log file {f} written on {prev}, absent on {self.t}" for f in lost])
                 return {"stop": f"gates green but {msg}", "code": 11, "gates": [f"log file {f} (written on {prev}, absent on {self.t})" for f in lost],
                         "detail": [msg[:240]],
                         "choices": ["find what writes that file (grep the source for its name), and why it no longer runs on this target "
@@ -2605,6 +2618,7 @@ class Run:
             if self.a.gates == "full" and summ.is_file():
                 # the record port-publish.py's layer path reads (and `--gates auto` reads): this target had its real-client run
                 (self.tdir / "GATES.md").write_text(summ.read_text(encoding="utf-8"), encoding="utf-8")
+                (self.tdir / RED_GATES).unlink(missing_ok=True)
                 note += "; recorded in GATES.md"
             # green gates are not done while a stub signal is unreviewed: only the loop stage asked, so a run resumed
             # past it (--from-stage audit/gates) reported a target done with one open (measured on a 26.x target)
@@ -2633,6 +2647,18 @@ class Run:
                 "gates": [l[:200] for l in failed], "detail": [l[:200] for l in failed[:4]] + [e[:240] for e in evidence],
                 "choices": ["run the same gates without --mc as the control: a red that is red on the base is not this target's",
                             "read build/mc%s/fork-port/ci-gates.log and the gate's own log" % self.t]}
+
+    def record_red(self, summ, failed):
+        """Write the red full gate run to GATES-RED.md: the commit tested, when, and its summary (or the failed rows)."""
+        head = _git(self.repo, "rev-parse", "--short", "HEAD")[1].strip() or "?"
+        when = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+        body = summ.read_text(encoding="utf-8", errors="replace") if summ.is_file() else \
+            "".join(f"- {l}\n" for l in failed) or "- (no gate rows: read the run's ci-gates.log)\n"
+        self.tdir.mkdir(parents=True, exist_ok=True)
+        (self.tdir / RED_GATES).write_text(
+            f"Red full gate run at `{head}` for Minecraft {self.t} ({when}). GATES.md, the last green record, is kept as it "
+            "was; while this file is here the target is not done and `--gates auto` runs the full gates. A green full run "
+            "deletes it.\n\n" + body, encoding="utf-8")
 
     def lost_logs(self):
         """(files, previous target) -- the mod's own log files from the inherited target's last gate run that this run lacks."""
@@ -2865,6 +2891,13 @@ class BranchRun(Run):
             return {"stop": "build-class-move-map.py failed: " + (r.stdout or "").strip()[-200:], "code": 10,
                     "choices": ["see build-class-move-map.py's usage; check both jars hold net.minecraft classes"]}
         read = fb.reader_of_root(self.repo)
+        # the files the rows alone make now (before this version's new moves): re-made whole below, so they stay
+        # mechanical for the cascade; every other file gets the moves in its code only, its comments untouched
+        try:
+            mech = {str(self.repo / p) for p in fb.mechanical_files(self.repo, self.repo, self.t, "HEAD",
+                                                                    fb.root_files(self.repo, self.repo, True))}
+        except Exception:      # noqa: BLE001 -- no port commit to compare with: every file is treated as changed by hand
+            mech = set()
         existing = set()
         for v in fb.chain(self.repo, self.t):
             for name in ("renames.tsv", "moves.generated.tsv"):
@@ -2875,7 +2908,7 @@ class BranchRun(Run):
         text, kept, dup = moves_table(read_pairs(raw), existing - plain_froms(had), pv, self.t)
         gen.write_text(text, encoding="utf-8")
         # rows as a tool: the moves are applied to the branch's source (a version branch holds its own source)
-        changed = fb.apply_rules_to_files(sorted(self.repo.glob("src/*/java/**/*.java")), fb.rules_of(text))
+        changed = fb.apply_moves_to_files(sorted(self.repo.glob("src/*/java/**/*.java")), fb.rules_of(text), mech)
         self.sh([self.py, str(ROOT / "tools/fix-access-transformer.py"), "--work", str(self.repo), "--class-map", str(raw)])
         return {"done": f"{kept} unambiguous move(s) {pv}->{self.t} -> .port/{self.t}/moves.generated.tsv"
                         f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s)", "moves": kept}
@@ -4047,11 +4080,15 @@ def self_check():
             rc_part = drive(run, a_, [], ["audit"])
         a_.to_stage, a_.gates = None, "ab"
         expect(rc_none == 17 and rc_part == 0, f"--gates none: exit {rc_none} (want 17); --to-stage audit: {rc_part} (want 0)")
-    # ---- a full gate run that is not green removes the Gate C record, so `--gates auto` runs full again
+    # ---- a full gate run that is not green is recorded apart (GATES-RED.md) and never removes or rewrites the last green
+    # GATES.md (weekly-round dry run, 2026-10-18); while it is there `--gates auto` runs full again and the target is not
+    # done; a green full run deletes it
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
-        for gates, code, want_record in (("full", 1, False), ("ab", 1, True), ("full", 0, True)):
-            (td / "GATES.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
+        green_md = "Gates at `abc1234` for Minecraft 1.21.4\n\n| Gate C -- real client, `launch` | PASS | ok |\n"
+        for gates, code, want_red in (("full", 1, True), ("ab", 1, True), ("full", 0, False)):
+            if code:
+                (td / "GATES.md").write_text(green_md, encoding="utf-8")
             a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates=gates, modid="m", base="x",
                                     direct=False, from_stage="gates", to_stage=None, max_errors=None, confirm_spend=False,
                                     port_checkout=[])
@@ -4065,8 +4102,16 @@ def self_check():
                 return CompletedProcess(cmd, code, "", "")
             run.sh = gsh
             run.s_gates()
-            expect((td / "GATES.md").is_file() == want_record and gates_auto(td) == ("ab" if want_record else "full"),
-                   f"--gates {gates} exit {code}: GATES.md {'kept/written' if want_record else 'removed'}")
+            red = td / RED_GATES
+            expect((td / "GATES.md").is_file() and red.is_file() == want_red
+                   and (code == 0 or (td / "GATES.md").read_text(encoding="utf-8") == green_md)
+                   and gates_auto(td) == ("full" if want_red else "ab")
+                   and (not want_red or "Red full gate run" in red.read_text(encoding="utf-8")),
+                   f"--gates {gates} exit {code}: GATES.md kept{' byte for byte' if code else ''}, "
+                   f"GATES-RED.md {'written' if want_red else 'gone'}")
+            if want_red:
+                expect(any("GATES-RED.md" in x for x in target_done(repo, "1.21.4", write=False)),
+                       "a red full run on record: the target is not done, whatever GATES.md says")
     # ---- issue #113: a Gate C client the OOM killer killed is environmental -- RESIDUE.md says re-run, no fixer
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
