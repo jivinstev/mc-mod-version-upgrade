@@ -549,7 +549,8 @@ def session_transcripts(projects=None, session_dir=None, cwd=None):
     files = collections.defaultdict(list)
     roots = [pathlib.Path(session_dir).expanduser()] if session_dir else [pathlib.Path(projects).expanduser() if projects
                                                                            else projects_dir()]
-    want = os.path.abspath(cwd).rstrip("/\\") if cwd else None
+    norm = lambda x: x.replace("\\", "/").rstrip("/")
+    want = norm(cwd if os.path.isabs(cwd) else os.path.abspath(cwd)) if cwd else None
     for root in roots:
         for f in sorted(root.rglob("*.jsonl")) if root.is_dir() else []:
             sid = f.parent.parent.name if f.parent.name == "subagents" else f.stem
@@ -564,7 +565,7 @@ def session_transcripts(projects=None, session_dir=None, cwd=None):
                 except ValueError:
                     continue
                 c = d.get("cwd")
-                if want and isinstance(c, str) and (c.rstrip("/\\") == want or c.startswith(want + os.sep) or c.startswith(want + "/")):
+                if want and isinstance(c, str) and (norm(c) == want or norm(c).startswith(want + "/")):
                     hit = True
                 m = d.get("message") or {}
                 if d.get("type") != "assistant" or m.get("model") == "<synthetic>" or not d.get("timestamp"):
