@@ -517,7 +517,7 @@ def round_task(cfg, mrepo, existing=()):
               "attached) and read mmvu/.claude/skills/keep-current/SKILL.md, section \"The weekly round\". Follow it "
               "exactly, in order. This is the migrator's current main, on purpose: the round runs the newest tools and "
               f"skill, fixes included. Tuesday's plan workflow ran the tools pinned at `migrator_sha` in {CONFIG}, so "
-              "that a plan is reproducible from its commit; the two meet only at the plan issue, which step 2 reads. If "
+              "that a plan is reproducible from its commit; the two meet only at the plan issue, which step 3 reads. If "
               "read-plan cannot read it, stop and report (setup must be re-run to move the pin).",
               "2. First of all, before freezing anything: python3 mmvu/tools/round-preflight.py "
               + " ".join(f"--fork {f['repo']}=<its clone>" for f in forks) + ". A fork with no clone in this session: "
@@ -885,7 +885,8 @@ def self_check():
     # set (read from tools/model-prices.tsv: a task created without one ran on the account's default)
     pr_ = task["prompt"]
     expect("round-preflight.py --fork o/lib=<its clone>" in pr_ and pr_.index("round-preflight.py") < pr_.index("read-plan --latest")
-           and "add_repo is refused" in pr_ and "leaves the plan issue open" in pr_ and "GITHUB_TOKEN when it is set" in pr_,
+           and "add_repo is refused" in pr_ and "leaves the plan issue open" in pr_ and "GITHUB_TOKEN when it is set" in pr_
+           and "which step 3 reads" in pr_ and pr_.index("3. Freeze the input") > pr_.index("which step 3 reads") - 2000,
            f"the round prompt checks the clones first, says how GitHub is read and that a stop leaves the plan open: {pr_}")
     with tempfile.TemporaryDirectory() as d_:
         tsv = pathlib.Path(d_) / "p.tsv"

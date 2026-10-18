@@ -141,7 +141,13 @@ run is green, and it is then gated against the dependency's NEW build.
    gate tables, the ledger changes. Merge the port branch into the work branch first if it moved (a CI-only
    commit, say), so the PR is current. Run `fix-ledger.py check --release keep-current/<date>` first: an S1 mode
    open on a branch that ships blocks the PR, and the run stops and reports.
-   **Auto-merge** (the fork's `"automerge": true` in `.github/weekly-plan.json`): wait for the PR's own CI -- every gate, full and minimal --
+   **In the weekly round the merge and the release run wait for the round's step 4** for that version: its gates, its
+   fresh review and the grading of the review's `not-ok` rows (an S1/S2 there blocks both). Green CI alone is never
+   enough there. For a version-branch fork this holds for the head's PR too, which still merges before the cascade
+   starts -- the cascade starts from the merged port branch ("A fork with version branches" step 1) -- so the head is
+   gated, reviewed, merged, then cascaded, and each version above in turn.
+   **Auto-merge** (the fork's `"automerge": true` in `.github/weekly-plan.json`; in the weekly round only once step 4
+   allows it, above): wait for the PR's own CI -- every gate, full and minimal --
    and merge with a merge commit (never squash or rebase: the authors' commits must stay commits). A red or
    missing check is not merged: fix it on the work branch, or stop and report. **Then wait for the CI run the merge
    itself triggers on the target branch** (a push run on the port branch, or the layer branch for a layer PR) and
@@ -227,11 +233,13 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    fetch origin` (the done check and the review rows read origin's branch when the local one is behind) and continue the
    cascade from there (`cascade --repo DIR <lower>..<newest>`: what is already merged is up to date, a merge it left
    ungated is gated first). **The 1.21.x -> 26.x boundary** (the rename between 1.21.11 and 26.1.2 changes method and
-   class names the rows do not cover) usually conflicts: the cascade stops at 26.1.2 with the files named; resolve them
-   by hand inside the cascade -- in that version's worktree (`build/fork-branches/26.1.2`), `git merge
+   class names the rows do not cover) usually conflicts. With the **plain cascade** (a fix carried up, `cascade
+   <at>..<newest>`) it stops at 26.1.2 with the files named; resolve them by hand inside the cascade -- in that version's worktree (`build/fork-branches/26.1.2`), `git merge
    neoforge-1.21.11`, resolve each file through 26.1.2's rows and the rename (the 26.x name, the lower version's
    change), commit, then `cascade --repo DIR 26.1.2..<newest>` -- and say in its PR which files were resolved by hand
-   (they are review rows). Every version whose gated files changed reads not done until its gates (`--gates full` once
+   (they are review rows). With `--apply` (the head cascade of the authors' code) nothing stops there: a file it cannot
+   merge becomes a decision with an open REMERGE.json entry, answered through step 2's decisions (`--apply-decisions`),
+   never by hand. Every version whose gated files changed reads not done until its gates (`--gates full` once
    before a release) run again; where its own files changed it needs a fresh review, and where it took the authors'
    change through the rows only, one review of that change covers every such version (`python3
    tools/fork-branches.py review-authors --repo DIR --range <old port commit>..<new port commit> --reviewer ...`).
@@ -384,10 +392,11 @@ included), PR, pre-release and merge asks.
 3. **Per fork**, from its entry in `frozen.json`; say which case it is. **The authors' code is taken only when the plan
    says so (`take_authors`), and a done version is reopened only for an S1.**
    - **A single-version fork:** when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (merge, reconcile,
-     port, gate, PR into the head). Each selected known issue is fixed on the port branch. Nothing else changes for it.
+     port, gate, PR into the head), with step 6's merge and release run only after step 4 below (review and grading). Each selected known issue is fixed on the port branch. Nothing else changes for it.
    - **A version-branch fork with `head_cascade: true`** (the authors' box ticked, or the head has none of their code
      untaken): when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (when only the head's untaken code is
-     to take and nothing is new upstream, the merge is empty: go on). Then "A fork with version branches" from the head:
+     to take and nothing is new upstream, the merge is empty: go on), step 6's merge only after step 4 below for the
+     head's version (its review and grading), and the cascade after that merge. Then "A fork with version branches" from the head:
      write the default decisions' `patch` diffs into `round/decisions/<owner>__<repo>.decisions.json` (its step 2), then
      `cascade --repo DIR --apply-decisions round/decisions/<owner>__<repo>.decisions.json --gates ab` -- the head cascade
      `<head>..<newest>`; with no earlier `--apply` it runs that `--apply` first, then the answers. A `patch` left without
@@ -427,8 +436,11 @@ included), PR, pre-release and merge asks.
    already have.
    - gates A/B/C in full (`fork-port.py --repo DIR --target <v> --gates full`, or `ci-gates.py --env full` and `minimal`
      on a single-version fork), the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`);
-   - **one full review against the fixed rubric, before the merge**: `fork-port.py --repo DIR --target <v> --check-done` on
-     the version's checkout writes REVIEW.md's `?` rows; a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
+   - **one full review against the fixed rubric, before the merge**: on a version branch, `fork-port.py --repo DIR --target
+     <v> --check-done` on the version's checkout writes REVIEW.md's `?` rows (it refuses a single-version fork, which has
+     no `.port/`: there the fresh reviewer gets the work branch's changes, `git diff --name-only
+     <port branch>...keep-current/<date>`, one row per file with `ok`/`not-ok` and a note, written into the PR body's
+     review table, and the same rule below applies); a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
      "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
      **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
      the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5).
@@ -542,7 +554,8 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    unchanged. The JSON also holds `model` -- the model to set in step 3, the most capable one priced in
    `tools/model-prices.tsv`, read from that file -- and `repositories`, the forks to attach in step 4. Say in one line that the round is Wednesday at `round.time` from `.github/weekly-plan.json`, Pacific.
    **When the owner defers the task** (they will create it later, or have it created another time): create nothing;
-   write the `round-task` JSON to a file and give its path, and put in the report the model they chose at stop 1 and
+   write the `round-task` JSON to a file outside every fork checkout (the session's scratch directory, never a clone that
+   a commit could pick it up from) and give its path, and put in the report the model they chose at stop 1 and
    the repositories to attach (`repositories` in the JSON); then stop. Do steps 3 to 5 when the task is created.
 3. **Set the round's model; never leave it on the account default.** A task created without one runs on whatever the
    account defaults to (measured: a routine created without one ran on Sonnet, and the first dry run ran on the default

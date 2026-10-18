@@ -544,7 +544,11 @@ s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf
 v = s[s.index("## A fork with version branches"):s.index("## A fork with the layer")]
 need = ("is pushed only after the PR of the version below it is\n   merged", "never stacked on an unmerged lower PR",
         "resolve them\n   by hand inside the cascade", "26.1.2..<newest>")
-sys.exit(0 if all(n in v for n in need) and "merge them in chain order by step 6's" not in v else 1)
+need += ("With the **plain cascade**", "answered through step 2's decisions")
+setup = s[s.index("## Setup: the weekly cycle"):]
+flat = lambda x: " ".join(x.split())                 # the wording, not where its lines wrap
+sys.exit(0 if all(flat(n) in flat(v) for n in need) and "merge them in chain order by step 6's" not in flat(v)
+         and "outside every fork checkout" in flat(setup) else 1)
 PY
 # the weekly round's per-version order (dry run, 2026-10-18: the round reviewed each version after it merged): the review
 # comes before the merge and the pre-release, and a not-ok row graded S1/S2 at that version blocks both
@@ -556,7 +560,15 @@ step = r[r.index("4. **Per version, in ladder order**"):r.index("5. **New findin
 pos = [step.find(x) for x in ("gates A/B/C in full", "one full review against the fixed rubric, before the merge",
                               "blocks that version's merge and its pre-release", "the merge of the version's PR",
                               "a pre-release through Port CI")]
-sys.exit(0 if all(p >= 0 for p in pos) and pos == sorted(pos) and "The order is fixed" in step else 1)
+run6 = s[s.index("6. **Push the work branch and open a PR"):s.index("7. **Dependents next.**")]
+sv = r[r.index("   - **A single-version fork:**"):r.index("   - **A version-branch fork with `head_cascade: true`**")]
+hc = r[r.index("   - **A version-branch fork with `head_cascade: true`**"):r.index("   - **A version-branch fork with `head_cascade: false`**")]
+# review of #147: Run step 6 (auto-merge, release=true) must not run ahead of the round's review, for a single-version
+# fork as for a version-branch one, and the review has a single-version form
+ok6 = ("In the weekly round the merge and the release run wait for the round's step 4" in run6
+       and "only after step 4" in sv and "only after step 4" in hc and "the cascade after that merge" in hc
+       and "git diff --name-only" in step and "single-version fork" in step)
+sys.exit(0 if all(p >= 0 for p in pos) and pos == sorted(pos) and "The order is fixed" in step and ok6 else 1)
 PY
 out="$(python3 tools/weekly-plan.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "weekly-plan self-check (in $(grep -o '[0-9.]* s)$' <<<"$out" | tr -d ')')): the workflow equals tools/golden/weekly-plan.yml (Tuesdays 15:00 and 16:00 UTC plus workflow_dispatch, contents: read and issues: write, no secrets, the tools at a pinned commit, no model); its first step lets only the 08:00 Los Angeles slot through on both sides of daylight saving (and with no tz database); the deadline is the next Wednesday round; install refuses an org-owned fork without plan_owner, a checkout off the head branch and a head that is not the default branch (unless --default-branch-too), and is idempotent; the round task is CRON_TZ=America/Los_Angeles with a jittered minute, a fresh session, push and email on; the allow list is empty by default (the round asks) and rendered verbatim into the prompt, automerge follows merge-fork-prs; the round's own work branches and PRs fall under merge-fork-prs, the ledger and README Ports block under push-version-branches, plan-issue comments and ledger-issue edits are always allowed and the migrator repository is only read; the round clones current main and says the plan ran at migrator_sha, which install records; a re-install over an existing config (a single-version fork and a layer fork with layer_branch in one set) warns on stderr for each allow, ledger_issues, depends_on and layer_branch its flags drop, naming the flag, keeps the default result otherwise unchanged (no warning on a fresh install or with every value re-passed), and --keep-existing keeps them while a flag given still wins; replaces lists exact task names (its own, --replace-task, existing keep-current names of this set); the authors' upstream comes from the fork parent when omitted; --trailer lines end the install commit; the plan issue has the deadline first, is assigned to the owner, a section per fork; a second run the same week opens nothing; an unclosed plan is carried forward (ticks and the owner's replies, not a drive-by's) and closed as superseded; an incomplete plan opens no issue" \
