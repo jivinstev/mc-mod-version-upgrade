@@ -720,13 +720,18 @@ def read_plan(issue, comments, allowed, now=None):
                     continue
                 grades[hit[0]] = {"fork": hit[0][0], "id": hit[0][1], "severity": val.upper(), "by": who,
                                   "reason": rest or f"owner override in plan issue #{issue.get('number')}"}
-    out_forks = []
+    out_forks, said_by = [], {}
     for r, f in forks.items():
         t = ticks[r]
         sel = [i for i in f["defaults"] + f["candidates"] if t.get(i, i in f["defaults"])]
         casc = f.get("cascade")
         has = bool(f.get("new_count")) or bool(f.get("untaken_count"))
         take = has and authors.get(r, True)
+        # who decided: the plan pre-ticks the box, so an unticked box is the owner's (or a writer's) decision
+        take_by = ("nothing to take (no new or untaken authors' commits)" if not has else
+                   "default (the box was found ticked, as the plan pre-ticks it)" if authors.get(r) is True else
+                   "owner (the box was unticked)" if r in authors else "default (no box found in the issue)")
+        said_by[r] = take_by
         out_forks.append({
             "repo": r, "head": f["head"], "role": f.get("role", ""), "upstream": f.get("upstream"),
             "upstream_branch": f.get("upstream_branch"), "upstream_commit": f.get("upstream_commit"),
@@ -744,12 +749,14 @@ def read_plan(issue, comments, allowed, now=None):
             # is none of it); without it the plan's decisions -- all about that cascade -- do not apply
             head_cascade = take or not has
             o = out_forks[-1]
+            o["take_authors_by"] = take_by       # a version-branch fork's only: a single-version fork's input stays as it was
             o["head_cascade"] = head_cascade
             if not head_cascade:
                 o["cascade"] = {"range": casc["range"], "decisions": [],
                                 "not_applied": [d["id"] for d in casc["decisions"]],
                                 "why": "the authors' code is not taken this round: no head cascade, so no decision of it applies"}
             o["fixes"] = fix_plan(f, sel, head_cascade)
+    read_plan.take_by = said_by           # read-plan says it for every fork (stderr), the JSON keeps its form
     return {"schema": 1, "issue": issue.get("number"), "repo": data["repo"], "week": data["week"],
             "deadline": data["deadline"], "owner": data["owner"], "frozen_at": now, "forks": out_forks,
             "decisions": [dict({"fork": r, "id": i}, **v) for (r, i), v in sorted(decisions.items())],
@@ -1328,6 +1335,9 @@ def cmd_read_plan(a, out):
                 p = d / (f["repo"].replace("/", "__") + ".decisions.json")
                 p.write_text(json.dumps(f["cascade"], indent=1) + "\n", encoding="utf-8")
                 out(f"read-plan: {f['repo']}: {len(f['cascade']['decisions'])} decision(s) -> {p}")
+    for f in frozen["forks"]:
+        print(f"read-plan: {f['repo']}: take_authors {str(f['take_authors']).lower()} -- "
+              f"{getattr(read_plan, 'take_by', {}).get(f['repo'], '?')}", file=sys.stderr)
     if a.out:
         pathlib.Path(a.out).write_text(text, encoding="utf-8")
         sel = sum(len(f["selected"]) for f in frozen["forks"])
@@ -1794,8 +1804,12 @@ def plan_untaken_check(expect, cli):
                and fx.get("KI-4", {}).get("cascade", "").endswith(" neoforge-1.21.1..1.21.5") and "early_start" not in fr,
                f"ticked: the authors' code is taken, the head cascade runs with its decisions; each fix at its lowest open "
                f"version: {f} {o}")
+        expect(f.get("take_authors_by", "").startswith("default") and "take_authors true -- default" in o,
+               f"read-plan says a ticked box is the plan's default: {f.get('take_authors_by')} {o}")
         rc, o, fr, f = freeze(b.replace("- [x] Take the authors' code", "- [ ] Take the authors' code"), *late)
         fx = {x["id"]: x for x in f.get("fixes", [])}
+        expect(f.get("take_authors_by", "").startswith("owner") and "take_authors false -- owner" in o,
+               f"read-plan says the owner unticked the authors' box: {f.get('take_authors_by')} {o}")
         expect(rc == 0 and f.get("take_authors") is False and f.get("head_cascade") is False
                and f.get("cascade", {}).get("decisions") == [] and f["cascade"].get("not_applied") == ["d1e2f3a4b5c6", "a1b2c3d4e5f6"]
                and not (d / "dec" / "o__lib.decisions.json").exists() and "no head cascade" in o

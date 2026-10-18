@@ -354,10 +354,13 @@ included), PR, pre-release and merge asks.
    "$XDG_RUNTIME_DIR"`). Install or set what it names that the session can (apt, an export) and run it again; anything
    left missing other than a clone is reported in the first comment and the versions that need it wait.
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
-   round/frozen.json --decisions-dir round/decisions` (`gh` or GITHUB_TOKEN reads it). No open plan issue: stop and
-   report. Per fork, `frozen.json` says whether to take the authors' commits (`take_authors`, and the exact
+   round/frozen.json --decisions-dir round/decisions`. It reads GitHub through `GITHUB_TOKEN` when that is set (REST), else
+   `GH_TOKEN`, else the `gh` command line -- so a `gh` whose own login is broken does not matter while `GITHUB_TOKEN` is
+   set; it says on stderr which one it used. No open plan issue: stop and report. Per fork, `frozen.json` says whether to take the authors' commits (`take_authors`, and the exact
    `upstream_commit` the plan saw), which known issues are `selected`, the decisions with their choices, and the grade
-   overrides. **These are the run's only inputs.** Nothing new enters the run except an S1 found during it; the
+   overrides; read-plan says per fork whether `take_authors` is the plan's default (the box found ticked), the owner's
+   (unticked) or nothing to take, and a version-branch fork's entry records it as `take_authors_by` -- put it in the first
+   comment. **These are the run's only inputs.** Nothing new enters the run except an S1 found during it; the
    authors' commits pushed after the plan wait for next week (merge `upstream_commit`, not the branch tip). **Freeze at
    the deadline, not before:** read-plan run before the plan's deadline warns -- the plan workflow and the round are
    normally 24 hours apart, and an early freeze cuts the owner's window to tick and reply. Only when the owner asked to
@@ -444,6 +447,8 @@ included), PR, pre-release and merge asks.
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
    ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
    and local, S4 ledgered.
+   **A round that stops** (a missing clone, a stop that needs the owner, no quota) **leaves the plan issue open**: say why in
+   one comment; next Tuesday's plan carries its ticks and replies forward. Only step 6 closes it.
 6. **Close.** On the plan issue, one closing comment with the outcome -- per fork: the merged PRs, the pre-releases cut,
    the ledger changes and the new findings with their grades -- and the **cost and time table**:
    `python3 tools/port-cost.py round-table --since <round start> --session-cwd <the round's working directory>` (this
@@ -523,20 +528,25 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    exactly one of them -- no match, no deletion -- then `create_trigger` with its `name`, `cron_expression`
    (`CRON_TZ=America/Los_Angeles <minute> 8 * * 3`, the minute jittered per fork set below 08:30), `create_new_session_on_fire:
    true`, `notifications` (push and email on), `initiation` and `prompt` (the fork set and the `allow` list in it),
-   unchanged. Say in one line that the round is Wednesday at `round.time` from `.github/weekly-plan.json`, Pacific.
+   unchanged. The JSON also holds `model` -- the model to set in step 3, the most capable one priced in
+   `tools/model-prices.tsv`, read from that file -- and `repositories`, the forks to attach in step 4. Say in one line that the round is Wednesday at `round.time` from `.github/weekly-plan.json`, Pacific.
    **When the owner defers the task** (they will create it later, or have it created another time): create nothing;
    write the `round-task` JSON to a file and give its path, and put in the report the model they chose at stop 1 and
    the repositories to attach (`repositories` in the JSON); then stop. Do steps 3 to 5 when the task is created.
 3. **Set the round's model; never leave it on the account default.** A task created without one runs on whatever the
-   account defaults to (measured: a routine created without one ran on Sonnet), and `create_trigger` takes no model --
-   set it right after creating, with `update_trigger` `model`, to the model the user chose at stop 1. Recommend Opus:
+   account defaults to (measured: a routine created without one ran on Sonnet, and the first dry run ran on the default
+   because the field was empty), and `create_trigger` takes no model -- set it right after creating, with `update_trigger`
+   `model`, to the `model` of the round-task JSON unless the user chose another at stop 1; when the owner creates the task
+   themselves (it is deferred, or a connector cannot set it), tell them to set that model on it. Recommend Opus:
    the session's own model does all of this skill's judgement -- the merges, the reconcile (take theirs, keep or shrink
    ours, the A/B), the reviews it starts, the grades and every merge-on-green call. The mechanical work keeps its own
    models whatever the session runs on: the compile loop (`tools/file-loop.py`) climbs Haiku -> Sonnet -> Opus only on
    failure, `tools/port-upstream.py` and `tools/gate-loop.py` default to Sonnet, the visual review to Haiku. Say in one
    line which model was set. (Changing an existing task's model is the user's call: ask, then `update_trigger`.)
-4. **Repositories on the task.** A scheduled session cannot add repositories (measured twice: `add_repo` never appears
-   in one), and `create_trigger`/`update_trigger` have no repository field. So:
+4. **Repositories on the task -- every fork of the set must be attached.** A scheduled session cannot add
+   repositories (measured three times: `add_repo` never appears in one, or the session's permission check refuses it),
+   and `create_trigger`/`update_trigger` have no repository field. So the setup checklist has one line per fork, and is
+   not done until each is attached:
    - **Attach only what the round pushes to: the user's forks** (`repositories` in the JSON). This repository is
      public and only read: the prompt clones it itself; never ask the user to attach it.
    - **The user adds the forks.** Give them the exact link and steps: open https://claude.ai/code/routines, click the
@@ -545,7 +555,8 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
      fork (`owner/repo`), and save. If they have the edit form open while you change the prompt with `update_trigger`,
      ask them to close and reopen it first, or saving the form writes the old prompt back. (From a local CLI,
      `/schedule` does this.)
-   - **The prompt checks, it does not wait:** a missing clone is named and the round stops after freezing its input.
+   - **The prompt checks first, it does not wait:** its first step is `round-preflight.py`; a missing clone is named in
+     one comment on the plan issue and the round stops before freezing anything, the plan issue left open.
 5. **Check it.** Run the plan workflow once by hand (Actions -> Weekly plan -> Run workflow, or `gh workflow run
    weekly-plan.yml --repo <owner/lib> --ref neoforge-1.21.1`): it costs no model and must open the plan issue, assigned
    to the owner. Read the round task back (`get_trigger`): cron, a fresh session per fire, notifications and the model

@@ -62,7 +62,10 @@ an existing config, or with every value re-passed, the output is as before.
 ROUND-TASK prints the Wednesday round's scheduled task as JSON for the skill to create (create_trigger): its name, the
 cron `CRON_TZ=America/Los_Angeles <minute> 8 * * 3` (minute jittered below 08:30 from the name), a fresh session per
 fire, push and email notifications on, and a prompt that runs the keep-current round for the fork set, starting with
-`known-issues.py read-plan`, with the fork set and the `allow` list in it. The round clones this repository's current
+`known-issues.py read-plan`, with the fork set and the `allow` list in it, and `model`: the model to set on the task
+(update_trigger), the most capable one priced in tools/model-prices.tsv (its top tier), read from that file. The prompt
+checks every fork's clone first (tools/round-preflight.py: a scheduled session cannot attach a repository) and stops,
+before freezing, when one is missing; a stopped round leaves the plan issue open. The round clones this repository's current
 main (it gets the tools' fixes); only the plan workflow is pinned at `migrator_sha` (a reproducible plan); they meet at
 the plan issue. `replaces` lists exact task names, never a
 description: the round's own name, every `replace_tasks` name, and each --existing name (the names `list_triggers`
@@ -516,18 +519,25 @@ def round_task(cfg, mrepo, existing=()):
               f"skill, fixes included. Tuesday's plan workflow ran the tools pinned at `migrator_sha` in {CONFIG}, so "
               "that a plan is reproducible from its commit; the two meet only at the plan issue, which step 2 reads. If "
               "read-plan cannot read it, stop and report (setup must be re-run to move the pin).",
-              f"2. Its first step freezes the input: python3 mmvu/tools/known-issues.py read-plan --latest --slug "
+              "2. First of all, before freezing anything: python3 mmvu/tools/round-preflight.py "
+              + " ".join(f"--fork {f['repo']}=<its clone>" for f in forks) + ". A fork with no clone in this session: "
+              "stop now -- this scheduled session cannot attach a repository (add_repo is refused here), so post one "
+              f"comment on the newest open plan issue on {first['repo']} naming the repository and saying it must be "
+              "added to this scheduled task's repositories, and stop. Install or set what else it names that the "
+              f"session can (a JDK, libegl1, XDG_RUNTIME_DIR) and run it again. Read {CONFIG} from {first['repo']}'s "
+              f"{first['head']}: if it differs from the fork set above, stop and report that setup must be re-run. "
+              "GitHub is read through GITHUB_TOKEN when it is set (over REST; a broken gh login then does not matter), "
+              "else GH_TOKEN, else gh.",
+              f"3. Freeze the input: python3 mmvu/tools/known-issues.py read-plan --latest --slug "
               f"{first['repo']} --out round/frozen.json --decisions-dir round/decisions. The selected known issues and "
               "the authors' changes it says to take are the run's only inputs; nothing else enters except a new S1. "
               "With no open plan issue, stop and report.",
-              "3. Look for each fork's clone in this session. If one is missing, still do step 2, then stop: name the "
-              f"repository and say it must be added to this scheduled task's repositories. Read {CONFIG} from "
-              f"{first['repo']}'s {first['head']}: if it differs from the fork set above, stop and report that setup "
-              "must be re-run.",
               "4. A fork with version branches (.port/<v>/branch.properties) is a version-branch fork even when a legacy "
               "layer branch with .multiversion/ exists: that layer branch is history; ignore it.",
               "5. Never promote a release, publish to Modrinth or CurseForge, push to or comment on the authors' "
-              "repositories, force-push, or merge into the migrator repository."]
+              "repositories, force-push, or merge into the migrator repository.",
+              "6. A round that stops before its close leaves the plan issue open (next Tuesday's plan carries it "
+              "forward); only the closing comment of a round that ran its steps closes it."]
     name = cfg["round"]["name"]
     return {"name": name, "cron_expression": cfg["round"]["cron"], "create_new_session_on_fire": True,
             "notifications": {"push": True, "email": True}, "initiation": "human_request", "prompt": "\n".join(lines),
@@ -535,7 +545,31 @@ def round_task(cfg, mrepo, existing=()):
             "replaces_rule": f"delete only a task whose name is exactly one of `replaces`; pass every name list_triggers "
                              f"returns with --existing so the ones that start with {REPLACE_PREFIX!r} and name a fork of "
                              "this set are listed",
-            "allow": allow, "repositories": [f["repo"] for f in forks]}
+            "allow": allow, "repositories": [f["repo"] for f in forks],
+            "model": recommended_model(),
+            "model_rule": "set it on the task right after create_trigger (update_trigger model): a task without one runs on "
+                          "the account's default model; this is the most capable model priced in tools/model-prices.tsv "
+                          "(its top price tier), which does the round's judgement -- the owner may choose another"}
+
+
+def recommended_model(prices=None):
+    """The model the round should run on: the highest-priced (top tier) row of tools/model-prices.tsv, the newest
+    price date breaking a tie -- read from that file, never written here. None when it has no row."""
+    path = pathlib.Path(prices) if prices else ROOT / "tools/model-prices.tsv"
+    rows, head = [], None
+    for line in path.read_text(encoding="utf-8").splitlines() if path.is_file() else []:
+        if not line.strip() or line.startswith("#"):
+            continue
+        cells = line.split("\t")
+        if head is None:
+            head = cells
+            continue
+        r = dict(zip(head, cells))
+        try:
+            rows.append((float(r.get("input") or 0), r.get("as_of") or "", r["model"]))
+        except (KeyError, ValueError):
+            continue
+    return max(rows)[2] if rows else None
 
 
 # ---------------------------------------------------------------- the workflow's steps
@@ -846,6 +880,21 @@ def self_check():
            f"the round: Wednesday, a jittered minute just below 08:30 Los Angeles: {task['cron_expression']}")
     expect(task["create_new_session_on_fire"] and task["notifications"] == {"push": True, "email": True},
            "a fresh session each fire, push and email on")
+    # the dry run (2026-10-18): the round checks every fork's clone first and stops, before freezing, when one is missing
+    # (a scheduled session cannot attach one); a stopped round leaves the plan issue open; the task says which model to
+    # set (read from tools/model-prices.tsv: a task created without one ran on the account's default)
+    pr_ = task["prompt"]
+    expect("round-preflight.py --fork o/lib=<its clone>" in pr_ and pr_.index("round-preflight.py") < pr_.index("read-plan --latest")
+           and "add_repo is refused" in pr_ and "leaves the plan issue open" in pr_ and "GITHUB_TOKEN when it is set" in pr_,
+           f"the round prompt checks the clones first, says how GitHub is read and that a stop leaves the plan open: {pr_}")
+    with tempfile.TemporaryDirectory() as d_:
+        tsv = pathlib.Path(d_) / "p.tsv"
+        tsv.write_text("# x\nmodel\tinput\toutput\tas_of\nsmall-a\t0.10\t1\t2026-10-08\nbig-a\t4.00\t20\t2026-09-25\n"
+                       "mid-a\t2.00\t10\t2026-09-25\n", encoding="utf-8")
+        expect(recommended_model(tsv) == "big-a" and recommended_model(pathlib.Path(d_) / "none.tsv") is None,
+               "recommended_model: the top-priced row, None without a file")
+    expect(task.get("model") == recommended_model() and task.get("model") and "update_trigger" in task.get("model_rule", ""),
+           f"round-task names the model to set, read from tools/model-prices.tsv: {task.get('model')}")
     expect("read-plan --latest --slug o/lib" in task["prompt"] and "The weekly round" in task["prompt"]
            and task["name"].startswith(NAME_PREFIX) and task["name"] in task["replaces"], f"the round prompt: {task}")
     expect(forks[0]["role"] == "library" and forks[1]["role"] == "dependent", "the first fork is the library")
