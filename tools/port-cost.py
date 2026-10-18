@@ -543,19 +543,29 @@ def read_marks(path):
     return sorted(out)
 
 
+def cwd_form(x):
+    """A working directory in one form on every OS: forward slashes, no trailing one, the drive letter lower-case. A
+    path rooted at / or \\ counts as absolute as given (Python 3.13's ntpath.isabs says no to a drive-less one)."""
+    x = str(x)
+    if not re.match(r"^(?:[A-Za-z]:)?[/\\]", x):
+        x = os.path.abspath(x)
+    x = x.replace("\\", "/").rstrip("/")
+    return x[0].lower() + x[1:] if re.match(r"^[A-Za-z]:", x) else x
+
+
 def session_transcripts(projects=None, session_dir=None, cwd=None):
     """{session id: session} (collect()'s form, every request labelled "round") of the transcripts in session_dir, or
     of every transcript under `projects` whose records ran in `cwd` or a directory below it."""
     files = collections.defaultdict(list)
     roots = [pathlib.Path(session_dir).expanduser()] if session_dir else [pathlib.Path(projects).expanduser() if projects
                                                                            else projects_dir()]
-    norm = lambda x: x.replace("\\", "/").rstrip("/")
-    want = norm(cwd if os.path.isabs(cwd) else os.path.abspath(cwd)) if cwd else None
+    want = cwd_form(cwd) if cwd else None
     for root in roots:
         for f in sorted(root.rglob("*.jsonl")) if root.is_dir() else []:
             sid = f.parent.parent.name if f.parent.name == "subagents" else f.stem
             files[sid].append(f)
-    sessions = {}
+    sessions, seen = {}, set()       # one request once, across every file: a resumed session copies the earlier history
+    norm = cwd_form
     for sid, fs in files.items():
         reqs, hit = {}, want is None
         for f in fs:
@@ -570,9 +580,12 @@ def session_transcripts(projects=None, session_dir=None, cwd=None):
                 m = d.get("message") or {}
                 if d.get("type") != "assistant" or m.get("model") == "<synthetic>" or not d.get("timestamp"):
                     continue
-                rid = (f.name, d.get("requestId") or d.get("uuid"))
-                reqs.setdefault(rid, (ts(d["timestamp"]), m.get("model", "?"), d.get("effort") or "unset",
-                                      m.get("usage") or {}, f.parent.name == "subagents"))
+                rid = d.get("requestId") or (f.name, d.get("uuid"))
+                if rid in seen:
+                    continue
+                seen.add(rid)
+                reqs[rid] = (ts(d["timestamp"]), m.get("model", "?"), d.get("effort") or "unset", m.get("usage") or {},
+                             f.parent.name == "subagents")
         if hit and reqs:
             sessions[sid] = dict(reqs=list(reqs.values()), labels=["round"] * len(reqs), cost=None,
                                  others=collections.Counter(), versions=set(), entry=set())
@@ -797,6 +810,8 @@ def self_check():
         (sp / "R1.jsonl").write_text(rq(1, "2026-10-18T06:00:00Z", 100000) + rq(2, "2026-10-18T06:40:00Z", 200000)
                                      + rq(3, "2026-10-18T07:50:00Z", 400000), encoding="utf-8")
         (sp / "R1/subagents/rev.jsonl").write_text(rq(4, "2026-10-18T06:50:00Z", 800000), encoding="utf-8")
+        # a resumed session: a new transcript that begins with the earlier one's history (the same request ids)
+        (sp / "R2.jsonl").write_text(rq(2, "2026-10-18T06:40:00Z", 200000), encoding="utf-8")
         (d / "projects2" / "-other").mkdir()
         (d / "projects2" / "-other" / "X.jsonl").write_text(rq(5, "2026-10-18T06:45:00Z", 5000, cwd="/elsewhere"), encoding="utf-8")
         marks = d / "marks.tsv"
@@ -809,7 +824,7 @@ def self_check():
         rows2 = session_rows(sess, "2026-10-18T05:59:00Z", read_marks(marks))
         by = {(r[0], r[1]): r for r in rows2}
         price = lambda n: estimate_usd({model: collections.Counter(output=n)}, load_prices())[0]
-        expect(list(sess) == ["R1"] and [r[:2] for r in rows2] == [("(round)", "setup"), ("o/lib", "1.21.10"), ("o/lib", "1.21.11")]
+        expect(sorted(sess) == ["R1"] and [r[:2] for r in rows2] == [("(round)", "setup"), ("o/lib", "1.21.10"), ("o/lib", "1.21.11")]
                and by[("o/lib", "1.21.10")][5] == 2 and by[("o/lib", "1.21.11")][5] == 1
                and by[("o/lib", "1.21.10")][4] == 1.0 and by[("(round)", "setup")][4] == 0.52
                and abs(by[("o/lib", "1.21.10")][2] - round(price(1000000), 2)) < 0.011
@@ -823,6 +838,9 @@ def self_check():
                f"round-table --session-cwd: {text}")
         expect(session_rows(session_transcripts(session_dir=sp), "2026-10-18T05:59:00Z", [])[0][:2] == ("(round)", "setup"),
                "--session DIR with no marks: one row for the whole round")
+        expect(cwd_form("C:\\Work\\Round\\") == "c:/Work/Round" and cwd_form("c:/Work/Round") == "c:/Work/Round"
+               and cwd_form("/work/round/") == "/work/round" and cwd_form("\\work\\round") == "/work/round",
+               "cwd_form: one form whatever the separators, the drive letter's case, or a drive-less rooted path")
         expect("| o/lib | 1.21.4 | ≈ $1.25 | 0.75 h |" in tab and "| **o/lib** | **total** | **≈ $1.25** | **0.75 h** |" in tab
                and "| **all forks** |" in tab and "an-old-record" not in tab, f"the table: {tab}")
     print("self-check: OK" if ok else "self-check: FAILED")
