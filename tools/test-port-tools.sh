@@ -614,6 +614,10 @@ done, why, _n = ld.library_done_branch_release("owner/lib", "lib-1.1-mc1.21.4", 
 rc, out = fp("--target", "1.21.4", "--check-done")
 (rc != 18 or "GATES.md" not in out or "no verdict: changed src/main/java/com/example/mod/Plain.java" not in out) and \
     bad.append(f"after an edit: not done, gates stale, the file a review row: {rc} {out}")
+# on the branch's own checkout --check-done also writes the reviewer's `?` row (never a verdict)
+"| changed | src/main/java/com/example/mod/Plain.java | ? | ? |" in (r / ".port/1.21.4/REVIEW.md").read_text(encoding="utf-8") \
+    or bad.append(f"--check-done on the branch writes REVIEW.md's `?` row: {out}")
+g("checkout", "-q", "--", ".")
 g("checkout", "-q", "neoforge-1.21.3")
 (r / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain {\n int v = 1;\n}\n", encoding="utf-8")
 g("commit", "-qam", "fix at 1.21.3")
