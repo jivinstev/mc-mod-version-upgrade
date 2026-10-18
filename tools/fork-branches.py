@@ -2437,13 +2437,17 @@ def worktree_for(repo, t):
     return w, None
 
 
-def run_gates(work, t, gates, say=print):
-    """The no-model gates on version t's checkout: tools/fork-port.py from the measure stage with no budget."""
+def run_gates(work, t, gates, say=print, untaken_ok=None):
+    """The no-model gates on version t's checkout: tools/fork-port.py from the measure stage with no budget.
+    untaken_ok: a weekly round's frozen input, passed on (fork-port.py --untaken-ok: the authors' commits the plan does
+    not take do not stop the gates at the upstream freeze)."""
     if gates == "none":
         return 0
     cmd = [sys.executable, str(ROOT / "tools/fork-port.py"), "--repo", str(work), "--target", t, "--from-stage", "measure",
            "--budget", "0", "--max-errors", "0"]
     cmd += ["--to-stage", "audit"] if gates == "compile" else ["--gates", gates]
+    if untaken_ok:
+        cmd += ["--untaken-ok", str(pathlib.Path(untaken_ok).resolve())]
     say(f"fork-branches: cascade: {t}: {' '.join(cmd[1:])}")
     return subprocess.run(cmd).returncode
 
@@ -2505,7 +2509,7 @@ def port_ref_refused(repo, tip, name, first, upstream=None):
 
 
 def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=None, budget=DEFAULT_BUDGET_LINES,
-            out_dir=None, port_ref=None, upstream=None, _guarded=False):
+            out_dir=None, port_ref=None, upstream=None, _guarded=False, untaken_ok=None):
     """`FROM..TO`: merge FROM's branch into the next branch up TO's chain, then that one into the next, ... up to TO,
     running the no-model gates on each branch a merge changed. FROM is a version or the port branch (its name, or
     `port`). Pushes nothing.
@@ -2536,7 +2540,8 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
             say(f"fork-branches: cascade --port-ref REFUSED: {why}"); return 2
     if mode == "plan":
         return cascade_plan(repo, spec, budget, out_dir, say, port_ref=port_tip)
-    runner = runner or run_gates
+    if runner is None:
+        runner = (lambda w_, t_, g_, s_=print: run_gates(w_, t_, g_, s_, untaken_ok=untaken_ok)) if untaken_ok else run_gates
     rows, merged, items, mech = [], [], [], []
     resolve = {"budget": budget} if mode in ("apply", "plan-run") else None
     for k in range(i, len(nodes) - 1):
@@ -2746,7 +2751,8 @@ def read_decisions(path):
     return data if isinstance(data, dict) else {"decisions": data}
 
 
-def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LINES, out_dir=None, runner=None):
+def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LINES, out_dir=None, runner=None,
+                    untaken_ok=None):
     """cascade --apply-decisions FILE: each answer (by decision id) applied at every version whose REMERGE.json holds
     that decision, oldest first -- take (the authors' file through the version's rows), keep, patch (a diff in the port
     branch's names, through the version's rows) or content -- its entry cleared, the choice logged in that branch's
@@ -2776,7 +2782,8 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     if set(answers) - held():
         say(f"fork-branches: --apply-decisions: {len(set(answers) - held())} answer(s) with no REMERGE.json entry yet "
             "(no earlier --apply): running cascade --apply first")
-        rc0 = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner)
+        rc0 = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner,
+                      untaken_ok=untaken_ok)
         if rc0:
             say("fork-branches: --apply-decisions: the cascade --apply stopped; no decision applied"); return rc0
     done_ids, failed, waiting = set(), [], []
@@ -2849,7 +2856,8 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     if missing:
         say(f"fork-branches: --apply-decisions: no open entry holds {', '.join(missing)} (answered already, or a stale block)")
     say("fork-branches: --apply-decisions: merging the decisions up and re-planning (cascade --apply)")
-    rc = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner)
+    rc = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner,
+                 untaken_ok=untaken_ok)
     return 1 if failed or rc else 0
 
 
@@ -3466,6 +3474,9 @@ def main():
                    "version has not taken")
     k.add_argument("--upstream", metavar="REMOTE/BRANCH", help="the authors' branch --port-ref is checked against "
                    "(default: the lowest version's upstream= in its branch.properties)")
+    k.add_argument("--untaken-ok", metavar="FROZEN_JSON", help="a weekly round's frozen input (round/frozen.json), passed "
+                   "to each version's gates (fork-port.py --untaken-ok): the authors' commits the plan does not take do "
+                   "not stop them at the upstream freeze; recorded in that version's DRIFT.md")
     un = sub.add_parser("untaken", help="the authors' code the head carries that a version branch has not taken")
     un.add_argument("--repo", required=True); un.add_argument("--upstream", required=True, metavar="REF",
                                                               help="the authors' branch (e.g. authors/main)")
@@ -3510,11 +3521,13 @@ def main():
         if a.upstream and not a.port_ref:
             ap.error("--upstream is what --port-ref is checked against: pass --port-ref too")
         if a.apply_decisions:
-            return apply_decisions(a.repo, a.apply_decisions, a.gates, budget=a.budget_lines, out_dir=a.out)
+            return apply_decisions(a.repo, a.apply_decisions, a.gates, budget=a.budget_lines, out_dir=a.out,
+                                   untaken_ok=a.untaken_ok)
         if not a.range:
             ap.error("cascade needs FROM..TO")
         return cascade(a.repo, a.range, a.gates, a.dry_run, mode="plan" if a.plan else "apply" if a.apply else None,
-                       budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream)
+                       budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream,
+                       untaken_ok=a.untaken_ok)
     if a.cmd == "migrate":
         return migrate(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.dry_run, a.port_branch,
                        jpath=a.json, library=a.library)
@@ -4300,6 +4313,18 @@ def self_check():
         pass
     unpinned = remap_ci_args(port_args, {}, "examplemod")
     expect(unpinned[:6] == port_args[:6], f"ci: with no version pin the --dep-jar and its variant stay as they are: {unpinned}")
+    # cascade --untaken-ok: the round's frozen input reaches each version's fork-port.py gates; without it the command
+    # is exactly what it was
+    calls, real_run = [], subprocess.run
+    try:
+        subprocess.run = lambda cmd, *a_, **k_: (calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1]
+        run_gates("w", "1.21.3", "ab", say=lambda *_: None)
+        run_gates("w", "1.21.3", "ab", say=lambda *_: None, untaken_ok="round/frozen.json")
+    finally:
+        subprocess.run = real_run
+    expect(len(calls) == 2 and "--untaken-ok" not in calls[0] and calls[1][:len(calls[0])] == calls[0]
+           and calls[1][len(calls[0]):] == ["--untaken-ok", str(pathlib.Path("round/frozen.json").resolve())],
+           f"cascade --untaken-ok is passed to the gates run, and only then: {calls}")
     # @OnlyIn stripped from a CRLF file (a Windows checkout's overlay) exactly as layer.py strips it: no stray \r
     crlf = "class Cf {\r\n    @OnlyIn(Dist.CLIENT)\r\n    Thing t;\r\n}\r\n"
     expect(strip_onlyin_text(crlf) == "class Cf {\r\n    Thing t;\r\n}\r\n"

@@ -417,8 +417,12 @@ entry spans from the earliest change it has not taken. A branch written before t
    [--upstream <remote>/<branch>] [--library owner/repo@TAG ...]` (the checkout on that branch; a new version inherits
    its parent's record). Every run to the end stops with exit 19 when the authors' branch has commits after the
    recorded one, or a `--port-release` names another release of a recorded library; `--accept-upstream-drift` continues
-   and appends to `.port/<v>/DRIFT.md`. A `--library` pin alone never re-checks the authors' branch; re-freezing a moved
-   upstream needs `--accept-upstream-drift`.
+   and appends to `.port/<v>/DRIFT.md`. A freeze whose authors' branch cannot be read (the remote missing or never fetched)
+   stops the same way: never remove a remote to get past it. A weekly round that does not take the authors' code (its
+   `round/frozen.json` says `take_authors: false`) is not drift: `fork-port.py` reads `round/frozen.json` from the working
+   directory (or `--untaken-ok FILE`), records the drift in `DRIFT.md` as left out by the plan and goes on, and `cascade
+   --untaken-ok round/frozen.json` passes it to each version's gates; another library release still stops. A `--library`
+   pin alone never re-checks the authors' branch; re-freezing a moved upstream needs `--accept-upstream-drift`.
 0a. **Read first**: CATALOG §M and `references/minor-version-deltas.md` (the U and L sections). The first port re-derived
    five rows that were already there.
 0b. **Guard the names**: `python3 tools/guard-names.py ensure --mod-repo DIR` plus one `--mod-repo` per fork it depends

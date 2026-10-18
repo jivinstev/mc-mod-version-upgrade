@@ -368,6 +368,12 @@ included), PR, pre-release and merge asks.
    - **A version-branch fork with `head_cascade: false`** (the owner unticked the box while the head has authors' code
      no version took): **no cascade from the head, and no `--apply-decisions`** -- read-plan wrote no decisions file,
      since every decision of the plan is about the head cascade (`cascade.not_applied`). Only the selected fixes move.
+   - **The upstream freeze when the authors' code is not taken** (`take_authors: false`, either case): every version's
+     freeze is behind the authors' branch on purpose. `fork-port.py` reads `round/frozen.json` from the round's working
+     directory and records that drift in the version's `DRIFT.md` as left out by the plan instead of stopping (exit 19);
+     pass `--untaken-ok round/frozen.json` to every `fork-branches.py cascade` and to a `fork-port.py` run started
+     elsewhere. Never remove or rename the `authors` remote to get past the guard (a freeze that cannot be compared stops
+     too), and never use `--accept-upstream-drift` in a round.
    - **Each selected known issue** (a version-branch fork, either case) goes where `frozen.json`'s `fixes` says: it is
      made at `at`, the **lowest version whose ledger status is `open`** (not the `lowest` field: an issue first seen at
      1.21.1 may be open only at 26.3), and carried up by the one cascade named there, never fixed version by version:
