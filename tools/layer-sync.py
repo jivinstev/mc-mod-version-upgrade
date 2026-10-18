@@ -16,7 +16,11 @@ Single-version forks are the default and are NOT touched: every command except `
 fork" and exits 0 having changed nothing when the checkout has no .multiversion/ (base.properties + at least one
 target). The keep-current skill only calls this for a fork that has the layer.
 
-  detect  prints layer=true|false (and the targets).
+  detect  prints layer=true|false (and the targets). A fork with VERSION BRANCHES (a `neoforge-<v>` branch carrying
+          `.port/<v>/branch.properties`, tools/fork-branches.py) is a version-branch fork even when a legacy layer
+          branch with .multiversion/ is still there: version branches win, that layer branch is history and the round
+          ignores it, so detect prints `layer=false kind=version-branches versions=...` (with `legacy_layer=` naming
+          the ignored branches) and exits 0, `--ref <layer branch>` included. A fork with neither prints as before.
   merge   merge REF (the 1.21.1 port branch, or the keep-current work branch cut from it) into the checked-out layer
           branch with a MERGE COMMIT (--no-ff; never a rebase, never a force-push), then run the layer's isolation rule
           against REF. Refuses a dirty tree. A conflict is aborted and listed: it is a person's.
@@ -911,8 +915,36 @@ def layer_refs(repo):
     return [r for r, _, sym in (l.partition("\t") for l in rows) if r and not sym and ref_targets(repo, r)]
 
 
+def version_refs(repo):
+    """{version: branch} of the fork's version branches (local first, then origin's): a `neoforge-<v>` branch that
+    carries .port/<v>/branch.properties (tools/fork-branches.py version_branches)."""
+    out = {}
+    for pat in ("refs/heads/neoforge-*", "refs/remotes/origin/neoforge-*"):
+        for line in git(repo, "for-each-ref", "--format=%(refname:short)", pat).stdout.split():
+            v = line.split("neoforge-", 1)[1]
+            if v not in out and git(repo, "cat-file", "-e", f"{line}:.port/{v}/branch.properties").returncode == 0:
+                out[v] = line
+    return out
+
+
 def cmd_detect(a):
     repo = pathlib.Path(a.repo).resolve()
+    vb = version_refs(repo)
+    if vb:
+        # version branches win over a legacy layer branch: the layer is history and keep-current ignores it
+        if a.ref and ref_targets(repo, a.ref) is None:
+            print(f"layer-sync: unknown ref {a.ref}")
+            return 2
+        legacy = sorted(set(layer_refs(repo)) | ({a.ref} if a.ref and ref_targets(repo, a.ref) else set()))
+        vs = sorted(vb, key=lambda t: [int(x) if x.isdigit() else x for x in re.split(r"[.]", t)])
+        print("layer=false kind=version-branches versions=" + ",".join(vs)
+              + (f" legacy_layer={','.join(legacy)}" if legacy else ""))
+        if legacy:
+            print(f"layer-sync: this fork has version branches (.port/<v>/branch.properties), so it is a version-branch "
+                  f"fork: version branches win over the legacy layer branch{'es' if len(legacy) > 1 else ''} "
+                  f"{', '.join(legacy)} (.multiversion/), which {'are' if len(legacy) > 1 else 'is'} history and ignored "
+                  "-- keep-current takes \"A fork with version branches\", not the layer step")
+        return 0
     if a.ref:
         ts = ref_targets(repo, a.ref)
         if ts is None:
@@ -938,7 +970,7 @@ def cmd_detect(a):
     if others:
         print(f"layer-sync: the checked-out branch has no layer, but {', '.join(others)} carr"
               f"{'ies' if len(others) == 1 else 'y'} .multiversion/ -- this fork HAS a layer; rerun with --ref <layer branch>"
-              " (the fleet entry's layer_branch)")
+              " (the fork's layer_branch in .github/weekly-plan.json)")
         return 3
     return 0
 
@@ -1295,7 +1327,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1] if __doc__ else "")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("detect"); p.add_argument("--repo", default=".")
-    p.add_argument("--ref", help="read the layer from this branch/ref (the fleet's layer_branch) without checking it out")
+    p.add_argument("--ref", help="read the layer from this branch/ref (the fork's layer_branch) without checking it out")
     p.add_argument("--port-ref", help="with --ref: also print layer_behind=N, the port-branch commits the layer has not merged")
     p = sub.add_parser("merge"); p.add_argument("--repo", default="."); p.add_argument("--port-ref", required=True)
     p.add_argument("--layer-branch")

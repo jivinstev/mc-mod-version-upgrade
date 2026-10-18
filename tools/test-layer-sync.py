@@ -651,6 +651,21 @@ def main():
         (f / "src/main/java/net/m/A.java").write_text("a2\nb\nc\nd\n", encoding="utf-8"); git(f, "commit", "-qam", "upstream change")
         r = sh(sys.executable, str(LS), "detect", "--repo", str(f), "--ref", "layer", "--port-ref", "port")
         expect(r.returncode == 0 and "layer_behind=1" in r.stdout, f"detect counts the port commit the layer has not merged: {r.stdout}")
+        # version branches (.port/<v>/branch.properties) win over a legacy layer branch: the layer is history
+        vb = tmp / "vb"; vb.mkdir(); make_fork(vb, True); git(vb, "checkout", "-q", "port")
+        git(vb, "checkout", "-qb", "neoforge-1.21.3")
+        r = sh(sys.executable, str(LS), "detect", "--repo", str(vb))
+        expect(r.returncode == 3 and "HAS a layer" in r.stdout,
+               f"a neoforge-* branch without .port/<v>/branch.properties is no version branch: the layer reads as before: {r.stdout}")
+        (vb / ".port/1.21.3").mkdir(parents=True); (vb / ".port/1.21.3/branch.properties").write_text("v=1\n", encoding="utf-8")
+        git(vb, "add", "-A"); git(vb, "commit", "-qm", "version branch"); git(vb, "checkout", "-q", "port")
+        for extra in ([], ["--ref", "layer"], ["--ref", "layer", "--port-ref", "port"]):
+            r = sh(sys.executable, str(LS), "detect", "--repo", str(vb), *extra)
+            expect(r.returncode == 0 and r.stdout.splitlines()[0] == "layer=false kind=version-branches versions=1.21.3 legacy_layer=layer"
+                   and "version branches win" in r.stdout and "history and ignored" in r.stdout and "HAS a layer" not in r.stdout,
+                   f"detect {extra}: version branches win, the legacy layer branch is history: {r.stdout}")
+        expect(sh(sys.executable, str(LS), "detect", "--repo", str(vb), "--ref", "nope").returncode == 2,
+               "detect --ref unknown exits 2 on a version-branch fork too")
         git(f, "checkout", "-q", "layer")
         r = sh(sys.executable, str(LS), "merge", "--repo", str(f), "--port-ref", "port", "--layer-branch", "layer")
         expect(r.returncode == 0 and len(git(f, "rev-list", "--merges", "-1", "HEAD").split()) == 1, f"merge made a merge commit: {r.stdout}{r.stderr}")
