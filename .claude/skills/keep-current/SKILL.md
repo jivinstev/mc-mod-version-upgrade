@@ -407,9 +407,14 @@ included), PR, pre-release and merge asks.
      `.port/<v>/shipped-expect-<variant>.txt` expects -- CI green there proves nothing about that jar. Regenerate it
      (`fork-branches.py ci --repo DIR --all --modid ID --run`, pushed under `push-version-branches`; else ask) before
      trusting a green PR run, and name it in the closing comment;
+   **The order is fixed: gates, then the review, then the findings graded, then the merge, then the pre-release.** The
+   review is of the version's work branch (`keep-current/<date>-<v>`, or the version branch's checkout before it is
+   pushed), never of what is already merged: a reviewer who reads a version after its PR merged reviews code players can
+   already have.
    - gates A/B/C in full (`fork-port.py --repo DIR --target <v> --gates full`, or `ci-gates.py --env full` and `minimal`
      on a single-version fork), the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`);
-   - **one full review against the fixed rubric**: a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
+   - **one full review against the fixed rubric, before the merge**: `fork-port.py --repo DIR --target <v> --check-done` on
+     the version's checkout writes REVIEW.md's `?` rows; a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
      "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
      **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
      the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5).
@@ -417,9 +422,15 @@ included), PR, pre-release and merge asks.
      its own work; a scheduled task's cloud session can. If this session cannot start one, stop at the review step for
      that version: comment on the plan issue (@owner) that the version is gated and waits for its review, go on only with
      what does not depend on it, and name it in the closing comment. Never skip the review, and never fill `REVIEW.md`
-     yourself;
+     yourself. Commit REVIEW.md on the work branch, so the PR carries it;
+   - **a `not-ok` row blocks by its grade**: each `not-ok` row the re-check leaves is a finding, graded with
+     `known-issues.py add` (step 5) at its lowest affected version. One graded **S1 or S2 at the version being worked**
+     blocks that version's merge and its pre-release until it is fixed (and the re-check passes) or re-graded below S2
+     with the rubric's inputs (`known-issues.py grade`, the reason recorded; an owner's `/grade` from the plan counts);
+     the versions above it wait too (they carry it by the cascade). An S3/S4 row is ledgered and does not block;
+   - the merge of the version's PR (step 6's rule and "A fork with version branches" step 3), then its push run green;
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
-     `pre-release` in `allow`; without it, ask on the plan issue;
+     `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above;
    - a library's version: `fork-branches.py library-record --repo LIB --target <v> --dependent DEP` once the dependent's
      same version passed Gate C on that exact released jar;
    - its cost: `fork-port.py`'s cost stage appends to `.port/<v>/COST.md` (tokens, dollars, wall time and a price tier,
