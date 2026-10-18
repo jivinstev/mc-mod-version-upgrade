@@ -284,7 +284,9 @@ ours) is caught by the next cascade, which records the change it lacks. With a r
 undone and the same diffs are printed to apply after the hand merge. Start **one fixer only where it stopped**. A merge the cascade made and did not gate green (red, or stopped for a hand re-apply) stays
 on that version's branch and worktree (`build/fork-branches/<v>`); the cascade records it (`mmvu-cascade-ungated.json` in
 the clone's git directory), so the next run gates that version before it calls it up to date, and clears it once green
-(`--gates none` says "NOT gated" and leaves it). Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
+(`--gates none` says "NOT gated" and leaves it). Its worktree is reused as the stopped run left it when the only
+uncommitted changes are that run's own records in `.port/<v>/` (GATES.md, GATES-RED.md, RESIDUE.md, COST.md, ...); a
+worktree whose directory was removed is pruned and made again; any other edit there is refused, naming the files. Every version the cascade merged a jar-relevant change into is **not done** afterwards: its `GATES.md` and
 `REVIEW.md` name a commit before the merge, so it needs a green full Gate C again and a fresh reviewer who re-reads the
 files the merge changed and names the merge commit (the tool carries no verdict forward by itself; its rows are still
 only the files that differ from the parent at the new merge-base, so a file the version took unchanged from its parent

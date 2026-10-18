@@ -2515,8 +2515,14 @@ def worktree_for(repo, t):
         return repo, None
     w = repo / "build" / "fork-branches" / t
     if w.is_dir() and (w / ".git").exists():
-        if git(w, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-            return None, f"the worktree {w} has uncommitted changes"
+        dirty = [ln[3:].strip().strip('"') for ln in git(w, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
+                 if len(ln) > 3]
+        # a run that stopped here (red gates, a stop before its cost stage) leaves its own records edited: the next run
+        # reuses the worktree with them (they are what that run found); anything else is a person's edit and is refused
+        left = [f for f in dirty if not run_output(f, t)]
+        if left:
+            return None, (f"the worktree {w} has uncommitted changes ({', '.join(left[:4])}): commit or discard them "
+                          f"(git -C {w} checkout -- .), or remove the worktree (git worktree remove --force {w})")
         if git(w, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() != b:
             r = git(w, "checkout", "-q", b)
             if r.returncode:
@@ -2528,10 +2534,23 @@ def worktree_for(repo, t):
             return None, f"no branch {b}"
         git(repo, "branch", b, o)
     w.parent.mkdir(parents=True, exist_ok=True)
+    # a worktree whose directory is gone (removed by hand, a cleaned build/) stays registered and makes `worktree add`
+    # fail: prune the stale registrations first
+    git(repo, "worktree", "prune")
     r = git(repo, "worktree", "add", str(w), b)
     if r.returncode:
         return None, f"cannot make a worktree for {b}: {r.stderr.strip()[-300:]}"
     return w, None
+
+
+RUN_OUTPUT_NAMES = ("GATES.md", "GATES-RED.md", "RESIDUE.md", "COST.md", "TEST-ITEMS.md", "INVENTORY-CHECK.json",
+                    "DRIFT.md", "DEPS.md", "REVIEW.md")
+
+
+def run_output(path, t):
+    """Is `path` one of the records a fork-port.py run writes into version t's .port/<t>/ (never jar content)?"""
+    return path.replace("\\", "/").startswith(f"{REC}/{t}/") and path.rsplit("/", 1)[-1] in RUN_OUTPUT_NAMES \
+        and path.count("/") == 2
 
 
 def run_gates(work, t, gates, say=print, untaken_ok=None):
@@ -4081,6 +4100,38 @@ def _check_ci_check(expect):
            "add_variant_jars: a variant with expectations gets its glob once; none, nothing added")
 
 
+def _check_stopped_worktree(expect):
+    """A cascade stopped at a version leaves its worktree under build/fork-branches/ with the run's records edited, or a
+    registration whose directory is gone; the next run reuses or re-makes it instead of refusing (weekly-round dry run).
+    A person's edit there is still refused. A single-version fork has no version branch: nothing is made for it."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w4, _w = worktree_for(r, "1.21.4")
+        (w4 / ".port/1.21.4/INVENTORY-CHECK.json").write_text("{}\n", encoding="utf-8")       # a stopped run's record
+        (w4 / ".port/1.21.4/GATES.md").unlink()
+        again, why = worktree_for(r, "1.21.4")
+        expect(again == w4 and why is None, f"a worktree holding only the stopped run's records is reused: {why}")
+        (w4 / "src/main/java/com/example/mod/Plain.java").write_text("class Plain { int hand; }\n", encoding="utf-8")
+        none_, why = worktree_for(r, "1.21.4")
+        expect(none_ is None and "Plain.java" in (why or ""), f"a person's edit in it is still refused: {why}")
+        shutil.rmtree(w4)                                   # the directory gone, the worktree still registered
+        made, why = worktree_for(r, "1.21.4")
+        expect(made == w4 and why is None and (w4 / ".git").exists(), f"a stale registration is pruned and re-made: {why}")
+    with tempfile.TemporaryDirectory() as d:
+        sv = pathlib.Path(d) / "solo"; sv.mkdir()
+        git(sv, "init", "-q", "-b", "neoforge-1.21.1", check=True)
+        (sv / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        git(sv, "add", "-A", check=True)
+        git(sv, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "port", check=True)
+        rc, out = _quiet(cascade, sv, "neoforge-1.21.1..1.21.3", "none")
+        w_, why = worktree_for(sv, "1.21.3")
+        expect(rc == 2 and w_ is None and "no branch" in (why or "") and not (sv / "build").exists(),
+               f"a single-version fork: no cascade, no worktree made: {rc} {out[-200:]} {why}")
+    expect(run_output(".port/1.21.4/RESIDUE.md", "1.21.4") and not run_output(".port/1.21.4/renames.tsv", "1.21.4")
+           and not run_output(".port/1.21.3/RESIDUE.md", "1.21.4") and not run_output("src/RESIDUE.md", "1.21.4"),
+           "run_output: only this version's run records")
+
+
 def _check_prerelease_pin(expect):
     """A dependent version pinned to a library pre-release (tools/layer-deps.py writes the mark into DEPS.md) is not
     done: its pre-release may ship with it, its full Release and promotion wait for the library's version."""
@@ -5107,6 +5158,7 @@ def self_check():
         _check_ungated_rerun(expect)
         _check_check_done_rows(expect)
         _check_ci_check(expect)
+        _check_stopped_worktree(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)
