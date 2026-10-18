@@ -103,7 +103,8 @@ own commit and writes nothing; the parent branch is read from origin when the lo
    writes it alone on the branch);
 7. every item of the base build's behaviour inventory (`.port/INVENTORY.json`) is accounted for on the version
    (`layer-inventory.py`'s account of the branch's own tree) AND the committed `INVENTORY-CHECK.json` says exactly what a
-   fresh check says (a release is judged by the committed one: a run rewrites it, commit it);
+   fresh check says (a release is judged by the committed one: a run rewrites it, commit it -- the run that rewrote it
+   still lists it, saying `commit ... (no re-run needed)`: commit it and the next check passes; do not re-run for it);
 8. no dependency was built against a library version that is not done (`--allow-undone-library`, DEPS.md
    "Development only") or against a jar copied from a library checkout (`port_jar_dev.`, `--port-checkout`);
 9. **a library** (`library=true`): at least one dependent's version passed Gate C against this library's jar, recorded

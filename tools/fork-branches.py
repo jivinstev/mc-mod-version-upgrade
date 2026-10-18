@@ -1093,9 +1093,16 @@ def inventory_problems(repo, root, t, ref, work, files, write, mechanical):
     out = [f"behaviour inventory: unaccounted {r['id']} ({r['detail']})" for r in rep["items"] if r["status"] == "unaccounted"]
     committed = git(repo, "show", f"{ref}:{REC}/{t}/{li.CHECK_FILE}")
     if not out and (committed.returncode != 0 or committed.stdout != want):
-        out.append(f"behaviour inventory: the committed .port/{t}/{li.CHECK_FILE} "
-                   + ("is missing" if committed.returncode else "differs from a fresh check")
-                   + " -- a release reads the committed one: run tools/fork-port.py on the branch (it rewrites it) and commit it")
+        state = "is missing" if committed.returncode else "differs from a fresh check"
+        if work and read_file(p) == want:
+            # the work tree already holds the fresh account (this run rewrote it, or an earlier one did): the only step
+            # left is the commit -- telling a person to re-run fork-port here sent them round in a loop (gap 4 after #147)
+            out.append(f"behaviour inventory: the committed .port/{t}/{li.CHECK_FILE} {state}; the work tree's copy is "
+                       "the fresh account -- a release reads the committed one: commit "
+                       f".port/{t}/{li.CHECK_FILE} (no re-run needed)")
+        else:
+            out.append(f"behaviour inventory: the committed .port/{t}/{li.CHECK_FILE} {state}"
+                       " -- a release reads the committed one: run tools/fork-port.py on the branch (it rewrites it) and commit it")
     return out
 
 
@@ -4114,6 +4121,28 @@ def _check_check_done_rows(expect):
                "the local parent when it is ahead of origin (a merge not pushed yet)")
 
 
+def _check_inventory_settles(expect):
+    """INVENTORY-CHECK.json: a done check that rewrites it says the commit is all that is left (not "run fork-port",
+    which it just did); once committed the next check passes, from the branch's checkout and from another one."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        t = "1.21.4"
+        w, _w = worktree_for(r, t)
+        _hand(w, {f".port/{t}/INVENTORY-CHECK.json": "{}\n"}, "a stale account")
+        first = [x for x in target_done(w, t, write=True) if "INVENTORY-CHECK" in x]
+        expect(len(first) == 1 and "commit .port/1.21.4/INVENTORY-CHECK.json (no re-run needed)" in first[0]
+               and "run tools/fork-port.py" not in first[0],
+               f"the run that rewrote the account names the commit as the one step left: {first}")
+        git(w, "add", "-A", check=True); git(w, "commit", "-qm", "the fresh account", check=True)
+        second = [x for x in target_done(w, t, write=True) if "inventory" in x]
+        other = [x for x in target_done(r, t) if "inventory" in x]
+        expect(second == [] and other == [], f"committed, the account settles: {second} / {other}")
+        _hand(w, {f".port/{t}/INVENTORY-CHECK.json": "{}\n"}, "stale again")
+        ro = [x for x in target_done(r, t) if "INVENTORY-CHECK" in x]
+        expect(len(ro) == 1 and "run tools/fork-port.py" in ro[0],
+               f"a check that cannot rewrite it (another checkout) still names the run: {ro}")
+
+
 def _check_push_advice(expect):
     """The cascade's closing advice: outside a round, push the branches (as before); in a round, the work-branch PR."""
     plain = push_advice(["1.21.3", "1.21.4"], False)
@@ -5237,6 +5266,7 @@ def self_check():
         _check_check_done_rows(expect)
         _check_ci_check(expect)
         _check_push_advice(expect)
+        _check_inventory_settles(expect)
         _check_stopped_worktree(expect)
     if deep:
         _check_cascade_plan(expect)
