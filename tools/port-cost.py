@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Record what a port cost: model, effort, every token type, dollars, time, and the port's size.
+"""Record what a port cost: price tier, effort, every token type, dollars, time, and the port's size.
 
     python3 tools/port-cost.py <modid>              # writes mods/<modid>/COST.json + MIGRATION.md "## Cost"
     python3 tools/port-cost.py <modid> --print      # show it, write nothing
     python3 tools/port-cost.py --self-check         # fixture transcripts: attribution and the default path
+    python3 tools/port-cost.py round-table --since TIME --fork LABEL=DIR [--fork ...] [--projects DIR]
+                                                    # a keep-current round's per-fork, per-version cost and time table
+
+NO MODEL IDENTIFIER IS WRITTEN. Records go into fork repositories (.port/<v>/COST.md, a layer's COST.md) and the
+public corpus, so requests are grouped by a neutral PRICE TIER instead (from the list input price in
+tools/model-prices.tsv: top, mid or small; `unpriced` for a model with no row): tokens, dollars and wall time stay exact. Records written
+before this change keep their `model:` lines as history.
 
 tools/finish-port.py runs this for you. Numbers are read from Claude Code's own transcripts
 (~/.claude/projects, or $CLAUDE_CONFIG_DIR/projects). Tokens are never estimated; dollars are
@@ -33,8 +40,8 @@ ONE TARGET OF A FORK LAYER (--path DIR --target T)
     the real spend. Without --target nothing of this applies: every request of a matching session counts.
 
 WHAT IS RECORDED (so costs can be normalised later)
-    per model   requests, input, output (and the thinking part of it), cache reads, cache writes (5-minute
-                and 1-hour), web searches/fetches
+    per tier    requests, input, output (and the thinking part of it), cache reads, cache writes (5-minute
+                and 1-hour), web searches/fetches -- per price tier, never per model name
     effort      requests per effort level (low/medium/high/...)
     time        wall (first to last request) and active (gaps capped at 10 minutes) hours
     dollars     the session's own recorded total (`cost-state` in the transcript) when the Claude Code
@@ -68,6 +75,18 @@ def load_prices(path=PRICES):
         r = dict(zip(head, cells))
         rows[r["model"]] = {k: (v if k in ("model", "as_of") else float(v)) for k, v in r.items()}
     return rows
+
+
+TIERS = ((3.0, "top"), (1.5, "mid"), (0.0, "small"))     # by list input price, US$ per million tokens
+
+
+def tier_of(model, prices):
+    """The neutral price-tier label a record carries instead of the model's name: from its list input price in
+    tools/model-prices.tsv (top from $3, mid from $1.50, small below), `unpriced` for a model with no row."""
+    p = prices.get(model) or prices.get(re.sub(r"-\d{8}$", "", model))
+    if not p:
+        return "unpriced"
+    return next(name for floor, name in TIERS if p["input"] >= floor)
 
 
 def estimate_usd(per_model, prices):
@@ -294,6 +313,9 @@ def summarise(modid, sessions, port, target=None):
     totals = collections.Counter()
     for c in per_model.values():
         totals.update(c)
+    prices, per_tier = load_prices(), collections.defaultdict(collections.Counter)
+    for model, c in per_model.items():
+        per_tier[tier_of(model, prices)].update(c)
     day = lambda x: datetime.datetime.fromtimestamp(x, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
     return {
         "schema": 1,
@@ -307,7 +329,7 @@ def summarise(modid, sessions, port, target=None):
         "usd": usd,
         "usd_source": usd_source,
         "usd_note": usd_note,
-        "models": {k: dict(v) for k, v in sorted(per_model.items())},
+        "tiers": {k: dict(v) for k, v in sorted(per_tier.items())},
         "totals": dict(totals),
         "effort": dict(effort),
         "claude_code": sorted({v for s in sessions.values() for v in s["versions"]}),
@@ -334,7 +356,7 @@ def corpus_row(c):
     return {
         "month": (c["start"] or "")[:7], "minecraft": "+".join(s["minecraft"]),
         "java_files": two_sig(s["java_files"]), "mixin_classes": two_sig(s["mixin_classes"]),
-        "geckolib": "yes" if s["geckolib"] else "no", "models": "+".join(c["models"]),
+        "geckolib": "yes" if s["geckolib"] else "no", "models": "+".join(c.get("tiers") or c.get("models") or {}),
         "effort": max(c["effort"], key=c["effort"].get) if c["effort"] else "",
         "sessions": c["sessions"], "requests": t.get("requests", 0), "subagent_requests": t.get("subagent_requests", 0),
         "active_hours": c["active_hours"], "wall_hours": c["wall_hours"], "input": t.get("input", 0),
@@ -355,14 +377,14 @@ def migration_section(c):
         usd = f"**≈ ${c['usd']:.2f}** ({c['usd_note']})"
     else:
         usd = f"**${c['usd']:.2f}**"
-    models = ", ".join(f"{m} ({v['requests']} req)" for m, v in c["models"].items())
+    tiers = ", ".join(f"{m} ({v['requests']} req)" for m, v in c["tiers"].items())
     effort = ", ".join(f"{k} {v}" for k, v in sorted(c["effort"].items()))
     size = c["size"]
     lines = [
         "## Cost (recorded by tools/port-cost.py -- do not edit by hand)",
         f"- {usd} over {c['sessions']} session(s): {c['active_hours']} h active, {c['wall_hours']} h wall "
         f"({c['start']} to {c['end']})",
-        f"- model: {models}; effort: {effort}",
+        f"- price tier: {tiers}; effort: {effort}",
         f"- tokens: output {t.get('output', 0):,} (thinking {t.get('thinking', 0):,}), input {t.get('input', 0):,}, "
         f"cache read {t.get('cache_read', 0):,}, cache write {t.get('cache_write', 0):,} "
         f"(5m {t.get('cache_write_5m', 0):,} / 1h {t.get('cache_write_1h', 0):,})",
@@ -412,6 +434,97 @@ def attribution_lines(c, split, since):
             f"requests {split['shared'][0]} ({usd(split['shared'])}), other targets' {split['other'][0]}, "
             f"outside this checkout {split['elsewhere'][0]}. Records of concurrent targets add up.\n"
             f"- window: requests {window} to {split['end']} (requests before it are not in this record)\n")
+
+
+# ---------------------------------------------------------------- a keep-current round's table (issue #135, part 2a)
+
+RECORD = re.compile(r"(?m)^- (.*?) over \d+ session\(s\): ([\d.]+) h active, ([\d.]+) h wall \((\S+) to (\S+)\)")
+
+
+def cost_records(text):
+    """[(usd or None, estimated, wall hours, start, end)] of the records in a COST.md (or a MIGRATION.md Cost section)."""
+    out = []
+    for m in RECORD.finditer(text or ""):
+        usd = re.search(r"\$([\d,]+\.\d+)", m.group(1))
+        out.append((float(usd.group(1).replace(",", "")) if usd else None, "≈" in m.group(1), float(m.group(3)),
+                    m.group(4), m.group(5)))
+    return out
+
+
+def _fb():
+    import importlib.util
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("fork_branches_cost", ROOT / "tools/fork-branches.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def round_rows(forks, since, projects=None):
+    """[(fork, version, usd or None, estimated, wall hours, records)]: a version-branch fork's rows from each version
+    branch's .port/<v>/COST.md records that end at or after `since`; a single-version fork's one row measured from the
+    transcripts that touched its checkout since then (it keeps no .port/ records)."""
+    import subprocess
+    fb, rows = _fb(), []
+    cut = since if ("+" in since[10:] or since.endswith("Z")) else since + ("T00:00" if len(since) == 10 else "") + "+00:00"
+    for label, d in forks:
+        vb = fb.version_branches(d)
+        if vb:
+            for v in sorted(vb, key=fb.mc_key):
+                r = subprocess.run(["git", "-C", str(d), "show", f"{vb[v]}:.port/{v}/COST.md"], capture_output=True,
+                                   text=True, encoding="utf-8", errors="replace")
+                recs = [x for x in cost_records(r.stdout if r.returncode == 0 else "") if ts(x[4]) >= ts(cut)]
+                usd = None if any(x[0] is None for x in recs) or not recs else round(sum(x[0] for x in recs), 2)
+                rows.append((label, v, usd if recs else 0.0, any(x[1] for x in recs), round(sum(x[2] for x in recs), 2),
+                             len(recs)))
+            continue
+        proj = pathlib.Path(projects).expanduser() if projects else projects_dir()
+        sessions = collect("", proj, os.path.abspath(d)) if proj.is_dir() else {}
+        for k in list(sessions):
+            v = sessions[k]
+            v["reqs"] = [x for x in v["reqs"] if x[0] >= ts(cut)]
+            v["cost"] = None
+            if not v["reqs"]:
+                del sessions[k]
+        if sessions:
+            c = summarise("", sessions, pathlib.Path(os.devnull) / "none")
+            rows.append((label, "head", c["usd"], c.get("usd_source") == "estimated", c["wall_hours"], len(sessions)))
+        else:
+            rows.append((label, "head", 0.0, False, 0.0, 0))
+    return rows
+
+
+def round_table(rows):
+    money = lambda u, est: "unpriced" if u is None else f"{'≈ ' if est else ''}${u:.2f}"
+    out = ["| Fork | Version | Cost | Wall time |", "|---|---|---|---|"]
+    grand, gw, gest, gnone = 0.0, 0.0, False, False
+    for fork in dict.fromkeys(r[0] for r in rows):
+        mine = [r for r in rows if r[0] == fork]
+        for _f, v, u, est, wall, n in mine:
+            out.append(f"| {fork} | {v} | {money(u, est) if n else '-'} | {wall:.2f} h |")
+        none = any(r[2] is None for r in mine)
+        tot = round(sum(r[2] or 0 for r in mine), 2)
+        est = any(r[3] for r in mine)
+        wall = round(sum(r[4] for r in mine), 2)
+        out.append(f"| **{fork}** | **total** | **{money(None if none else tot, est)}**"
+                   + (" (some unpriced)" if none and tot else "") + f" | **{wall:.2f} h** |")
+        grand += tot; gw += wall; gest |= est; gnone |= none
+    out.append(f"| **all forks** | | **{money(None if gnone else round(grand, 2), gest)}** | **{round(gw, 2):.2f} h** |")
+    return "\n".join(out) + "\n"
+
+
+def round_table_main(argv):
+    ap = argparse.ArgumentParser(prog="port-cost.py round-table", description="a keep-current round's cost and time, "
+                                 "per fork and per version, with totals (Markdown, for the plan issue's closing comment)")
+    ap.add_argument("--since", required=True, help="the round's start (ISO; UTC unless it says otherwise)")
+    ap.add_argument("--fork", action="append", required=True, metavar="LABEL=DIR", help="a fork's label and checkout")
+    ap.add_argument("--projects", help="transcript directory (default ~/.claude/projects)")
+    a = ap.parse_args(argv)
+    forks = [tuple(x.split("=", 1)) for x in a.fork]
+    if any(len(f) != 2 for f in forks):
+        ap.error("--fork LABEL=DIR")
+    print(round_table(round_rows(forks, a.since, a.projects)), end="")
+    return 0
 
 
 def self_check():
@@ -509,6 +622,41 @@ def self_check():
         code, text = run("examplemod", "--path", str(fork), "--print", *P)
         expect(code == 0 and f"output {whole['output']:,} " in text and "attribution" not in text,
                f"a layer checkout without --target is counted whole, as before: {text}")
+        # no model identifier in a record (#137 item 1): a neutral price tier, tokens, dollars and wall time
+        used = {json.loads(l)["message"]["model"] for l in main_s.splitlines() if '"assistant"' in l}
+        expect(used and all(not any(m in x for m in used) and "- model:" not in x and "- price tier: top (" in x
+                            for x in out.values())
+               and not any(m in json.dumps(summarise("examplemod", sess, fork)) for m in used),
+               f"records name a price tier, never the model: {out}")
+        prices = load_prices()
+        want = lambda inp: "top" if inp >= 3 else "mid" if inp >= 1.5 else "small"
+        expect(prices and all(tier_of(m, prices) == want(r["input"]) for m, r in prices.items())
+               and tier_of("some-unknown", prices) == "unpriced", "the tiers come from the list input prices")
+        # the round's table: a version-branch fork's .port/<v>/COST.md records since the round's start, a single-version
+        # fork measured from its transcripts, totals per fork and in all
+        import subprocess
+        vb = d / "vb"
+        g = lambda *a: subprocess.run(["git", "-C", str(vb), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                      capture_output=True, text=True, encoding="utf-8", check=True)
+        vb.mkdir(); g("init", "-q", "-b", "neoforge-1.21.1")
+        (vb / "x").write_text("x\n", encoding="utf-8"); g("add", "-A"); g("commit", "-qm", "port")
+        g("checkout", "-q", "-b", "neoforge-1.21.4")
+        (vb / ".port/1.21.4").mkdir(parents=True)
+        (vb / ".port/1.21.4/branch.properties").write_text("minecraft_version=1.21.4\n", encoding="utf-8")
+        (vb / ".port/1.21.4/COST.md").write_text(
+            "## fork-port.py run since a\n\n## Cost (recorded by tools/port-cost.py -- do not edit by hand)\n"
+            "- **$5.00** over 1 session(s): 1.0 h active, 2.0 h wall (2026-09-01T10:00Z to 2026-09-01T12:00Z)\n"
+            "- model: an-old-record (3 req); effort: high\n\n## fork-port.py run since b\n\n"
+            "## Cost (recorded by tools/port-cost.py -- do not edit by hand)\n"
+            "- **≈ $1.25** (estimated from tokens) over 1 session(s): 0.5 h active, 0.75 h wall "
+            "(2026-10-01T10:00Z to 2026-10-01T10:45Z)\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "1.21.4")
+        rows = round_rows([("o/lib", vb), ("o/dep", sv)], "2026-10-01", d / "projects")
+        expect(rows[0][:5] == ("o/lib", "1.21.4", 1.25, True, 0.75) and rows[1][0:2] == ("o/dep", "head") and rows[1][5] == 1,
+               f"round rows: only the records since the round's start; the single-version fork measured: {rows}")
+        tab = round_table(rows)
+        expect("| o/lib | 1.21.4 | ≈ $1.25 | 0.75 h |" in tab and "| **o/lib** | **total** | **≈ $1.25** | **0.75 h** |" in tab
+               and "| **all forks** |" in tab and "an-old-record" not in tab, f"the table: {tab}")
     print("self-check: OK" if ok else "self-check: FAILED")
     return 0 if ok else 1
 
@@ -604,4 +752,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["round-table"]:
+        sys.exit(round_table_main(sys.argv[2:]))
     sys.exit(self_check() if "--self-check" in sys.argv[1:] else main())

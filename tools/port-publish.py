@@ -3,7 +3,7 @@
 
     port-publish.py setup   --repo <fork clone> --permission <url> [--branch neoforge-1.21.1]
     port-publish.py modrinth-create --repo .           # CI: create the Modrinth draft project (MODRINTH_TOKEN)
-    port-publish.py publish --repo . --tag <tag> [--dry-run] [--manual]   # CI: upload one promoted release
+    port-publish.py publish --repo . --tag <tag> [--dry-run] [--manual] [--platform mr|cf|both]   # CI: one release
     port-publish.py --self-check
 
 The fork carries its publishing config as .github/port-publish.json (written by `setup`, reviewed, committed):
@@ -41,6 +41,12 @@ prints the fields to paste into CurseForge's create-project form (CurseForge has
     damage, other mods broken) is open in it -- fix-ledger.py's own check;
   - each dependency that is another fork port already has the version this release was built against published
     on that platform.
+PER PLATFORM: `--platform mr` (Modrinth) or `cf` (CurseForge) uploads to that one only; the default is both. Before
+uploading, each platform asked is judged against the fork's known-issues ledger (tools/known-issues.py
+blocks-publish: an open S1 at the release's Minecraft version that applies to that platform's jar), read from the
+head branch (`port_branch` in a version branch's .port/<mc>/branch.properties, else the checked-out branch's
+.port/KNOWN-ISSUES.json). A blocked platform is HELD BACK -- named with the S1s that hold it -- and the other one still
+goes; a run where every platform asked is held back exits 1. A fork with no ledger is judged as before.
 It is idempotent: a platform this release is already published on (a marker in the release notes) is skipped,
 so a re-run after a partial failure only does what is missing. After uploading it appends the links to the
 release notes. Tokens come from the environment (MODRINTH_TOKEN, CURSEFORGE_TOKEN, GITHUB_TOKEN) -- never
@@ -161,6 +167,68 @@ def version_of(tag, modid, mc=None):
     if len(v) > 32:                      # Modrinth's version_number limit
         raise SystemExit(f"{tag}: version number {v!r} is over 32 characters")
     return v
+
+
+# ---------------------------------------------------------------- the known-issues ledger, per platform (issue #135)
+
+PLATFORM_KEY = {"modrinth": "mr", "curseforge": "cf"}
+
+
+def _known_issues():
+    spec = importlib.util.spec_from_file_location("known_issues_pp", ROOT / "known-issues.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+def ledger_for(repo, mc):
+    """(the known-issues ledger as a dict, or None; why it could not be read, or None). Read from the head branch: a
+    version branch names it (port_branch in .port/<mc>/branch.properties) and the ledger is read from origin's copy
+    (fetched when the checkout lacks it); otherwise the checkout is the head and its own file is read."""
+    props = pathlib.Path(repo) / ".port" / mc / "branch.properties"
+    head = None
+    if props.is_file():
+        m = re.search(r"(?m)^port_branch=(\S+)", props.read_text(encoding="utf-8", errors="replace"))
+        head = m.group(1) if m else None
+    if head:
+        ref = f"refs/remotes/origin/{head}"
+        if git(repo, "rev-parse", "--verify", "--quiet", ref).returncode != 0:
+            git(repo, "fetch", "-q", "--depth", "1", "origin", f"+refs/heads/{head}:{ref}")
+            if git(repo, "rev-parse", "--verify", "--quiet", ref).returncode != 0:
+                return None, f"cannot read the head branch {head} to check its known-issues ledger"
+        r = git(repo, "show", f"{ref}:.port/KNOWN-ISSUES.json")
+        text = r.stdout if r.returncode == 0 else ""
+        where = f"{head}:.port/KNOWN-ISSUES.json"
+    else:
+        f = pathlib.Path(repo) / ".port/KNOWN-ISSUES.json"
+        text = f.read_text(encoding="utf-8") if f.is_file() else ""
+        where = ".port/KNOWN-ISSUES.json"
+    if not text.strip():
+        return None, None
+    try:
+        return _known_issues().validate(json.loads(text)), None
+    except Exception as e:                      # an unreadable ledger holds every platform back: never publish blind
+        return None, f"the known-issues ledger {where} is not valid ({e})"
+
+
+def held_back(repo, mc, plats):
+    """{platform: why} for each platform of `plats` an open S1 in the ledger blocks (known-issues.py blocks-publish)."""
+    data, err = ledger_for(repo, mc)
+    if err:
+        return {p: err for p in plats}
+    if data is None:
+        return {}
+    ki, out = _known_issues(), {}
+    for p in plats:
+        hit = ki.blocks_publish(data, mc, PLATFORM_KEY[p])
+        if hit:
+            out[p] = (f"{len(hit)} open S1 at Minecraft {mc} against the {PLATFORM_KEY[p]} jar in the known-issues ledger: "
+                      + "; ".join(f"{e['id']} {e['title']}" for e in hit))
+    return out
+
+
+def asked(plats, platform):
+    """The configured platforms this run is asked for (--platform mr / cf; None or both: every one)."""
+    return [p for p in plats if platform in (None, "both") or PLATFORM_KEY[p] == platform]
 
 
 # ---------------------------------------------------------------- gates
@@ -599,7 +667,7 @@ def layer_dep_versions(repo, tag, cfg, t):
     return out, errs
 
 
-def publish_layer(repo, tag, cfg, release, repo_slug, info, dry=False, manual=False):
+def publish_layer(repo, tag, cfg, release, repo_slug, info, dry=False, manual=False, platform=None):
     lc = cfg["layer"]
     if not info["branch"]:
         print(f"::error::will not publish {tag}: the config's \"layer\" section names no \"branch\" (the layer branch)")
@@ -610,15 +678,15 @@ def publish_layer(repo, tag, cfg, release, repo_slug, info, dry=False, manual=Fa
             print(f"::error::will not publish {tag}: {w}")
         return 1
     all_t = [info["base"]] + info["targets"]
-    asked = lc.get("targets") or []
-    unknown = [t for t in asked if t not in all_t]
+    asked_targets = lc.get("targets") or []
+    unknown = [t for t in asked_targets if t not in all_t]
     if unknown:
         print(f"::error::will not publish {tag}: layer.targets names {', '.join(unknown)}, which the layer does not have")
         return 1
-    plats = platforms(cfg)
+    plats = asked(platforms(cfg), platform)
     suffix = {p: cfg[p].get("asset", "") for p in plats}
-    cand = list(asked)
-    if not asked:           # every target the release holds a file for
+    cand = list(asked_targets)
+    if not asked_targets:   # every target the release holds a file for
         cand = [t for t in all_t if any(layer_pick_asset(release, suffix[p], t, info["base"]) for p in plats)]
     if not cand:
         print(f"::error::will not publish {tag}: the release holds no jar for any target of the layer")
@@ -664,12 +732,15 @@ def publish_layer(repo, tag, cfg, release, repo_slug, info, dry=False, manual=Fa
         for e in errors:
             print(f"::error::will not publish {tag}: {e}")
         return 1
-    links, missing = [], []
+    links, missing, n_held = [], [], 0
     for t, assets in plan:
         text = notes(cfg, tag, release, repo_slug, mc=t)
+        held = held_back(repo, t, [p for p in plats if (p, t) not in done])
         for plat in plats:
             if (plat, t) in done:
                 print(f"{plat} {t}: already published -- skipped"); continue
+            if plat in held:
+                print(f"::warning::{plat} {t}: HELD BACK, not uploaded: {held[plat]}"); n_held += 1; continue
             if not dry and not os.environ.get(f"{plat.upper()}_TOKEN"):
                 missing.append(f"{plat} is configured but the {plat.upper()}_TOKEN secret is not set"); continue
             if plat == "modrinth":
@@ -687,12 +758,15 @@ def publish_layer(repo, tag, cfg, release, repo_slug, info, dry=False, manual=Fa
             print(f"published {tag} on {p} for Minecraft {r.split('@')[1]}: {u}")
     for m in missing:
         print(f"::error::{m}")
+    if n_held and not links and not missing:
+        print(f"::error::will not publish {tag}: what was asked is held back by open S1s (above)")
+        return 1
     return 1 if missing else 0
 
 
 # ---------------------------------------------------------------- commands
 
-def publish(repo, tag, dry=False, manual=False):
+def publish(repo, tag, dry=False, manual=False, platform=None):
     cfg = load_config(repo)
     if not cfg:
         print(f"::notice::no {CONFIG}: this fork is not set up to publish (port-publish.py setup)"); return 0
@@ -701,7 +775,7 @@ def publish(repo, tag, dry=False, manual=False):
     release = gh("GET", f"/repos/{repo_slug}/releases/tags/{tag}")
     info = layer_of(repo, tag, cfg)
     if info:            # a multi-version release: one file per green target
-        return publish_layer(repo, tag, cfg, release, repo_slug, info, dry, manual)
+        return publish_layer(repo, tag, cfg, release, repo_slug, info, dry, manual, platform)
     why = gate(repo, cfg, tag, release, manual)
     if why:
         for w in why:
@@ -715,11 +789,17 @@ def publish(repo, tag, dry=False, manual=False):
             print(f"::error::will not publish {tag}: the release notes {b} -- public text describes differences, "
                   "not the original's defects (edit \"differences\" in the config)")
         return 1
+    want = asked(platforms(cfg), platform)
+    held = held_back(repo, minecraft_of(tag), [p for p in want if p not in done])
     for plat in ("modrinth", "curseforge"):
         if plat not in platforms(cfg):
             print(f"::notice::{plat}: no project configured yet -- skipped"); continue
+        if plat not in want:
+            print(f"{plat}: not asked (--platform {platform}) -- skipped"); continue
         if plat in done:
             print(f"{plat}: already published ({done[plat]}) -- skipped"); continue
+        if plat in held:
+            print(f"::warning::{plat}: HELD BACK, not uploaded: {held[plat]}"); continue
         tokvar = f"{plat.upper()}_TOKEN"
         if not dry and not os.environ.get(tokvar):
             missing.append(f"{plat} is configured but the {tokvar} secret is not set"); continue
@@ -738,6 +818,9 @@ def publish(repo, tag, dry=False, manual=False):
             print(f"published {tag} on {p}: {u}")
     for m in missing:
         print(f"::error::{m}")
+    if held and not links and all(p in held or p in done for p in want):
+        print(f"::error::will not publish {tag}: every platform asked is held back by an open S1 (above)")
+        return 1
     return 1 if missing else 0
 
 
@@ -1129,6 +1212,9 @@ def main():
     p = sub.add_parser("publish"); p.add_argument("--repo", default="."); p.add_argument("--tag", required=True)
     p.add_argument("--dry-run", action="store_true"); p.add_argument("--manual", action="store_true",
                                                                      help="a person asked for this publish (ignores auto)")
+    p.add_argument("--platform", choices=("mr", "cf", "both"), default="both",
+                   help="upload to Modrinth (mr) or CurseForge (cf) only (default both); a platform an open S1 in the "
+                        "known-issues ledger blocks is held back either way")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
@@ -1139,7 +1225,7 @@ def main():
     if a.cmd == "modrinth-create":
         return modrinth_create(a.repo)
     if a.cmd == "publish":
-        return publish(a.repo, a.tag, a.dry_run, a.manual)
+        return publish(a.repo, a.tag, a.dry_run, a.manual, None if a.platform == "both" else a.platform)
     ap.print_help(); return 2
 
 

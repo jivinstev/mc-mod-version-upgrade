@@ -225,6 +225,70 @@ LIB_ALL = ("<!-- port-publish:modrinth:A1@1.21.1 --> <!-- port-publish:curseforg
            "<!-- port-publish:modrinth:A3@1.21.11 --> <!-- port-publish:curseforge:7@1.21.11 -->")
 
 
+def ki_ledger(platforms=None, mc="1.21.1", sev_failure="crash"):
+    e = {"id": "KI-7", "title": "crash on the jar", "override": None, "lowest": mc, "status": {mc: "open"}, "source": "gate",
+         "rubric": {"failure": sev_failure, "visibility": "common", "reach": "normal", "workaround": False},
+         "severity": "S1" if sev_failure == "crash" else "S3"}
+    if platforms:
+        e["platforms"] = platforms
+    return json.dumps({"schema": 1, "issues": [e]})
+
+
+def per_platform():
+    """--platform mr|cf and the known-issues ledger's blocks-publish, per platform (issue #135): a cf-only S1 publishes
+    to Modrinth and holds CurseForge back, naming why; a fork without a ledger publishes as before."""
+    def run(ledger=None, platform=None, tag="m-2-mc1.21.1", branch_props=None, head_ledger=None):
+        pp = load("ppplat")
+        with tempfile.TemporaryDirectory() as t:
+            d = pathlib.Path(t)
+            make_config(d, deps=[])
+            if ledger is not None:
+                (d / ".port").mkdir(exist_ok=True)
+                (d / ".port/KNOWN-ISSUES.json").write_text(ledger, encoding="utf-8")
+            if branch_props:
+                mc = tag.rsplit("-mc", 1)[1]
+                (d / ".port" / mc).mkdir(parents=True)
+                (d / ".port" / mc / "branch.properties").write_text(branch_props, encoding="utf-8")
+            os.environ.update({"GITHUB_REPOSITORY": "o/m", "MODRINTH_TOKEN": "t", "CURSEFORGE_TOKEN": "t"})
+            mc = tag.rsplit("-mc", 1)[1]
+            rel = release([f"m-2_mr.jar", f"m-2_cf.jar"])
+            shown = []
+
+            def git(repo, *a):
+                if a[:2] == ("rev-parse", "--abbrev-ref"):
+                    return R(0, f"neoforge-{mc}\n")
+                if a[0] == "show" and a[1].endswith(":.port/KNOWN-ISSUES.json"):
+                    shown.append(a[1])
+                    return R(0, head_ledger) if head_ledger is not None else R(128)
+                return R(0)
+            calls, up = fakes(pp, rel, git)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = pp.publish(d, tag, dry=False, manual=False, platform=platform)
+            return rc, buf.getvalue(), sorted({u[0] for u in up}), shown
+    rc, out, up, _ = run(ki_ledger(["cf"]))
+    expect(rc == 0 and up == ["modrinth"] and "::warning::curseforge: HELD BACK, not uploaded: 1 open S1 at Minecraft 1.21.1 "
+           "against the cf jar" in out and "KI-7 crash on the jar" in out,
+           f"a cf-only S1: published to Modrinth, CurseForge held back and named: rc={rc} {up} {out}")
+    rc, out, up, _ = run(ki_ledger(["cf"]), platform="cf")
+    expect(rc == 1 and up == [] and "HELD BACK" in out and "modrinth: not asked (--platform cf)" in out,
+           f"--platform cf with a cf-only S1: nothing uploaded, exit 1: rc={rc} {out}")
+    rc, out, up, _ = run(platform="mr")
+    expect(rc == 0 and up == ["modrinth"] and "curseforge: not asked (--platform mr) -- skipped" in out,
+           f"--platform mr, no ledger: Modrinth only: rc={rc} {out}")
+    rc, out, up, _ = run(ki_ledger())
+    expect(rc == 1 and up == [] and out.count("HELD BACK") == 2, f"an S1 on every platform holds both back: {out}")
+    rc, out, up, _ = run(ki_ledger(sev_failure="cosmetic"))
+    expect(rc == 0 and up == ["curseforge", "modrinth"] and "HELD BACK" not in out, f"an open S3 blocks nothing: {out}")
+    rc, out, up, _ = run("{not json")
+    expect(rc == 1 and up == [] and "not valid" in out, f"an unreadable ledger holds every platform back: {out}")
+    # a version branch: the ledger is read from the head branch (port_branch), not the checkout
+    rc, out, up, shown = run(ki_ledger(), tag="m-2-mc1.21.4", branch_props="port_branch=neoforge-1.21.1\n",
+                             head_ledger=ki_ledger(["mr"], mc="1.21.4"))
+    expect(rc == 0 and up == ["curseforge"] and shown == ["refs/remotes/origin/neoforge-1.21.1:.port/KNOWN-ISSUES.json"]
+           and "modrinth: HELD BACK" in out, f"a version branch reads the head branch's ledger: rc={rc} {up} {shown} {out}")
+
+
 def main():
     global ok
     if "--regen" in sys.argv:
@@ -346,6 +410,7 @@ def main():
     # dry run uploads and patches nothing
     rc, out, calls, up = layer_run({"layer": {"branch": "neoforge-1.21.x", "released": ["1.21.4"]}}, deps=[], dry=True)
     expect(rc == 0 and not up and not [c for c in calls if c[1] == "PATCH"] and out.count("modrinth version:") == 3, "dry run is dry")
+    per_platform()
     print("test-port-publish:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

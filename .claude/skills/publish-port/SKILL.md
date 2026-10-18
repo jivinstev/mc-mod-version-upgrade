@@ -120,13 +120,15 @@ problems (the fork, never the original author) and the permission link -- never 
 **Known issues** (a fork with `.port/KNOWN-ISSUES.json` on its head branch, `tools/known-issues.py`): the notes'
 known-issues section comes from the ledger -- `known-issues.py release-notes --repo <fork> --ref <head branch>
 --version <mc> --tag <tag> [--platform mr|cf]` lists what is open for that version at the tag, S1-S3 (with
-`--platform`, only what affects that platform's jar). Publishing still refuses an open S1: `port-publish.py` checks
-the fix ledgers above and does not read this file yet, so before dispatching, run `known-issues.py blocks-publish
---repo <fork> --ref <head branch> --version <mc> --platform mr` and again with `--platform cf`. Exit 1 (it prints
-each S1) means that platform's jar **must not be uploaded**. An issue scoped to one platform (`"platforms": ["cf"]`)
-blocks only that one, and the other platform may proceed. `port-publish.py publish` uploads both platforms in one
-run and cannot leave one out yet, so with exactly one platform blocked do not dispatch it: tell the user which
-platform is blocked and by what, and leave the other platform's upload to them or to a later fixed build.
+`--platform`, only what affects that platform's jar). **Publishing judges each platform by the ledger itself**:
+`port-publish.py publish` runs `known-issues.py blocks-publish` for each platform it is asked for (the head branch's
+ledger: on a version branch the one `port_branch` in `.port/<mc>/branch.properties` names) and uploads only the
+platforms with no open S1 at that Minecraft version; a blocked one is **held back** with a warning naming the S1s that
+hold it (an issue scoped to `"platforms": ["cf"]` holds back CurseForge alone, and Modrinth still goes), and a run where
+every platform asked is held back fails. `--platform mr` or `--platform cf` (default both) publishes one platform alone
+-- a later run for the held-back one, once its S1 is fixed in a newer build, or by hand. A ledger that cannot be read
+holds every platform back. The fix ledgers above are still checked as before, and a fork with no
+`.port/KNOWN-ISSUES.json` publishes as it always did.
 
 **Expect the first run against an old release to be refused** if its ledger shows an open S1: that is the gate
 working, and the answer is to promote and publish the build that fixes it, not to edit the ledger.
