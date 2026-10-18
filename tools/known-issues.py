@@ -8,7 +8,7 @@ each Minecraft version (issue #135, part 1).
                                           [--file PATH ...] [--platform mr|cf ...]
     python3 tools/known-issues.py grade   [LEDGER] ID [--failure F] [--visibility V] [--reach R] [--workaround yes|no]
                                           [--override S --reason WHY [--by WHO] | --clear-override]
-    python3 tools/known-issues.py status  [LEDGER] ID --set MC=STATE [--set ...] [--lowest MC]
+    python3 tools/known-issues.py status  [LEDGER] ID --set MC[,MC...|FROM..TO]=STATE [--set ...] [--lowest MC]
     python3 tools/known-issues.py list    [LEDGER] [--version MC] [--severity S1,S2] [--min S] [--open] [--platform P]
                                           [--json]
     python3 tools/known-issues.py select  [LEDGER] [--budget N] [--touched PATH ...] [--version MC ...]
@@ -104,6 +104,7 @@ Exit codes: 0 ok (reopens: it reopens; blocks-publish: nothing blocks); 1 reopen
 blocks-publish: an open S1 applies to that platform; 2 bad input or an invalid ledger.
 """
 import argparse
+import collections
 import json
 import os
 import pathlib
@@ -910,8 +911,61 @@ def parse_states(items):
 
 
 def next_id(data):
-    n = [int(m.group(1)) for e in data["issues"] for m in [re.match(r"^KI-(\d+)$", e["id"])] if m]
-    return f"KI-{max(n, default=0) + 1}"
+    """The next id in the ledger's own numbering: its most used `<PREFIX>-<n>` prefix, zero-padded as its widest number
+    is (`EXM-024` -> `EXM-025`); `KI-1` for an empty ledger, as before."""
+    got = [(m.group(1), m.group(2)) for e in data["issues"] for m in [re.match(r"^([A-Za-z][A-Za-z0-9]*)-(\d+)$", e["id"])] if m]
+    if not got:
+        return "KI-1"
+    count = collections.Counter(p for p, _n in got)
+    prefix = max(count, key=lambda p: (count[p], p == "KI"))
+    nums = [n for p, n in got if p == prefix]
+    width = max(len(n) for n in nums) if any(n.startswith("0") for n in nums) else 0
+    return f"{prefix}-{max(int(n) for n in nums) + 1:0{width}d}"
+
+
+def similar_titles(a, b):
+    """0..1: how alike two issue titles read (difflib's ratio over the lower-cased words)."""
+    import difflib
+    w = lambda t: " ".join(re.findall(r"[a-z0-9]+", t.lower()))
+    return difflib.SequenceMatcher(None, w(a), w(b)).ratio()
+
+
+def likely_duplicates(data, title, files):
+    """Existing entries a new one probably repeats: one that names a file the new one names and has a similar title
+    (similar_titles >= 0.5), or any whose title is nearly the same (>= 0.85). -> [(id, title, why)]."""
+    out = []
+    for e in data["issues"]:
+        sim = similar_titles(title, e.get("title", ""))
+        same = sorted(set(files or ()) & set(e.get("files") or ()))
+        if same and sim >= 0.5:
+            out.append((e["id"], e.get("title", ""), f"same file {same[0]}, similar title"))
+        elif sim >= 0.85:
+            out.append((e["id"], e.get("title", ""), "nearly the same title"))
+    return out
+
+
+def expand_states(items, have=()):
+    """`--set` values, each `MC=STATE`, `MC,MC,...=STATE` or `FROM..TO=STATE` (FROM, TO and every version the entry
+    already lists between them) -> {MC: STATE}."""
+    out = {}
+    for it in items or ():
+        vs, sep, st = it.partition("=")
+        if not sep:
+            raise Invalid(f"--set/--status {it!r}: MC=STATE")
+        for v in (x.strip() for x in vs.split(",")):
+            lo, dots, hi = v.partition("..")
+            if dots:
+                for x in (lo, hi):
+                    if not MC_RE.match(x):
+                        raise Invalid(f"--set {it!r}: {x!r} is not a Minecraft version")
+                span = {lo, hi} | {x for x in have if mc_key(lo) <= mc_key(x) <= mc_key(hi)}
+                for x in span:
+                    out[x] = st.strip()
+            elif not MC_RE.match(v):
+                raise Invalid(f"--set {it!r}: {v!r} is not a Minecraft version")
+            else:
+                out[v] = st.strip()
+    return out
 
 
 def regrade(e, a):
@@ -965,7 +1019,9 @@ def build_parser():
     p.add_argument("--override", choices=SEVERITIES); p.add_argument("--reason"); p.add_argument("--by")
     p.add_argument("--clear-override", action="store_true")
     p = common(sub.add_parser("status", help="set an issue's state at Minecraft versions"))
-    p.add_argument("id"); p.add_argument("--set", action="append", required=True, metavar="MC=STATE")
+    p.add_argument("id"); p.add_argument("--set", action="append", required=True, metavar="MC[,MC...|FROM..TO]=STATE",
+                                         help="one version, a comma list, or FROM..TO (both ends and every version the "
+                                              "entry lists between them); repeatable")
     p.add_argument("--lowest")
     p = common(sub.add_parser("list", help="the issues, filtered by version and severity"))
     p.add_argument("--version"); p.add_argument("--severity", help="comma-separated, e.g. S1,S2")
@@ -1055,6 +1111,9 @@ def run(argv):
         i = a.id or next_id(data)
         if any(e["id"] == i for e in data["issues"]):
             raise Invalid(f"issue {i} exists already")
+        for d_id, d_title, why in likely_duplicates(data, a.title.strip(), a.files):
+            print(f"known-issues: WARNING {i} may repeat {d_id} ({why}: {d_title!r}): if it is the same defect, drop "
+                  f"{i} and add to {d_id} instead (known-issues.py status/grade)", file=sys.stderr)
         e = {"id": i, "title": a.title.strip(), "override": None, "lowest": a.lowest, "source": a.source,
              "rubric": {"failure": a.failure, "visibility": a.visibility, "reach": a.reach,
                         "workaround": yesno(a.workaround)},
@@ -1083,7 +1142,7 @@ def run(argv):
         return 0
     if a.cmd == "status":
         e = find(data, a.id)
-        e["status"].update(parse_states(a.set))
+        e["status"].update(expand_states(a.set, e["status"]))
         if a.lowest:
             e["lowest"] = a.lowest
         write_ledger(path, data)
@@ -1469,6 +1528,28 @@ def self_check():
         rc, o = cli("reopens", *L, "--version", "1.21.8", "--id", "KI-7")
         expect(rc == 0, f"reopens is unchanged by platforms: {o}")
         cli("status", *L, "KI-7", "--set", "1.21.8=fixed@abcdef1")
+        # weekly-round dry run (2026-10-18): new ids follow the ledger's own numbering, one --set takes several versions,
+        # and an entry that repeats one (the same file, a similar title) is warned about
+        led2 = d / "other"
+        L2 = ("--ledger", str(led2 / LEDGER_NAME))
+        base = ("--failure", "functional", "--visibility", "common", "--reach", "feature", "--workaround", "no")
+        cli("add", *L2, "--id", "EXM-023", "--title", "the panel closes on its own", *base, "--lowest", "1.21.10",
+            "--file", "src/main/java/com/example/mod/Panel.java")
+        cli("add", *L2, "--id", "EXM-024", "--title", "fog drawn with the wrong shape", *base, "--lowest", "1.21.10",
+            "--status", "1.21.10=open", "--status", "1.21.11=open", "--status", "26.1.2=open", "--status", "26.3=open")
+        rc, o = cli("add", *L2, "--title", "a cursor drawn transparent", *base, "--lowest", "26.3")
+        expect(rc == 0 and o.startswith("EXM-025: ") and "WARNING" not in o, f"add follows the ledger's prefix: {o}")
+        rc, o = cli("add", *L2, "--title", "The panel closes on its own again", *base, "--lowest", "26.3",
+                    "--file", "src/main/java/com/example/mod/Panel.java")
+        expect(rc == 0 and "EXM-026" in o and "WARNING EXM-026 may repeat EXM-023" in o, f"a likely duplicate is warned about: {o}")
+        rc, o = cli("status", *L2, "EXM-024", "--set", "1.21.10,1.21.11=fixed@abc1234", "--set", "26.1.2..26.3=fixed@def5678")
+        st = find(read_ledger(led2 / LEDGER_NAME), "EXM-024")["status"]
+        expect(rc == 0 and st == {"1.21.10": "fixed@abc1234", "1.21.11": "fixed@abc1234", "26.1.2": "fixed@def5678",
+                                  "26.3": "fixed@def5678"}, f"status --set takes a list and a range in one call: {st} {o}")
+        rc, o = cli("status", *L2, "EXM-024", "--set", "1.21.10..x=open")
+        expect(rc == 2, f"a bad range is refused: {o}")
+        expect(next_id({"issues": []}) == "KI-1" and next_id({"issues": [{"id": "KI-9"}]}) == "KI-10",
+               "an empty ledger and a KI- ledger number as before")
         # a multi-mod repository: one ledger per mod
         rc, o = cli("add", *L, "--mod", "examplemod", "--title", "t", "--failure", "kick", "--visibility", "rare",
                     "--reach", "normal", "--workaround", "no", "--lowest", "1.21.1")

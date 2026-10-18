@@ -415,7 +415,8 @@ included), PR, pre-release and merge asks.
      <v> --since <round start> --print >> .port/<v>/COST.md`, committed with the version's records.
    Post a progress comment on the plan issue as each version finishes (gates, review, the pre-release tag).
 5. **New findings.** Grade each with `known-issues.py add` (the rubric's inputs, `--lowest` its lowest affected
-   version). At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
+   version, `--file` each file it is in); a WARNING that it may repeat an entry means read that entry first and record
+   the finding there when it is the same defect. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
    reopens it (fixed at its lowest open version, only that fix cascaded, by step 3's rule: from a version branch, or
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
    ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
@@ -424,8 +425,8 @@ included), PR, pre-release and merge asks.
    the ledger changes and the new findings with their grades -- and the **cost and time table**:
    `python3 tools/port-cost.py round-table --since <round start> --fork <owner/repo>=<checkout> ...` (per fork, per
    version, with totals); then close the issue (state completed). An issue the round closed is never carried forward.
-7. **Afterwards:** set the ledger statuses on each head branch (`known-issues.py status <ID> --set <v>=fixed@<commit>`
-   for every version a fix reached, committed alone), then refresh the README Ports block ("README Ports block" below).
+7. **Afterwards:** set the ledger statuses on each head branch (`known-issues.py status <ID> --set <v>,<v>=fixed@<commit>`,
+   or `--set <from>..<to>=fixed@<commit>`, for every version a fix reached, in one call per issue, committed alone), then refresh the README Ports block ("README Ports block" below).
 
 ## README Ports block
 

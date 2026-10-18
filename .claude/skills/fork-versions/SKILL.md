@@ -340,11 +340,18 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
         --lowest 1.21.4 --status 1.21.4=open --status 1.21.5=open [--source review] [--file PATH] [--notes N]
     python3 tools/known-issues.py grade   --repo DIR KI-3 [--reach feature] [--override S2 --reason WHY --by owner]
     python3 tools/known-issues.py status  --repo DIR KI-3 --set 1.21.4=fixed@<commit> --set 1.21.5=wontfix:<reason>
+    python3 tools/known-issues.py status  --repo DIR KI-3 --set 1.21.10,1.21.11=fixed@<commit> --set 26.1.2..26.3=fixed@<c2>
     python3 tools/known-issues.py list    --repo DIR --ref neoforge-1.21.1 [--version 1.21.5] [--min S2] [--open]
     python3 tools/known-issues.py select  --repo DIR [--budget 3] [--touched PATH ...] [--version V ...] [--add ID] [--remove ID]
     python3 tools/known-issues.py render-issue  --repo DIR          # the pinned issue: issue by version, by severity
     python3 tools/known-issues.py release-notes --repo DIR --version 1.21.5 --tag <tag> [--min S3] [--platform mr|cf]
     python3 tools/known-issues.py blocks-publish --repo DIR --version 1.21.5 --platform mr|cf   # exit 1: an open S1
+
+`add` numbers a new entry in the ledger's own numbering (its most used prefix, zero-padded as it is: `EXM-025` after
+`EXM-024`; `KI-1` for a new ledger) unless `--id` names it, and warns on stderr about a likely duplicate -- an entry that
+names the same `--file` with a similar title, or any with nearly the same title: read it, and add to that entry instead
+when it is the same defect. `status --set` takes one version, a comma list or `FROM..TO` (both ends and every version
+the entry lists between them).
 
 `select` is the default choice of what a run takes: every open S1, then S2s lowest affected version first up to
 `--budget`, then any S3 in a file the run already touches; the owner's `--add` / `--remove` apply last and the output
