@@ -400,6 +400,28 @@ def pinned_releases(workflow_text):
     return sorted({m for ln in (workflow_text or "").splitlines() if ".m2/repository" in ln for m in PIN_RE.findall(ln)})
 
 
+PRERELEASE_MARK = "**Library pre-release (not done):**"    # tools/layer-deps.py writes it into a version's DEPS.md
+PRERELEASE_KEY = "port_jar_prerelease."                       # ... and beside the pin in its branch.properties
+
+
+def prerelease_pin_blockers(tag, read):
+    """Blockers for promoting `tag` of a version branch whose build is pinned to a library PRE-RELEASE that was not done
+    when it was pinned (tools/layer-deps.py: DEPS.md's "Library pre-release (not done)" mark, or port_jar_prerelease.
+    in .port/<mc>/branch.properties at the tag). read(path) -> the file at the tag, or None. --with-dependency does
+    not lift it: promoting the library alongside does not make its version done; re-resolve the pin once it is.
+    A tag without -mc<v>, or with neither file (a single-version fork), never waits."""
+    m = re.search(r"-mc(\d[\d.]*)$", tag)
+    if not m:
+        return []
+    mc = m.group(1)
+    deps, props = read(f".port/{mc}/DEPS.md") or "", read(f".port/{mc}/branch.properties") or ""
+    if PRERELEASE_MARK in deps or re.search(r"(?m)^" + re.escape(PRERELEASE_KEY), props):
+        return [f"{tag} is built against a library pre-release whose {mc} was not done (.port/{mc}/DEPS.md \"Library "
+                "pre-release (not done)\"): once the library's version is done, re-resolve the pin (layer-deps.py resolve "
+                "--port-release), cut a new pre-release and promote that one; --with-dependency does not lift this"]
+    return []
+
+
 def dependency_blockers(workflow_text, release_of, with_deps=(), own=None):
     """(blockers, notes) for promoting: each pinned dependency release that is still a pre-release blocks, unless it
     is named in with_deps (promoted together); one that cannot be read is a note (the check is best effort).
@@ -473,6 +495,17 @@ def promote(argv):
                     return json.loads(x.stdout)
             return json.loads(_get(f"https://api.github.com/repos/{r_}/releases/tags/{t_}"))
         why, notes = dependency_blockers(wf, release_of, a.with_dependency, a.fork)
+
+        def at_tag(path):
+            r_ = subprocess.run(["git", "-C", a.repo or ".", "show", f"{a.tag}:{path}"], capture_output=True, text=True,
+                                encoding="utf-8")
+            if r_.returncode == 0:
+                return r_.stdout
+            try:
+                return _get(f"https://raw.githubusercontent.com/{a.fork}/{a.tag}/{path}")
+            except Exception:              # noqa: BLE001 -- absent at the tag (or unreadable): no mark read
+                return None
+        why = why + prerelease_pin_blockers(a.tag, at_tag)
         for n in notes:
             print("note: " + n)
         if why:
@@ -862,6 +895,14 @@ def self_check():
     ok &= pinned_releases(pre_pin) == [("o/lib", "lib-1.1-mc1.21.1")]
     ok &= dependency_blockers(pre_pin, look) == (["o/lib@lib-1.1-mc1.21.1 is still a pre-release"], [])
     ok &= dependency_blockers(pre_pin, look, ["o/lib"]) == ([], [])
+    # review of #147: a version built against a library pre-release that was not done is never promoted, even with
+    # --with-dependency; a single-version tag (no .port/) and a re-resolved pin never wait
+    tree = {".port/1.21.4/DEPS.md": "x\n**Library pre-release (not done):** `com.example:lib` ...\n"}
+    ok &= len(prerelease_pin_blockers("dep-1.0-mc1.21.4", tree.get)) == 1
+    ok &= len(prerelease_pin_blockers("dep-1.0-mc1.21.4",
+                                      {".port/1.21.4/branch.properties": "port_jar_prerelease.com.example\\:lib=x\n"}.get)) == 1
+    ok &= prerelease_pin_blockers("dep-1.0-mc1.21.1", {}.get) == [] and prerelease_pin_blockers("dep-1.0", tree.get) == []
+    ok &= prerelease_pin_blockers("dep-1.0-mc1.21.4", {".port/1.21.4/DEPS.md": "pinned to lib-1.0 (done)\n"}.get) == []
     ok &= dependency_blockers(fixture(deps=True), look) == ([], [])
     ok &= dependency_blockers(fixture(deps=False), look) == ([], []) and pinned_releases(fixture(deps=False)) == []
     unread = dependency_blockers(pre_pin, lambda r_, t_: (_ for _ in ()).throw(OSError("offline")))

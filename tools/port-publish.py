@@ -296,6 +296,15 @@ def gate(repo, cfg, tag, release, manual=False, layer_branch=None):
     elif git(repo, "merge-base", "--is-ancestor", f"refs/tags/{tag}", "HEAD").returncode != 0:
         why.append(f"{tag} is not an ancestor of the checked-out branch")
     why += ledger_errors(cfg, tag)
+    m_ = re.search(r"-mc(\d[\d.]*?)(?:-r\d+)?$", tag)
+    if m_:   # a version branch built against a library pre-release that was not done (tools/layer-deps.py's mark)
+        mc_ = m_.group(1)
+        deps_ = git(repo, "show", f"{tag}:.port/{mc_}/DEPS.md")
+        props_ = git(repo, "show", f"{tag}:.port/{mc_}/branch.properties")
+        if (deps_.returncode == 0 and "**Library pre-release (not done):**" in deps_.stdout) or \
+                (props_.returncode == 0 and re.search(r"(?m)^port_jar_prerelease\.", props_.stdout)):
+            why.append(f"{tag} is built against a library pre-release whose {mc_} was not done (.port/{mc_}/DEPS.md): "
+                       "re-resolve the pin once the library's version is done, and publish that release")
     for d in ([] if layer_branch else cfg.get("dependencies", [])):
         if d.get("port") and d.get("type") == "required":
             dtag = pinned_dependency_tag(repo, d["port"], tag)
@@ -1141,6 +1150,15 @@ def self_check():
         expect(any("must not be released" in w for w in why), f"open S1 refuses: {why}")
         expect(any("names no column" in w for w in gate(".", cfg, "m-3-mc1.21.1", good)), "unknown tag refuses")
         expect(any("pre-release" in w for w in gate(".", cfg, "m-2-mc1.21.1", {**good, "prerelease": True})), "pre-release refuses")
+        class RS:
+            def __init__(self, rc, out): self.returncode, self.stdout = rc, out
+        real_git = git
+        git = lambda repo, *a: RS(0, "**Library pre-release (not done):** `com.example:lib`\n") if a[:1] == ("show",) \
+            and a[1].endswith("/DEPS.md") else RS(0, "")
+        why_pre = gate(".", cfg, "m-2-mc1.21.1", good)
+        git = real_git
+        expect(any("library pre-release" in w for w in why_pre),
+               f"a release built against a library pre-release that was not done is not published: {why_pre}")
         expect(any("not published by" in w for w in gate(".", cfg, "m-2-mc1.21.1", {**good, "author": {"login": "x"}})), "foreign author refuses")
         expect(any("permission" in w for w in gate(".", {**cfg, "permission": ""}, "m-2-mc1.21.1", good)), "no permission refuses")
         expect(any("auto is off" in w for w in gate(".", {**cfg, "auto": False}, "m-2-mc1.21.1", good)), "auto off refuses unattended")
