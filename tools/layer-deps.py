@@ -241,6 +241,8 @@ def render_block(rows):
             lines.append(f"port_jar.{key(ga)}={r['pin']}")
         if r.get("pin_dev"):        # a jar copied from a sibling's checkout (version branches): development only
             lines.append(f"port_jar_dev.{key(ga)}={r['pin_dev']}")
+        if r.get("pin") and r.get("prerelease"):   # pinned to a library pre-release that is not done: kept with the pin
+            lines.append(f"{PRERELEASE_KEY}{key(ga)}=" + " ".join(str(r["prerelease"]).split()))
     lines.append(END)
     return "\n".join(lines) + "\n"
 
@@ -796,6 +798,9 @@ def library_done_release(repo, tag, target, get=None, _seen=None):
         return False, f"at release {tag}: tools/fork-port.py could not be loaded: cannot judge the done list", []
     tdir = f".multiversion/targets/{target}"
     try:
+        if raw(f"{tdir}/GATES-RED.md") is not None:
+            return False, (f"at release {tag}: the last full gate run of {target} was red ({tdir}/GATES-RED.md): its "
+                           "older green GATES.md does not count"), []
         gates = raw(f"{tdir}/GATES.md") or ""
         ok, why, sha = gates_record(gates, target)
         if not ok:
@@ -1015,7 +1020,10 @@ def library_done_branch_release(repo, tag, target):
 RUNTIME_CONFS = {"implementation", "api", "modImplementation", "jarJar"}
 
 
-def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, allow_undone=False):
+PRERELEASE_KEY = "port_jar_prerelease."     # beside port_jar.<g:a>: that pin is a library pre-release not done yet
+
+
+def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, allow_undone=False, prereleases=None):
     """(rows, stop). lookups overrides the network (self-check). dry_run: a sibling checkout is not built or installed
     (its row says what would be). pins: {group:module: (substitute coord, port_jar value)} the target's block already
     holds -- a released sibling's pin is kept when no --port-checkout/--port-release names it this run.
@@ -1066,6 +1074,9 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
             if spec["repo"] not in checkouts and pin and pin[0] == ver and pin[1]:
                 # pinned by an earlier `resolve --port-release`, and nothing this run names the sibling: keep the pin
                 row.update({"to": ver, "pin": pin[1], "source": f"{spec['repo']}: kept the earlier --port-release pin"})
+                if (prereleases or {}).get(ga):
+                    # a kept pin keeps what it was: a library pre-release whose version was not done when it was pinned
+                    row["prerelease"] = prereleases[ga]
                 if not dry_run:
                     # the pin alone serves CI (layer-deps fetch); put the jar into this machine's mavenLocal too, so a
                     # fresh checkout's compile resolves the substitute -- same sha256-checked download as fetch
@@ -1129,6 +1140,16 @@ def current_pins(repo, target):
     return {ga: (x.get("substitute"), x["port_jar"]) for ga, x in got.items() if x.get("port_jar")}
 
 
+def current_prereleases(repo, target):
+    """{group:module: why} for each pin of the block marked as a library pre-release (PRERELEASE_KEY)."""
+    tp = props_file(repo, target)
+    text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
+    if BEGIN not in text or END not in text:
+        return {}
+    return {k.replace("\\:", ":"): v for k, v in
+            re.findall(r"(?m)^" + re.escape(PRERELEASE_KEY) + r"(.+?)=(.*?)\s*$", text[text.index(BEGIN):text.index(END)])}
+
+
 def write(repo, target, rows, stop):
     t = target_dir(repo, target)
     if not t.is_dir():
@@ -1158,7 +1179,8 @@ def cmd_resolve(a):
             print(f"layer-deps: --port-release must be owner/repo@TAG, got {s!r}"); return 2
         checkouts[k] = v
     rows, stop = resolve(repo, a.target, checkouts, dry_run=a.dry_run, pins=current_pins(repo, a.target),
-                         allow_undone=getattr(a, "allow_undone_library", False))
+                         allow_undone=getattr(a, "allow_undone_library", False),
+                         prereleases=current_prereleases(repo, a.target))
     for r in rows:
         state = ("-> " + r["to"]) if r.get("to") else ("DROPPED " + r["drop"]) if r.get("drop") else \
                 ("REFUSED " + r["refused"]) if r.get("refused") else ("MISSING " + r.get("missing", ""))
@@ -1280,6 +1302,22 @@ def self_check():
         expect(not ported and current_pins(repo, "1.21.4") == {"com.example:lib": pin},
                f"an earlier port_jar pin is kept: {current_pins(repo, '1.21.4')} {ported}")
         expect(pinned == [("com.example:lib", "1.0-mc1.21.4", pin[1])], f"a kept pin is installed into mavenLocal: {pinned}")
+        # a kept pin that was a library pre-release stays marked (review of #147: a later resolve that did not name the
+        # library dropped the DEPS.md mark, and the dependent read done)
+        rows, stop = resolve(repo, "1.21.4", {}, lk_p, pins={"com.example:lib": pin})
+        rows[[r["module"] for r in rows].index("lib")]["prerelease"] = "lib-1.0-mc1.21.4 is a pre-release; not done"
+        write(repo, "1.21.4", rows, stop)
+        pre_ = current_prereleases(repo, "1.21.4")
+        rows, stop = resolve(repo, "1.21.4", {}, lk_p, pins=current_pins(repo, "1.21.4"), prereleases=pre_)
+        write(repo, "1.21.4", rows, stop)
+        md_ = (repo / ".multiversion/targets/1.21.4/DEPS.md").read_text(encoding="utf-8")
+        expect(pre_ == {"com.example:lib": "lib-1.0-mc1.21.4 is a pre-release; not done"} and PRERELEASE_MARK in md_
+               and current_prereleases(repo, "1.21.4") == pre_ and not ported,
+               f"a kept pre-release pin keeps its mark in the block and in DEPS.md: {pre_} {md_}")
+        rows, stop = resolve(repo, "1.21.4", {}, lk_p, pins=current_pins(repo, "1.21.4"))
+        write(repo, "1.21.4", rows, stop)
+        expect(not current_prereleases(repo, "1.21.4"), "control: without the carried mark it is gone")
+        del pinned[1:]                           # the kept-pin installs above are not the dry-run case's
         rows, stop = resolve(repo, "1.21.4", {"owner/lib": "newtag"}, lk_p, pins={"com.example:lib": pin})
         expect(ported == ["com.example:lib"], "a run that names the sibling resolves it afresh")
         rows, stop = resolve(repo, "1.21.4", {}, lk_p, pins={"com.example:lib": ("com.example:lib:0.9-mc1.21.4", pin[1])})
@@ -1509,6 +1547,10 @@ def self_check():
         rel_done("a release whose GATES.md is current at the tag, every overlay reviewed ok at an ancestor of the tag: done")
         expect(any(u.endswith("/compare/abc1234...tag9") for u in seen) and any("/git/trees/tag9" in u for u in seen),
                "the release check reads the compare API from GATES.md's commit and the tag's tree")
+        files[".multiversion/targets/1.21.4/GATES-RED.md"] = "Red full gate run at `abc1234` for Minecraft 1.21.4\n"
+        r_ = rel_done("a release whose last full gate run was red (GATES-RED.md at the tag): not done", False)
+        expect("GATES-RED.md" in r_[1], f"the red record is named: {r_}")
+        del files[".multiversion/targets/1.21.4/GATES-RED.md"]
         cmps["abc1234"]["files"].append({"filename": "src/main/java/A.java"})
         rel_done("a release with a source change since the gates: not done", False)
         cmps["abc1234"].update(status="diverged", files=[])

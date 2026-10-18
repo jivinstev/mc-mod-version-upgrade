@@ -1139,7 +1139,7 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
         if fp().UNDONE_LIBRARY_MARK in deps:
             out.append("built against a library version that is not done (--allow-undone-library, DEPS.md \"Development "
                        "only\"): re-resolve with --port-release once the library's version is done")
-        if LIBRARY_PRERELEASE_MARK in deps:
+        if LIBRARY_PRERELEASE_MARK in deps or any(k.startswith("port_jar_prerelease.") for k in info(root, t)):
             out.append("built against a library pre-release whose version is not done (DEPS.md \"Library pre-release\"): "
                        "fine for this version's pre-release; done, a full Release and promotion wait until the library's "
                        "version is done -- then re-resolve with --port-release")
@@ -1418,7 +1418,7 @@ def expected_tree(lay, t, parent, port_commit, parent_files=None):
     return files, notes
 
 
-RECORD_COPY = ("GATES.md", "COST.md", "DEPS.md", "TEST-ITEMS.md", "RESIDUE.md", "BEHAVIOUR.json", "renames.tsv",
+RECORD_COPY = ("GATES.md", "GATES-RED.md", "COST.md", "DEPS.md", "TEST-ITEMS.md", "RESIDUE.md", "BEHAVIOUR.json", "renames.tsv",
                "moves.generated.tsv", "drops.txt", "logs-known-absent.txt")
 LAYER_ONLY_KEYS = re.compile(r"^(?:inherits|mixin_add\.|mixin_add_only\.|mixin_remove_only\.|shared_chain)")
 
@@ -4145,6 +4145,39 @@ def _check_prerelease_pin(expect):
         after = target_done(r, "1.21.4")
         expect(not any("library pre-release" in x for x in before) and any("library pre-release" in x for x in after),
                f"a version pinned to a library pre-release is not done (control: without the mark it was not said): {after}")
+        w5, _w = worktree_for(r, "1.21.5")                  # the mark kept beside the pin in branch.properties counts too
+        bp = w5 / f"{REC}/1.21.5/{BRANCH_PROPS}"
+        bp.write_text(bp.read_text(encoding="utf-8") + "port_jar_prerelease.com.example\\:lib=lib-1.0-mc1.21.5 not done\n",
+                      encoding="utf-8")
+        git(w5, "commit", "-qam", "1.21.5: the pin's pre-release mark", check=True)
+        expect(any("library pre-release" in x for x in target_done(r, "1.21.5")),
+               "the pre-release mark beside the pin in branch.properties keeps the version not done")
+        # a red full run on record (GATES-RED.md beside an older green GATES.md) keeps a version branch not done
+        w3, _w = worktree_for(r, "1.21.3")
+        before3 = target_done(r, "1.21.3")
+        (w3 / f"{REC}/1.21.3/GATES-RED.md").write_text("Red full gate run at `abc1234` for Minecraft 1.21.3\n", encoding="utf-8")
+        git(w3, "add", "-A", check=True); git(w3, "commit", "-qm", "1.21.3: a red full run", check=True)
+        after3 = target_done(r, "1.21.3")
+        expect(not any("GATES-RED.md" in x for x in before3) and any("GATES-RED.md" in x for x in after3),
+               f"version branch: GATES-RED.md keeps it not done (gates_problems): {after3}")
+    # migrate carries a layer target's GATES-RED.md into .port/<t>/ (so a target not done there is not done after)
+    import types
+    with tempfile.TemporaryDirectory() as d:
+        mv = pathlib.Path(d) / ".multiversion"
+        (mv / "targets/1.21.4").mkdir(parents=True)
+        for n in ("GATES.md", "GATES-RED.md"):
+            (mv / "targets/1.21.4" / n).write_text(f"{n}\n", encoding="utf-8")
+        lay = types.SimpleNamespace(mv=mv, dir=pathlib.Path(d), base={"minecraft_version": "1.21.1"}, commit="c" * 40,
+                                    shared_chain=lambda t: [])
+        got = records_of(lay, "1.21.4", None, "p" * 40, "", {}, {}, [])
+        expect(f"{REC}/1.21.4/GATES-RED.md" in got and f"{REC}/1.21.4/GATES.md" in got,
+               f"migrate copies GATES-RED.md with GATES.md: {sorted(got)}")
+    # the run records a reused worktree may carry are records for ci-gates.py too (never jar content)
+    import ast
+    names = {e.value for n in ast.parse((ROOT / "tools/ci-gates.py").read_text(encoding="utf-8")).body
+             if isinstance(n, ast.Assign) and any(getattr(x, "id", "") == "GATE_OUTPUTS" for x in n.targets)
+             for e in getattr(n.value, "elts", [])}
+    expect(set(RUN_OUTPUT_NAMES) <= names, f"RUN_OUTPUT_NAMES are all ci-gates.py GATE_OUTPUTS: {set(RUN_OUTPUT_NAMES) - names}")
 
 
 def _check_untaken_head(expect):
