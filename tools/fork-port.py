@@ -802,6 +802,8 @@ REVIEW_OUTPUTS = ("GATES.md", "GATES-RED.md", "COST.md", "RESIDUE.md", "REVIEW.m
                                                # still read as a reviewed input by layer-inventory.py's account
                   "INVENTORY-CHECK.json",      # layer-inventory.py's account, rewritten by every done check
                   "DEPS.md",                   # layer-deps.py resolve's table, rewritten by every setup (machine paths)
+                  "DRIFT.md",                  # drift_stop's log of drift accepted or left out by a round's plan (a
+                                               # version branch's .port/<v>/DRIFT.md), appended by a run after review
                   "KNOWN-ISSUES.json")         # the known-issues ledger (tools/known-issues.py): a record of findings
 # Files of a target's directory that are not in a player's jar: a change to them does not make GATES.md stale
 # (tools/layer-deps.py NOT_JAR, the same list). REMERGE.json is layer-sync's record of an overlay the authors' change
@@ -5199,6 +5201,12 @@ def self_check_review131():
             g("add", "-A"); g("commit", "-qm", "deps")
             w(repo / ".multiversion/targets/1.21.4/DEPS.md", "# Dependencies\n\nresolved on another machine\n")
             expect(target_done(repo, "1.21.4") == [], f"a rewritten DEPS.md keeps the review current: {target_done(repo, '1.21.4')}")
+            # DRIFT.md (drift_stop appends to it; on a version branch it is .port/<v>/DRIFT.md, in the version's own
+            # directory) is a run output too: recording an accepted drift makes neither the review nor the gates stale
+            w(repo / ".multiversion/targets/1.21.4/DRIFT.md", "- 2026-10-20 1.21.4: accepted with --accept-upstream-drift: x\n")
+            g("add", "-A"); g("commit", "-qm", "drift recorded")
+            expect("DRIFT.md" in REVIEW_OUTPUTS and target_done(repo, "1.21.4") == [],
+                   f"a DRIFT.md committed after the review keeps it current: {target_done(repo, '1.21.4')}")
     case("finding 7", f7)
 
     # ---- finding 11: --check-done writes nothing; a missing or stale prepared tree is said precisely, or re-prepared
