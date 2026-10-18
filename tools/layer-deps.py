@@ -25,7 +25,10 @@ WHERE A BUILD IS LOOKED UP
                 uploaded to both) and that Modrinth project's builds are used. The DEPS.md row names which.
   maven.modrinth  that Modrinth project's builds.
   a sibling port  the coordinate the fork's port-ci.yml puts into mavenLocal from a sibling port's release
-                (`--dep-jar`). Its layer writes one jar per target (`<asset>-mc<t>.jar`); with
+                (`--dep-jar`). Its layer writes one jar per target (`<asset>-mc<t>.jar`); a version-branch
+                library's release (a tag ending -mc<t>) holds the jars as its build names them, often per
+                variant (`<name>-<ver>_mr.jar`): the asset is read from the release's own asset list, the one of
+                the pinned asset's name and variant; with
                 --port-checkout owner/repo=DIR it is taken from DIR/build/mc<t>/libs (built with that checkout's
                 .multiversion/build.sh <t> assemble when missing) and installed into ~/.m2 as version <v>-mc<t>.
   anything else (a `${...}` version, a maven the authors run) is left alone: the target's prop.* lines carry it.
@@ -415,11 +418,74 @@ def checkout_lock(co, target):
     return m.CheckoutLock(co, "layer-deps.py", target, env=env)
 
 
+def port_version(version, target):
+    """The coordinate version a sibling's jar for `target` is installed under: <version>-mc<target>. A version that
+    already ends in -mc<target> (a version branch's workflow pins the version's own release, `1.1-mc1.21.8`) is not
+    suffixed again (it was: `1.1-mc1.21.8-mc1.21.8`)."""
+    return version if version.endswith(f"-mc{target}") else f"{version}-mc{target}"
+
+
+SIDE_JAR = re.compile(r"-(?:sources|javadoc|api|dev|slim)\.jar$")
+
+
+def asset_shape(name):
+    """A jar's name with its versions blanked: `lib-1.1.9_mr.jar`, `lib-1.1.8_mr-mc1.21.8.jar` -> `lib-#_mr.jar`; what
+    stays is the mod's name and the variant (`_mr`, `_cf`, `-fabric`)."""
+    return re.sub(r"\d+(?:\.\d+)+(?:[-+][\w.]*\d[\w.]*)?", "#", re.sub(r"-mc\d+(?:\.\d+)*", "", name))
+
+
+def pick_release_asset(names, want, target):
+    """The release asset that stands for `want` (the asset the workflow pins, often of an older release) among a
+    version branch's release `names`: the same name, or <stem>-mc<target>.jar, or the one jar of the same shape
+    (asset_shape: the variant honoured, so `_cf` never stands in for `_mr`), or the release's only jar. -> (name, None)
+    or (None, why)."""
+    jars = [n for n in names if n.endswith(".jar") and not SIDE_JAR.search(n)]
+    stem = want[:-4]
+    for n in (want, f"{stem}-mc{target}.jar"):
+        if n in jars:
+            return n, None
+    same = [n for n in jars if asset_shape(n) == asset_shape(want)]
+    if len(same) == 1:
+        return same[0], None
+    if len(jars) == 1 and not same:
+        return jars[0], None
+    return None, (f"no asset of the release stands for {want} ({'several' if same else 'none'} of the same name and "
+                  f"variant among {', '.join(jars) or 'no jar'})")
+
+
+def release_assets(repo, tag, get=None):
+    """[(name, download url)] of a GitHub release (the REST API; GH_TOKEN/GITHUB_TOKEN when set), or None."""
+    tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    try:
+        rel = json.loads((get or _get)(f"https://api.github.com/repos/{repo}/releases/tags/{tag}",
+                                       {"Authorization": f"Bearer {tok}"} if tok else None))
+        return [(x["name"], x.get("browser_download_url") or f"https://github.com/{repo}/releases/download/{tag}/{x['name']}")
+                for x in rel.get("assets", []) if x.get("name")]
+    except Exception:          # noqa: BLE001 -- the caller falls back to the names it can guess
+        return None
+
+
 def resolve_port(ga, spec, target, checkouts):
     repo = spec["repo"]
     stem = spec["asset"][:-4]
-    ver = f"{spec['version']}-mc{target}"
+    ver = port_version(spec["version"], target)
     co = checkouts.get(repo)
+    if isinstance(co, str) and co.endswith(f"-mc{target}"):
+        # a version branch's release (<mod>-<ver>-mc<t>): its jars are named as the build names them, often with a
+        # variant (lib-1.1.9_mr.jar); read the release's actual assets rather than guessing a name
+        assets = release_assets(repo, co)
+        if assets is not None:
+            name, why = pick_release_asset([n for n, _u in assets], spec["asset"], target)
+            if not name:
+                return {"missing": f"{repo}'s release {co}: {why}", "source": repo}
+            url = dict(assets)[name]
+            try:
+                data = _get(url)
+            except Exception as e:
+                return {"missing": f"{repo}'s release {co}: cannot download {name} ({e})", "source": repo}
+            install_m2(ga, ver, data)
+            sha = hashlib.sha256(data).hexdigest()
+            return {"to": f"{ga}:{ver}", "pin": f"{url} {sha}", "source": f"{repo} release {co}: {name} (sha256 {sha[:16]}…)"}
     if isinstance(co, str):         # --port-release owner/repo@tag: the sibling's released layer jar, pinned for CI
         url = f"https://github.com/{repo}/releases/download/{co}/{stem}-mc{target}.jar"
         try:
@@ -977,7 +1043,7 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
             spec = ports[ga]
             row["role"] = roles.get(f"port:{spec['repo']}", "required")
             pin = pins.get(ga)
-            ver = f"{ga}:{spec['version']}-mc{target}"
+            ver = f"{ga}:{port_version(spec['version'], target)}"
             co = checkouts.get(spec["repo"])
             if co is not None:
                 # library first: the dependent's target T builds only against a library T that is done
@@ -1263,6 +1329,32 @@ def self_check():
         expect(stop is None and ported == ["com.example:lib"] and by["lib"].get("undone") == "no green Gate C"
                and "`--allow-undone-library`" in md and "com.example:lib" in md.split("Development only")[1],
                f"--allow-undone-library on a checkout: used, and DEPS.md says so: {stop} {md}")
+        # --port-release of a version branch's release (weekly-round dry run, 2026-10-18): the coordinate is not suffixed
+        # twice, and the jar is the release's own asset of the pinned name and variant, not <asset>-mc<t>.jar
+        expect(port_version("1.1-mc1.21.8", "1.21.8") == "1.1-mc1.21.8" and port_version("1.1", "1.21.8") == "1.1-mc1.21.8"
+               and port_version("1.1-mc1.21.4", "1.21.8") == "1.1-mc1.21.4-mc1.21.8",
+               "port_version: -mc<t> once, a layer's plain version suffixed as before")
+        rel = ["examplelib-1.2_mr.jar", "examplelib-1.2_cf.jar", "examplelib-1.2-sources.jar"]
+        expect(pick_release_asset(rel, "examplelib-1.1_mr.jar", "1.21.8")[0] == "examplelib-1.2_mr.jar"
+               and pick_release_asset(rel, "examplelib-1.1_cf.jar", "1.21.8")[0] == "examplelib-1.2_cf.jar"
+               and pick_release_asset(rel, "examplelib-1.1.jar", "1.21.8")[0] is None
+               and pick_release_asset(["examplelib-1.2.jar"], "examplelib-1.1.jar", "1.21.8")[0] == "examplelib-1.2.jar"
+               and pick_release_asset(["examplelib-1.2-mc1.21.8.jar"], "examplelib-1.1.jar", "1.21.8")[0]
+               == "examplelib-1.2-mc1.21.8.jar",
+               "pick_release_asset: the variant honoured; a bare name with two variants is ambiguous, never a guess")
+        g_, m2 = globals(), []
+        saved = {k: g_[k] for k in ("_get", "install_m2")}
+        api = json.dumps({"assets": [{"name": n, "browser_download_url": f"https://dl.example/{n}"} for n in rel]}).encode()
+        try:
+            g_["_get"] = lambda url, h=None: api if "/releases/tags/" in url else url.rsplit("/", 1)[1].encode()
+            g_["install_m2"] = lambda ga, ver, data: m2.append((ga, ver, data))
+            spec = {"repo": "owner/lib", "asset": "examplelib-1.1_cf.jar", "version": "1.1-mc1.21.8"}
+            got = resolve_port("com.example:lib", spec, "1.21.8", {"owner/lib": "examplelib-1.2-mc1.21.8"})
+        finally:
+            g_.update(saved)
+        expect(got.get("to") == "com.example:lib:1.1-mc1.21.8" and got.get("pin", "").startswith("https://dl.example/examplelib-1.2_cf.jar ")
+               and m2 == [("com.example:lib", "1.1-mc1.21.8", b"examplelib-1.2_cf.jar")],
+               f"--port-release of a version branch's release: its _cf asset, one -mc suffix: {got} {m2}")
         # the library/dependent loop (weekly-round dry run, 2026-10-18): a library version is done only once a dependent's
         # Gate C is recorded on its jar, and the dependent could not pin it until it was done. A version-branch library's
         # PRE-RELEASE with green gates is taken for the dependent's pre-release (marked in DEPS.md, the dependent's
@@ -1609,7 +1701,7 @@ def sibling_substitutes(repo, target):
     out = {}
     for k, coord in SUBSTITUTE.findall(text[text.index(BEGIN):text.index(END)]):
         ga = k.replace("\\:", ":")
-        if ga in ports and coord == f"{ga}:{ports[ga]['version']}-mc{target}":
+        if ga in ports and coord == f"{ga}:{port_version(ports[ga]['version'], target)}":
             out[ga] = coord
     return out
 
@@ -1695,7 +1787,9 @@ def main():
     r.add_argument("--target", required=True)
     r.add_argument("--port-checkout", action="append", default=[], help="owner/repo=DIR: a sibling layer fork's checkout")
     r.add_argument("--port-release", action="append", default=[],
-                   help="owner/repo@TAG: a sibling layer fork's release holding <asset>-mc<t>.jar; pinned (url + sha256) for CI")
+                   help="owner/repo@TAG: a sibling's release -- a layer's holding <asset>-mc<t>.jar, or a version branch's "
+                        "(<mod>-<ver>-mc<t>), whose asset of the pinned name and variant is read from the release; pinned "
+                        "(url + sha256) for CI")
     r.add_argument("--dry-run", action="store_true")
     r.add_argument("--allow-undone-library", action="store_true",
                    help="development only: build against a --port-checkout sibling whose target is not done (recorded in DEPS.md)")
