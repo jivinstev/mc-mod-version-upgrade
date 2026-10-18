@@ -58,13 +58,30 @@ def jdk_for(repo, mc):
     return int(jv.group(1)) if jv else java_major(mc)
 
 
-def find_java(major, explicit=None):
+JDK_ROOTS = ("/usr/lib/jvm", "/opt", "/opt/java", "/usr/local", "~/.gradle/jdks", "~/.jdks", "~/.sdkman/candidates/java",
+             "/Library/Java/JavaVirtualMachines")
+
+
+def java_candidates(major, explicit=None, env=None, roots=JDK_ROOTS):
+    """The JDK homes to try for `major`, in order: --java-home; JAVA_HOME_<major> (and the _X64/_ARM64 forms that
+    setup-java and the hosted runners set); each directory of the usual install roots whose name carries the version
+    as a whole number (/usr/lib/jvm, /opt, the Gradle toolchain downloads in ~/.gradle/jdks, ~/.jdks, SDKMAN, macOS);
+    then JAVA_HOME. Each is checked by running its java -version."""
+    env = os.environ if env is None else env
     cands = [explicit] if explicit else []
-    for d in sorted(pathlib.Path("/usr/lib/jvm").glob("*")) if pathlib.Path("/usr/lib/jvm").is_dir() else []:
-        if re.search(rf"(?:^|[-.]){major}(?:[.-]|$)", d.name):
-            cands.append(str(d))
-    if os.environ.get("JAVA_HOME"):
-        cands.append(os.environ["JAVA_HOME"])
+    cands += [env[k] for k in (f"JAVA_HOME_{major}", f"JAVA_HOME_{major}_X64", f"JAVA_HOME_{major}_ARM64") if env.get(k)]
+    for root in roots:
+        r = pathlib.Path(os.path.expanduser(root))
+        for d in sorted(r.glob("*")) if r.is_dir() else []:
+            if d.is_dir() and re.search(rf"(?:^|[^0-9.]){major}(?:[.+_-]|$)", d.name):
+                cands.append(str(d / "Contents/Home") if (d / "Contents/Home/bin").is_dir() else str(d))
+    if env.get("JAVA_HOME"):
+        cands.append(env["JAVA_HOME"])
+    return list(dict.fromkeys(cands))
+
+
+def find_java(major, explicit=None):
+    cands = java_candidates(major, explicit)
     for c in cands:
         j = pathlib.Path(c) / "bin" / "java"
         if j.is_file():
@@ -323,7 +340,8 @@ def main():
     major = jdk_for(repo, mc)
     java = find_java(major, a.java_home)
     if not java:
-        say(f"no JDK {major} found (looked in /usr/lib/jvm, JAVA_HOME); pass --java-home"); return 2
+        say(f"no JDK {major} found (looked at JAVA_HOME_{major}, {', '.join(JDK_ROOTS)} and JAVA_HOME); install it or "
+            "pass --java-home"); return 2
     cache = pathlib.Path(a.cache_dir or os.environ.get("SHIPPED_GATE_CACHE") or
                          pathlib.Path.home() / ".cache/shipped-gate").resolve()
     cache.mkdir(parents=True, exist_ok=True)
@@ -366,6 +384,16 @@ def self_check():
     ok &= load_problems("[x/INFO] ok\n[y/ERROR] Mod loading has failed\n[z/DEBUG] ModLoadingException") != []
     ok &= len(load_problems("[z/DEBUG] ModLoadingException\n[x/INFO] fine")) == 0
     ok &= find_java(99) is None
+    with tempfile.TemporaryDirectory() as d:      # where a JDK 25 is looked for, not only /usr/lib/jvm (dry run, 2026-10-18)
+        r = pathlib.Path(d)
+        for n in ("opt/jdk-25.0.1+9", "opt/jdk-21.0.4", "opt/jdk-125", "gradle/jdks/eclipse_adoptium-25-amd64-linux.2",
+                  "jvm/java-25-openjdk-amd64"):
+            (r / n).mkdir(parents=True)
+        got = java_candidates(25, None, {"JAVA_HOME_25_X64": "/hosted/25", "JAVA_HOME": "/default"},
+                              (str(r / "jvm"), str(r / "opt"), str(r / "gradle/jdks")))
+        ok &= got == ["/hosted/25", str(r / "jvm/java-25-openjdk-amd64"), str(r / "opt/jdk-25.0.1+9"),
+                      str(r / "gradle/jdks/eclipse_adoptium-25-amd64-linux.2"), "/default"]
+        ok &= java_candidates(21, "/explicit", {}, (str(r / "opt"),)) == ["/explicit", str(r / "opt/jdk-21.0.4")]
     with tempfile.TemporaryDirectory() as d:      # the JDK pick, with no --mc: the checkout's own Minecraft version
         r = pathlib.Path(d)
         (r / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.1\n", encoding="utf-8")

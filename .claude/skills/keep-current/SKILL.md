@@ -25,7 +25,7 @@ it: **if it crashes them, kicks them from a server, hangs, damages a save or bre
 
 Tools: `tools/port-sync.py` (bring the authors' commits in), `tools/fix-ledger.py` (the worksheet and the ledger),
 `tools/port-upstream.py` + the file loop (port the new code), `tools/ci-gates.py` (gates, no model),
-`tools/port-ci.py` (CI; `promote` is never run here), `tools/port-fleet.py` (an older fleet file: only a migration input here),
+`tools/port-ci.py` (CI; `promote` is never run here), `tools/round-preflight.py` (what the round needs, checked first), `tools/port-fleet.py` (an older fleet file: only a migration input here),
 `tools/weekly-plan.py` (the weekly cycle's setup and its plan workflow), `tools/known-issues.py` (the ledger, the plan
 issue: `render-plan`, `read-plan`; the README Ports block: `render-ports`), `tools/port-cost.py` (cost records, the
 round's table).
@@ -342,6 +342,17 @@ through the plan issue:** a comment @mentioning the owner with the action and wh
 with what the list allows and names it in the closing comment. An empty list means every push (the work branches
 included), PR, pre-release and merge asks.
 
+0. **Preflight, before anything else:** `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...` (every fork of
+   the set; read-only). It prints one line per need and `MISSING` with what to do: **each fork's clone** (a scheduled
+   session cannot attach a repository -- `add_repo` is refused there -- so a fork that is not in the task's repositories
+   has no clone: stop now, before freezing, with one comment on the plan issue that names the repository and says to add
+   it to the scheduled task's repositories; the plan issue stays open for the next run), the GitHub way it will use
+   (GITHUB_TOKEN wins, then GH_TOKEN, both over REST; `gh` only when neither is set, so a broken `gh` login does not matter
+   when a token is set), a JDK for each version (21 for 1.21.x, **25 for 26.x**: found at `JAVA_HOME_25`, `/usr/lib/jvm`,
+   `/opt`, `~/.gradle/jdks`, ...), and for the client gates **`libEGL.so.1`** (the 26.3 client loads it: `libegl1`) and
+   **`XDG_RUNTIME_DIR`** (unset in a cloud session: `export XDG_RUNTIME_DIR=$(mktemp -d) && chmod 700
+   "$XDG_RUNTIME_DIR"`). Install or set what it names that the session can (apt, an export) and run it again; anything
+   left missing other than a clone is reported in the first comment and the versions that need it wait.
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
    round/frozen.json --decisions-dir round/decisions` (`gh` or GITHUB_TOKEN reads it). No open plan issue: stop and
    report. Per fork, `frozen.json` says whether to take the authors' commits (`take_authors`, and the exact
@@ -528,7 +539,10 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    weekly-plan.yml --repo <owner/lib> --ref neoforge-1.21.1`): it costs no model and must open the plan issue, assigned
    to the owner. Read the round task back (`get_trigger`): cron, a fresh session per fire, notifications and the model
    that was set. Do not fire the round to test it -- a fire is a whole round; it runs on Wednesday against the plan.
-   The environment needs the build hosts in its allowed domains (`cloud/allowed-domains.txt`).
+   The environment needs the build hosts in its allowed domains (`cloud/allowed-domains.txt`), and what the round's
+   gates run on: JDK 21 and JDK 25 (every 26.x version builds and boots on 25), `libegl1` (the 26.3 client) and an
+   `XDG_RUNTIME_DIR`, in the environment's setup script; `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...`
+   says what is missing (the round runs it first).
 
 ## Evidence that this is needed (and the mistake it prevents)
 

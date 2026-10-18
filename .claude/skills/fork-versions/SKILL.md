@@ -147,7 +147,9 @@ refuses them; `make-fork-layer.py versions` prints the table, `versions --refres
 version's jar declares exactly its own Minecraft and NeoForge ranges (`[1.21.3,1.21.4)`), so a skipped version is never
 claimed. **The 26.x calendar line** follows 1.21.11: 26.1.2, 26.2 and 26.3 are targeted; NeoForge numbers them by the
 whole Minecraft version, so both ranges stop at the next patch release (`[26.2,26.2.1)`); they need Java 25 (CATALOG §V1,
-`java_version=25`); GeckoLib 5.5+ is `com.geckolib:geckolib-neoforge-<mc>` (a `substitute.` line); 26.2 and 26.3 need
+`java_version=25`: a JDK 25 on the machine -- `shipped-gate.py` finds it at `JAVA_HOME_25`, `/usr/lib/jvm`, `/opt`,
+`~/.gradle/jdks`, ...; the 26.3 client also needs `libEGL.so.1` (`libegl1`) and every client an `XDG_RUNTIME_DIR`:
+`tools/round-preflight.py` says what is missing); GeckoLib 5.5+ is `com.geckolib:geckolib-neoforge-<mc>` (a `substitute.` line); 26.2 and 26.3 need
 `nfrt_version=2.0.31`. `add-target` writes each of these from versions.json. Read CATALOG §V before porting a 26.x version.
 
 **Direct jumps.** A version whose middle versions will never ship can stand on a lower branch directly (`add-target
