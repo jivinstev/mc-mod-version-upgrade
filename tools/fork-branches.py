@@ -3525,14 +3525,16 @@ def library_record(lib, t, dependent, slug=None, say=print):
 
 def ci_args(repo, t, modid, kit_version=None):
     """The tools/port-ci.py arguments that give version branch t the single-version workflow at its version: the port
-    branch's installed workflow read back (port-ci.py recover_args), then remap_ci_args."""
+    branch's installed workflow read back (port-ci.py recover_args), then remap_ci_args; `--branch neoforge-<t>`, so
+    the triggers name the version branch whichever branch the checkout it runs on has (a keep-current/* work branch)."""
     t_ref = resolve_branch(repo, branch_name(t))
     read = reader_of_ref(repo, t_ref)
     p = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
     pc = load("port_ci_fb", "port-ci.py")
     wf = git(repo, "show", f"{resolve_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
     args = pc.recover_args(wf.stdout) if wf.returncode == 0 else ["--modid", modid, "--gatec", "launch,spawn,battle,gauntlet"]
-    return add_variant_jars(remap_ci_args(args, p, modid, kit_version), shipped_variants(repo, t_ref, t))
+    return add_variant_jars(remap_ci_args(args, p, modid, kit_version), shipped_variants(repo, t_ref, t)) + [
+        "--branch", branch_name(t)]
 
 
 def shipped_variants(repo, ref, t):
@@ -4109,6 +4111,9 @@ def _check_ci_check(expect):
         expect(len(w14) == 1 and "kit 7, older than kit 8" in w14[0] and "*_cf.jar" in w14[0]
                and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines) and "--all" in lines[-1],
                f"ci-check names the outdated kit and the missing _cf job: {lines}")
+        args4 = ci_args(r, "1.21.4", "examplemod", 7)
+        expect(args4[-2:] == ["--branch", "neoforge-1.21.4"] and args4.count("--branch") == 1,
+               f"ci_args names the version branch for the workflow's triggers, not the checkout's HEAD: {args4}")
         expect(not [l for l in ci_check(r, ["1.21.4"], kit_version=False) if "WARNING" in l and "kit" in l]
                and shipped_variants(r, resolve_branch(r, "neoforge-1.21.4"), "1.21.4") == ["cf"],
                "kit_version=False compares the variants only")

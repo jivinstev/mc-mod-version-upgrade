@@ -312,10 +312,23 @@ def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_o
     return v
 
 
+def port_branch(repo, mc, explicit=None):
+    """The branch the workflow's triggers name: --branch when given; on a version branch -- the checkout holds
+    `.port/<mc>/` for its own Minecraft version -- `neoforge-<mc>`, whatever branch is checked out (a keep-current/*
+    work branch merges into it); else the checked-out branch, as a single-version fork always had."""
+    if explicit:
+        if not re.fullmatch(r"[\w.\-/]+", explicit):
+            raise SystemExit(f"--branch must be a branch name, got {explicit!r}")
+        return explicit
+    if mc and (pathlib.Path(repo) / ".port" / mc).is_dir():
+        return f"neoforge-{mc}"
+    return git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+
 def recover_args(text):
     """The port-ci.py arguments an installed workflow was generated with, read back from its text: what a re-pin or a
     new option regenerates from, so nothing else moves. Not arguments (read from the checkout instead): the port
-    branch (HEAD), the authors' branch (origin/HEAD), the target (gradle.properties) and the Java toolchain."""
+    branch (port_branch: HEAD, or neoforge-<mc> on a version branch), the authors' branch (origin/HEAD), the target (gradle.properties) and the Java toolchain."""
     out = []
     one = lambda rx: (re.search(rx, text) or [None, None])[1]
     out += ["--modid", one(r'ci-gates\.py --repo \. --modid "([^"]+)"')]
@@ -938,6 +951,16 @@ def self_check():
                                         capture_output=True, text=True, encoding="utf-8", check=True)
         g_("init", "-q"); pathlib.Path(d_, "x").write_text("x\n", encoding="utf-8"); g_("add", "-A"); g_("commit", "-qm", "x")
         g_("tag", "solo-1.0-mc1.21.1")
+        # the workflow's branch: a single-version fork (no .port/) keeps the checked-out branch, work branch or not;
+        # a version branch checked out on a keep-current/* work branch still names neoforge-<mc>, not that work branch
+        g_("checkout", "-q", "-b", "keep-current/2026-10-20")
+        ok &= port_branch(d_, "1.21.1") == "keep-current/2026-10-20"
+        g_("checkout", "-q", "-b", "neoforge-1.21.1"); ok &= port_branch(d_, "1.21.1") == "neoforge-1.21.1"
+        g_("checkout", "-q", "keep-current/2026-10-20")
+        for v_ in ("1.21.3", "1.21.4"):
+            pathlib.Path(d_, ".port", v_).mkdir(parents=True); pathlib.Path(d_, ".port", v_, "branch.properties").write_text("x=1\n", encoding="utf-8")
+        ok &= port_branch(d_, "1.21.4") == "neoforge-1.21.4" and port_branch(d_, "1.21.4", "neoforge-x") == "neoforge-x"
+        import shutil; shutil.rmtree(pathlib.Path(d_, ".port"))
         pathlib.Path(d_, ".port/1.21.4").mkdir(parents=True)
         pathlib.Path(d_, ".port/1.21.4/DEPS.md").write_text("deps at the tag\n", encoding="utf-8")
         g_("add", "-A"); g_("commit", "-qm", "deps"); g_("tag", "dep-1.0-mc1.21.4")
@@ -1102,6 +1125,8 @@ def main():
     ap.add_argument("--layer-branch", help="the fork's multi-version layer branch (e.g. neoforge-1.21.x): the same workflow "
                     "then also runs on it and carries the layer-* jobs (isolation, inertness, compile-only middle "
                     "targets, full gates on the newest target); skipped on the port branch")
+    ap.add_argument("--branch", help="the branch the workflow runs on (default: neoforge-<mc> when the checkout has "
+                    ".port/<mc>/, a version branch; else the checked-out branch)")
     ap.add_argument("--trailer", action="append", default=[])
     ap.add_argument("--kit-version", type=int, help="Port CI kit to pin (default: the newest published)")
     ap.add_argument("--kit-sha", help="its sha256 (default: read from the release's SHA256SUMS)")
@@ -1112,7 +1137,7 @@ def main():
     mc, neo = p.get("minecraft_version"), p.get("neo_version")
     if not mc or not neo:
         sys.exit("gradle.properties has no minecraft_version / neo_version")
-    branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    branch = port_branch(repo, mc, a.branch)
     base = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip().split("/", 1)[-1] or "main"
     mrepo = migrator_repo()
     kver, ksha = kit_pin(mrepo, a.kit_version, a.kit_sha)
