@@ -6,6 +6,9 @@
     python3 tools/port-cost.py --self-check         # fixture transcripts: attribution and the default path
     python3 tools/port-cost.py round-table --since TIME --fork LABEL=DIR [--fork ...] [--projects DIR]
                                                     # a keep-current round's per-fork, per-version cost and time table
+    python3 tools/port-cost.py round-table --since TIME --session DIR | --session-cwd DIR [--marks round/marks.tsv]
+                                                    # the round's own session, split per version at its marks
+    python3 tools/port-cost.py mark --fork LABEL --version V [--file round/marks.tsv]   # the round starts V now
 
 NO MODEL IDENTIFIER IS WRITTEN. Records go into fork repositories (.port/<v>/COST.md, a layer's COST.md) and the
 public corpus, so requests are grouped by a neutral PRICE TIER instead (from the list input price in
@@ -513,13 +516,138 @@ def round_table(rows):
     return "\n".join(out) + "\n"
 
 
+# ---------------------------------------------------------------- the round's own session, split by its marks
+#
+# A scheduled cloud session runs the whole round from one working directory: its transcripts touch the fork checkouts
+# through worktrees, subagents and relative paths, and no COST.md record is written when a run stops before its cost
+# stage -- so the table read $0.00 for every version. With --session DIR (the session's transcript directory under
+# ~/.claude/projects) or --session-cwd DIR (every transcript whose records ran in DIR or below it), the table charges
+# that session's own requests instead, split per version by the round's own timestamps: `port-cost.py mark` appends
+# "<ISO time>\t<fork>\t<version>" to round/marks.tsv as the round starts each version; a request belongs to the last
+# mark at or before it (before the first: the round's setup row). Wall time is from a mark to the next.
+
+MARKS_DEFAULT = pathlib.Path("round/marks.tsv")
+
+
+def read_marks(path):
+    """[(time, fork, version)] sorted by time, from a marks file ("" lines and # comments skipped)."""
+    out = []
+    p = pathlib.Path(path)
+    for line in p.read_text(encoding="utf-8").splitlines() if p.is_file() else []:
+        cells = line.split("\t")
+        if len(cells) >= 3 and not line.startswith("#"):
+            try:
+                out.append((ts(cells[0].strip()), cells[1].strip(), cells[2].strip()))
+            except ValueError:
+                continue
+    return sorted(out)
+
+
+def session_transcripts(projects=None, session_dir=None, cwd=None):
+    """{session id: session} (collect()'s form, every request labelled "round") of the transcripts in session_dir, or
+    of every transcript under `projects` whose records ran in `cwd` or a directory below it."""
+    files = collections.defaultdict(list)
+    roots = [pathlib.Path(session_dir).expanduser()] if session_dir else [pathlib.Path(projects).expanduser() if projects
+                                                                           else projects_dir()]
+    want = os.path.abspath(cwd).rstrip("/\\") if cwd else None
+    for root in roots:
+        for f in sorted(root.rglob("*.jsonl")) if root.is_dir() else []:
+            sid = f.parent.parent.name if f.parent.name == "subagents" else f.stem
+            files[sid].append(f)
+    sessions = {}
+    for sid, fs in files.items():
+        reqs, hit = {}, want is None
+        for f in fs:
+            for line in open(f, errors="replace", encoding="utf-8"):
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                c = d.get("cwd")
+                if want and isinstance(c, str) and (c.rstrip("/\\") == want or c.startswith(want + os.sep) or c.startswith(want + "/")):
+                    hit = True
+                m = d.get("message") or {}
+                if d.get("type") != "assistant" or m.get("model") == "<synthetic>" or not d.get("timestamp"):
+                    continue
+                rid = (f.name, d.get("requestId") or d.get("uuid"))
+                reqs.setdefault(rid, (ts(d["timestamp"]), m.get("model", "?"), d.get("effort") or "unset",
+                                      m.get("usage") or {}, f.parent.name == "subagents"))
+        if hit and reqs:
+            sessions[sid] = dict(reqs=list(reqs.values()), labels=["round"] * len(reqs), cost=None,
+                                 others=collections.Counter(), versions=set(), entry=set())
+    return sessions
+
+
+def session_rows(sessions, since, marks, until=None):
+    """[(fork, version, usd, estimated, wall hours, requests)]: the sessions' requests since `since`, each charged to the
+    last mark at or before it (before the first mark: ("(round)", "setup")); wall time from each mark to the next (the
+    last one: to its last request, or `until`)."""
+    cut = ts(since)
+    reqs = sorted(((r, sid) for sid, v in sessions.items() for r in v["reqs"] if r[0] >= cut), key=lambda x: x[0][0])
+    bounds = [(cut, "(round)", "setup")] + [m for m in marks if m[0] >= cut]
+    buckets = collections.OrderedDict(((f, v), []) for _t, f, v in bounds)
+    for r, sid in reqs:
+        key = [(f, v) for t0, f, v in bounds if t0 <= r[0]][-1]
+        buckets[key].append((r, sid))
+    ends = {}
+    for i, (t0, f, v) in enumerate(bounds):
+        nxt = bounds[i + 1][0] if i + 1 < len(bounds) else None
+        last = max((r[0][0] for r in buckets[(f, v)]), default=t0)
+        ends[(f, v)] = (t0, nxt if nxt is not None else (ts(until) if until else last))
+    rows = []
+    for (f, v), got in buckets.items():
+        if (f, v) == ("(round)", "setup") and not got:
+            continue
+        part = collections.defaultdict(list)
+        for r, sid in got:
+            part[sid].append(r)
+        c = summarise("", {k: dict(sessions[k], reqs=rs) for k, rs in part.items()}, pathlib.Path(os.devnull) / "none") \
+            if part else {"usd": 0.0, "usd_source": None}
+        t0, t1 = ends[(f, v)]
+        rows.append((f, v, c["usd"], c.get("usd_source") == "estimated", round(max(0.0, t1 - t0) / 3600, 2), len(got)))
+    return rows
+
+
+def mark_main(argv):
+    ap = argparse.ArgumentParser(prog="port-cost.py mark", description="record that the round starts work on a fork's "
+                                 "version now (round-table --session splits the session's cost at these marks)")
+    ap.add_argument("--fork", required=True); ap.add_argument("--version", required=True)
+    ap.add_argument("--file", default=str(MARKS_DEFAULT), help="default round/marks.tsv")
+    ap.add_argument("--at", help="the time (ISO; default now)")
+    a = ap.parse_args(argv)
+    at = a.at or datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    ts(at)
+    f = pathlib.Path(a.file)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "a", encoding="utf-8") as fh:
+        fh.write(f"{at}\t{a.fork}\t{a.version}\n")
+    print(f"port-cost: mark {at} {a.fork} {a.version} -> {f}")
+    return 0
+
+
 def round_table_main(argv):
     ap = argparse.ArgumentParser(prog="port-cost.py round-table", description="a keep-current round's cost and time, "
                                  "per fork and per version, with totals (Markdown, for the plan issue's closing comment)")
     ap.add_argument("--since", required=True, help="the round's start (ISO; UTC unless it says otherwise)")
-    ap.add_argument("--fork", action="append", required=True, metavar="LABEL=DIR", help="a fork's label and checkout")
+    ap.add_argument("--fork", action="append", default=[], metavar="LABEL=DIR", help="a fork's label and checkout")
     ap.add_argument("--projects", help="transcript directory (default ~/.claude/projects)")
+    ap.add_argument("--session", metavar="DIR", help="this session's transcript directory: charge its own requests, split "
+                    "per version at the round's marks (--marks), instead of the COST.md records")
+    ap.add_argument("--session-cwd", metavar="DIR", help="the same for every transcript under --projects whose records ran "
+                    "in DIR or below it (a scheduled session's working directory)")
+    ap.add_argument("--marks", default=str(MARKS_DEFAULT), help="the round's marks (port-cost.py mark; default round/marks.tsv)")
     a = ap.parse_args(argv)
+    since = a.since if ("+" in a.since[10:] or a.since.endswith("Z")) else a.since + ("T00:00" if len(a.since) == 10 else "") + "+00:00"
+    if a.session or a.session_cwd:
+        sessions = session_transcripts(a.projects, a.session, a.session_cwd)
+        marks = read_marks(a.marks)
+        print(round_table(session_rows(sessions, since, marks)), end="")
+        print(f"\nFrom this session's own transcripts ({len(sessions)} session(s), "
+              f"{a.session or 'cwd ' + a.session_cwd}), split at {len(marks)} mark(s) of {a.marks}; the forks' COST.md "
+              "records are not added (they measure the same requests).")
+        return 0
+    if not a.fork:
+        ap.error("--fork LABEL=DIR (or --session / --session-cwd)")
     forks = [tuple(x.split("=", 1)) for x in a.fork]
     if any(len(f) != 2 for f in forks):
         ap.error("--fork LABEL=DIR")
@@ -655,6 +783,45 @@ def self_check():
         expect(rows[0][:5] == ("o/lib", "1.21.4", 1.25, True, 0.75) and rows[1][0:2] == ("o/dep", "head") and rows[1][5] == 1,
                f"round rows: only the records since the round's start; the single-version fork measured: {rows}")
         tab = round_table(rows)
+        # the round's own session (weekly-round dry run, 2026-10-18: a scheduled session's transcripts touch no checkout
+        # path, so the table read $0.00): its requests by its working directory, split at the round's marks
+        model = sorted(load_prices())[0]
+        sp = d / "projects2" / "-round"
+        (sp / "R1" / "subagents").mkdir(parents=True)
+
+        def rq(i, at, out_, cwd="/work/round"):
+            return json.dumps({"type": "assistant", "requestId": f"q{i}", "cwd": cwd, "timestamp": at,
+                               "message": {"model": model, "content": [], "usage": {"input_tokens": 0,
+                                                                                    "output_tokens": out_}}}) + "\n"
+        (sp / "R1.jsonl").write_text(rq(1, "2026-10-18T06:00:00Z", 100000) + rq(2, "2026-10-18T06:40:00Z", 200000)
+                                     + rq(3, "2026-10-18T07:50:00Z", 400000), encoding="utf-8")
+        (sp / "R1/subagents/rev.jsonl").write_text(rq(4, "2026-10-18T06:50:00Z", 800000), encoding="utf-8")
+        (d / "projects2" / "-other").mkdir()
+        (d / "projects2" / "-other" / "X.jsonl").write_text(rq(5, "2026-10-18T06:45:00Z", 5000, cwd="/elsewhere"), encoding="utf-8")
+        marks = d / "marks.tsv"
+        for at, v in (("2026-10-18T06:30:00Z", "1.21.10"), ("2026-10-18T07:30:00Z", "1.21.11")):
+            with contextlib.redirect_stdout(io.StringIO()) as buf_:
+                code = mark_main(["--fork", "o/lib", "--version", v, "--file", str(marks), "--at", at])
+            text = buf_.getvalue()
+            expect(code == 0, f"mark: {text}")
+        sess = session_transcripts(d / "projects2", cwd="/work/round")
+        rows2 = session_rows(sess, "2026-10-18T05:59:00Z", read_marks(marks))
+        by = {(r[0], r[1]): r for r in rows2}
+        price = lambda n: estimate_usd({model: collections.Counter(output=n)}, load_prices())[0]
+        expect(list(sess) == ["R1"] and [r[:2] for r in rows2] == [("(round)", "setup"), ("o/lib", "1.21.10"), ("o/lib", "1.21.11")]
+               and by[("o/lib", "1.21.10")][5] == 2 and by[("o/lib", "1.21.11")][5] == 1
+               and by[("o/lib", "1.21.10")][4] == 1.0 and by[("(round)", "setup")][4] == 0.52
+               and abs(by[("o/lib", "1.21.10")][2] - round(price(1000000), 2)) < 0.011
+               and abs(sum(r[2] for r in rows2) - round(price(1500000), 2)) < 0.03,
+               f"the session by its cwd, split at the marks (its subagent included, another cwd not): {rows2}")
+        with contextlib.redirect_stdout(io.StringIO()) as buf_:
+            code = round_table_main(["--since", "2026-10-18T05:59:00Z", "--session-cwd", "/work/round",
+                                     "--projects", str(d / "projects2"), "--marks", str(marks)])
+        text = buf_.getvalue()
+        expect(code == 0 and "| o/lib | 1.21.10 |" in text and "split at 2 mark(s)" in text and "| o/lib | 1.21.10 | $0.00" not in text and "≈ $0.00 |" not in text,
+               f"round-table --session-cwd: {text}")
+        expect(session_rows(session_transcripts(session_dir=sp), "2026-10-18T05:59:00Z", [])[0][:2] == ("(round)", "setup"),
+               "--session DIR with no marks: one row for the whole round")
         expect("| o/lib | 1.21.4 | ≈ $1.25 | 0.75 h |" in tab and "| **o/lib** | **total** | **≈ $1.25** | **0.75 h** |" in tab
                and "| **all forks** |" in tab and "an-old-record" not in tab, f"the table: {tab}")
     print("self-check: OK" if ok else "self-check: FAILED")
@@ -754,4 +921,6 @@ def main():
 if __name__ == "__main__":
     if sys.argv[1:2] == ["round-table"]:
         sys.exit(round_table_main(sys.argv[2:]))
+    if sys.argv[1:2] == ["mark"]:
+        sys.exit(mark_main(sys.argv[2:]))
     sys.exit(self_check() if "--self-check" in sys.argv[1:] else main())

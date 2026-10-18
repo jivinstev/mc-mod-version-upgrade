@@ -389,7 +389,8 @@ included), PR, pre-release and merge asks.
      into the head too, by its own PR. Work the versions in ladder order, oldest affected first.
      `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
      has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
-4. **Per version, in ladder order**, once its code is in:
+4. **Per version, in ladder order**, once its code is in -- first `python3 tools/port-cost.py mark --fork <owner/repo>
+   --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks):
    - (a version-branch fork, once per round before the first version) `python3 tools/fork-branches.py ci-check --repo DIR`:
      a WARNING names a branch whose Port CI workflow is older than the kit or boots no jar of a variant its
      `.port/<v>/shipped-expect-<variant>.txt` expects -- CI green there proves nothing about that jar. Regenerate it
@@ -423,8 +424,10 @@ included), PR, pre-release and merge asks.
    and local, S4 ledgered.
 6. **Close.** On the plan issue, one closing comment with the outcome -- per fork: the merged PRs, the pre-releases cut,
    the ledger changes and the new findings with their grades -- and the **cost and time table**:
-   `python3 tools/port-cost.py round-table --since <round start> --fork <owner/repo>=<checkout> ...` (per fork, per
-   version, with totals); then close the issue (state completed). An issue the round closed is never carried forward.
+   `python3 tools/port-cost.py round-table --since <round start> --session-cwd <the round's working directory>` (this
+   session's own requests, its subagents included, per fork and version at the `mark`s, with totals; the COST.md form,
+   `--fork <owner/repo>=<checkout> ...`, measures only what fork-port's cost stage recorded, which a scheduled session's
+   transcripts may not reach -- it read $0.00 for every version); then close the issue (state completed). An issue the round closed is never carried forward.
 7. **Afterwards:** set the ledger statuses on each head branch (`known-issues.py status <ID> --set <v>,<v>=fixed@<commit>`,
    or `--set <from>..<to>=fixed@<commit>`, for every version a fix reached, in one call per issue, committed alone), then refresh the README Ports block ("README Ports block" below).
 
