@@ -1093,9 +1093,16 @@ def inventory_problems(repo, root, t, ref, work, files, write, mechanical):
     out = [f"behaviour inventory: unaccounted {r['id']} ({r['detail']})" for r in rep["items"] if r["status"] == "unaccounted"]
     committed = git(repo, "show", f"{ref}:{REC}/{t}/{li.CHECK_FILE}")
     if not out and (committed.returncode != 0 or committed.stdout != want):
-        out.append(f"behaviour inventory: the committed .port/{t}/{li.CHECK_FILE} "
-                   + ("is missing" if committed.returncode else "differs from a fresh check")
-                   + " -- a release reads the committed one: run tools/fork-port.py on the branch (it rewrites it) and commit it")
+        state = "is missing" if committed.returncode else "differs from a fresh check"
+        if work and read_file(p) == want:
+            # the work tree already holds the fresh account (this run rewrote it, or an earlier one did): the only step
+            # left is the commit -- telling a person to re-run fork-port here sent them round in a loop (gap 4 after #147)
+            out.append(f"behaviour inventory: the committed .port/{t}/{li.CHECK_FILE} {state}; the work tree's copy is "
+                       "the fresh account -- a release reads the committed one: commit "
+                       f".port/{t}/{li.CHECK_FILE} (no re-run needed)")
+        else:
+            out.append(f"behaviour inventory: the committed .port/{t}/{li.CHECK_FILE} {state}"
+                       " -- a release reads the committed one: run tools/fork-port.py on the branch (it rewrites it) and commit it")
     return out
 
 
@@ -1154,9 +1161,14 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
             seen = (_seen or set()) | {t}
             if pv not in seen and resolve_branch(repo, branch_name(pv)) and target_done(repo, pv, _seen=seen):
                 out.append(f"its parent {pv} is still not done (added with --allow-undone-parent: {allowed})")
-        if p.get("library") == "true" and not library_tested(repo, root, t, ref, work, files):
-            out.append(LIBRARY_PENDING + f" (record one: python3 tools/fork-branches.py library-record --repo {repo} "
-                       f"--target {t} --dependent DIR)")
+        if p.get("library") == "true":
+            tested, stale = library_status(repo, root, t, ref, work, files)
+            if not tested:
+                out.append((f"library: the dependents' record is for {stale}, the branch is at {ref[:12]} with "
+                            "jar-relevant changes since -- it counts for that commit's jar, not this one: release this "
+                            "commit and record a dependent's Gate C against it" if stale else LIBRARY_PENDING)
+                           + f" ({'' if stale else 'record one: '}python3 tools/fork-branches.py library-record --repo {repo} "
+                             f"--target {t} --dependent DIR)")
         return out
     finally:
         if tmp is not None:
@@ -1182,18 +1194,27 @@ def check_done(repo, t, who="fork-branches", say=print):
     return UNDONE_EXIT if why else 0
 
 
-def library_tested(repo, root, t, ref, work, files):
-    """Does .port/<t>/DEPENDENTS.json name a dependent that passed Gate C against a jar built from a library commit
-    this branch carries, with nothing jar-relevant changed since (so the same jar)?"""
+def library_status(repo, root, t, ref, work, files):
+    """(tested, stale) for library version t: tested when .port/<t>/DEPENDENTS.json names a dependent that passed Gate
+    C against a jar built from a library commit this branch carries with nothing jar-relevant changed since (the same
+    jar). A record counts for the commit (and tag) it names, never for a later one: when the branch moved on with
+    jar-relevant changes, stale is "<tag> (<commit>)" of the last such record (for the done check to name), else "" (a
+    record for a commit this branch does not carry is no record of it)."""
     try:
         deps = json.loads(read_file(rec_dir(root, t) / "DEPENDENTS.json") or "[]")
     except ValueError:
-        return False
+        return False, ""
+    stale = ""
     for d in deps if isinstance(deps, list) else []:
         c = str((d or {}).get("library_commit", ""))
-        if d.get("gate_c") == "PASS" and commit_current(repo, root, t, c, ref, work, "gates", files)[0]:
-            return True
-    return False
+        if d.get("gate_c") != "PASS":
+            continue
+        if commit_current(repo, root, t, c, ref, work, "gates", files)[0]:
+            return True, ""
+        if COMMIT_ID.match(c) and git(repo, "merge-base", "--is-ancestor", c, ref).returncode == 0:
+            stale = f"{d.get('library_tag') or 'its tag'} ({c[:12]})"      # the branch moved on from it
+    return False, stale
+
 
 
 # ---------------------------------------------------------------- migration: a layer fork -> version branches
@@ -2804,11 +2825,27 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         plan = plan_of(spec, rows, items, mech, 0.0, budget)
         write_plan(repo, plan, out_dir, say)
     if merged and mode != "plan-run":
-        say(f"fork-branches: nothing was pushed: git push origin {' '.join(branch_name(t) for t in merged)}")
+        say(push_advice(merged, mode == "apply" or bool(untaken_ok) or ROUND_FROZEN.is_file()))
     return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED", "merged earlier, RED")) else 0
 
 
 cascade_run_result = {}
+# a weekly keep-current round's frozen input in the working directory (fork-port.py's FROZEN_DEFAULT): a round is running
+ROUND_FROZEN = pathlib.Path("round/frozen.json")
+
+
+def push_advice(merged, in_round):
+    """The cascade's closing line for the versions it merged. Outside a round: push the branches. In a keep-current
+    round (--apply, --untaken-ok, or round/frozen.json in the working directory) a version branch is never pushed
+    directly: each goes up as its own work branch and PR, lowest first (keep-current, the cascade's step 3)."""
+    names = [branch_name(t) for t in merged]
+    if not in_round:
+        return f"fork-branches: nothing was pushed: git push origin {' '.join(names)}"
+    return ("fork-branches: nothing was pushed. In a keep-current round each version goes up as its own PR, lowest first, "
+            "each only once the PR below it is merged and its push run green: git push origin "
+            f"{names[0]}:keep-current/<date>-{merged[0]}, then open its PR into {names[0]}"
+            + (f" (then {', '.join(names[1:])} the same way)" if len(names) > 1 else "")
+            + "; never git push origin " + " ".join(names))
 
 
 def plan_of(spec, rows, items, mech, elapsed, budget):
@@ -3525,14 +3562,16 @@ def library_record(lib, t, dependent, slug=None, say=print):
 
 def ci_args(repo, t, modid, kit_version=None):
     """The tools/port-ci.py arguments that give version branch t the single-version workflow at its version: the port
-    branch's installed workflow read back (port-ci.py recover_args), then remap_ci_args."""
+    branch's installed workflow read back (port-ci.py recover_args), then remap_ci_args; `--branch neoforge-<t>`, so
+    the triggers name the version branch whichever branch the checkout it runs on has (a keep-current/* work branch)."""
     t_ref = resolve_branch(repo, branch_name(t))
     read = reader_of_ref(repo, t_ref)
     p = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
     pc = load("port_ci_fb", "port-ci.py")
     wf = git(repo, "show", f"{resolve_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
     args = pc.recover_args(wf.stdout) if wf.returncode == 0 else ["--modid", modid, "--gatec", "launch,spawn,battle,gauntlet"]
-    return add_variant_jars(remap_ci_args(args, p, modid, kit_version), shipped_variants(repo, t_ref, t))
+    return add_variant_jars(remap_ci_args(args, p, modid, kit_version), shipped_variants(repo, t_ref, t)) + [
+        "--branch", branch_name(t)]
 
 
 def shipped_variants(repo, ref, t):
@@ -3995,6 +4034,8 @@ def _check_port_taken(expect):
                and '+\x20@Inject(method = "tock", at = @At("TAIL"))' in ents[0].get("diff", ""),
                f"t6: a second stop on a still-open file keeps the first change in its entry (both diffs): "
                f"{[c.get('since') for c in ents]} {out[-300:]}")
+        expect("nothing was pushed: git push origin neoforge-1.21.3 neoforge-1.21.4" in out and "keep-current/" not in out,
+               f"t6: outside a round the cascade closes with the plain push, as before: {out[-300:]}")
     # t7: a real conflict in the same merge (merge undone): after the hand merge the next cascade offers the change again
     with tempfile.TemporaryDirectory() as d:
         r, g, _run = _migrated_fixture(d)
@@ -4094,6 +4135,38 @@ def _check_check_done_rows(expect):
                "the local parent when it is ahead of origin (a merge not pushed yet)")
 
 
+def _check_inventory_settles(expect):
+    """INVENTORY-CHECK.json: a done check that rewrites it says the commit is all that is left (not "run fork-port",
+    which it just did); once committed the next check passes, from the branch's checkout and from another one."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        t = "1.21.4"
+        w, _w = worktree_for(r, t)
+        _hand(w, {f".port/{t}/INVENTORY-CHECK.json": "{}\n"}, "a stale account")
+        first = [x for x in target_done(w, t, write=True) if "INVENTORY-CHECK" in x]
+        expect(len(first) == 1 and "commit .port/1.21.4/INVENTORY-CHECK.json (no re-run needed)" in first[0]
+               and "run tools/fork-port.py" not in first[0],
+               f"the run that rewrote the account names the commit as the one step left: {first}")
+        git(w, "add", "-A", check=True); git(w, "commit", "-qm", "the fresh account", check=True)
+        second = [x for x in target_done(w, t, write=True) if "inventory" in x]
+        other = [x for x in target_done(r, t) if "inventory" in x]
+        expect(second == [] and other == [], f"committed, the account settles: {second} / {other}")
+        _hand(w, {f".port/{t}/INVENTORY-CHECK.json": "{}\n"}, "stale again")
+        ro = [x for x in target_done(r, t) if "INVENTORY-CHECK" in x]
+        expect(len(ro) == 1 and "run tools/fork-port.py" in ro[0],
+               f"a check that cannot rewrite it (another checkout) still names the run: {ro}")
+
+
+def _check_push_advice(expect):
+    """The cascade's closing advice: outside a round, push the branches (as before); in a round, the work-branch PR."""
+    plain = push_advice(["1.21.3", "1.21.4"], False)
+    expect(plain == "fork-branches: nothing was pushed: git push origin neoforge-1.21.3 neoforge-1.21.4", plain)
+    rnd = push_advice(["1.21.3", "1.21.4"], True)
+    expect("git push origin neoforge-1.21.3:keep-current/<date>-1.21.3" in rnd and "open its PR into neoforge-1.21.3" in rnd
+           and "then neoforge-1.21.4 the same way" in rnd and "nothing was pushed: git push" not in rnd,
+           f"in a round the advice is the keep-current PR, never a direct push: {rnd}")
+
+
 def _check_ci_check(expect):
     """ci-check warns about a version branch whose workflow pins an older kit or boots no `_cf` jar although the branch
     keeps .port/<v>/shipped-expect-cf.txt; ci_args adds that variant's --variant-jar."""
@@ -4109,6 +4182,9 @@ def _check_ci_check(expect):
         expect(len(w14) == 1 and "kit 7, older than kit 8" in w14[0] and "*_cf.jar" in w14[0]
                and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines) and "--all" in lines[-1],
                f"ci-check names the outdated kit and the missing _cf job: {lines}")
+        args4 = ci_args(r, "1.21.4", "examplemod", 7)
+        expect(args4[-2:] == ["--branch", "neoforge-1.21.4"] and args4.count("--branch") == 1,
+               f"ci_args names the version branch for the workflow's triggers, not the checkout's HEAD: {args4}")
         expect(not [l for l in ci_check(r, ["1.21.4"], kit_version=False) if "WARNING" in l and "kit" in l]
                and shipped_variants(r, resolve_branch(r, "neoforge-1.21.4"), "1.21.4") == ["cf"],
                "kit_version=False compares the variants only")
@@ -4556,6 +4632,9 @@ def _check_deferred_integration(expect):
         expect(rc == 0 and len(ents) == 1 and not ents[0].get("deferred") and "AUTHORS_FIX" in ents[0].get("diff", "")
                and any("did not merge into " + em in w for w in target_done(r, "1.21.5")),
                f"t8: an unrelated dropped dependency: the authors' change is an open entry, 1.21.5 not done: {ents}")
+        expect("git push origin neoforge-1.21.3:keep-current/<date>-1.21.3" in out
+               and "nothing was pushed: git push" not in out,
+               f"t8: a round's cascade (--apply) closes with the keep-current PR step, not a direct push: {out[-400:]}")
     # t11: a deferred entry never closes by an unrelated edit of its file; it opens again when the dependency returns
     deps = ("| dependency | role | base pin | for this target | from |\n|---|---|---|---|---|\n"
             "| `com.example:other` | optional | `1` | {} | - |\n")
@@ -4915,7 +4994,24 @@ def self_check():
                                                                              "library_commit": "0" * 40}]), encoding="utf-8")
             expect(target_done(r, "1.21.4")[:1] and target_done(r, "1.21.4")[0].startswith(LIBRARY_PENDING),
                    "control: a dependent recorded against another commit does not count")
-            g("checkout", "-q", "--", "."); (r / REC / "1.21.4" / "DEPENDENTS.json").unlink()
+            # a record made at tag X while the library branch moved on: it counts for X's commit and jar only; the done
+            # check names both, rather than passing or reading as "no dependent" (gap 8 after #147)
+            rec_c = g("rev-parse", "HEAD")
+            (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",
+                                                                             "library_tag": "examplelib-1.0-mc1.21.4",
+                                                                             "library_commit": rec_c}]), encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "record at the tag")
+            expect(target_done(r, "1.21.4") == [], "the branch moved only by the record itself: the same jar, it counts")
+            (r / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain { int v = 2; }\n",
+                                                                       encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "the library moved on")
+            head_ = g("rev-parse", "HEAD")
+            lib_ = [w for w in target_done(r, "1.21.4") if w.startswith("library")]
+            expect(len(lib_) == 1 and f"record is for examplelib-1.0-mc1.21.4 ({rec_c[:12]})" in lib_[0]
+                   and f"the branch is at {head_[:12]}" in lib_[0],
+                   f"a record for an older tag: the done check names the tag and where the branch is: {lib_}")
+            g("reset", "-q", "--hard", "HEAD~2")
+            g("checkout", "-q", "--", "."); (r / REC / "1.21.4" / "DEPENDENTS.json").unlink(missing_ok=True)
             (r / "src/main/java/com/example/mod/ExampleMod.java").write_text("package com.example.mod;\nclass ExampleMod { int edited; }\n",
                                                                            encoding="utf-8")
             why = target_done(r, "1.21.4")
@@ -5200,6 +5296,8 @@ def self_check():
         _check_ungated_rerun(expect)
         _check_check_done_rows(expect)
         _check_ci_check(expect)
+        _check_push_advice(expect)
+        _check_inventory_settles(expect)
         _check_stopped_worktree(expect)
     if deep:
         _check_cascade_plan(expect)

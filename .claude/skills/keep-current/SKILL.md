@@ -226,7 +226,8 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    `port_taken`.)
 3. **One version at a time, lowest first, each waiting for the one below it.** For version v: its gates and its review
    (the round's step 4) on the merged branch, then push it as a work branch and open its PR into the version branch
-   (`git push origin neoforge-<v>:keep-current/<date>-<v>`, the cascade's table in the body), merge it by step 6's rule
+   (`git push origin neoforge-<v>:keep-current/<date>-<v>`, the cascade's table in the body; the cascade's closing
+   line says the same in a round -- `--apply`, `--untaken-ok` or `round/frozen.json` -- never push `neoforge-<v>` itself), merge it by step 6's rule
    and wait for that merge's push run. **`keep-current/<date>-<v>` is pushed only after the PR of the version below it is
    merged and its push run is green** -- never stacked on an unmerged lower PR: a higher PR that carries a lower
    version's unmerged merge would merge that version's code past its own review and CI. After the lower merge, `git

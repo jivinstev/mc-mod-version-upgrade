@@ -312,10 +312,23 @@ def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_o
     return v
 
 
+def port_branch(repo, mc, explicit=None):
+    """The branch the workflow's triggers name: --branch when given; on a version branch -- the checkout holds
+    `.port/<mc>/` for its own Minecraft version -- `neoforge-<mc>`, whatever branch is checked out (a keep-current/*
+    work branch merges into it); else the checked-out branch, as a single-version fork always had."""
+    if explicit:
+        if not re.fullmatch(r"[\w.\-/]+", explicit):
+            raise SystemExit(f"--branch must be a branch name, got {explicit!r}")
+        return explicit
+    if mc and (pathlib.Path(repo) / ".port" / mc).is_dir():
+        return f"neoforge-{mc}"
+    return git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+
 def recover_args(text):
     """The port-ci.py arguments an installed workflow was generated with, read back from its text: what a re-pin or a
     new option regenerates from, so nothing else moves. Not arguments (read from the checkout instead): the port
-    branch (HEAD), the authors' branch (origin/HEAD), the target (gradle.properties) and the Java toolchain."""
+    branch (port_branch: HEAD, or neoforge-<mc> on a version branch), the authors' branch (origin/HEAD), the target (gradle.properties) and the Java toolchain."""
     out = []
     one = lambda rx: (re.search(rx, text) or [None, None])[1]
     out += ["--modid", one(r'ci-gates\.py --repo \. --modid "([^"]+)"')]
@@ -423,13 +436,18 @@ def prerelease_pin_blockers(tag, read):
 
 
 def tag_file(repo, fork, tag, path):
-    """`path` at `tag`: from the local clone when it has the tag (absent there: None, no request), else from GitHub
-    (raw.githubusercontent; None when absent or unreadable)."""
-    if subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
-                      capture_output=True, text=True, encoding="utf-8").returncode == 0:
-        r_ = subprocess.run(["git", "-C", str(repo), "show", f"{tag}:{path}"], capture_output=True, text=True,
-                            encoding="utf-8")
-        return r_.stdout if r_.returncode == 0 else None
+    """`path` at `tag`: from the local clone when it has the tag -- a path its tree does not list is None with no
+    request -- else from GitHub (raw.githubusercontent; None when absent or unreadable). When git itself errors (no
+    such tag here, or a blob-filtered clone whose lazy fetch fails) it falls back to GitHub too."""
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8")
+    if run("rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}").returncode == 0:
+        listed = run("ls-tree", "--name-only", tag, "--", path)       # the tree only: no blob is fetched
+        if listed.returncode == 0 and not listed.stdout.strip():
+            return None
+        if listed.returncode == 0:
+            shown = run("show", f"{tag}:{path}")
+            if shown.returncode == 0:
+                return shown.stdout
     try:
         return _get(f"https://raw.githubusercontent.com/{fork}/{tag}/{path}")
     except Exception:                  # noqa: BLE001 -- absent at the tag (or unreadable): no mark read
@@ -651,7 +669,75 @@ def variant_check():
         recover_args("name: something else\n"); ok = False
     except SystemExit:
         pass
-    return ok and shipped_script_check() and manifest_script_check()
+    return ok and shipped_script_check() and manifest_script_check() and release_script_check()
+
+
+def release_script_check():
+    """Run the release job's `Publish pre-release` script (single-version `release` and layer `layer-release`) on a
+    fake fork: a bare origin with tags and a stand-in gh. The -rN count-up skips a name whose release OR tag exists (a
+    tag with no release made gh release create reuse that tag's commit and ignore --target); a tag at another commit
+    than the build is refused, nothing created."""
+    import os, tempfile
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gitbash import BASH
+    ok = True
+    for layer in (None, "neoforge-1.21.x"):
+        wf = fixture(False, layer)
+        jobs = [wf] if layer is None else [wf.split("\n  release:\n", 1)[1], wf.split("\n  layer-release:\n", 1)[1]]
+        for job in jobs:
+            body = job.split("      - name: Publish pre-release\n", 1)[1].split("        run: |\n", 1)[1]
+            body = body.split("\n\n", 1)[0]
+            script = "\n".join(l[10:] for l in body.splitlines())
+            # (ref_type, ref_name, releases that exist, tags {name: "build"|"other"}) -> (exit, created tag or None)
+            cases = {"fresh": (("branch", "neoforge-1.21.1", [], {}), (0, "examplemod-1.0-mc1.21.1")),
+                     "a release": (("branch", "neoforge-1.21.1", ["examplemod-1.0-mc1.21.1"],
+                                    {"examplemod-1.0-mc1.21.1": "other"}), (0, "examplemod-1.0-mc1.21.1-r2")),
+                     "a tag, no release": (("branch", "neoforge-1.21.1", [], {"examplemod-1.0-mc1.21.1": "other"}),
+                                           (0, "examplemod-1.0-mc1.21.1-r2")),
+                     "tag and release, then a bare tag": (("branch", "neoforge-1.21.1", ["examplemod-1.0-mc1.21.1"],
+                                                           {"examplemod-1.0-mc1.21.1": "other",
+                                                            "examplemod-1.0-mc1.21.1-r2": "other"}),
+                                                          (0, "examplemod-1.0-mc1.21.1-r3")),
+                     "a pushed tag at the build": (("tag", "examplemod-1.0-mc1.21.1", [], {"examplemod-1.0-mc1.21.1": "build"}),
+                                                   (0, "examplemod-1.0-mc1.21.1")),
+                     "a tag at another commit": (("tag", "examplemod-1.0-mc1.21.1", [], {"examplemod-1.0-mc1.21.1": "other"}),
+                                                 (1, None))}
+            for case, ((rtype, rname, rels, tags), want) in cases.items():
+                with tempfile.TemporaryDirectory() as d:
+                    d = pathlib.Path(d)
+                    origin, repo = d / "origin.git", d / "repo"
+                    def g(*a, cwd=repo):
+                        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                                              errors="replace")
+                    g("init", "-q", "--bare", str(origin), cwd=d)
+                    g("init", "-q", str(repo), cwd=d)
+                    for k, v in (("user.email", "t@e"), ("user.name", "t"), ("core.autocrlf", "false")):
+                        g("config", k, v)
+                    (repo / "gradle.properties").write_text("mod_version=1.0\n", encoding="utf-8")
+                    g("add", "-A"); g("commit", "-qm", "older"); other = g("rev-parse", "HEAD").stdout.strip()
+                    (repo / "x").write_text("x\n", encoding="utf-8")
+                    g("add", "-A"); g("commit", "-qm", "build"); build = g("rev-parse", "HEAD").stdout.strip()
+                    for name, at in tags.items():
+                        g("tag", "-a", "-m", "t", name, build if at == "build" else other)   # annotated: peeled
+                    g("remote", "add", "origin", str(origin)); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1", "--tags")
+                    (repo / "jars").mkdir(); (repo / "jars/x.jar").write_bytes(b"")
+                    # the stand-in gh is a shell function ahead of the script: no PATH lookup of an extension-less
+                    # file, which Windows' Git Bash would not do the same way
+                    fake_gh = ('gh() { if [ "$1 $2" = "release view" ]; then for r in $RELEASES; do [ "$r" = "$3" ] && return 0; done; '
+                               'return 1; fi; if [ "$1 $2" = "release create" ]; then echo "$3" >> "$CREATED"; return 0; fi; return 3; }\n')
+                    run = fake_gh + (script.replace("${{ github.ref_type }}", rtype).replace("${{ github.ref_name }}", rname)
+                           .replace("${{ github.repository }}", "o/examplemod").replace("${{ github.sha }}", build))
+                    env = dict(os.environ, RELEASES=" ".join(rels), CREATED=(d / "created.txt").as_posix(), PREVIEW="")
+                    r = subprocess.run([BASH, "-c", run], cwd=repo, env=env, capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace")
+                    made = (d / "created.txt").read_text(encoding="utf-8").split() if (d / "created.txt").exists() else []
+                    good = r.returncode == want[0] and made == ([want[1]] if want[1] else [])
+                    good &= want[0] == 0 or "already points at" in r.stdout + r.stderr
+                    if not good:
+                        print(f"release script check ({'layer' if layer else 'single-version'}, {case}): exit {r.returncode}, "
+                              f"created {made}, want {want}\n{(r.stdout + r.stderr)[-1500:]}")
+                    ok &= good
+    return ok
 
 
 def manifest_script_check():
@@ -933,12 +1019,43 @@ def self_check():
                                         capture_output=True, text=True, encoding="utf-8", check=True)
         g_("init", "-q"); pathlib.Path(d_, "x").write_text("x\n", encoding="utf-8"); g_("add", "-A"); g_("commit", "-qm", "x")
         g_("tag", "solo-1.0-mc1.21.1")
-        real_get = globals()["_get"]
-        globals()["_get"] = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("no request"))
+        # the workflow's branch: a single-version fork (no .port/) keeps the checked-out branch, work branch or not;
+        # a version branch checked out on a keep-current/* work branch still names neoforge-<mc>, not that work branch
+        g_("checkout", "-q", "-b", "keep-current/2026-10-20")
+        ok &= port_branch(d_, "1.21.1") == "keep-current/2026-10-20"
+        g_("checkout", "-q", "-b", "neoforge-1.21.1"); ok &= port_branch(d_, "1.21.1") == "neoforge-1.21.1"
+        g_("checkout", "-q", "keep-current/2026-10-20")
+        for v_ in ("1.21.3", "1.21.4"):
+            pathlib.Path(d_, ".port", v_).mkdir(parents=True); pathlib.Path(d_, ".port", v_, "branch.properties").write_text("x=1\n", encoding="utf-8")
+        ok &= port_branch(d_, "1.21.4") == "neoforge-1.21.4" and port_branch(d_, "1.21.4", "neoforge-x") == "neoforge-x"
+        import shutil; shutil.rmtree(pathlib.Path(d_, ".port"))
+        pathlib.Path(d_, ".port/1.21.4").mkdir(parents=True)
+        pathlib.Path(d_, ".port/1.21.4/DEPS.md").write_text("deps at the tag\n", encoding="utf-8")
+        g_("add", "-A"); g_("commit", "-qm", "deps"); g_("tag", "dep-1.0-mc1.21.4")
+        real_get, calls_ = globals()["_get"], []
+        globals()["_get"] = lambda url, *a_, **k_: (calls_.append(url), "from GitHub\n")[1]
         try:
-            ok &= tag_file(d_, "o/solo", "solo-1.0-mc1.21.1", ".port/1.21.1/DEPS.md") is None
+            absent = tag_file(d_, "o/solo", "solo-1.0-mc1.21.1", ".port/1.21.1/DEPS.md")
+            no_call = list(calls_)
+            local = tag_file(d_, "o/dep", "dep-1.0-mc1.21.4", ".port/1.21.4/DEPS.md")
+            after_local = list(calls_)
+            remote = tag_file(d_, "o/dep", "dep-9.9-mc1.21.4", ".port/1.21.4/DEPS.md")      # not a tag of this clone
+            after_remote = list(calls_)
+            # a blob the clone lacks (a blob-filtered clone whose lazy fetch fails): git errors, GitHub is asked
+            pathlib.Path(d_, ".port/1.21.5").mkdir(parents=True)
+            pathlib.Path(d_, ".port/1.21.5/DEPS.md").write_text("blob not here\n", encoding="utf-8")
+            g_("add", "-A"); g_("commit", "-qm", "gone"); g_("tag", "dep-1.0-mc1.21.5")
+            oid = g_("rev-parse", "dep-1.0-mc1.21.5:.port/1.21.5/DEPS.md").stdout.strip()
+            loose = pathlib.Path(d_, ".git/objects", oid[:2], oid[2:])
+            loose.chmod(0o644); loose.unlink()        # git writes loose objects read-only: Windows refuses the unlink
+            del calls_[:]
+            lazy = tag_file(d_, "o/dep", "dep-1.0-mc1.21.5", ".port/1.21.5/DEPS.md")
         finally:
             globals()["_get"] = real_get
+        ok &= absent is None and no_call == []                       # absent at a local tag: None, no request
+        ok &= local == "deps at the tag\n" and after_local == []     # present at a local tag: from git, no request
+        ok &= remote == "from GitHub\n" and after_remote == ["https://raw.githubusercontent.com/o/dep/dep-9.9-mc1.21.4/.port/1.21.4/DEPS.md"]
+        ok &= lazy == "from GitHub\n" and calls_ == ["https://raw.githubusercontent.com/o/dep/dep-1.0-mc1.21.5/.port/1.21.5/DEPS.md"]
     ok &= dependency_blockers(fixture(deps=True), look) == ([], [])
     ok &= dependency_blockers(fixture(deps=False), look) == ([], []) and pinned_releases(fixture(deps=False)) == []
     unread = dependency_blockers(pre_pin, lambda r_, t_: (_ for _ in ()).throw(OSError("offline")))
@@ -1077,6 +1194,8 @@ def main():
     ap.add_argument("--layer-branch", help="the fork's multi-version layer branch (e.g. neoforge-1.21.x): the same workflow "
                     "then also runs on it and carries the layer-* jobs (isolation, inertness, compile-only middle "
                     "targets, full gates on the newest target); skipped on the port branch")
+    ap.add_argument("--branch", help="the branch the workflow runs on (default: neoforge-<mc> when the checkout has "
+                    ".port/<mc>/, a version branch; else the checked-out branch)")
     ap.add_argument("--trailer", action="append", default=[])
     ap.add_argument("--kit-version", type=int, help="Port CI kit to pin (default: the newest published)")
     ap.add_argument("--kit-sha", help="its sha256 (default: read from the release's SHA256SUMS)")
@@ -1087,7 +1206,7 @@ def main():
     mc, neo = p.get("minecraft_version"), p.get("neo_version")
     if not mc or not neo:
         sys.exit("gradle.properties has no minecraft_version / neo_version")
-    branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    branch = port_branch(repo, mc, a.branch)
     base = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip().split("/", 1)[-1] or "main"
     mrepo = migrator_repo()
     kver, ksha = kit_pin(mrepo, a.kit_version, a.kit_sha)

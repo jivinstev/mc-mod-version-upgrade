@@ -103,11 +103,16 @@ own commit and writes nothing; the parent branch is read from origin when the lo
    writes it alone on the branch);
 7. every item of the base build's behaviour inventory (`.port/INVENTORY.json`) is accounted for on the version
    (`layer-inventory.py`'s account of the branch's own tree) AND the committed `INVENTORY-CHECK.json` says exactly what a
-   fresh check says (a release is judged by the committed one: a run rewrites it, commit it);
+   fresh check says (a release is judged by the committed one: a run rewrites it, commit it -- the run that rewrote it
+   still lists it, saying `commit ... (no re-run needed)`: commit it and the next check passes; do not re-run for it);
 8. no dependency was built against a library version that is not done (`--allow-undone-library`, DEPS.md
    "Development only") or against a jar copied from a library checkout (`port_jar_dev.`, `--port-checkout`);
 9. **a library** (`library=true`): at least one dependent's version passed Gate C against this library's jar, recorded
-   in `DEPENDENTS.json` (`fork-branches.py library-record`) for a commit whose jar is current. Gate C on a library alone
+   in `DEPENDENTS.json` (`fork-branches.py library-record`) for a commit whose jar is current. **A record counts for the
+   commit (and tag) it names, never for a later one**: when the library branch moved on with jar-relevant changes after
+   the recorded tag, the done check says `library: the dependents' record is for <tag> (<commit>), the branch is at
+   <sha> ...` -- release the new commit and record a dependent's Gate C against that release; a branch that moved only
+   in records (the record itself, reviews, notes) still has the same jar, and the record counts. Gate C on a library alone
    checks nothing (its spawn and battle phases spawn no entity of its own, so ci-gates.py skips them there).
 
 A record that names a **layer commit** (a migrated version's GATES.md and REVIEW.md) counts when `MIGRATED.json` maps
@@ -194,7 +199,9 @@ Each version branch gets the same workflow as a single-version port, at its vers
 branch's workflow read back, without `--layer-branch`, each sibling `--dep-jar` replaced by this version's pinned
 library release and each `--dep-jar-variant` of it moved to the same release and coordinates -- refused, exit 2, when
 the release's asset names do not show which asset the variant is -- a library's Gate C without spawn and battle, and
-the newest published Port CI kit rather than the port branch's older pin; `--kit-version N` pins kit N); `--run` runs
+the newest published Port CI kit rather than the port branch's older pin; `--kit-version N` pins kit N; and
+`--branch neoforge-<v>`, so the triggers name the version branch even when the command runs on a `keep-current/*` work
+branch -- `port-ci.py` alone also takes `neoforge-<mc>` on a checkout holding `.port/<mc>/`); `--run` runs
 it in a worktree of the branch and commits there. Push the branch; nothing is pushed for you. The layer jobs (layer-compile, layer-isolation, layer-inertness, ...)
 do not apply. A tag `<mod>-<ver>-mc<v>` on the branch releases that version (publish-port's single-version path). The
 cascade keeps each branch's own `.github/workflows/port-ci.yml` and install manifest when it merges the lower branch:
@@ -319,7 +326,7 @@ stale (the root `README.md` only; a README under `src/` is jar content). Read it
 
 Each entry: id, title, the severity and the rubric inputs it came from, an owner `override` (recorded with its
 reason), the lowest affected version, a status per Minecraft version (`open`, `fixed@<commit>`, `wontfix:<reason>`,
-`n/a`; a version not listed is not affected), the source (authors, review, gate, player) and notes. `grade` derives
+`duplicate:<ID>` -- tracked by another issue of the ledger, rendered `dup of <ID>`, never open --, `n/a`; a version not listed is not affected), the source (authors, review, gate, player) and notes. `grade` derives
 the severity from the inputs:
 
 | Severity | Rubric inputs | Meaning |

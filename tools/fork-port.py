@@ -802,6 +802,8 @@ REVIEW_OUTPUTS = ("GATES.md", "GATES-RED.md", "COST.md", "RESIDUE.md", "REVIEW.m
                                                # still read as a reviewed input by layer-inventory.py's account
                   "INVENTORY-CHECK.json",      # layer-inventory.py's account, rewritten by every done check
                   "DEPS.md",                   # layer-deps.py resolve's table, rewritten by every setup (machine paths)
+                  "DRIFT.md",                  # drift_stop's log of drift accepted or left out by a round's plan (a
+                                               # version branch's .port/<v>/DRIFT.md), appended by a run after review
                   "KNOWN-ISSUES.json")         # the known-issues ledger (tools/known-issues.py): a record of findings
 # Files of a target's directory that are not in a player's jar: a change to them does not make GATES.md stale
 # (tools/layer-deps.py NOT_JAR, the same list). REMERGE.json is layer-sync's record of an overlay the authors' change
@@ -1617,7 +1619,8 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
             "detail": reasons, "choices": [f"bring it in: {kc}",
                                            "a weekly round whose frozen plan does not take the authors' code: the same command "
                                            "with --untaken-ok round/frozen.json (recorded in DRIFT.md)",
-                                           "or continue knowingly on the frozen code: the same command with --accept-upstream-drift (recorded in .multiversion/DRIFT.md)"]}
+                                           "or continue knowingly on the frozen code: the same command with --accept-upstream-drift "
+                                           f"(recorded in {df.relative_to(repo).as_posix()})"]}
 
 
 INJECTORS =r'(?:Inject|Redirect|ModifyArg|ModifyArgs|ModifyVariable|ModifyConstant|ModifyReturnValue|' \
@@ -4671,8 +4674,9 @@ def self_check_done_freeze_sweep():
         with contextlib.redirect_stdout(io.StringIO()):
             st = drift_stop(fork, a_)
         expect(st and st["code"] == DRIFT_EXIT and "1 commit(s)" in st["stop"]
-               and any("port-sync.py" in c and "--upstream upstream/main" in c and "--port neoforge-1.21.1" in c for c in st["choices"]),
-               f"the authors pushed: exit 19 naming the keep-current command: {st}")
+               and any("port-sync.py" in c and "--upstream upstream/main" in c and "--port neoforge-1.21.1" in c for c in st["choices"])
+               and any("--accept-upstream-drift (recorded in .multiversion/DRIFT.md)" in c for c in st["choices"]),
+               f"the authors pushed: exit 19 naming the keep-current command and the layer's DRIFT.md: {st}")
         a_.accept_upstream_drift = True
         with contextlib.redirect_stdout(io.StringIO()):
             st = drift_stop(fork, a_)
@@ -4709,8 +4713,11 @@ def self_check_done_freeze_sweep():
         with contextlib.redirect_stdout(io.StringIO()):
             st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
         expect(st and st["code"] == DRIFT_EXIT and "no `authors` remote" in st["stop"] and not vdrift.exists()
-               and any("--untaken-ok" in c for c in st["choices"]),
-               f"a freeze naming a remote the clone lacks: exit 19 (removing the remote is no escape), nothing recorded: {st}")
+               and any("--untaken-ok" in c for c in st["choices"])
+               and any("--accept-upstream-drift (recorded in .port/1.21.3/DRIFT.md)" in c for c in st["choices"])
+               and not any(".multiversion/" in c for c in st["choices"]),
+               f"a freeze naming a remote the clone lacks: exit 19 (removing the remote is no escape), nothing recorded, "
+               f"the version's own DRIFT.md named: {st}")
         gf("remote", "add", "origin", "https://github.com/owner/examplemod.git")
         now = datetime.datetime.now(datetime.timezone.utc)
         frozen = pathlib.Path(d) / "frozen.json"
@@ -5194,6 +5201,12 @@ def self_check_review131():
             g("add", "-A"); g("commit", "-qm", "deps")
             w(repo / ".multiversion/targets/1.21.4/DEPS.md", "# Dependencies\n\nresolved on another machine\n")
             expect(target_done(repo, "1.21.4") == [], f"a rewritten DEPS.md keeps the review current: {target_done(repo, '1.21.4')}")
+            # DRIFT.md (drift_stop appends to it; on a version branch it is .port/<v>/DRIFT.md, in the version's own
+            # directory) is a run output too: recording an accepted drift makes neither the review nor the gates stale
+            w(repo / ".multiversion/targets/1.21.4/DRIFT.md", "- 2026-10-20 1.21.4: accepted with --accept-upstream-drift: x\n")
+            g("add", "-A"); g("commit", "-qm", "drift recorded")
+            expect("DRIFT.md" in REVIEW_OUTPUTS and target_done(repo, "1.21.4") == [],
+                   f"a DRIFT.md committed after the review keeps it current: {target_done(repo, '1.21.4')}")
     case("finding 7", f7)
 
     # ---- finding 11: --check-done writes nothing; a missing or stale prepared tree is said precisely, or re-prepared

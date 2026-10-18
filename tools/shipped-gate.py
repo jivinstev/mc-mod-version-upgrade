@@ -80,6 +80,12 @@ def java_candidates(major, explicit=None, env=None, roots=JDK_ROOTS):
     return list(dict.fromkeys(cands))
 
 
+def no_jdk_message(major):
+    """What find_java looked at, in the order java_candidates tries them."""
+    return (f"no JDK {major} found (looked at JAVA_HOME, JAVA_HOME_{major}, {', '.join(JDK_ROOTS)}); install it or "
+            "pass --java-home")
+
+
 def find_java(major, explicit=None):
     cands = java_candidates(major, explicit)
     for c in cands:
@@ -340,8 +346,7 @@ def main():
     major = jdk_for(repo, mc)
     java = find_java(major, a.java_home)
     if not java:
-        say(f"no JDK {major} found (looked at JAVA_HOME_{major}, {', '.join(JDK_ROOTS)} and JAVA_HOME); install it or "
-            "pass --java-home"); return 2
+        say(no_jdk_message(major)); return 2
     cache = pathlib.Path(a.cache_dir or os.environ.get("SHIPPED_GATE_CACHE") or
                          pathlib.Path.home() / ".cache/shipped-gate").resolve()
     cache.mkdir(parents=True, exist_ok=True)
@@ -384,6 +389,9 @@ def self_check():
     ok &= load_problems("[x/INFO] ok\n[y/ERROR] Mod loading has failed\n[z/DEBUG] ModLoadingException") != []
     ok &= len(load_problems("[z/DEBUG] ModLoadingException\n[x/INFO] fine")) == 0
     ok &= find_java(99) is None
+    # the not-found message names the places in the order they are tried: JAVA_HOME, then JAVA_HOME_<major>, then roots
+    msg = no_jdk_message(25)
+    ok &= re.findall(r"JAVA_HOME(?:_\d+)?", msg) == ["JAVA_HOME", "JAVA_HOME_25"] and msg.find("JAVA_HOME_25") < msg.find(JDK_ROOTS[0])
     with tempfile.TemporaryDirectory() as d:      # where a JDK 25 is looked for, not only /usr/lib/jvm (dry run, 2026-10-18)
         r = pathlib.Path(d)
         for n in ("opt/jdk-25.0.1+9", "opt/jdk-21.0.4", "opt/jdk-125", "gradle/jdks/eclipse_adoptium-25-amd64-linux.2",
