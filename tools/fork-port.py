@@ -1463,9 +1463,9 @@ def freeze_upstream(repo, ref=None, libraries=(), accept_drift=False, props_file
 # got past (a deleted remote is never the way): --untaken-ok <frozen.json>, or the round's own round/frozen.json in the
 # working directory, names this fork; its drift is then recorded in DRIFT.md as left out by the plan, and the run goes
 # on. Only the authors' branch: a library release other than the frozen one still stops. A frozen input older than
-# FROZEN_MAX_DAYS (last week's round) is not this round's decision and is ignored.
+# FROZEN_MAX_DAYS (7: a week -- last week's round) or more is not this round's decision and is ignored.
 FROZEN_DEFAULT = pathlib.Path("round/frozen.json")
-FROZEN_MAX_DAYS = 8
+FROZEN_MAX_DAYS = 7
 
 
 def origin_slug(repo):
@@ -1487,7 +1487,9 @@ def frozen_entry(repo, path=None, now=None):
         forks = data.get("forks") or []
     except (OSError, ValueError, AttributeError) as e:
         return None, f, f"{f} is not a frozen round input ({e})"
-    at = data.get("frozen_at") or ""
+    at = data.get("frozen_at") if isinstance(data, dict) else None
+    if not isinstance(at, str) or not at:
+        return None, f, f"{f} has no frozen_at: not a round's frozen input"
     try:
         when = datetime.datetime.fromisoformat(at.replace("Z", "+00:00"))
         if when.tzinfo is None:
@@ -1495,7 +1497,7 @@ def frozen_entry(repo, path=None, now=None):
         age = ((now or datetime.datetime.now(datetime.timezone.utc)) - when).total_seconds() / 86400
     except ValueError:
         return None, f, f"{f} has no frozen_at: not a round's frozen input"
-    if age > FROZEN_MAX_DAYS:
+    if age >= FROZEN_MAX_DAYS:
         return None, f, f"{f} was frozen {at} ({int(age)} days ago): not this round's input"
     slug = origin_slug(repo)
     hit = [x for x in forks if isinstance(x, dict) and slug and str(x.get("repo", "")).lower() == slug.lower()]
@@ -1504,7 +1506,7 @@ def frozen_entry(repo, path=None, now=None):
     return dict(hit[0], _issue=data.get("issue")), f, None
 
 
-def untaken_ok(repo, a, rec):
+def untaken_ok(repo, a, rec, compared=True):
     """-> (note, None) when the round's frozen input left the authors' drift out on purpose, else (None, why not / None).
     take_authors false: every commit of theirs waits (the plan did not take them). take_authors true: only what came
     after the plan's upstream_commit, once the checkout carries that commit (pushed after the plan: next week)."""
@@ -1515,6 +1517,11 @@ def untaken_ok(repo, a, rec):
     if e.get("take_authors") is False:
         return f"left out on purpose by {src}: take_authors false for {e.get('repo')}", None
     uc = e.get("upstream_commit")
+    if not compared:
+        # the plan takes the authors' code: only commits after its upstream_commit may wait, and that can be told only
+        # when their branch could be read
+        return None, (f"{src} takes the authors' code for {e.get('repo')}, and their branch could not be compared: "
+                      "make it readable (the remote, a fetch) first")
     if uc and _git(repo, "merge-base", "--is-ancestor", uc, "HEAD")[0] == 0:
         return (f"pushed after {src} saw {uc[:12]} (taken): waits for next week's plan", None)
     return None, (f"{src} takes the authors' code for {e.get('repo')} and this checkout does not carry its "
@@ -1551,7 +1558,7 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
           f"tools/port-sync.py --repo {repo} --port {port} --upstream {ref or '<remote>/<branch>'} --dry-run, then the "
           f"keep-current skill), then " + (f"fork-branches.py freeze --repo {repo} --target {a.target}" if props_file
                                              else f"make-fork-layer.py freeze --repo {repo}"))
-    reasons, upstream_reasons = [], []
+    reasons, upstream_reasons, compared = [], [], True
     if not rec:
         print(f"fork-port: upstream: WARNING no authors' commit recorded for this buildout ({bp.relative_to(repo).as_posix()} "
               "upstream/upstream_commit): an upstream that moves mid-ladder goes unseen -- "
@@ -1565,6 +1572,7 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
         # records what the buildout started from, which HEAD may never have carried in full
         since = st.get("since") if st.get("since") is not None else st.get("behind")
         if st.get("error"):
+            compared = False
             # a freeze that cannot be compared is a stop, not a warning: deleting the remote must never get a run
             # past the guard (the frozen plan's decision does, below)
             upstream_reasons.append(f"cannot compare with the authors' branch: {st['error']}" + (add_remote_hint(repo, ref) or ""))
@@ -1583,7 +1591,7 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
     day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     df = pathlib.Path(drift_file) if drift_file else mv / "DRIFT.md"
     if upstream_reasons and not getattr(a, "accept_upstream_drift", False):
-        note, why_not = untaken_ok(repo, a, rec)
+        note, why_not = untaken_ok(repo, a, rec, compared)
         if note:
             with open(df, "a", encoding="utf-8") as fh:
                 fh.write(f"- {day} {a.target}: {note}: {'; '.join(upstream_reasons)}\n")
@@ -4705,10 +4713,14 @@ def self_check_done_freeze_sweep():
         def freeze_file(take, at=now, repo_="owner/examplemod", uc=None):
             frozen.write_text(json.dumps({"issue": 7, "frozen_at": at.isoformat(timespec="seconds"), "forks": [
                 {"repo": repo_, "take_authors": take, "upstream_commit": uc}]}), encoding="utf-8")
+        head_ = gf("rev-parse", "HEAD")
         for case, args_, want_stop in (("take_authors false", dict(take=False), False),
                                        ("another fork's entry", dict(take=False, repo_="owner/other"), True),
                                        ("last week's frozen input", dict(take=False, at=now - datetime.timedelta(days=30)), True),
-                                       ("take_authors true, upstream_commit not carried", dict(take=True, uc="f" * 40), True)):
+                                       ("frozen exactly 7 days ago", dict(take=False, at=now - datetime.timedelta(days=7)), True),
+                                       ("take_authors true, upstream_commit not carried", dict(take=True, uc="f" * 40), True),
+                                       ("take_authors true, carried, but the branch cannot be compared",
+                                        dict(take=True, uc=head_), True)):
             freeze_file(**args_)
             a_.untaken_ok = str(frozen)
             buf = io.StringIO()
@@ -4716,8 +4728,17 @@ def self_check_done_freeze_sweep():
                 st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
             expect((st is not None) == want_stop and (st is None or st["code"] == DRIFT_EXIT),
                    f"--untaken-ok, {case}: {'a stop' if want_stop else 'goes on'}: {st} {buf.getvalue()}")
+        frozen.write_text(json.dumps({"frozen_at": 20261018, "forks": [{"repo": "owner/examplemod", "take_authors": False}]}),
+                          encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
+        expect(st and st["code"] == DRIFT_EXIT, f"a frozen_at that is not a string is no frozen input: {st}")
+        freeze_file(False, at=now - datetime.timedelta(days=6, hours=23))
+        with contextlib.redirect_stdout(io.StringIO()):
+            st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
+        expect(st is None, f"a frozen input under a week old is this round's: {st}")
         rec_ = vdrift.read_text(encoding="utf-8") if vdrift.exists() else ""
-        expect(rec_.count("\n") == 1 and "left out on purpose by the frozen plan" in rec_ and "plan issue #7" in rec_,
+        expect(rec_.count("\n") == 2 and "left out on purpose by the frozen plan" in rec_ and "plan issue #7" in rec_,
                f"the accepted drift is recorded once in the version's DRIFT.md, naming the plan: {rec_!r}")
         # round/frozen.json in the working directory is read without the flag
         a_.untaken_ok = None
@@ -4731,8 +4752,26 @@ def self_check_done_freeze_sweep():
                 st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
         finally:
             os.chdir(old_cwd)
-        expect(st is None and vdrift.read_text(encoding="utf-8").count("\n") == 2,
+        expect(st is None and vdrift.read_text(encoding="utf-8").count("\n") == 3,
                f"the round's round/frozen.json is read from the working directory: {st}")
+        # a real authors' branch ahead of the freeze (the remote exists and is fetched): a plan that does not take their
+        # code goes on; one that takes it goes on only for what came after the commit it took, once that is carried
+        rbp = fork / ".port/1.21.4/branch.properties"
+        rdrift = fork / ".port/1.21.4/DRIFT.md"
+        w(rbp, f"minecraft_version=1.21.4\nupstream=upstream/main\nupstream_commit={gf('rev-parse', 'upstream/main')}\n")
+        w(up / "A.java", "a3\n"); gu("commit", "-qam", "authors 3")
+        a_.untaken_ok = str(frozen)
+        for case, args_, want_stop in (("take_authors false, the authors ahead", dict(take=False), False),
+                                       ("take_authors true, their new tip not carried", dict(take=True, uc=gu("rev-parse", "HEAD")), True),
+                                       ("take_authors true, the plan's commit carried", dict(take=True, uc=gf("rev-parse", "HEAD")), False)):
+            freeze_file(**args_)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                st = drift_stop(fork, a_, fetch=True, props_file=rbp, drift_file=rdrift)
+            expect((st is not None) == want_stop and "1 commit(s)" in (buf.getvalue() + (st or {}).get("stop", "")),
+                   f"--untaken-ok against a real authors' branch, {case}: {st} {buf.getvalue()}")
+        rbp.unlink(); rdrift.unlink(missing_ok=True); a_.untaken_ok = None
+        freeze_file(False)
         # a library release other than the frozen one still stops, whatever the plan says about the authors
         a_.untaken_ok, a_.port_release = str(frozen), ["owner/lib@v9"]
         w(vbp, vbp.read_text(encoding="utf-8") + "library.owner/lib=v1\n")
