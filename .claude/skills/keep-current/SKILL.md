@@ -439,7 +439,9 @@ known issues (the pinned issue with `--pinned-issue N`, and `.port/KNOWN-ISSUES.
 `<!-- ports:begin -->` and `<!-- ports:end -->` in the fork's root README; it never changes a byte outside the markers
 (the authors' README text merges as before), and a root README edit runs no Port CI and stales no gate. When it runs:
 on the **head branch** after every round and every release; on the fork's **default branch** (where visitors land) only
-once the chain reaches its newest version, and after that on every release. Commit it alone.
+once the chain reaches its newest version, and after that on every release. Commit it alone. Every GitHub call it
+makes is bounded (`MMVU_GH_TIMEOUT`, default 60 s) and a read falls back (a token's REST call to `gh`, `gh` to
+anonymous REST): where `gh` hangs (its GraphQL blocked) it fails or answers in bounded time, never hangs the round.
 
 ## Setup: the weekly cycle on the user's accounts
 

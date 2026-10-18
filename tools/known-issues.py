@@ -756,24 +756,69 @@ def read_plan(issue, comments, allowed, now=None):
             "grades": [grades[k] for k in sorted(grades)], "ignored": ignored, "carried_from": data.get("carried_from")}
 
 
-def gh_api(path, method="GET", data=None):
-    """GitHub's REST API: GITHUB_TOKEN / GH_TOKEN when set, else the `gh` command line. -> parsed JSON."""
-    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+GH_TIMEOUT_ENV = "MMVU_GH_TIMEOUT"       # seconds one GitHub call may take (gh or REST); default 60
+
+
+def gh_timeout():
+    try:
+        return max(1.0, float(os.environ.get(GH_TIMEOUT_ENV) or 60))
+    except ValueError:
+        return 60.0
+
+
+def gh_rest(path, method="GET", data=None, tok=None):
+    """One REST call to api.github.com (urllib, a timeout on every socket operation); tok None: anonymous (a public
+    repository's issues and releases read without one). -> parsed JSON."""
+    import urllib.request
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "mmvu-weekly-plan", "Content-Type": "application/json"}
     if tok:
-        import urllib.request
-        req = urllib.request.Request("https://api.github.com" + path, method=method,
-                                     data=None if data is None else json.dumps(data).encode("utf-8"),
-                                     headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json",
-                                              "User-Agent": "mmvu-weekly-plan", "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            text = r.read().decode("utf-8")
-        return json.loads(text) if text.strip() else {}
+        headers["Authorization"] = f"Bearer {tok}"
+    req = urllib.request.Request("https://api.github.com" + path, method=method,
+                                 data=None if data is None else json.dumps(data).encode("utf-8"), headers=headers)
+    with urllib.request.urlopen(req, timeout=min(30.0, gh_timeout())) as r:
+        text = r.read().decode("utf-8")
+    return json.loads(text) if text.strip() else {}
+
+
+def gh_source():
+    """Which way gh_api reaches GitHub, said once by the commands that read it."""
+    if os.environ.get("GITHUB_TOKEN"):
+        return "GITHUB_TOKEN over REST (gh is not used, so a broken gh login does not matter)"
+    if os.environ.get("GH_TOKEN"):
+        return "GH_TOKEN over REST (gh is not used)"
+    return "the gh command line (no GITHUB_TOKEN or GH_TOKEN set), anonymous REST if gh fails or times out"
+
+
+def gh_api(path, method="GET", data=None):
+    """GitHub's REST API: GITHUB_TOKEN (else GH_TOKEN) over REST when set; else the `gh` command line. Every call is
+    bounded (MMVU_GH_TIMEOUT, default 60 s; `gh` hung where its GraphQL endpoint was blocked), and a read whose way
+    failed falls back -- a token's REST call to `gh`, `gh` to anonymous REST -- before it fails. -> parsed JSON."""
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    errs = []
+    if tok:
+        try:
+            return gh_rest(path, method, data, tok)
+        except Exception as e:          # noqa: BLE001 -- a bad token or a blocked call: try the next way for a read
+            if method != "GET":
+                raise
+            errs.append(f"REST with the token: {e}")
     cmd = ["gh", "api", "-X", method, path] + (["--input", "-"] if data is not None else [])
-    r = subprocess.run(cmd, input=None if data is None else json.dumps(data), capture_output=True, text=True,
-                       encoding="utf-8")
-    if r.returncode:
-        raise Invalid(f"gh api {path}: {(r.stderr or r.stdout).strip()[-300:]} (set GITHUB_TOKEN or log in with gh)")
-    return json.loads(r.stdout) if r.stdout.strip() else {}
+    try:
+        r = subprocess.run(cmd, input=None if data is None else json.dumps(data), capture_output=True, text=True,
+                           encoding="utf-8", timeout=gh_timeout())
+        if r.returncode == 0:
+            return json.loads(r.stdout) if r.stdout.strip() else {}
+        errs.append(f"gh: {(r.stderr or r.stdout).strip()[-300:]}")
+    except subprocess.TimeoutExpired:
+        errs.append(f"gh: no answer in {gh_timeout():.0f} s ({GH_TIMEOUT_ENV})")
+    except OSError as e:
+        errs.append(f"gh: {e}")
+    if method == "GET":
+        try:
+            return gh_rest(path, method, None, None)
+        except Exception as e:          # noqa: BLE001
+            errs.append(f"anonymous REST: {e}")
+    raise Invalid(f"gh api {path}: " + "; ".join(errs) + " (set GITHUB_TOKEN or log in with gh)")
 
 
 def gh_pages(path, api=gh_api):
@@ -1237,6 +1282,8 @@ def cmd_read_plan(a, out):
     slug = a.slug or slug_of(a.repo or ".")
     if not slug:
         raise Invalid("no --slug and no GitHub origin remote to read it from")
+    if not a.from_json:
+        print(f"read-plan: GitHub through {gh_source()}", file=sys.stderr)
     if a.latest:
         found = open_plan_issues(slug, api)
         if not found:
@@ -1303,6 +1350,7 @@ def cmd_render_ports(a, repo, out):
     elif a.fetch_releases:
         if not slug:
             raise Invalid("--fetch-releases needs --slug or a GitHub origin remote")
+        print(f"render-ports: GitHub through {gh_source()}", file=sys.stderr)
         releases = gh_pages(f"/repos/{slug}/releases")
     fb = None
     try:
@@ -1550,6 +1598,30 @@ def self_check():
         expect(rc == 2, f"a bad range is refused: {o}")
         expect(next_id({"issues": []}) == "KI-1" and next_id({"issues": [{"id": "KI-9"}]}) == "KI-10",
                "an empty ledger and a KI- ledger number as before")
+        # GitHub calls are bounded and fall back (weekly-round dry run: render-ports --fetch-releases hung where gh's
+        # GraphQL was blocked): gh timing out, then anonymous REST for a read; a write is never retried anonymously
+        saved_env = {k: os.environ.pop(k, None) for k in ("GITHUB_TOKEN", "GH_TOKEN")}
+        real_run, real_rest, seen = subprocess.run, globals()["gh_rest"], []
+        try:
+            def slow(cmd, **k):
+                seen.append(("gh", k.get("timeout")))
+                raise subprocess.TimeoutExpired(cmd, k.get("timeout"))
+            subprocess.run = slow
+            globals()["gh_rest"] = lambda path, method="GET", data=None, tok=None: (seen.append(("rest", tok)), [{"tag_name": "t"}])[1]
+            got = gh_api("/repos/owner/examplemod/releases?per_page=100&page=1")
+            try:
+                gh_api("/repos/owner/examplemod/issues", "POST", {"title": "x"})
+                wrote = True
+            except Invalid as e:
+                wrote = "no answer in" not in str(e)
+            src = gh_source()
+        finally:
+            subprocess.run, globals()["gh_rest"] = real_run, real_rest
+            for k, v in saved_env.items():
+                if v is not None:
+                    os.environ[k] = v
+        expect(got == [{"tag_name": "t"}] and seen[:2] == [("gh", gh_timeout()), ("rest", None)] and not wrote
+               and "gh command line" in src, f"gh bounded, a read falls back to REST, a write does not: {seen} {wrote}")
         # a multi-mod repository: one ledger per mod
         rc, o = cli("add", *L, "--mod", "examplemod", "--title", "t", "--failure", "kick", "--visibility", "rare",
                     "--reach", "normal", "--workaround", "no", "--lowest", "1.21.1")
