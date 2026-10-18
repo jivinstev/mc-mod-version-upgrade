@@ -2523,6 +2523,8 @@ def worktree_for(repo, t):
         if left:
             return None, (f"the worktree {w} has uncommitted changes ({', '.join(left[:4])}): commit or discard them "
                           f"(git -C {w} checkout -- .), or remove the worktree (git worktree remove --force {w})")
+        if dirty:
+            print(f"fork-branches: reusing {w} as a stopped run left it, its own records uncommitted: {', '.join(dirty)}")
         if git(w, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() != b:
             r = git(w, "checkout", "-q", b)
             if r.returncode:
@@ -2723,7 +2725,7 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
             if work is None:
                 rows.append((t, "STOPPED", why)); break
             say(f"fork-branches: cascade: {t}: {what}: gating it now")
-            rc = runner(work, t, gates, say)
+            rc = runner(work, t, gates, say)          # the record stays until this run is green
             if rc not in (0, 17, UNDONE_EXIT):
                 rows.append((t, f"merged earlier, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
                 say(f"fork-branches: cascade STOPPED at {t}: still red -- start ONE fixer there (python3 tools/fork-port.py "
@@ -2775,6 +2777,10 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
                 f"until the file changes), commit, then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}")
             show_pending()
             break
+        if gates != "none" and mode != "plan-run":
+            # recorded BEFORE the gates run: a run that is killed or times out leaves the merge recorded as ungated
+            mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(),
+                         "merged; its gates did not finish (killed, timed out, or still running)")
         rc = runner(work, t, gates, say) if mode != "plan-run" else 0
         if rc not in (0, 17, UNDONE_EXIT):
             rows.append((t, f"merged, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
@@ -3568,9 +3574,9 @@ def ci_check(repo, versions=None, kit_version=None):
         if wf.returncode:
             why.append("no .github/workflows/port-ci.yml")
         else:
-            m = re.search(r'KIT_VERSION: "(\d+)"', wf.stdout)
-            if newest is not None and (not m or int(m.group(1)) < newest):
-                why.append(f"its workflow pins Port CI kit {m.group(1) if m else '?'}, older than kit {newest}")
+            kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf.stdout)]    # the kit's release the workflow downloads
+            if newest is not None and (not kits or min(kits) < newest):
+                why.append(f"its workflow pins Port CI kit {min(kits) if kits else '?'}, older than kit {newest}")
             vj = (re.search(r'\n\s*VARIANT_JARS: "([^"]*)"', wf.stdout) or [None, ""])[1].split()
             miss = [v for v in shipped_variants(repo, ref, t) if f"*_{v}.jar" not in vj]
             if miss:
@@ -4082,12 +4088,13 @@ def _check_ci_check(expect):
     with tempfile.TemporaryDirectory() as d:
         r, g, _run = _migrated_fixture(d)
         w4, _w = worktree_for(r, "1.21.4")
-        wf = ('name: Port CI\nenv:\n  KIT_VERSION: "3"\njobs:\n  shipped:\n    env:\n          VARIANT_JARS: "*_mr.jar"\n'
-              '    steps:\n      - run: ./tools/ci-gates.py --repo . --modid "examplemod"\n')
+        wf = (ROOT / "tools/golden/port-ci-single-deps.yml").read_text(encoding="utf-8")    # a real workflow: kit v7
         _hand(w4, {".github/workflows/port-ci.yml": wf, ".port/1.21.4/shipped-expect-cf.txt": "A.log:cf ran\n"}, "1.21.4: CI")
-        lines = ci_check(r, kit_version=5)
+        lines = ci_check(r, kit_version=8)
         w14 = [l for l in lines if "neoforge-1.21.4" in l]
-        expect(len(w14) == 1 and "kit 3, older than kit 5" in w14[0] and "*_cf.jar" in w14[0]
+        same = [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "kit" in l and "WARNING" in l]
+        expect(not same, f"a workflow on the newest kit (the golden's v7) is not called old: {same}")
+        expect(len(w14) == 1 and "kit 7, older than kit 8" in w14[0] and "*_cf.jar" in w14[0]
                and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines) and "--all" in lines[-1],
                f"ci-check names the outdated kit and the missing _cf job: {lines}")
         expect(not [l for l in ci_check(r, ["1.21.4"], kit_version=False) if "WARNING" in l and "kit" in l]
@@ -4100,6 +4107,26 @@ def _check_ci_check(expect):
            "add_variant_jars: a variant with expectations gets its glob once; none, nothing added")
 
 
+def _check_killed_gates(expect):
+    """A gates run that never returns (killed, timed out) leaves the merge recorded as ungated: the record is written
+    before the gates run and cleared only when they are green."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        _authors(r, g, {"src/main/java/com/example/mod/Plain.java": ("int v = 1;", "int v = 3;")}, "authors: v = 3")
+
+        def killed(w, t, gates, say=print):
+            raise KeyboardInterrupt("killed")
+        try:
+            _quiet(cascade, r, "port..1.21.3", "ab", runner=killed)
+            died = False
+        except KeyboardInterrupt:
+            died = True
+        rec = dict(ungated(r))
+        _quiet(cascade, r, "port..1.21.3", "ab", runner=lambda w, t, gates, say=print: 0)
+        expect(died and "1.21.3" in rec and "did not finish" in rec["1.21.3"]["why"] and not ungated(r),
+               f"a killed gates run leaves the merge recorded; a green re-run clears it: {rec} {ungated(r)}")
+
+
 def _check_stopped_worktree(expect):
     """A cascade stopped at a version leaves its worktree under build/fork-branches/ with the run's records edited, or a
     registration whose directory is gone; the next run reuses or re-makes it instead of refusing (weekly-round dry run).
@@ -4109,8 +4136,10 @@ def _check_stopped_worktree(expect):
         w4, _w = worktree_for(r, "1.21.4")
         (w4 / ".port/1.21.4/INVENTORY-CHECK.json").write_text("{}\n", encoding="utf-8")       # a stopped run's record
         (w4 / ".port/1.21.4/GATES.md").unlink()
-        again, why = worktree_for(r, "1.21.4")
+        (again, why), said = _quiet(lambda: worktree_for(r, "1.21.4"))
         expect(again == w4 and why is None, f"a worktree holding only the stopped run's records is reused: {why}")
+        expect("reusing" in said and "INVENTORY-CHECK.json" in said and "GATES.md" in said,
+               f"the reuse names the uncommitted records it carries: {said}")
         (w4 / "src/main/java/com/example/mod/Plain.java").write_text("class Plain { int hand; }\n", encoding="utf-8")
         none_, why = worktree_for(r, "1.21.4")
         expect(none_ is None and "Plain.java" in (why or ""), f"a person's edit in it is still refused: {why}")
@@ -5192,6 +5221,7 @@ def self_check():
         _check_check_done_rows(expect)
         _check_ci_check(expect)
         _check_stopped_worktree(expect)
+        _check_killed_gates(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)
