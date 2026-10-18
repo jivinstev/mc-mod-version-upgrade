@@ -108,6 +108,7 @@ REVIEWED_INPUTS = ("renames.tsv", "STUBS.json", "REMERGE.json", "moves.generated
                    "shared-helpers.txt")
 GATES_DOC = re.compile(r"^((?!src/)[^\n]*\.md|LICENSE[^/]*|\.github/.*)$")     # port-publish.py's: nothing in a jar
 LIBRARY_PENDING = "library: no dependent has passed Gate C against this library version's jar yet"
+LIBRARY_PRERELEASE_MARK = "**Library pre-release (not done):**"      # tools/layer-deps.py render_md() writes it
 DEV_JAR_MARK = "port_jar_dev."
 
 
@@ -1065,6 +1066,10 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
         if fp().UNDONE_LIBRARY_MARK in deps:
             out.append("built against a library version that is not done (--allow-undone-library, DEPS.md \"Development "
                        "only\"): re-resolve with --port-release once the library's version is done")
+        if LIBRARY_PRERELEASE_MARK in deps:
+            out.append("built against a library pre-release whose version is not done (DEPS.md \"Library pre-release\"): "
+                       "fine for this version's pre-release; done, a full Release and promotion wait until the library's "
+                       "version is done -- then re-resolve with --port-release")
         p = info(root, t)
         dev = sorted(k[len(DEV_JAR_MARK):] for k in p if k.startswith(DEV_JAR_MARK))
         if dev:
@@ -3745,6 +3750,21 @@ def _check_port_taken(expect):
                f"{out[-400:]} {why}")
 
 
+def _check_prerelease_pin(expect):
+    """A dependent version pinned to a library pre-release (tools/layer-deps.py writes the mark into DEPS.md) is not
+    done: its pre-release may ship with it, its full Release and promotion wait for the library's version."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        before = target_done(r, "1.21.4")
+        w4, _w = worktree_for(r, "1.21.4")
+        (w4 / ".port/1.21.4/DEPS.md").write_text("# Dependencies for Minecraft 1.21.4\n\n" + LIBRARY_PRERELEASE_MARK
+                                                 + " `com.example:lib` is pinned to a library pre-release\n", encoding="utf-8")
+        git(w4, "add", "-A", check=True); git(w4, "commit", "-qm", "1.21.4: pinned to the library's pre-release", check=True)
+        after = target_done(r, "1.21.4")
+        expect(not any("library pre-release" in x for x in before) and any("library pre-release" in x for x in after),
+               f"a version pinned to a library pre-release is not done (control: without the mark it was not said): {after}")
+
+
 def _check_untaken_head(expect):
     """The weekly round's first dry run: the head already carries the authors' release (merged earlier, no cascade
     since: every port_taken older). `untaken` names it; a fix cascaded from a version branch, or from a fix branch cut
@@ -4735,6 +4755,7 @@ def self_check():
         _check_port_taken(expect)
         _check_deferred_integration(expect)
         _check_untaken_head(expect)
+        _check_prerelease_pin(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)

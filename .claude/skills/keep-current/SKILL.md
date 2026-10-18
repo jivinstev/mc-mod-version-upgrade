@@ -230,7 +230,9 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    dependent's same version to it (`layer-deps.py resolve --repo DEP --target <v> --port-release owner/lib@<tag>` on the
    dependent's checkout of that branch, then `fork-branches.py ci --repo DEP --target <v> --modid ID` for its workflow), and
    once the dependent's Gate C is green against it, `fork-branches.py library-record` in the library (fork-versions,
-   "Library first").
+   "Library first"). The library's version is not done before that record, and that is expected: `resolve` takes its
+   pre-release when the gates are green at the tag (marked in the dependent's DEPS.md), never `--allow-undone-library`;
+   the dependent's version is done, and may be promoted, only once the library's is.
 
 ## A fork with the layer (opt-in, existing layer forks only; skip this for a single-version fork)
 

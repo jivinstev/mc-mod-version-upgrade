@@ -171,7 +171,13 @@ branches; it reads the dependent's green GATES.md and its pin of this library's 
 `.port/T/DEPENDENTS.json`; that is what makes the library's version done.
 
 **Don't exceed your dependency.** A dependent's version T may cut its pre-release pinned to the library's T
-pre-release (that pair is what the owner plays; the library is only really tested through it). The dependent's T must
+pre-release (that pair is what the owner plays; the library is only really tested through it). This is how the library
+rule's loop is broken: `layer-deps.py resolve --port-release owner/lib@<tag>` takes a version-branch library's
+**pre-release whose gates are green at the tag** (GATES.md, a green Gate C) although that version is not done yet -- no
+`--allow-undone-library` -- and marks it in the dependent's `DEPS.md` ("Library pre-release (not done)"). The dependent
+then gates and cuts its pre-release against it, `library-record` records its Gate C in the library (which makes the
+library's version done once the rest of its list holds), and the dependent re-resolves the same tag: its version is not
+done while the mark stands. A full Release, or a pre-release with red gates, is still refused. The dependent's T must
 not be promoted to a full Release, nor published, while the library release it pins is still a pre-release; promote
 both together (`port-ci.py promote --with-dependency owner/lib`, the library promoted too), or the library first.
 

@@ -67,6 +67,11 @@ LIBRARY FIRST
   with exit 18 (dry run too; nothing is built, fetched or written but DEPS.md's reason). --allow-undone-library lets a
   --port-checkout through for development only -- DEPS.md records it under "Development only" -- never a release.
   `library-done` asks the same question alone. A pin kept from an earlier --port-release is not re-checked.
+  A version-branch library's PRE-RELEASE whose version is not done is still taken when its gates are green at the tag
+  (GATES.md: a green Gate C at a commit the tag carries): the library rule waits for a dependent's Gate C against the
+  library's jar, so a dependent's pre-release may pin it ("Don't exceed your dependency"). DEPS.md marks it
+  ("Library pre-release (not done)") and the dependent's version is then not done -- no full Release, no promotion --
+  until the library's is and the pin is re-resolved. A full Release, or a pre-release with red gates, is refused.
 
 VERSION BRANCHES (tools/fork-branches.py). On a fork of stacked version branches the same commands run on the checkout
 of branch neoforge-<t>: the block above goes into .port/<t>/branch.properties (.port/branch.gradle applies it) and
@@ -264,7 +269,18 @@ def render_md(target, rows, stop):
         out.append(f"**Development only (`--allow-undone-library`):** `{r['group']}:{r['module']}` was built from a "
                    f"checkout whose {target} target is not done ({r['undone']}). Not for release: once the library's "
                    f"{target} is done and released, re-resolve with `--port-release`.")
+    pre = [r for r in rows if r.get("prerelease")]
+    if pre and not undone:
+        out.append("")
+    for r in pre:
+        out.append(f"{PRERELEASE_MARK} `{r['group']}:{r['module']}` is pinned to a library pre-release whose {target} is "
+                   f"not done ({r['prerelease']}). This version may cut its own pre-release with it (the pair is what a "
+                   f"person plays); it is not done, and is neither promoted nor published, until the library's {target} "
+                   f"is done: then re-resolve with `--port-release`.")
     return "\n".join(out) + "\n"
+
+
+PRERELEASE_MARK = "**Library pre-release (not done):**"      # tools/fork-branches.py target_done() reads it
 
 
 # ---------------------------------------------------------------- network lookups
@@ -869,6 +885,45 @@ def library_clone(repo):
     return d, None
 
 
+def gates_at_tag(repo, tag, target):
+    """The gates item of the done list (tools/fork-branches.py gates_problems: a green Gate C in .port/<t>/GATES.md at a
+    commit the tag carries, nothing jar-relevant changed since) read at release `tag`. -> [] or the problems."""
+    fb = _fb()
+    d, err = library_clone(repo)
+    if d is None:
+        return [err]
+    c = _git(d, "rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}").stdout.strip()
+    if not c:
+        return [f"{repo} has no tag {tag}"]
+    with tempfile.TemporaryDirectory() as t:
+        root = fb.export(d, c, pathlib.Path(t) / "tree")
+        return fb.gates_problems(d, root, target, c, False, fb.root_files(d, root, False))
+
+
+def library_prerelease(repo, tag, target, get=None, gates=None):
+    """May a dependent's PRE-RELEASE pin this library release although the library's version is not done? Yes when the
+    release is a version branch's, a GitHub pre-release, and its gates are green at the tag (gates_at_tag). The library
+    rule waits for a dependent's Gate C on the library's jar, and that Gate C needs the jar pinned first: this is how the
+    pair is built and played ("Don't exceed your dependency"); done, a full Release and promotion still need the
+    library's version done. -> (ok, why)."""
+    import urllib.error
+    get = get or _get
+    if not branch_release(repo, tag, target, get):
+        return False, f"{tag} is not a version branch's release"
+    tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    try:
+        rel = json.loads(get(f"https://api.github.com/repos/{repo}/releases/tags/{tag}",
+                             {"Authorization": f"Bearer {tok}"} if tok else None))
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return False, f"cannot read {repo}'s release {tag} ({e})"
+    if not rel.get("prerelease"):
+        return False, f"{tag} is a full Release: a full Release of a library version needs that version done"
+    why = (gates or gates_at_tag)(repo, tag, target)
+    if why:
+        return False, f"{tag} is a pre-release, but its gates are not green: {_reasons(why)}"
+    return True, f"{tag} is a pre-release with green gates (GATES.md at the tag)"
+
+
 def library_done_branch_release(repo, tag, target):
     """A version-branch library's release: the same done list (tools/fork-branches.py target_done) run on the tag's
     tree with the library's own history -- so the release-side answer and the checkout's agree (issue #133, gap 1).
@@ -903,7 +958,8 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
     row is "refused" and the resolve stops -- unless allow_undone and it is a checkout, whose row then says
     "undone" (DEPS.md records the override)."""
     lk = {"curse": resolve_curse, "modrinth": resolve_modrinth, "port": resolve_port, "cf": cf_provider,
-          "mr_id": mr_project_id, "pin_jar": install_pin, "library_done": library_done, **(lookups or {})}
+          "mr_id": mr_project_id, "pin_jar": install_pin, "library_done": library_done,
+          "prerelease": library_prerelease, **(lookups or {})}
     pins = pins or {}
     build = (repo / "build.gradle").read_text(encoding="utf-8")
     mpath = repo / ".github/port-install.json"
@@ -926,8 +982,14 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
             if co is not None:
                 # library first: the dependent's target T builds only against a library T that is done
                 done, why, notes = lk["library_done"](spec["repo"], co, target)
+                pre = lk["prerelease"](spec["repo"], co, target) if not done and isinstance(co, str) else (False, "")
                 if not done and isinstance(co, pathlib.Path) and allow_undone:
                     row["undone"] = why
+                elif not done and pre[0]:
+                    # a dependent's pre-release may pin the library's pre-release; DEPS.md marks it, and the dependent's
+                    # version is not done (no full Release, no promotion) until the library's is
+                    row["prerelease"] = f"{pre[1]}; its {target} is not done: {why}"
+                    row["library"] = f"{target} NOT done, pre-release pinned: {pre[1]}"
                 elif not done:
                     row.update({"refused": f"{spec['repo']}'s {target} target is not done: {why}", "source": spec["repo"]})
                     refused.append(f"{ga} ({row['refused']})")
@@ -1040,6 +1102,10 @@ def cmd_resolve(a):
         if r.get("undone"):
             print(f"layer-deps: {a.target} {r['group']}:{r['module']}: LIBRARY NOT DONE, used anyway "
                   f"(--allow-undone-library, recorded in DEPS.md): {r['undone']}")
+        if r.get("prerelease"):
+            print(f"layer-deps: {a.target} {r['group']}:{r['module']}: LIBRARY PRE-RELEASE, not done: pinned for this "
+                  f"version's pre-release only (recorded in DEPS.md; not done until the library's {a.target} is): "
+                  f"{r['prerelease']}")
     wrote = False if a.dry_run else write(repo, a.target, rows, stop)
     n_sub, n_drop = sum(1 for r in rows if r.get("to")), sum(1 for r in rows if r.get("drop"))
     if stop:
@@ -1117,7 +1183,8 @@ def self_check():
                                             else {"missing": "none", "source": "fake"}),
               "modrinth": lambda p, t, c: {"missing": "none", "source": "fake"},
               "port": lambda ga, s, t, co: {"to": f"{ga}:{s['version']}-mc{t}", "source": "fake"},
-              "mr_id": lambda slug: None, "library_done": lambda r, co, t: (True, "fake done", [])}
+              "mr_id": lambda slug: None, "library_done": lambda r, co, t: (True, "fake done", []),
+              "prerelease": lambda r, co, t: (False, "not a pre-release (fake)")}
         rows, stop = resolve(repo, "1.21.4", {}, lk)
         expect(stop is None, f"optional misses do not stop: {stop}")
         by = {r["module"]: r for r in rows}
@@ -1196,6 +1263,35 @@ def self_check():
         expect(stop is None and ported == ["com.example:lib"] and by["lib"].get("undone") == "no green Gate C"
                and "`--allow-undone-library`" in md and "com.example:lib" in md.split("Development only")[1],
                f"--allow-undone-library on a checkout: used, and DEPS.md says so: {stop} {md}")
+        # the library/dependent loop (weekly-round dry run, 2026-10-18): a library version is done only once a dependent's
+        # Gate C is recorded on its jar, and the dependent could not pin it until it was done. A version-branch library's
+        # PRE-RELEASE with green gates is taken for the dependent's pre-release (marked in DEPS.md, the dependent's
+        # version not done); a checkout, a full Release or red gates are still refused
+        asked = []
+        lk_pre = dict(lk_u, prerelease=lambda r, co, t: (asked.append(co), (True, f"{co} is a pre-release with green gates"))[1])
+        ported.clear()
+        rows, stop = resolve(repo, "1.21.4", {"owner/lib": "lib-1.0-mc1.21.4"}, lk_pre)
+        by = {r["module"]: r for r in rows}
+        md = render_md("1.21.4", rows, stop)
+        expect(stop is None and ported == ["com.example:lib"] and by["lib"].get("prerelease") and not by["lib"].get("refused")
+               and PRERELEASE_MARK in md and "Development only" not in md and "not done" in md,
+               f"a library pre-release with green gates: pinned, and DEPS.md marks it: {stop} {md}")
+        ported.clear()
+        rows, stop = resolve(repo, "1.21.4", {"owner/lib": repo}, lk_pre)
+        expect(stop and "library first" in stop and not ported and asked == ["lib-1.0-mc1.21.4"],
+               f"a checkout is never a pre-release (not asked, refused): {stop} {asked}")
+        rows, stop = resolve(repo, "1.21.4", {"owner/lib": "lib-1.0-mc1.21.4"},
+                             dict(lk_u, prerelease=lambda r, co, t: (False, "a full Release")))
+        expect(stop and "library first" in stop and not ported, f"no green pre-release: refused as before: {stop}")
+        got = []
+        fake_get = lambda url, h=None: (got.append(url), json.dumps({"prerelease": "/releases/tags/" in url and "pre" in url}).encode()
+                                        if "/releases/tags/" in url else b"minecraft_version=1.21.4\n")[1]
+        ok_, why_ = library_prerelease("owner/lib", "lib-pre-mc1.21.4", "1.21.4", fake_get, gates=lambda *a_: [])
+        bad_, why_b = library_prerelease("owner/lib", "lib-1.0-mc1.21.4", "1.21.4", fake_get, gates=lambda *a_: [])
+        red_, why_r = library_prerelease("owner/lib", "lib-pre-mc1.21.4", "1.21.4", fake_get,
+                                         gates=lambda *a_: ["no green Gate C recorded in GATES.md"])
+        expect(ok_ and not bad_ and "full Release" in why_b and not red_ and "GATES.md" in why_r,
+               f"library_prerelease: a pre-release with green gates only: {why_} | {why_b} | {why_r}")
         rows, stop = resolve(repo, "1.21.4", {"owner/lib": repo}, lk_p)
         by = {r["module"]: r for r in rows}
         expect(stop is None and "library 1.21.4 done: fake done" in by["lib"]["source"]
