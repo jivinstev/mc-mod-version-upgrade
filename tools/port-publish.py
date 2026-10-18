@@ -607,7 +607,8 @@ def check_runs(repo_slug, sha):
 
 
 def target_green(repo, tag, info, t, lc, runs):
-    if git(repo, "cat-file", "-e", f"{tag}:.multiversion/targets/{t}/GATES-RED.md").returncode == 0:
+    red = git(repo, "show", f"{tag}:.multiversion/targets/{t}/GATES-RED.md")
+    if red.returncode == 0 and (red.stdout or "").strip():
         # a full gate run after the green record was red (fork-port.py writes GATES-RED.md and keeps GATES.md)
         return False, f"the last full gate run of {t} was red (.multiversion/targets/{t}/GATES-RED.md at {tag})"
     green, why = ci_green(t, info["base"], info["targets"][-1] if info["targets"] else info["base"], runs)
