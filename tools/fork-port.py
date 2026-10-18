@@ -2595,6 +2595,7 @@ class Run:
         # older version of the tooling (measured: one from before the 1.21.5 GameTest adapter) fails the same way
         # forever while the tool that would fix it is never asked
         shutil.rmtree(self.work / "gates", ignore_errors=True)
+        summ.unlink(missing_ok=True)      # an earlier run's summary must never stand for this run's (GATES.md, GATES-RED.md)
         cmd = [self.py, str(ROOT / "tools/ci-gates.py"), "--repo", str(self.repo), "--modid", modid, "--base",
                self.a.base, "--mc", self.t, "--summary", str(summ), "--work-dir", str(self.work / "gates")]
         if self.a.gates == "ab":
@@ -4109,12 +4110,16 @@ def self_check():
                     (run.work / "ci-gates-summary.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
                 return CompletedProcess(cmd, code, "", "")
             run.sh = gsh
+            run.work.mkdir(parents=True, exist_ok=True)
+            (run.work / "ci-gates-summary.md").write_text("STALE summary of an earlier run\n", encoding="utf-8")
             run.s_gates()
             red = td / RED_GATES
             expect((td / "GATES.md").is_file() and red.is_file() == want_red
                    and (code == 0 or (td / "GATES.md").read_text(encoding="utf-8") == green_md)
                    and gates_auto(td) == ("full" if want_red else "ab")
-                   and (not want_red or "Red full gate run" in red.read_text(encoding="utf-8")),
+                   and (not want_red or "Red full gate run" in red.read_text(encoding="utf-8"))
+                   and "STALE" not in (td / "GATES.md").read_text(encoding="utf-8")
+                   and (not red.is_file() or "STALE" not in red.read_text(encoding="utf-8")),
                    f"--gates {gates} exit {code}: GATES.md kept{' byte for byte' if code else ''}, "
                    f"GATES-RED.md {'written' if want_red else 'gone'}")
             if want_red:

@@ -817,7 +817,8 @@ def gh_api(path, method="GET", data=None):
             return json.loads(r.stdout) if r.stdout.strip() else {}
         errs.append(f"gh: {(r.stderr or r.stdout).strip()[-300:]}")
     except subprocess.TimeoutExpired:
-        errs.append(f"gh: no answer in {gh_timeout():.0f} s ({GH_TIMEOUT_ENV})")
+        errs.append(f"gh: no answer in {gh_timeout():.0f} s ({GH_TIMEOUT_ENV})"
+                    + ("" if method == "GET" else f" -- this {method} may have been posted: check before re-running it"))
     except OSError as e:
         errs.append(f"gh: {e}")
     if method == "GET":
@@ -1010,6 +1011,8 @@ def expand_states(items, have=()):
                 for x in (lo, hi):
                     if not MC_RE.match(x):
                         raise Invalid(f"--set {it!r}: {x!r} is not a Minecraft version")
+                if mc_key(lo) > mc_key(hi):
+                    raise Invalid(f"--set {it!r}: the range runs backwards ({lo} is after {hi}): write {hi}..{lo}")
                 span = {lo, hi} | {x for x in have if mc_key(lo) <= mc_key(x) <= mc_key(hi)}
                 for x in span:
                     out[x] = st.strip()
@@ -1606,6 +1609,9 @@ def self_check():
                                   "26.3": "fixed@def5678"}, f"status --set takes a list and a range in one call: {st} {o}")
         rc, o = cli("status", *L2, "EXM-024", "--set", "1.21.10..x=open")
         expect(rc == 2, f"a bad range is refused: {o}")
+        rc, o = cli("status", *L2, "EXM-024", "--set", "26.3..1.21.10=open")
+        expect(rc == 2 and "backwards" in o and find(read_ledger(led2 / LEDGER_NAME), "EXM-024")["status"]["26.3"] == "fixed@def5678",
+               f"a reversed range is refused and nothing is written: {o}")
         expect(next_id({"issues": []}) == "KI-1" and next_id({"issues": [{"id": "KI-9"}]}) == "KI-10",
                "an empty ledger and a KI- ledger number as before")
         # GitHub calls are bounded and fall back (weekly-round dry run: render-ports --fetch-releases hung where gh's
@@ -1623,7 +1629,7 @@ def self_check():
                 gh_api("/repos/owner/examplemod/issues", "POST", {"title": "x"})
                 wrote = True
             except Invalid as e:
-                wrote = "no answer in" not in str(e)
+                wrote = "no answer in" not in str(e) or "may have been posted" not in str(e)
             src = gh_source()
         finally:
             subprocess.run, globals()["gh_rest"] = real_run, real_rest

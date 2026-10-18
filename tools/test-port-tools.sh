@@ -536,6 +536,13 @@ grep -q 'self-check: OK' <<<"$out" && ok "known-issues self-check (in $(grep -o 
 # both sides of daylight saving, install / round-task, and the steps against a fake GitHub on two tiny single-version
 # forks -- no network, seconds
 echo "weekly-plan.py: the Tuesday plan workflow and the Wednesday round task"
+# the README names the weekly round's new flags and limits (review of #147)
+python3 - <<'PY' && ok "README: round-table --session DIR, MMVU_GH_TIMEOUT and the REST fallback, round-preflight --versions/--no-client, the JDK search" || bad "the README no longer names the round's new flags (round-table --session, MMVU_GH_TIMEOUT, preflight --versions/--no-client, the JDK search)"
+import pathlib, sys
+r = " ".join(pathlib.Path("README.md").read_text(encoding="utf-8").split())
+sys.exit(0 if all(x in r for x in ("`--session DIR`", "MMVU_GH_TIMEOUT", "falls back to REST", "[--versions 1.21.1,26.3] [--no-client]",
+                                   "`JAVA_HOME` first, then `JAVA_HOME_<n>`")) else 1)
+PY
 # a version's work branch waits for the lower version's merge, and the 1.21.x -> 26.x conflicts are resolved by hand inside
 # the cascade (dry run, 2026-10-18: the skill did not say either)
 python3 - <<'PY' && ok "keep-current, version branches: keep-current/<date>-<v> is pushed only after the lower version's PR merged; the 1.21.x -> 26.x rename conflicts resolved by hand inside the cascade" || bad "keep-current no longer says a version's work branch waits for the lower merge, or how the 26.x boundary is crossed"
