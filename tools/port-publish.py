@@ -1098,6 +1098,10 @@ def self_check():
         green = target_green(r_, "t-green", info_, "1.21.4", {"released": ["1.21.4"]}, [])
         expect(not red[0] and "GATES-RED.md" in red[1] and "GATES-RED.md" not in green[1],
                f"port-publish's layer path reads GATES-RED.md at the tag: {red} / control {green}")
+        (td_ / "GATES-RED.md").write_text("", encoding="utf-8")            # existence counts, not content
+        g_("add", "-A"); g_("commit", "-qm", "empty red"); g_("tag", "t-red-empty")
+        empty = target_green(r_, "t-red-empty", info_, "1.21.4", {"released": ["1.21.4"]}, [])
+        expect(not empty[0] and "GATES-RED.md" in empty[1], f"an empty GATES-RED.md counts too: {empty}")
     expect(version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod") == "1.0.0+1.21.1-r2", version_of("examplemod-1.0.0-mc1.21.1-r2", "examplemod"))
     expect(version_of("examplemod-1.1.2-mc1.21.1", "examplemod") == "1.1.2+1.21.1", "version, no suffix")
     expect(version_of("examplemod-1.1.1-fix-fix-mc1.21.1-r6", "examplemod") == "1.1.1-fix-fix+1.21.1-r6", "fix suffix")
