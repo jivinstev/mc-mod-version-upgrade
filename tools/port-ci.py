@@ -669,7 +669,77 @@ def variant_check():
         recover_args("name: something else\n"); ok = False
     except SystemExit:
         pass
-    return ok and shipped_script_check() and manifest_script_check()
+    return ok and shipped_script_check() and manifest_script_check() and release_script_check()
+
+
+def release_script_check():
+    """Run the release job's `Publish pre-release` script (single-version `release` and layer `layer-release`) on a
+    fake fork: a bare origin with tags and a stand-in gh. The -rN count-up skips a name whose release OR tag exists (a
+    tag with no release made gh release create reuse that tag's commit and ignore --target); a tag at another commit
+    than the build is refused, nothing created."""
+    import os, tempfile
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gitbash import BASH
+    ok = True
+    for layer in (None, "neoforge-1.21.x"):
+        wf = fixture(False, layer)
+        jobs = [wf] if layer is None else [wf.split("\n  release:\n", 1)[1], wf.split("\n  layer-release:\n", 1)[1]]
+        for job in jobs:
+            body = job.split("      - name: Publish pre-release\n", 1)[1].split("        run: |\n", 1)[1]
+            body = body.split("\n\n", 1)[0]
+            script = "\n".join(l[10:] for l in body.splitlines())
+            # (ref_type, ref_name, releases that exist, tags {name: "build"|"other"}) -> (exit, created tag or None)
+            cases = {"fresh": (("branch", "neoforge-1.21.1", [], {}), (0, "examplemod-1.0-mc1.21.1")),
+                     "a release": (("branch", "neoforge-1.21.1", ["examplemod-1.0-mc1.21.1"],
+                                    {"examplemod-1.0-mc1.21.1": "other"}), (0, "examplemod-1.0-mc1.21.1-r2")),
+                     "a tag, no release": (("branch", "neoforge-1.21.1", [], {"examplemod-1.0-mc1.21.1": "other"}),
+                                           (0, "examplemod-1.0-mc1.21.1-r2")),
+                     "tag and release, then a bare tag": (("branch", "neoforge-1.21.1", ["examplemod-1.0-mc1.21.1"],
+                                                           {"examplemod-1.0-mc1.21.1": "other",
+                                                            "examplemod-1.0-mc1.21.1-r2": "other"}),
+                                                          (0, "examplemod-1.0-mc1.21.1-r3")),
+                     "a pushed tag at the build": (("tag", "examplemod-1.0-mc1.21.1", [], {"examplemod-1.0-mc1.21.1": "build"}),
+                                                   (0, "examplemod-1.0-mc1.21.1")),
+                     "a tag at another commit": (("tag", "examplemod-1.0-mc1.21.1", [], {"examplemod-1.0-mc1.21.1": "other"}),
+                                                 (1, None))}
+            for case, ((rtype, rname, rels, tags), want) in cases.items():
+                with tempfile.TemporaryDirectory() as d:
+                    d = pathlib.Path(d)
+                    origin, repo, bindir = d / "origin.git", d / "repo", d / "bin"
+                    bindir.mkdir()
+                    def g(*a, cwd=repo):
+                        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                                              errors="replace")
+                    g("init", "-q", "--bare", str(origin), cwd=d)
+                    g("init", "-q", str(repo), cwd=d)
+                    for k, v in (("user.email", "t@e"), ("user.name", "t"), ("core.autocrlf", "false")):
+                        g("config", k, v)
+                    (repo / "gradle.properties").write_text("mod_version=1.0\n", encoding="utf-8")
+                    g("add", "-A"); g("commit", "-qm", "older"); other = g("rev-parse", "HEAD").stdout.strip()
+                    (repo / "x").write_text("x\n", encoding="utf-8")
+                    g("add", "-A"); g("commit", "-qm", "build"); build = g("rev-parse", "HEAD").stdout.strip()
+                    for name, at in tags.items():
+                        g("tag", "-a", "-m", "t", name, build if at == "build" else other)   # annotated: peeled
+                    g("remote", "add", "origin", str(origin)); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1", "--tags")
+                    (repo / "jars").mkdir(); (repo / "jars/x.jar").write_bytes(b"")
+                    (bindir / "gh").write_text(
+                        '#!/bin/sh\nif [ "$1 $2" = "release view" ]; then for r in $RELEASES; do [ "$r" = "$3" ] && exit 0; done; exit 1; fi\n'
+                        'if [ "$1 $2" = "release create" ]; then echo "$3" >> "$CREATED"; exit 0; fi\nexit 3\n', encoding="utf-8")
+                    (bindir / "gh").chmod(0o755)
+                    run = (script.replace("${{ github.ref_type }}", rtype).replace("${{ github.ref_name }}", rname)
+                           .replace("${{ github.repository }}", "o/examplemod").replace("${{ github.sha }}", build))
+                    env = dict(os.environ, PATH=f"{bindir.as_posix()}{os.pathsep}{os.environ.get('PATH', '')}",
+                               RELEASES=" ".join(rels), CREATED=(d / "created.txt").as_posix(), PREVIEW="")
+                    r = subprocess.run([BASH, "-c", run], cwd=repo, env=env, capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace")
+                    made = (d / "created.txt").read_text(encoding="utf-8").split() if (d / "created.txt").exists() else []
+                    good = r.returncode == want[0] and made == ([want[1]] if want[1] else [])
+                    good &= want[0] == 0 or "already points at" in r.stdout + r.stderr
+                    if not good:
+                        print(f"release script check ({'layer' if layer else 'single-version'}, {case}): exit {r.returncode}, "
+                              f"created {made}, want {want}\n{(r.stdout + r.stderr)[-1500:]}")
+                    ok &= good
+    return ok
 
 
 def manifest_script_check():

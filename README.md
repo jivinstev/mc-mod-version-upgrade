@@ -65,7 +65,9 @@ tree. Then:
   until it is migrated (`fork-branches.py migrate`); no new fork gets one. Every multi-version feature is switched on only
   where a version branch's `.port/` or a layer's `.multiversion/` exists, and a single-version fork builds, gates, syncs
   and publishes exactly as before.
-- **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes. Once a person
+- **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes (a `release` run on
+  an unchanged `mod_version` is cut as `-r2`, `-r3`, ...: a name whose release or tag already exists is skipped, and a
+  tag that points at another commit than the build stops the job, nothing released). Once a person
   has played it, `port-ci.py promote` makes it a full Release that records who played it; the newest full Release
   is the fork's official baseline.
 - **Defects the authors' original already has** are proved pre-existing (their branch, their commit), then

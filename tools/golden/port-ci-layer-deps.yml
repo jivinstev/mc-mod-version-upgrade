@@ -164,14 +164,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # the commit a tag of this repository points at (an annotated tag peeled), empty when there is no such tag
+          tag_commit() { git ls-remote origin "refs/tags/$1" "refs/tags/$1^{}" | awk '{c=$1} END {print c}'; }
           if [ "${{ github.ref_type }}" = tag ]; then TAG="${{ github.ref_name }}"; else
             v=$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
             TAG="examplemod-${v}-mc1.21.1"
-            # the port was fixed but the author's version did not move: release it as -r2, -r3, ...
+            # the port was fixed but the author's version did not move: release it as -r2, -r3, ... -- a name is taken
+            # when its release OR its tag exists (a tag with no release: gh release create would reuse that tag)
             base="$TAG"; n=2
-            while gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+            while [ -n "$(tag_commit "$TAG")" ] || gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; do
               TAG="${base}-r${n}"; n=$((n+1))
             done
+          fi
+          at=$(tag_commit "$TAG")
+          if [ -n "$at" ] && [ "$at" != "${{ github.sha }}" ]; then
+            echo "::error::tag $TAG already points at $at, not at ${{ github.sha }} (this build): gh release create would attach the pre-release to $at and ignore --target. Nothing released; delete or move that tag, or bump mod_version"
+            exit 1
           fi
           {
             echo "**Unofficial port** of https://github.com/a/examplemod to NeoForge 21.1.100 (Minecraft 1.21.1)."
@@ -661,14 +669,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREVIEW: ${{ needs.layer-plan.outputs.preview }}
         run: |
+          # the commit a tag of this repository points at (an annotated tag peeled), empty when there is no such tag
+          tag_commit() { git ls-remote origin "refs/tags/$1" "refs/tags/$1^{}" | awk '{c=$1} END {print c}'; }
           if [ "${{ github.ref_type }}" = tag ]; then TAG="${{ github.ref_name }}"; else
             v=$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' gradle.properties | head -1)
             TAG="examplemod-${v}-mc1.21.1"
-            # the port was fixed but the author's version did not move: release it as -r2, -r3, ...
+            # the port was fixed but the author's version did not move: release it as -r2, -r3, ... -- a name is taken
+            # when its release OR its tag exists (a tag with no release: gh release create would reuse that tag)
             base="$TAG"; n=2
-            while gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+            while [ -n "$(tag_commit "$TAG")" ] || gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; do
               TAG="${base}-r${n}"; n=$((n+1))
             done
+          fi
+          at=$(tag_commit "$TAG")
+          if [ -n "$at" ] && [ "$at" != "${{ github.sha }}" ]; then
+            echo "::error::tag $TAG already points at $at, not at ${{ github.sha }} (this build): gh release create would attach the pre-release to $at and ignore --target. Nothing released; delete or move that tag, or bump mod_version"
+            exit 1
           fi
           {
             echo "**Unofficial port** of https://github.com/a/examplemod to NeoForge 21.1.100 (Minecraft 1.21.1)."
