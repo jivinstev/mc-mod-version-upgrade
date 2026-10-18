@@ -9,7 +9,8 @@
 # both 15:00 and 16:00 UTC and the first step lets through only the run that is 08:00 there) it:
 #   1. fetches each fork's authors' upstream and lists their new commits;
 #   2. plans each version-branch fork's cascade (tools/fork-branches.py cascade --plan: git and the rename rows only,
-#      on a throwaway copy, with the authors' commits merged into the head there);
+#      on a throwaway copy, with the authors' commits merged into the head there), and lists the authors' code the head
+#      already has that a version branch has not taken (fork-branches.py untaken);
 #   3. selects the known issues the round takes (tools/known-issues.py select: every S1, S2s up to the budget);
 #   4. renders the plan issue (tools/known-issues.py render-plan) -- the deadline first, checkboxes pre-ticked for the
 #      defaults, escalated decisions answered by `/decide <id> <choice>`, grade overrides by `/grade <ID> <S1-S4>`;

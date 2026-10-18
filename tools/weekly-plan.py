@@ -614,7 +614,10 @@ def fb_mod():
 
 
 def step_cascade(work):
-    """Each version-branch fork: fork-branches.py cascade <head>..<newest> --plan (a single-version fork: none)."""
+    """Each version-branch fork: fork-branches.py cascade <head>..<newest> --plan (a single-version fork: none), and the
+    authors' code the head already carries that a version branch has not taken (fork-branches.py untaken: in some
+    version's port_taken..head and reachable from the authors' branch, or a merge of it) -- a head that merged the
+    authors' release earlier with no cascade since has nothing new upstream, yet the round must not carry it unasked."""
     inp = load_input(work)
     fb = fb_mod()
     for i, f in enumerate(inp["forks"]):
@@ -635,6 +638,14 @@ def step_cascade(work):
             "mechanical": plan.get("mechanical", []), "versions": plan.get("versions", []),
             "decisions": [{k: d.get(k) for k in ("id", "file", "versions", "escalate", "choice", "reasoning", "class")}
                           for d in plan.get("decisions", [])]}}
+        up = f"refs/remotes/upstream/{f['upstream_branch']}"
+        f["untaken"] = [{k: c[k] for k in ("sha", "subject", "merge", "versions")}
+                        for c in fb.untaken_authors(f["clone"], f["head_commit"], up, vs)]
+        f["base_version"] = fb.info_ref(f["clone"], vs[0]).get("base_minecraft_version") or \
+            (f["head"][len("neoforge-"):] if f["head"].startswith("neoforge-") else None)
+        if f["untaken"]:
+            print(f"weekly-plan: {f['repo']}: the head carries {len(f['untaken'])} commit(s) of the authors' that a version "
+                  f"branch has not taken")
     save_input(work, inp)
     return 0
 
@@ -654,14 +665,21 @@ def step_select(work):
             runs.append(json.loads(r.stdout))
         sel, opened, every = runs
         title = {e["id"]: e["title"] for e in every}
-        f["selection"] = [dict(s, title=title.get(s["id"], "")) for s in sel]
+        # the lowest version still open (the status map), where the round makes the fix -- `lowest` is the first
+        # affected version, which may be fixed already
+        lo = {e["id"]: min((v for v, st in e["status"].items() if st == "open"), key=k_mc, default=None) for e in every}
+        f["selection"] = [dict(s, title=title.get(s["id"], ""), lowest_open=lo.get(s["id"])) for s in sel]
         taken = {s["id"] for s in sel}
-        f["candidates"] = [{"id": e["id"], "severity": e["severity"], "lowest": e["lowest"], "title": e["title"]}
-                           for e in opened if e["id"] not in taken]
+        f["candidates"] = [{"id": e["id"], "severity": e["severity"], "lowest": e["lowest"], "title": e["title"],
+                            "lowest_open": lo.get(e["id"])} for e in opened if e["id"] not in taken]
         f["ledger_ids"] = [e["id"] for e in every]
         print(f"weekly-plan: {f['repo']}: {len(sel)} known issue(s) by default, {len(f['candidates'])} other open")
     save_input(work, inp)
     return 0
+
+
+def k_mc(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v))
 
 
 def step_previous(work, api=None, slug=None):
@@ -1057,6 +1075,39 @@ def self_check():
         expect(f0["cascade"] is None and [s["id"] for s in f0["selection"]] == ["KI-1"]
                and [c["id"] for c in f0["candidates"]] == ["KI-2"] and f0["selection"][0]["title"] == "crash on load",
                f"a single-version fork: no cascade; select's S1 by default, the S3 a candidate: {f0}")
+        expect("untaken" not in f0 and "base_version" not in f0 and f0["selection"][0].get("lowest_open") == "1.21.1",
+               f"a single-version fork: no untaken list (its plan renders as before): {f0}")
+        # the smallest version-branch fork (one version, hand-made): the head merged the authors' release earlier and
+        # no version took it -- nothing new upstream, yet the plan lists it (the first weekly-round dry run's bug)
+        vb = d / "vbfork"
+        subprocess.run(["git", "clone", "-q", str(up), str(vb)], check=True, capture_output=True)
+        gq(vb, "checkout", "-q", "-b", "neoforge-1.21.1", "HEAD~1")
+        (vb / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        gq(vb, "add", "-A"); gq(vb, "commit", "-qm", "port")
+        x = gq(vb, "rev-parse", "HEAD")
+        gq(vb, "checkout", "-q", "-b", "neoforge-1.21.3")
+        (vb / "gradle.properties").write_text("minecraft_version=1.21.3\n", encoding="utf-8")
+        (vb / ".port/1.21.3").mkdir(parents=True)
+        (vb / ".port/1.21.3/branch.properties").write_text(
+            "minecraft_version=1.21.3\nbranch=neoforge-1.21.3\nparent=neoforge-1.21.1\nparent_minecraft_version=1.21.1\n"
+            f"port_branch=neoforge-1.21.1\nbase_minecraft_version=1.21.1\nport_taken={x}\n", encoding="utf-8")
+        gq(vb, "add", "-A"); gq(vb, "commit", "-qm", "1.21.3")
+        gq(vb, "checkout", "-q", "neoforge-1.21.1"); gq(vb, "merge", "-q", "--no-ff", "--no-edit", "origin/main")
+        for b_ in ("neoforge-1.21.1", "neoforge-1.21.3"):
+            gq(vb, "update-ref", f"refs/remotes/origin/{b_}", b_)
+        c3 = make_config([parse_fork(f"o/vb@neoforge-1.21.1={up}#main")], "someone", 3, "owner/migrator")
+        conf3 = d / "weekly-plan-vb.json"
+        conf3.write_text(json.dumps(c3), encoding="utf-8")
+        w3 = d / "plan-vb"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_fetch(conf3, vb, w3, now=summer)
+            step_cascade(w3)
+            step_select(w3)
+        fv = load_input(w3)["forks"][0]
+        expect(fv["new_count"] == 0 and fv["cascade"]["range"] == "neoforge-1.21.1..1.21.3" and fv["base_version"] == "1.21.1"
+               and [(c["subject"].split(" ")[0], c["merge"], c["versions"]) for c in fv.get("untaken", [])]
+               == [("Merge", True, ["1.21.3"]), ("authors:", False, ["1.21.3"])],
+               f"a version-branch fork: nothing new upstream, the head's untaken authors' commit and its merge listed: {fv}")
         # previous / open against a fake GitHub: carry-forward from an unclosed plan, then supersede it
         issues, calls = {}, []
 
