@@ -1617,7 +1617,8 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
             "detail": reasons, "choices": [f"bring it in: {kc}",
                                            "a weekly round whose frozen plan does not take the authors' code: the same command "
                                            "with --untaken-ok round/frozen.json (recorded in DRIFT.md)",
-                                           "or continue knowingly on the frozen code: the same command with --accept-upstream-drift (recorded in .multiversion/DRIFT.md)"]}
+                                           "or continue knowingly on the frozen code: the same command with --accept-upstream-drift "
+                                           f"(recorded in {df.relative_to(repo).as_posix()})"]}
 
 
 INJECTORS =r'(?:Inject|Redirect|ModifyArg|ModifyArgs|ModifyVariable|ModifyConstant|ModifyReturnValue|' \
@@ -4671,8 +4672,9 @@ def self_check_done_freeze_sweep():
         with contextlib.redirect_stdout(io.StringIO()):
             st = drift_stop(fork, a_)
         expect(st and st["code"] == DRIFT_EXIT and "1 commit(s)" in st["stop"]
-               and any("port-sync.py" in c and "--upstream upstream/main" in c and "--port neoforge-1.21.1" in c for c in st["choices"]),
-               f"the authors pushed: exit 19 naming the keep-current command: {st}")
+               and any("port-sync.py" in c and "--upstream upstream/main" in c and "--port neoforge-1.21.1" in c for c in st["choices"])
+               and any("--accept-upstream-drift (recorded in .multiversion/DRIFT.md)" in c for c in st["choices"]),
+               f"the authors pushed: exit 19 naming the keep-current command and the layer's DRIFT.md: {st}")
         a_.accept_upstream_drift = True
         with contextlib.redirect_stdout(io.StringIO()):
             st = drift_stop(fork, a_)
@@ -4709,8 +4711,11 @@ def self_check_done_freeze_sweep():
         with contextlib.redirect_stdout(io.StringIO()):
             st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
         expect(st and st["code"] == DRIFT_EXIT and "no `authors` remote" in st["stop"] and not vdrift.exists()
-               and any("--untaken-ok" in c for c in st["choices"]),
-               f"a freeze naming a remote the clone lacks: exit 19 (removing the remote is no escape), nothing recorded: {st}")
+               and any("--untaken-ok" in c for c in st["choices"])
+               and any("--accept-upstream-drift (recorded in .port/1.21.3/DRIFT.md)" in c for c in st["choices"])
+               and not any(".multiversion/" in c for c in st["choices"]),
+               f"a freeze naming a remote the clone lacks: exit 19 (removing the remote is no escape), nothing recorded, "
+               f"the version's own DRIFT.md named: {st}")
         gf("remote", "add", "origin", "https://github.com/owner/examplemod.git")
         now = datetime.datetime.now(datetime.timezone.utc)
         frozen = pathlib.Path(d) / "frozen.json"
