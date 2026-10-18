@@ -1921,7 +1921,10 @@ def compile_error_lines(log, root=None, cap=RESIDUE_ERRORS_SHOWN):
     text = p.read_text(encoding="utf-8", errors="replace")
     if RECOUNT_MARK in text:
         text = text.split(RECOUNT_MARK, 1)[1]
-    pre = (str(pathlib.Path(root).resolve()).replace("\\", "/").rstrip("/") + "/") if root else None
+    # the log may name the checkout as given or resolved (a Windows 8.3 short temp path resolves to the long one)
+    pres = sorted({str(q).replace("\\", "/").rstrip("/") + "/" for q in (pathlib.Path(root), pathlib.Path(root).resolve())},
+                  key=len, reverse=True) if root else []
+    fold = (lambda x: x.lower()) if os.name == "nt" else (lambda x: x)
     seen, out = set(), []
     for ln in text.splitlines():
         ln = ln.replace("\\", "/")
@@ -1929,8 +1932,10 @@ def compile_error_lines(log, root=None, cap=RESIDUE_ERRORS_SHOWN):
         if not m:
             continue
         f = m.group(1)
-        if pre and f.startswith(pre):
-            f = f[len(pre):]
+        for pre in pres:
+            if fold(f).startswith(fold(pre)):
+                f = f[len(pre):]
+                break
         key = (f, m.group(2), m.group(3))
         if key not in seen:
             seen.add(key)
