@@ -17,7 +17,7 @@ description: Make a fork port build for more Minecraft versions as stacked versi
   that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
   fork moves to version branches with `tools/fork-branches.py migrate` when the maintainer decides it for that fork.
 
-Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, ci),
+Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, ci, ci-check),
 `tools/fork-port.py` (the stages and the done list, on a version branch), `tools/layer-inventory.py`,
 `tools/layer-deps.py`, `tools/ci-gates.py --mc`, `tools/port-ci.py`, `tools/audit-mixin-targets.py`,
 `tools/fix-access-transformer.py`, `tools/burndown-count.sh`, `tools/port-cost.py`.
@@ -194,7 +194,12 @@ the newest published Port CI kit rather than the port branch's older pin; `--kit
 it in a worktree of the branch and commits there. Push the branch; nothing is pushed for you. The layer jobs (layer-compile, layer-isolation, layer-inertness, ...)
 do not apply. A tag `<mod>-<ver>-mc<v>` on the branch releases that version (publish-port's single-version path). The
 cascade keeps each branch's own `.github/workflows/port-ci.yml` and install manifest when it merges the lower branch:
-regenerate them with `ci` when a lower branch's change to them should reach this one.
+regenerate them with `ci` when a lower branch's change to them should reach this one. `ci` adds a `--variant-jar
+*_<v>.jar` for each `.port/<v>/shipped-expect-<v>.txt` the branch keeps (`cf` for `shipped-expect-cf.txt`), so the
+workflow's `shipped jars` job boots that jar too -- a workflow that boots only `_mr` is green while the local `_cf`
+check is red. `ci --all` does every version branch; `ci-check --repo DIR` warns about each branch whose workflow pins an
+older kit than the newest published one or lacks such a job (the weekly round runs it); `sync-shared --ci MODID`
+regenerates the synced branches' workflows, and without `--ci` prints the same warnings.
 
 ## Run the tool; handle only the residue
 

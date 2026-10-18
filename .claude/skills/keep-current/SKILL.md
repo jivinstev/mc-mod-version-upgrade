@@ -390,6 +390,11 @@ included), PR, pre-release and merge asks.
      `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
      has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
 4. **Per version, in ladder order**, once its code is in:
+   - (a version-branch fork, once per round before the first version) `python3 tools/fork-branches.py ci-check --repo DIR`:
+     a WARNING names a branch whose Port CI workflow is older than the kit or boots no jar of a variant its
+     `.port/<v>/shipped-expect-<variant>.txt` expects -- CI green there proves nothing about that jar. Regenerate it
+     (`fork-branches.py ci --repo DIR --all --modid ID --run`, pushed under `push-version-branches`; else ask) before
+     trusting a green PR run, and name it in the closing comment;
    - gates A/B/C in full (`fork-port.py --repo DIR --target <v> --gates full`, or `ci-gates.py --env full` and `minimal`
      on a single-version fork), the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`);
    - **one full review against the fixed rubric**: a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions

@@ -3317,7 +3317,7 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
 
 
 
-def sync_shared(repo, targets=None, say=print):
+def sync_shared(repo, targets=None, say=print, ci_modid=None):
     """Bring version branches up to the shared library's current tables and helpers (make-fork-layer.py sync-shared's
     job on a layer): per version, oldest first, on a clean checkout of its branch -- each `# ---- shared <v>` section of
     .port/<t>/shared-renames.tsv rewritten from templates/fork-layer/shared/<v>/renames.tsv; every .java file the rows
@@ -3411,6 +3411,19 @@ def sync_shared(repo, targets=None, say=print):
         say(f"fork-branches: sync-shared {t}: {len(set(changed))} file(s) changed and committed on {branch_name(t)}"
             + (f" (no library copy of {', '.join(kept)}: kept as it was)" if kept else "")
             + "; its review is stale until a fresh reviewer reads the change")
+    if ci_modid:
+        # each synced version's workflow regenerated too (the variant shipped-jar job a shipped-expect-<v>.txt asks
+        # for, the newest kit): a branch keeps its own port-ci.yml through every merge
+        for t in todo:
+            rc = ci(repo, t, ci_modid, run=True, say=say)
+            if rc:
+                return rc
+    else:
+        # the variants only (offline): a workflow that boots no jar its branch keeps expectations for
+        for line in ci_check(repo, todo, kit_version=False):
+            if "boots no" in line:
+                say(line.replace("ci-check: WARNING ", "sync-shared: CI not current: ")
+                    + f" -- regenerate: sync-shared --ci <modid>, or ci --repo {repo} --all --modid <modid> --run")
     return 0
 
 
@@ -3494,7 +3507,63 @@ def ci_args(repo, t, modid, kit_version=None):
     pc = load("port_ci_fb", "port-ci.py")
     wf = git(repo, "show", f"{resolve_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
     args = pc.recover_args(wf.stdout) if wf.returncode == 0 else ["--modid", modid, "--gatec", "launch,spawn,battle,gauntlet"]
-    return remap_ci_args(args, p, modid, kit_version)
+    return add_variant_jars(remap_ci_args(args, p, modid, kit_version), shipped_variants(repo, t_ref, t))
+
+
+def shipped_variants(repo, ref, t):
+    """The variants version t's branch keeps shipped-jar expectations for: `cf` for .port/<t>/shipped-expect-cf.txt."""
+    r = git(repo, "ls-tree", "--name-only", f"{ref}:{REC}/{t}/") if ref else None
+    names = r.stdout.splitlines() if r is not None and r.returncode == 0 else []
+    return sorted(m.group(1) for n in names for m in [re.fullmatch(r"shipped-expect-([A-Za-z0-9]+)\.txt", n)] if m)
+
+
+def add_variant_jars(args, variants):
+    """port-ci.py args with a `--variant-jar *_<v>.jar` for each variant that has expectations and no glob yet: the
+    workflow's `shipped jars` job then boots that jar too (an old workflow booted only `_mr` while `_cf` was red)."""
+    have = {args[i + 1] for i in range(len(args) - 1) if args[i] == "--variant-jar"}
+    return list(args) + [x for v in variants if f"*_{v}.jar" not in have for x in ("--variant-jar", f"*_{v}.jar")]
+
+
+def ci_check(repo, versions=None, kit_version=None):
+    """Lines for the round (and sync-shared): each version branch whose .github/workflows/port-ci.yml is older than the
+    Port CI kit (kit_version: the newest published when None, not compared when False) or lacks the shipped-jar glob of a
+    variant its .port/<v>/shipped-expect-<variant>.txt names. Read from each branch's newest commit (origin's when the
+    local branch is behind). -> [lines], the last one the summary."""
+    repo = pathlib.Path(repo).resolve()
+    have = version_branches(repo)
+    todo = [t for t in sorted(have, key=mc_key) if not versions or t in versions]
+    newest, out = None, []
+    if kit_version is None:
+        try:
+            pc = load("port_ci_fb", "port-ci.py")
+            newest = pc.kit_pin(pc.migrator_repo())[0]
+        except (Exception, SystemExit) as e:    # noqa: BLE001 -- offline: say so, compare the variants only
+            out.append(f"fork-branches: ci-check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
+    elif kit_version is not False:
+        newest = int(kit_version)
+    stale = 0
+    for t in todo:
+        ref = fresh_branch(repo, branch_name(t)) or have[t]
+        wf = git(repo, "show", f"{ref}:.github/workflows/port-ci.yml")
+        why = []
+        if wf.returncode:
+            why.append("no .github/workflows/port-ci.yml")
+        else:
+            m = re.search(r'KIT_VERSION: "(\d+)"', wf.stdout)
+            if newest is not None and (not m or int(m.group(1)) < newest):
+                why.append(f"its workflow pins Port CI kit {m.group(1) if m else '?'}, older than kit {newest}")
+            vj = (re.search(r'\n\s*VARIANT_JARS: "([^"]*)"', wf.stdout) or [None, ""])[1].split()
+            miss = [v for v in shipped_variants(repo, ref, t) if f"*_{v}.jar" not in vj]
+            if miss:
+                why.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
+                           + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
+        if why:
+            stale += 1
+            out.append(f"fork-branches: ci-check: WARNING {branch_name(t)}: " + "; ".join(why))
+    out.append(f"fork-branches: ci-check: {len(todo)} version branch(es), {stale} with an outdated workflow"
+               + (f" -- regenerate: python3 tools/fork-branches.py ci --repo {repo} --all --modid <modid> --run, then push"
+                  if stale else ""))
+    return out
 
 
 PIN_URL = re.compile(r"^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/(.+)$")
@@ -3578,6 +3647,12 @@ def remap_ci_args(args, p, modid, kit_version=None):
 
 def ci(repo, t, modid, run=False, say=print, kit_version=None):
     repo = pathlib.Path(repo).resolve()
+    if t is None:                       # --all: every version branch, oldest first
+        for v in sorted(version_branches(repo), key=mc_key):
+            rc = ci(repo, v, modid, run, say, kit_version)
+            if rc:
+                return rc
+        return 0
     if not resolve_branch(repo, branch_name(t)):
         say(f"fork-branches: no branch {branch_name(t)}"); return 2
     try:
@@ -3658,8 +3733,16 @@ def main():
     lr.add_argument("--dependent", required=True); lr.add_argument("--slug")
     ss = sub.add_parser("sync-shared"); ss.add_argument("--repo", required=True)
     ss.add_argument("--target", action="append", default=[], help="a version to sync (repeat; default every version branch)")
-    ci_ = sub.add_parser("ci"); ci_.add_argument("--repo", required=True); ci_.add_argument("--target", required=True)
+    ss.add_argument("--ci", metavar="MODID", help="also regenerate each synced version branch's Port CI workflow "
+                    "(ci --run: the variant shipped-jar jobs, the newest kit); without it, ci-check's warnings are printed")
+    ci_ = sub.add_parser("ci"); ci_.add_argument("--repo", required=True)
+    cit = ci_.add_mutually_exclusive_group(required=True)
+    cit.add_argument("--target"); cit.add_argument("--all", action="store_true", help="every version branch")
     ci_.add_argument("--modid", required=True); ci_.add_argument("--run", action="store_true")
+    cc = sub.add_parser("ci-check", help="warn about version branches whose Port CI workflow is older than the kit or "
+                        "boots no jar of a variant they keep shipped-jar expectations for")
+    cc.add_argument("--repo", required=True); cc.add_argument("--target", action="append", default=[])
+    cc.add_argument("--kit-version", type=int, help="the kit to compare with (default: the newest published)")
     ci_.add_argument("--kit-version", type=int, help="the Port CI kit to pin (default: the newest published, not the "
                      "port branch's pin)")
     a = ap.parse_args()
@@ -3670,9 +3753,13 @@ def main():
     if a.cmd == "library-record":
         return library_record(a.repo, a.target, a.dependent, a.slug)
     if a.cmd == "ci":
-        return ci(a.repo, a.target, a.modid, a.run, kit_version=a.kit_version)
+        return ci(a.repo, None if a.all else a.target, a.modid, a.run, kit_version=a.kit_version)
+    if a.cmd == "ci-check":
+        for line in ci_check(a.repo, a.target or None, a.kit_version):
+            print(line)
+        return 0
     if a.cmd == "sync-shared":
-        return sync_shared(a.repo, a.target or None)
+        return sync_shared(a.repo, a.target or None, ci_modid=a.ci)
     if a.cmd == "review-authors":
         return review_authors(a.repo, a.range, a.reviewer, a.note, a.verdict)
     if a.cmd == "untaken":
@@ -3968,6 +4055,30 @@ def _check_check_done_rows(expect):
         _hand(w3, {"src/main/java/com/example/mod/Extra3.java": "package com.example.mod;\nclass Extra3 { int a; }\n"}, "local")
         expect(fresh_branch(r, "neoforge-1.21.3") == git(w3, "rev-parse", "HEAD").stdout.strip(),
                "the local parent when it is ahead of origin (a merge not pushed yet)")
+
+
+def _check_ci_check(expect):
+    """ci-check warns about a version branch whose workflow pins an older kit or boots no `_cf` jar although the branch
+    keeps .port/<v>/shipped-expect-cf.txt; ci_args adds that variant's --variant-jar."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w4, _w = worktree_for(r, "1.21.4")
+        wf = ('name: Port CI\nenv:\n  KIT_VERSION: "3"\njobs:\n  shipped:\n    env:\n          VARIANT_JARS: "*_mr.jar"\n'
+              '    steps:\n      - run: ./tools/ci-gates.py --repo . --modid "examplemod"\n')
+        _hand(w4, {".github/workflows/port-ci.yml": wf, ".port/1.21.4/shipped-expect-cf.txt": "A.log:cf ran\n"}, "1.21.4: CI")
+        lines = ci_check(r, kit_version=5)
+        w14 = [l for l in lines if "neoforge-1.21.4" in l]
+        expect(len(w14) == 1 and "kit 3, older than kit 5" in w14[0] and "*_cf.jar" in w14[0]
+               and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines) and "--all" in lines[-1],
+               f"ci-check names the outdated kit and the missing _cf job: {lines}")
+        expect(not [l for l in ci_check(r, ["1.21.4"], kit_version=False) if "WARNING" in l and "kit" in l]
+               and shipped_variants(r, resolve_branch(r, "neoforge-1.21.4"), "1.21.4") == ["cf"],
+               "kit_version=False compares the variants only")
+    expect(add_variant_jars(["--modid", "m", "--variant-jar", "*_mr.jar"], ["cf"]) == ["--modid", "m", "--variant-jar", "*_mr.jar",
+                                                                                     "--variant-jar", "*_cf.jar"]
+           and add_variant_jars(["--modid", "m", "--variant-jar", "*_cf.jar"], ["cf"]) == ["--modid", "m", "--variant-jar", "*_cf.jar"]
+           and add_variant_jars(["--modid", "m"], []) == ["--modid", "m"],
+           "add_variant_jars: a variant with expectations gets its glob once; none, nothing added")
 
 
 def _check_prerelease_pin(expect):
@@ -4995,6 +5106,7 @@ def self_check():
         _check_prerelease_pin(expect)
         _check_ungated_rerun(expect)
         _check_check_done_rows(expect)
+        _check_ci_check(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)
