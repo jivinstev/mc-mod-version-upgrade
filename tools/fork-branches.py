@@ -2457,6 +2457,44 @@ def run_gates(work, t, gates, say=print, untaken_ok=None):
     return subprocess.run(cmd).returncode
 
 
+# A merge the cascade made whose gates did not pass (red, or stopped for a hand re-apply) stays on the local branch and
+# in its worktree. The next run used to see that branch already carrying its parent and report it "up to date" without
+# gating it. The cascade records each such merge here (in the clone's git directory: shared by every worktree, never in
+# a tree) and a later run gates it before it calls it up to date; a green gate run clears it.
+UNGATED_FILE = "mmvu-cascade-ungated.json"
+
+
+def _ungated_path(repo):
+    d = git(repo, "rev-parse", "--git-common-dir").stdout.strip()
+    p = pathlib.Path(d) if d else pathlib.Path(repo) / ".git"
+    return p if p.is_absolute() else pathlib.Path(repo) / p
+
+
+def ungated(repo):
+    """{version: {"commit", "why"}} of the merges an earlier cascade made and did not gate green."""
+    try:
+        data = json.loads((_ungated_path(repo) / UNGATED_FILE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def mark_ungated(repo, t, commit=None, why=None):
+    """Record (commit given) or clear (commit None) version t's ungated merge."""
+    data = ungated(repo)
+    if commit:
+        data[t] = {"commit": commit, "why": why or ""}
+    elif t not in data:
+        return
+    else:
+        data.pop(t)
+    f = _ungated_path(repo) / UNGATED_FILE
+    if data:
+        f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        f.unlink(missing_ok=True)
+
+
 def cascade_nodes(repo, spec):
     """(port branch, [None, versions...] of TO's chain, start index, TO) for `FROM..TO`; ValueError for bad input."""
     frm, sep, to = spec.partition("..")
@@ -2558,7 +2596,30 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         if not pref or not tref:
             say(f"fork-branches: no branch {pname if not pref else branch_name(t)}"); return 2
         if git(repo, "merge-base", "--is-ancestor", pref, tref).returncode == 0 and not needs_carry(repo, t, tref, pref, pv, port, port_tip):
-            rows.append((t, "up to date", ""))
+            earlier = ungated(repo).get(t) if mode not in ("plan", "plan-run") else None
+            if earlier and git(repo, "merge-base", "--is-ancestor", earlier["commit"], tref).returncode != 0:
+                mark_ungated(repo, t)        # the branch no longer carries that merge (reset by hand): nothing to gate
+                earlier = None
+            if not earlier:
+                rows.append((t, "up to date", ""))
+                continue
+            what = f"merged by an earlier cascade at {earlier['commit'][:12]} and not gated green ({earlier['why']})"
+            if dry_run:
+                rows.append((t, f"would gate: {what}", "")); continue
+            if gates == "none":
+                rows.append((t, f"up to date, NOT gated: {what}", "run the cascade with --gates to gate it")); continue
+            work, why = worktree_for(repo, t)
+            if work is None:
+                rows.append((t, "STOPPED", why)); break
+            say(f"fork-branches: cascade: {t}: {what}: gating it now")
+            rc = runner(work, t, gates, say)
+            if rc not in (0, 17, UNDONE_EXIT):
+                rows.append((t, f"merged earlier, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
+                say(f"fork-branches: cascade STOPPED at {t}: still red -- start ONE fixer there (python3 tools/fork-port.py "
+                    f"--repo {work} --target {t} --from-stage measure, with a budget), commit, then cascade {t}..{to}")
+                break
+            mark_ungated(repo, t)
+            rows.append((t, f"merged earlier, gated now, gates exit {rc}", ""))
             continue
         if dry_run:
             n = git(repo, "rev-list", "--count", f"{tref}..{pref}").stdout.strip()
@@ -2596,6 +2657,7 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         merged.append(t)
         if pending and resolve is None:
             rows.append((t, "STOPPED: merged, the authors' change to re-apply by hand", ", ".join(list(pending)[:6])))
+            mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(), "stopped for the authors' change by hand")
             say(f"fork-branches: cascade STOPPED at {t}: merged, but the authors' change to {', '.join(list(pending)[:6])} "
                 f"reaches {t} through no merge and {t} changed the file by hand. On {branch_name(t)}: apply each diff "
                 f"below through {t}'s rows, commit, remove its entry from .port/{t}/REMERGE.json (the done check lists it "
@@ -2605,9 +2667,12 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         rc = runner(work, t, gates, say) if mode != "plan-run" else 0
         if rc not in (0, 17, UNDONE_EXIT):
             rows.append((t, f"merged, RED (fork-port exit {rc})", f".port/{t}/RESIDUE.md"))
+            mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(), f"red after the merge, fork-port exit {rc}")
             say(f"fork-branches: cascade STOPPED at {t}: red after the merge -- start ONE fixer there (python3 tools/fork-port.py "
                 f"--repo {work} --target {t} --from-stage measure, with a budget), commit, then cascade {t}..{to}")
             break
+        if gates != "none" and mode != "plan-run":
+            mark_ungated(repo, t)
         n_open = sum(1 for x in its if not x.get("executed"))
         rows.append((t, "merged" + ("" if gates == "none" or mode == "plan-run" else f", gates exit {rc}")
                      + (f", {n_open} decision(s) open" if n_open else ""), ""))
@@ -2623,7 +2688,7 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         write_plan(repo, plan, out_dir, say)
     if merged and mode != "plan-run":
         say(f"fork-branches: nothing was pushed: git push origin {' '.join(branch_name(t) for t in merged)}")
-    return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED")) else 0
+    return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED", "merged earlier, RED")) else 0
 
 
 cascade_run_result = {}
@@ -3750,6 +3815,29 @@ def _check_port_taken(expect):
                f"{out[-400:]} {why}")
 
 
+def _check_ungated_rerun(expect):
+    """A cascade stopped red at a version leaves the merge on its branch; the next run gates it instead of calling it
+    up to date, and once it is green the run after says up to date and gates nothing."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        _authors(r, g, {"src/main/java/com/example/mod/Plain.java": ("int v = 1;", "int v = 2;")}, "authors: v = 2")
+        calls = []
+
+        def runner(red):
+            return lambda w, t, gates, say=print: (calls.append(t), 12 if t in red else 0)[1]
+        rc1, out1 = _quiet(cascade, r, "port..1.21.5", "ab", runner=runner({"1.21.4"}))
+        first, calls[:] = list(calls), []
+        marked = set(ungated(r))
+        rc2, out2 = _quiet(cascade, r, "port..1.21.5", "ab", runner=runner(set()))
+        second, calls[:] = list(calls), []
+        rc3, out3 = _quiet(cascade, r, "port..1.21.5", "ab", runner=runner(set()))
+        expect(rc1 == 1 and first == ["1.21.3", "1.21.4"] and marked == {"1.21.4"} and rc2 == 0
+               and second == ["1.21.4", "1.21.5"] and "merged earlier, gated now" in out2 and rc3 == 0 and calls == []
+               and not ungated(r) and "| 1.21.4 | up to date |" in out3,
+               f"a re-run after a red stop gates the earlier merge, then says up to date: {first} {second} {calls} "
+               f"{out2[-500:]} {out3[-300:]}")
+
+
 def _check_prerelease_pin(expect):
     """A dependent version pinned to a library pre-release (tools/layer-deps.py writes the mark into DEPS.md) is not
     done: its pre-release may ship with it, its full Release and promotion wait for the library's version."""
@@ -4756,6 +4844,7 @@ def self_check():
         _check_deferred_integration(expect)
         _check_untaken_head(expect)
         _check_prerelease_pin(expect)
+        _check_ungated_rerun(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)
