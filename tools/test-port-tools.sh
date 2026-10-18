@@ -978,6 +978,27 @@ grown = m.roots_of(a)
 m._ROOTS[id(b := {"org/example/C.java"})] = (object(), 1, {"net/minecraft/"})   # an entry left by a dead object with b's id
 sys.exit(0 if first == {"net/minecraft/"} and grown == {"net/minecraft/", "com/mojang/"} and m.roots_of(b) == {"org/example/"} else 1)
 PY
+# audit-mixin-targets find_sources_jar: the build's own NeoForge version's jar, never the first one sorted (a version
+# branch keeps the previous version's staged jars beside its own); a lone jar (single-version) as before
+python3 - <<'PY' && ok "audit-mixin-targets: the sources jar of the build's neo_version is picked over an older version's left beside it; a lone jar and no gradle.properties as before" || bad "audit-mixin-targets find_sources_jar picked another version's sources jar"
+import importlib.util, os, pathlib, sys, tempfile, time
+spec = importlib.util.spec_from_file_location("a", "tools/audit-mixin-targets.py"); m = importlib.util.module_from_spec(spec)
+sys.argv = ["x"]; spec.loader.exec_module(m)
+ok = True
+with tempfile.TemporaryDirectory() as d:
+    art = pathlib.Path(d) / "build/moddev/artifacts"; art.mkdir(parents=True)
+    new = art / "neoforge-21.11.5-sources.jar"; new.write_bytes(b"x")
+    ok &= m.find_sources_jar(d) == str(new)                                   # single-version: its one jar
+    old = art / "neoforge-21.10.40-sources.jar"; old.write_bytes(b"x")
+    t = time.time(); os.utime(new, (t - 60, t - 60)); os.utime(old, (t, t))   # the stale one even newer on disk
+    (pathlib.Path(d) / "gradle.properties").write_text("minecraft_version=1.21.11\nneo_version=21.11.5\n", encoding="utf-8")
+    ok &= m.find_sources_jar(d) == str(new)
+    (pathlib.Path(d) / "gradle.properties").write_text("neo_version=21.10.40\n", encoding="utf-8")
+    ok &= m.find_sources_jar(d) == str(old)
+    (pathlib.Path(d) / "gradle.properties").write_text("neo_version=21.10.4\n", encoding="utf-8")   # a prefix is no match
+    ok &= m.find_sources_jar(d) == str(old)                                   # none matches: the newest, said on stderr
+sys.exit(0 if ok else 1)
+PY
 # R25: a registration supplier names what it builds and every Block/Item Properties takes that name (prefix-only rows)
 python3 - <<'PY' && ok "shared rows: R25 registry ids -- suppliers enter their name, Item/Block Properties are stamped, a constructor reference becomes an entering supplier" || bad "the R25 RegIds rows rewrite the wrong shapes"
 import re, pathlib, sys

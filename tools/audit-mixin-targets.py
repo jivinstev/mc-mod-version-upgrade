@@ -434,14 +434,40 @@ def find_sources_jar(workspace):
     `build/moddev/artifacts/`, so a tool that only knows NeoGradle's `build/neoForm/*/sources.jar`
     exits "no sources.jar found" on every multi-version port. That is not a red gate, it is a
     MISSING one, and the two look identical from a task list (X15).
+
+    The jar of the BUILD's NeoForge version (gradle.properties neo_version): a version branch's checkout keeps the
+    previous version's staged jars beside its own in build/moddev/artifacts, and the first one sorted is the older
+    version's (measured: a 1.21.11 branch audited against 21.10 sources failed Gate B). With no version to match, or
+    none matching, the newest of the layout's jars, said on stderr when there was a choice.
     """
+    neo = build_neo_version(workspace)
     for pattern in ("build/moddev/artifacts/minecraft-patched-*-sources.jar",
                     "build/moddev/artifacts/neoforge-*-sources.jar",
                     "build/neoForm/*/sources.jar"):
         found = sorted(glob.glob(os.path.join(workspace, pattern)))
-        if found:
+        if not found:
+            continue
+        if neo:
+            rx = re.compile(r"(?<![\w.])" + re.escape(neo) + r"(?![\w.])")
+            hit = [f for f in found if rx.search(os.path.relpath(f, workspace).replace(os.sep, "/"))]
+            if hit:
+                return hit[0]
+        if len(found) == 1:
             return found[0]
+        pick = max(found, key=os.path.getmtime)
+        print("audit-mixin-targets: %s sources jars and none for NeoForge %s: using the newest, %s"
+              % (len(found), neo or "(no neo_version in gradle.properties)", os.path.basename(pick)), file=sys.stderr)
+        return pick
     return None
+
+
+def build_neo_version(workspace):
+    """The build's NeoForge version (gradle.properties `neo_version`, else `neoforge_version`), or None."""
+    gp = os.path.join(workspace, "gradle.properties")
+    if not os.path.isfile(gp):
+        return None
+    props = read_properties(gp)
+    return props.get("neo_version") or props.get("neoforge_version") or None
 
 
 def read_properties(path):
