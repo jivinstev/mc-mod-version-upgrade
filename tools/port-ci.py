@@ -705,8 +705,7 @@ def release_script_check():
             for case, ((rtype, rname, rels, tags), want) in cases.items():
                 with tempfile.TemporaryDirectory() as d:
                     d = pathlib.Path(d)
-                    origin, repo, bindir = d / "origin.git", d / "repo", d / "bin"
-                    bindir.mkdir()
+                    origin, repo = d / "origin.git", d / "repo"
                     def g(*a, cwd=repo):
                         return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
                                               errors="replace")
@@ -722,14 +721,13 @@ def release_script_check():
                         g("tag", "-a", "-m", "t", name, build if at == "build" else other)   # annotated: peeled
                     g("remote", "add", "origin", str(origin)); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1", "--tags")
                     (repo / "jars").mkdir(); (repo / "jars/x.jar").write_bytes(b"")
-                    (bindir / "gh").write_text(
-                        '#!/bin/sh\nif [ "$1 $2" = "release view" ]; then for r in $RELEASES; do [ "$r" = "$3" ] && exit 0; done; exit 1; fi\n'
-                        'if [ "$1 $2" = "release create" ]; then echo "$3" >> "$CREATED"; exit 0; fi\nexit 3\n', encoding="utf-8")
-                    (bindir / "gh").chmod(0o755)
-                    run = (script.replace("${{ github.ref_type }}", rtype).replace("${{ github.ref_name }}", rname)
+                    # the stand-in gh is a shell function ahead of the script: no PATH lookup of an extension-less
+                    # file, which Windows' Git Bash would not do the same way
+                    fake_gh = ('gh() { if [ "$1 $2" = "release view" ]; then for r in $RELEASES; do [ "$r" = "$3" ] && return 0; done; '
+                               'return 1; fi; if [ "$1 $2" = "release create" ]; then echo "$3" >> "$CREATED"; return 0; fi; return 3; }\n')
+                    run = fake_gh + (script.replace("${{ github.ref_type }}", rtype).replace("${{ github.ref_name }}", rname)
                            .replace("${{ github.repository }}", "o/examplemod").replace("${{ github.sha }}", build))
-                    env = dict(os.environ, PATH=f"{bindir.as_posix()}{os.pathsep}{os.environ.get('PATH', '')}",
-                               RELEASES=" ".join(rels), CREATED=(d / "created.txt").as_posix(), PREVIEW="")
+                    env = dict(os.environ, RELEASES=" ".join(rels), CREATED=(d / "created.txt").as_posix(), PREVIEW="")
                     r = subprocess.run([BASH, "-c", run], cwd=repo, env=env, capture_output=True, text=True,
                                        encoding="utf-8", errors="replace")
                     made = (d / "created.txt").read_text(encoding="utf-8").split() if (d / "created.txt").exists() else []
@@ -1048,7 +1046,8 @@ def self_check():
             pathlib.Path(d_, ".port/1.21.5/DEPS.md").write_text("blob not here\n", encoding="utf-8")
             g_("add", "-A"); g_("commit", "-qm", "gone"); g_("tag", "dep-1.0-mc1.21.5")
             oid = g_("rev-parse", "dep-1.0-mc1.21.5:.port/1.21.5/DEPS.md").stdout.strip()
-            pathlib.Path(d_, ".git/objects", oid[:2], oid[2:]).unlink()
+            loose = pathlib.Path(d_, ".git/objects", oid[:2], oid[2:])
+            loose.chmod(0o644); loose.unlink()        # git writes loose objects read-only: Windows refuses the unlink
             del calls_[:]
             lazy = tag_file(d_, "o/dep", "dep-1.0-mc1.21.5", ".port/1.21.5/DEPS.md")
         finally:
