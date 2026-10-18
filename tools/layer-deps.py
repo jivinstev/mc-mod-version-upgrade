@@ -439,8 +439,8 @@ def asset_shape(name):
 def pick_release_asset(names, want, target):
     """The release asset that stands for `want` (the asset the workflow pins, often of an older release) among a
     version branch's release `names`: the same name, or <stem>-mc<target>.jar, or the one jar of the same shape
-    (asset_shape: the variant honoured, so `_cf` never stands in for `_mr`), or the release's only jar. -> (name, None)
-    or (None, why)."""
+    (asset_shape: the mod's name and the variant honoured, so `_cf` never stands in for `_mr`, nor another mod's jar for
+    this one's). A lone jar of another shape is no match. -> (name, None) or (None, why)."""
     jars = [n for n in names if n.endswith(".jar") and not SIDE_JAR.search(n)]
     stem = want[:-4]
     for n in (want, f"{stem}-mc{target}.jar"):
@@ -449,22 +449,21 @@ def pick_release_asset(names, want, target):
     same = [n for n in jars if asset_shape(n) == asset_shape(want)]
     if len(same) == 1:
         return same[0], None
-    if len(jars) == 1 and not same:
-        return jars[0], None
     return None, (f"no asset of the release stands for {want} ({'several' if same else 'none'} of the same name and "
                   f"variant among {', '.join(jars) or 'no jar'})")
 
 
 def release_assets(repo, tag, get=None):
-    """[(name, download url)] of a GitHub release (the REST API; GH_TOKEN/GITHUB_TOKEN when set), or None."""
+    """([(name, download url)], None) of a GitHub release (the REST API; GH_TOKEN/GITHUB_TOKEN when set), or (None, the
+    error) -- the caller falls back to the names it can guess and reports this error when those fail too."""
     tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     try:
         rel = json.loads((get or _get)(f"https://api.github.com/repos/{repo}/releases/tags/{tag}",
                                        {"Authorization": f"Bearer {tok}"} if tok else None))
         return [(x["name"], x.get("browser_download_url") or f"https://github.com/{repo}/releases/download/{tag}/{x['name']}")
-                for x in rel.get("assets", []) if x.get("name")]
-    except Exception:          # noqa: BLE001 -- the caller falls back to the names it can guess
-        return None
+                for x in rel.get("assets", []) if x.get("name")], None
+    except Exception as e:     # noqa: BLE001 -- said, not swallowed
+        return None, f"cannot list {repo}'s release {tag} ({type(e).__name__}: {e})"
 
 
 def resolve_port(ga, spec, target, checkouts):
@@ -472,10 +471,11 @@ def resolve_port(ga, spec, target, checkouts):
     stem = spec["asset"][:-4]
     ver = port_version(spec["version"], target)
     co = checkouts.get(repo)
+    list_err = None
     if isinstance(co, str) and co.endswith(f"-mc{target}"):
         # a version branch's release (<mod>-<ver>-mc<t>): its jars are named as the build names them, often with a
         # variant (lib-1.1.9_mr.jar); read the release's actual assets rather than guessing a name
-        assets = release_assets(repo, co)
+        assets, list_err = release_assets(repo, co)
         if assets is not None:
             name, why = pick_release_asset([n for n, _u in assets], spec["asset"], target)
             if not name:
@@ -502,8 +502,8 @@ def resolve_port(ga, spec, target, checkouts):
             try:
                 data = _get(url)
             except Exception as e2:
-                return {"missing": f"{repo}'s release {co} has neither {stem}-mc{target}.jar nor {spec['asset']} ({e2})",
-                        "source": repo}
+                return {"missing": f"{repo}'s release {co} has neither {stem}-mc{target}.jar nor {spec['asset']} ({e2})"
+                                   + (f"; and {list_err}" if list_err else ""), "source": repo}
         install_m2(ga, ver, data)
         sha = hashlib.sha256(data).hexdigest()
         return {"to": f"{ga}:{ver}", "pin": f"{url} {sha}", "source": f"{repo} release {co}: {stem}-mc{target}.jar (sha256 {sha[:16]}…)"}
@@ -1377,6 +1377,8 @@ def self_check():
                and pick_release_asset(rel, "examplelib-1.1_cf.jar", "1.21.8")[0] == "examplelib-1.2_cf.jar"
                and pick_release_asset(rel, "examplelib-1.1.jar", "1.21.8")[0] is None
                and pick_release_asset(["examplelib-1.2.jar"], "examplelib-1.1.jar", "1.21.8")[0] == "examplelib-1.2.jar"
+               and pick_release_asset(["examplelib-1.2_cf.jar"], "examplelib-1.1_mr.jar", "1.21.8")[0] is None
+               and pick_release_asset(["otherlib-9.0.jar"], "examplelib-1.1_mr.jar", "1.21.8")[0] is None
                and pick_release_asset(["examplelib-1.2-mc1.21.8.jar"], "examplelib-1.1.jar", "1.21.8")[0]
                == "examplelib-1.2-mc1.21.8.jar",
                "pick_release_asset: the variant honoured; a bare name with two variants is ambiguous, never a guess")
@@ -1390,6 +1392,16 @@ def self_check():
             got = resolve_port("com.example:lib", spec, "1.21.8", {"owner/lib": "examplelib-1.2-mc1.21.8"})
         finally:
             g_.update(saved)
+        boom = lambda url, h=None: (_ for _ in ()).throw(OSError("blocked by the proxy"))
+        al, ae = release_assets("owner/lib", "x-mc1.21.8", boom)
+        expect(al is None and "blocked by the proxy" in ae, f"release_assets says why it could not list: {ae}")
+        try:
+            g_["_get"] = boom
+            miss = resolve_port("com.example:lib", spec, "1.21.8", {"owner/lib": "examplelib-1.2-mc1.21.8"})
+        finally:
+            g_.update(saved)
+        expect("blocked by the proxy" in miss.get("missing", "") and "cannot list" in miss.get("missing", ""),
+               f"a release that cannot be listed or fetched names the real error: {miss}")
         expect(got.get("to") == "com.example:lib:1.1-mc1.21.8" and got.get("pin", "").startswith("https://dl.example/examplelib-1.2_cf.jar ")
                and m2 == [("com.example:lib", "1.1-mc1.21.8", b"examplelib-1.2_cf.jar")],
                f"--port-release of a version branch's release: its _cf asset, one -mc suffix: {got} {m2}")
