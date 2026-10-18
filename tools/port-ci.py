@@ -410,16 +410,30 @@ def prerelease_pin_blockers(tag, read):
     in .port/<mc>/branch.properties at the tag). read(path) -> the file at the tag, or None. --with-dependency does
     not lift it: promoting the library alongside does not make its version done; re-resolve the pin once it is.
     A tag without -mc<v>, or with neither file (a single-version fork), never waits."""
-    m = re.search(r"-mc(\d[\d.]*)$", tag)
+    m = TAG.fullmatch(tag)          # the release tag's own form: <mod>-<ver>-mc<mc>[-release][-r<N>]
     if not m:
         return []
-    mc = m.group(1)
+    mc = m.group("mc")
     deps, props = read(f".port/{mc}/DEPS.md") or "", read(f".port/{mc}/branch.properties") or ""
     if PRERELEASE_MARK in deps or re.search(r"(?m)^" + re.escape(PRERELEASE_KEY), props):
         return [f"{tag} is built against a library pre-release whose {mc} was not done (.port/{mc}/DEPS.md \"Library "
                 "pre-release (not done)\"): once the library's version is done, re-resolve the pin (layer-deps.py resolve "
                 "--port-release), cut a new pre-release and promote that one; --with-dependency does not lift this"]
     return []
+
+
+def tag_file(repo, fork, tag, path):
+    """`path` at `tag`: from the local clone when it has the tag (absent there: None, no request), else from GitHub
+    (raw.githubusercontent; None when absent or unreadable)."""
+    if subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
+                      capture_output=True, text=True, encoding="utf-8").returncode == 0:
+        r_ = subprocess.run(["git", "-C", str(repo), "show", f"{tag}:{path}"], capture_output=True, text=True,
+                            encoding="utf-8")
+        return r_.stdout if r_.returncode == 0 else None
+    try:
+        return _get(f"https://raw.githubusercontent.com/{fork}/{tag}/{path}")
+    except Exception:                  # noqa: BLE001 -- absent at the tag (or unreadable): no mark read
+        return None
 
 
 def dependency_blockers(workflow_text, release_of, with_deps=(), own=None):
@@ -496,16 +510,7 @@ def promote(argv):
             return json.loads(_get(f"https://api.github.com/repos/{r_}/releases/tags/{t_}"))
         why, notes = dependency_blockers(wf, release_of, a.with_dependency, a.fork)
 
-        def at_tag(path):
-            r_ = subprocess.run(["git", "-C", a.repo or ".", "show", f"{a.tag}:{path}"], capture_output=True, text=True,
-                                encoding="utf-8")
-            if r_.returncode == 0:
-                return r_.stdout
-            try:
-                return _get(f"https://raw.githubusercontent.com/{a.fork}/{a.tag}/{path}")
-            except Exception:              # noqa: BLE001 -- absent at the tag (or unreadable): no mark read
-                return None
-        why = why + prerelease_pin_blockers(a.tag, at_tag)
+        why = why + prerelease_pin_blockers(a.tag, lambda path: tag_file(a.repo or ".", a.fork, a.tag, path))
         for n in notes:
             print("note: " + n)
         if why:
@@ -903,6 +908,37 @@ def self_check():
                                       {".port/1.21.4/branch.properties": "port_jar_prerelease.com.example\\:lib=x\n"}.get)) == 1
     ok &= prerelease_pin_blockers("dep-1.0-mc1.21.1", {}.get) == [] and prerelease_pin_blockers("dep-1.0", tree.get) == []
     ok &= prerelease_pin_blockers("dep-1.0-mc1.21.4", {".port/1.21.4/DEPS.md": "pinned to lib-1.0 (done)\n"}.get) == []
+    # the tag's suffixes the release workflow accepts (TAG): -r<N> and -release are judged too
+    ok &= all(len(prerelease_pin_blockers(t_, tree.get)) == 1 for t_ in ("dep-1.0-mc1.21.4-r2", "dep-1.0-mc1.21.4-release",
+                                                                          "dep-1.0-mc1.21.4-release-r3"))
+    # wired into promote: it refuses before dispatching anything; and a tag the local clone has is read only there
+    import contextlib, io
+    saved = {k: globals()[k] for k in ("gh_logged_in", "fork_workflow", "tag_file", "_get")}
+    asked = []
+    try:
+        globals().update(gh_logged_in=lambda: False, fork_workflow=lambda *a_: (fixture(deps=False), "a stub"),
+                         tag_file=lambda repo, fork, tag, path: (asked.append(path), tree.get(path))[1],
+                         _get=lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("no request expected")))
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                promote(["--fork", "o/dep", "--tag", "dep-1.0-mc1.21.4-r2", "--played-by", "someone", "--print"])
+            refused = ""
+        except SystemExit as e:
+            refused = str(e)
+    finally:
+        globals().update(saved)
+    ok &= "library pre-release" in refused and ".port/1.21.4/DEPS.md" in asked
+    with tempfile.TemporaryDirectory() as d_:
+        g_ = lambda *a_: subprocess.run(["git", "-C", d_, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a_],
+                                        capture_output=True, text=True, encoding="utf-8", check=True)
+        g_("init", "-q"); pathlib.Path(d_, "x").write_text("x\n", encoding="utf-8"); g_("add", "-A"); g_("commit", "-qm", "x")
+        g_("tag", "solo-1.0-mc1.21.1")
+        real_get = globals()["_get"]
+        globals()["_get"] = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("no request"))
+        try:
+            ok &= tag_file(d_, "o/solo", "solo-1.0-mc1.21.1", ".port/1.21.1/DEPS.md") is None
+        finally:
+            globals()["_get"] = real_get
     ok &= dependency_blockers(fixture(deps=True), look) == ([], [])
     ok &= dependency_blockers(fixture(deps=False), look) == ([], []) and pinned_releases(fixture(deps=False)) == []
     unread = dependency_blockers(pre_pin, lambda r_, t_: (_ for _ in ()).throw(OSError("offline")))

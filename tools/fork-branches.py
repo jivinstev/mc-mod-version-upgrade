@@ -1418,7 +1418,7 @@ def expected_tree(lay, t, parent, port_commit, parent_files=None):
     return files, notes
 
 
-RECORD_COPY = ("GATES.md", "GATES-RED.md", "COST.md", "DEPS.md", "TEST-ITEMS.md", "RESIDUE.md", "BEHAVIOUR.json", "renames.tsv",
+RECORD_COPY = ("GATES.md", "COST.md", "DEPS.md", "TEST-ITEMS.md", "RESIDUE.md", "BEHAVIOUR.json", "renames.tsv",
                "moves.generated.tsv", "drops.txt", "logs-known-absent.txt")
 LAYER_ONLY_KEYS = re.compile(r"^(?:inherits|mixin_add\.|mixin_add_only\.|mixin_remove_only\.|shared_chain)")
 
@@ -4027,6 +4027,18 @@ def _check_ungated_rerun(expect):
 
         def runner(red):
             return lambda w, t, gates, say=print: (calls.append(t), 12 if t in red else 0)[1]
+
+        def killed(w, t, gates, say=print):
+            raise KeyboardInterrupt("killed")
+        # a gates run that never returns (killed, timed out): the record is written before the gates, so it is there
+        try:
+            _quiet(cascade, r, "port..1.21.3", "ab", runner=killed)
+            died = False
+        except KeyboardInterrupt:
+            died = True
+        rec0 = dict(ungated(r))
+        expect(died and "1.21.3" in rec0 and "did not finish" in rec0["1.21.3"]["why"],
+               f"a killed gates run leaves the merge recorded as ungated: {rec0}")
         rc1, out1 = _quiet(cascade, r, "port..1.21.5", "ab", runner=runner({"1.21.4"}))
         first, calls[:] = list(calls), []
         marked = set(ungated(r))
@@ -4107,26 +4119,6 @@ def _check_ci_check(expect):
            "add_variant_jars: a variant with expectations gets its glob once; none, nothing added")
 
 
-def _check_killed_gates(expect):
-    """A gates run that never returns (killed, timed out) leaves the merge recorded as ungated: the record is written
-    before the gates run and cleared only when they are green."""
-    with tempfile.TemporaryDirectory() as d:
-        r, g, _run = _migrated_fixture(d)
-        _authors(r, g, {"src/main/java/com/example/mod/Plain.java": ("int v = 1;", "int v = 3;")}, "authors: v = 3")
-
-        def killed(w, t, gates, say=print):
-            raise KeyboardInterrupt("killed")
-        try:
-            _quiet(cascade, r, "port..1.21.3", "ab", runner=killed)
-            died = False
-        except KeyboardInterrupt:
-            died = True
-        rec = dict(ungated(r))
-        _quiet(cascade, r, "port..1.21.3", "ab", runner=lambda w, t, gates, say=print: 0)
-        expect(died and "1.21.3" in rec and "did not finish" in rec["1.21.3"]["why"] and not ungated(r),
-               f"a killed gates run leaves the merge recorded; a green re-run clears it: {rec} {ungated(r)}")
-
-
 def _check_stopped_worktree(expect):
     """A cascade stopped at a version leaves its worktree under build/fork-branches/ with the run's records edited, or a
     registration whose directory is gone; the next run reuses or re-makes it instead of refusing (weekly-round dry run).
@@ -4189,18 +4181,6 @@ def _check_prerelease_pin(expect):
         after3 = target_done(r, "1.21.3")
         expect(not any("GATES-RED.md" in x for x in before3) and any("GATES-RED.md" in x for x in after3),
                f"version branch: GATES-RED.md keeps it not done (gates_problems): {after3}")
-    # migrate carries a layer target's GATES-RED.md into .port/<t>/ (so a target not done there is not done after)
-    import types
-    with tempfile.TemporaryDirectory() as d:
-        mv = pathlib.Path(d) / ".multiversion"
-        (mv / "targets/1.21.4").mkdir(parents=True)
-        for n in ("GATES.md", "GATES-RED.md"):
-            (mv / "targets/1.21.4" / n).write_text(f"{n}\n", encoding="utf-8")
-        lay = types.SimpleNamespace(mv=mv, dir=pathlib.Path(d), base={"minecraft_version": "1.21.1"}, commit="c" * 40,
-                                    shared_chain=lambda t: [])
-        got = records_of(lay, "1.21.4", None, "p" * 40, "", {}, {}, [])
-        expect(f"{REC}/1.21.4/GATES-RED.md" in got and f"{REC}/1.21.4/GATES.md" in got,
-               f"migrate copies GATES-RED.md with GATES.md: {sorted(got)}")
     # the run records a reused worktree may carry are records for ci-gates.py too (never jar content)
     import ast
     names = {e.value for n in ast.parse((ROOT / "tools/ci-gates.py").read_text(encoding="utf-8")).body
@@ -5221,7 +5201,6 @@ def self_check():
         _check_check_done_rows(expect)
         _check_ci_check(expect)
         _check_stopped_worktree(expect)
-        _check_killed_gates(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)

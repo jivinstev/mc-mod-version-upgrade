@@ -13,8 +13,8 @@ prints one line per check -- `ok` or `MISSING` with what to do -- and exits 1 wh
   github      which way the tools reach GitHub: GITHUB_TOKEN (wins), else GH_TOKEN, both over REST; else the gh command
               line. Neither a token nor gh: missing. A broken gh login does not matter when a token is set.
   jdk         a JDK for each Minecraft version the forks build: 21 for 1.21.x, 25 for 26.x (a version branch's own
-              java_version first) -- found where tools/shipped-gate.py looks (JAVA_HOME_<n>, /usr/lib/jvm, /opt,
-              ~/.gradle/jdks, ~/.jdks, SDKMAN, JAVA_HOME).
+              java_version first) -- found where tools/shipped-gate.py looks (JAVA_HOME first, then JAVA_HOME_<n>,
+              /usr/lib/jvm, /opt, ~/.gradle/jdks, ~/.jdks, SDKMAN).
   libEGL      (Linux, a 26.3 or later client) libEGL.so.1, which that client loads (Debian/Ubuntu: libegl1).
   XDG_RUNTIME_DIR  (Linux, any client gate) set to a directory this user can write: the client's audio and display
               libraries need it.
