@@ -147,7 +147,7 @@ def self_check():
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
         lib = d / "lib"
-        run = lambda *a: subprocess.run(["git", "-C", str(lib), *a], capture_output=True, text=True, check=True)
+        run = lambda *a: subprocess.run(["git", "-C", str(lib), *a], capture_output=True, text=True, encoding="utf-8", check=True)
         lib.mkdir()
         run("init", "-q", "-b", "neoforge-1.21.1")
         (lib / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
