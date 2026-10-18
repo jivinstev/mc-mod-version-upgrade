@@ -315,15 +315,21 @@ Say first which kinds of fork the set holds (single-version unless `.port/<v>/br
 those win over a legacy layer branch with `.multiversion/`, which is history and ignored -- `layer-sync.py detect` says
 `kind=version-branches`). The fork set, its upstreams, pins, ledger issues and `allow` come from
 `.github/weekly-plan.json` on the library's head branch, nothing else. The "Run" steps above are the per-fork mechanics;
-this is the order and the rules around them.
+this is the order and the rules around them. The round runs this repository's **current main** (its prompt clones it,
+so it gets the tools' fixes); only Tuesday's plan workflow is pinned, at `migrator_sha` in that file, so that a plan is
+reproducible from its commit. The two meet only at the plan issue: if `read-plan` cannot read it, stop and report.
 
 **What the round may do unattended is the `allow` list** in that file (the prompt repeats it verbatim), and nothing
-more: `push-version-branches` (commit to the fork's `neoforge-<v>` branches and its head branch; never force-push),
-`pre-release` (dispatch Port CI with `release=true`; never promote, never publish to Modrinth or CurseForge),
-`merge-fork-prs` (merge the round's own PRs on the fork repositories once CI is green; never the migrator
-repository). **An action outside the list is a stop that asks the owner, through the plan issue:** a comment
-@mentioning the owner with the action and why; the round does not take it, goes on with what the list allows and
-names it in the closing comment. An empty list means every push, pre-release and merge asks.
+more: `push-version-branches` (commit to the fork's head branch -- its known-issues ledger and README Ports block
+included -- and its `neoforge-<v>` branches; never force-push), `pre-release` (dispatch Port CI with `release=true`;
+never promote, never publish to Modrinth or CurseForge), `merge-fork-prs` (push the round's own `keep-current/<date>`
+work branches on the fork repositories, open PRs from them, and merge those PRs once CI is green; never the migrator
+repository). **Always allowed, whatever the list says, because they are how the round reports:** comments on the plan
+issue (and closing it at step 6), and edits to the ledger issues the config lists (`ledger_issues`). **Nothing on the
+migrator repository, apart from reading it, is ever allowed.** **Any other action is a stop that asks the owner,
+through the plan issue:** a comment @mentioning the owner with the action and why; the round does not take it, goes on
+with what the list allows and names it in the closing comment. An empty list means every push (the work branches
+included), PR, pre-release and merge asks.
 
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
    round/frozen.json --decisions-dir round/decisions` (`gh` or GITHUB_TOKEN reads it). No open plan issue: stop and
@@ -382,6 +388,24 @@ once the chain reaches its newest version, and after that on every release. Comm
 Setup makes both halves, and re-running it recreates both and removes stale ones. Never create, edit or delete the
 workflow or the round task by hand: a schedule change is a change to `tools/weekly-plan.py` or this section.
 
+**Before step 1, per fork** (each answer is a flag of step 1; none is guessed):
+
+- **Fetch first:** `git fetch origin` in each checkout, the library's on its head branch and up to date with origin's
+  (`git pull --ff-only`). `install` commits on the local head branch, and with `--default-branch-too` it builds the
+  default branch's commit on the LOCAL branch of that name when one exists (origin's only when none does), so a stale
+  local default branch is brought up to origin's first (`git fetch origin <default>:<default>`) or deleted.
+- **Which kind of fork:** `python3 tools/layer-sync.py detect --repo <checkout>`. `layer=true`, or exit 3 (it names the
+  branch that carries `.multiversion/`), is a layer fork: pass `--layer-branch <owner/repo>=<that branch>`.
+  `kind=version-branches` (version branches win over a legacy layer branch) or a plain `layer=false` with exit 0: no
+  `--layer-branch`. Say which kind each fork is; a single-version fork stays one.
+- **The default branch:** `gh repo view <owner/repo> --json defaultBranchRef -q .defaultBranchRef.name` (or `git
+  remote set-head origin -a` and `git symbolic-ref --short refs/remotes/origin/HEAD`). When it differs from the head
+  branch, ask the user: make the head branch the default (Settings -> Branches), or pass `--default-branch-too`.
+- **`ledger_issues`:** the fork's open issues whose body has a `fix-ledger` block (`<!-- fix-ledger:begin -->` ...
+  `<!-- fix-ledger:end -->`, which `fix-ledger.py parse --body FILE` reads back) -- the GitHub search
+  `repo:<owner/repo> is:issue is:open "fix-ledger" in:body` (`search_issues`, or `gh search issues`). Pass their
+  numbers as `--ledger-issues <owner/repo>=N,N`; closed ones are left out. None found: no flag.
+
 1. **The plan workflow** (with the user's go-ahead, stop 1), on a checkout of the first fork's head branch:
 
        python3 tools/weekly-plan.py install --repo <library checkout> \
@@ -391,7 +415,7 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
            [--allow push-version-branches --allow pre-release --allow merge-fork-prs] \
            [--ledger-issues <owner/dep>=12,15] [--depends-on <owner/dep>=<owner/lib>] \
            [--layer-branch <owner/repo>=<branch>] [--replace-task "<old task name>"] \
-           [--trailer "<Key>: <value>" ...]
+           [--default-branch-too] [--keep-existing] [--trailer "<Key>: <value>" ...]
 
    One `--fork` per fork, the library first (a fork alone: one). A `--fork` without `=URL#BRANCH` takes the authors'
    upstream from the GitHub fork parent and its default branch (refused for a repository that is not a fork: name it).
@@ -399,10 +423,14 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    never a default -- with none the round asks before every push, pre-release and merge. `automerge` follows
    `merge-fork-prs`. A dependent depends on the library unless `--depends-on` says otherwise. Moving from an old fleet
    file: pass its `upstream`, `ledger_issues` and `layer_branch` values as these flags, once; after that the config is
-   the only source. An agent passes its session's attribution trailers with `--trailer` (one per line), so the commit
+   the only source. **Re-running setup rebuilds the config from the flags alone:** for each `allow`, `ledger_issues`,
+   `depends_on` or `layer_branch` the existing config holds and the new flags leave out, `install` warns on stderr and
+   names the flag to re-pass; re-pass it, or add `--keep-existing` to keep every such value (a flag given still wins).
+   Read the warnings before pushing. An agent passes its session's attribution trailers with `--trailer` (one per line), so the commit
    carries them; without it, amend the commit's message before pushing. It commits `.github/workflows/weekly-plan.yml`
-   (this repository pinned at origin/main's commit) and `.github/weekly-plan.json` in one `[skip ci]` commit, on the
-   library's repository only (the dependents get nothing); an unchanged set commits nothing. It refuses an organization-owned fork without `--plan-owner`, and exits 3 when the head branch
+   (this repository pinned at origin/main's commit, recorded as `migrator_sha`) and `.github/weekly-plan.json` in one
+   `[skip ci]` commit, on the library's repository only (the dependents get nothing); an unchanged set commits
+   nothing. It refuses an organization-owned fork without `--plan-owner`, and exits 3 when the head branch
    is not the repository's default branch (GitHub runs a schedule only from the default branch): ask the user to make
    the head branch the default, or rerun with `--default-branch-too`, which commits the same workflow file to the
    default branch too. Push what it names. The other forks must be public (the workflow reads them without a token).
@@ -414,6 +442,9 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    (`CRON_TZ=America/Los_Angeles <minute> 8 * * 3`, the minute jittered per fork set below 08:30), `create_new_session_on_fire:
    true`, `notifications` (push and email on), `initiation` and `prompt` (the fork set and the `allow` list in it),
    unchanged. Say in one line that the round is Wednesday at `round.time` from `.github/weekly-plan.json`, Pacific.
+   **When the owner defers the task** (they will create it later, or have it created another time): create nothing;
+   write the `round-task` JSON to a file and give its path, and put in the report the model they chose at stop 1 and
+   the repositories to attach (`repositories` in the JSON); then stop. Do steps 3 to 5 when the task is created.
 3. **Set the round's model; never leave it on the account default.** A task created without one runs on whatever the
    account defaults to (measured: a routine created without one ran on Sonnet), and `create_trigger` takes no model --
    set it right after creating, with `update_trigger` `model`, to the model the user chose at stop 1. Recommend Opus:
