@@ -75,7 +75,8 @@ directory changed since, its run outputs and the reviewer's BEHAVIOUR.json aside
 manual-test items, from tools/layer-test-plan.py, written by a run to the end or alone by `--write-test-items`), every item of .multiversion/INVENTORY.json accounted for on the target (tools/layer-inventory.py, its account in
 the target's INVENTORY-CHECK.json -- a run output like GATES.md, never "changed since the review"), and no dependency
 resolved against an undone library target (--allow-undone-library in DEPS.md). A run whose gates are green but that lacks the rest exits 18 and adds a `?` row to REVIEW.md for every item without
-one (and an `item` row for each inventory item left unaccounted); `--check-done` only asks. A NEW target is refused (exit 18, before anything is written; make-fork-layer.py
+one (and an `item` row for each inventory item left unaccounted); `--check-done` only asks (on a version branch's own
+checkout it adds the same `?` rows, never a verdict). A NEW target is refused (exit 18, before anything is written; make-fork-layer.py
 add-target refuses it too) while the target it stands on is not done; `--allow-undone-parent` is the development escape,
 recorded as allowed_undone_parent= in the new target's target.properties, and that target is not done until its parent is.
 
@@ -3269,7 +3270,8 @@ def main():
                          "oldest first, no model; stops at the first red target with its RESIDUE.md and prints the table")
     ap.add_argument("--check-done", action="store_true",
                     help="only say whether --target is done (Gate C, stubs, REVIEW.md, TEST-ITEMS.md, the behaviour inventory): "
-                         "exit 0, or 18 with the reasons; writes nothing")
+                         "exit 0, or 18 with the reasons; on a version branch's own checkout it adds REVIEW.md's `?` rows "
+                         "for the reviewer (never a verdict); otherwise it writes nothing")
     ap.add_argument("--write-test-items", action="store_true",
                     help="only write --target's TEST-ITEMS.md (its manual-test items, from tools/layer-test-plan.py, no "
                          "model), holding the checkout lock; no stage or gate runs (layer forks only)")
@@ -3298,9 +3300,8 @@ def main():
         print(f"fork-port: --from-stage {a.from_stage} runs on {fork_branches().branch_name(a.target)}'s checkout: check it "
               "out first (or start from setup, which does)"); return 2
     if branch and a.check_done:
-        why = fork_branches().target_done(a.repo, a.target)      # only asks: writes nothing
-        print(f"fork-port {a.target}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
-        return UNDONE_EXIT if why else 0
+        # the done list; on the branch's own checkout it also adds REVIEW.md's `?` rows (no verdict), off it nothing
+        return fork_branches().check_done(a.repo, a.target, "fork-port")
     if branch and a.write_test_items:
         return write_test_items_branch(a)
     if a.check_done:

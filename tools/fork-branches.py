@@ -234,6 +234,17 @@ def resolve_branch(repo, name):
     return None
 
 
+def fresh_branch(repo, name):
+    """A commit for branch `name`, the newer of the local branch and origin's: origin's when the local branch is behind
+    it (a fetch after the parent's PR merged), the local one when it is ahead or has diverged (a merge not pushed yet).
+    None when neither exists."""
+    loc = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}^{{commit}}").stdout.strip()
+    org = git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{name}^{{commit}}").stdout.strip()
+    if loc and org and loc != org and git(repo, "merge-base", "--is-ancestor", loc, org).returncode == 0:
+        return org
+    return loc or org or None
+
+
 def is_branch_fork(repo, t):
     """Has the clone a version branch for t (local or origin) carrying .port/<t>/branch.properties?"""
     c = resolve_branch(repo, branch_name(t))
@@ -746,7 +757,7 @@ def parent_base(repo, root, t, ref):
     `ref` and the parent's branch tip, or ref's first parent when the parent's branch is not in this clone."""
     p = info(root, t)
     parent = p.get("parent") or ""
-    tip = resolve_branch(repo, parent) if parent else None
+    tip = fresh_branch(repo, parent) if parent else None      # a local parent left behind by a fetch is stale
     mb = git(repo, "merge-base", ref, tip).stdout.strip() if tip else ""
     if not mb:
         mb = git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^1").stdout.strip()
@@ -1088,6 +1099,25 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
     finally:
         if tmp is not None:
             tmp.cleanup()
+
+
+def check_done(repo, t, who="fork-branches", say=print):
+    """`check-done` (and fork-port.py --check-done on a version branch): the done list, and -- on the checkout of t's own
+    branch -- a `?` row in REVIEW.md for every item without one and an `item` row for each unaccounted inventory id, for
+    the fresh reviewer to fill (never a verdict). Off the branch it reads the branch's commit and writes nothing.
+    -> 0 done, 18 not done."""
+    repo = pathlib.Path(repo).resolve()
+    why = target_done(repo, t)
+    say(f"{who} {t}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
+    if checkout_version(repo) == t and (rec_dir(repo, t) / BRANCH_PROPS).is_file():
+        unacc = [m.group(1) for w in why for m in [re.match(r"behaviour inventory: unaccounted (\S+) \(", w)] if m]
+        n = review_skeleton(repo, repo, t, "HEAD", True, unacc)
+        if n:
+            say(f"{who} {t}: added {n} `?` row(s) to .port/{t}/REVIEW.md for the fresh reviewer (no verdict written; "
+                "commit it with the review)")
+    elif why:
+        say(f"{who} {t}: not on {branch_name(t)}'s checkout: nothing written (check it out for REVIEW.md's `?` rows)")
+    return UNDONE_EXIT if why else 0
 
 
 def library_tested(repo, root, t, ref, work, files):
@@ -3604,9 +3634,7 @@ def main():
     if a.cmd == "verify":
         return verify(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.tip)
     if a.cmd == "check-done":
-        why = target_done(a.repo, a.target)
-        print(f"fork-branches {a.target}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
-        return UNDONE_EXIT if why else 0
+        return check_done(a.repo, a.target, "fork-branches")
     ap.print_help()
     return 2
 
@@ -3836,6 +3864,48 @@ def _check_ungated_rerun(expect):
                and not ungated(r) and "| 1.21.4 | up to date |" in out3,
                f"a re-run after a red stop gates the earlier merge, then says up to date: {first} {second} {calls} "
                f"{out2[-500:]} {out3[-300:]}")
+
+
+def _check_check_done_rows(expect):
+    """fork-port.py --check-done on a version branch's checkout writes REVIEW.md's `?` rows (the skill and the REVIEW.md
+    header say so; reviewers called review_skeleton by hand); off the branch it writes nothing. And the parent is read
+    from origin when the local parent branch is behind it (after a fetch), so the rows are not stale."""
+    import contextlib, io
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w4, _w = worktree_for(r, "1.21.4")
+        _hand(w4, {"src/main/java/com/example/mod/Plain.java": ("int v = 1;", "int v = 41;")}, "1.21.4: its own change")
+        rv = w4 / ".port/1.21.4/REVIEW.md"
+        before = rv.read_text(encoding="utf-8")
+        w3, _w = worktree_for(r, "1.21.3")               # a checkout on another version branch: off 1.21.4's
+        old = sys.argv
+        try:
+            sys.argv = ["fork-port.py", "--repo", str(w3), "--target", "1.21.4", "--check-done"]
+            with contextlib.redirect_stdout(io.StringIO()) as off:
+                rc_off = fp().main()
+            sys.argv = ["fork-port.py", "--repo", str(w4), "--target", "1.21.4", "--check-done"]
+            with contextlib.redirect_stdout(io.StringIO()) as on:
+                rc_on = fp().main()
+        finally:
+            sys.argv = old
+        after = rv.read_text(encoding="utf-8")
+        expect(rc_off == UNDONE_EXIT and rc_on == UNDONE_EXIT and before != after
+               and "| changed | src/main/java/com/example/mod/Plain.java | ? | ? |" in after
+               and after.startswith(before.rstrip("\n")) and "nothing written" in off.getvalue(),
+               f"--check-done on the branch's checkout adds the `?` row, off it nothing: {on.getvalue()[-300:]} {off.getvalue()[-200:]}")
+        # a stale local parent: origin's neoforge-1.21.3 has a commit the local branch lacks, and 1.21.4 merged it
+        _hand(w3, {"src/main/java/com/example/mod/Extra3.java": "package com.example.mod;\nclass Extra3 {}\n"}, "1.21.3: merged PR")
+        x = git(w3, "rev-parse", "HEAD").stdout.strip()
+        git(r, "update-ref", "refs/remotes/origin/neoforge-1.21.3", x, check=True)
+        git(w3, "reset", "-q", "--hard", "HEAD~1", check=True)            # the local branch left behind by a fetch
+        git(w4, "merge", "-q", "--no-edit", x, check=True)
+        head4 = git(w4, "rev-parse", "HEAD").stdout.strip()
+        expect(parent_base(r, w4, "1.21.4", head4)[1] == x and fresh_branch(r, "neoforge-1.21.3") == x,
+               f"the parent is origin's when the local branch is behind it: {parent_base(r, w4, '1.21.4', head4)} {x}")
+        git(w3, "reset", "-q", "--hard", x, check=True)
+        _hand(w3, {"src/main/java/com/example/mod/Extra3.java": "package com.example.mod;\nclass Extra3 { int a; }\n"}, "local")
+        expect(fresh_branch(r, "neoforge-1.21.3") == git(w3, "rev-parse", "HEAD").stdout.strip(),
+               "the local parent when it is ahead of origin (a merge not pushed yet)")
 
 
 def _check_prerelease_pin(expect):
@@ -4845,6 +4915,7 @@ def self_check():
         _check_untaken_head(expect)
         _check_prerelease_pin(expect)
         _check_ungated_rerun(expect)
+        _check_check_done_rows(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)

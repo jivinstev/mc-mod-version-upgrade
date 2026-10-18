@@ -67,7 +67,9 @@ helpers, catalogue entries and a cost figure; the next fork, and the next versio
 
 A version is **done** when, and only when, all of these hold (`fork-branches.py target_done()`; ask it with
 `python3 tools/fork-port.py --repo DIR --target <v> --check-done` -- or `fork-branches.py check-done` -- exit 0 or 18 with
-every open reason; off the branch it reads the branch's own commit and writes nothing):
+every open reason; on the branch's own checkout it also adds a `?` row to `REVIEW.md` for every item without one (and an
+`item` row per unaccounted inventory id) for the fresh reviewer, never a verdict; off the branch it reads the branch's
+own commit and writes nothing; the parent branch is read from origin when the local one is behind it, after a fetch):
 
 1. it compiles at 0 errors in every source set and the mixin and event-listener audits are clean (the gates stage runs
    only then);
