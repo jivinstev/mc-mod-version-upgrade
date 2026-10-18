@@ -423,13 +423,18 @@ def prerelease_pin_blockers(tag, read):
 
 
 def tag_file(repo, fork, tag, path):
-    """`path` at `tag`: from the local clone when it has the tag (absent there: None, no request), else from GitHub
-    (raw.githubusercontent; None when absent or unreadable)."""
-    if subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
-                      capture_output=True, text=True, encoding="utf-8").returncode == 0:
-        r_ = subprocess.run(["git", "-C", str(repo), "show", f"{tag}:{path}"], capture_output=True, text=True,
-                            encoding="utf-8")
-        return r_.stdout if r_.returncode == 0 else None
+    """`path` at `tag`: from the local clone when it has the tag -- a path its tree does not list is None with no
+    request -- else from GitHub (raw.githubusercontent; None when absent or unreadable). When git itself errors (no
+    such tag here, or a blob-filtered clone whose lazy fetch fails) it falls back to GitHub too."""
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8")
+    if run("rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}").returncode == 0:
+        listed = run("ls-tree", "--name-only", tag, "--", path)       # the tree only: no blob is fetched
+        if listed.returncode == 0 and not listed.stdout.strip():
+            return None
+        if listed.returncode == 0:
+            shown = run("show", f"{tag}:{path}")
+            if shown.returncode == 0:
+                return shown.stdout
     try:
         return _get(f"https://raw.githubusercontent.com/{fork}/{tag}/{path}")
     except Exception:                  # noqa: BLE001 -- absent at the tag (or unreadable): no mark read
@@ -933,12 +938,32 @@ def self_check():
                                         capture_output=True, text=True, encoding="utf-8", check=True)
         g_("init", "-q"); pathlib.Path(d_, "x").write_text("x\n", encoding="utf-8"); g_("add", "-A"); g_("commit", "-qm", "x")
         g_("tag", "solo-1.0-mc1.21.1")
-        real_get = globals()["_get"]
-        globals()["_get"] = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("no request"))
+        pathlib.Path(d_, ".port/1.21.4").mkdir(parents=True)
+        pathlib.Path(d_, ".port/1.21.4/DEPS.md").write_text("deps at the tag\n", encoding="utf-8")
+        g_("add", "-A"); g_("commit", "-qm", "deps"); g_("tag", "dep-1.0-mc1.21.4")
+        real_get, calls_ = globals()["_get"], []
+        globals()["_get"] = lambda url, *a_, **k_: (calls_.append(url), "from GitHub\n")[1]
         try:
-            ok &= tag_file(d_, "o/solo", "solo-1.0-mc1.21.1", ".port/1.21.1/DEPS.md") is None
+            absent = tag_file(d_, "o/solo", "solo-1.0-mc1.21.1", ".port/1.21.1/DEPS.md")
+            no_call = list(calls_)
+            local = tag_file(d_, "o/dep", "dep-1.0-mc1.21.4", ".port/1.21.4/DEPS.md")
+            after_local = list(calls_)
+            remote = tag_file(d_, "o/dep", "dep-9.9-mc1.21.4", ".port/1.21.4/DEPS.md")      # not a tag of this clone
+            after_remote = list(calls_)
+            # a blob the clone lacks (a blob-filtered clone whose lazy fetch fails): git errors, GitHub is asked
+            pathlib.Path(d_, ".port/1.21.5").mkdir(parents=True)
+            pathlib.Path(d_, ".port/1.21.5/DEPS.md").write_text("blob not here\n", encoding="utf-8")
+            g_("add", "-A"); g_("commit", "-qm", "gone"); g_("tag", "dep-1.0-mc1.21.5")
+            oid = g_("rev-parse", "dep-1.0-mc1.21.5:.port/1.21.5/DEPS.md").stdout.strip()
+            pathlib.Path(d_, ".git/objects", oid[:2], oid[2:]).unlink()
+            del calls_[:]
+            lazy = tag_file(d_, "o/dep", "dep-1.0-mc1.21.5", ".port/1.21.5/DEPS.md")
         finally:
             globals()["_get"] = real_get
+        ok &= absent is None and no_call == []                       # absent at a local tag: None, no request
+        ok &= local == "deps at the tag\n" and after_local == []     # present at a local tag: from git, no request
+        ok &= remote == "from GitHub\n" and after_remote == ["https://raw.githubusercontent.com/o/dep/dep-9.9-mc1.21.4/.port/1.21.4/DEPS.md"]
+        ok &= lazy == "from GitHub\n" and calls_ == ["https://raw.githubusercontent.com/o/dep/dep-1.0-mc1.21.5/.port/1.21.5/DEPS.md"]
     ok &= dependency_blockers(fixture(deps=True), look) == ([], [])
     ok &= dependency_blockers(fixture(deps=False), look) == ([], []) and pinned_releases(fixture(deps=False)) == []
     unread = dependency_blockers(pre_pin, lambda r_, t_: (_ for _ in ()).throw(OSError("offline")))
