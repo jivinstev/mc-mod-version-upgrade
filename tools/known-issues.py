@@ -47,7 +47,8 @@ THE SCHEMA (schema 1):
                "severity": "S1".."S4",          # the rubric's grade, or the override's when there is one
                "override": null | {"severity": "S2", "reason": "...", "by": "owner"},
                "lowest": "1.21.1",              # the lowest affected Minecraft version (a key of status)
-               "status": {"1.21.1": "open", "1.21.3": "fixed@<commit>", "1.21.4": "wontfix:<reason>", "1.21.5": "n/a"},
+               "status": {"1.21.1": "open", "1.21.3": "fixed@<commit>", "1.21.4": "wontfix:<reason>", "1.21.5": "n/a",
+                          "1.21.8": "duplicate:KI-2"},     # tracked by that issue at this version: not open here
                "source": "authors|review|gate|player",
                "files": ["src/main/java/..."],  # optional: the files the defect is in (select's S3 rule)
                "platforms": ["cf"],             # optional: only that platform's jar (mr Modrinth, cf CurseForge);
@@ -125,7 +126,7 @@ SOURCES = ("authors", "review", "gate", "player")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MOD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MC_RE = re.compile(r"^\d+(?:\.\d+){1,3}$")
-STATE_RE = re.compile(r"^(?:open|n/a|fixed@[0-9a-f]{7,40}|wontfix:\S.*)$")
+STATE_RE = re.compile(r"^(?:open|n/a|fixed@[0-9a-f]{7,40}|wontfix:\S.*|duplicate:[A-Za-z0-9][A-Za-z0-9._-]{0,63})$")
 DEFAULT_BUDGET = 3
 TOP_KEYS = {"schema", "issues"}
 ISSUE_KEYS = {"id", "title", "rubric", "severity", "override", "lowest", "status", "source", "files", "platforms", "notes"}
@@ -219,7 +220,8 @@ def validate(data):
             if not MC_RE.match(str(v)):
                 raise Invalid(f"{where}: status key {v!r} is not a Minecraft version")
             if not isinstance(s, str) or not STATE_RE.match(s):
-                raise Invalid(f"{where}: status {v}={s!r} is not open, fixed@<commit>, wontfix:<reason> or n/a")
+                raise Invalid(f"{where}: status {v}={s!r} is not open, fixed@<commit>, wontfix:<reason>, "
+                              "duplicate:<ID> or n/a")
         lo = e["lowest"]
         if not isinstance(lo, str) or not MC_RE.match(lo) or st.get(lo) in (None, "n/a"):
             raise Invalid(f"{where}: lowest {lo!r} must be a version in status that is affected (not n/a)")
@@ -235,6 +237,10 @@ def validate(data):
             raise Invalid(f"{where}: platforms must be a non-empty list of {', '.join(PLATFORMS)} (absent: all)")
         if "notes" in e and not isinstance(e["notes"], str):
             raise Invalid(f"{where}: notes must be text")
+    for e in issues:              # duplicate:<ID> names another issue of this ledger
+        for v, s in e["status"].items():
+            if s.startswith("duplicate:") and (s[10:] == e["id"] or s[10:] not in seen):
+                raise Invalid(f"issue {e['id']}: status {v}={s!r}: duplicate:<ID> must name another issue of this ledger")
     return data
 
 
@@ -395,6 +401,8 @@ def cell(s):
         return f"fixed `{s[6:13]}`"
     if s.startswith("wontfix:"):
         return "wontfix"
+    if s.startswith("duplicate:"):
+        return f"dup of {s[10:]}"
     return "**open**"
 
 
@@ -420,6 +428,8 @@ def render_issue(data):
              f"(the rubric gives {derive(e['rubric'])}): {md(e['override']['reason'])}" for e in issues if e.get("override")]
     notes += [f"- {e['id']} at {v}: won't fix: {md(s[8:])}" for e in issues
               for v, s in sorted(e["status"].items(), key=lambda x: mc_key(x[0])) if s.startswith("wontfix:")]
+    notes += [f"- {e['id']} at {v}: a duplicate of {s[10:]} (tracked there)" for e in issues
+              for v, s in sorted(e["status"].items(), key=lambda x: mc_key(x[0])) if s.startswith("duplicate:")]
     if notes:
         out += ["", "\\* an owner override.", ""] + notes
     out += ["", "S1 crash, kick, data loss or hang (blocks publishing); S2 a core feature broken in normal play, no "
@@ -1645,12 +1655,33 @@ def self_check():
         expect(cli("list", *L, "--mod", "../x")[0] == 2, "a bad --mod exits 2")
         # validation: a bad entry exits 2
         good = json.loads(led.read_text(encoding="utf-8"))
+        # duplicate:<ID> (gap 5 after #147): a version of one issue tracked by another -- accepted by the validator and
+        # the status command, rendered as such, never open (so neither selected for a round nor in release notes)
+        dup = json.loads(json.dumps(good))
+        a_, b_ = dup["issues"][0], dup["issues"][1]
+        v_ = max(a_["status"], key=mc_key)
+        a_["status"][v_] = f"duplicate:{b_['id']}"
+        validate(dup)
+        rendered = render_issue(dup)
+        expect(f"dup of {b_['id']}" in rendered and f"{a_['id']} at {v_}: a duplicate of {b_['id']}" in rendered
+               and v_ not in open_versions(a_)
+               and a_["id"] not in [e["id"] for e, _w in select(dup, run_versions=[v_])]
+               and a_["title"] not in release_notes(dup, v_, "examplemod-1.0-mc" + v_),
+               f"duplicate:<ID> renders, is not open, is not selected nor listed in release notes: {rendered}")
+        dup_file = d / "dup.json"
+        dup_file.write_text(json.dumps(dup), encoding="utf-8")
+        rc, o = cli("status", "--ledger", str(dup_file), a_["id"], "--set", f"{v_}=duplicate:{b_['id']}")
+        expect(rc == 0, f"status --set MC=duplicate:<ID> is accepted: {rc} {o}")
+        dup_file.unlink()
         cases = [
             (lambda x: x.update(schema=2), "schema"),
             (lambda x: x["issues"][0].update(severity="S3"), "re-grade"),
             (lambda x: x["issues"][0]["rubric"].update(failure="boom"), "failure"),
             (lambda x: x["issues"][0]["status"].update({"1.21.9": "fixed@zz"}), "fixed@<commit>"),
             (lambda x: x["issues"][0]["status"].update({"1.21.9": "wontfix:"}), "wontfix:<reason>"),
+            (lambda x: x["issues"][0]["status"].update({"1.21.9": "duplicate:"}), "duplicate:<ID>"),
+            (lambda x: x["issues"][0]["status"].update({"1.21.9": "duplicate:KI-404"}), "another issue"),
+            (lambda x: x["issues"][0]["status"].update({"1.21.9": "duplicate:" + x["issues"][0]["id"]}), "another issue"),
             (lambda x: x["issues"][0].update(lowest="1.21.5"), "lowest must be the lowest"),
             (lambda x: x["issues"][0].update(lowest="1.21.1"), "affected (not n/a)"),
             (lambda x: x["issues"][1].update(id=x["issues"][0]["id"]), "duplicate"),

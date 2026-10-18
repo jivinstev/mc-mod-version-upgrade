@@ -322,7 +322,7 @@ stale (the root `README.md` only; a README under `src/` is jar content). Read it
 
 Each entry: id, title, the severity and the rubric inputs it came from, an owner `override` (recorded with its
 reason), the lowest affected version, a status per Minecraft version (`open`, `fixed@<commit>`, `wontfix:<reason>`,
-`n/a`; a version not listed is not affected), the source (authors, review, gate, player) and notes. `grade` derives
+`duplicate:<ID>` -- tracked by another issue of the ledger, rendered `dup of <ID>`, never open --, `n/a`; a version not listed is not affected), the source (authors, review, gate, player) and notes. `grade` derives
 the severity from the inputs:
 
 | Severity | Rubric inputs | Meaning |
