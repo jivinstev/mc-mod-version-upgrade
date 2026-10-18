@@ -2804,11 +2804,27 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         plan = plan_of(spec, rows, items, mech, 0.0, budget)
         write_plan(repo, plan, out_dir, say)
     if merged and mode != "plan-run":
-        say(f"fork-branches: nothing was pushed: git push origin {' '.join(branch_name(t) for t in merged)}")
+        say(push_advice(merged, mode == "apply" or bool(untaken_ok) or ROUND_FROZEN.is_file()))
     return 1 if rows and rows[-1][1].startswith(("STOPPED", "merged, RED", "merged earlier, RED")) else 0
 
 
 cascade_run_result = {}
+# a weekly keep-current round's frozen input in the working directory (fork-port.py's FROZEN_DEFAULT): a round is running
+ROUND_FROZEN = pathlib.Path("round/frozen.json")
+
+
+def push_advice(merged, in_round):
+    """The cascade's closing line for the versions it merged. Outside a round: push the branches. In a keep-current
+    round (--apply, --untaken-ok, or round/frozen.json in the working directory) a version branch is never pushed
+    directly: each goes up as its own work branch and PR, lowest first (keep-current, the cascade's step 3)."""
+    names = [branch_name(t) for t in merged]
+    if not in_round:
+        return f"fork-branches: nothing was pushed: git push origin {' '.join(names)}"
+    return ("fork-branches: nothing was pushed. In a keep-current round each version goes up as its own PR, lowest first, "
+            "each only once the PR below it is merged and its push run green: git push origin "
+            f"{names[0]}:keep-current/<date>-{merged[0]}, then open its PR into {names[0]}"
+            + (f" (then {', '.join(names[1:])} the same way)" if len(names) > 1 else "")
+            + "; never git push origin " + " ".join(names))
 
 
 def plan_of(spec, rows, items, mech, elapsed, budget):
@@ -3997,6 +4013,8 @@ def _check_port_taken(expect):
                and '+\x20@Inject(method = "tock", at = @At("TAIL"))' in ents[0].get("diff", ""),
                f"t6: a second stop on a still-open file keeps the first change in its entry (both diffs): "
                f"{[c.get('since') for c in ents]} {out[-300:]}")
+        expect("nothing was pushed: git push origin neoforge-1.21.3 neoforge-1.21.4" in out and "keep-current/" not in out,
+               f"t6: outside a round the cascade closes with the plain push, as before: {out[-300:]}")
     # t7: a real conflict in the same merge (merge undone): after the hand merge the next cascade offers the change again
     with tempfile.TemporaryDirectory() as d:
         r, g, _run = _migrated_fixture(d)
@@ -4094,6 +4112,16 @@ def _check_check_done_rows(expect):
         _hand(w3, {"src/main/java/com/example/mod/Extra3.java": "package com.example.mod;\nclass Extra3 { int a; }\n"}, "local")
         expect(fresh_branch(r, "neoforge-1.21.3") == git(w3, "rev-parse", "HEAD").stdout.strip(),
                "the local parent when it is ahead of origin (a merge not pushed yet)")
+
+
+def _check_push_advice(expect):
+    """The cascade's closing advice: outside a round, push the branches (as before); in a round, the work-branch PR."""
+    plain = push_advice(["1.21.3", "1.21.4"], False)
+    expect(plain == "fork-branches: nothing was pushed: git push origin neoforge-1.21.3 neoforge-1.21.4", plain)
+    rnd = push_advice(["1.21.3", "1.21.4"], True)
+    expect("git push origin neoforge-1.21.3:keep-current/<date>-1.21.3" in rnd and "open its PR into neoforge-1.21.3" in rnd
+           and "then neoforge-1.21.4 the same way" in rnd and "nothing was pushed: git push" not in rnd,
+           f"in a round the advice is the keep-current PR, never a direct push: {rnd}")
 
 
 def _check_ci_check(expect):
@@ -4561,6 +4589,9 @@ def _check_deferred_integration(expect):
         expect(rc == 0 and len(ents) == 1 and not ents[0].get("deferred") and "AUTHORS_FIX" in ents[0].get("diff", "")
                and any("did not merge into " + em in w for w in target_done(r, "1.21.5")),
                f"t8: an unrelated dropped dependency: the authors' change is an open entry, 1.21.5 not done: {ents}")
+        expect("git push origin neoforge-1.21.3:keep-current/<date>-1.21.3" in out
+               and "nothing was pushed: git push" not in out,
+               f"t8: a round's cascade (--apply) closes with the keep-current PR step, not a direct push: {out[-400:]}")
     # t11: a deferred entry never closes by an unrelated edit of its file; it opens again when the dependency returns
     deps = ("| dependency | role | base pin | for this target | from |\n|---|---|---|---|---|\n"
             "| `com.example:other` | optional | `1` | {} | - |\n")
@@ -5205,6 +5236,7 @@ def self_check():
         _check_ungated_rerun(expect)
         _check_check_done_rows(expect)
         _check_ci_check(expect)
+        _check_push_advice(expect)
         _check_stopped_worktree(expect)
     if deep:
         _check_cascade_plan(expect)
