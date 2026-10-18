@@ -9,7 +9,7 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
                                          [--ledger-issues REPO=N[,N]] [--depends-on REPO=REPO[,REPO]]
                                          [--layer-branch REPO=BRANCH] [--replace-task NAME ...] [--trailer "K: V" ...]
                                          [--migrator-repo OWNER/REPO] [--migrator-sha SHA] [--default-branch-too]
-                                         [--no-commit] [--print]
+                                         [--keep-existing] [--no-commit] [--print]
     python3 tools/weekly-plan.py round-task (--repo DIR | --config FILE) [--existing NAME ...] [--migrator-repo O/R]
     python3 tools/weekly-plan.py fetch    --config FILE --repo DIR --work DIR      # the workflow's steps, in order
     python3 tools/weekly-plan.py cascade  --work DIR
@@ -28,16 +28,21 @@ config; the dependents get nothing.
 head, role (library / dependent), the authors' upstream URL and branch, `depends_on` (a dependent: the library unless
 --depends-on says otherwise; the exact pin is the dependent's `--dep-jar` in its port-ci.yml), `ledger_issues`,
 `automerge` (true exactly when `allow` has merge-fork-prs) and `layer_branch` (only when given); and for the set the
-budget, the round's time (jittered per set from its name), `plan_owner`, `allow` and `replace_tasks`. An older fleet
-file is only an input to the first setup that writes it.
+budget, the round's time (jittered per set from its name), `plan_owner`, `allow`, `replace_tasks` and `migrator_sha`
+(the commit of this repository the workflow pins). An older fleet file is only an input to the first setup that writes
+it.
 
 ALLOW (--allow, repeatable; the default is none, which means the round asks the owner, on the plan issue, before each
 of these): what the unattended round may do without asking. Each owner chooses for their fork set:
-  push-version-branches  commit to the fork's `neoforge-<v>` branches and its head branch; never force-push
+  push-version-branches  commit to the fork's head branch (its known-issues ledger and README Ports block included)
+                         and its `neoforge-<v>` branches; never force-push
   pre-release            dispatch Port CI with `release=true`; never promote, never publish to Modrinth or CurseForge
-  merge-fork-prs         merge the round's own PRs on the fork repositories once CI is green; never the migrator
-                         repository
-The round prompt carries the list verbatim; anything outside it is a stop that asks the owner on the plan issue.
+  merge-fork-prs         push the round's own `keep-current/<date>` work branches on the fork repositories, open PRs
+                         from them, and merge those PRs once CI is green; never the migrator repository
+Always allowed, whatever the list says, because they are how the round reports: comments on the plan issue (and closing
+it at the close), and edits to the ledger issues the config lists. Nothing on the migrator repository but reading it
+is ever allowed. The round prompt carries all of this verbatim; anything else is a stop that asks the owner on the plan
+issue.
 
 INSTALL (on a checkout of the first fork's head branch) writes and commits there, in one `[skip ci]` commit:
   .github/workflows/weekly-plan.yml   templates/weekly-plan.yml with this repository and a PINNED commit of it (default:
@@ -49,11 +54,17 @@ addressed to nobody. GitHub runs a scheduled workflow only from the repository's
 head branch, install refuses (exit 3) unless --default-branch-too, which also commits the same workflow file to the
 default branch (a local commit; push both). Nothing is pushed. An unchanged file set makes no commit. --trailer adds
 a `Key: value` line to the end of the commit message (an agent passes its session's attribution trailers).
+Install builds the config from its flags only, so a re-run drops what it is not given again: when a config exists,
+each per-fork `ledger_issues`, `depends_on` and `layer_branch`, and the set's `allow`, that it holds and the new flags
+leave out is warned about on stderr, naming the flag to re-pass; --keep-existing keeps those values instead. Without
+an existing config, or with every value re-passed, the output is as before.
 
 ROUND-TASK prints the Wednesday round's scheduled task as JSON for the skill to create (create_trigger): its name, the
 cron `CRON_TZ=America/Los_Angeles <minute> 8 * * 3` (minute jittered below 08:30 from the name), a fresh session per
 fire, push and email notifications on, and a prompt that runs the keep-current round for the fork set, starting with
-`known-issues.py read-plan`, with the fork set and the `allow` list in it. `replaces` lists exact task names, never a
+`known-issues.py read-plan`, with the fork set and the `allow` list in it. The round clones this repository's current
+main (it gets the tools' fixes); only the plan workflow is pinned at `migrator_sha` (a reproducible plan); they meet at
+the plan issue. `replaces` lists exact task names, never a
 description: the round's own name, every `replace_tasks` name, and each --existing name (the names `list_triggers`
 returned) that starts with "keep-current" and names a fork of this set (`owner/repo`, or its repository name as a word).
 Setup deletes a listed task only when one with exactly that name exists.
@@ -61,7 +72,7 @@ Setup deletes a listed task only when one with exactly that name exists.
 Exit codes: 0 ok; 1 a step failed (the workflow run fails, no issue is opened); 2 bad input; 3 the head branch is not
 the default branch (install). Standard library only.
 """
-import argparse, datetime, json, os, pathlib, re, subprocess, sys, tempfile
+import argparse, copy, datetime, json, os, pathlib, re, subprocess, sys, tempfile
 
 TOOLS = pathlib.Path(__file__).resolve().parent
 ROOT = TOOLS.parent
@@ -78,11 +89,18 @@ SPEC_RE = re.compile(r"^([\w.-]+/[\w.-]+)@([\w./-]+)(?:=(\S+?)#([\w./-]+))?$")
 REPLACE_PREFIX = "keep-current"
 # what the unattended round may do without asking (install --allow); the round prompt carries these lines verbatim
 ALLOW = {
-    "push-version-branches": "commit to the fork's `neoforge-<v>` branches and its head branch; never force-push",
+    "push-version-branches": "commit to the fork's head branch (its known-issues ledger and README Ports block "
+                             "included) and its `neoforge-<v>` branches; never force-push",
     "pre-release": "dispatch Port CI with `release=true`; never promote, never publish to Modrinth or CurseForge",
-    "merge-fork-prs": "merge the round's own PRs on the fork repositories once CI is green; never the migrator "
-                      "repository",
+    "merge-fork-prs": "push the round's own `keep-current/<date>` work branches on the fork repositories, open PRs from "
+                      "them, and merge those PRs once CI is green; never the migrator repository",
 }
+# allowed whatever `allow` says: how the round reports (round-task's prompt carries these verbatim)
+ALWAYS = ("Always allowed, whatever the list says, because they are how the round reports: comments on the plan issue "
+          "(and closing it at the close), and edits to the ledger issues listed above.")
+MIGRATOR_RULE = "Nothing on the migrator repository, apart from reading it (the clone in step 1), is ever allowed."
+# the per-fork fields `install` rebuilds from flags only: an existing config's values are warned about or kept
+KEPT = (("ledger_issues", "--ledger-issues"), ("depends_on", "--depends-on"), ("layer_branch", "--layer-branch"))
 TRAILER_RE = re.compile(r"^[A-Za-z][\w-]*: \S.*$")
 
 
@@ -221,7 +239,7 @@ def per_fork(values, forks, flag):
 
 
 def make_config(forks, plan_owner, budget, migrator_repo, allow=(), ledger_issues=None, depends_on=None,
-                layer_branch=None, replace_tasks=()):
+                layer_branch=None, replace_tasks=(), migrator_sha=None):
     name = round_name(forks)
     minute = round_minute(name)
     bad = [x for x in allow if x not in ALLOW]
@@ -251,10 +269,47 @@ def make_config(forks, plan_owner, budget, migrator_repo, allow=(), ledger_issue
                      "cron": f"CRON_TZ={TZ} {minute} {ROUND_NOMINAL[0]} * * 3"}}
     if plan_owner:
         cfg["plan_owner"] = plan_owner
+    if migrator_sha:
+        cfg["migrator_sha"] = migrator_sha
     extra = [t.strip() for t in replace_tasks if t.strip()]
     if extra:
         cfg["replace_tasks"] = list(dict.fromkeys(extra))
     return cfg
+
+
+def carried_over(old, forks, flags, allow, build, keep=False):
+    """What an existing config holds that this run's flags would drop: `install` rebuilds the config from its flags
+    only. For each per-fork field in KEPT (and the set's `allow`) that the existing config has, this run gives no flag
+    for, and the new config would hold differently: a warning naming the flag to re-pass; with `keep`, the existing
+    value is put into `flags` (or returned as the allow list). `build(flags, allow)` makes the new config.
+    -> (warnings, allow)"""
+    warns = []
+    if not isinstance(old, dict):
+        return warns, allow
+    new = {f["repo"].lower(): f for f in build(flags, allow)["forks"]}
+    names = {f["repo"].lower(): f["repo"] for f in forks}
+    for of in old.get("forks") or []:
+        repo = names.get(str(of.get("repo", "")).lower())
+        if not repo:
+            continue
+        for field, flag in KEPT:
+            ov = of.get(field)
+            if not ov or repo in flags[field] or ov == new[repo.lower()].get(field):
+                continue
+            val = ",".join(str(x) for x in ov) if isinstance(ov, list) else str(ov)
+            warns.append(f"{repo}: the existing {CONFIG} has {field} {val}, which this run "
+                         + ("keeps (--keep-existing)" if keep else f"drops: re-pass {flag} {repo}={val}, or rerun "
+                                                                   "with --keep-existing"))
+            if keep:
+                flags[field][repo] = val
+    oa = [x for x in old.get("allow") or [] if x in ALLOW]
+    if oa and not allow:
+        warns.append(f"the existing {CONFIG} has allow {', '.join(oa)}, which this run "
+                     + ("keeps (--keep-existing)" if keep else "drops: re-pass " + " ".join(f"--allow {x}" for x in oa)
+                        + ", or rerun with --keep-existing"))
+        if keep:
+            allow = oa
+    return warns, allow
 
 
 def default_branch(repo):
@@ -324,10 +379,25 @@ def install(a, say=print, repo_info=None):
     mrepo = a.migrator_repo or migrator_repo()
     sha = a.migrator_sha or git(ROOT, "rev-parse", "origin/main").stdout.strip()
     wf = workflow(mrepo, sha, head)
-    cfg = make_config(forks, a.plan_owner, a.budget, mrepo, allow=a.allow or [],
-                      ledger_issues=per_fork(a.ledger_issues, forks, "--ledger-issues"),
-                      depends_on=per_fork(a.depends_on, forks, "--depends-on"),
-                      layer_branch=per_fork(a.layer_branch, forks, "--layer-branch"), replace_tasks=a.replace_task or [])
+    flags = {"ledger_issues": per_fork(a.ledger_issues, forks, "--ledger-issues"),
+             "depends_on": per_fork(a.depends_on, forks, "--depends-on"),
+             "layer_branch": per_fork(a.layer_branch, forks, "--layer-branch")}
+
+    def build(fl, allow):
+        return make_config(copy.deepcopy(forks), a.plan_owner, a.budget, mrepo, allow=allow, replace_tasks=a.replace_task
+                           or [], migrator_sha=sha, **fl)
+    allow = a.allow or []
+    if (repo / CONFIG).is_file():
+        try:
+            old = json.loads((repo / CONFIG).read_text(encoding="utf-8"))
+        except ValueError as e:
+            old = None
+            print(f"weekly-plan: warning: the existing {CONFIG} is not JSON ({e}): nothing in it is carried over",
+                  file=sys.stderr)
+        warns, allow = carried_over(old, forks, flags, allow, build, keep=a.keep_existing)
+        for w in warns:
+            print(f"weekly-plan: warning: {w}", file=sys.stderr)
+    cfg = build(flags, allow)
     cfg_text = json.dumps(cfg, indent=2, sort_keys=True) + "\n"
     if a.print:
         say(wf, end="")
@@ -396,8 +466,10 @@ def allow_lines(allow):
     lines = ["Unattended permissions (the `allow` list in the config, chosen by the owner at setup; exactly these, "
              "nothing more):"]
     lines += [f"- {x}: {ALLOW[x]}." for x in ALLOW if x in allow] or [
-        "- none: every push, pre-release and merge needs the owner's answer first."]
-    lines += ["Any action outside this list is a stop: do not take it; ask the owner in a comment on the plan issue "
+        "- none: every push (the round's work branches included), PR, pre-release and merge needs the owner's answer "
+        "first."]
+    lines += [ALWAYS, MIGRATOR_RULE,
+              "Any other action is a stop: do not take it; ask the owner in a comment on the plan issue "
               "(@mention them, the action and why), go on with what the list allows, and report it at the close."]
     return lines
 
@@ -440,7 +512,10 @@ def round_task(cfg, mrepo, existing=()):
     lines += ["", "Steps:",
               f"1. git clone --depth 1 https://github.com/{mrepo} mmvu (public, read only; never ask for it to be "
               "attached) and read mmvu/.claude/skills/keep-current/SKILL.md, section \"The weekly round\". Follow it "
-              "exactly, in order.",
+              "exactly, in order. This is the migrator's current main, on purpose: the round runs the newest tools and "
+              f"skill, fixes included. Tuesday's plan workflow ran the tools pinned at `migrator_sha` in {CONFIG}, so "
+              "that a plan is reproducible from its commit; the two meet only at the plan issue, which step 2 reads. If "
+              "read-plan cannot read it, stop and report (setup must be re-run to move the pin).",
               f"2. Its first step freezes the input: python3 mmvu/tools/known-issues.py read-plan --latest --slug "
               f"{first['repo']} --out round/frozen.json --decisions-dir round/decisions. The selected known issues and "
               "the authors' changes it says to take are the run's only inputs; nothing else enters except a new S1. "
@@ -758,9 +833,23 @@ def self_check():
     expect(forks[0]["role"] == "library" and forks[1]["role"] == "dependent", "the first fork is the library")
     # the allow list: empty by default (ask), rendered verbatim and explicitly; automerge follows merge-fork-prs
     expect(cfg["allow"] == [] and not any(f["automerge"] for f in cfg["forks"])
-           and "- none: every push, pre-release and merge needs the owner's answer first." in task["prompt"]
-           and "Any action outside this list is a stop" in task["prompt"] and "plan issue" in task["prompt"],
+           and "- none: every push (the round's work branches included), PR, pre-release and merge needs the owner's "
+               "answer first." in task["prompt"]
+           and "Any other action is a stop" in task["prompt"] and "plan issue" in task["prompt"],
            f"no --allow: nothing allowed, the round asks: {task['prompt']}")
+    # the round's own bookkeeping: always allowed whatever the list says; the migrator repository only read
+    expect(ALWAYS in task["prompt"] and MIGRATOR_RULE in task["prompt"]
+           and task["prompt"].index(ALWAYS) < task["prompt"].index("Any other action is a stop")
+           and "keep-current/<date>` work branches" in ALLOW["merge-fork-prs"] and "open PRs" in ALLOW["merge-fork-prs"]
+           and "known-issues ledger and README Ports block" in ALLOW["push-version-branches"],
+           f"plan-issue comments and ledger-issue edits always allowed, the migrator never written, work branches "
+           f"under merge-fork-prs, ledger and Ports block under push-version-branches: {task['prompt']}")
+    # the round runs the migrator's current main, the plan the pinned sha, and the prompt says so
+    expect("current main, on purpose" in task["prompt"] and "`migrator_sha`" in task["prompt"]
+           and "git clone --depth 1 https://github.com/owner/migrator mmvu" in task["prompt"]
+           and "migrator_sha" not in cfg
+           and make_config(copy.deepcopy(forks), "someone", 3, "owner/migrator", migrator_sha="b" * 40)["migrator_sha"]
+           == "b" * 40, f"the round clones main and says the plan used migrator_sha: {task['prompt']}")
     full = make_config([parse_fork("o/lib@neoforge-1.21.1=https://github.com/a/lib#main"),
                         parse_fork("o/dep@neoforge-1.21.1=https://github.com/a/dep#dev")], "someone", 3, "owner/migrator",
                        allow=["merge-fork-prs", "push-version-branches", "pre-release"], ledger_issues={"o/dep": "#7,3"},
@@ -837,7 +926,7 @@ def self_check():
         def inst(*extra, otype=None, info=None, argv=None):
             buf = io.StringIO()
             ri = info or ((lambda s: {"owner": {"type": otype}}) if otype else None)
-            with contextlib.redirect_stdout(buf):
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 try:
                     rc = install(ap.parse_args((argv or base) + list(extra)), repo_info=ri)
                 except Fail as e:
@@ -848,9 +937,10 @@ def self_check():
                f"an org-owned fork without --plan-owner is refused, nothing written: {rc} {o}")
         rc, o = inst("--plan-owner", "someone")
         wf_written = (fork / WORKFLOW).read_text(encoding="utf-8") if (fork / WORKFLOW).is_file() else ""
-        expect(rc == 0 and "committed" in o and wf_written == fixture() and "[skip ci]" in gq(fork, "log", "-1", "--format=%s")
+        expect(rc == 0 and "committed" in o and "warning" not in o and wf_written == fixture() and "[skip ci]" in gq(fork, "log", "-1", "--format=%s")
                and json.loads((fork / CONFIG).read_text(encoding="utf-8"))["plan_owner"] == "someone",
-               f"install commits the golden workflow and plan_owner on the head branch, [skip ci]: {rc} {o}")
+               f"install commits the golden workflow and plan_owner on the head branch, [skip ci], no warning with no "
+               f"existing config: {rc} {o}")
         n = gq(fork, "rev-list", "--count", "HEAD")
         rc, o = inst("--plan-owner", "someone")
         expect(rc == 0 and "unchanged" in o and gq(fork, "rev-list", "--count", "HEAD") == n,
@@ -889,6 +979,38 @@ def self_check():
                f"{parsed!r}")
         rc, o = inst("--plan-owner", "someone", "--trailer", "not a trailer")
         expect(rc == 2 and "--trailer" in o, f"a malformed --trailer is refused: {o}")
+        expect(c3["migrator_sha"] == "a" * 40, f"install records the pinned migrator_sha in the config: {c3}")
+        # a re-run drops what it is not given (the default, unchanged) but warns for each; --keep-existing keeps it.
+        # A three-fork set: a layer fork (layer_branch) and a dependent with non-default depends_on and ledger issues
+        argv3 = ["install", "--repo", str(fork), "--fork", "o/lib@neoforge-1.21.1=https://github.com/a/lib#main",
+                 "--fork", "o/mid@neoforge-1.21.1=https://github.com/a/mid#main",
+                 "--fork", "o/dep@neoforge-1.21.1=https://github.com/a/dep#main", "--migrator-repo", "owner/migrator",
+                 "--migrator-sha", "a" * 40, "--plan-owner", "someone"]
+        full_flags = ["--allow", "push-version-branches", "--allow", "merge-fork-prs", "--ledger-issues", "o/dep=7,3",
+                      "--depends-on", "o/dep=o/lib,o/mid", "--layer-branch", "o/mid=layer"]
+        rc, o = inst(*full_flags, argv=argv3)
+        c4 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        expect(rc == 0 and "warning" not in o and c4["allow"] == ["push-version-branches", "merge-fork-prs"],
+               f"--allow given: the existing allow (pre-release) is replaced, not warned about as a drop: {o}")
+        rc, o = inst(*full_flags, argv=argv3)
+        expect(rc == 0 and "warning" not in o and "unchanged" in o,
+               f"every value re-passed: no warning, nothing changes: {o}")
+        rc, o = inst(argv=argv3)
+        c5 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        w = [l for l in o.splitlines() if "warning" in l]
+        expect(rc == 0 and len(w) == 4 and "re-pass --ledger-issues o/dep=3,7" in o
+               and "re-pass --depends-on o/dep=o/lib,o/mid" in o and "re-pass --layer-branch o/mid=layer" in o
+               and "re-pass --allow push-version-branches --allow merge-fork-prs" in o and "--keep-existing" in o
+               and c5["allow"] == [] and c5["forks"][2]["ledger_issues"] == [] and c5["forks"][2]["depends_on"] == ["o/lib"]
+               and "layer_branch" not in c5["forks"][1],
+               f"a bare re-run: the old values dropped as before, one warning each naming the flag: {o}")
+        rc, o = inst(*full_flags, argv=argv3)
+        rc, o = inst("--keep-existing", "--ledger-issues", "o/dep=9", argv=argv3)
+        c6 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        expect(rc == 0 and c6["allow"] == c4["allow"] and c6["forks"][2]["ledger_issues"] == [9]
+               and c6["forks"][2]["depends_on"] == ["o/lib", "o/mid"] and c6["forks"][1]["layer_branch"] == "layer"
+               and "drops" not in o and o.count("keeps (--keep-existing)") == 3,
+               f"--keep-existing: the old values the flags leave out are kept, a flag given still wins: {o}")
 
         # the steps, offline: a library fork with a version branch is too big a fixture here (fork-branches'
         # own self-check covers cascade --plan); a single-version fork set of two, upstream with new commits
@@ -1047,6 +1169,9 @@ def build_parser():
     p.add_argument("--migrator-sha", help="the commit the workflow pins (default: origin/main)")
     p.add_argument("--default-branch-too", action="store_true",
                    help="also commit the workflow to the default branch when that is not the head branch")
+    p.add_argument("--keep-existing", action="store_true",
+                   help="keep the existing config's allow, ledger_issues, depends_on and layer_branch this run's flags "
+                        "do not set (without it, each one dropped is warned about on stderr)")
     p.add_argument("--no-commit", action="store_true"); p.add_argument("--print", action="store_true")
     p = sub.add_parser("round-task", help="the Wednesday round's scheduled task, as JSON")
     p.add_argument("--repo"); p.add_argument("--config"); p.add_argument("--migrator-repo")
