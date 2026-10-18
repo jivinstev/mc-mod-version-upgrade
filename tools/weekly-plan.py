@@ -5,9 +5,12 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
 `round-task`; re-running setup regenerates both.
 
     python3 tools/weekly-plan.py install --repo DIR --fork SPEC [--fork SPEC ...] [--plan-owner LOGIN|@org/team]
-                                         [--owner-type user|org] [--budget N] [--migrator-repo OWNER/REPO]
-                                         [--migrator-sha SHA] [--default-branch-too] [--no-commit] [--print]
-    python3 tools/weekly-plan.py round-task (--repo DIR | --config FILE) [--migrator-repo OWNER/REPO]
+                                         [--owner-type user|org] [--budget N] [--allow WHAT ...]
+                                         [--ledger-issues REPO=N[,N]] [--depends-on REPO=REPO[,REPO]]
+                                         [--layer-branch REPO=BRANCH] [--replace-task NAME ...] [--trailer "K: V" ...]
+                                         [--migrator-repo OWNER/REPO] [--migrator-sha SHA] [--default-branch-too]
+                                         [--no-commit] [--print]
+    python3 tools/weekly-plan.py round-task (--repo DIR | --config FILE) [--existing NAME ...] [--migrator-repo O/R]
     python3 tools/weekly-plan.py fetch    --config FILE --repo DIR --work DIR      # the workflow's steps, in order
     python3 tools/weekly-plan.py cascade  --work DIR
     python3 tools/weekly-plan.py select   --work DIR
@@ -15,8 +18,26 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
     python3 tools/weekly-plan.py open     --work DIR                               # GITHUB_TOKEN, GITHUB_REPOSITORY
     python3 tools/weekly-plan.py --self-check | --regen-golden
 
-SPEC is `owner/repo@HEAD_BRANCH=UPSTREAM_URL#UPSTREAM_BRANCH`, one per fork of the set, the LIBRARY FIRST: the plan
+SPEC is `owner/repo@HEAD_BRANCH[=UPSTREAM_URL#UPSTREAM_BRANCH]`, one per fork of the set, the LIBRARY FIRST: the plan
 issue opens on the first fork's repository, with a section per fork (the others are public and read without a token).
+Without `=UPSTREAM_URL#UPSTREAM_BRANCH` the authors' upstream is the GitHub fork parent and its default branch (read from
+the GitHub API; refused for a repository that is not a fork). Only the first fork's repository gets the workflow and the
+config; the dependents get nothing.
+
+`.github/weekly-plan.json` on the first fork's head branch is the fork set's ONLY source for the round: per fork its
+head, role (library / dependent), the authors' upstream URL and branch, `depends_on` (a dependent: the library unless
+--depends-on says otherwise; the exact pin is the dependent's `--dep-jar` in its port-ci.yml), `ledger_issues`,
+`automerge` (true exactly when `allow` has merge-fork-prs) and `layer_branch` (only when given); and for the set the
+budget, the round's time (jittered per set from its name), `plan_owner`, `allow` and `replace_tasks`. An older fleet
+file is only an input to the first setup that writes it.
+
+ALLOW (--allow, repeatable; the default is none, which means the round asks the owner, on the plan issue, before each
+of these): what the unattended round may do without asking. Each owner chooses for their fork set:
+  push-version-branches  commit to the fork's `neoforge-<v>` branches and its head branch; never force-push
+  pre-release            dispatch Port CI with `release=true`; never promote, never publish to Modrinth or CurseForge
+  merge-fork-prs         merge the round's own PRs on the fork repositories once CI is green; never the migrator
+                         repository
+The round prompt carries the list verbatim; anything outside it is a stop that asks the owner on the plan issue.
 
 INSTALL (on a checkout of the first fork's head branch) writes and commits there, in one `[skip ci]` commit:
   .github/workflows/weekly-plan.yml   templates/weekly-plan.yml with this repository and a PINNED commit of it (default:
@@ -26,13 +47,16 @@ Who the plan is addressed to (assigned and @mentioned): `plan_owner` (setup pass
 repository's owner when that is a user. An organization-owned fork without --plan-owner is refused: a plan is never
 addressed to nobody. GitHub runs a scheduled workflow only from the repository's DEFAULT branch: when that is not the
 head branch, install refuses (exit 3) unless --default-branch-too, which also commits the same workflow file to the
-default branch (a local commit; push both). Nothing is pushed. An unchanged file set makes no commit.
+default branch (a local commit; push both). Nothing is pushed. An unchanged file set makes no commit. --trailer adds
+a `Key: value` line to the end of the commit message (an agent passes its session's attribution trailers).
 
 ROUND-TASK prints the Wednesday round's scheduled task as JSON for the skill to create (create_trigger): its name, the
 cron `CRON_TZ=America/Los_Angeles <minute> 8 * * 3` (minute jittered below 08:30 from the name), a fresh session per
 fire, push and email notifications on, and a prompt that runs the keep-current round for the fork set, starting with
-`known-issues.py read-plan`. The same name is what setup deletes before recreating it (and any older keep-current
-nightly routine).
+`known-issues.py read-plan`, with the fork set and the `allow` list in it. `replaces` lists exact task names, never a
+description: the round's own name, every `replace_tasks` name, and each --existing name (the names `list_triggers`
+returned) that starts with "keep-current" and names a fork of this set (`owner/repo`, or its repository name as a word).
+Setup deletes a listed task only when one with exactly that name exists.
 
 Exit codes: 0 ok; 1 a step failed (the workflow run fails, no issue is opened); 2 bad input; 3 the head branch is not
 the default branch (install). Standard library only.
@@ -50,7 +74,16 @@ ROUND_WEEKDAY = 2              # Wednesday (date.weekday())
 ROUND_NOMINAL = (8, 30)        # the round's nominal time there; the cron minute is jittered just below it
 DEFAULT_BUDGET = 3
 NAME_PREFIX = "keep-current weekly round"
-SPEC_RE = re.compile(r"^([\w.-]+/[\w.-]+)@([\w./-]+)=(\S+?)#([\w./-]+)$")
+SPEC_RE = re.compile(r"^([\w.-]+/[\w.-]+)@([\w./-]+)(?:=(\S+?)#([\w./-]+))?$")
+REPLACE_PREFIX = "keep-current"
+# what the unattended round may do without asking (install --allow); the round prompt carries these lines verbatim
+ALLOW = {
+    "push-version-branches": "commit to the fork's `neoforge-<v>` branches and its head branch; never force-push",
+    "pre-release": "dispatch Port CI with `release=true`; never promote, never publish to Modrinth or CurseForge",
+    "merge-fork-prs": "merge the round's own PRs on the fork repositories once CI is green; never the migrator "
+                      "repository",
+}
+TRAILER_RE = re.compile(r"^[A-Za-z][\w-]*: \S.*$")
 
 
 class Fail(Exception):
@@ -152,20 +185,75 @@ def gate_script(wf):
 def parse_fork(spec):
     m = SPEC_RE.match(spec.strip())
     if not m:
-        raise Fail(f"--fork {spec!r}: owner/repo@HEAD_BRANCH=UPSTREAM_URL#UPSTREAM_BRANCH")
+        raise Fail(f"--fork {spec!r}: owner/repo@HEAD_BRANCH[=UPSTREAM_URL#UPSTREAM_BRANCH]")
     return {"repo": m.group(1), "head": m.group(2), "upstream": m.group(3), "upstream_branch": m.group(4)}
 
 
-def make_config(forks, plan_owner, budget, migrator_repo):
+def resolve_upstreams(forks, repo_info):
+    """A fork named without its authors' upstream: the GitHub fork parent, at the parent's default branch."""
+    for f in forks:
+        if f["upstream"]:
+            continue
+        try:
+            parent = (repo_info(f["repo"]) or {}).get("parent")
+        except Exception as e:
+            raise Fail(f"--fork {f['repo']}: cannot read its GitHub fork parent ({e}): name the authors' upstream "
+                       "(owner/repo@HEAD=UPSTREAM_URL#UPSTREAM_BRANCH)")
+        if not parent or not parent.get("default_branch") or not (parent.get("clone_url") or parent.get("full_name")):
+            raise Fail(f"--fork {f['repo']}: not a GitHub fork, so the authors' upstream cannot be derived: name it "
+                       "(owner/repo@HEAD=UPSTREAM_URL#UPSTREAM_BRANCH)")
+        f["upstream"] = parent.get("clone_url") or f"https://github.com/{parent['full_name']}.git"
+        f["upstream_branch"] = parent["default_branch"]
+        f["upstream_source"] = "github fork parent"
+    return forks
+
+
+def per_fork(values, forks, flag):
+    """['owner/repo=VALUE', ...] -> {repo: VALUE}; a repository outside the fork set is refused."""
+    names = {f["repo"].lower(): f["repo"] for f in forks}
+    out = {}
+    for v in values or []:
+        repo, sep, val = v.partition("=")
+        if not sep or not val.strip() or repo.strip().lower() not in names:
+            raise Fail(f"{flag} {v!r}: REPO=VALUE with REPO one of the forks ({', '.join(names.values())})")
+        out[names[repo.strip().lower()]] = val.strip()
+    return out
+
+
+def make_config(forks, plan_owner, budget, migrator_repo, allow=(), ledger_issues=None, depends_on=None,
+                layer_branch=None, replace_tasks=()):
     name = round_name(forks)
     minute = round_minute(name)
+    bad = [x for x in allow if x not in ALLOW]
+    if bad:
+        raise Fail(f"--allow {', '.join(bad)}: one of {', '.join(ALLOW)}")
+    allow = [x for x in ALLOW if x in allow]
+    ledger_issues, depends_on, layer_branch = ledger_issues or {}, depends_on or {}, layer_branch or {}
+    repos = {f["repo"] for f in forks}
     for i, f in enumerate(forks):
         f["role"] = "library" if i == 0 and len(forks) > 1 else ("dependent" if len(forks) > 1 else "")
-    cfg = {"schema": 1, "forks": forks, "budget": budget, "migrator_repo": migrator_repo,
+        nums = [n.strip().lstrip("#") for n in ledger_issues.get(f["repo"], "").split(",") if n.strip()]
+        if any(not n.isdigit() for n in nums):
+            raise Fail(f"--ledger-issues {f['repo']}={ledger_issues[f['repo']]}: issue numbers, comma separated")
+        f["ledger_issues"] = sorted({int(n) for n in nums})
+        f["automerge"] = "merge-fork-prs" in allow
+        if f["repo"] in depends_on:
+            deps = [d.strip() for d in depends_on[f["repo"]].split(",") if d.strip()]
+            if any(d not in repos or d == f["repo"] for d in deps):
+                raise Fail(f"--depends-on {f['repo']}={depends_on[f['repo']]}: other forks of the set")
+            f["depends_on"] = deps
+        elif f["role"] == "dependent":
+            f["depends_on"] = [forks[0]["repo"]]
+        if f["repo"] in layer_branch:
+            f["layer_branch"] = layer_branch[f["repo"]]
+    cfg = {"schema": 1, "forks": forks, "budget": budget, "migrator_repo": migrator_repo, "allow": allow,
            "round": {"name": name, "tz": TZ, "weekday": "Wednesday", "time": f"{ROUND_NOMINAL[0]:02d}:{minute:02d}",
                      "cron": f"CRON_TZ={TZ} {minute} {ROUND_NOMINAL[0]} * * 3"}}
     if plan_owner:
         cfg["plan_owner"] = plan_owner
+    extra = [t.strip() for t in replace_tasks if t.strip()]
+    if extra:
+        cfg["replace_tasks"] = list(dict.fromkeys(extra))
     return cfg
 
 
@@ -203,9 +291,13 @@ def commit_to(repo, branch, files, msg):
     return c
 
 
-def install(a, say=print, owner_type_of=None):
+def install(a, say=print, repo_info=None):
     repo = pathlib.Path(a.repo).resolve()
     forks = [parse_fork(s) for s in a.fork]
+    trailers = [t.strip() for t in a.trailer or []]
+    bad = [t for t in trailers if not TRAILER_RE.match(t)]
+    if bad:
+        raise Fail(f"--trailer {bad[0]!r}: a `Key: value` line")
     if not forks:
         raise Fail("--fork: at least one (the library first)")
     if len({f["repo"].lower() for f in forks}) != len(forks):
@@ -215,11 +307,13 @@ def install(a, say=print, owner_type_of=None):
     if cur != head:
         raise Fail(f"{repo} is on {cur!r}, not the head branch {head}: check it out first")
     k = ki()
+    info = repo_info or (lambda s: k.gh_api(f"/repos/{s}"))
+    resolve_upstreams(forks, info)
     owner_login = forks[0]["repo"].split("/")[0]
     otype = a.owner_type
     if not a.plan_owner and not otype:
         try:
-            otype = (owner_type_of or (lambda s: k.gh_api(f"/repos/{s}")["owner"]["type"]))(forks[0]["repo"])
+            otype = info(forks[0]["repo"])["owner"]["type"]
         except Exception as e:
             raise Fail(f"cannot tell whether {forks[0]['repo']} is owned by a user or an organization ({e}): pass "
                        "--plan-owner LOGIN (the person running setup), or --owner-type user")
@@ -230,7 +324,10 @@ def install(a, say=print, owner_type_of=None):
     mrepo = a.migrator_repo or migrator_repo()
     sha = a.migrator_sha or git(ROOT, "rev-parse", "origin/main").stdout.strip()
     wf = workflow(mrepo, sha, head)
-    cfg = make_config(forks, a.plan_owner, a.budget, mrepo)
+    cfg = make_config(forks, a.plan_owner, a.budget, mrepo, allow=a.allow or [],
+                      ledger_issues=per_fork(a.ledger_issues, forks, "--ledger-issues"),
+                      depends_on=per_fork(a.depends_on, forks, "--depends-on"),
+                      layer_branch=per_fork(a.layer_branch, forks, "--layer-branch"), replace_tasks=a.replace_task or [])
     cfg_text = json.dumps(cfg, indent=2, sort_keys=True) + "\n"
     if a.print:
         say(wf, end="")
@@ -262,6 +359,8 @@ def install(a, say=print, owner_type_of=None):
            "issue for the fork owner: the authors' new commits, the cascade plan and the known issues the Wednesday\n"
            f"round takes. Generated by {mrepo}'s tools/weekly-plan.py install (keep-current setup) with the tools\n"
            f"pinned at {sha[:12]}; re-run setup to change it, do not edit by hand.\n")
+    if trailers:
+        msg += "\n" + "\n".join(trailers) + "\n"
     if not changed:
         say(f"weekly-plan: {WORKFLOW} and {CONFIG} unchanged on {head}")
     elif a.no_commit:
@@ -275,6 +374,12 @@ def install(a, say=print, owner_type_of=None):
         say(f"weekly-plan: {WORKFLOW} on {also}: " + (f"committed {c[:12]}" if c else "unchanged"))
     say(f"weekly-plan: plan issues go to {k.mention(k.resolve_owner(a.plan_owner, owner_login, otype or ''))} on "
         f"{forks[0]['repo']}; the round: {cfg['round']['cron']}. Push: git push origin {head}" + (f" {also}" if also else ""))
+    for f in forks:
+        if f.get("upstream_source"):
+            say(f"weekly-plan: {f['repo']}: the authors' upstream is its GitHub fork parent: {f['upstream']} "
+                f"{f['upstream_branch']}")
+    say("weekly-plan: allow: " + (", ".join(cfg["allow"]) if cfg["allow"] else
+        "none (the round asks the owner on the plan issue before each push, pre-release and merge)"))
     return 0
 
 
@@ -286,13 +391,52 @@ def migrator_repo():
     return m.group(1)
 
 
-def round_task(cfg, mrepo):
+def allow_lines(allow):
+    """The round prompt's permissions block: the `allow` list verbatim, and the rule for everything else."""
+    lines = ["Unattended permissions (the `allow` list in the config, chosen by the owner at setup; exactly these, "
+             "nothing more):"]
+    lines += [f"- {x}: {ALLOW[x]}." for x in ALLOW if x in allow] or [
+        "- none: every push, pre-release and merge needs the owner's answer first."]
+    lines += ["Any action outside this list is a stop: do not take it; ask the owner in a comment on the plan issue "
+              "(@mention them, the action and why), go on with what the list allows, and report it at the close."]
+    return lines
+
+
+def replaces_for(cfg, existing=()):
+    """Exact task names the setup deletes before creating the round: its own name, the configured replace_tasks, and
+    each existing name that starts with keep-current and names a fork of this set."""
+    forks = [f["repo"] for f in cfg["forks"]]
+
+    def ours(n):
+        low = n.strip().lower()
+        if not low.startswith(REPLACE_PREFIX):
+            return False
+        return any(r.lower() in low or re.search(r"(?<![\w./-])" + re.escape(r.split("/", 1)[1].lower()) + r"(?![\w/-])",
+                                                 low) for r in forks)
+    names = [cfg["round"]["name"], *cfg.get("replace_tasks", []), *(n.strip() for n in existing if ours(n))]
+    return list(dict.fromkeys(n for n in names if n))
+
+
+def round_task(cfg, mrepo, existing=()):
     forks = cfg["forks"]
     first = forks[0]
+    allow = cfg.get("allow", [])
+
+    def fork_line(f):
+        bits = [f"- {f['repo']} head {f['head']}" + (f" ({f['role']})" if f.get("role") else ""),
+                f"authors' upstream {f['upstream']} {f['upstream_branch']}"]
+        if f.get("depends_on"):
+            bits.append("depends on " + ", ".join(f["depends_on"]))
+        bits.append("ledger issues " + (", ".join(f"#{n}" for n in f["ledger_issues"]) if f.get("ledger_issues") else "none"))
+        bits.append(f"automerge {'yes' if f.get('automerge') else 'no'}")
+        if f.get("layer_branch"):
+            bits.append(f"layer branch {f['layer_branch']}")
+        return "; ".join(bits)
     lines = [f"Run the keep-current skill's weekly round for this fork set, unattended (fresh session, no human present).",
-             "", "Fork set (dependency order, the library first; the plan issue is on the first):"]
-    lines += [f"- {f['repo']} head {f['head']}" + (f" ({f['role']})" if f.get("role") else "")
-              + f"; authors' upstream {f['upstream']} {f['upstream_branch']}" for f in forks]
+             "", f"The fork set's only source is {CONFIG} on {first['repo']} branch {first['head']} (no fleet file). "
+             "As setup wrote it (dependency order, the library first; the plan issue is on the first):"]
+    lines += [fork_line(f) for f in forks]
+    lines += ["", *allow_lines(allow)]
     lines += ["", "Steps:",
               f"1. git clone --depth 1 https://github.com/{mrepo} mmvu (public, read only; never ask for it to be "
               "attached) and read mmvu/.claude/skills/keep-current/SKILL.md, section \"The weekly round\". Follow it "
@@ -302,14 +446,21 @@ def round_task(cfg, mrepo):
               "the authors' changes it says to take are the run's only inputs; nothing else enters except a new S1. "
               "With no open plan issue, stop and report.",
               "3. Look for each fork's clone in this session. If one is missing, still do step 2, then stop: name the "
-              "repository and say it must be added to this scheduled task's repositories.",
-              "4. Never promote a release, publish to Modrinth or CurseForge, push to or comment on the authors' "
+              f"repository and say it must be added to this scheduled task's repositories. Read {CONFIG} from "
+              f"{first['repo']}'s {first['head']}: if it differs from the fork set above, stop and report that setup "
+              "must be re-run.",
+              "4. A fork with version branches (.port/<v>/branch.properties) is a version-branch fork even when a legacy "
+              "layer branch with .multiversion/ exists: that layer branch is history; ignore it.",
+              "5. Never promote a release, publish to Modrinth or CurseForge, push to or comment on the authors' "
               "repositories, force-push, or merge into the migrator repository."]
     name = cfg["round"]["name"]
     return {"name": name, "cron_expression": cfg["round"]["cron"], "create_new_session_on_fire": True,
             "notifications": {"push": True, "email": True}, "initiation": "human_request", "prompt": "\n".join(lines),
-            "replaces": [name, "keep-current (nightly routine of an earlier setup, if any)"],
-            "repositories": [f["repo"] for f in forks]}
+            "replaces": replaces_for(cfg, existing),
+            "replaces_rule": f"delete only a task whose name is exactly one of `replaces`; pass every name list_triggers "
+                             f"returns with --existing so the ones that start with {REPLACE_PREFIX!r} and name a fork of "
+                             "this set are listed",
+            "allow": allow, "repositories": [f["repo"] for f in forks]}
 
 
 # ---------------------------------------------------------------- the workflow's steps
@@ -605,6 +756,50 @@ def self_check():
     expect("read-plan --latest --slug o/lib" in task["prompt"] and "The weekly round" in task["prompt"]
            and task["name"].startswith(NAME_PREFIX) and task["name"] in task["replaces"], f"the round prompt: {task}")
     expect(forks[0]["role"] == "library" and forks[1]["role"] == "dependent", "the first fork is the library")
+    # the allow list: empty by default (ask), rendered verbatim and explicitly; automerge follows merge-fork-prs
+    expect(cfg["allow"] == [] and not any(f["automerge"] for f in cfg["forks"])
+           and "- none: every push, pre-release and merge needs the owner's answer first." in task["prompt"]
+           and "Any action outside this list is a stop" in task["prompt"] and "plan issue" in task["prompt"],
+           f"no --allow: nothing allowed, the round asks: {task['prompt']}")
+    full = make_config([parse_fork("o/lib@neoforge-1.21.1=https://github.com/a/lib#main"),
+                        parse_fork("o/dep@neoforge-1.21.1=https://github.com/a/dep#dev")], "someone", 3, "owner/migrator",
+                       allow=["merge-fork-prs", "push-version-branches", "pre-release"], ledger_issues={"o/dep": "#7,3"},
+                       replace_tasks=["keep-current nightly"])
+    ft = round_task(full, "owner/migrator", existing=["keep-current nightly: o/lib", "Keep-Current dep weekly",
+                                                      "keep-current: other/thing", "nightly o/lib", "keep-current deps",
+                                                      full["round"]["name"]])
+    expect(full["allow"] == list(ALLOW) and all(f"- {k_}: {v_}." in ft["prompt"] for k_, v_ in ALLOW.items())
+           and ft["allow"] == list(ALLOW) and all(f["automerge"] for f in full["forks"]),
+           f"--allow: the list in canonical order, each line verbatim in the prompt, automerge on: {ft['prompt']}")
+    expect(full["forks"][1]["ledger_issues"] == [3, 7] and full["forks"][1]["depends_on"] == ["o/lib"]
+           and "depends_on" not in full["forks"][0] and "ledger issues #3, #7" in ft["prompt"]
+           and "authors' upstream https://github.com/a/dep dev" in ft["prompt"] and CONFIG in ft["prompt"]
+           and "legacy layer branch" in ft["prompt"], f"the fork set's fields in the config and the prompt: {full}")
+    expect(ft["replaces"] == [full["round"]["name"], "keep-current nightly", "keep-current nightly: o/lib",
+                              "Keep-Current dep weekly"] and not any("(" in n for n in ft["replaces"]),
+           f"replaces: exact names only -- its own, --replace-task, and existing keep-current names of this set: "
+           f"{ft['replaces']}")
+    expect(round_task(cfg, "owner/migrator")["replaces"] == [cfg["round"]["name"]],
+           "no existing task named: replaces is the round's own name alone")
+    for bad_allow in (["push-everything"],):
+        try:
+            make_config(forks, None, 3, "o/m", allow=bad_allow); bad.append("an unknown --allow is refused")
+        except Fail:
+            pass
+    # the authors' upstream from the GitHub fork parent when the spec omits it
+    nf = resolve_upstreams([parse_fork("o/lib@neoforge-1.21.1")], lambda s: {"parent": {
+        "clone_url": "https://github.com/a/lib.git", "default_branch": "dev", "full_name": "a/lib"}})
+    expect(nf[0]["upstream"] == "https://github.com/a/lib.git" and nf[0]["upstream_branch"] == "dev"
+           and nf[0]["upstream_source"] == "github fork parent", f"the upstream from the fork parent: {nf}")
+    try:
+        resolve_upstreams([parse_fork("o/lib@neoforge-1.21.1")], lambda s: {"fork": False})
+        bad.append("a repository that is not a fork, named without its upstream, is refused")
+    except Fail:
+        pass
+    try:
+        per_fork(["x/y=1"], forks, "--ledger-issues"); bad.append("a per-fork flag naming a repository outside the set")
+    except Fail:
+        pass
     for s in ("o/lib", "o/lib@b=https://x", "o/lib@b#main"):
         try:
             parse_fork(s); bad.append(f"a bad --fork {s!r} is refused")
@@ -639,11 +834,12 @@ def self_check():
         base = ["install", "--repo", str(fork), "--fork", "o/lib@neoforge-1.21.1=https://github.com/a/lib#main",
                 "--migrator-repo", "owner/migrator", "--migrator-sha", "a" * 40]
 
-        def inst(*extra, otype=None):
+        def inst(*extra, otype=None, info=None, argv=None):
             buf = io.StringIO()
+            ri = info or ((lambda s: {"owner": {"type": otype}}) if otype else None)
             with contextlib.redirect_stdout(buf):
                 try:
-                    rc = install(ap.parse_args(base + list(extra)), owner_type_of=(lambda s: otype) if otype else None)
+                    rc = install(ap.parse_args((argv or base) + list(extra)), repo_info=ri)
                 except Fail as e:
                     rc = 2; print(e)
             return rc, buf.getvalue()
@@ -676,6 +872,23 @@ def self_check():
         expect(rc == 0 and gq(fork, "show", f"main:{WORKFLOW}") == fixture().rstrip("\n")
                and gq(fork, "show", "main:README.md") == "x" and gq(fork, "status", "--porcelain") == "",
                f"--default-branch-too: the workflow also committed to the default branch, no checkout touched: {o}")
+        # trailers, the allow list and the derived upstream, through install
+        gq(fork, "remote", "set-head", "origin", "neoforge-1.21.1")
+        tr = ["Co-Authored-By: Someone <someone@example.invalid>", "Session: https://example.invalid/s/1"]
+        argv2 = ["install", "--repo", str(fork), "--fork", "o/lib@neoforge-1.21.1", "--migrator-repo", "owner/migrator",
+                 "--migrator-sha", "a" * 40]
+        rc, o = inst("--plan-owner", "someone", "--allow", "pre-release", "--trailer", tr[0], "--trailer", tr[1],
+                     argv=argv2, info=lambda s: {"parent": {"clone_url": "https://github.com/a/lib.git",
+                                                            "default_branch": "main"}})
+        c3 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
+        parsed = gq(fork, "log", "-1", "--format=%(trailers:only,unfold)")
+        expect(rc == 0 and c3["allow"] == ["pre-release"] and c3["forks"][0]["upstream"] == "https://github.com/a/lib.git"
+               and c3["forks"][0]["automerge"] is False and parsed.splitlines() == tr
+               and "fork parent" in o and "allow: pre-release" in o,
+               f"install: --allow recorded, the upstream from the fork parent, --trailer lines end the commit: {rc} {o} "
+               f"{parsed!r}")
+        rc, o = inst("--plan-owner", "someone", "--trailer", "not a trailer")
+        expect(rc == 2 and "--trailer" in o, f"a malformed --trailer is refused: {o}")
 
         # the steps, offline: a library fork with a version branch is too big a fixture here (fork-branches'
         # own self-check covers cascade --plan); a single-version fork set of two, upstream with new commits
@@ -821,6 +1034,15 @@ def build_parser():
     p.add_argument("--plan-owner", help="who the plan is addressed to: the login of whoever runs setup, or @org/team")
     p.add_argument("--owner-type", choices=("user", "org"), help="the fork's owner kind (default: read from GitHub)")
     p.add_argument("--budget", type=int, default=DEFAULT_BUDGET, help=f"S2s a round takes (default {DEFAULT_BUDGET})")
+    p.add_argument("--allow", action="append", choices=tuple(ALLOW), metavar="WHAT",
+                   help="what the unattended round may do without asking (repeatable): " + ", ".join(ALLOW)
+                        + "; default none: it asks the owner")
+    p.add_argument("--ledger-issues", action="append", metavar="REPO=N[,N]", help="the fork issues with fix ledgers")
+    p.add_argument("--depends-on", action="append", metavar="REPO=REPO[,REPO]",
+                   help="a dependent's dependencies in the set (default: the library)")
+    p.add_argument("--layer-branch", action="append", metavar="REPO=BRANCH", help="a layer fork's .multiversion/ branch")
+    p.add_argument("--replace-task", action="append", metavar="NAME", help="an old scheduled task's exact name to replace")
+    p.add_argument("--trailer", action="append", metavar='"KEY: VALUE"', help="a line added to the end of the commit message")
     p.add_argument("--migrator-repo", help="this repository on GitHub (default: its origin)")
     p.add_argument("--migrator-sha", help="the commit the workflow pins (default: origin/main)")
     p.add_argument("--default-branch-too", action="store_true",
@@ -828,6 +1050,8 @@ def build_parser():
     p.add_argument("--no-commit", action="store_true"); p.add_argument("--print", action="store_true")
     p = sub.add_parser("round-task", help="the Wednesday round's scheduled task, as JSON")
     p.add_argument("--repo"); p.add_argument("--config"); p.add_argument("--migrator-repo")
+    p.add_argument("--existing", action="append", default=[], metavar="NAME",
+                   help="an existing scheduled task's name (list_triggers), repeatable: matched into replaces")
     p = sub.add_parser("fetch"); p.add_argument("--config", required=True); p.add_argument("--repo", required=True)
     p.add_argument("--work", required=True)
     for n in ("cascade", "select", "previous", "open"):
@@ -851,7 +1075,8 @@ def main(argv=None):
             if not (a.config or a.repo):
                 raise Fail("--repo DIR (its .github/weekly-plan.json) or --config FILE")
             cfg = json.loads(pathlib.Path(a.config or pathlib.Path(a.repo) / CONFIG).read_text(encoding="utf-8"))
-            print(json.dumps(round_task(cfg, a.migrator_repo or cfg.get("migrator_repo") or migrator_repo()), indent=1))
+            print(json.dumps(round_task(cfg, a.migrator_repo or cfg.get("migrator_repo") or migrator_repo(), a.existing),
+                             indent=1))
             return 0
         if a.cmd == "fetch":
             return step_fetch(a.config, a.repo, a.work)

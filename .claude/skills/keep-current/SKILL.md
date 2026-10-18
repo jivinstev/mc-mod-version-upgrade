@@ -8,13 +8,16 @@ description: Keep a fork port current with its authors, unattended or on request
 **Which fork:** a single-version fork (one `neoforge-1.21.1`-style branch) is the default and the proven path; everything in
 "Run" below is for it. A multi-version fork is one of two kinds, and each gets one extra step after step 6, nothing else
 changing for it: **version branches** (the default for a multi-version fork: one branch per version, `neoforge-1.21.3`,
-`neoforge-1.21.4`, ..., each carrying `.port/<version>/branch.properties`; the fleet entry says `"version_branches": true`)
+`neoforge-1.21.4`, ..., each carrying `.port/<version>/branch.properties`)
 get "A fork with version branches"; an existing **layer** fork (`.multiversion/` on a `layer_branch`) gets "A fork with the
 layer". `git ls-remote --heads origin 'neoforge-*'` lists the version branches; `tools/layer-sync.py detect --repo DIR
---ref <layer_branch>` says whether a layer exists: pass the fleet entry's `layer_branch` when it has one, since the clone
-is usually checked out on the port branch, which has no `.multiversion/`. Without `--ref`, detect exits 3 (not 0) when the
-checked-out branch has no layer but another branch does, so a layer fork can never read as single-version and skip its
-layer step.
+--ref <layer_branch>` says whether a layer exists: pass the fork's `layer_branch` (in `.github/weekly-plan.json`) when it
+has one, since the clone is usually checked out on the port branch, which has no `.multiversion/`. Without `--ref`, detect
+exits 3 (not 0) when the checked-out branch has no layer but another branch does, so a layer fork can never read as
+single-version and skip its layer step. **Version branches win:** a fork that has `.port/<v>/branch.properties` version
+branches AND a legacy layer branch with `.multiversion/` (one migrated to branches) is a version-branch fork; the layer
+branch is history and is ignored, by the round and by every run. detect says so: `layer=false kind=version-branches
+versions=... legacy_layer=<branch>`, exit 0, with or without `--ref`; never run the layer step for such a fork.
 
 The port-fork skill makes a port; this one keeps it alive. A community fork is judged by the people who install
 it: **if it crashes them, kicks them from a server, hangs, damages a save or breaks their other mods, the fork is
@@ -22,38 +25,45 @@ it: **if it crashes them, kicks them from a server, hangs, damages a save or bre
 
 Tools: `tools/port-sync.py` (bring the authors' commits in), `tools/fix-ledger.py` (the worksheet and the ledger),
 `tools/port-upstream.py` + the file loop (port the new code), `tools/ci-gates.py` (gates, no model),
-`tools/port-ci.py` (CI; `promote` is never run here), `tools/port-fleet.py` (every fork, dependency order),
+`tools/port-ci.py` (CI; `promote` is never run here), `tools/port-fleet.py` (an older fleet file: only a migration input here),
 `tools/weekly-plan.py` (the weekly cycle's setup and its plan workflow), `tools/known-issues.py` (the ledger, the plan
 issue: `render-plan`, `read-plan`; the README Ports block: `render-ports`), `tools/port-cost.py` (cost records, the
 round's table).
 
 ## Stops -- ask the user
 
-1. Setting up the weekly cycle (once, and whenever it changes): which forks (the library first), what may be pushed
-   unattended, and the round's model (Opus recommended; see "Setup"). The days and times are fixed by the tools:
-   the plan Tuesday 08:00 America/Los_Angeles, the round Wednesday morning there.
+1. Setting up the weekly cycle (once, and whenever it changes): which forks (the library first), what the unattended
+   round may do without asking (the `allow` list, "Setup" step 1: none by default), and the round's model (Opus
+   recommended; see "Setup"). The days are fixed by the tools: the plan Tuesday 08:00 America/Los_Angeles, the round
+   Wednesday morning there, at a minute jittered per fork set (`round.time` in `.github/weekly-plan.json`).
 2. A reconcile decision the rule below does not settle (both outcomes would ship an S1 mode, or the only fix is a
    design change of the authors' feature).
-3. Merging a keep-current PR into the port branch -- unless that fork's fleet entry says `"automerge": true`. The
-   user may set it for every fork whose releases they promote by hand: the pre-release a merge produces is not
-   what players are pointed at until a person has played it and promoted it, so merging on green is safe.
+3. Merging a keep-current PR into the port branch -- unless that fork says `"automerge": true` in
+   `.github/weekly-plan.json` (setup writes it exactly when the owner allowed `merge-fork-prs`). The user may allow it
+   for every fork whose releases they promote by hand: the pre-release a merge produces is not what players are
+   pointed at until a person has played it and promoted it, so merging on green is safe.
 4. **Never**: promoting a release (a person must have played it -- `port-ci.py promote` is theirs), publishing to
    Modrinth/CurseForge, pushing to or commenting on the authors' repository, force-pushing.
 
-## The fleet and its order
+## The fork set and its order
 
-The fleet file (outside this repository: it names other people's mods) is `tools/port-fleet.py`'s. Order is
-**dependencies first**. Per-fork fields this skill reads beyond port-fleet's: `"upstream"` (the authors' repo and
-branch), `"automerge"` (merge its keep-current PR once CI is green), `"ledger_issues"` (the fork issues that carry
-fix ledgers), and -- only for a fork with the multi-version layer -- `"layer_branch"` (the branch carrying
-`.multiversion/`, where `layer-sync.py detect` runs; a single-version entry has no such key). A dependent's CI pins its dependency by exact release asset (`--dep-jar`, written into
-the dependent's `port-ci.yml`), so read the edges from those pins, not from memory. A dependent is not touched
-until its dependency's run is green, and it is then gated against the dependency's NEW build.
+**The single source is `.github/weekly-plan.json` on the first fork's (the library's) head branch**, written only by
+`weekly-plan.py install` ("Setup"). A fresh session reads it from there; nothing else holds the fork set. An older
+fleet file (`tools/port-fleet.py`'s, outside this repository) is only an input to the first setup that moves its
+values into flags; after that it is not read. Order is **dependencies first** (the `forks` list: the library first).
+Per fork: `repo`, `head`, `role` (`library` / `dependent`; empty for a fork alone), `upstream` and `upstream_branch`
+(the authors' repository and branch), `depends_on` (a dependent's dependencies in the set), `ledger_issues` (the fork
+issues that carry fix ledgers), `automerge` (merge its keep-current PR once CI is green: true exactly when `allow` has
+`merge-fork-prs`), and -- only for a fork with the multi-version layer -- `layer_branch` (the branch carrying
+`.multiversion/`, where `layer-sync.py detect` runs). For the set: `allow`, `budget`, `plan_owner`, `round` (its name,
+time and cron). A dependent's CI pins its dependency by exact release asset (`--dep-jar`, written into the dependent's
+`port-ci.yml`), so read the exact pins from there, not from memory. A dependent is not touched until its dependency's
+run is green, and it is then gated against the dependency's NEW build.
 
-## Run (per fork, in fleet order)
+## Run (per fork, in the set's order)
 
 0. **Guard the names** (once per session, single-version and layer forks alike): `python3 tools/guard-names.py ensure --mod-repo <clone>` with one
-   `--mod-repo` per fleet fork it depends on. A run that commits learnings here first passes `guard-names.py check`.
+   `--mod-repo` per fork of the set it depends on. A run that commits learnings here first passes `guard-names.py check`.
 1. **Nothing new? Stop cheaply.** `port-sync.py --dry-run` for the authors' branch, and for each dependency
    "has it a newer green build than the dependent pins?". For a fork with a `layer_branch`, also
    `layer-sync.py detect --repo DIR --ref origin/<layer_branch> --port-ref origin/<branch>` after a `git fetch`:
@@ -131,7 +141,7 @@ until its dependency's run is green, and it is then gated against the dependency
    gate tables, the ledger changes. Merge the port branch into the work branch first if it moved (a CI-only
    commit, say), so the PR is current. Run `fix-ledger.py check --release keep-current/<date>` first: an S1 mode
    open on a branch that ships blocks the PR, and the run stops and reports.
-   **Auto-merge** (fleet entry `"automerge": true`): wait for the PR's own CI -- every gate, full and minimal --
+   **Auto-merge** (the fork's `"automerge": true` in `.github/weekly-plan.json`): wait for the PR's own CI -- every gate, full and minimal --
    and merge with a merge commit (never squash or rebase: the authors' commits must stay commits). A red or
    missing check is not merged: fix it on the work branch, or stop and report. **Then wait for the CI run the merge
    itself triggers on the target branch** (a push run on the port branch, or the layer branch for a layer PR) and
@@ -164,13 +174,13 @@ until its dependency's run is green, and it is then gated against the dependency
    through Port CI refreshes it by itself; a re-pin without a promotion does not, so once the re-pinned workflow is
    on the port branch run `python3 tools/port-manifest.py refresh --repo DIR --commit` there and push (it says
    "unchanged" when nothing moved; it refuses, writing nothing, when the newest full Release cannot be named).
-8. **Report once** on the fleet's tracking issue: what came in, what was decided, what is waiting for a person
+8. **Report once** on the fork set's tracking issue (in the weekly round: the plan issue): what came in, what was decided, what is waiting for a person
    (a PR to merge, a build to play and promote). Silent when nothing changed.
 
 ## A fork with version branches (skip this for a single-version fork)
 
-Only for a fleet entry with `"version_branches": true` (or a clone whose `neoforge-<version>` branches carry
-`.port/<version>/branch.properties`). The port branch's PR (steps 1-6) brings the authors' code in at the base version;
+Only for a fork whose `neoforge-<version>` branches carry `.port/<version>/branch.properties` (even when a legacy layer
+branch with `.multiversion/` is still there: version branches win, and that layer branch is ignored). The port branch's PR (steps 1-6) brings the authors' code in at the base version;
 each version branch must take it, in chain order, and nothing fixes a version unless this is run. There is no R6
 re-merge here: git's own merge does it, with the rename rows applied as a tool.
 
@@ -273,8 +283,9 @@ version; the layer branch must carry it to every target, and nothing fixes a mid
 The cycle is weekly, not nightly, for every fork set (a library and its dependents, or one fork alone), single-version
 and version-branch forks alike:
 
-- **Tuesday 08:00 America/Los_Angeles: the plan, with no model.** A GitHub Actions workflow on the first fork's head
-  branch (`.github/workflows/weekly-plan.yml`, from `templates/weekly-plan.yml`; config `.github/weekly-plan.json`)
+- **Tuesday 08:00 America/Los_Angeles: the plan, with no model.** A GitHub Actions workflow on the first fork's (the
+  library's) head branch only -- the dependents' repositories get no workflow and no config
+  (`.github/workflows/weekly-plan.yml`, from `templates/weekly-plan.yml`; config `.github/weekly-plan.json`)
   fetches each fork's authors' upstream, runs `fork-branches.py cascade --plan` for each version-branch fork (with the
   authors' commits merged into the head on the runner's throwaway checkout), `known-issues.py select`, `known-issues.py
   render-plan`, and opens **one plan issue** on the library's repository with a section per fork, assigned to the fork
@@ -284,7 +295,8 @@ and version-branch forks alike:
   (`/decide <id> <choice>`) and grade overrides (`/grade <ID> <S1-S4> [reason]`); its title starts `[decision needed]`
   when the plan escalates something. It costs no model quota, so it opens whether or not the owner has any left.
 - **Wednesday morning America/Los_Angeles: the round** ("The weekly round" below), a Claude scheduled task with a fresh
-  session each fire. It reads the plan issue once, at its start, posts progress on it and closes it with the outcome.
+  session each fire, at `round.time` in `.github/weekly-plan.json` (a minute below 08:30, jittered per fork set from the
+  task's name -- read it there, never assume a fixed time). It reads the plan issue once, at its start, posts progress on it and closes it with the outcome.
 - **No answer:** the defaults apply. **No round** (no quota, the session never started): nothing is lost -- next
   Tuesday's workflow sees the plan issue no round closed, carries its ticks and replies into the new issue, says "last
   week's round did not run", and closes the old one as superseded.
@@ -299,8 +311,19 @@ else is listed as ignored.
 
 ## The weekly round (what the Wednesday task runs; a fresh agent follows this alone)
 
-Say first which kinds of fork the set holds (single-version unless `.port/<v>/branch.properties` branches exist). The
-"Run" steps above are the per-fork mechanics; this is the order and the rules around them.
+Say first which kinds of fork the set holds (single-version unless `.port/<v>/branch.properties` branches exist;
+those win over a legacy layer branch with `.multiversion/`, which is history and ignored -- `layer-sync.py detect` says
+`kind=version-branches`). The fork set, its upstreams, pins, ledger issues and `allow` come from
+`.github/weekly-plan.json` on the library's head branch, nothing else. The "Run" steps above are the per-fork mechanics;
+this is the order and the rules around them.
+
+**What the round may do unattended is the `allow` list** in that file (the prompt repeats it verbatim), and nothing
+more: `push-version-branches` (commit to the fork's `neoforge-<v>` branches and its head branch; never force-push),
+`pre-release` (dispatch Port CI with `release=true`; never promote, never publish to Modrinth or CurseForge),
+`merge-fork-prs` (merge the round's own PRs on the fork repositories once CI is green; never the migrator
+repository). **An action outside the list is a stop that asks the owner, through the plan issue:** a comment
+@mentioning the owner with the action and why; the round does not take it, goes on with what the list allows and
+names it in the closing comment. An empty list means every push, pre-release and merge asks.
 
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
    round/frozen.json --decisions-dir round/decisions` (`gh` or GITHUB_TOKEN reads it). No open plan issue: stop and
@@ -325,7 +348,8 @@ Say first which kinds of fork the set holds (single-version unless `.port/<v>/br
      "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
      **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
      the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5);
-   - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote);
+   - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
+     `pre-release` in `allow`; without it, ask on the plan issue;
    - a library's version: `fork-branches.py library-record --repo LIB --target <v> --dependent DEP` once the dependent's
      same version passed Gate C on that exact released jar;
    - its cost: `fork-port.py`'s cost stage appends to `.port/<v>/COST.md` (tokens, dollars, wall time and a price tier,
@@ -362,21 +386,34 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
 
        python3 tools/weekly-plan.py install --repo <library checkout> \
            --fork <owner/lib>@neoforge-1.21.1=<authors' repo URL>#<their branch> \
-           --fork <owner/dep>@neoforge-1.21.1=<authors' repo URL>#<their branch> \
-           --plan-owner <login of the person running setup>
+           --fork <owner/dep>@neoforge-1.21.1 \
+           --plan-owner <login of the person running setup> \
+           [--allow push-version-branches --allow pre-release --allow merge-fork-prs] \
+           [--ledger-issues <owner/dep>=12,15] [--depends-on <owner/dep>=<owner/lib>] \
+           [--layer-branch <owner/repo>=<branch>] [--replace-task "<old task name>"] \
+           [--trailer "<Key>: <value>" ...]
 
-   One `--fork` per fork, the library first (a fork alone: one). It commits `.github/workflows/weekly-plan.yml` (this
-   repository pinned at origin/main's commit) and `.github/weekly-plan.json` in one `[skip ci]` commit; an unchanged
-   set commits nothing. It refuses an organization-owned fork without `--plan-owner`, and exits 3 when the head branch
+   One `--fork` per fork, the library first (a fork alone: one). A `--fork` without `=URL#BRANCH` takes the authors'
+   upstream from the GitHub fork parent and its default branch (refused for a repository that is not a fork: name it).
+   `--allow` is the owner's choice for this fork set, asked at stop 1 and passed as they answered; it is fork config,
+   never a default -- with none the round asks before every push, pre-release and merge. `automerge` follows
+   `merge-fork-prs`. A dependent depends on the library unless `--depends-on` says otherwise. Moving from an old fleet
+   file: pass its `upstream`, `ledger_issues` and `layer_branch` values as these flags, once; after that the config is
+   the only source. An agent passes its session's attribution trailers with `--trailer` (one per line), so the commit
+   carries them; without it, amend the commit's message before pushing. It commits `.github/workflows/weekly-plan.yml`
+   (this repository pinned at origin/main's commit) and `.github/weekly-plan.json` in one `[skip ci]` commit, on the
+   library's repository only (the dependents get nothing); an unchanged set commits nothing. It refuses an organization-owned fork without `--plan-owner`, and exits 3 when the head branch
    is not the repository's default branch (GitHub runs a schedule only from the default branch): ask the user to make
    the head branch the default, or rerun with `--default-branch-too`, which commits the same workflow file to the
    default branch too. Push what it names. The other forks must be public (the workflow reads them without a token).
-2. **The round task:** `python3 tools/weekly-plan.py round-task --repo <library checkout>` prints the task as JSON.
-   List the scheduled tasks (`list_triggers`) and delete every one whose name is in its `replaces` list (the same
-   round from an earlier setup, and a keep-current nightly routine of an older setup), then `create_trigger` with its
-   `name`, `cron_expression` (`CRON_TZ=America/Los_Angeles <minute> 8 * * 3`, the minute jittered below 08:30),
-   `create_new_session_on_fire: true`, `notifications` (push and email on), `initiation` and `prompt`, unchanged.
-   Say in one line that the round is Wednesday at that time Pacific.
+2. **The round task:** list the scheduled tasks (`list_triggers`) first, then `python3 tools/weekly-plan.py round-task
+   --repo <library checkout> --existing "<name>" ...` with every name the listing returned; it prints the task as JSON.
+   Its `replaces` holds exact task names, never a description: the round's own name, each `--replace-task` name, and
+   each listed name that starts with "keep-current" and names a fork of this set. Delete a task only when its name is
+   exactly one of them -- no match, no deletion -- then `create_trigger` with its `name`, `cron_expression`
+   (`CRON_TZ=America/Los_Angeles <minute> 8 * * 3`, the minute jittered per fork set below 08:30), `create_new_session_on_fire:
+   true`, `notifications` (push and email on), `initiation` and `prompt` (the fork set and the `allow` list in it),
+   unchanged. Say in one line that the round is Wednesday at `round.time` from `.github/weekly-plan.json`, Pacific.
 3. **Set the round's model; never leave it on the account default.** A task created without one runs on whatever the
    account defaults to (measured: a routine created without one ran on Sonnet), and `create_trigger` takes no model --
    set it right after creating, with `update_trigger` `model`, to the model the user chose at stop 1. Recommend Opus:
