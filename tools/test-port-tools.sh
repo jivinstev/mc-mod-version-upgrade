@@ -1014,18 +1014,20 @@ import importlib.util, os, pathlib, sys, tempfile, time
 spec = importlib.util.spec_from_file_location("a", "tools/audit-mixin-targets.py"); m = importlib.util.module_from_spec(spec)
 sys.argv = ["x"]; spec.loader.exec_module(m)
 ok = True
+same = lambda got, want: got is not None and pathlib.Path(got).resolve() == pathlib.Path(want).resolve()   # Windows: glob's
+# path joins the workspace and the pattern with mixed separators (and may keep an 8.3 short name), so compare files
 with tempfile.TemporaryDirectory() as d:
     art = pathlib.Path(d) / "build/moddev/artifacts"; art.mkdir(parents=True)
     new = art / "neoforge-21.11.5-sources.jar"; new.write_bytes(b"x")
-    ok &= m.find_sources_jar(d) == str(new)                                   # single-version: its one jar
+    ok &= same(m.find_sources_jar(d), new)                                   # single-version: its one jar
     old = art / "neoforge-21.10.40-sources.jar"; old.write_bytes(b"x")
     t = time.time(); os.utime(new, (t - 60, t - 60)); os.utime(old, (t, t))   # the stale one even newer on disk
     (pathlib.Path(d) / "gradle.properties").write_text("minecraft_version=1.21.11\nneo_version=21.11.5\n", encoding="utf-8")
-    ok &= m.find_sources_jar(d) == str(new)
+    ok &= same(m.find_sources_jar(d), new)
     (pathlib.Path(d) / "gradle.properties").write_text("neo_version=21.10.40\n", encoding="utf-8")
-    ok &= m.find_sources_jar(d) == str(old)
+    ok &= same(m.find_sources_jar(d), old)
     (pathlib.Path(d) / "gradle.properties").write_text("neo_version=21.10.4\n", encoding="utf-8")   # a prefix is no match
-    ok &= m.find_sources_jar(d) == str(old)                                   # none matches: the newest, said on stderr
+    ok &= same(m.find_sources_jar(d), old)                                   # none matches: the newest, said on stderr
 sys.exit(0 if ok else 1)
 PY
 # R25: a registration supplier names what it builds and every Block/Item Properties takes that name (prefix-only rows)
