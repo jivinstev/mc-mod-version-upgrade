@@ -108,7 +108,11 @@ own commit and writes nothing; the parent branch is read from origin when the lo
 8. no dependency was built against a library version that is not done (`--allow-undone-library`, DEPS.md
    "Development only") or against a jar copied from a library checkout (`port_jar_dev.`, `--port-checkout`);
 9. **a library** (`library=true`): at least one dependent's version passed Gate C against this library's jar, recorded
-   in `DEPENDENTS.json` (`fork-branches.py library-record`) for a commit whose jar is current. Gate C on a library alone
+   in `DEPENDENTS.json` (`fork-branches.py library-record`) for a commit whose jar is current. **A record counts for the
+   commit (and tag) it names, never for a later one**: when the library branch moved on with jar-relevant changes after
+   the recorded tag, the done check says `library: the dependents' record is for <tag> (<commit>), the branch is at
+   <sha> ...` -- release the new commit and record a dependent's Gate C against that release; a branch that moved only
+   in records (the record itself, reviews, notes) still has the same jar, and the record counts. Gate C on a library alone
    checks nothing (its spawn and battle phases spawn no entity of its own, so ci-gates.py skips them there).
 
 A record that names a **layer commit** (a migrated version's GATES.md and REVIEW.md) counts when `MIGRATED.json` maps

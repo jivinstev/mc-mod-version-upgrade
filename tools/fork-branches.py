@@ -1161,9 +1161,14 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
             seen = (_seen or set()) | {t}
             if pv not in seen and resolve_branch(repo, branch_name(pv)) and target_done(repo, pv, _seen=seen):
                 out.append(f"its parent {pv} is still not done (added with --allow-undone-parent: {allowed})")
-        if p.get("library") == "true" and not library_tested(repo, root, t, ref, work, files):
-            out.append(LIBRARY_PENDING + f" (record one: python3 tools/fork-branches.py library-record --repo {repo} "
-                       f"--target {t} --dependent DIR)")
+        if p.get("library") == "true":
+            tested, stale = library_status(repo, root, t, ref, work, files)
+            if not tested:
+                out.append((f"library: the dependents' record is for {stale}, the branch is at {ref[:12]} with "
+                            "jar-relevant changes since -- it counts for that commit's jar, not this one: release this "
+                            "commit and record a dependent's Gate C against it" if stale else LIBRARY_PENDING)
+                           + f" ({'' if stale else 'record one: '}python3 tools/fork-branches.py library-record --repo {repo} "
+                             f"--target {t} --dependent DIR)")
         return out
     finally:
         if tmp is not None:
@@ -1189,18 +1194,27 @@ def check_done(repo, t, who="fork-branches", say=print):
     return UNDONE_EXIT if why else 0
 
 
-def library_tested(repo, root, t, ref, work, files):
-    """Does .port/<t>/DEPENDENTS.json name a dependent that passed Gate C against a jar built from a library commit
-    this branch carries, with nothing jar-relevant changed since (so the same jar)?"""
+def library_status(repo, root, t, ref, work, files):
+    """(tested, stale) for library version t: tested when .port/<t>/DEPENDENTS.json names a dependent that passed Gate
+    C against a jar built from a library commit this branch carries with nothing jar-relevant changed since (the same
+    jar). A record counts for the commit (and tag) it names, never for a later one: when the branch moved on with
+    jar-relevant changes, stale is "<tag> (<commit>)" of the last such record (for the done check to name), else "" (a
+    record for a commit this branch does not carry is no record of it)."""
     try:
         deps = json.loads(read_file(rec_dir(root, t) / "DEPENDENTS.json") or "[]")
     except ValueError:
-        return False
+        return False, ""
+    stale = ""
     for d in deps if isinstance(deps, list) else []:
         c = str((d or {}).get("library_commit", ""))
-        if d.get("gate_c") == "PASS" and commit_current(repo, root, t, c, ref, work, "gates", files)[0]:
-            return True
-    return False
+        if d.get("gate_c") != "PASS":
+            continue
+        if commit_current(repo, root, t, c, ref, work, "gates", files)[0]:
+            return True, ""
+        if COMMIT_ID.match(c) and git(repo, "merge-base", "--is-ancestor", c, ref).returncode == 0:
+            stale = f"{d.get('library_tag') or 'its tag'} ({c[:12]})"      # the branch moved on from it
+    return False, stale
+
 
 
 # ---------------------------------------------------------------- migration: a layer fork -> version branches
@@ -4980,7 +4994,24 @@ def self_check():
                                                                              "library_commit": "0" * 40}]), encoding="utf-8")
             expect(target_done(r, "1.21.4")[:1] and target_done(r, "1.21.4")[0].startswith(LIBRARY_PENDING),
                    "control: a dependent recorded against another commit does not count")
-            g("checkout", "-q", "--", "."); (r / REC / "1.21.4" / "DEPENDENTS.json").unlink()
+            # a record made at tag X while the library branch moved on: it counts for X's commit and jar only; the done
+            # check names both, rather than passing or reading as "no dependent" (gap 8 after #147)
+            rec_c = g("rev-parse", "HEAD")
+            (r / REC / "1.21.4" / "DEPENDENTS.json").write_text(json.dumps([{"dependent": "owner/dep", "gate_c": "PASS",
+                                                                             "library_tag": "examplelib-1.0-mc1.21.4",
+                                                                             "library_commit": rec_c}]), encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "record at the tag")
+            expect(target_done(r, "1.21.4") == [], "the branch moved only by the record itself: the same jar, it counts")
+            (r / "src/main/java/com/example/mod/Plain.java").write_text("package com.example.mod;\npublic class Plain { int v = 2; }\n",
+                                                                       encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "the library moved on")
+            head_ = g("rev-parse", "HEAD")
+            lib_ = [w for w in target_done(r, "1.21.4") if w.startswith("library")]
+            expect(len(lib_) == 1 and f"record is for examplelib-1.0-mc1.21.4 ({rec_c[:12]})" in lib_[0]
+                   and f"the branch is at {head_[:12]}" in lib_[0],
+                   f"a record for an older tag: the done check names the tag and where the branch is: {lib_}")
+            g("reset", "-q", "--hard", "HEAD~2")
+            g("checkout", "-q", "--", "."); (r / REC / "1.21.4" / "DEPENDENTS.json").unlink(missing_ok=True)
             (r / "src/main/java/com/example/mod/ExampleMod.java").write_text("package com.example.mod;\nclass ExampleMod { int edited; }\n",
                                                                            encoding="utf-8")
             why = target_done(r, "1.21.4")
