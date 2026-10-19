@@ -698,7 +698,7 @@ fi
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gate-loop: offline authlib Caused-by noise never replaces the real cause; only the GameTest summary is a server verdict; _reap spares a sibling checkout sharing the prefix (/x/fork vs /x/fork-b); a client killed with exit 137 and no verdict is 'killed' (OOM said only when the cgroup or dmesg confirms it), a caught WARN trace is never the stop reason, and Gate C does not start below the free-memory floor (faked meminfo and cgroup); a second Gate C client on the machine waits for the first's lock (saying who holds it) and a killed holder's lock is free" || bad "gate-loop self-check: $out"
 out="$(python3 tools/round-preflight.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "round-preflight: a missing fork clone says to attach it to the scheduled task; the GitHub way named (GITHUB_TOKEN wins over gh); a JDK per version (25 for 26.x); libEGL.so.1 for a 26.3 client and XDG_RUNTIME_DIR, skipped with --no-client or off Linux" \
+grep -q 'self-check: OK' <<<"$out" && ok "round-preflight: a missing fork clone says to attach it to the scheduled task; the GitHub way named (GITHUB_TOKEN wins over gh); a JDK per version (25 for 26.x); libEGL.so.1 for a 26.3 client and XDG_RUNTIME_DIR, skipped with --no-client or off Linux; a shallow clone's 26.x branches read from origin by name (a single-version fork's versions as before); origin/HEAD and the remote an upstream freeze names (exit 19), each with its fix" \
   || bad "round-preflight self-check: $out"
 out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick (JAVA_HOME first, then JAVA_HOME_<n>, /usr/lib/jvm, /opt, the Gradle toolchain downloads; java.exe too) and crash-cause self-check; the expectations file (single-version with none: none, as before; version branch .port/<mc>/shipped-expect-cf.txt for _cf, the unsuffixed one for _mr; layer .multiversion/), a variant missing its expected line fails; boot() on a stand-in server, no Minecraft: clean passes, a crash after Done fails, an exit before stop fails" || bad "shipped-gate self-check: $out"
@@ -1383,7 +1383,11 @@ if core:
     need(0 <= a < u and a < o and re.search(r"if \(into == null\) RenderPasses\.requireNoOpenPass", c), "the own-pass path does not assert (before uploading) that no pass is open")
     need("into == null ? Uploaded.of(m) : Uploaded.inPass(m)" in c, "a draw into an open pass does not upload through Uploaded.inPass")
     need(re.search(r"RenderPass pass = into != null \? into :", c) and re.search(r"if \(into == null\) \{?\s*pass\.close\(\);", c), "a pass handed in is replaced or closed")
-    need("drawIndexed(up.indexCount(), 1, up.firstIndex(), up.baseVertex(), 0)" in c, "the draw ignores the transient upload's first index / base vertex")
+    need("drawIndexed(up.indexCount(), 1, up.firstIndex(), 0, 0)" in c, "the draw ignores the transient upload's first index")
+    # 26.3's transient buffer refuses slice() ("Cannot slice transient buffer"): the vertices bind as the allocation's own
+    # slice, never re-sliced from its buffer (weekly round 2026-10-19: a shader-masked entity crashed the client)
+    need("pass.setVertexBuffer(0, up.vertices());" in c and ".slice()" not in c,
+         "an in-pass draw re-slices the transient vertex buffer (26.3: Cannot slice transient buffer)")
 inpass = re.search(r"static Uploaded inPass\(MeshData m\) \{(.*?)\n        \}\n", gl, re.S)
 tr = re.search(r"private static GpuBufferSlice transient_\(.*?\n        \}\n", gl, re.S)
 need(inpass and tr and "transientMemory()" in tr.group(0) and "allocateGpuMapped(" in tr.group(0) and "writeToBuffer" not in inpass.group(1) + tr.group(0),
@@ -1403,7 +1407,12 @@ eb = re.search(r"public void endBatch\(RenderPass into\) \{(.*?)\n        \}", m
 need(eb and re.search(r"if \(into == null\) \{\s*Deferred\.drawIfNoPassOpen\(\);", eb.group(1)), "a pass-free endBatch does not draw what an in-pass end deferred")
 dr = re.search(r"static void draw\(RenderType type, MeshData mesh, RenderPass into\) \{(.*?)\n        \}\n", mbs, re.S)
 need(dr and re.search(r"into == null \? LegacyGl\.inRenderPass\(\) :.*?Deferred\.add\(type, mesh\);", dr.group(1), re.S), "a batch ended while a pass is open is not deferred")
-need(dr and "Uploaded.inPass(m)" in dr.group(1) and "drawFromBuffer(" in dr.group(1), "a vanilla type is not drawn into the open pass from a transient upload")
+need(dr and "Uploaded.inPassOwnVertices(m)" in dr.group(1) and "drawFromBuffer(" in dr.group(1)
+     and re.search(r"try \(GpuBuffer vertices = up\.vertices\(\)\.buffer\(\)\)", dr.group(1)) and "Uploaded.inPass(m)" not in dr.group(1),
+     "a vanilla type drawn into the open pass hands drawFromBuffer (which slices it) a transient vertex buffer, or never closes its own")
+own = re.search(r"static Uploaded inPassOwnVertices\(MeshData m\) \{(.*?)\n        \}\n", gl, re.S)
+need(own and "createBuffer(" in own.group(1) and "own.close()" in own.group(1),
+     "Uploaded.inPassOwnVertices does not put the vertices in a buffer of their own (closed on failure)")
 # a handler at an in-pass stage that mixes types: its type switches and ends go into the scope's pass, not to AfterLevel
 sc = re.search(r"public Scope drawingInto\(RenderPass pass\) \{(.*?)\n        \}\n", mbs, re.S)
 need(sc and re.search(r"scopePass = pass;", sc.group(1)) and re.search(r"endBatch\(pass\);\s*scopePass = outer;", sc.group(1)),

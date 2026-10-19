@@ -399,36 +399,54 @@ public final class LegacyGl {
     }
 
     /** What a mesh is drawn from: its vertices (and indices: its own, or the sequential ones for its topology), uploaded.
-     *  {@code baseVertex} / {@code firstIndex} place the mesh in the buffers (0 except for a transient upload). */
-    record Uploaded(GpuBuffer vertices, GpuBuffer indices, IndexType indexType, int indexCount, int baseVertex, int firstIndex) {
+     *  {@code vertices} is the slice the mesh's vertices start at (bound as it is: the backend applies its offset), and
+     *  {@code firstIndex} places the mesh in the index buffer (0 except for a transient upload). */
+    record Uploaded(GpuBufferSlice vertices, GpuBuffer indices, IndexType indexType, int indexCount, int firstIndex) {
         static Uploaded of(MeshData m) {
-            GpuBuffer vertices = uploadVertices(m.vertexBuffer());
+            GpuBufferSlice vertices = uploadVertices(m.vertexBuffer()).slice();
             if (m.indexBuffer() == null) {
                 RenderSystem.AutoStorageIndexBuffer seq = RenderSystem.getSequentialBuffer(m.drawState().primitiveTopology());
-                return new Uploaded(vertices, seq.getBuffer(m.drawState().indexCount()), seq.type(), m.drawState().indexCount(), 0, 0);
+                return new Uploaded(vertices, seq.getBuffer(m.drawState().indexCount()), seq.type(), m.drawState().indexCount(), 0);
             }
-            return new Uploaded(vertices, uploadIndices(m.indexBuffer()), m.drawState().indexType(), m.drawState().indexCount(), 0, 0);
+            return new Uploaded(vertices, uploadIndices(m.indexBuffer()), m.drawState().indexType(), m.drawState().indexCount(), 0);
         }
 
         /**
          * For a draw into a pass that is already open, where the encoder refuses {@code writeToBuffer}: the geometry goes
          * into the encoder's transient memory through a MAPPED allocation (a CPU write, no encoder command; valid for the
-         * frame). An index buffer binds without an offset, so the allocation's offset becomes the first index (and the
-         * vertex one the base vertex, for vanilla's {@code drawFromBuffer}, which binds the whole buffer).
+         * frame). 26.3's transient buffer refuses {@code slice()} ("Cannot slice transient buffer"), so the vertices are
+         * the allocation's own slice, bound as it is (as {@code GlRenderPass}'s push constants are); an index buffer binds
+         * without an offset, so the index allocation's offset becomes the first index.
          */
         static Uploaded inPass(MeshData m) {
-            int vertexSize = m.drawState().format().getVertexSize();
-            GpuBufferSlice v = transient_(m.vertexBuffer(), vertexSize, GpuBuffer.USAGE_VERTEX);
-            int baseVertex = RenderPasses.firstElement(v.offset(), vertexSize);
+            return inPass(m, transient_(m.vertexBuffer(), m.drawState().format().getVertexSize(), GpuBuffer.USAGE_VERTEX));
+        }
+
+        /**
+         * As {@link #inPass(MeshData)}, for vanilla's {@code PreparedRenderType.drawFromBuffer}, which takes a whole
+         * vertex BUFFER and slices it (a transient one refuses that): the vertices go into a buffer of their own, created
+         * with its data ({@code device.createBuffer(data)}, which an open pass allows, as the sequential index buffer
+         * grows). The caller closes {@code vertices().buffer()} after the draw.
+         */
+        static Uploaded inPassOwnVertices(MeshData m) {
+            GpuBuffer own = RenderSystem.getDevice().createBuffer(() -> "mv in-pass vertices", GpuBuffer.USAGE_VERTEX, m.vertexBuffer());
+            try {
+                return inPass(m, own.slice());
+            } catch (RuntimeException e) {
+                own.close();
+                throw e;
+            }
+        }
+
+        private static Uploaded inPass(MeshData m, GpuBufferSlice v) {
             if (m.indexBuffer() == null) {
                 RenderSystem.AutoStorageIndexBuffer seq = RenderSystem.getSequentialBuffer(m.drawState().primitiveTopology());
                 // grows with device.createBuffer(initial data), which an open pass allows
-                return new Uploaded(v.buffer(), seq.getBuffer(m.drawState().indexCount()), seq.type(), m.drawState().indexCount(), baseVertex, 0);
+                return new Uploaded(v, seq.getBuffer(m.drawState().indexCount()), seq.type(), m.drawState().indexCount(), 0);
             }
             IndexType type = m.drawState().indexType();
             GpuBufferSlice i = transient_(m.indexBuffer(), Math.max(4, type.bytes), GpuBuffer.USAGE_INDEX);
-            return new Uploaded(v.buffer(), i.buffer(), type, m.drawState().indexCount(), baseVertex,
-                    RenderPasses.firstElement(i.offset(), type.bytes));
+            return new Uploaded(v, i.buffer(), type, m.drawState().indexCount(), RenderPasses.firstElement(i.offset(), type.bytes));
         }
 
         private static GpuBufferSlice transient_(ByteBuffer data, int alignment, int usage) {
@@ -514,7 +532,7 @@ public final class LegacyGl {
                     if (globals != null) pass.setUniform("Globals", globals);
                     replacedDefaults = projection != null || globals != null;
                 }
-                pass.setVertexBuffer(0, up.vertices().slice());   // the whole buffer: baseVertex places the mesh
+                pass.setVertexBuffer(0, up.vertices());   // never vertices().buffer().slice(): a transient buffer refuses it
                 var scissor = RenderSystem.getScissorStateForRenderTypeDraws();
                 if (scissor.enabled()) pass.enableScissor(scissor.x(), scissor.y(), scissor.width(), scissor.height());
                 for (int i = 0; i < 12; i++) {
@@ -526,7 +544,7 @@ public final class LegacyGl {
                             ? g.program().getProgramId() : -1, temps);
                 }
                 pass.setIndexBuffer(up.indices(), up.indexType());
-                pass.drawIndexed(up.indexCount(), 1, up.firstIndex(), up.baseVertex(), 0);
+                pass.drawIndexed(up.indexCount(), 1, up.firstIndex(), 0, 0);
             } finally {
                 try {
                     if (into == null) {

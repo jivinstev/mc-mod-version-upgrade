@@ -29,5 +29,7 @@ re:(method = "renderScreenEffect"[^;{]*?\(\s*Minecraft \w+,\s*PoseStack \w+,)(\s
 # the other draws the model double-sided (compile-clean, gates green). NeoForgeRenderTypes.getItemLayeredTranslucent is
 # the 1.21.1 state: entity-translucent shader, default CULL, translucent, lightmap, overlay, sorted -- same signature on
 # 1.21.5 and 1.21.8 (NeoForgeRenderPipelines.ENTITY_TRANSLUCENT_CULL). Rows do not reach overlays. CATALOG M73.
+# NOT on 26.3: NeoForge 26.3 has no NeoForgeRenderTypes.getItemLayeredTranslucent (cannot find symbol); vanilla's
+# RenderTypes.entityTranslucentCull(texture) is back there (RenderPipelines.ENTITY_TRANSLUCENT_CULL, culled). CATALOG M73.
 re:\bRenderType\.entityTranslucentCull\(	net.neoforged.neoforge.client.NeoForgeRenderTypes.getItemLayeredTranslucent(
 #!strict

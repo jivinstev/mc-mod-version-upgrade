@@ -26,7 +26,8 @@ re:\.getMainCamera\(\)\.getBlockPosition\(\)	.getMainCamera().blockPosition()
 re:\.getMainCamera\(\)\.getEntity\(\)	.getMainCamera().entity()
 # ---- RenderType.<factory>(..) -> RenderTypes.<factory>(..). The static factories left RenderType (whose only static is now
 # create(name, RenderSetup)) for RenderTypes. ONLY names that exist in 1.21.1 with the same arguments and the same culling:
-# entityCutout still culls and entityCutoutNoCull still does not on 1.21.11 (it is 26.2 that swaps them, CATALOG V60). Written
+# entityCutout still culls and entityCutoutNoCull still does not on 1.21.11 (26.1.2 swaps them: from 26.1.2 on
+# RenderPipelines.ENTITY_CUTOUT is withCull(false) and the culling one is entityCutoutCull, CATALOG V60). Written
 # fully qualified so no import has to be added.
 re:\bRenderType\.(entitySolid|entityCutout|entityCutoutNoCull|entityCutoutNoCullZOffset|entityTranslucent|entityTranslucentEmissive|entitySmoothCutout|entityDecal|entityNoOutline|entityShadow|entityGlint|armorCutoutNoCull|armorEntityGlint|eyes|energySwirl|lightning|lines|leash)\(	net.minecraft.client.renderer.rendertype.RenderTypes.\1(
 # ---- numeric permission levels (CATALOG V15, the same shape as 26.2): level 2 is Commands.LEVEL_GAMEMASTERS. Fully qualified.
