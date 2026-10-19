@@ -298,7 +298,7 @@ def self_check():
         # its versions and its verdict exactly as before origin was read
         expect(fork_versions(sv, lambda repo: ["neoforge-1.21.1", "neoforge-26.3", "neoforge-26.1.2"]) == {"1.21.1": 21},
                f"a single-version fork: origin's other neoforge-<v> names not counted: {fork_versions(sv, lambda repo: ['neoforge-26.3'])}")
-        run_sv = lambda *a: subprocess.run(["git", "-C", str(sv), *a], capture_output=True, text=True, check=True)
+        run_sv = lambda *a: subprocess.run(["git", "-C", str(sv), *a], capture_output=True, text=True, encoding="utf-8", check=True)
         run_sv("remote", "add", "origin", "https://github.com/owner/examplemod.git")
         res_sv = checks([("owner/examplemod", sv)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
                         lib=lambda n: False, linux=True, heads=lambda repo: ["neoforge-1.21.1", "neoforge-26.3"])
