@@ -8,7 +8,8 @@ The last step of every port: the fork's branch then shows, on every push, that t
 author's own Gradle build and passes the gates it was held to (tools/ci-gates.py, no model involved); and a
 tag `<mod>-<version>-mc<minecraft>` publishes the author-built JARs as a GitHub pre-release once the gates
 pass. Everything is read from the repository rather than guessed: the target from gradle.properties, the
-Java toolchain from build.gradle, the author's branch from origin/HEAD. --dep names a sibling port this one
+Java toolchain from build.gradle, the author's branch from origin/HEAD (else `git ls-remote --symref origin HEAD`,
+else `main` with a warning). --dep names a sibling port this one
 compiles against (published to mavenLocal by its own build first, as during the port).
 
 Per-platform jars (both opt-in; without them the workflow is byte-for-byte what it was, tools/golden/port-ci-*.yml):
@@ -38,7 +39,7 @@ check is best effort: it reads the workflow with `gh api` when gh is logged in, 
 The workflow downloads the Port CI kit (tools/port-ci-kit.py) -- a release asset holding only the gate runner and
 what it needs -- pinned by version and sha256, rather than checking this repository out. Standard library only.
 """
-import argparse, pathlib, re, subprocess, sys
+import argparse, json, os, pathlib, re, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "templates/upstream-harness/port-ci.yml"
@@ -84,21 +85,84 @@ def _get(url, accept=None):
         return r.read().decode("utf-8")
 
 
-def kit_pin(repo, version=None, sha=None):
+def default_branch(repo, fallback="main", say=None, ref=False):
+    """The name of origin's default branch (the authors' base): refs/remotes/origin/HEAD, which a fresh clone in a
+    cloud session may lack (weekly round 2026-10-19: it fell back to `main`, and the first PR run failed); then
+    `git ls-remote --symref origin HEAD`; only then `fallback`, with a warning naming the fix. ref: a found branch
+    as `origin/<name>` (the fallback as given)."""
+    say = say or (lambda m: print(m, file=sys.stderr))
+    r = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip() if ref else r.stdout.strip().split("/", 1)[-1]
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "ls-remote", "--symref", "origin", "HEAD"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=60,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        m = re.search(r"(?m)^ref: refs/heads/(\S+)\s+HEAD$", r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        m = None
+    if m:
+        say(f"port-ci: this clone has no origin/HEAD; origin's default branch, read with git ls-remote: {m.group(1)} "
+            "(git remote set-head origin -a records it)")
+        return f"origin/{m.group(1)}" if ref else m.group(1)
+    say(f"port-ci: WARNING: cannot tell origin's default branch (no origin/HEAD, and git ls-remote --symref origin HEAD "
+        f"named none): assuming {fallback}; fix: git remote set-head origin -a")
+    return fallback
+
+
+KIT_FLOOR = 1          # where the probe starts when no workflow pins a kit yet
+
+
+def pinned_kits(texts):
+    """The Port CI kit versions the workflow texts download (port-ci-kit-vN)."""
+    return sorted({int(k) for t in texts for k in re.findall(r"port-ci-kit-v(\d+)", t or "")})
+
+
+def probe_newest_kit(repo, floor, get=None, limit=200):
+    """The newest Port CI kit found by its release download (port-ci-kit-vN/SHA256SUMS), counting up from `floor`
+    (the highest kit a workflow already pins): for a session that can download github.com releases but not read
+    api.github.com (403). -> N, or None when not even `floor` downloads."""
+    get = get or _get
+    start, best = max(int(floor or KIT_FLOOR), 1), None
+    for n in range(start, start + limit):
+        try:
+            get(f"https://github.com/{repo}/releases/download/port-ci-kit-v{n}/SHA256SUMS")
+        except Exception:      # noqa: BLE001 -- the first kit above the newest found ends the count
+            if best is not None or n >= start + 2:
+                break
+            continue
+        best = n
+    return best
+
+
+def kit_pin(repo, version=None, sha=None, floor=None, get=None, say=None):
     """(version, sha256) of the Port CI kit the workflow downloads: the newest published kit unless a version is
     given, and the sha256 its release's own SHA256SUMS states unless one is given. A fork's CI then trusts a
     checksum, not a download (tools/port-ci-kit.py builds kits reproducibly, so `port-ci-kit.py sha` on the
-    release commit cross-checks it)."""
+    release commit cross-checks it). When the release list cannot be read (the API refused: weekly round 2026-10-19,
+    a 403 where release downloads worked), the newest kit is found by probing the downloads upward from `floor` (the
+    highest kit the fork's workflows pin), and `say` is told so."""
     import json
+    get = get or _get
+    say = say or (lambda m: print(m, file=sys.stderr))
     if version is None:
-        rels = json.loads(_get(f"https://api.github.com/repos/{repo}/releases?per_page=100"))
+        try:
+            rels = json.loads(get(f"https://api.github.com/repos/{repo}/releases?per_page=100"))
+        except Exception as e:      # noqa: BLE001 -- said, then the download probe
+            found = probe_newest_kit(repo, floor, get)
+            if found is None:
+                sys.exit(f"cannot list {repo}'s releases ({e}), and no port-ci-kit-vN/SHA256SUMS downloads from kit "
+                         f"{floor or KIT_FLOOR} up: pass --kit-version N")
+            say(f"port-ci: FALLBACK: cannot list {repo}'s releases ({e}); the newest Port CI kit was found by probing "
+                f"its release downloads upward from kit {floor or KIT_FLOOR}: kit v{found} (pass --kit-version N to choose)")
+            rels = [{"tag_name": f"port-ci-kit-v{found}"}]
         vs = [int(r["tag_name"].rsplit("v", 1)[1]) for r in rels
               if re.fullmatch(r"port-ci-kit-v\d+", r.get("tag_name", ""))]
         if not vs:
             sys.exit(f"{repo} has published no Port CI kit yet (merge to main publishes one)")
         version = max(vs)
     if sha is None:
-        sums = _get(f"https://github.com/{repo}/releases/download/port-ci-kit-v{version}/SHA256SUMS")
+        sums = get(f"https://github.com/{repo}/releases/download/port-ci-kit-v{version}/SHA256SUMS")
         m = re.search(rf"^([0-9a-f]{{64}})\s+port-ci-kit-v{version}\.tar\.gz$", sums, re.M)
         if not m:
             sys.exit(f"port-ci-kit-v{version}'s SHA256SUMS names no port-ci-kit-v{version}.tar.gz")
@@ -586,6 +650,70 @@ def regen_golden():
         (GOLDEN / f"port-ci-{name}.yml").write_text(fixture(deps, layer), encoding="utf-8")
         print(f"wrote tools/golden/port-ci-{name}.yml")
     return 0
+
+
+def want(case, good, expected, actual):
+    """One named self-check assertion; a failure prints what was expected and what came."""
+    if not good:
+        print(f"port-ci self-check FAIL [{case}]: expected {expected!r}, got {actual!r}")
+    return bool(good)
+
+
+def kit_probe_check():
+    """kit_pin when the release list is refused (a 403 from api.github.com; downloads work): the newest kit by probing
+    SHA256SUMS upward from the highest pinned one, said as a FALLBACK; a readable list is used as before."""
+    import urllib.error
+    have, said, ok = {7, 8, 9}, [], True
+    sums = lambda n: f"{'c' * 64}  port-ci-kit-v{n}.tar.gz\n"
+
+    def get(url, accept=None):
+        if "api.github.com" in url:
+            raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)
+        n = int(re.search(r"port-ci-kit-v(\d+)/SHA256SUMS$", url).group(1))
+        if n not in have:
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+        return sums(n)
+    got = kit_pin("o/m", floor=7, get=get, say=said.append)
+    ok &= want("kit_pin falls back to probing the downloads", got == (9, "c" * 64), (9, "c" * 64), got)
+    ok &= want("the fallback is said", len(said) == 1 and "FALLBACK" in said[0] and "403" in said[0] and "kit v9" in said[0],
+               "one FALLBACK line naming the 403 and kit v9", said)
+    ok &= want("probe from the floor", probe_newest_kit("o/m", 8, get) == 9 and probe_newest_kit("o/m", None, get) is None
+               and probe_newest_kit("o/m", 6, get) == 9 and probe_newest_kit("o/m", 10, get) is None, "9, None, 9, None",
+               [probe_newest_kit("o/m", f, get) for f in (8, None, 6, 10)])
+    said.clear()
+    listed = lambda url, accept=None: (json.dumps([{"tag_name": "port-ci-kit-v8"}, {"tag_name": "x"}]) if "api." in url
+                                       else sums(8))
+    ok &= want("a readable release list is used, nothing said", kit_pin("o/m", floor=7, get=listed, say=said.append) == (8, "c" * 64)
+               and not said, "(8, sha), no line", said)
+    ok &= want("pinned_kits reads the workflows", pinned_kits(["x port-ci-kit-v7.tar.gz", "port-ci-kit-v12/S", None]) == [7, 12],
+               [7, 12], pinned_kits(["x port-ci-kit-v7.tar.gz", "port-ci-kit-v12/S", None]))
+    return ok
+
+
+def default_branch_check():
+    """default_branch: origin/HEAD; without it, git ls-remote --symref; only then the fallback, with a warning."""
+    import tempfile
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        run = lambda *a, cwd=d: subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8")
+        run("init", "-q", "-b", "develop", "up")
+        run("-c", "user.email=x@example.com", "-c", "user.name=x", "commit", "-q", "--allow-empty", "-m", "x", cwd=d / "up")
+        run("clone", "-q", str(d / "up"), "co")
+        said = []
+        ok &= want("origin/HEAD", default_branch(d / "co", say=said.append) == "develop" and not said
+                   and default_branch(d / "co", ref=True) == "origin/develop", "develop", said)
+        run("remote", "set-head", "origin", "-d", cwd=d / "co")
+        got = default_branch(d / "co", say=said.append)
+        ok &= want("no origin/HEAD: ls-remote", got == "develop" and len(said) == 1 and "ls-remote" in said[0]
+                   and default_branch(d / "co", say=said.append, ref=True) == "origin/develop",
+                   "develop, said", (got, said))
+        said.clear()
+        run("remote", "set-url", "origin", str(d / "gone"), cwd=d / "co")
+        got = default_branch(d / "co", "master", say=said.append)
+        ok &= want("unreachable origin: the fallback, warned", got == "master" and "WARNING" in said[0]
+                   and "set-head origin -a" in said[0], "master + warning", (got, said))
+    return ok
 
 
 def variant_check():
@@ -1156,6 +1284,8 @@ def self_check():
         except SystemExit:
             pass
     ok &= variant_check()
+    ok &= kit_probe_check()
+    ok &= default_branch_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -1207,9 +1337,11 @@ def main():
     if not mc or not neo:
         sys.exit("gradle.properties has no minecraft_version / neo_version")
     branch = port_branch(repo, mc, a.branch)
-    base = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip().split("/", 1)[-1] or "main"
+    base = default_branch(repo)
     mrepo = migrator_repo()
-    kver, ksha = kit_pin(mrepo, a.kit_version, a.kit_sha)
+    wfs = sorted((repo / ".github/workflows").glob("*.y*ml")) if (repo / ".github/workflows").is_dir() else []
+    kver, ksha = kit_pin(mrepo, a.kit_version, a.kit_sha,
+                         floor=max(pinned_kits(f.read_text(encoding="utf-8", errors="replace") for f in wfs), default=None))
     values = {"TARGET": f"NeoForge {neo} (Minecraft {mc})", "BRANCH": branch, "MC": mc, "MODID": a.modid,
               "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
               "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}

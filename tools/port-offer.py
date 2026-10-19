@@ -25,6 +25,15 @@ CI_FILES = {".github/workflows/port-ci.yml", ".github/port-install.json"}
 MANIFEST = ".github/port-install.json"
 
 
+def _port_ci():
+    """tools/port-ci.py, for default_branch (origin/HEAD, else git ls-remote --symref, else the fallback, warned)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("port_ci_po", pathlib.Path(__file__).resolve().with_name("port-ci.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def git(repo, *a, check=True):
     r = subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8",
                        errors="replace")
@@ -491,7 +500,7 @@ def main():
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
     branch = a.branch or git(repo, "rev-parse", "--abbrev-ref", "HEAD")
-    base = a.base or git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False) or "origin/main"
+    base = a.base or _port_ci().default_branch(repo, "origin/main", ref=True)
     fork = gh_slug(git(repo, "remote", "get-url", "origin"))
     if not fork:
         sys.exit("origin is not a GitHub repository")
@@ -529,7 +538,7 @@ def main():
     name = display_name(props, upstream, fork, modid)
     up_default = "main"
     if upstream:
-        up_default = git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False).split("/", 1)[-1] or "main"
+        up_default = _port_ci().default_branch(repo, "main")
     ctx = {"modid": modid, "name": name, "target": target, "files": files, "ins": ins, "dels": dels, "tracked": tracked,
            "hunks": hunk_sizes(git(repo, "diff", "-U0", f"{base_sha}..{tip}")), "commits": port, "ci_commits": ci,
            "verified": verified(state) + (ci_verified(ci_run(fork, branch)) if ci else []),

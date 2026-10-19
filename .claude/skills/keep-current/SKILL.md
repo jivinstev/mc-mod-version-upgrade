@@ -236,8 +236,11 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    ungated is gated first). **The 1.21.x -> 26.x boundary** (the rename between 1.21.11 and 26.1.2 changes method and
    class names the rows do not cover) usually conflicts. With the **plain cascade** (a fix carried up, `cascade
    <at>..<newest>`) it stops at 26.1.2 with the files named; resolve them by hand inside the cascade -- in that version's worktree (`build/fork-branches/26.1.2`), `git merge
-   neoforge-1.21.11`, resolve each file through 26.1.2's rows and the rename (the 26.x name, the lower version's
-   change), commit, then `cascade --repo DIR 26.1.2..<newest>` -- and say in its PR which files were resolved by hand
+   --no-commit neoforge-1.21.11`, then `python3 tools/fork-branches.py remake --repo build/fork-branches/26.1.2 --branch
+   neoforge-26.1.2` (the cascade's rows step, which a plain `git merge` skips: every rows-only file re-made through
+   26.1.2's rows, each other changed file carried through the rows 26.1.2 adds; it lists what is still in conflict),
+   resolve each listed file through 26.1.2's rows and the rename (the 26.x name, the lower version's change), run
+   `remake` again, commit, then `cascade --repo DIR 26.1.2..<newest>` -- and say in its PR which files were resolved by hand
    (they are review rows). With `--apply` (the head cascade of the authors' code) nothing stops there: a file it cannot
    merge becomes a decision with an open REMERGE.json entry, answered through step 2's decisions (`--apply-decisions`),
    never by hand. Every version whose gated files changed reads not done until its gates (`--gates full` once
@@ -371,7 +374,10 @@ included), PR, pre-release and merge asks.
    when a token is set), a JDK for each version (21 for 1.21.x, **25 for 26.x**: found at `JAVA_HOME_25`, `/usr/lib/jvm`,
    `/opt`, `~/.gradle/jdks`, ...), and for the client gates **`libEGL.so.1`** (the 26.3 client loads it: `libegl1`) and
    **`XDG_RUNTIME_DIR`** (unset in a cloud session: `export XDG_RUNTIME_DIR=$(mktemp -d) && chmod 700
-   "$XDG_RUNTIME_DIR"`). Install or set what it names that the session can (apt, an export) and run it again; anything
+   "$XDG_RUNTIME_DIR"`); on a version-branch fork, its **`origin/HEAD`** (a WARNING, not missing: a fresh cloud clone may lack it, `git
+   remote set-head origin -a`) and **the remote each version's upstream freeze names** (`upstream=<remote>/<branch>`: without it the gates stop
+   with exit 19; it prints the fetch-only `git remote add`). A shallow single-branch clone of a version branch has its other version branches
+   read from origin by name (`git ls-remote`), so their JDK and libEGL are asked too. Install or set what it names that the session can (apt, an export, the git commands) and run it again; anything
    left missing other than a clone is reported in the first comment and the versions that need it wait.
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
    round/frozen.json --decisions-dir round/decisions`. It reads GitHub through `GITHUB_TOKEN` when that is set (REST), else

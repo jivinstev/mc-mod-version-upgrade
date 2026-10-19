@@ -26,9 +26,14 @@ import java.util.List;
  * draws no item. Call {@link #publish} at the end of every such {@code addRenderData} (GeckoLib's own
  * ItemInHandGeoLayer does the same).
  *
- * <p>The pose is still NOT moved to the bone's pivot before {@code submitItemStackRender} (as from 5.3, CATALOG M53/M55):
- * an override whose offsets were tuned on 4.x-5.2 starts with {@code RenderUtil.translateAndRotateMatrixForBone(pose,
- * bone)}. The base hook draws with {@code OverlayTexture.NO_OVERLAY} and the entity state's outline colour.
+ * <p>The pose is ALREADY at the bone's pivot, its rotation applied, when {@code submitItemStackRender} runs: 5.5.2 (as
+ * 5.4.5 on 1.21.11) runs the per-bone task after {@code RenderUtil.transformToBone}, whose last step is the bone's
+ * {@code translateToPivotPoint} (read from the 5.5.2 jar). Only 5.3 (1.21.10) left the pose away from the pivot, which
+ * a 1.21.10 override compensated for with {@code RenderUtil.translateAndRotateMatrixForBone(pose, bone)} (CATALOG
+ * M53); carried on to 5.4.5+ that call applies the pivot twice and draws a held item off the hand (a dependent fork:
+ * weapons about 0.85 block away, wrist chains about 2), so drop it there, and any {@code bone.translateToPivotPoint}
+ * before the offsets (CATALOG M55). The base hook draws with {@code OverlayTexture.NO_OVERLAY} and the entity state's
+ * outline colour.
  */
 public final class GeoItemLayers {
     private GeoItemLayers() {

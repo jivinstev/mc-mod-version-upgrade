@@ -2878,7 +2878,7 @@ class BranchRun(Run):
         fb = self.fb
         p = self.props()
         pv = self.parent_version() or p.get("base_minecraft_version", "1.21.1")
-        work, why = fb.worktree_for(self.repo, pv)
+        work, why = fb.stage_checkout(self.repo, pv)
         if work is None:
             return {"stop": f"cannot check out {fb.branch_name(pv)} to stage it: {why}", "code": 10,
                     "choices": [f"stage it by hand: git worktree add <dir> {fb.branch_name(pv)} && ./gradlew createMinecraftArtifacts"]}
