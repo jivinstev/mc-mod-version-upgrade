@@ -5190,6 +5190,13 @@ def _quiet(fn, *a, **k):
 
 def self_check():
     ok = True
+    # no background auto-gc/maintenance in the fixtures: a detached `git gc --auto` after a fixture's commits still writes
+    # under .git/objects while its temporary directory is removed (CI: "Directory not empty: .../fork/.git/objects")
+    n = int(os.environ.get("GIT_CONFIG_COUNT", "0") or 0)
+    for k, v in (("gc.auto", "0"), ("maintenance.auto", "false")):
+        os.environ[f"GIT_CONFIG_KEY_{n}"], os.environ[f"GIT_CONFIG_VALUE_{n}"] = k, v
+        n += 1
+    os.environ["GIT_CONFIG_COUNT"] = str(n)
 
     def expect(c, msg):
         nonlocal ok
