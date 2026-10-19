@@ -427,6 +427,18 @@ def port_version(version, target):
     return version if version.endswith(f"-mc{target}") else f"{version}-mc{target}"
 
 
+def is_version_tag(tag, target):
+    """Is `tag` a version branch's release tag for `target`: <mod>-<ver>-mc<target>, or a re-cut of it
+    (<mod>-<ver>-mc<target>-r<N>, Port CI's count-up when the plain tag exists at another commit)?"""
+    return bool(re.search(r"-mc" + re.escape(target) + r"(?:-r\d+)?$", tag or ""))
+
+
+def recut_number(tag):
+    """The re-cut number of a release tag: N for <...>-r<N>, 1 for the plain tag (the first cut)."""
+    m = re.search(r"-r(\d+)$", tag or "")
+    return int(m.group(1)) if m else 1
+
+
 SIDE_JAR = re.compile(r"-(?:sources|javadoc|api|dev|slim)\.jar$")
 
 
@@ -472,7 +484,7 @@ def resolve_port(ga, spec, target, checkouts):
     ver = port_version(spec["version"], target)
     co = checkouts.get(repo)
     list_err = None
-    if isinstance(co, str) and co.endswith(f"-mc{target}"):
+    if isinstance(co, str) and is_version_tag(co, target):
         # a version branch's release (<mod>-<ver>-mc<t>): its jars are named as the build names them, often with a
         # variant (lib-1.1.9_mr.jar); read the release's actual assets rather than guessing a name
         assets, list_err = release_assets(repo, co)
@@ -496,7 +508,7 @@ def resolve_port(ga, spec, target, checkouts):
             # a version-branch library releases ONE version per tag (<mod>-<ver>-mc<t>), its jar named as its build
             # names it; only a tag of exactly that version may fall back to the plain name (a layer release's plain
             # jar is the base version's)
-            if not co.endswith(f"-mc{target}"):
+            if not is_version_tag(co, target):
                 return {"missing": f"{repo}'s release {co} has no {stem}-mc{target}.jar ({e})", "source": repo}
             url = f"https://github.com/{repo}/releases/download/{co}/{spec['asset']}"
             try:
@@ -1057,13 +1069,21 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
                 # library first: the dependent's target T builds only against a library T that is done
                 done, why, notes = lk["library_done"](spec["repo"], co, target)
                 pre = lk["prerelease"](spec["repo"], co, target) if not done and isinstance(co, str) else (False, "")
+                was = (prereleases or {}).get(ga)
+                if (not done and not pre[0] and was and isinstance(co, str) and pin and pin[0] == ver
+                        and f"/releases/download/{co}/" in pin[1] and pre[1].startswith("cannot read")):
+                    # the same release, already pinned as a library pre-release with green gates, re-named by a setup's
+                    # re-resolve whose session cannot read GitHub's release API: the earlier check stands, said so
+                    print(f"layer-deps: {target} {ga}: {co} kept as the library pre-release it was pinned as (the pin is "
+                          f"unchanged; this run could not re-check it: {pre[1]})")
+                    pre = (True, None)
                 if not done and isinstance(co, pathlib.Path) and allow_undone:
                     row["undone"] = why
                 elif not done and pre[0]:
                     # a dependent's pre-release may pin the library's pre-release; DEPS.md marks it, and the dependent's
                     # version is not done (no full Release, no promotion) until the library's is
-                    row["prerelease"] = f"{pre[1]}; its {target} is not done: {why}"
-                    row["library"] = f"{target} NOT done, pre-release pinned: {pre[1]}"
+                    row["prerelease"] = was if pre[1] is None else f"{pre[1]}; its {target} is not done: {why}"
+                    row["library"] = f"{target} NOT done, pre-release pinned: {pre[1] or was}"
                 elif not done:
                     row.update({"refused": f"{spec['repo']}'s {target} target is not done: {why}", "source": spec["repo"]})
                     refused.append(f"{ga} ({row['refused']})")
@@ -1141,13 +1161,22 @@ def current_pins(repo, target):
 
 
 def current_prereleases(repo, target):
-    """{group:module: why} for each pin of the block marked as a library pre-release (PRERELEASE_KEY)."""
+    """{group:module: why} for each pin of the block marked as a library pre-release (PRERELEASE_KEY); a pin the block
+    does not mark but DEPS.md does (a block written before the key existed, or by hand) is taken from DEPS.md's
+    "Library pre-release" line -- a re-resolve that keeps the pin keeps the mark (weekly round 2026-10-19: each
+    fork-port.py setup's re-resolve dropped it, and the dependent read done)."""
     tp = props_file(repo, target)
     text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
     if BEGIN not in text or END not in text:
         return {}
-    return {k.replace("\\:", ":"): v for k, v in
-            re.findall(r"(?m)^" + re.escape(PRERELEASE_KEY) + r"(.+?)=(.*?)\s*$", text[text.index(BEGIN):text.index(END)])}
+    got = {k.replace("\\:", ":"): v for k, v in
+           re.findall(r"(?m)^" + re.escape(PRERELEASE_KEY) + r"(.+?)=(.*?)\s*$", text[text.index(BEGIN):text.index(END)])}
+    md = target_dir(repo, target) / "DEPS.md"
+    for ga, why in re.findall(re.escape(PRERELEASE_MARK) + r" `([^`]+)` is pinned to a library pre-release whose \S+ is "
+                              r"not done \((.*?)\)\. This version may cut",
+                              md.read_text(encoding="utf-8") if md.is_file() else ""):
+        got.setdefault(ga, why)
+    return got
 
 
 def write(repo, target, rows, stop):
@@ -1317,6 +1346,32 @@ def self_check():
         rows, stop = resolve(repo, "1.21.4", {}, lk_p, pins=current_pins(repo, "1.21.4"))
         write(repo, "1.21.4", rows, stop)
         expect(not current_prereleases(repo, "1.21.4"), "control: without the carried mark it is gone")
+        # weekly round 2026-10-19: each fork-port.py setup re-resolved and the "Library pre-release" mark went. (1) a
+        # block that does not carry the key while DEPS.md marks the pin: the mark is read from DEPS.md
+        mark = "lib-1.0-mc1.21.4 is a pre-release with green gates (GATES.md at the tag); its 1.21.4 is not done: x"
+        rows, stop = resolve(repo, "1.21.4", {}, lk_p, pins={"com.example:lib": pin}, prereleases={"com.example:lib": mark})
+        write(repo, "1.21.4", rows, stop)
+        tpx = props_file(repo, "1.21.4")
+        tpx.write_text("".join(ln for ln in tpx.read_text(encoding="utf-8").splitlines(True)
+                               if not ln.startswith(PRERELEASE_KEY)), encoding="utf-8")
+        expect(current_prereleases(repo, "1.21.4") == {"com.example:lib": mark},
+               f"a pre-release mark only DEPS.md carries is read back: {current_prereleases(repo, '1.21.4')}")
+        # (2) the same release named again by --port-release while the release API cannot be read: kept, marked, said
+        pin_x = ("com.example:lib:1.0-mc1.21.4", "https://github.com/owner/lib/releases/download/x/lib-1.0_a-mc1.21.4.jar " + "b" * 64)
+        lk_x = dict(lk_p, port=lk["port"], library_done=lambda r, co, t: (False, "no green Gate C", []),
+                    prerelease=lambda r, co, t: (False, f"cannot read {r}'s release {co} (HTTP Error 403: Forbidden)"))
+        rows, stop = resolve(repo, "1.21.4", {"owner/lib": "x"}, lk_x, pins={"com.example:lib": pin_x},
+                             prereleases={"com.example:lib": mark})
+        lib_row = [r for r in rows if r["module"] == "lib"][0]
+        expect(stop is None and lib_row.get("prerelease") == mark and not lib_row.get("refused"),
+               f"the same pre-release re-named when the API cannot be read: kept with its mark: {stop} {lib_row}")
+        for why_, pins_, pre_x, co_ in (("a full Release", {"com.example:lib": pin_x}, {"com.example:lib": mark}, "x"),
+                                        ("another tag", {"com.example:lib": pin_x}, {"com.example:lib": mark}, "y"),
+                                        ("never marked", {"com.example:lib": pin_x}, {}, "x")):
+            lk_y = dict(lk_x, prerelease=lambda r, co, t, w=why_: (False, f"{co} is {w}") if w == "a full Release"
+                        else (False, f"cannot read {r}'s release {co} (HTTP Error 403)"))
+            rows, stop = resolve(repo, "1.21.4", {"owner/lib": co_}, lk_y, pins=pins_, prereleases=pre_x)
+            expect(stop and "library first" in stop, f"control ({why_}): refused as before: {stop}")
         del pinned[1:]                           # the kept-pin installs above are not the dry-run case's
         rows, stop = resolve(repo, "1.21.4", {"owner/lib": "newtag"}, lk_p, pins={"com.example:lib": pin})
         expect(ported == ["com.example:lib"], "a run that names the sibling resolves it afresh")
@@ -1405,6 +1460,28 @@ def self_check():
         expect(got.get("to") == "com.example:lib:1.1-mc1.21.8" and got.get("pin", "").startswith("https://dl.example/examplelib-1.2_cf.jar ")
                and m2 == [("com.example:lib", "1.1-mc1.21.8", b"examplelib-1.2_cf.jar")],
                f"--port-release of a version branch's release: its _cf asset, one -mc suffix: {got} {m2}")
+        # a re-cut release tag (<mod>-<ver>-mc<t>-r<N>, Port CI's count-up; weekly round 2026-10-19: `--port-release
+        # owner/lib@lib-1.1.9-mc26.3-r3` was read as a layer release and failed) is the same version branch's release
+        expect(is_version_tag("examplelib-1.2-mc1.21.8", "1.21.8") and is_version_tag("examplelib-1.2-mc1.21.8-r3", "1.21.8")
+               and not is_version_tag("examplelib-1.2-mc1.21.8-r3", "1.21.80") and not is_version_tag("x-mc1.21.8-rc1", "1.21.8")
+               and not is_version_tag("examplelib-1.2", "1.21.8") and recut_number("x-mc1.21.8") == 1
+               and recut_number("x-mc1.21.8-r3") == 3, "is_version_tag / recut_number: -mc<t> with an optional -r<N>")
+        m2.clear()
+        try:
+            g_["_get"] = lambda url, h=None: api if "/releases/tags/" in url else url.rsplit("/", 1)[1].encode()
+            g_["install_m2"] = lambda ga, ver, data: m2.append((ga, ver, data))
+            got3 = resolve_port("com.example:lib", spec, "1.21.8", {"owner/lib": "examplelib-1.2-mc1.21.8-r3"})
+            asked3 = []
+            g_["_get"] = lambda url, h=None: (asked3.append(url), (_ for _ in ()).throw(OSError("blocked"))
+                                              if "/releases/tags/" in url or url.endswith("-mc1.21.8.jar") else b"jar")[1]
+            got3b = resolve_port("com.example:lib", spec, "1.21.8", {"owner/lib": "examplelib-1.2-mc1.21.8-r3"})
+        finally:
+            g_.update(saved)
+        expect(got3.get("to") == "com.example:lib:1.1-mc1.21.8" and got3.get("pin", "").startswith("https://dl.example/examplelib-1.2_cf.jar ")
+               and "examplelib-1.2-mc1.21.8-r3" in got3.get("source", ""),
+               f"--port-release of a re-cut tag: the version branch's release, its own asset: {got3}")
+        expect(got3b.get("to") == "com.example:lib:1.1-mc1.21.8" and asked3[-1].endswith("/examplelib-1.2-mc1.21.8-r3/examplelib-1.1_cf.jar"),
+               f"a re-cut tag that cannot be listed falls back to the pinned asset name, as the plain tag does: {got3b} {asked3}")
         # the library/dependent loop (weekly-round dry run, 2026-10-18): a library version is done only once a dependent's
         # Gate C is recorded on its jar, and the dependent could not pin it until it was done. A version-branch library's
         # PRE-RELEASE with green gates is taken for the dependent's pre-release (marked in DEPS.md, the dependent's

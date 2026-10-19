@@ -22,7 +22,13 @@ prints one line per check -- `ok` or `MISSING` with what to do -- and exits 1 wh
 The versions are each fork's version branches (neoforge-<v> with .port/<v>/branch.properties) and its head's
 gradle.properties minecraft_version; --versions names them instead. --no-client skips the client's needs (libEGL,
 XDG_RUNTIME_DIR) for a round that runs no Gate C. A single-version fork is checked the same way, at its one version.
-Read-only: it writes nothing and fetches nothing. Standard library only.
+  origin/HEAD each clone's refs/remotes/origin/HEAD (the authors' base; fix: git remote set-head origin -a).
+  remotes     each remote a version's upstream freeze names (upstream=<remote>/<branch>): without it the gates stop
+              with exit 19; the fix is the fetch-only `git remote add` tools/fork-port.py prints.
+
+A shallow single-branch clone holds no ref of its other version branches: their names are read from origin
+(git ls-remote --heads origin 'neoforge-*') and each counts at its version's JDK.
+Read-only: it writes nothing and fetches nothing (git ls-remote is its one network read). Standard library only.
 """
 import argparse, importlib.util, os, pathlib, re, shutil, subprocess, sys
 
@@ -52,9 +58,23 @@ def origin_slug(repo):
     return m.group(1) if m else None
 
 
-def fork_versions(repo):
+def origin_heads(repo):
+    """The branch names origin has (git ls-remote --heads origin 'neoforge-*'; never prompts), or [] when it cannot be
+    read: a shallow single-branch clone has none of the other version branches as refs."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "ls-remote", "--heads", "origin", "neoforge-*"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=60,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [ln.split("refs/heads/", 1)[1] for ln in r.stdout.splitlines() if "refs/heads/" in ln] if r.returncode == 0 else []
+
+
+def fork_versions(repo, heads=origin_heads):
     """{version: java major} a clone builds: its version branches (local or origin's) and its checked-out
-    gradle.properties minecraft_version, each version's own java_version first."""
+    gradle.properties minecraft_version, each version's own java_version first; then a version branch origin has that
+    this clone holds no ref of (a shallow single-branch clone; weekly round 2026-10-19: its 26.x versions, and so JDK 25
+    and libEGL, went unchecked), by its name (neoforge-<version>) and that version's JDK."""
     sg = _load("shipped_gate_pf", "shipped-gate.py")
     out = {}
     rc, refs = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/neoforge-*", "refs/remotes/origin/neoforge-*")
@@ -67,6 +87,41 @@ def fork_versions(repo):
     mc = sg.gradle_prop(repo, "minecraft_version")
     if mc and mc not in out:
         out[mc] = sg.jdk_for(repo, mc)
+    local = set(refs.split()) if rc == 0 else set()
+    for b in heads(repo):
+        v = b.split("neoforge-", 1)[1] if b.startswith("neoforge-") else ""
+        if (re.fullmatch(r"\d+\.\d+(?:\.\d+)?", v) and v not in out and b not in local
+                and f"origin/{b}" not in local):
+            out[v] = sg.java_major(v)
+    return out
+
+
+def remote_checks(repo):
+    """[(ok, what, detail)] for the remotes a round's gates read: origin/HEAD (the authors' base port-ci.py and
+    port-offer.py name; a fresh cloud clone may lack it), and each remote a version's upstream freeze names
+    (upstream=<remote>/<branch> in .port/<v>/branch.properties or .multiversion/base.properties): without it the gates
+    stop with exit 19 (tools/fork-port.py DRIFT_EXIT: the freeze cannot be compared)."""
+    out = []
+    rc, _ = git(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    out.append((rc == 0, f"origin/HEAD of {repo}", "set" if rc == 0 else
+                f"not set (the authors' base is read from it): git -C {repo} remote set-head origin -a"))
+    rc, refs = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/neoforge-*", "refs/remotes/origin/neoforge-*")
+    named = {}
+    for ref in (refs.splitlines() if rc == 0 else []) + ["HEAD"]:
+        v = ref.split("neoforge-", 1)[1] if "neoforge-" in ref else None
+        for f in ([f".port/{v}/branch.properties"] if v else []) + [".multiversion/base.properties"]:
+            rc2, props = git(repo, "show", f"{ref}:{f}")
+            m = re.search(r"(?m)^upstream\s*=\s*([\w.-]+)/\S+\s*$", props) if rc2 == 0 else None
+            if m:
+                named.setdefault(m.group(1), m.group(0).split("=", 1)[1].strip())
+    remotes = set(git(repo, "remote")[1].split())
+    for remote, ref in sorted(named.items()):
+        if remote in remotes:
+            out.append((True, f"remote {remote} of {repo}", f"the upstream freeze's {ref}"))
+            continue
+        hint = _load("fork_port_pf", "fork-port.py").add_remote_hint(repo, ref) or ""
+        out.append((False, f"remote {remote} of {repo}", f"the upstream freeze names {ref}, and the gates stop with exit 19 "
+                    "without it" + hint))
     return out
 
 
@@ -86,7 +141,7 @@ def has_lib(name, env=None, dirs=None):
     return any((pathlib.Path(d) / name).exists() for d in dirs)
 
 
-def checks(forks, versions=None, client=True, env=None, find_java=None, lib=None, linux=None, gh=None):
+def checks(forks, versions=None, client=True, env=None, find_java=None, lib=None, linux=None, gh=None, heads=None):
     """[(ok, what, detail)] for the round's needs. forks: [(owner/repo, dir)]. The keyword arguments stand in for the
     machine in the self-check."""
     env = os.environ if env is None else env
@@ -107,7 +162,8 @@ def checks(forks, versions=None, client=True, env=None, find_java=None, lib=None
             out.append((False, f"clone of {slug}", f"{p} is a clone of {got}, not {slug}"))
             continue
         out.append((True, f"clone of {slug}", str(p)))
-        for v, j in (fork_versions(p) if versions is None else {}).items():
+        out += remote_checks(p)
+        for v, j in (fork_versions(p, heads or origin_heads) if versions is None else {}).items():
             need.setdefault(j, set()).add(v)
     for v in versions or ():
         need.setdefault(25 if re.match(r"26\.", v) else 21, set()).add(v)
@@ -159,10 +215,12 @@ def self_check():
             run("add", "-A"); run("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", v)
         run("checkout", "-q", "neoforge-1.21.1")
         run("remote", "add", "origin", "https://github.com/owner/examplelib.git")
+        run("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/neoforge-1.21.1")
+        none = lambda repo: []
         jdks = {21: "/jdk21/bin/java"}
         xdg = d / "xdg"; xdg.mkdir()
         res = checks([("owner/examplelib", lib), ("owner/examplemod", d / "absent")], env={"GITHUB_TOKEN": "x"},
-                     find_java=jdks.get, lib=lambda n: False, linux=True)
+                     find_java=jdks.get, lib=lambda n: False, linux=True, heads=none)
         by = {w: (ok, det) for ok, w, det in res}
         expect(not by["clone of owner/examplemod"][0] and "scheduled task's repositories" in by["clone of owner/examplemod"][1],
                f"a missing clone says to attach it to the task: {by}")
@@ -170,13 +228,55 @@ def self_check():
         expect(by["JDK 21"][0] and not by["JDK 25"][0] and "26.1.2, 26.3" in by["JDK 25"][1], f"JDK per version: {by}")
         expect(not by["libEGL.so.1"][0] and "26.3" in by["libEGL.so.1"][1] and not by["XDG_RUNTIME_DIR"][0], f"client needs: {by}")
         res = checks([("owner/examplelib", lib)], env={"XDG_RUNTIME_DIR": str(xdg)}, find_java=lambda j: f"/jdk{j}",
-                     lib=lambda n: True, linux=True, gh="/usr/bin/gh")
+                     lib=lambda n: True, linux=True, gh="/usr/bin/gh", heads=none)
         expect(all(ok for ok, _w, _d in res) and any(w == "github" and "gh command line" in det for _o, w, det in res),
                f"everything there: all ok, gh named: {res}")
-        res = checks([("owner/examplelib", lib)], versions=["1.21.1"], env={}, find_java=lambda j: None, linux=False, gh="")
+        res = checks([("owner/examplelib", lib)], versions=["1.21.1"], env={}, find_java=lambda j: None, linux=False, gh="", heads=none)
         expect([w for ok, w, _d in res if not ok] == ["github", "JDK 21"], f"--versions, no client off Linux: {res}")
-        res = checks([("owner/examplelib", lib)], client=False, env={"GH_TOKEN": "y"}, find_java=lambda j: "/j", linux=True)
+        res = checks([("owner/examplelib", lib)], client=False, env={"GH_TOKEN": "y"}, find_java=lambda j: "/j", linux=True,
+                     heads=none)
         expect(not any(w in ("libEGL.so.1", "XDG_RUNTIME_DIR") for _o, w, _d in res), "--no-client: no client checks")
+        # weekly round 2026-10-19: (a) a shallow single-branch clone holds no ref of its 26.x branches: their names
+        # from origin count, at their version's JDK (and the 26.3 client's libEGL); (b) the remote an upstream freeze
+        # names; (c) origin/HEAD
+        sh = d / "shallow"
+        subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(lib), str(sh)], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(sh), "remote", "set-url", "origin", "https://github.com/owner/examplelib.git"], check=True)
+        subprocess.run(["git", "-C", str(sh), "remote", "set-head", "origin", "-d"], check=True, capture_output=True)
+        names = lambda repo: ["neoforge-1.21.1", "neoforge-26.1.2", "neoforge-26.3", "neoforge-1.21.x", "neoforge-26.3-wip"]
+        expect(fork_versions(sh, none) == {"1.21.1": 21}, f"control: the clone's refs alone miss 26.x: {fork_versions(sh, none)}")
+        expect(fork_versions(sh, names) == {"1.21.1": 21, "26.1.2": 25, "26.3": 25},
+               f"origin's version branches by name, at their JDK: {fork_versions(sh, names)}")
+        res = checks([("owner/examplelib", sh)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
+                     lib=lambda n: False, linux=True, heads=names)
+        by = {w: (ok, det) for ok, w, det in res}
+        expect(not by["JDK 25"][0] and "26.1.2, 26.3" in by["JDK 25"][1] and not by["libEGL.so.1"][0],
+               f"the shallow clone's 26.x needs are checked: {by}")
+        expect(not by[f"origin/HEAD of {sh}"][0] and f"git -C {sh} remote set-head origin -a" in by[f"origin/HEAD of {sh}"][1],
+               f"a clone with no origin/HEAD: missing, with the fix: {by}")
+        expect(fork_versions(lib, names) == fork_versions(lib, none) == {"1.21.1": 21, "26.1.2": 25, "26.3": 25},
+               "a clone holding the branches: the same versions whether origin is read or not")
+        sv = d / "single"; sv.mkdir()
+        subprocess.run(["git", "-C", str(sv), "init", "-q", "-b", "neoforge-1.21.1"], check=True)
+        (sv / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        expect(fork_versions(sv, lambda repo: ["neoforge-1.21.1"]) == fork_versions(sv, none) == {"1.21.1": 21},
+               "a single-version fork: its one version, as before")
+        run("checkout", "-q", "neoforge-26.3")
+        (lib / ".port/26.3/branch.properties").write_text("minecraft_version=26.3\njava_version=25\nupstream=authors/main\n"
+                                                         "upstream_commit=" + "a" * 40 + "\n", encoding="utf-8")
+        run("add", "-A"); run("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "freeze")
+        run("checkout", "-q", "neoforge-1.21.1")
+        rm = {w: (ok, det) for ok, w, det in remote_checks(lib)}
+        expect(not rm[f"remote authors of {lib}"][0] and "exit 19" in rm[f"remote authors of {lib}"][1]
+               and "git remote add authors" in rm[f"remote authors of {lib}"][1]
+               and "set-url --push authors DISABLED" in rm[f"remote authors of {lib}"][1] and rm[f"origin/HEAD of {lib}"][0],
+               f"the freeze's remote missing: exit 19 named, the fetch-only add command: {rm}")
+        run("remote", "add", "authors", "https://github.com/owner/upstreamlib.git")
+        rm = {w: (ok, det) for ok, w, det in remote_checks(lib)}
+        expect(rm[f"remote authors of {lib}"][0], f"the remote there: ok: {rm}")
+        expect([w for ok, w, _d in remote_checks(sv) if not ok] == [f"origin/HEAD of {sv}"] and len(remote_checks(sv)) == 1,
+               f"a single-version fork with no freeze: only origin/HEAD is asked: {remote_checks(sv)}")
         expect(has_lib("libX.so.1", {}, [str(d)]) is False and (d / "libX.so.1").write_bytes(b"") == 0
                and has_lib("libX.so.1", {}, [str(d)]), "has_lib looks in the directories given")
     for m in bad:

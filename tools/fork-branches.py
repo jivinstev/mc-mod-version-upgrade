@@ -16,6 +16,7 @@
     python3 tools/fork-branches.py freeze      --repo DIR --target T [--upstream REMOTE/BRANCH] [--library owner/repo@TAG]
                                                [--accept-upstream-drift]
     python3 tools/fork-branches.py library-record --repo LIB --target T --dependent DIR [--slug owner/repo]
+    python3 tools/fork-branches.py remake      --repo DIR --branch neoforge-<v>   # after a hand-made merge: the rows' step
     python3 tools/fork-branches.py ci          --repo DIR --target T --modid ID [--run]
     python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...]
     python3 tools/fork-branches.py --self-check [--deep | --platform]   # --deep: before a release; --platform: an OS-only leg
@@ -2566,6 +2567,153 @@ def worktree_for(repo, t):
     return w, None
 
 
+CONFLICT_MARK = re.compile(rb"(?m)^(<{7}|>{7}) ")
+
+
+def remake(work, t, say=print):
+    """The cascade's rows-as-a-tool step for a merge a person makes by hand (`git merge <lower>` at a version boundary
+    the cascade stopped at): on the checkout `work` of version t's branch, during the merge (MERGE_HEAD) or right after
+    its merge commit, each .java file the merge changed is re-made as merge_up makes it -- a file both sides had from
+    the rows alone (the parent's equal to its rows over the port branch it carries, t's equal to t's rows over the one
+    it carried) is re-made from the port branch's new file through t's rows (a conflict there resolved); every other
+    such file is merged again (git merge-file) with the parent's two sides put through the rows t adds over its parent
+    (own_table, in their code, comments kept) -- written when that merge is clean, listed when it is not, and left
+    alone once a person resolved it; a file t dropped stays dropped. Staged, never committed. Weekly round 2026-10-19: a hand-resolved 1.21.11 -> 26.1.2
+    merge skipped this, and its fixer scripted own_table/apply_rules over 63 files. -> exit code (1: conflicts left)."""
+    work = pathlib.Path(work).resolve()
+    b = branch_name(t)
+    cur = git(work, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if cur != b:
+        say(f"fork-branches: remake: {work} is on {cur or '?'}, not {b}: run it in the checkout of {b} that holds the merge")
+        return 2
+    mh = git(work, "rev-parse", "-q", "--verify", "MERGE_HEAD").stdout.strip()
+    if mh:
+        pre, parent_ref, committed = git(work, "rev-parse", "HEAD").stdout.strip(), mh, False
+    else:
+        two = git(work, "rev-parse", "-q", "--verify", "HEAD^2").stdout.strip()
+        if not two:
+            say(f"fork-branches: remake: no merge on {b} (no MERGE_HEAD, and HEAD is not a merge commit): run it during "
+                "the merge or right after its commit")
+            return 2
+        pre, parent_ref, committed = git(work, "rev-parse", "HEAD^1").stdout.strip(), two, True
+    read_t = reader_of_ref(work, pre)
+    props = parse_props(read_t(f"{REC}/{t}/{BRANCH_PROPS}"))
+    if not props:
+        say(f"fork-branches: remake: {b} has no {REC}/{t}/{BRANCH_PROPS}: not a version branch"); return 2
+    port_name = props.get("port_branch") or branch_name(props.get("base_minecraft_version", "1.21.1"))
+    port_tip = resolve_branch(work, port_name)
+    if not port_tip:
+        say(f"fork-branches: remake: no branch {port_name} (the port branch) in this clone"); return 2
+    parent_version = props.get("parent_minecraft_version") if props.get("parent") != port_name else None
+    port_new = parent_ref if parent_version is None else git(work, "merge-base", parent_ref, port_tip).stdout.strip()
+    port_mb = git(work, "merge-base", pre, port_tip).stdout.strip()
+    unmerged = {x for x in git(work, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if x}
+    changed = {x for x in git(work, "diff", "--name-only", pre).stdout.splitlines() if x} | unmerged
+    rn = read_t if any(f.startswith(REC + "/") for f in unmerged) else reader_of_root(work)
+    rows_new = rows_tree(work, port_new, rn, t, chain_read(rn, t))
+    rows_old = rows_tree(work, port_mb, read_t, t, chain_read(read_t, t))
+    rp = reader_of_ref(work, parent_ref)
+    rows_par = rows_tree(work, port_new, rp, parent_version, chain_read(rp, parent_version)) if parent_version else None
+    own = rules_of(own_table(rn, t, parent_version))
+    strip = props.get("strip_onlyin") == "true"
+    mb_p = git(work, "merge-base", pre, parent_ref).stdout.strip()
+
+    def conv(data):
+        text = apply_rules_code(data.decode("utf-8", "surrogateescape"), own)
+        return (strip_onlyin_text(text) if strip else text).encode("utf-8", "surrogateescape")
+    remade, carried, dropped, left, kept = [], [], [], [], []
+    for f in sorted(x for x in changed if re.match(r"^src/[^/]+/java/.+\.java$", x)):
+        t_pre, p_new = blob_at(work, pre, f), blob_at(work, parent_ref, f)
+        if t_pre is None and blob_at(work, port_mb, f) is not None:
+            if (work / f).exists() or f in unmerged:
+                git(work, "rm", "-q", "-f", "--", f)
+            dropped.append(f)
+            continue
+        p_mech = parent_version is None or p_new == rows_par.get(f)
+        if p_mech and t_pre == rows_old.get(f):
+            new = rows_new.get(f)
+            if new is None:
+                if (work / f).exists() or f in unmerged:
+                    git(work, "rm", "-q", "-f", "--", f)
+            else:
+                (work / f).parent.mkdir(parents=True, exist_ok=True)
+                (work / f).write_bytes(new)
+                git(work, "add", "--", f)
+            remade.append(f)
+            continue
+        if not (work / f).is_file():
+            continue
+        cur = (work / f).read_bytes()
+        pb = blob_at(work, mb_p, f) if mb_p else None
+        if t_pre is None and pb is None and p_new is not None and cur == p_new:
+            new = conv(p_new)                       # a file the parent added, taken as it is: in t's names
+            if new != cur:
+                (work / f).write_bytes(new)
+                git(work, "add", "--", f)
+                carried.append(f)
+            continue
+        if t_pre is None or pb is None or p_new is None:
+            if CONFLICT_MARK.search(cur):
+                left.append(f)
+            continue
+        # git merged the parent's change in the PARENT's names: merge it again with both of the parent's sides put
+        # through the rows t adds (only ever applied to the parent's text, never to t's: a swap row is not idempotent),
+        # unless a person already resolved the file (no markers, and not what git's own merge made)
+        if not CONFLICT_MARK.search(cur) and cur != merge_file(t_pre, pb, p_new)[1]:
+            kept.append(f)
+            continue
+        clean, merged = merge_file(t_pre, conv(pb), conv(p_new))
+        if not clean:
+            left.append(f)
+            continue
+        if merged != cur:
+            (work / f).write_bytes(merged)
+            git(work, "add", "--", f)
+            carried.append(f)
+    say(f"fork-branches: remake {b}: {len(remade)} file(s) the rows alone make re-made from {port_name}'s code through "
+        f"{t}'s rows; {len(carried)} file(s) changed by hand carried through the rows {t} adds (code only, comments kept)"
+        + (f"; {len(dropped)} dropped on {t}, kept dropped" if dropped else "")
+        + (f"; {len(kept)} already resolved by hand, left as they are" if kept else "") + "; staged")
+    for f in carried:
+        say(f"fork-branches: remake: carried through {t}'s rows (a review row): {f}")
+    if left:
+        say(f"fork-branches: remake: {len(left)} file(s) still hold conflict markers -- resolve them through {t}'s rows by "
+            f"hand, then run remake again: {', '.join(left[:6])}")
+        return 1
+    say("fork-branches: remake: " + ("commit them (a follow-up commit, or git commit --amend on the merge)" if committed
+                                     else "finish the merge: git commit") + f", then cascade --repo <clone> {t}..<newest>")
+    return 0
+
+
+def stage_checkout(repo, t, say=print):
+    """A clean tree of version t's branch to stage (createMinecraftArtifacts) and read, never committed to:
+    worktree_for's checkout when it can make one; else -- the branch held by another worktree, a person's or this
+    tool's own build/fork-branches/<t> of the main clone (weekly round 2026-10-19: fork-port.py's moves stage stopped on
+    it) -- a DETACHED worktree at the branch's commit under build/fork-port/stage/<t>, which checks out no branch, so
+    no worktree that holds one is touched (kept between runs, so its Gradle caches stay warm). -> (path, why not)."""
+    repo = pathlib.Path(repo).resolve()
+    w, why = worktree_for(repo, t)
+    if w is not None:
+        return w, None
+    c = resolve_branch(repo, branch_name(t))
+    if not c:
+        return None, why
+    d = repo / "build" / "fork-port" / "stage" / t
+    if d.is_dir() and (d / ".git").exists():
+        r = git(d, "checkout", "-q", "--detach", "--force", c)
+        if r.returncode:
+            return None, f"{why}; and cannot move the stage worktree {d} to {c[:12]}: {r.stderr.strip()[-200:]}"
+    else:
+        d.parent.mkdir(parents=True, exist_ok=True)
+        git(repo, "worktree", "prune")
+        r = git(repo, "worktree", "add", "--detach", str(d), c)
+        if r.returncode:
+            return None, f"{why}; and cannot make a detached stage worktree: {r.stderr.strip()[-300:]}"
+    say(f"fork-branches: {branch_name(t)} is not checked out here ({why}); staging a detached worktree at its commit "
+        f"{c[:12]} instead: {d} (no branch checked out, nothing else touched)")
+    return d, None
+
+
 RUN_OUTPUT_NAMES = ("GATES.md", "GATES-RED.md", "RESIDUE.md", "COST.md", "TEST-ITEMS.md", "INVENTORY-CHECK.json",
                     "DRIFT.md", "DEPS.md", "REVIEW.md")
 
@@ -3564,11 +3712,13 @@ def ci_args(repo, t, modid, kit_version=None):
     """The tools/port-ci.py arguments that give version branch t the single-version workflow at its version: the port
     branch's installed workflow read back (port-ci.py recover_args), then remap_ci_args; `--branch neoforge-<t>`, so
     the triggers name the version branch whichever branch the checkout it runs on has (a keep-current/* work branch)."""
-    t_ref = resolve_branch(repo, branch_name(t))
+    # the newer of the local branch and origin's (fresh_branch, as ci-check reads): a local branch left behind a merged
+    # re-pin (weekly round 2026-10-19) printed the older library release's tag
+    t_ref = fresh_branch(repo, branch_name(t))
     read = reader_of_ref(repo, t_ref)
     p = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
     pc = load("port_ci_fb", "port-ci.py")
-    wf = git(repo, "show", f"{resolve_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
+    wf = git(repo, "show", f"{fresh_branch(repo, p.get('port_branch', 'neoforge-1.21.1'))}:.github/workflows/port-ci.yml")
     args = pc.recover_args(wf.stdout) if wf.returncode == 0 else ["--modid", modid, "--gatec", "launch,spawn,battle,gauntlet"]
     return add_variant_jars(remap_ci_args(args, p, modid, kit_version), shipped_variants(repo, t_ref, t)) + [
         "--branch", branch_name(t)]
@@ -3600,7 +3750,10 @@ def ci_check(repo, versions=None, kit_version=None):
     if kit_version is None:
         try:
             pc = load("port_ci_fb", "port-ci.py")
-            newest = pc.kit_pin(pc.migrator_repo())[0]
+            # the floor of the download probe kit_pin falls back to when the release list is refused (a 403)
+            pinned = pc.pinned_kits(git(repo, "show", f"{fresh_branch(repo, branch_name(t)) or have[t]}:.github/workflows/"
+                                        "port-ci.yml").stdout for t in todo)
+            newest = pc.kit_pin(pc.migrator_repo(), floor=max(pinned, default=None), say=out.append)[0]
         except (Exception, SystemExit) as e:    # noqa: BLE001 -- offline: say so, compare the variants only
             out.append(f"fork-branches: ci-check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
     elif kit_version is not False:
@@ -3709,11 +3862,44 @@ def remap_ci_args(args, p, modid, kit_version=None):
     return res
 
 
-def ci(repo, t, modid, run=False, say=print, kit_version=None):
+def remote_tags(slug):
+    """The tag names of GitHub repository `slug` (git ls-remote; $LAYER_DEPS_GIT_URL's {repo} format when set, as
+    tools/layer-deps.py reads a library), or None when it cannot be read."""
+    url = os.environ.get("LAYER_DEPS_GIT_URL", "https://github.com/{repo}.git").format(repo=slug)
+    try:
+        r = subprocess.run(["git", "ls-remote", "--tags", "--refs", url], capture_output=True, text=True, encoding="utf-8",
+                           timeout=60, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode:
+        return None
+    return [ln.split("refs/tags/", 1)[1] for ln in r.stdout.splitlines() if "refs/tags/" in ln]
+
+
+def newer_recuts(p, t, tags_of=remote_tags):
+    """[(group:module, pinned tag, newest re-cut)] for each port_jar pin of branch.properties `p` whose library release
+    has a newer re-cut of the same version (<tag>-r<N>, the plain tag being r1): the pin is what the workflow gets,
+    so a re-cut published after it is a re-resolve away (layer-deps.py resolve --port-release owner/repo@<newest>)."""
+    lr = load("layer_deps_fb", "layer-deps.py")
+    out = []
+    for k, v in sorted(p.items()):
+        m = PIN_URL.match(v.split()[0]) if k.startswith("port_jar.") and v else None
+        if not m or not lr.is_version_tag(m.group(2), t):
+            continue
+        base = re.sub(r"-r\d+$", "", m.group(2))
+        tags = tags_of(m.group(1)) or []
+        cuts = [x for x in tags if x == base or (x.startswith(base + "-r") and re.fullmatch(r"-r\d+", x[len(base):]))]
+        best = max(cuts, key=lr.recut_number, default=None)
+        if best and lr.recut_number(best) > lr.recut_number(m.group(2)):
+            out.append((k[len("port_jar."):], m.group(2), best, m.group(1)))
+    return out
+
+
+def ci(repo, t, modid, run=False, say=print, kit_version=None, tags_of=remote_tags):
     repo = pathlib.Path(repo).resolve()
     if t is None:                       # --all: every version branch, oldest first
         for v in sorted(version_branches(repo), key=mc_key):
-            rc = ci(repo, v, modid, run, say, kit_version)
+            rc = ci(repo, v, modid, run, say, kit_version, tags_of)
             if rc:
                 return rc
         return 0
@@ -3727,6 +3913,11 @@ def ci(repo, t, modid, run=False, say=print, kit_version=None):
         say("fork-branches: Port CI kit: the newest published (port-ci.py's default; the port branch's pin is not "
             "carried over); --kit-version N pins another")
     say(f"fork-branches: {branch_name(t)}: python3 tools/port-ci.py --repo <its checkout> {' '.join(args)}")
+    props = parse_props(reader_of_ref(repo, fresh_branch(repo, branch_name(t)))(f"{REC}/{t}/{BRANCH_PROPS}"))
+    for ga, tag, best, slug in newer_recuts(props, t, tags_of):
+        say(f"fork-branches: WARNING {branch_name(t)} pins {ga} to {slug}'s release {tag}, and {best} is a newer re-cut "
+            f"of it: re-pin it first (python3 tools/layer-deps.py resolve --repo <checkout of {branch_name(t)}> --target "
+            f"{t} --port-release {slug}@{best}, commit), then run ci again")
     if not run:
         say(f"fork-branches: run it on a checkout of {branch_name(t)} (or pass --run: a worktree under build/fork-branches/), then push")
         return 0
@@ -3799,6 +3990,10 @@ def main():
     ss.add_argument("--target", action="append", default=[], help="a version to sync (repeat; default every version branch)")
     ss.add_argument("--ci", metavar="MODID", help="also regenerate each synced version branch's Port CI workflow "
                     "(ci --run: the variant shipped-jar jobs, the newest kit); without it, ci-check's warnings are printed")
+    rm_ = sub.add_parser("remake", help="after a hand-made merge into a version branch: re-make its files through the "
+                         "version's rows, as the cascade's merge does (staged, not committed)")
+    rm_.add_argument("--repo", required=True, help="the checkout of the version branch that holds the merge")
+    rm_.add_argument("--branch", required=True, metavar="neoforge-<v>")
     ci_ = sub.add_parser("ci"); ci_.add_argument("--repo", required=True)
     cit = ci_.add_mutually_exclusive_group(required=True)
     cit.add_argument("--target"); cit.add_argument("--all", action="store_true", help="every version branch")
@@ -3816,6 +4011,10 @@ def main():
         return freeze(a.repo, a.target, a.upstream, a.library, a.accept_upstream_drift)
     if a.cmd == "library-record":
         return library_record(a.repo, a.target, a.dependent, a.slug)
+    if a.cmd == "remake":
+        if not re.fullmatch(r"neoforge-\d+(?:\.\d+)+", a.branch):
+            ap.error(f"--branch neoforge-<version>, got {a.branch!r}")
+        return remake(a.repo, a.branch.split("neoforge-", 1)[1])
     if a.cmd == "ci":
         return ci(a.repo, None if a.all else a.target, a.modid, a.run, kit_version=a.kit_version)
     if a.cmd == "ci-check":
@@ -4182,17 +4381,174 @@ def _check_ci_check(expect):
         expect(len(w14) == 1 and "kit 7, older than kit 8" in w14[0] and "*_cf.jar" in w14[0]
                and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines) and "--all" in lines[-1],
                f"ci-check names the outdated kit and the missing _cf job: {lines}")
+        # the release list refused (a 403 from api.github.com, downloads working; weekly round 2026-10-19): the newest kit
+        # is probed from the highest one the branches pin (v7), and the fallback is said
+        import urllib.error
+        real_load = globals()["load"]
+
+        def kit_get(url, accept=None):
+            if "api.github.com" in url:
+                raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)
+            n = int(re.search(r"port-ci-kit-v(\d+)/SHA256SUMS$", url).group(1))
+            if n not in (7, 8):
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            return f"{'c' * 64}  port-ci-kit-v{n}.tar.gz\n"
+
+        def fake_load(name, file):
+            m = real_load(name, file)
+            if file == "port-ci.py":
+                m._get, m.migrator_repo = kit_get, lambda: "o/migrator"
+            return m
+        globals()["load"] = fake_load
+        try:
+            probed = ci_check(r, ["1.21.4"])
+        finally:
+            globals()["load"] = real_load
+        expect(any("FALLBACK" in l and "kit v8" in l for l in probed) and any("older than kit 8" in l for l in probed),
+               f"ci-check with the release list refused: the kit probed from the pinned v7 up, said: {probed}")
         args4 = ci_args(r, "1.21.4", "examplemod", 7)
         expect(args4[-2:] == ["--branch", "neoforge-1.21.4"] and args4.count("--branch") == 1,
                f"ci_args names the version branch for the workflow's triggers, not the checkout's HEAD: {args4}")
         expect(not [l for l in ci_check(r, ["1.21.4"], kit_version=False) if "WARNING" in l and "kit" in l]
                and shipped_variants(r, resolve_branch(r, "neoforge-1.21.4"), "1.21.4") == ["cf"],
                "kit_version=False compares the variants only")
+        # weekly round 2026-10-19: ci printed the library's first cut although a re-cut (-r3) was pinned on origin's
+        # branch (the local one behind it) and published. ci_args reads the newer of the two; ci warns of a newer re-cut
+        old4 = git(w4, "rev-parse", "HEAD").stdout.strip()
+        bp4 = w4 / ".port/1.21.4/branch.properties"
+        pin_ = "https://github.com/owner/examplelib/releases/download/examplelib-1.2-mc1.21.4{}/examplelib-1.2.jar " + "a" * 64
+        _hand(w4, {".port/1.21.4/branch.properties": bp4.read_text(encoding="utf-8") + "library=true\n"
+                   + "port_jar.com.example\\:lib=" + pin_.format("-r2") + "\n"}, "1.21.4: re-pin")
+        git(w4, "update-ref", "refs/remotes/origin/neoforge-1.21.4", "HEAD", check=True)
+        git(w4, "reset", "-q", "--hard", old4, check=True)
+        a_new = ci_args(r, "1.21.4", "examplemod", 7)
+        gc_ = a_new[a_new.index("--gatec") + 1] if "--gatec" in a_new else ""
+        expect("spawn" not in gc_ and "launch" in gc_,
+               f"ci_args reads origin's branch.properties when the local branch is behind it: {a_new}")
+        said = []
+        tags = {"owner/examplelib": ["examplelib-1.2-mc1.21.4", "examplelib-1.2-mc1.21.4-r2", "examplelib-1.2-mc1.21.4-r3",
+                                     "examplelib-1.2-mc1.21.4-r10x", "examplelib-1.3-mc1.21.4", "examplelib-1.2-mc1.21.5-r9"]}
+        ci(r, "1.21.4", "examplemod", say=said.append, kit_version=7, tags_of=tags.get)
+        warn = [l for l in said if "newer re-cut" in l]
+        expect(len(warn) == 1 and "examplelib-1.2-mc1.21.4-r2, and examplelib-1.2-mc1.21.4-r3 is a newer re-cut" in warn[0]
+               and "--port-release owner/examplelib@examplelib-1.2-mc1.21.4-r3" in warn[0],
+               f"ci names the newest re-cut of the pinned release (highest N; plain tag = r1): {said}")
+        said.clear()
+        ci(r, "1.21.4", "examplemod", say=said.append, kit_version=7, tags_of=lambda s_: tags[s_][:2])
+        expect(not [l for l in said if "re-cut" in l], f"the pinned re-cut is the newest: no warning: {said}")
+        said.clear()
+        ci(r, "1.21.4", "examplemod", say=said.append, kit_version=7, tags_of=lambda s_: None)
+        expect(not [l for l in said if "re-cut" in l], f"tags that cannot be read: no warning, as before: {said}")
+        said.clear()
+        ci(r, "1.21.3", "examplemod", say=said.append, kit_version=7, tags_of=lambda s_: 1 / 0)
+        expect(not [l for l in said if "re-cut" in l], f"a version with no library pin asks for no tags: {said}")
     expect(add_variant_jars(["--modid", "m", "--variant-jar", "*_mr.jar"], ["cf"]) == ["--modid", "m", "--variant-jar", "*_mr.jar",
                                                                                      "--variant-jar", "*_cf.jar"]
            and add_variant_jars(["--modid", "m", "--variant-jar", "*_cf.jar"], ["cf"]) == ["--modid", "m", "--variant-jar", "*_cf.jar"]
            and add_variant_jars(["--modid", "m"], []) == ["--modid", "m"],
            "add_variant_jars: a variant with expectations gets its glob once; none, nothing added")
+
+
+def _check_stage_checkout(expect):
+    """fork-port.py's moves stage stages the parent version from stage_checkout: a branch another worktree holds (this
+    tool's own build/fork-branches/<v> of the main clone, as when fork-port runs in a version's worktree) is staged from
+    a detached worktree at its commit, the holder untouched (weekly round 2026-10-19). Unheld: worktree_for's, as before."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w3, _w = worktree_for(r, "1.21.3")                       # the main clone's own worktree holds neoforge-1.21.3
+        w4, _w = worktree_for(r, "1.21.4")
+        held = git(w3, "rev-parse", "HEAD").stdout.strip()
+        none_, why = worktree_for(w4, "1.21.3")
+        expect(none_ is None and why, f"control: the held branch cannot be checked out from the version's worktree: {why}")
+        (st, why), said = _quiet(lambda: stage_checkout(w4, "1.21.3"))
+        expect(st is not None and st != w3 and git(st, "rev-parse", "HEAD").stdout.strip() == held
+               and git(st, "symbolic-ref", "-q", "HEAD").returncode != 0 and "detached" in said,
+               f"a held parent is staged from a detached worktree at its commit, said: {st} {why} {said}")
+        expect(git(w3, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "neoforge-1.21.3"
+               and git(w3, "rev-parse", "HEAD").stdout.strip() == held, "the worktree that holds it is untouched")
+        _hand(w3, {"src/main/java/com/example/mod/Plain.java": "class Plain { int later; }\n"}, "1.21.3: later")
+        (st2, why), _said = _quiet(lambda: stage_checkout(w4, "1.21.3"))
+        expect(st2 == st and git(st, "rev-parse", "HEAD").stdout.strip() == git(w3, "rev-parse", "HEAD").stdout.strip(),
+               f"the stage worktree is reused and moved to the branch's new commit: {why}")
+        (w5, why), said = _quiet(lambda: stage_checkout(r, "1.21.5"))
+        expect(w5 == r / "build" / "fork-branches" / "1.21.5" and "detached" not in said
+               and git(w5, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "neoforge-1.21.5",
+               f"an unheld branch: worktree_for's checkout, as before: {w5} {why}")
+
+
+def _check_remake(expect):
+    """remake: a merge into a version branch made by hand with plain `git merge` (a version-boundary conflict) gets the
+    rows' step the cascade's merge applies -- the rows-only files re-made from the port branch through the version's
+    rows, a hand-changed file carried through the rows the version adds -- staged, not committed (weekly round
+    2026-10-19). Not on a version branch: refused, nothing written."""
+    em, pl = "src/main/java/com/example/mod/ExampleMod.java", "src/main/java/com/example/mod/Plain.java"
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        _authors(r, g, {em: "package com.example.mod;\nimport old.Thing;\npublic class ExampleMod { Thing t; Thing u; void a() { x.oldCall(); } }\n"},
+                 "authors: ExampleMod")
+        rc, out = _quiet(cascade, r, "port..1.21.3", "none")
+        w3, _w = worktree_for(r, "1.21.3")
+        _hand(w3, {pl: "package com.example.mod;\n// calls newCall\npublic class Plain { void f() { x.newCall(); } }\n"},
+              "fix at 1.21.3")
+        w4, _w = worktree_for(r, "1.21.4")
+        git(w4, "merge", "--no-ff", "--no-commit", "neoforge-1.21.3")
+        before = (w4 / pl).read_bytes()
+        # a boundary conflict git leaves in a rows-only file (the 1.21.11 -> 26.1.2 rename): conflict markers there
+        before_em = b"<<<<<<< HEAD\nclass ExampleMod { ours }\n=======\nclass ExampleMod { theirs }\n>>>>>>> neoforge-1.21.3\n"
+        (w4 / em).write_bytes(before_em)
+        expect(rc == 0 and b"x.newCall()" in before,
+               f"control: a plain git merge carries 1.21.3's name into 1.21.4 (its rows rename it): {before!r} {out[-300:]}")
+        rc, said = _quiet(remake, w4, "1.21.4")
+        want_em = rows_tree(w4, resolve_branch(w4, "neoforge-1.21.1"), reader_of_root(w4), "1.21.4", chain(w4, "1.21.4"))[em]
+        staged = set(git(w4, "diff", "--cached", "--name-only").stdout.split())
+        expect(rc == 0 and (w4 / em).read_bytes() == want_em and b"import new.Thing;" in want_em and em in staged,
+               f"remake: the rows-only file re-made from the port branch through 1.21.4's rows, staged: {said} {(w4 / em).read_bytes()!r} "
+               f"(after git merge alone: {before_em!r})")
+        expect((w4 / pl).read_bytes() == before.replace(b"x.newCall()", b"x.newerCall()") and pl in staged
+               and "carried through 1.21.4's rows (a review row)" in said and "finish the merge" in said,
+               f"remake: the hand-changed file carried through the rows 1.21.4 adds, its comment kept: {(w4 / pl).read_bytes()!r} {said}")
+        git(w4, "commit", "-qm", "merge 1.21.3", check=True)
+        head = git(w4, "rev-parse", "HEAD").stdout.strip()
+        rc, said = _quiet(remake, w4, "1.21.4")
+        expect(rc == 0 and "0 file(s) changed by hand carried" in said and not git(w4, "status", "--porcelain",
+               "--untracked-files=no").stdout.strip() and git(w4, "rev-parse", "HEAD").stdout.strip() == head,
+               f"remake after the merge commit, nothing left to do: nothing changed, nothing committed: {said}")
+        ov = "src/main/java/com/example/mod/Over.java"
+        _hand(w4, {ov: "package com.example.mod;\nclass Over { int keep = 6; }\n"}, "1.21.4: Over")
+        _hand(w3, {ov: "package com.example.mod;\nclass Over { int fixed = 3; }\n"}, "1.21.3: Over")
+        git(w4, "merge", "--no-ff", "--no-commit", "neoforge-1.21.3")
+        rc, said = _quiet(remake, w4, "1.21.4")
+        expect(rc == 1 and "still hold conflict markers" in said and ov in said and b"<<<<<<<" in (w4 / ov).read_bytes(),
+               f"a file both sides changed, in conflict through the rows too: left for a person, named, exit 1: {said}")
+        (w4 / ov).write_bytes(b"package com.example.mod;\nclass Over { int keep = 6; int fixed = 3; }\n")
+        rc, said = _quiet(remake, w4, "1.21.4")
+        expect(rc == 0 and "1 already resolved by hand, left as they are" in said
+               and (w4 / ov).read_bytes() == b"package com.example.mod;\nclass Over { int keep = 6; int fixed = 3; }\n",
+               f"run again once a person resolved it: their file left as they wrote it: {said}")
+        git(w4, "merge", "--abort")
+        # the rows go over the PARENT's two sides only, never over t's own text: a line t wrote in its own names (here a
+        # call spelled as the parent spells it, which the rows would rename) stays as t wrote it
+        three = "package com.example.mod;\nclass Three {\n    void a() { x.newCall(); }\n\n\n    int pad;\n}\n"
+        _hand(w3, {"src/main/java/com/example/mod/Three.java": three}, "1.21.3: Three")
+        git(w4, "merge", "-q", "--no-ff", "-X", "ours", "-m", "merge", "neoforge-1.21.3", check=True)
+        _quiet(remake, w4, "1.21.4")                     # right after the merge commit: its rows step, then committed
+        git(w4, "commit", "-qm", "1.21.4: the merge through the rows", check=True)
+        took = (w4 / "src/main/java/com/example/mod/Three.java").read_text(encoding="utf-8")
+        expect(took == three.replace("x.newCall()", "x.newerCall()"), f"a file the parent added: in t's names: {took!r}")
+        _hand(w4, {"src/main/java/com/example/mod/Three.java": took.replace("    int pad;\n", "    int pad;\n    void own() { y.newCall(); }\n")},
+              "1.21.4: its own line")
+        _hand(w3, {"src/main/java/com/example/mod/Three.java": three.replace("x.newCall();", "x.newCall(); x.newCall();")}, "1.21.3: fix")
+        git(w4, "merge", "--no-ff", "--no-commit", "neoforge-1.21.3")
+        rc, said = _quiet(remake, w4, "1.21.4")
+        got3 = (w4 / "src/main/java/com/example/mod/Three.java").read_text(encoding="utf-8")
+        expect(rc == 0 and "y.newCall();" in got3 and "x.newerCall(); x.newerCall();" in got3,
+               f"the parent's change through the rows, t's own line untouched: {got3!r} {said}")
+        git(w4, "merge", "--abort")
+        rc, said = _quiet(remake, w3, "1.21.3")
+        expect(rc == 2 and "no merge" in said, f"no merge in progress or just made: refused: {said}")
+        rc, said = _quiet(remake, r, "1.21.4")
+        expect(rc == 2 and "not neoforge-1.21.4" in said and not git(r, "status", "--porcelain", "--untracked-files=no").stdout.strip(),
+               f"a checkout not on the version branch (a single-version fork, the layer branch): refused, nothing written: {said}")
 
 
 def _check_stopped_worktree(expect):
@@ -5299,6 +5655,8 @@ def self_check():
         _check_push_advice(expect)
         _check_inventory_settles(expect)
         _check_stopped_worktree(expect)
+        _check_stage_checkout(expect)
+        _check_remake(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)

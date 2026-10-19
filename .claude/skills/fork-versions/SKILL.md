@@ -17,7 +17,7 @@ description: Make a fork port build for more Minecraft versions as stacked versi
   that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
   fork moves to version branches with `tools/fork-branches.py migrate` when the maintainer decides it for that fork.
 
-Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, ci, ci-check),
+Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, remake, ci, ci-check),
 `tools/fork-port.py` (the stages and the done list, on a version branch), `tools/layer-inventory.py`,
 `tools/layer-deps.py`, `tools/ci-gates.py --mc`, `tools/port-ci.py`, `tools/audit-mixin-targets.py`,
 `tools/fix-access-transformer.py`, `tools/burndown-count.sh`, `tools/port-cost.py`.
@@ -40,7 +40,11 @@ helpers, catalogue entries and a cost figure; the next fork, and the next versio
   class moves) are kept per version so that a merge can apply them: each file the merge changed that both sides had
   from the rows alone ("mechanical": the version's file equals its rows over the port branch's file) is re-made from the
   port branch's new file through the version's rows, and committed with the merge; a file a person changed is merged
-  by git, and a conflict there stops the cascade for a person.
+  by git, and a conflict there stops the cascade for a person. **That person's merge gets the same step:** a plain
+  `git merge <lower>` skips it, so merge with `--no-commit`, run `python3 tools/fork-branches.py remake --repo <the
+  version's checkout> --branch neoforge-<v>` (the rows-only files re-made through the version's rows, a conflict there
+  included; each other file the merge changed carried through the rows the version adds, code only; staged; the files
+  still in conflict listed, exit 1), resolve those by hand through the rows, run it again, then commit.
 - **Records, per version.** Branch `neoforge-<v>` carries `.port/<v>/` -- `branch.properties` (the version, its parent,
   the port branch, the upstream freeze, the library pins, the build keys: `prop.*` also written into gradle.properties,
   `toml.*`, `java_version`, `nfrt_version`, `substitute.*`/`exclude.*`/`port_jar.*`, `strip_onlyin`, `library=true` for
@@ -113,7 +117,10 @@ own commit and writes nothing; the parent branch is read from origin when the lo
    the recorded tag, the done check says `library: the dependents' record is for <tag> (<commit>), the branch is at
    <sha> ...` -- release the new commit and record a dependent's Gate C against that release; a branch that moved only
    in records (the record itself, reviews, notes) still has the same jar, and the record counts. Gate C on a library alone
-   checks nothing (its spawn and battle phases spawn no entity of its own, so ci-gates.py skips them there).
+   checks nothing (its spawn and battle phases spawn no entity of its own, so ci-gates.py skips them there) -- nor the
+   library's render helpers, which nothing draws through until a dependent's entity does: a library 26.3 Gate C was
+   green while a dependent's Gate C crashed in its `LegacyGl.draw` (CATALOG V111). The dependent's Gate C on the
+   library's jar, recorded with `library-record`, is what proves them.
 
 A record that names a **layer commit** (a migrated version's GATES.md and REVIEW.md) counts when `MIGRATED.json` maps
 that commit to a prepared-tree digest equal to the branch's own: an unchanged, reviewed version stays done when it moves.

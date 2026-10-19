@@ -984,7 +984,7 @@ def main():
         print(f"[port-upstream] {e}", file=sys.stderr)
         return 2
     if a.base is None:
-        a.base = sh(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo).stdout.strip() or "master"
+        a.base = _load_tool("port_ci_pu", "port-ci.py").default_branch(repo, "master", ref=True)
     d = pathlib.Path(os.path.expanduser(f"~/.mc-mod-upgrade/upstream/{repo.name}-{a.branch}"))
     d.mkdir(parents=True, exist_ok=True)
     sf = d / "state.json"
