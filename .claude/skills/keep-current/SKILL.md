@@ -374,9 +374,9 @@ included), PR, pre-release and merge asks.
    when a token is set), a JDK for each version (21 for 1.21.x, **25 for 26.x**: found at `JAVA_HOME_25`, `/usr/lib/jvm`,
    `/opt`, `~/.gradle/jdks`, ...), and for the client gates **`libEGL.so.1`** (the 26.3 client loads it: `libegl1`) and
    **`XDG_RUNTIME_DIR`** (unset in a cloud session: `export XDG_RUNTIME_DIR=$(mktemp -d) && chmod 700
-   "$XDG_RUNTIME_DIR"`); each clone's **`origin/HEAD`** (a fresh cloud clone may lack it: `git remote set-head origin
-   -a`) and **the remote each version's upstream freeze names** (`upstream=<remote>/<branch>`: without it the gates stop
-   with exit 19; it prints the fetch-only `git remote add`). A shallow single-branch clone's other version branches are
+   "$XDG_RUNTIME_DIR"`); on a version-branch fork, its **`origin/HEAD`** (a WARNING, not missing: a fresh cloud clone may lack it, `git
+   remote set-head origin -a`) and **the remote each version's upstream freeze names** (`upstream=<remote>/<branch>`: without it the gates stop
+   with exit 19; it prints the fetch-only `git remote add`). A shallow single-branch clone of a version branch has its other version branches
    read from origin by name (`git ls-remote`), so their JDK and libEGL are asked too. Install or set what it names that the session can (apt, an export, the git commands) and run it again; anything
    left missing other than a clone is reported in the first comment and the versions that need it wait.
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out

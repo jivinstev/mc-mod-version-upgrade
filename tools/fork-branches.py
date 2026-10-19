@@ -2653,7 +2653,7 @@ def remake(work, t, say=print):
                 carried.append(f)
             continue
         if t_pre is None or pb is None or p_new is None:
-            if CONFLICT_MARK.search(cur):
+            if CONFLICT_MARK.search(cur) or f in unmerged:
                 left.append(f)
             continue
         # git merged the parent's change in the PARENT's names: merge it again with both of the parent's sides put
@@ -2676,7 +2676,14 @@ def remake(work, t, say=print):
         + (f"; {len(kept)} already resolved by hand, left as they are" if kept else "") + "; staged")
     for f in carried:
         say(f"fork-branches: remake: carried through {t}'s rows (a review row): {f}")
-    if left:
+    # any path git still has unmerged (a modify/delete conflict has no markers; a resource or build file) is a person's
+    still = sorted({x for x in git(work, "diff", "--name-only", "--diff-filter=U").stdout.splitlines() if x} - set(left))
+    if still:
+        say(f"fork-branches: remake: {len(still)} path(s) git still has unmerged -- resolve them (git add / git rm), then "
+            f"run remake again: {', '.join(still[:6])}")
+    if left or still:
+        if not left:
+            return 1
         say(f"fork-branches: remake: {len(left)} file(s) still hold conflict markers -- resolve them through {t}'s rows by "
             f"hand, then run remake again: {', '.join(left[:6])}")
         return 1
@@ -2699,6 +2706,11 @@ def stage_checkout(repo, t, say=print):
     if not c:
         return None, why
     d = repo / "build" / "fork-port" / "stage" / t
+    git(repo, "worktree", "prune")
+    listed = {pathlib.Path(ln[len("worktree "):]).resolve() for ln in git(repo, "worktree", "list", "--porcelain").stdout.splitlines()
+              if ln.startswith("worktree ")}
+    if d.is_dir() and d.resolve() not in listed:
+        shutil.rmtree(d, ignore_errors=True)       # the tool's own stage dir, no longer a registered worktree: re-made
     if d.is_dir() and (d / ".git").exists():
         r = git(d, "checkout", "-q", "--detach", "--force", c)
         if r.returncode:
@@ -4470,6 +4482,11 @@ def _check_stage_checkout(expect):
         (st2, why), _said = _quiet(lambda: stage_checkout(w4, "1.21.3"))
         expect(st2 == st and git(st, "rev-parse", "HEAD").stdout.strip() == git(w3, "rev-parse", "HEAD").stdout.strip(),
                f"the stage worktree is reused and moved to the branch's new commit: {why}")
+        git(w4, "worktree", "remove", "--force", str(st), check=True)   # unregistered, its directory back (a restore)
+        (st / ".git").parent.mkdir(parents=True, exist_ok=True); (st / ".git").write_text("gitdir: /nowhere\n", encoding="utf-8")
+        (st3, why), _said = _quiet(lambda: stage_checkout(w4, "1.21.3"))
+        expect(st3 == st and git(st, "rev-parse", "HEAD").stdout.strip() == git(w3, "rev-parse", "HEAD").stdout.strip(),
+               f"a stage dir that is no longer a registered worktree is the tool's own: removed and re-made: {why}")
         (w5, why), said = _quiet(lambda: stage_checkout(r, "1.21.5"))
         expect(w5 == r / "build" / "fork-branches" / "1.21.5" and "detached" not in said
                and git(w5, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "neoforge-1.21.5",
@@ -4522,6 +4539,10 @@ def _check_remake(expect):
                f"a file both sides changed, in conflict through the rows too: left for a person, named, exit 1: {said}")
         (w4 / ov).write_bytes(b"package com.example.mod;\nclass Over { int keep = 6; int fixed = 3; }\n")
         rc, said = _quiet(remake, w4, "1.21.4")
+        expect(rc == 1 and "git still has unmerged" in said and ov in said,
+               f"resolved but not added: git still has it unmerged, so not done: {said}")
+        git(w4, "add", "--", ov)
+        rc, said = _quiet(remake, w4, "1.21.4")
         expect(rc == 0 and "1 already resolved by hand, left as they are" in said
                and (w4 / ov).read_bytes() == b"package com.example.mod;\nclass Over { int keep = 6; int fixed = 3; }\n",
                f"run again once a person resolved it: their file left as they wrote it: {said}")
@@ -4543,6 +4564,14 @@ def _check_remake(expect):
         got3 = (w4 / "src/main/java/com/example/mod/Three.java").read_text(encoding="utf-8")
         expect(rc == 0 and "y.newCall();" in got3 and "x.newerCall(); x.newerCall();" in got3,
                f"the parent's change through the rows, t's own line untouched: {got3!r} {said}")
+        git(w4, "merge", "--abort")
+        # a modify/delete conflict has no markers (review of this change): still unmerged, so exit 1, never "git commit"
+        _hand(w4, {pl: "package com.example.mod;\npublic class Plain { int handFix = 1; }\n"}, "1.21.4: hand fix")
+        git(w3, "rm", "-q", pl, check=True); git(w3, "commit", "-qm", "1.21.3: delete Plain", check=True)
+        git(w4, "merge", "--no-ff", "--no-commit", "neoforge-1.21.3")
+        rc, said = _quiet(remake, w4, "1.21.4")
+        expect(rc == 1 and pl in said and "finish the merge" not in said,
+               f"a modify/delete conflict is left for a person, exit 1: {rc} {said}")
         git(w4, "merge", "--abort")
         rc, said = _quiet(remake, w3, "1.21.3")
         expect(rc == 2 and "no merge" in said, f"no merge in progress or just made: refused: {said}")
