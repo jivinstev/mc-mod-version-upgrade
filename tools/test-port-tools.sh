@@ -572,7 +572,7 @@ need_r = ("fresh subagents that return a short summary -- at most ~40 lines", "W
           "`gh run watch <run id> --exit-status`", "round/NOTES.md", "past ~200k tokens",
           "A worker MAY carry the same change across several versions", "fresh worker per version",
           "On a version branch, dispatch it right after the merge", "no pre-release is cut without a green full-gate run on exactly the released tree",
-          "A single-version fork keeps step 6's order", "--from-stage measure --gates full", "ci --repo DIR --head --modid ID --run",
+          "A single-version fork keeps step 6's order", "--from-stage measure --gates full", "ci --repo DIR --head --run",
           "on a single-version fork `ci-gates.py --env full` and `minimal`, as always")
 need_v = ("Move each version's freeze in its PR, not after it", "before its work branch is pushed")
 sys.exit(0 if all(n in r for n in need_r) and all(n in v for n in need_v)

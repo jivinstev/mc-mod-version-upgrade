@@ -351,8 +351,9 @@ def dep_jar_variants(variants, dep_specs, sha_of=None):
 # GATES_DOC, port-publish.py GATES_DOC) and never read by a gate (ci-gates.py writes them; GATE_OUTPUTS). A push of
 # only those -- a version's cost record, its manual-test items -- then runs no full Port CI, as a ledger-only push of
 # the head does not. GitHub's `*` stops at `/`, so `.port/*/*.md` is one version's directory and never a deeper
-# `.port/<v>/<mod>/` file, and src/ is never matched. Only on a version branch (the checkout holds .port/<mc>/, the
-# rule port_branch() uses): a single-version fork has none of these files, and its workflow stays byte-for-byte what it
+# `.port/<v>/<mod>/` file, and src/ is never matched. Only on a version branch (the checkout holds
+# .port/<mc>/branch.properties, fork-branches.py's version_branches rule -- a single-version fork may keep
+# .port/<mc>/shipped-expect-<variant>.txt and is not one): a single-version fork's workflow stays byte-for-byte what it
 # was (tools/golden/port-ci-single-*.yml); pull_request and tag runs are untouched (GitHub applies paths-ignore to
 # branch pushes only), and workflow_dispatch -- the release -- always runs every gate.
 VERSION_RECORDS_IGNORE = (".port/*.md", ".port/*/*.md")
@@ -365,8 +366,10 @@ def records_values(values, version_branch=False):
 
 
 def is_version_branch(repo, mc):
-    """The checkout is a version branch: it holds .port/<mc>/ for its own Minecraft version (port_branch()'s rule)."""
-    return bool(mc) and (pathlib.Path(repo) / ".port" / mc).is_dir()
+    """The checkout is a version branch: it holds .port/<mc>/branch.properties for its own Minecraft version
+    (fork-branches.py version_branches). Not port_branch()'s looser .port/<mc>/ test: a single-version fork may keep
+    .port/<mc>/shipped-expect-<variant>.txt there (port-fork, shipped-gate.py) and must not get the records ignore."""
+    return bool(mc) and (pathlib.Path(repo) / ".port" / mc / "branch.properties").is_file()
 
 
 def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_of=None):
@@ -407,7 +410,7 @@ def port_branch(repo, mc, explicit=None):
         if not re.fullmatch(r"[\w.\-/]+", explicit):
             raise SystemExit(f"--branch must be a branch name, got {explicit!r}")
         return explicit
-    if is_version_branch(repo, mc):
+    if mc and (pathlib.Path(repo) / ".port" / mc).is_dir():
         return f"neoforge-{mc}"
     return git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
@@ -722,6 +725,10 @@ def records_check():
         d = pathlib.Path(d)
         outs = {}
         for case, mc, files in (("single", "1.21.1", {".port/KNOWN-ISSUES.json": "{}\n"}),
+                                # a single-version fork that keeps a shipped-jar expectation in .port/<mc>/ (port-fork):
+                                # still single-version, the golden's line (review of the cost PR, S3)
+                                ("single-shipped", "1.21.1", {".port/KNOWN-ISSUES.json": "{}\n",
+                                                              ".port/1.21.1/shipped-expect-cf.txt": "A.log:cf ran\n"}),
                                 ("version-branch", "1.21.4", {".port/1.21.4/branch.properties": "minecraft_version=1.21.4\n",
                                                               ".port/1.21.4/GATES.md": "# Gates\n"})):
             r = d / case
@@ -744,9 +751,10 @@ def records_check():
             ok &= want(f"records: main() renders the {case} checkout", res.returncode == 0, 0, res.stderr[-300:])
         if all(outs.values()):
             s, v_ = outs["single"], outs["version-branch"]
-            ok &= want("records: main() on a single-version checkout: the base list only",
-                       line(s).strip() == 'paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"]',
-                       "the base list", line(s))
+            for c_ in ("single", "single-shipped"):
+                ok &= want(f"records: main() on a {c_} checkout: the base list only", line(outs[c_]).strip()
+                           == 'paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"]',
+                           "the base list", line(outs[c_]))
             ok &= want("records: main() on a version branch: the records too", json.loads(line(v_).split("paths-ignore:", 1)[1])
                        == ign and 'branches: ["neoforge-1.21.4"]' in v_, ign, line(v_))
     return ok

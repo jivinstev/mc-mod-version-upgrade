@@ -17,7 +17,7 @@
                                                [--accept-upstream-drift]
     python3 tools/fork-branches.py library-record --repo LIB --target T --dependent DIR [--slug owner/repo]
     python3 tools/fork-branches.py remake      --repo DIR --branch neoforge-<v>   # after a hand-made merge: the rows' step
-    python3 tools/fork-branches.py ci          --repo DIR (--target T | --all | --head) --modid ID [--run] [--kit-version N]
+    python3 tools/fork-branches.py ci          --repo DIR (--target T | --all) --modid ID | --head [--modid ID]  [--run] [--kit-version N]
     python3 tools/fork-branches.py ci-check    --repo DIR [--target T ...] [--kit-version N]   # the head branch too
     python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...]
     python3 tools/fork-branches.py --self-check [--deep | --platform]   # --deep: before a release; --platform: an OS-only leg
@@ -3784,18 +3784,32 @@ def ci_check(repo, versions=None, kit_version=None):
                 why.append(f"its workflow pins Port CI kit {min(kits) if kits else '?'}, older than kit {newest}")
             vj = (re.search(r'\n\s*VARIANT_JARS: "([^"]*)"', wf.stdout) or [None, ""])[1].split()
             miss = [v for v in shipped_variants(repo, ref, t) if f"*_{v}.jar" not in vj]
+            if newest is not False and not ignores_records(wf.stdout, version_records()):
+                # a workflow port-ci.py rendered before a version branch's records were ignored: every push of only
+                # GATES.md, COST.md, ... is a full Port CI run (review of the cost PR)
+                why.append("its push trigger ignores none of the round's records (" + ", ".join(version_records())
+                           + "), so a records-only push runs the full Port CI")
             if miss:
                 why.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
                            + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
         if why:
             stale += 1
             out.append(f"fork-branches: ci-check: WARNING {branch_name(t)}: " + "; ".join(why))
-    if not versions and have:
-        out += head_ci_lines(repo, have, newest)
-    out.append(f"fork-branches: ci-check: {len(todo)} version branch(es), {stale} with an outdated workflow"
+    head_lines = head_ci_lines(repo, have, newest) if not versions and have else []
+    out += head_lines
+    out.append(f"fork-branches: ci-check: {len(todo)} version branch(es)" + (" and the head branch" if not versions and have
+                                                                              else "")
+               + f", {stale + len(head_lines)} with an outdated workflow"
                + (f" -- regenerate: python3 tools/fork-branches.py ci --repo {repo} --all --modid <modid> --run, then push"
-                  if stale else ""))
+                  if stale else "")
+               + (f"{';' if stale else ' --'} the head: python3 tools/fork-branches.py ci --repo {repo} --head --run, then "
+                  "push it" if head_lines else ""))
     return out
+
+
+def version_records():
+    """The round records a version branch's push trigger ignores beyond the ledger and README (port-ci.py's own list)."""
+    return tuple(load("port_ci_fb", "port-ci.py").VERSION_RECORDS_IGNORE)
 
 
 def head_branch(repo, have=None):
@@ -3821,16 +3835,17 @@ def head_workflow(repo, have=None):
 RECORD_PUSHES = (".port/KNOWN-ISSUES.json", "README.md")     # the head's round commits: the ledger, the Ports block
 
 
-def ignores_records(wf):
-    """Does the workflow's push trigger paths-ignore the head's round records (the ledger and the root README)? A workflow
-    port-ci.py rendered before that line existed runs the full Port CI for every ledger or Ports-block commit."""
+def ignores_records(wf, need=None):
+    """Does the workflow's push trigger paths-ignore the head's round records (the ledger and the root README; `need`:
+    other paths, a version branch's records)? A workflow port-ci.py rendered before that line existed runs the full Port
+    CI for every ledger or Ports-block commit."""
     push = wf.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0] if "\n  push:\n" in wf else ""
     m = re.search(r"(?m)^\s*paths-ignore: (\[.*\])\s*$", push)
     try:
         ign = json.loads(m.group(1)) if m else []
     except ValueError:
         ign = []
-    return all(f in ign for f in RECORD_PUSHES)
+    return all(f in ign for f in (need if need is not None else RECORD_PUSHES))
 
 
 def head_ci_lines(repo, have, newest):
@@ -3852,14 +3867,17 @@ def head_ci_lines(repo, have, newest):
     if not why:
         return []
     return [f"fork-branches: ci-check: WARNING {head} (the head branch): " + "; ".join(why) + f" -- regenerate: python3 "
-            f"tools/fork-branches.py ci --repo {repo} --head --modid <modid> --run, then push {head}"]
+            f"tools/fork-branches.py ci --repo {repo} --head --run, then push {head}"]
 
 
 def ci_head(repo, modid, run=False, say=print, kit_version=None):
-    """`ci --head`: the head branch's workflow regenerated from itself (port-ci.py recover_args: its pins, variants,
-    gates and layer branch as they are), only the Port CI kit moved to the newest published (or --kit-version), so it
-    gets what port-ci.py renders today -- the records paths-ignore above all. Only for a version-branch fork (its head
-    is named by the versions' branch.properties); a single-version fork's workflow is never touched here."""
+    """`ci --head`: the head branch's workflow regenerated from itself (port-ci.py recover_args: its modid, upstream, pins,
+    variants, gates, tag suffix and layer branch as they are), only the Port CI kit moved to the newest published (or
+    --kit-version), so it gets what port-ci.py renders today -- the records paths-ignore above all. Not read back by
+    recover_args: the authors' branch (BASE), which port-ci.py takes from origin/HEAD -- so it is compared with the
+    workflow's own `git fetch --no-tags origin "<base>"` and a difference refuses (fix origin/HEAD first); a --modid
+    other than the workflow's refuses too. Only for a version-branch fork (its head is named by the versions'
+    branch.properties); a single-version fork's workflow is never touched here."""
     repo = pathlib.Path(repo).resolve()
     have = version_branches(repo)
     if not have:
@@ -3874,8 +3892,17 @@ def ci_head(repo, modid, run=False, say=print, kit_version=None):
         if rec[i] in ("--kit-version", "--kit-sha"):           # the kit moves; everything else is read back as it is
             i += 2; continue
         if rec[i] == "--modid":
-            args += ["--modid", modid or rec[i + 1]]; i += 2; continue
+            if modid and modid != rec[i + 1]:
+                say(f"fork-branches: --modid {modid} is not the head workflow's ({rec[i + 1]}): ci --head regenerates the "
+                    "workflow as it is -- drop --modid, or install another with port-ci.py"); return 2
+            args += ["--modid", rec[i + 1]]; i += 2; continue
         args.append(rec[i]); i += 1
+    had = re.search(r'git fetch --no-tags origin "([^"]+)"', wf)
+    base = pc.default_branch(repo, say=lambda m_: None)
+    if had and had.group(1) != base:
+        say(f"fork-branches: the head workflow fetches the authors' branch {had.group(1)}, but port-ci.py would take "
+            f"{base} (origin/HEAD): fix origin/HEAD first (git remote set-head origin {had.group(1)}), then run ci --head "
+            "again"); return 2
     args += (["--kit-version", str(kit_version)] if kit_version else []) + ["--branch", head]
     import shlex
     say(f"fork-branches: {head} (the head branch): python3 tools/port-ci.py --repo <its checkout> {shlex.join(args)}")
@@ -4111,7 +4138,8 @@ def main():
     cit.add_argument("--target"); cit.add_argument("--all", action="store_true", help="every version branch")
     cit.add_argument("--head", action="store_true", help="the head (port) branch: its workflow regenerated from itself, "
                      "the kit moved to the newest (ci-check names it when it ignores no round records)")
-    ci_.add_argument("--modid", required=True); ci_.add_argument("--run", action="store_true")
+    ci_.add_argument("--modid", help="required with --target/--all; with --head the workflow's own (a different one refuses)")
+    ci_.add_argument("--run", action="store_true")
     cc = sub.add_parser("ci-check", help="warn about version branches whose Port CI workflow is older than the kit or "
                         "boots no jar of a variant they keep shipped-jar expectations for, and about a head branch whose "
                         "workflow is older than the kit or runs the full Port CI for a ledger or README commit")
@@ -4132,6 +4160,8 @@ def main():
         return remake(a.repo, a.branch.split("neoforge-", 1)[1])
     if a.cmd == "ci" and a.head:
         return ci_head(a.repo, a.modid, a.run, kit_version=a.kit_version)
+    if a.cmd == "ci" and not a.modid:
+        ap.error("ci --target/--all: --modid is required")
     if a.cmd == "ci":
         return ci(a.repo, None if a.all else a.target, a.modid, a.run, kit_version=a.kit_version)
     if a.cmd == "ci-check":
@@ -4563,26 +4593,49 @@ def _check_ci_check(expect):
         # workflow the kit-v23 one with no paths-ignore; ci-check read only the version branches)
         expect(head_branch(r) == "neoforge-1.21.1" and head_workflow(r)[1] == "",
                f"the head is the versions' port_branch; no workflow there yet: {head_branch(r)}")
-        expect(not [l for l in ci_check(r, kit_version=8) if "head branch" in l], "a head with no workflow: no head line")
+        expect(not [l for l in ci_check(r, kit_version=8) if "(the head branch)" in l], "a head with no workflow: no head line")
         w1, _w = worktree_for(r, "1.21.1")
         old_wf = re.sub(r"(?m)^    # the known-issues ledger.*\n    # those runs.*\n    paths-ignore: .*\n", "", wf)
         expect(old_wf != wf and "paths-ignore" not in old_wf and ignores_records(wf) and not ignores_records(old_wf),
                "the fixture: the golden workflow without its paths-ignore (port-ci.py before the ledger existed)")
         _hand(w1, {".github/workflows/port-ci.yml": old_wf}, "CI on the head (an old kit's workflow)")
-        hl = [l for l in ci_check(r, kit_version=7) if "head branch" in l]
+        hl = [l for l in ci_check(r, kit_version=7) if "(the head branch)" in l]
         expect(len(hl) == 1 and "WARNING neoforge-1.21.1 (the head branch)" in hl[0] and "ignores no records" in hl[0]
                and "older than" not in hl[0] and "ci --repo" in hl[0] and "--head" in hl[0]
-               and "head branch" not in ci_check(r, kit_version=7)[-1],
+               and "and the head branch," in ci_check(r, kit_version=7)[-1] and "--head --run" in ci_check(r, kit_version=7)[-1],
                f"ci-check names a head whose push trigger ignores no records, with the ci --head command: {hl}")
-        expect(not [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "head branch" in l],
+        expect(not [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "(the head branch)" in l],
                "ci-check --target: the named versions only, no head line")
         _hand(w1, {".github/workflows/port-ci.yml": wf}, "CI on the head (today's workflow)")
-        expect(not [l for l in ci_check(r, kit_version=7) if "head branch" in l], "a current head: no head line")
-        hl = [l for l in ci_check(r, kit_version=8) if "head branch" in l]
+        expect(not [l for l in ci_check(r, kit_version=7) if "(the head branch)" in l], "a current head: no head line")
+        hl = [l for l in ci_check(r, kit_version=8) if "(the head branch)" in l]
         expect(len(hl) == 1 and "kit 7, older than kit 8" in hl[0] and "ignores no records" not in hl[0],
                f"a head on an older kit is named like a version branch: {hl}")
+        # a version branch whose workflow lacks the records ignore is named too (review of the cost PR), and the summary
+        # counts the head; a workflow with it is not
+        rl = ci_check(r, ["1.21.4"], kit_version=7)
+        expect(any("neoforge-1.21.4" in l and "ignores none of the round's records" in l for l in rl)
+               and "1 with an outdated workflow" in rl[-1] and "head" not in rl[-1],
+               f"ci-check names a version branch whose push trigger ignores no round records: {rl}")
+        pcm = load("port_ci_fbt", "port-ci.py")
+        vwf = wf.replace('"README.md"]', '"README.md"' + "".join(f', "{x}"' for x in pcm.VERSION_RECORDS_IGNORE) + "]", 1)
+        expect(vwf != wf and ignores_records(vwf, version_records()) and not ignores_records(wf, version_records()),
+               "the fixture: a version branch's workflow as port-ci.py renders it now")
+        _hand(w4, {".github/workflows/port-ci.yml": vwf}, "1.21.4: CI with the records ignore")
+        rl = ci_check(r, ["1.21.4"], kit_version=7)
+        expect(not any("round's records" in l for l in rl), f"a version branch with the records ignore is not named: {rl}")
+        git(r, "update-ref", "refs/remotes/origin/master", "HEAD", check=True)
+        git(r, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master", check=True)
         said.clear()
-        rc = ci_head(r, "examplemod", say=said.append)
+        expect(ci_head(r, "othermod", say=said.append) == 2 and "not the head workflow's" in said[-1],
+               f"ci --head --modid other than the workflow's refuses: {said}")
+        said.clear()
+        git(r, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/neoforge-1.21.1", check=True)
+        expect(ci_head(r, None, say=said.append) == 2 and "fetches the authors' branch master" in said[-1]
+               and "set-head origin master" in said[-1], f"ci --head refuses when origin/HEAD is not the workflow's base: {said}")
+        git(r, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master", check=True)
+        said.clear()
+        rc = ci_head(r, None, say=said.append)
         cmd = next((l for l in said if "tools/port-ci.py --repo" in l), "")
         expect(rc == 0 and "--kit-version" not in cmd and "--kit-sha" not in cmd and cmd.endswith("--branch neoforge-1.21.1")
                and "--modid examplemod" in cmd and "--dep-jar" in cmd and "--gatec" in cmd,

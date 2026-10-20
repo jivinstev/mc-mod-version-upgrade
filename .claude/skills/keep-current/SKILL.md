@@ -478,7 +478,7 @@ whole context written again after each wait on gates or CI longer than the 5-min
      an older kit or its push trigger ignores no records: every ledger and README Ports-block commit the round makes there
      is then a full Port CI run (2026-10-19 round: nine, 8-14 minutes each, on a head still on a kit-v23 workflow --
      re-pins keep a workflow's kit, and nothing regenerated the head). Regenerate it first, before the round's first
-     ledger commit: `fork-branches.py ci --repo DIR --head --modid ID --run` (the head's own pins, variants and gates read
+     ledger commit: `fork-branches.py ci --repo DIR --head --run` (the head's own pins, variants and gates read
      back, only the kit moved to the newest), pushed under `push-version-branches`; else ask;
    **The order is fixed: gates and the review, then the findings graded, then the merge, then the pre-release** (on a
    version branch the review starts from the cascade's green A/B gates and the one full run follows its fixes, below). The

@@ -218,13 +218,16 @@ workflow's `shipped jars` job boots that jar too -- a workflow that boots only `
 check is red. `ci --all` does every version branch; `ci-check --repo DIR` warns about each branch whose workflow pins an
 older kit than the newest published one or lacks such a job (the weekly round runs it), and about **the head branch**
 when its workflow pins an older kit or its push trigger ignores no records (`ci --head --run` regenerates the head's
-from itself, only the kit moved); `sync-shared --ci MODID` regenerates the synced branches' workflows, and without `--ci`
+from itself, only the kit moved; it refuses a `--modid` other than the workflow's, or an origin/HEAD that is not the
+workflow's authors' branch); `sync-shared --ci MODID` regenerates the synced branches' workflows, and without `--ci`
 prints the same warnings. **A version branch's push trigger also ignores its round records** -- `.port/*.md` and
 `.port/*/*.md` (GATES.md, REVIEW.md, COST.md, DEPS.md, DRIFT.md, TEST-ITEMS.md, `.port/DECISIONS.md`: Markdown outside
 `src/`, never jar content, never read by a gate) beside the ledger and the root README every workflow ignores -- so a
 push of only those runs no full Port CI; `branch.properties`, the rows, STUBS.json, REMERGE.json and the shipped-jar
 expectations still run it, as do every pull request, tag and dispatched release. Only where the checkout holds
-`.port/<mc>/` (port-ci.py renders it there): a single-version fork's workflow is byte-for-byte what it was.
+`.port/<mc>/branch.properties` (port-ci.py renders it there; a single-version fork's `.port/<mc>/shipped-expect-*.txt`
+does not count): a single-version fork's workflow is byte-for-byte what it was. `ci-check` names a version branch whose
+workflow lacks it, and counts the head in its summary.
 
 ## Run the tool; handle only the residue
 
@@ -345,7 +348,7 @@ Every known defect of the fork lives in **one ledger**, `.port/KNOWN-ISSUES.json
 mod, `.port/<mod>/KNOWN-ISSUES.json` (`--mod <mod>`). `tools/known-issues.py` writes it (atomically, sorted keys,
 2-space indent); nobody edits it by hand. It is a record, not port code: Port CI's push trigger `paths-ignore`s it
 (a workflow port-ci.py rendered since the ledger exists: `fork-branches.py ci-check` names a head branch whose workflow
-is older, and `fork-branches.py ci --repo DIR --head --modid ID --run` regenerates it, only its kit moved),
+is older, and `fork-branches.py ci --repo DIR --head --run` regenerates it, only its kit moved),
 it never makes gates or a review stale, and `fork-branches.py cascade` never carries it to a version branch, so a
 ledger-only commit goes straight onto the head branch. README and ledger edits never trigger CI or make gates
 stale (the root `README.md` only; a README under `src/` is jar content). Read it from there: `--repo DIR --ref neoforge-1.21.1`.
