@@ -116,18 +116,45 @@ def convert_text(text, keep=frozenset()):
             if key in RENDER:
                 if m.name == "render":
                     # 1.21.6+: the screen wrapper (26.x extractRenderStateWithTooltipAndSubtitles) draws the background
-                    # BEFORE this hook, so the 1.20.2-1.21.5 idiom of opening render() with renderBackground(...) draws
-                    # it twice, and a second blur throws "Can only blur once per frame" (CATALOG M61). Drop the call
-                    # made with the hook's own arguments; a background drawn with other values is left, and noted.
+                    # BEFORE this hook, so the 1.20.2-1.21.5 idiom of calling renderBackground(...) as a statement of
+                    # render() draws it twice, and a second blur throws "Can only blur once per frame" (CATALOG M61).
+                    # Drop a call made with the hook's own arguments when it stands as a statement of its own (the code
+                    # before it ends a statement or opens/closes a block). Kept (renamed) and noted: a call that is the
+                    # body of a braceless if/else/loop (dropping it would capture the next statement), one made with
+                    # other values, and every call in a class that overrides renderBackground itself (its wrapper call
+                    # is to that override, so the explicit call may be the only background drawn).
                     g, mx, my, pt = names
                     own = re.compile(r"(?m)^[ \t]*(?:(?:this|super)\s*\.\s*)?renderBackground\(\s*%s\s*,\s*%s\s*,\s*%s\s*,"
                                      r"\s*%s\s*\)\s*;[ \t]*(?://[^\n]*)?\n" % tuple(map(re.escape, (g, mx, my, pt))))
-                    new_body, k = own.subn("", body)
-                    if k:
+                    # an override that does not reach super's background replaces it (an empty one draws none); one that
+                    # calls super first (a renderBg turned extractBackground) still draws it, so the call is a duplicate
+                    overrides_bg = any(
+                        x.name in ("renderBackground", "extractBackground") and len(x.params) == 4 and ptype(x.params[0]) == G
+                        and overridden(text, x) and not re.search(r"\bsuper\s*\.\s*(?:renderBackground|extractBackground)\s*\(",
+                                                                ni.code_spans(text[x.body_open + 1:x.body_close]))
+                        for x in fs.methods(text))
+                    masked = ni.code_spans(body)
+                    keep_notes, cut = [], []
+                    for c in own.finditer(masked):
+                        before = masked[:c.start()].rstrip()
+                        if overrides_bg:
+                            keep_notes.append(f"line {line}: render calls renderBackground and the class overrides its "
+                                              "background itself -- renamed, not dropped: check it is not drawn twice")
+                        elif before == "" or before[-1] in ";{}":
+                            cut.append(c.span())
+                        else:
+                            keep_notes.append(f"line {line}: render calls renderBackground as the body of a braceless "
+                                              "if/else/loop -- renamed, not dropped: the screen already draws its "
+                                              "background (1.21.6+), remove it with its condition by hand")
+                    if cut:
+                        new_body = body
+                        for a, b in reversed(cut):
+                            new_body = new_body[:a] + new_body[b:]
                         text = text[:m.body_open + 1] + new_body + text[m.body_close:]
-                        notes.append(f"line {line}: dropped {k} renderBackground(...) call(s) from render: the screen "
-                                     "draws its background before render since 1.21.6 (a second blur throws)")
-                    elif re.search(r"(?<![\w$])renderBackground\s*\(", ni.code_spans(body)):
+                        notes.append(f"line {line}: dropped {len(cut)} renderBackground(...) call(s) from render: the "
+                                     "screen draws its background before render since 1.21.6 (a second blur throws)")
+                    notes.extend(dict.fromkeys(keep_notes))
+                    if not cut and not keep_notes and re.search(r"(?<![\w$])renderBackground\s*\(", masked):
                         notes.append(f"line {line}: render calls renderBackground with other arguments -- the screen "
                                      "already draws its background (1.21.6+): check it is not a second blur")
                     m = next(x for x in fs.methods(text) if x.start == m.start)
@@ -291,6 +318,19 @@ class S extends Screen {
     other, _, onotes = convert_text(t.replace("this.renderBackground(g, mx, my, pt);", "this.renderBackground(g, 0, 0, pt);"))
     if "this.extractBackground(g, 0, 0, pt);" not in other or not any("other arguments" in x for x in onotes):
         miss.append(f"a background call with other arguments is renamed and noted, not dropped: {onotes}")
+    # a call that is the body of a braceless if: dropping it would make the NEXT statement conditional
+    cond, _, cnotes = convert_text(t.replace("this.renderBackground(g, mx, my, pt);",
+                                             "if (fancy)\n            this.renderBackground(g, mx, my, pt);"))
+    if ("if (fancy)\n            this.extractBackground(g, mx, my, pt);\n        super.extractRenderState(g, mx, my, pt);"
+            not in cond or not any("braceless" in x for x in cnotes)):
+        miss.append(f"a renderBackground under a braceless if is kept (renamed) and noted, not dropped: {cnotes}\n{cond}")
+    # a class that overrides its own background: its explicit super call may be the only background drawn
+    ov = t.replace("    @Override\n    public void render(", "    @Override\n    public void renderBackground(GuiGraphicsExtractor g, "
+                   "int mx, int my, float pt) {\n    }\n\n    @Override\n    public void render(", 1)
+    ov = ov.replace("this.renderBackground(g, mx, my, pt);", "super.renderBackground(g, mx, my, pt);")
+    ovo, _, ovn = convert_text(ov)
+    if "super.extractBackground(g, mx, my, pt);" not in ovo or not any("overrides its background" in x for x in ovn):
+        miss.append(f"a class overriding renderBackground keeps (renames) its explicit background call, noted: {ovn}\n{ovo}")
     kept, _, _ = convert_text(t, frozenset({"mouseClicked"}))   # the mod has its own old-shape mouseClicked
     if "child.mouseClicked(mouseX - 4, mouseY, button)" not in kept or "return super.mouseClicked(event, doubleClick);" not in kept:
         miss.append("own-hook guard: a child call to a mod-declared old-shape hook was rewritten (or super was not)")

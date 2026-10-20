@@ -353,7 +353,14 @@ def run_from_plan(a):
             print(f"propose-learnings: --out {out} is inside this checkout; the worklist is not a file to commit "
                   f"(write it to a scratch directory)", file=sys.stderr)
             return 2
-        out.write_text(text + "\n", encoding="utf-8")
+        if not out.parent.is_dir():
+            print(f"propose-learnings: --out {out}: the directory {out.parent} does not exist", file=sys.stderr)
+            return 2
+        try:
+            out.write_text(text + "\n", encoding="utf-8")
+        except OSError as e:
+            print(f"propose-learnings: --out {out}: {e}", file=sys.stderr)
+            return 2
         print(f"propose-learnings: worklist written to {out}")
     else:
         print(text, file=sys.stdout if rc == 0 else sys.stderr)
@@ -412,6 +419,13 @@ def self_check():
                 bad.append("--out inside the checkout is refused, nothing written")
             if run_from_plan(ns(str(pathlib.Path(d) / "w.md"))) != 0 or "- [ ]" not in (pathlib.Path(d) / "w.md").read_text(encoding="utf-8"):
                 bad.append("--out outside the checkout writes the worklist")
+            if run_from_plan(ns(str(pathlib.Path(d) / "missing" / "w.md"))) != 2:
+                bad.append("--out into a directory that does not exist: a clean exit 2, not a traceback")
+    import subprocess
+    both = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "--from-plan", "o/dep#61", "--modid", "x",
+                           "--comments-file", os.devnull], capture_output=True, text=True, encoding="utf-8")
+    if both.returncode != 2 or "one or the other" not in both.stderr:
+        bad.append(f"--from-plan with --modid is refused (exit 2): {both.returncode} {both.stderr[-200:]}")
     if CATALOG.read_bytes() != cat_before:
         bad.append("--from-plan changed CATALOG.md")
     print("propose-learnings self-check: " + ("OK" if not bad else "FAIL\n  " + "\n  ".join(bad)))
@@ -440,7 +454,13 @@ def main():
     if a.self_check:
         return self_check()
     if a.from_plan:
+        if a.modid:
+            print("propose-learnings: --from-plan prints a worklist and applies nothing; --modid belongs to the "
+                  "applying flow -- give one or the other", file=sys.stderr)
+            return 2
         return run_from_plan(a)
+    if a.comments_file or a.out:
+        ap.error("--comments-file and --out go with --from-plan")
     if not a.modid:
         ap.error("--modid is required (or --from-plan OWNER/REPO#N, or --self-check)")
 

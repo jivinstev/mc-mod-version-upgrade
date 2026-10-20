@@ -20,7 +20,7 @@ FMLEnvironment.dist	FMLEnvironment.getDist()
 Screen.hasShiftDown	Minecraft.getInstance().hasShiftDown
 # the other two modifier statics moved the same way (21.10.64 Minecraft.hasControlDown()/hasAltDown(); 21.8.54 had them on
 # Screen). Never a raw GLFW_MOD_CONTROL test: on macOS hasControlDown means Cmd (CATALOG M83). Fully qualified, no import.
-re:\bScreen\.hasControlDown\(\)	net.minecraft.client.Minecraft.getInstance().hasControlDown()
-re:\bScreen\.hasAltDown\(\)	net.minecraft.client.Minecraft.getInstance().hasAltDown()
+re:(?<![\w$.])Screen\.hasControlDown\(\)	net.minecraft.client.Minecraft.getInstance().hasControlDown()
+re:(?<![\w$.])Screen\.hasAltDown\(\)	net.minecraft.client.Minecraft.getInstance().hasAltDown()
 addRenderLayer	withRenderLayer
 #!strict
