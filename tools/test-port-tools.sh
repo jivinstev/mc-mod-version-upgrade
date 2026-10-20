@@ -278,7 +278,7 @@ grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans,
   || bad "file-loop self-check: $out"
 
 out="$(python3 tools/port-cost.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "port-cost: a session driving two layer targets and a second fork (one subagent per target) is charged once -- each target only its own requests, the parts sum to the session; a single-version checkout and a layer checkout without --target are counted whole, as before; records carry a price tier and no model name; round-table sums each version branch's COST.md records since the round's start and measures a single-version fork, with totals; round-table --session-cwd charges a scheduled session's own requests (its subagents included, another cwd not) per version at the round's marks" \
+grep -q 'self-check: OK' <<<"$out" && ok "port-cost: a session driving two layer targets and a second fork (one subagent per target) is charged once -- each target only its own requests, the parts sum to the session; a single-version checkout and a layer checkout without --target are counted whole, as before; records carry a price tier and no model name; round-table sums each version branch's COST.md records since the round's start and measures a single-version fork, with totals; round-table --session-cwd charges a scheduled session's own requests (its subagents included, another cwd not) per version at the round's marks; mark --phase splits it per fork x version x phase (a recurring phase summed, each version's rows summing to its unphased row, per-phase totals) while a marks file without phases gives today's table byte for byte" \
   || bad "port-cost self-check: $out"
 
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"

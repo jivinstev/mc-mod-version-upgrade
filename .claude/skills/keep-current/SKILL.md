@@ -463,7 +463,13 @@ whole context written again after each wait on gates or CI longer than the 5-min
      `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
      has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
 4. **Per version, in ladder order**, once its code is in -- first `python3 tools/port-cost.py mark --fork <owner/repo>
-   --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks):
+   --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks).
+   **Mark every change of the kind of work too**, with `--phase` (same fork and version; one more column in the file):
+   `upstream` -- the authors' cascade and resolving its conflicts and decisions (step 3's head cascade is marked
+   `--version <the lowest version it reaches> --phase upstream` when it starts), `backlog` -- the selected known-issue
+   fixes, `review` -- the fresh reviews and the fixes they cause, `overhead` -- pins, gates, CI waits, records. The
+   round-table then splits each version by phase and adds per-phase totals, so the cost of taking the authors' code
+   can be compared week over week (marks without `--phase` keep the table as it was):
    - (a version-branch fork, once per round, before the round's first commit to it -- step 1's grade overrides included) `python3 tools/fork-branches.py ci-check --repo DIR`:
      a WARNING names a branch whose Port CI workflow is older than the kit or boots no jar of a variant its
      `.port/<v>/shipped-expect-<variant>.txt` expects -- CI green there proves nothing about that jar. Regenerate it
@@ -546,7 +552,13 @@ whole context written again after each wait on gates or CI longer than the 5-min
    `python3 tools/port-cost.py round-table --since <round start> --session-cwd <the round's working directory>` (this
    session's own requests, its subagents included, per fork and version at the `mark`s, with totals; the COST.md form,
    `--fork <owner/repo>=<checkout> ...`, measures only what fork-port's cost stage recorded, which a scheduled session's
-   transcripts may not reach -- it read $0.00 for every version) -- and, before you close the issue, a **Lessons for
+   transcripts may not reach -- it read $0.00 for every version), split per phase where the round marked phases (it
+   did: above), with the per-phase totals, and under it **the size of the authors' change** per version: commits
+   (`git rev-list --count <old port_taken>..<new port_taken>` of that version's `.port/<v>/branch.properties`, or of the
+   head's merge for a single-version fork), files and changed lines (`git diff --shortstat` over the same range), and
+   how many files the cascade merged **mechanically** versus **by an agent** (`CASCADE-PLAN.json`: `mechanical` against
+   the files of its `decisions`, plus any resolved by hand) -- so cost per authors' changed line and the mechanical
+   share can be compared week over week -- and, before you close the issue, a **Lessons for
    the migrator** block in that same comment. It applies to every round, a single-version fork's and a version-branch
    fork's alike, and it is only text in the comment: no tool reads or writes anything for it, and **nothing is written
    to the migrator repository** (this session can only read it). Under the heading `### Lessons for the migrator`, a

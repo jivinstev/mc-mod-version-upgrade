@@ -108,6 +108,8 @@ LESSONS_RULE = ("Before closing, the closing comment carries a `### Lessons for 
 # re-read every turn, ~39% cache writes -- the whole context re-written after each idle gap longer than the 5-minute
 # cache -- ~14% output): the orchestrator stays small, workers are fresh subagents, and waits are few and long
 CONTEXT_RULE = ("Keep this session small: it orchestrates and never does a version's porting, gating or review in its own context. Each version's fixer and reviewer are fresh subagents that return a short summary (at most ~40 lines: what changed, gate verdicts, open rows, commit shas); keep only those, never their transcripts or the build logs. One worker may carry the same change across several versions (a re-pin, one fix cascaded up) while its context stays modest; distinct porting work at each version gets a fresh worker per version. Wait for gates and CI in ONE blocking command (`gh run watch <run id> --exit-status`, or a single until-loop run in the background or under Monitor), never by polling turn by turn: every idle gap longer than 5 minutes re-writes this session's whole cached context, so a small context and few, long waits are what keep the round cheap. If this session's context passes ~200k tokens, write the round's state (frozen input, per-version status, open rows, shas, what comes next) to round/NOTES.md and continue from a fresh subagent that reads it.")
+# the round's cost by KIND of work, so the cost of taking the authors' code can be compared week over week
+PHASE_RULE = ("Mark each change of the kind of work with python3 mmvu/tools/port-cost.py mark --fork <owner/repo> --version <v> --phase upstream|backlog|review|overhead (upstream: the authors' cascade and its conflicts; backlog: the selected known-issue fixes; review: fresh reviews and the fixes they cause; overhead: pins, gates, CI waits, records). The closing comment's cost table (round-table --session-cwd) gives the per-phase split and per-phase totals, and for upstream the size of what the authors changed per version (commits, files, changed lines) and how many files the cascade merged mechanically versus by an agent, so cost per authors' changed line and the mechanical-merge share can be compared week over week.")
 # the per-fork fields `install` rebuilds from flags only: an existing config's values are warned about or kept
 KEPT = (("ledger_issues", "--ledger-issues"), ("depends_on", "--depends-on"), ("layer_branch", "--layer-branch"))
 TRAILER_RE = re.compile(r"^[A-Za-z][\w-]*: \S.*$")
@@ -545,7 +547,8 @@ def round_task(cfg, mrepo, existing=()):
               "6. A round that stops before its close leaves the plan issue open (next Tuesday's plan carries it "
               "forward); only the closing comment of a round that ran its steps closes it.",
               "7. " + CONTEXT_RULE,
-              "8. " + LESSONS_RULE]
+              "8. " + PHASE_RULE,
+              "9. " + LESSONS_RULE]
     name = cfg["round"]["name"]
     return {"name": name, "cron_expression": cfg["round"]["cron"], "create_new_session_on_fire": True,
             "notifications": {"push": True, "email": True}, "initiation": "human_request", "prompt": "\n".join(lines),
@@ -933,8 +936,14 @@ def self_check():
            and "fresh subagents" in CONTEXT_RULE and "~40 lines" in CONTEXT_RULE and "ONE blocking command" in CONTEXT_RULE
            and "5 minutes" in CONTEXT_RULE and "round/NOTES.md" in CONTEXT_RULE and "~200k tokens" in CONTEXT_RULE
            and "the same change across several versions" in CONTEXT_RULE and "fresh worker per version" in CONTEXT_RULE
-           and "\n7. " + CONTEXT_RULE in task["prompt"] and "\n8. " + LESSONS_RULE in task["prompt"],
+           and "\n7. " + CONTEXT_RULE in task["prompt"] and "\n9. " + LESSONS_RULE in task["prompt"],
            f"the round prompt keeps the orchestrator small, its workers fresh and its waits blocking: {task['prompt']}")
+    # the cost by kind of work (upstream intake measured week over week): phase marks, the per-phase split, the authors'
+    # change size and the mechanical-merge share in the closing table
+    expect("\n8. " + PHASE_RULE in task["prompt"] and "--phase upstream|backlog|review|overhead" in PHASE_RULE
+           and "per-phase" in PHASE_RULE and "changed lines" in PHASE_RULE and "mechanically versus by an agent" in PHASE_RULE
+           and task["prompt"].index(PHASE_RULE) < task["prompt"].index(LESSONS_RULE),
+           f"the round prompt marks phases and asks for the per-phase split and the authors' change size: {task['prompt']}")
     # the round runs the migrator's current main, the plan the pinned sha, and the prompt says so
     expect("current main, on purpose" in task["prompt"] and "`migrator_sha`" in task["prompt"]
            and "git clone --depth 1 https://github.com/owner/migrator mmvu" in task["prompt"]
