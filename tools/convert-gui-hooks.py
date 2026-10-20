@@ -114,6 +114,23 @@ def convert_text(text, keep=frozenset()):
             body = text[m.body_open + 1:m.body_close]
             line = fs.line_of(text, m.start)
             if key in RENDER:
+                if m.name == "render":
+                    # 1.21.6+: the screen wrapper (26.x extractRenderStateWithTooltipAndSubtitles) draws the background
+                    # BEFORE this hook, so the 1.20.2-1.21.5 idiom of opening render() with renderBackground(...) draws
+                    # it twice, and a second blur throws "Can only blur once per frame" (CATALOG M61). Drop the call
+                    # made with the hook's own arguments; a background drawn with other values is left, and noted.
+                    g, mx, my, pt = names
+                    own = re.compile(r"(?m)^[ \t]*(?:(?:this|super)\s*\.\s*)?renderBackground\(\s*%s\s*,\s*%s\s*,\s*%s\s*,"
+                                     r"\s*%s\s*\)\s*;[ \t]*(?://[^\n]*)?\n" % tuple(map(re.escape, (g, mx, my, pt))))
+                    new_body, k = own.subn("", body)
+                    if k:
+                        text = text[:m.body_open + 1] + new_body + text[m.body_close:]
+                        notes.append(f"line {line}: dropped {k} renderBackground(...) call(s) from render: the screen "
+                                     "draws its background before render since 1.21.6 (a second blur throws)")
+                    elif re.search(r"(?<![\w$])renderBackground\s*\(", ni.code_spans(body)):
+                        notes.append(f"line {line}: render calls renderBackground with other arguments -- the screen "
+                                     "already draws its background (1.21.6+): check it is not a second blur")
+                    m = next(x for x in fs.methods(text) if x.start == m.start)
                 text = text[:m.start] + text[m.start:m.params_open].replace(m.name, RENDER[key], 1) + text[m.params_open:]
                 n += 1; changed = True; break
             if m.name == "renderBg" and types == (G, "float", "int", "int"):
@@ -251,7 +268,7 @@ class S extends Screen {
 '''
     out, n, notes = convert_text(t)
     want = ["public void extractRenderState(GuiGraphicsExtractor g, int mx, int my, float pt)",
-            "this.extractBackground(g, mx, my, pt);", "super.extractRenderState(g, mx, my, pt);",
+            "public void extractRenderState(GuiGraphicsExtractor g, int mx, int my, float pt) {\n        super.extractRenderState(g, mx, my, pt);",
             "model.render(pose, buffer, light, overlay);", "Helper.render(g, source, 1, 2, 3);", "command.render(g, font, 4, 5);",
             "child.extractRenderState(g, mx, my, pt);",
             "protected void extractBackground(GuiGraphicsExtractor g, int mx, int my, float pt) {\n        super.extractBackground(g, mx, my, pt);",
@@ -265,8 +282,15 @@ class S extends Screen {
     miss = [w for w in want if w not in out]
     if "int scanCode = event.scancode();" in out:
         miss.append("unused local declared")
-    if notes:
-        miss.append(f"unexpected notes {notes}")
+    # the leading renderBackground(...) is DROPPED, not renamed: 26.x's screen wrapper already draws the background, and a
+    # second extractBackground blurs twice ("Can only blur once per frame", a client crash on opening the screen)
+    if "renderBackground(" in out or "this.extractBackground(g, mx, my, pt);" in out:
+        miss.append("the render hook's own renderBackground call was kept (renamed) instead of dropped")
+    if len(notes) != 1 or "dropped 1 renderBackground" not in notes[0]:
+        miss.append(f"expected one note naming the dropped background call: {notes}")
+    other, _, onotes = convert_text(t.replace("this.renderBackground(g, mx, my, pt);", "this.renderBackground(g, 0, 0, pt);"))
+    if "this.extractBackground(g, 0, 0, pt);" not in other or not any("other arguments" in x for x in onotes):
+        miss.append(f"a background call with other arguments is renamed and noted, not dropped: {onotes}")
     kept, _, _ = convert_text(t, frozenset({"mouseClicked"}))   # the mod has its own old-shape mouseClicked
     if "child.mouseClicked(mouseX - 4, mouseY, button)" not in kept or "return super.mouseClicked(event, doubleClick);" not in kept:
         miss.append("own-hook guard: a child call to a mod-declared old-shape hook was rewritten (or super was not)")

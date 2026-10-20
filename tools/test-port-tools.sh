@@ -315,7 +315,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-paintings.py|convert-paintings: a code-registered painting becomes a painting_variant data file + the placeable tag" \
             "convert-rendertypes.py|convert-rendertypes: a CompositeState becomes a pipeline + RenderSetup; reverse-Z depth, unknown shards refused" \
             "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
-            "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
+            "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept; a render hook's own leading renderBackground is dropped (1.21.6+: the screen draws it, a second blur throws)" \
             "srcsets.py|srcsets: every source set the author builds, their compile and jar tasks, and the target from the build" \
             "port-profile.py|port-profile: count the cost-driving port patterns per mod and name the tool covering each" \
             "convert-entity-renderstate.py|convert-entity-renderstate: vanilla entity renderers/models/layers onto 26.2 render state; refuses what it cannot rewrite exactly" \
