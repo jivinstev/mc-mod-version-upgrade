@@ -102,6 +102,8 @@ ALLOW = {
 ALWAYS = ("Always allowed, whatever the list says, because they are how the round reports: comments on the plan issue "
           "(and closing it at the close), and edits to the ledger issues listed above.")
 MIGRATOR_RULE = "Nothing on the migrator repository, apart from reading it (the clone in step 1), is ever allowed."
+# the closing comment carries the round's candidate lessons for the migrator, which the round itself never writes
+LESSONS_RULE = ("Before closing, the closing comment carries a `### Lessons for the migrator` table (every fork kind, single-version included; text only): | version | symptom | fork commit | why it looks general |, one row per candidate lesson whose cause looks like the version, NeoForge, a library or a shared helper rather than the mod -- the error text or behaviour, the fix as owner/repo@<sha> -- or one `| none | | | |` row. Nothing is written to the migrator repository: a later session harvests it with tools/propose-learnings.py --from-plan.")
 # the per-fork fields `install` rebuilds from flags only: an existing config's values are warned about or kept
 KEPT = (("ledger_issues", "--ledger-issues"), ("depends_on", "--depends-on"), ("layer_branch", "--layer-branch"))
 TRAILER_RE = re.compile(r"^[A-Za-z][\w-]*: \S.*$")
@@ -537,7 +539,8 @@ def round_task(cfg, mrepo, existing=()):
               "5. Never promote a release, publish to Modrinth or CurseForge, push to or comment on the authors' "
               "repositories, force-push, or merge into the migrator repository.",
               "6. A round that stops before its close leaves the plan issue open (next Tuesday's plan carries it "
-              "forward); only the closing comment of a round that ran its steps closes it."]
+              "forward); only the closing comment of a round that ran its steps closes it.",
+              "7. " + LESSONS_RULE]
     name = cfg["round"]["name"]
     return {"name": name, "cron_expression": cfg["round"]["cron"], "create_new_session_on_fire": True,
             "notifications": {"push": True, "email": True}, "initiation": "human_request", "prompt": "\n".join(lines),
@@ -912,6 +915,13 @@ def self_check():
            and "known-issues ledger and README Ports block" in ALLOW["push-version-branches"],
            f"plan-issue comments and ledger-issue edits always allowed, the migrator never written, work branches "
            f"under merge-fork-prs, ledger and Ports block under push-version-branches: {task['prompt']}")
+    # the closing comment's lessons block (2026-10-19 round: its lessons reached the migrator only by hand): asked for in
+    # the prompt, after the close rule, while the migrator stays read-only
+    expect(LESSONS_RULE in task["prompt"] and task["prompt"].index(LESSONS_RULE) > task["prompt"].index("only the closing "
+           "comment") and "### Lessons for the migrator" in LESSONS_RULE and "propose-learnings.py --from-plan" in LESSONS_RULE
+           and "Nothing is written to the migrator" in LESSONS_RULE and MIGRATOR_RULE in task["prompt"]
+           and "single-version included" in LESSONS_RULE,
+           f"the round prompt asks for the Lessons for the migrator block and keeps the migrator read-only: {task['prompt']}")
     # the round runs the migrator's current main, the plan the pinned sha, and the prompt says so
     expect("current main, on purpose" in task["prompt"] and "`migrator_sha`" in task["prompt"]
            and "git clone --depth 1 https://github.com/owner/migrator mmvu" in task["prompt"]

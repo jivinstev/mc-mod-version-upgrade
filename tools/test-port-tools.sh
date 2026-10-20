@@ -315,7 +315,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-paintings.py|convert-paintings: a code-registered painting becomes a painting_variant data file + the placeable tag" \
             "convert-rendertypes.py|convert-rendertypes: a CompositeState becomes a pipeline + RenderSetup; reverse-Z depth, unknown shards refused" \
             "convert-core-shaders.py|convert-core-shaders: GLSL 150 loose uniforms become 26.x blocks; vanilla-set names bind to vanilla" \
-            "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept" \
+            "convert-gui-hooks.py|convert-gui-hooks: render hooks become extract*, input handlers take event records; bodies kept; a render hook's own renderBackground statement is dropped (1.21.6+: the screen draws it, a second blur throws), kept and noted under a braceless if/else/loop or when the class overrides its background" \
             "srcsets.py|srcsets: every source set the author builds, their compile and jar tasks, and the target from the build" \
             "port-profile.py|port-profile: count the cost-driving port patterns per mod and name the tool covering each" \
             "convert-entity-renderstate.py|convert-entity-renderstate: vanilla entity renderers/models/layers onto 26.2 render state; refuses what it cannot rewrite exactly" \
@@ -580,6 +580,21 @@ PY
 out="$(python3 tools/weekly-plan.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "weekly-plan self-check (in $(grep -o '[0-9.]* s)$' <<<"$out" | tr -d ')')): the workflow equals tools/golden/weekly-plan.yml (Tuesdays 15:00 and 16:00 UTC plus workflow_dispatch, contents: read and issues: write, no secrets, the tools at a pinned commit, no model); its first step lets only the 08:00 Los Angeles slot through on both sides of daylight saving (and with no tz database); the deadline is the next Wednesday round; install refuses an org-owned fork without plan_owner, a checkout off the head branch and a head that is not the default branch (unless --default-branch-too), and is idempotent; the round task is CRON_TZ=America/Los_Angeles with a jittered minute, a fresh session, push and email on; the allow list is empty by default (the round asks) and rendered verbatim into the prompt, automerge follows merge-fork-prs; the round's own work branches and PRs fall under merge-fork-prs, the ledger and README Ports block under push-version-branches, plan-issue comments and ledger-issue edits are always allowed and the migrator repository is only read; the round clones current main and says the plan ran at migrator_sha, which install records; a re-install over an existing config (a single-version fork and a layer fork with layer_branch in one set) warns on stderr for each allow, ledger_issues, depends_on and layer_branch its flags drop, naming the flag, keeps the default result otherwise unchanged (no warning on a fresh install or with every value re-passed), and --keep-existing keeps them while a flag given still wins; replaces lists exact task names (its own, --replace-task, existing keep-current names of this set); the authors' upstream comes from the fork parent when omitted; --trailer lines end the install commit; the plan issue has the deadline first, is assigned to the owner, a section per fork; a second run the same week opens nothing; an unclosed plan is carried forward (ticks and the owner's replies, not a drive-by's) and closed as superseded; an incomplete plan opens no issue" \
   || bad "weekly-plan self-check: $(tail -5 <<<"$out")"
+# the round's lessons reach the migrator as a block in its closing comment (round of 2026-10-19: they were harvested by
+# hand), for every fork kind, and a follow-up session's worklist reads it -- the round itself still writes nothing here
+python3 - <<'PY' && ok "keep-current, the close: a 'Lessons for the migrator' block in the closing comment, single-version and version-branch forks alike, text only, nothing written to the migrator; harvested with propose-learnings.py --from-plan" || bad "keep-current's close no longer asks for the Lessons for the migrator block, or no longer says it is text only for every fork kind"
+import pathlib, sys
+s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf-8")
+r = s[s.index("## The weekly round"):s.index("## README Ports block")]
+close = " ".join(r[r.index("6. **Close.**"):r.index("7. **Afterwards:**")].split())
+need = ("### Lessons for the migrator", "| version | symptom | fork commit | why it looks general |",
+        "a single-version fork's and a version-branch fork's alike", "no tool reads or writes anything for it",
+        "nothing is written to the migrator repository", "propose-learnings.py --from-plan", "| none | | | |")
+sys.exit(0 if all(n in close for n in need) and close.index("Lessons for the migrator") < close.index("close the issue (state completed)") else 1)
+PY
+out="$(python3 tools/propose-learnings.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "propose-learnings --from-plan: the newest comment's Lessons block becomes a checklist (evidence links, catalogue hits by the symptom, a row naming a listed mod flagged); no block exits 1; --out refused inside the checkout; CATALOG.md untouched" \
+  || bad "propose-learnings self-check: $(tail -5 <<<"$out")"
 # ---- stacked version branches (tools/fork-branches.py, the default for a multi-version fork): migrating a layer fork, the
 # branch-mode done check through fork-port.py's own CLI, the cascade, the library's release-side done check -- on a layer
 # fixture; a single-version fork is untouched (its own checks above and below run unchanged)
@@ -1154,6 +1169,31 @@ cases = [
 bad = [(c, f(*c[:3])) for c in cases if f(*c[:3]) != c[3]]
 print(*bad, sep="\n")
 sys.exit(1 if bad else 0)
+PY
+# the 2026-10-19 harvest rows (1.21.10 hasControlDown/hasAltDown, 1.21.11 BLOCK_SHEET_MIPPED): a simple-name call is
+# rewritten, a fully qualified one (a package dot before the class) is left alone
+python3 - <<'PY' && ok "shared rows: Screen.hasControlDown/hasAltDown (1.21.10) and BLOCK_SHEET_MIPPED (1.21.11) rewrite the simple name and never a fully qualified one" || bad "a 2026-10-19 harvest row misses its simple name or breaks a fully qualified one"
+import re, pathlib, sys
+def rows(ver, word):
+    out = []
+    for l in pathlib.Path(f"templates/fork-layer/shared/{ver}/renames.tsv").read_text(encoding="utf-8").splitlines():
+        if l.startswith("re:") and word in l.split("\t")[0]:
+            pat, rep = l[3:].split("\t")
+            out.append((pat, rep))
+    return out
+def f(rs, s):
+    for pat, rep in rs:
+        s = re.sub(pat, rep, s)
+    return s
+ctl = rows("1.21.10", "hasControlDown") + rows("1.21.10", "hasAltDown")
+bsm = rows("1.21.11", "BLOCK_SHEET_MIPPED")
+ok = (len(ctl) == 2 and len(bsm) == 1
+      and f(ctl, "if (Screen.hasControlDown() && Screen.hasAltDown())") ==
+          "if (net.minecraft.client.Minecraft.getInstance().hasControlDown() && net.minecraft.client.Minecraft.getInstance().hasAltDown())"
+      and f(ctl, "net.minecraft.client.gui.screens.Screen.hasControlDown()") == "net.minecraft.client.gui.screens.Screen.hasControlDown()"
+      and f(bsm, ".setTextureState(RenderStateShard.BLOCK_SHEET_MIPPED)") == ".setTextureState(@MVPKG@.LegacyRenderType.BLOCK_SHEET_MIPPED)"
+      and f(bsm, "net.minecraft.client.renderer.RenderType.BLOCK_SHEET_MIPPED") == "net.minecraft.client.renderer.RenderType.BLOCK_SHEET_MIPPED")
+sys.exit(0 if ok else 1)
 PY
 # 1.21.8 drops a leading renderBackground(...) from render() only in a Screen (a file with an `extends ...Screen`)
 python3 - <<'PY' && ok "shared rows: the 1.21.6 renderBackground row applies in a Screen subclass only, not to another Renderable's render()" || bad "the renderBackground row misses a Screen or deletes a non-Screen's call"
