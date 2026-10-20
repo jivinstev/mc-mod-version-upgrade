@@ -104,6 +104,10 @@ ALWAYS = ("Always allowed, whatever the list says, because they are how the roun
 MIGRATOR_RULE = "Nothing on the migrator repository, apart from reading it (the clone in step 1), is ever allowed."
 # the closing comment carries the round's candidate lessons for the migrator, which the round itself never writes
 LESSONS_RULE = ("Before closing, the closing comment carries a `### Lessons for the migrator` table (every fork kind, single-version included; text only): | version | symptom | fork commit | why it looks general |, one row per candidate lesson whose cause looks like the version, NeoForge, a library or a shared helper rather than the mod -- the error text or behaviour, the fix as owner/repo@<sha> -- or one `| none | | | |` row. Nothing is written to the migrator repository: a later session harvests it with tools/propose-learnings.py --from-plan.")
+# what the round's cost is made of (2026-10-19 round, one session, ~$105: ~48% cache reads of a ~565k-token context
+# re-read every turn, ~39% cache writes -- the whole context re-written after each idle gap longer than the 5-minute
+# cache -- ~14% output): the orchestrator stays small, workers are fresh subagents, and waits are few and long
+CONTEXT_RULE = ("Keep this session small: it orchestrates and never does a version's porting, gating or review in its own context. Each version's fixer and reviewer are fresh subagents that return a short summary (at most ~40 lines: what changed, gate verdicts, open rows, commit shas); keep only those, never their transcripts or the build logs. One worker may carry the same change across several versions (a re-pin, one fix cascaded up) while its context stays modest; distinct porting work at each version gets a fresh worker per version. Wait for gates and CI in ONE blocking command (`gh run watch <run id> --exit-status`, or a single until-loop run in the background or under Monitor), never by polling turn by turn: every idle gap longer than 5 minutes re-writes this session's whole cached context, so a small context and few, long waits are what keep the round cheap. If this session's context passes ~200k tokens, write the round's state (frozen input, per-version status, open rows, shas, what comes next) to round/NOTES.md and continue from a fresh subagent that reads it.")
 # the per-fork fields `install` rebuilds from flags only: an existing config's values are warned about or kept
 KEPT = (("ledger_issues", "--ledger-issues"), ("depends_on", "--depends-on"), ("layer_branch", "--layer-branch"))
 TRAILER_RE = re.compile(r"^[A-Za-z][\w-]*: \S.*$")
@@ -540,7 +544,8 @@ def round_task(cfg, mrepo, existing=()):
               "repositories, force-push, or merge into the migrator repository.",
               "6. A round that stops before its close leaves the plan issue open (next Tuesday's plan carries it "
               "forward); only the closing comment of a round that ran its steps closes it.",
-              "7. " + LESSONS_RULE]
+              "7. " + CONTEXT_RULE,
+              "8. " + LESSONS_RULE]
     name = cfg["round"]["name"]
     return {"name": name, "cron_expression": cfg["round"]["cron"], "create_new_session_on_fire": True,
             "notifications": {"push": True, "email": True}, "initiation": "human_request", "prompt": "\n".join(lines),
@@ -922,6 +927,14 @@ def self_check():
            and "Nothing is written to the migrator" in LESSONS_RULE and MIGRATOR_RULE in task["prompt"]
            and "single-version included" in LESSONS_RULE,
            f"the round prompt asks for the Lessons for the migrator block and keeps the migrator read-only: {task['prompt']}")
+    # the round's cost (2026-10-19: ~87% cache reads and writes of the orchestrator's ~565k-token context): the prompt keeps
+    # the orchestrator small, its workers fresh with short summaries, and its waits blocking -- for every fork kind
+    expect(CONTEXT_RULE in task["prompt"] and task["prompt"].index(CONTEXT_RULE) < task["prompt"].index(LESSONS_RULE)
+           and "fresh subagents" in CONTEXT_RULE and "~40 lines" in CONTEXT_RULE and "ONE blocking command" in CONTEXT_RULE
+           and "5 minutes" in CONTEXT_RULE and "round/NOTES.md" in CONTEXT_RULE and "~200k tokens" in CONTEXT_RULE
+           and "the same change across several versions" in CONTEXT_RULE and "fresh worker per version" in CONTEXT_RULE
+           and "\n7. " + CONTEXT_RULE in task["prompt"] and "\n8. " + LESSONS_RULE in task["prompt"],
+           f"the round prompt keeps the orchestrator small, its workers fresh and its waits blocking: {task['prompt']}")
     # the round runs the migrator's current main, the plan the pinned sha, and the prompt says so
     expect("current main, on purpose" in task["prompt"] and "`migrator_sha`" in task["prompt"]
            and "git clone --depth 1 https://github.com/owner/migrator mmvu" in task["prompt"]
