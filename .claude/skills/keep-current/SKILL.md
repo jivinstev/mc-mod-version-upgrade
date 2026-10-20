@@ -163,7 +163,8 @@ run is green, and it is then gated against the dependency's NEW build.
    **Known-issues ledger** (a fork with `.port/KNOWN-ISSUES.json` on its head branch; the fork-versions skill,
    "Known issues"): grade each new finding into it with `tools/known-issues.py add` (only an S1 reopens a version
    that is done: `known-issues.py reopens`), commit the ledger alone on the head branch (Port CI ignores a
-   ledger-only push), and take the release notes' known-issues section from it: `known-issues.py release-notes
+   ledger-only push -- when its workflow is one port-ci.py rendered since the ledger exists; on a version-branch fork
+   `fork-branches.py ci-check` names a head whose workflow does not), and take the release notes' known-issues section from it: `known-issues.py release-notes
    --repo <fork> --version <mc> --tag <tag>` (S1-S3; S4 omitted). A fork without the file keeps the fix ledgers
    above, unchanged. In the weekly round these steps run inside "The weekly round" below, on its frozen input.
 7. **Dependents next.** Gate each dependent locally against this build (its `_mr`-style jar put into mavenLocal
@@ -228,8 +229,9 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    (the round's step 4) on the merged branch, then push it as a work branch and open its PR into the version branch
    (`git push origin neoforge-<v>:keep-current/<date>-<v>`, the cascade's table in the body; the cascade's closing
    line says the same in a round -- `--apply`, `--untaken-ok` or `round/frozen.json` -- never push `neoforge-<v>` itself), merge it by step 6's rule
-   and wait for that merge's push run. **`keep-current/<date>-<v>` is pushed only after the PR of the version below it is
-   merged and its push run is green** -- never stacked on an unmerged lower PR: a higher PR that carries a lower
+   and wait for that merge's push run -- together with the version's release run, in one blocking command, when it cuts a
+   pre-release (the weekly round's step 4: the release is dispatched right after the merge). **`keep-current/<date>-<v>`
+   is pushed only after the PR of the version below it is merged and its push run is green** -- never stacked on an unmerged lower PR: a higher PR that carries a lower
    version's unmerged merge would merge that version's code past its own review and CI. After the lower merge, `git
    fetch origin` (the done check and the review rows read origin's branch when the local one is behind) and continue the
    cascade from there (`cascade --repo DIR <lower>..<newest>`: what is already merged is up to date, a merge it left
@@ -247,8 +249,14 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    before a release) run again; where its own files changed it needs a fresh review, and where it took the authors'
    change through the rows only, one review of that change covers every such version (`python3
    tools/fork-branches.py review-authors --repo DIR --range <old port commit>..<new port commit> --reviewer ...`).
-4. **Move each version's freeze** once merged: on its checkout, `python3 tools/fork-branches.py freeze --repo DIR --target
-   <v>` (and `--library owner/repo@TAG` for a re-pinned library release), and commit `.port/<v>/branch.properties`.
+4. **Move each version's freeze in its PR, not after it**: on the version's checkout, once its code is in and before its
+   work branch is pushed, `python3 tools/fork-branches.py freeze --repo DIR --target <v>` (and `--library owner/repo@TAG`
+   for a re-pinned library release, already published by then), and commit `.port/<v>/branch.properties` there, so the
+   PR carries it. The freeze keys are bookkeeping: no gate or review goes stale (fork-versions, "Done" item 2), so it
+   needs no gate run of its own. Committed alone onto `neoforge-<v>` after the merge, it was one more full Port CI run
+   per version (2026-10-19 round: five, 8-14 minutes each) -- a path filter sees only that `branch.properties`, a build
+   input, changed, never which key. Only a version whose freeze could not move before the merge (an authors' commit
+   named after it) commits it afterwards, alone.
 5. **Dependents.** A library's version releases from its own branch (Port CI's `release` on `neoforge-<v>`); re-pin the
    dependent's same version to it (`layer-deps.py resolve --repo DEP --target <v> --port-release owner/lib@<tag>` on the
    dependent's checkout of that branch, then `fork-branches.py ci --repo DEP --target <v> --modid ID` for its workflow), and
@@ -365,6 +373,30 @@ through the plan issue:** a comment @mentioning the owner with the action and wh
 with what the list allows and names it in the closing comment. An empty list means every push (the work branches
 included), PR, pre-release and merge asks.
 
+**Keep the orchestrator small, and wait in one command** (every fork kind; the round-task prompt repeats it). Measured on
+the 2026-10-19 round (one session ported a dependent fork across four versions plus a library fix, about $105): ~48% of
+the spend was cache reads -- the orchestrator's ~565k-token context re-read on every turn --, ~39% cache writes -- the
+whole context written again after each wait on gates or CI longer than the 5-minute cache --, ~14% output.
+
+- **The orchestrator never does a version's porting, gating or review in its own context.** Each version's fixer and its
+  reviewer are fresh subagents that return a short summary -- at most ~40 lines: what changed, the gate verdicts, the
+  open rows, the commit shas -- and the orchestrator keeps only those (never a worker's transcript, a build log or a
+  diff). It reads the plan, decides the order, starts the workers, merges, dispatches and reports.
+- **A worker MAY carry the same change across several versions** -- a re-pin, one fix cascaded up -- while its context
+  stays modest (measured: one worker carrying one fix through five versions cost ~$4 per version). Distinct porting work
+  at each version (a cascade's decisions, a RESIDUE.md, a version's review fixes) gets a fresh worker per version
+  (fork-versions, "One fresh residue fixer per Minecraft version": one fixer carried across six versions grew to ~650k
+  tokens, ~$120). A reviewer is always fresh, one per version.
+- **Wait in ONE blocking command, never by polling turn by turn**: `gh run watch <run id> --exit-status` (REST) for a CI
+  run, or one until-loop over `gh api repos/<owner>/<repo>/actions/runs/<id> --jq .status` (a token's `curl` when `gh` is
+  broken) run in the background or under Monitor; a local gate run started in the background, its completion awaited, not
+  its log read as it grows. Wait for runs that go together (a merge's push run and its release run) in the same
+  command. Each idle gap longer than 5 minutes re-writes the whole cached context, so fewer, longer waits on a small
+  context are what keep the round cheap.
+- **If the orchestrator's context grows large** (past ~200k tokens), it writes the round's state -- the frozen input, each
+  version's status, the open rows and findings, the shas, what comes next -- to `round/NOTES.md` and continues from a
+  fresh subagent (or session) that starts from that file, instead of carrying on.
+
 0. **Preflight, before anything else:** `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...` (every fork of
    the set; read-only). It prints one line per need and `MISSING` with what to do: **each fork's clone** (a scheduled
    session cannot attach a repository -- `add_repo` is refused there -- so a fork that is not in the task's repositories
@@ -431,18 +463,45 @@ included), PR, pre-release and merge asks.
      `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
      has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
 4. **Per version, in ladder order**, once its code is in -- first `python3 tools/port-cost.py mark --fork <owner/repo>
-   --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks):
-   - (a version-branch fork, once per round before the first version) `python3 tools/fork-branches.py ci-check --repo DIR`:
+   --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks).
+   **Mark every change of the kind of work too**, with `--phase` (same fork and version; one more column in the file):
+   `upstream` -- the authors' cascade and resolving its conflicts and decisions (step 3's head cascade is marked
+   `--version <the lowest version it reaches> --phase upstream` when it starts), `backlog` -- the selected known-issue
+   fixes, `review` -- the fresh reviews and the fixes they cause, `overhead` -- pins, gates, CI waits, records. The
+   round-table then splits each version by phase and adds per-phase totals, so the cost of taking the authors' code
+   can be compared week over week (marks without `--phase` keep the table as it was):
+   - (a version-branch fork, once per round, before the round's first commit to it -- step 1's grade overrides included) `python3 tools/fork-branches.py ci-check --repo DIR`:
      a WARNING names a branch whose Port CI workflow is older than the kit or boots no jar of a variant its
      `.port/<v>/shipped-expect-<variant>.txt` expects -- CI green there proves nothing about that jar. Regenerate it
      (`fork-branches.py ci --repo DIR --all --modid ID --run`, pushed under `push-version-branches`; else ask) before
-     trusting a green PR run, and name it in the closing comment;
-   **The order is fixed: gates, then the review, then the findings graded, then the merge, then the pre-release.** The
+     trusting a green PR run, and name it in the closing comment. It names **the head branch** too when its workflow pins
+     an older kit or its push trigger ignores no records: every ledger and README Ports-block commit the round makes there
+     is then a full Port CI run (2026-10-19 round: nine, 8-14 minutes each, on a head still on a kit-v23 workflow --
+     re-pins keep a workflow's kit, and nothing regenerated the head). Regenerate it first, before the round's first
+     ledger commit: `fork-branches.py ci --repo DIR --head --run` (the head's own pins, variants and gates read
+     back, only the kit moved to the newest), pushed under `push-version-branches`; else ask;
+   **The order is fixed: gates and the review, then the findings graded, then the merge, then the pre-release** (on a
+   version branch the review starts from the cascade's green A/B gates and the one full run follows its fixes, below). The
    review is of the version's work branch (`keep-current/<date>-<v>`, or the version branch's checkout before it is
    pushed), never of what is already merged: a reviewer who reads a version after its PR merged reviews code players can
    already have.
-   - gates A/B/C in full (`fork-port.py --repo DIR --target <v> --gates full`, or `ci-gates.py --env full` and `minimal`
-     on a single-version fork), the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`);
+   - gates A/B/C in full, the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`): on a
+     single-version fork `ci-gates.py --env full` and `minimal`, as always. **On a version branch, the cheapest correct
+     sequence** -- one full run (~20 minutes) per version where the 2026-10-19 round ran two or three, every gate still
+     green on the exact tree that merges:
+     1. what changes the build goes in first: a library re-pin (`layer-deps.py resolve --port-release`, then
+        `fork-branches.py ci` for the workflow) before the version is gated, never after its gates;
+     2. the cascade's `--gates ab` (compile, audits, Gate A/B) green is what the review starts from: the review needs no
+        Gate C run before it;
+     3. the review, the fixer's fixes of its `not-ok` rows and their re-check (below), committed;
+     4. ONE full run on that final tree, on the version's checkout: `fork-port.py --repo DIR --target <v> --from-stage
+        measure --gates full` (the compile re-measured, the audits and every gate run; setup, staging and the class moves
+        not redone). Only a red run, or a jar-relevant change after it, needs another; a fix made after the review gets
+        its changed rows re-checked like any other;
+     5. a records-only commit after it -- GATES.md, REVIEW.md, COST.md, TEST-ITEMS.md, the ledger, the root README, the
+        freeze or a `library.` record in branch.properties -- stales no gate and no review: run nothing again for it
+        (`--check-done` confirms). Never `--gates auto` to save a run: once any Gate C is recorded it runs A/B only,
+        which leaves a stale Gate C stale;
    - **one full review against the fixed rubric, before the merge**: on a version branch, `fork-port.py --repo DIR --target
      <v> --check-done` on the version's checkout writes REVIEW.md's `?` rows (it refuses a single-version fork, which has
      no `.port/`: there the fresh reviewer gets the work branch's changes, `git diff --name-only
@@ -461,9 +520,18 @@ included), PR, pre-release and merge asks.
      blocks that version's merge and its pre-release until it is fixed (and the re-check passes) or re-graded below S2
      with the rubric's inputs (`known-issues.py grade`, the reason recorded; an owner's `/grade` from the plan counts);
      the versions above it wait too (they carry it by the cascade). An S3/S4 row is ledgered and does not block;
-   - the merge of the version's PR (step 6's rule and "A fork with version branches" step 3), then its push run green;
+   - the merge of the version's PR (step 6's rule and "A fork with version branches" step 3), then its push run green
+     (on a version branch that cuts a pre-release, awaited together with the release run: next item);
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
-     `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above;
+     `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above.
+     **On a version branch, dispatch it right after the merge** instead of after the push run alone: the release run
+     checks out the merged commit and its release job needs that run's own full gates (full, minimal and every variant
+     leg), so no pre-release is cut without a green full-gate run on exactly the released tree. Wait for the push run
+     and the release run together, in one blocking command, and report both; a red push run is handled by step 6's rule
+     (one re-run of a job that failed before any gate body; otherwise reported as blocking that pre-release's promotion),
+     never ignored because the release run passed. That makes two serial CI waits per version (the PR's run, then the
+     merge's push and release runs side by side) where the 2026-10-19 round had three (PR, push, then freeze push and
+     release). A single-version fork keeps step 6's order: its push run green first, then the release run;
    - a library's version: `fork-branches.py library-record --repo LIB --target <v> --dependent DEP` once the dependent's
      same version passed Gate C on that exact released jar;
    - its cost: `fork-port.py`'s cost stage appends to `.port/<v>/COST.md` (tokens, dollars, wall time and a price tier,
@@ -484,7 +552,13 @@ included), PR, pre-release and merge asks.
    `python3 tools/port-cost.py round-table --since <round start> --session-cwd <the round's working directory>` (this
    session's own requests, its subagents included, per fork and version at the `mark`s, with totals; the COST.md form,
    `--fork <owner/repo>=<checkout> ...`, measures only what fork-port's cost stage recorded, which a scheduled session's
-   transcripts may not reach -- it read $0.00 for every version) -- and, before you close the issue, a **Lessons for
+   transcripts may not reach -- it read $0.00 for every version), split per phase where the round marked phases (it
+   did: above), with the per-phase totals, and under it **the size of the authors' change** per version: commits
+   (`git rev-list --count <old port_taken>..<new port_taken>` of that version's `.port/<v>/branch.properties`, or of the
+   head's merge for a single-version fork), files and changed lines (`git diff --shortstat` over the same range), and
+   how many files the cascade merged **mechanically** versus **by an agent** (`CASCADE-PLAN.json`: `mechanical` against
+   the files of its `decisions`, plus any resolved by hand) -- so cost per authors' changed line and the mechanical
+   share can be compared week over week -- and, before you close the issue, a **Lessons for
    the migrator** block in that same comment. It applies to every round, a single-version fork's and a version-branch
    fork's alike, and it is only text in the comment: no tool reads or writes anything for it, and **nothing is written
    to the migrator repository** (this session can only read it). Under the heading `### Lessons for the migrator`, a

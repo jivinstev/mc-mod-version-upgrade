@@ -8,7 +8,8 @@
                                                     # a keep-current round's per-fork, per-version cost and time table
     python3 tools/port-cost.py round-table --since TIME --session DIR | --session-cwd DIR [--marks round/marks.tsv]
                                                     # the round's own session, split per version at its marks
-    python3 tools/port-cost.py mark --fork LABEL --version V [--file round/marks.tsv]   # the round starts V now
+    python3 tools/port-cost.py mark --fork LABEL --version V [--phase upstream|backlog|review|overhead] [--file round/marks.tsv]
+                                                    # the round starts V (or that kind of work on V) now
 
 NO MODEL IDENTIFIER IS WRITTEN. Records go into fork repositories (.port/<v>/COST.md, a layer's COST.md) and the
 public corpus, so requests are grouped by a neutral PRICE TIER instead (from the list input price in
@@ -499,6 +500,8 @@ def round_rows(forks, since, projects=None):
 
 def round_table(rows):
     money = lambda u, est: "unpriced" if u is None else f"{'≈ ' if est else ''}${u:.2f}"
+    if rows and len(rows[0]) == 7:
+        return phased_table(rows, money)
     out = ["| Fork | Version | Cost | Wall time |", "|---|---|---|---|"]
     grand, gw, gest, gnone = 0.0, 0.0, False, False
     for fork in dict.fromkeys(r[0] for r in rows):
@@ -516,6 +519,35 @@ def round_table(rows):
     return "\n".join(out) + "\n"
 
 
+PHASES = ("upstream", "backlog", "review", "overhead")
+# upstream: the authors' cascade and resolving its conflicts; backlog: the selected known-issue fixes; review: fresh
+# reviews and the fixes they cause; overhead: pins, gates, CI waits, records. A mark without a phase: "-".
+
+
+def phased_table(rows, money):
+    """round_table for rows that carry a phase (a marks file with --phase marks): one row per fork x version x phase,
+    each version's total (what the unphased table shows for it), each fork's, all forks', then the per-phase totals --
+    so the cost of taking the authors' code (upstream) can be compared week over week."""
+    tot = lambda rs: (None if any(r[2] is None for r in rs) else round(sum(r[2] for r in rs), 2), any(r[3] for r in rs),
+                      round(sum(r[4] for r in rs), 2))
+    cell = lambda rs: (lambda u, e, w: f"**{money(u, e)}** | **{w:.2f} h**")(*tot(rs))
+    out = ["| Fork | Version | Phase | Cost | Wall time |", "|---|---|---|---|---|"]
+    for fork in dict.fromkeys(r[0] for r in rows):
+        mine = [r for r in rows if r[0] == fork]
+        for v in dict.fromkeys(r[1] for r in mine):
+            vs = [r for r in mine if r[1] == v]
+            for _f, _v, u, est, wall, n, ph in vs:
+                out.append(f"| {fork} | {v} | {ph or '-'} | {money(u, est) if n else '-'} | {wall:.2f} h |")
+            if len(vs) > 1:
+                out.append(f"| {fork} | {v} | **all phases** | {cell(vs)} |")
+        out.append(f"| **{fork}** | **total** | | {cell(mine)} |")
+    out.append(f"| **all forks** | | | {cell(rows)} |")
+    out += ["", "| Phase | Cost | Wall time |", "|---|---|---|"]
+    for ph in [p_ for p_ in PHASES + ("",) if any(r[6] == p_ for r in rows)]:
+        out.append(f"| {ph or '-'} | {cell([r for r in rows if r[6] == ph])} |")
+    return "\n".join(out) + "\n"
+
+
 # ---------------------------------------------------------------- the round's own session, split by its marks
 #
 # A scheduled cloud session runs the whole round from one working directory: its transcripts touch the fork checkouts
@@ -530,17 +562,20 @@ MARKS_DEFAULT = pathlib.Path("round/marks.tsv")
 
 
 def read_marks(path):
-    """[(time, fork, version)] sorted by time, from a marks file ("" lines and # comments skipped)."""
+    """[(time, fork, version)] sorted by time, from a marks file ("" lines and # comments skipped); a mark written with
+    --phase has a fourth cell and comes back as (time, fork, version, phase). A file of the older three-column form reads
+    exactly as before."""
     out = []
     p = pathlib.Path(path)
     for line in p.read_text(encoding="utf-8").splitlines() if p.is_file() else []:
         cells = line.split("\t")
         if len(cells) >= 3 and not line.startswith("#"):
             try:
-                out.append((ts(cells[0].strip()), cells[1].strip(), cells[2].strip()))
+                m = (ts(cells[0].strip()), cells[1].strip(), cells[2].strip())
             except ValueError:
                 continue
-    return sorted(out)
+            out.append(m + (cells[3].strip(),) if len(cells) >= 4 and cells[3].strip() else m)
+    return sorted(out, key=lambda m: m[0])
 
 
 def cwd_form(x):
@@ -595,7 +630,9 @@ def session_transcripts(projects=None, session_dir=None, cwd=None):
 def session_rows(sessions, since, marks, until=None):
     """[(fork, version, usd, estimated, wall hours, requests)]: the sessions' requests since `since`, each charged to the
     last mark at or before it (before the first mark: ("(round)", "setup")); wall time from each mark to the next (the
-    last one: to its last request, or `until`)."""
+    last one: to its last request, or `until`). With any phased mark: phased_rows, one more cell per row."""
+    if any(len(m) == 4 for m in marks):
+        return phased_rows(sessions, since, marks, until)
     cut = ts(since)
     reqs = sorted(((r, sid) for sid, v in sessions.items() for r in v["reqs"] if r[0] >= cut), key=lambda x: x[0][0])
     bounds = [(cut, "(round)", "setup")] + [m for m in marks if m[0] >= cut]
@@ -622,20 +659,54 @@ def session_rows(sessions, since, marks, until=None):
     return rows
 
 
+def phased_rows(sessions, since, marks, until=None):
+    """[(fork, version, usd, estimated, wall hours, requests, phase)]: as session_rows, keyed by fork x version x phase (a
+    mark without one: ""), in order of first appearance; a key that recurs (review, overhead, review) sums its segments'
+    requests and wall times. Each version's rows sum to what the unphased split charges it."""
+    cut = ts(since)
+    reqs = sorted(((r, sid) for sid, v in sessions.items() for r in v["reqs"] if r[0] >= cut), key=lambda x: x[0][0])
+    bounds = [(cut, "(round)", "setup", "")] + [(m + ("",))[:4] for m in marks if m[0] >= cut]
+    got = collections.OrderedDict(((b[1], b[2], b[3]), []) for b in bounds)
+    wall = collections.defaultdict(float)
+    seg = [[] for _ in bounds]
+    for r, sid in reqs:
+        seg[[i for i, b in enumerate(bounds) if b[0] <= r[0]][-1]].append((r, sid))
+    for i, b in enumerate(bounds):
+        key = (b[1], b[2], b[3])
+        got[key] += seg[i]
+        nxt = bounds[i + 1][0] if i + 1 < len(bounds) else None
+        end = nxt if nxt is not None else (ts(until) if until else max((r[0][0] for r in seg[i]), default=b[0]))
+        wall[key] += max(0.0, end - b[0])
+    rows = []
+    for (f, v, ph), g_ in got.items():
+        if (f, v) == ("(round)", "setup") and not g_:
+            continue
+        part = collections.defaultdict(list)
+        for r, sid in g_:
+            part[sid].append(r)
+        c = summarise("", {k: dict(sessions[k], reqs=rs) for k, rs in part.items()}, pathlib.Path(os.devnull) / "none") \
+            if part else {"usd": 0.0, "usd_source": None}
+        rows.append((f, v, c["usd"], c.get("usd_source") == "estimated", round(wall[(f, v, ph)] / 3600, 2), len(g_), ph))
+    return rows
+
+
 def mark_main(argv):
     ap = argparse.ArgumentParser(prog="port-cost.py mark", description="record that the round starts work on a fork's "
                                  "version now (round-table --session splits the session's cost at these marks)")
     ap.add_argument("--fork", required=True); ap.add_argument("--version", required=True)
     ap.add_argument("--file", default=str(MARKS_DEFAULT), help="default round/marks.tsv")
     ap.add_argument("--at", help="the time (ISO; default now)")
+    ap.add_argument("--phase", choices=PHASES, help="the kind of work that starts now (round-table then splits each version "
+                    "by it): upstream = the authors' cascade and its conflicts, backlog = the selected known-issue fixes, "
+                    "review = fresh reviews and the fixes they cause, overhead = pins, gates, CI waits, records")
     a = ap.parse_args(argv)
     at = a.at or datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     ts(at)
     f = pathlib.Path(a.file)
     f.parent.mkdir(parents=True, exist_ok=True)
     with open(f, "a", encoding="utf-8") as fh:
-        fh.write(f"{at}\t{a.fork}\t{a.version}\n")
-    print(f"port-cost: mark {at} {a.fork} {a.version} -> {f}")
+        fh.write(f"{at}\t{a.fork}\t{a.version}" + (f"\t{a.phase}" if a.phase else "") + "\n")
+    print(f"port-cost: mark {at} {a.fork} {a.version}" + (f" ({a.phase})" if a.phase else "") + f" -> {f}")
     return 0
 
 
@@ -836,6 +907,43 @@ def self_check():
         text = buf_.getvalue()
         expect(code == 0 and "| o/lib | 1.21.10 |" in text and "split at 2 mark(s)" in text and "| o/lib | 1.21.10 | $0.00" not in text and "≈ $0.00 |" not in text,
                f"round-table --session-cwd: {text}")
+        # --phase (the round's cost split by kind of work): an old three-column marks file renders exactly as before
+        old_tab = round_table(rows2)
+        u_ = lambda k: f"≈ ${by[k][2]:.2f}"            # (prices from tools/model-prices.tsv; the shape is today's, byte for byte)
+        s_, a_, b_ = ("(round)", "setup"), ("o/lib", "1.21.10"), ("o/lib", "1.21.11")
+        expect(old_tab == ("| Fork | Version | Cost | Wall time |\n|---|---|---|---|\n"
+                           f"| (round) | setup | {u_(s_)} | 0.52 h |\n| **(round)** | **total** | **{u_(s_)}** | **0.52 h** |\n"
+                           f"| o/lib | 1.21.10 | {u_(a_)} | 1.00 h |\n| o/lib | 1.21.11 | {u_(b_)} | 0.33 h |\n"
+                           f"| **o/lib** | **total** | **≈ ${round(by[a_][2] + by[b_][2], 2):.2f}** | **1.33 h** |\n"
+                           f"| **all forks** | | **≈ ${round(by[s_][2] + round(by[a_][2] + by[b_][2], 2), 2):.2f}** | **1.85 h** |\n")
+               and all(len(m) == 3 for m in read_marks(marks)),
+               f"marks without a phase: today's table, no Phase column: {old_tab}")
+        pm = d / "phased.tsv"
+        for at, v, ph in (("2026-10-18T06:30:00Z", "1.21.10", "upstream"), ("2026-10-18T06:45:00Z", "1.21.10", "review"),
+                          ("2026-10-18T07:00:00Z", "1.21.10", "upstream"), ("2026-10-18T07:30:00Z", "1.21.11", "overhead")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                expect(mark_main(["--fork", "o/lib", "--version", v, "--phase", ph, "--file", str(pm), "--at", at]) == 0, "mark --phase")
+        expect(pm.read_text(encoding="utf-8").splitlines()[0] == "2026-10-18T06:30:00Z\to/lib\t1.21.10\tupstream"
+               and marks.read_text(encoding="utf-8").splitlines()[0].count("\t") == 2,
+               "mark --phase writes a fourth column; without it the line is as before")
+        rows3 = session_rows(sess, "2026-10-18T05:59:00Z", read_marks(pm))
+        b3 = {(r[0], r[1], r[6]): r for r in rows3}
+        v10 = [r for r in rows3 if r[1] == "1.21.10"]
+        expect([r[:2] + (r[6],) for r in rows3] == [("(round)", "setup", ""), ("o/lib", "1.21.10", "upstream"),
+                                                     ("o/lib", "1.21.10", "review"), ("o/lib", "1.21.11", "overhead")]
+               and b3[("o/lib", "1.21.10", "upstream")][4] == 0.75 and b3[("o/lib", "1.21.10", "review")][4] == 0.25
+               and b3[("o/lib", "1.21.10", "upstream")][5] == 1 and b3[("o/lib", "1.21.10", "review")][5] == 1
+               and abs(sum(r[2] for r in v10) - by[("o/lib", "1.21.10")][2]) < 0.011
+               and round(sum(r[4] for r in v10), 2) == by[("o/lib", "1.21.10")][4]
+               and b3[("o/lib", "1.21.11", "overhead")][2] == by[("o/lib", "1.21.11")][2],
+               f"phased marks: fork x version x phase, a recurring phase summed, each version's rows summing to its unphased "
+               f"row: {rows3}")
+        ptab = round_table(rows3)
+        expect(ptab.startswith("| Fork | Version | Phase | Cost | Wall time |") and "| o/lib | 1.21.10 | **all phases** |" in ptab
+               and "| o/lib | 1.21.10 | upstream |" in ptab and "| Phase | Cost | Wall time |" in ptab
+               and "| upstream | **" in ptab and "| review | **" in ptab and "| overhead | **" in ptab and "| - | **" in ptab
+               and "| **all forks** | | |" in ptab and "**1.00 h** |" in ptab,
+               f"the phased table: per phase, each version's total, per-phase totals: {ptab}")
         expect(session_rows(session_transcripts(session_dir=sp), "2026-10-18T05:59:00Z", [])[0][:2] == ("(round)", "setup"),
                "--session DIR with no marks: one row for the whole round")
         expect(cwd_form("C:\\Work\\Round\\") == "c:/Work/Round" and cwd_form("c:/Work/Round") == "c:/Work/Round"

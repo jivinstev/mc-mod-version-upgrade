@@ -38,7 +38,7 @@ on:
     tags: ["*-mc{{MC}}{{TAG_SUFFIX}}"]
     # the known-issues ledger (tools/known-issues.py) and the root README are records, not port code: a push of only
     # those runs nothing (GitHub evaluates path filters on branch pushes only, so a release tag still runs)
-    paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"]
+    paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"{{RECORDS_IGNORE}}]
   pull_request:
     branches: ["{{BRANCH}}"{{LAYER_BRANCH_ITEM}}]
   release:
