@@ -580,6 +580,21 @@ PY
 out="$(python3 tools/weekly-plan.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "weekly-plan self-check (in $(grep -o '[0-9.]* s)$' <<<"$out" | tr -d ')')): the workflow equals tools/golden/weekly-plan.yml (Tuesdays 15:00 and 16:00 UTC plus workflow_dispatch, contents: read and issues: write, no secrets, the tools at a pinned commit, no model); its first step lets only the 08:00 Los Angeles slot through on both sides of daylight saving (and with no tz database); the deadline is the next Wednesday round; install refuses an org-owned fork without plan_owner, a checkout off the head branch and a head that is not the default branch (unless --default-branch-too), and is idempotent; the round task is CRON_TZ=America/Los_Angeles with a jittered minute, a fresh session, push and email on; the allow list is empty by default (the round asks) and rendered verbatim into the prompt, automerge follows merge-fork-prs; the round's own work branches and PRs fall under merge-fork-prs, the ledger and README Ports block under push-version-branches, plan-issue comments and ledger-issue edits are always allowed and the migrator repository is only read; the round clones current main and says the plan ran at migrator_sha, which install records; a re-install over an existing config (a single-version fork and a layer fork with layer_branch in one set) warns on stderr for each allow, ledger_issues, depends_on and layer_branch its flags drop, naming the flag, keeps the default result otherwise unchanged (no warning on a fresh install or with every value re-passed), and --keep-existing keeps them while a flag given still wins; replaces lists exact task names (its own, --replace-task, existing keep-current names of this set); the authors' upstream comes from the fork parent when omitted; --trailer lines end the install commit; the plan issue has the deadline first, is assigned to the owner, a section per fork; a second run the same week opens nothing; an unclosed plan is carried forward (ticks and the owner's replies, not a drive-by's) and closed as superseded; an incomplete plan opens no issue" \
   || bad "weekly-plan self-check: $(tail -5 <<<"$out")"
+# the round's lessons reach the migrator as a block in its closing comment (round of 2026-10-19: they were harvested by
+# hand), for every fork kind, and a follow-up session's worklist reads it -- the round itself still writes nothing here
+python3 - <<'PY' && ok "keep-current, the close: a 'Lessons for the migrator' block in the closing comment, single-version and version-branch forks alike, text only, nothing written to the migrator; harvested with propose-learnings.py --from-plan" || bad "keep-current's close no longer asks for the Lessons for the migrator block, or no longer says it is text only for every fork kind"
+import pathlib, sys
+s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf-8")
+r = s[s.index("## The weekly round"):s.index("## README Ports block")]
+close = " ".join(r[r.index("6. **Close.**"):r.index("7. **Afterwards:**")].split())
+need = ("### Lessons for the migrator", "| version | symptom | fork commit | why it looks general |",
+        "a single-version fork's and a version-branch fork's alike", "no tool reads or writes anything for it",
+        "nothing is written to the migrator repository", "propose-learnings.py --from-plan", "| none | | | |")
+sys.exit(0 if all(n in close for n in need) and close.index("Lessons for the migrator") < close.index("close the issue (state completed)") else 1)
+PY
+out="$(python3 tools/propose-learnings.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "propose-learnings --from-plan: the newest comment's Lessons block becomes a checklist (evidence links, catalogue hits by the symptom, a row naming a listed mod flagged); no block exits 1; --out refused inside the checkout; CATALOG.md untouched" \
+  || bad "propose-learnings self-check: $(tail -5 <<<"$out")"
 # ---- stacked version branches (tools/fork-branches.py, the default for a multi-version fork): migrating a layer fork, the
 # branch-mode done check through fork-port.py's own CLI, the cascade, the library's release-side done check -- on a layer
 # fixture; a single-version fork is untouched (its own checks above and below run unchanged)

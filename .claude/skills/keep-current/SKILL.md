@@ -484,7 +484,19 @@ included), PR, pre-release and merge asks.
    `python3 tools/port-cost.py round-table --since <round start> --session-cwd <the round's working directory>` (this
    session's own requests, its subagents included, per fork and version at the `mark`s, with totals; the COST.md form,
    `--fork <owner/repo>=<checkout> ...`, measures only what fork-port's cost stage recorded, which a scheduled session's
-   transcripts may not reach -- it read $0.00 for every version); then close the issue (state completed). An issue the round closed is never carried forward.
+   transcripts may not reach -- it read $0.00 for every version) -- and, before you close the issue, a **Lessons for
+   the migrator** block in that same comment. It applies to every round, a single-version fork's and a version-branch
+   fork's alike, and it is only text in the comment: no tool reads or writes anything for it, and **nothing is written
+   to the migrator repository** (this session can only read it). Under the heading `### Lessons for the migrator`, a
+   table `| version | symptom | fork commit | why it looks general |` with one row per candidate lesson the round met:
+   a finding or fix whose cause looks like the Minecraft version, NeoForge, a library's new line or a shared helper or
+   rename row, not this mod's own code (a crash, a silent behaviour change, a fix a compile loop made that changed what
+   the code does). The symptom is what a porter would search for -- the error or log text, else the behaviour; the
+   commit is the fix as `owner/repo@<sha>`; the last column says in a few words why any port to that version would
+   meet it. A round that met none writes one row `| none | | | |`. A later session with write access to the migrator
+   turns the rows into catalogue entries, starting from `python3 tools/propose-learnings.py --from-plan
+   <owner/repo>#<N>` (a worklist; it writes nothing). Then close the issue (state completed). An issue the round
+   closed is never carried forward.
 7. **Afterwards:** set the ledger statuses on each head branch (`known-issues.py status <ID> --set <v>,<v>=fixed@<commit>`,
    or `--set <from>..<to>=fixed@<commit>`, for every version a fix reached, in one call per issue, committed alone), then refresh the README Ports block ("README Ports block" below).
 

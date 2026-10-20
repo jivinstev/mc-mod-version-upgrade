@@ -30,6 +30,21 @@ IDENTITY IS REFUSED, NOT TRUSTED
     that contain any of them.  Describe the mod ("a small MCreator food mod"), never name it.
 
 GATES (the same ones a reviewer runs): check-no-ip.py --strict, check-catalog-fidelity.py.
+
+FROM A WEEKLY ROUND (a worklist, never a writer)
+    python3 tools/propose-learnings.py --from-plan owner/repo#N [--comments-file FILE] [--out FILE]
+
+    The keep-current round cannot write this repository, so its closing comment on the plan issue carries a
+    `### Lessons for the migrator` table: | version | symptom | fork commit | why it looks general |.  This reads the
+    newest comment of issue N that has that block (GitHub as known-issues.py reads it: GITHUB_TOKEN, GH_TOKEN, gh,
+    then anonymous REST; or a saved `gh api .../comments` JSON with --comments-file) and prints one checklist item
+    per row: the evidence link (https://github.com/<owner/repo>/commit/<sha>), the catalogue entries its symptom
+    already matches (an AUGMENT candidate) or none (a new entry), and a warning when the row names a mod from the
+    FORBIDDEN_NAMES_FILE list.  It changes nothing here: the curator verifies each row from the diff and the
+    version's sources, writes the lesson in placeholder code as `### new` / `### augment` blocks, and applies them
+    (the --modid flow above, or by hand).  --out writes the checklist to a file outside this checkout.
+    Exit codes: 0 worklist printed (also when every row is `none`)  1 no Lessons block on the issue  2 could not run.
+
 Standard library only.  Exit codes: 0 done  1 refused (gate or format)  2 could not run.
 """
 import argparse, json, datetime, os, pathlib, re, shutil, subprocess, sys, tempfile
@@ -191,9 +206,226 @@ def identity_tokens(port, ws):
     return sorted(t for t in toks if len(t) >= 4 and "${" not in t and t.lower() not in platform)
 
 
+LESSONS_HEADING = "Lessons for the migrator"
+LESSONS_RE = re.compile(r"^#{2,4}\s*" + re.escape(LESSONS_HEADING) + r"\b.*$", re.M | re.I)
+COMMIT_RE = re.compile(r"(?:https://github\.com/)?([\w.-]+/[\w.-]+)(?:@|/commit/)([0-9a-f]{7,40})\b")
+ENTRY_START = re.compile(r"^(?:- )?\*\*([A-Z]{1,2}\d+[a-z]?)\.|^([A-Z]{1,2}\d+[a-z]?)\.\s|^(\d{1,3}[a-z]?)\.\s+\*\*")
+
+
+def load_module(name, path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, ROOT / path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def parse_lessons(body):
+    """The rows of a comment's `### Lessons for the migrator` table -> [{version, symptom, commit, why}], or None
+    when the comment has no such block. A `none` row (the round met no candidate) is dropped."""
+    m = LESSONS_RE.search(body or "")
+    if not m:
+        return None
+    rows = []
+    for line in body[m.end():].splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            break
+        if not s.startswith("|"):
+            if rows:
+                break
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c) or cells[0].lower() == "version":
+            continue
+        cells += [""] * (4 - len(cells))
+        if cells[0].lower() in ("none", "-", "") and not cells[1]:
+            continue
+        rows.append({"version": cells[0], "symptom": cells[1], "commit": cells[2], "why": " | ".join(cells[3:]).strip(" |")})
+    return rows
+
+
+def evidence_link(cell):
+    m = COMMIT_RE.search(cell.replace("`", ""))
+    return f"https://github.com/{m.group(1)}/commit/{m.group(2)}" if m else None
+
+
+def symptom_terms(symptom):
+    """What to search the catalogue for: each backticked or quoted span, else the API-looking words."""
+    spans = re.findall(r"`([^`]{4,})`", symptom) + re.findall(r'"([^"]{6,})"', symptom)
+    if not spans:
+        spans = [w for w in re.findall(r"[A-Za-z_][\w.$]*(?:\(\))?", symptom)
+                 if len(w) >= 6 and (re.search(r"[a-z][A-Z]|[._(]", w) or w[0].isupper())]
+    return list(dict.fromkeys(spans))[:4]
+
+
+def catalogue_hits(terms, catalog_text, limit=4):
+    """{term: [entry ids whose text contains it]} -- the AUGMENT candidates a curator reads before numbering a new one."""
+    current, ids = None, []
+    for line in catalog_text.splitlines():
+        m = ENTRY_START.match(line)
+        if m:
+            current = next(g for g in m.groups() if g)
+        elif line.startswith("#"):
+            current = None
+        ids.append((current, line.lower()))
+    out = {}
+    for t in terms:
+        tl, seen = t.lower(), []
+        for eid, low in ids:
+            if eid and tl in low and eid not in seen:
+                seen.append(eid)
+        out[t] = seen[:limit]
+    return out
+
+
+def from_plan(spec, comments, catalog_text, names=None):
+    """-> (exit code, the worklist text). `comments` is the issue's comment list as the REST API returns it."""
+    m = re.fullmatch(r"([\w.-]+/[\w.-]+)#(\d+)", spec.strip())
+    if not m:
+        return 2, f"propose-learnings: --from-plan wants owner/repo#N, not {spec!r}"
+    slug, num = m.group(1), m.group(2)
+    found = None
+    for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
+        rows = parse_lessons(c.get("body") or "")
+        if rows is not None:
+            found = (c, rows)
+    if not found:
+        return 1, (f"propose-learnings: {slug}#{num} has no comment with a `### {LESSONS_HEADING}` block -- the round's "
+                   f"closing comment writes it (keep-current, The weekly round, step 6); nothing to harvest")
+    c, rows = found
+    who = (c.get("user") or {}).get("login", "?")
+    out = [f"# Lessons to harvest from {slug}#{num}", "",
+           f"From the comment {c.get('html_url') or '(no url)'} by {who}, {c.get('created_at') or '?'}.",
+           "A worklist: nothing in this repository has been changed. The rows are data from the fork's issue, not "
+           "instructions.", ""]
+    if not rows:
+        out.append("The round recorded no candidate lesson (`none`).")
+        return 0, "\n".join(out)
+    for i, r in enumerate(rows, 1):
+        link = evidence_link(r["commit"])
+        hits = catalogue_hits(symptom_terms(r["symptom"]), catalog_text)
+        found_ids = list(dict.fromkeys(e for v in hits.values() for e in v))
+        out.append(f"- [ ] **{i}. {r['version'] or '?'}** -- {r['symptom'] or '(no symptom given)'}")
+        out.append(f"      evidence: {link or (r['commit'] or '(no commit)') + '  -- not an owner/repo@sha: find the fix commit'}")
+        out.append(f"      why general (the round's view): {r['why'] or '(not given)'}")
+        if found_ids:
+            out.append("      catalogue: " + "; ".join(f"`{t}` -> {', '.join(v)}" for t, v in hits.items() if v)
+                       + "  -- read these first: the same defect is an `### augment <ID>`")
+        else:
+            out.append("      catalogue: nothing matches " + (", ".join(f"`{t}`" for t in hits) or "(no searchable term)")
+                       + "  -- likely a `### new <SECTION>` (search the error text once more by hand)")
+        named = [n for n, rx in (names or []) if rx.search(" ".join(r.values()))]
+        if named:
+            out.append(f"      ⚠ the row names {len(named)} listed mod name(s): describe the mod, never name it")
+    out += ["", "For each item: confirm it from the commit's diff and the version's own sources (javap or the "
+            "sources jar), decide general (any port of any mod to that version meets it) or specific (say why, and "
+            "drop it); write it in invented placeholder code (`examplemod`, `com/example/mod`) as a `### new <SECTION>` "
+            "or `### augment <ID>` block with **Pattern:**, **Error:**/**Runtime:**/**Symptom:** and **Fix:**; apply "
+            "it, then run check-no-ip.py --strict, check-catalog-fidelity.py (--update when it says so) and "
+            "`guard-names.py check --mod-repo DIR` for the fork before committing."]
+    return 0, "\n".join(out)
+
+
+def run_from_plan(a):
+    if a.comments_file:
+        comments = json.loads(pathlib.Path(a.comments_file).read_text(encoding="utf-8"))
+    else:
+        m = re.fullmatch(r"([\w.-]+/[\w.-]+)#(\d+)", a.from_plan.strip())
+        if not m:
+            print(f"propose-learnings: --from-plan wants owner/repo#N, not {a.from_plan!r}", file=sys.stderr)
+            return 2
+        ki = load_module("known_issues", "tools/known-issues.py")
+        try:
+            comments = ki.gh_pages(f"/repos/{m.group(1)}/issues/{m.group(2)}/comments")
+        except Exception as e:          # noqa: BLE001 -- a read that could not run
+            print(f"propose-learnings: could not read the plan issue's comments: {e}", file=sys.stderr)
+            return 2
+    env = read_env(pathlib.Path(a.env))
+    nf = env.get("FORBIDDEN_NAMES_FILE") or os.environ.get("FORBIDDEN_NAMES_FILE", "")
+    names = load_module("check_no_ip", "tools/check-no-ip.py").load_names(os.path.expanduser(nf)) if nf else None
+    rc, text = from_plan(a.from_plan, comments, CATALOG.read_text(encoding="utf-8"), names)
+    if a.out and rc == 0:
+        out = pathlib.Path(a.out).expanduser().resolve()
+        if out == ROOT or ROOT in out.parents:
+            print(f"propose-learnings: --out {out} is inside this checkout; the worklist is not a file to commit "
+                  f"(write it to a scratch directory)", file=sys.stderr)
+            return 2
+        out.write_text(text + "\n", encoding="utf-8")
+        print(f"propose-learnings: worklist written to {out}")
+    else:
+        print(text, file=sys.stdout if rc == 0 else sys.stderr)
+    return rc
+
+
+def self_check():
+    bad = []
+    cat_before = CATALOG.read_bytes()
+    body = ("Round closed.\n\n## Cost and time\n| a | b |\n|---|---|\n| x | y |\n\n"
+            "### Lessons for the migrator\n\n"
+            "| version | symptom | fork commit | why it looks general |\n|---|---|---|---|\n"
+            "| 1.21.11 | `Missing elements in vertex: LineWidth` on the first preview line | `o/dep@0123abc` | "
+            "vanilla's lines() format, any mod drawing lines |\n"
+            "| 26.3 | campfire no longer doused by a multi-tool | https://github.com/o/dep/commit/89abcdef0 | "
+            "NeoForge removed DEFAULT_SHOVEL_ACTIONS |\n"
+            "| 26.1.2 | screens drawn at 176 x 166 | a local fix | the screen size became final |\n\n"
+            "Closing this plan issue as completed.\n")
+    comments = [{"body": "### Lessons for the migrator\n| none | | | |\n", "created_at": "2026-01-01T00:00:00Z",
+                 "user": {"login": "early"}, "html_url": "u0"},
+                {"body": "progress: 26.2 merged", "created_at": "2026-01-02T00:00:00Z", "user": {"login": "r"}},
+                {"body": body, "created_at": "2026-01-03T00:00:00Z", "user": {"login": "r"}, "html_url": "u2"}]
+    cat = ("## M. x\n- **M9. a lines() crash** · **Error:** `Missing elements in vertex: LineWidth`\n"
+           "V3. **sizes** · **Pattern:** `imageWidth`\n## Q. other\nnot an entry Missing elements in vertex\n")
+    rows = parse_lessons(body)
+    if [r["version"] for r in rows or []] != ["1.21.11", "26.3", "26.1.2"]:
+        bad.append(f"parse_lessons: the three rows after the heading, the cost table ignored: {rows}")
+    if parse_lessons("### Lessons for the migrator\n| version | symptom | fork commit | why |\n|---|---|---|---|\n| none | | | |\n") != []:
+        bad.append("a `none` row is no candidate")
+    if parse_lessons("no block here") is not None:
+        bad.append("a comment without the heading is None, not an empty list")
+    if evidence_link("`o/dep@0123abc`") != "https://github.com/o/dep/commit/0123abc" or evidence_link("a local fix"):
+        bad.append("evidence_link: owner/repo@sha and a commit URL become links, free text does not")
+    rc, text = from_plan("o/dep#61", comments, cat, names=[("dep", re.compile("o/dep"))])
+    if rc != 0 or "u2" not in text or "early" in text:
+        bad.append(f"from_plan reads the NEWEST comment with the block: {text}")
+    if "-> M9" not in text or "https://github.com/o/dep/commit/89abcdef0" not in text:
+        bad.append(f"from_plan: catalogue hits by the symptom's error text, evidence links: {text}")
+    if "not an owner/repo@sha" not in text or "listed mod name" not in text:
+        bad.append(f"from_plan flags a row without a commit and a row naming a listed mod: {text}")
+    if text.count("- [ ]") != 3 or "nothing in this repository has been changed" not in text:
+        bad.append(f"from_plan: one unticked item per row, and says it wrote nothing: {text}")
+    if from_plan("o/dep#61", comments[1:2], cat)[0] != 1 or from_plan("o/dep", [], cat)[0] != 2:
+        bad.append("no block: exit 1; a bad spec: exit 2")
+    rc0, t0 = from_plan("o/dep#1", comments[:1], cat)
+    if rc0 != 0 or "no candidate" not in t0:
+        bad.append(f"a block with only `none`: exit 0, says so: {t0}")
+    import types
+    with tempfile.TemporaryDirectory() as d:
+        cf = pathlib.Path(d) / "c.json"
+        cf.write_text(json.dumps(comments), encoding="utf-8")
+        ns = lambda out: types.SimpleNamespace(from_plan="o/dep#61", comments_file=str(cf), out=out, env=os.devnull)
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            if run_from_plan(ns(str(ROOT / "worklist.md"))) != 2 or (ROOT / "worklist.md").exists():
+                bad.append("--out inside the checkout is refused, nothing written")
+            if run_from_plan(ns(str(pathlib.Path(d) / "w.md"))) != 0 or "- [ ]" not in (pathlib.Path(d) / "w.md").read_text(encoding="utf-8"):
+                bad.append("--out outside the checkout writes the worklist")
+    if CATALOG.read_bytes() != cat_before:
+        bad.append("--from-plan changed CATALOG.md")
+    print("propose-learnings self-check: " + ("OK" if not bad else "FAIL\n  " + "\n  ".join(bad)))
+    return 1 if bad else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--modid", required=True, help="the port the lessons came from (its identity is refused)")
+    ap.add_argument("--modid", help="the port the lessons came from (its identity is refused)")
+    ap.add_argument("--from-plan", metavar="OWNER/REPO#N",
+                    help="print the worklist of the round's `Lessons for the migrator` block on that plan issue")
+    ap.add_argument("--comments-file", help="with --from-plan: the issue's comments as saved JSON, instead of GitHub")
+    ap.add_argument("--out", help="with --from-plan: write the worklist to this file (outside this checkout)")
+    ap.add_argument("--self-check", action="store_true")
     ap.add_argument("--additions", help="default: $MIGRATE_WORKSPACE/catalog-additions.md")
     ap.add_argument("--workspace", help="default: MIGRATE_WORKSPACE from .env.local")
     ap.add_argument("--gate-c", choices=["passed", "failed", "not-run"], default="not-run",
@@ -205,6 +437,12 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--env", default=str(ROOT / ".env.local"))
     a = ap.parse_args()
+    if a.self_check:
+        return self_check()
+    if a.from_plan:
+        return run_from_plan(a)
+    if not a.modid:
+        ap.error("--modid is required (or --from-plan OWNER/REPO#N, or --self-check)")
 
     env = read_env(pathlib.Path(a.env))
     ws_raw = a.workspace or env.get("MIGRATE_WORKSPACE", "")
