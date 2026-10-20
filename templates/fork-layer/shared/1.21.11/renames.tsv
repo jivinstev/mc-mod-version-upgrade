@@ -30,6 +30,11 @@ re:\.getMainCamera\(\)\.getEntity\(\)	.getMainCamera().entity()
 # RenderPipelines.ENTITY_CUTOUT is withCull(false) and the culling one is entityCutoutCull, CATALOG V60). Written
 # fully qualified so no import has to be added.
 re:\bRenderType\.(entitySolid|entityCutout|entityCutoutNoCull|entityCutoutNoCullZOffset|entityTranslucent|entityTranslucentEmissive|entitySmoothCutout|entityDecal|entityNoOutline|entityShadow|entityGlint|armorCutoutNoCull|armorEntityGlint|eyes|energySwirl|lightning|lines|leash)\(	net.minecraft.client.renderer.rendertype.RenderTypes.\1(
+# ⚠ lines() moves by the row above, but its vertices now need .setLineWidth(w) (POSITION_COLOR_NORMAL_LINE_WIDTH): a 1.21.1
+# vertex chain without it compiles and crashes the client on its first draw (CATALOG M77). A row cannot add it; the chain is the mod's.
+# ---- RenderStateShard is gone on 1.21.11; the block atlas texture shard is the layer helper's (LegacyRenderType.BLOCK_SHEET_MIPPED,
+# the same TextureStateShard(TextureAtlas.LOCATION_BLOCKS, mipmap)). Seen in a dependent fork's 1.21.11 port as a per-fork row.
+re:\b(?:RenderStateShard|RenderType)\.BLOCK_SHEET_MIPPED\b	@MVPKG@.LegacyRenderType.BLOCK_SHEET_MIPPED
 # ---- numeric permission levels (CATALOG V15, the same shape as 26.2): level 2 is Commands.LEVEL_GAMEMASTERS. Fully qualified.
 re:\.requires\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*->\s*\1\.hasPermission\(2\)\s*\)	.requires(net.minecraft.commands.Commands.hasPermission(net.minecraft.commands.Commands.LEVEL_GAMEMASTERS))
 # ---- GeckoLib 4.x text -> 5.4: the baked-model types left cache.object and the built-in layers got a `builtin` package (same
