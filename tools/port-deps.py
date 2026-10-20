@@ -481,13 +481,32 @@ def resolve_mod(d, search, versions_fn, target_mc, loader):
     return res
 
 
+def pinned_native(d, v):
+    """Is the dependency's pinned version already a build for the target (one of the registry's native builds)? Then it
+    is kept: a dependency moves to a newer build only by an explicit bump (tools/layer-deps.py resolve --bump), the
+    same rule for every kind of fork."""
+    ver = str(d.get("version") or "")
+    if not ver or "$" in ver:
+        return False
+    if ver in (v.get("native_ids") or []) or ver in (v.get("native_versions") or []):
+        return d["group"] in ("curse.maven", "maven.modrinth") or ver in (v.get("native_versions") or [])
+    if d["group"] in ("curse.maven", "maven.modrinth") or loader_swap_needed(d["artifact"]):
+        return False
+    pat = re.compile(r"(?<![\w.])" + re.escape(ver) + r"(?![\w]|\.\d)")
+    return any(pat.search(n) for n in v.get("native_names") or [])
+
+
 def suggest(d, res, mc, vn_fn):
-    """Suggested coordinate for the target in the author's own style (or None + reason)."""
+    """Suggested coordinate for the target in the author's own style (or None + reason). A pin that is already a build
+    for the target is kept (no change): only an explicit bump moves it."""
     v = res.get("versions") or {}
     ch = v.get("chosen")
     if not v.get("has_native") or not ch:
         return {"coord": None, "change": None, "note": "no target build"}
     cl = ":" + d["classifier"] if d["classifier"] else ""
+    if pinned_native(d, v):
+        return {"coord": f"{d['group']}:{d['artifact']}:{d['version']}{cl}", "change": None, "kept": True,
+                "note": f"kept: the pinned build is already a {mc} build (move it with tools/layer-deps.py resolve --bump)"}
     keys = d["version_keys"]
     only_key = re.fullmatch(r"\$\{?([\w.]+)\}?", d["version_raw"] or "") if d["version_raw"] else None
     g, a = d["group"], d["artifact"]
@@ -1058,6 +1077,18 @@ dependencies {
         chk("tooling", D[("org.spongepowered", "mixin", "processor")]["kind"] == "tooling")
         chk("no-publish-repo", not any(r["url"].startswith("file:") for r in rep["repositories"]))
         chk("json", json.loads(json.dumps(rep))["exit"] == 3)
+        # a pin that is already a target build is kept (no change): only an explicit bump moves it
+        kd = {"group": "curse.maven", "artifact": "keep-444", "version": "123", "classifier": None, "version_keys": [],
+              "version_raw": "123"}
+        kv = {"has_native": True, "chosen": {"fileId": "999", "fileName": "keep-2.jar"}, "native_ids": ["123", "999"]}
+        ks = suggest(kd, {"via": "cursemaven", "versions": kv}, "1.21.1", lambda x: x)
+        mv = suggest(dict(kd, version="50"), {"via": "cursemaven", "versions": kv}, "1.21.1", lambda x: x)
+        am = {"group": "ex.am", "artifact": "amlib-neoforge", "version": "1.21.1-2.0", "classifier": None, "version_keys": [],
+              "version_raw": "1.21.1-2.0"}
+        ka = suggest(am, {"via": "search", "versions": dict(kv, native_ids=["x"], native_names=["amlib-neoforge-1.21.1-2.0.jar",
+                                                                                               "amlib-neoforge-1.21.1-2.1.jar"])}, "1.21.1", None)
+        chk("pin-kept", ks["change"] is None and ks["coord"] == "curse.maven:keep-444:123" and ks.get("kept")
+            and mv["change"] == "build.gradle literal: 50 -> 999" and ka["change"] is None and ka.get("kept"))
 
         real_sleep = time.sleep
         time.sleep = lambda s: None

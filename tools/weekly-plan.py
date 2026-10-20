@@ -14,6 +14,7 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
     python3 tools/weekly-plan.py fetch    --config FILE --repo DIR --work DIR      # the workflow's steps, in order
     python3 tools/weekly-plan.py cascade  --work DIR
     python3 tools/weekly-plan.py select   --work DIR
+    python3 tools/weekly-plan.py deps     --work DIR                               # newer builds of the pinned deps
     python3 tools/weekly-plan.py previous --work DIR                               # GITHUB_TOKEN, GITHUB_REPOSITORY
     python3 tools/weekly-plan.py open     --work DIR                               # GITHUB_TOKEN, GITHUB_REPOSITORY
     python3 tools/weekly-plan.py --self-check | --regen-golden
@@ -71,6 +72,15 @@ the plan issue. `replaces` lists exact task names, never a
 description: the round's own name, every `replace_tasks` name, and each --existing name (the names `list_triggers`
 returned) that starts with "keep-current" and names a fork of this set (`owner/repo`, or its repository name as a word).
 Setup deletes a listed task only when one with exactly that name exists.
+
+DEPS (the workflow's step 4; every kind of fork alike, a deliberate change to single-version forks decided by the
+maintainer): per fork and per Minecraft version it builds (the head's build.gradle; each version branch's block over its
+build.gradle), each pinned CurseForge/Modrinth dependency with a newer compatible build (tools/layer-deps.py
+dependency_updates). The plan lists them under "Dependency updates", ticked by default, unticked with the reason when
+the newer build is an alpha/beta, a major-version jump, drops a Minecraft version the fork builds, or switches provider;
+a lookup that fails is listed as "could not check" and never fails the plan. read-plan returns the ticked ones as each
+fork's `dep_bumps`, and the round applies each once at setup with `layer-deps.py resolve --bump`; nothing else moves a
+pin.
 
 Exit codes: 0 ok; 1 a step failed (the workflow run fails, no issue is opened); 2 bad input; 3 the head branch is not
 the default branch (install). Standard library only.
@@ -539,7 +549,10 @@ def round_task(cfg, mrepo, existing=()):
               f"3. Freeze the input: python3 mmvu/tools/known-issues.py read-plan --latest --slug "
               f"{first['repo']} --out round/frozen.json --decisions-dir round/decisions. The selected known issues and "
               "the authors' changes it says to take are the run's only inputs; nothing else enters except a new S1. "
-              "With no open plan issue, stop and report.",
+              "With no open plan issue, stop and report. Each fork's `dep_bumps` there are the dependency updates the owner left "
+              "ticked: apply each exactly once, at that version's setup and before its gates, by its `command` (layer-deps.py "
+              "resolve --bump, in the checkout of that version's branch), and commit it; no other step moves a dependency "
+              "(every resolve keeps the pins), and an unticked one stays as it is.",
               "4. A fork with version branches (.port/<v>/branch.properties) is a version-branch fork even when a legacy "
               "layer branch with .multiversion/ exists: that layer branch is history; ignore it.",
               "5. Never promote a release, publish to Modrinth or CurseForge, push to or comment on the authors' "
@@ -727,6 +740,54 @@ def k_mc(v):
     return tuple(int(x) for x in re.findall(r"\d+", v))
 
 
+def ld_mod():
+    import importlib.util
+    sys.dont_write_bytecode = True
+    spec = importlib.util.spec_from_file_location("layer_deps_wp", TOOLS / "layer-deps.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def fork_pins(f, fb, ld):
+    """{mc: {group:module: coordinate}}: the registry pins of every Minecraft version the fork builds -- the head's (its
+    build.gradle, at the head commit) and each version branch's (its block over its build.gradle, at the branch tip)."""
+    clone = f["clone"]
+    show = lambda ref, p: git(clone, "show", f"{ref}:{p}").stdout if git(clone, "cat-file", "-e", f"{ref}:{p}").returncode == 0 else ""
+    out = {}
+    hc = f["head_commit"]
+    hp = show(hc, "gradle.properties")
+    mc = ld.read_props_text(hp).get("minecraft_version") or (f["head"][len("neoforge-"):] if f["head"].startswith("neoforge-") else "?")
+    out[mc] = ld.version_pins(show(hc, "build.gradle"), hp, show(hc, f".port/{mc}/branch.properties"))
+    for v in sorted(fb.version_branches(clone), key=fb.mc_key):
+        ref = fb.resolve_branch(clone, fb.branch_name(v))
+        if ref and v not in out:
+            out[v] = ld.version_pins(show(ref, "build.gradle"), show(ref, "gradle.properties"),
+                                     show(ref, f".port/{v}/branch.properties"))
+    return out
+
+
+def step_deps(work, lk=None):
+    """Each fork: every pinned CurseForge/Modrinth dependency with a newer compatible build, per Minecraft version it
+    builds (tools/layer-deps.py dependency_updates: no model; Modrinth's public API, CurseForge only with a key). A
+    lookup that fails is listed as "could not check", and a fork whose pins cannot be read gets one such line: this
+    step never fails the plan."""
+    inp = load_input(work)
+    fb, ld = fb_mod(), ld_mod()
+    for f in inp["forks"]:
+        try:
+            f["dep_updates"] = ld.dependency_updates(fork_pins(f, fb, ld), lk)
+        except Exception as e:          # noqa: BLE001 -- fail soft: the plan goes on, the section says so
+            f["dep_updates"] = {"rows": [], "checked": 0,
+                                "unchecked": [{"mc": "?", "ga": "*", "coord": "", "why": f"the pins could not be read ({e})"}]}
+        du = f["dep_updates"]
+        print(f"weekly-plan: {f['repo']}: {du['checked']} pinned dependenc{'y' if du['checked'] == 1 else 'ies'} checked, "
+              f"{len(du['rows'])} with a newer build ({sum(1 for r in du['rows'] if r['default'])} ticked), "
+              f"{len(du['unchecked'])} could not be checked")
+    save_input(work, inp)
+    return 0
+
+
 def step_previous(work, api=None, slug=None):
     """Resolve the owner (plan_owner, else the repository's user owner) and read the open plan issues: one of this week
     already open makes `open` a no-op; an older one no round closed is carried forward."""
@@ -825,14 +886,14 @@ def self_check():
            "no model and not the Port CI kit")
     steps = re.findall(r"\n      - name: (.*)", wf)
     expect(steps[0].startswith("Continue only at 08:00") and [s[:2] for s in steps if s[:1].isdigit()] ==
-           ["1.", "2.", "3.", "4.", "5."], f"the gate first, then the five steps in order: {steps}")
+           ["1.", "2.", "3.", "4.", "5.", "6."], f"the gate first, then the six steps in order: {steps}")
     expect(all(b.count("if: steps.when.outputs.go == 'true'") == 1 for b in wf.split("\n      - name: ")[2:]),
            "every step after the gate runs only when it lets the run through")
     try:
         import yaml
         y = yaml.safe_load(wf)
         expect(y[True]["schedule"] == [{"cron": "0 15 * * 2"}, {"cron": "0 16 * * 2"}] and "workflow_dispatch" in y[True]
-               and y["permissions"] == {"contents": "read", "issues": "write"} and len(y["jobs"]["plan"]["steps"]) == 9,
+               and y["permissions"] == {"contents": "read", "issues": "write"} and len(y["jobs"]["plan"]["steps"]) == 10,
                "the workflow parses as YAML, with its triggers, permissions and steps")
     except ImportError:
         pass
@@ -1121,7 +1182,9 @@ def self_check():
         lib = d / "libfork"
         subprocess.run(["git", "clone", "-q", str(up), str(lib)], check=True, capture_output=True)
         gq(lib, "checkout", "-q", "-b", "neoforge-1.21.1")
-        (lib / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (lib / "gradle.properties").write_text("minecraft_version=1.21.1\nviewer_version=a1\n", encoding="utf-8")
+        (lib / "build.gradle").write_text('dependencies {\n    runtimeOnly "maven.modrinth:viewer:${viewer_version}"\n'
+                                          '    compileOnly "maven.modrinth:down:z1"\n}\n', encoding="utf-8")
         gq(lib, "add", "-A"); gq(lib, "commit", "-qm", "port")
         led = lib / ".port/KNOWN-ISSUES.json"
         led.parent.mkdir()
@@ -1145,11 +1208,28 @@ def self_check():
                          "someone", 3, "owner/migrator")
         conf.write_text(json.dumps(c2), encoding="utf-8")
         w = d / "plan"
+        vfiles = [{"id": "a1", "name": "1.1", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                  {"id": "a2", "name": "1.2", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-02"},
+                  {"id": "a3", "name": "1.2", "mcs": ["1.21.3"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                  {"id": "a4", "name": "1.3-beta", "mcs": ["1.21.3"], "loaders": ["neoforge"], "channel": "beta", "date": "2026-03"}]
+
+        def mr_files(p):
+            if p == "down":
+                raise OSError("HTTP Error 503: the lookup failed")
+            return vfiles
+        dlk = {"mr_files": mr_files, "cf": lambda: None}
         with contextlib.redirect_stdout(io.StringIO()):
             step_fetch(conf, lib, w, now=summer, clone=lambda r: str(dep))
             step_cascade(w)
             step_select(w)
+            step_deps(w, dlk)
         inp = load_input(w)
+        du0, du1 = inp["forks"][0]["dep_updates"], inp["forks"][1]["dep_updates"]
+        expect([(r["mc"], r["ga"], r["from"], r["to"], r["default"]) for r in du0["rows"]]
+               == [("1.21.1", "maven.modrinth:viewer", "maven.modrinth:viewer:a1", "maven.modrinth:viewer:a2", True)]
+               and [u["ga"] for u in du0["unchecked"]] == ["maven.modrinth:down"] and du1 == {"rows": [], "unchecked": [], "checked": 0},
+               f"deps, a single-version fork: the gradle.properties-keyed pin's newer build ticked, a failed lookup listed, "
+               f"the plan going on: {du0} {du1}")
         f0 = inp["forks"][0]
         expect(f0["new_count"] == 1 and f0["new_commits"][0]["subject"] == "authors: a new feature" and f0["authors_merged"]
                and inp["deadline"] == "2026-07-15T" + c2["round"]["time"] + "-07:00",
@@ -1165,6 +1245,7 @@ def self_check():
         subprocess.run(["git", "clone", "-q", str(up), str(vb)], check=True, capture_output=True)
         gq(vb, "checkout", "-q", "-b", "neoforge-1.21.1", "HEAD~1")
         (vb / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (vb / "build.gradle").write_text('dependencies {\n    runtimeOnly "maven.modrinth:viewer:a1"\n}\n', encoding="utf-8")
         gq(vb, "add", "-A"); gq(vb, "commit", "-qm", "port")
         x = gq(vb, "rev-parse", "HEAD")
         gq(vb, "checkout", "-q", "-b", "neoforge-1.21.3")
@@ -1172,7 +1253,9 @@ def self_check():
         (vb / ".port/1.21.3").mkdir(parents=True)
         (vb / ".port/1.21.3/branch.properties").write_text(
             "minecraft_version=1.21.3\nbranch=neoforge-1.21.3\nparent=neoforge-1.21.1\nparent_minecraft_version=1.21.1\n"
-            f"port_branch=neoforge-1.21.1\nbase_minecraft_version=1.21.1\nport_taken={x}\n", encoding="utf-8")
+            f"port_branch=neoforge-1.21.1\nbase_minecraft_version=1.21.1\nport_taken={x}\n"
+            "# BEGIN layer-deps (tools/layer-deps.py)\nsubstitute.maven.modrinth\\:viewer=maven.modrinth:viewer:a3\n"
+            "# END layer-deps\n", encoding="utf-8")
         gq(vb, "add", "-A"); gq(vb, "commit", "-qm", "1.21.3")
         gq(vb, "checkout", "-q", "neoforge-1.21.1"); gq(vb, "merge", "-q", "--no-ff", "--no-edit", "origin/main")
         for b_ in ("neoforge-1.21.1", "neoforge-1.21.3"):
@@ -1185,7 +1268,17 @@ def self_check():
             step_fetch(conf3, vb, w3, now=summer)
             step_cascade(w3)
             step_select(w3)
+            step_deps(w3, dlk)
         fv = load_input(w3)["forks"][0]
+        expect([(r["mc"], r["to"], r["default"], "a beta" in r["why"]) for r in fv["dep_updates"]["rows"]]
+               == [("1.21.1", "maven.modrinth:viewer:a2", True, False), ("1.21.3", "maven.modrinth:viewer:a4", False, True)],
+               f"deps, a version-branch fork: per version, the branch's own pin (its block) checked, a beta unticked: "
+               f"{fv['dep_updates']}")
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_deps(w3, {"mr_files": lambda p: (_ for _ in ()).throw(OSError("offline")), "cf": lambda: None})
+        fo = load_input(w3)["forks"][0]["dep_updates"]
+        expect(not fo["rows"] and len(fo["unchecked"]) == 2 and all("offline" in u["why"] for u in fo["unchecked"]),
+               f"deps with every lookup failing: each pin could not be checked, no failure: {fo}")
         expect(fv["new_count"] == 0 and fv["cascade"]["range"] == "neoforge-1.21.1..1.21.3" and fv["base_version"] == "1.21.1"
                and [(c["subject"].split(" ")[0], c["merge"], c["versions"]) for c in fv.get("untaken", [])]
                == [("Merge", True, ["1.21.3"]), ("authors:", False, ["1.21.3"])],
@@ -1228,7 +1321,8 @@ def self_check():
         expect(first.get("assignees") == ["someone"] and first["body"].startswith(k.PLAN_MARK + "\n**Deadline: the round "
                "starts Wednesday 2026-07-15") and "@someone" in first["body"] and "[x] Take the authors' new commits" in first["body"]
                and "- [x] **S1** `KI-1`" in first["body"] and "- [ ] **S3** `KI-2`" in first["body"]
-               and "## o/dep (dependent)" in first["body"] and not first["title"].startswith("[decision needed]"),
+               and "## o/dep (dependent)" in first["body"] and not first["title"].startswith("[decision needed]")
+               and "- [x] `maven.modrinth:viewer` at 1.21.1" in first["body"] and "Could not check" in first["body"],
                f"the plan issue: deadline first, assigned and @mentioned, a section per fork: {first}")
         # this week's issue already open: a second run (e.g. a manual dispatch) opens nothing
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1312,7 +1406,7 @@ def build_parser():
                    help="an existing scheduled task's name (list_triggers), repeatable: matched into replaces")
     p = sub.add_parser("fetch"); p.add_argument("--config", required=True); p.add_argument("--repo", required=True)
     p.add_argument("--work", required=True)
-    for n in ("cascade", "select", "previous", "open"):
+    for n in ("cascade", "select", "deps", "previous", "open"):
         sub.add_parser(n).add_argument("--work", required=True)
     return ap
 
@@ -1338,11 +1432,12 @@ def main(argv=None):
             return 0
         if a.cmd == "fetch":
             return step_fetch(a.config, a.repo, a.work)
-        if a.cmd in ("cascade", "select", "previous", "open"):
-            return {"cascade": step_cascade, "select": step_select, "previous": step_previous, "open": step_open}[a.cmd](a.work)
+        if a.cmd in ("cascade", "select", "deps", "previous", "open"):
+            return {"cascade": step_cascade, "select": step_select, "deps": step_deps, "previous": step_previous,
+                    "open": step_open}[a.cmd](a.work)
     except (Fail, OSError, ValueError, KeyError) as e:
         print(f"weekly-plan: {e}", file=sys.stderr)
-        return 1 if a.cmd in ("fetch", "cascade", "select", "previous", "open") else 2
+        return 1 if a.cmd in ("fetch", "cascade", "select", "deps", "previous", "open") else 2
     ap.print_help()
     return 2
 

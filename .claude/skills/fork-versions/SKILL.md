@@ -164,6 +164,18 @@ whole Minecraft version, so both ranges stop at the next patch release (`[26.2,2
 `tools/round-preflight.py` says what is missing); GeckoLib 5.5+ is `com.geckolib:geckolib-neoforge-<mc>` (a `substitute.` line); 26.2 and 26.3 need
 `nfrt_version=2.0.31`. `add-target` writes each of these from versions.json. Read CATALOG §V before porting a 26.x version.
 
+**The 26.1.2 entityCutout swap (CATALOG V60) is decided by the parent's line, never by a row or a person.** From 26.1.2
+`entityCutout` does not cull (it is 1.21's `entityCutoutNoCull`), `entityCutoutCull` does, `entityCutoutNoCull` is gone
+and `entityCutoutNoCullZOffset` is `entityCutoutZOffset`. A swap row cannot carry it (applied twice it swaps back; a file
+changed by hand is never re-made through the rows). On a version branch at 26.1.2 or above whose parent builds below it,
+`python3 tools/fork-branches.py cutout-check --repo <its checkout> --branch neoforge-26.1.2 [--fix]` pairs every call with
+its parent version's line (the lines a line diff pairs, else the same enclosing method in call order) and names it by
+what the parent's call meant; `--fix` renames the ones whose meaning was lost (a right tree is left as it is). It runs by
+itself where code crosses that boundary -- `add-target`, the rows' own output, the cascade's merge, `remake` and
+`fork-port.py`'s moves stage -- so run it by hand after resolving a boundary conflict yourself. A call it lists with no
+parent line was written on 26.x: decide it (keep `entityCutout` when the model's back faces must show, else
+`entityCutoutCull`). A single-version fork, or 26.2 over 26.1.2, never takes it.
+
 **Direct jumps.** A version whose middle versions will never ship can stand on a lower branch directly (`add-target
 --parent <lower>`, or on the port branch): it applies the shared library of every targeted version in between, newest
 first. It skips the middle versions' own gates, not their API changes; its cost has not been measured yet -- try it on a
@@ -175,7 +187,10 @@ A dependent fork's version T is ported only after the library fork's T is **done
 own reason aside) and **released**: the library's version branch cuts its own pre-release (Port CI's `release` on
 `neoforge-T`, tag `<mod>-<ver>-mcT`), and the dependent pins that release's jar by sha256 in `.port/T/branch.properties`
 (`port_jar.<g:a>=<url> <sha256>` beside `substitute.<g:a>=<g:a:ver-mcT>`): `python3 tools/layer-deps.py resolve --repo
-DIR --target T --port-release owner/lib@<tag>` on the dependent's T checkout. `layer-deps.py library-done --target T
+DIR --target T --port-release owner/lib@<tag>` on the dependent's T checkout. **A pin is kept:** every later resolve
+(`fork-port.py`'s setup, a cascade's) keeps each CurseForge/Modrinth pin the block holds as it is, with no lookup; only
+`--bump DEP[=VERSION]` / `--bump-all` moves one (the weekly plan's "Dependency updates" boxes say which; a single-version
+fork follows the same rule). `layer-deps.py library-done --target T
 --port-release owner/lib@<tag>` asks the library's done list at that tag -- the same `target_done()`, run on the tag's
 tree with the library's own history (a bare clone under `~/.mmvu/cache/git/`), so the release-side answer and the
 checkout's agree. **A dependent never builds against a live library checkout**: `--port-checkout owner/lib=DIR` only
@@ -329,7 +344,7 @@ only the files that differ from the parent at the new merge-base, so a file the 
 is no row). Nothing is pushed: push the merged branches (or open their PRs) yourself -- one version at a time,
 lowest first, a version's PR opened only after the one below it merged (keep-current, "A fork with version branches"
 step 3). A conflict at the 1.21.x -> 26.x boundary (the rename between 1.21.11 and 26.1.2) is expected: resolve it by hand
-in that version's worktree, through its rows, commit, and cascade on.
+in that version's worktree, through its rows, run `cutout-check --fix` there (above), commit, and cascade on.
 
 **The shared library moved** (a row or a helper changed in `templates/fork-layer/shared/<v>/`): `python3
 tools/fork-branches.py sync-shared --repo DIR [--target <v> ...]` rewrites each version's `shared <v>` sections of

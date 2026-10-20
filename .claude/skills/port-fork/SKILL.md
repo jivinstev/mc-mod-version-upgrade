@@ -53,6 +53,14 @@ Dependencies that are themselves forks being ported: port those first (step 3 pe
 pass `--provide <authors' coordinate prefix>=<mavenLocal coordinate>` to the dependent port. The
 dependency's own build publishes it with `./gradlew publishToMavenLocal`.
 
+**A pinned dependency moves only by an explicit bump** (the same rule as a version branch's; a deliberate change to
+single-version forks, decided by the maintainer). The port's build stage moves each CurseForge/Modrinth dependency the
+authors pinned for another Minecraft version to the target's build, and keeps one already pinned to a target build;
+after that only `python3 tools/layer-deps.py resolve --repo ~/forks/<repo> --target <mc> --bump <dep>[=<version>]`
+(or `--bump-all`) moves it, rewriting its build.gradle coordinate or the gradle.properties key that coordinate's version
+reads. `layer-deps.py updates --repo ~/forks/<repo>` lists what a bump would take; the weekly plan lists the same as
+boxes (keep-current).
+
 ## 2. Estimate (no model)
 
 ```bash

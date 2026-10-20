@@ -2922,8 +2922,18 @@ class BranchRun(Run):
         # rows as a tool: the moves are applied to the branch's source (a version branch holds its own source)
         changed = fb.apply_moves_to_files(sorted(self.repo.glob("src/*/java/**/*.java")), fb.rules_of(text), mech)
         self.sh([self.py, str(ROOT / "tools/fix-access-transformer.py"), "--work", str(self.repo), "--class-map", str(raw)])
+        cut = ""
+        if fb.cutout_crossing(self.t, fb.cutout_below(p)):
+            # the 26.1.2 entityCutout swap (CATALOG V60): each call named for what its parent line meant, before any
+            # compile error is shown to a model (entityCutoutNoCull is gone; entityCutout compiles with the wrong culling)
+            pref = fb.resolve_branch(self.repo, p.get("parent") or fb.branch_name(pv))
+            pref = pref and (fb.git(self.repo, "merge-base", "HEAD", pref).stdout.strip() or pref)
+            cx = fb.cutout_tree(self.repo, pref, fix=True)
+            fb.cutout_report(cx, fb.branch_name(self.t), True, print)
+            cut = (f"; entityCutout swap: {len(cx['fixed'])} call(s) renamed for their parent line's meaning"
+                   + (f", {len(cx['fresh'])} with no parent line to decide (fork-branches.py cutout-check)" if cx["fresh"] else ""))
         return {"done": f"{kept} unambiguous move(s) {pv}->{self.t} -> .port/{self.t}/moves.generated.tsv"
-                        f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s)", "moves": kept}
+                        f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s){cut}", "moves": kept}
 
     def s_loop(self):
         start = self.compile_errors()

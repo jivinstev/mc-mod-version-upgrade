@@ -14,7 +14,11 @@ layer". `git ls-remote --heads origin 'neoforge-*'` lists the version branches; 
 --ref <layer_branch>` says whether a layer exists: pass the fork's `layer_branch` (in `.github/weekly-plan.json`) when it
 has one, since the clone is usually checked out on the port branch, which has no `.multiversion/`. Without `--ref`, detect
 exits 3 (not 0) when the checked-out branch has no layer but another branch does, so a layer fork can never read as
-single-version and skip its layer step. **Version branches win:** a fork that has `.port/<v>/branch.properties` version
+single-version and skip its layer step. **Dependency updates are explicit for every kind of fork** (a deliberate change to
+single-version forks, decided by the maintainer): no step re-picks a pinned CurseForge/Modrinth dependency by itself --
+`layer-deps.py resolve` keeps every pin, and a single-version fork's build.gradle pins move only by `layer-deps.py
+resolve --bump` -- so a dependency moves only when the plan's "Dependency updates" box is ticked (or the user asks).
+**Version branches win:** a fork that has `.port/<v>/branch.properties` version
 branches AND a legacy layer branch with `.multiversion/` (one migrated to branches) is a version-branch fork; the layer
 branch is history and is ignored, by the round and by every run. detect says so: `layer=false kind=version-branches
 versions=... legacy_layer=<branch>`, exit 0, with or without `--ref`; never run the layer step for such a fork.
@@ -243,7 +247,10 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    26.1.2's rows, each other changed file carried through the rows 26.1.2 adds; it lists what is still in conflict),
    resolve each listed file through 26.1.2's rows and the rename (the 26.x name, the lower version's change), run
    `remake` again, commit, then `cascade --repo DIR 26.1.2..<newest>` -- and say in its PR which files were resolved by hand
-   (they are review rows). With `--apply` (the head cascade of the authors' code) nothing stops there: a file it cannot
+   (they are review rows). Before that commit, `python3 tools/fork-branches.py cutout-check --repo
+   build/fork-branches/26.1.2 --branch neoforge-26.1.2 --fix` (remake and the cascade's merge run it themselves; run it
+   again after resolving by hand): every `entityCutout` / `entityCutoutNoCull` / `entityCutoutCull` call named by what
+   its 1.21.11 line meant (CATALOG V60); decide each call it lists with no parent line. With `--apply` (the head cascade of the authors' code) nothing stops there: a file it cannot
    merge becomes a decision with an open REMERGE.json entry, answered through step 2's decisions (`--apply-decisions`),
    never by hand. Every version whose gated files changed reads not done until its gates (`--gates full` once
    before a release) run again; where its own files changed it needs a fresh review, and where it took the authors'
@@ -334,8 +341,11 @@ and version-branch forks alike:
   checkboxes pre-ticked for the defaults (every open S1, then S2s up to the budget), each with its lowest open version
   (the status map; `lowest` is only the first affected one), the escalated cascade decisions (the head cascade's: they
   apply only with the authors' box ticked) with their options
-  (`/decide <id> <choice>`) and grade overrides (`/grade <ID> <S1-S4> [reason]`); its title starts `[decision needed]`
-  when the plan escalates something. It costs no model quota, so it opens whether or not the owner has any left.
+  (`/decide <id> <choice>`), the **dependency updates** (`weekly-plan.py deps`: per Minecraft version the fork builds,
+  each pinned CurseForge/Modrinth dependency with a newer compatible build, current -> new, ticked by default and
+  unticked with the reason when the new build is an alpha/beta, a major-version jump, drops a Minecraft version the fork
+  builds or switches provider; a failed lookup is listed "could not check"), and grade overrides (`/grade <ID> <S1-S4>
+  [reason]`); its title starts `[decision needed]` when the plan escalates something. It costs no model quota, so it opens whether or not the owner has any left.
 - **Wednesday morning America/Los_Angeles: the round** ("The weekly round" below), a Claude scheduled task with a fresh
   session each fire, at `round.time` in `.github/weekly-plan.json` (a minute below 08:30, jittered per fork set from the
   task's name -- read it there, never assume a fixed time). It reads the plan issue once, at its start, posts progress on it and closes it with the outcome.
@@ -426,6 +436,13 @@ whole context written again after each wait on gates or CI longer than the 5-min
    comment says so. Apply each
    grade override first: `known-issues.py grade --repo <fork> <ID> --override <S> --reason "<reason> (plan #N)" --by
    <who>` on the head branch, committed alone. Post a first comment on the plan issue: the frozen selection, @owner.
+   **Dependency updates:** each fork's `dep_bumps` in `frozen.json` (the boxes left ticked) are applied exactly once, at
+   that version's setup and before its gates: run each entry's `command` (`layer-deps.py resolve --repo <checkout of
+   neoforge-<mc>> --target <mc> --bump <g:m>=<coord>`) in the checkout of that version's branch and commit the changed
+   `branch.properties` (a version branch) or `build.gradle` / `gradle.properties` (a single-version fork, or the port
+   branch) as its own commit; on a version branch it goes in with the re-pins (step 4 below: what changes the build goes
+   in first). An unticked one (`dep_kept`) stays as it is. After that no step re-picks a dependency: `fork-port.py`'s
+   setup and every other resolve keep the pins, so `branch.properties` does not move mid-round.
 2. **Order: the library first, then each dependent.** A dependent starts only once the library's versions it pins are
    green and released (Run step 7, "Don't exceed your dependency").
 3. **Per fork**, from its entry in `frozen.json`; say which case it is. **The authors' code is taken only when the plan
@@ -490,7 +507,8 @@ whole context written again after each wait on gates or CI longer than the 5-min
      sequence** -- one full run (~20 minutes) per version where the 2026-10-19 round ran two or three, every gate still
      green on the exact tree that merges:
      1. what changes the build goes in first: a library re-pin (`layer-deps.py resolve --port-release`, then
-        `fork-branches.py ci` for the workflow) before the version is gated, never after its gates;
+        `fork-branches.py ci` for the workflow) and the plan's ticked dependency bumps (`dep_bumps`, `resolve --bump`)
+        before the version is gated, never after its gates;
      2. the cascade's `--gates ab` (compile, audits, Gate A/B) green is what the review starts from: the review needs no
         Gate C run before it;
      3. the review, the fixer's fixes of its `not-ok` rows and their re-check (below), committed;

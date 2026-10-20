@@ -4,6 +4,8 @@
 
     python3 tools/layer-deps.py resolve --repo DIR --target 1.21.4 [--port-checkout owner/repo=DIR ...]
                                 [--port-release owner/repo@TAG ...] [--allow-undone-library] [--dry-run]
+                                [--bump DEP[=VERSION] ...] [--bump-all]
+    python3 tools/layer-deps.py updates --repo DIR [--target MC] [--json]
     python3 tools/layer-deps.py library-done --target 1.21.4 (--port-checkout owner/repo=DIR | --port-release owner/repo@TAG)
     python3 tools/layer-deps.py fetch --repo DIR --target 1.21.4
     python3 tools/layer-deps.py --self-check
@@ -33,6 +35,19 @@ WHERE A BUILD IS LOOKED UP
                 .multiversion/build.sh <t> assemble when missing) and installed into ~/.m2 as version <v>-mc<t>.
   anything else (a `${...}` version, a maven the authors run) is left alone: the target's prop.* lines carry it.
   Newest release first, then beta, then alpha; the channel is recorded.
+
+A PIN IS KEPT; A BUMP IS EXPLICIT (every kind of fork alike: a deliberate change to single-version forks, decided by
+the maintainer). A CurseForge/Modrinth dependency the block already pins (substitute.<g:m>=...) is kept exactly as it is
+by every later resolve -- fork-port.py's setup, a cascade's, a person's -- with no lookup; only a dependency with no pin
+yet (a first resolve) is looked up. `--bump DEP[=VERSION]` (DEP a group:module, a module or a CurseForge slug; VERSION a
+file/version id or a whole group:module:version) moves one: to VERSION, else to the newest compatible build;
+`--bump-all` moves every one. On a single-version fork (or a version-branch fork's port branch) the pins are
+build.gradle's own coordinates and `resolve --bump` rewrites that coordinate in build.gradle, or the gradle.properties
+key its version reads, and nothing else; without --bump there is nothing to resolve there (exit 2, as before).
+`updates` lists, per Minecraft version the checkout builds, each pinned dependency with a newer compatible build -- what
+a bump would take -- with the reason to look first (an alpha or beta, a major-version jump, a build that drops a
+Minecraft version the fork builds, a CurseForge pin found on Modrinth only); the weekly plan (tools/weekly-plan.py deps)
+lists the same per fork as ticked boxes, and the round applies the ticked ones once with --bump.
 
 WHICH ONES MAY BE DROPPED
   The fork's .github/port-install.json says which mods a player must install (role "required") -- the tested set
@@ -1035,10 +1050,15 @@ RUNTIME_CONFS = {"implementation", "api", "modImplementation", "jarJar"}
 PRERELEASE_KEY = "port_jar_prerelease."     # beside port_jar.<g:a>: that pin is a library pre-release not done yet
 
 
-def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, allow_undone=False, prereleases=None):
+def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, allow_undone=False, prereleases=None,
+            kept=None, bumps=None):
     """(rows, stop). lookups overrides the network (self-check). dry_run: a sibling checkout is not built or installed
     (its row says what would be). pins: {group:module: (substitute coord, port_jar value)} the target's block already
     holds -- a released sibling's pin is kept when no --port-checkout/--port-release names it this run.
+    kept: {group:module: substitute coordinate} -- the registry (CurseForge/Modrinth) pins the block already holds, each
+    kept as it is with no lookup: a resolve never moves a pinned dependency by itself. bumps: {group:module: coordinate
+    or None} -- the explicit --bump/--bump-all: a coordinate is pinned as given, None re-picks the newest compatible
+    build (the lookup a missing pin gets); "*" in it means every registry dependency.
     A sibling named by --port-checkout or --port-release is used only when its own `target` is done (library_done:
     a green Gate C recorded in its GATES.md at the commit used, then fork-port.py's done list); else its
     row is "refused" and the resolve stops -- unless allow_undone and it is a checkout, whose row then says
@@ -1053,7 +1073,10 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
     roles = manifest_roles(manifest)
     wf = repo / ".github/workflows/port-ci.yml"
     ports = port_deps(wf.read_text(encoding="utf-8") if wf.exists() else "")
-    cf = lk["cf"]()
+    kept, bumps = kept or {}, bumps or {}
+    regs = [f"{d['group']}:{d['module']}" for d in gradle_deps(build) if d["kind"] in ("curse", "modrinth")]
+    # CurseForge is asked only when some dependency is looked up (a resolve that keeps every pin needs no network)
+    cf = lk["cf"]() if any(pin_choice(ga, kept, bumps)[0] in ("lookup", "bump") for ga in regs if ga not in ports) else None
     cache, ids, rows, missing_required, refused = {}, {}, [], [], []
     for d in gradle_deps(build):
         ga = f"{d['group']}:{d['module']}"
@@ -1117,9 +1140,22 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
                 row.update(lk["port"](ga, spec, target, checkouts))
             if row.get("library") and row.get("to"):
                 row["source"] = f"{row.get('source', '')}; library {row['library']}"
+        elif d["kind"] in ("curse", "modrinth") and pin_choice(ga, kept, bumps)[0] in ("keep", "to"):
+            # pinned already (kept as it is), or bumped to an exact coordinate: no lookup, the pin is the build's
+            how, to = pin_choice(ga, kept, bumps)
+            was = deps_md_row(repo, target, ga) if how == "keep" else None
+            if was and was[3] == to:
+                # the row the earlier resolve wrote for this very build: its role and source, so DEPS.md stays as it was
+                row.update({"role": was[1].strip("`") or unnamed, "to": to, "source": was[4]})
+            else:
+                row["role"] = registry_role(d, roles, unnamed, manifest, ids, lk)
+                row.update({"to": to, "source": f"bumped explicitly (--bump): {kept.get(ga, d['coord'])} -> {to}" if how == "to"
+                            else f"kept the pin (a resolve never moves a pinned dependency; `--bump {ga}` moves it)"})
         elif d["kind"] == "curse":
             row["role"] = roles.get(f"cf:{d['cf_project']}", unnamed)
             row.update(lk["curse"](d, target, cf, cache))
+            if pin_choice(ga, kept, bumps)[0] == "bump":
+                row["source"] = f"bumped (--bump): the newest compatible build; {row.get('source', '')}"
         elif d["kind"] == "modrinth":
             # the build names a slug or an id; the manifest's cdn URL carries the id
             role = roles.get(f"mr:{d['module']}")
@@ -1129,6 +1165,8 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
                 role = roles.get(f"mr:{ids[d['module']]}") if ids[d["module"]] else None
             row["role"] = role or unnamed
             row.update(lk["modrinth"](d["module"], target, cache))
+            if pin_choice(ga, kept, bumps)[0] == "bump":
+                row["source"] = f"bumped (--bump): the newest compatible build; {row.get('source', '')}"
         else:
             continue
         if row.get("missing"):
@@ -1143,6 +1181,55 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
                                       " (finish and release the library's target first; --allow-undone-library is for "
                                       "development against a --port-checkout only)", stop] if x)
     return rows, stop
+
+
+def pin_choice(ga, kept, bumps):
+    """What a resolve does with registry dependency `ga`: ("to", coord) bumped to an exact coordinate; ("bump", None)
+    bumped to the newest compatible build (--bump GA, --bump-all); ("keep", coord) pinned already, kept as it is;
+    ("lookup", None) not pinned yet: the newest compatible build, as a first resolve picks it."""
+    if ga in bumps:
+        return ("to", bumps[ga]) if bumps[ga] else ("bump", None)
+    if "*" in bumps:
+        return "bump", None
+    if ga in kept:
+        return "keep", kept[ga]
+    return "lookup", None
+
+
+def registry_role(d, roles, unnamed, manifest, ids, lk):
+    """A CurseForge/Modrinth dependency's role from port-install.json (a Modrinth slug matched through its id)."""
+    if d["kind"] == "curse":
+        return roles.get(f"cf:{d['cf_project']}", unnamed)
+    role = roles.get(f"mr:{d['module']}")
+    if role is None and manifest is not None:
+        if d["module"] not in ids:
+            ids[d["module"]] = lk["mr_id"](d["module"])
+        role = roles.get(f"mr:{ids[d['module']]}") if ids[d["module"]] else None
+    return role or unnamed
+
+
+def deps_md_row(repo, target, ga):
+    """The cells [dependency, role, base pin, for this target, from] of `ga`'s row in the target's DEPS.md, or None: a
+    kept pin takes its role and source from it, so a re-resolve that keeps every pin leaves DEPS.md as it was (and asks
+    nothing of the network)."""
+    md = target_dir(repo, target) / "DEPS.md"
+    for line in (md.read_text(encoding="utf-8").splitlines() if md.is_file() else []):
+        cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
+        if len(cells) == 5 and cells[0] == f"`{ga}`":
+            return cells
+    return None
+
+
+def current_registry_pins(repo, target):
+    """{group:module: substitute coordinate} for each registry pin (a substitute. line with no port_jar pin: a CurseForge
+    or Modrinth build) the target's layer-deps block holds."""
+    tp = props_file(repo, target)
+    text = tp.read_text(encoding="utf-8") if tp.is_file() else ""
+    if BEGIN not in text or END not in text:
+        return {}
+    blk = text[text.index(BEGIN):text.index(END)]
+    sibling = {k.replace("\\:", ":") for k in re.findall(r"(?m)^port_jar(?:_dev)?\.(.+?)=", blk)}
+    return {k.replace("\\:", ":"): v for k, v in SUBSTITUTE.findall(blk) if k.replace("\\:", ":") not in sibling}
 
 
 PIN_LINE = re.compile(r"(?m)^(substitute|port_jar)\.(.+?)=(.*?)\s*$")
@@ -1191,11 +1278,38 @@ def write(repo, target, rows, stop):
     return True
 
 
+def parse_bumps(specs, bump_all, deps):
+    """--bump DEP[=COORD|=VERSION] (repeatable) and --bump-all -> {group:module: coordinate or None}, "*" for all. DEP is
+    a group:module, a module or a CurseForge slug the build pins; VERSION alone keeps the pinned group:module. Raises
+    ValueError naming a DEP the build does not pin."""
+    out = {"*": None} if bump_all else {}
+    for spec in specs or []:
+        dep, _, ver = spec.partition("=")
+        hit = [d for d in deps if dep in (f"{d['group']}:{d['module']}", d["module"])
+               or (d["kind"] == "curse" and re.fullmatch(re.escape(dep) + r"-\d+", d["module"]))]
+        if len(hit) != 1:
+            raise ValueError(f"--bump {spec}: " + ("names more than one dependency" if hit else
+                             "no CurseForge or Modrinth dependency of that name in build.gradle (one of: "
+                             + ", ".join(f"{d['group']}:{d['module']}" for d in deps) + ")"))
+        ga = f"{hit[0]['group']}:{hit[0]['module']}"
+        out[ga] = (ver if ver.count(":") >= 2 else f"{ga}:{ver}") if ver else None
+    return out
+
+
 def cmd_resolve(a):
     repo = pathlib.Path(a.repo).resolve()
     if not (repo / ".multiversion/base.properties").exists() and not branch_target(repo, a.target):
-        print("layer-deps: no .multiversion/ in the fork (a single-version fork has nothing to resolve)")
+        if getattr(a, "bump", None) or getattr(a, "bump_all", False):
+            return cmd_bump_single(repo, a.target, a.bump, a.bump_all, a.dry_run)
+        print("layer-deps: no .multiversion/ in the fork (a single-version fork has nothing to resolve; its pins are "
+              "build.gradle's, moved only by --bump)")
         return 2
+    build = (repo / "build.gradle").read_text(encoding="utf-8") if (repo / "build.gradle").is_file() else ""
+    try:
+        bumps = parse_bumps(getattr(a, "bump", []), getattr(a, "bump_all", False),
+                            [d for d in gradle_deps(build) if d["kind"] in ("curse", "modrinth")])
+    except ValueError as e:
+        print(f"layer-deps: {e}"); return 2
     checkouts = {}
     for s in a.port_checkout:
         k, _, v = s.partition("=")
@@ -1209,7 +1323,8 @@ def cmd_resolve(a):
         checkouts[k] = v
     rows, stop = resolve(repo, a.target, checkouts, dry_run=a.dry_run, pins=current_pins(repo, a.target),
                          allow_undone=getattr(a, "allow_undone_library", False),
-                         prereleases=current_prereleases(repo, a.target))
+                         prereleases=current_prereleases(repo, a.target), kept=current_registry_pins(repo, a.target),
+                         bumps=bumps)
     for r in rows:
         state = ("-> " + r["to"]) if r.get("to") else ("DROPPED " + r["drop"]) if r.get("drop") else \
                 ("REFUSED " + r["refused"]) if r.get("refused") else ("MISSING " + r.get("missing", ""))
@@ -1229,6 +1344,265 @@ def cmd_resolve(a):
         print(f"layer-deps: STOP {stop}")
         return EXIT_UNDONE if any(r.get("refused") for r in rows) else EXIT_REQUIRED
     print(f"layer-deps: {a.target}: {n_sub} substituted, {n_drop} dropped" + (", written" if wrote else ", not written"))
+    return 0
+
+
+# ---------------------------------------------------------------- explicit dependency updates (every kind of fork)
+#
+# A resolve never moves a pinned dependency (above); moving one is explicit: `resolve --bump DEP[=VERSION]` /
+# `--bump-all`. The same rule holds on a single-version fork, whose pins are build.gradle's own coordinates (or the
+# gradle.properties key a coordinate's version reads): there --bump rewrites that coordinate, and nothing else moves it.
+# `updates` (and tools/weekly-plan.py's plan) lists, per Minecraft version a fork builds, each pinned CurseForge/Modrinth
+# dependency that has a newer compatible build -- what a bump would take -- with the reason a person should look first:
+# an alpha or beta, a major-version jump, a build that drops a Minecraft version the fork builds, or a provider switch.
+
+def read_props_text(text):
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line and not line.startswith(("#", "!")) and "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def build_pins(build_text, props_text=""):
+    """[{group, module, version, coord, kind, conf, src}] for each CurseForge/Modrinth coordinate build.gradle pins -- a
+    literal one (src "literal"), or one whose version is a whole gradle.properties key (`${key}`/`$key`, src "prop:<key>",
+    expanded). What a single-version fork builds against, and what --bump rewrites."""
+    props = read_props_text(props_text)
+    out, seen = [], set()
+    for ln in strip_comments(build_text or "").splitlines():
+        m = DEP_LINE.match(ln)
+        if not m:
+            continue
+        parts = m.group(2).split(":")
+        if len(parts) < 3 or parts[0] not in ("curse.maven", "maven.modrinth") or (parts[0], parts[1]) in seen:
+            continue
+        src = "literal"
+        if "$" in parts[2]:
+            km = re.fullmatch(r"\$\{?([\w.]+)\}?", parts[2])
+            if not km or km.group(1) not in props or "$" in parts[0] + parts[1]:
+                continue
+            parts[2], src = props[km.group(1)], f"prop:{km.group(1)}"
+        seen.add((parts[0], parts[1]))
+        d = {"conf": m.group(1), "group": parts[0], "module": parts[1], "version": parts[2],
+             "coord": ":".join(parts[:3]), "kind": "curse" if parts[0] == "curse.maven" else "modrinth", "src": src,
+             "raw": m.group(2)}
+        if d["kind"] == "curse":
+            cm = re.fullmatch(r"(.+)-(\d+)", parts[1])
+            if not cm:
+                continue
+            d["cf_project"] = cm.group(2)
+        out.append(d)
+    return out
+
+
+def version_pins(build_text, props_text, branch_props_text=""):
+    """{group:module: coordinate} the build of one Minecraft version uses: build.gradle's registry pins, each replaced by
+    the version's layer-deps block substitute (a version branch's branch.properties) and left out when the block excludes
+    it; a sibling port's pins (port_jar.) are not registry pins."""
+    pins = {f"{d['group']}:{d['module']}": d["coord"] for d in build_pins(build_text, props_text)}
+    text = branch_props_text or ""
+    if BEGIN in text and END in text:
+        blk = text[text.index(BEGIN):text.index(END)]
+        sibling = {k.replace("\\:", ":") for k in re.findall(r"(?m)^port_jar(?:_dev)?\.(.+?)=", blk)}
+        for k, v in SUBSTITUTE.findall(blk):
+            ga = k.replace("\\:", ":")
+            if ga not in sibling and v.split(":")[0] in ("curse.maven", "maven.modrinth"):
+                pins[ga] = v
+        for k in re.findall(r"(?m)^exclude\.(.+?)=", blk):
+            pins.pop(k.replace("\\:", ":"), None)
+    return pins
+
+
+def _major(name, mcs):
+    """The first number of a build's own version (its name with the Minecraft versions and loader words taken out)."""
+    s = name or ""
+    for mc in sorted({x for v in mcs for x in (v, ".".join(v.split(".")[:2]))}, key=len, reverse=True):
+        s = re.sub(r"(?<![\d.])" + re.escape(mc) + r"(?![\d])", " ", s)
+    s = re.sub(r"(?i)neoforge|forge|fabric|quilt|\bmc", " ", s)
+    m = re.search(r"(?<![\w.])v?(\d+)(?:\.\d+)+", s) or re.search(r"(?<![\w.])v?(\d+)(?![\w])", s)
+    return int(m.group(1)) if m else None
+
+
+def mr_version_of_sha1(sha1):
+    """The Modrinth version whose file has this sha1, as mr_files() rows have it, or None."""
+    try:
+        v = json.loads(_get(f"{MODRINTH}/version_file/{sha1}?algorithm=sha1"))
+    except Exception:
+        return None
+    return {"project": v.get("project_id"), "id": v["id"], "mcs": v.get("game_versions", []), "loaders": v.get("loaders", []),
+            "channel": v.get("version_type"), "date": v.get("date_published"), "name": v.get("version_number")}
+
+
+def update_candidate(coord, mc, lk=None, cache=None):
+    """(current build, newer build, its coordinate, provider switch?) for a pinned registry coordinate at Minecraft `mc`:
+    the newest compatible build published after the pinned one (release first, then beta, then alpha, as pick() picks);
+    newer None when there is none. Raises LookupError when it cannot tell (the plan says "could not check")."""
+    lk = {"mr_files": mr_files, "cf": cf_provider, "cf_files": cf_files, "mr_sha1": mr_version_of_sha1,
+          "curse_jar": lambda m, v: _get(f"{CURSEMAVEN}/{m}/{v}/{m}-{v}.jar"), **(lk or {})}
+    cache = {} if cache is None else cache
+    g, m, v = (coord.split(":") + ["", ""])[:3]
+    switch = False
+    if g == "maven.modrinth":
+        files = cache.get(("mr", m)) or lk["mr_files"](m)
+        cache[("mr", m)] = files
+        cur = next((f for f in files if v in (f.get("id"), f.get("name"))), None)
+        style = "name" if cur and v == cur.get("name") and v != cur.get("id") else "id"
+        mk = lambda f: f"maven.modrinth:{m}:{f[style]}"
+    elif g == "curse.maven":
+        pid = (re.fullmatch(r"(.+)-(\d+)", m) or [None, None, None])[2]
+        if not pid:
+            raise LookupError(f"{coord}: not a cursemaven coordinate")
+        cf = cache.get("cf", False)
+        if cf is False:
+            cf = cache["cf"] = lk["cf"]()
+        if cf is not None:
+            files = cache.get(("cf", pid, mc)) or lk["cf_files"](cf, pid, mc)
+            cache[("cf", pid, mc)] = files
+            cur = next((f for f in files if f.get("id") == v), None)
+            mk = lambda f: f"curse.maven:{m}:{f['id']}"
+        else:
+            # no CURSEFORGE_API_KEY (the plan workflow has no secrets): the pinned jar's sha1 on Modrinth, as resolve does
+            cur = lk["mr_sha1"](hashlib.sha1(lk["curse_jar"](m, v)).hexdigest())
+            if not cur:
+                raise LookupError("the pinned CurseForge file is not on Modrinth and CURSEFORGE_API_KEY is not set")
+            files = cache.get(("mr", cur["project"])) or lk["mr_files"](cur["project"])
+            cache[("mr", cur["project"])] = files
+            mk, switch = (lambda f, p=cur["project"]: f"maven.modrinth:{p}:{f['id']}"), True
+    else:
+        raise LookupError(f"{coord}: not a CurseForge or Modrinth coordinate")
+    if cur is None:
+        raise LookupError(f"the pinned build {v} is not among the project's builds")
+    newer = [f for f in files if (f.get("date") or "") > (cur.get("date") or "") and f.get("id") != cur.get("id")]
+    new = pick(newer, mc)
+    return cur, new, (mk(new) if new else None), switch
+
+
+def dependency_updates(pins_by_mc, lk=None):
+    """{"rows": [{"id", "mc", "ga", "from", "to", "from_name", "to_name", "channel", "default", "why"}],
+    "unchecked": [{"mc", "ga", "coord", "why"}], "checked": n} for {mc: {group:module: coordinate}}. A row is ticked
+    (default) unless the newer build is an alpha or beta, a major-version jump, drops a Minecraft version the fork builds
+    that the pinned build serves, or switches provider. A lookup that fails is listed unchecked, never raised."""
+    built = sorted(pins_by_mc, key=lambda v: tuple(int(x) for x in re.findall(r"\d+", v)))
+    rows, unchecked, n, cache = [], [], 0, {}
+    for mc in built:
+        for ga, coord in sorted(pins_by_mc[mc].items()):
+            n += 1
+            try:
+                cur, new, to, switch = update_candidate(coord, mc, lk, cache)
+            except Exception as e:      # noqa: BLE001 -- fail soft: "could not check", the plan goes on
+                unchecked.append({"mc": mc, "ga": ga, "coord": coord, "why": str(e)[:200] or type(e).__name__})
+                continue
+            if not new:
+                continue
+            why = []
+            if new.get("channel") in ("alpha", "beta"):
+                why.append(f"a {new['channel']}")
+            a, b = _major(cur.get("name"), cur.get("mcs", []) + new.get("mcs", [])), \
+                _major(new.get("name"), cur.get("mcs", []) + new.get("mcs", []))
+            if a is not None and b is not None and b > a:
+                why.append(f"a major-version jump ({cur.get('name')} -> {new.get('name')})")
+            gone = [v for v in built if v in cur.get("mcs", []) and v not in new.get("mcs", [])]
+            if gone:
+                why.append(f"drops Minecraft {', '.join(gone)}, which the fork builds and the pinned build serves")
+            if switch:
+                why.append("found on Modrinth by the CurseForge jar's sha1 (no CURSEFORGE_API_KEY): the bump switches the "
+                           "pin to a Modrinth coordinate")
+            rows.append({"id": f"D{len(rows) + 1}", "mc": mc, "ga": ga, "from": coord, "to": to,
+                         "from_name": cur.get("name"), "to_name": new.get("name"), "channel": new.get("channel"),
+                         "default": not why, "why": "; ".join(why)})
+    return {"rows": rows, "unchecked": unchecked, "checked": n}
+
+
+def bump_command(mc, ga, to, checkout="<checkout of neoforge-{mc}>"):
+    """The one command that applies a bump, the same for every kind of fork."""
+    return (f"python3 tools/layer-deps.py resolve --repo {checkout.format(mc=mc)} --target {mc} --bump {ga}={to}")
+
+
+def cmd_bump_single(repo, target, specs, bump_all, dry_run=False, lk=None, say=print):
+    """--bump on a single-version fork (or a version-branch fork's port branch): its pins are build.gradle's. Each named
+    dependency's coordinate is rewritten -- in build.gradle when literal, else the gradle.properties key its version
+    reads -- to the given version or the newest compatible build (update_candidate); nothing else is touched. A bump
+    that changes the coordinate's group or module where the version is a gradle.properties key is refused (edit it by
+    hand). -> 0, or 2 on bad input or a failed lookup."""
+    bg, gp = repo / "build.gradle", repo / "gradle.properties"
+    build = bg.read_text(encoding="utf-8") if bg.is_file() else ""
+    props = gp.read_text(encoding="utf-8") if gp.is_file() else ""
+    mc = read_props_text(props).get("minecraft_version")
+    if mc and mc != target:
+        say(f"layer-deps: {repo} builds Minecraft {mc}, not {target}: run --bump on the checkout of neoforge-{target}")
+        return 2
+    deps = build_pins(build, props)
+    try:
+        bumps = parse_bumps(specs, bump_all, deps)
+    except ValueError as e:
+        say(f"layer-deps: {e}"); return 2
+    todo = [d for d in deps if f"{d['group']}:{d['module']}" in bumps or "*" in bumps]
+    new_build, new_props, did = build, props, 0
+    for d in todo:
+        ga = f"{d['group']}:{d['module']}"
+        to = bumps.get(ga)
+        if not to:
+            try:
+                _cur, new, to, switch = update_candidate(d["coord"], target, lk)
+            except Exception as e:      # noqa: BLE001
+                say(f"layer-deps: {target} {ga}: cannot look up a newer build ({e}); pass --bump {ga}=<version>"); return 2
+            if not to:
+                say(f"layer-deps: {target} {ga}: {d['coord']} is the newest compatible build, kept"); continue
+            if switch:
+                say(f"layer-deps: {target} {ga}: the newer build was found on Modrinth only ({to}); a single-version "
+                    f"pin keeps its provider: pass --bump {ga}=<CurseForge file id> (CURSEFORGE_API_KEY finds it)")
+                return 2
+        if to == d["coord"]:
+            say(f"layer-deps: {target} {ga}: already {to}"); continue
+        if d["src"].startswith("prop:"):
+            key = d["src"][5:]
+            if to.rsplit(":", 1)[0] != ga:
+                say(f"layer-deps: {target} {ga}: its version is gradle.properties' {key}, and {to} changes the "
+                    "coordinate itself: edit build.gradle by hand")
+                return 2
+            new_props = re.sub(r"(?m)^(\s*" + re.escape(key) + r"[ \t]*=[ \t]*)" + re.escape(d["version"]) + r"[ \t]*$",
+                               lambda x: x.group(1) + to.rsplit(":", 1)[1], new_props)
+        else:
+            new_build = new_build.replace(d["coord"], to)
+        did += 1
+        say(f"layer-deps: {target} {ga}: {d['coord']} -> {to} (bumped explicitly, single-version build)")
+    if did and not dry_run:
+        if new_build != build:
+            bg.write_text(new_build, encoding="utf-8")
+        if new_props != props:
+            gp.write_text(new_props, encoding="utf-8")
+    say(f"layer-deps: {target}: {did} bumped" + (" (dry run, not written)" if dry_run and did else ""))
+    return 0
+
+
+def checkout_pins(repo, target=None):
+    """{mc: {group:module: coordinate}} for the checkout `repo`: its own Minecraft version's pins (a version branch's
+    block applied; a layer's targets, each with its target.properties block, too)."""
+    repo = pathlib.Path(repo)
+    rd = lambda p: (repo / p).read_text(encoding="utf-8") if (repo / p).is_file() else ""
+    build, props = rd("build.gradle"), rd("gradle.properties")
+    mc = target or read_props_text(props).get("minecraft_version") or "?"
+    out = {mc: version_pins(build, props, rd(f".port/{mc}/branch.properties"))}
+    for tp in sorted((repo / ".multiversion/targets").glob("*/target.properties")):
+        out[tp.parent.name] = version_pins(build, props, tp.read_text(encoding="utf-8"))
+    return out
+
+
+def cmd_updates(a):
+    res = dependency_updates(checkout_pins(pathlib.Path(a.repo), a.target))
+    if a.json:
+        print(json.dumps(res, indent=1))
+        return 0
+    for r in res["rows"]:
+        print(f"layer-deps: update {r['mc']} {r['ga']}: {r['from']} -> {r['to']} ({r['from_name']} -> {r['to_name']}, "
+              f"{r['channel']})" + (f" -- look first: {r['why']}" if r["why"] else "") + f"\n    {bump_command(r['mc'], r['ga'], r['to'], a.repo)}")
+    for u in res["unchecked"]:
+        print(f"layer-deps: could not check {u['mc']} {u['ga']} ({u['coord']}): {u['why']}")
+    print(f"layer-deps: {res['checked']} pinned registry dependenc{'y' if res['checked'] == 1 else 'ies'} checked, "
+          f"{len(res['rows'])} with a newer compatible build, {len(res['unchecked'])} could not be checked")
     return 0
 
 
@@ -1805,11 +2179,154 @@ def self_check():
                 os.environ["USERPROFILE"] = profile
             else:
                 os.environ.pop("USERPROFILE", None)
+    _check_pins_and_bumps(expect)
     if bad:
         print("layer-deps self-check: FAIL\n  " + "\n  ".join(bad))
         return 1
     print("layer-deps self-check: OK")
     return 0
+
+
+def _check_pins_and_bumps(expect):
+    """A pinned dependency is kept by every re-resolve, on a version-branch fixture and a layer target (no lookup, the
+    block and DEPS.md byte for byte as they were); --bump moves it (to a version, or to the newest); a single-version
+    fixture: resolve without --bump changes nothing, --bump rewrites its build.gradle literal or gradle.properties key;
+    `updates` names each newer build, ticked or with its reason, and a failed lookup as unchecked."""
+    import contextlib, io
+    build = ('dependencies {\n    implementation "curse.maven:somelib-111:222"\n'
+             '    runtimeOnly "maven.modrinth:viewer:${viewer_version}"\n    compileOnly "maven.modrinth:devmod:abc123"\n}\n')
+    vbuild = build.replace("${viewer_version}", "v10")
+    looked = []
+    lk = {"cf": lambda: None, "mr_id": lambda slug: None,
+          "curse": lambda d, t, cf, c: (looked.append(d["module"]), {"to": f"maven.modrinth:somelib:new{len(looked)}",
+                                                                      "source": "fake newest"})[1],
+          "modrinth": lambda p, t, c: (looked.append(p), {"to": f"maven.modrinth:{p}:new{len(looked)}", "source": "fake"})[1]}
+    def q(fn, *a, **k):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            return fn(*a, **k), buf
+    with tempfile.TemporaryDirectory() as td:
+        # a version branch: neoforge-1.21.4's checkout, its block in .port/1.21.4/branch.properties
+        vb = pathlib.Path(td) / "vb"
+        (vb / ".port/1.21.4").mkdir(parents=True)
+        (vb / "gradle.properties").write_text("minecraft_version=1.21.4\nviewer_version=1.0\n", encoding="utf-8")
+        (vb / "build.gradle").write_text(build.replace("${viewer_version}", "v10"), encoding="utf-8")
+        bp = vb / ".port/1.21.4/branch.properties"
+        bp.write_text("minecraft_version=1.21.4\nparent=neoforge-1.21.1\n", encoding="utf-8")
+        rows, stop = resolve(vb, "1.21.4", {}, lk)
+        write(vb, "1.21.4", rows, stop)
+        first, md1 = bp.read_text(encoding="utf-8"), (vb / ".port/1.21.4/DEPS.md").read_text(encoding="utf-8")
+        kept = current_registry_pins(vb, "1.21.4")
+        expect(looked == ["somelib-111", "viewer", "devmod"] and kept == {"curse.maven:somelib-111": "maven.modrinth:somelib:new1",
+               "maven.modrinth:viewer": "maven.modrinth:viewer:new2", "maven.modrinth:devmod": "maven.modrinth:devmod:new3"},
+               f"a first resolve looks every dependency up and pins it: {looked} {kept}")
+        rows, stop = resolve(vb, "1.21.4", {}, lk, kept=kept)
+        write(vb, "1.21.4", rows, stop)
+        expect(len(looked) == 3 and bp.read_text(encoding="utf-8") == first
+               and (vb / ".port/1.21.4/DEPS.md").read_text(encoding="utf-8") == md1,
+               f"a re-resolve keeps every pin, with no lookup: branch.properties and DEPS.md unchanged: {looked}")
+        rc, buf = q(cmd_resolve, argparse.Namespace(repo=str(vb), target="1.21.4", port_checkout=[], port_release=[],
+                                                    dry_run=False, allow_undone_library=False, bump=[], bump_all=False))
+        expect(rc == 0 and bp.read_text(encoding="utf-8") == first,
+               f"the command line re-resolve (fork-port.py setup's) keeps every pin, with no network: {rc} {buf.getvalue()}")
+        rows, stop = resolve(vb, "1.21.4", {}, lk, kept=kept, bumps=parse_bumps(["viewer=maven.modrinth:viewer:v12"], False,
+                                                                                    gradle_deps(vbuild)))
+        by = {r["module"]: r for r in rows}
+        expect(len(looked) == 3 and by["viewer"]["to"] == "maven.modrinth:viewer:v12" and "--bump" in by["viewer"]["source"]
+               and by["somelib-111"]["to"] == "maven.modrinth:somelib:new1",
+               f"--bump DEP=COORD pins that one as given, the others kept: {by}")
+        rows, stop = resolve(vb, "1.21.4", {}, lk, kept=kept, bumps=parse_bumps(["somelib"], False, gradle_deps(vbuild)))
+        by = {r["module"]: r for r in rows}
+        expect(looked[3:] == ["somelib-111"] and by["somelib-111"]["to"] == "maven.modrinth:somelib:new4"
+               and by["viewer"]["to"] == "maven.modrinth:viewer:new2", f"--bump DEP (a CurseForge slug) re-picks that one only: {looked}")
+        rows, stop = resolve(vb, "1.21.4", {}, lk, kept=kept, bumps=parse_bumps([], True, gradle_deps(vbuild)))
+        expect(len(looked) == 7, f"--bump-all re-picks every one: {looked}")
+        try:
+            parse_bumps(["nosuch"], False, gradle_deps(vbuild)); expect(False, "--bump of a dependency the build does not pin is refused")
+        except ValueError:
+            pass
+        # a layer target: the same rule in target.properties
+        ly = pathlib.Path(td) / "ly"
+        (ly / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        (ly / ".multiversion/base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (ly / ".multiversion/targets/1.21.4/target.properties").write_text("prop.minecraft_version=1.21.4\n", encoding="utf-8")
+        (ly / "build.gradle").write_text(build.replace("${viewer_version}", "v10"), encoding="utf-8")
+        rows, stop = resolve(ly, "1.21.4", {}, lk)
+        write(ly, "1.21.4", rows, stop)
+        tp1 = (ly / ".multiversion/targets/1.21.4/target.properties").read_text(encoding="utf-8")
+        n = len(looked)
+        rows, stop = resolve(ly, "1.21.4", {}, lk, kept=current_registry_pins(ly, "1.21.4"))
+        write(ly, "1.21.4", rows, stop)
+        expect(len(looked) == n and (ly / ".multiversion/targets/1.21.4/target.properties").read_text(encoding="utf-8") == tp1,
+               "a layer target keeps its pins the same way")
+        # a single-version fork: build.gradle's coordinates are the pins
+        sv = pathlib.Path(td) / "sv"
+        sv.mkdir()
+        (sv / "build.gradle").write_text(build, encoding="utf-8")
+        (sv / "gradle.properties").write_text("minecraft_version=1.21.1\nviewer_version=1.0\n", encoding="utf-8")
+        snap = lambda: ((sv / "build.gradle").read_text(encoding="utf-8"), (sv / "gradle.properties").read_text(encoding="utf-8"))
+        s0 = snap()
+        ns = lambda **k: argparse.Namespace(**{"repo": str(sv), "target": "1.21.1", "port_checkout": [], "port_release": [],
+                                               "dry_run": False, "allow_undone_library": False, "bump": [], "bump_all": False, **k})
+        rc, buf = q(cmd_resolve, ns())
+        expect(rc == 2 and snap() == s0 and "only by --bump" in buf.getvalue(),
+               f"single-version: resolve without --bump has nothing to do and changes nothing: {buf.getvalue()}")
+        expect([(d["coord"], d["src"]) for d in build_pins(*s0)] == [("curse.maven:somelib-111:222", "literal"),
+               ("maven.modrinth:viewer:1.0", "prop:viewer_version"), ("maven.modrinth:devmod:abc123", "literal")],
+               f"build_pins: literal and gradle.properties-keyed pins: {build_pins(*s0)}")
+        rc, buf = q(cmd_resolve, ns(bump=["somelib=999", "maven.modrinth:viewer=1.1"]))
+        s1 = snap()
+        expect(rc == 0 and 'implementation "curse.maven:somelib-111:999"' in s1[0] and "viewer_version=1.1\n" in s1[1]
+               and "${viewer_version}" in s1[0] and 'compileOnly "maven.modrinth:devmod:abc123"' in s1[0],
+               f"single-version --bump: the literal rewritten in build.gradle, the keyed one in gradle.properties: {s1} {buf.getvalue()}")
+        rc, buf = q(cmd_resolve, ns(bump=["viewer=maven.modrinth:other:2"]))
+        expect(rc == 2 and snap() == s1, f"a keyed pin's coordinate change is refused: {buf.getvalue()}")
+        files = {"viewer": [{"id": "a1", "name": "1.1", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                            {"id": "a2", "name": "1.2", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-03"}]}
+        fl = {"mr_files": lambda p: files[p]}
+        rc, buf = q(cmd_bump_single, sv, "1.21.1", ["viewer"], False, False, fl)
+        expect(rc == 0 and "viewer_version=1.2\n" in snap()[1], f"single-version --bump DEP: the newest compatible: {buf.getvalue()}")
+    # updates: the plan's rows, their defaults and reasons
+    mrf = {"rel": [{"id": "r1", "name": "2.0.1", "mcs": ["1.21.1", "1.21.4"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                   {"id": "r2", "name": "2.1.0", "mcs": ["1.21.1", "1.21.4"], "loaders": ["neoforge"], "channel": "release", "date": "2026-02"}],
+           "beta": [{"id": "b1", "name": "1.0", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                    {"id": "b2", "name": "1.1-beta", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "beta", "date": "2026-02"}],
+           "major": [{"id": "m1", "name": "examplemod-1.21.1-neoforge-19.4.0", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                     {"id": "m2", "name": "examplemod-1.21.1-neoforge-20.0.1", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-02"}],
+           "drop": [{"id": "d1", "name": "3.0", "mcs": ["1.21.1", "1.21.4"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                    {"id": "d2", "name": "3.1", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-02"}],
+           "fresh": [{"id": "f1", "name": "1.0", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"}]}
+
+    def mr(p):
+        if p == "down":
+            raise OSError("HTTP Error 503")
+        return mrf[p]
+    sw = {"project": "sw", "id": "s1", "name": "1.0", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"}
+    mrf["sw"] = [sw, dict(sw, id="s2", name="1.1", date="2026-02")]
+    pins = {"1.21.1": {"maven.modrinth:rel": "maven.modrinth:rel:r1", "maven.modrinth:beta": "maven.modrinth:beta:1.0",
+                       "maven.modrinth:major": "maven.modrinth:major:m1", "maven.modrinth:drop": "maven.modrinth:drop:d1",
+                       "maven.modrinth:fresh": "maven.modrinth:fresh:f1", "maven.modrinth:down": "maven.modrinth:down:x",
+                       "curse.maven:sw-77": "curse.maven:sw-77:5"},
+            "1.21.4": {"maven.modrinth:rel": "maven.modrinth:rel:r1"}}
+    res = dependency_updates(pins, {"mr_files": mr, "cf": lambda: None, "mr_sha1": lambda h: sw, "curse_jar": lambda m, v: b"jar"})
+    got = {(r["mc"], r["ga"]): r for r in res["rows"]}
+    expect(got[("1.21.1", "maven.modrinth:rel")]["to"] == "maven.modrinth:rel:r2" and got[("1.21.1", "maven.modrinth:rel")]["default"]
+           and got[("1.21.4", "maven.modrinth:rel")]["default"]
+           and got[("1.21.1", "maven.modrinth:beta")]["to"] == "maven.modrinth:beta:1.1-beta"
+           and not got[("1.21.1", "maven.modrinth:beta")]["default"] and "a beta" in got[("1.21.1", "maven.modrinth:beta")]["why"]
+           and "major-version jump" in got[("1.21.1", "maven.modrinth:major")]["why"]
+           and "drops Minecraft 1.21.4" in got[("1.21.1", "maven.modrinth:drop")]["why"]
+           and ("1.21.1", "maven.modrinth:fresh") not in got
+           and got[("1.21.1", "curse.maven:sw-77")]["to"] == "maven.modrinth:sw:s2" and "switches the pin" in got[("1.21.1", "curse.maven:sw-77")]["why"]
+           and [u["ga"] for u in res["unchecked"]] == ["maven.modrinth:down"] and "503" in res["unchecked"][0]["why"]
+           and res["checked"] == 8,
+           f"updates: a release ticked; a beta, a major jump, a dropped version, a provider switch unticked with the reason; "
+           f"the current one not listed; a failed lookup unchecked: {res}")
+    expect(version_pins(build.replace("${viewer_version}", "v1"), "", f"{BEGIN}\nsubstitute.maven.modrinth\\:viewer=maven.modrinth:viewer:v9\n"
+                        f"exclude.maven.modrinth\\:devmod=x\nsubstitute.com.example\\:lib=com.example:lib:1-mc1.21.4\n"
+                        f"port_jar.com.example\\:lib=u s\n{END}\n") == {"curse.maven:somelib-111": "curse.maven:somelib-111:222",
+                                                                    "maven.modrinth:viewer": "maven.modrinth:viewer:v9"},
+           "version_pins: the block's substitutes over build.gradle's, an exclude dropped, a sibling port not a registry pin")
 
 
 PORT_JAR = re.compile(r"(?m)^port_jar\.(.+?)=(https://github\.com/[\w.-]+/[\w.-]+/releases/download/\S+\.jar) ([0-9a-f]{64})\s*$")
@@ -1922,12 +2439,21 @@ def main():
                         "(<mod>-<ver>-mc<t>), whose asset of the pinned name and variant is read from the release; pinned "
                         "(url + sha256) for CI")
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--bump", action="append", default=[], metavar="DEP[=VERSION]",
+                   help="move this pinned CurseForge/Modrinth dependency: to VERSION (a file/version id, or a whole "
+                        "group:module:version), else to the newest compatible build. Without it a pinned dependency is "
+                        "kept as it is; on a single-version fork it edits build.gradle (or the gradle.properties key)")
+    r.add_argument("--bump-all", action="store_true", help="move every pinned registry dependency to its newest compatible build")
     r.add_argument("--allow-undone-library", action="store_true",
                    help="development only: build against a --port-checkout sibling whose target is not done (recorded in DEPS.md)")
     ld = sub.add_parser("library-done", help="is a sibling library's target done? exit 0 yes, 18 no")
     ld.add_argument("--target", required=True)
     ld.add_argument("--port-checkout", help="owner/repo=DIR")
     ld.add_argument("--port-release", help="owner/repo@TAG")
+    up = sub.add_parser("updates", help="each pinned CurseForge/Modrinth dependency with a newer compatible build "
+                        "(what --bump would take), with the reason to look first; nothing is changed")
+    up.add_argument("--repo", required=True); up.add_argument("--target", help="the checkout's Minecraft version (default: "
+                    "gradle.properties')"); up.add_argument("--json", action="store_true")
     f = sub.add_parser("fetch")
     f.add_argument("--repo", required=True)
     f.add_argument("--target", required=True)
@@ -1938,6 +2464,8 @@ def main():
         return cmd_resolve(a)
     if a.cmd == "fetch":
         return cmd_fetch(a)
+    if a.cmd == "updates":
+        return cmd_updates(a)
     if a.cmd == "library-done":
         return cmd_library_done(a)
     ap.print_help()

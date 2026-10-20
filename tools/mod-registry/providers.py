@@ -257,6 +257,7 @@ class ModrinthProvider(Provider):
                 continue
             out.append({
                 "fileId": v["id"],
+                "versionNumber": v.get("version_number"),
                 "fileName": primary.get("filename"),
                 "loaders": v.get("loaders", []),
                 "mcs": v.get("game_versions", []),

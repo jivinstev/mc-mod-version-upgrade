@@ -102,6 +102,10 @@ def classify(files, target_loader, target_mc):
         "classification": cls,
         "chosen": chosen,
         "has_native": bool(native),
+        # every build for the target (port-deps.py: a dependency already pinned to one of them is kept, not moved)
+        "native_ids": sorted({str(p[3]["fileId"]) for p in native}),
+        "native_versions": sorted({str(p[3]["versionNumber"]) for p in native if p[3].get("versionNumber")}),
+        "native_names": sorted({str(p[3]["fileName"]) for p in native if p[3].get("fileName")}),
         "has_older": bool(older),
         "has_newer": bool(newer),
         "older_mcs": older_mcs,
