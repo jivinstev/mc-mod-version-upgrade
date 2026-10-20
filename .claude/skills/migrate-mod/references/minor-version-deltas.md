@@ -243,10 +243,12 @@ it reflectively. `EntityRenderDispatcher.render` dropped its yaw argument.
 
 L5. **The frame graph: sky and clouds are passes that run LATER** · `LevelRenderer.renderSky`/`renderClouds`
 are gone; `addSkyPass`/`addCloudsPass` only RECORD. A hook at `addSkyPass` draws before the sky; a flag set
-while rendering entities is not yet set when `addCloudsPass` runs. Draw after the sky from
-`RenderLevelStageEvent` `AFTER_SKY` (fired inside the sky pass); skip clouds with a mixin on
-`CloudRenderer.render` (runs inside the cloud pass, after the entities). `renderLevel` gained a leading
-`GraphicsResourceAllocator`.
+while rendering entities is not yet set when `addCloudsPass` runs. `renderLevel` gained a leading
+`GraphicsResourceAllocator`. ⚠ Corrected (CATALOG M20): `AFTER_SKY` is fired inside the sky pass, which is
+not added at all for `SkyType.NONE`, lava / powder snow or a sky-blocking effect, and which fires it after a
+dimension's custom sky -- so "draw after the sky from AFTER_SKY" loses the effect in the Nether and covers
+custom skies. Draw in the sky pass before the stage dispatch, add an own pass on frames with no sky pass,
+stand down when the dimension draws its own sky, and cancel clouds at the cloud pass's `renderClouds` call.
 
 L6. **Mixin targets javac cannot see (16 in one mod)** · `LivingEntity.hurt` → `hurtServer(ServerLevel, …)`;
 `actuallyHurt` gained `ServerLevel` first · `Entity.changeDimension(DimensionTransition)` →
@@ -448,13 +450,16 @@ ASM `Type` (`getClassName()` is dotted); `processClass` edits the passed `ClassN
 L29. **A SHIPPED jar cannot register an FML 10 class processor at all** · `ClassProcessorProvider` is found with
 `ServiceLoader` while the thread context loader is the EARLY-SERVICES loader, which holds only top-level `mods/` jars
 declaring one of five early services (candidate locator, file reader, dependency locator, graphics bootstrapper,
-immediate window). A jarJar'd library is never scanned for them, and making the mod jar itself an early-service jar
+immediate window), and the plugin loader built from the `FMLModType: LIBRARY` jars -- top-level OR jar-in-jar
+(⚠ corrected: this said a jarJar'd library is never scanned; a library fork's shipped-jar boots on FML 10, 11
+and 12 prove a nested LIBRARY jar's provider runs, CATALOG M43). Making the mod jar itself an early-service jar
 masks it out of the transforming loader (its mixins stop applying). So a coremod that worked from `mods/` on 1.21.1
-(ModLauncher scanned the mods dir) runs on 1.21.10 only in DEV. · **Measured with `tools/shipped-gate.py`** (a real
+(ModLauncher scanned the mods dir) runs on 1.21.10 only in DEV unless its provider moves into a nested LIBRARY jar. · **Measured with `tools/shipped-gate.py`** (a real
 server, the built jar in mods/): 1.21.1 and 1.21.8 PASS, 1.21.10 FAIL while every dev gate was green. · **Fix used
 for a mod that also has an agent backend:** initialise the backend from `FMLConstructModEvent` (the agent retransforms,
 so it need only be selected before the first transformed class loads) -- restores 1.21.1's shipped behaviour; a
-coremod-only mod has no shipped path on FML 10 and should say so loudly.
+coremod-only mod ships its provider, services file and transformer in a nested `FMLModType: LIBRARY` jar
+(`META-INF/jarjar/metadata.json`) and proves it with a shipped-jar boot that expects the transformer's log line.
 
 L30. **GeckoLib 5.3 (1.21.10 line): `GeoRenderEvent.*` render-layer events are INTERFACES (CATALOG M44)** ·
 `GeoRenderEvent.Entity/ReplacedEntity/Block.CompileRenderLayers` are interfaces; the postable events are the concrete classes
