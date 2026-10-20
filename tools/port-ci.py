@@ -346,6 +346,29 @@ def dep_jar_variants(variants, dep_specs, sha_of=None):
     return out
 
 
+# A version branch's round records (the fork-versions skill: .port/<v>/GATES.md, REVIEW.md, COST.md, DEPS.md, DRIFT.md,
+# TEST-ITEMS.md, RESIDUE.md, ...; .port/DECISIONS.md): Markdown outside src/, so never jar content (fork-branches.py
+# GATES_DOC, port-publish.py GATES_DOC) and never read by a gate (ci-gates.py writes them; GATE_OUTPUTS). A push of
+# only those -- a version's cost record, its manual-test items -- then runs no full Port CI, as a ledger-only push of
+# the head does not. GitHub's `*` stops at `/`, so `.port/*/*.md` is one version's directory and never a deeper
+# `.port/<v>/<mod>/` file, and src/ is never matched. Only on a version branch (the checkout holds .port/<mc>/, the
+# rule port_branch() uses): a single-version fork has none of these files, and its workflow stays byte-for-byte what it
+# was (tools/golden/port-ci-single-*.yml); pull_request and tag runs are untouched (GitHub applies paths-ignore to
+# branch pushes only), and workflow_dispatch -- the release -- always runs every gate.
+VERSION_RECORDS_IGNORE = (".port/*.md", ".port/*/*.md")
+
+
+def records_values(values, version_branch=False):
+    """RECORDS_IGNORE: the extra paths-ignore entries of a version branch's push trigger (VERSION_RECORDS_IGNORE);
+    empty, so nothing moves, on a single-version fork's port branch or a layer fork."""
+    return dict(values, RECORDS_IGNORE="".join(f', "{p}"' for p in VERSION_RECORDS_IGNORE) if version_branch else "")
+
+
+def is_version_branch(repo, mc):
+    """The checkout is a version branch: it holds .port/<mc>/ for its own Minecraft version (port_branch()'s rule)."""
+    return bool(mc) and (pathlib.Path(repo) / ".port" / mc).is_dir()
+
+
 def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_of=None):
     """The placeholders of the two opt-in variant options. With neither, every one is empty (RELEASE_NEEDS stays
     `gates`) and the workflow is byte-for-byte the variant-free one (self-check: tools/golden/port-ci-*.yml).
@@ -384,7 +407,7 @@ def port_branch(repo, mc, explicit=None):
         if not re.fullmatch(r"[\w.\-/]+", explicit):
             raise SystemExit(f"--branch must be a branch name, got {explicit!r}")
         return explicit
-    if mc and (pathlib.Path(repo) / ".port" / mc).is_dir():
+    if is_version_branch(repo, mc):
         return f"neoforge-{mc}"
     return git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
 
@@ -630,7 +653,7 @@ GOLDEN_CASES = (("single-nodeps", False, None), ("single-deps", True, None), ("l
 FIX_DEP = "o/lib@lib-1.0-mc1.21.1/lib-1.0_mr.jar=com.example.lib:lib:1.0"
 
 
-def fixture(deps=True, layer=None, variant_jars=(), dep_variants=()):
+def fixture(deps=True, layer=None, variant_jars=(), dep_variants=(), version_branch=False):
     """The workflow for fixed, invented values (no network: every sha256 is fake). The three option-free cases are
     recorded in tools/golden/port-ci-<case>.yml, captured from port-ci.py BEFORE --variant-jar/--dep-jar-variant
     existed: an option a fork does not use must not change one byte of its workflow."""
@@ -642,6 +665,7 @@ def fixture(deps=True, layer=None, variant_jars=(), dep_variants=()):
               "KIT_SHA256": "b" * 64, "GATEC": "launch,spawn", "TAG_SUFFIX": "", "PRE_BUILD": pre,
               "UPSTREAM": "https://github.com/a/examplemod"}
     values = variant_values(values, list(variant_jars), list(dep_variants), [FIX_DEP] if deps else [], sha)
+    values = records_values(values, version_branch)
     return render(TEMPLATE.read_text(encoding="utf-8"), layer_values(values, layer))
 
 
@@ -657,6 +681,75 @@ def want(case, good, expected, actual):
     if not good:
         print(f"port-ci self-check FAIL [{case}]: expected {expected!r}, got {actual!r}")
     return bool(good)
+
+
+def _gh_glob(pattern):
+    """A GitHub Actions path filter as a regex: `**` crosses directories, `*` does not (tools/known-issues.py's)."""
+    out = ""
+    for tok in re.split(r"(\*\*/?|\*)", pattern):
+        out += {"**/": "(?:.*/)?", "**": ".*", "*": "[^/]*"}.get(tok, re.escape(tok))
+    return re.compile(f"^{out}$")
+
+
+def records_check():
+    """A version branch's push trigger also ignores its round records (VERSION_RECORDS_IGNORE); a single-version fork's
+    workflow does not move by one byte -- checked on the fixtures AND through main() on two real git checkouts, a
+    single-version port branch and a version branch (plus a version-branch fork's head, which is single-version-shaped)."""
+    import tempfile
+    ok = True
+    for name, deps, layer in GOLDEN_CASES:            # the default: byte for byte the golden, every fork kind
+        ok &= want(f"records: {name} unchanged", fixture(deps, layer) == (GOLDEN / f"port-ci-{name}.yml").read_text(encoding="utf-8"),
+                   "the golden", "a diff")
+    single, vb = fixture(True), fixture(True, version_branch=True)
+    line = lambda w: next(l for l in w.splitlines() if "paths-ignore:" in l)
+    ok &= want("records: only the paths-ignore line differs", [a for a in zip(single.splitlines(), vb.splitlines()) if a[0] != a[1]]
+               == [(line(single), line(vb))] and len(single.splitlines()) == len(vb.splitlines()), "one line", line(vb))
+    ign = json.loads(line(vb).split("paths-ignore:", 1)[1])
+    ok &= want("records: the version branch's list", ign == json.loads(line(single).split("paths-ignore:", 1)[1])
+               + list(VERSION_RECORDS_IGNORE), "base + records", ign)
+    hit = lambda f: any(_gh_glob(g).match(f) for g in ign)
+    recs = [".port/1.21.4/GATES.md", ".port/1.21.4/REVIEW.md", ".port/26.3/COST.md", ".port/26.3/DEPS.md",
+            ".port/26.3/TEST-ITEMS.md", ".port/26.3/DRIFT.md", ".port/DECISIONS.md", ".port/KNOWN-ISSUES.json", "README.md"]
+    code = [".port/26.3/branch.properties", ".port/26.3/renames.tsv", ".port/26.3/STUBS.json", ".port/26.3/REMERGE.json",
+            ".port/26.3/shipped-expect-cf.txt", ".port/branch.gradle", ".port/26.3/examplemod/NOTES.md", "src/main/resources/README.md",
+            "src/main/resources/assets/examplemod/x.md", "docs/README.md", "build.gradle", "gradle.properties", ".github/workflows/port-ci.yml"]
+    ok &= want("records: what is ignored", all(hit(f) for f in recs), recs, [f for f in recs if not hit(f)])
+    ok &= want("records: what still runs Port CI", not any(hit(f) for f in code), [], [f for f in code if hit(f)])
+    ok &= want("records: push only", vb.count("paths-ignore") == 1 and "paths" not in vb.split("  pull_request:", 1)[1].split("jobs:", 1)[0],
+               "one paths-ignore, under push", vb.count("paths-ignore"))
+    # main() itself, on real checkouts (no network: the kit pinned by version and sha)
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        outs = {}
+        for case, mc, files in (("single", "1.21.1", {".port/KNOWN-ISSUES.json": "{}\n"}),
+                                ("version-branch", "1.21.4", {".port/1.21.4/branch.properties": "minecraft_version=1.21.4\n",
+                                                              ".port/1.21.4/GATES.md": "# Gates\n"})):
+            r = d / case
+            r.mkdir()
+            g = lambda *a, r=r: subprocess.run(["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-C", str(r), *a],
+                                               capture_output=True, text=True, encoding="utf-8")
+            g("init", "-q", "-b", f"neoforge-{mc}")
+            (r / "gradle.properties").write_text(f"minecraft_version={mc}\nneo_version=21.1.100\n", encoding="utf-8")
+            (r / "build.gradle").write_text("// no toolchain line\n", encoding="utf-8")
+            for f, text in files.items():
+                (r / f).parent.mkdir(parents=True, exist_ok=True)
+                (r / f).write_text(text, encoding="utf-8")
+            g("add", "-A")
+            g("-c", "user.email=x@example.com", "-c", "user.name=x", "commit", "-q", "-m", "x")
+            res = subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve()), "--repo", str(r), "--modid", "examplemod",
+                                  "--gatec", "launch", "--kit-version", "7", "--kit-sha", "b" * 64, "--print"],
+                                 capture_output=True, text=True, encoding="utf-8",
+                                 env=dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="gc.auto", GIT_CONFIG_VALUE_0="0"))
+            outs[case] = res.stdout if res.returncode == 0 else ""
+            ok &= want(f"records: main() renders the {case} checkout", res.returncode == 0, 0, res.stderr[-300:])
+        if all(outs.values()):
+            s, v_ = outs["single"], outs["version-branch"]
+            ok &= want("records: main() on a single-version checkout: the base list only",
+                       line(s).strip() == 'paths-ignore: [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"]',
+                       "the base list", line(s))
+            ok &= want("records: main() on a version branch: the records too", json.loads(line(v_).split("paths-ignore:", 1)[1])
+                       == ign and 'branches: ["neoforge-1.21.4"]' in v_, ign, line(v_))
+    return ok
 
 
 def kit_probe_check():
@@ -1047,7 +1140,7 @@ def self_check():
     v = {k: f"<{k}>" for k in set(re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", t))}
     v["PRE_BUILD"] = pre_build(["owner/lib@neoforge-1.21.1"])
     v["BRANCH"], v["BASE"] = "neoforge-1.21.1", "master"
-    v = variant_values(v)
+    v = records_values(variant_values(v))
     plain = render(t, layer_values(v, None))
     out = plain
     lay = render(t, layer_values(v, "neoforge-1.21.x"))
@@ -1284,6 +1377,7 @@ def self_check():
         except SystemExit:
             pass
     ok &= variant_check()
+    ok &= records_check()
     ok &= kit_probe_check()
     ok &= default_branch_check()
     print("self-check:", "OK" if ok else "FAIL")
@@ -1346,6 +1440,7 @@ def main():
               "BASE": base, "JAVA": java_version(repo, mc), "MIGRATOR_REPO": mrepo, "KIT_VERSION": str(kver), "KIT_SHA256": ksha,
               "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
     values = variant_values(values, a.variant_jar, a.dep_jar_variant, a.dep_jar)
+    values = records_values(values, is_version_branch(repo, mc))
     out = render(TEMPLATE.read_text(encoding="utf-8"), layer_values(values, a.layer_branch))
     if a.print:
         print(out); return 0

@@ -1751,7 +1751,8 @@ def self_check():
                    and not fb.jar_relevant("README.md", "1.21.4") and fb.jar_relevant("src/main/resources/README.md", "1.21.4"),
                    "fork-branches: the ledger is no version branch's jar input, and the cascade skips it (LEDGER_PATH)")
             tpl = (root / "templates/upstream-harness/port-ci.yml").read_text(encoding="utf-8")
-            push = tpl[tpl.index("  push:"):tpl.index("  pull_request:")]
+            # the base list, as a single-version fork gets it (a version branch's records join it: port-ci.py RECORDS_IGNORE)
+            push = tpl[tpl.index("  push:"):tpl.index("  pull_request:")].replace("{{RECORDS_IGNORE}}", "")
             m = re.search(r"paths-ignore: (\[.*\])", push)
             ignore = json.loads(m.group(1)) if m else []
             expect(ignore == [".port/KNOWN-ISSUES.json", ".port/*/KNOWN-ISSUES.json", "README.md"],
