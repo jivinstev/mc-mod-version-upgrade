@@ -481,16 +481,24 @@ def resolve_mod(d, search, versions_fn, target_mc, loader):
     return res
 
 
-def pinned_native(d, v):
+MC_IN_NAME = re.compile(r"(?<![\d.])(1\.\d{1,2}(?:\.\d+)?|2\d\.\d+(?:\.\d+)?)(?![\d])")
+
+
+def pinned_native(d, v, mc=None):
     """Is the dependency's pinned version already a build for the target (one of the registry's native builds)? Then it
     is kept: a dependency moves to a newer build only by an explicit bump (tools/layer-deps.py resolve --bump), the
-    same rule for every kind of fork."""
+    same rule for every kind of fork. An author-maven artifact named for another loader or Minecraft version
+    (`geolib-forge-1.20.1`) is never the target's build, whatever its version number."""
     ver = str(d.get("version") or "")
     if not ver or "$" in ver:
         return False
+    registry = d["group"] in ("curse.maven", "maven.modrinth")
+    if not registry and (loader_swap_needed(d["artifact"])
+                         or any(x != mc for x in MC_IN_NAME.findall(d["artifact"]) if mc)):
+        return False
     if ver in (v.get("native_ids") or []) or ver in (v.get("native_versions") or []):
-        return d["group"] in ("curse.maven", "maven.modrinth") or ver in (v.get("native_versions") or [])
-    if d["group"] in ("curse.maven", "maven.modrinth") or loader_swap_needed(d["artifact"]):
+        return registry or ver in (v.get("native_versions") or [])
+    if registry:
         return False
     pat = re.compile(r"(?<![\w.])" + re.escape(ver) + r"(?![\w]|\.\d)")
     return any(pat.search(n) for n in v.get("native_names") or [])
@@ -504,7 +512,7 @@ def suggest(d, res, mc, vn_fn):
     if not v.get("has_native") or not ch:
         return {"coord": None, "change": None, "note": "no target build"}
     cl = ":" + d["classifier"] if d["classifier"] else ""
-    if pinned_native(d, v):
+    if pinned_native(d, v, mc):
         return {"coord": f"{d['group']}:{d['artifact']}:{d['version']}{cl}", "change": None, "kept": True,
                 "note": f"kept: the pinned build is already a {mc} build (move it with tools/layer-deps.py resolve --bump)"}
     keys = d["version_keys"]
@@ -1087,6 +1095,15 @@ dependencies {
               "version_raw": "1.21.1-2.0"}
         ka = suggest(am, {"via": "search", "versions": dict(kv, native_ids=["x"], native_names=["amlib-neoforge-1.21.1-2.0.jar",
                                                                                                "amlib-neoforge-1.21.1-2.1.jar"])}, "1.21.1", None)
+        # review S2: an author-maven artifact for another loader and Minecraft version is never kept, even when a
+        # target build shares its version number
+        geo = {"group": "com.example.geo", "artifact": "geolib-forge-1.20.1", "version": "4.4.9", "classifier": None,
+               "version_keys": [], "version_raw": "4.4.9"}
+        gv = dict(kv, native_ids=["g1"], native_versions=["4.4.9"], native_names=["geolib-neoforge-1.21.1-4.4.9.jar"],
+                  chosen={"fileId": "g1", "fileName": "geolib-neoforge-1.21.1-4.4.9.jar"})
+        gs = suggest(geo, {"via": "search", "versions": gv}, "1.21.1", None)
+        chk("pin-foreign-artifact-moved", not gs.get("kept") and gs["coord"] == "com.example.geo:geolib-neoforge-1.21.1:4.4.9"
+            and not pinned_native(dict(geo, artifact="geolib-neoforge-1.20.1"), gv, "1.21.1"))
         chk("pin-kept", ks["change"] is None and ks["coord"] == "curse.maven:keep-444:123" and ks.get("kept")
             and mv["change"] == "build.gradle literal: 50 -> 999" and ka["change"] is None and ka.get("kept"))
 

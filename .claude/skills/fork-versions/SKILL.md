@@ -169,12 +169,16 @@ whole Minecraft version, so both ranges stop at the next patch release (`[26.2,2
 and `entityCutoutNoCullZOffset` is `entityCutoutZOffset`. A swap row cannot carry it (applied twice it swaps back; a file
 changed by hand is never re-made through the rows). On a version branch at 26.1.2 or above whose parent builds below it,
 `python3 tools/fork-branches.py cutout-check --repo <its checkout> --branch neoforge-26.1.2 [--fix]` pairs every call with
-its parent version's line (the lines a line diff pairs, else the same enclosing method in call order) and names it by
-what the parent's call meant; `--fix` renames the ones whose meaning was lost (a right tree is left as it is). It runs by
-itself where code crosses that boundary -- `add-target`, the rows' own output, the cascade's merge, `remake` and
-`fork-port.py`'s moves stage -- so run it by hand after resolving a boundary conflict yourself. A call it lists with no
-parent line was written on 26.x: decide it (keep `entityCutout` when the model's back faces must show, else
-`entityCutoutCull`). A single-version fork, or 26.2 over 26.1.2, never takes it.
+its parent version's line and names it by what the parent's call meant; `--fix` renames the ones whose meaning was lost
+(a right tree is left as it is). Only a sure pairing is renamed -- an equal line, or a parent call with the same argument
+text; a call paired by position only is listed `decide <file>:<line>` with the parent call it may be. It runs by itself
+where code crosses that boundary -- `add-target`, the rows' own output, the cascade's merge and `remake` rename;
+`fork-port.py`'s moves stage only lists -- so run it by hand after resolving a boundary conflict yourself. **A culling
+fix made on purpose on the 26.x branch** (a defect inherited from the parent, fixed only there) is held by the cascade
+and `remake` as a decision, not reverted, while the parent's line is unchanged; `cutout-check --fix` would rename it, so
+read its list before `--fix`. Decide each listed call: one with no parent line was written on 26.x (keep `entityCutout`
+when the model's back faces must show, else `entityCutoutCull`); a held one is kept when the version changed it on
+purpose. A single-version fork, or 26.2 over 26.1.2, never takes it.
 
 **Direct jumps.** A version whose middle versions will never ship can stand on a lower branch directly (`add-target
 --parent <lower>`, or on the port branch): it applies the shared library of every targeted version in between, newest

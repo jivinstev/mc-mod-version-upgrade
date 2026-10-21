@@ -1480,6 +1480,9 @@ def update_candidate(coord, mc, lk=None, cache=None):
     return cur, new, (mk(new) if new else None), switch
 
 
+SAFE_COORD = re.compile(r"^[A-Za-z0-9._+:-]+$")     # what a coordinate may hold to be written into a command (and a box)
+
+
 def dependency_updates(pins_by_mc, lk=None):
     """{"rows": [{"id", "mc", "ga", "from", "to", "from_name", "to_name", "channel", "default", "why"}],
     "unchecked": [{"mc", "ga", "coord", "why"}], "checked": n} for {mc: {group:module: coordinate}}. A row is ticked
@@ -1491,9 +1494,17 @@ def dependency_updates(pins_by_mc, lk=None):
         for ga, coord in sorted(pins_by_mc[mc].items()):
             n += 1
             try:
+                if not SAFE_COORD.match(coord) or not SAFE_COORD.match(ga):
+                    raise LookupError("the pinned coordinate holds characters a command must not carry")
                 cur, new, to, switch = update_candidate(coord, mc, lk, cache)
+                if to is not None and not SAFE_COORD.match(to):
+                    # a registry version string is the publisher's: `$(...)` or a backtick would run in the round's
+                    # --bump command (with its push credentials), so it is never offered
+                    raise LookupError("the newer build's version holds characters a command must not carry "
+                                      "(only A-Z a-z 0-9 . _ + : - are taken): bump it by hand if it is right")
             except Exception as e:      # noqa: BLE001 -- fail soft: "could not check", the plan goes on
-                unchecked.append({"mc": mc, "ga": ga, "coord": coord, "why": str(e)[:200] or type(e).__name__})
+                unchecked.append({"mc": mc, "ga": ga, "coord": coord if SAFE_COORD.match(coord) else "",
+                                  "why": str(e)[:200] or type(e).__name__})
                 continue
             if not new:
                 continue
@@ -1518,7 +1529,40 @@ def dependency_updates(pins_by_mc, lk=None):
 
 def bump_command(mc, ga, to, checkout="<checkout of neoforge-{mc}>"):
     """The one command that applies a bump, the same for every kind of fork."""
-    return (f"python3 tools/layer-deps.py resolve --repo {checkout.format(mc=mc)} --target {mc} --bump {ga}={to}")
+    import shlex
+    return (f"python3 tools/layer-deps.py resolve --repo {shlex.quote(checkout.format(mc=mc))} --target {shlex.quote(mc)} "
+            f"--bump {shlex.quote(f'{ga}={to}')}")
+
+
+def _dep_code_lines(text):
+    """[(index, code part)] of each line of `text` (line endings kept) that is a dependency declaration outside any
+    comment: the part before a `//`, never a line inside a /* */ block."""
+    out, block = [], False
+    for i, ln in enumerate(text.splitlines(True)):
+        code = ln
+        if block:
+            end = code.find("*/")
+            if end < 0:
+                continue
+            code, block = code[end + 2:], False
+        code = re.sub(r"/\*.*?\*/", "", code)
+        if "/*" in code:
+            code, block = code[:code.index("/*")], True
+        code = re.sub(r"(^|\s)//.*$", "", code.rstrip("\r\n"))
+        if DEP_LINE.match(code):
+            out.append((i, code))
+    return out
+
+
+def replace_coordinate(text, old, new):
+    """`text` with the quoted coordinate `old` replaced by `new` on the dependency lines outside comments only, and only
+    as a whole quoted token (`lib:1.2` never rewrites `lib:1.2.5`); every other byte, line endings included, kept."""
+    lines = text.splitlines(True)
+    tok = re.compile(r"""(["'])""" + re.escape(old) + r"""(["'])""")
+    for i, code in _dep_code_lines(text):
+        cut = len(code)
+        lines[i] = tok.sub(lambda m: m.group(1) + new + m.group(2), lines[i][:cut]) + lines[i][cut:]
+    return "".join(lines)
 
 
 def cmd_bump_single(repo, target, specs, bump_all, dry_run=False, lk=None, say=print):
@@ -1528,8 +1572,9 @@ def cmd_bump_single(repo, target, specs, bump_all, dry_run=False, lk=None, say=p
     that changes the coordinate's group or module where the version is a gradle.properties key is refused (edit it by
     hand). -> 0, or 2 on bad input or a failed lookup."""
     bg, gp = repo / "build.gradle", repo / "gradle.properties"
-    build = bg.read_text(encoding="utf-8") if bg.is_file() else ""
-    props = gp.read_text(encoding="utf-8") if gp.is_file() else ""
+    # bytes in and out: a CRLF build stays CRLF
+    build = bg.read_bytes().decode("utf-8") if bg.is_file() else ""
+    props = gp.read_bytes().decode("utf-8") if gp.is_file() else ""
     mc = read_props_text(props).get("minecraft_version")
     if mc and mc != target:
         say(f"layer-deps: {repo} builds Minecraft {mc}, not {target}: run --bump on the checkout of neoforge-{target}")
@@ -1563,17 +1608,23 @@ def cmd_bump_single(repo, target, specs, bump_all, dry_run=False, lk=None, say=p
                 say(f"layer-deps: {target} {ga}: its version is gradle.properties' {key}, and {to} changes the "
                     "coordinate itself: edit build.gradle by hand")
                 return 2
-            new_props = re.sub(r"(?m)^(\s*" + re.escape(key) + r"[ \t]*=[ \t]*)" + re.escape(d["version"]) + r"[ \t]*$",
-                               lambda x: x.group(1) + to.rsplit(":", 1)[1], new_props)
+            ref = re.compile(r"\$\{?" + re.escape(key) + r"(?![\w.])\}?")
+            users = [c for _i, c in _dep_code_lines(build) if ref.search(c)]
+            if len(users) > 1:
+                say(f"layer-deps: {target} {ga}: its version is gradle.properties' {key}, which {len(users)} dependency "
+                    f"lines read: bumping it would move the others too -- edit them by hand")
+                return 2
+            new_props = re.sub(r"(?m)^([ \t]*" + re.escape(key) + r"[ \t]*=[ \t]*)" + re.escape(d["version"])
+                               + r"([ \t]*)(?=\r?$)", lambda x: x.group(1) + to.rsplit(":", 1)[1] + x.group(2), new_props)
         else:
-            new_build = new_build.replace(d["coord"], to)
+            new_build = replace_coordinate(new_build, d["coord"], to)
         did += 1
         say(f"layer-deps: {target} {ga}: {d['coord']} -> {to} (bumped explicitly, single-version build)")
     if did and not dry_run:
         if new_build != build:
-            bg.write_text(new_build, encoding="utf-8")
+            bg.write_bytes(new_build.encode("utf-8"))
         if new_props != props:
-            gp.write_text(new_props, encoding="utf-8")
+            gp.write_bytes(new_props.encode("utf-8"))
     say(f"layer-deps: {target}: {did} bumped" + (" (dry run, not written)" if dry_run and did else ""))
     return 0
 
@@ -2281,6 +2332,30 @@ def _check_pins_and_bumps(expect):
                f"single-version --bump: the literal rewritten in build.gradle, the keyed one in gradle.properties: {s1} {buf.getvalue()}")
         rc, buf = q(cmd_resolve, ns(bump=["viewer=maven.modrinth:other:2"]))
         expect(rc == 2 and snap() == s1, f"a keyed pin's coordinate change is refused: {buf.getvalue()}")
+        # review S2: only the dependency's own quoted token on a line outside comments; a key two coordinates read
+        # refuses; CRLF stays CRLF
+        (sv / "build.gradle").write_bytes(('dependencies {\r\n    implementation "curse.maven:somelib-111:999"\r\n'
+                                           '    // implementation "curse.maven:somelib-111:999"\r\n'
+                                           '    /* implementation "curse.maven:somelib-111:999" */\r\n'
+                                           '    runtimeOnly "maven.modrinth:viewer:${viewer_version}"\r\n'
+                                           '    implementation "maven.modrinth:devmod:abc123"\r\n'
+                                           '    compileOnly "maven.modrinth:devmod:abc1234"\r\n}\r\n').encode("utf-8"))
+        (sv / "gradle.properties").write_bytes(b"minecraft_version=1.21.1\r\nviewer_version=1.1\r\n")
+        rc, buf = q(cmd_resolve, ns(bump=["somelib=1000", "devmod=abc1239", "viewer=1.2"]))
+        bb, pp = (sv / "build.gradle").read_bytes(), (sv / "gradle.properties").read_bytes()
+        expect(rc == 0 and b'implementation "curse.maven:somelib-111:1000"\r\n' in bb
+               and b'// implementation "curse.maven:somelib-111:999"' in bb and b'/* implementation "curse.maven:somelib-111:999" */' in bb
+               and b'"maven.modrinth:devmod:abc1239"' in bb and b'"maven.modrinth:devmod:abc1234"' in bb
+               and b"viewer_version=1.2\r\n" in pp and bb.count(b"\r\n") == 8 and b"\n" not in bb.replace(b"\r\n", b""),
+               f"single-version --bump: the token on the live line only, comments and a longer coordinate untouched, CRLF "
+               f"kept: {bb!r} {pp!r} {buf.getvalue()}")
+        (sv / "build.gradle").write_bytes(bb.replace(b'    implementation "maven.modrinth:devmod:abc1239"',
+                                                     b'    implementation "maven.modrinth:other:${viewer_version}"'))
+        rc, buf = q(cmd_resolve, ns(bump=["viewer=1.3"]))
+        expect(rc == 2 and (sv / "gradle.properties").read_bytes() == pp and "2 dependency lines read" in buf.getvalue(),
+               f"a gradle.properties key another coordinate reads is refused, nothing written: {buf.getvalue()}")
+        (sv / "build.gradle").write_text(build, encoding="utf-8")
+        (sv / "gradle.properties").write_text("minecraft_version=1.21.1\nviewer_version=1.1\n", encoding="utf-8")
         files = {"viewer": [{"id": "a1", "name": "1.1", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
                             {"id": "a2", "name": "1.2", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-03"}]}
         fl = {"mr_files": lambda p: files[p]}
@@ -2322,6 +2397,17 @@ def _check_pins_and_bumps(expect):
            and res["checked"] == 8,
            f"updates: a release ticked; a beta, a major jump, a dropped version, a provider switch unticked with the reason; "
            f"the current one not listed; a failed lookup unchecked: {res}")
+    # review S2 (security): a registry version string is the publisher's -- `$(...)` or a backtick in it would run in
+    # the round's --bump command; such a build is never offered, and the command is quoted
+    evil = {"evil": [{"id": "e1", "name": "1.0", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                     {"id": "e2", "name": "1.1$(touch pwned)`id`", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release",
+                      "date": "2026-02"}]}
+    res = dependency_updates({"1.21.1": {"maven.modrinth:evil": "maven.modrinth:evil:1.0"}}, {"mr_files": lambda p: evil[p]})
+    import shlex
+    cmd = bump_command("1.21.1", "maven.modrinth:x", "maven.modrinth:x:1.2", "<checkout of neoforge-{mc}>")
+    expect(not res["rows"] and res["unchecked"] and "characters a command must not carry" in res["unchecked"][0]["why"]
+           and shlex.split(cmd)[-1] == "maven.modrinth:x=maven.modrinth:x:1.2" and "'<checkout of neoforge-1.21.1>'" in cmd,
+           f"a version string with shell syntax is never offered; the --bump command is quoted: {res} {cmd}")
     expect(version_pins(build.replace("${viewer_version}", "v1"), "", f"{BEGIN}\nsubstitute.maven.modrinth\\:viewer=maven.modrinth:viewer:v9\n"
                         f"exclude.maven.modrinth\\:devmod=x\nsubstitute.com.example\\:lib=com.example:lib:1-mc1.21.4\n"
                         f"port_jar.com.example\\:lib=u s\n{END}\n") == {"curse.maven:somelib-111": "curse.maven:somelib-111:222",

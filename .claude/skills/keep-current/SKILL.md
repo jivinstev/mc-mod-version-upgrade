@@ -249,8 +249,9 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    `remake` again, commit, then `cascade --repo DIR 26.1.2..<newest>` -- and say in its PR which files were resolved by hand
    (they are review rows). Before that commit, `python3 tools/fork-branches.py cutout-check --repo
    build/fork-branches/26.1.2 --branch neoforge-26.1.2 --fix` (remake and the cascade's merge run it themselves; run it
-   again after resolving by hand): every `entityCutout` / `entityCutoutNoCull` / `entityCutoutCull` call named by what
-   its 1.21.11 line meant (CATALOG V60); decide each call it lists with no parent line. With `--apply` (the head cascade of the authors' code) nothing stops there: a file it cannot
+   again after resolving by hand): every `entityCutout` / `entityCutoutNoCull` / `entityCutoutCull` call surely paired
+   with its 1.21.11 line named by what that line meant (CATALOG V60); decide each `decide <file>:<line>` it lists (paired
+   by position only, no parent line, or a culling fix this version made on purpose, which a cascade holds). With `--apply` (the head cascade of the authors' code) nothing stops there: a file it cannot
    merge becomes a decision with an open REMERGE.json entry, answered through step 2's decisions (`--apply-decisions`),
    never by hand. Every version whose gated files changed reads not done until its gates (`--gates full` once
    before a release) run again; where its own files changed it needs a fresh review, and where it took the authors'

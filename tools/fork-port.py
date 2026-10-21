@@ -2924,14 +2924,17 @@ class BranchRun(Run):
         self.sh([self.py, str(ROOT / "tools/fix-access-transformer.py"), "--work", str(self.repo), "--class-map", str(raw)])
         cut = ""
         if fb.cutout_crossing(self.t, fb.cutout_below(p)):
-            # the 26.1.2 entityCutout swap (CATALOG V60): each call named for what its parent line meant, before any
-            # compile error is shown to a model (entityCutoutNoCull is gone; entityCutout compiles with the wrong culling)
+            # the 26.1.2 entityCutout swap (CATALOG V60), checked and listed (file:line) before any compile error is shown
+            # to a model -- never renamed here: this stage runs on every fork-port.py run, on a branch whose own lines may
+            # be deliberate (add-target and the cascade's merge rename what they bring; cutout-check --fix renames the rest)
             pref = fb.resolve_branch(self.repo, p.get("parent") or fb.branch_name(pv))
             pref = pref and (fb.git(self.repo, "merge-base", "HEAD", pref).stdout.strip() or pref)
-            cx = fb.cutout_tree(self.repo, pref, fix=True)
-            fb.cutout_report(cx, fb.branch_name(self.t), True, print)
-            cut = (f"; entityCutout swap: {len(cx['fixed'])} call(s) renamed for their parent line's meaning"
-                   + (f", {len(cx['fresh'])} with no parent line to decide (fork-branches.py cutout-check)" if cx["fresh"] else ""))
+            cx = fb.cutout_tree(self.repo, pref, fix=False)
+            fb.cutout_report(cx, fb.branch_name(self.t), False, print)
+            n_dec = len(cx["decide"]) + len(cx["fresh"])
+            cut = (f"; entityCutout swap: {len(cx['fixed'])} call(s) to rename (fork-branches.py cutout-check --branch "
+                   f"{fb.branch_name(self.t)} --fix), {n_dec} to decide: " + "; ".join(fb.cutout_lines(cx, False))[:1500]
+                   if cx["fixed"] or n_dec else "")
         return {"done": f"{kept} unambiguous move(s) {pv}->{self.t} -> .port/{self.t}/moves.generated.tsv"
                         f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s){cut}", "moves": kept}
 

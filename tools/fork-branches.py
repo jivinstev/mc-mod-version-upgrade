@@ -77,11 +77,14 @@ THE 26.1.2 ENTITYCUTOUT SWAP (CATALOG V60). From 26.1.2 vanilla's entityCutout d
 entityCutoutNoCull), entityCutoutCull does, and entityCutoutNoCullZOffset is entityCutoutZOffset. No rename row can carry
 it (a swap applied twice swaps back; a file changed by hand is never re-made through the rows), so on a version branch at
 26.1.2 or above whose parent builds below it each call is named by its PARENT's line: the call on the parent's same file
-it pairs with (the lines a line diff pairs, else the same enclosing method in call order) decides -- 1.21's entityCutout
--> entityCutoutCull, entityCutoutNoCull -> entityCutout. It runs by itself where code crosses that boundary (add-target,
-the rows' own output, the cascade's merge, remake) and on demand as `cutout-check --branch neoforge-<v> [--fix]`, which
-also lists each call with no parent line (written on 26.x) for the agent to decide. A tree already right is left as it
-is. A single-version fork, or a version whose parent is already 26.1.2 or above, never takes it.
+it pairs with decides -- 1.21's entityCutout -> entityCutoutCull, entityCutoutNoCull -> entityCutout. Only a SURE
+pairing is renamed: a line the line diff finds equal (names masked), or a parent call with the same argument text; a
+pairing by position only (a changed block line by line, the enclosing method in call order) is listed to decide, never
+renamed. It runs by itself where code crosses that boundary (add-target, the rows' own output, the cascade's merge,
+remake -- these two hold, as a decision, a line the version already had against a parent line the merge did not change:
+a culling fix made on that version on purpose stays; fork-port.py's moves stage only lists) and on demand as
+`cutout-check --branch neoforge-<v> [--fix]`, which lists every call to decide with its file:line, those with no parent
+line (written on 26.x) included. A tree already right is left as it is. A single-version fork, or a version whose parent is already 26.1.2 or above, never takes it.
 
 THE HEAD'S UNTAKEN CODE. `untaken` lists the authors' commits the port branch has that a version branch has not taken
 (in that version's port_taken..head and reachable from their branch, or a merge of it). A cascade from a version branch
@@ -2076,12 +2079,17 @@ def diff_lines(diff):
 def version_rules(read, t):
     """(the rename rules of t's chain, strip_onlyin) -- what turns an authors' line into the version's line. A version
     at 26.1.2 or above over a port branch below it also renames the entityCutout family by meaning (CATALOG V60): the
-    authors' line is in the port branch's names, so the swap is applied to it exactly once."""
+    authors' line is in the port branch's names, so change_taken() names each call of it by what the authors' call
+    meant (cutout_translate over the rows' output: right whatever the rows did, a table carrying swap rows included)."""
     props = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
-    rules = rules_of(chain_table(read, t, chain_read(read, t)))
-    if cutout_crossing(t, props.get("base_minecraft_version")):
-        rules = (list(rules[0]) + [(CUTOUT_SWAP, lambda m: CUTOUT_MEANING[m.group(1)], None)], rules[1], rules[2])
+    rules = Rules(rules_of(chain_table(read, t, chain_read(read, t))))
+    rules.cutout = cutout_crossing(t, props.get("base_minecraft_version"))
     return rules, props.get("strip_onlyin") == "true"
+
+
+class Rules(tuple):
+    """A rules tuple (rules_of) that also says whether the version takes the entityCutout swap over the port branch."""
+    cutout = False
 
 
 def change_taken(data, diff, f, rules=None, strip=False):
@@ -2092,7 +2100,12 @@ def change_taken(data, diff, f, rules=None, strip=False):
         return False
     have = [x.strip() for x in data.decode("utf-8", "surrogateescape").replace("\r\n", "\n").split("\n")]
     added, removed = diff_lines(diff)
-    tr = (lambda x: apply_rules(x, rules).strip()) if rules is not None and f.endswith(".java") else (lambda x: x.strip())
+    if rules is not None and f.endswith(".java") and getattr(rules, "cutout", False):
+        tr = lambda x: cutout_translate(x, apply_rules(x, rules)).strip()
+    elif rules is not None and f.endswith(".java"):
+        tr = lambda x: apply_rules(x, rules).strip()
+    else:
+        tr = lambda x: x.strip()
     want = [tr(x) for x in added if not (strip and "@OnlyIn(" in x)]
     want = [w for w in want if w and not TRIVIAL_LINE.match(w)]
     if want:
@@ -2539,11 +2552,13 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
     if cutout_crossing(t, parent_version or props.get("base_minecraft_version")):
         # the 26.1.2 boundary (CATALOG V60): each entityCutout-family call named for what its parent line meant --
         # the files git merged by hand-changed text as well, which no row re-makes; a call with no parent line is named
-        cx = cutout_tree(work, parent_ref, fix=True, stage=True)
-        if cx["fixed"] or cx["fresh"]:
-            notes.append(f"entityCutout swap (26.1.2): {len(cx['fixed'])} call(s) renamed for their parent line's meaning"
-                         + (f"; {len(cx['fresh'])} written on {t} with no parent line -- decide them (fork-branches.py "
-                            f"cutout-check --branch {branch_name(t)})" if cx["fresh"] else ""))
+        mb_c = git(repo, "merge-base", pre, parent_ref).stdout.strip()
+        cx = cutout_tree(work, parent_ref, fix=True, stage=True, since=(mb_c, pre) if mb_c else None)
+        if cx["fixed"] or cx["fresh"] or cx["decide"]:
+            notes.append(f"entityCutout swap (26.1.2): {len(cx['fixed'])} call(s) renamed for their parent line's meaning, "
+                         f"{len(cx['decide']) + len(cx['fresh'])} to decide (fork-branches.py cutout-check --branch "
+                         f"{branch_name(t)} lists them again)")
+            notes += [f"entityCutout swap: {ln}" for ln in cutout_lines(cx, True)]
     # port_taken moves to port_new only here, after record_untaken: every change in the range is taken, or held by an
     # entry (whose removal, or --apply-decisions, is the explicit clear). A merge undone commits nothing, so it stays.
     new_taken = port_new
@@ -2613,7 +2628,8 @@ CONFLICT_MARK = re.compile(rb"(?m)^(<{7}|>{7}) ")
 # entityCutoutZOffset. A swap row cannot carry it (applied to a file twice it swaps back, and a file changed by hand is
 # never re-made through the rows), so the meaning is decided by the PARENT's line: each call on a version branch at
 # 26.1.2 or above whose parent is below it is paired with the call on the parent's same file it came from (the lines
-# git's diff pairs, else the same enclosing method in call order), and named by what the parent's name meant there.
+# git's diff finds equal, or a call with the same argument text), and named by what the parent's name meant there; a
+# pairing by position only is listed to decide, never renamed.
 # A call with no parent line was written on 26.x and is reported for the agent. Deterministic, and idempotent: a
 # tree already right is left as it is (the decision is read off the parent, never off the version's own name).
 CUTOUT_AT = "26.1.2"
@@ -2621,7 +2637,6 @@ CUTOUT_MEANING = {"entityCutout": "entityCutoutCull", "entityCutoutNoCull": "ent
                   "entityCutoutNoCullZOffset": "entityCutoutZOffset"}         # below 26.1.2 -> 26.1.2 and above
 CUTOUT_RE = re.compile(r"(?<![\w$])(entityCutoutNoCullZOffset|entityCutoutNoCull|entityCutoutZOffset|entityCutoutCull|"
                        r"entityCutout)(?![\w$])")
-CUTOUT_SWAP = re.compile(r"(?<![\w$])(entityCutoutNoCullZOffset|entityCutoutNoCull|entityCutout)(?![\w$])")
 CUTOUT_DECL = re.compile(r"(?:^|[^\w.$])[A-Z][\w$]*(?:<[^<>;]*>)?(?:\[\])*\s+$")      # `RenderType entityCutout(`: a declaration
 METHOD_DECL = re.compile(r"^\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|static|final|abstract|"
                          r"synchronized|native|default|strictfp)\s+)*(?:<[^>]*>\s+)?([\w$][\w$.<>\[\],? ]*?)\s+([\w$]+)\s*\(")
@@ -2676,11 +2691,35 @@ def _method_keys(lines):
     return keys
 
 
+def _call_args(text, off, name):
+    """The argument text of the call at `off` (whitespace collapsed), "::" for a method reference."""
+    if text[max(0, off - 2):off] == "::":
+        return "::"
+    i = text.find("(", off + len(name))
+    depth, j = 0, i
+    while 0 <= j < len(text):
+        c = text[j]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return " ".join(text[i + 1:j].split())
+        elif c in "\"'":
+            k = j + 1
+            while k < len(text) and text[k] != c and text[k] != "\n":
+                k += 2 if text[k] == "\\" else 1
+            j = k
+        j += 1
+    return None
+
+
 def cutout_align(parent, child):
-    """For each call of `child` (cutout_calls order): the name the parent's corresponding call had, or None when it has
-    none. Lines are paired as a line diff pairs them (the names masked, so a renamed call still pairs, and a changed
-    block of the same size pairs line by line); a line pairs its calls when both hold as many; what is left pairs by
-    the enclosing method, in call order, when both sides have as many left there."""
+    """For each call of `child` (cutout_calls order): (the parent call's index, sure) or None when no parent call
+    pairs with it. SURE pairings only: the lines a line diff finds EQUAL (the names masked, so a renamed call still
+    pairs) holding as many calls, or a parent call with the same argument text (unique in the enclosing method, else in
+    the file). A pairing by position only -- a changed block of the same size line by line, or the same enclosing
+    method in call order -- is a GUESS (sure False): it is never renamed by itself, it is listed to decide."""
     import difflib
     pc, cc = cutout_calls(parent or ""), cutout_calls(child)
     out = [None] * len(cc)
@@ -2689,24 +2728,41 @@ def cutout_align(parent, child):
     P, C = (parent or "").split("\n"), child.split("\n")
     norm = lambda l: CUTOUT_RE.sub("\0", l).strip()
     sm = difflib.SequenceMatcher(None, [norm(x) for x in P], [norm(x) for x in C], autojunk=False)
-    linemap = {}
+    eq, rep_ = {}, {}
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
-            for k in range(i2 - i1):
-                linemap[j1 + k] = i1 + k
+        if tag == "equal":
+            eq.update({j1 + k: i1 + k for k in range(i2 - i1)})
+        elif tag == "replace" and i2 - i1 == j2 - j1:
+            rep_.update({j1 + k: i1 + k for k in range(i2 - i1)})
     on_p, on_c = {}, {}
     for i, c in enumerate(pc):
         on_p.setdefault(c[2], []).append(i)
     for j, c in enumerate(cc):
         on_c.setdefault(c[2], []).append(j)
     used = set()
-    for line, js in on_c.items():
-        ii = on_p.get(linemap.get(line), [])
-        if len(ii) == len(js):
-            for j, i in zip(js, ii):
-                out[j] = pc[i][1]
-                used.add(i)
+
+    def by_line(m, sure):
+        for line, js in on_c.items():
+            ii = [i for i in on_p.get(m.get(line), []) if i not in used]
+            js = [j for j in js if out[j] is None]
+            if js and len(ii) == len(js) == len(on_p.get(m.get(line), [])):
+                for j, i in zip(js, ii):
+                    out[j] = (i, sure)
+                    used.add(i)
+    by_line(eq, True)
     kp, kc = _method_keys(P), _method_keys(C)
+    ap = [_call_args(parent, c[0], c[1]) for c in pc]
+    ac = [_call_args(child, c[0], c[1]) for c in cc]
+    for j, c in enumerate(cc):
+        if out[j] is not None or ac[j] in (None, "::", ""):
+            continue
+        cands = [i for i in range(len(pc)) if i not in used and ap[i] == ac[j]]
+        same = [i for i in cands if kp[pc[i][2]] == kc[c[2]]]
+        if len(same) == 1 or len(cands) == 1:
+            i = same[0] if len(same) == 1 else cands[0]
+            out[j] = (i, True)
+            used.add(i)
+    by_line(rep_, False)
     left_p, left_c = {}, {}
     for i, c in enumerate(pc):
         if i not in used and kp[c[2]]:
@@ -2718,30 +2774,47 @@ def cutout_align(parent, child):
         ii = left_p.get(k, [])
         if len(ii) == len(js):
             for j, i in zip(js, ii):
-                out[j] = pc[i][1]
+                out[j] = (i, False)
     return out
 
 
-def cutout_fix_text(parent, child):
-    """(child with each call named for what its parent call meant, [(line, had, want)] changed, [(line, name)] with no
-    parent call). parent None: the file is new on this version, every call is reported."""
+def cutout_fix_text(parent, child, held=None):
+    """(child with each SURELY paired call named for what its parent call meant, [(line, had, want)] renamed,
+    [(line, name, why)] to decide -- a guessed pairing, or a sure one `held` keeps --, [(line, name)] with no parent
+    call). held(child line text, parent line text) -> True keeps a sure rename as a decision (the cascade's: a line this
+    version already had, against a parent line the merge did not change, is this version's own choice). parent None:
+    the file is new on this version, every call is reported."""
     cc = cutout_calls(child)
-    names = cutout_align(parent, child) if parent is not None else [None] * len(cc)
-    fixes, fresh, text = [], [], child
-    for (off, name, line), pname in sorted(zip(cc, names), key=lambda x: -x[0][0]):
-        if pname is None:
+    pc = cutout_calls(parent or "")
+    pairs = cutout_align(parent, child) if parent is not None else [None] * len(cc)
+    P, C = (parent or "").split("\n"), child.split("\n")
+    fixes, decide, fresh, text = [], [], [], child
+    for (off, name, line), pr in sorted(zip(cc, pairs), key=lambda x: -x[0][0]):
+        if pr is None:
             fresh.append((line + 1, name))
             continue
+        i, sure = pr
+        pname = pc[i][1]
         want = CUTOUT_MEANING.get(pname, pname)
-        if want != name:
+        if want == name:
+            continue
+        if not sure:
+            decide.append((line + 1, name, f"paired by position only with the parent's {pname}( at line {pc[i][2] + 1} "
+                                           f"(which means {want} here): rename it if that is its parent call"))
+        elif held and held(C[line].strip(), P[pc[i][2]].strip()):
+            decide.append((line + 1, name, f"its parent's {pname}( (which means {want} here) did not change, and this "
+                                           f"version already had {name}( on this line: kept as this version's own choice "
+                                           f"-- rename it with cutout-check --fix if it is not"))
+        else:
             text = text[:off] + want + text[off + len(name):]
             fixes.append((line + 1, name, want))
-    return text, fixes[::-1], fresh[::-1]
+    return text, fixes[::-1], decide[::-1], fresh[::-1]
 
 
 def cutout_translate(below, above):
     """`above` -- a file made from `below` by rows alone (the same calls, in the same order) -- with each call named for
-    what `below`'s meant. Rows never add or drop a call, so the calls pair in order; else as cutout_fix_text pairs them."""
+    what `below`'s meant. Rows never add, drop or reorder a call, so the calls pair in order; else as cutout_fix_text
+    pairs them (sure pairings only)."""
     if "entityCutout" not in above:
         return above
     pc, cc = cutout_calls(below), cutout_calls(above)
@@ -2755,16 +2828,20 @@ def cutout_translate(below, above):
     return text
 
 
-def cutout_tree(work, parent_ref, fix=False, stage=False, files=None, child_ref=None):
+def cutout_tree(work, parent_ref, fix=False, stage=False, files=None, child_ref=None, since=None):
     """cutout_fix_text over every .java file under src/ of the checkout `work` (or of commit `child_ref`, read only) that
     names the family, against the same path at `parent_ref`. fix: written (bytes otherwise kept; staged with stage); a
-    file still holding conflict markers is left for the person resolving it. -> {"files", "calls", "fixed": [(file,
-    line, had, want)], "fresh": [(file, line, name)], "skipped": [file]}"""
+    file still holding conflict markers is left for the person resolving it. since=(old parent commit, this version's
+    commit before the merge) -- the cascade's and remake's: a sure rename of a line this version already had, against a
+    parent line that commit already had, is held as a decision (a culling fix made on this version on purpose stays).
+    -> {"files", "calls", "fixed": [(file, line, had, want)], "decide": [(file, line, name, why)], "fresh": [(file,
+    line, name)], "skipped": [file]}"""
     work = pathlib.Path(work)
     if files is None:
         r = git(work, "grep", "-l", "-I", "-e", "entityCutout", *([child_ref] if child_ref else []), "--", "src")
         files = [ln.split(":", 1)[1] if child_ref else ln for ln in r.stdout.splitlines()]
-    res = {"files": 0, "calls": 0, "fixed": [], "fresh": [], "skipped": []}
+    res = {"files": 0, "calls": 0, "fixed": [], "decide": [], "fresh": [], "skipped": []}
+    lines_at = lambda ref, f: {x.strip() for x in (blob_at(work, ref, f) or b"").decode("utf-8", "surrogateescape").split("\n")}
     for f in sorted(x for x in files if re.match(r"^src/[^/]+/java/.+\.java$", x)):
         p = work / f
         raw = blob_at(work, child_ref, f) if child_ref else (p.read_bytes() if p.is_file() else None)
@@ -2777,10 +2854,16 @@ def cutout_tree(work, parent_ref, fix=False, stage=False, files=None, child_ref=
         if "entityCutout" not in child:
             continue
         pb = blob_at(work, parent_ref, f) if parent_ref else None
-        new, fixes, fresh = cutout_fix_text(pb.decode("utf-8", "surrogateescape") if pb is not None else None, child)
+        held = None
+        if since:
+            old_p, pre_c = lines_at(since[0], f), lines_at(since[1], f)
+            held = lambda cl, pl, old_p=old_p, pre_c=pre_c: cl in pre_c and pl in old_p
+        new, fixes, decide, fresh = cutout_fix_text(pb.decode("utf-8", "surrogateescape") if pb is not None else None,
+                                                    child, held)
         res["files"] += 1
         res["calls"] += len(cutout_calls(child))
         res["fixed"] += [(f, *x) for x in fixes]
+        res["decide"] += [(f, *x) for x in decide]
         res["fresh"] += [(f, *x) for x in fresh]
         if fix and not child_ref and new != child:
             p.write_bytes(new.encode("utf-8", "surrogateescape"))
@@ -2789,19 +2872,25 @@ def cutout_tree(work, parent_ref, fix=False, stage=False, files=None, child_ref=
     return res
 
 
+def cutout_lines(res, fix):
+    """One line per call a cutout check renamed (or would), per call to decide and per file it skipped."""
+    out = [f"{f}:{line}: {had} -> {want} (the parent's call there {'culls' if want == 'entityCutoutCull' else 'does not cull'}"
+           f"; from {CUTOUT_AT} that is {want})" + ("" if fix else " -- to fix") for f, line, had, want in res["fixed"]]
+    out += [f"decide {f}:{line}: {name}( -- {why}" for f, line, name, why in res["decide"]]
+    out += [f"decide {f}:{line}: {name}( has no parent line -- {CUTOUT_HINT}" for f, line, name in res["fresh"]]
+    out += [f"{f} still holds conflict markers: resolve it, then run cutout-check again" for f in res["skipped"]]
+    return out
+
+
 def cutout_report(res, b, fix, say=print, where=""):
     """The lines a cutout check prints: the counts, each call it named (or would name), each call left to decide."""
-    n_ok = res["calls"] - len(res["fixed"]) - len(res["fresh"])
+    n_ok = res["calls"] - len(res["fixed"]) - len(res["fresh"]) - len(res["decide"])
     say(f"fork-branches: cutout-check {b}{where}: {res['calls']} entityCutout-family call(s) in {res['files']} file(s): "
         f"{n_ok} right, {len(res['fixed'])} " + ("fixed" if fix else "to fix (--fix)")
-        + f", {len(res['fresh'])} written on this version with no parent line (decide)")
-    for f, line, had, want in res["fixed"]:
-        say(f"fork-branches: cutout-check: {f}:{line}: {had} -> {want} (the parent's call there "
-            f"{'culls' if want == 'entityCutoutCull' else 'does not cull'}; from {CUTOUT_AT} that is {want})")
-    for f, line, name in res["fresh"]:
-        say(f"fork-branches: cutout-check: decide {f}:{line}: {name}( has no parent line -- {CUTOUT_HINT}")
-    for f in res["skipped"]:
-        say(f"fork-branches: cutout-check: {f} still holds conflict markers: resolve it, then run cutout-check again")
+        + f", {len(res['decide'])} paired by position only or kept as this version's own (decide), {len(res['fresh'])} "
+          "written on this version with no parent line (decide)")
+    for ln in cutout_lines(res, fix):
+        say(f"fork-branches: cutout-check: {ln}")
 
 
 def cutout_check(repo, b, fix=False, say=print):
@@ -2948,7 +3037,7 @@ def remake(work, t, say=print):
     if swap:
         # the 26.1.2 boundary: every entityCutout-family call named for what its parent line meant (CATALOG V60) --
         # the files a person resolved too, which no row re-makes
-        cutout_report(cutout_tree(work, parent_ref, fix=True, stage=True), b, True, say)
+        cutout_report(cutout_tree(work, parent_ref, fix=True, stage=True, since=(mb_p, pre) if mb_p else None), b, True, say)
     say(f"fork-branches: remake {b}: {len(remade)} file(s) the rows alone make re-made from {port_name}'s code through "
         f"{t}'s rows; {len(carried)} file(s) changed by hand carried through the rows {t} adds (code only, comments kept)"
         + (f"; {len(dropped)} dropped on {t}, kept dropped" if dropped else "")
@@ -5143,11 +5232,22 @@ def _check_cutout(expect):
                          "    RenderType b(Identifier t) { return RenderTypes.entityCutoutNoCull(t, true); }\n}\n",
            "Merged.java": "class Merged {\n    void f() {\n        x(RenderTypes.entityCutout(T));\n        "
                           "y(RenderTypes.entityCutoutNoCull(U));\n        z(RenderTypes::entityCutoutNoCullZOffset);\n    }\n}\n",
-           "Hand.java": "class Hand {\n    void g() {\n        draw(RenderTypes.entityCutoutNoCull(TEX));\n    }\n"
-                        "    // entityCutout( in a comment is no call\n}\n"}
+           "Hand.java": "class Hand {\n    void g() {\n        draw(RenderTypes.entityCutoutNoCull(TEX));\n"
+                        "        fill(RenderTypes.entityCutout(SKIN));\n    }\n    // entityCutout( in a comment is no call\n}\n",
+           # review S1: calls already right on 26.x but reordered and edited in a changed block -- paired by argument
+           # text, never by position, so neither is flipped; the same with an extra line (the method fallback)
+           "Reorder.java": "class Reorder {\n    void r() {\n        a(RenderTypes.entityCutout(T1), 1);\n"
+                           "        b(RenderTypes.entityCutoutNoCull(T2), 2);\n    }\n}\n",
+           "Reorder2.java": "class Reorder2 {\n    void r() {\n        a(RenderTypes.entityCutout(T1), 1);\n"
+                            "        b(RenderTypes.entityCutoutNoCull(T2), 2);\n    }\n}\n"}
     right = par["Right.java"].replace("entityCutout(", "entityCutoutCull(").replace("entityCutoutNoCull(", "entityCutout(")
-    hand = ("class Hand {\n    void g() {\n        int k = 2;\n        draw(RenderTypes.entityCutoutNoCull(TEX, k > 1));\n    }\n"
+    hand = ("class Hand {\n    void g() {\n        int k = 2;\n        draw(RenderTypes.entityCutoutNoCull(TEX, k > 1));\n"
+            "        fill(RenderTypes.entityCutout(SKIN));\n    }\n"
             "    void own() { draw(RenderTypes.entityCutout(OTHER)); }\n    // entityCutout( in a comment is no call\n}\n")
+    reorder = ("class Reorder {\n    void r() {\n        b(RenderTypes.entityCutout(T2), 3);\n"
+               "        a(RenderTypes.entityCutoutCull(T1), 4);\n    }\n}\n")
+    reorder2 = ("class Reorder2 {\n    void r() {\n        int n = 0;\n        b(RenderTypes.entityCutout(T2), 3);\n"
+                "        a(RenderTypes.entityCutoutCull(T1), 4);\n    }\n}\n")
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d) / "fork"
         g = lambda *a: git(r, *a, check=True)
@@ -5168,13 +5268,17 @@ def _check_cutout(expect):
             "port_branch=neoforge-1.21.11\nbase_minecraft_version=1.21.11\n", encoding="utf-8")
         (r / pkg / "Right.java").write_text(right, encoding="utf-8")
         (r / pkg / "Hand.java").write_text(hand, encoding="utf-8")
+        (r / pkg / "Reorder.java").write_text(reorder, encoding="utf-8")
+        (r / pkg / "Reorder2.java").write_text(reorder2, encoding="utf-8")
         (r / pkg / "Fresh.java").write_text("class Fresh { RenderType f(Identifier t) { return RenderTypes.entityCutout(t); } }\n",
                                            encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "26.1.2")
-        before = {n: (r / pkg / n).read_bytes() for n in ("Right.java", "Merged.java", "Hand.java", "Fresh.java")}
+        before = {n: (r / pkg / n).read_bytes() for n in ("Right.java", "Merged.java", "Hand.java", "Fresh.java",
+                                                           "Reorder.java", "Reorder2.java")}
         g("checkout", "-q", "neoforge-1.21.11")
         rc, said = _quiet(cutout_check, r, "neoforge-26.1.2")
-        expect(rc == 1 and "4 to fix (--fix)" in said and "2 written on this version with no parent line" in said
+        expect(rc == 1 and "4 to fix (--fix)" in said and "1 paired by position only" in said
+               and "2 written on this version with no parent line" in said
                and not git(r, "status", "--porcelain").stdout.strip(),
                f"not checked out: read from the branch, the calls to fix and to decide named, nothing written: {said}")
         rc, said = _quiet(cutout_check, r, "neoforge-26.1.2", True)
@@ -5185,12 +5289,16 @@ def _check_cutout(expect):
         expect(rc == 0 and got["Right.java"].encode() == before["Right.java"] and got["Fresh.java"].encode() == before["Fresh.java"]
                and "x(RenderTypes.entityCutoutCull(T))" in got["Merged.java"] and "y(RenderTypes.entityCutout(U))" in got["Merged.java"]
                and "z(RenderTypes::entityCutoutZOffset)" in got["Merged.java"]
-               and "draw(RenderTypes.entityCutout(TEX, k > 1))" in got["Hand.java"]
+               and "draw(RenderTypes.entityCutoutNoCull(TEX, k > 1))" in got["Hand.java"]
+               and "fill(RenderTypes.entityCutoutCull(SKIN))" in got["Hand.java"]
+               and f"decide {pkg}Hand.java:4: entityCutoutNoCull( -- paired by position only" in said
+               and got["Reorder.java"].encode() == before["Reorder.java"] and got["Reorder2.java"].encode() == before["Reorder2.java"]
                and "void own() { draw(RenderTypes.entityCutout(OTHER)); }" in got["Hand.java"] and "// entityCutout( in" in got["Hand.java"]
                and f"decide {pkg}Fresh.java:1: entityCutout( has no parent line" in said
-               and f"decide {pkg}Hand.java:6: entityCutout(" in said,
-               f"--fix: the merged and the hand-changed calls named by the parent's meaning; right, fresh and comments "
-               f"left; the fresh ones listed to decide: {said} {got}")
+               and f"decide {pkg}Hand.java:7: entityCutout(" in said,
+               f"--fix: the merged calls and a hand-changed file's unchanged line named by the parent's meaning; a call "
+               f"paired by position only, right, reordered, fresh and comments left; the guessed and fresh ones listed to "
+               f"decide: {said} {got}")
         g("commit", "-qam", "26.1.2: the swap")
         rc, said = _quiet(cutout_check, r, "neoforge-26.1.2", True)
         expect(rc == 0 and " 0 fixed" in said and not git(r, "status", "--porcelain").stdout.strip(),
@@ -5199,11 +5307,21 @@ def _check_cutout(expect):
         tip = resolve_branch(r, "neoforge-1.21.11")
         rt = rows_tree(r, tip, reader_of_root(r), "26.1.2", ["26.1.2"])
         rules, _strip = version_rules(reader_of_root(r), "26.1.2")
-        expect(rt[pkg + "Merged.java"] == (r / pkg / "Merged.java").read_bytes()
-               and apply_rules("a(RenderTypes.entityCutout(t)); b(RenderTypes.entityCutoutNoCull(t));", rules)
-               == "a(RenderTypes.entityCutoutCull(t)); b(RenderTypes.entityCutout(t));",
-               f"rows_tree and version_rules name the family for what the port branch's call meant: {rt[pkg + 'Merged.java']!r}")
-        # a hand merge of the parent's new call: remake names it as well (staged)
+        add = "@@ -1 +1 @@\n+a(RenderTypes.entityCutout(t)); b(RenderTypes.entityCutoutNoCull(t));\n"
+        line = b"a(RenderTypes.entityCutoutCull(t)); b(RenderTypes.entityCutout(t));\n"
+        expect(rt[pkg + "Merged.java"] == (r / pkg / "Merged.java").read_bytes() and change_taken(line, add, "A.java", rules)
+               and not change_taken(line.replace(b"entityCutoutCull", b"entityCutout", 1), add, "A.java", rules),
+               f"rows_tree and change_taken name the family for what the port branch's call meant: {rt[pkg + 'Merged.java']!r}")
+        # review S3: a table that already carries swap rows (an older hand table) is not swapped twice
+        rd = lambda p_: ("re:\\bRenderTypes\\.entityCutoutNoCull\\(\tRenderTypes.entityCutout(\n" if p_.endswith("26.1.2/renames.tsv")
+                         else reader_of_root(r)(p_))
+        rules2, _s = version_rules(rd, "26.1.2")
+        expect(change_taken(line, add, "A.java", rules2), "a version whose rows already swap: the authors' line still reads taken")
+        # a hand merge of the parent's new call: remake names it as well (staged); a culling fix made on 26.1.2 on
+        # purpose (x back to the non-culling entityCutout), its parent line unchanged, is held as a decision (review S3)
+        (r / pkg / "Merged.java").write_text((r / pkg / "Merged.java").read_text(encoding="utf-8").replace(
+            "x(RenderTypes.entityCutoutCull(T))", "x(RenderTypes.entityCutout(T))"), encoding="utf-8")
+        g("commit", "-qam", "26.1.2: x must not cull")
         g("checkout", "-q", "neoforge-1.21.11")
         (r / pkg / "Merged.java").write_text(par["Merged.java"].replace("    }\n}", "        w(RenderTypes.entityCutout(V));\n    }\n}"),
                                              encoding="utf-8")
@@ -5212,9 +5330,11 @@ def _check_cutout(expect):
         git(r, "merge", "--no-ff", "--no-commit", "neoforge-1.21.11")
         rc, said = _quiet(remake, r, "26.1.2")
         m = (r / pkg / "Merged.java").read_text(encoding="utf-8")
-        expect(rc == 0 and "w(RenderTypes.entityCutoutCull(V))" in m and "x(RenderTypes.entityCutoutCull(T))" in m
-               and pkg + "Merged.java" in git(r, "diff", "--cached", "--name-only").stdout,
-               f"remake after a hand merge: the parent's new call named for its meaning, staged: {said} {m!r}")
+        expect(rc == 0 and "w(RenderTypes.entityCutoutCull(V))" in m and "x(RenderTypes.entityCutout(T))" in m
+               and pkg + "Merged.java" in git(r, "diff", "--cached", "--name-only").stdout
+               and f"decide {pkg}Merged.java:3: entityCutout( -- its parent's entityCutout(" in said and "own choice" in said,
+               f"remake after a hand merge: the parent's new call named for its meaning, staged; this version's own "
+               f"culling fix held and listed: {said} {m!r}")
         git(r, "merge", "--abort")
         # a version above 26.1.2 over 26.1.2: its parent already speaks 26.x, nothing to check
         g("checkout", "-q", "-b", "neoforge-26.2")
