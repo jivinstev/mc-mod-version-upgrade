@@ -327,7 +327,9 @@ def apply_dep_versions(repo, deps_json):
     """Put the target builds the deps stage resolved into the build, mechanically: each dependency's
     `suggested.change` from deps.json (`gradle.properties: KEY=old -> new`, or a literal coordinate in
     build.gradle). Measured: a build model kept the author's 1.20.1 file ids for 13 dependencies while the
-    preflight had already named every replacement. Idempotent. -> the changes made."""
+    preflight had already named every replacement. Idempotent. A dependency already pinned to a build for the target is
+    never moved (port-deps.py suggests no change for it: a pin moves only by an explicit `tools/layer-deps.py resolve
+    --bump`, the same rule as a version branch's). -> the changes made."""
     try:
         deps = json.loads(pathlib.Path(deps_json).read_text(encoding="utf-8")).get("dependencies") or []
     except (OSError, ValueError):

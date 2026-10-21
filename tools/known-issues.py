@@ -82,7 +82,10 @@ THE WEEKLY PLAN ISSUE (issue #135, part 2a; tools/weekly-plan.py runs it as a Gi
                the other open issues; tools/weekly-plan.py writes it) into ONE issue: the deadline line first (the
                round's start; with no answer the defaults apply), then per fork the authors' commits (a checkbox to
                take them), the known issues as checkboxes pre-ticked for the defaults, the escalated decisions with
-               their options (`/decide <id> <choice>`), and grade overrides (`/grade <ID> <S1-S4> [reason]`). The
+               their options (`/decide <id> <choice>`), the dependency updates (tools/weekly-plan.py deps: per
+               Minecraft version, each pinned dependency with a newer compatible build, ticked by default, unticked
+               with the reason for an alpha/beta, a major-version jump, a dropped Minecraft version or a provider
+               switch; a failed lookup listed as "could not check"), and grade overrides (`/grade <ID> <S1-S4> [reason]`). The
                title starts `[decision needed]` when the plan escalates something. A previous plan issue no round
                closed is carried in: its ticks and replies, with "last week's round did not run".
   read-plan    the round's first step: the issue's checkboxes and the `/decide` and `/grade` replies, frozen as JSON.
@@ -93,7 +96,9 @@ THE WEEKLY PLAN ISSUE (issue #135, part 2a; tools/weekly-plan.py runs it as a Gi
                A version-branch fork's entry also says whether the head is cascaded (`head_cascade`: false when the
                plan does not take the authors' code the head has -- new or untaken -- and then no decision applies and
                no decisions file is written) and, per selected issue, `fixes`: the lowest version still open (the
-               status map, not `lowest`) and the one cascade that carries the fix. Run before the plan's deadline it
+               status map, not `lowest`) and the one cascade that carries the fix. Every fork whose plan has the
+               dependency section gets `dep_bumps` (the ticked ones, each with its `layer-deps.py resolve --bump`
+               command; the round applies them once at setup) and `dep_kept`. Run before the plan's deadline it
                warns (the owner's window is cut short); --now records an early start the owner asked for.
   render-ports the fork README's Ports block, between `<!-- ports:begin -->` and `<!-- ports:end -->`: one row per
                Minecraft version (branch, newest pre-release or release, done state) and the known-issues links. With
@@ -445,7 +450,7 @@ CHOICES = ("take", "keep", "patch", "content")
 WRITE_PERMS = ("admin", "maintain", "write")
 BOT = "github-actions[bot]"
 SHOWN_COMMITS = 20
-CHECKBOX_RE = re.compile(r"(?m)^\s*[-*] \[( |x|X)\] .*?<!-- (ki|authors):(\S+?) (default|candidate) -->\s*$")
+CHECKBOX_RE = re.compile(r"(?m)^\s*[-*] \[( |x|X)\] .*?<!-- (ki|authors|dep):(\S+?) (default|candidate) -->\s*$")
 DECIDE_RE = re.compile(r"^/decide\s+(\S+)\s+(\S+)\s*(.*)$")
 GRADE_RE = re.compile(r"^/grade\s+(\S+)\s+(\S+)\s*(.*)$")
 
@@ -529,6 +534,48 @@ def fix_plan(f, selected, head_cascade):
     return out
 
 
+SAFE_COORD = re.compile(r"^[A-Za-z0-9._+:-]+$")      # tools/layer-deps.py's: what a --bump command may carry
+
+
+def esc(text):
+    """Registry text (a build's name, a reason) for the issue: no code span, mention or table cell it could open."""
+    return md(str(text)).replace("`", "\\`").replace("@", "&#64;").replace("<", "&lt;")
+
+
+def dep_key(r):
+    return f"{r['mc']} {r['ga']} {r['to']}"
+
+
+def dep_lines(repo, du, carried):
+    """The plan's "Dependency updates" lines of one fork: a box per pinned dependency with a newer compatible build,
+    ticked by default unless it has a reason to look first (then unticked, the reason shown); a carried tick wins; a
+    lookup that failed listed as "could not check"."""
+    ok = lambda r: all(SAFE_COORD.match(str(r.get(k) or "")) for k in ("mc", "ga", "from", "to"))
+    rows = [r for r in du.get("rows", []) if ok(r)]
+    un = list(du.get("unchecked", [])) + [{"mc": r.get("mc"), "ga": r.get("ga"), "coord": r.get("from"),
+                                           "why": "a coordinate holds characters a command must not carry"}
+                                          for r in du.get("rows", []) if not ok(r)]
+    code = lambda x: f"`{x}`" if SAFE_COORD.match(str(x or "")) else esc(x)
+    if not rows and not un:
+        return [f"Every pinned CurseForge/Modrinth dependency is on its newest compatible build ({du.get('checked', 0)} "
+                "checked)." if du.get("checked") else "No CurseForge/Modrinth dependency pinned."]
+    out = []
+    if rows:
+        out += ["Ticked, the round bumps it once at its setup (`tools/layer-deps.py resolve --bump`, in that version's "
+                "checkout); unticked, the pin stays. Nothing else moves a pinned dependency.", ""]
+    for r in rows:
+        on = carried.get(dep_key(r), r["default"])
+        names = f" ({esc(r.get('from_name'))} -> {esc(r.get('to_name'))}, {esc(r.get('channel') or '?')})"
+        out.append(f"- [{'x' if on else ' '}] `{r['ga']}` at {r['mc']}: `{r['from']}` -> `{r['to']}`{names}"
+                   + ("" if r["default"] else f" -- not ticked by default: {esc(r['why'])}")
+                   + f" <!-- dep:{repo}:{r['id']} {'default' if r['default'] else 'candidate'} -->")
+    if un:
+        out += ["", "Could not check (the round leaves these pins as they are):", ""]
+        out += [f"- {code(u['ga'])} at {esc(u['mc'])}" + (f" (`{u['coord']}`)" if SAFE_COORD.match(str(u.get("coord") or "")) else "")
+                + f": {esc(u['why'])}" for u in un]
+    return out
+
+
 def render_plan(inp):
     """PLAN-INPUT (tools/weekly-plan.py) -> {"title", "body", "decision_needed"}."""
     forks = inp["forks"]
@@ -537,6 +584,7 @@ def render_plan(inp):
     pf = prev.get("frozen") or {}
     pticks = {f["repo"]: f.get("ticks", {}) for f in pf.get("forks", [])}
     pauth = {f["repo"]: f.get("take_authors") for f in pf.get("forks", [])}
+    pdeps = {f["repo"]: f.get("dep_ticks") or {} for f in pf.get("forks", [])}
     seen, clash = set(), set()
     for f in forks:
         ids = {r["id"] for r in f.get("selection", [])} | {r["id"] for r in f.get("candidates", [])}
@@ -603,6 +651,9 @@ def render_plan(inp):
                          f"<!-- ki:{repo}:{r['id']} candidate -->")
         if not sel and not cand:
             lines.append(f"No open known issues in the ledger (`.port/{LEDGER_NAME}` on `{f['head']}`).")
+        du = f.get("dep_updates")
+        if du is not None:
+            lines += ["", "### Dependency updates", ""] + dep_lines(repo, du, pdeps.get(repo, {}))
         lines += ["", "### Decisions", ""]
         c = f.get("cascade")
         decs = []
@@ -636,6 +687,9 @@ def render_plan(inp):
                            "defaults": [r["id"] for r in sel], "candidates": [r["id"] for r in cand],
                            "ids": sorted(set(f.get("ledger_ids", [])) | {r["id"] for r in sel + cand}, key=natural),
                            "cascade": None if c is None else {"range": c["range"], "decisions": decs}})
+        if du is not None:           # every kind of fork: the dependency updates the step found
+            data_forks[-1]["dep_updates"] = [{k: r.get(k) for k in ("id", "mc", "ga", "from", "to", "default", "why")}
+                                             for r in du.get("rows", [])]
         if c is not None:            # a version-branch fork only: a single-version fork's data block stays as it was
             data_forks[-1].update({"untaken_count": len(un), "base_version": f.get("base_version"),
                                    "fix_at": {r["id"]: r.get("lowest_open") or r["lowest"] for r in sel + cand}})
@@ -669,12 +723,18 @@ def read_plan(issue, comments, allowed, now=None):
     data = plan_data(body)
     forks = {f["repo"]: f for f in data["forks"]}
     ticks = {r: {} for r in forks}
+    dticks = {r: {} for r in forks}
     authors = {}
     for m in CHECKBOX_RE.finditer(body):
         on, kind, key = m.group(1) != " ", m.group(2), m.group(3)
         if kind == "authors":
             if key in forks:
                 authors[key] = on
+            continue
+        if kind == "dep":
+            repo, _, i = key.rpartition(":")
+            if repo in dticks:
+                dticks[repo][i] = on
             continue
         repo, _, i = key.rpartition(":")
         if repo in ticks:
@@ -766,6 +826,19 @@ def read_plan(issue, comments, allowed, now=None):
                                 "not_applied": [d["id"] for d in casc["decisions"]],
                                 "why": "the authors' code is not taken this round: no head cascade, so no decision of it applies"}
             o["fixes"] = fix_plan(f, sel, head_cascade)
+        if f.get("dep_updates") is not None:
+            # the dependency updates the owner left ticked: the round bumps each once, at setup; nothing else moves a pin
+            o = out_forks[-1]
+            on = {d["id"]: dticks[r].get(d["id"], bool(d.get("default"))) for d in f["dep_updates"]}
+            import shlex
+            safe = lambda d: all(SAFE_COORD.match(str(d.get(k) or "")) for k in ("mc", "ga", "to"))
+            o["dep_bumps"] = [{"id": d["id"], "mc": d["mc"], "ga": d["ga"], "from": d["from"], "to": d["to"],
+                               "command": f"python3 mmvu/tools/layer-deps.py resolve --repo "
+                                          f"{shlex.quote('<checkout of neoforge-' + d['mc'] + '>')} --target "
+                                          f"{shlex.quote(d['mc'])} --bump {shlex.quote(d['ga'] + '=' + d['to'])}"}
+                              for d in f["dep_updates"] if on[d["id"]] and safe(d)]
+            o["dep_kept"] = [d["id"] for d in f["dep_updates"] if not on[d["id"]]]
+            o["dep_ticks"] = {f"{d['mc']} {d['ga']} {d['to']}": on[d["id"]] for d in f["dep_updates"]}
     read_plan.take_by = said_by           # read-plan says it for every fork (stderr), the JSON keeps its form
     return {"schema": 1, "issue": issue.get("number"), "repo": data["repo"], "week": data["week"],
             "deadline": data["deadline"], "owner": data["owner"], "frozen_at": now, "forks": out_forks,
@@ -1354,7 +1427,8 @@ def cmd_read_plan(a, out):
     if a.out:
         pathlib.Path(a.out).write_text(text, encoding="utf-8")
         sel = sum(len(f["selected"]) for f in frozen["forks"])
-        out(f"read-plan: #{n} frozen at {now}: {sel} known issue(s) selected, {len(frozen['grades'])} grade "
+        bumps = sum(len(f.get("dep_bumps", [])) for f in frozen["forks"])
+        out(f"read-plan: #{n} frozen at {now}: {sel} known issue(s) selected, {bumps} dependency bump(s), {len(frozen['grades'])} grade "
             f"override(s), {len(frozen['ignored'])} reply line(s) ignored -> {a.out}")
     else:
         out(text, end="")
@@ -1870,6 +1944,7 @@ def plan_untaken_check(expect, cli):
 
 def plan_check(expect, cli):
     """render-plan / read-plan / render-ports on invented data: no network, no git beyond one tiny repo."""
+    import shlex
     dec = {"id": "d1e2f3a4b5c6", "file": "src/main/java/com/example/mod/A.java", "versions": ["1.21.4", "1.21.5"],
            "escalate": True, "choice": "keep", "reasoning": "over the budget."}
     dflt = {"id": "a1b2c3d4e5f6", "file": "src/main/java/com/example/mod/B.java", "versions": ["1.21.4"],
@@ -1932,6 +2007,46 @@ def plan_check(expect, cli):
         expect(got.get("range") == "neoforge-1.21.1..1.21.5" and [x["choice"] for x in got.get("decisions", [])] ==
                ["take", "take"] and not (d / "dec" / "o__dep.decisions.json").exists(),
                f"--decisions-dir: one cascade --apply-decisions file per version-branch fork: {got}")
+        # dependency updates (every kind of fork): ticked by default, unticked with the reason; ticks read back
+        du_lib = {"checked": 3, "rows": [
+            {"id": "D1", "mc": "1.21.1", "ga": "maven.modrinth:viewer", "from": "maven.modrinth:viewer:a1",
+             "to": "maven.modrinth:viewer:a2", "from_name": "1.1", "to_name": "1.2", "channel": "release", "default": True, "why": ""},
+            {"id": "D2", "mc": "1.21.4", "ga": "curse.maven:extra-333", "from": "curse.maven:extra-333:5",
+             "to": "curse.maven:extra-333:9", "from_name": "x-2.0", "to_name": "x-3.0-beta", "channel": "beta", "default": False,
+             "why": "a beta; a major-version jump (x-2.0 -> x-3.0-beta)"}],
+            "unchecked": [{"mc": "1.21.5", "ga": "maven.modrinth:down", "coord": "maven.modrinth:down:z", "why": "HTTP Error 503"}]}
+        inp2 = json.loads(json.dumps(inp))
+        inp2["forks"][0]["dep_updates"] = du_lib
+        inp2["forks"][1]["dep_updates"] = {"checked": 2, "rows": [], "unchecked": []}
+        b2 = render_plan(inp2)["body"]
+        expect("### Dependency updates" in b2 and "- [x] `maven.modrinth:viewer` at 1.21.1: `maven.modrinth:viewer:a1` -> "
+               "`maven.modrinth:viewer:a2` (1.1 -> 1.2, release) <!-- dep:o/lib:D1 default -->" in b2
+               and "- [ ] `curse.maven:extra-333` at 1.21.4" in b2 and "not ticked by default: a beta; a major-version jump" in b2
+               and "<!-- dep:o/lib:D2 candidate -->" in b2 and "`maven.modrinth:down` at 1.21.5 (`maven.modrinth:down:z`): HTTP Error 503" in b2
+               and "on its newest compatible build (2 checked)" in b2 and "### Dependency updates" not in b,
+               f"render-plan: the dependency section per fork, defaults and reasons, the unchecked listed: {b2}")
+        b3 = b2.replace("- [x] `maven.modrinth:viewer`", "- [ ] `maven.modrinth:viewer`").replace("- [ ] `curse.maven:extra-333`",
+                                                                                                  "- [x] `curse.maven:extra-333`")
+        for body, want in ((b2, ["D1"]), (b3, ["D2"])):
+            fr2 = read_plan({"number": 8, "body": body}, [], lambda u: True, "t")
+            l2, d2_ = fr2["forks"][0], fr2["forks"][1]
+            expect([x["id"] for x in l2.get("dep_bumps", [])] == want and d2_.get("dep_bumps") == []
+                   and all(f"--bump {x['ga']}={x['to']}" in x["command"] and f"--target {x['mc']}" in x["command"]
+                           for x in l2["dep_bumps"]) and len(l2.get("dep_ticks", {})) == 2,
+                   f"read-plan: the ticked dependency bumps, each with its command: {l2.get('dep_bumps')} {l2.get('dep_kept')}")
+        # review S2 (security): registry text cannot open a code span or a mention, and a coordinate with shell syntax
+        # is never a bump; every command is quoted
+        bad_inp = json.loads(json.dumps(inp2))
+        bad_inp["forks"][0]["dep_updates"]["rows"] = [dict(du_lib["rows"][0], from_name="`@someone` $(x)"),
+                                                     dict(du_lib["rows"][0], id="D2", to="maven.modrinth:viewer:$(touch x)")]
+        b4 = render_plan(bad_inp)["body"]
+        fr4 = read_plan({"number": 9, "body": b4}, [], lambda u: True, "t")["forks"][0]
+        expect("\\`&#64;someone\\` $(x)" in b4 and "`@someone`" not in b4 and "$(touch x)" not in b4.split("<!-- weekly-plan:data")[0]
+               and [x["id"] for x in fr4.get("dep_bumps", [])] == ["D1"]
+               and shlex.split(fr4["dep_bumps"][0]["command"])[-1] == "maven.modrinth:viewer=maven.modrinth:viewer:a2",
+               f"registry text escaped, an unsafe coordinate never a bump, the command quoted: {b4} {fr4}")
+        expect("dep_bumps" not in json.loads(json.dumps(read_plan({"number": 7, "body": b}, [], lambda u: True, "t")))["forks"][0],
+               "a plan without the dependency section reads back as before")
         fx2 = dict(fx, issue={"number": 7, "body": "no plan here"})
         (d / "fx2.json").write_text(json.dumps(fx2), encoding="utf-8")
         expect(cli("read-plan", "--issue", "7", "--slug", "o/lib", "--from-json", str(d / "fx2.json"))[0] == 2,

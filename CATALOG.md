@@ -2613,7 +2613,15 @@ with its back faces the wrong way round — visible only to a human looking at a
 name reads right; ask what the thing actually does. Here that is one `grep` for `withCull` in
 `RenderPipelines`, which settles it in seconds and is the only thing that distinguishes the two
 mappings. · Same discipline as V34 (a value change wearing a rename's clothes) and V23 (an
-inclusive/exclusive bound change wearing one).
+inclusive/exclusive bound change wearing one). · **On a fork of version branches the swap is a tool, not a row:**
+a swap row is not idempotent (applied to a file twice it swaps back) and never reaches a file changed by hand, so
+`tools/fork-branches.py cutout-check --repo <checkout> --branch neoforge-26.1.2 [--fix]` names each call by what the
+PARENT version's line meant (only a sure pairing: an equal line, or the same argument text) -- also
+`entityCutoutNoCullZOffset` → `entityCutoutZOffset` -- and lists for a person to decide a call paired by position
+only, a call written fresh on 26.x, and (in a cascade or remake) a line the version changed on purpose against an
+unchanged parent line. It runs by itself at the boundary (add-target, the rows' output, the cascade's merge, remake;
+fork-port.py's moves stage lists only); verified in the 26.1.2 sources (`RenderTypes.entityCutoutCull` → `ENTITY_CUTOUT_CULL`; `entityCutout` →
+`ENTITY_CUTOUT`, `.withCull(false)`; no `entityCutoutNoCull`).
 
 **V57. 🔴 A vanilla model's PART HIERARCHY moved, and a mesh is data validated at BAKE — so it
 compiles, loads, and kills the client.** · **Pattern:** any humanoid mesh, which every mod that

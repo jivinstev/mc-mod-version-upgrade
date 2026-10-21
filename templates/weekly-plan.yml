@@ -12,9 +12,13 @@
 #      on a throwaway copy, with the authors' commits merged into the head there), and lists the authors' code the head
 #      already has that a version branch has not taken (fork-branches.py untaken);
 #   3. selects the known issues the round takes (tools/known-issues.py select: every S1, S2s up to the budget);
-#   4. renders the plan issue (tools/known-issues.py render-plan) -- the deadline first, checkboxes pre-ticked for the
-#      defaults, escalated decisions answered by `/decide <id> <choice>`, grade overrides by `/grade <ID> <S1-S4>`;
-#   5. opens it on this repository, assigned to the fork owner with an @mention. A previous plan issue no round closed
+#   4. checks each pinned CurseForge/Modrinth dependency for a newer compatible build, per Minecraft version the fork
+#      builds (tools/weekly-plan.py deps; Modrinth's public API, no key: a lookup that fails is listed "could not check");
+#   5. renders the plan issue (tools/known-issues.py render-plan) -- the deadline first, checkboxes pre-ticked for the
+#      defaults (a dependency update unticked, with the reason, when it is an alpha/beta, a major-version jump or drops a
+#      Minecraft version the fork builds), escalated decisions answered by `/decide <id> <choice>`, grade overrides by
+#      `/grade <ID> <S1-S4>`;
+#   6. opens it on this repository, assigned to the fork owner with an @mention. A previous plan issue no round closed
 #      is carried forward (its ticks and replies) and closed as superseded.
 # The Wednesday round (a Claude scheduled task, made by the same setup) reads the issue once at its start; with no
 # answer the defaults apply. The tools come from {{MIGRATOR_REPO}} at the pinned commit below. A failed step fails the
@@ -101,15 +105,18 @@ jobs:
       - name: 3. Select the known issues (known-issues.py select)
         if: steps.when.outputs.go == 'true'
         run: python3 mmvu/tools/weekly-plan.py select --work plan
+      - name: 4. Check the pinned dependencies for newer builds (layer-deps.py updates)
+        if: steps.when.outputs.go == 'true'
+        run: python3 mmvu/tools/weekly-plan.py deps --work plan
       - name: The owner, and last week's plan issue if no round closed it
         if: steps.when.outputs.go == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 mmvu/tools/weekly-plan.py previous --work plan
-      - name: 4. Render the plan (known-issues.py render-plan)
+      - name: 5. Render the plan (known-issues.py render-plan)
         if: steps.when.outputs.go == 'true'
         run: python3 mmvu/tools/known-issues.py render-plan --input plan/plan-input.json --out plan/issue.json
-      - name: 5. Open the plan issue
+      - name: 6. Open the plan issue
         if: steps.when.outputs.go == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
