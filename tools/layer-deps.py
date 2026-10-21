@@ -1176,6 +1176,12 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
                 row["drop"] = f"no {target} build ({row['role']})"
         rows.append(row)
     stop = ("required dependencies with no build for " + target + ": " + "; ".join(missing_required)) if missing_required else None
+    unsafe = [f"{r['group']}:{r['module']} -> {r['to']!r}" for r in rows
+              if r.get("to") and r.get("kind") in ("curse", "modrinth") and not SAFE_COORD.match(r["to"])]
+    if unsafe:
+        # a registry's version string is the publisher's: never written into branch.properties / target.properties
+        stop = "; ".join(x for x in ["coordinates holding characters a build file must not get (only A-Z a-z 0-9 . _ + : - "
+                                     "are written): " + "; ".join(unsafe), stop] if x)
     if refused:
         stop = "; ".join(x for x in ["library first: sibling library targets not done: " + "; ".join(refused) +
                                       " (finish and release the library's target first; --allow-undone-library is for "
@@ -1293,6 +1299,9 @@ def parse_bumps(specs, bump_all, deps):
                              + ", ".join(f"{d['group']}:{d['module']}" for d in deps) + ")"))
         ga = f"{hit[0]['group']}:{hit[0]['module']}"
         out[ga] = (ver if ver.count(":") >= 2 else f"{ga}:{ver}") if ver else None
+        if out[ga] and not SAFE_COORD.match(out[ga]):
+            raise ValueError(f"--bump {spec}: {out[ga]!r} holds characters a build file must not get (only A-Z a-z 0-9 . _ "
+                             "+ : - are written)")
     return out
 
 
@@ -1534,35 +1543,55 @@ def bump_command(mc, ga, to, checkout="<checkout of neoforge-{mc}>"):
             f"--bump {shlex.quote(f'{ga}={to}')}")
 
 
+def _mask_comments(text):
+    """`text` with every comment character (// to the end of the line, /* ... */) turned into a space, string literals
+    and line endings kept: the same length, so an offset into it is an offset into `text`."""
+    out, i, n, q = list(text), 0, len(text), None
+    while i < n:
+        c = text[i]
+        if q:
+            if c == "\\":
+                i += 2; continue
+            if c == q or c == "\n":
+                q = None
+            i += 1; continue
+        if c in "\"'":
+            q = c; i += 1; continue
+        if text.startswith("//", i):
+            while i < n and text[i] not in "\r\n":
+                out[i] = " "; i += 1
+            continue
+        if text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if text[k] not in "\r\n":
+                    out[k] = " "
+            i = j; continue
+        i += 1
+    return "".join(out)
+
+
 def _dep_code_lines(text):
-    """[(index, code part)] of each line of `text` (line endings kept) that is a dependency declaration outside any
-    comment: the part before a `//`, never a line inside a /* */ block."""
-    out, block = [], False
-    for i, ln in enumerate(text.splitlines(True)):
-        code = ln
-        if block:
-            end = code.find("*/")
-            if end < 0:
-                continue
-            code, block = code[end + 2:], False
-        code = re.sub(r"/\*.*?\*/", "", code)
-        if "/*" in code:
-            code, block = code[:code.index("/*")], True
-        code = re.sub(r"(^|\s)//.*$", "", code.rstrip("\r\n"))
-        if DEP_LINE.match(code):
-            out.append((i, code))
+    """[(start offset, masked line)] of each line of `text` that is a dependency declaration outside any comment (the
+    line's comments blanked, so offsets into it are offsets into `text`)."""
+    masked, out, pos = _mask_comments(text), [], 0
+    for ln in masked.splitlines(True):
+        if DEP_LINE.match(ln.rstrip("\r\n")):
+            out.append((pos, ln))
+        pos += len(ln)
     return out
 
 
 def replace_coordinate(text, old, new):
-    """`text` with the quoted coordinate `old` replaced by `new` on the dependency lines outside comments only, and only
-    as a whole quoted token (`lib:1.2` never rewrites `lib:1.2.5`); every other byte, line endings included, kept."""
-    lines = text.splitlines(True)
+    """(`text` with the quoted coordinate `old` replaced by `new` on the dependency lines outside comments only, as a
+    whole quoted token -- `lib:1.2` never rewrites `lib:1.2.5` -- every other byte, line endings included, kept; the
+    number of replacements)."""
     tok = re.compile(r"""(["'])""" + re.escape(old) + r"""(["'])""")
-    for i, code in _dep_code_lines(text):
-        cut = len(code)
-        lines[i] = tok.sub(lambda m: m.group(1) + new + m.group(2), lines[i][:cut]) + lines[i][cut:]
-    return "".join(lines)
+    spans = [(pos + m.start() + 1, pos + m.end() - 1) for pos, ln in _dep_code_lines(text) for m in tok.finditer(ln)]
+    for a, b in reversed(spans):
+        text = text[:a] + new + text[b:]
+    return text, len(spans)
 
 
 def cmd_bump_single(repo, target, specs, bump_all, dry_run=False, lk=None, say=print):
@@ -1600,6 +1629,9 @@ def cmd_bump_single(repo, target, specs, bump_all, dry_run=False, lk=None, say=p
                 say(f"layer-deps: {target} {ga}: the newer build was found on Modrinth only ({to}); a single-version "
                     f"pin keeps its provider: pass --bump {ga}=<CurseForge file id> (CURSEFORGE_API_KEY finds it)")
                 return 2
+        if not SAFE_COORD.match(to or ""):
+            say(f"layer-deps: {target} {ga}: {to!r} holds characters a build file must not get (only A-Z a-z 0-9 . _ + : - "
+                "are written): refused, nothing written"); return 2
         if to == d["coord"]:
             say(f"layer-deps: {target} {ga}: already {to}"); continue
         if d["src"].startswith("prop:"):
@@ -1610,14 +1642,21 @@ def cmd_bump_single(repo, target, specs, bump_all, dry_run=False, lk=None, say=p
                 return 2
             ref = re.compile(r"\$\{?" + re.escape(key) + r"(?![\w.])\}?")
             users = [c for _i, c in _dep_code_lines(build) if ref.search(c)]
+            before = new_props
             if len(users) > 1:
                 say(f"layer-deps: {target} {ga}: its version is gradle.properties' {key}, which {len(users)} dependency "
                     f"lines read: bumping it would move the others too -- edit them by hand")
                 return 2
             new_props = re.sub(r"(?m)^([ \t]*" + re.escape(key) + r"[ \t]*=[ \t]*)" + re.escape(d["version"])
                                + r"([ \t]*)(?=\r?$)", lambda x: x.group(1) + to.rsplit(":", 1)[1] + x.group(2), new_props)
+            if new_props == before:
+                say(f"layer-deps: {target} {ga}: gradle.properties' {key}={d['version']} was not found to rewrite: "
+                    "nothing written"); return 2
         else:
-            new_build = replace_coordinate(new_build, d["coord"], to)
+            new_build, n = replace_coordinate(new_build, d["coord"], to)
+            if not n:
+                say(f"layer-deps: {target} {ga}: {d['coord']} was not found on a dependency line outside a comment: "
+                    "nothing written"); return 2
         did += 1
         say(f"layer-deps: {target} {ga}: {d['coord']} -> {to} (bumped explicitly, single-version build)")
     if did and not dry_run:
@@ -2356,6 +2395,32 @@ def _check_pins_and_bumps(expect):
                f"a gradle.properties key another coordinate reads is refused, nothing written: {buf.getvalue()}")
         (sv / "build.gradle").write_text(build, encoding="utf-8")
         (sv / "gradle.properties").write_text("minecraft_version=1.21.1\nviewer_version=1.1\n", encoding="utf-8")
+        # re-review S2: a coordinate behind a /* */ comment on the same line is still the one rewritten; a bump that
+        # rewrote nothing fails, and so does a registry id with build-file syntax (single-version and version branch)
+        (sv / "build.gradle").write_text('dependencies {\n    /* old */ implementation "maven.modrinth:viewer:1.1"\n}\n',
+                                         encoding="utf-8")
+        rc, buf = q(cmd_resolve, ns(bump=["viewer=1.2"]))
+        expect(rc == 0 and '/* old */ implementation "maven.modrinth:viewer:1.2"' in (sv / "build.gradle").read_text(encoding="utf-8"),
+               f"a coordinate after a block comment on its line is rewritten: {buf.getvalue()}")
+        expect(replace_coordinate('x\n// implementation "maven.modrinth:viewer:1.2"\n', "maven.modrinth:viewer:1.2", "z")[1] == 0,
+               "replace_coordinate: nothing outside a dependency line, nothing in a comment")
+        payload = 'a2" ; println(\'pwned\') ; def z = "'
+        pf = {"viewer": [{"id": "1.2", "name": "1.2", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                         {"id": payload, "name": "1.3", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-02"}]}
+        bsave = (sv / "build.gradle").read_bytes()
+        rc, buf = q(cmd_bump_single, sv, "1.21.1", ["viewer"], False, False, {"mr_files": lambda p_: pf[p_]})
+        expect(rc == 2 and (sv / "build.gradle").read_bytes() == bsave and "pwned" not in bsave.decode("utf-8"),
+               f"single-version: a registry id with build-file syntax is refused, nothing written: {buf.getvalue()}")
+        rc, buf = q(cmd_resolve, ns(bump=["viewer=" + payload]))
+        expect(rc == 2 and (sv / "build.gradle").read_bytes() == bsave, f"a user-given unsafe version is refused: {buf.getvalue()}")
+        lk_evil = dict(lk, modrinth=lambda p_, t_, c_: {"to": f"maven.modrinth:{p_}:{payload}", "source": "evil registry"})
+        b0 = bp.read_text(encoding="utf-8")
+        rows, stop = resolve(vb, "1.21.4", {}, lk_evil, kept=current_registry_pins(vb, "1.21.4"),
+                             bumps=parse_bumps(["viewer"], False, gradle_deps(vbuild)))
+        write(vb, "1.21.4", rows, stop)
+        expect(stop and "must not get" in stop and bp.read_text(encoding="utf-8") == b0 and "pwned" not in bp.read_text(encoding="utf-8"),
+               f"version branch: a registry coordinate with build-file syntax stops the resolve, branch.properties unchanged: {stop}")
+        (sv / "build.gradle").write_text(build, encoding="utf-8")
         files = {"viewer": [{"id": "a1", "name": "1.1", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
                             {"id": "a2", "name": "1.2", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-03"}]}
         fl = {"mr_files": lambda p: files[p]}

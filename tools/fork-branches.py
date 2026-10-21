@@ -2728,8 +2728,10 @@ def cutout_align(parent, child):
     P, C = (parent or "").split("\n"), child.split("\n")
     norm = lambda l: CUTOUT_RE.sub("\0", l).strip()
     sm = difflib.SequenceMatcher(None, [norm(x) for x in P], [norm(x) for x in C], autojunk=False)
-    eq, rep_ = {}, {}
+    eq, rep_, gone = {}, {}, set()
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "delete":
+            gone.update(range(i1, i2))                 # the parent's lines this version no longer has
         if tag == "equal":
             eq.update({j1 + k: i1 + k for k in range(i2 - i1)})
         elif tag == "replace" and i2 - i1 == j2 - j1:
@@ -2753,15 +2755,18 @@ def cutout_align(parent, child):
     kp, kc = _method_keys(P), _method_keys(C)
     ap = [_call_args(parent, c[0], c[1]) for c in pc]
     ac = [_call_args(child, c[0], c[1]) for c in cc]
+    z = lambda name: "ZOffset" in name
     for j, c in enumerate(cc):
-        if out[j] is not None or ac[j] in (None, "::", ""):
+        # the same argument text is sure only when it is unique on BOTH sides within the same enclosing method, the
+        # parent's call is still there (its line not deleted), and both are, or both are not, a ZOffset call
+        k = kc[c[2]]
+        if out[j] is not None or ac[j] in (None, "::", "") or not k:
             continue
-        cands = [i for i in range(len(pc)) if i not in used and ap[i] == ac[j]]
-        same = [i for i in cands if kp[pc[i][2]] == kc[c[2]]]
-        if len(same) == 1 or len(cands) == 1:
-            i = same[0] if len(same) == 1 else cands[0]
-            out[j] = (i, True)
-            used.add(i)
+        mine = [x for x in range(len(cc)) if out[x] is None and ac[x] == ac[j] and kc[cc[x][2]] == k]
+        cands = [i for i in range(len(pc)) if i not in used and ap[i] == ac[j] and kp[pc[i][2]] == k]
+        if len(mine) == 1 and len(cands) == 1 and pc[cands[0]][2] not in gone and z(pc[cands[0]][1]) == z(c[1]):
+            out[j] = (cands[0], True)
+            used.add(cands[0])
     by_line(rep_, False)
     left_p, left_c = {}, {}
     for i, c in enumerate(pc):
@@ -2775,6 +2780,9 @@ def cutout_align(parent, child):
         if len(ii) == len(js):
             for j, i in zip(js, ii):
                 out[j] = (i, False)
+    for j, pr in enumerate(out):                      # a ZOffset call never surely pairs with a plain one, nor back
+        if pr and pr[1] and z(pc[pr[0]][1]) != z(cc[j][1]):
+            out[j] = (pr[0], False)
     return out
 
 
@@ -5312,6 +5320,17 @@ def _check_cutout(expect):
         expect(rt[pkg + "Merged.java"] == (r / pkg / "Merged.java").read_bytes() and change_taken(line, add, "A.java", rules)
                and not change_taken(line.replace(b"entityCutoutCull", b"entityCutout", 1), add, "A.java", rules),
                f"rows_tree and change_taken name the family for what the port branch's call meant: {rt[pkg + 'Merged.java']!r}")
+        # re-review S2: an argument text unique on one side only, a deleted parent call, a ZOffset against a plain one --
+        # never a sure pairing: listed to decide, nothing renamed
+        pa = "class A {\n    void m() {\n        x(RenderTypes.entityCutout(T));\n    }\n}\n"
+        ca = "class A {\n    void m() {\n        int q = 1;\n        y(RenderTypes.entityCutout(T));\n        x(RenderTypes.entityCutoutCull(T), 1);\n    }\n}\n"
+        pb_ = "class B {\n    void m() {\n        x(RenderTypes.entityCutout(TEXTURE));\n    }\n    void n() {\n        k();\n    }\n}\n"
+        cb = "class B {\n    void m() {\n    }\n    void n() {\n        k();\n        y(RenderTypes.entityCutout(TEXTURE));\n    }\n}\n"
+        pz = "class Z {\n    void m() {\n        a(RenderTypes.entityCutout(TEX));\n    }\n}\n"
+        cz = "class Z {\n    void m() {\n        a(RenderTypes.entityCutoutZOffset(TEX), 1);\n    }\n}\n"
+        for name_, p_, c_ in (("one-side unique", pa, ca), ("deleted parent call", pb_, cb), ("ZOffset", pz, cz)):
+            got_, fx_, dec_, fr_ = cutout_fix_text(p_, c_)
+            expect(got_ == c_ and not fx_, f"{name_}: nothing renamed by a guess: {fx_} {dec_} {fr_}")
         # review S3: a table that already carries swap rows (an older hand table) is not swapped twice
         rd = lambda p_: ("re:\\bRenderTypes\\.entityCutoutNoCull\\(\tRenderTypes.entityCutout(\n" if p_.endswith("26.1.2/renames.tsv")
                          else reader_of_root(r)(p_))
