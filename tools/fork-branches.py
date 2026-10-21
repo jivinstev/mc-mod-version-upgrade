@@ -4150,14 +4150,36 @@ def head_ci_lines(repo, have, newest):
             f"tools/fork-branches.py ci --repo {repo} --head --run, then push {head}"]
 
 
-def ci_head(repo, modid, run=False, say=print, kit_version=None):
+def branch_holder(repo, b):
+    """The worktree (not `repo`'s own checkout) that has branch `b` checked out: (path, None) when it is clean (no
+    tracked change), (None, why) when it is dirty -- a person's edit or another run's, never touched -- and (None,
+    None) when no other worktree holds it."""
+    repo = pathlib.Path(repo).resolve()
+    path = None
+    for ln in git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+        if ln.startswith("worktree "):
+            path = pathlib.Path(ln[len("worktree "):])
+        elif ln == f"branch refs/heads/{b}" and path is not None and path.is_dir() and path.resolve() != repo:
+            dirty = [x[3:].strip() for x in git(path, "status", "--porcelain", "--untracked-files=no").stdout.splitlines()
+                     if len(x) > 3]
+            if dirty:
+                return None, (f"{b} is checked out in the worktree {path} with uncommitted changes "
+                              f"({', '.join(dirty[:4])}): commit or discard them there, or remove that worktree "
+                              f"(git worktree remove {path}); nothing was written")
+            return path.resolve(), None
+    return None, None
+
+
+def ci_head(repo, modid, run=False, say=print, kit_version=None, runner=None):
     """`ci --head`: the head branch's workflow regenerated from itself (port-ci.py recover_args: its modid, upstream, pins,
     variants, gates, tag suffix and layer branch as they are), only the Port CI kit moved to the newest published (or
     --kit-version), so it gets what port-ci.py renders today -- the records paths-ignore above all. Not read back by
     recover_args: the authors' branch (BASE), which port-ci.py takes from origin/HEAD -- so it is compared with the
     workflow's own `git fetch --no-tags origin "<base>"` and a difference refuses (fix origin/HEAD first); a --modid
     other than the workflow's refuses too. Only for a version-branch fork (its head is named by the versions'
-    branch.properties); a single-version fork's workflow is never touched here."""
+    branch.properties); a single-version fork's workflow is never touched here. --run regenerates and commits in the
+    worktree that already holds the head when it is clean (a tool's build/fork-branches/<x>), refuses when that one is
+    dirty, else uses worktree_for()."""
     repo = pathlib.Path(repo).resolve()
     have = version_branches(repo)
     if not have:
@@ -4193,10 +4215,17 @@ def ci_head(repo, modid, run=False, say=print, kit_version=None):
     if not m:
         say(f"fork-branches: --run needs a head named neoforge-<version>, not {head}: run the command above on its checkout")
         return 2
-    work, why = worktree_for(repo, m.group(1))
+    # a worktree that already holds the head (a tool's own build/fork-branches/<x>, e.g. the ledger's) is reused when
+    # it is clean -- `git worktree add` refuses a branch checked out elsewhere -- and a dirty one refuses, untouched
+    work, why = branch_holder(repo, head)
+    if work is not None:
+        say(f"fork-branches: {head} is checked out in the clean worktree {work}: regenerating it there")
+    elif why is None:
+        work, why = worktree_for(repo, m.group(1))
     if work is None:
         say(f"fork-branches: {why}"); return 2
-    rc = subprocess.run([sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(work), *args]).returncode
+    cmd = [sys.executable, str(ROOT / "tools/port-ci.py"), "--repo", str(work), *args]
+    rc = (runner or (lambda c: subprocess.run(c).returncode))(cmd)
     if rc == 0:
         say(f"fork-branches: committed on {head} in {work}; nothing pushed: git push origin {head}")
     return rc
@@ -4932,6 +4961,34 @@ def _check_ci_check(expect):
         said.clear()
         rc = ci_head(r, "examplemod", say=said.append, kit_version=9)
         expect(rc == 0 and any("--kit-version 9 --branch neoforge-1.21.1" in l for l in said), f"ci --head --kit-version: {said}")
+        # --run with the head held by another clean tool worktree (build/fork-branches/ledger; weekly round: `worktree
+        # add` refused the branch): reused, the workflow committed there; a dirty holder refuses, nothing written
+        git(r, "worktree", "remove", "--force", str(w1), check=True)
+        led = r / "build" / "fork-branches" / "ledger"
+        git(r, "worktree", "add", "-q", str(led), "neoforge-1.21.1", check=True)
+        ran = []
+
+        def fake_ci(c):
+            ran.append(c)
+            w_ = pathlib.Path(c[c.index("--repo") + 1])
+            (w_ / ".github/workflows/port-ci.yml").write_text(wf + "# regenerated\n", encoding="utf-8")
+            git(w_, "commit", "-qam", "Port CI: regenerated", check=True)
+            return 0
+        said.clear()
+        tip = resolve_branch(r, "neoforge-1.21.1")
+        rc = ci_head(r, None, run=True, say=said.append, runner=fake_ci)
+        expect(rc == 0 and len(ran) == 1 and pathlib.Path(ran[0][ran[0].index("--repo") + 1]) == led.resolve()
+               and resolve_branch(r, "neoforge-1.21.1") != tip and "# regenerated" in git(r, "show", "neoforge-1.21.1:.github/workflows/port-ci.yml").stdout,
+               f"ci --head --run: the clean worktree holding the head reused, committed there: {said} {ran}")
+        (led / ".github/workflows/port-ci.yml").write_text("edited by hand\n", encoding="utf-8")
+        said.clear()
+        tip = resolve_branch(r, "neoforge-1.21.1")
+        rc = ci_head(r, None, run=True, say=said.append, runner=fake_ci)
+        expect(rc == 2 and len(ran) == 1 and "uncommitted changes" in said[-1] and str(led) in said[-1]
+               and resolve_branch(r, "neoforge-1.21.1") == tip
+               and (led / ".github/workflows/port-ci.yml").read_text(encoding="utf-8") == "edited by hand\n",
+               f"ci --head --run: a dirty worktree holding the head refuses, nothing written: {said}")
+        git(r, "worktree", "remove", "--force", str(led), check=True)
     # a single-version fork: no version branches, so ci-check names no head and ci --head refuses (its workflow is not
     # touched here; the default path stays as it was)
     with tempfile.TemporaryDirectory() as d:
