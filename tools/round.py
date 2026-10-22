@@ -836,7 +836,8 @@ def holder(d, branch):
     """The worktree (the clone itself included) that has `branch` checked out, or None."""
     for block in git(d, "worktree", "list", "--porcelain").stdout.split("\n\n"):
         if f"branch refs/heads/{branch}" in block:
-            return block.split("\n", 1)[0].split(" ", 1)[1]
+            # git prints C:/... on Windows: the platform's own form, so it compares with the paths the driver builds
+            return str(pathlib.Path(block.split("\n", 1)[0].split(" ", 1)[1]))
     return None
 
 
