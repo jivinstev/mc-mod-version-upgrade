@@ -1825,7 +1825,7 @@ def self_check():
         p_ = pathlib.Path(j["prompt"].split("Read ", 1)[1].split(" and do", 1)[0])
         return p_.read_text(encoding="utf-8") if p_.is_file() else ""
 
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="round-selfcheck-"))
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="round-selfcheck-")).resolve()   # Windows: the long form, as git prints
     os.environ[LOCK_ENV] = str(tmp / "full-gates.lock")
     try:
         def repo(name, versions, origin=None):
@@ -2294,15 +2294,16 @@ def self_check():
         with State.tx(rs, write=False) as st:
             pass
         note, r_ = t_ledger(st, st.item("examplemod@1.21.1:ledger"), tmp / "ledger.log")
-        expect(holder(dep, "neoforge-1.21.1") == str(hw) and checkout(str(dep), "neoforge-1.21.1") == str(hw)
+        expect(os.path.samefile(holder(dep, "neoforge-1.21.1") or tmp, hw)
+               and os.path.samefile(checkout(str(dep), "neoforge-1.21.1"), hw)
                and git(dep, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "neoforge-1.21.5",
-               f"the head held by a clean worktree: the step works there, the clone stays where it is: {note}")
+               f"the head held by a clean worktree: the step works there, the clone stays where it is: {note} (holder {holder(dep, 'neoforge-1.21.1')!r}, hw {str(hw)!r})")
         (hw / "Main.java").write_text("dirty\n", encoding="utf-8")
         try:
             checkout(str(dep), "neoforge-1.21.1")
             expect(False, "a dirty worktree holding the head was used")
         except StepError as e:
-            expect("uncommitted changes" in str(e) and str(hw) in str(e), f"a dirty holder is refused: {e}")
+            expect("uncommitted changes" in str(e) and os.path.normcase(str(hw)) in os.path.normcase(str(e)), f"a dirty holder is refused: {e}")
         gh = real_gh
         # S4: a run is alive only on its host with its pid's own start time; retry --allow lasts one run
         with State.tx(rs) as st:
