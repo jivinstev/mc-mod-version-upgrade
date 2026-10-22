@@ -450,7 +450,7 @@ CHOICES = ("take", "keep", "patch", "content")
 WRITE_PERMS = ("admin", "maintain", "write")
 BOT = "github-actions[bot]"
 SHOWN_COMMITS = 20
-CHECKBOX_RE = re.compile(r"(?m)^\s*[-*] \[( |x|X)\] .*?<!-- (ki|authors|dep):(\S+?) (default|candidate) -->\s*$")
+CHECKBOX_RE = re.compile(r"(?m)^\s*[-*] \[( |x|X)\] .*?<!-- (ki|authors|dep|adopt):(\S+?) (default|candidate) -->\s*$")
 DECIDE_RE = re.compile(r"^/decide\s+(\S+)\s+(\S+)\s*(.*)$")
 GRADE_RE = re.compile(r"^/grade\s+(\S+)\s+(\S+)\s*(.*)$")
 
@@ -576,6 +576,42 @@ def dep_lines(repo, du, carried):
     return out
 
 
+def shared_lines(repo, sh, carried):
+    """The plan's "Adopt MMVU's shared code" lines of one version-branch fork (tools/weekly-plan.py, from
+    fork-branches.py sync-shared --check): what the round's sync step takes by itself, a box per hand-written copy of
+    what MMVU's shared library ships -- NOT ticked by default (it changes the fork's code); a carried tick wins -- and
+    the code the fork marks ahead of MMVU (the closing comment's Lessons block lists it to harvest)."""
+    if sh.get("error"):
+        return [f"The shared-library check could not run ({esc(sh['error'])}): the round checks again at its start."]
+    vs = sh.get("versions") or {}
+    sync = [v for v, x in vs.items() if x.get("changes")]
+    rec = [(v, p) for v, x in vs.items() for p in x.get("reconcile", [])]
+    out = [(f"The round runs `fork-branches.py sync-shared` first, each as its own commit before the version's gates: "
+            f"{len(sync)} version(s) take MMVU's newer shared tables or helpers ({', '.join(sync)})." if sync else
+            "Every version is on MMVU's current shared tables and helpers: no sync this round.")]
+    if rec:
+        out += ["", "Edited by hand while MMVU's copy moved (the round never overwrites them; an agent reconciles each):", ""]
+        out += [f"- {esc(p)} at {v}" for v, p in rec]
+    ad = sh.get("adopt") or []
+    if ad:
+        out += ["", "The fork carries its own copy of what MMVU's shared library now ships. Not ticked by default (it "
+                "changes the fork's code); ticked, the round replaces the copy with MMVU's at that version and runs "
+                "its gates:", ""]
+        for a in ad:
+            what = (f"the fork's own copy of MMVU's shared helper `{esc(a.get('helper'))}` (library {esc(a.get('library'))}"
+                    + (", byte-identical" if a.get("same") else "") + ")" if a.get("kind") == "helper" else
+                    f"the row `{esc(a.get('row'))}` duplicates MMVU's shared table")
+            out.append(f"- [{'x' if carried.get(a['id'], False) else ' '}] {esc(a['path'])} at {a['version']}: {what}"
+                       + (" -- marked ahead of MMVU: harvest it first" if a.get("ahead") else "")
+                       + f" <!-- adopt:{repo}:{a['id']} candidate -->")
+    ah = sh.get("ahead") or []
+    if ah:
+        out += ["", "Marked ahead of MMVU (`MV-AHEAD-OF-TEMPLATE`): the closing comment's Lessons block lists these to "
+                "harvest:", ""]
+        out += [f"- {esc(a['path'])} at {a['version']}: {esc(a.get('text', ''))[:200]}" for a in ah]
+    return out
+
+
 def render_plan(inp):
     """PLAN-INPUT (tools/weekly-plan.py) -> {"title", "body", "decision_needed"}."""
     forks = inp["forks"]
@@ -585,6 +621,7 @@ def render_plan(inp):
     pticks = {f["repo"]: f.get("ticks", {}) for f in pf.get("forks", [])}
     pauth = {f["repo"]: f.get("take_authors") for f in pf.get("forks", [])}
     pdeps = {f["repo"]: f.get("dep_ticks") or {} for f in pf.get("forks", [])}
+    padopt = {f["repo"]: f.get("adopt_ticks") or {} for f in pf.get("forks", [])}
     seen, clash = set(), set()
     for f in forks:
         ids = {r["id"] for r in f.get("selection", [])} | {r["id"] for r in f.get("candidates", [])}
@@ -654,6 +691,9 @@ def render_plan(inp):
         du = f.get("dep_updates")
         if du is not None:
             lines += ["", "### Dependency updates", ""] + dep_lines(repo, du, pdeps.get(repo, {}))
+        sh = f.get("shared")
+        if sh is not None:           # a version-branch fork only (weekly-plan.py cascade): a single-version plan stays as it was
+            lines += ["", "### Adopt MMVU's shared code", ""] + shared_lines(repo, sh, padopt.get(repo, {}))
         lines += ["", "### Decisions", ""]
         c = f.get("cascade")
         decs = []
@@ -690,6 +730,8 @@ def render_plan(inp):
         if du is not None:           # every kind of fork: the dependency updates the step found
             data_forks[-1]["dep_updates"] = [{k: r.get(k) for k in ("id", "mc", "ga", "from", "to", "default", "why")}
                                              for r in du.get("rows", [])]
+        if sh is not None:
+            data_forks[-1]["adopt"] = [{k: a.get(k) for k in ("id", "version", "kind", "path")} for a in sh.get("adopt") or []]
         if c is not None:            # a version-branch fork only: a single-version fork's data block stays as it was
             data_forks[-1].update({"untaken_count": len(un), "base_version": f.get("base_version"),
                                    "fix_at": {r["id"]: r.get("lowest_open") or r["lowest"] for r in sel + cand}})
@@ -724,6 +766,7 @@ def read_plan(issue, comments, allowed, now=None):
     forks = {f["repo"]: f for f in data["forks"]}
     ticks = {r: {} for r in forks}
     dticks = {r: {} for r in forks}
+    aticks = {r: {} for r in forks}
     authors = {}
     for m in CHECKBOX_RE.finditer(body):
         on, kind, key = m.group(1) != " ", m.group(2), m.group(3)
@@ -731,10 +774,10 @@ def read_plan(issue, comments, allowed, now=None):
             if key in forks:
                 authors[key] = on
             continue
-        if kind == "dep":
+        if kind in ("dep", "adopt"):
             repo, _, i = key.rpartition(":")
             if repo in dticks:
-                dticks[repo][i] = on
+                (dticks if kind == "dep" else aticks)[repo][i] = on
             continue
         repo, _, i = key.rpartition(":")
         if repo in ticks:
@@ -839,6 +882,12 @@ def read_plan(issue, comments, allowed, now=None):
                               for d in f["dep_updates"] if on[d["id"]] and safe(d)]
             o["dep_kept"] = [d["id"] for d in f["dep_updates"] if not on[d["id"]]]
             o["dep_ticks"] = {f"{d['mc']} {d['ga']} {d['to']}": on[d["id"]] for d in f["dep_updates"]}
+        if f.get("adopt") is not None:
+            # the hand-written copies of MMVU's shared code the owner ticked to adopt (none by default: a behaviour change)
+            o = out_forks[-1]
+            on = {a["id"]: aticks[r].get(a["id"], False) for a in f["adopt"]}
+            o["adopt"] = [a["id"] for a in f["adopt"] if on[a["id"]]]
+            o["adopt_ticks"] = on
     read_plan.take_by = said_by           # read-plan says it for every fork (stderr), the JSON keeps its form
     return {"schema": 1, "issue": issue.get("number"), "repo": data["repo"], "week": data["week"],
             "deadline": data["deadline"], "owner": data["owner"], "frozen_at": now, "forks": out_forks,
@@ -2007,6 +2056,32 @@ def plan_check(expect, cli):
         expect(got.get("range") == "neoforge-1.21.1..1.21.5" and [x["choice"] for x in got.get("decisions", [])] ==
                ["take", "take"] and not (d / "dec" / "o__dep.decisions.json").exists(),
                f"--decisions-dir: one cascade --apply-decisions file per version-branch fork: {got}")
+        # the shared library (a version-branch fork only): the sync preview, the reconcile list, an adopt box NOT ticked
+        # by default, the ahead marks; a ticked box comes back as the fork's `adopt`; the single-version fork gets none
+        inp3 = json.loads(json.dumps(inp))
+        inp3["forks"][0]["shared"] = {
+            "versions": {"1.21.4": {"changes": 2, "reconcile": []},
+                         "1.21.5": {"changes": 0, "reconcile": ["src/main/java/com/example/mod/mv/Gl.java"]}},
+            "adopt": [{"id": "A0123456789", "version": "1.21.5", "kind": "helper", "path": "src/main/java/com/example/mod/mv/Gl.java",
+                       "helper": "Gl", "library": "1.21.5", "same": False, "ahead": True},
+                      {"id": "Abcdef01234", "version": "1.21.4", "kind": "row", "path": ".port/1.21.4/renames.tsv",
+                       "row": "a.B\tc.B", "library": "1.21.4", "same": True}],
+            "ahead": [{"version": "1.21.5", "path": "src/main/java/com/example/mod/mv/Gl.java", "line": 1, "text": "a faster draw"}]}
+        b3 = render_plan(inp3)["body"]
+        sec = b3.split("### Adopt MMVU's shared code", 1)[-1].split("###", 1)[0]
+        expect(b3.count("### Adopt MMVU's shared code") == 1 and "1 version(s) take MMVU's newer shared tables or helpers (1.21.4)" in sec
+               and "Gl.java at 1.21.5" in sec and "- [ ] " in sec and "- [x]" not in sec
+               and "<!-- adopt:o/lib:A0123456789 candidate -->" in sec and "harvest it first" in sec
+               and "a faster draw" in sec and b3.replace(sec, "").count("Adopt MMVU") == 1
+               and "### Adopt" not in b and render_plan(inp)["body"] == b,
+               f"render-plan: the shared-library section of the version-branch fork only, its boxes unticked: {sec}")
+        fr3 = read_plan({"number": 7, "body": b3.replace("- [ ] src/main/java/com/example/mod/mv/Gl.java", "- [x] src/main/java/com/example/mod/mv/Gl.java")
+                         .replace("- [ ] src/main/java/com/example/mod/mv/Gl\\.java", "- [x] src/main/java/com/example/mod/mv/Gl\\.java")},
+                        [], lambda u: True, "t")
+        l3, d3 = fr3["forks"][0], fr3["forks"][1]
+        expect(l3.get("adopt") == ["A0123456789"] and l3.get("adopt_ticks") == {"A0123456789": True, "Abcdef01234": False}
+               and "adopt" not in d3 and "adopt" not in read_plan({"number": 7, "body": b}, [], lambda u: True, "t")["forks"][0],
+               f"read-plan: the ticked adopt box only; no adopt key without the section: {l3.get('adopt_ticks')} {sec}")
         # dependency updates (every kind of fork): ticked by default, unticked with the reason; ticks read back
         du_lib = {"checked": 3, "rows": [
             {"id": "D1", "mc": "1.21.1", "ga": "maven.modrinth:viewer", "from": "maven.modrinth:viewer:a1",

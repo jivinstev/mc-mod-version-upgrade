@@ -114,7 +114,7 @@ In short -- what to ask, and the command it runs (the full detail is in the tabl
 | **migrate-mod** | `> Migrate <mod name> to 26.2` | `python3 tools/port.py "<mod name or jar>" --to 26.2` |
 | **port-fork** | `> Port my fork <github url> to 1.21.1` | `python3 tools/port-upstream.py --repo DIR --modid ID`, then `python3 tools/port-ci.py --repo DIR --modid ID` |
 | **fork-versions** | `> Make my fork build for 1.21.4 too` | `python3 tools/fork-branches.py add-target --repo DIR --target 1.21.4`, then `python3 tools/fork-port.py --repo DIR --target 1.21.4`; the 26.1.2 entityCutout swap: `python3 tools/fork-branches.py cutout-check --repo DIR --branch neoforge-26.1.2 [--fix]` |
-| **keep-current** | `> Keep my forks current` / `> Set up the weekly round` | setup: `python3 tools/weekly-plan.py install --repo DIR --fork owner/repo@neoforge-1.21.1[=URL#BRANCH] --plan-owner LOGIN [--allow WHAT ...]` and `weekly-plan.py round-task --existing NAME ... [--version-branches]`; the round: `python3 tools/known-issues.py read-plan --latest --slug owner/repo`, then, for a set of version-branch forks, its driver: `python3 tools/round.py init --frozen round/frozen.json --fork owner/repo=DIR ...` and `python3 tools/round.py drive` until it prints `ROUND DONE` (each AGENT JOB it prints goes to a fresh subagent, then `round.py record ID --summary FILE`; `round.py status`, `round.py resume` after a restart; each ticked dependency update is applied once by it: `python3 tools/layer-deps.py resolve --repo DIR --target MC --bump DEP=VERSION`); its lessons, harvested here afterwards: `python3 tools/propose-learnings.py --from-plan owner/repo#N` |
+| **keep-current** | `> Keep my forks current` / `> Set up the weekly round` | setup: `python3 tools/weekly-plan.py install --repo DIR --fork owner/repo@neoforge-1.21.1[=URL#BRANCH] --plan-owner LOGIN [--allow WHAT ...]` and `weekly-plan.py round-task --existing NAME ... [--version-branches]`; the round: `python3 tools/known-issues.py read-plan --latest --slug owner/repo`, then, for a set of version-branch forks, its driver: `python3 tools/round.py init --frozen round/frozen.json --fork owner/repo=DIR ...` and `python3 tools/round.py drive` until it prints `ROUND DONE` (each AGENT JOB it prints goes to a fresh subagent, then `round.py record ID --summary FILE`; `round.py status`, `round.py resume` after a restart; each ticked dependency update is applied once by it: `python3 tools/layer-deps.py resolve --repo DIR --target MC --bump DEP=VERSION`; each version behind this repository's shared library is synced by it: `python3 tools/fork-branches.py sync-shared --repo DIR --target V`, what it would change read first with `python3 tools/fork-branches.py sync-shared --repo DIR --check [--json FILE]`); its lessons, harvested here afterwards: `python3 tools/propose-learnings.py --from-plan owner/repo#N` |
 | **publish-port** | `> Publish my fork on Modrinth and CurseForge` | `python3 tools/port-publish.py setup --repo DIR --permission URL`; CI: `port-publish.py publish --tag TAG [--platform mr\|cf]` |
 | **review-contribution** | `> Review PR 42` | `python3 tools/review-pr.py --base origin/main --head HEAD` |
 
@@ -131,13 +131,25 @@ drops a Minecraft version the fork builds or switches provider; a lookup that fa
 never fails the plan. The round applies the ticked ones once, at setup, with `tools/layer-deps.py resolve --bump`, and
 nothing else moves a dependency: every resolve (fork-port.py's setup included) keeps a pinned one as it is, and a
 single-version fork's pins (its build.gradle coordinates) move only by `--bump` too -- the same for every kind of fork, a
-deliberate change to single-version forks, decided by the maintainer. Wednesday morning Pacific a Claude scheduled
+deliberate change to single-version forks, decided by the maintainer. For a version-branch fork the issue also has
+"Adopt MMVU's shared code" (`fork-branches.py sync-shared --check`, read-only): which versions the round will bring up
+to this repository's current shared tables and helpers, the copies the fork edited by hand while the template moved (an
+agent reconciles them; nothing overwrites them), a box per hand-written copy of what the shared library now ships --
+NOT ticked by default, as adopting changes the fork's code -- and the code the fork marks `MV-AHEAD-OF-TEMPLATE`, which
+the closing comment's Lessons block lists to harvest; a single-version fork's issue has no such section. Wednesday morning Pacific a Claude scheduled
 task runs the round from that issue, at a minute jittered per fork set (`round.time` in the fork's config). For a set of
 version-branch forks (`weekly-plan.py round-task --version-branches`) the round runs on a driver, `tools/round.py`: from the frozen plan and the clones it builds `round/STATE.json` (per fork and version,
 in ladder order, the library before its dependents) and runs every mechanical step itself -- merge-ups, re-pins, the one
 full gate run per version (one at a time on the machine), PRs, CI waits, merges, release dispatch, records, cost marks
 -- while the session only starts a fresh subagent for each job it prints (the authors' code, the selected fixes, the
-fresh review, the fixer, the re-check, a fixer for a step that failed, the close) and records its short summary; state
+fresh review, the fixer, the re-check, a fixer for a step that failed, the close) and records its short summary. At
+`init` it reads each fork against this repository's shared library (`sync-shared --check`, no checkout touched): a
+version a sync would change gets work this round even with nothing else -- first a `sync` step (`fork-branches.py
+sync-shared` as its own commit on the version branch), then its gates, PR, merge, release and the dependents' re-pin;
+a hand-edited copy whose template moved is a reconcile job instead, the file untouched; a copy the plan ticked to adopt
+is an adopt job; a version with none of this and no other work is not queued. When the version below only moved its
+own installed helper copy to its library's, a cascade keeps this version's installed copy instead of merging the two.
+State
 survives a restart (`round.py resume`). A set with a single-version fork keeps the round as it was (`round.py init`
 refuses it). On a version-branch library, each version merges only after each dependent's Gate C
 passed against its candidate jar, so a library crash is a finding before the merge, not a re-release after it. With no

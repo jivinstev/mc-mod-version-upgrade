@@ -20,7 +20,7 @@
     python3 tools/fork-branches.py cutout-check --repo DIR --branch neoforge-<v> [--fix]   # the 26.1.2 entityCutout swap
     python3 tools/fork-branches.py ci          --repo DIR (--target T | --all) --modid ID | --head [--modid ID]  [--run] [--kit-version N]
     python3 tools/fork-branches.py ci-check    --repo DIR [--target T ...] [--kit-version N]   # the head branch too
-    python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...]
+    python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...] [--check [--json FILE]]   # --check: read-only report
     python3 tools/fork-branches.py --self-check [--deep | --platform]   # --deep: before a release; --platform: an OS-only leg
 
 THE SHAPE. The port branch `neoforge-1.21.1` stays exactly what it is (a single-version port). Each further Minecraft
@@ -2312,7 +2312,27 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             (work / f).parent.mkdir(parents=True, exist_ok=True)
             (work / f).write_bytes(new)
             git(work, "add", "--", f)
+    # a shared helper both sides carry as installed: the parent's copy moved with ITS library (sync-shared), and t follows
+    # its own -- never a 3-way merge of two versions' library copies (a conflict, or a hybrid of both that t's listing
+    # then calls edited); t's sync-shared brings t's copy up
+    if not already and java:
+        t_listed = helper_map(read_t(f"{REC}/{t}/shared-helpers.txt"))
+        p_listed = helper_map(reader_of_ref(repo, parent_ref)(f"{REC}/{parent_version}/shared-helpers.txt")) \
+            if parent_version else {}
+        own_copy = 0
+        for f in java:
+            t_pre, p_new = blob_at(repo, pre, f), blob_at(repo, parent_ref, f)
+            if (t_pre is not None and p_new is not None and f in t_listed and f in p_listed
+                    and hash_blobs({f: t_pre})[f] == t_listed[f] and hash_blobs({f: p_new})[f] == p_listed[f]):
+                git(work, "checkout", pre, "--", f)
+                resolved.add(f)
+                own_copy += 1
+        if own_copy:
+            notes.append(f"{own_copy} shared helper(s) {t} carries as installed kept as {t}'s library copy ({parent_name}'s "
+                         f"moved with its own library; sync-shared {t} brings {t}'s up)")
     for f in java:
+        if f in resolved:
+            continue
         t_pre, p_new = blob_at(repo, pre, f), blob_at(repo, parent_ref, f)
         if t_pre is None and blob_at(repo, port_mb, f) is not None:
             if (work / f).exists() or f in conflicted:
@@ -3833,39 +3853,59 @@ def used_helpers(pool, java_texts):
     return added
 
 
-def helper_pass(repo, work, t, versions_, mv_pkg, modid, files, say=print, who="sync-shared", add_only=False, pre=None):
-    """The shared-library helpers on the checkout `work` of version t: each helper of `versions_`' library the tree uses
-    (transitively) is installed; one installed and unedited since follows the library's copy (add_only: left as it is,
-    and one the commit `pre` lacks that arrived as the library's copy -- carried in by a merge -- listed as installed);
-    the fork's own class of that name, or an edited helper, is left alone and said. .port/<t>/shared-helpers.txt kept in
-    step. `files`: the tree's build files ({path: bytes}, build.gradle/gradle.properties read for `// REQUIRES:`).
-    -> the paths written (not staged)."""
-    changed = []
-    listed = helper_blobs(work, t)
+def helper_plan(versions_, mv_pkg, modid, files, cur, listed, add_only=False, absent_before=None):
+    """What the helper step does on a tree, written nowhere: each helper of `versions_`' library the tree `cur`
+    ({path: bytes}) uses (transitively) is installed; one installed and unedited since (its blob in `listed`, the
+    .port/<t>/shared-helpers.txt map) follows the library's copy (add_only: left as it is, and one `absent_before(dest)`
+    says arrived as the library's copy -- carried in by a merge -- listed as installed); the fork's own class of that
+    name, or an edited helper, is left alone. `files`: the build files ({path: bytes}, build.gradle/gradle.properties
+    read for `// REQUIRES:`). -> ({dest: library bytes} to write, {dest: blob} the new listing,
+    [(dest, "edited"|"own", library bytes)] left alone)."""
     build_text = files.get("build.gradle", b"").decode("utf-8", "replace") + files.get("gradle.properties", b"").decode("utf-8", "replace")
     pool = shared_helpers_for(sorted(set(versions_), key=mc_key, reverse=True), mv_pkg, modid, build_text)
-    cur = root_files(repo, work, True)
     java = [d.decode("utf-8", "replace") for p, d in cur.items() if p.startswith("src/main/java/") and p.endswith(".java")]
-    lines = dict(listed)
+    writes, lines, kept = {}, dict(listed), []
     for rel, body in used_helpers(pool, java).items():
         dest = f"src/main/java/{rel}"
         data = body.encode("utf-8")
         if dest in cur and (add_only or listed.get(dest) != hash_blobs({dest: cur[dest]})[dest]):
-            if add_only and cur[dest] == data and dest not in listed and pre and blob_at(repo, pre, dest) is None:
+            if add_only and cur[dest] == data and dest not in listed and absent_before and absent_before(dest):
                 lines[dest] = hash_blobs({dest: data})[dest]      # carried in by a merge, as installed: listed here too
             if cur[dest] != data and not add_only:   # the fork's own class of that name, or an edited helper: left alone, said
-                say(f"fork-branches: {who} {t}: {dest} "
-                    + ("was edited since it was installed" if dest in listed else "is the fork's own class, not the installed helper")
-                    + ": left alone (the library's copy differs; merge it by hand if wanted)")
+                kept.append((dest, "edited" if dest in listed else "own", data))
             continue
         if cur.get(dest) != data:
-            (work / dest).parent.mkdir(parents=True, exist_ok=True)
-            (work / dest).write_bytes(data); changed.append(dest)
+            writes[dest] = data
         lines[dest] = hash_blobs({dest: data})[dest]
+    return writes, lines, kept
+
+
+def helper_listing(lines):
+    return ("# shared-library helpers as installed (path blob): tools/fork-branches.py\n"
+            + "".join(f"{k} {v}\n" for k, v in sorted(lines.items()))).encode("utf-8")
+
+
+def helper_pass(repo, work, t, versions_, mv_pkg, modid, files, say=print, who="sync-shared", add_only=False, pre=None):
+    """The shared-library helpers on the checkout `work` of version t (helper_plan, carried out): each helper of
+    `versions_`' library the tree uses (transitively) is installed; one installed and unedited since follows the
+    library's copy (add_only: left as it is, and one the commit `pre` lacks that arrived as the library's copy --
+    carried in by a merge -- listed as installed); the fork's own class of that name, or an edited helper, is left
+    alone and said. .port/<t>/shared-helpers.txt kept in step. `files`: the tree's build files ({path: bytes},
+    build.gradle/gradle.properties read for `// REQUIRES:`). -> the paths written (not staged)."""
+    changed = []
+    listed = helper_blobs(work, t)
+    cur = root_files(repo, work, True)
+    writes, lines, kept = helper_plan(versions_, mv_pkg, modid, files, cur, listed, add_only,
+                                      (lambda dest: blob_at(repo, pre, dest) is None) if pre else None)
+    for dest, kind, _data in kept:
+        say(f"fork-branches: {who} {t}: {dest} "
+            + ("was edited since it was installed" if kind == "edited" else "is the fork's own class, not the installed helper")
+            + ": left alone (the library's copy differs; merge it by hand if wanted)")
+    for dest, data in writes.items():
+        (work / dest).parent.mkdir(parents=True, exist_ok=True)
+        (work / dest).write_bytes(data); changed.append(dest)
     if lines != listed:
-        (work / REC / t / "shared-helpers.txt").write_bytes(
-            ("# shared-library helpers as installed (path blob): tools/fork-branches.py\n"
-             + "".join(f"{k} {v}\n" for k, v in sorted(lines.items()))).encode("utf-8"))
+        (work / REC / t / "shared-helpers.txt").write_bytes(helper_listing(lines))
         changed.append(f"{REC}/{t}/shared-helpers.txt")
     return changed
 
@@ -4031,68 +4071,325 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
 
 
 
-def sync_shared(repo, targets=None, say=print, ci_modid=None):
+SHARED_HEADER = b"shared fork-layer helper from mc-mod-version-upgrade"   # the first line of every shared helper
+AHEAD_MARK = "MV-AHEAD-OF-TEMPLATE"     # a fork's code ahead of the shared library's: a lesson to harvest
+_TEMPLATE_HISTORY = {}
+
+
+def library_history_ok(d):
+    """Has the repository holding the shared library its whole history? A shallow clone (the round clones this
+    repository with --depth 1) is deepened once (`git fetch --unshallow`, reading the public repository); when that
+    fails the history is unknown. Memoised per directory."""
+    key = ("shallow", str(d))
+    if key not in _TEMPLATE_HISTORY:
+        ok = git(d, "rev-parse", "--git-dir").returncode == 0
+        if ok and git(d, "rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+            git(d, "fetch", "-q", "--unshallow", env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+            ok = git(d, "rev-parse", "--is-shallow-repository").stdout.strip() == "false"
+        _TEMPLATE_HISTORY[key] = ok
+    return _TEMPLATE_HISTORY[key]
+
+
+def template_history(rel):
+    """Every text the shared library's file `rel` (under shared_dir(), e.g. `26.3/renames.tsv`) has had in the git
+    history of the repository it is in, the current one included; empty when that is no git repository or its history
+    cannot be had (a shallow clone that cannot be deepened): an edit cannot be told then, and nothing is called edited."""
+    key = (str(shared_dir()), rel)
+    if key not in _TEMPLATE_HISTORY:
+        d, out = shared_dir(), set()
+        if d.is_dir() and library_history_ok(d):
+            r = git(d, "log", "--format=", "--raw", "--no-abbrev", "--no-renames", "--", rel)    # pathspec relative to d
+            blobs = {b for ln in r.stdout.splitlines() if ln.startswith(":")
+                     for b in ln.split("\t", 1)[0].split()[2:4] if b.strip("0")}
+            if r.returncode == 0 and blobs:
+                out = {x.decode("utf-8", "surrogateescape") for x in cat_blobs(d, sorted(blobs)).values()}
+        if out and (d / rel).is_file():
+            out.add((d / rel).read_text(encoding="utf-8", errors="surrogateescape"))
+        _TEMPLATE_HISTORY[key] = out
+    return _TEMPLATE_HISTORY[key]
+
+
+def library_copies(name, versions_, sub):
+    """Every text the shared library's helper `name` has had (any of `versions_`, any commit in its history, the current
+    one), placeholders filled, as bytes: a fork file equal to one of them is a library copy nobody edited."""
+    out = set()
+    for v in versions_:
+        f = shared_dir() / v / "java" / f"{name}.java"
+        texts = set(template_history(f"{v}/java/{name}.java"))
+        if f.is_file():
+            texts.add(f.read_text(encoding="utf-8"))
+        out |= {sub(x).encode("utf-8", "surrogateescape") for x in texts}
+    return out
+
+
+def section_edited(ver, section, sub):
+    """Is a `# ---- shared <ver>` section of a version's shared-renames.tsv (its text, header line first) hand-edited:
+    equal to no text the library's table has ever had (placeholders filled)? False when the history is unknown."""
+    hist = template_history(f"{ver}/renames.tsv")
+    if not hist:
+        return False
+    norm = lambda x: x.replace("\r\n", "\n").strip("\n")
+    body = section.split("\n", 1)[1] if "\n" in section else ""
+    return norm(body) not in {norm(sub(h)) for h in hist}
+
+
+def sync_plan(repo, t, work=None, ref=None, rows=True):
+    """What sync-shared does on version t, written nowhere: from the checkout `work` (its files as git would store them)
+    or, read-only, from the commit `ref`. -> {"writes": {path: bytes} (empty: current), "edited": [{path, what, kind,
+    reconcile, library_blob}] (a hand-edited table section or helper, left alone; `reconcile` when the library's copy
+    moved since it was installed), "own": [{path, ...}] (the fork's own class at a helper's path), "kept": [versions with
+    no library table], "versions", and the tree it read (files, read, mv_pkg, modid, new_text, lines)}. rows=False
+    (the read-only check): the files the rows alone made are not re-made -- each version's whole port branch through
+    its table twice, minutes on a large fork -- a changed table already says the version changes."""
+    repo = pathlib.Path(repo).resolve()
+    if work is not None:
+        files = root_files(repo, work, True)
+        read = reader_of_root(work)
+        head = git(work, "rev-parse", "HEAD", check=True).stdout.strip()      # work's HEAD, not the clone's
+    else:
+        files = ref_files(repo, ref)
+        read = lambda p_: files[p_].decode("utf-8", "surrogateescape") if p_ in files else ""
+        head = ref
+    props = parse_props(read(f"{REC}/{t}/{BRANCH_PROPS}"))
+    mv_pkg = props.get("mv_package") or "mv"
+    toml = next((files[p_] for p_ in sorted(files) if p_.endswith("META-INF/neoforge.mods.toml") and p_.startswith("src/")), b"")
+    modid = (re.search(rb'(?m)^\s*modId\s*=\s*"([^"]+)"', toml) or [None, b""])[1].decode("utf-8", "replace")
+    sub = lambda x: x.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
+    sp = f"{REC}/{t}/shared-renames.tsv"
+    old_text = read(sp)
+    mfl = _mod("make_fork_layer_fb", "make-fork-layer.py")
+    stable = [l["mc"] for l in mfl.versions()["lines"] if l.get("stable")]
+    # every targeted version above the base up to t, nearest first (as add-target writes them): a version whose
+    # library gained a table since gets its section, and its helpers count even with no table at all
+    base_v = props.get("base_minecraft_version") or (stable[0] if stable else t)
+    span = [v for v in stable if mc_key(base_v) < mc_key(v) <= mc_key(t)][::-1]
+    old_secs = {k.split(" ", 1)[1]: b for k, b in shared_sections(old_text).items()}
+    versions_ = span + [v for v in old_secs if v not in span]
+    new_sections, kept, edited = [], [], []
+    for ver in versions_:
+        f = shared_dir() / ver / "renames.tsv"
+        if f.is_file():
+            fresh = f"# ---- shared {ver}\n" + sub(f.read_text(encoding="utf-8"))
+            if ver in old_secs and old_secs[ver].strip("\n") != fresh.strip("\n") and section_edited(ver, old_secs[ver], sub):
+                new_sections.append(old_secs[ver].rstrip("\n"))      # hand-edited: left as it is, said
+                edited.append({"path": sp, "what": f"section `shared {ver}`", "kind": "section", "reconcile": True,
+                               "library_blob": None})
+            else:
+                new_sections.append(fresh)
+        elif ver in old_secs:
+            new_sections.append(old_secs[ver].rstrip("\n")); kept.append(ver)
+    new_text = ("\n".join(x.rstrip("\n") for x in new_sections) + "\n") if new_sections else old_text
+    writes = {}
+    if new_text != old_text:
+        writes[sp] = new_text.encode("utf-8", "surrogateescape")
+        pb = props.get("port_branch") or branch_name(props.get("base_minecraft_version", "1.21.1"))
+        tip = resolve_branch(repo, pb)
+        pr = (git(repo, "merge-base", head, tip).stdout.strip() or None) if tip else None
+        if pr and rows:
+            # every .java file the rows alone made (equal to the old tables over the port branch) re-made through the new
+            rows_old = rows_tree(repo, pr, read, t, chain_read(read, t))
+            read2 = lambda p_: new_text if p_ == sp else read(p_)
+            rows_new = rows_tree(repo, pr, read2, t, chain_read(read2, t))
+            for p_, data in rows_old.items():
+                if files.get(p_) == data and rows_new.get(p_) not in (None, data):
+                    writes[p_] = rows_new[p_]
+    # helpers: an installed, unedited one follows the library; a newly used one is added
+    listed = helper_map(read(f"{REC}/{t}/shared-helpers.txt"))
+    cur = dict(files)
+    cur.update(writes)
+    # a helper's copy equal to a text the library itself once shipped is a library copy nobody edited, listed or not (a
+    # copy carried over from a layer -- a stand-in's `// MV-STAND-IN:` lines aside --, a merge, a version below): it
+    # follows the library like an installed one (weekly
+    # round 2026-10-21: a dependent's unlisted 26.3 LegacyGl kept a crash the library's template had fixed a week before)
+    seen = dict(listed)
+    mv_dir = "src/main/java/" + mv_pkg.replace(".", "/") + "/"
+    for p_ in [x for x in cur if x.startswith(mv_dir) and x.endswith(".java") and "/" not in x[len(mv_dir):]]:
+        name = p_[len(mv_dir):-5]
+        if any((shared_dir() / v / "java" / f"{name}.java").is_file() for v in versions_) \
+                and listed.get(p_) != hash_blobs({p_: cur[p_]})[p_] \
+                and re.sub(rb"(?m)^// MV-STAND-IN:.*\r?\n", b"", cur[p_]) in library_copies(name, versions_, sub):
+            seen[p_] = hash_blobs({p_: cur[p_]})[p_]
+    hw, lines, hkept = helper_plan(versions_, mv_pkg, modid, files, cur, seen)
+    if not hw and lines == seen:
+        lines = dict(listed)        # nothing to update: a listing-only commit would cost a release for no change
+    writes.update(hw)
+    if lines != listed:
+        writes[f"{REC}/{t}/shared-helpers.txt"] = helper_listing(lines)
+    own = []
+    for dest, kind, data in hkept:
+        lb = hash_blobs({dest: data})[dest]
+        if kind == "edited":
+            edited.append({"path": dest, "what": "helper", "kind": "helper", "library_blob": lb,
+                           "reconcile": listed.get(dest) != lb})
+        else:
+            own.append({"path": dest, "library_blob": lb})
+    return {"writes": writes, "edited": edited, "own": own, "kept": kept, "versions": versions_, "files": files,
+            "read": read, "mv_pkg": mv_pkg, "modid": modid, "new_text": new_text, "lines": lines}
+
+
+def adopt_candidates(t, plan):
+    """The fork's hand-written copies of what the shared library now ships at version t: a .java file under the
+    version's mv package (or carrying a shared helper's own header or `// REQUIRES:` line) named like a helper of t's
+    library that is not installed as that helper; a row of .port/<t>/renames.tsv that a shared table of t already has.
+    -> [{id, kind: helper|row, path, helper|row, library, same}] (`id` is stable while the candidate is)."""
+    files, read = plan["files"], plan["read"]
+    build = files.get("build.gradle", b"").decode("utf-8", "replace") + files.get("gradle.properties", b"").decode("utf-8", "replace")
+    nearest = {}
+    for v in plan["versions"]:                  # nearest first: the copy a sync would install
+        d = shared_dir() / v / "java"
+        for f in sorted(d.glob("*.java")) if d.is_dir() else []:
+            nearest.setdefault(f.stem, v)
+    pool = shared_helpers_for(sorted(set(plan["versions"]), key=mc_key, reverse=True), plan["mv_pkg"], plan["modid"], build)
+    lib = {rel.rsplit("/", 1)[-1][:-5]: body.encode("utf-8") for rel, body in pool.items()}
+    mv_dir = "src/main/java/" + plan["mv_pkg"].replace(".", "/") + "/"
+    ident = lambda key: "A" + hashlib.sha1(f"{t}\0{key}".encode("utf-8")).hexdigest()[:10]
+    out = []
+    for p_, data in sorted(files.items()):
+        if not (p_.startswith("src/main/java/") and p_.endswith(".java")) or p_ in plan["lines"]:
+            continue
+        name = p_.rsplit("/", 1)[-1][:-5]
+        if name not in lib:
+            continue
+        if not (p_.startswith(mv_dir) or SHARED_HEADER in data or re.search(rb"(?m)^// REQUIRES: ", data)):
+            continue
+        out.append({"id": ident(p_), "kind": "helper", "path": p_, "helper": name, "library": nearest.get(name, "?"),
+                    "same": data == lib[name]})
+    norm = lambda ln: "\t".join(x.strip() for x in ln.split("\t"))
+    shared_rows = {norm(ln) for ln in plan["new_text"].splitlines() if ln.strip() and not ln.lstrip().startswith("#")}
+    for ln in read(f"{REC}/{t}/renames.tsv").splitlines():
+        if ln.strip() and not ln.lstrip().startswith("#") and norm(ln) in shared_rows:
+            out.append({"id": ident("row\0" + norm(ln)), "kind": "row", "path": f"{REC}/{t}/renames.tsv", "row": norm(ln),
+                        "library": t, "same": True})
+    return out
+
+
+def ahead_marks(files):
+    """The fork's code marked `MV-AHEAD-OF-TEMPLATE` (ahead of the shared library: a lesson to harvest) ->
+    [{path, line, text}], one per file, its marker lines joined."""
+    out = []
+    mark = AHEAD_MARK.encode("utf-8")
+    for p_, data in sorted(files.items()):
+        if mark not in data or p_.startswith((REC + "/", ".github/")):
+            continue
+        hits = [(i + 1, ln) for i, ln in enumerate(data.decode("utf-8", "replace").splitlines()) if AHEAD_MARK in ln]
+        text = " ".join(ln.split(AHEAD_MARK, 1)[1].lstrip(":").strip() for _i, ln in hits)
+        out.append({"path": p_, "line": hits[0][0], "text": re.sub(r"\s+", " ", text)[:300]})
+    return out
+
+
+def shared_status(repo, targets=None):
+    """sync-shared --check, read-only (no checkout touched): per version branch (its newest commit, local or origin's)
+    -> {t: {"ref", "changes": [paths a sync would write], "edited": [...], "reconcile": [the edited ones whose library
+    copy moved: an agent's job, never overwritten], "own": [...], "adopt": adopt_candidates, "ahead": ahead_marks}}
+    ({"error": why} for a version that could not be read)."""
+    repo = pathlib.Path(repo).resolve()
+    have = version_branches(repo)
+    out = {}
+    for t in sorted(have, key=mc_key):
+        if targets and t not in targets:
+            continue
+        ref = fresh_branch(repo, branch_name(t)) or have[t]
+        try:
+            plan = sync_plan(repo, t, ref=ref, rows=False)
+            out[t] = {"ref": ref, "changes": sorted(plan["writes"]),
+                      "edited": [{k: e[k] for k in ("path", "what", "reconcile", "library_blob")} for e in plan["edited"]],
+                      "reconcile": [e["path"] for e in plan["edited"] if e["reconcile"]],
+                      "own": [o["path"] for o in plan["own"]], "kept": plan["kept"],
+                      "adopt": adopt_candidates(t, plan), "ahead": ahead_marks(plan["files"])}
+            ahead = {a["path"] for a in out[t]["ahead"]}
+            for a in out[t]["adopt"]:
+                a["ahead"] = a["path"] in ahead       # adopting it would drop what the fork has and the library lacks
+        except Exception as e:      # noqa: BLE001 -- one unreadable version is said, the others still reported
+            out[t] = {"ref": ref, "error": f"{type(e).__name__}: {e}"[:300]}
+    return out
+
+
+def status_lines(st, who="sync-shared --check"):
+    """The report of shared_status, one line per finding. -> (lines, anything to do)."""
+    lines, todo = [], False
+    for t, s in st.items():
+        h = f"fork-branches: {who} {t}:"
+        if s.get("error"):
+            lines.append(f"{h} could not be read: {s['error']}"); todo = True
+            continue
+        rec = [e for e in s["edited"] if e["reconcile"]]
+        todo = todo or bool(s["changes"] or rec)
+        lines.append(f"{h} " + (f"would change {len(s['changes'])} file(s): {', '.join(s['changes'][:8])}"
+                                + (" ..." if len(s["changes"]) > 8 else "")
+                                + (" (a table moved: the sync also re-makes the files its rows alone made)"
+                                   if f"{REC}/{t}/shared-renames.tsv" in s["changes"] else "")
+                                if s["changes"] else "current"))
+        for e in s["edited"]:
+            lines.append(f"{h} EDITED {e['path']} ({e['what']}, edited by hand): left alone; "
+                         + ("the library's copy moved since it was installed -- reconcile the fork's copy with it by hand"
+                            if e["reconcile"] else "the library's copy has not moved since: nothing to reconcile"))
+        for a in s["adopt"]:
+            lines.append(f"{h} adopt: " + (f"{a['path']} is the fork's own copy of the shared helper {a['helper']} "
+                                            f"(library {a['library']}{', byte-identical' if a['same'] else ''})"
+                                            + (" -- marked ahead of the library: harvest it first, adopting it would drop "
+                                               "the fork's fix" if a.get("ahead") else "")
+                                            if a["kind"] == "helper" else
+                                            f"{a['path']} row `{a['row']}` duplicates a row of the shared tables"))
+        for a in s["ahead"]:
+            lines.append(f"{h} ahead of the library (harvest): {a['path']}:{a['line']}: {a['text']}")
+    return lines, todo
+
+
+def sync_shared(repo, targets=None, say=print, ci_modid=None, check=False, json_out=None):
     """Bring version branches up to the shared library's current tables and helpers (make-fork-layer.py sync-shared's
     job on a layer): per version, oldest first, on a clean checkout of its branch -- each `# ---- shared <v>` section of
-    .port/<t>/shared-renames.tsv rewritten from templates/fork-layer/shared/<v>/renames.tsv; every .java file the rows
-    alone made (equal to the old tables over the port branch) re-made through the new ones; each shared helper it carries
-    as installed (unedited since) replaced by the library's copy, and a helper the tree now uses added; committed on
-    the branch. The tables and shared-helpers.txt are reviewed inputs, so the version's review goes stale (re-review the
-    change); the next cascade remakes mechanical files through the new rows. Pushes nothing. -> exit code."""
+    .port/<t>/shared-renames.tsv rewritten from templates/fork-layer/shared/<v>/renames.tsv (a section edited by hand --
+    equal to no text the library's table ever had -- is left alone and said); every .java file the rows alone made
+    (equal to the old tables over the port branch) re-made through the new ones; each shared helper it carries as
+    installed (unedited since) replaced by the library's copy, and a helper the tree now uses added; committed on the
+    branch. The tables and shared-helpers.txt are reviewed inputs, so the version's review goes stale (re-review the
+    change); the next cascade remakes mechanical files through the new rows. Pushes nothing.
+    check=True: nothing written, no checkout touched -- per version what a sync would change, the hand-edited copies
+    it would leave, the adopt candidates and the code marked ahead of the library (shared_status); exit 1 when a
+    version would change or has a copy to reconcile, else 0; json_out: the status as JSON. -> exit code."""
     repo = pathlib.Path(repo).resolve()
     have = version_branches(repo)
     order = sorted(have, key=mc_key)
     todo = [t for t in order if not targets or t in targets]
     if targets and set(targets) - set(order):
         say(f"fork-branches: no version branch for {', '.join(sorted(set(targets) - set(order)))}"); return 2
+    if check:
+        st = shared_status(repo, todo)
+        if json_out:
+            pathlib.Path(json_out).write_text(json.dumps(st, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        lines, busy = status_lines(st)
+        for ln in lines:
+            say(ln)
+        return 1 if busy else 0
     above = [t for t in order if t not in todo and todo and mc_key(t) > mc_key(todo[0])]
     if above:
         say(f"fork-branches: sync-shared: WARNING: {', '.join(above)} not synced -- each keeps its old copy of the shared "
             f"tables, so a cascade from below re-makes the synced files back through them; sync them too (run "
             f"sync-shared without --target, the default: every version)")
-    mfl = load("make_fork_layer_fb", "make-fork-layer.py")
-    stable = [l["mc"] for l in mfl.versions()["lines"] if l.get("stable")]
     for t in todo:
         work, why = worktree_for(repo, t)
         if work is None:
             say(f"fork-branches: sync-shared {t}: {why}"); return 2
-        files = root_files(repo, work, True)
-        props = info(work, t)
-        mv_pkg = props.get("mv_package") or "mv"
-        toml = next((files[p] for p in sorted(files) if p.endswith("META-INF/neoforge.mods.toml") and p.startswith("src/")), b"")
-        modid = (re.search(rb'(?m)^\s*modId\s*=\s*"([^"]+)"', toml) or [None, b""])[1].decode("utf-8", "replace")
-        sub = lambda x: x.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
-        sp = work / REC / t / "shared-renames.tsv"
-        old_text = read_file(sp)
-        # every targeted version above the base up to t, nearest first (as add-target writes them): a version whose
-        # library gained a table since gets its section, and its helpers count even with no table at all
-        base_v = props.get("base_minecraft_version") or (stable[0] if stable else t)
-        span = [v for v in stable if mc_key(base_v) < mc_key(v) <= mc_key(t)][::-1]
-        old_secs = {k.split(" ", 1)[1]: b for k, b in shared_sections(old_text).items()}
-        versions_ = span + [v for v in old_secs if v not in span]
-        new_sections, kept = [], []
-        for ver in versions_:
-            f = shared_dir() / ver / "renames.tsv"
-            if f.is_file():
-                new_sections.append(f"# ---- shared {ver}\n" + sub(f.read_text(encoding="utf-8")))
-            elif ver in old_secs:
-                new_sections.append(old_secs[ver].rstrip("\n")); kept.append(ver)
-        new_text = ("\n".join(x.rstrip("\n") for x in new_sections) + "\n") if new_sections else old_text
-        pr = port_ref_of(repo, work, t, git(work, "rev-parse", "HEAD", check=True).stdout.strip())   # work's HEAD, not the clone's
-        read = reader_of_root(work)
-        rows_old = rows_tree(repo, pr, read, t, chain(work, t)) if pr else {}
-        changed = []
-        if new_text != old_text:
-            sp.write_bytes(new_text.encode("utf-8")); changed.append(sp.relative_to(work).as_posix())
-            rows_new = rows_tree(repo, pr, reader_of_root(work), t, chain(work, t)) if pr else {}
-            for p, data in rows_old.items():
-                if files.get(p) == data and rows_new.get(p) not in (None, data):
-                    (work / p).write_bytes(rows_new[p]); changed.append(p)
-        # helpers: an installed, unedited one follows the library; a newly used one is added
-        changed += helper_pass(repo, work, t, versions_, mv_pkg, modid, files, say, "sync-shared")
+        plan = sync_plan(repo, t, work=work)
+        for e in plan["edited"]:
+            if e["kind"] == "helper":
+                say(f"fork-branches: sync-shared {t}: {e['path']} was edited since it was installed: left alone (the "
+                    "library's copy differs; merge it by hand if wanted)")
+            else:
+                say(f"fork-branches: sync-shared {t}: {e['path']} {e['what']} was edited by hand: left alone (move the "
+                    f"fork's own rows to {REC}/{t}/renames.tsv, then sync again)")
+        for o in plan["own"]:
+            say(f"fork-branches: sync-shared {t}: {o['path']} is the fork's own class, not the installed helper: left "
+                "alone (the library's copy differs; merge it by hand if wanted)")
+        changed = sorted(plan["writes"])
         if not changed:
             say(f"fork-branches: sync-shared {t}: current"); continue
-        git(work, "add", "-A", "--", *sorted(set(changed)), check=True)
+        versions_, kept = plan["versions"], plan["kept"]
+        old_secs = {k.split(" ", 1)[1] for k in shared_sections(plan["read"](f"{REC}/{t}/shared-renames.tsv"))}
+        for p_, data in plan["writes"].items():
+            (work / p_).parent.mkdir(parents=True, exist_ok=True)
+            (work / p_).write_bytes(data)
+        git(work, "add", "-A", "--", *changed, check=True)
         mm = git(ROOT, "rev-parse", "--short", "HEAD").stdout.strip() or "?"
         r = git(work, "commit", "-q", "-m", f"{branch_name(t)}: the shared library at mc-mod-version-upgrade {mm}\n\n"
                 f"Tables {', '.join(v for v in versions_ if (shared_dir() / v / 'renames.tsv').is_file() or v in old_secs) or '-'} re-synced; the files the rows alone made re-made through them; the "
@@ -4626,6 +4923,11 @@ def main():
     ss.add_argument("--target", action="append", default=[], help="a version to sync (repeat; default every version branch)")
     ss.add_argument("--ci", metavar="MODID", help="also regenerate each synced version branch's Port CI workflow "
                     "(ci --run: the variant shipped-jar jobs, the newest kit); without it, ci-check's warnings are printed")
+    ss.add_argument("--check", action="store_true", help="write nothing, touch no checkout: per version what a sync "
+                    "would change, each hand-edited copy it would leave (to reconcile by hand), the fork's own copies of "
+                    "what the library ships (adopt candidates) and code marked MV-AHEAD-OF-TEMPLATE (to harvest); exit 1 "
+                    "when a version would change or has a copy to reconcile")
+    ss.add_argument("--json", metavar="FILE", help="with --check: the status per version as JSON")
     rm_ = sub.add_parser("remake", help="after a hand-made merge into a version branch: re-make its files through the "
                          "version's rows, as the cascade's merge does (staged, not committed)")
     rm_.add_argument("--repo", required=True, help="the checkout of the version branch that holds the merge")
@@ -4675,7 +4977,11 @@ def main():
             print(line)
         return 0
     if a.cmd == "sync-shared":
-        return sync_shared(a.repo, a.target or None, ci_modid=a.ci)
+        if a.json and not a.check:
+            ap.error("--json goes with --check")
+        if a.check and a.ci:
+            ap.error("--check writes nothing: not with --ci")
+        return sync_shared(a.repo, a.target or None, ci_modid=a.ci, check=a.check, json_out=a.json)
     if a.cmd == "review-authors":
         return review_authors(a.repo, a.range, a.reviewer, a.note, a.verdict)
     if a.cmd == "untaken":
@@ -6585,6 +6891,90 @@ def self_check():
                        and "sync-shared 1.21.5: src/main/java/com/example/mod/mv/Helper.java was edited since it was installed" in out,
                        f"sync-shared (every version): 1.21.4's helper-only library synced, 1.21.5's edited helper named and kept: {out[-600:]}")
                 git(w5s, "reset", "-q", "--hard", pre5s)
+
+                def env_lib(fn, *a_, **k_):
+                    os.environ["MMVU_SHARED_DIR"] = str(lib)
+                    _TEMPLATE_HISTORY.clear()
+                    try:
+                        return _quiet(fn, *a_, **k_)
+                    finally:
+                        os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+                hrel = "src/main/java/com/example/mod/mv/Helper.java"
+                # a synced version is current for --check (no sync work); the cascade from a synced version below keeps
+                # each side's installed library copy (never a 3-way merge of two versions' copies: a conflict or a hybrid)
+                refs0 = g("for-each-ref")
+                rc, out = env_lib(sync_shared, r, ["1.21.4"], check=True)
+                expect(rc == 0 and "sync-shared --check 1.21.4: current" in out and g("for-each-ref") == refs0,
+                       f"sync-shared --check on a synced version: current, exit 0, no ref moved: {out[-300:]}")
+                w4c, _w = worktree_for(r, "1.21.4")
+                pre4c = resolve_branch(r, "neoforge-1.21.4")
+                rc, out = env_lib(cascade, r, "1.21.3..1.21.4", "none")
+                f4c = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
+                expect(rc == 0 and b"v = 44" in f4c[hrel] and resolve_branch(r, "neoforge-1.21.4") != pre4c
+                       and "kept as 1.21.4's library copy" in out,
+                       f"cascade from a synced 1.21.3 (v=33) into a synced 1.21.4 (v=44): 1.21.4 keeps its own copy: {out[-500:]}")
+                git(w4c, "reset", "-q", "--hard", pre4c)
+                # the library in git (its history tells an edit from an old copy): a table section edited by hand and a
+                # copy edited after the library moved are named to reconcile, never overwritten; an unlisted stand-in of an
+                # old library text follows the library; the fork's own copy and a duplicated row are adopt candidates; a
+                # file marked MV-AHEAD-OF-TEMPLATE is a harvest candidate
+                gl = lambda *a_: git(lib, *a_, check=True)
+                ident = ("-c", "user.name=t", "-c", "user.email=t@example.com")
+                gl("init", "-q"); gl("add", "-A"); gl(*ident, "commit", "-qm", "library")
+                w3c, _w = worktree_for(r, "1.21.3")
+                pre3c = resolve_branch(r, "neoforge-1.21.3")
+                sp3 = w3c / ".port/1.21.3/shared-renames.tsv"
+                sp3.write_text(sp3.read_text(encoding="utf-8").replace("#!strict", "fork.Own\tfork.Mine\n#!strict"), encoding="utf-8")
+                lst = w3c / ".port/1.21.3/shared-helpers.txt"
+                lst.write_text("".join(ln + "\n" for ln in lst.read_text(encoding="utf-8").splitlines() if hrel not in ln), encoding="utf-8")
+                (w3c / hrel).write_text("// MV-STAND-IN: the layer's copy, unchanged\n" + (w3c / hrel).read_text(encoding="utf-8"), encoding="utf-8")
+                orel = "src/main/java/com/example/mod/mv/Other.java"
+                (w3c / orel).write_text("// MV-AHEAD-OF-TEMPLATE: does more than the library's\npackage com.example.mod.mv;\n"
+                                        "public class Other { int better; }\n", encoding="utf-8")
+                rn3 = w3c / ".port/1.21.3/renames.tsv"
+                rn3.write_text(rn3.read_text(encoding="utf-8") + "old.Shared\tnewer.Shared\n", encoding="utf-8")
+                git(w3c, "add", "-A"); git(w3c, "commit", "-qm", "1.21.3: hand edits", check=True)
+                edited3 = resolve_branch(r, "neoforge-1.21.3")
+                (lib / "1.21.3/java/Other.java").write_text("package @MVPKG@;\npublic class Other { }\n", encoding="utf-8")
+                (lib / "1.21.3/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 35; }\n", encoding="utf-8")
+                (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\nx.Y\tz.Y\n#!strict\n", encoding="utf-8")
+                gl("add", "-A"); gl(*ident, "commit", "-qm", "library moved")
+                refs0 = g("for-each-ref")
+                jf = pathlib.Path(e) / "status.json"
+                rc, out = env_lib(sync_shared, r, ["1.21.3"], check=True, json_out=str(jf))
+                st3 = json.loads(jf.read_text(encoding="utf-8")).get("1.21.3", {})
+                expect(rc == 1 and g("for-each-ref") == refs0 and resolve_branch(r, "neoforge-1.21.3") == edited3
+                       and "EDITED .port/1.21.3/shared-renames.tsv (section `shared 1.21.3`" in out
+                       and st3.get("reconcile") == [".port/1.21.3/shared-renames.tsv"] and hrel in st3.get("changes", [])
+                       and f"adopt: {orel} is the fork's own copy of the shared helper Other (library 1.21.3)" in out
+                       and "marked ahead of the library" in out and "duplicates a row of the shared tables" in out
+                       and f"ahead of the library (harvest): {orel}:1: does more than the library's" in out
+                       and [a["kind"] for a in st3.get("adopt", [])] == ["helper", "row"],
+                       f"sync-shared --check: read-only (no ref moved, exit 1), the edited section to reconcile, the stand-in "
+                       f"to update, the adopt and harvest candidates: {out[-900:]}")
+                rc, out = env_lib(sync_shared, r, ["1.21.3"])
+                f3s = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))
+                expect(rc == 0 and b"v = 35" in f3s[hrel] and b"MV-STAND-IN" not in f3s[hrel]
+                       and helper_map(f3s[".port/1.21.3/shared-helpers.txt"].decode()).get(hrel) == hash_blobs({"x": f3s[hrel]})["x"]
+                       and b"fork.Own" in f3s[".port/1.21.3/shared-renames.tsv"] and b"z.Y" not in f3s[".port/1.21.3/shared-renames.tsv"]
+                       and f3s[orel] == (w3c / orel).read_bytes() and "was edited by hand: left alone" in out,
+                       f"sync-shared: the stand-in follows the library and is listed; the edited section and the fork's own "
+                       f"class are left as they were: {out[-500:]}")
+                git(w3c, "reset", "-q", "--hard", pre3c)
+                # a shallow clone of the library that cannot be deepened (the round clones with --depth 1): its history is
+                # unknown, so nothing is called edited (a section the library once shipped is never a reconcile job)
+                shc = lib / "shallow"
+                git(lib, "clone", "-q", "--depth", "1", lib.as_uri(), str(shc), check=True)
+                git(shc, "remote", "set-url", "origin", str(lib / "gone"))
+                os.environ["MMVU_SHARED_DIR"] = str(shc)
+                _TEMPLATE_HISTORY.clear()
+                try:
+                    expect(template_history("1.21.3/renames.tsv") == set()
+                           and not section_edited("1.21.3", "# ---- shared 1.21.3\nan.Old\tan.Older\n", lambda x: x),
+                           "a shallow library clone that cannot be deepened: no history, nothing called edited")
+                finally:
+                    os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+                    _TEMPLATE_HISTORY.clear()
                 for v in ("1.21.4", "1.21.5", "1.21.8"):
                     if (r / "build/fork-branches" / v).is_dir():
                         git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / v))
@@ -6606,6 +6996,9 @@ def self_check():
             expect(rc == 2 and "nothing to migrate" in out and gs("for-each-ref") == refs and not (sv / REC).exists()
                    and checkout_version(sv) is None,
                    f"single-version fork: migrate refuses (exit 2), no branch, no .port/: {out}")
+            rc, out = _quiet(sync_shared, sv, check=True)
+            expect(rc == 0 and not out.strip() and gs("for-each-ref") == refs and not (sv / REC).exists(),
+                   f"single-version fork: sync-shared --check reports nothing and writes nothing: {out}")
     # the port branch moved past the layer (the authors' new code not merged into it yet): each migrated version is
     # judged against the port commit IT carries, never the clone's HEAD -- done from a checkout of the port branch too
     with tempfile.TemporaryDirectory() as d:

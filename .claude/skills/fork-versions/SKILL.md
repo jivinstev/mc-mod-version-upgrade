@@ -362,7 +362,14 @@ commits on each version branch (in its checkout, or `build/fork-branches/<v>`); 
 version from the base up to each branch's own counts, so a version whose library has helpers and no table is synced
 too. Without `--target` it syncs every version (the default, and the safe one): a version left out keeps its old copy
 of the tables, so a cascade from below re-makes the synced files back through them, and a partial run names those
-versions in a WARNING. Then cascade.
+versions in a WARNING. Then cascade. A section of `shared-renames.tsv` edited by hand (equal to no text the library's
+table ever had) is left alone and named: move the fork's own rows to `.port/<v>/renames.tsv` and sync again. A helper
+copy that equals a text the library once shipped (a layer's `MV-STAND-IN` copy too), listed or not, is a library copy
+and is updated. `sync-shared --check [--json FILE]` writes nothing and touches no checkout: per version what a sync
+would change, each hand-edited copy whose template moved (reconcile it by hand), the fork's own copies of what the
+library ships (adopt candidates) and the code marked `MV-AHEAD-OF-TEMPLATE` (ahead of the template: a lesson to
+harvest); the weekly round runs it at `init` and syncs only what it names. A cascade keeps a version's installed helper
+copy when the version below only moved its own installed copy to its library's (two versions' copies are never merged).
 
 ## Known issues: one ledger at the head, graded S1-S4
 
