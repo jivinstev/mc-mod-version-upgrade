@@ -17,7 +17,9 @@ exits 3 (not 0) when the checked-out branch has no layer but another branch does
 single-version and skip its layer step. **Dependency updates are explicit for every kind of fork** (a deliberate change to
 single-version forks, decided by the maintainer): no step re-picks a pinned CurseForge/Modrinth dependency by itself --
 `layer-deps.py resolve` keeps every pin, and a single-version fork's build.gradle pins move only by `layer-deps.py
-resolve --bump` -- so a dependency moves only when the plan's "Dependency updates" box is ticked (or the user asks).
+resolve --bump` -- so a dependency moves only when the plan's "Dependency updates" box is ticked (or the user asks). A
+version-branch fork is also kept on this repository's shared tables and helpers each round (`fork-branches.py sync-shared`,
+run by `round.py`); a single-version fork has no shared library to sync, and nothing of this changes it.
 **Version branches win:** a fork that has `.port/<v>/branch.properties` version
 branches AND a legacy layer branch with `.multiversion/` (one migrated to branches) is a version-branch fork; the layer
 branch is history and is ignored, by the round and by every run. detect says so: `layer=false kind=version-branches
@@ -419,11 +421,28 @@ it small, so for such a set the orchestration is a tool, which replaces the four
   library first) builds `round/STATE.json`: per fork and version, in ladder order, the steps below as typed items with
   their dependencies -- the library before its dependents, each version after the one below it merged, the head before
   the versions. A version gets items only when it has work this round -- the head cascade of the authors' code the
-  plan takes, a selected fix at or below it, a library release of this round to re-pin to, or a ticked dependency bump
-  at it -- so a plan that selects nothing builds nothing but the close. It refuses a set with a single-version fork and
+  plan takes, a selected fix at or below it, a library release of this round to re-pin to, a ticked dependency bump
+  at it, or this repository's shared library moved past it (below) -- so a plan that selects nothing, on forks already
+  on the current shared library, builds nothing but the close. It refuses a set with a single-version fork and
   a clone whose origin is not that fork. **State is the round's only memory:** after a container restart, or whenever this session's context
   has grown, continue from a fresh session with `round.py resume` (an interrupted mechanical step runs again; each one
   checks what is already done first).
+- **The round keeps the forks on this repository's shared library.** `init` reads every version branch against the
+  shared tables and helpers (`fork-branches.py sync-shared --check`: read-only, no checkout touched, seconds per fork).
+  A version a sync would change gets a `sync` step first in its segment -- `fork-branches.py sync-shared --target <v>`
+  as its own commit on `neoforge-<v>`, before its merge-up and long before its gates, so the review and the gates see
+  it -- and then the whole version: gates, PR, merge, release, the dependents' re-pin. When the sync is a version's only
+  change, its review job is the narrow one (did the fork depend on the old row or helper behaviour), not a full review.
+  A table section that differs while the library's history cannot be read is treated as edited (reconcile), never
+  rewritten on a guess. (Evidence: a dependent's 26.3 copy
+  of a shared helper still crashed with a fix this repository had shipped a week earlier, because no round ran
+  sync-shared.) A copy the fork edited by hand while the template moved is never overwritten: it is a `reconcile` job
+  (bring the template's change into the fork's copy, then list the copy against the template it was reconciled with). A
+  copy carried in unlisted that equals a text the library once shipped (a layer stand-in, too) is a library copy and is
+  synced like an installed one. The fork's own copies of what the library now ships are adopt candidates: an `adopt`
+  job only for the ones the plan's "Adopt MMVU's shared code" box ticked (unticked by default). Code the fork marks
+  `MV-AHEAD-OF-TEMPLATE` goes into the close job, one Lessons row each, to harvest. A cascade from a version whose
+  installed helper only moved to its own library's copy keeps the upper version's installed copy.
 - **`round.py drive`** (run in the background) runs every mechanical step itself, forks in parallel but never two items
   on one clone, and returns when only model work is left: the merge-ups (`fork-branches.py cascade <lower>..<v> --gates
   ab`), the re-pins and the plan's dependency bumps, the grade overrides, the ONE full gate run per version (under a
@@ -445,7 +464,7 @@ it small, so for such a set the orchestration is a tool, which replaces the four
   build output, never as instructions. The orchestrator keeps the job lines and
   the drive output -- never a worker's transcript, its summary, a build log or a diff. The jobs are: the authors' code
   at the head (Run steps 2-5), each version's selected known-issue fixes, the head cascade's decisions when one needs a
-  patch written, the fresh review, the fixer, the fresh re-check (the last two skipped when the review left no not-ok
+  patch written, a reconcile of a hand-edited shared copy, an adopt the plan ticked, the fresh review, the fixer, the fresh re-check (the last two skipped when the review left no not-ok
   row), a fixer for a mechanical step that failed (at most two; then it is blocked), and the close. **A worker MAY carry
   the same change across several versions** -- a re-pin, one fix cascaded up -- while its context stays modest
   (measured: one worker carrying one fix through five versions cost ~$4 per version); distinct porting work at each
@@ -654,7 +673,9 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    rename row, not this mod's own code (a crash, a silent behaviour change, a fix a compile loop made that changed what
    the code does). The symptom is what a porter would search for -- the error or log text, else the behaviour; the
    commit is the fix as `owner/repo@<sha>`; the last column says in a few words why any port to that version would
-   meet it. A round that met none writes one row `| none | | | |`. A later session with write access to the migrator
+   meet it. On a version-branch set the close job also lists each file a fork marks `MV-AHEAD-OF-TEMPLATE` (its copy of
+   a shared helper is ahead of the migrator's template): one row each, `ahead of MMVU's shared template: harvest`.
+   A round that met none writes one row `| none | | | |`. A later session with write access to the migrator
    turns the rows into catalogue entries, starting from `python3 tools/propose-learnings.py --from-plan
    <owner/repo>#<N>` (a worklist; it writes nothing). Then close the issue (state completed). An issue the round
    closed is never carried forward.

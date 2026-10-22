@@ -190,11 +190,13 @@ public final class LegacyGl {
     /** 1.21.4's {@code RenderType.setupRenderState()}: the type's texture / lightmap / overlay shards and its shader. */
     public static void setupRenderState(RenderType type) {
         if (type instanceof LegacyRenderType legacy) legacy.setupRenderState();
+        else LegacyRenderType.Copies.setupRenderState(type);   // another mod's relocated copy (CATALOG V117)
     }
 
     /** 1.21.4's {@code RenderType.clearRenderState()}. */
     public static void clearRenderState(RenderType type) {
         if (type instanceof LegacyRenderType legacy) legacy.clearRenderState();
+        else LegacyRenderType.Copies.clearRenderState(type);   // another mod's relocated copy (CATALOG V117)
     }
 
     /** BufferUploader.drawWithShader: the current shader and the state set above, into the main render target. */

@@ -199,6 +199,105 @@ public class LegacyRenderType extends RenderType {
         this.state = state;
     }
 
+    /**
+     * Another mod's copy of this class (CATALOG V117). Every mod built with the fork layer carries its own
+     * LegacyRenderType, relocated into its own package, so a render type a DEPENDENT made and handed to a library's helper
+     * ({@code MultiBufferSource}, {@code LegacyGl.setupRenderState}, a render queue) is no {@code instanceof} of the
+     * library's copy: routed as a vanilla type its shards and shader are never set up, and vanilla's draw binds none of
+     * its shader's own uniforms ("Missing uniform MV_LocalUvMin"). A copy is told by a superclass named LegacyRenderType
+     * outside this package and driven through its own public methods, looked up once per class; any other type is none.
+     */
+    public static final class Copies {
+        private static final java.lang.reflect.Method[] NONE = new java.lang.reflect.Method[0];
+        private static final Object DONE = new Object();
+        private static final ClassValue<java.lang.reflect.Method[]> METHODS = new ClassValue<>() {
+            @Override
+            protected java.lang.reflect.Method[] computeValue(Class<?> type) {
+                for (Class<?> c = type; c != null && c != Object.class; c = c.getSuperclass()) {
+                    if (c == LegacyRenderType.class) {
+                        return NONE;                    // this mod's own: its callers use it directly
+                    }
+                    if (c.getSimpleName().equals("LegacyRenderType") && RenderType.class.isAssignableFrom(c)) {
+                        return new java.lang.reflect.Method[] {find(c, "draw", MeshData.class), find(c, "setupRenderState"),
+                                find(c, "clearRenderState"),
+                                find(c, "draw", MeshData.class, com.mojang.renderpearl.api.commands.RenderPass.class),
+                                find(c, "drawsIntoMainTarget")};
+                    }
+                }
+                return NONE;
+            }
+        };
+
+        private Copies() {
+        }
+
+        /** The copy's own public instance method (declared by the copy, never vanilla's), or null. */
+        private static java.lang.reflect.Method find(Class<?> c, String name, Class<?>... args) {
+            try {
+                java.lang.reflect.Method m = c.getMethod(name, args);
+                if (java.lang.reflect.Modifier.isStatic(m.getModifiers()) || m.getDeclaringClass().getName().startsWith("net.minecraft.")) {
+                    return null;
+                }
+                m.trySetAccessible();
+                return m;
+            } catch (NoSuchMethodException | SecurityException e) {
+                return null;
+            }
+        }
+
+        /** Calls method {@code which} of another mod's copy -> its result (DONE for a void one), or null when {@code type}
+         *  is no copy or its copy has no such method. */
+        private static Object call(RenderType type, int which, Object... args) {
+            java.lang.reflect.Method[] ms = type == null ? NONE : METHODS.get(type.getClass());
+            java.lang.reflect.Method m = which < ms.length ? ms[which] : null;
+            if (m == null) {
+                return null;
+            }
+            try {
+                Object r = m.invoke(type, args);
+                return m.getReturnType() == void.class ? DONE : r;
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                if (e.getCause() instanceof RuntimeException r) throw r;
+                if (e.getCause() instanceof Error err) throw err;
+                throw new IllegalStateException(e.getCause());
+            } catch (IllegalAccessException e) {
+                throw new IllegalStateException("cannot call " + m + " of another mod's LegacyRenderType", e);
+            }
+        }
+
+        /** Whether {@code type} is another mod's copy of this class. */
+        public static boolean isCopy(RenderType type) {
+            return type != null && METHODS.get(type.getClass()).length > 0;
+        }
+
+        /** {@code draw(mesh)} of another mod's copy (it closes the mesh) -> true; false when {@code type} is none. */
+        public static boolean draw(RenderType type, MeshData mesh) {
+            return call(type, 0, mesh) != null;
+        }
+
+        /** {@code setupRenderState()} of another mod's copy -> true; false when {@code type} is none. */
+        public static boolean setupRenderState(RenderType type) {
+            return call(type, 1) != null;
+        }
+
+        /** {@code clearRenderState()} of another mod's copy -> true; false when {@code type} is none. */
+        public static boolean clearRenderState(RenderType type) {
+            return call(type, 2) != null;
+        }
+
+        /** {@code draw(mesh, into)} of another mod's copy (26.3: into an open pass, null: a pass of its own); false when
+         *  {@code type} is no copy or has no such method (the mesh untouched). */
+        public static boolean draw(RenderType type, MeshData mesh, com.mojang.renderpearl.api.commands.RenderPass into) {
+            return into == null ? draw(type, mesh) : call(type, 3, mesh, into) != null;
+        }
+
+        /** Whether another mod's copy draws into an output target of its own (not the main one); false for every other type. */
+        public static boolean ownTarget(RenderType type) {
+            Object main = call(type, 4);
+            return main instanceof Boolean b && !b;
+        }
+    }
+
     /** 1.21.4's RenderType.setupRenderState: the texture / lightmap / overlay shards, then the shader's (the mod's override
      *  pushes its uniforms there, as in 1.21.4). */
     public void setupRenderState() {

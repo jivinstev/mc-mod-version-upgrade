@@ -219,7 +219,8 @@ public interface MultiBufferSource {
             if (mesh == null) {
                 return;
             }
-            if (into == null ? LegacyGl.inRenderPass() : type instanceof LegacyRenderType l && !l.drawsIntoMainTarget()) {
+            if (into == null ? LegacyGl.inRenderPass() : type instanceof LegacyRenderType l ? !l.drawsIntoMainTarget()
+                    : LegacyRenderType.Copies.ownTarget(type)) {   // another mod's copy: its own target (CATALOG V117)
                 Deferred.add(type, mesh);
                 return;
             }
@@ -230,6 +231,9 @@ public interface MultiBufferSource {
                     legacy.draw(mesh, into);
                 }
                 return;
+            }
+            if (LegacyRenderType.Copies.draw(type, mesh, into)) {
+                return;   // another mod's relocated LegacyRenderType (CATALOG V117): its own draw, which closes the mesh
             }
             if (into != null) {
                 try (MeshData m = mesh) {

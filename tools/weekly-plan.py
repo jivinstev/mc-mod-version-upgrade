@@ -82,6 +82,13 @@ a lookup that fails is listed as "could not check" and never fails the plan. rea
 fork's `dep_bumps`, and the round applies each once at setup with `layer-deps.py resolve --bump`; nothing else moves a
 pin.
 
+SHARED (inside the cascade step; a version-branch fork only, so a single-version fork's plan is unchanged): each
+version against MMVU's shared library as of the pinned commit (fork-branches.py sync-shared --check, read-only). The
+plan's "Adopt MMVU's shared code" section says which versions the round's sync step will bring up and which hand-edited
+copies an agent reconciles, gives a box per hand-written copy of what the library ships -- NOT ticked by default -- and
+lists the code marked MV-AHEAD-OF-TEMPLATE; read-plan returns the ticked ids as the fork's `adopt`. The round checks
+again at its start against current MMVU (round.py init).
+
 Exit codes: 0 ok; 1 a step failed (the workflow run fails, no issue is opened); 2 bad input; 3 the head branch is not
 the default branch (install). Standard library only.
 """
@@ -716,8 +723,30 @@ def step_cascade(work):
         if f["untaken"]:
             print(f"weekly-plan: {f['repo']}: the head carries {len(f['untaken'])} commit(s) of the authors' that a version "
                   f"branch has not taken")
+        f["shared"] = shared_summary(fb, f["clone"], vs)
+        sh = f["shared"]
+        print(f"weekly-plan: {f['repo']}: " + (f"the shared-library check failed: {sh['error']}" if sh.get("error") else
+              f"{sum(1 for x in sh['versions'].values() if x['changes'])} version(s) behind MMVU's shared library, "
+              f"{len(sh['adopt'])} adopt candidate(s), {len(sh['ahead'])} file(s) marked ahead of it"))
     save_input(work, inp)
     return 0
+
+
+def shared_summary(fb, clone, versions):
+    """A version-branch fork against MMVU's shared library (fork-branches.py sync-shared --check, read-only): per
+    version the files the round's sync step would change and the hand-edited copies to reconcile; the fork's own copies
+    of what the library ships (adopt candidates, each with its stable id); the code marked MV-AHEAD-OF-TEMPLATE. Fails
+    soft: {"error": why}."""
+    try:
+        st = fb.shared_status(clone, versions)
+    except Exception as e:          # noqa: BLE001 -- the plan goes on, its section says so
+        return {"error": f"{type(e).__name__}: {e}"[:300]}
+    bad = [f"{v}: {x['error']}" for v, x in st.items() if x.get("error")]
+    if bad:
+        return {"error": "; ".join(bad)[:300]}
+    return {"versions": {v: {"changes": len(x["changes"]), "reconcile": x["reconcile"]} for v, x in st.items()},
+            "adopt": [dict(a, version=v) for v, x in st.items() for a in x["adopt"]],
+            "ahead": [dict(a, version=v) for v, x in st.items() for a in x["ahead"]]}
 
 
 def step_select(work):
@@ -1263,7 +1292,7 @@ def self_check():
         expect(f0["cascade"] is None and [s["id"] for s in f0["selection"]] == ["KI-1"]
                and [c["id"] for c in f0["candidates"]] == ["KI-2"] and f0["selection"][0]["title"] == "crash on load",
                f"a single-version fork: no cascade; select's S1 by default, the S3 a candidate: {f0}")
-        expect("untaken" not in f0 and "base_version" not in f0 and f0["selection"][0].get("lowest_open") == "1.21.1",
+        expect("untaken" not in f0 and "base_version" not in f0 and "shared" not in f0 and f0["selection"][0].get("lowest_open") == "1.21.1",
                f"a single-version fork: no untaken list (its plan renders as before): {f0}")
         # the smallest version-branch fork (one version, hand-made): the head merged the authors' release earlier and
         # no version took it -- nothing new upstream, yet the plan lists it (the first weekly-round dry run's bug)
@@ -1309,6 +1338,8 @@ def self_check():
                and [(c["subject"].split(" ")[0], c["merge"], c["versions"]) for c in fv.get("untaken", [])]
                == [("Merge", True, ["1.21.3"]), ("authors:", False, ["1.21.3"])],
                f"a version-branch fork: nothing new upstream, the head's untaken authors' commit and its merge listed: {fv}")
+        expect(set(fv.get("shared", {}).get("versions", {})) == {"1.21.3"} and "adopt" in fv["shared"] and "ahead" in fv["shared"],
+               f"a version-branch fork: its shared-library status (sync-shared --check) is in the plan input: {fv.get('shared')}")
         # previous / open against a fake GitHub: carry-forward from an unclosed plan, then supersede it
         issues, calls = {}, []
 

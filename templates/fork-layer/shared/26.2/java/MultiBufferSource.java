@@ -24,7 +24,8 @@ import java.util.SequencedMap;
  * 26.2 has no {@code MultiBufferSource} (geometry is recorded into the frame's staged buffer, CATALOG §V100). This is
  * the 1.21 shape for fork code that still asks a buffer source for a {@link VertexConsumer} per render type and ends
  * the batch itself: the vertices are collected in {@link ByteBufferBuilder}s and each type's mesh is drawn on
- * {@code endBatch} -- a fork-layer {@link LegacyRenderType} through its own draw, a vanilla type through
+ * {@code endBatch} -- a fork-layer {@link LegacyRenderType} (this mod's or another mod's relocated copy, CATALOG
+ * V117) through its own draw, a vanilla type through
  * {@code prepare().drawFromBuffer(...)}, which draws into the type's output target (or the output override) itself.
  * {@link #main()} stands in for {@code renderBuffers().bufferSource()} and is flushed by {@link Flush}.
  */
@@ -150,6 +151,9 @@ public interface MultiBufferSource {
             if (type instanceof LegacyRenderType legacy) {
                 legacy.draw(mesh);   // closes the mesh
                 return;
+            }
+            if (LegacyRenderType.Copies.draw(type, mesh)) {
+                return;   // another mod's relocated LegacyRenderType (CATALOG V117): its own draw, which closes the mesh
             }
             try (MeshData m = mesh) {
                 LegacyGl.Uploaded up = LegacyGl.Uploaded.of(m);
