@@ -2320,14 +2320,18 @@ def self_check():
         with full_gate_lock("first", lambda *x: None) as lk:
             with open(gate_lock_path(), "a+", encoding="utf-8") as fh:
                 expect(not _flock(fh, block=False), "a second full gate run waits for the machine's lock")
-            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"], pass_fds=(lk.fileno(),))
-        with open(gate_lock_path(), "a+", encoding="utf-8") as fh:
-            expect(not _flock(fh, block=False), "the gate run's process still holds the lock after the driver let go")
-            child.wait()
-            got = _flock(fh, block=False)
-            expect(got, "free once the gate run ended")
-            if got:
-                _funlock(fh)
+            # POSIX only: Windows has no pass_fds, and its msvcrt lock is not inherited by a child (the gate run
+            # there passes no lock either, see the pass_fds guards above)
+            child = (subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"], pass_fds=(lk.fileno(),))
+                     if os.name != "nt" else None)
+        if child is not None:
+            with open(gate_lock_path(), "a+", encoding="utf-8") as fh:
+                expect(not _flock(fh, block=False), "the gate run's process still holds the lock after the driver let go")
+                child.wait()
+                got = _flock(fh, block=False)
+                expect(got, "free once the gate run ended")
+                if got:
+                    _funlock(fh)
         expect(parse_summary("RESULT: blocked\nnot_ok: 2\nblocking: X-1 S2 kick\nfixed: X-2 abc1234\n")
                == {"status": "blocked", "blocking": ["X-1 S2 kick"], "fixed": [["X-2", "abc1234"]], "commits": [], "not_ok": 2},
                "the summary format")
