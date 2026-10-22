@@ -404,7 +404,7 @@ def origin_mismatch(d, slug):
 
 def cmd_init(a):
     rdir = pathlib.Path(a.round_dir).resolve()
-    state = pathlib.Path(a.state) if a.state else rdir / STATE_DEFAULT
+    state = pathlib.Path(a.state).resolve() if a.state else rdir / STATE_DEFAULT
     if state.exists() and not a.force:
         print(f"round: {state} exists (the round's memory): `round.py resume` continues it; --force starts over")
         return 2
@@ -456,7 +456,7 @@ def cmd_init(a):
     items = build_queue(frozen, cfg, forks, date)
     data = {"schema": 1, "created": now(), "round_start": a.since or now(), "round_dir": str(rdir),
             "frozen": str(pathlib.Path(a.frozen).resolve()), "date": date, "allow": cfg.get("allow", []),
-            "plan": {"repo": frozen.get("repo"), "issue": frozen.get("issue"), "owner": frozen.get("owner")},
+            "plan": {"repo": frozen.get("repo"), "issue": frozen.get("issue"), "owner": owner_login(frozen)},
             "forks": forks, "items": items}
     state.parent.mkdir(parents=True, exist_ok=True)
     tmp = state.with_suffix(".tmp")
@@ -703,7 +703,7 @@ def job_task(st, it):
     if s == "close":
         P = st.data["plan"]
         return [f"Close the round: keep-current \"The weekly round\" step 6, on plan issue {P['repo']}#{P['issue']} "
-                f"(@{P.get('owner') or 'the owner'}).",
+                f"(@{owner_login(P) or 'the owner'}).",
                 f"The outcome per fork is `python3 {T / 'round.py'} status --markdown --state {st.path}` (merged PRs, "
                 f"pre-release tags, blocked items with their reasons) and the summaries under {st.rdir / 'round/summaries'} "
                 "(read those you need: the new findings and their grades, the review fixes).",
@@ -832,7 +832,24 @@ def clean(d):
         raise StepError(f"the clone {d} has uncommitted changes: {r.stdout.strip().splitlines()[0]} ...")
 
 
+def holder(d, branch):
+    """The worktree (the clone itself included) that has `branch` checked out, or None."""
+    for block in git(d, "worktree", "list", "--porcelain").stdout.split("\n\n"):
+        if f"branch refs/heads/{branch}" in block:
+            return block.split("\n", 1)[0].split(" ", 1)[1]
+    return None
+
+
 def checkout(d, branch, create_from=None):
+    """A checkout of `branch` to work in -> its path: the worktree that already holds it when that one is clean (a
+    cascade keeps the head at build/fork-branches/<v>), else the clone, switched to it. A dirty holder is refused."""
+    h = holder(d, branch)
+    if h:
+        r = git(h, "status", "--porcelain", "--untracked-files=no")
+        if r.stdout.strip():
+            raise StepError(f"{branch} is checked out at {h} with uncommitted changes ({r.stdout.strip().splitlines()[0]} "
+                            "...): commit or discard them there; the driver does not touch a dirty checkout")
+        return h
     clean(d)
     if git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
         git(d, "checkout", "-q", branch, check=True)
@@ -840,6 +857,7 @@ def checkout(d, branch, create_from=None):
         git(d, "checkout", "-q", "-b", branch, create_from, check=True)
     else:
         git(d, "checkout", "-q", branch, check=True)      # origin's, tracked
+    return str(d)
 
 
 def vco(st, fork, v):
@@ -931,8 +949,7 @@ def t_ci_check(st, it, log):
 
 def t_grades(st, it, log):
     F, P = st.fork(it["fork"]), st.data["plan"]
-    d = F["dir"]
-    checkout(d, F["head"])
+    d = checkout(F["dir"], F["head"])
     ff_local(d, F["head"])
     for g in it["extra"]["grades"]:
         sh(st, it, [sys.executable, TOOLS / "known-issues.py", "grade", "--repo", d, g["id"], "--override", g["severity"],
@@ -946,7 +963,7 @@ def t_setup(st, it, log):
     F = st.fork(it["fork"])
     d = F["dir"]
     git(d, "fetch", "-q", "origin", F["head"], check=True)
-    checkout(d, it["extra"]["branch"], create_from=f"origin/{F['head']}")
+    d = checkout(d, it["extra"]["branch"], create_from=f"origin/{F['head']}")
     n = 0
     for b in it["extra"]["bumps"]:
         cmd = shlex.split(b["command"].replace("mmvu/tools/", str(TOOLS) + "/"))
@@ -1038,7 +1055,8 @@ def code_changes(d, a, b):
     ledger, the root README's Ports block and the bookkeeping keys of a branch.properties (a library pin's tag, the
     freeze). [] when b only adds records to what was gated at a."""
     out = []
-    for f in git(d, "diff", "--name-only", a, b, check=True).stdout.splitlines():
+    # --no-renames: a file moved onto a record path is its deletion (code) plus a record, never a record alone
+    for f in git(d, "diff", "--name-only", "--no-renames", a, b, check=True).stdout.splitlines():
         if RECORD_MD.match(f) or f.endswith("KNOWN-ISSUES.json") and f.startswith(".port/"):
             continue
         if f == "README.md" and strip_ports(blob(d, a, f)) == strip_ports(blob(d, b, f)):
@@ -1055,9 +1073,10 @@ def head(d):
     return git(d, "rev-parse", "HEAD", check=True).stdout.strip()
 
 
-def gates_green(path, at, v):
-    """None when the GATES.md at `path` certifies commit `at` (its header names it; an uncommitted overlay over it, as a
-    --port-checkout pin leaves, still names it) for Minecraft v with every row green and a Gate C PASS row; else why."""
+def gates_green(path, at, v, overlay=False):
+    """None when the GATES.md at `path` certifies commit `at` for Minecraft v with every row green and a Gate C PASS row;
+    else why. overlay: an uncommitted overlay over `at` (`<sha> + uncommitted: ...`, the dependent gate's --port-checkout
+    pin) is accepted; without it only a clean tree at `at` is (layer-deps.py gates_record's rule)."""
     text = mod("fb").read_file(path)
     if not text:
         return f"no {pathlib.Path(path).name}"
@@ -1065,6 +1084,8 @@ def gates_green(path, at, v):
     if not m or m.group(2) != v:
         return f"its header is not for Minecraft {v}: {text.splitlines()[0][:160]}"
     sha = m.group(1).split()[0]
+    if not overlay and m.group(1).strip() != sha:
+        return f"it certifies an edited tree ({m.group(1)[:120]}), not the commit"
     if len(sha) < 7 or not at.startswith(sha):
         return f"it certifies {sha}, not {at[:12]}"
     rows = [ln for ln in text.splitlines() if ln.startswith("|")]
@@ -1101,8 +1122,7 @@ def t_gates(st, it, log):
         c = commit_paths(d, [f".port/{v}"], f"Gate records for {v} (keep-current round)")
         return "full gates green" + (f", records {c[:12]}" if c else ""), {"gated_head": gated, "gated_at": at,
                                                                             "head_after": head(d)}
-    d = F["dir"]
-    checkout(d, branch_of(st, it))
+    d = checkout(F["dir"], branch_of(st, it))
     au = seg_item(st, it, "authors")
     up = au["extra"].get("upstream_commit") if au else None
     gated, at = head(d), time.time()
@@ -1152,7 +1172,7 @@ def t_depgate(st, it, log):
                 shutil.copy2(q_, evid / f)
         why = ("GATES-RED.md" if (work / ".port" / v / "GATES-RED.md").is_file()
                else f"fork-port exit {r.returncode}" if r.returncode not in (0, 18)
-               else gates_green(work / ".port" / v / "GATES.md", wt_head, v))
+               else gates_green(work / ".port" / v / "GATES.md", wt_head, v, overlay=True))
         if why:
             raise StepError(f"{it['extra']['dependent']} {v}: Gate C against {it['fork']}'s candidate jar is NOT green "
                             f"({why}; evidence in {evid}): a blocking finding on the library version, which does not merge")
@@ -1369,7 +1389,7 @@ def t_ledger(st, it, log):
               and not x["result"].get("skipped")}
     unmerged = [x["version"] for x in st.items if x["fork"] == it["fork"] and x["step"] == "merge"
                 and x["status"] != "ok"]
-    checkout(d, F["head"])
+    d = checkout(d, F["head"])
     ff_local(d, F["head"])
     sets, refused = 0, []
     if (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file():
@@ -1413,13 +1433,19 @@ TOOL_IMPL = {"ci-check": t_ci_check, "grades": t_grades, "setup": t_setup, "merg
              "release": t_release, "librecord": t_librecord, "ledger": t_ledger}
 
 
+def owner_login(plan):
+    """The plan owner's login: frozen.json has {"login": ...}; a plain string is taken as it is."""
+    o = plan.get("owner")
+    return (o.get("login") or "") if isinstance(o, dict) else (o or "")
+
+
 def ask_owner(st, it, need):
     P = st.data["plan"]
     if it.get("asked"):
         return
     with contextlib.suppress(Exception):
         gh(f"repos/{P['repo']}/issues/{P['issue']}/comments", "POST",
-           {"body": f"@{P.get('owner') or 'owner'} the round needs your go-ahead for {it['fork']} {it['version']}: "
+           {"body": f"@{owner_login(P) or 'owner'} the round needs your go-ahead for {it['fork']} {it['version']}: "
                     f"`{it['step']}` needs `{need}`, which the round's `allow` list does not hold. Everything that does "
                     "not depend on it goes on; it is named in the closing comment."})
         it["asked"] = True
@@ -1837,7 +1863,7 @@ def self_check():
         LIB, DEP = "owner/examplelib", "owner/examplemod"
 
         def fz(lib_fix_at="1.21.4", dep_take=True, lib_sel=True, bumps=True):
-            return {"schema": 1, "issue": 7, "repo": LIB, "owner": "owner", "grades": [], "decisions": [], "forks": [
+            return {"schema": 1, "issue": 7, "repo": LIB, "owner": {"login": "owner"}, "grades": [], "decisions": [], "forks": [
                 {"repo": LIB, "head": "neoforge-1.21.1", "take_authors": False, "head_cascade": False,
                  "selected": ["LIB-1"] if lib_sel else [], "cascade": {"range": "neoforge-1.21.1..1.21.8", "decisions": []},
                  "fixes": [{"id": "LIB-1", "at": lib_fix_at, "how": f"on neoforge-{lib_fix_at}"}] if lib_sel else [],
@@ -1887,6 +1913,18 @@ def self_check():
         rc, o, items = init(fz(lib_sel=False, dep_take=False, bumps=False), cfg, both, str(tmp / "empty/round/STATE.json"))
         expect(rc == 0 and [it["id"] for it in items] == ["round:close"],
                f"a plan that selects nothing builds nothing but the close: {[it['id'] for it in items]}")
+        here = os.getcwd()
+        try:
+            os.chdir(tmp / "empty")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                main(["next", "--state", "round/STATE.json"])
+        finally:
+            os.chdir(here)
+        absst = str((tmp / "empty/round/STATE.json").resolve())
+        nj = [json.loads(ln) for ln in buf.getvalue().splitlines() if ln.startswith("{")]
+        expect(nj and nj[0]["record"].endswith(f"--state {absst}") and f"--state {absst}" in job_file(nj[0]),
+               f"a relative --state is named absolutely in the job and its record line: {buf.getvalue()}")
         rc, o, items = init(fz(lib_fix_at="1.21.5", dep_take=False, bumps=False), cfg, both, str(tmp / "mid/round/STATE.json"))
         vers = lambda f_: sorted({it["version"] for it in items if it["fork"] == f_ and not it.get("final")
                                   and it["step"] != "ci-check"})
@@ -2025,7 +2063,8 @@ def self_check():
             expect(blocked_by(st, st.item("examplemod@1.21.5:merge")) == "examplemod@1.21.4:review", "blocked_by")
         expect([x["id"] for x in js] == ["round_close"], f"the close comes once nothing else can run: {js}")
         cjob = job_file(js[0]) if js else ""
-        expect("round-table" in cjob and "Lessons for the migrator" in cjob, f"the close job: {cjob}")
+        expect("round-table" in cjob and "Lessons for the migrator" in cjob and "(@owner)" in cjob and "{'login'" not in cjob
+               and f"--state {pathlib.Path(state).resolve()}" in cjob, f"the close job: @ the owner's login: {cjob}")
         rec("round_close", "RESULT: ok\n")
         rc, o = q(cmd_drive, a)
         expect(rc == 3 and "BLOCKED examplemod@1.21.4:review" in o, f"stuck: exit 3 naming the blocked item: {o}")
@@ -2110,6 +2149,14 @@ def self_check():
             except Reset as e:
                 expect(set(e.ids) == {"examplelib@1.21.4:gates", dg} and path in str(e),
                        f"code after the gated commit ({path}) sends the gates and the dependent gate back: {e.ids} {e}")
+        git(lco, "reset", "-q", "--hard", lsha["pr"], check=True)
+        git(lco, "mv", "Main.java", ".port/1.21.4/NOTES.md", check=True)
+        git(lco, "commit", "-q", "-m", "move", check=True)
+        try:
+            step("examplelib@1.21.4:pr")
+            expect(False, "code moved onto a record path passed as records")
+        except Reset as e:
+            expect("Main.java" in str(e), f"a code file moved onto a .port/ Markdown path is its deletion, code: {e}")
         # the same through run_tool: the step itself waits for them again
         with State.tx(rs) as st:
             claim(st, st.item("examplelib@1.21.4:pr"))
@@ -2157,6 +2204,10 @@ def self_check():
                 expect(False, f"exit 18 with a GATES.md that does not certify the worktree passed ({want})")
             except StepError as e:
                 expect(want in str(e), f"exit 18 is green only with a GATES.md certifying the worktree: {want}: {e}")
+        gm = tmp / "GATES-f.md"
+        gm.write_text(good.replace("{head}", g0), encoding="utf-8")
+        expect("edited tree" in (gates_green(gm, g0, "1.21.4") or "") and gates_green(gm, g0, "1.21.4", overlay=True) is None,
+               "the library's own gates: a GATES.md over an uncommitted tree is refused; only the dependent gate's overlay passes")
         seen["gates"] = good
         note, r_ = step(dg)
         expect("green against the candidate jar" in note and seen.get("held"),
@@ -2229,6 +2280,29 @@ def self_check():
         with State.tx(rs, write=False) as st:
             expect(all(st.item(f"examplelib@1.21.4:{s_}")["status"] == "pending" for s_ in ("gates", "pr", "ci", "freeze"))
                    and st.item(dg)["status"] == "pending", "a ci fixer's success sends the gates, the PR and its CI back")
+        posted = []
+        gh = lambda path, method="GET", data=None: posted.append(data) or {}
+        with State.tx(rs) as st:
+            ask_owner(st, st.item("examplelib@1.21.4:merge"), "merge-fork-prs")
+        gh = real_gh
+        expect(posted and posted[0]["body"].startswith("@owner the round needs"), f"the ask @mentions the login: {posted}")
+        git(dep, "checkout", "-q", "neoforge-1.21.5", check=True)
+        hw = dep / "build/fork-branches/1.21.1"
+        git(dep, "worktree", "add", "-q", str(hw), "neoforge-1.21.1", check=True)
+        gh = lambda path, method="GET", data=None: []
+        with State.tx(rs, write=False) as st:
+            pass
+        note, r_ = t_ledger(st, st.item("examplemod@1.21.1:ledger"), tmp / "ledger.log")
+        expect(holder(dep, "neoforge-1.21.1") == str(hw) and checkout(str(dep), "neoforge-1.21.1") == str(hw)
+               and git(dep, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "neoforge-1.21.5",
+               f"the head held by a clean worktree: the step works there, the clone stays where it is: {note}")
+        (hw / "Main.java").write_text("dirty\n", encoding="utf-8")
+        try:
+            checkout(str(dep), "neoforge-1.21.1")
+            expect(False, "a dirty worktree holding the head was used")
+        except StepError as e:
+            expect("uncommitted changes" in str(e) and str(hw) in str(e), f"a dirty holder is refused: {e}")
+        gh = real_gh
         # S4: a run is alive only on its host with its pid's own start time; retry --allow lasts one run
         with State.tx(rs) as st:
             it = st.item("examplelib@1.21.4:merge")
@@ -2302,6 +2376,8 @@ def main(argv=None):
         if name == "gate":
             s.add_argument("command", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
+    if a.cmd != "init":
+        a.state = str(pathlib.Path(a.state).resolve())   # every job and record line names it absolutely (workers run in worktrees)
     if a.cmd != "init" and not pathlib.Path(a.state).is_file():
         print(f"round: no {a.state}: run `round.py init` first")
         return 2
