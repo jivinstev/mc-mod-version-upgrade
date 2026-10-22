@@ -78,7 +78,10 @@ re:import net\.neoforged\.neoforge\.common\.util\.DummySavedData;\n
 re:(\.register\(\s*"([a-z0-9_./-]+)"\s*,\s*)([A-Za-z_][\w.$]*)::new\b	\1() -> @MVPKG@.RegIds.enter("\2") ? null : new \3()
 # a static factory reference (`REG.register("name", Factory::create)`) the same way, when it is the whole supplier: it builds
 # its Properties inside the call, and without the entering supplier it fails at boot with `Item id not set` (weekly round
-# 2026-10-21). Only before the register call's `)`: a two-argument factory reference is a Function overload, not a Supplier
+# 2026-10-21). Only as the whole supplier (`register(name, Ref::m)` then `)`); a register call with more arguments is left.
+# A reference to a one-argument `m(ResourceLocation)` (DeferredRegister's Function overload) cannot be told apart by text,
+# but it never changes behaviour silently: `Ref.m()` with no argument does not compile, so javac names it -- and a class
+# with both `m()` and `m(ResourceLocation)` was already ambiguous for `register(name, Ref::m)` before the row.
 re:(\.register\(\s*"([a-z0-9_./-]+)"\s*,\s*)([A-Za-z_][\w.$]*)::(?!new\b)([A-Za-z_]\w*)(?=\s*\))	\1() -> @MVPKG@.RegIds.enter("\2") ? null : \3.\4()
 re:(\.register\(\s*"([a-z0-9_./-]+)"\s*,\s*\(\)\s*->\s*)(new\s)	\1@MVPKG@.RegIds.enter("\2") ? null : \3
 re:\bnew ((?:Item\.)?Properties\(\))	@MVPKG@.RegIds.stamp(new \1)
@@ -89,12 +92,16 @@ re:(?<![\w.])((?:BlockBehaviour\.|Block\.)?Properties\.of\(\))	@MVPKG@.RegIds.st
 re:(?<![\w.])((?:BlockBehaviour\.|Block\.)?Properties\.of(?:Full|Legacy)Copy\((?:[^()]|\([^()]*\))*\))	@MVPKG@.RegIds.stamp(\1)
 # ---- LevelHeightAccessor (1.21.2, CATALOG V23): getMinBuildHeight() is getMinY(); getMaxBuildHeight() was EXCLUSIVE
 # (minY + height) and getMaxY() is INCLUSIVE (minY + height - 1: the 1.21.3 jar's default method, javap), so a plain rename
-# is a silent off-by-one. `getMaxBuildHeight() - 1` is getMaxY(); the bare call is getMaxY() + 1 -- only where `+ 1` binds
-# as the call did: after `(` `,` `=` `<` `>` `?` `:` `+` `&` `|` `{` `;` `[` or `return`, and not before `*` `/` `%` `.`
-# `[`. Anywhere else (after `-`, a cast) the old call is left for the compile error, never a wrong bound.
-re:((?:[(,=<>?:+&|{;\[]|\breturn)\s*)((?:[A-Za-z_]\w*(?:\(\))?\.)*)getMaxBuildHeight\(\)\s*-\s*1(?![\w.])(?!\s*[*/%])	\1\2getMaxY()
-re:((?:[(,=<>?:+&|{;\[]|\breturn)\s*)((?:[A-Za-z_]\w*(?:\(\))?\.)*)getMaxBuildHeight\(\)(?!\s*[*/%.\[])	\1\2getMaxY() + 1
+# is a silent off-by-one. The call becomes `(<receiver>.getMaxY() + 1)` -- parenthesised, so exact in any expression
+# (string concatenation, `-`, `*`, a cast); `<receiver>.getMaxBuildHeight() - 1` folds to `getMaxY()` only where that
+# subtraction is the whole operand (after `(` `,` `=` `<` `>` `?` `:` `+` `&` `|` `{` `;` `[` or `return`, not before
+# `*` `/` `%`). The receiver is a plain chain (`level`, `this.level()`, `e.level().x`); one that starts after `)`/`]`, a
+# match inside a string literal (a mixin descriptor `"...Level;getMaxBuildHeight()I"`) and a method reference
+# (`Level::getMaxBuildHeight`) are left for javac / the mixin audit, never a wrong bound.
+re:((?:[(,=<>?:+&|{;\[]|\breturn\b)\s*)((?<![\w$.)\]"/;])(?:[A-Za-z_$][\w$]*(?:\(\))?\.)*)getMaxBuildHeight\(\)\s*-\s*1(?![\w.])(?!\s*[*/%])(?=(?:[^"\n]*"[^"\n]*")*[^"\n]*(?:\n|$))	\1\2getMaxY()
+re:(?<![\w$.)\]"/;])((?:[A-Za-z_$][\w$]*(?:\(\))?\.)*)getMaxBuildHeight\(\)(?=(?:[^"\n]*"[^"\n]*")*[^"\n]*(?:\n|$))	(\1getMaxY() + 1)
 re:\bgetMinBuildHeight\(\)	getMinY()
+re:::getMinBuildHeight\b	::getMinY
 # ---- mixin targets (invisible to javac; audit-mixin-targets.py checks them against the target's sources)
 re:@Inject\(method = "hurt",([^\n]*)\n(\s*)private void ([\w$]+)\(DamageSource (\w+),	@Inject(method = "hurtServer",\1\n\2private void \3(net.minecraft.server.level.ServerLevel mv$hurtLevel, DamageSource \4,
 re:@Inject\(method = "actuallyHurt",([^\n]*)\n(\s*)private void ([\w$]+)\(DamageSource (\w+),	@Inject(method = "actuallyHurt",\1\n\2private void \3(net.minecraft.server.level.ServerLevel mv$hurtLevel, DamageSource \4,

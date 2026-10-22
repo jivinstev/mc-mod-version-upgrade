@@ -161,7 +161,8 @@ def split_rules(renames):
 # compile. So the call is held out of every row when its argument is a matrix: a `new Matrix4f(..)`/`new
 # Transformation(..)`, a `(Matrix4f)` cast, `<x>.pose()` (PoseStack.Pose.pose() is the Matrix4f), or a name the same
 # file declares as Matrix4f/Matrix4fc/Transformation. Any other argument is the rows' business, as before.
-KEEP_MARK = ''          # a private-use character no source holds; put between the dot and the name while rows run
+KEEP_MARK = '\ufdd0'      # a Unicode noncharacter (never text a mod ships); put between the dot and the name while rows run
+KEEP_CALL_MARKED = '.' + KEEP_MARK + 'mulPose('
 _MATRIX_DECL = re.compile(r'\b(?:org\.joml\.)?Matrix4fc?\s+(\w+)\s*[=;,)]'
                           r'|\b(?:com\.mojang\.math\.)?Transformation\s+(\w+)\s*[=;,)]')
 _MATRIX_ARG = re.compile(r'\s*(?:new\s+(?:org\.joml\.)?Matrix4fc?\s*\(|new\s+(?:com\.mojang\.math\.)?Transformation\s*\('
@@ -191,8 +192,13 @@ def _call_arg(text, start):
 
 def guard_overloads(text):
     """`text` with each surviving-overload call (above) marked so no row matches it; unguard() takes the marks out.
-    Text without such a call is returned as it is (the same object)."""
+    Text without such a call is returned as it is (the same object); a call already marked stays marked (idempotent)."""
     if '.mulPose(' not in text:
+        return text
+    if text.count(KEEP_MARK) != text.count(KEEP_CALL_MARKED):
+        # the file holds the mark itself (not one guard put there): left unguarded, said -- the rows then run as before
+        print('prepare-sources: a file holds U+FDD0, the overload guard\'s mark: mulPose calls in it are not guarded',
+              file=sys.stderr)
         return text
     names = {a or b for a, b in _MATRIX_DECL.findall(text)}
     out, last = [], 0
@@ -209,7 +215,8 @@ def guard_overloads(text):
 
 
 def unguard(text):
-    return text.replace(KEEP_MARK, '') if KEEP_MARK in text else text
+    """The marks guard_overloads() put in taken out again -- only those: any other character is the file's own."""
+    return text.replace(KEEP_CALL_MARKED, '.mulPose(') if KEEP_MARK in text else text
 
 
 def build_pattern(renames):

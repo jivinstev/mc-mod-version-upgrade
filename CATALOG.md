@@ -1779,8 +1779,9 @@ loop by one block, with a clean compile and no test that necessarily notices. Po
 `getMaxY() + 1` to preserve meaning; write NEW code as `<= getMaxY()`. This is the archetype for
 **W6**: flag such a row in the rename table, because six months later nobody remembers which rows
 were judgements. **On a fork layer or version branch it is a shared row** (`shared/1.21.3/renames.tsv`, under
-"LevelHeightAccessor"): `getMaxBuildHeight() - 1` → `getMaxY()`, the bare call → `getMaxY() + 1`, only where `+ 1` binds
-as the call did (never after `-` or before `*`/`/`, which stay for javac); a fork row that wrote `getMaxY()` for the bare
+"LevelHeightAccessor"): the call → `(getMaxY() + 1)`, parenthesised so it is exact in any expression (an unparenthesised
+`"h=" + getMaxY() + 1` concatenates "1"), and a whole-operand `getMaxBuildHeight() - 1` → `getMaxY()`; a string literal
+(a mixin descriptor) and a method reference are left for javac and the mixin audit; a fork row that wrote `getMaxY()` for the bare
 call shortened a scan by one block on two dependent forks before the row existed (`tools/test-renames.sh` section 4).
 ⚠ *Dated too late: this arrives at **1.21.2** (minor-version-deltas U7).* 
 

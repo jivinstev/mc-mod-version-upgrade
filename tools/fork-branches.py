@@ -2340,7 +2340,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                 continue
             t_pre, p_new = blob_at(repo, pre, f), blob_at(repo, parent_ref, f)
             pb = blob_at(repo, mb_p, f) if mb_p else None
-            cur = wt_bytes(work / f, p_new or t_pre) if (work / f).is_file() else None
+            cur = wt_bytes(work, f) if (work / f).is_file() else None
             if t_pre is None and pb is None and p_new is not None and f not in conflicted and cur == p_new:
                 new = conv(p_new)                       # a file the parent added, taken as it is: in t's names
             elif t_pre is not None and pb is not None and p_new is not None:
@@ -2350,9 +2350,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             else:
                 continue
             if new != cur or f in conflicted:
-                (work / f).parent.mkdir(parents=True, exist_ok=True)
-                (work / f).write_bytes(new)
-                git(work, "add", "--", f)
+                wt_put(work, f, new)
                 resolved.add(f)
                 if new != (merge_file(t_pre, pb, p_new)[1] if t_pre is not None and pb is not None else p_new) or f in conflicted:
                     carried_rows += 1
@@ -2993,21 +2991,22 @@ def cutout_check(repo, b, fix=False, say=print):
     return 1 if res["skipped"] or (res["fixed"] and not fix) else 0
 
 
-def wt_bytes(path, blob):
-    """A work-tree file's bytes as its blob would hold them: CRLF read back as LF when the blob it came from (`blob`) has
-    LF line endings -- a checkout with core.autocrlf=true writes CRLF, which is no edit."""
-    data = pathlib.Path(path).read_bytes()
-    return data.replace(b"\r\n", b"\n") if blob is not None and b"\r\n" not in blob and b"\r\n" in data else data
+def wt_bytes(work, f):
+    """The work-tree file `f` of checkout `work` as git would store it (its clean conversion: core.autocrlf, eol and
+    text attributes), so a CRLF checkout of an LF blob reads as that blob and a real CRLF edit does not."""
+    sha = git(work, "hash-object", "-w", "--", f).stdout.strip()
+    return git(work, "cat-file", "blob", sha, binary=True).stdout if sha else pathlib.Path(work, f).read_bytes()
 
 
-def wt_form(path, data):
-    """`data` (blob bytes) in the line endings the work-tree file at `path` has now: CRLF when it is CRLF and `data` is
-    LF (core.autocrlf=true), else as it is."""
-    try:
-        now = pathlib.Path(path).read_bytes()
-    except OSError:
-        return data
-    return data.replace(b"\n", b"\r\n") if b"\r\n" in now and b"\r\n" not in data else data
+def wt_put(work, f, data):
+    """Stage `data` (blob bytes) as `f` and check the work-tree file out from the index again, so it takes the line
+    endings this checkout's own config and attributes give it (LF under core.autocrlf=false, CRLF under true)."""
+    p_ = pathlib.Path(work, f)
+    p_.parent.mkdir(parents=True, exist_ok=True)
+    p_.write_bytes(data)
+    git(work, "add", "--", f)
+    p_.unlink()                          # the index now matches the file's stat, so checkout would leave it as written
+    git(work, "checkout", "--", f)
 
 
 def own_conv(read, t, parent_version, props):
@@ -3095,13 +3094,12 @@ def remake(work, t, say=print):
             continue
         if not (work / f).is_file():
             continue
-        cur = wt_bytes(work / f, p_new or t_pre)
+        cur = wt_bytes(work, f)
         pb = blob_at(work, mb_p, f) if mb_p else None
         if t_pre is None and pb is None and p_new is not None and cur == p_new:
             new = conv(p_new)                       # a file the parent added, taken as it is: in t's names
             if new != cur:
-                (work / f).write_bytes(wt_form(work / f, new))
-                git(work, "add", "--", f)
+                wt_put(work, f, new)
                 carried.append(f)
             continue
         if t_pre is None or pb is None or p_new is None:
@@ -3119,8 +3117,7 @@ def remake(work, t, say=print):
             left.append(f)
             continue
         if merged != cur:
-            (work / f).write_bytes(wt_form(work / f, merged))
-            git(work, "add", "--", f)
+            wt_put(work, f, merged)
             carried.append(f)
     if swap:
         # the 26.1.2 boundary: every entityCutout-family call named for what its parent line meant (CATALOG V60) --
@@ -5339,6 +5336,28 @@ def _check_rows_through_merge(expect):
     expect(apply_rules(m4, rules) == m4.replace("mulPose(q)", "rotate(q)") and apply_rules_code(m4, rules) == apply_rules(m4, rules),
            f"a member row renaming mulPose leaves the Matrix4f overload alone: {apply_rules(m4, rules)!r}")
     expect(_ps().guard_overloads(body) is body, "text without mulPose goes through the rows untouched by the guard")
+    # a mod's own private-use glyph (U+E000, a custom font icon in a string) survives the guard, with and without a
+    # mulPose call in the file; a file holding the guard's own mark (U+FDD0) is left unguarded, never altered by it
+    for src in ('String s = "\ue000 Mana";\n', 'String s = "\ue000 Mana";\npose.mulPose(new Matrix4f());\n'):
+        expect(apply_rules(src, rules) == src and apply_rules_code(src, rules) == src,
+               f"a literal U+E000 stays byte-identical through the rows: {apply_rules(src, rules)!r}")
+    own = 'String s = "\ufdd0";\npose.mulPose(new Matrix4f());\npose.mulPose(q);\n'
+    expect(apply_rules(own, rules) == own.replace("mulPose", "rotate"),
+           f"a file holding the mark itself: unguarded (the rows run as they did before the guard), its text kept: {apply_rules(own, rules)!r}")
+    # wt_put: a file written back takes the line endings the checkout's own config gives it, not the old file's
+    with tempfile.TemporaryDirectory() as d:
+        for crlf in ("false", "true"):
+            wr = pathlib.Path(d) / crlf
+            wr.mkdir()
+            git(wr, "init", "-q"); git(wr, "config", "core.autocrlf", crlf)
+            (wr / "A.java").write_bytes(b"class A {}\n")
+            git(wr, "add", "A.java"); git(wr, "-c", "user.name=a", "-c", "user.email=a@b", "commit", "-qm", "a")
+            (wr / "A.java").write_bytes(b"class A {}\r\n")             # a CRLF work-tree file over an LF blob
+            wt_put(wr, "A.java", b"class A { int x; }\n")
+            want = b"class A { int x; }\r\n" if crlf == "true" else b"class A { int x; }\n"
+            expect((wr / "A.java").read_bytes() == want and wt_bytes(wr, "A.java") == b"class A { int x; }\n",
+                   f"core.autocrlf={crlf}: written back as the checkout writes it ({want!r}), read as its blob: "
+                   f"{(wr / 'A.java').read_bytes()!r}")
     with tempfile.TemporaryDirectory() as d:
         r, g, _run = _migrated_fixture(d)
         lib = pathlib.Path(d) / "lib"

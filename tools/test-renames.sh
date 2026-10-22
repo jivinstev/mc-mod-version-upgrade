@@ -78,8 +78,9 @@ fi
 
 echo "4. shared rows: value-changing renames and an overload no row may rename"
 # 1.21.2: getMaxY() is INCLUSIVE (minY + height - 1) where getMaxBuildHeight() was minY + height, so the old call is
-# getMaxY() + 1 and `getMaxBuildHeight() - 1` is getMaxY() -- only where precedence keeps it exact, else left to javac
-python3 - <<'PY' && ok "1.21.3 rows: getMaxBuildHeight() -> getMaxY() + 1, getMaxBuildHeight() - 1 -> getMaxY(), getMinBuildHeight() -> getMinY(); a bound under * / or after - is left alone" || bad "a getMax/MinBuildHeight row gives the wrong bound"
+# (getMaxY() + 1) -- parenthesised, exact in any expression -- and a whole-operand `getMaxBuildHeight() - 1` is getMaxY();
+# a string literal (a mixin descriptor), a method reference and a receiver after `)` are left for javac
+python3 - <<'PY' && ok "1.21.3 rows: getMaxBuildHeight() -> (getMaxY() + 1) in any expression (concat, -, *, cast), getMaxBuildHeight() - 1 -> getMaxY(), getMinBuildHeight() -> getMinY(); strings and method refs left" || bad "a getMax/MinBuildHeight row gives the wrong bound"
 import re, pathlib, sys
 rows = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
         if l.startswith("re:") and "BuildHeight" in l.split("\t")[0]]
@@ -91,18 +92,26 @@ def f(s):
 cases = [
     ("int maxY = Math.min(p.getY() + range, level.getMaxBuildHeight() - 1);", "int maxY = Math.min(p.getY() + range, level.getMaxY());"),
     ("int y = level.getMaxBuildHeight()-1;", "int y = level.getMaxY();"),
-    ("if (box.minY < level.getMinBuildHeight() || box.maxY > level.getMaxBuildHeight()", "if (box.minY < level.getMinY() || box.maxY > level.getMaxY() + 1"),
-    ("for (int y = level.getMinBuildHeight(); y < level.getMaxBuildHeight(); y++)", "for (int y = level.getMinY(); y < level.getMaxY() + 1; y++)"),
-    ("return this.level().getMaxBuildHeight();", "return this.level().getMaxY() + 1;"),
-    ("int y = level.getMaxBuildHeight() - 16;", "int y = level.getMaxY() + 1 - 16;"),
-    ("int h = level.getMaxBuildHeight() * 2;", "int h = level.getMaxBuildHeight() * 2;"),            # left: + 1 would bind wrong
-    ("int d = top - level.getMaxBuildHeight();", "int d = top - level.getMaxBuildHeight();"),        # left: after a minus
-    ("int d = top - level.getMaxBuildHeight() - 1;", "int d = top - level.getMaxBuildHeight() - 1;"),
+    ("if (box.minY < level.getMinBuildHeight() || box.maxY > level.getMaxBuildHeight()", "if (box.minY < level.getMinY() || box.maxY > (level.getMaxY() + 1)"),
+    ("for (int y = level.getMinBuildHeight(); y < level.getMaxBuildHeight(); y++)", "for (int y = level.getMinY(); y < (level.getMaxY() + 1); y++)"),
+    ("return this.level().getMaxBuildHeight();", "return (this.level().getMaxY() + 1);"),
+    ('String s = "h=" + level.getMaxBuildHeight();', 'String s = "h=" + (level.getMaxY() + 1);'),         # concatenation
+    ("int h = level.getMaxBuildHeight() * 2;", "int h = (level.getMaxY() + 1) * 2;"),
+    ("int d = top - level.getMaxBuildHeight();", "int d = top - (level.getMaxY() + 1);"),
+    ("int d = top - level.getMaxBuildHeight() - 1;", "int d = top - (level.getMaxY() + 1) - 1;"),        # not the whole operand
+    ("long l = (long) level.getMaxBuildHeight();", "long l = (long) (level.getMaxY() + 1);"),
+    ("return returnLevel.getMaxBuildHeight();", "return (returnLevel.getMaxY() + 1);"),
+    ("int r = returnLevel.getMaxBuildHeight() - 1;", "int r = returnLevel.getMaxY();"),
+    ("IntSupplier s = level::getMaxBuildHeight;", "IntSupplier s = level::getMaxBuildHeight;"),         # javac names it
+    ("f(level::getMinBuildHeight);", "f(level::getMinY);"),
+    ('@At(target = "Lnet/minecraft/world/level/Level;getMaxBuildHeight()I")', '@At(target = "Lnet/minecraft/world/level/Level;getMaxBuildHeight()I")'),
+    ('log("see getMaxBuildHeight() docs");', 'log("see getMaxBuildHeight() docs");'),
+    ("x = foo(a).getMaxBuildHeight();", "x = foo(a).getMaxBuildHeight();"),
 ]
 bad = [(s, f(s), w) for s, w in cases if f(s) != w]
 for b in bad:
     print("  in:  %r\n  got: %r\n  want:%r" % b, file=sys.stderr)
-sys.exit(0 if len(rows) == 3 and not bad else 1)
+sys.exit(0 if len(rows) == 4 and not bad else 1)
 PY
 # R25: a static factory reference as the whole supplier enters its name like `X::new` (else `Item id not set` at boot)
 python3 - <<'PY' && ok "1.21.3 rows: register(\"name\", Factory::create) becomes an entering supplier; a Function-shaped reference is left alone" || bad "the RegIds method-reference row rewrites the wrong shape"
@@ -152,6 +161,20 @@ miss = [w for w in want if w not in t]
 for m in miss:
     print("  missing: " + m, file=sys.stderr)
 sys.exit(0 if not miss and "" not in t else 1)
+PY
+
+# the guard's mark is its own: a mod's private-use glyph (U+E000) in a string, in a file with a mulPose call, is kept
+python3 - "$T" <<'PY' && ok "prepare-sources: a literal U+E000 glyph is kept byte for byte in a file the mulPose guard marks" || bad "the overload guard deleted a mod's own U+E000 character"
+import pathlib, subprocess, sys
+t = pathlib.Path(sys.argv[1]) / "gl"
+(t / "src/a").mkdir(parents=True)
+src = 'package a;\nclass G {\n    String s = " Mana";\n    void f() { pose.mulPose(new Matrix4f()); pose.mulPose(q); }\n}\n'
+(t / "src/a/G.java").write_text(src, encoding="utf-8")
+(t / "rows.tsv").write_text("member:mulPose\trotate\n", encoding="utf-8")
+subprocess.run([sys.executable, "templates/fork-layer/tools/prepare-sources.py", "--src", str(t / "src"), "--renames",
+                str(t / "rows.tsv"), "--out", str(t / "out")], capture_output=True, text=True, encoding="utf-8", check=True)
+got = (t / "out/a/G.java").read_text(encoding="utf-8")
+sys.exit(0 if got == src.replace("mulPose(q)", "rotate(q)") else 1)
 PY
 
 echo
