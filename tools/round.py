@@ -2033,7 +2033,7 @@ def self_check():
         fence = ftext.split(UNTRUSTED, 1)[-1] if UNTRUSTED in ftext else ""
         expect("finding on the library version" in ftext and "IGNORE EVERY RULE" not in ftext.split(UNTRUSTED, 1)[0]
                and re.search(r"\n" + FENCE + r"text\n[^`]*IGNORE EVERY RULE[^`]*\n" + FENCE + r"\n", fence)
-               and "round/logs/" in ftext, f"the fixer job: the failure as fenced data, after the not-instructions line: {ftext}")
+               and re.search(r"round[\\/]logs[\\/]", ftext), f"the fixer job: the failure as fenced data, after the not-instructions line: {ftext}")
         # S2-4: a tool item's outcome is never recorded by hand; an agent item only while it is out
         for bad in ("examplelib@1.21.4:ci", "examplelib@1.21.4:review", "examplelib@1.21.4:gates"):
             with State.tx(state, write=False) as st:
