@@ -333,8 +333,11 @@ and version-branch forks alike:
 - **Tuesday 08:00 America/Los_Angeles: the plan, with no model.** A GitHub Actions workflow on the first fork's (the
   library's) head branch only -- the dependents' repositories get no workflow and no config
   (`.github/workflows/weekly-plan.yml`, from `templates/weekly-plan.yml`; config `.github/weekly-plan.json`)
-  fetches each fork's authors' upstream, runs `fork-branches.py cascade --plan` for each version-branch fork (with the
-  authors' commits merged into the head on the runner's throwaway checkout), `known-issues.py select`, `known-issues.py
+  fetches each fork's authors' upstream, runs `fork-branches.py cascade --plan` for each version-branch fork (when the
+  authors have new commits, with `--head-merge <their commit>`: the round's head merge simulated on the plan's
+  throwaway ref first -- git only, no push -- so the decisions their code raises up the versions are on Tuesday's plan;
+  a file that conflicts in the head merge itself is listed as "Head merge needs an agent: N file(s)"; a preview that
+  cannot run is listed as "Could not preview" and the plan goes on), `known-issues.py select`, `known-issues.py
   render-plan`, and opens **one plan issue** on the library's repository with a section per fork, assigned to the fork
   owner with an @mention. Its first line is the deadline: the round's start, Wednesday morning Pacific; with no answer
   the defaults apply. It lists the authors' new commits (a box to take them, ticked by default) -- for a version-branch
@@ -342,7 +345,9 @@ and version-branch forks alike:
   commits of some version's `port_taken..head` reachable from their branch, or merges of it; a head that merged their
   release earlier, with no cascade since, shows it with nothing new upstream), under the same box -- the known issues as
   checkboxes pre-ticked for the defaults (every open S1, then S2s up to the budget), each with its lowest open version
-  (the status map; `lowest` is only the first affected one), the escalated cascade decisions (the head cascade's: they
+  (the status map; `lowest` is only the first affected one; on a version-branch fork `known-issues.py lowest` checks
+  the branches below it with git alone: an entry's `pattern` found lower moves the fix there, a listed file
+  byte-identical lower is shown as "lowest may be lower (unchecked)"), the escalated cascade decisions (the head cascade's: they
   apply only with the authors' box ticked) with their options
   (`/decide <id> <choice>`), the **dependency updates** (`weekly-plan.py deps`: per Minecraft version the fork builds,
   each pinned CurseForge/Modrinth dependency with a newer compatible build, current -> new, ticked by default and
@@ -553,7 +558,14 @@ it small, so for such a set the orchestration is a tool, which replaces the four
      too), and never use `--accept-upstream-drift` in a round.
    - **Each selected known issue** (a version-branch fork, either case) goes where `frozen.json`'s `fixes` says: it is
      made at `at`, the **lowest version whose ledger status is `open`** (not the `lowest` field: an issue first seen at
-     1.21.1 may be open only at 26.3), and carried up by the one cascade named there, never fixed version by version:
+     1.21.1 may be open only at 26.3), and carried up by the one cascade named there, never fixed version by version.
+     **Check below `at` before fixing:** `python3 tools/known-issues.py lowest --repo DIR --ref origin/<head> <ID>` (git
+     only, no checkout) greps the entry's `pattern` on every lower version branch the ledger leaves unset; with no
+     pattern, read the lower branches yourself (`git show origin/neoforge-<v>:<file>`). Found lower: fix it at the
+     lowest version that has it and cascade from there, and record it (`known-issues.py status <ID> --set
+     <versions>=open --lowest <v>`) -- never fix it high and come back next week. On a version-branch set the driver
+     does this itself (round.py init, and one `lowest` job per fork for the entries with no pattern). Give a new entry a
+     `--pattern` when its defect has a recognisable text, so the next check is mechanical. Where the fix is made:
      at a version branch, the fix on `neoforge-<at>` and `python3 tools/fork-branches.py cascade --repo DIR
      <at>..<newest>` (from a version branch, a cascade carries only what that branch took -- each merge's port commit is
      its merge-base with the head -- never the head's untaken code); at the head's own version with `head_cascade: true`,
@@ -645,7 +657,8 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    Post a progress comment on the plan issue as each version finishes (gates, review, the pre-release tag; on a
    version-branch set the driver posts it when the version's release item ends).
 5. **New findings.** Grade each with `known-issues.py add` (the rubric's inputs, `--lowest` its lowest affected
-   version, `--file` each file it is in); a WARNING that it may repeat an entry means read that entry first and record
+   version, `--file` each file it is in, `--pattern` a text whose presence means the defect is there, so a later
+   `known-issues.py lowest` finds it on other branches with git alone); a WARNING that it may repeat an entry means read that entry first and record
    the finding there when it is the same defect. At a version that is already done, `known-issues.py reopens --version <v> --id <ID>` decides: only an S1
    reopens it (fixed at its lowest open version, only that fix cascaded, by step 3's rule: from a version branch, or
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
