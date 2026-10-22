@@ -2340,7 +2340,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                 continue
             t_pre, p_new = blob_at(repo, pre, f), blob_at(repo, parent_ref, f)
             pb = blob_at(repo, mb_p, f) if mb_p else None
-            cur = (work / f).read_bytes() if (work / f).is_file() else None
+            cur = wt_bytes(work / f, p_new or t_pre) if (work / f).is_file() else None
             if t_pre is None and pb is None and p_new is not None and f not in conflicted and cur == p_new:
                 new = conv(p_new)                       # a file the parent added, taken as it is: in t's names
             elif t_pre is not None and pb is not None and p_new is not None:
@@ -2993,6 +2993,23 @@ def cutout_check(repo, b, fix=False, say=print):
     return 1 if res["skipped"] or (res["fixed"] and not fix) else 0
 
 
+def wt_bytes(path, blob):
+    """A work-tree file's bytes as its blob would hold them: CRLF read back as LF when the blob it came from (`blob`) has
+    LF line endings -- a checkout with core.autocrlf=true writes CRLF, which is no edit."""
+    data = pathlib.Path(path).read_bytes()
+    return data.replace(b"\r\n", b"\n") if blob is not None and b"\r\n" not in blob and b"\r\n" in data else data
+
+
+def wt_form(path, data):
+    """`data` (blob bytes) in the line endings the work-tree file at `path` has now: CRLF when it is CRLF and `data` is
+    LF (core.autocrlf=true), else as it is."""
+    try:
+        now = pathlib.Path(path).read_bytes()
+    except OSError:
+        return data
+    return data.replace(b"\n", b"\r\n") if b"\r\n" in now and b"\r\n" not in data else data
+
+
 def own_conv(read, t, parent_version, props):
     """bytes -> bytes: the PARENT's text in t's names -- the rows t adds over its parent (own_table) over the code (comments
     kept), the 26.1.2 entityCutout swap by meaning (CATALOG V60) and @OnlyIn stripped as t does. Only ever applied to the
@@ -3078,12 +3095,12 @@ def remake(work, t, say=print):
             continue
         if not (work / f).is_file():
             continue
-        cur = (work / f).read_bytes()
+        cur = wt_bytes(work / f, p_new or t_pre)
         pb = blob_at(work, mb_p, f) if mb_p else None
         if t_pre is None and pb is None and p_new is not None and cur == p_new:
             new = conv(p_new)                       # a file the parent added, taken as it is: in t's names
             if new != cur:
-                (work / f).write_bytes(new)
+                (work / f).write_bytes(wt_form(work / f, new))
                 git(work, "add", "--", f)
                 carried.append(f)
             continue
@@ -3102,7 +3119,7 @@ def remake(work, t, say=print):
             left.append(f)
             continue
         if merged != cur:
-            (work / f).write_bytes(merged)
+            (work / f).write_bytes(wt_form(work / f, merged))
             git(work, "add", "--", f)
             carried.append(f)
     if swap:
