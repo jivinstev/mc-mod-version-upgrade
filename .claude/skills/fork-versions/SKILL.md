@@ -40,7 +40,10 @@ helpers, catalogue entries and a cost figure; the next fork, and the next versio
   class moves) are kept per version so that a merge can apply them: each file the merge changed that both sides had
   from the rows alone ("mechanical": the version's file equals its rows over the port branch's file) is re-made from the
   port branch's new file through the version's rows, and committed with the merge; a file a person changed is merged
-  by git, and a conflict there stops the cascade for a person. **That person's merge gets the same step:** a plain
+  by git and then again with the parent's two sides put through the rows the version adds (code only, never the
+  version's own text), so the authors' new lines arrive in the version's names -- counted as mechanical in the plan --
+  and a conflict through the rows too stops the cascade for a person; a shared helper a converted line now names is
+  installed with the merge. **That person's merge gets the same step:** a plain
   `git merge <lower>` skips it, so merge with `--no-commit`, run `python3 tools/fork-branches.py remake --repo <the
   version's checkout> --branch neoforge-<v>` (the rows-only files re-made through the version's rows, a conflict there
   included; each other file the merge changed carried through the rows the version adds, code only; staged; the files
@@ -321,7 +324,8 @@ branch, then:
 
 (`fork-port.py --repo DIR --chain <lowest>..<newest>` runs the same on version branches.) It merges the lowest branch into
 the next one up, that into the next, ... with a merge commit each, re-makes the mechanical files through each version's
-rows, runs the no-model gates on each merged branch (fork-port.py from the measure stage, no budget; default `ab`), and
+rows (and merges each hand-changed file again through the rows the version adds, so the authors' new lines arrive in
+the version's names; a shared helper a converted line names is installed), runs the no-model gates on each merged branch (fork-port.py from the measure stage, no budget; default `ab`), and
 stops at the first conflict (the merge undone, the files named) or red branch, naming the command that cascades on from
 there. A file the authors changed (the port branch's diff) that the parent version does not carry reaches the version
 through no merge, so the cascade carries it itself: a `.java` file the rows alone made is re-made through the version's

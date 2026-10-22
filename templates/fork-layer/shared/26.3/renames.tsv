@@ -11,7 +11,9 @@ org.lwjgl.glfw.GLFW	@MVPKG@.GLFW
 re:\bInputConstants\.isKeyDown\((?:[^,()]|\((?:[^()]|\([^()]*\))*\))+,\s*	InputConstants.isKeyDown(
 # ---- PoseStack.mulPose(Quaternionf) is gone (26.3 keeps mulPose(Matrix4fc) / mulPose(Transformation)); a quaternion goes
 # through rotate(Quaternionfc). 1.21's idiom is mulPose(Axis.XP.rotationDegrees(a)); a quaternion held in a variable cannot
-# be told from a matrix by a row and is left to the compile error.
+# be told from a matrix by a row and is left to the compile error. The other way round is the row machinery's: a mulPose
+# call with a matrix argument (a new Matrix4f/Transformation, a cast, `.pose()`, a name the file declares as a matrix) is
+# held out of EVERY row (prepare-sources.py guard_overloads), so a fork row `member:mulPose<TAB>rotate` cannot break it.
 re:\.mulPose\(\s*(?=(?:com\.mojang\.math\.)?Axis\.[XYZ][PN]\.rotation)	.rotate(
 re:\.mulPose\(\s*(?=new\s+(?:org\.joml\.)?Quaternionf\()	.rotate(
 # ---- AbortableIterationConsumer.Continuation is the top-level net.minecraft.util.Continuation (same constants). A nested

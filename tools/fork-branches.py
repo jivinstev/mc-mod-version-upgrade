@@ -406,10 +406,13 @@ def apply_rules(text, rules):
     crlf = "\r\n" in text
     if crlf:
         text = text.replace("\r\n", "\n")
+    ps = _ps()
+    text = ps.guard_overloads(text)          # a surviving overload (mulPose with a matrix) no row may rename
     for rx, repl, _ex in regexes:
         text = rx.sub(repl, text)
     if pattern is not None:
         text = pattern.sub(lambda m: table[m.group(1)], text)
+    text = ps.unguard(text)
     return text.replace("\n", "\r\n") if crlf else text
 
 
@@ -475,7 +478,9 @@ def java_segments(text):
 def apply_rules_code(text, rules):
     """apply_rules() on the code of a Java file only: every comment kept byte for byte (a javadoc naming a class by
     its old package stays as written). String literals are code here, as for apply_rules()."""
-    return "".join(piece if comment else apply_rules(piece, rules) for comment, piece in java_segments(text))
+    ps = _ps()
+    text = ps.guard_overloads(text)          # the whole file's declarations decide (a piece may not hold them)
+    return ps.unguard("".join(piece if comment else apply_rules(piece, rules) for comment, piece in java_segments(text)))
 
 
 def apply_moves_to_files(paths, rules, mechanical=()):
@@ -2321,6 +2326,38 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             remake(f)
             resolved.add(f)
             remade += 1
+    # every other .java file the merge changed: git merged the parent's change in the PARENT's names, so the authors' new
+    # lines it carried would reach t unconverted (weekly round 2026-10-21: 6-10 files per version fixed by hand). Merge it
+    # again with the parent's two sides put through the rows t adds (own_conv; never t's own text) -- remake's step: taken
+    # when that merge is clean, a conflict there resolved by it; otherwise git's result stands (a conflict goes on below)
+    carried_rows = 0
+    if not already and java:
+        rn_c = reader_of_root(work) if not conflicted & {f for f in changed if f.startswith(REC + "/")} else read_t
+        conv = own_conv(rn_c, t, parent_version, parse_props(rn_c(f"{REC}/{t}/{BRANCH_PROPS}")))
+        mb_p = git(repo, "merge-base", pre, parent_ref).stdout.strip()
+        for f in java:
+            if f in resolved:
+                continue
+            t_pre, p_new = blob_at(repo, pre, f), blob_at(repo, parent_ref, f)
+            pb = blob_at(repo, mb_p, f) if mb_p else None
+            cur = wt_bytes(work, f) if (work / f).is_file() else None
+            if t_pre is None and pb is None and p_new is not None and f not in conflicted and cur == p_new:
+                new = conv(p_new)                       # a file the parent added, taken as it is: in t's names
+            elif t_pre is not None and pb is not None and p_new is not None:
+                clean, new = merge_file(t_pre, conv(pb), conv(p_new))
+                if not clean:
+                    continue
+            else:
+                continue
+            if new != cur or f in conflicted:
+                wt_put(work, f, new)
+                resolved.add(f)
+                if new != (merge_file(t_pre, pb, p_new)[1] if t_pre is not None and pb is not None else p_new) or f in conflicted:
+                    carried_rows += 1
+                    mech.append({"file": f, "version": t, "how": f"{parent_name}'s change merged through the rows {t} adds "
+                                 f"over it ({t}'s own text untouched)"})
+    if carried_rows:
+        notes.append(f"{carried_rows} file(s) changed by hand: {parent_name}'s change put through the rows {t} adds")
     for f in port_java:
         t_pre = blob_at(repo, pre, f)
         if t_pre is None:
@@ -2559,6 +2596,22 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                          f"{len(cx['decide']) + len(cx['fresh'])} to decide (fork-branches.py cutout-check --branch "
                          f"{branch_name(t)} lists them again)")
             notes += [f"entityCutout swap: {ln}" for ln in cutout_lines(cx, True)]
+    # a row the merged code went through may name a shared helper this branch never carried (weekly round 2026-10-21: the
+    # 1.21.5 getOwnerUUID row's Owners): each helper the tree now uses and lacks is installed, as add-target installs it
+    if props.get("mv_package") and (shared_dir()).is_dir():
+        span = sorted({v for v in os.listdir(shared_dir()) if (shared_dir() / v).is_dir() and re.match(r"^\d+(\.\d+)+$", v)
+                       and mc_key(props.get("base_minecraft_version") or "1.21.1") < mc_key(v) <= mc_key(t)}, key=mc_key)
+        bfiles = {k: blob_at(repo, pre, k) or b"" for k in ("build.gradle", "gradle.properties")}
+        toml = next((data for path_, data in ref_files(repo, pre, "src").items()
+                     if path_.endswith("META-INF/neoforge.mods.toml")), b"")
+        modid = (re.search(rb'(?m)^\s*modId\s*=\s*"([^"]+)"', toml) or [None, b""])[1].decode("utf-8", "replace")
+        added = helper_pass(repo, work, t, span, props["mv_package"], modid, bfiles, say, "cascade", add_only=True,
+                            pre=pre)
+        if added:
+            git(work, "add", "--", *added)
+        if any(a.endswith(".java") for a in added):
+            notes.append(f"shared helper(s) the merged code uses installed: "
+                         + ", ".join(a.rsplit("/", 1)[-1] for a in added if a.endswith(".java")))
     # port_taken moves to port_new only here, after record_untaken: every change in the range is taken, or held by an
     # entry (whose removal, or --apply-decisions, is the explicit clear). A merge undone commits nothing, so it stays.
     new_taken = port_new
@@ -2938,6 +2991,40 @@ def cutout_check(repo, b, fix=False, say=print):
     return 1 if res["skipped"] or (res["fixed"] and not fix) else 0
 
 
+def wt_bytes(work, f):
+    """The work-tree file `f` of checkout `work` as git would store it (its clean conversion: core.autocrlf, eol and
+    text attributes), so a CRLF checkout of an LF blob reads as that blob and a real CRLF edit does not."""
+    sha = git(work, "hash-object", "-w", "--", f).stdout.strip()
+    return git(work, "cat-file", "blob", sha, binary=True).stdout if sha else pathlib.Path(work, f).read_bytes()
+
+
+def wt_put(work, f, data):
+    """Stage `data` (blob bytes) as `f` and check the work-tree file out from the index again, so it takes the line
+    endings this checkout's own config and attributes give it (LF under core.autocrlf=false, CRLF under true)."""
+    p_ = pathlib.Path(work, f)
+    p_.parent.mkdir(parents=True, exist_ok=True)
+    p_.write_bytes(data)
+    git(work, "add", "--", f)
+    p_.unlink()                          # the index now matches the file's stat, so checkout would leave it as written
+    git(work, "checkout", "--", f)
+
+
+def own_conv(read, t, parent_version, props):
+    """bytes -> bytes: the PARENT's text in t's names -- the rows t adds over its parent (own_table) over the code (comments
+    kept), the 26.1.2 entityCutout swap by meaning (CATALOG V60) and @OnlyIn stripped as t does. Only ever applied to the
+    parent's text, never to t's own: a swap row is not idempotent."""
+    own = rules_of(own_table(read, t, parent_version))
+    strip = props.get("strip_onlyin") == "true"
+    swap = cutout_crossing(t, cutout_below(props))
+
+    def conv(data):
+        text = apply_rules_code(data.decode("utf-8", "surrogateescape"), own)
+        if swap:                                   # the parent's names meant what they meant below 26.1.2 (CATALOG V60)
+            text = cutout_translate(data.decode("utf-8", "surrogateescape"), text)
+        return (strip_onlyin_text(text) if strip else text).encode("utf-8", "surrogateescape")
+    return conv
+
+
 def remake(work, t, say=print):
     """The cascade's rows-as-a-tool step for a merge a person makes by hand (`git merge <lower>` at a version boundary
     the cascade stopped at): on the checkout `work` of version t's branch, during the merge (MERGE_HEAD) or right after
@@ -2982,17 +3069,9 @@ def remake(work, t, say=print):
     rows_old = rows_tree(work, port_mb, read_t, t, chain_read(read_t, t))
     rp = reader_of_ref(work, parent_ref)
     rows_par = rows_tree(work, port_new, rp, parent_version, chain_read(rp, parent_version)) if parent_version else None
-    own = rules_of(own_table(rn, t, parent_version))
-    strip = props.get("strip_onlyin") == "true"
     mb_p = git(work, "merge-base", pre, parent_ref).stdout.strip()
-
     swap = cutout_crossing(t, cutout_below(props))
-
-    def conv(data):
-        text = apply_rules_code(data.decode("utf-8", "surrogateescape"), own)
-        if swap:                                   # the parent's names meant what they meant below 26.1.2 (CATALOG V60)
-            text = cutout_translate(data.decode("utf-8", "surrogateescape"), text)
-        return (strip_onlyin_text(text) if strip else text).encode("utf-8", "surrogateescape")
+    conv = own_conv(rn, t, parent_version, props)
     remade, carried, dropped, left, kept = [], [], [], [], []
     for f in sorted(x for x in changed if re.match(r"^src/[^/]+/java/.+\.java$", x)):
         t_pre, p_new = blob_at(work, pre, f), blob_at(work, parent_ref, f)
@@ -3015,13 +3094,12 @@ def remake(work, t, say=print):
             continue
         if not (work / f).is_file():
             continue
-        cur = (work / f).read_bytes()
+        cur = wt_bytes(work, f)
         pb = blob_at(work, mb_p, f) if mb_p else None
         if t_pre is None and pb is None and p_new is not None and cur == p_new:
             new = conv(p_new)                       # a file the parent added, taken as it is: in t's names
             if new != cur:
-                (work / f).write_bytes(new)
-                git(work, "add", "--", f)
+                wt_put(work, f, new)
                 carried.append(f)
             continue
         if t_pre is None or pb is None or p_new is None:
@@ -3039,8 +3117,7 @@ def remake(work, t, say=print):
             left.append(f)
             continue
         if merged != cur:
-            (work / f).write_bytes(merged)
-            git(work, "add", "--", f)
+            wt_put(work, f, merged)
             carried.append(f)
     if swap:
         # the 26.1.2 boundary: every entityCutout-family call named for what its parent line meant (CATALOG V60) --
@@ -3756,6 +3833,43 @@ def used_helpers(pool, java_texts):
     return added
 
 
+def helper_pass(repo, work, t, versions_, mv_pkg, modid, files, say=print, who="sync-shared", add_only=False, pre=None):
+    """The shared-library helpers on the checkout `work` of version t: each helper of `versions_`' library the tree uses
+    (transitively) is installed; one installed and unedited since follows the library's copy (add_only: left as it is,
+    and one the commit `pre` lacks that arrived as the library's copy -- carried in by a merge -- listed as installed);
+    the fork's own class of that name, or an edited helper, is left alone and said. .port/<t>/shared-helpers.txt kept in
+    step. `files`: the tree's build files ({path: bytes}, build.gradle/gradle.properties read for `// REQUIRES:`).
+    -> the paths written (not staged)."""
+    changed = []
+    listed = helper_blobs(work, t)
+    build_text = files.get("build.gradle", b"").decode("utf-8", "replace") + files.get("gradle.properties", b"").decode("utf-8", "replace")
+    pool = shared_helpers_for(sorted(set(versions_), key=mc_key, reverse=True), mv_pkg, modid, build_text)
+    cur = root_files(repo, work, True)
+    java = [d.decode("utf-8", "replace") for p, d in cur.items() if p.startswith("src/main/java/") and p.endswith(".java")]
+    lines = dict(listed)
+    for rel, body in used_helpers(pool, java).items():
+        dest = f"src/main/java/{rel}"
+        data = body.encode("utf-8")
+        if dest in cur and (add_only or listed.get(dest) != hash_blobs({dest: cur[dest]})[dest]):
+            if add_only and cur[dest] == data and dest not in listed and pre and blob_at(repo, pre, dest) is None:
+                lines[dest] = hash_blobs({dest: data})[dest]      # carried in by a merge, as installed: listed here too
+            if cur[dest] != data and not add_only:   # the fork's own class of that name, or an edited helper: left alone, said
+                say(f"fork-branches: {who} {t}: {dest} "
+                    + ("was edited since it was installed" if dest in listed else "is the fork's own class, not the installed helper")
+                    + ": left alone (the library's copy differs; merge it by hand if wanted)")
+            continue
+        if cur.get(dest) != data:
+            (work / dest).parent.mkdir(parents=True, exist_ok=True)
+            (work / dest).write_bytes(data); changed.append(dest)
+        lines[dest] = hash_blobs({dest: data})[dest]
+    if lines != listed:
+        (work / REC / t / "shared-helpers.txt").write_bytes(
+            ("# shared-library helpers as installed (path blob): tools/fork-branches.py\n"
+             + "".join(f"{k} {v}\n" for k, v in sorted(lines.items()))).encode("utf-8"))
+        changed.append(f"{REC}/{t}/shared-helpers.txt")
+    return changed
+
+
 def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None, say=print):
     """Make version branch neoforge-<t> from its parent's (the nearest lower version branch, or --parent, else the port
     branch): its versions from templates/fork-layer/versions.json written into gradle.properties, branch.properties
@@ -3975,30 +4089,7 @@ def sync_shared(repo, targets=None, say=print, ci_modid=None):
                 if files.get(p) == data and rows_new.get(p) not in (None, data):
                     (work / p).write_bytes(rows_new[p]); changed.append(p)
         # helpers: an installed, unedited one follows the library; a newly used one is added
-        listed = helper_blobs(work, t)
-        build_text = files.get("build.gradle", b"").decode("utf-8", "replace") + files.get("gradle.properties", b"").decode("utf-8", "replace")
-        pool = shared_helpers_for(sorted(set(versions_), key=mc_key, reverse=True), mv_pkg, modid, build_text)
-        cur = root_files(repo, work, True)
-        java = [d.decode("utf-8", "replace") for p, d in cur.items() if p.startswith("src/main/java/") and p.endswith(".java")]
-        lines = dict(listed)
-        for rel, body in used_helpers(pool, java).items():
-            dest = f"src/main/java/{rel}"
-            data = body.encode("utf-8")
-            if dest in cur and listed.get(dest) != hash_blobs({dest: cur[dest]})[dest]:
-                if cur[dest] != data:        # the fork's own class of that name, or an edited helper: left alone, said
-                    say(f"fork-branches: sync-shared {t}: {dest} "
-                        + ("was edited since it was installed" if dest in listed else "is the fork's own class, not the installed helper")
-                        + ": left alone (the library's copy differs; merge it by hand if wanted)")
-                continue
-            if cur.get(dest) != data:
-                (work / dest).parent.mkdir(parents=True, exist_ok=True)
-                (work / dest).write_bytes(data); changed.append(dest)
-            lines[dest] = hash_blobs({dest: data})[dest]
-        if lines != listed:
-            (work / REC / t / "shared-helpers.txt").write_bytes(
-                ("# shared-library helpers as installed (path blob): tools/fork-branches.py\n"
-                 + "".join(f"{k} {v}\n" for k, v in sorted(lines.items()))).encode("utf-8"))
-            changed.append(f"{REC}/{t}/shared-helpers.txt")
+        changed += helper_pass(repo, work, t, versions_, mv_pkg, modid, files, say, "sync-shared")
         if not changed:
             say(f"fork-branches: sync-shared {t}: current"); continue
         git(work, "add", "-A", "--", *sorted(set(changed)), check=True)
@@ -5228,6 +5319,120 @@ def _check_remake(expect):
         rc, said = _quiet(remake, r, "1.21.4")
         expect(rc == 2 and "not neoforge-1.21.4" in said and not git(r, "status", "--porcelain", "--untracked-files=no").stdout.strip(),
                f"a checkout not on the version branch (a single-version fork, the layer branch): refused, nothing written: {said}")
+
+
+def _check_rows_through_merge(expect):
+    """The cascade puts the authors' new lines through each version's rows in a file git 3-way-merges (weekly round
+    2026-10-21: 6-10 files per version were fixed by hand): a 3-version chain where the authors add a line using a 1.21.1
+    API renamed at the middle version (and a swap row there) carries it converted at each version, mechanically, in a
+    file every version changed by hand; the version's own text is never put through the rows again (a swap row is not
+    idempotent); a helper the converted line names is installed; a real conflict still goes to a person (stops, or a
+    decision in the plan). A matrix argument of mulPose is held out of every row. A single-version fork: refused."""
+    h = "src/main/java/com/example/mod/H.java"
+    body = ("package com.example.mod;\nclass H {\n    int top;\n    int p1;\n    int p2;\n    int p3;\n    void a() { }\n"
+            "    int p4;\n    int p5;\n    int p6;\n    int mid;\n    int p7;\n    int p8;\n    int p9;\n    int pad;\n}\n")
+    rules = rules_of("member:mulPose\trotate\n")
+    m4 = "pose.mulPose(new Matrix4f(\n    a, b));\npose.mulPose(q);\nMatrix4f m = x;\npose.mulPose(m);\n"
+    expect(apply_rules(m4, rules) == m4.replace("mulPose(q)", "rotate(q)") and apply_rules_code(m4, rules) == apply_rules(m4, rules),
+           f"a member row renaming mulPose leaves the Matrix4f overload alone: {apply_rules(m4, rules)!r}")
+    expect(_ps().guard_overloads(body) is body, "text without mulPose goes through the rows untouched by the guard")
+    # a mod's own private-use glyph (U+E000, a custom font icon in a string) survives the guard, with and without a
+    # mulPose call in the file; a file holding the guard's own mark (U+FDD0) is left unguarded, never altered by it
+    for src in ('String s = "\ue000 Mana";\n', 'String s = "\ue000 Mana";\npose.mulPose(new Matrix4f());\n'):
+        expect(apply_rules(src, rules) == src and apply_rules_code(src, rules) == src,
+               f"a literal U+E000 stays byte-identical through the rows: {apply_rules(src, rules)!r}")
+    own = 'String s = "\ufdd0";\npose.mulPose(new Matrix4f());\npose.mulPose(q);\n'
+    expect(apply_rules(own, rules) == own.replace("mulPose", "rotate"),
+           f"a file holding the mark itself: unguarded (the rows run as they did before the guard), its text kept: {apply_rules(own, rules)!r}")
+    # wt_put: a file written back takes the line endings the checkout's own config gives it, not the old file's
+    with tempfile.TemporaryDirectory() as d:
+        for crlf in ("false", "true"):
+            wr = pathlib.Path(d) / crlf
+            wr.mkdir()
+            git(wr, "init", "-q"); git(wr, "config", "core.autocrlf", crlf)
+            (wr / "A.java").write_bytes(b"class A {}\n")
+            git(wr, "add", "A.java"); git(wr, "-c", "user.name=a", "-c", "user.email=a@b", "commit", "-qm", "a")
+            (wr / "A.java").write_bytes(b"class A {}\r\n")             # a CRLF work-tree file over an LF blob
+            wt_put(wr, "A.java", b"class A { int x; }\n")
+            want = b"class A { int x; }\r\n" if crlf == "true" else b"class A { int x; }\n"
+            expect((wr / "A.java").read_bytes() == want and wt_bytes(wr, "A.java") == b"class A { int x; }\n",
+                   f"core.autocrlf={crlf}: written back as the checkout writes it ({want!r}), read as its blob: "
+                   f"{(wr / 'A.java').read_bytes()!r}")
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        lib = pathlib.Path(d) / "lib"
+        (lib / "1.21.4/java").mkdir(parents=True)
+        (lib / "1.21.4/java/Owners.java").write_text("package @MVPKG@;\npublic final class Owners {\n    public static Object "
+                                                     "uuid(Object e) { return e; }\n}\n", encoding="utf-8")
+        saved = os.environ.get("MMVU_SHARED_DIR")
+        os.environ["MMVU_SHARED_DIR"] = str(lib)
+        try:
+            w4, _w = worktree_for(r, "1.21.4")
+            rn4 = w4 / ".port/1.21.4/renames.tsv"
+            # the middle version renames a 1.21.1 member, swaps two names (three rows: applied twice they swap back), and
+            # routes a call through a shared helper
+            _hand(w4, {".port/1.21.4/renames.tsv": rn4.read_text(encoding="utf-8") + "member:oldMid\tnewMid\n"
+                       "re:\\bleftHand\\(\tmv$tmp(\nre:\\brightHand\\(\tleftHand(\nre:\\bmv\\$tmp\\(\trightHand(\n"
+                       "re:(\\w+)\\.getOwnerUUID\\(\\)\tcom.example.mod.mv.Owners.uuid(\\1)\n"}, "1.21.4: rows")
+            _authors(r, g, {h: body}, "authors: H")
+            rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+            expect(rc == 0, f"control: H reaches every version through the rows: {out[-400:]}")
+            for t, edit in (("1.21.3", ("    int top;\n", "    int top;\n    int own3;\n")),
+                            ("1.21.4", ("    int pad;\n", "    int pad;\n    void own() { leftHand(); }\n")),
+                            ("1.21.5", ("    int mid;\n", "    int mid;\n    int own5;\n"))):
+                wt, _w = worktree_for(r, t)
+                _hand(wt, {h: edit}, f"{t}: its own line in H")
+            new_a = "    void a() { z.oldMid(); rightHand(); Object o = e.getOwnerUUID(); }\n"
+            _authors(r, g, {h: ("    void a() { }\n", new_a)}, "authors: a() calls the 1.21.1 API")
+            pdir = pathlib.Path(d) / "plan"
+            rc, out = _quiet(cascade, r, "port..1.21.5", mode="plan", out_dir=pdir)
+            plan = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8")) if (pdir / "CASCADE-PLAN.json").is_file() else {}
+            expect(rc == 0 and any(m["file"] == h and m["version"] == "1.21.4" for m in plan.get("mechanical", []))
+                   and not any(x["file"] == h for x in plan.get("decisions", [])),
+                   f"cascade --plan: H merged mechanically through 1.21.4's rows, no decision: {plan.get('mechanical')} "
+                   f"{[x['file'] for x in plan.get('decisions', [])]} {out[-300:]}")
+            rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+            got = {t: (ref_files(r, resolve_branch(r, branch_name(t))).get(h) or b"").decode("utf-8") for t in ("1.21.3", "1.21.4", "1.21.5")}
+            conv_a = "    void a() { z.newMid(); leftHand(); Object o = com.example.mod.mv.Owners.uuid(e); }\n"
+            expect(rc == 0 and new_a in got["1.21.3"] and "int own3;" in got["1.21.3"],
+                   f"1.21.3 (no row for these names): the authors' line as written, its own line kept: {got['1.21.3']!r} {out[-400:]}")
+            for t in ("1.21.4", "1.21.5"):
+                expect(conv_a in got[t] and "void own() { leftHand(); }" in got[t] and "int own3;" in got[t],
+                       f"{t}: the authors' new line in the version's names (renamed and swapped once), the version's own "
+                       f"swap-spelled line untouched: {got[t]!r} {out[-400:]}")
+            expect("int own5;" in got["1.21.5"], f"1.21.5 keeps its own line: {got['1.21.5']!r}")
+            ents = {t: [c["overlay"] for c in remerge_entries(ref_files(r, resolve_branch(r, branch_name(t))).get(f".port/{t}/REMERGE.json", b""))]
+                    for t in ("1.21.3", "1.21.4", "1.21.5")}
+            expect(not any(h in v for v in ents.values()), f"the change counts as taken at every version (no entry): {ents}")
+            f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+            f3 = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))
+            ow = "src/main/java/com/example/mod/mv/Owners.java"
+            expect(b"package com.example.mod.mv;" in f5.get(ow, b"") and ow in f5.get(".port/1.21.5/shared-helpers.txt", b"").decode()
+                   and ow not in f3, f"the helper the converted line names is installed where the row applies: {f5.get(ow)!r} "
+                   f"{f5.get('.port/1.21.5/shared-helpers.txt')!r} {sorted(k for k in f3 if 'mv/' in k)}")
+            # a real conflict (the authors and 1.21.4 change the same line) still goes to a person
+            w4, _w = worktree_for(r, "1.21.4")
+            _hand(w4, {h: ("    int p9;\n", "    int p9 = 4;\n")}, "1.21.4: p9")
+            _authors(r, g, {h: ("    int p9;\n", "    int p9 = 1;\n")}, "authors: p9")
+            rc, out = _quiet(cascade, r, "port..1.21.5", mode="plan", out_dir=pdir)
+            plan = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8"))
+            expect(any(x["file"] == h and "1.21.4" in x["versions"] for x in plan.get("decisions", [])),
+                   f"a conflict through the rows too: a decision in the plan: {plan.get('decisions')}")
+            rc, out = _quiet(cascade, r, "port..1.21.5", "none")
+            expect(rc == 1 and "STOPPED at 1.21.4" in out, f"a conflict through the rows too: the cascade stops there: {out[-400:]}")
+        finally:
+            os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+    # a single-version fork: no version branches, so nothing of this runs; refused, nothing written
+    with tempfile.TemporaryDirectory() as d:
+        sv = pathlib.Path(d)
+        gs = lambda *a: subprocess.run(["git", "-C", str(sv), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        gs("init", "-q", "-b", "neoforge-1.21.1"); gs("config", "user.email", "a@b"); gs("config", "user.name", "a")
+        (sv / "A.java").write_text("class A { void f() { pose.mulPose(new Matrix4f()); } }\n", encoding="utf-8")
+        gs("add", "-A"); gs("commit", "-qm", "port")
+        refs = gs("for-each-ref")
+        rc, out = _quiet(cascade, sv, "port..1.21.4", "none")
+        expect(rc == 2 and gs("for-each-ref") == refs and not gs("status", "--porcelain"),
+               f"a single-version fork: the cascade refuses, nothing written: {out}")
 
 
 def _check_cutout(expect):
@@ -6482,6 +6687,7 @@ def self_check():
         _check_stopped_worktree(expect)
         _check_stage_checkout(expect)
         _check_remake(expect)
+        _check_rows_through_merge(expect)
         _check_cutout(expect)
     if deep:
         _check_cascade_plan(expect)

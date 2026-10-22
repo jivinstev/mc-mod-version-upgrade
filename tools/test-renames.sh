@@ -76,6 +76,107 @@ else
   echo "  SKIP  no javac here (CI runs it; a skip is not a pass)"
 fi
 
+echo "4. shared rows: value-changing renames and an overload no row may rename"
+# 1.21.2: getMaxY() is INCLUSIVE (minY + height - 1) where getMaxBuildHeight() was minY + height, so the old call is
+# (getMaxY() + 1) -- parenthesised, exact in any expression -- and a whole-operand `getMaxBuildHeight() - 1` is getMaxY();
+# a string literal (a mixin descriptor), a method reference and a receiver after `)` are left for javac
+python3 - <<'PY' && ok "1.21.3 rows: getMaxBuildHeight() -> (getMaxY() + 1) in any expression (concat, -, *, cast), getMaxBuildHeight() - 1 -> getMaxY(), getMinBuildHeight() -> getMinY(); strings and method refs left" || bad "a getMax/MinBuildHeight row gives the wrong bound"
+import re, pathlib, sys
+rows = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
+        if l.startswith("re:") and "BuildHeight" in l.split("\t")[0]]
+def f(s):
+    for r in rows:
+        pat, rep = r[3:].split("\t")
+        s = re.sub(pat, rep, s)
+    return s
+cases = [
+    ("int maxY = Math.min(p.getY() + range, level.getMaxBuildHeight() - 1);", "int maxY = Math.min(p.getY() + range, level.getMaxY());"),
+    ("int y = level.getMaxBuildHeight()-1;", "int y = level.getMaxY();"),
+    ("if (box.minY < level.getMinBuildHeight() || box.maxY > level.getMaxBuildHeight()", "if (box.minY < level.getMinY() || box.maxY > (level.getMaxY() + 1)"),
+    ("for (int y = level.getMinBuildHeight(); y < level.getMaxBuildHeight(); y++)", "for (int y = level.getMinY(); y < (level.getMaxY() + 1); y++)"),
+    ("return this.level().getMaxBuildHeight();", "return (this.level().getMaxY() + 1);"),
+    ('String s = "h=" + level.getMaxBuildHeight();', 'String s = "h=" + (level.getMaxY() + 1);'),         # concatenation
+    ("int h = level.getMaxBuildHeight() * 2;", "int h = (level.getMaxY() + 1) * 2;"),
+    ("int d = top - level.getMaxBuildHeight();", "int d = top - (level.getMaxY() + 1);"),
+    ("int d = top - level.getMaxBuildHeight() - 1;", "int d = top - (level.getMaxY() + 1) - 1;"),        # not the whole operand
+    ("long l = (long) level.getMaxBuildHeight();", "long l = (long) (level.getMaxY() + 1);"),
+    ("return returnLevel.getMaxBuildHeight();", "return (returnLevel.getMaxY() + 1);"),
+    ("int r = returnLevel.getMaxBuildHeight() - 1;", "int r = returnLevel.getMaxY();"),
+    ("IntSupplier s = level::getMaxBuildHeight;", "IntSupplier s = level::getMaxBuildHeight;"),         # javac names it
+    ("f(level::getMinBuildHeight);", "f(level::getMinY);"),
+    ('@At(target = "Lnet/minecraft/world/level/Level;getMaxBuildHeight()I")', '@At(target = "Lnet/minecraft/world/level/Level;getMaxBuildHeight()I")'),
+    ('log("see getMaxBuildHeight() docs");', 'log("see getMaxBuildHeight() docs");'),
+    ("x = foo(a).getMaxBuildHeight();", "x = foo(a).getMaxBuildHeight();"),
+]
+bad = [(s, f(s), w) for s, w in cases if f(s) != w]
+for b in bad:
+    print("  in:  %r\n  got: %r\n  want:%r" % b, file=sys.stderr)
+sys.exit(0 if len(rows) == 4 and not bad else 1)
+PY
+# R25: a static factory reference as the whole supplier enters its name like `X::new` (else `Item id not set` at boot)
+python3 - <<'PY' && ok "1.21.3 rows: register(\"name\", Factory::create) becomes an entering supplier; a Function-shaped reference is left alone" || bad "the RegIds method-reference row rewrites the wrong shape"
+import re, pathlib, sys
+rows = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
+        if l.startswith("re:") and "RegIds.enter" in l]
+def f(s):
+    for r in rows:
+        pat, rep = r[3:].split("\t")
+        s = re.sub(pat, rep.replace("@MVPKG@", "p"), s)
+    return s
+cases = [
+    ('ITEMS.register("staff",\n        StaffFactory::create\n    );', 'ITEMS.register("staff",\n        () -> p.RegIds.enter("staff") ? null : StaffFactory.create()\n    );'),
+    ('ITEMS.register("x", Foo::new);', 'ITEMS.register("x", () -> p.RegIds.enter("x") ? null : new Foo());'),
+    ('ITEMS.register("x", Foo::make, props);', 'ITEMS.register("x", Foo::make, props);'),
+]
+bad = [(s, f(s), w) for s, w in cases if f(s) != w]
+for b in bad:
+    print("  in:  %r\n  got: %r\n  want:%r" % b, file=sys.stderr)
+sys.exit(0 if not bad else 1)
+PY
+# 26.3: mulPose(Quaternionf) is rotate(Quaternionfc) but mulPose(Matrix4fc)/mulPose(Transformation) stay: whatever the rows
+# say (here a fork's broad member row), a matrix argument keeps mulPose -- through prepare-sources.py itself
+mkdir -p "$T/mp/src/a" && cat > "$T/mp/src/a/P.java" <<'JAVA'
+package a;
+class P {
+    void f(PoseStack pose, Quaternionf q, Transformation tr) {
+        Matrix4f m = new Matrix4f();
+        pose.mulPose(Axis.XP.rotationDegrees(90));
+        pose.mulPose(q);
+        pose.mulPose(new Matrix4f(
+                1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1));
+        pose.mulPose(m);
+        pose.mulPose(tr);
+        pose.mulPose(other.last().pose());
+    }
+}
+JAVA
+{ cat templates/fork-layer/shared/26.3/renames.tsv; printf 'member:mulPose\trotate\n'; } > "$T/mp/rows.tsv"
+python3 templates/fork-layer/tools/prepare-sources.py --src "$T/mp/src" --renames "$T/mp/rows.tsv" --out "$T/mp/out" >/dev/null 2>&1
+python3 - "$T/mp/out/a/P.java" <<'PY' && ok "26.3: a mulPose call with a matrix argument keeps mulPose under any row; a quaternion one becomes rotate" || bad "a row renamed mulPose(Matrix4f) to rotate, or missed a quaternion"
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+want = ["pose.rotate(Axis.XP.rotationDegrees(90));", "pose.rotate(q);", "pose.mulPose(new Matrix4f(", "pose.mulPose(m);",
+        "pose.mulPose(tr);", "pose.mulPose(other.last().pose());"]
+miss = [w for w in want if w not in t]
+for m in miss:
+    print("  missing: " + m, file=sys.stderr)
+sys.exit(0 if not miss and "" not in t else 1)
+PY
+
+# the guard's mark is its own: a mod's private-use glyph (U+E000) in a string, in a file with a mulPose call, is kept
+python3 - "$T" <<'PY' && ok "prepare-sources: a literal U+E000 glyph is kept byte for byte in a file the mulPose guard marks" || bad "the overload guard deleted a mod's own U+E000 character"
+import pathlib, subprocess, sys
+t = pathlib.Path(sys.argv[1]) / "gl"
+(t / "src/a").mkdir(parents=True)
+src = 'package a;\nclass G {\n    String s = " Mana";\n    void f() { pose.mulPose(new Matrix4f()); pose.mulPose(q); }\n}\n'
+(t / "src/a/G.java").write_text(src, encoding="utf-8")
+(t / "rows.tsv").write_text("member:mulPose\trotate\n", encoding="utf-8")
+subprocess.run([sys.executable, "templates/fork-layer/tools/prepare-sources.py", "--src", str(t / "src"), "--renames",
+                str(t / "rows.tsv"), "--out", str(t / "out")], capture_output=True, text=True, encoding="utf-8", check=True)
+got = (t / "out/a/G.java").read_text(encoding="utf-8")
+sys.exit(0 if got == src.replace("mulPose(q)", "rotate(q)") else 1)
+PY
+
 echo
 echo "renames self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1
