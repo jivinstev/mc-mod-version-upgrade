@@ -76,6 +76,84 @@ else
   echo "  SKIP  no javac here (CI runs it; a skip is not a pass)"
 fi
 
+echo "4. shared rows: value-changing renames and an overload no row may rename"
+# 1.21.2: getMaxY() is INCLUSIVE (minY + height - 1) where getMaxBuildHeight() was minY + height, so the old call is
+# getMaxY() + 1 and `getMaxBuildHeight() - 1` is getMaxY() -- only where precedence keeps it exact, else left to javac
+python3 - <<'PY' && ok "1.21.3 rows: getMaxBuildHeight() -> getMaxY() + 1, getMaxBuildHeight() - 1 -> getMaxY(), getMinBuildHeight() -> getMinY(); a bound under * / or after - is left alone" || bad "a getMax/MinBuildHeight row gives the wrong bound"
+import re, pathlib, sys
+rows = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
+        if l.startswith("re:") and "BuildHeight" in l.split("\t")[0]]
+def f(s):
+    for r in rows:
+        pat, rep = r[3:].split("\t")
+        s = re.sub(pat, rep, s)
+    return s
+cases = [
+    ("int maxY = Math.min(p.getY() + range, level.getMaxBuildHeight() - 1);", "int maxY = Math.min(p.getY() + range, level.getMaxY());"),
+    ("int y = level.getMaxBuildHeight()-1;", "int y = level.getMaxY();"),
+    ("if (box.minY < level.getMinBuildHeight() || box.maxY > level.getMaxBuildHeight()", "if (box.minY < level.getMinY() || box.maxY > level.getMaxY() + 1"),
+    ("for (int y = level.getMinBuildHeight(); y < level.getMaxBuildHeight(); y++)", "for (int y = level.getMinY(); y < level.getMaxY() + 1; y++)"),
+    ("return this.level().getMaxBuildHeight();", "return this.level().getMaxY() + 1;"),
+    ("int y = level.getMaxBuildHeight() - 16;", "int y = level.getMaxY() + 1 - 16;"),
+    ("int h = level.getMaxBuildHeight() * 2;", "int h = level.getMaxBuildHeight() * 2;"),            # left: + 1 would bind wrong
+    ("int d = top - level.getMaxBuildHeight();", "int d = top - level.getMaxBuildHeight();"),        # left: after a minus
+    ("int d = top - level.getMaxBuildHeight() - 1;", "int d = top - level.getMaxBuildHeight() - 1;"),
+]
+bad = [(s, f(s), w) for s, w in cases if f(s) != w]
+for b in bad:
+    print("  in:  %r\n  got: %r\n  want:%r" % b, file=sys.stderr)
+sys.exit(0 if len(rows) == 3 and not bad else 1)
+PY
+# R25: a static factory reference as the whole supplier enters its name like `X::new` (else `Item id not set` at boot)
+python3 - <<'PY' && ok "1.21.3 rows: register(\"name\", Factory::create) becomes an entering supplier; a Function-shaped reference is left alone" || bad "the RegIds method-reference row rewrites the wrong shape"
+import re, pathlib, sys
+rows = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
+        if l.startswith("re:") and "RegIds.enter" in l]
+def f(s):
+    for r in rows:
+        pat, rep = r[3:].split("\t")
+        s = re.sub(pat, rep.replace("@MVPKG@", "p"), s)
+    return s
+cases = [
+    ('ITEMS.register("staff",\n        StaffFactory::create\n    );', 'ITEMS.register("staff",\n        () -> p.RegIds.enter("staff") ? null : StaffFactory.create()\n    );'),
+    ('ITEMS.register("x", Foo::new);', 'ITEMS.register("x", () -> p.RegIds.enter("x") ? null : new Foo());'),
+    ('ITEMS.register("x", Foo::make, props);', 'ITEMS.register("x", Foo::make, props);'),
+]
+bad = [(s, f(s), w) for s, w in cases if f(s) != w]
+for b in bad:
+    print("  in:  %r\n  got: %r\n  want:%r" % b, file=sys.stderr)
+sys.exit(0 if not bad else 1)
+PY
+# 26.3: mulPose(Quaternionf) is rotate(Quaternionfc) but mulPose(Matrix4fc)/mulPose(Transformation) stay: whatever the rows
+# say (here a fork's broad member row), a matrix argument keeps mulPose -- through prepare-sources.py itself
+mkdir -p "$T/mp/src/a" && cat > "$T/mp/src/a/P.java" <<'JAVA'
+package a;
+class P {
+    void f(PoseStack pose, Quaternionf q, Transformation tr) {
+        Matrix4f m = new Matrix4f();
+        pose.mulPose(Axis.XP.rotationDegrees(90));
+        pose.mulPose(q);
+        pose.mulPose(new Matrix4f(
+                1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1));
+        pose.mulPose(m);
+        pose.mulPose(tr);
+        pose.mulPose(other.last().pose());
+    }
+}
+JAVA
+{ cat templates/fork-layer/shared/26.3/renames.tsv; printf 'member:mulPose\trotate\n'; } > "$T/mp/rows.tsv"
+python3 templates/fork-layer/tools/prepare-sources.py --src "$T/mp/src" --renames "$T/mp/rows.tsv" --out "$T/mp/out" >/dev/null 2>&1
+python3 - "$T/mp/out/a/P.java" <<'PY' && ok "26.3: a mulPose call with a matrix argument keeps mulPose under any row; a quaternion one becomes rotate" || bad "a row renamed mulPose(Matrix4f) to rotate, or missed a quaternion"
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+want = ["pose.rotate(Axis.XP.rotationDegrees(90));", "pose.rotate(q);", "pose.mulPose(new Matrix4f(", "pose.mulPose(m);",
+        "pose.mulPose(tr);", "pose.mulPose(other.last().pose());"]
+miss = [w for w in want if w not in t]
+for m in miss:
+    print("  missing: " + m, file=sys.stderr)
+sys.exit(0 if not miss and "" not in t else 1)
+PY
+
 echo
 echo "renames self-test: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

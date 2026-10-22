@@ -236,13 +236,16 @@ def _prepare_sources_module():
     return m
 
 
-def apply_rows(text, rules, hits):
+def apply_rows(text, rules, hits, ps=None):
     """`text` rewritten by `rules` (prepare-sources.py's split_rules + build_pattern) exactly as prepare-sources.py
-    rewrites an authors' file: regex/member rules first, in table order, then the type-token sweep; CRLF kept."""
+    rewrites an authors' file: regex/member rules first, in table order, then the type-token sweep; CRLF kept; a
+    surviving-overload call (prepare-sources.py guard_overloads: mulPose with a matrix) held out of every row."""
     regex_rules, pattern, table = rules
     crlf = "\r\n" in text
     if crlf:
         text = text.replace("\r\n", "\n")
+    if ps is not None:
+        text = ps.guard_overloads(text)
     for rx, repl, _ex in regex_rules:
         text, n = rx.subn(repl, text)
         if n:
@@ -252,6 +255,8 @@ def apply_rows(text, rules, hits):
             hits.add(m.group(1))
             return table[m.group(1)]
         text = pattern.sub(tok, text)
+    if ps is not None:
+        text = ps.unguard(text)
     return text.replace("\n", "\r\n") if crlf else text
 
 
@@ -294,7 +299,7 @@ def rename_inherited_overlays(target, names, sub, overlay, tmp, rows):
                 sys.exit(f"layer: {target}: the overlay {(MV / 'targets' / t / sub / rel).relative_to(MV.parent).as_posix()} "
                          f"(inherited from {t}) is not UTF-8 ({e.reason} at byte {e.start}), so {INHERITED_ROWS}=true cannot "
                          f"run the rows after {t} over it: save it as UTF-8 (every source the layer renames is read as UTF-8)")
-            new = apply_rows(text, (regex_rules, pattern, tab), hits)
+            new = apply_rows(text, (regex_rules, pattern, tab), hits, ps)
             if new != text:
                 with open(f, "w", encoding="utf-8", newline="") as fh:
                     fh.write(new)

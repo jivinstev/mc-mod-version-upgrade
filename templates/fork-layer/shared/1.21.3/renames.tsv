@@ -76,6 +76,10 @@ re:import net\.neoforged\.neoforge\.common\.util\.DummySavedData;\n
 # has to find a closing parenthesis. A registration by constructor reference (`REG.register("name", Y::new)`, Y a Supplier-shaped no-arg
 # constructor) becomes the same entering supplier; without it Y builds its Properties with no name recorded
 re:(\.register\(\s*"([a-z0-9_./-]+)"\s*,\s*)([A-Za-z_][\w.$]*)::new\b	\1() -> @MVPKG@.RegIds.enter("\2") ? null : new \3()
+# a static factory reference (`REG.register("name", Factory::create)`) the same way, when it is the whole supplier: it builds
+# its Properties inside the call, and without the entering supplier it fails at boot with `Item id not set` (weekly round
+# 2026-10-21). Only before the register call's `)`: a two-argument factory reference is a Function overload, not a Supplier
+re:(\.register\(\s*"([a-z0-9_./-]+)"\s*,\s*)([A-Za-z_][\w.$]*)::(?!new\b)([A-Za-z_]\w*)(?=\s*\))	\1() -> @MVPKG@.RegIds.enter("\2") ? null : \3.\4()
 re:(\.register\(\s*"([a-z0-9_./-]+)"\s*,\s*\(\)\s*->\s*)(new\s)	\1@MVPKG@.RegIds.enter("\2") ? null : \3
 re:\bnew ((?:Item\.)?Properties\(\))	@MVPKG@.RegIds.stamp(new \1)
 # the same, written fully qualified (the bare rows above cannot see past the package prefix)
@@ -83,6 +87,14 @@ re:\bnew (net\.minecraft\.world\.item\.Item\.Properties\(\))	@MVPKG@.RegIds.stam
 re:(?<![\w.])(net\.minecraft\.world\.level\.block\.(?:state\.BlockBehaviour|Block)\.Properties\.of(?:(?:Full|Legacy)Copy)?\((?:[^()]|\([^()]*\))*\))	@MVPKG@.RegIds.stamp(\1)
 re:(?<![\w.])((?:BlockBehaviour\.|Block\.)?Properties\.of\(\))	@MVPKG@.RegIds.stamp(\1)
 re:(?<![\w.])((?:BlockBehaviour\.|Block\.)?Properties\.of(?:Full|Legacy)Copy\((?:[^()]|\([^()]*\))*\))	@MVPKG@.RegIds.stamp(\1)
+# ---- LevelHeightAccessor (1.21.2, CATALOG V23): getMinBuildHeight() is getMinY(); getMaxBuildHeight() was EXCLUSIVE
+# (minY + height) and getMaxY() is INCLUSIVE (minY + height - 1: the 1.21.3 jar's default method, javap), so a plain rename
+# is a silent off-by-one. `getMaxBuildHeight() - 1` is getMaxY(); the bare call is getMaxY() + 1 -- only where `+ 1` binds
+# as the call did: after `(` `,` `=` `<` `>` `?` `:` `+` `&` `|` `{` `;` `[` or `return`, and not before `*` `/` `%` `.`
+# `[`. Anywhere else (after `-`, a cast) the old call is left for the compile error, never a wrong bound.
+re:((?:[(,=<>?:+&|{;\[]|\breturn)\s*)((?:[A-Za-z_]\w*(?:\(\))?\.)*)getMaxBuildHeight\(\)\s*-\s*1(?![\w.])(?!\s*[*/%])	\1\2getMaxY()
+re:((?:[(,=<>?:+&|{;\[]|\breturn)\s*)((?:[A-Za-z_]\w*(?:\(\))?\.)*)getMaxBuildHeight\(\)(?!\s*[*/%.\[])	\1\2getMaxY() + 1
+re:\bgetMinBuildHeight\(\)	getMinY()
 # ---- mixin targets (invisible to javac; audit-mixin-targets.py checks them against the target's sources)
 re:@Inject\(method = "hurt",([^\n]*)\n(\s*)private void ([\w$]+)\(DamageSource (\w+),	@Inject(method = "hurtServer",\1\n\2private void \3(net.minecraft.server.level.ServerLevel mv$hurtLevel, DamageSource \4,
 re:@Inject\(method = "actuallyHurt",([^\n]*)\n(\s*)private void ([\w$]+)\(DamageSource (\w+),	@Inject(method = "actuallyHurt",\1\n\2private void \3(net.minecraft.server.level.ServerLevel mv$hurtLevel, DamageSource \4,

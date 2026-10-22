@@ -154,6 +154,64 @@ def split_rules(renames):
     return tokens, regexes
 
 
+# ---- calls a row must never rename, whatever the row says: an overload that SURVIVES the version a row renames its
+# sibling at. PoseStack.mulPose(Quaternionf) is rotate(Quaternionfc) at 26.3, while mulPose(Matrix4fc) and
+# mulPose(Transformation) stay (javap of the 26.3 client jar); a row cannot see an argument's type, and a fork's
+# `member:mulPose<TAB>rotate` once turned the authors' new `pose.mulPose(new Matrix4f(...))` into a call that does not
+# compile. So the call is held out of every row when its argument is a matrix: a `new Matrix4f(..)`/`new
+# Transformation(..)`, a `(Matrix4f)` cast, `<x>.pose()` (PoseStack.Pose.pose() is the Matrix4f), or a name the same
+# file declares as Matrix4f/Matrix4fc/Transformation. Any other argument is the rows' business, as before.
+KEEP_MARK = ''          # a private-use character no source holds; put between the dot and the name while rows run
+_MATRIX_DECL = re.compile(r'\b(?:org\.joml\.)?Matrix4fc?\s+(\w+)\s*[=;,)]'
+                          r'|\b(?:com\.mojang\.math\.)?Transformation\s+(\w+)\s*[=;,)]')
+_MATRIX_ARG = re.compile(r'\s*(?:new\s+(?:org\.joml\.)?Matrix4fc?\s*\(|new\s+(?:com\.mojang\.math\.)?Transformation\s*\('
+                         r'|\(\s*(?:org\.joml\.)?Matrix4fc?\s*\))')
+_KEEP_CALL = re.compile(r'\.mulPose\(')
+
+
+def _call_arg(text, start):
+    """The argument text of a call whose '(' ends just before `start` (to its matching ')'), or None when unbalanced."""
+    depth, i, n = 1, start, len(text)
+    while i < n:
+        c = text[i]
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+        elif c in '"\'':
+            j = i + 1
+            while j < n and text[j] != c and text[j] != '\n':
+                j += 2 if text[j] == '\\' else 1
+            i = j
+        i += 1
+    return None
+
+
+def guard_overloads(text):
+    """`text` with each surviving-overload call (above) marked so no row matches it; unguard() takes the marks out.
+    Text without such a call is returned as it is (the same object)."""
+    if '.mulPose(' not in text:
+        return text
+    names = {a or b for a, b in _MATRIX_DECL.findall(text)}
+    out, last = [], 0
+    for m in _KEEP_CALL.finditer(text):
+        arg = _call_arg(text, m.end())
+        bare = None if arg is None else re.sub(r'^\s*(?:this\.)?', '', arg).strip()
+        # the argument's start decides even when its end is not in `text` (one line of a call that spans several)
+        if _MATRIX_ARG.match(text, m.end()) or (bare is not None and (bare in names or re.search(r'\.pose\(\)$', bare))):
+            out.append(text[last:m.start() + 1] + KEEP_MARK)
+            last = m.start() + 1
+    if not out:
+        return text
+    return ''.join(out) + text[last:]
+
+
+def unguard(text):
+    return text.replace(KEEP_MARK, '') if KEEP_MARK in text else text
+
+
 def build_pattern(renames):
     if not renames:
         return None, {}
@@ -261,6 +319,7 @@ def main():
         # first, the shape rules can never match -- the type in them has already been
         # renamed -- so they quietly do nothing and the call site stays broken in a new
         # way. Specific before general.
+        text = guard_overloads(text)
         for rx, repl, _ex in regex_rules:
             text, n = rx.subn(repl, text)
             if n:
@@ -272,6 +331,7 @@ def main():
                 return table[m.group(1)]
             text, n = pattern.subn(_tok, text)
             rewrites += n
+        text = unguard(text)
         dest = os.path.join(a.out, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         with open(dest, 'w', encoding='utf-8', newline='') as fh:
