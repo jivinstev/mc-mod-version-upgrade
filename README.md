@@ -114,7 +114,7 @@ In short -- what to ask, and the command it runs (the full detail is in the tabl
 | **migrate-mod** | `> Migrate <mod name> to 26.2` | `python3 tools/port.py "<mod name or jar>" --to 26.2` |
 | **port-fork** | `> Port my fork <github url> to 1.21.1` | `python3 tools/port-upstream.py --repo DIR --modid ID`, then `python3 tools/port-ci.py --repo DIR --modid ID` |
 | **fork-versions** | `> Make my fork build for 1.21.4 too` | `python3 tools/fork-branches.py add-target --repo DIR --target 1.21.4`, then `python3 tools/fork-port.py --repo DIR --target 1.21.4`; the 26.1.2 entityCutout swap: `python3 tools/fork-branches.py cutout-check --repo DIR --branch neoforge-26.1.2 [--fix]` |
-| **keep-current** | `> Keep my forks current` / `> Set up the weekly round` | setup: `python3 tools/weekly-plan.py install --repo DIR --fork owner/repo@neoforge-1.21.1[=URL#BRANCH] --plan-owner LOGIN [--allow WHAT ...]` and `weekly-plan.py round-task --existing NAME ...`; the round: `python3 tools/known-issues.py read-plan --latest --slug owner/repo`, then each ticked dependency update once: `python3 tools/layer-deps.py resolve --repo DIR --target MC --bump DEP=VERSION`; its lessons, harvested here afterwards: `python3 tools/propose-learnings.py --from-plan owner/repo#N` |
+| **keep-current** | `> Keep my forks current` / `> Set up the weekly round` | setup: `python3 tools/weekly-plan.py install --repo DIR --fork owner/repo@neoforge-1.21.1[=URL#BRANCH] --plan-owner LOGIN [--allow WHAT ...]` and `weekly-plan.py round-task --existing NAME ... [--version-branches]`; the round: `python3 tools/known-issues.py read-plan --latest --slug owner/repo`, then, for a set of version-branch forks, its driver: `python3 tools/round.py init --frozen round/frozen.json --fork owner/repo=DIR ...` and `python3 tools/round.py drive` until it prints `ROUND DONE` (each AGENT JOB it prints goes to a fresh subagent, then `round.py record ID --summary FILE`; `round.py status`, `round.py resume` after a restart; each ticked dependency update is applied once by it: `python3 tools/layer-deps.py resolve --repo DIR --target MC --bump DEP=VERSION`); its lessons, harvested here afterwards: `python3 tools/propose-learnings.py --from-plan owner/repo#N` |
 | **publish-port** | `> Publish my fork on Modrinth and CurseForge` | `python3 tools/port-publish.py setup --repo DIR --permission URL`; CI: `port-publish.py publish --tag TAG [--platform mr\|cf]` |
 | **review-contribution** | `> Review PR 42` | `python3 tools/review-pr.py --base origin/main --head HEAD` |
 
@@ -132,7 +132,15 @@ never fails the plan. The round applies the ticked ones once, at setup, with `to
 nothing else moves a dependency: every resolve (fork-port.py's setup included) keeps a pinned one as it is, and a
 single-version fork's pins (its build.gradle coordinates) move only by `--bump` too -- the same for every kind of fork, a
 deliberate change to single-version forks, decided by the maintainer. Wednesday morning Pacific a Claude scheduled
-task runs the round from that issue, at a minute jittered per fork set (`round.time` in the fork's config). With no
+task runs the round from that issue, at a minute jittered per fork set (`round.time` in the fork's config). For a set of
+version-branch forks (`weekly-plan.py round-task --version-branches`) the round runs on a driver, `tools/round.py`: from the frozen plan and the clones it builds `round/STATE.json` (per fork and version,
+in ladder order, the library before its dependents) and runs every mechanical step itself -- merge-ups, re-pins, the one
+full gate run per version (one at a time on the machine), PRs, CI waits, merges, release dispatch, records, cost marks
+-- while the session only starts a fresh subagent for each job it prints (the authors' code, the selected fixes, the
+fresh review, the fixer, the re-check, a fixer for a step that failed, the close) and records its short summary; state
+survives a restart (`round.py resume`). A set with a single-version fork keeps the round as it was (`round.py init`
+refuses it). On a version-branch library, each version merges only after each dependent's Gate C
+passed against its candidate jar, so a library crash is a finding before the merge, not a re-release after it. With no
 answer the defaults apply; a round that did not run is carried into the next week's issue. Only the library's (first
 fork's) repository gets the workflow and the config (`weekly-plan.json`, under `.github` on its head branch), which is
 the fork set's only source for the round: forks, upstreams, dependencies, ledger issues. What the round may do without

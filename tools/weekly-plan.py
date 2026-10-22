@@ -120,6 +120,12 @@ LESSONS_RULE = ("Before closing, the closing comment carries a `### Lessons for 
 CONTEXT_RULE = ("Keep this session small: it orchestrates and never does a version's porting, gating or review in its own context. Each version's fixer and reviewer are fresh subagents that return a short summary (at most ~40 lines: what changed, gate verdicts, open rows, commit shas); keep only those, never their transcripts or the build logs. One worker may carry the same change across several versions (a re-pin, one fix cascaded up) while its context stays modest; distinct porting work at each version gets a fresh worker per version. Wait for gates and CI in ONE blocking command (`gh run watch <run id> --exit-status`, or a single until-loop run in the background or under Monitor), never by polling turn by turn: every idle gap longer than 5 minutes re-writes this session's whole cached context, so a small context and few, long waits are what keep the round cheap. If this session's context passes ~200k tokens, write the round's state (frozen input, per-version status, open rows, shas, what comes next) to round/NOTES.md and continue from a fresh subagent that reads it.")
 # the round's cost by KIND of work, so the cost of taking the authors' code can be compared week over week
 PHASE_RULE = ("Mark each change of the kind of work with python3 mmvu/tools/port-cost.py mark --fork <owner/repo> --version <v> --phase upstream|backlog|review|overhead (upstream: the authors' cascade and its conflicts; backlog: the selected known-issue fixes; review: fresh reviews and the fixes they cause; overhead: pins, gates, CI waits, records). The closing comment's cost table (round-table --session-cwd) gives the per-phase split and per-phase totals, and for upstream the size of what the authors changed per version (commits, files, changed lines) and how many files the cascade merged mechanically versus by an agent, so cost per authors' changed line and the mechanical-merge share can be compared week over week.")
+# a set of version-branch forks only (round-task --version-branches) runs on the driver instead: the 2026-10-21 round
+# (~$215) reached ~549k tokens despite the hand-off rule above, cache writes ~51% -- idle gaps and three container
+# restarts re-wrote it; a single-version set keeps CONTEXT_RULE and PHASE_RULE, unchanged
+DRIVER_RULE = ("Run the round with its driver and never do a step by hand. Right after step 3: python3 mmvu/tools/round.py init --frozen round/frozen.json --fork <owner/repo>=<its clone> for every fork, the library first. Then loop: run python3 mmvu/tools/round.py drive in the background (it runs every mechanical step itself -- merge-ups, re-pins, the one full gate run per version under a machine-wide lock, the library's pre-merge dependent gate, PRs, CI waits, merges, release dispatch, records, phase marks -- and blocks in its own waits); for each AGENT JOB it prints, start a fresh subagent whose whole prompt is the job's `prompt` line, and when it ends run the job's `record` line; never read a worker's transcript, its summary or a log here; then drive again. drive exit 3 means blocked: its BLOCKED lines say what; handle only that, then drive again. round/STATE.json is the round's only memory: after a restart, or once this session's context passes ~100k tokens, continue from a fresh session with python3 mmvu/tools/round.py resume. Keep this session small -- the job lines and the drive output only: every idle gap longer than 5 minutes re-writes its whole cached context.")
+DRIVER_PHASE_RULE = ("The driver marks every item with python3 mmvu/tools/port-cost.py mark --fork <owner/repo> --version <v> --phase upstream|backlog|review|overhead as it starts (upstream: the authors' cascade and its conflicts; backlog: the selected known-issue fixes; review: fresh reviews and the fixes they cause; overhead: pins, gates, CI waits, records); never mark by hand. The closing comment's cost table (round-table --session-cwd) gives the per-phase split and per-phase totals, and for upstream the size of what the authors changed per version (commits, files, changed lines) and how many files the cascade merged mechanically versus by an agent, so cost per authors' changed line and the mechanical-merge share can be compared week over week.")
+GOLDEN_SV_PROMPT = TOOLS / "golden/round-task-single-version.txt"
 # the per-fork fields `install` rebuilds from flags only: an existing config's values are warned about or kept
 KEPT = (("ledger_issues", "--ledger-issues"), ("depends_on", "--depends-on"), ("layer_branch", "--layer-branch"))
 TRAILER_RE = re.compile(r"^[A-Za-z][\w-]*: \S.*$")
@@ -510,7 +516,10 @@ def replaces_for(cfg, existing=()):
     return list(dict.fromkeys(n for n in names if n))
 
 
-def round_task(cfg, mrepo, existing=()):
+def round_task(cfg, mrepo, existing=(), driver=False):
+    """The round's scheduled task. driver: every fork of the set is a version-branch fork, and the round runs on
+    tools/round.py (rules 7 and 8, and who applies step 3's bumps); without it the prompt is the single-version one,
+    byte for byte (tools/golden/round-task-single-version.txt)."""
     forks = cfg["forks"]
     first = forks[0]
     allow = cfg.get("allow", [])
@@ -550,17 +559,20 @@ def round_task(cfg, mrepo, existing=()):
               f"{first['repo']} --out round/frozen.json --decisions-dir round/decisions. The selected known issues and "
               "the authors' changes it says to take are the run's only inputs; nothing else enters except a new S1. "
               "With no open plan issue, stop and report. Each fork's `dep_bumps` there are the dependency updates the owner left "
-              "ticked: apply each exactly once, at that version's setup and before its gates, by its `command` (layer-deps.py "
-              "resolve --bump, in the checkout of that version's branch), and commit it; no other step moves a dependency "
-              "(every resolve keeps the pins), and an unticked one stays as it is.",
+              + ("ticked: the driver (rule 7) applies each exactly once, at that version's setup and before its gates, by its "
+               "`command` (layer-deps.py resolve --bump, in the checkout of that version's branch), and commits it; "
+               if driver else
+               "ticked: apply each exactly once, at that version's setup and before its gates, by its `command` (layer-deps.py "
+               "resolve --bump, in the checkout of that version's branch), and commit it; ")
+              + "no other step moves a dependency (every resolve keeps the pins), and an unticked one stays as it is.",
               "4. A fork with version branches (.port/<v>/branch.properties) is a version-branch fork even when a legacy "
               "layer branch with .multiversion/ exists: that layer branch is history; ignore it.",
               "5. Never promote a release, publish to Modrinth or CurseForge, push to or comment on the authors' "
               "repositories, force-push, or merge into the migrator repository.",
               "6. A round that stops before its close leaves the plan issue open (next Tuesday's plan carries it "
               "forward); only the closing comment of a round that ran its steps closes it.",
-              "7. " + CONTEXT_RULE,
-              "8. " + PHASE_RULE,
+              "7. " + (DRIVER_RULE if driver else CONTEXT_RULE),
+              "8. " + (DRIVER_PHASE_RULE if driver else PHASE_RULE),
               "9. " + LESSONS_RULE]
     name = cfg["round"]["name"]
     return {"name": name, "cron_expression": cfg["round"]["cron"], "create_new_session_on_fire": True,
@@ -999,6 +1011,20 @@ def self_check():
            and "the same change across several versions" in CONTEXT_RULE and "fresh worker per version" in CONTEXT_RULE
            and "\n7. " + CONTEXT_RULE in task["prompt"] and "\n9. " + LESSONS_RULE in task["prompt"],
            f"the round prompt keeps the orchestrator small, its workers fresh and its waits blocking: {task['prompt']}")
+    # a single-version set's prompt is byte for byte the one before the driver (the golden); only a set of version-branch
+    # forks (--version-branches) runs on tools/round.py
+    expect(GOLDEN_SV_PROMPT.is_file() and task["prompt"] == GOLDEN_SV_PROMPT.read_text(encoding="utf-8"),
+           "the single-version round prompt equals tools/golden/round-task-single-version.txt byte for byte")
+    dtask = round_task(cfg, "owner/migrator", driver=True)
+    dp = dtask["prompt"]
+    expect("\n7. " + DRIVER_RULE in dp and "\n8. " + DRIVER_PHASE_RULE in dp and CONTEXT_RULE not in dp
+           and PHASE_RULE not in dp and "never do a step by hand" in DRIVER_RULE and "round.py drive" in DRIVER_RULE
+           and "round.py init --frozen round/frozen.json" in DRIVER_RULE and "round.py resume" in DRIVER_RULE
+           and "`record` line" in DRIVER_RULE and "exit 3" in DRIVER_RULE and "pre-merge dependent gate" in DRIVER_RULE
+           and "the driver (rule 7) applies each exactly once" in dp and "the driver (rule 7)" not in task["prompt"]
+           and (ROOT / "tools/round.py").is_file() and "\n9. " + LESSONS_RULE in dp
+           and {k: v for k, v in dtask.items() if k != "prompt"} == {k: v for k, v in task.items() if k != "prompt"},
+           f"--version-branches: rules 7 and 8 run the driver, nothing else of the task changes: {dp}")
     # the cost by kind of work (upstream intake measured week over week): phase marks, the per-phase split, the authors'
     # change size and the mechanical-merge share in the closing table
     expect("\n8. " + PHASE_RULE in task["prompt"] and "--phase upstream|backlog|review|overhead" in PHASE_RULE
@@ -1404,6 +1430,9 @@ def build_parser():
     p.add_argument("--repo"); p.add_argument("--config"); p.add_argument("--migrator-repo")
     p.add_argument("--existing", action="append", default=[], metavar="NAME",
                    help="an existing scheduled task's name (list_triggers), repeatable: matched into replaces")
+    p.add_argument("--version-branches", action="store_true",
+                   help="every fork of the set is a version-branch fork (layer-sync.py detect: kind=version-branches): the "
+                        "round runs on tools/round.py; without it the single-version round prompt, unchanged")
     p = sub.add_parser("fetch"); p.add_argument("--config", required=True); p.add_argument("--repo", required=True)
     p.add_argument("--work", required=True)
     for n in ("cascade", "select", "deps", "previous", "open"):
@@ -1427,8 +1456,8 @@ def main(argv=None):
             if not (a.config or a.repo):
                 raise Fail("--repo DIR (its .github/weekly-plan.json) or --config FILE")
             cfg = json.loads(pathlib.Path(a.config or pathlib.Path(a.repo) / CONFIG).read_text(encoding="utf-8"))
-            print(json.dumps(round_task(cfg, a.migrator_repo or cfg.get("migrator_repo") or migrator_repo(), a.existing),
-                             indent=1))
+            print(json.dumps(round_task(cfg, a.migrator_repo or cfg.get("migrator_repo") or migrator_repo(), a.existing,
+                                        driver=a.version_branches), indent=1))
             return 0
         if a.cmd == "fetch":
             return step_fetch(a.config, a.repo, a.work)
