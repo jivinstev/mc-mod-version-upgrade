@@ -4124,10 +4124,12 @@ def library_copies(name, versions_, sub):
 
 def section_edited(ver, section, sub):
     """Is a `# ---- shared <ver>` section of a version's shared-renames.tsv (its text, header line first) hand-edited:
-    equal to no text the library's table has ever had (placeholders filled)? False when the history is unknown."""
+    equal to no text the library's table has ever had (placeholders filled)? None when the history is unknown (a
+    shallow clone that cannot be deepened, a library outside git): an edit cannot be told then, and the caller keeps the
+    section as it is -- never rewritten on a guess."""
     hist = template_history(f"{ver}/renames.tsv")
     if not hist:
-        return False
+        return None
     norm = lambda x: x.replace("\r\n", "\n").strip("\n")
     body = section.split("\n", 1)[1] if "\n" in section else ""
     return norm(body) not in {norm(sub(h)) for h in hist}
@@ -4170,10 +4172,14 @@ def sync_plan(repo, t, work=None, ref=None, rows=True):
         f = shared_dir() / ver / "renames.tsv"
         if f.is_file():
             fresh = f"# ---- shared {ver}\n" + sub(f.read_text(encoding="utf-8"))
-            if ver in old_secs and old_secs[ver].strip("\n") != fresh.strip("\n") and section_edited(ver, old_secs[ver], sub):
-                new_sections.append(old_secs[ver].rstrip("\n"))      # hand-edited: left as it is, said
-                edited.append({"path": sp, "what": f"section `shared {ver}`", "kind": "section", "reconcile": True,
-                               "library_blob": None})
+            ed = section_edited(ver, old_secs[ver], sub) if ver in old_secs and \
+                old_secs[ver].strip("\n") != fresh.strip("\n") else False
+            if ed is not False:
+                # hand-edited, or the history is unknown so an edit cannot be ruled out: left as it is, said (a reconcile)
+                new_sections.append(old_secs[ver].rstrip("\n"))
+                edited.append({"path": sp, "what": f"section `shared {ver}`" + (
+                    "" if ed else ", the library's history unknown (cannot tell an edit from an older library text)"),
+                    "kind": "section", "reconcile": True, "library_blob": None})
             else:
                 new_sections.append(fresh)
         elif ver in old_secs:
@@ -4197,16 +4203,17 @@ def sync_plan(repo, t, work=None, ref=None, rows=True):
     listed = helper_map(read(f"{REC}/{t}/shared-helpers.txt"))
     cur = dict(files)
     cur.update(writes)
-    # a helper's copy equal to a text the library itself once shipped is a library copy nobody edited, listed or not (a
+    # an unlisted helper copy equal to a text the library itself once shipped is a library copy nobody edited (a
     # copy carried over from a layer -- a stand-in's `// MV-STAND-IN:` lines aside --, a merge, a version below): it
     # follows the library like an installed one (weekly
     # round 2026-10-21: a dependent's unlisted 26.3 LegacyGl kept a crash the library's template had fixed a week before)
     seen = dict(listed)
     mv_dir = "src/main/java/" + mv_pkg.replace(".", "/") + "/"
+    # only an UNLISTED copy: a listed one that differs from its listing was changed on purpose (an edit, or a revert to
+    # an older library text) and stays edited
     for p_ in [x for x in cur if x.startswith(mv_dir) and x.endswith(".java") and "/" not in x[len(mv_dir):]]:
         name = p_[len(mv_dir):-5]
-        if any((shared_dir() / v / "java" / f"{name}.java").is_file() for v in versions_) \
-                and listed.get(p_) != hash_blobs({p_: cur[p_]})[p_] \
+        if p_ not in listed and any((shared_dir() / v / "java" / f"{name}.java").is_file() for v in versions_) \
                 and re.sub(rb"(?m)^// MV-STAND-IN:.*\r?\n", b"", cur[p_]) in library_copies(name, versions_, sub):
             seen[p_] = hash_blobs({p_: cur[p_]})[p_]
     hw, lines, hkept = helper_plan(versions_, mv_pkg, modid, files, cur, seen)
@@ -6855,7 +6862,31 @@ def self_check():
                 (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
                 (lib / "1.21.3/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 33; }\n", encoding="utf-8")
                 saved = os.environ.get("MMVU_SHARED_DIR")
+                # the library's history unknown (no git): a section that differs from the library's text cannot be told
+                # from a hand edit, so it is kept and named to reconcile -- never rewritten on a guess
                 os.environ["MMVU_SHARED_DIR"] = str(lib)
+                _TEMPLATE_HISTORY.clear()
+                pre3u = resolve_branch(r, "neoforge-1.21.3")
+                try:
+                    rcu, outu = _quiet(sync_shared, r, ["1.21.3"])
+                finally:
+                    os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
+                f3u = ref_files(r, resolve_branch(r, "neoforge-1.21.3"))
+                expect(rcu == 0 and b"newer.Shared" not in f3u[".port/1.21.3/shared-renames.tsv"]
+                       and "section `shared 1.21.3`, the library's history unknown" in outu and "left alone" in outu,
+                       f"sync-shared with the library's history unknown: the differing section kept and said: {outu[-500:]}")
+                git(worktree_for(r, "1.21.3")[0], "reset", "-q", "--hard", pre3u)
+                # the library in git from here on: its old table text (what the fork's section holds) is in its history
+                old_sec = shared_sections(ref_files(r, pre3u)[".port/1.21.3/shared-renames.tsv"].decode())["shared 1.21.3"]
+                new_tsv = (lib / "1.21.3/renames.tsv").read_text(encoding="utf-8")
+                (lib / "1.21.3/renames.tsv").write_text(old_sec.split("\n", 1)[1], encoding="utf-8")
+                gl = lambda *a_: git(lib, *a_, check=True)
+                ident = ("-c", "user.name=t", "-c", "user.email=t@example.com")
+                gl("init", "-q"); gl("add", "-A"); gl(*ident, "commit", "-qm", "library: the old table")
+                (lib / "1.21.3/renames.tsv").write_text(new_tsv, encoding="utf-8")
+                gl("add", "-A"); gl(*ident, "commit", "-qm", "library: a new row")
+                os.environ["MMVU_SHARED_DIR"] = str(lib)
+                _TEMPLATE_HISTORY.clear()
                 try:
                     rc, out = _quiet(sync_shared, r, ["1.21.3"])
                 finally:
@@ -6918,9 +6949,7 @@ def self_check():
                 # copy edited after the library moved are named to reconcile, never overwritten; an unlisted stand-in of an
                 # old library text follows the library; the fork's own copy and a duplicated row are adopt candidates; a
                 # file marked MV-AHEAD-OF-TEMPLATE is a harvest candidate
-                gl = lambda *a_: git(lib, *a_, check=True)
-                ident = ("-c", "user.name=t", "-c", "user.email=t@example.com")
-                gl("init", "-q"); gl("add", "-A"); gl(*ident, "commit", "-qm", "library")
+                gl("add", "-A"); gl(*ident, "commit", "-qm", "library")
                 w3c, _w = worktree_for(r, "1.21.3")
                 pre3c = resolve_branch(r, "neoforge-1.21.3")
                 sp3 = w3c / ".port/1.21.3/shared-renames.tsv"
@@ -6961,6 +6990,28 @@ def self_check():
                        f"sync-shared: the stand-in follows the library and is listed; the edited section and the fork's own "
                        f"class are left as they were: {out[-500:]}")
                 git(w3c, "reset", "-q", "--hard", pre3c)
+                # a LISTED helper reverted on purpose to an older library text (no longer its listing) stays edited --
+                # the history match is for unlisted copies only
+                (lib / "1.21.4/java/Helper.java").write_text("package @MVPKG@;\npublic class Helper { int v = 45; }\n", encoding="utf-8")
+                gl("add", "-A"); gl(*ident, "commit", "-qm", "library: 1.21.4 helper moved")
+                w4r, _w = worktree_for(r, "1.21.4")
+                pre4r = resolve_branch(r, "neoforge-1.21.4")
+                v45 = b"package com.example.mod.mv;\npublic class Helper { int v = 45; }\n"
+                (w4r / hrel).write_bytes(v45)
+                l4 = w4r / ".port/1.21.4/shared-helpers.txt"
+                l4.write_text("".join((f"{hrel} {hash_blobs({'x': v45})['x']}" if ln.startswith(hrel + " ") else ln) + "\n"
+                                      for ln in l4.read_text(encoding="utf-8").splitlines()), encoding="utf-8")
+                git(w4r, "commit", "-qam", "1.21.4: helper at the library's copy", check=True)
+                (w4r / hrel).write_bytes(v45.replace(b"45", b"44"))
+                git(w4r, "commit", "-qam", "1.21.4: helper reverted to the older library text", check=True)
+                rc, out = env_lib(sync_shared, r, ["1.21.4"], check=True)
+                wc = [ln for ln in out.splitlines() if "would change" in ln]
+                expect(f"EDITED {hrel} (helper, edited by hand)" in out and not any(hrel in ln for ln in wc),
+                       f"a listed helper reverted to an older library text: edited, never overwritten: {out[-500:]}")
+                rc, out = env_lib(sync_shared, r, ["1.21.4"])
+                expect(rc == 0 and ref_files(r, resolve_branch(r, "neoforge-1.21.4"))[hrel] == v45.replace(b"45", b"44"),
+                       f"... and sync-shared leaves it as the fork put it: {out[-300:]}")
+                git(w4r, "reset", "-q", "--hard", pre4r)
                 # a shallow clone of the library that cannot be deepened (the round clones with --depth 1): its history is
                 # unknown, so nothing is called edited (a section the library once shipped is never a reconcile job)
                 shc = lib / "shallow"
@@ -6970,8 +7021,8 @@ def self_check():
                 _TEMPLATE_HISTORY.clear()
                 try:
                     expect(template_history("1.21.3/renames.tsv") == set()
-                           and not section_edited("1.21.3", "# ---- shared 1.21.3\nan.Old\tan.Older\n", lambda x: x),
-                           "a shallow library clone that cannot be deepened: no history, nothing called edited")
+                           and section_edited("1.21.3", "# ---- shared 1.21.3\nan.Old\tan.Older\n", lambda x: x) is None,
+                           "a shallow library clone that cannot be deepened: no history, an edit cannot be told (kept)")
                 finally:
                     os.environ.pop("MMVU_SHARED_DIR") if saved is None else os.environ.__setitem__("MMVU_SHARED_DIR", saved)
                     _TEMPLATE_HISTORY.clear()
@@ -7037,9 +7088,19 @@ def self_check():
             with tempfile.TemporaryDirectory() as e:
                 lib = pathlib.Path(e)
                 (lib / "1.21.3").mkdir(parents=True)
-                (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
+                # in git, its history holding the old table the branch's section has (a moved table, not a hand edit)
+                old_sec = shared_sections(ref_files(r, resolve_branch(r, "neoforge-1.21.3"))[".port/1.21.3/shared-renames.tsv"]
+                                          .decode())["shared 1.21.3"]
+                (lib / "1.21.3/renames.tsv").write_text(old_sec.split("\n", 1)[1], encoding="utf-8")
+                git(lib, "init", "-q", check=True)
+                for msg in ("old table", "new row"):
+                    if msg == "new row":
+                        (lib / "1.21.3/renames.tsv").write_text("#!exhaustive\nold.Shared\tnewer.Shared\n#!strict\n", encoding="utf-8")
+                    git(lib, "add", "-A", check=True)
+                    git(lib, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", msg, check=True)
                 saved = os.environ.get("MMVU_SHARED_DIR")
                 os.environ["MMVU_SHARED_DIR"] = str(lib)
+                _TEMPLATE_HISTORY.clear()
                 try:
                     rc, out = _quiet(sync_shared, r, ["1.21.3"])
                 finally:

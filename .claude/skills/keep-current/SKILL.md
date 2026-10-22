@@ -431,7 +431,10 @@ it small, so for such a set the orchestration is a tool, which replaces the four
   shared tables and helpers (`fork-branches.py sync-shared --check`: read-only, no checkout touched, seconds per fork).
   A version a sync would change gets a `sync` step first in its segment -- `fork-branches.py sync-shared --target <v>`
   as its own commit on `neoforge-<v>`, before its merge-up and long before its gates, so the review and the gates see
-  it -- and then the whole version: gates, PR, merge, release, the dependents' re-pin. (Evidence: a dependent's 26.3 copy
+  it -- and then the whole version: gates, PR, merge, release, the dependents' re-pin. When the sync is a version's only
+  change, its review job is the narrow one (did the fork depend on the old row or helper behaviour), not a full review.
+  A table section that differs while the library's history cannot be read is treated as edited (reconcile), never
+  rewritten on a guess. (Evidence: a dependent's 26.3 copy
   of a shared helper still crashed with a fix this repository had shipped a week earlier, because no round ran
   sync-shared.) A copy the fork edited by hand while the template moved is never overwritten: it is a `reconcile` job
   (bring the template's change into the fork's copy, then list the copy against the template it was reconciled with). A

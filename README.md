@@ -145,7 +145,8 @@ full gate run per version (one at a time on the machine), PRs, CI waits, merges,
 fresh review, the fixer, the re-check, a fixer for a step that failed, the close) and records its short summary. At
 `init` it reads each fork against this repository's shared library (`sync-shared --check`, no checkout touched): a
 version a sync would change gets work this round even with nothing else -- first a `sync` step (`fork-branches.py
-sync-shared` as its own commit on the version branch), then its gates, PR, merge, release and the dependents' re-pin;
+sync-shared` as its own commit on the version branch), then its gates, PR, merge, release and the dependents' re-pin
+(a narrow review when the sync is its only change);
 a hand-edited copy whose template moved is a reconcile job instead, the file untouched; a copy the plan ticked to adopt
 is an adopt job; a version with none of this and no other work is not queued. When the version below only moved its
 own installed helper copy to its library's, a cascade keeps this version's installed copy instead of merging the two.

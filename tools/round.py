@@ -337,9 +337,12 @@ def build_queue(frozen, cfg, forks, date):
         adopt_v = {v: [a for a in s_.get("adopt", []) if a["id"] in ticked] for v, s_ in sh_.items()}
         adopt_v = {v: a for v, a in adopt_v.items() if a}
 
-        def work(v):
+        def other_work(v):
             return (authors_up or (lowest_fix is not None and rank[v] >= lowest_fix) or bool(bumps.get(v))
-                    or any((lb, v) in release_of for lb in libs) or v in sync_v or v in rec_v or v in adopt_v)
+                    or any((lb, v) in release_of for lb in libs))
+
+        def work(v):
+            return other_work(v) or v in sync_v or v in rec_v or v in adopt_v
         head_work = bool(f.get("take_authors")) or work(base)
         segs = [v for v in F["versions"] if work(v)]
         if not (head_work or segs or grades):
@@ -386,6 +389,9 @@ def build_queue(frozen, cfg, forks, date):
             if at.get(v):
                 q.add(slug, v, "backlog", extra={"fixes": at[v]})
             seg_review(q, slug, v)
+            if v in sync_v and not (other_work(v) or v in rec_v or v in adopt_v):
+                # the version's only change is the shared library's own (reviewed in the migrator): a narrow review
+                q.items[-3]["extra"]["sync_only"] = True
             g = q.add(slug, v, "gates")
             if F.get("library"):
                 for dep in dependents.get(slug, []):
@@ -822,9 +828,14 @@ def job_task(st, it):
         else:
             what = (f"The work branch's changes: `git -C {F['dir']} diff --name-only origin/{F['head']}...{br}`; one row per "
                     "file -- `| file | ok/not-ok | note |` -- written to the summary (the driver puts it in the PR body).")
+        narrow = (["This version's only change this round is the shared library's sync (fork-branches.py sync-shared: "
+                   "the migrator's own reviewed tables and helpers). Review narrowly: the stale rows are the sync's "
+                   "files; for each, check only that the fork's code did not depend on the old row or helper behaviour "
+                   "(a call site, an override, a mixin of a helper); no full review of unchanged files."]
+                  if it["extra"].get("sync_only") else [])
         return [f"You are the FRESH REVIEWER of {it['fork']} {v} (never the fixer): keep-current \"The weekly round\" "
                 "step 4, \"one full review against the fixed rubric, before the merge\". The rubric: "
-                f"{ROOT / 'templates/upstream-harness/reviewer-prompt.md'} and REVIEW_PRINCIPLES.md beside it.", what,
+                f"{ROOT / 'templates/upstream-harness/reviewer-prompt.md'} and REVIEW_PRINCIPLES.md beside it.", *narrow, what,
                 "Do not fix anything. Write `not_ok: <n>` (the not-ok rows) in the summary.",
                 "Acceptance: every row has a verdict and a note; committed (a version branch) or in the summary."]
     if s == "fix":
@@ -2131,13 +2142,17 @@ def self_check():
             sy_state = str(tmp / "sy/round/STATE.json")
             rc, o, items = init(fz_y(), cf_y, [f"{SY}={syn}"], sy_state)
             ids_y = [it["id"] for it in items]
+            rv_y = next((it for it in items if it["id"] == "examplesync@26.3:review"), {})
+            expect(rv_y.get("extra", {}).get("sync_only") is True, f"a sync-only version: its review is the narrow one: {rv_y}")
             expect(rc == 0 and ids_y[:3] == ["examplesync@1.21.1:ci-check", "examplesync@26.3:sync", "examplesync@26.3:mergeup"]
                    and "examplesync@26.3:gates" in ids_y and "examplesync@26.3:release" in ids_y
                    and ids_y.index("examplesync@26.3:sync") < ids_y.index("examplesync@26.3:gates")
                    and not any(it["step"] in ("reconcile", "adopt") for it in items),
                    f"an old copy of a shared helper at 26.3: the version gets work, its sync first, before its gates: {ids_y} {o}")
             with State.tx(sy_state) as st_:
+                rvt = "\n".join(job_task(st_, st_.item("examplesync@26.3:review")))
                 note, _res = t_sync(st_, st_.item("examplesync@26.3:sync"), tmp / "sync.log")
+            expect("only change this round is the shared library's sync" in rvt, f"the narrow review's job text: {rvt}")
             co_y = mod("fb").worktree_for(syn, "26.3")[0]
             expect("committed" in note and b"v = 2" in (pathlib.Path(co_y) / hrel).read_bytes()
                    and git(co_y, "status", "--porcelain").stdout.strip() == "",
@@ -2152,6 +2167,8 @@ def self_check():
             rc, o, items = init(fz_y(), cf_y, [f"{SY}={syn}"], sy_state)
             by_y = {it["id"]: it for it in items}
             rj = by_y.get("examplesync@26.3:reconcile")
+            expect(not by_y["examplesync@26.3:review"]["extra"].get("sync_only"),
+                   "a version with a reconcile job (more than the sync): the full review")
             expect(rc == 0 and rj and rj["kind"] == "agent" and "examplesync@26.3:sync" not in by_y
                    and rj["extra"]["edited"][0]["path"] == hrel and "examplesync@26.3:gates" in by_y,
                    f"a hand-edited copy whose library copy moved: a reconcile job (and the version's gates), no sync: {list(by_y)}")

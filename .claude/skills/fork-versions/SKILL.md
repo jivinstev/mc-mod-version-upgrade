@@ -363,9 +363,11 @@ version from the base up to each branch's own counts, so a version whose library
 too. Without `--target` it syncs every version (the default, and the safe one): a version left out keeps its old copy
 of the tables, so a cascade from below re-makes the synced files back through them, and a partial run names those
 versions in a WARNING. Then cascade. A section of `shared-renames.tsv` edited by hand (equal to no text the library's
-table ever had) is left alone and named: move the fork's own rows to `.port/<v>/renames.tsv` and sync again. A helper
-copy that equals a text the library once shipped (a layer's `MV-STAND-IN` copy too), listed or not, is a library copy
-and is updated. `sync-shared --check [--json FILE]` writes nothing and touches no checkout: per version what a sync
+table ever had) is left alone and named: move the fork's own rows to `.port/<v>/renames.tsv` and sync again; so is a
+section that differs while the library's history cannot be read (a shallow clone that cannot be deepened): an edit
+cannot be ruled out, so it is never rewritten on a guess. An UNLISTED helper copy that equals a text the library once
+shipped (a layer's `MV-STAND-IN` copy too) is a library copy and is updated; a listed copy that differs from its
+listing (an edit, or a revert to an older library text) stays edited. `sync-shared --check [--json FILE]` writes nothing and touches no checkout: per version what a sync
 would change, each hand-edited copy whose template moved (reconcile it by hand), the fork's own copies of what the
 library ships (adopt candidates) and the code marked `MV-AHEAD-OF-TEMPLATE` (ahead of the template: a lesson to
 harvest); the weekly round runs it at `init` and syncs only what it names. A cascade keeps a version's installed helper
