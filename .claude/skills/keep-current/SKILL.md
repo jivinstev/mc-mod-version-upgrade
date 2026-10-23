@@ -346,8 +346,8 @@ and version-branch forks alike:
   release earlier, with no cascade since, shows it with nothing new upstream), under the same box -- the known issues as
   checkboxes pre-ticked for the defaults (every open S1, then S2s up to the budget), each with its lowest open version
   (the status map; `lowest` is only the first affected one; on a version-branch fork `known-issues.py lowest` checks
-  the branches below it with git alone: an entry's `pattern` found lower moves the fix there, a listed file
-  byte-identical lower is shown as "lowest may be lower (unchecked)"), the escalated cascade decisions (the head cascade's: they
+  the branches below it with git alone: an entry's `pattern` matching lower is shown as "may be at <v> (unconfirmed)",
+  the fix left where it is; a listed file byte-identical lower is shown as "lowest may be lower (unchecked)"), the escalated cascade decisions (the head cascade's: they
   apply only with the authors' box ticked) with their options
   (`/decide <id> <choice>`), the **dependency updates** (`weekly-plan.py deps`: per Minecraft version the fork builds,
   each pinned CurseForge/Modrinth dependency with a newer compatible build, current -> new, ticked by default and
@@ -560,12 +560,14 @@ it small, so for such a set the orchestration is a tool, which replaces the four
      made at `at`, the **lowest version whose ledger status is `open`** (not the `lowest` field: an issue first seen at
      1.21.1 may be open only at 26.3), and carried up by the one cascade named there, never fixed version by version.
      **Check below `at` before fixing:** `python3 tools/known-issues.py lowest --repo DIR --ref origin/<head> <ID>` (git
-     only, no checkout) greps the entry's `pattern` on every lower version branch the ledger leaves unset; with no
-     pattern, read the lower branches yourself (`git show origin/neoforge-<v>:<file>`). Found lower: fix it at the
-     lowest version that has it and cascade from there, and record it (`known-issues.py status <ID> --set
-     <versions>=open --lowest <v>`) -- never fix it high and come back next week. On a version-branch set the driver
-     does this itself (round.py init, and one `lowest` job per fork for the entries with no pattern). Give a new entry a
-     `--pattern` when its defect has a recognisable text, so the next check is mechanical. Where the fix is made:
+     only, no checkout) greps the entry's `pattern` on every lower version branch the ledger leaves unset -- a hit is
+     evidence, not proof (the same text can be right at another version): read the branch to confirm it; with no
+     pattern, read the lower branches yourself (`git show origin/neoforge-<v>:<file>`). Confirmed lower: record it
+     (`known-issues.py status <ID> --set <versions>=open --lowest <v>`), and fix it at the lowest version that has it
+     and cascade from there when that reopens no done version (an S1, or versions that have work this round anyway;
+     never onto the head when the head is not cascaded) -- otherwise the next plan fixes it there. On a version-branch
+     set the driver does this itself (round.py init, then one `lowest` job per fork that confirms the candidates). Give
+     a new entry a `--pattern` when its defect has a recognisable text. Where the fix is made:
      at a version branch, the fix on `neoforge-<at>` and `python3 tools/fork-branches.py cascade --repo DIR
      <at>..<newest>` (from a version branch, a cascade carries only what that branch took -- each merge's port commit is
      its merge-base with the head -- never the head's untaken code); at the head's own version with `head_cascade: true`,

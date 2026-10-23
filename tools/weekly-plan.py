@@ -91,8 +91,9 @@ back to the head as it is and the plan says "Could not preview". No new upstream
 as before.
 
 LOWEST (inside the select step; a version-branch fork only): each listed known issue against the version branches below
-its lowest open version (known-issues.py lowest, git only): a `pattern` found lower moves its fix there (the plan's
-fix_at), a listed file byte-identical lower shows "lowest may be lower (unchecked)".
+its lowest open version (known-issues.py lowest, git only): a `pattern` matching lower shows "may be at <v>
+(unconfirmed)" -- evidence, not proof: fix_at stays (the round's lowest job confirms it) -- and a listed file
+byte-identical lower shows "lowest may be lower (unchecked)".
 
 SHARED (inside the cascade step; a version-branch fork only, so a single-version fork's plan is unchanged): each
 version against MMVU's shared library as of the pinned commit (fork-branches.py sync-shared --check, read-only). The
@@ -811,8 +812,9 @@ def step_select(work):
 
 def lowest_below(f, every):
     """Each listed issue of a version-branch fork against the version branches below the version it would be fixed at
-    (known-issues.py lowest, git only): its pattern found lower moves the fix there (`lowest_found`, the plan's fix_at);
-    a listed file byte-identical lower says "lowest may be lower (unchecked)". Fails soft: an issue it cannot check
+    (known-issues.py lowest, git only): its pattern found lower is a candidate only, "may be at <v> (unconfirmed)"
+    (`lowest_candidate`; the plan's fix_at stays: the round's lowest job confirms it); a listed file byte-identical lower
+    says "lowest may be lower (unchecked)". Fails soft: an issue it cannot check
     keeps its line as it was."""
     k = ki()
     by = {e["id"]: e for e in every}
@@ -827,15 +829,15 @@ def lowest_below(f, every):
             print(f"weekly-plan: {f['repo']}: {r['id']}: the lowest check could not run: {x}")
             continue
         if res["found"]:
-            r["lowest_found"] = res["found"][0]
+            r["lowest_candidate"] = res["found"][0]
         note = k.lowest_note(res)
         if note:
             r["lowest_note"] = note
-    n = sum(1 for r in f["selection"] + f["candidates"] if r.get("lowest_found"))
-    m = sum(1 for r in f["selection"] + f["candidates"] if r.get("lowest_note") and not r.get("lowest_found"))
+    n = sum(1 for r in f["selection"] + f["candidates"] if r.get("lowest_candidate"))
+    m = sum(1 for r in f["selection"] + f["candidates"] if r.get("lowest_note") and not r.get("lowest_candidate"))
     if n or m:
-        print(f"weekly-plan: {f['repo']}: {n} issue(s) found below their lowest open version (fixed lower), {m} whose "
-              "lowest may be lower (unchecked)")
+        print(f"weekly-plan: {f['repo']}: {n} issue(s) whose pattern is below their lowest open version (unconfirmed), "
+              f"{m} whose lowest may be lower (unchecked)")
 
 
 def k_mc(v):
@@ -1401,14 +1403,14 @@ def self_check():
                f"a version-branch fork: nothing new upstream, the head's untaken authors' commit and its merge listed: {fv}")
         expect(set(fv.get("shared", {}).get("versions", {})) == {"1.21.3"} and "adopt" in fv["shared"] and "ahead" in fv["shared"],
                f"a version-branch fork: its shared-library status (sync-shared --check) is in the plan input: {fv.get('shared')}")
-        expect("head_merge" not in fv["cascade"] and not any("lowest_note" in r or "lowest_found" in r
+        expect("head_merge" not in fv["cascade"] and not any("lowest_note" in r or "lowest_candidate" in r
                                                              for r in fv["selection"] + fv["candidates"])
                and "lowest_note" not in f0["selection"][0],
                f"no new upstream commits: no head-merge preview (the cascade command as before); a single-version fork "
                f"gets no lowest check: {fv['cascade']}")
         # the head merge previewed: the authors' new commit conflicts with the head's port (so the throwaway checkout
         # merge of step_fetch is aborted) and changes a line 1.21.3 changed too -- the version-boundary decision the
-        # round would meet is on the plan; the ledger's pattern found on the head moves the fix there
+        # round would meet is on the plan; the ledger's pattern on the head is shown as a candidate, fix_at unchanged
         up2 = d / "up2"
         subprocess.run(["git", "init", "-q", "-b", "main", str(up2)], check=True)
         F = "src/F.java"
@@ -1462,17 +1464,27 @@ def self_check():
         expect(gq(hm_, "rev-parse", "refs/remotes/origin/neoforge-1.21.1") == x2 and gq(hm_, "rev-parse", "neoforge-1.21.1") == x2,
                "the preview changed no real branch")
         sel_hm = {r["id"]: r for r in fh["selection"] + fh["candidates"]}
-        expect(sel_hm["KI-1"].get("lowest_found") == "1.21.1" and "its pattern is also at 1.21.1" in sel_hm["KI-1"].get("lowest_note", "")
-               and "lowest_found" not in sel_hm["KI-2"]
+        expect(sel_hm["KI-1"].get("lowest_candidate") == "1.21.1"
+               and "may be at 1.21.1 (unconfirmed" in sel_hm["KI-1"].get("lowest_note", "")
+               and "lowest_candidate" not in sel_hm["KI-2"]
                and "lowest may be lower (unchecked): 1.21.1" in sel_hm["KI-2"].get("lowest_note", ""),
-               f"the lowest check: the pattern on the head moves KI-1's fix there; KI-2's file unchanged below is flagged: {sel_hm}")
+               f"the lowest check: the pattern on the head is a candidate only (KI-1 unconfirmed there); KI-2's file "
+               f"unchanged below is flagged: {sel_hm}")
         inp5 = load_input(w5)
         inp5.update(owner={"login": "someone"})
         r5 = k.render_plan(inp5)
         expect("--head-merge " in r5["body"] and "Head merge needs an agent: 1 file(s)" in r5["body"]
                and f"`{F}` at 1.21.3" in r5["body"] and "lowest may be lower (unchecked)" in r5["body"]
-               and '"fix_at": {"KI-1": "1.21.1", "KI-2": "1.21.3"}' in r5["body"].replace("\n", ""),
+               and '"fix_at": {"KI-1": "1.21.3", "KI-2": "1.21.3"}' in r5["body"].replace("\n", "")
+               and "may be at 1.21.1 (unconfirmed" in r5["body"],
                f"the plan shows the previewed decision, the head merge's conflict and the lowest check: {r5['body'][-2500:]}")
+        inp7 = load_input(w5)
+        inp7.update(owner={"login": "someone"})
+        inp7["forks"][0]["cascade"]["head_merge"] = {"ref": "c" * 40, "commit": "c" * 40, "merged": False, "already": True,
+                                                    "conflicts": [], "error": None}
+        b7 = k.render_plan(inp7)["body"]
+        expect("throwaway ref first" not in b7 and "Previewed:" not in b7 and "--plan`, git and the rename rows" in b7,
+               "the authors' commit already in the head: the plan does not claim a simulated head merge")
         # the preview cannot run (an unknown commit): the plan of the head as it is, said
         inp6 = load_input(w5)
         inp6["forks"][0]["upstream_commit"] = "f" * 40

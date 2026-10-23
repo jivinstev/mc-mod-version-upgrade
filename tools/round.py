@@ -50,13 +50,16 @@ forks already on the current shared library, builds nothing but the close):
       run awaited together) -> librecord:<library> (a dependent: fork-branches.py library-record once its Gate C passed
       on the released jar)
   LOWEST FIRST (init, before any fix): each selected fix is checked against the version branches below the version
-  the plan fixes it at (known-issues.py lowest, git only, on the head's ledger): an entry with a `pattern` found lower
-  moves its fix down to the lowest such version, and the merges carry it up from there (the segments re-planned, not a
-  fix made high and a return next week); an entry with no pattern whose file is present lower gets ONE `lowest` agent
-  job per fork, first in the queue (every fork's items wait for it): it reads the lower branches (git show, no
-  checkout) and writes `lowest: <ID> <version>`, and a lower version re-plans the queue the same way. Either finding is
-  written to the ledger by the final ledger step (open there, `lowest` moved down). A fixer who still sees the defect
-  below its version writes `lowest:` too: the ledger records it for the next plan.
+  the plan fixes it at (known-issues.py lowest, git only, on the head's ledger). Nothing moves on that alone: a
+  `pattern` hit is a candidate, and a hit, or a listed file present lower, puts the issue into ONE `lowest` agent job
+  per fork, first in the queue (every fork's items wait for it). The job reads the lower branches (git show, no
+  checkout) and writes `lowest: <ID> <version>` -- only a version it was asked about and below the fix counts. A
+  confirmed lower version moves the fix there and re-plans the queue (the merges carry it up from there) when that
+  reopens nothing: the issue is an S1 (only an S1 reopens a done version), or every version from there up to the fix
+  already has work this round; and never onto the head while the plan does not cascade the head (the versions above
+  would get nothing). Otherwise the fix stays, and the confirmed version is recorded for the next plan. The final
+  ledger step writes every confirmed version (open from it up to the fix, `lowest` moved down). A fixer who still sees
+  a defect it was given below its version writes `lowest:` too: the ledger records it for the next plan.
   per fork a final ledger once nothing else of the fork can run (statuses for what merged, the README Ports block, the
   versions that did not merge named), and one close (the closing comment), once nothing else can run.
 
@@ -431,7 +434,8 @@ def build_queue(frozen, cfg, forks, date):
 
 
 def moved_fix(x, move, base):
-    """A frozen fix with its version moved down by the lowest check (None: as the plan had it)."""
+    """A frozen fix with its version moved down by a confirmed lowest check (None: as the plan had it). record_lowest
+    never moves a fix onto the head unless the head is cascaded, so "on the head" is the head cascade's case."""
     if not move or move.get("at") == x.get("at"):
         return x
     at = move["at"]
@@ -443,12 +447,14 @@ def moved_fix(x, move, base):
 
 def lowest_of(d, F, fixes, say=print):
     """LOWEST FIRST at init: each fix against the version branches below it (known-issues.py lowest_check, git only,
-    on the head's ledger at origin/<head>). -> {"moves": {id: {"at", "found", "why"}}, "ask": [{"id", "at", "versions",
-    "files"}], "error": None or why}. Fails soft: a check that cannot run leaves the fixes where the plan put them."""
+    on the head's ledger at origin/<head>). A pattern hit is a candidate, never a move: every issue with a hit or a
+    file present below goes to the `lowest` job. -> {"moves": {}, "recorded": {}, "ask": [{"id", "at", "versions",
+    "found", "unchanged", "files", "severity"}], "error": None or why}. Fails soft: a check that cannot run leaves the
+    fixes where the plan put them."""
     ki = mod("ki")
     order = [F["base"]] + F["versions"]
     rank = {v: i for i, v in enumerate(order)}
-    out = {"moves": {}, "ask": [], "error": None}
+    out = {"moves": {}, "recorded": {}, "ask": [], "error": None}
     try:
         data = ki.read_ledger(repo=d, ref=f"origin/{F['head']}")
         refs = {v: r for v, r in ki.version_refs(d).items() if v in rank}
@@ -467,21 +473,34 @@ def lowest_of(d, F, fixes, say=print):
         except Exception as e_:                  # noqa: BLE001
             out["error"] = f"{x['id']}: {type(e_).__name__}: {e_}"[:300]
             continue
-        found = [v for v in r["found"] if v in rank]
-        if found:
-            low = min([found[0], at], key=lambda v: rank[v])
-            out["moves"][x["id"]] = {"at": low, "found": found, "why": f"its pattern is at {', '.join(found)}"}
-            at = low
-        look = sorted({v for v in r["unchanged"] + r["present"] + r["unchecked"] if v in rank and rank[v] < rank[at]},
+        below = lambda vs: [v for v in vs if v in rank and rank[v] < rank[at]]
+        found = below(r["found"])
+        # a pattern is evidence, not proof: its hits are candidates the job confirms; with no pattern, a file present
+        # below (or nothing recorded about where) is looked at the same way
+        look = sorted(set(found) | (set() if r["how"] == "pattern" else set(below(r["unchanged"] + r["present"] + r["unchecked"]))),
                       key=lambda v: rank[v])
-        if r["how"] != "pattern" and look:
-            out["ask"].append({"id": x["id"], "at": at, "versions": look, "files": list(e.get("files") or []),
-                               "unchanged": [v for v in r["unchanged"] if v in look]})
-    if out["moves"] or out["ask"]:
-        say(f"round: {F['name']}: lowest check: "
-            + ", ".join(f"{i} fixed at {m['at']} ({m['why']})" for i, m in out["moves"].items())
-            + ("; " if out["moves"] and out["ask"] else "")
-            + (f"{len(out['ask'])} fix(es) with no pattern checked below by an agent first" if out["ask"] else ""))
+        if look:
+            out["ask"].append({"id": x["id"], "at": at, "versions": look, "found": found, "files": list(e.get("files") or []),
+                               "unchanged": below(r["unchanged"]), "severity": e["severity"]})
+    if out["ask"]:
+        say(f"round: {F['name']}: lowest check: {len(out['ask'])} fix(es) looked at below by an agent first ("
+            + ", ".join(f"{a['id']}" + (f" may be at {', '.join(a['found'])}" if a["found"] else "") for a in out["ask"]) + ")")
+    return out
+
+
+def late_lowest(st, fork):
+    """The fixers' `lowest: <ID> <version>` lines that count: from a backlog that ended ok, for an issue that backlog
+    was given, at a ladder version below that fix's version. -> [(id, version)]."""
+    F = st.fork(fork)
+    rk = {v: k for k, v in enumerate([F["base"]] + F["versions"])}
+    out = []
+    for x in st.items:
+        if x["fork"] != fork or x["step"] != "backlog" or x["status"] != "ok":
+            continue
+        at = {f_["id"]: f_.get("at") or x["version"] for f_ in x["extra"].get("fixes", [])}
+        for i, v in x["result"].get("lowest", []):
+            if i in at and v in rk and rk[v] < rk.get(at[i], rk.get(x["version"], 0)):
+                out.append((i, v))
     return out
 
 
@@ -492,10 +511,10 @@ def lowest_sets(F, data, extra=()):
     ki = mod("ki")
     order = [F["base"]] + F["versions"]
     rank = {v: i for i, v in enumerate(order)}
+    lc = F.get("lowest_check") or {}
     low = {}
-    for i, m in ((F.get("lowest_check") or {}).get("moves") or {}).items():
-        low[i] = min(m["found"] + [m["at"]], key=lambda v: rank.get(v, 99))
-    for i, v in extra:
+    for i, v in [(i, m["confirmed"]) for i, m in (lc.get("moves") or {}).items()] + list((lc.get("recorded") or {}).items()) \
+            + list(extra):
         if v in rank and (i not in low or rank[v] < rank[low[i]]):
             low[i] = v
     out = []
@@ -926,8 +945,9 @@ def job_task(st, it):
         rows = []
         for x in it["extra"]["ask"]:
             fl = ", ".join(x["files"]) or "(no file recorded: find where the defect is first)"
-            rows.append(f"- {x['id']}: fixed at {x['at']} this round; look at " + ", ".join(
-                f"neoforge-{v}" + (" (its file is byte-identical there)" if v in x.get("unchanged", []) else "")
+            rows.append(f"- {x['id']} ({x.get('severity', '?')}): fixed at {x['at']} this round; look at " + ", ".join(
+                f"neoforge-{v}" + (" (its ledger pattern matches there: a candidate, not proof)" if v in x.get("found", [])
+                                   else " (its file is byte-identical there)" if v in x.get("unchanged", []) else "")
                 for v in x["versions"]) + f"; file(s): {fl}")
         return [f"Before any fix of {it['fork']} is made this round, check whether each defect below is also at the "
                 "LOWER version branches named (the driver moves a fix down to the lowest version that has it, and the "
@@ -937,8 +957,10 @@ def job_task(st, it):
                 "origin/neoforge-<v>:<file>`, `git -C " + str(F["dir"]) + " grep -n <text> origin/neoforge-<v> -- <file>` -- "
                 "never a checkout, a commit or a build. A defect that depends on that version's own API or format (the "
                 "same text can be right there) is not there.",
-                "Write one line per issue: `lowest: <ID> <version>`, the lowest version that HAS the defect (the version "
-                "it is fixed at when none lower has it). Fix nothing.",
+                "Write one line per issue: `lowest: <ID> <version>`, the lowest version you CONFIRMED has the defect "
+                "(the version it is fixed at when none lower has it) -- only a version listed for it counts. Fix nothing. "
+                "The driver decides what a lower version changes: it moves the fix only when that reopens no done "
+                "version (an S1, or versions that have work this round anyway); else it records it for the next plan.",
                 "Acceptance: a `lowest:` line for every issue listed."]
     if s == "backlog":
         fx = it["extra"]["fixes"]
@@ -1668,8 +1690,7 @@ def t_ledger(st, it, log):
     sets, refused = 0, []
     if (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file():
         # LOWEST FIRST's findings: open at the lower versions, `lowest` moved down -- before the fixed@ statuses
-        late = [tuple(y) for x in st.items if x["fork"] == it["fork"] and x["step"] == "backlog" and x["status"] == "ok"
-                for y in x["result"].get("lowest", [])]
+        late = late_lowest(st, it["fork"])
         found = late or (F.get("lowest_check") or {}).get("moves")
         data = mod("ki").read_ledger(pathlib.Path(d) / ".port/KNOWN-ISSUES.json") if found else None
         for ident, vs, low in (lowest_sets(F, data, late) if found else []):
@@ -1920,19 +1941,36 @@ POST_GATE = ("depgate", "freeze", "pr", "ci")
 
 
 def record_lowest(st, it, lines):
-    """A `lowest` job's `lowest: <ID> <version>` lines: each one below the version its fix is at becomes a move (the
-    fork's lowest_check), the ledger step records it. -> [(id, version)] moved."""
+    """A `lowest` job's `lowest: <ID> <version>` lines (LOWEST FIRST): a version it was asked about, below the fix's.
+    It moves the fix (the fork's lowest_check moves; the queue is re-planned) only when that reopens nothing -- an S1,
+    or every version from there up to the fix already has work this round -- and never onto the head while the plan
+    does not cascade the head; otherwise it is recorded for the ledger and the next plan, the fix staying.
+    -> [(id, version)] moved."""
     F = st.fork(it["fork"])
     order = [F["base"]] + F["versions"]
     rank = {v: i for i, v in enumerate(order)}
-    lc = F.setdefault("lowest_check", {"moves": {}, "ask": [], "error": None})
+    lc = F.setdefault("lowest_check", {"moves": {}, "recorded": {}, "ask": [], "error": None})
+    lc.setdefault("moves", {}); lc.setdefault("recorded", {})
     ask = {x["id"]: x for x in it["extra"].get("ask", [])}
+    try:
+        fzf = next((f for f in json.loads(pathlib.Path(st.data["frozen"]).read_text(encoding="utf-8"))["forks"]
+                    if f["repo"] == it["fork"]), {})
+    except (OSError, ValueError, KeyError):
+        fzf = {}
+    head_cascade = fzf.get("head_cascade", True)
+    busy = {x["version"] for x in st.items if x["fork"] == it["fork"]
+            and x["step"] not in ("ci-check", "grades", "lowest", "ledger")}
     moved = []
     for i, v in lines:
         x = ask.get(i)
-        if not x or v not in rank or rank[v] >= rank.get(x["at"], 0):
-            continue                             # not one it was asked, or not below the fix's version
-        lc.setdefault("moves", {})[i] = {"at": v, "found": [v], "why": f"the lowest check job found it at {v}"}
+        if not x or v not in x.get("versions", []) or v not in rank or rank[v] >= rank.get(x["at"], 0):
+            continue                             # not one it was asked about, or not below the fix's version
+        span = [w for w in order if rank[v] <= rank[w] < rank[x["at"]]]
+        reopens = x.get("severity") != "S1" and not all(w in busy for w in span)
+        if reopens or (v == F["base"] and not head_cascade):
+            lc["recorded"][i] = v
+            continue
+        lc["moves"][i] = {"at": v, "confirmed": v, "why": f"the lowest job confirmed it at {v}"}
         moved.append((i, v))
     return moved
 
@@ -2259,9 +2297,11 @@ def self_check():
                and not any(it["step"] in ("review", "gates", "release") and it["version"] == "1.21.4" for it in items),
                f"one fix at the middle version: that version and above, and the dependent's re-pin there, only: "
                f"{[it['id'] for it in items]}")
-        # ---- LOWEST FIRST: the ledger says LOW-1 is first at 26.1.2, but its pattern is on 1.21.4 (not on the head):
-        # the round fixes it at 1.21.4 and the merges carry it up; LOW-2 has no pattern and its file is unchanged
-        # below, so one `lowest` job looks first (every item waits for it); its answer re-plans the queue
+        # ---- LOWEST FIRST: the ledger says each issue is first at 26.1.2. LOW-1 (S2) and LOW-3 (S1) have a pattern
+        # that matches on 1.21.4 and 1.21.5 (not on the head); LOW-2 has no pattern, its file unchanged below; LOW-4's
+        # pattern matches everywhere, the head included. A hit is a candidate: nothing moves at init, ONE lowest job
+        # looks first (every item waits for it), and only its confirmed answer moves a fix -- an S1, or onto versions
+        # that have work this round anyway, never onto the head while the head is not cascaded
         LO = "owner/examplelow"
         low = repo("examplelow", [("1.21.4", "1.21.1"), ("1.21.5", "1.21.4"), ("26.1.2", "1.21.5")])
         glo = lambda *x: git(low, "-c", "gc.auto=0", *x, check=True)
@@ -2272,65 +2312,99 @@ def self_check():
             (low / "Same.java").write_text("class Same {}\n", encoding="utf-8")
             if v == "1.21.1":
                 ki_ = mod("ki")
-                base_ = ["--repo", str(low), "--failure", "functional", "--visibility", "common", "--reach", "normal",
-                         "--workaround", "no", "--lowest", "26.1.2"]
+                base_ = ["--repo", str(low), "--visibility", "common", "--reach", "normal", "--workaround", "no",
+                         "--lowest", "26.1.2"]
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    ki_.main(["add", *base_, "--id", "LOW-1", "--title", "the bad call", "--file", "Defect.java",
-                              "--pattern", r"badCall\(\)"])
-                    ki_.main(["add", *base_, "--id", "LOW-2", "--title", "the same file", "--file", "Same.java"])
+                    ki_.main(["add", *base_, "--failure", "functional", "--id", "LOW-1", "--title", "the bad call",
+                              "--file", "Defect.java", "--pattern", r"badCall\(\)"])
+                    ki_.main(["add", *base_, "--failure", "functional", "--id", "LOW-2", "--title", "the same file",
+                              "--file", "Same.java"])
+                    ki_.main(["add", *base_, "--failure", "crash", "--id", "LOW-3", "--title", "a crash in x",
+                              "--file", "Defect.java", "--pattern", r"badCall\(\)"])
+                    ki_.main(["add", *base_, "--failure", "functional", "--id", "LOW-4", "--title", "any call at all",
+                              "--file", "Defect.java", "--pattern", r"Call\(\)"])
             glo("add", "-A"); glo("commit", "-q", "-m", f"{v}: the files")
             glo("push", "-q", "origin", f"neoforge-{v}")
         glo("checkout", "-q", "neoforge-1.21.1")
         cf_lo = {"forks": [{"repo": LO, "head": "neoforge-1.21.1", "role": "", "automerge": True}], "allow": cfg["allow"]}
 
-        def fz_lo(ids):
+        def fz_lo(ids, take=False):
             return {"schema": 1, "issue": 10, "repo": LO, "owner": {"login": "owner"}, "grades": [], "decisions": [],
-                    "forks": [{"repo": LO, "head": "neoforge-1.21.1", "take_authors": False, "head_cascade": False,
+                    "forks": [{"repo": LO, "head": "neoforge-1.21.1", "take_authors": take, "head_cascade": take,
+                               "upstream_commit": "a" * 40, "upstream": "authors", "upstream_branch": "main",
                                "selected": list(ids), "dep_bumps": [], "cascade": {"range": "neoforge-1.21.1..26.1.2", "decisions": []},
                                "fixes": [{"id": i, "at": "26.1.2", "how": "on neoforge-26.1.2, the newest version"} for i in ids]}]}
         lo_state = str(tmp / "low/round/STATE.json")
-        rc, o, items = init(fz_lo(["LOW-1", "LOW-2"]), cf_lo, [f"{LO}={low}"], lo_state)
+        sm = tmp / "low/lowest.md"
+        backlogs = lambda its: {it["version"]: sorted(x["id"] for x in it["extra"]["fixes"]) for it in its if it["step"] == "backlog"}
+
+        def answer(text):
+            with State.tx(lo_state) as st_:
+                dispatch_agent(st_, st_.item("examplelow@1.21.1:lowest"))
+            sm.write_text("RESULT: ok\n" + text, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_record(argparse.Namespace(id="examplelow@1.21.1:lowest", summary=str(sm), status=None, state=lo_state))
+            with State.tx(lo_state, write=False) as st_:
+                return st_.items, st_.fork(LO)
+        ids4 = ["LOW-1", "LOW-2", "LOW-3", "LOW-4"]
+        rc, o, items = init(fz_lo(ids4), cf_lo, [f"{LO}={low}"], lo_state)
         lby = {it["id"]: it for it in items}
-        bl = {it["version"]: [x["id"] for x in it["extra"]["fixes"]] for it in items if it["step"] == "backlog"}
         lj = lby.get("examplelow@1.21.1:lowest", {})
-        expect(rc == 0 and bl == {"1.21.4": ["LOW-1"], "26.1.2": ["LOW-2"]}
-               and sorted({it["version"] for it in items if it["step"] == "mergeup"}) == ["1.21.4", "1.21.5", "26.1.2"]
-               and "moved down from 26.1.2" in lby["examplelow@1.21.4:backlog"]["extra"]["fixes"][0]["how"]
-               and lj.get("kind") == "agent" and [x["id"] for x in lj["extra"]["ask"]] == ["LOW-2"]
-               and lj["extra"]["ask"][0]["versions"] == ["1.21.1", "1.21.4", "1.21.5"]
+        ask = {x["id"]: x for x in lj.get("extra", {}).get("ask", [])}
+        expect(rc == 0 and backlogs(items) == {"26.1.2": ids4} and lj.get("kind") == "agent"
+               and ask["LOW-1"]["found"] == ["1.21.4", "1.21.5"] and ask["LOW-1"]["versions"] == ["1.21.4", "1.21.5"]
+               and ask["LOW-2"]["versions"] == ["1.21.1", "1.21.4", "1.21.5"] and ask["LOW-3"]["severity"] == "S1"
+               and ask["LOW-4"]["found"] == ["1.21.1", "1.21.4", "1.21.5"]
                and lby["examplelow@1.21.1:ci-check"]["deps"] == ["examplelow@1.21.1:lowest"],
-               f"the pattern found on 1.21.4 moves LOW-1's fix there (the segments from 1.21.4 up); LOW-2 (no pattern, "
-               f"its file unchanged below) stays at 26.1.2 with one lowest job first: {bl} {o} {[it['id'] for it in items]}")
+               f"a pattern hit is a candidate: no fix moves at init; every hit and every unchanged file goes to the one "
+               f"lowest job, which every item waits for: {backlogs(items)} {ask} {o}")
         with State.tx(lo_state) as st_:
             dispatch_agent(st_, st_.item("examplelow@1.21.1:lowest"))
             lj_text = job_text(st_, st_.item("examplelow@1.21.1:lowest"))
-        expect("lowest: <ID> <version>" in lj_text and "git -C" in lj_text and "never a checkout" in lj_text
-               and "LOW-2: fixed at 26.1.2" in lj_text, f"the lowest job's prompt: {lj_text}")
-        sm = tmp / "low/lowest.md"
-        sm.write_text("RESULT: ok\nlowest: LOW-2 26.1.2\n", encoding="utf-8")
-        before = json.loads(pathlib.Path(lo_state).read_text(encoding="utf-8"))["items"]
-        with contextlib.redirect_stdout(io.StringIO()):
-            cmd_record(argparse.Namespace(id="examplelow@1.21.1:lowest", summary=str(sm), status=None, state=lo_state))
-        after = json.loads(pathlib.Path(lo_state).read_text(encoding="utf-8"))["items"]
-        expect([x["id"] for x in after] == [x["id"] for x in before] and next(
-            x for x in after if x["step"] == "lowest")["status"] == "ok",
-            "no lower version found: the queue is unchanged")
-        # the same job finding LOW-2 at 1.21.5: the queue is re-planned, the fix made at 1.21.5
-        rc, o, items = init(fz_lo(["LOW-1", "LOW-2"]), cf_lo, [f"{LO}={low}"], lo_state)
-        with State.tx(lo_state) as st_:
-            dispatch_agent(st_, st_.item("examplelow@1.21.1:lowest"))
-        sm.write_text("RESULT: ok\nlowest: LOW-2 1.21.5\nlowest: LOW-9 1.21.4\n", encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()):
-            cmd_record(argparse.Namespace(id="examplelow@1.21.1:lowest", summary=str(sm), status=None, state=lo_state))
+        expect("lowest: <ID> <version>" in lj_text and "never a checkout" in lj_text and "a candidate, not proof" in lj_text
+               and "LOW-3 (S1): fixed at 26.1.2" in lj_text, f"the lowest job's prompt: {lj_text}")
+        rc, o, items = init(fz_lo(ids4), cf_lo, [f"{LO}={low}"], lo_state)
+        before = [x["id"] for x in items]
+        # the false positive (the hit is right at those versions): the job confirms nothing lower -- nothing changes
+        after, F_ = answer("lowest: LOW-1 26.1.2\nlowest: LOW-2 26.1.2\nlowest: LOW-3 26.1.2\nlowest: LOW-4 26.1.2\n")
+        expect([x["id"] for x in after] == before and backlogs(after) == {"26.1.2": ids4}
+               and not F_["lowest_check"]["moves"] and not F_["lowest_check"]["recorded"],
+               f"pattern hits the job does not confirm: the queue and the ledger as they were: {F_['lowest_check']}")
+        # confirmed lower: the S1 moves (it may reopen done versions); the S2 onto done versions only is recorded for
+        # the next plan; a version it was not asked about, and an id it was not given, are ignored
+        rc, o, items = init(fz_lo(ids4), cf_lo, [f"{LO}={low}"], lo_state)
+        after, F_ = answer("lowest: LOW-1 1.21.4\nlowest: LOW-3 1.21.4\nlowest: LOW-2 1.21.1\nlowest: LOW-4 26.1.2\n"
+                           "lowest: LOW-9 1.21.4\nlowest: LOW-3 1.21.1\n")
+        lc_ = F_["lowest_check"]
+        expect(backlogs(after) == {"1.21.4": ["LOW-3"], "26.1.2": ["LOW-1", "LOW-2", "LOW-4"]}
+               and lc_["recorded"] == {"LOW-1": "1.21.4", "LOW-2": "1.21.1"} and list(lc_["moves"]) == ["LOW-3"]
+               and "moved down from 26.1.2" in next(x for x in after if x["id"] == "examplelow@1.21.4:backlog")["extra"]["fixes"][0]["how"],
+               f"only the S1 moves onto versions with no other work; the S2s are recorded, not moved: {backlogs(after)} {lc_}")
         with State.tx(lo_state, write=False) as st_:
-            bl2 = {it["version"]: [x["id"] for x in it["extra"]["fixes"]] for it in st_.items if it["step"] == "backlog"}
-            lst = st_.item("examplelow@1.21.1:lowest")["status"]
-            sets = lowest_sets(st_.fork(LO), mod("ki").read_ledger(low / ".port/KNOWN-ISSUES.json"), [("LOW-1", "1.21.1")])
-        expect(bl2 == {"1.21.4": ["LOW-1"], "1.21.5": ["LOW-2"]} and lst == "ok",
-               f"a lower version found by the lowest job re-plans: LOW-2 fixed at 1.21.5 (an id it was not asked ignored): {bl2}")
-        expect(sets == [("LOW-1", ["1.21.1", "1.21.4", "1.21.5"], "1.21.1"), ("LOW-2", ["1.21.5"], "1.21.5")],
-               f"the ledger step's writes: open from the lowest found up to the ledger's lowest open, `lowest` moved: {sets}")
-        # no pattern and nothing found below: unchanged (a fix with no lower branch asks no job)
+            sets = lowest_sets(st_.fork(LO), mod("ki").read_ledger(low / ".port/KNOWN-ISSUES.json"))
+        expect(sets == [("LOW-1", ["1.21.4", "1.21.5"], "1.21.4"), ("LOW-2", ["1.21.1", "1.21.4", "1.21.5"], "1.21.1"),
+                        ("LOW-3", ["1.21.4", "1.21.5"], "1.21.4")],
+               f"the ledger step writes each confirmed version open up to the fix, `lowest` moved: {sets}")
+        # the head: the plan cascades the head (it takes the authors' code; every version has work) -- the S2 moves
+        # there, the head cascade carries it; the head not cascaded -- recorded, not moved (nothing would carry it up)
+        rc, o, items = init(fz_lo(["LOW-4"], take=True), cf_lo, [f"{LO}={low}"], lo_state)
+        after, F_ = answer("lowest: LOW-4 1.21.1\n")
+        expect(backlogs(after) == {"1.21.1": ["LOW-4"]} and "on the head" in next(
+            x for x in after if x["id"] == "examplelow@1.21.1:backlog")["extra"]["fixes"][0]["how"]
+            and next(x for x in after if x["id"] == "examplelow@1.21.4:mergeup")["extra"].get("head_cascade"),
+            f"head cascaded: the confirmed head version takes the fix and the head cascade carries it: {backlogs(after)}")
+        rc, o, items = init(fz_lo(["LOW-4"]), cf_lo, [f"{LO}={low}"], lo_state)
+        after, F_ = answer("lowest: LOW-4 1.21.1\n")
+        expect(backlogs(after) == {"26.1.2": ["LOW-4"]} and F_["lowest_check"]["recorded"] == {"LOW-4": "1.21.1"},
+               f"head not cascaded: never moved onto the head, recorded for the next plan: {backlogs(after)} {F_['lowest_check']}")
+        # a fixer's late `lowest:` lines count only for an issue it was given, below that fix's version
+        with State.tx(lo_state) as st_:
+            bk = st_.item("examplelow@26.1.2:backlog")
+            bk["status"] = "ok"
+            bk["result"]["lowest"] = [["LOW-4", "1.21.5"], ["LOW-1", "1.21.4"], ["LOW-4", "26.1.2"], ["LOW-4", "9.9"]]
+            late = late_lowest(st_, LO)
+        expect(late == [("LOW-4", "1.21.5")], f"a fixer's lowest: lines only for its own issues, below its version: {late}")
+        # nothing selected, or a fix at the lowest branch: no lowest job, the queue as before
         rc, o, items = init(fz_lo([]), cf_lo, [f"{LO}={low}"], lo_state)
         expect(rc == 0 and [it["id"] for it in items] == ["round:close"], f"nothing selected: no lowest job: {items}")
         rc, o, items = init(dict(fz_lo(["LOW-2"]), forks=[dict(fz_lo(["LOW-2"])["forks"][0],

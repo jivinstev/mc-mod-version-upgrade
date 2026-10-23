@@ -53,7 +53,9 @@ THE SCHEMA (schema 1):
                "source": "authors|review|gate|player",
                "files": ["src/main/java/..."],  # optional: the files the defect is in (select's S3 rule)
                "pattern": "textures/block/x",   # optional: an extended regex (git grep -E) whose match in `files` (or
-                                                # anywhere, with no files) means the defect is there (`lowest`)
+                                                # anywhere, with no files) is EVIDENCE the defect may be there, never
+                                                # proof (the same text can be right at another version): `lowest`
+                                                # reports a hit as a candidate a person or agent confirms
                "platforms": ["cf"],             # optional: only that platform's jar (mr Modrinth, cf CurseForge);
                                                 # absent: every platform
                "notes": "..."}]}
@@ -74,10 +76,11 @@ THE RUBRIC (grade derives the severity from the recorded inputs; an owner overri
     cosmetic    the look is wrong, but nothing the player needs is lost (a wrong colour tint, a texture seam).
 
 LOWEST (read-only; the plan and the round run it before a fix): is the defect also at a version BELOW the one it is to
-be fixed at (its lowest open version, or --at)? Only the fork's `neoforge-<mc>` branches below it whose status the
+be fixed at (its lowest open version, or --at)? It finds candidates, never proof: Only the fork's `neoforge-<mc>` branches below it whose status the
 ledger does not set are looked at (a version set n/a, fixed, wontfix or duplicate is trusted), by git alone on the refs
 (origin's, else the local branch; no checkout). With a `pattern` (or --pattern): `git grep -E` in `files` on each such
-branch -- a match is the defect there (`found`, and the fix moves down to the lowest one). With no pattern: each branch
+branch -- a match is a candidate (`found`: "may be at <v> (unconfirmed)"); nothing moves a fix on a hit alone (the
+plan's fix_at stays; the round's `lowest` job confirms or rejects it). With no pattern: each branch
 holding a listed file byte-identical to the fix version's is `unchanged` ("lowest may be lower (unchecked)"), one
 holding it changed is `present`; a branch with none of the files cannot have the defect in them. With no files and no
 pattern every such branch is `unchecked`. A single-version fork has no branch below its one version: nothing to check.
@@ -427,7 +430,7 @@ def lowest_check(repo, e, at=None, refs=None, pattern=None, cache=None):
 def lowest_note(r):
     """A plan line's words for a lowest_check result ("" when it says nothing)."""
     if r.get("found"):
-        return f"its pattern is also at {', '.join(r['found'])}: fixed at {r['found'][0]}"
+        return f"may be at {', '.join(r['found'])} (unconfirmed: its pattern is there)"
     if r.get("unchanged"):
         return f"lowest may be lower (unchecked): {', '.join(r['unchanged'])} {'has' if len(r['unchanged']) == 1 else 'have'} its file unchanged"
     return ""
@@ -436,7 +439,7 @@ def lowest_note(r):
 def lowest_line(r):
     """`lowest`'s words for one result."""
     if r["found"]:
-        return f"lowest: {r['lowest']} (the pattern is at {', '.join(r['found'])})"
+        return f"may be at {', '.join(r['found'])} (unconfirmed: the pattern is there)"
     if r["unchanged"]:
         return f"lowest may be lower (unchecked): {', '.join(r['unchanged'])} hold the file unchanged"
     if r["how"] is None and r["below"]:
@@ -822,7 +825,7 @@ def render_plan(inp):
             lines.append(f"The cascade plan (`fork-branches.py cascade {c['range']} --plan"
                          + (f" --head-merge {str(hm.get('commit') or hm.get('ref') or '')[:12]}`, the authors' new "
                             "commits merged into the head on a throwaway ref first, as the round will; git"
-                            if hm and not hm.get("error") else "`, git")
+                            if hm and hm.get("merged") else "`, git")
                          + f" and the rename rows only): {len(plan.get('mechanical', []))} file(s) merged mechanically, "
                          f"{len(ds)} decision(s), {len(esc)} escalated to you.")
             if (n or un) and ds:
@@ -855,8 +858,7 @@ def render_plan(inp):
             data_forks[-1]["adopt"] = [{k: a.get(k) for k in ("id", "version", "kind", "path")} for a in sh.get("adopt") or []]
         if c is not None:            # a version-branch fork only: a single-version fork's data block stays as it was
             data_forks[-1].update({"untaken_count": len(un), "base_version": f.get("base_version"),
-                                   "fix_at": {r["id"]: r.get("lowest_found") or r.get("lowest_open") or r["lowest"]
-                                              for r in sel + cand}})
+                                   "fix_at": {r["id"]: r.get("lowest_open") or r["lowest"] for r in sel + cand}})
     lines += ["## Grade overrides", "",
               "Each issue above shows its grade (S1 crash, kick, data loss, hang, security or build; S2 a core feature "
               "broken in normal play with no workaround; S3 cosmetic, uncommon or with a workaround; S4 invisible or an "
@@ -2075,8 +2077,8 @@ def lowest_selfcheck(expect, cli):
         expect(sorted(refs) == ["1.21.1", "1.21.4", "26.1.2"], f"the fork's version branches: {refs}")
         r1 = lowest_check(d, find(data, "EXM-1"), refs=refs)
         expect(r1["at"] == "26.1.2" and r1["found"] == ["1.21.4"] and r1["lowest"] == "1.21.4" and r1["how"] == "pattern"
-               and "fixed at 1.21.4" in lowest_note(r1),
-               f"the pattern on 1.21.4 (not on the head) while the ledger says 26.1.2: the fix moves to 1.21.4: {r1}")
+               and lowest_note(r1) == "may be at 1.21.4 (unconfirmed: its pattern is there)",
+               f"the pattern on 1.21.4 (not on the head) while the ledger says 26.1.2: a candidate, unconfirmed: {r1}")
         r2 = lowest_check(d, find(data, "EXM-2"), refs=refs)
         expect(not r2["found"] and r2["unchanged"] == ["1.21.1", "1.21.4"] and r2["lowest"] == "26.1.2"
                and lowest_note(r2).startswith("lowest may be lower (unchecked): 1.21.1, 1.21.4"),
@@ -2087,7 +2089,7 @@ def lowest_selfcheck(expect, cli):
         r4 = lowest_check(d, find(data, "EXM-4"), refs=refs)
         expect(r4["below"] == ["1.21.1"] and not r4["found"], f"a status the ledger sets (n/a) is trusted: {r4}")
         rc, o = cli("lowest", "--repo", str(d), "EXM-1", "EXM-2")
-        expect(rc == 0 and "EXM-1\tat 26.1.2\tlowest: 1.21.4" in o and "lowest may be lower (unchecked)" in o,
+        expect(rc == 0 and "EXM-1\tat 26.1.2\tmay be at 1.21.4 (unconfirmed" in o and "lowest may be lower (unchecked)" in o,
                f"lowest prints one line per issue: {o}")
         rc, o = cli("lowest", "--repo", str(d), "EXM-3", "--pattern", "badCall", "--json")
         expect(rc == 0 and json.loads(o)[0]["found"] == ["1.21.4"], f"--pattern overrides the entry's: {o}")

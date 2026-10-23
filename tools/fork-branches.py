@@ -3651,7 +3651,7 @@ def cascade_plan(repo, spec, budget, out_dir, say=print, port_ref=None, head_mer
                     "error": f"{spec} does not start at the port branch {port_}"}
             except Exception as e:             # noqa: BLE001 -- fail soft: the plan of the head as it is, said
                 hm = {"ref": head_merge, "merged": False, "conflicts": [], "error": f"{type(e).__name__}: {e}"[:300]}
-            say(f"fork-branches: cascade --plan: the head merge of {head_merge[:12]} "
+            say(f"fork-branches: cascade --plan: the head merge of {str(hm.get('commit') or head_merge)[:12]} "
                 + (f"could not be simulated ({hm['error']}): planning the head as it is" if hm.get("error") else
                    "is in the head already" if hm.get("already") else
                    f"simulated, {len(hm['conflicts'])} file(s) conflicting in it"))
