@@ -96,5 +96,45 @@ class ModsDir(unittest.TestCase):
                          "/run/mods")
 
 
+
+class Ports(unittest.TestCase):
+    """modreg.py ports: which search hits are ports of a mod (invented names; real-world shapes)."""
+    def setUp(self):
+        import modreg
+        self.m = modreg
+
+    def hit(self, name, pid, provider="curseforge"):
+        return {"provider": provider, "id": pid, "name": name}
+
+    def names(self, original, hits, exclude=()):
+        return [h["name"] for h in self.m.port_candidates(original, hits, set(exclude))]
+
+    def test_a_leading_article_is_dropped_for_the_search(self):
+        self.assertEqual(self.m.strip_article("The Example Sword"), "Example Sword")
+        self.assertEqual(self.m.strip_article("A Example"), "Example")
+        self.assertEqual(self.m.strip_article("Theme Park"), "Theme Park")        # a word, not an article
+        self.assertEqual(self.m.strip_article("The"), "The")                      # nothing would be left
+
+    def test_ports_are_found_by_their_port_words(self):
+        hits = [self.hit("The Example Sword - Community Port (NeoForge)", "1"), self.hit("Example Sword [Unofficial Port]", "2"),
+                self.hit("Example Sword Continued", "3"), self.hit("Example Sword CE NeoForge Port", "4"),
+                self.hit("Example Sword 1.21.1 Port", "5"), self.hit("Example Sword - Reforged", "6")]
+        self.assertEqual(len(self.names("The Example Sword", hits)), 6)
+
+    def test_addons_and_lookalikes_are_not_ports(self):
+        hits = [self.hit("Example Sword: Extra Gadgets", "1"), self.hit("Upgraded Example Sword", "2"),
+                self.hit("Example Sword Continued Delight", "3"), self.hit("Other Weapons: Example Sword Unofficial", "4"),
+                self.hit("Example Swords", "5"), self.hit("The Example Sword Reimagined: Remastered", "6")]
+        self.assertEqual(self.names("The Example Sword", hits), [])
+
+    def test_the_original_is_excluded_and_duplicates_kept_once(self):
+        hits = [self.hit("Example Sword", "9"), self.hit("Example Sword (Unofficial Port)", "7"),
+                self.hit("Example Sword (Unofficial Port)", "7"), self.hit("Example Sword (Unofficial Port)", "ex", "modrinth")]
+        self.assertEqual([(h["provider"], h["id"]) for h in self.m.port_candidates("Example Sword", hits, {"curseforge:9"})],
+                         [("curseforge", "7"), ("modrinth", "ex")])
+
+    def test_a_too_short_name_finds_nothing(self):
+        self.assertEqual(self.names("Ab", [self.hit("Ab Port", "1")]), [])
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

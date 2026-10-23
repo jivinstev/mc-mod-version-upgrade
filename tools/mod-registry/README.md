@@ -11,6 +11,9 @@ Everything prints **JSON to stdout**. Nothing is written to disk (see ToS below)
 # find candidates across BOTH backends (deduped, sorted by downloads)
 python3 modreg.py search --query "giant squid" [--limit 20]
 
+# a mod whose own project has no build for the target: native ports on other projects
+python3 modreg.py ports --name "<original's name>" --exclude curseforge:123456 [--loader neoforge --mc 1.21.1]
+
 # classify a project against the target (default neoforge / 1.21.1)
 python3 modreg.py versions --provider curseforge --id 123456 [--loader neoforge --mc 1.21.1]
 #   classification: native | needs-migrate | needs-downport | none
