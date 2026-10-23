@@ -105,8 +105,14 @@ Work them in order; `references/pipeline.md` has the exact commands.
     whose canonical project is stuck on an older MC (so stage (b) says `needs-migrate`), a community
     **"(Unofficial Port)"** / "1.21.1 port" project often carries a native 1.21.1 build under a *different*
     project id (measured: one popular cave mod's official CurseForge listing is 1.20.1-only, while a
-    separate "(Unofficial Port)" listing ships a native 1.21.1 build). Before committing to a big migration, **re-search** `"<name> port"` /
-    `"<name> 1.21.1"` and scan several hits for a native one. If the user has the jar locally (a CF-UI
+    separate "(Unofficial Port)" listing ships a native 1.21.1 build). Before committing to a big migration,
+    **whenever stage (b) says anything but `native`**, run the deterministic lookup:
+    `modreg.py ports --name "<the original's name>" --exclude <provider>:<id> ...` (each of the original's own
+    projects). It asks both registries for projects WITH a native (loader, mc) build whose name contains the
+    original's whole name and adds only port words ("Community Port", "[Unofficial Port]", "NeoForge Port",
+    "Continued", "Reforged", versions) -- an addon ("X: Extra Gadgets", "X Delight") is never returned. Do not
+    re-search with free-form variants instead: CurseForge's search returns nothing for some of them (a name
+    with a leading "The" plus extra words), so an empty result there proves nothing. If the user has the jar locally (a CF-UI
     install), the definitive resolver is the **CurseForge fingerprint API** — Murmur2 (whitespace bytes
     9/10/13/32 stripped, seed 1) → `POST /v1/fingerprints` returns the exact `{modId, fileId}` (that's
     how the CF launcher identifies a jar). Surface both the official + any port variant at the gate so
