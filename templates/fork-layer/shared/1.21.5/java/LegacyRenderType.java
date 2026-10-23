@@ -15,9 +15,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import net.minecraft.client.renderer.RenderStateShard;
 import net.minecraft.client.renderer.RenderType;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.List;
 import java.util.function.UnaryOperator;
 
@@ -94,8 +92,6 @@ public class LegacyRenderType extends RenderType {
     private final VertexFormat format;
     private final VertexFormat.Mode mode;
     private final State state;
-    /** LegacyGl's state before each (possibly nested) setupRenderState, restored by clearRenderState. */
-    private final Deque<LegacyGl.Saved> saved = new ArrayDeque<>();
 
     private LegacyRenderType(String name, VertexFormat format, VertexFormat.Mode mode, int bufferSize,
                              boolean affectsCrumbling, boolean sortOnUpload, State state) {
@@ -114,14 +110,19 @@ public class LegacyRenderType extends RenderType {
     @Override
     public void setupRenderState() {
         super.setupRenderState();
-        saved.push(LegacyGl.load(state.key, state.shader.shader(), getRenderTarget()));
-        state.shader.setupRenderState();
+        LegacyGl.load(this, state.key, state.shader.shader(), getRenderTarget());
+        try {
+            state.shader.setupRenderState();
+        } catch (RuntimeException | Error e) {   // the mod's shard override threw: nothing of this type stays loaded
+            LegacyGl.restore(this);
+            throw e;
+        }
     }
 
     @Override
     public void clearRenderState() {
         state.shader.clearRenderState();
-        if (!saved.isEmpty()) LegacyGl.restore(saved.pop());
+        LegacyGl.restore(this);
         super.clearRenderState();
     }
 

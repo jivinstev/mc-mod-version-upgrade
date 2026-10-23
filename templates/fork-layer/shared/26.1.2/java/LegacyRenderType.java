@@ -255,15 +255,24 @@ public class LegacyRenderType extends RenderType {
         }
     }
 
-    /** 1.21.4's RenderType.setupRenderState: the texture / lightmap / overlay shards, then the shader's (the mod's override
-     *  pushes its uniforms there, as in 1.21.4). */
+    /** 1.21.4's RenderType.setupRenderState: the texture / lightmap / overlay shards, then the shader and the
+     *  transparency / depth / write-mask / cull / layering state it folded into the pipeline, loaded into {@link LegacyGl}
+     *  so a following {@code LegacyGl.drawWithShader} draws with them (see {@link LegacyGl#load}), then the shader shard's
+     *  own setup (the mod's override pushes its uniforms there, as in 1.21.4). */
     public void setupRenderState() {
         state.real.forEach(Shard::setupRenderState);
-        state.shader.setupRenderState();
+        LegacyGl.load(this, state.key, state.shader.shader(), getRenderTarget());
+        try {
+            state.shader.setupRenderState();
+        } catch (RuntimeException | Error e) {   // the mod's shard override threw: nothing of this type stays loaded
+            LegacyGl.restore(this);
+            throw e;
+        }
     }
 
     public void clearRenderState() {
         state.shader.clearRenderState();
+        LegacyGl.restore(this);
         state.real.forEach(Shard::clearRenderState);
     }
 

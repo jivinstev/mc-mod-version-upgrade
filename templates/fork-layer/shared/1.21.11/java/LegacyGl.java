@@ -71,6 +71,9 @@ public final class LegacyGl {
     private static boolean cull = true;
     private static Object shader;
     private static boolean warnedEquation;
+    // what a set-up LegacyRenderType adds (see load): its depth bias and its output target (null: the main target)
+    private static float biasScale, biasConstant;
+    private static RenderTarget target;
     private static float[] shaderColor = {1f, 1f, 1f, 1f};
 
     private LegacyGl() {}
@@ -158,9 +161,10 @@ public final class LegacyGl {
         if (type instanceof LegacyRenderType legacy) legacy.clearRenderState();
     }
 
-    /** BufferUploader.drawWithShader: the current shader and the state set above, into the main render target. */
+    /** BufferUploader.drawWithShader: the current shader and the state set above, into the main render target -- or,
+     *  while a {@link LegacyRenderType} is set up, with its shader and state into its output target (see {@link #load}). */
     public static void drawWithShader(MeshData mesh) {
-        draw(mesh, shader, current(), Minecraft.getInstance().getMainRenderTarget());
+        draw(mesh, shader, current(), target != null ? target : Minecraft.getInstance().getMainRenderTarget());
     }
 
     // ---- state as a value -------------------------------------------------------------------------------------
@@ -181,7 +185,72 @@ public final class LegacyGl {
 
     static Key current() {
         return new Key(blend ? blendFunction : null, depthTest ? depthFunction : DepthTestFunction.NO_DEPTH_TEST,
-                depthWrite, writeColor, writeAlpha, cull, 0, 0);
+                depthWrite, writeColor, writeAlpha, cull, biasScale, biasConstant);
+    }
+
+    /** The state {@link #load} replaced, put back by {@link #restore}; {@code owner} is the type that loaded it. */
+    record Saved(Object owner, boolean blend, BlendFunction blendFunction, boolean depthTest, DepthTestFunction depthFunction,
+                 boolean depthWrite, boolean writeColor, boolean writeAlpha, boolean cull, float biasScale,
+                 float biasConstant, RenderTarget target, Object shader) {}
+
+    /** Every set-up type's entry, oldest first. ONE stack for every type (not one per type), so set-ups and clears that
+     *  do not nest -- A set up, B set up, A cleared, B cleared -- still end with nothing of either loaded. */
+    private static final java.util.ArrayList<Saved> LOADED = new java.util.ArrayList<>();
+
+    /**
+     * 1.21.4's RenderType.setupRenderState() ran every shard of its CompositeState: the ShaderStateShard set the shader,
+     * and the transparency / depth-test / write-mask / cull / layering shards set GL state. 1.21.1-1.21.4 code that sets
+     * a type up and then draws with BufferUploader.drawWithShader (a mod's own render queue) drew with all of it.
+     * {@link LegacyRenderType#setupRenderState} loads the type's shader and state here so {@link #drawWithShader} does
+     * too, into the type's output target; {@link LegacyRenderType#clearRenderState} restores the state and the shader it
+     * replaced. Only a shader object this layer draws with (a {@link ShaderInstance} or a {@link Vanilla}) is loaded: a type
+     * with no shader state of its own keeps the one {@code setShader} set, as 1.21.4's did. As the shared 1.21.5-1.21.10 copies do.
+     */
+    static Saved load(Object owner, Key key, Object shaderObj, RenderTarget into) {
+        Saved s = new Saved(owner, blend, blendFunction, depthTest, depthFunction, depthWrite, writeColor, writeAlpha, cull,
+                biasScale, biasConstant, target, shader);
+        LOADED.add(s);
+        blend = key.blend() != null;
+        if (blend) blendFunction = key.blend();
+        depthTest = key.depth() != DepthTestFunction.NO_DEPTH_TEST;
+        if (depthTest) depthFunction = key.depth();
+        depthWrite = key.depthWrite();
+        writeColor = key.writeColor();
+        writeAlpha = key.writeAlpha();
+        cull = key.cull();
+        biasScale = key.biasScale();
+        biasConstant = key.biasConstant();
+        if (shaderObj instanceof ShaderInstance || shaderObj instanceof Vanilla) shader = shaderObj;
+        target = into;
+        return s;
+    }
+
+    /** Puts back what {@code owner}'s newest {@link #load} replaced, and drops that entry and every one loaded after it;
+     *  an owner with nothing loaded changes nothing. Once nothing is loaded, what only a set-up type adds (its depth bias,
+     *  its output target) is back at the default. */
+    static void restore(Object owner) {
+        int i = LOADED.size() - 1;
+        while (i >= 0 && LOADED.get(i).owner() != owner) i--;
+        if (i < 0) return;
+        Saved s = LOADED.get(i);
+        LOADED.subList(i, LOADED.size()).clear();
+        blend = s.blend();
+        blendFunction = s.blendFunction();
+        depthTest = s.depthTest();
+        depthFunction = s.depthFunction();
+        depthWrite = s.depthWrite();
+        writeColor = s.writeColor();
+        writeAlpha = s.writeAlpha();
+        cull = s.cull();
+        biasScale = s.biasScale();
+        biasConstant = s.biasConstant();
+        target = s.target();
+        shader = s.shader();
+        if (LOADED.isEmpty()) {
+            biasScale = 0;
+            biasConstant = 0;
+            target = null;
+        }
     }
 
     // ---- drawing ----------------------------------------------------------------------------------------------

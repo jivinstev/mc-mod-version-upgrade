@@ -15,7 +15,8 @@
 
 WHO CALLS IT. tools/port-upstream.py (a fork) imports run_forge_stage() / at_loop() / run_stage(); tools/port.py
 (a jar: after setup and the recipe pack for a Forge hop, after tools/era-hop.py flattened the tree for an era hop)
-runs this command. One list per stage, so a converter added here reaches both routes; tools/test-port-tools.sh
+runs this command. tools/fork-port.py imports run_ladder() for a VERSION-BRANCH hop (neoforge-<from> -> neoforge-<to>,
+fork-versions skill): only the LADDER rows below, each when its change lands in the hop. Neither stage calls it. One list per stage, so a converter added here reaches both routes; tools/test-port-tools.sh
 fails if either route stops going through it or names a converter itself.
 
 ORDER. members -> each converter in CONVERTERS order -> members again. The member pass needs javac's errors
@@ -155,6 +156,97 @@ def plan(repo, dirs, modid, render_state_type=None, render_state_factory=None, s
             fn = lambda d, i: ["--src", d, *(["--assets", assets] if i == 0 and assets.is_dir() else []), *idx]
         out.append((label, script, fn))
     return out, adv
+
+
+# THE VERSION-BRANCH LADDER (tools/fork-port.py's moves stage on neoforge-<to>, FROM its parent's version). A hop runs
+# a converter only when a change it converts LANDS in the hop (FROM < lands <= TO) and its output compiles at TO
+# (valid_from <= TO; None: each row's output compiles from the version it lands in). The era stage above ignores this
+# table: it moves 1.21.1 to 26.x in one step and runs every CONVERTERS row, as before.
+#   (label, script, lands, valid_from, how to call it, uses: a source regex without which the row neither runs nor
+#   advises, or None)   -- each checked against the jars (CATALOG V96 / V92):
+#   override-signatures  rows land at 1.21.2 (releaseUsing, customServerAiStep) and 1.21.5 (appendHoverText, hurtEnemy,
+#                        inventoryTick): javap of the 1.21.1 / 1.21.3 / 1.21.4 / 1.21.5 merged jars; --crossing runs
+#                        only the rows in the hop, and each hop's output compiled on that hop's branch (1.21.3, 1.21.5).
+#   gear-tiers           Tier / Tiers / TieredItem / the old ArmorMaterial go at 1.21.2, SwordItem / DiggerItem /
+#                        PickaxeItem / ArmorItem at 1.21.5 (class listing of those jars), but the generated shim is
+#                        built on Identifier (1.21.11) and Item.Properties.delayedComponent (26.1): it compiles on
+#                        26.1.2, not on 1.21.5 or 1.21.11. So a ladder hop over 1.21.2 / 1.21.5 gets an ADVISORY
+#                        (port by hand, CATALOG V92), and only a direct jump to 26.1.2+ runs it.
+# Every other converter is era-only: its output is written for 26.2, and several re-supply what the shared library's
+# helpers already re-supply on a version branch (LegacyRenderType, ShaderInstance, MultiBufferSource), so running it
+# there would convert the same code twice.
+LADDER = [
+    ("override-signatures", "convert-override-signatures.py", ("1.21.2", "1.21.5"), None, "crossing", None),
+    ("gear-tiers", "convert-gear-tiers.py", ("1.21.2", "1.21.5"), "26.1.2", "assets",
+     r"\b(?:Tier|Tiers|TieredItem|SwordItem|DiggerItem|PickaxeItem|ArmorItem)\b"),
+]
+
+
+def mc_key(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+
+
+def ladder_plan(frm, to, text=None):
+    """-> ([(label, script, kind)] to run on the hop frm -> to, [advisory]): the LADDER rows a change of which lands in
+    the hop; one whose output needs a later version than `to` is an advisory instead. With the sources' `text`, a row
+    whose `uses` pattern it does not match is left out altogether (nothing to convert, nothing to advise)."""
+    todo, adv = [], []
+    for label, script, lands, valid_from, kind, uses in LADDER:
+        crossed = [v for v in lands if mc_key(frm) < mc_key(v) <= mc_key(to)]
+        if not crossed or (uses and text is not None and not re.search(uses, text)):
+            continue
+        if valid_from and mc_key(to) < mc_key(valid_from):
+            adv.append(f"{label}: its change lands at {', '.join(crossed)} in this hop ({frm} -> {to}), but {script}'s "
+                       f"output needs {valid_from}+: not run -- port those sites by hand (CATALOG V92 for gear-tiers)")
+            continue
+        todo.append((label, script, kind))
+    return todo, adv
+
+
+def compat_package(repo, dirs):
+    """The generated helpers' package root: the @Mod class's package, else the scaffold's mod_group_id."""
+    pkg = mod_package(dirs)
+    if not pkg:
+        gp = pathlib.Path(repo) / "gradle.properties"
+        pkg = (re.findall(r"(?m)^mod_group_id\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) or [None])[0] if gp.exists() else None
+    return pkg
+
+
+def run_ladder(repo, dirs, frm, to, run=run_tool, say=print, fp=fingerprint):
+    """The converters a version-branch hop frm -> to crosses (ladder_plan), over every source set, in LADDER order.
+    Idempotent: a re-run (a resumed fork-port.py) finds nothing left to convert. No compile here: the caller's measure
+    stage counts. A converter that crashes (a traceback, or an exit other than 0 / 1 = refused) raises RuntimeError.
+    -> (steps [{step, summary, changed, notes, refused}], advisories)."""
+    repo = pathlib.Path(repo)
+    text = "\n".join(f.read_text(encoding="utf-8", errors="replace") for d in dirs for f in pathlib.Path(d).rglob("*.java"))
+    todo, adv = ladder_plan(frm, to, text)
+    steps = []
+    if not todo:
+        return steps, adv
+    pkg = compat_package(repo, dirs)
+    assets = repo / "src/main/resources/assets"
+    for label, script, kind in todo:
+        before, outs = fp(repo), []
+        for i, d in enumerate(dirs):
+            args = ["--src", d]
+            if kind == "crossing":
+                args += ["--crossing", f"{frm}..{to}"]
+            elif kind == "assets" and i == 0 and assets.is_dir():
+                args += ["--assets", assets]
+            if pkg and script in TAKES_PACKAGE:
+                args += ["--package", pkg + ".compat"]
+            rc, o = run(script, *args)
+            if rc not in (0, 1) or "Traceback (most recent call last)" in (o or ""):
+                raise RuntimeError(f"{script} crashed on {d} (exit {rc}): " + " / ".join((o or "").strip().splitlines()[-3:])[-600:])
+            outs.append(o)
+        heads = list(dict.fromkeys(headline(o, "convert-", script[:-3]) for o in outs))
+        nref = sum(1 for o in outs for l in o.splitlines() if "REFUSED" in l and not re.search(r"REFUSED \d+ site", l))
+        nnote = sum(1 for o in outs for l in o.splitlines() if re.match(r"\s*NOTE\b", l))
+        changed = fp(repo) != before
+        steps.append({"step": label, "changed": changed, "output": "\n".join(outs), "notes": nnote, "refused": nref,
+                      "summary": " | ".join(heads) + (f"; {nref} REFUSED" if nref else "") + (f"; {nnote} NOTE" if nnote else "")})
+        say(f"{label}: {steps[-1]['summary']}" + ("" if changed else " (no change)"))
+    return steps, adv
 
 
 def run_stage(repo, dirs, members_table, workdir, modid, compile_count, start_errors, say=print,
@@ -534,10 +626,11 @@ def self_check():
         src = repo / "src/main/java/x"
         src.mkdir(parents=True)
         (src / "A.java").write_text("class A {}\n", encoding="utf-8")
-        calls, counts = [], iter([5, 3, 3, 1, 0])
+        calls, counts, argv = [], iter([5, 3, 3, 1, 0]), {}
 
         def fake_run(name, *args):
             calls.append(name)
+            argv[name] = [str(x) for x in args]
             if name == "convert-valueio.py":
                 (src / "A.java").write_text("class A { int x; }\n", encoding="utf-8")
             return 0, f"{name[:-3]}: done"
@@ -551,6 +644,8 @@ def self_check():
                                                                     "convert-saved-data.py",
                                                                     "convert-gear-tiers.py", "convert-entity-renderstate.py",
                                                                     "convert-buffer-seam.py"]
+        # the era stage runs every row of every converter, as before the ladder: no --crossing
+        ok &= argv["convert-override-signatures.py"] == ["--src", str(repo / "src/main/java")]
         recount = [s for s in steps if s["step"] == "valueio"][0]
         ok &= recount["errors"] == 3 and [s for s in steps if s["step"] == "gui-hooks"][0]["errors"] == 5
         (repo / "src/main/resources/assets/x/shaders/core").mkdir(parents=True)
@@ -575,6 +670,48 @@ def self_check():
         ok &= calls.index("forge-shapes.py") < calls.index("convert-simplechannel.py") < calls.index("fix-holders.py")
         ok &= rep["errors"] == [30] and "fix-missing-members.py" in calls and "fix-block-codecs.py" in calls
         ok &= calls.index("convert-capabilities.py") < calls.index("fix-holders.py")
+    # the version-branch ladder: a hop runs a converter only when its change lands in it, and only where it compiles
+    names = lambda frm, to: [x[0] for x in ladder_plan(frm, to)[0]]
+    ok &= names("1.21.4", "1.21.5") == ["override-signatures"] and any("gear-tiers" in x and "26.1.2+" in x for x in ladder_plan("1.21.4", "1.21.5")[1])
+    ok &= ladder_plan("1.21.4", "1.21.5", "class A extends Item {}")[1] == []                       # no gear class named: no advisory
+    ok &= any("gear-tiers" in x for x in ladder_plan("1.21.4", "1.21.5", "class A extends SwordItem {}")[1])
+    ok &= [x[0] for x in ladder_plan("1.21.1", "26.2", "class A {}")[0]] == ["override-signatures"]
+    ok &= names("1.21.1", "1.21.3") == ["override-signatures"]
+    ok &= ladder_plan("1.21.5", "1.21.8") == ([], []) and ladder_plan("1.21.11", "26.1.2") == ([], [])
+    ok &= names("1.21.1", "26.2") == ["override-signatures", "gear-tiers"]          # a direct jump
+    with tempfile.TemporaryDirectory() as d:        # the real converter through run_ladder: crossed, not crossed, re-run
+        repo = pathlib.Path(d)
+        j = repo / "src/main/java/com/example/mod"
+        j.mkdir(parents=True)
+        item = ("package com.example.mod;\n\npublic class Blade extends Item {\n    @Override\n"
+                "    public boolean hurtEnemy(ItemStack s, LivingEntity t, LivingEntity a) {\n        t.igniteForSeconds(2);\n"
+                "        return super.hurtEnemy(s, t, a);\n    }\n}\n")
+        (j / "Blade.java").write_text(item, encoding="utf-8")
+        quiet = lambda s: None
+        steps, adv = run_ladder(repo, [repo / "src/main/java"], "1.21.5", "1.21.8", say=quiet)
+        ok &= steps == [] and adv == [] and (j / "Blade.java").read_text(encoding="utf-8") == item
+        steps, adv = run_ladder(repo, [repo / "src/main/java"], "1.21.1", "1.21.3", say=quiet)
+        ok &= [s["step"] for s in steps] == ["override-signatures"] and not steps[0]["changed"]   # hurtEnemy is a 1.21.5 row
+        steps, adv = run_ladder(repo, [repo / "src/main/java"], "1.21.4", "1.21.5", say=quiet)
+        out = (j / "Blade.java").read_text(encoding="utf-8")
+        ok &= steps[0]["changed"] and "public void hurtEnemy(" in out and "private boolean ported$hurtEnemy(" in out
+        ok &= adv == []                     # Blade names no gear class: gear-tiers neither runs nor advises
+        steps, _ = run_ladder(repo, [repo / "src/main/java"], "1.21.4", "1.21.5", say=quiet)
+        ok &= not steps[0]["changed"] and (j / "Blade.java").read_text(encoding="utf-8") == out        # idempotent
+        # a converter that crashes is a stop, never "refused"
+        for rc in (1, 3):
+            try:
+                run_ladder(repo, [repo / "src/main/java"], "1.21.4", "1.21.5", say=quiet,
+                           run=lambda *a, rc=rc: (rc, "Traceback (most recent call last):\n  boom\nKeyError: 'x'" if rc == 1 else "died"))
+                ok = False
+            except RuntimeError as e:
+                ok &= "crashed" in str(e)
+        # NOTEs are counted on the step's summary
+        (j / "Tick.java").write_text("package com.example.mod;\n\npublic class Tick extends Item {\n    @Override\n    public void "
+                                     "inventoryTick(ItemStack s, Level l, Entity e, int slot, boolean sel) {\n        if (l.isClientSide) "
+                                     "return;\n    }\n}\n", encoding="utf-8")
+        steps, _ = run_ladder(repo, [repo / "src/main/java"], "1.21.4", "1.21.5", say=quiet)
+        ok &= steps[0]["notes"] == 1 and "1 NOTE" in steps[0]["summary"]
     with tempfile.TemporaryDirectory() as d:        # X157: narrowed access is widened by AT, once, not for a subclass
         w = pathlib.Path(d); j = w / "src/main/java/p"; j.mkdir(parents=True)
         (j / "Fly.java").write_text("class Fly { void f() { if (m.operation == MoveControl.Operation.WAIT) {} } }", encoding="utf-8")
