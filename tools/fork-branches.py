@@ -104,7 +104,7 @@ simulation failing: the plan of the head as it is, with `head_merge.error`. With
 Exit codes: 0 ok; 1 a difference (verify) or a red branch (cascade); 18 not done (check-done); 2 bad input.
 Standard library only.
 """
-import argparse, datetime, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
+import argparse, collections, datetime, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TPL = ROOT / "templates/fork-branches/branch.gradle"
@@ -2265,24 +2265,18 @@ def _tokens(s):
 
 
 def dep_named(name, dropped):
-    """The dropped dependency (group:module, of `dropped`) that `name` stands for: the group:module, its module, the
-    module without a CurseForge project id, or a name whose words are the module's words in order, or its first words
-    run together (`example_spells` and `examplespells` both name `curse.maven:example-spells-n-things-123`). None when no one, or more than one,
-    matches."""
+    """The dropped dependency (group:module, of `dropped`) that `name` stands for: the group:module, or a name whose
+    words are exactly the module's words (the module without a CurseForge project id), apart or run together
+    (`example_spells` and `examplespells` both name `curse.maven:example-spells-123`). Never a prefix or a subset of the
+    words (`core` does not name `a.b:core-tweaks`). None when none, or more than one, matches."""
     if not name:
         return None
     if name in dropped:
         return name
     want = _tokens(name)
-    hits = []
-    for ga in sorted(dropped):
-        module = re.sub(r"-\d+$", "", ga.partition(":")[2])
-        mt = _tokens(module)
-        if want == mt or any("".join(want) == "".join(mt[:k]) for k in range(1, len(mt) + 1)) and len("".join(want)) >= 4:
-            hits.append(ga); continue
-        it = iter(mt)
-        if len("".join(want)) >= 4 and all(w in it for w in want):
-            hits.append(ga)
+    hits = [ga for ga in sorted(dropped)
+            if want and (want == _tokens(re.sub(r"-\d+$", "", ga.partition(":")[2]))
+                         or "".join(want) == "".join(_tokens(re.sub(r"-\d+$", "", ga.partition(":")[2]))))]
     return hits[0] if len(hits) == 1 else None
 
 
@@ -2325,17 +2319,31 @@ def classify(f, t, t_pre, diff, read, budget):
         # factory outside the integration package, its new line naming the integration's item class): the deferred
         # default, as for the integration's own files -- one dependency for every class used, else the owner decides
         deps_ = {class_dep(p_, deps) for n in uses for p_ in drops if pathlib.PurePosixPath(p_).stem == n}
-        if len(deps_) == 1 and None not in deps_:
-            dep = deps_.pop()
+        dep = next(iter(deps_)) if len(deps_) == 1 and None not in deps_ else None
+        # only when the WHOLE change is about those classes, and within the budget: a large change that also names one
+        # (review S2-2: a 150-line fix with one line using a dropped class) carries real fixes a default must not drop
+        names = lambda ln: any(re.search(rf"\b{re.escape(n)}\b", ln) for n in uses)
+        plus = [ln[1:] for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++")
+                and not TRIVIAL_LINE.match(ln[1:])]
+        minus = [ln[1:] for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---")
+                 and not TRIVIAL_LINE.match(ln[1:])]
+        kept = lambda r: any(collections.Counter(re.findall(r"\w+|[^\w\s]", r))
+                             <= collections.Counter(re.findall(r"\w+|[^\w\s]", a)) for a in plus)
+        # every added line names one of those classes, and every removed line is kept whole inside an added one: the
+        # change only ADDS uses of the dropped integration
+        only = bool(plus) and all(names(ln) for ln in plus) and all(kept(r) for r in minus)
+        if dep and only and size <= budget:
             return ("optional-integration", False, f"keep ours while {dep} is dropped at this version (DEPS.md): the "
                     f"authors' change uses {', '.join(uses)}, {dep}'s integration, which {t} drops; the change is held as "
                     "a deferred REMERGE.json entry", "keep",
                     f"the authors' change uses {', '.join(uses)}, which {t} drops with {dep} (no build at {t}); ours "
                     f"stays. The change stays recorded (a deferred entry, not counted against done) and becomes an open "
                     f"entry once {dep} is no longer dropped at {t}", dep)
-        return ("escalate", True, "", "keep",
-                f"the authors' change uses {', '.join(uses)}, which {t} drops (drops.txt): their intent cannot be kept "
-                "here as is", None)
+        return ("escalate", True, "", DEFERRED + dep if dep else "keep",
+                f"the authors' change uses {', '.join(uses)}, which {t} drops (drops.txt)"
+                + (f" with {dep}, and also changes other lines (or is over the budget of {budget}): `{DEFERRED}{dep}` "
+                   "keeps ours and holds it all until the dependency returns, `patch` takes the rest now"
+                   if dep else ": their intent cannot be kept here as is"), None)
     if size > budget:
         return ("escalate", True, "", "patch",
                 f"the authors' change is {size} changed lines, over the budget of {budget} (--budget-lines): adapting it "
@@ -6644,12 +6652,14 @@ def _check_deferred_uses(expect):
     drops as a dropped dependency's integration takes the deferred default (not an escalation); --apply-decisions
     takes the owner's `deferred:<dependency>` answer for an escalated one."""
     pl = "src/main/java/com/example/mod/Plain.java"
-    dep = "curse.maven:example-spells-n-things-123"
+    dep = "curse.maven:example-spells-123"
     deps = ("| dependency | role | base pin | for this target | from |\n|---|---|---|---|---|\n"
             f"| `{dep}` | extra | `1` | dropped: no 1.21.5 build (extra) | CurseForge |\n")
     drops = "com/example/mod/compat/example_spells/SpellStaff.java\ncom/example/mod/other/Loose.java\n"
     expect(dep_named("example_spells", {dep}) == dep and dep_named("examplespells", {dep}) == dep
            and dep_named("other", {dep}) is None and dep_named(dep, {dep}) == dep
+           and dep_named("example", {dep}) is None and dep_named("core", {"a.b:core-tweaks"}) is None
+           and class_dep("com/example/mod/compat/core/X.java", "| `a.b:core-tweaks` | extra | `1` | dropped: x | - |\n") is None
            and class_dep("com/example/mod/compat/example_spells/SpellStaff.java", deps) == dep
            and class_dep("com/example/mod/other/Loose.java", deps) is None,
            "dep_named / class_dep: an integration package's name stands for its dropped dependency, nothing else does")
@@ -6670,6 +6680,23 @@ def _check_deferred_uses(expect):
                and pd and pd[0]["choice"] == DEFERRED + dep and not pd[0]["escalate"],
                f"a file using a dropped integration's class: the deferred default, proposed as deferred:<dep>: {ents} {pd} "
                f"{out[-400:]}")
+    # review S2-2: a change that also changes other lines, or is over the budget, is escalated, deferred:<dep> recommended
+    for edit, budget_, what in ((("int v = 1;", "int v = 2; SpellStaff staff;"), DEFAULT_BUDGET_LINES, "a mixed change"),
+                                (("int v = 1;", "int v = 1; SpellStaff staff;"), 1, "over the budget")):
+        with tempfile.TemporaryDirectory() as d:
+            r, g, _run = _migrated_fixture(d)
+            w5, _w = worktree_for(r, "1.21.5")
+            _hand(w5, {".port/1.21.5/DEPS.md": deps, ".port/1.21.5/drops.txt": drops,
+                       pl: ("int v = 1;", "int v = 1; int h5;")}, "1.21.5: a hand change, a dropped integration")
+            _authors(r, g, {pl: edit}, "authors: the staff and more")
+            rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply", budget=budget_)
+            f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+            ents = [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == pl]
+            expect(rc == 0 and len(ents) == 1 and ents[0].get("escalate") and not ents[0].get("deferred")
+                   and ents[0].get("choice") == DEFERRED + dep
+                   and any("did not merge into " + pl in w for w in target_done(r, "1.21.5")),
+                   f"{what} naming a dropped integration's class: escalated (deferred:<dep> recommended), not deferred: "
+                   f"{ents} {out[-300:]}")
     with tempfile.TemporaryDirectory() as d:
         r, g, _run = _migrated_fixture(d)
         w5, _w = worktree_for(r, "1.21.5")

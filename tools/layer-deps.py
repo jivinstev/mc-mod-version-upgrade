@@ -457,16 +457,20 @@ def recut_number(tag):
 SIDE_JAR = re.compile(r"-(?:sources|javadoc|api|dev|slim)\.jar$")
 
 
-# a version's qualifiers after its numbers (`-fix`, `-fix-fix`, `-beta.2`, `+1.21.4`): hyphen or plus chunks of letters,
-# digits and dots -- never an underscore (`_mr`/`_cf` is the variant) nor a loader or side-jar word (`-fabric` is one)
-_VERSION_QUALIFIER = (r"(?:[-+](?!(?:neoforge|forge|fabric|quilt|sources|javadoc|api|dev|slim)(?![A-Za-z0-9]))"
-                      r"[A-Za-z0-9.]+)*")
+# a version's qualifiers after its numbers (`-fix`, `-fix-fix`, `-beta.2`, `-rc1`, `+1.21.4`): hyphen or plus chunks
+# that hold a digit, or are a known release word (fix, hotfix, beta, alpha, rc, pre, patch; any case, repeatable) --
+# never an underscore (`_mr`/`_cf` is the variant), and never a loader or side word (`-NeoForge`, `-fabric`, `-client`)
+_QUALIFIER_WORDS = r"(?:fix|hotfix|beta|alpha|rc|pre|patch)"
+_VERSION_QUALIFIER = (r"(?:[-+](?:[A-Za-z0-9.]*\d[A-Za-z0-9.]*|(?i:" + _QUALIFIER_WORDS + r")[0-9.]*)(?![A-Za-z]))*")
 
 
 def asset_shape(name):
     """A jar's name with its versions blanked: `lib-1.1.9_mr.jar`, `lib-1.1.8_mr-mc1.21.8.jar`, `lib-1.1.9-fix-fix_mr.jar`
-    -> `lib-#_mr.jar`; what stays is the mod's name and the variant (`_mr`, `_cf`, `-fabric`)."""
-    return re.sub(r"\d+(?:\.\d+)+" + _VERSION_QUALIFIER, "#", re.sub(r"-mc\d+(?:\.\d+)*", "", name))
+    -> `lib-#_mr.jar`; what stays is the mod's name and the variant (`_mr`, `_cf`, `-fabric`, `-client`), compared
+    without case (`-NeoForge` is `-neoforge`). The `.jar` extension is set aside first, so no qualifier can take it."""
+    stem, ext = (name[:-4], ".jar") if name.lower().endswith(".jar") else (name, "")
+    stem = re.sub(r"-mc\d+(?:\.\d+)*", "", stem)
+    return (re.sub(r"\d+(?:\.\d+)+" + _VERSION_QUALIFIER, "#", stem) + ext).lower()
 
 
 def pick_release_asset(names, want, target):
@@ -1590,7 +1594,7 @@ def dependency_updates(pins_by_mc, lk=None, dropped_by_mc=None):
                 continue
             if not new:
                 continue
-            why = [f"restore: dropped at {mc} (no build when it was resolved; DEPS.md), a build exists now -- ticked, "
+            why = [f"restore: dropped at {mc} (no build when it was resolved; DEPS.md), a build exists now -- if ticked, "
                    "the dependency is pinned again and its integration code has to compile, be ported and reviewed"]
             if new.get("channel") in ("alpha", "beta"):
                 why.append(f"a {new['channel']}")
@@ -1993,6 +1997,17 @@ def self_check():
                and pick_release_asset(["otherlib-1.2-fix_mr.jar"], "examplelib-1.1_mr.jar", "1.21.4")[0] is None
                and pick_release_asset(["examplelib-1.2-fix-fabric.jar"], "examplelib-1.1.jar", "1.21.4")[0] is None,
                "asset_shape: a -fix qualifier blanked with the version; _cf never for _mr, another mod's jar never")
+        # review S2-1: `.jar` is no qualifier, loader and side words in any case are the variant, and only a qualifier
+        # with a digit or a release word is blanked (the four repro cases)
+        expect(pick_release_asset(["examplelib-1.2-Fabric.jar", "examplelib-1.2-Forge.jar"], "examplelib-1.1-NeoForge.jar",
+                                  "1.21.4")[0] is None
+               and pick_release_asset(["examplelib-1.2-client.jar"], "examplelib-1.1-fix.jar", "1.21.4")[0] is None
+               and pick_release_asset(["examplelib-1.2-fix.jar"], "examplelib-1.1.jar", "1.21.4")[0] == "examplelib-1.2-fix.jar"
+               and pick_release_asset(["examplelib-1.2-NeoForge.jar", "examplelib-1.2-Fabric.jar"], "examplelib-1.1-neoforge.jar",
+                                      "1.21.4")[0] == "examplelib-1.2-NeoForge.jar"
+               and asset_shape("examplelib-1.2-RC2-Hotfix-common.jar") == "examplelib-#-common.jar"
+               and asset_shape("examplelib-1.2+1.21.4-beta.2.jar") == "examplelib-#.jar",
+               "asset_shape: `.jar` kept out, loader/side words honoured in any case, only digit or release-word qualifiers blanked")
         g_, m2 = globals(), []
         saved = {k: g_[k] for k in ("_get", "install_m2")}
         api = json.dumps({"assets": [{"name": n, "browser_download_url": f"https://dl.example/{n}"} for n in rel]}).encode()

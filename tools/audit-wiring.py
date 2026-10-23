@@ -57,6 +57,8 @@ def call_args(text, i):
 def tree_files(repo, ref=None):
     """{path: text} of every src/*/java/**/*.java file, in the work tree (ref None) or at a git ref."""
     repo = pathlib.Path(repo)
+    if ref is not None and ref.startswith("-"):
+        raise LookupError(f"{ref!r} is not a ref (it would be read as an option)")
     if ref is None:
         return {p.relative_to(repo).as_posix(): p.read_text(encoding="utf-8", errors="replace")
                 for d in sorted(repo.glob("src/*/java")) for p in sorted(d.rglob("*.java"))}
@@ -245,6 +247,10 @@ def self_check():
         g("add", "-A"); g("commit", "-qm", "before")
         (r / "src/main/java/com/example/mod/ExampleMod.java").write_text(bad["src/main/java/com/example/mod/ExampleMod.java"],
                                                                          encoding="utf-8")
+        try:
+            tree_files(r, "--output=x"); expect(False, "a ref starting with - is refused")
+        except LookupError:
+            pass
         tf = tree_files(r, "HEAD")
         expect(tf == before and tree_files(r)["src/main/java/com/example/mod/ExampleMod.java"]
                == bad["src/main/java/com/example/mod/ExampleMod.java"],

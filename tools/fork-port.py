@@ -2144,8 +2144,11 @@ class Run:
 
     def resume_cmd(self, stage):
         a = self.a
+        # a loop to resume is a run that should spend: after a $0 gate re-run stopped at its spend guard, the command
+        # the person is told to raise names the porting default, not --budget 0.0 (review S4)
+        budget = a.budget if a.budget or stage != "loop" else default_budget(None, None)
         return (f"python3 tools/fork-port.py --repo {a.repo} --target {self.t} --from-stage {stage} "
-                f"--budget {a.budget} --gates {a.gates}" + "".join(f" --port-checkout {c}" for c in getattr(a, "port_checkout", []))
+                f"--budget {budget:g} --gates {a.gates}" + "".join(f" --port-checkout {c}" for c in getattr(a, "port_checkout", []))
                 + "".join(f" --port-release {c}" for c in getattr(a, "port_release", []))
                 + (" --allow-undone-library" if getattr(a, "allow_undone_library", False) else "")
                 + (f" --untaken-ok {a.untaken_ok}" if getattr(a, "untaken_ok", None) else ""))
@@ -3561,6 +3564,13 @@ def self_check():
            and default_budget(None, "moves") == 15.0 and all(default_budget(None, x) == 0.0 for x in RECHECK_STAGES)
            and default_budget(7.5, "measure") == 7.5 and default_budget(0.0, None) == 0.0,
            "default_budget: $0 for a re-run from measure/audit/gates/cost, $15 otherwise, an explicit --budget kept")
+    import types as _ty
+    _ns = argparse.Namespace(repo="r", gates="full", budget=0.0)
+    _rc = lambda st: Run.resume_cmd(_ty.SimpleNamespace(a=_ns, t="1.21.4"), st)
+    expect("--budget 15 " in _rc("loop") and "--budget 0 " in _rc("measure")
+           and "--budget 7.5 " in Run.resume_cmd(_ty.SimpleNamespace(a=argparse.Namespace(repo="r", gates="ab", budget=7.5),
+                                                                     t="1.21.4"), "loop"),
+           f"resume_cmd: after a $0 run, the loop to resume names the porting default: {_rc('loop')} / {_rc('measure')}")
     # cost: each record starts where the last one ended, so a resumed run never counts a request twice
     expect(cost_since("") is None, "a target with no COST.md record counts every request that worked on it")
     expect(cost_since("## r\n- **≈ $1.00** over 1 session(s): 0.1 h active, 0.2 h wall (2026-10-01T10:00Z to 2026-10-01T11:30Z)\n")

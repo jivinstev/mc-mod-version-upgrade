@@ -7,6 +7,8 @@
 # and the harness rename table of each layer target (port_gates.harness_table reads templates/upstream-harness/versions/<mc>.renames.tsv).
 # Also by hand: the promote job's install-manifest refresh, port-manifest.py (standard library only, self-contained),
 # and the publish job's known-issues check, known-issues.py (port-publish.py's per-platform blocks-publish; standard library only).
+# Also by hand: ci-gates.py's report-only audits, audit-wiring.py and audit-descriptors.py (standard library; the
+# latter loads audit-mixin-targets.py beside it).
 templates/multi-version/tools/gametest_adapter.py
 templates/multi-version/tools/prepare-sources.py
 templates/multi-version/versions/26.2.renames.hand.tsv
@@ -25,9 +27,11 @@ templates/upstream-harness/versions/1.21.8.renames.tsv
 templates/upstream-harness/versions/26.1.2.renames.tsv
 templates/upstream-harness/versions/26.2.renames.tsv
 templates/upstream-harness/versions/26.3.renames.tsv
+tools/audit-descriptors.py
 tools/audit-event-listeners.py
 tools/audit-mixin-targets.py
 tools/audit-unit-codecs.py
+tools/audit-wiring.py
 tools/central-mirror.init.gradle
 tools/ci-gates.py
 tools/content-census.py

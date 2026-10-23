@@ -214,6 +214,8 @@ def wiring_ref(repo, bv, base):
     if base:
         cands.append(base)
     for ref in cands:
+        if ref.startswith("-"):
+            continue                    # never an option to git
         if subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
                           capture_output=True).returncode == 0:
             return ref
@@ -225,7 +227,11 @@ def report_row(name, rc, out, prefix):
     nothing or could not run: a clean tree's GATES.md is exactly what it was."""
     if rc != 1:
         return None
-    hits = [l[len(prefix):].strip() for l in out.splitlines() if l.startswith(prefix)][:-1]
+    lines = [l[len(prefix):].strip() for l in out.splitlines() if l.startswith(prefix)]
+    # a crash (a traceback, also exit 1) is no finding: the audit's own count line must close its output
+    if not lines or not re.match(r"\d+ (?:finding|stale)", lines[-1]) or len(lines) < 2:
+        return None
+    hits = lines[:-1]
     return f"| {name} | REPORT | {len(hits)} to read: " + "; ".join(h.replace('|', '/') for h in hits)[:600] + " |"
 
 
@@ -271,6 +277,10 @@ def self_check():
     ok &= report_row("W", 2, "audit-wiring: no Java sources", "audit-wiring:") is None
     rr = report_row("W", 1, "audit-wiring: event wiring lost: A|B\naudit-wiring: 1 finding(s) against x", "audit-wiring:")
     ok &= rr == "| W | REPORT | 1 to read: event wiring lost: A/B |" and "FAIL" not in rr
+    ok &= report_row("D", 1, "Traceback (most recent call last):\n  File ...\nKeyError: 'x'", "audit-descriptors:") is None
+    ok &= report_row("D", 1, "audit-descriptors: something odd\nTraceback ...", "audit-descriptors:") is None
+    ok &= report_row("D", 1, "audit-descriptors: a.java:3: \"x\": gone\naudit-descriptors: 1 stale of 4 vanilla", "audit-descriptors:") \
+        == "| D | REPORT | 1 to read: a.java:3: \"x\": gone |"
     with _t.TemporaryDirectory() as d:   # wiring_ref: a version branch's parent, else --base, else nothing
         g = lambda *x: subprocess.run(["git", "-C", d, *x], capture_output=True, check=True)
         g("init", "-q", "-b", "neoforge-1.21.1"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
@@ -279,6 +289,8 @@ def self_check():
         (pathlib.Path(d) / ".port/1.21.4/branch.properties").write_text("parent=neoforge-1.21.1\n", encoding="utf-8")
         ok &= wiring_ref(d, "1.21.4", "authors/main") == "neoforge-1.21.1" and wiring_ref(d, None, "neoforge-1.21.1") == \
             "neoforge-1.21.1" and wiring_ref(d, None, "nosuch/ref") is None and wiring_ref(d, None, None) is None
+        (pathlib.Path(d) / ".port/1.21.4/branch.properties").write_text("parent=--output=x\n", encoding="utf-8")
+        ok &= wiring_ref(d, "1.21.4", None) is None and not (pathlib.Path(d) / "x").exists()
     with _t.TemporaryDirectory() as d:   # tested_tree: a layer run names the edits it tested; HEAD alone when clean
         g = lambda *x: subprocess.run(["git", "-C", d, *x], capture_output=True, check=True)
         g("init", "-q"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
@@ -452,7 +464,7 @@ def main():
         lines = [l.strip() for l in (r.stdout + r.stderr).splitlines() if l.strip()]
         rep = [l[len("⚠ report:"):].strip() for l in lines if l.startswith("⚠ report:")]
         record("Data -- nothing NeoForge would silently ignore", r.returncode == 0,
-               ("1.21-clean" + ("; report: " + rep[0][:240] if rep else "")) if r.returncode == 0 else
+               ("1.21-clean" + ("; report: " + rep[0][:240].replace("|", "/") if rep else "")) if r.returncode == 0 else
                "; ".join(l for l in lines if l.startswith(("✗", "REFUSED")))[:300] or lines[-1][:300])
 
     if ok:     # report only, never red: wiring the port dropped against its parent / the authors' source (CATALOG 12e),

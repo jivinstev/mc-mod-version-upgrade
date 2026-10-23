@@ -206,7 +206,9 @@ routes; `tools/test-port-tools.sh` fails if a route stops going through it. Two
 gates guard bug classes found in shipped ports: a field-less network payload behind `StreamCodec.unit`
 (`tools/audit-unit-codecs.py`), and data files the server silently rejected (a row of `tools/ci-gates.py`).
 Three static checks only report (a `REPORT` row in GATES.md when they find something, nothing when they do not, never
-a red gate; on every kind of fork): the data row also names location-predicate keys 1.20.5 renamed
+a red gate). Report-only rows also appear on a single-version fork when a check finds something; a clean tree's
+GATES.md is unchanged. A fork's CI runs them from the first Port CI kit release that ships them (`tools/port-ci-kit.txt`):
+the data row also names location-predicate keys 1.20.5 renamed
 (`structure`/`biome`, ignored by 1.21, so an advancement is granted anywhere; `tools/fix-datapack-layout.py --apply`
 renames them); `tools/audit-wiring.py` lists event subscribers and capability registrations the tree lost against a
 version branch's parent branch, else the authors' ref (`--base`), and providers answering null for a null side; and
