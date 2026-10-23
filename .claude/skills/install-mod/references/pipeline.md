@@ -30,6 +30,12 @@ python3 $REG/modreg.py versions --provider <p> --id <id> --loader $LOADER --mc $
 ```
 Read `classification`: `native | needs-migrate | needs-downport | none`. `chosen` = the source file
 (fileId + srcLoader + srcMC). `newer_mcs`/`older_mcs` inform the gates. `needs-downport` → gate.
+Not `native`? Look for a native port on another project before migrating or downporting:
+```bash
+python3 $REG/modreg.py ports --name "<original's name>" --exclude <provider>:<id> --loader $LOADER --mc $MC
+```
+Each `ports[]` entry has a native build (the registries were asked with the target's filters); `versions`-check
+the one the user picks. Offer them at the gate beside migrating the original.
 
 ## (c) DEPENDENCY CHECK (recursive)
 ```bash

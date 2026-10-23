@@ -5619,7 +5619,8 @@ def _check_stage_checkout(expect):
         expect(st3 == st and git(st, "rev-parse", "HEAD").stdout.strip() == git(w3, "rev-parse", "HEAD").stdout.strip(),
                f"a stage dir that is no longer a registered worktree is the tool's own: removed and re-made: {why}")
         (w5, why), said = _quiet(lambda: stage_checkout(r, "1.21.5"))
-        expect(w5 == r / "build" / "fork-branches" / "1.21.5" and "detached" not in said
+        # resolved: worktree_for resolves the repo, and a temp dir can sit behind a symlink (macOS: /var -> /private/var)
+        expect(w5 is not None and w5.resolve() == (r / "build" / "fork-branches" / "1.21.5").resolve() and "detached" not in said
                and git(w5, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "neoforge-1.21.5",
                f"an unheld branch: worktree_for's checkout, as before: {w5} {why}")
 

@@ -12,6 +12,12 @@ _took() { _dt=$((SECONDS - _t_last)); _t_last=$SECONDS; }    # in this shell, no
 ok()  { _took; printf '  PASS %4ss  %s\n' "$_dt" "$1"; pass=$((pass+1)); }
 bad() { _took; printf '  FAIL %4ss  %s\n' "$_dt" "$1"; fail=$((fail+1)); }
 
+echo "0. the scripts run on BSD sed (macOS) as well as GNU sed (Linux CI)"
+# `sed -i 's/x/y/' f` is GNU-only: BSD sed takes the expression as -i's backup suffix and then fails or edits
+# nothing, so a test passes in CI and fails on a Mac (it happened twice). `sed -i.bak ... && rm -f f.bak` works on both.
+gnu_sed="$(grep -nE "(^|[;&|(]|\s)sed -i ['\"]" tools/*.sh templates/*/*.sh 2>/dev/null || true)"
+[ -z "$gnu_sed" ] && ok "no script uses GNU-only 'sed -i <expr>' (BSD sed reads the expression as a backup suffix)" \
+  || bad "GNU-only 'sed -i <expr>' (use sed -i.bak ... && rm -f FILE.bak): $gnu_sed"
 echo "1. override-probe.py"
 if command -v javac >/dev/null 2>&1; then
   P="$T/port"; S="$P/src/main/java/org/fake"; mkdir -p "$S"
@@ -944,7 +950,7 @@ GR
   c5="$(cfg "$MXO/build/mc1.21.5/resources/main/examplemod.mixins.json" -Pmc=1.21.5)"
   agree="$(cd "$MXO" && for t in 1.21.3 1.21.4 1.21.5; do python3 .multiversion/tools/layer.py mixins --target "$t" --config src/main/resources/examplemod.mixins.json 2>&1; done | tr '\n' ' ')"
   # a mixin_remove_only naming a class the config does not list (a typo) stops the build, never silently removes nothing
-  sed -i 's/mixins:AuthorsMixin/mixins:AuthorMixin/' "$MXO/.multiversion/targets/1.21.4/target.properties"
+  sed -i.bak 's/mixins:AuthorsMixin/mixins:AuthorMixin/' "$MXO/.multiversion/targets/1.21.4/target.properties" && rm -f "$MXO/.multiversion/targets/1.21.4/target.properties.bak"   # -i.bak: BSD (macOS) sed and GNU sed both take it
   typo="$(cd "$MXO" && gradle -q --offline processResources -Pmc=1.21.4 2>&1)"; typo_rc=$?
   [ "$base_same" = yes ] && [ "$c0" = "mixins:AuthorsMixin" ] && [ "$c3" = "mixins:AuthorsMixin,PlainMixin" ] \
     && [ "$c4" = "client:OnlyMixin;mixins:PlainMixin" ] && [ "$c5" = "mixins:AuthorsMixin,PlainMixin" ] \
@@ -981,7 +987,7 @@ printf 'package com.example.mod.mixin;\nimport net.x.Fog;\n@Mixin(Fog.class)\npu
 mo_jar '    public void upload(Data d) {}
     private void upload(java.nio.ByteBuffer b, int o, Vec c, float s) {}'
 out="$(python3 tools/audit-mixin-targets.py "$MO" "$MO/src.jar" 2>&1)"
-sed -i 's/CallbackInfoReturnable<Vec>/CallbackInfoReturnable<Data>/' "$MO/src/main/java/com/example/mod/mixin/FogMixin.java"
+sed -i.bak 's/CallbackInfoReturnable<Vec>/CallbackInfoReturnable<Data>/' "$MO/src/main/java/com/example/mod/mixin/FogMixin.java" && rm -f "$MO/src/main/java/com/example/mod/mixin/FogMixin.java.bak"   # -i.bak: BSD (macOS) sed and GNU sed both take it
 mo_jar '    private void upload(java.nio.ByteBuffer b, int o, Vec c, float s) {}
     public void upload(Data d) {}'
 ctl="$(python3 tools/audit-mixin-targets.py "$MO" "$MO/src.jar" 2>&1)"
@@ -998,7 +1004,7 @@ printf 'package net.x.state.level;\npublic class Cam {}\n' > "$MP/jar/net/x/stat
 printf '{"package":"com.example.mod.mixin","client":["RendMixin"]}' > "$MP/src/main/resources/examplemod.mixins.json"
 printf 'package com.example.mod.mixin;\nimport net.x.Rend;\n@Mixin(Rend.class)\npublic class RendMixin {\n    @Inject(method = "submit(Lnet/x/state/Cam;Lcom/example/mod/Own;)V", at = @At("HEAD"))\n    private void a(Cam c, Own o, CallbackInfo ci) {}\n}\n' > "$MP/src/main/java/com/example/mod/mixin/RendMixin.java"
 out="$(python3 tools/audit-mixin-targets.py "$MP" "$MP/src.jar" 2>&1)"
-sed -i 's#Lnet/x/state/Cam;#Lnet/x/state/level/Cam;#' "$MP/src/main/java/com/example/mod/mixin/RendMixin.java"
+sed -i.bak 's#Lnet/x/state/Cam;#Lnet/x/state/level/Cam;#' "$MP/src/main/java/com/example/mod/mixin/RendMixin.java" && rm -f "$MP/src/main/java/com/example/mod/mixin/RendMixin.java.bak"   # -i.bak: BSD (macOS) sed and GNU sed both take it
 ctl="$(python3 tools/audit-mixin-targets.py "$MP" "$MP/src.jar" 2>&1)"
 grep -q '1 MISMATCH' <<<"$out" && grep -q 'does not have: net.x.state.Cam' <<<"$out" && grep -q 'all targets match' <<<"$ctl" \
   && ok "mixin audit: a pinned descriptor naming a class that moved package (same simple name) is a mismatch; the moved name, and a mod's own type, pass" \

@@ -7,6 +7,7 @@ only as a header — it is never printed.
 
 Subcommands:
   search        --query "<text>" [--loader neoforge --mc 1.21.1] [--limit N]
+  ports         --name "<original's name>" [--exclude provider:id ...] [--loader neoforge --mc 1.21.1]
   versions      --provider <p> --id <projectId> [--loader neoforge --mc 1.21.1]
   deps          --provider <p> --id <projectId> --file <fileId>
   download      --provider <p> --id <projectId> --file <fileId> --out <file or folder>
@@ -118,6 +119,69 @@ def _norm(name):
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
+def strip_article(text):
+    """'The Example Mod' -> 'Example Mod'. CurseForge's search matches nothing for a query that starts with an article
+    and goes on (measured: the full name of a mod starting with "The", filtered to its loader and version, returned
+    nothing; the same name without "The" returned the mod). Modrinth's search is unaffected."""
+    return re.sub(r"^\s*(the|a|an)\s+(?=\S)", "", text or "", flags=re.I).strip()
+
+
+# Words a port's project name adds to the original's ("X - Community Port (NeoForge)", "X [Unofficial Port]",
+# "X NeoForge Port", "X - Reforged"); an addon's name adds other words.
+PORT_WORDS = {"port", "ported", "backport", "unofficial", "community", "neoforge", "reforged", "continued",
+              "continuation", "fork", "revived", "ce"}
+# ...and words that only say which version or edition ("X 1.21.1 Port", "X CE", "X for 1.21.x").
+FILLER_WORDS = {"mc", "x", "edition", "version", "for", "by", "of", "the", "and", "to", "on"}
+
+
+def _words(name):
+    return re.findall(r"[a-z0-9]+", (name or "").lower())
+
+
+def port_candidates(original, hits, exclude=()):
+    """The projects among `hits` that are ports of `original`: their name contains the original's whole name
+    (case, punctuation and a leading article ignored) and adds nothing but PORT_WORDS / FILLER_WORDS / numbers -- so
+    an addon ("Example Mod: Extra Gadgets", "Upgraded Example Mod", "Example Mod Continued Delight") is not one -- and they are not one
+    of `exclude` (provider:id
+    strings, the original's own projects). Deterministic: word tests, no ranking. `hits` are provider search results
+    already filtered to the target loader and Minecraft version, so every candidate has a native build."""
+    want = _words(strip_article(original))
+    if not want or len("".join(want)) < 4:             # a name this short would match half the registry
+        return []
+    out, seen = [], set()
+    for h in hits:
+        key = f"{h['provider']}:{h['id']}"
+        if key in exclude or key in seen:
+            continue
+        got = _words(strip_article(h["name"]))
+        at = next((i for i in range(len(got) - len(want) + 1) if got[i:i + len(want)] == want), None)
+        extra = set(got[:at] + got[at + len(want):]) if at is not None else None
+        if extra is not None and all(w in PORT_WORDS or w in FILLER_WORDS or w.isdigit() for w in extra):
+            seen.add(key)
+            out.append({"name": h["name"], "provider": h["provider"], "id": h["id"], "slug": h.get("slug"),
+                        "url": h.get("url"), "downloads": h.get("downloads", 0)})
+    return out
+
+
+def cmd_ports(args):
+    """Projects that carry a native (loader, mc) build of a mod whose own project has none: community or unofficial
+    ports live under a different project, named after the original."""
+    warnings, hits = [], []
+    query = strip_article(args.name)
+    for pname in ("modrinth", "curseforge"):
+        try:
+            prov = providers.get_provider(pname)
+            if pname == "curseforge" and not prov.available():
+                warnings.append("curseforge: CURSEFORGE_API_KEY not set — skipped")
+                continue
+            hits += prov.search(query, loader=args.loader, mc=args.mc, limit=50)
+        except Exception as e:
+            reason = str(getattr(e, "reason", "") or e)[:160] if isinstance(e, urllib.error.URLError) else ""
+            warnings.append(f"{pname}: {type(e).__name__}" + (f" ({reason})" if reason else ""))
+    _emit({"name": args.name, "target": {"loader": args.loader, "mc": args.mc},
+           "ports": port_candidates(args.name, hits, set(args.exclude or ())), "warnings": warnings})
+
+
 def cmd_search(args):
     query = args.query
     loader = args.loader
@@ -134,6 +198,10 @@ def cmd_search(args):
             # Search unfiltered by mc/loader so we can classify ALL candidates
             # (a mod that only has an older build should still surface).
             hits = prov.search(query, loader=None, mc=None, limit=args.limit)
+            bare = strip_article(query)
+            if bare != query:                     # CurseForge finds nothing for a leading article: ask both ways
+                ids = {h["id"] for h in hits}
+                hits += [h for h in prov.search(bare, loader=None, mc=None, limit=args.limit) if h["id"] not in ids]
         except Exception as e:
             # the reason, not just the class: "URLError" alone hid a certificate failure as "no results"
             reason = str(getattr(e, "reason", "") or e)[:160] if isinstance(e, urllib.error.URLError) else ""
@@ -307,6 +375,14 @@ def main():
     s.add_argument("--mc", default=DEFAULT_MC)
     s.add_argument("--limit", type=int, default=20)
     s.set_defaults(func=cmd_search)
+
+    po = sub.add_parser("ports", help="native ports of a mod whose own project has no build for the target")
+    po.add_argument("--name", required=True, help="the original mod's name")
+    po.add_argument("--exclude", action="append", default=[], metavar="PROVIDER:ID",
+                    help="the original's own projects (repeat)")
+    po.add_argument("--loader", default=DEFAULT_LOADER)
+    po.add_argument("--mc", default=DEFAULT_MC)
+    po.set_defaults(func=cmd_ports)
 
     v = sub.add_parser("versions")
     v.add_argument("--provider", required=True)
