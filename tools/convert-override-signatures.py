@@ -27,7 +27,14 @@ absent in the one below, present from it on; 1.21.2 is not staged, its rows were
              -> (ItemStack, TooltipContext, TooltipDisplay, Consumer<Component>, TooltipFlag)  void
              the copy fills a list; the override forwards each line to the consumer, in order.
   1.21.2  Item.releaseUsing(ItemStack, Level, LivingEntity, int)        void -> boolean   (false = vanilla's default)
-  1.21.5  Item.hurtEnemy(ItemStack, LivingEntity, LivingEntity)         boolean -> void   (the value only fed a stat)
+  1.21.5  Item.hurtEnemy(ItemStack, LivingEntity, LivingEntity)         boolean -> void
+             On 1.21.1 the value gated ItemStack.postHurtEnemy in Player.attack -- where SwordItem / DiggerItem take
+             their durability damage -- and the ITEM_USED stat.  From 1.21.5 ItemStack.hurtEnemy answers "has a WEAPON
+             component" and ItemStack.postHurtEnemy damages the stack by that component after Item.postHurtEnemy, so
+             no override can veto it (javap of 21.1.238, 21.5.98 and 26.2.0.90).  A body that can return anything but
+             `true` / `super.hurtEnemy(..)` (a `return false;` that spared the durability, a computed veto) is
+             REFUSED and named; `return super.hurtEnemy(..)` becomes `super.hurtEnemy(..); return true`, NOTED when
+             the class also overrides postHurtEnemy (1.21.1 skipped it when Item's default returned false).
   1.21.5  Item.inventoryTick(ItemStack, Level, Entity, int, boolean)    -> (ItemStack, ServerLevel, Entity, EquipmentSlot)
              isSelected becomes `slot == MAINHAND`; the inventory slot INDEX has no value from 1.21.5 (-1 is passed)
              and the hook runs on the SERVER only -- a body that reads the index or branches on isClientSide is NOTED.
@@ -68,7 +75,15 @@ HOOKS = [
      "old": ["ItemStack", "LivingEntity", "LivingEntity"],
      "new_ret": "void", "new": ["{t0} {n0}", "{t1} {n1}", "{t2} {n2}"],
      "body": ["this.ported$hurtEnemy({n0}, {n1}, {n2});"],
-     "extras": [], "super": "super.hurtEnemy({a0}, {a1}, {a2})", "super_void": True, "super_return": "true"},
+     "extras": [], "super": "super.hurtEnemy({a0}, {a1}, {a2})", "super_void": True, "super_return": "true",
+     # a return other than these was a veto of postHurtEnemy (the durability damage) that 1.21.5 cannot express
+     "refuse_return": (r"\breturn\s+(?!true\s*;)(?!super\s*\.\s*hurtEnemy\s*\()[^;]*;",
+                       "hurtEnemy: the body can return a value other than true -- on 1.21.1 that skipped postHurtEnemy "
+                       "(the durability damage); from 1.21.5 the WEAPON component damages the stack whatever the hook "
+                       "returns, so no boundary adapter keeps it: port by hand (CATALOG V96)"),
+     "file_notes": [(r"\bvoid\s+postHurtEnemy\s*\(", r"\breturn\s+super\s*\.\s*hurtEnemy\s*\(",
+                     "hurtEnemy: returns super's value and the class overrides postHurtEnemy -- 1.21.1 skipped that "
+                     "override when Item's default returned false; from 1.21.5 it always runs")]},
     {"name": "inventoryTick", "since": "1.21.5", "old_ret": "void",
      "old": ["ItemStack", "Level", "Entity", "int", "boolean"],
      "new_ret": "void",
@@ -219,6 +234,10 @@ def convert_text(text, hooks=None):
         if bc is None:
             continue
         body = text[bo:bc + 1]
+        rr = hook.get("refuse_return")
+        if rr and re.search(rr[0], re.sub(r"//[^\n]*|/\*.*?\*/", "", body, flags=re.S)):
+            refused.append(rr[1])
+            continue
         new_body = rewrite_supers(body, hook, refused)
         if new_body is None:
             continue
@@ -226,6 +245,9 @@ def convert_text(text, hooks=None):
         fill = {}
         for i, (t, n) in enumerate(typed):
             fill[f"t{i}"], fill[f"n{i}"] = t, n
+        for in_file, in_body, msg in hook.get("file_notes", []):
+            if re.search(in_file, text) and re.search(in_body, body):
+                notes.append((line, msg))
         for needle, msg in hook.get("notes", []):
             needle = needle.format(**fill)
             if re.search(r"\b" + re.escape(needle) + r"\b", body):
@@ -351,6 +373,17 @@ def self_check():
     chk("idempotent per hop", convert_text(hop[0], hooks_crossing("1.21.4", "1.21.5"))[0] == hop[0])
     step = convert_text(convert_text(FIXTURE, hooks_crossing("1.21.1", "1.21.3"))[0], hooks_crossing("1.21.4", "1.21.5"))[0]
     chk("the ladder's hops add up to the era route's one step", step == new)
+    # a hurtEnemy veto (a false that spared postHurtEnemy's durability damage on 1.21.1) is refused, not converted
+    veto = ("class V extends SwordItem {\n    public boolean hurtEnemy(ItemStack s, LivingEntity t, LivingEntity a) {\n"
+            "        if (t.isBlocking()) {\n            return false;\n        }\n        return super.hurtEnemy(s, t, a);\n    }\n}\n")
+    vr = convert_text(veto)
+    chk("a hurtEnemy that can return false: refused, untouched", vr[0] == veto and vr[1] == [] and any("postHurtEnemy" in r for r in vr[3]))
+    chk("a computed hurtEnemy result: refused", convert_text(veto.replace("return false;", "return t.isAlive();"))[3])
+    chk("a false only in a comment does not refuse", convert_text(veto.replace("return false;", "// return false;"))[1] == ["hurtEnemy"])
+    post = veto.replace("        if (t.isBlocking()) {\n            return false;\n        }\n", "") \
+        .replace("}\n}\n", "}\n    public void postHurtEnemy(ItemStack s, LivingEntity t, LivingEntity a) { s.shrink(1); }\n}\n")
+    pr = convert_text(post)
+    chk("return super + an own postHurtEnemy: converted and noted", pr[1] == ["hurtEnemy"] and any("postHurtEnemy" in m for _, m in pr[2]))
     try:
         parse_crossing("1.21.5..1.21.4")
         chk("a backwards --crossing is refused", False)

@@ -2942,10 +2942,23 @@ class BranchRun(Run):
                    f"{fb.branch_name(self.t)} --fix), {n_dec} to decide: " + "; ".join(fb.cutout_lines(cx, False))[:1500]
                    if cx["fixed"] or n_dec else "")
         # the converters whose change lands in this hop (mechanical-hop.py LADDER), after the rows and the moves
-        conv, steps, adv = branch_converters(self.repo, pv, self.t, self.work)
+        conv, steps, adv, stop = self.hop_converters(pv)
+        if stop:
+            return stop
         return {"done": f"{kept} unambiguous move(s) {pv}->{self.t} -> .port/{self.t}/moves.generated.tsv"
                         f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s){cut}{conv}",
                 "moves": kept, **({"converters": [s["summary"] for s in steps], "advisories": adv} if steps or adv else {})}
+
+    def hop_converters(self, pv, run=None):
+        """branch_converters for this hop -> (line, steps, advisories, None), or (.., a stop) when a converter crashed:
+        a stop with what it printed, never a refusal and never a traceback out of the stage."""
+        try:
+            return (*branch_converters(self.repo, pv, self.t, self.work, run=run), None)
+        except RuntimeError as e:
+            return "", [], [], {"stop": f"a converter crashed on the {pv}->{self.t} hop: {str(e)[:400]}", "code": 10,
+                                "detail": [str(e)[:600]],
+                                "choices": ["fix the converter (tools/convert-*.py, with a self-check case for that input), then "
+                                            "resume with " + self.resume_cmd("moves")]}
 
     def s_loop(self):
         start = self.compile_errors()
@@ -3119,15 +3132,19 @@ def branch_converters(repo, frm, to, work=None, run=None):
     """A version-branch hop's converters: tools/mechanical-hop.py run_ladder over the branch's source sets, the LADDER
     rows whose change lands in frm -> to (each idempotent, so a resumed run converts nothing twice). Each one's output
     goes to <work>/convert-<label>.out. Only BranchRun.s_moves calls this: a layer target and a single-version fork never
-    reach it. -> ("; converters ..." for the stage line, or "", steps, advisories)."""
+    reach it. Each run APPENDS its output, under a dated header, so a resumed run keeps the earlier one. A converter
+    that crashes raises RuntimeError (s_moves turns it into a stop). -> ("; converters ..." for the stage line -- each
+    one's REFUSED and NOTE counts in it -- or "", steps, advisories)."""
     mh = load("mechanical_hop_fp", "mechanical-hop.py")
     repo = pathlib.Path(repo)
     dirs = sorted(p for p in repo.glob("src/*/java") if p.is_dir())
     steps, adv = mh.run_ladder(repo, dirs, frm, to, say=lambda s: None, **({"run": run} if run else {}))
     if work:
         pathlib.Path(work).mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         for s in steps:
-            (pathlib.Path(work) / f"convert-{s['step']}.out").write_text(s["output"] + "\n", encoding="utf-8")
+            with open(pathlib.Path(work) / f"convert-{s['step']}.out", "a", encoding="utf-8", newline="\n") as f:
+                f.write(f"# ---- {stamp} {frm}->{to}\n{s['output']}\n")
     if not steps and not adv:
         return "", steps, adv
     line = "; converters landing in " + f"{frm}->{to}: " + ("; ".join(s["summary"] for s in steps) or "none run")
@@ -3587,26 +3604,38 @@ def self_check():
         if not c:
             ok = False; print("FAIL:", msg)
     # a version-branch hop runs the converters whose change lands in it (mechanical-hop.py LADDER); nothing else does
-    import inspect as _insp
-    expect("branch_converters(" in _insp.getsource(BranchRun.s_moves) and "branch_converters(" not in _insp.getsource(Run.s_moves)
+    import inspect as _insp, types as _ty
+    expect("self.hop_converters(" in _insp.getsource(BranchRun.s_moves) and "branch_converters(" not in _insp.getsource(Run)
+           and "hop_converters" not in _insp.getsource(Run)
            and "run_ladder" not in _insp.getsource(Run), "only a version-branch hop runs the ladder's converters")
     with tempfile.TemporaryDirectory() as d:
         repo, work = pathlib.Path(d) / "r", pathlib.Path(d) / "w"
         j = repo / "src/main/java/com/example/mod"
         j.mkdir(parents=True)
         item = ("package com.example.mod;\n\npublic class Blade extends Item {\n    @Override\n    public void inventoryTick(ItemStack s, "
-                "Level l, Entity e, int slot, boolean selected) {\n        if (selected) e.igniteForSeconds(1);\n    }\n}\n")
+                "Level l, Entity e, int slot, boolean selected) {\n        if (selected && !l.isClientSide) e.igniteForSeconds(1);\n    }\n}\n")
         (j / "Blade.java").write_text(item, encoding="utf-8")
         line, steps, adv = branch_converters(repo, "1.21.5", "1.21.8", work)
         expect(line == "" and steps == [] and (j / "Blade.java").read_text(encoding="utf-8") == item,
                "a hop no converter's change lands in runs none and changes nothing")
         line, steps, adv = branch_converters(repo, "1.21.4", "1.21.5", work)
         now = (j / "Blade.java").read_text(encoding="utf-8")
-        expect(steps and steps[0]["changed"] and "ServerLevel portedLevel" in now and "inventoryTick 1" in line
-               and (work / "convert-override-signatures.out").is_file() and any("gear-tiers" in x for x in adv),
-               f"a hop over 1.21.5 runs convert-override-signatures (and names gear-tiers as an advisory): {line}")
+        expect(steps and steps[0]["changed"] and "ServerLevel portedLevel" in now and "inventoryTick 1" in line and "1 NOTE" in line
+               and (work / "convert-override-signatures.out").is_file() and adv == [],
+               f"a hop over 1.21.5 runs convert-override-signatures, its NOTE counted, no gear advisory without gear: {line}")
         line2, steps2, _ = branch_converters(repo, "1.21.4", "1.21.5", work)
-        expect(not steps2[0]["changed"] and (j / "Blade.java").read_text(encoding="utf-8") == now, "a re-run converts nothing twice")
+        outs = (work / "convert-override-signatures.out").read_text(encoding="utf-8")
+        expect(not steps2[0]["changed"] and (j / "Blade.java").read_text(encoding="utf-8") == now and outs.count("# ---- ") == 2
+               and "inventoryTick 1" in outs, "a re-run converts nothing twice and keeps the first run's output")
+        (j / "Edge.java").write_text("package com.example.mod;\n\npublic class Edge extends SwordItem {}\n", encoding="utf-8")
+        expect(any("gear-tiers" in x for x in branch_converters(repo, "1.21.4", "1.21.5", work)[2]),
+               "a tree naming a 1.21.x gear class gets the gear-tiers advisory")
+        fake = _ty.SimpleNamespace(repo=repo, t="1.21.5", work=work, resume_cmd=lambda s: f"--from-stage {s}")
+        *_r, stop = BranchRun.hop_converters(fake, "1.21.4", run=lambda *a: (1, "Traceback (most recent call last):\nboom"))
+        expect(stop and stop["code"] == 10 and "crashed" in stop["stop"] and "--from-stage moves" in stop["choices"][0],
+               f"a crashing converter stops the moves stage (exit 10, resume named), not passed off as a refusal: {stop}")
+        *_r, stop = BranchRun.hop_converters(fake, "1.21.4", run=lambda *a: (7, "died"))
+        expect(stop and "exit 7" in stop["stop"], "an unexpected exit code is a stop too, not a traceback out of s_moves")
     # a re-run from measure (a gate re-run) has no compile-loop budget unless given one; a porting run keeps $15
     expect(default_budget(None, None) == 15.0 and default_budget(None, "setup") == 15.0 and default_budget(None, "loop") == 15.0
            and default_budget(None, "moves") == 15.0 and all(default_budget(None, x) == 0.0 for x in RECHECK_STAGES)

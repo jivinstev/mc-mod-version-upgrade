@@ -435,12 +435,19 @@ fp = load("fp", "fork-port.py")
 bad = []
 blade = lambda r: (r / "src/main/java/com/example/mod/Blade.java").read_text(encoding="utf-8")
 orig = (ld / "Blade.java").read_text(encoding="utf-8")
-# single-version fixture: no version branch, no layer -> fork-port never takes the branch route, so no ladder;
-# the era route calls the converter with no --crossing and every row runs, exactly as before
+# single-version fixture: no version branch, no layer -> fork-port's real Run path stops (at setup, exit 2; resumed at
+# moves, the layer path's own stop, as on origin/main) and no converter runs: the file is byte for byte as it was, no
+# convert-*.out anywhere
 sv = ld / "sv"
 subprocess.run(["git", "init", "-q", str(sv)], check=True)
 if fp.branch_mode(sv, "1.21.5"):
     bad.append("a single-version fixture is taken as a version-branch run")
+for extra in ([], ["--from-stage", "moves"]):
+    r = subprocess.run([sys.executable, "tools/fork-port.py", "--repo", str(sv), "--target", "1.21.5", *extra],
+                       capture_output=True, text=True, encoding="utf-8")
+    if (r.returncode == 0 if extra else r.returncode != 2) or blade(sv) != orig or list(sv.rglob("convert-*.out")) or "converters landing" in r.stdout:
+        bad.append(f"fork-port on a single-version fork ran a converter or did not stop at setup ({extra}): {r.returncode} {r.stdout[-300:]}")
+# the era route calls the converter with no --crossing and every row runs, exactly as before
 subprocess.run([sys.executable, "tools/convert-override-signatures.py", "--src", str(sv / "src/main/java")], capture_output=True, check=False)
 if "public void hurtEnemy(" not in blade(sv) or "public boolean releaseUsing(" not in blade(sv):
     bad.append("the era call (no --crossing) no longer converts every row")
@@ -453,11 +460,19 @@ if steps or adv or blade(vb) != orig:
 line, steps, adv = fp.branch_converters(vb, "1.21.1", "1.21.3", ld / "w")
 if "public boolean releaseUsing(" not in blade(vb) or "public boolean hurtEnemy(" not in blade(vb):
     bad.append(f"1.21.1 -> 1.21.3 did not convert exactly the 1.21.2 rows: {line}")
-# 1.21.4 -> 1.21.5 crosses 1.21.5: hurtEnemy moves; gear-tiers named as an advisory (its shim needs 26.1.2+)
+# 1.21.4 -> 1.21.5 crosses 1.21.5: hurtEnemy moves; no gear class named, so no gear-tiers advisory
 line, steps, adv = fp.branch_converters(vb, "1.21.4", "1.21.5", ld / "w")
 after = blade(vb)
-if "public void hurtEnemy(" not in after or not any("gear-tiers" in a and "26.1.2+" in a for a in adv):
-    bad.append(f"1.21.4 -> 1.21.5 did not convert hurtEnemy or name gear-tiers: {line}")
+if "public void hurtEnemy(" not in after or adv:
+    bad.append(f"1.21.4 -> 1.21.5 did not convert hurtEnemy, or advised gear-tiers with no gear class: {line} {adv}")
+# a hurtEnemy that vetoes (return false spared postHurtEnemy's durability damage on 1.21.1) is REFUSED, file untouched
+vt = ld / "veto"; (vt / "src/main/java/com/example/mod").mkdir(parents=True)
+veto = orig.replace("extends Item", "extends SwordItem").replace("        target.igniteForSeconds(2);\n",
+                                                                 "        if (target.isBlocking()) return false;\n")
+(vt / "src/main/java/com/example/mod/Blade.java").write_text(veto, encoding="utf-8")
+line, steps, adv = fp.branch_converters(vt, "1.21.4", "1.21.5", ld / "wv")
+if blade(vt) != veto or "1 REFUSED" not in line or not any("gear-tiers" in a and "26.1.2+" in a for a in adv):
+    bad.append(f"a vetoing hurtEnemy was converted, or the refusal / the gear advisory (a SwordItem is named) is missing: {line} {adv}")
 # the ladder's two hops end where the era route's one step does, and a re-run changes nothing
 if after != blade(sv):
     bad.append("the ladder's hops and the era route's one step disagree")
@@ -467,7 +482,7 @@ if blade(vb) != after:
 print("\n".join(bad) or "ladder OK")
 PY
 )"
-grep -q '^ladder OK$' <<<"$out" && ok "version-branch ladder: a hop crossing a converter's landing version runs it (1.21.1->1.21.3 the 1.21.2 rows, 1.21.4->1.21.5 the 1.21.5 rows, gear-tiers an advisory below 26.1.2), a hop crossing none runs nothing, a re-run converts nothing twice, the hops add up to the era route's one step; a single-version fixture never takes the branch route and the era call is unchanged" \
+grep -q '^ladder OK$' <<<"$out" && ok "version-branch ladder: a hop crossing a converter's landing version runs it (1.21.1->1.21.3 the 1.21.2 rows, 1.21.4->1.21.5 the 1.21.5 rows), a hop crossing none runs nothing, a re-run converts nothing twice, the hops add up to the era route's one step; a vetoing hurtEnemy is REFUSED and counted; gear-tiers is an advisory below 26.1.2 only where a 1.21.x gear class is named; on a single-version fixture fork-port's real path stops at setup with no converter run and the file unchanged, and the era call is unchanged" \
   || bad "version-branch ladder converters: $out"
 
 echo "burndown-count.sh: a log that hit the capped Gradle compile is refused unless recounted (X5g)"
@@ -1568,7 +1583,7 @@ need(core and re.search(r"else if \(replacedDefaults\) \{\s*RenderSystem\.bindDe
 print(*bad, sep="\n")
 sys.exit(1 if bad else 0)
 PY
-python3 - <<'PY' && ok "shared 1.21.5-26.3 render helpers (every version with LegacyRenderType): a LegacyRenderType's setupRenderState loads its shader, blend / depth / write-mask / cull / bias state and output target into LegacyGl (so setupRenderState + drawWithShader draws as the type does) and clearRenderState restores it; draw() runs the shader shard once; 1.21.5's draw calls the shader's apply() before binding its uniforms and samplers, keeps no COLOR_MODULATOR written inside apply() (as on 1.21.1) and calls clear() after" || bad "shared 1.21.5-26.3 render helpers: a set-up LegacyRenderType no longer reaches drawWithShader, or 1.21.5's draw lost apply()"
+python3 - <<'PY' && ok "shared 1.21.5-26.3 render helpers (every version with LegacyRenderType): a LegacyRenderType's setupRenderState loads its shader (only a ShaderInstance / Vanilla), blend / depth / write-mask / cull / bias state and output target into LegacyGl (so setupRenderState + drawWithShader draws as the type does) on ONE stack for all types, and clearRenderState pops to its own entry (non-nested clears end with nothing loaded, bias and target default once empty) restoring the shader too; a throwing shader shard leaves nothing loaded; draw() runs the shader shard once; 1.21.5's draw calls the shader's apply() before binding its uniforms and samplers, keeps no COLOR_MODULATOR written inside apply() (as on 1.21.1) and calls clear() after" || bad "shared 1.21.5-26.3 render helpers: a set-up LegacyRenderType no longer reaches drawWithShader, or 1.21.5's draw lost apply()"
 import pathlib, re, sys
 strip = lambda s: re.sub(r"//[^\n]*|/\*.*?\*/", "", s, flags=re.S)
 bad = []
@@ -1595,10 +1610,11 @@ for v in lrts:
     draw = body(lrt, r"public void draw\(MeshData mesh\)")
     shards_up = r"(?:super\.setupRenderState\(\);|state\.real\.forEach\(Shard::setupRenderState\);)"
     shards_down = r"(?:super\.clearRenderState\(\);|state\.real\.forEach\(Shard::clearRenderState\);)"
-    need(setup and re.search(shards_up + r".*LegacyGl\.load\(state\.key, state\.shader\.shader\(\), getRenderTarget\(\)\).*state\.shader\.setupRenderState\(\);", setup, re.S),
-         f"{v}: LegacyRenderType.setupRenderState does not run its shards, load its shader/state into LegacyGl and run the shader shard")
-    need(clear and re.search(r"state\.shader\.clearRenderState\(\);.*LegacyGl\.restore\(.*" + shards_down, clear, re.S),
+    need(setup and re.search(shards_up + r".*LegacyGl\.load\(this, state\.key, state\.shader\.shader\(\), getRenderTarget\(\)\);\s*try \{\s*state\.shader\.setupRenderState\(\);\s*\} catch \(RuntimeException \| Error e\) \{\s*LegacyGl\.restore\(this\);\s*throw e;", setup, re.S),
+         f"{v}: LegacyRenderType.setupRenderState does not run its shards, load its shader/state into LegacyGl and run the shader shard -- restoring what it loaded when that shard throws")
+    need(clear and re.search(r"state\.shader\.clearRenderState\(\);.*LegacyGl\.restore\(this\);.*" + shards_down, clear, re.S),
          f"{v}: LegacyRenderType.clearRenderState does not restore LegacyGl's state")
+    need("Deque<LegacyGl.Saved>" not in lrt, f"{v}: LegacyRenderType keeps a save stack of its own (one per type: non-nested clears leak)")
     need(draw and "setupRenderState();" in draw and "state.shader.setupRenderState" not in draw and "clearRenderState();" in draw,
          f"{v}: LegacyRenderType.draw runs the shader shard twice or not inside setup/clear")
     dws = body(gl, r"public static void drawWithShader\(MeshData mesh\)")
@@ -1606,13 +1622,19 @@ for v in lrts:
          f"{v}: LegacyGl.drawWithShader ignores a set-up type's output target")
     cur = body(gl, r"static Key current\(\)")
     need(cur and "biasScale, biasConstant" in cur, f"{v}: LegacyGl.current() drops a set-up type's depth bias")
-    load = body(gl, r"static Saved load\(Key key, Object shaderObj, RenderTarget into\)")
+    load = body(gl, r"static Saved load\(Object owner, Key key, Object shaderObj, RenderTarget into\)")
     need(load and all(f in load for f in ("blend =", "depthTest =", "depthWrite =", "writeColor =", "writeAlpha =", "cull =",
-                                          "biasScale =", "biasConstant =", "shader = shaderObj", "target = into")),
-         f"{v}: LegacyGl.load does not set every piece of a type's state")
-    rest = body(gl, r"static void restore\(Saved s\)")
-    need(rest and "shader" not in rest and "target = s.target()" in rest and "blend = s.blend()" in rest,
-         f"{v}: LegacyGl.restore does not put the state back (or resets the shader, which 1.21.4's shard left set)")
+                                          "biasScale =", "biasConstant =", "target = into", "LOADED.add(s)")),
+         f"{v}: LegacyGl.load does not set every piece of a type's state, or does not push it on the one stack")
+    need(load and re.search(r"if \(shaderObj instanceof ShaderInstance \|\| shaderObj instanceof Vanilla\) shader = shaderObj;", load)
+         and not re.search(r"(?m)^\s*shader = shaderObj;", load),
+         f"{v}: LegacyGl.load sets a shader object it cannot draw with (a type with no shader state must keep setShader's)")
+    need(re.search(r"private static final java\.util\.ArrayList<Saved> LOADED", gl), f"{v}: LegacyGl has no single save stack")
+    rest = body(gl, r"static void restore\(Object owner\)")
+    need(rest and "target = s.target()" in rest and "blend = s.blend()" in rest and "shader = s.shader()" in rest
+         and re.search(r"LOADED\.get\(i\)\.owner\(\) != owner", rest) and "LOADED.subList(i, LOADED.size()).clear()" in rest
+         and re.search(r"if \(LOADED\.isEmpty\(\)\) \{\s*biasScale = 0;\s*biasConstant = 0;\s*target = null;", rest),
+         f"{v}: LegacyGl.restore does not pop to the owner's entry, put back the state and shader, or default the bias / target once empty")
 d = pathlib.Path("templates/fork-layer/shared/1.21.5/java")
 gl = strip((d / "LegacyGl.java").read_text(encoding="utf-8"))
 core = body(gl, r"static void draw\(MeshData mesh, Object shaderObj, Key key, RenderTarget target\)")

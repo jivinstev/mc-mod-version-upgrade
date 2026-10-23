@@ -264,7 +264,11 @@ then the converters whose change lands in this hop, `tools/mechanical-hop.py`'s 
 `appendHoverText`, `hurtEnemy`, `inventoryTick`), each body kept in a private 1.21.1-shaped copy, so the compile loop
 never hand-ports them; below 26.1.2 a hop over 1.21.2 / 1.21.5 names `convert-gear-tiers.py` as an ADVISORY in the stage
 line -- port those sites by hand by CATALOG V92's rules (a sword's tool rules, `instanceof` widened only where unbound) --
-because its shim needs 26.1.2's API; idempotent, so a resume converts nothing twice), measure, loop (the compile loop edits the branch's source; a row it keeps joins `renames.tsv`), audit,
+because its shim needs 26.1.2's API (only when the tree names a 1.21.x gear class); a vetoing `hurtEnemy` (one that can
+return false, which spared the durability on 1.21.1) is REFUSED and named, never converted; a crashing converter stops
+the stage, exit 10; idempotent, so a resume converts nothing twice. **At the hop only:** the cascade's merges do not run
+the converters, so authors' code merged up later with an old-shape hook goes to the compile loop -- run
+`fork-port.py --target <v> --from-stage moves` on that version to convert it), measure, loop (the compile loop edits the branch's source; a row it keeps joins `renames.tsv`), audit,
 gates (`ci-gates.py --mc <v>`), cost. It stops only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11
 (Gate A/B), 12 (Gate C), 13 (mixin audit), 14 (the checkout is in use), 18 (an undone parent or library) or 19 (the
 authors' branch moved since the freeze), and `.port/<v>/RESIDUE.md` with the remaining errors by CATALOG entry and the

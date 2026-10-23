@@ -145,22 +145,28 @@ public final class LegacyGl {
                 depthWrite, writeColor, writeAlpha, cull, biasScale, biasConstant);
     }
 
-    /** The state {@link #load} replaced, put back by {@link #restore}. */
-    record Saved(boolean blend, BlendFunction blendFunction, boolean depthTest, DepthTestFunction depthFunction,
+    /** The state {@link #load} replaced, put back by {@link #restore}; {@code owner} is the type that loaded it. */
+    record Saved(Object owner, boolean blend, BlendFunction blendFunction, boolean depthTest, DepthTestFunction depthFunction,
                  boolean depthWrite, boolean writeColor, boolean writeAlpha, boolean cull, float biasScale,
-                 float biasConstant, RenderTarget target) {}
+                 float biasConstant, RenderTarget target, Object shader) {}
+
+    /** Every set-up type's entry, oldest first. ONE stack for every type (not one per type), so set-ups and clears that
+     *  do not nest -- A set up, B set up, A cleared, B cleared -- still end with nothing of either loaded. */
+    private static final java.util.ArrayList<Saved> LOADED = new java.util.ArrayList<>();
 
     /**
      * 1.21.4's RenderType.setupRenderState() ran every shard of its CompositeState: the ShaderStateShard set the shader,
      * and the transparency / depth-test / write-mask / cull / layering shards set GL state. 1.21.1-1.21.4 code that sets
      * a type up and then draws with BufferUploader.drawWithShader (a mod's own render queue) drew with all of it.
      * {@link LegacyRenderType#setupRenderState} loads the type's shader and state here so {@link #drawWithShader} does
-     * too, into the type's output target; {@link LegacyRenderType#clearRenderState} restores the state (the shader stays
-     * set, as 1.21.4's ShaderStateShard left it).
+     * too, into the type's output target; {@link LegacyRenderType#clearRenderState} restores the state and the shader it
+     * replaced. Only a shader object this layer draws with (a {@link ShaderInstance} or a {@link Vanilla}) is loaded: a type
+     * with no shader state of its own keeps the one {@code setShader} set, as 1.21.4's did.
      */
-    static Saved load(Key key, Object shaderObj, RenderTarget into) {
-        Saved s = new Saved(blend, blendFunction, depthTest, depthFunction, depthWrite, writeColor, writeAlpha, cull,
-                biasScale, biasConstant, target);
+    static Saved load(Object owner, Key key, Object shaderObj, RenderTarget into) {
+        Saved s = new Saved(owner, blend, blendFunction, depthTest, depthFunction, depthWrite, writeColor, writeAlpha, cull,
+                biasScale, biasConstant, target, shader);
+        LOADED.add(s);
         blend = key.blend() != null;
         if (blend) blendFunction = key.blend();
         depthTest = key.depth() != DepthTestFunction.NO_DEPTH_TEST;
@@ -171,12 +177,20 @@ public final class LegacyGl {
         cull = key.cull();
         biasScale = key.biasScale();
         biasConstant = key.biasConstant();
-        shader = shaderObj;
+        if (shaderObj instanceof ShaderInstance || shaderObj instanceof Vanilla) shader = shaderObj;
         target = into;
         return s;
     }
 
-    static void restore(Saved s) {
+    /** Puts back what {@code owner}'s newest {@link #load} replaced, and drops that entry and every one loaded after it;
+     *  an owner with nothing loaded changes nothing. Once nothing is loaded, what only a set-up type adds (its depth bias,
+     *  its output target) is back at the default. */
+    static void restore(Object owner) {
+        int i = LOADED.size() - 1;
+        while (i >= 0 && LOADED.get(i).owner() != owner) i--;
+        if (i < 0) return;
+        Saved s = LOADED.get(i);
+        LOADED.subList(i, LOADED.size()).clear();
         blend = s.blend();
         blendFunction = s.blendFunction();
         depthTest = s.depthTest();
@@ -188,6 +202,12 @@ public final class LegacyGl {
         biasScale = s.biasScale();
         biasConstant = s.biasConstant();
         target = s.target();
+        shader = s.shader();
+        if (LOADED.isEmpty()) {
+            biasScale = 0;
+            biasConstant = 0;
+            target = null;
+        }
     }
 
     // ---- drawing ----------------------------------------------------------------------------------------------

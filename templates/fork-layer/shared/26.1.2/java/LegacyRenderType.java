@@ -22,9 +22,7 @@ import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.resources.Identifier;
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Deque;
 import java.util.List;
 import java.util.function.UnaryOperator;
 
@@ -163,8 +161,6 @@ public class LegacyRenderType extends RenderType {
     private final VertexFormat format;
     private final VertexFormat.Mode mode;
     private final State state;
-    /** LegacyGl's state before each (possibly nested) setupRenderState, restored by clearRenderState. */
-    private final Deque<LegacyGl.Saved> saved = new ArrayDeque<>();
 
     private LegacyRenderType(String name, VertexFormat format, VertexFormat.Mode mode, int bufferSize,
                              boolean affectsCrumbling, boolean sortOnUpload, State state) {
@@ -265,13 +261,18 @@ public class LegacyRenderType extends RenderType {
      *  own setup (the mod's override pushes its uniforms there, as in 1.21.4). */
     public void setupRenderState() {
         state.real.forEach(Shard::setupRenderState);
-        saved.push(LegacyGl.load(state.key, state.shader.shader(), getRenderTarget()));
-        state.shader.setupRenderState();
+        LegacyGl.load(this, state.key, state.shader.shader(), getRenderTarget());
+        try {
+            state.shader.setupRenderState();
+        } catch (RuntimeException | Error e) {   // the mod's shard override threw: nothing of this type stays loaded
+            LegacyGl.restore(this);
+            throw e;
+        }
     }
 
     public void clearRenderState() {
         state.shader.clearRenderState();
-        if (!saved.isEmpty()) LegacyGl.restore(saved.pop());
+        LegacyGl.restore(this);
         state.real.forEach(Shard::clearRenderState);
     }
 
