@@ -1504,7 +1504,7 @@ need(core and re.search(r"else if \(replacedDefaults\) \{\s*RenderSystem\.bindDe
 print(*bad, sep="\n")
 sys.exit(1 if bad else 0)
 PY
-python3 - <<'PY' && ok "shared 1.21.5 / 1.21.8 / 1.21.10 render helpers: a LegacyRenderType's setupRenderState loads its shader, blend / depth / write-mask / cull / bias state and output target into LegacyGl (so setupRenderState + drawWithShader draws as the type does) and clearRenderState restores it; draw() runs the shader shard once; 1.21.5's draw calls the shader's apply() before binding its uniforms and samplers, keeps no COLOR_MODULATOR written inside apply() (as on 1.21.1) and calls clear() after" || bad "shared 1.21.5-1.21.10 render helpers: a set-up LegacyRenderType no longer reaches drawWithShader, or 1.21.5's draw lost apply()"
+python3 - <<'PY' && ok "shared 1.21.5-26.3 render helpers (every version with LegacyRenderType): a LegacyRenderType's setupRenderState loads its shader, blend / depth / write-mask / cull / bias state and output target into LegacyGl (so setupRenderState + drawWithShader draws as the type does) and clearRenderState restores it; draw() runs the shader shard once; 1.21.5's draw calls the shader's apply() before binding its uniforms and samplers, keeps no COLOR_MODULATOR written inside apply() (as on 1.21.1) and calls clear() after" || bad "shared 1.21.5-26.3 render helpers: a set-up LegacyRenderType no longer reaches drawWithShader, or 1.21.5's draw lost apply()"
 import pathlib, re, sys
 strip = lambda s: re.sub(r"//[^\n]*|/\*.*?\*/", "", s, flags=re.S)
 bad = []
@@ -1517,16 +1517,23 @@ def body(text, head):
     while depth and i < len(text):
         depth += {"{": 1, "}": -1}.get(text[i], 0); i += 1
     return text[m.end():i - 1]
-for v in ("1.21.5", "1.21.8", "1.21.10"):
+# every shared version that carries LegacyRenderType (1.21.11+ have no RenderStateShard: the shards run as Shard)
+lrts = sorted(p.parent.parent.name for p in pathlib.Path("templates/fork-layer/shared").glob("*/java/LegacyRenderType.java"))
+need(set(lrts) >= {"1.21.5", "1.21.8", "1.21.10", "1.21.11", "26.1.2", "26.2", "26.3"}, f"shared LegacyRenderType versions: {lrts}")
+for v in lrts:
     d = pathlib.Path("templates/fork-layer/shared") / v / "java"
     gl = strip((d / "LegacyGl.java").read_text(encoding="utf-8"))
     lrt = strip((d / "LegacyRenderType.java").read_text(encoding="utf-8"))
-    setup = body(lrt, r"public void setupRenderState\(\)")
-    clear = body(lrt, r"public void clearRenderState\(\)")
+    # the type's own (1.21.11+'s Shard / Modifier / texture shards declare the same methods first)
+    own = lambda head: next((b for b in (body(lrt[m.start():], head) for m in re.finditer(head, lrt)) if b and "state." in b), None)
+    setup = own(r"public void setupRenderState\(\)")
+    clear = own(r"public void clearRenderState\(\)")
     draw = body(lrt, r"public void draw\(MeshData mesh\)")
-    need(setup and re.search(r"super\.setupRenderState\(\);.*LegacyGl\.load\(state\.key, state\.shader\.shader\(\), getRenderTarget\(\)\).*state\.shader\.setupRenderState\(\);", setup, re.S),
+    shards_up = r"(?:super\.setupRenderState\(\);|state\.real\.forEach\(Shard::setupRenderState\);)"
+    shards_down = r"(?:super\.clearRenderState\(\);|state\.real\.forEach\(Shard::clearRenderState\);)"
+    need(setup and re.search(shards_up + r".*LegacyGl\.load\(state\.key, state\.shader\.shader\(\), getRenderTarget\(\)\).*state\.shader\.setupRenderState\(\);", setup, re.S),
          f"{v}: LegacyRenderType.setupRenderState does not run its shards, load its shader/state into LegacyGl and run the shader shard")
-    need(clear and re.search(r"state\.shader\.clearRenderState\(\);.*LegacyGl\.restore\(.*super\.clearRenderState\(\);", clear, re.S),
+    need(clear and re.search(r"state\.shader\.clearRenderState\(\);.*LegacyGl\.restore\(.*" + shards_down, clear, re.S),
          f"{v}: LegacyRenderType.clearRenderState does not restore LegacyGl's state")
     need(draw and "setupRenderState();" in draw and "state.shader.setupRenderState" not in draw and "clearRenderState();" in draw,
          f"{v}: LegacyRenderType.draw runs the shader shard twice or not inside setup/clear")

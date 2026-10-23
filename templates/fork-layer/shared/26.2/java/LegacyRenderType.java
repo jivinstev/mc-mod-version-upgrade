@@ -25,7 +25,9 @@ import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.texture.TextureAtlas;
 import net.minecraft.resources.Identifier;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.List;
@@ -186,6 +188,8 @@ public class LegacyRenderType extends RenderType {
     private final VertexFormat format;
     private final PrimitiveTopology mode;
     private final State state;
+    /** LegacyGl's state before each (possibly nested) setupRenderState, restored by clearRenderState. */
+    private final Deque<LegacyGl.Saved> saved = new ArrayDeque<>();
 
     private LegacyRenderType(String name, VertexFormat format, PrimitiveTopology mode,
                              boolean affectsCrumbling, boolean sortOnUpload, State state) {
@@ -280,15 +284,19 @@ public class LegacyRenderType extends RenderType {
         }
     }
 
-    /** 1.21.4's RenderType.setupRenderState: the texture / lightmap / overlay shards, then the shader's (the mod's override
-     *  pushes its uniforms there, as in 1.21.4). */
+    /** 1.21.4's RenderType.setupRenderState: the texture / lightmap / overlay shards, then the shader and the
+     *  transparency / depth / write-mask / cull / layering state it folded into the pipeline, loaded into {@link LegacyGl}
+     *  so a following {@code LegacyGl.drawWithShader} draws with them (see {@link LegacyGl#load}), then the shader shard's
+     *  own setup (the mod's override pushes its uniforms there, as in 1.21.4). */
     public void setupRenderState() {
         state.real.forEach(Shard::setupRenderState);
+        saved.push(LegacyGl.load(state.key, state.shader.shader(), getRenderTarget()));
         state.shader.setupRenderState();
     }
 
     public void clearRenderState() {
         state.shader.clearRenderState();
+        if (!saved.isEmpty()) LegacyGl.restore(saved.pop());
         state.real.forEach(Shard::clearRenderState);
     }
 
