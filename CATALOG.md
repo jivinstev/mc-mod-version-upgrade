@@ -3159,7 +3159,8 @@ with that path's latent bugs.
 become a two-method shim, and that is the cheapest correct row in a §W table.** ·
 **Pattern:** `Item.releaseUsing(ItemStack, Level, LivingEntity, int)` and
 `MobEffect.applyEffectTick(ServerLevel, LivingEntity, int)` both gained a **boolean return** on
-26.2 while keeping their parameters · **Error:** `releaseUsing(...) in XItem cannot override
+26.2 while keeping their parameters (⚠ dated too late for `releaseUsing`: it is boolean from 1.21.2 -- 21.3.97's jar;
+§V96's table carries the version) · **Error:** `releaseUsing(...) in XItem cannot override
 releaseUsing(...) in Item … return type void is not compatible with boolean` — 25 files for the
 first, 2 for the second · **Fix, and the shape generalises to every void→value change:** do not
 rewrite the bodies. Rewrite only the line that DECLARES them, into the override vanilla now calls
@@ -3796,7 +3797,13 @@ components, so vanilla gear answers too). A BOUND test or a cast is left alone a
 because widening the guard in front of a cast hands it a vanilla item and a `ClassCastException`. · **Armour
 textures move too:** 26.2 draws worn armour from `assets/<ns>/equipment/<id>.json` and
 `textures/entity/equipment/humanoid[_leggings]/`, not `textures/models/armor/<id>_layer_{1,2}.png`; the
-converter writes the json and moves the textures for every layer id the code names. · **Refused, named:**
+converter writes the json and moves the textures for every layer id the code names. · ⚠ **Where it lands vs where
+it compiles:** `Tier` / `Tiers` / `TieredItem` / the old `ArmorMaterial` are gone from 1.21.2 (21.3.97's jar),
+`SwordItem` / `DiggerItem` / `PickaxeItem` / `ArmorItem` from 1.21.5 (21.4.158 still has them), but the generated shim
+needs `Identifier` (1.21.11) and `Properties.delayedComponent` (26.1): it compiles on 26.1.2 and not on 1.21.5. So a
+version-branch hop over 1.21.2 or 1.21.5 below 26.1.2 does not run it -- `fork-port.py`'s moves stage names it as an
+ADVISORY -- and those sites are ported by hand with this entry's two rules (the sword's tool rules and tags, `instanceof`
+widened only where unbound); a direct jump to 26.1.2+ runs it. · **Refused, named:**
 `AxeItem`/`ShovelItem`/`HoeItem` subclasses (still vanilla classes on 26.2, with a
 `(ToolMaterial, float, float, Properties)` constructor), `Registries.ARMOR_MATERIAL` (no such registry), and
 `getDefaultAttributeModifiers` overrides. **Measured:** −102 errors on a 467-error library port, 0 errors
@@ -3846,7 +3853,7 @@ old slot INDEX or branching on `isClientSide` is NOTED, because 26.2 passes no i
 A `super` call used as a value where the new one is void is REFUSED. **Adding a hook is a table row**, which is the
 point: a §V entry that says "this hook changed shape" should land as a row here, not as per-port judgement.
 **Measured:** 7 overrides in one library, −14 errors, 0 at the rewritten sites.
-· **AUGMENT -- ⚠ these hook shapes land at 1.21.5, not 26.2:** 21.5.98's `Item.hurtEnemy` returns `void`, `inventoryTick` takes `(ItemStack, ServerLevel, Entity, EquipmentSlot)` and `appendHoverText` takes `TooltipDisplay` (21.4.158 has the 1.21.1 shapes). A version ladder meets them at the 1.21.5 hop -- where the version-branch route runs no converter, so a compile loop writes them by hand. The trap there: a mod's base class that used `hurtEnemy`'s `false` as a VETO (`if (!super.hurtEnemy(stack, target, attacker)) return false;` before extra damage) loses it, and the extra damage hits allies; give subclasses a boolean helper of their own to test. (A dependent fork's 1.21.5 review: five weapons.)
+· **AUGMENT -- ⚠ these hook shapes land at 1.21.5, not 26.2:** 21.5.98's `Item.hurtEnemy` returns `void`, `inventoryTick` takes `(ItemStack, ServerLevel, Entity, EquipmentSlot)` and `appendHoverText` takes `TooltipDisplay` (21.4.158 has the 1.21.1 shapes). A version ladder meets them at the 1.21.5 hop, and `releaseUsing` (boolean) / `customServerAiStep(ServerLevel)` already at the 1.21.2 one (21.3.97 has them, 21.1 does not), so each row carries the version it lands in and `--crossing FROM..TO` runs only the rows in a hop: `tools/fork-port.py`'s moves stage on a version branch runs it for the hop from the parent's version (`tools/mechanical-hop.py` `LADDER`), and each hop's output was compiled on that hop's branch (1.21.3, 1.21.5); the era route still runs every row in its one step. Before that the version-branch route ran no converter and a compile loop wrote these by hand. The trap there: a mod's base class that used `hurtEnemy`'s `false` as a VETO (`if (!super.hurtEnemy(stack, target, attacker)) return false;` before extra damage) loses it, and the extra damage hits allies; give subclasses a boolean helper of their own to test -- the converter REFUSES such a `super.hurtEnemy(..)` used as a value and names it, rather than dropping the veto. (A dependent fork's 1.21.5 review: five weapons.)
 
 **V95. Small 26.2 removals found by zero-model baselines (cluster).** · **Pattern:** the 1.21.1 calls listed
 below, each a one-line shape · **Error:** `cannot find symbol` on the old member (`putUUID`, `getShort`,

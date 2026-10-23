@@ -343,9 +343,9 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "audit-unit-codecs.py|audit-unit-codecs: a field-less payload class behind StreamCodec.unit is caught; a record is not" \
             "audit-wiring.py|audit-wiring: a dropped @EventBusSubscriber or register call, an unregistered Forge capability, a lost registration and a null-side provider are reported; a clean port is not" \
             "audit-descriptors.py|audit-descriptors: a removed method, a changed signature and a moved class in a transformer's strings are reported; a supertype's method, a mod's own names, comments and mixin files are not" \
-            "convert-override-signatures.py|convert-override-signatures: a hook whose 26.2 signature changed keeps its body in a private 1.21.1-shaped copy" \
+            "convert-override-signatures.py|convert-override-signatures: a hook whose signature changed after 1.21.1 keeps its body in a private 1.21.1-shaped copy; --crossing FROM..TO runs only the rows landing in that hop (1.21.2 / 1.21.5), idempotent, and the hops add up to the one-step era run" \
             "port-derive.py|port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handlers dropped" \
-            "mechanical-hop.py|mechanical-hop: members, then every converter in order, then members; a converter that changed nothing is not recounted; one needing the port's input is an advisory" \
+            "mechanical-hop.py|mechanical-hop: members, then every converter in order, then members (the era stage, no --crossing); a converter that changed nothing is not recounted; one needing the port's input is an advisory; the version-branch LADDER runs a converter only on a hop its change lands in, an output that needs a later version is an advisory, a re-run changes nothing" \
             "layer-test-plan.py|layer-test-plan: per layer target, the reviewed/reopened stubs, whole-file overlays, fired rows with a no-gate note, dropped optional integrations, preview targets and (with INVENTORY.json only) each base behaviour item not the same, a shared change once with its range; a single-version fork is its one version with no layer section" \
             "layer-inventory.py|layer-inventory: the base build's mixin targets/injections (fork-port's hook_targets), event listeners, render classes and uses, core shaders with uniforms/samplers and registries; per target same through the rename tables, changed in an overlay, dropped by drops.txt or BEHAVIOUR.json (inherited), accounted by a reviewed stub or REVIEW.md, from 1.21.5 a sampler no RenderPipeline names is unaccounted (exit 16); a single-version fork has no requirement and nothing written" \
             "manual-tests.py|manual-tests: the 10 manual tests no gate reaches, one per kind first (music, client packets, bosses, keys...), with steps naming real ids" \
@@ -405,6 +405,70 @@ PY
 )"
 grep -q '^parity OK$' <<<"$out" && ok "port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs a stage tool itself; every era converter is listed" \
   || bad "route parity: $out"
+
+echo "version-branch hops run the converters whose change lands in the hop; the era route and a single-version fork as before"
+LD="$T/ladder"; mkdir -p "$LD/sv/src/main/java/com/example/mod" "$LD/vb/src/main/java/com/example/mod"
+cat > "$LD/Blade.java" <<'JAVA'
+package com.example.mod;
+
+public class Blade extends Item {
+    @Override
+    public boolean hurtEnemy(ItemStack s, LivingEntity target, LivingEntity attacker) {
+        target.igniteForSeconds(2);
+        return super.hurtEnemy(s, target, attacker);
+    }
+
+    @Override
+    public void releaseUsing(ItemStack s, Level level, LivingEntity user, int left) {
+        user.stopUsingItem();
+    }
+}
+JAVA
+cp "$LD/Blade.java" "$LD/sv/src/main/java/com/example/mod/"; cp "$LD/Blade.java" "$LD/vb/src/main/java/com/example/mod/"
+printf 'mod_id=examplemod\nminecraft_version=1.21.1\n' > "$LD/sv/gradle.properties"
+out="$(python3 - "$LD" <<'PY' 2>&1
+import importlib.util, pathlib, subprocess, sys
+ld = pathlib.Path(sys.argv[1])
+def load(n, f):
+    s = importlib.util.spec_from_file_location(n, f"tools/{f}"); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); return m
+fp = load("fp", "fork-port.py")
+bad = []
+blade = lambda r: (r / "src/main/java/com/example/mod/Blade.java").read_text(encoding="utf-8")
+orig = (ld / "Blade.java").read_text(encoding="utf-8")
+# single-version fixture: no version branch, no layer -> fork-port never takes the branch route, so no ladder;
+# the era route calls the converter with no --crossing and every row runs, exactly as before
+sv = ld / "sv"
+subprocess.run(["git", "init", "-q", str(sv)], check=True)
+if fp.branch_mode(sv, "1.21.5"):
+    bad.append("a single-version fixture is taken as a version-branch run")
+subprocess.run([sys.executable, "tools/convert-override-signatures.py", "--src", str(sv / "src/main/java")], capture_output=True, check=False)
+if "public void hurtEnemy(" not in blade(sv) or "public boolean releaseUsing(" not in blade(sv):
+    bad.append("the era call (no --crossing) no longer converts every row")
+# a version-branch hop: 1.21.5 -> 1.21.8 crosses no landing version and runs nothing
+vb = ld / "vb"
+line, steps, adv = fp.branch_converters(vb, "1.21.5", "1.21.8", ld / "w")
+if steps or adv or blade(vb) != orig:
+    bad.append(f"a hop crossing no landing version ran a converter: {line}")
+# 1.21.1 -> 1.21.3 crosses 1.21.2: releaseUsing moves, hurtEnemy (1.21.5) stays
+line, steps, adv = fp.branch_converters(vb, "1.21.1", "1.21.3", ld / "w")
+if "public boolean releaseUsing(" not in blade(vb) or "public boolean hurtEnemy(" not in blade(vb):
+    bad.append(f"1.21.1 -> 1.21.3 did not convert exactly the 1.21.2 rows: {line}")
+# 1.21.4 -> 1.21.5 crosses 1.21.5: hurtEnemy moves; gear-tiers named as an advisory (its shim needs 26.1.2+)
+line, steps, adv = fp.branch_converters(vb, "1.21.4", "1.21.5", ld / "w")
+after = blade(vb)
+if "public void hurtEnemy(" not in after or not any("gear-tiers" in a and "26.1.2+" in a for a in adv):
+    bad.append(f"1.21.4 -> 1.21.5 did not convert hurtEnemy or name gear-tiers: {line}")
+# the ladder's two hops end where the era route's one step does, and a re-run changes nothing
+if after != blade(sv):
+    bad.append("the ladder's hops and the era route's one step disagree")
+fp.branch_converters(vb, "1.21.4", "1.21.5", ld / "w")
+if blade(vb) != after:
+    bad.append("a re-run of the hop converted again")
+print("\n".join(bad) or "ladder OK")
+PY
+)"
+grep -q '^ladder OK$' <<<"$out" && ok "version-branch ladder: a hop crossing a converter's landing version runs it (1.21.1->1.21.3 the 1.21.2 rows, 1.21.4->1.21.5 the 1.21.5 rows, gear-tiers an advisory below 26.1.2), a hop crossing none runs nothing, a re-run converts nothing twice, the hops add up to the era route's one step; a single-version fixture never takes the branch route and the era call is unchanged" \
+  || bad "version-branch ladder converters: $out"
 
 echo "burndown-count.sh: a log that hit the capped Gradle compile is refused unless recounted (X5g)"
 printf '> Task :compileJava FAILED\n/w/A.java:3: error: cannot find symbol\n1,000 errors\n' > "$T/gcap.log"

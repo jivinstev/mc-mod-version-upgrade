@@ -35,6 +35,9 @@ Stages, each logged as one line and skipped with a reason when it does not apply
   moves    build-class-move-map.py between the target this one inherits (or the base) and this one, from the
            staged merged jars -> .multiversion/targets/<t>/moves.generated.tsv, which layer.py reads as one more
            rename table. Generated per fork per target from Mojang's data, so not a map anyone commits upstream.
+           On a version branch the moves are applied to the source, then the converters whose change lands in the hop
+           from the parent's version run (tools/mechanical-hop.py run_ladder: convert-override-signatures --crossing;
+           a converter whose output needs a later version is an advisory); a layer target runs none.
   measure  compile every source set (srcsets.compile_tasks); burndown-count.sh decides whether it is a count
   loop     file-loop.py --layer <t> --budget N (its kept rows land in the target's renames.tsv)
   audit    audit-mixin-targets.py against the target's sources jar and prepared tree, then audit-event-listeners.py (abstract
@@ -2938,8 +2941,11 @@ class BranchRun(Run):
             cut = (f"; entityCutout swap: {len(cx['fixed'])} call(s) to rename (fork-branches.py cutout-check --branch "
                    f"{fb.branch_name(self.t)} --fix), {n_dec} to decide: " + "; ".join(fb.cutout_lines(cx, False))[:1500]
                    if cx["fixed"] or n_dec else "")
+        # the converters whose change lands in this hop (mechanical-hop.py LADDER), after the rows and the moves
+        conv, steps, adv = branch_converters(self.repo, pv, self.t, self.work)
         return {"done": f"{kept} unambiguous move(s) {pv}->{self.t} -> .port/{self.t}/moves.generated.tsv"
-                        f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s){cut}", "moves": kept}
+                        f"{f' ({dup} already in a table)' if dup else ''}, applied to {changed} source file(s){cut}{conv}",
+                "moves": kept, **({"converters": [s["summary"] for s in steps], "advisories": adv} if steps or adv else {})}
 
     def s_loop(self):
         start = self.compile_errors()
@@ -3107,6 +3113,27 @@ class BranchRun(Run):
         sync-shared). The layer's warning was false here (no .multiversion/ to read); the real gap is a library version
         with a table that the branch has no section of."""
         return branch_shared_gap(self.repo, self.t, self.props(), self.fb)
+
+
+def branch_converters(repo, frm, to, work=None, run=None):
+    """A version-branch hop's converters: tools/mechanical-hop.py run_ladder over the branch's source sets, the LADDER
+    rows whose change lands in frm -> to (each idempotent, so a resumed run converts nothing twice). Each one's output
+    goes to <work>/convert-<label>.out. Only BranchRun.s_moves calls this: a layer target and a single-version fork never
+    reach it. -> ("; converters ..." for the stage line, or "", steps, advisories)."""
+    mh = load("mechanical_hop_fp", "mechanical-hop.py")
+    repo = pathlib.Path(repo)
+    dirs = sorted(p for p in repo.glob("src/*/java") if p.is_dir())
+    steps, adv = mh.run_ladder(repo, dirs, frm, to, say=lambda s: None, **({"run": run} if run else {}))
+    if work:
+        pathlib.Path(work).mkdir(parents=True, exist_ok=True)
+        for s in steps:
+            (pathlib.Path(work) / f"convert-{s['step']}.out").write_text(s["output"] + "\n", encoding="utf-8")
+    if not steps and not adv:
+        return "", steps, adv
+    line = "; converters landing in " + f"{frm}->{to}: " + ("; ".join(s["summary"] for s in steps) or "none run")
+    if adv:
+        line += "; ADVISORY " + " / ".join(adv)
+    return line, steps, adv
 
 
 def branch_shared_gap(repo, t, props, fb, shared_root=None, stable=None):
@@ -3559,6 +3586,27 @@ def self_check():
         nonlocal ok
         if not c:
             ok = False; print("FAIL:", msg)
+    # a version-branch hop runs the converters whose change lands in it (mechanical-hop.py LADDER); nothing else does
+    import inspect as _insp
+    expect("branch_converters(" in _insp.getsource(BranchRun.s_moves) and "branch_converters(" not in _insp.getsource(Run.s_moves)
+           and "run_ladder" not in _insp.getsource(Run), "only a version-branch hop runs the ladder's converters")
+    with tempfile.TemporaryDirectory() as d:
+        repo, work = pathlib.Path(d) / "r", pathlib.Path(d) / "w"
+        j = repo / "src/main/java/com/example/mod"
+        j.mkdir(parents=True)
+        item = ("package com.example.mod;\n\npublic class Blade extends Item {\n    @Override\n    public void inventoryTick(ItemStack s, "
+                "Level l, Entity e, int slot, boolean selected) {\n        if (selected) e.igniteForSeconds(1);\n    }\n}\n")
+        (j / "Blade.java").write_text(item, encoding="utf-8")
+        line, steps, adv = branch_converters(repo, "1.21.5", "1.21.8", work)
+        expect(line == "" and steps == [] and (j / "Blade.java").read_text(encoding="utf-8") == item,
+               "a hop no converter's change lands in runs none and changes nothing")
+        line, steps, adv = branch_converters(repo, "1.21.4", "1.21.5", work)
+        now = (j / "Blade.java").read_text(encoding="utf-8")
+        expect(steps and steps[0]["changed"] and "ServerLevel portedLevel" in now and "inventoryTick 1" in line
+               and (work / "convert-override-signatures.out").is_file() and any("gear-tiers" in x for x in adv),
+               f"a hop over 1.21.5 runs convert-override-signatures (and names gear-tiers as an advisory): {line}")
+        line2, steps2, _ = branch_converters(repo, "1.21.4", "1.21.5", work)
+        expect(not steps2[0]["changed"] and (j / "Blade.java").read_text(encoding="utf-8") == now, "a re-run converts nothing twice")
     # a re-run from measure (a gate re-run) has no compile-loop budget unless given one; a porting run keeps $15
     expect(default_budget(None, None) == 15.0 and default_budget(None, "setup") == 15.0 and default_budget(None, "loop") == 15.0
            and default_budget(None, "moves") == 15.0 and all(default_budget(None, x) == 0.0 for x in RECHECK_STAGES)

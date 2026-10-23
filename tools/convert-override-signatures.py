@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Move overrides of vanilla hooks whose SIGNATURE changed in 26.2, keeping every body byte-identical.
+"""Move overrides of vanilla hooks whose SIGNATURE changed after 1.21.1, keeping every body byte-identical.
 
-    python3 tools/convert-override-signatures.py --src src/main/java [--dry-run]
+    python3 tools/convert-override-signatures.py --src src/main/java [--crossing FROM..TO] [--dry-run]
     python3 tools/convert-override-signatures.py --list
     python3 tools/convert-override-signatures.py --self-check
 
@@ -20,28 +20,36 @@ methods:
 Inside the private copy, `super.hook(<old args>)` is rewritten to the 26.2 super call; nothing else is touched.
 `$` cannot collide with a name the mod or vanilla declares.
 
-THE TABLE (HOOKS below; `--list` prints it).  Each row was read off the 26.2 jar and the 1.21.1 sources:
-  Item.appendHoverText(ItemStack, TooltipContext, List<Component>, TooltipFlag)            void
-     -> (ItemStack, TooltipContext, TooltipDisplay, Consumer<Component>, TooltipFlag)       void
-     the copy fills a list; the override forwards each line to the consumer, in order.
-  Item.releaseUsing(ItemStack, Level, LivingEntity, int)        void -> boolean   (false = vanilla's default)
-  Item.hurtEnemy(ItemStack, LivingEntity, LivingEntity)         boolean -> void   (the value only fed a stat)
-  Item.inventoryTick(ItemStack, Level, Entity, int, boolean)    -> (ItemStack, ServerLevel, Entity, EquipmentSlot)
-     isSelected becomes `slot == MAINHAND`; the inventory slot INDEX has no 26.2 value (-1 is passed) and 26.2
-     calls this on the SERVER only -- a body that reads the index or branches on isClientSide is NOTED.
-  Mob.customServerAiStep()                                      -> (ServerLevel)   (it ran server-side already;
-     six shipped ports made this edit by hand)
+THE TABLE (HOOKS below; `--list` prints it).  Each row was read off the 1.21.1 sources and the jars, and carries the
+Minecraft version its new signature LANDS in (javap of the 1.21.1, 1.21.3, 1.21.4, 1.21.5 and 26.2 merged jars:
+absent in the one below, present from it on; 1.21.2 is not staged, its rows were first seen in 1.21.3's jar):
+  1.21.5  Item.appendHoverText(ItemStack, TooltipContext, List<Component>, TooltipFlag)    void
+             -> (ItemStack, TooltipContext, TooltipDisplay, Consumer<Component>, TooltipFlag)  void
+             the copy fills a list; the override forwards each line to the consumer, in order.
+  1.21.2  Item.releaseUsing(ItemStack, Level, LivingEntity, int)        void -> boolean   (false = vanilla's default)
+  1.21.5  Item.hurtEnemy(ItemStack, LivingEntity, LivingEntity)         boolean -> void   (the value only fed a stat)
+  1.21.5  Item.inventoryTick(ItemStack, Level, Entity, int, boolean)    -> (ItemStack, ServerLevel, Entity, EquipmentSlot)
+             isSelected becomes `slot == MAINHAND`; the inventory slot INDEX has no value from 1.21.5 (-1 is passed)
+             and the hook runs on the SERVER only -- a body that reads the index or branches on isClientSide is NOTED.
+  1.21.2  Mob.customServerAiStep()                                      -> (ServerLevel)   (it ran server-side already;
+             six shipped ports made this edit by hand)
+
+WHICH ROWS RUN.  Without --crossing every row runs: the era route (tools/mechanical-hop.py --stage era) moves a
+1.21.1 tree to 26.x in one step.  `--crossing FROM..TO` runs only the rows whose version lands in the hop
+(FROM < version <= TO): a version-branch hop (tools/fork-port.py on neoforge-<TO>, FROM its parent's version), so a
+1.21.4 -> 1.21.5 hop moves the three 1.21.5 hooks and leaves the rest, which its branch already has in their new
+shape or which do not exist yet.
 
 Matched by method name AND the exact old parameter types (annotations, `final` and package prefixes ignored), in
-a class that extends or implements something; an override already in the 26.2 shape does not match.  REFUSED and
+a class that extends or implements something; an override already in the new shape does not match.  REFUSED and
 named: a `super.hook(...)` used as a value where the new super returns void, and a body that is abstract.
-Idempotent.  Standard library only.
+Idempotent (with or without --crossing).  Standard library only.
 """
 import argparse, pathlib, re, sys, tempfile
 
 COMPONENT = "net.minecraft.network.chat.Component"
 HOOKS = [
-    {"name": "appendHoverText", "old_ret": "void",
+    {"name": "appendHoverText", "since": "1.21.5", "old_ret": "void",
      "old": ["ItemStack", "TooltipContext", "List<Component>", "TooltipFlag"],
      "new_ret": "void",
      "new": ["{t0} {n0}", "{t1} {n1}", "net.minecraft.world.item.component.TooltipDisplay portedDisplay",
@@ -51,17 +59,17 @@ HOOKS = [
               "portedLines.forEach(portedTooltip);"],
      "extras": ["net.minecraft.world.item.component.TooltipDisplay portedDisplay"],
      "super": "super.appendHoverText({a0}, {a1}, portedDisplay, ({a2})::add, {a3})", "super_void": True},
-    {"name": "releaseUsing", "old_ret": "void",
+    {"name": "releaseUsing", "since": "1.21.2", "old_ret": "void",
      "old": ["ItemStack", "Level", "LivingEntity", "int"],
      "new_ret": "boolean", "new": ["{t0} {n0}", "{t1} {n1}", "{t2} {n2}", "{t3} {n3}"],
      "body": ["this.ported$releaseUsing({n0}, {n1}, {n2}, {n3});", "return false;"],
      "extras": [], "super": "super.releaseUsing({a0}, {a1}, {a2}, {a3})", "super_void": False},
-    {"name": "hurtEnemy", "old_ret": "boolean",
+    {"name": "hurtEnemy", "since": "1.21.5", "old_ret": "boolean",
      "old": ["ItemStack", "LivingEntity", "LivingEntity"],
      "new_ret": "void", "new": ["{t0} {n0}", "{t1} {n1}", "{t2} {n2}"],
      "body": ["this.ported$hurtEnemy({n0}, {n1}, {n2});"],
      "extras": [], "super": "super.hurtEnemy({a0}, {a1}, {a2})", "super_void": True, "super_return": "true"},
-    {"name": "inventoryTick", "old_ret": "void",
+    {"name": "inventoryTick", "since": "1.21.5", "old_ret": "void",
      "old": ["ItemStack", "Level", "Entity", "int", "boolean"],
      "new_ret": "void",
      "new": ["{t0} {n0}", "net.minecraft.server.level.ServerLevel portedLevel", "{t2} {n2}",
@@ -70,14 +78,31 @@ HOOKS = [
               "portedSlot == net.minecraft.world.entity.EquipmentSlot.MAINHAND, portedLevel, portedSlot);"],
      "extras": ["net.minecraft.server.level.ServerLevel portedLevel", "net.minecraft.world.entity.EquipmentSlot portedSlot"],
      "super": "super.inventoryTick({a0}, portedLevel, {a2}, portedSlot)", "super_void": True,
-     "notes": [("{n3}", "reads the inventory slot index, which 26.2 does not pass (-1 now)"),
-               ("isClientSide", "branches on isClientSide; 26.2 calls inventoryTick on the server only")]},
-    {"name": "customServerAiStep", "old_ret": "void", "old": [],
+     "notes": [("{n3}", "reads the inventory slot index, which 1.21.5+ does not pass (-1 now)"),
+               ("isClientSide", "branches on isClientSide; 1.21.5+ calls inventoryTick on the server only")]},
+    {"name": "customServerAiStep", "since": "1.21.2", "old_ret": "void", "old": [],
      "new_ret": "void", "new": ["net.minecraft.server.level.ServerLevel portedLevel"],
      "body": ["this.ported$customServerAiStep(portedLevel);"],
      "extras": ["net.minecraft.server.level.ServerLevel portedLevel"],
      "super": "super.customServerAiStep(portedLevel)", "super_void": True},
 ]
+def mc_key(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+def hooks_crossing(frm, to):
+    """The rows whose new signature lands in the hop frm -> to (frm < since <= to)."""
+    return [h for h in HOOKS if mc_key(frm) < mc_key(h["since"]) <= mc_key(to)]
+
+
+def parse_crossing(spec):
+    """'FROM..TO' -> (FROM, TO); raises ValueError on anything else."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)+)\s*\.\.\s*(\d+(?:\.\d+)+)\s*", spec or "")
+    if not m or mc_key(m.group(1)) >= mc_key(m.group(2)):
+        raise ValueError(f"--crossing wants FROM..TO with FROM below TO (e.g. 1.21.4..1.21.5), not {spec!r}")
+    return m.group(1), m.group(2)
+
+
 HEADER = re.compile(r"(?P<mods>(?:public|protected)\s+(?:final\s+)?)(?P<ret>[\w.<>\[\]]+)\s+(?P<name>\w+)\s*\(")
 
 
@@ -151,7 +176,7 @@ def rewrite_supers(body, hook, refused):
                 continue
             statement = re.search(r"(^|[;{}])\s*$", body[:m.start()]) and body[close + 1:].lstrip().startswith(";")
             if not statement:
-                refused.append(f"super.{hook['name']}(...) used as a value; 26.2's returns void")
+                refused.append(f"super.{hook['name']}(...) used as a value; from {hook['since']} it returns void")
                 return None
         out.append(body[pos:m.start()])
         out.append(new)
@@ -160,12 +185,12 @@ def rewrite_supers(body, hook, refused):
     return "".join(out)
 
 
-def convert_text(text):
-    """(new text, [converted hook names], [notes], [refused])."""
+def convert_text(text, hooks=None):
+    """(new text, [converted hook names], [notes], [refused]); hooks: the rows to apply (default all)."""
     if not re.search(r"\b(extends|implements)\b", text):
         return text, [], [], []
     done, notes, refused = [], [], []
-    names = {h["name"]: h for h in HOOKS}
+    names = {h["name"]: h for h in (HOOKS if hooks is None else hooks)}
     pos, out = 0, []
     for m in HEADER.finditer(text):
         hook = names.get(m.group("name"))
@@ -219,11 +244,11 @@ def convert_text(text):
     return "".join(out), done, notes, refused
 
 
-def run(src, dry=False):
+def run(src, dry=False, hooks=None, crossing=None):
     changed, counts, all_notes, all_refused = 0, {}, [], []
     for f in sorted(pathlib.Path(src).rglob("*.java")):
         t = f.read_text(encoding="utf-8")
-        new, done, notes, refused = convert_text(t)
+        new, done, notes, refused = convert_text(t, hooks)
         rel = f.relative_to(src)
         all_notes += [f"  NOTE {rel}:{ln}: {msg}" for ln, msg in notes]
         all_refused += [f"  REFUSED {rel}: {msg}" for msg in refused]
@@ -234,7 +259,9 @@ def run(src, dry=False):
             if not dry:
                 f.write_text(new, encoding="utf-8")
     print(f"convert-override-signatures: {sum(counts.values())} override(s) in {changed} file(s)"
-          + "".join(f"; {k} {v}" for k, v in sorted(counts.items())))
+          + "".join(f"; {k} {v}" for k, v in sorted(counts.items()))
+          + (f" (rows landing in {crossing[0]}..{crossing[1]}: {', '.join(h['name'] for h in hooks) or 'none'})"
+             if crossing else ""))
     for line in all_refused + all_notes:
         print(line)
     return 1 if all_refused else 0
@@ -311,6 +338,24 @@ def self_check():
     bad = convert_text("class B extends Item { public boolean hurtEnemy(ItemStack s, LivingEntity t, LivingEntity a) "
                        "{ boolean r = super.hurtEnemy(s, t, a); return r; } }")
     chk("super used as a value: refused", bad[1] == [] and bad[3])
+    # --crossing: a version-branch hop runs only the rows that land in it
+    names = lambda frm, to: sorted(h["name"] for h in hooks_crossing(frm, to))
+    chk("1.21.4..1.21.5 crosses the three 1.21.5 rows", names("1.21.4", "1.21.5") == ["appendHoverText", "hurtEnemy", "inventoryTick"])
+    chk("1.21.1..1.21.3 crosses the two 1.21.2 rows", names("1.21.1", "1.21.3") == ["customServerAiStep", "releaseUsing"])
+    chk("1.21.5..1.21.8 crosses none", names("1.21.5", "1.21.8") == [])
+    chk("a direct 1.21.1..26.2 jump crosses all", len(hooks_crossing("1.21.1", "26.2")) == len(HOOKS))
+    hop = convert_text(FIXTURE, hooks_crossing("1.21.4", "1.21.5"))
+    chk("a 1.21.5 hop converts the 1.21.5 hooks only", sorted(hop[1]) == ["appendHoverText", "hurtEnemy", "inventoryTick"]
+        and "public void releaseUsing(ItemStack s, Level level, LivingEntity user, int left) {\n        super.releaseUsing(" in hop[0])
+    chk("a hop that crosses nothing changes nothing", convert_text(FIXTURE, hooks_crossing("1.21.5", "1.21.8"))[0] == FIXTURE)
+    chk("idempotent per hop", convert_text(hop[0], hooks_crossing("1.21.4", "1.21.5"))[0] == hop[0])
+    step = convert_text(convert_text(FIXTURE, hooks_crossing("1.21.1", "1.21.3"))[0], hooks_crossing("1.21.4", "1.21.5"))[0]
+    chk("the ladder's hops add up to the era route's one step", step == new)
+    try:
+        parse_crossing("1.21.5..1.21.4")
+        chk("a backwards --crossing is refused", False)
+    except ValueError:
+        pass
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -318,6 +363,7 @@ def self_check():
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--src")
+    ap.add_argument("--crossing", metavar="FROM..TO", help="only the rows landing in this hop (FROM < row <= TO): a version-branch hop")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--self-check", action="store_true")
@@ -326,10 +372,16 @@ def main():
         return self_check()
     if a.list:
         for h in HOOKS:
-            print(f"{h['name']}({', '.join(h['old'])}) {h['old_ret']}  ->  {h['new_ret']}")
+            print(f"{h['since']:<8}{h['name']}({', '.join(h['old'])}) {h['old_ret']}  ->  {h['new_ret']}")
         return 0
     if not a.src:
         ap.error("--src is required")
+    if a.crossing:
+        try:
+            crossing = parse_crossing(a.crossing)
+        except ValueError as e:
+            ap.error(str(e))
+        return run(a.src, a.dry_run, hooks_crossing(*crossing), crossing)
     return run(a.src, a.dry_run)
 
 

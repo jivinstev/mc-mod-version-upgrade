@@ -258,7 +258,13 @@ workflow lacks it, and counts the head in its summary.
 the stages -- setup (the behaviour inventory from the port branch when missing, `layer-deps.py resolve`, the data
 conversions a version needs written into its own resources), stage (Minecraft staged, the access transformer fixed in
 place), moves (the class moves from the parent version, staged in a worktree, kept in `moves.generated.tsv` AND applied
-to the source: a file the rows alone made is re-made whole, a hand-changed file in its code only, its comments as written), measure, loop (the compile loop edits the branch's source; a row it keeps joins `renames.tsv`), audit,
+to the source: a file the rows alone made is re-made whole, a hand-changed file in its code only, its comments as written;
+then the converters whose change lands in this hop, `tools/mechanical-hop.py`'s `LADDER` -- the hook-signature rows of
+`convert-override-signatures.py --crossing <parent>..<v>` (1.21.2: `releaseUsing`, `customServerAiStep`; 1.21.5:
+`appendHoverText`, `hurtEnemy`, `inventoryTick`), each body kept in a private 1.21.1-shaped copy, so the compile loop
+never hand-ports them; below 26.1.2 a hop over 1.21.2 / 1.21.5 names `convert-gear-tiers.py` as an ADVISORY in the stage
+line -- port those sites by hand by CATALOG V92's rules (a sword's tool rules, `instanceof` widened only where unbound) --
+because its shim needs 26.1.2's API; idempotent, so a resume converts nothing twice), measure, loop (the compile loop edits the branch's source; a row it keeps joins `renames.tsv`), audit,
 gates (`ci-gates.py --mc <v>`), cost. It stops only when a stage cannot finish: a STOPPED block, exit 10 (compile), 11
 (Gate A/B), 12 (Gate C), 13 (mixin audit), 14 (the checkout is in use), 18 (an undone parent or library) or 19 (the
 authors' branch moved since the freeze), and `.port/<v>/RESIDUE.md` with the remaining errors by CATALOG entry and the
