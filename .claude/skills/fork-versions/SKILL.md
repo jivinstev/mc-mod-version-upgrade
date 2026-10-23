@@ -277,7 +277,8 @@ it keeps only that -- the orchestrator never ports, gates or reviews a version i
 run or a CI run in one blocking command, never by polling (keep-current, "The weekly round": each idle gap over the
 5-minute cache re-writes the whole context). **The cheapest correct gate sequence** per version (the done list decides what
 is stale): the build-changing inputs first (a re-pin), the cascade's `--gates ab`, the review and its fixes, then ONE
-`fork-port.py --repo DIR --target <v> --from-stage measure --gates full` on the final tree; a records-only commit
+`fork-port.py --repo DIR --target <v> --from-stage measure --gates full` on the final tree (a re-run from `measure` has no
+compile-loop budget unless `--budget` gives one: it gates, it never edits); a records-only commit
 (GATES.md, REVIEW.md, COST.md, the ledger, the README, the freeze or a library record) re-runs nothing, a re-pin re-runs the
 gates but not the review (keep-current, "The weekly round" step 4).
 
@@ -471,9 +472,13 @@ goes up the chain this way:
    - **port change** -- the file has a `STUBS.json` entry (a stand-in, an API rewrite of ours): keep ours, apply the
      authors' change around it.
    - **authors' fix** -- anything else: take their change, adapted through the rows, ours re-applied around it.
+     The same deferred default covers a file OUTSIDE the integration package whose authors' change names only classes
+     the version drops (`drops.txt`) as one dropped dependency's integration (their package, `compat/<name>/`, names
+     it): the plan shows it as `deferred:<group:module>`.
    - **escalated** -- keeping the authors' intent is not feasible at that version (their added code names a class the
-     version drops in `drops.txt`), or the change is over `--budget-lines` changed lines (default 80). Only these go to
-     the owner. The agent may escalate a default too when it finds the intent infeasible, saying why.
+     version drops in `drops.txt` that no single dropped dependency owns), or the change is over `--budget-lines`
+     changed lines (default 80). Only these go to the owner. The agent may escalate a default too when it finds the
+     intent infeasible, saying why.
    The rule behind every default: **keep the authors' design intent**. The fixer agent makes the defaults and records
    each with its reasoning (the answers file below; the tool writes them to `.port/DECISIONS.md`, append-only).
 3. `cascade ... --apply [--gates ab]` -- the same merges on the real branches. Mechanical items are resolved; a default
@@ -481,11 +486,16 @@ goes up the chain this way:
    change and gets an open `.port/<v>/REMERGE.json` entry (the id, class, default, the diff). Everything else goes on,
    the versions above included: blocking is per file, not per version. An open entry travels up with its file (a
    higher version that takes the file from its parent carries the entry open too, never a silent loss), and only a
-   version with an open entry stays not done. A red branch still stops (start one fixer there).
+   version with an open entry stays not done. A red branch still stops (start one fixer there). Every cascade (and
+   `--apply-decisions`) first fetches `origin` and compares each branch it reads: a stale local branch behind origin is
+   fast-forwarded (a checked-out one only when clean; `--plan` reads origin's commit), and one that diverged refuses the
+   run -- merge or reset it first, never cascade from a wrong merge base.
 4. **Ask once.** File `ISSUE.md` as ONE issue on the fork: each escalated item with its versions, the authors' change,
    ours at each version, the options (`take`: the authors' file through each version's rows; `keep`: ours, their change
    not taken; `patch`: a diff in the port branch's names, applied through each version's rows; `content`: the file, per
-   version or for all) and a recommendation, plus a machine-readable `cascade-decisions` block.
+   version or for all; `deferred:<dependency>`: ours kept and the authors' change held as a deferred entry while the
+   version drops that dependency -- refused at a version whose `DEPS.md` does not drop it) and a recommendation, plus a
+   machine-readable `cascade-decisions` block.
 5. **Resume in one shot.** `cascade --repo DIR --apply-decisions FILE` (the block saved to a file, the agent's own
    default answers added to its `decisions` list with `by` and `reason`) applies each answer at every version holding
    that decision, oldest first, clears the entries, logs each in `.port/DECISIONS.md`, then runs `--apply` over the

@@ -270,6 +270,65 @@ def fresh_branch(repo, name):
     return loc or org or None
 
 
+def branch_worktrees(repo):
+    """{branch name: worktree path} of every checkout (the main one included) that has a branch checked out."""
+    out, cur = {}, None
+    for ln in git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+        if ln.startswith("worktree "):
+            cur = ln[len("worktree "):]
+        elif ln.startswith("branch refs/heads/") and cur:
+            out[ln[len("branch refs/heads/"):]] = cur
+    return out
+
+
+def origin_sync(repo, names, change=True, say=print):
+    """Before a cascade reads its branches: are the local ones what origin has? A stale local branch (a PR merged on
+    origin, the clone not pulled) gives the merges a wrong merge base. Fetches origin, then per branch: the same, or
+    ahead of origin (a merge not pushed yet), or local only -> used as it is; strictly behind -> fast-forwarded
+    (change; a checked-out branch only when its checkout is clean), else origin's commit used in its place (the plan's
+    throwaway clone); diverged, or behind with a dirty checkout -> refused. No `origin` remote: nothing to check.
+    -> ({name: origin's commit} for the branches to read at origin's commit, None) or (None, why refused)."""
+    if git(repo, "remote", "get-url", "origin").returncode:
+        return {}, None
+    f = git(repo, "fetch", "-q", "origin")
+    if f.returncode:
+        say(f"fork-branches: cannot fetch origin ({f.stderr.strip()[-200:]}): comparing with origin's refs as last fetched")
+    over, wts = {}, None
+    for name in dict.fromkeys(names):
+        loc = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}^{{commit}}").stdout.strip()
+        org = git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{name}^{{commit}}").stdout.strip()
+        if not loc or not org or loc == org or git(repo, "merge-base", "--is-ancestor", org, loc).returncode == 0:
+            continue
+        behind = git(repo, "rev-list", "--count", f"{loc}..{org}").stdout.strip()
+        if git(repo, "merge-base", "--is-ancestor", loc, org).returncode != 0:
+            ahead = git(repo, "rev-list", "--count", f"{org}..{loc}").stdout.strip()
+            return None, (f"the local {name} ({loc[:12]}) has diverged from origin/{name} ({org[:12]}): {ahead} commit(s) "
+                          f"only here, {behind} only on origin. Its merges would start from a wrong merge base: merge "
+                          f"origin/{name} into it (or reset it to origin/{name} if the local commits are not wanted), "
+                          "then run the cascade again")
+        if not change:
+            over[name] = org
+            say(f"fork-branches: the local {name} is {behind} commit(s) behind origin/{name}: reading origin's "
+                f"{org[:12]}")
+            continue
+        if wts is None:
+            wts = branch_worktrees(repo)
+        wt = wts.get(name)
+        if wt is None:
+            r = git(repo, "update-ref", f"refs/heads/{name}", org, loc)
+        elif git(wt, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+            return None, (f"the local {name} is {behind} commit(s) behind origin/{name} and its checkout {wt} has "
+                          f"uncommitted changes: commit or stash them, git -C {wt} merge --ff-only origin/{name}, then "
+                          "run the cascade again")
+        else:
+            r = git(wt, "merge", "--ff-only", "-q", org)
+        if r.returncode:
+            return None, (f"cannot fast-forward the local {name} to origin/{name} ({org[:12]}): "
+                          f"{(r.stderr or r.stdout).strip()[-200:]}")
+        say(f"fork-branches: fast-forwarded the local {name} {behind} commit(s) to origin/{name} ({org[:12]})")
+    return over, None
+
+
 def is_branch_fork(repo, t):
     """Has the clone a version branch for t (local or origin) carrying .port/<t>/branch.properties?"""
     c = resolve_branch(repo, branch_name(t))
@@ -2198,17 +2257,60 @@ def integration_dep(f, text, deps_text):
     return None
 
 
+DEFERRED = "deferred:"          # the decision form "keep ours, deferred on <dependency>" (--apply-decisions, /decide)
+
+
+def _tokens(s):
+    return [x for x in re.split(r"[^a-z0-9]+", (s or "").lower()) if x]
+
+
+def dep_named(name, dropped):
+    """The dropped dependency (group:module, of `dropped`) that `name` stands for: the group:module, its module, the
+    module without a CurseForge project id, or a name whose words are the module's words in order, or its first words
+    run together (`example_spells` and `examplespells` both name `curse.maven:example-spells-n-things-123`). None when no one, or more than one,
+    matches."""
+    if not name:
+        return None
+    if name in dropped:
+        return name
+    want = _tokens(name)
+    hits = []
+    for ga in sorted(dropped):
+        module = re.sub(r"-\d+$", "", ga.partition(":")[2])
+        mt = _tokens(module)
+        if want == mt or any("".join(want) == "".join(mt[:k]) for k in range(1, len(mt) + 1)) and len("".join(want)) >= 4:
+            hits.append(ga); continue
+        it = iter(mt)
+        if len("".join(want)) >= 4 and all(w in it for w in want):
+            hits.append(ga)
+    return hits[0] if len(hits) == 1 else None
+
+
+def class_dep(path, deps_text):
+    """The dropped dependency a class this version drops (drops.txt) is the integration of: its path names the mod
+    (integration_dep), or it sits in an integration package (`compat/<name>/`, `integration/<name>/`) whose <name>
+    names a dependency DEPS.md records dropped (dep_named). None otherwise."""
+    dep = integration_dep(path, "", deps_text)
+    if dep:
+        return dep
+    m = re.search(r"(?:^|/)(?:compat|integration|integrations)/([^/]+)/", path)
+    return dep_named(m.group(1), dropped_deps(deps_text)) if m else None
+
+
 def classify(f, t, t_pre, diff, read, budget):
     """The decision class of an authors' change version t could not take mechanically (the policy fork-versions states):
-    -> (class, escalated, default text, recommended choice, reasoning). Mechanical rules only: no model."""
+    -> (class, escalated, default text, recommended choice, reasoning, deferred dependency or None). Mechanical rules
+    only: no model. A deferred dependency means the default is the tool's own: ours kept while that dependency is
+    dropped at t, the authors' change a deferred REMERGE.json entry -- for a file of an integration of a dropped
+    dependency, and for any file whose only obstacle is that it uses classes t drops as that dependency's integration."""
     stubs = read(f"{REC}/{t}/STUBS.json")
     deps = read(f"{REC}/{t}/DEPS.md")
     ours = (t_pre or b"").decode("utf-8", "replace")
     integ = "/compat/" in f or "/integration/" in f or "isLoaded(" in ours
     absent = integ and integration_dep(f, ours + "\n" + diff, deps)
     added = [ln[1:] for ln in diff.splitlines() if ln.startswith("+") and not ln.startswith("+++")]
-    gone = sorted({pathlib.PurePosixPath(x).stem for x in drops_of(read, chain_read(read, t))}
-                  - {pathlib.PurePosixPath(f).stem})
+    drops = drops_of(read, chain_read(read, t))
+    gone = sorted({pathlib.PurePosixPath(x).stem for x in drops} - {pathlib.PurePosixPath(f).stem})
     uses = [n for n in gone if any(re.search(rf"\b{re.escape(n)}\b", ln) for ln in added)]
     size = diff_size(diff)
     if absent:
@@ -2216,22 +2318,36 @@ def classify(f, t, t_pre, diff, read, budget):
                 "calls stubbed so it just works when the integration returns; the authors' change is held as a deferred "
                 "REMERGE.json entry", "keep",
                 f"{t} has no build of {absent}; our file runs without it. The authors' change stays recorded (a deferred "
-                f"entry, not counted against done) and becomes an open entry once {absent} is no longer dropped at {t}")
+                f"entry, not counted against done) and becomes an open entry once {absent} is no longer dropped at {t}",
+                absent)
     if uses:
+        # the classes the change uses are dropped here as a dropped dependency's integration (weekly round 2026-10-21: a
+        # factory outside the integration package, its new line naming the integration's item class): the deferred
+        # default, as for the integration's own files -- one dependency for every class used, else the owner decides
+        deps_ = {class_dep(p_, deps) for n in uses for p_ in drops if pathlib.PurePosixPath(p_).stem == n}
+        if len(deps_) == 1 and None not in deps_:
+            dep = deps_.pop()
+            return ("optional-integration", False, f"keep ours while {dep} is dropped at this version (DEPS.md): the "
+                    f"authors' change uses {', '.join(uses)}, {dep}'s integration, which {t} drops; the change is held as "
+                    "a deferred REMERGE.json entry", "keep",
+                    f"the authors' change uses {', '.join(uses)}, which {t} drops with {dep} (no build at {t}); ours "
+                    f"stays. The change stays recorded (a deferred entry, not counted against done) and becomes an open "
+                    f"entry once {dep} is no longer dropped at {t}", dep)
         return ("escalate", True, "", "keep",
-                f"the authors' change uses {', '.join(uses)}, which {t} drops (drops.txt): their intent cannot be kept here as is")
+                f"the authors' change uses {', '.join(uses)}, which {t} drops (drops.txt): their intent cannot be kept "
+                "here as is", None)
     if size > budget:
         return ("escalate", True, "", "patch",
                 f"the authors' change is {size} changed lines, over the budget of {budget} (--budget-lines): adapting it "
-                "around our change costs more than a default decision may")
+                "around our change costs more than a default decision may", None)
     if integ:
         return ("optional-integration", False, "keep the integration, apply the authors' change around it", "patch",
-                "an optional integration: kept, with the authors' design")
+                "an optional integration: kept, with the authors' design", None)
     if f in stubs or pathlib.PurePosixPath(f).name in stubs:
         return ("port-change", False, "keep our deliberate change (STUBS.json), apply the authors' change around it", "patch",
-                "a deliberate port change of ours (a stand-in, an API rewrite) is kept; the authors' change goes around it")
+                "a deliberate port change of ours (a stand-in, an API rewrite) is kept; the authors' change goes around it", None)
     return ("authors-fix", False, "take the authors' change through the rows, our change re-applied around it", "patch",
-            "their fix, adapted through the rows (the authors' design intent)")
+            "their fix, adapted through the rows (the authors' design intent)", None)
 
 
 def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, say=print, resolve=None, port_tip=None):
@@ -2511,7 +2627,8 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             if not diff.strip():
                 mb_p = git(repo, "merge-base", pre, parent_ref).stdout.strip()
                 diff, source = git(repo, "diff", mb_p, parent_ref, "--", f).stdout, "parent"
-            klass, esc, default, choice, why = classify(f, t, t_pre, diff, read_t, resolve.get("budget", DEFAULT_BUDGET_LINES))
+            klass, esc, default, choice, why, dep = classify(f, t, t_pre, diff, read_t,
+                                                             resolve.get("budget", DEFAULT_BUDGET_LINES))
             did = hashlib.sha1(f"{f}\0{diff}".encode("utf-8", "surrogateescape")).hexdigest()[:12]
             if t_pre is None:
                 git(work, "rm", "-q", "-f", "--", f)
@@ -2523,14 +2640,13 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             item = {"id": did, "file": f, "version": t, "class": klass, "escalate": esc, "default": default,
                     "choice": choice, "reasoning": why, "diff": diff, "source": source, "from": frm, "to": port_new,
                     "ours": (t_pre or b"").decode("utf-8", "replace")[:6000]}
-            dep = integration_dep(f, (t_pre or b"").decode("utf-8", "replace") + "\n" + diff,
-                                  read_t(f"{REC}/{t}/DEPS.md")) if klass == "optional-integration" and choice == "keep" else None
+            dep = dep if klass == "optional-integration" and choice == "keep" else None
             if dep:
                 # a default the tool carries out itself: ours kept while the dependency is dropped here, logged, and the
                 # authors' change held as a DEFERRED entry -- not counted against done until the dependency returns
                 item["executed"] = True
                 item["deferred"] = dep
-                decided.append({"id": did, "file": f, "version": t, "choice": "keep (deferred)", "by": "cascade default",
+                decided.append({"id": did, "file": f, "version": t, "choice": f"keep (deferred on {dep})", "by": "cascade default",
                                 "reasoning": why})
                 new_entries.append(entry(f, frm, diff, {"id": did, "class": klass, "escalate": False, "default": default,
                                                          "choice": "take", "reasoning": why, "source": source,
@@ -2600,13 +2716,23 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             frm, diff = span(f, port_from)
             extra = {"reason": f"the authors' change is not in {t}'s file (no merge brought it, or a merge kept {t}'s)"}
             if resolve is not None:
-                klass, esc, default, choice, why = classify(f, t, body, diff, rn_, resolve.get("budget", DEFAULT_BUDGET_LINES))
+                klass, esc, default, choice, why, dep = classify(f, t, body, diff, rn_,
+                                                                 resolve.get("budget", DEFAULT_BUDGET_LINES))
                 did = hashlib.sha1(f"{f}\0{diff}".encode("utf-8", "surrogateescape")).hexdigest()[:12]
-                extra.update({"id": did, "class": klass, "escalate": esc, "default": default, "choice": choice,
-                              "reasoning": why, "source": "authors"})
-                items.append({"id": did, "file": f, "version": t, "class": klass, "escalate": esc, "default": default,
-                              "choice": choice, "reasoning": why, "diff": diff, "source": "authors", "from": frm,
-                              "to": port_new, "ours": body.decode("utf-8", "replace")[:6000]})
+                dep = dep if klass == "optional-integration" and choice == "keep" else None
+                extra.update({"id": did, "class": klass, "escalate": esc, "default": default,
+                              "choice": "take" if dep else choice, "reasoning": why, "source": "authors"})
+                item = {"id": did, "file": f, "version": t, "class": klass, "escalate": esc, "default": default,
+                        "choice": choice, "reasoning": why, "diff": diff, "source": "authors", "from": frm,
+                        "to": port_new, "ours": body.decode("utf-8", "replace")[:6000]}
+                if dep:
+                    # the deferred default, carried out: ours is the file already; the entry waits for the dependency
+                    extra.update({"deferred": dep, "reason": f"deferred: {dep} is dropped at {t} (DEPS.md); ours kept, "
+                                                            "the authors' change waits for it"})
+                    item.update({"executed": True, "deferred": dep})
+                    append_decisions(work, [{"id": did, "file": f, "version": t, "choice": f"keep (deferred on {dep})",
+                                             "by": "cascade default", "reasoning": why}])
+                items.append(item)
             else:
                 pending[f] = diff
             new_entries.append(entry(f, frm, diff, extra))
@@ -3357,8 +3483,14 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         why = None if _guarded else port_ref_refused(repo, port_tip, port_ref, nodes[1], upstream)
         if why:
             say(f"fork-branches: cascade --port-ref REFUSED: {why}"); return 2
+    over = {}
+    if not _guarded and mode != "plan-run":
+        over, why = origin_sync(repo, ([port] if i == 0 and not port_tip else []) + [branch_name(t) for t in nodes[max(i, 1):]],
+                                change=mode != "plan" and not dry_run, say=say)
+        if why:
+            say(f"fork-branches: cascade REFUSED: {why}"); return 2
     if mode == "plan":
-        return cascade_plan(repo, spec, budget, out_dir, say, port_ref=port_tip, head_merge=head_merge)
+        return cascade_plan(repo, spec, budget, out_dir, say, port_ref=port_tip, head_merge=head_merge, origin_refs=over)
     if runner is None:
         runner = (lambda w_, t_, g_, s_=print: run_gates(w_, t_, g_, s_, untaken_ok=untaken_ok)) if untaken_ok else run_gates
     rows, merged, items, mech = [], [], [], []
@@ -3511,6 +3643,8 @@ def plan_of(spec, rows, items, mech, elapsed, budget):
             g_.update({k: it[k] for k in ("class", "default", "choice", "reasoning")})
     decisions = sorted(groups.values(), key=lambda x: (not x["escalate"], x["file"]))
     for d in decisions:
+        if d.get("deferred") and d.get("choice") == "keep" and not d["escalate"]:
+            d["choice"] = DEFERRED + d["deferred"]        # the form --apply-decisions and /decide take back
         d["status"] = ("escalated: the owner decides (ISSUE.md)" if d["escalate"] else
                        (f"decided by the cascade: ours kept while {d['deferred']} is dropped, the authors' change a "
                         "deferred REMERGE.json entry (logged in DECISIONS.md)") if d["executed"] and d.get("deferred") else
@@ -3628,10 +3762,11 @@ def simulate_head_merge(clone, port, ref):
     return out
 
 
-def cascade_plan(repo, spec, budget, out_dir, say=print, port_ref=None, head_merge=None):
+def cascade_plan(repo, spec, budget, out_dir, say=print, port_ref=None, head_merge=None, origin_refs=None):
     """cascade --plan: the whole chain merged on a throwaway bare clone (its objects shared, its refs its own), no gates,
     nothing stopped by a decision; the real branches untouched. Writes the plan files. head_merge (a commit): merged into
-    the port branch on the clone first (simulate_head_merge). -> 0, 1 (a merge could not run)."""
+    the port branch on the clone first (simulate_head_merge). origin_refs ({branch: commit}, origin_sync's): branches
+    whose local ref is behind origin, read at origin's commit on the clone. -> 0, 1 (a merge could not run)."""
     t0 = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="cascade-plan-") as d:
         clone = pathlib.Path(d) / "plan.git"
@@ -3640,6 +3775,8 @@ def cascade_plan(repo, spec, budget, out_dir, say=print, port_ref=None, head_mer
             say(f"fork-branches: cascade --plan: cannot make a throwaway clone: {r.stderr.strip()[-200:]}"); return 1
         git(clone, "fetch", "-q", str(repo), "+refs/remotes/*:refs/remotes/*")
         git(clone, "symbolic-ref", "HEAD", "refs/heads/__cascade-plan-none__")   # no branch "checked out" in the clone
+        for name, c in (origin_refs or {}).items():
+            git(clone, "update-ref", f"refs/heads/{name}", c)
         git(clone, "config", "user.name", git(repo, "config", "user.name").stdout.strip() or "cascade-plan")
         git(clone, "config", "user.email", git(repo, "config", "user.email").stdout.strip() or "cascade-plan@localhost")
         hm = None
@@ -3703,9 +3840,14 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     except ValueError as e:
         say(f"fork-branches: --apply-decisions: {e}"); return 2
     answers = {d["id"]: d for d in data.get("decisions", []) if d.get("id") and d.get("choice")}
-    bad = [i for i, d in answers.items() if d["choice"] not in ("take", "keep", "patch", "content")]
+    bad = [i for i, d in answers.items() if d["choice"] not in ("take", "keep", "patch", "content")
+           and not (d["choice"].startswith(DEFERRED) and len(d["choice"]) > len(DEFERRED))]
     if bad:
-        say(f"fork-branches: --apply-decisions: unknown choice for {', '.join(bad)} (take, keep, patch or content)"); return 2
+        say(f"fork-branches: --apply-decisions: unknown choice for {', '.join(bad)} (take, keep, patch, content or "
+            f"{DEFERRED}<dependency>)"); return 2
+    _o, why = origin_sync(repo, [port] + [branch_name(t) for t in nodes[1:]], say=say)
+    if why:
+        say(f"fork-branches: --apply-decisions REFUSED: {why}"); return 2
     def held():
         return {c.get("id") for t in nodes[1:] for c in remerge_entries(
             blob_at(repo, resolve_branch(repo, branch_name(t)) or "HEAD", f"{REC}/{t}/REMERGE.json"))}
@@ -3728,10 +3870,23 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
             say(f"fork-branches: --apply-decisions {t}: {why}"); return 2
         read = reader_of_root(work)
         pr = port_ref_of(repo, work, t, git(work, "rev-parse", "HEAD", check=True).stdout.strip())
-        logged, cleared = [], []
+        logged, cleared, deferred_ = [], [], {}
         for c in mine:
             a, f = answers[c["id"]], c["overlay"]
             choice = a["choice"]
+            if choice.startswith(DEFERRED):
+                # keep ours, deferred on a dependency this version drops: the entry stays, marked deferred (not counted
+                # against done), and opens again when DEPS.md no longer drops the dependency
+                dep = dep_named(choice[len(DEFERRED):], dropped_deps(read(f"{REC}/{t}/DEPS.md")))
+                if not dep:
+                    failed.append(f"{c['id']} at {t}: {choice[len(DEFERRED):]} is not a dependency {t}'s DEPS.md records "
+                                  "dropped (deferred: needs one; else take, keep, patch or content)")
+                    continue
+                deferred_[c["id"]] = dep
+                logged.append({"id": c["id"], "file": f, "version": t, "choice": f"keep (deferred on {dep})",
+                               "by": a.get("by") or "?", "reasoning": a.get("reason") or c.get("reasoning", "")})
+                done_ids.add(c["id"])
+                continue
             if choice == "take":
                 if f.endswith(".java"):
                     new = rows_tree(repo, pr, read, t, chain(work, t)).get(f)
@@ -3764,10 +3919,13 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
             logged.append({"id": c["id"], "file": f, "version": t, "choice": choice, "by": a.get("by") or "?",
                            "reasoning": a.get("reason") or c.get("reasoning", "")})
             done_ids.add(c["id"])
-        if not cleared:
+        if not cleared and not deferred_:
             continue
         rm = work / REC / t / "REMERGE.json"
         keep_ = [c for c in remerge_entries(rm.read_bytes() if rm.is_file() else b"") if c not in cleared]
+        keep_ = [dict(c, deferred=deferred_[c["id"]], escalate=False, choice="take",
+                      reason=f"deferred: {deferred_[c['id']]} is dropped at {t} (DEPS.md); ours kept, the authors' "
+                             "change waits for it (an answer)") if c.get("id") in deferred_ else c for c in keep_]
         rm.write_text(json.dumps({"conflicts": keep_}, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         git(work, "add", "--", rm.relative_to(work).as_posix())
         append_decisions(work, logged)
@@ -6426,6 +6584,122 @@ def _check_deferred_integration(expect):
                f"t11: a deferred entry survives an unrelated edit and opens again when its dependency returns: {why}")
 
 
+def _check_origin_sync(expect):
+    """Weekly round 2026-10-21: the cascade read a local lower branch that origin had moved past (a wrong merge base).
+    The same as origin, or ahead of it: used as it is; strictly behind: fast-forwarded (a clean checked-out worktree
+    too); --plan reads origin's commit and changes no real branch; diverged, or behind with a dirty checkout: refused."""
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        o = pathlib.Path(d) / "origin.git"
+        git(r, "clone", "-q", "--bare", str(r), str(o), check=True)
+        git(r, "remote", "add", "origin", str(o), check=True)
+        git(r, "fetch", "-q", "origin", check=True)
+        before = {b: resolve_branch(r, b) for b in ("neoforge-1.21.3", "neoforge-1.21.4", "neoforge-1.21.5")}
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+        expect(rc == 0 and "fast-forwarded" not in out and "REFUSED" not in out
+               and all(resolve_branch(r, b) == c for b, c in before.items()),
+               f"origin_sync: local branches the same as origin: the cascade as before: {out[-300:]}")
+        other = pathlib.Path(d) / "other"
+        git(d, "clone", "-q", str(o), str(other), check=True)
+        for k in ("user.name", "user.email"):
+            git(other, "config", k, "a@b", check=True)
+        def on_origin(b, f, text):
+            git(other, "checkout", "-q", b, check=True)
+            (other / f).write_text(text, encoding="utf-8")
+            git(other, "add", "-A", check=True); git(other, "commit", "-qm", f"{b}: on origin", check=True)
+            git(other, "push", "-q", "origin", b, check=True)
+            return git(other, "rev-parse", "HEAD", check=True).stdout.strip()
+        new4 = on_origin("neoforge-1.21.4", "NOTE4.txt", "merged on origin\n")
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none", mode="plan", out_dir=str(pathlib.Path(d) / "plan"))
+        expect(rc == 0 and resolve_branch(r, "neoforge-1.21.4") == before["neoforge-1.21.4"]
+               and "reading origin's" in out, f"origin_sync --plan: origin's commit read, no real branch changed: {out[-400:]}")
+        w4, _w = worktree_for(r, "1.21.4")
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+        expect(rc == 0 and resolve_branch(r, "neoforge-1.21.4") == new4 and (w4 / "NOTE4.txt").is_file()
+               and "fast-forwarded the local neoforge-1.21.4" in out,
+               f"origin_sync: a strictly-behind clean checked-out branch is fast-forwarded: {out[-400:]}")
+        new4b = on_origin("neoforge-1.21.4", "NOTE4.txt", "again\n")
+        (w4 / "Plain.txt").write_text("x\n", encoding="utf-8"); git(w4, "add", "Plain.txt", check=True)
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+        expect(rc == 2 and "uncommitted changes" in out and resolve_branch(r, "neoforge-1.21.4") == new4,
+               f"origin_sync: behind with a dirty checkout: refused, nothing moved: {out[-300:]}")
+        git(w4, "reset", "-q", "--hard", check=True)
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+        expect(rc == 0 and resolve_branch(r, "neoforge-1.21.4") == new4b, f"origin_sync: clean again, fast-forwarded: {out[-300:]}")
+        on_origin("neoforge-1.21.5", "NOTE5.txt", "origin only\n")
+        w5, _w = worktree_for(r, "1.21.5")
+        _hand(w5, {"NOTE5b.txt": "local only\n"}, "1.21.5: local only")
+        mine5 = resolve_branch(r, "neoforge-1.21.5")
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+        expect(rc == 2 and "has diverged from origin/neoforge-1.21.5" in out and resolve_branch(r, "neoforge-1.21.5") == mine5,
+               f"origin_sync: a diverged branch refuses the cascade: {out[-300:]}")
+        git(w5, "reset", "-q", "--hard", "origin/neoforge-1.21.5", check=True)
+        _hand(w5, {"NOTE5c.txt": "ahead\n"}, "1.21.5: a merge not pushed yet")
+        rc, out = _quiet(cascade, r, "1.21.3..1.21.5", "none")
+        expect(rc == 0 and "REFUSED" not in out, f"origin_sync: a local branch ahead of origin is used as it is: {out[-300:]}")
+
+
+def _check_deferred_uses(expect):
+    """Weekly round 2026-10-21: a file outside the integration package whose authors' change uses a class the version
+    drops as a dropped dependency's integration takes the deferred default (not an escalation); --apply-decisions
+    takes the owner's `deferred:<dependency>` answer for an escalated one."""
+    pl = "src/main/java/com/example/mod/Plain.java"
+    dep = "curse.maven:example-spells-n-things-123"
+    deps = ("| dependency | role | base pin | for this target | from |\n|---|---|---|---|---|\n"
+            f"| `{dep}` | extra | `1` | dropped: no 1.21.5 build (extra) | CurseForge |\n")
+    drops = "com/example/mod/compat/example_spells/SpellStaff.java\ncom/example/mod/other/Loose.java\n"
+    expect(dep_named("example_spells", {dep}) == dep and dep_named("examplespells", {dep}) == dep
+           and dep_named("other", {dep}) is None and dep_named(dep, {dep}) == dep
+           and class_dep("com/example/mod/compat/example_spells/SpellStaff.java", deps) == dep
+           and class_dep("com/example/mod/other/Loose.java", deps) is None,
+           "dep_named / class_dep: an integration package's name stands for its dropped dependency, nothing else does")
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w5, _w = worktree_for(r, "1.21.5")
+        _hand(w5, {".port/1.21.5/DEPS.md": deps, ".port/1.21.5/drops.txt": drops,
+                   pl: ("int v = 1;", "int v = 1; int h5;")}, "1.21.5: a hand change, a dropped integration")
+        _authors(r, g, {pl: ("int v = 1;", "int v = 1; SpellStaff staff;")}, "authors: the staff")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply", out_dir=str(pathlib.Path(d) / "plan"))
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        ents = [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == pl]
+        plan = json.loads((pathlib.Path(d) / "plan" / "CASCADE-PLAN.json").read_text(encoding="utf-8"))
+        pd = [x for x in plan["decisions"] if x["file"] == pl]
+        expect(rc == 0 and len(ents) == 1 and ents[0].get("deferred") == dep and not ents[0].get("escalate")
+               and b"SpellStaff" not in f5[pl] and not any("did not merge into " + pl in w for w in target_done(r, "1.21.5"))
+               and f"keep (deferred on {dep})".encode() in f5.get(".port/DECISIONS.md", b"")
+               and pd and pd[0]["choice"] == DEFERRED + dep and not pd[0]["escalate"],
+               f"a file using a dropped integration's class: the deferred default, proposed as deferred:<dep>: {ents} {pd} "
+               f"{out[-400:]}")
+    with tempfile.TemporaryDirectory() as d:
+        r, g, _run = _migrated_fixture(d)
+        w5, _w = worktree_for(r, "1.21.5")
+        _hand(w5, {".port/1.21.5/DEPS.md": deps, ".port/1.21.5/drops.txt": drops,
+                   pl: ("int v = 1;", "int v = 1; int h5;")}, "1.21.5: a hand change, a dropped class")
+        _authors(r, g, {pl: ("int v = 1;", "int v = 1; Loose loose;")}, "authors: a loose class")
+        rc, out = _quiet(cascade, r, "port..1.21.5", "none", mode="apply")
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        ents = [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == pl]
+        expect(rc == 0 and len(ents) == 1 and ents[0].get("escalate") and not ents[0].get("deferred"),
+               f"a dropped class no dropped dependency owns: escalated as before: {ents}")
+        did = ents[0].get("id") if ents else "?"
+        bad, good = pathlib.Path(d) / "bad.json", pathlib.Path(d) / "good.json"
+        bad.write_text(json.dumps({"range": "port..1.21.5", "decisions": [{"id": did, "choice": "deferred:nosuchmod",
+                                                                          "by": "owner"}]}), encoding="utf-8")
+        good.write_text(json.dumps({"range": "port..1.21.5", "decisions": [{"id": did, "choice": "deferred:example_spells",
+                                                                           "by": "owner", "reason": "kept, deferred"}]}),
+                        encoding="utf-8")
+        rc_b, out_b = _quiet(apply_decisions, r, str(bad), "none")
+        rc_g, out_g = _quiet(apply_decisions, r, str(good), "none")
+        f5 = ref_files(r, resolve_branch(r, "neoforge-1.21.5"))
+        ents = [c for c in remerge_entries(f5.get(".port/1.21.5/REMERGE.json", b"")) if c.get("overlay") == pl]
+        expect(rc_b == 1 and "is not a dependency" in out_b and rc_g == 0 and len(ents) == 1
+               and ents[0].get("deferred") == dep and not ents[0].get("escalate")
+               and f"keep (deferred on {dep}) | owner".encode() in f5.get(".port/DECISIONS.md", b"")
+               and not any("did not merge into " + pl in w for w in target_done(r, "1.21.5")),
+               f"--apply-decisions deferred:<dep>: the entry kept, deferred, logged; an undropped name refused: "
+               f"{ents} {out_b[-300:]} {out_g[-300:]}")
+
+
 def _check_cascade_plan(expect):
     """cascade --plan / --apply / --apply-decisions on a 4-version fixture: one conflict at two versions grouped into one
     decision, a mechanical one resolved, an optional integration absent at a version decided by default (logged), an
@@ -7240,6 +7514,8 @@ def self_check():
         _check_remake(expect)
         _check_rows_through_merge(expect)
         _check_cutout(expect)
+        _check_origin_sync(expect)
+        _check_deferred_uses(expect)
     if deep:
         _check_cascade_plan(expect)
         _check_migrate_library(expect)

@@ -352,7 +352,9 @@ and version-branch forks alike:
   (`/decide <id> <choice>`), the **dependency updates** (`weekly-plan.py deps`: per Minecraft version the fork builds,
   each pinned CurseForge/Modrinth dependency with a newer compatible build, current -> new, ticked by default and
   unticked with the reason when the new build is an alpha/beta, a major-version jump, drops a Minecraft version the fork
-  builds or switches provider; a failed lookup is listed "could not check"), and grade overrides (`/grade <ID> <S1-S4>
+  builds or switches provider; on a version-branch fork also each dependency a version dropped that has a build for it
+  now, an unticked **restore** box -- ticked, the round pins it again with the same `--bump`, and that version's
+  integration code then needs compiling, porting and review; a failed lookup is listed "could not check"), and grade overrides (`/grade <ID> <S1-S4>
   [reason]`); its title starts `[decision needed]` when the plan escalates something. It costs no model quota, so it opens whether or not the owner has any left.
 - **Wednesday morning America/Los_Angeles: the round** ("The weekly round" below), a Claude scheduled task with a fresh
   session each fire, at `round.time` in `.github/weekly-plan.json` (a minute below 08:30, jittered per fork set from the
@@ -614,7 +616,8 @@ it small, so for such a set the orchestration is a tool, which replaces the four
      3. the review, the fixer's fixes of its `not-ok` rows and their re-check (below), committed;
      4. ONE full run on that final tree, on the version's checkout: `fork-port.py --repo DIR --target <v> --from-stage
         measure --gates full` (the compile re-measured, the audits and every gate run; setup, staging and the class moves
-        not redone). Only a red run, or a jar-relevant change after it, needs another; a fix made after the review gets
+        not redone). It fixes nothing: a re-run from `measure` has no compile-loop budget unless given one (`--budget`),
+        so a compile error stops it red with the tree as it was, for the fixer. Only a red run, or a jar-relevant change after it, needs another; a fix made after the review gets
         its changed rows re-checked like any other;
      5. a records-only commit after it -- GATES.md, REVIEW.md, COST.md, TEST-ITEMS.md, the ledger, the root README, the
         freeze or a `library.` record in branch.properties -- stales no gate and no review: run nothing again for it
