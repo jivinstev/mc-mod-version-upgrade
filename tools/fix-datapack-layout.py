@@ -155,6 +155,60 @@ def scan_advancements(data_root, apply):
     return hits
 
 
+# ─────────────── S11: location-predicate keys 1.20.5 renamed (ignored, so the predicate is always true) ───────────────
+# 1.20.5's LocationPredicate takes HolderSets: `structures` and `biomes`. A 1.20.x `structure` / `biome` key is an
+# unknown key, IGNORED -- the predicate then matches anywhere, and a "discover the ruins" advancement is granted on the
+# player's first tick (CATALOG S11). Report-only in --verify (a new finding, not a new failure); --apply renames the key
+# (a single id, a list or a #tag are all valid values of the new key).
+LOCATION_KEYS = {"structure": "structures", "biome": "biomes"}
+LOCATION_PARENTS = ("location", "stepping_on", "movement_affected_by")
+
+
+def _location_dicts(node, parent=None, sibling=None):
+    """Every location-predicate dict in a decoded JSON tree: the value of a `location` / `stepping_on` /
+    `movement_affected_by` key, or the `predicate` of a `location_check` loot condition."""
+    if isinstance(node, dict):
+        if parent in LOCATION_PARENTS or (parent == "predicate" and str(sibling or "").endswith("location_check")):
+            yield node
+        for k, v in node.items():
+            yield from _location_dicts(v, k, node.get("condition"))
+    elif isinstance(node, list):
+        for v in node:
+            yield from _location_dicts(v, parent, sibling)
+
+
+def scan_location_keys(data_root, apply):
+    """[(file, old key -> new key)] of the pre-1.20.5 location-predicate keys under advancement/, predicate/ and
+    loot_table/; with apply the keys are renamed (the file rewritten with indent 2 only when a key changed)."""
+    hits = []
+    for root, _, files in os.walk(data_root):
+        r_ = root + os.sep
+        if not any(os.sep + d + os.sep in r_ for d in ("advancement", "predicate", "loot_table")):
+            continue
+        for fn in sorted(files):
+            if not fn.endswith(".json"):
+                continue
+            path = os.path.join(root, fn)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    doc = json.load(f)
+            except (OSError, ValueError):
+                continue
+            found = []
+            for d in _location_dicts(doc):
+                for old, new in LOCATION_KEYS.items():
+                    if old in d and new not in d:
+                        found.append(f'"{old}" -> "{new}"')
+                        if apply:
+                            d[new] = d.pop(old)
+            if found:
+                hits.append((os.path.relpath(path, data_root).replace(os.sep, "/"), sorted(set(found))))
+                if apply:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    return hits
+
+
 # ─────────────────────────── §143: the 1.21 loot-table cluster ───────────────────────────
 # Every 1.20 mob-drop table fails to parse on 1.21, and it fails SILENTLY: the error is logged at
 # data load and the table is then ignored, so the mob simply drops nothing. Live example, found by
@@ -488,6 +542,9 @@ def main():
         print(f"   rewrote {len(icons)} advancement icon(s) for the 1.21 ItemStack codec")
         lfiles, lcounts = scan_loot(data_root, apply=True)
         print(f"   rewrote {lfiles} loot table(s) for the 1.21 codecs")
+        locs = scan_location_keys(data_root, apply=True)
+        if locs:
+            print(f"   renamed the pre-1.20.5 location-predicate keys in {len(locs)} file(s) (CATALOG S11)")
         for note, n in sorted(lcounts.items()):
             print(f"      {n:4d}x  {note}")
 
@@ -529,6 +586,12 @@ def main():
                 f"\n   ✗ {lfiles} loot table(s) use pre-1.21 functions/conditions.\n{detail}\n"
                 "     1.21 logs a parse error and then IGNORES the table, so the mob drops NOTHING —\n"
                 "     no crash, and no gate fails. Fix: python3 tools/fix-datapack-layout.py <mod> --apply")
+        locs = scan_location_keys(data_root, apply=False)
+        if locs:
+            # report only: a finding the gate states, not a new failure of it
+            print(f"   ⚠ report: {len(locs)} file(s) use a pre-1.20.5 location-predicate key, IGNORED by 1.21 (the "
+                  f"predicate matches anywhere; CATALOG S11), e.g. {locs[0][0]}: {', '.join(locs[0][1])}. "
+                  "Fix: python3 tools/fix-datapack-layout.py <mod> --apply")
         print("   ✓ datapack layout is 1.21-clean")
     elif not apply:
         print("   (report only — pass --apply to make the changes)")
@@ -581,6 +644,25 @@ def self_check():
         v = run("--verify")
         ok &= v.returncode == 0 and "1.21-clean" in v.stdout
         ok &= "Forge-only" not in run("--apply").stdout          # idempotent
+    # S11: a pre-1.20.5 location-predicate key -- reported by --verify (which still passes), renamed by --apply
+    with tempfile.TemporaryDirectory() as t:
+        w(t, "data/m/advancement/ruins.json", {"criteria": {"found": {"trigger": "minecraft:location", "conditions": {
+            "player": [{"condition": "minecraft:entity_properties", "entity": "this",
+                        "predicate": {"location": {"structure": "m:ruins"}}}]}}}})
+        w(t, "data/m/loot_table/chests/c.json", {"pools": [{"conditions": [{"condition": "minecraft:location_check",
+                                                                              "predicate": {"biome": "minecraft:plains"}}]}]})
+        w(t, "data/m/advancement/fine.json", {"criteria": {"x": {"trigger": "minecraft:location", "conditions": {
+            "player": [{"condition": "minecraft:entity_properties", "entity": "this",
+                        "predicate": {"location": {"structures": "m:ruins"}, "structure": "not a location key"}}]}}}})
+        hits = scan_location_keys(os.path.join(t, "src/main/resources/data"), apply=False)
+        ok &= [h[0] for h in hits] == ["m/advancement/ruins.json", "m/loot_table/chests/c.json"]
+        v = run("--verify")
+        ok &= v.returncode == 0 and "⚠ report: 2 file(s)" in v.stdout and "1.21-clean" in v.stdout
+        run("--apply")
+        ok &= r(t, "data/m/advancement/ruins.json")["criteria"]["found"]["conditions"]["player"][0]["predicate"] == \
+            {"location": {"structures": "m:ruins"}}
+        ok &= r(t, "data/m/loot_table/chests/c.json")["pools"][0]["conditions"][0]["predicate"] == {"biomes": "minecraft:plains"}
+        ok &= "⚠ report" not in run("--verify").stdout
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 

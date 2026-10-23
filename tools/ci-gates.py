@@ -203,6 +203,32 @@ def cf_jars(libs, found, mc=None):
         if pathlib.Path(libs).is_dir() else []
 
 
+def wiring_ref(repo, bv, base):
+    """The sources tools/audit-wiring.py compares the tree with: a version branch's parent branch (origin's, else the
+    local one), else the authors' ref (--base); None when neither resolves."""
+    cands = []
+    if bv:
+        parent = read_kv(pathlib.Path(repo) / ".port" / bv / "branch.properties").get("parent")
+        if parent:
+            cands += [f"origin/{parent}", parent]
+    if base:
+        cands.append(base)
+    for ref in cands:
+        if subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                          capture_output=True).returncode == 0:
+            return ref
+    return None
+
+
+def report_row(name, rc, out, prefix):
+    """A REPORT row (a finding the run states, never a red gate) for an audit's exit and output, or None when it found
+    nothing or could not run: a clean tree's GATES.md is exactly what it was."""
+    if rc != 1:
+        return None
+    hits = [l[len(prefix):].strip() for l in out.splitlines() if l.startswith(prefix)][:-1]
+    return f"| {name} | REPORT | {len(hits)} to read: " + "; ".join(h.replace('|', '/') for h in hits)[:600] + " |"
+
+
 def self_check():
     ok = green_detail("[x] All 4 required tests passed :)") == "4 required test(s) passed"
     ok &= green_detail("M_BOOT_TEST: spawned 40 creature type(s): [a]\nM_BOOT_TEST: PASS — ticked 200").startswith(
@@ -240,6 +266,19 @@ def self_check():
         t = log_tails([pathlib.Path(d) / "a.log", pathlib.Path(d) / "missing.log"], n=3)
         ok &= t.splitlines() == ["----- tail of a.log (3 of 100 lines) -----", "l97", "l98", "l99"]
         ok &= log_tails([pathlib.Path(d) / "missing.log"]) == ""
+    # the report-only audits: a row only for a finding, so a clean tree's GATES.md is what it was (single-version too)
+    ok &= report_row("W", 0, "audit-wiring: 0 finding(s)", "audit-wiring:") is None
+    ok &= report_row("W", 2, "audit-wiring: no Java sources", "audit-wiring:") is None
+    rr = report_row("W", 1, "audit-wiring: event wiring lost: A|B\naudit-wiring: 1 finding(s) against x", "audit-wiring:")
+    ok &= rr == "| W | REPORT | 1 to read: event wiring lost: A/B |" and "FAIL" not in rr
+    with _t.TemporaryDirectory() as d:   # wiring_ref: a version branch's parent, else --base, else nothing
+        g = lambda *x: subprocess.run(["git", "-C", d, *x], capture_output=True, check=True)
+        g("init", "-q", "-b", "neoforge-1.21.1"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
+        (pathlib.Path(d) / "f").write_text("x", encoding="utf-8"); g("add", "-A"); g("commit", "-qm", "x")
+        (pathlib.Path(d) / ".port/1.21.4").mkdir(parents=True)
+        (pathlib.Path(d) / ".port/1.21.4/branch.properties").write_text("parent=neoforge-1.21.1\n", encoding="utf-8")
+        ok &= wiring_ref(d, "1.21.4", "authors/main") == "neoforge-1.21.1" and wiring_ref(d, None, "neoforge-1.21.1") == \
+            "neoforge-1.21.1" and wiring_ref(d, None, "nosuch/ref") is None and wiring_ref(d, None, None) is None
     with _t.TemporaryDirectory() as d:   # tested_tree: a layer run names the edits it tested; HEAD alone when clean
         g = lambda *x: subprocess.run(["git", "-C", d, *x], capture_output=True, check=True)
         g("init", "-q"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
@@ -411,9 +450,31 @@ def main():
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         (work / "datapack-verify.log").write_text(r.stdout + r.stderr, encoding="utf-8")
         lines = [l.strip() for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+        rep = [l[len("⚠ report:"):].strip() for l in lines if l.startswith("⚠ report:")]
         record("Data -- nothing NeoForge would silently ignore", r.returncode == 0,
-               "1.21-clean" if r.returncode == 0 else
+               ("1.21-clean" + ("; report: " + rep[0][:240] if rep else "")) if r.returncode == 0 else
                "; ".join(l for l in lines if l.startswith(("✗", "REFUSED")))[:300] or lines[-1][:300])
+
+    if ok:     # report only, never red: wiring the port dropped against its parent / the authors' source (CATALOG 12e),
+        # and vanilla descriptors kept as strings outside the mixins checked against the build's sources jar (V118)
+        against = wiring_ref(repo, bv, a.base)
+        if against:
+            r = subprocess.run([sys.executable, str(ROOT / "tools/audit-wiring.py"), "--repo", str(repo), "--against", against],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+            (work / "audit-wiring.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+            print((r.stdout.strip().splitlines() or ["audit-wiring: no output"])[-1], flush=True)
+            row = report_row(f"Wiring -- subscribers and capabilities against `{against}` (report)", r.returncode,
+                             r.stdout, "audit-wiring:")
+            if row:
+                rows.append(row)
+        r = subprocess.run([sys.executable, str(ROOT / "tools/audit-descriptors.py"), str(repo)],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        (work / "audit-descriptors.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+        print((r.stdout.strip().splitlines() or ["audit-descriptors: no output"])[-1], flush=True)
+        row = report_row("Descriptors -- vanilla names in strings outside the mixins (report)", r.returncode, r.stdout,
+                         "audit-descriptors:")
+        if row:
+            rows.append(row)
 
     if ok:     # static: a payload codec that rejects every send (client disconnect, no server-side gate sees it)
         r = subprocess.run([sys.executable, str(ROOT / "tools/audit-unit-codecs.py"), str(repo / "src/main/java")],

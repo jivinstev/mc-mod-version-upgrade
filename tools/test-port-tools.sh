@@ -341,6 +341,8 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "dep-moves.py|dep-moves: classes a dependency moved between the author's jar and the target's are found by comparing the jars, and rewritten" \
             "convert-valueio.py|convert-valueio: scalar entity/block-entity save-load onto ValueInput/ValueOutput, hurt onto hurtServer; the rest refused" \
             "audit-unit-codecs.py|audit-unit-codecs: a field-less payload class behind StreamCodec.unit is caught; a record is not" \
+            "audit-wiring.py|audit-wiring: a dropped @EventBusSubscriber or register call, an unregistered Forge capability, a lost registration and a null-side provider are reported; a clean port is not" \
+            "audit-descriptors.py|audit-descriptors: a removed method, a changed signature and a moved class in a transformer's strings are reported; a supertype's method, a mod's own names, comments and mixin files are not" \
             "convert-override-signatures.py|convert-override-signatures: a hook whose 26.2 signature changed keeps its body in a private 1.21.1-shaped copy" \
             "port-derive.py|port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handlers dropped" \
             "mechanical-hop.py|mechanical-hop: members, then every converter in order, then members; a converter that changed nothing is not recounted; one needing the port's input is an advisory" \
