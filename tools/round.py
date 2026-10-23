@@ -1396,6 +1396,15 @@ def built_jars(co):
     return [j for j in (pathlib.Path(co) / "build/libs").glob("*.jar") if not j.name.endswith("-sources.jar")]
 
 
+def gate_run_cmd(d, v, stage, frozen, *extra):
+    """A full gate run of version v's checkout d through fork-port.py, from `stage`. A gate run fixes nothing: no compile
+    loop budget (--budget 0 --max-errors 0), so a compile error stops it red with the tree as it was -- with the default
+    budget a gate re-run that met an error started the file loop, whose workers (and its 0-error scan and probe rounds)
+    rewrote files nothing had asked about (weekly round 2026-10-21). A red run goes back to the fixer."""
+    return [sys.executable, TOOLS / "fork-port.py", "--repo", d, "--target", v, "--from-stage", stage, "--gates", "full",
+            "--budget", "0", "--max-errors", "0", *extra, "--untaken-ok", frozen]
+
+
 def t_gates(st, it, log):
     """ONE full gate run on the version's checkout. Records what it gated (gated_head, before the records commit) and
     when, after removing the checkout's old jars: the library's pre-merge dependent gate takes only a jar this run
@@ -1408,8 +1417,7 @@ def t_gates(st, it, log):
             j.unlink()
         gated, at = head(d), time.time()
         with full_gate_lock(it["id"], say_to(log)) as lk:
-            sh(st, it, [sys.executable, TOOLS / "fork-port.py", "--repo", d, "--target", v, "--from-stage", "measure",
-                        "--gates", "full", "--untaken-ok", st.data["frozen"]], log, ok=(0, 18), hold=lk)
+            sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"]), log, ok=(0, 18), hold=lk)
         if (pathlib.Path(d) / ".port" / v / "GATES-RED.md").is_file():
             raise StepError(f".port/{v}/GATES-RED.md: the full run is not green")
         why = gates_green(pathlib.Path(d) / ".port" / v / "GATES.md", gated, v)
@@ -1459,9 +1467,8 @@ def t_depgate(st, it, log):
     try:
         wt_head = head(work)
         with full_gate_lock(it["id"], say_to(log)) as lk:
-            r = sh(st, it, [sys.executable, TOOLS / "fork-port.py", "--repo", work, "--target", v, "--from-stage",
-                            "setup", "--gates", "full", "--port-checkout", f"{it['fork']}={lco}",
-                            "--allow-undone-library", "--untaken-ok", st.data["frozen"]], log, ok=range(0, 256), hold=lk)
+            r = sh(st, it, gate_run_cmd(work, v, "setup", st.data["frozen"], "--port-checkout", f"{it['fork']}={lco}",
+                                        "--allow-undone-library"), log, ok=range(0, 256), hold=lk)
         for f in ("GATES.md", "GATES-RED.md", "RESIDUE.md", "DEPS.md"):
             q_ = work / ".port" / v / f
             if q_.is_file():
@@ -2179,6 +2186,13 @@ def self_check():
         buf = []
         rc = fn(*a_, out=buf.append)
         return rc, "\n".join(buf)
+    # a version branch's gate run fixes nothing (weekly round 2026-10-21: a gate re-run with the default budget started
+    # the file loop and rewrote unrelated files); the single-version route's commands (sv_gate_cmds) are not this one
+    gc_ = [str(x) for x in gate_run_cmd("co", "1.21.4", "measure", "frozen.json", "--allow-undone-library")]
+    expect(gc_[gc_.index("--budget") + 1] == "0" and gc_[gc_.index("--max-errors") + 1] == "0"
+           and gc_[gc_.index("--from-stage") + 1] == "measure" and gc_[gc_.index("--gates") + 1] == "full"
+           and "--allow-undone-library" in gc_ and gc_[-2:] == ["--untaken-ok", "frozen.json"],
+           f"gate_run_cmd: a full gate run with no compile-loop budget: {gc_}")
 
     def job_file(j):
         p_ = pathlib.Path(j["prompt"].split("Read ", 1)[1].split(" and do", 1)[0])

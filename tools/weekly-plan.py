@@ -871,16 +871,33 @@ def fork_pins(f, fb, ld):
     return out
 
 
+def fork_dropped(f, fb, ld):
+    """{mc: {group:module: the authors' base coordinate}}: the registry dependencies each version branch dropped (its
+    layer-deps block excludes them: DEPS.md "dropped: no <v> build"). A single-version fork has none."""
+    clone = f["clone"]
+    show = lambda ref, p: git(clone, "show", f"{ref}:{p}").stdout if git(clone, "cat-file", "-e", f"{ref}:{p}").returncode == 0 else ""
+    out = {}
+    for v in sorted(fb.version_branches(clone), key=fb.mc_key):
+        ref = fb.resolve_branch(clone, fb.branch_name(v))
+        if ref:
+            d = ld.dropped_pins(show(ref, "build.gradle"), show(ref, "gradle.properties"),
+                                show(ref, f".port/{v}/branch.properties"))
+            if d:
+                out[v] = d
+    return out
+
+
 def step_deps(work, lk=None):
     """Each fork: every pinned CurseForge/Modrinth dependency with a newer compatible build, per Minecraft version it
-    builds (tools/layer-deps.py dependency_updates: no model; Modrinth's public API, CurseForge only with a key). A
+    builds, and every dependency a version branch dropped that has a build for it now (an unticked "restore" box)
+    (tools/layer-deps.py dependency_updates: no model; Modrinth's public API, CurseForge only with a key). A
     lookup that fails is listed as "could not check", and a fork whose pins cannot be read gets one such line: this
     step never fails the plan."""
     inp = load_input(work)
     fb, ld = fb_mod(), ld_mod()
     for f in inp["forks"]:
         try:
-            f["dep_updates"] = ld.dependency_updates(fork_pins(f, fb, ld), lk)
+            f["dep_updates"] = ld.dependency_updates(fork_pins(f, fb, ld), lk, fork_dropped(f, fb, ld))
         except Exception as e:          # noqa: BLE001 -- fail soft: the plan goes on, the section says so
             f["dep_updates"] = {"rows": [], "checked": 0,
                                 "unchecked": [{"mc": "?", "ga": "*", "coord": "", "why": f"the pins could not be read ({e})"}]}
@@ -1363,7 +1380,8 @@ def self_check():
         subprocess.run(["git", "clone", "-q", str(up), str(vb)], check=True, capture_output=True)
         gq(vb, "checkout", "-q", "-b", "neoforge-1.21.1", "HEAD~1")
         (vb / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
-        (vb / "build.gradle").write_text('dependencies {\n    runtimeOnly "maven.modrinth:viewer:a1"\n}\n', encoding="utf-8")
+        (vb / "build.gradle").write_text('dependencies {\n    runtimeOnly "maven.modrinth:viewer:a1"\n'
+                                         '    compileOnly "maven.modrinth:extra:a2"\n}\n', encoding="utf-8")
         gq(vb, "add", "-A"); gq(vb, "commit", "-qm", "port")
         x = gq(vb, "rev-parse", "HEAD")
         gq(vb, "checkout", "-q", "-b", "neoforge-1.21.3")
@@ -1373,6 +1391,7 @@ def self_check():
             "minecraft_version=1.21.3\nbranch=neoforge-1.21.3\nparent=neoforge-1.21.1\nparent_minecraft_version=1.21.1\n"
             f"port_branch=neoforge-1.21.1\nbase_minecraft_version=1.21.1\nport_taken={x}\n"
             "# BEGIN layer-deps (tools/layer-deps.py)\nsubstitute.maven.modrinth\\:viewer=maven.modrinth:viewer:a3\n"
+            "exclude.maven.modrinth\\:extra=no 1.21.3 build (extra)\n"
             "# END layer-deps\n", encoding="utf-8")
         gq(vb, "add", "-A"); gq(vb, "commit", "-qm", "1.21.3")
         gq(vb, "checkout", "-q", "neoforge-1.21.1"); gq(vb, "merge", "-q", "--no-ff", "--no-edit", "origin/main")
@@ -1389,13 +1408,16 @@ def self_check():
             step_deps(w3, dlk)
         fv = load_input(w3)["forks"][0]
         expect([(r["mc"], r["to"], r["default"], "a beta" in r["why"]) for r in fv["dep_updates"]["rows"]]
-               == [("1.21.1", "maven.modrinth:viewer:a2", True, False), ("1.21.3", "maven.modrinth:viewer:a4", False, True)],
-               f"deps, a version-branch fork: per version, the branch's own pin (its block) checked, a beta unticked: "
-               f"{fv['dep_updates']}")
+               == [("1.21.1", "maven.modrinth:viewer:a2", True, False), ("1.21.3", "maven.modrinth:viewer:a4", False, True),
+                   ("1.21.3", "maven.modrinth:extra:a3", False, False)]
+               and [r.get("restore", False) for r in fv["dep_updates"]["rows"]] == [False, False, True]
+               and fv["dep_updates"]["rows"][2]["from"] == "maven.modrinth:extra:a2",
+               f"deps, a version-branch fork: per version, the branch's own pin (its block) checked, a beta unticked; the "
+               f"dependency 1.21.3 dropped, with a build now, an unticked restore box: {fv['dep_updates']}")
         with contextlib.redirect_stdout(io.StringIO()):
             step_deps(w3, {"mr_files": lambda p: (_ for _ in ()).throw(OSError("offline")), "cf": lambda: None})
         fo = load_input(w3)["forks"][0]["dep_updates"]
-        expect(not fo["rows"] and len(fo["unchecked"]) == 2 and all("offline" in u["why"] for u in fo["unchecked"]),
+        expect(not fo["rows"] and len(fo["unchecked"]) == 4 and all("offline" in u["why"] for u in fo["unchecked"]),
                f"deps with every lookup failing: each pin could not be checked, no failure: {fo}")
         expect(fv["new_count"] == 0 and fv["cascade"]["range"] == "neoforge-1.21.1..1.21.3" and fv["base_version"] == "1.21.1"
                and [(c["subject"].split(" ")[0], c["merge"], c["versions"]) for c in fv.get("untaken", [])]

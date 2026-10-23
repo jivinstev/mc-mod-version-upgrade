@@ -457,10 +457,20 @@ def recut_number(tag):
 SIDE_JAR = re.compile(r"-(?:sources|javadoc|api|dev|slim)\.jar$")
 
 
+# a version's qualifiers after its numbers (`-fix`, `-fix-fix`, `-beta.2`, `-rc1`, `+1.21.4`): hyphen or plus chunks
+# that hold a digit, or are a known release word (fix, hotfix, beta, alpha, rc, pre, patch; any case, repeatable) --
+# never an underscore (`_mr`/`_cf` is the variant), and never a loader or side word (`-NeoForge`, `-fabric`, `-client`)
+_QUALIFIER_WORDS = r"(?:fix|hotfix|beta|alpha|rc|pre|patch)"
+_VERSION_QUALIFIER = (r"(?:[-+](?:[A-Za-z0-9.]*\d[A-Za-z0-9.]*|(?i:" + _QUALIFIER_WORDS + r")[0-9.]*)(?![A-Za-z]))*")
+
+
 def asset_shape(name):
-    """A jar's name with its versions blanked: `lib-1.1.9_mr.jar`, `lib-1.1.8_mr-mc1.21.8.jar` -> `lib-#_mr.jar`; what
-    stays is the mod's name and the variant (`_mr`, `_cf`, `-fabric`)."""
-    return re.sub(r"\d+(?:\.\d+)+(?:[-+][\w.]*\d[\w.]*)?", "#", re.sub(r"-mc\d+(?:\.\d+)*", "", name))
+    """A jar's name with its versions blanked: `lib-1.1.9_mr.jar`, `lib-1.1.8_mr-mc1.21.8.jar`, `lib-1.1.9-fix-fix_mr.jar`
+    -> `lib-#_mr.jar`; what stays is the mod's name and the variant (`_mr`, `_cf`, `-fabric`, `-client`), compared
+    without case (`-NeoForge` is `-neoforge`). The `.jar` extension is set aside first, so no qualifier can take it."""
+    stem, ext = (name[:-4], ".jar") if name.lower().endswith(".jar") else (name, "")
+    stem = re.sub(r"-mc\d+(?:\.\d+)*", "", stem)
+    return (re.sub(r"\d+(?:\.\d+)+" + _VERSION_QUALIFIER, "#", stem) + ext).lower()
 
 
 def pick_release_asset(names, want, target):
@@ -1445,10 +1455,9 @@ def mr_version_of_sha1(sha1):
             "channel": v.get("version_type"), "date": v.get("date_published"), "name": v.get("version_number")}
 
 
-def update_candidate(coord, mc, lk=None, cache=None):
-    """(current build, newer build, its coordinate, provider switch?) for a pinned registry coordinate at Minecraft `mc`:
-    the newest compatible build published after the pinned one (release first, then beta, then alpha, as pick() picks);
-    newer None when there is none. Raises LookupError when it cannot tell (the plan says "could not check")."""
+def _candidate_files(coord, mc, lk=None, cache=None):
+    """(the project's builds, the pinned build or None, coordinate maker, provider switch?) of a pinned registry
+    coordinate, for Minecraft `mc`. Raises LookupError when it cannot tell."""
     lk = {"mr_files": mr_files, "cf": cf_provider, "cf_files": cf_files, "mr_sha1": mr_version_of_sha1,
           "curse_jar": lambda m, v: _get(f"{CURSEMAVEN}/{m}/{v}/{m}-{v}.jar"), **(lk or {})}
     cache = {} if cache is None else cache
@@ -1482,21 +1491,57 @@ def update_candidate(coord, mc, lk=None, cache=None):
             mk, switch = (lambda f, p=cur["project"]: f"maven.modrinth:{p}:{f['id']}"), True
     else:
         raise LookupError(f"{coord}: not a CurseForge or Modrinth coordinate")
+    return files, cur, mk, switch
+
+
+def update_candidate(coord, mc, lk=None, cache=None):
+    """(current build, newer build, its coordinate, provider switch?) for a pinned registry coordinate at Minecraft `mc`:
+    the newest compatible build published after the pinned one (release first, then beta, then alpha, as pick() picks);
+    newer None when there is none. Raises LookupError when it cannot tell (the plan says "could not check")."""
+    files, cur, mk, switch = _candidate_files(coord, mc, lk, cache)
     if cur is None:
-        raise LookupError(f"the pinned build {v} is not among the project's builds")
+        raise LookupError(f"the pinned build {coord.split(':')[-1]} is not among the project's builds")
     newer = [f for f in files if (f.get("date") or "") > (cur.get("date") or "") and f.get("id") != cur.get("id")]
     new = pick(newer, mc)
     return cur, new, (mk(new) if new else None), switch
 
 
+def restore_candidate(coord, mc, lk=None, cache=None):
+    """(build, its coordinate, provider switch?) for a dependency a version DROPPED (no build for `mc` when it was
+    resolved; `coord` is the authors' base pin): the build pick() takes for `mc` now, or (None, None, switch). Raises
+    LookupError when it cannot tell."""
+    files, _cur, mk, switch = _candidate_files(coord, mc, lk, cache)
+    new = pick(files, mc)
+    return new, (mk(new) if new else None), switch
+
+
+def dropped_pins(build_text, props_text, branch_props_text=""):
+    """{group:module: the authors' base coordinate} of each registry dependency a version's layer-deps block excludes
+    (DEPS.md "dropped: no <v> build"): what the weekly plan re-checks for a build that has appeared since."""
+    base = {f"{d['group']}:{d['module']}": d["coord"] for d in build_pins(build_text, props_text)}
+    text = branch_props_text or ""
+    if BEGIN not in text or END not in text:
+        return {}
+    blk = text[text.index(BEGIN):text.index(END)]
+    out = {}
+    for k in re.findall(r"(?m)^exclude\.(.+?)=", blk):
+        ga = k.replace("\\:", ":")
+        if ga in base:
+            out[ga] = base[ga]
+    return out
+
+
 SAFE_COORD = re.compile(r"^[A-Za-z0-9._+:-]+$")     # what a coordinate may hold to be written into a command (and a box)
 
 
-def dependency_updates(pins_by_mc, lk=None):
+def dependency_updates(pins_by_mc, lk=None, dropped_by_mc=None):
     """{"rows": [{"id", "mc", "ga", "from", "to", "from_name", "to_name", "channel", "default", "why"}],
     "unchecked": [{"mc", "ga", "coord", "why"}], "checked": n} for {mc: {group:module: coordinate}}. A row is ticked
     (default) unless the newer build is an alpha or beta, a major-version jump, drops a Minecraft version the fork builds
-    that the pinned build serves, or switches provider. A lookup that fails is listed unchecked, never raised."""
+    that the pinned build serves, or switches provider. A lookup that fails is listed unchecked, never raised.
+    dropped_by_mc ({mc: {group:module: base coordinate}}, dropped_pins): a dependency a version dropped that has a build
+    for it now is a "restore" row (restore: True), never ticked by default -- bringing an integration back is a port of
+    its code, the owner's call."""
     built = sorted(pins_by_mc, key=lambda v: tuple(int(x) for x in re.findall(r"\d+", v)))
     rows, unchecked, n, cache = [], [], 0, {}
     for mc in built:
@@ -1533,6 +1578,31 @@ def dependency_updates(pins_by_mc, lk=None):
             rows.append({"id": f"D{len(rows) + 1}", "mc": mc, "ga": ga, "from": coord, "to": to,
                          "from_name": cur.get("name"), "to_name": new.get("name"), "channel": new.get("channel"),
                          "default": not why, "why": "; ".join(why)})
+    for mc in sorted(dropped_by_mc or {}, key=lambda v: tuple(int(x) for x in re.findall(r"\d+", v))):
+        for ga, coord in sorted(dropped_by_mc[mc].items()):
+            n += 1
+            try:
+                if not SAFE_COORD.match(coord) or not SAFE_COORD.match(ga):
+                    raise LookupError("the pinned coordinate holds characters a command must not carry")
+                new, to, switch = restore_candidate(coord, mc, lk, cache)
+                if to is not None and not SAFE_COORD.match(to):
+                    raise LookupError("the build's version holds characters a command must not carry "
+                                      "(only A-Z a-z 0-9 . _ + : - are taken): restore it by hand if it is right")
+            except Exception as e:      # noqa: BLE001 -- fail soft
+                unchecked.append({"mc": mc, "ga": ga, "coord": coord if SAFE_COORD.match(coord) else "",
+                                  "why": f"dropped at {mc}: " + (str(e)[:200] or type(e).__name__)})
+                continue
+            if not new:
+                continue
+            why = [f"restore: dropped at {mc} (no build when it was resolved; DEPS.md), a build exists now -- if ticked, "
+                   "the dependency is pinned again and its integration code has to compile, be ported and reviewed"]
+            if new.get("channel") in ("alpha", "beta"):
+                why.append(f"a {new['channel']}")
+            if switch:
+                why.append("found on Modrinth by the CurseForge jar's sha1 (no CURSEFORGE_API_KEY): a Modrinth coordinate")
+            rows.append({"id": f"D{len(rows) + 1}", "mc": mc, "ga": ga, "from": coord, "to": to, "restore": True,
+                         "from_name": "dropped", "to_name": new.get("name"), "channel": new.get("channel"),
+                         "default": False, "why": "; ".join(why)})
     return {"rows": rows, "unchecked": unchecked, "checked": n}
 
 
@@ -1681,13 +1751,26 @@ def checkout_pins(repo, target=None):
     return out
 
 
+def checkout_dropped(repo, target=None):
+    """{mc: {group:module: base coordinate}} of the dependencies a version branch's checkout dropped (its block's
+    excludes); {} for a single-version checkout (no .port/<mc>/branch.properties)."""
+    repo = pathlib.Path(repo)
+    rd = lambda p: (repo / p).read_text(encoding="utf-8") if (repo / p).is_file() else ""
+    props = rd("gradle.properties")
+    mc = target or read_props_text(props).get("minecraft_version") or "?"
+    d = dropped_pins(rd("build.gradle"), props, rd(f".port/{mc}/branch.properties"))
+    return {mc: d} if d else {}
+
+
 def cmd_updates(a):
-    res = dependency_updates(checkout_pins(pathlib.Path(a.repo), a.target))
+    res = dependency_updates(checkout_pins(pathlib.Path(a.repo), a.target), None,
+                             checkout_dropped(pathlib.Path(a.repo), a.target))
     if a.json:
         print(json.dumps(res, indent=1))
         return 0
     for r in res["rows"]:
-        print(f"layer-deps: update {r['mc']} {r['ga']}: {r['from']} -> {r['to']} ({r['from_name']} -> {r['to_name']}, "
+        print(f"layer-deps: {'restore' if r.get('restore') else 'update'} {r['mc']} {r['ga']}: {r['from']} -> {r['to']} "
+              f"({r['from_name']} -> {r['to_name']}, "
               f"{r['channel']})" + (f" -- look first: {r['why']}" if r["why"] else "") + f"\n    {bump_command(r['mc'], r['ga'], r['to'], a.repo)}")
     for u in res["unchecked"]:
         print(f"layer-deps: could not check {u['mc']} {u['ga']} ({u['coord']}): {u['why']}")
@@ -1901,6 +1984,30 @@ def self_check():
                and pick_release_asset(["examplelib-1.2-mc1.21.8.jar"], "examplelib-1.1.jar", "1.21.8")[0]
                == "examplelib-1.2-mc1.21.8.jar",
                "pick_release_asset: the variant honoured; a bare name with two variants is ambiguous, never a guess")
+        # a version with a letters-only qualifier (`1.1.9-fix`, `-fix-fix`; weekly round 2026-10-21): the same shape, and
+        # still the variant and the mod's name honoured
+        fixrel = ["examplelib-1.2-fix-fix_mr.jar", "examplelib-1.2-fix-fix_cf.jar", "otherlib-1.2-fix_mr.jar"]
+        expect(asset_shape("examplelib-1.2-fix-fix_mr.jar") == asset_shape("examplelib-1.1_mr.jar") == "examplelib-#_mr.jar"
+               and asset_shape("examplelib-1.2-beta1_mr.jar") == "examplelib-#_mr.jar"
+               and asset_shape("examplelib-1.2-fabric.jar") == "examplelib-#-fabric.jar"
+               and asset_shape("examplelib-1.2-fix-neoforge.jar") == "examplelib-#-neoforge.jar"
+               and pick_release_asset(fixrel, "examplelib-1.1_mr.jar", "1.21.4")[0] == "examplelib-1.2-fix-fix_mr.jar"
+               and pick_release_asset(fixrel, "examplelib-1.1-fix_cf.jar", "1.21.4")[0] == "examplelib-1.2-fix-fix_cf.jar"
+               and pick_release_asset(["examplelib-1.2-fix_cf.jar"], "examplelib-1.1_mr.jar", "1.21.4")[0] is None
+               and pick_release_asset(["otherlib-1.2-fix_mr.jar"], "examplelib-1.1_mr.jar", "1.21.4")[0] is None
+               and pick_release_asset(["examplelib-1.2-fix-fabric.jar"], "examplelib-1.1.jar", "1.21.4")[0] is None,
+               "asset_shape: a -fix qualifier blanked with the version; _cf never for _mr, another mod's jar never")
+        # review S2-1: `.jar` is no qualifier, loader and side words in any case are the variant, and only a qualifier
+        # with a digit or a release word is blanked (the four repro cases)
+        expect(pick_release_asset(["examplelib-1.2-Fabric.jar", "examplelib-1.2-Forge.jar"], "examplelib-1.1-NeoForge.jar",
+                                  "1.21.4")[0] is None
+               and pick_release_asset(["examplelib-1.2-client.jar"], "examplelib-1.1-fix.jar", "1.21.4")[0] is None
+               and pick_release_asset(["examplelib-1.2-fix.jar"], "examplelib-1.1.jar", "1.21.4")[0] == "examplelib-1.2-fix.jar"
+               and pick_release_asset(["examplelib-1.2-NeoForge.jar", "examplelib-1.2-Fabric.jar"], "examplelib-1.1-neoforge.jar",
+                                      "1.21.4")[0] == "examplelib-1.2-NeoForge.jar"
+               and asset_shape("examplelib-1.2-RC2-Hotfix-common.jar") == "examplelib-#-common.jar"
+               and asset_shape("examplelib-1.2+1.21.4-beta.2.jar") == "examplelib-#.jar",
+               "asset_shape: `.jar` kept out, loader/side words honoured in any case, only digit or release-word qualifiers blanked")
         g_, m2 = globals(), []
         saved = {k: g_[k] for k in ("_get", "install_m2")}
         api = json.dumps({"assets": [{"name": n, "browser_download_url": f"https://dl.example/{n}"} for n in rel]}).encode()
@@ -2478,6 +2585,23 @@ def _check_pins_and_bumps(expect):
                         f"port_jar.com.example\\:lib=u s\n{END}\n") == {"curse.maven:somelib-111": "curse.maven:somelib-111:222",
                                                                     "maven.modrinth:viewer": "maven.modrinth:viewer:v9"},
            "version_pins: the block's substitutes over build.gradle's, an exclude dropped, a sibling port not a registry pin")
+    # a dependency a version dropped (weekly round 2026-10-21: never re-checked): its base pin, offered as an unticked
+    # restore row once a build for that version exists; none for a version that excludes nothing (a single-version fork)
+    blk_ = f"{BEGIN}\nexclude.maven.modrinth\\:devmod=no 1.21.4 build (extra)\nexclude.com.example\\:lib=x\n{END}\n"
+    dp = dropped_pins(build.replace("${viewer_version}", "v1"), "", blk_)
+    expect(list(dp) == ["maven.modrinth:devmod"] and dropped_pins(build, "", "") == {}
+           and dropped_pins(build, "", f"{BEGIN}\nsubstitute.maven.modrinth\\:viewer=maven.modrinth:viewer:v9\n{END}\n") == {},
+           f"dropped_pins: an excluded registry pin's base coordinate, nothing else: {dp}")
+    rf = {"back": [{"id": "k1", "name": "1.0", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"},
+                   {"id": "k4", "name": "1.0+1.21.4", "mcs": ["1.21.4"], "loaders": ["neoforge"], "channel": "release", "date": "2026-05"}],
+          "gone": [{"id": "g1", "name": "1.0", "mcs": ["1.21.1"], "loaders": ["neoforge"], "channel": "release", "date": "2026-01"}]}
+    res = dependency_updates({"1.21.4": {}}, {"mr_files": lambda p_: rf[p_]},
+                             {"1.21.4": {"maven.modrinth:back": "maven.modrinth:back:k1", "maven.modrinth:gone": "maven.modrinth:gone:g1"}})
+    expect(len(res["rows"]) == 1 and res["rows"][0]["restore"] and res["rows"][0]["to"] == "maven.modrinth:back:k4"
+           and not res["rows"][0]["default"] and res["rows"][0]["why"].startswith("restore: dropped at 1.21.4")
+           and res["checked"] == 2 and not res["unchecked"]
+           and dependency_updates({"1.21.4": {}}, {"mr_files": lambda p_: rf[p_]}) == {"rows": [], "unchecked": [], "checked": 0},
+           f"restore: a dropped dependency with a build now is an unticked restore row; one still without none: {res}")
 
 
 PORT_JAR = re.compile(r"(?m)^port_jar\.(.+?)=(https://github\.com/[\w.-]+/[\w.-]+/releases/download/\S+\.jar) ([0-9a-f]{64})\s*$")

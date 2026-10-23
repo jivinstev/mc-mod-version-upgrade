@@ -544,6 +544,13 @@ def render_issue(data):
 PLAN_MARK = "<!-- weekly-plan:v1 -->"
 DATA_BEGIN, DATA_END = "<!-- weekly-plan:data", "-->"
 CHOICES = ("take", "keep", "patch", "content")
+DEFERRED_CHOICE = re.compile(r"^deferred:[A-Za-z0-9._:-]+$")    # keep ours, deferred on a dependency the version drops
+
+
+def valid_choice(val):
+    """A cascade decision's answer: take, keep, patch, content, or deferred:<dependency> (fork-branches.py
+    --apply-decisions: ours kept, the authors' change a deferred entry while the version drops that dependency)."""
+    return val in CHOICES or bool(DEFERRED_CHOICE.match(val or ""))
 WRITE_PERMS = ("admin", "maintain", "write")
 BOT = "github-actions[bot]"
 SHOWN_COMMITS = 20
@@ -664,7 +671,8 @@ def dep_lines(repo, du, carried):
     for r in rows:
         on = carried.get(dep_key(r), r["default"])
         names = f" ({esc(r.get('from_name'))} -> {esc(r.get('to_name'))}, {esc(r.get('channel') or '?')})"
-        out.append(f"- [{'x' if on else ' '}] `{r['ga']}` at {r['mc']}: `{r['from']}` -> `{r['to']}`{names}"
+        out.append(f"- [{'x' if on else ' '}] " + ("**restore** " if r.get("restore") else "")
+                   + f"`{r['ga']}` at {r['mc']}: `{r['from']}` -> `{r['to']}`{names}"
                    + ("" if r["default"] else f" -- not ticked by default: {esc(r['why'])}")
                    + f" <!-- dep:{repo}:{r['id']} {'default' if r['default'] else 'candidate'} -->")
     if un:
@@ -834,7 +842,8 @@ def render_plan(inp):
             lines += head_merge_lines(hm) if hm else []
             for d in esc:
                 lines += ["", f"- **`{d['id']}`** `{d['file']}` at {', '.join(d['versions'])}: {md(d.get('reasoning', ''))} "
-                          f"Options: {', '.join('`' + x + '`' for x in CHOICES)}. Recommended: `{d['choice']}` (the "
+                          f"Options: {', '.join('`' + x + '`' for x in CHOICES)}, `deferred:<dependency>` (ours kept "
+                          f"while that version drops it). Recommended: `{d['choice']}` (the "
                           f"default with no answer). Answer: `/decide {d['id']} <choice>`."]
             rest = [d for d in ds if not d.get("escalate")]
             if rest:
@@ -947,8 +956,9 @@ def read_plan(issue, comments, allowed, now=None):
                                                                if hit else f"no such {'decision' if kind == 'decide' else 'issue'} in this plan")})
                 continue
             if kind == "decide":
-                if val not in CHOICES:
-                    ignored.append({"by": who, "line": ln, "why": f"choice {val!r} is not one of {', '.join(CHOICES)}"})
+                if not valid_choice(val):
+                    ignored.append({"by": who, "line": ln, "why": f"choice {val!r} is not one of {', '.join(CHOICES)} "
+                                                                  "or deferred:<dependency>"})
                     continue
                 decisions[hit[0]] = {"choice": val, "by": who, "reason": rest}
             else:
@@ -2267,6 +2277,9 @@ def plan_check(expect, cli):
         expect(d1 and d1[0]["choice"] == "take" and d1[0]["by"] == "owner-member" and d1[0]["reason"] == "they fixed it"
                and d2 and d2[0]["choice"] == "take" and d2[0]["by"] == "default",
                f"/decide from a member of the owner team counts; no answer keeps the default: {fr.get('decisions')}")
+        expect(valid_choice("keep") and valid_choice("deferred:examplespells") and valid_choice("deferred:curse.maven:x-1")
+               and not valid_choice("deferred:") and not valid_choice("deferred:$(x)") and not valid_choice("maybe"),
+               "a decision answer: take/keep/patch/content or deferred:<dependency>, nothing with shell syntax")
         expect([(g["id"], g["severity"], g["by"]) for g in fr.get("grades", [])] == [("KI-1", "S2", "writer")],
                f"/grade: an id two forks share needs <owner/repo>:, a writer's counts: {fr.get('grades')}")
         why = sorted(x["why"].split(":")[0].split(" ")[0] for x in fr.get("ignored", []))

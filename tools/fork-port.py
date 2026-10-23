@@ -2144,8 +2144,11 @@ class Run:
 
     def resume_cmd(self, stage):
         a = self.a
+        # a loop to resume is a run that should spend: after a $0 gate re-run stopped at its spend guard, the command
+        # the person is told to raise names the porting default, not --budget 0.0 (review S4)
+        budget = a.budget if a.budget or stage != "loop" else default_budget(None, None)
         return (f"python3 tools/fork-port.py --repo {a.repo} --target {self.t} --from-stage {stage} "
-                f"--budget {a.budget} --gates {a.gates}" + "".join(f" --port-checkout {c}" for c in getattr(a, "port_checkout", []))
+                f"--budget {budget:g} --gates {a.gates}" + "".join(f" --port-checkout {c}" for c in getattr(a, "port_checkout", []))
                 + "".join(f" --port-release {c}" for c in getattr(a, "port_release", []))
                 + (" --allow-undone-library" if getattr(a, "allow_undone_library", False) else "")
                 + (f" --untaken-ok {a.untaken_ok}" if getattr(a, "untaken_ok", None) else ""))
@@ -3285,10 +3288,25 @@ def sweep(a, runner=None, out=print):
         lock.release()
 
 
+RECHECK_STAGES = ("measure", "audit", "gates", "cost")
+
+
+def default_budget(budget, from_stage):
+    """--budget when none is given: $15 for a run that ports (from the start, setup, stage, moves, or the loop asked for
+    by name), $0 for a re-run --from-stage measure/audit/gates/cost -- a gate re-run on a ported tree. With a budget such
+    a re-run that met a compile error started the file loop, whose workers and its 0-error scan and probe rounds
+    rewrote files outside the error (weekly round 2026-10-21); with none it stops red at the spend guard, the tree as it
+    was. A fixer passes its budget explicitly (every resume command fork-port prints names one)."""
+    if budget is not None:
+        return budget
+    return 0.0 if from_stage in RECHECK_STAGES else 15.0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo"); ap.add_argument("--target")
-    ap.add_argument("--budget", type=float, default=15.0, help="dollars the compile loop's workers may spend")
+    ap.add_argument("--budget", type=float, help="dollars the compile loop's workers may spend (default 15; 0 for a "
+                    "re-run --from-stage measure, audit, gates or cost: a gate re-run fixes nothing unless given a budget)")
     ap.add_argument("--gates", default="auto", choices=["auto", "none", "ab", "full"],
                     help="auto (default): full -- Gate C, a real client, included -- until the target's GATES.md records a "
                          "green Gate C, then ab. A target gets one real-client run on its initial port; CI keeps its own policy")
@@ -3337,6 +3355,7 @@ def main():
     a = ap.parse_args()
     if a.self_check:
         return self_check()
+    a.budget = default_budget(a.budget, a.from_stage)
     if a.chain:
         if not a.repo or a.target:
             ap.error("--chain takes --repo and no --target")
@@ -3540,6 +3559,18 @@ def self_check():
         nonlocal ok
         if not c:
             ok = False; print("FAIL:", msg)
+    # a re-run from measure (a gate re-run) has no compile-loop budget unless given one; a porting run keeps $15
+    expect(default_budget(None, None) == 15.0 and default_budget(None, "setup") == 15.0 and default_budget(None, "loop") == 15.0
+           and default_budget(None, "moves") == 15.0 and all(default_budget(None, x) == 0.0 for x in RECHECK_STAGES)
+           and default_budget(7.5, "measure") == 7.5 and default_budget(0.0, None) == 0.0,
+           "default_budget: $0 for a re-run from measure/audit/gates/cost, $15 otherwise, an explicit --budget kept")
+    import types as _ty
+    _ns = argparse.Namespace(repo="r", gates="full", budget=0.0)
+    _rc = lambda st: Run.resume_cmd(_ty.SimpleNamespace(a=_ns, t="1.21.4"), st)
+    expect("--budget 15 " in _rc("loop") and "--budget 0 " in _rc("measure")
+           and "--budget 7.5 " in Run.resume_cmd(_ty.SimpleNamespace(a=argparse.Namespace(repo="r", gates="ab", budget=7.5),
+                                                                     t="1.21.4"), "loop"),
+           f"resume_cmd: after a $0 run, the loop to resume names the porting default: {_rc('loop')} / {_rc('measure')}")
     # cost: each record starts where the last one ended, so a resumed run never counts a request twice
     expect(cost_since("") is None, "a target with no COST.md record counts every request that worked on it")
     expect(cost_since("## r\n- **≈ $1.00** over 1 session(s): 0.1 h active, 0.2 h wall (2026-10-01T10:00Z to 2026-10-01T11:30Z)\n")
