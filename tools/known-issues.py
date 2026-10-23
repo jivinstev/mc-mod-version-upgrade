@@ -5,10 +5,11 @@ each Minecraft version (issue #135, part 1).
 
     python3 tools/known-issues.py add     [LEDGER] --title T --failure F --visibility V --reach R --workaround yes|no
                                           --lowest MC [--status MC=STATE ...] [--id ID] [--source S] [--notes N]
-                                          [--file PATH ...] [--platform mr|cf ...]
+                                          [--file PATH ...] [--pattern REGEX] [--platform mr|cf ...]
     python3 tools/known-issues.py grade   [LEDGER] ID [--failure F] [--visibility V] [--reach R] [--workaround yes|no]
                                           [--override S --reason WHY [--by WHO] | --clear-override]
-    python3 tools/known-issues.py status  [LEDGER] ID --set MC[,MC...|FROM..TO]=STATE [--set ...] [--lowest MC]
+    python3 tools/known-issues.py status  [LEDGER] ID [--set MC[,MC...|FROM..TO]=STATE ...] [--lowest MC] [--pattern REGEX]
+    python3 tools/known-issues.py lowest  [LEDGER] [ID ...] [--at MC] [--pattern REGEX] [--json]
     python3 tools/known-issues.py list    [LEDGER] [--version MC] [--severity S1,S2] [--min S] [--open] [--platform P]
                                           [--json]
     python3 tools/known-issues.py select  [LEDGER] [--budget N] [--touched PATH ...] [--version MC ...]
@@ -51,6 +52,10 @@ THE SCHEMA (schema 1):
                           "1.21.8": "duplicate:KI-2"},     # tracked by that issue at this version: not open here
                "source": "authors|review|gate|player",
                "files": ["src/main/java/..."],  # optional: the files the defect is in (select's S3 rule)
+               "pattern": "textures/block/x",   # optional: an extended regex (git grep -E) whose match in `files` (or
+                                                # anywhere, with no files) is EVIDENCE the defect may be there, never
+                                                # proof (the same text can be right at another version): `lowest`
+                                                # reports a hit as a candidate a person or agent confirms
                "platforms": ["cf"],             # optional: only that platform's jar (mr Modrinth, cf CurseForge);
                                                 # absent: every platform
                "notes": "..."}]}
@@ -69,6 +74,16 @@ THE RUBRIC (grade derives the severity from the recorded inputs; an owner overri
     functional  a feature does not work, or information or controls the player needs are missing, unreadable or
                 unusable -- invisible GUI text and a missing UI element are functional;
     cosmetic    the look is wrong, but nothing the player needs is lost (a wrong colour tint, a texture seam).
+
+LOWEST (read-only; the plan and the round run it before a fix): is the defect also at a version BELOW the one it is to
+be fixed at (its lowest open version, or --at)? It finds candidates, never proof: Only the fork's `neoforge-<mc>` branches below it whose status the
+ledger does not set are looked at (a version set n/a, fixed, wontfix or duplicate is trusted), by git alone on the refs
+(origin's, else the local branch; no checkout). With a `pattern` (or --pattern): `git grep -E` in `files` on each such
+branch -- a match is a candidate (`found`: "may be at <v> (unconfirmed)"); nothing moves a fix on a hit alone (the
+plan's fix_at stays; the round's `lowest` job confirms or rejects it). With no pattern: each branch
+holding a listed file byte-identical to the fix version's is `unchanged` ("lowest may be lower (unchecked)"), one
+holding it changed is `present`; a branch with none of the files cannot have the defect in them. With no files and no
+pattern every such branch is `unchecked`. A single-version fork has no branch below its one version: nothing to check.
 
 ONLY S1 GOES BACK. A finding at a version that is already done reopens it only when it is an S1 (`reopens` answers
 yes, exit 0); any other finding goes into the ledger at its lowest affected version (exit 1).
@@ -134,7 +149,8 @@ MC_RE = re.compile(r"^\d+(?:\.\d+){1,3}$")
 STATE_RE = re.compile(r"^(?:open|n/a|fixed@[0-9a-f]{7,40}|wontfix:\S.*|duplicate:[A-Za-z0-9][A-Za-z0-9._-]{0,63})$")
 DEFAULT_BUDGET = 3
 TOP_KEYS = {"schema", "issues"}
-ISSUE_KEYS = {"id", "title", "rubric", "severity", "override", "lowest", "status", "source", "files", "platforms", "notes"}
+ISSUE_KEYS = {"id", "title", "rubric", "severity", "override", "lowest", "status", "source", "files", "pattern",
+              "platforms", "notes"}
 
 
 class Invalid(Exception):
@@ -236,6 +252,8 @@ def validate(data):
             raise Invalid(f"{where}: source {e['source']!r} is not one of {', '.join(SOURCES)}")
         if "files" in e and (not isinstance(e["files"], list) or not all(isinstance(f, str) and f for f in e["files"])):
             raise Invalid(f"{where}: files must be a list of paths")
+        if "pattern" in e and (not isinstance(e["pattern"], str) or not e["pattern"].strip() or "\n" in e["pattern"]):
+            raise Invalid(f"{where}: pattern must be one line of text (an extended regex, git grep -E)")
         pl = e.get("platforms", PLATFORMS)
         if "platforms" in e and (not isinstance(pl, list) or not pl or len(set(pl)) != len(pl)
                                  or not set(pl) <= set(PLATFORMS)):
@@ -350,6 +368,85 @@ def select(data, budget=DEFAULT_BUDGET, touched=(), run_versions=(), add=(), rem
     out += [(find(data, i), "added by the owner") for i in add if i not in taken]
     gone = set(remove)
     return [(e, why) for e, why in out if e["id"] not in gone]
+
+
+def version_refs(repo):
+    """{mc: ref} of the fork's `neoforge-<mc>` branches: origin's (what is pushed), else the local branch."""
+    r = subprocess.run(["git", "-C", str(repo), "for-each-ref", "--format=%(refname)", "refs/heads/neoforge-*",
+                        "refs/remotes/origin/neoforge-*"], capture_output=True, text=True, encoding="utf-8")
+    out = {}
+    for ref in sorted(r.stdout.split(), key=lambda x: x.startswith("refs/remotes/")):     # origin's last: it wins
+        v = ref.rsplit("/neoforge-", 1)[-1]
+        if MC_RE.match(v):
+            out[v] = ref
+    return out
+
+
+def _tree(repo, ref, cache):
+    """{path: blob} of a ref's whole tree, read once per ref."""
+    if ref not in cache:
+        r = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", "-z", ref], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        cache[ref] = {ln.split("\t", 1)[1]: ln.split()[2] for ln in r.stdout.split("\0") if "\t" in ln} if not r.returncode else {}
+    return cache[ref]
+
+
+def lowest_check(repo, e, at=None, refs=None, pattern=None, cache=None):
+    """Is the defect also below the version it is to be fixed at (LOWEST in the module text)? Read-only, git alone.
+    -> {"id", "at", "below": [versions looked at], "how": "pattern"|"files"|None, "found": [...], "unchanged": [...],
+    "present": [...], "unchecked": [...], "lowest": the lowest found (else at), "error": None or why}."""
+    refs = version_refs(repo) if refs is None else refs
+    cache = {} if cache is None else cache
+    ov = open_versions(e)
+    at = at or (ov[0] if ov else e["lowest"])
+    below = sorted((v for v in refs if mc_key(v) < mc_key(at) and e["status"].get(v, "open") == "open"), key=mc_key)
+    pat = pattern or e.get("pattern")
+    files = list(e.get("files") or [])
+    out = {"id": e["id"], "at": at, "below": below, "how": "pattern" if pat else "files" if files else None,
+           "found": [], "unchanged": [], "present": [], "unchecked": [], "lowest": at, "error": None}
+    for v in below:
+        if pat:
+            r = subprocess.run(["git", "-C", str(repo), "grep", "-q", "-E", "-e", pat, refs[v], "--", *files],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if r.returncode == 0:
+                out["found"].append(v)
+            elif r.returncode != 1:
+                out["unchecked"].append(v)
+                out["error"] = (r.stderr.strip() or f"git grep exit {r.returncode}")[-200:]
+        elif files:
+            here, mine = _tree(repo, refs[v], cache), _tree(repo, refs[at], cache) if at in refs else {}
+            hit = [f for f in files if f in here]
+            if any(here[f] == mine.get(f) for f in hit):
+                out["unchanged"].append(v)
+            elif hit:
+                out["present"].append(v)
+        else:
+            out["unchecked"].append(v)
+    if out["found"]:
+        out["lowest"] = out["found"][0]
+    return out
+
+
+def lowest_note(r):
+    """A plan line's words for a lowest_check result ("" when it says nothing)."""
+    if r.get("found"):
+        return f"may be at {', '.join(r['found'])} (unconfirmed: its pattern is there)"
+    if r.get("unchanged"):
+        return f"lowest may be lower (unchecked): {', '.join(r['unchanged'])} {'has' if len(r['unchanged']) == 1 else 'have'} its file unchanged"
+    return ""
+
+
+def lowest_line(r):
+    """`lowest`'s words for one result."""
+    if r["found"]:
+        return f"may be at {', '.join(r['found'])} (unconfirmed: the pattern is there)"
+    if r["unchanged"]:
+        return f"lowest may be lower (unchecked): {', '.join(r['unchanged'])} hold the file unchanged"
+    if r["how"] is None and r["below"]:
+        return f"unchecked: no files and no pattern ({', '.join(r['below'])} below)"
+    return (f"nothing below ({len(r['below'])} version(s) looked at" + (f" by {r['how']}" if r["how"] else "")
+            + (f"; {', '.join(r['present'])} hold the file changed" if r["present"] else "")
+            + (f"; unchecked {', '.join(r['unchecked'])}" if r["unchecked"] else "") + ")")
 
 
 def applies(e, platform):
@@ -499,7 +596,8 @@ def _where(r):
     """An issue's versions on its plan line: the lowest version still open (the status map: where the round makes the
     fix) when it is not the first affected one, else `lowest` as before."""
     lo = r.get("lowest_open")
-    return f"lowest open {lo} (first affected {r['lowest']})" if lo and lo != r["lowest"] else f"lowest {r['lowest']}"
+    w = f"lowest open {lo} (first affected {r['lowest']})" if lo and lo != r["lowest"] else f"lowest {r['lowest']}"
+    return w + (f" ({r['lowest_note']})" if r.get("lowest_note") else "")
 
 
 def _commit_line(c):
@@ -612,6 +710,25 @@ def shared_lines(repo, sh, carried):
     return out
 
 
+def head_merge_lines(hm):
+    """The Decisions section's words for the previewed head merge (weekly-plan.py cascade, a fork with new upstream
+    commits only): the preview's caveat, the head merge's own conflicts, or that it could not run."""
+    if hm.get("error"):
+        return [f"Could not preview the authors' new commits in the cascade ({esc(hm['error'])[:300]}): the plan is the "
+                "head's as it is, and the round's head merge may raise decisions it does not show."]
+    out = []
+    if hm.get("merged"):
+        out.append("Previewed: the round makes its own head merge and ports it, so a decision's id can change; an answer "
+                   "whose id the round does not find is asked again there.")
+    cf = hm.get("conflicts") or []
+    if cf:
+        out += ["", f"- **Head merge needs an agent: {len(cf)} file(s)** conflict when the authors' commits merge into "
+                "the head (the round's authors step ports them; the preview carried the authors' side of each conflicting "
+                "hunk): " + ", ".join(f"`{esc(x)}`" for x in cf[:SHOWN_COMMITS])
+                + (f" and {len(cf) - SHOWN_COMMITS} more" if len(cf) > SHOWN_COMMITS else "") + "."]
+    return out
+
+
 def render_plan(inp):
     """PLAN-INPUT (tools/weekly-plan.py) -> {"title", "body", "decision_needed"}."""
     forks = inp["forks"]
@@ -704,12 +821,17 @@ def render_plan(inp):
             ds = plan.get("decisions", [])
             esc = [d for d in ds if d.get("escalate")]
             escalated += len(esc)
-            lines.append(f"The cascade plan (`fork-branches.py cascade {c['range']} --plan`, git and the rename rows "
-                         f"only): {len(plan.get('mechanical', []))} file(s) merged mechanically, {len(ds)} decision(s), "
-                         f"{len(esc)} escalated to you.")
+            hm = c.get("head_merge")
+            lines.append(f"The cascade plan (`fork-branches.py cascade {c['range']} --plan"
+                         + (f" --head-merge {str(hm.get('commit') or hm.get('ref') or '')[:12]}`, the authors' new "
+                            "commits merged into the head on a throwaway ref first, as the round will; git"
+                            if hm and hm.get("merged") else "`, git")
+                         + f" and the rename rows only): {len(plan.get('mechanical', []))} file(s) merged mechanically, "
+                         f"{len(ds)} decision(s), {len(esc)} escalated to you.")
             if (n or un) and ds:
                 lines.append("They are the head cascade's, which carries the authors' code: they apply only with the box "
                              "above ticked; unticked, the round runs no head cascade and none of them applies.")
+            lines += head_merge_lines(hm) if hm else []
             for d in esc:
                 lines += ["", f"- **`{d['id']}`** `{d['file']}` at {', '.join(d['versions'])}: {md(d.get('reasoning', ''))} "
                           f"Options: {', '.join('`' + x + '`' for x in CHOICES)}. Recommended: `{d['choice']}` (the "
@@ -726,7 +848,9 @@ def render_plan(inp):
                            "upstream_commit": f.get("upstream_commit"), "head_commit": f.get("head_commit"),
                            "defaults": [r["id"] for r in sel], "candidates": [r["id"] for r in cand],
                            "ids": sorted(set(f.get("ledger_ids", [])) | {r["id"] for r in sel + cand}, key=natural),
-                           "cascade": None if c is None else {"range": c["range"], "decisions": decs}})
+                           "cascade": None if c is None else {"range": c["range"], "decisions": decs,
+                                                              **({"head_merge_conflicts": len(c["head_merge"].get("conflicts") or [])}
+                                                                 if c.get("head_merge") else {})}})
         if du is not None:           # every kind of fork: the dependency updates the step found
             data_forks[-1]["dep_updates"] = [{k: r.get(k) for k in ("id", "mc", "ga", "from", "to", "default", "why")}
                                              for r in du.get("rows", [])]
@@ -1198,6 +1322,7 @@ def build_parser():
     p.add_argument("--source", choices=SOURCES, default="review")
     p.add_argument("--notes", default="")
     p.add_argument("--file", action="append", dest="files", metavar="PATH")
+    p.add_argument("--pattern", help="an extended regex (git grep -E) whose match in the files means the defect is there")
     p.add_argument("--platform", action="append", dest="platforms", choices=PLATFORMS,
                    help="only this platform's jar is affected (repeatable; default: every platform)")
     p = common(sub.add_parser("grade", help="re-grade an issue; an owner override wins and is recorded"))
@@ -1206,10 +1331,16 @@ def build_parser():
     p.add_argument("--override", choices=SEVERITIES); p.add_argument("--reason"); p.add_argument("--by")
     p.add_argument("--clear-override", action="store_true")
     p = common(sub.add_parser("status", help="set an issue's state at Minecraft versions"))
-    p.add_argument("id"); p.add_argument("--set", action="append", required=True, metavar="MC[,MC...|FROM..TO]=STATE",
+    p.add_argument("id"); p.add_argument("--set", action="append", default=[], metavar="MC[,MC...|FROM..TO]=STATE",
                                          help="one version, a comma list, or FROM..TO (both ends and every version the "
                                               "entry lists between them); repeatable")
     p.add_argument("--lowest")
+    p.add_argument("--pattern", help="set the entry's pattern (an extended regex; `lowest` greps the files for it)")
+    p = common(sub.add_parser("lowest", help="is the defect also below the version it is fixed at? (read-only, git only)"))
+    p.add_argument("ids", nargs="*", metavar="ID", help="default: every issue still open")
+    p.add_argument("--at", help="the version the fix is made at (default: the issue's lowest open version)")
+    p.add_argument("--pattern", help="grep for this extended regex instead of the entry's pattern")
+    p.add_argument("--json", action="store_true")
     p = common(sub.add_parser("list", help="the issues, filtered by version and severity"))
     p.add_argument("--version"); p.add_argument("--severity", help="comma-separated, e.g. S1,S2")
     p.add_argument("--min", choices=SEVERITIES, help="this severity or worse")
@@ -1309,6 +1440,8 @@ def run(argv):
             e["notes"] = a.notes
         if a.files:
             e["files"] = sorted(set(a.files))
+        if a.pattern:
+            e["pattern"] = a.pattern
         if a.platforms:
             e["platforms"] = sorted(set(a.platforms), key=PLATFORMS.index)
         e["severity"] = effective(e)
@@ -1329,9 +1462,13 @@ def run(argv):
         return 0
     if a.cmd == "status":
         e = find(data, a.id)
+        if not (a.set or a.lowest or a.pattern):
+            raise Invalid("status: nothing to change (--set, --lowest or --pattern)")
         e["status"].update(expand_states(a.set, e["status"]))
         if a.lowest:
             e["lowest"] = a.lowest
+        if a.pattern:
+            e["pattern"] = a.pattern
         write_ledger(path, data)
         out(f"{e['id']}: " + ", ".join(f"{v}={s}" for v, s in sorted(e["status"].items(), key=lambda x: mc_key(x[0]))))
         return 0
@@ -1367,6 +1504,17 @@ def run(argv):
                 out(f"{e['id']}\t{e['severity']}\tlowest {e['lowest']}\t{why}\t{e['title']}")
             for i in a.remove:
                 out(f"{i}\t{find(data, i)['severity']}\t-\tremoved by the owner")
+        return 0
+    if a.cmd == "lowest":
+        if a.at and not MC_RE.match(a.at):
+            raise Invalid(f"--at {a.at!r} is not a Minecraft version")
+        refs, cache = version_refs(repo), {}
+        rows = [lowest_check(repo, find(data, i), a.at, refs, a.pattern, cache) for i in a.ids] if a.ids else \
+            [lowest_check(repo, e, a.at, refs, a.pattern, cache) for e in sorted(data["issues"], key=order) if open_versions(e)]
+        if a.json:
+            out(json.dumps(rows, indent=1))
+        for r in ([] if a.json else rows):
+            out(f"{r['id']}\tat {r['at']}\t" + lowest_line(r) + (f"\tERROR {r['error']}" if r["error"] else ""))
         return 0
     if a.cmd == "render-issue":
         out(render_issue(data), end="")
@@ -1887,11 +2035,84 @@ def self_check():
                    "paths-ignore matches the root README and the ledgers only (GitHub's glob: * stops at /)")
     plan_check(expect, cli)
     plan_untaken_check(expect, cli)
+    lowest_selfcheck(expect, cli)
     took = time.monotonic() - t0
     for b in bad:
         print("FAIL:", b)
     print(f"self-check: {'OK' if not bad else 'FAIL'} ({took:.1f} s)")
     return 0 if not bad else 1
+
+
+def lowest_selfcheck(expect, cli):
+    """LOWEST on a three-version fixture (the head 1.21.1, 1.21.4, 26.1.2): the pattern found below the ledger's
+    lowest, a file unchanged below flagged, a set status trusted, a single-version fork with nothing below."""
+    import shutil
+    d = pathlib.Path(tempfile.mkdtemp(prefix="known-issues-lowest-"))
+    try:
+        g = lambda *a: subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                       "-c", "gc.auto=0", *a], capture_output=True, text=True, encoding="utf-8")
+        g("init", "-q", "-b", "neoforge-1.21.1")
+        src = d / "src" / "a"
+        src.mkdir(parents=True)
+        (src / "Defect.java").write_text("class Defect { void x() { goodCall(); } }\n", encoding="utf-8")
+        (src / "Same.java").write_text("class Same {}\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "head")
+        for v in ("1.21.4", "26.1.2"):
+            g("checkout", "-q", "-b", f"neoforge-{v}")
+            (src / "Defect.java").write_text(f"class Defect {{ void x() {{ badCall(); }} }} // {v}\n", encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", v)
+        led = d / ".port" / LEDGER_NAME
+        base = ["--repo", str(d), "--failure", "functional", "--visibility", "common", "--reach", "normal",
+                "--workaround", "no", "--lowest", "26.1.2"]
+        rc1, _ = cli("add", *base, "--id", "EXM-1", "--title", "the bad call", "--file", "src/a/Defect.java",
+                     "--pattern", r"badCall\(\)")
+        rc2, _ = cli("add", *base, "--id", "EXM-2", "--title", "the same file", "--file", "src/a/Same.java")
+        rc3, _ = cli("add", *base, "--id", "EXM-3", "--title", "nothing recorded about where")
+        rc4, _ = cli("add", *base, "--id", "EXM-4", "--title", "trusted below", "--file", "src/a/Defect.java",
+                     "--pattern", "badCall", "--status", "26.1.2=open", "--status", "1.21.4=n/a")
+        data = read_ledger(led)
+        expect(rc1 == rc2 == rc3 == rc4 == 0 and find(data, "EXM-1")["pattern"] == r"badCall\(\)",
+               f"add --pattern records the pattern: {rc1} {rc2} {rc3} {rc4}")
+        refs = version_refs(d)
+        expect(sorted(refs) == ["1.21.1", "1.21.4", "26.1.2"], f"the fork's version branches: {refs}")
+        r1 = lowest_check(d, find(data, "EXM-1"), refs=refs)
+        expect(r1["at"] == "26.1.2" and r1["found"] == ["1.21.4"] and r1["lowest"] == "1.21.4" and r1["how"] == "pattern"
+               and lowest_note(r1) == "may be at 1.21.4 (unconfirmed: its pattern is there)",
+               f"the pattern on 1.21.4 (not on the head) while the ledger says 26.1.2: a candidate, unconfirmed: {r1}")
+        r2 = lowest_check(d, find(data, "EXM-2"), refs=refs)
+        expect(not r2["found"] and r2["unchanged"] == ["1.21.1", "1.21.4"] and r2["lowest"] == "26.1.2"
+               and lowest_note(r2).startswith("lowest may be lower (unchecked): 1.21.1, 1.21.4"),
+               f"no pattern, the file byte-identical below: flagged, the fix stays: {r2}")
+        r3 = lowest_check(d, find(data, "EXM-3"), refs=refs)
+        expect(r3["how"] is None and r3["unchecked"] == ["1.21.1", "1.21.4"] and not lowest_note(r3),
+               f"no files, no pattern: every version below unchecked, nothing claimed: {r3}")
+        r4 = lowest_check(d, find(data, "EXM-4"), refs=refs)
+        expect(r4["below"] == ["1.21.1"] and not r4["found"], f"a status the ledger sets (n/a) is trusted: {r4}")
+        rc, o = cli("lowest", "--repo", str(d), "EXM-1", "EXM-2")
+        expect(rc == 0 and "EXM-1\tat 26.1.2\tmay be at 1.21.4 (unconfirmed" in o and "lowest may be lower (unchecked)" in o,
+               f"lowest prints one line per issue: {o}")
+        rc, o = cli("lowest", "--repo", str(d), "EXM-3", "--pattern", "badCall", "--json")
+        expect(rc == 0 and json.loads(o)[0]["found"] == ["1.21.4"], f"--pattern overrides the entry's: {o}")
+        rc, o = cli("status", "--repo", str(d), "EXM-2", "--pattern", "class Same")
+        expect(rc == 0 and find(read_ledger(led), "EXM-2")["pattern"] == "class Same", f"status --pattern: {rc} {o}")
+        rc, o = cli("status", "--repo", str(d), "EXM-2")
+        expect(rc == 2, f"status with nothing to change is refused: {rc} {o}")
+        bad = json.loads(led.read_text(encoding="utf-8"))
+        bad["issues"][0]["pattern"] = "two\nlines"
+        try:
+            validate(bad)
+            expect(False, "a two-line pattern is refused")
+        except Invalid:
+            pass
+        # a single-version fork: one branch, nothing below it
+        g("checkout", "-q", "neoforge-1.21.1")
+        for v in ("1.21.4", "26.1.2"):
+            g("branch", "-q", "-D", f"neoforge-{v}")
+        r5 = lowest_check(d, find(data, "EXM-1"), at="1.21.1")
+        expect(r5["below"] == [] and not r5["found"] and r5["lowest"] == "1.21.1" and not lowest_note(r5),
+               f"a single-version fork: nothing below its one version, nothing changes: {r5}")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def plan_untaken_check(expect, cli):

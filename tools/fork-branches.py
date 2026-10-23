@@ -7,6 +7,7 @@
     python3 tools/fork-branches.py verify      --repo DIR [--layer-ref REF] [--targets T,T] [--tip]
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO [--gates none|compile|ab|full] [--dry-run]
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO --plan|--apply [--budget-lines N] [--out DIR]
+    python3 tools/fork-branches.py cascade     --repo DIR PORT..TO --plan --head-merge REF [...]   # the head merge previewed
     python3 tools/fork-branches.py cascade     --repo DIR --apply-decisions FILE [--gates ...] [--out DIR]
     python3 tools/fork-branches.py cascade     --repo DIR PORT..TO --port-ref REF [--upstream REMOTE/BRANCH] [...]
     python3 tools/fork-branches.py untaken     --repo DIR --upstream REF [--head B] [--json]
@@ -91,6 +92,14 @@ THE HEAD'S UNTAKEN CODE. `untaken` lists the authors' commits the port branch ha
 never carries them (each merge's port commit is its merge-base with the port branch); a fix at the port branch's own
 version that must not carry them goes on a branch cut from the lowest version's port_taken and up with `--port-ref`,
 which refuses a ref holding any. The weekly round uses both when its plan does not take the authors' code.
+
+THE HEAD MERGE PREVIEWED. `cascade PORT..TO --plan --head-merge REF` (the weekly plan, when the authors have new
+commits: the round merges them into the head before its cascade) first merges REF into the port branch on the plan's
+throwaway clone only (git merge-tree and commit-tree: no checkout, no real branch, nothing pushed), then plans the
+cascade from that simulated head, so the decisions the authors' code raises up the versions are in the plan. A file
+that conflicts in the head merge itself takes the authors' side of each conflicting hunk for the preview and is listed
+(`head_merge.conflicts`: the round's authors step ports it). REF already in the head: nothing to simulate. The
+simulation failing: the plan of the head as it is, with `head_merge.error`. Without --head-merge the plan is as before.
 
 Exit codes: 0 ok; 1 a difference (verify) or a red branch (cascade); 18 not done (check-done); 2 bad input.
 Standard library only.
@@ -3319,7 +3328,7 @@ def port_ref_refused(repo, tip, name, first, upstream=None):
 
 
 def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=None, budget=DEFAULT_BUDGET_LINES,
-            out_dir=None, port_ref=None, upstream=None, _guarded=False, untaken_ok=None):
+            out_dir=None, port_ref=None, upstream=None, _guarded=False, untaken_ok=None, head_merge=None):
     """`FROM..TO`: merge FROM's branch into the next branch up TO's chain, then that one into the next, ... up to TO,
     running the no-model gates on each branch a merge changed. FROM is a version or the port branch (its name, or
     `port`). Pushes nothing.
@@ -3349,7 +3358,7 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
         if why:
             say(f"fork-branches: cascade --port-ref REFUSED: {why}"); return 2
     if mode == "plan":
-        return cascade_plan(repo, spec, budget, out_dir, say, port_ref=port_tip)
+        return cascade_plan(repo, spec, budget, out_dir, say, port_ref=port_tip, head_merge=head_merge)
     if runner is None:
         runner = (lambda w_, t_, g_, s_=print: run_gates(w_, t_, g_, s_, untaken_ok=untaken_ok)) if untaken_ok else run_gates
     rows, merged, items, mech = [], [], [], []
@@ -3528,6 +3537,13 @@ def write_plan(repo, plan, out_dir, say=print):
           f"{plan['escalated']} escalated to the owner, {plan['open']} open in all. Planned in {plan['elapsed_s']} s "
           "(git and the rows only, no model).", "", "| version | result |", "|---|---|"]
     md += [f"| {v['version']} | {v['result']} |" for v in plan["versions"]]
+    hm = plan.get("head_merge")
+    if hm:
+        md += ["", (f"The head merge of {hm['ref']} could not be simulated ({hm['error']}): this is the plan of the head "
+                    "as it is." if hm.get("error") else f"{hm['ref']} is in the head already." if hm.get("already") else
+                    f"Planned from the head with {hm['ref']} merged into it on the throwaway clone; "
+                    f"{len(hm['conflicts'])} file(s) conflict in that merge (the authors' side of each conflicting hunk "
+                    "previewed; an agent ports them): " + (", ".join(f"`{c}`" for c in hm["conflicts"]) or "none") + ".")]
     for m in plan["mechanical"]:
         md.append(f"- mechanical: `{m['file']}` at {m['version']} -- {m['how']}")
     for d in plan["decisions"]:
@@ -3571,9 +3587,51 @@ def write_plan(repo, plan, out_dir, say=print):
     return out
 
 
-def cascade_plan(repo, spec, budget, out_dir, say=print, port_ref=None):
+def simulate_head_merge(clone, port, ref):
+    """--head-merge: REF merged into the port branch on the throwaway clone's own ref (THE HEAD MERGE PREVIEWED): git
+    merge-tree for the conflicts, again with -X theirs for the tree the preview carries, commit-tree, update-ref.
+    -> {"ref", "commit", "merged", "already", "conflicts", "error"}."""
+    out = {"ref": ref, "commit": None, "merged": False, "already": False, "conflicts": [], "error": None}
+    head = resolve_branch(clone, port)
+    up = git(clone, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").stdout.strip()
+    if not head or not up:
+        out["error"] = f"no commit {ref if not up else port} in the clone"
+        return out
+    out["commit"] = up
+    if git(clone, "merge-base", "--is-ancestor", up, head).returncode == 0:
+        out["already"] = True
+        return out
+    r = git(clone, "merge-tree", "--write-tree", "--name-only", "--no-messages", head, up)
+    if r.returncode not in (0, 1) or not r.stdout.strip():
+        out["error"] = f"git merge-tree: {(r.stderr or r.stdout).strip()[-200:]}"
+        return out
+    lines = r.stdout.splitlines()
+    tree = lines[0].strip()
+    out["conflicts"] = sorted({ln.strip() for ln in lines[1:] if ln.strip()})
+    if r.returncode == 1:
+        r = git(clone, "merge-tree", "--write-tree", "--no-messages", "-X", "theirs", head, up)
+        if r.returncode not in (0, 1) or not r.stdout.strip():
+            out["error"] = f"git merge-tree -X theirs: {(r.stderr or r.stdout).strip()[-200:]}"
+            return out
+        tree = r.stdout.splitlines()[0].strip()
+    env = dict(os.environ, GIT_AUTHOR_NAME="cascade-plan", GIT_AUTHOR_EMAIL="cascade-plan@localhost",
+               GIT_COMMITTER_NAME="cascade-plan", GIT_COMMITTER_EMAIL="cascade-plan@localhost")
+    c = git(clone, "commit-tree", tree, "-p", head, "-p", up, "-m", f"Preview: merge {up[:12]} into {port}", env=env)
+    if c.returncode or not c.stdout.strip():
+        out["error"] = f"git commit-tree: {c.stderr.strip()[-200:]}"
+        return out
+    u = git(clone, "update-ref", f"refs/heads/{port}", c.stdout.strip())
+    if u.returncode:
+        out["error"] = f"git update-ref: {u.stderr.strip()[-200:]}"
+        return out
+    out["merged"] = True
+    return out
+
+
+def cascade_plan(repo, spec, budget, out_dir, say=print, port_ref=None, head_merge=None):
     """cascade --plan: the whole chain merged on a throwaway bare clone (its objects shared, its refs its own), no gates,
-    nothing stopped by a decision; the real branches untouched. Writes the plan files. -> 0, 1 (a merge could not run)."""
+    nothing stopped by a decision; the real branches untouched. Writes the plan files. head_merge (a commit): merged into
+    the port branch on the clone first (simulate_head_merge). -> 0, 1 (a merge could not run)."""
     t0 = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="cascade-plan-") as d:
         clone = pathlib.Path(d) / "plan.git"
@@ -3584,12 +3642,27 @@ def cascade_plan(repo, spec, budget, out_dir, say=print, port_ref=None):
         git(clone, "symbolic-ref", "HEAD", "refs/heads/__cascade-plan-none__")   # no branch "checked out" in the clone
         git(clone, "config", "user.name", git(repo, "config", "user.name").stdout.strip() or "cascade-plan")
         git(clone, "config", "user.email", git(repo, "config", "user.email").stdout.strip() or "cascade-plan@localhost")
+        hm = None
+        if head_merge:
+            try:
+                port_, _n, i0, _t = cascade_nodes(clone, spec)
+                hm = simulate_head_merge(clone, port_, head_merge) if i0 == 0 else {
+                    "ref": head_merge, "merged": False, "conflicts": [],
+                    "error": f"{spec} does not start at the port branch {port_}"}
+            except Exception as e:             # noqa: BLE001 -- fail soft: the plan of the head as it is, said
+                hm = {"ref": head_merge, "merged": False, "conflicts": [], "error": f"{type(e).__name__}: {e}"[:300]}
+            say(f"fork-branches: cascade --plan: the head merge of {str(hm.get('commit') or head_merge)[:12]} "
+                + (f"could not be simulated ({hm['error']}): planning the head as it is" if hm.get("error") else
+                   "is in the head already" if hm.get("already") else
+                   f"simulated, {len(hm['conflicts'])} file(s) conflicting in it"))
         cascade_run_result.clear()
         lines = []
         rc = cascade(clone, spec, "none", say=lines.append, mode="plan-run", budget=budget, port_ref=port_ref,
                      _guarded=True)
         res = dict(cascade_run_result)
     plan = plan_of(spec, res.get("rows", []), res.get("items", []), res.get("mech", []), time.monotonic() - t0, budget)
+    if hm is not None:
+        plan["head_merge"] = hm
     for ln in lines:
         if ln.startswith("| ") or "STOPPED" in ln:
             say(ln.replace(str(clone), str(repo)))
@@ -4901,6 +4974,8 @@ def main():
     k.add_argument("--budget-lines", type=int, default=DEFAULT_BUDGET_LINES,
                    help=f"an authors' change larger than this (changed lines) is escalated, not a default (default {DEFAULT_BUDGET_LINES})")
     k.add_argument("--out", help="where the plan files go (default build/fork-branches/plan)")
+    k.add_argument("--head-merge", metavar="REF", help="with --plan from the port branch: merge REF (the authors' new "
+                   "commit) into the port branch on the throwaway clone first, as the round's head merge will")
     k.add_argument("--port-ref", metavar="REF", help="FROM the port branch: carry REF (a fix branch cut from the lowest "
                    "version's port_taken) in place of the port branch's tip; refused when REF holds authors' code that "
                    "version has not taken")
@@ -4994,6 +5069,8 @@ def main():
     if a.cmd == "untaken":
         return untaken_cmd(a.repo, a.upstream, a.head, a.json)
     if a.cmd == "cascade":
+        if a.head_merge and (not a.plan or a.port_ref):
+            ap.error("--head-merge goes with --plan from the port branch, not with --port-ref")
         if (a.port_ref or a.upstream) and (a.apply_decisions or a.dry_run):
             ap.error("--port-ref/--upstream go with a cascade FROM..TO (plain, --plan or --apply)")
         if a.upstream and not a.port_ref:
@@ -5005,7 +5082,7 @@ def main():
             ap.error("cascade needs FROM..TO")
         return cascade(a.repo, a.range, a.gates, a.dry_run, mode="plan" if a.plan else "apply" if a.apply else None,
                        budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream,
-                       untaken_ok=a.untaken_ok)
+                       untaken_ok=a.untaken_ok, head_merge=a.head_merge)
     if a.cmd == "migrate":
         return migrate(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.dry_run, a.port_branch,
                        jpath=a.json, library=a.library)
@@ -6421,6 +6498,25 @@ def _check_cascade_plan(expect):
                and isinstance(plan.get("elapsed_s"), (int, float)),
                "the owner's issue holds only the escalated item, with a machine-readable block; the plan says its run time")
         say_time = plan.get("elapsed_s")
+        # --head-merge: the same authors' change NOT yet in the port branch (the weekly plan's case) -- merged into it on
+        # the throwaway clone first -- plans the same decisions; already in it, nothing is simulated
+        tip = resolve_branch(r, "neoforge-1.21.1")
+        g("update-ref", "refs/heads/neoforge-1.21.1", f"{tip}~1")
+        refs_b = g("for-each-ref", "--format=%(refname) %(objectname)")
+        hdir = pathlib.Path(d) / "plan-hm"
+        rc_h, out_h = _quiet(cascade, r, "port..1.21.8", mode="plan", out_dir=hdir, head_merge=tip)
+        hp = json.loads((hdir / "CASCADE-PLAN.json").read_text(encoding="utf-8")) if (hdir / "CASCADE-PLAN.json").is_file() else {}
+        expect(rc_h == 0 and (hp.get("head_merge") or {}).get("merged") and hp["head_merge"]["conflicts"] == []
+               and sorted((x["id"], x["file"], tuple(x["versions"])) for x in hp.get("decisions", []))
+               == sorted((x["id"], x["file"], tuple(x["versions"])) for x in plan.get("decisions", []))
+               and g("for-each-ref", "--format=%(refname) %(objectname)") == refs_b,
+               f"--head-merge: the authors' commit merged into the head on the throwaway clone plans the decisions it "
+               f"would raise once merged; no real ref moves: {hp.get('head_merge')} {out_h[-300:]}")
+        g("update-ref", "refs/heads/neoforge-1.21.1", tip)
+        rc_h, out_h = _quiet(cascade, r, "port..1.21.8", mode="plan", out_dir=hdir, head_merge=tip)
+        hp = json.loads((hdir / "CASCADE-PLAN.json").read_text(encoding="utf-8"))
+        expect(rc_h == 0 and hp["head_merge"].get("already") and len(hp["decisions"]) == len(plan["decisions"]),
+               f"--head-merge with the commit already in the head: nothing simulated, the plan as without it: {hp['head_merge']}")
         # --apply: everything merged; only the files with a decision are held, per file, and travel up
         rc, out = _quiet(cascade, r, "port..1.21.8", "none", mode="apply", out_dir=pdir)
         f8 = ref_files(r, resolve_branch(r, "neoforge-1.21.8"))

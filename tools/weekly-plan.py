@@ -82,6 +82,19 @@ a lookup that fails is listed as "could not check" and never fails the plan. rea
 fork's `dep_bumps`, and the round applies each once at setup with `layer-deps.py resolve --bump`; nothing else moves a
 pin.
 
+CASCADE (the workflow's step 2; a version-branch fork only): `fork-branches.py cascade <head>..<newest> --plan`. When the
+fork has new upstream commits the round merges them into the head before its cascade, so the plan previews that merge
+(`--head-merge <their commit>`: merged into the head on the plan's throwaway ref, git only, nothing pushed) and plans
+from that simulated head -- the decisions and mechanical merges their code raises are on Tuesday's plan; a file that
+conflicts in the head merge itself is listed ("Head merge needs an agent: N file(s)"). A preview that cannot run falls
+back to the head as it is and the plan says "Could not preview". No new upstream commits: the command and the plan are
+as before.
+
+LOWEST (inside the select step; a version-branch fork only): each listed known issue against the version branches below
+its lowest open version (known-issues.py lowest, git only): a `pattern` matching lower shows "may be at <v>
+(unconfirmed)" -- evidence, not proof: fix_at stays (the round's lowest job confirms it) -- and a listed file
+byte-identical lower shows "lowest may be lower (unchecked)".
+
 SHARED (inside the cascade step; a version-branch fork only, so a single-version fork's plan is unchanged): each
 version against MMVU's shared library as of the pinned commit (fork-branches.py sync-shared --check, read-only). The
 plan's "Adopt MMVU's shared code" section says which versions the round's sync step will bring up and which hand-edited
@@ -705,9 +718,22 @@ def step_cascade(work):
             continue
         spec = f"{f['head']}..{vs[-1]}"
         out = pathlib.Path(work) / f"cascade-{i}"
-        r = subprocess.run([sys.executable, str(TOOLS / "fork-branches.py"), "cascade", "--repo", f["clone"], spec,
-                            "--plan", "--out", str(out)], capture_output=True, text=True, encoding="utf-8")
-        print(r.stdout[-3000:], end="")
+        # the authors' new commits are merged into the head only in the round: the plan previews that merge on a
+        # throwaway ref (cascade --plan --head-merge), so the decisions it raises are on Tuesday's plan; with nothing
+        # new upstream the command is as it was
+        hm = ["--head-merge", f["upstream_commit"]] if f.get("new_count") and f.get("upstream_commit") else []
+        preview_error = None
+        while True:
+            r = subprocess.run([sys.executable, str(TOOLS / "fork-branches.py"), "cascade", "--repo", f["clone"], spec,
+                                "--plan", "--out", str(out), *hm], capture_output=True, text=True, encoding="utf-8")
+            print(r.stdout[-3000:], end="")
+            if (r.returncode or not (out / "CASCADE-PLAN.json").is_file()) and hm:
+                # fail soft: the plan of the head as it is, the preview said to have failed
+                preview_error = (f"cascade --plan --head-merge exit {r.returncode}: "
+                                 + (r.stderr.strip() or r.stdout.strip())[-300:])
+                hm = []
+                continue
+            break
         if r.returncode or not (out / "CASCADE-PLAN.json").is_file():
             raise Fail(f"{f['repo']}: cascade {spec} --plan failed (exit {r.returncode}): {r.stderr.strip()[-500:]}")
         plan = json.loads((out / "CASCADE-PLAN.json").read_text(encoding="utf-8"))
@@ -715,6 +741,11 @@ def step_cascade(work):
             "mechanical": plan.get("mechanical", []), "versions": plan.get("versions", []),
             "decisions": [{k: d.get(k) for k in ("id", "file", "versions", "escalate", "choice", "reasoning", "class")}
                           for d in plan.get("decisions", [])]}}
+        if preview_error or plan.get("head_merge"):
+            f["cascade"]["head_merge"] = {"error": preview_error} if preview_error else plan["head_merge"]
+            h_ = f["cascade"]["head_merge"]
+            print(f"weekly-plan: {f['repo']}: " + (f"could not preview the head merge: {h_['error']}" if h_.get("error") else
+                  f"the head merge previewed: {len(h_.get('conflicts') or [])} file(s) conflict (an agent ports them)"))
         up = f"refs/remotes/upstream/{f['upstream_branch']}"
         f["untaken"] = [{k: c[k] for k in ("sha", "subject", "merge", "versions")}
                         for c in fb.untaken_authors(f["clone"], f["head_commit"], up, vs)]
@@ -772,9 +803,41 @@ def step_select(work):
         f["candidates"] = [{"id": e["id"], "severity": e["severity"], "lowest": e["lowest"], "title": e["title"],
                             "lowest_open": lo.get(e["id"])} for e in opened if e["id"] not in taken]
         f["ledger_ids"] = [e["id"] for e in every]
+        if f.get("cascade") is not None:
+            lowest_below(f, every)       # a version-branch fork only: a single-version fork has no branch below its one
         print(f"weekly-plan: {f['repo']}: {len(sel)} known issue(s) by default, {len(f['candidates'])} other open")
     save_input(work, inp)
     return 0
+
+
+def lowest_below(f, every):
+    """Each listed issue of a version-branch fork against the version branches below the version it would be fixed at
+    (known-issues.py lowest, git only): its pattern found lower is a candidate only, "may be at <v> (unconfirmed)"
+    (`lowest_candidate`; the plan's fix_at stays: the round's lowest job confirms it); a listed file byte-identical lower
+    says "lowest may be lower (unchecked)". Fails soft: an issue it cannot check
+    keeps its line as it was."""
+    k = ki()
+    by = {e["id"]: e for e in every}
+    refs, cache = k.version_refs(f["clone"]), {}
+    for r in f["selection"] + f["candidates"]:
+        e = by.get(r["id"])
+        if not e:
+            continue
+        try:
+            res = k.lowest_check(f["clone"], e, r.get("lowest_open"), refs, None, cache)
+        except Exception as x:          # noqa: BLE001 -- the plan goes on
+            print(f"weekly-plan: {f['repo']}: {r['id']}: the lowest check could not run: {x}")
+            continue
+        if res["found"]:
+            r["lowest_candidate"] = res["found"][0]
+        note = k.lowest_note(res)
+        if note:
+            r["lowest_note"] = note
+    n = sum(1 for r in f["selection"] + f["candidates"] if r.get("lowest_candidate"))
+    m = sum(1 for r in f["selection"] + f["candidates"] if r.get("lowest_note") and not r.get("lowest_candidate"))
+    if n or m:
+        print(f"weekly-plan: {f['repo']}: {n} issue(s) whose pattern is below their lowest open version (unconfirmed), "
+              f"{m} whose lowest may be lower (unchecked)")
 
 
 def k_mc(v):
@@ -1340,6 +1403,97 @@ def self_check():
                f"a version-branch fork: nothing new upstream, the head's untaken authors' commit and its merge listed: {fv}")
         expect(set(fv.get("shared", {}).get("versions", {})) == {"1.21.3"} and "adopt" in fv["shared"] and "ahead" in fv["shared"],
                f"a version-branch fork: its shared-library status (sync-shared --check) is in the plan input: {fv.get('shared')}")
+        expect("head_merge" not in fv["cascade"] and not any("lowest_note" in r or "lowest_candidate" in r
+                                                             for r in fv["selection"] + fv["candidates"])
+               and "lowest_note" not in f0["selection"][0],
+               f"no new upstream commits: no head-merge preview (the cascade command as before); a single-version fork "
+               f"gets no lowest check: {fv['cascade']}")
+        # the head merge previewed: the authors' new commit conflicts with the head's port (so the throwaway checkout
+        # merge of step_fetch is aborted) and changes a line 1.21.3 changed too -- the version-boundary decision the
+        # round would meet is on the plan; the ledger's pattern on the head is shown as a candidate, fix_at unchanged
+        up2 = d / "up2"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(up2)], check=True)
+        F = "src/F.java"
+        body = lambda a_, b_: f"class F {{\n  int a = {a_};\n  // 1\n  // 2\n  // 3\n  // 4\n  int b = {b_};\n}}\n"
+        (up2 / "src").mkdir()
+        (up2 / F).write_text(body(1, 1), encoding="utf-8")
+        (up2 / "src/G.java").write_text("class G {}\n", encoding="utf-8")
+        gq(up2, "add", "-A"); gq(up2, "commit", "-qm", "root")
+        hm_ = d / "hmfork"
+        subprocess.run(["git", "clone", "-q", str(up2), str(hm_)], check=True, capture_output=True)
+        gq(hm_, "checkout", "-q", "-b", "neoforge-1.21.1")
+        (hm_ / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (hm_ / F).write_text(body(10, 1), encoding="utf-8")
+        gq(hm_, "add", "-A"); gq(hm_, "commit", "-qm", "port")
+        for args in (["--id", "KI-1", "--title", "a wrong a", "--failure", "functional", "--visibility", "common",
+                      "--reach", "normal", "--workaround", "no", "--lowest", "1.21.3", "--file", F, "--pattern", "a = 10"],
+                     ["--id", "KI-2", "--title", "G drawn in the wrong colour", "--failure", "cosmetic", "--visibility", "rare", "--reach",
+                      "normal", "--workaround", "no", "--lowest", "1.21.3", "--file", "src/G.java"]):
+            with contextlib.redirect_stdout(io.StringIO()):
+                k.main(["add", "--repo", str(hm_), *args])
+        gq(hm_, "add", "-A"); gq(hm_, "commit", "-qm", "ledger")
+        x2 = gq(hm_, "rev-parse", "HEAD")
+        gq(hm_, "checkout", "-q", "-b", "neoforge-1.21.3")
+        (hm_ / "gradle.properties").write_text("minecraft_version=1.21.3\n", encoding="utf-8")
+        (hm_ / ".port/1.21.3").mkdir(parents=True)
+        (hm_ / ".port/1.21.3/branch.properties").write_text(
+            "minecraft_version=1.21.3\nbranch=neoforge-1.21.3\nparent=neoforge-1.21.1\nparent_minecraft_version=1.21.1\n"
+            f"port_branch=neoforge-1.21.1\nbase_minecraft_version=1.21.1\nport_taken={x2}\n", encoding="utf-8")
+        (hm_ / F).write_text(body(10, 13), encoding="utf-8")
+        gq(hm_, "add", "-A"); gq(hm_, "commit", "-qm", "1.21.3")
+        gq(hm_, "checkout", "-q", "neoforge-1.21.1")
+        for b_ in ("neoforge-1.21.1", "neoforge-1.21.3"):
+            gq(hm_, "update-ref", f"refs/remotes/origin/{b_}", b_)
+        (up2 / F).write_text(body(2, 2), encoding="utf-8")
+        gq(up2, "add", "-A"); gq(up2, "commit", "-qm", "authors: a and b")
+        c5 = make_config([parse_fork(f"o/hm@neoforge-1.21.1={up2}#main")], "someone", 3, "owner/migrator")
+        conf5 = d / "weekly-plan-hm.json"
+        conf5.write_text(json.dumps(c5), encoding="utf-8")
+        w5 = d / "plan-hm"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_fetch(conf5, hm_, w5, now=summer)
+            step_cascade(w5)
+            step_select(w5)
+        fh = load_input(w5)["forks"][0]
+        hmr = fh["cascade"].get("head_merge") or {}
+        decs = fh["cascade"]["plan"]["decisions"]
+        expect(fh["new_count"] == 1 and fh["merge_conflicts"] == [F] and hmr.get("merged") and hmr.get("conflicts") == [F]
+               and [(x_["file"], x_["versions"]) for x_ in decs] == [(F, ["1.21.3"])],
+               f"new upstream commits: the head merge simulated on a throwaway ref, its own conflict listed, and the "
+               f"version-boundary decision at 1.21.3 on the plan: {hmr} {decs}")
+        expect(gq(hm_, "rev-parse", "refs/remotes/origin/neoforge-1.21.1") == x2 and gq(hm_, "rev-parse", "neoforge-1.21.1") == x2,
+               "the preview changed no real branch")
+        sel_hm = {r["id"]: r for r in fh["selection"] + fh["candidates"]}
+        expect(sel_hm["KI-1"].get("lowest_candidate") == "1.21.1"
+               and "may be at 1.21.1 (unconfirmed" in sel_hm["KI-1"].get("lowest_note", "")
+               and "lowest_candidate" not in sel_hm["KI-2"]
+               and "lowest may be lower (unchecked): 1.21.1" in sel_hm["KI-2"].get("lowest_note", ""),
+               f"the lowest check: the pattern on the head is a candidate only (KI-1 unconfirmed there); KI-2's file "
+               f"unchanged below is flagged: {sel_hm}")
+        inp5 = load_input(w5)
+        inp5.update(owner={"login": "someone"})
+        r5 = k.render_plan(inp5)
+        expect("--head-merge " in r5["body"] and "Head merge needs an agent: 1 file(s)" in r5["body"]
+               and f"`{F}` at 1.21.3" in r5["body"] and "lowest may be lower (unchecked)" in r5["body"]
+               and '"fix_at": {"KI-1": "1.21.3", "KI-2": "1.21.3"}' in r5["body"].replace("\n", "")
+               and "may be at 1.21.1 (unconfirmed" in r5["body"],
+               f"the plan shows the previewed decision, the head merge's conflict and the lowest check: {r5['body'][-2500:]}")
+        inp7 = load_input(w5)
+        inp7.update(owner={"login": "someone"})
+        inp7["forks"][0]["cascade"]["head_merge"] = {"ref": "c" * 40, "commit": "c" * 40, "merged": False, "already": True,
+                                                    "conflicts": [], "error": None}
+        b7 = k.render_plan(inp7)["body"]
+        expect("throwaway ref first" not in b7 and "Previewed:" not in b7 and "--plan`, git and the rename rows" in b7,
+               "the authors' commit already in the head: the plan does not claim a simulated head merge")
+        # the preview cannot run (an unknown commit): the plan of the head as it is, said
+        inp6 = load_input(w5)
+        inp6["forks"][0]["upstream_commit"] = "f" * 40
+        save_input(w5, inp6)
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_cascade(w5)
+        h6 = load_input(w5)["forks"][0]["cascade"].get("head_merge") or {}
+        expect(h6.get("error") and "Could not preview" in "\n".join(k.head_merge_lines(h6)),
+               f"fail soft: a head merge that cannot be simulated is listed as could not preview: {h6}")
         # previous / open against a fake GitHub: carry-forward from an unclosed plan, then supersede it
         issues, calls = {}, []
 
