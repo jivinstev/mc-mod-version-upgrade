@@ -285,8 +285,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
             git show "origin/${{ github.base_ref }}:docs/catalog-census.tsv" > docs/catalog-census.tsv
+            python3 tools/check-catalog-fidelity.py --base "origin/${{ github.base_ref }}"
+          else
+            python3 tools/check-catalog-fidelity.py
           fi
-          python3 tools/check-catalog-fidelity.py
           git checkout -- docs/catalog-census.tsv
       - name: vendored licence manifest
         run: python3 tools/gen-vendored.py --check

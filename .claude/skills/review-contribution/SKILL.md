@@ -67,7 +67,11 @@ quietly narrower. Widening an allowlist needs the owner, by name, in the PR.
 - **Correct and not a duplicate?** Search the catalogue for the API name and the error text. If an entry
   already covers it, the right change is an `AUGMENT` to that entry, not a new number.
 - **Placed right?** In the section for its axis (loader, version family, runtime, silent-resource, …).
-- **Nothing lost.** The fidelity gate (run against the base census) settles this mechanically.
+- **Nothing lost.** The fidelity gate (run against the base census) settles this mechanically. A removal it
+  accepts was declared on the branch with `Catalog-removed: <file>::<id> -- <reason>` (review-pr lists each as
+  "removed on purpose"): judge each reason as you would a deleted rule -- is the lesson really obsolete or
+  carried elsewhere? A self-test that asserts less passes only with `Tests-removed: <script> <before>-><after>
+  -- <reason>` at exactly the measured counts; read that reason the same way.
 
 **The port's target version.** A learnings commit says `Port target(s): Minecraft X ...` and
 `Gate C (real client): passed|failed|not-run`. When Gate C `passed` and this is a mod not already counted
