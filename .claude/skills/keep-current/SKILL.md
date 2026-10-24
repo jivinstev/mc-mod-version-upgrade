@@ -68,20 +68,18 @@ run is green, and it is then gated against the dependency's NEW build.
    `--mod-repo` per fork of the set it depends on. A run that commits learnings here first passes `guard-names.py check`.
 1. **Nothing new? Stop cheaply.** `port-sync.py --dry-run` for the authors' branch, and for each dependency
    "has it a newer green build than the dependent pins?". No change anywhere: exit, no model work.
-2. **Merge** on a work branch `keep-current/<date>` cut from the port branch: `port-sync.py` (a merge, never a
-   rebase). It first compares the branch it merges into with origin's (the version-branch cascade's check,
-   `tools/origin-sync.py`, every kind of fork): one strictly behind origin is fast-forwarded, a diverged one is refused
-   (exit 2: merge origin's branch into it, then run again), never a reset or a force; `--dry-run` reads origin's
-   commit and moves nothing. A work branch origin does not have is used as it is, so cut it from the port branch only
-   after `port-sync.py --port <port branch> --dry-run` names nothing behind (else `git merge --ff-only
-   origin/<port branch>` on it first). Fetch immediately before merging and name the exact commit merged in the message, read from git
-   (`git rev-parse --short <remote>/<branch>`), never from memory: the authors can push while a reconcile is
-   running, and the next run decides from what this one says it merged (`port-sync.py` now puts it in the message).
-   **To merge one exact commit** (the weekly round's frozen `upstream_commit`): `port-sync.py` has no option for it --
-   it merges the tip of `--upstream <remote>/<branch>`, which the authors can move at any moment. So run `port-sync.py
-   --dry-run` (it fetches and lists the incoming commits, up to the tip, and changes nothing), then, on a clean tree,
-   `git checkout <work branch>` and `git merge --no-ff -m "Merge <remote>/<branch> at <short sha> into <work branch>"
-   <sha>` (port-sync's own message form).
+2. **Merge** on a work branch `keep-current/<date>` cut from the port branch, by port-sync itself (a merge, never a
+   rebase): `port-sync.py --repo DIR --port keep-current/<date> --base <port branch> --upstream <remote>/<branch>
+   [--commit <sha>]`. It first compares the port branch (`--base`) with origin's (the version-branch cascade's check,
+   `tools/origin-sync.py`, every kind of fork): strictly behind origin, it is fast-forwarded; diverged, refused (exit 2:
+   merge origin's branch into it, then run again); never a reset or a force. It then cuts the work branch from it (an
+   existing work branch that lacks the port branch's tip is refused: it was cut from a stale base), fetches the
+   authors' remote and merges, naming the exact commit in the message ("Merge <remote>/<branch> at <sha> into <work
+   branch>", read from git, never from memory: the authors can push while a reconcile is running, and the next run
+   decides from what this one says it merged). `--dry-run` lists the incoming commits, reads origin's port branch when
+   the local one is behind, and moves nothing. **To merge one exact commit** (the weekly round's frozen
+   `upstream_commit`): `--commit <sha>` merges exactly that commit, never a newer tip, and refuses a commit the
+   `--upstream` branch does not reach.
    **A conflict in a file one of our fix commits touched** cannot wait for step 3 -- the merge cannot be committed,
    and the A/B needs a tree that compiles. Resolve it to the AUTHORS' side, say in the merge message that the
    resolution is provisional ("decision and A/B: <issue> ledger"), and if step 3's A/B then fails, commit our fix
@@ -503,7 +501,8 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    green and released (Run step 7, "Don't exceed your dependency").
 3. **Per fork**, from its entry in `frozen.json`; say which case it is. **The authors' code is taken only when the plan
    says so (`take_authors`), and a done version is reopened only for an S1.**
-   - **A single-version fork:** when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (merge, reconcile,
+   - **A single-version fork:** when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (step 2's
+     `port-sync.py ... --base <head> --commit <upstream_commit>`; merge, reconcile,
      port, gate, PR into the head), with step 6's merge and release run only after step 4 below (review and grading). Each selected known issue is fixed on the port branch. Nothing else changes for it.
    - **A version-branch fork with `head_cascade: true`** (the authors' box ticked, or the head has none of their code
      untaken): when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (when only the head's untaken code is

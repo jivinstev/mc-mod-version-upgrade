@@ -2,6 +2,7 @@
 """Keep a port branch current with its author: bring in their new commits, then say what is left to port.
 
     python3 tools/port-sync.py --repo <fork clone> --port <port branch> --upstream <remote>/<branch> [--dry-run]
+                               [--commit SHA] [--base <port branch>]       # --port a work branch, e.g. keep-current/<date>
     python3 tools/port-sync.py --self-check
 
 A fork carries two port branches (see the port-fork skill):
@@ -12,10 +13,13 @@ A fork carries two port branches (see the port-fork skill):
 WHAT IT DOES (a merge, never a rebase: the branch is shared, and its history is what the author reviews):
   0. compare the local port branch with origin's (tools/origin-sync.py, as the version-branch cascade does): strictly
      behind -> fast-forwarded (--dry-run: origin's commit is read, nothing moves); diverged -> refused, exit 2, with
-     what to do. Never a reset or a force. A branch origin does not have (a keep-current/<date> work branch) is used
-     as it is;
-  1. fetch the remote and list the author's commits not yet on the port branch (subjects, files, +/- lines);
-  2. merge them into the port branch. A conflict stops here with the files listed -- both sides edited the same
+     what to do. Never a reset or a force. With --base, --port is a work branch (keep-current/<date>): the BASE
+     (the port branch) is the one checked, the work branch is cut from it when it does not exist yet, and an existing
+     one that lacks the base's tip is refused (it was cut from a stale base);
+  1. fetch the remote and list the author's commits not yet on the port branch (subjects, files, +/- lines), up to
+     the tip of --upstream, or up to --commit SHA (the weekly round's frozen upstream_commit), which must be reachable
+     from it;
+  2. merge them (that commit, never a newer tip) into the port branch, as "Merge <upstream> at <sha> into <port>". A conflict stops here with the files listed -- both sides edited the same
      lines, which is a person's call (or a model's, with --dry-run first to see the size);
   3. compile and count (tools/burndown-count.sh): every error is new author code still written for the old target.
      Re-run the port pipeline's mechanical stage on it, then the gates (tools/ci-gates.py), then push.
@@ -41,32 +45,67 @@ def incoming(repo, port, upstream):
     return rows, stat
 
 
-def origin_check(repo, port, dry, out):
-    """The port branch against origin's before anything is read (tools/origin-sync.py, the version-branch cascade's
-    check): strictly behind -> fast-forwarded (a dry run reads origin's commit instead and moves nothing); diverged,
-    or behind with uncommitted changes -> refused. -> (the ref to read the port branch at, None) or (None, why)."""
+def origin_check(repo, names, dry, out):
+    """The branches about to be read against origin's (tools/origin-sync.py, the version-branch cascade's check):
+    strictly behind -> fast-forwarded (a dry run reads origin's commit instead and moves nothing); diverged, or behind
+    with uncommitted changes -> refused. -> ({name: the ref to read it at}, None) or (None, why)."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("origin_sync_ps", HERE / "origin-sync.py")
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-    over, why = m.origin_sync(repo, [port], change=not dry, say=out, tool="port-sync", again="run port-sync again")
-    return (None, why) if why else ((over or {}).get(port, port), None)
+    over, why = m.origin_sync(repo, names, change=not dry, say=out, tool="port-sync", again="run port-sync again")
+    return (None, why) if why else ({n: (over or {}).get(n, n) for n in names}, None)
 
 
-def sync(repo, port, upstream, dry=False, out=print):
-    at, why = origin_check(repo, port, dry, out)
+def has_branch(repo, name):
+    return git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}^{{commit}}", check=False).returncode == 0
+
+
+def sync(repo, port, upstream, dry=False, out=print, commit=None, base=None):
+    """Merge `upstream`'s tip -- or exactly `commit`, which must be reachable from it (the weekly round's frozen
+    upstream_commit) -- into `port`. `base`: the port branch a work branch `port` is cut from; it is checked against
+    origin (and `port` cut from it when it does not exist yet), and an existing `port` must contain it."""
+    base = base if base and base != port else None
+    at, why = origin_check(repo, [base] if base else [port], dry, out)
     if why:
         out(f"port-sync: REFUSED: {why}")
         return 2
+    if base:
+        if not has_branch(repo, base):
+            out(f"port-sync: REFUSED: --base {base} is not a local branch"); return 2
+        if has_branch(repo, port):
+            if git(repo, "merge-base", "--is-ancestor", at[base], port, check=False).returncode:
+                out(f"port-sync: REFUSED: the work branch {port} was cut from an older {base} (it lacks "
+                    f"{git(repo, 'rev-parse', '--short', at[base]).strip()}): merge {base} into it, or delete it and "
+                    "run port-sync again to cut it afresh")
+                return 2
+            at[port] = port
+        elif dry:
+            at[port] = at[base]
+            out(f"port-sync: {port} does not exist yet: it will be cut from {base} ({git(repo, 'rev-parse', '--short', at[base]).strip()})")
+        else:
+            git(repo, "branch", port, base)
+            out(f"port-sync: cut {port} from {base} ({git(repo, 'rev-parse', '--short', base).strip()})")
+            at[port] = port
     remote = upstream.split("/", 1)[0]
     if remote in git(repo, "remote").split():
         git(repo, "fetch", "-q", remote)
-    rows, stat = incoming(repo, at, upstream)
+    target = upstream
+    if commit:
+        r = git(repo, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}", check=False)
+        sha = r.stdout.strip()
+        if r.returncode or git(repo, "merge-base", "--is-ancestor", sha, upstream, check=False).returncode:
+            out(f"port-sync: REFUSED: --commit {commit} is not a commit reachable from {upstream} (after fetching "
+                f"{remote}): name one of the authors' commits on that branch")
+            return 2
+        target = sha
+    rows, stat = incoming(repo, at[port], target)
     if not rows:
-        out(f"port-sync: {port} already has everything on {upstream}")
+        out(f"port-sync: {port} already has everything on {upstream}" + (f" up to {target[:12]}" if commit else ""))
         return 0
-    out(f"port-sync: {len(rows)} author commit(s) on {upstream} not on {port} ({stat or 'no file changes'}):")
-    for sha, day, subj in rows[:15]:
-        out(f"   {sha} {day} {subj}")
+    out(f"port-sync: {len(rows)} author commit(s) on {upstream}" + (f" up to {target[:12]}" if commit else "")
+        + f" not on {port} ({stat or 'no file changes'}):")
+    for sha_, day, subj in rows[:15]:
+        out(f"   {sha_} {day} {subj}")
     if len(rows) > 15:
         out(f"   ... and {len(rows) - 15} more")
     if dry:
@@ -74,8 +113,8 @@ def sync(repo, port, upstream, dry=False, out=print):
     if git(repo, "status", "--porcelain").strip():
         sys.exit("port-sync: the working tree has uncommitted changes; commit or stash them first")
     git(repo, "checkout", "-q", port)
-    head = git(repo, "rev-parse", "--short", upstream).strip()          # name the commit merged: the authors can
-    r = git(repo, "merge", "--no-ff", "-m", f"Merge {upstream} at {head} into {port}", upstream, check=False)  # push mid-run
+    head = git(repo, "rev-parse", "--short", target).strip()            # name the commit merged: the authors can
+    r = git(repo, "merge", "--no-ff", "-m", f"Merge {upstream} at {head} into {port}", target, check=False)  # push mid-run
     if r.returncode:
         files = git(repo, "diff", "--name-only", "--diff-filter=U").split()
         out(f"port-sync: CONFLICT in {len(files)} file(s) -- both the author and the port changed the same lines:")
@@ -89,6 +128,64 @@ def sync(repo, port, upstream, dry=False, out=print):
     out("   2. port it with the pipeline's mechanical stage (tools/port-upstream.py), then fix what is left;")
     out("   3. gates: tools/ci-gates.py --repo <clone> ...; then push (CI re-runs them and releases on a tag).")
     return 0
+
+
+def base_commit_check():
+    """--base and --commit, the weekly round's path (#161 U1 review): a work branch keep-current/<date> cut from a port
+    branch behind origin is cut from origin's tip (the base fast-forwarded first); a diverged base refuses; a work
+    branch cut earlier from a stale base refuses; --commit merges that commit, never the newer tip, and refuses a commit
+    the upstream branch does not reach."""
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        G = lambda r, *a: subprocess.run(["git", "-C", str(r), "-c", "user.name=a", "-c", "user.email=a@a", *a],
+                                         check=True, capture_output=True, text=True, encoding="utf-8").stdout.strip()
+        up, fork, other = d / "up", d / "fork", d / "other"
+        up.mkdir(); G(up, "init", "-q", "-b", "main")
+        (up / "A.java").write_text("a\n", encoding="utf-8"); G(up, "add", "-A"); G(up, "commit", "-qm", "base")
+        G(up, "branch", "neoforge-1.21.1")
+        subprocess.run(["git", "clone", "-q", "-b", "neoforge-1.21.1", str(up), str(fork)], check=True, capture_output=True)
+        subprocess.run(["git", "clone", "-q", "-b", "neoforge-1.21.1", str(up), str(other)], check=True, capture_output=True)
+        (other / "P.java").write_text("a PR merged on origin\n", encoding="utf-8"); G(other, "add", "-A"); G(other, "commit", "-qm", "PR")
+        G(other, "push", "-q", "origin", "neoforge-1.21.1")
+        pr = G(other, "rev-parse", "HEAD")
+        (up / "B.java").write_text("frozen\n", encoding="utf-8"); G(up, "add", "-A"); G(up, "commit", "-qm", "frozen")
+        frozen = G(up, "rev-parse", "HEAD")
+        (up / "C.java").write_text("pushed after the freeze\n", encoding="utf-8"); G(up, "add", "-A"); G(up, "commit", "-qm", "later")
+        wb = "keep-current/2026-10-28"
+        log = []
+        rc = sync(fork, wb, "origin/main", dry=True, out=log.append, commit=frozen, base="neoforge-1.21.1")
+        ok &= rc == 0 and not has_branch(fork, wb) and any("reading origin's" in l for l in log) \
+            and any("1 author commit(s)" in l and frozen[:12] in l for l in log)
+        log = []
+        rc = sync(fork, wb, "origin/main", out=log.append, commit=frozen, base="neoforge-1.21.1")
+        ok &= rc == 0 and any("fast-forwarded the local neoforge-1.21.1" in l for l in log) \
+            and G(fork, "rev-parse", "neoforge-1.21.1") == pr \
+            and subprocess.run(["git", "-C", str(fork), "merge-base", "--is-ancestor", pr, wb]).returncode == 0 \
+            and (fork / "B.java").is_file() and not (fork / "C.java").exists() \
+            and G(fork, "log", "-1", "--format=%s", wb) == f"Merge origin/main at {G(fork, 'rev-parse', '--short', frozen)} into {wb}"
+        G(fork, "checkout", "-q", "neoforge-1.21.1")
+        log = []
+        ok &= sync(fork, wb, "origin/main", out=log.append, commit="0" * 40, base="neoforge-1.21.1") == 2 \
+            and any("is not a commit reachable" in l for l in log)
+        # a work branch cut before origin moved again: refused (it lacks the base's new tip)
+        (other / "Q.java").write_text("PR 2\n", encoding="utf-8"); G(other, "add", "-A"); G(other, "commit", "-qm", "PR 2")
+        G(other, "push", "-q", "origin", "neoforge-1.21.1")
+        log = []
+        ok &= sync(fork, wb, "origin/main", out=log.append, base="neoforge-1.21.1") == 2 \
+            and any("cut from an older neoforge-1.21.1" in l for l in log)
+        # a diverged base: refused, nothing cut or merged
+        (fork / "L.java").write_text("only here\n", encoding="utf-8"); G(fork, "add", "-A"); G(fork, "commit", "-qm", "local")
+        (other / "R.java").write_text("PR 3\n", encoding="utf-8"); G(other, "add", "-A"); G(other, "commit", "-qm", "PR 3")
+        G(other, "push", "-q", "origin", "neoforge-1.21.1")
+        h = G(fork, "rev-parse", "HEAD")
+        log = []
+        ok &= sync(fork, "keep-current/other", "origin/main", out=log.append, base="neoforge-1.21.1") == 2 \
+            and any("has diverged" in l for l in log) and not has_branch(fork, "keep-current/other") \
+            and G(fork, "rev-parse", "HEAD") == h
+    if not ok:
+        print("FAIL: port-sync --base / --commit", log)
+    return ok
 
 
 def self_check():
@@ -147,6 +244,7 @@ def self_check():
         ok &= sync(fork, "neoforge-1.21.1", "origin/main", out=log.append) == 2 \
             and any("REFUSED" in l and "has diverged" in l and "run port-sync again" in l for l in log) \
             and git(fork, "rev-parse", "HEAD").strip() == head and not (fork / ".git/MERGE_HEAD").exists()
+    ok &= base_commit_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -163,6 +261,8 @@ def _refuse_layer(repo, tool):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo"); ap.add_argument("--port"); ap.add_argument("--upstream")
+    ap.add_argument("--commit", help="merge exactly this commit (reachable from --upstream), not the tip")
+    ap.add_argument("--base", help="the port branch a work branch --port is cut from: checked against origin first")
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
@@ -173,7 +273,7 @@ def main():
         return 2
     if not (a.repo and a.port and a.upstream):
         ap.error("--repo, --port and --upstream are required")
-    return sync(a.repo, a.port, a.upstream, a.dry_run)
+    return sync(a.repo, a.port, a.upstream, a.dry_run, commit=a.commit, base=a.base)
 
 
 if __name__ == "__main__":
