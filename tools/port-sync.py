@@ -10,6 +10,10 @@ A fork carries two port branches (see the port-fork skill):
                          releases again: re-run port-derive with the new release commit, never port-sync.
 
 WHAT IT DOES (a merge, never a rebase: the branch is shared, and its history is what the author reviews):
+  0. compare the local port branch with origin's (tools/origin-sync.py, as the version-branch cascade does): strictly
+     behind -> fast-forwarded (--dry-run: origin's commit is read, nothing moves); diverged -> refused, exit 2, with
+     what to do. Never a reset or a force. A branch origin does not have (a keep-current/<date> work branch) is used
+     as it is;
   1. fetch the remote and list the author's commits not yet on the port branch (subjects, files, +/- lines);
   2. merge them into the port branch. A conflict stops here with the files listed -- both sides edited the same
      lines, which is a person's call (or a model's, with --dry-run first to see the size);
@@ -37,11 +41,26 @@ def incoming(repo, port, upstream):
     return rows, stat
 
 
+def origin_check(repo, port, dry, out):
+    """The port branch against origin's before anything is read (tools/origin-sync.py, the version-branch cascade's
+    check): strictly behind -> fast-forwarded (a dry run reads origin's commit instead and moves nothing); diverged,
+    or behind with uncommitted changes -> refused. -> (the ref to read the port branch at, None) or (None, why)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("origin_sync_ps", HERE / "origin-sync.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    over, why = m.origin_sync(repo, [port], change=not dry, say=out, tool="port-sync", again="run port-sync again")
+    return (None, why) if why else ((over or {}).get(port, port), None)
+
+
 def sync(repo, port, upstream, dry=False, out=print):
+    at, why = origin_check(repo, port, dry, out)
+    if why:
+        out(f"port-sync: REFUSED: {why}")
+        return 2
     remote = upstream.split("/", 1)[0]
     if remote in git(repo, "remote").split():
         git(repo, "fetch", "-q", remote)
-    rows, stat = incoming(repo, port, upstream)
+    rows, stat = incoming(repo, at, upstream)
     if not rows:
         out(f"port-sync: {port} already has everything on {upstream}")
         return 0
@@ -98,6 +117,36 @@ def self_check():
         (up / "A.java").write_text("a changed upstream\n", encoding="utf-8"); g(up, "commit", "-qam", "Change A")
         log = []
         ok &= sync(fork, "neoforge-1.21.1", "origin/main", out=log.append) == 2 and any("A.java" in l for l in log)
+        # a single-version fork whose local port branch is behind origin's (a PR merged there, the clone not pulled):
+        # fast-forwarded before the merge, so the merge starts from origin's tip; diverged: refused, nothing merged
+        g(fork, "merge", "--abort")
+        g(fork, "push", "-q", "origin", "neoforge-1.21.1")
+        other = pathlib.Path(d, "other")
+        subprocess.run(["git", "clone", "-q", "-b", "neoforge-1.21.1", str(up), str(other)], check=True, capture_output=True)
+        g(other, "config", "user.email", "a@a"); g(other, "config", "user.name", "a")
+        (other / "C.java").write_text("merged on origin\n", encoding="utf-8"); g(other, "add", "-A"); g(other, "commit", "-qm", "PR")
+        g(other, "push", "-q", "origin", "neoforge-1.21.1")
+        tip = git(other, "rev-parse", "HEAD").strip()
+        (up / "D.java").write_text("d\n", encoding="utf-8"); g(up, "add", "-A"); g(up, "commit", "-qm", "Add D")
+        g(up, "checkout", "-q", "main")
+        before = git(fork, "rev-parse", "neoforge-1.21.1").strip()
+        log = []
+        ok &= sync(fork, "neoforge-1.21.1", "origin/main", dry=True, out=log.append) == 0 \
+            and git(fork, "rev-parse", "neoforge-1.21.1").strip() == before and any("reading origin's" in l for l in log)
+        log = []
+        ok &= sync(fork, "neoforge-1.21.1", "origin/main", out=log.append, dry=False) in (0, 2) \
+            and any("fast-forwarded" in l for l in log) \
+            and git(fork, "merge-base", "--is-ancestor", tip, "neoforge-1.21.1", check=False).returncode == 0
+        g(fork, "merge", "--abort") if (fork / ".git/MERGE_HEAD").exists() else None
+        g(fork, "reset", "-q", "--hard", tip)          # the fixture's own state, not the tool's: a local commit next
+        (fork / "E.java").write_text("only here\n", encoding="utf-8"); g(fork, "add", "-A"); g(fork, "commit", "-qm", "local")
+        (other / "F.java").write_text("only there\n", encoding="utf-8"); g(other, "add", "-A"); g(other, "commit", "-qm", "PR 2")
+        g(other, "push", "-q", "origin", "neoforge-1.21.1")
+        head = git(fork, "rev-parse", "HEAD").strip()
+        log = []
+        ok &= sync(fork, "neoforge-1.21.1", "origin/main", out=log.append) == 2 \
+            and any("REFUSED" in l and "has diverged" in l and "run port-sync again" in l for l in log) \
+            and git(fork, "rev-parse", "HEAD").strip() == head and not (fork / ".git/MERGE_HEAD").exists()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
