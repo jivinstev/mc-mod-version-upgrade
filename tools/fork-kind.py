@@ -19,9 +19,9 @@ THE LAYER IS REMOVED. The `.multiversion/` overlay route (one layer branch build
 last commit of this repository that supports it is LAST_LAYER_COMMIT. A checkout with the layer at HEAD
 (`.multiversion/base.properties` or `.multiversion/targets/`) is refused by `detect` and by every tool that takes a
 fork checkout (refuse_layer(), exit 2), with LAYER_REMOVED: check that commit out to migrate the fork to version
-branches (`fork-branches.py migrate` there), then use the fork-versions skill. Any other `.multiversion/` at HEAD (a
-single-version fork's shipped-jar files, shipped-jar.txt and shipped-expect*.txt, which the layer era kept there) is
-refused too, exit 2, with MOVED: nothing reads that directory any more -- those files live in `.port/<mc>/` on every
+branches (`fork-branches.py migrate` there), then use the fork-versions skill. A single-version fork's shipped-jar
+files (shipped-jar.txt, shipped-expect*.txt, which the layer era kept there) committed under `.multiversion/` at HEAD
+(read with git ls-tree: an untracked or ignored leftover never counts) are refused too, exit 2, with MOVED: nothing reads that directory any more -- those files live in `.port/<mc>/` on every
 kind of fork -- so a gate would otherwise run without them, silently. A migrated fork (version branches exist) checked out on its legacy layer branch is refused too, exit 2, but told to check
 out its head branch instead (LEGACY_CHECKOUT): it needs no migration. Standard library only.
 """
@@ -53,13 +53,19 @@ def is_layer(repo):
 
 MOVED = ("{tool}: {repo} has a .multiversion/ directory at HEAD ({files}), which nothing reads since the layer route was "
          "removed: the shipped-jar files live in .port/<mc>/ on every kind of fork (ci-gates.py --shipped, shipped-gate.py). "
-         "Move them -- git mv .multiversion/<file> .port/{mc}/<file> for each -- and commit, then run again.")
+         "Move them -- mkdir -p .port/{mc} && git mv .multiversion/<file> .port/{mc}/<file> for each -- and commit, then "
+         "run again.")
+
+
+SHIPPED_FILE = re.compile(r"\.multiversion/(shipped-jar\.txt|shipped-expect(?:-[A-Za-z0-9]+)?\.txt)")
 
 
 def stray_files(repo):
-    """The files of a `.multiversion/` at HEAD that is no layer (what MOVED names), [] when there is none."""
-    mv = pathlib.Path(repo) / ".multiversion"
-    return sorted(p.relative_to(mv).as_posix() for p in mv.rglob("*") if p.is_file()) if mv.is_dir() else []
+    """The shipped-jar files committed at HEAD under a `.multiversion/` that is no layer (what MOVED names): read from
+    git, never the working tree, so an untracked or ignored leftover (a __pycache__) refuses nothing. [] when none."""
+    ls = git(repo, "ls-tree", "-r", "--name-only", "HEAD", "--", ".multiversion")
+    return sorted(m.group(1) for f in (ls.stdout.splitlines() if ls.returncode == 0 else [])
+                  for m in [SHIPPED_FILE.fullmatch(f)] if m)
 
 
 LEGACY_CHECKOUT = ("{tool}: {repo} is a version-branch fork checked out on a legacy layer branch ({branch}); check out "
@@ -164,14 +170,21 @@ def self_check():
         expect(detect(r) == ("single-version", [], []), f"one port branch: single-version: {detect(r)}")
         expect(refuse_layer(r, "x") is None, "a single-version fork is not refused")
         # a .multiversion/ with only a single-version fork's shipped-jar files is no layer, and nothing reads it any
-        # more: refused, told to move them to .port/<mc>/ (#161 U1)
+        # more: refused, told to move them to .port/<mc>/ (#161 U1); read from HEAD, so untracked leftovers do not count
+        w(".multiversion/tools/__pycache__/x.cpython-313.pyc", "junk")
         w(".multiversion/shipped-jar.txt", "*_mr.jar\n")
+        expect(refuse_layer(r, "x") is None, "an untracked .multiversion/ (a __pycache__, an uncommitted file): not refused")
+        g("add", ".multiversion/shipped-jar.txt"); g("commit", "-qm", "shipped list in the old place")
         msg = refuse_layer(r, "x")
+        expect(msg and "mkdir -p .port/1.21.1 && git mv .multiversion/<file> .port/1.21.1/<file>" in msg
+               and "pyc" not in msg and "__pycache__" not in msg, f"only the shipped files are named, the mkdir first: {msg}")
         expect(msg and msg.startswith("x: ") and "(shipped-jar.txt)" in msg and ".port/1.21.1/<file>" in msg
                and LAST_LAYER_COMMIT[:12] not in msg and detect(r)[0] == "single-version",
                f"a .multiversion/ holding only shipped-jar.txt: refused, the move to .port/<mc>/ named: {msg}")
-        (r / ".multiversion/shipped-jar.txt").unlink(); (r / ".multiversion").rmdir()
-        expect(refuse_layer(r, "x") is None, "the files moved: no refusal")
+        (r / ".port/1.21.1").mkdir(parents=True)
+        g("mv", ".multiversion/shipped-jar.txt", ".port/1.21.1/shipped-jar.txt"); g("commit", "-qm", "moved")
+        expect(refuse_layer(r, "x") is None, "the files moved (the leftover __pycache__ still there): no refusal")
+        import shutil; shutil.rmtree(r / ".multiversion")
         # a legacy layer branch (history) beside the port branch: still single-version, the branch listed
         g("checkout", "-q", "-b", "neoforge-1.21.x")
         w(".multiversion/base.properties", "base=1.21.1\n"); w(".multiversion/targets/1.21.4/target.properties", "x=1\n")
