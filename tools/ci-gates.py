@@ -162,6 +162,16 @@ def branch_version(repo):
     return m.group(1) if m and (pathlib.Path(repo) / ".port" / m.group(1) / "branch.properties").is_file() else None
 
 
+def shipped_jar_file(repo, bv=None):
+    """Where the fork names the jar a player installs (one glob under the build's libs): .port/<mc>/shipped-jar.txt on
+    every kind of fork (<mc>: the version branch's, else gradle.properties' minecraft_version), None when no version
+    can be read."""
+    gp = pathlib.Path(repo) / "gradle.properties"
+    m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
+    mc = bv or (m.group(1) if m else None)
+    return pathlib.Path(repo) / ".port" / mc / "shipped-jar.txt" if mc else None
+
+
 def read_kv(path):
     p = pathlib.Path(path)
     return dict(re.findall(r"(?m)^\s*([\w.:\\-]+)\s*=\s*(.*?)\s*$", p.read_text(encoding="utf-8"))) if p.is_file() else {}
@@ -323,6 +333,16 @@ def self_check():
         (r / ".port/1.21.4/shipped-expect-cf.txt").write_text("A.log:x\n", encoding="utf-8")
         ok &= sg.expect_file(r, "1.21.4", "cf") == r / ".port/1.21.4/shipped-expect-cf.txt"
         ok &= sg.expect_file(r, "1.21.4", sg.variant_of("*_mr.jar")) is None
+    with tempfile.TemporaryDirectory() as d:      # #161 U1 (B2): --shipped on a single-version fork reads .port/<mc>/
+        r, sg = pathlib.Path(d), _load("shipped_gate", "shipped-gate.py")
+        ok &= shipped_jar_file(r) is None                                 # no gradle.properties: no version to name
+        (r / "gradle.properties").write_text("minecraft_version=1.21.1\nneo_version=21.1.100\n", encoding="utf-8")
+        ok &= branch_version(r) is None and shipped_jar_file(r) == r / ".port/1.21.1/shipped-jar.txt"
+        ok &= shipped_jar_file(r, "1.21.4") == r / ".port/1.21.4/shipped-jar.txt"    # a version branch: as before
+        (r / ".port/1.21.1").mkdir(parents=True)
+        (r / ".port/1.21.1/shipped-expect-mr.txt").write_text("A.log:x\n", encoding="utf-8")
+        ok &= sg.expect_file(r, None, sg.variant_of("*_mr.jar")) == r / ".port/1.21.1/shipped-expect-mr.txt"
+        ok &= sg.expect_file(r, None, None) is None and branch_version(r) is None   # still single-version
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -341,10 +361,10 @@ def main():
                          "requires (optional integrations and dev-only mods removed from the runtime, not the compile)")
     ap.add_argument("--shipped", action="store_true",
                     help="also boot the BUILT jar in a real NeoForge server and read the mod's own logs (tools/shipped-gate.py); "
-                         "expectations come from the fork's .port/<mc>/shipped-expect[-<variant>].txt on a version branch, "
-                         "else .multiversion/shipped-expect.txt")
+                         "expectations come from the fork's .port/<mc>/shipped-expect-<variant>.txt, else "
+                         ".port/<mc>/shipped-expect.txt (every kind of fork)")
     ap.add_argument("--shipped-jar", help="glob (under the build's libs dir) naming the jar a player installs; default: "
-                                          ".multiversion/shipped-jar.txt, else the only jar there")
+                                          ".port/<mc>/shipped-jar.txt, else the only jar there")
     ap.add_argument("--mc", help="the Minecraft version of the version branch checked out (tools/fork-branches.py; "
                                  "it must be that branch's): the run takes build/.fork-port.lock, so a second run on the "
                                  "same checkout is refused (exit 14)")
@@ -541,14 +561,15 @@ def main():
             rows.append("| Shipped jar -- the built jar boots in a real server | not run | an earlier gate failed |")
         else:
             libs = bdir / "libs"
-            sj = repo / (f".port/{bv}" if bv else ".multiversion") / "shipped-jar.txt"
+            sj = shipped_jar_file(repo, bv)
             pat = a.shipped_jar or (sj.read_text(encoding="utf-8").split() or [""])[0] \
-                if (a.shipped_jar or sj.is_file()) else None
+                if (a.shipped_jar or (sj and sj.is_file())) else None
             found = sorted(libs.glob(pat)) if pat and libs.is_dir() else (sorted(libs.glob("*.jar")) if libs.is_dir() else [])
             label = "Shipped jar -- the built jar boots in a real server, the mod's own logs show its subsystems ran"
             if len(found) != 1:
                 record(label, False, f"cannot tell which jar a player installs: {len(found)} match(es) in {libs}"
-                                     f"{' for ' + pat if pat else ''}; pass --shipped-jar GLOB or write .multiversion/shipped-jar.txt")
+                                     f"{' for ' + pat if pat else ''}; pass --shipped-jar GLOB or write "
+                                     f"{sj.relative_to(repo).as_posix() if sj else '.port/<mc>/shipped-jar.txt'}")
             for jar in ([found[0]] + (cf_jars(libs, found[0]) if a.mc else [])) if len(found) == 1 else []:
                 first = jar == found[0]
                 log_name = "shipped-gate.log" if first else f"shipped-gate-{jar.stem}.log"
@@ -571,9 +592,11 @@ def main():
                     m = re.search(r"^neo_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8"), re.M) if gp.is_file() else None
                     if m:
                         cmd += ["--neo", m.group(1)]
-                    for n in ("shipped-expect.txt",):
-                        if (repo / ".multiversion" / n).is_file():
-                            cmd += ["--expect-file", str(repo / ".multiversion" / n)]
+                    # .port/<mc>/shipped-expect-<variant>.txt, else .port/<mc>/shipped-expect.txt, as on a version branch
+                    sg = _load("shipped_gate", "shipped-gate.py")
+                    ef = sg.expect_file(repo, None, sg.variant_of(pat))
+                    if ef:
+                        cmd += ["--expect-file", str(ef)]
                 r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
                 (work / log_name).write_text(r.stdout + r.stderr, encoding="utf-8")
                 print(r.stdout[-4000:] if r.returncode == 0 else r.stdout + r.stderr, flush=True)

@@ -18,8 +18,8 @@ tick loop", "Encountered an unexpected exception") and a server that exits after
 
 --expect-file reads one expectation per line (FILE:REGEX, '#' comments). Without it the fork's own list is used,
 the first that exists of: .port/<mc>/shipped-expect-<variant>.txt (a version branch, per shipped jar variant:
---variant cf for the `*_cf.jar` one), .port/<mc>/shipped-expect.txt, then .multiversion/shipped-expect.txt; <mc> is
---mc or else the checkout's gradle.properties minecraft_version. None of them: no expectations, the jar is only booted.
+--variant cf for the `*_cf.jar` one), then .port/<mc>/shipped-expect.txt, on every kind of fork; <mc> is --mc or else
+the checkout's gradle.properties minecraft_version. None of them: no expectations, the jar is only booted.
 --neo defaults to the checkout's gradle.properties neo_version.
 The JDK is the one the Minecraft version needs (1.21.x: 21, 26.x: 25; a version branch's own java_version in
 .port/<mc>/branch.properties first), the version being --mc or else the checkout's gradle.properties.
@@ -118,13 +118,12 @@ def variant_of(glob):
 
 def expect_file(repo, mc=None, variant=None):
     """The fork's own expectations file for this jar, or None: .port/<mc>/shipped-expect-<variant>.txt, then
-    .port/<mc>/shipped-expect.txt (<mc>: the given one, else gradle.properties'), then .multiversion/shipped-expect.txt."""
+    .port/<mc>/shipped-expect.txt (<mc>: the given one, else gradle.properties'), on every kind of fork."""
     repo = pathlib.Path(repo)
     pmc = mc or gradle_prop(repo, "minecraft_version")
     names = []
     if pmc:
         names += ([f".port/{pmc}/shipped-expect-{variant}.txt"] if variant else []) + [f".port/{pmc}/shipped-expect.txt"]
-    names += [".multiversion/shipped-expect.txt"]
     return next((repo / n for n in names if (repo / n).is_file()), None)
 
 
@@ -429,8 +428,7 @@ def self_check():
 
 
 def expect_check():
-    """Which expectations file a jar gets: single-version (none, .port/<mc>/ or .multiversion/shipped-expect.txt),
-    version branch per variant."""
+    """Which expectations file a jar gets: .port/<mc>/ per variant on every kind of fork (none: no file)."""
     ok = True
     ok &= [variant_of(g) for g in ("*_cf.jar", "*_mr.jar", "*-fabric.jar", "*.jar", None)] == ["cf", "mr", "fabric", None, None]
     with tempfile.TemporaryDirectory() as d:
@@ -446,9 +444,9 @@ def expect_check():
         ok &= expect_file(r, None, "mr") == r / ".port/1.21.4/shipped-expect.txt"      # _mr: the unsuffixed one
         ok &= expect_file(r, "1.21.4") == r / ".port/1.21.4/shipped-expect.txt"
         ok &= expect_file(r, "1.21.5") is None                                       # another version's: not this one
-        (r / ".multiversion").mkdir()                                               # a single-version fork's list, as before
+        (r / ".multiversion").mkdir()                       # the removed layer's location is not read (#161 U1)
         (r / ".multiversion/shipped-expect.txt").write_text("A.log:x\n", encoding="utf-8")
-        ok &= expect_file(r, "1.21.6") == r / ".multiversion/shipped-expect.txt"
+        ok &= expect_file(r, "1.21.6") is None
         ok &= expect_file(r / "none") is None
         # a variant whose expected line is missing from its log fails
         lg = r / "logs"; lg.mkdir()
