@@ -43,7 +43,6 @@ import argparse, json, os, pathlib, re, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "templates/upstream-harness/port-ci.yml"
-LAYER_TEMPLATE = ROOT / "templates/upstream-harness/port-ci-layer.yml"
 SHIPPED_TEMPLATE = ROOT / "templates/upstream-harness/port-ci-shipped.yml"
 GOLDEN = ROOT / "tools/golden"
 WORKFLOW = ".github/workflows/port-ci.yml"
@@ -170,62 +169,6 @@ def kit_pin(repo, version=None, sha=None, floor=None, get=None, say=None):
     if not re.fullmatch(r"[0-9a-f]{64}", sha):
         sys.exit(f"not a sha256: {sha!r}")
     return int(version), sha
-
-
-def layer_values(values, layer_branch):
-    """The two placeholders of the multi-version layer: the layer branch in the triggers, and the layer-* jobs (a
-    second template, rendered with the same values). Without --layer-branch both are empty and the workflow is
-    exactly the layer-free one."""
-    if not layer_branch:
-        return dict(values, LAYER_BRANCH_ITEM="", LAYER_JOBS="", RELEASE_NOT_LAYER="")
-    if not re.fullmatch(r"[\w.\-/]+", layer_branch) or layer_branch == values["BRANCH"]:
-        raise SystemExit(f"--layer-branch must be a branch name other than the port branch ({values['BRANCH']}), got {layer_branch!r}")
-    v = dict(values, LAYER_BRANCH=layer_branch)
-    jobs = render(LAYER_TEMPLATE.read_text(encoding="utf-8"), v) + render(layer_release_job(v), v)
-    return dict(values, LAYER_BRANCH_ITEM=f', "{layer_branch}"', LAYER_JOBS=jobs,
-                RELEASE_NOT_LAYER=f" && github.ref_name != '{layer_branch}'")
-
-
-def layer_release_job(v):
-    """The `release` job of the main template, made the layer branch's: it also waits for the layer's compile and gate
-    jobs and puts every target's jar (layer-jars-<t>) beside the base jars, so ONE pre-release holds the file
-    publish-port's layer path uploads per target. Derived from the release job's own text, so the release script has
-    one home; the main release job steps aside on the layer branch (RELEASE_NOT_LAYER)."""
-    t = TEMPLATE.read_text(encoding="utf-8")
-    job = t[t.index("\n  release:\n    needs:") + 1:]          # the JOB (the first `release:` is the trigger)
-    nxt = re.search(r"\n\n  (?:#|[a-z][\w-]*:\n)", job)       # the next job (or its comment), not a blank line in a script
-    job = job[:nxt.start() + 1] if nxt else job
-    needs = [x.strip() for x in v["RELEASE_NEEDS"].strip("[]").split(",")]
-    ok = " && ".join(f"needs.{n}.result == 'success'" for n in needs)
-    job = job.replace("  release:\n", "  layer-release:\n    name: layer release (the base jars and one jar per layer target)\n", 1)
-    # every layer job that can fail is a need: isolation and inertness (the base build untouched) must pass; the jobs
-    # a fork may legitimately not run (no middle target, no full_gates= list) may be skipped, never failed
-    layer = ["layer-plan", "layer-isolation", "layer-inertness", "layer-compile", "layer-gates", "layer-gates-extra"]
-    job = re.sub(r"(?m)^    needs: .*$", "    needs: [" + ", ".join(needs + layer) + "]", job, count=1)
-    job = re.sub(r"(?m)^    if: .*$", "    if: ${{ !cancelled() && " + ok + " && needs.layer-plan.outputs.layer == 'true'"
-                 " && needs.layer-isolation.result == 'success' && needs.layer-inertness.result == 'success'"
-                 " && needs.layer-gates.result == 'success' && (needs.layer-compile.result == 'success'"
-                 " || needs.layer-compile.result == 'skipped') && (needs.layer-gates-extra.result == 'success'"
-                 " || needs.layer-gates-extra.result == 'skipped') && github.ref_name == '{{LAYER_BRANCH}}' && inputs.release }}",
-                 job, count=1)
-    jars = "      - uses: actions/download-artifact@v4\n        with:\n          name: jars\n          path: jars\n"
-    if jars not in job:
-        raise SystemExit("port-ci: the release job no longer downloads `jars`; layer_release_job needs updating")
-    job = job.replace(jars, jars + "      - uses: actions/download-artifact@v4\n        with:\n          pattern: layer-jars-*\n"
-                                   "          merge-multiple: true\n          path: jars\n", 1)
-    # a preview target (preview=true in its target.properties; layer-ci.py plan lists them) keeps its jar on the
-    # pre-release, and the notes say it is a preview that publish-port will not upload. The list reaches the script
-    # through env only, never spliced into it.
-    env = "        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n"
-    built = '            echo "Built from'
-    if job.count(env) != 1 or job.count(built) != 1:
-        raise SystemExit("port-ci: the release job's notes changed shape; layer_release_job's preview note needs updating")
-    job = job.replace(env, env + "          PREVIEW: ${{ needs.layer-plan.outputs.preview }}\n", 1)
-    job = job.replace(built, '            if [ -n "$PREVIEW" ]; then\n'
-                             '              echo "**Preview** (built and gated, not published to Modrinth or CurseForge): Minecraft ${PREVIEW//,/, }."\n'
-                             '              echo\n'
-                             '            fi\n' + built, 1)
-    return "\n" + job
 
 
 def render(text, values):
@@ -361,7 +304,7 @@ VERSION_RECORDS_IGNORE = (".port/*.md", ".port/*/*.md")
 
 def records_values(values, version_branch=False):
     """RECORDS_IGNORE: the extra paths-ignore entries of a version branch's push trigger (VERSION_RECORDS_IGNORE);
-    empty, so nothing moves, on a single-version fork's port branch or a layer fork."""
+    empty, so nothing moves, on a single-version fork's port branch."""
     return dict(values, RECORDS_IGNORE="".join(f', "{p}"' for p in VERSION_RECORDS_IGNORE) if version_branch else "")
 
 
@@ -454,9 +397,8 @@ def recover_args(text):
     mc_suffix = re.search(r'tags: \["\*-mc([\d.]+)([^"]*)"\]', text)
     if mc_suffix and mc_suffix.group(2):
         out.append(f"--tag-suffix={mc_suffix.group(2)}")
-    layer = one(r'push:\n    branches: \["[^"]+", "([^"]+)"\]')
-    if layer:
-        out += ["--layer-branch", layer]
+    # a workflow generated with the removed --layer-branch also triggers on the layer branch: that is dropped here, so a
+    # regenerated workflow has no layer jobs
     out += ["--kit-version", one(r"port-ci-kit-v(\d+)\.tar\.gz"), "--kit-sha", one(r'echo "([0-9a-f]{64})  \$RUNNER_TEMP/kit\.tar\.gz"')]
     if None in out:
         raise SystemExit("this does not look like a workflow port-ci.py generated (no --modid, --gatec or kit pin found)")
@@ -652,12 +594,12 @@ def promote(argv):
     return r.returncode
 
 
-GOLDEN_CASES = (("single-nodeps", False, None), ("single-deps", True, None), ("layer-deps", True, "neoforge-1.21.x"))
+GOLDEN_CASES = (("single-nodeps", False), ("single-deps", True))
 FIX_DEP = "o/lib@lib-1.0-mc1.21.1/lib-1.0_mr.jar=com.example.lib:lib:1.0"
 
 
-def fixture(deps=True, layer=None, variant_jars=(), dep_variants=(), version_branch=False):
-    """The workflow for fixed, invented values (no network: every sha256 is fake). The three option-free cases are
+def fixture(deps=True, variant_jars=(), dep_variants=(), version_branch=False):
+    """The workflow for fixed, invented values (no network: every sha256 is fake). The two option-free cases are
     recorded in tools/golden/port-ci-<case>.yml, captured from port-ci.py BEFORE --variant-jar/--dep-jar-variant
     existed: an option a fork does not use must not change one byte of its workflow."""
     sha = lambda u: ("c" if "_cf" in u else "a") * 64
@@ -669,12 +611,19 @@ def fixture(deps=True, layer=None, variant_jars=(), dep_variants=(), version_bra
               "UPSTREAM": "https://github.com/a/examplemod"}
     values = variant_values(values, list(variant_jars), list(dep_variants), [FIX_DEP] if deps else [], sha)
     values = records_values(values, version_branch)
-    return render(TEMPLATE.read_text(encoding="utf-8"), layer_values(values, layer))
+    return render(TEMPLATE.read_text(encoding="utf-8"), values)
+
+
+def _load_tool(name, file):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, ROOT / "tools" / file)
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
 
 
 def regen_golden():
-    for name, deps, layer in GOLDEN_CASES:
-        (GOLDEN / f"port-ci-{name}.yml").write_text(fixture(deps, layer), encoding="utf-8")
+    for name, deps in GOLDEN_CASES:
+        (GOLDEN / f"port-ci-{name}.yml").write_text(fixture(deps), encoding="utf-8")
         print(f"wrote tools/golden/port-ci-{name}.yml")
     return 0
 
@@ -700,8 +649,8 @@ def records_check():
     single-version port branch and a version branch (plus a version-branch fork's head, which is single-version-shaped)."""
     import tempfile
     ok = True
-    for name, deps, layer in GOLDEN_CASES:            # the default: byte for byte the golden, every fork kind
-        ok &= want(f"records: {name} unchanged", fixture(deps, layer) == (GOLDEN / f"port-ci-{name}.yml").read_text(encoding="utf-8"),
+    for name, deps in GOLDEN_CASES:            # the default: byte for byte the golden, every fork kind
+        ok &= want(f"records: {name} unchanged", fixture(deps) == (GOLDEN / f"port-ci-{name}.yml").read_text(encoding="utf-8"),
                    "the golden", "a diff")
     single, vb = fixture(True), fixture(True, version_branch=True)
     line = lambda w: next(l for l in w.splitlines() if "paths-ignore:" in l)
@@ -820,41 +769,39 @@ def default_branch_check():
 def variant_check():
     """--variant-jar / --dep-jar-variant: off by default (byte-identical goldens), and what each adds when given."""
     ok = True
-    for name, deps, layer in GOLDEN_CASES:            # neither option: today's workflow, byte for byte, both fork kinds
-        ok &= fixture(deps, layer) == (GOLDEN / f"port-ci-{name}.yml").read_text(encoding="utf-8")
+    for name, deps in GOLDEN_CASES:            # neither option: today's workflow, byte for byte
+        ok &= fixture(deps) == (GOLDEN / f"port-ci-{name}.yml").read_text(encoding="utf-8")
     cf = FIX_DEP.replace("_mr.jar", "_cf.jar")
-    for layer in (None, "neoforge-1.21.x"):
-        base = fixture(True, layer)
-        # --variant-jar: one more job, the release needs it, globs only through env, the dep jar passed as --deps
-        s = fixture(True, layer, variant_jars=["*_mr.jar", "*_cf.jar"])
-        job = s.split("\n  shipped:\n", 1)[1].split("\n  release:\n", 1)[0]
-        ok &= s.count("\n  shipped:\n") == 1 and "    name: shipped jars\n" in job
-        ok &= "needs: [gates, shipped]" in s and "needs: gates\n" not in s.split("\n  release:\n", 1)[1].split("steps:", 1)[0]
-        ok &= 'VARIANT_JARS: "*_mr.jar *_cf.jar"' in job and 'DEP_JARS: ".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar"' in job
-        ok &= "shipped-gate.py" in job and "--deps" in job and "log_tails" in job and "::error::shipped jar" in job
-        ok &= "!inputs.promote" in job.split("steps:", 1)[0] and "github.event_name != 'release'" in job.split("steps:", 1)[0]
-        ok &= "a" * 64 + "  " in job and "b" * 64 + "  " in job          # dependency and kit sha256-checked here too
-        ok &= "${{" not in job.split("run: |\n          python3", 1)[1].split("\n      - name: Shipped-jar summary", 1)[0]
-        ok &= s.replace(s[s.index("\n\n  shipped:\n"):s.index("\n\n  release:\n")], "").replace(
-            "needs: [gates, shipped]", "needs: gates").replace(          # (the layer release waits for it too)
-            "needs: [gates, shipped, layer-plan", "needs: [gates, layer-plan").replace(
-            " && needs.shipped.result == 'success'", "") == base        # nothing else moved
-        # --dep-jar-variant: one more leg, named; default legs keep their check and artifact names; sha256 pinned
-        d = fixture(True, layer, dep_variants=[cf])
-        g = d.split("\n  gates:\n", 1)[1].split("\n  release:\n", 1)[0]
-        ok &= 'env: [full, minimal]\n        variant: [""]\n        include:\n          - env: full\n            variant: "cf"\n' in g
-        ok &= "name: gates (${{ matrix.env }}${{ matrix.variant && format(', {0}', matrix.variant) || '' }})" in g
-        ok &= "name: gate-logs-${{ matrix.env }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}" in g
-        ok &= "if: matrix.env == 'full' && !matrix.variant" in g
-        step = g.split("the lib-1.0_cf.jar variant", 1)[1].split("\n      - ", 1)[0]
-        ok &= "if: matrix.variant == 'cf'" in step and "c" * 64 + "  $HOME/.m2/repository/com/example/lib/lib/1.0/lib-1.0.jar" in step
-        ok &= "sha256sum -c -" in step and "releases/download/lib-1.0-mc1.21.1/lib-1.0_cf.jar" in step and "${{" not in step
-        ok &= g.index("lib-1.0_mr.jar") < g.index("lib-1.0_cf.jar") < g.index("- name: Build and gates")
-        ok &= "needs: gates\n" in d and "\n  shipped:\n" not in d
-        both = fixture(True, layer, variant_jars=["*_mr.jar"], dep_variants=[cf])
-        ok &= "\n  shipped:\n" in both and 'variant: "cf"' in both and "needs: [gates, shipped]" in both
+    base = fixture(True)
+    # --variant-jar: one more job, the release needs it, globs only through env, the dep jar passed as --deps
+    s = fixture(True, variant_jars=["*_mr.jar", "*_cf.jar"])
+    job = s.split("\n  shipped:\n", 1)[1].split("\n  release:\n", 1)[0]
+    ok &= s.count("\n  shipped:\n") == 1 and "    name: shipped jars\n" in job
+    ok &= "needs: [gates, shipped]" in s and "needs: gates\n" not in s.split("\n  release:\n", 1)[1].split("steps:", 1)[0]
+    ok &= 'VARIANT_JARS: "*_mr.jar *_cf.jar"' in job and 'DEP_JARS: ".m2/repository/com/example/lib/lib/1.0/lib-1.0.jar"' in job
+    ok &= "shipped-gate.py" in job and "--deps" in job and "log_tails" in job and "::error::shipped jar" in job
+    ok &= "!inputs.promote" in job.split("steps:", 1)[0] and "github.event_name != 'release'" in job.split("steps:", 1)[0]
+    ok &= "a" * 64 + "  " in job and "b" * 64 + "  " in job          # dependency and kit sha256-checked here too
+    ok &= "${{" not in job.split("run: |\n          python3", 1)[1].split("\n      - name: Shipped-jar summary", 1)[0]
+    ok &= s.replace(s[s.index("\n\n  shipped:\n"):s.index("\n\n  release:\n")], "").replace(
+        "needs: [gates, shipped]", "needs: gates").replace(
+        " && needs.shipped.result == 'success'", "") == base        # nothing else moved
+    # --dep-jar-variant: one more leg, named; default legs keep their check and artifact names; sha256 pinned
+    d = fixture(True, dep_variants=[cf])
+    g = d.split("\n  gates:\n", 1)[1].split("\n  release:\n", 1)[0]
+    ok &= 'env: [full, minimal]\n        variant: [""]\n        include:\n          - env: full\n            variant: "cf"\n' in g
+    ok &= "name: gates (${{ matrix.env }}${{ matrix.variant && format(', {0}', matrix.variant) || '' }})" in g
+    ok &= "name: gate-logs-${{ matrix.env }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}" in g
+    ok &= "if: matrix.env == 'full' && !matrix.variant" in g
+    step = g.split("the lib-1.0_cf.jar variant", 1)[1].split("\n      - ", 1)[0]
+    ok &= "if: matrix.variant == 'cf'" in step and "c" * 64 + "  $HOME/.m2/repository/com/example/lib/lib/1.0/lib-1.0.jar" in step
+    ok &= "sha256sum -c -" in step and "releases/download/lib-1.0-mc1.21.1/lib-1.0_cf.jar" in step and "${{" not in step
+    ok &= g.index("lib-1.0_mr.jar") < g.index("lib-1.0_cf.jar") < g.index("- name: Build and gates")
+    ok &= "needs: gates\n" in d and "\n  shipped:\n" not in d
+    both = fixture(True, variant_jars=["*_mr.jar"], dep_variants=[cf])
+    ok &= "\n  shipped:\n" in both and 'variant: "cf"' in both and "needs: [gates, shipped]" in both
     # tools/port-offer.py reads the default pin only: the variant's curl is written URL-first
-    d = fixture(True, None, dep_variants=[cf])
+    d = fixture(True, dep_variants=[cf])
     ok &= [m.group(1) for m in re.finditer(r'curl -fsSL -o "[^"]*/([\w.+-]+\.jar)" "(https://github\.com/[^"]+/releases/download/[^"]+)"', d)
            if "o/lib" in m.group(2)] == ["lib-1.0.jar"]
     ok &= variant_label("lib-1.0_mr.jar", "lib-1.0_cf.jar") == "cf" and variant_label("lib-2.3.jar", "lib-2.3-fabric.jar") == "fabric"
@@ -885,14 +832,17 @@ def variant_check():
     ok &= recover_args(fixture(False)) == ["--modid", "examplemod", "--upstream", "https://github.com/a/examplemod", *kit, *pin]
     ok &= recover_args(fixture(True)) == ["--modid", "examplemod", "--upstream", "https://github.com/a/examplemod", *deps,
                                           "--dep", "o/other@neoforge-1.21.1", *kit, *pin]
-    ok &= recover_args(fixture(True, "neoforge-1.21.x", ["*_mr.jar", "*_cf.jar"], [cf])) == [
+    ok &= recover_args(fixture(True, ["*_mr.jar", "*_cf.jar"], [cf])) == [
         "--modid", "examplemod", "--upstream", "https://github.com/a/examplemod", *deps, "--dep-jar-variant", cf,
-        "--variant-jar", "*_mr.jar", "--variant-jar", "*_cf.jar", "--dep", "o/other@neoforge-1.21.1", *kit,
-        "--layer-branch", "neoforge-1.21.x", *pin]
-    sfx = render(TEMPLATE.read_text(encoding="utf-8"), layer_values(variant_values(dict(
+        "--variant-jar", "*_mr.jar", "--variant-jar", "*_cf.jar", "--dep", "o/other@neoforge-1.21.1", *kit, *pin]
+    # a workflow made with the removed --layer-branch (its push trigger also names the layer branch): read back
+    # without it, so regenerating it drops the layer jobs
+    old = fixture(False).replace('branches: ["neoforge-1.21.1"]', 'branches: ["neoforge-1.21.1", "neoforge-1.21.x"]')
+    ok &= old != fixture(False) and recover_args(old) == recover_args(fixture(False))
+    sfx = render(TEMPLATE.read_text(encoding="utf-8"), variant_values(dict(
         {k: "x" for k in re.findall(r"(?<!\$)\{\{([A-Z0-9_]+)\}\}", TEMPLATE.read_text(encoding="utf-8"))},
         MC="1.21.1", TAG_SUFFIX="-release", MODID="m", GATEC="launch", KIT_VERSION="3", KIT_SHA256="d" * 64,
-        UPSTREAM="the original", PRE_BUILD="", BRANCH="neoforge-1.21.1")), None))
+        UPSTREAM="the original", PRE_BUILD="", BRANCH="neoforge-1.21.1")))
     ok &= recover_args(sfx) == ["--modid", "m", "--gatec", "launch", "--tag-suffix=-release", "--kit-version", "3", "--kit-sha", "d" * 64]
     try:
         recover_args("name: something else\n"); ok = False
@@ -902,7 +852,7 @@ def variant_check():
 
 
 def release_script_check():
-    """Run the release job's `Publish pre-release` script (single-version `release` and layer `layer-release`) on a
+    """Run the release job's `Publish pre-release` script on a
     fake fork: a bare origin with tags and a stand-in gh. The -rN count-up skips a name whose release OR tag exists (a
     tag with no release made gh release create reuse that tag's commit and ignore --target); a tag at another commit
     than the build is refused, nothing created."""
@@ -910,126 +860,123 @@ def release_script_check():
     sys.path.insert(0, str(ROOT / "tools"))
     from gitbash import BASH
     ok = True
-    for layer in (None, "neoforge-1.21.x"):
-        wf = fixture(False, layer)
-        jobs = [wf] if layer is None else [wf.split("\n  release:\n", 1)[1], wf.split("\n  layer-release:\n", 1)[1]]
-        for job in jobs:
-            body = job.split("      - name: Publish pre-release\n", 1)[1].split("        run: |\n", 1)[1]
-            body = body.split("\n\n", 1)[0]
-            script = "\n".join(l[10:] for l in body.splitlines())
-            # (ref_type, ref_name, releases that exist, tags {name: "build"|"other"}) -> (exit, created tag or None)
-            cases = {"fresh": (("branch", "neoforge-1.21.1", [], {}), (0, "examplemod-1.0-mc1.21.1")),
-                     "a release": (("branch", "neoforge-1.21.1", ["examplemod-1.0-mc1.21.1"],
-                                    {"examplemod-1.0-mc1.21.1": "other"}), (0, "examplemod-1.0-mc1.21.1-r2")),
-                     "a tag, no release": (("branch", "neoforge-1.21.1", [], {"examplemod-1.0-mc1.21.1": "other"}),
-                                           (0, "examplemod-1.0-mc1.21.1-r2")),
-                     "tag and release, then a bare tag": (("branch", "neoforge-1.21.1", ["examplemod-1.0-mc1.21.1"],
-                                                           {"examplemod-1.0-mc1.21.1": "other",
-                                                            "examplemod-1.0-mc1.21.1-r2": "other"}),
-                                                          (0, "examplemod-1.0-mc1.21.1-r3")),
-                     "a pushed tag at the build": (("tag", "examplemod-1.0-mc1.21.1", [], {"examplemod-1.0-mc1.21.1": "build"}),
-                                                   (0, "examplemod-1.0-mc1.21.1")),
-                     "a tag at another commit": (("tag", "examplemod-1.0-mc1.21.1", [], {"examplemod-1.0-mc1.21.1": "other"}),
-                                                 (1, None))}
-            for case, ((rtype, rname, rels, tags), want) in cases.items():
-                with tempfile.TemporaryDirectory() as d:
-                    d = pathlib.Path(d)
-                    origin, repo = d / "origin.git", d / "repo"
-                    def g(*a, cwd=repo):
-                        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-                                              errors="replace")
-                    g("init", "-q", "--bare", str(origin), cwd=d)
-                    g("init", "-q", str(repo), cwd=d)
-                    for k, v in (("user.email", "t@e"), ("user.name", "t"), ("core.autocrlf", "false")):
-                        g("config", k, v)
-                    (repo / "gradle.properties").write_text("mod_version=1.0\n", encoding="utf-8")
-                    g("add", "-A"); g("commit", "-qm", "older"); other = g("rev-parse", "HEAD").stdout.strip()
-                    (repo / "x").write_text("x\n", encoding="utf-8")
-                    g("add", "-A"); g("commit", "-qm", "build"); build = g("rev-parse", "HEAD").stdout.strip()
-                    for name, at in tags.items():
-                        g("tag", "-a", "-m", "t", name, build if at == "build" else other)   # annotated: peeled
-                    g("remote", "add", "origin", str(origin)); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1", "--tags")
-                    (repo / "jars").mkdir(); (repo / "jars/x.jar").write_bytes(b"")
-                    # the stand-in gh is a shell function ahead of the script: no PATH lookup of an extension-less
-                    # file, which Windows' Git Bash would not do the same way
-                    fake_gh = ('gh() { if [ "$1 $2" = "release view" ]; then for r in $RELEASES; do [ "$r" = "$3" ] && return 0; done; '
-                               'return 1; fi; if [ "$1 $2" = "release create" ]; then echo "$3" >> "$CREATED"; return 0; fi; return 3; }\n')
-                    run = fake_gh + (script.replace("${{ github.ref_type }}", rtype).replace("${{ github.ref_name }}", rname)
-                           .replace("${{ github.repository }}", "o/examplemod").replace("${{ github.sha }}", build))
-                    env = dict(os.environ, RELEASES=" ".join(rels), CREATED=(d / "created.txt").as_posix(), PREVIEW="")
-                    r = subprocess.run([BASH, "-c", run], cwd=repo, env=env, capture_output=True, text=True,
-                                       encoding="utf-8", errors="replace")
-                    made = (d / "created.txt").read_text(encoding="utf-8").split() if (d / "created.txt").exists() else []
-                    good = r.returncode == want[0] and made == ([want[1]] if want[1] else [])
-                    good &= want[0] == 0 or "already points at" in r.stdout + r.stderr
-                    if not good:
-                        print(f"release script check ({'layer' if layer else 'single-version'}, {case}): exit {r.returncode}, "
-                              f"created {made}, want {want}\n{(r.stdout + r.stderr)[-1500:]}")
-                    ok &= good
+    wf = fixture(False)
+    for job in [wf]:
+        body = job.split("      - name: Publish pre-release\n", 1)[1].split("        run: |\n", 1)[1]
+        body = body.split("\n\n", 1)[0]
+        script = "\n".join(l[10:] for l in body.splitlines())
+        # (ref_type, ref_name, releases that exist, tags {name: "build"|"other"}) -> (exit, created tag or None)
+        cases = {"fresh": (("branch", "neoforge-1.21.1", [], {}), (0, "examplemod-1.0-mc1.21.1")),
+                 "a release": (("branch", "neoforge-1.21.1", ["examplemod-1.0-mc1.21.1"],
+                                {"examplemod-1.0-mc1.21.1": "other"}), (0, "examplemod-1.0-mc1.21.1-r2")),
+                 "a tag, no release": (("branch", "neoforge-1.21.1", [], {"examplemod-1.0-mc1.21.1": "other"}),
+                                       (0, "examplemod-1.0-mc1.21.1-r2")),
+                 "tag and release, then a bare tag": (("branch", "neoforge-1.21.1", ["examplemod-1.0-mc1.21.1"],
+                                                       {"examplemod-1.0-mc1.21.1": "other",
+                                                        "examplemod-1.0-mc1.21.1-r2": "other"}),
+                                                      (0, "examplemod-1.0-mc1.21.1-r3")),
+                 "a pushed tag at the build": (("tag", "examplemod-1.0-mc1.21.1", [], {"examplemod-1.0-mc1.21.1": "build"}),
+                                               (0, "examplemod-1.0-mc1.21.1")),
+                 "a tag at another commit": (("tag", "examplemod-1.0-mc1.21.1", [], {"examplemod-1.0-mc1.21.1": "other"}),
+                                             (1, None))}
+        for case, ((rtype, rname, rels, tags), want) in cases.items():
+            with tempfile.TemporaryDirectory() as d:
+                d = pathlib.Path(d)
+                origin, repo = d / "origin.git", d / "repo"
+                def g(*a, cwd=repo):
+                    return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                                          errors="replace")
+                g("init", "-q", "--bare", str(origin), cwd=d)
+                g("init", "-q", str(repo), cwd=d)
+                for k, v in (("user.email", "t@e"), ("user.name", "t"), ("core.autocrlf", "false")):
+                    g("config", k, v)
+                (repo / "gradle.properties").write_text("mod_version=1.0\n", encoding="utf-8")
+                g("add", "-A"); g("commit", "-qm", "older"); other = g("rev-parse", "HEAD").stdout.strip()
+                (repo / "x").write_text("x\n", encoding="utf-8")
+                g("add", "-A"); g("commit", "-qm", "build"); build = g("rev-parse", "HEAD").stdout.strip()
+                for name, at in tags.items():
+                    g("tag", "-a", "-m", "t", name, build if at == "build" else other)   # annotated: peeled
+                g("remote", "add", "origin", str(origin)); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1", "--tags")
+                (repo / "jars").mkdir(); (repo / "jars/x.jar").write_bytes(b"")
+                # the stand-in gh is a shell function ahead of the script: no PATH lookup of an extension-less
+                # file, which Windows' Git Bash would not do the same way
+                fake_gh = ('gh() { if [ "$1 $2" = "release view" ]; then for r in $RELEASES; do [ "$r" = "$3" ] && return 0; done; '
+                           'return 1; fi; if [ "$1 $2" = "release create" ]; then echo "$3" >> "$CREATED"; return 0; fi; return 3; }\n')
+                run = fake_gh + (script.replace("${{ github.ref_type }}", rtype).replace("${{ github.ref_name }}", rname)
+                       .replace("${{ github.repository }}", "o/examplemod").replace("${{ github.sha }}", build))
+                env = dict(os.environ, RELEASES=" ".join(rels), CREATED=(d / "created.txt").as_posix(), PREVIEW="")
+                r = subprocess.run([BASH, "-c", run], cwd=repo, env=env, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace")
+                made = (d / "created.txt").read_text(encoding="utf-8").split() if (d / "created.txt").exists() else []
+                good = r.returncode == want[0] and made == ([want[1]] if want[1] else [])
+                good &= want[0] == 0 or "already points at" in r.stdout + r.stderr
+                if not good:
+                    print(f"release script check ({case}): exit {r.returncode}, "
+                          f"created {made}, want {want}\n{(r.stdout + r.stderr)[-1500:]}")
+                ok &= good
     return ok
 
 
 def manifest_script_check():
     """Run the promote job's manifest-refresh script on a fake fork (a bare origin, a stand-in port-manifest.py), for
-    a single-version and a layer fork's workflow: a changed manifest is committed on top of the port branch and
+    a fork's workflow: a changed manifest is committed on top of the port branch and
     pushed there (the tag stays in its history); a push the branch moved under is retried on the new tip; an
     unchanged manifest pushes nothing; a tag that is not a tag name never reaches git."""
     import os, tempfile
     sys.path.insert(0, str(ROOT / "tools"))
     from gitbash import BASH
     ok = True
-    for layer in (None, "neoforge-1.21.x"):
-        wf = fixture(True, layer)
-        body = wf.split("      - name: Refresh the install manifest\n", 1)[1].split("        run: |\n", 1)[1]
-        body = body.split("\n\n", 1)[0]
-        script = "\n".join(l[10:] for l in body.splitlines()).replace("python3 ", f'"{pathlib.Path(sys.executable).as_posix()}" ')
-        for case in ("changed", "race", "unchanged", "bad-tag"):
-            with tempfile.TemporaryDirectory() as d:
-                d = pathlib.Path(d)
-                origin, repo, tmp = d / "origin.git", d / "repo", d / "tmp"
-                tmp.mkdir()
-                def g(*a, cwd=repo):
-                    return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-                g("init", "-q", "--bare", str(origin), cwd=d)
-                g("init", "-q", str(repo), cwd=d)
-                for k, v in (("user.email", "t@e"), ("user.name", "t"), ("core.autocrlf", "false")):
-                    g("config", k, v)
-                (repo / ".github").mkdir()
-                (repo / ".github/port-install.json").write_text('{"v": 1}\n', encoding="utf-8")
-                g("add", "-A"); g("commit", "-qm", "port"); g("tag", "m-1-mc1.21.1")
-                g("remote", "add", "origin", str(origin)); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1")
-                tools = repo / ".port-tools/tools"
-                tools.mkdir(parents=True)
-                (tools / "port-manifest.py").write_text(
-                    "import pathlib, subprocess, sys\n"
-                    "calls = pathlib.Path(sys.argv[0]).with_name('calls.txt')\n"
-                    "calls.write_text(calls.read_text(encoding='utf-8') + ' '.join(sys.argv[1:]) + '\\n' if calls.exists() "
-                    "else ' '.join(sys.argv[1:]) + '\\n', encoding='utf-8')\n"
-                    f"if {case != 'unchanged'}:\n"
-                    "    pathlib.Path('.github/port-install.json').write_text('{\"v\": 2}\\n', encoding='utf-8')\n"
-                    "    subprocess.run(['git', 'commit', '-qam', 'Install manifest [skip ci]'], check=True)\n",
-                    encoding="utf-8")
-                if case == "race":       # the branch moves once under the first push: rejected, then refreshed again
-                    hook = origin / "hooks/pre-receive"
-                    hook.write_text('#!/bin/sh\nif [ ! -f "$GIT_DIR/raced" ]; then touch "$GIT_DIR/raced"; '
-                                    'echo "moved" >&2; exit 1; fi\nexit 0\n', encoding="utf-8")
-                    hook.chmod(0o755)
-                env = dict(os.environ, RUNNER_TEMP=str(tmp), GITHUB_STEP_SUMMARY=(tmp / "summary.md").as_posix(),
-                           TAG="m-1-mc1.21.1; touch pwned" if case == "bad-tag" else "m-1-mc1.21.1")
-                r = subprocess.run([BASH, "-c", script], cwd=repo, env=env, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace")
-                calls = (tools / "calls.txt").read_text(encoding="utf-8").splitlines() if (tools / "calls.txt").exists() else []
-                tip = g("rev-parse", "neoforge-1.21.1", cwd=origin).stdout.strip()
-                pushed = g("show", f"{tip}:.github/port-install.json", cwd=origin).stdout
-                anc = g("merge-base", "--is-ancestor", "m-1-mc1.21.1", tip).returncode == 0
-                want = {"changed": (0, 1, '{"v": 2}\n'), "race": (0, 2, '{"v": 2}\n'),
-                        "unchanged": (0, 1, '{"v": 1}\n'), "bad-tag": (1, 0, '{"v": 1}\n')}[case]
-                good = (r.returncode, len(calls), pushed) == want and anc and not (repo / "pwned").exists()
-                good &= all(c == "refresh --repo . --tag m-1-mc1.21.1 --commit" for c in calls)
-                if not good:
-                    print(f"manifest script check ({'layer' if layer else 'single-version'}, {case}): exit {r.returncode}, "
-                          f"{len(calls)} call(s), origin has {pushed!r}\n{(r.stdout + r.stderr)[-1500:]}")
-                ok &= good
+    wf = fixture(True)
+    body = wf.split("      - name: Refresh the install manifest\n", 1)[1].split("        run: |\n", 1)[1]
+    body = body.split("\n\n", 1)[0]
+    script = "\n".join(l[10:] for l in body.splitlines()).replace("python3 ", f'"{pathlib.Path(sys.executable).as_posix()}" ')
+    for case in ("changed", "race", "unchanged", "bad-tag"):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            origin, repo, tmp = d / "origin.git", d / "repo", d / "tmp"
+            tmp.mkdir()
+            def g(*a, cwd=repo):
+                return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            g("init", "-q", "--bare", str(origin), cwd=d)
+            g("init", "-q", str(repo), cwd=d)
+            for k, v in (("user.email", "t@e"), ("user.name", "t"), ("core.autocrlf", "false")):
+                g("config", k, v)
+            (repo / ".github").mkdir()
+            (repo / ".github/port-install.json").write_text('{"v": 1}\n', encoding="utf-8")
+            g("add", "-A"); g("commit", "-qm", "port"); g("tag", "m-1-mc1.21.1")
+            g("remote", "add", "origin", str(origin)); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1")
+            tools = repo / ".port-tools/tools"
+            tools.mkdir(parents=True)
+            (tools / "port-manifest.py").write_text(
+                "import pathlib, subprocess, sys\n"
+                "calls = pathlib.Path(sys.argv[0]).with_name('calls.txt')\n"
+                "calls.write_text(calls.read_text(encoding='utf-8') + ' '.join(sys.argv[1:]) + '\\n' if calls.exists() "
+                "else ' '.join(sys.argv[1:]) + '\\n', encoding='utf-8')\n"
+                f"if {case != 'unchanged'}:\n"
+                "    pathlib.Path('.github/port-install.json').write_text('{\"v\": 2}\\n', encoding='utf-8')\n"
+                "    subprocess.run(['git', 'commit', '-qam', 'Install manifest [skip ci]'], check=True)\n",
+                encoding="utf-8")
+            if case == "race":       # the branch moves once under the first push: rejected, then refreshed again
+                hook = origin / "hooks/pre-receive"
+                hook.write_text('#!/bin/sh\nif [ ! -f "$GIT_DIR/raced" ]; then touch "$GIT_DIR/raced"; '
+                                'echo "moved" >&2; exit 1; fi\nexit 0\n', encoding="utf-8")
+                hook.chmod(0o755)
+            env = dict(os.environ, RUNNER_TEMP=str(tmp), GITHUB_STEP_SUMMARY=(tmp / "summary.md").as_posix(),
+                       TAG="m-1-mc1.21.1; touch pwned" if case == "bad-tag" else "m-1-mc1.21.1")
+            r = subprocess.run([BASH, "-c", script], cwd=repo, env=env, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+            calls = (tools / "calls.txt").read_text(encoding="utf-8").splitlines() if (tools / "calls.txt").exists() else []
+            tip = g("rev-parse", "neoforge-1.21.1", cwd=origin).stdout.strip()
+            pushed = g("show", f"{tip}:.github/port-install.json", cwd=origin).stdout
+            anc = g("merge-base", "--is-ancestor", "m-1-mc1.21.1", tip).returncode == 0
+            want = {"changed": (0, 1, '{"v": 2}\n'), "race": (0, 2, '{"v": 2}\n'),
+                    "unchanged": (0, 1, '{"v": 1}\n'), "bad-tag": (1, 0, '{"v": 1}\n')}[case]
+            good = (r.returncode, len(calls), pushed) == want and anc and not (repo / "pwned").exists()
+            good &= all(c == "refresh --repo . --tag m-1-mc1.21.1 --commit" for c in calls)
+            if not good:
+                print(f"manifest script check ({case}): exit {r.returncode}, "
+                      f"{len(calls)} call(s), origin has {pushed!r}\n{(r.stdout + r.stderr)[-1500:]}")
+            ok &= good
     return ok
 
 
@@ -1040,7 +987,7 @@ def shipped_script_check():
     --expect-file (_cf its suffixed file, _mr the unsuffixed one, none when there is none), fail naming the failing
     variant with its server log tail, and refuse a glob that matches no jar."""
     import os, shutil, tempfile
-    wf =fixture(True, None, variant_jars=["*_mr.jar", "*_cf.jar", "*_none.jar"])
+    wf =fixture(True, variant_jars=["*_mr.jar", "*_cf.jar", "*_none.jar"])
     body = wf.split("python3 - <<'PY'\n", 1)[1].split("\n          PY\n", 1)[0]
     script = "\n".join(l[10:] for l in body.splitlines())
     ok = True
@@ -1149,9 +1096,8 @@ def self_check():
     v["PRE_BUILD"] = pre_build(["owner/lib@neoforge-1.21.1"])
     v["BRANCH"], v["BASE"] = "neoforge-1.21.1", "master"
     v = records_values(variant_values(v))
-    plain = render(t, layer_values(v, None))
+    plain = render(t, v)
     out = plain
-    lay = render(t, layer_values(v, "neoforge-1.21.x"))
     ok = "${{ github.sha }}" in out and "{{" not in out.replace("${{", "")    # GitHub's own ${{ }} survive
     ok &= "repository: owner/lib" in out and "path: .port-deps/lib" in out and "publishToMavenLocal" in out
     import tempfile
@@ -1183,8 +1129,8 @@ def self_check():
     ok &= "TAG: ${{ inputs.promote }}" in job and "--prerelease=false --latest" in job
     ok &= len(run_blocks(job)) == 3 and not any("${{" in b for b in run_blocks(job))   # nothing spliced into a script
     # then the install manifest: refreshed for the promoted tag and pushed to the PORT branch only, only where one
-    # exists, its tag validated, and a failure never stops publish (both fork kinds: the layer file is the same job)
-    for w in (plain, lay):
+    # exists, its tag validated, and a failure never stops publish
+    for w in (plain,):
         pj = w.split("\n  promote:\n", 1)[-1].split("\n  publish:\n", 1)[0]
         refresh = pj.split("- name: Refresh the install manifest\n", 1)[-1]
         ok &= "    permissions:\n      contents: write\n" in pj and "continue-on-error: true" in refresh
@@ -1322,68 +1268,17 @@ def self_check():
             promote_dispatch(*bad); ok = False
         except SystemExit:
             pass
-    # layer branch: without --layer-branch the workflow has no layer text at all; with it the SAME file gains the
-    # triggers and six layer-* jobs, each skipped on the port branch and without .multiversion/
-    ok &= "layer-plan" not in plain and "layer-gates" not in plain and "neoforge-1.21.x" not in plain and 'branches: ["neoforge-1.21.1"]' in plain
+    # no layer text: the workflow triggers on the port branch alone and has no layer jobs (the layer route was removed)
+    ok &= "layer" not in plain.lower() and 'branches: ["neoforge-1.21.1"]' in plain
     ok &= plain.endswith("modrinth-create --repo .\n") and "{{" not in plain.replace("${{", "")
-    ok &= "{{" not in lay.replace("${{", "") and lay.count("\n  gates:\n") == 1
-    ok &= lay.count('branches: ["neoforge-1.21.1", "neoforge-1.21.x"]') == 2
-    for j in ("layer-plan", "layer-isolation", "layer-inertness", "layer-compile", "layer-gates", "layer-gates-extra"):
-        ok &= f"\n  {j}:\n" in lay
-    ljobs = lay.split("\n  layer-plan:\n", 1)[1]
-    ok &= "github.ref_name == 'neoforge-1.21.x' || github.base_ref == 'neoforge-1.21.x'" in ljobs.split("steps:", 1)[0]
-    for j in ("layer-isolation", "layer-inertness", "layer-compile", "layer-gates", "layer-gates-extra"):
-        body = ljobs.split(f"\n  {j}:\n", 1)[1].split("\n  layer-", 1)[0]
-        ok &= "needs: layer-plan" in body and "needs.layer-plan.outputs.layer == 'true'" in body and not any("always()" in l for l in body.splitlines() if l.startswith("    if:"))
-    # layer-release: the release job made the layer branch's -- base jars plus every target's, after every layer gate;
-    # the main release steps aside there; each layer job fetches its pinned sibling jars first
-    rel = lay.split("\n  layer-release:\n", 1)[1]
-    ok &= ("needs: [gates, layer-plan, layer-isolation, layer-inertness, layer-compile, layer-gates, layer-gates-extra]" in rel
-           and "github.ref_name == 'neoforge-1.21.x' && inputs.release" in rel)
-    # every layer job gates the release: isolation/inertness/gates must succeed; compile and gates-extra may be skipped
-    rif = next(l for l in rel.splitlines() if l.startswith("    if:"))
-    ok &= all(f"needs.{j}.result == 'success'" in rif for j in ("layer-isolation", "layer-inertness", "layer-gates"))
-    ok &= all(f"(needs.{j}.result == 'success' || needs.{j}.result == 'skipped')" in rif for j in ("layer-compile", "layer-gates-extra"))
-    ok &= "needs.layer-isolation.result == 'skipped'" not in rif and "needs.layer-inertness.result == 'skipped'" not in rif
-    ok &= "pattern: layer-jars-*" in rel and "merge-multiple: true" in rel and "gh release create" in rel
-    # preview targets (issue #76): the plan's list reaches the notes through env, never spliced into the script
-    ok &= "      preview: ${{ steps.plan.outputs.preview }}\n" in ljobs.split("\n  layer-isolation:\n", 1)[0]
-    ok &= "PREVIEW: ${{ needs.layer-plan.outputs.preview }}" in rel and 'if [ -n "$PREVIEW" ]; then' in rel
-    ok &= "${{ needs.layer-plan.outputs.preview }}" not in rel.split("run: |", 1)[1]
-    ok &= "PREVIEW" not in plain and "preview" not in plain.lower()
-    ok &= "github.ref_name != 'neoforge-1.21.x'" in lay.split("\n  release:\n    needs:", 1)[1].split("steps:", 1)[0]
-    ok &= "github.ref_name !=" not in plain and "layer-release" not in plain and "layer-deps.py" not in plain
-    ok &= lay.count("layer-deps.py fetch --repo . --target") == 3 and lay.count("name: layer-jars-") == 2
-    # a DEPENDENT fork's layer (#78; tools/golden/port-ci-layer-deps.yml is one: --dep-jar on a library's release): each
-    # job that builds a target first puts the library's 1.21.1 jar in mavenLocal, then fetches the library's per-target
-    # jars its target.properties pins (url + sha256, from the library's layer-release), the target only through env --
-    # and only then builds; the single-version workflow fetches nothing
-    dep = fixture(True, "neoforge-1.21.x")
-    for j, build in (("layer-compile", "layer-ci.py compile"), ("layer-gates", "ci-gates.py --repo . --modid"),
-                     ("layer-gates-extra", "ci-gates.py --repo . --modid")):
-        body = dep.split(f"\n  {j}:\n", 1)[1].split("\n\n  ", 1)[0]
-        i_lib = body.find("releases/download/lib-1.0-mc1.21.1/lib-1.0_mr.jar")
-        i_fetch = body.find('layer-deps.py fetch --repo . --target "$TARGET"')
-        ok &= 0 < i_lib < i_fetch < body.find(build) and "sha256sum -c -" in body[i_lib:i_fetch]
-        ok &= "--target ${{" not in body and "TARGET: ${{ " in body[:i_fetch]
-    ok &= "layer-deps.py" not in fixture(True, None) and "layer-deps.py" not in fixture(False, None)
-    ok &= "python3 .multiversion/tools/layer.py isolation --base \"origin/neoforge-1.21.1\"" in lay
-    ok &= "layer-ci.py inertness" in lay and "layer-ci.py compile" in lay and "--mc \"$NEWEST\"" in lay
-    extra = ljobs.split("\n  layer-gates-extra:\n", 1)[1]
-    ok &= "has_full == 'true'" in extra.split("steps:", 1)[0] and "fromJson(needs.layer-plan.outputs.full_matrix)" in extra
-    ok &= "fromJson(needs.layer-plan.outputs.matrix)" in lay and "java-version: ${{ matrix.java }}" in lay
+    ok &= "PREVIEW" not in plain and "preview" not in plain.lower() and "github.ref_name !=" not in plain
+    ok &= "layer-deps.py" not in fixture(True) and "layer-deps.py" not in fixture(False)
     # every needs.<job>.outputs.<name> a job reads is one <job> declares: GitHub reads an undeclared output as '', so a
-    # missing line silently skips its job (layer-gates-extra never ran while has_full/full_matrix were undeclared)
-    for wf in (plain, lay, dep):
+    # missing line silently skips its job
+    for wf in (plain, fixture(True)):
         for job, name in set(re.findall(r"needs\.([\w-]+)\.outputs\.(\w+)", wf)):
             head = wf.split(f"\n  {job}:\n", 1)[1].split("\n    steps:", 1)[0]
             ok &= f"\n      {name}: ${{{{ steps." in head
-    ok &= "run: |" in ljobs and "${{ needs" not in "\n".join(l for l in ljobs.splitlines() if l.lstrip().startswith(("python3", "extra=", "git fetch", "curl")))   # exec-ok: line prefixes to match, not a command
-    for bad in ("neoforge-1.21.1", "x y"):         # the port branch itself, or not a branch name
-        try:
-            layer_values(v, bad); ok = False
-        except SystemExit:
-            pass
     ok &= variant_check()
     ok &= records_check()
     ok &= kit_probe_check()
@@ -1423,9 +1318,6 @@ def main():
     ap.add_argument("--gatec", default="launch,spawn,battle,gauntlet"); ap.add_argument("--no-commit", action="store_true")
     ap.add_argument("--tag-suffix", default="", help="a tag series of its own, e.g. -release for a release-aligned "
                     "branch, so its JARs never share tags with the development port's")
-    ap.add_argument("--layer-branch", help="the fork's multi-version layer branch (e.g. neoforge-1.21.x): the same workflow "
-                    "then also runs on it and carries the layer-* jobs (isolation, inertness, compile-only middle "
-                    "targets, full gates on the newest target); skipped on the port branch")
     ap.add_argument("--branch", help="the branch the workflow runs on (default: neoforge-<mc> when the checkout has "
                     ".port/<mc>/, a version branch; else the checked-out branch)")
     ap.add_argument("--trailer", action="append", default=[])
@@ -1434,6 +1326,9 @@ def main():
     ap.add_argument("--print", action="store_true", help="print the rendered workflow and change nothing")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
+    why = _load_tool("fork_kind", "fork-kind.py").refuse_layer(repo, "port-ci")
+    if why:
+        sys.exit(why)
     p = props(repo)
     mc, neo = p.get("minecraft_version"), p.get("neo_version")
     if not mc or not neo:
@@ -1449,7 +1344,7 @@ def main():
               "GATEC": a.gatec, "TAG_SUFFIX": a.tag_suffix, "PRE_BUILD": "\n".join(x for x in (dep_jars(a.dep_jar), pre_build(a.dep)) if x), "UPSTREAM": a.upstream or "the original"}
     values = variant_values(values, a.variant_jar, a.dep_jar_variant, a.dep_jar)
     values = records_values(values, is_version_branch(repo, mc))
-    out = render(TEMPLATE.read_text(encoding="utf-8"), layer_values(values, a.layer_branch))
+    out = render(TEMPLATE.read_text(encoding="utf-8"), values)
     if a.print:
         print(out); return 0
     f = repo / WORKFLOW

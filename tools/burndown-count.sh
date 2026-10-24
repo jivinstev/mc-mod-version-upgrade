@@ -36,7 +36,7 @@ fi
 
 if [ "$RAN" = no ]; then
   echo "NOT A COUNT -- compileJava never ran. Blocking failure:"
-  # a rename table that will not load (layer.py / prepare-sources: `renames.tsv:<n>: duplicate rule ...`) is the
+  # a rename table that will not load (prepare-sources: `renames.tsv:<n>: duplicate rule ...`) is the
   # reason, and it is printed above Gradle's generic "Process 'command python3' finished with non-zero exit value 1"
   grep -E "^(FAILURE|\* What went wrong|Could not resolve|Could not (GET|find)|A problem (was found|occurred)|> )|renames\.tsv:[0-9]+: " "$LOG" \
     | grep -v '^> Task' | head -8

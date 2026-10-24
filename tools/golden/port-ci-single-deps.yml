@@ -24,12 +24,6 @@
 # in the GitHub UI publishes too, and publish = <tag> publishes one by hand. publish_setup = true creates the
 # Modrinth draft project once. Publishing refuses a pre-release, a build with an open S1 in its fix ledger, and
 # a dependency not yet published; it never runs on a pull request.
-#
-# Layer branch: when the fork has a multi-version layer branch (.multiversion/, templates/fork-layer), this SAME
-# file is installed on both branches -- the layer branch may differ from the port branch only inside .multiversion/
-# and one commented line in build.gradle, so it cannot carry a workflow of its own. The layer-* jobs at the end run
-# only on the layer branch (and only where .multiversion/ exists): isolation, inertness, a compile-only pass of
-# every middle target, and the full gates on the newest target (tools/layer-ci.py, tools/port-ci.py --layer-branch).
 name: Port CI (NeoForge 21.1.100 (Minecraft 1.21.1))
 
 on:
@@ -246,7 +240,7 @@ jobs:
           echo "Promoted $TAG (played by @$WHO)" >> "$GITHUB_STEP_SUMMARY"
       # The install manifest (.github/port-install.json, what install-port.py installs) then names the promoted jar and
       # the sibling jars this workflow pins: tools/port-manifest.py refresh, committed as data ([skip ci]) to the port
-      # branch only -- never the layer branch -- and only where the branch has a manifest. The commit sits on top of the
+      # branch only, and only where the branch has a manifest. The commit sits on top of the
       # tag, so publish (needs: promote) still finds the tag in the branch's history. A failure here is reported and
       # never stops publish.
       - name: Port CI kit v7 (pinned by sha256)

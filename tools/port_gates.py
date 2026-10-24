@@ -36,9 +36,7 @@ def gradle(repo, args, log, extra_init=(), env=None, timeout=2400):
     cmd = [BASH, "gradlew","--console=plain", "-I", str(ROOT / "tools/central-mirror.init.gradle")]
     for i in extra_init:
         cmd += ["-I", str(i)]
-    # a fork's multi-version layer builds another Minecraft from the same tree (.multiversion/build.sh's -P set,
-    # which tools/ci-gates.py --mc puts here); every Gradle call of a gate run must carry it, or the run tests 1.21.1
-    cmd += gradle_target_args(env)
+    cmd += gradle_target_args(env)      # PORT_GRADLE_ARGS: extra arguments every Gradle call of a gate run carries
     return sh(cmd + list(args) + ["-Dorg.gradle.jvmargs=-Xmx6g"], cwd=repo, env=env, timeout=timeout, log=log)
 
 
@@ -65,14 +63,6 @@ def compile_log(repo, tasks, log, extra_init=(), env=None, timeout=2400):
     return r2 if r2.returncode else r
 
 
-def build_dir_name(env=None):
-    """The build directory of this run: a fork layer builds target <t> into build/mc<t>/ (layer.gradle)."""
-    for a in gradle_target_args(env):
-        if a.startswith("-Pmc="):
-            return "build/mc" + a[len("-Pmc="):]
-    return "build"
-
-
 def gradle_target_args(env=None):
     """PORT_GRADLE_ARGS: extra Gradle arguments for every call of a gate run, newline-separated."""
     raw = (env if env is not None else os.environ).get("PORT_GRADLE_ARGS", "")
@@ -82,8 +72,8 @@ def gradle_target_args(env=None):
 def tgt(c):
     """The Target of this run: from --branch normally; from gradle.properties for a caller that never parsed
     arguments (tools/ci-gates.py builds the same context to reuse the harness and Gate A). On a fork's version branch
-    (PORT_BRANCH_MC, set by ci-gates.py) the base version's, exactly as a layer target's run has it: the harness is
-    then renamed for the branch's version (layer_target)."""
+    (PORT_BRANCH_MC, set by ci-gates.py) the base version's: the harness is then renamed for the branch's version
+    (layer_target)."""
     if "target" not in c:
         base = os.environ.get("PORT_BRANCH_BASE") if os.environ.get("PORT_BRANCH_MC") else None
         c["target"] = targets.TARGETS[base] if base in targets.TARGETS else targets.target_of_repo(c["repo"])
@@ -160,12 +150,9 @@ def harness(c):
         parked = author_unlisted_mixins(c["repo"], c["args"].base)
         t = t.replace("/*AUTHOR_UNLISTED*/", ", ".join(f'"{n}"' for n in parked))
         if layer_target():
-            # a fork's layer builds target <t> into build/mc<t>/ (layer.gradle), and its mixin config is the one
-            # processResources wrote there (the layer adds the target's mixins at that step): read both from there,
-            # or the test looks at build/classes/java/main, finds nothing, and fails every layer target (measured)
-            bd = build_dir_name()
-            t = t.replace('DIR.resolve("build/classes/java/main")', f'DIR.resolve("{bd}/classes/java/main")')
-            t = t.replace('DIR.resolve("src/main/resources/', f'DIR.resolve("{bd}/resources/main/')
+            # a version branch's mixin config is the one processResources wrote (its mixin changes are made at that
+            # step): read it from build/resources/main, not the source tree
+            t = t.replace('DIR.resolve("src/main/resources/', 'DIR.resolve("build/resources/main/')
         (h / "test" / pkg.replace(".", "/")).mkdir(parents=True)
         (h / "test" / pkg.replace(".", "/") / "MixinConfigIntegrityTest.java").write_text(t, encoding="utf-8")
     if tg.gametest == "registration":
@@ -202,7 +189,7 @@ def no_gametest_annotation(mc):
 
 
 def harness_layer_registration(c, h, pkg, mc):
-    """A layer target past 1.21.5: the (already renamed) harness tests are wired by the generated registrar and
+    """A version branch past 1.21.5: the (already renamed) harness tests are wired by the generated registrar and
     their dead annotations stripped, by the same templates/multi-version/tools/gametest_adapter.py the 26.x route uses.
     The 1.21.5 dialect keeps ResourceLocation and FML's @EventBusSubscriber bus attribute; 1.21.6+ (FML 9) drops the attribute; 1.21.11 writes Identifier (the 26.x rename) over a non-generic TestEnvironmentDefinition; 26.x is the adapter's default."""
     dialect = ("26" if mc_tuple(mc) >= (26,) else "1.21.11" if mc_tuple(mc) >= (1, 21, 11)
@@ -216,12 +203,8 @@ def harness_layer_registration(c, h, pkg, mc):
 
 
 def layer_target(env=None):
-    """The Minecraft target a fork's multi-version layer builds in this run (-Pmc in PORT_GRADLE_ARGS), or a version
-    branch's version (PORT_BRANCH_MC: tools/fork-branches.py; its build needs no -P, its harness the same renaming),
-    or None."""
-    for a in gradle_target_args(env):
-        if a.startswith("-Pmc="):
-            return a[len("-Pmc="):]
+    """The Minecraft version of the version branch this run gates (PORT_BRANCH_MC, set by tools/ci-gates.py; its
+    harness is renamed for that version), or None (a single-version fork)."""
     return (env if env is not None else os.environ).get("PORT_BRANCH_MC") or None
 
 
@@ -254,8 +237,8 @@ def harness_table(mc, seen=()):
 
 
 def harness_layer_target(h, mc):
-    """A fork's multi-version layer builds the author's tree for another 1.21.x; the harness (written for 1.21.1)
-    gets that target's own rename table, the same mechanism as the layer's."""
+    """A version branch builds the author's code for another Minecraft version; the harness (written for 1.21.1) gets
+    that version's own rename table."""
     table = h.parent / f"harness-{mc}.renames.tsv"
     table.write_text(harness_table(mc) + "\n", encoding="utf-8")
     out = h / "java.renamed"

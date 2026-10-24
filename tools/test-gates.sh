@@ -220,7 +220,7 @@ rm -rf "$SR"
 rm -rf "$H" "$H/../names.$$"
 
 echo "11. gate-loop: a killed client is 'killed', not a crash; a caught WARN trace is never the stop reason (issue #113)"
-# gate-loop is shared by single-version and layer forks and reads no .multiversion/: these cases hold for both
+# gate-loop is shared by single-version and version-branch forks: these cases hold for both
 GL="$(mktemp -d)"
 gl_kind() {  # gl_kind <wanted-kind> <label> <log-file> -- the kind tools/gate-loop.py's classifier gives a client log
    local got; got="$(python3 -c "import importlib.util as u,sys; s=u.spec_from_file_location('gl', sys.argv[1]); m=u.module_from_spec(s); s.loader.exec_module(m); f=m.failure_of(open(sys.argv[2], encoding='utf-8').read(), client=True); print(f[0] if f else 'green')" "$ROOT/tools/gate-loop.py" "$3" 2>&1)"

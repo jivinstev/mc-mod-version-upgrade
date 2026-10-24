@@ -1,0 +1,1195 @@
+blob
+mark :1
+data 12
+build/
+run/
+
+blob
+mark :2
+data 82
+plugins { id 'java' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+blob
+mark :3
+data 64
+minecraft_version=1.21.1
+neo_version=21.1.228
+mod_id=examplemod
+
+blob
+mark :4
+data 22
+#!/bin/sh
+echo gradle
+
+blob
+mark :5
+data 68
+package com.example.mod.cf;
+import old.Thing;
+class Cf { Thing t; }
+
+blob
+mark :6
+data 106
+package com.example.mod;
+import old.Thing;
+public class ExampleMod { Thing t; void a() { x.oldCall(); } }
+
+blob
+mark :7
+data 88
+package com.example.mod;
+import old.Thing;
+public class Over { Thing t; int keep = 1; }
+
+blob
+mark :8
+data 59
+package com.example.mod;
+public class Plain { int v = 1; }
+
+blob
+mark :9
+data 123
+package com.example.mod.mixin;
+@Mixin(Foo.class)
+class AMixin {
+ @Inject(method = "tick", at = @At("HEAD"))
+ void h() {}
+}
+
+blob
+mark :10
+data 204
+modLoader="javafml"
+[[mods]]
+modId="examplemod"
+[[dependencies.examplemod]]
+modId="minecraft"
+versionRange="${minecraft_version_range}"
+[[dependencies.examplemod]]
+modId="neoforge"
+versionRange="[21.1,)"
+
+blob
+mark :11
+data 29
+{"parent": "item/generated"}
+
+blob
+mark :12
+data 14
+{"type": "x"}
+
+blob
+mark :13
+data 89
+{
+  "package": "com.example.mod.mixin",
+  "mixins": [
+    "AMixin"
+  ],
+  "client": []
+}
+
+reset refs/heads/neoforge-1.21.1
+commit refs/heads/neoforge-1.21.1
+mark :14
+author a <a@b> 1792806515 +0000
+committer a <a@b> 1792806515 +0000
+data 12
+port 1.21.1
+M 100644 :1 .gitignore
+M 100644 :2 build.gradle
+M 100644 :3 gradle.properties
+M 100755 :4 gradlew
+M 100644 :5 src/cf/java/com/example/mod/cf/Cf.java
+M 100644 :6 src/main/java/com/example/mod/ExampleMod.java
+M 100644 :7 src/main/java/com/example/mod/Over.java
+M 100644 :8 src/main/java/com/example/mod/Plain.java
+M 100644 :9 src/main/java/com/example/mod/mixin/AMixin.java
+M 100644 :10 src/main/resources/META-INF/neoforge.mods.toml
+M 100644 :11 src/main/resources/assets/examplemod/models/item/a.json
+M 100644 :12 src/main/resources/data/examplemod/recipe/r.json
+M 100644 :13 src/main/resources/examplemod.mixins.json
+
+blob
+mark :15
+data 104
+package com.example.mod;
+import old.Shared;
+class UsesHelper { com.example.mod.mv.Helper h; Shared s; }
+
+commit refs/heads/neoforge-1.21.1
+mark :16
+author a <a@b> 1792806516 +0000
+committer a <a@b> 1792806516 +0000
+data 30
+port: a class naming a helper
+from :14
+M 100644 :15 src/main/java/com/example/mod/UsesHelper.java
+
+blob
+mark :17
+data 181
+Gates for `examplemod` at `3b424ff` for Minecraft 1.21.3 (full environment) -- run by CI:
+
+| check | result | detail |
+|---|---|---|
+| Gate C -- real client, `launch` | PASS | ok |
+
+blob
+mark :18
+data 46
+# Manual-test items: Minecraft 1.21.3
+
+- none
+
+blob
+mark :19
+data 791
+# Version branch neoforge-1.21.3 (tools/fork-branches.py migrate): Minecraft 1.21.3, from the layer target 1.21.3
+# at 1cf56e167e9a. The build keys below are what layer.gradle applied with -Pmc=1.21.3; .port/branch.gradle
+# reads them, gradle.properties holds the prop.* versions, and mixin_add/mixin_remove are this version's changes
+# over its parent branch's mixin configs (already written into them).
+minecraft_version=1.21.3
+branch=neoforge-1.21.3
+parent=neoforge-1.21.1
+port_branch=neoforge-1.21.1
+base_minecraft_version=1.21.1
+port_taken=14ceadb0af783b41124eb7c7ef38c6c6d9526d8c
+mv_package=com.example.mod.mv
+prop.minecraft_version=1.21.3
+prop.neo_version=21.3.97
+toml.minecraft=[1.21.3,1.21.4)
+toml.neoforge=[21.3,21.4)
+java_version=21
+mixin_add.examplemod.mixins.json=client:BMixin
+
+blob
+mark :20
+data 43
+old.Thing	new.Thing
+member:oldCall	newCall
+
+blob
+mark :21
+data 160
+# shared-library helpers as installed (path blob): tools/fork-branches.py
+src/main/java/com/example/mod/mv/Helper.java ca85cbf525208aca1742a2c1f9631be2b6167069
+
+blob
+mark :22
+data 66
+# ---- shared 1.21.3
+#!exhaustive
+old.Shared	new.Shared
+#!strict
+
+
+blob
+mark :23
+data 781
+{
+ "generated_by": "tools/layer-inventory.py build",
+ "base": "1.21.1",
+ "src_tree": "80e50d6e17e795f897c239f2a9b05f53a9f3c26f",
+ "counts": {
+  "mixin": 1,
+  "injection": 1,
+  "overwrite": 0,
+  "event": 0,
+  "render-class": 0,
+  "render-use": 0,
+  "registry": 0,
+  "shader": 0,
+  "shader-uniform": 0,
+  "shader-sampler": 0
+ },
+ "items": [
+  {
+   "id": "main:com/example/mod/mixin/AMixin.java#injection:@Inject method=tick @At(value=\"HEAD\")",
+   "set": "main",
+   "file": "com/example/mod/mixin/AMixin.java",
+   "kind": "injection",
+   "key": "@Inject method=tick @At(value=\"HEAD\")"
+  },
+  {
+   "id": "main:com/example/mod/mixin/AMixin.java#mixin:@Mixin Foo",
+   "set": "main",
+   "file": "com/example/mod/mixin/AMixin.java",
+   "kind": "mixin",
+   "key": "@Mixin Foo"
+  }
+ ]
+}
+
+blob
+mark :24
+data 3037
+// Version-branch build settings for a community fork port (mc-mod-version-upgrade: templates/fork-branches).
+//
+// Applied by ONE line at the end of the authors' build.gradle on a fork's version branches (neoforge-1.21.3,
+// neoforge-1.21.4, ... -- tools/fork-branches.py), never on the port branch neoforge-1.21.1 nor on a single-version
+// fork. A version branch holds the full source for its Minecraft version and its own gradle.properties versions, so a
+// plain `./gradlew build` builds that version. This script adds only what gradle.properties cannot say, read from
+// .port/<minecraft_version>/branch.properties (the same keys a .multiversion/ layer target's target.properties had):
+//   java_version=N               the Java toolchain and --release (26.x needs 25)
+//   nfrt_version=V               the NeoForm runtime that stages this Minecraft (when ModDevGradle's own cannot)
+//   substitute.<g\:a>=<g:a:v>    a dependency's build for this Minecraft (tools/layer-deps.py writes these)
+//   exclude.<g\:a>=<reason>      a dependency with no build for this Minecraft that the port does not require
+// and runs the client in build/mc<version>/run, so one version's mod configs never reach another's client when one
+// checkout switches between version branches. Without that file (any other branch) it does nothing.
+
+def pbMc = project.findProperty('minecraft_version')?.toString()
+def pbFile = pbMc ? file(".port/${pbMc}/branch.properties") : null
+if (pbFile == null || !pbFile.exists()) {
+    return
+}
+def pbProps = new Properties()
+pbFile.withInputStream { pbProps.load(it) }
+
+if (extensions.findByName('neoForge') != null) {
+    neoForge.runs.matching { it.name == 'client' }.configureEach { r -> r.gameDirectory = file("build/mc${pbMc}/run") }
+}
+if (pbProps.getProperty('java_version')) {
+    def jv = pbProps.getProperty('java_version') as int
+    java.toolchain.languageVersion = JavaLanguageVersion.of(jv)
+    tasks.withType(JavaCompile).configureEach { options.release = jv }
+}
+if (pbProps.getProperty('nfrt_version')) {
+    neoFormRuntime.version = pbProps.getProperty('nfrt_version')
+}
+def pbSubs = pbProps.stringPropertyNames().findAll { it.startsWith('substitute.') }
+configurations.configureEach {
+    resolutionStrategy.dependencySubstitution {
+        pbSubs.each { k -> substitute(module(k.substring(11))).using(module(pbProps.getProperty(k))) }
+    }
+}
+pbProps.stringPropertyNames().findAll { it.startsWith('exclude.') }.each { k ->
+    def ga = k.substring(8).split(':', 2)
+    if (ga.length != 2 || !ga[0] || !ga[1]) {
+        throw new GradleException(".port/${pbMc}/branch.properties: ${k} is not exclude.<group>\\:<module> (escape the ':')")
+    }
+    configurations.configureEach { exclude group: ga[0], module: ga[1] }
+}
+if (pbSubs.any { pbProps.getProperty(it).startsWith('maven.modrinth:') }) {
+    repositories {
+        maven { url = 'https://api.modrinth.com/maven'; content { includeGroup 'maven.modrinth' } }
+    }
+}
+println "version branch: Minecraft ${pbMc} (.port/${pbMc}/branch.properties)"
+
+blob
+mark :25
+data 337
+plugins { id 'java' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+// Version branch (community fork only; not the authors' code): reads .port/<minecraft_version>/branch.properties
+// for what gradle.properties cannot say (Java toolchain, dependency swaps, the client's game directory).
+apply from: '.port/branch.gradle'
+
+blob
+mark :26
+data 63
+minecraft_version=1.21.3
+neo_version=21.3.97
+mod_id=examplemod
+
+blob
+mark :27
+data 76
+package com.example.mod.cf;
+import new.Thing;
+class Cf { Thing t; int c3; }
+
+blob
+mark :28
+data 106
+package com.example.mod;
+import new.Thing;
+public class ExampleMod { Thing t; void a() { x.newCall(); } }
+
+blob
+mark :29
+data 55
+package com.example.mod;
+class OnlyHere { int v = 3; }
+
+blob
+mark :30
+data 88
+package com.example.mod;
+import new.Thing;
+public class Over { Thing t; int keep = 3; }
+
+blob
+mark :31
+data 104
+package com.example.mod;
+import new.Shared;
+class UsesHelper { com.example.mod.mv.Helper h; Shared s; }
+
+blob
+mark :32
+data 47
+package com.example.mod.mixin;
+class BMixin {}
+
+blob
+mark :33
+data 63
+package com.example.mod.mv;
+public class Helper { int v = 3; }
+
+blob
+mark :34
+data 197
+modLoader="javafml"
+[[mods]]
+modId="examplemod"
+[[dependencies.examplemod]]
+modId="minecraft"
+versionRange="[1.21.3,1.21.4)"
+[[dependencies.examplemod]]
+modId="neoforge"
+versionRange="[21.3,21.4)"
+
+blob
+mark :35
+data 105
+{
+  "package": "com.example.mod.mixin",
+  "mixins": [
+    "AMixin"
+  ],
+  "client": [
+    "BMixin"
+  ]
+}
+
+commit refs/heads/neoforge-1.21.3
+mark :36
+author a <a@b> 1792806518 +0000
+committer a <a@b> 1792806518 +0000
+data 355
+Version branch neoforge-1.21.3: Minecraft 1.21.3 from the layer at 1cf56e167e9a
+
+The source is what the layer's `layer.py prepare --target 1.21.3` makes (every source set), the
+resources and build settings what layer.gradle applied with -Pmc=1.21.3, and the target's records
+are in .port/1.21.3/.
+
+Made by tools/fork-branches.py (mc-mod-version-upgrade).
+from :16
+M 100644 :17 .port/1.21.3/GATES.md
+M 100644 :18 .port/1.21.3/TEST-ITEMS.md
+M 100644 :19 .port/1.21.3/branch.properties
+M 100644 :20 .port/1.21.3/renames.tsv
+M 100644 :21 .port/1.21.3/shared-helpers.txt
+M 100644 :22 .port/1.21.3/shared-renames.tsv
+M 100644 :23 .port/INVENTORY.json
+M 100644 :24 .port/branch.gradle
+M 100644 :25 build.gradle
+M 100644 :26 gradle.properties
+M 100644 :27 src/cf/java/com/example/mod/cf/Cf.java
+M 100644 :28 src/main/java/com/example/mod/ExampleMod.java
+M 100644 :29 src/main/java/com/example/mod/OnlyHere.java
+M 100644 :30 src/main/java/com/example/mod/Over.java
+M 100644 :31 src/main/java/com/example/mod/UsesHelper.java
+M 100644 :32 src/main/java/com/example/mod/mixin/BMixin.java
+M 100644 :33 src/main/java/com/example/mod/mv/Helper.java
+M 100644 :34 src/main/resources/META-INF/neoforge.mods.toml
+M 100644 :35 src/main/resources/examplemod.mixins.json
+
+blob
+mark :37
+data 736
+{
+ "target": "1.21.3",
+ "items": [
+  {
+   "id": "main:com/example/mod/mixin/AMixin.java#injection:@Inject method=tick @At(value=\"HEAD\")",
+   "set": "main",
+   "file": "com/example/mod/mixin/AMixin.java",
+   "kind": "injection",
+   "key": "@Inject method=tick @At(value=\"HEAD\")",
+   "status": "same",
+   "detail": "unchanged"
+  },
+  {
+   "id": "main:com/example/mod/mixin/AMixin.java#mixin:@Mixin Foo",
+   "set": "main",
+   "file": "com/example/mod/mixin/AMixin.java",
+   "kind": "mixin",
+   "key": "@Mixin Foo",
+   "status": "same",
+   "detail": "unchanged"
+  }
+ ],
+ "unaccounted": [],
+ "counts": {
+  "same": 2
+ },
+ "notes": [
+  "the authors' src/ changed since INVENTORY.json was built: re-run tools/layer-inventory.py build"
+ ]
+}
+
+blob
+mark :38
+data 720
+{
+ "tool": "tools/fork-branches.py migrate",
+ "layer_ref": "HEAD",
+ "layer_commit": "1cf56e167e9a465d5efd105d3413a65d239a0cc7",
+ "target": "1.21.3",
+ "port_commit": "14ceadb0af783b41124eb7c7ef38c6c6d9526d8c",
+ "branch_commit": "574517b0bb1a986bf035468bf44a11f8963d5acc",
+ "digest": "de5cc4aadfa00ffdd651f150bcc5418bc27f02f28eadac5008f901add36ade3e",
+ "review_inputs": "8a9e604fc2d97a30d09a57be40055c1af027fb3ec8dd4d0cd5c59f074f5f22b5",
+ "with_modes": true,
+ "recorded": {
+  "3b424ff9cb5d606e370c590c9f8dba0e0eac78f0": {
+   "digest": "de5cc4aadfa00ffdd651f150bcc5418bc27f02f28eadac5008f901add36ade3e",
+   "review_inputs": "8a9e604fc2d97a30d09a57be40055c1af027fb3ec8dd4d0cd5c59f074f5f22b5",
+   "with_modes": true
+  }
+ }
+}
+
+blob
+mark :39
+data 1893
+# Review: Minecraft 1.21.3 (version branch neoforge-1.21.3)
+
+An independent review by a FRESH agent that was given only this version's changes: every file that differs
+from the parent branch (its parent branch) at their merge-base (`git diff <merge-base>..neoforge-1.21.3`), read against the parent's
+file, its STUBS.json and .port/1.21.3/renames.tsv. One row per STUBS.json entry, per `changed` file, per
+resource group (`resources`: a directory with the digest of its changed files -- an edit makes it a new
+row) and for renames.tsv (`renames`, with its digest); the files the rename rows alone made, the build
+settings tools/fork-branches.py derives and added helper classes need no row; a file deleted here is a `deleted`
+row unless drops.txt or a mixin_remove key accounts for it. Verdict `ok` (the change keeps
+the behaviour, or the difference is right and the note says why) or `not-ok`. A hook item of the behaviour
+inventory is accounted for only by a row whose note names its id, or by an `item` row for the id; a
+reviewer may add `missing` (a file that should exist) and `shared` (a shared helper) rows. `reviewer` names
+the reviewing agent, distinct from the fixer; `commit` is the commit reviewed (`git rev-parse --short HEAD`).
+tools/fork-port.py adds a `?` row for every item it finds unreviewed; it never changes a verdict.
+
+Migrated from the layer's .multiversion/targets/1.21.3/REVIEW.md by tools/fork-branches.py: the commit is a layer commit, mapped in MIGRATED.json.
+
+- reviewer: fresh agent x, not the fixer
+- date: 2026-10-16
+- commit: 3b424ff
+
+| kind | file | verdict | note |
+|---|---|---|---|
+| changed | src/cf/java/com/example/mod/cf/Cf.java | ok | read against the authors' file |
+| changed | src/main/java/com/example/mod/Over.java | ok | read against the authors' file |
+| renames | .port/1.21.3/renames.tsv @b8e13f30e22a | ok | read against the authors' file |
+
+commit refs/heads/neoforge-1.21.3
+mark :40
+author a <a@b> 1792806519 +0000
+committer a <a@b> 1792806519 +0000
+data 385
+neoforge-1.21.3: its records migrated from the layer
+
+REVIEW.md keeps the layer reviewer's verdicts on the files that stand for the same bytes;
+MIGRATED.json maps each layer commit GATES.md and REVIEW.md name to the digest of what the
+layer prepared there (branch commit 574517b0bb1a); INVENTORY-CHECK.json is a fresh account.
+
+Made by tools/fork-branches.py (mc-mod-version-upgrade).
+from :36
+M 100644 :37 .port/1.21.3/INVENTORY-CHECK.json
+M 100644 :38 .port/1.21.3/MIGRATED.json
+M 100644 :39 .port/1.21.3/REVIEW.md
+
+blob
+mark :41
+data 181
+Gates for `examplemod` at `ff709b1` for Minecraft 1.21.4 (full environment) -- run by CI:
+
+| check | result | detail |
+|---|---|---|
+| Gate C -- real client, `launch` | PASS | ok |
+
+blob
+mark :42
+data 46
+# Manual-test items: Minecraft 1.21.4
+
+- none
+
+blob
+mark :43
+data 905
+# Version branch neoforge-1.21.4 (tools/fork-branches.py migrate): Minecraft 1.21.4, from the layer target 1.21.4
+# at 1cf56e167e9a. The build keys below are what layer.gradle applied with -Pmc=1.21.4; .port/branch.gradle
+# reads them, gradle.properties holds the prop.* versions, and mixin_add/mixin_remove are this version's changes
+# over its parent branch's mixin configs (already written into them).
+minecraft_version=1.21.4
+branch=neoforge-1.21.4
+parent=neoforge-1.21.3
+parent_minecraft_version=1.21.3
+port_branch=neoforge-1.21.1
+base_minecraft_version=1.21.1
+port_taken=14ceadb0af783b41124eb7c7ef38c6c6d9526d8c
+mv_package=com.example.mod.mv
+prop.minecraft_version=1.21.4
+prop.neo_version=21.4.158
+toml.minecraft=[1.21.4,1.21.5)
+toml.neoforge=[21.4,21.5)
+java_version=21
+allowed_undone_parent=1.21.3 2026-10-24: no green Gate C recorded in GATES.md
+mixin_remove.examplemod.mixins.json=mixins:AMixin
+
+blob
+mark :44
+data 25
+member:newCall	newerCall
+
+blob
+mark :45
+data 160
+# shared-library helpers as installed (path blob): tools/fork-branches.py
+src/main/java/com/example/mod/mv/Helper.java 8a539e5aad4b674b5a52e768889fd340acf992f2
+
+blob
+mark :46
+data 3713
+# ---- shared 1.21.4
+# Shared fork-layer rename table: NeoForge 1.21.3 -> 1.21.4 (Minecraft 1.21.4; NeoForge 21.4). Applied AFTER the
+# fork's own rows and on top of the 1.21.3 table (a 1.21.4 target inherits 1.21.3). Measured against
+# neoforge-21.4.158-sources.jar on the first layer-fork port. CATALOG §M / minor-version-deltas L8+.
+#!exhaustive  shared table: most rows are for API this mod does not use
+# ---- client reload listeners: a named graph in 1.21.4
+net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent	net.neoforged.neoforge.client.event.AddClientReloadListenersEvent
+RegisterClientReloadListenersEvent	AddClientReloadListenersEvent
+re:(\w+)\.registerReloadListener\(([\w.()]+)\)	\1.addListener(com.example.mod.mv.ReloadIds.of(\2), \2)
+# ---- atlases and textures
+re:\bInventoryMenu\.BLOCK_ATLAS\b	net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_BLOCKS
+# ---- NeoForge 21.4: ClientLevel.partEntities (id -> part map) is gone; dragonParts() is the list of all parts
+re:\b(\w+)\.partEntities\.get\(([^()]+)\)	com.example.mod.mv.PartEntities.byId(\1, \2)
+re:\b(\w+)\.partEntities\.values\(\)	\1.dragonParts()
+re:\b(\w+)\.partEntities\.remove\((\w+)\.getId\(\)\)	\1.dragonParts().remove(\2)
+# ---- tickets: vanilla dropped POST_TELEPORT
+re:\bTicketType\.POST_TELEPORT\b	com.example.mod.mv.Tickets.POST_TELEPORT
+# ---- TextureManager.register(String prefix, texture) -> named registration (the first argument is a string)
+re:(\w+)\.register\(\s*("(?:[^"\\]|\\.)*"(?:\s*\+\s*(?:[^,()]|\([^()]*\))+)*),\s*(\w+)\s*\)	com.example.mod.mv.Textures.register(\1, \2, \3)
+re:\bSkullBlockRenderer\.createSkullRenderers\(	com.example.mod.mv.Skulls.createSkullRenderers(
+# ---- FML 6 (NeoForge 21.4) early display: SimpleBufferBuilder takes a name for its buffer
+re:new SimpleBufferBuilder\((\d+)\)	new SimpleBufferBuilder("examplemod", \1)
+# ---- LevelRenderer.renderLevel lost its LightTexture argument (1.21.4); this row runs before the 1.21.3 one, on the
+# 1.21.1 text, so it writes the full 1.21.4 descriptor itself
+re:LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/renderer/LightTexture;	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;
+# ---- mixin targets: ScreenEffectRenderer.renderScreenEffect(Minecraft, PoseStack) gained a MultiBufferSource
+# (measured on neoforge-21.4.158); an @Inject handler needs the extra parameter before its CallbackInfo
+re:(method = "renderScreenEffect"[^;{]*?\(\s*Minecraft \w+,\s*PoseStack \w+,)(\s*CallbackInfo\b)	\1 net.minecraft.client.renderer.MultiBufferSource mv$bufferSource,\2
+# ---- RenderType.entityTranslucentCull is gone (1.21.2) and RenderType.entityTranslucent sets NO_CULL, so mapping one to
+# the other draws the model double-sided (compile-clean, gates green). NeoForgeRenderTypes.getItemLayeredTranslucent is
+# the 1.21.1 state: entity-translucent shader, default CULL, translucent, lightmap, overlay, sorted -- same signature on
+# 1.21.5 and 1.21.8 (NeoForgeRenderPipelines.ENTITY_TRANSLUCENT_CULL). Rows do not reach overlays. CATALOG M73.
+# NOT on 26.3: NeoForge 26.3 has no NeoForgeRenderTypes.getItemLayeredTranslucent (cannot find symbol); vanilla's
+# RenderTypes.entityTranslucentCull(texture) is back there (RenderPipelines.ENTITY_TRANSLUCENT_CULL, culled). CATALOG M73.
+re:\bRenderType\.entityTranslucentCull\(	net.neoforged.neoforge.client.NeoForgeRenderTypes.getItemLayeredTranslucent(
+#!strict
+
+# ---- shared 1.21.3
+#!exhaustive
+old.Shared	new.Shared
+#!strict
+
+
+blob
+mark :47
+data 64
+minecraft_version=1.21.4
+neo_version=21.4.158
+mod_id=examplemod
+
+blob
+mark :48
+data 97
+package com.example.mod.cf;
+import new.Thing;
+class Cf {
+    @OnlyIn(Dist.CLIENT)
+    Thing t;
+}
+
+blob
+mark :49
+data 63
+package com.example.mod.mv;
+public class Helper { int v = 4; }
+
+blob
+mark :50
+data 197
+modLoader="javafml"
+[[mods]]
+modId="examplemod"
+[[dependencies.examplemod]]
+modId="minecraft"
+versionRange="[1.21.4,1.21.5)"
+[[dependencies.examplemod]]
+modId="neoforge"
+versionRange="[21.4,21.5)"
+
+blob
+mark :51
+data 69
+{"model": {"type": "minecraft:model", "model": "examplemod:item/a"}}
+
+blob
+mark :52
+data 89
+{
+  "package": "com.example.mod.mixin",
+  "mixins": [],
+  "client": [
+    "BMixin"
+  ]
+}
+
+commit refs/heads/neoforge-1.21.4
+mark :53
+author a <a@b> 1792806520 +0000
+committer a <a@b> 1792806520 +0000
+data 355
+Version branch neoforge-1.21.4: Minecraft 1.21.4 from the layer at 1cf56e167e9a
+
+The source is what the layer's `layer.py prepare --target 1.21.4` makes (every source set), the
+resources and build settings what layer.gradle applied with -Pmc=1.21.4, and the target's records
+are in .port/1.21.4/.
+
+Made by tools/fork-branches.py (mc-mod-version-upgrade).
+from :40
+M 100644 :41 .port/1.21.4/GATES.md
+M 100644 :42 .port/1.21.4/TEST-ITEMS.md
+M 100644 :43 .port/1.21.4/branch.properties
+M 100644 :44 .port/1.21.4/renames.tsv
+M 100644 :45 .port/1.21.4/shared-helpers.txt
+M 100644 :46 .port/1.21.4/shared-renames.tsv
+M 100644 :47 gradle.properties
+M 100644 :48 src/cf/java/com/example/mod/cf/Cf.java
+D src/main/java/com/example/mod/mixin/AMixin.java
+M 100644 :49 src/main/java/com/example/mod/mv/Helper.java
+M 100644 :50 src/main/resources/META-INF/neoforge.mods.toml
+M 100644 :51 src/main/resources/assets/examplemod/items/a.json
+M 100644 :52 src/main/resources/examplemod.mixins.json
+
+blob
+mark :54
+data 921
+{
+ "target": "1.21.4",
+ "items": [
+  {
+   "id": "main:com/example/mod/mixin/AMixin.java#injection:@Inject method=tick @At(value=\"HEAD\")",
+   "set": "main",
+   "file": "com/example/mod/mixin/AMixin.java",
+   "kind": "injection",
+   "key": "@Inject method=tick @At(value=\"HEAD\")",
+   "status": "moved",
+   "detail": "the file is not in the target's prepared tree; an ok row of REVIEW.md names it",
+   "accounted": true
+  },
+  {
+   "id": "main:com/example/mod/mixin/AMixin.java#mixin:@Mixin Foo",
+   "set": "main",
+   "file": "com/example/mod/mixin/AMixin.java",
+   "kind": "mixin",
+   "key": "@Mixin Foo",
+   "status": "moved",
+   "detail": "the file is not in the target's prepared tree; an ok row of REVIEW.md names it",
+   "accounted": true
+  }
+ ],
+ "unaccounted": [],
+ "counts": {
+  "moved": 2
+ },
+ "notes": [
+  "the authors' src/ changed since INVENTORY.json was built: re-run tools/layer-inventory.py build"
+ ]
+}
+
+blob
+mark :55
+data 720
+{
+ "tool": "tools/fork-branches.py migrate",
+ "layer_ref": "HEAD",
+ "layer_commit": "1cf56e167e9a465d5efd105d3413a65d239a0cc7",
+ "target": "1.21.4",
+ "port_commit": "14ceadb0af783b41124eb7c7ef38c6c6d9526d8c",
+ "branch_commit": "f45b6657dba9dc96d1f33e103ac37e65d8580404",
+ "digest": "cac2ebe85752f07dbf8ceab64537fd5e49c90f5f8d385858d2bb5a93280d121f",
+ "review_inputs": "fe5fb164203b50c1ec0159615d43d6ea8f09c545dbe20a6b7785c7490fedfb59",
+ "with_modes": true,
+ "recorded": {
+  "ff709b10fd98f78fd587073fca282375758fff51": {
+   "digest": "cac2ebe85752f07dbf8ceab64537fd5e49c90f5f8d385858d2bb5a93280d121f",
+   "review_inputs": "fe5fb164203b50c1ec0159615d43d6ea8f09c545dbe20a6b7785c7490fedfb59",
+   "with_modes": true
+  }
+ }
+}
+
+blob
+mark :56
+data 2202
+# Review: Minecraft 1.21.4 (version branch neoforge-1.21.4)
+
+An independent review by a FRESH agent that was given only this version's changes: every file that differs
+from the parent branch (its parent branch) at their merge-base (`git diff <merge-base>..neoforge-1.21.4`), read against the parent's
+file, its STUBS.json and .port/1.21.4/renames.tsv. One row per STUBS.json entry, per `changed` file, per
+resource group (`resources`: a directory with the digest of its changed files -- an edit makes it a new
+row) and for renames.tsv (`renames`, with its digest); the files the rename rows alone made, the build
+settings tools/fork-branches.py derives and added helper classes need no row; a file deleted here is a `deleted`
+row unless drops.txt or a mixin_remove key accounts for it. Verdict `ok` (the change keeps
+the behaviour, or the difference is right and the note says why) or `not-ok`. A hook item of the behaviour
+inventory is accounted for only by a row whose note names its id, or by an `item` row for the id; a
+reviewer may add `missing` (a file that should exist) and `shared` (a shared helper) rows. `reviewer` names
+the reviewing agent, distinct from the fixer; `commit` is the commit reviewed (`git rev-parse --short HEAD`).
+tools/fork-port.py adds a `?` row for every item it finds unreviewed; it never changes a verdict.
+
+Migrated from the layer's .multiversion/targets/1.21.4/REVIEW.md by tools/fork-branches.py: the commit is a layer commit, mapped in MIGRATED.json.
+
+- reviewer: fresh agent x, not the fixer
+- date: 2026-10-16
+- commit: ff709b1
+
+| kind | file | verdict | note |
+|---|---|---|---|
+| changed | src/cf/java/com/example/mod/cf/Cf.java | ok | read against the authors' file |
+| item | main:com/example/mod/mixin/AMixin.java#injection:@Inject method=tick @At(value="HEAD") | ok | read against the authors' file |
+| item | main:com/example/mod/mixin/AMixin.java#mixin:@Mixin Foo | ok | read against the authors' file |
+| renames | .port/1.21.4/renames.tsv @955762478a5d | ok | read against the authors' file |
+| resources | src/main/resources/assets/examplemod/items @ea6d91d2d008 | ok | read against the authors' file [migrated from the layer's review of this group] |
+
+commit refs/heads/neoforge-1.21.4
+mark :57
+author a <a@b> 1792806520 +0000
+committer a <a@b> 1792806520 +0000
+data 385
+neoforge-1.21.4: its records migrated from the layer
+
+REVIEW.md keeps the layer reviewer's verdicts on the files that stand for the same bytes;
+MIGRATED.json maps each layer commit GATES.md and REVIEW.md name to the digest of what the
+layer prepared there (branch commit f45b6657dba9); INVENTORY-CHECK.json is a fresh account.
+
+Made by tools/fork-branches.py (mc-mod-version-upgrade).
+from :53
+M 100644 :54 .port/1.21.4/INVENTORY-CHECK.json
+M 100644 :55 .port/1.21.4/MIGRATED.json
+M 100644 :56 .port/1.21.4/REVIEW.md
+
+blob
+mark :58
+data 181
+Gates for `examplemod` at `5be0fca` for Minecraft 1.21.5 (full environment) -- run by CI:
+
+| check | result | detail |
+|---|---|---|
+| Gate C -- real client, `launch` | PASS | ok |
+
+blob
+mark :59
+data 46
+# Manual-test items: Minecraft 1.21.5
+
+- none
+
+blob
+mark :60
+data 919
+# Version branch neoforge-1.21.5 (tools/fork-branches.py migrate): Minecraft 1.21.5, from the layer target 1.21.5
+# at 1cf56e167e9a. The build keys below are what layer.gradle applied with -Pmc=1.21.5; .port/branch.gradle
+# reads them, gradle.properties holds the prop.* versions, and mixin_add/mixin_remove are this version's changes
+# over its parent branch's mixin configs (already written into them).
+minecraft_version=1.21.5
+branch=neoforge-1.21.5
+parent=neoforge-1.21.4
+parent_minecraft_version=1.21.4
+port_branch=neoforge-1.21.1
+base_minecraft_version=1.21.1
+port_taken=14ceadb0af783b41124eb7c7ef38c6c6d9526d8c
+mv_package=com.example.mod.mv
+prop.minecraft_version=1.21.5
+prop.neo_version=21.5.98
+toml.minecraft=[1.21.5,1.21.6)
+toml.neoforge=[21.5,21.6)
+java_version=21
+allowed_undone_parent=1.21.4 2026-10-24: no green Gate C recorded in GATES.md
+strip_onlyin=true
+mixin_add.examplemod.mixins.json=mixins:AMixin
+
+blob
+mark :61
+data 75
+# 1.21.5: from<TAB>to (plain type, member:, re:) -- see prepare-sources.py
+
+blob
+mark :62
+data 18810
+# ---- shared 1.21.5
+# Shared rows for a fork layer's 1.21.5 target (and every later one that inherits it).
+# 1.21.5 is where CompoundTag/ListTag getters started returning Optional -- the same change 26.2 carries
+# (CATALOG §V12), so these rows come from templates/multi-version/versions/26.2.renames.hand.tsv.
+# ⚠ NOT copied verbatim: the 26.2 rows matched `.getInt(<anything without a comma>)`, which also rewrites a
+# ByteBuffer read (`bytes.getInt(at)` -> `bytes.getIntOr(at, 0)`) -- Battle of Lord had no binary readers, the
+# first fork that went through here (a Blender/glTF loader) has eight. A shared row cannot know the receiver's
+# type, so it anchors on what the NBT API guarantees and a byte offset never is: a string literal key, or an
+# UPPER_CASE constant (bare or Class.CONST). A key held in a variable, and a ListTag index, are left to the
+# fork's own rows or its workers.
+#!exhaustive  # shared library: most forks use only some of these rows
+# GameRules.getBoolean/getInt(GameRules.Key) still return the value on 1.21.5 and take an UPPER_CASE key too: a call
+# on getGameRules() or with a GameRules.RULE_* argument is not an NBT read (CATALOG M74)
+re:(?<!getGameRules\(\))\.getInt\(("[^"]*"|(?!GameRules\.)(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getIntOr(\1, 0)
+re:\.getString\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getStringOr(\1, "")
+re:(?<!Boolean)(?<!getGameRules\(\))\.getBoolean\(("[^"]*"|(?!GameRules\.)(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getBooleanOr(\1, false)
+re:\.getLong\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getLongOr(\1, 0L)
+re:\.getDouble\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getDoubleOr(\1, 0.0)
+re:\.getFloat\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getFloatOr(\1, 0.0F)
+re:\.getCompound\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*)\)	.getCompoundOrEmpty(\1)
+re:\.getList\(("[^"]*"|(?:\w+\.)?[A-Z][A-Z0-9_]*),\s*[A-Za-z0-9_.]+\)	.getListOrEmpty(\1)
+# CompoundTag.getAllKeys() -> keySet() (same Set<String>)
+member:getAllKeys	keySet
+# CompoundTag.getUUID/putUUID/hasUUID are gone; a UUID goes through UUIDUtil.CODEC (the same int[4] on disk).
+# Each needs an argument, so the many no-arg Entity.getUUID() calls are untouched.
+re:([\w.]+(?:\(\))?)\.getUUID\(([^()]+)\)	com.example.mod.mv.Nbt.getUuid(\1, \2)
+re:([\w.]+(?:\(\))?)\.putUUID\(([^(),]+),\s*([^()]+)\)	com.example.mod.mv.Nbt.putUuid(\1, \2, \3)
+re:([\w.]+(?:\(\))?)\.hasUUID\(([^()]+)\)	com.example.mod.mv.Nbt.hasUuid(\1, \2)
+# CompoundTag.contains(key, type) lost its type argument (from the 26.2 table, verbatim: anchored on a tag id).
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:1|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_BYTE)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ByteTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:2|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_SHORT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ShortTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:3|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:4|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:5|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_FLOAT)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.FloatTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:6|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_DOUBLE)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.DoubleTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:7|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_BYTE_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ByteArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:8|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_STRING)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.StringTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:9|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LIST)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.ListTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:10|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_COMPOUND)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.CompoundTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:11|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_INT_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.IntArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:12|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_LONG_ARRAY)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.LongArrayTag)
+re:(?<![\w.)\]])((?:[A-Za-z_]\w*(?:\(\))?\.)*[A-Za-z_]\w*(?:\(\))?)\.contains\(\s*([^,()]+?)\s*,\s*(?:99|(?:(?:net\.minecraft\.nbt\.)?(?:Compound)?Tag\.)?TAG_ANY_NUMERIC)\s*\)	(\1.get(\2) instanceof net.minecraft.nbt.NumericTag)
+# ---- 1.21.4 -> 1.21.5 package moves
+com.mojang.blaze3d.platform.GlConst	com.mojang.blaze3d.opengl.GlConst
+com.mojang.blaze3d.platform.GlDebug	com.mojang.blaze3d.opengl.GlDebug
+com.mojang.blaze3d.platform.GlStateManager	com.mojang.blaze3d.opengl.GlStateManager
+com.mojang.blaze3d.shaders.AbstractUniform	com.mojang.blaze3d.opengl.AbstractUniform
+net.neoforged.neoforge.client.model.data.ModelData	net.neoforged.neoforge.model.data.ModelData
+net.neoforged.neoforge.client.model.data.ModelDataManager	net.neoforged.neoforge.model.data.ModelDataManager
+net.neoforged.neoforge.client.model.data.ModelProperty	net.neoforged.neoforge.model.data.ModelProperty
+net.minecraft.world.entity.animal.Sheep	net.minecraft.world.entity.animal.sheep.Sheep
+net.minecraft.world.entity.animal.Wolf	net.minecraft.world.entity.animal.wolf.Wolf
+net.minecraft.world.entity.animal.WolfVariant	net.minecraft.world.entity.animal.wolf.WolfVariant
+net.minecraft.world.entity.animal.WolfVariants	net.minecraft.world.entity.animal.wolf.WolfVariants
+net.minecraft.world.entity.animal.FrogVariant	net.minecraft.world.entity.animal.frog.FrogVariant
+net.minecraft.core.component.DataComponentPredicate	net.minecraft.core.component.predicates.DataComponentPredicate
+net.neoforged.neoforge.client.event.AddAttributeTooltipsEvent	net.neoforged.neoforge.event.AddAttributeTooltipsEvent
+net.neoforged.neoforge.client.event.GatherSkippedAttributeTooltipsEvent	net.neoforged.neoforge.event.GatherSkippedAttributeTooltipsEvent
+net.neoforged.neoforge.event.entity.player.PlayerHeartTypeEvent	net.neoforged.neoforge.client.event.PlayerHeartTypeEvent
+# ---- the RenderPipeline rewrite: immediate-mode GL on LegacyGl, 1.21.4 RenderType.create on LegacyRenderType
+# (the rest of the layer is java/Legacy*.java, ShaderInstance, ShaderShard, Uniform, RawGlTexture)
+net.minecraft.client.renderer.RenderStateShard.ShaderStateShard	com.example.mod.mv.ShaderShard
+re:\bRenderStateShard\.ShaderStateShard\b	com.example.mod.mv.ShaderShard
+re:\bShaderStateShard\b	com.example.mod.mv.ShaderShard
+com.mojang.blaze3d.shaders.Uniform	com.example.mod.mv.Uniform
+re:\bGlStateManager\.(SourceFactor|DestFactor)\b	com.mojang.blaze3d.platform.\1
+re:\bRenderSystem\.(enableBlend|disableBlend|defaultBlendFunc|blendFuncSeparate|blendFunc|blendEquation|enableDepthTest|disableDepthTest|depthFunc|depthMask|colorMask|enableCull|disableCull|recordRenderCall)\(	com.example.mod.mv.LegacyGl.\1(
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionColorShader\s*\)	com.example.mod.mv.LegacyGl.setShader(com.example.mod.mv.LegacyGl.Vanilla.POSITION_COLOR)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionTexShader\s*\)	com.example.mod.mv.LegacyGl.setShader(com.example.mod.mv.LegacyGl.Vanilla.POSITION_TEX)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionTexColorShader\s*\)	com.example.mod.mv.LegacyGl.setShader(com.example.mod.mv.LegacyGl.Vanilla.POSITION_TEX_COLOR)
+re:RenderSystem\.setShader\(\s*GameRenderer::getPositionShader\s*\)	com.example.mod.mv.LegacyGl.setShader(com.example.mod.mv.LegacyGl.Vanilla.POSITION)
+re:\bRenderSystem\.setShader\(	com.example.mod.mv.LegacyGl.setShader(
+re:\bRenderSystem\.setShaderTexture\(	com.example.mod.mv.LegacyGl.setShaderTexture(
+re:\bBufferUploader\.drawWithShader\(	com.example.mod.mv.LegacyGl.drawWithShader(
+re:\bCoreShaders\.(POSITION_TEX_COLOR|POSITION_TEX|POSITION_COLOR|POSITION)\b	com.example.mod.mv.LegacyGl.Vanilla.\1
+re:\bRenderType\.create\(	com.example.mod.mv.LegacyRenderType.create(
+re:\bRenderType\.CompositeState\.builder\(\)	com.example.mod.mv.LegacyRenderType.state()
+re:\bRenderType\.CompositeState\b	com.example.mod.mv.LegacyRenderType.State
+re:\b(?:RenderStateShard|RenderType)\.(NO_TRANSPARENCY|ADDITIVE_TRANSPARENCY|LIGHTNING_TRANSPARENCY|GLINT_TRANSPARENCY|CRUMBLING_TRANSPARENCY|OVERLAY_TRANSPARENCY|VIGNETTE_TRANSPARENCY|TRANSLUCENT_TRANSPARENCY|NO_DEPTH_TEST|EQUAL_DEPTH_TEST|LEQUAL_DEPTH_TEST|GREATER_DEPTH_TEST|COLOR_DEPTH_WRITE|COLOR_WRITE|DEPTH_WRITE|CULL|NO_CULL|POLYGON_OFFSET_LAYERING)\b	com.example.mod.mv.LegacyRenderType.\1
+re:import com\.mojang\.blaze3d\.vertex\.BufferUploader;\n?	
+re:import net\.minecraft\.client\.renderer\.CoreShaders;\n?	
+# DynamicTexture(NativeImage) gained a name supplier (debug label only)
+re:new DynamicTexture\(([^(),]+)\)	new DynamicTexture(() -> "com.example.mod.mv", \1)
+# ---- Entity.moveTo(...) is snapTo(...) (CATALOG §V39: same body; NOT absSnapTo). A receiver that is a PathNavigation
+# keeps its own moveTo(x, y, z, speed) -- X7b: this guesses at the receiver's spelling, it cannot see its type.
+re:(?<!Navigation\(\))(?<!avigation)(?<!avigator)\.moveTo\(	.snapTo(
+# ---- chunk tickets lost their value type: addRegionTicket(type, pos, radius, value) -> addTicketWithRadius(type, pos, radius)
+# (the value only told two tickets of one type apart; vanilla 1.21.5 keeps one ticket per type, pos and level)
+re:\.addRegionTicket\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*(?:[^,()]|\([^()]*\))+\)	.addTicketWithRadius(\1, \2, \3)
+re:\.removeRegionTicket\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+),\s*(?:[^,()]|\([^()]*\))+\)	.removeTicketWithRadius(\1, \2, \3)
+# ---- ClientInput lost forwardImpulse/leftImpulse/jumping/shiftKeyDown
+re:\binput\.forwardImpulse\b	input.getMoveVector().y
+re:\binput\.leftImpulse\b	input.getMoveVector().x
+re:\binput\.jumping\b	input.keyPresses.jump()
+re:\binput\.shiftKeyDown\b	input.keyPresses.shift()
+# ---- OwnableEntity.getOwnerUUID() -> getOwnerReference() (a nullable EntityReference)
+re:([\w.]+(?:\(\))?)\.getOwnerUUID\(\)	com.example.mod.mv.Owners.uuid(\1)
+# ---- SavedData is a SavedDataType (id + constructor + codec) now; Factory is gone, and save() overrides nothing.
+# The helper keeps the mod's own save(CompoundTag, Provider)/load(CompoundTag[, Provider]) and the on-disk layout.
+re:([\w.]+(?:\(\))?)\.computeIfAbsent\(\s*new SavedData\.Factory<>\(\s*((?:[^,()]|\([^()]*\))+),\s*((?:[^,()]|\([^()]*\))+)(?:,\s*null)?\s*\),\s*((?:[^,()]|\([^()]*\))+)\s*\)	com.example.mod.mv.SavedDatas.computeIfAbsent(\1, \2, \3, \4)
+re:@Override(\s+public CompoundTag save\(CompoundTag \w+, HolderLookup\.Provider \w+\))	\1
+# ---- Screenshot.takeScreenshot(target) is callback-based now (the GL backend completes it before returning)
+re:\bScreenshot\.takeScreenshot\(\s*((?:[^,()]|\([^()]*\))+)\s*\)	com.example.mod.mv.Screenshots.take(\1)
+# ---- BakedQuad became a record: getSprite()/getVertices()/getDirection()/getTintIndex()/isShade()/getLightEmission()
+# are sprite()/vertices()/direction()/tintIndex()/shade()/lightEmission(). Anchored on the receiver names a quad is
+# conventionally held in (X7b: a guess at spelling, not at type; getSprite() alone belongs to far too many classes).
+re:\b(quad|bakedQuad|q)\.getSprite\(\)	\1.sprite()
+re:\b(quad|bakedQuad|q)\.getVertices\(\)	\1.vertices()
+re:\b(quad|bakedQuad|q)\.getDirection\(\)	\1.direction()
+re:\b(quad|bakedQuad|q)\.getTintIndex\(\)	\1.tintIndex()
+re:\b(quad|bakedQuad|q)\.isShade\(\)	\1.shade()
+re:\b(quad|bakedQuad|q)\.getLightEmission\(\)	\1.lightEmission()
+# ---- RenderTarget is textures, not a framebuffer: frameBufferId / bindWrite(viewport) ask the backend for the FBO
+# the receiver is the whole chain (`Minecraft.getInstance().getMainRenderTarget()`), never its tail
+re:((?<![\w$.])(?!super\.frameBufferId\b)[\w$]+(?:\(\))?(?:\.[\w$]+(?:\(\))?)*)\.frameBufferId\b	com.example.mod.mv.LegacyTargets.fbo(\1)
+re:([\w.]+(?:\(\))?)\.bindWrite\(\s*(true|false)\s*\)	com.example.mod.mv.LegacyTargets.bindWrite(\1, \2)
+# GlStateManager no longer tracks the clear colour; the GL call is the same
+re:\bGlStateManager\._clearColor\(	org.lwjgl.opengl.GL11.glClearColor(
+# ---- Inventory.items is private in 1.21.5; the same NonNullList is getNonEquipmentItems()
+re:\.getInventory\(\)\.items\b	.getInventory().getNonEquipmentItems()
+# ---- GeckoLib: its only 1.21.5 line is 5.x. These classes only MOVED from 4.x (the predicate's AnimationState<T> is
+# AnimationTest<T> now; 5.x's own processing.AnimationState is a different class). The render-state rewrite itself
+# (GeoEntityRenderer<T, R extends EntityRenderState & GeoRenderState>, layers' addRenderData/addPerBoneRender,
+# BlockAndItemGeoLayer.getRelevantBones) is per file: CATALOG M49.
+software.bernie.geckolib.renderer.GeoRenderer	software.bernie.geckolib.renderer.base.GeoRenderer
+software.bernie.geckolib.animation.AnimatableManager	software.bernie.geckolib.animatable.manager.AnimatableManager
+software.bernie.geckolib.animation.AnimationController	software.bernie.geckolib.animatable.processing.AnimationController
+software.bernie.geckolib.animation.AnimationState	software.bernie.geckolib.animatable.processing.AnimationTest
+# AnimationController.getControllerState() is getAnimationState() (same State enum)
+re:\.getControllerState\(\)	.getAnimationState()
+# ---- GeckoLib 5 resource ids: a model/animation id is the BARE name under geckolib/{models,animations}/ (tools/fork-port.py
+# setup copies the 4.x geo/ and animations/ files there). The 4.x file-path ids do not survive every 5.x line's lookup:
+# 5.1-5.3 strip only geckolib/... and the suffix ("geo/x.geo.json" asks for "geo/x"), and 5.4.5's animation lookup strips
+# "animations/" and ".json" but not ".animation" (asks for "x.animation") -- so write the bare name everywhere.
+re:"geo/([\w/.-]+?)\.geo\.json"	"\1"
+re:"animations/([\w/.-]+?)\.animation\.json"	"\1"
+re:"([a-z0-9_.-]+):geo/([\w/.-]+?)\.geo\.json"	"\1:\2"
+re:"([a-z0-9_.-]+):animations/([\w/.-]+?)\.animation\.json"	"\1:\2"
+re:"geo/"\s*\+\s*([\w.()]+)\s*\+\s*"\.geo\.json"	\1
+re:"animations/"\s*\+\s*([\w.()]+)\s*\+\s*"\.animation\.json"	\1
+#!strict
+
+# ---- shared 1.21.4
+# Shared fork-layer rename table: NeoForge 1.21.3 -> 1.21.4 (Minecraft 1.21.4; NeoForge 21.4). Applied AFTER the
+# fork's own rows and on top of the 1.21.3 table (a 1.21.4 target inherits 1.21.3). Measured against
+# neoforge-21.4.158-sources.jar on the first layer-fork port. CATALOG §M / minor-version-deltas L8+.
+#!exhaustive  shared table: most rows are for API this mod does not use
+# ---- client reload listeners: a named graph in 1.21.4
+net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent	net.neoforged.neoforge.client.event.AddClientReloadListenersEvent
+RegisterClientReloadListenersEvent	AddClientReloadListenersEvent
+re:(\w+)\.registerReloadListener\(([\w.()]+)\)	\1.addListener(com.example.mod.mv.ReloadIds.of(\2), \2)
+# ---- atlases and textures
+re:\bInventoryMenu\.BLOCK_ATLAS\b	net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_BLOCKS
+# ---- NeoForge 21.4: ClientLevel.partEntities (id -> part map) is gone; dragonParts() is the list of all parts
+re:\b(\w+)\.partEntities\.get\(([^()]+)\)	com.example.mod.mv.PartEntities.byId(\1, \2)
+re:\b(\w+)\.partEntities\.values\(\)	\1.dragonParts()
+re:\b(\w+)\.partEntities\.remove\((\w+)\.getId\(\)\)	\1.dragonParts().remove(\2)
+# ---- tickets: vanilla dropped POST_TELEPORT
+re:\bTicketType\.POST_TELEPORT\b	com.example.mod.mv.Tickets.POST_TELEPORT
+# ---- TextureManager.register(String prefix, texture) -> named registration (the first argument is a string)
+re:(\w+)\.register\(\s*("(?:[^"\\]|\\.)*"(?:\s*\+\s*(?:[^,()]|\([^()]*\))+)*),\s*(\w+)\s*\)	com.example.mod.mv.Textures.register(\1, \2, \3)
+re:\bSkullBlockRenderer\.createSkullRenderers\(	com.example.mod.mv.Skulls.createSkullRenderers(
+# ---- FML 6 (NeoForge 21.4) early display: SimpleBufferBuilder takes a name for its buffer
+re:new SimpleBufferBuilder\((\d+)\)	new SimpleBufferBuilder("examplemod", \1)
+# ---- LevelRenderer.renderLevel lost its LightTexture argument (1.21.4); this row runs before the 1.21.3 one, on the
+# 1.21.1 text, so it writes the full 1.21.4 descriptor itself
+re:LevelRenderer;renderLevel\(Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;Lnet/minecraft/client/renderer/LightTexture;	LevelRenderer;renderLevel(Lcom/mojang/blaze3d/resource/GraphicsResourceAllocator;Lnet/minecraft/client/DeltaTracker;ZLnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/GameRenderer;
+# ---- mixin targets: ScreenEffectRenderer.renderScreenEffect(Minecraft, PoseStack) gained a MultiBufferSource
+# (measured on neoforge-21.4.158); an @Inject handler needs the extra parameter before its CallbackInfo
+re:(method = "renderScreenEffect"[^;{]*?\(\s*Minecraft \w+,\s*PoseStack \w+,)(\s*CallbackInfo\b)	\1 net.minecraft.client.renderer.MultiBufferSource mv$bufferSource,\2
+# ---- RenderType.entityTranslucentCull is gone (1.21.2) and RenderType.entityTranslucent sets NO_CULL, so mapping one to
+# the other draws the model double-sided (compile-clean, gates green). NeoForgeRenderTypes.getItemLayeredTranslucent is
+# the 1.21.1 state: entity-translucent shader, default CULL, translucent, lightmap, overlay, sorted -- same signature on
+# 1.21.5 and 1.21.8 (NeoForgeRenderPipelines.ENTITY_TRANSLUCENT_CULL). Rows do not reach overlays. CATALOG M73.
+# NOT on 26.3: NeoForge 26.3 has no NeoForgeRenderTypes.getItemLayeredTranslucent (cannot find symbol); vanilla's
+# RenderTypes.entityTranslucentCull(texture) is back there (RenderPipelines.ENTITY_TRANSLUCENT_CULL, culled). CATALOG M73.
+re:\bRenderType\.entityTranslucentCull\(	net.neoforged.neoforge.client.NeoForgeRenderTypes.getItemLayeredTranslucent(
+#!strict
+
+# ---- shared 1.21.3
+#!exhaustive
+old.Shared	new.Shared
+#!strict
+
+
+blob
+mark :63
+data 63
+minecraft_version=1.21.5
+neo_version=21.5.98
+mod_id=examplemod
+
+blob
+mark :64
+data 72
+package com.example.mod.cf;
+import new.Thing;
+class Cf {
+    Thing t;
+}
+
+blob
+mark :65
+data 55
+package com.example.mod;
+class OnlyHere { int v = 5; }
+
+blob
+mark :66
+data 88
+package com.example.mod;
+import new.Thing;
+public class Over { Thing t; int keep = 5; }
+
+blob
+mark :67
+data 197
+modLoader="javafml"
+[[mods]]
+modId="examplemod"
+[[dependencies.examplemod]]
+modId="minecraft"
+versionRange="[1.21.5,1.21.6)"
+[[dependencies.examplemod]]
+modId="neoforge"
+versionRange="[21.5,21.6)"
+
+commit refs/heads/neoforge-1.21.5
+mark :68
+author a <a@b> 1792806521 +0000
+committer a <a@b> 1792806521 +0000
+data 355
+Version branch neoforge-1.21.5: Minecraft 1.21.5 from the layer at 1cf56e167e9a
+
+The source is what the layer's `layer.py prepare --target 1.21.5` makes (every source set), the
+resources and build settings what layer.gradle applied with -Pmc=1.21.5, and the target's records
+are in .port/1.21.5/.
+
+Made by tools/fork-branches.py (mc-mod-version-upgrade).
+from :57
+M 100644 :58 .port/1.21.5/GATES.md
+M 100644 :59 .port/1.21.5/TEST-ITEMS.md
+M 100644 :60 .port/1.21.5/branch.properties
+M 100644 :61 .port/1.21.5/renames.tsv
+M 100644 :45 .port/1.21.5/shared-helpers.txt
+M 100644 :62 .port/1.21.5/shared-renames.tsv
+M 100644 :63 gradle.properties
+M 100644 :64 src/cf/java/com/example/mod/cf/Cf.java
+M 100644 :65 src/main/java/com/example/mod/OnlyHere.java
+M 100644 :66 src/main/java/com/example/mod/Over.java
+M 100644 :9 src/main/java/com/example/mod/mixin/AMixin.java
+M 100644 :67 src/main/resources/META-INF/neoforge.mods.toml
+M 100644 :35 src/main/resources/examplemod.mixins.json
+
+blob
+mark :69
+data 736
+{
+ "target": "1.21.5",
+ "items": [
+  {
+   "id": "main:com/example/mod/mixin/AMixin.java#injection:@Inject method=tick @At(value=\"HEAD\")",
+   "set": "main",
+   "file": "com/example/mod/mixin/AMixin.java",
+   "kind": "injection",
+   "key": "@Inject method=tick @At(value=\"HEAD\")",
+   "status": "same",
+   "detail": "unchanged"
+  },
+  {
+   "id": "main:com/example/mod/mixin/AMixin.java#mixin:@Mixin Foo",
+   "set": "main",
+   "file": "com/example/mod/mixin/AMixin.java",
+   "kind": "mixin",
+   "key": "@Mixin Foo",
+   "status": "same",
+   "detail": "unchanged"
+  }
+ ],
+ "unaccounted": [],
+ "counts": {
+  "same": 2
+ },
+ "notes": [
+  "the authors' src/ changed since INVENTORY.json was built: re-run tools/layer-inventory.py build"
+ ]
+}
+
+blob
+mark :70
+data 720
+{
+ "tool": "tools/fork-branches.py migrate",
+ "layer_ref": "HEAD",
+ "layer_commit": "1cf56e167e9a465d5efd105d3413a65d239a0cc7",
+ "target": "1.21.5",
+ "port_commit": "14ceadb0af783b41124eb7c7ef38c6c6d9526d8c",
+ "branch_commit": "12843898f0f9fa31a1c83358115056775f21ea8a",
+ "digest": "046d90fd9bbf74b15ce108004a9339a5adae49e8e6902a0e903e6421b6387215",
+ "review_inputs": "e7954d42542df7930888389d1c5b3e13226bf275108c9ab9a1ef1b466e4077df",
+ "with_modes": true,
+ "recorded": {
+  "5be0fca0eb2b31f57131c4c1770b8051c1680dd2": {
+   "digest": "046d90fd9bbf74b15ce108004a9339a5adae49e8e6902a0e903e6421b6387215",
+   "review_inputs": "e7954d42542df7930888389d1c5b3e13226bf275108c9ab9a1ef1b466e4077df",
+   "with_modes": true
+  }
+ }
+}
+
+blob
+mark :71
+data 1802
+# Review: Minecraft 1.21.5 (version branch neoforge-1.21.5)
+
+An independent review by a FRESH agent that was given only this version's changes: every file that differs
+from the parent branch (its parent branch) at their merge-base (`git diff <merge-base>..neoforge-1.21.5`), read against the parent's
+file, its STUBS.json and .port/1.21.5/renames.tsv. One row per STUBS.json entry, per `changed` file, per
+resource group (`resources`: a directory with the digest of its changed files -- an edit makes it a new
+row) and for renames.tsv (`renames`, with its digest); the files the rename rows alone made, the build
+settings tools/fork-branches.py derives and added helper classes need no row; a file deleted here is a `deleted`
+row unless drops.txt or a mixin_remove key accounts for it. Verdict `ok` (the change keeps
+the behaviour, or the difference is right and the note says why) or `not-ok`. A hook item of the behaviour
+inventory is accounted for only by a row whose note names its id, or by an `item` row for the id; a
+reviewer may add `missing` (a file that should exist) and `shared` (a shared helper) rows. `reviewer` names
+the reviewing agent, distinct from the fixer; `commit` is the commit reviewed (`git rev-parse --short HEAD`).
+tools/fork-port.py adds a `?` row for every item it finds unreviewed; it never changes a verdict.
+
+Migrated from the layer's .multiversion/targets/1.21.5/REVIEW.md by tools/fork-branches.py: the commit is a layer commit, mapped in MIGRATED.json.
+
+- reviewer: fresh agent x, not the fixer
+- date: 2026-10-16
+- commit: 5be0fca
+
+| kind | file | verdict | note |
+|---|---|---|---|
+| changed | src/main/java/com/example/mod/Over.java | ok | read against the authors' file |
+| renames | .port/1.21.5/renames.tsv @1ddd983e2547 | ok | read against the authors' file |
+
+commit refs/heads/neoforge-1.21.5
+mark :72
+author a <a@b> 1792806522 +0000
+committer a <a@b> 1792806522 +0000
+data 385
+neoforge-1.21.5: its records migrated from the layer
+
+REVIEW.md keeps the layer reviewer's verdicts on the files that stand for the same bytes;
+MIGRATED.json maps each layer commit GATES.md and REVIEW.md name to the digest of what the
+layer prepared there (branch commit 12843898f0f9); INVENTORY-CHECK.json is a fresh account.
+
+Made by tools/fork-branches.py (mc-mod-version-upgrade).
+from :68
+M 100644 :69 .port/1.21.5/INVENTORY-CHECK.json
+M 100644 :70 .port/1.21.5/MIGRATED.json
+M 100644 :71 .port/1.21.5/REVIEW.md
+

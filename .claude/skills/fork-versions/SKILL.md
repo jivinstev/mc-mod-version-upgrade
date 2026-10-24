@@ -1,11 +1,11 @@
 ---
 name: fork-versions
-description: Make a fork port build for more Minecraft versions as stacked version branches -- one real branch per version (neoforge-1.21.3 made from neoforge-1.21.1, neoforge-1.21.4 from neoforge-1.21.3, ... neoforge-26.3), each a full single-version port at its own version with its own build, gates, CI and release, a fix or the authors' new code merged upward through the chain with the rename rows applied as a tool -- port one version at a time through the shared rename tables and helper library, gate it like the base, record what it cost and feed every new pattern back into the shared library; and migrate an existing `.multiversion/` layer fork to branches. Use when the user asks to support another 1.21.x or 26.x version (or "the latest") in a fork, to add, port, gate or check a version, to carry a fix up the versions, to migrate a layer fork, or to measure how far a fork is from newer versions.
+description: Make a fork port build for more Minecraft versions as stacked version branches -- one real branch per version (neoforge-1.21.3 made from neoforge-1.21.1, neoforge-1.21.4 from neoforge-1.21.3, ... neoforge-26.3), each a full single-version port at its own version with its own build, gates, CI and release, a fix or the authors' new code merged upward through the chain with the rename rows applied as a tool -- port one version at a time through the shared rename tables and helper library, gate it like the base, record what it cost and feed every new pattern back into the shared library. A fork still on the removed `.multiversion/` layer is refused by every tool and migrated with the last migrator commit that supports it. Use when the user asks to support another 1.21.x or 26.x version (or "the latest") in a fork, to add, port, gate or check a version, to carry a fix up the versions, to migrate a layer fork (pointed at that commit), or to measure how far a fork is from newer versions.
 ---
 
 # Build a fork for more Minecraft versions
 
-**Say first which kind of fork this is**, and default to single-version:
+**Say first which kind of fork this is** (`python3 tools/fork-kind.py detect --repo DIR`), and default to single-version:
 
 - **Single-version** (the default): one port branch, `neoforge-1.21.1`, built, gated, synced and
   published by port-fork, keep-current and publish-port. Nothing in this skill touches it. Do not turn a single-version
@@ -13,11 +13,12 @@ description: Make a fork port build for more Minecraft versions as stacked versi
   **version branches** (below), never a layer.
 - **Version branches** (the default for a multi-version fork): the port branch plus one branch per further version,
   `neoforge-<version>`, each carrying `.port/<version>/branch.properties`. Everything below is for these.
-- **An existing layer fork** (`.multiversion/` on a `neoforge-1.21.x` branch; legacy, being removed, its code getting
-  bug fixes only): overlay mode keeps working for a repository that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
-  fork moves to version branches with `tools/fork-branches.py migrate` when the maintainer decides it for that fork.
+- **A layer fork** (`.multiversion/base.properties` or `.multiversion/targets/` at HEAD): the overlay route was removed.
+  Every tool that takes a fork checkout refuses it (exit 2), naming the last migrator commit that supports it -- see
+  "A fork still on the layer" at the end. A version-branch fork whose old layer branch still exists is fine: `detect`
+  lists that branch as `legacy_layer=` and everything ignores it.
 
-Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, remake, ci, ci-check),
+Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-kind.py` (detect), `tools/fork-branches.py` (versions, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, remake, ci, ci-check),
 `tools/fork-port.py` (the stages and the done list, on a version branch), `tools/layer-inventory.py`,
 `tools/layer-deps.py`, `tools/ci-gates.py --mc`, `tools/port-ci.py`, `tools/audit-mixin-targets.py`,
 `tools/fix-access-transformer.py`, `tools/burndown-count.sh`, `tools/port-cost.py`.
@@ -60,12 +61,11 @@ helpers, catalogue entries and a cost figure; the next fork, and the next versio
   touches them; a branch therefore also carries its ancestors' `.port/<lower>/` as read-only copies. A single-version
   fork never gets any of it: only `fork-branches.py` writes `.port/`, and only on a version branch.
 - **A repository holding several mods**: one branch per version holding all of them is fine; records per mod
-  (`.port/<v>/<mod>/`) are not built yet -- such a repository keeps overlay mode until they are (a follow-up).
+  (`.port/<v>/<mod>/`) are not built yet -- such a repository is not given version branches until they are (a follow-up).
 
 ## Stops -- ask the user
 
-1. Which fork, which versions ("every stable 1.21.x" is the default, then 26.x), and -- for a layer fork -- whether to
-   migrate it now.
+1. Which fork, and which versions ("every stable 1.21.x" is the default, then 26.x).
 2. Merging a version branch's PR, unless the fork's fleet entry allows automerge (keep-current's rules).
 3. **Never**: push to the authors' repository, force-push, delete or move a version branch, promote or publish a
    release, merge on this repository (only its maintainer merges).
@@ -92,7 +92,7 @@ own commit and writes nothing; the parent branch is read from origin when the lo
      rows over the port branch's file, or the parent's file through the rows this version adds, `@OnlyIn` stripped from
      1.21.6 -- an inherited overlay the rows renamed), the build files the tool derives (gradle.properties' versions, the
      mods.toml ranges, a mixin config's `mixin_add`/`mixin_remove` arrays, the hook line), a `.java` file the port
-     branch does not have (a helper or an overlay-only class: no authors' counterpart, as on the layer), a
+     branch does not have (a helper or a version-only class: no authors' counterpart), a
      shared-library helper as installed (`shared-helpers.txt`), documents and the records;
    - every file the parent has and this version **deletes** (kind `deleted`), except one the chain's `drops.txt`
      names or a `mixin_remove.` key in its `branch.properties` accounts for (a mixin class the version drops by its config);
@@ -158,7 +158,7 @@ goes to the version's fixer; after the fix, a fresh reviewer reviews again again
 
 `templates/fork-layer/versions.json` is the policy, in data: a 1.21.x version is targeted only if NeoForge published a
 **stable** line for it. 1.21.2, 1.21.6, 1.21.7 and 1.21.9 had beta-only NeoForge lines and are skipped (`add-target`
-refuses them; `make-fork-layer.py versions` prints the table, `versions --refresh` re-reads the NeoForge maven). A
+refuses them; `fork-branches.py versions` prints the table, `versions --refresh` re-reads the NeoForge maven). A
 version's jar declares exactly its own Minecraft and NeoForge ranges (`[1.21.3,1.21.4)`), so a skipped version is never
 claimed. **The 26.x calendar line** follows 1.21.11: 26.1.2, 26.2 and 26.3 are targeted; NeoForge numbers them by the
 whole Minecraft version, so both ranges stop at the next patch release (`[26.2,26.2.1)`); they need Java 25 (CATALOG §V1,
@@ -225,14 +225,13 @@ both together (`port-ci.py promote --with-dependency owner/lib`, the library pro
 
 Each version branch gets the same workflow as a single-version port, at its version and with the full gate set:
 `python3 tools/fork-branches.py ci --repo DIR --target <v> --modid ID` prints the `tools/port-ci.py` command (the port
-branch's workflow read back, without `--layer-branch`, each sibling `--dep-jar` replaced by this version's pinned
+branch's workflow read back, each sibling `--dep-jar` replaced by this version's pinned
 library release and each `--dep-jar-variant` of it moved to the same release and coordinates -- refused, exit 2, when
 the release's asset names do not show which asset the variant is -- a library's Gate C without spawn and battle, and
 the newest published Port CI kit rather than the port branch's older pin; `--kit-version N` pins kit N; and
 `--branch neoforge-<v>`, so the triggers name the version branch even when the command runs on a `keep-current/*` work
 branch -- `port-ci.py` alone also takes `neoforge-<mc>` on a checkout holding `.port/<mc>/`); `--run` runs
-it in a worktree of the branch and commits there. Push the branch; nothing is pushed for you. The layer jobs (layer-compile, layer-isolation, layer-inertness, ...)
-do not apply. A tag `<mod>-<ver>-mc<v>` on the branch releases that version (publish-port's single-version path). The
+it in a worktree of the branch and commits there. Push the branch; nothing is pushed for you. A tag `<mod>-<ver>-mc<v>` on the branch releases that version (publish-port's single-version path). The
 cascade keeps each branch's own `.github/workflows/port-ci.yml` and install manifest when it merges the lower branch:
 regenerate them with `ci` when a lower branch's change to them should reach this one. `ci` adds a `--variant-jar
 *_<v>.jar` for each `.port/<v>/shipped-expect-<v>.txt` the branch keeps (`cf` for `shipped-expect-cf.txt`), so the
@@ -377,7 +376,7 @@ versions in a WARNING. Then cascade. A section of `shared-renames.tsv` edited by
 table ever had) is left alone and named: move the fork's own rows to `.port/<v>/renames.tsv` and sync again; so is a
 section that differs while the library's history cannot be read (a shallow clone that cannot be deepened): an edit
 cannot be ruled out, so it is never rewritten on a guess. An UNLISTED helper copy that equals a text the library once
-shipped (a layer's `MV-STAND-IN` copy too) is a library copy and is updated; a listed copy that differs from its
+shipped (an `MV-STAND-IN` copy too) is a library copy and is updated; a listed copy that differs from its
 listing (an edit, or a revert to an older library text) stays edited. `sync-shared --check [--json FILE]` writes nothing and touches no checkout: per version what a sync
 would change, each hand-edited copy whose template moved (reconcile it by hand), the fork's own copies of what the
 library ships (adopt candidates) and the code marked `MV-AHEAD-OF-TEMPLATE` (ahead of the template: a lesson to
@@ -446,7 +445,7 @@ the entry lists between them).
 says who chose each item. `release-notes` lists the issues open for that version at the tag, S1-S3 by default (with
 `--repo`, a `fixed@<commit>` that is not in the tag counts as open there).
 
-The ledger stays on the head branch everywhere: `cascade` never merges it up, and `add-target` and `migrate` never copy
+The ledger stays on the head branch everywhere: `cascade` never merges it up, and `add-target` never copies
 it (nor the weekly plan's `.github/workflows/weekly-plan.yml` and `.github/weekly-plan.json`) onto a version branch
 they make from a head that has it. The weekly cycle (keep-current, "The weekly cycle") runs `select` every Tuesday in
 a zero-model plan issue (`known-issues.py render-plan`) that the owner answers, and the Wednesday round starts from
@@ -526,7 +525,7 @@ goes up the chain this way:
    neoforge-1.21.1..26.3 --port-ref fix/<id>` (refused while the branch holds authors' code that version has not taken),
    then into the head by its own PR.
 
-`port_taken=` in `.port/<v>/branch.properties` (written by migrate, add-target and every cascade merge) is the port
+`port_taken=` in `.port/<v>/branch.properties` (written by add-target and every cascade merge, and by the migration on a migrated fork) is the port
 commit the version has fully taken: the carry of the authors' change to files the parent does not carry starts there,
 so a change a run did not take (a merge undone, then merged by hand) is offered again by the next run, and an open
 entry spans from the earliest change it has not taken. A branch written before the key starts from its merge-base.
@@ -596,53 +595,25 @@ entry spans from the earliest change it has not taken. A branch written before t
    cover it -- written from the items' sources, each shared change once at its first version, and a four- or five-item
    checklist per version in the order an install session reaches them.
 
-## Migrating a layer fork to version branches
+## A fork still on the layer
 
-When the maintainer decides it for a fork, on its clone (the layer branch fetched, the port branch present):
-
-    python3 tools/fork-branches.py migrate --repo DIR --layer-ref origin/neoforge-1.21.x --dry-run    # the plan
-    python3 tools/fork-branches.py migrate --repo DIR --layer-ref origin/neoforge-1.21.x [--json migrate.json] [--library]
-
-A **library** fork (one other forks pin) passes `--library` -- inferred when the layer's `base.properties` says
-`library=true` --, so every made branch carries `library=true` in its `branch.properties`: the library rule applies
-(a version is done only once a dependent passed Gate C against its jar, recorded with `library-record`; its own Gate
-C skips spawn and battle). Without it a migrated library reads as an ordinary fork.
-
-Per target, in inherits order, it makes `neoforge-<t>` from its parent's branch (the first from the port commit the layer
-carries) with git plumbing -- no checkout or work tree of yours is touched, nothing is pushed, no branch is moved or
-deleted, and a branch that already exists with other content is refused (one with the same content is left alone). The
-source is exactly what the layer's own `layer.py prepare --target <t>` makes for every source set; resources are the
-chain's over the authors'; layer.gradle's processResources edits (mixin arrays, mods.toml ranges) and the `-P` versions
-are written into the files; build.gradle gets the branch hook instead of the layer's. The target's records move to
-`.port/<t>/` (REVIEW.md keeps the layer reviewer's verdicts on the rows that stand for the same bytes; STUBS.json and
-REMERGE.json paths translated). A second commit adds `MIGRATED.json` (the layer commit, the digest of what the layer
-prepared at each commit GATES.md and REVIEW.md name, the branch commit) and a fresh `INVENTORY-CHECK.json`. It then
-re-runs the layer's prepare to **verify** each branch byte for byte, and runs both done checks: each line reads
-`byte-identical ...; layer done|not done, branch done|not done`, with the reasons when a target done on the layer is not
-done on its branch. Check: every line byte-identical; every target done on the layer done on its branch; `git log
---graph` shows the stack; then push the branches yourself. `fork-branches.py verify --repo DIR --layer-ref <ref>`
-compares again later. Then regenerate CI per branch (`ci`), point keep-current at the branches (step 10), and retire the
-layer branch only when the maintainer says so. A layer that is not isolated (it differs from the port commit outside
-`.multiversion/`) is refused. A repository holding several mods stays on the layer for now.
-
-## Existing layer repositories (overlay mode; legacy, being removed)
-
-A fork that keeps its `.multiversion/` layer is served as before: `tools/make-fork-layer.py` (init, add-target,
-sync-shared, freeze -- `freeze --library` never re-checks the authors' branch, `--accept-upstream-drift` re-freezes a
-moved one), `.multiversion/tools/layer.py` (prepare, mixins, props, isolation, compare-jars), `tools/fork-port.py
---target <t>` / `--chain FROM..TO` (the sweep), `tools/layer-sync.py` (keep-current's layer step: merge, re-merge overlays
-three ways, overlay budget), `tools/layer-deps.py`, `tools/layer-ci.py` and `port-ci.py --layer-branch` (the layer jobs),
-`tools/layer-test-plan.py`. Its done list is the one above with the layer's names: records in
-`.multiversion/targets/<t>/`, review rows for whole-file overlays (`overlay`) instead of changed files, the prepared tree
-`build/mc<t>/mv/java` for the inventory, `inherits` for the chain. Every behaviour of overlay mode is gated on the fork
-having `.multiversion/` at HEAD; removing overlay mode is a later issue. Do not make a new fork a layer.
+The `.multiversion/` overlay route (one layer branch building every version) was removed. On a checkout with the layer at
+HEAD every tool stops with exit 2 and says so, naming **baa092b62eae**, the last commit of this repository that supports
+it (`LAST_LAYER_COMMIT` in `tools/fork-kind.py`). To move such a fork to version branches, when the maintainer decides it:
+check that commit out in a separate clone of this repository and run its migration there -- `python3
+tools/fork-branches.py migrate --repo DIR --layer-ref origin/neoforge-1.21.x --dry-run`, then without `--dry-run`, as
+that commit's fork-versions skill ("Migrating a layer fork to version branches") describes -- and push the branches it
+made. From then on use this version: the migrated branches' `.port/<v>/MIGRATED.json` keeps their layer-era GATES.md
+and REVIEW.md counting, and the old layer branch is history (`fork-kind.py detect` lists it as `legacy_layer=`). Do not
+make a new fork a layer.
 
 ## Testing the tool itself
 
 `python3 tools/fork-branches.py --self-check` is the fast suite CI runs: every named case (the review findings
-t6, t7, t8 and t11 included), the line-ending unit cases and one migration on a shared fixture built once per run.
+t6, t7, t8 and t11 included), the line-ending unit cases, on the frozen version-branch fixture (`tools/fixtures/version-branches.fi`, a migrated
+fork's branches) imported once per run.
 Before a release of the tool (or after changing the cascade, the REMERGE records or `port_taken`) run it with
-`--deep`: the four-version cascade `--plan` / `--apply` / `--apply-decisions` flow, `migrate --library`, 200 random
+`--deep`: the four-version cascade `--plan` / `--apply` / `--apply-decisions` flow, 200 random
 cascade sequences on a four-version fixture, each step checked against the invariant (`FB_RANDOM_SEQUENCES=N` for
 another count), and the whole self-check again under `core.autocrlf=true`. CI never runs these.
 

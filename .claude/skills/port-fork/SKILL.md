@@ -180,7 +180,7 @@ It dispatches the fork's own Port CI workflow with `promote=<tag>` (no gates run
 is not a pre-release it published from that branch, makes it a full Release marked latest, and replaces
 "Pre-release until played by a person." with who played it and when. Where the port branch has an install
 manifest (step 7), the same run then points it at the promoted jar and the sibling jars the workflow pins
-(`tools/port-manifest.py refresh`, a `[skip ci]` commit on the port branch, never the layer branch); a workflow
+(`tools/port-manifest.py refresh`, a `[skip ci]` commit on the port branch); a workflow
 generated before this step existed does not, so re-render it with the newest kit (`port-ci.py args --repo DIR`,
 drop its `--kit-version`/`--kit-sha`, rerun). Without a logged-in `gh` it prints the
 dispatch instead: send it through the GitHub connector (workflow `port-ci.yml`, ref = the port branch, inputs

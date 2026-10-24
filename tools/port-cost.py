@@ -11,7 +11,7 @@
     python3 tools/port-cost.py mark --fork LABEL --version V [--phase upstream|backlog|review|overhead] [--file round/marks.tsv]
                                                     # the round starts V (or that kind of work on V) now
 
-NO MODEL IDENTIFIER IS WRITTEN. Records go into fork repositories (.port/<v>/COST.md, a layer's COST.md) and the
+NO MODEL IDENTIFIER IS WRITTEN. Records go into fork repositories (.port/<v>/COST.md) and the
 public corpus, so requests are grouped by a neutral PRICE TIER instead (from the list input price in
 tools/model-prices.tsv: top, mid or small; `unpriced` for a model with no row): tokens, dollars and wall time stay exact. Records written
 before this change keep their `model:` lines as history.
@@ -27,11 +27,11 @@ WHICH REQUESTS COUNT
     A session that also WORKED on other mods (edits, commands -- not just reading one for reference) is
     listed under `contamination`, so a mixed session is visible rather than silently inflating this port.
 
-ONE TARGET OF A FORK LAYER (--path DIR --target T)
-    A session that works on several targets of a fork, or on two forks, at once is NOT charged in full to each:
-    every request is charged to at most one target, by what its own tool calls touched (attribute() below):
-      - a request naming a target of this checkout (.multiversion/targets/<t>, build/mc<t>, -mc<t>, --target/--mc/
-        -Pmc <t>, "target <t>", build.sh <t>) is that target's;
+ONE VERSION OF A FORK (--path DIR --target T: a version branch's checkout, tools/fork-port.py's cost stage)
+    A session that works on several versions of a fork, or on two forks, at once is NOT charged in full to each:
+    every request is charged to at most one version, by what its own tool calls touched (attribute() below):
+      - a request naming a version of this checkout (.port/<t>, neoforge-<t>, build/mc<t>, -mc<t>, --target/--mc
+        <t>, "target <t>") is that version's;
       - one touching a path in another git work tree (another fork, another worktree) and not the checkout is
         `elsewhere`;
       - one touching the checkout without naming a target, or touching nothing (thinking, reading the migrator,
@@ -132,17 +132,11 @@ def read_env():
 
 
 def port_size(port, target=None):
+    """The checkout's size: its own src/ and gradle.properties (a version branch's checkout is that version's)."""
     java = list((port / "src").rglob("*.java")) if (port / "src").is_dir() else []
-    if target is not None:                 # a layer target's own work is its overlay files
-        java = list((port / ".multiversion" / "targets" / target).rglob("*.java"))
     props = {}
-    # A fork layer (.multiversion/) states each target's versions as `prop.<key>=` in its target.properties.
-    layer = sorted((port / ".multiversion" / "targets").glob("*/target.properties")) if target is None \
-        else [port / ".multiversion" / "targets" / target / "target.properties"]
     files = [port / "gradle.properties"] + sorted((port / "versions").glob("*.properties"))
-    if target is not None:
-        files = []                         # a single layer target: its own versions, not the base's
-    for f in files + layer:
+    for f in files:
         if f.is_file():
             for k, v in re.findall(r"(?m)^\s*([\w.]+)\s*=\s*(\S*)", f.read_text(errors="replace", encoding="utf-8")):
                 props.setdefault(k[len("prop."):] if k.startswith("prop.") else k, []).append(v)
@@ -238,16 +232,16 @@ ABS_RX = re.compile(r"(?<![\w.~/:\\-])(/[\w.@+-]+(?:/[\w.@+-]*)*|[A-Za-z]:(?:\\\
 
 
 def _target_rx(t):
-    """A target named in a tool call: its overlay or build dir, its jar suffix, or a target argument."""
+    """A version named in a tool call: its records or build dir, its branch, its jar suffix, or a target argument."""
     T, B = re.escape(t), r"(?![0-9]|\.[0-9])"
-    return re.compile(r"(?:\.multiversion[/\\]+targets[/\\]+" + T + r"|(?<![A-Za-z])mc" + T
-                      + r"|(?:--mc|-Pmc|(?<![A-Za-z])[Tt]arget)[= :]+" + T + r"|build\.sh\s+" + T + ")" + B)
+    return re.compile(r"(?:\.port[/\\]+" + T + r"|neoforge-" + T + r"|(?<![A-Za-z])mc" + T
+                      + r"|(?:--mc|(?<![A-Za-z])[Tt]arget)[= :]+" + T + ")" + B)
 
 
 def attribute(checkout, targets, migrator=ROOT):
-    """-> label(text, cwd, prev) -> label, for one checkout of a fork layer. Labels: 'target:<t>', 'shared' (this
-    checkout, no target named), 'elsewhere' (only paths outside it). `prev` is the label of the request before it in
-    the same transcript (None at its start). See the docstring, ONE TARGET OF A FORK LAYER."""
+    """-> label(text, cwd, prev) -> label, for one checkout of a fork. Labels: 'target:<t>', 'shared' (this
+    checkout, no version named), 'elsewhere' (only paths outside it). `prev` is the label of the request before it in
+    the same transcript (None at its start). See the docstring, ONE VERSION OF A FORK."""
     home = str(checkout).rstrip("/\\")
     forms = {home, json.dumps(home)[1:-1]}
     here_rx = re.compile("(?:" + "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True)) + r")(?![\w.-])")
@@ -741,8 +735,8 @@ def round_table_main(argv):
 
 
 def self_check():
-    """Fixture transcripts: one session drives two targets of a layer fork (and a second fork), with one subagent per
-    target; a single-version checkout is matched as before. -> 0 when every case holds."""
+    """Fixture transcripts: one session drives two versions of a fork (and a second fork), with one subagent per
+    version; a single-version checkout is matched as before. -> 0 when every case holds."""
     import contextlib, io, tempfile
     ok = True
 
@@ -767,9 +761,9 @@ def self_check():
         d = pathlib.Path(d)
         fork, lib, sv = d / "fork", d / "fork-lib", d / "single"
         for t in ("1.21.4", "1.21.5"):
-            (fork / ".multiversion/targets" / t).mkdir(parents=True)
-            (fork / ".multiversion/targets" / t / "target.properties").write_text(f"prop.minecraft_version={t}\n", encoding="utf-8")
-        (lib / ".multiversion/targets/1.21.4").mkdir(parents=True)
+            (fork / ".port" / t).mkdir(parents=True)
+            (fork / ".port" / t / "branch.properties").write_text(f"minecraft_version={t}\n", encoding="utf-8")
+        (lib / ".port/1.21.4").mkdir(parents=True)
         (sv / "src").mkdir(parents=True)
         for r in (fork, lib, sv):
             (r / ".git").mkdir()
@@ -788,12 +782,12 @@ def self_check():
         def prompt(text, cwd=None):
             return json.dumps({"type": "user", "cwd": cwd, "message": {"role": "user", "content": text}}) + "\n"
 
-        o4, o5 = f"{fork}/.multiversion/targets/1.21.4/A.java", f"{fork}/.multiversion/targets/1.21.5/A.java"
+        o4, o5 = f"{fork}/.port/1.21.4/RESIDUE.md", f"{fork}/.port/1.21.5/RESIDUE.md"
         main_s = (prompt("port the fork to 1.21.4 and 1.21.5")
                   + req("S1", o4, 100) + req("S1", None, 10) + req("S1", o5, 1000)
-                  + req("S1", f"cd {fork} && .multiversion/build.sh 1.21.4 compileJava", 200, tool="Bash", key="command")
+                  + req("S1", f"cd {fork} && git checkout neoforge-1.21.4 && ./gradlew compileJava", 200, tool="Bash", key="command")
                   + req("S1", f"{fork}/src/main/java/B.java", 20, tool="Read")       # base source while on 1.21.4
-                  + req("S1", f"{lib}/.multiversion/targets/1.21.4/C.java", 5000)    # the other fork's 1.21.4: not ours
+                  + req("S1", f"{lib}/.port/1.21.4/C.md", 5000)                     # the other fork's 1.21.4: not ours
                   + req("S1", None, 7))                                                # thinking about that one
         (proj / "S1.jsonl").write_text(main_s, encoding="utf-8")
         (proj / "S1/subagents/a4.jsonl").write_text(prompt(f"fix target 1.21.4 in {fork}") + req("S1", None, 3)
@@ -834,7 +828,7 @@ def self_check():
                f"single-version: the whole matching session, no attribution lines: {text}")
         code, text = run("examplemod", "--path", str(fork), "--print", *P)
         expect(code == 0 and f"output {whole['output']:,} " in text and "attribution" not in text,
-               f"a layer checkout without --target is counted whole, as before: {text}")
+               f"a version checkout without --target is counted whole, as before: {text}")
         # no model identifier in a record (#137 item 1): a neutral price tier, tokens, dollars and wall time
         used = {json.loads(l)["message"]["model"] for l in main_s.splitlines() if '"assistant"' in l}
         expect(used and all(not any(m in x for m in used) and "- model:" not in x and "- price tier: top (" in x
@@ -966,7 +960,8 @@ def main():
                                     "that ever touched the port")
     ap.add_argument("--session", help="count only sessions whose id starts with this")
     ap.add_argument("--path", help="match sessions by this checkout path instead of mods/<modid> (upstream ports)")
-    ap.add_argument("--target", help="a fork layer target (.multiversion/targets/<t>): size its overlays and versions")
+    ap.add_argument("--target", help="a version of the fork (the version branch checked out at --path): charge each "
+                                     "request to one version at most")
     ap.add_argument("--label", action="append", default=[], metavar="NAME=PATH",
                     help="split the cost by which path each request worked in, e.g. port=/src/fork tools=/src/migrator")
     a = ap.parse_args()
@@ -978,9 +973,8 @@ def main():
         return 2
     labels = [tuple(x.split("=", 1)) for x in a.label]
     attr = None
-    if a.target and a.path:             # a fork layer target: charge each request to one target at most
-        tdir = port / ".multiversion" / "targets"
-        known = sorted({a.target} | ({d.name for d in tdir.iterdir() if d.is_dir()} if tdir.is_dir() else set()))
+    if a.target and a.path:             # one version of a fork: charge each request to one version at most
+        known = sorted({a.target} | {p.parent.name for p in (port / ".port").glob("*/branch.properties")})
         attr = attribute(os.path.abspath(a.path), known)
     sessions = collect(a.modid, projects, a.path, labels, attr)
     if a.session:

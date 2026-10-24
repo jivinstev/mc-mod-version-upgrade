@@ -1,64 +1,64 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Port one fork-layer target in one command, and hand back only the residue.
+"""Port one version branch of a fork in one command, and hand back only the residue.
 
     python3 tools/fork-port.py --repo DIR --target 1.21.5 [--budget 15] [--gates auto|none|ab|full]
-                               [--json out.json] [--from-stage <name>] [--base REF] [--modid ID] [--direct]
+                               [--json out.json] [--from-stage <name>] [--to-stage <name>] [--base REF] [--modid ID]
                                [--port-checkout owner/repo=DIR] [--port-release owner/repo@TAG]
                                [--max-errors N] [--confirm-spend] [--allow-undone-parent] [--allow-undone-library]
                                [--upstream REMOTE/BRANCH] [--accept-upstream-drift] [--untaken-ok FROZEN_JSON]
                                [--self-check]
     python3 tools/fork-port.py --repo DIR --target <t> --check-done
     python3 tools/fork-port.py --repo DIR --target <t> --write-test-items
-    python3 tools/fork-port.py --repo DIR --chain FROM..TO [--from-stage gates] [--gates auto|ab|full]
+    python3 tools/fork-port.py --repo DIR --chain FROM..TO [--gates ab|full|none]     # = fork-branches.py cascade
 
-The fork-versions skill's procedure (steps 1-9) as stages, the way tools/run-port.py is the jar-port procedure.
-The orchestrating session starts this and then reads ONE summary (the last lines of stdout, the --json file, and
-.multiversion/targets/<t>/RESIDUE.md when it stopped) -- never the workers' transcripts or the build logs.
+The fork-versions skill's procedure (steps 1-9) as stages, the way tools/run-port.py is the jar-port procedure, on a
+fork with VERSION BRANCHES (tools/fork-branches.py): version t is the branch neoforge-<t>, a plain single-version build
+at Minecraft t, with its records in .port/<t>/. The orchestrating session starts this and then reads ONE summary (the
+last lines of stdout, the --json file, and .port/<t>/RESIDUE.md when it stopped) -- never the workers' transcripts or
+the build logs.
+
+A SINGLE-VERSION FORK (no version branch) is never touched: fork-port stops at once (exit 2), having written nothing --
+versions are added as version branches only when the maintainer decides it (fork-branches.py add-target). A checkout
+with the removed .multiversion/ layer at HEAD is refused (exit 2, tools/fork-kind.py).
 
 Stages, each logged as one line and skipped with a reason when it does not apply:
-  setup    layer-inventory.py build first when .multiversion/INVENTORY.json is missing (once per layer: the base build's
-           behaviour inventory the done list accounts for), then
-           layer-deps.py resolve --dry-run, when the authors' build pins dependencies (a required one with no
-           build for the target stops here, exit 15, before anything is written; a sibling library whose target is not
-           done stops it with exit 18 and layer-deps' reason -- --allow-undone-library, development only, is passed
-           through, recorded in DEPS.md and the summary, and kept in the resume command; --port-checkout passes a sibling
-           layer fork's checkout for its per-target jar, --port-release its release, pinned for CI), then
-           make-fork-layer.py add-target (when the target dir is missing; --direct passes `add-target --direct`: a jump
-           that inherits nothing but still takes the shared library of every targeted version in between, see the
-           fork-versions skill) + sync-shared + layer-deps.py resolve (the target's own build of each dependency into
-           target.properties, the drops into DEPS.md); installs layer.py's support for the generated moves table and for
-           shared_chain when the fork's copy is a verbatim older copy of the template
-  stage    one `.multiversion/build.sh <t> compileJava` to stage Minecraft; while createMinecraftArtifacts fails
-           on the access transformer, fix-access-transformer.py --overrides-from <log> on the TARGET's own AT
-           (bounded: 4 rounds)
-  moves    build-class-move-map.py between the target this one inherits (or the base) and this one, from the
-           staged merged jars -> .multiversion/targets/<t>/moves.generated.tsv, which layer.py reads as one more
-           rename table. Generated per fork per target from Mojang's data, so not a map anyone commits upstream.
-           On a version branch the moves are applied to the source, then the converters whose change lands in the hop
-           from the parent's version run (tools/mechanical-hop.py run_ladder: convert-override-signatures --crossing;
-           a converter whose output needs a later version is an advisory); a layer target runs none.
+  setup    off t's branch: fork-branches.py add-target when neoforge-<t> does not exist yet (refused, exit 18, while the
+           version it stands on is not done; --allow-undone-parent is the recorded development escape), then a checkout
+           of it; layer-inventory.py build when .port/INVENTORY.json is missing; layer-deps.py resolve when the authors'
+           build pins dependencies (a required one with no build for t stops here, exit 15; a sibling library whose
+           version is not done stops it with exit 18 -- --allow-undone-library, development only, is passed through,
+           recorded in DEPS.md and the summary, and kept in the resume command; --port-checkout passes a sibling fork's
+           checkout for its jar, --port-release its release, pinned for CI); then the data forms the version needs
+           (1.21.2 recipes and item definitions, 26.2 entity predicates, 26.3 data, GeckoLib 5 asset paths) written into
+           the branch's own src/main/resources
+  stage    `./gradlew compileJava` to stage Minecraft; while createMinecraftArtifacts fails on the access transformer,
+           fix-access-transformer.py --overrides-from <log> on the branch's AT (bounded: 4 rounds)
+  moves    build-class-move-map.py between the parent version's staged jars and this one's -> .port/<t>/moves.generated.tsv,
+           applied to the source as rows (a file the rows alone made is re-made whole, a hand-changed file in its code
+           only); the 26.1.2 entityCutout swap is listed; then the converters whose change lands in the hop from the
+           parent's version run (tools/mechanical-hop.py run_ladder: convert-override-signatures --crossing; a converter
+           whose output needs a later version is an advisory)
   measure  compile every source set (srcsets.compile_tasks); burndown-count.sh decides whether it is a count
-  loop     file-loop.py --layer <t> --budget N (its kept rows land in the target's renames.tsv)
-  audit    audit-mixin-targets.py against the target's sources jar and prepared tree, then audit-event-listeners.py (abstract
-           events) over every prepared tree against the target's resolved classpath (only at 0 errors)
+  loop     file-loop.py --budget N on the branch's source (its kept rows land in .port/<t>/renames.tsv)
+  audit    audit-mixin-targets.py against the version's sources jar, then audit-event-listeners.py (abstract events)
+           over every source tree against the branch's resolved classpath (only at 0 errors)
   gates    ci-gates.py --mc <t>: none = skip; ab = author build, Gate A, Gate B; full = + Gate C phases. After a green run, the
-           mod's own log files (harness/run/logs, minus vanilla's) are compared with the inherited target's last gate run: a file
+           mod's own log files (harness/run/logs, minus vanilla's) are compared with the parent version's last gate run: a file
            it wrote there and not here is residue (exit 11) -- a subsystem stopped running (CATALOG X47)
-  cost     port-cost.py --target <t> appended to targets/<t>/COST.md: only the requests that worked on <t> (one target per
-           request, by what its tool calls touched; shared work on its own line), from where the target's last record ended
-           (no record: all of them on this machine), plus the loop workers' own recorded dollars when the loop ran
+  cost     port-cost.py --target <t> appended to .port/<t>/COST.md: the requests that worked on <t>, from where its last
+           record ended (no record: all of them on this machine), plus the loop workers' own recorded dollars when the
+           loop ran
 
 THE STOP CONTRACT. When a stage cannot finish this does not hand the rest to anyone silently: it prints a
-STOPPED block and writes the RESIDUE REPORT (into --json and .multiversion/targets/<t>/RESIDUE.md): the
-remaining errors grouped by CATALOG entry / family (not the raw log), the loop's escalation record, audit
-mismatches or failing gates with their one-line reason, and the command to resume (`--from-stage <stage>`).
-Whoever picks it up fixes what RESIDUE.md lists, and puts each fix in the shared library
-(templates/fork-layer/shared/<t>) or a converter -- not in one fork.
+STOPPED block and writes the RESIDUE REPORT (into --json and .port/<t>/RESIDUE.md): the remaining errors grouped by
+CATALOG entry / family (not the raw log), the loop's escalation record, audit mismatches or failing gates with their
+one-line reason, and the command to resume (`--from-stage <stage>`). Whoever picks it up fixes what RESIDUE.md lists,
+and puts each fix in the shared library (templates/fork-layer/shared/<t>) or a converter -- not in one fork.
 
 ONE RUN PER CHECKOUT (CATALOG X44). The run takes build/.fork-port.lock (pid, stale-pid aware) for its whole length and a
 second run on the same checkout is refused at once with a message naming the holder; its own children (ci-gates.py)
-are let through. A lock whose process is gone is taken over. tools/layer-ci.py CheckoutLock is the code.
+are let through. A lock whose process is gone is taken over. tools/checkout-lock.py CheckoutLock is the code.
 
 NO RESIDENT GRADLE (issue #122). Every Gradle the run starts (its own, and its children's: layer-deps, file-loop,
 ci-gates) runs with -Dorg.gradle.daemon=false added to GRADLE_OPTS (unless GRADLE_OPTS already sets org.gradle.daemon),
@@ -68,48 +68,37 @@ resident memory (PID, RSS, command).
 
 A RESUME RE-MEASURES. `--from-stage S` keeps the earlier stages' results for the summary but never their numbers: the
 compile count the loop, audit and gates rely on is always one this run measured (a stale 0 once skipped the audit and
-every gate and reported the target done).
+every gate and reported the target done). A resume past setup runs on t's own checkout.
 
-DONE IS ONE FIXED LIST (target_done(), the fork-versions skill's "Done"): a green Gate C in GATES.md, no unreviewed
-STUBS.json entry, REVIEW.md complete for the commit it names (an independent fresh-context reviewer's verdict + note on
-every STUBS.json entry, every whole-file overlay, each group of its resource overlays and its renames.tsv -- the last
-two with a digest of their files, so an edit is a new row -- with reviewer, date and commit; nothing in the target's
-directory changed since, its run outputs and the reviewer's BEHAVIOUR.json aside), TEST-ITEMS.md (the target's
-manual-test items, from tools/layer-test-plan.py, written by a run to the end or alone by `--write-test-items`), every item of .multiversion/INVENTORY.json accounted for on the target (tools/layer-inventory.py, its account in
-the target's INVENTORY-CHECK.json -- a run output like GATES.md, never "changed since the review"), and no dependency
-resolved against an undone library target (--allow-undone-library in DEPS.md). A run whose gates are green but that lacks the rest exits 18 and adds a `?` row to REVIEW.md for every item without
-one (and an `item` row for each inventory item left unaccounted); `--check-done` only asks (on a version branch's own
-checkout it adds the same `?` rows, never a verdict). A NEW target is refused (exit 18, before anything is written; make-fork-layer.py
-add-target refuses it too) while the target it stands on is not done; `--allow-undone-parent` is the development escape,
-recorded as allowed_undone_parent= in the new target's target.properties, and that target is not done until its parent is.
+DONE IS ONE FIXED LIST: tools/fork-branches.py target_done() (the fork-versions skill's "Done"). A run whose gates are
+green but that lacks the rest exits 18 and adds a `?` row to REVIEW.md for every item without one; `--check-done` only
+asks (on the branch's own checkout it adds the same `?` rows, never a verdict); `--write-test-items` writes
+.port/<t>/TEST-ITEMS.md alone.
 
-THE UPSTREAM FREEZE. .multiversion/base.properties records the authors' branch (upstream=), the commit the buildout
-started from (upstream_commit=, the merge-base of HEAD and that branch) and each sibling library's release
-(library.<owner>/<repo>=<tag>, from --port-release). make-fork-layer.py init --upstream / freeze writes it; a run that adds
-the layer's first target writes it when it is missing. Every run to the end fetches the branch and stops (exit 19) when it
-holds commits the checkout lacks, or when --port-release names another release of a recorded library, naming the
-keep-current command; --accept-upstream-drift continues and appends the drift to .multiversion/DRIFT.md. A freeze whose
-authors' branch cannot be read (no such remote, never fetched) stops the same way: removing the remote is never a way
-past it. A weekly round whose frozen input does not take the authors' code (`take_authors: false` in round/frozen.json,
-read from the working directory, or the file --untaken-ok names) goes on: the drift is recorded in DRIFT.md as left out
-by the plan (with take_authors true, only what came after the plan's upstream_commit, once the checkout carries it).
-A library release other than the frozen one still stops. A --to-stage run (layer-sync.py's measuring) is not checked.
+THE UPSTREAM FREEZE. .port/<t>/branch.properties records the authors' branch (upstream=), the commit the buildout
+started from (upstream_commit=) and each sibling library's release (library.<owner>/<repo>=<tag>); `fork-branches.py
+freeze` writes it (and --upstream here, when none is recorded). Every run to the end fetches the branch and stops (exit
+19) when it holds commits the checkout lacks, or when --port-release names another release of a recorded library,
+naming the keep-current command; --accept-upstream-drift continues and appends the drift to .port/<t>/DRIFT.md. A
+freeze whose authors' branch cannot be read (no such remote, never fetched) stops the same way: removing the remote is
+never a way past it. A weekly round whose frozen input does not take the authors' code (`take_authors: false` in
+round/frozen.json, read from the working directory, or the file --untaken-ok names) goes on: the drift is recorded in
+DRIFT.md as left out by the plan (with take_authors true, only what came after the plan's upstream_commit, once the
+checkout carries it). A library release other than the frozen one still stops. A --to-stage run is not checked.
 
-THE SWEEP. `--chain FROM..TO --from-stage S` (default gates) runs this tool for every target from FROM up TO's inherits
-chain, oldest first, from stage S with no model (--budget 0 --max-errors 0), checks the upstream once, stops at the first
-red target (any exit but 0, 17, 18) naming its RESIDUE.md and the command that sweeps on, and prints the table. A bug
-class found late is fixed at the lowest target where it exists, then swept up; one fixer only where the sweep goes red.
+THE SWEEP. `--chain FROM..TO` is tools/fork-branches.py cascade FROM..TO (merge each branch into the next, then the
+no-model gates per branch; --gates auto means ab).
 
 Exit codes: 0 done; 10 stopped before/in the compile (stage, moves, measure, loop); 11 Gate A/B (or the author's
-build) red; 12 Gate C red; 13 mixin / event-listener audit; 14 the checkout is in use by another run; 15 a required dependency has no build for
-the target (DEPS.md / the STOPPED block name it); 17 every stage passed but the target has no green Gate C recorded
-(GATES.md), or the gates were not run (--gates none): A/B green is not done -- a version is done only after its
-real-client run. A full gate run that is not green is written to GATES-RED.md, never over GATES.md (the last green
-record stays); while it is there the target is not done and `--gates auto` runs full; a green full run deletes it. Every run to the end (from any --from-stage)
-stops with exit 10 while STUBS.json holds an unreviewed stub signal; 18 Gate C green but not done (REVIEW.md /
-TEST-ITEMS.md / the behaviour inventory / an undone parent or library, listed), a new target over an undone parent, or
-a sibling library's target that is not done (layer-deps.py resolve's exit 18); 19 the authors' branch or a recorded
-library release moved since the buildout's freeze; 2 bad input.
+build) red; 12 Gate C red; 13 mixin / event-listener audit; 14 the checkout is in use by another run; 15 a required
+dependency has no build for the version (DEPS.md / the STOPPED block name it); 17 every stage passed but the version
+has no green Gate C recorded (GATES.md), or the gates were not run (--gates none): A/B green is not done -- a version
+is done only after its real-client run. A full gate run that is not green is written to GATES-RED.md, never over
+GATES.md (the last green record stays); while it is there the version is not done and `--gates auto` runs full; a
+green full run deletes it. Every run to the end (from any --from-stage) stops with exit 10 while STUBS.json holds an
+unreviewed stub signal; 18 Gate C green but not done (the done list's reasons, listed), a new version over an undone
+parent, or a sibling library's version that is not done (layer-deps.py resolve's exit 18); 19 the authors' branch or
+a recorded library release moved since the buildout's freeze; 2 bad input, a single-version fork or a layer checkout.
 Standard library only.
 """
 import argparse, datetime, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile
@@ -120,11 +109,6 @@ from gitbash import BASH   # noqa: E402
 
 STAGES = ["setup", "stage", "moves", "measure", "loop", "audit", "gates", "cost"]
 STAGE_ROUNDS = 4
-INSERT = ('            m = MV / "targets" / t / "moves.generated.tsv"   # tools/fork-port.py: derived from the staged jars\n'
-          '            if m.exists():\n'
-          '                rows.append(f"# ---- moves {t} (generated)\\n" + m.read_text(encoding="utf-8"))\n')
-ANCHOR = ('            if r.exists():\n'
-          '                rows.append(f"# ---- {t}\\n" + r.read_text(encoding="utf-8"))\n')
 
 
 def load(name, file):
@@ -134,6 +118,7 @@ def load(name, file):
 
 
 # ---------------------------------------------------------------- pure helpers (covered by --self-check)
+
 
 def gate_evidence(text, limit=4):
     """The first few concrete reasons a gate log is red: javac `file:line: error: message` lines (path shortened to
@@ -183,8 +168,8 @@ def lost_log_files(prev_dir, cur_dir, known_absent=()):
 
 
 def select_stages(from_stage, to_stage=None):
-    """(skipped, to_run) for --from-stage, and --to-stage (stop after that stage: tools/layer-sync.py measures a
-    target with `--from-stage stage --to-stage measure` and audits it with `--from-stage audit --to-stage audit`)."""
+    """(skipped, to_run) for --from-stage, and --to-stage (stop after that stage: keep-current measures a version
+    with `--from-stage stage --to-stage measure`)."""
     if from_stage is None:
         skipped, run = [], list(STAGES)
     elif from_stage not in STAGES:
@@ -224,12 +209,6 @@ def chain(mv, target):
 RECOUNT_MARK = "# --- the capped compile hit the cap; uncapped recount (portFullErrors) ---"
 
 
-def hit_cap(text):
-    """Did the Gradle-integrated compile stop at tools/maxerrs.init.gradle's cap (javac printing '1,000 errors')?"""
-    cap = load("port_gates", "port_gates.py").GRADLE_ERROR_CAP
-    return re.search(r"(?m)^\s*%s errors\s*$" % format(cap, ",").replace(",", ",?"), text) is not None
-
-
 def capped_tasks(text):
     """The compile tasks whose javac stopped at the cap: each '1,000 errors' line belongs to the last
     '> Task :compile...Java' before it. Only those are recounted -- recounting a task whose dependency (main's
@@ -249,59 +228,6 @@ def mc_key(v):
     return tuple(int(x) if x.isdigit() else 0 for x in re.findall(r"\d+|[A-Za-z]+", v))
 
 
-def shared_chain(mv, target):
-    """The targets whose shared library applies to `target`, newest first: its inherits chain, plus every version named by
-    a `shared_chain=` key in that chain (a direct jump). The same rule as templates/fork-layer/tools/layer.py
-    shared_chain(), checked against it in --self-check; without the key it is chain()."""
-    names = chain(mv, target)
-    extra = []
-    for x in names:
-        extra += [s.strip() for s in read_props(mv / "targets" / x / "target.properties").get("shared_chain", "").split(",") if s.strip()]
-    return sorted(set(names) | set(extra), key=mc_key, reverse=True) if extra else names
-
-
-def drop_harvested_rows(mv, target):
-    """Rows in targets/<t>/renames.tsv that a shared library the target applies now carries word for word (a row
-    harvested into templates/fork-layer/shared, fork-versions step 8). Left in both places they are a duplicate rule,
-    which layer.py refuses at table load. Removes them (with a `# X<n>` comment line right above, if it is the loop's).
-    -> the rows removed."""
-    table = mv / "targets" / target / "renames.tsv"
-    if not table.is_file():
-        return []
-    shared = set()
-    for v in shared_chain(mv, target):
-        f = mv / "shared" / v / "renames.tsv"
-        if f.is_file():
-            shared |= {ln.strip() for ln in f.read_text(encoding="utf-8").splitlines() if ln.strip() and not ln.startswith("#")}
-    regexes = []
-    for r in shared:
-        if r.startswith("re:") and "\t" in r:
-            pat, rep = r[3:].split("\t", 1)
-            try:
-                regexes.append((re.compile(pat), rep))
-            except re.error:
-                pass
-
-    def subsumed(row):
-        """A plain target row whose `to` a shared regex already makes of its `from`: both would apply, and the second
-        rewrites the first one's result (measured: isClientSide()() from a target row plus the shared row that replaced it)."""
-        if row.startswith(("re:", "member:")) or "\t" not in row:
-            return False
-        frm, to = row.split("\t", 1)
-        return any(rx.sub(rep, frm) == to for rx, rep in regexes if rx.search(frm))
-    lines, out, gone = table.read_text(encoding="utf-8").splitlines(), [], []
-    for ln in lines:
-        if ln.strip() and not ln.startswith("#") and (ln.strip() in shared or subsumed(ln.strip())):
-            gone.append(ln)
-            if out and out[-1].startswith("# X") and "proposed by a file-loop worker" in out[-1]:
-                out.pop()
-            continue
-        out.append(ln)
-    if gone:
-        table.write_text("\n".join(out) + "\n", encoding="utf-8")
-    return gone
-
-
 RED_GATES = "GATES-RED.md"       # a full gate run that was not green, kept apart from the last green GATES.md
 
 
@@ -316,25 +242,6 @@ def gates_auto(tdir):
     rows = [l for l in text.splitlines() if l.startswith("|")]
     green_c = any("Gate C" in l and "| PASS |" in l for l in rows) and not any("| FAIL |" in l for l in rows)
     return "ab" if green_c else "full"
-
-
-def drop_shadowing_overlays(mv, target):
-    """Overlays in targets/<t>/java that are byte-for-byte a shared helper the target applies (the same file name in a
-    shared/<v>/java tree of its shared_chain): written while the shared library was not synced yet, they then SHADOW it,
-    and a later fix to the shared helper never reaches this fork. -> the overlays removed."""
-    tj = mv / "targets" / target / "java"
-    if not tj.is_dir():
-        return []
-    shared = {}
-    for v in shared_chain(mv, target):
-        for f in (mv / "shared" / v / "java").rglob("*.java") if (mv / "shared" / v / "java").is_dir() else []:
-            shared.setdefault(f.relative_to(mv / "shared" / v / "java").as_posix(), f.read_bytes())
-    gone = []
-    for rel, data in shared.items():
-        ov = tj / rel
-        if ov.is_file() and ov.read_bytes() == data:
-            ov.unlink(); gone.append(rel)
-    return gone
 
 
 def layer_client_items(repo, tdir, target):
@@ -378,32 +285,6 @@ def layer_client_items(repo, tdir, target):
             print(f"fork-port: {len(unconverted)} item model(s) with 1.21.1 overrides no item-definition form was "
                   f"written for (they show the plain model): {', '.join(unconverted[:8])}")
     return written
-
-
-def whole_file_overlays(repo, tdir):
-    """The target's own Java overlays that replace a whole authors' file: targets/<t>/java/<path> for
-    src/main/java/<path>, targets/<t>/<set>/java/<path> for src/<set>/java/<path>. An overlay-only file (a helper the
-    authors do not have) is not one. One definition, tools/layer-sync.py whole_file_overlays(): the files its overlay
-    report counts against the budget are the files REVIEW.md needs a row for. -> [(overlay, authors' file)] as paths."""
-    if not tdir.is_dir():
-        return []
-    ls = load("layer_sync", "layer-sync.py")
-    return [(ov, src) for _s, _rel, ov, src in ls.whole_file_overlays(pathlib.Path(repo), tdir.name)]
-
-
-def overlay_stubs(repo, tdir):
-    """Stub signals of every Java overlay of the target against the authors' file it replaces (src/<set>/java/<same
-    path>). The loop's own audit sees only the files ITS run changed, so an earlier run's loss -- or a person's -- was
-    never compared again (measured: five client-extension overrides deleted with their renderers, unflagged). Counts,
-    not text, are compared, so the renames an overlay carries do not read as a change. -> [{file, why}]"""
-    ss = load("singleshot", "singleshot.py")
-    out = []
-    for ov, src in whole_file_overlays(repo, tdir):
-        why = ss.stub_signals(src.read_text(encoding="utf-8", errors="replace"),
-                              ov.read_text(encoding="utf-8", errors="replace"), audit=True)
-        if why:
-            out.append({"file": ov.relative_to(repo).as_posix(), "why": "; ".join(why)})
-    return out
 
 
 def layer_recipes(repo, tdir, target):
@@ -783,21 +664,12 @@ def unreviewed_stubs(tdir):
     return [e for e in have if isinstance(e, dict) and not e.get("reviewed")]
 
 
-# ---------------------------------------------------------------- a target's done record (R1)
+# ---------------------------------------------------------------- a version's records (R1)
 #
-# DONE is one fixed list, the same for every target, checked by target_done(): (1) a green Gate C recorded in GATES.md
-# at a commit HEAD carries, nothing that can change the jar changed since (gates_current: port-publish.py's
-# listed_green, the rule layer-deps.py applies to a library), (2) no unreviewed STUBS.json entry, (3) REVIEW.md
-# complete for the reviewed commit: an independent fresh-context reviewer's verdict on every STUBS.json entry, every
-# whole-file overlay (against the authors' file), each resource group and renames.tsv (review_file_items), with the reviewer, the date and the commit id reviewed, nothing the
-# target is built from (its directory, src/, its chain's targets/ and shared/) changed since that commit, and no
-# overlay layer-sync.py recorded in REMERGE.json as not taking the authors' change still unedited, (4) the
-# target's manual-test items generated (TEST-ITEMS.md, from tools/layer-test-plan.py), (5) a parent that was skipped
-# with --allow-undone-parent done by now, (6) every item of the base build's behaviour inventory accounted for
-# (tools/layer-inventory.py inventory_unaccounted(), its account in INVENTORY-CHECK.json), and (7) no dependency
-# resolved against a library target that is not done (--allow-undone-library, DEPS.md). Compile and the audits are implied: the gates stage runs only at 0 errors and
-# after the audit. Every file here is Markdown: written after the gates, it must not make port-publish.py read the
-# target's GATES.md as stale (a *.md is not in a player's jar).
+# DONE is one fixed list, tools/fork-branches.py target_done(); what follows is shared with it and with
+# tools/layer-deps.py and tools/known-issues.py: the run outputs a review does not judge, the files that are not in a
+# player's jar, and REVIEW.md's form. Every file here is Markdown: written after the gates, it must not make
+# port-publish.py read the version's GATES.md as stale (a *.md is not in a player's jar).
 
 REVIEW_OUTPUTS = ("GATES.md", "GATES-RED.md", "COST.md", "RESIDUE.md", "REVIEW.md", "TEST-ITEMS.md",   # not what a review judged
                   "BEHAVIOUR.json",            # the reviewer's own record beside REVIEW.md (a moved/dropped item and
@@ -809,13 +681,12 @@ REVIEW_OUTPUTS = ("GATES.md", "GATES-RED.md", "COST.md", "RESIDUE.md", "REVIEW.m
                                                # version branch's .port/<v>/DRIFT.md), appended by a run after review
                   "KNOWN-ISSUES.json")         # the known-issues ledger (tools/known-issues.py): a record of findings
 # Files of a target's directory that are not in a player's jar: a change to them does not make GATES.md stale
-# (tools/layer-deps.py NOT_JAR, the same list). REMERGE.json is layer-sync's record of an overlay the authors' change
-# did not merge into: a reviewed input (it is not in REVIEW_OUTPUTS), but not jar content.
+# (tools/layer-deps.py NOT_JAR, the same list). REMERGE.json is the cascade's record of an authors' change a version did
+# not take: a reviewed input (it is not in REVIEW_OUTPUTS), but not jar content.
 NOT_JAR_FILES = frozenset(REVIEW_OUTPUTS) | {"STUBS.json", "BEHAVIOUR.json", "INVENTORY.json", "REMERGE.json"}
 # records matched by their path from the repository root, not their name: the fork's README (a README under src/ is
 # jar content). A change to one makes neither gates nor a review stale.
 ROOT_RECORDS = ("README.md",)
-COMMIT_ID = re.compile(r"^[0-9a-f]{7,40}$")
 VERDICTS = ("ok", "not-ok")
 # REVIEW.md row kinds: stub / overlay / resources / renames are what review_items() requires a verdict on (a version
 # branch's `changed` file stands for a layer's `overlay`, and `deleted` names a file it lacks that its parent has:
@@ -827,19 +698,6 @@ VERDICTS = ("ok", "not-ok")
 REVIEW_KINDS = ("stub", "overlay", "resources", "renames", "item", "changed", "deleted", "missing", "shared")
 REVIEWER_KINDS = ("missing", "shared")
 REVIEW_FIELDS = ("reviewer", "date", "commit")
-REVIEW_HEAD = ("# Review: Minecraft {t}\n\n"
-               "An independent review by a FRESH agent that was given only this target's files (STUBS.json, its overlays,\n"
-               "the authors' files they replace, its resource overlays and renames.tsv). One row per STUBS.json entry,\n"
-               "per whole-file overlay, per resource group (`resources`: a directory of the target's resources/, with the\n"
-               "digest of its files -- an edit makes it a new row) and for renames.tsv (`renames`, with its digest);\n"
-               "verdict `ok` (the change keeps the authors' behaviour, or the difference is right and the note says why)\n"
-               "or `not-ok` (it does not: the target is not done). A hook item of the behaviour inventory (a mixin target,\n"
-               "an injection, an event listener, a shader uniform/sampler) is accounted for only by a row whose note names\n"
-               "its id, or by an `item` row for the id. `reviewer` names the reviewing agent, distinct from the fixer\n"
-               "(e.g. `fresh agent <id>, not the fixer`). `commit` is the commit reviewed, a hex id of 7-40 digits\n"
-               "(`git rev-parse --short HEAD`). tools/fork-port.py adds a `?` row for every item it finds unreviewed\n"
-               "(an `item` row for every unaccounted inventory item); it never changes a verdict.\n\n"
-               "- reviewer: ?\n- date: ?\n- commit: ?\n\n| kind | file | verdict | note |\n|---|---|---|---|\n")
 
 
 def _git(repo, *args, env=None, timeout=120):
@@ -851,211 +709,14 @@ def _git(repo, *args, env=None, timeout=120):
         return 1, str(e)
 
 
-def jar_chain(mv, t):
-    """t, its inherits chain, then every `shared_chain` version: the targets whose targets/<c>/ and shared/<c>/ can
-    change t's jar (tools/layer-deps.py _chain_of, the same rule)."""
-    out = chain(mv, t)
-    for x in list(out):
-        out += [s.strip() for s in read_props(mv / "targets" / x / "target.properties").get("shared_chain", "").split(",")
-                if s.strip() and s.strip() not in out]
-    return out
-
-
-def changed_since(repo, sha, paths=()):
-    """Files that differ between commit `sha` and the working tree (committed since, edited, or untracked under src/
-    or .multiversion/: an untracked overlay or source is built into the jar), limited to `paths` when given.
-    -> sorted list, or None when git cannot tell."""
-    rc, diff = _git(repo, "diff", "--name-only", sha, "--", *paths)
-    rc2, new = _git(repo, "ls-files", "--others", "--exclude-standard", "--", *(paths or ("src", ".multiversion")))
-    if rc or rc2:
-        return None
-    return sorted({x for x in (diff + "\n" + new).splitlines() if x})
-
-
-def gates_current(repo, t):
-    """(current, why) for targets/<t>/GATES.md against the checkout: it names the commit it tested (not an edited
-    tree), that commit is HEAD or an ancestor, and nothing that can change t's jar changed since -- port-publish.py's
-    listed_green() on the files changed since that commit, with this file list's documents and run outputs aside: the
-    rule tools/layer-deps.py applies to a sibling library's checkout, so a library and its dependents agree."""
-    repo = pathlib.Path(repo)
-    g = repo / ".multiversion/targets" / t / "GATES.md"
-    text = g.read_text(encoding="utf-8", errors="replace") if g.is_file() else ""
-    if not text:
-        return False, "no GATES.md"
-    m = re.search(r"at `([^`]+)`", text.splitlines()[0])
-    if not m:
-        return False, "GATES.md names no commit it tested"
-    if "uncommitted" in m.group(1):
-        return False, (f"GATES.md certifies an edited tree ({m.group(1)[:120]}), not a commit: commit, then re-run the "
-                       "full gates (--from-stage gates --gates full)")
-    sha = m.group(1).split()[0]
-    if not COMMIT_ID.match(sha) or _git(repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")[0] != 0:
-        return False, f"GATES.md names {sha}, which is not a commit in this checkout"
-    if _git(repo, "merge-base", "--is-ancestor", sha, "HEAD")[0] != 0:
-        return False, f"GATES.md names {sha}, which is not an ancestor of HEAD"
-    changed = changed_since(repo, sha)
-    if changed is not None:
-        changed = [f for f in changed if f.rsplit("/", 1)[-1] not in NOT_JAR_FILES and f not in ROOT_RECORDS]
-    green, why = load("port_publish", "port-publish.py").listed_green(t, text, changed, jar_chain(repo / ".multiversion", t))
-    return green, ("GATES.md (at " + sha + "): " + why) if not green else why
-
-
-SYNC_RESIDUE_SECTION = "## Overlays the authors' change did not merge into (layer-sync)"   # tools/layer-sync.py RESIDUE_SECTION
-
-
-def _split_residue(text):
-    """RESIDUE.md -> (fork-port's part, layer-sync's section or "")."""
-    i = text.find(SYNC_RESIDUE_SECTION)
-    if i < 0:
-        return text, ""
-    j = text.find("\n## ", i + len(SYNC_RESIDUE_SECTION))
-    sec = text[i:j + 1] if j >= 0 else text[i:]
-    return (text[:i] + (text[j + 1:] if j >= 0 else "")).rstrip("\n"), sec.rstrip("\n") + "\n"
-
-
 def put_residue(tdir, t, md):
-    """Write fork-port's stop report to tdir/RESIDUE.md, keeping layer-sync's section (an overlay the authors' change
-    did not merge into) when the file holds one."""
-    f = tdir / "RESIDUE.md"
-    _mine, sec = _split_residue(f.read_text(encoding="utf-8") if f.is_file() else "")
-    f.write_text(md.rstrip("\n") + "\n" + (f"\n{sec}" if sec else ""), encoding="utf-8")
+    """Write fork-port's stop report to tdir/RESIDUE.md."""
+    (tdir / "RESIDUE.md").write_text(md.rstrip("\n") + "\n", encoding="utf-8")
 
 
 def clear_residue(tdir, t):
-    """A run that ended clears its own report: tdir/RESIDUE.md goes, unless it holds layer-sync's section, which stays
-    (alone, under layer-sync's header) until layer-sync removes it."""
-    f = tdir / "RESIDUE.md"
-    if not f.is_file():
-        return
-    _mine, sec = _split_residue(f.read_text(encoding="utf-8"))
-    if not sec:
-        f.unlink()
-        return
-    text = f"# {t}: residue\n\n{sec}"
-    if f.read_text(encoding="utf-8") != text:
-        f.write_text(text, encoding="utf-8")
-
-
-def remerge_open(repo, tdir):
-    """The overlays tools/layer-sync.py recorded in tdir/REMERGE.json as not taking the authors' change, still with
-    the bytes they had then (a person who merged one changed it). -> one reason each; an unreadable file is one."""
-    f = tdir / "REMERGE.json"
-    if not f.is_file():
-        return []
-    rel = f.relative_to(repo).as_posix()
-    try:
-        conflicts = json.loads(f.read_text(encoding="utf-8")).get("conflicts", [])
-        assert isinstance(conflicts, list)
-    except (ValueError, AttributeError, AssertionError):
-        return [f"{rel} is not readable: cannot tell which overlays the authors' change did not merge into"]
-    out = []
-    for c in conflicts:
-        ov = repo / str((c or {}).get("overlay", ""))
-        if not (c or {}).get("overlay") or not ov.is_file():
-            continue          # the overlay is gone: removed by a person, nothing left to merge into
-        if hashlib.sha256(ov.read_bytes()).hexdigest() == str(c.get("digest", "")).lower():
-            out.append(f"the authors' change did not merge into {c['overlay']} ({c.get('reason') or 'conflict'}, "
-                       f"{c.get('since') or '?'}; {rel}): merge it by hand (the hunks are in RESIDUE.md), then re-review it")
-    return out
-
-
-PREPARE_INPUTS = ("java", "renames.tsv", "moves.generated.tsv", "drops.txt", "target.properties")
-
-
-def prepared_tree(repo, t, prepare=False):
-    """[] when build/mc<t>/mv/java (what the behaviour inventory reads) exists and is newer than every file it is
-    prepared from; else the one reason it is not. prepare: re-prepare it (layer.py prepare, no compile) when missing
-    or stale -- only for a caller that holds the checkout (fork-port.py's own run)."""
-    repo = pathlib.Path(repo)
-    mv = repo / ".multiversion"
-    src = repo / "src/main/java"
-    if not src.is_dir() or not (mv / "INVENTORY.json").is_file():
-        return []        # nothing prepared to judge (layer-inventory.py says what is missing)
-    out = repo / "build" / f"mc{t}" / "mv/java"
-    cmd = f"python3 .multiversion/tools/layer.py prepare --target {t} --src src/main/java --out build/mc{t}/mv/java"
-    # every other source set with its own src/<set>/java is prepared too (layer.gradle does: build/mc<t>/mv/<set>-java),
-    # and the inventory reads each one's prepared tree, so a missing one cannot be judged
-    others = sorted(d.parent.name for d in (repo / "src").glob("*/java") if d.is_dir() and d.parent.name != "main")
-    set_out = lambda s_: out.parent / f"{s_}-java"
-    set_cmd = lambda s_: (f"python3 .multiversion/tools/layer.py prepare --target {t} --set {s_} --src src/{s_}/java "
-                          f"--out build/mc{t}/mv/{s_}-java")
-
-    def newest():
-        roots = [src, mv / "tools/layer.py", mv / "tools/prepare-sources.py"] + [repo / "src" / s_ / "java" for s_ in others]
-        for c in jar_chain(mv, t):
-            roots += [mv / "targets" / c / x for x in PREPARE_INPUTS] + [mv / "shared" / c / "java", mv / "shared" / c / "renames.tsv"]
-        best = (0, None)
-        for r in roots:
-            for f in ([r] if r.is_file() else r.rglob("*") if r.is_dir() else []):
-                if f.is_file() and f.stat().st_mtime_ns > best[0]:
-                    best = (f.stat().st_mtime_ns, f)
-        return best
-
-    def tree_time():
-        return max([out.stat().st_mtime_ns] + [f.stat().st_mtime_ns for f in out.rglob("*") if f.is_file()])
-    n_time, n_file = newest()
-    why = None if out.is_dir() and tree_time() >= n_time else (
-        "missing" if not out.is_dir() else f"older than {n_file.relative_to(repo).as_posix()}")
-    # inherited_overlay_rows (opt-in): layer.py prepare stamps an on-mode tree (java.inherited_overlay_rows beside it);
-    # a tree prepared in the other mode than the layer now says is stale. Off and unstamped -- every default layer --
-    # reads as before
-    key_on, supported = load("layer_sync", "layer-sync.py").inherited_rows_setting(mv)
-    stamp = out.parent / "java.inherited_overlay_rows"
-    # a stamp counts only when written after the tree it sits beside: a layer.py that predates the key re-prepares the
-    # tree without touching it, and an off tree it left behind must not read as on forever
-    on_tree = stamp.is_file() and out.is_dir() and stamp.stat().st_mtime_ns >= tree_time()
-    on_now = key_on and supported
-    if not why and on_now != on_tree:
-        why = (f"prepared with inherited_overlay_rows {'on' if on_tree else 'off'}, and the layer now has it "
-               f"{'on' if on_now else 'off'}")
-    missing_sets = [s_ for s_ in others if not set_out(s_).is_dir()]
-    if (why or missing_sets) and prepare and (mv / "tools/layer.py").is_file():
-        jobs = ([("main", src, out)] if why else []) + [(s_, repo / "src" / s_ / "java", set_out(s_))
-                                                         for s_ in others if why or s_ in missing_sets]
-        if why:
-            stamp.unlink(missing_ok=True)      # layer.py writes a new one when it prepares on
-        for s_, sd, od in jobs:
-            r = subprocess.run([sys.executable, str(mv / "tools/layer.py"), "prepare", "--target", t, "--set", s_,
-                                "--src", str(sd), "--out", str(od)], cwd=str(repo), capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=900)
-            if r.returncode or not od.is_dir():
-                return [f"behaviour inventory: re-preparing build/mc{t}/mv/{od.name} failed (exit {r.returncode}): "
-                        + " ".join((r.stdout + r.stderr).strip().splitlines()[-2:])[:300]]
-        print(f"fork-port: {t}: re-prepared " + ", ".join(f"build/mc{t}/mv/{od.name}" for _s, _d, od in jobs)
-              + f" ({why or 'missing'}; layer.py prepare, no compile) for the done check")
-        return []
-    if not why and missing_sets:
-        return [f"behaviour inventory: no prepared tree build/mc{t}/mv/{s_}-java (the {s_} source set), so it cannot be "
-                f"judged: prepare it (no compile): {set_cmd(s_)}" for s_ in missing_sets]
-    if not why:
-        return []
-    if why == "missing":
-        return [f"behaviour inventory: no prepared tree build/mc{t}/mv/java (a fresh clone, or never built here), so it "
-                f"cannot be judged: prepare it (no compile): {cmd}"]
-    return [f"behaviour inventory: the prepared tree build/mc{t}/mv/java is {why}, so its account would be about older "
-            f"code: re-prepare it (no compile): {cmd}"]
-
-
-def blob_ids(repo, files):
-    """{file: git blob id} -- what git stores for each file (`git hash-object`, so the checkout's line-ending
-    conversion applies and a Windows checkout gets the ids the GitHub tree lists); outside a git repo, the id of the
-    bytes as they are."""
-    files = list(files)
-    if not files:
-        return {}
-    try:
-        r = subprocess.run(["git", "-C", str(repo), "hash-object", "--stdin-paths"], capture_output=True, text=True,
-                           input="".join(f"{f}\n" for f in files), encoding="utf-8", errors="replace", timeout=120)
-        ids = r.stdout.split()
-        if r.returncode == 0 and len(ids) == len(files):
-            return dict(zip(files, ids))
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    out = {}
-    for f in files:
-        data = pathlib.Path(f).read_bytes()
-        out[f] = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
-    return out
+    """A run that ended clears its own report: tdir/RESIDUE.md goes."""
+    (tdir / "RESIDUE.md").unlink(missing_ok=True)
 
 
 def resource_group(rel):
@@ -1084,35 +745,6 @@ def review_file_items(tprefix, entries):
     return out
 
 
-def review_items(repo, tdir):
-    """What the reviewer must give a verdict on: every STUBS.json entry, every whole-file overlay of the target, each
-    group of its resource overlays and its renames.tsv (review_file_items). -> sorted [(kind, file relative to the
-    repo)]."""
-    items = set()
-    try:
-        stubs = json.loads((tdir / "STUBS.json").read_text(encoding="utf-8")) if (tdir / "STUBS.json").is_file() else []
-    except ValueError:
-        stubs = []
-    items |= {("stub", e["file"]) for e in stubs if isinstance(e, dict) and e.get("file")}
-    items |= {("overlay", ov.relative_to(repo).as_posix()) for ov, _src in whole_file_overlays(repo, tdir)}
-    files = sorted(p for p in (tdir / "resources").rglob("*") if p.is_file()) if (tdir / "resources").is_dir() else []
-    files += [tdir / "renames.tsv"] if (tdir / "renames.tsv").is_file() else []
-    ids = blob_ids(repo, files)
-    items |= review_file_items(tdir.relative_to(repo).as_posix(), [(f.relative_to(tdir).as_posix(), ids[f]) for f in files])
-    return sorted(items)
-
-
-def review_counts(repo, tdir, items):
-    """'S stub(s), whole-file overlays (N) + overlay-only files (M) (those need no row), R resource group(s),
-    renames.tsv' for a message: the overlay words are tools/layer-sync.py overlay_counts()'s."""
-    n = lambda k: sum(1 for kk, _ in items if kk == k)
-    ls = load("layer_sync", "layer-sync.py")
-    own = len(ls.own_overlays(pathlib.Path(repo) / ".multiversion", tdir.name))
-    s = (f"{n('stub')} stub(s), {ls.overlay_counts({'overlays': n('overlay'), 'overlay_only': max(own - n('overlay'), 0)})}"
-         " (those need no row)")
-    return s + f", {n('resources')} resource group(s)" + (", renames.tsv" if n("renames") else "")
-
-
 def _cells(line):
     """The cells of one Markdown table row; `\\|` is a literal bar."""
     s = line.strip()
@@ -1133,55 +765,6 @@ def parse_review(text):
             if len(c) >= 4 and c[0] in REVIEW_KINDS:
                 rows[(c[0], c[1].strip("`"))] = (c[2].strip("` ").lower(), "|".join(c[3:]).strip())
     return fields, rows
-
-
-def review_problems(repo, tdir):
-    """[] when tdir/REVIEW.md is complete for the commit it names; else what is missing, one line each."""
-    repo = pathlib.Path(repo)
-    items = review_items(repo, tdir)
-    f = tdir / "REVIEW.md"
-    if not f.is_file():
-        return [f"no REVIEW.md: {len(items)} item(s) need an independent reviewer's verdict "
-                f"({review_counts(repo, tdir, items)})"]
-    fields, rows = parse_review(f.read_text(encoding="utf-8", errors="replace"))
-    out = [f"REVIEW.md has no {k}" for k in REVIEW_FIELDS if fields.get(k, "?") in ("", "?")]
-    if fields.get("date", "?") not in ("", "?") and not re.match(r"^\d{4}-\d\d-\d\d\b", fields["date"]):
-        out.append(f"REVIEW.md date {fields['date']!r} is not YYYY-MM-DD")
-    c = fields.get("commit", "?")
-    if c not in ("", "?"):
-        rel = tdir.relative_to(repo).as_posix()
-        mv = repo / ".multiversion"
-        jc = jar_chain(mv, tdir.name) if tdir.parent == mv / "targets" else [tdir.name]
-        paths = ["src", *[f".multiversion/targets/{x}" for x in jc], *[f".multiversion/shared/{x}" for x in jc]]
-        if not COMMIT_ID.match(c):
-            out.append(f"REVIEW.md names commit {c!r}, which is not a commit id (a name such as HEAD or a branch moves): "
-                       "name the reviewed commit with `git rev-parse --short HEAD`")
-        elif _git(repo, "rev-parse", "--verify", "--quiet", f"{c}^{{commit}}")[0] != 0:
-            out.append(f"REVIEW.md names commit {c}, which is not in this checkout")
-        elif _git(repo, "merge-base", "--is-ancestor", c, "HEAD")[0] != 0:
-            out.append(f"REVIEW.md names commit {c}, which is not an ancestor of HEAD")
-        else:
-            # the target's own files, and what it is built from: the authors' src/, its chain's overlays and shared
-            # library (the target's own run outputs aside; another target's not-jar files aside)
-            changed = changed_since(repo, c, paths)
-            changed = None if changed is None else [
-                x for x in changed if x not in ROOT_RECORDS
-                and x.rsplit("/", 1)[-1] not in (REVIEW_OUTPUTS if x.startswith(rel + "/") else NOT_JAR_FILES)]
-            if changed is None:
-                out.append(f"cannot compare {rel} with the reviewed commit {c} (git failed)")
-            elif changed:
-                out.append(f"{len(changed)} file(s) the target is built from changed since the reviewed commit {c}, e.g. "
-                           f"{changed[0]}: re-review them and name the new commit")
-    for kind, file in items:
-        v = rows.get((kind, file))
-        if not v or v[0] not in VERDICTS:
-            out.append(f"no verdict: {kind} {file}")
-        elif v[0] != "ok":
-            out.append(f"reviewer says not-ok: {kind} {file} -- {v[1][:200]}")
-        elif not v[1] or v[1] == "?":
-            out.append(f"a verdict without a note: {kind} {file}")
-    out += extra_row_problems(rows, items)
-    return out
 
 
 def extra_row_problems(rows, items):
@@ -1209,144 +792,21 @@ def drop_reported_items(lines, ids):
     return [ln for ln in lines if not any(ln.startswith(f"behaviour inventory: unaccounted {i} (") for i in ids)]
 
 
-def review_skeleton(repo, tdir, t):
-    """Give REVIEW.md a `?` row for every item that has none (the header too when the file is new), and an `item` row
-    for every behaviour-inventory item the target leaves unaccounted (tools/layer-inventory.py's account; sorted by id,
-    so a file's items stand together): the hooks a file-level row does not account for are named, so the reviewer
-    sees them. Never changes a verdict a reviewer wrote. -> rows added."""
-    items = review_items(pathlib.Path(repo), tdir)
-    f = tdir / "REVIEW.md"
-    text = f.read_text(encoding="utf-8") if f.is_file() else REVIEW_HEAD.format(t=t)
-    _fields, rows = parse_review(text)
-    try:
-        _code, rep, _lines = load("layer_inventory", "layer-inventory.py").check(repo, t)
-    except Exception:          # noqa: BLE001 -- the skeleton is a help; the done check itself reports the inventory
-        rep = None
-    unacc = sorted((rep or {}).get("unaccounted") or [])
-    add = [(k, x) for k, x in items if (k, x) not in rows] + [("item", i) for i in unacc if ("item", i) not in rows]
-    if add or not f.is_file():
-        tdir.mkdir(parents=True, exist_ok=True)
-        f.write_text(text.rstrip("\n") + "\n" + "".join(f"| {k} | {x.replace('|', chr(92) + '|')} | ? | ? |\n"
-                                                         for k, x in add), encoding="utf-8")
-    return len(add)
-
-
-def write_test_items(repo, tdir, t):
-    """The target's manual-test items (tools/layer-test-plan.py's items that apply to t, no model) into TEST-ITEMS.md,
-    rewritten only when they changed. -> (count, None) or (None, why it could not be generated)."""
-    try:
-        plan = load("layer_test_plan", "layer-test-plan.py").plan_fork(pathlib.Path(repo))
-        items = [g for g in (plan.get("layer") or {}).get("items", []) if t in (g.get("targets") or [])]
-    except Exception as e:      # noqa: BLE001 -- a broken plan is a stop with its reason, never a silent pass
-        return None, f"tools/layer-test-plan.py failed: {type(e).__name__}: {e}"[:300]
-    lines = [f"# Manual-test items: Minecraft {t}", "",
-             "Generated by tools/fork-port.py from tools/layer-test-plan.py (no model): what a person must look at on this",
-             "version because no gate judges it. The fork-versions skill's step 11 turns them into the test plan.", ""]
-    for g in items:
-        what = next((str(g[k]) for k in ("overlay", "file", "row", "dependency") if g.get(k)), g.get("kind", "?"))
-        extra = [f"range {g['range']}" if g.get("range") else "", f"first {g['first']}" if g.get("first") else "",
-                 f"status {g['status']}" if g.get("status") else ""]
-        lines.append(f"- {g.get('kind', '?')}: `{what}`" + (f" ({', '.join(x for x in extra if x)})" if any(extra) else ""))
-    if not items:
-        lines.append("- none: no stub, overlay, gate-blind rename, dropped integration or preview applies to this target")
-    text = "\n".join(lines) + "\n"
-    f = tdir / "TEST-ITEMS.md"
-    if not f.is_file() or f.read_text(encoding="utf-8") != text:
-        f.write_text(text, encoding="utf-8")
-    return len(items), None
-
-
-def parent_target(mv, t):
-    """The target `t` stands on: its `inherits`, else (a new target, or a direct jump) the nearest lower target the
-    layer has. None for the first target."""
-    inh = read_props(mv / "targets" / t / "target.properties").get("inherits")
-    if inh:
-        return inh
-    have = [p.name for p in (mv / "targets").iterdir() if p.is_dir() and p.name != t] if (mv / "targets").is_dir() else []
-    lower = sorted((x for x in have if mc_key(x) < mc_key(t)), key=mc_key)
-    return lower[-1] if lower else None
-
-
-def target_done(repo, t, _seen=None, write=True, prepare=False):
-    """[] when target t is DONE by the one definition above; else every reason it is not, one line each.
-    write=False: nothing is written (--check-done only asks). prepare: re-prepare a missing or stale prepared tree for
-    the inventory check (no compile) -- only a caller holding the checkout passes it."""
-    repo = pathlib.Path(repo)
-    mv = repo / ".multiversion"
-    tdir = mv / "targets" / t
-    if not tdir.is_dir():
-        return [f"{t} is not a target of this layer"]
-    out = []
-    if (tdir / RED_GATES).is_file():
-        out.append(f"the last full gate run was red ({RED_GATES}); GATES.md's older green record does not count until a "
-                   "full run is green again")
-    elif gates_auto(tdir) != "ab":
-        out.append("no green Gate C recorded in GATES.md")
-    else:
-        cur, why = gates_current(repo, t)
-        if not cur:
-            out.append(why)
-    n_open = len(unreviewed_stubs(tdir))
-    if n_open:
-        out.append(f"{n_open} unreviewed stub signal(s) in STUBS.json")
-    out += review_problems(repo, tdir)
-    out += remerge_open(repo, tdir)       # layer-sync.py: an overlay the authors' change did not merge into
-    if not (tdir / "TEST-ITEMS.md").is_file():
-        out.append(f"manual-test items not generated (TEST-ITEMS.md): write them, no gate run: "
-                   f"python3 tools/fork-port.py --repo {repo} --target {t} --write-test-items")
-    # (6) every base behaviour item accounted for (tools/layer-inventory.py; [] on a single-version fork). It writes
-    # the target's INVENTORY-CHECK.json, a run output like GATES.md (REVIEW_OUTPUTS), unless write=False. Its prepared
-    # tree must be current, or its answer is about older code
-    tree = prepared_tree(repo, t, prepare=prepare)
-    rv = tdir / "REVIEW.md"
-    notok = not_ok_items(rv.read_text(encoding="utf-8", errors="replace")) if rv.is_file() else {}
-    out += tree or drop_reported_items(load("layer_inventory", "layer-inventory.py").inventory_unaccounted(repo, t, write=write),
-                                       notok)
-    # (7) R3: a target resolved against a library target that was not done (--allow-undone-library) is development only
-    deps_md = tdir / "DEPS.md"
-    if deps_md.is_file() and UNDONE_LIBRARY_MARK in deps_md.read_text(encoding="utf-8", errors="replace"):
-        out.append("built against a library target that is not done (--allow-undone-library, DEPS.md \"Development only\"): "
-                   "re-resolve with --port-release once the library's target is done")
-    allowed = read_props(tdir / "target.properties").get("allowed_undone_parent", "")
-    if allowed:
-        p = allowed.split()[0]
-        seen = (_seen or set()) | {t}
-        if p not in seen and (mv / "targets" / p).is_dir() and target_done(repo, p, seen, write=write):
-            out.append(f"its parent {p} is still not done (added with --allow-undone-parent: {allowed})")
-    return out
-
-
 UNDONE_LIBRARY_MARK = "**Development only (`--allow-undone-library`):**"     # tools/layer-deps.py render_md()
-
-
-def undone_parent_stop(repo, t, allow=False, parent=None, prepare=False):
-    """Before a NEW target is added: (parent, reasons) when the target it would stand on is not done, else None.
-    With allow, the same answer, for the caller to record. parent: the target it will inherit, when the caller has
-    resolved it (make-fork-layer.py add-target --inherits); else parent_target(). Read-only (write=False); prepare as
-    target_done()."""
-    mv = pathlib.Path(repo) / ".multiversion"
-    if (mv / "targets" / t).is_dir():
-        return None
-    p = parent or parent_target(mv, t)
-    if not p or not (mv / "targets" / p).is_dir():
-        return None
-    why = target_done(repo, p, write=False, prepare=prepare)
-    return (p, why) if why else None
 
 
 # ---------------------------------------------------------------- the authors' commit a buildout started from (R4)
 #
-# .multiversion/base.properties records `upstream=<remote>/<branch>` (the authors' branch, as port-sync.py --upstream
-# names it), `upstream_commit=<sha>` (the authors' commit the layer branch carried when the buildout started: the
-# merge-base of HEAD and that branch, which HEAD must carry in full: freeze refuses a branch HEAD lacks commits of) and
-# `library.<owner>/<repo>=<tag>` (each sibling library's layer release the buildout resolves against, from
-# --port-release). Recorded at `make-fork-layer.py init --upstream` / `freeze`, or by fork-port.py when it adds the
-# first target of a layer that has no record (the branch: --upstream, else the one `upstream` remote branch HEAD
-# carries -- never the remote's default branch as such). A run to the end then stops with exit 19 when the authors'
-# branch has commits after the recorded one that the checkout does not carry (the upstream moved: keep-current first),
-# or -- frozen upstream or not -- when a --port-release names another release of a recorded library; the fetch never
-# prompts. --accept-upstream-drift continues and records it in
-# .multiversion/DRIFT.md. A single-version fork has no .multiversion/: nothing here runs.
+# A version branch's .port/<t>/branch.properties records `upstream=<remote>/<branch>` (the authors' branch, as
+# port-sync.py --upstream names it), `upstream_commit=<sha>` (the authors' commit the branch carried when the buildout
+# started: the merge-base of HEAD and that branch, which HEAD must carry in full: freeze refuses a branch HEAD lacks
+# commits of) and `library.<owner>/<repo>=<tag>` (each sibling library's release the buildout resolves against, from
+# --port-release). Recorded by `fork-branches.py freeze` (the branch: --upstream, else the one `upstream` remote branch
+# HEAD carries -- never the remote's default branch as such); a new version inherits its parent's record. A run to the
+# end then stops with exit 19 when the authors' branch has commits after the recorded one that the checkout does not
+# carry (the upstream moved: keep-current first), or -- frozen upstream or not -- when a --port-release names another
+# release of a recorded library; the fetch never prompts. --accept-upstream-drift continues and records it in
+# .port/<t>/DRIFT.md. A single-version fork has no version branch: nothing here runs.
 
 DRIFT_EXIT = 19
 UNDONE_EXIT = 18
@@ -1426,16 +886,16 @@ def write_props(path, updates):
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def freeze_upstream(repo, ref=None, libraries=(), accept_drift=False, props_file=None):
+def freeze_upstream(repo, ref, libraries, accept_drift, props_file):
     """Record the authors' commit the buildout starts from (the merge-base of HEAD and `ref`, default the recorded or
-    detected `upstream` branch) and each `owner/repo@TAG` library release in base.properties (props_file: another
-    properties file -- a version branch's .port/<t>/branch.properties). -> (what was recorded, None) or (None, why not).
+    detected `upstream` branch) and each `owner/repo@TAG` library release in props_file (a version branch's
+    .port/<t>/branch.properties). -> (what was recorded, None) or (None, why not).
     Pinning a library only (libraries, no `ref`, an upstream already recorded) leaves the upstream record as it is, so a
     moved authors' branch never blocks a library pin (issue #133, gap 3); accept_drift records the merge-base although
     HEAD lacks commits of the branch (the run then stops with 19 until keep-current, or continues with
     --accept-upstream-drift)."""
     repo = pathlib.Path(repo)
-    bp = pathlib.Path(props_file) if props_file else repo / ".multiversion/base.properties"
+    bp = pathlib.Path(props_file)
     props = read_props(bp)
     if libraries and not ref and props.get("upstream_commit"):
         ref = None                              # a library pin alone: the upstream record stays
@@ -1533,27 +993,18 @@ def untaken_ok(repo, a, rec, compared=True):
                   f"upstream_commit {str(uc or '?')[:12]} yet: merge it first")
 
 
-def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
-    """The R4 check for a run to the end on a layer fork: None, or the stop for an authors' branch (or a recorded
-    library release) that moved since the buildout's freeze. Records the freeze first when the layer has none and this
-    run adds its first target (or names --upstream). Prints what it did. props_file / drift_file: a version branch's
-    .port/<t>/branch.properties and DRIFT.md instead of the layer's base.properties and DRIFT.md."""
-    if os.environ.get(DRIFT_CHECKED_ENV) == "1":      # a --chain sweep's own child: the sweep checked once
-        return None
+def drift_stop(repo, a, props_file, drift_file, fetch=True):
+    """The R4 check for a run to the end on a version branch: None, or the stop for an authors' branch (or a recorded
+    library release) that moved since the buildout's freeze (props_file: the branch's .port/<t>/branch.properties;
+    drift_file: its DRIFT.md). Prints what it did."""
     repo = pathlib.Path(repo)
-    mv = repo / ".multiversion"
-    bp = pathlib.Path(props_file) if props_file else mv / "base.properties"
+    bp = pathlib.Path(props_file)
     if not bp.is_file():
         return None
     props = read_props(bp)
-    if props_file:
-        new_first = False
-    else:
-        have_targets = any(p.is_dir() for p in (mv / "targets").iterdir()) if (mv / "targets").is_dir() else False
-        new_first = not (mv / "targets" / a.target).is_dir() and not have_targets
     up = getattr(a, "upstream", None)
-    if not props.get("upstream_commit") and (new_first or up):
-        rec, why = freeze_upstream(repo, up, getattr(a, "port_release", []), props_file=props_file)
+    if not props.get("upstream_commit") and up:
+        rec, why = freeze_upstream(repo, up, getattr(a, "port_release", []), False, props_file)
         print(f"fork-port: upstream: " + (f"froze the buildout at {', '.join(f'{k}={v}' for k, v in rec.items())} "
                                           f"({bp.relative_to(repo).as_posix()})" if rec else f"NOT frozen: {why}"))
         props = read_props(bp)
@@ -1561,14 +1012,12 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
     port = a.base.split("/", 1)[1] if "/" in a.base else a.base
     kc = (f"keep-current for this fork first (Claude Code: \"keep this fork current\"; command line: python3 "
           f"tools/port-sync.py --repo {repo} --port {port} --upstream {ref or '<remote>/<branch>'} --dry-run, then the "
-          f"keep-current skill), then " + (f"fork-branches.py freeze --repo {repo} --target {a.target}" if props_file
-                                             else f"make-fork-layer.py freeze --repo {repo}"))
+          f"keep-current skill), then fork-branches.py freeze --repo {repo} --target {a.target}")
     reasons, upstream_reasons, compared = [], [], True
     if not rec:
         print(f"fork-port: upstream: WARNING no authors' commit recorded for this buildout ({bp.relative_to(repo).as_posix()} "
               "upstream/upstream_commit): an upstream that moves mid-ladder goes unseen -- "
-              + (f"fork-branches.py freeze --repo {repo} --target {a.target}" if props_file else f"make-fork-layer.py freeze --repo {repo}")
-              + " --upstream <remote>/<branch>")
+              + f"fork-branches.py freeze --repo {repo} --target {a.target} --upstream <remote>/<branch>")
     else:
         st = upstream_drift(repo, ref, rec, fetch=fetch)
         if st.get("fetch_error"):
@@ -1587,14 +1036,12 @@ def drift_stop(repo, a, fetch=True, props_file=None, drift_file=None):
                                     + ("" if st["fetched"] else "; not fetched now, compared with the last fetch") + ")")
         elif since:
             print(f"fork-port: upstream: the checkout carries {ref} at {st['tip'][:12]}, newer than the freeze {rec[:12]} "
-                  f"(keep-current merged it): record it with "
-                  + (f"fork-branches.py freeze --repo {repo} --target {a.target}" if props_file
-                     else f"make-fork-layer.py freeze --repo {repo}"))
+                  f"(keep-current merged it): record it with fork-branches.py freeze --repo {repo} --target {a.target}")
         elif st.get("behind"):
             print(f"fork-port: upstream: note: {ref} has {st['behind']} commit(s) this checkout does not carry, none of "
                   f"them after the freeze {rec[:12]}: not a stop")
     day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    df = pathlib.Path(drift_file) if drift_file else mv / "DRIFT.md"
+    df = pathlib.Path(drift_file)
     if upstream_reasons and not getattr(a, "accept_upstream_drift", False):
         note, why_not = untaken_ok(repo, a, rec, compared)
         if note:
@@ -1707,7 +1154,7 @@ def record_stubs(tdir, found, parents=(), repo=None):
     """Merge this run's stub signals into tdir/STUBS.json ([{file, why, reviewed, hooks}]) and return every entry. An
     entry a reviewer marked ("reviewed": "<why the change is right>") stays reviewed unless a later run flags the file
     again for a new reason. A NEW entry whose every signal, word for word (counts included), was already reviewed for
-    the same file in a target this one inherits (parents: their target dirs, nearest first) takes that review, marked
+    the same file in a version this one stands on (parents: their .port/<v>/ dirs, nearest first) takes that review, marked
     as inherited: the same loss re-flagged one version on is not a new question (measured: six of a target's eight).
     With repo (the fork checkout the entries' paths are relative to), each entry also records "hooks", the file's
     hook_targets() when it was recorded -- what a review of it is made against -- and an inherited review is taken
@@ -1721,20 +1168,19 @@ def record_stubs(tdir, found, parents=(), repo=None):
     except ValueError:
         have = []
     by = {e["file"]: e for e in have}
-    rel = lambda f: re.sub(r"/targets/[^/]+/", "/targets/*/", f)
     prior = {}
     for pd in parents:
         try:
             for e in json.loads((pd / "STUBS.json").read_text(encoding="utf-8")) if (pd / "STUBS.json").is_file() else []:
                 if e.get("reviewed"):
-                    prior.setdefault(rel(e["file"]), (pd.name, e))
+                    prior.setdefault(e["file"], (pd.name, e))
         except ValueError:
             continue
     for s in found:
         e = by.get(s["file"])
         if e is None or s["why"] not in e.get("why", ""):
             why = s["why"] if e is None else e["why"] + "; " + s["why"]
-            src = prior.get(rel(s["file"]))
+            src = prior.get(s["file"])
             new = {"file": s["file"], "why": why, "reviewed": None}
             now = _hooks_of(repo, s["file"])
             if now is not None:
@@ -1762,49 +1208,7 @@ def record_stubs(tdir, found, parents=(), repo=None):
     return out
 
 
-def merge_shared_at(mv, target, at):
-    """Add every access-transformer line the target's shared libraries need (.multiversion/shared/<v>/accesstransformer.cfg
-    for each version in shared_chain) to the target's own AT, unless an equal line (comment aside) is there. A helper
-    that extends a constructor vanilla made private compiles only with its line; inheriting the line from the previous
-    target's AT misses a direct jump, which has no previous target. -> the lines added."""
-    want = []
-    for v in shared_chain(mv, target):
-        f = mv / "shared" / v / "accesstransformer.cfg"
-        if f.is_file():
-            for ln in f.read_text(encoding="utf-8").splitlines():
-                if not ln.strip() or ln.lstrip().startswith("#"):
-                    continue
-                # `# until <version>`: a line for a class that a later Minecraft removed reaches targets up to that version
-                # only (measured: a 1.21.3 constructor line was merged into every target through 26.3)
-                until = re.search(r"#.*\buntil (\d[\w.]*)", ln)
-                if until and mc_key(target) > mc_key(until.group(1)):
-                    continue
-                want.append(ln)
-    have = at.read_text(encoding="utf-8") if at.exists() else ""
-    rule = lambda ln: " ".join(ln.split("#", 1)[0].split())
-    known = {rule(ln) for ln in have.splitlines()}
-    add = []
-    for ln in want:
-        if rule(ln) not in known:
-            known.add(rule(ln)); add.append(ln)
-    if add:
-        at.parent.mkdir(parents=True, exist_ok=True)
-        at.write_text(have + ("" if have.endswith("\n") or not have else "\n") + "\n".join(add) + "\n", encoding="utf-8")
-    return add
-
-
-SHARED_DIR = ROOT / "templates/fork-layer/shared"
 ERRORS_PER_DOLLAR = 100      # measured hops cleared 76-144 errors per dollar of workers (issue #49); the guard's default
-
-
-def skipped_shared(mv, target, shared_root=SHARED_DIR):
-    """Shared libraries (versions) strictly between what `target` inherits (or the base) and itself that its shared chain
-    does not include: a target that skips versions without `shared_chain` would miss their rows and helpers."""
-    ch = chain(mv, target)
-    low = ch[1] if len(ch) > 1 else read_props(mv / "base.properties").get("minecraft_version", "0")
-    have = set(shared_chain(mv, target))
-    vs = [p.name for p in shared_root.iterdir() if p.is_dir()] if shared_root.is_dir() else []
-    return sorted((v for v in vs if mc_key(low) < mc_key(v) < mc_key(target) and v not in have), key=mc_key)
 
 
 def spend_guard(errors, budget, max_errors=None, confirm=False):
@@ -1855,36 +1259,6 @@ def read_pairs(path):
             a, b = l.split("\t")[:2]
             out.append((a.strip(), b.strip()))
     return out
-
-
-def layer_history(rel="templates/fork-layer/tools/layer.py"):
-    """Every committed version of the template's layer.py (git log of the migrator), newest first; [] without git."""
-    r = subprocess.run(["git", "-C", str(ROOT), "log", "--format=%H", "--", rel], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-    out = []
-    for h in r.stdout.split() if r.returncode == 0 else []:
-        s = subprocess.run(["git", "-C", str(ROOT), "show", f"{h}:{rel}"], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
-        if s.returncode == 0:
-            out.append(s.stdout)
-    return out
-
-
-def layer_patch(fork_text, template_text, history=(), need_shared_chain=False):
-    """('current'|'replace'|'diverged', text). The fork's layer.py is the migrator's file copied in by `init`. It is
-    replaced only when it is a verbatim OLDER copy of the template (the template minus the moves lines, or any version in
-    `history`); anything else a human merges. A fork whose layer.py already reads the generated moves is `current` unless a
-    target needs `shared_chain` (a direct jump) and the copy does not know it -- so a fork that does not jump is
-    never touched."""
-    if fork_text == template_text:
-        return "current", fork_text
-    if "moves.generated.tsv" in fork_text and not (need_shared_chain and "shared_chain" not in fork_text):
-        return "current", fork_text
-    if INSERT in template_text and fork_text == template_text.replace(INSERT, ""):
-        return "replace", template_text
-    if fork_text in set(history):
-        return "replace", template_text
-    return "diverged", fork_text
 
 
 def below_java(p):
@@ -1950,18 +1324,16 @@ def stop_block(stop):
 ENVIRONMENTAL = re.compile(r"JVM killed \(exit \d+|not enough free memory \(")
 
 
-# Issue #122: a layer run's own Gradle invocations before Gate C (stage, measure, the loop's compiles, the audit's
+# Issue #122: a run's own Gradle invocations before Gate C (stage, measure, the loop's compiles, the audit's
 # classpath, ci-gates' builds) left resident daemons and workers (measured: ~2.3 GB) and Gate C's free-memory guard then
 # refused. Every Gradle this run starts runs daemon-less: each exits when its build ends, so nothing the run started is
 # resident when the client needs the memory. Not `gradlew --stop`: that stops other checkouts' daemons too (#113).
 NO_DAEMON = "-Dorg.gradle.daemon=false"
 
 
-def gradle_env(env, layer):
-    """-> the environment for the run's subprocesses: on a layer fork `env` with NO_DAEMON in GRADLE_OPTS (unless
-    GRADLE_OPTS already sets org.gradle.daemon: the person's choice stands); otherwise None (inherit, unchanged)."""
-    if not layer:
-        return None
+def gradle_env(env):
+    """-> the environment for the run's subprocesses: `env` with NO_DAEMON in GRADLE_OPTS (unless GRADLE_OPTS already
+    sets org.gradle.daemon: the person's choice stands)."""
     env = dict(env)
     opts = env.get("GRADLE_OPTS", "")
     if "org.gradle.daemon" not in opts:
@@ -2095,21 +1467,37 @@ def residue_report(stage, left, errors_view, esc, audit, gates, resume, environm
     return "\n".join(md), data
 
 
+# ---------------------------------------------------------------- a version branch (tools/fork-branches.py)
+#
+# Version t is the branch neoforge-<t>, a plain single-version build at Minecraft t, with its records in .port/<t>/.
+# The stages run on the checked-out branch's own tree: the compile loop edits src/ (file-loop.py), the generated class
+# moves are applied to the source as rows and kept in .port/<t>/moves.generated.tsv, the gates are ci-gates.py --mc <t>
+# (its branch mode), and the done list is tools/fork-branches.py target_done(). Nothing here runs for a single-version
+# fork (no version branch).
+
+
+def fork_branches():
+    return load("fork_branches", "fork-branches.py")
+
+
 # ---------------------------------------------------------------- running things
 
+
 class Run:
+    """One fork-port.py run on version branch t (its checkout, its .port/<t>/ records)."""
+
     def __init__(self, a):
         self.a = a
         self.repo = pathlib.Path(a.repo).resolve()
-        self.mv = self.repo / ".multiversion"
         self.t = a.target
-        self.tdir = self.mv / "targets" / self.t
+        self.fb = fork_branches()
+        self.tdir = self.repo / ".port" / self.t
         self.work = self.repo / "build" / f"mc{self.t}" / "fork-port"
         self.summary = {"repo": str(self.repo), "target": self.t, "stages": {},
                         "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")}
         self.jpath = pathlib.Path(a.json) if a.json else self.work / "fork-port.json"
         self.py = sys.executable
-        self.env = gradle_env(os.environ, (self.mv / "base.properties").exists())    # None: not a layer fork, inherit
+        self.env = gradle_env(os.environ)
 
     def say(self, stage, msg):
         print(f"fork-port: {stage}: {msg}", flush=True)
@@ -2121,12 +1509,6 @@ class Run:
         if log:
             out.close()
         return r
-
-    def gradle(self, tasks, log):
-        init = [str(x) for x in ("--init-script", ROOT / "tools/maxerrs.init.gradle",
-                                 "--init-script", ROOT / "tools/central-mirror.init.gradle")]
-        return self.sh([BASH, str(self.mv / "build.sh"), self.t, *tasks, "--continue", "--console=plain", *init,
-                        "-Dorg.gradle.jvmargs=-Xmx6g"], log)
 
     def count(self, log):
         """(errors or None, reason). BUILD SUCCESSFUL is 0; otherwise only burndown-count.sh may call it a count."""
@@ -2140,10 +1522,6 @@ class Run:
             return None, " ".join(lines[:2] + [re.sub(r"^.*/mv/", "mv/", x) for x in lines[2:8]])
         m = re.search(r"errors = (\d+)", r.stdout)
         return (int(m.group(1)) if m else None), ""
-
-    def artifacts(self):
-        d = self.repo / "build" / f"mc{self.t}" / "moddev" / "artifacts"
-        return sorted(d.glob("*merged.jar")), sorted(j for j in d.glob("*-sources.jar") if "resources" not in j.name)
 
     def resume_cmd(self, stage):
         a = self.a
@@ -2160,126 +1538,6 @@ class Run:
         self.jpath.parent.mkdir(parents=True, exist_ok=True)
         self.jpath.write_text(json.dumps(self.summary, indent=1), encoding="utf-8")
 
-    # ---- stages: each returns a result dict; a "stop" key ends the run
-
-    def s_setup(self):
-        if not (self.mv / "base.properties").exists():
-            return {"stop": "no .multiversion/ in the fork", "code": 2,
-                    "choices": [f"python3 tools/make-fork-layer.py init --repo {self.repo}"]}
-        did = []
-        if not (self.mv / "INVENTORY.json").is_file():
-            # R2: the base build's behaviour inventory, once per layer (a layer made before it existed gets one here);
-            # done (target_done) needs every item accounted for, so it is built before the parent's done check
-            r = self.sh([self.py, str(ROOT / "tools/layer-inventory.py"), "build", "--repo", str(self.repo)])
-            if r.returncode != 0:
-                return {"stop": "layer-inventory.py build failed: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:300],
-                        "code": 2, "choices": [f"python3 tools/layer-inventory.py build --repo {self.repo}"]}
-            did.append("behaviour inventory: " + ((r.stdout or "").strip().splitlines() or ["built"])[-1]
-                       .replace("layer-inventory: ", "").split(" -> ")[0] + " (commit .multiversion/INVENTORY.json)")
-        if not self.tdir.is_dir():          # R1: never start target N+1 before N is done
-            und = undone_parent_stop(self.repo, self.t, prepare=True)    # this run holds the checkout lock
-            if und and not getattr(self.a, "allow_undone_parent", False):
-                p, why = und
-                return {"stop": f"{p}, the target {self.t} would stand on, is not done: {'; '.join(why[:3])}"[:600],
-                        "code": UNDONE_EXIT, "detail": why[:8],
-                        "choices": [f"finish {p} first: python3 tools/fork-port.py --repo {self.a.repo} --target {p} "
-                                    "(and its review: fork-versions skill, \"Done\")",
-                                    f"development only: the same command with --allow-undone-parent (recorded in {self.t}'s "
-                                    f"target.properties; {self.t} is then not done until {p} is)"]}
-            if und:
-                did.append(f"WARNING parent {und[0]} not done, allowed (--allow-undone-parent, recorded)")
-        allow_lib = getattr(self.a, "allow_undone_library", False)
-        deps = [self.py, str(ROOT / "tools/layer-deps.py"), "resolve", "--repo", str(self.repo), "--target", self.t,
-                *[x for c in getattr(self.a, "port_checkout", []) for x in ("--port-checkout", c)],
-                *[x for c in getattr(self.a, "port_release", []) for x in ("--port-release", c)],
-                *(["--allow-undone-library"] if allow_lib else [])]
-        if allow_lib:     # R3's development escape: recorded in the summary here, in DEPS.md by layer-deps.py
-            self.summary["allow_undone_library"] = True
-        if pins_dependencies(self.repo):
-            r = self.sh([*deps, "--dry-run"])
-            if r.returncode == UNDONE_EXIT:
-                return self.library_stop(r)
-            if r.returncode == 15:
-                stop = next((ln for ln in (r.stdout or "").splitlines() if "STOP" in ln), "a required dependency has no build")
-                return {"stop": stop.replace("layer-deps: STOP ", "")[:600], "code": 15,
-                        "choices": [f"skip {self.t}: the next target jumps over it (fork-port.py --direct)",
-                                    "or find a build for it and pin it in the target's target.properties by hand"]}
-            if r.returncode != 0:
-                return {"stop": "layer-deps.py failed: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:300], "code": 2,
-                        "choices": [DEPS_CHOICE]}
-        if not self.tdir.is_dir():
-            r = self.sh([self.py, str(ROOT / "tools/make-fork-layer.py"), "add-target", "--repo", str(self.repo),
-                         "--target", self.t, *(["--direct"] if self.a.direct else []),
-                         *(["--allow-undone-parent"] if getattr(self.a, "allow_undone_parent", False) else [])])
-            if r.returncode != 0:
-                return {"stop": "add-target refused: " + ((r.stdout or "").strip().splitlines() or ["?"])[-1][:300],
-                        "code": UNDONE_EXIT if r.returncode == UNDONE_EXIT else 2,
-                        "choices": ["make-fork-layer.py versions lists the targeted lines and why others are skipped"]}
-            did.append("add-target")
-        r = self.sh([self.py, str(ROOT / "tools/make-fork-layer.py"), "sync-shared", "--repo", str(self.repo)])
-        did.append("sync-shared")
-        div = [ln.split("DIVERGED ", 1)[1].split(" ", 1)[0] for ln in (r.stdout or "").splitlines() if "DIVERGED " in ln]
-        if div:   # an edited machinery file is never written over: say so, and the layer_patch guard below decides layer.py
-            did.append(f"left alone (edited, not a template copy -- merge by hand): {', '.join(div)}")
-        # every table in the inherits chain: a row harvested from a parent target is a duplicate in this target's merge too
-        gone = [r for x in chain(self.mv, self.t) if (self.mv / "targets" / x).is_dir() for r in drop_harvested_rows(self.mv, x)]
-        if gone:
-            did.append(f"{len(gone)} row(s) now in the shared library dropped from the target's table")
-        shadow = drop_shadowing_overlays(self.mv, self.t)
-        if shadow:
-            did.append(f"{len(shadow)} overlay(s) identical to a shared helper dropped")
-        n_rec, refused = layer_recipes(self.repo, self.tdir, self.t)
-        if n_rec or refused:
-            did.append(f"{n_rec} recipe(s) in the 1.21.2 ingredient form" + (f", {len(refused)} refused (Gate B will name them)"
-                                                                               if refused else ""))
-        n_pred, refused = layer_entity_predicates(self.repo, self.tdir, self.t, self.mv)
-        if n_pred or refused:
-            did.append(f"{n_pred} advancement/loot table(s) with 26.2 entity predicates"
-                       + (f", {len(refused)} refused (Gate B will name them)" if refused else ""))
-        n_263, refused = layer_263_data(self.repo, self.tdir, self.t, self.mv)
-        if n_263 or refused:
-            did.append(f"{n_263} file(s) in the 26.3 data form (block states, trim palettes, loot grammar)"
-                       + (f", {len(refused)} refused (Gate B will name them)" if refused else ""))
-        n_items = layer_client_items(self.repo, self.tdir, self.t)
-        if n_items:
-            did.append(f"{n_items} client item definition(s)")
-        if pins_dependencies(self.repo):
-            r = self.sh(deps)
-            if r.returncode == UNDONE_EXIT:
-                return self.library_stop(r)
-            if r.returncode != 0:
-                return {"stop": "layer-deps.py resolve: " + " ".join((r.stdout or "").strip().splitlines()[-2:])[:600],
-                        "code": 15 if r.returncode == 15 else 2, "choices": [DEPS_CHOICE]}
-            did.append("layer-deps: " + ((r.stdout or "").strip().splitlines() or [""])[-1].split(": ", 2)[-1])
-            if allow_lib and "LIBRARY NOT DONE" in (r.stdout or ""):
-                did.append("WARNING built against a library target that is not done (--allow-undone-library, recorded "
-                           "in DEPS.md; this target is not done until it is re-resolved with --port-release)")
-        n_geo = layer_geckolib_assets(self.repo, self.tdir, self.t)
-        if n_geo:
-            did.append(f"{n_geo} GeckoLib model/animation file(s) at the 5.x paths")
-        lp, tp = self.mv / "tools/layer.py", ROOT / "templates/fork-layer/tools/layer.py"
-        need_sc = any("shared_chain" in read_props(self.mv / "targets" / x / "target.properties")
-                      for x in chain(self.mv, self.t) if (self.mv / "targets" / x / "target.properties").is_file())
-        fork_text = lp.read_text(encoding="utf-8")
-        verdict, text = layer_patch(fork_text, tp.read_text(encoding="utf-8"),
-                                    layer_history() if "moves.generated.tsv" not in fork_text or need_sc else (), need_sc)
-        if verdict == "replace":
-            lp.write_text(text, encoding="utf-8"); did.append("layer.py: replaced by the template's (shared_chain / generated-moves support)")
-        elif verdict == "diverged":
-            return {"stop": ".multiversion/tools/layer.py lacks " + ("shared_chain" if need_sc and "moves.generated.tsv" in fork_text
-                                                                       else "moves.generated.tsv") +
-                            " support and is not a verbatim older copy of the template, so it cannot be replaced safely",
-                    "code": 2,
-                    "choices": ["merge templates/fork-layer/tools/layer.py's changes (generated moves, shared_chain) into the fork's copy"]}
-        warn = load("layer_sync", "layer-sync.py").inherited_rows_unsupported(self.mv)
-        if warn:    # the key is set and the fork's (edited, so not replaced) layer.py ignores it: say so every run
-            print(f"fork-port: {warn}", flush=True); did.append(warn)
-        stale = load("layer_ci", "layer-ci.py").only_mixins_unsupported(self.repo, self.t)
-        if stale:   # issue #119: an edited (so not synced) copy would keep an _only mixin on every later target in silence
-            return {"stop": f"{self.t}'s chain uses mixin_add_only/mixin_remove_only and {', '.join(stale)} does not read them",
-                    "code": 2, "choices": ["merge templates/fork-layer's layer.gradle / tools/layer.py (mixin_add_only) into the fork's copy"]}
-        return {"done": ", ".join(did)}
-
     def library_stop(self, r):
         """layer-deps.py exit 18: a sibling library's target is not done (R3, library first). -> the stop, code 18."""
         stop = next((ln for ln in (r.stdout or "").splitlines() if "STOP" in ln), "a sibling library's target is not done")
@@ -2288,94 +1546,6 @@ class Run:
                             "layer-release), then resume with --port-release owner/repo@TAG",
                             "development only, against a --port-checkout: the same command with --allow-undone-library "
                             f"(recorded in DEPS.md; {self.t} is then not done until it is re-resolved with --port-release)"]}
-
-    def s_stage(self):
-        ch = chain(self.mv, self.t)
-        at = self.tdir / "resources/META-INF/accesstransformer.cfg"
-        if not at.exists():     # the nearest AT in the chain, else the authors': the target's file replaces them
-            src = next((self.mv / "targets" / x / "resources/META-INF/accesstransformer.cfg" for x in ch[1:]
-                        if (self.mv / "targets" / x / "resources/META-INF/accesstransformer.cfg").exists()),
-                       self.repo / "src/main/resources/META-INF/accesstransformer.cfg")
-            if src.exists():
-                at.parent.mkdir(parents=True, exist_ok=True)
-                at.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-        merge_shared_at(self.mv, self.t, at)
-        self.work.mkdir(parents=True, exist_ok=True)
-        for rnd in range(1, STAGE_ROUNDS + 1):
-            log = self.work / f"stage-{rnd}.log"
-            self.gradle(["compileJava"], log)
-            text = log.read_text(encoding="utf-8", errors="replace")
-            merged, sources = self.artifacts()
-            if "createMinecraftArtifacts FAILED" not in text and merged and sources:
-                return {"done": f"Minecraft staged ({len(merged)} merged jar(s)), {rnd} round(s)", "rounds": rnd}
-            if not at.exists():
-                break
-            # fix-access-transformer edits src/*/resources/META-INF/accesstransformer.cfg under --work: give it the
-            # TARGET's file in a scratch tree, then take the result back. The authors' AT is never touched.
-            with tempfile.TemporaryDirectory() as tmp:
-                scratch = pathlib.Path(tmp) / "src/main/resources/META-INF/accesstransformer.cfg"
-                scratch.parent.mkdir(parents=True)
-                scratch.write_text(at.read_text(encoding="utf-8"), encoding="utf-8")
-                r = self.sh([self.py, str(ROOT / "tools/fix-access-transformer.py"), "--work", tmp,
-                             "--overrides-from", str(log)])
-                added = re.search(r"(\d+) override widening", r.stdout or "")
-                if not added or int(added.group(1)) == 0:
-                    break
-                at.write_text(scratch.read_text(encoding="utf-8"), encoding="utf-8")
-        tail = [l for l in text.splitlines() if "What went wrong" in l or "error" in l.lower()][:4]
-        return {"stop": "Minecraft would not stage (createMinecraftArtifacts)", "code": 10, "detail": tail,
-                "choices": ["read build/mc%s/fork-port/stage-*.log for the first failure, fix the access "
-                            "transformer by hand in targets/%s/resources/META-INF/" % (self.t, self.t)]}
-
-    def s_moves(self):
-        ch = chain(self.mv, self.t)
-        prev = ch[1] if len(ch) > 1 else read_props(self.mv / "base.properties").get("minecraft_version", "base")
-        if len(ch) > 1:
-            old_dir = self.repo / "build" / f"mc{prev}" / "moddev" / "artifacts"
-        else:
-            old_dir = self.repo / "build" / "moddev" / "artifacts"
-        old = sorted(old_dir.glob("*merged.jar"))
-        if not old:     # the previous target (or, on a direct jump / first target, the base) was never staged here
-            self.sh([BASH, str(self.mv / "build.sh"), prev, "createMinecraftArtifacts", "--console=plain"],
-                    self.work / "stage-prev.log")
-            old = sorted(old_dir.glob("*merged.jar"))
-        new, _ = self.artifacts()
-        if not old or not new:
-            return {"stop": f"no staged merged jar for {prev if not old else self.t}", "code": 10,
-                    "choices": [f"stage it: .multiversion/build.sh {prev if not old else self.t} createMinecraftArtifacts"]}
-        self.work.mkdir(parents=True, exist_ok=True)
-        cps = []
-        for name, jars in (("old", old), ("new", new)):
-            p = self.work / f"cp-{name}.txt"
-            p.write_text("\n".join(str(j) for j in jars) + "\n", encoding="utf-8")
-            cps.append(p)
-        raw = self.work / f"moves-{prev}-to-{self.t}.tsv"
-        r = self.sh([self.py, str(ROOT / "tools/build-class-move-map.py"), "--from-cp", str(cps[0]), "--to-cp",
-                     str(cps[1]), "--out", str(raw)])
-        if r.returncode != 0 or not raw.exists():
-            return {"stop": "build-class-move-map.py failed: " + (r.stdout or "").strip()[-200:], "code": 10,
-                    "choices": ["see build-class-move-map.py's usage; check both jars hold net.minecraft classes"]}
-        existing = set()
-        for x in dict.fromkeys(ch + shared_chain(self.mv, self.t)):      # a direct jump's shared tables count too (X31)
-            for f in (self.mv / "targets" / x / "renames.tsv", self.mv / "shared" / x / "renames.tsv"):
-                if f.is_file():
-                    existing |= plain_froms(f.read_text(encoding="utf-8"))
-        text, kept, dup = moves_table(read_pairs(raw), existing, prev, self.t)
-        gen = self.tdir / "moves.generated.tsv"
-        gen.write_text(text, encoding="utf-8")
-        at = self.tdir / "resources/META-INF/accesstransformer.cfg"
-        fixed = ""
-        if at.is_file():    # an AT entry for a class vanilla moved matches nothing; rewrite those to the new names
-            with tempfile.TemporaryDirectory() as tmp:
-                scratch = pathlib.Path(tmp) / "src/main/resources/META-INF/accesstransformer.cfg"
-                scratch.parent.mkdir(parents=True)
-                scratch.write_text(at.read_text(encoding="utf-8"), encoding="utf-8")
-                self.sh([self.py, str(ROOT / "tools/fix-access-transformer.py"), "--work", tmp, "--class-map", str(raw)])
-                new_at = scratch.read_text(encoding="utf-8")
-                if new_at != at.read_text(encoding="utf-8"):
-                    at.write_text(new_at, encoding="utf-8"); fixed = ", access transformer re-pointed at moved classes"
-        return {"done": f"{kept} unambiguous move(s) {prev}->{self.t} -> {gen.relative_to(self.repo)}"
-                        f"{f' ({dup} already in a table)' if dup else ''}{fixed}", "moves": kept}
 
     def s_measure(self):
         ss = load("srcsets", "srcsets.py")
@@ -2401,12 +1571,6 @@ class Run:
             self.say("measure", gap)
         return {"done": f"{n} error(s) across {len(tasks)} compile task(s) (starting count)", "errors": n, "log": str(log), "this_run": True}
 
-    def shared_gap(self):
-        """A warning, or None: a layer target that skips versions without shared_chain misses their shared library."""
-        sk = skipped_shared(self.mv, self.t)
-        return (f"WARNING {self.t} skips shared librar{'y' if len(sk) == 1 else 'ies'} {', '.join(sk)} "
-                f"and has no shared_chain: their rows and helpers are NOT applied (add-target --direct)") if sk else None
-
     def error_view(self, log):
         cs = load("compile_summary", "compile-summary.py")
         text = pathlib.Path(log).read_text(encoding="utf-8", errors="replace")
@@ -2415,81 +1579,6 @@ class Run:
             return [f"NOT A COUNT: {w}" for w in why[:3]], set()
         s = cs.summarise(text, cs.rb.signatures())
         return cs.render(s, None, 8, 8), set(s["files"])
-
-    def s_loop(self):
-        start = self.compile_errors()      # a count THIS run measured; a resume re-measures rather than trusting the last run's
-        if start == 0:
-            # an earlier run's loop may have left stub signals: they are still residue at 0 errors
-            flog = self.work / "file-loop.jsonl"
-            open_ = [e for e in record_stubs(self.tdir, [x for e in (loop_events(flog, all_runs=True) if flog.is_file() else [])
-                                                         if e.get("event") == "stub-signals" for x in e.get("files", [])]
-                                                    + overlay_stubs(self.repo, self.tdir),
-                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]], repo=self.repo)
-                     if not e.get("reviewed")]
-            if open_:
-                detail = [stub_line(e) for e in open_]
-                return {"stop": f"0 errors, but {len(open_)} unreviewed stub signal(s) from earlier runs (STUBS.json)",
-                        "code": 10, "errors": 0, "detail": detail, "view": detail,
-                        "choices": ["port each flagged file's lost behaviour, or set its \"reviewed\" in "
-                                    "targets/<t>/STUBS.json to why the change is right; then resume with --from-stage loop"]}
-            return {"skipped": "already at 0 errors", "errors": 0}
-        why = spend_guard(start, self.a.budget, self.a.max_errors, self.a.confirm_spend)
-        if why:
-            skipped = skipped_shared(self.mv, self.t)
-            return {"stop": "spend guard: " + why, "code": 10, "errors": start, "this_run": True,
-                    "compile_errors": compile_error_lines(self.work / "measure.log", self.repo),
-                    "detail": [why] + ([f"the target skips shared librar{'y' if len(skipped) == 1 else 'ies'} {', '.join(skipped)}: "
-                                        f"a direct jump needs shared_chain (add-target --direct)"] if skipped else []),
-                    "choices": [f"raise it on purpose: {self.resume_cmd('loop')} --confirm-spend (or --max-errors N / a larger --budget)",
-                                "a jump that skips versions: add shared_chain= (make-fork-layer.py add-target --direct) so the shared "
-                                "libraries clear most of these errors for free"]}
-        flog = self.work / "file-loop.jsonl"
-        out = self.work / "file-loop.out"
-        r = self.sh([self.py, str(ROOT / "tools/file-loop.py"), "--work", str(self.repo), "--layer", self.t,
-                     "--budget", str(self.a.budget), "--log", str(flog)], out)
-        ev = loop_events(flog)
-        end = next((e for e in reversed(ev) if e.get("event") == "end"), None)
-        n = end.get("errors") if end else None
-        clog = self.repo / "build" / f"mc{self.t}" / "file-loop-compile.log"
-        res = {"errors": n, "start_errors": start, "exit": r.returncode, "log": str(flog), "this_run": True}
-        # every run's stub signals are kept in targets/<t>/STUBS.json until someone reviews them: a resumed run used to
-        # forget the previous run's (measured: ten flagged files vanished from RESIDUE.md on the next --from-stage loop)
-        stubs_all = record_stubs(self.tdir, [s for e in loop_events(flog, all_runs=True) if e.get("event") == "stub-signals"
-                                             for s in e.get("files", [])] + overlay_stubs(self.repo, self.tdir),
-                              parents=[self.mv / "targets" / x for x in chain(self.mv, self.t)[1:]], repo=self.repo)
-        if n == 0:
-            # 0 errors is not done when a worker got there by emptying code or by forking the shared library: the
-            # loop's own stub audit, and any overlay of a shared helper, are residue (measured on the first
-            # unattended target: both happened at "0 errors" and the run went on to the audit)
-            stubs = [s for s in stubs_all if not s.get("reviewed")]
-            shared = self.shared_helper_overlays()
-            if stubs or shared:
-                detail = [stub_line(s) for s in stubs] + \
-                         [f"shared helper overlaid in this fork: {f}" for f in shared]
-                res.update({"stop": f"0 errors, but {len(stubs)} stub signal(s) and {len(shared)} overlay(s) of the "
-                                    f"shared library", "code": 10, "detail": detail, "view": detail,
-                            "spent": end.get("spent", 0),     # the loop did spend to get to 0: report it, not $0
-                            "choices": ["port each flagged method to the new signature (never drop @Override), or, when the "
-                                    "change is right, set its \"reviewed\" in targets/<t>/STUBS.json to why",
-                                        "fix a shared helper in templates/fork-layer/shared/<t> and delete the "
-                                        "fork's overlay of it; then resume with --from-stage loop"]})
-                return res
-            res["done"] = f"{start} -> 0 errors, ${end.get('spent', 0)} of workers"
-            return res
-        view, files = self.error_view(clog) if clog.is_file() else ([], set())
-        esc = escalation(ev, files)
-        res.update({"stop": f"{n} compile errors" if n is not None else "the loop ended without a count (file-loop.out)",
-                    "code": 10, "spent": esc["spent"], "view": view, "esc": esc, "detail": view[:6],
-                    "choices": [f"continue: {self.resume_cmd('loop')} with a higher --budget",
-                                "fix the listed groups by hand, as shared rows / helpers (not in this fork)"]})
-        return res
-
-    def shared_helper_overlays(self):
-        """Overlays (this target's java/) of a class the shared library supplies: a fix there belongs in the library."""
-        mv_pkg = read_props(self.repo / ".multiversion/base.properties").get("mv_package", "")
-        names = {p.name for p in (self.repo / ".multiversion/shared").glob("*/java/**/*.java")}
-        root = self.tdir / "java" / mv_pkg.replace(".", "/")
-        return sorted(str(p.relative_to(self.repo)) for p in root.glob("*.java") if p.name in names) if mv_pkg else []
 
     def compile_errors(self):
         """The compile count the audit and gates rely on, FROM THIS RUN. A count carried over from an earlier run's
@@ -2511,78 +1600,6 @@ class Run:
         return {"stop": f"{stage} needs a clean compile; this run measured {n if n is not None else 'no count'}",
                 "code": 10, "detail": [f"compile errors: {n}"],
                 "choices": [f"resume from measure: {self.resume_cmd('measure')}"]}
-
-    def s_audit(self):
-        n = self.compile_errors()
-        if n != 0:
-            return self.not_compiled(n, "audit")
-        neo = read_props(self.tdir / "target.properties").get("prop.neo_version", "")
-        jars = [j for j in self.artifacts()[1] if neo in j.name] or self.artifacts()[1]
-        if not jars:
-            return {"stop": "no staged sources jar to audit against", "code": 13, "choices": ["stage Minecraft first"]}
-        prepared = self.repo / "build" / f"mc{self.t}" / "mv" / "java"
-        r = self.sh([self.py, str(ROOT / "tools/audit-mixin-targets.py"), str(self.repo), str(jars[0]),
-                     f"--sources={prepared}"])
-        lines = (r.stdout or "").strip().splitlines()
-        if r.returncode == 0:
-            if read_props(self.tdir / "target.properties").get("strip_onlyin") == "true" or any(
-                    read_props(self.mv / "targets" / x / "target.properties").get("strip_onlyin") == "true"
-                    for x in chain(self.mv, self.t)[1:]):
-                hits = client_refs_in_common(self.repo, prepared)
-                if hits:
-                    return {"stop": f"{len(hits)} client lookup(s) in common classes will crash a dedicated server once "
-                                    "@OnlyIn is stripped (CATALOG M52)", "code": 13, "audit": hits, "detail": hits[:6],
-                            "choices": ["in each overlay: call @MVPKG@.ClientRefs.player()/level() (the shared rows' form), "
-                                        "or move the lookup into a nested client-only class"]}
-            ev = self.audit_event_listeners()
-            if ev.get("stop"):
-                return ev
-            return {"done": ((lines[-1] if lines else "all targets match")[:120] + "; " + ev["done"])[:200]}
-        if r.returncode == 2 or any("NO TARGETS CHECKED" in l for l in lines):
-            # the audit looked at nothing: a scope fault in this run, never a verdict on the mixins (§X27)
-            return {"stop": "the mixin audit checked no targets (wrong jar or tree?) -- not a pass",
-                    "code": 13, "audit": lines[:8], "detail": lines[:4],
-                    "choices": ["fix the audit's inputs in tools/fork-port.py and resume with --from-stage audit"]}
-        # keep each mismatch WITH its header line (the mixin file and the annotated target): a "mixin:/vanilla:"
-        # pair alone does not say which file to fix -- measured, the first residue report could not be acted on
-        bad = [l for l in lines if l.strip() and not l.strip().startswith(("ok ", "checked ")) and "all targets" not in l] or lines
-        return {"stop": f"{len([l for l in lines if 'mixin:' in l]) or len(bad)} mixin target(s) do not match vanilla",
-                "code": 13, "audit": bad, "detail": bad[:6],
-                "choices": ["retarget each mixin in a per-target overlay or with mixin_add, or keep it to one target with mixin_add_only / mixin_remove_only (fork-versions step 5)",
-                            "a recurring shape belongs in the shared library"]}
-
-    def target_classpath(self):
-        """Gradle's own resolved compile classpath for this layer target, cached under the run's work dir (the code
-        is tools/layer-ci.py's, shared with the fork's layer CI). Never rebuilt by hand (X25b-ii)."""
-        return load("layer_ci", "layer-ci.py").target_classpath(
-            self.repo, self.t, self.work, [ROOT / "tools/central-mirror.init.gradle"], BASH)
-
-    def audit_event_listeners(self):
-        """audit-event-listeners.py (CATALOG X33/X42) over every prepared tree of the target, against its own classpath:
-        a listener naming an ABSTRACT event compiles everywhere and kills mod loading (measured on 1.21.8)."""
-        trees = sorted(str(p) for p in (self.repo / "build" / f"mc{self.t}" / "mv").glob("*java") if p.is_dir())
-        if not trees:
-            return {"stop": "no prepared tree to audit event listeners in", "code": 13,
-                    "choices": ["build the target once so build/mc<t>/mv exists"]}
-        cp, why = self.target_classpath()
-        if cp is None:
-            return {"stop": "event-listener audit: " + why, "code": 13, "detail": [why],
-                    "choices": ["fix the classpath resolution; this audit refuses to run on a guessed one"]}
-        r = self.sh([self.py, str(ROOT / "tools/audit-event-listeners.py"), str(self.repo), f"--cp-file={cp}",
-                     f"--tree={','.join(trees)}", f"--mc={self.t}"])
-        lines = (r.stdout or "").strip().splitlines()
-        if r.returncode == 0:
-            return {"done": (lines[0] if lines else "event listeners ok")[:100]}
-        if r.returncode == 2:
-            return {"stop": "the event-listener audit checked no listeners (wrong tree or classpath?) -- not a pass",
-                    "code": 13, "audit": lines[:8], "detail": lines[:4],
-                    "choices": ["fix the audit's inputs in tools/fork-port.py and resume with --from-stage audit"]}
-        bad = [l for l in lines if l.strip() and not l.startswith("checked ")]
-        return {"stop": f"{sum('ABSTRACT' in l for l in bad)} event listener(s) name an abstract event "
-                        f"(the bus refuses them at load)",
-                "code": 13, "audit": bad, "detail": bad[:6],
-                "choices": ["port each listener to a concrete subclass of the event in a per-target overlay "
-                            "(CATALOG X33: check the subclass still carries what the listener uses)"]}
 
     def modid(self):
         if self.a.modid:
@@ -2631,10 +1648,10 @@ class Run:
                         "detail": [msg[:240]],
                         "choices": ["find what writes that file (grep the source for its name), and why it no longer runs on this target "
                                     "(CATALOG X47: a registration the new loader ignores is the usual cause)",
-                                    "if the file is gone on purpose, list it in .multiversion/targets/%s/logs-known-absent.txt with the reason" % self.t]}
+                                    "if the file is gone on purpose, list it in .port/%s/logs-known-absent.txt with the reason" % self.t]}
             note = f"; log files match {prev}" if prev else ""
             if self.a.gates == "full" and summ.is_file():
-                # the record port-publish.py's layer path reads (and `--gates auto` reads): this target had its real-client run
+                # the record `--gates auto` reads: this version had its real-client run
                 (self.tdir / "GATES.md").write_text(summ.read_text(encoding="utf-8"), encoding="utf-8")
                 (self.tdir / RED_GATES).unlink(missing_ok=True)
                 note += "; recorded in GATES.md"
@@ -2678,18 +1695,6 @@ class Run:
             "was; while this file is here the target is not done and `--gates auto` runs the full gates. A green full run "
             "deletes it.\n\n" + body, encoding="utf-8")
 
-    def lost_logs(self):
-        """(files, previous target) -- the mod's own log files from the inherited target's last gate run that this run lacks."""
-        inh = read_props(self.tdir / "target.properties").get("inherits")
-        if not inh:
-            return [], None
-        prev = self.repo / "build" / f"mc{inh}" / "fork-port" / "gates" / "harness" / "run" / "logs"
-        if not prev.is_dir():
-            return [], None
-        known = pathlib.Path(self.tdir / "logs-known-absent.txt")
-        absent = [l.split("#", 1)[0].strip() for l in known.read_text(encoding="utf-8").splitlines()] if known.is_file() else []
-        return lost_log_files(prev, self.work / "gates" / "harness" / "run" / "logs", [a for a in absent if a]), inh
-
     def s_cost(self):
         modid = self.modid()
         if not modid:
@@ -2708,63 +1713,6 @@ class Run:
         f.write_text(old.rstrip("\n") + ("\n\n" if old else "") + f"## fork-port.py run since {self.summary['started']}\n\n"
                      + r.stdout.strip() + "\n" + extra, encoding="utf-8")
         return {"done": f"appended to {f.relative_to(self.repo)}"}
-
-
-    # ---- what the end of a run asks (a version branch's BranchRun answers from tools/fork-branches.py)
-
-    def done(self, prepare=False):
-        return target_done(self.repo, self.t, prepare=prepare)
-
-    def shipped_expected(self):
-        return any((self.repo / ".multiversion").glob("shipped-expect*.txt"))
-
-    def skeleton(self):
-        return review_skeleton(self.repo, self.tdir, self.t)
-
-    def test_items(self):
-        return write_test_items(self.repo, self.tdir, self.t)
-
-    def review_note(self, added):
-        return (f"REVIEW.md lists every item{f', {added} new' if added else ''}: "
-                f"{review_counts(self.repo, self.tdir, review_items(self.repo, self.tdir))}; STUBS.json, the overlays and the "
-                "authors' files they replace")
-
-    def drift(self, a):
-        return drift_stop(self.repo, a)
-
-    def records_rel(self):
-        return f".multiversion/targets/{self.t}/"
-
-
-# ---------------------------------------------------------------- a version branch (tools/fork-branches.py)
-#
-# A fork migrated to stacked version branches (or started as one) has no .multiversion/: version t is the branch
-# neoforge-<t>, a plain single-version build at Minecraft t, with its records in .port/<t>/. The same stages run on it
-# -- setup, stage, moves, measure, loop, audit, gates, cost -- on the checked-out branch's own tree: the compile loop
-# edits src/ (file-loop.py's plain mode), the generated class moves are applied to the source as rows and kept in
-# .port/<t>/moves.generated.tsv, the gates are ci-gates.py --mc <t> (its branch mode), and the done list is
-# tools/fork-branches.py target_done(). Nothing here runs for a single-version fork (no version branch) or a layer.
-
-def fork_branches():
-    return load("fork_branches", "fork-branches.py")
-
-
-def branch_mode(repo, t):
-    """Is (repo, t) a version branch run? -- no layer at HEAD, and the checkout is on t's version branch or the clone
-    has version branches (t's own, or others t would be added beside)."""
-    repo = pathlib.Path(repo)
-    if (repo / ".multiversion/base.properties").is_file():
-        return False
-    fb = fork_branches()
-    return fb.checkout_version(repo) == t or bool(fb.version_branches(repo))
-
-
-class BranchRun(Run):
-    def __init__(self, a):
-        super().__init__(a)
-        self.fb = fork_branches()
-        self.tdir = self.repo / ".port" / self.t
-        self.env = gradle_env(os.environ, True)
 
     def props(self):
         return self.fb.info(self.repo, self.t)
@@ -3068,8 +2016,8 @@ class BranchRun(Run):
                 "audit": bad, "detail": bad[:6], "choices": ["port each listener to a concrete subclass of the event (CATALOG X33)"]}
 
     def target_classpath(self):
-        """Gradle's own resolved compile classpath of the branch build (tools/qtc-init.gradle), as layer-ci.py resolves
-        a layer target's, through the branch's plain ./gradlew."""
+        """Gradle's own resolved compile classpath of the branch build (tools/qtc-init.gradle), through the branch's
+        plain ./gradlew. Never rebuilt by hand (CATALOG X25b-ii)."""
         self.work.mkdir(parents=True, exist_ok=True)
         cmd = [BASH, "gradlew", "-I", str(ROOT / "tools/qtc-init.gradle"), "-I", str(ROOT / "tools/central-mirror.init.gradle"),
                "-q", "qtcClasspath", "--console=plain"]
@@ -3123,16 +2071,14 @@ class BranchRun(Run):
     def shared_gap(self):
         """A version branch has no shared_chain: its shared tables are the `# ---- shared <v>` sections of
         .port/<t>/shared-renames.tsv, one per library version above the base up to t (fork-branches.py add-target /
-        sync-shared). The layer's warning was false here (no .multiversion/ to read); the real gap is a library version
-        with a table that the branch has no section of."""
+        sync-shared); the gap is a library version with a table that the branch has no section of."""
         return branch_shared_gap(self.repo, self.t, self.props(), self.fb)
 
 
 def branch_converters(repo, frm, to, work=None, run=None):
     """A version-branch hop's converters: tools/mechanical-hop.py run_ladder over the branch's source sets, the LADDER
     rows whose change lands in frm -> to (each idempotent, so a resumed run converts nothing twice). Each one's output
-    goes to <work>/convert-<label>.out. Only BranchRun.s_moves calls this: a layer target and a single-version fork never
-    reach it. Each run APPENDS its output, under a dated header, so a resumed run keeps the earlier one. A converter
+    goes to <work>/convert-<label>.out. Only Run.s_moves calls this: a single-version fork never reaches it. Each run APPENDS its output, under a dated header, so a resumed run keeps the earlier one. A converter
     that crashes raises RuntimeError (s_moves turns it into a stop). -> ("; converters ..." for the stage line -- each
     one's REFUSED and NOTE counts in it -- or "", steps, advisories)."""
     mh = load("mechanical_hop_fp", "mechanical-hop.py")
@@ -3154,12 +2100,12 @@ def branch_converters(repo, frm, to, work=None, run=None):
 
 
 def branch_shared_gap(repo, t, props, fb, shared_root=None, stable=None):
-    """The version-branch check behind BranchRun.shared_gap: a warning naming the stable shared library versions in
+    """The version-branch check behind Run.shared_gap: a warning naming the stable shared library versions in
     (base, t] that have a renames.tsv and no section in .port/<t>/shared-renames.tsv (sync-shared's span), or None."""
     base = props.get("base_minecraft_version") or "1.21.1"
     shared_root = pathlib.Path(shared_root) if shared_root else fb.shared_dir()
     if stable is None:
-        stable = [l["mc"] for l in load("make_fork_layer_fp", "make-fork-layer.py").versions()["lines"] if l.get("stable")]
+        stable = [l["mc"] for l in fb.versions_table()["lines"] if l.get("stable")]
     have = {k.split(" ", 1)[1] for k in fb.shared_sections(fb.read_file(pathlib.Path(repo) / ".port" / t / "shared-renames.tsv"))}
     vs = [v for v in stable if (shared_root / v / "renames.tsv").is_file()]
     miss = sorted((v for v in vs if mc_key(base) < mc_key(v) <= mc_key(t) and v not in have), key=mc_key)
@@ -3216,122 +2162,6 @@ def execute(run, todo):
     return None
 
 
-# ---------------------------------------------------------------- fix lowest, then sweep up (R5)
-
-SWEEP_GREEN = (0, 17, UNDONE_EXIT)     # the stages it re-ran are green; 17/18 say what else "done" still needs
-DRIFT_CHECKED_ENV = "FORK_PORT_DRIFT_CHECKED"     # a sweep checks the upstream once, not once per target
-
-
-def chain_targets(mv, frm, to):
-    """The targets from `frm` up to `to` along `to`'s inherits chain, oldest first. ValueError when `frm` is not in it."""
-    if not (mv / "targets" / to).is_dir():
-        raise ValueError(f"{to} is not a target of this layer")
-    ch = list(reversed(chain(mv, to)))
-    if frm not in ch:
-        raise ValueError(f"{frm} is not in {to}'s inherits chain ({' -> '.join(ch)})")
-    return ch[ch.index(frm):]
-
-
-def sweep_green(rc, summ):
-    """Did the target's stages run green? 0 and 17 say so; an 18 only when the child ended "Gate C green, NOT done"
-    (its summary lists not_done, no stop) -- an 18 with a stop is a refusal before anything was built (a library
-    target not done, an undone parent), and an 18 with no summary written this run cannot say: both are red."""
-    if rc == UNDONE_EXIT:
-        return bool(summ) and "stop" not in summ and summ.get("not_done") is not None
-    return rc in SWEEP_GREEN
-
-
-def sweep_result(rc, summ):
-    if rc == 0:
-        return "done"
-    if rc == 17:
-        return "green, NOT done: Gate C not run"
-    if rc == UNDONE_EXIT and sweep_green(rc, summ):
-        nd = summ.get("not_done") or []
-        return f"green, NOT done: {nd[0] if nd else 'review / test items'}" + (f" (+{len(nd) - 1})" if len(nd) > 1 else "")
-    st = summ.get("stop") or {}
-    return f"RED at {st.get('stage', '?')}: {st.get('left', f'exit {rc}')}"
-
-
-def sweep(a, runner=None, out=print):
-    """`--chain FROM..TO --from-stage S`: re-run stage S onward (no model: --budget 0 --max-errors 0) for every target
-    from FROM up TO's inherits chain, oldest first; stop at the first red target and name its RESIDUE.md. A bug class
-    fixed at the lowest target where it exists is swept up this way, and a fixer is started only where it goes red.
-    -> the first red target's exit code, else 0 when every target is done, else the first not-done code (17/18)."""
-    repo = pathlib.Path(a.repo).resolve()
-    mv = repo / ".multiversion"
-    if not (mv / "base.properties").is_file():
-        out("fork-port: --chain needs a layer fork (.multiversion/); a single-version fork has one version and nothing to sweep")
-        return 2
-    frm, sep, to = a.chain.partition("..")
-    try:
-        if not sep or not frm or not to:
-            raise ValueError(f"--chain wants FROM..TO (e.g. 1.21.3..26.3), not {a.chain!r}")
-        targets = chain_targets(mv, frm, to)
-        stage = a.from_stage or "gates"
-        select_stages(stage, a.to_stage)
-    except ValueError as e:
-        out(f"fork-port: {e}"); return 2
-    if runner is None:
-        def runner(cmd, env):
-            return subprocess.run(cmd, env=env).returncode
-    lc = load("layer_ci", "layer-ci.py")
-    lock = lc.CheckoutLock(repo, "fork-port.py --chain", a.chain)
-    busy = lock.acquire()
-    if busy:
-        out(f"fork-port: {busy}"); return 14
-    try:
-        a.target = to
-        st = drift_stop(repo, a)
-        if st:
-            out(stop_block(dict(st, stage="chain", left=st["stop"], residue="(none: nothing ran)")))
-            return st["code"]
-        env = dict(os.environ, **{DRIFT_CHECKED_ENV: "1"})
-        out(f"fork-port: chain {' -> '.join(targets)}: --from-stage {stage} --gates {a.gates}, no model (--budget 0 --max-errors 0)")
-        rows, first_bad, first_nd = [], None, None
-        for t in targets:
-            cmd = [sys.executable, str(pathlib.Path(__file__).resolve()), "--repo", str(repo), "--target", t,
-                   "--from-stage", stage, "--gates", a.gates, "--budget", "0", "--max-errors", "0", "--base", a.base,
-                   *(["--to-stage", a.to_stage] if a.to_stage else []), *(["--modid", a.modid] if a.modid else []),
-                   *[x for c in a.port_checkout for x in ("--port-checkout", c)],
-                   *[x for c in a.port_release for x in ("--port-release", c)],
-                   *(["--allow-undone-library"] if getattr(a, "allow_undone_library", False) else [])]
-            out(f"fork-port: chain: {t} ...")
-            jp = repo / "build" / f"mc{t}" / "fork-port" / "fork-port.json"
-            before = jp.stat().st_mtime_ns if jp.is_file() else None
-            rc = runner(cmd, env)
-            try:      # only the summary this child wrote: an older run's (a child that stopped before saving) misleads
-                summ = json.loads(jp.read_text(encoding="utf-8")) if jp.stat().st_mtime_ns != before else {}
-            except (OSError, ValueError):
-                summ = {}
-            green = sweep_green(rc, summ)
-            res = (mv / "targets" / t / "RESIDUE.md")
-            rows.append((t, rc, sweep_result(rc, summ),
-                         res.relative_to(repo).as_posix() if not green and res.is_file() else ""))
-            if not green:
-                first_bad = rc
-                break
-            if rc and first_nd is None:
-                first_nd = rc
-        out("")
-        out("| target | exit | result | residue |")
-        out("|---|---|---|---|")
-        for t, rc, r, p in rows:
-            out(f"| {t} | {rc} | {r[:160]} | {p or '-'} |")
-        left = targets[len(rows):]
-        if left:
-            out(f"| {', '.join(left)} | - | not run: the sweep stops at the first red target | - |")
-        if first_bad is not None:
-            t = rows[-1][0]
-            out(f"\nfork-port: chain STOPPED at {t} (exit {first_bad}): start ONE fixer there, with only "
-                f"{rows[-1][3] or f'.multiversion/targets/{t}/'}; then sweep on: python3 tools/fork-port.py --repo {a.repo} "
-                f"--chain {t}..{to} --from-stage {stage} --gates {a.gates}")
-            return first_bad
-        return first_nd or 0
-    finally:
-        lock.release()
-
-
 RECHECK_STAGES = ("measure", "audit", "gates", "cost")
 
 
@@ -3359,100 +2189,90 @@ def main():
     ap.add_argument("--base", default="origin/neoforge-1.21.1", help="the authors' ref, for ci-gates.py --base")
     ap.add_argument("--max-errors", type=int, help="the loop refuses to start above this many errors (default: 100 per dollar of --budget)")
     ap.add_argument("--confirm-spend", action="store_true", help="start the loop although the error count exceeds the spend guard")
-    ap.add_argument("--direct", action="store_true",
-                    help="a NEW target that jumps: no inherits, shared_chain= pulls the shared library of every targeted version "
-                         "in between (make-fork-layer.py add-target --direct); ignored when the target already exists")
     ap.add_argument("--port-checkout", action="append", default=[],
-                    help="owner/repo=DIR: a sibling layer fork this one depends on; its per-target jar comes from DIR "
+                    help="owner/repo=DIR: a sibling fork this one depends on; its jar for this version comes from DIR "
                          "(tools/layer-deps.py)")
     ap.add_argument("--port-release", action="append", default=[],
-                    help="owner/repo@TAG: a sibling layer fork's release holding its per-target jar; pinned (url + sha256) "
-                         "in the target's target.properties for CI's `layer-deps.py fetch` (tools/layer-deps.py)")
+                    help="owner/repo@TAG: a sibling fork's release holding its jar for this version; pinned (url + sha256) "
+                         "in .port/<t>/branch.properties for the version branch's CI (tools/layer-deps.py)")
     ap.add_argument("--allow-undone-parent", action="store_true",
-                    help="development only: add a NEW target although the target it stands on is not done (recorded in its "
-                         "target.properties as allowed_undone_parent; the new target is then not done until its parent is)")
+                    help="development only: add a NEW version although the version it stands on is not done (recorded in its "
+                         "branch.properties as allowed_undone_parent; the new version is then not done until its parent is)")
     ap.add_argument("--allow-undone-library", action="store_true",
-                    help="development only: resolve against a sibling library's --port-checkout whose target is not done "
-                         "(passed to layer-deps.py resolve, recorded in DEPS.md and the summary; the target is then not done "
+                    help="development only: resolve against a sibling library's --port-checkout whose version is not done "
+                         "(passed to layer-deps.py resolve, recorded in DEPS.md and the summary; the version is then not done "
                          "until it is re-resolved with --port-release)")
     ap.add_argument("--upstream", help="<remote>/<branch>: the authors' branch, recorded with the commit the buildout starts "
-                                       "from in .multiversion/base.properties (default: the recorded one, else the one branch "
-                                       "of the clone's `upstream` remote that HEAD carries)")
+                                       "from in .port/<t>/branch.properties when no freeze is recorded there")
     ap.add_argument("--accept-upstream-drift", action="store_true",
                     help="continue although the authors' branch (or a recorded library release) moved since the buildout's "
-                         "freeze (exit 19 otherwise); recorded in .multiversion/DRIFT.md")
+                         "freeze (exit 19 otherwise); recorded in .port/<t>/DRIFT.md")
     ap.add_argument("--untaken-ok", metavar="FROZEN_JSON",
                     help="a weekly round's frozen input (known-issues.py read-plan --out): the authors' commits it leaves "
                          "out on purpose (take_authors false, or pushed after the plan) do not stop the run; recorded in "
                          "DRIFT.md (default: round/frozen.json in the working directory, when it exists)")
     ap.add_argument("--chain", metavar="FROM..TO",
-                    help="sweep: re-run --from-stage (default gates) onward for every target from FROM up TO's inherits chain, "
-                         "oldest first, no model; stops at the first red target with its RESIDUE.md and prints the table")
+                    help="the sweep: tools/fork-branches.py cascade FROM..TO (merge upward, then the no-model gates per "
+                         "version branch)")
     ap.add_argument("--check-done", action="store_true",
-                    help="only say whether --target is done (Gate C, stubs, REVIEW.md, TEST-ITEMS.md, the behaviour inventory): "
-                         "exit 0, or 18 with the reasons; on a version branch's own checkout it adds REVIEW.md's `?` rows "
-                         "for the reviewer (never a verdict); otherwise it writes nothing")
+                    help="only say whether --target is done (tools/fork-branches.py target_done): exit 0, or 18 with the "
+                         "reasons; on the branch's own checkout it adds REVIEW.md's `?` rows for the reviewer (never a verdict)")
     ap.add_argument("--write-test-items", action="store_true",
-                    help="only write --target's TEST-ITEMS.md (its manual-test items, from tools/layer-test-plan.py, no "
-                         "model), holding the checkout lock; no stage or gate runs (layer forks only)")
+                    help="only write --target's .port/<t>/TEST-ITEMS.md (its manual-test items, no model), on the branch's "
+                         "checkout, holding the checkout lock; no stage or gate runs")
     ap.add_argument("--self-check", action="store_true")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
     a.budget = default_budget(a.budget, a.from_stage)
-    if a.chain:
-        if not a.repo or a.target:
-            ap.error("--chain takes --repo and no --target")
-        if not pathlib.Path(a.repo).is_dir():
-            print(f"fork-port: no such directory: {a.repo}"); return 2
-        if not (pathlib.Path(a.repo) / ".multiversion/base.properties").is_file() and fork_branches().version_branches(a.repo):
-            # version branches: the sweep is a cascade (merge each branch into the next, no-model gates per branch)
-            print("fork-port: --chain on version branches is tools/fork-branches.py cascade (merge upward, then gates)")
-            gates = {"auto": "ab", "none": "none"}.get(a.gates, a.gates)
-            return fork_branches().cascade(a.repo, a.chain, gates, untaken_ok=a.untaken_ok)
-        return sweep(a)        # --gates auto passes through: each target is full until its own GATES.md records Gate C
-    if not a.repo or not a.target:
-        ap.error("--repo and --target are required")
+    if not a.repo or not (a.target or a.chain):
+        ap.error("--repo and --target (or --chain) are required")
     if not pathlib.Path(a.repo).is_dir():
         print(f"fork-port: no such directory: {a.repo}"); return 2
-    branch = branch_mode(a.repo, a.target)
-    if branch and not a.check_done and fork_branches().checkout_version(pathlib.Path(a.repo)) != a.target \
+    why = load("fork_kind", "fork-kind.py").refuse_layer(a.repo, "fork-port")
+    if why:
+        print(why); return 2
+    if not fork_branches().version_branches(a.repo) and fork_branches().checkout_version(pathlib.Path(a.repo)) is None:
+        # principle 2: nothing multi-version runs on a single-version fork -- it stops here, having written nothing
+        print(f"fork-port: {a.repo} has no version branch: a single-version fork (one version; nothing to port or sweep "
+              "here). Versions are added as version branches when the maintainer decides it (the fork-versions skill: "
+              "fork-branches.py add-target).")
+        return 2
+    if a.chain:
+        if a.target:
+            ap.error("--chain takes --repo and no --target")
+        # the sweep on version branches is a cascade: merge each branch into the next, no-model gates per branch
+        print("fork-port: --chain on version branches is tools/fork-branches.py cascade (merge upward, then gates)")
+        gates = {"auto": "ab", "none": "none"}.get(a.gates, a.gates)
+        return fork_branches().cascade(a.repo, a.chain, gates, untaken_ok=a.untaken_ok)
+    if not a.check_done and fork_branches().checkout_version(pathlib.Path(a.repo)) != a.target \
             and a.from_stage and a.from_stage != "setup":
         print(f"fork-port: --from-stage {a.from_stage} runs on {fork_branches().branch_name(a.target)}'s checkout: check it "
               "out first (or start from setup, which does)"); return 2
-    if branch and a.check_done:
+    if a.check_done:
         # the done list; on the branch's own checkout it also adds REVIEW.md's `?` rows (no verdict), off it nothing
         return fork_branches().check_done(a.repo, a.target, "fork-port")
-    if branch and a.write_test_items:
-        return write_test_items_branch(a)
-    if a.check_done:
-        if not (pathlib.Path(a.repo) / ".multiversion/base.properties").is_file():
-            print("fork-port: --check-done needs a layer fork (.multiversion/)"); return 2
-        why = target_done(a.repo, a.target, write=False)      # only asks: writes nothing
-        print(f"fork-port {a.target}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
-        return UNDONE_EXIT if why else 0
     if a.write_test_items:
-        return write_test_items_only(a)
+        return write_test_items_branch(a)
     try:
         skipped, todo = select_stages(a.from_stage, a.to_stage)
     except ValueError as e:
         print(f"fork-port: {e}"); return 2
-    run = BranchRun(a) if branch else Run(a)
-    if run.env:     # the in-process helpers (target_classpath: layer-ci.py) start Gradle too: daemon-less as well
-        os.environ["GRADLE_OPTS"] = run.env["GRADLE_OPTS"]
+    run = Run(a)
+    os.environ["GRADLE_OPTS"] = run.env["GRADLE_OPTS"]     # the in-process helpers start Gradle too: daemon-less as well
     if a.gates == "auto":
         a.gates = gates_auto(run.tdir)
         print(f"fork-port: gates: auto -> {a.gates} ({'Gate C already recorded in GATES.md' if a.gates == 'ab' else 'no recorded Gate C pass yet: one real-client run on the initial port'})")
-    lc = load("layer_ci", "layer-ci.py")
-    lock = lc.CheckoutLock(run.repo, "fork-port.py", a.target)
+    cl = load("checkout_lock", "checkout-lock.py")
+    lock = cl.CheckoutLock(run.repo, "fork-port.py", a.target)
     busy = lock.acquire()
     if busy:
         print(f"fork-port: {busy}")
         return 14
-    if run.env is not None and lc.LOCK_ENV in os.environ:
+    if cl.LOCK_ENV in os.environ:
         # run.env was copied before the lock was taken: the children (ci-gates.py --mc, layer-deps.py) must see the
         # holder, or they refuse their own parent's checkout
-        run.env[lc.LOCK_ENV] = os.environ[lc.LOCK_ENV]
+        run.env[cl.LOCK_ENV] = os.environ[cl.LOCK_ENV]
     try:
         return drive(run, a, skipped, todo)
     finally:
@@ -3465,7 +2285,7 @@ def write_test_items_branch(a):
     repo = pathlib.Path(a.repo).resolve()
     if fb.checkout_version(repo) != a.target:
         print(f"fork-port: check out {fb.branch_name(a.target)} first: TEST-ITEMS.md is written on its branch"); return 2
-    lock = load("layer_ci", "layer-ci.py").CheckoutLock(repo, "fork-port.py", a.target)
+    lock = load("checkout_lock", "checkout-lock.py").CheckoutLock(repo, "fork-port.py", a.target)
     busy = lock.acquire()
     if busy:
         print(f"fork-port: {busy}"); return 14
@@ -3476,29 +2296,6 @@ def write_test_items_branch(a):
     if why:
         print(f"fork-port {a.target}: manual-test items not written: {why}"); return 2
     print(f"fork-port {a.target}: {n} manual-test item(s) -> .port/{a.target}/TEST-ITEMS.md")
-    return 0
-
-
-def write_test_items_only(a):
-    """--write-test-items: TEST-ITEMS.md for --target and nothing else, under the checkout lock (a run in progress
-    owns the target's files). Exit 0 written, 14 the checkout is in use, 2 not a layer target or the plan failed."""
-    repo = pathlib.Path(a.repo)
-    tdir = repo / ".multiversion/targets" / a.target
-    if not (repo / ".multiversion/base.properties").is_file():
-        print("fork-port: --write-test-items needs a layer fork (.multiversion/)"); return 2
-    if not tdir.is_dir():
-        print(f"fork-port: {a.target} is not a target of this layer"); return 2
-    lock = load("layer_ci", "layer-ci.py").CheckoutLock(repo, "fork-port.py", a.target)
-    busy = lock.acquire()
-    if busy:
-        print(f"fork-port: {busy}"); return 14
-    try:
-        n, why = write_test_items(repo, tdir, a.target)
-    finally:
-        lock.release()
-    if why:
-        print(f"fork-port {a.target}: manual-test items not written: {why}"); return 2
-    print(f"fork-port {a.target}: {n} manual-test item(s) -> {(tdir / 'TEST-ITEMS.md').relative_to(repo).as_posix()}")
     return 0
 
 
@@ -3514,8 +2311,8 @@ def drive(run, a, skipped, todo):
     for s in skipped:
         run.summary["stages"].setdefault(s, {"skipped": f"before --from-stage {a.from_stage}"})
     partial = bool(a.to_stage) and todo[-1] != STAGES[-1]          # a partial run is not "the port is done"
-    # R4: a run to the end first checks the authors' branch against the buildout's freeze (layer forks only; a partial
-    # run is keep-current's own measuring, after it merged the authors' code)
+    # R4: a run to the end first checks the authors' branch against the buildout's freeze (a partial run is
+    # keep-current's own measuring, after it merged the authors' code)
     stop = None if partial else run.drift(a)
     if stop:
         stop.update(stage=todo[0], left=stop["stop"])
@@ -3544,7 +2341,7 @@ def drive(run, a, skipped, todo):
                                   environment=stop.get("environment"), compile_errors=stop.get("compile_errors"))
         rpath = run.tdir / "RESIDUE.md"
         if run.tdir.is_dir():
-            put_residue(run.tdir, a.target, md)       # layer-sync.py's section (an unmerged overlay) stays
+            put_residue(run.tdir, a.target, md)
         stop["residue"] = str(rpath.relative_to(run.repo)) if run.tdir.is_dir() else "(no target dir)"
         run.summary["residue"] = data
         run.summary["stop"] = {"stage": stop["stage"], "code": stop["code"], "left": stop["left"], "resume": resume}
@@ -3552,7 +2349,7 @@ def drive(run, a, skipped, todo):
         print(stop_block(stop))
         print(f"fork-port: summary in {run.jpath}")
         return stop["code"]
-    if not partial:           # only a run to the end clears an earlier stop's report (never layer-sync's section)
+    if not partial:           # only a run to the end clears an earlier stop's report
         clear_residue(run.tdir, a.target)
     # a version is DONE only after its real-client run: green A/B with no Gate C on record is reported as such, never as done
     no_gates = not partial and a.gates == "none"      # no gates is not done either: the same exit as A/B without Gate C
@@ -3605,9 +2402,10 @@ def self_check():
             ok = False; print("FAIL:", msg)
     # a version-branch hop runs the converters whose change lands in it (mechanical-hop.py LADDER); nothing else does
     import inspect as _insp, types as _ty
-    expect("self.hop_converters(" in _insp.getsource(BranchRun.s_moves) and "branch_converters(" not in _insp.getsource(Run)
-           and "hop_converters" not in _insp.getsource(Run)
-           and "run_ladder" not in _insp.getsource(Run), "only a version-branch hop runs the ladder's converters")
+    expect("self.hop_converters(" in _insp.getsource(Run.s_moves)
+           and all("hop_converters" not in _insp.getsource(getattr(Run, m)) for m in ("s_setup", "s_stage", "s_measure", "s_loop",
+                                                                                       "s_audit", "s_gates", "s_cost")),
+           "only the moves stage of a version-branch hop runs the ladder's converters")
     with tempfile.TemporaryDirectory() as d:
         repo, work = pathlib.Path(d) / "r", pathlib.Path(d) / "w"
         j = repo / "src/main/java/com/example/mod"
@@ -3631,10 +2429,10 @@ def self_check():
         expect(any("gear-tiers" in x for x in branch_converters(repo, "1.21.4", "1.21.5", work)[2]),
                "a tree naming a 1.21.x gear class gets the gear-tiers advisory")
         fake = _ty.SimpleNamespace(repo=repo, t="1.21.5", work=work, resume_cmd=lambda s: f"--from-stage {s}")
-        *_r, stop = BranchRun.hop_converters(fake, "1.21.4", run=lambda *a: (1, "Traceback (most recent call last):\nboom"))
+        *_r, stop = Run.hop_converters(fake, "1.21.4", run=lambda *a: (1, "Traceback (most recent call last):\nboom"))
         expect(stop and stop["code"] == 10 and "crashed" in stop["stop"] and "--from-stage moves" in stop["choices"][0],
                f"a crashing converter stops the moves stage (exit 10, resume named), not passed off as a refusal: {stop}")
-        *_r, stop = BranchRun.hop_converters(fake, "1.21.4", run=lambda *a: (7, "died"))
+        *_r, stop = Run.hop_converters(fake, "1.21.4", run=lambda *a: (7, "died"))
         expect(stop and "exit 7" in stop["stop"], "an unexpected exit code is a stop too, not a traceback out of s_moves")
     # a re-run from measure (a gate re-run) has no compile-loop budget unless given one; a porting run keeps $15
     expect(default_budget(None, None) == 15.0 and default_budget(None, "setup") == 15.0 and default_budget(None, "loop") == 15.0
@@ -3660,8 +2458,6 @@ def self_check():
     expect("$0.75 over 2 worker(s)" in ln and "1 with no result" in ln and loop_spend_line([{"event": "start"}]) == "",
            f"the loop workers' own recorded dollars are one line, and none without workers: {ln!r}")
     # stage selection
-    expect(hit_cap("> Task :compileJava\n1,000 errors\n") and hit_cap("1000 errors\n") and not hit_cap("999 errors\n")
-           and not hit_cap("21,000 errors\n"), "hit_cap reads javac's capped total, with or without the comma")
     with tempfile.TemporaryDirectory() as d_:
         lg = pathlib.Path(d_) / "m.log"
         lg.write_text("> Task :compileJava\n/w/A.java:1: error: cannot find symbol\n1,000 errors\n> Task :compileJava FAILED\nBUILD FAILED\n\n"
@@ -3724,13 +2520,6 @@ def self_check():
     with tempfile.TemporaryDirectory() as d:
         p = pathlib.Path(d, "m.tsv"); p.write_text(text, encoding="utf-8")
         expect(read_pairs(p) == [("net.minecraft.a.Zombie", "net.minecraft.a.z.Zombie")], "table reads back as pairs")
-    # layer.py patch decision, against the real template
-    tpl = (ROOT / "templates/fork-layer/tools/layer.py").read_text(encoding="utf-8")
-    expect(INSERT in tpl, "template layer.py carries the moves.generated.tsv block")
-    old = tpl.replace(INSERT, "")
-    expect(layer_patch(old, tpl)[0] == "replace" and layer_patch(tpl, tpl)[0] == "current"
-           and layer_patch(old + "# hand edit\n", tpl)[0] == "diverged", "layer.py patch verdicts")
-    expect(ANCHOR + INSERT in tpl, "moves block sits right after the target's own rows")
     # chain / modid
     with tempfile.TemporaryDirectory() as d:
         mv = pathlib.Path(d)
@@ -3750,7 +2539,7 @@ def self_check():
     expect(s["total"] == 3 and view and "3 errors in 2 files" in view[0], "canned compile summary")
     evs = [{"event": "start", "errors": 3},
            {"event": "worker", "model": "haiku", "files": ["x/java/m/A.java"], "usd": 0.1},
-           {"event": "worker", "model": "opus", "files": [".multiversion/targets/1.21.5/java/m/A.java"], "usd": 1.0},
+           {"event": "worker", "model": "opus", "files": [".port/1.21.5/java/m/A.java"], "usd": 1.0},
            {"event": "rule", "row": "a\tb", "kept": False, "why": "errors grew", "errors": 5},
            {"event": "rule", "row": "c\td", "kept": True, "why": "", "errors": 2},
            {"event": "stub-signals", "files": [{"file": "m/B.java", "why": "emptied"}]},
@@ -3763,7 +2552,7 @@ def self_check():
            and "## The loop's record" in md and "BUILD FAILED" not in md, "residue md")
     expect(len(md.splitlines()) < 60 and data["resume"].endswith("--from-stage loop"), "residue is bounded")
     b = stop_block({"stage": "loop", "left": "3 compile errors", "spent": 1.1, "detail": ["x"],
-                    "residue": ".multiversion/targets/1.21.5/RESIDUE.md", "choices": ["a", "b"]})
+                    "residue": ".port/1.21.5/RESIDUE.md", "choices": ["a", "b"]})
     expect(b.startswith("STOPPED at loop: 3 compile errors") and "Residue: " in b and "do not pick one silently" in b, "stop block")
     with tempfile.TemporaryDirectory() as d:
         lg = pathlib.Path(d, "l.jsonl")
@@ -3810,7 +2599,7 @@ def self_check():
         that now answers `fresh`. -> (stop dict or None, how many times it measured, the commands it ran, summary)."""
         with tempfile.TemporaryDirectory() as d:
             repo = pathlib.Path(d)
-            (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+            (repo / ".port/1.21.4").mkdir(parents=True)
             a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m",
                                     base="x", direct=False, from_stage=stage, max_errors=None, confirm_spend=False)
             run = Run(a_)
@@ -3864,32 +2653,6 @@ def self_check():
     # ---- spend guard and the skipped-shared warning
     expect(spend_guard(900, 15) is None and spend_guard(1501, 15) and spend_guard(1501, 15, confirm=True) is None
            and spend_guard(50, 0.1) and spend_guard(50, 0.1, max_errors=60) is None, "spend guard thresholds")
-    with tempfile.TemporaryDirectory() as d:
-        mv = pathlib.Path(d) / "mv"; sh = pathlib.Path(d) / "shared"
-        for v in ("1.21.3", "1.21.4", "1.21.5", "1.21.11"):
-            (sh / v).mkdir(parents=True)
-        (mv / "targets/1.21.11").mkdir(parents=True)
-        (mv / "base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
-        (mv / "targets/1.21.11/target.properties").write_text("x=1\n", encoding="utf-8")
-        expect(skipped_shared(mv, "1.21.11", sh) == ["1.21.3", "1.21.4", "1.21.5"], "a jump without shared_chain names the skipped libraries")
-        (mv / "targets/1.21.11/target.properties").write_text("shared_chain=1.21.3,1.21.4,1.21.5\n", encoding="utf-8")
-        expect(skipped_shared(mv, "1.21.11", sh) == [], "shared_chain silences it")
-        (mv / "targets/1.21.4").mkdir(); (mv / "targets/1.21.4/target.properties").write_text("x=1\n", encoding="utf-8")
-        (mv / "targets/1.21.5").mkdir(); (mv / "targets/1.21.5/target.properties").write_text("inherits=1.21.4\n", encoding="utf-8")
-        expect(skipped_shared(mv, "1.21.5", sh) == [], "an ordinary hop (inherits the nearest lower target) skips nothing")
-    # ---- a row harvested into the shared library leaves the target's table (else: a duplicate rule at table load)
-    with tempfile.TemporaryDirectory() as d:
-        mv = pathlib.Path(d); (mv / "targets/1.21.4").mkdir(parents=True); (mv / "shared/1.21.4").mkdir(parents=True)
-        (mv / "shared/1.21.4/renames.tsv").write_text("re:a\tb\n", encoding="utf-8")
-        (mv / "targets/1.21.4/renames.tsv").write_text("# head\nKeep\tMe\n# X3: proposed by a file-loop worker, kept\nre:a\tb\n",
-                                                       encoding="utf-8")
-        expect(drop_harvested_rows(mv, "1.21.4") == ["re:a\tb"]
-               and (mv / "targets/1.21.4/renames.tsv").read_text(encoding="utf-8") == "# head\nKeep\tMe\n",
-               "a harvested row (and its loop comment) leaves the target's table; the rest stays")
-        (mv / "shared/1.21.4/renames.tsv").write_text("re:\\.isClientSide\\b(?!\\s*\\()\t.isClientSide()\n", encoding="utf-8")
-        (mv / "targets/1.21.4/renames.tsv").write_text("e.level().isClientSide\te.level().isClientSide()\nKeep\tMe\n", encoding="utf-8")
-        expect(drop_harvested_rows(mv, "1.21.4") == ["e.level().isClientSide\te.level().isClientSide()"],
-               "a target row a shared regex already makes is dropped (else the two rewrite each other)")
     # ---- recipes: derived into the overlay, a hand overlay never touched, an authors' edit reaches a generated one
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); rd = repo / "src/main/resources/data/examplemod/recipe"; rd.mkdir(parents=True)
@@ -3897,7 +2660,7 @@ def self_check():
                                                "result": {"id": "examplemod:a"}}), encoding="utf-8")
         (rd / "b.json").write_text(json.dumps({"type": "minecraft:crafting_shapeless", "ingredients": [{"item": "minecraft:dirt"}],
                                                "result": {"id": "examplemod:b"}}), encoding="utf-8")
-        td = repo / ".multiversion/targets/1.21.4"; hand = td / "resources/data/examplemod/recipe/b.json"
+        td = repo / ".port/1.21.4"; hand = td / "resources/data/examplemod/recipe/b.json"
         hand.parent.mkdir(parents=True); hand.write_text("{\"hand\": true}", encoding="utf-8")
         n, ref = layer_recipes(repo, td, "1.21.4")
         a_ = json.loads((td / "resources/data/examplemod/recipe/a.json").read_text(encoding="utf-8"))
@@ -4047,14 +2810,14 @@ def self_check():
         repo = pathlib.Path(d); md = repo / "src/main/resources/assets/examplemod/models/item"; md.mkdir(parents=True)
         (md / "sword.json").write_text('{"parent": "item/handheld", "textures": {"layer0": "examplemod:item/sword"}}', encoding="utf-8")
         (md / "special.json").write_text('{"parent": "item/generated", "textures": {"layer0": "examplemod:item/special"}}', encoding="utf-8")
-        td = repo / ".multiversion/targets/1.21.4"
+        td = repo / ".port/1.21.4"
         keep = td / "resources/assets/examplemod/items/special.json"; keep.parent.mkdir(parents=True)
         keep.write_text('{"model": {"type": "minecraft:special"}}', encoding="utf-8")
         n = layer_client_items(repo, td, "1.21.4")
         expect(n == 1 and (keep.parent / "sword.json").is_file() and "special" in keep.read_text(encoding="utf-8"),
                f"client items: the missing one written, the overlay's own kept ({n})")
         expect(layer_client_items(repo, td, "1.21.4") == 0, "client items: idempotent")
-        expect(layer_client_items(repo, repo / ".multiversion/targets/1.21.1x", "1.21.1") == 0, "control: none before 1.21.2")
+        expect(layer_client_items(repo, repo / ".port/1.21.1x", "1.21.1") == 0, "control: none before 1.21.2")
         # spawn-egg colours from the authors' registration (hex literals), 1.21.1 overrides as select/condition
         jd = repo / "src/main/java/com/example/mod"; jd.mkdir(parents=True)
         (jd / "ModItems.java").write_text('ITEMS.register("mob_spawn_egg",\n    () -> new DeferredSpawnEggItem(ModEntities.MOB, '
@@ -4095,7 +2858,7 @@ def self_check():
         (ad / "geo/mob.geo.json").write_text('{"m": 1}', encoding="utf-8")
         (ad / "geo/hand.geo.json").write_text('{"m": 2}', encoding="utf-8")
         (ad / "animations/armor/cape.animation.json").write_text('{"a": 1}', encoding="utf-8")
-        td = repo / ".multiversion/targets/1.21.5"; td.mkdir(parents=True)
+        td = repo / ".port/1.21.5"; td.mkdir(parents=True)
         (td / "DEPS.md").write_text("| `curse.maven:geckolib-388172` | required | `1` | curse.maven:geckolib-388172:2 | "
                                     "CurseForge file 2 (geckolib-neoforge-1.21.5-5.1.0.jar) |\n", encoding="utf-8")
         gm = td / "resources/assets/examplemod/geckolib/models"
@@ -4117,40 +2880,17 @@ def self_check():
         layer_geckolib_assets(repo, td, "1.21.5")
         expect(not (gm / "mob.geo.json").exists() and (gm / "hand.geo.json").exists(),
                "geckolib 5: a copy whose authors' file is gone is removed; the hand overlay stays")
-        t4 = repo / ".multiversion/targets/1.21.4"; t4.mkdir(parents=True)
+        t4 = repo / ".port/1.21.4"; t4.mkdir(parents=True)
         (t4 / "DEPS.md").write_text("| `curse.maven:geckolib-388172` | required | `1` | curse.maven:geckolib-388172:3 | "
                                     "CurseForge file 3 (geckolib-neoforge-1.21.4-4.8.5.jar) |\n", encoding="utf-8")
         expect(layer_geckolib_assets(repo, t4, "1.21.4") == 0 and not (t4 / "resources").exists(),
                "control: a GeckoLib 4.x target gets no 5.x copies")
-        t0 = repo / ".multiversion/targets/1.21.3"; t0.mkdir(parents=True)
+        t0 = repo / ".port/1.21.3"; t0.mkdir(parents=True)
         expect(layer_geckolib_assets(repo, t0, "1.21.3") == 0, "control: a target that names no GeckoLib gets none")
         for line_, want in (("geckolib-neoforge-1.21.10-5.3-alpha-3.jar", 5), ("software.bernie.geckolib:geckolib-neoforge-1.21.1:4.7.1", 4),
                             ("prop.geckolib_version=5.2.2", 5)):
             (t0 / "target.properties").write_text(line_ + "\n", encoding="utf-8")
             expect(target_geckolib_major(t0) == want, f"geckolib version from {line_!r}: {target_geckolib_major(t0)}")
-    # ---- the overlay audit: an overlay that deleted an authors' override is flagged, a renamed copy is not
-    with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); sd = repo / "src/main/java/m"; sd.mkdir(parents=True)
-        (sd / "A.java").write_text("class A extends B {\n @Override\n public void initializeClient(C c) { c.x(); }\n"
-                                   " @Override\n public int f() { return 1; }\n}\n", encoding="utf-8")
-        (sd / "Same.java").write_text("class S extends B {\n @Override\n public int f() { return 1; }\n}\n", encoding="utf-8")
-        td = repo / ".multiversion/targets/1.21.4"; od = td / "java/m"; od.mkdir(parents=True)
-        (od / "A.java").write_text("class A extends B {\n @Override\n public int f() { return 2; }\n}\n", encoding="utf-8")
-        (od / "Same.java").write_text("class S extends Bee {\n @Override\n public int g() { return 1; }\n}\n", encoding="utf-8")
-        got = overlay_stubs(repo, td)
-        expect([g["file"] for g in got] == [".multiversion/targets/1.21.4/java/m/A.java"] and "initializeClient" in got[0]["why"],
-               f"overlay audit: a deleted override is flagged, a renamed one is not: {got}")
-    # ---- a shared AT line marked `# until <v>` reaches targets up to <v> only
-    with tempfile.TemporaryDirectory() as td:
-        mvd = pathlib.Path(td) / ".multiversion"
-        (mvd / "shared/1.21.3").mkdir(parents=True)
-        for t, inh in (("1.21.3", None), ("1.21.4", "1.21.3"), ("1.21.5", "1.21.4")):
-            (mvd / "targets" / t).mkdir(parents=True)
-            (mvd / "targets" / t / "target.properties").write_text(f"inherits={inh}\n" if inh else "x=1\n", encoding="utf-8")
-        (mvd / "shared/1.21.3/accesstransformer.cfg").write_text(
-            "public a.B <init>(I)V # helper (until 1.21.4)\npublic a.C f\n", encoding="utf-8")
-        got = {t: merge_shared_at(mvd, t, pathlib.Path(td) / f"at-{t}.cfg") for t in ("1.21.4", "1.21.5")}
-        expect(len(got["1.21.4"]) == 2 and got["1.21.5"] == ["public a.C f"], f"AT until ceiling: {got}")
     # ---- green gates are not done with an unreviewed stub (a resume past the loop never asked)
     with tempfile.TemporaryDirectory() as td:
         td = pathlib.Path(td)
@@ -4170,41 +2910,33 @@ def self_check():
         expect(record_stubs(td, [{"file": "A.java", "why": "deleted a file"}])[0]["reviewed"] is None, "a new reason reopens it")
     # ---- a version is done only after its real-client run: green A/B without a Gate C record exits 17, with one 0
     with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        repo = pathlib.Path(d); (repo / ".port/1.21.4").mkdir(parents=True)
         a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
                                 direct=False, from_stage="cost", to_stage=None, max_errors=None, confirm_spend=False, port_checkout=[])
         run = Run(a_); run.s_cost = lambda: {"skipped": "fake"}
         import contextlib, io
         with contextlib.redirect_stdout(io.StringIO()):
             rc_ab = drive(run, a_, [s_ for s_ in STAGES if s_ != "cost"], ["cost"])
-            (repo / ".multiversion/targets/1.21.4/GATES.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n",
-                                                                          encoding="utf-8")
+            (repo / ".port/1.21.4/GATES.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n",
+                                                          encoding="utf-8")
+            run.done = lambda prepare=False: ["REVIEW.md: none"]; run.skeleton = lambda: 0
+            run.test_items = lambda: (0, None); run.review_note = lambda added: "x"
             rc_c = drive(run, a_, [s_ for s_ in STAGES if s_ != "cost"], ["cost"])
-        # R1: Gate C green is not done without the review record (exit 18); with it, for the commit reviewed, done
-        expect(rc_ab == 17 and rc_c == UNDONE_EXIT, f"done needs a recorded Gate C and the review: A/B only -> {rc_ab}, "
-                                                    f"with Gate C but no REVIEW.md -> {rc_c} (want {UNDONE_EXIT})")
-        g_ = lambda *x: subprocess.run(["git", "-C", str(repo), *x], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
-        (repo / ".gitignore").write_text("build/\n", encoding="utf-8")      # as every fork's
-        g_("init", "-q"); g_("config", "user.email", "a@b"); g_("config", "user.name", "a"); g_("add", "-A"); g_("commit", "-qm", "t")
-        (repo / ".multiversion/targets/1.21.4/GATES.md").write_text(       # the gates ran at that commit
-            f"Gates for `m` at `{g_('rev-parse', '--short', 'HEAD')}` for Minecraft 1.21.4 (local environment):\n\n| Gate C -- real client, `launch` | PASS | ok |\n",
-            encoding="utf-8")
-        rv = repo / ".multiversion/targets/1.21.4/REVIEW.md"
-        rv.write_text(rv.read_text(encoding="utf-8").replace("- reviewer: ?", "- reviewer: fresh agent r1")
-                      .replace("- date: ?", "- date: 2026-10-16").replace("- commit: ?", "- commit: " + g_("rev-parse", "--short", "HEAD")),
-                      encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()):
+            run.done = lambda prepare=False: []
             rc_rev = drive(run, a_, [s_ for s_ in STAGES if s_ != "cost"], ["cost"])
-        expect(rc_rev == 0 and (repo / ".multiversion/targets/1.21.4/TEST-ITEMS.md").is_file(),
-               f"Gate C + a complete review (nothing to judge) + test items generated: done, exit {rc_rev} {target_done(repo, '1.21.4')}")
+        # R1: Gate C green is not done while the done list is open (exit 18); with it closed, done (0). The done list
+        # itself is tools/fork-branches.py target_done(), checked there.
+        expect(rc_ab == 17 and rc_c == UNDONE_EXIT and rc_rev == 0,
+               f"done needs a recorded Gate C and the done list: A/B only -> {rc_ab}, with Gate C and an open list -> {rc_c} "
+               f"(want {UNDONE_EXIT}), with it closed -> {rc_rev}")
         # --from-stage cost over an older GATES.md with an unreviewed stub: not done (exit 10, the stub named)
-        (repo / ".multiversion/targets/1.21.4/STUBS.json").write_text(json.dumps([{"file": "A.java", "why": "emptied f()",
+        (repo / ".port/1.21.4/STUBS.json").write_text(json.dumps([{"file": "A.java", "why": "emptied f()",
                                                                                   "reviewed": None}]), encoding="utf-8")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc_stub = drive(run, a_, [s_ for s_ in STAGES if s_ != "cost"], ["cost"])
         expect(rc_stub == 10 and "A.java" in buf.getvalue(), f"a run resumed past the gates with an open stub: exit {rc_stub}")
-        (repo / ".multiversion/targets/1.21.4/STUBS.json").unlink()
+        (repo / ".port/1.21.4/STUBS.json").unlink()
         # --gates none is not done, even with a Gate C on record; a partial run (--to-stage) still ends 0
         a_.gates = "none"
         with contextlib.redirect_stdout(io.StringIO()):
@@ -4217,7 +2949,7 @@ def self_check():
     # GATES.md (weekly-round dry run, 2026-10-18); while it is there `--gates auto` runs full again and the target is not
     # done; a green full run deletes it
     with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
+        repo = pathlib.Path(d); td = repo / ".port/1.21.4"; td.mkdir(parents=True)
         green_md = "Gates at `abc1234` for Minecraft 1.21.4\n\n| Gate C -- real client, `launch` | PASS | ok |\n"
         for gates, code, want_red in (("full", 1, True), ("ab", 1, True), ("full", 0, False)):
             if code:
@@ -4246,12 +2978,9 @@ def self_check():
                    and (not red.is_file() or "STALE" not in red.read_text(encoding="utf-8")),
                    f"--gates {gates} exit {code}: GATES.md kept{' byte for byte' if code else ''}, "
                    f"GATES-RED.md {'written' if want_red else 'gone'}")
-            if want_red:
-                expect(any("GATES-RED.md" in x for x in target_done(repo, "1.21.4", write=False)),
-                       "a red full run on record: the target is not done, whatever GATES.md says")
     # ---- issue #113: a Gate C client the OOM killer killed is environmental -- RESIDUE.md says re-run, no fixer
     with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
+        repo = pathlib.Path(d); td = repo / ".port/1.21.4"; td.mkdir(parents=True)
         a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="full", modid="m", base="x",
                                 direct=False, from_stage="gates", to_stage=None, max_errors=None, confirm_spend=False,
                                 port_checkout=[])
@@ -4278,36 +3007,29 @@ def self_check():
                 expect(any("free" in e for e in st["environment"]), "the evidence carries the free-memory figure")
     md, _d = residue_report("gates", "x", [], None, [], ["Gate B: FAIL -- tests"], "r")
     expect("Fix what is listed here" in md and "Environmental" not in md, "a code failure's RESIDUE.md is unchanged")
-    # ---- issue #122: the run's own Gradle leaves no resident daemon before Gate C (layer forks only), and a refused
+    # ---- issue #122: the run's own Gradle leaves no resident daemon before Gate C, and a refused
     # Gate C names what holds the memory
     with tempfile.TemporaryDirectory() as d:
-        for layer in (True, False):
-            repo = pathlib.Path(d) / ("layer" if layer else "single"); repo.mkdir()
-            if layer:
-                (repo / ".multiversion").mkdir(); (repo / ".multiversion/base.properties").write_text("mc=1.21.1\n", encoding="utf-8")
-            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
-                                    direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
-                                    port_checkout=[])
-            seen = []
-            real_run = subprocess.run
-            subprocess.run = lambda cmd, **k: (seen.append((cmd, k)), CompletedProcess(cmd, 0, "", ""))[1]
-            try:
-                Run(a_).gradle(["compileJava"], str(repo / "g.log"))
-            finally:
-                subprocess.run = real_run
-            cmd, kw = seen[0]
-            opts = (kw.get("env") or {}).get("GRADLE_OPTS", "")
-            if layer:
-                expect("-Dorg.gradle.daemon=false" in opts and kw["env"].get("PATH") == os.environ.get("PATH"),
-                       f"a layer fork's Gradle runs daemon-less (GRADLE_OPTS), with the rest of the environment: {opts!r}")
-            else:
-                expect(kw.get("env") is None and "--no-daemon" not in cmd,
-                       f"a single-version checkout's environment is inherited unchanged: {kw.get('env')!r}")
+        repo = pathlib.Path(d)
+        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
+                                direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
+                                port_checkout=[])
+        seen = []
+        real_run = subprocess.run
+        subprocess.run = lambda cmd, **k: (seen.append((cmd, k)), CompletedProcess(cmd, 0, "", ""))[1]
+        try:
+            Run(a_).gradle(["compileJava"], str(repo / "g.log"))
+        finally:
+            subprocess.run = real_run
+        cmd, kw = seen[0]
+        opts = (kw.get("env") or {}).get("GRADLE_OPTS", "")
+        expect("-Dorg.gradle.daemon=false" in opts and kw["env"].get("PATH") == os.environ.get("PATH"),
+               f"a version branch's Gradle runs daemon-less (GRADLE_OPTS), with the rest of the environment: {opts!r}")
     if "gradle_env" in globals():
-        e_ = gradle_env({"GRADLE_OPTS": "-Xmx1g -Dorg.gradle.daemon=true", "A": "1"}, True)
+        e_ = gradle_env({"GRADLE_OPTS": "-Xmx1g -Dorg.gradle.daemon=true", "A": "1"})
         expect(e_["GRADLE_OPTS"] == "-Xmx1g -Dorg.gradle.daemon=true", "an explicit org.gradle.daemon in GRADLE_OPTS stands")
-        expect(gradle_env({"GRADLE_OPTS": "-Xmx1g"}, True)["GRADLE_OPTS"] == "-Xmx1g -Dorg.gradle.daemon=false"
-               and gradle_env({}, True)["GRADLE_OPTS"] == "-Dorg.gradle.daemon=false", "NO_DAEMON is appended to GRADLE_OPTS")
+        expect(gradle_env({"GRADLE_OPTS": "-Xmx1g"})["GRADLE_OPTS"] == "-Xmx1g -Dorg.gradle.daemon=false"
+               and gradle_env({})["GRADLE_OPTS"] == "-Dorg.gradle.daemon=false", "NO_DAEMON is appended to GRADLE_OPTS")
     with tempfile.TemporaryDirectory() as d:
         proc = pathlib.Path(d) / "proc"
         for pid, rss, argv in ((4242, 2300 * 1024, ["/usr/lib/jvm/bin/java", "-Xmx6g", "-cp", "/x/gradle-daemon.jar",
@@ -4325,7 +3047,7 @@ def self_check():
             fake = memory_holders(str(proc), top=3)
             expect(fake == ["PID 4242 2300 MB java ... GradleDaemon", "PID 5000 900 MB java ... net.example.client.Main",
                             "PID 4250 700 MB java ... GradleWorkerMain"], f"memory_holders: largest first, named by main class: {fake}")
-        repo = pathlib.Path(d) / "r"; (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
+        repo = pathlib.Path(d) / "r"; (repo / ".port/1.21.4").mkdir(parents=True)
         a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="full", modid="m", base="x",
                                 direct=False, from_stage="gates", to_stage=None, max_errors=None, confirm_spend=False,
                                 port_checkout=[])
@@ -4358,15 +3080,6 @@ def self_check():
         expect(gates_auto(td) == "ab", "a green Gate C recorded: ab")
         (td / "GATES.md").write_text("| Gate C -- real client, `launch` | PASS | ok |\n| Gate C -- real client, `spawn` | FAIL | x |\n", encoding="utf-8")
         expect(gates_auto(td) == "full", "a red row: full again")
-    # ---- an overlay identical to a shared helper is dropped (it would shadow later fixes); a changed one stays
-    with tempfile.TemporaryDirectory() as d:
-        mv = pathlib.Path(d); (mv / "targets/26.1.2/java/p/mv").mkdir(parents=True); (mv / "shared/26.1.2/java/p/mv").mkdir(parents=True)
-        for n, body in (("Same.java", "class Same {}\n"), ("Mine.java", "class Mine {}\n")):
-            (mv / "shared/26.1.2/java/p/mv" / n).write_text(body, encoding="utf-8")
-        (mv / "targets/26.1.2/java/p/mv/Same.java").write_text("class Same {}\n", encoding="utf-8")
-        (mv / "targets/26.1.2/java/p/mv/Mine.java").write_text("class Mine { int x; }\n", encoding="utf-8")
-        expect(drop_shadowing_overlays(mv, "26.1.2") == ["p/mv/Same.java"] and (mv / "targets/26.1.2/java/p/mv/Mine.java").is_file(),
-               "a byte-identical overlay of a shared helper is dropped, a changed one kept")
     # ---- a client lookup widened to a common type in a common class is found before Gate B; client code is not
     with tempfile.TemporaryDirectory() as d:
         repo = pathlib.Path(d); pr = repo / "build/mc1.21.8/mv/java/m"; (pr / "client").mkdir(parents=True)
@@ -4389,13 +3102,13 @@ def self_check():
     # ---- a review carries one version on when the file and every signal are the same; a changed count does not
     with tempfile.TemporaryDirectory() as d:
         mv = pathlib.Path(d); a, b = mv / "1.21.5", mv / "1.21.8"; a.mkdir(); b.mkdir()
-        (a / "STUBS.json").write_text(json.dumps([{"file": ".multiversion/targets/1.21.5/java/X.java", "why": "removes 3 call(s)",
+        (a / "STUBS.json").write_text(json.dumps([{"file": "src/main/java/X.java", "why": "removes 3 call(s)",
                                                    "reviewed": "same message API"}]), encoding="utf-8")
-        got = record_stubs(b, [{"file": ".multiversion/targets/1.21.8/java/X.java", "why": "removes 3 call(s)"},
-                               {"file": ".multiversion/targets/1.21.8/java/Y.java", "why": "removes 3 call(s)"}], parents=[a])
+        got = record_stubs(b, [{"file": "src/main/java/X.java", "why": "removes 3 call(s)"},
+                               {"file": "src/main/java/Y.java", "why": "removes 3 call(s)"}], parents=[a])
         expect(got[0]["reviewed"] == "(inherited from 1.21.5) same message API" and got[1]["reviewed"] is None,
                f"an identical signal inherits the parent's review, another file does not: {got}")
-        got = record_stubs(mv / "1.21.10", [{"file": ".multiversion/targets/1.21.10/java/X.java", "why": "removes 4 call(s)"}],
+        got = record_stubs(mv / "1.21.10", [{"file": "src/main/java/X.java", "why": "removes 4 call(s)"}],
                            parents=[b, a])
         expect(got[0]["reviewed"] is None, "control: a different count is a new question")
         expect(all("hooks" not in e for e in json.loads((b / "STUBS.json").read_text(encoding="utf-8"))),
@@ -4418,12 +3131,12 @@ def self_check():
                                                          f"  void h(CallbackInfo ci) {{ {body} }}\n}}\n")
         sig = "removes 2 mixin injection handler(s): check each still applies somewhere, with the same effect"
         def target(t, text, inh=()):
-            f = mv / t / "java/m/LrMixin.java"; f.parent.mkdir(parents=True, exist_ok=True)
+            f = repo / "src/main/java/m/LrMixin.java"; f.parent.mkdir(parents=True, exist_ok=True)
             if text is None:
                 f.unlink(missing_ok=True)
             else:
                 f.write_text(text, encoding="utf-8")
-            return record_stubs(mv / t, [{"file": f".multiversion/targets/{t}/java/m/LrMixin.java", "why": sig}],
+            return record_stubs(mv / t, [{"file": "src/main/java/m/LrMixin.java", "why": sig}],
                                 parents=[mv / x for x in inh], repo=repo)
         got = target("1.21.3", mix("HEAD"))
         expect(got[0]["reviewed"] is None and got[0]["hooks"] == ["@Inject method=renderLevel @At(value=\"HEAD\")",
@@ -4443,62 +3156,11 @@ def self_check():
         expect(got2 == got, "a resumed run keeps the flag rather than re-inheriting")
         got = target("1.21.6", mix("HEAD", meth="renderSky"), ["1.21.4", "1.21.3"])
         expect(got[0]["reviewed"] is None and "renderSky" in got[0]["recheck"], f"same signal, changed method: flagged: {got}")
-        # a STUBS.json from before "hooks": the parent's file on disk is what its review was made against
-        (mv / "1.21.7").mkdir(); (mv / "1.21.7/java/m").mkdir(parents=True)
-        (mv / "1.21.7/java/m/LrMixin.java").write_text(mix("HEAD"), encoding="utf-8")
-        (mv / "1.21.7/STUBS.json").write_text(json.dumps([{"file": ".multiversion/targets/1.21.7/java/m/LrMixin.java",
-                                                            "why": sig, "reviewed": "moved, same effect"}]), encoding="utf-8")
-        expect(target("1.21.8", mix("HEAD"), ["1.21.7"])[0]["reviewed"] == "(inherited from 1.21.7) moved, same effect",
-               "an old entry without hooks, the same hooks on disk: inherited")
-        expect(target("1.21.9", mix("RETURN"), ["1.21.7"])[0]["recheck"].startswith("re-justify"),
-               "an old entry without hooks, changed hooks on disk: flagged, never silently passed")
-        (mv / "1.21.7/java/m/LrMixin.java").unlink()
-        expect(target("1.21.10", mix("RETURN"), ["1.21.7"])[0]["reviewed"] == "(inherited from 1.21.7) moved, same effect",
-               "an old entry whose file is gone too: hooks unknown, inherited as before")
         expect(target("1.21.11", None, ["1.21.3"])[0]["recheck"].endswith("to (none)"),
                "the file gone on the inheriting target: it hooks nothing, flagged")
-    # ---- the shared libraries' access-transformer lines reach a direct jump's AT, once, comment aside
-    with tempfile.TemporaryDirectory() as d:
-        mv = pathlib.Path(d)
-        (mv / "targets/1.21.4").mkdir(parents=True)
-        (mv / "targets/1.21.4/target.properties").write_text("shared_chain=1.21.3,1.21.4\n", encoding="utf-8")
-        (mv / "shared/1.21.3").mkdir(parents=True)
-        (mv / "shared/1.21.3/accesstransformer.cfg").write_text("# why\npublic a.B <init>(I)V # helper\n", encoding="utf-8")
-        at = mv / "targets/1.21.4/resources/META-INF/accesstransformer.cfg"
-        at.parent.mkdir(parents=True); at.write_text("public c.D e()V\n", encoding="utf-8")
-        expect(merge_shared_at(mv, "1.21.4", at) == ["public a.B <init>(I)V # helper"] and merge_shared_at(mv, "1.21.4", at) == []
-               and at.read_text(encoding="utf-8") == "public c.D e()V\npublic a.B <init>(I)V # helper\n",
-               "a direct jump's AT gets its shared libraries' lines, once")
-        (mv / "targets/1.21.4/target.properties").write_text("x=1\n", encoding="utf-8")
-        at.write_text("public c.D e()V\n", encoding="utf-8")
-        expect(merge_shared_at(mv, "1.21.4", at) == [], "control: a target whose chain lacks that version gets nothing")
-    # ---- setup: pinned dependencies are resolved per target; a required one with no build stops before add-target
-    with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); (repo / ".multiversion/tools").mkdir(parents=True)
-        (repo / ".multiversion/base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
-        (repo / "build.gradle").write_text('dependencies {\n    implementation "curse.maven:somelib-1:2"\n}\n', encoding="utf-8")
-        (repo / ".multiversion/INVENTORY.json").write_text('{"items": []}\n', encoding="utf-8")   # built: no build call
-        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
-                                direct=False, from_stage=None, max_errors=None, confirm_spend=False,
-                                port_checkout=["owner/lib=/x/lib"], port_release=["owner/rel@v1"])
-        run = Run(a_); ran = []
-        def sh15(cmd, log=None, cwd=None):
-            ran.append(" ".join(map(str, cmd)))
-            return CompletedProcess(cmd, 15 if "layer-deps.py" in ran[-1] else 0, "layer-deps: STOP required: curse.maven:somelib-1\n", "")
-        run.sh = sh15
-        res = run.s_setup()
-        expect(res.get("code") == 15 and "somelib" in res["stop"] and len(ran) == 1 and "--dry-run" in ran[0]
-               and "--port-checkout owner/lib=/x/lib" in ran[0] and "--port-release owner/rel@v1" in ran[0],
-               f"a required dependency with no build stops setup first: {res} {ran}")
-        expect("--port-checkout owner/lib=/x/lib" in run.resume_cmd("setup") and "--port-release owner/rel@v1" in run.resume_cmd("setup"),
-               "the resume command keeps --port-checkout and --port-release")
-        expect(pins_dependencies(repo), "a cursemaven pin is a pinned dependency")
-        (repo / "build.gradle").write_text('dependencies {\n    implementation "net.example:lib:${lib_version}"\n}\n', encoding="utf-8")
-        expect(not pins_dependencies(repo), "control: a build with no pinned mod resolves nothing (setup runs as before)")
     # the guard stops the loop stage before any worker runs
     with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
-        (repo / ".multiversion/base.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        repo = pathlib.Path(d); (repo / ".port/1.21.4").mkdir(parents=True)
         a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
                                 direct=False, from_stage=None, max_errors=None, confirm_spend=False)
         run = Run(a_); ran = []
@@ -4511,94 +3173,65 @@ def self_check():
         run.sh = lambda *x, **k: (ran.append(x), CompletedProcess(x, 1, "", ""))[1]
         run.s_loop()
         expect(ran, "--confirm-spend lets the loop start")
-    # ---- one run per checkout: a live holder refuses a second run (exit 14, naming it); a dead one is taken over
-    with tempfile.TemporaryDirectory() as d:
+    # ---- one run per checkout: a live holder refuses a second run (exit 14, naming it); a dead one is taken over.
+    # The checkout is a version branch's (gradle.properties' version with its .port/<v>/branch.properties); drive() is
+    # stubbed, so no stage runs
+    cl = load("checkout_lock", "checkout-lock.py")
+
+    def vb_checkout(d):
         repo = pathlib.Path(d)
+        (repo / ".port/1.21.4").mkdir(parents=True)
+        (repo / ".port/1.21.4/branch.properties").write_text("minecraft_version=1.21.4\n", encoding="utf-8")
+        (repo / "gradle.properties").write_text("minecraft_version=1.21.4\n", encoding="utf-8")
+        return repo
+
+    def run_main(argv, drive_=None):
+        seen, real_drive, real_argv = {}, globals()["drive"], sys.argv
+        def fake_drive(run, *_):
+            seen["env"] = run.env
+            seen["holder"] = run.env.get(cl.LOCK_ENV)
+            return 0
+        globals()["drive"] = drive_ or fake_drive
+        sys.argv = ["fork-port.py", *argv]
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = main()
+        finally:
+            globals()["drive"], sys.argv = real_drive, real_argv
+        return rc, buf.getvalue(), seen
+    with tempfile.TemporaryDirectory() as d:
+        repo = vb_checkout(d)
         holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
             (repo / "build").mkdir()
             (repo / "build/.fork-port.lock").write_text(json.dumps({"pid": holder.pid, "tool": "fork-port.py", "target": "1.21.3",
                                                                     "started": "2026-01-01T00:00:00Z"}), encoding="utf-8")
-            buf = io.StringIO()
-            real_argv = sys.argv
-            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4"]
-            try:
-                with contextlib.redirect_stdout(buf):
-                    rc = main()
-            finally:
-                sys.argv = real_argv
-            expect(rc == 14 and str(holder.pid) in buf.getvalue() and "one gate run per checkout" in buf.getvalue(),
-                   f"a second run is refused with exit 14 naming the holder: rc={rc} {buf.getvalue()[:200]}")
+            rc, out_, _s = run_main(["--repo", str(repo), "--target", "1.21.4"])
+            expect(rc == 14 and str(holder.pid) in out_ and "one gate run per checkout" in out_,
+                   f"a second run is refused with exit 14 naming the holder: rc={rc} {out_[:200]}")
             expect(json.loads((repo / "build/.fork-port.lock").read_text(encoding="utf-8"))["pid"] == holder.pid,
                    "the refused run leaves the holder's lock alone")
         finally:
             holder.kill(); holder.wait()
-        buf = io.StringIO()
-        sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4"]
-        try:
-            with contextlib.redirect_stdout(buf):
-                rc = main()          # the holder is dead now: stale, taken over; it then stops at setup (no .multiversion) with 2
-        finally:
-            sys.argv = real_argv
+        rc, out_, _s = run_main(["--repo", str(repo), "--target", "1.21.4"], drive_=lambda *_: 2)
         expect(rc == 2 and not (repo / "build/.fork-port.lock").exists(),
                f"a dead holder's lock is taken over and released at the end: rc={rc}")
-    # ---- the children see the lock holder: on a layer fork they run with run.env (GRADLE_OPTS without a daemon),
-    # copied before the lock was taken; a single-version checkout's children inherit os.environ (run.env is None)
-    lc = load("layer_ci", "layer-ci.py")
-    for layer in (True, False):
-        with tempfile.TemporaryDirectory() as d:
-            repo = pathlib.Path(d)
-            if layer:
-                (repo / ".multiversion").mkdir()
-                (repo / ".multiversion/base.properties").write_text("mc=1.21.1\n", encoding="utf-8")
-            seen, real_drive, real_argv = {}, globals()["drive"], sys.argv
-            def fake_drive(run, *_):
-                seen["env"] = run.env
-                seen["holder"] = (run.env if run.env is not None else os.environ).get(lc.LOCK_ENV)
-                return 0
-            globals()["drive"] = fake_drive
-            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4", "--gates", "none"]
-            try:
-                with contextlib.redirect_stdout(io.StringIO()):
-                    main()
-            finally:
-                globals()["drive"], sys.argv = real_drive, real_argv
-            expect(seen.get("holder") == str(os.getpid()) and (seen.get("env") is not None) == layer,
-                   f"{'layer' if layer else 'single-version'}: a child sees this run as the lock holder: {seen.get('holder')}")
-    # ---- --direct and shared_chain: layer.py's rule and the tool's mirror of it agree
-    lay = load("layer_tpl", "../templates/fork-layer/tools/layer.py")
+    # ---- the children see the lock holder: they run with run.env (GRADLE_OPTS without a daemon), copied before the
+    # lock was taken
     with tempfile.TemporaryDirectory() as d:
-        mv = pathlib.Path(d)
-        for t_, props in (("1.21.3", "x=1\n"), ("1.21.5", "inherits=1.21.3\n"),
-                          ("1.21.11", "shared_chain=1.21.4, 1.21.5,1.21.8,1.21.10\n"), ("1.21.12", "inherits=1.21.11\n")):
-            (mv / "targets" / t_).mkdir(parents=True)
-            (mv / "targets" / t_ / "target.properties").write_text(props, encoding="utf-8")
-        for t_ in ("1.21.3", "1.21.5", "1.21.11", "1.21.12"):
-            expect(shared_chain(mv, t_) == lay.shared_chain(t_, mv), f"fork-port and layer.py agree on shared_chain({t_})")
-        expect(shared_chain(mv, "1.21.5") == chain(mv, "1.21.5") == ["1.21.5", "1.21.3"], "no key: the inherits chain, as before")
-        expect(shared_chain(mv, "1.21.11") == ["1.21.11", "1.21.10", "1.21.8", "1.21.5", "1.21.4"], "direct: newest first")
-        expect(shared_chain(mv, "1.21.12")[:2] == ["1.21.12", "1.21.11"] and "1.21.8" in shared_chain(mv, "1.21.12"),
-               "a target inheriting a direct one sees what its parent saw")
-    # layer.py replacement: only a verbatim older copy; a fork that does not jump is never touched
-    older = tpl.replace(INSERT, "")
-    expect(layer_patch(tpl, tpl, [], True)[0] == "current", "template copy is current")
-    withmoves_nosc = tpl.replace("shared_chain", "shared_chaiN")
-    expect(layer_patch(withmoves_nosc, tpl, [withmoves_nosc], False)[0] == "current", "moves-aware fork that needs no jump is untouched")
-    expect(layer_patch(withmoves_nosc, tpl, [withmoves_nosc], True)[0] == "replace", "a verbatim older copy is replaced when a jump needs shared_chain")
-    expect(layer_patch(withmoves_nosc + "# hand edit\n", tpl, [withmoves_nosc], True)[0] == "diverged", "an edited copy is never replaced")
-    expect(layer_patch(older, tpl, [])[0] == "replace", "the pre-moves copy is still replaced")
-    hist = layer_history()
-    if len(hist) >= 2:
-        expect(layer_patch(hist[-1], tpl, hist, True)[0] in ("replace", "current"), "the oldest committed template copy is replaceable")
-    ok = self_check_done_freeze_sweep() and ok
-    ok = self_check_review131() and ok
+        repo = vb_checkout(d)
+        rc, _o, seen = run_main(["--repo", str(repo), "--target", "1.21.4", "--gates", "none"])
+        expect(seen.get("holder") == str(os.getpid()) and "-Dorg.gradle.daemon=false" in seen["env"].get("GRADLE_OPTS", ""),
+               f"a child sees this run as the lock holder, daemon-less: {seen.get('holder')}")
+    ok = self_check_freeze() and ok
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
 
-def self_check_done_freeze_sweep():
-    """R1 (the done record, the undone-parent refusal), R4 (the upstream freeze) and R5 (the sweep), each on a layer
-    fixture AND a single-version one (no .multiversion/: nothing of this runs, the output and exit are as before)."""
+def self_check_freeze():
+    """R4 (the upstream freeze) on a version branch's .port/<t>/branch.properties, the PR #131 review's freeze findings,
+    and the single-version path: no version branch, so fork-port stops at once and writes nothing."""
     import contextlib, io
     from subprocess import CompletedProcess
     ok = True
@@ -4607,6 +3240,12 @@ def self_check_done_freeze_sweep():
         nonlocal ok
         if not c:
             ok = False; print("FAIL:", msg)
+
+    def run_case(name, fn):
+        try:
+            fn()
+        except Exception as e:      # noqa: BLE001 -- a missing function is a FAIL line, not a crash
+            expect(False, f"{name}: {type(e).__name__}: {e}")
 
     def git_repo(d):
         pathlib.Path(d).mkdir(parents=True, exist_ok=True)
@@ -4617,161 +3256,6 @@ def self_check_done_freeze_sweep():
     def w(p, text):
         p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text, encoding="utf-8")
 
-    green_c = "Gates for `m` at `{at}` for Minecraft {t} (local environment):\n\n| Gate C -- real client, `launch` | PASS | ok |\n"
-    # ---- R1: REVIEW.md -- one verdict per STUBS.json entry and per whole-file overlay, for the commit reviewed
-    with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); g = git_repo(repo)
-        td = repo / ".multiversion/targets/1.21.4"
-        w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
-        w(repo / "src/main/java/com/example/mod/A.java", "class A { void f() { x(); } }\n")
-        w(repo / "src/main/java/com/example/mod/B.java", "class B {}\n")
-        w(td / "java/com/example/mod/A.java", "class A { void f() { y(); } }\n")             # replaces an authors' file
-        w(td / "java/com/example/mod/mv/Helper.java", "class Helper {}\n")                    # overlay-only: not reviewed
-        w(td / "STUBS.json", json.dumps([{"file": ".multiversion/targets/1.21.4/java/com/example/mod/A.java",
-                                          "why": "removes 1 call(s)", "reviewed": "same effect"}]))
-        w(td / "target.properties", "x=1\n"); w(td / "GATES.md", green_c.format(t="1.21.4", at="x"))
-        li = load("layer_inventory", "layer-inventory.py")       # R2: the base inventory (nothing hooked here) and a
-        with contextlib.redirect_stdout(io.StringIO()):         # prepared tree, so the done list's item (6) holds
-            li.cmd_build(argparse.Namespace(repo=str(repo), dry_run=False, out=None))
-        (repo / "build/mc1.21.4/mv/java").mkdir(parents=True)
-        items = review_items(repo, td)
-        expect(items == [("overlay", ".multiversion/targets/1.21.4/java/com/example/mod/A.java"),
-                         ("stub", ".multiversion/targets/1.21.4/java/com/example/mod/A.java")],
-               f"review items: every stub entry and every whole-file overlay, no overlay-only helper: {items}")
-        expect(review_problems(repo, td) == ["no REVIEW.md: 2 item(s) need an independent reviewer's verdict (1 stub(s), "
-                                             "whole-file overlays (1) + overlay-only files (1) (those need no row), "
-                                             "0 resource group(s))"], f"no REVIEW.md: not done: {review_problems(repo, td)}")
-        expect(review_skeleton(repo, td, "1.21.4") == 2 and review_skeleton(repo, td, "1.21.4") == 0,
-               "the skeleton gets a ? row per item, once")
-        pr = review_problems(repo, td)
-        expect(sum(p.startswith("no verdict") for p in pr) == 2 and any("no reviewer" in p for p in pr)
-               and any("no commit" in p for p in pr), f"a skeleton is not a review: {pr}")
-        g("add", "-A"); g("commit", "-qm", "port 1.21.4"); head = g("rev-parse", "--short", "HEAD")
-        w(td / "GATES.md", green_c.format(t="1.21.4", at=head))      # the gates ran at the committed port
-        txt = (td / "REVIEW.md").read_text(encoding="utf-8")
-        txt = (txt.replace("- reviewer: ?", "- reviewer: fresh agent (session x)").replace("- date: ?", "- date: 2026-10-16")
-               .replace("- commit: ?", f"- commit: {head}")
-               .replace("| overlay | .multiversion/targets/1.21.4/java/com/example/mod/A.java | ? | ? |",
-                        "| overlay | .multiversion/targets/1.21.4/java/com/example/mod/A.java | ok | y() is x()'s 1.21.4 name \\| same |")
-               .replace("| stub | .multiversion/targets/1.21.4/java/com/example/mod/A.java | ? | ? |",
-                        "| stub | .multiversion/targets/1.21.4/java/com/example/mod/A.java | ok | the call moved, same effect |"))
-        (td / "REVIEW.md").write_text(txt, encoding="utf-8")
-        expect(review_problems(repo, td) == [], f"a complete review for HEAD: {review_problems(repo, td)}")
-        expect(parse_review(txt)[1][("overlay", ".multiversion/targets/1.21.4/java/com/example/mod/A.java")][1]
-               == "y() is x()'s 1.21.4 name | same", "an escaped bar stays in the note")
-        expect(target_done(repo, "1.21.4") == [f"manual-test items not generated (TEST-ITEMS.md): write them, no gate run: "
-                                               f"python3 tools/fork-port.py --repo {repo} --target 1.21.4 --write-test-items"],
-               f"done also needs the test items, naming the command that writes them: {target_done(repo, '1.21.4')}")
-        # --write-test-items: TEST-ITEMS.md only, under the checkout lock; refused (14) while another run holds it
-        lc_ = load("layer_ci", "layer-ci.py")
-        held = lc_.CheckoutLock(repo, "fork-port.py", "1.21.5", pid=os.getppid(), env={})    # another live run
-        expect(held.acquire() is None, "the fixture takes the checkout lock")
-        argv_ = sys.argv
-        try:
-            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4", "--write-test-items"]
-            with contextlib.redirect_stdout(io.StringIO()) as buf_:
-                rc_busy = main()
-            held.release()
-            expect(rc_busy == 14 and not (td / "TEST-ITEMS.md").exists(), f"--write-test-items waits for the checkout: "
-                                                                          f"{rc_busy} {buf_.getvalue()}")
-            before_ = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*") if ".git" not in p.parts)
-            with contextlib.redirect_stdout(io.StringIO()) as buf_:
-                rc_w = main()
-            after_ = sorted(p.relative_to(repo).as_posix() for p in repo.rglob("*") if ".git" not in p.parts)
-        finally:
-            sys.argv = argv_
-        expect(rc_w == 0 and set(after_) - set(before_) == {".multiversion/targets/1.21.4/TEST-ITEMS.md"}
-               and "A.java" in (td / "TEST-ITEMS.md").read_text(encoding="utf-8") and not (repo / "build/.fork-port.lock").exists(),
-               f"--write-test-items writes TEST-ITEMS.md from layer-test-plan.py and nothing else: {rc_w} "
-               f"{set(after_) - set(before_)} {buf_.getvalue()}")
-        n_, why_ = write_test_items(repo, td, "1.21.4")
-        expect(why_ is None and n_ >= 1, f"test items generated from layer-test-plan.py: {n_} {why_}")
-        expect(target_done(repo, "1.21.4") == [], f"done: {target_done(repo, '1.21.4')}")
-        # BEHAVIOUR.json is the reviewer's own record beside REVIEW.md: writing it after the review is not a change
-        # the review missed (it is still what the inventory account reads)
-        w(td / "BEHAVIOUR.json", json.dumps([{"item": "main:com/example/mod/B.java#*", "status": "dropped", "reason": "x"}]))
-        expect(target_done(repo, "1.21.4") == [] and "BEHAVIOUR.json" in REVIEW_OUTPUTS,
-               f"a BEHAVIOUR.json written after the review leaves it current: {target_done(repo, '1.21.4')}")
-        (td / "BEHAVIOUR.json").unlink()
-        # resource overlays and renames.tsv are review items: one row per resource group and one for renames.tsv, each
-        # with its digest -- an edit (a spawn-egg tint, a missing tag added) is a new row, never covered by the old verdict
-        w(td / "resources/assets/examplemod/items/egg.json", '{"model": {"type": "minecraft:model"}}\n')
-        w(td / "resources/assets/examplemod/items/sub/b.json", '{"model": {}}\n')
-        w(td / "resources/examplemod.mixins.json", '{}\n')
-        w(td / "renames.tsv", "x\ty\n")
-        g("add", "-A"); g("commit", "-qm", "resources"); head2 = g("rev-parse", "--short", "HEAD")
-        w(td / "GATES.md", green_c.format(t="1.21.4", at=head2))
-        os.utime(repo / "build/mc1.21.4/mv/java")     # prepared after renames.tsv: the inventory reads a current tree
-        ri = [x for x in review_items(repo, td) if x[0] in ("resources", "renames")]
-        expect([(k, x.rsplit(" @", 1)[0]) for k, x in ri] == [
-            ("renames", ".multiversion/targets/1.21.4/renames.tsv"),
-            ("resources", ".multiversion/targets/1.21.4/resources/assets/examplemod/items"),
-            ("resources", ".multiversion/targets/1.21.4/resources/examplemod.mixins.json")]
-               and all(re.fullmatch(r"[0-9a-f]{12}", x.rsplit(" @", 1)[1]) for _k, x in ri),
-               f"one row per resource group (sub-folders in it) and one for renames.tsv, each with a digest: {ri}")
-        txt2 = txt.replace(f"- commit: {head}", f"- commit: {head2}")
-        (td / "REVIEW.md").write_text(txt2, encoding="utf-8")
-        pr = target_done(repo, "1.21.4")
-        expect(sorted(p.split(" @")[0] for p in pr) == [
-            "no verdict: renames .multiversion/targets/1.21.4/renames.tsv",
-            "no verdict: resources .multiversion/targets/1.21.4/resources/assets/examplemod/items",
-            "no verdict: resources .multiversion/targets/1.21.4/resources/examplemod.mixins.json"],
-               f"an unreviewed resource overlay or renames.tsv: not done: {pr}")
-        expect(review_skeleton(repo, td, "1.21.4") == 3, "the skeleton gives each its `?` row")
-        txt2 = txt2 + "".join(f"| {k} | {x} | ok | compared with the authors' 1.21.1 files |\n" for k, x in ri)
-        (td / "REVIEW.md").write_text(txt2, encoding="utf-8")
-        expect(target_done(repo, "1.21.4") == [], f"every group and renames.tsv reviewed: done: {target_done(repo, '1.21.4')}")
-        w(td / "resources/assets/examplemod/items/egg.json", '{"model": {"type": "minecraft:model", "tints": [1]}}\n')
-        g("add", "-A"); g("commit", "-qm", "tint"); head3 = g("rev-parse", "--short", "HEAD")
-        w(td / "GATES.md", green_c.format(t="1.21.4", at=head3))
-        (td / "REVIEW.md").write_text(txt2.replace(f"- commit: {head2}", f"- commit: {head3}"), encoding="utf-8")
-        pr = target_done(repo, "1.21.4")
-        expect(len(pr) == 1 and pr[0].startswith("no verdict: resources .multiversion/targets/1.21.4/resources/assets/examplemod/items @")
-               and pr[0] not in [f"no verdict: {k} {x}" for k, x in ri],
-               f"a group edited after its verdict (the commit moved on): its new digest has no verdict: {pr}")
-        (td / "REVIEW.md").write_text(txt, encoding="utf-8")
-        g("rm", "-rq", ".multiversion/targets/1.21.4/resources", ".multiversion/targets/1.21.4/renames.tsv")
-        g("commit", "-qm", "drop the fixture's resources"); head4 = g("rev-parse", "--short", "HEAD")
-        txt = txt.replace(f"- commit: {head}", f"- commit: {head4}"); head = head4
-        (td / "REVIEW.md").write_text(txt, encoding="utf-8"); w(td / "GATES.md", green_c.format(t="1.21.4", at=head))
-        expect(target_done(repo, "1.21.4") == [], f"back to the plain fixture: done: {target_done(repo, '1.21.4')}")
-        (td / "java/com/example/mod/A.java").write_text("class A { void f() { z(); } }\n", encoding="utf-8")
-        expect(any("changed since the reviewed commit" in p for p in target_done(repo, "1.21.4")),
-               "an overlay edited after the review: not done (re-review, name the new commit)")
-        g("checkout", "-q", "--", "."); w(td / "GATES.md", green_c.format(t="1.21.4", at=head))
-        os.utime(repo / "build/mc1.21.4/mv/java")      # the overlay is as built again: the prepared tree is current
-        (td / "REVIEW.md").write_text(txt.replace("| ok | the call moved", "| not-ok | the call moved"), encoding="utf-8")
-        expect(any(p.startswith("reviewer says not-ok") for p in target_done(repo, "1.21.4")), "a not-ok verdict: not done")
-        (td / "REVIEW.md").write_text(txt.replace(f"- commit: {head}", "- commit: 0123456"), encoding="utf-8")
-        expect(any("not in this checkout" in p for p in target_done(repo, "1.21.4")), "an unknown reviewed commit: not done")
-        (td / "REVIEW.md").write_text(txt, encoding="utf-8")
-        # ---- the next target is refused while 1.21.4 is not done; --allow-undone-parent is recorded and keeps it undone
-        (td / "TEST-ITEMS.md").unlink()
-        stop_ = undone_parent_stop(repo, "1.21.5")
-        expect(stop_ and stop_[0] == "1.21.4" and "TEST-ITEMS" in stop_[1][0], f"1.21.5 stands on an undone 1.21.4: {stop_}")
-        a_ = argparse.Namespace(repo=str(repo), target="1.21.5", json=None, budget=1.0, gates="ab", modid="m", base="x",
-                                direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
-                                port_checkout=[], port_release=[], allow_undone_parent=False)
-        run = Run(a_); ran = []
-        run.sh = lambda cmd, log=None, cwd=None: (ran.append(" ".join(map(str, cmd))), CompletedProcess(cmd, 0, "", ""))[1]
-        res = run.s_setup()
-        expect(res.get("code") == UNDONE_EXIT and "1.21.4" in res["stop"] and not ran and not run.tdir.exists()
-               and any("--allow-undone-parent" in c for c in res["choices"]),
-               f"setup refuses a new target over an undone parent before anything runs: {res} {ran}")
-        a_.allow_undone_parent = True
-        try:
-            run.s_setup()          # past add-target the fixture has no layer machinery: only the add-target call matters
-        except OSError:
-            pass
-        expect(any("--allow-undone-parent" in c for c in ran if "add-target" in c), f"the escape reaches add-target: {ran}")
-        write_test_items(repo, td, "1.21.4")
-        expect(undone_parent_stop(repo, "1.21.5") is None and undone_parent_stop(repo, "1.21.4") is None,
-               "a done parent (and an existing target) is never refused")
-        w(repo / ".multiversion/targets/1.21.5/target.properties", "inherits=1.21.4\nallowed_undone_parent=1.21.4 2026-10-16: x\n")
-        w(repo / ".multiversion/targets/1.21.5/GATES.md", green_c.format(t="1.21.5", at=head))
-        (td / "TEST-ITEMS.md").unlink()
-        expect(any("parent 1.21.4 is still not done" in p for p in target_done(repo, "1.21.5")),
-               "a target added over an undone parent is not done while that parent is not")
     # ---- R4: the authors' commit the buildout started from; a moved upstream stops a run to the end (exit 19)
     with tempfile.TemporaryDirectory() as d:
         up, fork = pathlib.Path(d) / "authors", pathlib.Path(d) / "fork"
@@ -4779,46 +3263,42 @@ def self_check_done_freeze_sweep():
         subprocess.run(["git", "clone", "-q", "-o", "upstream", str(up), str(fork)], check=True, capture_output=True)
         gf = lambda *x: subprocess.run(["git", "-C", str(fork), *x], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
         gf("config", "user.email", "a@b"); gf("config", "user.name", "a")
-        w(fork / ".multiversion/base.properties", "minecraft_version=1.21.1\nmv_package=com.example.mod.mv\n")
-        gf("add", "-A"); gf("commit", "-qm", "layer")
+        vbp, vdrift = fork / ".port/1.21.3/branch.properties", fork / ".port/1.21.3/DRIFT.md"
+        w(vbp, "minecraft_version=1.21.3\nmv_package=com.example.mod.mv\n")
+        gf("add", "-A"); gf("commit", "-qm", "version branch")
         a_ = argparse.Namespace(repo=str(fork), target="1.21.3", base="origin/neoforge-1.21.1", port_release=["owner/lib@v1"],
-                                upstream=None, accept_upstream_drift=False)
+                                upstream="upstream/main", accept_upstream_drift=False)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            st = drift_stop(fork, a_)
-        bp = read_props(fork / ".multiversion/base.properties")
+            st = drift_stop(fork, a_, vbp, vdrift)
+        a_.upstream = None
+        bp = read_props(vbp)
         expect(st is None and bp.get("upstream") == "upstream/main" and bp.get("upstream_commit") == gu("rev-parse", "HEAD")
                and bp.get("library.owner/lib") == "v1" and bp.get("mv_package") == "com.example.mod.mv",
-               f"the first target freezes the authors' commit and each library release, other keys kept: {bp} {buf.getvalue()}")
-        gf("commit", "-qam", "freeze"); (fork / ".multiversion/targets/1.21.3").mkdir(parents=True)
+               f"--upstream with no freeze recorded freezes the authors' commit and each library release, other keys kept: {bp} {buf.getvalue()}")
+        gf("commit", "-qam", "freeze")
         w(up / "A.java", "a2\n"); gu("commit", "-qam", "authors 2")
         with contextlib.redirect_stdout(io.StringIO()):
-            st = drift_stop(fork, a_)
+            st = drift_stop(fork, a_, vbp, vdrift)
         expect(st and st["code"] == DRIFT_EXIT and "1 commit(s)" in st["stop"]
                and any("port-sync.py" in c and "--upstream upstream/main" in c and "--port neoforge-1.21.1" in c for c in st["choices"])
-               and any("--accept-upstream-drift (recorded in .multiversion/DRIFT.md)" in c for c in st["choices"]),
-               f"the authors pushed: exit 19 naming the keep-current command and the layer's DRIFT.md: {st}")
+               and any("--accept-upstream-drift (recorded in .port/1.21.3/DRIFT.md)" in c for c in st["choices"]),
+               f"the authors pushed: exit 19 naming the keep-current command and the version's DRIFT.md: {st}")
         a_.accept_upstream_drift = True
         with contextlib.redirect_stdout(io.StringIO()):
-            st = drift_stop(fork, a_)
-        expect(st is None and "accepted" in (fork / ".multiversion/DRIFT.md").read_text(encoding="utf-8"),
+            st = drift_stop(fork, a_, vbp, vdrift)
+        expect(st is None and "accepted" in vdrift.read_text(encoding="utf-8"),
                "--accept-upstream-drift continues, recorded in DRIFT.md")
+        vdrift.unlink()
         a_.accept_upstream_drift = False
         gf("merge", "-q", "--no-edit", "upstream/main")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            st = drift_stop(fork, a_)
-        expect(st is None and "newer than the freeze" in buf.getvalue(), f"after keep-current merged it: no stop, a re-freeze hint: {buf.getvalue()}")
-        # a version branch's freeze (.port/<t>/branch.properties): the hints name fork-branches.py freeze, and a freeze
-        # naming a remote the clone lacks says how to add it, fetch-only
-        vbp = fork / ".port/1.21.3/branch.properties"
-        w(vbp, f"minecraft_version=1.21.3\nupstream=upstream/main\nupstream_commit={bp.get('upstream_commit')}\n")
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            st = drift_stop(fork, a_, props_file=vbp, drift_file=fork / ".port/1.21.3/DRIFT.md")
-        expect(st is None and f"fork-branches.py freeze --repo {fork} --target 1.21.3" in buf.getvalue()
-               and "make-fork-layer.py" not in buf.getvalue(),
-               f"a version branch: the re-freeze hint is fork-branches.py freeze, not make-fork-layer.py: {buf.getvalue()}")
+            st = drift_stop(fork, a_, vbp, vdrift)
+        expect(st is None and "newer than the freeze" in buf.getvalue()
+               and f"fork-branches.py freeze --repo {fork} --target 1.21.3" in buf.getvalue(),
+               f"after keep-current merged it: no stop, a re-freeze hint (fork-branches.py freeze): {buf.getvalue()}")
+        # a freeze naming a remote the clone lacks says how to add it, fetch-only
         w(vbp, "minecraft_version=1.21.3\nupstream=authors/main\nupstream_commit=" + bp.get("upstream_commit", "") + "\n")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -4830,7 +3310,6 @@ def self_check_done_freeze_sweep():
         expect(add_remote_hint(fork, "upstream/main") is None, "an existing remote gets no hint")
         # the weekly round's dry run (2026-10-18): a missing remote is a stop, never the way past the guard; a round whose
         # frozen plan does not take the authors' code goes on, the drift recorded in DRIFT.md as left out by the plan
-        vdrift = fork / ".port/1.21.3/DRIFT.md"
         with contextlib.redirect_stdout(io.StringIO()):
             st = drift_stop(fork, a_, fetch=False, props_file=vbp, drift_file=vdrift)
         expect(st and st["code"] == DRIFT_EXIT and "no `authors` remote" in st["stop"] and not vdrift.exists()
@@ -4923,352 +3402,7 @@ def self_check_done_freeze_sweep():
                 and {"stop", "code"} <= {k.value for k in n.keys if isinstance(k, ast.Constant)}
                 and "choices" not in {k.value for k in n.keys if isinstance(k, ast.Constant)}]
         expect(not bare, f"every stop this tool returns names its choices (lines {bare})")
-        vbp.unlink()
-        a_.port_release = ["owner/lib@v2"]
-        with contextlib.redirect_stdout(io.StringIO()):
-            st = drift_stop(fork, a_)
-        expect(st and st["code"] == DRIFT_EXIT and "owner/lib" in st["stop"], f"a library resolved against another release: {st}")
-        os.environ[DRIFT_CHECKED_ENV] = "1"
-        try:
-            expect(drift_stop(fork, a_) is None, "a sweep's child does not check again")
-        finally:
-            del os.environ[DRIFT_CHECKED_ENV]
-    # ---- R5: --chain FROM..TO re-runs the stage for each target oldest first, no model, stops at the first red
-    with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); mv = repo / ".multiversion"
-        w(mv / "base.properties", "minecraft_version=1.21.1\n")
-        for t_, inh in (("1.21.3", None), ("1.21.4", "1.21.3"), ("1.21.5", "1.21.4"), ("1.21.8", "1.21.5")):
-            w(mv / "targets" / t_ / "target.properties", f"inherits={inh}\n" if inh else "x=1\n")
-        expect(chain_targets(mv, "1.21.4", "1.21.8") == ["1.21.4", "1.21.5", "1.21.8"], "the range along the inherits chain")
-        codes, seen = {"1.21.3": 0, "1.21.4": UNDONE_EXIT, "1.21.5": 12, "1.21.8": 0}, []
 
-        def runner(cmd, env):
-            t_ = cmd[cmd.index("--target") + 1]; seen.append((t_, cmd, env))
-            summ = {"stop": {"stage": "gates", "left": "1 gate(s) red: Gate C"}} if codes[t_] == 12 else (
-                {"not_done": ["no REVIEW.md"]} if codes[t_] == UNDONE_EXIT else {})
-            w(repo / "build" / f"mc{t_}" / "fork-port" / "fork-port.json", json.dumps(summ))
-            if codes[t_] == 12:
-                w(mv / "targets" / t_ / "RESIDUE.md", "# Residue: gates\n")
-            return codes[t_]
-        sa = argparse.Namespace(repo=str(repo), chain="1.21.3..1.21.8", from_stage=None, to_stage=None, gates="full",
-                                base="origin/neoforge-1.21.1", modid=None, port_checkout=[], port_release=[],
-                                upstream=None, accept_upstream_drift=False, target=None)
-        lines = []
-        with contextlib.redirect_stdout(io.StringIO()):
-            rc = sweep(sa, runner, out=lines.append)
-        txt = "\n".join(lines)
-        expect(rc == 12 and [s[0] for s in seen] == ["1.21.3", "1.21.4", "1.21.5"],
-               f"oldest first, on past a green-but-unreviewed target, stopped at the first red: {rc} {[s[0] for s in seen]}")
-        c0 = seen[0][1]
-        expect(c0[c0.index("--from-stage") + 1] == "gates" and c0[c0.index("--budget") + 1] == "0"
-               and c0[c0.index("--max-errors") + 1] == "0" and c0[c0.index("--gates") + 1] == "full"
-               and seen[0][2].get(DRIFT_CHECKED_ENV) == "1", f"each target: --from-stage gates, no model: {c0}")
-        expect("| 1.21.5 | 12 | RED at gates: 1 gate(s) red: Gate C | .multiversion/targets/1.21.5/RESIDUE.md |" in txt
-               and "| 1.21.8 | - | not run" in txt and "--chain 1.21.5..1.21.8" in txt and "ONE fixer" in txt,
-               f"the table names the red target's RESIDUE.md and the command to sweep on: {txt}")
-        codes["1.21.5"] = 0; seen.clear(); lines.clear()
-        with contextlib.redirect_stdout(io.StringIO()):
-            rc = sweep(sa, runner, out=lines.append)
-        expect(rc == UNDONE_EXIT and len(seen) == 4, "all green, one unreviewed: exit 18")
-        sa.chain = "1.21.9..1.21.8"
-        expect(sweep(sa, runner, out=lines.append) == 2, "FROM outside TO's chain: bad input")
-        expect(not (repo / "build/.fork-port.lock").exists(), "the sweep releases its checkout lock")
-    # ---- wiring (1): done includes the base behaviour inventory (layer-inventory.py) -- a layer fixture and a
-    # single-version one
-    mixin_src = ("package com.example.mod.mixin;\n@Mixin(Foo.class)\npublic class FooMixin {\n"
-                 "    @Inject(method = \"tick\", at = @At(\"HEAD\"))\n    private void onTick(CallbackInfo ci) {}\n}\n")
-    for layer in (True, False):
-        with tempfile.TemporaryDirectory() as d:
-            repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"
-            w(repo / "src/main/java/com/example/mod/mixin/FooMixin.java", mixin_src)
-            w(td / "target.properties", "x=1\n"); w(td / "GATES.md", green_c.format(t="1.21.4", at="x"))
-            w(repo / "build/mc1.21.4/mv/java/com/example/mod/mixin/FooMixin.java", "package com.example.mod.mixin;\npublic class FooMixin {}\n")
-            if layer:
-                w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
-                inv_why = [x for x in target_done(repo, "1.21.4") if x.startswith("behaviour inventory")]
-                expect(len(inv_why) == 1 and "layer-inventory.py build" in inv_why[0],
-                       f"layer: no INVENTORY.json is not done, naming the build: {inv_why}")
-                li = load("layer_inventory", "layer-inventory.py")
-                with contextlib.redirect_stdout(io.StringIO()):
-                    li.cmd_build(argparse.Namespace(repo=str(repo), dry_run=False, out=None))
-            why = target_done(repo, "1.21.4")
-            inv_why = [x for x in why if x.startswith("behaviour inventory")]
-            if layer:
-                expect(len(inv_why) == 2 and all("unaccounted" in x and "FooMixin" in x for x in inv_why)
-                       and (td / "INVENTORY-CHECK.json").is_file(),
-                       f"layer: a mixin and an injection the prepared tree lost are unaccounted: not done: {inv_why}")
-                # the skeleton names each unaccounted item in an `item` row, a file's items together, so the reviewer
-                # sees the hooks a file-level row does not account for
-                review_skeleton(repo, td, "1.21.4")
-                rows_ = [k for k in parse_review((td / "REVIEW.md").read_text(encoding="utf-8"))[1] if k[0] == "item"]
-                expect(rows_ == [("item", "main:com/example/mod/mixin/FooMixin.java#injection:@Inject method=tick @At(value=\"HEAD\")"),
-                                 ("item", "main:com/example/mod/mixin/FooMixin.java#mixin:@Mixin Foo")],
-                       f"layer: review_skeleton lists the unaccounted item ids: {rows_}")
-                (td / "REVIEW.md").unlink()
-                w(td / "BEHAVIOUR.json", json.dumps([{"item": "main:com/example/mod/mixin/FooMixin.java#*",
-                                                      "status": "dropped", "reason": "the hook is gone on 1.21.4"}]))
-                expect(not [x for x in target_done(repo, "1.21.4") if x.startswith("behaviour inventory")],
-                       "layer: each item recorded in BEHAVIOUR.json: the inventory is accounted for")
-                expect("INVENTORY-CHECK.json" in REVIEW_OUTPUTS, "INVENTORY-CHECK.json is a run output, not a reviewed file")
-            else:
-                expect(not inv_why and not (td / "INVENTORY-CHECK.json").exists(),
-                       f"single-version: no inventory requirement, nothing written: {why}")
-                review_skeleton(repo, td, "1.21.4")
-                expect(not [k for k in parse_review((td / "REVIEW.md").read_text(encoding="utf-8"))[1] if k[0] == "item"],
-                       "single-version: no inventory, so the skeleton names no item")
-    # ---- wiring (2): setup builds .multiversion/INVENTORY.json once when it is missing (layer fork only)
-    for layer in (True, False):
-        with tempfile.TemporaryDirectory() as d:
-            repo = pathlib.Path(d); (repo / ".multiversion/targets/1.21.4").mkdir(parents=True)
-            if layer:
-                w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
-            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
-                                    direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
-                                    port_checkout=[], port_release=[], allow_undone_parent=False, allow_undone_library=False)
-            run = Run(a_); ran = []
-            def ish(cmd, log=None, cwd=None, code=0):
-                ran.append(" ".join(map(str, cmd)))
-                return CompletedProcess(cmd, code, "layer-inventory: 3 item(s) from the base (mixin 1) -> x\n", "")
-            run.sh = ish
-            for _ in range(2):
-                try:
-                    res = run.s_setup()   # past sync-shared the fixture has no layer machinery: only the calls matter
-                except OSError:
-                    res = {}
-                if layer:
-                    (repo / ".multiversion/INVENTORY.json").write_text("{}\n", encoding="utf-8")   # what the build wrote
-            builds = [c for c in ran if "layer-inventory.py build" in c]
-            if layer:
-                expect(len(builds) == 1 and ran[0] == builds[0], f"layer: the inventory is built once, first: {ran}")
-                (repo / ".multiversion/INVENTORY.json").unlink(); ran.clear()
-                run.sh = lambda cmd, log=None, cwd=None: ish(cmd, log, cwd, code=2)
-                try:
-                    res = run.s_setup()
-                except OSError as e:     # went on past it: not stopped
-                    res = {"went_on": str(e)}
-                expect(res.get("code") == 2 and "layer-inventory.py build failed" in res["stop"] and len(ran) == 1,
-                       f"layer: a failed inventory build stops setup: {res}")
-            else:
-                expect(not ran and res.get("code") == 2 and "no .multiversion" in res["stop"],
-                       f"single-version: setup stops as before, no inventory build: {res} {ran}")
-    # ---- wiring (3): layer-deps exit 18 (a library target not done) stops setup with 18 and its message;
-    # --allow-undone-library is passed through, recorded, kept in the resume command, and keeps the target not done
-    with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"; td.mkdir(parents=True)
-        w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
-        w(repo / ".multiversion/INVENTORY.json", '{"items": []}\n')
-        w(repo / "build.gradle", 'dependencies {\n    implementation "curse.maven:somelib-1:2"\n}\n')
-        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", json=None, budget=1.0, gates="ab", modid="m", base="x",
-                                direct=False, from_stage=None, to_stage=None, max_errors=None, confirm_spend=False,
-                                port_checkout=["owner/lib=/x/lib"], port_release=[], allow_undone_parent=False,
-                                allow_undone_library=False)
-        run = Run(a_); ran = []
-        msg18 = "layer-deps: STOP library first: sibling library targets not done: owner/lib 1.21.4 (A/B only)\n"
-        def sh18(cmd, log=None, cwd=None, on_dry=True):
-            ran.append(" ".join(map(str, cmd)))
-            hit = "layer-deps.py" in ran[-1] and (("--dry-run" in ran[-1]) == on_dry)
-            return CompletedProcess(cmd, 18 if hit else 0, msg18 if hit else "", "")
-        run.sh = sh18
-        def setup_or_crash():
-            try:
-                return run.s_setup()
-            except OSError as e:      # went on past the resolve into the (absent) layer machinery: not stopped
-                return {"went_on": str(e)}
-        res = setup_or_crash()
-        expect(res.get("code") == UNDONE_EXIT and res["stop"].startswith("library first") and "owner/lib" in res["stop"]
-               and any("--allow-undone-library" in c for c in res["choices"]) and len(ran) == 1,
-               f"the dry run's exit 18 stops setup with 18 and layer-deps' reason: {res} {ran}")
-        ran.clear(); run.sh = lambda cmd, log=None, cwd=None: sh18(cmd, log, cwd, on_dry=False)
-        res = setup_or_crash()
-        expect(res.get("code") == UNDONE_EXIT and "library first" in res["stop"],
-               f"the resolve's own exit 18 stops setup with 18 too (was 2): {res}")
-        a_.allow_undone_library = True; ran.clear()
-        run.sh = lambda cmd, log=None, cwd=None: (ran.append(" ".join(map(str, cmd))), CompletedProcess(cmd, 0, "", ""))[1]
-        try:
-            run.s_setup()
-        except OSError:
-            pass
-        deps_calls = [c for c in ran if "layer-deps.py resolve" in c]
-        expect(len(deps_calls) == 2 and all("--allow-undone-library" in c for c in deps_calls)
-               and run.summary.get("allow_undone_library") is True and "--allow-undone-library" in run.resume_cmd("setup"),
-               f"--allow-undone-library: passed to layer-deps, recorded, in the resume command: {deps_calls} {run.resume_cmd('setup')}")
-        a_.allow_undone_library = False
-        expect("--allow-undone-library" not in run.resume_cmd("setup"), "control: no flag, not in the resume command")
-        w(td / "DEPS.md", "# Dependencies\n\n" + UNDONE_LIBRARY_MARK + " `com.example:lib` was built from a checkout\n")
-        expect(any("--allow-undone-library" in x for x in target_done(repo, "1.21.4")),
-               "a target resolved against an undone library is not done")
-        w(td / "DEPS.md", "# Dependencies\n")
-        expect(not any("--allow-undone-library" in x for x in target_done(repo, "1.21.4")), "control: a released library")
-    # ---- single-version fork: no .multiversion/ -- no freeze, no review, no sweep; fork-port stops at setup as before
-    with tempfile.TemporaryDirectory() as d:
-        repo = pathlib.Path(d); git_repo(repo)
-        w(repo / "build.gradle", "plugins {}\n")
-        a_ = argparse.Namespace(repo=str(repo), target="1.21.4", base="origin/neoforge-1.21.1", port_release=[],
-                                upstream="upstream/main", accept_upstream_drift=False)
-        expect(drift_stop(repo, a_) is None and not (repo / ".multiversion").exists(), "single-version: no upstream check, nothing written")
-        (repo / "frozen.json").write_text(json.dumps({"frozen_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                                                      "forks": [{"repo": "owner/examplemod", "take_authors": False}]}),
-                                          encoding="utf-8")
-        a_.untaken_ok = str(repo / "frozen.json")
-        expect(drift_stop(repo, a_) is None and not list(repo.rglob("DRIFT.md")) and not (repo / ".port").exists(),
-               "single-version with --untaken-ok: still no upstream check, nothing written")
-        lines = []
-        sa = argparse.Namespace(repo=str(repo), chain="1.21.3..1.21.4", from_stage=None, to_stage=None, gates="auto",
-                                base="x", modid=None, port_checkout=[], port_release=[], target=None)
-        expect(sweep(sa, lambda *x: 0, out=lines.append) == 2 and "single-version" in lines[0], "single-version: --chain is bad input")
-        buf, real_argv = io.StringIO(), sys.argv
-        sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4"]
-        try:
-            with contextlib.redirect_stdout(buf):
-                rc = main()
-        finally:
-            sys.argv = real_argv
-        out_ = buf.getvalue()
-        expect(rc == 2 and "no .multiversion/ in the fork" in out_ and not any(k in out_ for k in ("upstream", "REVIEW", "NOT done"))
-               and not (repo / ".multiversion").exists(), f"single-version: setup stops as before, exit 2, nothing new said: {out_}")
-    return ok
-
-
-def self_check_review131():
-    """The PR #131 review's fork-port findings, each on a layer fixture, plus the single-version path (no .multiversion/:
-    nothing of this runs). Every case is wrapped, so a missing function is a FAIL line, not a crash."""
-    import contextlib, hashlib, io, types
-    from subprocess import CompletedProcess
-    ok = True
-
-    def expect(c, msg):
-        nonlocal ok
-        if not c:
-            ok = False; print("FAIL:", msg)
-
-    def case(name, fn):
-        nonlocal ok
-        try:
-            fn()
-        except Exception as e:      # noqa: BLE001 -- a case that cannot run is a failed case
-            ok = False; print(f"FAIL: {name}: {type(e).__name__}: {e}")
-
-    def git_repo(d):
-        pathlib.Path(d).mkdir(parents=True, exist_ok=True)
-        g = lambda *x: subprocess.run(["git", "-C", str(d), *x], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
-        g("init", "-q", "-b", "main"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
-        return g
-
-    def w(p, text):
-        p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text, encoding="utf-8")
-
-    def gates_md(t, at):
-        return (f"Gates for `examplemod` at `{at}` for Minecraft {t} (local environment) -- run by CI:\n\n"
-                "| check | result | detail |\n|---|---|---|\n| Gate C -- real client, `launch` | PASS | ok |\n")
-
-    def done_fixture(d):
-        """A layer with 1.21.3 and 1.21.4 (inherits 1.21.3), each DONE: gates at HEAD, a complete review, test items,
-        the inventory, a prepared tree. -> (repo, git)"""
-        repo = pathlib.Path(d); g = git_repo(repo); mv = repo / ".multiversion"
-        w(mv / "base.properties", "minecraft_version=1.21.1\n"); w(repo / ".gitignore", "build/\n")
-        w(repo / "src/main/java/com/example/mod/A.java", "class A { void f() { x(); } }\n")
-        w(repo / "src/main/java/com/example/mod/B.java", "class B {}\n")
-        w(mv / "shared/1.21.4/renames.tsv", "# shared rows\n")
-        for t, inh in (("1.21.3", None), ("1.21.4", "1.21.3")):
-            td = mv / "targets" / t
-            w(td / "target.properties", f"inherits={inh}\n" if inh else "x=1\n")
-            w(td / "java/com/example/mod/A.java", "class A { void f() { y" + t.replace(".", "") + "(); } }\n")
-            w(td / "TEST-ITEMS.md", f"# Manual-test items: Minecraft {t}\n\n- none\n")
-        li = load("layer_inventory", "layer-inventory.py")
-        with contextlib.redirect_stdout(io.StringIO()):
-            li.cmd_build(argparse.Namespace(repo=str(repo), dry_run=False, out=None))
-        g("add", "-A"); g("commit", "-qm", "port"); head = g("rev-parse", "--short", "HEAD")
-        for t in ("1.21.3", "1.21.4"):
-            td = mv / "targets" / t
-            w(td / "GATES.md", gates_md(t, head))
-            w(td / "REVIEW.md", REVIEW_HEAD.format(t=t).replace("- reviewer: ?", "- reviewer: fresh agent")
-              .replace("- date: ?", "- date: 2026-10-16").replace("- commit: ?", f"- commit: {head}")
-              + f"| overlay | .multiversion/targets/{t}/java/com/example/mod/A.java | ok | the call's {t} name |\n")
-            w(repo / f"build/mc{t}/mv/java/com/example/mod/A.java", "class A {}\n")
-        return repo, g
-
-    def baseline(repo):
-        for t in ("1.21.3", "1.21.4"):
-            expect(target_done(repo, t) == [], f"the fixture's {t} is done: {target_done(repo, t)}")
-
-    # ---- finding 1: a re-merge conflict layer-sync recorded in REMERGE.json keeps the target not done until the
-    # overlay changed (a person merged it); fork-port keeps layer-sync's RESIDUE.md section
-    def f1():
-        with tempfile.TemporaryDirectory() as d:
-            repo, g = done_fixture(d); baseline(repo)
-            ov = repo / ".multiversion/targets/1.21.4/java/com/example/mod/A.java"
-            rel = ov.relative_to(repo).as_posix()
-            w(repo / ".multiversion/targets/1.21.4/REMERGE.json", json.dumps({"conflicts": [
-                {"overlay": rel, "digest": hashlib.sha256(ov.read_bytes()).hexdigest(), "reason": "a hunk did not apply",
-                 "since": "o1..n1"}]}))
-            why = target_done(repo, "1.21.4")
-            expect(any("did not merge" in x and rel in x for x in why), f"an unmerged overlay on record: not done: {why}")
-            expect("REMERGE.json" not in REVIEW_OUTPUTS, "REMERGE.json is a reviewed input, not a run output")
-            ov.write_text("class A { void f() { merged(); } }\n", encoding="utf-8")
-            expect(not any("did not merge" in x for x in target_done(repo, "1.21.4")),
-                   "the overlay changed since the conflict was recorded (a person merged it): no longer a reason")
-            (repo / ".multiversion/targets/1.21.4/REMERGE.json").write_text("{not json", encoding="utf-8")
-            expect(any("REMERGE.json" in x for x in target_done(repo, "1.21.4")), "an unreadable REMERGE.json fails closed")
-        with tempfile.TemporaryDirectory() as d:
-            td = pathlib.Path(d) / "t"; td.mkdir()
-            sec = SYNC_RESIDUE_SECTION + "\n\n- `F.java` (digest abc123): 1 hunk\n"
-            w(td / "RESIDUE.md", "# 1.21.4: residue\n\n" + sec)
-            put_residue(td, "1.21.4", "# Residue: gates\n\nfork-port's part\n")
-            txt = (td / "RESIDUE.md").read_text(encoding="utf-8")
-            expect("fork-port's part" in txt and sec.strip() in txt, f"fork-port's report keeps layer-sync's section: {txt}")
-            put_residue(td, "1.21.4", "# Residue: loop\n\nnewer\n")
-            txt = (td / "RESIDUE.md").read_text(encoding="utf-8")
-            expect("newer" in txt and "fork-port's part" not in txt and txt.count(SYNC_RESIDUE_SECTION) == 1,
-                   f"a second report replaces fork-port's part only: {txt}")
-            clear_residue(td, "1.21.4")
-            txt = (td / "RESIDUE.md").read_text(encoding="utf-8") if (td / "RESIDUE.md").is_file() else ""
-            expect(sec.strip() in txt and "newer" not in txt, f"a run that ends clears its part, never layer-sync's: {txt!r}")
-            put_residue(td, "1.21.4", "# Residue: x\n"); (td / "RESIDUE.md").write_text("# Residue: x\n", encoding="utf-8")
-            clear_residue(td, "1.21.4")
-            expect(not (td / "RESIDUE.md").exists(), "a RESIDUE.md that holds only fork-port's part is removed, as before")
-            ls = load("layer_sync", "layer-sync.py")
-            expect(getattr(ls, "RESIDUE_SECTION", SYNC_RESIDUE_SECTION) == SYNC_RESIDUE_SECTION,
-                   "fork-port's copy of layer-sync's section heading matches layer-sync.py")
-    case("finding 1", f1)
-
-    # ---- finding 3: done follows GATES.md's commit like listed_green (src/, a parent's overlay, shared/ invalidate
-    # it; documents do not), and the review is stale on the same files
-    def f3():
-        with tempfile.TemporaryDirectory() as d:
-            repo, g = done_fixture(d); baseline(repo)
-            w(repo / "README.md", "docs\n"); g("add", "README.md"); g("commit", "-qm", "docs")
-            expect(target_done(repo, "1.21.4") == [], f"a documentation commit after the gates keeps it done: {target_done(repo, '1.21.4')}")
-            for path, text in (("src/main/java/com/example/mod/B.java", "class B { int authors; }\n"),
-                               (".multiversion/targets/1.21.3/java/com/example/mod/A.java", "class A { void f() { p(); } }\n"),
-                               (".multiversion/shared/1.21.4/renames.tsv", "# shared rows\nOld\tNew\n")):
-                g("checkout", "-q", "main"); g("checkout", "-q", "-B", "probe")
-                w(repo / path, text); g("commit", "-qam", f"change {path}")
-                why = target_done(repo, "1.21.4")
-                expect(any("GATES.md" in x and "changed since" in x for x in why),
-                       f"{path} committed after the gates ran: the gates are stale: {why}")
-                expect(any("since the reviewed commit" in x for x in why), f"{path} changed after the review: re-review: {why}")
-            g("checkout", "-q", "main")
-            w(repo / "src/main/java/com/example/mod/C.java", "class C {}\n")
-            expect(any("GATES.md" in x for x in target_done(repo, "1.21.4")), "an untracked source file is built in: stale")
-            (repo / "src/main/java/com/example/mod/C.java").unlink()
-            head = g("rev-parse", "--short", "HEAD")
-            w(repo / ".multiversion/targets/1.21.4/GATES.md", gates_md("1.21.4", f"{head} + uncommitted: src/x.java"))
-            expect(any("edited tree" in x for x in target_done(repo, "1.21.4")), "gates on an edited tree certify no commit")
-    case("finding 3", f3)
-
-    # ---- finding 4: REVIEW.md's commit must be a commit id, not a name that moves (HEAD, a branch)
-    def f4():
-        with tempfile.TemporaryDirectory() as d:
-            repo, g = done_fixture(d); baseline(repo)
-            rv = repo / ".multiversion/targets/1.21.4/REVIEW.md"
-            txt = rv.read_text(encoding="utf-8")
-            for name in ("HEAD", "main"):
-                rv.write_text(re.sub(r"- commit: \S+", f"- commit: {name}", txt), encoding="utf-8")
-                expect(any("commit id" in x for x in target_done(repo, "1.21.4")), f"commit: {name} is refused")
-    case("finding 4", f4)
-
-    # ---- finding 5: auto-detection takes the authors' branch the checkout carries, not their default; freeze refuses
-    # a branch the checkout lacks commits of; the stop is "moved since the freeze", not HEAD..tip
     def f5():
         with tempfile.TemporaryDirectory() as d:
             up, fork = pathlib.Path(d) / "authors", pathlib.Path(d) / "fork"
@@ -5278,230 +3412,47 @@ def self_check_review131():
             gf = lambda *x: subprocess.run(["git", "-C", str(fork), *x], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
             gf("config", "user.email", "a@b"); gf("config", "user.name", "a")
             gf("checkout", "-q", "-b", "port", "upstream/port-base")
-            w(fork / ".multiversion/base.properties", "minecraft_version=1.21.1\n"); gf("add", "-A"); gf("commit", "-qm", "layer")
+            vbp = fork / ".port/1.21.3/branch.properties"
+            w(vbp, "minecraft_version=1.21.3\n"); gf("add", "-A"); gf("commit", "-qm", "version branch")
             expect(detect_upstream(fork) == "upstream/port-base", f"the branch the port carries, not upstream/HEAD: {detect_upstream(fork)}")
-            rec, why = freeze_upstream(fork, "upstream/main")
+            rec, why = freeze_upstream(fork, "upstream/main", (), False, vbp)
             expect(rec is None and "keep-current" in (why or ""), f"freeze refuses a branch HEAD lacks commits of: {rec} {why}")
-            expect("upstream_commit" not in read_props(fork / ".multiversion/base.properties"), "nothing recorded")
-            (fork / ".multiversion/targets/1.21.3").mkdir(parents=True)
-            write_props(fork / ".multiversion/base.properties",
+            expect("upstream_commit" not in read_props(vbp), "nothing recorded")
+            write_props(vbp,
                         {"upstream": "upstream/main", "upstream_commit": gu("rev-parse", "main")})
             a_ = argparse.Namespace(repo=str(fork), target="1.21.3", base="origin/neoforge-1.21.1", port_release=[],
                                     upstream=None, accept_upstream_drift=False)
             with contextlib.redirect_stdout(io.StringIO()):
-                st = drift_stop(fork, a_, fetch=False)
+                st = drift_stop(fork, a_, vbp, fork / ".port/1.21.3/DRIFT.md", fetch=False)
             expect(st is None, f"nothing moved since the recorded commit: no stop, though HEAD lacks it: {st}")
             gu("checkout", "-q", "main"); w(up / "A.java", "a3\n"); gu("commit", "-qam", "authors 3")
             with contextlib.redirect_stdout(io.StringIO()):
-                st = drift_stop(fork, a_, fetch=True)
+                st = drift_stop(fork, a_, vbp, fork / ".port/1.21.3/DRIFT.md", fetch=True)
             expect(st and st["code"] == DRIFT_EXIT and "1 commit(s)" in st["stop"], f"the authors moved since the freeze: 19: {st}")
-    case("finding 5", f5)
+    run_case("finding 5", f5)
 
-    # ---- finding 6: a library-only freeze still stops on another --port-release
     def f6():
         with tempfile.TemporaryDirectory() as d:
             repo = pathlib.Path(d)
-            w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\nlibrary.owner/lib=v1\n")
-            (repo / ".multiversion/targets/1.21.3").mkdir(parents=True)
+            vbp = repo / ".port/1.21.3/branch.properties"
+            w(vbp, "minecraft_version=1.21.3\nlibrary.owner/lib=v1\n")
             a_ = argparse.Namespace(repo=str(repo), target="1.21.3", base="x", port_release=["owner/lib@v2"],
                                     upstream=None, accept_upstream_drift=False)
             with contextlib.redirect_stdout(io.StringIO()):
-                st = drift_stop(repo, a_, fetch=False)
+                st = drift_stop(repo, a_, vbp, repo / ".port/1.21.3/DRIFT.md", fetch=False)
             expect(st and st["code"] == DRIFT_EXIT and "owner/lib" in st["stop"], f"a library-only freeze: 19 on v2: {st}")
             a_.port_release = ["owner/lib@v1"]
             with contextlib.redirect_stdout(io.StringIO()):
-                expect(drift_stop(repo, a_, fetch=False) is None, "the recorded release: no stop")
-    case("finding 6", f6)
+                expect(drift_stop(repo, a_, vbp, repo / ".port/1.21.3/DRIFT.md", fetch=False) is None, "the recorded release: no stop")
+    run_case("finding 6", f6)
 
-    # ---- finding 7: DEPS.md (rewritten by every setup) is a run output: it does not make a review stale
-    def f7():
-        expect("DEPS.md" in REVIEW_OUTPUTS, "DEPS.md is a run output")
-        with tempfile.TemporaryDirectory() as d:
-            repo, g = done_fixture(d)
-            w(repo / ".multiversion/targets/1.21.4/DEPS.md", "# Dependencies\n\nresolved on this machine\n")
-            g("add", "-A"); g("commit", "-qm", "deps")
-            w(repo / ".multiversion/targets/1.21.4/DEPS.md", "# Dependencies\n\nresolved on another machine\n")
-            expect(target_done(repo, "1.21.4") == [], f"a rewritten DEPS.md keeps the review current: {target_done(repo, '1.21.4')}")
-            # DRIFT.md (drift_stop appends to it; on a version branch it is .port/<v>/DRIFT.md, in the version's own
-            # directory) is a run output too: recording an accepted drift makes neither the review nor the gates stale
-            w(repo / ".multiversion/targets/1.21.4/DRIFT.md", "- 2026-10-20 1.21.4: accepted with --accept-upstream-drift: x\n")
-            g("add", "-A"); g("commit", "-qm", "drift recorded")
-            expect("DRIFT.md" in REVIEW_OUTPUTS and target_done(repo, "1.21.4") == [],
-                   f"a DRIFT.md committed after the review keeps it current: {target_done(repo, '1.21.4')}")
-    case("finding 7", f7)
-
-    # ---- finding 11: --check-done writes nothing; a missing or stale prepared tree is said precisely, or re-prepared
-    # (no compile) where the caller holds the checkout
-    def f11():
-        with tempfile.TemporaryDirectory() as d:
-            repo, g = done_fixture(d)
-            chk = repo / ".multiversion/targets/1.21.4/INVENTORY-CHECK.json"
-            chk.unlink(missing_ok=True)
-            expect(target_done(repo, "1.21.4", write=False) == [] and not chk.exists(), "write=False: nothing written")
-            shutil.rmtree(repo / "build/mc1.21.4")
-            why = target_done(repo, "1.21.4", write=False)
-            expect(len(why) == 1 and "layer.py prepare" in why[0] and "no compile" in why[0],
-                   f"a fresh clone: the reason names the prepare command: {why}")
-            for f in ("layer.py", "prepare-sources.py"):
-                w(repo / ".multiversion/tools" / f, (ROOT / "templates/fork-layer/tools" / f).read_text(encoding="utf-8"))
-            with contextlib.redirect_stdout(io.StringIO()):
-                why = target_done(repo, "1.21.4", prepare=True)
-            expect((repo / "build/mc1.21.4/mv/java/com/example/mod/A.java").is_file(), f"prepare=True re-prepares the tree: {why}")
-            past = (repo / "build/mc1.21.4/mv/java").stat().st_mtime - 3600
-            for f in [repo / "build/mc1.21.4/mv/java", *(repo / "build/mc1.21.4/mv/java").rglob("*")]:
-                os.utime(f, (past, past))        # built an hour before the overlay's last edit
-            why = target_done(repo, "1.21.4")
-            expect(any("older than" in x for x in why), f"sources newer than the prepared tree: stale: {why}")
-            with contextlib.redirect_stdout(io.StringIO()):
-                target_done(repo, "1.21.4", prepare=True)
-            expect(not any("older than" in x for x in target_done(repo, "1.21.4")), "re-prepared: current again")
-            # inherited_overlay_rows (opt-in): base.properties is not an input of the tree (an edit of another key --
-            # freeze's upstream= -- leaves it current, as before); the mode the tree was prepared in (layer.py's stamp
-            # beside it) is: a switch either way makes it stale, and a re-prepare makes it current again. A layer.py
-            # that predates the key ignores it, so the key alone changes nothing there.
-            bp = repo / ".multiversion/base.properties"
-            keep_bp = bp.read_text(encoding="utf-8") if bp.is_file() else None
-            stamp = repo / "build/mc1.21.4/mv/java.inherited_overlay_rows"
-            later = (repo / "build/mc1.21.4/mv/java").stat().st_mtime + 60
-            mode = lambda why: [x for x in why if "inherited_overlay_rows" in x or "older than" in x]
-
-            def step(body, want, label, reprep=False, layer_text=None):
-                w(bp, body); os.utime(bp, (later, later))
-                if layer_text is not None:
-                    w(repo / ".multiversion/tools/layer.py", layer_text)
-                    past = (repo / "build/mc1.21.4/mv/java").stat().st_mtime + 1
-                    os.utime(repo / ".multiversion/tools/layer.py", (past - 7200, past - 7200))
-                if reprep:
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        target_done(repo, "1.21.4", prepare=True)
-                got = mode(target_done(repo, "1.21.4"))
-                expect([x for x in got if want in x] if want else not got, f"{label}: {got}")
-            tpl_layer = (ROOT / "templates/fork-layer/tools/layer.py").read_text(encoding="utf-8")
-            step("minecraft_version=1.21.1\nupstream=origin/x\n", None, "another key edited: current")
-            step("minecraft_version=1.21.1\ninherited_overlay_rows=true\n", "prepared with inherited_overlay_rows off, and "
-                 "the layer now has it on", "key set, tree prepared off: stale")
-            step("minecraft_version=1.21.1\ninherited_overlay_rows=true\n", None, "re-prepared on: current", reprep=True)
-            expect(stamp.is_file(), "an on-mode prepare stamps the tree")
-            step("minecraft_version=1.21.1\n", "prepared with inherited_overlay_rows on, and the layer now has it off",
-                 "key removed, tree prepared on: stale")
-            step("minecraft_version=1.21.1\n", None, "re-prepared off: current", reprep=True)
-            expect(not stamp.exists(), "an off-mode prepare removes the stamp (and writes none)")
-            old_layer = tpl_layer.replace("def inherited_overlay_rows(", "def _gone_(")
-            step("minecraft_version=1.21.1\ninherited_overlay_rows=true\n", None,
-                 "a layer.py that predates the key ignores it: the off tree stays current", layer_text=old_layer)
-            # downgrade: an on-mode tree (stamped), then a layer.py that predates the key re-prepares it (as the Gradle
-            # build does) and never touches the stamp -- the tree is off now, and current, not stale forever
-            w(repo / ".multiversion/tools/layer.py", tpl_layer)
-            step("minecraft_version=1.21.1\ninherited_overlay_rows=true\n", None, "on again: current", reprep=True)
-            expect(stamp.is_file(), "stamped again")
-            older = (tpl_layer.replace("def inherited_overlay_rows(", "def _predates_it(")
-                     .replace("        if inherited_overlay_rows():", "        if False:")
-                     .replace("        if stamp is not None and stamp.is_file():\n            stamp.unlink()", "")
-                     .replace("        if rc == 0 and inherited_hits is not None and stamp is not None:\n"
-                              "            stamp.write_text(f\"{INHERITED_ROWS}=true\\n\", encoding=\"utf-8\")", ""))
-            expect(older.count("stamp.unlink()") == 0 and "stamp.write_text" not in older, "the older layer.py stand-in")
-            w(repo / ".multiversion/tools/layer.py", older)
-            __import__("time").sleep(0.05)
-            r = subprocess.run([sys.executable, str(repo / ".multiversion/tools/layer.py"), "prepare", "--target", "1.21.4",
-                                "--src", "src/main/java", "--out", "build/mc1.21.4/mv/java"], cwd=str(repo),
-                               capture_output=True, text=True, encoding="utf-8")
-            expect(r.returncode == 0 and stamp.is_file(), f"the older layer.py prepared and left the stamp: {r.stderr[-300:]}")
-            got = mode(target_done(repo, "1.21.4"))
-            expect(not [x for x in got if "inherited_overlay_rows" in x],
-                   f"a stamp older than the tree beside it is ignored (an older layer.py re-prepared it off): {got}")
-            w(repo / ".multiversion/tools/layer.py", tpl_layer)
-            if keep_bp is None:
-                bp.unlink()
-            else:
-                w(bp, keep_bp)
-            buf, real_argv = io.StringIO(), sys.argv
-            chk.unlink(missing_ok=True)
-            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4", "--check-done"]
-            try:
-                with contextlib.redirect_stdout(buf):
-                    main()
-            finally:
-                sys.argv = real_argv
-            expect(not chk.exists(), f"--check-done only asks: no INVENTORY-CHECK.json written: {buf.getvalue()}")
-    case("finding 11", f11)
-
-    # ---- finding 12: a sweep stops on a refusal 18 (a stop, nothing built) and never reads an older run's summary
-    def f12():
-        with tempfile.TemporaryDirectory() as d:
-            repo = pathlib.Path(d); mv = repo / ".multiversion"
-            w(mv / "base.properties", "minecraft_version=1.21.1\n")
-            for t_, inh in (("1.21.3", None), ("1.21.4", "1.21.3"), ("1.21.5", "1.21.4")):
-                w(mv / "targets" / t_ / "target.properties", f"inherits={inh}\n" if inh else "x=1\n")
-            w(repo / "build/mc1.21.4/fork-port/fork-port.json", json.dumps({"stop": {"stage": "gates", "left": "OLD RUN"}}))
-            seen = []
-
-            def runner(cmd, env):
-                t_ = cmd[cmd.index("--target") + 1]; seen.append(t_)
-                if t_ == "1.21.3":
-                    w(repo / "build/mc1.21.3/fork-port/fork-port.json", json.dumps(
-                        {"stop": {"stage": "setup", "code": UNDONE_EXIT, "left": "library first: owner/lib 1.21.3"}}))
-                return UNDONE_EXIT
-            sa = argparse.Namespace(repo=str(repo), chain="1.21.3..1.21.5", from_stage="setup", to_stage=None, gates="ab",
-                                    base="x", modid=None, port_checkout=[], port_release=[], upstream=None,
-                                    accept_upstream_drift=False, target=None)
-            lines = []
-            with contextlib.redirect_stdout(io.StringIO()):
-                rc = sweep(sa, runner, out=lines.append)
-            expect(rc == UNDONE_EXIT and seen == ["1.21.3"] and "RED at setup" in "\n".join(lines),
-                   f"a library refusal (18 with a stop) is red: the sweep stops: {rc} {seen} {lines}")
-            seen.clear(); lines.clear(); sa.chain = "1.21.4..1.21.5"
-            with contextlib.redirect_stdout(io.StringIO()):
-                rc = sweep(sa, lambda cmd, env: (seen.append(1), 14)[1], out=lines.append)
-            expect(rc == 14 and "OLD RUN" not in "\n".join(lines), f"a child that wrote no summary: no stale reason: {lines}")
-    case("finding 12", f12)
-
-    # ---- findings 1 + 13 in drive(): the end message, and RESIDUE.md handling around layer-sync's section
-    def f13():
-        with tempfile.TemporaryDirectory() as d:
-            repo = pathlib.Path(d); td = repo / ".multiversion/targets/1.21.4"
-            w(td / "GATES.md", gates_md("1.21.4", "abc1234"))
-            sec = SYNC_RESIDUE_SECTION + "\n\n- `F.java` (digest abc): 1 hunk\n"
-            w(td / "RESIDUE.md", "# Residue: gates\n\nold fork-port part\n\n" + sec)
-            run = types.SimpleNamespace(repo=repo, tdir=td, jpath=repo / "fp.json", summary={"stages": {}},
-                                        save=lambda: None, resume_cmd=lambda s: f"resume {s}",
-                                        drift=lambda a: drift_stop(repo, a), test_items=lambda: write_test_items(repo, td, "1.21.4"),
-                                        done=lambda prepare=False: target_done(repo, "1.21.4", prepare=prepare),
-                                        skeleton=lambda: review_skeleton(repo, td, "1.21.4"),
-                                        records_rel=lambda: ".multiversion/targets/1.21.4/", review_note=lambda n: "")
-            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", from_stage=None, to_stage=None, gates="ab")
-            g_ = globals(); keep = {k: g_[k] for k in ("execute", "drift_stop", "write_test_items", "target_done")}
-            g_.update(execute=lambda r, t: None, drift_stop=lambda r, a: None, write_test_items=lambda r, t, x: (0, None),
-                      target_done=lambda *x, **k: [])
-            try:
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf):
-                    rc = drive(run, a_, [], list(STAGES))
-                txt = (td / "RESIDUE.md").read_text(encoding="utf-8") if (td / "RESIDUE.md").is_file() else ""
-                expect(rc == 0 and "fork-port 1.21.4: done" in buf.getvalue(), f"the end message: {buf.getvalue()}")
-                expect(sec.strip() in txt and "old fork-port part" not in txt, f"done keeps layer-sync's section: {txt!r}")
-                a_.to_stage = "moves"; buf = io.StringIO()
-                with contextlib.redirect_stdout(buf):
-                    drive(run, a_, [], ["setup", "stage", "moves"])
-                expect("fork-port 1.21.4: stages setup, stage, moves ok" in buf.getvalue(), f"partial: {buf.getvalue()}")
-                a_.to_stage = None
-                g_["execute"] = lambda r, t: {"stage": "gates", "left": "1 gate(s) red", "stop": "1 gate(s) red", "code": 12,
-                                               "choices": ["fix it"]}
-                with contextlib.redirect_stdout(io.StringIO()):
-                    rc = drive(run, a_, [], list(STAGES))
-                txt = (td / "RESIDUE.md").read_text(encoding="utf-8")
-                expect(rc == 12 and "1 gate(s) red" in txt and sec.strip() in txt, f"a stop's report keeps the section: {txt}")
-            finally:
-                g_.update(keep)
-    case("finding 13", f13)
-
-    # ---- finding 14: the fetch never prompts (GIT_TERMINAL_PROMPT=0, a short timeout) and says it could not fetch
     def f14():
         with tempfile.TemporaryDirectory() as d:
             up, fork = pathlib.Path(d) / "authors", pathlib.Path(d) / "fork"
             gu = git_repo(up); w(up / "A.java", "a\n"); gu("add", "-A"); gu("commit", "-qm", "authors 1")
             subprocess.run(["git", "clone", "-q", "-o", "upstream", str(up), str(fork)], check=True, capture_output=True)
-            w(fork / ".multiversion/base.properties", f"upstream=upstream/main\nupstream_commit={gu('rev-parse', 'HEAD')}\n")
-            (fork / ".multiversion/targets/1.21.3").mkdir(parents=True)
+            vbp = fork / ".port/1.21.3/branch.properties"
+            w(vbp, f"upstream=upstream/main\nupstream_commit={gu('rev-parse', 'HEAD')}\n")
             real, calls = subprocess.run, []
 
             def fake(cmd, *x, **k):
@@ -5515,45 +3466,72 @@ def self_check_review131():
             try:
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    st = drift_stop(fork, a_)
+                    st = drift_stop(fork, a_, vbp, fork / ".port/1.21.3/DRIFT.md")
             finally:
                 subprocess.run = real
             env = (calls[0].get("env") or {}) if calls else {}
             expect(calls and env.get("GIT_TERMINAL_PROMPT") == "0" and (calls[0].get("timeout") or 999) <= 60,
                    f"the fetch cannot prompt and gives up quickly: {calls}")
             expect(st is None and "could not fetch" in buf.getvalue(), f"says so and compares with the last fetch: {buf.getvalue()}")
-    case("finding 14", f14)
+    run_case("finding 14", f14)
 
-    # ---- single-version: no .multiversion/ -- none of it runs, the same answers as before
+    # ---- single-version: no version branch -- fork-port stops at once (exit 2), nothing written, nothing of a
+    # version branch said; --chain, --check-done and --write-test-items the same
     def single():
         with tempfile.TemporaryDirectory() as d:
-            repo = pathlib.Path(d); git_repo(repo)
-            a_ = argparse.Namespace(repo=str(repo), target="1.21.4", base="x", port_release=["owner/lib@v2"], upstream=None,
-                                    accept_upstream_drift=False)
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                st = drift_stop(repo, a_)
-            expect(st is None and not buf.getvalue() and not (repo / ".multiversion").exists(), "single-version: no drift check")
-            expect(target_done(repo, "1.21.4") == ["1.21.4 is not a target of this layer"], "single-version: no target")
+            repo = pathlib.Path(d); g = git_repo(repo)
+            w(repo / "gradle.properties", "minecraft_version=1.21.1\n"); w(repo / "build.gradle", "plugins {}\n")
+            g("add", "-A"); g("commit", "-qm", "port")
+            before = sorted(str(p) for p in repo.rglob("*") if ".git" not in p.parts)
+            for extra in ([], ["--from-stage", "moves"], ["--check-done"], ["--write-test-items"]):
+                buf, real_argv = io.StringIO(), sys.argv
+                sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4", *extra]
+                try:
+                    with contextlib.redirect_stdout(buf):
+                        rc = main()
+                finally:
+                    sys.argv = real_argv
+                out_ = buf.getvalue()
+                expect(rc == 2 and "single-version fork" in out_ and not any(k in out_ for k in ("upstream", "REVIEW", "NOT done")),
+                       f"single-version {extra}: exit 2, nothing of a version branch said: {rc} {out_}")
+            buf, real_argv = io.StringIO(), sys.argv
+            sys.argv = ["fork-port.py", "--repo", str(repo), "--chain", "1.21.3..1.21.4"]
+            try:
+                with contextlib.redirect_stdout(buf):
+                    rc = main()
+            finally:
+                sys.argv = real_argv
+            expect(rc == 2 and "single-version fork" in buf.getvalue(), f"single-version --chain: exit 2: {buf.getvalue()}")
+            expect(sorted(str(p) for p in repo.rglob("*") if ".git" not in p.parts) == before, "single-version: nothing written")
             expect(detect_upstream(repo) is None, "single-version clone with no upstream remote: nothing detected")
-    case("single-version", single)
+    run_case("single-version", single)
+
+    # ---- the removed layer: a checkout with .multiversion/ at HEAD is refused with the one message (tools/fork-kind.py)
+    def layer():
+        with tempfile.TemporaryDirectory() as d:
+            repo = pathlib.Path(d); git_repo(repo)
+            w(repo / ".multiversion/base.properties", "minecraft_version=1.21.1\n")
+            buf, real_argv = io.StringIO(), sys.argv
+            sys.argv = ["fork-port.py", "--repo", str(repo), "--target", "1.21.4"]
+            try:
+                with contextlib.redirect_stdout(buf):
+                    rc = main()
+            finally:
+                sys.argv = real_argv
+            fk = load("fork_kind", "fork-kind.py")
+            expect(rc == 2 and fk.LAST_LAYER_COMMIT[:12] in buf.getvalue() and "fork-branches.py migrate" in buf.getvalue(),
+                   f"a layer at HEAD: refused, naming the last commit with the layer: {buf.getvalue()}")
+    run_case("layer refused", layer)
 
     def gap7():
-        # issue #133 gap 7: a not-ok `item` row is the reviewer's verdict with its note, not "unaccounted"; a `missing`
-        # (a file that should exist) or `shared` (a shared helper) row needs a verdict, and a not-ok one of any kind blocks
-        text = (REVIEW_HEAD.format(t="1.21.4") + "| item | main:A.java#mixin:X | not-ok | the hook is gone, behaviour lost |\n"
-                "| missing | src/main/resources/data/m/tags/item/repair.json | ? | ? |\n"
-                "| shared | LegacyGl | ok | read against 1.21.1's draw |\n| changed | src/main/java/B.java | not-ok | wrong id |\n")
-        _f, rows = parse_review(text)
-        got = extra_row_problems(rows, [("changed", "src/main/java/B.java")])
-        expect(got == ["reviewer says not-ok: item main:A.java#mixin:X -- the hook is gone, behaviour lost",
-                       "no verdict: missing src/main/resources/data/m/tags/item/repair.json"],
-               f"extra review rows: {got}")
+        # issue #133 gap 7: an item the reviewer marked not-ok is reported once, with its note
+        text = ("# Review: Minecraft 1.21.4\n\n- reviewer: r\n- date: d\n- commit: abc1234\n\n| kind | file | verdict | note |\n"
+                "|---|---|---|---|\n| item | main:A.java#mixin:X | not-ok | the hook is gone, behaviour lost |\n")
         inv = ["behaviour inventory: unaccounted main:A.java#mixin:X (not in the target's file)",
                "behaviour inventory: unaccounted main:C.java#event:E (not in the target's file)"]
         got = drop_reported_items(inv, not_ok_items(text))
         expect(got == inv[1:], f"an item the reviewer marked not-ok is reported once, with its note: {got}")
-    case("gap 7 review rows", gap7)
+    run_case("gap 7 review rows", gap7)
     return ok
 
 

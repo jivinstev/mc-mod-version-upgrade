@@ -18,11 +18,9 @@ tick loop", "Encountered an unexpected exception") and a server that exits after
 
 --expect-file reads one expectation per line (FILE:REGEX, '#' comments). Without it the fork's own list is used,
 the first that exists of: .port/<mc>/shipped-expect-<variant>.txt (a version branch, per shipped jar variant:
---variant cf for the `*_cf.jar` one), .port/<mc>/shipped-expect.txt, then the layer's
-.multiversion/shipped-expect-<target>.txt (only with --mc) and .multiversion/shipped-expect.txt; <mc> is --mc or
-else the checkout's gradle.properties minecraft_version. None of them: no expectations, the jar is only booted.
---mc/--neo default from the fork layer's target when --repo has .multiversion and --mc names a target (tools:
-layer.py props).
+--variant cf for the `*_cf.jar` one), .port/<mc>/shipped-expect.txt, then .multiversion/shipped-expect.txt; <mc> is
+--mc or else the checkout's gradle.properties minecraft_version. None of them: no expectations, the jar is only booted.
+--neo defaults to the checkout's gradle.properties neo_version.
 The JDK is the one the Minecraft version needs (1.21.x: 21, 26.x: 25; a version branch's own java_version in
 .port/<mc>/branch.properties first), the version being --mc or else the checkout's gradle.properties.
 Exit 0 pass, 1 fail, 2 bad input. --self-check runs the model-free parts. Standard library only.
@@ -120,14 +118,13 @@ def variant_of(glob):
 
 def expect_file(repo, mc=None, variant=None):
     """The fork's own expectations file for this jar, or None: .port/<mc>/shipped-expect-<variant>.txt, then
-    .port/<mc>/shipped-expect.txt (<mc>: the given one, else gradle.properties'), then the layer's
-    .multiversion/shipped-expect-<mc>.txt (only for a given mc) and .multiversion/shipped-expect.txt."""
+    .port/<mc>/shipped-expect.txt (<mc>: the given one, else gradle.properties'), then .multiversion/shipped-expect.txt."""
     repo = pathlib.Path(repo)
     pmc = mc or gradle_prop(repo, "minecraft_version")
     names = []
     if pmc:
         names += ([f".port/{pmc}/shipped-expect-{variant}.txt"] if variant else []) + [f".port/{pmc}/shipped-expect.txt"]
-    names += ([f".multiversion/shipped-expect-{mc}.txt"] if mc else []) + [".multiversion/shipped-expect.txt"]
+    names += [".multiversion/shipped-expect.txt"]
     return next((repo / n for n in names if (repo / n).is_file()), None)
 
 
@@ -294,14 +291,6 @@ def boot(run, java, timeout, settle=10.0, poll=1.0):
     return True, f"started and stopped cleanly in {time.time() - t0:.0f} s", full
 
 
-def layer_props(repo, mc):
-    layer = repo / ".multiversion/tools/layer.py"
-    if not layer.is_file() or not (repo / ".multiversion/targets" / mc).is_dir():
-        return {}
-    out = subprocess.run([sys.executable, str(layer), "props", "--target", mc], capture_output=True, text=True, encoding="utf-8").stdout
-    return dict(re.findall(r"-P(\w+)=(\S+)", out))
-
-
 def main():
     if "--self-check" in sys.argv:
         return self_check()
@@ -321,16 +310,13 @@ def main():
     for d in a.deps:
         if not pathlib.Path(d).is_file():
             say(f"--deps {d}: no such file"); return 2
-    props = layer_props(repo, a.mc) if a.mc else {}
-    mc = a.mc and props.get("minecraft_version", a.mc)
-    neo = a.neo or props.get("neo_version")
+    mc = a.mc
+    neo = a.neo or gradle_prop(repo, "neo_version")
     if not neo:
-        neo = gradle_prop(repo, "neo_version")
-    if not neo:
-        say("no NeoForge version: pass --neo (or --mc naming a .multiversion target)"); return 2
+        say("no NeoForge version: pass --neo"); return 2
     exp_lines = list(a.expect_log)
     ef = pathlib.Path(a.expect_file) if a.expect_file else None
-    if ef is None:     # the fork's own list: the version branch's (per variant first), then the layer's
+    if ef is None:     # the fork's own list: the version branch's (per variant first)
         ef = expect_file(repo, a.mc, a.variant)
     if ef:
         if not ef.is_file():
@@ -430,7 +416,8 @@ def self_check():
 
 
 def expect_check():
-    """Which expectations file a jar gets: single-version (none, or .port/<mc>/), version branch per variant, layer."""
+    """Which expectations file a jar gets: single-version (none, .port/<mc>/ or .multiversion/shipped-expect.txt),
+    version branch per variant."""
     ok = True
     ok &= [variant_of(g) for g in ("*_cf.jar", "*_mr.jar", "*-fabric.jar", "*.jar", None)] == ["cf", "mr", "fabric", None, None]
     with tempfile.TemporaryDirectory() as d:
@@ -446,10 +433,8 @@ def expect_check():
         ok &= expect_file(r, None, "mr") == r / ".port/1.21.4/shipped-expect.txt"      # _mr: the unsuffixed one
         ok &= expect_file(r, "1.21.4") == r / ".port/1.21.4/shipped-expect.txt"
         ok &= expect_file(r, "1.21.5") is None                                       # another version's: not this one
-        (r / ".multiversion").mkdir()                                               # a layer fork, as before
+        (r / ".multiversion").mkdir()                                               # a single-version fork's list, as before
         (r / ".multiversion/shipped-expect.txt").write_text("A.log:x\n", encoding="utf-8")
-        (r / ".multiversion/shipped-expect-1.21.5.txt").write_text("A.log:y\n", encoding="utf-8")
-        ok &= expect_file(r, "1.21.5") == r / ".multiversion/shipped-expect-1.21.5.txt"
         ok &= expect_file(r, "1.21.6") == r / ".multiversion/shipped-expect.txt"
         ok &= expect_file(r / "none") is None
         # a variant whose expected line is missing from its log fails

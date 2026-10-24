@@ -31,14 +31,16 @@ A fork is single-version (one `neoforge-<mc>` branch) unless the maintainer opts
 4. **Simple wins ties**: decide, and record why in the PR; ask only for a real quality/cost/simplicity trade-off or a
    change a fork's owner would notice. If the layout can separate the concerns, change the layout.
 
-- P1. One route check (`layer-sync.py detect`); multi-version code sits behind it.
+- P1. One route check (`tools/fork-kind.py detect`); multi-version code sits behind it.
 - P2. A PR touching the single-version route has a single-version fixture test and a `Single-version-change: <reason>`
   or `Single-version-unchanged: <reason>` commit line; the enforced file list lives in `tools/check-readme.py`.
 - P3. Per-version files in `.port/<mc>/` on every kind of fork (the target; today mostly version branches).
 - P4. One round and one driver (`round.py`) for any fork set (target; today `round.py` takes version-branch sets only).
 - P5. A head branch is a single-version branch: what is built for it runs on single-version forks too, unless it reads
   another version's branch.
-- P6. The `.multiversion/` layer route is legacy and being removed (#161 U7): bug fixes only, no new layer fork.
+- P6. Done (#161 U7): the `.multiversion/` layer route is removed. A checkout with the layer at HEAD is refused by every
+  tool that takes a fork checkout (`tools/fork-kind.py` `refuse_layer`, exit 2), naming `LAST_LAYER_COMMIT`, the last
+  commit that supports it, where its migration runs. No new layer fork.
 - P7. Docs say which route: what the code does on each (the rule above).
 
 ## Merging

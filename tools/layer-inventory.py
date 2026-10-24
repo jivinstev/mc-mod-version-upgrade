@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""The base build's behaviour inventory, and every layer target's account of it (the fork-versions skill, R2).
+"""The base build's behaviour inventory, and every version branch's account of it (the fork-versions skill, R2).
 
     python3 tools/layer-inventory.py build --repo DIR [--dry-run] [--out FILE]
-    python3 tools/layer-inventory.py check --repo DIR --target T [--json] [--inventory FILE] [--no-write]
+    python3 tools/layer-inventory.py check --repo DIR --target T [--json] [--no-write]
     python3 tools/layer-inventory.py --self-check
 
 WHY.  The gates cannot see rendering, and a wrong stub review ("handlers moved, same effect") was once inherited by
 eight targets and found a day later. So the question "does this target still do what the base does?" is asked at the
-START of a buildout, from the base, and answered per target -- not discovered at the end in a real client.
+START of a buildout, from the base, and answered per version -- not discovered at the end in a real client.
 
-BUILD writes .multiversion/INVENTORY.json from the authors' base sources (src/<set>/java and src/<set>/resources: the
-layer branch never edits them, so they are the base build's code). Each item is (source set, file, kind, key):
+BUILD, on a version branch's checkout, writes .port/INVENTORY.json from the PORT branch's sources (src/<set>/java and
+src/<set>/resources at the port commit the branch carries: the base build's code). Each item is (source set, file,
+kind, key):
   mixin       each @Mixin target class                         } fork-port.py's hook_targets(), imported, so a stub
   injection   each @Inject/@Redirect/@Modify*/@Wrap*: method=   } review and the inventory read a hook the same way
               and every @At                                    }
@@ -27,12 +28,12 @@ layer branch never edits them, so they are the base build's code). Each item is 
 The file is deterministic (no time stamp); it records the git tree of src/ it was made from, and `check` warns when
 the authors' sources have changed since (re-run `build` after a keep-current merge).
 
-CHECK accounts for every item on target T, against T's PREPARED tree (build/mc<T>/mv/java, mv/<set>-java -- what the
-compile and the mixin audit see; a non-main set the layer does not prepare compiles from the authors' tree) and T's
-effective resources (targets/<chain>/resources over src/<set>/resources). Per item:
-  same        the key is there in the same file -- or, in a file the target takes from the authors' tree through the
-              rename tables only, its renamed counterpart of the same kind (recorded as "now")
-  changed     in a file a target OVERLAYS, a counterpart of the same kind with a different key: accounted only when a
+CHECK accounts for every item on version T, on its branch's checkout: against T's own src/<set>/java and
+src/<set>/resources (what it builds). A file is one a person changed unless the rows alone made it from the port
+branch's (tools/fork-branches.py mechanical_files). Per item:
+  same        the key is there in the same file -- or, in a file the rows alone made, its renamed counterpart of the
+              same kind (recorded as "now")
+  changed     in a file a person changed, a counterpart of the same kind with a different key: accounted only when a
               review names the file (below)
   moved       not there, and a REVIEWED STUBS.json entry of T for that file (no open `recheck`), a REVIEW.md of T naming
               the file or the item id in a row with verdict `ok` and a note (a `?` or not-ok row, or a mention
@@ -41,18 +42,16 @@ effective resources (targets/<chain>/resources over src/<set>/resources). Per it
               or a BEHAVIOUR.json entry {"item", "status": "moved", "where", "review"}
   dropped     the file is in the chain's drops.txt under a comment (the comment is the reason), or a BEHAVIOUR.json entry
               {"item", "status": "dropped", "reason"}
-  unaccounted none of the above: the target is not done. The list is printed (and given in --json).
-The account is written to .multiversion/targets/<t>/INVENTORY-CHECK.json (unless --no-write or --inventory), and
-inventory_unaccounted(repo, t) -> [reasons] is the same check as a function (fork-port.py's done check).
-BEHAVIOUR.json lives in .multiversion/targets/<t>/ and is read over T's inherits chain, nearest first (an item a parent
-dropped stays dropped, marked inherited). tools/layer-test-plan.py lists every item that is not "same" as a manual-test
-candidate.
+  unaccounted none of the above: the version is not done. The list is printed (and given in --json).
+The account is written to .port/<t>/INVENTORY-CHECK.json (unless --no-write); tools/fork-branches.py's done check runs
+the same check (check_branch). drops.txt and BEHAVIOUR.json are read over T's chain of .port/<v>/ copies, nearest first
+(an item a parent dropped stays dropped, marked inherited).
 
-A SINGLE-VERSION fork (no .multiversion/base.properties) has no inventory requirement: `build` writes nothing (exit 2,
-like layer-deps.py), `check` says so and exits 0.
+A SINGLE-VERSION fork (no version branch checked out) has no inventory requirement: `build` writes nothing (exit 2),
+`check` says so and exits 0. A checkout with the removed .multiversion/ layer at HEAD is refused (tools/fork-kind.py).
 
-Exit codes: 0 built / every item accounted for; 16 `check`: unaccounted items (listed); 2 bad input (no layer, no
-INVENTORY.json, the target's prepared tree is missing -- run `.multiversion/build.sh <t> compileJava` first).
+Exit codes: 0 built / every item accounted for; 16 `check`: unaccounted items (listed); 2 bad input (not a version
+branch's checkout, no .port/INVENTORY.json, a layer checkout).
 Standard library only; reads files, runs nothing but `git rev-parse`.
 """
 import argparse, difflib, fnmatch, importlib.util, json, pathlib, re, subprocess, sys, tempfile
@@ -104,7 +103,7 @@ REVIEW_HOOK_KINDS = HOOK_KINDS + ("shader-uniform", "shader-sampler")
 
 def review_names(names, r):
     """Does an ok row account for item r? A row naming its id (an `item` row) always does. A row naming its file (or a
-    path ending in /<its file>: an overlay row's .multiversion/targets/<t>/java/<file>) does for a non-hook item, and
+    path ending in /<its file>: a changed row's src/<set>/java/<file>) does for a non-hook item, and
     for a hook (REVIEW_HOOK_KINDS) only when its note names the item's id. names: review_ok_names()."""
     if r["id"] in names:
         return True
@@ -114,8 +113,8 @@ def review_names(names, r):
     return bool(rows)
 
 
-def _plan():
-    return _load("layer_test_plan_for_inventory", "layer-test-plan.py")
+def mc_key(v):
+    return [int(x) if x.isdigit() else x for x in re.split(r"[.]", v)]
 
 
 COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
@@ -248,20 +247,19 @@ def build_inventory(repo):
     items = [{"id": item_id(s, f, k, key), "set": s, "file": f, "kind": k, "key": key}
              for (s, f), lst in sorted(found.items()) for k, key in lst]
     counts = {k: sum(1 for i in items if i["kind"] == k) for k in KINDS}
-    base = _plan().read_props(repo / ".multiversion/base.properties").get("minecraft_version", "")
-    inv = {"generated_by": "tools/layer-inventory.py build", "base": base, "src_tree": src_tree(repo),
+    inv = {"generated_by": "tools/layer-inventory.py build", "base": "", "src_tree": src_tree(repo),
            "counts": counts, "items": items}
     return inv
 
 
 # ---------------------------------------------------------------- per-target account
 
-def _drops(mv, names, dir_of=None):
+def _drops(names, dir_of):
     """{rel: reason or ""} over the chain's drops.txt (a comment block above a run of entries is their reason).
-    dir_of(t): the directory holding t's drops.txt (default the layer's targets/<t>)."""
+    dir_of(t): the directory holding t's drops.txt (.port/<t>)."""
     out = {}
     for t in reversed(names):
-        p = (dir_of(t) if dir_of else mv / "targets" / t) / "drops.txt"
+        p = dir_of(t) / "drops.txt"
         if not p.is_file():
             continue
         note, pending = "", []
@@ -280,9 +278,9 @@ def _drops(mv, names, dir_of=None):
     return out
 
 
-def _stub_files(tdir, branch=False):
-    """{(set, rel): (reviewed?, review or open reason)} for T's STUBS.json entries (branch: a version branch's, whose
-    entries name src/<set>/java/<rel>)."""
+def _stub_files(tdir):
+    """{(set, rel): (reviewed?, review or open reason)} for T's STUBS.json entries (a version branch's, which name
+    src/<set>/java/<rel>)."""
     out = {}
     try:
         entries = json.loads(_read(tdir / "STUBS.json")) if (tdir / "STUBS.json").is_file() else []
@@ -291,9 +289,7 @@ def _stub_files(tdir, branch=False):
     for e in entries if isinstance(entries, list) else []:
         if not isinstance(e, dict) or not e.get("file"):
             continue
-        m = re.search(r"/targets/[^/]+/(?:([\w-]+)/)?java/(.+)$", e["file"])
-        if not m and branch:
-            m = re.match(r"^src/([\w-]+)/java/(.+)$", e["file"])
+        m = re.match(r"^src/([\w-]+)/java/(.+)$", e["file"])
         if not m:
             continue
         ok = bool(e.get("reviewed")) and not e.get("recheck")
@@ -301,17 +297,17 @@ def _stub_files(tdir, branch=False):
     return out
 
 
-def _behaviour(mv, names, dir_of=None):
-    """{item id: (entry, from target)} over the chain's BEHAVIOUR.json, nearest first; [problems]. dir_of as _drops."""
+def _behaviour(root, names, dir_of):
+    """{item id: (entry, from version)} over the chain's BEHAVIOUR.json, nearest first; [problems]. dir_of as _drops."""
     out, bad = {}, []
     for t in names:
-        p = (dir_of(t) if dir_of else mv / "targets" / t) / "BEHAVIOUR.json"
+        p = dir_of(t) / "BEHAVIOUR.json"
         if not p.is_file():
             continue
         try:
             data = json.loads(_read(p))
         except ValueError as e:
-            bad.append(f"{p.relative_to(mv.parent).as_posix()}: not JSON ({e})")
+            bad.append(f"{p.relative_to(root).as_posix()}: not JSON ({e})")
             continue
         for e in data if isinstance(data, list) else []:
             if isinstance(e, dict) and e.get("item") and e["item"] not in out:
@@ -330,19 +326,6 @@ def _behaviour_for(beh, iid):
     return None
 
 
-def prepared_dirs(repo, target, sets):
-    """{set: prepared java dir} for target (layer.gradle prepares every set's src/<set>/java); None for one not prepared
-    here -- never the raw src/<set>/java, which would read every item an overlay of that set changed as "same"."""
-    b = repo / "build" / f"mc{target}" / "mv"
-    out = {}
-    for s in sets:
-        if not (repo / "src" / s / "java").is_dir():
-            continue
-        p = b / ("java" if s == "main" else f"{s}-java")
-        out[s] = p if p.is_dir() else None
-    return out
-
-
 def _pair(base, now):
     """Greedy best pairs between two key lists (same kind, already without exact matches): [(b, n)], unpaired base."""
     cand = sorted(((difflib.SequenceMatcher(None, b, n).ratio(), i, j) for i, b in enumerate(base) for j, n in enumerate(now)),
@@ -355,52 +338,15 @@ def _pair(base, now):
     return pairs, [b for i, b in enumerate(base) if i not in used_b]
 
 
-def account(repo, target, inv=None):
-    """{"target", "items": [{id, kind, set, file, key, status, detail, now?}], "unaccounted": [ids], "notes": [...]}.
-    Raises ValueError for a missing inventory or prepared tree."""
-    repo = pathlib.Path(repo).resolve()
-    mv = repo / ".multiversion"
-    lp = _plan()
-    if inv is None:
-        p = mv / INV
-        if not p.is_file():
-            raise ValueError(f"no .multiversion/{INV}: run tools/layer-inventory.py build --repo {repo} first")
-        inv = json.loads(_read(p))
-    names = lp.chain(mv, target)
-    if not names:
-        raise ValueError(f"no such target: .multiversion/targets/{target}/target.properties")
-    sets = _sets(repo)
-    pdirs = prepared_dirs(repo, target, sets)
-    if pdirs.get("main", 1) is None:
-        raise ValueError(f"no prepared tree build/mc{target}/mv/java: run .multiversion/build.sh {target} compileJava first")
-    for s in sorted(k for k, v in pdirs.items() if v is None):
-        raise ValueError(f"no prepared tree build/mc{target}/mv/{s}-java (the {s} source set): run .multiversion/build.sh "
-                         f"{target} compileJava first, or .multiversion/tools/layer.py prepare --target {target} --set {s} "
-                         f"--src src/{s}/java --out build/mc{target}/mv/{s}-java")
-    res = {s: [mv / "targets" / c / "resources" for c in names if s == "main"] + [repo / "src" / s / "resources"]
-           for s in sets}
-    res = {s: [d for d in v if d.is_dir()] for s, v in res.items()}
-    now = scan_tree({s: d for s, d in pdirs.items() if d}, {})
-    overlaid = {(s, rel) for s in sets for c in names for rel in lp.java_rels(lp.overlay_dir(mv, c, s))}
-    drops = _drops(mv, names)
-    stubs = _stub_files(mv / "targets" / target)
-    review_p = mv / "targets" / target / "REVIEW.md"
-    review = review_ok_names(_read(review_p)) if review_p.is_file() else {}
-    beh, notes = _behaviour(mv, names)
-    src_moved = bool(inv.get("src_tree") and src_tree(repo) and inv["src_tree"] != src_tree(repo))
-    return _account(target, inv, pdirs, res, sets, now, overlaid, drops, stubs, review, beh, notes, src_moved)
-
-
 def _account(target, inv, pdirs, res, sets, now, overlaid, drops, stubs, review, beh, notes, src_moved):
-    """The account itself, from what account() (a layer target) or account_branch() (a version branch) gathered:
+    """The account itself, from what account_branch() (a version branch) gathered:
     pdirs {set: java dir}, res {set: [resource dirs, nearest first]}, now scan_tree(pdirs), overlaid {(set, rel)} (files
     a person changed, not the rename tables alone), drops {rel: reason}, stubs _stub_files(), review review_ok_names(),
     beh _behaviour(), notes [..], src_moved: the base's sources changed since the inventory was built."""
-    lp = _plan()
     present = now
     java_text = None          # the prepared trees' Java, read once when a 1.21.5+ shader item needs it
 
-    json_read = lp.mc_key(target) < lp.mc_key("1.21.5")
+    json_read = mc_key(target) < mc_key("1.21.5")
 
     def prepared_java():
         nonlocal java_text
@@ -533,59 +479,23 @@ def _account(target, inv, pdirs, res, sets, now, overlaid, drops, stubs, review,
 
 # ---------------------------------------------------------------- CLI
 
-def is_layer(repo):
-    return (pathlib.Path(repo) / ".multiversion/base.properties").is_file()
-
-
 def cmd_build(a):
     repo = pathlib.Path(a.repo).resolve()
-    if not is_layer(repo) and _fb().checkout_version(repo):
-        try:
-            dest, inv = build_branch_inventory(repo)
-        except ValueError as e:
-            print(f"layer-inventory: {e}"); return 2
-        dest = pathlib.Path(a.out) if getattr(a, "out", None) else dest
-        if not a.dry_run:
-            dest.write_text(json.dumps(inv, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"layer-inventory: {len(inv['items'])} item(s) from the port branch" + ("" if a.dry_run else f" -> {dest}"))
-        return 0
-    if not is_layer(repo):
-        print("layer-inventory: no .multiversion/ in the fork (a single-version fork has no inventory requirement)")
+    why = _load("fork_kind_for_inventory", "fork-kind.py").refuse_layer(repo, "layer-inventory")
+    if why:
+        print(why); return 2
+    if not _fb().checkout_version(repo):
+        print("layer-inventory: not a version branch's checkout (a single-version fork has no inventory requirement)")
         return 2
-    inv = build_inventory(repo)
-    text = json.dumps(inv, indent=1, ensure_ascii=False) + "\n"
-    c = ", ".join(f"{k} {v}" for k, v in inv["counts"].items() if v)
-    dest = pathlib.Path(a.out) if getattr(a, "out", None) else repo / ".multiversion" / INV
-    if not a.dry_run:
-        dest.write_text(text, encoding="utf-8")
-    print(f"layer-inventory: {len(inv['items'])} item(s) from the base ({c or 'none'})"
-          + ("" if a.dry_run else f" -> {dest}"))
-    return 0
-
-
-def check(repo, target, inventory=None):
-    """(exit code, report dict or None, message lines) -- what fork-port.py calls. inventory: a path to read instead
-    of .multiversion/INVENTORY.json."""
-    repo = pathlib.Path(repo).resolve()
-    if not is_layer(repo):
-        return 0, None, ["layer-inventory: single-version fork: no inventory requirement"]
     try:
-        inv = json.loads(_read(inventory)) if inventory else None
-        rep = account(repo, target, inv)
+        dest, inv = build_branch_inventory(repo)
     except ValueError as e:
-        return 2, None, [f"layer-inventory: {e}"]
-    lines = [f"layer-inventory: {target}: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["counts"].items()))]
-    lines += [f"layer-inventory: note: {n}" for n in rep["notes"]]
-    for r in rep["items"]:
-        if r["status"] == "unaccounted":
-            lines.append(f"layer-inventory: UNACCOUNTED {r['id']} ({r['detail']})")
-    if rep["unaccounted"]:
-        lines.append(f"layer-inventory: {target} is NOT done: {len(rep['unaccounted'])} base behaviour item(s) unaccounted for; "
-                     f"record each in .multiversion/targets/{target}/BEHAVIOUR.json "
-                     '({"item": ID, "status": "dropped", "reason": ...} or {"item": ID, "status": "moved", "where": ..., '
-                     '"review": ...}), or review the file\'s STUBS.json entry')
-        return EXIT_UNACCOUNTED, rep, lines
-    return 0, rep, lines
+        print(f"layer-inventory: {e}"); return 2
+    dest = pathlib.Path(a.out) if getattr(a, "out", None) else dest
+    if not a.dry_run:
+        dest.write_text(json.dumps(inv, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"layer-inventory: {len(inv['items'])} item(s) from the port branch" + ("" if a.dry_run else f" -> {dest}"))
+    return 0
 
 
 CHECK_FILE = "INVENTORY-CHECK.json"
@@ -629,11 +539,11 @@ def account_branch(repo, root, target, mechanical, inv=None, ref="HEAD"):
     overlaid = {(s, rel) for s, d in pdirs.items() for rel in _rels(d, "*.java")
                 if f"src/{s}/java/{rel}" not in mechanical}
     dir_of = lambda t: rec / t
-    drops = _drops(None, names, dir_of)
-    stubs = _stub_files(rec / target, branch=True)
+    drops = _drops(names, dir_of)
+    stubs = _stub_files(rec / target)
     review_p = rec / target / "REVIEW.md"
     review = review_ok_names(_read(review_p)) if review_p.is_file() else {}
-    beh, notes = _behaviour(root / ".port-unused", names, dir_of)
+    beh, notes = _behaviour(root, names, dir_of)
     pr = fb.port_ref_of(repo, root, target, ref)
     now_src = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{pr}:src"], capture_output=True, text=True,
                              encoding="utf-8").stdout.strip() if pr else ""
@@ -684,41 +594,19 @@ def build_branch_inventory(repo):
     return repo / ".port" / INV, inv
 
 
-def write_check(repo, target, rep):
-    """The target's account into .multiversion/targets/<t>/INVENTORY-CHECK.json (deterministic: rewritten only when it
-    changed). A run output like GATES.md: what fork-port.py's done check and a reviewer read, not a reviewed input."""
-    p = pathlib.Path(repo) / ".multiversion/targets" / target / CHECK_FILE
-    text = json.dumps(rep, indent=1, ensure_ascii=False) + "\n"
-    if not p.is_file() or p.read_text(encoding="utf-8") != text:
-        p.write_text(text, encoding="utf-8")
-
-
-def inventory_unaccounted(repo, target, write=True):
-    """[] when every base behaviour item is accounted for on target (or the fork is single-version); else one line per
-    reason it is not: each unaccounted item, a missing INVENTORY.json or prepared tree. Writes INVENTORY-CHECK.json
-    when the check ran (write=False: nothing). What fork-port.py's target_done() calls."""
-    code, rep, lines = check(repo, target)
-    if rep is None:
-        return [] if code == 0 else [ln.replace("layer-inventory: ", "behaviour inventory: ") for ln in lines]
-    if write:
-        write_check(repo, target, rep)
-    return [f"behaviour inventory: unaccounted {r['id']} ({r['detail']})" for r in rep["items"] if r["status"] == "unaccounted"]
-
-
 def cmd_check(a):
-    if not is_layer(a.repo) and _fb().checkout_version(pathlib.Path(a.repo)) == a.target:
-        code, rep, lines = check_branch(pathlib.Path(a.repo).resolve(), pathlib.Path(a.repo).resolve(), a.target)
-        if rep is not None and not a.no_write:
-            (pathlib.Path(a.repo) / ".port" / a.target / CHECK_FILE).write_text(check_text(rep), encoding="utf-8")
-        print(json.dumps(rep, indent=1, ensure_ascii=False) if a.json and rep is not None else "\n".join(lines))
-        return code
-    code, rep, lines = check(a.repo, a.target, a.inventory)
-    if rep is not None and not a.inventory and not a.no_write:
-        write_check(a.repo, a.target, rep)
-    if a.json and rep is not None:
-        print(json.dumps(rep, indent=1, ensure_ascii=False))
-    else:
-        print("\n".join(lines))
+    repo = pathlib.Path(a.repo).resolve()
+    why = _load("fork_kind_for_inventory", "fork-kind.py").refuse_layer(repo, "layer-inventory")
+    if why:
+        print(why); return 2
+    if _fb().checkout_version(repo) != a.target:
+        print("layer-inventory: single-version fork (no version branch checked out for this version): no inventory "
+              "requirement")
+        return 0
+    code, rep, lines = check_branch(repo, repo, a.target)
+    if rep is not None and not a.no_write:
+        (repo / ".port" / a.target / CHECK_FILE).write_text(check_text(rep), encoding="utf-8")
+    print(json.dumps(rep, indent=1, ensure_ascii=False) if a.json and rep is not None else "\n".join(lines))
     return code
 
 
@@ -765,6 +653,18 @@ def self_check():
     expect(("shader-sampler", "examplemod:core/glow MaskSampler") in sh and ("shader-uniform", "examplemod:core/glow GlowTime") in sh
            and ("shader", "examplemod:core/glow.json") in sh, f"core shader with its uniforms and samplers: {sh}")
 
+    def version(root, t, parent=None, inv=None):
+        """A version branch's checkout at root: gradle.properties' version, .port/<t>/branch.properties (and the
+        parent's carried copy), .port/INVENTORY.json."""
+        w(root / "gradle.properties", f"minecraft_version={t}\n")
+        for v, par in ((t, parent), (parent, None)):
+            if v:
+                w(root / ".port" / v / "branch.properties", f"minecraft_version={v}\nport_branch=neoforge-1.21.1\n"
+                  + (f"parent=neoforge-{par}\nparent_minecraft_version={par}\n" if par else "parent=neoforge-1.21.1\n"))
+        if inv is not None:
+            w(root / ".port" / INV, json.dumps(inv, indent=1) + "\n")
+        return root
+
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
         # single-version fork: no requirement, nothing written
@@ -772,160 +672,145 @@ def self_check():
         w(sv / "src/main/java/com/example/mod/client/GlowRenderer.java", render)
         before = sorted(p.relative_to(sv).as_posix() for p in sv.rglob("*"))
         expect(cmd_build(argparse.Namespace(repo=str(sv), dry_run=False)) == 2, "single-version: build refuses (exit 2)")
-        code, rep, lines = check(sv, "1.21.4")
-        expect(code == 0 and rep is None and "no inventory requirement" in lines[0], f"single-version: check passes, says so: {lines}")
+        expect(cmd_check(argparse.Namespace(repo=str(sv), target="1.21.4", json=False, no_write=False)) == 0,
+               "single-version: check passes, says so")
         expect(sorted(p.relative_to(sv).as_posix() for p in sv.rglob("*")) == before, "single-version: nothing written")
-        # layer fork
-        lf = d / "layer"
-        mvd = lf / ".multiversion"
-        w(mvd / "base.properties", "minecraft_version=1.21.1\n")
-        w(lf / "src/main/java/com/example/mod/mixin/LevelRendererMixin.java", mixin)
-        w(lf / "src/main/java/com/example/mod/Events.java", events)
-        w(lf / "src/main/java/com/example/mod/client/GlowRenderer.java", render)
-        w(lf / "src/main/java/com/example/mod/compat/OptMixin.java", '@Mixin(OptThing.class)\nclass OptMixin {\n'
+        # the base build (the port branch's sources) -> the inventory
+        base = d / "base"
+        w(base / "src/main/java/com/example/mod/mixin/LevelRendererMixin.java", mixin)
+        w(base / "src/main/java/com/example/mod/Events.java", events)
+        w(base / "src/main/java/com/example/mod/client/GlowRenderer.java", render)
+        w(base / "src/main/java/com/example/mod/compat/OptMixin.java", '@Mixin(OptThing.class)\nclass OptMixin {\n'
           '  @Inject(method = "x", at = @At("HEAD"))\n  void x(CallbackInfo ci) {}\n}\n')
-        w(lf / "src/main/java/com/example/mod/Plain.java", "class Plain {}\n")
-        w(lf / "src/main/resources/assets/examplemod/shaders/core/glow.json", shader)
-        w(lf / "src/main/resources/assets/examplemod/shaders/core/glow.fsh", "uniform sampler2D Sampler0;\nuniform sampler2D MaskSampler;\n"
-          "uniform float GlowTime;\nuniform mat4 ModelViewMat;\n")
-        w(mvd / "targets/1.21.4/target.properties", "x=1\n")
-        w(mvd / "targets/1.21.5/target.properties", "inherits=1.21.4\n")
-        expect(cmd_build(argparse.Namespace(repo=str(lf), dry_run=False)) == 0, "layer: build writes the inventory")
-        inv = json.loads((mvd / INV).read_text(encoding="utf-8"))
-        text1 = (mvd / INV).read_text(encoding="utf-8")
-        cmd_build(argparse.Namespace(repo=str(lf), dry_run=False))
-        expect((mvd / INV).read_text(encoding="utf-8") == text1, "build is deterministic (byte-identical on a re-run)")
+        w(base / "src/main/java/com/example/mod/Plain.java", "class Plain {}\n")
+        fsh = "uniform sampler2D Sampler0;\nuniform sampler2D MaskSampler;\nuniform float GlowTime;\nuniform mat4 ModelViewMat;\n"
+        w(base / "src/main/resources/assets/examplemod/shaders/core/glow.json", shader)
+        w(base / "src/main/resources/assets/examplemod/shaders/core/glow.fsh", fsh)
+        inv = build_inventory(base)
+        expect(json.dumps(build_inventory(base)) == json.dumps(inv), "build is deterministic (the same inventory on a re-run)")
         expect(inv["counts"]["mixin"] == 2 and inv["counts"]["injection"] == 3 and inv["counts"]["shader-sampler"] == 2
                and inv["counts"]["registry"] == 2 and not any(i["file"].endswith("Plain.java") for i in inv["items"]),
                f"inventory counts: {inv['counts']}")
-        expect(check(lf, "1.21.4")[0] == 2, "no prepared tree: exit 2 (build the target first)")
-        # 1.21.4's prepared tree: LevelRendererMixin renamed by the tables only (LevelRenderer -> LevelRenderer2, not an
-        # overlay); GlowRenderer overlaid, and the overlay lost the setShader use; OptMixin in drops.txt under a comment
-        pt = lf / "build/mc1.21.4/mv/java/com/example/mod"
+        # version 1.21.4: LevelRendererMixin renamed by the rows only (LevelRenderer -> LevelRenderer2: a mechanical file);
+        # GlowRenderer changed by hand and lost the setShader use; OptMixin dropped (drops.txt, under a comment)
+        v4 = version(d / "v4", "1.21.4", inv=inv)
+        pt = v4 / "src/main/java/com/example/mod"
         w(pt / "mixin/LevelRendererMixin.java", mixin.replace("LevelRenderer.class", "LevelRenderer2.class")
           .replace('"renderSky"', '"renderSky2"'))
         w(pt / "Events.java", events)
         ovl = render.replace(" RenderSystem.setShader(GameRenderer::getPositionTexShader);", "")
         w(pt / "client/GlowRenderer.java", ovl)
-        w(mvd / "targets/1.21.4/java/com/example/mod/client/GlowRenderer.java", ovl)
-        w(mvd / "targets/1.21.4/drops.txt", "# the optional mod has no 1.21.4 build (DEPS.md)\ncom/example/mod/compat/OptMixin.java\n")
-        code, rep, lines = check(lf, "1.21.4")
+        w(v4 / "src/main/resources/assets/examplemod/shaders/core/glow.json", shader)
+        w(v4 / "src/main/resources/assets/examplemod/shaders/core/glow.fsh", fsh)
+        w(v4 / ".port/1.21.4/drops.txt", "# the optional mod has no 1.21.4 build (DEPS.md)\ncom/example/mod/compat/OptMixin.java\n")
+        mech = {"src/main/java/com/example/mod/mixin/LevelRendererMixin.java", "src/main/java/com/example/mod/Events.java"}
+        chk = lambda root, t: check_branch(root, root, t, mech)
+        code, rep, lines = chk(v4, "1.21.4")
         st = {(r["file"].rsplit("/", 1)[-1], r["kind"], r["key"]): r["status"] for r in rep["items"]}
         expect(st.get(("LevelRendererMixin.java", "mixin", "@Mixin LevelRenderer")) == "same"
                and any(r.get("now") == "@Mixin LevelRenderer2" for r in rep["items"]),
-               f"a table-renamed mixin target is the same, with its new key: {st}")
+               f"a mixin target the rows renamed is the same, with its new key: {st}")
         expect(st.get(("OptMixin.java", "injection", '@Inject method=x @At(value="HEAD")')) == "dropped",
                f"a file in drops.txt under a comment is dropped with that reason: {st}")
         expect(st.get(("GlowRenderer.java", "render-use", "RenderSystem.setShader")) == "unaccounted"
                and st.get(("GlowRenderer.java", "render-class", "class GlowRenderer : EntityRenderer")) == "same",
-               f"an overlay that lost a render use is unaccounted; its class is the same: {st}")
+               f"a hand-changed file that lost a render use is unaccounted; its class is the same: {st}")
         expect(st.get(("glow.json", "shader-sampler", "examplemod:core/glow MaskSampler")) == "same",
                f"up to 1.21.4 the shader json is read: its samplers are the same: {st}")
         expect(code == EXIT_UNACCOUNTED and len(rep["unaccounted"]) == 2 and any("UNACCOUNTED" in l for l in lines),
                f"unaccounted items fail the check (exit 16) with a list: {code} {rep['unaccounted']}")
-        # account: a reviewed STUBS.json entry for the overlay; GameRenderer.getPositionTexShader too (the same file)
-        w(mvd / "targets/1.21.4/STUBS.json", json.dumps([{"file": ".multiversion/targets/1.21.4/java/com/example/mod/client/GlowRenderer.java",
-                                                          "why": "empties 1 method body", "reviewed": "the shader is set by the RenderType now"}]))
-        code, rep, _ = check(lf, "1.21.4")
+        # account: a reviewed STUBS.json entry for the file; GameRenderer.getPositionTexShader too (the same file)
+        gp = "src/main/java/com/example/mod/client/GlowRenderer.java"
+        w(v4 / ".port/1.21.4/STUBS.json", json.dumps([{"file": gp, "why": "empties 1 method body",
+                                                       "reviewed": "the shader is set by the RenderType now"}]))
+        code, rep, _ = chk(v4, "1.21.4")
         expect(code == 0 and not rep["unaccounted"], f"a reviewed stub of the file accounts for it: exit 0 ({rep['unaccounted']})")
-        w(mvd / "targets/1.21.4/STUBS.json", json.dumps([{"file": ".multiversion/targets/1.21.4/java/com/example/mod/client/GlowRenderer.java",
-                                                          "why": "x", "reviewed": None, "recheck": "re-justify: hook targets changed"}]))
-        expect(check(lf, "1.21.4")[0] == EXIT_UNACCOUNTED, "an unreviewed (recheck) stub does not account")
-        w(mvd / "targets/1.21.4/STUBS.json", json.dumps([{"file": ".multiversion/targets/1.21.4/java/com/example/mod/client/GlowRenderer.java",
-                                                          "why": "x", "reviewed": "ok"}]))
-        # 1.21.5 inherits 1.21.4; from 1.21.5 the json is not read: the shader, and each sampler/uniform that is not a
-        # vanilla one, must be named by the prepared Java (its RenderPipeline). Only Sampler0, GlowTime and the path are.
+        w(v4 / ".port/1.21.4/STUBS.json", json.dumps([{"file": gp, "why": "x", "reviewed": None,
+                                                       "recheck": "re-justify: hook targets changed"}]))
+        expect(chk(v4, "1.21.4")[0] == EXIT_UNACCOUNTED, "an unreviewed (recheck) stub does not account")
+        w(v4 / ".port/1.21.4/STUBS.json", json.dumps([{"file": gp, "why": "x", "reviewed": "ok"}]))
+        # 1.21.5 stands on 1.21.4; from 1.21.5 the json is not read: the shader, and each sampler/uniform that is not a
+        # vanilla one, must be named by the Java (its RenderPipeline). Only Sampler0, GlowTime and the path are.
         import shutil
-        shutil.copytree(lf / "build/mc1.21.4", lf / "build/mc1.21.5")
-        w(lf / "build/mc1.21.5/mv/java/com/example/mod/mv/Pipelines.java",
+        shutil.copytree(v4, d / "v5")
+        v5 = version(d / "v5", "1.21.5", parent="1.21.4")
+        w(v5 / "src/main/java/com/example/mod/mv/Pipelines.java",
           'class Pipelines { Object p = b.withVertexShader("core/glow").withSampler("Sampler0").withUniform("GlowTime"); }\n')
-        code, rep, _ = check(lf, "1.21.5")
+        code, rep, _ = chk(v5, "1.21.5")
         st = {(r["kind"], r["key"]): r["status"] for r in rep["items"] if r["file"].endswith("glow.json")}
         expect(st.get(("shader", "examplemod:core/glow.json")) == "same" and st.get(("shader-uniform", "examplemod:core/glow GlowTime")) == "same"
                and st.get(("shader-uniform", "examplemod:core/glow ModelViewMat")) == "same"
                and st.get(("shader-sampler", "examplemod:core/glow MaskSampler")) == "unaccounted",
                f"1.21.5+: a sampler no pipeline names is unaccounted; vanilla's and named ones are the same: {st}")
         expect(code == EXIT_UNACCOUNTED and len(rep["unaccounted"]) == 3 and any("setShader" in i for i in rep["unaccounted"]),
-               f"a stub review is per target (1.21.5 has no STUBS.json of its own): {rep['unaccounted']}")
+               f"a stub review is per version (1.21.5 has no STUBS.json of its own): {rep['unaccounted']}")
         mask = [r["id"] for r in rep["items"] if r["key"].endswith("MaskSampler")]
-        w(mvd / "targets/1.21.4/BEHAVIOUR.json", json.dumps([{"item": i, "status": "dropped"} for i in mask]))
+        w(v5 / ".port/1.21.4/BEHAVIOUR.json", json.dumps([{"item": i, "status": "dropped"} for i in mask]))
         # REVIEW.md accounts only through a parsed row with verdict ok (and a note) naming the file or the item id:
         # a mention in a note, review_skeleton's `?` row (it contains the path) and a not-ok row do not
-        ovp = ".multiversion/targets/1.21.5/java/com/example/mod/client/GlowRenderer.java"
         head = "- reviewer: r\n- date: 2026-01-01\n- commit: abc1234\n\n| kind | file | verdict | note |\n|---|---|---|---|\n"
         for body, why in (("- com/example/mod/client/GlowRenderer.java: reviewed against the authors' file\n", "a mention in a note"),
-                          (f"| overlay | {ovp} | ? | ? |\n", "a `?` row (review_skeleton's)"),
-                          (f"| overlay | {ovp} | not-ok | loses the shader |\n", "a not-ok row"),
-                          (f"| overlay | {ovp} | ok | ? |\n", "an ok row without a note"),
-                          (f"| overlay | {ovp}.bak | ok | fine |\n", "an ok row for another file")):
-            w(mvd / "targets/1.21.5/REVIEW.md", head + body)
-            code, rep, _ = check(lf, "1.21.5")
+                          (f"| changed | {gp} | ? | ? |\n", "a `?` row (review_skeleton's)"),
+                          (f"| changed | {gp} | not-ok | loses the shader |\n", "a not-ok row"),
+                          (f"| changed | {gp} | ok | ? |\n", "an ok row without a note"),
+                          (f"| changed | {gp}.bak | ok | fine |\n", "an ok row for another file")):
+            w(v5 / ".port/1.21.5/REVIEW.md", head + body)
+            code, rep, _ = chk(v5, "1.21.5")
             expect(code == EXIT_UNACCOUNTED and len(rep["unaccounted"]) == 3,
                    f"{why} in REVIEW.md does not account for the file's items: {rep['unaccounted']}")
-        w(mvd / "targets/1.21.5/REVIEW.md", head + f"| overlay | {ovp} | ok | the RenderType sets the shader now |\n")
-        code, rep, _ = check(lf, "1.21.5")
+        w(v5 / ".port/1.21.5/REVIEW.md", head + f"| changed | {gp} | ok | the RenderType sets the shader now |\n")
+        code, rep, _ = chk(v5, "1.21.5")
         expect(code == EXIT_UNACCOUNTED and rep["unaccounted"] == mask,
                f"an ok REVIEW.md row naming the file accounts for it; a drop with no reason does not: {rep['unaccounted']}")
         mid = [i for i in rep["items"] if i["key"] == "RenderSystem.setShader"]
-        w(mvd / "targets/1.21.5/REVIEW.md", head + f"| stub | {mid[0]['id']} | ok | moved to the RenderType |\n" if mid else head)
-        code, rep, _ = check(lf, "1.21.5")
+        w(v5 / ".port/1.21.5/REVIEW.md", head + f"| stub | {mid[0]['id']} | ok | moved to the RenderType |\n" if mid else head)
+        code, rep, _ = chk(v5, "1.21.5")
         expect(mid and mid[0]["id"] not in rep["unaccounted"] and len(rep["unaccounted"]) == 2,
                f"an ok row naming an item id accounts for that item only: {rep['unaccounted']}")
-        w(mvd / "targets/1.21.5/REVIEW.md", head + f"| overlay | {ovp} | ok | the RenderType sets the shader now |\n")
-        w(mvd / "targets/1.21.4/BEHAVIOUR.json", json.dumps([{"item": i, "status": "dropped", "reason": "the mask pass is gone"}
-                                                              for i in mask]))
-        code, rep, _ = check(lf, "1.21.5")
+        w(v5 / ".port/1.21.5/REVIEW.md", head + f"| changed | {gp} | ok | the RenderType sets the shader now |\n")
+        w(v5 / ".port/1.21.4/BEHAVIOUR.json", json.dumps([{"item": i, "status": "dropped", "reason": "the mask pass is gone"}
+                                                          for i in mask]))
+        code, rep, _ = chk(v5, "1.21.5")
         dropped = [r for r in rep["items"] if r["status"] == "dropped" and r["key"].endswith("MaskSampler")]
         expect(code == 0 and dropped and "inherited from 1.21.4" in dropped[0]["detail"],
                f"a parent's BEHAVIOUR.json drop is inherited, marked so: exit {code} {dropped}")
-        expect(inventory_unaccounted(lf, "1.21.5") == [] and json.loads((mvd / "targets/1.21.5" / CHECK_FILE).read_text(
-               encoding="utf-8"))["unaccounted"] == [], "inventory_unaccounted: [] when done, the account written")
-        (mvd / "targets/1.21.5/REVIEW.md").unlink()
-        un = inventory_unaccounted(lf, "1.21.5")
-        expect(len(un) == 2 and all(u.startswith("behaviour inventory: unaccounted ") for u in un),
-               f"inventory_unaccounted: one line per unaccounted item: {un}")
-        (mvd / INV).rename(d / INV)
-        expect(inventory_unaccounted(lf, "1.21.5") and "INVENTORY.json" in inventory_unaccounted(lf, "1.21.5")[0],
-               "a layer fork without INVENTORY.json is not done (fail closed), naming the build command")
-        expect(inventory_unaccounted(sv, "1.21.4") == [] and not (sv / ".multiversion").exists(),
-               "single-version: inventory_unaccounted is [] and writes nothing")
-        expect(src_tree(lf) is None, "not a git repo: no src tree recorded")
+        (v5 / ".port" / INV).unlink()
+        code, rep, lines = chk(v5, "1.21.5")
+        expect(code == 2 and rep is None and "INVENTORY.json" in lines[0],
+               f"a version branch without .port/INVENTORY.json is not judged (fail closed), naming the build command: {lines}")
+        expect(src_tree(base) is None, "not a git repo: no src tree recorded")
     # ---- a file-level ok row accounts for a file's non-hook items only: a hook (mixin target, injection, event
     # listener, shader uniform/sampler) needs its id named, in the row's note or as an `item` row's file
     with tempfile.TemporaryDirectory() as d:
-        lf = pathlib.Path(d) / "layer"
-        mvd = lf / ".multiversion"
-        w(mvd / "base.properties", "minecraft_version=1.21.1\n")
-        w(mvd / "targets/1.21.4/target.properties", "x=1\n")
-        base = mixin.replace("private void sky(CallbackInfo ci) {}",
-                             "private void sky(CallbackInfo ci) { RenderSystem.setShader(GameRenderer::getPositionTexShader); }")
-        w(lf / "src/main/java/com/example/mod/mixin/LevelRendererMixin.java", base)
-        cmd_build(argparse.Namespace(repo=str(lf), dry_run=False))
-        ov = (base.replace(' RenderSystem.setShader(GameRenderer::getPositionTexShader);', "")
+        d = pathlib.Path(d)
+        base_ = d / "base"
+        src = mixin.replace("private void sky(CallbackInfo ci) {}",
+                            "private void sky(CallbackInfo ci) { RenderSystem.setShader(GameRenderer::getPositionTexShader); }")
+        w(base_ / "src/main/java/com/example/mod/mixin/LevelRendererMixin.java", src)
+        v4 = version(d / "v4", "1.21.4", inv=build_inventory(base_))
+        ov = (src.replace(' RenderSystem.setShader(GameRenderer::getPositionTexShader);', "")
               .replace('  @Inject(method = "renderClouds", at = @At("HEAD"), cancellable = true)\n  private void clouds(CallbackInfo ci) {}\n', ""))
-        w(mvd / "targets/1.21.4/java/com/example/mod/mixin/LevelRendererMixin.java", ov)
-        w(lf / "build/mc1.21.4/mv/java/com/example/mod/mixin/LevelRendererMixin.java", ov)
-        code, rep, _ = check(lf, "1.21.4")
+        w(v4 / "src/main/java/com/example/mod/mixin/LevelRendererMixin.java", ov)
+        chk = lambda: check_branch(v4, v4, "1.21.4", set())
+        code, rep, _ = chk()
         lost = {r["kind"]: r["id"] for r in rep["items"] if r["status"] == "unaccounted"}
         expect(code == EXIT_UNACCOUNTED and set(lost) >= {"injection", "render-use"},
-               f"the overlay lost an injection and a render use: {rep['unaccounted']}")
-        ovp = ".multiversion/targets/1.21.4/java/com/example/mod/mixin/LevelRendererMixin.java"
+               f"the hand-changed file lost an injection and a render use: {rep['unaccounted']}")
+        ovp = "src/main/java/com/example/mod/mixin/LevelRendererMixin.java"
         head = "- reviewer: r\n- date: 2026-01-01\n- commit: abc1234\n\n| kind | file | verdict | note |\n|---|---|---|---|\n"
-        w(mvd / "targets/1.21.4/REVIEW.md", head + f"| overlay | {ovp} | ok | the sky hook is the same |\n")
-        code, rep, _ = check(lf, "1.21.4")
+        rv = v4 / ".port/1.21.4/REVIEW.md"
+        w(rv, head + f"| changed | {ovp} | ok | the sky hook is the same |\n")
+        code, rep, _ = chk()
         expect(lost["injection"] in rep["unaccounted"] and not any(":render-use:" in i for i in rep["unaccounted"]),
                f"a file-level ok row accounts for the render use, not for the injection it never names: {rep['unaccounted']}")
-        w(mvd / "targets/1.21.4/REVIEW.md", head + f"| overlay | {ovp} | ok | sky same; {lost['injection']}: the clouds "
-                                                   "hook is vanilla's own option now |\n")
-        code, rep, _ = check(lf, "1.21.4")
+        w(rv, head + f"| changed | {ovp} | ok | sky same; {lost['injection']}: the clouds hook is vanilla's own option now |\n")
+        code, rep, _ = chk()
         expect(code == 0 and not rep["unaccounted"], f"an ok row whose note names the hook's id accounts for it: {rep['unaccounted']}")
-        w(mvd / "targets/1.21.4/REVIEW.md", head + f"| overlay | {ovp} | ok | sky same |\n"
-                                                   f"| item | {lost['injection']} | ok | the clouds hook is vanilla's own option now |\n")
-        code, rep, _ = check(lf, "1.21.4")
+        w(rv, head + f"| changed | {ovp} | ok | sky same |\n| item | {lost['injection']} | ok | the clouds hook is vanilla's own option now |\n")
+        code, rep, _ = chk()
         expect(code == 0, f"an ok `item` row for the hook's id accounts for it: {rep['unaccounted']}")
-        w(mvd / "targets/1.21.4/REVIEW.md", head + f"| overlay | {ovp} | ok | sky same |\n"
-                                                   f"| item | {lost['injection']} | ? | ? |\n")
-        expect(check(lf, "1.21.4")[0] == EXIT_UNACCOUNTED, "a `?` item row (review_skeleton's) accounts for nothing")
+        w(rv, head + f"| changed | {ovp} | ok | sky same |\n| item | {lost['injection']} | ? | ? |\n")
+        expect(chk()[0] == EXIT_UNACCOUNTED, "a `?` item row (review_skeleton's) accounts for nothing")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -935,15 +820,14 @@ def main():
         return self_check()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd")
-    b = sub.add_parser("build", help="write .multiversion/INVENTORY.json from the base sources")
+    b = sub.add_parser("build", help="write .port/INVENTORY.json from the port branch's sources (on a version branch)")
     b.add_argument("--repo", required=True)
     b.add_argument("--dry-run", action="store_true", help="count, write nothing")
-    b.add_argument("--out", help="write the inventory here instead of .multiversion/INVENTORY.json")
-    c = sub.add_parser("check", help="account for every inventory item on a target")
+    b.add_argument("--out", help="write the inventory here instead of .port/INVENTORY.json")
+    c = sub.add_parser("check", help="account for every inventory item on the checked-out version branch")
     c.add_argument("--repo", required=True)
     c.add_argument("--target", required=True)
     c.add_argument("--json", action="store_true")
-    c.add_argument("--inventory", help="read the inventory from here instead of .multiversion/INVENTORY.json")
     c.add_argument("--no-write", action="store_true", help=f"do not write the target's {CHECK_FILE}")
     a = ap.parse_args()
     if a.cmd == "build":
