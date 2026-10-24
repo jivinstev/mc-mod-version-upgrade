@@ -26,14 +26,14 @@ A fork is single-version (one `neoforge-<mc>` branch) unless the maintainer opts
    safety, cost, durability or efficiency works, and is tested, on both kinds.
 2. **Multi-version machinery stays out, provably**: ladder hops, the cascade, per-version CI, the cross-version gate
    lock and direct jumps are never reached on a single-version fork, and a single-version fixture test shows it.
-3. **It costs single-version forks nothing**: no added complexity or nondeterminism, and a change to what an existing
-   single-version fork does is said plainly, never silent.
+3. **Multi-version-only code costs single-version forks nothing**: no added complexity or nondeterminism, and a change
+   to what an existing single-version fork does is said plainly, never silent.
 4. **Simple wins ties**: decide, and record why in the PR; ask only for a real quality/cost/simplicity trade-off or a
    change a fork's owner would notice. If the layout can separate the concerns, change the layout.
 
 - P1. One route check (`layer-sync.py detect`); multi-version code sits behind it.
 - P2. A PR touching the single-version route has a single-version fixture test and a `Single-version-change: <reason>`
-  or `Single-version-unchanged: <reason>` commit line (`tools/check-readme.py`).
+  or `Single-version-unchanged: <reason>` commit line; the enforced file list lives in `tools/check-readme.py`.
 - P3. Per-version files in `.port/<mc>/` on every kind of fork (the target; today mostly version branches).
 - P4. One round and one driver (`round.py`) for any fork set (target; today `round.py` takes version-branch sets only).
 - P5. A head branch is a single-version branch: what is built for it runs on single-version forks too, unless it reads

@@ -176,8 +176,8 @@ version number `<ver>+<version>`. Dispatch Port CI **on that version's branch** 
 branch. A version's ledger column names its own tag; a port dependency must have published its release for the same
 Minecraft version first (the version branch's workflow pins that release, `fork-branches.py ci`). Promote only a version
 that is done (fork-versions "Done") and has been played: run `fork-port.py --check-done` on that branch yourself first, as
-neither `port-ci.py promote` nor publishing runs it (they refuse only a build pinned to a library pre-release that was not
-done).
+neither `port-ci.py promote` nor publishing runs the done check; their only done-related refusal is a build pinned to a
+library pre-release that was not done.
 
 ## Part 4: a multi-version release (legacy, being removed; existing layer forks only)
 

@@ -58,18 +58,18 @@ tree. Then:
   booted, as before); the release needs it. A dependent of such a mod adds `--dep-jar-variant` (the other platform's asset of the same pinned
   release), which runs one more `gates (full, <label>)` leg against that jar. Without either, the workflow is unchanged.
 - **Single-version first.** A fork port is one `neoforge-<mc>` branch by default. More versions are opt-in per fork,
-  and then they are **stacked version branches**: `neoforge-1.21.3` made from `neoforge-1.21.1`, `neoforge-1.21.4` from
-  `neoforge-1.21.3`, ..., each the full source for its version with its own build, gates, CI and release, a fix or the
-  authors' new code merged upward branch by branch with the rename rows applied as a tool (`tools/fork-branches.py`).
-  The machinery for several versions (the cascade, per-version CI, the ladder hops) is switched on only where a version
-  branch's `.port/<mc>/branch.properties` exists. Fixes, checks and savings are meant for both kinds of fork
-  ([CLAUDE.md](CLAUDE.md), "Single-version and version-branch forks"), so a single-version fork's behaviour does
-  change, deliberately and said in the PR (`Single-version-change:` commit lines): dependency bumps are explicit for
-  every fork, re-cut releases are tagged `-rN`, a weekly-round merge waits for the review, and report-only audit rows
-  appear when they find something. Some savings still reach version-branch forks only (the round driver,
-  `tools/round.py`; the head-merge preview on the plan). The `.multiversion/` **layer** route is legacy and being
-  removed: a fork that still has one keeps working until it is migrated (`fork-branches.py migrate`), its code gets
-  bug fixes only, and no new fork gets one.
+  and then they are **stacked version branches**: `neoforge-1.21.3` made from `neoforge-1.21.1`, `neoforge-1.21.4`
+  from `neoforge-1.21.3`, ..., each the full source for its version with its own build, gates, CI and release, a fix
+  or the authors' new code merged upward branch by branch with the rename rows applied as a tool
+  (`tools/fork-branches.py`). The machinery for several versions (the cascade, per-version CI, the ladder hops) is
+  switched on only where a version branch's `.port/<mc>/branch.properties` exists. Fixes, checks and savings are meant
+  for both kinds of fork ([CLAUDE.md](CLAUDE.md), "Single-version and version-branch forks"), so a single-version
+  fork's behaviour does change, deliberately and said in the PR (`Single-version-change:` commit lines): dependency
+  bumps are explicit for every fork, re-cut releases are tagged `-rN`, a weekly-round merge waits for the review, and
+  report-only audit rows appear when they find something. Some fixes, checks and savings still reach version-branch
+  forks only (e.g. the round driver, `tools/round.py`, the head-merge preview on the plan, the stale-kit warning; #161
+  lists the rest). The `.multiversion/` **layer** route is legacy and being removed: a fork that still has one keeps
+  working until it is migrated (`fork-branches.py migrate`), its code gets bug fixes only, and no new fork gets one.
 - **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes (a `release` run on
   an unchanged `mod_version` is cut as `-r2`, `-r3`, ...: a name whose release or tag already exists is skipped, and a
   tag that points at another commit than the build stops the job, nothing released). Once a person

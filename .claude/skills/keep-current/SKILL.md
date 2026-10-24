@@ -81,9 +81,10 @@ run is green, and it is then gated against the dependency's NEW build.
    (`git rev-parse --short <remote>/<branch>`), never from memory: the authors can push while a reconcile is
    running, and the next run decides from what this one says it merged (`port-sync.py` now puts it in the message).
    **To merge one exact commit** (the weekly round's frozen `upstream_commit`): `port-sync.py` has no option for it --
-   it fetches `--upstream <remote>/<branch>` and merges that ref's tip. After the fetch, compare `git rev-parse
-   <remote>/<branch>` with the commit: equal, run `port-sync.py`; the authors pushed since, merge the commit with git
-   in port-sync's own form, `git merge --no-ff -m "Merge <remote>/<branch> at <short sha> into <work branch>" <sha>`.
+   it merges the tip of `--upstream <remote>/<branch>`, which the authors can move at any moment. So run `port-sync.py
+   --dry-run` (it fetches and lists the incoming commits, up to the tip, and changes nothing), then, on a clean tree,
+   `git checkout <work branch>` and `git merge --no-ff -m "Merge <remote>/<branch> at <short sha> into <work branch>"
+   <sha>` (port-sync's own message form).
    **A conflict in a file one of our fix commits touched** cannot wait for step 3 -- the merge cannot be committed,
    and the A/B needs a tree that compiles. Resolve it to the AUTHORS' side, say in the merge message that the
    resolution is provisional ("decision and A/B: <issue> ledger"), and if step 3's A/B then fails, commit our fix
