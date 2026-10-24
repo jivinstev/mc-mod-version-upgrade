@@ -5,12 +5,12 @@ description: Keep a fork port current with its authors, unattended or on request
 
 # Keep a fork port current
 
-**Which fork:** a single-version fork (one `neoforge-1.21.1`-style branch) is the default and the proven path; everything in
+**Which fork:** a single-version fork (one `neoforge-1.21.1`-style branch) is the default; everything in
 "Run" below is for it. A multi-version fork is one of two kinds, and each gets one extra step after step 6, nothing else
 changing for it: **version branches** (the default for a multi-version fork: one branch per version, `neoforge-1.21.3`,
 `neoforge-1.21.4`, ..., each carrying `.port/<version>/branch.properties`)
-get "A fork with version branches"; an existing **layer** fork (`.multiversion/` on a `layer_branch`) gets "A fork with the
-layer". `git ls-remote --heads origin 'neoforge-*'` lists the version branches; `tools/layer-sync.py detect --repo DIR
+get "A fork with version branches"; an existing **layer** fork (`.multiversion/` on a `layer_branch`; legacy, being
+removed) gets "A fork with the layer". `git ls-remote --heads origin 'neoforge-*'` lists the version branches; `tools/layer-sync.py detect --repo DIR
 --ref <layer_branch>` says whether a layer exists: pass the fork's `layer_branch` (in `.github/weekly-plan.json`) when it
 has one, since the clone is usually checked out on the port branch, which has no `.multiversion/`. Without `--ref`, detect
 exits 3 (not 0) when the checked-out branch has no layer but another branch does, so a layer fork can never read as
@@ -80,6 +80,11 @@ run is green, and it is then gated against the dependency's NEW build.
    rebase). Fetch immediately before merging and name the exact commit merged in the message, read from git
    (`git rev-parse --short <remote>/<branch>`), never from memory: the authors can push while a reconcile is
    running, and the next run decides from what this one says it merged (`port-sync.py` now puts it in the message).
+   **To merge one exact commit** (the weekly round's frozen `upstream_commit`): `port-sync.py` has no option for it --
+   it merges the tip of `--upstream <remote>/<branch>`, which the authors can move at any moment. So run `port-sync.py
+   --dry-run` (it fetches and lists the incoming commits, up to the tip, and changes nothing), then, on a clean tree,
+   `git checkout <work branch>` and `git merge --no-ff -m "Merge <remote>/<branch> at <short sha> into <work branch>"
+   <sha>` (port-sync's own message form).
    **A conflict in a file one of our fix commits touched** cannot wait for step 3 -- the merge cannot be committed,
    and the A/B needs a tree that compiles. Resolve it to the AUTHORS' side, say in the merge message that the
    resolution is provisional ("decision and A/B: <issue> ledger"), and if step 3's A/B then fails, commit our fix
@@ -160,8 +165,10 @@ run is green, and it is then gated against the dependency's NEW build.
    report its result: a green PR does not prove the merged branch is green. A job that failed before any gate body
    ran (setup, dependency download -- e.g. "could not list the runtime's mods") is re-run once; a second failure, or
    any failure inside a gate, is reported as waiting on the user with the failing job's summary line. Never report
-   a merge as done while its push run is red or still running. After merging, start the fork's
-   release run (`release=true`): it cuts a pre-release, which dependents re-pin to (step 7). Promotion stays a
+   a merge as done while its push run is red or still running. Start the fork's release run (`release=true`) right
+   after the merge, without waiting for the push run first: it cuts a pre-release, which dependents re-pin to (step 7),
+   and its release job needs that run's own gates on the merged commit (the same workflow template on every kind of
+   fork). Wait for the push run and the release run together, in one blocking command. Promotion stays a
    person's (stop 4). Without `automerge`, leave the PR open for the user.
    Once the pre-release exists, rename this reconcile's ledger column (`keep-current/<date>`) to its tag (joined
    with ` + ` in a ledger shared with a dependency): publishing (the publish-port skill) judges the column that
@@ -275,7 +282,7 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    pre-release when the gates are green at the tag (marked in the dependent's DEPS.md), never `--allow-undone-library`;
    the dependent's version is done, and may be promoted, only once the library's is.
 
-## A fork with the layer (opt-in, existing layer forks only; skip this for a single-version fork)
+## A fork with the layer (legacy, being removed: existing layer forks only, bug fixes only; skip this for a single-version fork)
 
 Only when `layer-sync.py detect --ref <layer_branch>` says `layer=true` (exit 3 from a bare `detect` means the same thing: rerun with `--ref`). The port branch's PR (steps 1-6) is the authors' code at the base
 version; the layer branch must carry it to every target, and nothing fixes a middle target unless this is run.
@@ -520,7 +527,8 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    overrides; read-plan says per fork whether `take_authors` is the plan's default (the box found ticked), the owner's
    (unticked) or nothing to take, and a version-branch fork's entry records it as `take_authors_by` -- put it in the first
    comment. **These are the run's only inputs.** Nothing new enters the run except an S1 found during it; the
-   authors' commits pushed after the plan wait for next week (merge `upstream_commit`, not the branch tip). **Freeze at
+   authors' commits pushed after the plan wait for next week (merge `upstream_commit`, not the branch tip:
+   Run step 2, "To merge one exact commit"). **Freeze at
    the deadline, not before:** read-plan run before the plan's deadline warns -- the plan workflow and the round are
    normally 24 hours apart, and an early freeze cuts the owner's window to tick and reply. Only when the owner asked to
    start now (on the plan issue, or in this session) add `--now`: `frozen.json` records it as `early_start`, and the first
@@ -604,8 +612,13 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    review is of the version's work branch (`keep-current/<date>-<v>`, or the version branch's checkout before it is
    pushed), never of what is already merged: a reviewer who reads a version after its PR merged reviews code players can
    already have.
-   - gates A/B/C in full, the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`): on a
-     single-version fork `ci-gates.py --env full` and `minimal`, as always. **On a version branch, the cheapest correct
+   - gates A/B/C in full, the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`). **On a
+     single-version fork, the cheapest correct sequence** -- one full gate pass, on the tree that merges: what changes
+     the build (a re-pin, the ticked `dep_bumps`) is committed first; the review starts from a green compile and Gate A/B
+     (`ci-gates.py --repo DIR --modid ID --base <upstream_commit> --gatec none`); after the review's fixes and their
+     re-check, ONE pass of `ci-gates.py ... --env full` then `--env minimal` (the commands `round.py`'s head path runs);
+     only a red run, or a jar-relevant change after it, needs another, and a ledger or README Ports-block commit needs
+     none. **On a version branch, the cheapest correct
      sequence** -- one full run (~20 minutes) per version where the 2026-10-19 round ran two or three, every gate still
      green on the exact tree that merges:
      1. what changes the build goes in first: a library re-pin (`layer-deps.py resolve --port-release`, then
@@ -642,17 +655,17 @@ it small, so for such a set the orchestration is a tool, which replaces the four
      with the rubric's inputs (`known-issues.py grade`, the reason recorded; an owner's `/grade` from the plan counts);
      the versions above it wait too (they carry it by the cascade). An S3/S4 row is ledgered and does not block;
    - the merge of the version's PR (step 6's rule and "A fork with version branches" step 3), then its push run green
-     (on a version branch that cuts a pre-release, awaited together with the release run: next item);
+     (when it cuts a pre-release, awaited together with the release run: next item);
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
      `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above.
-     **On a version branch, dispatch it right after the merge** instead of after the push run alone: the release run
+     **Dispatch it right after the merge** (every kind of fork) instead of after the push run alone: the release run
      checks out the merged commit and its release job needs that run's own full gates (full, minimal and every variant
      leg), so no pre-release is cut without a green full-gate run on exactly the released tree. Wait for the push run
      and the release run together, in one blocking command, and report both; a red push run is handled by step 6's rule
      (one re-run of a job that failed before any gate body; otherwise reported as blocking that pre-release's promotion),
      never ignored because the release run passed. That makes two serial CI waits per version (the PR's run, then the
      merge's push and release runs side by side) where the 2026-10-19 round had three (PR, push, then freeze push and
-     release). A single-version fork keeps step 6's order: its push run green first, then the release run;
+     release);
    - a library's version: BEFORE its merge, each dependent's Gate C against its candidate jar (the library pre-merge
      dependent gate above; red blocks the merge); after the release, `fork-branches.py library-record --repo LIB --target
      <v> --dependent DEP` once the dependent's same version passed Gate C on that exact released jar;

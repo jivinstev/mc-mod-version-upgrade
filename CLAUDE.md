@@ -17,19 +17,29 @@ that genuinely needs no README change (a typo, an internal step) says so with a 
 
 Describe only what the code does: if a step runs on one route and not another, say which.
 
-## Single-version first
+## Single-version and version-branch forks
 
-A fork port is single-version by default: one `neoforge-<mc>` branch, built, gated, synced and published as it is
-today. The multi-version layer (`.multiversion/`, the `fork-versions` skill) is **opt-in per fork, by an explicit
-decision**; only the forks the maintainer has opted in have it, and every other fork stays single-version. So:
+A fork is single-version (one `neoforge-<mc>` branch) unless the maintainer opts it into version branches
+(`fork-versions`); never convert one unasked. `fork-versions`, `keep-current` and `publish-port` say first which kind.
 
-- Every multi-version behaviour (layer branch CI, `fork-port.py`, direct jumps, `full_gates`, the checkout lock) is gated
-  on the fork having `.multiversion/` and defaults off. A change to a shared tool (`ci-gates.py`, `port-ci.py`,
-  `port-sync.py`, `port-publish.py`, the skills) must leave a single-version fork's behaviour byte-for-byte as it was.
-- Check every such change against a single-version fixture as well as a layer fixture, and say so in its self-check or
-  `tools/test-port-tools.sh` test (a layer-only assertion proves nothing about the default path).
-- `fork-versions`, `keep-current` and `publish-port` say in their first lines which kind of fork they are on and default
-  to single-version; do not turn a single-version fork into a layer fork without being asked.
+1. **Better for one fork is better for every fork**: a change to a port's, or its process's, quality, correctness,
+   safety, cost, durability or efficiency works, and is tested, on both kinds.
+2. **Multi-version machinery stays out, provably**: ladder hops, the cascade, per-version CI, the cross-version gate
+   lock and direct jumps are never reached on a single-version fork, and a single-version fixture test shows it.
+3. **Multi-version-only code costs single-version forks nothing**: no added complexity or nondeterminism, and a change
+   to what an existing single-version fork does is said plainly, never silent.
+4. **Simple wins ties**: decide, and record why in the PR; ask only for a real quality/cost/simplicity trade-off or a
+   change a fork's owner would notice. If the layout can separate the concerns, change the layout.
+
+- P1. One route check (`layer-sync.py detect`); multi-version code sits behind it.
+- P2. A PR touching the single-version route has a single-version fixture test and a `Single-version-change: <reason>`
+  or `Single-version-unchanged: <reason>` commit line; the enforced file list lives in `tools/check-readme.py`.
+- P3. Per-version files in `.port/<mc>/` on every kind of fork (the target; today mostly version branches).
+- P4. One round and one driver (`round.py`) for any fork set (target; today `round.py` takes version-branch sets only).
+- P5. A head branch is a single-version branch: what is built for it runs on single-version forks too, unless it reads
+  another version's branch.
+- P6. The `.multiversion/` layer route is legacy and being removed (#161 U7): bug fixes only, no new layer fork.
+- P7. Docs say which route: what the code does on each (the rule above).
 
 ## Merging
 

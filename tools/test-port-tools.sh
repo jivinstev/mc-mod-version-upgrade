@@ -646,9 +646,10 @@ sys.exit(0 if all(flat(n) in flat(v) for n in need) and "merge them in chain ord
 PY
 # the round's cost (2026-10-19, ~$105: ~87% cache reads and writes of the orchestrator's ~565k-token context; four serial CI
 # waits per version, five freeze-only push runs, nine ledger/README runs on the head): the orchestrator stays small, waits
-# block, the freeze rides in the version's PR, a version's release is dispatched right after its merge -- version branches
-# only: a single-version fork keeps its order
-python3 - <<'PY' && ok "keep-current, the round's cost: fresh worker subagents with ~40-line summaries, one blocking wait, round/NOTES.md past ~200k tokens; a set of version-branch forks runs on tools/round.py instead (round-task --version-branches; waits inside the driver, state in round/STATE.json with resume, one full gate run on the machine, the library pre-merge dependent gate), a set with a single-version fork keeps those rules; on a version branch the freeze in its PR, the release dispatched right after the merge (its own full gates on the released tree), one full local gate run after the review's fixes, the head's workflow named by ci-check; a single-version fork keeps push run then release" || bad "keep-current no longer keeps the orchestrator small, or the version-branch CI order regressed, or it reached the single-version order"
+# block, the freeze rides in the version's PR, a version's release is dispatched right after its merge -- on every kind
+# of fork (#161 D4: the release job needs that run's own gates on either route), and a single-version fork gates once on
+# the tree that merges (D3)
+python3 - <<'PY' && ok "keep-current, the round's cost: fresh worker subagents with ~40-line summaries, one blocking wait, round/NOTES.md past ~200k tokens; a set of version-branch forks runs on tools/round.py instead (round-task --version-branches; waits inside the driver, state in round/STATE.json with resume, one full gate run on the machine, the library pre-merge dependent gate), a set with a single-version fork keeps those rules; on a version branch the freeze in its PR, the release dispatched right after the merge (its own full gates on the released tree), one full local gate run after the review's fixes, the head's workflow named by ci-check; a single-version fork too dispatches the release right after the merge and runs one full gate pass after an A/B-only run the review starts from" || bad "keep-current no longer keeps the orchestrator small, or the CI order after a merge regressed on either route"
 import pathlib, sys
 s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf-8")
 flat = lambda x: " ".join(x.split())
@@ -664,12 +665,14 @@ need_r = ("fresh subagents that return a short summary -- at most ~40 lines", "W
           "at most one full gate run on the machine", "**The library pre-merge dependent gate.**",
           "A red run is a blocking finding on the LIBRARY version",
           "A worker MAY carry the same change across several versions", "fresh worker per version",
-          "On a version branch, dispatch it right after the merge", "no pre-release is cut without a green full-gate run on exactly the released tree",
-          "A single-version fork keeps step 6's order", "--from-stage measure --gates full", "ci --repo DIR --head --run",
-          "on a single-version fork `ci-gates.py --env full` and `minimal`, as always")
+          "**Dispatch it right after the merge** (every kind of fork)", "no pre-release is cut without a green full-gate run on exactly the released tree",
+          "--from-stage measure --gates full", "ci --repo DIR --head --run",
+          "**On a single-version fork, the cheapest correct sequence** -- one full gate pass", "--gatec none",
+          "ONE pass of `ci-gates.py ... --env full` then `--env minimal`")
 need_v = ("Move each version's freeze in its PR, not after it", "before its work branch is pushed")
 sys.exit(0 if all(n in r for n in need_r) and all(n in v for n in need_v)
-         and "Then wait for the CI run the merge itself triggers" in run6 and "After merging, start the fork's release run" in run6 else 1)
+         and "Then wait for the CI run the merge itself triggers" in run6 and "Start the fork's release run (`release=true`) right after the merge" in run6
+         and "A single-version fork keeps step 6's order" not in r else 1)
 PY
 # the weekly round's per-version order (dry run, 2026-10-18: the round reviewed each version after it merged): the review
 # comes before the merge and the pre-release, and a not-ok row graded S1/S2 at that version blocks both
