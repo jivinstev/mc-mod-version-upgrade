@@ -15,6 +15,9 @@ gitq() { git -C "$M" -c user.name=t -c user.email=t@example.invalid "$@"; }
 M="$T/mig"; git clone -q "$ROOT" "$M"
 # the clone must carry the CURRENT tools (this test may run before they are committed)
 cp tools/review-pr.py tools/check-no-ip.py tools/check-catalog-fidelity.py tools/test-review.sh "$M/tools/"
+# a catalogue file whose path holds a SPACE: its keys must survive the trip through review-pr's parsing
+mkdir -p "$M/docs/catalog"; printf 'Z1. **kept** body.\nZ2. **to drop** body.\n' > "$M/docs/catalog/spaced name.md"
+( cd "$M" && python3 tools/check-catalog-fidelity.py --update >/dev/null )
 gitq add -A; gitq commit -qm "test: current tools" >/dev/null 2>&1
 BASE="$(git -C "$M" rev-parse HEAD)"
 # the forbidden name is ASSEMBLED at runtime: written literally here, the IP gate would (rightly) flag
@@ -79,6 +82,26 @@ expect dropboth  1 "gate:fidelity"              "a rule deleted TOGETHER with it
 expect allowlist 1 "allowlist"                  "widening the IP gate's binary allowlist is BLOCKED"
 expect cisoft    1 "can no longer fail"         "a CI step made unable to fail is BLOCKED"
 expect weaken    1 "assertions fell"            "a self-test that asserts less is BLOCKED"
+# a fall DECLARED with a `Tests-removed:` commit line passes only with exactly the counts measured
+FELL="$(sed -n 's/.*assertions fell \([0-9]*\) -> \([0-9]*\).*/\1->\2/p' "$T/weaken.log" | head -1)"
+declare_on() { gitq checkout -q -b "$2" "$1"; gitq commit -q --allow-empty -m "$3"; gitq checkout -q "$BASE"; }
+if [ -n "$FELL" ]; then
+  declare_on weaken weakdecl $'declare\n\nTests-removed: tools/test-cycle.sh '"$FELL"' -- cases folded into another test'
+  declare_on weaken weakmiss $'declare\n\nTests-removed: tools/test-cycle.sh '"${FELL%->*}->1"' -- wrong count'
+  declare_on weaken weakwhy  $'declare\n\nTests-removed: tools/test-cycle.sh '"$FELL"' --'
+  declare_on clean  weakstale $'declare\n\nTests-removed: tools/test-cycle.sh '"$FELL"' -- nothing fell'
+  expect weakdecl  0 "declared: cases folded"    "CONTROL: a fall declared with its exact counts passes, the reason shown"
+  expect weakmiss  1 "does not match"            "a fall declared with DIFFERENT counts is still BLOCKED"
+  expect weakwhy   1 "malformed declaration"     "a Tests-removed line with no reason is BLOCKED"
+  expect weakstale 1 "did not fall"              "a Tests-removed line with no matching fall is BLOCKED"
+else bad "could not read the measured fall from the weaken case"; fi
+# a catalogue removal DECLARED with a `Catalog-removed:` line passes the fidelity gate review-pr runs
+GONE="$(sed -n 's/.*- \(CATALOG\.md::[^ |]*\).*/\1/p' "$T/droprule.log" | head -1)"
+declare_on dropboth dropdecl "declare"$'\n\n'"Catalog-removed: ${GONE:-CATALOG.md::none} -- merged into another entry"
+plant spacekey "sed -i '/^Z2\\. /d' 'docs/catalog/spaced name.md' && python3 tools/check-catalog-fidelity.py --update >/dev/null"
+declare_on spacekey spacedecl $'declare\n\nCatalog-removed: docs/catalog/spaced name.md::Z2 -- folded into Z1'
+expect spacedecl 0 "removed on purpose (Catalog-removed:): docs/catalog/spaced name.md::Z2" "CONTROL: a declared key whose path holds a space is listed whole, with its reason"
+expect dropdecl  0 "merged into another"        "CONTROL: a catalogue removal declared on the branch passes gate:fidelity (--base merge-base), its reason shown"
 grep -q 'ATTENTION.*gates' "$T/cisoft.log" && ok "a CI change is also flagged for line-by-line reading" || bad "CI change not flagged"
 [ -z "$(git -C "$M" worktree list | sed 1d)" ] && ok "no review worktree is left behind" || bad "leftover worktrees"
 

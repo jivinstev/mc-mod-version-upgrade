@@ -15,6 +15,8 @@ WHAT IT LOOKS FOR, beyond the gates
     security     added lines that fetch-and-run, eval, shell=True, disable TLS, touch credentials, or
                  give a workflow write permissions / pull_request_target
     gates        lines REMOVED from a gate or its self-test, fewer self-test cases, a check disabled
+                 (fewer cases pass only when a commit on the branch declares exactly that fall:
+                 `Tests-removed: tools/test-x.sh 209->183 -- <reason>`)
     catalogue    entries removed (the fidelity gate), new entries without Pattern / Fix / a symptom,
                  new entries with no number anywhere (a rule with no measurement behind it)
     scope        files outside the areas a contribution usually touches
@@ -165,6 +167,22 @@ def run_self_test(tree, script):
     return passed(r.stdout + r.stderr)
 
 
+TESTS_REMOVED = re.compile(r"^Tests-removed:(.*)$", re.M)
+TESTS_REMOVED_ARGS = re.compile(r"^\s*(tools/test-[\w-]+\.sh)\s+(\d+)\s*->\s*(\d+)\s+--\s+(\S.*?)\s*$")
+
+
+def tests_removed(log):
+    """-> ({(script, before, after): reason}, [malformed line]) from `Tests-removed:` commit lines."""
+    out, bad = {}, []
+    for m in TESTS_REMOVED.finditer(log):
+        d = TESTS_REMOVED_ARGS.match(m.group(1))
+        if d:
+            out[(d.group(1), int(d.group(2)), int(d.group(3)))] = d.group(4)
+        else:
+            bad.append(m.group(0).strip())
+    return out, bad
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", default="origin/main")
@@ -267,6 +285,8 @@ def main():
                 gate_results[name] = "absent"
                 continue
             cmd = list(argv)
+            if name == "fidelity" and "--base" in (wt / argv[1]).read_text(encoding="utf-8", errors="replace"):
+                cmd += ["--base", merge_base]     # honour the branch's `Catalog-removed:` lines, as CI does
             if wants_names:
                 if names and pathlib.Path(names).is_file():
                     cmd += ["--names", names, "--strict"]
@@ -277,6 +297,8 @@ def main():
                     name_note = "no private name list (optional); read added lines for mod names by hand"
             r = subprocess.run(cmd, cwd=wt, capture_output=True, text=True, encoding="utf-8", errors="replace")
             gate_results[name] = "PASS" if r.returncode == 0 else "FAIL"
+            for key, why in re.findall(r"^catalog-removed\t([^\t\n]+)\t(.*)$", r.stdout, re.M):
+                f("ATTENTION", "catalogue", f"entry removed on purpose (Catalog-removed:): {key}", why)
             if "self-test" in name and r.returncode == 0:
                 gate_results[name] += f" ({passed(r.stdout + r.stderr)})"
             if r.returncode:
@@ -284,6 +306,11 @@ def main():
                 f("BLOCKING", "gate:" + name, "gate failed on the PR's tree", " | ".join(tail))
         # a self-test that asserts LESS than it did is a weakened gate, even when it passes
         changed_tests = [p for st, p in changed if st != "D" and re.match(r"tools/test-[\w-]+\.sh$", p)]
+        declared, bad_decl = tests_removed(sh("git", "log", "--format=%B", f"{merge_base}..{a.head}").stdout)
+        for line in bad_decl:
+            f("BLOCKING", "gates", "malformed declaration: want `Tests-removed: tools/test-x.sh <before>-><after> "
+              "-- <reason>`, reason required", line)
+        used = set()
         if changed_tests:
             bt = pathlib.Path(tempfile.mkdtemp(prefix="review-base-"))
             try:
@@ -293,10 +320,22 @@ def main():
                         continue
                     before, after = run_self_test(bt, p), run_self_test(wt, p)
                     if before is not None and (after is None or after < before):
-                        f("BLOCKING", "gates", f"self-test assertions fell {before} -> {after}", p)
+                        if (p, before, after) in declared:
+                            used.add((p, before, after))
+                            f("ATTENTION", "gates", f"self-test assertions fell {before} -> {after}, declared: "
+                              f"{declared[(p, before, after)]}", p)
+                        else:
+                            other = [f"{b}->{c}" for (q, b, c) in declared if q == p]
+                            f("BLOCKING", "gates", f"self-test assertions fell {before} -> {after}"
+                              + (f" (declared {', '.join(other)}, which does not match)" if other else
+                                 f"; if intended, declare it: `Tests-removed: {p} {before}->{after} -- <reason>`"), p)
             finally:
                 sh("git", "worktree", "remove", "--force", str(bt), check=False)
                 shutil.rmtree(bt, ignore_errors=True)
+        for (p, b, c), why in declared.items():
+            if (p, b, c) not in used:     # a stale declaration must not linger to excuse a later fall
+                f("BLOCKING", "gates", f"declared `Tests-removed: {p} {b}->{c}` but the assertions did not fall "
+                  "that way: drop the line or correct the counts", why)
     finally:
         sh("git", "worktree", "remove", "--force", str(wt), check=False)
         shutil.rmtree(wt, ignore_errors=True)
