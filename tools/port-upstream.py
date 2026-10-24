@@ -954,6 +954,15 @@ def commit_message(c, md):
 FUNCS = {s: globals()["st_" + s.replace("-", "_")] for s in STAGES}
 
 
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     if "--self-check" in sys.argv:
@@ -977,6 +986,10 @@ def main():
     ap.add_argument("--shader-block", help="26.2: run convert-core-shaders with this uniform block name")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
+    why = _refuse_layer(a.repo, "port-upstream")
+    if why:
+        print(why)
+        return 2
     try:
         target = targets.target_of(a.branch)
         if a.base is None:           # a hop is cut from our previous port branch; a first port from the author's default

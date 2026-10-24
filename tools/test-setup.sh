@@ -28,7 +28,7 @@ for t in bash env tar sh cat dirname; do c="$(command -v $t)" && ln -sf "$c" "$N
 echo "1. idempotence: a second --yes run changes nothing"
 fresh; st --yes >/dev/null; a="$(cat "$R/.env.local")"
 out="$(st --yes)"; b="$(cat "$R/.env.local")"
-{ echo "$out" | grep -q "no changes" && [ "$a" = "$b" ]; } && ok "second --yes reports zero changes and .env.local is identical" \
+{ echo "$out" | grep >/dev/null "no changes" && [ "$a" = "$b" ]; } && ok "second --yes reports zero changes and .env.local is identical" \
   || bad "second --yes changed something"
 
 echo "2. the install path needs no Java, and never mentions it"
@@ -55,7 +55,7 @@ fresh; out="$(st --check)"
 echo "5. switching to migrate is additive, and a missing JDK is a PROBLEM, not a crash"
 fresh; st --yes >/dev/null
 out="$(SETUP_PATH_OVERRIDE="$NOJAVA" st --yes --path migrate)"; code=$?
-[ $code = 1 ] && echo "$out" | grep -q "PROBLEM: no JDK" && ok "migrate without java exits 1 naming the JDK" \
+[ $code = 1 ] && echo "$out" | grep >/dev/null "PROBLEM: no JDK" && ok "migrate without java exits 1 naming the JDK" \
   || bad "migrate without java: exit $code"
 grep -q '^SKILLS_INSTALL=project$' "$R/.env.local" && grep -q '^MIGRATE_WORKSPACE=' "$R/.env.local" \
   && ok "existing keys kept, migration keys added" || bad "path switch lost or failed to add keys"
@@ -63,7 +63,7 @@ grep -q '^SKILLS_INSTALL=project$' "$R/.env.local" && grep -q '^MIGRATE_WORKSPAC
 echo "6. a workspace inside a git repository is refused"
 fresh; st --yes >/dev/null
 sed -i.orig "s#^SETUP_PATH=.*#SETUP_PATH=migrate#" "$R/.env.local"; echo "MIGRATE_WORKSPACE=$R/work" >> "$R/.env.local"
-out="$(st --yes)"; echo "$out" | grep -q "is inside a git repository" && ok "workspace inside the checkout is flagged" \
+out="$(st --yes)"; echo "$out" | grep >/dev/null "is inside a git repository" && ok "workspace inside the checkout is flagged" \
   || bad "workspace inside a repo was accepted silently"
 
 echo "7. mods directories are a SET"
@@ -95,22 +95,22 @@ mkdir -p "$WS/mods/demo"; printf 'mod_name=Demo\n' > "$WS/mods/demo/gradle.prope
 ( cd "$WS" && MIGRATE_WORKSPACE="$WS" bash tools/make-multiversion.sh demo 26.2 ) >/dev/null 2>&1
 { [ -f "$WS/mods/demo/versions/26.2.renames.tsv" ] && [ -f "$WS/mods/demo/tools/prepare-sources.py" ]; } \
   && ok "make-multiversion.sh runs from INSIDE the workspace and scaffolds mods/<modid>" || bad "tools do not work from the workspace"
-out="$(st --yes)"; echo "$out" | grep -q "no changes" && ok "re-running with a workspace is still a no-op" || bad "workspace re-run changed something"
+out="$(st --yes)"; echo "$out" | grep >/dev/null "no changes" && ok "re-running with a workspace is still a no-op" || bad "workspace re-run changed something"
 mkdir -p "$H/ws2/tools"; sed -i.orig "s#^MIGRATE_WORKSPACE=.*#MIGRATE_WORKSPACE=$H/ws2#" "$R/.env.local"
-out="$(st --yes)"; echo "$out" | grep -q "ws2/tools exists and is not a link" && [ -d "$H/ws2/tools" ] && [ ! -L "$H/ws2/tools" ] \
+out="$(st --yes)"; echo "$out" | grep >/dev/null "ws2/tools exists and is not a link" && [ -d "$H/ws2/tools" ] && [ ! -L "$H/ws2/tools" ] \
   && ok "an existing real directory is never replaced by a link" || bad "setup clobbered an existing directory"
 
 echo "11. --output-repo sets the destination, and setup always says where ports go"
-fresh; out="$(st --yes --path migrate)"; echo "$out" | grep -q "destination: none" && ok "no destination: setup says ports stay in the workspace" \
+fresh; out="$(st --yes --path migrate)"; echo "$out" | grep >/dev/null "destination: none" && ok "no destination: setup says ports stay in the workspace" \
   || bad "no destination line: $(echo "$out" | grep destination)"
 D="$H/ports"; mkdir -p "$D"; git -C "$D" init -q
 out="$(st --yes --path migrate --output-repo "$D")"
-{ grep -q "^MOD_OUTPUT_REPO=$D$" "$R/.env.local" && echo "$out" | grep -q "destination: $D (a git repo"; } \
+{ grep -q "^MOD_OUTPUT_REPO=$D$" "$R/.env.local" && echo "$out" | grep >/dev/null "destination: $D (a git repo"; } \
   && ok "--output-repo on a git repo is written and echoed as a git destination" || bad "--output-repo git: $(echo "$out" | grep destination)"
 mkdir -p "$H/plain"; out="$(st --yes --path migrate --output-repo "$H/plain")"
-echo "$out" | grep -q "destination: $H/plain (not a git repo" && ok "a plain folder is echoed as copy-only" || bad "plain folder not echoed"
+echo "$out" | grep >/dev/null "destination: $H/plain (not a git repo" && ok "a plain folder is echoed as copy-only" || bad "plain folder not echoed"
 out="$(st --yes --path migrate --output-repo "$H/nope")"; code=$?
-{ [ $code = 1 ] && echo "$out" | grep -q "does not exist"; } && ok "a nonexistent --output-repo is a PROBLEM (exit 1)" || bad "nonexistent accepted (exit $code)"
+{ [ $code = 1 ] && echo "$out" | grep >/dev/null "does not exist"; } && ok "a nonexistent --output-repo is a PROBLEM (exit 1)" || bad "nonexistent accepted (exit $code)"
 st --yes --path migrate --output-repo none >/dev/null
 grep -q '^MOD_OUTPUT_REPO=$' "$R/.env.local" && ok "--output-repo none clears the destination" || bad "none did not clear: $(grep MOD_OUTPUT "$R/.env.local")"
 
@@ -138,7 +138,7 @@ os.waitpid(pid, 0); sys.stdout.write(out.decode(errors="replace"))
 PYX
 }
 fresh; out="$(tty_run 'maybe,y')"
-{ echo "$out" | grep -q "Also set up migration? (yes/no) \[no\]" && echo "$out" | grep -q "please answer" \
+{ echo "$out" | grep >/dev/null "Also set up migration? (yes/no) \[no\]" && echo "$out" | grep >/dev/null "please answer" \
   && grep -q '^SETUP_PATH=migrate$' "$R/.env.local"; } \
   && ok "interactive: default shown as 'no', a bad answer is asked again, 'y' turns migration on" \
   || bad "interactive yes/no: $(echo "$out" | grep -iE 'migration|please' | head -3)"
@@ -150,34 +150,34 @@ fresh; P="$(dirname "$R")"
 mkdir -p "$P/any-name/mods/somemod" "$P/unrelated/mods"; git -C "$P/any-name" init -q; git -C "$P/unrelated" init -q
 touch "$P/any-name/mods/somemod/build.gradle"
 out="$(st --yes --migrate)"
-{ echo "$out" | grep -q "looks like a ports repo.*any-name" && ! echo "$out" | grep -q "unrelated" \
+{ echo "$out" | grep >/dev/null "looks like a ports repo.*any-name" && ! echo "$out" | grep >/dev/null "unrelated" \
   && grep -q '^MOD_OUTPUT_REPO=../any-name$' "$R/.env.local"; } \
   && ok "a sibling git repo with mods/<modid>/build.gradle is offered under any name; a bare mods/ is not" \
   || bad "detection: $(echo "$out" | grep -E 'ports repo|destination')"
 
 echo "14. setup ends by saying how to start: Claude Code, and what to ask it"
 fresh; out="$(SETUP_PATH_OVERRIDE="$NOJAVA" st --yes)"; code=$?
-{ [ $code = 0 ] && echo "$out" | grep -q "Claude Code is not installed" && echo "$out" | grep -q "&& claude" \
-  && echo "$out" | grep -q "./setup --migrate"; } \
+{ [ $code = 0 ] && echo "$out" | grep >/dev/null "Claude Code is not installed" && echo "$out" | grep >/dev/null "&& claude" \
+  && echo "$out" | grep >/dev/null "./setup --migrate"; } \
   && ok "no claude on PATH: a note (not a PROBLEM) with the install command, then cd + claude + the add-on hint" \
   || bad "claude hint (exit $code): $(echo "$out" | grep -iE 'claude|next' | head -3)"
 C="$(mktemp -d)"; for f in "$NOJAVA"/*; do ln -s "$(readlink "$f")" "$C/$(basename "$f")"; done
 printf '#!/bin/sh\n' > "$C/claude"; chmod +x "$C/claude"
 fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --migrate)"
-{ echo "$out" | grep -q "claude: ok" && ! echo "$out" | grep -q "not installed" && echo "$out" | grep -q "Migrate <mod name>"; } \
+{ echo "$out" | grep >/dev/null "claude: ok" && ! echo "$out" | grep >/dev/null "not installed" && echo "$out" | grep >/dev/null "Migrate <mod name>"; } \
   && ok "claude present: reported ok, and the migrate path shows how to ask for a migration" || bad "claude present: $(echo "$out" | grep -iE 'claude' | head -3)"
 rm -rf "$C"
 
 echo "15. deploy targets: tested versions + NeoForge installs; vanilla-only skipped; shared folders flagged"
 fresh; B="$H/.minecraft"; mkdir -p "$B/versions/26.3" "$B/versions/1.21.1" "$B/versions/neoforge-21.1.228" "$B/mods"
 out="$(st --yes)"
-{ echo "$out" | grep -q "skipped (vanilla only, no NeoForge installed): 26.3" && ! grep -q '^MINECRAFT_MODS_DIR_26_3=' "$R/.env.local" \
+{ echo "$out" | grep >/dev/null "skipped (vanilla only, no NeoForge installed): 26.3" && ! grep -q '^MINECRAFT_MODS_DIR_26_3=' "$R/.env.local" \
   && grep -q "^MINECRAFT_MODS_DIR_1_21_1=$B/mods$" "$R/.env.local" && grep -q '^MINECRAFT_MODS_DIR_26_2=$' "$R/.env.local"; } \
   && ok "vanilla 26.3 is listed as skipped; 1.21.1 -> its NeoForge folder; tested 26.2 with no install -> none" \
   || bad "targets: $(echo "$out" | sed -n '/Mod versions/,/For each/p' | tr '\n' '|')"
 fresh; B="$H/.minecraft"; mkdir -p "$B/versions/neoforge-21.1.228" "$B/versions/neoforge-26.2.0.75" "$B/mods"
 out="$(st --yes)"
-echo "$out" | grep -q "is also the mods folder of your Minecraft" && ok "one mods/ folder recommended for two versions is FLAGGED" \
+echo "$out" | grep >/dev/null "is also the mods folder of your Minecraft" && ok "one mods/ folder recommended for two versions is FLAGGED" \
   || bad "shared folder not flagged: $(echo "$out" | grep note)"
 fresh; B="$H/.minecraft"; mkdir -p "$B/versions/neoforge-21.1.228" "$B/versions/neoforge-26.2.0.75" "$B/mods" "$B-26.2/mods"
 st --yes >/dev/null
@@ -192,19 +192,19 @@ grep -q "^MINECRAFT_MODS_DIR_26_2=$B-26.2/mods$" "$R/.env.local" && [ -d "$B-26.
 echo "16. a RE-RUN asks only NEW questions; --review asks them all"
 fresh; st --yes >/dev/null                                  # an earlier install-only setup
 out="$(TTY_PATH="$NOJAVA" tty_run ',,no' --migrate)"
-{ echo "$out" | grep -q "kept: your main Minecraft folder" && ! echo "$out" | grep -q "your main Minecraft folder (or 'none') \[" \
-  && echo "$out" | grep -q "Share your lessons as pull requests? (yes/no) \[yes\]" && echo "$out" | grep -q "Kept [0-9]* earlier answer" \
+{ echo "$out" | grep >/dev/null "kept: your main Minecraft folder" && ! echo "$out" | grep >/dev/null "your main Minecraft folder (or 'none') \[" \
+  && echo "$out" | grep >/dev/null "Share your lessons as pull requests? (yes/no) \[yes\]" && echo "$out" | grep >/dev/null "Kept [0-9]* earlier answer" \
   && grep -q '^CONTRIBUTE_LEARNINGS=no$' "$R/.env.local"; } \
   && ok "earlier answers are kept and listed; only the new questions are asked (here: 'share lessons' -> no)" \
   || bad "re-run asked old questions: $(echo "$out" | grep -E 'kept|\]: ' | head -5 | tr '\n' '|')"
 out="$(TTY_PATH="$NOJAVA" tty_run '' --review)"
-echo "$out" | grep -q "your main Minecraft folder (or 'none') \[" && ok "--review asks every question again" || bad "--review did not re-ask"
+echo "$out" | grep >/dev/null "your main Minecraft folder (or 'none') \[" && ok "--review asks every question again" || bad "--review did not re-ask"
 
 echo "17. sharing lessons: yes without gh -> the install + sign-in steps are named, nothing is run"
 fresh; out="$(SETUP_PATH_OVERRIDE="$NOJAVA" st --yes --migrate)"
-{ echo "$out" | grep -q "sharing lessons needs the GitHub CLI" && grep -q '^CONTRIBUTE_LEARNINGS=yes$' "$R/.env.local"; } \
+{ echo "$out" | grep >/dev/null "sharing lessons needs the GitHub CLI" && grep -q '^CONTRIBUTE_LEARNINGS=yes$' "$R/.env.local"; } \
   && ok "the default is to share; with no gh, --yes names 'gh auth login' and installs nothing" || bad "gh note: $(echo "$out" | grep -i 'gh\|share' | head -3)"
-fresh; out="$(st --yes)"; ! echo "$out" | grep -q "Share what your ports teach" && ok "install-only setup does not ask about sharing lessons" || bad "asked without the add-on"
+fresh; out="$(st --yes)"; ! echo "$out" | grep >/dev/null "Share what your ports teach" && ok "install-only setup does not ask about sharing lessons" || bad "asked without the add-on"
 
 echo "18. Claude Code permissions: added (only added), backed up, remembered"
 cs() { python3 -c "import json,sys;d=json.load(open('$H/.claude/settings.json'));print(eval(sys.argv[1]))" "$1"; }
@@ -226,10 +226,10 @@ SETUP_PATH_OVERRIDE="$NOJAVA" st --yes --migrate >/dev/null
   && ok "migrate: merged into existing settings -- nothing removed or changed, lists extended, backup kept" \
   || bad "merge: $(cat "$H/.claude/settings.json")"
 before="$(cat "$H/.claude/settings.json")"; out="$(SETUP_PATH_OVERRIDE="$NOJAVA" st --yes --migrate)"
-[ "$(cat "$H/.claude/settings.json")" = "$before" ] && echo "$out" | grep -q "already in place" \
+[ "$(cat "$H/.claude/settings.json")" = "$before" ] && echo "$out" | grep >/dev/null "already in place" \
   && ok "a re-run adds nothing and says so" || bad "re-run changed settings"
 fresh; mkdir -p "$H/.claude"; printf '{not json' > "$H/.claude/settings.json"
-out="$(st --yes)"; [ "$(cat "$H/.claude/settings.json")" = "{not json" ] && echo "$out" | grep -q "is not valid JSON" \
+out="$(st --yes)"; [ "$(cat "$H/.claude/settings.json")" = "{not json" ] && echo "$out" | grep >/dev/null "is not valid JSON" \
   && ok "an unparseable settings file is left untouched and reported" || bad "bad JSON touched"
 fresh; out="$(st --check)"; [ ! -e "$H/.claude/settings.json" ] && ok "--check does not write Claude Code settings" || bad "--check wrote settings"
 fresh; out="$(tty_run 'n,,,,,,no')"
@@ -237,27 +237,27 @@ fresh; out="$(tty_run 'n,,,,,,no')"
   && ok "answering no writes nothing, and the answer is remembered" || bad "no: $(ls "$H/.claude" 2>&1; grep CLAUDE_SETTINGS "$R/.env.local")"
 
 fresh; out="$(CURSEFORGE_API_KEY=not-a-real-key st --yes)"
-echo "$out" | grep -q "found in the environment" && ! echo "$out" | grep -q "not-a-real-key" \
+echo "$out" | grep >/dev/null "found in the environment" && ! echo "$out" | grep >/dev/null "not-a-real-key" \
   && ! grep -q '^CURSEFORGE_API_KEY' "$R/.env.local" 2>/dev/null \
   && ok "a CurseForge key in the environment is reported as found, never printed or written" \
   || bad "env key: $(echo "$out" | grep -A3 'Mod registries'; grep CURSEFORGE "$R/.env.local")"
-fresh; out="$(st --yes)"; echo "$out" | grep -q "CurseForge is OPTIONAL" \
+fresh; out="$(st --yes)"; echo "$out" | grep >/dev/null "CurseForge is OPTIONAL" \
   && ok "without a key, setup still explains how to get one" || bad "no key: $(echo "$out" | grep -A3 'Mod registries')"
 
 # model training: only the user's own "confirmed" records it -- never --yes, never a default
 fresh; out="$(st --yes)"
-! grep -q '^TRAINING_OPTOUT' "$R/.env.local" 2>/dev/null && echo "$out" | grep -q 'data-privacy-controls' \
-  && echo "$out" | grep -q 'never assumed, even with --yes' \
+! grep -q '^TRAINING_OPTOUT' "$R/.env.local" 2>/dev/null && echo "$out" | grep >/dev/null 'data-privacy-controls' \
+  && echo "$out" | grep >/dev/null 'never assumed, even with --yes' \
   && ok "--yes never confirms the training opt-out; it points at the setting instead" || bad "--yes training: $(grep TRAINING "$R/.env.local")"
 fresh; out="$(tty_run 'n,,,,,,no,')"
-! grep -q '^TRAINING_OPTOUT' "$R/.env.local" && echo "$out" | grep -q 'model training not confirmed off' \
+! grep -q '^TRAINING_OPTOUT' "$R/.env.local" && echo "$out" | grep >/dev/null 'model training not confirmed off' \
   && ok "pressing Enter at the training question records nothing and leaves a reminder" || bad "enter: $(grep TRAINING "$R/.env.local")"
 fresh; out="$(tty_run 'n,,,,,,no,yes')"
 ! grep -q '^TRAINING_OPTOUT' "$R/.env.local" \
   && ok "answering 'yes' is not 'confirmed': nothing recorded" || bad "yes accepted: $(grep TRAINING "$R/.env.local")"
 fresh; out="$(tty_run 'n,,,,,,no,confirmed')"
 grep -q '^TRAINING_OPTOUT=confirmed$' "$R/.env.local" && out2="$(tty_run '')" \
-  && echo "$out2" | grep -q 'kept: you confirmed model training is turned off' \
+  && echo "$out2" | grep >/dev/null 'kept: you confirmed model training is turned off' \
   && ok "typing 'confirmed' records it, and a re-run keeps it without asking" || bad "confirmed: $(grep TRAINING "$R/.env.local")"
 
 echo "19. --install-missing is Windows' (install.ps1 passes it): on macOS/Linux it installs no Claude Code or JDK"
@@ -266,8 +266,8 @@ echo "19. --install-missing is Windows' (install.ps1 passes it): on macOS/Linux 
 C="$(mktemp -d)"; for f in "$NOJAVA"/*; do ln -s "$(readlink "$f")" "$C/$(basename "$f")"; done
 for t in curl brew npm winget; do printf '#!/bin/sh\necho "$0 $*" >> "%s/ran"\n' "$C" > "$C/$t"; chmod +x "$C/$t"; done
 fresh; out="$(SETUP_PATH_OVERRIDE="$C" st --yes --migrate --install-missing)"; code=$?
-{ [ ! -e "$C/ran" ] && echo "$out" | grep -q "Claude Code is not installed" && echo "$out" | grep -q "no JDK found" \
-  && ! echo "$out" | grep -q "setup.cmd --install-missing"; } \
+{ [ ! -e "$C/ran" ] && echo "$out" | grep >/dev/null "Claude Code is not installed" && echo "$out" | grep >/dev/null "no JDK found" \
+  && ! echo "$out" | grep >/dev/null "setup.cmd --install-missing"; } \
   && ok "no installer ran; Claude Code and the JDK are reported with their usual hints" \
   || bad "--install-missing on $(uname): $(cat "$C/ran" 2>/dev/null; echo "$out" | grep -iE 'claude|jdk' | head -3)"
 rm -rf "$C"
@@ -281,12 +281,12 @@ R2="$(mktemp -d)/repo"; mkdir -p "$R2"
 ( cd "$R2" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm t )
 cp "$R1/.env.local" "$R1/.setup-state.json" "$R2/"; R="$R2"
 out="$(st --yes)"
-{ echo "$out" | grep -q "is linked to another clone" && [ "$(readlink "$WS/tools")" = "$R1/tools" ]; } \
+{ echo "$out" | grep >/dev/null "is linked to another clone" && [ "$(readlink "$WS/tools")" = "$R1/tools" ]; } \
   && ok "--yes reports the other clone and leaves the links alone" || bad "--yes relink: $(echo "$out" | grep -i 'workspace\|clone' | head -3)"
 out="$(tty_run 'y')"
 { [ "$(readlink "$WS/tools")" = "$R2/tools" ] && [ "$(readlink "$WS/templates")" = "$R2/templates" ] \
   && [ "$(readlink "$WS/.env.local")" = "$R2/.env.local" ] && [ -d "$WS/mods/demo" ] && [ -f "$R1/tools/setup.py" ] \
-  && ! echo "$out" | grep -qE "PROBLEM.*(link|workspace|clone)"; } \
+  && ! echo "$out" | grep >/dev/null -E "PROBLEM.*(link|workspace|clone)"; } \
   && ok "answering y re-points all three links; the ports in mods/ and the other clone are untouched" \
   || bad "relink: $(ls -la "$WS"; echo "$out" | grep -E 'PROBLEM|note: workspace' | head -5)"
 rm -rf "$(dirname "$R2")"

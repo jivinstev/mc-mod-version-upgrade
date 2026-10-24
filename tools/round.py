@@ -26,7 +26,8 @@ weeks running): here a library version's merge waits for the dependent's Gate C 
 THE QUEUE (`init`, from the frozen plan and the clones; ordered, each item a small typed step with explicit
 dependencies). Only a set of VERSION-BRANCH forks (`.port/<v>/branch.properties` branches): a set with a single-version
 fork keeps the round the keep-current skill describes (round-task without --version-branches) and init refuses it, as
-it refuses a layer fork and a clone whose origin is not that fork. Per fork, library first (`depends_on` in
+it refuses a clone with the removed .multiversion/ layer at HEAD (tools/fork-kind.py) and a clone whose origin is not
+that fork. Per fork, library first (`depends_on` in
 .github/weekly-plan.json), and per version only when it has work this round -- the head cascade of the authors' code the
 plan takes, a selected fix at or below it, a library release of this round to re-pin to, a ticked dependency bump at it,
 or MMVU's shared library moved past it (init reads fork-branches.py sync-shared --check: a version a sync changes, a
@@ -117,7 +118,8 @@ _MODS = {}
 
 
 def mod(key):
-    files = {"fb": "fork-branches.py", "ki": "known-issues.py", "pc": "port-ci.py", "lc": "layer-ci.py"}
+    files = {"fb": "fork-branches.py", "ki": "known-issues.py", "pc": "port-ci.py", "lc": "checkout-lock.py",
+             "fk": "fork-kind.py"}
     if key not in _MODS:
         sys.dont_write_bytecode = True
         _MODS[key] = load(f"round_{key}", files[key])
@@ -263,16 +265,9 @@ def full_gate_lock(who, say=print):
 # ---------------------------------------------------------------- init: the queue
 
 def fork_kind(d):
-    """'branches' (version branches: .port/<v>/branch.properties), 'layer' (a .multiversion/ layer with no version
-    branches) or 'single'."""
-    fb = mod("fb")
-    if fb.version_branches(d):
-        return "branches"
-    r = git(d, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin")
-    for ref in r.stdout.split():
-        if git(d, "cat-file", "-e", f"{ref}:.multiversion/base.properties").returncode == 0:
-            return "layer"
-    return "single"
+    """'branches' (version branches: .port/<v>/branch.properties) or 'single' (tools/fork-kind.py; a legacy layer
+    branch is history and ignored)."""
+    return "branches" if mod("fb").version_branches(d) else "single"
 
 
 def ladder(d, head_version):
@@ -613,11 +608,11 @@ def cmd_init(a):
         if why:
             print(f"round: {slug}: {why}")
             return 2
-        kind = fork_kind(d)
-        if kind == "layer":
-            print(f"round: {slug} is a .multiversion/ layer fork: the driver does not run a layer fork (the skill's "
-                  "\"A fork with the layer\" does, by hand)")
+        why = mod("fk").refuse_layer(d, "round")
+        if why:
+            print(f"round: {slug}: {why}")
             return 2
+        kind = fork_kind(d)
         if kind == "single":
             print(f"round: {slug} is a single-version fork (no .port/<v>/branch.properties branches): the driver runs only "
                   "a set of version-branch forks; a set with a single-version fork keeps the round as the keep-current "
@@ -752,7 +747,7 @@ def finish(st, it, status, note="", result=None):
 
 
 def pid_alive(pid):
-    """tools/layer-ci.py's check (Windows too, where os.kill(pid, 0) would end the process)."""
+    """tools/checkout-lock.py's check (Windows too, where os.kill(pid, 0) would end the process)."""
     try:
         return mod("lc").pid_alive(int(pid))
     except (ValueError, TypeError):
@@ -1372,7 +1367,7 @@ def head(d):
 def gates_green(path, at, v, overlay=False):
     """None when the GATES.md at `path` certifies commit `at` for Minecraft v with every row green and a Gate C PASS row;
     else why. overlay: an uncommitted overlay over `at` (`<sha> + uncommitted: ...`, the dependent gate's --port-checkout
-    pin) is accepted; without it only a clean tree at `at` is (layer-deps.py gates_record's rule)."""
+    pin) is accepted; without it only a clean tree at `at` is."""
     text = mod("fb").read_file(path)
     if not text:
         return f"no {pathlib.Path(path).name}"

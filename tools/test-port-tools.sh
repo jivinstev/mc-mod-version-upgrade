@@ -280,11 +280,11 @@ done
 
 echo "13. file-loop.py (model-free parts: load-crash scans, supertype filter, generated-path mapping, batching)"
 out="$(python3 tools/file-loop.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching, rows_first (layer mode: a worker row is tried before its overlay is kept; a dropped overlay's directory is recreated)" \
+grep -q 'self-check: OK' <<<"$out" && ok "file loop: R1 and client-import scans, supertype-aware probe filter, batching" \
   || bad "file-loop self-check: $out"
 
 out="$(python3 tools/port-cost.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "port-cost: a session driving two layer targets and a second fork (one subagent per target) is charged once -- each target only its own requests, the parts sum to the session; a single-version checkout and a layer checkout without --target are counted whole, as before; records carry a price tier and no model name; round-table sums each version branch's COST.md records since the round's start and measures a single-version fork, with totals; round-table --session-cwd charges a scheduled session's own requests (its subagents included, another cwd not) per version at the round's marks; mark --phase splits it per fork x version x phase (a recurring phase summed, each version's rows summing to its unphased row, per-phase totals) while a marks file without phases gives today's table byte for byte" \
+grep -q 'self-check: OK' <<<"$out" && ok "port-cost: a session driving two version branches and a second fork (one subagent per version) is charged once -- each version only its own requests, the parts sum to the session; a single-version checkout without --target is counted whole, as before; records carry a price tier and no model name; round-table sums each version branch's COST.md records since the round's start and measures a single-version fork, with totals; round-table --session-cwd charges a scheduled session's own requests (its subagents included, another cwd not) per version at the round's marks; mark --phase splits it per fork x version x phase (a recurring phase summed, each version's rows summing to its unphased row, per-phase totals) while a marks file without phases gives today's table byte for byte" \
   || bad "port-cost self-check: $out"
 
 out="$(python3 tools/gate-loop.py --self-check 2>&1)"
@@ -330,7 +330,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port-ci.py|port-ci: install the fork's CI + tag-driven pre-release workflow as its own commit" \
             "port-offer.py|port-offer: the authors see the port without our CI commit; port commits after a CI commit are replayed without it; only what state.json verified is claimed" \
             "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
-            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict; a manifest behind its fork's newest full Release is installed as tested and named NOT THE NEWEST RELEASE; --all-versions (fixtures: a library's layer release, a dependent's local layer build) installs only the versions every fork has, one game directory and launcher profile each, every target jar and dependency checked, a single-version fork its one version" \
+            "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict; a manifest behind its fork's newest full Release is installed as tested and named NOT THE NEWEST RELEASE" \
             "port-manifest.py|port-manifest: refresh points the install manifest at the newest full Release (same platform variant) and the workflow's sibling pins, leaves registry entries alone, says unchanged, refuses a pre-release, an older tag, an ambiguous jar or an unfetchable pin" \
             "optional-dep-scan.py|optional-dep-scan: a listener class naming an optional mod in a method type blocks; a mixin reaching one through the mod is reported" \
             "port-fleet.py|port-fleet: one fleet file runs ci/gates/offer over every fork in order, flags per fork, push after each" \
@@ -346,8 +346,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "convert-override-signatures.py|convert-override-signatures: a hook whose signature changed after 1.21.1 keeps its body in a private 1.21.1-shaped copy; --crossing FROM..TO runs only the rows landing in that hop (1.21.2 / 1.21.5), idempotent, and the hops add up to the one-step era run" \
             "port-derive.py|port-derive: a dev-branch port replayed onto the release, unreleased files and their port-only handlers dropped" \
             "mechanical-hop.py|mechanical-hop: members, then every converter in order, then members (the era stage, no --crossing); a converter that changed nothing is not recounted; one needing the port's input is an advisory; the version-branch LADDER runs a converter only on a hop its change lands in, an output that needs a later version is an advisory, a re-run changes nothing" \
-            "layer-test-plan.py|layer-test-plan: per layer target, the reviewed/reopened stubs, whole-file overlays, fired rows with a no-gate note, dropped optional integrations, preview targets and (with INVENTORY.json only) each base behaviour item not the same, a shared change once with its range; a single-version fork is its one version with no layer section" \
-            "layer-inventory.py|layer-inventory: the base build's mixin targets/injections (fork-port's hook_targets), event listeners, render classes and uses, core shaders with uniforms/samplers and registries; per target same through the rename tables, changed in an overlay, dropped by drops.txt or BEHAVIOUR.json (inherited), accounted by a reviewed stub or REVIEW.md, from 1.21.5 a sampler no RenderPipeline names is unaccounted (exit 16); a single-version fork has no requirement and nothing written" \
+            "layer-inventory.py|layer-inventory: the base build's mixin targets/injections (fork-port's hook_targets), event listeners, render classes and uses, core shaders with uniforms/samplers and registries; per version branch same through the rename tables, changed in the branch, dropped by drops.txt or BEHAVIOUR.json, accounted by a reviewed stub or REVIEW.md, from 1.21.5 a sampler no RenderPipeline names is unaccounted (exit 16); a single-version fork has no requirement and nothing written; a layer checkout is refused" \
             "manual-tests.py|manual-tests: the 10 manual tests no gate reaches, one per kind first (music, client packets, bosses, keys...), with steps naming real ids" \
             "offer-page.py|offer-page: the handoff page shows each fork's install, distance from release, checks and its manual tests" \
             "minitoml.py|minitoml: the TOML reader for Pythons without tomllib reads mods.toml forms (inline tables, every string kind) as tomllib does, and refuses broken TOML" \
@@ -435,17 +434,16 @@ fp = load("fp", "fork-port.py")
 bad = []
 blade = lambda r: (r / "src/main/java/com/example/mod/Blade.java").read_text(encoding="utf-8")
 orig = (ld / "Blade.java").read_text(encoding="utf-8")
-# single-version fixture: no version branch, no layer -> fork-port's real Run path stops (at setup, exit 2; resumed at
-# moves, the layer path's own stop, as on origin/main) and no converter runs: the file is byte for byte as it was, no
-# convert-*.out anywhere
+# single-version fixture: no version branch -> fork-port stops before any stage (exit 2, fresh or resumed at moves)
+# and no converter runs: the file is byte for byte as it was, no convert-*.out anywhere
 sv = ld / "sv"
 subprocess.run(["git", "init", "-q", str(sv)], check=True)
-if fp.branch_mode(sv, "1.21.5"):
-    bad.append("a single-version fixture is taken as a version-branch run")
+if load("fk", "fork-kind.py").detect(sv)[0] != "single-version":
+    bad.append("a single-version fixture is taken as a version-branch fork")
 for extra in ([], ["--from-stage", "moves"]):
     r = subprocess.run([sys.executable, "tools/fork-port.py", "--repo", str(sv), "--target", "1.21.5", *extra],
                        capture_output=True, text=True, encoding="utf-8")
-    if (r.returncode == 0 if extra else r.returncode != 2) or blade(sv) != orig or list(sv.rglob("convert-*.out")) or "converters landing" in r.stdout:
+    if r.returncode != 2 or "single-version fork" not in r.stdout or blade(sv) != orig or list(sv.rglob("convert-*.out")) or "converters landing" in r.stdout:
         bad.append(f"fork-port on a single-version fork ran a converter or did not stop at setup ({extra}): {r.returncode} {r.stdout[-300:]}")
 # the era route calls the converter with no --crossing and every row runs, exactly as before
 subprocess.run([sys.executable, "tools/convert-override-signatures.py", "--src", str(sv / "src/main/java")], capture_output=True, check=False)
@@ -482,7 +480,7 @@ if blade(vb) != after:
 print("\n".join(bad) or "ladder OK")
 PY
 )"
-grep -q '^ladder OK$' <<<"$out" && ok "version-branch ladder: a hop crossing a converter's landing version runs it (1.21.1->1.21.3 the 1.21.2 rows, 1.21.4->1.21.5 the 1.21.5 rows), a hop crossing none runs nothing, a re-run converts nothing twice, the hops add up to the era route's one step; a vetoing hurtEnemy is REFUSED and counted; gear-tiers is an advisory below 26.1.2 only where a 1.21.x gear class is named; on a single-version fixture fork-port's real path stops at setup with no converter run and the file unchanged, and the era call is unchanged" \
+grep -q '^ladder OK$' <<<"$out" && ok "version-branch ladder: a hop crossing a converter's landing version runs it (1.21.1->1.21.3 the 1.21.2 rows, 1.21.4->1.21.5 the 1.21.5 rows), a hop crossing none runs nothing, a re-run converts nothing twice, the hops add up to the era route's one step; a vetoing hurtEnemy is REFUSED and counted; gear-tiers is an advisory below 26.1.2 only where a 1.21.x gear class is named; on a single-version fixture fork-port stops before any stage (exit 2) with no converter run and the file unchanged, and the era call is unchanged" \
   || bad "version-branch ladder converters: $out"
 
 echo "burndown-count.sh: a log that hit the capped Gradle compile is refused unless recounted (X5g)"
@@ -503,102 +501,92 @@ out="$(python3 tools/layer-deps.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "layer-deps: pinned mods resolved per target, a required miss stops (exit 15) and writes nothing, an optional miss is excluded and recorded, a slug-pinned Modrinth mod matches the manifest by project id, an unlisted implementation dependency is required (fail closed), an earlier --port-release pin survives a re-resolve, --dry-run builds no sibling, a single-version fork is untouched, library first: a sibling target with no green Gate C / an open REVIEW.md / a jar-changing file since its gated commit is refused (checkout or release), --allow-undone-library passes a checkout only and DEPS.md says so" \
   || bad "layer-deps self-check: $out"
 
-out="$(python3 tools/make-fork-layer.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork layer: init is idempotent (one hook line), add-target writes versions and mods.toml ranges, add-target --direct writes shared_chain (default off), add-target refuses a new target over an undone parent (exit 18) unless --allow-undone-parent (recorded), init --upstream / freeze record the authors' commit" \
-  || bad "make-fork-layer self-check: $out"
-# the 26.x calendar line, through the real command line on a single-version fixture turned layer: 26.1.2 one hop on from
-# 1.21.11, Java 25, ranges to the next patch release, GeckoLib's new group as an ESCAPED substitution (Properties keys end
-# at ':'), and layer-ci's plan picks 26.3 as the newest with its own JDK
-L26="$T/layer26"; mkdir -p "$L26/src/main/java/com/example/mod"
-echo 'package com.example.mod; class A {}' > "$L26/src/main/java/com/example/mod/A.java"
-printf 'minecraft_version=1.21.1\nneo_version=21.1.228\ngeckolib_version=4.8.4\n' > "$L26/gradle.properties"; echo 'plugins {}' > "$L26/build.gradle"
-python3 tools/make-fork-layer.py init --repo "$L26" >/dev/null 2>&1
-for t26 in 1.21.11 26.1.2 26.2 26.3; do python3 tools/make-fork-layer.py add-target --repo "$L26" --target "$t26" --allow-undone-parent >/dev/null 2>&1; done
-P26="$L26/.multiversion/targets/26.1.2/target.properties"
-grep -qx 'inherits=1.21.11' "$P26" && grep -qx 'java_version=25' "$P26" && grep -qx 'toml.minecraft=\[26.1.2,26.1.3)' "$P26" \
-  && grep -qxF 'substitute.software.bernie.geckolib\:geckolib-neoforge-26.1.2=com.geckolib:geckolib-neoforge-26.1.2:5.5.2' "$P26" \
-  && grep -qx 'inherits=26.2' "$L26/.multiversion/targets/26.3/target.properties" \
-  && ! grep -q 'substitute\|java_version=25' "$L26/.multiversion/targets/1.21.11/target.properties" \
-  && ok "fork layer: 26.x targets get Java 25, the 1.21.11 -> 26.1.2 -> 26.2 -> 26.3 chain, next-patch ranges and an escaped GeckoLib substitution; 1.21.11 unchanged" \
-  || bad "26.x add-target: $(cat "$P26" 2>&1)"
-out="$(python3 tools/layer-ci.py plan --repo "$L26" 2>&1)"
-python3 -c 'import json,sys; p=json.load(sys.stdin); sys.exit(not (p["newest"] == "26.3" and p["newest_java"] == "25"))' <<<"$out" && ok "layer-ci plan: 26.3 is the newest target (after 1.21.11), on Java 25" || bad "layer-ci plan on 26.x: $out"
-out="$(python3 templates/fork-layer/tools/layer.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork layer: isolation rule (only .multiversion/ + the commented hook), target chains, jar comparison ignores the manifest, a direct jump (shared_chain) prepares the hop-by-hop chain's tree" \
-  || bad "layer.py self-check: $out"
-# R1/R4/R5 through the real command line (no Gradle, no model): a target is done only with a complete REVIEW.md, a new
-# target over an undone parent is refused, a moved authors' branch stops a run to the end (exit 19), and --chain sweeps a
-# range oldest first and stops at the first red target with its RESIDUE.md. Each on a layer fixture AND a single-version one.
-echo "fork-port: the done record (R1), the upstream freeze (R4), the fix-lowest sweep (R5)"
-RL="$T/r145"; mkdir -p "$RL"
-printf 'minecraft_version=1.21.1\nneo_version=21.1.228\n' > "$RL/gradle.properties"; echo 'plugins {}' > "$RL/build.gradle"
-python3 tools/make-fork-layer.py init --repo "$RL" >/dev/null 2>&1
-python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.3 >/dev/null 2>&1
-out="$(python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.4 2>&1)"; code=$?
-[ $code = 18 ] && grep -q 'REFUSED 1.21.4' <<<"$out" && [ ! -e "$RL/.multiversion/targets/1.21.4" ] \
-  && ok "add-target: a new target over an undone parent is refused (exit 18) and nothing is written" || bad "add-target over an undone parent: exit $code: $out"
-python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.4 --allow-undone-parent >/dev/null 2>&1
-grep -q '^allowed_undone_parent=1.21.3 ' "$RL/.multiversion/targets/1.21.4/target.properties" \
-  && ok "add-target --allow-undone-parent: added, and the escape is recorded in target.properties" || bad "--allow-undone-parent not recorded"
-python3 tools/make-fork-layer.py add-target --repo "$RL" --target 1.21.5 --allow-undone-parent >/dev/null 2>&1
-out="$(python3 tools/fork-port.py --repo "$RL" --target 1.21.3 --check-done 2>&1)"; code=$?
-[ $code = 18 ] && grep -q 'no green Gate C' <<<"$out" && grep -q 'no REVIEW.md' <<<"$out" \
-  && ok "fork-port --check-done: not done without Gate C and REVIEW.md (exit 18, each reason listed)" || bad "--check-done: exit $code: $out"
-# TEST-ITEMS.md: --check-done names the command that writes it alone; --write-test-items writes it and nothing else
-grep -q -- "--target 1.21.3 --write-test-items" <<<"$out" || bad "--check-done does not name --write-test-items: $out"
-before="$(cd "$RL" && find . -path ./.git -prune -o -type f -print | sort)"
-out="$(python3 tools/fork-port.py --repo "$RL" --target 1.21.3 --write-test-items 2>&1)"; code=$?
-after="$(cd "$RL" && find . -path ./.git -prune -o -type f -print | sort)"
-[ $code = 0 ] && [ "$(comm -13 <(echo "$before") <(echo "$after"))" = "./.multiversion/targets/1.21.3/TEST-ITEMS.md" ] \
-  && [ ! -e "$RL/build/.fork-port.lock" ] && ! grep -q 'TEST-ITEMS' <<<"$(python3 tools/fork-port.py --repo "$RL" --target 1.21.3 --check-done 2>&1)" \
-  && ok "fork-port --write-test-items: writes only TEST-ITEMS.md (no stage, no gate), releases the lock; --check-done no longer lists it" \
-  || bad "--write-test-items: exit $code: $out"
-# the sweep: --from-stage cost --gates none runs no Gradle; 1.21.3 is green-but-not-done (17), 1.21.4 has an open stub (red, 10)
-printf '[{"file": "x/A.java", "why": "emptied f()", "reviewed": null}]\n' > "$RL/.multiversion/targets/1.21.4/STUBS.json"
-out="$(python3 tools/fork-port.py --repo "$RL" --chain 1.21.3..1.21.5 --from-stage cost --gates none 2>&1)"; code=$?
-[ $code = 10 ] && grep -q '^| 1.21.3 | 17 | green, NOT done' <<<"$out" && grep -q '^| 1.21.4 | 10 | RED at cost.*| .multiversion/targets/1.21.4/RESIDUE.md |$' <<<"$out" \
-  && grep -q '^| 1.21.5 | - | not run' <<<"$out" && grep -q -- '--chain 1.21.4..1.21.5' <<<"$out" && [ ! -e "$RL/build/.fork-port.lock" ] \
-  && ok "fork-port --chain: oldest first, stops at the first red target naming its RESIDUE.md, the table and the command to sweep on" \
-  || bad "fork-port --chain: exit $code: $out"
-# the freeze: the authors push after the buildout started -> a run to the end stops with exit 19 naming keep-current
-UP="$T/r145-authors"; mkdir -p "$UP"; git -C "$UP" init -q -b main; git -C "$UP" config user.email a@b; git -C "$UP" config user.name a
-echo a > "$UP/A.java"; git -C "$UP" add -A; git -C "$UP" commit -qm one
-git clone -q -o upstream "$UP" "$T/r145-fork"; RF="$T/r145-fork"; git -C "$RF" config user.email a@b; git -C "$RF" config user.name a
-cp "$RL/gradle.properties" "$RL/build.gradle" "$RF/"
-python3 tools/make-fork-layer.py init --repo "$RF" --upstream upstream/main >/dev/null 2>&1
-grep -q "^upstream_commit=$(git -C "$UP" rev-parse HEAD)$" "$RF/.multiversion/base.properties" \
-  && ok "make-fork-layer init --upstream records the authors' commit the buildout starts from" || bad "init --upstream: $(cat "$RF/.multiversion/base.properties")"
-mkdir -p "$RF/.multiversion/targets/1.21.3"; git -C "$RF" add -A; git -C "$RF" commit -qm layer
-echo b > "$UP/A.java"; git -C "$UP" commit -qam two
-out="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --from-stage cost --gates none 2>&1)"; code=$?
-[ $code = 19 ] && grep -q 'upstream moved' <<<"$out" && grep -q 'port-sync.py' <<<"$out" \
-  && ok "fork-port: the authors' branch moved since the freeze -> exit 19, naming the keep-current command" || bad "upstream drift: exit $code: $out"
-out="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --from-stage cost --gates none --accept-upstream-drift 2>&1)"; code=$?
-[ $code = 17 ] && grep -q 'accepted' "$RF/.multiversion/DRIFT.md" \
-  && ok "fork-port --accept-upstream-drift continues (here to exit 17) and records the drift in DRIFT.md" || bad "--accept-upstream-drift: exit $code: $out"
-# done includes the base behaviour inventory (layer-inventory.py): a layer without INVENTORY.json, then one whose target
-# has no prepared tree yet, is not done -- each named in --check-done's reasons
-out="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --check-done 2>&1)"; code=$?
-echo x=1 > "$RF/.multiversion/targets/1.21.3/target.properties"
-mkdir -p "$RF/src/main/java/com/example/mod"; echo 'class A {}' > "$RF/src/main/java/com/example/mod/A.java"
-python3 tools/layer-inventory.py build --repo "$RF" >/dev/null 2>&1
-out2="$(python3 tools/fork-port.py --repo "$RF" --target 1.21.3 --check-done 2>&1)"; code2=$?
-[ $code = 18 ] && grep -q 'behaviour inventory: no .multiversion/INVENTORY.json: run tools/layer-inventory.py build' <<<"$out" \
-  && [ $code2 = 18 ] && grep -q 'behaviour inventory: no prepared tree build/mc1.21.3/mv/java' <<<"$out2" \
-  && ok "fork-port --check-done on a layer: the behaviour inventory is on the done list (no INVENTORY.json, then no prepared tree: exit 18, named)" \
-  || bad "inventory in --check-done: $code: $out / $code2: $out2"
-# single-version: no .multiversion/ -- fork-port stops at setup exactly as before; --chain and --check-done are bad input
-SV="$T/r145-single"; mkdir -p "$SV"; cp "$RL/gradle.properties" "$RL/build.gradle" "$SV/"
+out="$(python3 tools/fork-kind.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "fork-kind: one port branch (and a single-branch clone of the head) is single-version; a neoforge-<v> branch with .port/<v>/branch.properties (local or origin's) makes version branches; a legacy layer branch is listed and ignored; a .multiversion/ holding only shipped-jar.txt is not a layer; the layer at HEAD is refused naming the last supporting commit" \
+  || bad "fork-kind self-check: $out"
+out="$(python3 tools/checkout-lock.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "checkout-lock: one run per checkout (a second refused naming the holder), the holder's child let through, a dead or unreadable lock taken over" \
+  || bad "checkout-lock self-check: $out"
+# the removed layer: a checkout with .multiversion/base.properties (or targets/) at HEAD is refused by every tool that
+# takes a fork checkout, exit 2, naming the last commit that supports the layer and the migration there; nothing written
+LAST="$(python3 -c 'import importlib.util as u; s=u.spec_from_file_location("fk","tools/fork-kind.py"); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.LAST_LAYER_COMMIT[:12])')"
+LR="$T/layer-refused"; mkdir -p "$LR/.multiversion/targets/1.21.4"; git -C "$LR" init -q -b neoforge-1.21.1
+printf 'minecraft_version=1.21.1\nmod_id=examplemod\n' > "$LR/gradle.properties"; echo 'plugins {}' > "$LR/build.gradle"
+printf 'minecraft_version=1.21.1\n' > "$LR/.multiversion/base.properties"; echo x=1 > "$LR/.multiversion/targets/1.21.4/target.properties"
+before="$(cd "$LR" && find . -path ./.git -prune -o -type f -print | sort)"
+git -C "$LR" remote add origin https://github.com/owner/examplemod
+printf '{"forks": [{"repo": "owner/examplemod", "head": "neoforge-1.21.1"}]}\n' > "$T/lr-config.json"; echo '{}' > "$T/lr-frozen.json"
+# every user-facing tool that takes a fork checkout (a --repo, or a --fork ...=DIR)
+refused=""; n=0
+while read -r cmd; do
+  n=$((n+1)); out="$(python3 tools/$cmd 2>&1 </dev/null)"; code=$?
+  { [ $code = 2 ] && grep -q "has the .multiversion/ layer at HEAD" <<<"$out" && grep -q "$LAST" <<<"$out" && grep -q 'fork-branches.py migrate' <<<"$out"; } \
+    || refused="$refused [${cmd%% *}: exit $code: ${out:0:200}]"
+done <<LAYERTOOLS
+fork-kind.py detect --repo $LR
+fork-port.py --repo $LR --target 1.21.4
+fork-branches.py ci-check --repo $LR
+ci-gates.py --repo $LR --modid examplemod
+layer-deps.py resolve --repo $LR --target 1.21.4
+layer-inventory.py build --repo $LR
+port-ci.py --repo $LR --modid examplemod
+port-publish.py publish --repo $LR --tag t
+port-sync.py --repo $LR --port neoforge-1.21.1 --upstream upstream/main
+port-upstream.py --repo $LR --modid examplemod
+port-offer.py --repo $LR
+port-derive.py --repo $LR --branch neoforge-1.21.1 --base origin/main
+port-provenance.py --repo $LR --base HEAD
+port-manifest.py refresh --repo $LR
+review-metrics.py --repo $LR --base HEAD
+manual-tests.py --repo $LR
+port-ci-kit.py trace --repo $LR --modid examplemod
+audit-wiring.py --repo $LR --against HEAD
+shipped-gate.py --jar $T/none.jar --repo $LR
+known-issues.py list --repo $LR
+weekly-plan.py install --repo $LR --fork owner/examplemod@neoforge-1.21.1=https://example.invalid/a#main --plan-owner someone
+round-preflight.py --fork owner/examplemod=$LR
+round.py init --frozen $T/lr-frozen.json --fork owner/examplemod=$LR --config $T/lr-config.json --round-dir $T/lr-round
+port-cost.py round-table --since 2026-01-01 --fork a=$LR
+LAYERTOOLS
+after="$(cd "$LR" && find . -path ./.git -prune -o -type f -print | sort)"
+[ -z "$refused" ] && [ "$before" = "$after" ] \
+  && [ "$n" = 24 ] \
+  && ok "a .multiversion/ layer at HEAD is refused (exit 2) by all $n fork-taking tools (fork-kind, fork-port, fork-branches, ci-gates, layer-deps, layer-inventory, port-ci, port-publish, port-sync, port-upstream, port-offer, port-derive, port-provenance, port-manifest, review-metrics, manual-tests, port-ci-kit trace, audit-wiring, shipped-gate, known-issues, weekly-plan install, round-preflight, round init, port-cost round-table), naming commit $LAST and the migration; nothing written" \
+  || bad "layer refusal:$refused $( [ "$before" = "$after" ] || echo 'files written')"
+# a migrated fork (version branches exist) checked out on its legacy layer branch: refused (exit 2), told to check out
+# its head branch -- no migration, no commit named
+LV="$T/legacy-checkout"; mkdir -p "$LV"; git -C "$LV" init -q -b neoforge-1.21.1; git -C "$LV" config user.email a@b; git -C "$LV" config user.name a
+printf 'minecraft_version=1.21.1\n' > "$LV/gradle.properties"; git -C "$LV" add -A; git -C "$LV" commit -qm base
+git -C "$LV" checkout -qb neoforge-1.21.4; mkdir -p "$LV/.port/1.21.4"
+printf 'parent=neoforge-1.21.1\nport_branch=neoforge-1.21.1\n' > "$LV/.port/1.21.4/branch.properties"; git -C "$LV" add -A; git -C "$LV" commit -qm 1.21.4
+git -C "$LV" checkout -q neoforge-1.21.1; git -C "$LV" checkout -qb neoforge-1.21.x; mkdir -p "$LV/.multiversion/targets/1.21.4"
+printf 'minecraft_version=1.21.1\n' > "$LV/.multiversion/base.properties"; echo x=1 > "$LV/.multiversion/targets/1.21.4/target.properties"
+git -C "$LV" add -A; git -C "$LV" commit -qm layer
+lvbad=""
+for cmd in "fork-kind.py detect --repo $LV" "fork-port.py --repo $LV --target 1.21.4" "port-sync.py --repo $LV --port neoforge-1.21.1 --upstream upstream/main"; do
+  out="$(python3 tools/$cmd 2>&1)"; code=$?
+  { [ $code = 2 ] && grep -qF "is a version-branch fork checked out on a legacy layer branch (neoforge-1.21.x); check out its head branch (neoforge-1.21.1)" <<<"$out" \
+      && ! grep -q 'migrate' <<<"$out" && ! grep -q "$LAST" <<<"$out"; } || lvbad="$lvbad [${cmd%% *}: exit $code: ${out:0:200}]"
+done
+git -C "$LV" checkout -q neoforge-1.21.1
+out="$(python3 tools/fork-kind.py detect --repo "$LV" 2>&1)"; code=$?
+[ -z "$lvbad" ] && [ $code = 0 ] && grep -q '^kind=version-branches versions=1.21.4 legacy_layer=neoforge-1.21.x$' <<<"$out" \
+  && ok "a migrated fork checked out on its legacy layer branch is refused (exit 2) and told to check out its head branch (no migration named); on the head it is a version-branch fork" \
+  || bad "legacy layer checkout:$lvbad detect on the head: exit $code: $out"
+# single-version: no version branch -- fork-port stops before any stage, having written nothing; --chain, --check-done
+# and --write-test-items stop the same way (exit 2)
+SV="$T/r145-single"; mkdir -p "$SV"; git -C "$SV" init -q -b neoforge-1.21.1
+printf 'minecraft_version=1.21.1\nneo_version=21.1.228\n' > "$SV/gradle.properties"; echo 'plugins {}' > "$SV/build.gradle"
 out="$(python3 tools/fork-port.py --repo "$SV" --target 1.21.4 2>&1)"; code=$?
-[ $code = 2 ] && grep -q 'no .multiversion/ in the fork' <<<"$out" && ! grep -qi 'upstream\|review\|NOT done' <<<"$out" && [ ! -e "$SV/.multiversion" ] \
-  && ok "fork-port on a single-version fork: stops at setup (exit 2) as before; no freeze, no review, nothing written" || bad "single-version fork-port: exit $code: $out"
+[ $code = 2 ] && grep -q 'single-version fork' <<<"$out" && ! grep -qi 'upstream\|review\|NOT done' <<<"$out" && [ ! -e "$SV/.multiversion" ] && [ ! -e "$SV/.port" ] \
+  && ok "fork-port on a single-version fork: stops before any stage (exit 2); no freeze, no review, nothing written" || bad "single-version fork-port: exit $code: $out"
 python3 tools/fork-port.py --repo "$SV" --chain 1.21.3..1.21.4 >/dev/null 2>&1; c1=$?
 python3 tools/fork-port.py --repo "$SV" --target 1.21.4 --check-done >/dev/null 2>&1; c2=$?
 python3 tools/fork-port.py --repo "$SV" --target 1.21.4 --write-test-items >/dev/null 2>&1; c3=$?
-[ $c1 = 2 ] && [ $c2 = 2 ] && [ $c3 = 2 ] && [ ! -e "$SV/.multiversion" ] && [ -z "$(find "$SV" -name TEST-ITEMS.md -o -name .fork-port.lock)" ] \
-  && ok "single-version: --chain, --check-done and --write-test-items are bad input (exit 2), nothing written" || bad "single-version --chain $c1 / --check-done $c2 / --write-test-items $c3"
+[ $c1 = 2 ] && [ $c2 = 2 ] && [ $c3 = 2 ] && [ ! -e "$SV/.multiversion" ] && [ ! -e "$SV/.port" ] && [ -z "$(find "$SV" -name TEST-ITEMS.md -o -name .fork-port.lock)" ] \
+  && ok "single-version: --chain, --check-done and --write-test-items stop the same way (exit 2), nothing written" || bad "single-version --chain $c1 / --check-done $c2 / --write-test-items $c3"
 out="$(python3 tools/fork-port.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, layer.py patch, every --from-stage resume re-measures, one run per checkout, direct-jump shared_chain agrees with layer.py, a red full gate run is written to GATES-RED.md and keeps GATES.md byte for byte (not done, auto runs full, a green run deletes it), a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command, done needs REVIEW.md (for the commit reviewed), TEST-ITEMS.md and every base behaviour inventory item accounted for (layer-inventory.py; none on single-version), setup builds INVENTORY.json once when missing (layer only), a library target not done stops setup with exit 18 and --allow-undone-library is passed through, recorded and resumed, a new target over an undone parent is refused, the upstream freeze stops a run when the authors moved, --chain sweeps up and stops at the first red -- each also on a single-version fixture" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves table, residue report, STOP block, every --from-stage resume re-measures, one run per checkout (tools/checkout-lock.py), a red full gate run is written to GATES-RED.md and keeps GATES.md byte for byte (not done, auto runs full, a green run deletes it), a killed or memory-refused Gate C is environmental (RESIDUE.md: re-run when memory is free, no fixer), --gates none and an open stub after --from-stage cost are not done, --port-release reaches layer-deps and the resume command, a library version not done stops setup with exit 18 and --allow-undone-library is passed through, recorded and resumed, the upstream freeze in .port/<t>/branch.properties stops a run when the authors moved (exit 19; --accept-upstream-drift records DRIFT.md), and on a single-version fixture fork-port stops at once and writes nothing" \
   || bad "fork-port self-check: $out"
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
@@ -635,7 +623,7 @@ PY
 python3 - <<'PY' && ok "keep-current, version branches: keep-current/<date>-<v> is pushed only after the lower version's PR merged; the 1.21.x -> 26.x rename conflicts resolved by hand inside the cascade" || bad "keep-current no longer says a version's work branch waits for the lower merge, or how the 26.x boundary is crossed"
 import pathlib, sys
 s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf-8")
-v = s[s.index("## A fork with version branches"):s.index("## A fork with the layer")]
+v = s[s.index("## A fork with version branches"):s.index("## The weekly cycle")]
 need = ("is pushed only after the PR of the version below it is\n   merged", "never stacked on an unmerged lower PR",
         "resolve them\n   by hand inside the cascade", "26.1.2..<newest>")
 need += ("With the **plain cascade**", "answered through step 2's decisions")
@@ -654,7 +642,7 @@ import pathlib, sys
 s = pathlib.Path(".claude/skills/keep-current/SKILL.md").read_text(encoding="utf-8")
 flat = lambda x: " ".join(x.split())
 r = flat(s[s.index("## The weekly round"):s.index("## README Ports block")])
-v = flat(s[s.index("## A fork with version branches"):s.index("## A fork with the layer")])
+v = flat(s[s.index("## A fork with version branches"):s.index("## The weekly cycle")])
 run6 = flat(s[s.index("6. **Push the work branch and open a PR"):s.index("7. **Dependents next.**")])
 need_r = ("fresh subagents that return a short summary -- at most ~40 lines", "Wait in ONE blocking command",
           "`gh run watch <run id> --exit-status`", "round/NOTES.md", "past ~200k tokens",
@@ -715,16 +703,15 @@ PY
 out="$(python3 tools/propose-learnings.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "propose-learnings --from-plan: the newest comment's Lessons block becomes a checklist (evidence links, catalogue hits by the symptom, a row naming a listed mod flagged); no block exits 1; --out refused inside the checkout; CATALOG.md untouched" \
   || bad "propose-learnings self-check: $(tail -5 <<<"$out")"
-# ---- stacked version branches (tools/fork-branches.py, the default for a multi-version fork): migrating a layer fork, the
-# branch-mode done check through fork-port.py's own CLI, the cascade, the library's release-side done check -- on a layer
-# fixture; a single-version fork is untouched (its own checks above and below run unchanged)
-echo "fork-branches: stacked version branches (migrate, done, cascade, library release, CLI)"
+# ---- stacked version branches (tools/fork-branches.py, the multi-version fork): the branch-mode done check through
+# fork-port.py's own CLI, the cascade, the library's release-side done check -- on the frozen version-branch fixture
+# (tools/fixtures/version-branches.fi); a single-version fork is untouched (its own checks above and below run unchanged)
+echo "fork-branches: stacked version branches (done, cascade, library release, CLI)"
 export FB_FIXTURE_CACHE="$T/fb-fixtures"    # the fork-branches fixtures, built once for every block below
-# On Windows (Git Bash: msys/cygwin) only the platform leg: the line-ending cases and the port-ahead migration that
-# failed natively there. The full default self-check -- every named case -- runs on Linux on every PR.
+# On Windows (Git Bash: msys/cygwin) only the platform leg: the line-ending cases that failed natively there. The full default self-check -- every named case -- runs on Linux on every PR.
 fb_mode=""; case "${OSTYPE:-}" in msys*|cygwin*|win*) fb_mode="--platform" ;; esac
 out="$(python3 tools/fork-branches.py --self-check $fb_mode 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-branches self-check${fb_mode:+ $fb_mode, the OS leg -- Linux runs all of}: a 3-target layer fixture migrates to byte-identical branches (every source set, resources, mixin arrays, toml ranges, versions), each done as its layer target was; the checkout untouched; without MIGRATED.json the layer records do not count; an edit stales gates and review; cascade carries the authors' change through each version's rows and a lower fix upward (never the head branch's known-issues ledger), and stops on a conflict; add-target refused over an undone parent; the library rule; a single-version fork refused, nothing written; cascade --plan on a throwaway clone (one decision per file and hunk across versions, mechanical ones merged, a default logged, an escalated one in the one issue), --apply holding only the decision files open while the versions above go on, --apply-decisions clearing them everywhere; port_taken re-offers a change no run took; ci-check names a head branch whose workflow pins an older kit or ignores no round records and ci --head regenerates it from itself (only the kit moved), while a single-version fork gets no head line and ci --head refuses it, writing nothing; sync-shared --check reads only (no ref moved) and names what a sync would change, a hand-edited table section to reconcile, adopt candidates (the fork's own helper copy, a duplicated row) and MV-AHEAD-OF-TEMPLATE files, while a single-version fork reports nothing; sync-shared leaves an edited section alone (and a differing one when the library's history is unknown), leaves a listed helper reverted to an older library text alone, and updates an unlisted stand-in of an old library text; a cascade keeps the upper version's installed helper copy" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-branches self-check${fb_mode:+ $fb_mode, the OS leg -- Linux runs all of}: on the frozen 3-version fixture each version branch is done from its migrated records (MIGRATED.json; without it the legacy layer records do not count); a layer at HEAD is refused; an edit stales gates and review; cascade carries the authors' change through each version's rows and a lower fix upward (never the head branch's known-issues ledger), and stops on a conflict; add-target refused over an undone parent; the library rule; a single-version fork refused, nothing written; cascade --plan on a throwaway clone (one decision per file and hunk across versions, mechanical ones merged, a default logged, an escalated one in the one issue), --apply holding only the decision files open while the versions above go on, --apply-decisions clearing them everywhere; port_taken re-offers a change no run took; ci-check names a head branch whose workflow pins an older kit or ignores no round records and ci --head regenerates it from itself (only the kit moved), while a single-version fork gets no head line and ci --head refuses it, writing nothing; sync-shared --check reads only (no ref moved) and names what a sync would change, a hand-edited table section to reconcile, adopt candidates (the fork's own helper copy, a duplicated row) and MV-AHEAD-OF-TEMPLATE files, while a single-version fork reports nothing; sync-shared leaves an edited section alone (and a differing one when the library's history is unknown), leaves a listed helper reverted to an older library text alone, and updates an unlisted stand-in of an old library text; a cascade keeps the upper version's installed helper copy" \
   || bad "fork-branches self-check: $(tail -5 <<<"$out")"
 out="$(python3 - "$T/fb" <<'PY' 2>&1
 import importlib.util, json, os, pathlib, subprocess, sys
@@ -789,7 +776,7 @@ PY
 )"
 [ "$out" = "OK" ] && ok "fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write-test-items on it, an edit makes it not done (gates stale, a review row), --chain is the cascade and stops at a conflict; layer-deps' release-side done check on a tag agrees with the checkout's (its clone under \$MMVU_CACHE_DIR, re-pointed when the URL changes)" \
   || bad "fork-port / layer-deps on version branches: $out"
-echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, layer mode"
+echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, --cp-file/--tree (fork) mode"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
   E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \
     "$E/src/net/neoforged/neoforge/client/event" "$E/tree/a/b" "$E/classes"
@@ -836,214 +823,43 @@ out="$(python3 tools/round-preflight.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "round-preflight: a missing fork clone says to attach it to the scheduled task; the GitHub way named (GITHUB_TOKEN wins over gh); a JDK per version (25 for 26.x); libEGL.so.1 for a 26.3 client and XDG_RUNTIME_DIR, skipped with --no-client or off Linux; a version-branch shallow clone's 26.x branches read from origin by name (a single-version fork's versions and verdict as before, an authors' 26.x branch on its origin not counted); origin/HEAD a warning and the remote an upstream freeze names (exit 19), each with its fix" \
   || bad "round-preflight self-check: $out"
 out="$(python3 tools/shipped-gate.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick (JAVA_HOME first, then JAVA_HOME_<n>, /usr/lib/jvm, /opt, the Gradle toolchain downloads; java.exe too) and crash-cause self-check; the expectations file (single-version with none: none, as before; version branch .port/<mc>/shipped-expect-cf.txt for _cf, the unsuffixed one for _mr; layer .multiversion/), a variant missing its expected line fails; boot() on a stand-in server, no Minecraft: clean passes, a crash after Done fails, an exit before stop fails" || bad "shipped-gate self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "shipped-gate: expectation parsing, log matching, JDK pick (JAVA_HOME first, then JAVA_HOME_<n>, /usr/lib/jvm, /opt, the Gradle toolchain downloads; java.exe too) and crash-cause self-check; the expectations file (single-version with none: none, as before; version branch .port/<mc>/shipped-expect-cf.txt for _cf, the unsuffixed one for _mr), a variant missing its expected line fails; boot() on a stand-in server, no Minecraft: clean passes, a crash after Done fails, an exit before stop fails" || bad "shipped-gate self-check: $out"
 python3 tools/shipped-gate.py --jar "$T/nope.jar" >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a jar that does not exist exits 2" || bad "shipped-gate missing-jar exit"
 printf 'x' > "$T/notjar.jar"; python3 tools/shipped-gate.py --jar "$T/notjar.jar" --neo 21.1.228 >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a file that is not a jar exits 2" || bad "shipped-gate non-jar exit"
 python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1],'w').writestr('a','b')" "$T/ok.jar"
 python3 tools/shipped-gate.py --jar "$T/ok.jar" --neo 21.1.228 --expect-log 'bad/path:x' >/dev/null 2>&1; [ $? = 2 ] && ok "shipped-gate: a malformed --expect-log exits 2 before anything is downloaded" || bad "shipped-gate bad expectation exit"
-out="$(python3 tools/layer-ci.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "layer-ci: targets are VERSION-sorted (1.21.11 is newer than 1.21.8), java follows inherits, hook stripping" || bad "layer-ci self-check: $out"
-mkdir -p "$T/lay/.multiversion/targets"/{1.21.8,1.21.10,1.21.11,1.21.3}; echo x=1 > "$T/lay/.multiversion/base.properties"
-for t in 1.21.8 1.21.10 1.21.11 1.21.3; do echo "java_version=21" > "$T/lay/.multiversion/targets/$t/target.properties"; done
-out="$(python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho" 2>&1)"
-grep -q '^newest=1.21.11$' "$T/gho" && grep -q '"1.21.8"' <<<"$out" && ! grep -q '"t":"1.21.11"' "$T/gho" \
-  && ok "layer-ci plan: newest target is 1.21.11 (not the lexically last 1.21.8) and it is not in the compile matrix" || bad "layer-ci plan: $out $(cat "$T/gho")"
-out="$(python3 tools/layer-ci.py plan --repo "$T/nolayer" 2>&1)"
-grep -q '"layer": "false"' <<<"$out" && ok "layer-ci plan: a fork without .multiversion/ plans no layer job" || bad "layer-ci plan (no layer): $out"
-# CI policy: full_gates is opt-in (default none), a typo is an error, and a single-version fork never sees it
-out="$(python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho0" 2>&1)"
-grep -q '^has_full=false$' "$T/gho0" && ok "layer-ci plan: no ci.properties means no extra full-gate target (the default)" || bad "layer-ci plan default has_full: $out"
-printf 'full_gates=1.21.8\n' > "$T/lay/.multiversion/ci.properties"
-python3 tools/layer-ci.py plan --repo "$T/lay" --github-output "$T/gho1" >/dev/null 2>&1
-grep -q '^has_full=true$' "$T/gho1" && grep -q '^full_matrix=.*"t":"1.21.8"' "$T/gho1" && ! grep -q '"t":"1.21.11"' <(grep '^full_matrix=' "$T/gho1") \
-  && ok "layer-ci plan: full_gates=1.21.8 gets the released middle target a full-gate job" || bad "layer-ci plan full_gates: $(cat "$T/gho1")"
-printf 'full_gates=1.21.9\n' > "$T/lay/.multiversion/ci.properties"
-python3 tools/layer-ci.py plan --repo "$T/lay" >/dev/null 2>&1; [ $? != 0 ] && ok "layer-ci plan: a full_gates typo fails the plan instead of meaning 'no gates'" || bad "full_gates typo accepted"
-rm "$T/lay/.multiversion/ci.properties"
-mkdir -p "$T/single"; printf 'full_gates=1.21.4\n' > "$T/single/ci.properties"
-python3 tools/layer-ci.py plan --repo "$T/single" --github-output "$T/gho2" >/dev/null 2>&1
-grep -q '^layer=false$' "$T/gho2" && grep -q '^has_full=false$' "$T/gho2" && ok "layer-ci plan: a single-version fork (no .multiversion/) plans nothing, whatever files it has" || bad "single-version plan: $(cat "$T/gho2")"
-# one run per checkout: a live holder refuses a second layer run (exit 14); a single-version run takes no lock at all
-mkdir -p "$T/lk/build" "$T/lk/.multiversion/targets/1.21.4" "$T/lk/.multiversion/tools"; : > "$T/lk/.multiversion/tools/layer.py"
+# one run per checkout (tools/checkout-lock.py): a live holder refuses a second run on a version branch's checkout
+# (exit 14); a single-version run takes no lock at all
+LK="$T/lk"; mkdir -p "$LK"; git -C "$LK" init -q -b neoforge-1.21.1; git -C "$LK" config user.email a@b; git -C "$LK" config user.name a
+printf 'minecraft_version=1.21.1\n' > "$LK/gradle.properties"; git -C "$LK" add -A; git -C "$LK" commit -qm base
+git -C "$LK" checkout -qb neoforge-1.21.4; mkdir -p "$LK/.port/1.21.4" "$LK/build"
+printf 'parent=neoforge-1.21.1\n' > "$LK/.port/1.21.4/branch.properties"; printf 'minecraft_version=1.21.4\n' > "$LK/gradle.properties"
+git -C "$LK" add -A; git -C "$LK" commit -qm 1.21.4
 # the holder is a Python process writing its OWN pid: under Git Bash on Windows `$!` is an MSYS pid, not the native pid
 # the lock code checks, so a shell-written pid reads as dead there
-python3 -c 'import json,os,sys,time; open(sys.argv[1],"w",encoding="utf-8").write(json.dumps({"pid": os.getpid(), "tool": "fork-port.py", "target": "1.21.3", "started": "2026-01-01T00:00:00Z"})); time.sleep(30)' "$T/lk/build/.fork-port.lock" & HOLDJOB=$!
-for _ in $(seq 50); do [ -s "$T/lk/build/.fork-port.lock" ] && break; sleep 0.1; done
-HOLD="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["pid"])' "$T/lk/build/.fork-port.lock")"
-out="$(python3 tools/ci-gates.py --repo "$T/lk" --modid m --mc 1.21.4 --work-dir "$T/lkw" 2>&1)"; code=$?
-[ $code = 14 ] && grep -q "$HOLD" <<<"$out" && ok "ci-gates --mc: a second run on a busy checkout is refused (exit 14) naming the holder" || bad "ci-gates lock exit $code: $out"
-out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
+python3 -c 'import json,os,sys,time; open(sys.argv[1],"w",encoding="utf-8").write(json.dumps({"pid": os.getpid(), "tool": "fork-port.py", "target": "1.21.3", "started": "2026-01-01T00:00:00Z"})); time.sleep(30)' "$LK/build/.fork-port.lock" & HOLDJOB=$!
+for _ in $(seq 50); do [ -s "$LK/build/.fork-port.lock" ] && break; sleep 0.1; done
+HOLD="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["pid"])' "$LK/build/.fork-port.lock")"
+out="$(python3 tools/ci-gates.py --repo "$LK" --modid m --mc 1.21.4 --work-dir "$T/lkw" 2>&1)"; code=$?
+[ $code = 14 ] && grep -q "$HOLD" <<<"$out" && ok "ci-gates --mc on a version branch: a second run on a busy checkout is refused (exit 14) naming the holder" || bad "ci-gates lock exit $code: $out"
+out="$(python3 tools/fork-port.py --repo "$LK" --target 1.21.4 2>&1)"; code=$?
 [ $code = 14 ] && ok "fork-port: a second run on a busy checkout is refused (exit 14)" || bad "fork-port lock exit $code: $out"
-python3 tools/ci-gates.py --repo "$T/lk" --modid m --work-dir "$T/lkw2" >/dev/null 2>&1; code=$?
-[ $code != 14 ] && grep -q "\"pid\": $HOLD" "$T/lk/build/.fork-port.lock" && ok "ci-gates without --mc (a single-version fork) ignores the lock entirely" || bad "single-version ci-gates touched the lock (exit $code)"
+SVL="$T/lk-single"; mkdir -p "$SVL/build"; cp "$LK/build/.fork-port.lock" "$SVL/build/"
+python3 tools/ci-gates.py --repo "$SVL" --modid m --work-dir "$T/lkw2" >/dev/null 2>&1; code=$?
+[ $code != 14 ] && grep -q "\"pid\": $HOLD" "$SVL/build/.fork-port.lock" && ok "ci-gates without --mc (a single-version fork) ignores the lock entirely" || bad "single-version ci-gates touched the lock (exit $code)"
 kill $HOLDJOB 2>/dev/null; wait $HOLDJOB 2>/dev/null
-out="$(python3 tools/fork-port.py --repo "$T/lk" --target 1.21.4 2>&1)"; code=$?
-[ $code = 10 ] || [ $code = 2 ] && [ ! -e "$T/lk/build/.fork-port.lock" ] && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
+# the holder is gone: its lock is stale -- a real fork-port run on the version branch takes it over and releases it when
+# it ends (it stops at setup here: no Gradle project, exit 10 or 2)
+out="$(python3 tools/fork-port.py --repo "$LK" --target 1.21.4 --gates none 2>&1)"; code=$?
+{ [ $code = 10 ] || [ $code = 2 ]; } && ! grep -q 'another fork-port.py is using this checkout' <<<"$out" && [ ! -e "$LK/build/.fork-port.lock" ] \
+  && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
 
-out="$(python3 tools/layer-sync.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "layer-sync: classification (untouched / touch-up / rework), overlay shadowing, table, stop block, overlay helpers (names-only, three-way merge, duplicate member, RESIDUE section)" || bad "layer-sync self-check: $out"
-out="$(python3 tools/test-layer-sync.py 2>&1)"
-grep -q 'test-layer-sync: OK' <<<"$out" && ok "keep-current on a layer fork: merge commit (no force), overlays re-merged three ways (clean rewrite, inherited, retired, conflict + duplicate member left with hunks in RESIDUE, hand resolution kept), overlay budget, per-target class + table, rework stops with RESIDUE (exit 10), single-version fork untouched, version branches win over a legacy layer branch in detect" || bad "test-layer-sync: $out"
 out="$(python3 tools/test-port-publish.py 2>&1)"
-grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; layer forks publish one file per green target, refuse non-green / stale / unpublished-dependency targets; --platform mr|cf, and a cf-only S1 in the ledger publishes to Modrinth and holds CurseForge back by name (a version branch reads the head branch's ledger; an unreadable ledger holds both)" || bad "test-port-publish: $out"
+grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; --platform mr|cf, and a cf-only S1 in the ledger publishes to Modrinth and holds CurseForge back by name (a version branch reads the head branch's ledger; an unreadable ledger holds both)" || bad "test-port-publish: $out"
 out="$(python3 tools/fix-ledger.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fix-ledger: a ledger without a layer section renders as before; the layer table renders and validates" || bad "fix-ledger self-check: $out"
-if command -v gradle >/dev/null 2>&1; then
-  G="$T/gj"; mkdir -p "$G"
-  printf "rootProject.name = 'scratch'\n" > "$G/settings.gradle"
-  cat > "$G/build.gradle" <<'GR'
-plugins { id 'java' }
-version = '1.0'
-tasks.register('embedded', Jar) { archiveFileName.set('helper.jar'); destinationDirectory = layout.buildDirectory.dir('embedded') }
-tasks.register('mrJar', Jar) { archiveFileName.set("scratch-${project.version}_mr.jar") }
-tasks.jar { archiveFileName.set("scratch-${project.version}_base.jar"); destinationDirectory = layout.buildDirectory.dir('intermediates') }
-tasks.register('plain', Jar) { }
-def mvTarget = project.findProperty('mc')?.toString()
-if (mvTarget == null) return
-layout.buildDirectory = file("build/mc${mvTarget}")
-GR
-  sed -n '/BEGIN-JAR-NAMES/,/END-JAR-NAMES/p' templates/fork-layer/layer.gradle >> "$G/build.gradle"
-  (cd "$G" && gradle -q --offline mrJar jar plain embedded >/dev/null 2>&1; gradle -q --offline mrJar jar plain embedded -Pmc=1.21.4 >/dev/null 2>&1)
-  base="$(cd "$G/build" && find . -name '*.jar' -not -path './mc*' | sort | tr '\n' ' ')"
-  mc="$(cd "$G/build/mc1.21.4" && find . -name '*.jar' | sort | tr '\n' ' ')"
-  [ "$base" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0.jar ./libs/scratch-1.0_mr.jar " ] \
-    && [ "$mc" = "./embedded/helper.jar ./intermediates/scratch-1.0_base.jar ./libs/scratch-1.0-mc1.21.4.jar ./libs/scratch-1.0_mr-mc1.21.4.jar " ] \
-    && ok "layer.gradle: with -Pmc the jars in libs are named -mc<target>; without it, and for embedded/intermediate jars, names are unchanged" \
-    || bad "layer.gradle jar names: base=[$base] mc=[$mc]"
-  # an exclude. key with no ':' (unescaped, so java.util.Properties cut it there) is refused, never a whole-group exclude
-  GE="$T/ge"; mkdir -p "$GE"; printf "rootProject.name = 'scratch'\n" > "$GE/settings.gradle"
-  { printf "plugins { id 'java' }\ndef mvProps = new Properties()\nfile('t.properties').withInputStream { mvProps.load(it) }\n"
-    sed -n '/BEGIN-EXCLUDES/,/END-EXCLUDES/p' templates/fork-layer/layer.gradle; } > "$GE/build.gradle"
-  printf 'exclude.com.example\\:lib=no build\n' > "$GE/t.properties"
-  (cd "$GE" && gradle -q --offline help >/dev/null 2>&1); good=$?
-  printf 'exclude.com.example:lib=no build\n' > "$GE/t.properties"
-  out="$(cd "$GE" && gradle -q --offline help 2>&1)"; badkey=$?
-  [ $good = 0 ] && [ $badkey != 0 ] && grep -q 'escape the' <<<"$out" \
-    && ok "layer.gradle: an escaped exclude.<group:module> applies; an unescaped one (no ':' left in the key) stops the build" \
-    || bad "layer.gradle exclude keys: escaped exit $good, unescaped exit $badkey: $out"
-  # issue #114: each layer target's client gets its own game directory; without -Pmc the authors' run/ is unchanged
-  # (a stand-in for ModDevGradle's neoForge.runs: no plugin download, no Minecraft)
-  GR="$T/gr"; mkdir -p "$GR"; printf "rootProject.name = 'scratch'\n" > "$GR/settings.gradle"
-  { cat <<'GR'
-class FakeRun { String name; def gameDirectory; FakeRun(String n) { name = n } }
-def runs = project.container(FakeRun) { n -> new FakeRun(n) }
-extensions.add('neoForge', [runs: runs])
-neoForge.runs.create('client') { gameDirectory = file('run') }
-neoForge.runs.create('gameTestServer') { gameDirectory = file('harness/run') }
-tasks.register('printRunDirs') { doLast { neoForge.runs.each { println "RUNDIR ${it.name}=${projectDir.toPath().relativize(file(it.gameDirectory).toPath())}" } } }
-def mvTarget = project.findProperty('mc')?.toString()
-if (mvTarget == null) return
-GR
-    sed -n '/BEGIN-RUN-DIRS/,/END-RUN-DIRS/p' templates/fork-layer/layer.gradle; } > "$GR/build.gradle"
-  rd() { (cd "$GR" && gradle -q --offline printRunDirs "$@" 2>&1) | grep '^RUNDIR' | tr '\\' '/' | sort | tr '\n' ' '; }   # Windows prints build\mc<t>\run
-  r0="$(rd)"; r4="$(rd -Pmc=1.21.4)"; r26="$(rd -Pmc=26.2)"
-  [ "$r0" = "RUNDIR client=run RUNDIR gameTestServer=harness/run " ] \
-    && [ "$r4" = "RUNDIR client=build/mc1.21.4/run RUNDIR gameTestServer=harness/run " ] \
-    && [ "$r26" = "RUNDIR client=build/mc26.2/run RUNDIR gameTestServer=harness/run " ] \
-    && ok "layer.gradle: -Pmc=1.21.4 and -Pmc=26.2 run the client in their own build/mc<t>/run; without -Pmc the run directory is unchanged, and the gates' GameTest server keeps its own" \
-    || bad "layer.gradle run dirs: base=[$r0] 1.21.4=[$r4] 26.2=[$r26]"
-fi
-# issue #119: per-target-only mixins on a layer fork. A three-target chain 1.21.3 < 1.21.4 < 1.21.5: 1.21.3 adds
-# PlainMixin (mixin_add, inherited by every later target); 1.21.4 adds OnlyMixin with mixin_add_only and takes the
-# authors' AuthorsMixin off with mixin_remove_only, both for 1.21.4 alone. layer.py (the prepared tree that compiles and
-# that the mixin audit reads: layer-ci.py and fork-port.py audit build/mc<t>/mv/java) and layer.gradle (the config at
-# processResources) must resolve the same set. A single-version fork has no .multiversion/ and never applies
-# layer.gradle; the base build (no -Pmc) below keeps the authors' config byte-for-byte.
-MXO="$T/mixin-only"; mkdir -p "$MXO/.multiversion/tools" "$MXO/src/main/java/com/example/mod/mixin" "$MXO/src/main/resources"
-cp templates/fork-layer/tools/layer.py templates/fork-layer/tools/prepare-sources.py "$MXO/.multiversion/tools/"
-for t in 1.21.3 1.21.4 1.21.5; do mkdir -p "$MXO/.multiversion/targets/$t"; done
-printf 'mixin_add.examplemod.mixins.json=mixins:PlainMixin\n' > "$MXO/.multiversion/targets/1.21.3/target.properties"
-printf 'inherits=1.21.3\nmixin_add_only.examplemod.mixins.json=client:OnlyMixin\nmixin_remove_only.examplemod.mixins.json=mixins:AuthorsMixin\n' \
-  > "$MXO/.multiversion/targets/1.21.4/target.properties"
-printf 'inherits=1.21.4\n' > "$MXO/.multiversion/targets/1.21.5/target.properties"
-for t in 1.21.3:PlainMixin 1.21.4:OnlyMixin; do
-  d="$MXO/.multiversion/targets/${t%%:*}/java/com/example/mod/mixin"; mkdir -p "$d"
-  printf 'package com.example.mod.mixin;\npublic class %s {}\n' "${t#*:}" > "$d/${t#*:}.java"
-done
-printf 'package com.example.mod.mixin;\npublic class AuthorsMixin {}\n' > "$MXO/src/main/java/com/example/mod/mixin/AuthorsMixin.java"
-printf 'package com.example.mod;\npublic class Mod {}\n' > "$MXO/src/main/java/com/example/mod/Mod.java"
-printf '{"package":"com.example.mod.mixin","mixins":["AuthorsMixin"]}' > "$MXO/src/main/resources/examplemod.mixins.json"
-trees=""
-for t in 1.21.3 1.21.4 1.21.5; do
-  (cd "$MXO" && python3 .multiversion/tools/layer.py prepare --target "$t" --src src/main/java --out "build/mc$t/mv/java" >/dev/null 2>&1)
-  trees="$trees$t=$(cd "$MXO/build/mc$t/mv/java/com/example/mod/mixin" 2>/dev/null && ls | tr '\n' ',') "
-done
-[ "$trees" = "1.21.3=AuthorsMixin.java,PlainMixin.java, 1.21.4=OnlyMixin.java,PlainMixin.java, 1.21.5=AuthorsMixin.java,PlainMixin.java, " ] \
-  && ok "layer.py: a mixin_add_only class is in its own target's prepared tree and not in the next one's (it inherits the overlay); a mixin_remove_only class is off its own target alone; a plain mixin_add still reaches every later target" \
-  || bad "layer.py per-target-only mixins, prepared trees: $trees"
-# inherited_overlay_rows (opt-in, .multiversion/base.properties): on the same three-target layer fixture, plus an
-# overlay at 1.21.3 that names OldA/OldB/OldC and rows 1.21.3 OldA, 1.21.4 OldB, 1.21.5 OldC. Without the key (and
-# with =false) every prepared tree is byte-for-byte what the fixture prepared above with no key and the inherited
-# overlay is the 1.21.3 file verbatim; with it 1.21.4 renames it by its row, 1.21.5 by 1.21.4's and its own, never by
-# 1.21.3's, and 1.21.3's own tree is unchanged. A single-version fork has no .multiversion/: no layer.py runs there.
-MXI="$T/inherited-rows"; cp -r "$MXO" "$MXI"; rm -rf "$MXI/build"
-printf 'package com.example.mod;\npublic class Uses { OldA a; OldB b; OldC c; }\n' > "$MXI/src/main/java/com/example/mod/Uses.java"
-printf 'package com.example.mod;\r\npublic class Uses { OldA a; OldB b; OldC c; int real; }\r\n' > "$MXI/.multiversion/targets/1.21.3/java/com/example/mod/Uses.java"
-i=0; for t in 1.21.3 1.21.4 1.21.5; do i=$((i+1)); n=$(printf 'ABC' | cut -c$i); printf 'Old%s\tNew%s\n' "$n" "$n" > "$MXI/.multiversion/targets/$t/renames.tsv"; done
-printf 'minecraft_version=1.21.1\n' > "$MXI/.multiversion/base.properties"
-iprep() { for t in 1.21.3 1.21.4 1.21.5; do (cd "$MXI" && python3 .multiversion/tools/layer.py prepare --target "$t" --src src/main/java --out "build/$1/mc$t" >/dev/null 2>&1) || echo "PREPARE-FAILED $1 $t"; done; }
-ifail="$(iprep none)"
-printf 'minecraft_version=1.21.1\ninherited_overlay_rows=false\n' > "$MXI/.multiversion/base.properties"; ifail="$ifail$(iprep false)"
-printf 'minecraft_version=1.21.1\ninherited_overlay_rows=true\n' > "$MXI/.multiversion/base.properties"; ifail="$ifail$(iprep on)"
-U=com/example/mod/Uses.java; OV="$MXI/.multiversion/targets/1.21.3/java/$U"
-# the expected bytes from Python, not sed: Git for Windows' sed reads text mode and drops the overlay's CRs
-want() { python3 -c 'import sys; b = open(sys.argv[1], "rb").read()
-for r in sys.argv[2:]: b = b.replace(*(x.encode() for x in r.split(">")))
-sys.stdout.buffer.write(b)' "$OV" "$@" | od -c; }
-want4="$(want 'OldB>NewB')"; want5="$(want 'OldB>NewB' 'OldC>NewC')"
-# the old fixture's trees (prepared above with the key absent) against the same targets here with the key absent or false
-same_old=yes; for t in 1.21.3 1.21.4 1.21.5; do for m in none false; do
-  diff -r "$MXO/build/mc$t/mv/java/com/example/mod/mixin" "$MXI/build/$m/mc$t/com/example/mod/mixin" >/dev/null || same_old=no
-  diff -r "$MXI/build/none/mc$t" "$MXI/build/$m/mc$t" >/dev/null || same_old=no; done; done
-iwhy=""      # each condition on its own, so a failure names the one that failed
-[ -z "$ifail" ] || iwhy="$iwhy prepare-failed"; [ "$same_old" = yes ] || iwhy="$iwhy off-not-identical"
-{ cmp -s "$OV" "$MXI/build/none/mc1.21.4/$U" && cmp -s "$OV" "$MXI/build/none/mc1.21.5/$U"; } || iwhy="$iwhy off-overlay-not-verbatim"
-diff -r "$MXI/build/none/mc1.21.3" "$MXI/build/on/mc1.21.3" >/dev/null || iwhy="$iwhy root-tree-changed"
-[ "$(od -c < "$MXI/build/on/mc1.21.4/$U")" = "$want4" ] || iwhy="$iwhy on-1.21.4-bytes"
-[ "$(od -c < "$MXI/build/on/mc1.21.5/$U")" = "$want5" ] || iwhy="$iwhy on-1.21.5-bytes"
-diff -r -x Uses.java "$MXI/build/none/mc1.21.5" "$MXI/build/on/mc1.21.5" >/dev/null || iwhy="$iwhy on-other-files-changed"
-[ -z "$(ls "$MXI/build/none" "$MXI/build/false" "$MXI/build/on" | grep inherited_overlay_rows)" ] || iwhy="$iwhy stamp-beside-custom-out"
-(cd "$MXI" && python3 .multiversion/tools/layer.py prepare --target 1.21.5 --src src/main/java --out build/mc1.21.5/mv/java >/dev/null 2>&1) \
-  && [ -f "$MXI/build/mc1.21.5/mv/java.inherited_overlay_rows" ] || iwhy="$iwhy no-stamp-on-default-out"
-[ -z "$iwhy" ] \
-  && ok "layer.py inherited_overlay_rows: off (no key, or =false) every prepared tree is byte-identical and the inherited overlay verbatim; on, 1.21.3's overlay is renamed at 1.21.4 by 1.21.4's row and at 1.21.5 by 1.21.4's and 1.21.5's, never by 1.21.3's (CRLF kept), the root target's tree and every other file unchanged; only an on-mode prepare of the default build/mc<t>/mv/java leaves its stamp beside it (a custom --out none)" \
-  || bad "layer.py inherited_overlay_rows:$iwhy; fail=[$ifail] same_old=$same_old 1.21.4 on: $(cat "$MXI/build/on/mc1.21.4/$U" 2>&1 | head -2 | tr '\r\n' '  ')"
-if command -v gradle >/dev/null 2>&1; then
-  printf "rootProject.name = 'scratch'\n" > "$MXO/settings.gradle"
-  { cat <<'GR'
-plugins { id 'java' }
-def mvTarget = project.findProperty('mc')?.toString()
-if (mvTarget == null) return
-def mvChain = []
-for (def t = mvTarget; t; ) {
-    mvChain.add(0, t)
-    def p = new Properties()
-    file(".multiversion/targets/${t}/target.properties").withInputStream { p.load(it) }
-    t = p.getProperty('inherits')
-}
-def mvRanges = [:]
-layout.buildDirectory = file("build/mc${mvTarget}")
-GR
-    sed -n '/BEGIN-MIXINS/,/END-MIXINS/p' templates/fork-layer/layer.gradle; } > "$MXO/build.gradle"
-  cfg() { local f="$1"; shift; (cd "$MXO" && gradle -q --offline processResources "$@" >/dev/null 2>&1) || { echo "BUILD-FAILED"; return; }
-          python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print(";".join(k + ":" + ",".join(sorted(v)) for k, v in sorted(j.items()) if isinstance(v, list)))' "$f"; }
-  c0="$(cfg "$MXO/build/resources/main/examplemod.mixins.json")"
-  base_same=no; cmp -s "$MXO/build/resources/main/examplemod.mixins.json" "$MXO/src/main/resources/examplemod.mixins.json" && base_same=yes
-  c3="$(cfg "$MXO/build/mc1.21.3/resources/main/examplemod.mixins.json" -Pmc=1.21.3)"
-  c4="$(cfg "$MXO/build/mc1.21.4/resources/main/examplemod.mixins.json" -Pmc=1.21.4)"
-  c5="$(cfg "$MXO/build/mc1.21.5/resources/main/examplemod.mixins.json" -Pmc=1.21.5)"
-  agree="$(cd "$MXO" && for t in 1.21.3 1.21.4 1.21.5; do python3 .multiversion/tools/layer.py mixins --target "$t" --config src/main/resources/examplemod.mixins.json 2>&1; done | tr '\n' ' ')"
-  # a mixin_remove_only naming a class the config does not list (a typo) stops the build, never silently removes nothing
-  sed -i.bak 's/mixins:AuthorsMixin/mixins:AuthorMixin/' "$MXO/.multiversion/targets/1.21.4/target.properties" && rm -f "$MXO/.multiversion/targets/1.21.4/target.properties.bak"   # -i.bak: BSD (macOS) sed and GNU sed both take it
-  typo="$(cd "$MXO" && gradle -q --offline processResources -Pmc=1.21.4 2>&1)"; typo_rc=$?
-  [ "$base_same" = yes ] && [ "$c0" = "mixins:AuthorsMixin" ] && [ "$c3" = "mixins:AuthorsMixin,PlainMixin" ] \
-    && [ "$c4" = "client:OnlyMixin;mixins:PlainMixin" ] && [ "$c5" = "mixins:AuthorsMixin,PlainMixin" ] \
-    && [ "$agree" = "$c3 $c4 $c5 " ] && [ $typo_rc != 0 ] && grep -q 'does not list' <<<"$typo" \
-    && ok "layer.gradle: mixin_add_only/mixin_remove_only change their own target's mixin config alone (1.21.4 has OnlyMixin, not AuthorsMixin; 1.21.5 has neither change), plain mixin_add inherits, the set equals layer.py mixins, a remove naming nothing stops the build; without -Pmc the authors' config is byte-for-byte unchanged" \
-    || bad "layer.gradle per-target-only mixins: base=[$c0 same=$base_same] 1.21.3=[$c3] 1.21.4=[$c4] 1.21.5=[$c5] layer.py=[$agree] typo rc=$typo_rc"
-fi
+grep -q 'self-check: OK' <<<"$out" && ok "fix-ledger: a ledger renders and validates; a legacy layer section is kept in the JSON and not rendered" || bad "fix-ledger self-check: $out"
 out="$(python3 tools/port-ci.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "port-ci: the layer jobs exist only with --layer-branch, are skipped on the port branch, and splice no input into a script; without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (single-version and layer fork); --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted with its own .port/<mc>/shipped-expect[-<variant>].txt as --expect-file or none, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back; promote refreshes the install manifest on the port branch only (its script run on a fake fork, single-version and layer: pushed on top of the tag, retried when the branch moved, nothing pushed when unchanged, a bad tag refused); a version branch's push trigger also paths-ignores its round records (.port/*.md, .port/*/*.md -- not branch.properties, the rows, STUBS.json or src/), rendered through main() on a real version-branch checkout, while a single-version checkout renders the golden's line byte for byte" || bad "port-ci self-check: $out"
+grep -q 'self-check: OK' <<<"$out" && ok "port-ci: without --variant-jar/--dep-jar-variant the workflow is byte-identical to tools/golden (with and without dependencies); infer drops a removed layer branch's trigger; --variant-jar adds a shipped-jars job the release needs (its script run on a fake fork: one build, each jar booted with its own .port/<mc>/shipped-expect[-<variant>].txt as --expect-file or none, a failing or unmatched variant named); --dep-jar-variant adds a sha256-pinned gates (full, <label>) leg and refuses a mismatched spec; args reads every option back; promote refreshes the install manifest on the port branch only (its script run on a fake fork: pushed on top of the tag, retried when the branch moved, nothing pushed when unchanged, a bad tag refused); a version branch's push trigger also paths-ignores its round records (.port/*.md, .port/*/*.md -- not branch.properties, the rows, STUBS.json or src/), rendered through main() on a real version-branch checkout, while a single-version checkout renders the golden's line byte for byte" || bad "port-ci self-check: $out"
 python3 - <<'PY' && ok "ci-gates: --gatec none means no Gate C (not a phase name)" || bad "ci-gates --gatec none"
 import re,sys
 src=open("tools/ci-gates.py").read()
@@ -1104,50 +920,17 @@ f = lambda t: re.sub(pat, rep, t)
 sys.exit(0 if f("if (level.isClientSide) {") == "if (level.isClientSide()) {" and f("level.isClientSide()") == "level.isClientSide()" else 1)
 PY
 # a shared helper marked `// REQUIRES: <token>` is installed only in a fork whose build names the token (GeckoLib helpers)
-python3 - <<'PY' && ok "sync-shared: a REQUIRES-gated helper is skipped in a fork without the library, installed in one with it" || bad "a REQUIRES-gated shared helper reached a fork without its library (or missed one with it)"
+python3 - <<'PY' && ok "shared helpers: a REQUIRES-gated helper is skipped in a fork without the library, installed in one with it" || bad "a REQUIRES-gated shared helper reached a fork without its library (or missed one with it)"
 import importlib.util, pathlib, sys, tempfile
 sys.argv = ["x"]
-spec = importlib.util.spec_from_file_location("m", "tools/make-fork-layer.py"); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-d = pathlib.Path(tempfile.mkdtemp()); (d / ".multiversion").mkdir()
-(d / "gradle.properties").write_text("mod_id=examplemod\n", encoding="utf-8")
-(d / "src/main/resources/META-INF").mkdir(parents=True)
-(d / "src/main/resources/META-INF/neoforge.mods.toml").write_text('[[mods]]\nmodId="examplemod"\n', encoding="utf-8")
-(d / "build.gradle").write_text("dependencies {}\n", encoding="utf-8")
-sh = pathlib.Path(tempfile.mkdtemp()); (sh / "9.9/java").mkdir(parents=True); m.SHARED = sh
+spec = importlib.util.spec_from_file_location("fb", "tools/fork-branches.py"); fb = importlib.util.module_from_spec(spec); spec.loader.exec_module(fb)
+sh = pathlib.Path(tempfile.mkdtemp()); (sh / "9.9/java").mkdir(parents=True); fb.shared_dir = lambda: sh
 (sh / "9.9/java/Needs.java").write_text("// OVERLAY-ONLY\n// REQUIRES: geckolib\npackage @MVPKG@;\nclass Needs {}\n", encoding="utf-8")
 (sh / "9.9/java/Plain.java").write_text("// OVERLAY-ONLY\npackage @MVPKG@;\nclass Plain {}\n", encoding="utf-8")
-names = lambda: sorted(k.rsplit("/", 1)[1] for k in m.shared_files(d, "9.9"))
-without = names()
-(d / "build.gradle").write_text('dependencies { implementation "com.geckolib:geckolib-neoforge-1.21.11:5.4.5" }\n', encoding="utf-8")
-with_ = names()
+names = lambda build: sorted(k.rsplit("/", 1)[1] for k in fb.shared_helpers_for(["9.9"], "com.example.mod.mv", "examplemod", build))
+without = names("dependencies {}\n")
+with_ = names('dependencies { implementation "com.geckolib:geckolib-neoforge-1.21.11:5.4.5" }\n')
 sys.exit(0 if without == ["Plain.java"] and with_ == ["Needs.java", "Plain.java"] else 1)
-PY
-# a layer made before a layer.gradle change gets the current machinery from sync-shared (--check reports it first);
-# a copy someone edited (not any version the migrator shipped) is reported, fails --check, and is never written over
-python3 - <<'PY' && ok "sync-shared: a verbatim older layer.gradle is refreshed, a missing build.sh installed, an edited layer.py reported (--check fails) and left alone" || bad "sync-shared overwrote an edited machinery file (or left a verbatim older one stale)"
-import importlib.util, io, contextlib, pathlib, sys, tempfile
-sys.argv = ["x"]
-spec = importlib.util.spec_from_file_location("m", "tools/make-fork-layer.py"); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-d = pathlib.Path(tempfile.mkdtemp()); (d / ".multiversion/tools").mkdir(parents=True); (d / ".multiversion/targets").mkdir()
-(d / "gradle.properties").write_text("mod_id=examplemod\n", encoding="utf-8")
-for f in m.MACHINERY:
-    (d / ".multiversion" / f).write_bytes((m.TPL / f).read_bytes())
-older = b"// an older layer.gradle the migrator shipped\n"
-m._HISTORY["layer.gradle"] = {older}   # the template's git history, without git (CI clones shallow)
-(d / ".multiversion/layer.gradle").write_bytes(older)
-(d / ".multiversion/build.sh").unlink()
-edited = (m.TPL / "tools/layer.py").read_text(encoding="utf-8") + "# a hand edit\n"
-(d / ".multiversion/tools/layer.py").write_text(edited, encoding="utf-8")
-out = io.StringIO()
-with contextlib.redirect_stdout(out): rc_check = m.sync_shared(d, check=True)
-untouched = (d / ".multiversion/layer.gradle").read_bytes() == older
-with contextlib.redirect_stdout(out): m.sync_shared(d)
-with contextlib.redirect_stdout(out): rc_after = m.sync_shared(d, check=True)
-cur = lambda f: (d / ".multiversion" / f).read_bytes() == (m.TPL / f).read_bytes()
-log = out.getvalue()
-sys.exit(0 if rc_check == 1 and untouched and cur("layer.gradle") and cur("build.sh")
-         and (d / ".multiversion/tools/layer.py").read_text(encoding="utf-8") == edited
-         and rc_after == 1 and "DIVERGED .multiversion/tools/layer.py" in log else 1)
 PY
 # audit-mixin-targets roots_of: its cache never answers with another jar's roots (an id() reused, or the set grown)
 python3 - <<'PY' && ok "audit-mixin-targets: roots_of is recomputed for a new object reusing an id() and for a grown one (both copies identical)" || bad "audit-mixin-targets roots_of answered from a stale cache entry"
@@ -1216,7 +999,7 @@ PY
 # M66/M68/M71 (1.21.2 API, shared/1.21.3): a boolean Entity.hurt use is hurtServer's result through Hurt.server (never a
 # health comparison), hurt overrides become hurtServer, InteractionResultHolder/cooldowns/Ingredient/GeckoLib 4.7/
 # doHurtTarget/profiler/BlockEntityType.Builder shapes, and a vanilla core-shader shard is named before the helper row
-# takes it. Layer forks only: a single-version fork has no .multiversion/ and never reads these tables.
+# takes it. Version-branch forks only: a single-version fork never reads these tables.
 python3 - <<'PY' && ok "shared rows (1.21.3): boolean hurt -> Hurt.server, hurt overrides, InteractionResult, cooldowns, GeckoLib 4.7, doHurtTarget, profiler, BE builder, core-shader shards (and their controls)" || bad "a 1.21.3 shared row for the 1.21.2 entity/item/client API rewrites the wrong shape"
 import re, pathlib, sys
 rows = [l for l in pathlib.Path("templates/fork-layer/shared/1.21.3/renames.tsv").read_text(encoding="utf-8").splitlines()
@@ -1413,36 +1196,32 @@ J
     || bad "EditBoxes restore re-invoked the chained responder: $out"
 elif [ -n "${CI:-}" ]; then bad "no javac in CI -- EditBoxes was NOT tested"
 else echo "  SKIP  no javac (CI runs it; a skip is not a pass)"; fi
-# add_shared_helpers copies a helper only when its FQN or an `MV-REQUIRES: Name` line is in the tree; a helper naming
-# another by its simple name (same package) needs the tag, or a mod using one helper gets a set that does not compile
-python3 - <<'PY' && ok "shared helpers: for every target and every helper used alone, the copied set is closed under simple-name references (MV-REQUIRES tags complete)" || bad "a shared helper names another by simple name without an MV-REQUIRES tag"
-import importlib.util, io, contextlib, pathlib, re, sys, tempfile
-spec = importlib.util.spec_from_file_location("layer", "templates/fork-layer/tools/layer.py")
-L = importlib.util.module_from_spec(spec); spec.loader.exec_module(L)
+# a helper is copied only when its FQN or an `MV-REQUIRES: Name` line is in the tree (fork-branches used_helpers); a
+# helper naming another by its simple name (same package) needs the tag, or a mod using one helper gets a set that does
+# not compile
+python3 - <<'PY' && ok "shared helpers: for every version and every helper used alone, the copied set is closed under simple-name references (MV-REQUIRES tags complete)" || bad "a shared helper names another by simple name without an MV-REQUIRES tag"
+import importlib.util, pathlib, re, sys
+sys.argv = ["x"]
+spec = importlib.util.spec_from_file_location("fb", "tools/fork-branches.py")
+fb = importlib.util.module_from_spec(spec); spec.loader.exec_module(fb)
 key = lambda v: tuple(int(x) for x in v.split("."))
 src = pathlib.Path("templates/fork-layer/shared")
 allv = sorted([d.name for d in src.iterdir() if (d / "java").is_dir()], key=key)
 PKG = "com.example.mod.mv"
+every = " ".join(sorted({t for f in src.glob("*/java/*.java")
+                         for t in re.findall(r"(?m)^// REQUIRES: (\S+)", f.read_text(encoding="utf-8"))}))
 def strip(t):
     t = re.sub(r"//[^\n]*|/\*.*?\*/", "", t, flags=re.S); t = re.sub(r'"(?:\\.|[^"\\])*"', '""', t)
     return re.sub(r"^import [^\n]*\n", "", t, flags=re.M)
 problems = []
 for target in allv:
     vers = [v for v in reversed(allv) if key(v) <= key(target)]
-    mv = pathlib.Path(tempfile.mkdtemp()) / ".multiversion"
-    for v in vers:
-        d = mv / "shared" / v / "java" / PKG.replace(".", "/"); d.mkdir(parents=True)
-        for f in (src / v / "java").glob("*.java"):
-            (d / f.name).write_text(f.read_text(encoding="utf-8").replace("@MVPKG@", PKG).replace("@MODID@", "examplemod"), encoding="utf-8")
-    L.MV = mv
-    pool = sorted({f.stem for v in vers for f in (src / v / "java").glob("*.java")})
-    for seed in pool:
-        out = mv.parent / f"out-{seed}"; (out / "com/example/mod").mkdir(parents=True)
-        (out / "com/example/mod/Use.java").write_text(f"package com.example.mod;\nclass Use {{ {PKG}.{seed} x; }}\n", encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()): L.add_shared_helpers(vers, out)
-        got = {f.stem: f.read_text(encoding="utf-8") for f in (out / PKG.replace(".", "/")).glob("*.java")}
+    pool = fb.shared_helpers_for(vers, PKG, "examplemod", every)
+    names = sorted({rel.rsplit("/", 1)[1][:-5] for rel in pool})
+    for seed in names:
+        got = {rel.rsplit("/", 1)[1][:-5]: t for rel, t in fb.used_helpers(pool, [f"package com.example.mod;\nclass Use {{ {PKG}.{seed} x; }}\n"]).items()}
         for n, t in got.items():
-            for o in set(pool) - set(got):
+            for o in set(names) - set(got):
                 if not re.search(r"^import [\w.]*\." + o + ";", t, re.M) and re.search(r"(?<![\w.])" + o + r"\b", strip(t)):
                     problems.append(f"{target}: {seed} -> {n} names {o}")
 print(*sorted(set(problems)), sep="\n")

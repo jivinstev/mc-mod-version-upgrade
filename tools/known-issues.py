@@ -1405,6 +1405,10 @@ def run(argv):
     a = build_parser().parse_args(argv)
     if a.self_check:
         return self_check()
+    why = _refuse_layer((getattr(a, "repo", None) or ".") if hasattr(a, "repo") else None, "known-issues")
+    if why:
+        print(why)
+        return 2
     if not a.cmd:
         build_parser().print_help()
         return 2
@@ -1686,6 +1690,15 @@ def cmd_render_ports(a, repo, out):
     out(f"render-ports: wrote the Ports block of {p} ({len(rows)} version(s)); commit it alone (a root README edit "
         "runs no Port CI and stales no gate)")
     return 0
+
+
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
 
 
 def main(argv=None):
@@ -1988,11 +2001,11 @@ def self_check():
         if not all((root / "tools" / f).is_file() for f in others):
             print("self-check: the cross-tool checks need the whole repository: skipped (a Port CI kit)")
         else:
-            # layer target (--mc) and a single-version fork (no --mc: HEAD, as before -- byte-for-byte)
+            # a version branch (--mc) and a single-version fork (no --mc: HEAD, as before -- byte-for-byte)
             cg = load("ci_gates_ki", "ci-gates.py")
             (d / ".port" / LEDGER_NAME).write_text(dump(empty()), encoding="utf-8")         # an edit to the ledger alone
             head = g("rev-parse", "--short", "HEAD")
-            expect(cg.tested_tree(d, "1.21.5") == head, "ci-gates: a ledger edit does not make a layer target's tree edited")
+            expect(cg.tested_tree(d, "1.21.5") == head, "ci-gates: a ledger edit does not make a version branch's tree edited")
             expect(cg.tested_tree(d, None) == head, "ci-gates: a single-version fork's tested tree is HEAD, as before")
             (d / "README.md").write_text("# a generated Ports block\n", encoding="utf-8")       # a root README edit
             g("add", "README.md")
@@ -2019,12 +2032,6 @@ def self_check():
                                                               "src/main/resources/README.md",
                                                               ".port/1.21.4/renames.tsv", "build.gradle")),
                    "port-publish: the ledger and the root README are not jar content (a README in src/ is)")
-            green, why = pp.listed_green("1.21.4", "# Gates at `abc1234` for Minecraft 1.21.4\n| A | PASS |\n",
-                                         [".port/KNOWN-ISSUES.json", "README.md"], ["1.21.4"])
-            expect(green, f"a released layer target stays green after a ledger and README commit: {why}")
-            green, why = pp.listed_green("1.21.4", "# Gates at `abc1234` for Minecraft 1.21.4\n| A | PASS |\n",
-                                         ["src/main/resources/README.md"], ["1.21.4"])
-            expect(not green, "control: a README under src/main/resources makes the gates stale")
             fb = load("fork_branches_ki", "fork-branches.py")
             expect(all(fb.LEDGER_PATH.match(f) and not fb.jar_relevant(f, "1.21.4")
                        for f in (".port/KNOWN-ISSUES.json", ".port/examplemod/KNOWN-ISSUES.json"))

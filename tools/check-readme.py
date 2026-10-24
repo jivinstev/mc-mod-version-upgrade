@@ -18,7 +18,7 @@ WITH --base (the pre-push hook and CI pass the branch it will merge into):
      `Single-version-change: <reason>` (what an existing single-version fork now does differently) or
      `Single-version-unchanged: <reason>` (CLAUDE.md, P2: nothing changes silently). Every such line is printed. The
      route, read at the merge-base and at HEAD: SV_ROOTS, every tools/ script and templates/ path they name, and those
-     scripts' own, transitively (minus MV_TOOLS, the multi-version-only ones, and MV_PREFIX: the layer's and this repository's own);
+     scripts' own, transitively (minus MV_TOOLS, the multi-version-only ones, and MV_PREFIX: the version branches' shared library and this repository's own);
      everything under templates/upstream-harness/; and each line of keep-current, port-fork or publish-port, old or new,
      outside a `## ` section about version branches or the layer.
 Exit 0 pass, 1 fail, 2 could not run (no skills found, or the base is unknown): a gate that quietly checked
@@ -30,10 +30,10 @@ PATH = re.compile(r"(?<![\w./-])((?:tools|docs|templates|setup|cloud|\.claude|\.
 SV_ROOTS = [f"tools/{t}.py" for t in ("port", "port-upstream", "port-sync", "port-ci", "port-publish", "ci-gates",
                                         "shipped-gate")]
 SV_PREFIX = ("templates/upstream-harness/",)                           # every single-version fork's CI and harness
-MV_TOOLS = {f"tools/{t}" for t in ("fork-branches.py", "fork-port.py", "round.py", "layer-ci.py", "layer-sync.py", "layer.py",
-                                   "make-fork-layer.py", "layer-inventory.py", "layer-test-plan.py", "make-multiversion.sh")}
+MV_TOOLS = {f"tools/{t}" for t in ("fork-branches.py", "fork-port.py", "round.py", "checkout-lock.py", "layer-inventory.py",
+                                   "make-multiversion.sh")}
 MV_PREFIX = ("templates/fork-layer/", "tools/check-", "tools/test-", "tools/guard-names.py", "tools/install-hooks.sh",
-             "tools/propose-learnings.py")                            # layer-only, or this repository's own tooling
+             "tools/propose-learnings.py")          # the version branches' shared library, or this repository's own tooling
 SV_SKILLS = {f".claude/skills/{s}/SKILL.md" for s in ("keep-current", "port-fork", "publish-port")}
 MV_SECTION = re.compile(r"version branch|\blayer\b|multi-version", re.I)  # a `## ` heading the single-version route skips
 REF = re.compile(r"(?<![\w-])([\w-]+\.(?:py|sh))\b|(templates/[\w./-]*[\w/])")

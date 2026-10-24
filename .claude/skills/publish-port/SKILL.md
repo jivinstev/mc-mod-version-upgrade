@@ -9,10 +9,10 @@ description: Publish a fork port as an unofficial community version on Modrinth 
 **version branches** (the default for a multi-version fork: `neoforge-1.21.3`, `neoforge-1.21.4`, ..., each with
 `.port/<version>/`) is published the same way, one version at a time: every version branch is a single-version port at
 its own Minecraft version, with its own CI, its own release (tag `<mod>-<ver>-mc<version>`) and Parts 1-3 run on that
-branch ("Version branches" below). An existing fork with the multi-version **layer** (legacy, being removed) adds "Part 4" and only when its
-config has a `layer` section; without that section `port-publish.py` behaves byte-for-byte as before (a test compares its
-output and API calls with a recorded golden). Never set up a new multi-version fork for Part 4: it is for layer forks
-that have not migrated (fork-versions, "Migrating a layer fork").
+branch ("Version branches" below). The removed `.multiversion/` layer route is not served: `port-publish.py` refuses a
+checkout with the layer at HEAD (exit 2, naming the last migrator commit that supports it; fork-versions, "A fork still
+on the layer"), and a config's old `layer` section is ignored. A single-version fork's output and API calls are compared
+with a recorded golden (`tools/test-port-publish.py`).
 
 The step after `port-fork` and `keep-current`: a fork whose release a person has played and promoted goes onto
 the platforms players install from. Tool: `tools/port-publish.py`. The upload itself always runs in the fork's
@@ -178,33 +178,6 @@ Minecraft version first (the version branch's workflow pins that release, `fork-
 that is done (fork-versions "Done") and has been played: run `fork-port.py --check-done` on that branch yourself first, as
 neither `port-ci.py promote` nor publishing runs the done check; their only done-related refusal is a build pinned to a
 library pre-release that was not done.
-
-## Part 4: a multi-version release (legacy, being removed; existing layer forks only)
-
-Config: `"layer": {"branch": "<layer branch>", "targets": [optional explicit list], "released": [targets whose full
-gates were run]}`, AND the tag's commit must carry `.multiversion/`. `publish` then uploads **one file per green
-target**, each with its own game version (Modrinth `game_versions`, CurseForge `gameVersions`), version number
-(`<ver>+<mc>`) and notes:
-- **Files.** The layer build names each target's jars `<name>-mc<target>.jar` (only with `-Pmc`; the base jar is
-  untouched). The release must hold them; the newest target's jar is in its `layer-gates-<newest>` artifact. Without
-  `layer.targets`, every target the release holds a file for is a candidate; a missing file on a configured
-  platform refuses the publish.
-- **Green.** A target publishes only if, at the released commit, the base's `gates (...)` jobs are green (base),
-  `layer gates (newest target T)` is green (newest), or it is listed under `released` and its `GATES.md` names it, has
-  no FAIL row, and nothing that builds its jar changed since (documents, CI files and other targets' own directories
-  excepted). A middle target is compile-only in CI and is not green on that alone. **Any candidate that is not green
-  refuses the whole publish, naming it; nothing is uploaded.**
-- **Dependencies.** A required port dependency must be published for that target's Minecraft on each platform
-  (its release notes carry `id@<mc>` markers). A target pins the dependency's version for the same Minecraft with
-  `publish.dep.<repo name>=<version number>` in its `target.properties`; a pin the dependency lacks refuses.
-- Idempotent per target and platform (markers `id@<mc>` in the release notes). The tag may be on the layer branch;
-  "built from the branch" is judged against `origin/<layer branch>`.
-- **Preview targets.** A target whose own `target.properties` says `preview=true` is built, gated and attached to the
-  layer pre-release like any other (the pre-release notes name it as a preview), but `publish` never uploads it: it
-  prints `target <t>: preview, not published`, does not ask that target's gates, and never fails on it (a publish
-  whose every candidate is preview uploads nothing and exits 0). Use it for a target with a known gap that is not
-  ready for players; remove the key (or set `preview=false`) to publish it on the next release. The base target has no
-  `target.properties` and is never preview. A single-version fork has no targets and nothing here applies.
 
 ## After the first publish
 

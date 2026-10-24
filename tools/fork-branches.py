@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: MIT
 """Stacked version branches: a multi-version fork as one real branch per Minecraft version (the default).
 
-    python3 tools/fork-branches.py migrate     --repo DIR [--layer-ref REF] [--port-branch B] [--targets T,T] [--dry-run] [--library]
-                                               [--json FILE]
-    python3 tools/fork-branches.py verify      --repo DIR [--layer-ref REF] [--targets T,T] [--tip]
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO [--gates none|compile|ab|full] [--dry-run]
     python3 tools/fork-branches.py cascade     --repo DIR FROM..TO --plan|--apply [--budget-lines N] [--out DIR]
     python3 tools/fork-branches.py cascade     --repo DIR PORT..TO --plan --head-merge REF [...]   # the head merge previewed
@@ -21,6 +18,7 @@
     python3 tools/fork-branches.py cutout-check --repo DIR --branch neoforge-<v> [--fix]   # the 26.1.2 entityCutout swap
     python3 tools/fork-branches.py ci          --repo DIR (--target T | --all) --modid ID | --head [--modid ID]  [--run] [--kit-version N]
     python3 tools/fork-branches.py ci-check    --repo DIR [--target T ...] [--kit-version N]   # the head branch too
+    python3 tools/fork-branches.py versions    [--refresh]   # the targeted lines (templates/fork-layer/versions.json)
     python3 tools/fork-branches.py sync-shared --repo DIR [--target T ...] [--check [--json FILE]]   # --check: read-only report
     python3 tools/fork-branches.py --self-check [--deep | --platform]   # --deep: before a release; --platform: an OS-only leg
 
@@ -67,12 +65,10 @@ development-only checkout jar; for a library (library=true) at least one depende
 this library's jar (DEPENDENTS.json, `library-record`). A record naming a LAYER commit (a migrated target) counts when
 .port/<t>/MIGRATED.json maps that commit to a prepared-tree digest equal to the branch's own.
 
-MIGRATE turns an existing layer fork into these branches: per target in chain order, a branch made (with git plumbing:
-no checkout, no worktree of the person's is touched) from its parent's branch -- the first one from the port commit the
-layer carries -- whose source is exactly what the layer's own `layer.py prepare` makes for that target, every source set
-and the resources, with that target's records moved into .port/<t>/. It never pushes, never deletes or moves an
-existing branch, and refuses a target branch that already exists with other content (one with the same content is
-left as it is). `verify` re-runs the layer's prepare and compares; migrate runs it on every branch it made.
+A LAYER FORK IS REFUSED. The `.multiversion/` layer route (and `migrate`, which turned a layer into these branches)
+was removed; a checkout with the layer at HEAD is refused (tools/fork-kind.py, which names the last commit that can
+migrate one). A fork migrated earlier keeps its layer branches as history: they are ignored, and the records the
+migration moved count through MIGRATED.json (above).
 
 THE 26.1.2 ENTITYCUTOUT SWAP (CATALOG V60). From 26.1.2 vanilla's entityCutout does not cull (it is 1.21's
 entityCutoutNoCull), entityCutoutCull does, and entityCutoutNoCullZOffset is entityCutoutZOffset. No rename row can carry
@@ -101,7 +97,7 @@ that conflicts in the head merge itself takes the authors' side of each conflict
 (`head_merge.conflicts`: the round's authors step ports it). REF already in the head: nothing to simulate. The
 simulation failing: the plan of the head as it is, with `head_merge.error`. Without --head-merge the plan is as before.
 
-Exit codes: 0 ok; 1 a difference (verify) or a red branch (cascade); 18 not done (check-done); 2 bad input.
+Exit codes: 0 ok; 1 a red branch (cascade); 18 not done (check-done); 2 bad input.
 Standard library only.
 """
 import argparse, collections, datetime, hashlib, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
@@ -117,7 +113,6 @@ def shared_dir():
     return pathlib.Path(os.environ.get("MMVU_SHARED_DIR") or SHARED_DEFAULT)
 REC = ".port"
 BRANCH_PROPS = "branch.properties"
-LAYER_HOOK_LINE = "apply from: '.multiversion/layer.gradle'"
 BRANCH_HOOK_LINE = "apply from: '.port/branch.gradle'"
 BRANCH_HOOK = ("\n// Version branch (community fork only; not the authors' code): reads .port/<minecraft_version>/branch.properties\n"
                "// for what gradle.properties cannot say (Java toolchain, dependency swaps, the client's game directory).\n"
@@ -156,6 +151,10 @@ def _mod(key, file):
 
 def fp():
     return _mod("fork_port_fb", "fork-port.py")
+
+
+def fork_kind():
+    return _mod("fork_kind_fb", "fork-kind.py")
 
 
 def _ps():
@@ -222,6 +221,7 @@ def set_props_text(text, updates):
 
 
 # ---------------------------------------------------------------- what a checkout / tree is
+
 
 def rec_dir(root, t):
     return pathlib.Path(root) / REC / t
@@ -336,6 +336,7 @@ def is_branch_fork(repo, t):
 
 
 # ---------------------------------------------------------------- trees and blobs
+
 
 def tree_entries(repo, ref, prefix=None):
     """{path: (mode, blob)} of commit `ref` (optionally under `prefix`)."""
@@ -484,11 +485,11 @@ def apply_rules(text, rules):
     return text.replace("\n", "\r\n") if crlf else text
 
 
-ONLYIN = re.compile(r"\n[ \t]*@OnlyIn\([^)]*\)[ \t]*")      # templates/fork-layer/tools/layer.py's
+ONLYIN = re.compile(r"\n[ \t]*@OnlyIn\([^)]*\)[ \t]*")
 
 
 def strip_onlyin_text(text):
-    """@OnlyIn removed as layer.py's strip_onlyin does -- it reads the file as text, so a CRLF file is stripped line
+    """@OnlyIn removed -- it reads the file as text, so a CRLF file is stripped line
     for line and stays CRLF (the bare pattern on CRLF text would leave a stray \\r behind each removed annotation)."""
     if "\r\n" not in text:
         return ONLYIN.sub("", text)
@@ -665,8 +666,9 @@ def reader_of_ref(repo, ref):
 
 # ---------------------------------------------------------------- derived files (no review row when exact)
 
+
 def toml_rewrite(text, ranges):
-    """layer.gradle's mvRewriteToml on a source file: versionRange of the [[dependencies.*]] block whose modId a key
+    """A neoforge.mods.toml rewrite: versionRange of the [[dependencies.*]] block whose modId a key
     names ("minecraft", "neoforge") set to its range; every other line, and the line endings, kept."""
     out, mod = [], None
     for line in text.splitlines(keepends=True):
@@ -684,7 +686,7 @@ def toml_rewrite(text, ranges):
 
 
 def mixin_spec(value):
-    """`client:A,B;mixins:C` -> [(array, class)] (layer.py's form)."""
+    """`client:A,B;mixins:C` -> [(array, class)] (a `mixin_add.<config>` / `mixin_remove.<config>` value)."""
     out = []
     for spec in (value or "").split(";"):
         array, _, classes = spec.partition(":")
@@ -693,7 +695,7 @@ def mixin_spec(value):
 
 
 def mixin_edit(obj, adds, removes):
-    """layer.gradle's processResources edit on a parsed mixin config: each add appended to its array when absent, each
+    """A mixin config edit on the parsed config: each add appended to its array when absent, each
     remove taken out (ValueError when the config does not list it). Order kept."""
     obj = json.loads(json.dumps(obj))
     for array, c in adds:
@@ -774,6 +776,7 @@ def derived_ok(path, base, cur, props):
 
 
 # ---------------------------------------------------------------- what counts as a change
+
 
 def jar_relevant(path, t):
     """Can a change to `path` change version t's jar? Everything but this branch's records (its branch.properties is
@@ -877,6 +880,7 @@ def commit_current(repo, root, t, c, ref, work, kind, files=None, items=None):
 
 
 # ---------------------------------------------------------------- review items: the files that differ from the parent
+
 
 def first_difference(a, b, width=40):
     """repr of about `width` bytes around the first byte where a and b differ (a self-check's failure message)."""
@@ -1316,352 +1320,9 @@ def library_status(repo, root, t, ref, work, files):
     return False, stale
 
 
-
-# ---------------------------------------------------------------- migration: a layer fork -> version branches
-
-class Layer:
-    """The layer at one commit, written into a scratch directory from its blobs (its own .multiversion/tools/layer.py
-    must run there): the blobs' bytes, never a checkout's, so core.autocrlf or an eol attribute cannot change what is
-    prepared and committed. checkout() gives a git worktree of it for the layer's own done check (it needs git),
-    made with line-ending conversion off. close() removes both; the person's checkout is never touched."""
-
-    def __init__(self, repo, commit, scratch):
-        self.repo, self.commit = pathlib.Path(repo), commit
-        self.dir = pathlib.Path(scratch) / f"layer-{commit[:12]}"
-        self.wt = None
-        if not self.dir.is_dir():
-            export(repo, commit, self.dir)
-        self.mv = self.dir / ".multiversion"
-        spec = importlib.util.spec_from_file_location(f"layer_{commit[:12]}", self.mv / "tools/layer.py")
-        sys.dont_write_bytecode = True
-        self.lp = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.lp)
-        self.base = parse_props(read_file(self.mv / "base.properties"))
-
-    def checkout(self):
-        if self.wt is None:
-            self.wt = self.dir.parent / f"{self.dir.name}-wt"
-            git(self.repo, "-c", "core.autocrlf=false", "-c", "core.eol=lf", "worktree", "add", "--detach", "--force",
-                str(self.wt), self.commit, check=True)
-        return self.wt
-
-    def close(self):
-        if self.wt is not None:
-            git(self.repo, "worktree", "remove", "--force", str(self.wt))
-            shutil.rmtree(self.wt, ignore_errors=True)
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def targets(self):
-        d = self.mv / "targets"
-        return sorted((p.name for p in d.iterdir() if (p / "target.properties").is_file()), key=mc_key) if d.is_dir() else []
-
-    def props(self, t):
-        return parse_props(read_file(self.mv / "targets" / t / "target.properties"))
-
-    def raw_props(self, t):
-        return read_file(self.mv / "targets" / t / "target.properties")
-
-    def chain(self, t):
-        return self.lp.chain(t)
-
-    def shared_chain(self, t):
-        return getattr(self.lp, "shared_chain", self.lp.chain)(t)
-
-    def prepare(self, t, sset, out):
-        r = subprocess.run([sys.executable, str(self.mv / "tools/layer.py"), "prepare", "--target", t, "--set", sset,
-                            "--src", str(self.dir / "src" / sset / "java"), "--out", str(out)], cwd=self.dir,
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if r.returncode:
-            raise RuntimeError(f"layer.py prepare --target {t} --set {sset} failed: {(r.stdout + r.stderr).strip()[-600:]}")
-
-
-def layer_mixins(lay, t):
-    """(adds, removes) {config: {array: [class]}} the layer at that commit applies to t: its own layer.py's mixin_set(),
-    or, for a layer.py older than it, every mixin_add of the chain (farthest first), which is all such a layer read."""
-    if hasattr(lay.lp, "mixin_set"):
-        return lay.lp.mixin_set(t)
-    adds = {}
-    for v in reversed(lay.chain(t)):
-        for k, val in sorted(lay.props(v).items()):
-            if k.startswith("mixin_add."):
-                for array, c in mixin_spec(val):
-                    lst = adds.setdefault(k[len("mixin_add."):], {}).setdefault(array, [])
-                    if c not in lst:
-                        lst.append(c)
-    return adds, {}
-
-
-def ordered_targets(lay, only=None):
-    """The layer's targets, each after the target it inherits (its parent's branch must exist first)."""
-    names = lay.targets()
-    out = []
-
-    def add(t, seen=()):
-        if t in out:
-            return
-        if t in seen:
-            raise ValueError(f"inherits loop at {t}")
-        inh = lay.props(t).get("inherits")
-        if inh:
-            add(inh, (*seen, t))
-        out.append(t)
-    for t in names:
-        add(t)
-    if only:
-        want = set(only)
-        bad = want - set(names)
-        if bad:
-            raise ValueError(f"not targets of the layer: {', '.join(sorted(bad))}")
-        out = [t for t in out if t in want]
-    return out
-
-
-def strip_layer_hook(text):
-    """build.gradle with make-fork-layer.py's hook (its comment lines and the apply line) taken out."""
-    hook = load("make_fork_layer_fb", "make-fork-layer.py").HOOK
-    if text.endswith(hook):
-        return text[:-len(hook)].rstrip("\n") + "\n"
-    return "".join(l for l in text.splitlines(keepends=True) if l.strip() != LAYER_HOOK_LINE)
-
+# ---------------------------------------------------------------- commits made with git plumbing (no checkout)
 
 AT_DEFAULT = "src/main/resources/META-INF/accesstransformer.cfg"
-
-
-def custom_at_paths(build_gradle):
-    """Access-transformer files the authors' build.gradle names other than the default path."""
-    out = []
-    for m in re.finditer(r"accessTransformers?[^\n]*?['\"]([^'\"\n]+\.cfg)['\"]", build_gradle):
-        p = m.group(1).lstrip("./")
-        if p != AT_DEFAULT:
-            out.append(p)
-    return sorted(set(out))
-
-
-def translate_path(p, t=None):
-    """A layer record's path as the version branch has it: an overlay or a prepared file -> src/<set>/java/<rel>, a
-    target's resource -> src/main/resources/<rel>; anything else unchanged."""
-    m = re.match(r"^\.multiversion/targets/[^/]+/(?:([\w-]+)/)?java/(.+)$", p)
-    if m:
-        return f"src/{m.group(1) or 'main'}/java/{m.group(2)}"
-    m = re.match(r"^\.multiversion/targets/[^/]+/resources/(.+)$", p)
-    if m:
-        return f"src/main/resources/{m.group(1)}"
-    m = re.match(r"^build/mc[^/]+/mv/(?:([\w-]+)-)?java/(.+)$", p)
-    if m:
-        return f"src/{m.group(1) or 'main'}/java/{m.group(2)}"
-    return p
-
-
-def translate_stubs(text):
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return text
-    if not isinstance(data, list):
-        return text
-    for e in data:
-        if isinstance(e, dict) and isinstance(e.get("file"), str):
-            e["file"] = translate_path(e["file"])
-    return json.dumps(data, indent=1, ensure_ascii=False) + "\n"
-
-
-def expected_tree(lay, t, parent, port_commit, parent_files=None):
-    """{path: bytes} of version branch t as migrated from layer commit lay.commit (without the records of other
-    versions, which the branch carries from its parent), and notes. parent_files: the parent version's expected tree
-    (for its mixin configs; None for the first version)."""
-    repo, notes = lay.repo, []
-    base = ref_files(repo, port_commit)
-    files = {p: d for p, d in base.items() if not p.startswith(".multiversion/") and not p.startswith(REC + "/")
-             and not head_only(p)}
-    tprops, raw = lay.props(t), lay.raw_props(t)
-    ch = lay.chain(t)
-    # sources: the layer's own prepare, per source set (main last, as layer.gradle does)
-    sets = sorted({p.split("/")[1] for p in files if re.match(r"^src/[^/]+/java/", p)}, key=lambda s: (s == "main", s))
-    with tempfile.TemporaryDirectory() as d:
-        for s in sets:
-            out = pathlib.Path(d) / f"{s}-java"
-            lay.prepare(t, s, out)
-            for p in [p for p in files if p.startswith(f"src/{s}/java/") and p.endswith(".java")]:
-                del files[p]
-            for f in sorted(out.rglob("*.java")):
-                files[f"src/{s}/java/{f.relative_to(out).as_posix()}"] = f.read_bytes()
-    # resources: the chain's resources over the authors' (main set only; the nearest target wins)
-    for v in reversed(ch):
-        rd = lay.mv / "targets" / v / "resources"
-        for f in sorted(rd.rglob("*")) if rd.is_dir() else []:
-            if f.is_file():
-                files[f"src/main/resources/{f.relative_to(rd).as_posix()}"] = f.read_bytes()
-    at = next((lay.mv / "targets" / v / "resources/META-INF/accesstransformer.cfg" for v in ch
-               if (lay.mv / "targets" / v / "resources/META-INF/accesstransformer.cfg").is_file()), None)
-    bg = strip_layer_hook(files.get("build.gradle", b"").decode("utf-8", "surrogateescape"))
-    if at is not None:
-        for p in custom_at_paths(bg):
-            files[p] = at.read_bytes()
-            notes.append(f"{t}: the target's access transformer written to {p} too (the authors' build names it)")
-    # the edits layer.gradle made at processResources: mixin configs, mods.toml ranges
-    adds, removes = layer_mixins(lay, t)
-    deltas = {}
-    for p in sorted(files):
-        name = p.rsplit("/", 1)[-1]
-        if not p.startswith("src/") or "/resources/" not in p and "/templates/" not in p:
-            continue
-        if name in adds or name in removes:
-            obj = jload(files[p])
-            a = [(arr, c) for arr, cs in (adds.get(name) or {}).items() for c in cs]
-            r = [(arr, c) for arr, cs in (removes.get(name) or {}).items() for c in cs]
-            new = mixin_edit(obj, a, r)
-            if new != obj:
-                files[p] = json_like(new, files[p].decode("utf-8", "surrogateescape")).encode("utf-8", "surrogateescape")
-        if name == "neoforge.mods.toml":
-            ranges = {k[5:]: v for k, v in tprops.items() if k.startswith("toml.")}
-            if ranges:
-                files[p] = toml_rewrite(files[p].decode("utf-8", "surrogateescape"), ranges).encode("utf-8", "surrogateescape")
-    # this version's mixin changes over its parent's configs, for the derived-file rule
-    for p in sorted(files):
-        name = p.rsplit("/", 1)[-1]
-        if (name in adds or name in removes) and p.startswith("src/"):
-            before = (parent_files or base).get(p)
-            if before is not None:
-                a_, r_ = mixin_delta(jload(before), jload(files[p]))
-                if a_:
-                    deltas[f"mixin_add.{name}"] = spec_text(a_)
-                if r_:
-                    deltas[f"mixin_remove.{name}"] = spec_text(r_)
-    # versions, the hook, the shared script
-    gp = files.get("gradle.properties", b"").decode("utf-8", "surrogateescape")
-    files["gradle.properties"] = set_props_text(gp, {k[5:]: v for k, v in tprops.items() if k.startswith("prop.")}).encode(
-        "utf-8", "surrogateescape")
-    files["build.gradle"] = (bg.rstrip("\n") + "\n" + BRANCH_HOOK).encode("utf-8", "surrogateescape")
-    files[f"{REC}/branch.gradle"] = TPL.read_bytes()
-    if (lay.mv / "INVENTORY.json").is_file():
-        files[f"{REC}/INVENTORY.json"] = (lay.mv / "INVENTORY.json").read_bytes()
-    files.update(records_of(lay, t, parent, port_commit, raw, deltas, files, ch))
-    return files, notes
-
-
-RECORD_COPY = ("GATES.md", "COST.md", "DEPS.md", "TEST-ITEMS.md", "RESIDUE.md", "BEHAVIOUR.json", "renames.tsv",
-               "moves.generated.tsv", "drops.txt", "logs-known-absent.txt")
-LAYER_ONLY_KEYS = re.compile(r"^(?:inherits|mixin_add\.|mixin_add_only\.|mixin_remove_only\.|shared_chain)")
-
-
-def records_of(lay, t, parent, port_commit, raw, deltas, files, ch):
-    """{path: bytes} of .port/<t>/: branch.properties, the target's records (paths translated), its rows."""
-    tdir, rd = lay.mv / "targets" / t, f"{REC}/{t}"
-    pb = branch_name(lay.base.get("minecraft_version", "1.21.1"))
-    head = [f"# Version branch {branch_name(t)} (tools/fork-branches.py migrate): Minecraft {t}, from the layer target {t}",
-            f"# at {lay.commit[:12]}. The build keys below are what layer.gradle applied with -Pmc={t}; .port/branch.gradle",
-            "# reads them, gradle.properties holds the prop.* versions, and mixin_add/mixin_remove are this version's changes",
-            "# over its parent branch's mixin configs (already written into them).",
-            f"minecraft_version={t}", f"branch={branch_name(t)}", f"parent={branch_name(parent) if parent else pb}"]
-    if parent:
-        head.append(f"parent_minecraft_version={parent}")
-    head += [f"port_branch={pb}", f"base_minecraft_version={lay.base.get('minecraft_version', '1.21.1')}",
-             f"port_taken={port_commit}"]
-    for k in ("mv_package", "upstream", "upstream_commit", "library"):
-        if lay.base.get(k):
-            head.append(f"{k}={lay.base[k]}")
-    head += [f"{k}={v}" for k, v in sorted(lay.base.items()) if k.startswith("library.")]
-    sc = lay.shared_chain(t)
-    if sc != ch:
-        head.append("shared_chain=" + ",".join(sc))
-    body = [l for l in raw.splitlines() if not LAYER_ONLY_KEYS.match(l.strip()) and not l.lstrip().startswith("# Minecraft ")]
-    out = {f"{rd}/{BRANCH_PROPS}": ("\n".join(head + body + [f"{k}={v}" for k, v in sorted(deltas.items())]) + "\n").encode("utf-8")}
-    for name in RECORD_COPY:
-        if (tdir / name).is_file():
-            out[f"{rd}/{name}"] = (tdir / name).read_bytes()
-    if (tdir / "STUBS.json").is_file():
-        out[f"{rd}/STUBS.json"] = translate_stubs(read_file(tdir / "STUBS.json")).encode("utf-8")
-    for n in (f"shipped-expect-{t}.txt", "shipped-expect.txt"):
-        if (lay.mv / n).is_file():
-            out[f"{rd}/shipped-expect.txt"] = (lay.mv / n).read_bytes(); break
-    if (lay.mv / "shipped-jar.txt").is_file():
-        out[f"{rd}/shipped-jar.txt"] = (lay.mv / "shipped-jar.txt").read_bytes()
-    drift = [l for l in read_file(lay.mv / "DRIFT.md").splitlines() if re.match(rf"^- \S+ {re.escape(t)}: ", l)]
-    if drift:
-        out[f"{rd}/DRIFT.md"] = ("\n".join(drift) + "\n").encode("utf-8")
-    shared = [f"# ---- shared {s}\n" + read_file(lay.mv / "shared" / s / "renames.tsv") for s in sc
-              if (lay.mv / "shared" / s / "renames.tsv").is_file()]
-    if shared:
-        out[f"{rd}/shared-renames.tsv"] = ("\n".join(shared) + "\n").encode("utf-8")
-    # the shared-library helpers the layer added to this target's tree (a later helper edit is a review item)
-    pool = {}
-    for s in reversed(sc):
-        d = lay.mv / "shared" / s / "java"
-        for f in d.rglob("*.java") if d.is_dir() else []:
-            pool[f.relative_to(d).as_posix()] = f.read_bytes()
-    own = {f.relative_to(lay.mv / "targets" / v / "java").as_posix() for v in ch
-           for f in (lay.mv / "targets" / v / "java").rglob("*.java")} if pool else set()
-    helpers = [f"src/main/java/{rel} {hash_blobs({rel: files[f'src/main/java/{rel}']})[rel]}" for rel in sorted(pool)
-               if f"src/main/java/{rel}" in files and rel not in own and files[f"src/main/java/{rel}"] == pool[rel]]
-    if helpers:
-        out[f"{rd}/shared-helpers.txt"] = ("# shared-library helpers as installed (path blob): tools/fork-branches.py\n"
-                                           + "\n".join(helpers) + "\n").encode("utf-8")
-    rm = tdir / "REMERGE.json"
-    if rm.is_file():
-        try:
-            data = json.loads(read_file(rm))
-            for c in data.get("conflicts", []):
-                ov = lay.dir / str(c.get("overlay", ""))
-                new = translate_path(str(c.get("overlay", "")))
-                if ov.is_file() and hashlib.sha256(ov.read_bytes()).hexdigest() == str(c.get("digest", "")).lower() \
-                        and new in files:
-                    c["digest"] = hashlib.sha256(files[new]).hexdigest()       # still open: the branch file's bytes
-                c["overlay"] = new
-            out[f"{rd}/REMERGE.json"] = (json.dumps(data, indent=1) + "\n").encode("utf-8")
-        except ValueError:
-            out[f"{rd}/REMERGE.json"] = rm.read_bytes()
-    known = set(RECORD_COPY) | {"STUBS.json", "REMERGE.json", "target.properties", "REVIEW.md", "INVENTORY-CHECK.json"}
-    for f in sorted(tdir.iterdir()) if tdir.is_dir() else []:
-        if f.is_file() and f.name not in known:
-            out[f"{rd}/{f.name}"] = f.read_bytes()
-    return out
-
-
-def translate_review(lay, t, items_now, layer_items):
-    """The layer target's REVIEW.md as version branch t's, keeping only what a reviewer judged: each verdict moves to
-    the branch item that stands for the same bytes -- an overlay row to its `changed` src file, a resource group's row
-    (when it was current) to the branch's group when the branch group's files are among the reviewed ones, renames.tsv
-    (same digest), stub/item/missing/shared rows as they are. An item no reviewer judged gets no row (the done check,
-    and fork-port.py's skeleton, list it). -> text or None when the layer target has no REVIEW.md."""
-    f_ = fp()
-    src = lay.mv / "targets" / t / "REVIEW.md"
-    if not src.is_file():
-        return None
-    text = read_file(src)
-    fields, rows = f_.parse_review(text)
-    current = set(layer_items)
-    out = {}
-    for (kind, file), (v, note) in rows.items():
-        if kind == "overlay":
-            out[("changed", translate_path(file))] = (v, note)
-        elif kind == "stub":
-            out[("stub", translate_path(file))] = (v, note)
-        elif kind == "renames":
-            out[("renames", file.replace(f".multiversion/targets/{t}/", f"{REC}/{t}/"))] = (v, note)
-        elif kind == "resources":
-            if (kind, file) not in current:
-                continue                                    # a stale verdict carries nothing
-            out[("layer-resources", file)] = (v, note)
-        else:
-            out[(kind, file)] = (v, note)
-    # a branch resource group takes the verdict of the current layer group with the same key whose files include it
-    lgroups = {f.split(" @", 1)[0].replace(f".multiversion/targets/{t}/", "src/main/"): (v, n)
-               for (k, f), (v, n) in out.items() if k == "layer-resources"}
-    for kind, file in items_now:
-        if kind == "resources":
-            key = file.split(" @", 1)[0]
-            if key in lgroups:
-                out[("resources", file)] = (lgroups[key][0], lgroups[key][1] + " [migrated from the layer's review of this group]")
-    out = {k: v for k, v in out.items() if k[0] != "layer-resources"}
-    p = {"branch": branch_name(t)}
-    head = REVIEW_HEAD.format(t=t, b=p["branch"], p="its parent branch")
-    head = head.replace("- reviewer: ?\n- date: ?\n- commit: ?\n",
-                        f"- reviewer: {fields.get('reviewer', '?')}\n- date: {fields.get('date', '?')}\n"
-                        f"- commit: {fields.get('commit', '?')}\n")
-    head = head.replace("\n\n- reviewer:", f"\n\nMigrated from the layer's .multiversion/targets/{t}/REVIEW.md by "
-                                            "tools/fork-branches.py: the commit is a layer commit, mapped in MIGRATED.json.\n\n- reviewer:", 1)
-    return head + "".join(f"| {k} | {x.replace('|', chr(92) + '|')} | {v} | {n.replace('|', chr(92) + '|')} |\n"
-                          for (k, x), (v, n) in sorted(out.items()))
 
 
 def commit_tree(repo, files, modes, parent, message, env_extra=None):
@@ -1689,279 +1350,8 @@ def commit_tree(repo, files, modes, parent, message, env_extra=None):
 TRAILER = "\n\nMade by tools/fork-branches.py (mc-mod-version-upgrade)."
 
 
-def compare_trees(want, have, ignore=()):
-    """[(path, what)] where two {path: bytes} trees differ."""
-    out = []
-    for p in sorted(set(want) | set(have)):
-        if any(p == i or p.startswith(i) for i in ignore):
-            continue
-        if p not in have:
-            out.append((p, "missing on the branch"))
-        elif p not in want:
-            out.append((p, "only on the branch"))
-        elif want[p] != have[p]:
-            out.append((p, "differs"))
-    return out
-
-
-def layer_commit_of(repo, layer_ref):
-    for ref in ([layer_ref] if layer_ref else ["HEAD", "neoforge-1.21.x", "origin/neoforge-1.21.x"]):
-        c = git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").stdout.strip()
-        if c and git(repo, "cat-file", "-e", f"{c}:.multiversion/base.properties").returncode == 0:
-            return ref, c
-    return None, None
-
-
-def verify_target(lay, t, branch_ref, parent, port_commit, parent_files=None):
-    """[(path, what)]: where version branch `branch_ref` differs from what layer commit lay.commit makes for t -- the
-    layer's own `layer.py prepare` run again for every source set, the chain's resources, the mixin arrays the layer's
-    own resolver gives, the versions and the hook. Records under .port/ are not compared (they move on)."""
-    repo = lay.repo
-    want, _notes = expected_tree(lay, t, parent, port_commit, parent_files)
-    have = ref_files(repo, branch_ref)
-    have = {p: d for p, d in have.items() if not p.startswith(REC + "/") or p == f"{REC}/branch.gradle"}
-    want = {p: d for p, d in want.items() if not p.startswith(REC + "/") or p == f"{REC}/branch.gradle"}
-    diffs = compare_trees(want, have)
-    adds, removes = layer_mixins(lay, t)
-    for cfg in sorted(set(adds) | set(removes)):
-        for p in [p for p in have if p.rsplit("/", 1)[-1] == cfg and p.startswith("src/")]:
-            src = next((lay.mv / "targets" / v / "resources" / p.split("/resources/", 1)[1] for v in lay.chain(t)
-                        if p.startswith("src/main/resources/") and
-                        (lay.mv / "targets" / v / "resources" / p.split("/resources/", 1)[1]).is_file()), lay.dir / p)
-            if not src.is_file():
-                continue
-            if not hasattr(lay.lp, "apply_mixins"):
-                continue                # an older layer.py: the arrays were compared byte for byte above
-            layer_arrays = lay.lp.apply_mixins(json.loads(read_file(src)), cfg, adds, removes)
-            got = jload(have[p])
-            mine = {k: sorted(v) for k, v in got.items() if isinstance(v, list)}
-            if {k: v for k, v in layer_arrays.items() if v or k in mine} != {k: v for k, v in mine.items() if v or k in layer_arrays}:
-                diffs.append((p, f"mixin arrays differ from the layer's (layer.py mixins --target {t} --config): "
-                                 f"{layer_arrays} vs {mine}"))
-    return diffs
-
-
-def migrate(repo, layer_ref=None, targets=None, dry_run=False, port_branch=None, say=print, jpath=None, library=False):
-    """-> exit code. See the module docstring. library (--library), or a layer whose base.properties says
-    library=true: every branch made gets library=true in its branch.properties (the library rule: done only once a
-    dependent passed Gate C against its jar; its Gate C skips spawn and battle)."""
-    repo = pathlib.Path(repo).resolve()
-    ref, lc = layer_commit_of(repo, layer_ref)
-    if not lc:
-        say(f"fork-branches: no layer (.multiversion/base.properties) at {layer_ref or 'HEAD / neoforge-1.21.x'}: nothing to migrate")
-        return 2
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="fork-branches-"))
-    lay = None
-    report = {"layer_ref": ref, "layer_commit": lc, "targets": []}
-    try:
-        lay = Layer(repo, lc, scratch)
-        if library or lay.base.get("library") == "true":
-            lay.base["library"] = "true"            # records_of writes it into every branch.properties
-            say("fork-branches: a library fork" + (" (--library)" if library else " (the layer's base.properties says "
-                "library=true)") + ": every version branch gets library=true")
-        base_mc = lay.base.get("minecraft_version", "1.21.1")
-        pb = port_branch or branch_name(base_mc)
-        port_tip = resolve_branch(repo, pb)
-        if not port_tip:
-            say(f"fork-branches: the port branch {pb} is not in this clone (pass --port-branch)"); return 2
-        port_commit = git(repo, "merge-base", lc, port_tip).stdout.strip()
-        iso = git(repo, "diff", "--name-only", port_commit, lc).stdout.split()
-        outside = [p for p in iso if not p.startswith(".multiversion/") and p != "build.gradle"]
-        if outside:
-            say(f"fork-branches: the layer at {lc[:12]} differs from the port commit it carries ({port_commit[:12]}) outside "
-                f".multiversion/ ({', '.join(outside[:5])}): not an isolated layer (layer.py isolation); refusing"); return 2
-        ahead = git(repo, "rev-list", "--count", f"{port_commit}..{port_tip}").stdout.strip()
-        if ahead not in ("", "0"):
-            say(f"fork-branches: note: {pb} has {ahead} commit(s) the layer does not carry; the version branches start from "
-                f"the port commit the layer carries ({port_commit[:12]}) -- bring them up afterwards with "
-                f"`fork-branches.py cascade --repo {repo} {pb}..<newest>`")
-        try:
-            order = ordered_targets(lay, targets)
-        except ValueError as e:
-            say(f"fork-branches: {e}"); return 2
-        say(f"fork-branches: layer {ref} at {lc[:12]}, port {pb} at {port_commit[:12]}; versions in chain order: "
-            f"{' -> '.join(order)}" + (" (dry run: nothing is written)" if dry_run else ""))
-        made, expected_of, bad, planned = {}, {}, 0, set()
-        for t in order:
-            inh = lay.props(t).get("inherits")
-            parent = inh
-            if inh and inh not in order and not resolve_branch(repo, branch_name(inh)):
-                say(f"fork-branches: {t} inherits {inh}, which is neither migrated nor in --targets"); return 2
-            start = (made.get(inh) or resolve_branch(repo, branch_name(inh))) if inh else port_commit
-            row = {"target": t, "branch": branch_name(t), "parent": branch_name(inh) if inh else pb, "start": start}
-            want, notes = expected_tree(lay, t, parent, port_commit, expected_of.get(inh))
-            expected_of[t] = want
-            for n in notes:
-                say(f"fork-branches: {n}")
-            carried = {p: d for p, d in (ref_files(repo, start, REC) if git(repo, "cat-file", "-e", f"{start}:{REC}").returncode == 0
-                                         else {}).items() if not p.startswith(f"{REC}/{t}/")
-                       and p not in (f"{REC}/branch.gradle", f"{REC}/INVENTORY.json") and not head_only(p)}
-            tree = dict(carried, **want)
-            modes = {p: m for p, (m, _b) in tree_entries(repo, port_commit).items()}
-            existing = resolve_branch(repo, branch_name(t))
-            if existing:
-                have = ref_files(repo, existing)
-                diff = [d for d in compare_trees({p: v for p, v in tree.items() if not p.startswith(f"{REC}/{t}/")},
-                                                 {p: v for p, v in have.items() if not p.startswith(f"{REC}/{t}/")
-                                                  and not head_only(p)})]     # a copy an older migrate carried
-                if diff:
-                    say(f"fork-branches: REFUSED {t}: {branch_name(t)} already exists with other content ({len(diff)} "
-                        f"file(s), e.g. {diff[0][0]}: {diff[0][1]}); it is never moved or deleted -- rename it, or migrate "
-                        "the other versions with --targets")
-                    return 2
-                say(f"fork-branches: {t}: {branch_name(t)} exists with the same content: left as it is")
-                made[t] = existing
-                row["result"] = "exists, same content"
-                report["targets"].append(row)
-                continue
-            if dry_run:
-                n_src = sum(1 for p in want if p.startswith("src/"))
-                rec = sorted(p.rsplit("/", 1)[-1] for p in want if p.startswith(f"{REC}/{t}/"))
-                rec += ["MIGRATED.json", "INVENTORY-CHECK.json (fresh)"] + \
-                    (["REVIEW.md (the layer's verdicts)"] if (lay.mv / "targets" / t / "REVIEW.md").is_file() else [])
-                at = f"{start[:12]}" if not inh or inh not in planned else "its tip once made"
-                say(f"fork-branches: {t}: would make {branch_name(t)} from {row['parent']} ({at}): {n_src} source "
-                    f"file(s) from the layer's prepare, records {', '.join(rec)}")
-                planned.add(t)
-                made[t] = start
-                row["result"] = "planned"
-                report["targets"].append(row)
-                continue
-            c1 = commit_tree(repo, tree, modes, start,
-                             f"Version branch {branch_name(t)}: Minecraft {t} from the layer at {lc[:12]}\n\n"
-                             f"The source is what the layer's `layer.py prepare --target {t}` makes (every source set), the\n"
-                             f"resources and build settings what layer.gradle applied with -Pmc={t}, and the target's records\n"
-                             f"are in .port/{t}/." + TRAILER)
-            # the mapping that keeps a reviewed, gated target done: each commit its records name -> the digests of what
-            # the layer prepared there
-            recorded = {}
-            named = set()
-            for name in ("GATES.md", "REVIEW.md"):
-                txt = read_file(lay.mv / "targets" / t / name)
-                m = re.search(r"at `([0-9a-f]{7,40})", txt.splitlines()[0]) if name == "GATES.md" and txt else None
-                if m:
-                    named.add(m.group(1))
-                if name == "REVIEW.md" and txt:
-                    cm = fp().parse_review(txt)[0].get("commit", "")
-                    if COMMIT_ID.match(cm or ""):
-                        named.add(cm)
-            # REVIEW.md as the branch's, from the layer's verdicts (needs the branch items, so after the tree exists)
-            stage = export(repo, c1, scratch / f"stage-{t}")
-            items_now = review_items(repo, stage, t, c1, False)
-            try:
-                layer_items = fp().review_items(lay.dir, lay.mv / "targets" / t)
-            except Exception:       # noqa: BLE001 -- an old layer: no current-item test, so no resource verdict carries
-                layer_items = []
-            rv = translate_review(lay, t, items_now, layer_items)
-            extra = {}
-            if rv is not None:
-                extra[f"{REC}/{t}/REVIEW.md"] = rv.encode("utf-8")
-                (stage / REC / t / "REVIEW.md").write_text(rv, encoding="utf-8")
-            for c in sorted(named):
-                full = git(repo, "rev-parse", "--verify", "--quiet", f"{c}^{{commit}}").stdout.strip()
-                if not full:
-                    recorded[c] = {"error": "not a commit in this clone"}
-                    continue
-                if full == lc:
-                    files_c = dict(tree, **extra)
-                else:
-                    try:
-                        lc_ = Layer(repo, full, scratch)
-                        pc_ = git(repo, "merge-base", full, port_tip).stdout.strip()
-                        files_c, _n = expected_tree(lc_, t, parent, pc_, None)
-                        lc_.close()
-                    except Exception as e:      # noqa: BLE001 -- recorded: that record then does not carry
-                        recorded[full] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
-                        continue
-                dj, dr = digests(files_c, t, modes)
-                recorded[full] = {"digest": dj, "review_inputs": dr, "with_modes": True}
-            jar, inputs = digests(dict(tree, **extra), t, modes)
-            mig = {"tool": "tools/fork-branches.py migrate", "layer_ref": ref, "layer_commit": lc, "target": t,
-                   "port_commit": port_commit, "branch_commit": c1, "digest": jar, "review_inputs": inputs,
-                   "with_modes": True, "recorded": recorded}
-            extra[f"{REC}/{t}/MIGRATED.json"] = (json.dumps(mig, indent=1) + "\n").encode("utf-8")
-            (stage / REC / t / "MIGRATED.json").write_bytes(extra[f"{REC}/{t}/MIGRATED.json"])
-            # the inventory account, fresh, so the committed file is what a check says (gap 1)
-            li = _mod("layer_inventory_fb", "layer-inventory.py")
-            files_s = root_files(repo, stage, False)
-            code, rep, _lines = li.check_branch(repo, stage, t, mechanical=mechanical_files(repo, stage, t, c1, files_s),
-                                                files=files_s, ref=c1)
-            if rep is not None:
-                extra[f"{REC}/{t}/{li.CHECK_FILE}"] = li.check_text(rep).encode("utf-8")
-            c2 = commit_tree(repo, dict(tree, **extra), modes, c1,
-                             f"{branch_name(t)}: its records migrated from the layer\n\n"
-                             f"REVIEW.md keeps the layer reviewer's verdicts on the files that stand for the same bytes;\n"
-                             f"MIGRATED.json maps each layer commit GATES.md and REVIEW.md name to the digest of what the\n"
-                             f"layer prepared there (branch commit {c1[:12]}); INVENTORY-CHECK.json is a fresh account." + TRAILER)
-            if git(repo, "branch", branch_name(t), c2).returncode != 0:
-                say(f"fork-branches: could not create {branch_name(t)}"); return 2
-            made[t] = c2
-            diffs = verify_target(lay, t, c2, parent, port_commit, expected_of.get(inh))
-            bad += bool(diffs)
-            done = target_done(repo, t)
-            try:
-                layer_done = fp().target_done(lay.checkout(), t, write=False, prepare=True)
-            except Exception as e:      # noqa: BLE001
-                layer_done = [f"(the layer's own check failed: {e})"]
-            row.update(result="made", commit=c2, migration_commit=c1, identical=not diffs, diffs=diffs[:20],
-                       layer_done=not layer_done, branch_done=not done, not_done=done[:20], layer_not_done=layer_done[:20])
-            report["targets"].append(row)
-            say(f"fork-branches: {t}: made {branch_name(t)} at {c2[:12]} from {row['parent']}; "
-                + ("byte-identical to the layer's prepare" if not diffs else f"DIFFERS from the layer in {len(diffs)} file(s)")
-                + f"; layer {'done' if not layer_done else 'not done'}, branch {'done' if not done else 'not done'}")
-            for p, what in diffs[:10]:
-                say(f"fork-branches:   {p}: {what}")
-            if not layer_done and done:
-                for w in done[:8]:
-                    say(f"fork-branches:   NOT done on the branch although done on the layer: {w}")
-        if jpath:
-            pathlib.Path(jpath).write_text(json.dumps(report, indent=1), encoding="utf-8")
-        if not dry_run and made:
-            say("fork-branches: nothing was pushed. Check each branch, then: git push origin "
-                + " ".join(branch_name(t) for t in order))
-            say("fork-branches: CI per version branch: python3 tools/fork-branches.py ci --repo DIR --target <t> --modid ID")
-        return 1 if bad else 0
-    finally:
-        if lay is not None:
-            lay.close()
-        shutil.rmtree(scratch, ignore_errors=True)
-
-
-def verify(repo, layer_ref=None, targets=None, tip=False, say=print):
-    """Compare each version branch with what the layer makes (verify_target). The branch's migration commit (named in
-    MIGRATED.json) is compared unless tip. -> 0 identical, 1 a difference, 2 bad input."""
-    repo = pathlib.Path(repo).resolve()
-    ref, lc = layer_commit_of(repo, layer_ref)
-    if not lc:
-        say("fork-branches: no layer to compare with (--layer-ref)"); return 2
-    scratch = pathlib.Path(tempfile.mkdtemp(prefix="fork-branches-"))
-    lay = Layer(repo, lc, scratch)
-    try:
-        pb = branch_name(lay.base.get("minecraft_version", "1.21.1"))
-        port_commit = git(repo, "merge-base", lc, resolve_branch(repo, pb) or lc).stdout.strip()
-        bad, prev = 0, {}
-        for t in ordered_targets(lay, targets):
-            b = resolve_branch(repo, branch_name(t))
-            if not b:
-                say(f"fork-branches: {t}: no branch {branch_name(t)}"); bad += 1; continue
-            mig = json.loads(git(repo, "show", f"{b}:{REC}/{t}/MIGRATED.json").stdout or "{}") if not tip else {}
-            at = mig.get("branch_commit") or b
-            inh = lay.props(t).get("inherits")
-            diffs = verify_target(lay, t, at, inh, port_commit, prev.get(inh))
-            prev[t] = expected_tree(lay, t, inh, port_commit, prev.get(inh))[0]
-            say(f"fork-branches: {t}: {branch_name(t)} at {at[:12]} " + ("byte-identical to the layer's prepare" if not diffs
-                                                                         else f"DIFFERS in {len(diffs)} file(s)"))
-            for p, what in diffs[:20]:
-                say(f"fork-branches:   {p}: {what}")
-            bad += bool(diffs)
-        return 1 if bad else 0
-    finally:
-        lay.close()
-        shutil.rmtree(scratch, ignore_errors=True)
-
-
-
 # ---------------------------------------------------------------- cascade: merge a lower branch up the chain
+
 
 def chain_read(read, t):
     """chain() through a reader (a tree that is not on disk)."""
@@ -4047,6 +3437,7 @@ def write_test_items(repo, t):
 
 # ---------------------------------------------------------------- a new version branch
 
+
 def version_branches(repo):
     """{version: commit} of every version branch in the clone (local first, then origin's)."""
     out = {}
@@ -4062,7 +3453,7 @@ def version_branches(repo):
 def shared_helpers_for(versions_, mv_pkg, modid, build_text):
     """{rel path under src/main/java: text} of the shared library's helper classes for `versions_` (nearest first:
     the nearest version's copy wins), placeholders filled; a helper whose `// REQUIRES: <token>` the build does not
-    name is left out (make-fork-layer.py's rule)."""
+    name is left out."""
     pool = {}
     for v in reversed(versions_):
         d = shared_dir() / v / "java"
@@ -4075,7 +3466,7 @@ def shared_helpers_for(versions_, mv_pkg, modid, build_text):
 
 
 def used_helpers(pool, java_texts):
-    """The helpers of `pool` the tree uses, transitively (templates/fork-layer/tools/layer.py add_shared_helpers)."""
+    """The helpers of `pool` the tree uses, transitively."""
     text = "\n".join(java_texts)
     fqn = lambda rel: rel[:-5].replace("/", ".")
     added, changed = {}, True
@@ -4149,6 +3540,96 @@ def helper_pass(repo, work, t, versions_, mv_pkg, modid, files, say=print, who="
     return changed
 
 
+# ---------------------------------------------------------------- which versions: templates/fork-layer/versions.json
+
+VERSIONS = ROOT / "templates/fork-layer/versions.json"
+
+
+def versions_table():
+    """templates/fork-layer/versions.json: the base, and per Minecraft line its NeoForge, Java, GeckoLib and whether
+    it is targeted (only lines with a STABLE NeoForge are; a beta-only line is skipped with the reason recorded)."""
+    return json.loads(VERSIONS.read_text(encoding="utf-8"))
+
+
+def version_line(mc):
+    return next((l for l in versions_table()["lines"] if l["mc"] == mc), None)
+
+
+def neo_line(v):
+    """(Minecraft version, build) a NeoForge version builds, or None for a beta or a version of neither scheme.
+    21.N.B -> 1.21.N (21.0.B -> 1.21); from 26.x the Minecraft version is the first three parts with a trailing .0
+    dropped: 26.2.0.B -> 26.2, 26.1.2.B -> 26.1.2."""
+    m = re.match(r"21\.(\d+)\.(\d+)$", v)
+    if m:
+        n = int(m.group(1))
+        return ("1.21" if n == 0 else f"1.21.{n}"), int(m.group(2))
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)\.(\d+)$", v)
+    if m and int(m.group(1)) >= 26:
+        a, b, c = m.group(1), m.group(2), int(m.group(3))
+        return (f"{a}.{b}" if c == 0 else f"{a}.{b}.{c}"), int(m.group(4))
+    return None
+
+
+def neo_of(mc, build):
+    """The NeoForge version string for a Minecraft version and build: the inverse of neo_line."""
+    p = mc.split(".")
+    if p[0] == "1":
+        return f"21.{p[2] if len(p) > 2 else 0}.{build}"
+    return f"{p[0]}.{p[1]}.{p[2] if len(p) > 2 else 0}.{build}"
+
+
+def newest_stable(xml):
+    """{Minecraft version: newest stable NeoForge version string} from maven-metadata.xml."""
+    newest = {}
+    for v in re.findall(r"<version>([^<]+)</version>", xml):
+        nl = neo_line(v)
+        if nl:
+            newest[nl[0]] = max(newest.get(nl[0], 0), nl[1])
+    return {mc: neo_of(mc, b) for mc, b in newest.items()}
+
+
+def versions_cmd(refresh=False, say=print):
+    """`versions`: the targeted lines; with --refresh, the newest stable NeoForge per line from the NeoForge maven,
+    and any stable line versions.json lacks."""
+    tbl = versions_table()
+    if not refresh:
+        for l in tbl["lines"]:
+            say(f"{l['mc']:8} {l['neo'] or '-':10} {'target' if l['stable'] else 'skipped: ' + l['skip']}")
+        return 0
+    import urllib.request
+    url = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+    newest = newest_stable(urllib.request.urlopen(url, timeout=30).read().decode("utf-8"))
+    for l in tbl["lines"]:
+        say(f"{l['mc']:8} recorded {l['neo'] or '-':10} newest stable on maven: {newest.get(l['mc'], 'none (beta only)')}"
+            + (f"   skipped: {l['skip']}" if l.get("skip") else ""))
+    known = {l["mc"] for l in tbl["lines"]}
+    for mc in sorted(set(newest) - known, key=mc_key):
+        if mc_key(mc) > mc_key(tbl["base"]):
+            say(f"{mc:8} NOT IN versions.json: newest stable on maven {newest[mc]} -- add a line for it")
+    return 0
+
+
+def toml_ranges(target, neo):
+    """(minecraft, neoforge) mods.toml version ranges for a version: one NeoForge line each.
+    1.21.N: [1.21.N,1.21.N+1) and [21.N,21.N+1). 26.x: every Minecraft release is its own NeoForge line, so both
+    ranges stop at the next patch release: [26.2,26.2.1) and [26.1.2,26.1.3)."""
+    parts = [int(x) for x in target.split(".")]
+    if parts[0] >= 26:
+        nxt = ".".join(map(str, parts[:2] + [parts[2] + 1 if len(parts) > 2 else 1]))
+        return f"[{target},{nxt})", f"[{target},{nxt})"
+    nxt = ".".join(map(str, parts[:-1] + [parts[-1] + 1])) if len(parts) == 3 else f"{target}.1"
+    major, minor = neo.split(".")[:2]
+    return f"[{target},{nxt})", f"[{major}.{minor},{major}.{int(minor) + 1})"
+
+
+def substitute_line(s):
+    """`group:name=group:name:version` as a branch.properties line. The key's ':' is escaped: java.util.Properties
+    (branch.gradle reads the file with it) ends a key at the first unescaped ':' as well as '=', so an unescaped
+    `substitute.a:b=a:c:1` would load as key `substitute.a`."""
+    k, _, v = s.partition("=")
+    return f"{k.replace(':', chr(92) + ':')}={v}"
+
+
 def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None, say=print):
     """Make version branch neoforge-<t> from its parent's (the nearest lower version branch, or --parent, else the port
     branch): its versions from templates/fork-layer/versions.json written into gradle.properties, branch.properties
@@ -4158,15 +3639,14 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     @OnlyIn stripped from 1.21.6. Refused (exit 18, nothing written) while the parent version is not done, unless
     allow_undone_parent (recorded). Plumbing only: no checkout is touched. -> exit code."""
     repo = pathlib.Path(repo).resolve()
-    mfl = load("make_fork_layer_fb", "make-fork-layer.py")
-    ln = mfl.line(t)
+    ln = version_line(t)
     if ln is None or not ln.get("stable"):
         say(f"fork-branches: {t} is not a targeted line of templates/fork-layer/versions.json"
             + (f": {ln['skip']}" if ln and ln.get("skip") else "")); return 2
     if resolve_branch(repo, branch_name(t)):
         say(f"fork-branches: {branch_name(t)} exists already"); return 2
     have = version_branches(repo)
-    base_mc = mfl.versions()["base"]
+    base_mc = versions_table()["base"]
     pb = port_branch or (parse_props(reader_of_ref(repo, next(iter(have.values())))(f"{REC}/{next(iter(have))}/{BRANCH_PROPS}"))
                          .get("port_branch") if have else None) or branch_name(base_mc)
     if parent in ("port", pb):
@@ -4201,11 +3681,11 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
     first = next((files[p] for p in sorted(files) if p.startswith("src/main/java/") and p.endswith(".java")), b"")
     pkg = re.search(rb"(?m)^package\s+([\w.]+)\s*;", first)
     mv_pkg = pp.get("mv_package") or ".".join((pkg.group(1).decode("utf-8", "replace").split(".") if pkg else ["mv"])[:2]) + ".mv"
-    order = [l["mc"] for l in mfl.versions()["lines"] if l.get("stable")]
+    order = [l["mc"] for l in versions_table()["lines"] if l.get("stable")]
     lo = parent or base_mc
     new_versions = [v for v in order if mc_key(lo) < mc_key(v) <= mc_key(t)][::-1]        # nearest first
     neo = ln["neo"]
-    mc_range, neo_range = mfl.ranges(t, neo)
+    mc_range, neo_range = toml_ranges(t, neo)
     props = {"prop.minecraft_version": t, "prop.neo_version": neo}
     if ln.get("geckolib") and "geckolib_version" in gp:
         props["prop.geckolib_version"] = ln["geckolib"]
@@ -4214,7 +3694,7 @@ def add_target(repo, t, parent=None, allow_undone_parent=False, port_branch=None
         keys.append(f"nfrt_version={ln['nfrt']}")
     if ln.get("geckolib_group") and "geckolib_version" in gp:
         old = f"software.bernie.geckolib:geckolib-neoforge-{t}"
-        keys.append("substitute." + mfl.substitute_line(f"{old}={ln['geckolib_group']}:geckolib-neoforge-{t}:{ln['geckolib']}"))
+        keys.append("substitute." + substitute_line(f"{old}={ln['geckolib_group']}:geckolib-neoforge-{t}:{ln['geckolib']}"))
     strip = mc_key(t) >= mc_key("1.21.6")
     if strip:
         keys.append("strip_onlyin=true")
@@ -4398,8 +3878,7 @@ def sync_plan(repo, t, work=None, ref=None, rows=True):
     sub = lambda x: x.replace("@MVPKG@", mv_pkg).replace("@MODID@", modid)
     sp = f"{REC}/{t}/shared-renames.tsv"
     old_text = read(sp)
-    mfl = _mod("make_fork_layer_fb", "make-fork-layer.py")
-    stable = [l["mc"] for l in mfl.versions()["lines"] if l.get("stable")]
+    stable = [l["mc"] for l in versions_table()["lines"] if l.get("stable")]
     # every targeted version above the base up to t, nearest first (as add-target writes them): a version whose
     # library gained a table since gets its section, and its helpers count even with no table at all
     base_v = props.get("base_minecraft_version") or (stable[0] if stable else t)
@@ -4582,8 +4061,8 @@ def status_lines(st, who="sync-shared --check"):
 
 
 def sync_shared(repo, targets=None, say=print, ci_modid=None, check=False, json_out=None):
-    """Bring version branches up to the shared library's current tables and helpers (make-fork-layer.py sync-shared's
-    job on a layer): per version, oldest first, on a clean checkout of its branch -- each `# ---- shared <v>` section of
+    """Bring version branches up to the shared library's current tables and helpers 
+    per version, oldest first, on a clean checkout of its branch -- each `# ---- shared <v>` section of
     .port/<t>/shared-renames.tsv rewritten from templates/fork-layer/shared/<v>/renames.tsv (a section edited by hand --
     equal to no text the library's table ever had -- is left alone and said); every .java file the rows alone made
     (equal to the old tables over the port branch) re-made through the new ones; each shared helper it carries as
@@ -4662,6 +4141,7 @@ def sync_shared(repo, targets=None, say=print, ci_modid=None, check=False, json_
 
 
 # ---------------------------------------------------------------- freeze, library record, CI
+
 
 def freeze(repo, t, upstream=None, libraries=(), accept_drift=False, say=print):
     """The upstream freeze of version t's branch (tools/fork-port.py freeze_upstream into .port/<t>/branch.properties):
@@ -5111,18 +4591,14 @@ def ci(repo, t, modid, run=False, say=print, kit_version=None, tags_of=remote_ta
 
 # ---------------------------------------------------------------- CLI
 
+
 def main():
     if "--self-check" in sys.argv:
         return self_check()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd")
-    m = sub.add_parser("migrate"); m.add_argument("--repo", required=True); m.add_argument("--layer-ref")
-    m.add_argument("--port-branch"); m.add_argument("--targets"); m.add_argument("--dry-run", action="store_true")
-    m.add_argument("--json")
-    m.add_argument("--library", action="store_true", help="a library fork: library=true in every made branch's "
-                   "branch.properties (inferred when the layer's base.properties says library=true)")
-    v = sub.add_parser("verify"); v.add_argument("--repo", required=True); v.add_argument("--layer-ref")
-    v.add_argument("--targets"); v.add_argument("--tip", action="store_true", help="compare the branch tips, not the migration commits")
+    vs = sub.add_parser("versions", help="the targeted Minecraft lines (templates/fork-layer/versions.json)")
+    vs.add_argument("--refresh", action="store_true", help="the newest stable NeoForge per line, from the NeoForge maven")
     c = sub.add_parser("check-done"); c.add_argument("--repo", required=True); c.add_argument("--target", required=True)
     k = sub.add_parser("cascade"); k.add_argument("--repo", required=True)
     k.add_argument("range", metavar="FROM..TO", nargs="?", help="(not with --apply-decisions: the block names its range)")
@@ -5200,6 +4676,11 @@ def main():
     ci_.add_argument("--kit-version", type=int, help="the Port CI kit to pin (default: the newest published, not the "
                      "port branch's pin)")
     a = ap.parse_args()
+    if a.cmd == "versions":
+        return versions_cmd(a.refresh)
+    why = fork_kind().refuse_layer(getattr(a, "repo", None), "fork-branches")
+    if why:
+        print(why); return 2
     if a.cmd == "add-target":
         return add_target(a.repo, a.target, a.parent, a.allow_undone_parent, a.port_branch)
     if a.cmd == "freeze":
@@ -5249,11 +4730,6 @@ def main():
         return cascade(a.repo, a.range, a.gates, a.dry_run, mode="plan" if a.plan else "apply" if a.apply else None,
                        budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream,
                        untaken_ok=a.untaken_ok, head_merge=a.head_merge)
-    if a.cmd == "migrate":
-        return migrate(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.dry_run, a.port_branch,
-                       jpath=a.json, library=a.library)
-    if a.cmd == "verify":
-        return verify(a.repo, a.layer_ref, a.targets.split(",") if a.targets else None, a.tip)
     if a.cmd == "check-done":
         return check_done(a.repo, a.target, "fork-branches")
     ap.print_help()
@@ -5299,107 +4775,34 @@ def _fixture_run(*a):
     return x.stdout
 
 
-def _fixture(d):
-    """A small layer fork: port branch neoforge-1.21.1 and layer branch neoforge-1.21.x with three targets (built once
-    per process, then copied)."""
-    return _fixture_copy("layer", lambda base: _fixture_build(base)[0], d)
+FIXTURE = ROOT / "tools/fixtures/version-branches.fi"
 
 
-def _fixture_build(d):
-    d = pathlib.Path(d); r = d / "fork"; r.mkdir(parents=True)
-    def g(*a, cwd=r): return subprocess.run(["git", "-C", str(cwd), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
-    def w(p, t):
-        f = r / p; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(t, encoding="utf-8")
+def _fixture_import(base):
+    """The version-branch fixture: port branch neoforge-1.21.1 and version branches neoforge-1.21.3/.4/.5 stacked on it,
+    each version done, with the records a migration from the removed layer left (.port/<v>/MIGRATED.json maps the layer
+    commits their GATES.md and REVIEW.md name): the shape of a migrated fork. tools/fixtures/version-branches.fi is a
+    `git fast-export` of it, frozen when the layer route was removed (the same commits every run); a legacy layer branch
+    neoforge-1.21.x (history: ignored) is added beside it, and checked out (the tool's own calls never refuse it;
+    only a command-line run on that checkout is refused)."""
+    r = pathlib.Path(base) / "fork"; r.mkdir(parents=True)
+    def g(*a): return subprocess.run(["git", "-C", str(r), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
     g("init", "-q", "-b", "neoforge-1.21.1"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
-    w("gradle.properties", "minecraft_version=1.21.1\nneo_version=21.1.228\nmod_id=examplemod\n")
-    w("build.gradle", "plugins { id 'java' }\njava.toolchain.languageVersion = JavaLanguageVersion.of(21)\n")
-    w(".gitignore", "build/\nrun/\n")
-    w("gradlew", "#!/bin/sh\necho gradle\n"); (r / "gradlew").chmod(0o755)
-    w("src/main/java/com/example/mod/ExampleMod.java", "package com.example.mod;\nimport old.Thing;\npublic class ExampleMod { Thing t; void a() { x.oldCall(); } }\n")
-    w("src/main/java/com/example/mod/Plain.java", "package com.example.mod;\npublic class Plain { int v = 1; }\n")
-    w("src/main/java/com/example/mod/Over.java", "package com.example.mod;\nimport old.Thing;\npublic class Over { Thing t; int keep = 1; }\n")
-    w("src/main/java/com/example/mod/mixin/AMixin.java", "package com.example.mod.mixin;\n@Mixin(Foo.class)\nclass AMixin {\n @Inject(method = \"tick\", at = @At(\"HEAD\"))\n void h() {}\n}\n")
-    w("src/cf/java/com/example/mod/cf/Cf.java", "package com.example.mod.cf;\nimport old.Thing;\nclass Cf { Thing t; }\n")
-    w("src/main/resources/META-INF/neoforge.mods.toml", 'modLoader="javafml"\n[[mods]]\nmodId="examplemod"\n[[dependencies.examplemod]]\nmodId="minecraft"\nversionRange="${minecraft_version_range}"\n[[dependencies.examplemod]]\nmodId="neoforge"\nversionRange="[21.1,)"\n')
-    w("src/main/resources/examplemod.mixins.json", json.dumps({"package": "com.example.mod.mixin", "mixins": ["AMixin"], "client": []}, indent=2) + "\n")
-    w("src/main/resources/assets/examplemod/models/item/a.json", '{"parent": "item/generated"}\n')
-    w("src/main/resources/data/examplemod/recipe/r.json", '{"type": "x"}\n')
-    g("add", "-A"); g("commit", "-qm", "port 1.21.1")
-    g("checkout", "-q", "-b", "neoforge-1.21.x")
-    py = sys.executable
-    def run(*a):
-        x = subprocess.run([py, *a], capture_output=True, text=True, encoding="utf-8")
-        if x.returncode: raise RuntimeError(f"{a}: {x.stdout}{x.stderr}")
-        return x.stdout
-    run(str(ROOT / "tools/make-fork-layer.py"), "init", "--repo", str(r), "--mv-package", "com.example.mod.mv")
-    mv = r / ".multiversion"
-    for t in ("1.21.3", "1.21.4", "1.21.5"):
-        run(str(ROOT / "tools/make-fork-layer.py"), "add-target", "--repo", str(r), "--target", t, "--allow-undone-parent")
-    # rows, overlays (main and cf), a resource overlay, a mixin_add, a shared helper the code names
-    w(".multiversion/targets/1.21.3/renames.tsv", "old.Thing\tnew.Thing\nmember:oldCall\tnewCall\n")
-    w(".multiversion/targets/1.21.3/java/com/example/mod/Over.java", "package com.example.mod;\nimport new.Thing;\npublic class Over { Thing t; int keep = 3; }\n")
-    w(".multiversion/targets/1.21.3/cf/java/com/example/mod/cf/Cf.java", "package com.example.mod.cf;\nimport new.Thing;\nclass Cf { Thing t; int c3; }\n")
-    w(".multiversion/targets/1.21.3/java/com/example/mod/mixin/BMixin.java", "package com.example.mod.mixin;\nclass BMixin {}\n")
-    with open(mv / "targets/1.21.3/target.properties", "a", encoding="utf-8") as f: f.write("mixin_add.examplemod.mixins.json=client:BMixin\n")
-    w(".multiversion/targets/1.21.4/resources/assets/examplemod/items/a.json", '{"model": {"type": "minecraft:model", "model": "examplemod:item/a"}}\n')
-    w(".multiversion/targets/1.21.4/renames.tsv", "member:newCall\tnewerCall\n")
-    w(".multiversion/targets/1.21.5/java/com/example/mod/Over.java", "package com.example.mod;\nimport new.Thing;\npublic class Over { Thing t; int keep = 5; }\n")
-    # an overlay-only class (the authors have none) changed at a later target, and @OnlyIn stripped at 1.21.5 from an
-    # overlay it inherits: neither is a review row on the layer, so neither may be one on the branch
-    w(".multiversion/targets/1.21.3/java/com/example/mod/OnlyHere.java", "package com.example.mod;\nclass OnlyHere { int v = 3; }\n")
-    w(".multiversion/targets/1.21.5/java/com/example/mod/OnlyHere.java", "package com.example.mod;\nclass OnlyHere { int v = 5; }\n")
-    w(".multiversion/targets/1.21.4/cf/java/com/example/mod/cf/Cf.java",
-      "package com.example.mod.cf;\nimport new.Thing;\nclass Cf {\n    @OnlyIn(Dist.CLIENT)\n    Thing t;\n}\n")
-    with open(mv / "targets/1.21.5/target.properties", "a", encoding="utf-8") as f: f.write("strip_onlyin=true\n")
-    # 1.21.4 alone takes an authors' mixin off (mixin_remove_only): the class is absent there, present again at 1.21.5
-    with open(mv / "targets/1.21.4/target.properties", "a", encoding="utf-8") as f: f.write("mixin_remove_only.examplemod.mixins.json=mixins:AMixin\n")
-    run(str(ROOT / "tools/layer-inventory.py"), "build", "--repo", str(r))
-    g("add", "-A"); g("commit", "-qm", "layer: three targets")
-    return r, g, run
-
-def _fixture_shared(r, g):
-    def w(p, t):
-        f = r / p; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(t, encoding="utf-8")
-    w(".multiversion/shared/1.21.3/renames.tsv", "#!exhaustive\nold.Shared\tnew.Shared\n#!strict\n")
-    w(".multiversion/shared/1.21.3/java/com/example/mod/mv/Helper.java", "package com.example.mod.mv;\npublic class Helper { int v = 3; }\n")
-    w(".multiversion/shared/1.21.4/java/com/example/mod/mv/Helper.java", "package com.example.mod.mv;\npublic class Helper { int v = 4; }\n")
-    g("add", "-A"); g("commit", "-qm", "shared library")
-    g("checkout", "-q", "neoforge-1.21.1")
-    w("src/main/java/com/example/mod/UsesHelper.java", "package com.example.mod;\nimport old.Shared;\nclass UsesHelper { com.example.mod.mv.Helper h; Shared s; }\n")
-    g("add", "-A"); g("commit", "-qm", "port: a class naming a helper")
-    g("checkout", "-q", "neoforge-1.21.x"); g("merge", "-q", "--no-edit", "neoforge-1.21.1")
-
-
-def _fixture_done(r, g, t):
-    """Give layer target t complete done records at HEAD (GATES.md, REVIEW.md, TEST-ITEMS.md), committed."""
-    fp_ = fp()
-    tdir = r / ".multiversion/targets" / t
-    head = g("rev-parse", "--short", "HEAD")
-    (tdir / "GATES.md").write_text(f"Gates for `examplemod` at `{head}` for Minecraft {t} (full environment) -- run by CI:\n\n"
-                                   "| check | result | detail |\n|---|---|---|\n| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
-    (tdir / "TEST-ITEMS.md").write_text(f"# Manual-test items: Minecraft {t}\n\n- none\n", encoding="utf-8")
-    fp_.prepared_tree(r, t, prepare=True)
-    fp_.review_skeleton(r, tdir, t)
-    text = (tdir / "REVIEW.md").read_text(encoding="utf-8")
-    text = text.replace("- reviewer: ?", "- reviewer: fresh agent x, not the fixer").replace("- date: ?", "- date: 2026-10-16")
-    text = text.replace("- commit: ?", f"- commit: {head}").replace("| ? | ? |", "| ok | read against the authors' file |")
-    (tdir / "REVIEW.md").write_text(text, encoding="utf-8")
-    fp_.target_done(r, t, write=True, prepare=True)
-    g("add", "-A"); g("commit", "-qm", f"{t}: done records")
-    return fp_.target_done(r, t, write=False, prepare=True)
+    with open(FIXTURE, "rb") as f:
+        subprocess.run(["git", "-C", str(r), "fast-import", "--quiet"], stdin=f, capture_output=True, check=True)
+    g("checkout", "-q", "-f", "neoforge-1.21.1")
+    port = g("rev-parse", "HEAD")
+    files = {".multiversion/base.properties": b"minecraft_version=1.21.1\n",
+             ".multiversion/targets/1.21.3/target.properties": b"prop.minecraft_version=1.21.3\n"}
+    files.update(ref_files(r, port))
+    g("branch", "neoforge-1.21.x", commit_tree(r, files, {}, port, "layer: legacy, history only"))
+    g("checkout", "-q", "neoforge-1.21.x")       # parked off the port branch (a version's worktree may take that)
+    return r
 
 
 def _migrated_fixture(d):
-    """The layer fixture with its shared library, each target done, migrated to version branches (built once per
-    process, then copied)."""
-    def build(base):
-        r, g, _run = _fixture(base)
-        _fixture_shared(r, g)
-        for t in ("1.21.3", "1.21.4", "1.21.5"):
-            _quiet(_fixture_done, r, g, t)
-        assert _quiet(migrate, r)[0] == 0
-        return r
-    return _fixture_copy("migrated", build, pathlib.Path(d) / "a")
+    """The version-branch fixture (_fixture_import), imported once per process, then copied."""
+    return _fixture_copy("migrated", _fixture_import, pathlib.Path(d) / "a")
 
 
 def _authors(r, g, edits, msg):
@@ -6331,11 +5734,7 @@ def _check_random_sequences(expect, n=None, seed=20261017, say=None):
     violations = []
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
-        r, g, _run = _fixture(d / "a")
-        _fixture_shared(r, g)
-        for t in ("1.21.3", "1.21.4", "1.21.5"):
-            _quiet(_fixture_done, r, g, t)
-        assert _quiet(migrate, r)[0] == 0
+        r, g, _run = _migrated_fixture(d)
         _quiet(add_target, r, "1.21.8", allow_undone_parent=True)
 
         def port_edit(fn, msg):
@@ -6527,28 +5926,6 @@ def _check_random_sequences(expect, n=None, seed=20261017, say=None):
     expect(not violations, f"the taken-or-recorded invariant holds under {n} random sequences (seed {seed}): "
                            + " || ".join(violations[:3]))
     return violations
-
-
-def _check_migrate_library(expect):
-    """migrate --library (or a layer whose base.properties says library=true) marks every branch a library. One target
-    each (the cost is the migrate); the control is the shared migrated fixture."""
-    lib = lambda r, t: parse_props(ref_files(r, resolve_branch(r, branch_name(t))).get(f"{REC}/{t}/{BRANCH_PROPS}", b"").decode()).get("library")
-    with tempfile.TemporaryDirectory() as d:
-        r, g, _run = _fixture(pathlib.Path(d) / "a")
-        _fixture_shared(r, g)
-        rc, out = _quiet(migrate, r, targets=["1.21.3"], library=True)
-        expect(rc == 0 and lib(r, "1.21.3") == "true" and LIBRARY_PENDING in "\n".join(target_done(r, "1.21.3")),
-               f"migrate --library: library=true on the branch made, and the library rule applies: {out[-300:]}")
-        r1, g1, _run1 = _fixture(pathlib.Path(d) / "b")
-        _fixture_shared(r1, g1)
-        bp = r1 / ".multiversion/base.properties"
-        bp.write_text(read_file(bp) + "library=true\n", encoding="utf-8"); g1("commit", "-qam", "layer: a library")
-        rc, out = _quiet(migrate, r1, targets=["1.21.3"])
-        expect(rc == 0 and lib(r1, "1.21.3") == "true",
-               f"migrate infers library=true from the layer's base.properties: {out[-300:]}")
-        r2, _g2, _run2 = _migrated_fixture(pathlib.Path(d) / "c")
-        expect(all(lib(r2, t) is None for t in ("1.21.3", "1.21.4", "1.21.5")),
-               "control: a layer that is not a library migrates without library=true")
 
 
 def _check_deferred_integration(expect):
@@ -6962,7 +6339,7 @@ def self_check():
     expect(len(calls) == 2 and "--untaken-ok" not in calls[0] and calls[1][:len(calls[0])] == calls[0]
            and calls[1][len(calls[0]):] == ["--untaken-ok", str(pathlib.Path("round/frozen.json").resolve())],
            f"cascade --untaken-ok is passed to the gates run, and only then: {calls}")
-    # @OnlyIn stripped from a CRLF file (a Windows checkout's overlay) exactly as layer.py strips it: no stray \r
+    # @OnlyIn stripped from a CRLF file (a Windows checkout): no stray \r
     crlf = "class Cf {\r\n    @OnlyIn(Dist.CLIENT)\r\n    Thing t;\r\n}\r\n"
     expect(strip_onlyin_text(crlf) == "class Cf {\r\n    Thing t;\r\n}\r\n"
            and strip_onlyin_text(crlf.replace("\r\n", "\n")) == "class Cf {\n    Thing t;\n}\n",
@@ -6982,64 +6359,25 @@ def self_check():
         expect(n == 1 and f.read_bytes() == b"import new.Thing;\r\nclass A { Thing t; String s = \"\xe9\"; }\r\n",
                f"rows applied as bytes keep CRLF and a non-UTF-8 byte: {f.read_bytes()!r}")
     # --platform (FB_SELF_CHECK_PLATFORM): only what an OS can break by itself -- the line-ending unit cases above and
-    # the port-ahead migration below (the case that failed natively on Windows), for a CI leg whose logic the
+    # the port-ahead judging below (the case that failed natively on Windows), for a CI leg whose logic the
     # default run already covers on another OS
     platform = "--platform" in sys.argv or bool(os.environ.get("FB_SELF_CHECK_PLATFORM"))
     if not platform:
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
-            r, g, _run = _fixture(d / "a")
-            _fixture_shared(r, g)
-            for t in ("1.21.3", "1.21.4", "1.21.5"):
-                why = _quiet(_fixture_done, r, g, t)[0]
-                expect(not why, f"fixture: layer target {t} done: {why}")
-            # layer mode, a fresh clone (no build/): the done check's re-prepare makes every source set's tree, the cf set's
-            # too; without it the inventory refuses rather than read the raw src/cf/java (every cf overlay item "same")
-            shutil.rmtree(r / "build/mc1.21.5")
-            expect(fp().prepared_tree(r, "1.21.5", prepare=True) == [] and (r / "build/mc1.21.5/mv/cf-java").is_dir()
-                   and b"@OnlyIn" not in (r / "build/mc1.21.5/mv/cf-java/com/example/mod/cf/Cf.java").read_bytes(),
-                   "layer re-prepare for the done check: main and the cf source set (its overlay, @OnlyIn stripped)")
-            shutil.rmtree(r / "build/mc1.21.5/mv/cf-java")
-            miss = fp().prepared_tree(r, "1.21.5", prepare=False)
-            li_ = _mod("layer_inventory_fb", "layer-inventory.py")
-            try:
-                li_.account(r, "1.21.5"); raised = ""
-            except ValueError as e:
-                raised = str(e)
-            expect(any("mv/cf-java" in m for m in miss) and "mv/cf-java" in raised,
-                   f"a missing prepared cf set: the done check and the inventory refuse to judge it: {miss} {raised!r}")
-            fp().prepared_tree(r, "1.21.5", prepare=True)
-            refs0 = g("for-each-ref", "--format=%(refname) %(objectname)")
-            head0 = g("rev-parse", "HEAD")
-            rc, out = _quiet(migrate, r, dry_run=True)
-            expect(rc == 0 and "would make neoforge-1.21.4" in out and g("for-each-ref", "--format=%(refname) %(objectname)") == refs0,
-                   f"migrate --dry-run prints the plan and writes nothing: {out[-400:]}")
-            rc, out = _quiet(migrate, r)
-            expect(rc == 0 and out.count("byte-identical to the layer's prepare") == 3 and out.count("layer done, branch done") == 3,
-                   f"migrate: three byte-identical branches, each done as its layer target was: {out[-900:]}")
-            expect(g("rev-parse", "HEAD") == head0 and not g("status", "--porcelain"),
-                   "migrate never touches the checkout (HEAD and the work tree are as they were)")
-            expect(all(resolve_branch(r, branch_name(t)) for t in ("1.21.3", "1.21.4", "1.21.5")), "the three branches exist")
-            if rc == 0 and "migrated" not in _FIXTURES:             # this is what _migrated_fixture builds: reuse it
-                shared_ = os.environ.get("FB_FIXTURE_CACHE")
-                seed = (pathlib.Path(shared_) / "migrated" / "fork") if shared_ else \
-                    pathlib.Path(tempfile.mkdtemp(prefix="fb-fixture-migrated-")) / "fork"
-                if not (seed / ".fixture-complete").is_file():
-                    shutil.rmtree(seed, ignore_errors=True)
-                    shutil.copytree(r, seed, symlinks=True)
-                    if shared_:
-                        (seed / ".fixture-complete").write_bytes(b"")
-                    else:
-                        import atexit
-                        atexit.register(shutil.rmtree, seed.parent, True)
-                _FIXTURES["migrated"] = seed
+            r, g, _run = _migrated_fixture(d)
+            # the fixture: the branches a migration from the (removed) layer made, frozen (tools/fixtures/); a legacy
+            # layer branch beside them is history and ignored
+            expect(all(resolve_branch(r, branch_name(t)) for t in ("1.21.3", "1.21.4", "1.21.5"))
+                   and resolve_branch(r, "neoforge-1.21.x") and set(version_branches(r)) == {"1.21.3", "1.21.4", "1.21.5"},
+                   "the three version branches exist; the legacy layer branch is not one")
             b4, b5 = resolve_branch(r, "neoforge-1.21.4"), resolve_branch(r, "neoforge-1.21.5")
             expect(git(r, "merge-base", "--is-ancestor", b4, b5).returncode == 0
                    and git(r, "merge-base", "--is-ancestor", resolve_branch(r, "neoforge-1.21.1"), resolve_branch(r, "neoforge-1.21.3")).returncode == 0,
                    "stacked: each branch is made from the one below it, the first from the port branch")
             f5 = ref_files(r, b5)
             expect(not any(p.startswith(".multiversion/") for p in f5) and BRANCH_HOOK_LINE in f5["build.gradle"].decode()
-                   and LAYER_HOOK_LINE not in f5["build.gradle"].decode() and b"minecraft_version=1.21.5" in f5["gradle.properties"],
+                   and ".multiversion/layer.gradle" not in f5["build.gradle"].decode() and b"minecraft_version=1.21.5" in f5["gradle.properties"],
                    "a version branch carries no .multiversion/, the branch hook instead of the layer's, and its own versions")
             expect(b"keep = 5" in f5["src/main/java/com/example/mod/Over.java"] and b"new.Thing" in f5["src/main/java/com/example/mod/ExampleMod.java"]
                    and b"@OnlyIn" not in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b"Thing t;" in f5["src/cf/java/com/example/mod/cf/Cf.java"] and b'"[1.21.5,1.21.6)"' in f5["src/main/resources/META-INF/neoforge.mods.toml"]
@@ -7056,10 +6394,6 @@ def self_check():
                    f"1.21.5's review rows: its own overlay of an authors' file; not an overlay-only class, not the parent's file "
                    f"with @OnlyIn stripped: {items} "
                    + " / ".join(explain_changed(r, "1.21.5", b5, f) for k, f in items if k == "changed" and "Cf.java" in f))
-            rc, out = _quiet(verify, r)
-            expect(rc == 0 and out.count("byte-identical") == 3, f"verify: the layer's prepare run again equals every branch: {out[-300:]}")
-            rc, out = _quiet(migrate, r)
-            expect(rc == 0 and out.count("exists with the same content") == 3, f"migrate again: nothing to do: {out[-300:]}")
             # the digest mapping is what keeps a moved target done: without it, its layer-commit records do not count
             with tempfile.TemporaryDirectory() as e:
                 root = export(r, b5, pathlib.Path(e) / "t")
@@ -7250,7 +6584,7 @@ def self_check():
             expect(all(head_only(x) for x in (".port/KNOWN-ISSUES.json", ".port/examplemod/KNOWN-ISSUES.json") + HEAD_ONLY)
                    and not any(head_only(x) for x in (".port/1.21.4/branch.properties", ".github/workflows/port-ci.yml",
                                                      "src/main/resources/KNOWN-ISSUES.json")),
-                   "head_only: the ledgers and the weekly plan's files, nothing else (migrate's carried records use it too)")
+                   "head_only: the ledgers and the weekly plan's files, nothing else (the carried records use it too)")
             git(r, "worktree", "remove", "--force", str(lw))
             g("branch", "-D", "latin-port", "neoforge-1.21.10")
             # sync-shared: the shared library moved (a row and a helper): 1.21.3 takes both, its rows-only files re-made
@@ -7428,54 +6762,26 @@ def self_check():
                     if (r / "build/fork-branches" / v).is_dir():
                         git(r, "worktree", "remove", "--force", str(r / "build/fork-branches" / v))
             git(r, "worktree", "remove", "--force", str(r / "build/fork-branches/1.21.3"))
-            # a branch that exists with other content is refused, nothing moved
-            g("branch", "-f", "neoforge-1.21.5", "neoforge-1.21.1")
-            before = g("rev-parse", "neoforge-1.21.5")
-            rc, out = _quiet(migrate, r, targets=["1.21.5"])
-            expect(rc == 2 and "REFUSED 1.21.5" in out and g("rev-parse", "neoforge-1.21.5") == before,
-                   f"an existing branch with other content: refused, never moved: {out[-300:]}")
-            # a single-version fork: nothing to migrate, nothing written
+            # a single-version fork: sync-shared has nothing to do and writes nothing
             sv = d / "single"; sv.mkdir()
             gs = lambda *a: subprocess.run(["git", "-C", str(sv), *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
             gs("init", "-q", "-b", "neoforge-1.21.1"); gs("config", "user.email", "a@b"); gs("config", "user.name", "a")
             (sv / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
             gs("add", "-A"); gs("commit", "-qm", "port")
             refs = gs("for-each-ref")
-            rc, out = _quiet(migrate, sv)
-            expect(rc == 2 and "nothing to migrate" in out and gs("for-each-ref") == refs and not (sv / REC).exists()
-                   and checkout_version(sv) is None,
-                   f"single-version fork: migrate refuses (exit 2), no branch, no .port/: {out}")
+            expect(checkout_version(sv) is None and not version_branches(sv), "a single-version fork has no version branch")
             rc, out = _quiet(sync_shared, sv, check=True)
             expect(rc == 0 and not out.strip() and gs("for-each-ref") == refs and not (sv / REC).exists(),
                    f"single-version fork: sync-shared --check reports nothing and writes nothing: {out}")
-    # the port branch moved past the layer (the authors' new code not merged into it yet): each migrated version is
-    # judged against the port commit IT carries, never the clone's HEAD -- done from a checkout of the port branch too
+    # the port branch moved past the versions (the authors' new code not cascaded yet): each version is judged
+    # against the port commit IT carries, never the clone's HEAD -- done from a checkout of the port branch too
     with tempfile.TemporaryDirectory() as d:
-        r, g, _run = _fixture(pathlib.Path(d) / "a")
-        _fixture_shared(r, g)
-        _run(str(ROOT / "tools/layer-inventory.py"), "build", "--repo", str(r))     # current for the layer's port commit
-        g("add", "-A"); g("commit", "-qm", "layer: inventory current")
-        for t in ("1.21.3", "1.21.4", "1.21.5"):
-            _quiet(_fixture_done, r, g, t)
-        if "migrated" not in _FIXTURES and os.environ.get("FB_FIXTURE_CACHE"):
-            # the --platform leg built no migrated fixture: migrate a copy of this one (every target done, its
-            # inventory current) once, for the blocks of test-port-tools.sh that copy it from FB_FIXTURE_CACHE
-            seed = pathlib.Path(os.environ["FB_FIXTURE_CACHE"]) / "migrated" / "fork"
-            if not (seed / ".fixture-complete").is_file():
-                shutil.rmtree(seed, ignore_errors=True)
-                shutil.copytree(r, seed, symlinks=True)
-                if _quiet(migrate, seed)[0] == 0:
-                    (seed / ".fixture-complete").write_bytes(b"")
-            if (seed / ".fixture-complete").is_file():
-                _FIXTURES["migrated"] = seed
+        r, g, _run = _migrated_fixture(d)
         g("checkout", "-q", "neoforge-1.21.1")
         (r / "src/main/java/com/example/mod/Later.java").write_text("package com.example.mod;\nclass Later {}\n", encoding="utf-8")
         uh = r / "src/main/java/com/example/mod/UsesHelper.java"
         uh.write_text(uh.read_text(encoding="utf-8").replace("Shared s;", "Shared s; int later;"), encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "authors: a newer commit on the port branch")
-        rc, out = _quiet(migrate, r, layer_ref="neoforge-1.21.x")       # run from the port branch's checkout
-        expect(rc == 0 and out.count("layer done, branch done") == 3,
-               f"migrate (from a checkout of the port branch, ahead of the layer): each branch done as on the layer: {out[-600:]}")
         for t in ("1.21.3", "1.21.4", "1.21.5"):
             why = target_done(r, t)
             expect(why == [], f"{t} judged from a checkout of the port branch (ahead of it): done: {why} "
@@ -7522,8 +6828,7 @@ def self_check():
             expect(rc == 0 and f5.get(rj) == b'{"type": "authors-new"}\n' and rj not in ref_files(r, resolve_branch(r, "neoforge-1.21.4")),
                    f"a resource the parent dropped and 1.21.5 keeps: the authors' change reaches 1.21.5: {f5.get(rj)!r} {out[-400:]}")
     # the deep passes (--self-check --deep, or FB_RANDOM_SEQUENCES / FB_DEEP set) -- not run in CI, run them before a
-    # release of the tool: the 4-version cascade plan/apply/decisions flow and migrate --library (each builds and
-    # migrates its own fixtures), 200 random cascade sequences against the invariant, and the whole self-check again
+    # release of the tool: the 4-version cascade plan/apply/decisions flow (it builds its own fixture), 200 random cascade sequences against the invariant, and the whole self-check again
     # under core.autocrlf=true. The default run keeps every named case (t6/t7/t8/t11 included) and the CRLF unit cases.
     deep = "--deep" in sys.argv or bool(os.environ.get("FB_DEEP"))
     if not platform:
@@ -7545,12 +6850,11 @@ def self_check():
         _check_deferred_uses(expect)
     if deep:
         _check_cascade_plan(expect)
-        _check_migrate_library(expect)
     if deep or os.environ.get("FB_RANDOM_SEQUENCES"):
         _check_random_sequences(expect, say=print)
     if deep and not os.environ.get("FB_SELF_CHECK_CRLF"):
         # the same checks with core.autocrlf=true (a Windows checkout's default): a version branch checked out with CRLF
-        # line endings must read as its blobs (root_files), and a layer's prepare must see the blobs' bytes (Layer)
+        # line endings must read as its blobs (root_files)
         with tempfile.TemporaryDirectory() as d:
             cfg = pathlib.Path(d) / "gitconfig"
             cfg.write_text("[core]\n\tautocrlf = true\n[user]\n\tname = a\n\temail = a@b\n", encoding="utf-8")
