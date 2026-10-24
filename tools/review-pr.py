@@ -297,7 +297,7 @@ def main():
                     name_note = "no private name list (optional); read added lines for mod names by hand"
             r = subprocess.run(cmd, cwd=wt, capture_output=True, text=True, encoding="utf-8", errors="replace")
             gate_results[name] = "PASS" if r.returncode == 0 else "FAIL"
-            for key, why in re.findall(r"^\s*- removed (\S+)\s+\(declared: (.*)\)$", r.stdout, re.M):
+            for key, why in re.findall(r"^catalog-removed\t([^\t\n]+)\t(.*)$", r.stdout, re.M):
                 f("ATTENTION", "catalogue", f"entry removed on purpose (Catalog-removed:): {key}", why)
             if "self-test" in name and r.returncode == 0:
                 gate_results[name] += f" ({passed(r.stdout + r.stderr)})"

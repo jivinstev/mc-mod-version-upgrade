@@ -132,19 +132,25 @@ fcase 1 "a tool the catalogue names is DELETED" \
   'import os;os.remove("tools/real-tool.py")'
 
 echo "6b. a removal declared with a 'Catalog-removed: <file>::<id> -- <reason>' commit line (--base)"
-dcase() {  # dcase <wanted-exit> <label> <entry line to delete, or ''> <commit message> [grep for the output] [--base REF]
-   local want="$1" label="$2" drop="$3" msg="$4" pat="${5:-}" base="${6:---base main}"
+# Each case is a git repo on `main` plus a PR branch `pr` built by <pr-shell>, then judged as CI judges it:
+# the BASE census copied over the tree, `--base main`. In <pr-shell>: drop LINE, upd (--update), ci MSG (commit).
+drop() { python3 -c "import pathlib,sys;p=pathlib.Path('CATALOG.md');p.write_text(p.read_text().replace(sys.argv[1]+'\n',''))" "$1"; }
+upd()  { python3 "$ROOT/tools/check-catalog-fidelity.py" --update; }
+ci()   { git -c user.name=t -c user.email=t@example.invalid commit -q -a --allow-empty -m "$1"; }
+scase() {  # scase <wanted-exit> <label> <pr-shell> [grep for the output] [check args, default --base main]
+   local want="$1" label="$2" pr="$3" pat="${4:-}" args="${5:---base main}"
    local C; C="$(mktemp -d)"; mkdir -p "$C/docs"
    printf '## A. Section\n**A1. first** body.\n**A2. second** body.\n## B. Other\n1. **one** body.\n## C. Again\n1. **one again** body.\n' > "$C/CATALOG.md"
-   ( cd "$C" && git init -q -b main && python3 "$ROOT/tools/check-catalog-fidelity.py" --update && git add -A \
-     && git -c user.name=t -c user.email=t@example.invalid commit -qm base && git checkout -qb pr \
-     && if [ -n "$drop" ]; then python3 -c "import pathlib,sys;p=pathlib.Path('CATALOG.md');p.write_text(p.read_text().replace(sys.argv[1]+'\n',''))" "$drop"; fi \
-     && git -c user.name=t -c user.email=t@example.invalid commit -qam "$msg" --allow-empty ) >/dev/null 2>&1
-   ( cd "$C" && python3 "$ROOT/tools/check-catalog-fidelity.py" $base ) > "$C.log" 2>&1
+   ( cd "$C" && git init -q -b main && upd && git add -A && ci base && git checkout -qb pr && eval "$pr" \
+     && git show main:docs/catalog-census.tsv > docs/catalog-census.tsv ) >/dev/null 2>&1
+   ( cd "$C" && GITHUB_STEP_SUMMARY="${SUMMARY:-}" python3 "$ROOT/tools/check-catalog-fidelity.py" $args ) > "$C.log" 2>&1
    local got=$?
    if [ "$got" = "$want" ] && { [ -z "$pat" ] || grep -q -- "$pat" "$C.log"; }; then echo "  PASS  $label (exit $got)"; pass=$((pass+1))
    else echo "  FAIL  $label — wanted exit $want${pat:+ and '$pat'}, got $got: $(tail -3 "$C.log" | tr '\n' ' ')"; fail=$((fail+1)); fi
    rm -rf "$C" "$C.log"
+}
+dcase() {  # dcase <wanted-exit> <label> <entry line to delete, or ''> <commit message> [grep] [check args]: delete, --update, commit
+   scase "$1" "$2" "${3:+drop '$3' && }upd && ci \"\$(printf '%s' '$4')\"" "${5:-}" "${6:-}"
 }
 R=$'x\n\nCatalog-removed:'
 dcase 1 "an UNDECLARED removal still fails under --base" '**A2. second** body.' "drop A2" "DISAPPEARED"
@@ -157,6 +163,26 @@ dcase 1 "a declaration for the same id in another FILE does not cover it" '**A2.
 dcase 0 "a repeated id: the key the tool REPORTS (1#2, positional) is the one declared" '1. **one** body.' "$R CATALOG.md::1#2 -- section B removed" "section B removed"
 dcase 1 "without --base, declarations are not read (behaviour unchanged)" '**A2. second** body.' "$R CATALOG.md::A2 -- superseded" "DISAPPEARED" " "
 dcase 2 "an unknown --base cannot run (exit 2), never a silent pass" '' "x" "" "--base nosuchref"
+dcase 0 "each declared removal is printed as one machine-readable line" '**A2. second** body.' "$R CATALOG.md::A2 -- superseded by A1" $'catalog-removed\tCATALOG.md::A2\tsuperseded by A1'
+# the PR's COMMITTED census must match its tree: CI reads the base census, so nothing else would notice
+scase 1 "a declared removal WITHOUT --update (census not committed) fails" \
+  "drop '**A2. second** body.' && ci \"\$R CATALOG.md::A2 -- forgot the census\"" "run --update and commit the census"
+scase 1 "a census row deleted on its own (entry still there) fails" \
+  "grep -v '^CATALOG.md::A1	' docs/catalog-census.tsv > c.tmp && mv c.tmp docs/catalog-census.tsv && ci 'tidy census'" "run --update and commit the census"
+scase 1 "a NEW entry without --update fails under --base" \
+  "printf '**A3. third** body.\n' >> CATALOG.md && ci 'add A3'" "not in the committed census"
+# a declaration that a later commit reverts no longer counts -- nor does the revert's copy of it
+scase 1 "a REVERTED declaration does not cover a later silent removal" \
+  "echo n > n.txt && git add n.txt && ci \"\$R CATALOG.md::A2 -- planned\" && git -c user.name=t -c user.email=t@example.invalid revert --no-edit HEAD && drop '**A2. second** body.' && upd && ci 'drop A2'" "DISAPPEARED"
+scase 1 "a revert commit carrying a COPY of the declaration does not count either" \
+  "ci \"\$R CATALOG.md::A2 -- planned\" && A=\$(git rev-parse HEAD) && ci \"\$(printf 'Revert x\n\nCatalog-removed: CATALOG.md::A2 -- planned\n\nThis reverts commit %s.' \"\$A\")\" && drop '**A2. second** body.' && upd && ci 'drop A2'" "DISAPPEARED"
+scase 0 "CONTROL: a declaration survives the revert of an UNRELATED commit" \
+  "echo n > n.txt && git add n.txt && ci 'noise' && git -c user.name=t -c user.email=t@example.invalid revert --no-edit HEAD && drop '**A2. second** body.' && upd && ci \"\$R CATALOG.md::A2 -- superseded\"" "superseded"
+# CI: the declared removals also go to the job summary, with their reasons
+SM="$(mktemp)"; SUMMARY="$SM" dcase 0 "the declared removals are appended to \$GITHUB_STEP_SUMMARY" '**A2. second** body.' "$R CATALOG.md::A2 -- in the summary"
+grep -q 'CATALOG.md::A2`: in the summary' "$SM" && { echo "  PASS  ... and the summary names the key and its reason"; pass=$((pass+1)); } \
+  || { echo "  FAIL  the step summary does not list the declared removal"; fail=$((fail+1)); }
+rm -f "$SM"
 
 echo "7. the encoding gate (Windows reads and writes cp1252 unless told otherwise)"
 ( python3 "$ROOT/tools/check-encoding.py" >/dev/null 2>&1 )

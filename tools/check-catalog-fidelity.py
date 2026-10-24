@@ -23,10 +23,14 @@ DECLARING A REMOVAL (only with --base; CI passes the branch the PR merges into)
         Catalog-removed: <file>::<id> -- <reason>
 
     <file>::<id> is the exact key the FAIL lists (e.g. `CATALOG.md::M6`, `docs/x.md::3#5`); the reason
-    is required. A disappeared entry passes only if its key is declared, the count may fall by exactly
+    is required. A declaration in a commit that a later commit reverts does not count. A disappeared
+    entry passes only if its key is declared, the count may fall by exactly
     the number declared, and every declaration is printed with its reason. A declared key that did NOT
-    disappear is itself a failure, so stale declarations cannot pile up. Without --base no declaration
-    is read and the behaviour is as before.
+    disappear is itself a failure, so stale declarations cannot pile up. With --base the census
+    committed at HEAD must also list exactly the entries there are now (run --update and commit it),
+    since CI reads the base census and would otherwise never see the PR's. Each declared removal is
+    also printed as a `catalog-removed<TAB>key<TAB>reason` line and, in CI, added to
+    $GITHUB_STEP_SUMMARY. Without --base no declaration is read and the behaviour is as before.
 
     Keys are positional for an id the file repeats (`3`, `3#2`, `3#3`, ...): deleting one such entry
     shifts the later ones down, so the keys that DISAPPEAR are the highest `#n`, and the shifted ones
@@ -34,7 +38,7 @@ DECLARING A REMOVAL (only with --base; CI passes the branch the PR merges into)
 
 EXIT CODES     0 clean    1 an entry disappeared, or the count fell    2 could not run
 """
-import argparse, hashlib, pathlib, re, subprocess, sys
+import argparse, hashlib, os, pathlib, re, subprocess, sys
 
 # Every shape an entry id takes in the catalogue. The first version of this gate knew only two of
 # them and recognised 56 of ~450 entries -- a fidelity gate blind to nine rules in ten reports
@@ -105,20 +109,29 @@ def dangling_paths(root, globs):
 
 
 DECLARE_RE = re.compile(r"^Catalog-removed:(.*)$", re.M)
+REVERTS_RE = re.compile(r"^This reverts commit ([0-9a-f]{7,40})", re.M)
+
+
+def git(root, *args):
+    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    return r.returncode, r.stdout
 
 
 def declared_removals(root, base):
-    """-> (rc, {key: reason}, [problem]) from `Catalog-removed:` lines in merge-base(base, HEAD)..HEAD."""
-    def git(*args):
-        r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
-        return r.returncode, r.stdout
-    rc, mb = git("merge-base", base, "HEAD")
+    """-> (rc, {key: reason}, [problem]) from `Catalog-removed:` lines in merge-base(base, HEAD)..HEAD.
+    A commit that a later commit in the range reverts declares nothing, and neither does a revert commit
+    (its body may carry a copy of the reverted message): a declaration must survive to HEAD to count."""
+    rc, mb = git(root, "merge-base", base, "HEAD")
     if rc:
         return 2, {}, [f"cannot find the merge-base with {base} (fetch it first)"]
-    _, log = git("log", "--format=%B", f"{mb.strip()}..HEAD")
+    _, log = git(root, "log", "--format=%H%x00%B%x1e", f"{mb.strip()}..HEAD")
+    commits = [c.strip("\n").split("\0", 1) for c in log.split("\x1e") if "\0" in c]
+    reverted = {r for _, body in commits for r in REVERTS_RE.findall(body)}
+    kept = [body for sha, body in commits
+            if not REVERTS_RE.search(body) and not any(sha.startswith(r) for r in reverted)]
     out, problems = {}, []
-    for m in DECLARE_RE.finditer(log):
+    for m in DECLARE_RE.finditer("\n".join(kept)):
         key, sep, reason = m.group(1).strip().partition(" -- ")
         key, reason = key.strip(), reason.strip()
         if "::" not in key or not reason:
@@ -186,9 +199,16 @@ def main():
                 print(f"  {b}", file=sys.stderr)
             return 1
 
+
     gone_all = sorted(set(prev) - set(found))
     gone = [k for k in gone_all if k not in declared]
     stale = sorted(k for k in declared if k not in gone_all)
+    removed = [(k, declared[k]) for k in gone_all if k in declared]
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if removed and summary:                          # CI: show reviewers the removals outside the log
+        with open(summary, "a", encoding="utf-8") as fh:
+            fh.write("### Catalogue entries removed on purpose\n\n"
+                     + "".join(f"- `{k}`: {why}\n" for k, why in removed) + "\n")
     changed = sorted(k for k in set(prev) & set(found) if prev[k] != found[k])
     added = sorted(set(found) - set(prev))
 
@@ -197,9 +217,9 @@ def main():
         print(f"  + new     {k}")
     for k in changed:
         print(f"  ~ changed {k}   (edits are fine; this is here so the diff is visible)")
-    for k in gone_all:
-        if k in declared:
-            print(f"  - removed {k}   (declared: {declared[k]})")
+    for k, why in removed:
+        print(f"  - removed {k}   (declared: {why})")
+        print(f"catalog-removed\t{k}\t{why}")      # one machine-readable line each (tools/review-pr.py)
 
     if gone:
         print(f"\ncheck-catalog-fidelity: FAIL — {len(gone)} entr{'y' if len(gone)==1 else 'ies'} DISAPPEARED:",
@@ -222,6 +242,21 @@ def main():
             print(f"  Catalog-removed: {k} -- {declared[k]}", file=sys.stderr)
         print("  Drop the declaration, or use the key this tool reports as gone.", file=sys.stderr)
         return 1
+
+    if a.base:
+        # CI judges against the BASE census, so the census the PR commits is otherwise never read: a
+        # declared removal without --update (or a census row deleted on its own) would pass here and
+        # turn main red on the next push. The committed census must list exactly today's entries.
+        rc, committed = git(root, "show", f"HEAD:./{pathlib.PurePath(a.census).as_posix()}")
+        keys = {l.split("\t", 1)[0] for l in committed.splitlines() if "\t" in l and not l.startswith("#")}
+        if rc or keys != set(found):
+            print(f"check-catalog-fidelity: FAIL — the census committed at HEAD ({a.census}) does not list "
+                  "the catalogue's entries now: run --update and commit the census.", file=sys.stderr)
+            for k in sorted(set(found) - keys)[:10]:
+                print(f"  not in the committed census: {k}", file=sys.stderr)
+            for k in sorted(keys - set(found))[:10]:
+                print(f"  in the committed census but gone: {k}", file=sys.stderr)
+            return 1
 
     if len(found) < len(prev) - (len(gone_all) - len(gone)):   # by no more than what was declared
         print(f"\ncheck-catalog-fidelity: FAIL — entry count fell {len(prev)} -> {len(found)}.",

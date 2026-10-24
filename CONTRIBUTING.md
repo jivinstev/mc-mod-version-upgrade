@@ -32,7 +32,9 @@ Tests-removed: tools/test-x.sh <before>-><after> -- <reason>   # review-pr: a se
 ```
 
 `check-catalog-fidelity.py --base origin/main` reads the first (CI passes `--base`; without it nothing is read); a
-declared key that did not disappear fails too. `tools/review-pr.py` reads the second and accepts a fall only with
+declared key that did not disappear fails too, so does a census committed without `--update` (it must list exactly the
+entries there are now), and a declaration in a commit a later commit reverts no longer counts. CI also lists the
+declared removals in the job summary. `tools/review-pr.py` reads the second and accepts a fall only with
 exactly the counts it measures. For an id a file repeats the keys are positional (`3`, `3#2`, ...): deleting one
 shifts the later ones, so declare the keys the gate reports, not the ones you deleted by eye.
 
