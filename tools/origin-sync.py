@@ -81,7 +81,7 @@ def self_check():
         d = pathlib.Path(d)
         up, c = d / "up", d / "clone"
         g = lambda r, *a: subprocess.run(["git", "-C", str(r), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-                                          *a], capture_output=True, text=True, check=True).stdout.strip()
+                                          *a], capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
         up.mkdir(); g(up, "init", "-q", "-b", "neoforge-1.21.1")
         (up / "A").write_text("a\n", encoding="utf-8"); g(up, "add", "-A"); g(up, "commit", "-qm", "a")
         subprocess.run(["git", "clone", "-q", str(up), str(c)], check=True, capture_output=True)
