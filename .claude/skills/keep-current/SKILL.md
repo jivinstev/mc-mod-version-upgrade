@@ -69,7 +69,12 @@ run is green, and it is then gated against the dependency's NEW build.
 1. **Nothing new? Stop cheaply.** `port-sync.py --dry-run` for the authors' branch, and for each dependency
    "has it a newer green build than the dependent pins?". No change anywhere: exit, no model work.
 2. **Merge** on a work branch `keep-current/<date>` cut from the port branch: `port-sync.py` (a merge, never a
-   rebase). Fetch immediately before merging and name the exact commit merged in the message, read from git
+   rebase). It first compares the branch it merges into with origin's (the version-branch cascade's check,
+   `tools/origin-sync.py`, every kind of fork): one strictly behind origin is fast-forwarded, a diverged one is refused
+   (exit 2: merge origin's branch into it, then run again), never a reset or a force; `--dry-run` reads origin's
+   commit and moves nothing. A work branch origin does not have is used as it is, so cut it from the port branch only
+   after `port-sync.py --port <port branch> --dry-run` names nothing behind (else `git merge --ff-only
+   origin/<port branch>` on it first). Fetch immediately before merging and name the exact commit merged in the message, read from git
    (`git rev-parse --short <remote>/<branch>`), never from memory: the authors can push while a reconcile is
    running, and the next run decides from what this one says it merged (`port-sync.py` now puts it in the message).
    **To merge one exact commit** (the weekly round's frozen `upstream_commit`): `port-sync.py` has no option for it --
@@ -463,9 +468,11 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    when a token is set), a JDK for each version (21 for 1.21.x, **25 for 26.x**: found at `JAVA_HOME_25`, `/usr/lib/jvm`,
    `/opt`, `~/.gradle/jdks`, ...), and for the client gates **`libEGL.so.1`** (the 26.3 client loads it: `libegl1`) and
    **`XDG_RUNTIME_DIR`** (unset in a cloud session: `export XDG_RUNTIME_DIR=$(mktemp -d) && chmod 700
-   "$XDG_RUNTIME_DIR"`); on a version-branch fork, its **`origin/HEAD`** (a WARNING, not missing: a fresh cloud clone may lack it, `git
-   remote set-head origin -a`) and **the remote each version's upstream freeze names** (`upstream=<remote>/<branch>`: without it the gates stop
-   with exit 19; it prints the fetch-only `git remote add`). A shallow single-branch clone of a version branch has its other version branches
+   "$XDG_RUNTIME_DIR"`); on every kind of fork, its **`origin/HEAD`** (a WARNING, not missing: a fresh cloud clone may lack it, `git
+   remote set-head origin -a`); on a version-branch fork, **the remote each version's upstream freeze names** (`upstream=<remote>/<branch>`: without it the gates stop
+   with exit 19; it prints the fetch-only `git remote add`); on a single-version fork, **a remote fetching its authors'
+   repository** as the set's `.github/weekly-plan.json` names it (`upstream`, read from the clones given, so pass the
+   library's too), which `port-sync.py` merges from (missing, with the fetch-only `git remote add`). A shallow single-branch clone of a version branch has its other version branches
    read from origin by name (`git ls-remote`), so their JDK and libEGL are asked too. Install or set what it names that the session can (apt, an export, the git commands) and run it again; anything
    left missing other than a clone is reported in the first comment and the versions that need it wait.
 1. **Freeze the input.** `python3 tools/known-issues.py read-plan --latest --slug <library owner/repo> --out
@@ -556,12 +563,18 @@ it small, so for such a set the orchestration is a tool, which replaces the four
      re-pins keep a workflow's kit, and nothing regenerated the head). Regenerate it first, before the round's first
      ledger commit: `fork-branches.py ci --repo DIR --head --run` (the head's own pins, variants and gates read
      back, only the kit moved to the newest), pushed under `push-version-branches`; else ask;
+   - (a single-version fork, once per round, before its first commit) `python3 tools/port-ci.py check --repo DIR`: the
+     same check of the port branch's workflow (an older kit -- new gates reach a fork only from the first kit that ships
+     them -- or no records ignore), a WARNING that never blocks, with the command that regenerates it at the newest kit
+     (its own options read back). Regenerate and push it with the work branch's PR when `allow` has `merge-fork-prs`
+     (else ask), and name it in the closing comment;
    **The order is fixed: gates and the review, then the findings graded, then the merge, then the pre-release** (on a
    version branch the review starts from the cascade's green A/B gates and the one full run follows its fixes, below). The
    review is of the version's work branch (`keep-current/<date>-<v>`, or the version branch's checkout before it is
    pushed), never of what is already merged: a reviewer who reads a version after its PR merged reviews code players can
    already have.
-   - gates A/B/C in full, the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`). **On a
+   - gates A/B/C in full, the shipped-jar expectations included (`.port/<v>/shipped-expect-<variant>.txt`, and the
+     jar `.port/<v>/shipped-jar.txt` names, on every kind of fork). **On a
      single-version fork, the cheapest correct sequence** -- one full gate pass, on the tree that merges: what changes
      the build (a re-pin, the ticked `dep_bumps`) is committed first; the review starts from a green compile and Gate A/B
      (`ci-gates.py --repo DIR --modid ID --base <upstream_commit> --gatec none`); after the review's fixes and their
