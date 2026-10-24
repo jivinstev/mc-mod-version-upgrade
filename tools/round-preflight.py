@@ -29,7 +29,8 @@ XDG_RUNTIME_DIR) for a round that runs no Gate C. A single-version fork is check
               prints. (a single-version fork, tools/fork-kind.py detect) a remote fetching the authors' repository its
               entry in the set's .github/weekly-plan.json names (`upstream`; read from the clones given, the library's
               head first), which port-sync.py merges from: missing, with the fetch-only add, when none does; no line
-              when no clone given carries that config.
+              when no clone given carries that config. Missing even when the plan takes no authors' code: the
+              preflight runs before the plan is frozen, so it cannot know.
 
 A shallow single-branch clone of a version-branch fork holds no ref of its other version branches: their names are
 read from origin (git ls-remote --heads origin 'neoforge-*') and each counts at its version's JDK. A single-version
