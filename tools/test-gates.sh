@@ -131,6 +131,33 @@ fcase 1 "a numbered entry (12.) that DISAPPEARS" \
 fcase 1 "a tool the catalogue names is DELETED" \
   'import os;os.remove("tools/real-tool.py")'
 
+echo "6b. a removal declared with a 'Catalog-removed: <file>::<id> -- <reason>' commit line (--base)"
+dcase() {  # dcase <wanted-exit> <label> <entry line to delete, or ''> <commit message> [grep for the output] [--base REF]
+   local want="$1" label="$2" drop="$3" msg="$4" pat="${5:-}" base="${6:---base main}"
+   local C; C="$(mktemp -d)"; mkdir -p "$C/docs"
+   printf '## A. Section\n**A1. first** body.\n**A2. second** body.\n## B. Other\n1. **one** body.\n## C. Again\n1. **one again** body.\n' > "$C/CATALOG.md"
+   ( cd "$C" && git init -q -b main && python3 "$ROOT/tools/check-catalog-fidelity.py" --update && git add -A \
+     && git -c user.name=t -c user.email=t@example.invalid commit -qm base && git checkout -qb pr \
+     && if [ -n "$drop" ]; then python3 -c "import pathlib,sys;p=pathlib.Path('CATALOG.md');p.write_text(p.read_text().replace(sys.argv[1]+'\n',''))" "$drop"; fi \
+     && git -c user.name=t -c user.email=t@example.invalid commit -qam "$msg" --allow-empty ) >/dev/null 2>&1
+   ( cd "$C" && python3 "$ROOT/tools/check-catalog-fidelity.py" $base ) > "$C.log" 2>&1
+   local got=$?
+   if [ "$got" = "$want" ] && { [ -z "$pat" ] || grep -q -- "$pat" "$C.log"; }; then echo "  PASS  $label (exit $got)"; pass=$((pass+1))
+   else echo "  FAIL  $label — wanted exit $want${pat:+ and '$pat'}, got $got: $(tail -3 "$C.log" | tr '\n' ' ')"; fail=$((fail+1)); fi
+   rm -rf "$C" "$C.log"
+}
+R=$'x\n\nCatalog-removed:'
+dcase 1 "an UNDECLARED removal still fails under --base" '**A2. second** body.' "drop A2" "DISAPPEARED"
+dcase 0 "a DECLARED removal passes, and its reason is printed" '**A2. second** body.' "$R CATALOG.md::A2 -- superseded by A1" "superseded by A1"
+dcase 1 "a declared key that still EXISTS fails (no stale declarations)" '' "$R CATALOG.md::A1 -- not really gone" "did NOT disappear"
+dcase 1 "a declaration with an EMPTY reason fails" '**A2. second** body.' "$R CATALOG.md::A2 --" "malformed"
+dcase 1 "a declaration with NO reason fails" '**A2. second** body.' "$R CATALOG.md::A2" "malformed"
+dcase 1 "a declaration for a DIFFERENT key does not cover the real removal" '**A2. second** body.' "$R CATALOG.md::A1 -- wrong key" "- CATALOG.md::A2"
+dcase 1 "a declaration for the same id in another FILE does not cover it" '**A2. second** body.' "$R docs/other.md::A2 -- wrong file" "- CATALOG.md::A2"
+dcase 0 "a repeated id: the key the tool REPORTS (1#2, positional) is the one declared" '1. **one** body.' "$R CATALOG.md::1#2 -- section B removed" "section B removed"
+dcase 1 "without --base, declarations are not read (behaviour unchanged)" '**A2. second** body.' "$R CATALOG.md::A2 -- superseded" "DISAPPEARED" " "
+dcase 2 "an unknown --base cannot run (exit 2), never a silent pass" '' "x" "" "--base nosuchref"
+
 echo "7. the encoding gate (Windows reads and writes cp1252 unless told otherwise)"
 ( python3 "$ROOT/tools/check-encoding.py" >/dev/null 2>&1 )
 [ $? = 0 ] && { echo "  PASS  the real tree names every encoding"; pass=$((pass+1)); } \

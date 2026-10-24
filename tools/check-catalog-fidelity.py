@@ -14,10 +14,27 @@ WHY THIS EXISTS
 USAGE
     python3 tools/check-catalog-fidelity.py --update    # regenerate the census (review the diff!)
     python3 tools/check-catalog-fidelity.py             # verify; non-zero if an entry vanished
+    python3 tools/check-catalog-fidelity.py --base origin/main   # verify, honouring declared removals
+
+DECLARING A REMOVAL (only with --base; CI passes the branch the PR merges into)
+    A removal that is genuinely intended is declared, one entry per line, in a commit message on the
+    branch (between the merge-base with --base and HEAD):
+
+        Catalog-removed: <file>::<id> -- <reason>
+
+    <file>::<id> is the exact key the FAIL lists (e.g. `CATALOG.md::M6`, `docs/x.md::3#5`); the reason
+    is required. A disappeared entry passes only if its key is declared, the count may fall by exactly
+    the number declared, and every declaration is printed with its reason. A declared key that did NOT
+    disappear is itself a failure, so stale declarations cannot pile up. Without --base no declaration
+    is read and the behaviour is as before.
+
+    Keys are positional for an id the file repeats (`3`, `3#2`, `3#3`, ...): deleting one such entry
+    shifts the later ones down, so the keys that DISAPPEAR are the highest `#n`, and the shifted ones
+    show as `~ changed`. Declare the keys the FAIL lists, not the ones you deleted by eye.
 
 EXIT CODES     0 clean    1 an entry disappeared, or the count fell    2 could not run
 """
-import argparse, hashlib, pathlib, re, sys
+import argparse, hashlib, pathlib, re, subprocess, sys
 
 # Every shape an entry id takes in the catalogue. The first version of this gate knew only two of
 # them and recognised 56 of ~450 entries -- a fidelity gate blind to nine rules in ten reports
@@ -87,6 +104,31 @@ def dangling_paths(root, globs):
     return sorted(out.items())
 
 
+DECLARE_RE = re.compile(r"^Catalog-removed:(.*)$", re.M)
+
+
+def declared_removals(root, base):
+    """-> (rc, {key: reason}, [problem]) from `Catalog-removed:` lines in merge-base(base, HEAD)..HEAD."""
+    def git(*args):
+        r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        return r.returncode, r.stdout
+    rc, mb = git("merge-base", base, "HEAD")
+    if rc:
+        return 2, {}, [f"cannot find the merge-base with {base} (fetch it first)"]
+    _, log = git("log", "--format=%B", f"{mb.strip()}..HEAD")
+    out, problems = {}, []
+    for m in DECLARE_RE.finditer(log):
+        key, sep, reason = m.group(1).strip().partition(" -- ")
+        key, reason = key.strip(), reason.strip()
+        if "::" not in key or not reason:
+            problems.append(f"malformed `Catalog-removed:{m.group(1)}` -- want "
+                            "`Catalog-removed: <file>::<id> -- <reason>`, reason required")
+            continue
+        out[key] = reason
+    return 0, out, problems
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -96,6 +138,8 @@ def main():
                     default=["CATALOG.md", "docs/catalog/*.md", ".claude/skills/*/SKILL.md",
                              ".claude/skills/*/references/*.md"])
     ap.add_argument("--update", action="store_true")
+    ap.add_argument("--base", help="the branch this will merge into, e.g. origin/main: honours "
+                    "`Catalog-removed: <file>::<id> -- <reason>` commit lines on the branch")
     a = ap.parse_args()
 
     root = pathlib.Path(a.root).resolve()
@@ -130,7 +174,21 @@ def main():
         k, v = line.split("\t", 1)
         prev[k] = v.strip()
 
-    gone = sorted(set(prev) - set(found))
+    declared = {}
+    if a.base:
+        rc, declared, bad = declared_removals(root, a.base)
+        if rc:
+            print(f"check-catalog-fidelity: FAIL — {bad[0]}", file=sys.stderr)
+            return 2
+        if bad:
+            print("check-catalog-fidelity: FAIL — a removal declaration is malformed:", file=sys.stderr)
+            for b in bad:
+                print(f"  {b}", file=sys.stderr)
+            return 1
+
+    gone_all = sorted(set(prev) - set(found))
+    gone = [k for k in gone_all if k not in declared]
+    stale = sorted(k for k in declared if k not in gone_all)
     changed = sorted(k for k in set(prev) & set(found) if prev[k] != found[k])
     added = sorted(set(found) - set(prev))
 
@@ -139,6 +197,9 @@ def main():
         print(f"  + new     {k}")
     for k in changed:
         print(f"  ~ changed {k}   (edits are fine; this is here so the diff is visible)")
+    for k in gone_all:
+        if k in declared:
+            print(f"  - removed {k}   (declared: {declared[k]})")
 
     if gone:
         print(f"\ncheck-catalog-fidelity: FAIL — {len(gone)} entr{'y' if len(gone)==1 else 'ies'} DISAPPEARED:",
@@ -147,10 +208,22 @@ def main():
             print(f"  - {k}", file=sys.stderr)
         print("\n  Each of these is a rule somebody paid for. If a removal is genuinely intended,",
               file=sys.stderr)
-        print("  rerun with --update and say why in the commit message.", file=sys.stderr)
+        print("  rerun with --update and declare each one in a commit message on the branch, one line",
+              file=sys.stderr)
+        print("  per entry (CI reads them with --base):", file=sys.stderr)
+        for k in gone:
+            print(f"    Catalog-removed: {k} -- <reason>", file=sys.stderr)
         return 1
 
-    if len(found) < len(prev):
+    if stale:
+        print(f"\ncheck-catalog-fidelity: FAIL — {len(stale)} declared removal(s) did NOT disappear:",
+              file=sys.stderr)
+        for k in stale:
+            print(f"  Catalog-removed: {k} -- {declared[k]}", file=sys.stderr)
+        print("  Drop the declaration, or use the key this tool reports as gone.", file=sys.stderr)
+        return 1
+
+    if len(found) < len(prev) - (len(gone_all) - len(gone)):   # by no more than what was declared
         print(f"\ncheck-catalog-fidelity: FAIL — entry count fell {len(prev)} -> {len(found)}.",
               file=sys.stderr)
         return 1
@@ -165,7 +238,9 @@ def main():
               "docs/catalog-external-paths.tsv.", file=sys.stderr)
         return 1
 
-    print("check-catalog-fidelity: PASS — nothing lost, and every tools/ and templates/ path it names exists.")
+    dropped = len(gone_all) - len(gone)
+    print("check-catalog-fidelity: PASS — " + (f"nothing lost but {dropped} declared removal(s)," if dropped
+          else "nothing lost,") + " and every tools/ and templates/ path it names exists.")
     return 0
 
 

@@ -77,7 +77,11 @@ jobs:
       - name: use the base branch's census
         if: github.event_name == 'pull_request'
         run: git show "origin/${{ github.base_ref }}:docs/catalog-census.tsv" > docs/catalog-census.tsv
-      - run: python3 tools/check-catalog-fidelity.py
+      # ...and honour `Catalog-removed: <file>::<id> -- <reason>` lines in the PR's own commits
+      - if: github.event_name == 'pull_request'
+        run: python3 tools/check-catalog-fidelity.py --base "origin/${{ github.base_ref }}"
+      - if: github.event_name != 'pull_request'
+        run: python3 tools/check-catalog-fidelity.py
 
   readme-skills:
     name: the README still describes the skills

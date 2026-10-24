@@ -15,13 +15,26 @@ Run them locally the same way CI does:
 
 ```bash
 python3 tools/check-no-ip.py
-python3 tools/check-catalog-fidelity.py
+python3 tools/check-catalog-fidelity.py --base origin/main   # honours `Catalog-removed:` lines (below)
 python3 tools/gen-vendored.py --check
 python3 tools/check-readme.py --base origin/main   # a skill change needs a README change, or a `README-unchanged: <reason>` commit line;
                                                    # a single-version route change, a `Single-version-change:` or `-unchanged:` line
 ./tools/test-gates.sh          # proves each gate FAILS on a planted violation
 ./tools/test-setup.sh          # proves ./setup keeps its re-run promises
 ```
+
+On a pull request CI judges the catalogue against the **base** branch's census, so a rule that vanished fails
+even after `--update`. Two gates refuse a removal unless a commit on the branch declares it, with a reason:
+
+```text
+Catalog-removed: <file>::<id> -- <reason>               # one per entry, the exact key the fidelity gate lists
+Tests-removed: tools/test-x.sh <before>-><after> -- <reason>   # review-pr: a self-test that now asserts less
+```
+
+`check-catalog-fidelity.py --base origin/main` reads the first (CI passes `--base`; without it nothing is read); a
+declared key that did not disappear fails too. `tools/review-pr.py` reads the second and accepts a fall only with
+exactly the counts it measures. For an id a file repeats the keys are positional (`3`, `3#2`, ...): deleting one
+shifts the later ones, so declare the keys the gate reports, not the ones you deleted by eye.
 
 `check-no-ip.py` scans the **committed tree** rather than the diff, because a file added in an
 earlier commit and pushed later is still a publication. It treats "could not run" as a failure: a
