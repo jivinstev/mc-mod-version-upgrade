@@ -22,17 +22,21 @@ prints one line per check -- `ok` or `MISSING` with what to do -- and exits 1 wh
 The versions are each fork's version branches (neoforge-<v> with .port/<v>/branch.properties) and its head's
 gradle.properties minecraft_version; --versions names them instead. --no-client skips the client's needs (libEGL,
 XDG_RUNTIME_DIR) for a round that runs no Gate C. A single-version fork is checked the same way, at its one version.
-  origin/HEAD (a version-branch fork) its refs/remotes/origin/HEAD, a WARNING when unset, not counted missing (the
+  origin/HEAD (every kind of fork) its refs/remotes/origin/HEAD, a WARNING when unset, not counted missing (the
               tools fall back to git ls-remote; fix: git remote set-head origin -a).
-  remotes     each remote a version's upstream freeze names (upstream=<remote>/<branch>): without it the gates stop
-              with exit 19; the fix is the fetch-only `git remote add` tools/fork-port.py prints.
+  remotes     (a version-branch fork) each remote a version's upstream freeze names (upstream=<remote>/<branch>):
+              without it the gates stop with exit 19; the fix is the fetch-only `git remote add` tools/fork-port.py
+              prints. (a single-version fork, tools/fork-kind.py detect) a remote fetching the authors' repository its
+              entry in the set's .github/weekly-plan.json names (`upstream`; read from the clones given, the library's
+              head first), which port-sync.py merges from: missing, with the fetch-only add, when none does; no line
+              when no clone given carries that config.
 
 A shallow single-branch clone of a version-branch fork holds no ref of its other version branches: their names are
 read from origin (git ls-remote --heads origin 'neoforge-*') and each counts at its version's JDK. A single-version
-fork's origin names are not read: its versions and verdict are as before.
+fork's origin names are not read: its versions are as before.
 Read-only: it writes nothing and fetches nothing (git ls-remote is its one network read). Standard library only.
 """
-import argparse, importlib.util, os, pathlib, re, shutil, subprocess, sys
+import argparse, importlib.util, json, os, pathlib, re, shutil, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -111,18 +115,71 @@ def is_branch_fork(repo, refs=()):
                for ref in refs if "neoforge-" in ref)
 
 
-def remote_checks(repo):
-    """[(ok, what, detail)] for the remotes a round's gates read: origin/HEAD (the authors' base port-ci.py and
-    port-offer.py name; a fresh cloud clone may lack it), and each remote a version's upstream freeze names
-    (upstream=<remote>/<branch> in .port/<v>/branch.properties or .multiversion/base.properties): without it the gates
-    stop with exit 19 (tools/fork-port.py DRIFT_EXIT: the freeze cannot be compared)."""
+def norm_url(u):
+    """A repository URL compared loosely: scheme, `git@host:` form, `.git` and case do not matter."""
+    u = (u or "").strip().lower()
+    u = re.sub(r"^git@([^:]+):", r"https://\1/", u)
+    u = re.sub(r"^(?:https?|ssh|git)://(?:[^@/]+@)?", "", u)
+    return re.sub(r"(?:\.git)?/*$", "", u)
+
+
+def plan_upstreams(dirs):
+    """{fork slug (lower case): (the authors' repository URL, their branch)} from .github/weekly-plan.json at HEAD (else
+    origin/HEAD) of each clone given: the library's head branch holds the set's config (keep-current, "The fork set")."""
+    out = {}
+    for d in dirs:
+        for ref in ("HEAD", "origin/HEAD"):
+            rc, cfg = git(d, "show", f"{ref}:.github/weekly-plan.json")
+            if rc != 0:
+                continue
+            try:
+                forks = json.loads(cfg).get("forks", [])
+            except (ValueError, AttributeError):
+                forks = []
+            for f in forks if isinstance(forks, list) else []:
+                if isinstance(f, dict) and f.get("repo") and f.get("upstream"):
+                    out.setdefault(str(f["repo"]).lower(), (str(f["upstream"]), str(f.get("upstream_branch") or "")))
+            break
+    return out
+
+
+def authors_remote_check(repo, upstreams):
+    """A single-version fork's authors' remote (the check a version branch's upstream freeze gets, from the one record
+    a single-version fork has: its weekly-plan.json `upstream`): a remote of the clone that fetches that URL, which
+    port-sync.py --upstream <remote>/<branch> merges from. [] when the config names no upstream for this fork."""
+    slug = origin_slug(repo)
+    up = upstreams.get((slug or "").lower())
+    if not up:
+        return []
+    url, branch = up
+    for name in git(repo, "remote")[1].split():
+        if norm_url(git(repo, "remote", "get-url", name)[1]) == norm_url(url):
+            return [(True, f"authors' remote of {repo}", f"{name} fetches {url}: port-sync.py --upstream {name}/{branch or '<branch>'}")]
+    return [(False, f"authors' remote of {repo}", f"no remote fetches {url} (the weekly plan's upstream for {slug}), which "
+             f"the round's port-sync.py merges from -- add it once, fetch-only: git -C {repo} remote add authors {url} && "
+             f"git -C {repo} remote set-url --push authors DISABLED && git -C {repo} fetch authors")]
+
+
+def is_single_version(repo):
+    """tools/fork-kind.py detect (the one route check): no neoforge-<v> branch, local or origin's, carries
+    .port/<v>/branch.properties."""
+    return _load("fork_kind_pf", "fork-kind.py").detect(repo)[0] == "single-version"
+
+
+def remote_checks(repo, upstreams=None):
+    """[(ok, what, detail)] for the remotes a round's gates read: origin/HEAD on every kind of fork (the authors' base
+    port-ci.py and port-offer.py name; a fresh cloud clone may lack it), and each remote a version's upstream freeze
+    names (upstream=<remote>/<branch> in .port/<v>/branch.properties or .multiversion/base.properties): without it the
+    gates stop with exit 19 (tools/fork-port.py DRIFT_EXIT: the freeze cannot be compared). A single-version fork has
+    no freeze: its authors' remote is the one fetching its weekly-plan.json `upstream` (upstreams, plan_upstreams())."""
     out = []
     rc, refs = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/neoforge-*", "refs/remotes/origin/neoforge-*")
-    if is_branch_fork(repo, refs.splitlines() if rc == 0 else []):
-        # a warning (None), never a MISSING: the tools fall back to git ls-remote --symref without it
-        h, _ = git(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
-        out.append((True if h == 0 else None, f"origin/HEAD of {repo}", "set" if h == 0 else
-                    f"not set (the authors' base is read from it, else from git ls-remote): git -C {repo} remote set-head origin -a"))
+    # a warning (None), never a MISSING: the tools fall back to git ls-remote --symref without it
+    h, _ = git(repo, "symbolic-ref", "-q", "refs/remotes/origin/HEAD")
+    out.append((True if h == 0 else None, f"origin/HEAD of {repo}", "set" if h == 0 else
+                f"not set (the authors' base is read from it, else from git ls-remote): git -C {repo} remote set-head origin -a"))
+    if upstreams and is_single_version(repo):
+        out += authors_remote_check(repo, upstreams)
     named = {}
     for ref in (refs.splitlines() if rc == 0 else []) + ["HEAD"]:
         v = ref.split("neoforge-", 1)[1] if "neoforge-" in ref else None
@@ -167,6 +224,7 @@ def checks(forks, versions=None, client=True, env=None, find_java=None, lib=None
         find_java = _load("shipped_gate_pf", "shipped-gate.py").find_java
     lib = lib or has_lib
     out, need = [], {}
+    ups = plan_upstreams([pathlib.Path(d) for _s, d in forks if (pathlib.Path(d) / ".git").exists()])
     for slug, d in forks:
         p = pathlib.Path(d)
         got = origin_slug(p) if (p / ".git").exists() else None
@@ -179,7 +237,7 @@ def checks(forks, versions=None, client=True, env=None, find_java=None, lib=None
             out.append((False, f"clone of {slug}", f"{p} is a clone of {got}, not {slug}"))
             continue
         out.append((True, f"clone of {slug}", str(p)))
-        out += remote_checks(p)
+        out += remote_checks(p, ups)
         for v, j in (fork_versions(p, heads or origin_heads) if versions is None else {}).items():
             need.setdefault(j, set()).add(v)
     for v in versions or ():
@@ -293,7 +351,9 @@ def self_check():
         run("remote", "add", "authors", "https://github.com/owner/upstreamlib.git")
         rm = {w: (ok, det) for ok, w, det in remote_checks(lib)}
         expect(rm[f"remote authors of {lib}"][0], f"the remote there: ok: {rm}")
-        expect(remote_checks(sv) == [], f"a single-version fork: no remote line at all, as before: {remote_checks(sv)}")
+        rs = remote_checks(sv)
+        expect([(ok, w) for ok, w, _d in rs] == [(None, f"origin/HEAD of {sv}")] and "remote set-head origin -a" in rs[0][2],
+               f"a single-version fork with no origin/HEAD: the same warning as a version-branch head (#161 U1, E6): {rs}")
         # a single-version fork whose origin also has a neoforge-26.x branch that is no port (the authors', old work):
         # its versions and its verdict exactly as before origin was read
         expect(fork_versions(sv, lambda repo: ["neoforge-1.21.1", "neoforge-26.3", "neoforge-26.1.2"]) == {"1.21.1": 21},
@@ -302,8 +362,35 @@ def self_check():
         run_sv("remote", "add", "origin", "https://github.com/owner/examplemod.git")
         res_sv = checks([("owner/examplemod", sv)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
                         lib=lambda n: False, linux=True, heads=lambda repo: ["neoforge-1.21.1", "neoforge-26.3"])
-        expect(all(ok is True for ok, _w, _d in res_sv) and not any("origin/HEAD" in w or "JDK 25" in w for _o, w, _d in res_sv),
-               f"a single-version fork with no origin/HEAD and an authors' 26.x branch: all ok, no new line: {res_sv}")
+        expect(all(ok is not False for ok, _w, _d in res_sv) and not any("JDK 25" in w for _o, w, _d in res_sv)
+               and [w for ok, w, _d in res_sv if ok is None] == [f"origin/HEAD of {sv}"],
+               f"a single-version fork with no origin/HEAD and an authors' 26.x branch: nothing missing, the origin/HEAD "
+               f"warning, no 26.x JDK: {res_sv}")
+        # E6: a single-version fork's authors' remote, from the set's weekly-plan.json (on the library's head)
+        cfg = {"forks": [{"repo": "owner/examplelib", "upstream": "https://github.com/up/examplelib", "upstream_branch": "main"},
+                         {"repo": "owner/examplemod", "upstream": "https://github.com/up/examplemod", "upstream_branch": "dev"}]}
+        (sv / ".github").mkdir()
+        (sv / ".github/weekly-plan.json").write_text(json.dumps(cfg), encoding="utf-8")
+        run_sv("add", "-A"); run_sv("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "plan")
+        ups = plan_upstreams([sv])
+        expect(ups.get("owner/examplemod") == ("https://github.com/up/examplemod", "dev"), f"plan_upstreams: {ups}")
+        rs = {w: (ok, det) for ok, w, det in remote_checks(sv, ups)}
+        expect(rs[f"authors' remote of {sv}"][0] is False and "git -C" in rs[f"authors' remote of {sv}"][1]
+               and "remote add authors https://github.com/up/examplemod" in rs[f"authors' remote of {sv}"][1]
+               and "set-url --push authors DISABLED" in rs[f"authors' remote of {sv}"][1],
+               f"a single-version fork without its authors' remote: missing, with the fetch-only add: {rs}")
+        run_sv("remote", "add", "upstream", "git@github.com:Up/examplemod.git")
+        rs = {w: (ok, det) for ok, w, det in remote_checks(sv, ups)}
+        expect(rs[f"authors' remote of {sv}"][0] is True and "--upstream upstream/dev" in rs[f"authors' remote of {sv}"][1],
+               f"the authors' remote there (another URL form): ok: {rs}")
+        res = checks([("owner/examplemod", sv)], env={"GH_TOKEN": "y", "XDG_RUNTIME_DIR": str(xdg)}, find_java=jdks.get,
+                     lib=lambda n: False, linux=True, heads=none)
+        expect(any(w == f"authors' remote of {sv}" and ok for ok, w, _d in res), f"checks() reads the set's config: {res}")
+        # a version-branch fork with the same config: its remote lines are its freezes', exactly as before
+        before = remote_checks(lib)
+        expect(remote_checks(lib, {"owner/examplelib": ("https://github.com/up/examplelib", "main")}) == before
+               and not any("authors' remote" in w for _o, w, _d in before),
+               f"a version-branch fork: no weekly-plan remote line, its freeze lines unchanged: {before}")
         expect(has_lib("libX.so.1", {}, [str(d)]) is False and (d / "libX.so.1").write_bytes(b"") == 0
                and has_lib("libX.so.1", {}, [str(d)]), "has_lib looks in the directories given")
     for m in bad:
