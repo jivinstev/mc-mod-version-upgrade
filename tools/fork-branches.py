@@ -4204,9 +4204,8 @@ def ci_check(repo, versions=None, kit_version=None):
         try:
             pc = load("port_ci_fb", "port-ci.py")
             # the floor of the download probe kit_pin falls back to when the release list is refused (a 403)
-            pinned = pc.pinned_kits([git(repo, "show", f"{fresh_branch(repo, branch_name(t)) or have[t]}:.github/workflows/"
-                                         "port-ci.yml").stdout for t in todo] + [head_workflow(repo, have)[1]])
-            newest = pc.kit_pin(pc.migrator_repo(), floor=max(pinned, default=None), say=out.append)[0]
+            newest = pc.newest_kit([git(repo, "show", f"{fresh_branch(repo, branch_name(t)) or have[t]}:.github/workflows/"
+                                        "port-ci.yml").stdout for t in todo] + [head_workflow(repo, have)[1]], say=out.append)
         except (Exception, SystemExit) as e:    # noqa: BLE001 -- offline: say so, compare the variants only
             out.append(f"fork-branches: ci-check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
     elif kit_version is not False:
@@ -4272,20 +4271,10 @@ def head_workflow(repo, have=None):
     return head, (r.stdout if r is not None and r.returncode == 0 else "")
 
 
-RECORD_PUSHES = (".port/KNOWN-ISSUES.json", "README.md")     # the head's round commits: the ledger, the Ports block
-
-
 def ignores_records(wf, need=None):
-    """Does the workflow's push trigger paths-ignore the head's round records (the ledger and the root README; `need`:
-    other paths, a version branch's records)? A workflow port-ci.py rendered before that line existed runs the full Port
-    CI for every ledger or Ports-block commit."""
-    push = wf.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0] if "\n  push:\n" in wf else ""
-    m = re.search(r"(?m)^\s*paths-ignore: (\[.*\])\s*$", push)
-    try:
-        ign = json.loads(m.group(1)) if m else []
-    except ValueError:
-        ign = []
-    return all(f in ign for f in (need if need is not None else RECORD_PUSHES))
+    """port-ci.py ignores_records: does the workflow's push trigger paths-ignore the head's round records (`need`:
+    other paths, a version branch's records)?"""
+    return load("port_ci_fb", "port-ci.py").ignores_records(wf, need)
 
 
 def head_ci_lines(repo, have, newest):
@@ -4297,13 +4286,7 @@ def head_ci_lines(repo, have, newest):
     head, wf = head_workflow(repo, have)
     if not wf:
         return []
-    why = []
-    kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf)]
-    if newest is not None and (not kits or min(kits) < newest):
-        why.append(f"its workflow pins Port CI kit {min(kits) if kits else '?'}, older than kit {newest}")
-    if not ignores_records(wf):
-        why.append("its push trigger ignores no records, so every known-issues ledger or README Ports-block commit runs "
-                   "the full Port CI there")
+    why = load("port_ci_fb", "port-ci.py").stale_workflow(wf, newest)   # the single-version check (port-ci.py check)
     if not why:
         return []
     return [f"fork-branches: ci-check: WARNING {head} (the head branch): " + "; ".join(why) + f" -- regenerate: python3 "
@@ -4343,8 +4326,9 @@ def ci_head(repo, modid, run=False, say=print, kit_version=None, runner=None):
     repo = pathlib.Path(repo).resolve()
     have = version_branches(repo)
     if not have:
-        say("fork-branches: ci --head is for a fork with version branches (none here); a single-version fork keeps its "
-            "workflow (port-ci.py args --repo DIR prints the command that regenerates it)"); return 2
+        say("fork-branches: ci --head is for a fork with version branches (none here); a single-version fork's port branch "
+            "is checked by port-ci.py check --repo DIR, which warns about an old kit or no records ignore and prints the "
+            "command that regenerates its workflow at the newest kit"); return 2
     head, wf = head_workflow(repo, have)
     if not wf:
         say(f"fork-branches: {head} has no .github/workflows/port-ci.yml (the port-fork skill installs it)"); return 2
