@@ -1405,6 +1405,10 @@ def run(argv):
     a = build_parser().parse_args(argv)
     if a.self_check:
         return self_check()
+    why = _refuse_layer((getattr(a, "repo", None) or ".") if hasattr(a, "repo") else None, "known-issues")
+    if why:
+        print(why)
+        return 2
     if not a.cmd:
         build_parser().print_help()
         return 2
@@ -1686,6 +1690,15 @@ def cmd_render_ports(a, repo, out):
     out(f"render-ports: wrote the Ports block of {p} ({len(rows)} version(s)); commit it alone (a root README edit "
         "runs no Port CI and stales no gate)")
     return 0
+
+
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
 
 
 def main(argv=None):

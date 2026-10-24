@@ -393,6 +393,9 @@ def commit_to(repo, branch, files, msg):
 
 def install(a, say=print, repo_info=None):
     repo = pathlib.Path(a.repo).resolve()
+    why = _refuse_layer(repo, "weekly-plan")
+    if why:
+        raise Fail(why)
     forks = [parse_fork(s) for s in a.fork]
     trailers = [t.strip() for t in a.trailer or []]
     bad = [t for t in trailers if not TRAILER_RE.match(t)]
@@ -1638,6 +1641,15 @@ def build_parser():
     for n in ("cascade", "select", "deps", "previous", "open"):
         sub.add_parser(n).add_argument("--work", required=True)
     return ap
+
+
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
 
 
 def main(argv=None):

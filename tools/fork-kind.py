@@ -20,8 +20,9 @@ last commit of this repository that supports it is LAST_LAYER_COMMIT. A checkout
 (`.multiversion/base.properties` or `.multiversion/targets/`) is refused by `detect` and by every tool that takes a
 fork checkout (refuse_layer(), exit 2), with LAYER_REMOVED: check that commit out to migrate the fork to version
 branches (`fork-branches.py migrate` there), then use the fork-versions skill. A `.multiversion/` holding only a
-single-version fork's shipped-jar files (shipped-jar.txt, shipped-expect.txt) is not a layer and is not refused.
-Standard library only.
+single-version fork's shipped-jar files (shipped-jar.txt, shipped-expect.txt) is not a layer and is not refused. A
+migrated fork (version branches exist) checked out on its legacy layer branch is refused too, exit 2, but told to check
+out its head branch instead (LEGACY_CHECKOUT): it needs no migration. Standard library only.
 """
 import argparse, pathlib, re, subprocess, sys, tempfile
 
@@ -49,9 +50,33 @@ def is_layer(repo):
     return (mv / "base.properties").is_file() or (mv / "targets").is_dir()
 
 
+LEGACY_CHECKOUT = ("{tool}: {repo} is a version-branch fork checked out on a legacy layer branch ({branch}); check out "
+                   "its head branch ({head})")
+
+
+def head_of(repo, vb):
+    """The head (port) branch of a version-branch fork: `port_branch=` in its oldest version's branch.properties
+    (tools/fork-branches.py head_branch), else neoforge-1.21.1."""
+    for v in sorted(vb, key=mc_key):
+        props = git(repo, "show", f"{vb[v]}:.port/{v}/branch.properties").stdout
+        m = re.search(r"(?m)^port_branch=(\S+)", props)
+        if m:
+            return m.group(1)
+    return "neoforge-1.21.1"
+
+
 def refuse_layer(repo, tool):
-    """The one refusal: None for a fork this repository serves, else the message (print it and exit 2)."""
-    return LAYER_REMOVED.format(tool=tool, repo=repo) if repo and is_layer(repo) else None
+    """The one refusal: None for a fork this repository serves, else the message (print it and exit 2). A migrated
+    fork (it has version branches) whose checkout sits on its legacy layer branch is told to check out its head branch;
+    any other layer at HEAD is told where its migration runs (LAST_LAYER_COMMIT)."""
+    if not repo or not is_layer(repo):
+        return None
+    vb = version_refs(repo)
+    if vb:
+        branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        return LEGACY_CHECKOUT.format(tool=tool, repo=repo, branch=branch if branch not in ("", "HEAD") else "a detached HEAD",
+                                      head=head_of(repo, vb))
+    return LAYER_REMOVED.format(tool=tool, repo=repo)
 
 
 def version_refs(repo):
@@ -135,9 +160,17 @@ def self_check():
                f"the layer branch not checked out: no refusal, listed as legacy: {detect(r)}")
         # version branches win; the layer branch is history
         g("checkout", "-q", "-b", "neoforge-1.21.4")
-        w("gradle.properties", "minecraft_version=1.21.4\n"); w(".port/1.21.4/branch.properties", "parent=neoforge-1.21.1\n")
+        w("gradle.properties", "minecraft_version=1.21.4\n"); w(".port/1.21.4/branch.properties", "parent=neoforge-1.21.1\nport_branch=neoforge-1.21.1\n")
         g("add", "-A"); g("commit", "-qm", "1.21.4")
         expect(detect(r) == ("version-branches", ["1.21.4"], ["neoforge-1.21.x"]), f"version branches: {detect(r)}")
+        # a migrated fork checked out on its legacy layer branch: refused (exit 2), told to check out its head, no migration
+        g("checkout", "-q", "neoforge-1.21.x")
+        msg = refuse_layer(r, "some-tool")
+        expect(msg == f"some-tool: {r} is a version-branch fork checked out on a legacy layer branch (neoforge-1.21.x); "
+                      "check out its head branch (neoforge-1.21.1)" and "migrate" not in msg and LAST_LAYER_COMMIT[:12] not in msg,
+               f"a migrated fork on its legacy layer branch is told to check out its head: {msg}")
+        g("checkout", "-q", "neoforge-1.21.4")
+        expect(refuse_layer(r, "x") is None, "back on a version branch: no refusal")
         # a single-branch clone of the head (the port branch) is a single-version fork
         c = pathlib.Path(d) / "clone"
         subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(r), str(c)], check=True,

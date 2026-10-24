@@ -170,6 +170,15 @@ def self_check():
     return 0 if ok else 1
 
 
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
+
+
 def main():
     if "--self-check" in sys.argv:
         return self_check()
@@ -181,6 +190,10 @@ def main():
     v = sub.add_parser("verify"); v.add_argument("kit")
     s = sub.add_parser("sha"); s.add_argument("--version", required=True)
     a = ap.parse_args()
+    why = _refuse_layer(getattr(a, "repo", None), "port-ci-kit")
+    if why:
+        print(why)
+        return 2
     if a.cmd == "trace":
         return trace(pathlib.Path(a.repo).resolve(), a.modid, a.base, a.gatec)
     if a.cmd == "build":

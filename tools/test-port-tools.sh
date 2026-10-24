@@ -514,18 +514,65 @@ LR="$T/layer-refused"; mkdir -p "$LR/.multiversion/targets/1.21.4"; git -C "$LR"
 printf 'minecraft_version=1.21.1\nmod_id=examplemod\n' > "$LR/gradle.properties"; echo 'plugins {}' > "$LR/build.gradle"
 printf 'minecraft_version=1.21.1\n' > "$LR/.multiversion/base.properties"; echo x=1 > "$LR/.multiversion/targets/1.21.4/target.properties"
 before="$(cd "$LR" && find . -path ./.git -prune -o -type f -print | sort)"
-refused=""
-for cmd in "fork-kind.py detect --repo $LR" "fork-port.py --repo $LR --target 1.21.4" "fork-branches.py ci-check --repo $LR" \
-           "ci-gates.py --repo $LR --modid examplemod" "layer-deps.py resolve --repo $LR --target 1.21.4" \
-           "layer-inventory.py build --repo $LR"; do
-  out="$(python3 tools/$cmd 2>&1)"; code=$?
+git -C "$LR" remote add origin https://github.com/owner/examplemod
+printf '{"forks": [{"repo": "owner/examplemod", "head": "neoforge-1.21.1"}]}\n' > "$T/lr-config.json"; echo '{}' > "$T/lr-frozen.json"
+# every user-facing tool that takes a fork checkout (a --repo, or a --fork ...=DIR)
+refused=""; n=0
+while read -r cmd; do
+  n=$((n+1)); out="$(python3 tools/$cmd 2>&1 </dev/null)"; code=$?
   { [ $code = 2 ] && grep -q "has the .multiversion/ layer at HEAD" <<<"$out" && grep -q "$LAST" <<<"$out" && grep -q 'fork-branches.py migrate' <<<"$out"; } \
     || refused="$refused [${cmd%% *}: exit $code: ${out:0:200}]"
-done
+done <<LAYERTOOLS
+fork-kind.py detect --repo $LR
+fork-port.py --repo $LR --target 1.21.4
+fork-branches.py ci-check --repo $LR
+ci-gates.py --repo $LR --modid examplemod
+layer-deps.py resolve --repo $LR --target 1.21.4
+layer-inventory.py build --repo $LR
+port-ci.py --repo $LR --modid examplemod
+port-publish.py publish --repo $LR --tag t
+port-sync.py --repo $LR --port neoforge-1.21.1 --upstream upstream/main
+port-upstream.py --repo $LR --modid examplemod
+port-offer.py --repo $LR
+port-derive.py --repo $LR --branch neoforge-1.21.1 --base origin/main
+port-provenance.py --repo $LR --base HEAD
+port-manifest.py refresh --repo $LR
+review-metrics.py --repo $LR --base HEAD
+manual-tests.py --repo $LR
+port-ci-kit.py trace --repo $LR --modid examplemod
+audit-wiring.py --repo $LR --against HEAD
+shipped-gate.py --jar $T/none.jar --repo $LR
+known-issues.py list --repo $LR
+weekly-plan.py install --repo $LR --fork owner/examplemod@neoforge-1.21.1=https://example.invalid/a#main --plan-owner someone
+round-preflight.py --fork owner/examplemod=$LR
+round.py init --frozen $T/lr-frozen.json --fork owner/examplemod=$LR --config $T/lr-config.json --round-dir $T/lr-round
+port-cost.py round-table --since 2026-01-01 --fork a=$LR
+LAYERTOOLS
 after="$(cd "$LR" && find . -path ./.git -prune -o -type f -print | sort)"
 [ -z "$refused" ] && [ "$before" = "$after" ] \
-  && ok "a .multiversion/ layer at HEAD is refused (exit 2) by fork-kind, fork-port, fork-branches, ci-gates, layer-deps and layer-inventory, naming commit $LAST and the migration; nothing written" \
+  && [ "$n" = 24 ] \
+  && ok "a .multiversion/ layer at HEAD is refused (exit 2) by all $n fork-taking tools (fork-kind, fork-port, fork-branches, ci-gates, layer-deps, layer-inventory, port-ci, port-publish, port-sync, port-upstream, port-offer, port-derive, port-provenance, port-manifest, review-metrics, manual-tests, port-ci-kit trace, audit-wiring, shipped-gate, known-issues, weekly-plan install, round-preflight, round init, port-cost round-table), naming commit $LAST and the migration; nothing written" \
   || bad "layer refusal:$refused $( [ "$before" = "$after" ] || echo 'files written')"
+# a migrated fork (version branches exist) checked out on its legacy layer branch: refused (exit 2), told to check out
+# its head branch -- no migration, no commit named
+LV="$T/legacy-checkout"; mkdir -p "$LV"; git -C "$LV" init -q -b neoforge-1.21.1; git -C "$LV" config user.email a@b; git -C "$LV" config user.name a
+printf 'minecraft_version=1.21.1\n' > "$LV/gradle.properties"; git -C "$LV" add -A; git -C "$LV" commit -qm base
+git -C "$LV" checkout -qb neoforge-1.21.4; mkdir -p "$LV/.port/1.21.4"
+printf 'parent=neoforge-1.21.1\nport_branch=neoforge-1.21.1\n' > "$LV/.port/1.21.4/branch.properties"; git -C "$LV" add -A; git -C "$LV" commit -qm 1.21.4
+git -C "$LV" checkout -q neoforge-1.21.1; git -C "$LV" checkout -qb neoforge-1.21.x; mkdir -p "$LV/.multiversion/targets/1.21.4"
+printf 'minecraft_version=1.21.1\n' > "$LV/.multiversion/base.properties"; echo x=1 > "$LV/.multiversion/targets/1.21.4/target.properties"
+git -C "$LV" add -A; git -C "$LV" commit -qm layer
+lvbad=""
+for cmd in "fork-kind.py detect --repo $LV" "fork-port.py --repo $LV --target 1.21.4" "port-sync.py --repo $LV --port neoforge-1.21.1 --upstream upstream/main"; do
+  out="$(python3 tools/$cmd 2>&1)"; code=$?
+  { [ $code = 2 ] && grep -qF "is a version-branch fork checked out on a legacy layer branch (neoforge-1.21.x); check out its head branch (neoforge-1.21.1)" <<<"$out" \
+      && ! grep -q 'migrate' <<<"$out" && ! grep -q "$LAST" <<<"$out"; } || lvbad="$lvbad [${cmd%% *}: exit $code: ${out:0:200}]"
+done
+git -C "$LV" checkout -q neoforge-1.21.1
+out="$(python3 tools/fork-kind.py detect --repo "$LV" 2>&1)"; code=$?
+[ -z "$lvbad" ] && [ $code = 0 ] && grep -q '^kind=version-branches versions=1.21.4 legacy_layer=neoforge-1.21.x$' <<<"$out" \
+  && ok "a migrated fork checked out on its legacy layer branch is refused (exit 2) and told to check out its head branch (no migration named); on the head it is a version-branch fork" \
+  || bad "legacy layer checkout:$lvbad detect on the head: exit $code: $out"
 # single-version: no version branch -- fork-port stops before any stage, having written nothing; --chain, --check-done
 # and --write-test-items stop the same way (exit 2)
 SV="$T/r145-single"; mkdir -p "$SV"; git -C "$SV" init -q -b neoforge-1.21.1
@@ -801,6 +848,11 @@ SVL="$T/lk-single"; mkdir -p "$SVL/build"; cp "$LK/build/.fork-port.lock" "$SVL/
 python3 tools/ci-gates.py --repo "$SVL" --modid m --work-dir "$T/lkw2" >/dev/null 2>&1; code=$?
 [ $code != 14 ] && grep -q "\"pid\": $HOLD" "$SVL/build/.fork-port.lock" && ok "ci-gates without --mc (a single-version fork) ignores the lock entirely" || bad "single-version ci-gates touched the lock (exit $code)"
 kill $HOLDJOB 2>/dev/null; wait $HOLDJOB 2>/dev/null
+# the holder is gone: its lock is stale -- a real fork-port run on the version branch takes it over and releases it when
+# it ends (it stops at setup here: no Gradle project, exit 10 or 2)
+out="$(python3 tools/fork-port.py --repo "$LK" --target 1.21.4 --gates none 2>&1)"; code=$?
+{ [ $code = 10 ] || [ $code = 2 ]; } && ! grep -q 'another fork-port.py is using this checkout' <<<"$out" && [ ! -e "$LK/build/.fork-port.lock" ] \
+  && ok "a dead holder's lock is stale: taken over, and released when the run ends" || bad "stale lock exit $code: $out"
 
 out="$(python3 tools/test-port-publish.py 2>&1)"
 grep -q 'test-port-publish: OK' <<<"$out" && ok "publish-port: single-version output and API calls byte-identical to the recorded golden; --platform mr|cf, and a cf-only S1 in the ledger publishes to Modrinth and holds CurseForge back by name (a version branch reads the head branch's ledger; an unreadable ledger holds both)" || bad "test-port-publish: $out"

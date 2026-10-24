@@ -16,7 +16,8 @@ description: Make a fork port build for more Minecraft versions as stacked versi
 - **A layer fork** (`.multiversion/base.properties` or `.multiversion/targets/` at HEAD): the overlay route was removed.
   Every tool that takes a fork checkout refuses it (exit 2), naming the last migrator commit that supports it -- see
   "A fork still on the layer" at the end. A version-branch fork whose old layer branch still exists is fine: `detect`
-  lists that branch as `legacy_layer=` and everything ignores it.
+  lists that branch as `legacy_layer=` and everything ignores it; a checkout sitting on that branch is refused too
+  (exit 2), told to check out its head branch.
 
 Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-kind.py` (detect), `tools/fork-branches.py` (versions, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, remake, ci, ci-check),
 `tools/fork-port.py` (the stages and the done list, on a version branch), `tools/layer-inventory.py`,

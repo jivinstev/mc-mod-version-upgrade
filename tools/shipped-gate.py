@@ -291,6 +291,15 @@ def boot(run, java, timeout, settle=10.0, poll=1.0):
     return True, f"started and stopped cleanly in {time.time() - t0:.0f} s", full
 
 
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
+
+
 def main():
     if "--self-check" in sys.argv:
         return self_check()
@@ -304,6 +313,10 @@ def main():
     ap.add_argument("--settle", type=float, default=10.0, help="seconds the server runs after 'Done (' before `stop`")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
+    why = _refuse_layer(a.repo, "shipped-gate")
+    if why:
+        print(why)
+        return 2
     jar = pathlib.Path(a.jar).resolve()
     if not jar.is_file() or not zipfile.is_zipfile(jar):
         say(f"--jar {a.jar}: not a jar"); return 2

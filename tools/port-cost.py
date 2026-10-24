@@ -730,6 +730,11 @@ def round_table_main(argv):
     forks = [tuple(x.split("=", 1)) for x in a.fork]
     if any(len(f) != 2 for f in forks):
         ap.error("--fork LABEL=DIR")
+    for _label, d in forks:
+        why = _refuse_layer(d, "port-cost")
+        if why:
+            print(why)
+            return 2
     print(round_table(round_rows(forks, a.since, a.projects)), end="")
     return 0
 
@@ -947,6 +952,15 @@ def self_check():
                and "| **all forks** |" in tab and "an-old-record" not in tab, f"the table: {tab}")
     print("self-check: OK" if ok else "self-check: FAILED")
     return 0 if ok else 1
+
+
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
 
 
 def main():

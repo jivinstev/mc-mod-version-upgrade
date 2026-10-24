@@ -1328,7 +1328,8 @@ def main():
     repo = pathlib.Path(a.repo).resolve()
     why = _load_tool("fork_kind", "fork-kind.py").refuse_layer(repo, "port-ci")
     if why:
-        sys.exit(why)
+        print(why)
+        sys.exit(2)
     p = props(repo)
     mc, neo = p.get("minecraft_version"), p.get("neo_version")
     if not mc or not neo:

@@ -3,7 +3,7 @@
 # ResourceLocation to Identifier here (CATALOG §V4, a pure type rename) and moved ~330 classes (the fork's generated
 # moves.generated.tsv carries those; they are derived from the staged jars and are not copied into this library).
 # A rename row reaches the AUTHORS' files only. It never reaches an overlay (CATALOG §W8) and never reaches a shared HELPER
-# (helpers are copied into the branch AFTER the rename pass), so helpers in shared/1.21.11/java are written
+# (layer.py copies helpers into the prepared tree AFTER the rename pass), so helpers in shared/1.21.11/java are written
 # in the 1.21.11 dialect by hand.
 #!exhaustive  # shared library: most forks use only some of these rows
 net.minecraft.resources.ResourceLocation	net.minecraft.resources.Identifier

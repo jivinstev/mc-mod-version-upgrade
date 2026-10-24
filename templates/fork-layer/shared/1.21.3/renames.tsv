@@ -1,8 +1,8 @@
 # Shared fork-layer rename table: NeoForge 1.21.1 -> 1.21.3 (Minecraft 1.21.2 API; NeoForge 21.3).
 # Harvested from the first layer-fork port and measured against neoforge-21.3.97-sources.jar.
-# Every fork that adds a 1.21.3 version branch inherits these rows (fork-branches.py add-target / sync-shared copy them
-# into .port/1.21.3/shared-renames.tsv, with @MVPKG@ = the fork's helper package). Fork-specific rows stay in the
-# branch's own .port/1.21.3/renames.tsv. CATALOG §M (M26-M45) has the reasoning for each row.
+# Every fork that adds a 1.21.3 target inherits these rows (make-fork-layer.py sync-shared copies them to
+# .multiversion/shared/1.21.3/, with @MVPKG@ = the fork's helper package). Fork-specific rows stay in
+# .multiversion/targets/1.21.3/renames.tsv. CATALOG §M (M26-M45) has the reasoning for each row.
 #
 # Most of a shared table matches nothing in any one mod, so it is exempt from the dead-rule report as one
 # block (CATALOG X23); the fork's own table is checked.
