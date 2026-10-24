@@ -7,14 +7,14 @@ description: Make a fork port build for more Minecraft versions as stacked versi
 
 **Say first which kind of fork this is**, and default to single-version:
 
-- **Single-version** (the default and the proven path): one port branch, `neoforge-1.21.1`, built, gated, synced and
+- **Single-version** (the default): one port branch, `neoforge-1.21.1`, built, gated, synced and
   published by port-fork, keep-current and publish-port. Nothing in this skill touches it. Do not turn a single-version
   fork into a multi-version one unless the user explicitly decides it gets more versions; then it becomes a fork of
   **version branches** (below), never a layer.
 - **Version branches** (the default for a multi-version fork): the port branch plus one branch per further version,
   `neoforge-<version>`, each carrying `.port/<version>/branch.properties`. Everything below is for these.
-- **An existing layer fork** (`.multiversion/` on a `neoforge-1.21.x` branch): overlay mode keeps working for a repository
-  that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
+- **An existing layer fork** (`.multiversion/` on a `neoforge-1.21.x` branch; legacy, being removed, its code getting
+  bug fixes only): overlay mode keeps working for a repository that has not migrated -- see "Existing layer repositories" at the end -- but no new fork is made a layer, and a layer
   fork moves to version branches with `tools/fork-branches.py migrate` when the maintainer decides it for that fork.
 
 Tools: `tools/known-issues.py` (the known-issues ledger), `tools/fork-branches.py` (migrate, verify, add-target, cascade -- plain, `--plan`, `--apply`, `--apply-decisions`, `--port-ref` --, untaken, review-authors, sync-shared, check-done, freeze, library-record, remake, ci, ci-check),
@@ -625,7 +625,7 @@ compares again later. Then regenerate CI per branch (`ci`), point keep-current a
 layer branch only when the maintainer says so. A layer that is not isolated (it differs from the port commit outside
 `.multiversion/`) is refused. A repository holding several mods stays on the layer for now.
 
-## Existing layer repositories (overlay mode)
+## Existing layer repositories (overlay mode; legacy, being removed)
 
 A fork that keeps its `.multiversion/` layer is served as before: `tools/make-fork-layer.py` (init, add-target,
 sync-shared, freeze -- `freeze --library` never re-checks the authors' branch, `--accept-upstream-drift` re-freezes a
