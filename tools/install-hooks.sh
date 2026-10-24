@@ -76,10 +76,11 @@ if [ -f "$root/tools/check-similarity.py" ]; then
     fi
   done <<< "$pushes"
 fi
-# A skill change is a README change (CLAUDE.md): compared with origin/main when this clone has it.
+# A skill change is a README change, and a single-version route change says so (CLAUDE.md): compared with origin/main
+# when this clone has it.
 base=""; git -C "$root" rev-parse -q --verify origin/main >/dev/null && base="--base origin/main"
 python3 "$root/tools/check-readme.py" --root "$root" $base || {
-  echo "pre-push: REFUSED — the README no longer describes the skills (see above). Nothing has been pushed." >&2
+  echo "pre-push: REFUSED — the README no longer describes the skills, or a single-version route change says nothing (see above). Nothing has been pushed." >&2
   exit 1
 }
 HOOK

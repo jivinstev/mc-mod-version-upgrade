@@ -14,18 +14,39 @@ WITH --base (the pre-push hook and CI pass the branch it will merge into):
   3. if the branch changes a SKILL.md, or ADDS a script that a SKILL.md names, then README.md must change on the
      branch too -- unless a commit message on the branch carries a line `README-unchanged: <reason>` (a typo fix
      in a skill, say). The reason is printed, so a reviewer sees it.
+  4. if the branch changes a file the single-version route runs (SV_TOOLS, or a line of keep-current, port-fork or
+     publish-port outside a `## ` section about version branches or the layer), a commit message on the branch carries
+     `Single-version-change: <reason>` (what an existing single-version fork now does differently) or
+     `Single-version-unchanged: <reason>` (CLAUDE.md, P2: nothing changes silently). The line is printed.
 Exit 0 pass, 1 fail, 2 could not run (no skills found, or the base is unknown): a gate that quietly checked
 nothing reports like one that passed. Standard library only.
 """
 import argparse, pathlib, re, subprocess, sys, tempfile
 
 PATH = re.compile(r"(?<![\w./-])((?:tools|docs|templates|setup|cloud|\.claude|\.github)/[\w./-]*[\w/])")
+SV_TOOLS = {f"tools/{t}.py" for t in ("port", "port-upstream", "port-sync", "port-ci", "port-publish", "ci-gates",
+                                         "shipped-gate")}
+SV_SKILLS = {f".claude/skills/{s}/SKILL.md" for s in ("keep-current", "port-fork", "publish-port")}
+MV_SECTION = re.compile(r"version branch|layer|multi-version", re.I)    # a `## ` heading the single-version route skips
 LINK = re.compile(r"\]\(((?!https?:|#|mailto:)[^)\s]+)\)")
 
 
 def git(root, *a):
     r = subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode, r.stdout
+
+
+def sv_lines(root, mb, f):
+    """Does the branch change a line of skill `f` outside a `## ` section about version branches or the layer?"""
+    _, d = git(root, "diff", "-U0", mb, "HEAD", "--", f)
+    starts = [int(m) for m in re.findall(r"^@@ -\S+ \+(\d+)", d, re.M)]
+    p = root / f
+    lines = p.read_text(encoding="utf-8").splitlines() if p.is_file() else []
+    for n in starts:                      # a deletion's hunk names the line before it: the same section
+        head = next((l for l in reversed(lines[:max(n, 1)]) if l.startswith("## ")), "")
+        if not MV_SECTION.search(head):
+            return True
+    return False
 
 
 def check(root, base=None):
@@ -63,6 +84,17 @@ def check(root, base=None):
                 problems.append("this branch changes " + ", ".join(sorted(why)[:5]) + (" ..." if len(why) > 5 else "")
                                 + " but not README.md: update the Skills table / workflow section, or say why not "
                                 "with a commit line `README-unchanged: <reason>`")
+        sv = sorted(f for f in changed if f in SV_TOOLS or (f in SV_SKILLS and sv_lines(root, mb, f)))   # 4
+        if sv:
+            _, log = git(root, "log", "--format=%B", f"{mb}..HEAD")
+            said = re.findall(r"^(Single-version-(?:change|unchanged)):\s*(\S.*)$", log, re.M)
+            if said:
+                notes.append(f"single-version route touched ({', '.join(sv[:3])}): {said[-1][0]}: {said[-1][1]}")
+            else:
+                problems.append("this branch changes " + ", ".join(sv[:5]) + (" ..." if len(sv) > 5 else "")
+                                + ", which the single-version route runs: say what that means for an existing "
+                                "single-version fork with a commit line `Single-version-change: <reason>` or "
+                                "`Single-version-unchanged: <reason>`")
         checked += f", {len(changed)} changed file(s) since {base}"
     notes.insert(0, f"checked {checked}")
     return (1 if problems else 0), problems, notes
@@ -96,6 +128,25 @@ def self_check():
         g("reset", "-q", "--hard", "HEAD~1")
         w("README.md", "| **alpha**: does a | `tools/a.py`, `tools/b.py` |\n"); g("add", "-A"); g("commit", "-qm", "readme")
         rc, _, _ = check(r, "main"); ok &= rc == 0
+        # 4: the single-version route (a tool it runs; a skill line outside a version-branch or layer section)
+        g("checkout", "-qb", "sv", "main")
+        w(".claude/skills/keep-current/SKILL.md", "# k\n## Run\nstep\n## A fork with version branches\nvb\n")
+        w("README.md", "| **alpha**: does a | `tools/a.py` |\n| **keep-current**: k | |\n")
+        g("add", "-A"); g("commit", "-qm", "kc")
+        rc, p, _ = check(r, "main"); ok &= rc == 1 and "Single-version-change" in p[0]  # a new skill's Run section
+        g("checkout", "-qb", "sv2")
+        w(".claude/skills/keep-current/SKILL.md", "# k\n## Run\nstep\n## A fork with version branches\nvb, more\n")
+        g("commit", "-qam", "vb only\n\nREADME-unchanged: a test")
+        rc, p, _ = check(r, "sv"); ok &= rc == 0 and not p                            # a version-branch section only
+        w(".claude/skills/keep-current/SKILL.md", "# k\n## Run\nstep, changed\n## A fork with version branches\nvb, more\n")
+        g("commit", "-qam", "run step")
+        rc, p, _ = check(r, "sv"); ok &= rc == 1 and any("Single-version-change" in x for x in p)
+        g("commit", "-q", "--allow-empty", "-m", "y\n\nSingle-version-unchanged: wording only")
+        rc, p, n = check(r, "sv"); ok &= rc == 0 and any("wording only" in x for x in n)
+        g("tag", "t"); w("tools/port-sync.py", ""); g("add", "-A"); g("commit", "-qm", "tool")
+        rc, p, _ = check(r, "t"); ok &= rc == 1 and "tools/port-sync.py" in p[0]    # a tool the route runs
+        g("commit", "-q", "--allow-empty", "-m", "z\n\nSingle-version-change: merges now name the commit")
+        rc, p, n = check(r, "t"); ok &= rc == 0 and any("Single-version-change: merges" in x for x in n)
         rc, _, _ = check(r, "nosuchbase"); ok &= rc == 2
         (r / "README.md").unlink()
         rc, _, _ = check(r); ok &= rc == 2
