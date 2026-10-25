@@ -47,8 +47,9 @@ The account is written to .port/<t>/INVENTORY-CHECK.json (unless --no-write); to
 the same check (check_branch). drops.txt and BEHAVIOUR.json are read over T's chain of .port/<v>/ copies, nearest first
 (an item a parent dropped stays dropped, marked inherited).
 
-A SINGLE-VERSION fork (no version branch checked out) has no inventory requirement: `build` writes nothing (exit 2),
-`check` says so and exits 0. A checkout with the removed .multiversion/ layer at HEAD is refused (tools/fork-kind.py).
+A SINGLE-VERSION fork (no version branch checked out) has no inventory requirement HERE: `build` writes nothing (exit
+2), `check` says so and exits 0 -- its review base's inventory is accounted for by tools/fork-branches.py check-done
+(#161 U5), through check_branch(inv=inventory_of_commit(base)). A checkout with the removed .multiversion/ layer at HEAD is refused (tools/fork-kind.py).
 
 Exit codes: 0 built / every item accounted for; 16 `check`: unaccounted items (listed); 2 bad input (not a version
 branch's checkout, no .port/INVENTORY.json, a layer checkout).
@@ -551,15 +552,16 @@ def account_branch(repo, root, target, mechanical, inv=None, ref="HEAD"):
     return _account(target, inv, pdirs, res, sets, now, overlaid, drops, stubs, review, beh, notes, src_moved)
 
 
-def check_branch(repo, root, target, mechanical=None, files=None, ref="HEAD"):
-    """check() for a version branch: (exit code, report or None, message lines)."""
+def check_branch(repo, root, target, mechanical=None, files=None, ref="HEAD", inv=None):
+    """check() for a version branch (or a single-version fork's tree with inv, its review base's inventory:
+    inventory_of_commit): (exit code, report or None, message lines)."""
     root = pathlib.Path(root)
     if mechanical is None:
         fb = _fb()
         files = files if files is not None else fb.root_files(repo, root, (root / ".git").exists())
         mechanical = fb.mechanical_files(repo, root, target, ref, files)
     try:
-        rep = account_branch(repo, root, target, mechanical, ref=ref)
+        rep = account_branch(repo, root, target, mechanical, inv=inv, ref=ref)
     except ValueError as e:
         return 2, None, [f"layer-inventory: {e}"]
     lines = [f"layer-inventory: {target}: " + ", ".join(f"{k} {v}" for k, v in sorted(rep["counts"].items()))]
@@ -581,17 +583,24 @@ def build_branch_inventory(repo):
     pr = fb.port_ref_of(repo, repo, t, "HEAD")
     if not pr:
         raise ValueError(f"the port branch {fb.info(repo, t).get('port_branch')} is not in this clone")
+    return repo / ".port" / INV, inventory_of_commit(repo, pr, fb.info(repo, t).get("base_minecraft_version", ""))
+
+
+def inventory_of_commit(repo, c, base_label=""):
+    """The inventory of commit c's sources (its src/ exported; no checkout touched): the port branch's for a version
+    branch, a single-version fork's review base for its done check."""
+    fb = _fb()
     with tempfile.TemporaryDirectory() as d:
         base = pathlib.Path(d) / "base"
-        for path, data in fb.ref_files(repo, pr, "src").items():
+        for path, data in fb.ref_files(repo, c, "src").items():
             f = base / path
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_bytes(data)
         inv = build_inventory(base)
-    inv["base"] = fb.info(repo, t).get("base_minecraft_version", "")
-    inv["src_tree"] = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{pr}:src"], capture_output=True, text=True,
+    inv["base"] = base_label
+    inv["src_tree"] = subprocess.run(["git", "-C", str(repo), "rev-parse", f"{c}:src"], capture_output=True, text=True,
                                      encoding="utf-8").stdout.strip() or None
-    return repo / ".port" / INV, inv
+    return inv
 
 
 def cmd_check(a):
@@ -601,7 +610,7 @@ def cmd_check(a):
         print(why); return 2
     if _fb().checkout_version(repo) != a.target:
         print("layer-inventory: single-version fork (no version branch checked out for this version): no inventory "
-              "requirement")
+              "requirement here -- its review base's inventory is accounted for by tools/fork-branches.py check-done")
         return 0
     code, rep, lines = check_branch(repo, repo, a.target)
     if rep is not None and not a.no_write:

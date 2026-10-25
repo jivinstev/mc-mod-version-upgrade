@@ -484,8 +484,16 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   --commit <upstream_commit>`; a conflict stops it red and becomes its fixer's job -- resolve, commit the merge -- after
   which it finds nothing left to merge), `authors` (an agent: Run steps 3-5, reconcile and port to green A/B),
   `repin-head` (an agent, a dependent: Run step 7's `port-ci.py args` edit to the library's release of this round),
-  `backlog`, the fresh `review`, `fix` and `recheck`, then `gates` (ONE `ci-gates.py` full and minimal pass on the
-  reviewed tree, under the machine-wide lock), `depgate:<dependent>` (a library), `pr` (only what that pass gated),
+  `backlog`, the fresh `review`, `fix` and `recheck` (on `.port/<mc>/REVIEW.md`, step 4 below), `records` (#161 U5:
+  `fork-branches.py check-done` writes the done list's records -- TEST-ITEMS.md, INVENTORY-CHECK.json, any `?` row the
+  review left -- and, when the head was re-pinned to a library pre-release whose version is not done, DEPS.md's
+  "Library pre-release (not done)" mark; committed before the gates), then `gates` (ONE `ci-gates.py` full and minimal
+  pass on the reviewed tree, under the machine-wide lock; the full run is committed as `.port/<mc>/GATES.md`; a fork
+  marked a library in `.port/<mc>/port.properties` with no dependent gate in the set is refused, since its Gate C skips
+  spawn and battle), `depgate:<dependent>` (a library), `done` (the done list, `fork-branches.py target_done`: the
+  first round on a head with no `.port/<mc>/REVIEW.md` only reports it and makes the records; after that a version
+  that is not done does not go out -- the library pre-release mark excepted, which stops promotion and publishing,
+  never the pre-release), `pr` (only what that pass gated),
   `ci`, `merge` (no push-run wait) and `release` (dispatched right after the merge; the merge's push run and the release
   run awaited together), and the final `ledger` (statuses; the README Ports block only on a fork with
   `.port/KNOWN-ISSUES.json`). A version-branch fork's head keeps its own order (gates before the review, the push run
@@ -635,10 +643,14 @@ it small, so the orchestration is a tool, which replaces the four rules above:
         (`--check-done` confirms). Never `--gates auto` to save a run: once any Gate C is recorded it runs A/B only,
         which leaves a stale Gate C stale;
    - **one full review against the fixed rubric, before the merge**: on a version branch, `fork-port.py --repo DIR --target
-     <v> --check-done` on the version's checkout writes REVIEW.md's `?` rows (it refuses a single-version fork, which has
-     no `.port/`: there the fresh reviewer gets the work branch's changes, `git diff --name-only
-     <port branch>...keep-current/<date>`, one row per file with `ok`/`not-ok` and a note, written into the PR body's
-     review table, and the same rule below applies); a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
+     <v> --check-done` on the version's checkout writes REVIEW.md's `?` rows; on a single-version fork (#161 U5)
+     `fork-branches.py check-done --repo DIR --target <mc> --base <the commit the change started from: the merge-base of
+     origin's head and keep-current/<date>>` does the same in `.port/<mc>/REVIEW.md` -- it records that base (a new base
+     starts the file afresh) and writes a row for every file `git diff --name-only <base>..HEAD` lists (an added file
+     too, records and documents aside) and an `item` row for each hook of the base's behaviour inventory that is gone,
+     plus TEST-ITEMS.md and INVENTORY-CHECK.json, so a single-version fork has the same done list in `.port/<mc>/` as a
+     version branch (GATES.md certifying the commit, the rubric, STUBS.json when it has one, the inventory,
+     TEST-ITEMS.md), instead of a review table in the PR body; a fresh reviewer agent fills `REVIEW.md` -- every row fork-versions
      "Done" item 4 lists, plus the behaviour-inventory account (item 7) -- then the fixer fixes the `not-ok` rows and
      **one re-check of the changed rows only** follows (the rows `check-done` reports stale since the review). That is
      the stopping rule: a second full review is not run; whatever the re-check still finds is graded (step 5).

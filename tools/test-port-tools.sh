@@ -691,7 +691,7 @@ ok6 = ("In the weekly round the merge and the release run wait for the round's s
 sys.exit(0 if all(p >= 0 for p in pos) and pos == sorted(pos) and "The order is fixed" in step and ok6 else 1)
 PY
 out="$(python3 tools/round.py --self-check 2>&1)"
-grep -q 'round self-check: OK' <<<"$out" && ok "round.py (in $(grep -o '[0-9.]* s)$' <<<"$out" | tr -d ')')): init on a library + dependent fixture (three and two version branches) builds the queue in ladder order, each version after the one below merged, the library's pre-merge dependent gate (the dependent's Gate C against the candidate jar) between its gates and its merge and only where the dependent has that version, the dependent's re-pin after the library's release and its library record after its own Gate C; drive runs the mechanical steps (stand-ins), prints short self-contained agent jobs and writes a port-cost mark with --phase at every item; one running item per clone; a review with no not-ok row skips the fix and re-check; a failed pre-merge dependent gate blocks the library merge, becomes a fixer job, and its fix re-runs the library's gates and the dependent gate; resume re-lists an out job and re-queues a step whose process died; a blocked item stops only its dependents, drive then exits 3 naming it, and the close comes once nothing else can run; a step the allow list lacks is blocked and asked once on the plan issue; the PR, CI, merge (a merge commit) and release steps against a stand-in GitHub and a bare origin; a second full gate run waits for the machine's lock; single-version forks on the driver (#161 U4) -- a set of single-version forks only (a library and its dependent), a version-branch library with single-version dependents (at its head's version and at a version branch's), a single-version library with a version-branch dependent: each queue in the single-version round's order (ci-check, setup, upstream, authors, repin-head, backlog, review, fix, recheck, ONE gates pass, the library's dependent gate, pr, ci, merge, release), the library's pre-merge dependent gate before its merge, a red one its fixer's job with the gates and the gate run again, each set driven to the close and an interrupted step re-queued by resume from STATE.json; no lowest check, shared-library read or ladder step on a single-version fork; a version branch pinning a single-version library that releases this round refused, and otherwise the queue built and the hand re-pin named in the close; the head path's real steps on a single-version fixture against a stand-in GitHub and bare origins -- port-ci.py check's warning recorded and the workflow regenerated at setup, the authors' frozen commit merged by port-sync.py and a conflict its fixer's job, one ci-gates full+minimal pass under the machine's lock with the old jars removed, the dependent's head gated under the lock (its workflow's --base) against a private mavenLocal holding the candidate (its name and variant matched as a release asset) while ~/.m2 is never written, only the gated commit in the PR, the merge with no push-run wait and the release dispatched right after it, no README Ports block without a known-issues ledger; the shared library: a version whose helper copy is older than the template gets a sync step (its own commit) before its gates and a full segment, an up-to-date fork gets no work, a hand-edited copy whose template moved is a reconcile job and stays untouched, an adopt candidate is a job only when the plan ticked it, a sync-only version gets the narrow review, an MV-AHEAD-OF-TEMPLATE file reaches the close job's Lessons" \
+grep -q 'round self-check: OK' <<<"$out" && ok "round.py (in $(grep -o '[0-9.]* s)$' <<<"$out" | tr -d ')')): init on a library + dependent fixture (three and two version branches) builds the queue in ladder order, each version after the one below merged, the library's pre-merge dependent gate (the dependent's Gate C against the candidate jar) between its gates and its merge and only where the dependent has that version, the dependent's re-pin after the library's release and its library record after its own Gate C; drive runs the mechanical steps (stand-ins), prints short self-contained agent jobs and writes a port-cost mark with --phase at every item; one running item per clone; a review with no not-ok row skips the fix and re-check; a failed pre-merge dependent gate blocks the library merge, becomes a fixer job, and its fix re-runs the library's gates and the dependent gate; resume re-lists an out job and re-queues a step whose process died; a blocked item stops only its dependents, drive then exits 3 naming it, and the close comes once nothing else can run; a step the allow list lacks is blocked and asked once on the plan issue; the PR, CI, merge (a merge commit) and release steps against a stand-in GitHub and a bare origin; a second full gate run waits for the machine's lock; single-version forks on the driver (#161 U4) -- a set of single-version forks only (a library and its dependent), a version-branch library with single-version dependents (at its head's version and at a version branch's), a single-version library with a version-branch dependent: each queue in the single-version round's order (ci-check, setup, upstream, authors, repin-head, backlog, review, fix, recheck, ONE gates pass, the library's dependent gate, pr, ci, merge, release), the library's pre-merge dependent gate before its merge, a red one its fixer's job with the gates and the gate run again, each set driven to the close and an interrupted step re-queued by resume from STATE.json; no lowest check, shared-library read or ladder step on a single-version fork; a version branch pinning a single-version library that releases this round refused, and otherwise the queue built and the hand re-pin named in the close; the head path's real steps on a single-version fixture against a stand-in GitHub and bare origins -- port-ci.py check's warning recorded and the workflow regenerated at setup, the authors' frozen commit merged by port-sync.py and a conflict its fixer's job, one ci-gates full+minimal pass under the machine's lock with the old jars removed, the dependent's head gated under the lock (its workflow's --base) against a private mavenLocal holding the candidate (its name and variant matched as a release asset) while ~/.m2 is never written, only the gated commit in the PR, the merge with no push-run wait and the release dispatched right after it, no README Ports block without a known-issues ledger; the done list on a single-version fork (#161 U5) -- the review job on .port/<mc>/REVIEW.md against the round's base, the records step committing check-done's records, the full run committed as GATES.md, a library marked in port.properties with no dependent gate refused, the done step reporting only while origin's head has no records and then blocking until the review is filled, an undone library pre-release re-pin marked in DEPS.md (promotion refuses it) and the mark dropped on a done one; the shared library: a version whose helper copy is older than the template gets a sync step (its own commit) before its gates and a full segment, an up-to-date fork gets no work, a hand-edited copy whose template moved is a reconcile job and stays untouched, an adopt candidate is a job only when the plan ticked it, a sync-only version gets the narrow review, an MV-AHEAD-OF-TEMPLATE file reaches the close job's Lessons" \
   || bad "round.py self-check: $( (grep '^FAIL' <<<"$out" || true; tail -3 <<<"$out") | head -40)"
 out="$(python3 tools/weekly-plan.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "weekly-plan self-check (in $(grep -o '[0-9.]* s)$' <<<"$out" | tr -d ')')): the workflow equals tools/golden/weekly-plan.yml (Tuesdays 15:00 and 16:00 UTC plus workflow_dispatch, contents: read and issues: write, no secrets, the tools at a pinned commit, no model); its first step lets only the 08:00 Los Angeles slot through on both sides of daylight saving (and with no tz database); the deadline is the next Wednesday round; install refuses an org-owned fork without plan_owner, a checkout off the head branch and a head that is not the default branch (unless --default-branch-too), and is idempotent; the round task is CRON_TZ=America/Los_Angeles with a jittered minute, a fresh session, push and email on; the allow list is empty by default (the round asks) and rendered verbatim into the prompt, automerge follows merge-fork-prs; the round's own work branches and PRs fall under merge-fork-prs, the ledger and README Ports block under push-version-branches, plan-issue comments and ledger-issue edits are always allowed and the migrator repository is only read; the round clones current main and says the plan ran at migrator_sha, which install records; a re-install over an existing config (a single-version fork and a layer fork with layer_branch in one set) warns on stderr for each allow, ledger_issues, depends_on and layer_branch its flags drop, naming the flag, keeps the default result otherwise unchanged (no warning on a fresh install or with every value re-passed), and --keep-existing keeps them while a flag given still wins; replaces lists exact task names (its own, --replace-task, existing keep-current names of this set); the authors' upstream comes from the fork parent when omitted; --trailer lines end the install commit; the plan issue has the deadline first, is assigned to the owner, a section per fork; a second run the same week opens nothing; an unclosed plan is carried forward (ticks and the owner's replies, not a drive-by's) and closed as superseded; a single-version fork's Decisions section shows the fetch step's trial merge of the authors' new commits (a conflicting file listed, a clean merge said clean, a failed merge said with git's error, no branch moved); an incomplete plan opens no issue; the round prompt runs every fork set on tools/round.py (rules 7 and 8: init, drive in the background, each AGENT JOB a fresh subagent and its record line, exit 3 = blocked, resume from round/STATE.json, the driver marking the phases) before the lessons rule, byte for byte tools/golden/round-task-single-version.txt, and round-task --version-branches is accepted and prints the same task" \
@@ -1077,6 +1077,110 @@ PY
 else
   echo "  SKIP  #161 U2 ci-gates audit rows (no javac/jar)"
 fi
+# ---- #161 U5 (C2, C3, B1): the done list on a single-version fork -- on a single-branch clone of the frozen fixture's
+# head (single-version): its records in .port/<mc>/, judged against the review base; the version-branch fixture alongside
+echo "#161 U5: the done check, the library pre-release mark and the library marker on a single-version fork"
+out="$(python3 - "$T/u5" <<'PY' 2>&1
+import contextlib, importlib.util, io, pathlib, subprocess, sys
+d = pathlib.Path(sys.argv[1]); d.mkdir()
+L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
+fb, cg, fk, pc, pp = (L("fb", "fork-branches.py"), L("cg", "ci-gates.py"), L("fk", "fork-kind.py"), L("pc", "port-ci.py"),
+                      L("pp", "port-publish.py"))
+bad = []
+G = lambda w, *a: subprocess.run(["git", "-C", str(w), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+r, g, _ = fb._migrated_fixture(d)                     # the version-branch fork
+vb_before = {v: fb.target_done(r, v) for v in ("1.21.4", "1.21.5")}
+sv = d / "sv"
+subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(r), str(sv)], check=True, capture_output=True)
+G(sv, "config", "user.name", "t"); G(sv, "config", "user.email", "t@example.invalid")
+(fk.detect(sv)[0] == "single-version" and fb.sv_version(sv, sv) == "1.21.1") or bad.append(f"the head's clone is single-version: {fk.detect(sv)}")
+mc = "1.21.1"; rec = sv / ".port" / mc
+def done(**k):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = fb.check_done(sv, mc, "t", **k)
+    return rc, buf.getvalue()
+# no base yet: not done, and it says how to start
+rc, o = done()
+(rc == 18 and fb.SV_NO_BASE in o and not rec.exists()) or bad.append(f"C2: no review base: not done, nothing written: {rc} {o}")
+java = sv / "src/main/java/com/example/mod/Listen.java"
+java.write_text("package com.example.mod;\npublic class Listen {\n  @SubscribeEvent\n  public static void onTick(Object e) {}\n}\n",
+                encoding="utf-8")
+G(sv, "add", "-A"); G(sv, "commit", "-qm", "a listener")
+base = G(sv, "rev-parse", "HEAD")
+jrel = java.relative_to(sv).as_posix()
+text0 = java.read_text(encoding="utf-8")
+# the round's change: an edit that drops a listener, and an added class
+java.write_text(text0.replace("@SubscribeEvent", "// listener removed", 1), encoding="utf-8")
+(java.parent / "Added.java").write_text("package x; class Added {}\n", encoding="utf-8")
+G(sv, "add", "-A"); G(sv, "commit", "-qm", "the change")
+rc, o = done(base=base[:10])
+rv = (rec / "REVIEW.md").read_text(encoding="utf-8") if (rec / "REVIEW.md").is_file() else ""
+added = (java.parent / "Added.java").relative_to(sv).as_posix()
+(rc == 18 and f"- base: {base}" in rv and f"| changed | {jrel} | ? | ? |" in rv and f"| changed | {added} | ? | ? |" in rv
+ and "| item | " in rv and (rec / "TEST-ITEMS.md").is_file() and (rec / "INVENTORY-CHECK.json").is_file()
+ and "no green Gate C recorded in GATES.md" in o) \
+    or bad.append(f"C2: --base records the base, a `?` row per changed or added file and an `item` row for the dropped "
+                  f"listener, TEST-ITEMS.md and INVENTORY-CHECK.json; GATES.md missing: {rc} {o} {rv}")
+# the gates (ci-gates' own header) and the review filled: done; an export of the commit agrees (a release reads that)
+h = G(sv, "rev-parse", "--short", "HEAD")
+(rec / "GATES.md").write_text(cg.summary_head(sv, "examplemod", None, None, "full") + "\n\n| check | result | detail |\n"
+                              "|---|---|---|\n| Gate C -- real client, `launch` | PASS | ok |\n", encoding="utf-8")
+rv = (rec / "REVIEW.md").read_text(encoding="utf-8")
+(rec / "REVIEW.md").write_text(rv.replace("- reviewer: ?", "- reviewer: fresh").replace("- date: ?", "- date: 2026-10-28")
+                               .replace("- commit: ?", f"- commit: {h}").replace("| ? | ? |", "| ok | intended: the listener moved away |"),
+                               encoding="utf-8")
+done()                                                # the round's records step: the inventory account the review settled
+G(sv, "add", "-A"); G(sv, "commit", "-qm", "records")
+rc, o = done()
+c = G(sv, "rev-parse", "HEAD")
+import tempfile
+with tempfile.TemporaryDirectory() as t:
+    exp = fb.target_done(sv, mc, root=fb.export(sv, c, pathlib.Path(t) / "x"), ref=c)
+(rc == 0 and "done" in o and exp == [] and not G(sv, "status", "--porcelain")) \
+    or bad.append(f"C2: gates and the review recorded: done, the export agrees, nothing rewritten: {rc} {o} {exp}")
+# a code change after them stales the gates and the review
+java.write_text(java.read_text(encoding="utf-8") + "\n// later\n", encoding="utf-8")
+G(sv, "add", "-A"); G(sv, "commit", "-qm", "later")
+why = fb.target_done(sv, mc)
+(any(w.startswith("GATES.md 1 file(s) changed since") for w in why) and any(w.startswith("REVIEW.md 1 file(s) changed since") for w in why)) \
+    or bad.append(f"C2: an edit after the records stales the gates and the review: {why}")
+# a new round's base starts REVIEW.md afresh: the old verdicts were about another change
+nb = G(sv, "rev-parse", "HEAD")
+rc, o = done(base=nb)
+rv = (rec / "REVIEW.md").read_text(encoding="utf-8")
+(f"- base: {nb}" in rv and "- reviewer: ?" in rv and "| ok |" not in rv) or bad.append(f"C2: a new base starts afresh: {rv}")
+G(sv, "checkout", "-q", "--", "."); G(sv, "clean", "-qfd", ".port")
+# C3: the library pre-release mark in .port/<mc>/DEPS.md at the tag refuses promotion and publishing, as on a version branch
+rec.mkdir(parents=True, exist_ok=True)
+(rec / "DEPS.md").write_text(f"{fb.LIBRARY_PRERELEASE_MARK} `owner/examplelib` is pinned to examplelib-1.0-mc1.21.1\n", encoding="utf-8")
+G(sv, "add", "-A"); G(sv, "commit", "-qm", "pin"); G(sv, "tag", "examplemod-1.0-mc1.21.1")
+why = fb.target_done(sv, mc)
+read = lambda p: subprocess.run(["git", "-C", str(sv), "show", f"examplemod-1.0-mc1.21.1:{p}"], capture_output=True, text=True).stdout or None
+pp.gh = lambda *a, **k: {}
+pub = pp.gate(str(sv), {"permission": "https://example.invalid/agreed", "auto": True}, "examplemod-1.0-mc1.21.1",
+              {"prerelease": False, "draft": False, "author": {"login": "github-actions[bot]"}})
+(fb.SV_PRERELEASE in why and len(pc.prerelease_pin_blockers("examplemod-1.0-mc1.21.1", read)) == 1
+ and any("library pre-release" in w for w in pub)) \
+    or bad.append(f"C3: the mark: not done, promotion and publishing refuse the tag: {why} {pub}")
+# B1: the library marker in .port/<mc>/port.properties: spawn and battle skipped
+(not cg.is_library(sv, None)) or bad.append("B1: unmarked")
+(rec / "port.properties").write_text("library=true\n", encoding="utf-8")
+(cg.is_library(sv, None) and cg.library_phases(["launch", "spawn", "battle"], True)[0] == ["launch"]) or bad.append("B1: marked")
+# --base on a version branch's checkout is refused; the version-branch fixture's done lists as before
+g("checkout", "-q", "neoforge-1.21.4")
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = fb.check_done(r, "1.21.4", "t", base="HEAD")
+(rc == 2 and "--base is for a single-version" in buf.getvalue()) or bad.append(f"--base on a version branch: {rc} {buf.getvalue()}")
+g("checkout", "-q", "neoforge-1.21.1")
+{v: fb.target_done(r, v) for v in vb_before} == vb_before or bad.append("control: the version branches' done lists changed")
+print("\n".join(bad) or "OK")
+PY
+)"
+[ "$out" = "OK" ] && ok "#161 U5 on a single-branch clone of the head (single-version) and the version-branch fixture: fork-branches.py check-done --base records the review base in .port/<mc>/REVIEW.md and writes a \`?\` row per changed or added file and an \`item\` row for a dropped listener, TEST-ITEMS.md and INVENTORY-CHECK.json; with GATES.md (ci-gates' header names the version) and the review filled the version is done, on the checkout and on an export of the commit; a later edit stales the gates and the review; a new base starts REVIEW.md afresh; DEPS.md's library pre-release mark makes it not done and promotion and publishing refuse the tag; .port/<mc>/port.properties library=true drops spawn and battle; --base is refused on a version branch, whose done lists are unchanged" \
+  || bad "#161 U5: $out"
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, --cp-file/--tree (fork) mode"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
   E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \

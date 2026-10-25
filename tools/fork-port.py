@@ -2235,8 +2235,8 @@ def main():
     if not fork_branches().version_branches(a.repo) and fork_branches().checkout_version(pathlib.Path(a.repo)) is None:
         # principle 2: nothing multi-version runs on a single-version fork -- it stops here, having written nothing
         print(f"fork-port: {a.repo} has no version branch: a single-version fork (one version; nothing to port or sweep "
-              "here). Versions are added as version branches when the maintainer decides it (the fork-versions skill: "
-              "fork-branches.py add-target).")
+              "here; its done list is tools/fork-branches.py check-done). Versions are added as version branches when "
+              "the maintainer decides it (the fork-versions skill: fork-branches.py add-target).")
         return 2
     if a.chain:
         if a.target:

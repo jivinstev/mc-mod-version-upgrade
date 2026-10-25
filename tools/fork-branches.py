@@ -10,7 +10,7 @@
     python3 tools/fork-branches.py untaken     --repo DIR --upstream REF [--head B] [--json]
     python3 tools/fork-branches.py review-authors --repo DIR --range A..B --reviewer WHO [--note N] [--verdict ok|not-ok]
     python3 tools/fork-branches.py add-target  --repo DIR --target T [--parent V] [--allow-undone-parent]
-    python3 tools/fork-branches.py check-done  --repo DIR --target T
+    python3 tools/fork-branches.py check-done  --repo DIR --target T [--base REF]   # --base: a single-version fork
     python3 tools/fork-branches.py freeze      --repo DIR --target T [--upstream REMOTE/BRANCH] [--library owner/repo@TAG]
                                                [--accept-upstream-drift]
     python3 tools/fork-branches.py library-record --repo LIB --target T --dependent DIR [--slug owner/repo]
@@ -64,6 +64,10 @@ INVENTORY-CHECK.json equal to a fresh check; no dependency built against a libra
 development-only checkout jar; for a library (library=true) at least one dependent recorded as Gate C green against
 this library's jar (DEPENDENTS.json, `library-record`). A record naming a LAYER commit (a migrated target) counts when
 .port/<t>/MIGRATED.json maps that commit to a prepared-tree digest equal to the branch's own.
+A SINGLE-VERSION fork (#161 U5, C2) has the same list in .port/<mc>/, judged by `check-done --base REF` against the
+review base REVIEW.md records (the commit its change started from) instead of a parent branch: every file that differs
+from the base is a row (no rows, parent or library record apply there), the base's behaviour inventory is the one to
+account for, and DEPS.md's library pre-release mark (written by tools/round.py on a re-pin) keeps it not done.
 
 A LAYER FORK IS REFUSED. The `.multiversion/` layer route (and `migrate`, which turned a layer into these branches)
 was removed; a checkout with the layer at HEAD is refused (tools/fork-kind.py, which names the last commit that can
@@ -889,17 +893,19 @@ def helper_blobs(root, t):
     return helper_map(read_file(rec_dir(root, t) / "shared-helpers.txt"))
 
 
-def review_items(repo, root, t, ref, work, files=None, mechanical=None):
+def review_items(repo, root, t, ref, work, files=None, mechanical=None, sv=None):
     """[(kind, file)] a fresh reviewer must give a verdict on for version t: every STUBS.json entry; every file that
     differs from the parent branch at their merge-base (`git diff <parent>..<branch>`) as a `changed` row -- resources
     as one `resources` row per group (its first three directories, with the group's digest) -- except the files the
     rows alone made (mechanical), build settings the tool derived (derived_ok), a .java file added at this version (a
     helper: no counterpart to read it against), a shared-library helper as installed (shared-helpers.txt), deletions,
-    the records under .port/ and documents; plus .port/<t>/renames.tsv as one `renames` row (its digest)."""
+    the records under .port/ and documents; plus .port/<t>/renames.tsv as one `renames` row (its digest).
+    sv: a single-version fork's review base (a commit, sv_base()): every file that differs from it, added .java files
+    included (no rows, no parent, no port branch there to explain a difference away)."""
     f_ = fp()
     files = files if files is not None else root_files(repo, root, work)
     blobs = hash_blobs(files)
-    pv, mb = parent_base(repo, root, t, ref)
+    pv, mb = (None, sv) if sv else parent_base(repo, root, t, ref)
     base = tree_entries(repo, mb) if mb else {}
     base_data = None
     props = info(root, t)
@@ -924,7 +930,7 @@ def review_items(repo, root, t, ref, work, files=None, mechanical=None):
             continue
         if p in base and base[p][1] == blobs[p]:
             continue
-        if p.endswith(".java") and p not in authors:
+        if not sv and p.endswith(".java") and p not in authors:
             continue        # a class the authors do not have (a helper, an overlay-only file): no counterpart to read
         if helpers.get(p) == blobs[p] or p in mech:
             continue
@@ -935,7 +941,7 @@ def review_items(repo, root, t, ref, work, files=None, mechanical=None):
                 base_data[p] = cat_blobs(repo, [base[p][1]])[base[p][1]]
             if derived_ok(p, base_data[p], files[p], props):
                 continue
-            if re.match(r"^src/[^/]+/java/.+\.java$", p):
+            if not sv and re.match(r"^src/[^/]+/java/.+\.java$", p):
                 # the parent's file through the rows this version adds (and @OnlyIn stripped from 1.21.6): an inherited
                 # overlay the version's rows renamed, never a change of its own -- the layer asked no row for it either
                 if own is None:
@@ -987,7 +993,10 @@ def accounted_deletions(root, t, files, props):
 
 
 def port_ref_of(repo, root, t, ref):
-    """The port branch commit this version branch carries (the merge-base of `ref` and the port branch)."""
+    """The port branch commit this version branch carries (the merge-base of `ref` and the port branch). None for a
+    single-version tree (no .port/<t>/branch.properties): it is its own port branch, with nothing below it."""
+    if not (rec_dir(root, t) / BRANCH_PROPS).is_file():
+        return None
     pb = info(root, t).get("port_branch") or branch_name(info(root, t).get("base_minecraft_version", "1.21.1"))
     tip = resolve_branch(repo, pb)
     if not tip:
@@ -1020,17 +1029,49 @@ REVIEW_HEAD = ("# Review: Minecraft {t} (version branch {b})\n\n"
                "- reviewer: ?\n- date: ?\n- commit: ?\n\n| kind | file | verdict | note |\n|---|---|---|---|\n")
 
 
-def review_skeleton(repo, root, t, ref, work, unaccounted=()):
+SV_REVIEW_HEAD = ("# Review: Minecraft {t} (single-version fork, branch {b})\n\n"
+                  "An independent review by a FRESH agent that was given only this change: every file that differs from\n"
+                  "the review base (`base`, the commit the change started from: `git diff {base}..HEAD`), read against the\n"
+                  "base's file, with STUBS.json when the fork has one. One row per STUBS.json entry, per `changed` file\n"
+                  "(an added file too), per resource group (`resources`: a directory with the digest of its changed files) and\n"
+                  "per `deleted` file; the records under .port/ and documents need none. Verdict `ok` (the change keeps the\n"
+                  "behaviour, or the difference is right and the note says why) or `not-ok`. A hook item of the base's\n"
+                  "behaviour inventory that is gone is accounted for only by a row whose note names its id, or by an `item`\n"
+                  "row for the id. `reviewer` names the reviewing agent, distinct from the fixer; `commit` is the commit\n"
+                  "reviewed (`git rev-parse --short HEAD`). tools/fork-branches.py check-done adds a `?` row for every item\n"
+                  "it finds unreviewed and starts this file afresh for a new base; it never changes a verdict.\n\n"
+                  "- base: {base}\n- reviewer: ?\n- date: ?\n- commit: ?\n\n| kind | file | verdict | note |\n|---|---|---|---|\n")
+SV_BASE = re.compile(r"(?m)^\s*-\s*base\s*:\s*`?([0-9a-f]{7,40})`?\s*$")
+
+
+def sv_version(repo, root):
+    """The Minecraft version of a SINGLE-VERSION fork's tree at `root` (gradle.properties' minecraft_version, with no
+    .port/<it>/branch.properties there and no version branch in the clone: tools/fork-kind.py's rule), else None."""
+    mc = parse_props(read_file(pathlib.Path(root) / "gradle.properties")).get("minecraft_version")
+    return mc if mc and not (rec_dir(root, mc) / BRANCH_PROPS).is_file() and not version_branches(repo) else None
+
+
+def sv_base(root, t):
+    """The review base REVIEW.md records on a single-version fork (`- base: <sha>`), else None."""
+    m = SV_BASE.search(read_file(rec_dir(root, t) / "REVIEW.md"))
+    return m.group(1) if m else None
+
+
+def review_skeleton(repo, root, t, ref, work, unaccounted=(), sv=None):
     """REVIEW.md with a `?` row for every item that has none (the header when new) and an `item` row for each
-    unaccounted inventory id. Never changes a verdict. -> rows added."""
+    unaccounted inventory id. Never changes a verdict. sv: a single-version fork's review base -- a REVIEW.md
+    recorded for another base is a review of another change, and starts afresh. -> rows added."""
     f_ = fp()
-    items = review_items(repo, root, t, ref, work)
+    items = review_items(repo, root, t, ref, work, sv=sv)
     f = rec_dir(root, t) / "REVIEW.md"
     p = info(root, t)
-    text = read_file(f) or REVIEW_HEAD.format(t=t, b=p.get("branch", branch_name(t)), p=p.get("parent", "?"))
+    text = fresh = read_file(f)
+    if sv and sv_base(root, t) != sv:
+        text = SV_REVIEW_HEAD.format(t=t, b=git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() or "?", base=sv)
+    text = text or REVIEW_HEAD.format(t=t, b=p.get("branch", branch_name(t)), p=p.get("parent", "?"))
     _fields, rows = f_.parse_review(text)
     add = [(k, x) for k, x in items if (k, x) not in rows] + [("item", i) for i in sorted(unaccounted) if ("item", i) not in rows]
-    if add or not f.is_file():
+    if add or not f.is_file() or text != fresh:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(text.rstrip("\n") + "\n" + "".join(f"| {k} | {x.replace('|', chr(92) + '|')} | ? | ? |\n" for k, x in add),
                      encoding="utf-8")
@@ -1131,12 +1172,14 @@ def remerge_open(root, t, files):
     return out
 
 
-def inventory_problems(repo, root, t, ref, work, files, write, mechanical):
+def inventory_problems(repo, root, t, ref, work, files, write, mechanical, sv=None):
     """The behaviour inventory on version t (tools/layer-inventory.py account_branch): [] when every base item is
     accounted for AND the committed INVENTORY-CHECK.json says exactly what a fresh check says (issue #133, gap 1: the
-    release-side check reads the committed file). write: rewrite the file (a run that holds the checkout)."""
+    release-side check reads the committed file). write: rewrite the file (a run that holds the checkout). sv: a
+    single-version fork's review base, whose inventory is the base (no port branch below it)."""
     li = _mod("layer_inventory_fb", "layer-inventory.py")
-    code, rep, lines = li.check_branch(repo, root, t, mechanical=mechanical, files=files, ref=ref)   # the branch judged, not HEAD
+    inv = li.inventory_of_commit(repo, sv) if sv else None
+    code, rep, lines = li.check_branch(repo, root, t, mechanical=mechanical, files=files, ref=ref, inv=inv)   # the branch judged, not HEAD
     if rep is None:
         return [ln.replace("layer-inventory: ", "behaviour inventory: ") for ln in lines] if code else []
     want = li.check_text(rep)
@@ -1155,16 +1198,25 @@ def inventory_problems(repo, root, t, ref, work, files, write, mechanical):
                        f".port/{t}/{li.CHECK_FILE} (no re-run needed)")
         else:
             out.append(f"behaviour inventory: the committed .port/{t}/{li.CHECK_FILE} {state}"
-                       " -- a release reads the committed one: run tools/fork-port.py on the branch (it rewrites it) and commit it")
+                       + (" -- a release reads the committed one: run tools/fork-branches.py check-done on the checkout "
+                          "(it rewrites it) and commit it" if sv else
+                          " -- a release reads the committed one: run tools/fork-port.py on the branch (it rewrites it) and commit it"))
     return out
 
 
-def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
+def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None):
     """[] when version t is DONE (the list in this file's header); else every reason it is not. root: the tree to
-    judge (default: the checkout when it is on t's branch, else an export of the branch); ref: its commit."""
+    judge (default: the checkout when it is on t's branch, else an export of the branch); ref: its commit. A
+    SINGLE-VERSION fork's tree at Minecraft t (sv_version) is judged by the same list (#161 U5, C2) -- its records in
+    .port/<t>/ too -- against its review base (base, else the one REVIEW.md records) instead of a parent branch: the
+    list's version-branch items (rows, the parent, the library's dependents' record) do not apply there."""
     repo = pathlib.Path(repo).resolve()
     tmp = None
     try:
+        if root is None and sv_version(repo, repo) == t:
+            return sv_done(repo, t, repo, ref or "HEAD", write, base)
+        if root is not None and sv_version(repo, root) == t:
+            return sv_done(repo, t, pathlib.Path(root), ref or "HEAD", False, base)
         if root is None:
             if checkout_version(repo) == t:
                 root, ref = repo, ref or "HEAD"
@@ -1228,22 +1280,100 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None):
             tmp.cleanup()
 
 
-def check_done(repo, t, who="fork-branches", say=print):
+SV_NO_BASE = "no review base: run tools/fork-branches.py check-done --base <the commit the change started from>"
+
+
+def sv_done(repo, t, root, ref, write, base=None):
+    """target_done() for a single-version fork's tree: GATES.md certifying it, STUBS.json reviewed, REVIEW.md's rubric
+    over every file changed since the review base, no merge left open, TEST-ITEMS.md, the base's behaviour inventory
+    accounted for (INVENTORY-CHECK.json committed as a fresh check), and no pin to a library pre-release that is not
+    done (DEPS.md's mark). -> [] or the reasons."""
+    work = root.resolve() == repo and (root / ".git").exists()
+    ref = git(repo, "rev-parse", ref).stdout.strip()
+    base = base or sv_base(root, t)
+    files = root_files(repo, root, work)
+    out = gates_problems(repo, root, t, ref, work, files)
+    n_open = len(fp().unreviewed_stubs(rec_dir(root, t)))
+    if n_open:
+        out.append(f"{n_open} unreviewed stub signal(s) in STUBS.json")
+    if not base or git(repo, "cat-file", "-e", f"{base}^{{commit}}").returncode:
+        return out + [SV_NO_BASE if not base else f"the review base {base} is not a commit in this clone"]
+    items = review_items(repo, root, t, ref, work, files, set(), sv=base)
+    out += review_problems(repo, root, t, ref, work, files, items)
+    out += remerge_problems(repo, root, t, work, files)
+    if not (rec_dir(root, t) / "TEST-ITEMS.md").is_file():
+        out.append(f"manual-test items not generated (TEST-ITEMS.md): python3 tools/fork-branches.py check-done --repo "
+                   f"{repo} --target {t}")
+    rv = read_file(rec_dir(root, t) / "REVIEW.md")
+    out += fp().drop_reported_items(inventory_problems(repo, root, t, ref, work, files, write, set(), sv=base),
+                                    fp().not_ok_items(rv) if rv else {})
+    if LIBRARY_PRERELEASE_MARK in read_file(rec_dir(root, t) / "DEPS.md"):
+        out.append(SV_PRERELEASE)
+    return out
+
+
+SV_PRERELEASE = ("built against a library pre-release whose version is not done (DEPS.md \"Library pre-release\"): fine "
+                 "for this fork's pre-release; done, a full Release and promotion wait until the library's version is "
+                 "done -- then re-pin to its done release and drop the mark")
+
+
+def unaccounted_ids(why):
+    """The behaviour-inventory ids a done list names unaccounted (inventory_problems' line: `unaccounted <id>
+    (<detail>)`): an id may hold a space (an event item's key, `@SubscribeEvent <type>`), never ` (`."""
+    return [m.group(1) for w in why for m in [re.match(r"behaviour inventory: unaccounted (.+?) \(", w)] if m]
+
+
+def check_done(repo, t, who="fork-branches", say=print, base=None):
     """`check-done` (and fork-port.py --check-done on a version branch): the done list, and -- on the checkout of t's own
     branch -- a `?` row in REVIEW.md for every item without one and an `item` row for each unaccounted inventory id, for
     the fresh reviewer to fill (never a verdict). Off the branch it reads the branch's commit and writes nothing.
     -> 0 done, 18 not done."""
     repo = pathlib.Path(repo).resolve()
+    if sv_version(repo, repo) == t:
+        return sv_check_done(repo, t, who, say, base)
+    if base:
+        say(f"{who} {t}: --base is for a single-version fork's checkout at Minecraft {t}; this is not one")
+        return 2
     why = target_done(repo, t)
     say(f"{who} {t}: " + ("done" if not why else f"NOT done ({len(why)} open):\n" + "\n".join(f"  - {w}" for w in why)))
     if checkout_version(repo) == t and (rec_dir(repo, t) / BRANCH_PROPS).is_file():
-        unacc = [m.group(1) for w in why for m in [re.match(r"behaviour inventory: unaccounted (\S+) \(", w)] if m]
+        unacc = unaccounted_ids(why)
         n = review_skeleton(repo, repo, t, "HEAD", True, unacc)
         if n:
             say(f"{who} {t}: added {n} `?` row(s) to .port/{t}/REVIEW.md for the fresh reviewer (no verdict written; "
                 "commit it with the review)")
     elif why:
         say(f"{who} {t}: not on {branch_name(t)}'s checkout: nothing written (check it out for REVIEW.md's `?` rows)")
+    return UNDONE_EXIT if why else 0
+
+
+def sv_check_done(repo, t, who, say, base=None):
+    """`check-done` on a single-version fork's checkout (#161 U5, C2): records the review base (--base, resolved to its
+    commit; else the one REVIEW.md records), writes REVIEW.md's `?` rows (afresh for a new base), TEST-ITEMS.md and
+    INVENTORY-CHECK.json (the records the done list reads, as fork-port.py writes them on a version branch), then the
+    done list. -> 0 done, 18 not done, 2 bad input."""
+    if base:
+        r = git(repo, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+        if r.returncode:
+            say(f"{who} {t}: --base {base} is not a commit in this clone")
+            return 2
+        base = r.stdout.strip()
+    base, n = base or sv_base(repo, t), 0
+    if base:
+        rec_dir(repo, t).mkdir(parents=True, exist_ok=True)
+        n = review_skeleton(repo, repo, t, "HEAD", True, sv=base)
+        _n, err = write_test_items(repo, t, sv=base)
+        if err:
+            say(f"{who} {t}: TEST-ITEMS.md not written: {err}")
+    why = target_done(repo, t, write=True, base=base)
+    unacc = unaccounted_ids(why)
+    if base and unacc:
+        n += review_skeleton(repo, repo, t, "HEAD", True, unacc, sv=base)
+    say(f"{who} {t} (single-version): " + ("done" if not why else f"NOT done ({len(why)} open):\n"
+                                           + "\n".join(f"  - {w}" for w in why)))
+    if base and n:
+        say(f"{who} {t}: added {n} `?` row(s) to .port/{t}/REVIEW.md for the fresh reviewer (no verdict written; "
+            "commit it with the review)")
     return UNDONE_EXIT if why else 0
 
 
@@ -3344,7 +3474,7 @@ def authors_reviewed(repo, root, t, c, ref):
     return None
 
 
-def write_test_items(repo, t):
+def write_test_items(repo, t, sv=None):
     """.port/<t>/TEST-ITEMS.md on version t's checkout: what a person must look at on this version because no gate
     judges it (no model): each STUBS.json entry, each file changed from the parent branch (flagged mixin / client),
     each dependency DEPS.md says was dropped, a preview version, and each base behaviour item that is not the same
@@ -3352,10 +3482,13 @@ def write_test_items(repo, t):
     repo = pathlib.Path(repo).resolve()
     try:
         files = root_files(repo, repo, True)
-        items = review_items(repo, repo, t, "HEAD", True, files)
-        lines = [f"# Manual-test items: Minecraft {t}", "",
+        items = review_items(repo, repo, t, "HEAD", True, files, set() if sv else None, sv=sv)
+        lines = ([f"# Manual-test items: Minecraft {t}", "",
+                  "Generated by tools/fork-branches.py check-done on the single-version fork (no model): what a person",
+                  f"must look at in this change (since {sv[:12]}) because no gate judges it.", ""] if sv else
+                 [f"# Manual-test items: Minecraft {t}", "",
                  "Generated by tools/fork-port.py on the version branch (no model): what a person must look at on this",
-                 "version because no gate judges it. The fork-versions skill's step 11 turns them into the test plan.", ""]
+                 "version because no gate judges it. The fork-versions skill's step 11 turns them into the test plan.", ""])
         n = 0
         for kind, f in items:
             if kind == "renames":
@@ -3371,7 +3504,8 @@ def write_test_items(repo, t):
         if info(repo, t).get("preview") == "true":
             lines.append("- preview: this version is a preview (never published)"); n += 1
         li = _mod("layer_inventory_fb", "layer-inventory.py")
-        _c, rep, _l = li.check_branch(repo, repo, t, files=files)
+        _c, rep, _l = li.check_branch(repo, repo, t, set() if sv else None, files=files,
+                                      inv=li.inventory_of_commit(repo, sv) if sv else None)
         for r in (rep or {}).get("items", []):
             if r.get("status") != "same":
                 lines.append(f"- behaviour: `{r['id']}` ({r.get('status')}: {str(r.get('detail', ''))[:160]})"); n += 1
@@ -4535,6 +4669,7 @@ def main():
     vs = sub.add_parser("versions", help="the targeted Minecraft lines (templates/fork-layer/versions.json)")
     vs.add_argument("--refresh", action="store_true", help="the newest stable NeoForge per line, from the NeoForge maven")
     c = sub.add_parser("check-done"); c.add_argument("--repo", required=True); c.add_argument("--target", required=True)
+    c.add_argument("--base", help="a single-version fork: the commit the change started from (recorded in REVIEW.md)")
     k = sub.add_parser("cascade"); k.add_argument("--repo", required=True)
     k.add_argument("range", metavar="FROM..TO", nargs="?", help="(not with --apply-decisions: the block names its range)")
     k.add_argument("--gates", default="ab", choices=["none", "compile", "ab", "full"],
@@ -4666,7 +4801,7 @@ def main():
                        budget=a.budget_lines, out_dir=a.out, port_ref=a.port_ref, upstream=a.upstream,
                        untaken_ok=a.untaken_ok, head_merge=a.head_merge)
     if a.cmd == "check-done":
-        return check_done(a.repo, a.target, "fork-branches")
+        return check_done(a.repo, a.target, "fork-branches", base=a.base)
     ap.print_help()
     return 2
 
