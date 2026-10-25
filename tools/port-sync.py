@@ -3,6 +3,7 @@
 
     python3 tools/port-sync.py --repo <fork clone> --port <port branch> --upstream <remote>/<branch> [--dry-run]
                                [--commit SHA] [--base <port branch>]       # --port a work branch, e.g. keep-current/<date>
+    python3 tools/port-sync.py --repo <fork clone> --data-forms     # step 2b alone, on the checkout as it is
     python3 tools/port-sync.py --self-check
 
 A fork carries two port branches (see the port-fork skill):
@@ -21,6 +22,11 @@ WHAT IT DOES (a merge, never a rebase: the branch is shared, and its history is 
      from it;
   2. merge them (that commit, never a newer tip) into the port branch, as "Merge <upstream> at <sha> into <port>". A conflict stops here with the files listed -- both sides edited the same
      lines, which is a person's call (or a model's, with --dry-run first to see the size);
+  2b. put the merged data files in the checkout's version's forms (gradle.properties minecraft_version; the
+     version-branch converters, tools/fork-port.py convert_data: 1.21.2 recipes, 26.2 entity predicates, 26.3 data,
+     a stranded pre-1.21 layout) and commit what changed on its own, "data forms for <mc> after the authors' merge";
+     what a converter refuses is listed in .port/<mc>/DATA-FORMS.md. A file already in that form is left as it is,
+     so a re-run (after a conflict is resolved and committed, or --data-forms) commits only what is still old;
   3. compile and count (tools/burndown-count.sh): every error is new author code still written for the old target.
      Re-run the port pipeline's mechanical stage on it, then the gates (tools/ci-gates.py), then push.
 Nothing is pushed by this tool. Standard library only.
@@ -101,6 +107,8 @@ def sync(repo, port, upstream, dry=False, out=print, commit=None, base=None):
     rows, stat = incoming(repo, at[port], target)
     if not rows:
         out(f"port-sync: {port} already has everything on {upstream}" + (f" up to {target[:12]}" if commit else ""))
+        if not dry and git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == port:
+            data_forms(repo, out)          # a conflict its fixer resolved and committed: that merge's data, converted
         return 0
     out(f"port-sync: {len(rows)} author commit(s) on {upstream}" + (f" up to {target[:12]}" if commit else "")
         + f" not on {port} ({stat or 'no file changes'}):")
@@ -126,9 +134,12 @@ def sync(repo, port, upstream, dry=False, out=print, commit=None, base=None):
         for f in files:
             out(f"   {f}")
         out("   resolve each keeping the author's change written in the port's API, then `git commit`;"
-            " or `git merge --abort` to undo.")
+            " or `git merge --abort` to undo. Then run port-sync again (or port-sync --data-forms): it puts the"
+            " merged data files in this version's forms.")
         return 2
-    out(f"port-sync: merged ({git(repo, 'rev-parse', '--short', 'HEAD').strip()}). Next:")
+    out(f"port-sync: merged ({git(repo, 'rev-parse', '--short', 'HEAD').strip()}).")
+    data_forms(repo, out)
+    out("port-sync: next:")
     out("   1. compile: tools/burndown-count.sh -- each error is new author code still on the old target;")
     out("   2. port it with the pipeline's mechanical stage (tools/port-upstream.py), then fix what is left;")
     out("   3. gates: tools/ci-gates.py --repo <clone> ...; then push (CI re-runs them and releases on a tag).")
@@ -272,6 +283,21 @@ def self_check():
     return 0 if ok else 1
 
 
+def data_forms(repo, out=print):
+    """tools/fork-port.py data_forms_after_merge on the checkout's Minecraft version (gradle.properties): the authors'
+    data files just merged, put in that version's forms and committed on their own. -> the commit or None."""
+    import importlib.util as _ilu
+    mc = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)",
+                   (pathlib.Path(repo) / "gradle.properties").read_text(encoding="utf-8", errors="replace")) \
+        if (pathlib.Path(repo) / "gradle.properties").is_file() else None
+    if not mc:
+        out("port-sync: data forms: no minecraft_version in gradle.properties; not converted")
+        return None
+    s_ = _ilu.spec_from_file_location("fork_port_ps", HERE / "fork-port.py")
+    m = _ilu.module_from_spec(s_); s_.loader.exec_module(m)
+    return m.data_forms_after_merge(repo, mc.group(1), say=lambda x: out("port-sync: " + x))[2]
+
+
 def _refuse_layer(repo, tool):
     """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
     (print it and exit 2)."""
@@ -287,6 +313,7 @@ def main():
     ap.add_argument("--commit", help="merge exactly this commit (reachable from --upstream), not the tip")
     ap.add_argument("--base", help="the port branch a work branch --port is cut from: checked against origin first")
     ap.add_argument("--dry-run", action="store_true"); ap.add_argument("--self-check", action="store_true")
+    ap.add_argument("--data-forms", action="store_true", help="only step 2b: the checkout's merged data files in its version's forms")
     a = ap.parse_args()
     if a.self_check:
         return self_check()
@@ -294,6 +321,11 @@ def main():
     if why:
         print(why)
         return 2
+    if a.data_forms:
+        if not a.repo:
+            ap.error("--data-forms needs --repo")
+        data_forms(a.repo)
+        return 0
     if not (a.repo and a.port and a.upstream):
         ap.error("--repo, --port and --upstream are required")
     return sync(a.repo, a.port, a.upstream, a.dry_run, commit=a.commit, base=a.base)
