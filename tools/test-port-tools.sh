@@ -467,7 +467,7 @@ line, steps, adv = fp.branch_converters(vb, "1.21.4", "1.21.5", ld / "w")
 after = blade(vb)
 if "public void hurtEnemy(" not in after or adv:
     bad.append(f"1.21.4 -> 1.21.5 did not convert hurtEnemy, or advised gear-tiers with no gear class: {line} {adv}")
-# a hurtEnemy that vetoes (return false spared postHurtEnemy's durability damage on 1.21.1) is REFUSED, file untouched
+# a hurtEnemy that vetoes (return false spared the durability damage of postHurtEnemy on 1.21.1) is REFUSED, file untouched
 vt = ld / "veto"; (vt / "src/main/java/com/example/mod").mkdir(parents=True)
 veto = orig.replace("extends Item", "extends SwordItem").replace("        target.igniteForSeconds(2);\n",
                                                                  "        if (target.isBlocking()) return false;\n")
