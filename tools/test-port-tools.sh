@@ -1099,7 +1099,7 @@ fi
 # ---- #161 U5 (C2, C3, B1): the done list on a single-version fork -- on a single-branch clone of the frozen fixture's
 # head (single-version): its records in .port/<mc>/, judged against the review base; the version-branch fixture alongside
 echo "#161 U5: the done check, the library pre-release mark and the library marker on a single-version fork"
-out="$(python3 - "$T/u5" <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-u5.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import contextlib, importlib.util, io, pathlib, subprocess, sys
 d = pathlib.Path(sys.argv[1]); d.mkdir()
 L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
@@ -1197,7 +1197,7 @@ g("checkout", "-q", "neoforge-1.21.1")
 {v: fb.target_done(r, v) for v in vb_before} == vb_before or bad.append("control: the version branches' done lists changed")
 print("\n".join(bad) or "OK")
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-u5.py" "$T/u5" 2>&1)"
 [ "$out" = "OK" ] && ok "#161 U5 on a single-branch clone of the head (single-version) and the version-branch fixture: fork-branches.py check-done --base records the review base in .port/<mc>/REVIEW.md and writes a \`?\` row per changed or added file and an \`item\` row for a dropped listener, TEST-ITEMS.md and INVENTORY-CHECK.json; with GATES.md (ci-gates' header names the version) and the review filled the version is done, on the checkout and on an export of the commit; a later edit stales the gates and the review; a new base starts REVIEW.md afresh; DEPS.md's library pre-release mark makes it not done and promotion and publishing refuse the tag; .port/<mc>/port.properties library=true drops spawn and battle; --base is refused on a version branch, whose done lists are unchanged" \
   || bad "#161 U5: $out"
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, --cp-file/--tree (fork) mode"
