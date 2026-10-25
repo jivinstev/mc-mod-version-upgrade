@@ -60,7 +60,7 @@ def main():
     if not blocked:
         # Only once the hosts are reachable: the installs download from them.
         print('cloud/check.py: making sure xvfb and Java 25 are installed (first time: a minute or two)...', flush=True)
-        subprocess.run(['bash', str(ROOT / 'cloud/ensure.sh')])   # exec-ok: the cloud container is Linux only
+        subprocess.run(['bash', str(ROOT / 'cloud/ensure.sh')])   # exec-ok: the cloud container is Linux only  # compat-ok: Linux only
     if not shutil.which('xvfb-run'):
         problems.append('xvfb-run is missing: run bash cloud/ensure.sh and read its error')
     jv = java_versions()

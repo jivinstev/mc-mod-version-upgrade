@@ -217,3 +217,54 @@ jobs:
       # The probe finds methods that compile but override nothing; the sweep must be valid shell; the
       # resource test is compiled against stub JUnit and must catch each data-layer failure it names.
       - run: ./tools/test-port-tools.sh
+
+  compat-static:
+    name: portable to macOS and Windows (static)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Seconds: every tracked .py must parse as Python 3.9 and no tool or script may use a pattern that has broken
+      # macOS (bash 3.2, BSD sed/grep, Python 3.9) or Windows (WSL's bash, POSIX-only APIs). CLAUDE.md "Portability".
+      - run: python3 tools/check-compat.py --self-check
+      - run: python3 tools/check-compat.py
+
+  macos:
+    name: "macOS: bash 3.2, BSD tools, Python 3.9 (part ${{ matrix.part }} of 3)"
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # The machine people run these tools on: Apple's /bin/bash (3.2), BSD sed and grep, and the Command Line Tools'
+      # /usr/bin/python3 (3.9). Linux and Windows CI pass code that breaks here, so this runs the same suites with
+      # those first on PATH (no Homebrew bash, no setup-python). Two parallel halves (PORT_TOOLS_PART) beside the
+      # other jobs: no added wall time.
+      - name: The shell, sed and Python this job really uses
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          bash --version | head -1; command -v sed; python3 --version
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 9), sys.version'
+      - name: Every tracked script parses with bash 3.2
+        if: matrix.part == 1
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          git ls-files '*.sh' | while read -r f; do /bin/bash -n "$f" || exit 1; done
+      - name: Port tools (macOS, part ${{ matrix.part }} of 3)
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          PORT_TOOLS_PART=${{ matrix.part }} ./tools/test-port-tools.sh
+      - name: Gates (macOS)
+        if: matrix.part == 1
+        run: |
+          export PATH="/bin:/usr/bin:$PATH"
+          ./tools/test-gates.sh

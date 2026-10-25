@@ -1619,11 +1619,11 @@ def cmd_read_plan(a, out):
     comments = gh_pages(f"/repos/{slug}/issues/{n}/comments", api)
     data = plan_data(issue.get("body") or "")
     owner = resolve_owner(a.owner, None, None) if a.owner else data["owner"]
-    clock = (datetime.datetime.fromisoformat(a.clock) if a.clock else datetime.datetime.now(datetime.timezone.utc))
+    clock = (datetime.datetime.fromisoformat(a.clock.replace("Z", "+00:00")) if a.clock else datetime.datetime.now(datetime.timezone.utc))
     now = clock.isoformat(timespec="seconds")
     frozen = read_plan(issue, comments, owner_check(slug, owner, api), now)
     try:
-        ahead = (datetime.datetime.fromisoformat(data["deadline"]) - clock).total_seconds()
+        ahead = (datetime.datetime.fromisoformat(str(data["deadline"]).replace("Z", "+00:00")) - clock).total_seconds()
     except (KeyError, TypeError, ValueError):
         ahead = 0
     if ahead > 0:

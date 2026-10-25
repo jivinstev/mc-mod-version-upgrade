@@ -59,3 +59,36 @@ sets `FORBIDDEN_NAMES_FILE` in `.env.local` when unset and installs the hooks (`
 hook then refuses a push whose commit messages or added lines contain any listed name, and the IP gate scans the
 whole tree for them. `guard-names.py check` with the same arguments must pass before committing or pushing here.
 Use invented placeholders (`examplemod`, `com/example/mod`) in fixtures and self-checks.
+
+## Portability: macOS and Windows, not just Linux CI
+
+The tools run on three systems, and Linux CI alone passes code that breaks the other two. Every rule below
+comes from a real failure here. `tools/check-compat.py` enforces the mechanical ones (pre-commit hook, CI); the
+macOS CI job runs the suites under Apple's bash 3.2, BSD tools and Python 3.9; Windows CI runs them under Git Bash.
+
+**macOS** (what a Mac user's machine has: `/bin/bash` 3.2, BSD `sed`/`grep`, `/usr/bin/python3` 3.9):
+- Python 3.9, standard library only: no `match`, no `tomllib` at module level (import it where used, falling
+  back to `tools/minitoml.py`), no `Counter <= Counter` (3.10), and `datetime.fromisoformat` only after
+  `.replace("Z", "+00:00")` (a trailing `Z` needs 3.11).
+- Bash 3.2: never a heredoc inside `$( ... )` (a quote in it breaks the whole script); write it to a file
+  with a plain heredoc, then run the file in `$( )`. No `declare -A`, `mapfile`, `${var,,}`.
+- BSD tools: `sed -i.bak ... && rm -f FILE.bak`, never `sed -i '...'`; no `grep -P`, `date -d`, `stat -c`,
+  `readlink -e`; no GNU `timeout` (use a watchdog: `perl -e 'alarm N; exec @ARGV'` or Python).
+- Temp dirs live under `/var -> /private/var`: compare `Path.resolve()`d paths, never path strings.
+- Nothing may depend on directory listing order (`os.walk`, `glob`, `iterdir`): sort.
+
+**Windows** (Git Bash and a cp1252 console; every failure class seen in two weeks of Windows CI):
+- Every text open/read/write and `subprocess(..., text=True)` names `encoding="utf-8"` (`check-encoding.py`).
+- Never a bare `["bash", ...]`: Windows finds WSL's bash first; use `tools/gitbash.py`'s `BASH`.
+- Compare paths as resolved `Path`s, never strings: Windows gives `C:\Users\RUNNER~1\...` and
+  `C:\Users\runneradmin\...`, `C:/` and `C:\` for the same file. Print paths with `.as_posix()` when a test reads them.
+- POSIX-only APIs need an `os.name != "nt"` guard: `pass_fds`, `fcntl`, signals other than SIGTERM/SIGINT,
+  `os.symlink` (needs privileges), executable bits.
+- Deleting a git checkout: `.git/objects` files are read-only, so `shutil.rmtree` needs an `onerror` that
+  clears the read-only bit and retries (`PermissionError: [WinError 5]` otherwise).
+- Tests that compare bytes must not depend on line endings: a checkout can have `core.autocrlf=true`; read
+  with `newline=""` or compare after normalising, and set `core.autocrlf=false` in a test's own repos.
+
+When a rule cannot apply to a line (a Linux-only cloud script, a call already inside an `os.name` guard), say so
+on that line with `# compat-ok: <reason>`. Run `tools/install-hooks.sh` once per clone: its pre-commit hook runs
+`check-compat.py`, `check-encoding.py` and the system `bash -n` (bash 3.2 on a Mac) on what you stage.

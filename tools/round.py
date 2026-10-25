@@ -3675,7 +3675,7 @@ def self_check():
                 expect(not _flock(fh, block=False), "a second full gate run waits for the machine's lock")
             # POSIX only: Windows has no pass_fds, and its msvcrt lock is not inherited by a child (the gate run
             # there passes no lock either, see the pass_fds guards above)
-            child = (subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"], pass_fds=(lk.fileno(),))
+            child = (subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"], pass_fds=(lk.fileno(),))  # compat-ok: os.name guard below
                      if os.name != "nt" else None)
         if child is not None:
             with open(gate_lock_path(), "a+", encoding="utf-8") as fh:
