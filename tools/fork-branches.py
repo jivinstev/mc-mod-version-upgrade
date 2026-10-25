@@ -1666,8 +1666,8 @@ def classify(f, t, t_pre, diff, read, budget):
                 and not TRIVIAL_LINE.match(ln[1:])]
         minus = [ln[1:] for ln in diff.splitlines() if ln.startswith("-") and not ln.startswith("---")
                  and not TRIVIAL_LINE.match(ln[1:])]
-        kept = lambda r: any(collections.Counter(re.findall(r"\w+|[^\w\s]", r))
-                             <= collections.Counter(re.findall(r"\w+|[^\w\s]", a)) for a in plus)
+        kept = lambda r: any(not (collections.Counter(re.findall(r"\w+|[^\w\s]", r))   # Counter <= is 3.10+
+                                  - collections.Counter(re.findall(r"\w+|[^\w\s]", a))) for a in plus)
         # every added line names one of those classes, and every removed line is kept whole inside an added one: the
         # change only ADDS uses of the dropped integration
         only = bool(plus) and all(names(ln) for ln in plus) and all(kept(r) for r in minus)
