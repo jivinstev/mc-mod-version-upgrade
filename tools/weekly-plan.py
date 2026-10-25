@@ -88,7 +88,9 @@ fork has new upstream commits the round merges them into the head before its cas
 from that simulated head -- the decisions and mechanical merges their code raises are on Tuesday's plan; a file that
 conflicts in the head merge itself is listed ("Head merge needs an agent: N file(s)"). A preview that cannot run falls
 back to the head as it is and the plan says "Could not preview". No new upstream commits: the command and the plan are
-as before.
+as before. A single-version fork has no cascade: its Decisions section shows the fetch step's own trial merge of
+the authors' new commits into the head (in the throwaway checkout, aborted on a conflict): the files that conflict
+("Head merge needs an agent: N file(s)"), "no conflict", or "Could not preview" with the merge's error.
 
 LOWEST (inside the select step; a version-branch fork only): each listed known issue against the version branches below
 its lowest open version (known-issues.py lowest, git only): a `pattern` matching lower shows "may be at <v>
@@ -669,19 +671,22 @@ def step_fetch(config, repo, work, now=None, clone=None):
         uc = git(d, "rev-parse", up, check=True).stdout.strip()
         log = git(d, "log", "--format=%H%x09%s", f"{hc}..{uc}", check=True).stdout.splitlines()
         commits = [{"sha": l.split("\t", 1)[0], "subject": l.split("\t", 1)[1] if "\t" in l else ""} for l in log]
-        merged, conflicts = False, []
+        merged, conflicts, err = False, [], None
         if commits:
             git(d, "checkout", "-q", "-B", f["head"], hc, check=True)
             r = git(d, "-c", "user.name=weekly-plan", "-c", "user.email=weekly-plan@localhost", "merge", "-q", "--no-edit",
                     "--no-ff", uc)
             if r.returncode:
                 conflicts = git(d, "diff", "--name-only", "--diff-filter=U").stdout.split()
+                if not conflicts:       # failed with nothing conflicted: why, for the plan's "Could not preview"
+                    err = (r.stderr.strip() or r.stdout.strip() or f"git merge exit {r.returncode}")[-300:]
                 git(d, "merge", "--abort")
                 git(d, "checkout", "-q", "-B", f["head"], hc, check=True)
             else:
                 merged = True
         forks.append(dict(f, clone=str(d.resolve()), head_ref=ref, head_commit=hc, upstream_commit=uc,
-                          new_commits=commits, new_count=len(commits), authors_merged=merged, merge_conflicts=conflicts))
+                          new_commits=commits, new_count=len(commits), authors_merged=merged, merge_conflicts=conflicts,
+                          **({"merge_error": err} if err else {})))
         print(f"weekly-plan: {f['repo']}: {len(commits)} new commit(s) from {f['upstream']} {f['upstream_branch']} "
               f"at {uc[:12]}" + (f"; merging them conflicts in {', '.join(conflicts[:6])}" if conflicts else ""))
     inp = {"schema": 1, "repo": cfg["forks"][0]["repo"], "now": now.isoformat(timespec="seconds"), "week": week,
@@ -1513,6 +1518,57 @@ def self_check():
         h6 = load_input(w5)["forks"][0]["cascade"].get("head_merge") or {}
         expect(h6.get("error") and "Could not preview" in "\n".join(k.head_merge_lines(h6)),
                f"fail soft: a head merge that cannot be simulated is listed as could not preview: {h6}")
+        # a single-version fork whose port conflicts with the authors' new commit (up2's): no cascade, the fetch step's
+        # trial merge in the throwaway checkout is the preview; its conflicting file on the plan, no branch moved
+        sv2 = d / "svconflict"
+        subprocess.run(["git", "clone", "-q", str(up2), str(sv2)], check=True, capture_output=True)
+        gq(sv2, "checkout", "-q", "-b", "neoforge-1.21.1", "HEAD~1")
+        (sv2 / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        (sv2 / F).write_text(body(10, 1), encoding="utf-8")
+        gq(sv2, "add", "-A"); gq(sv2, "commit", "-qm", "port")
+        gq(sv2, "update-ref", "refs/remotes/origin/neoforge-1.21.1", "HEAD")
+        x3 = gq(sv2, "rev-parse", "HEAD")
+        c8 = make_config([parse_fork(f"o/sv@neoforge-1.21.1={up2}#main")], "someone", 3, "owner/migrator")
+        conf8 = d / "weekly-plan-sv.json"
+        conf8.write_text(json.dumps(c8), encoding="utf-8")
+        w8 = d / "plan-sv"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_fetch(conf8, sv2, w8, now=summer)
+            step_cascade(w8)
+            step_select(w8)
+        fs = load_input(w8)["forks"][0]
+        expect(fs["cascade"] is None and fs["merge_conflicts"] == [F] and not fs["authors_merged"] and "merge_error" not in fs
+               and "head_merge" not in fs, f"a single-version fork: the trial merge's conflict recorded, nothing else: {fs}")
+        expect(gq(sv2, "rev-parse", "neoforge-1.21.1") == x3 and gq(sv2, "rev-parse", "refs/remotes/origin/neoforge-1.21.1") == x3
+               and not gq(sv2, "status", "--porcelain"), "the aborted trial merge moved no branch and left the checkout clean")
+        inp8 = load_input(w8)
+        inp8.update(owner={"login": "someone"})
+        r8 = k.render_plan(inp8)["body"]
+        dec8 = r8.split("### Decisions", 1)[1].split("## Grade overrides", 1)[0]
+        expect("there is no cascade to plan" in dec8 and "Head merge needs an agent: 1 file(s)" in dec8 and f"`{F}`" in dec8
+               and "(a trial merge;" in dec8 and "Previewed:" not in dec8 and "--head-merge" not in r8
+               and '"head_merge_conflicts": 1' in r8,
+               f"the plan's single-version section lists the trial merge's conflicting file: {dec8}")
+        # a trial merge that fails with nothing conflicted (an untracked file in its way): its error recorded and shown
+        sv3 = d / "svfail"
+        subprocess.run(["git", "clone", "-q", str(up), str(sv3)], check=True, capture_output=True)
+        gq(sv3, "checkout", "-q", "-b", "neoforge-1.21.1", "HEAD~1")
+        (sv3 / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        gq(sv3, "add", "-A"); gq(sv3, "commit", "-qm", "port")
+        (sv3 / "A.java").write_text("in the way\n", encoding="utf-8")
+        c9 = make_config([parse_fork(f"o/sv@neoforge-1.21.1={up}#main")], "someone", 3, "owner/migrator")
+        conf9 = d / "weekly-plan-svf.json"
+        conf9.write_text(json.dumps(c9), encoding="utf-8")
+        w9 = d / "plan-svf"
+        with contextlib.redirect_stdout(io.StringIO()):
+            step_fetch(conf9, sv3, w9, now=summer)
+        inp9 = load_input(w9)
+        inp9.update(owner={"login": "someone"})
+        f9 = inp9["forks"][0]
+        dec9 = k.render_plan(inp9)["body"].split("### Decisions", 1)[1].split("## Grade overrides", 1)[0]
+        expect(f9["new_count"] == 1 and not f9["authors_merged"] and f9["merge_conflicts"] == [] and f9.get("merge_error")
+               and "Could not preview merging" in dec9 and "untracked" in dec9 and "needs an agent" not in dec9,
+               f"fail soft: a trial merge that fails with no conflict is said so, with git's reason: {f9} {dec9}")
         # previous / open against a fake GitHub: carry-forward from an unclosed plan, then supersede it
         issues, calls = {}, []
 
@@ -1552,7 +1608,9 @@ def self_check():
                "starts Wednesday 2026-07-15") and "@someone" in first["body"] and "[x] Take the authors' new commits" in first["body"]
                and "- [x] **S1** `KI-1`" in first["body"] and "- [ ] **S3** `KI-2`" in first["body"]
                and "## o/dep (dependent)" in first["body"] and not first["title"].startswith("[decision needed]")
-               and "- [x] `maven.modrinth:viewer` at 1.21.1" in first["body"] and "Could not check" in first["body"],
+               and "- [x] `maven.modrinth:viewer` at 1.21.1" in first["body"] and "Could not check" in first["body"]
+               and first["body"].count("The authors' new commits merge into the head with no conflict (a trial merge).") == 2
+               and first["body"].count('"head_merge_conflicts": 0') == 2,
                f"the plan issue: deadline first, assigned and @mentioned, a section per fork: {first}")
         # this week's issue already open: a second run (e.g. a manual dispatch) opens nothing
         with contextlib.redirect_stdout(io.StringIO()):

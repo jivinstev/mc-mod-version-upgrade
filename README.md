@@ -66,9 +66,10 @@ tree. Then:
   report-only audit rows appear when they find something (the mixin-target and event-listener audits among them,
   which also say when an input is missing), a stale Port CI kit is warned about (`port-ci.py check`), a
   port branch behind origin's is fast-forwarded before `port-sync.py` merges (a diverged one refused), the round's
-  preflight checks `origin/HEAD` and the authors' remote, and the shipped-jar files are read from `.port/<mc>/`. Some
-  fixes, checks and savings still reach version-branch forks only (e.g. the round driver, `tools/round.py`, the
-  head-merge preview on the plan; #161 lists the rest). The `.multiversion/` **layer** route (one branch building every version) was removed (#161 U7): every
+  preflight checks `origin/HEAD` and the authors' remote, the shipped-jar files are read from `.port/<mc>/`, and
+  Tuesday's plan shows a trial merge of the authors' new commits into the head (in the plan's throwaway checkout) and
+  lists the files that conflict. Some fixes, checks and savings still reach version-branch forks only (e.g. the round
+  driver, `tools/round.py`; #161 lists the rest). The `.multiversion/` **layer** route (one branch building every version) was removed (#161 U7): every
   tool refuses a checkout with the layer at HEAD, naming commit `baa092b62eae`, the last that supports it -- check it
   out to migrate such a fork to version branches (`fork-branches.py migrate`; fork-versions, "A fork still on the layer").
 - **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes (a `release` run on
@@ -173,9 +174,10 @@ authors' new commits (for a version-branch fork also the authors' code the head 
 took, under the same box), the cascade plan (its decisions apply only when that box is ticked; when the authors have
 new commits it is planned with their merge into the head simulated on a throwaway ref first, `fork-branches.py cascade
 --plan --head-merge`, so the decisions their code raises up the versions are on Tuesday's plan, and a file that
-conflicts in that head merge itself is listed as needing an agent), and the known issues the round will take, each
-with its lowest open version (for a version-branch fork checked below with `tools/known-issues.py lowest`, git only: an
-entry's `pattern` matching on a lower branch is shown as "may be at <v> (unconfirmed)" -- evidence, not proof: the fix
+conflicts in that head merge itself is listed as needing an agent; a single-version fork, which has no cascade, gets
+the plan's trial merge of their commits into the head instead, its conflicting files listed the same way or the merge
+said clean), and the known issues the round will take, each with its lowest open version (for a version-branch fork
+checked below with `tools/known-issues.py lowest`, git only: an entry's `pattern` matching on a lower branch is shown as "may be at <v> (unconfirmed)" -- evidence, not proof: the fix
 stays where it is -- and a listed file unchanged below is flagged "lowest may be lower (unchecked)"), as checkboxes pre-ticked for the defaults, with
 `/decide <id> <choice>` and `/grade <ID> <S1-S4>` replies. Unticked, the round cascades nothing from the head: each
 fix is made at its lowest open version and cascaded from there. Under "Dependency updates" it lists, per fork and per

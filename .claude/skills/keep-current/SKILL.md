@@ -299,7 +299,9 @@ and version-branch forks alike:
   authors have new commits, with `--head-merge <their commit>`: the round's head merge simulated on the plan's
   throwaway ref first -- git only, no push -- so the decisions their code raises up the versions are on Tuesday's plan;
   a file that conflicts in the head merge itself is listed as "Head merge needs an agent: N file(s)"; a preview that
-  cannot run is listed as "Could not preview" and the plan goes on), `known-issues.py select`, `known-issues.py
+  cannot run is listed as "Could not preview" and the plan goes on; a single-version fork, with no cascade, shows the
+  fetch step's trial merge of the authors' new commits into the head instead: its conflicting files listed the same way
+  in its Decisions section, the merge said clean, or "Could not preview" with git's error), `known-issues.py select`, `known-issues.py
   render-plan`, and opens **one plan issue** on the library's repository with a section per fork, assigned to the fork
   owner with an @mention. Its first line is the deadline: the round's start, Wednesday morning Pacific; with no answer
   the defaults apply. It lists the authors' new commits (a box to take them, ticked by default) -- for a version-branch
