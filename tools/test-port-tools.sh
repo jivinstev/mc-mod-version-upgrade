@@ -373,6 +373,15 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
   out="$(python3 "tools/$tool" --self-check 2>&1)"
   grep -q 'self-check: OK' <<<"$out" && ok "$what" || bad "$tool self-check: $out"
 done
+# real-install: --mc narrows a saved plan to those versions (the file keeps every version); an unknown one is refused
+RI="$T/real-install-plan"; mkdir -p "$RI"
+printf '{"label":"examplemod","versions":[{"mc":"1.21.1","problems":[]},{"mc":"1.21.4","problems":[]}],"totals":{"disk_ok":false}}' > "$RI/plan.json"
+ri_bad="$(python3 tools/real-install.py install --plan "$RI/plan.json" --mc 9.9 2>&1)"; ri_bad_rc=$?
+ri_one="$(python3 tools/real-install.py install --plan "$RI/plan.json" --mc 1.21.4 2>&1)"
+[ "$ri_bad_rc" = 2 ] && grep -q '9.9 not in the plan' <<<"$ri_bad" && grep -q '(examplemod: 1.21.4)' <<<"$ri_one" \
+  && grep -q '"1.21.1"' "$RI/plan.json" \
+  && ok "real-install: --mc narrows a saved plan to those versions and keeps the file whole; a version not in it is refused" \
+  || bad "real-install --mc with --plan: rc=$ri_bad_rc $(tail -2 <<<"$ri_bad") | $(tail -2 <<<"$ri_one")"
 
 out="$(python3 tools/visual-review.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "visual review: black, flat and missing-texture frames are findings without a model; verdict lines parse" \
