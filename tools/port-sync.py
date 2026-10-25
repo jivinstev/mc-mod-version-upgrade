@@ -102,6 +102,15 @@ def self_check():
     return 0 if ok else 1
 
 
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--repo"); ap.add_argument("--port"); ap.add_argument("--upstream")
@@ -109,6 +118,10 @@ def main():
     a = ap.parse_args()
     if a.self_check:
         return self_check()
+    why = _refuse_layer(a.repo, "port-sync")
+    if why:
+        print(why)
+        return 2
     if not (a.repo and a.port and a.upstream):
         ap.error("--repo, --port and --upstream are required")
     return sync(a.repo, a.port, a.upstream, a.dry_run)

@@ -76,8 +76,8 @@ def main():
     flags = {a.split("=", 1)[0]: a.split("=", 1)[1] if "=" in a else True
              for a in sys.argv[1:] if a.startswith("--")}
     ws = args[0] if args else "."
-    # fork-layer mode: --cp-file=<classpath.txt> (Gradle's own, one jar per line) and --tree=<dir>[,<dir>...]
-    # (the target's prepared trees); no versions/<t>.properties exists there
+    # fork mode (fork-port.py on a version branch): --cp-file=<classpath.txt> (Gradle's own, one jar per line) and
+    # --tree=<dir>[,<dir>...] (the source trees); no versions/<t>.properties exists there
     cp_arg, trees_arg = flags.get("--cp-file"), flags.get("--tree")
     if not os.path.isdir(ws):
         sys.exit("no such port directory: %s -- this is NOT a pass.\n"

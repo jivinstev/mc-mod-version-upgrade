@@ -6,24 +6,21 @@ description: Keep a fork port current with its authors, unattended or on request
 # Keep a fork port current
 
 **Which fork:** a single-version fork (one `neoforge-1.21.1`-style branch) is the default; everything in
-"Run" below is for it. A multi-version fork is one of two kinds, and each gets one extra step after step 6, nothing else
-changing for it: **version branches** (the default for a multi-version fork: one branch per version, `neoforge-1.21.3`,
-`neoforge-1.21.4`, ..., each carrying `.port/<version>/branch.properties`)
-get "A fork with version branches"; an existing **layer** fork (`.multiversion/` on a `layer_branch`; legacy, being
-removed) gets "A fork with the layer". `git ls-remote --heads origin 'neoforge-*'` lists the version branches; `tools/layer-sync.py detect --repo DIR
---ref <layer_branch>` says whether a layer exists: pass the fork's `layer_branch` (in `.github/weekly-plan.json`) when it
-has one, since the clone is usually checked out on the port branch, which has no `.multiversion/`. Without `--ref`, detect
-exits 3 (not 0) when the checked-out branch has no layer but another branch does, so a layer fork can never read as
-single-version and skip its layer step. **Dependency updates are explicit for every kind of fork** (a deliberate change to
+"Run" below is for it. A multi-version fork has **version branches** (one branch per version, `neoforge-1.21.3`,
+`neoforge-1.21.4`, ..., each carrying `.port/<version>/branch.properties`) and gets one extra step after step 6,
+"A fork with version branches", nothing else changing for it. `python3 tools/fork-kind.py detect --repo DIR` says which:
+`kind=single-version`, or `kind=version-branches versions=...` (local or origin's branches, so a clone checked out on the
+port branch reads right). A checkout with the removed `.multiversion/` layer at HEAD is refused by detect and by every
+tool (exit 2, naming the last migrator commit that supports it: fork-versions, "A fork still on the layer"); stop and
+tell the user. **Dependency updates are explicit for every kind of fork** (a deliberate change to
 single-version forks, decided by the maintainer): no step re-picks a pinned CurseForge/Modrinth dependency by itself --
 `layer-deps.py resolve` keeps every pin, and a single-version fork's build.gradle pins move only by `layer-deps.py
 resolve --bump` -- so a dependency moves only when the plan's "Dependency updates" box is ticked (or the user asks). A
 version-branch fork is also kept on this repository's shared tables and helpers each round (`fork-branches.py sync-shared`,
 run by `round.py`); a single-version fork has no shared library to sync, and nothing of this changes it.
-**Version branches win:** a fork that has `.port/<v>/branch.properties` version
-branches AND a legacy layer branch with `.multiversion/` (one migrated to branches) is a version-branch fork; the layer
-branch is history and is ignored, by the round and by every run. detect says so: `layer=false kind=version-branches
-versions=... legacy_layer=<branch>`, exit 0, with or without `--ref`; never run the layer step for such a fork.
+A fork that has version branches AND a legacy layer branch with `.multiversion/` (one migrated to branches) is a
+version-branch fork; the layer branch is history and is ignored, by the round and by every run. detect says so:
+`kind=version-branches versions=... legacy_layer=<branch>`, exit 0.
 
 The port-fork skill makes a port; this one keeps it alive. A community fork is judged by the people who install
 it: **if it crashes them, kicks them from a server, hangs, damages a save or breaks their other mods, the fork is
@@ -60,22 +57,17 @@ values into flags; after that it is not read. Order is **dependencies first** (t
 Per fork: `repo`, `head`, `role` (`library` / `dependent`; empty for a fork alone), `upstream` and `upstream_branch`
 (the authors' repository and branch), `depends_on` (a dependent's dependencies in the set), `ledger_issues` (the fork
 issues that carry fix ledgers), `automerge` (merge its keep-current PR once CI is green: true exactly when `allow` has
-`merge-fork-prs`), and -- only for a fork with the multi-version layer -- `layer_branch` (the branch carrying
-`.multiversion/`, where `layer-sync.py detect` runs). For the set: `allow`, `budget`, `plan_owner`, `round` (its name,
+`merge-fork-prs`). For the set: `allow`, `budget`, `plan_owner`, `round` (its name,
 time and cron). A dependent's CI pins its dependency by exact release asset (`--dep-jar`, written into the dependent's
 `port-ci.yml`), so read the exact pins from there, not from memory. A dependent is not touched until its dependency's
 run is green, and it is then gated against the dependency's NEW build.
 
 ## Run (per fork, in the set's order)
 
-0. **Guard the names** (once per session, single-version and layer forks alike): `python3 tools/guard-names.py ensure --mod-repo <clone>` with one
+0. **Guard the names** (once per session, every kind of fork alike): `python3 tools/guard-names.py ensure --mod-repo <clone>` with one
    `--mod-repo` per fork of the set it depends on. A run that commits learnings here first passes `guard-names.py check`.
 1. **Nothing new? Stop cheaply.** `port-sync.py --dry-run` for the authors' branch, and for each dependency
-   "has it a newer green build than the dependent pins?". For a fork with a `layer_branch`, also
-   `layer-sync.py detect --repo DIR --ref origin/<layer_branch> --port-ref origin/<branch>` after a `git fetch`:
-   `layer_behind=N` above 0 is new work even when the authors pushed nothing (a fix of ours, or a run whose layer
-   step did not run). Then skip steps 2-7 for that fork and go straight to "A fork with the layer", merging the port
-   branch itself. No change anywhere: exit, no model work.
+   "has it a newer green build than the dependent pins?". No change anywhere: exit, no model work.
 2. **Merge** on a work branch `keep-current/<date>` cut from the port branch: `port-sync.py` (a merge, never a
    rebase). Fetch immediately before merging and name the exact commit merged in the message, read from git
    (`git rev-parse --short <remote>/<branch>`), never from memory: the authors can push while a reconcile is
@@ -147,6 +139,13 @@ run is green, and it is then gated against the dependency's NEW build.
    client gate -- Gate B passes even when it fails to apply).
 5. **Gate** (`ci-gates.py`, full and minimal; one run at a time -- the software-rendered client gives false
    failures under CPU contention, and the A/B worktrees share `~/.gradle`, so they count too). Then each mode's reproduction, for the modes this run decided.
+   **A shipped-jar expectation that fails right after an upstream merge is not yet a regression.** The authors may
+   have reworded the log line the expectation reads (e.g. a class logged by its internal name,
+   `net/minecraft/server/level/ServerLevel`, where it was `ServerLevel`). Before deciding, bisect it with the same
+   file: `tools/shipped-gate.py --jar <previous release's jar> --expect-file <the fork's expectations file>` and the
+   same for the new build, then read both runs' mod logs (`<work>/server/logs/`). The line there in another form: the
+   subsystem ran -- widen the pattern to accept both forms, still anchored to the effect (the same class, a count),
+   prove it on both jars, and say so in the commit. The line absent: a regression -- a fix-ledger mode, as in step 3.
 6. **Push the work branch and open a PR into the port branch** -- the fork's versioned branch, e.g.
    `neoforge-1.21.1` -- with: the incoming commits, the reconcile table (mode, severity, decision, evidence), the
    gate tables, the ledger changes. Merge the port branch into the work branch first if it moved (a CI-only
@@ -161,7 +160,7 @@ run is green, and it is then gated against the dependency's NEW build.
    allows it, above): wait for the PR's own CI -- every gate, full and minimal --
    and merge with a merge commit (never squash or rebase: the authors' commits must stay commits). A red or
    missing check is not merged: fix it on the work branch, or stop and report. **Then wait for the CI run the merge
-   itself triggers on the target branch** (a push run on the port branch, or the layer branch for a layer PR) and
+   itself triggers on the target branch** (a push run on the port branch, or the version branch for a version's PR) and
    report its result: a green PR does not prove the merged branch is green. A job that failed before any gate body
    ran (setup, dependency download -- e.g. "could not list the runtime's mods") is re-run once; a second failure, or
    any failure inside a gate, is reported as waiting on the user with the failing job's summary line. Never report
@@ -200,7 +199,7 @@ run is green, and it is then gated against the dependency's NEW build.
 ## A fork with version branches (skip this for a single-version fork)
 
 Only for a fork whose `neoforge-<version>` branches carry `.port/<version>/branch.properties` (even when a legacy layer
-branch with `.multiversion/` is still there: version branches win, and that layer branch is ignored). The port branch's PR (steps 1-6) brings the authors' code in at the base version;
+branch with `.multiversion/` is still there: it is history, and ignored). The port branch's PR (steps 1-6) brings the authors' code in at the base version;
 each version branch must take it, in chain order, and nothing fixes a version unless this is run. There is no R6
 re-merge here: git's own merge does it, with the rename rows applied as a tool.
 
@@ -282,56 +281,6 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    pre-release when the gates are green at the tag (marked in the dependent's DEPS.md), never `--allow-undone-library`;
    the dependent's version is done, and may be promoted, only once the library's is.
 
-## A fork with the layer (legacy, being removed: existing layer forks only, bug fixes only; skip this for a single-version fork)
-
-Only when `layer-sync.py detect --ref <layer_branch>` says `layer=true` (exit 3 from a bare `detect` means the same thing: rerun with `--ref`). The port branch's PR (steps 1-6) is the authors' code at the base
-version; the layer branch must carry it to every target, and nothing fixes a middle target unless this is run.
-
-1. Cut `keep-current/<date>-layer` from the layer branch and `python3 tools/layer-sync.py merge --repo DIR --port-ref
-   keep-current/<date>` (the port work branch, or the port branch once its PR is merged): a MERGE COMMIT, never a
-   rebase or force-push; a conflict is aborted and listed (it means the layer's isolation rule was already broken).
-2. `python3 tools/layer-sync.py run --repo DIR --json t.json --md t.md`: per target, oldest first, fork-port.py's
-   `stage..measure`, then the audits at 0 errors or the compile loop (`--budget`) otherwise. Each target is
-   **untouched** (0 errors, clean audits right after the merge), **touch-up** (the loop cleared it) or **rework**
-   (residue left: `.multiversion/targets/<t>/RESIDUE.md`). It also lists the upstream-changed files each target
-   OVERLAYS: an overlay replaces the whole file, so read it against upstream's new version even when it compiles.
-   **Before measuring, `run` re-merges those overlays** when HEAD is the merge (or `--changed-from` is given): per
-   overlay, a three-way `git merge-file` with base = the authors' file before the merge, ours = the overlay,
-   theirs = the authors' file now, both PREPARED for that target (its rename chain, no overlay); an overlay of a
-   path an older target also overlays follows that target's re-merged copy (or, when that older overlay conflicted
-   or its target is not in `--targets`, merges against the authors' files itself: it is never skipped). A clean
-   merge rewrites the overlay (the target is at least a touch-up), one that merges into exactly what it replaces is
-   deleted, and a conflict -- or a clean merge that declares a member twice -- leaves the overlay as it was (no
-   conflict marker reaches the tree), writes its hunks to the target's RESIDUE.md and an entry (overlay, digest,
-   reason, since) to `.multiversion/targets/<t>/REMERGE.json`, and makes the target rework; fork-port.py does not
-   call the target done while an entry's overlay is unedited. A target that inherits such an overlay as it is (no
-   copy of its own) gets an entry too: "inherits an overlay that did not take the authors' change".
-   `layer-sync.py remerge --repo DIR --old REF [--new REF] [--targets T] --dry-run` shows the same without writing;
-   after you merge an overlay by hand, `remerge` leaves it alone and drops its entry (and every inheriting
-   target's); an entry left unedited is merged again on the next run against the authors' file it was recorded
-   against, and goes when that merges. REMERGE.json is deleted when empty. The table's notes also give each
-   target's overlay budget (see `layer-sync.py overlays` in fork-versions).
-3. **A rework target stops the run (exit 10) for a person.** It is never skipped, never released as is, and never
-   reported as done; fix what its RESIDUE.md lists in the shared library, then `layer-sync.py run --targets <t>`.
-4. Put `t.md` (target | errors before | errors after | class | residue) in the layer PR body and link it from the port
-   PR; `layer-sync.py ledger --ledger L.json --json t.json --column keep-current/<date>` then `fix-ledger.py render
-   --ledger L.json --into BODY` puts the same table in the fix ledger's issue.
-5. Merging the layer PR follows step 6's rule: wait for the push run on the layer branch and report it.
-6. Gates: the layer's CI runs the full gates on the base and the newest target and compile + audits on the middle
-   ones; a target you intend to release gets `ci-gates.py --mc <t>` (full) first.
-7. **A shipped-jar expectation that fails right after an upstream merge is not yet a regression.** The authors may
-   have reworded the log line the expectation reads (e.g. a class logged by its internal name,
-   `net/minecraft/server/level/ServerLevel`, where it was `ServerLevel`). Before deciding, bisect it with the same
-   file: `tools/shipped-gate.py --jar <previous release's jar> --expect-file .multiversion/shipped-expect.txt` and the
-   same for the new build, then read both runs' mod logs (`<work>/server/logs/`). The line there in another form: the
-   subsystem ran -- widen the pattern to accept both forms, still anchored to the effect (the same class, a count),
-   prove it on both jars, and say so in the commit. The line absent: a regression -- a fix-ledger mode, as in step 3.
-8. **Move the buildout's freeze** once the layer PR is merged: on the updated layer branch, `python3
-   tools/make-fork-layer.py freeze --repo DIR` (and `--library owner/repo@TAG` for a re-pinned library release), and
-   commit `.multiversion/base.properties`. Only a layer that has a freeze (`upstream_commit=` there) needs it. `fork-port.py` compares every run to the end with
-   the authors' branch and stops with exit 19 while that branch holds commits after the freeze that the layer branch lacks; that exit, from a
-   fork-versions buildout, means "run this skill for the fork (and its libraries) first".
-
 ## The weekly cycle (both halves installed only by "Setup" below)
 
 The cycle is weekly, not nightly, for every fork set (a library and its dependents, or one fork alone), single-version
@@ -381,7 +330,7 @@ else is listed as ignored.
 ## The weekly round (what the Wednesday task runs; a fresh agent follows this alone)
 
 Say first which kinds of fork the set holds (single-version unless `.port/<v>/branch.properties` branches exist;
-those win over a legacy layer branch with `.multiversion/`, which is history and ignored -- `layer-sync.py detect` says
+those win over a legacy layer branch with `.multiversion/`, which is history and ignored -- `fork-kind.py detect` says
 `kind=version-branches`). The fork set, its upstreams, pins, ledger issues and `allow` come from
 `.github/weekly-plan.json` on the library's head branch, nothing else. The "Run" steps above are the per-fork mechanics;
 this is the order and the rules around them. The round runs this repository's **current main** (its prompt clones it,
@@ -452,7 +401,7 @@ it small, so for such a set the orchestration is a tool, which replaces the four
   of a shared helper still crashed with a fix this repository had shipped a week earlier, because no round ran
   sync-shared.) A copy the fork edited by hand while the template moved is never overwritten: it is a `reconcile` job
   (bring the template's change into the fork's copy, then list the copy against the template it was reconciled with). A
-  copy carried in unlisted that equals a text the library once shipped (a layer stand-in, too) is a library copy and is
+  copy carried in unlisted that equals a text the library once shipped (an `MV-STAND-IN` copy, too) is a library copy and is
   synced like an installed one. The fork's own copies of what the library now ships are adopt candidates: an `adopt`
   job only for the ones the plan's "Adopt MMVU's shared code" box ticked (unticked by default). Code the fork marks
   `MV-AHEAD-OF-TEMPLATE` goes into the close job, one Lessons row each, to harvest. A cascade from a version whose
@@ -736,10 +685,9 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
   (`git pull --ff-only`). `install` commits on the local head branch, and with `--default-branch-too` it builds the
   default branch's commit on the LOCAL branch of that name when one exists (origin's only when none does), so a stale
   local default branch is brought up to origin's first (`git fetch origin <default>:<default>`) or deleted.
-- **Which kind of fork:** `python3 tools/layer-sync.py detect --repo <checkout>`. `layer=true`, or exit 3 (it names the
-  branch that carries `.multiversion/`), is a layer fork: pass `--layer-branch <owner/repo>=<that branch>`.
-  `kind=version-branches` (version branches win over a legacy layer branch) or a plain `layer=false` with exit 0: no
-  `--layer-branch`. Say which kind each fork is; a single-version fork stays one.
+- **Which kind of fork:** `python3 tools/fork-kind.py detect --repo <checkout>`: `kind=single-version` or
+  `kind=version-branches` (version branches win over a legacy layer branch). A layer at HEAD is refused (exit 2):
+  stop. Say which kind each fork is; a single-version fork stays one.
 - **The default branch:** `gh repo view <owner/repo> --json defaultBranchRef -q .defaultBranchRef.name` (or `git
   remote set-head origin -a` and `git symbolic-ref --short refs/remotes/origin/HEAD`). When it differs from the head
   branch, ask the user: make the head branch the default (Settings -> Branches), or pass `--default-branch-too`.
@@ -756,7 +704,7 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
            --plan-owner <login of the person running setup> \
            [--allow push-version-branches --allow pre-release --allow merge-fork-prs] \
            [--ledger-issues <owner/dep>=12,15] [--depends-on <owner/dep>=<owner/lib>] \
-           [--layer-branch <owner/repo>=<branch>] [--replace-task "<old task name>"] \
+           [--replace-task "<old task name>"] \
            [--default-branch-too] [--keep-existing] [--trailer "<Key>: <value>" ...]
 
    One `--fork` per fork, the library first (a fork alone: one). A `--fork` without `=URL#BRANCH` takes the authors'
@@ -764,9 +712,9 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    `--allow` is the owner's choice for this fork set, asked at stop 1 and passed as they answered; it is fork config,
    never a default -- with none the round asks before every push, pre-release and merge. `automerge` follows
    `merge-fork-prs`. A dependent depends on the library unless `--depends-on` says otherwise. Moving from an old fleet
-   file: pass its `upstream`, `ledger_issues` and `layer_branch` values as these flags, once; after that the config is
+   file: pass its `upstream` and `ledger_issues` values as these flags, once; after that the config is
    the only source. **Re-running setup rebuilds the config from the flags alone:** for each `allow`, `ledger_issues`,
-   `depends_on` or `layer_branch` the existing config holds and the new flags leave out, `install` warns on stderr and
+   or `depends_on` the existing config holds and the new flags leave out, `install` warns on stderr and
    names the flag to re-pass; re-pass it, or add `--keep-existing` to keep every such value (a flag given still wins).
    Read the warnings before pushing. An agent passes its session's attribution trailers with `--trailer` (one per line), so the commit
    carries them; without it, amend the commit's message before pushing. It commits `.github/workflows/weekly-plan.yml`

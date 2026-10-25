@@ -7,7 +7,7 @@ Wednesday. Both are made only by the keep-current skill's setup, which runs `ins
     python3 tools/weekly-plan.py install --repo DIR --fork SPEC [--fork SPEC ...] [--plan-owner LOGIN|@org/team]
                                          [--owner-type user|org] [--budget N] [--allow WHAT ...]
                                          [--ledger-issues REPO=N[,N]] [--depends-on REPO=REPO[,REPO]]
-                                         [--layer-branch REPO=BRANCH] [--replace-task NAME ...] [--trailer "K: V" ...]
+                                         [--replace-task NAME ...] [--trailer "K: V" ...]
                                          [--migrator-repo OWNER/REPO] [--migrator-sha SHA] [--default-branch-too]
                                          [--keep-existing] [--no-commit] [--print]
     python3 tools/weekly-plan.py round-task (--repo DIR | --config FILE) [--existing NAME ...] [--migrator-repo O/R]
@@ -28,7 +28,7 @@ config; the dependents get nothing.
 `.github/weekly-plan.json` on the first fork's head branch is the fork set's ONLY source for the round: per fork its
 head, role (library / dependent), the authors' upstream URL and branch, `depends_on` (a dependent: the library unless
 --depends-on says otherwise; the exact pin is the dependent's `--dep-jar` in its port-ci.yml), `ledger_issues`,
-`automerge` (true exactly when `allow` has merge-fork-prs) and `layer_branch` (only when given); and for the set the
+`automerge` (true exactly when `allow` has merge-fork-prs); and for the set the
 budget, the round's time (jittered per set from its name), `plan_owner`, `allow`, `replace_tasks` and `migrator_sha`
 (the commit of this repository the workflow pins). An older fleet file is only an input to the first setup that writes
 it.
@@ -56,7 +56,7 @@ head branch, install refuses (exit 3) unless --default-branch-too, which also co
 default branch (a local commit; push both). Nothing is pushed. An unchanged file set makes no commit. --trailer adds
 a `Key: value` line to the end of the commit message (an agent passes its session's attribution trailers).
 Install builds the config from its flags only, so a re-run drops what it is not given again: when a config exists,
-each per-fork `ledger_issues`, `depends_on` and `layer_branch`, and the set's `allow`, that it holds and the new flags
+each per-fork `ledger_issues` and `depends_on`, and the set's `allow`, that it holds and the new flags
 leave out is warned about on stderr, naming the flag to re-pass; --keep-existing keeps those values instead. Without
 an existing config, or with every value re-passed, the output is as before.
 
@@ -147,7 +147,7 @@ DRIVER_RULE = ("Run the round with its driver and never do a step by hand. Right
 DRIVER_PHASE_RULE = ("The driver marks every item with python3 mmvu/tools/port-cost.py mark --fork <owner/repo> --version <v> --phase upstream|backlog|review|overhead as it starts (upstream: the authors' cascade and its conflicts; backlog: the selected known-issue fixes; review: fresh reviews and the fixes they cause; overhead: pins, gates, CI waits, records); never mark by hand. The closing comment's cost table (round-table --session-cwd) gives the per-phase split and per-phase totals, and for upstream the size of what the authors changed per version (commits, files, changed lines) and how many files the cascade merged mechanically versus by an agent, so cost per authors' changed line and the mechanical-merge share can be compared week over week.")
 GOLDEN_SV_PROMPT = TOOLS / "golden/round-task-single-version.txt"
 # the per-fork fields `install` rebuilds from flags only: an existing config's values are warned about or kept
-KEPT = (("ledger_issues", "--ledger-issues"), ("depends_on", "--depends-on"), ("layer_branch", "--layer-branch"))
+KEPT = (("ledger_issues", "--ledger-issues"), ("depends_on", "--depends-on"))
 TRAILER_RE = re.compile(r"^[A-Za-z][\w-]*: \S.*$")
 
 
@@ -286,14 +286,14 @@ def per_fork(values, forks, flag):
 
 
 def make_config(forks, plan_owner, budget, migrator_repo, allow=(), ledger_issues=None, depends_on=None,
-                layer_branch=None, replace_tasks=(), migrator_sha=None):
+                replace_tasks=(), migrator_sha=None):
     name = round_name(forks)
     minute = round_minute(name)
     bad = [x for x in allow if x not in ALLOW]
     if bad:
         raise Fail(f"--allow {', '.join(bad)}: one of {', '.join(ALLOW)}")
     allow = [x for x in ALLOW if x in allow]
-    ledger_issues, depends_on, layer_branch = ledger_issues or {}, depends_on or {}, layer_branch or {}
+    ledger_issues, depends_on = ledger_issues or {}, depends_on or {}
     repos = {f["repo"] for f in forks}
     for i, f in enumerate(forks):
         f["role"] = "library" if i == 0 and len(forks) > 1 else ("dependent" if len(forks) > 1 else "")
@@ -309,8 +309,6 @@ def make_config(forks, plan_owner, budget, migrator_repo, allow=(), ledger_issue
             f["depends_on"] = deps
         elif f["role"] == "dependent":
             f["depends_on"] = [forks[0]["repo"]]
-        if f["repo"] in layer_branch:
-            f["layer_branch"] = layer_branch[f["repo"]]
     cfg = {"schema": 1, "forks": forks, "budget": budget, "migrator_repo": migrator_repo, "allow": allow,
            "round": {"name": name, "tz": TZ, "weekday": "Wednesday", "time": f"{ROUND_NOMINAL[0]:02d}:{minute:02d}",
                      "cron": f"CRON_TZ={TZ} {minute} {ROUND_NOMINAL[0]} * * 3"}}
@@ -395,6 +393,9 @@ def commit_to(repo, branch, files, msg):
 
 def install(a, say=print, repo_info=None):
     repo = pathlib.Path(a.repo).resolve()
+    why = _refuse_layer(repo, "weekly-plan")
+    if why:
+        raise Fail(why)
     forks = [parse_fork(s) for s in a.fork]
     trailers = [t.strip() for t in a.trailer or []]
     bad = [t for t in trailers if not TRAILER_RE.match(t)]
@@ -427,8 +428,7 @@ def install(a, say=print, repo_info=None):
     sha = a.migrator_sha or git(ROOT, "rev-parse", "origin/main").stdout.strip()
     wf = workflow(mrepo, sha, head)
     flags = {"ledger_issues": per_fork(a.ledger_issues, forks, "--ledger-issues"),
-             "depends_on": per_fork(a.depends_on, forks, "--depends-on"),
-             "layer_branch": per_fork(a.layer_branch, forks, "--layer-branch")}
+             "depends_on": per_fork(a.depends_on, forks, "--depends-on")}
 
     def build(fl, allow):
         return make_config(copy.deepcopy(forks), a.plan_owner, a.budget, mrepo, allow=allow, replace_tasks=a.replace_task
@@ -551,8 +551,6 @@ def round_task(cfg, mrepo, existing=(), driver=False):
             bits.append("depends on " + ", ".join(f["depends_on"]))
         bits.append("ledger issues " + (", ".join(f"#{n}" for n in f["ledger_issues"]) if f.get("ledger_issues") else "none"))
         bits.append(f"automerge {'yes' if f.get('automerge') else 'no'}")
-        if f.get("layer_branch"):
-            bits.append(f"layer branch {f['layer_branch']}")
         return "; ".join(bits)
     lines = [f"Run the keep-current skill's weekly round for this fork set, unattended (fresh session, no human present).",
              "", f"The fork set's only source is {CONFIG} on {first['repo']} branch {first['head']} (no fleet file). "
@@ -1277,13 +1275,13 @@ def self_check():
         expect(rc == 2 and "--trailer" in o, f"a malformed --trailer is refused: {o}")
         expect(c3["migrator_sha"] == "a" * 40, f"install records the pinned migrator_sha in the config: {c3}")
         # a re-run drops what it is not given (the default, unchanged) but warns for each; --keep-existing keeps it.
-        # A three-fork set: a layer fork (layer_branch) and a dependent with non-default depends_on and ledger issues
+        # A three-fork set: a dependent with non-default depends_on and ledger issues
         argv3 = ["install", "--repo", str(fork), "--fork", "o/lib@neoforge-1.21.1=https://github.com/a/lib#main",
                  "--fork", "o/mid@neoforge-1.21.1=https://github.com/a/mid#main",
                  "--fork", "o/dep@neoforge-1.21.1=https://github.com/a/dep#main", "--migrator-repo", "owner/migrator",
                  "--migrator-sha", "a" * 40, "--plan-owner", "someone"]
         full_flags = ["--allow", "push-version-branches", "--allow", "merge-fork-prs", "--ledger-issues", "o/dep=7,3",
-                      "--depends-on", "o/dep=o/lib,o/mid", "--layer-branch", "o/mid=layer"]
+                      "--depends-on", "o/dep=o/lib,o/mid"]
         rc, o = inst(*full_flags, argv=argv3)
         c4 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
         expect(rc == 0 and "warning" not in o and c4["allow"] == ["push-version-branches", "merge-fork-prs"],
@@ -1294,18 +1292,17 @@ def self_check():
         rc, o = inst(argv=argv3)
         c5 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
         w = [l for l in o.splitlines() if "warning" in l]
-        expect(rc == 0 and len(w) == 4 and "re-pass --ledger-issues o/dep=3,7" in o
-               and "re-pass --depends-on o/dep=o/lib,o/mid" in o and "re-pass --layer-branch o/mid=layer" in o
+        expect(rc == 0 and len(w) == 3 and "re-pass --ledger-issues o/dep=3,7" in o
+               and "re-pass --depends-on o/dep=o/lib,o/mid" in o
                and "re-pass --allow push-version-branches --allow merge-fork-prs" in o and "--keep-existing" in o
-               and c5["allow"] == [] and c5["forks"][2]["ledger_issues"] == [] and c5["forks"][2]["depends_on"] == ["o/lib"]
-               and "layer_branch" not in c5["forks"][1],
+               and c5["allow"] == [] and c5["forks"][2]["ledger_issues"] == [] and c5["forks"][2]["depends_on"] == ["o/lib"],
                f"a bare re-run: the old values dropped as before, one warning each naming the flag: {o}")
         rc, o = inst(*full_flags, argv=argv3)
         rc, o = inst("--keep-existing", "--ledger-issues", "o/dep=9", argv=argv3)
         c6 = json.loads((fork / CONFIG).read_text(encoding="utf-8"))
         expect(rc == 0 and c6["allow"] == c4["allow"] and c6["forks"][2]["ledger_issues"] == [9]
-               and c6["forks"][2]["depends_on"] == ["o/lib", "o/mid"] and c6["forks"][1]["layer_branch"] == "layer"
-               and "drops" not in o and o.count("keeps (--keep-existing)") == 3,
+               and c6["forks"][2]["depends_on"] == ["o/lib", "o/mid"]
+               and "drops" not in o and o.count("keeps (--keep-existing)") == 2,
                f"--keep-existing: the old values the flags leave out are kept, a flag given still wins: {o}")
 
         # the steps, offline: a library fork with a version branch is too big a fixture here (fork-branches'
@@ -1622,7 +1619,6 @@ def build_parser():
     p.add_argument("--ledger-issues", action="append", metavar="REPO=N[,N]", help="the fork issues with fix ledgers")
     p.add_argument("--depends-on", action="append", metavar="REPO=REPO[,REPO]",
                    help="a dependent's dependencies in the set (default: the library)")
-    p.add_argument("--layer-branch", action="append", metavar="REPO=BRANCH", help="a layer fork's .multiversion/ branch")
     p.add_argument("--replace-task", action="append", metavar="NAME", help="an old scheduled task's exact name to replace")
     p.add_argument("--trailer", action="append", metavar='"KEY: VALUE"', help="a line added to the end of the commit message")
     p.add_argument("--migrator-repo", help="this repository on GitHub (default: its origin)")
@@ -1630,7 +1626,7 @@ def build_parser():
     p.add_argument("--default-branch-too", action="store_true",
                    help="also commit the workflow to the default branch when that is not the head branch")
     p.add_argument("--keep-existing", action="store_true",
-                   help="keep the existing config's allow, ledger_issues, depends_on and layer_branch this run's flags "
+                   help="keep the existing config's allow, ledger_issues and depends_on this run's flags "
                         "do not set (without it, each one dropped is warned about on stderr)")
     p.add_argument("--no-commit", action="store_true"); p.add_argument("--print", action="store_true")
     p = sub.add_parser("round-task", help="the Wednesday round's scheduled task, as JSON")
@@ -1638,13 +1634,22 @@ def build_parser():
     p.add_argument("--existing", action="append", default=[], metavar="NAME",
                    help="an existing scheduled task's name (list_triggers), repeatable: matched into replaces")
     p.add_argument("--version-branches", action="store_true",
-                   help="every fork of the set is a version-branch fork (layer-sync.py detect: kind=version-branches): the "
+                   help="every fork of the set is a version-branch fork (fork-kind.py detect: kind=version-branches): the "
                         "round runs on tools/round.py; without it the single-version round prompt, unchanged")
     p = sub.add_parser("fetch"); p.add_argument("--config", required=True); p.add_argument("--repo", required=True)
     p.add_argument("--work", required=True)
     for n in ("cascade", "select", "deps", "previous", "open"):
         sub.add_parser(n).add_argument("--work", required=True)
     return ap
+
+
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
 
 
 def main(argv=None):

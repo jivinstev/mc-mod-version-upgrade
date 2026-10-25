@@ -312,6 +312,15 @@ def self_check():
     return 0 if not bad else 1
 
 
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--fork", action="append", default=[], metavar="OWNER/REPO=DIR", help="a fork of the set and its clone")
@@ -327,6 +336,10 @@ def main(argv=None):
         if not sep or not re.fullmatch(r"[\w.-]+/[\w.-]+", slug):
             ap.error(f"--fork OWNER/REPO=DIR, got {f!r}")
         forks.append((slug, pathlib.Path(d).expanduser()))
+        why = _refuse_layer(pathlib.Path(d).expanduser(), "round-preflight")
+        if why:
+            print(f"preflight: {slug}: {why}")
+            return 2
     if not forks and not a.versions:
         ap.error("--fork OWNER/REPO=DIR (one per fork of the set) or --versions")
     res = checks(forks, a.versions.split(",") if a.versions else None, client=not a.no_client)

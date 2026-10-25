@@ -157,6 +157,15 @@ def audit(before, after):
     return out
 
 
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
+
+
 def main():
     if "--self-check" in sys.argv:
         return self_check()
@@ -165,6 +174,10 @@ def main():
     ap.add_argument("--against", required=True, metavar="REF", help="the sources to compare with (a git ref)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
+    why = _refuse_layer(a.repo, "audit-wiring")
+    if why:
+        print(why)
+        return 2
     try:
         before = tree_files(a.repo, a.against)
     except LookupError as e:

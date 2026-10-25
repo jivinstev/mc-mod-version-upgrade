@@ -103,15 +103,6 @@ def data_rejections(log, modid):
     return list(dict.fromkeys(out))
 
 
-def target_jar_glob(pat, mc):
-    """The shipped-jar glob for a layer target. The layer names the jars it builds for target T "<name>-mcT.jar"
-    (templates/fork-layer/layer.gradle, only with -Pmc), so ".multiversion/shipped-jar.txt"'s "*_mr.jar" is
-    "*_mr-mcT.jar" there. A glob already naming the target, or with no .jar ending, is left alone; no --mc: unchanged."""
-    if not pat or not mc or not pat.endswith(".jar") or pat.endswith(f"-mc{mc}.jar"):
-        return pat
-    return pat[:-4] + f"-mc{mc}.jar"
-
-
 def green_detail(text):
     """What a green gate log proves, in one line: the GameTest count, or the client's PASS line and spawns."""
     m = re.search(r"All (\d+) required tests passed", text) or re.search(r"BOOT_TEST: (PASS[^\n]*)", text)
@@ -145,7 +136,7 @@ ROOT_RECORDS = ("README.md",)   # records by their path from the repository root
 
 
 def tested_tree(repo, mc):
-    """The commit a layer target's GATES.md certifies. A run on an edited checkout tested more than HEAD, so the record
+    """The commit a version branch's GATES.md (--mc) certifies. A run on an edited checkout tested more than HEAD, so the record
     says so ("<sha> + uncommitted: a, b") instead of naming a commit that does not hold the code that went green; only
     changes to tracked files count, and the run's own outputs do not. Without --mc (a single-version fork, CI's clean
     checkout) it is HEAD, as before."""
@@ -164,8 +155,8 @@ def tested_tree(repo, mc):
 
 def branch_version(repo):
     """The Minecraft version of a fork's VERSION BRANCH checked out at `repo` (tools/fork-branches.py: gradle.properties'
-    minecraft_version, with .port/<it>/branch.properties beside it), else None -- the port branch, a layer branch and
-    every single-version fork."""
+    minecraft_version, with .port/<it>/branch.properties beside it), else None -- the port branch and every
+    single-version fork."""
     gp = pathlib.Path(repo) / "gradle.properties"
     m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
     return m.group(1) if m and (pathlib.Path(repo) / ".port" / m.group(1) / "branch.properties").is_file() else None
@@ -181,8 +172,7 @@ LIBRARY_SKIP = ("spawn", "battle")
 
 def is_library(repo, bv):
     """A version branch marked library=true (its .port/<bv>/branch.properties). Only a version branch: there the
-    library rule stands in for the skipped phases (a dependent's Gate C against the jar, tools/fork-branches.py); a
-    layer fork, which has no such rule, runs every phase as before."""
+    library rule stands in for the skipped phases (a dependent's Gate C against the jar, tools/fork-branches.py)."""
     return bool(bv) and read_kv(pathlib.Path(repo) / ".port" / bv / "branch.properties").get("library") == "true"
 
 
@@ -195,11 +185,10 @@ def library_phases(phases, library):
     return [p for p in phases if p not in LIBRARY_SKIP], [p for p in phases if p in LIBRARY_SKIP]
 
 
-def cf_jars(libs, found, mc=None):
-    """The CurseForge variant jar(s) a build writes beside the shipped one (`*_cf*.jar`, for a layer target the ones
-    named for it): each is booted by the shipped-jar gate too, since players install it."""
-    pat = f"*_cf*-mc{mc}.jar" if mc else "*_cf*.jar"
-    return [j for j in sorted(pathlib.Path(libs).glob(pat)) if j != found and "-sources" not in j.name] \
+def cf_jars(libs, found):
+    """The CurseForge variant jar(s) a build writes beside the shipped one (`*_cf*.jar`): each is booted by the
+    shipped-jar gate too, since players install it."""
+    return [j for j in sorted(pathlib.Path(libs).glob("*_cf*.jar")) if j != found and "-sources" not in j.name] \
         if pathlib.Path(libs).is_dir() else []
 
 
@@ -264,9 +253,6 @@ def self_check():
            "java.lang.IllegalArgumentException: Invalid recipe m:b: No key id in MapLike\n"
            "[x] ERROR Couldn't parse data file 'other:x': No key id\n[x] INFO loaded m:fine")
     ok &= len(data_rejections(rej, "m")) == 3 and data_rejections(rej, "zz") == []
-    ok &= target_jar_glob("*_mr.jar", "1.21.4") == "*_mr-mc1.21.4.jar" and target_jar_glob("*_mr.jar", None) == "*_mr.jar"
-    ok &= target_jar_glob("*_mr-mc1.21.4.jar", "1.21.4") == "*_mr-mc1.21.4.jar" and target_jar_glob("mod", "1.21.4") == "mod"
-    ok &= target_jar_glob(None, "1.21.4") is None
     with _t.TemporaryDirectory() as d:
         (pathlib.Path(d) / "a.log").write_text("\n".join(f"l{i}" for i in range(100)), encoding="utf-8")
         t = log_tails([pathlib.Path(d) / "a.log", pathlib.Path(d) / "missing.log"], n=3)
@@ -291,30 +277,30 @@ def self_check():
             "neoforge-1.21.1" and wiring_ref(d, None, "nosuch/ref") is None and wiring_ref(d, None, None) is None
         (pathlib.Path(d) / ".port/1.21.4/branch.properties").write_text("parent=--output=x\n", encoding="utf-8")
         ok &= wiring_ref(d, "1.21.4", None) is None and not (pathlib.Path(d) / "x").exists()
-    with _t.TemporaryDirectory() as d:   # tested_tree: a layer run names the edits it tested; HEAD alone when clean
+    with _t.TemporaryDirectory() as d:   # tested_tree: a version branch's run names the edits it tested; HEAD alone when clean
         g = lambda *x: subprocess.run(["git", "-C", d, *x], capture_output=True, check=True)
         g("init", "-q"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
-        t = pathlib.Path(d) / ".multiversion/targets/1.21.4"; t.mkdir(parents=True)
+        t = pathlib.Path(d) / ".port/1.21.4"; t.mkdir(parents=True)
         (t / "A.java").write_text("a", encoding="utf-8"); (t / "GATES.md").write_text("g", encoding="utf-8")
         (t / "INVENTORY-CHECK.json").write_text("{}", encoding="utf-8")
         (t / "DEPS.md").write_text("# Dependencies\n", encoding="utf-8")
-        (t.parent.parent / "DRIFT.md").write_text("- accepted\n", encoding="utf-8")
+        (t / "DRIFT.md").write_text("- accepted\n", encoding="utf-8")
         g("add", "-A"); g("commit", "-qm", "c")
         h = subprocess.run(["git", "-C", d, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
                            encoding="utf-8").stdout.strip()
         (t / "GATES.md").write_text("g2", encoding="utf-8")
         (t / "INVENTORY-CHECK.json").write_text("{\"x\": 1}", encoding="utf-8")   # layer-inventory.py's account: an output
         (t / "DEPS.md").write_text("# Dependencies\n\nresolved here\n", encoding="utf-8")   # setup's layer-deps resolve
-        (t.parent.parent / "DRIFT.md").write_text("- accepted\n- accepted again\n", encoding="utf-8")   # this run's drift line
+        (t / "DRIFT.md").write_text("- accepted\n- accepted again\n", encoding="utf-8")   # this run's drift line
         ok &= tested_tree(d, "1.21.4") == h                      # the run's own output is not an edit
         (t / "A.java").write_text("b", encoding="utf-8")
-        ok &= tested_tree(d, "1.21.4") == f"{h} + uncommitted: .multiversion/targets/1.21.4/A.java"
+        ok &= tested_tree(d, "1.21.4") == f"{h} + uncommitted: .port/1.21.4/A.java"
         ok &= tested_tree(d, None) == h                          # single-version: HEAD, exactly as before
-        # --shipped on a layer target boots the sibling ports' per-target jars beside it (layer-deps.sibling_jars, its
-        # own self-check covers a dependent fixture); a fork with no sibling substitute gets no --deps
+        # --shipped on a version branch boots the sibling ports' jars beside it (layer-deps.sibling_jars, its own
+        # self-check covers a dependent fixture); a fork with no sibling substitute gets no --deps
         ok &= _load("layer_deps", "layer-deps.py").sibling_jars(d, "1.21.4") == []
     # a version branch (tools/fork-branches.py) is known by .port/<its gradle.properties version>/; a single-version
-    # fork and a layer branch are not one; a library's Gate C drops spawn and battle; the _cf jar is booted too
+    # fork is not one; a library's Gate C drops spawn and battle; the _cf jar is booted too
     with tempfile.TemporaryDirectory() as d:
         r = pathlib.Path(d)
         (r / "gradle.properties").write_text("minecraft_version=1.21.4\nneo_version=21.4.158\n", encoding="utf-8")
@@ -326,13 +312,11 @@ def self_check():
         ok &= library_phases(["launch", "spawn", "battle", "gauntlet"], True) == (["launch", "gauntlet"], ["spawn", "battle"])
         ok &= library_phases(["launch", "spawn"], False) == (["launch", "spawn"], [])
         ok &= is_library(r, "1.21.4")
-        (r / ".multiversion").mkdir(); (r / ".multiversion/base.properties").write_text("library=true\n", encoding="utf-8")
-        ok &= not is_library(r, None)              # a layer fork marked library: every phase, as before
+        ok &= not is_library(r, None)              # not a version branch: every phase, as before
         libs = r / "libs"; libs.mkdir()
-        for n in ("m-1_mr.jar", "m-1_cf.jar", "m-1_cf-sources.jar", "m-1_mr-mc1.21.4.jar", "m-1_cf-mc1.21.4.jar"):
+        for n in ("m-1_mr.jar", "m-1_cf.jar", "m-1_cf-sources.jar"):
             (libs / n).write_bytes(b"x")
-        ok &= [j.name for j in cf_jars(libs, libs / "m-1_mr.jar")] == ["m-1_cf-mc1.21.4.jar", "m-1_cf.jar"]
-        ok &= [j.name for j in cf_jars(libs, libs / "m-1_mr-mc1.21.4.jar", "1.21.4")] == ["m-1_cf-mc1.21.4.jar"]
+        ok &= [j.name for j in cf_jars(libs, libs / "m-1_mr.jar")] == ["m-1_cf.jar"]
     with tempfile.TemporaryDirectory() as d:      # --shipped on a version branch: the variant's expectations file
         r, sg = pathlib.Path(d), _load("shipped_gate", "shipped-gate.py")
         (r / ".port/1.21.4").mkdir(parents=True)
@@ -358,53 +342,45 @@ def main():
     ap.add_argument("--shipped", action="store_true",
                     help="also boot the BUILT jar in a real NeoForge server and read the mod's own logs (tools/shipped-gate.py); "
                          "expectations come from the fork's .port/<mc>/shipped-expect[-<variant>].txt on a version branch, "
-                         "else .multiversion/shipped-expect[-<target>].txt")
+                         "else .multiversion/shipped-expect.txt")
     ap.add_argument("--shipped-jar", help="glob (under the build's libs dir) naming the jar a player installs; default: "
                                           ".multiversion/shipped-jar.txt, else the only jar there")
-    ap.add_argument("--mc", help="a Minecraft target of the fork's multi-version layer (.multiversion/targets/<mc>); "
-                                 "every Gradle call of the run then builds that target (and takes build/.fork-port.lock: "
-                                 "a second run on the same checkout is refused, exit 14)")
+    ap.add_argument("--mc", help="the Minecraft version of the version branch checked out (tools/fork-branches.py; "
+                                 "it must be that branch's): the run takes build/.fork-port.lock, so a second run on the "
+                                 "same checkout is refused (exit 14)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
+    why = _load("fork_kind", "fork-kind.py").refuse_layer(repo, "ci-gates")
+    if why:
+        print(f"[ci-gates] {why}", flush=True)
+        return 2
     bv = branch_version(repo)        # a version branch (tools/fork-branches.py): a plain build at its own version
     if bv:
         bprops = read_kv(repo / ".port" / bv / "branch.properties")
-        # the harness is written for the base version and renamed for this one, as for a layer target (port_gates.py)
+        # the harness is written for the base version and renamed for this one (port_gates.py)
         os.environ["PORT_BRANCH_MC"] = bv
         os.environ["PORT_BRANCH_BASE"] = bprops.get("base_minecraft_version", "1.21.1")
     if a.mc and bv and a.mc != bv:
         print(f"[ci-gates] --mc {a.mc}: the checkout is version branch {bv}", flush=True)
         return 2
-    if a.mc and bv:
-        # one gate run per checkout (CATALOG X44), as for a layer target; no -P arguments: the branch builds its version
-        lock = _load("layer_ci", "layer-ci.py").CheckoutLock(repo, "ci-gates.py", a.mc)
+    if a.mc and not bv:
+        print(f"[ci-gates] --mc {a.mc}: the checkout is not a version branch (no .port/<its version>/branch.properties); "
+              "a single-version fork's gates take no --mc", flush=True)
+        return 2
+    if a.mc:
+        # one gate run per checkout (CATALOG X44): a single-version fork never takes the lock. tools/fork-port.py holds
+        # it for its whole run and its gates stage reaches here as a child (let through)
+        lock = _load("checkout_lock", "checkout-lock.py").CheckoutLock(repo, "ci-gates.py", a.mc)
         busy = lock.acquire()
         if busy:
             print(f"[ci-gates] {busy}", flush=True)
             return 14
         atexit.register(lock.release)
         print(f"[ci-gates] version branch {bv} (.port/{bv}/branch.properties)", flush=True)
-    elif a.mc:
-        layer = repo / ".multiversion/tools/layer.py"
-        if not (repo / ".multiversion/targets" / a.mc).is_dir() or not layer.is_file():
-            print(f"[ci-gates] --mc {a.mc}: no .multiversion/targets/{a.mc} in {repo}", flush=True)
-            return 2
-        # one gate run per checkout (CATALOG X44), only on a layer target: a single-version fork never takes the lock.
-        # tools/fork-port.py holds it for its whole run and its gates stage reaches here as a child (let through).
-        lock = _load("layer_ci", "layer-ci.py").CheckoutLock(repo, "ci-gates.py", a.mc)
-        busy = lock.acquire()
-        if busy:
-            print(f"[ci-gates] {busy}", flush=True)
-            return 14
-        atexit.register(lock.release)
-        props = subprocess.run([sys.executable, str(layer), "props", "--target", a.mc], capture_output=True,
-                               text=True, encoding="utf-8", check=True).stdout
-        os.environ["PORT_GRADLE_ARGS"] = props
-        print(f"[ci-gates] multi-version target {a.mc}: " + " ".join(props.split()), flush=True)
     work = pathlib.Path(a.work_dir or tempfile.mkdtemp(prefix="port-ci-")).resolve()
     work.mkdir(parents=True, exist_ok=True)
     pu, ss = _load("port_gates", "port_gates.py"), _load("srcsets", "srcsets.py")
-    bdir = repo / pu.build_dir_name()
+    bdir = repo / "build"
     c = {"repo": repo, "dir": work, "args": types.SimpleNamespace(modid=a.modid, base=a.base)}
     rows, ok = [], True
 
@@ -568,13 +544,12 @@ def main():
             sj = repo / (f".port/{bv}" if bv else ".multiversion") / "shipped-jar.txt"
             pat = a.shipped_jar or (sj.read_text(encoding="utf-8").split() or [""])[0] \
                 if (a.shipped_jar or sj.is_file()) else None
-            pat = target_jar_glob(pat, None if bv else a.mc)
             found = sorted(libs.glob(pat)) if pat and libs.is_dir() else (sorted(libs.glob("*.jar")) if libs.is_dir() else [])
             label = "Shipped jar -- the built jar boots in a real server, the mod's own logs show its subsystems ran"
             if len(found) != 1:
                 record(label, False, f"cannot tell which jar a player installs: {len(found)} match(es) in {libs}"
                                      f"{' for ' + pat if pat else ''}; pass --shipped-jar GLOB or write .multiversion/shipped-jar.txt")
-            for jar in ([found[0]] + (cf_jars(libs, found[0], None if bv else a.mc) if a.mc else [])) if len(found) == 1 else []:
+            for jar in ([found[0]] + (cf_jars(libs, found[0]) if a.mc else [])) if len(found) == 1 else []:
                 first = jar == found[0]
                 log_name = "shipped-gate.log" if first else f"shipped-gate-{jar.stem}.log"
                 cmd = [sys.executable, str(ROOT / "tools/shipped-gate.py"), "--repo", str(repo), "--jar", str(jar),
@@ -589,13 +564,6 @@ def main():
                     if ef:
                         cmd += ["--expect-file", str(ef)]
                     sib = _load("layer_deps", "layer-deps.py").sibling_jars(repo, bv)
-                    if sib:
-                        cmd += ["--deps", *sib]
-                elif a.mc:
-                    cmd += ["--mc", a.mc]
-                    # a dependent fork's layer target: the sibling ports' per-target jars beside the built one (the
-                    # port branch's `shipped jars` job passes the --dep-jar jars the same way); none -> no --deps
-                    sib = _load("layer_deps", "layer-deps.py").sibling_jars(repo, a.mc)
                     if sib:
                         cmd += ["--deps", *sib]
                 else:

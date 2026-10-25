@@ -53,25 +53,8 @@ python3 tools/install-port.py owner/RepoA owner/RepoB --mods-dir /tmp/try/mods
 tools/boot-mods.sh /tmp/try/mods            # headless server; PASS = the set loads together
 ```
 
-**Every version at once (multi-version forks).** `--all-versions` installs the forks into every Minecraft version
-they ALL have: the port branch's version plus each target of every fork's newest layer pre-release (assets
-`<name>-mc<t>.jar`, Port CI's `layer-release`), intersected across the forks named and the ports they depend on (the
-versions outside that set are printed and skipped; `--versions 1.21.4,26.2` narrows it). Each version gets its own
-game directory, `minecraft-<mc>/mods` beside the launcher's folder (`--instances-dir DIR` moves them; a
-`MINECRAFT_MODS_DIR_<mc>` setup recorded wins), its NeoForge (the target's `prop.neo_version`) and a launcher profile
-"NeoForge <mc> (fork ports)" pointing at it. The base version installs exactly as above; a layer target installs each
-fork's `-mc<t>` jar (the manifest's variant; sha256 as GitHub records the asset) and, for every other manifest file,
-the build that target's `target.properties` substitutes (named as in its `DEPS.md`; a Modrinth build checked by its
-sha512, a CurseForge one -- no hash recorded -- by the mod id its jar declares), leaves out what the target excludes,
-and looks up by mod id what it does not name ("not tested by CI"). It ends with a table of version, NeoForge,
-profile, jars and result. `--port-checkout owner/repo=DIR` takes a fork's targets from a local layer build
-(`DIR/build/mc<t>/libs`) instead of its release. A single-version fork gives its one version; without the flag
-nothing changes.
-
-```bash
-python3 tools/install-port.py owner/LibFork owner/DepFork --all-versions --dry-run
-python3 tools/install-port.py owner/LibFork owner/DepFork --all-versions --versions 1.21.4,26.2 --port-checkout owner/DepFork=../DepFork
-```
+**A version branch (multi-version forks).** Each version branch carries its own install manifest, so one version
+installs like any port on another branch: `python3 tools/install-port.py owner/Fork@neoforge-<mc> --mc <mc>`.
 
 ## Operating model
 Run autonomously through resolution + download + migrate + smoke-test. **Stop and ask** only at

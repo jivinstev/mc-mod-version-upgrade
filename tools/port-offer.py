@@ -484,6 +484,15 @@ def self_check():
     return 0 if ok else 1
 
 
+def _refuse_layer(repo, tool):
+    """tools/fork-kind.py's refusal of a checkout with the removed .multiversion/ layer at HEAD: None, or the message
+    (print it and exit 2)."""
+    import importlib.util as _ilu
+    s = _ilu.spec_from_file_location("fork_kind", pathlib.Path(__file__).resolve().parent / "fork-kind.py")
+    m = _ilu.module_from_spec(s); s.loader.exec_module(m)
+    return m.refuse_layer(repo, tool)
+
+
 def main():
     if "--self-check" in sys.argv:
         return self_check()
@@ -499,6 +508,10 @@ def main():
                     help="when the release has one jar per platform, the one to install and why (e.g. _mr=...)")
     a = ap.parse_args()
     repo = pathlib.Path(a.repo).resolve()
+    why = _refuse_layer(a.repo, "port-offer")
+    if why:
+        print(why)
+        return 2
     branch = a.branch or git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     base = a.base or _port_ci().default_branch(repo, "origin/main", ref=True)
     fork = gh_slug(git(repo, "remote", "get-url", "origin"))
