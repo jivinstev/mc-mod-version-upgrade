@@ -548,10 +548,23 @@ def stale_manifests(manifests, releases=None):
 NEO_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
 
 
+def neoforge_complete(mc_dir, v):
+    """Whether NeoForge v's installer FINISHED, not just started: its version folder exists AND the client it builds
+    is there -- libraries/net/neoforged/neoforge/<v>/neoforge-<v>-client.jar (up to 1.21.8's NeoForge) or
+    libraries/net/neoforged/minecraft-client-patched/<v>/ (1.21.10's on, 26.x). An installer that stopped on a failed
+    download leaves the version folder and the libraries but no client, and that game cannot load Minecraft
+    ("Mod ID: 'minecraft' ... Actual version: '[MISSING]'", NoClassDefFoundError in the early display)."""
+    lib = mc_dir / "libraries" / "net" / "neoforged"
+    return ((mc_dir / "versions" / f"neoforge-{v}" / f"neoforge-{v}.json").is_file()
+            and ((lib / "neoforge" / v / f"neoforge-{v}-client.jar").is_file()
+                 or any((lib / "minecraft-client-patched" / v).glob("*.jar"))))
+
+
 def neoforge_installed(mc_dir, v):
-    """The installed NeoForge of v's line (21.1.x) that is v or newer, else None."""
+    """The installed NeoForge of v's line (21.1.x) that is v or newer, and whose install finished, else None."""
     line = v.rsplit(".", 1)[0]
-    have = sorted((p.name[len("neoforge-"):] for p in (mc_dir / "versions").glob(f"neoforge-{line}.*")),
+    have = sorted((p.name[len("neoforge-"):] for p in (mc_dir / "versions").glob(f"neoforge-{line}.*")
+                   if neoforge_complete(mc_dir, p.name[len("neoforge-"):])),
                   key=vkey) if (mc_dir / "versions").is_dir() else []
     ok = [h for h in have if vkey(h) >= vkey(v)]
     return ok[-1] if ok else None
@@ -801,8 +814,11 @@ def self_check():
         calls = []
         def fake_get(u):
             return hashlib.sha256(b"jar").hexdigest().encode() if u.endswith(".sha256") else b"jar"
-        def fake_run(argv, **k):
+        def fake_run(argv, **k):                     # a finished install: the version file and the client it builds
             calls.append(argv); (mc / "versions/neoforge-21.1.20").mkdir(parents=True)
+            (mc / "versions/neoforge-21.1.20/neoforge-21.1.20.json").write_text("{}", encoding="utf-8")
+            (mc / "libraries/net/neoforged/neoforge/21.1.20").mkdir(parents=True, exist_ok=True)
+            (mc / "libraries/net/neoforged/neoforge/21.1.20/neoforge-21.1.20-client.jar").write_bytes(b"jar")
             return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
         ok &= _chk(any("launcher_profiles" in x for x in pr) and not calls, 138)          # launcher never run: refuse
@@ -821,7 +837,19 @@ def self_check():
         n, pr = ensure_neoforge(neo, mods, get=fake_get, run=fake_run)
         ok &= _chk(len(calls) == 1 and any("is installed" in x for x in n), 152)            # second run: nothing to do
         (mc / "versions/neoforge-21.1.20").rename(mc / "versions/neoforge-21.1.30")
+        (mc / "versions/neoforge-21.1.30/neoforge-21.1.20.json").rename(mc / "versions/neoforge-21.1.30/neoforge-21.1.30.json")
+        (mc / "libraries/net/neoforged/neoforge/21.1.20").rename(mc / "libraries/net/neoforged/neoforge/21.1.30")
+        (mc / "libraries/net/neoforged/neoforge/21.1.30/neoforge-21.1.20-client.jar").rename(
+            mc / "libraries/net/neoforged/neoforge/21.1.30/neoforge-21.1.30-client.jar")
         ok &= _chk(neoforge_installed(mc, "21.1.20") == "21.1.30" and neoforge_installed(mc, "21.1.31") is None, 154)
+        # an installer that stopped after its downloads: version folder, no built client -> not installed
+        (mc / "versions/neoforge-21.4.9").mkdir(parents=True)
+        (mc / "versions/neoforge-21.4.9/neoforge-21.4.9.json").write_text("{}", encoding="utf-8")
+        ok &= _chk(neoforge_installed(mc, "21.4.9") is None and not neoforge_complete(mc, "21.4.9"), 155)
+        # the newer layout (1.21.10's NeoForge on, 26.x): the patched client under minecraft-client-patched/
+        (mc / "libraries/net/neoforged/minecraft-client-patched/21.4.9").mkdir(parents=True)
+        (mc / "libraries/net/neoforged/minecraft-client-patched/21.4.9/minecraft-client-patched-21.4.9.jar").write_bytes(b"j")
+        ok &= _chk(neoforge_installed(mc, "21.4.9") == "21.4.9", 156)
         bad = lambda u: b"0" * 64 if u.endswith(".sha256") else b"jar"
         shutil.rmtree(mc / "versions")
         _n, pr = ensure_neoforge(neo, mods, get=bad, run=fake_run)
