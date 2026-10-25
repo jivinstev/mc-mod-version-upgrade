@@ -28,8 +28,8 @@ dependencies). Any fork set: version-branch forks (`.port/<v>/branch.properties`
 mixed. A single-version fork is its head alone (P5: the head path below); nothing of the ladder -- lowest check,
 shared-library sync, merge-ups, freeze, library record -- is built or read for it. init refuses a clone with the removed
 .multiversion/ layer at HEAD (tools/fork-kind.py), a clone whose origin is not that fork, and a version-branch
-dependent whose version BRANCH (not its head) would re-pin to a single-version library's release (layer-deps.py resolve
-takes only a version branch's release). Per fork, library first (`depends_on` in
+dependent whose version BRANCH (not its head) pins a single-version library that releases this round (layer-deps.py
+resolve takes only a version branch's release; when either is not so, the close names that branch's hand re-pin). Per fork, library first (`depends_on` in
 .github/weekly-plan.json), and per version only when it has work this round -- the head cascade of the authors' code the
 plan takes, a selected fix at or below it, a library release of this round to re-pin to, a ticked dependency bump at it,
 or MMVU's shared library moved past it (init reads fork-branches.py sync-shared --check: a version a sync changes, a
@@ -368,9 +368,15 @@ def build_queue(frozen, cfg, forks, date):
         adopt_v = {v: [a for a in s_.get("adopt", []) if a["id"] in ticked] for v, s_ in sh_.items()}
         adopt_v = {v: a for v, a in adopt_v.items() if a}
 
+        def rel_at(lb, v):
+            """A library release of this round to re-pin to at v: never a single-version library's at a version
+            BRANCH (layer-deps.py resolve takes only a version branch's release; init refuses a branch that pins one
+            while it releases, and the close names the hand re-pin otherwise)."""
+            return (lb, v) in release_of and (v == base or forks[lb]["kind"] != "single")
+
         def other_work(v):
             return (authors_up or (lowest_fix is not None and rank[v] >= lowest_fix) or bool(bumps.get(v))
-                    or any((lb, v) in release_of for lb in libs))
+                    or any(rel_at(lb, v) for lb in libs))
 
         def work(v):
             return other_work(v) or v in sync_v or v in rec_v or v in adopt_v
@@ -421,7 +427,7 @@ def build_queue(frozen, cfg, forks, date):
             else:
                 q.add(slug, v, "mergeup", extra={"from": prev, "head_cascade": k == 0,
                                                  "decisions_file": k == 0 and authors_up and bool(casc.get("decisions"))})
-            rel = [lb for lb in libs if (lb, v) in release_of]
+            rel = [lb for lb in libs if rel_at(lb, v)]
             if rel or bumps.get(v):
                 q.add(slug, v, "repin", deps=[release_of[(lb, v)] for lb in rel],
                       extra={"bumps": bumps.get(v, []), "libraries": rel})
@@ -603,22 +609,45 @@ def shared_of(d, versions, slug):
     return shared, harvest, ("; ".join(bad)[:300] or None)
 
 
-def sv_library_refusal(cfg, forks):
-    """Why the set cannot run (None when it can): a version-branch dependent's version BRANCH (not its head) that would
-    re-pin to a single-version library's release -- layer-deps.py resolve --port-release takes only a version branch's
-    release (its tree holds .port/<v>/branch.properties)."""
+def sv_library_branches(cfg, forks, items):
+    """A version-branch dependent's version BRANCH (not its head) that depends on a single-version library: the driver
+    never re-pins it (layer-deps.py resolve --port-release takes only a version branch's release). -> (why the set
+    cannot run, or None; the close job's lines). It cannot run only when the library releases this round (its release
+    item is queued) AND that branch's Port CI workflow pins the library (port-ci.py --dep-jar, read at origin's branch):
+    the branch would be left on the old release. Otherwise the queue is built and the close names the hand re-pin."""
+    ids = {x["id"] for x in items}
+    lines = []
     for cf in cfg["forks"]:
         D = forks.get(cf["repo"])
         if not D or D["kind"] != "branches":
             continue
         for lb in cf.get("depends_on", []):
             L = forks.get(lb)
-            if L and L["kind"] == "single" and L["base"] in D["versions"]:
-                return (f"{cf['repo']}'s version branch neoforge-{L['base']} depends on {lb}, a single-version library: "
-                        "its re-pin (layer-deps.py resolve --port-release) takes only a version branch's release, so "
-                        "the driver cannot run this set; make the library a version-branch fork (fork-versions) or "
-                        "re-pin that branch by hand")
-    return None
+            if not (L and L["kind"] == "single" and L["base"] in D["versions"]):
+                continue
+            v = L["base"]
+            wf = git(D["dir"], "show", f"origin/neoforge-{v}:{PORT_CI_WF}")
+            pinned = wf.returncode == 0 and any(p["repo"].lower() == lb.lower()
+                                                for p in mod("ld").port_deps(wf.stdout).values())
+            releases = f"{L['name']}@{v}:release" in ids
+            if releases and pinned:
+                return (f"{cf['repo']}'s version branch neoforge-{v} pins {lb}, a single-version library that releases "
+                        "this round: its re-pin (layer-deps.py resolve --port-release) takes only a version branch's "
+                        "release, so the driver cannot run this set; make the library a version-branch fork "
+                        "(fork-versions), or leave that library's release out of this round's plan"), []
+            lines.append(f"- {cf['repo']} neoforge-{v} depends on {lb}, a single-version library: the driver re-pins no "
+                         "version branch to it -- " + (f"{lb} releases this round, but that branch's Port CI workflow "
+                         "pins no release of it, so nothing was re-pinned there" if releases else
+                         f"{lb} releases nothing this round, so its pin stays") + "; when it next releases, re-pin "
+                         f"neoforge-{v} by hand (`port-ci.py args`, its --dep-jar tag and asset) and say so.")
+    return None, lines
+
+
+def hand_repin_lines(st):
+    """The close job's lines for sv_library_branches (nothing for a set without such a branch)."""
+    rows = st.data.get("hand_repins") or []
+    return (["Name in the closing comment each version branch below that the round did not re-pin:", *rows]
+            if rows else [])
 
 
 def cmd_init(a):
@@ -682,16 +711,18 @@ def cmd_init(a):
             print(f"round: {slug}: WARNING: the shared-library check failed ({why}): no sync, reconcile or adopt item "
                   "for this fork this round; the close names it")
             forks[slug]["shared_error"] = why
-    why = sv_library_refusal(cfg, forks)
+    date = a.date or datetime.date.today().isoformat()
+    items = build_queue(frozen, cfg, forks, date)
+    why, hand = sv_library_branches(cfg, forks, items)
     if why:
         print(f"round: {why}")
         return 2
-    date = a.date or datetime.date.today().isoformat()
-    items = build_queue(frozen, cfg, forks, date)
     data = {"schema": 1, "created": now(), "round_start": a.since or now(), "round_dir": str(rdir),
             "frozen": str(pathlib.Path(a.frozen).resolve()), "date": date, "allow": cfg.get("allow", []), "config": cfg,
             "plan": {"repo": frozen.get("repo"), "issue": frozen.get("issue"), "owner": owner_login(frozen)},
             "forks": forks, "items": items}
+    if hand:
+        data["hand_repins"] = hand            # only such a set has the key: every other set's state is as before
     state.parent.mkdir(parents=True, exist_ok=True)
     tmp = state.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -980,7 +1011,7 @@ def job_task(st, it):
                 f"--session-cwd {st.rdir}` (the phase marks are in round/marks.tsv), with the authors' change size per "
                 "version and the mechanical-merge share (step 6).",
                 "Add the `### Lessons for the migrator` table (step 6; a `| none | | | |` row when there is none).",
-                *harvest_lines(st),
+                *harvest_lines(st), *hand_repin_lines(st),
                 "Close the issue (state completed) only when every item in status is ok, skipped or a blocked item "
                 "that waits on the owner and is named in the comment; a round that stopped leaves it open (step 5).",
                 "Acceptance: one closing comment posted; the issue closed or left open by that rule."]
@@ -1154,15 +1185,16 @@ def say_to(log):
     return say
 
 
-def sh(st, it, cmd, log, cwd=None, ok=(0,), hold=None):
+def sh(st, it, cmd, log, cwd=None, ok=(0,), hold=None, env=None):
     """Run a command with its output appended to the step's log; -> CompletedProcess (stdout = the output). hold: the
-    full-gate lock's open file, inherited by the command so that it holds the lock as long as it runs."""
+    full-gate lock's open file, inherited by the command so that it holds the lock as long as it runs. env: the
+    command's whole environment (default: this process's)."""
     with open(log, "a", encoding="utf-8") as fh:
         fh.write(f"$ {' '.join(shlex.quote(str(c)) for c in cmd)}\n")
         fh.flush()
         extra = {"pass_fds": (hold.fileno(),)} if hold is not None and os.name != "nt" else {}
         r = subprocess.run([str(c) for c in cmd], cwd=str(cwd or st.rdir), stdout=fh, stderr=subprocess.STDOUT,
-                           text=True, encoding="utf-8", errors="replace", **extra)
+                           text=True, encoding="utf-8", errors="replace", env=env, **extra)
     if r.returncode not in ok:
         raise StepError(f"{pathlib.Path(str(cmd[1])).name if len(cmd) > 1 else cmd[0]} exit {r.returncode}: "
                         + tail(log, 6))
@@ -1641,28 +1673,54 @@ def t_depgate(st, it, log):
                                                                                        "library_head": head(lco)}
 
 
-def m2_dir(ga, ver):
-    g, a = ga.split(":")
-    return pathlib.Path.home() / ".m2/repository" / g.replace(".", "/") / a / ver
+def private_m2(dest, cands):
+    """A private mavenLocal for one dependent gate run: a copy of ~/.m2/repository (what the dependent's build resolves
+    from mavenLocal besides the library: other sibling ports' pinned jars, --dep builds), with each candidate jar put
+    at the coordinates the dependent pins ({group:artifact: (version, bytes)}, a minimal POM beside it). ~/.m2 itself is
+    only read: no kill, restart or unlocked build elsewhere ever sees the candidate there. -> dest."""
+    dest = pathlib.Path(dest)
+    shutil.rmtree(dest, ignore_errors=True)
+    home = pathlib.Path.home() / ".m2/repository"
+    if home.is_dir():
+        shutil.copytree(home, dest, symlinks=True)
+    dest.mkdir(parents=True, exist_ok=True)
+    for ga, (ver, data) in cands.items():
+        g, a = ga.split(":")
+        d_ = dest / g.replace(".", "/") / a / ver
+        d_.mkdir(parents=True, exist_ok=True)
+        (d_ / f"{a}-{ver}.jar").write_bytes(data)
+        (d_ / f"{a}-{ver}.pom").write_text(f"<project><modelVersion>4.0.0</modelVersion><groupId>{g}</groupId>"
+                                          f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
+                                          "</packaging></project>\n", encoding="utf-8")
+    return dest
+
+
+def candidate_jar(jars, asset, v):
+    """The library's built jar that stands for the asset the dependent pins: layer-deps.py pick_release_asset's match
+    (the same name, <stem>-mc<v>.jar, or the one jar of the same shape -- the mod's name and its variant, so `_cf`
+    never stands in for `_mr`), as a version branch's re-pin picks a release asset. -> (path, None) or (None, why)."""
+    name, why = mod("ld").pick_release_asset([j.name for j in jars], asset, v)
+    return (next(j for j in jars if j.name == name), None) if name else (None, why)
 
 
 def depgate_head(st, it, lib, dep, v, lco, jars, log):
     """The pre-merge dependent gate when the dependent's version v is its HEAD (a single-version dependent, or a
     version-branch dependent's head): origin's head on a throwaway worktree, gated by ci-gates.py full and minimal (the
-    head path's commands, its workflow's own --base) under the machine's gate lock, with the library's candidate jar put
-    into mavenLocal where the dependent's Port CI puts the library's release (port-ci.py --dep-jar: same group,
-    artifact and version) -- what was there before is put back afterwards, so nothing later builds against the
-    candidate. Green only when every command exits 0."""
+    head path's commands, its workflow's own --base) under the machine's gate lock, against a PRIVATE mavenLocal
+    (private_m2: round/work/depgate-<dep>-<v>-m2, Gradle pointed at it with -Dmaven.repo.local through PORT_GRADLE_ARGS,
+    which every Gradle call of a gate run carries) holding the library's candidate jar where the dependent's Port CI
+    puts the library's release (port-ci.py --dep-jar: same group, artifact and version). ~/.m2 is never written. Green
+    only when every command exits 0."""
     br = dep["head"]
     git(dep["dir"], "fetch", "-q", "origin", br, check=True)
     work = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}"
+    m2 = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}-m2"
     evid = st.rdir / "round/logs" / job_id(it)
     evid.mkdir(parents=True, exist_ok=True)
     if work.exists():
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
     git(dep["dir"], "worktree", "add", "-q", "--detach", str(work), f"origin/{br}", check=True)
-    saved, made, cand = {}, [], {}
     try:
         wf = (work / PORT_CI_WF).read_text(encoding="utf-8") if (work / PORT_CI_WF).is_file() else ""
         pins = {ga: p for ga, p in mod("ld").port_deps(wf).items() if p["repo"].lower() == it["fork"].lower()}
@@ -1672,26 +1730,25 @@ def depgate_head(st, it, lib, dep, v, lco, jars, log):
         m = re.search(r'--base "?(origin/[\w./-]+)', wf)
         if m:
             git(dep["dir"], "fetch", "-q", "origin", m.group(1).split("/", 1)[1])
+        cands = {}
         for ga, p in pins.items():
-            named = [j for j in jars if j.name == p["asset"]]
-            if not named and len(jars) != 1:
-                raise StepError(f"{lco}/build/libs has {', '.join(sorted(j.name for j in jars))} and none is named "
-                                f"{p['asset']} (the asset {it['extra']['dependent']} pins): which is the candidate?")
-            d_ = m2_dir(ga, p["version"])
-            for f_ in (d_ / f"{ga.split(':')[1]}-{p['version']}.jar", d_ / f"{ga.split(':')[1]}-{p['version']}.pom"):
-                saved[f_] = f_.read_bytes() if f_.is_file() else None
-            cand[ga] = (named or jars)[0].read_bytes()
+            jar, why = candidate_jar(jars, p["asset"], v)
+            if not jar:
+                raise StepError(f"{lco}/build/libs: {why} (the asset {it['extra']['dependent']} pins): which is the "
+                                "candidate?")
+            cands[ga] = (p["version"], jar.read_bytes())
+        try:
+            gate_cmds = sv_gate_cmds(work, None, m.group(1) if m else None)
+        except SystemExit as e:
+            raise StepError(f"{it['extra']['dependent']}'s {PORT_CI_WF} cannot be read back: {e}")
         rcs = []
         with full_gate_lock(it["id"], say_to(log)) as lk:
-            made = list(saved)
-            for ga, p in pins.items():
-                mod("ld").install_m2(ga, p["version"], cand[ga])
-            try:
-                gate_cmds = sv_gate_cmds(work, None, m.group(1) if m else None)
-            except SystemExit as e:
-                raise StepError(f"{it['extra']['dependent']}'s {PORT_CI_WF} cannot be read back: {e}")
+            private_m2(m2, cands)
+            env = dict(os.environ)
+            env["PORT_GRADLE_ARGS"] = "\n".join(x for x in (env.get("PORT_GRADLE_ARGS", ""),
+                                                              f"-Dmaven.repo.local={m2}") if x.strip())
             for cmd in gate_cmds:
-                rcs.append(sh(st, it, cmd, log, cwd=work, ok=range(0, 256), hold=lk).returncode)
+                rcs.append(sh(st, it, cmd, log, cwd=work, ok=range(0, 256), hold=lk, env=env).returncode)
         for f_ in (work / "build").glob("round-gates-*.md"):
             shutil.copy2(f_, evid / f_.name)
         bad = [r for r in rcs if r]
@@ -1700,13 +1757,9 @@ def depgate_head(st, it, lib, dep, v, lco, jars, log):
                             f"green (ci-gates exit {bad[0]}; evidence in {evid}): a blocking finding on the library, "
                             "which does not merge")
     finally:
-        for f_ in made:                      # mavenLocal as it was: the dependent's own builds use its released pin
-            if saved[f_] is None:
-                f_.unlink(missing_ok=True)
-            else:
-                f_.write_bytes(saved[f_])
         git(dep["dir"], "worktree", "remove", "--force", str(work))
         shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(m2, ignore_errors=True)
         git(dep["dir"], "worktree", "prune")
     return (f"{it['extra']['dependent']} {v} gates green against the candidate jar",
             {"evidence": str(evid), "library_head": head(lco)})
@@ -2601,14 +2654,49 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         want(resumed and all(v_ in TERMINAL for v_ in stat.values())
              and pos[f"examplesvlib@1.21.1:depgate:{VD}"] < pos["examplesvlib@1.21.1:merge"] < pos["examplevmod@1.21.1:gates"],
              f"driven to the close, resumed once: {resumed} {calls}")
+        # a version branch (not the head) of a version-branch dependent on a single-version library: the driver never
+        # re-pins it; the set is refused only when the library releases this round AND that branch pins it
         sv4lib, _x, _y = sv_repo("examplesvlib4", mc="1.21.4")
-        rc, o, _ = init(plan(fork_fz("owner/examplesvlib4", take=False, sel=["L-1"], head="neoforge-1.21.4"),
+        L4 = "owner/examplesvlib4"
+        sd_ = str(tmp / "svD/round/STATE.json")
+
+        def init_d(lib_work):
+            return init(plan(fork_fz(L4, take=False, sel=["L-1"] if lib_work else [], head="neoforge-1.21.4"),
                              fork_fz(VD, take=False)),
-                        conf({"repo": "owner/examplesvlib4", "head": "neoforge-1.21.4", "role": "library"},
-                             {"repo": VD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": ["owner/examplesvlib4"]}),
-                        [f"owner/examplesvlib4={sv4lib}", f"{VD}={vd}"], str(tmp / "svD/round/STATE.json"))
-        want(rc == 2 and "neoforge-1.21.4 depends on owner/examplesvlib4" in o,
-             f"a version branch (not the head) that would re-pin to a single-version library's release is refused: {o}")
+                        conf({"repo": L4, "head": "neoforge-1.21.4", "role": "library"},
+                             {"repo": VD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": [L4]}),
+                        [f"{L4}={sv4lib}", f"{VD}={vd}"], sd_)
+        rc, o, items = init_d(True)
+        with State.tx(sd_, write=False) as st_:
+            hr = list(st_.data.get("hand_repins") or [])
+            cl = "\n".join(job_task(st_, st_.item("round:close")))
+        want(rc == 0 and "examplesvlib4@1.21.4:release" in {x["id"] for x in items}
+             and not any(x["fork"] == VD for x in items if not x.get("final"))
+             and len(hr) == 1 and "pins no release of it" in hr[0] and hr[0] in cl and "by hand" in cl,
+             f"the library releases, the branch pins nothing of it: the queue is built (nothing re-pinned there) and the "
+             f"close names the hand re-pin: {rc} {o} {hr} {[x['id'] for x in items]}")
+        vd4 = pathlib.Path(holder(vd, "neoforge-1.21.4") or vd)       # the cascade's worktree may hold the branch
+        gvd = lambda *x: git(vd4, *x, check=True)
+        if vd4 == vd:
+            gvd("checkout", "-q", "neoforge-1.21.4")
+        (vd4 / PORT_CI_WF).parent.mkdir(parents=True, exist_ok=True)
+        (vd4 / PORT_CI_WF).write_text(
+            "      - name: examplesvlib4 1.0 from the examplesvlib4-1.0-mc1.21.4 release into mavenLocal (pinned by sha256)\n"
+            "        run: |\n          mkdir -p \"$HOME/.m2/repository/com/example/examplesvlib4/1.0\"\n"
+            "          curl -fsSL -o \"$HOME/.m2/repository/com/example/examplesvlib4/1.0/examplesvlib4-1.0.jar\" "
+            "\"https://github.com/owner/examplesvlib4/releases/download/examplesvlib4-1.0-mc1.21.4/examplesvlib4-1.0.jar\"\n",
+            encoding="utf-8")
+        gvd("add", "-A"); gvd("commit", "-q", "-m", "pin the library"); gvd("push", "-q", "origin", "neoforge-1.21.4")
+        if vd4 == vd:
+            gvd("checkout", "-q", "neoforge-1.21.1")
+        rc, o, items = init_d(True)
+        want(rc == 2 and "neoforge-1.21.4 pins owner/examplesvlib4" in o and "releases this round" in o,
+             f"the library releases and the branch pins it: refused, naming why: {o}")
+        rc, o, items = init_d(False)
+        with State.tx(sd_, write=False) as st_:
+            hr = list(st_.data.get("hand_repins") or [])
+        want(rc == 0 and len(hr) == 1 and "releases nothing this round" in hr[0],
+             f"the branch pins it but the library releases nothing this round: built, its pin stays, named: {o} {hr}")
 
         # ---- the head path's real steps, on the single-version set (A), against a stand-in GitHub
         api, runs = [], {"pull_request": "success", "push": "success", "workflow_dispatch": "success"}
@@ -2648,10 +2736,10 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         cmds = []
 
         def rec_sh(text="", rc_=0, effect=None):
-            def f_(st_, it_, cmd, log, cwd=None, ok=(0,), hold=None):
+            def f_(st_, it_, cmd, log, cwd=None, ok=(0,), hold=None, env=None):
                 cmds.append(([str(c) for c in cmd], hold is not None, cwd))
                 if effect:
-                    effect(cmd, cwd, hold)
+                    effect(cmd, cwd, hold, env)
                 with open(log, "a", encoding="utf-8") as fh:
                     fh.write(text)
                 if rc_ not in ok:
@@ -2666,7 +2754,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         with State.tx(sa2) as st_:
             st_.item("examplesvlib@1.21.1:ci-check")["result"] = r_
 
-        def regen(cmd, cwd, hold):
+        def regen(cmd, cwd, hold, env):
             if "port-ci.py" in str(cmd[1]) and "check" not in cmd:
                 p_ = pathlib.Path(cmd[cmd.index("--repo") + 1]) / PORT_CI_WF
                 p_.write_text(p_.read_text(encoding="utf-8") + "# kit 30\n", encoding="utf-8")
@@ -2706,10 +2794,11 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         (sl / "build/libs").mkdir(parents=True, exist_ok=True)
         (sl / "build/libs/examplesvlib-0.9.jar").write_bytes(b"old")
 
-        def gate_effect(cmd, cwd, hold):
+        def gate_effect(cmd, cwd, hold, env):
             with open(gate_lock_path(), "a+", encoding="utf-8") as fh:
                 cmds.append(("lock-busy", not _flock(fh, block=False), None))
-            (sl / "build/libs/examplesvlib-1.0.jar").write_bytes(b"candidate")
+            (sl / "build/libs/examplesvlib-1.1.jar").write_bytes(b"candidate")      # no jar named as the pin
+            (sl / "build/libs/examplesvlib-1.1_cf.jar").write_bytes(b"cf-candidate")
         cmds.clear()
         sh = rec_sh(effect=gate_effect)
         note, r_ = step(sa2, "examplesvlib@1.21.1:gates")
@@ -2717,43 +2806,66 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         want(len(g_) == 2 and all(h for _c, h, _w in g_) and all(c[1] for c in cmds if c[0] == "lock-busy")
              and [c[c.index("--env") + 1] for c, _h, _w in g_] == ["full", "minimal"]
              and g_[0][0][g_[0][0].index("--base") + 1] == sl_up
-             and [j.name for j in built_jars(sl)] == ["examplesvlib-1.0.jar"] and r_["gated_head"] == head(sl),
+             and sorted(j.name for j in built_jars(sl)) == ["examplesvlib-1.1.jar", "examplesvlib-1.1_cf.jar"]
+             and r_["gated_head"] == head(sl),
              f"one ci-gates pass (full, minimal) under the machine's one-gate lock, the old jar removed: {note} {cmds}")
         with State.tx(sa2) as st_:
             st_.item("examplesvlib@1.21.1:gates")["result"] = dict(r_, gated_at=time.time() - 5)
-        # the dependent gate: the dependent's head gated with the candidate jar in mavenLocal, which is put back after
+        # the dependent gate: the dependent's head gated against a PRIVATE mavenLocal holding the candidate jar (Gradle
+        # pointed there by -Dmaven.repo.local through PORT_GRADLE_ARGS); ~/.m2 is never written, so a kill or restart
+        # mid-gate, or another fork's unlocked build meanwhile, never meets the candidate there
         hm = tmp / "home"
         os.environ["HOME"] = os.environ["USERPROFILE"] = str(hm)
         m2j = hm / ".m2/repository/com/example/examplesvlib/1.0/examplesvlib-1.0.jar"
         m2j.parent.mkdir(parents=True)
         m2j.write_bytes(b"released")
+        other = hm / ".m2/repository/com/example/other/2.0/other-2.0.jar"
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b"another sibling's pinned jar")
         seen_ = {}
 
-        def dep_effect(cmd, cwd, hold):
-            seen_.setdefault("m2", []).append(m2j.read_bytes())
+        def dep_effect(cmd, cwd, hold, env):
+            args = (env or {}).get("PORT_GRADLE_ARGS", "").splitlines()
+            loc = [a_[len("-Dmaven.repo.local="):] for a_ in args if a_.startswith("-Dmaven.repo.local=")]
+            pm = pathlib.Path(loc[0]) if loc else None
+            seen_.setdefault("runs", []).append((
+                m2j.read_bytes() if m2j.is_file() else None, pm and (pm / "com/example/examplesvlib/1.0/examplesvlib-1.0.jar").read_bytes(),
+                pm and (pm / "com/example/other/2.0/other-2.0.jar").is_file(), pm and str(pm)))
             seen_["repo"] = str(cmd[cmd.index("--repo") + 1])
             seen_["base"] = cmd[cmd.index("--base") + 1] if "--base" in cmd else None
             (pathlib.Path(cwd) / "build").mkdir(exist_ok=True)
             (pathlib.Path(cwd) / "build/round-gates-full.md").write_text("| Gate C | PASS |\n", encoding="utf-8")
         cmds.clear()
         sh = rec_sh(effect=dep_effect)
-        note, r_ = step(sa2, dga.replace("svA", "svR"))
-        want("green against the candidate jar" in note and seen_.get("m2") == [b"candidate", b"candidate"]
-             and m2j.read_bytes() == b"released" and seen_.get("base") == "origin/main"
-             and all(h for _c, h, _w in cmds) and (pathlib.Path(r_["evidence"]) / "round-gates-full.md").is_file()
+        note, r_ = step(sa2, dga)
+        runs_ = seen_.get("runs", [])
+        want("green against the candidate jar" in note and len(runs_) == 2
+             and all(r0 == b"released" and r1 == b"candidate" and r2 and "depgate-examplesvmod-1.21.1-m2" in r3
+                     for r0, r1, r2, r3 in runs_)
+             and m2j.read_bytes() == b"released" and not pathlib.Path(runs_[0][3]).exists()
+             and seen_.get("base") == "origin/main" and all(h for _c, h, _w in cmds)
+             and (pathlib.Path(r_["evidence"]) / "round-gates-full.md").is_file()
              and "depgate-examplesvmod" in seen_.get("repo", ""),
-             f"the dependent's head gated with the candidate jar in mavenLocal, under the lock; mavenLocal put back: "
-             f"{note} {seen_} {cmds}")
+             f"the dependent's head gated under the lock against a private mavenLocal (the candidate at the pinned "
+             f"coordinates, the other mavenLocal artifacts copied), ~/.m2 never written, the copy removed: {note} {seen_}")
         sh = rec_sh(rc_=1, effect=dep_effect)
         try:
             step(sa2, dga)
             want(False, "a red dependent gate passed")
         except StepError as e:
-            want("NOT green" in str(e) and m2j.read_bytes() == b"released", f"red: a finding on the library, mavenLocal put back: {e}")
-        m2j.unlink()
+            want("NOT green" in str(e) and m2j.read_bytes() == b"released", f"red: a finding on the library, ~/.m2 as it was: {e}")
+        shutil.rmtree(hm / ".m2")
+        seen_.clear()
         sh = rec_sh(effect=dep_effect)
         step(sa2, dga)
-        want(not m2j.exists(), "nothing was in mavenLocal before: nothing is left there")
+        want(not (hm / ".m2").exists() and all(r1 == b"candidate" for _r0, r1, _r2, _r3 in seen_.get("runs", [[0, 0, 0, 0]])),
+             f"no ~/.m2 at all: the private one holds the candidate, and no ~/.m2 is made: {seen_}")
+        # the candidate is the built jar of the pinned asset's shape: its variant kept, `_cf` never for `_mr`
+        jl = [pathlib.Path(n) for n in ("examplesvlib-1.1_mr.jar", "examplesvlib-1.1_cf.jar")]
+        want(candidate_jar(jl, "examplesvlib-1.0_mr.jar", "1.21.1")[0] == jl[0]
+             and candidate_jar(jl, "examplesvlib-1.0_cf.jar", "1.21.1")[0] == jl[1]
+             and candidate_jar([pathlib.Path("other-1.jar"), pathlib.Path("x-2.jar")], "examplesvlib-1.0.jar", "1.21.1")[0] is None,
+             "the candidate jar: the pinned asset's name and variant, never another mod's jar")
         with State.tx(sa2) as st_:
             ftxt = job_text(st_, dict(st_.item(dga), status="failed", note="NOT green"), fixing=True)
         want("library's work branch" in ftxt and "version branch" not in ftxt.split("Acceptance")[0].split("failed.")[1],

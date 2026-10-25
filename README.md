@@ -217,12 +217,13 @@ survives a restart (`round.py resume`). A single-version fork is its head alone,
 merge (`port-sync.py --port keep-current/DATE --base HEAD_BRANCH --commit SHA`; a conflict is a fixer's job), the
 reconcile and port (an agent), the review, its fixes and re-check, ONE `ci-gates.py` full and minimal pass on the
 reviewed tree, the PR (only what that pass gated), its CI, the merge and the pre-release dispatched right after it; no
-lowest check, shared-library sync, cascade, freeze or library record is built for it. A version branch of a
-version-branch dependent cannot pin a single-version library (`round.py init` refuses that set). Each library version
+lowest check, shared-library sync, cascade, freeze or library record is built for it. The driver never re-pins a
+version branch of a version-branch dependent to a single-version library: `round.py init` refuses the set when that
+library releases this round and the branch pins it, and otherwise the close names the branch to re-pin by hand. Each library version
 -- a version-branch library's version, and a single-version library's head -- merges only after each dependent at that
 version passed its gates against the candidate jar (a version branch: Gate C through `fork-port.py --port-checkout`; a
-dependent's head: `ci-gates.py` full and minimal, the jar put into mavenLocal where its Port CI pins the library and
-put back afterwards), so a library crash is a finding before the merge, not a re-release after it; a set of
+dependent's head: `ci-gates.py` full and minimal against a private copy of mavenLocal, `-Dmaven.repo.local`, holding
+the jar where its Port CI pins the library; `~/.m2` is never written), so a library crash is a finding before the merge, not a re-release after it; a set of
 version-branch forks only keeps its head without that gate. With no
 answer the defaults apply; a round that did not run is carried into the next week's issue. Only the library's (first
 fork's) repository gets the workflow and the config (`weekly-plan.json`, under `.github` on its head branch), which is

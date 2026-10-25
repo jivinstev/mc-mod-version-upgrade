@@ -395,9 +395,11 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   the versions. A version gets items only when it has work this round -- the head cascade of the authors' code the
   plan takes, a selected fix at or below it, a library release of this round to re-pin to, a ticked dependency bump
   at it, or this repository's shared library moved past it (below) -- so a plan that selects nothing, on forks already
-  on the current shared library, builds nothing but the close. It refuses a clone whose origin is not that fork, and
-  a version-branch dependent whose version BRANCH (not its head) depends on a single-version library (that branch's
-  re-pin, `layer-deps.py resolve --port-release`, takes only a version branch's release). **State is the round's only memory:** after a container restart, or whenever this session's context
+  on the current shared library, builds nothing but the close. It refuses a clone whose origin is not that fork. A
+  version-branch dependent's version BRANCH (not its head) that depends on a single-version library is never re-pinned
+  by the driver (`layer-deps.py resolve --port-release` takes only a version branch's release): `init` refuses the set
+  only when the library releases this round AND that branch's Port CI workflow pins it; otherwise the queue is built and
+  the close job names the branch to re-pin by hand. **State is the round's only memory:** after a container restart, or whenever this session's context
   has grown, continue from a fresh session with `round.py resume` (an interrupted mechanical step runs again; each one
   checks what is already done first).
 - **The round keeps the forks on this repository's shared library.** `init` reads every version branch against the
@@ -465,9 +467,12 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   library has the same gate** before its head merges, and so has a version-branch library's head or version wherever a
   single-version dependent has that version: the dependent's HEAD (origin's, on a throwaway worktree) is gated by
   `ci-gates.py` full and minimal -- the head path's commands, with its workflow's own `--base` -- under the machine-wide
-  gate lock, with the library's candidate jar (the one the library's own gate pass just built: its old jars are removed
-  before that pass) put into mavenLocal at the coordinates the dependent's Port CI puts the library's release
-  (`port-ci.py --dep-jar`); what was there is put back afterwards, so no later build uses the candidate. It is green
+  gate lock, against a PRIVATE mavenLocal (`round/work/depgate-<dependent>-<v>-m2`: a copy of `~/.m2/repository`, Gradle
+  pointed at it with `-Dmaven.repo.local` through `PORT_GRADLE_ARGS`, which every Gradle call of a gate run carries)
+  holding the library's candidate jar (the one the library's own gate pass just built, its old jars removed before that
+  pass; the built jar of the pinned asset's name and variant) at the coordinates the dependent's Port CI puts the
+  library's release (`port-ci.py --dep-jar`). `~/.m2` itself is never written, so a kill or a restart mid-gate, or
+  another fork's build meanwhile, never meets the candidate there. It is green
   only when both runs exit 0; a red run is a blocking finding on the library, as above. A set of version-branch forks
   only keeps its head without this gate (unchanged for that set), and a head has no `library-record`.
 - **A single-version fork on the driver is its head alone** (principle 2: nothing of the ladder -- the lowest check,
@@ -651,7 +656,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      (when it cuts a pre-release, awaited together with the release run: next item);
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
      `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above.
-     **Dispatch it right after the merge** (every kind of fork) instead of after the push run alone: the release run
+     **Dispatch it right after the merge** (every kind of fork; for now a version-branch fork's HEAD is the exception:
+     the driver waits for its push run at the merge, "A single-version fork on the driver" above) instead of after the
+     push run alone: the release run
      checks out the merged commit and its release job needs that run's own full gates (full, minimal and every variant
      leg), so no pre-release is cut without a green full-gate run on exactly the released tree. Wait for the push run
      and the release run together, in one blocking command, and report both; a red push run is handled by step 6's rule
