@@ -979,9 +979,11 @@ for kind, w in (("single-version", sv), ("version-branch", r)):
     tree(w, method="hurtGone", event="Stage")                          # a stale target and an abstract event
     rc, md, _ = gates(w, f"{kind}-stale")
     rows = [l for l in md.splitlines() if "| REPORT |" in l]
-    (rc == 0 and "FAIL" not in md and len(rows) == 2 and rows[0].startswith(f"| {cg.MIXIN_ROW} | REPORT | 1 to read: ")
-     and "DragonMixin.java" in rows[0] and "hurtGone" in rows[0]
-     and rows[1] == f"| {cg.LISTENER_ROW} | REPORT | 1 to read: com/example/mod/Hook.java Stage: "
+    # every finding's file repo-relative and POSIX on every OS (Windows printed an absolute, backslashed temp path)
+    (rc == 0 and "FAIL" not in md and len(rows) == 2
+     and rows[0] == f"| {cg.MIXIN_ROW} | REPORT | 1 to read: src/main/java/com/example/mod/mixin/DragonMixin.java @Inject "
+                    "hurtGone: mixin: no such method in vanilla |"
+     and rows[1] == f"| {cg.LISTENER_ROW} | REPORT | 1 to read: src/main/java/com/example/mod/Hook.java Stage: "
                     "net.neoforged.neoforge.client.event.Stage is abstract or an interface |") or \
         bad.append(f"{kind}: a stale mixin target and an abstract-event listener are one REPORT row each, never red: {rc}\n{md}")
     FakeGates.qtc = False                                              # inputs missing: no sources jar, no classpath
@@ -1048,7 +1050,9 @@ for kind, w in (("single-version", sv), ("version-branch", r)):
     G(w, "add", "-A"); G(w, "commit", "-qm", "more mixins")
     rc, md, _ = gates(w, f"{kind}-scope")
     rows = [l for l in md.splitlines() if l.startswith(f"| {cg.MIXIN_ROW} |")]
-    (rc == 0 and len(rows) == 2 and "1 to read: src/client/java: ClientDragonMixin.java" in rows[0] and "hurtGone" in rows[0]
+    (rc == 0 and len(rows) == 2
+     and rows[0] == f"| {cg.MIXIN_ROW} | REPORT | 1 to read: src/client/java/com/example/mod/mixin/ClientDragonMixin.java "
+                    "@Inject hurtGone: mixin: no such method in vanilla |"
      and "skipped: 2 configured mixin(s) the audit cannot read: com.example.mod.hooks.HookedMixin (not in a mixin/ or mixins/ "
          "package), com.example.mod.hooks.KtMixin (Kotlin)" in rows[1]) or bad.append(f"{kind}: every source root's mixins are audited and "
                                                                                        f"the configured ones it cannot read are named: {rc}\n{md}")

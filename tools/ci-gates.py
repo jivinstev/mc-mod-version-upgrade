@@ -248,8 +248,8 @@ def skipped_row(name, why):
 
 def _blocks(out, count_rx):
     """The findings of an audit that prints `  <file>  <what>`, each followed by indented detail lines, and closes with
-    a count line matching count_rx: [(what, [detail, ...]), ...], or None when the output does not close that way (a
-    crash, a refusal)."""
+    a count line matching count_rx: [(head, [detail, ...]), ...] -- head as printed, its padding kept -- or None when
+    the output does not close that way (a crash, a refusal)."""
     lines = [l.rstrip() for l in out.splitlines() if l.strip()]
     if not lines or not re.fullmatch(count_rx, lines[-1].strip()):
         return None
@@ -258,7 +258,7 @@ def _blocks(out, count_rx):
         if l.startswith("      ") and hits:
             hits[-1][1].append(" ".join(l.split()))
         elif l.startswith("  "):
-            hits.append((" ".join(l.split()), []))
+            hits.append((l[2:], []))
     return hits or None
 
 
@@ -269,17 +269,53 @@ def mixin_row(rc, out):
     return hits_row(MIXIN_ROW, hits) if hits else None
 
 
-def mixin_hits(rc, out):
-    """One line per mismatch of tools/audit-mixin-targets.py's output, or None (clean, nothing checked, a crash)."""
+def mixin_hits(rc, out, repo=None, roots=()):
+    """One line per mismatch of tools/audit-mixin-targets.py's output, or None (clean, nothing checked, a crash). Its
+    file is the repo-relative POSIX path (repo_file): the audit prints it after the mixin package on POSIX and, as a
+    backslash path it cannot split, absolute on Windows."""
     hits = _blocks(out, r"\d+ MISMATCH\(ES\)") if rc == 1 else None
-    return [f"{w}: " + ", ".join(d) if d else w for w, d in hits] if hits else None
+    fmt = lambda w: finding(w, MIXIN_HEAD, repo, roots)
+    return [f"{fmt(w)}: " + ", ".join(d) if d else fmt(w) for w, d in hits] if hits else None
 
 
-def listener_row(rc, out):
+MIXIN_HEAD = r"(.+?)\s+(@.*)"        # `<file>  @Inject name`: the mixin audit's finding head
+LISTENER_HEAD = r"(.+?)\s+(\S+)"    # `<file>  EventType`: the listener audit's
+
+
+def finding(head, rx, repo, roots):
+    """`<file> <what>` from an audit's printed head, its file made repo-relative and POSIX."""
+    m = re.fullmatch(rx, head.strip())
+    path, what = (m.group(1), m.group(2)) if m else (head.strip(), "")
+    return " ".join([repo_file(path, repo, roots), *what.split()])
+
+
+def repo_file(path, repo, roots=()):
+    """A finding's file as a repo-relative POSIX path, the same on every OS and machine: given absolute, relative to a
+    source root (the listener audit), or after its mixin/ or mixins/ package (the mixin audit); else as printed, with
+    forward slashes."""
+    t = path.replace("\\", "/")
+    if repo is None:
+        return t
+    base = pathlib.Path(repo).resolve()
+    cands = [pathlib.Path(path)] if os.path.isabs(path) or re.match(r"[A-Za-z]:[\\/]", path) else []
+    cands += [pathlib.Path(r) / t for r in roots]
+    cands += sorted(f for r in roots for f in pathlib.Path(r).rglob(pathlib.PurePosixPath(t).name)
+                    if f.as_posix().endswith("/" + t) and in_mixin_package(f.relative_to(r)))
+    for c in cands:
+        try:
+            if c.is_file():
+                return c.resolve().relative_to(base).as_posix()
+        except (OSError, ValueError):
+            continue
+    return t
+
+
+def listener_row(rc, out, repo=None, roots=()):
     """A REPORT row for tools/audit-event-listeners.py's exit and output, or None: no abstract event (0), no listener
-    checked (2), or a crash (no closing `N LISTENER(S) THE BUS WILL REFUSE` line)."""
+    checked (2), or a crash (no closing `N LISTENER(S) THE BUS WILL REFUSE` line). Files repo-relative and POSIX."""
     hits = _blocks(out, r"\d+ LISTENER\(S\) THE BUS WILL REFUSE") if rc == 1 else None
-    return hits_row(LISTENER_ROW, [f"{w}: " + d[0].split(" is ", 1)[0] + " is abstract or an interface" if d else w
+    fmt = lambda w: finding(w, LISTENER_HEAD, repo, roots)
+    return hits_row(LISTENER_ROW, [f"{fmt(w)}: " + d[0].split(" is ", 1)[0] + " is abstract or an interface" if d else fmt(w)
                                    for w, d in hits]) if hits else None
 
 
@@ -370,7 +406,7 @@ def target_audit_rows(repo, bv, work, classpath=gradle_classpath):
     classpath). A finding is a REPORT row; a clean audit, or a tree with nothing for it to check, writes none (GATES.md
     unchanged); an audit with something to check and a missing input, a timeout, or configured mixins it cannot read
     writes `skipped: <why>`; a crash writes nothing. Never a FAIL."""
-    repo, work, rows = pathlib.Path(repo), pathlib.Path(work), []
+    repo, work, rows = pathlib.Path(repo).resolve(), pathlib.Path(work), []
 
     def run(tool, log, *args):
         """(returncode, stdout, why it could not run or None); a timeout is a reason, never a crash."""
@@ -395,9 +431,9 @@ def target_audit_rows(repo, bv, work, classpath=gradle_classpath):
             name = root.relative_to(repo).as_posix()
             rc, out, why = run("audit-mixin-targets", "audit-mixin-targets.log" if len(roots) == 1 else
                                f"audit-mixin-targets-{root.parent.name}.log", jar, f"--sources={root}")
-            found = mixin_hits(rc, out)
-            if found:
-                hits += [(f"{name}: " if len(roots) > 1 else "") + h for h in found]
+            found = mixin_hits(rc, out, repo, [root])
+            if found:              # each finding's path is repo-relative, so it names its source root itself
+                hits += found
             elif why:
                 skipped.append(f"{name}: {why}" if len(roots) > 1 else why)
         if unchecked:
@@ -414,7 +450,7 @@ def target_audit_rows(repo, bv, work, classpath=gradle_classpath):
             if cp is not None:
                 rc, out, why = run("audit-event-listeners", "audit-event-listeners.log", f"--cp-file={cp}",
                                    f"--tree={','.join(trees)}", *([f"--mc={bv}"] if bv else []))
-                row = listener_row(rc, out)
+                row = listener_row(rc, out, repo, trees)
             row = row or (skipped_row(LISTENER_ROW, why) if why else None)
             rows += [row] if row else []
     except Exception as e:
@@ -482,6 +518,15 @@ def self_check():
     ok &= refused(cp(1, "", "Traceback (most recent call last):\n  File ...\nKeyError: 'x'")) is None
     ok &= refused(cp(1, mx, "")) is None and refused(cp(2, "", "x")) is None
     ok &= skipped_row("M", "no | jar\n  here") == "| M | REPORT | skipped: no / jar here |"
+    with tempfile.TemporaryDirectory() as d:     # a finding's file: repo-relative and POSIX whatever the audit printed
+        r = pathlib.Path(d); root = r / "src/main/java"; mx = root / "com/example/mod/mixin/DragonMixin.java"
+        mx.parent.mkdir(parents=True); mx.write_text("x", encoding="utf-8")
+        want = "src/main/java/com/example/mod/mixin/DragonMixin.java"
+        ok &= repo_file(str(mx), r, [root]) == want                                         # absolute (Windows)
+        ok &= repo_file("DragonMixin.java", r, [root]) == want                              # after mixin/ (POSIX)
+        ok &= repo_file("com\\example\\mod\\mixin\\DragonMixin.java", r, [root]) == want  # OS separators
+        ok &= repo_file("Gone.java", r, [root]) == "Gone.java" and repo_file("a\\B.java", None) == "a/B.java"
+        ok &= finding(f"{mx}   @Inject hurt", MIXIN_HEAD, r, [root]) == f"{want} @Inject hurt"
     with _t.TemporaryDirectory() as d:   # wiring_ref: a version branch's parent, else --base, else nothing
         g = lambda *x: subprocess.run(["git", "-C", d, *x], capture_output=True, check=True)
         g("init", "-q", "-b", "neoforge-1.21.1"); g("config", "user.email", "a@b"); g("config", "user.name", "a")
