@@ -301,13 +301,13 @@ jobs:
   # The two halves of tools/test-port-tools.sh (PORT_TOOLS_PART) and the review self-test, each on its own runner
   # beside `static`, so the Windows wall time is the longest one (~5 min) rather than the sum.
   static-port-tools:
-    name: windows port tools (part ${{ matrix.part }} of 2)
+    name: windows port tools (part ${{ matrix.part }} of 3)
     if: github.event.action != 'labeled'
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        part: [1, 2]
+        part: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
