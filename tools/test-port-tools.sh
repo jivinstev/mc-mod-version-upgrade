@@ -795,6 +795,7 @@ wf = pc.fixture(False)                                # a single-version workflo
 g("add", "-A"); g("commit", "-qm", "CI at kit 7")
 sv = d / "sv"
 subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(r), str(sv)], check=True, capture_output=True)
+G(sv, "config", "user.name", "t"); G(sv, "config", "user.email", "t@example.invalid")   # port-sync's merges commit here
 fk.detect(sv)[0] == "single-version" or bad.append(f"the head's single-branch clone is single-version: {fk.detect(sv)}")
 fk.detect(r)[0] == "version-branches" or bad.append("control: the fixture is a version-branch fork")
 # E1: the kit check -- one function (port-ci.py stale_workflow) for the single-version port branch and the head
@@ -803,9 +804,11 @@ said = []; pc.check(sv, kit_version=9, say=said.append)
  and "--kit-version" not in said[0]) or bad.append(f"E1 single-version, a stale kit: warned with the regenerate command: {said}")
 said = []; rc = pc.check(sv, kit_version=7, say=said.append)
 (rc == 0 and "is current" in said[0]) or bad.append(f"E1 single-version, current: {said}")
+# ci-check prints the resolved checkout path (Windows: the long form of an 8.3 TEMP path), so the line is compared
+# with that path, every other character exactly
 head = [l for l in fb.ci_check(r, kit_version=9) if "(the head branch)" in l]
 head == [f"fork-branches: ci-check: WARNING neoforge-1.21.1 (the head branch): its workflow pins Port CI kit 7, older than kit 9 -- "
-         f"regenerate: python3 tools/fork-branches.py ci --repo {r} --head --run, then push neoforge-1.21.1"] \
+         f"regenerate: python3 tools/fork-branches.py ci --repo {r.resolve()} --head --run, then push neoforge-1.21.1"] \
     or bad.append(f"E1 version-branch head: the same line as before: {head}")
 [l for l in fb.ci_check(r, kit_version=7) if "(the head branch)" in l] == [] or bad.append("E1 version-branch head, current: no line")
 # E2: port-sync compares the port branch with origin first (the cascade's origin_sync)

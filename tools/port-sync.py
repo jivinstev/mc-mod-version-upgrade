@@ -25,7 +25,7 @@ WHAT IT DOES (a merge, never a rebase: the branch is shared, and its history is 
      Re-run the port pipeline's mechanical stage on it, then the gates (tools/ci-gates.py), then push.
 Nothing is pushed by this tool. Standard library only.
 """
-import argparse, pathlib, re, subprocess, sys, tempfile
+import argparse, os, pathlib, re, subprocess, sys, tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -117,6 +117,11 @@ def sync(repo, port, upstream, dry=False, out=print, commit=None, base=None):
     r = git(repo, "merge", "--no-ff", "-m", f"Merge {upstream} at {head} into {port}", target, check=False)  # push mid-run
     if r.returncode:
         files = git(repo, "diff", "--name-only", "--diff-filter=U").split()
+        if not files:                    # not a conflict: git refused the merge itself (no identity, a hook, ...)
+            out(f"port-sync: the merge failed, no file in conflict: {(r.stderr or r.stdout).strip()[-400:]}")
+            if (pathlib.Path(repo) / ".git" / "MERGE_HEAD").exists():
+                git(repo, "merge", "--abort", check=False)
+            return 2
         out(f"port-sync: CONFLICT in {len(files)} file(s) -- both the author and the port changed the same lines:")
         for f in files:
             out(f"   {f}")
@@ -146,6 +151,8 @@ def base_commit_check():
         G(up, "branch", "neoforge-1.21.1")
         subprocess.run(["git", "clone", "-q", "-b", "neoforge-1.21.1", str(up), str(fork)], check=True, capture_output=True)
         subprocess.run(["git", "clone", "-q", "-b", "neoforge-1.21.1", str(up), str(other)], check=True, capture_output=True)
+        for r_ in (fork, other):         # port-sync's own merge commits in the clone: its identity, not the machine's
+            G(r_, "config", "user.name", "a"); G(r_, "config", "user.email", "a@a")
         (other / "P.java").write_text("a PR merged on origin\n", encoding="utf-8"); G(other, "add", "-A"); G(other, "commit", "-qm", "PR")
         G(other, "push", "-q", "origin", "neoforge-1.21.1")
         pr = G(other, "rev-parse", "HEAD")
@@ -183,6 +190,22 @@ def base_commit_check():
         ok &= sync(fork, "keep-current/other", "origin/main", out=log.append, base="neoforge-1.21.1") == 2 \
             and any("has diverged" in l for l in log) and not has_branch(fork, "keep-current/other") \
             and G(fork, "rev-parse", "HEAD") == h
+        # a merge git refuses with no file in conflict (here: no committer identity) is said as git said it, not
+        # as a CONFLICT in 0 files
+        G(fork, "checkout", "-q", "--", "."); G(fork, "reset", "-q", "--hard", "origin/neoforge-1.21.1")
+        G(fork, "config", "--unset", "user.name"); G(fork, "config", "--unset", "user.email")
+        G(fork, "config", "user.useConfigOnly", "true")    # no identity guessed from the host name: git refuses
+        env = {k: os.environ.pop(k) for k in list(os.environ) if k.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_", "EMAIL"))}
+        home, os.environ["HOME"] = os.environ.get("HOME"), str(d)                 # no ~/.gitconfig identity either
+        try:
+            log = []
+            rc = sync(fork, "neoforge-1.21.1", "origin/main", out=log.append, commit=frozen)
+        finally:
+            os.environ.update(env)
+            if home is not None:
+                os.environ["HOME"] = home
+        ok &= rc == 2 and any("the merge failed, no file in conflict:" in l for l in log) \
+            and not any("CONFLICT" in l for l in log) and not (fork / ".git/MERGE_HEAD").exists()
     if not ok:
         print("FAIL: port-sync --base / --commit", log)
     return ok
