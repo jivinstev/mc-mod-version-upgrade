@@ -309,7 +309,9 @@ def gradle_classpath(repo, work):
     m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", text, re.S)
     jars = [l.strip() for l in m.group(1).splitlines() if l.strip()] if m else []
     if not jars:
-        return None, "Gradle printed no compile classpath (qtc-classpath.log)"
+        m = re.search(r"\* What went wrong:\n(?:.*\n)*?\s*> (.+)", text)
+        return None, "Gradle printed no compile classpath" + (f": {m.group(1).strip()[:160]}" if m else "") + \
+            " (qtc-classpath.log)"
     cp = pathlib.Path(work) / "qtc-classpath.txt"
     cp.write_text("\n".join(jars) + "\n", encoding="utf-8")
     return cp, ""
