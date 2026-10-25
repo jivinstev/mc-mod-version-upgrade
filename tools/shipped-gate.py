@@ -237,9 +237,10 @@ def prepare(work, cache_srv, jar, deps, port):
     return run
 
 
-def boot(run, java, timeout, settle=10.0, poll=1.0):
+def boot(run, java, timeout, settle=10.0, poll=1.0, sleep=time.sleep):
     """-> (ok, reason, console text). Start, wait for 'Done (', let it tick `settle` seconds, send stop, wait for
-    exit. A crash report, or an exit before `stop` was sent, fails it even after 'Done ('."""
+    exit. A crash report, or an exit before `stop` was sent, fails it even after 'Done ('. `sleep` waits one poll (the
+    self-check's stands in for a loaded machine's long one)."""
     args = sorted(run.glob("libraries/net/neoforged/neoforge/*/unix_args.txt"))[0]
     cmd = [java, "@user_jvm_args.txt", f"@{args.relative_to(run)}", "nogui"]
     console = run / "console.log"
@@ -251,17 +252,17 @@ def boot(run, java, timeout, settle=10.0, poll=1.0):
             text = console.read_text(encoding="utf-8", errors="replace")
             if done is None and re.search(r"Done \(\d", text):
                 done = time.time()
+            if p.poll() is not None:                  # before `stop`: an exit during a long poll is the server's own
+                break
             if done is not None and sent is None and time.time() - done >= settle:
                 try:
                     p.stdin.write(b"stop\n"); p.stdin.flush()
-                except OSError:
+                    sent = time.time()
+                except OSError:                       # the pipe is gone: it exited before it was told to stop
                     pass
-                sent = time.time()
-            if p.poll() is not None:
-                break
             if sent and time.time() - sent > 90:      # asked to stop, never did
                 break
-            time.sleep(poll)
+            sleep(poll)
         timed_out = p.poll() is None
         if timed_out:
             try:
@@ -471,8 +472,27 @@ if mode == "crash":
     sys.exit(255)
 if mode == "exit":
     sys.exit(0)
+if mode == "late":
+    while not pathlib.Path("die").exists():
+        time.sleep(0.05)
+    sys.exit(0)
 sys.exit(0 if sys.stdin.readline().strip() == "stop" else 3)
 """
+
+
+def _late_sleep(run):
+    """boot()'s sleep for the "late" stand-in: on the second poll that finds 'Done (' on the console (so boot() has
+    read it too), it lets the server exit and sleeps past both that exit and the settle."""
+    seen = []
+    def sleep(s):
+        if "Done (" in (run / "console.log").read_text(encoding="utf-8", errors="replace"):
+            seen.append(1)
+            if len(seen) == 2:
+                (run / "die").write_text("", encoding="utf-8")
+                time.sleep(1.0)
+                return
+        time.sleep(s)
+    return sleep
 
 
 def boot_check():
@@ -480,15 +500,18 @@ def boot_check():
     each): a clean one passes; one that crashes on its first tick after 'Done (', or exits unasked, fails."""
     ok = True
     with tempfile.TemporaryDirectory() as d:
-        for mode, want in (("clean", True), ("crash", False), ("exit", False)):
+        # "late": the server exits on its own inside the poll after boot() saw 'Done (' (a loaded machine's long sleep),
+        # once the settle is up -- still an exit before `stop`, never a clean stop
+        for mode, want in (("clean", True), ("crash", False), ("exit", False), ("late", False)):
             run = pathlib.Path(d) / mode
             (run / "libraries/net/neoforged/neoforge/0").mkdir(parents=True)
             (run / "libraries/net/neoforged/neoforge/0/unix_args.txt").write_text("", encoding="utf-8")
             (run / "@user_jvm_args.txt").write_text(FAKE_SERVER, encoding="utf-8")
             (run / "mode.txt").write_text(mode, encoding="utf-8")
-            got, why, _ = boot(run, sys.executable, 30, settle=0.5, poll=0.1)
+            got, why, _ = boot(run, sys.executable, 30, settle=0.5, poll=0.1,
+                               sleep=_late_sleep(run) if mode == "late" else time.sleep)
             good = got == want and (mode != "crash" or "crashed: crash report crash-reports/crash-server.txt" in why) \
-                and (mode != "exit" or "before it was told to stop" in why)
+                and (mode not in ("exit", "late") or "before it was told to stop" in why)
             if not good:
                 print(f"self-check: boot {mode}: {got} {why}")
             ok &= good
