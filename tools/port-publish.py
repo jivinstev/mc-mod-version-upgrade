@@ -15,7 +15,9 @@ The fork carries its publishing config as .github/port-publish.json (written by 
    "dependencies": [{"modrinth": "geckolib", "curseforge": "geckolib", "type": "required"},
                     {"port": "owner/other-fork", "type": "required"}],
    "modrinth": {"slug": "...", "asset": "_mr.jar"},
-   "curseforge": {"project_id": 123456, "slug": "...", "asset": "_cf.jar"}}
+   "curseforge": {"project_id": 123456, "slug": "...", "asset": "_cf.jar", "manual_release": false}}
+   (manual_release: true uploads each CurseForge file held -- approved but NOT released to players until the author
+   clicks Release on the website; for a port whose required library's file for the same version is still in review)
 
 A version branch (tools/fork-branches.py) publishes each version's release from its own branch, the same way.
 
@@ -461,6 +463,10 @@ def curseforge_file(cfg, tag, release, text, dry):
     rel = [{"slug": s, "type": kinds.get(t, "requiredDependency")} for s, t in dep_entries(cfg, "curseforge")]
     if rel:         # CurseForge rejects an empty list ("Array item count 0 is less than minimum count of 1")
         meta["relations"] = {"projects": rel}
+    if cf.get("manual_release"):
+        # approved, but not released until the author clicks Release on the website: its library's file for the same
+        # Minecraft version may still be in CurseForge's manual review, and a live port without it does not load
+        meta["isMarkedForManualRelease"] = True
     if dry:
         print("curseforge file:", json.dumps({**meta, "changelog": "<notes>", "file": asset["name"],
                                               "project_id": cf["project_id"]}, indent=1))
@@ -526,6 +532,10 @@ def publish(repo, tag, dry=False, manual=False, platform=None):
         gh("PATCH", f"/repos/{repo_slug}/releases/{release['id']}", {"body": (release.get("body") or "").rstrip() + "\n\n" + add})
         for p, r, u in links:
             print(f"published {tag} on {p}: {u}")
+            if p == "curseforge" and cfg["curseforge"].get("manual_release"):
+                print(f"::notice::{tag} on CurseForge is HELD (curseforge.manual_release): once CurseForge approves it, "
+                      "it stays hidden until you click Release on the file's page -- after the library's file for the "
+                      "same Minecraft version is live")
     for m in missing:
         print(f"::error::{m}")
     if held and not links and all(p in held or p in done for p in want):
@@ -912,6 +922,16 @@ def self_check():
         expect(pinned_dependency_tag(d, "o/lib", "mod-2.1-mc1.21.1") == "lib-1.0-mc1.21.1-r4",
                "a release the manifest does not describe falls back to the workflow's pin")
         expect(pinned_dependency_tag(d, "o/lib") == "lib-1.0-mc1.21.1-r4", "no tag: the workflow's pin, as before")
+    import contextlib, io
+    for held in (False, True):
+        buf = io.StringIO()
+        cf_cfg = {"project_id": 1, "asset": ""}
+        if held:
+            cf_cfg["manual_release"] = True
+        with contextlib.redirect_stdout(buf):
+            curseforge_file({"modid": "m", "curseforge": cf_cfg}, "m-1.0.0-mc1.21.1", {"assets": [{"name": "m.jar"}]}, "n", True)
+        expect(('"isMarkedForManualRelease": true' in buf.getvalue()) == held,
+               f"curseforge.manual_release {held}: the upload {'is' if held else 'is not'} held for a manual release")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
