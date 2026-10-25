@@ -1204,7 +1204,7 @@ out="$(python3 "$T/test-port-tools-heredoc-u5.py" "$T/u5" 2>&1)"
 # merge -- port-sync on a single-version fork (a single-branch clone of the fixture's head, made a 26.2 port), the
 # cascade's merge-up on the version-branch fixture; each converted once, its own commit, and a second run commits nothing
 echo "#161 U6: data forms after the authors' merge -- a single-version fork and the version-branch cascade"
-out="$(python3 - "$T/u6" <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-u6.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, json, pathlib, subprocess, sys
 d = pathlib.Path(sys.argv[1]); d.mkdir()
 L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
@@ -1291,7 +1291,7 @@ rc, o = fb._quiet(fb.cascade, r, "port..1.21.5", "none")
 (rc == 0 and "data forms" not in o) or bad.append(f"version branches: a second cascade, nothing new: no data forms: {o[-400:]}")
 print("\n".join(bad) or "OK")
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-u6.py" "$T/u6" 2>&1)"
 [ "$out" = "OK" ] && ok "#161 U6 on a single-branch clone of the head made a 26.2 port (single-version) and on the version-branch fixture: the authors' 1.21.1-form recipe and advancement merged by port-sync come out in 26.2's forms (string ingredients, the entity_type sub-predicate, the 1.21 icon) as their own commit after the merge, a refused file listed in .port/26.2/DATA-FORMS.md, and a second run commits nothing; the cascade puts the authors' recipe in 1.21.2+'s form at 1.21.3 (its own commit after the merge-up) and 1.21.4/.5 take it by the merge-up, recorded as the authors' change taken (no REMERGE entry), the head keeping the authors' form, and a second run or cascade commits nothing" \
   || bad "#161 U6: $out"
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, --cp-file/--tree (fork) mode"
