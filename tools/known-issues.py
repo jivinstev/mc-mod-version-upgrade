@@ -44,7 +44,7 @@ THE SCHEMA (schema 1):
    "issues": [{"id": "KI-1", "title": "...",
                "rubric": {"failure": "crash|kick|data|hang|security|build|functional|cosmetic",
                           "visibility": "always|common|rare|invisible",
-                          "reach": "normal|feature|unusual", "workaround": false},
+                          "reach": "normal|feature|unusual|latent", "workaround": false},
                "severity": "S1".."S4",          # the rubric's grade, or the override's when there is one
                "override": null | {"severity": "S2", "reason": "...", "by": "owner"},
                "lowest": "1.21.1",              # the lowest affected Minecraft version (a key of status)
@@ -66,8 +66,11 @@ THE RUBRIC (grade derives the severity from the recorded inputs; an owner overri
   S1  failure crash, kick (or network disconnect), data (world or player data lost or corrupted), hang, security
       (an exposed credential or secret, a token leak, an exploit or privilege path) or build (the version does not
       compile or produce a jar) -- whatever else. It blocks publishing (publish-port refuses an open S1; for an issue
-      scoped to one platform, that platform's upload only: `blocks-publish`).
-  S4  otherwise: visibility invisible, or reach unusual (an unusual setup, other mods, debug options).
+      scoped to one platform, that platform's upload only: `blocks-publish`). Reach latent (nothing calls the code
+      today, so no player can hit it yet) makes one of these S2 instead: taken by the next rounds within their budget,
+      never parked, and not blocking publishing. An override never grades one below S2 without the owner (`--owner`:
+      the owner's `/grade` on the plan issue, which the round applies).
+  S4  otherwise: visibility invisible, or reach unusual (an unusual setup, other mods, debug options) or latent.
   S2  otherwise: a functional failure with reach normal, visibility always or common and no workaround.
   S3  everything else: cosmetic, rare, a specific feature only, or a workaround exists. Cosmetic is S3 at most.
   The failure types beside the six S1 ones:
@@ -141,7 +144,7 @@ FAILURES = ("crash", "kick", "data", "hang", "security", "build", "functional", 
 BLOCKING = ("crash", "kick", "data", "hang", "security", "build")
 PLATFORMS = ("mr", "cf")                     # the Modrinth and CurseForge jars (port-ci.py --variant-jar)
 VISIBILITY = ("always", "common", "rare", "invisible")
-REACH = ("normal", "feature", "unusual")
+REACH = ("normal", "feature", "unusual", "latent")
 SOURCES = ("authors", "review", "gate", "player")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MOD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -168,8 +171,8 @@ def sev_rank(s):
 def derive(rubric):
     """The rubric's severity for its recorded inputs."""
     if rubric["failure"] in BLOCKING:
-        return "S1"
-    if rubric["visibility"] == "invisible" or rubric["reach"] == "unusual":
+        return "S2" if rubric["reach"] == "latent" else "S1"
+    if rubric["visibility"] == "invisible" or rubric["reach"] in ("unusual", "latent"):
         return "S4"
     if (rubric["failure"] == "functional" and rubric["reach"] == "normal"
             and rubric["visibility"] in ("always", "common") and not rubric["workaround"]):
@@ -535,7 +538,8 @@ def render_issue(data):
     if notes:
         out += ["", "\\* an owner override.", ""] + notes
     out += ["", "S1 crash, kick, data loss or hang (blocks publishing); S2 a core feature broken in normal play, no "
-            "workaround; S3 cosmetic, uncommon or with a workaround; S4 invisible or an unusual setup."]
+            "workaround, or a crash on a path nothing calls yet; S3 cosmetic, uncommon or with a workaround; S4 "
+            "invisible or an unusual setup."]
     return "\n".join(out) + "\n"
 
 
@@ -1319,6 +1323,11 @@ def regrade(e, a):
     if getattr(a, "override", None):
         if not (a.reason or "").strip():
             raise Invalid("--override needs --reason (the override is recorded with why)")
+        if e["rubric"]["failure"] in BLOCKING and sev_rank(a.override) > sev_rank("S2") \
+                and not getattr(a, "owner", False):
+            raise Invalid(f"--override {a.override}: a {e['rubric']['failure']} is S2 at the lowest without the owner "
+                          f"-- one nothing reaches today is --reach latent (S2); a lower grade is the owner's call "
+                          f"(`/grade {e['id']} {a.override}` on the plan issue, applied with --owner)")
         e["override"] = {"severity": a.override, "reason": a.reason.strip(), "by": a.by or "owner"}
     for k, allowed in (("failure", FAILURES), ("visibility", VISIBILITY), ("reach", REACH)):
         if e["rubric"][k] not in allowed:
@@ -1358,6 +1367,9 @@ def build_parser():
     p.add_argument("id")
     rubric_args(p, False)
     p.add_argument("--override", choices=SEVERITIES); p.add_argument("--reason"); p.add_argument("--by")
+    p.add_argument("--owner", action="store_true",
+                   help="the override is the owner's (a /grade on the plan issue): it may grade a crash, kick, data loss, "
+                        "hang, security or build failure below S2")
     p.add_argument("--clear-override", action="store_true")
     p = common(sub.add_parser("status", help="set an issue's state at Minecraft versions"))
     p.add_argument("id"); p.add_argument("--set", action="append", default=[], metavar="MC[,MC...|FROM..TO]=STATE",
@@ -1781,6 +1793,10 @@ def self_check():
     expect(derive(R("security", "invisible", "unusual", True)) == "S1", "security (a leaked token) grades S1")
     expect(derive(R("build", "rare", "feature", True)) == "S1", "build (the version does not compile) grades S1")
     expect(reopens("S1") and not any(reopens(s) for s in ("S2", "S3", "S4")), "only S1 reopens a done version")
+    for f in BLOCKING:
+        expect(derive(R(f, "invisible", "latent", True)) == "S2", f"a {f} on a path nothing calls yet (latent) is S2")
+    expect(derive(R("functional", r="latent")) == "S4" and derive(R("cosmetic", r="latent")) == "S4",
+           "latent is S4 for any other failure, as unusual is")
 
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
@@ -1817,6 +1833,20 @@ def self_check():
         expect(rc == 2 and "--reason" in o, f"an override without a reason is refused: {rc} {o}")
         rc, o = cli("grade", *L, "KI-4", "--clear-override")
         expect(rc == 0 and find(read_ledger(led), "KI-4")["severity"] == "S3", f"clear the override: {o}")
+        # a crash: never graded below S2 but by the owner; one nothing calls yet is S2 by its rubric (--reach latent)
+        k1 = find(read_ledger(led), "KI-1"); reach1 = k1["rubric"]["reach"]
+        rc, o = cli("grade", *L, "KI-1", "--override", "S4", "--reason", "nothing calls it", "--by", "keep-current-round")
+        expect(rc == 2 and "--reach latent" in o and find(read_ledger(led), "KI-1") == k1,
+               f"a round's override of a crash below S2 is refused, nothing written: {rc} {o}")
+        rc, o = cli("grade", *L, "KI-1", "--override", "S2", "--reason", "nothing calls it yet")
+        expect(rc == 0 and find(read_ledger(led), "KI-1")["severity"] == "S2", f"down to S2 is allowed: {rc} {o}")
+        rc, o = cli("grade", *L, "KI-1", "--override", "S3", "--reason", "accepted", "--by", "owner", "--owner")
+        expect(rc == 0 and find(read_ledger(led), "KI-1")["severity"] == "S3", f"the owner's --owner may go lower: {rc} {o}")
+        rc, o = cli("grade", *L, "KI-1", "--clear-override", "--reach", "latent")
+        expect(rc == 0 and find(read_ledger(led), "KI-1")["severity"] == "S2" and "rubric S2" in o,
+               f"a crash with --reach latent grades S2: {rc} {o}")
+        rc, o = cli("grade", *L, "KI-1", "--reach", reach1)
+        expect(rc == 0 and find(read_ledger(led), "KI-1") == k1, f"back as it was: {rc} {o}")
         rc, o = cli("grade", *L, "KI-6", "--visibility", "always", "--workaround", "yes")
         expect(rc == 0 and "S3 -> S3" in o, f"a re-grade from new inputs: {o}")
         # status

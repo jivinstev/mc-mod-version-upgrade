@@ -189,7 +189,9 @@ run is green, and it is then gated against the dependency's NEW build.
    names the tag it uploads, and refuses a tag no column names.
    **Known-issues ledger** (a fork with `.port/KNOWN-ISSUES.json` on its head branch; the fork-versions skill,
    "Known issues"): grade each new finding into it with `tools/known-issues.py add` (only an S1 reopens a version
-   that is done: `known-issues.py reopens`), commit the ledger alone on the head branch (Port CI ignores a
+   that is done: `known-issues.py reopens`; a crash, kick, data loss or hang on a path nothing calls today is
+   `--reach latent`, S2 -- never graded lower by the round: `grade --override` refuses it below S2 without the owner's
+   `/grade`, applied with `--owner`), commit the ledger alone on the head branch (Port CI ignores a
    ledger-only push -- when its workflow is one port-ci.py rendered since the ledger exists; on a version-branch fork
    `fork-branches.py ci-check` names a head whose workflow does not), and take the release notes' known-issues section from it: `known-issues.py release-notes
    --repo <fork> --version <mc> --tag <tag>` (S1-S3; S4 omitted). A fork without the file keeps the fix ledgers
@@ -670,7 +672,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    - **a `not-ok` row blocks by its grade**: each `not-ok` row the re-check leaves is a finding, graded with
      `known-issues.py add` (step 5) at its lowest affected version. One graded **S1 or S2 at the version being worked**
      blocks that version's merge and its pre-release until it is fixed (and the re-check passes) or re-graded below S2
-     with the rubric's inputs (`known-issues.py grade`, the reason recorded; an owner's `/grade` from the plan counts);
+     with the rubric's inputs (`known-issues.py grade`, the reason recorded; an owner's `/grade` from the plan counts;
+     a crash, kick, data loss or hang is never re-graded below S2 but by the owner -- one nothing calls yet is S2 with
+     `--reach latent`, and it blocks like any S2);
      the versions above it wait too (they carry it by the cascade). An S3/S4 row is ledgered and does not block;
    - the merge of the version's PR (step 6's rule and "A fork with version branches" step 3), then its push run green
      (when it cuts a pre-release, awaited together with the release run: next item);

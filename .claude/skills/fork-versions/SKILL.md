@@ -403,10 +403,14 @@ the severity from the inputs:
 
 | Severity | Rubric inputs | Meaning |
 |---|---|---|
-| **S1** | failure crash, kick, data, hang, security or build (anything else aside) | a crash, kick/disconnect, world or player data lost, a hang, a security hole, a version that does not build; blocks publishing |
-| **S2** | failure functional, reach normal, visibility always/common, no workaround | a core feature broken in normal play, e.g. invisible GUI text |
+| **S1** | failure crash, kick, data, hang, security or build (anything else aside), reach not latent | a crash, kick/disconnect, world or player data lost, a hang, a security hole, a version that does not build; blocks publishing |
+| **S2** | one of those failures with reach latent; or failure functional, reach normal, visibility always/common, no workaround | a crash on a path nothing calls yet (fixed by the next rounds, never parked, not blocking publishing); a core feature broken in normal play, e.g. invisible GUI text |
 | **S3** | anything else: cosmetic (S3 at most), rare, one specific feature, or a workaround | cosmetic, an uncommon path, or avoidable |
-| **S4** | visibility invisible, or reach unusual | invisible to players, or needs an unusual setup, other mods or debug options |
+| **S4** | visibility invisible, or reach unusual or latent | invisible to players, or needs an unusual setup, other mods or debug options |
+
+`latent`: nothing calls the code today, so no player can reach it yet. A crash, kick, data loss, hang, security or build
+failure is never graded below S2 by an override unless it is the owner's: `grade --override S3|S4` refuses one without
+`--owner`, which the weekly round passes only for the owner's `/grade` reply on the plan issue.
 
 `security`: an exposed credential or secret, a token leak, or an exploit or privilege path. `build`: the version does
 not compile or produce a jar. `functional`: a feature does not work, or information or controls the player needs are missing, unreadable or
@@ -424,9 +428,9 @@ into the ledger at its lowest affected version and the run goes on. `known-issue
 (or `--id ID`) answers: exit 0 yes, exit 1 no.
 
     python3 tools/known-issues.py add     --repo DIR --title T --failure crash|kick|data|hang|security|build|functional|cosmetic \
-        --visibility always|common|rare|invisible --reach normal|feature|unusual --workaround yes|no \
+        --visibility always|common|rare|invisible --reach normal|feature|unusual|latent --workaround yes|no \
         --lowest 1.21.4 --status 1.21.4=open --status 1.21.5=open [--source review] [--file PATH] [--notes N]
-    python3 tools/known-issues.py grade   --repo DIR KI-3 [--reach feature] [--override S2 --reason WHY --by owner]
+    python3 tools/known-issues.py grade   --repo DIR KI-3 [--reach feature] [--override S2 --reason WHY --by owner [--owner]]
     python3 tools/known-issues.py status  --repo DIR KI-3 --set 1.21.4=fixed@<commit> --set 1.21.5=wontfix:<reason>
     python3 tools/known-issues.py status  --repo DIR KI-3 --set 1.21.10,1.21.11=fixed@<commit> --set 26.1.2..26.3=fixed@<c2>
     python3 tools/known-issues.py list    --repo DIR --ref neoforge-1.21.1 [--version 1.21.5] [--min S2] [--open]
