@@ -80,6 +80,14 @@ run is green, and it is then gated against the dependency's NEW build.
    the local one is behind, and moves nothing. **To merge one exact commit** (the weekly round's frozen
    `upstream_commit`): `--commit <sha>` merges exactly that commit, never a newer tip, and refuses a commit the
    `--upstream` branch does not reach.
+   **The merged data files are then put in the port's version's forms** (every kind of fork; #161 U6): a recipe,
+   advancement or loot table the authors wrote for an older Minecraft is dropped at load with no other error (a
+   1.21.1 ingredient on 1.21.2+, a 1.21 entity predicate on 26.2). port-sync runs the version-branch data converters
+   (`tools/fork-port.py` `convert_data`, and `fix-datapack-layout.py --apply` when its `--verify` finds a pre-1.21
+   layout) on the files the merge brought in, and commits what changed on its own, "data forms for <mc> after the
+   authors' merge"; a file a converter refuses is listed in `.port/<mc>/DATA-FORMS.md` -- convert it by hand. After
+   resolving a conflict and committing the merge, run port-sync again (or `port-sync.py --repo DIR --data-forms`):
+   it converts that merge's files. The version-branch cascade does the same after each merge-up.
    **A conflict in a file one of our fix commits touched** cannot wait for step 3 -- the merge cannot be committed,
    and the A/B needs a tree that compiles. Resolve it to the AUTHORS' side, say in the merge message that the
    resolution is provisional ("decision and A/B: <issue> ledger"), and if step 3's A/B then fails, commit our fix

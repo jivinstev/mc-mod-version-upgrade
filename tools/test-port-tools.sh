@@ -1200,6 +1200,100 @@ PY
 out="$(python3 "$T/test-port-tools-heredoc-u5.py" "$T/u5" 2>&1)"
 [ "$out" = "OK" ] && ok "#161 U5 on a single-branch clone of the head (single-version) and the version-branch fixture: fork-branches.py check-done --base records the review base in .port/<mc>/REVIEW.md and writes a \`?\` row per changed or added file and an \`item\` row for a dropped listener, TEST-ITEMS.md and INVENTORY-CHECK.json; with GATES.md (ci-gates' header names the version) and the review filled the version is done, on the checkout and on an export of the commit; a later edit stales the gates and the review; a new base starts REVIEW.md afresh; DEPS.md's library pre-release mark makes it not done and promotion and publishing refuse the tag; .port/<mc>/port.properties library=true drops spawn and battle; --base is refused on a version branch, whose done lists are unchanged" \
   || bad "#161 U5: $out"
+# ---- #161 U6 (C5): the authors' data files merged in an older version's form are put in the version's forms after the
+# merge -- port-sync on a single-version fork (a single-branch clone of the fixture's head, made a 26.2 port), the
+# cascade's merge-up on the version-branch fixture; each converted once, its own commit, and a second run commits nothing
+echo "#161 U6: data forms after the authors' merge -- a single-version fork and the version-branch cascade"
+out="$(python3 - "$T/u6" <<'PY' 2>&1
+import importlib.util, json, pathlib, subprocess, sys
+d = pathlib.Path(sys.argv[1]); d.mkdir()
+L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
+fb, ps, fk, fp = L("fb", "fork-branches.py"), L("ps", "port-sync.py"), L("fk", "fork-kind.py"), L("fp", "fork-port.py")
+bad = []
+G = lambda w, *a: subprocess.run(["git", "-C", str(w), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+RECIPE = "src/main/resources/data/examplemod/recipe/probe.json"
+ADV = "src/main/resources/data/examplemod/advancement/probe.json"
+old_recipe = {"type": "minecraft:crafting_shaped", "pattern": ["ab"],
+              "key": {"a": {"item": "minecraft:stick"}, "b": {"tag": "c:ingots/iron"}}, "result": {"id": "minecraft:diamond", "count": 1}}
+old_adv = {"criteria": {"k": {"trigger": "minecraft:player_killed_entity", "conditions": {"entity": {"type": "minecraft:zombie"}}}},
+           "display": {"icon": {"item": "minecraft:diamond"}, "title": "t", "description": "d"}}
+def put(w, rel, doc):
+    (w / rel).parent.mkdir(parents=True, exist_ok=True); (w / rel).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+rj = lambda w, rel: json.loads((w / rel).read_text(encoding="utf-8"))
+r, g, _ = fb._migrated_fixture(d)                     # the version-branch fork
+# --- single-version: the head's clone made a 26.2 port; the authors (1.21.1-era data) merged by port-sync
+sv = d / "sv"
+subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(r), str(sv)], check=True, capture_output=True)
+G(sv, "config", "user.name", "t"); G(sv, "config", "user.email", "t@example.invalid")
+gp = sv / "gradle.properties"
+gp.write_text(gp.read_text(encoding="utf-8").replace("minecraft_version=1.21.1", "minecraft_version=26.2"), encoding="utf-8")
+G(sv, "commit", "-qam", "the port at 26.2")
+put(sv, "src/main/resources/data/examplemod/recipe/ours.json",           # the port's own file a converter refuses:
+    {"type": "minecraft:crafting_shaped", "pattern": ["a"], "key": {"a": {"item": "minecraft:stick", "count": 2}},
+     "result": {"id": "minecraft:stick", "count": 1}})                  # no merge brought it, so never reported
+G(sv, "add", "-A"); G(sv, "commit", "-qm", "the port's own recipe")
+fk.detect(sv)[0] == "single-version" or bad.append(f"the clone is single-version: {fk.detect(sv)}")
+up = d / "authors"
+subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(r), str(up)], check=True, capture_output=True)
+put(up, RECIPE, old_recipe); put(up, ADV, old_adv); G(up, "add", "-A"); G(up, "commit", "-qm", "authors: a recipe and an advancement")
+G(sv, "remote", "add", "authors", str(up))
+log = []; rc = ps.sync(sv, "neoforge-1.21.1", "authors/neoforge-1.21.1", out=log.append)
+subj = G(sv, "log", "-1", "--format=%s")
+parents = G(sv, "log", "-1", "--format=%P", "HEAD^").split()
+(rc == 0 and subj == "data forms for 26.2 after the authors' merge" and len(parents) == 2) \
+    or bad.append(f"single-version: the merge, then its data forms as their own commit: {rc} {subj!r} {log}")
+rec_, adv = rj(sv, RECIPE), rj(sv, ADV)
+rec_["key"] == {"a": "minecraft:stick", "b": "#c:ingots/iron"} or bad.append(f"single-version: the recipe's ingredients in 1.21.2+'s form: {rec_['key']}")
+adv["criteria"]["k"]["conditions"]["entity"] == {"entity_type": "minecraft:zombie"} \
+    or bad.append(f"single-version: the advancement's entity predicate in 26.2's form: {adv['criteria']['k']['conditions']}")
+adv["display"]["icon"] == {"id": "minecraft:diamond"} or bad.append(f"single-version: the icon in 1.21's form (the layout step): {adv['display']['icon']}")
+h = G(sv, "rev-parse", "HEAD"); log = []
+ps.sync(sv, "neoforge-1.21.1", "authors/neoforge-1.21.1", out=log.append)          # nothing new: data forms again
+ps.data_forms(sv, log.append)
+(G(sv, "rev-parse", "HEAD") == h and not G(sv, "status", "--porcelain")) \
+    or bad.append(f"single-version: a second run changes nothing: {log}")
+not (sv / ".port/26.2/DATA-FORMS.md").exists() or bad.append("single-version: no report when nothing is refused")
+# a refused file the merge brought in is listed in .port/<mc>/DATA-FORMS.md; a re-run keeps it as it was
+weird = "src/main/resources/data/examplemod/recipe/weird.json"
+put(up, weird, {"type": "minecraft:crafting_shaped", "pattern": ["a"], "key": {"a": {"item": "minecraft:stick", "count": 2}},
+                "result": {"id": "minecraft:stick", "count": 1}})
+G(up, "add", "-A"); G(up, "commit", "-qm", "authors: an ingredient beside other keys")
+log = []; ps.sync(sv, "neoforge-1.21.1", "authors/neoforge-1.21.1", out=log.append)
+rep = sv / ".port/26.2/DATA-FORMS.md"
+(rep.is_file() and "recipe/weird.json" in rep.read_text(encoding="utf-8") and "ours.json" not in rep.read_text(encoding="utf-8")) \
+    or bad.append(f"single-version: the merged file's refusal listed, the port's own not: {log}")
+h = G(sv, "rev-parse", "HEAD"); ps.data_forms(sv, log.append)
+G(sv, "rev-parse", "HEAD") == h or bad.append("single-version: a re-run with a refusal commits nothing")
+# --- version branches: the cascade's merge-up converts what the head (1.21.1) brought up, at 1.21.3/.4/.5
+fb._authors(r, g, {RECIPE: json.dumps(old_recipe, indent=2) + "\n"}, "authors: a recipe")
+rc, o = fb._quiet(fb.cascade, r, "port..1.21.5", "none")
+rc == 0 or bad.append(f"version branches: the cascade ran: {rc} {o[-600:]}")
+show = lambda ref: json.loads(subprocess.run(["git", "-C", str(r), "show", ref], capture_output=True, text=True).stdout or "null")
+head_rec = show(f"neoforge-1.21.1:{RECIPE}") or {"key": {}}
+head_rec["key"]["a"] == {"item": "minecraft:stick"} or bad.append("version branches: the head (1.21.1) keeps the authors' 1.21.1 form")
+for v in ("1.21.3", "1.21.4", "1.21.5"):
+    b = f"neoforge-{v}"
+    (show(f"{b}:{RECIPE}") or {}).get("key") == {"a": "minecraft:stick", "b": "#c:ingots/iron"} \
+        or bad.append(f"version branches: {v}'s recipe in 1.21.2+'s form")
+subj = lambda b, n=1: G(r, "log", f"-{n}", "--format=%s", b).splitlines()
+subj("neoforge-1.21.3") == ["data forms for 1.21.3 after the authors' merge"] \
+    or bad.append(f"version branches: 1.21.3's data forms its own commit after the merge-up: {subj('neoforge-1.21.3')}")
+all(s_.startswith("Merge neoforge-") for v in ("1.21.4", "1.21.5") for s_ in subj(f"neoforge-{v}")) \
+    or bad.append("version branches: 1.21.4/.5 take the converted file in the merge-up, no data forms commit of their own")
+all(fb.remerge_entries(fb.ref_files(r, fb.resolve_branch(r, f"neoforge-{v}")).get(f".port/{v}/REMERGE.json", b"")) == []
+    for v in ("1.21.4", "1.21.5")) or bad.append("version branches: the converted recipe counts as the authors' change taken")
+w4, _w = fb.worktree_for(r, "1.21.4")
+h = G(w4, "rev-parse", "HEAD")
+fp.data_forms_after_merge(w4, "1.21.4", say=lambda x: None)[2] is None and G(w4, "rev-parse", "HEAD") == h \
+    or bad.append("version branches: a second run on 1.21.4 commits nothing")
+rc, o = fb._quiet(fb.cascade, r, "port..1.21.5", "none")
+(rc == 0 and "data forms" not in o) or bad.append(f"version branches: a second cascade, nothing new: no data forms: {o[-400:]}")
+print("\n".join(bad) or "OK")
+PY
+)"
+[ "$out" = "OK" ] && ok "#161 U6 on a single-branch clone of the head made a 26.2 port (single-version) and on the version-branch fixture: the authors' 1.21.1-form recipe and advancement merged by port-sync come out in 26.2's forms (string ingredients, the entity_type sub-predicate, the 1.21 icon) as their own commit after the merge, a refused file listed in .port/26.2/DATA-FORMS.md, and a second run commits nothing; the cascade puts the authors' recipe in 1.21.2+'s form at 1.21.3 (its own commit after the merge-up) and 1.21.4/.5 take it by the merge-up, recorded as the authors' change taken (no REMERGE entry), the head keeping the authors' form, and a second run or cascade commits nothing" \
+  || bad "#161 U6: $out"
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, --cp-file/--tree (fork) mode"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
   E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \

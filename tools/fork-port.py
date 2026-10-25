@@ -206,6 +206,137 @@ def chain(mv, target):
     return out   # nearest first
 
 
+def convert_data(repo, mc, props_text="", deps_text="", layout=True, only=None):
+    """Every data conversion version `mc` needs, applied in place to `repo`'s src/main/resources: the 1.21.2 recipes and
+    item definitions, the 26.2 entity predicates, the 26.3 data and the GeckoLib 5 asset paths (layer_recipes,
+    layer_entity_predicates, layer_263_data, layer_client_items, layer_geckolib_assets), and first, only when its
+    --verify finds data stranded in a pre-1.21 layout (Forge 1.20.1's plural directories, forge: ids),
+    fix-datapack-layout.py --apply (layout=False: not that step -- fork-port's setup, on a base port that ran it).
+    Each reads the tree and writes only what differs from the form `mc` needs, so a file already in that form is left
+    byte-identical and a second run changes nothing. One function for a version branch (fork-port's setup stage, the
+    cascade after each merge-up) and a single-version fork (port-sync after the authors' merge) (CLAUDE.md P1).
+    props_text: the version's branch.properties (or port.properties), deps_text: its DEPS.md (both read for the
+    GeckoLib major). only: paths under src/main/resources (the files a merge brought in): a file is written only when
+    it, or what it is made from (an item's model, a GeckoLib 4.x asset), is one of them -- so a definition the next
+    version up made by hand is never written here and turned into a conflict at the next merge-up.
+    -> (written paths under src/main/resources, refused)"""
+    repo = pathlib.Path(repo)
+    refused = []
+    if layout and (repo / "src/main/resources").is_dir() and subprocess.run(
+            [sys.executable, str(ROOT / "tools/fix-datapack-layout.py"), str(repo), "--verify"],
+            capture_output=True, text=True).returncode == 1:
+        r = subprocess.run([sys.executable, str(ROOT / "tools/fix-datapack-layout.py"), str(repo), "--apply"],
+                           capture_output=True, text=True)
+        refused += [f"fix-datapack-layout: {l.strip()}" for l in (r.stdout or "").splitlines() if "REFUS" in l]
+    written = []
+    with tempfile.TemporaryDirectory() as d:
+        mv = pathlib.Path(d) / "mv"
+        tdir = mv / "targets" / mc
+        tdir.mkdir(parents=True)
+        (tdir / "target.properties").write_text(props_text or "", encoding="utf-8")
+        if deps_text:
+            (tdir / "DEPS.md").write_text(deps_text, encoding="utf-8")
+        for _n, ref in (layer_recipes(repo, tdir, mc), layer_entity_predicates(repo, tdir, mc, mv),
+                        layer_263_data(repo, tdir, mc, mv)):
+            refused += list(ref)
+        layer_client_items(repo, tdir, mc)
+        layer_geckolib_assets(repo, tdir, mc)
+        out = tdir / "resources"
+        for f in sorted(out.rglob("*")) if out.is_dir() else []:
+            if f.is_file():
+                rel = f.relative_to(out).as_posix()
+                if only is not None and rel not in only and _made_from(rel) not in only:
+                    continue
+                dest = repo / "src/main/resources" / rel
+                if not dest.is_file() or dest.read_bytes() != f.read_bytes():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(f.read_bytes()); written.append(rel)
+    return written, refused
+
+
+def _made_from(rel):
+    """The file a generated resource is made from: an item definition from its item model, a GeckoLib 5 asset from its
+    4.x path; else the file itself (a recipe, an advancement: converted where it is)."""
+    m = re.match(r"^assets/([^/]+)/items/(.+)$", rel)
+    if m:
+        return f"assets/{m.group(1)}/models/item/{m.group(2)}"
+    for old_dir, _suffix, new_dir in GECKO_ASSETS:
+        pre = re.match(r"^(assets/[^/]+/)" + re.escape(new_dir) + "/(.+)$", rel)
+        if pre:
+            return f"{pre.group(1)}{old_dir}/{pre.group(2)}"
+    return rel
+
+
+def data_form_of(mc, rel, data):
+    """The bytes convert_data gives the resource `rel` (under src/main/resources) holding `data` at version `mc`; None
+    when it leaves the file as it is or refuses it. The cascade's untaken check reads it: a version branch's data file
+    in this form (or its parent version's) has taken the authors' change, though no line of theirs is left as they
+    wrote it."""
+    with tempfile.TemporaryDirectory() as d:
+        f = pathlib.Path(d) / "src/main/resources" / rel
+        f.parent.mkdir(parents=True)
+        f.write_bytes(data)
+        convert_data(d, mc, layout=False, only={rel})
+        out = f.read_bytes()
+    return out if out != data else None
+
+
+DATA_FORMS_REPORT = "DATA-FORMS.md"
+
+
+def data_forms_after_merge(repo, mc, trailer="", say=print):
+    """convert_data on `repo`'s checkout at version `mc` right after the authors' code came in (port-sync's merge on a
+    single-version fork, each merge-up of the version-branch cascade): an authors' file merged in an older version's
+    form would otherwise reach `mc` as it is and be dropped at load with no other error (a 1.21.1 recipe ingredient on
+    1.21.2+, a 1.21 entity predicate on 26.2). What changed is committed on its own, "data forms for <mc> after the
+    authors' merge"; what a converter refused, of the files the last merge brought in, is listed in
+    .port/<mc>/DATA-FORMS.md (rewritten each run, removed when nothing is refused), so a second run on the same tree
+    commits nothing. Never run on a tree with uncommitted changes. -> (changed paths, refused, the commit or None)"""
+    repo = pathlib.Path(repo)
+    if subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout.strip():
+        say(f"data forms {mc}: skipped: the working tree has uncommitted changes")
+        return [], [], None
+    rec = repo / ".port" / mc
+    rd = lambda n: (rec / n).read_text(encoding="utf-8", errors="replace") if (rec / n).is_file() else ""
+    # only the files the last merge (HEAD against its first parent) brought in are converted, and only their refusals
+    # reported: a converter cannot always read its own output (a 26.3 advancement is no 1.21 predicate), and a file
+    # already on the branch is in this version's form (measured: every file of 19 real version branches, 0 rewritten,
+    # 7 such refusals). A re-run on our own commit reads the merge below it, so it changes nothing
+    top = "HEAD^" if subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%s"], capture_output=True,
+                                    text=True).stdout.startswith(f"data forms for {mc} ") else "HEAD"
+    merged = {f[len("src/main/resources/"):] for f in subprocess.run(
+        ["git", "-C", str(repo), "diff", "--name-only", f"{top}^1", top, "--", "src/main/resources"],
+        capture_output=True, text=True).stdout.split()}
+    _, refused = convert_data(repo, mc, rd("branch.properties") or rd("port.properties"), rd("DEPS.md"), only=merged)
+    refused = [x for x in refused if x.startswith("fix-datapack-layout:") or x.split(":", 1)[0] in merged]
+    report = rec / DATA_FORMS_REPORT
+    if refused:
+        rec.mkdir(parents=True, exist_ok=True)
+        report.write_text(f"# Data the converters for {mc} could not convert\n\n"
+                          "Written by tools/fork-port.py data_forms_after_merge after the authors' merge. Each file "
+                          "below is in an older version's form and is dropped at load: convert it by hand.\n\n"
+                          + "".join(f"- {x}\n" for x in sorted(set(refused))), encoding="utf-8")
+    elif report.is_file():
+        report.unlink()
+    g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+    rel = f".port/{mc}/{DATA_FORMS_REPORT}"
+    g("add", "-A", "--", "src/main/resources", *([rel] if report.is_file() or g("ls-files", "--", rel).stdout else []))
+    changed = [l for l in g("diff", "--cached", "--name-status").stdout.splitlines() if l]
+    if not changed:
+        say(f"data forms {mc}: every merged data file is in {mc}'s form" + (f"; {len(refused)} refused, as before"
+                                                                             if refused else ""))
+        return [], refused, None
+    r = g("commit", "-q", "-m", f"data forms for {mc} after the authors' merge\n\n"
+          + "".join(f"{l}\n" for l in changed) + (trailer or "\nMade by tools/fork-port.py convert_data."))
+    if r.returncode:
+        say(f"data forms {mc}: the commit failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        return changed, refused, None
+    sha = g("rev-parse", "HEAD").stdout.strip()
+    say(f"data forms {mc}: {len(changed)} file(s) converted, committed {sha[:12]}"
+        + (f"; {len(refused)} refused, listed in .port/{mc}/{DATA_FORMS_REPORT}" if refused else ""))
+    return changed, refused, sha
+
+
 RECOUNT_MARK = "# --- the capped compile hit the cap; uncapped recount (portFullErrors) ---"
 
 
@@ -1776,30 +1907,10 @@ class Run:
         return {"done": ", ".join(did) or "on its branch"}
 
     def data_forms(self):
-        """The layer's data conversions (1.21.2 recipes and item definitions, 26.2 entity predicates, 26.3 data, GeckoLib
-        5 asset paths), written into the branch's own src/main/resources: each reads the branch's resources (already in
-        its parent's form, so a file already converted is left as it is) and writes what this version needs."""
-        n = 0
-        with tempfile.TemporaryDirectory() as d:
-            mv = pathlib.Path(d) / "mv"
-            tdir = mv / "targets" / self.t
-            tdir.mkdir(parents=True)
-            (tdir / "target.properties").write_text(self.fb.read_file(self.tdir / "branch.properties"), encoding="utf-8")
-            if (self.tdir / "DEPS.md").is_file():
-                (tdir / "DEPS.md").write_text(self.fb.read_file(self.tdir / "DEPS.md"), encoding="utf-8")
-            layer_recipes(self.repo, tdir, self.t)
-            layer_entity_predicates(self.repo, tdir, self.t, mv)
-            layer_263_data(self.repo, tdir, self.t, mv)
-            layer_client_items(self.repo, tdir, self.t)
-            layer_geckolib_assets(self.repo, tdir, self.t)
-            out = tdir / "resources"
-            for f in sorted(out.rglob("*")) if out.is_dir() else []:
-                if f.is_file():
-                    dest = self.repo / "src/main/resources" / f.relative_to(out)
-                    if not dest.is_file() or dest.read_bytes() != f.read_bytes():
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        dest.write_bytes(f.read_bytes()); n += 1
-        return n
+        """The layer's data conversions, written into the branch's own src/main/resources (convert_data)."""
+        props = self.fb.read_file(self.tdir / "branch.properties")
+        deps = self.fb.read_file(self.tdir / "DEPS.md") if (self.tdir / "DEPS.md").is_file() else ""
+        return len(convert_data(self.repo, self.t, props, deps, layout=False)[0])
 
     def s_stage(self):
         at = self.repo / "src/main/resources/META-INF/accesstransformer.cfg"

@@ -2187,6 +2187,10 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
                 continue                                # t does not have the file, or has exactly the rows' file
             if change_taken(body, git(repo, "diff", port_from, port_new, "--", f).stdout, f, *rules_now):
                 continue
+            if f.startswith("src/main/resources/data/") and f.endswith(".json") and blob_at(repo, port_new, f) and \
+                    body in {fp().data_form_of(v, f[len("src/main/resources/"):], blob_at(repo, port_new, f))
+                             for v in (t, parent_version) if v} - {None}:
+                continue                                # the authors' file in t's (or its parent's) data forms
             old = old_entries.get(f)
             if old and old.get("from") and old.get("to") == port_new \
                     and entry_status(old, body, *rules_now, dropped_now) != "taken" \
@@ -3036,7 +3040,8 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
             rows.append((t, "STOPPED: conflict", ", ".join((left or list(pending))[:6]) or "; ".join(notes[-1:])))
             say(f"fork-branches: cascade STOPPED at {t}: {pname} does not merge into {branch_name(t)} by itself -- "
                 f"{', '.join(left[:6])}. Merge it by hand (git checkout {branch_name(t)} && git merge {pname}), resolve, "
-                f"commit, then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}"
+                f"commit, put the merged data in {t}'s forms (python3 tools/port-sync.py --repo <its checkout> --data-forms), "
+                f"then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}"
                 + (" -- the authors' change below reaches no merge: apply it too, or let the next cascade offer it again "
                    "(port_taken)" if pending else "") + " (or plan the whole chain first: cascade --plan, then --apply)")
             show_pending()
@@ -3051,6 +3056,9 @@ def cascade(repo, spec, gates="ab", dry_run=False, say=print, runner=None, mode=
                 f"until the file changes), commit, then: python3 tools/fork-branches.py cascade --repo {repo} {t}..{to}")
             show_pending()
             break
+        # the authors' data files the merge brought up in the parent's forms (a 1.21.1 recipe, a 1.21 predicate): t's
+        # forms, committed on their own before the gates (fork-port.py data_forms_after_merge; port-sync's step 2b)
+        fp().data_forms_after_merge(work, t, TRAILER, say=lambda x: say(f"fork-branches: cascade: {t}: {x}"))
         if gates != "none" and mode != "plan-run":
             # recorded BEFORE the gates run: a run that is killed or times out leaves the merge recorded as ungated
             mark_ungated(repo, t, git(work, "rev-parse", "HEAD").stdout.strip(),
