@@ -146,7 +146,8 @@ def fix_advancement_icon(path, apply=True):
 
 def scan_advancements(data_root, apply):
     hits = []
-    for root, _, files in os.walk(data_root):
+    for root, dirs, files in os.walk(data_root):
+        dirs.sort()                      # a stable report order: os.walk lists directories in filesystem order
         if os.sep + "advancement" not in root + os.sep:
             continue
         for fn in files:
@@ -181,7 +182,8 @@ def scan_location_keys(data_root, apply):
     """[(file, old key -> new key)] of the pre-1.20.5 location-predicate keys under advancement/, predicate/ and
     loot_table/; with apply the keys are renamed (the file rewritten with indent 2 only when a key changed)."""
     hits = []
-    for root, _, files in os.walk(data_root):
+    for root, dirs, files in os.walk(data_root):
+        dirs.sort()                      # a stable report order: os.walk lists directories in filesystem order
         r_ = root + os.sep
         if not any(os.sep + d + os.sep in r_ for d in ("advancement", "predicate", "loot_table")):
             continue

@@ -8,7 +8,8 @@
 // know an arbitrary jar's Screen classes at compile time.
 //
 // Modes (via -Ptestmode / smokeharness.testmode): LAUNCH | SPAWN | BATTLE | GAUNTLET | CENSUS. Prints
-// "SMOKEHARNESS_BOOT_TEST: PASS" and exits 0 on success (the marker tools/client-boot-loop.sh greps for).
+// "SMOKEHARNESS_BOOT_TEST: PASS" and exits 0 on success (the marker tools/client-boot-loop.sh greps for), through the
+// game's logger: on the console and in logs/latest.log.
 package com.forgeupgrade.smokeharness;
 
 import java.util.ArrayList;
@@ -71,6 +72,16 @@ import net.neoforged.neoforge.client.event.ClientTickEvent;
 public class ClientBootSmokeTest {
     private static final String P = SmokeHarness.MODID + ".";
     private static final String TAG = "SMOKEHARNESS_BOOT_TEST";
+    private static final org.slf4j.Logger LOG = com.mojang.logging.LogUtils.getLogger();
+
+    /**
+     * Every line of the test goes through the game's logger, so it reaches the console (stdout) AND logs/latest.log.
+     * System.out alone does not reach latest.log: measured on NeoForge 21.1-26.3 clients, where the raw line was
+     * printed but never logged, and a runner reading a real install's latest.log needs the verdict there.
+     */
+    private static void say(String line) {
+        LOG.info(line);
+    }
 
     private enum Mode { LAUNCH, SPAWN, BATTLE, GAUNTLET, CENSUS }
 
@@ -132,7 +143,7 @@ public class ClientBootSmokeTest {
                 default -> { }
             }
         } catch (Throwable t) {
-            System.out.println(TAG + ": FAIL — smoke test threw in phase " + phase + ": " + t);
+            say(TAG + ": FAIL — smoke test threw in phase " + phase + ": " + t);
             t.printStackTrace();
             finish(mc);
         }
@@ -149,23 +160,33 @@ public class ClientBootSmokeTest {
         if (++ticks < TITLE_SETTLE_TICKS) return;
 
         if (MODE == Mode.LAUNCH) {
-            System.out.println(TAG + ": PASS — reached title screen, client + target jar(s) loaded without crashing");
+            say(TAG + ": PASS — reached title screen, client + target jar(s) loaded without crashing");
             finish(mc);
             return;
         }
         String levelName = "smoke-" + System.currentTimeMillis();
-        System.out.println(TAG + ": [" + MODE + "] reached title — creating world '" + levelName + "' (namespaces=" + NAMESPACES + ")…");
+        say(TAG + ": [" + MODE + "] reached title — creating world '" + levelName + "' (namespaces=" + NAMESPACES + ")…");
         createFreshWorld(mc, levelName);
         transition(Phase.WAIT_INGAME);
     }
 
     private static void createFreshWorld(Minecraft mc, String levelName) {
+        // Laid out one argument per line, as in templates/neoforge-mod/test-templates/ClientBootSmokeTest.java.example:
+        // the per-version harness rename tables (templates/upstream-harness/versions) anchor on this shape, and
+        // tools/gatec-carrier.py applies them to this file to build the carrier for every Minecraft version.
         LevelSettings settings = new LevelSettings(
-            levelName, GameType.CREATIVE, false, Difficulty.NORMAL, true,
-            new GameRules(), WorldDataConfiguration.DEFAULT);
+            levelName,
+            GameType.CREATIVE,     // player can't die / can fly — mobs are the thing under test
+            false,                 // hardcore
+            Difficulty.NORMAL,     // NOT peaceful: hostile mobs would be culled instantly
+            true,                  // allow commands
+            new GameRules(),
+            WorldDataConfiguration.DEFAULT
+        );
         Function<RegistryAccess, WorldDimensions> dimensions = WorldPresets::createNormalWorldDimensions;
         mc.createWorldOpenFlows().createFreshLevel(
-            levelName, settings, WorldOptions.defaultWithRandomSeed(), dimensions, new TitleScreen());
+            levelName, settings, WorldOptions.defaultWithRandomSeed(), dimensions, new TitleScreen()
+        );
     }
 
     private static void waitIngame(Minecraft mc) {
@@ -183,12 +204,12 @@ public class ClientBootSmokeTest {
             // it behind six unrelated stress steps means one crash in someone else's mod costs you the
             // answer for all of them. Census, print, done.
             contentCensus(mc);
-            System.out.println(TAG + ": PASS — census clean across " + NAMESPACES.size() + " namespace(s)");
+            say(TAG + ": PASS — census clean across " + NAMESPACES.size() + " namespace(s)");
             finish(mc);
             return;
         }
         if (MODE == Mode.GAUNTLET) {
-            System.out.println(TAG + ": [GAUNTLET] in-world — running " + GauntletStep.values().length + " steps…");
+            say(TAG + ": [GAUNTLET] in-world — running " + GauntletStep.values().length + " steps…");
             transition(Phase.GAUNTLET);
             return;
         }
@@ -213,7 +234,7 @@ public class ClientBootSmokeTest {
         List<String> items = Arrays.stream(prop.split(",")).map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
         if (items.isEmpty()) return;
         if (!net.neoforged.fml.ModList.get().isLoaded("jei")) {
-            System.out.println(TAG + ": [JEI] -Psmokejeiverify set but JEI is not loaded — skipping recipe-output check");
+            say(TAG + ": [JEI] -Psmokejeiverify set but JEI is not loaded — skipping recipe-output check");
             return;
         }
         if (!JeiRecipeProbe.runtimeReady()) {
@@ -222,13 +243,13 @@ public class ClientBootSmokeTest {
         java.util.Map<String, Integer> counts = JeiRecipeProbe.countRecipesProducing(items);
         List<String> zero = new ArrayList<>();
         counts.forEach((id, n) -> {
-            System.out.println(TAG + ": [JEI] recipes JEI shows producing " + id + " = " + n);
+            say(TAG + ": [JEI] recipes JEI shows producing " + id + " = " + n);
             if (n == 0) zero.add(id);
         });
         if (!zero.isEmpty()) {
             throw new IllegalStateException("[JEI] JEI shows NO recipe producing: " + zero + " (mod's recipes not visible in JEI)");
         }
-        System.out.println(TAG + ": [JEI] verified " + items.size() + " output item(s) have visible JEI recipes: " + items);
+        say(TAG + ": [JEI] verified " + items.size() + " output item(s) have visible JEI recipes: " + items);
     }
 
     /**
@@ -243,7 +264,7 @@ public class ClientBootSmokeTest {
         List<String> uids = Arrays.stream(prop.split(",")).map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toList());
         if (uids.isEmpty()) return;
         if (!net.neoforged.fml.ModList.get().isLoaded("jei")) {
-            System.out.println(TAG + ": [JEI] -Psmokejeirecipes set but JEI is not loaded — skipping recipe-GUI probe");
+            say(TAG + ": [JEI] -Psmokejeirecipes set but JEI is not loaded — skipping recipe-GUI probe");
             return;
         }
         if (!JeiRecipeProbe.runtimeReady()) {
@@ -253,7 +274,7 @@ public class ClientBootSmokeTest {
         if (!missing.isEmpty()) {
             throw new IllegalStateException("[JEI] recipe categories NOT found in the JEI runtime (plugin did not register them): " + missing);
         }
-        System.out.println(TAG + ": [JEI] opened " + uids.size()
+        say(TAG + ": [JEI] opened " + uids.size()
             + " recipe categor(ies) in the JEI GUI — setRecipe()/draw() now rendering: " + uids);
     }
 
@@ -283,8 +304,8 @@ public class ClientBootSmokeTest {
                 Entity e = type.spawn(level, pos, MobSpawnType.COMMAND);
                 (e != null ? spawned : failed).add(EntityType.getKey(type));
             }
-            System.out.println(TAG + ": spawned " + spawned.size() + " creature type(s): " + spawned);
-            if (!failed.isEmpty()) System.out.println(TAG + ": (spawn returned null for: " + failed + ")");
+            say(TAG + ": spawned " + spawned.size() + " creature type(s): " + spawned);
+            if (!failed.isEmpty()) say(TAG + ": (spawn returned null for: " + failed + ")");
         });
     }
 
@@ -317,7 +338,7 @@ public class ClientBootSmokeTest {
                     }
                 }
             }
-            System.out.println(TAG + ": [BATTLE] spawned " + total + " mobs — team A " + teamA.size()
+            say(TAG + ": [BATTLE] spawned " + total + " mobs — team A " + teamA.size()
                 + " vs team B " + teamB.size() + " (" + types.size() + " type(s) × " + PER_TYPE + ")");
         });
     }
@@ -333,11 +354,11 @@ public class ClientBootSmokeTest {
             server.execute(() -> {
                 long aliveA = teamA.stream().filter(m -> m != null && m.isAlive()).count();
                 long aliveB = teamB.stream().filter(m -> m != null && m.isAlive()).count();
-                System.out.println(TAG + ": PASS — battle ran " + SURVIVE_TICKS
+                say(TAG + ": PASS — battle ran " + SURVIVE_TICKS
                     + " ticks with no crash (survivors: team A " + aliveA + ", team B " + aliveB + ")");
             });
         } else {
-            System.out.println(TAG + ": PASS — created world, spawned target creatures, world ticked "
+            say(TAG + ": PASS — created world, spawned target creatures, world ticked "
                 + SURVIVE_TICKS + " ticks with no crash");
         }
         finish(mc);
@@ -404,14 +425,14 @@ public class ClientBootSmokeTest {
         }
         GauntletStep[] steps = GauntletStep.values();
         if (gauntletStep >= steps.length) {
-            System.out.println(TAG + ": PASS — gauntlet ran " + steps.length + " item/block/use/effect steps with no crash");
+            say(TAG + ": PASS — gauntlet ran " + steps.length + " item/block/use/effect steps with no crash");
             finish(mc);
             return;
         }
         GauntletStep step = steps[gauntletStep];
         if (!gauntletEntered) {
             gauntletEntered = true;
-            System.out.println(TAG + ": [GAUNTLET] step " + (gauntletStep + 1) + "/" + steps.length + " — " + step);
+            say(TAG + ": [GAUNTLET] step " + (gauntletStep + 1) + "/" + steps.length + " — " + step);
             if (!stepWantsScreen(step) && mc.screen != null) mc.setScreen(null);
             enterGauntletStep(step, mc, server);
         }
@@ -434,9 +455,9 @@ public class ClientBootSmokeTest {
                 // Constructing the creative inventory rebuilds ALL tab contents, firing every mod's
                 // BuildCreativeModeTabContentsEvent handler (add/remove) + rendering the entries — the
                 // path a custom item-list screen does NOT exercise (this caught a tab-remove crash).
-                System.out.println(TAG + ": [GAUNTLET] opening real creative inventory (builds all tabs)");
+                say(TAG + ": [GAUNTLET] opening real creative inventory (builds all tabs)");
                 mc.setScreen(new net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen(
-                    mc.player, mc.level.enabledFeatures(), false));
+                    mc.player, mc.player.connection.enabledFeatures(), false));
             }
             case CREATIVE_PICKUP -> encodeCreativeStacks(mc);
             case CONTENT_CENSUS -> contentCensus(mc);
@@ -463,16 +484,23 @@ public class ClientBootSmokeTest {
         }
         @Override public boolean isPauseScreen() { return false; }
         @Override public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-            this.renderBackground(g, mouseX, mouseY, partialTick);
-            int perRow = Math.max(1, (this.width - 16) / 18);
-            int x = 8, y = 8, col = 0;
+            // A plain backdrop and no super.render, as in the neoforge-mod template's AllItemsScreen: the screen API
+            // around them changes across versions (26.1 extracts render state), and the rename tables cover this shape.
+            g.fill(0, 0, this.width, this.height, 0xFF404040);
+            int n = Math.max(1, items.size());
+            float s = Math.max(1f, Math.min(4f, (float) Math.sqrt((this.width - 16f) * (this.height - 16f) / (n * 18f * 18f))));
+            int perRow = Math.max(1, (int) ((this.width - 16) / (18 * s)));
+            g.pose().pushPose();
+            g.pose().translate(8, 8, 0);
+            g.pose().scale(s, s, 1f);
+            int col = 0, row = 0;
             for (Item item : items) {
                 ItemStack stack = new ItemStack(item);
-                g.renderItem(stack, x, y);
-                g.renderItemDecorations(this.font, stack, x, y);
-                if (++col >= perRow) { col = 0; x = 8; y += 18; } else { x += 18; }
+                g.renderItem(stack, col * 18, row * 18);
+                g.renderItemDecorations(this.font, stack, col * 18, row * 18);
+                if (++col >= perRow) { col = 0; row++; }
             }
-            super.render(g, mouseX, mouseY, partialTick);
+            g.pose().popPose();
         }
     }
 
@@ -519,7 +547,7 @@ public class ClientBootSmokeTest {
                     + failures.size() + " of " + (encoded + failures.size()) + " items): "
                     + failures.subList(0, Math.min(5, failures.size())));
         }
-        System.out.println(TAG + ": [GAUNTLET] encoded " + encoded
+        say(TAG + ": [GAUNTLET] encoded " + encoded
                 + " creative stack(s) against the CLIENT registry — creative pick-up is safe");
     }
 
@@ -530,7 +558,7 @@ public class ClientBootSmokeTest {
             new ItemStack(item).getTooltipLines(ctx, mc.player, TooltipFlag.Default.ADVANCED);
             n++;
         }
-        System.out.println(TAG + ": [GAUNTLET] built tooltips for " + n + " item(s)");
+        say(TAG + ": [GAUNTLET] built tooltips for " + n + " item(s)");
     }
 
     private static void giveAllItems(Minecraft mc, IntegratedServer server) {
@@ -543,7 +571,7 @@ public class ClientBootSmokeTest {
                 sp.getInventory().add(new ItemStack(item));
                 n++;
             }
-            System.out.println(TAG + ": [GAUNTLET] gave " + n + " item(s) to the player");
+            say(TAG + ": [GAUNTLET] gave " + n + " item(s) to the player");
         });
     }
 
@@ -559,7 +587,7 @@ public class ClientBootSmokeTest {
                     n++;
                 }
             }
-            System.out.println(TAG + ": [GAUNTLET] equipped " + n + " armor piece(s)");
+            say(TAG + ": [GAUNTLET] equipped " + n + " armor piece(s)");
         });
     }
 
@@ -575,7 +603,7 @@ public class ClientBootSmokeTest {
                 level.setBlockAndUpdate(pos, block.defaultBlockState());
                 n++;
             }
-            System.out.println(TAG + ": [GAUNTLET] placed " + n + " block(s)");
+            say(TAG + ": [GAUNTLET] placed " + n + " block(s)");
         });
     }
 
@@ -592,7 +620,7 @@ public class ClientBootSmokeTest {
                 sp.stopUsingItem();
                 n++;
             }
-            System.out.println(TAG + ": [GAUNTLET] use()'d " + n + " item(s)");
+            say(TAG + ": [GAUNTLET] use()'d " + n + " item(s)");
         });
     }
 
@@ -618,7 +646,7 @@ public class ClientBootSmokeTest {
                     for (Mob m : targets) m.addEffect(new MobEffectInstance(h, 100, 0, false, true));
                     n[0]++;
                 });
-            System.out.println(TAG + ": [GAUNTLET] applied " + n[0] + " effect(s) to the player and " + targets.size() + " mob(s)");
+            say(TAG + ": [GAUNTLET] applied " + n[0] + " effect(s) to the player and " + targets.size() + " mob(s)");
         });
     }
 
@@ -662,11 +690,11 @@ public class ClientBootSmokeTest {
      */
     private static void contentCensus(Minecraft mc) {
         if (NAMESPACES.isEmpty()) {
-            System.out.println(TAG + ": [GAUNTLET] census skipped — no -Psmokens namespaces to audit");
+            say(TAG + ": [GAUNTLET] census skipped — no -Psmokens namespaces to audit");
             return;
         }
         List<String> broken = new ArrayList<>();
-        System.out.println(TAG + ": [GAUNTLET] ── content census over " + NAMESPACES.size() + " namespace(s) ──");
+        say(TAG + ": [GAUNTLET] ── content census over " + NAMESPACES.size() + " namespace(s) ──");
 
         for (String ns : NAMESPACES.stream().sorted().toList()) {
             com.google.gson.JsonObject lang;
@@ -675,7 +703,7 @@ public class ClientBootSmokeTest {
                 lang = com.google.gson.JsonParser.parseReader(reader).getAsJsonObject();
             } catch (Exception noManifest) {
                 // A library mod may ship no lang file at all. That is not a failure — it is nothing to check.
-                System.out.println(TAG + ":   " + ns + " — no lang manifest, nothing to verify");
+                say(TAG + ":   " + ns + " — no lang manifest, nothing to verify");
                 continue;
             }
 
@@ -712,14 +740,14 @@ public class ClientBootSmokeTest {
                         + " itemGroup key(s), registers none — constructed but never registered?)");
             }
 
-            System.out.println(TAG + ":   " + ns + " — " + checked + " declared id(s), "
+            say(TAG + ":   " + ns + " — " + checked + " declared id(s), "
                     + missing.size() + " unregistered (advisory); tabs " + ownTabs + "/" + declaredTabs
                     + (tabLost ? "  <<< NO CREATIVE TAB" : "  OK")
                     + (missing.isEmpty() ? "" : "  [" + missing.subList(0, Math.min(6, missing.size())) + "]"));
             if (tabLost) broken.add(ns);
         }
 
-        System.out.println(TAG + ": [GAUNTLET] ── census done ──");
+        say(TAG + ": [GAUNTLET] ── census done ──");
         if (!broken.isEmpty()) {
             throw new IllegalStateException("census: these port(s) declare a creative tab and register NONE: "
                     + broken + " — their content exists but a player cannot find it");

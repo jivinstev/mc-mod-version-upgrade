@@ -1,0 +1,5 @@
+# The Gate C carrier's own rows for 1.21.3 (tools/gatec-carrier.py), applied after the gate harness table of the
+# version (templates/upstream-harness/versions). A carrier version gets the rows of every table here up to its own.
+# Only what the smoke harness has and the neoforge-mod harness does not: JeiRecipeProbe's item lookup.
+# 1.21.2 made Registry.get(ResourceLocation) return Optional<Holder.Reference>; getValue(ResourceLocation) is the value.
+re:BuiltInRegistries\.ITEM\.get\(ResourceLocation\.parse\(id\)\)	BuiltInRegistries.ITEM.getValue(ResourceLocation.parse(id))
