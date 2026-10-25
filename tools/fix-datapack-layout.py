@@ -657,7 +657,7 @@ def self_check():
             "player": [{"condition": "minecraft:entity_properties", "entity": "this",
                         "predicate": {"location": {"structures": "m:ruins"}, "structure": "not a location key"}}]}}}})
         hits = scan_location_keys(os.path.join(t, "src/main/resources/data"), apply=False)
-        ok &= [h[0] for h in hits] == ["m/advancement/ruins.json", "m/loot_table/chests/c.json"]
+        ok &= sorted(h[0] for h in hits) == ["m/advancement/ruins.json", "m/loot_table/chests/c.json"]
         v = run("--verify")
         ok &= v.returncode == 0 and "⚠ report: 2 file(s)" in v.stdout and "1.21-clean" in v.stdout
         run("--apply")
