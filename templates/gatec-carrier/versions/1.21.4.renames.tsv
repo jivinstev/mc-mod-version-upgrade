@@ -1,0 +1,5 @@
+# The Gate C carrier's own rows for 1.21.4 (see 1.21.3.renames.tsv).
+# JEI 20 (its first 1.21.4 build) replaced mezz.jei.api.recipe.RecipeType with mezz.jei.api.recipe.types.IRecipeType
+# (javap of jei-1.21.4-common-api 20.0.0.4: IRecipeManager.getRecipeType and IRecipesGui.showTypes take it).
+mezz.jei.api.recipe.RecipeType	mezz.jei.api.recipe.types.IRecipeType
+RecipeType	IRecipeType

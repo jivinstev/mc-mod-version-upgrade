@@ -160,12 +160,22 @@ public class ClientBootSmokeTest {
     }
 
     private static void createFreshWorld(Minecraft mc, String levelName) {
+        // Laid out one argument per line, as in templates/neoforge-mod/test-templates/ClientBootSmokeTest.java.example:
+        // the per-version harness rename tables (templates/upstream-harness/versions) anchor on this shape, and
+        // tools/gatec-carrier.py applies them to this file to build the carrier for every Minecraft version.
         LevelSettings settings = new LevelSettings(
-            levelName, GameType.CREATIVE, false, Difficulty.NORMAL, true,
-            new GameRules(), WorldDataConfiguration.DEFAULT);
+            levelName,
+            GameType.CREATIVE,     // player can't die / can fly — mobs are the thing under test
+            false,                 // hardcore
+            Difficulty.NORMAL,     // NOT peaceful: hostile mobs would be culled instantly
+            true,                  // allow commands
+            new GameRules(),
+            WorldDataConfiguration.DEFAULT
+        );
         Function<RegistryAccess, WorldDimensions> dimensions = WorldPresets::createNormalWorldDimensions;
         mc.createWorldOpenFlows().createFreshLevel(
-            levelName, settings, WorldOptions.defaultWithRandomSeed(), dimensions, new TitleScreen());
+            levelName, settings, WorldOptions.defaultWithRandomSeed(), dimensions, new TitleScreen()
+        );
     }
 
     private static void waitIngame(Minecraft mc) {
@@ -436,7 +446,7 @@ public class ClientBootSmokeTest {
                 // path a custom item-list screen does NOT exercise (this caught a tab-remove crash).
                 System.out.println(TAG + ": [GAUNTLET] opening real creative inventory (builds all tabs)");
                 mc.setScreen(new net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen(
-                    mc.player, mc.level.enabledFeatures(), false));
+                    mc.player, mc.player.connection.enabledFeatures(), false));
             }
             case CREATIVE_PICKUP -> encodeCreativeStacks(mc);
             case CONTENT_CENSUS -> contentCensus(mc);
@@ -463,16 +473,23 @@ public class ClientBootSmokeTest {
         }
         @Override public boolean isPauseScreen() { return false; }
         @Override public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-            this.renderBackground(g, mouseX, mouseY, partialTick);
-            int perRow = Math.max(1, (this.width - 16) / 18);
-            int x = 8, y = 8, col = 0;
+            // A plain backdrop and no super.render, as in the neoforge-mod template's AllItemsScreen: the screen API
+            // around them changes across versions (26.1 extracts render state), and the rename tables cover this shape.
+            g.fill(0, 0, this.width, this.height, 0xFF404040);
+            int n = Math.max(1, items.size());
+            float s = Math.max(1f, Math.min(4f, (float) Math.sqrt((this.width - 16f) * (this.height - 16f) / (n * 18f * 18f))));
+            int perRow = Math.max(1, (int) ((this.width - 16) / (18 * s)));
+            g.pose().pushPose();
+            g.pose().translate(8, 8, 0);
+            g.pose().scale(s, s, 1f);
+            int col = 0, row = 0;
             for (Item item : items) {
                 ItemStack stack = new ItemStack(item);
-                g.renderItem(stack, x, y);
-                g.renderItemDecorations(this.font, stack, x, y);
-                if (++col >= perRow) { col = 0; x = 8; y += 18; } else { x += 18; }
+                g.renderItem(stack, col * 18, row * 18);
+                g.renderItemDecorations(this.font, stack, col * 18, row * 18);
+                if (++col >= perRow) { col = 0; row++; }
             }
-            super.render(g, mouseX, mouseY, partialTick);
+            g.pose().popPose();
         }
     }
 

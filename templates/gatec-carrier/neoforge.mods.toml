@@ -1,0 +1,29 @@
+# The Gate C carrier's metadata (tools/gatec-carrier.py). The ranges are one NeoForge line each, written per
+# Minecraft version by the same rule a fork's version branch uses (tools/fork-branches.py toml_ranges).
+modLoader="javafml"
+loaderVersion="[1,)"
+license="MIT"
+
+[[mods]]
+modId="smokeharness"
+version="${mod_version}"
+displayName="Smoke Harness (Gate C carrier)"
+authors="mc-mod-version-upgrade"
+description='''
+Drives a client boot / world / gauntlet smoke test of the mods installed beside it, then quits.
+Inert unless the game is started with -Dsmokeharness.boottest=true.
+'''
+
+[[dependencies.smokeharness]]
+    modId="neoforge"
+    type="required"
+    versionRange="${neoforge_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.smokeharness]]
+    modId="minecraft"
+    type="required"
+    versionRange="${minecraft_range}"
+    ordering="NONE"
+    side="BOTH"

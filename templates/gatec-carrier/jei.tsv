@@ -1,0 +1,14 @@
+# The JEI API each carrier version's JeiRecipeProbe compiles against (compile-only, never bundled):
+#   mezz.jei:jei-<minecraft>-neoforge-api:<version> on https://maven.blamejared.com
+# minecraft<TAB>version. Measured 2026-10-24 from that maven's maven-metadata.xml (newest per line; 1.21.1 keeps the
+# smoke harness's own pin). A Minecraft version with no row has no JEI build (1.21.2 and 1.21.3 have none): its carrier
+# gets the stand-in probe (JeiRecipeProbe.nojei.java), which behaves as JEI-absent does everywhere else.
+1.21.1	19.39.0.370
+1.21.4	20.0.0.4
+1.21.5	21.4.0.27
+1.21.8	24.2.0.6
+1.21.10	26.3.0.31
+1.21.11	27.53.0.110
+26.1.2	29.47.0.111
+26.2	30.47.0.240
+26.3	31.16.0.90
