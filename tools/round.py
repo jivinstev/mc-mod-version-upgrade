@@ -1393,7 +1393,7 @@ def t_grades(st, it, log):
     ff_local(d, F["head"])
     for g in it["extra"]["grades"]:
         sh(st, it, [sys.executable, TOOLS / "known-issues.py", "grade", "--repo", d, g["id"], "--override", g["severity"],
-                    "--reason", f"{g.get('reason', '')} (plan #{P['issue']})", "--by", g.get("by", "owner")], log)
+                    "--reason", f"{g.get('reason', '')} (plan #{P['issue']})", "--by", g.get("by", "owner"), "--owner"], log)
     c = commit_paths(d, [".port"], f"Known issues: the plan's grade overrides (plan #{P['issue']})")
     push_ahead(d, F["head"])
     return f"{len(it['extra']['grades'])} override(s)" + (f", {c[:12]}" if c else ", nothing to commit"), {}
@@ -3884,6 +3884,35 @@ def self_check():
                == {"status": "blocked", "blocking": ["X-1 S2 kick"], "fixed": [["X-2", "abc1234"]], "commits": [], "not_ok": 2,
                    "lowest": [["X-3", "1.21.4"]]},
                "the summary format")
+        # the plan's grade overrides are the owner's: t_grades applies a /grade below S2 on a crash (--owner), which
+        # known-issues.py refuses from anyone else
+        gd = tmp / "grades-fork"
+        gd.mkdir()
+        git(gd, "init", "-q", "-b", "neoforge-1.21.1")
+        subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "add", "--repo", str(gd), "--title", "a crash",
+                        "--failure", "crash", "--visibility", "rare", "--reach", "latent", "--workaround", "no",
+                        "--lowest", "1.21.1", "--status", "1.21.1=open"], capture_output=True, check=True)
+        git(gd, "add", "-A"); git(gd, "commit", "-qm", "ledger")
+        G = globals()
+        kept = {k: G[k] for k in ("checkout", "ff_local", "push_ahead")}
+        G.update(checkout=lambda d, b, create_from=None: d, ff_local=lambda d, b: None, push_ahead=lambda d, b: None)
+        sh = lambda st_, it_, cmd, log, **k_: subprocess.run([str(c) for c in cmd], capture_output=True, text=True,
+                                                           encoding="utf-8", check=True)
+        try:
+            class _St:
+                data = {"plan": {"issue": 9}}
+                def fork(self, _):
+                    return {"dir": str(gd), "head": "neoforge-1.21.1"}
+            note, _r = t_grades(_St(), {"fork": "o/x", "extra": {"grades": [{"id": "KI-1", "severity": "S4", "reason": "accepted",
+                                                               "by": "owner"}]}}, str(tmp / "grades.log"))
+            led = json.loads((gd / ".port/KNOWN-ISSUES.json").read_text(encoding="utf-8"))["issues"][0]
+            expect(led["severity"] == "S4" and led["override"]["by"] == "owner" and "1 override(s)" in note,
+                   f"the owner's /grade S4 on a crash is applied (--owner): {note} {led}")
+        except subprocess.CalledProcessError as e:
+            expect(False, f"the owner's /grade S4 on a crash was refused: {e.stderr}")
+        finally:
+            G.update(kept)
+            sh = real_sh
     finally:
         gh, sh = real_gh, real_sh
         TOOL_IMPL.update(saved)
