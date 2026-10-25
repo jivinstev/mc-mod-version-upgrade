@@ -224,9 +224,9 @@ def convert_data(repo, mc, props_text="", deps_text="", layout=True, only=None):
     refused = []
     if layout and (repo / "src/main/resources").is_dir() and subprocess.run(
             [sys.executable, str(ROOT / "tools/fix-datapack-layout.py"), str(repo), "--verify"],
-            capture_output=True, text=True).returncode == 1:
+            capture_output=True, text=True, encoding="utf-8").returncode == 1:
         r = subprocess.run([sys.executable, str(ROOT / "tools/fix-datapack-layout.py"), str(repo), "--apply"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8")
         refused += [f"fix-datapack-layout: {l.strip()}" for l in (r.stdout or "").splitlines() if "REFUS" in l]
     written = []
     with tempfile.TemporaryDirectory() as d:
@@ -293,7 +293,7 @@ def data_forms_after_merge(repo, mc, trailer="", say=print):
     .port/<mc>/DATA-FORMS.md (rewritten each run, removed when nothing is refused), so a second run on the same tree
     commits nothing. Never run on a tree with uncommitted changes. -> (changed paths, refused, the commit or None)"""
     repo = pathlib.Path(repo)
-    if subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout.strip():
+    if subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True, encoding="utf-8").stdout.strip():
         say(f"data forms {mc}: skipped: the working tree has uncommitted changes")
         return [], [], None
     rec = repo / ".port" / mc
@@ -303,10 +303,10 @@ def data_forms_after_merge(repo, mc, trailer="", say=print):
     # already on the branch is in this version's form (measured: every file of 19 real version branches, 0 rewritten,
     # 7 such refusals). A re-run on our own commit reads the merge below it, so it changes nothing
     top = "HEAD^" if subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%s"], capture_output=True,
-                                    text=True).stdout.startswith(f"data forms for {mc} ") else "HEAD"
+                                    text=True, encoding="utf-8").stdout.startswith(f"data forms for {mc} ") else "HEAD"
     merged = {f[len("src/main/resources/"):] for f in subprocess.run(
         ["git", "-C", str(repo), "diff", "--name-only", f"{top}^1", top, "--", "src/main/resources"],
-        capture_output=True, text=True).stdout.split()}
+        capture_output=True, text=True, encoding="utf-8").stdout.split()}
     _, refused = convert_data(repo, mc, rd("branch.properties") or rd("port.properties"), rd("DEPS.md"), only=merged)
     refused = [x for x in refused if x.startswith("fix-datapack-layout:") or x.split(":", 1)[0] in merged]
     report = rec / DATA_FORMS_REPORT
@@ -318,7 +318,7 @@ def data_forms_after_merge(repo, mc, trailer="", say=print):
                           + "".join(f"- {x}\n" for x in sorted(set(refused))), encoding="utf-8")
     elif report.is_file():
         report.unlink()
-    g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+    g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True, encoding="utf-8")
     rel = f".port/{mc}/{DATA_FORMS_REPORT}"
     g("add", "-A", "--", "src/main/resources", *([rel] if report.is_file() or g("ls-files", "--", rel).stdout else []))
     changed = [l for l in g("diff", "--cached", "--name-status").stdout.splitlines() if l]
