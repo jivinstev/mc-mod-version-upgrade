@@ -12,12 +12,14 @@ _took() { _dt=$((SECONDS - _t_last)); _t_last=$SECONDS; }    # in this shell, no
 ok()  { _took; printf '  PASS %4ss  %s\n' "$_dt" "$1"; pass=$((pass+1)); }
 bad() { _took; printf '  FAIL %4ss  %s\n' "$_dt" "$1"; fail=$((fail+1)); }
 
-echo "0. the scripts run on BSD sed (macOS) as well as GNU sed (Linux CI)"
-# `sed -i 's/x/y/' f` is GNU-only: BSD sed takes the expression as -i's backup suffix and then fails or edits
-# nothing, so a test passes in CI and fails on a Mac (it happened twice). `sed -i.bak ... && rm -f f.bak` works on both.
-gnu_sed="$(grep -nE "(^|[;&|(]|\s)sed -i ['\"]" tools/*.sh templates/*/*.sh 2>/dev/null || true)"
-[ -z "$gnu_sed" ] && ok "no script uses GNU-only 'sed -i <expr>' (BSD sed reads the expression as a backup suffix)" \
-  || bad "GNU-only 'sed -i <expr>' (use sed -i.bak ... && rm -f FILE.bak): $gnu_sed"
+echo "0. portable to macOS (bash 3.2, BSD tools, Python 3.9) and Windows -- tools/check-compat.py"
+# Linux CI alone passes code that breaks the other two (GNU sed -i, a heredoc inside $( ), Python 3.10+ syntax,
+# a bare "bash" argv on Windows...): the static check runs on every tracked .py and .sh.
+out="$(python3 tools/check-compat.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "check-compat: each rule fires on its pattern and not on the safe form" || bad "check-compat self-check: $out"
+out="$(python3 tools/check-compat.py 2>&1)"
+grep -q 'check-compat: PASS' <<<"$out" && ok "check-compat: every tracked .py parses as Python 3.9 and no script or tool uses a pattern that breaks macOS or Windows" \
+  || bad "check-compat: $out"
 echo "1. override-probe.py"
 if command -v javac >/dev/null 2>&1; then
   P="$T/port"; S="$P/src/main/java/org/fake"; mkdir -p "$S"
@@ -171,13 +173,13 @@ I="$T/inst"; mkdir -p "$I"
 python3 -c 'import time; time.sleep(90)' net.minecraft.client.main.Main --gameDir "$I" &
 FAKE=$!
 sleep 3
-seen="$(python3 - "$I" <<'PY'
+cat > "$T/test-port-tools-heredoc-1.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location("bs", "tools/boot-smoke.py")
 bs = importlib.util.module_from_spec(spec); spec.loader.exec_module(bs)
 print(len(bs.game_already_running(pathlib.Path(sys.argv[1]))))
 PY
-)"
+seen="$(python3 "$T/test-port-tools-heredoc-1.py" "$I")"
 kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
 [ "${seen:-0}" -ge 1 ] && ok "boot-smoke sees a client already running on the instance" \
   || bad "boot-smoke's process probe missed a running client (saw ${seen:-nothing})"
@@ -189,7 +191,7 @@ B="$T/bs"; mkdir -p "$B/repo/tools" "$B/game-1.21.1/mods"; cp tools/boot-smoke.p
 # arguments it hands Windows Python, never a file's contents, so /d/a/... in .env.local would not resolve.
 W="$B"; command -v cygpath >/dev/null 2>&1 && W="$(cygpath -m "$B")"
 printf 'MINECRAFT_MODS_DIR_26_2=\nMINECRAFT_MODS_DIR_1_21_1=%s\n' "$W/game-1.21.1/mods" > "$B/repo/.env.local"
-found="$(env -u MINECRAFT_DIR python3 - "$B" <<'PY'
+cat > "$T/test-port-tools-heredoc-2.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("bs", sys.argv[1] + "/repo/tools/boot-smoke.py")
 bs = importlib.util.module_from_spec(spec); spec.loader.exec_module(bs)
@@ -197,7 +199,7 @@ bs.DEFAULT_INSTANCE = sys.argv[1] + "/no-default"
 found = bs.find_instance(None)
 print(found.as_posix() if found else None)
 PY
-)"
+found="$(env -u MINECRAFT_DIR python3 "$T/test-port-tools-heredoc-2.py" "$B")"
 [ "$found" = "$W/game-1.21.1" ] && ok "boot-smoke finds the instance from setup's per-version mods key" \
   || bad "boot-smoke instance from MINECRAFT_MODS_DIR_1_21_1: got '${found}'"
 
@@ -383,7 +385,7 @@ grep -q 'self-check: OK' <<<"$out" && ok "behaviour tests: failures read from th
   || bad "behaviour-tests self-check: $out"
 
 echo "both porting routes run the same deterministic era stage"
-out="$(python3 - <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-3.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import pathlib, re, sys
 t = pathlib.Path("tools")
 mh = (t / "mechanical-hop.py").read_text(encoding="utf-8")
@@ -406,7 +408,7 @@ for route, need in needs.items():
         problems.append(f"{route} runs a stage tool itself (keep it in mechanical-hop.py only): {stray}")
 print("\n".join(problems) or "parity OK")
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-3.py" 2>&1)"
 grep -q '^parity OK$' <<<"$out" && ok "port.py and port-upstream.py both run tools/mechanical-hop.py's Forge and era stages; no route runs a stage tool itself; every era converter is listed" \
   || bad "route parity: $out"
 
@@ -430,7 +432,7 @@ public class Blade extends Item {
 JAVA
 cp "$LD/Blade.java" "$LD/sv/src/main/java/com/example/mod/"; cp "$LD/Blade.java" "$LD/vb/src/main/java/com/example/mod/"
 printf 'mod_id=examplemod\nminecraft_version=1.21.1\n' > "$LD/sv/gradle.properties"
-out="$(python3 - "$LD" <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-4.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, pathlib, subprocess, sys
 ld = pathlib.Path(sys.argv[1])
 def load(n, f):
@@ -484,7 +486,7 @@ if blade(vb) != after:
     bad.append("a re-run of the hop converted again")
 print("\n".join(bad) or "ladder OK")
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-4.py" "$LD" 2>&1)"
 grep -q '^ladder OK$' <<<"$out" && ok "version-branch ladder: a hop crossing a converter's landing version runs it (1.21.1->1.21.3 the 1.21.2 rows, 1.21.4->1.21.5 the 1.21.5 rows), a hop crossing none runs nothing, a re-run converts nothing twice, the hops add up to the era route's one step; a vetoing hurtEnemy is REFUSED and counted; gear-tiers is an advisory below 26.1.2 only where a 1.21.x gear class is named; on a single-version fixture fork-port stops before any stage (exit 2) with no converter run and the file unchanged, and the era call is unchanged" \
   || bad "version-branch ladder converters: $out"
 
@@ -596,14 +598,14 @@ grep -q 'self-check: OK' <<<"$out" && ok "fork-port: stage selection, moves tabl
 out="$(python3 templates/multi-version/tools/gametest_adapter.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gametest adapter: both dialects (26.x Identifier / 1.21.5 ResourceLocation + mod-bus attribute) strip the dead annotations and register every test" \
   || bad "gametest_adapter self-check: $out"
-out="$(python3 - <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-5.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, pathlib
 s = importlib.util.spec_from_file_location("pg", "tools/port_gates.py"); m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
 assert [m.no_gametest_annotation(v) for v in ("1.21.1", "1.21.4", "1.21.5", "1.21.10", "26.2")] == [False, False, True, True, True]
 assert pathlib.Path("templates/upstream-harness/versions/1.21.5.renames.tsv").read_text().count("snapTo") >= 1
 print("self-check: OK")
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-5.py" 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
   || bad "port_gates check: $out"
 
@@ -721,7 +723,7 @@ fb_mode=""; case "${OSTYPE:-}" in msys*|cygwin*|win*) fb_mode="--platform" ;; es
 out="$(python3 tools/fork-branches.py --self-check $fb_mode 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "fork-branches self-check${fb_mode:+ $fb_mode, the OS leg -- Linux runs all of}: on the frozen 3-version fixture each version branch is done from its migrated records (MIGRATED.json; without it the legacy layer records do not count); a layer at HEAD is refused; an edit stales gates and review; cascade carries the authors' change through each version's rows and a lower fix upward (never the head branch's known-issues ledger), and stops on a conflict; add-target refused over an undone parent; the library rule; a single-version fork refused, nothing written; cascade --plan on a throwaway clone (one decision per file and hunk across versions, mechanical ones merged, a default logged, an escalated one in the one issue), --apply holding only the decision files open while the versions above go on, --apply-decisions clearing them everywhere; port_taken re-offers a change no run took; ci-check names a head branch whose workflow pins an older kit or ignores no round records and ci --head regenerates it from itself (only the kit moved), while a single-version fork gets no head line and ci --head refuses it, writing nothing; sync-shared --check reads only (no ref moved) and names what a sync would change, a hand-edited table section to reconcile, adopt candidates (the fork's own helper copy, a duplicated row) and MV-AHEAD-OF-TEMPLATE files, while a single-version fork reports nothing; sync-shared leaves an edited section alone (and a differing one when the library's history is unknown), leaves a listed helper reverted to an older library text alone, and updates an unlisted stand-in of an old library text; a cascade keeps the upper version's installed helper copy" \
   || bad "fork-branches self-check: $(tail -5 <<<"$out")"
-out="$(python3 - "$T/fb" <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-6.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, json, os, pathlib, subprocess, sys
 d = pathlib.Path(sys.argv[1]); d.mkdir()
 s = importlib.util.spec_from_file_location("fb", "tools/fork-branches.py"); fb = importlib.util.module_from_spec(s); s.loader.exec_module(fb)
@@ -781,13 +783,13 @@ def get(u):
 (ld.branch_release("o/l", "t", "1.21.5", get) and not ld.branch_release("o/l", "t", "1.21.4", get)) or bad.append("branch_release")
 print("\n".join(bad) or "OK")
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-6.py" "$T/fb" 2>&1)"
 [ "$out" = "OK" ] && ok "fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write-test-items on it, an edit makes it not done (gates stale, a review row), --chain is the cascade and stops at a conflict; layer-deps' release-side done check on a tag agrees with the checkout's (its clone under \$MMVU_CACHE_DIR, re-pointed when the URL changes)" \
   || bad "fork-port / layer-deps on version branches: $out"
 # ---- #161 U1: the safety checks a version-branch head gets run on a single-version fork too (P5) -- on a single-branch
 # clone of the frozen fixture's head (detected single-version), with the version-branch fixture alongside, unchanged
 echo "#161 U1: stale Port CI kit, merge onto a stale branch, preflight remotes, shipped-jar path -- both kinds of fork"
-out="$(python3 - "$T/u1" <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-7.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, json, pathlib, subprocess, sys
 d = pathlib.Path(sys.argv[1]); d.mkdir()
 L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
@@ -861,7 +863,7 @@ m = fk.refuse_layer(sv, "ci-gates")
 (m and ".port/1.21.1/<file>" in m and "shipped-jar.txt" in m) or bad.append(f"B2: a stray .multiversion/ refused, the move named: {m}")
 print("\n".join(bad) or "OK")
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-7.py" "$T/u1" 2>&1)"
 [ "$out" = "OK" ] && ok "#161 U1 on a single-branch clone of the head (single-version) and the version-branch fixture: port-ci.py check warns about an older kit with the regenerate command (one stale_workflow, the head's ci-check line unchanged); port-sync fast-forwards a port branch behind origin before the merge and refuses a diverged one, nothing merged or reset; preflight warns about a missing origin/HEAD and names the authors' remote the weekly plan's upstream needs (a version-branch fork's lines unchanged); --shipped reads .port/<mc>/shipped-jar.txt and a stray .multiversion/ is refused with the move" \
   || bad "#161 U1: $out"
 # ---- #161 U2 (C1): ci-gates runs the mixin-target and event-listener audits on every fork, report-only -- on a
@@ -869,7 +871,7 @@ PY
 # and Gate B faked, both audits real
 echo "#161 U2: mixin-target and event-listener audits as ci-gates REPORT rows -- both kinds of fork"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
-out="$(python3 - "$T/u2" <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-8.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import contextlib, importlib.util, io, pathlib, shutil, subprocess, sys, zipfile
 d = pathlib.Path(sys.argv[1]); d.mkdir()
 L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
@@ -1071,7 +1073,7 @@ for kind, w in (("single-version", sv), ("version-branch", r)):
      and not (work / "audit-mixin-targets.log").exists()) or bad.append(f"{kind}: a tree with no mixin and no listener runs neither audit: {calls}\n{md}")
 print("\n".join(bad) or "OK")
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-8.py" "$T/u2" 2>&1)"
 [ "$out" = "OK" ] && ok "#161 U2 on a single-branch clone of the head (single-version) and version branch 1.21.4: ci-gates' mixin-target and event-listener audits write one REPORT row each for a stale target and an abstract-event listener (never red), \`skipped: <why>\` with no sources jar or no classpath, no row when the audit crashes, and neither runs (no Gradle call) with nothing to check; a hung classpath resolution or audit is \`skipped: timed out after Ns\`; the classpath or sources-jar plumbing raising writes no row and leaves every other row as it was; a skipped row quotes Gradle's own reason; a mixin in src/client/java is audited and configured mixins it cannot read (outside mixin/, Kotlin) are named, a nested Outer\$Inner read in Outer's file; a clean tree's GATES.md is byte-identical to the one written without them" \
   || bad "#161 U2: $out"
 else
@@ -1151,7 +1153,7 @@ python3 tools/ci-gates.py --repo "$SVL" --modid m --work-dir "$T/lkw2" >/dev/nul
 # The real Gate A (port_gates.gate_a) against a faked Gradle: every other test fakes gate_a itself, so a broken
 # reference inside it (a helper removed with the layer route) crashed every fork's gates with nothing failing here.
 GA="$(mktemp -d)"; mkdir -p "$GA/src/main/resources/META-INF"
-out="$(python3 - "$GA" <<'PY' 2>&1
+cat > "$T/test-port-tools-heredoc-9.py" <<'PY'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import pathlib, sys, types
 sys.path.insert(0, "tools"); import port_gates as pg
 repo = pathlib.Path(sys.argv[1])
@@ -1162,7 +1164,7 @@ def gradle(r, args, log, **kw):
 pg.gradle = gradle; pg.gate_env = lambda c: {"PORT_GRADLE_INIT": "x"}
 print("ran", pg.gate_a({"repo": repo}, str(repo / "a.log")))
 PY
-)"
+out="$(python3 "$T/test-port-tools-heredoc-9.py" "$GA" 2>&1)"
 [ "$out" = "ran 3" ] && ok "port_gates.gate_a itself (Gradle faked): reads build/test-results/test and counts the tests run" \
   || bad "port_gates.gate_a: $out"
 rm -rf "$GA"

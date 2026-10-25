@@ -4,7 +4,8 @@
 # The pre-push hook does three things CI cannot: it refuses a direct push to `main` (this repository
 # takes pull requests only), it runs the IP gate BEFORE anything leaves the machine, and it compares the
 # pushed template Java with the third-party sources on this machine (tools/check-similarity.py), which CI
-# cannot hold. The pre-commit hook runs that last check on each commit. CI is the
+# cannot hold. The pre-commit hook runs that last check on each commit, and before it the portability checks
+# (tools/check-compat.py and the system bash -n -- bash 3.2 on a Mac) on the staged .py and .sh. CI is the
 # authority, but by the time CI speaks the content is already on GitHub -- and for the one thing this
 # gate guards, that is too late.
 set -uo pipefail
@@ -92,6 +93,26 @@ cat > .git/hooks/pre-commit <<'HOOK'
 #!/usr/bin/env bash
 set -uo pipefail
 root="$(git rev-parse --show-toplevel)"
+# Portability, on every commit (about a second): the staged .py and .sh through tools/check-compat.py (Python 3.9
+# syntax, GNU-only shell, a bare "bash" argv...), and each staged script through the SYSTEM bash -n -- on a Mac that
+# is bash 3.2, the shell CI never runs.
+staged="$(git diff --cached --name-only --diff-filter=AMRC -- '*.py' '*.sh')"
+if [ -n "$staged" ] && [ -f "$root/tools/check-compat.py" ]; then
+  . "$root/tools/python.sh" || exit 1
+  # shellcheck disable=SC2086
+  (cd "$root" && python3 tools/check-compat.py $staged) >/dev/null 2>&1 || {
+    (cd "$root" && python3 tools/check-compat.py $staged) | grep -v '^check-compat: '
+    echo "pre-commit: REFUSED — a portability problem (above; CLAUDE.md \"Portability\"). Nothing was committed." >&2
+    exit 1
+  }
+  sysbash=/bin/bash; [ -x "$sysbash" ] || sysbash=bash
+  for f in $staged; do
+    case "$f" in *.sh) "$sysbash" -n "$root/$f" || {
+      echo "pre-commit: REFUSED — $f does not parse with $("$sysbash" -c 'echo bash $BASH_VERSION'). Nothing was committed." >&2
+      exit 1; } ;;
+    esac
+  done
+fi
 [ -f "$root/tools/check-similarity.py" ] || exit 0   # a branch from before the gate
 git diff --cached --name-only --diff-filter=AMRC -- templates/ | grep -qE '\.java(\.example|\.template)?$' || exit 0
 . "$root/tools/python.sh" || exit 1   # python3 on Windows too
@@ -112,4 +133,4 @@ fi
 exit 0
 HOOK
 chmod +x .git/hooks/pre-commit
-echo "installed: .git/hooks/pre-commit  (runs check-similarity.py --staged when template Java is staged)"
+echo "installed: .git/hooks/pre-commit  (check-compat.py and the system bash -n on staged .py/.sh; check-similarity.py --staged when template Java is staged)"

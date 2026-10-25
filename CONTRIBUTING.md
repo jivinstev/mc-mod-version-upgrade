@@ -9,6 +9,7 @@ Four checks run on every pull request, and all must pass:
 | `tools/check-no-ip.py` | are we about to publish somebody else's work? |
 | `tools/check-catalog-fidelity.py` | did we quietly lose a migration rule? |
 | `tools/gen-vendored.py --check` | do the files we copy into *your* project carry the licence the manifest says? |
+| `tools/check-compat.py` | will it still run on a Mac (bash 3.2, BSD sed/grep, Python 3.9) and on Windows? See CLAUDE.md "Portability". A `macOS` CI job also runs the suites there. |
 | `tools/check-readme.py` | does the README still describe every skill (and did a skill change bring its README change)? Does a change to the single-version route say what it does to a single-version fork? |
 
 Run them locally the same way CI does:
@@ -17,6 +18,7 @@ Run them locally the same way CI does:
 python3 tools/check-no-ip.py
 python3 tools/check-catalog-fidelity.py --base origin/main   # honours `Catalog-removed:` lines (below)
 python3 tools/gen-vendored.py --check
+python3 tools/check-compat.py      # macOS / Windows portability (CLAUDE.md "Portability"); ~1 s
 python3 tools/check-readme.py --base origin/main   # a skill change needs a README change, or a `README-unchanged: <reason>` commit line;
                                                    # a single-version route change, a `Single-version-change:` or `-unchanged:` line
 ./tools/test-gates.sh          # proves each gate FAILS on a planted violation
@@ -52,7 +54,9 @@ gh repo fork jivinstev/mc-mod-version-upgrade --clone
 ```
 
 Install the hooks once after cloning: `./tools/install-hooks.sh`. The pre-push hook refuses direct pushes to `main`
-and runs the IP gate before anything leaves your machine. The pre-commit and pre-push hooks also run
+and runs the IP gate before anything leaves your machine. The pre-commit hook runs `tools/check-compat.py` and the
+system `bash -n` (bash 3.2 on a Mac) on the staged `.py` and `.sh`, so a portability break is refused at commit time.
+The pre-commit and pre-push hooks also run
 `tools/check-similarity.py`, which refuses template Java transcribed from the NeoForge, Minecraft or GeckoLib
 sources on your machine; CI cannot hold those sources, so this check exists only locally. Optionally, `FORBIDDEN_NAMES_FILE=` in
 `.env.local` can name a private list of mods you have ported, and the hook then refuses those names too.
