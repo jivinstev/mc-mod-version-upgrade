@@ -180,10 +180,35 @@ def read_kv(path):
 LIBRARY_SKIP = ("spawn", "battle")
 
 
+SV_PROPS = "port.properties"      # a single-version fork's per-version settings (.port/<mc>/): library=true
+
+
+def sv_mc(repo):
+    """gradle.properties' minecraft_version of a checkout that is no version branch (a single-version fork, or a
+    version-branch fork's head), else None."""
+    gp = pathlib.Path(repo) / "gradle.properties"
+    m = re.search(r"(?m)^\s*minecraft_version\s*=\s*(\S+)", gp.read_text(encoding="utf-8")) if gp.is_file() else None
+    return m.group(1) if m and not branch_version(repo) else None
+
+
+def summary_head(repo, modid, mc, bv, env):
+    """The summary's first line, which GATES.md readers parse (`at `<commit>` for Minecraft <v>`): the version is --mc
+    on a version branch, and gradle.properties' on a checkout that is no version branch (#161 U5: a single-version
+    fork's GATES.md in .port/<mc>/ names its version, as a version branch's does)."""
+    mc_ = mc or (sv_mc(repo) if not bv else None)
+    return (f"Gates for `{modid}` at `{tested_tree(repo, mc)}`{f' for Minecraft {mc_}' if mc_ else ''} ({env} environment) "
+            "-- run by CI with no model and no fixes applied:")
+
+
 def is_library(repo, bv):
-    """A version branch marked library=true (its .port/<bv>/branch.properties). Only a version branch: there the
-    library rule stands in for the skipped phases (a dependent's Gate C against the jar, tools/fork-branches.py)."""
-    return bool(bv) and read_kv(pathlib.Path(repo) / ".port" / bv / "branch.properties").get("library") == "true"
+    """A library: a version branch marked library=true in its .port/<bv>/branch.properties (the library rule stands
+    in for the skipped phases: a dependent's Gate C against the jar, tools/fork-branches.py), or a single-version fork
+    marked library=true in .port/<mc>/port.properties (#161 U5, B1: the keep-current round's pre-merge dependent gate,
+    tools/round.py depgate, stands in -- a round refuses a marked library with no dependent in its set)."""
+    if bv:
+        return read_kv(pathlib.Path(repo) / ".port" / bv / "branch.properties").get("library") == "true"
+    mc = sv_mc(repo)
+    return bool(mc) and read_kv(pathlib.Path(repo) / ".port" / mc / SV_PROPS).get("library") == "true"
 
 
 def library_phases(phases, library):
@@ -577,6 +602,27 @@ def self_check():
         for n in ("m-1_mr.jar", "m-1_cf.jar", "m-1_cf-sources.jar"):
             (libs / n).write_bytes(b"x")
         ok &= [j.name for j in cf_jars(libs, libs / "m-1_mr.jar")] == ["m-1_cf.jar"]
+    with tempfile.TemporaryDirectory() as d:      # #161 U5 (B1): a single-version library's marker is .port/<mc>/port.properties
+        r = pathlib.Path(d)
+        (r / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        ok &= not is_library(r, None) and sv_mc(r) == "1.21.1"       # unmarked: every phase
+        (r / ".port/1.21.1").mkdir(parents=True)
+        (r / ".port/1.21.1/port.properties").write_text("library=true\n", encoding="utf-8")
+        ok &= is_library(r, None)
+        (r / ".port/1.21.1/branch.properties").write_text("x=1\n", encoding="utf-8")
+        ok &= sv_mc(r) is None and not is_library(r, "1.21.1")      # a version branch reads branch.properties only
+    with tempfile.TemporaryDirectory() as d:      # #161 U5: a single-version fork's summary names its version
+        r = pathlib.Path(d)
+        subprocess.run(["git", "init", "-q", str(r)], check=True)
+        (r / "gradle.properties").write_text("minecraft_version=1.21.1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(r), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q",
+                        "--allow-empty", "-m", "x"], check=True)
+        ok &= " for Minecraft 1.21.1 (full environment)" in summary_head(r, "m", None, None, "full")
+        (r / ".port/1.21.4").mkdir(parents=True)
+        (r / "gradle.properties").write_text("minecraft_version=1.21.4\n", encoding="utf-8")
+        (r / ".port/1.21.4/branch.properties").write_text("x=1\n", encoding="utf-8")
+        ok &= "for Minecraft" not in summary_head(r, "m", None, "1.21.4", "full")      # a version branch: --mc only
+        ok &= " for Minecraft 1.21.4 (minimal" in summary_head(r, "m", "1.21.4", "1.21.4", "minimal")
     with tempfile.TemporaryDirectory() as d:      # --shipped on a version branch: the variant's expectations file
         r, sg = pathlib.Path(d), _load("shipped_gate", "shipped-gate.py")
         (r / ".port/1.21.4").mkdir(parents=True)
@@ -762,7 +808,8 @@ def main():
     phases, skipped = library_phases([q for q in a.gatec.split(",") if q and q != "none"], library)
     for q in skipped:
         rows.append(f"| Gate C -- real client, `{q}` | skipped | a library: no entity of its own to spawn; proven by a "
-                    "dependent's Gate C against this jar (tools/fork-branches.py library-record) |")
+                    + ("dependent's Gate C against this jar (tools/fork-branches.py library-record) |" if bv else
+                       "dependent's gates against this jar before the merge (tools/round.py depgate) |"))
         print(f"[ci-gates] Gate C {q}: skipped (library)", flush=True)
     for label, extra in [("Gate B -- headless server loads the mod, GameTests", [])] + \
             [(f"Gate C -- real client, `{p}`", ["--gatec", p]) for p in phases]:
@@ -862,8 +909,7 @@ def main():
                                                   else f"{len([l for l in rl if l.startswith('PASS')])} check(s) green"
                                                        if r.returncode == 0 else (r.stdout + r.stderr).strip().splitlines()[-1][:200]))
 
-    head = tested_tree(repo, a.mc)
-    md = [f"Gates for `{a.modid}` at `{head}`{f' for Minecraft {a.mc}' if a.mc else ''} ({a.env} environment) -- run by CI with no model and no fixes applied:", "",
+    md = [summary_head(repo, a.modid, a.mc, bv, a.env), "",
           "| check | result | detail |", "|---|---|---|", *rows, "",
           "Not covered by any automated gate: gameplay by a person."]
     pathlib.Path(a.summary).write_text("\n".join(md) + "\n", encoding="utf-8")

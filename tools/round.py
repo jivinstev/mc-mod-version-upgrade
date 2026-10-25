@@ -42,10 +42,14 @@ forks already on the current shared library, builds nothing but the close):
   a SINGLE-VERSION fork's head, the same steps in the single-version round's order (keep-current "The weekly round"):
       ci-check (port-ci.py check: a stale workflow is a warning, regenerated at setup) -> setup -> upstream (port-sync.py
       --port keep-current/<date> --base <head> --commit <upstream_commit>; a conflict is its fixer's job) -> authors
-      (Run steps 3-5) -> repin-head -> backlog -> review -> fix -> recheck -> gates (ONE ci-gates.py full and minimal
-      pass on the reviewed tree) -> depgate:<dependent> (a LIBRARY: the dependent's gates against this candidate jar,
-      before the merge) -> pr -> ci -> merge -> release (dispatched right after the merge; the push run and the release
-      run awaited together)
+      (Run steps 3-5) -> repin-head -> backlog -> review -> fix -> recheck (on .port/<mc>/REVIEW.md: fork-branches.py
+      check-done --base <the change's base>) -> records (#161 U5: check-done's TEST-ITEMS.md and INVENTORY-CHECK.json,
+      and DEPS.md's library pre-release mark when re-pinned to an undone library release, committed) -> gates (ONE
+      ci-gates.py full and minimal pass on the reviewed tree, the full run committed as .port/<mc>/GATES.md; a library
+      marked in .port/<mc>/port.properties with no dependent gate is refused) -> depgate:<dependent> (a LIBRARY: the
+      dependent's gates against this candidate jar, before the merge) -> done (fork-branches.py target_done: report
+      only while origin's head has no .port/<mc>/REVIEW.md, then a version not done does not go out) -> pr -> ci ->
+      merge -> release (dispatched right after the merge; the push run and the release run awaited together)
   a library head with a single-version dependent (or a single-version library) gets that depgate too, as does a
   version-branch library's version for a single-version dependent at that version; a set of version-branch forks only
   keeps its head as above
@@ -132,7 +136,7 @@ _MODS = {}
 
 def mod(key):
     files = {"fb": "fork-branches.py", "ki": "known-issues.py", "pc": "port-ci.py", "lc": "checkout-lock.py",
-             "fk": "fork-kind.py", "ld": "layer-deps.py", "rp": "round-preflight.py"}
+             "fk": "fork-kind.py", "ld": "layer-deps.py", "rp": "round-preflight.py", "cg": "ci-gates.py"}
     if key not in _MODS:
         sys.dont_write_bytecode = True
         _MODS[key] = load(f"round_{key}", files[key])
@@ -403,6 +407,7 @@ def build_queue(frozen, cfg, forks, date):
                 q.add(slug, base, "backlog", extra={"fixes": at[base]})
             if single:               # the review starts from A/B; ONE full pass on the reviewed tree (keep-current step 4)
                 seg_review(q, slug, base)
+                q.add(slug, base, "records")     # the done list's records, committed before the gates certify the tree
                 q.add(slug, base, "gates")
             else:
                 q.add(slug, base, "gates")
@@ -411,6 +416,8 @@ def build_queue(frozen, cfg, forks, date):
                 for dep in dependents.get(slug, []):
                     if (single or forks[dep]["kind"] == "single") and base in [forks[dep]["base"], *forks[dep]["versions"]]:
                         q.add(slug, base, f"depgate:{dep}", dirs=[slug, dep], extra={"dependent": dep})
+            if single:               # #161 U5 (C2): the done list before the PR (report only until the head has records)
+                q.add(slug, base, "done")
             for s in ("pr", "ci", "merge"):
                 q.add(slug, base, s)
             release_of[(slug, base)] = q.add(slug, base, "release")
@@ -1018,6 +1025,7 @@ def job_task(st, it):
     F = st.fork(it["fork"])
     w, br = where(st, it)
     vb = F["kind"] == "branches" and v != F["base"]
+    sv = F["kind"] == "single"
     co = F["dir"]
     if vb:
         with contextlib.suppress(StepError):
@@ -1086,6 +1094,13 @@ def job_task(st, it):
                     f"{br}): it writes REVIEW.md's `?` rows. Fill every row (fork-versions \"Done\" item 4, plus the "
                     "behaviour-inventory account, item 7) with ok / not-ok and a note, then commit .port/" + v + "/REVIEW.md "
                     f"on {br}.")
+        elif sv:
+            what = (f"Run `python3 {T / 'fork-branches.py'} check-done --repo {co} --target {v} --base "
+                    f"{sv_review_base(st, it)}` (the checkout of {br}; the base is the head this round's change started "
+                    "from): it records the base and writes .port/" + v + "/REVIEW.md's `?` rows -- every file the change "
+                    "touches, plus an `item` row for each hook of the base's behaviour inventory that is gone. Fill every "
+                    "row with ok / not-ok and a note (and the reviewer, date and commit fields), then commit .port/" + v
+                    + f"/REVIEW.md on {br}.")
         else:
             what = (f"The work branch's changes: `git -C {F['dir']} diff --name-only origin/{F['head']}...{br}`; one row per "
                     "file -- `| file | ok/not-ok | note |` -- written to the summary (the driver puts it in the PR body).")
@@ -1098,17 +1113,20 @@ def job_task(st, it):
                 "step 4, \"one full review against the fixed rubric, before the merge\". The rubric: "
                 f"{ROOT / 'templates/upstream-harness/reviewer-prompt.md'} and REVIEW_PRINCIPLES.md beside it.", *narrow, what,
                 "Do not fix anything. Write `not_ok: <n>` (the not-ok rows) in the summary.",
-                "Acceptance: every row has a verdict and a note; committed (a version branch) or in the summary."]
+                "Acceptance: every row has a verdict and a note; " + ("committed on " + br + "." if sv else
+                                                                      "committed (a version branch) or in the summary.")]
     if s == "fix":
         rev = st.rdir / "round/summaries" / (job_id(st.item(it["id"].rsplit(":", 1)[0] + ":review")) + ".md")
         return [f"You are the FIXER of {it['fork']} {v}: fix every not-ok row of the review "
-                + (f"(.port/{v}/REVIEW.md on {br})" if vb else f"({rev})") + f" on {w}, one commit per fix, A/B kept "
+                + (f"(.port/{v}/REVIEW.md on {br})" if vb or sv else f"({rev})") + f" on {w}, one commit per fix, A/B kept "
                 "green. Never edit a verdict. Write `fixed:` lines only for selected known issues.",
                 f"Acceptance: each not-ok row fixed and committed on {br}, or RESULT: blocked with why."]
     if s == "recheck":
         return [f"You are a FRESH RE-CHECKER of {it['fork']} {v} (neither the reviewer nor the fixer): re-check only the "
                 "rows the fixes changed -- " + (f"the rows `python3 {T / 'fork-port.py'} --repo {co} --target {v} "
-                "--check-done` reports stale since the review" if vb else "the files the fixer's commits changed") + ".",
+                "--check-done` reports stale since the review" if vb else f"the rows `python3 {T / 'fork-branches.py'} "
+                f"check-done --repo {co} --target {v}` reports stale since the review" if sv
+                else "the files the fixer's commits changed") + ".",
                 "That is the stopping rule (keep-current step 4): no second full review. Each not-ok row left is a "
                 f"finding: grade it with `python3 {T / 'known-issues.py'} add` at its lowest affected version (step 5; "
                 "a WARNING that it may repeat an entry: read that entry first). An S1 or S2 at this version blocks its "
@@ -1611,13 +1629,112 @@ def t_gates(st, it, log):
     if seg_ids(st, it, ("depgate",)):       # a library's candidate: only a jar this run builds counts (t_depgate)
         for j in built_jars(d):
             j.unlink()
+    single = F["kind"] == "single"
+    if single and sv_library(d, v) and not seg_ids(st, it, ("depgate",)):
+        raise StepError(f".port/{v}/port.properties marks {it['fork']} a library, so its Gate C skips spawn and battle "
+                        "(ci-gates.py), and only the pre-merge dependent gate stands in for them: this set gives it no "
+                        "dependent at that version. Add its dependent to .github/weekly-plan.json (role library, "
+                        "depends_on), or take the mark off")
     au = seg_item(st, it, "authors")
     up = au["extra"].get("upstream_commit") if au else None
     gated, at = head(d), time.time()
     with full_gate_lock(it["id"], say_to(log)) as lk:
         for cmd in sv_gate_cmds(d, up):
             sh(st, it, cmd, log, hold=lk)
-    return "ci-gates full and minimal green", {"gated_head": gated, "gated_at": at, "head_after": head(d)}
+    c = None
+    if single:                 # #161 U5 (C2): the full run is the version's GATES.md, as on a version branch
+        rec, summ = pathlib.Path(d) / ".port" / v, pathlib.Path(d) / "build/round-gates-full.md"
+        if not summ.is_file():
+            raise StepError("ci-gates.py --env full wrote no build/round-gates-full.md: no record of the full run")
+        rec.mkdir(parents=True, exist_ok=True)
+        (rec / "GATES.md").write_text(summ.read_text(encoding="utf-8"), encoding="utf-8")
+        why = gates_green(rec / "GATES.md", gated, v)
+        if why:
+            raise StepError(f".port/{v}/GATES.md: {why}")
+        c = commit_paths(d, [f".port/{v}/GATES.md"], f"Gate record for {v} (keep-current round)")
+    return "ci-gates full and minimal green" + (f", GATES.md {c[:12]}" if c else ""), {
+        "gated_head": gated, "gated_at": at, "head_after": head(d)}
+
+
+def sv_library(d, v):
+    """A single-version fork marked library=true in .port/<v>/port.properties (ci-gates.py is_library, B1)."""
+    return mod("cg").read_kv(pathlib.Path(d) / ".port" / v / mod("cg").SV_PROPS).get("library") == "true"
+
+
+def sv_review_base(st, it):
+    """The commit a single-version fork's change this round started from: the merge-base of origin's head and the work
+    branch (what the PR is against). The review base REVIEW.md records."""
+    F = st.fork(it["fork"])
+    r = git(F["dir"], "merge-base", f"origin/{F['head']}", branch_of(st, it))
+    return r.stdout.strip() or f"origin/{F['head']}"
+
+
+def lib_undone(st, lb, v):
+    """Is library lb's release of this round at v cut from a version that is not done? A single-version library: its
+    done step was report-only or did not pass; a version-branch library's version branch: target_done(); a
+    version-branch library's head has no done list (as before): never."""
+    L = st.fork(lb)
+    if L["kind"] == "single":
+        d_ = next((x for x in st.items if x["fork"] == lb and x["version"] == v and x["step"] == "done"), None)
+        return not d_ or d_["status"] != "ok" or bool((d_.get("result") or {}).get("report_only"))
+    if v in L["versions"]:
+        return bool(mod("fb").target_done(vco(st, lb, v), v))
+    return False
+
+
+SV_DEPS_HEAD = ("# Dependencies: Minecraft {v} (single-version fork)\n\nWritten by tools/round.py when this fork's head is "
+                "re-pinned; a pin to a library pre-release whose version is not done carries the mark below, and "
+                "port-ci.py promote and port-publish.py refuse a release built with it (#161 U5, C3).\n\n")
+
+
+def t_records(st, it, log):
+    """A single-version fork's done records (#161 U5, C2), committed BEFORE the gates certify the tree: check-done on the
+    reviewed checkout (REVIEW.md's base and any `?` row left, TEST-ITEMS.md, INVENTORY-CHECK.json), and -- when this
+    round re-pinned the head to a library pre-release whose version is not done -- DEPS.md's "Library pre-release (not
+    done)" mark, which promotion and publishing read at the tag (C3); a re-pin to done releases drops it."""
+    F, v = st.fork(it["fork"]), it["version"]
+    d = checkout(F["dir"], branch_of(st, it))
+    fb = mod("fb")
+    base = sv_review_base(st, it)      # this round's: a REVIEW.md carried from the last round names the last one's
+    sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "check-done", "--repo", d, "--target", v, "--base", base],
+       log, ok=(0, 18))
+    marks = []
+    rp = seg_item(st, it, "repin-head")
+    if rp:
+        for lb in rp["extra"]["libraries"]:
+            if lib_undone(st, lb, v):
+                tag = st.item(f"{st.fork(lb)['name']}@{v}:release").get("result", {}).get("tag")
+                marks.append(f"{fb.LIBRARY_PRERELEASE_MARK} `{lb}` is pinned to its pre-release {tag}, whose Minecraft {v} "
+                             "is not done. This fork may cut its own pre-release with it (the pair is what a person "
+                             "plays); it is neither promoted nor published until the library's version is done and the "
+                             "pin moves to that release.")
+        dp = pathlib.Path(d) / ".port" / v / "DEPS.md"
+        if marks:
+            dp.write_text(SV_DEPS_HEAD.format(v=v) + "\n".join(marks) + "\n", encoding="utf-8")
+        elif dp.is_file() and fb.LIBRARY_PRERELEASE_MARK in dp.read_text(encoding="utf-8"):
+            dp.unlink()
+    c = commit_paths(d, [f".port/{v}"], f"Done records for {v} (keep-current round)")
+    return "records" + (f" {c[:12]}" if c else " (unchanged)") + (f"; {len(marks)} library pre-release mark(s)"
+                                                                   if marks else ""), {"marks": len(marks)}
+
+
+def t_done(st, it, log):
+    """The done list on a single-version fork's work branch before its PR (#161 U5, C2): fork-branches.py target_done,
+    its records in .port/<v>/. The first round on a head with no records there only reports it (the records are made
+    this round); after that a version that is not done does not go out. A library pre-release mark (C3) does not stop
+    the PR: it stops promotion and publishing."""
+    F, v = st.fork(it["fork"]), it["version"]
+    d = checkout(F["dir"], branch_of(st, it))
+    fb = mod("fb")
+    why = [w for w in fb.target_done(pathlib.Path(d), v) if w != fb.SV_PRERELEASE]
+    # the first round: origin's head carries no done record yet (a REVIEW.md with its `- base:` line)
+    rollout = not fb.SV_BASE.search(git(F["dir"], "show", f"origin/{F['head']}:.port/{v}/REVIEW.md").stdout)
+    if why and rollout:
+        return (f"report only (the first round with the done records): {len(why)} open -- " + "; ".join(why))[:900], {
+            "report_only": True, "open": why}
+    if why:
+        raise StepError(f"{it['fork']} {v} is NOT done ({len(why)} open): " + "; ".join(why)[:1500])
+    return "done", {}
 
 
 def t_depgate(st, it, log):
@@ -2032,6 +2149,7 @@ def t_ledger(st, it, log):
 
 
 TOOL_IMPL = {"ci-check": t_ci_check, "grades": t_grades, "setup": t_setup, "upstream": t_upstream, "sync": t_sync,
+             "records": t_records, "done": t_done,
              "mergeup": t_mergeup,
              "repin": t_repin,
              "gates": t_gates, "depgate": t_depgate, "freeze": t_freeze, "pr": t_pr, "ci": t_ci, "merge": t_merge,
@@ -2478,6 +2596,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             (d / "gradle.properties").write_text(f"minecraft_version=1.21.1\nmod_id={name}\n".replace("1.21.1", mc),
                                                  encoding="utf-8")
             (d / "Main.java").write_text("class Main {}\n", encoding="utf-8")
+            (d / ".gitignore").write_text("build/\n", encoding="utf-8")       # as a Gradle mod's own
             g("add", "-A"); g("commit", "-q", "-m", "the authors' code")
             g("checkout", "-q", "-b", f"neoforge-{mc}")
             wf = ('      - run: curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" .../port-ci-kit-v20.tar.gz && echo "' + "a" * 64
@@ -2547,11 +2666,11 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         by = {x["id"]: x for x in items}
         dga = f"examplesvlib@1.21.1:depgate:{SD}"
         want(rc == 0 and "examplesvlib: single" in o and ids_of(items, SL) == [
-            "ci-check", "setup", "upstream", "authors", "review", "fix", "recheck", "gates", f"depgate:{SD}", "pr", "ci",
-            "merge", "release"], f"a single-version library: the single-version round's order, its dependent's gate "
+            "ci-check", "setup", "upstream", "authors", "review", "fix", "recheck", "records", "gates", f"depgate:{SD}",
+            "done", "pr", "ci", "merge", "release"], f"a single-version library: the single-version round's order, its dependent's gate "
                                  f"before its merge: {rc} {o} {ids_of(items, SL)}")
         want(ids_of(items, SD) == ["ci-check", "setup", "upstream", "authors", "repin-head", "backlog", "review", "fix",
-                                   "recheck", "gates", "pr", "ci", "merge", "release"]
+                                   "recheck", "records", "gates", "done", "pr", "ci", "merge", "release"]
              and "examplesvlib@1.21.1:release" in by["examplesvmod@1.21.1:repin-head"]["deps"]
              and by[dga]["lock"] and by["examplesvlib@1.21.1:gates"]["lock"] and set(by[dga]["dirs"]) == {SL, SD},
              f"its dependent: re-pinned to the library's release of this round, its fix at its one version: {ids_of(items, SD)}")
@@ -2645,7 +2764,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
                                  {"repo": VD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": [SL]}),
                             [f"{SL}={sl}", f"{VD}={vd}"], sc)
         by = {x["id"]: x for x in items}
-        want(rc == 0 and ids_of(items, SL)[7:9] == ["gates", f"depgate:{VD}"]
+        want(rc == 0 and ids_of(items, SL)[7:11] == ["records", "gates", f"depgate:{VD}", "done"]
              and ids_of(items, VD)[:6] == ["ci-check", "setup", "repin-head", "backlog", "gates", "review"]
              and "examplesvlib@1.21.1:release" in by["examplevmod@1.21.1:repin-head"]["deps"],
              f"a single-version library gates its version-branch dependent's head before its merge: {rc} {o} {list(by)}")
@@ -2790,6 +2909,34 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             aj = "\n".join(job_task(st_, st_.item("examplesvlib@1.21.1:authors")))
         want("the driver ran port-sync.py" in aj and "steps 3-5" in aj and sl_up in aj,
              f"the authors' job on a single-version fork: reconcile and port the merged code: {aj}")
+        # #161 U5 (C2): the done records before the gates -- the review base recorded, the `?` rows, TEST-ITEMS.md and
+        # INVENTORY-CHECK.json committed (real fork-branches.py check-done); the review job runs that command too
+        with State.tx(sa2, write=False) as st_:
+            rv_ = "\n".join(job_task(st_, st_.item("examplesvlib@1.21.1:review")))
+            fx_ = "\n".join(job_task(st_, st_.item("examplesvlib@1.21.1:fix")))
+        mb_ = git(sl, "merge-base", "origin/neoforge-1.21.1", "HEAD").stdout.strip()
+        want(f"fork-branches.py check-done --repo {sl} --target 1.21.1 --base {mb_}" in rv_ and "REVIEW.md on" in fx_,
+             f"the single-version review job: the done list's REVIEW.md, against the round's base: {rv_} {fx_}")
+        note, r_ = step(sa2, "examplesvlib@1.21.1:records")
+        rec_ = git(sl, "show", "--name-only", "--format=", "HEAD").stdout.split()
+        want(sorted(rec_) == [".port/1.21.1/INVENTORY-CHECK.json", ".port/1.21.1/REVIEW.md", ".port/1.21.1/TEST-ITEMS.md"]
+             and f"- base: {mb_}" in git(sl, "show", "HEAD:.port/1.21.1/REVIEW.md").stdout
+             and "| changed | Authors.java | ? | ? |" in git(sl, "show", "HEAD:.port/1.21.1/REVIEW.md").stdout
+             and not git(sl, "status", "--porcelain").stdout.strip(),
+             f"the records step: the done list's records committed, nothing left in the work tree: {note} {rec_}")
+        # B1: a single-version library's marker skips Gate C spawn and battle; with no dependent gate in its segment
+        # nothing stands in for them, and the gates step refuses before any gate runs
+        (sd / ".port/1.21.1").mkdir(parents=True, exist_ok=True)
+        (sd / ".port/1.21.1/port.properties").write_text("library=true\n", encoding="utf-8")
+        cmds.clear()
+        sh = rec_sh()
+        try:
+            step(sa2, "examplesvmod@1.21.1:gates")
+            want(False, "a marked library with no dependent gate was gated")
+        except StepError as e:
+            want("port.properties marks" in str(e) and not cmds, f"B1: refused, nothing run: {e} {cmds}")
+        (sd / ".port/1.21.1/port.properties").unlink()
+        sh = real_sh
         # ONE gate pass under the machine's lock; the library's old jars removed first, the candidate built by it
         (sl / "build/libs").mkdir(parents=True, exist_ok=True)
         (sl / "build/libs/examplesvlib-0.9.jar").write_bytes(b"old")
@@ -2799,6 +2946,11 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
                 cmds.append(("lock-busy", not _flock(fh, block=False), None))
             (sl / "build/libs/examplesvlib-1.1.jar").write_bytes(b"candidate")      # no jar named as the pin
             (sl / "build/libs/examplesvlib-1.1_cf.jar").write_bytes(b"cf-candidate")
+            e_ = cmd[cmd.index("--env") + 1]
+            (sl / f"build/round-gates-{e_}.md").write_text(
+                f"Gates for `examplesvlib` at `{head(sl)[:7]}` for Minecraft 1.21.1 ({e_} environment) -- run by CI:\n\n"
+                "| check | result | detail |\n|---|---|---|\n| Gate C -- real client, `launch` | PASS | ok |\n",
+                encoding="utf-8")
         cmds.clear()
         sh = rec_sh(effect=gate_effect)
         note, r_ = step(sa2, "examplesvlib@1.21.1:gates")
@@ -2807,8 +2959,11 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
              and [c[c.index("--env") + 1] for c, _h, _w in g_] == ["full", "minimal"]
              and g_[0][0][g_[0][0].index("--base") + 1] == sl_up
              and sorted(j.name for j in built_jars(sl)) == ["examplesvlib-1.1.jar", "examplesvlib-1.1_cf.jar"]
-             and r_["gated_head"] == head(sl),
-             f"one ci-gates pass (full, minimal) under the machine's one-gate lock, the old jar removed: {note} {cmds}")
+             and r_["gated_head"] == git(sl, "rev-parse", "HEAD~1").stdout.strip() and r_["head_after"] == head(sl)
+             and git(sl, "diff", "--name-only", "HEAD~1", "HEAD").stdout.split() == [".port/1.21.1/GATES.md"]
+             and "for Minecraft 1.21.1 (full" in git(sl, "show", "HEAD:.port/1.21.1/GATES.md").stdout,
+             f"one ci-gates pass (full, minimal) under the machine's one-gate lock, the old jar removed; the full run "
+             f"committed as .port/1.21.1/GATES.md (#161 U5): {note} {cmds}")
         with State.tx(sa2) as st_:
             st_.item("examplesvlib@1.21.1:gates")["result"] = dict(r_, gated_at=time.time() - 5)
         # the dependent gate: the dependent's head gated against a PRIVATE mavenLocal holding the candidate jar (Gradle
@@ -2871,6 +3026,10 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         want("library's work branch" in ftxt and "version branch" not in ftxt.split("Acceptance")[0].split("failed.")[1],
              f"the dependent gate's fixer job names the library's work branch: {ftxt}")
         sh = real_sh
+        # #161 U5 (C2): the done list before the PR -- origin's head has no records yet: the first round only reports
+        note, r_ = step(sa2, "examplesvlib@1.21.1:done")
+        want(r_.get("report_only") and any("no verdict: changed Authors.java" in w for w in r_["open"]),
+             f"the first round on a head with no records: the done list reported, not blocking: {note} {r_}")
         # only the gated commit goes out (E5): records after it pass, code after it sends the gates and the dependent
         # gate back
         prs["sha"] = None
@@ -2921,6 +3080,42 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         note, r_ = step(sa2, "examplesvlib@1.21.1:ledger")
         want(any("render-ports" in c for c_, _h, _w in cmds for c in c_), f"with a ledger: the Ports block: {note} {cmds}")
         sh = real_sh
+        # C2 after the rollout: origin's head now carries the records, so a version that is not done does not go out;
+        # once the review is filled in (records only: the gates stay current) it is done
+        git(sl, "checkout", "-q", "neoforge-1.21.1", check=True)        # the PR merged: origin's head holds the records
+        git(sl, "merge", "-q", "--no-edit", "keep-current/2026-10-21", check=True)
+        git(sl, "push", "-q", "origin", "neoforge-1.21.1", check=True)
+        try:
+            step(sa2, "examplesvlib@1.21.1:done")
+            want(False, "a version that is not done passed the done step after the rollout")
+        except StepError as e:
+            want("NOT done" in str(e) and "no verdict" in str(e), f"after the rollout, not done blocks the PR: {e}")
+        rvp = sl / ".port/1.21.1/REVIEW.md"
+        rvp.write_text(rvp.read_text(encoding="utf-8").replace("- reviewer: ?", "- reviewer: reviewer-agent")
+                       .replace("- date: ?", "- date: 2026-10-28").replace("- commit: ?", f"- commit: {head(sl)[:12]}")
+                       .replace("| ? | ? |", "| ok | the authors' new class, unchanged |"), encoding="utf-8")
+        commit_paths(sl, [".port"], "the review")
+        note, r_ = step(sa2, "examplesvlib@1.21.1:done")
+        want(note == "done", f"the review filled, the gates still current: done: {note}")
+        # C3: the dependent re-pinned to the library's release while the library was not done: DEPS.md carries the mark
+        # promotion and publishing read at the tag; a re-pin to a done release drops it
+        with State.tx(sa2) as st_:
+            st_.item("examplesvlib@1.21.1:release")["result"] = {"tag": "examplesvlib-1.0-mc1.21.1"}
+            st_.item("examplesvlib@1.21.1:done").update(status="ok", result={"report_only": True})
+        note, r_ = step(sa2, "examplesvmod@1.21.1:records")
+        dep_ = git(sd, "show", "HEAD:.port/1.21.1/DEPS.md").stdout
+        pc_ = mod("pc")
+        tagged = lambda path: git(sd, "show", f"HEAD:{path}").stdout or None
+        want(r_.get("marks") == 1 and mod("fb").LIBRARY_PRERELEASE_MARK in dep_ and "examplesvlib-1.0-mc1.21.1" in dep_
+             and len(pc_.prerelease_pin_blockers("examplesvmod-1.0-mc1.21.1", tagged)) == 1,
+             f"C3: a single-version dependent pinned to an undone library pre-release is marked, and promotion refuses "
+             f"it: {note} {dep_}")
+        with State.tx(sa2) as st_:
+            st_.item("examplesvlib@1.21.1:done")["result"] = {}
+        note, r_ = step(sa2, "examplesvmod@1.21.1:records")
+        want(r_.get("marks") == 0 and git(sd, "cat-file", "-e", "HEAD:.port/1.21.1/DEPS.md").returncode != 0
+             and pc_.prerelease_pin_blockers("examplesvmod-1.0-mc1.21.1", tagged) == [],
+             f"C3: re-pinned to a done library release, the mark is gone: {note}")
         with State.tx(sa2, write=False) as st_:
             vbh = {"fork": SL, "version": "1.21.1"}
             st_.data["forks"][SL]["kind"] = "branches"
