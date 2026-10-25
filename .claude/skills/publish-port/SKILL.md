@@ -151,6 +151,14 @@ working, and the answer is to promote and publish the build that fixes it, not t
    first CurseForge file puts its project into moderation; publish the dependent port to CurseForge only after the
    library's project is approved -- re-run `publish = <tag>`: what is already on Modrinth is skipped (its version
    number is found there), so only CurseForge uploads. Modrinth has no such wait.
+4. **CurseForge reviews each file, and a library's can take days** (a coremod or network code goes to manual
+   review). The dependent's project relation names the library's *project*, not a file, so a dependent file approved
+   first would be live while no library file for that Minecraft version is, and a player's game would not load. Set
+   `"manual_release": true` under `curseforge` in the DEPENDENT's config: its files then go through review in
+   parallel with the library's but are uploaded held (`isMarkedForManualRelease`) -- approved, not released. Tell the
+   user each held file and its library file; once the library's file for that version is live, the user clicks
+   Release on the dependent's file page (CurseForge has no API to release it). Modrinth reviews projects, not
+   versions: nothing to hold there.
 
 **A publish that stops half-way is re-run, not repaired by hand:** Modrinth uploads first; when CurseForge then fails,
 fix the cause (often a new CurseForge requirement -- the error names it) and dispatch `publish = <tag>` again.
