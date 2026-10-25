@@ -94,8 +94,8 @@ cat > .git/hooks/pre-commit <<'HOOK'
 set -uo pipefail
 root="$(git rev-parse --show-toplevel)"
 # Portability, on every commit (about a second): the staged .py and .sh through tools/check-compat.py (Python 3.9
-# syntax, GNU-only shell, a bare "bash" argv...), and each staged script through the SYSTEM bash -n -- on a Mac that
-# is bash 3.2, the shell CI never runs.
+# syntax, GNU-only shell, a bare "bash" argv...), the staged .py through tools/check-encoding.py, and each staged
+# script through the SYSTEM bash -n -- on a Mac that is bash 3.2, the shell CI never runs.
 staged="$(git diff --cached --name-only --diff-filter=AMRC -- '*.py' '*.sh')"
 if [ -n "$staged" ] && [ -f "$root/tools/check-compat.py" ]; then
   . "$root/tools/python.sh" || exit 1
@@ -105,6 +105,16 @@ if [ -n "$staged" ] && [ -f "$root/tools/check-compat.py" ]; then
     echo "pre-commit: REFUSED — a portability problem (above; CLAUDE.md \"Portability\"). Nothing was committed." >&2
     exit 1
   }
+  # every text open/read/write names its encoding (Windows defaults to cp1252): the commonest Windows CI failure
+  stagedpy="$(printf '%s\n' $staged | grep '\.py$' || true)"
+  if [ -n "$stagedpy" ] && [ -f "$root/tools/check-encoding.py" ]; then
+    # shellcheck disable=SC2086
+    (cd "$root" && python3 tools/check-encoding.py $stagedpy) >/dev/null 2>&1 || {
+      (cd "$root" && python3 tools/check-encoding.py $stagedpy)
+      echo "pre-commit: REFUSED — text I/O without encoding=\"utf-8\" (above; Windows reads cp1252). Nothing was committed." >&2
+      exit 1
+    }
+  fi
   sysbash=/bin/bash; [ -x "$sysbash" ] || sysbash=bash
   for f in $staged; do
     case "$f" in *.sh) "$sysbash" -n "$root/$f" || {
@@ -133,4 +143,4 @@ fi
 exit 0
 HOOK
 chmod +x .git/hooks/pre-commit
-echo "installed: .git/hooks/pre-commit  (check-compat.py and the system bash -n on staged .py/.sh; check-similarity.py --staged when template Java is staged)"
+echo "installed: .git/hooks/pre-commit  (check-compat.py, check-encoding.py and the system bash -n on staged .py/.sh; check-similarity.py --staged when template Java is staged)"

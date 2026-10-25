@@ -54,7 +54,7 @@ gh repo fork jivinstev/mc-mod-version-upgrade --clone
 ```
 
 Install the hooks once after cloning: `./tools/install-hooks.sh`. The pre-push hook refuses direct pushes to `main`
-and runs the IP gate before anything leaves your machine. The pre-commit hook runs `tools/check-compat.py` and the
+and runs the IP gate before anything leaves your machine. The pre-commit hook runs `tools/check-compat.py`, `tools/check-encoding.py` and the
 system `bash -n` (bash 3.2 on a Mac) on the staged `.py` and `.sh`, so a portability break is refused at commit time.
 The pre-commit and pre-push hooks also run
 `tools/check-similarity.py`, which refuses template Java transcribed from the NeoForge, Minecraft or GeckoLib

@@ -12,6 +12,9 @@ _took() { _dt=$((SECONDS - _t_last)); _t_last=$SECONDS; }    # in this shell, no
 ok()  { _took; printf '  PASS %4ss  %s\n' "$_dt" "$1"; pass=$((pass+1)); }
 bad() { _took; printf '  FAIL %4ss  %s\n' "$_dt" "$1"; fail=$((fail+1)); }
 
+# PORT_TOOLS_PART=1|2 runs one half (CI runs the halves as parallel jobs); unset runs everything, as before.
+case "${PORT_TOOLS_PART:-all}" in all|1|2) ;; *) echo "PORT_TOOLS_PART must be 1, 2 or unset" >&2; exit 2 ;; esac
+if [ "${PORT_TOOLS_PART:-all}" != 2 ]; then   # part 1: sections 0-13, the tool self-checks, the hop tests
 echo "0. portable to macOS (bash 3.2, BSD tools, Python 3.9) and Windows -- tools/check-compat.py"
 # Linux CI alone passes code that breaks the other two (GNU sed -i, a heredoc inside $( ), Python 3.10+ syntax,
 # a bare "bash" argv on Windows...): the static check runs on every tracked .py and .sh.
@@ -609,6 +612,8 @@ out="$(python3 "$T/test-port-tools-heredoc-5.py" 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "port_gates: annotation-free GameTest harness from 1.21.5 on, 1.21.1-1.21.4 left alone" \
   || bad "port_gates check: $out"
 
+fi   # part 1
+if [ "${PORT_TOOLS_PART:-all}" != 1 ]; then   # part 2: known-issues onward (~half the time on Windows)
 # ---- the known-issues ledger (tools/known-issues.py, issue #135 part 1): in-process, one tiny git repo -- seconds
 echo "known-issues.py: the S1-S4 ledger at the head branch"
 out="$(python3 tools/known-issues.py --self-check 2>&1)"
@@ -1751,5 +1756,6 @@ sys.exit(1 if bad else 0)
 PY
 
 echo
-echo "port-tools self-test: $pass passed, $fail failed"
+fi   # part 2
+echo "port-tools self-test${PORT_TOOLS_PART:+ (part $PORT_TOOLS_PART of 2)}: $pass passed, $fail failed"
 [ "$fail" = 0 ] || exit 1

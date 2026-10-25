@@ -91,4 +91,4 @@ macOS CI job runs the suites under Apple's bash 3.2, BSD tools and Python 3.9; W
 
 When a rule cannot apply to a line (a Linux-only cloud script, a call already inside an `os.name` guard), say so
 on that line with `# compat-ok: <reason>`. Run `tools/install-hooks.sh` once per clone: its pre-commit hook runs
-`check-compat.py` and the system `bash -n` (bash 3.2 on a Mac) on what you stage.
+`check-compat.py`, `check-encoding.py` and the system `bash -n` (bash 3.2 on a Mac) on what you stage.
