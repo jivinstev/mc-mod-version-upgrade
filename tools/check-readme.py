@@ -30,7 +30,8 @@ PATH = re.compile(r"(?<![\w./-])((?:tools|docs|templates|setup|cloud|\.claude|\.
 SV_ROOTS = [f"tools/{t}.py" for t in ("port", "port-upstream", "port-sync", "port-ci", "port-publish", "ci-gates",
                                         "shipped-gate")]
 SV_PREFIX = ("templates/upstream-harness/",)                           # every single-version fork's CI and harness
-MV_TOOLS = {f"tools/{t}" for t in ("fork-branches.py", "fork-port.py", "round.py", "checkout-lock.py", "layer-inventory.py",
+# round.py is not one of them: it drives single-version forks too (#161 U4)
+MV_TOOLS = {f"tools/{t}" for t in ("fork-branches.py", "fork-port.py", "checkout-lock.py", "layer-inventory.py",
                                    "make-multiversion.sh")}
 MV_PREFIX = ("templates/fork-layer/", "tools/check-", "tools/test-", "tools/guard-names.py", "tools/install-hooks.sh",
              "tools/propose-learnings.py")          # the version branches' shared library, or this repository's own tooling
