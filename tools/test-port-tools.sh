@@ -932,6 +932,24 @@ out="$(python3 tools/fork-port.py --repo "$LK" --target 1.21.4 2>&1)"; code=$?
 SVL="$T/lk-single"; mkdir -p "$SVL/build"; cp "$LK/build/.fork-port.lock" "$SVL/build/"
 python3 tools/ci-gates.py --repo "$SVL" --modid m --work-dir "$T/lkw2" >/dev/null 2>&1; code=$?
 [ $code != 14 ] && grep -q "\"pid\": $HOLD" "$SVL/build/.fork-port.lock" && ok "ci-gates without --mc (a single-version fork) ignores the lock entirely" || bad "single-version ci-gates touched the lock (exit $code)"
+# The real Gate A (port_gates.gate_a) against a faked Gradle: every other test fakes gate_a itself, so a broken
+# reference inside it (a helper removed with the layer route) crashed every fork's gates with nothing failing here.
+GA="$(mktemp -d)"; mkdir -p "$GA/src/main/resources/META-INF"
+out="$(python3 - "$GA" <<'PY' 2>&1
+import pathlib, sys, types
+sys.path.insert(0, "tools"); import port_gates as pg
+repo = pathlib.Path(sys.argv[1])
+def gradle(r, args, log, **kw):
+    d = pathlib.Path(r) / "build/test-results/test"; d.mkdir(parents=True, exist_ok=True)
+    (d / "TEST-x.xml").write_text('<testsuite tests="3" failures="0" errors="0"/>', encoding="utf-8")
+    pathlib.Path(log).write_text("", encoding="utf-8"); return types.SimpleNamespace(returncode=0)
+pg.gradle = gradle; pg.gate_env = lambda c: {"PORT_GRADLE_INIT": "x"}
+print("ran", pg.gate_a({"repo": repo}, str(repo / "a.log")))
+PY
+)"
+[ "$out" = "ran 3" ] && ok "port_gates.gate_a itself (Gradle faked): reads build/test-results/test and counts the tests run" \
+  || bad "port_gates.gate_a: $out"
+rm -rf "$GA"
 kill $HOLDJOB 2>/dev/null; wait $HOLDJOB 2>/dev/null
 # the holder is gone: its lock is stale -- a real fork-port run on the version branch takes it over and releases it when
 # it ends (it stops at setup here: no Gradle project, exit 10 or 2)
