@@ -144,7 +144,8 @@ run is green, and it is then gated against the dependency's NEW build.
    listener (fix each before the PR), and `skipped: <why>` means that audit could not run (run
    `tools/audit-mixin-targets.py` or `tools/audit-event-listeners.py` by hand then).
 5. **Gate** (`ci-gates.py`, full and minimal; one run at a time -- the software-rendered client gives false
-   failures under CPU contention, and the A/B worktrees share `~/.gradle`, so they count too). Then each mode's reproduction, for the modes this run decided.
+   failures under CPU contention, and the A/B worktrees share `~/.gradle`, so they count too; in the weekly round the
+   driver runs it under the machine-wide gate lock, and a worker runs any full gate run as `round.py gate -- <command>`). Then each mode's reproduction, for the modes this run decided.
    **A shipped-jar expectation that fails right after an upstream merge is not yet a regression.** The authors may
    have reworded the log line the expectation reads (e.g. a class logged by its internal name,
    `net/minecraft/server/level/ServerLevel`, where it was `ServerLevel`). Before deciding, bisect it with the same
@@ -381,12 +382,12 @@ whole context written again after each wait on gates or CI longer than the 5-min
   version's status, the open rows and findings, the shas, what comes next -- to `round/NOTES.md` and continues from a
   fresh subagent (or session) that starts from that file, instead of carrying on.
 
-**A set of version-branch forks runs on its driver, `tools/round.py`; the session never does a step by hand** (only
-when every fork of the set is a version-branch fork -- round-task `--version-branches` renders this into the prompt; a
-set with a single-version fork keeps the rules above, unchanged, and `round.py init` refuses it). On the 2026-10-21 round (two version-branch forks, 19 versions, about $215)
+**Every fork set runs on its driver, `tools/round.py`; the session never does a step by hand** -- a set of
+single-version forks, of version-branch forks, or both mixed (#161 U4; round-task renders this into the prompt of every
+set, and `--version-branches`, which older setups pass, changes nothing). On the 2026-10-21 round (two version-branch forks, 19 versions, about $215)
 the orchestrator still reached ~549k tokens although its prompt said to hand off at ~200k, and cache writes were ~51%:
 idle gaps on gates, CI and parallel workers, and three container restarts, each re-wrote it. A prompt rule did not keep
-it small, so for such a set the orchestration is a tool, which replaces the four rules above:
+it small, so the orchestration is a tool, which replaces the four rules above:
 
 - **`round.py init --frozen round/frozen.json --fork <owner/repo>=<clone> ...`** (after step 1's freeze; every fork, the
   library first) builds `round/STATE.json`: per fork and version, in ladder order, the steps below as typed items with
@@ -394,8 +395,11 @@ it small, so for such a set the orchestration is a tool, which replaces the four
   the versions. A version gets items only when it has work this round -- the head cascade of the authors' code the
   plan takes, a selected fix at or below it, a library release of this round to re-pin to, a ticked dependency bump
   at it, or this repository's shared library moved past it (below) -- so a plan that selects nothing, on forks already
-  on the current shared library, builds nothing but the close. It refuses a set with a single-version fork and
-  a clone whose origin is not that fork. **State is the round's only memory:** after a container restart, or whenever this session's context
+  on the current shared library, builds nothing but the close. It refuses a clone whose origin is not that fork. A
+  version-branch dependent's version BRANCH (not its head) that depends on a single-version library is never re-pinned
+  by the driver (`layer-deps.py resolve --port-release` takes only a version branch's release): `init` refuses the set
+  only when the library releases this round AND that branch's Port CI workflow pins it; otherwise the queue is built and
+  the close job names the branch to re-pin by hand. **State is the round's only memory:** after a container restart, or whenever this session's context
   has grown, continue from a fresh session with `round.py resume` (an interrupted mechanical step runs again; each one
   checks what is already done first).
 - **The round keeps the forks on this repository's shared library.** `init` reads every version branch against the
@@ -459,8 +463,33 @@ it small, so for such a set the orchestration is a tool, which replaces the four
   and a GATES.md in the dependent's worktree certifying its HEAD with every row green. A red run is a blocking finding on the LIBRARY version -- its fixer
   grades it and fixes it there, and the library's full gates and this gate run again -- instead of a reopen, a `-r2`
   re-release and a dependent re-pin after the merge (the 2026-10-21 round, the second week running). After the release,
-  the dependent re-pins to it and `library-record` records its Gate C on the released jar, as before. A version-branch
-  library only; the head and a single-version library keep Run step 7.
+  the dependent re-pins to it and `library-record` records its Gate C on the released jar, as before. **A single-version
+  library has the same gate** before its head merges, and so has a version-branch library's head or version wherever a
+  single-version dependent has that version: the dependent's HEAD (origin's, on a throwaway worktree) is gated by
+  `ci-gates.py` full and minimal -- the head path's commands, with its workflow's own `--base` -- under the machine-wide
+  gate lock, against a PRIVATE mavenLocal (`round/work/depgate-<dependent>-<v>-m2`: a copy of `~/.m2/repository`, Gradle
+  pointed at it with `-Dmaven.repo.local` through `PORT_GRADLE_ARGS`, which every Gradle call of a gate run carries)
+  holding the library's candidate jar (the one the library's own gate pass just built, its old jars removed before that
+  pass; the built jar of the pinned asset's name and variant) at the coordinates the dependent's Port CI puts the
+  library's release (`port-ci.py --dep-jar`). `~/.m2` itself is never written, so a kill or a restart mid-gate, or
+  another fork's build meanwhile, never meets the candidate there. It is green
+  only when both runs exit 0; a red run is a blocking finding on the library, as above. A set of version-branch forks
+  only keeps its head without this gate (unchanged for that set), and a head has no `library-record`.
+- **A single-version fork on the driver is its head alone** (principle 2: nothing of the ladder -- the lowest check,
+  sync-shared, the cascade, the freeze, `library-record` -- is built or read for it), in the single-version round's
+  order: `ci-check` (`port-ci.py check` on origin's head: a WARNING never blocks; `setup` then regenerates the workflow
+  on the work branch at the newest kit, its own options read back, so the PR carries it), `setup` (the work branch
+  `keep-current/<date>` from origin's head, the ticked `dep_bumps`), `upstream` (the authors' merge, mechanical:
+  `port-sync.py --port keep-current/<date> --base <head> --upstream <the remote fetching the plan's upstream>/<branch>
+  --commit <upstream_commit>`; a conflict stops it red and becomes its fixer's job -- resolve, commit the merge -- after
+  which it finds nothing left to merge), `authors` (an agent: Run steps 3-5, reconcile and port to green A/B),
+  `repin-head` (an agent, a dependent: Run step 7's `port-ci.py args` edit to the library's release of this round),
+  `backlog`, the fresh `review`, `fix` and `recheck`, then `gates` (ONE `ci-gates.py` full and minimal pass on the
+  reviewed tree, under the machine-wide lock), `depgate:<dependent>` (a library), `pr` (only what that pass gated),
+  `ci`, `merge` (no push-run wait) and `release` (dispatched right after the merge; the merge's push run and the release
+  run awaited together), and the final `ledger` (statuses; the README Ports block only on a fork with
+  `.port/KNOWN-ISSUES.json`). A version-branch fork's head keeps its own order (gates before the review, the push run
+  awaited at the merge).
 
 0. **Preflight, before anything else:** `python3 tools/round-preflight.py --fork <owner/repo>=<clone> ...` (every fork of
    the set; read-only). It prints one line per need and `MISSING` with what to do: **each fork's clone** (a scheduled
@@ -492,10 +521,10 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    normally 24 hours apart, and an early freeze cuts the owner's window to tick and reply. Only when the owner asked to
    start now (on the plan issue, or in this session) add `--now`: `frozen.json` records it as `early_start`, and the first
    comment says so. Each
-   grade override is applied first (on a version-branch set, the driver's `grades` item): `known-issues.py grade --repo <fork> <ID> --override <S>
+   grade override is applied first (the driver's `grades` item): `known-issues.py grade --repo <fork> <ID> --override <S>
    --reason "<reason> (plan #N)" --by <who>` on the head branch, committed alone. Post a first comment on the plan issue:
-   the frozen selection, @owner. Then, on a version-branch set, `round.py init` (above). **Dependency updates** (on a
-   version-branch set, the driver's `setup` and `repin` items): each fork's `dep_bumps` in `frozen.json` (the boxes left ticked) are applied exactly once, at
+   the frozen selection, @owner. Then `round.py init` (above). **Dependency updates** (the driver's `setup` items, and
+   on a version branch its `repin` items): each fork's `dep_bumps` in `frozen.json` (the boxes left ticked) are applied exactly once, at
    that version's setup and before its gates: run each entry's `command` (`layer-deps.py resolve --repo <checkout of
    neoforge-<mc>> --target <mc> --bump <g:m>=<coord>`) in the checkout of that version's branch and commit the changed
    `branch.properties` (a version branch) or `build.gradle` / `gradle.properties` (a single-version fork, or the port
@@ -508,7 +537,9 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    says so (`take_authors`), and a done version is reopened only for an S1.**
    - **A single-version fork:** when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (step 2's
      `port-sync.py ... --base <head> --commit <upstream_commit>`; merge, reconcile,
-     port, gate, PR into the head), with step 6's merge and release run only after step 4 below (review and grading). Each selected known issue is fixed on the port branch. Nothing else changes for it.
+     port, gate, PR into the head), with step 6's merge and release run only after step 4 below (review and grading). Each selected known issue is fixed on the port branch. Nothing else changes for it. On the driver
+     the merge is its `upstream` step and the reconcile and port its `authors` job ("A single-version fork on the
+     driver", above).
    - **A version-branch fork with `head_cascade: true`** (the authors' box ticked, or the head has none of their code
      untaken): when `take_authors`, Run steps 2-6 with the frozen `upstream_commit` (when only the head's untaken code is
      to take and nothing is new upstream, the merge is empty: go on), step 6's merge only after step 4 below for the
@@ -549,8 +580,8 @@ it small, so for such a set the orchestration is a tool, which replaces the four
      `fork-branches.py untaken --repo DIR --upstream <remote>/<branch>` lists, at any point, the authors' code the head
      has that a version has not taken: after a `head_cascade: false` round it must still list what the plan listed.
 4. **Per version, in ladder order**, once its code is in -- first `python3 tools/port-cost.py mark --fork <owner/repo>
-   --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks; on a
-   version-branch set the driver writes it, with `--phase`, at every item boundary).
+   --version <v>` (appends the time to `round/marks.tsv`: the cost table splits this session's usage at these marks; the
+   driver writes it, with `--phase`, at every item boundary).
    **Mark every change of the kind of work too**, with `--phase` (same fork and version; one more column in the file):
    `upstream` -- the authors' cascade and resolving its conflicts and decisions (step 3's head cascade is marked
    `--version <the lowest version it reaches> --phase upstream` when it starts), `backlog` -- the selected known-issue
@@ -570,8 +601,9 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    - (a single-version fork, once per round, before its first commit) `python3 tools/port-ci.py check --repo DIR`: the
      same check of the port branch's workflow (an older kit -- new gates reach a fork only from the first kit that ships
      them -- or no records ignore), a WARNING that never blocks, with the command that regenerates it at the newest kit
-     (its own options read back). Regenerate and push it with the work branch's PR when `allow` has `merge-fork-prs`
-     (else ask), and name it in the closing comment;
+     (its own options read back). The driver's `ci-check` item runs it on origin's head and its `setup` regenerates the
+     workflow on the work branch, so it goes out with the work branch's PR (under `merge-fork-prs`; else that PR asks);
+     name it in the closing comment;
    **The order is fixed: gates and the review, then the findings graded, then the merge, then the pre-release** (on a
    version branch the review starts from the cascade's green A/B gates and the one full run follows its fixes, below). The
    review is of the version's work branch (`keep-current/<date>-<v>`, or the version branch's checkout before it is
@@ -624,7 +656,9 @@ it small, so for such a set the orchestration is a tool, which replaces the four
      (when it cuts a pre-release, awaited together with the release run: next item);
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
      `pre-release` in `allow`; without it, ask on the plan issue. Never before the review and its S1/S2 findings above.
-     **Dispatch it right after the merge** (every kind of fork) instead of after the push run alone: the release run
+     **Dispatch it right after the merge** (every kind of fork; for now a version-branch fork's HEAD is the exception:
+     the driver waits for its push run at the merge, "A single-version fork on the driver" above) instead of after the
+     push run alone: the release run
      checks out the merged commit and its release job needs that run's own full gates (full, minimal and every variant
      leg), so no pre-release is cut without a green full-gate run on exactly the released tree. Wait for the push run
      and the release run together, in one blocking command, and report both; a red push run is handled by step 6's rule
@@ -638,8 +672,8 @@ it small, so for such a set the orchestration is a tool, which replaces the four
    - its cost: `fork-port.py`'s cost stage appends to `.port/<v>/COST.md` (tokens, dollars, wall time and a price tier,
      never a model name); work done outside it is appended with `python3 tools/port-cost.py <modid> --path DIR --target
      <v> --since <round start> --print >> .port/<v>/COST.md`, committed with the version's records.
-   Post a progress comment on the plan issue as each version finishes (gates, review, the pre-release tag; on a
-   version-branch set the driver posts it when the version's release item ends).
+   Post a progress comment on the plan issue as each version finishes (gates, review, the pre-release tag; the
+   driver posts it when the version's release item ends).
 5. **New findings.** Grade each with `known-issues.py add` (the rubric's inputs, `--lowest` its lowest affected
    version, `--file` each file it is in, `--pattern` a text whose presence means the defect is there, so a later
    `known-issues.py lowest` finds it on other branches with git alone); a WARNING that it may repeat an entry means read that entry first and record
@@ -742,9 +776,9 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
    the head branch the default, or rerun with `--default-branch-too`, which commits the same workflow file to the
    default branch too. Push what it names. The other forks must be public (the workflow reads them without a token).
 2. **The round task:** list the scheduled tasks (`list_triggers`) first, then `python3 tools/weekly-plan.py round-task
-   --repo <library checkout> --existing "<name>" ...` with every name the listing returned, and `--version-branches`
-   only when every fork of the set is a version-branch fork (the "Which kind of fork" answer above): the round then runs
-   on `tools/round.py`; without it the prompt is the single-version one, unchanged. It prints the task as JSON.
+   --repo <library checkout> --existing "<name>" ...` with every name the listing returned: the round runs on
+   `tools/round.py` for every fork set (`--version-branches`, which older setups pass, is accepted and changes nothing).
+   It prints the task as JSON.
    Its `replaces` holds exact task names, never a description: the round's own name, each `--replace-task` name, and
    each listed name that starts with "keep-current" and names a fork of this set. Delete a task only when its name is
    exactly one of them -- no match, no deletion -- then `create_trigger` with its `name`, `cron_expression`
