@@ -43,7 +43,7 @@ asst S2 z1 2026-09-30T11:00:00Z /elsewhere/y 999 9999 > "$J/S2.jsonl"
 
 echo "0. port-cost.py (fixture transcripts)"
 out="$(python3 tools/port-cost.py fakeport --workspace "$WS" --print 2>&1)"; code=$?
-C="$(python3 tools/port-cost.py fakeport --workspace "$WS" --print >/dev/null 2>&1; python3 - "$WS" <<'PY2'
+cat > "$T/test-cycle-heredoc-1.py" <<'PY2'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, sys, pathlib, os
 spec = importlib.util.spec_from_file_location("pc", "tools/port-cost.py"); pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
 s = pc.collect("fakeport", pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
@@ -51,7 +51,7 @@ c = pc.summarise("fakeport", s, pathlib.Path(sys.argv[1]) / "mods/fakeport")
 t = c["totals"]
 print(c["sessions"], t["requests"], t["subagent_requests"], t["output"], t["cache_read"], t["thinking"], t["cache_write_5m"], t["cache_write_1h"], c["usd"], sorted(c["effort"].items()), list(c["contamination"].values()))
 PY2
-)"
+C="$(python3 tools/port-cost.py fakeport --workspace "$WS" --print >/dev/null 2>&1; python3 "$T/test-cycle-heredoc-1.py" "$WS")"
 [ "$C" = "1 4 1 350 3500 15 120 180 1.5 [('high', 3), ('medium', 1)] [{'othermod': 1}]" ] \
   && ok "one request split over two blocks counts ONCE; subagent included; unrelated sessions not; a READ of another mod is not 'mixed'" \
   || bad "totals: $C"
@@ -79,13 +79,13 @@ req("q5", 300)                                                       # compactio
 req("q6", 400)
 open(sys.argv[1], "w").write("\n".join(json.dumps(x) for x in L) + "\n")
 PY4
-P5="$(python3 - <<'PY5'
+cat > "$T/test-cycle-heredoc-2.py" <<'PY5'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, pathlib, os
 spec = importlib.util.spec_from_file_location("cp", "tools/context-profile.py"); cp = importlib.util.module_from_spec(spec); spec.loader.exec_module(cp)
 p = cp.profile("fakeport", pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
 print(len(p["reqs"]), p["carried"]["catalogue"], p["carried"]["build"], p["sizes"]["catalogue"])
 PY5
-)"
+P5="$(python3 "$T/test-cycle-heredoc-2.py")"
 # catalogue (1000 tok) is carried by q2,q3,q4 = 3000; build (200 tok) by q3,q4 = 400; the compaction at q5 stops both
 [ "$P5" = "6 3000 400 1000" ] && ok "context-profile charges each result for the requests that carried it, and a compaction stops it" \
   || bad "context-profile: $P5"
@@ -137,13 +137,13 @@ rm "$J/S3.jsonl"
 # a no-cost-state build on a PRICED model gets an estimate from the exact tokens, labelled as one
 mv "$J/S1.jsonl" "$T/S1.keep"; mv "$J/S1" "$T/S1dir.keep"
 asst S4 p1 2026-09-30T12:00:00Z /w/mods/fakeport/C.java 1000000 1000000 | sed 's/claude-test-1/claude-opus-5-5/' > "$J/S4.jsonl"
-E="$(python3 - "$WS" <<'PY3'
+cat > "$T/test-cycle-heredoc-3.py" <<'PY3'   # written out, then run: macOS bash 3.2 misparses quotes in a heredoc inside $( )
 import importlib.util, sys, pathlib, os
 spec = importlib.util.spec_from_file_location("pc", "tools/port-cost.py"); pc = importlib.util.module_from_spec(spec); spec.loader.exec_module(pc)
 c = pc.summarise("fakeport", pc.collect("fakeport", pathlib.Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects"), pathlib.Path(sys.argv[1]) / "mods/fakeport")
 print(c["usd"], c["usd_source"], pc.corpus_row(c)["usd_source"])
 PY3
-)"
+E="$(python3 "$T/test-cycle-heredoc-3.py" "$WS")"
 # 10 input @4 + 1M output @20 + 1M cache read @0.20 + 40 5m-writes @5 + 60 1h-writes @8, per million
 [ "$E" = "20.2 estimated estimated" ] \
   && grep -q '≈ \$20.20.*estimated from tokens at list prices' <<<"$(python3 tools/port-cost.py fakeport --workspace "$WS" --print 2>&1)" \

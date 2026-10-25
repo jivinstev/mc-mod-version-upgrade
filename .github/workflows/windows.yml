@@ -295,8 +295,49 @@ jobs:
       - run: ./tools/test-gates.sh
       - run: ./tools/test-renames.sh
       - run: ./tools/test-cycle.sh
+      # port tools and the review self-test run as their own jobs below, in parallel: this job was ~11 min of
+      # suites run one after another, the longest check on every PR.
+
+  # The two halves of tools/test-port-tools.sh (PORT_TOOLS_PART) and the review self-test, each on its own runner
+  # beside `static`, so the Windows wall time is the longest one (~5 min) rather than the sum.
+  static-port-tools:
+    name: windows port tools (part ${{ matrix.part }} of 3)
+    if: github.event.action != 'labeled'
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - run: ./tools/test-port-tools.sh
-      # last: it re-runs a changed self-test (test-cycle.sh) on base and head, so that one must work first
+        env:
+          PORT_TOOLS_PART: ${{ matrix.part }}
+
+  static-review:
+    name: windows review self-test
+    if: github.event.action != 'labeled'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # it re-runs a changed self-test on the base and the head
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - run: ./tools/test-review.sh
 
   bootstrap:
