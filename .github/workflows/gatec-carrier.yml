@@ -1,0 +1,191 @@
+# The Gate C carrier: templates/smoke-harness's client driver (mod id smokeharness) built as one jar per Minecraft
+# version that a player's real NeoForge install loads (tools/gatec-carrier.py), and published for test runners.
+#
+# Every run starts with the plan job (cheap): the carrier's self-check, then each version's generated sources are
+# digested and compared with the newest published release's MANIFEST.txt. The build matrix runs when they differ, on a
+# pull request also when this workflow, tools/gatec-carrier.py or tools/shipped-gate.py change, and on every manual run.
+# It builds every version (the targeted lines of templates/fork-layer/versions.json, each on its own Java: 21 for
+# 1.21.x, 25 for 26.x) and fails if any version does not: build, check the jar's metadata, boot it in a real NeoForge
+# dedicated server of its version (tools/shipped-gate.py) and run it in that version's dev client under Xvfb (the
+# gauntlet phase; PASS required on stdout and in latest.log). Each version's jar is uploaded as artifact gatec-carrier-<mc>.
+#
+# Release: on a push to main whose sources differ from the newest release, once every version built and passed,
+# gatec-carrier-vN (N one past the newest) is published with gatec-carrier-<mc>.jar per version, SHA256SUMS and
+# MANIFEST.txt. Releases are immutable and never "latest": an existing tag is never replaced; most pushes publish nothing.
+name: gatec-carrier
+
+on:
+  # No path filter: the plan job decides from the generated sources themselves, so an edit to a shared input (a
+  # harness rename table, versions.json, the smoke harness) is built wherever it lands.
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gatec-carrier-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Self-check
+        run: python3 tools/gatec-carrier.py --self-check
+      - name: Versions
+        id: versions
+        run: |
+          python3 tools/gatec-carrier.py versions
+          echo "matrix=$(python3 tools/gatec-carrier.py versions --json)" >> "$GITHUB_OUTPUT"
+      - name: Compare with the newest published carrier
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          newest=$(gh release list --repo "${{ github.repository }}" --limit 200 --json tagName \
+                   --jq '[.[].tagName | select(test("^gatec-carrier-v[0-9]+$")) | ltrimstr("gatec-carrier-v") | tonumber] | max // 0')
+          args="--newest $newest"
+          if [ "$newest" -gt 0 ]; then
+            gh release download "gatec-carrier-v$newest" --repo "${{ github.repository }}" -p MANIFEST.txt -D published
+            args="$args --published published/MANIFEST.txt"
+          fi
+          python3 tools/gatec-carrier.py plan $args > "$RUNNER_TEMP/plan.txt"
+          cat "$RUNNER_TEMP/plan.txt"
+          cat "$RUNNER_TEMP/plan.txt" >> "$GITHUB_OUTPUT"
+          build=$(sed -n 's/^publish=//p' "$RUNNER_TEMP/plan.txt")
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            build=true
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags origin "${{ github.base_ref }}"
+            changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+            if grep -qE '^(\.github/workflows/gatec-carrier\.yml|tools/gatec-carrier\.py|tools/shipped-gate\.py)$' <<<"$changed"; then
+              build=true
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "build=$build"
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    name: carrier ${{ matrix.v.mc }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        v: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Gradle runs on 21 (the wrapper's Gradle predates Java 25); a 26.x build, server and client use the Java 25
+      # toolchain. The last version listed is the default JAVA_HOME.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            25
+            21
+      - name: Toolchains from setup-java
+        run: |
+          mkdir -p ~/.gradle
+          echo "org.gradle.java.installations.fromEnv=JAVA_HOME_21_X64,JAVA_HOME_25_X64" >> ~/.gradle/gradle.properties
+      - name: Software OpenGL for the client
+        run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri libegl1 libegl-mesa0
+      - name: Generate the ${{ matrix.v.mc }} carrier
+        run: python3 tools/gatec-carrier.py prepare --mc "${{ matrix.v.mc }}" --out "$RUNNER_TEMP/carrier"
+      - name: Build
+        working-directory: ${{ runner.temp }}/carrier
+        run: bash gradlew --no-daemon --console=plain build
+      - name: Collect the jar
+        run: |
+          mkdir -p dist
+          cp "$RUNNER_TEMP/carrier/build/libs/gatec-carrier-${{ matrix.v.mc }}.jar" dist/
+          ls -l dist
+      - name: The jar's metadata accepts Minecraft ${{ matrix.v.mc }} / NeoForge ${{ matrix.v.neo }}
+        run: python3 tools/gatec-carrier.py check-jar --mc "${{ matrix.v.mc }}" --jar "dist/gatec-carrier-${{ matrix.v.mc }}.jar"
+      - name: A real NeoForge ${{ matrix.v.neo }} server loads it
+        run: |
+          python3 tools/shipped-gate.py --repo "$RUNNER_TEMP/carrier" --jar "dist/gatec-carrier-${{ matrix.v.mc }}.jar" \
+            --mc "${{ matrix.v.mc }}" --neo "${{ matrix.v.neo }}" --expect-log "latest.log:smokeharness: loaded" \
+            --work-dir "$RUNNER_TEMP/server" --cache-dir "$RUNNER_TEMP/server-cache"
+      - name: The ${{ matrix.v.mc }} client runs the gauntlet (Xvfb)
+        run: python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode gauntlet --timeout 1500
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gatec-carrier-${{ matrix.v.mc }}
+          path: dist/gatec-carrier-${{ matrix.v.mc }}.jar
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-${{ matrix.v.mc }}
+          path: |
+            ${{ runner.temp }}/carrier/client-smoke.log
+            ${{ runner.temp }}/carrier/run/client/logs/latest.log
+            ${{ runner.temp }}/carrier/run/client/crash-reports/
+            ${{ runner.temp }}/server/server/console.log
+            ${{ runner.temp }}/server/server/logs/latest.log
+            ${{ runner.temp }}/server/server-failure.log
+          if-no-files-found: ignore
+
+  release:
+    needs: [plan, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: gatec-carrier-release      # two merges in quick succession must not race for the same number
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gatec-carrier-*
+          path: dist
+          merge-multiple: true
+      - name: Publish gatec-carrier-v${{ needs.plan.outputs.version }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="gatec-carrier-v${{ needs.plan.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 \
+             || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag exists already: a carrier release is never replaced"; exit 1
+          fi
+          python3 tools/gatec-carrier.py release --dist dist --tag "$tag" --commit "${{ github.sha }}"
+          cat dist/MANIFEST.txt
+          {
+            echo "**Gate C carrier ${tag#gatec-carrier-}** -- the smokeharness client test mod, one jar per Minecraft version."
+            echo
+            echo "Put \`gatec-carrier-<minecraft>.jar\` in a NeoForge instance's mods/ beside the mods under test and start the"
+            echo "client with \`-Dsmokeharness.boottest=true -Dsmokeharness.testmode=<launch|spawn|battle|gauntlet>"
+            echo "-Dsmokeharness.namespaces=<mod ids>\`; it prints \`SMOKEHARNESS_BOOT_TEST: PASS ...\` or \`... FAIL ...\` (stdout"
+            echo "and latest.log) and quits. MANIFEST.txt lists each jar's NeoForge and Java; SHA256SUMS pins them."
+            echo
+            echo "Not a release of this repository. Built from \`${{ github.sha }}\` by tools/gatec-carrier.py, published"
+            echo "automatically because the carrier's sources changed; never replaced."
+          } > notes.md
+          gh release create "$tag" dist/gatec-carrier-*.jar dist/SHA256SUMS dist/MANIFEST.txt \
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" --latest=false \
+            --title "Gate C carrier ${tag#gatec-carrier-}" --notes-file notes.md
