@@ -63,7 +63,8 @@ tree. Then:
   for both kinds of fork ([CLAUDE.md](CLAUDE.md), "Single-version and version-branch forks"), so a single-version
   fork's behaviour does change, deliberately and said in the PR (`Single-version-change:` commit lines): dependency
   bumps are explicit for every fork, re-cut releases are tagged `-rN`, a weekly-round merge waits for the review, and
-  report-only audit rows appear when they find something, a stale Port CI kit is warned about (`port-ci.py check`), a
+  report-only audit rows appear when they find something (the mixin-target and event-listener audits among them,
+  which also say when an input is missing), a stale Port CI kit is warned about (`port-ci.py check`), a
   port branch behind origin's is fast-forwarded before `port-sync.py` merges (a diverged one refused), the round's
   preflight checks `origin/HEAD` and the authors' remote, and the shipped-jar files are read from `.port/<mc>/`. Some
   fixes, checks and savings still reach version-branch forks only (e.g. the round driver, `tools/round.py`, the
@@ -264,7 +265,15 @@ the data row also names location-predicate keys 1.20.5 renamed
 renames them); `tools/audit-wiring.py` lists event subscribers and capability registrations the tree lost against a
 version branch's parent branch, else the authors' ref (`--base`), and providers answering null for a null side; and
 `tools/audit-descriptors.py` checks vanilla class names and descriptors kept as strings outside the mixins (coremods,
-ASM transformers, reflection) against the build's sources jar.
+ASM transformers, reflection) against the build's sources jar. Two more report the same way on every kind of fork, so a
+single-version round checks the authors' newly merged code too: `tools/audit-mixin-targets.py` (every mixin injection
+point against the sources jar the build staged) and `tools/audit-event-listeners.py` (no event listener names an abstract
+or interface event, asked of Gradle's own compile classpath, `tools/qtc-init.gradle`, with the JDK's `javap`). Each runs
+only when the tree has something for it (a mixin; a listener); with an input missing -- no staged sources jar, no
+classpath, no `javap` -- its row says `skipped: <why>`, and an audit that crashes writes no row. On a version branch,
+`fork-port.py`'s audit stage still gates on both before its gates stage runs `ci-gates.py`, so there a row appears only
+when that stage was skipped or the branch's own Port CI runs the gates. A fork's CI gets these two rows from the next
+Port CI kit release (the kit now ships `tools/audit-event-listeners.py` and `tools/qtc-init.gradle` again).
 
 The shared helper library (`templates/fork-layer/shared/<version>/java`) is written next to third-party sources --
 NeoForge's sources jars, the Minecraft sources every fork build stages, GeckoLib -- so one more gate runs **only on

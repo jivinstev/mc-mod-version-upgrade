@@ -139,7 +139,10 @@ run is green, and it is then gated against the dependency's NEW build.
    committed without its exec bit: run `bash gradlew`, do not chmod it -- that is diff in their tree.) Compile
    (`tools/burndown-count.sh`), run the mechanical stage, fix the rest with the catalogue. Mixins they added need
    their targets re-checked against this version (a mixin into networking or rendering is only exercised by a
-   client gate -- Gate B passes even when it fails to apply).
+   client gate -- Gate B passes even when it fails to apply). `ci-gates.py` checks them for you on every kind of
+   fork: a `Mixin targets` or `Event listeners` REPORT row in its summary names each stale target or abstract-event
+   listener (fix each before the PR), and `skipped: <why>` means that audit could not run (run
+   `tools/audit-mixin-targets.py` or `tools/audit-event-listeners.py` by hand then).
 5. **Gate** (`ci-gates.py`, full and minimal; one run at a time -- the software-rendered client gives false
    failures under CPU contention, and the A/B worktrees share `~/.gradle`, so they count too). Then each mode's reproduction, for the modes this run decided.
    **A shipped-jar expectation that fails right after an upstream merge is not yet a regression.** The authors may

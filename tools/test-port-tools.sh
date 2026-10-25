@@ -861,6 +861,151 @@ PY
 )"
 [ "$out" = "OK" ] && ok "#161 U1 on a single-branch clone of the head (single-version) and the version-branch fixture: port-ci.py check warns about an older kit with the regenerate command (one stale_workflow, the head's ci-check line unchanged); port-sync fast-forwards a port branch behind origin before the merge and refuses a diverged one, nothing merged or reset; preflight warns about a missing origin/HEAD and names the authors' remote the weekly plan's upstream needs (a version-branch fork's lines unchanged); --shipped reads .port/<mc>/shipped-jar.txt and a stray .multiversion/ is refused with the move" \
   || bad "#161 U1: $out"
+# ---- #161 U2 (C1): ci-gates runs the mixin-target and event-listener audits on every fork, report-only -- on a
+# single-branch clone of the frozen fixture's head (single-version) and on its version branch 1.21.4, the gates' Gradle
+# and Gate B faked, both audits real
+echo "#161 U2: mixin-target and event-listener audits as ci-gates REPORT rows -- both kinds of fork"
+if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+out="$(python3 - "$T/u2" <<'PY' 2>&1
+import contextlib, importlib.util, io, pathlib, shutil, subprocess, sys, zipfile
+d = pathlib.Path(sys.argv[1]); d.mkdir()
+L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
+fb, cg, fk = L("fb", "fork-branches.py"), L("cg", "ci-gates.py"), L("fk", "fork-kind.py")
+bad = []
+G = lambda w, *a: subprocess.run(["git", "-C", str(w), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+r, g, _ = fb._migrated_fixture(d)                     # the version-branch fork
+sv = d / "sv"
+subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(r), str(sv)], check=True, capture_output=True)
+G(sv, "config", "user.name", "t"); G(sv, "config", "user.email", "t@example.invalid")
+g("checkout", "-q", "neoforge-1.21.4")
+fk.detect(sv)[0] == "single-version" or bad.append(f"the head's clone is single-version: {fk.detect(sv)}")
+cg.branch_version(r) == "1.21.4" or bad.append("control: the checkout is version branch 1.21.4")
+# the build's own NeoForge and Minecraft, faked: an abstract event with a concrete subclass, and the canaries the
+# listener audit asks for; javac/jar from the JDK
+ev = d / "evt"
+for f, src in {"net/minecraft/world/item/Item.java": "package net.minecraft.world.item; public class Item {}",
+               "net/neoforged/neoforge/common/NeoForge.java": "package net.neoforged.neoforge.common; public class NeoForge {}",
+               "net/neoforged/bus/api/SubscribeEvent.java": "package net.neoforged.bus.api; public @interface SubscribeEvent {}",
+               "net/neoforged/neoforge/client/event/Stage.java":
+                   "package net.neoforged.neoforge.client.event;\npublic abstract class Stage { public static class After extends Stage {} }"}.items():
+    (ev / "src" / f).parent.mkdir(parents=True, exist_ok=True); (ev / "src" / f).write_text(src + "\n", encoding="utf-8")
+subprocess.run(["javac", "-d", str(ev / "classes"), *map(str, (ev / "src").rglob("*.java"))], check=True, capture_output=True)
+subprocess.run(["jar", "cf", str(ev / "fake.jar"), "-C", str(ev / "classes"), "."], check=True, capture_output=True)
+calls = []
+
+
+class FakeGates:                  # tools/port_gates.py with no Gradle: Gate A green, the classpath task printed
+    Fail = type("Fail", (Exception,), {})
+    qtc = True
+
+    @staticmethod
+    def gate_a(c, log):
+        return 3
+
+    @staticmethod
+    def gate_env(c):
+        return {"PORT_LOG_DIR": str(c["dir"])}
+
+    @staticmethod
+    def gradle(repo, args, log, extra_init=(), env=None, timeout=None):
+        calls.append(list(args))
+        out = f"QTC_CLASSPATH_BEGIN\n{ev / 'fake.jar'}\nQTC_CLASSPATH_END\n" if FakeGates.qtc and "qtcClasspath" in args else ""
+        pathlib.Path(log).write_text(out, encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+
+real_load, real_run = cg._load, subprocess.run
+cg._load = lambda n, f: FakeGates if n == "port_gates" else real_load(n, f)
+subprocess.run = lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "", "") \
+    if any(str(x).endswith("gate-loop.py") for x in cmd) else real_run(cmd, *a, **k)
+JAR = "build/moddev/artifacts/neoforge-{neo}-sources.jar"
+VANILLA = "package net.x;\npublic class Dragon {\n    public void hurt(int amount) {}\n}\n"
+MIXIN = ("package com.example.mod.mixin;\nimport net.x.Dragon;\n@Mixin(Dragon.class)\npublic class DragonMixin {\n"
+         "    @Inject(method = \"%s\", at = @At(\"HEAD\"))\n    private void a(int amount, CallbackInfo ci) {}\n}\n")
+HOOK = ("package com.example.mod;\nimport net.neoforged.bus.api.SubscribeEvent;\nimport net.neoforged.neoforge.client.event.Stage;\n"
+        "public class Hook {\n    @SubscribeEvent\n    public static void on(%s event) {}\n}\n")
+
+
+def tree(w, method="hurt", event="Stage.After", jar=True, mixin=True, hook=True):
+    neo = cg.read_kv(w / "gradle.properties").get("neo_version")
+    shutil.rmtree(w / "build", ignore_errors=True)
+    if jar:
+        (w / JAR.format(neo=neo)).parent.mkdir(parents=True)
+        with zipfile.ZipFile(w / JAR.format(neo=neo), "w") as z:
+            z.writestr("net/x/Dragon.java", VANILLA)
+    m, h = w / "src/main/java/com/example/mod/mixin/DragonMixin.java", w / "src/main/java/com/example/mod/Hook.java"
+    m.unlink(missing_ok=True); h.unlink(missing_ok=True)
+    if mixin:
+        m.write_text(MIXIN % method, encoding="utf-8")
+    if hook:
+        h.write_text(HOOK % event, encoding="utf-8")
+    G(w, "add", "-A"); G(w, "commit", "-qm", "fixture", "--allow-empty")
+
+
+def gates(w, name, reverted=False):
+    calls.clear()
+    real = cg.target_audit_rows
+    if reverted:                  # the change undone: what ci-gates wrote before it
+        cg.target_audit_rows = lambda *a, **k: []
+    summ, work = d / f"{name}.md", d / f"{name}-work"
+    bv = cg.branch_version(w)
+    sys.argv = ["ci-gates.py", "--repo", str(w), "--modid", "examplemod", "--gatec", "", "--skip-author-build",
+                "--summary", str(summ), "--work-dir", str(work)] + (["--mc", bv] if bv else [])
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = cg.main()
+    finally:
+        cg.target_audit_rows = real
+    return rc, summ.read_text(encoding="utf-8"), work
+
+
+for kind, w in (("single-version", sv), ("version-branch", r)):
+    tree(w)                                                            # clean: both audits ran, found nothing
+    rc0, before, _ = gates(w, f"{kind}-before", reverted=True)
+    rc, after, work = gates(w, f"{kind}-clean")
+    ran = "all targets match" in (work / "audit-mixin-targets.log").read_text(encoding="utf-8") and \
+        "no listener names" in (work / "audit-event-listeners.log").read_text(encoding="utf-8")
+    (rc0 == rc == 0 and after == before and ran and "REPORT" not in after) or \
+        bad.append(f"{kind}: a clean tree's GATES.md is byte-identical to the one without the audits (both ran): "
+                   f"{rc0} {rc} {ran}\n{before}\n---\n{after}")
+    tree(w, method="hurtGone", event="Stage")                          # a stale target and an abstract event
+    rc, md, _ = gates(w, f"{kind}-stale")
+    rows = [l for l in md.splitlines() if "| REPORT |" in l]
+    (rc == 0 and "FAIL" not in md and len(rows) == 2 and rows[0].startswith(f"| {cg.MIXIN_ROW} | REPORT | 1 to read: ")
+     and "DragonMixin.java" in rows[0] and "hurtGone" in rows[0]
+     and rows[1] == f"| {cg.LISTENER_ROW} | REPORT | 1 to read: com/example/mod/Hook.java Stage: "
+                    "net.neoforged.neoforge.client.event.Stage is abstract or an interface |") or \
+        bad.append(f"{kind}: a stale mixin target and an abstract-event listener are one REPORT row each, never red: {rc}\n{md}")
+    FakeGates.qtc = False                                              # inputs missing: no sources jar, no classpath
+    tree(w, method="hurtGone", event="Stage", jar=False)
+    rc, md, _ = gates(w, f"{kind}-missing")
+    FakeGates.qtc = True
+    rows = [l for l in md.splitlines() if "| REPORT |" in l]
+    (rc == 0 and len(rows) == 2 and all("| REPORT | skipped: " in l for l in rows) and "sources jar" in rows[0]
+     and "classpath" in rows[1]) or bad.append(f"{kind}: a missing input is a `skipped: <why>` row, never clean or red: {rc}\n{md}")
+    tree(w, method="hurtGone", event="Stage")                          # both audits crash: no row
+    neo = cg.read_kv(w / "gradle.properties").get("neo_version")
+    (w / JAR.format(neo=neo)).write_bytes(b"not a zip")
+    (w / "src/main/java/com/example/mod/Bad.java").write_bytes(b"// @SubscribeEvent \xff\xfe\n")
+    rc, md, work = gates(w, f"{kind}-crash")
+    (w / "src/main/java/com/example/mod/Bad.java").unlink()
+    crashed = all("Traceback" in (work / f"{t}.log").read_text(encoding="utf-8") for t in ("audit-mixin-targets", "audit-event-listeners"))
+    (rc == 0 and crashed and "| REPORT |" not in md) or bad.append(f"{kind}: a crashing audit writes no row: {rc} {crashed}\n{md}")
+    tree(w, mixin=False, hook=False)                                   # nothing to check: neither runs, no Gradle call
+    shutil.rmtree(w / "src/main/java/com/example/mod/mixin", ignore_errors=True)
+    G(w, "add", "-A"); G(w, "commit", "-qm", "no mixins", "--allow-empty")
+    rc, md, work = gates(w, f"{kind}-none")
+    (rc == 0 and "| REPORT |" not in md and not any("qtcClasspath" in c for c in calls)
+     and not (work / "audit-mixin-targets.log").exists()) or bad.append(f"{kind}: a tree with no mixin and no listener runs neither audit: {calls}\n{md}")
+print("\n".join(bad) or "OK")
+PY
+)"
+[ "$out" = "OK" ] && ok "#161 U2 on a single-branch clone of the head (single-version) and version branch 1.21.4: ci-gates' mixin-target and event-listener audits write one REPORT row each for a stale target and an abstract-event listener (never red), \`skipped: <why>\` with no sources jar or no classpath, no row when the audit crashes, and neither runs (no Gradle call) with nothing to check; a clean tree's GATES.md is byte-identical to the one written without them" \
+  || bad "#161 U2: $out"
+else
+  echo "  SKIP  #161 U2 ci-gates audit rows (no javac/jar)"
+fi
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, --cp-file/--tree (fork) mode"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
   E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \
