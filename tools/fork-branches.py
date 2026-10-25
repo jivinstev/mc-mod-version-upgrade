@@ -270,63 +270,12 @@ def fresh_branch(repo, name):
     return loc or org or None
 
 
-def branch_worktrees(repo):
-    """{branch name: worktree path} of every checkout (the main one included) that has a branch checked out."""
-    out, cur = {}, None
-    for ln in git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
-        if ln.startswith("worktree "):
-            cur = ln[len("worktree "):]
-        elif ln.startswith("branch refs/heads/") and cur:
-            out[ln[len("branch refs/heads/"):]] = cur
-    return out
-
-
 def origin_sync(repo, names, change=True, say=print):
-    """Before a cascade reads its branches: are the local ones what origin has? A stale local branch (a PR merged on
-    origin, the clone not pulled) gives the merges a wrong merge base. Fetches origin, then per branch: the same, or
-    ahead of origin (a merge not pushed yet), or local only -> used as it is; strictly behind -> fast-forwarded
-    (change; a checked-out branch only when its checkout is clean), else origin's commit used in its place (the plan's
-    throwaway clone); diverged, or behind with a dirty checkout -> refused. No `origin` remote: nothing to check.
+    """Before a cascade reads its branches: are the local ones what origin has? tools/origin-sync.py (the one
+    implementation; port-sync.py runs it too): fetch origin; a branch strictly behind is fast-forwarded (change), else
+    origin's commit read in its place (the plan's throwaway clone); diverged, or behind with a dirty checkout, refused.
     -> ({name: origin's commit} for the branches to read at origin's commit, None) or (None, why refused)."""
-    if git(repo, "remote", "get-url", "origin").returncode:
-        return {}, None
-    f = git(repo, "fetch", "-q", "origin")
-    if f.returncode:
-        say(f"fork-branches: cannot fetch origin ({f.stderr.strip()[-200:]}): comparing with origin's refs as last fetched")
-    over, wts = {}, None
-    for name in dict.fromkeys(names):
-        loc = git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}^{{commit}}").stdout.strip()
-        org = git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{name}^{{commit}}").stdout.strip()
-        if not loc or not org or loc == org or git(repo, "merge-base", "--is-ancestor", org, loc).returncode == 0:
-            continue
-        behind = git(repo, "rev-list", "--count", f"{loc}..{org}").stdout.strip()
-        if git(repo, "merge-base", "--is-ancestor", loc, org).returncode != 0:
-            ahead = git(repo, "rev-list", "--count", f"{org}..{loc}").stdout.strip()
-            return None, (f"the local {name} ({loc[:12]}) has diverged from origin/{name} ({org[:12]}): {ahead} commit(s) "
-                          f"only here, {behind} only on origin. Its merges would start from a wrong merge base: merge "
-                          f"origin/{name} into it (or reset it to origin/{name} if the local commits are not wanted), "
-                          "then run the cascade again")
-        if not change:
-            over[name] = org
-            say(f"fork-branches: the local {name} is {behind} commit(s) behind origin/{name}: reading origin's "
-                f"{org[:12]}")
-            continue
-        if wts is None:
-            wts = branch_worktrees(repo)
-        wt = wts.get(name)
-        if wt is None:
-            r = git(repo, "update-ref", f"refs/heads/{name}", org, loc)
-        elif git(wt, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-            return None, (f"the local {name} is {behind} commit(s) behind origin/{name} and its checkout {wt} has "
-                          f"uncommitted changes: commit or stash them, git -C {wt} merge --ff-only origin/{name}, then "
-                          "run the cascade again")
-        else:
-            r = git(wt, "merge", "--ff-only", "-q", org)
-        if r.returncode:
-            return None, (f"cannot fast-forward the local {name} to origin/{name} ({org[:12]}): "
-                          f"{(r.stderr or r.stdout).strip()[-200:]}")
-        say(f"fork-branches: fast-forwarded the local {name} {behind} commit(s) to origin/{name} ({org[:12]})")
-    return over, None
+    return load("origin_sync_fb", "origin-sync.py").origin_sync(repo, names, change=change, say=say)
 
 
 def is_branch_fork(repo, t):
@@ -4257,9 +4206,8 @@ def ci_check(repo, versions=None, kit_version=None):
         try:
             pc = load("port_ci_fb", "port-ci.py")
             # the floor of the download probe kit_pin falls back to when the release list is refused (a 403)
-            pinned = pc.pinned_kits([git(repo, "show", f"{fresh_branch(repo, branch_name(t)) or have[t]}:.github/workflows/"
-                                         "port-ci.yml").stdout for t in todo] + [head_workflow(repo, have)[1]])
-            newest = pc.kit_pin(pc.migrator_repo(), floor=max(pinned, default=None), say=out.append)[0]
+            newest = pc.newest_kit([git(repo, "show", f"{fresh_branch(repo, branch_name(t)) or have[t]}:.github/workflows/"
+                                        "port-ci.yml").stdout for t in todo] + [head_workflow(repo, have)[1]], say=out.append)
         except (Exception, SystemExit) as e:    # noqa: BLE001 -- offline: say so, compare the variants only
             out.append(f"fork-branches: ci-check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
     elif kit_version is not False:
@@ -4325,20 +4273,10 @@ def head_workflow(repo, have=None):
     return head, (r.stdout if r is not None and r.returncode == 0 else "")
 
 
-RECORD_PUSHES = (".port/KNOWN-ISSUES.json", "README.md")     # the head's round commits: the ledger, the Ports block
-
-
 def ignores_records(wf, need=None):
-    """Does the workflow's push trigger paths-ignore the head's round records (the ledger and the root README; `need`:
-    other paths, a version branch's records)? A workflow port-ci.py rendered before that line existed runs the full Port
-    CI for every ledger or Ports-block commit."""
-    push = wf.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0] if "\n  push:\n" in wf else ""
-    m = re.search(r"(?m)^\s*paths-ignore: (\[.*\])\s*$", push)
-    try:
-        ign = json.loads(m.group(1)) if m else []
-    except ValueError:
-        ign = []
-    return all(f in ign for f in (need if need is not None else RECORD_PUSHES))
+    """port-ci.py ignores_records: does the workflow's push trigger paths-ignore the head's round records (`need`:
+    other paths, a version branch's records)?"""
+    return load("port_ci_fb", "port-ci.py").ignores_records(wf, need)
 
 
 def head_ci_lines(repo, have, newest):
@@ -4350,13 +4288,7 @@ def head_ci_lines(repo, have, newest):
     head, wf = head_workflow(repo, have)
     if not wf:
         return []
-    why = []
-    kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf)]
-    if newest is not None and (not kits or min(kits) < newest):
-        why.append(f"its workflow pins Port CI kit {min(kits) if kits else '?'}, older than kit {newest}")
-    if not ignores_records(wf):
-        why.append("its push trigger ignores no records, so every known-issues ledger or README Ports-block commit runs "
-                   "the full Port CI there")
+    why = load("port_ci_fb", "port-ci.py").stale_workflow(wf, newest)   # the single-version check (port-ci.py check)
     if not why:
         return []
     return [f"fork-branches: ci-check: WARNING {head} (the head branch): " + "; ".join(why) + f" -- regenerate: python3 "
@@ -4396,8 +4328,9 @@ def ci_head(repo, modid, run=False, say=print, kit_version=None, runner=None):
     repo = pathlib.Path(repo).resolve()
     have = version_branches(repo)
     if not have:
-        say("fork-branches: ci --head is for a fork with version branches (none here); a single-version fork keeps its "
-            "workflow (port-ci.py args --repo DIR prints the command that regenerates it)"); return 2
+        say("fork-branches: ci --head is for a fork with version branches (none here); a single-version fork's port branch "
+            "is checked by port-ci.py check --repo DIR, which warns about an old kit or no records ignore and prints the "
+            "command that regenerates its workflow at the newest kit"); return 2
     head, wf = head_workflow(repo, have)
     if not wf:
         say(f"fork-branches: {head} has no .github/workflows/port-ci.yml (the port-fork skill installs it)"); return 2

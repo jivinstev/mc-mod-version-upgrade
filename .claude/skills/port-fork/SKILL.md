@@ -181,8 +181,9 @@ is not a pre-release it published from that branch, makes it a full Release mark
 "Pre-release until played by a person." with who played it and when. Where the port branch has an install
 manifest (step 7), the same run then points it at the promoted jar and the sibling jars the workflow pins
 (`tools/port-manifest.py refresh`, a `[skip ci]` commit on the port branch); a workflow
-generated before this step existed does not, so re-render it with the newest kit (`port-ci.py args --repo DIR`,
-drop its `--kit-version`/`--kit-sha`, rerun). Without a logged-in `gh` it prints the
+generated before this step existed does not, so re-render it with the newest kit (`port-ci.py check --repo DIR`
+warns when the workflow pins an older kit or ignores no round records, and prints that command: `port-ci.py args`'
+options without `--kit-version`/`--kit-sha`). Without a logged-in `gh` it prints the
 dispatch instead: send it through the GitHub connector (workflow `port-ci.yml`, ref = the port branch, inputs
 `promote`, `played_by`, `played_notes`). A fork whose workflow predates the `promote` input needs it re-rendered
 first: `port-ci.py --print` with the same `--dep-jar`/`--kit-version`/`--kit-sha` it was installed with, diff
@@ -286,7 +287,8 @@ one, ship BOTH:
 
 - `neoforge-<mc>` -- the development port, on the author's newest code. Keep it current with
   `tools/port-sync.py --repo <clone> --port neoforge-<mc> --upstream origin/<branch>` (stop 2 before pushing):
-  it merges (never rebases) the author's new commits, stops on a conflict with the files named, and says what
+  it first fast-forwards a local port branch that is behind origin's and refuses a diverged one (exit 2, nothing
+  merged, never a reset), then merges (never rebases) the author's new commits, stops on a conflict with the files named, and says what
   to re-port. This is what to hand the author to maintain.
 - `neoforge-<mc>-release` -- the port of what they released, derived with no re-porting:
 

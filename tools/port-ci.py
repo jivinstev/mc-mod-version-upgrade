@@ -20,6 +20,15 @@ Per-platform jars (both opt-in; without them the workflow is byte-for-byte what 
                                G:A:V), sha256-pinned; one more leg `gates (full, <label>)` runs the build and every
                                gate with it in mavenLocal instead of the default asset.
 
+    python3 tools/port-ci.py check --repo <fork checkout> [--kit-version N]
+
+`check` warns -- never blocks, exit 0 -- when the checkout's installed workflow pins a Port CI kit older than the newest
+published (a fork only gets a new gate from the first kit that ships it) or its push trigger ignores none of the round's
+records, and prints the command that regenerates it at the newest kit with its own options read back (on a version-branch
+fork, tools/fork-kind.py detect, `fork-branches.py ci --head --run` instead). It is the check
+tools/fork-branches.py ci-check makes for a version-branch fork's head branch (stale_workflow), for a single-version
+fork's port branch.
+
     python3 tools/port-ci.py promote --fork <owner/repo> --tag <release tag> --played-by <github login>
                              [--notes "<what was played>"] [--branch <port branch>] [--print]
                              [--with-dependency <owner/repo> ...] [--repo <local clone>]
@@ -169,6 +178,80 @@ def kit_pin(repo, version=None, sha=None, floor=None, get=None, say=None):
     if not re.fullmatch(r"[0-9a-f]{64}", sha):
         sys.exit(f"not a sha256: {sha!r}")
     return int(version), sha
+
+
+def newest_kit(texts, say=None):
+    """The newest published Port CI kit (kit_pin), its download probe starting at the highest kit `texts` (workflow
+    texts) pin. Raises (or exits) when it cannot be read: the caller says so and compares nothing else on the kit."""
+    return kit_pin(migrator_repo(), floor=max(pinned_kits(texts), default=None), say=say)[0]
+
+
+RECORD_PUSHES = (".port/KNOWN-ISSUES.json", "README.md")     # the head's round commits: the ledger, the Ports block
+
+
+def ignores_records(wf, need=None):
+    """Does the workflow's push trigger paths-ignore the head's round records (the ledger and the root README; `need`:
+    other paths, a version branch's records)? A workflow port-ci.py rendered before that line existed runs the full Port
+    CI for every ledger or Ports-block commit."""
+    push = wf.split("\n  push:\n", 1)[1].split("\n  pull_request:", 1)[0] if "\n  push:\n" in wf else ""
+    m = re.search(r"(?m)^\s*paths-ignore: (\[.*\])\s*$", push)
+    try:
+        ign = json.loads(m.group(1)) if m else []
+    except ValueError:
+        ign = []
+    return all(f in ign for f in (need if need is not None else RECORD_PUSHES))
+
+
+def stale_workflow(wf, newest):
+    """Why a port branch's installed workflow is out of date -- the one check for a single-version fork's port branch
+    (`port-ci.py check`) and a version-branch fork's head (tools/fork-branches.py ci-check): it pins a Port CI kit older
+    than `newest` (None: not compared), or its push trigger ignores none of the round's records (every known-issues
+    ledger or README Ports-block commit is then a full Port CI run). -> [reasons], [] when current."""
+    why = []
+    kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf)]
+    if newest is not None and (not kits or min(kits) < newest):
+        why.append(f"its workflow pins Port CI kit {min(kits) if kits else '?'}, older than kit {newest}")
+    if not ignores_records(wf):
+        why.append("its push trigger ignores no records, so every known-issues ledger or README Ports-block commit runs "
+                   "the full Port CI there")
+    return why
+
+
+def check(repo, file=None, kit_version=None, say=print):
+    """`port-ci.py check`: warn (never block: exit 0) when the checkout's installed workflow is out of date
+    (stale_workflow), with the command that regenerates it at the newest kit -- the workflow's own options read back
+    (recover_args), only the kit moved. kit_version: the kit to compare with (default: the newest published)."""
+    repo = pathlib.Path(repo)
+    f = pathlib.Path(file) if file else repo / WORKFLOW
+    if not f.is_file():
+        say(f"port-ci: check: {f} does not exist (the port-fork skill installs it)"); return 0
+    wf = f.read_text(encoding="utf-8", errors="replace")
+    newest = kit_version
+    if newest is None:
+        try:
+            newest = newest_kit([wf], say=say)
+        except (Exception, SystemExit) as e:    # noqa: BLE001 -- offline: say so, compare the records ignore only
+            say(f"port-ci: check: cannot read the newest Port CI kit ({e}); pass --kit-version N")
+    why = stale_workflow(wf, newest)
+    branch = git(repo, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip() or "the port branch"
+    if not why:
+        say(f"port-ci: check: {branch}: its workflow is current" + (f" (kit {newest})" if newest else "")); return 0
+    if _load_tool("fork_kind", "fork-kind.py").detect(repo)[0] == "version-branches":
+        # a version-branch fork's head (or a version branch): fork-branches regenerates it from itself, branch-aware
+        say(f"port-ci: check: WARNING {branch}: " + "; ".join(why) + f" -- regenerate: python3 tools/fork-branches.py "
+            f"ci --repo {repo} --head --run (the head; a version branch: ci --repo {repo} --all --modid <modid> --run), "
+            "then push it")
+        return 0
+    try:
+        rec = recover_args(wf)
+        args = [x for i, x in enumerate(rec) if x not in ("--kit-version", "--kit-sha")
+                and (i == 0 or rec[i - 1] not in ("--kit-version", "--kit-sha"))]
+        import shlex
+        how = " -- regenerate: " + shlex.join(["python3", "tools/port-ci.py", "--repo", str(repo), *args]) + ", then push it"   # exec-ok: printed for a person's shell
+    except SystemExit:
+        how = " -- regenerate it with tools/port-ci.py (its options could not be read back)"
+    say(f"port-ci: check: WARNING {branch}: " + "; ".join(why) + how)
+    return 0
 
 
 def render(text, values):
@@ -706,6 +789,66 @@ def records_check():
                            "the base list", line(outs[c_]))
             ok &= want("records: main() on a version branch: the records too", json.loads(line(v_).split("paths-ignore:", 1)[1])
                        == ign and 'branches: ["neoforge-1.21.4"]' in v_, ign, line(v_))
+    return ok
+
+
+def workflow_check_check():
+    """`port-ci.py check` on a single-version fork's port branch (#161 U1, E1): a workflow pinning an older kit, or one
+    whose push trigger ignores no records, is warned about with the command that regenerates it at the newest kit
+    (never blocking: exit 0); a current one says so; the same stale_workflow the version-branch head's ci-check uses."""
+    import io, tempfile
+    ok = True
+    with tempfile.TemporaryDirectory() as d:
+        r = pathlib.Path(d)
+        subprocess.run(["git", "-C", d, "init", "-q", "-b", "neoforge-1.21.1"], check=True)
+        (r / ".github/workflows").mkdir(parents=True)
+        cur = fixture(False)                                  # kit 7, the records ignore of a single-version workflow
+        (r / WORKFLOW).write_text(cur, encoding="utf-8")
+        said = []
+        ok &= want("check: a current single-version workflow", check(r, kit_version=7, say=said.append) == 0
+                   and len(said) == 1 and "is current (kit 7)" in said[0], "current", said)
+        said = []
+        rc = check(r, kit_version=9, say=said.append)
+        ok &= want("check: an older kit warns, exit 0, with the regenerate command at the newest kit", rc == 0
+                   and said[0].startswith("port-ci: check: WARNING neoforge-1.21.1: its workflow pins Port CI kit 7, older "
+                                          "than kit 9") and "--modid examplemod" in said[0] and "--kit-version" not in said[0]
+                   and "--gatec launch,spawn" in said[0], "WARNING ... kit 7 ... regenerate", said)
+        old = re.sub(r"(?m)^\s*paths-ignore: .*\n", "", cur)
+        (r / WORKFLOW).write_text(old, encoding="utf-8")
+        said = []
+        check(r, kit_version=7, say=said.append)
+        ok &= want("check: no records ignore warns", "ignores no records" in said[0] and "kit 7, older" not in said[0],
+                   "records warning", said)
+        ok &= want("check: stale_workflow is the head's check", stale_workflow(cur, 7) == [] and len(stale_workflow(old, 9)) == 2
+                   and stale_workflow(cur, None) == [], "[] / 2 reasons / []", (stale_workflow(cur, 7), stale_workflow(old, 9)))
+        said = []
+        def no_kit(*a, **k):
+            raise SystemExit("offline")
+        real, globals()["kit_pin"] = globals()["kit_pin"], no_kit
+        try:
+            check(r, say=said.append)
+        finally:
+            globals()["kit_pin"] = real
+        ok &= want("check: offline, said, the records still compared", "cannot read the newest Port CI kit" in said[0]
+                   and "ignores no records" in said[1], "offline then records", said)
+        # a version-branch fork's head: the version-branch regenerate command, not port-ci.py's (review S4)
+        (r / WORKFLOW).write_text(cur, encoding="utf-8")
+        g = lambda *a: subprocess.run(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                      check=True, capture_output=True)
+        g("add", "-A"); g("commit", "-qm", "head")
+        g("checkout", "-q", "-b", "neoforge-1.21.4"); (r / ".port/1.21.4").mkdir(parents=True)
+        (r / ".port/1.21.4/branch.properties").write_text("port_branch=neoforge-1.21.1\n", encoding="utf-8")
+        g("add", "-A"); g("commit", "-qm", "1.21.4"); g("checkout", "-q", "neoforge-1.21.1")
+        said = []
+        check(r, kit_version=9, say=said.append)
+        ok &= want("check: a version-branch head names fork-branches.py ci --head --run",
+                   said[0].startswith("port-ci: check: WARNING neoforge-1.21.1: its workflow pins Port CI kit 7, older than kit 9")
+                   and f"fork-branches.py ci --repo {r} --head --run" in said[0] and "tools/port-ci.py --repo" not in said[0],
+                   "fork-branches.py ci --head --run", said)
+        (r / WORKFLOW).unlink()
+        said = []
+        ok &= want("check: no workflow: said, exit 0", check(r, kit_version=7, say=said.append) == 0 and "does not exist" in said[0],
+                   "does not exist", said)
     return ok
 
 
@@ -1282,6 +1425,7 @@ def self_check():
     ok &= variant_check()
     ok &= records_check()
     ok &= kit_probe_check()
+    ok &= workflow_check_check()
     ok &= default_branch_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
@@ -1294,6 +1438,16 @@ def main():
         return regen_golden()
     if sys.argv[1:2] == ["promote"]:
         return promote(sys.argv[2:])
+    if sys.argv[1:2] == ["check"]:
+        ap = argparse.ArgumentParser(prog="port-ci.py check", description="warn when the installed workflow pins an "
+                                     "older Port CI kit or ignores no round records (never blocks: exit 0)")
+        ap.add_argument("--repo", default="."); ap.add_argument("--file", help=f"default: <repo>/{WORKFLOW}")
+        ap.add_argument("--kit-version", type=int, help="the kit to compare with (default: the newest published)")
+        a = ap.parse_args(sys.argv[2:])
+        why = _load_tool("fork_kind", "fork-kind.py").refuse_layer(pathlib.Path(a.repo).resolve(), "port-ci")
+        if why:
+            print(why); return 2
+        return check(a.repo, a.file, a.kit_version)
     if sys.argv[1:2] == ["args"]:
         ap = argparse.ArgumentParser(prog="port-ci.py args", description="print the port-ci.py command that regenerates "
                                      "a fork's installed workflow (add or change one option, then --print and diff)")

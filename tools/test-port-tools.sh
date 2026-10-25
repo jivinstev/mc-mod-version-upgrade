@@ -506,7 +506,7 @@ grep -q 'self-check: OK' <<<"$out" && ok "layer-deps: pinned mods resolved per t
   || bad "layer-deps self-check: $out"
 
 out="$(python3 tools/fork-kind.py --self-check 2>&1)"
-grep -q 'self-check: OK' <<<"$out" && ok "fork-kind: one port branch (and a single-branch clone of the head) is single-version; a neoforge-<v> branch with .port/<v>/branch.properties (local or origin's) makes version branches; a legacy layer branch is listed and ignored; a .multiversion/ holding only shipped-jar.txt is not a layer; the layer at HEAD is refused naming the last supporting commit" \
+grep -q 'self-check: OK' <<<"$out" && ok "fork-kind: one port branch (and a single-branch clone of the head) is single-version; a neoforge-<v> branch with .port/<v>/branch.properties (local or origin's) makes version branches; a legacy layer branch is listed and ignored; a .multiversion/ holding only shipped-jar.txt is no layer but refused, told to move it to .port/<mc>/; the layer at HEAD is refused naming the last supporting commit" \
   || bad "fork-kind self-check: $out"
 out="$(python3 tools/checkout-lock.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "checkout-lock: one run per checkout (a second refused naming the holder), the holder's child let through, a dead or unreadable lock taken over" \
@@ -780,6 +780,86 @@ PY
 )"
 [ "$out" = "OK" ] && ok "fork-port.py on version branches: --check-done done off the branch, a resume refused off it, --write-test-items on it, an edit makes it not done (gates stale, a review row), --chain is the cascade and stops at a conflict; layer-deps' release-side done check on a tag agrees with the checkout's (its clone under \$MMVU_CACHE_DIR, re-pointed when the URL changes)" \
   || bad "fork-port / layer-deps on version branches: $out"
+# ---- #161 U1: the safety checks a version-branch head gets run on a single-version fork too (P5) -- on a single-branch
+# clone of the frozen fixture's head (detected single-version), with the version-branch fixture alongside, unchanged
+echo "#161 U1: stale Port CI kit, merge onto a stale branch, preflight remotes, shipped-jar path -- both kinds of fork"
+out="$(python3 - "$T/u1" <<'PY' 2>&1
+import importlib.util, json, pathlib, subprocess, sys
+d = pathlib.Path(sys.argv[1]); d.mkdir()
+L = lambda n, f: (lambda s: (s.loader.exec_module(m := importlib.util.module_from_spec(s)), m)[1])(importlib.util.spec_from_file_location(n, f"tools/{f}"))
+fb, pc, ps, pf, fk, cg = (L("fb", "fork-branches.py"), L("pc", "port-ci.py"), L("ps", "port-sync.py"),
+                          L("pf", "round-preflight.py"), L("fk", "fork-kind.py"), L("cg", "ci-gates.py"))
+r, g, _ = fb._migrated_fixture(d)                     # the version-branch fork
+bad = []
+G = lambda w, *a: subprocess.run(["git", "-C", str(w), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+g("checkout", "-q", "neoforge-1.21.1")
+wf = pc.fixture(False)                                # a single-version workflow at kit 7
+(r / ".github/workflows").mkdir(parents=True, exist_ok=True); (r / pc.WORKFLOW).write_text(wf, encoding="utf-8")
+g("add", "-A"); g("commit", "-qm", "CI at kit 7")
+sv = d / "sv"
+subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(r), str(sv)], check=True, capture_output=True)
+G(sv, "config", "user.name", "t"); G(sv, "config", "user.email", "t@example.invalid")   # port-sync's merges commit here
+fk.detect(sv)[0] == "single-version" or bad.append(f"the head's single-branch clone is single-version: {fk.detect(sv)}")
+fk.detect(r)[0] == "version-branches" or bad.append("control: the fixture is a version-branch fork")
+# E1: the kit check -- one function (port-ci.py stale_workflow) for the single-version port branch and the head
+said = []; pc.check(sv, kit_version=9, say=said.append)
+(len(said) == 1 and said[0].startswith("port-ci: check: WARNING neoforge-1.21.1: its workflow pins Port CI kit 7, older than kit 9 -- regenerate: python3 tools/port-ci.py --repo")
+ and "--kit-version" not in said[0]) or bad.append(f"E1 single-version, a stale kit: warned with the regenerate command: {said}")
+said = []; rc = pc.check(sv, kit_version=7, say=said.append)
+(rc == 0 and "is current" in said[0]) or bad.append(f"E1 single-version, current: {said}")
+# ci-check prints the resolved checkout path (Windows: the long form of an 8.3 TEMP path), so the line is compared
+# with that path, every other character exactly
+head = [l for l in fb.ci_check(r, kit_version=9) if "(the head branch)" in l]
+head == [f"fork-branches: ci-check: WARNING neoforge-1.21.1 (the head branch): its workflow pins Port CI kit 7, older than kit 9 -- "
+         f"regenerate: python3 tools/fork-branches.py ci --repo {r.resolve()} --head --run, then push neoforge-1.21.1"] \
+    or bad.append(f"E1 version-branch head: the same line as before: {head}")
+[l for l in fb.ci_check(r, kit_version=7) if "(the head branch)" in l] == [] or bad.append("E1 version-branch head, current: no line")
+# E2: port-sync compares the port branch with origin first (the cascade's origin_sync)
+up = d / "authors"
+subprocess.run(["git", "clone", "-q", "--single-branch", "-b", "neoforge-1.21.1", str(r), str(up)], check=True, capture_output=True)
+(up / "NEW.txt").write_text("authors\n"); G(up, "add", "-A"); G(up, "commit", "-qm", "authors' change")
+G(sv, "remote", "add", "authors", str(up)); G(sv, "remote", "set-url", "--push", "authors", "DISABLED")
+g("checkout", "-q", "neoforge-1.21.1"); (r / "PR.txt").write_text("merged on origin\n"); g("add", "-A"); g("commit", "-qm", "a PR merged")
+tip = G(r, "rev-parse", "HEAD"); g("checkout", "-q", "neoforge-1.21.4")
+log = []; rc = ps.sync(sv, "neoforge-1.21.1", "authors/neoforge-1.21.1", out=log.append)
+(rc == 0 and any("fast-forwarded the local neoforge-1.21.1" in l for l in log)
+ and subprocess.run(["git", "-C", str(sv), "merge-base", "--is-ancestor", tip, "HEAD"]).returncode == 0
+ and (sv / "NEW.txt").is_file()) or bad.append(f"E2 single-version, behind origin: fast-forwarded, then merged on origin's tip: {rc} {log}")
+(sv / "LOCAL.txt").write_text("x\n"); G(sv, "add", "-A"); G(sv, "commit", "-qm", "local only")
+g("checkout", "-q", "neoforge-1.21.1"); (r / "PR2.txt").write_text("y\n"); g("add", "-A"); g("commit", "-qm", "PR 2"); g("checkout", "-q", "neoforge-1.21.4")
+(up / "NEW2.txt").write_text("z\n"); G(up, "add", "-A"); G(up, "commit", "-qm", "authors' change 2")
+h = G(sv, "rev-parse", "HEAD"); log = []
+rc = ps.sync(sv, "neoforge-1.21.1", "authors/neoforge-1.21.1", out=log.append)
+(rc == 2 and any("has diverged" in l for l in log) and G(sv, "rev-parse", "HEAD") == h and not (sv / "NEW2.txt").exists()) \
+    or bad.append(f"E2 single-version, diverged: refused, nothing merged or reset: {rc} {log}")
+# E6: origin/HEAD and the authors' remote on the single-version clone; the version-branch fork's lines as before
+plan = {"forks": [{"repo": "owner/examplemod", "upstream": "https://github.com/up/examplemod", "upstream_branch": "main"}]}
+(sv / ".github/weekly-plan.json").write_text(json.dumps(plan)); G(sv, "add", "-A"); G(sv, "commit", "-qm", "plan")
+G(sv, "remote", "set-url", "origin", "https://github.com/owner/examplemod.git")
+G(sv, "remote", "set-head", "origin", "-d")
+rs = {w: ok for ok, w, _d in pf.remote_checks(sv, pf.plan_upstreams([sv]))}
+(rs.get(f"origin/HEAD of {sv}", 1) is None and rs.get(f"authors' remote of {sv}") is False) \
+    or bad.append(f"E6 single-version: no origin/HEAD warned, no remote fetching the plan's upstream missing: {rs}")
+G(sv, "remote", "add", "up", "https://github.com/up/examplemod.git")
+rs = {w: ok for ok, w, _d in pf.remote_checks(sv, pf.plan_upstreams([sv]))}
+rs.get(f"authors' remote of {sv}") is True or bad.append(f"E6 single-version, the remote there: ok: {rs}")
+vb = pf.remote_checks(r)
+(pf.remote_checks(r, {"owner/examplemod": ("https://github.com/up/examplemod", "main")}) == vb
+ and not any("authors' remote" in w for _o, w, _d in vb)) or bad.append(f"E6 version-branch: its lines as before: {vb}")
+# B2/F3: the shipped-jar list in .port/<mc>/ on the single-version clone; a .multiversion/ left there is refused
+cg.shipped_jar_file(sv) == sv / ".port/1.21.1/shipped-jar.txt" or bad.append(f"B2: {cg.shipped_jar_file(sv)}")
+cg.shipped_jar_file(r, "1.21.4") == r / ".port/1.21.4/shipped-jar.txt" or bad.append("B2 version branch: as before")
+(sv / ".multiversion").mkdir(); (sv / ".multiversion/shipped-jar.txt").write_text("*_mr.jar\n")
+fk.refuse_layer(sv, "ci-gates") is None or bad.append("B2: an uncommitted .multiversion/ file refuses nothing")
+G(sv, "add", ".multiversion"); G(sv, "commit", "-qm", "the shipped list in the old place")
+m = fk.refuse_layer(sv, "ci-gates")
+(m and ".port/1.21.1/<file>" in m and "shipped-jar.txt" in m) or bad.append(f"B2: a stray .multiversion/ refused, the move named: {m}")
+print("\n".join(bad) or "OK")
+PY
+)"
+[ "$out" = "OK" ] && ok "#161 U1 on a single-branch clone of the head (single-version) and the version-branch fixture: port-ci.py check warns about an older kit with the regenerate command (one stale_workflow, the head's ci-check line unchanged); port-sync fast-forwards a port branch behind origin before the merge and refuses a diverged one, nothing merged or reset; preflight warns about a missing origin/HEAD and names the authors' remote the weekly plan's upstream needs (a version-branch fork's lines unchanged); --shipped reads .port/<mc>/shipped-jar.txt and a stray .multiversion/ is refused with the move" \
+  || bad "#161 U1: $out"
 echo "audit-event-listeners.py: abstract events (CATALOG X33), @SubscribeEvent and method-reference listeners, --cp-file/--tree (fork) mode"
 if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
   E="$T/evt"; mkdir -p "$E/src/net/minecraft/world/item" "$E/src/net/neoforged/neoforge/common" "$E/src/net/neoforged/bus/api" \
