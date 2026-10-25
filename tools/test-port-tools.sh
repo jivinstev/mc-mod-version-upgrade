@@ -331,6 +331,7 @@ for spec in "route.py|route planner: every hop finished before the next, a missi
             "port-offer.py|port-offer: the authors see the port without our CI commit; port commits after a CI commit are replayed without it; only what state.json verified is claimed" \
             "port-ci-kit.py|port-ci-kit: the scoped CI kit -- deterministic archive holding exactly the manifest, nothing from mods/ or docs/" \
             "install-port.py|install-port: a fork port and its sibling ports install from their manifests, sha256-checked, newest file on conflict; a manifest behind its fork's newest full Release is installed as tested and named NOT THE NEWEST RELEASE" \
+            "real-install.py|real-install: a per-version plan from fixture branches (the versions every fork has, each fork's variant jar of its branch's series, a workflow's --dep-jar / cf pin, registry deps; port-install.json never read; sizes; disk refusal), the Launcher's launch command from an inheritsFrom chain with OS/arch/feature rules and the NeoForge jar never vanilla's, boot and carrier verdicts, profiles refused while the Launcher runs, mods/ exactly the set, carrier sources sha-checked, the report" \
             "port-manifest.py|port-manifest: refresh points the install manifest at the newest full Release (same platform variant) and the workflow's sibling pins, leaves registry entries alone, says unchanged, refuses a pre-release, an older tag, an ambiguous jar or an unfetchable pin" \
             "optional-dep-scan.py|optional-dep-scan: a listener class naming an optional mod in a method type blocks; a mixin reaching one through the mod is reported" \
             "port-fleet.py|port-fleet: one fleet file runs ci/gates/offer over every fork in order, flags per fork, push after each" \
@@ -463,7 +464,7 @@ line, steps, adv = fp.branch_converters(vb, "1.21.4", "1.21.5", ld / "w")
 after = blade(vb)
 if "public void hurtEnemy(" not in after or adv:
     bad.append(f"1.21.4 -> 1.21.5 did not convert hurtEnemy, or advised gear-tiers with no gear class: {line} {adv}")
-# a hurtEnemy that vetoes (return false spared postHurtEnemy's durability damage on 1.21.1) is REFUSED, file untouched
+# a hurtEnemy that vetoes (return false spared the durability damage of postHurtEnemy on 1.21.1) is REFUSED, file untouched
 vt = ld / "veto"; (vt / "src/main/java/com/example/mod").mkdir(parents=True)
 veto = orig.replace("extends Item", "extends SwordItem").replace("        target.igniteForSeconds(2);\n",
                                                                  "        if (target.isBlocking()) return false;\n")
@@ -471,9 +472,9 @@ veto = orig.replace("extends Item", "extends SwordItem").replace("        target
 line, steps, adv = fp.branch_converters(vt, "1.21.4", "1.21.5", ld / "wv")
 if blade(vt) != veto or "1 REFUSED" not in line or not any("gear-tiers" in a and "26.1.2+" in a for a in adv):
     bad.append(f"a vetoing hurtEnemy was converted, or the refusal / the gear advisory (a SwordItem is named) is missing: {line} {adv}")
-# the ladder's two hops end where the era route's one step does, and a re-run changes nothing
+# the two ladder hops end where the one era-route step does, and a re-run changes nothing
 if after != blade(sv):
-    bad.append("the ladder's hops and the era route's one step disagree")
+    bad.append("the ladder hops and the one era-route step disagree")
 fp.branch_converters(vb, "1.21.4", "1.21.5", ld / "w")
 if blade(vb) != after:
     bad.append("a re-run of the hop converted again")
