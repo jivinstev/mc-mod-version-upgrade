@@ -1671,6 +1671,7 @@ def main():
     plat = Plat.host()
     src = Sources(pathlib.Path(a.work) / "cache")
     spec = bool(a.fork or a.mc or a.all_versions)
+    full = None                                    # a saved plan's every version, when --mc narrows it
     if a.cmd == "plan" or (spec and not a.plan):
         if not (a.mc or a.all_versions):
             print("real-install: name the versions (--mc X ... or --all-versions)", file=sys.stderr)
@@ -1699,8 +1700,15 @@ def main():
                 print(f"real-install: no plan at {pf} -- run `plan` first, or pass --plan FILE", file=sys.stderr)
                 return 2
             pf = cands[0]
-        plan = json.loads(pf.read_text(encoding="utf-8"))
+        plan = full = json.loads(pf.read_text(encoding="utf-8"))
         a.work = str(pf.parent)
+        if a.mc:                                   # --mc narrows a saved plan to those versions; the file keeps them all
+            unknown = [m for m in a.mc if m not in {v["mc"] for v in full["versions"]}]
+            if unknown:
+                print(f"real-install: {', '.join(unknown)} not in the plan {pf} "
+                      f"({', '.join(v['mc'] for v in full['versions'])})", file=sys.stderr)
+                return 2
+            plan = dict(full, versions=[v for v in full["versions"] if v["mc"] in a.mc])
         print(f"real-install: plan {pf} ({plan['label']}: {', '.join(v['mc'] for v in plan['versions'])})")
         if a.cmd == "install" and a.with_carrier:
             for v in plan["versions"]:
@@ -1715,8 +1723,8 @@ def main():
             print(render_plan(plan).splitlines()[-1], file=sys.stderr)
             return 1
         probs = do_install(plan, a, src, plat)
-        if not a.dry_run:
-            (pathlib.Path(a.work) / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+        if not a.dry_run:                           # the whole plan: a --mc run updated only its versions (same objects)
+            (pathlib.Path(a.work) / "plan.json").write_text(json.dumps(full or plan, indent=2), encoding="utf-8")
         for p in probs:
             print(f"PROBLEM: {p}")
         print("\ninstall: " + ("FAILED" if probs else "done" + (" (dry run)" if a.dry_run else "")))
