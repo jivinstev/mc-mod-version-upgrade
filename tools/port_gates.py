@@ -326,7 +326,7 @@ def gate_a(c, log):
         raise Fail(f"mixin config(s) declared in no neoforge.mods.toml [[mixins]] -- they never load: {lost}")
     env = gate_env(c)
     r = gradle(c["repo"], ["test"], log, extra_init=[env["PORT_GRADLE_INIT"]], env=env)
-    res = list((c["repo"] / build_dir_name() / "test-results/test").glob("*.xml"))
+    res = list((c["repo"] / "build" / "test-results/test").glob("*.xml"))
     ran = sum(int(m) for f in res for m in re.findall(r'tests="(\d+)"', f.read_text(encoding="utf-8")))
     bad = sum(int(m) for f in res for m in re.findall(r'(?:failures|errors)="(\d+)"', f.read_text(encoding="utf-8")))
     if r.returncode or bad:
