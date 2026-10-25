@@ -737,6 +737,22 @@ def head_merge_lines(hm):
     return out
 
 
+def sv_merge_lines(f):
+    """A single-version fork's Decisions words for the fetch step's trial merge of the authors' new commits into the head
+    (weekly-plan.py fetch: merge_conflicts, authors_merged, merge_error): the conflicting files, no conflict, or that it
+    could not run."""
+    cf = f.get("merge_conflicts") or []
+    if cf:
+        return ["", f"- **Head merge needs an agent: {len(cf)} file(s)** conflict when the authors' commits merge into the "
+                "head (a trial merge; the round's authors step ports them): " + ", ".join(f"`{esc(x)}`" for x in cf[:SHOWN_COMMITS])
+                + (f" and {len(cf) - SHOWN_COMMITS} more" if len(cf) > SHOWN_COMMITS else "") + "."]
+    if f.get("authors_merged"):
+        return ["", "The authors' new commits merge into the head with no conflict (a trial merge)."]
+    return ["", f"Could not preview merging the authors' new commits into the head ("
+            f"{esc(f.get('merge_error') or 'the trial merge did not run')[:300]}): the round's merge may conflict in files "
+            "this plan does not show."]
+
+
 def render_plan(inp):
     """PLAN-INPUT (tools/weekly-plan.py) -> {"title", "body", "decision_needed"}."""
     forks = inp["forks"]
@@ -824,6 +840,7 @@ def render_plan(inp):
         decs = []
         if c is None:
             lines.append("A single-version fork (no version branches): there is no cascade to plan.")
+            lines += sv_merge_lines(f) if n else []
         else:
             plan = c.get("plan") or {}
             ds = plan.get("decisions", [])
@@ -860,6 +877,8 @@ def render_plan(inp):
                            "cascade": None if c is None else {"range": c["range"], "decisions": decs,
                                                               **({"head_merge_conflicts": len(c["head_merge"].get("conflicts") or [])}
                                                                  if c.get("head_merge") else {})}})
+        if c is None and n:          # a single-version fork: its trial merge's conflicts, like a head's cascade.head_merge_conflicts
+            data_forks[-1]["head_merge_conflicts"] = len(f.get("merge_conflicts") or [])
         if du is not None:           # every kind of fork: the dependency updates the step found
             data_forks[-1]["dep_updates"] = [{k: r.get(k) for k in ("id", "mc", "ga", "from", "to", "default", "why")}
                                              for r in du.get("rows", [])]
@@ -2151,8 +2170,10 @@ def plan_untaken_check(expect, cli):
     fr = read_plan({"number": 3, "body": res["body"]}, [], lambda w: True, "2026-10-21T16:00:00+00:00")
     sv0 = json.loads(json.dumps(sv))
     sv0["forks"][0].update(new_count=0, new_commits=[])
-    # pinned from the tool before this change: a single-version fork's plan issue and frozen input, byte for byte
-    expect((h(res), h(fr), h(render_plan(sv0))) == ("b227e0c3c432bf78", "af5159d1b42a19c3", "9b9ceb2f13e3497b"),
+    # pinned: a single-version fork's plan issue and frozen input, byte for byte (#161 U3 changed the first on purpose:
+    # with new commits its Decisions section shows the fetch step's trial merge, here "Could not preview", none recorded)
+    expect("Could not preview merging" in res["body"] and "Could not preview" not in render_plan(sv0)["body"]
+           and (h(res), h(fr), h(render_plan(sv0))) == ("ce1aa9dc5af34a9c", "af5159d1b42a19c3", "9b9ceb2f13e3497b"),
            f"a single-version fork's plan and frozen input are unchanged: {(h(res), h(fr), h(render_plan(sv0)))}")
     dec = {"id": "d1e2f3a4b5c6", "file": "src/main/java/com/example/mod/A.java", "versions": ["1.21.4", "1.21.5"],
            "escalate": True, "choice": "keep", "reasoning": "over the budget."}
