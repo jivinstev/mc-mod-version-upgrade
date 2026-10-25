@@ -2188,7 +2188,7 @@ def merge_up(repo, work, t, parent_name, parent_ref, port_name, parent_version, 
             if change_taken(body, git(repo, "diff", port_from, port_new, "--", f).stdout, f, *rules_now):
                 continue
             if f.startswith("src/main/resources/data/") and f.endswith(".json") and blob_at(repo, port_new, f) and \
-                    body in {fp().data_form_of(v, f[len("src/main/resources/"):], blob_at(repo, port_new, f))
+                    body.replace(b"\r\n", b"\n") in {fp().data_form_of(v, f[len("src/main/resources/"):], blob_at(repo, port_new, f))
                              for v in (t, parent_version) if v} - {None}:
                 continue                                # the authors' file in t's (or its parent's) data forms
             old = old_entries.get(f)

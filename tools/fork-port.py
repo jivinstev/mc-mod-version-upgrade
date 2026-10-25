@@ -277,8 +277,8 @@ def data_form_of(mc, rel, data):
         f.parent.mkdir(parents=True)
         f.write_bytes(data)
         convert_data(d, mc, layout=False, only={rel})
-        out = f.read_bytes()
-    return out if out != data else None
+        out = f.read_bytes().replace(b"\r\n", b"\n")   # a converter's text-mode write is CRLF on Windows; git stores LF
+    return out if out != data.replace(b"\r\n", b"\n") else None
 
 
 DATA_FORMS_REPORT = "DATA-FORMS.md"
