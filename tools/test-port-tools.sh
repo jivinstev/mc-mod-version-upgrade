@@ -910,7 +910,14 @@ class FakeGates:                  # tools/port_gates.py with no Gradle: Gate A g
     @staticmethod
     def gradle(repo, args, log, extra_init=(), env=None, timeout=None):
         calls.append(list(args))
-        out = f"QTC_CLASSPATH_BEGIN\n{ev / 'fake.jar'}\nQTC_CLASSPATH_END\n" if FakeGates.qtc and "qtcClasspath" in args else ""
+        if "qtcClasspath" in args and FakeGates.qtc in ("timeout", "raise"):
+            if FakeGates.qtc == "raise":
+                raise RuntimeError("the classpath plumbing broke")
+            raise subprocess.TimeoutExpired(args, timeout)
+        out = f"QTC_CLASSPATH_BEGIN\n{ev / 'fake.jar'}\nQTC_CLASSPATH_END\n" if FakeGates.qtc is True and "qtcClasspath" in args \
+            else ("FAILURE: Build failed with an exception.\n\n* What went wrong:\nExecution failed for task ':qtcClasspath'.\n"
+                  "> Could not resolve all files for configuration ':compileClasspath'.\n   > Could not resolve com.example:lib:1.0.\n"
+                  if FakeGates.qtc == "wrong" else "")
         pathlib.Path(log).write_text(out, encoding="utf-8")
         return subprocess.CompletedProcess(args, 0, out, "")
 
@@ -992,8 +999,65 @@ for kind, w in (("single-version", sv), ("version-branch", r)):
     (w / "src/main/java/com/example/mod/Bad.java").unlink()
     crashed = all("Traceback" in (work / f"{t}.log").read_text(encoding="utf-8") for t in ("audit-mixin-targets", "audit-event-listeners"))
     (rc == 0 and crashed and "| REPORT |" not in md) or bad.append(f"{kind}: a crashing audit writes no row: {rc} {crashed}\n{md}")
+    # S2: a hung classpath resolution and a hung audit are `skipped: timed out after Ns`, never a crash or silence
+    FakeGates.qtc = "timeout"
+    tree(w, method="hurtGone", event="Stage")
+    rc, md, _ = gates(w, f"{kind}-cp-timeout")
+    (rc == 0 and f"| {cg.LISTENER_ROW} | REPORT | skipped: timed out after 300s resolving Gradle's compile classpath |" in md
+     and f"| {cg.MIXIN_ROW} | REPORT | 1 to read: " in md) or bad.append(f"{kind}: a classpath timeout is a skipped row: {rc}\n{md}")
+    FakeGates.qtc, cg.AUDIT_TIMEOUT = True, 0.001
+    rc, md, _ = gates(w, f"{kind}-audit-timeout")
+    cg.AUDIT_TIMEOUT = 600
+    (rc == 0 and f"| {cg.MIXIN_ROW} | REPORT | skipped: timed out after 0.001s |" in md
+     and f"| {cg.LISTENER_ROW} | REPORT | skipped: timed out after 0.001s |" in md) or \
+        bad.append(f"{kind}: an audit run that times out is a skipped row: {rc}\n{md}")
+    # S4a: the plumbing raising writes no row and leaves every other row as it was
+    FakeGates.qtc = "raise"
+    rc, md, _ = gates(w, f"{kind}-cp-raise")
+    FakeGates.qtc = True
+    real_load2 = cg._load
+    cg._load = lambda n, f: (_ for _ in ()).throw(RuntimeError("amt broke")) if n == "amt" else real_load2(n, f)
+    rc2, md2, _ = gates(w, f"{kind}-amt-raise")
+    cg._load = real_load2
+    _rc, base, _ = gates(w, f"{kind}-raise-base", reverted=True)
+    strip = lambda t, lab: "\n".join(l for l in t.splitlines() if not l.startswith(f"| {lab} |"))
+    (rc == rc2 == 0 and f"| {cg.LISTENER_ROW} |" not in md and f"| {cg.MIXIN_ROW} | REPORT | 1 to read: " in md
+     and strip(md, cg.MIXIN_ROW) == strip(base, cg.MIXIN_ROW) and f"| {cg.MIXIN_ROW} |" not in md2 and f"| {cg.LISTENER_ROW} | REPORT | 1 to read: " in md2
+     and strip(md2, cg.LISTENER_ROW) == strip(base, cg.MIXIN_ROW)) or bad.append(f"{kind}: an audit's plumbing raising writes no row, gates unaffected: {rc} {rc2}\n{md}\n{md2}")
+    # S4b: the skipped row quotes Gradle's own reason
+    FakeGates.qtc = "wrong"
+    rc, md, _ = gates(w, f"{kind}-cp-wrong")
+    FakeGates.qtc = True
+    (f"| {cg.LISTENER_ROW} | REPORT | skipped: Gradle printed no compile classpath: Could not resolve all files for "
+     "configuration ':compileClasspath'. (qtc-classpath.log) |" in md) or bad.append(f"{kind}: the skipped row names Gradle's reason:\n{md}")
+    # S3: mixins in another source set, in a config-named package outside mixin/, and in Kotlin
+    tree(w)
+    cm = w / "src/client/java/com/example/mod/mixin/ClientDragonMixin.java"
+    cm.parent.mkdir(parents=True, exist_ok=True)
+    cm.write_text((MIXIN % "hurtGone").replace("class DragonMixin", "class ClientDragonMixin"), encoding="utf-8")
+    hk = w / "src/main/java/com/example/mod/hooks/HookedMixin.java"
+    hk.parent.mkdir(parents=True, exist_ok=True)
+    hk.write_text((MIXIN % "hurt").replace("package com.example.mod.mixin", "package com.example.mod.hooks")
+                  .replace("class DragonMixin", "class HookedMixin"), encoding="utf-8")
+    kt = w / "src/main/kotlin/com/example/mod/hooks/KtMixin.kt"
+    kt.parent.mkdir(parents=True, exist_ok=True); kt.write_text("package com.example.mod.hooks\n", encoding="utf-8")
+    (w / "src/main/resources/examplemod.hooks.mixins.json").write_text(
+        '{"package":"com.example.mod.hooks","mixins":["HookedMixin","KtMixin"]}', encoding="utf-8")
+    (w / "src/main/resources/examplemod.nested.mixins.json").write_text(      # Outer$Inner is in Outer's file
+        '{"package":"com.example.mod.mixin","mixins":["DragonMixin$Inner"]}', encoding="utf-8")
+    G(w, "add", "-A"); G(w, "commit", "-qm", "more mixins")
+    rc, md, _ = gates(w, f"{kind}-scope")
+    rows = [l for l in md.splitlines() if l.startswith(f"| {cg.MIXIN_ROW} |")]
+    (rc == 0 and len(rows) == 2 and "1 to read: src/client/java: ClientDragonMixin.java" in rows[0] and "hurtGone" in rows[0]
+     and "skipped: 2 configured mixin(s) the audit cannot read: com.example.mod.hooks.HookedMixin (not in a mixin/ or mixins/ "
+         "package), com.example.mod.hooks.KtMixin (Kotlin)" in rows[1]) or bad.append(f"{kind}: every source root's mixins are audited and "
+                                                                                       f"the configured ones it cannot read are named: {rc}\n{md}")
+    for f in (cm, hk, kt, w / "src/main/resources/examplemod.hooks.mixins.json", w / "src/main/resources/examplemod.nested.mixins.json"):
+        f.unlink()
     tree(w, mixin=False, hook=False)                                   # nothing to check: neither runs, no Gradle call
     shutil.rmtree(w / "src/main/java/com/example/mod/mixin", ignore_errors=True)
+    for f in (w / "src/main/resources").glob("*.mixins.json"):        # and no config lists a mixin
+        f.write_text('{"package":"com.example.mod.mixin","mixins":[]}', encoding="utf-8")
     G(w, "add", "-A"); G(w, "commit", "-qm", "no mixins", "--allow-empty")
     rc, md, work = gates(w, f"{kind}-none")
     (rc == 0 and "| REPORT |" not in md and not any("qtcClasspath" in c for c in calls)
@@ -1001,7 +1065,7 @@ for kind, w in (("single-version", sv), ("version-branch", r)):
 print("\n".join(bad) or "OK")
 PY
 )"
-[ "$out" = "OK" ] && ok "#161 U2 on a single-branch clone of the head (single-version) and version branch 1.21.4: ci-gates' mixin-target and event-listener audits write one REPORT row each for a stale target and an abstract-event listener (never red), \`skipped: <why>\` with no sources jar or no classpath, no row when the audit crashes, and neither runs (no Gradle call) with nothing to check; a clean tree's GATES.md is byte-identical to the one written without them" \
+[ "$out" = "OK" ] && ok "#161 U2 on a single-branch clone of the head (single-version) and version branch 1.21.4: ci-gates' mixin-target and event-listener audits write one REPORT row each for a stale target and an abstract-event listener (never red), \`skipped: <why>\` with no sources jar or no classpath, no row when the audit crashes, and neither runs (no Gradle call) with nothing to check; a hung classpath resolution or audit is \`skipped: timed out after Ns\`; the classpath or sources-jar plumbing raising writes no row and leaves every other row as it was; a skipped row quotes Gradle's own reason; a mixin in src/client/java is audited and configured mixins it cannot read (outside mixin/, Kotlin) are named, a nested Outer\$Inner read in Outer's file; a clean tree's GATES.md is byte-identical to the one written without them" \
   || bad "#161 U2: $out"
 else
   echo "  SKIP  #161 U2 ci-gates audit rows (no javac/jar)"

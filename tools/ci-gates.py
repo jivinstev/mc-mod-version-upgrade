@@ -265,8 +265,14 @@ def _blocks(out, count_rx):
 def mixin_row(rc, out):
     """A REPORT row for tools/audit-mixin-targets.py's exit and output, or None: all targets match (0), no vanilla
     target checked (2), or a crash (a traceback, no closing `N MISMATCH(ES)` line)."""
+    hits = mixin_hits(rc, out)
+    return hits_row(MIXIN_ROW, hits) if hits else None
+
+
+def mixin_hits(rc, out):
+    """One line per mismatch of tools/audit-mixin-targets.py's output, or None (clean, nothing checked, a crash)."""
     hits = _blocks(out, r"\d+ MISMATCH\(ES\)") if rc == 1 else None
-    return hits_row(MIXIN_ROW, [f"{w}: " + ", ".join(d) if d else w for w, d in hits]) if hits else None
+    return [f"{w}: " + ", ".join(d) if d else w for w, d in hits] if hits else None
 
 
 def listener_row(rc, out):
@@ -286,10 +292,50 @@ def refused(r):
     return err.splitlines()[0]
 
 
-def has_mixins(main):
-    """A @Mixin file where tools/audit-mixin-targets.py looks (a mixin/ or mixins/ package under src/main/java)."""
-    return any({"mixin", "mixins"} & set(f.relative_to(main).parts[:-1]) and "@Mixin" in f.read_text(encoding="utf-8", errors="replace")
-               for f in pathlib.Path(main).rglob("*.java")) if pathlib.Path(main).is_dir() else False
+CLASSPATH_TIMEOUT = 300    # seconds: a hung classpath resolution must not eat Port CI's job time limit
+AUDIT_TIMEOUT = 600        # seconds, for each audit run (javap included)
+
+
+def mixin_configs(repo):
+    """The mixin classes the fork's mixin configs list: every JSON under src/*/resources with a "package" and a
+    mixins/client/server list (as port_gates.author_unlisted_mixins reads the authors'), as fully qualified names."""
+    out = set()
+    for f in sorted(pathlib.Path(repo).glob("src/*/resources/**/*.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8", errors="replace"))
+        except ValueError:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("package"), str):
+            out |= {f"{d['package']}.{n}" for k in ("mixins", "client", "server") for n in d.get(k) or [] if isinstance(n, str)}
+    return out
+
+
+def in_mixin_package(rel):
+    return bool({"mixin", "mixins"} & set(pathlib.PurePath(rel).parts[:-1]))
+
+
+def mixin_scope(repo):
+    """(roots, unchecked): the source roots tools/audit-mixin-targets.py is run on, one run each -- every src/*/java
+    holding a @Mixin file in a mixin/ or mixins/ package, the only files it reads -- and the configured mixins it cannot
+    check, each with why (a Kotlin source, a package outside mixin/ or mixins/, no source found)."""
+    repo = pathlib.Path(repo)
+    trees = sorted(p for p in repo.glob("src/*/java") if p.is_dir())
+    roots = {t for t in trees for f in t.rglob("*.java")
+             if in_mixin_package(f.relative_to(t)) and "@Mixin" in f.read_text(encoding="utf-8", errors="replace")}
+    unchecked = []
+    for fqn in sorted(mixin_configs(repo)):
+        rel = fqn.split("$", 1)[0].replace(".", "/")       # a nested mixin, Outer$Inner, is in Outer's file
+        java = [t for t in trees if (t / f"{rel}.java").is_file()]
+        if java:
+            if in_mixin_package(f"{rel}.java"):
+                roots.add(java[0])
+            else:
+                unchecked.append(f"{fqn} (not in a mixin/ or mixins/ package)")
+        elif any(repo.glob(f"src/*/*/{rel}.kt")):
+            unchecked.append(f"{fqn} (Kotlin)")
+        else:
+            unchecked.append(f"{fqn} (no Java source under src/*/java)")
+    return sorted(roots), unchecked
 
 
 def has_listeners(trees):
@@ -302,9 +348,9 @@ def gradle_classpath(repo, work):
     stage reads it: (file, "") or (None, why). Never rebuilt by hand (CATALOG X25b-ii)."""
     pu, log = _load("port_gates", "port_gates.py"), pathlib.Path(work) / "qtc-classpath.log"
     try:
-        pu.gradle(repo, ["-I", str(ROOT / "tools/qtc-init.gradle"), "-q", "qtcClasspath"], log, timeout=1800)
+        pu.gradle(repo, ["-I", str(ROOT / "tools/qtc-init.gradle"), "-q", "qtcClasspath"], log, timeout=CLASSPATH_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return None, "Gradle did not print the compile classpath within 30 minutes"
+        return None, f"timed out after {CLASSPATH_TIMEOUT:g}s resolving Gradle's compile classpath"
     text = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
     m = re.search(r"QTC_CLASSPATH_BEGIN\n(.*?)QTC_CLASSPATH_END", text, re.S)
     jars = [l.strip() for l in m.group(1).splitlines() if l.strip()] if m else []
@@ -319,36 +365,57 @@ def gradle_classpath(repo, work):
 
 def target_audit_rows(repo, bv, work, classpath=gradle_classpath):
     """Report-only rows of the two audits that ask the build's own Minecraft and NeoForge whether the code still binds:
-    the mixins' targets (tools/audit-mixin-targets.py, against the sources jar the build staged) and the event
-    listeners' types (tools/audit-event-listeners.py, against Gradle's resolved compile classpath). A finding is a
-    REPORT row; a clean audit, or a tree with nothing for it to check, writes none (GATES.md unchanged); an audit with
-    something to check and a missing input writes `skipped: <why>`; a crash writes nothing. Never a FAIL."""
+    the mixins' targets (tools/audit-mixin-targets.py, against the sources jar the build staged, once per source root
+    holding mixins) and the event listeners' types (tools/audit-event-listeners.py, against Gradle's resolved compile
+    classpath). A finding is a REPORT row; a clean audit, or a tree with nothing for it to check, writes none (GATES.md
+    unchanged); an audit with something to check and a missing input, a timeout, or configured mixins it cannot read
+    writes `skipped: <why>`; a crash writes nothing. Never a FAIL."""
     repo, work, rows = pathlib.Path(repo), pathlib.Path(work), []
 
-    def run(tool, label, parse, *args):
-        r = subprocess.run([sys.executable, str(ROOT / "tools" / f"{tool}.py"), str(repo), *args], capture_output=True,
-                           text=True, encoding="utf-8", errors="replace")
-        (work / f"{tool}.log").write_text(r.stdout + r.stderr, encoding="utf-8")
+    def run(tool, log, *args):
+        """(returncode, stdout, why it could not run or None); a timeout is a reason, never a crash."""
+        try:
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / f"{tool}.py"), str(repo), *args], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=AUDIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            (work / log).write_text(f"timed out after {AUDIT_TIMEOUT:g}s\n", encoding="utf-8")
+            return None, "", f"timed out after {AUDIT_TIMEOUT:g}s"
+        (work / log).write_text(r.stdout + r.stderr, encoding="utf-8")
         print(f"{tool}: " + (r.stdout.strip().splitlines() or ["no output"])[-1], flush=True)
-        row, why = parse(r.returncode, r.stdout), refused(r)
-        return row or (skipped_row(label, why) if why else None)
+        return r.returncode, r.stdout, refused(r)
 
-    main = repo / "src/main/java"
     try:
-        if has_mixins(main):
-            jar = _load("amt", "audit-mixin-targets.py").find_sources_jar(str(repo))
-            row = skipped_row(MIXIN_ROW, "no Minecraft sources jar staged by the build (build/moddev/artifacts/"
-                                         "*-sources.jar or build/neoForm/*/sources.jar)") if not jar else                 run("audit-mixin-targets", MIXIN_ROW, mixin_row, jar, f"--sources={main}")
-            rows += [row] if row else []
+        roots, unchecked = mixin_scope(repo)
+        jar = _load("amt", "audit-mixin-targets.py").find_sources_jar(str(repo)) if roots else None
+        hits, skipped = [], []
+        if roots and not jar:
+            skipped.append("no Minecraft sources jar staged by the build (build/moddev/artifacts/*-sources.jar or "
+                           "build/neoForm/*/sources.jar)")
+        for root in roots if jar else []:
+            name = root.relative_to(repo).as_posix()
+            rc, out, why = run("audit-mixin-targets", "audit-mixin-targets.log" if len(roots) == 1 else
+                               f"audit-mixin-targets-{root.parent.name}.log", jar, f"--sources={root}")
+            found = mixin_hits(rc, out)
+            if found:
+                hits += [(f"{name}: " if len(roots) > 1 else "") + h for h in found]
+            elif why:
+                skipped.append(f"{name}: {why}" if len(roots) > 1 else why)
+        if unchecked:
+            skipped.append(f"{len(unchecked)} configured mixin(s) the audit cannot read: " + ", ".join(unchecked))
+        rows += [hits_row(MIXIN_ROW, hits)] if hits else []
+        rows += [skipped_row(MIXIN_ROW, "; ".join(skipped))] if skipped else []
     except Exception as e:         # the audit's plumbing never reddens or stops the gates
         print(f"[ci-gates] mixin-target audit not run: {e}", flush=True)
     try:
         trees = sorted(str(p) for p in repo.glob("src/*/java") if p.is_dir())
         if has_listeners(trees):
             cp, why = (None, "no javap on PATH (the JDK's)") if not shutil.which("javap") else classpath(repo, work)
-            row = skipped_row(LISTENER_ROW, why) if cp is None else \
-                run("audit-event-listeners", LISTENER_ROW, listener_row, f"--cp-file={cp}", f"--tree={','.join(trees)}",
-                    *([f"--mc={bv}"] if bv else []))
+            row = None
+            if cp is not None:
+                rc, out, why = run("audit-event-listeners", "audit-event-listeners.log", f"--cp-file={cp}",
+                                   f"--tree={','.join(trees)}", *([f"--mc={bv}"] if bv else []))
+                row = listener_row(rc, out)
+            row = row or (skipped_row(LISTENER_ROW, why) if why else None)
             rows += [row] if row else []
     except Exception as e:
         print(f"[ci-gates] event-listener audit not run: {e}", flush=True)

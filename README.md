@@ -267,10 +267,12 @@ version branch's parent branch, else the authors' ref (`--base`), and providers 
 `tools/audit-descriptors.py` checks vanilla class names and descriptors kept as strings outside the mixins (coremods,
 ASM transformers, reflection) against the build's sources jar. Two more report the same way on every kind of fork, so a
 single-version round checks the authors' newly merged code too: `tools/audit-mixin-targets.py` (every mixin injection
-point against the sources jar the build staged) and `tools/audit-event-listeners.py` (no event listener names an abstract
+point against the sources jar the build staged, run once per `src/*/java` source root holding mixins) and `tools/audit-event-listeners.py` (no event listener names an abstract
 or interface event, asked of Gradle's own compile classpath, `tools/qtc-init.gradle`, with the JDK's `javap`). Each runs
 only when the tree has something for it (a mixin; a listener); with an input missing -- no staged sources jar, no
-classpath, no `javap` -- its row says `skipped: <why>`, and an audit that crashes writes no row. On a version branch,
+classpath, no `javap`, a timeout (300 s for the classpath, 600 s per audit run), or a mixin a config lists that the
+audit cannot read (Kotlin, or outside a `mixin/` or `mixins/` package) -- its row says `skipped: <why>`, and an audit
+that crashes writes no row. On a version branch,
 `fork-port.py`'s audit stage still gates on both before its gates stage runs `ci-gates.py`, so there a row appears only
 when that stage was skipped or the branch's own Port CI runs the gates. A fork's CI gets these two rows from the next
 Port CI kit release (the kit now ships `tools/audit-event-listeners.py` and `tools/qtc-init.gradle` again).
