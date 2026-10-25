@@ -4,8 +4,8 @@
     # none of them proves a jar a player downloads. This job runs the author's build once, then for each variant glob
     # requires exactly one built jar in build/libs and boots it ALONE (plus the pinned dependency jars) in a real
     # NeoForge server (tools/shipped-gate.py, from the Port CI kit), checking the fork's own log expectations for that
-    # variant when it has them (.port/<mc>/shipped-expect-<variant>.txt, else .port/<mc>/shipped-expect.txt, else
-    # .multiversion/shipped-expect.txt; the variant is the glob's suffix, cf for '*_cf.jar'). A failing variant
+    # variant when it has them (.port/<mc>/shipped-expect-<variant>.txt, else .port/<mc>/shipped-expect.txt; the
+    # variant is the glob's suffix, cf for '*_cf.jar'). A failing variant
     # fails the job, and the release needs it as it needs the gates. The globs reach the script only through env,
     # never spliced into it.
     name: shipped jars
