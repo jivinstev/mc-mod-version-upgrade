@@ -24,10 +24,12 @@ dependent's Gate C AFTER the library version had merged and pre-released (reopen
 weeks running): here a library version's merge waits for the dependent's Gate C against the library's candidate jar.
 
 THE QUEUE (`init`, from the frozen plan and the clones; ordered, each item a small typed step with explicit
-dependencies). Only a set of VERSION-BRANCH forks (`.port/<v>/branch.properties` branches): a set with a single-version
-fork keeps the round the keep-current skill describes (round-task without --version-branches) and init refuses it, as
-it refuses a clone with the removed .multiversion/ layer at HEAD (tools/fork-kind.py) and a clone whose origin is not
-that fork. Per fork, library first (`depends_on` in
+dependencies). Any fork set: version-branch forks (`.port/<v>/branch.properties` branches), single-version forks, or both
+mixed. A single-version fork is its head alone (P5: the head path below); nothing of the ladder -- lowest check,
+shared-library sync, merge-ups, freeze, library record -- is built or read for it. init refuses a clone with the removed
+.multiversion/ layer at HEAD (tools/fork-kind.py), a clone whose origin is not that fork, and a version-branch
+dependent whose version BRANCH (not its head) would re-pin to a single-version library's release (layer-deps.py resolve
+takes only a version branch's release). Per fork, library first (`depends_on` in
 .github/weekly-plan.json), and per version only when it has work this round -- the head cascade of the authors' code the
 plan takes, a selected fix at or below it, a library release of this round to re-pin to, a ticked dependency bump at it,
 or MMVU's shared library moved past it (init reads fork-branches.py sync-shared --check: a version a sync changes, a
@@ -37,6 +39,16 @@ forks already on the current shared library, builds nothing but the close):
       setup (work branch keep-current/<date>) -> authors (Run steps 2-5 at the frozen upstream_commit) -> repin-head ->
       backlog -> gates (ci-gates.py full and minimal) -> review -> fix -> recheck -> pr -> ci -> merge (its push run
       green) -> release
+  a SINGLE-VERSION fork's head, the same steps in the single-version round's order (keep-current "The weekly round"):
+      ci-check (port-ci.py check: a stale workflow is a warning, regenerated at setup) -> setup -> upstream (port-sync.py
+      --port keep-current/<date> --base <head> --commit <upstream_commit>; a conflict is its fixer's job) -> authors
+      (Run steps 3-5) -> repin-head -> backlog -> review -> fix -> recheck -> gates (ONE ci-gates.py full and minimal
+      pass on the reviewed tree) -> depgate:<dependent> (a LIBRARY: the dependent's gates against this candidate jar,
+      before the merge) -> pr -> ci -> merge -> release (dispatched right after the merge; the push run and the release
+      run awaited together)
+  a library head with a single-version dependent (or a single-version library) gets that depgate too, as does a
+  version-branch library's version for a single-version dependent at that version; a set of version-branch forks only
+  keeps its head as above
   then per version in ladder order, each waiting for the one below it to merge:
       sync (fork-branches.py sync-shared --target <v>, its own commit; only a version the check named) -> mergeup
       (fork-branches.py cascade <lower>..<v> --gates ab; the head cascade, with the plan's decisions, at the first
@@ -94,7 +106,8 @@ LOCK_ENV = "MMVU_FULL_GATE_LOCK"
 MAX_FIX = 2
 SUMMARY_LINES = 40
 TERMINAL = ("ok", "skipped", "blocked")
-PHASE = {"authors": "upstream", "mergeup": "upstream", "decisions": "upstream", "backlog": "backlog", "lowest": "backlog",
+PHASE = {"authors": "upstream", "upstream": "upstream", "mergeup": "upstream", "decisions": "upstream", "backlog": "backlog",
+         "lowest": "backlog",
          "review": "review", "fix": "review", "recheck": "review", "sync": "upstream", "reconcile": "upstream",
          "adopt": "backlog"}
 # the permission (the config's `allow`) a step needs; comments on the plan issue are always allowed
@@ -119,7 +132,7 @@ _MODS = {}
 
 def mod(key):
     files = {"fb": "fork-branches.py", "ki": "known-issues.py", "pc": "port-ci.py", "lc": "checkout-lock.py",
-             "fk": "fork-kind.py"}
+             "fk": "fork-kind.py", "ld": "layer-deps.py", "rp": "round-preflight.py"}
     if key not in _MODS:
         sys.dont_write_bytecode = True
         _MODS[key] = load(f"round_{key}", files[key])
@@ -307,14 +320,18 @@ class Q:
 
 
 def build_queue(frozen, cfg, forks, date):
-    """forks: {slug: {"dir", "head", "base", "versions", ...}} in config order (library first), every one a version-branch
-    fork. A version gets its segment only when it has work this round: the head cascade of the authors' code the plan
+    """forks: {slug: {"dir", "kind", "head", "base", "versions", ...}} in config order (library first); a single-version
+    fork has no versions (its head alone). A version gets its segment only when it has work this round: the head cascade of the authors' code the plan
     takes, a selected fix at or below it (carried up by the merges), a library release of this round to re-pin to, or a
     ticked dependency bump at it. A plan that selects nothing builds nothing but the close."""
     q = Q()
     fz = {f["repo"]: f for f in frozen["forks"]}
     deps_of = {f["repo"]: [d for d in f.get("depends_on", []) if d in forks] for f in cfg["forks"] if f["repo"] in forks}
     dependents = {s: [d for d in forks if s in deps_of.get(d, [])] for s in forks}
+
+    def sv_dep(dep, v):
+        """A single-version dependent whose one version is v: gated before the library's merge at v too."""
+        return forks[dep]["kind"] == "single" and forks[dep]["base"] == v
     release_of = {}            # (fork, version) -> the release item id
     # LOWEST FIRST: one job per fork whose fixes need an agent's look below their version; every fork waits for them
     lowest_items = []
@@ -365,17 +382,29 @@ def build_queue(frozen, cfg, forks, date):
         if grades:
             q.add(slug, base, "grades", extra={"grades": grades})
         if head_work:
+            single = F["kind"] == "single"
             lib_head = [release_of[(lb, base)] for lb in libs if (lb, base) in release_of]
             q.add(slug, base, "setup", extra={"bumps": bumps.get(base, []), "branch": f"keep-current/{date}"})
             if f.get("take_authors"):
-                q.add(slug, base, "authors", extra={"upstream_commit": f.get("upstream_commit"),
-                                                     "upstream": f.get("upstream"), "upstream_branch": f.get("upstream_branch")})
+                up = {"upstream_commit": f.get("upstream_commit"), "upstream": f.get("upstream"),
+                      "upstream_branch": f.get("upstream_branch")}
+                if single:           # the authors' merge is mechanical (port-sync.py); its conflicts are a fixer's
+                    q.add(slug, base, "upstream", extra=dict(up))
+                q.add(slug, base, "authors", extra=up)
             if lib_head:
                 q.add(slug, base, "repin-head", deps=lib_head, extra={"libraries": [lb for lb in libs if (lb, base) in release_of]})
             if at.get(base):
                 q.add(slug, base, "backlog", extra={"fixes": at[base]})
-            q.add(slug, base, "gates")
-            seg_review(q, slug, base)
+            if single:               # the review starts from A/B; ONE full pass on the reviewed tree (keep-current step 4)
+                seg_review(q, slug, base)
+                q.add(slug, base, "gates")
+            else:
+                q.add(slug, base, "gates")
+                seg_review(q, slug, base)
+            if F.get("library"):     # E4: a set of version-branch forks only keeps its head without this gate
+                for dep in dependents.get(slug, []):
+                    if (single or forks[dep]["kind"] == "single") and base in [forks[dep]["base"], *forks[dep]["versions"]]:
+                        q.add(slug, base, f"depgate:{dep}", dirs=[slug, dep], extra={"dependent": dep})
             for s in ("pr", "ci", "merge"):
                 q.add(slug, base, s)
             release_of[(slug, base)] = q.add(slug, base, "release")
@@ -409,7 +438,7 @@ def build_queue(frozen, cfg, forks, date):
             g = q.add(slug, v, "gates")
             if F.get("library"):
                 for dep in dependents.get(slug, []):
-                    if v in forks[dep]["versions"]:
+                    if v in forks[dep]["versions"] or sv_dep(dep, v):
                         q.add(slug, v, f"depgate:{dep}", dirs=[slug, dep], extra={"dependent": dep})
             q.add(slug, v, "freeze", extra={"libraries": rel})
             for s in ("pr", "ci", "merge"):
@@ -574,6 +603,24 @@ def shared_of(d, versions, slug):
     return shared, harvest, ("; ".join(bad)[:300] or None)
 
 
+def sv_library_refusal(cfg, forks):
+    """Why the set cannot run (None when it can): a version-branch dependent's version BRANCH (not its head) that would
+    re-pin to a single-version library's release -- layer-deps.py resolve --port-release takes only a version branch's
+    release (its tree holds .port/<v>/branch.properties)."""
+    for cf in cfg["forks"]:
+        D = forks.get(cf["repo"])
+        if not D or D["kind"] != "branches":
+            continue
+        for lb in cf.get("depends_on", []):
+            L = forks.get(lb)
+            if L and L["kind"] == "single" and L["base"] in D["versions"]:
+                return (f"{cf['repo']}'s version branch neoforge-{L['base']} depends on {lb}, a single-version library: "
+                        "its re-pin (layer-deps.py resolve --port-release) takes only a version branch's release, so "
+                        "the driver cannot run this set; make the library a version-branch fork (fork-versions) or "
+                        "re-pin that branch by hand")
+    return None
+
+
 def cmd_init(a):
     rdir = pathlib.Path(a.round_dir).resolve()
     state = pathlib.Path(a.state).resolve() if a.state else rdir / STATE_DEFAULT
@@ -613,11 +660,6 @@ def cmd_init(a):
             print(f"round: {slug}: {why}")
             return 2
         kind = fork_kind(d)
-        if kind == "single":
-            print(f"round: {slug} is a single-version fork (no .port/<v>/branch.properties branches): the driver runs only "
-                  "a set of version-branch forks; a set with a single-version fork keeps the round as the keep-current "
-                  "skill describes it (round-task without --version-branches)")
-            return 2
         head = cf["head"]
         base = head[len("neoforge-"):] if head.startswith("neoforge-") else head
         forks[slug] = {"dir": str(d), "kind": kind, "head": head, "base": base, "name": slug.split("/", 1)[1],
@@ -626,6 +668,10 @@ def cmd_init(a):
                        "depends_on": cf.get("depends_on", [])}
         fz_f = next((x for x in frozen["forks"] if x["repo"] == slug), {})
         fixes = fz_f.get("fixes") or [{"id": i, "at": base} for i in fz_f.get("selected", [])]
+        if kind == "single":
+            # one version: no branch below it to check, no shared library to sync (principle 2: never read here)
+            forks[slug]["shared"], forks[slug]["harvest"] = {}, []
+            continue
         if fixes:
             forks[slug]["lowest_check"] = lowest_of(d, forks[slug], fixes)
             if forks[slug]["lowest_check"].get("error"):
@@ -636,6 +682,10 @@ def cmd_init(a):
             print(f"round: {slug}: WARNING: the shared-library check failed ({why}): no sync, reconcile or adopt item "
                   "for this fork this round; the close names it")
             forks[slug]["shared_error"] = why
+    why = sv_library_refusal(cfg, forks)
+    if why:
+        print(f"round: {why}")
+        return 2
     date = a.date or datetime.date.today().isoformat()
     items = build_queue(frozen, cfg, forks, date)
     data = {"schema": 1, "created": now(), "round_start": a.since or now(), "round_dir": str(rdir),
@@ -829,8 +879,9 @@ def job_text(st, it, fixing=False):
         lines += [f"The driver's mechanical step `{it['step']}` for {it['fork']} {it['version']} failed."
                   + (f" Its log is {log} (read only its tail and any RESIDUE.md / GATES-RED.md it names)." if log else ""),
                   "", UNTRUSTED, "", FENCE + "text", *fence_safe(it.get("note", "")[-900:]), FENCE]
+        hint = FIX_HINT.get(it["step"] + ("-head" if it["step"] == "depgate" and not is_vb(st, it) else ""), "")
         lines += [f"Find and fix the cause on {where(st, it)[0]}, commit, leave the checkout clean, and stop: the driver "
-                  "runs the step again after you.", FIX_HINT.get(it["step"], ""), "",
+                  "runs the step again after you.", hint, "",
                   "Acceptance: the cause is fixed and committed (or, when it needs the owner, RESULT: blocked naming "
                   "what to ask)."]
     else:
@@ -864,6 +915,20 @@ FIX_HINT = {
                "(a crash is S1) on the library's head, find the cause in the library at this version (the dependent's "
                "GATES-RED.md / RESIDUE.md copied into the log directory name it), fix it on the library's version "
                "branch, commit. The driver re-runs the library's full gates and this dependent gate before the merge.",
+    "depgate-head": "The DEPENDENT's gates (ci-gates.py full and minimal on its head, the library's candidate jar put "
+                    "into mavenLocal where its Port CI pins the library's release) failed against this LIBRARY head's "
+                    "candidate jar, built by the library's own gate run before its merge. That is a finding on the "
+                    "library: grade it with known-issues.py add (a crash is S1) where the library keeps its ledger, find "
+                    "the cause in the library (the dependent's ci-gates summaries copied into the log directory name "
+                    "it), fix it on the library's work branch, commit. The driver re-runs the library's gates and this "
+                    "dependent gate before the merge.",
+    "upstream": "The authors' merge (port-sync.py --commit <the frozen upstream_commit>, a merge commit) stopped. A "
+                "CONFLICT (its log lists the files): resolve each on the work branch, keeping the authors' change "
+                "written in the port's API -- a file one of our fix commits touched resolved to the AUTHORS' side, "
+                "provisionally, said in the merge message (keep-current Run step 2) -- then `git commit` the merge. A "
+                "REFUSAL (a port branch diverged from origin's, a work branch cut from an older port branch, a commit "
+                "the authors' branch does not reach, no remote fetching the authors' repository): do what its message "
+                "says. Never rebase, reset or force anything.",
     "ci": "A red CI run on the PR: read the failing job's summary (gh run view --log-failed, tail only); a job that "
           "failed before any gate body ran (setup, a dependency download) is re-run once (gh run rerun --failed); a "
           "failure inside a gate is fixed on the branch and committed (the driver pushes it).",
@@ -926,6 +991,17 @@ def job_task(st, it):
     if vb:
         with contextlib.suppress(StepError):
             co = vco(st, it["fork"], v)          # the version's own checkout: check-done writes its rows only there
+    if s == "authors" and seg_item(st, it, "upstream"):
+        x = it["extra"]
+        return [f"The authors' code (the plan's take_authors) is merged into {it['fork']} at {v}: the driver ran "
+                f"port-sync.py on {w} with the frozen upstream commit {x.get('upstream_commit')} (a merge commit; its "
+                "conflicts, if any, were resolved by its fixer). Now keep-current \"Run\" steps 3-5 there: reconcile "
+                "every fix the port carries (step 3: take theirs only when proven, keep or shrink ours), port the new "
+                "code (step 4) to a green compile and Gate A/B (`ci-gates.py --repo " + str(F["dir"]) + " --modid <ID> "
+                f"--base {x.get('upstream_commit')} --gatec none`). Do not run the full gates: the driver runs them "
+                "after the review. Record each reconcile decision in the fix ledgers (step 3.5) and run fix-ledger.py "
+                f"check --release {br}.",
+                f"Acceptance: {br} holds the merge and the port, A/B green, committed."]
     if s == "authors":
         x = it["extra"]
         return [f"Take the authors' code (the plan's take_authors) into {it['fork']} at {v}: keep-current \"Run\" steps "
@@ -1060,7 +1136,7 @@ def job_task(st, it):
         return lines
     if s == "repin-head":
         libs = it["extra"]["libraries"]
-        tags = [st.item(f"{st.fork(lb)['name']}@{st.fork(lb)['base']}:release").get("result", {}).get("tag") for lb in libs]
+        tags = [st.item(f"{st.fork(lb)['name']}@{v}:release").get("result", {}).get("tag") for lb in libs]
         return [f"Re-pin {it['fork']}'s head ({F['head']}, single-version) to the library pre-release(s) this round cut: "
                 + ", ".join(f"{lb}@{t}" for lb, t in zip(libs, tags)) + ". keep-current Run step 7: `python3 "
                 f"{T / 'port-ci.py'} args --repo {F['dir']}` gives the current command; change the tag and asset of "
@@ -1215,11 +1291,50 @@ def base_of(st, it):
 
 def t_ci_check(st, it, log):
     F = st.fork(it["fork"])
+    if F["kind"] == "single":
+        return sv_ci_check(st, it, log)
     r = sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"]], log)
     warn = [ln for ln in pathlib.Path(log).read_text(encoding="utf-8").splitlines() if "WARNING" in ln]
     if warn:
         raise StepError(f"{len(warn)} workflow warning(s): {warn[0][:300]}")
     return "workflows current", {}
+
+
+def sv_ci_check(st, it, log):
+    """A single-version fork's workflow check (port-ci.py check, on origin's head): a WARNING never blocks (keep-current
+    step 4); it is recorded, and setup regenerates the workflow at the newest kit on the work branch, so the PR carries
+    it."""
+    F = st.fork(it["fork"])
+    d = F["dir"]
+    git(d, "fetch", "-q", "origin", F["head"], check=True)
+    wf = git(d, "show", f"origin/{F['head']}:{PORT_CI_WF}")
+    if wf.returncode:
+        return f"no {PORT_CI_WF} on origin/{F['head']}: nothing to check", {}
+    f_ = st.rdir / "round/work" / f"ci-check-{F['name']}.yml"
+    f_.parent.mkdir(parents=True, exist_ok=True)
+    f_.write_text(wf.stdout, encoding="utf-8")
+    sh(st, it, [sys.executable, TOOLS / "port-ci.py", "check", "--repo", d, "--file", f_], log)
+    warn = [ln for ln in pathlib.Path(log).read_text(encoding="utf-8").splitlines() if "WARNING" in ln]
+    if warn:
+        return (f"WARNING (never blocks; setup regenerates the workflow on the work branch): {warn[0][:300]}",
+                {"stale_workflow": warn[0][:300]})
+    return "workflow current", {}
+
+
+PORT_CI_WF = ".github/workflows/port-ci.yml"
+
+
+def regen_workflow(st, it, d, log):
+    """The work branch's Port CI workflow rendered again at the newest kit, every other option read back (port-ci.py
+    check's regenerate command, run here), committed alone. -> the commit or None."""
+    try:
+        rec = mod("pc").recover_args((pathlib.Path(d) / PORT_CI_WF).read_text(encoding="utf-8"))
+    except (OSError, SystemExit) as e:
+        raise StepError(f"the work branch's {PORT_CI_WF} cannot be read back to regenerate it: {e}")
+    args = [x for i, x in enumerate(rec) if x not in ("--kit-version", "--kit-sha")
+            and (i == 0 or rec[i - 1] not in ("--kit-version", "--kit-sha"))]
+    sh(st, it, [sys.executable, TOOLS / "port-ci.py", "--repo", d, *args], log)
+    return commit_paths(d, [PORT_CI_WF], "Port CI workflow at the newest kit (keep-current round)")
 
 
 def t_grades(st, it, log):
@@ -1246,7 +1361,44 @@ def t_setup(st, it, log):
         sh(st, it, [sys.executable if c == "python3" else c for c in cmd], log)
         n += 1
     c = commit_paths(d, ["."], "Dependency updates the plan ticked (keep-current round)") if n else None
-    return f"on {it['extra']['branch']}" + (f"; {n} bump(s), {c[:12]}" if c else ""), {}
+    cc = seg_item(st, it, "ci-check") if F["kind"] == "single" else None
+    w = regen_workflow(st, it, d, log) if cc and cc["result"].get("stale_workflow") else None
+    return (f"on {it['extra']['branch']}" + (f"; {n} bump(s), {c[:12]}" if c else "")
+            + (f"; workflow regenerated at the newest kit, {w[:12]}" if w else "")), {}
+
+
+def authors_remote(d, upstream):
+    """The clone's remote that fetches the authors' repository (`upstream` in the plan: a URL, or a remote's name) --
+    the one round-preflight.py checks for a single-version fork."""
+    names = git(d, "remote").stdout.split()
+    if upstream in names:
+        return upstream
+    nu = mod("rp").norm_url
+    for n in names:
+        if nu(git(d, "remote", "get-url", n).stdout) == nu(upstream):
+            return n
+    return None
+
+
+def t_upstream(st, it, log):
+    """A single-version fork's authors' merge, the plan's frozen commit exactly: port-sync.py --port <work branch> --base
+    <head> --commit <upstream_commit> (the head checked against origin first, a merge commit, never a rebase). A
+    conflict stops it red with the merge in progress: its fixer resolves and commits, and this step then finds nothing
+    left to merge."""
+    F, x = st.fork(it["fork"]), it["extra"]
+    d = F["dir"]
+    if not x.get("upstream_commit"):
+        raise StepError("the frozen plan names no upstream_commit for this fork: nothing exact to merge")
+    remote = authors_remote(d, x.get("upstream") or "")
+    if not remote:
+        raise StepError(f"no remote of {d} fetches the authors' repository {x.get('upstream')}: round-preflight.py "
+                        "prints the fetch-only `git remote add` to run")
+    if git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{F['head']}").returncode:
+        git(d, "branch", "-q", F["head"], f"origin/{F['head']}", check=True)
+    wb = branch_of(st, it)
+    sh(st, it, [sys.executable, TOOLS / "port-sync.py", "--repo", d, "--port", wb, "--base", F["head"],
+                "--upstream", f"{remote}/{x.get('upstream_branch') or 'main'}", "--commit", x["upstream_commit"]], log)
+    return f"{remote} at {x['upstream_commit'][:12]} merged into {wb}", {"merged_head": head(d)}
 
 
 def t_sync(st, it, log):
@@ -1309,7 +1461,7 @@ def t_repin(st, it, log):
     return ("re-pinned " + ", ".join(pins) if pins else f"{len(it['extra']['bumps'])} bump(s)") + (f", {c[:12]}" if c else ""), {"pins": pins}
 
 
-def sv_gate_cmds(d, upstream_commit=None):
+def sv_gate_cmds(d, upstream_commit=None, base_ref=None):
     wf = pathlib.Path(d) / ".github/workflows/port-ci.yml"
     if not wf.is_file():
         raise StepError("no .github/workflows/port-ci.yml on the work branch: the gates' --modid cannot be read")
@@ -1320,6 +1472,8 @@ def sv_gate_cmds(d, upstream_commit=None):
         raise StepError("the Port CI workflow names no --modid")
     gatec = (re.search(r'--gatec "?([\w,]+)"?', text) or [None, "launch,spawn,battle,gauntlet"])[1]
     base = ["--base", upstream_commit] if upstream_commit and git(d, "cat-file", "-e", f"{upstream_commit}^{{commit}}").returncode == 0 else []
+    if not base and base_ref and git(d, "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}").returncode == 0:
+        base = ["--base", base_ref]         # a dependent gate's worktree: its workflow's own --base
     out = []
     for env in ("full", "minimal"):
         out.append([sys.executable, TOOLS / "ci-gates.py", "--repo", d, "--modid", modid, *base, "--gatec", gatec,
@@ -1422,6 +1576,9 @@ def t_gates(st, it, log):
         return "full gates green" + (f", records {c[:12]}" if c else ""), {"gated_head": gated, "gated_at": at,
                                                                             "head_after": head(d)}
     d = checkout(F["dir"], branch_of(st, it))
+    if seg_ids(st, it, ("depgate",)):       # a library's candidate: only a jar this run builds counts (t_depgate)
+        for j in built_jars(d):
+            j.unlink()
     au = seg_item(st, it, "authors")
     up = au["extra"].get("upstream_commit") if au else None
     gated, at = head(d), time.time()
@@ -1438,7 +1595,7 @@ def t_depgate(st, it, log):
     GATES.md in that worktree certifying its HEAD with every row green."""
     lib, dep = st.fork(it["fork"]), st.fork(it["extra"]["dependent"])
     v = it["version"]
-    lco = vco(st, it["fork"], v)
+    lco = vco(st, it["fork"], v) if is_vb(st, it) else checkout(lib["dir"], branch_of(st, it))
     g = seg_item(st, it, "gates")["result"]
     if not g.get("gated_head"):
         raise StepError(f"the library's gates at {v} recorded no gated commit: run them again")
@@ -1451,6 +1608,8 @@ def t_depgate(st, it, log):
     if not jars or stale:
         raise StepError(f"{lco}/build/libs has {'no jar' if not jars else 'jars older than its gate run: ' + ', '.join(stale)}"
                         ": the candidate jar must be the one the library's gate run just built")
+    if not (dep["kind"] == "branches" and v in dep["versions"]):
+        return depgate_head(st, it, lib, dep, v, lco, jars, log)
     git(dep["dir"], "fetch", "-q", "origin", f"neoforge-{v}", check=True)
     work = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}"
     evid = st.rdir / "round/logs" / job_id(it)
@@ -1480,6 +1639,77 @@ def t_depgate(st, it, log):
         git(dep["dir"], "worktree", "prune")
     return f"{it['extra']['dependent']} {v} Gate C green against the candidate jar", {"evidence": str(evid),
                                                                                        "library_head": head(lco)}
+
+
+def m2_dir(ga, ver):
+    g, a = ga.split(":")
+    return pathlib.Path.home() / ".m2/repository" / g.replace(".", "/") / a / ver
+
+
+def depgate_head(st, it, lib, dep, v, lco, jars, log):
+    """The pre-merge dependent gate when the dependent's version v is its HEAD (a single-version dependent, or a
+    version-branch dependent's head): origin's head on a throwaway worktree, gated by ci-gates.py full and minimal (the
+    head path's commands, its workflow's own --base) under the machine's gate lock, with the library's candidate jar put
+    into mavenLocal where the dependent's Port CI puts the library's release (port-ci.py --dep-jar: same group,
+    artifact and version) -- what was there before is put back afterwards, so nothing later builds against the
+    candidate. Green only when every command exits 0."""
+    br = dep["head"]
+    git(dep["dir"], "fetch", "-q", "origin", br, check=True)
+    work = st.rdir / "round/work" / f"depgate-{dep['name']}-{v}"
+    evid = st.rdir / "round/logs" / job_id(it)
+    evid.mkdir(parents=True, exist_ok=True)
+    if work.exists():
+        git(dep["dir"], "worktree", "remove", "--force", str(work))
+        shutil.rmtree(work, ignore_errors=True)
+    git(dep["dir"], "worktree", "add", "-q", "--detach", str(work), f"origin/{br}", check=True)
+    saved, made, cand = {}, [], {}
+    try:
+        wf = (work / PORT_CI_WF).read_text(encoding="utf-8") if (work / PORT_CI_WF).is_file() else ""
+        pins = {ga: p for ga, p in mod("ld").port_deps(wf).items() if p["repo"].lower() == it["fork"].lower()}
+        if not pins:
+            raise StepError(f"{dep['head']} of {it['extra']['dependent']}: its Port CI workflow pins no release of "
+                            f"{it['fork']} (port-ci.py --dep-jar): nothing to gate against the candidate jar")
+        m = re.search(r'--base "?(origin/[\w./-]+)', wf)
+        if m:
+            git(dep["dir"], "fetch", "-q", "origin", m.group(1).split("/", 1)[1])
+        for ga, p in pins.items():
+            named = [j for j in jars if j.name == p["asset"]]
+            if not named and len(jars) != 1:
+                raise StepError(f"{lco}/build/libs has {', '.join(sorted(j.name for j in jars))} and none is named "
+                                f"{p['asset']} (the asset {it['extra']['dependent']} pins): which is the candidate?")
+            d_ = m2_dir(ga, p["version"])
+            for f_ in (d_ / f"{ga.split(':')[1]}-{p['version']}.jar", d_ / f"{ga.split(':')[1]}-{p['version']}.pom"):
+                saved[f_] = f_.read_bytes() if f_.is_file() else None
+            cand[ga] = (named or jars)[0].read_bytes()
+        rcs = []
+        with full_gate_lock(it["id"], say_to(log)) as lk:
+            made = list(saved)
+            for ga, p in pins.items():
+                mod("ld").install_m2(ga, p["version"], cand[ga])
+            try:
+                gate_cmds = sv_gate_cmds(work, None, m.group(1) if m else None)
+            except SystemExit as e:
+                raise StepError(f"{it['extra']['dependent']}'s {PORT_CI_WF} cannot be read back: {e}")
+            for cmd in gate_cmds:
+                rcs.append(sh(st, it, cmd, log, cwd=work, ok=range(0, 256), hold=lk).returncode)
+        for f_ in (work / "build").glob("round-gates-*.md"):
+            shutil.copy2(f_, evid / f_.name)
+        bad = [r for r in rcs if r]
+        if bad:
+            raise StepError(f"{it['extra']['dependent']} {v}: its gates against {it['fork']}'s candidate jar are NOT "
+                            f"green (ci-gates exit {bad[0]}; evidence in {evid}): a blocking finding on the library, "
+                            "which does not merge")
+    finally:
+        for f_ in made:                      # mavenLocal as it was: the dependent's own builds use its released pin
+            if saved[f_] is None:
+                f_.unlink(missing_ok=True)
+            else:
+                f_.write_bytes(saved[f_])
+        git(dep["dir"], "worktree", "remove", "--force", str(work))
+        shutil.rmtree(work, ignore_errors=True)
+        git(dep["dir"], "worktree", "prune")
+    return (f"{it['extra']['dependent']} {v} gates green against the candidate jar",
+            {"evidence": str(evid), "library_head": head(lco)})
 
 
 def t_freeze(st, it, log):
@@ -1610,12 +1840,19 @@ def t_merge(st, it, log):
     base = base_of(st, it)
     ff_local(st.fork(slug)["dir"], base)
     res = {"merge_sha": sha, "merged_at": now()}
-    if not is_vb(st, it):          # the head: its push run green first (Run step 6)
+    if not release_waits_push(st, it):          # a version-branch fork's head: its push run green first (Run step 6)
         ok, text = wait_runs(slug, sha, log, event="push", branch=base)
         if not ok:
             raise StepError(f"the merge's push run on {base}: {text}")
         return f"#{pr['pr']} merged ({sha[:12]}), push run green", res
     return f"#{pr['pr']} merged ({sha[:12]})", res
+
+
+def release_waits_push(st, it):
+    """The release is dispatched right after the merge and the merge's push run awaited with it (keep-current step 4):
+    a version branch, and a single-version fork's head; a version-branch fork's head waits for its push run at the
+    merge, as before."""
+    return is_vb(st, it) or st.fork(it["fork"])["kind"] == "single"
 
 
 TAG_RE = r"-mc{v}(?:-r\d+)?$"
@@ -1643,7 +1880,7 @@ def t_release(st, it, log):
         with State.tx(st.path) as s2:
             s2.item(it["id"])["result"]["dispatched_at"] = since
     ok, text = wait_runs(slug, mg["merge_sha"], log, event="workflow_dispatch", branch=base, since=since)
-    if is_vb(st, it):              # the merge's push run, awaited together with the release run
+    if release_waits_push(st, it):  # the merge's push run, awaited together with the release run
         ok2, text2 = wait_runs(slug, mg["merge_sha"], log, event="push", branch=base)
         if not ok2:
             raise StepError(f"the merge's push run on {base} is red ({text2}): it blocks the pre-release's promotion")
@@ -1729,7 +1966,8 @@ def t_ledger(st, it, log):
                                 f"{','.join(reached)}=fixed@{sha}", *(["--lowest", reached[0]] if below else [])], log)
                     sets += 1
         commit_paths(d, [".port/KNOWN-ISSUES.json"], "Known issues: the round's fixes (keep-current round)")
-    if merged:
+    # a single-version fork with no known-issues ledger gets no README Ports block (nothing for it to link)
+    if merged and not (F["kind"] == "single" and not (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file()):
         sh(st, it, [sys.executable, TOOLS / "known-issues.py", "render-ports", "--repo", d, "--head", F["head"],
                     "--fetch-releases", "--write"], log)
         commit_paths(d, ["README.md"], "README Ports block (keep-current round)")
@@ -1740,7 +1978,8 @@ def t_ledger(st, it, log):
     return note, {"unmerged": unmerged, "refused": refused}
 
 
-TOOL_IMPL = {"ci-check": t_ci_check, "grades": t_grades, "setup": t_setup, "sync": t_sync, "mergeup": t_mergeup,
+TOOL_IMPL = {"ci-check": t_ci_check, "grades": t_grades, "setup": t_setup, "upstream": t_upstream, "sync": t_sync,
+             "mergeup": t_mergeup,
              "repin": t_repin,
              "gates": t_gates, "depgate": t_depgate, "freeze": t_freeze, "pr": t_pr, "ci": t_ci, "merge": t_merge,
              "release": t_release, "librecord": t_librecord, "ledger": t_ledger}
@@ -2155,6 +2394,436 @@ def cmd_gate(a, out=print):
 
 # ---------------------------------------------------------------- self-check
 
+def self_check_single(tmp, repo, init, expect, q, job_file):
+    """Single-version forks on the driver (#161 U4, principle 1): a set of single-version forks only (a library and its
+    dependent), a version-branch library with single-version dependents, and a single-version library with a
+    version-branch dependent -- each queue's order, the library's pre-merge dependent gate, a drive to the close with an
+    interrupted step resumed from STATE.json; the head path's real steps on a single-version fixture against a stand-in
+    GitHub and a bare origin (the authors' merge, its conflict, the workflow check, ONE gate pass under the machine's
+    lock, the dependent gate on a mavenLocal it puts back, only the gated commit in the PR, the release dispatched
+    right after the merge); and the multi-version machinery never reached on a single-version fork (principle 2).
+    -> True when every check passed (each failure is printed by `expect`)."""
+    global gh, sh
+    real_gh, real_sh, saved = gh, sh, dict(TOOL_IMPL)
+    bad = []
+
+    def want(c, msg):
+        expect(c, msg)
+        if not c:
+            bad.append(msg)
+    home0 = os.environ.get("HOME"), os.environ.get("USERPROFILE")
+    try:
+        def sv_repo(name, mc="1.21.1", lib_dep=None, conflict=False):
+            """A single-version fork: one branch neoforge-<mc>, its Port CI workflow (with a --dep-jar pin of lib_dep),
+            origin a bare repository (github.com/owner/<name> rewritten to it), the authors' repository another bare
+            one with one commit the port lacks (conflict: on the same line the port changed) -> (clone, authors' sha,
+            the authors' repository path)."""
+            d = tmp / name
+            d.mkdir()
+            g = lambda *x: git(d, *x, check=True)
+            g("init", "-q", "-b", "main")
+            (d / "gradle.properties").write_text(f"minecraft_version=1.21.1\nmod_id={name}\n".replace("1.21.1", mc),
+                                                 encoding="utf-8")
+            (d / "Main.java").write_text("class Main {}\n", encoding="utf-8")
+            g("add", "-A"); g("commit", "-q", "-m", "the authors' code")
+            g("checkout", "-q", "-b", f"neoforge-{mc}")
+            wf = ('      - run: curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" .../port-ci-kit-v20.tar.gz && echo "' + "a" * 64
+                  + '  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -\n      - run: |\n          python3 .port-tools/tools/'
+                  'ci-gates.py --repo . --modid "' + name + '" --base "origin/main" \\\n            --gatec "launch,spawn"\n')
+            if lib_dep:
+                ln = lib_dep.split("/")[1]
+                wf += (f"      - name: {ln} 1.0 from the {ln}-1.0-mc{mc} release into mavenLocal (pinned by sha256)\n"
+                       f"        run: |\n          mkdir -p \"$HOME/.m2/repository/com/example/{ln}/1.0\"\n"
+                       f"          curl -fsSL -o \"$HOME/.m2/repository/com/example/{ln}/1.0/{ln}-1.0.jar\" "
+                       f"\"https://github.com/{lib_dep}/releases/download/{ln}-1.0-mc{mc}/{ln}-1.0.jar\"\n")
+            (d / PORT_CI_WF).parent.mkdir(parents=True)
+            (d / PORT_CI_WF).write_text(wf, encoding="utf-8")
+            (d / "Main.java").write_text("class Main { int port; }\n" if conflict else "class Main {}\n", encoding="utf-8")
+            g("add", "-A"); g("commit", "-q", "-m", "port")
+            g("checkout", "-q", "main")
+            (d / "Main.java" if conflict else d / "Authors.java").write_text(
+                "class Main { int authors; }\n" if conflict else "class Authors {}\n", encoding="utf-8")
+            g("add", "-A"); g("commit", "-q", "-m", "the authors' new code")
+            up = git(d, "rev-parse", "HEAD").stdout.strip()
+            ab = tmp / f"{name}-authors.git"
+            git(tmp, "clone", "-q", "--bare", str(d), str(ab), check=True)
+            g("checkout", "-q", f"neoforge-{mc}")
+            g("reset", "-q", "--hard")
+            g("branch", "-q", "-f", "main", "HEAD~1")          # origin's mirror of the authors: the port's base
+            bare = tmp / f"{name}.git"
+            git(tmp, "clone", "-q", "--bare", str(d), str(bare), check=True)
+            g("branch", "-q", "-D", "main")
+            url = f"https://github.com/owner/{name}.git"
+            g("remote", "add", "origin", url)
+            g("config", f"url.{bare.as_posix()}.insteadOf", url)
+            g("fetch", "-q", "origin")
+            g("remote", "add", "authors", ab.as_posix())
+            g("fetch", "-q", "authors")
+            return d, up, ab.as_posix()
+        SL, SD = "owner/examplesvlib", "owner/examplesvmod"
+        sl, sl_up, sl_ab = sv_repo("examplesvlib")
+        sd, sd_up, sd_ab = sv_repo("examplesvmod", lib_dep=SL, conflict=True)
+        ALLOW = ["push-version-branches", "pre-release", "merge-fork-prs"]
+
+        def fork_fz(slug, up=None, ab=None, take=True, sel=(), head="neoforge-1.21.1"):
+            return {"repo": slug, "head": head, "take_authors": take, "upstream_commit": up, "upstream": ab,
+                    "upstream_branch": "main", "selected": list(sel), "dep_bumps": [],
+                    "fixes": [{"id": i, "at": head.split("-", 1)[1]} for i in sel]}
+
+        def plan(*forks):
+            return {"schema": 1, "issue": 11, "repo": forks[0]["repo"], "owner": {"login": "owner"}, "grades": [],
+                    "decisions": [], "forks": list(forks)}
+
+        def conf(*rows):
+            return {"forks": [dict(r, automerge=True) for r in rows], "allow": ALLOW}
+        ids_of = lambda its, f_: [x["id"].split(":", 1)[1] for x in its if x["fork"] == f_ and not x.get("final")]
+        MV_STEPS = {"lowest", "sync", "mergeup", "decisions", "freeze", "librecord", "repin", "reconcile", "adopt"}
+        # ---- a set of single-version forks only: a library and its dependent
+        reached = []
+        lo_, sho_ = globals()["lowest_of"], globals()["shared_of"]
+        globals()["lowest_of"] = lambda *a_, **k_: reached.append("lowest_of") or lo_(*a_, **k_)
+        globals()["shared_of"] = lambda *a_, **k_: reached.append("shared_of") or sho_(*a_, **k_)
+        try:
+            sa = str(tmp / "svA/round/STATE.json")
+            rc, o, items = init(plan(fork_fz(SL, sl_up, sl_ab), fork_fz(SD, sd_up, sd_ab, sel=["SD-1"])),
+                                conf({"repo": SL, "head": "neoforge-1.21.1", "role": "library"},
+                                     {"repo": SD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": [SL]}),
+                                [f"{SL}={sl}", f"{SD}={sd}"], sa)
+        finally:
+            globals()["lowest_of"], globals()["shared_of"] = lo_, sho_
+        by = {x["id"]: x for x in items}
+        dga = f"examplesvlib@1.21.1:depgate:{SD}"
+        want(rc == 0 and "examplesvlib: single" in o and ids_of(items, SL) == [
+            "ci-check", "setup", "upstream", "authors", "review", "fix", "recheck", "gates", f"depgate:{SD}", "pr", "ci",
+            "merge", "release"], f"a single-version library: the single-version round's order, its dependent's gate "
+                                 f"before its merge: {rc} {o} {ids_of(items, SL)}")
+        want(ids_of(items, SD) == ["ci-check", "setup", "upstream", "authors", "repin-head", "backlog", "review", "fix",
+                                   "recheck", "gates", "pr", "ci", "merge", "release"]
+             and "examplesvlib@1.21.1:release" in by["examplesvmod@1.21.1:repin-head"]["deps"]
+             and by[dga]["lock"] and by["examplesvlib@1.21.1:gates"]["lock"] and set(by[dga]["dirs"]) == {SL, SD},
+             f"its dependent: re-pinned to the library's release of this round, its fix at its one version: {ids_of(items, SD)}")
+        want(not reached and not any(x["step"] in MV_STEPS for x in items),
+             f"principle 2: no lowest check, no shared-library read and no ladder step on a single-version set: {reached}")
+
+        # a drive with stand-in tool steps to the close, interrupted once and resumed from STATE.json alone
+        def drive_all(state, kill=None, fail=()):
+            calls, fail = [], set(fail)
+
+            def fake(st, it, log):
+                calls.append(it["id"])
+                if it["id"] in fail:
+                    fail.discard(it["id"])
+                    raise StepError("stand-in failure")
+                return "stand-in ok", ({"tag": f"x-mc{it['version']}"} if it["step"] == "release" else {})
+            for k in TOOL_IMPL:
+                TOOL_IMPL[k] = fake
+            a_ = argparse.Namespace(state=state, max_hours=1.0)
+            resumed, rc_ = False, None
+            try:
+                for _ in range(60):
+                    rc_, o_ = q(cmd_drive, a_)
+                    js = [json.loads(ln) for ln in o_.splitlines() if ln.startswith("{")]
+                    for j in js:
+                        sp = pathlib.Path(j["summary"])
+                        sp.parent.mkdir(parents=True, exist_ok=True)
+                        sp.write_text({"review": "RESULT: ok\nnot_ok: 0\n"}.get(j["step"], "RESULT: ok\n"), encoding="utf-8")
+                        q(cmd_record, argparse.Namespace(id=j["id"], status=None, summary=str(sp), state=state))
+                    if kill and not resumed:
+                        with State.tx(state, write=False) as st_:
+                            x_ = st_.item(kill)
+                        if x_["status"] == "ok":
+                            with State.tx(state) as st_:      # a container restart: the step's run is gone
+                                y_ = st_.item(kill)
+                                y_.update(status="running", pid=2 ** 22 + 7, host="a-dead-container", pstart="1")
+                            rc_, o2 = q(cmd_resume, argparse.Namespace(state=state))
+                            resumed = "1 interrupted tool step(s) re-queued" in o2
+                            continue
+                    if "ROUND DONE" in o_ or (not js and rc_):
+                        break
+            finally:
+                TOOL_IMPL.update(saved)
+            with State.tx(state, write=False) as st_:
+                return calls, {x["id"]: x["status"] for x in st_.items}, resumed
+        calls, stat, resumed = drive_all(sa, kill="examplesvlib@1.21.1:gates", fail=[dga])
+        pos = {c: k for k, c in enumerate(calls)}
+        want(resumed and all(v_ in TERMINAL for v_ in stat.values()) and calls.count("examplesvlib@1.21.1:gates") == 3
+             and pos[dga] < pos["examplesvlib@1.21.1:merge"] < pos["examplesvlib@1.21.1:release"]
+             < pos["examplesvmod@1.21.1:gates"] and not any(c.split(":", 1)[1].split(":")[0] in MV_STEPS for c in calls),
+             f"single-version set driven to the close: a red dependent gate is the library's fixer job and its gates and "
+             f"dependent gate run again before the merge; an interrupted gate run re-queued by resume: {resumed} {calls} {stat}")
+        # ---- a version-branch library with single-version dependents: one at its head's version, one at a version branch's
+        vl = repo("examplevlib", [("1.21.4", "1.21.1"), ("1.21.5", "1.21.4")])
+        s4, _u4, _a4 = sv_repo("examplesv4", mc="1.21.4", lib_dep="owner/examplevlib")
+        VL, S4 = "owner/examplevlib", "owner/examplesv4"
+        sb = str(tmp / "svB/round/STATE.json")
+        rc, o, items = init(plan(dict(fork_fz(VL, take=False, sel=["VL-1"]), head_cascade=False,
+                                      fixes=[{"id": "VL-1", "at": "1.21.1"}], cascade={"decisions": []}),
+                                 fork_fz(SD, sd_up, sd_ab), fork_fz(S4, take=False, head="neoforge-1.21.4")),
+                            conf({"repo": VL, "head": "neoforge-1.21.1", "role": "library"},
+                                 {"repo": SD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": [VL]},
+                                 {"repo": S4, "head": "neoforge-1.21.4", "role": "dependent", "depends_on": [VL]}),
+                            [f"{VL}={vl}", f"{SD}={sd}", f"{S4}={s4}"], sb)
+        by = {x["id"]: x for x in items}
+        want(rc == 0 and ids_of(items, VL)[:10] == ["ci-check", "setup", "backlog", "gates", "review", "fix", "recheck",
+                                                    f"depgate:{SD}", "pr", "ci"]
+             and f"examplevlib@1.21.4:depgate:{S4}" in by and f"examplevlib@1.21.5:depgate:{S4}" not in by
+             and "examplevlib@1.21.4:release" in by["examplesv4@1.21.4:repin-head"]["deps"]
+             and "examplevlib@1.21.1:release" in by["examplesvmod@1.21.1:repin-head"]["deps"]
+             and "examplevlib@1.21.4:mergeup" in by and "examplesvmod@1.21.1:upstream" in by,
+             f"a version-branch library, single-version dependents: its head keeps its order and gains the dependent's "
+             f"gate; its 1.21.4 version gates the dependent at 1.21.4: {rc} {o} {ids_of(items, VL)}")
+        calls, stat, resumed = drive_all(sb, kill="examplevlib@1.21.4:mergeup")
+        pos = {c: k for k, c in enumerate(calls)}
+        want(resumed and all(v_ in TERMINAL for v_ in stat.values())
+             and pos[f"examplevlib@1.21.1:depgate:{SD}"] < pos["examplevlib@1.21.1:merge"]
+             and pos[f"examplevlib@1.21.4:depgate:{S4}"] < pos["examplevlib@1.21.4:merge"]
+             < pos["examplesv4@1.21.4:gates"] and pos["examplevlib@1.21.1:release"] < pos["examplesvmod@1.21.1:gates"],
+             f"the mixed set driven to the close, resumed once: {resumed} {calls}")
+        with State.tx(sb, write=False) as st_:
+            rp_ = "\n".join(job_task(st_, st_.item("examplesv4@1.21.4:repin-head")))
+        want(f"{VL}@x-mc1.21.4" in rp_, f"the re-pin job names the library's release at the dependent's version: {rp_}")
+        # ---- a single-version library with a version-branch dependent (its head pins the library)
+        vd = repo("examplevmod", [("1.21.4", "1.21.1")])
+        VD = "owner/examplevmod"
+        sc = str(tmp / "svC/round/STATE.json")
+        rc, o, items = init(plan(fork_fz(SL, sl_up, sl_ab), dict(fork_fz(VD, take=False, sel=["VD-1"]), head_cascade=False,
+                                                                 cascade={"decisions": []})),
+                            conf({"repo": SL, "head": "neoforge-1.21.1", "role": "library"},
+                                 {"repo": VD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": [SL]}),
+                            [f"{SL}={sl}", f"{VD}={vd}"], sc)
+        by = {x["id"]: x for x in items}
+        want(rc == 0 and ids_of(items, SL)[7:9] == ["gates", f"depgate:{VD}"]
+             and ids_of(items, VD)[:6] == ["ci-check", "setup", "repin-head", "backlog", "gates", "review"]
+             and "examplesvlib@1.21.1:release" in by["examplevmod@1.21.1:repin-head"]["deps"],
+             f"a single-version library gates its version-branch dependent's head before its merge: {rc} {o} {list(by)}")
+        calls, stat, resumed = drive_all(sc, kill="examplesvlib@1.21.1:pr")
+        pos = {c: k for k, c in enumerate(calls)}
+        want(resumed and all(v_ in TERMINAL for v_ in stat.values())
+             and pos[f"examplesvlib@1.21.1:depgate:{VD}"] < pos["examplesvlib@1.21.1:merge"] < pos["examplevmod@1.21.1:gates"],
+             f"driven to the close, resumed once: {resumed} {calls}")
+        sv4lib, _x, _y = sv_repo("examplesvlib4", mc="1.21.4")
+        rc, o, _ = init(plan(fork_fz("owner/examplesvlib4", take=False, sel=["L-1"], head="neoforge-1.21.4"),
+                             fork_fz(VD, take=False)),
+                        conf({"repo": "owner/examplesvlib4", "head": "neoforge-1.21.4", "role": "library"},
+                             {"repo": VD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": ["owner/examplesvlib4"]}),
+                        [f"owner/examplesvlib4={sv4lib}", f"{VD}={vd}"], str(tmp / "svD/round/STATE.json"))
+        want(rc == 2 and "neoforge-1.21.4 depends on owner/examplesvlib4" in o,
+             f"a version branch (not the head) that would re-pin to a single-version library's release is refused: {o}")
+
+        # ---- the head path's real steps, on the single-version set (A), against a stand-in GitHub
+        api, runs = [], {"pull_request": "success", "push": "success", "workflow_dispatch": "success"}
+        prs = {}
+
+        def fake_gh(path, method="GET", data=None):
+            api.append((method, path.split("?")[0], (path.split("?") + [""])[1]))
+            if "/pulls?" in path:
+                return []
+            if path.endswith("/pulls") and method == "POST":
+                return {"number": 9}
+            if "/actions/runs?" in path:
+                return {"workflow_runs": [{"name": "Port CI", "event": e, "head_branch": "neoforge-1.21.1",
+                                           "status": "completed", "conclusion": c, "created_at": "2999-01-01T00:00:00Z",
+                                           "html_url": f"run-{e}"} for e, c in runs.items()]}
+            if path.endswith("/pulls/9"):
+                return {"merged": False, "head": {"sha": prs.get("sha")}}
+            if path.endswith("/pulls/9/merge"):
+                return {"sha": prs.get("sha")}
+            if "/releases" in path:
+                return [{"tag_name": "examplesvlib-1.0-mc1.21.1", "created_at": "2999-01-01T00:00:00Z"}]
+            return {}
+        gh = fake_gh
+
+        def step(state, iid, **res):
+            with State.tx(state) as st_:
+                if res:
+                    st_.item(iid)["result"] = dict(res)
+            with State.tx(state, write=False) as st_:
+                pass                          # read, then the step runs outside the state's lock (it takes it itself)
+            return TOOL_IMPL[st_.item(iid)["step"]](st_, st_.item(iid), tmp / "sv-real.log")
+        sa2 = str(tmp / "svR/round/STATE.json")
+        init(plan(fork_fz(SL, sl_up, sl_ab), fork_fz(SD, sd_up, sd_ab)),
+             conf({"repo": SL, "head": "neoforge-1.21.1", "role": "library"},
+                  {"repo": SD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": [SL]}),
+             [f"{SL}={sl}", f"{SD}={sd}"], sa2)
+        cmds = []
+
+        def rec_sh(text="", rc_=0, effect=None):
+            def f_(st_, it_, cmd, log, cwd=None, ok=(0,), hold=None):
+                cmds.append(([str(c) for c in cmd], hold is not None, cwd))
+                if effect:
+                    effect(cmd, cwd, hold)
+                with open(log, "a", encoding="utf-8") as fh:
+                    fh.write(text)
+                if rc_ not in ok:
+                    raise StepError(f"exit {rc_}")
+                return subprocess.CompletedProcess(cmd, rc_, "", "")
+            return f_
+        # the workflow check: a WARNING never blocks; setup regenerates the workflow on the work branch
+        sh = rec_sh("port-ci: check: WARNING neoforge-1.21.1: its workflow pins Port CI kit 20, older than kit 30\n")
+        note, r_ = step(sa2, "examplesvlib@1.21.1:ci-check")
+        want(r_.get("stale_workflow") and "never blocks" in note and cmds[-1][0][2:4] == ["check", "--repo"]
+             and "--file" in cmds[-1][0], f"the workflow check on origin's head: a warning, recorded: {note} {cmds[-1:]}")
+        with State.tx(sa2) as st_:
+            st_.item("examplesvlib@1.21.1:ci-check")["result"] = r_
+
+        def regen(cmd, cwd, hold):
+            if "port-ci.py" in str(cmd[1]) and "check" not in cmd:
+                p_ = pathlib.Path(cmd[cmd.index("--repo") + 1]) / PORT_CI_WF
+                p_.write_text(p_.read_text(encoding="utf-8") + "# kit 30\n", encoding="utf-8")
+        sh = rec_sh(effect=regen)
+        note, r_ = step(sa2, "examplesvlib@1.21.1:setup")
+        want("workflow regenerated" in note and cmds[-1][0][2:6] == ["--repo", str(sl), "--modid", "examplesvlib"]
+             and git(sl, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "keep-current/2026-10-21"
+             and "# kit 30" in git(sl, "show", f"HEAD:{PORT_CI_WF}").stdout,
+             f"setup: the work branch, the workflow regenerated with its own options and committed: {note} {cmds[-1:]}")
+        sh = real_sh
+        # the authors' merge: exactly the frozen commit, a merge commit on the work branch (real port-sync.py)
+        note, r_ = step(sa2, "examplesvlib@1.21.1:upstream")
+        want(git(sl, "merge-base", "--is-ancestor", sl_up, "HEAD").returncode == 0
+             and git(sl, "rev-list", "--parents", "-1", "HEAD").stdout.count(" ") == 2
+             and f"at {sl_up[:7]}" in git(sl, "log", "-1", "--format=%s").stdout,
+             f"the upstream step merges the frozen commit by port-sync.py: {note}")
+        step(sa2, "examplesvmod@1.21.1:setup")
+        try:
+            step(sa2, "examplesvmod@1.21.1:upstream")
+            want(False, "a conflicting authors' merge passed")
+        except StepError as e:
+            want("port-sync.py exit 2" in str(e) and "CONFLICT" in str(e), f"a conflict stops the step red (its fixer's job): {e}")
+        with State.tx(sa2) as st_:
+            ux = st_.item("examplesvmod@1.21.1:upstream")
+            ux.update(status="failed", note="CONFLICT in 1 file(s)")
+            ftxt = job_text(st_, ux, fixing=True)
+        want("AUTHORS' side" in ftxt and "`git commit` the merge" in ftxt, f"the conflict's fixer job: {ftxt}")
+        git(sd, "checkout", "-q", "--theirs", "Main.java", check=True)
+        git(sd, "commit", "-qam", "Merge the authors' commit (resolved)", check=True)
+        note, r_ = step(sa2, "examplesvmod@1.21.1:upstream")
+        want("merged into" in note, f"after the fixer's commit the step finds nothing left to merge: {note}")
+        with State.tx(sa2, write=False) as st_:
+            aj = "\n".join(job_task(st_, st_.item("examplesvlib@1.21.1:authors")))
+        want("the driver ran port-sync.py" in aj and "steps 3-5" in aj and sl_up in aj,
+             f"the authors' job on a single-version fork: reconcile and port the merged code: {aj}")
+        # ONE gate pass under the machine's lock; the library's old jars removed first, the candidate built by it
+        (sl / "build/libs").mkdir(parents=True, exist_ok=True)
+        (sl / "build/libs/examplesvlib-0.9.jar").write_bytes(b"old")
+
+        def gate_effect(cmd, cwd, hold):
+            with open(gate_lock_path(), "a+", encoding="utf-8") as fh:
+                cmds.append(("lock-busy", not _flock(fh, block=False), None))
+            (sl / "build/libs/examplesvlib-1.0.jar").write_bytes(b"candidate")
+        cmds.clear()
+        sh = rec_sh(effect=gate_effect)
+        note, r_ = step(sa2, "examplesvlib@1.21.1:gates")
+        g_ = [c for c in cmds if c[0] != "lock-busy"]
+        want(len(g_) == 2 and all(h for _c, h, _w in g_) and all(c[1] for c in cmds if c[0] == "lock-busy")
+             and [c[c.index("--env") + 1] for c, _h, _w in g_] == ["full", "minimal"]
+             and g_[0][0][g_[0][0].index("--base") + 1] == sl_up
+             and [j.name for j in built_jars(sl)] == ["examplesvlib-1.0.jar"] and r_["gated_head"] == head(sl),
+             f"one ci-gates pass (full, minimal) under the machine's one-gate lock, the old jar removed: {note} {cmds}")
+        with State.tx(sa2) as st_:
+            st_.item("examplesvlib@1.21.1:gates")["result"] = dict(r_, gated_at=time.time() - 5)
+        # the dependent gate: the dependent's head gated with the candidate jar in mavenLocal, which is put back after
+        hm = tmp / "home"
+        os.environ["HOME"] = os.environ["USERPROFILE"] = str(hm)
+        m2j = hm / ".m2/repository/com/example/examplesvlib/1.0/examplesvlib-1.0.jar"
+        m2j.parent.mkdir(parents=True)
+        m2j.write_bytes(b"released")
+        seen_ = {}
+
+        def dep_effect(cmd, cwd, hold):
+            seen_.setdefault("m2", []).append(m2j.read_bytes())
+            seen_["repo"] = str(cmd[cmd.index("--repo") + 1])
+            seen_["base"] = cmd[cmd.index("--base") + 1] if "--base" in cmd else None
+            (pathlib.Path(cwd) / "build").mkdir(exist_ok=True)
+            (pathlib.Path(cwd) / "build/round-gates-full.md").write_text("| Gate C | PASS |\n", encoding="utf-8")
+        cmds.clear()
+        sh = rec_sh(effect=dep_effect)
+        note, r_ = step(sa2, dga.replace("svA", "svR"))
+        want("green against the candidate jar" in note and seen_.get("m2") == [b"candidate", b"candidate"]
+             and m2j.read_bytes() == b"released" and seen_.get("base") == "origin/main"
+             and all(h for _c, h, _w in cmds) and (pathlib.Path(r_["evidence"]) / "round-gates-full.md").is_file()
+             and "depgate-examplesvmod" in seen_.get("repo", ""),
+             f"the dependent's head gated with the candidate jar in mavenLocal, under the lock; mavenLocal put back: "
+             f"{note} {seen_} {cmds}")
+        sh = rec_sh(rc_=1, effect=dep_effect)
+        try:
+            step(sa2, dga)
+            want(False, "a red dependent gate passed")
+        except StepError as e:
+            want("NOT green" in str(e) and m2j.read_bytes() == b"released", f"red: a finding on the library, mavenLocal put back: {e}")
+        m2j.unlink()
+        sh = rec_sh(effect=dep_effect)
+        step(sa2, dga)
+        want(not m2j.exists(), "nothing was in mavenLocal before: nothing is left there")
+        with State.tx(sa2) as st_:
+            ftxt = job_text(st_, dict(st_.item(dga), status="failed", note="NOT green"), fixing=True)
+        want("library's work branch" in ftxt and "version branch" not in ftxt.split("Acceptance")[0].split("failed.")[1],
+             f"the dependent gate's fixer job names the library's work branch: {ftxt}")
+        sh = real_sh
+        # only the gated commit goes out (E5): records after it pass, code after it sends the gates and the dependent
+        # gate back
+        prs["sha"] = None
+        c_ = (sl / ".port").mkdir(exist_ok=True) or (sl / ".port/NOTES.md").write_text("n\n", encoding="utf-8")
+        commit_paths(sl, [".port"], "records")
+        note, r_ = step(sa2, "examplesvlib@1.21.1:pr")
+        want(r_.get("pr") == 9 and git(tmp / "examplesvlib.git", "rev-parse", "keep-current/2026-10-21").stdout.strip()
+             == head(sl), f"records after the gated commit: the work branch goes out as its PR: {note} {r_}")
+        (sl / "Main.java").write_text("class Main { int late; }\n", encoding="utf-8")
+        commit_paths(sl, ["Main.java"], "code after the gates")
+        try:
+            step(sa2, "examplesvlib@1.21.1:pr")
+            want(False, "code after the gated commit was pushed")
+        except Reset as e:
+            want(set(e.ids) == {"examplesvlib@1.21.1:gates", dga}, f"code after the gates sends them back: {e.ids}")
+        git(sl, "reset", "-q", "--hard", "HEAD~1", check=True)
+        # the release right after the merge: the merge waits for no push run; the release waits for both together
+        prs["sha"] = head(sl)
+        with State.tx(sa2) as st_:
+            st_.item("examplesvlib@1.21.1:pr")["result"] = {"pr": 9, "sha": prs["sha"], "work": "keep-current/2026-10-21"}
+        api.clear()
+        note, r_ = step(sa2, "examplesvlib@1.21.1:merge")
+        k_put = next(k for k, (m, p_, _q) in enumerate(api) if m == "PUT")
+        want(not any("event=push" in q_ or "/actions/runs" in p_ for _m, p_, q_ in api[k_put:]) and "push run" not in note,
+             f"a single-version merge does not wait for its push run: {note} {api}")
+        with State.tx(sa2) as st_:
+            st_.item("examplesvlib@1.21.1:merge")["result"] = r_
+        api.clear()
+        note, r_ = step(sa2, "examplesvlib@1.21.1:release")
+        k_d = next((k for k, (m, p_, _q) in enumerate(api) if p_.endswith("/dispatches")), None)
+        want(r_.get("tag") == "examplesvlib-1.0-mc1.21.1" and k_d is not None and k_d == min(
+                 k for k, (m, p_, _q) in enumerate(api) if "/actions/" in p_)
+             and any("/actions/runs" in p_ and "head_sha" in q_ for _m, p_, q_ in api[k_d:])
+             and sum(1 for _m, p_, _q in api[k_d:] if p_.endswith("/actions/runs")) >= 2,
+             f"the release dispatched right after the merge, its run and the push run awaited after it: {note} {api}")
+        # the ledger: a single-version fork without a known-issues ledger gets no README Ports block
+        with State.tx(sa2) as st_:
+            mg_ = st_.item("examplesvlib@1.21.1:merge")
+            mg_["status"], mg_["result"] = "ok", {"merge_sha": prs["sha"]}
+        cmds.clear()
+        sh = rec_sh()
+        note, r_ = step(sa2, "examplesvlib@1.21.1:ledger")
+        want(not any("render-ports" in c for c_, _h, _w in cmds for c in c_), f"no ledger: no Ports block: {note} {cmds}")
+        (sl / ".port").mkdir(exist_ok=True)
+        (sl / ".port/KNOWN-ISSUES.json").write_text("[]\n", encoding="utf-8")
+        commit_paths(sl, [".port"], "a ledger")
+        git(sl, "push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1", check=True)
+        note, r_ = step(sa2, "examplesvlib@1.21.1:ledger")
+        want(any("render-ports" in c for c_, _h, _w in cmds for c in c_), f"with a ledger: the Ports block: {note} {cmds}")
+        sh = real_sh
+        with State.tx(sa2, write=False) as st_:
+            vbh = {"fork": SL, "version": "1.21.1"}
+            st_.data["forks"][SL]["kind"] = "branches"
+            want(not release_waits_push(st_, vbh), "a version-branch fork's head keeps its push-run wait at the merge")
+    finally:
+        gh, sh = real_gh, real_sh
+        TOOL_IMPL.update(saved)
+        for k, v in (("HOME", home0[0]), ("USERPROFILE", home0[1])):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return not bad
+
+
 def self_check():
     t0 = time.monotonic()
     ok = True
@@ -2229,7 +2898,6 @@ def self_check():
             return d
         lib = repo("examplelib", [("1.21.4", "1.21.1"), ("1.21.5", "1.21.4"), ("1.21.8", "1.21.5")])
         dep = repo("examplemod", [("1.21.4", "1.21.1"), ("1.21.5", "1.21.4")])
-        single = repo("examplesolo", [])
         wrong = repo("examplewrong", [("1.21.4", "1.21.1")], origin="https://github.com/someone/other.git")
         LIB, DEP = "owner/examplelib", "owner/examplemod"
 
@@ -2269,13 +2937,10 @@ def self_check():
             items = json.loads(pathlib.Path(st_path).read_text(encoding="utf-8"))["items"] if rc_ == 0 else []
             return rc_, buf.getvalue(), items
         both = [f"{LIB}={lib}", f"{DEP}={dep}"]
-        # ---- scope: a set with a single-version fork, and a clone whose origin is another repository, are refused
-        cf_s = {"forks": [{"repo": "owner/examplesolo", "head": "neoforge-1.21.1", "role": ""}], "allow": []}
-        fz_s = {"schema": 1, "issue": 8, "repo": "owner/examplesolo", "owner": "owner", "grades": [],
-                "forks": [{"repo": "owner/examplesolo", "head": "neoforge-1.21.1", "take_authors": True, "selected": ["S-1"]}]}
-        rc, o, _ = init(fz_s, cf_s, [f"owner/examplesolo={single}"], str(tmp / "sv/round/STATE.json"))
-        expect(rc == 2 and "single-version fork" in o and not (tmp / "sv/round/STATE.json").exists(),
-               f"a set with a single-version fork is refused (it keeps the skill's round): {rc} {o}")
+        # ---- single-version forks on the driver (#161 U4): a single-version set, mixed sets, and a clone whose origin is
+        # another repository refused
+        expect(self_check_single(tmp, repo, init, expect, q, job_file), "the single-version and mixed sets")
+        fz_s = {"schema": 1, "issue": 8, "repo": "owner/examplesolo", "owner": "owner", "grades": [], "forks": []}
         cf_w = {"forks": [{"repo": "owner/examplewrong", "head": "neoforge-1.21.1", "role": ""}], "allow": []}
         fz_w = dict(fz_s, forks=[{"repo": "owner/examplewrong", "head": "neoforge-1.21.1", "take_authors": True}])
         rc, o, _ = init(fz_w, cf_w, [f"owner/examplewrong={wrong}"], str(tmp / "wr/round/STATE.json"))
