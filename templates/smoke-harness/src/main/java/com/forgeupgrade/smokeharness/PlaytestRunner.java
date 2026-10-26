@@ -410,12 +410,12 @@ final class PlaytestRunner {
     static final class GotoOp extends Op {
         final String what, dim;
         volatile CmdResult res;
-        int phase, waited;
+        int phase, waited, settled;
         String at = "";
         static final Pattern COORDS = Pattern.compile("\\[(-?\\d+), ~, (-?\\d+)\\]");
         GotoOp(int no, String text, String what, String dim) { super(no, text); this.what = what; this.dim = dim; }
         @Override Res start(PlaytestRunner r, Minecraft mc) {
-            phase = 0; waited = 0; res = null;
+            phase = 0; waited = 0; settled = 0; res = null;
             r.runCommand(mc, "execute in " + dim + " run locate structure " + what, x -> res = x);
             return null;
         }
@@ -445,6 +445,9 @@ final class PlaytestRunner {
                 }
                 return fail("could not reach " + what + " at [" + at + "]: " + said);
             }
+            // arrived: give the chunks around a few seconds to load their entities (measured: a village's villagers are
+            // not there yet the tick after the teleport)
+            if (++settled < 40) return null;
             return pass("at " + what + " [" + at + "] in " + dim + (phase == 2 ? " (dropped in from y 120)" : ""));
         }
     }
