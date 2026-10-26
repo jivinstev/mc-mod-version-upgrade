@@ -1069,7 +1069,9 @@ def gh_rest(path, method="GET", data=None, tok=None):
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "mmvu-weekly-plan", "Content-Type": "application/json"}
     if tok:
         headers["Authorization"] = f"Bearer {tok}"
-    req = urllib.request.Request("https://api.github.com" + path, method=method,
+    # callers write the path with or without its leading slash (gh api takes both): "repos/o/r" must not become the
+    # host api.github.comrepos
+    req = urllib.request.Request("https://api.github.com/" + path.lstrip("/"), method=method,
                                  data=None if data is None else json.dumps(data).encode("utf-8"), headers=headers)
     with urllib.request.urlopen(req, timeout=min(30.0, gh_timeout())) as r:
         text = r.read().decode("utf-8")
@@ -1793,6 +1795,23 @@ def self_check():
     expect(derive(R("security", "invisible", "unusual", True)) == "S1", "security (a leaked token) grades S1")
     expect(derive(R("build", "rare", "feature", True)) == "S1", "build (the version does not compile) grades S1")
     expect(reopens("S1") and not any(reopens(s) for s in ("S2", "S3", "S4")), "only S1 reopens a done version")
+    import urllib.request
+    urls, real_open = [], urllib.request.urlopen
+
+    class _R:
+        def __enter__(self):
+            return self
+        def __exit__(self, *e):
+            return False
+        def read(self):
+            return b"{}"
+    urllib.request.urlopen = lambda req, timeout=None: (urls.append(req.full_url), _R())[1]
+    try:
+        gh_rest("repos/o/r/pulls"); gh_rest("/repos/o/r/issues")
+    finally:
+        urllib.request.urlopen = real_open
+    expect(urls == ["https://api.github.com/repos/o/r/pulls", "https://api.github.com/repos/o/r/issues"],
+           f"gh_rest joins a path with or without its leading slash to api.github.com/: {urls}")
     for f in BLOCKING:
         expect(derive(R(f, "invisible", "latent", True)) == "S2", f"a {f} on a path nothing calls yet (latent) is S2")
     expect(derive(R("functional", r="latent")) == "S4" and derive(R("cosmetic", r="latent")) == "S4",
