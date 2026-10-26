@@ -145,7 +145,7 @@ def inventory(jars):
                 if ns in ("minecraft", "c", "neoforge", "forge"):
                     continue
                 d = inv.setdefault(ns, {"entities": set(), "items": set(), "blocks": set(), "sounds": set(),
-                                        "lang": {}, "data": {}})
+                                        "other_ids": set(), "lang": {}, "data": {}})
                 if parts[0] == "assets" and parts[2] == "sounds.json":
                     try:
                         d["sounds"] |= set(json.loads(z.read(n).decode("utf-8")))
@@ -162,6 +162,8 @@ def inventory(jars):
                             d[{"entity": "entities", "item": "items", "block": "blocks"}[seg[0]]].add(seg[2])
                         else:
                             d["lang"].setdefault(seg[0], []).append(k)
+                            if len(seg) == 3 and seg[1] == ns and seg[0] in ("attribute", "effect", "enchantment"):
+                                d["other_ids"].add(seg[2])      # /attribute, /effect and /enchant take these ids
                 elif parts[0] == "data" and len(parts) >= 4:
                     d["data"].setdefault(parts[2], []).append("/".join(parts[3:]).rsplit(".", 1)[0])
     return {ns: {k: sorted(v) if isinstance(v, set) else {g: sorted(x) for g, x in sorted(v.items())}
@@ -175,7 +177,7 @@ def unknown_ids(parsed, inv):
     """Every <ns>:<id> in the script whose namespace is the mod's, but which the mod does not register."""
     known = {}
     for ns, d in inv.items():
-        known[ns] = set(d["entities"]) | set(d["items"]) | set(d["blocks"]) | set(d["sounds"])
+        known[ns] = set(d["entities"]) | set(d["items"]) | set(d["blocks"]) | set(d["sounds"]) | set(d["other_ids"])
         for g in d["data"].values():
             known[ns] |= set(g)
     out = []
@@ -432,7 +434,7 @@ def cmd_inventory(a):
         return 0
     for ns, d in inv.items():
         print(f"== {ns}")
-        for k in ("entities", "items", "blocks", "sounds"):
+        for k in ("entities", "items", "blocks", "sounds", "other_ids"):
             if d[k]:
                 print(f"  {k} ({len(d[k])}): {', '.join(d[k])}")
         for g, keys in d["lang"].items():
@@ -499,16 +501,18 @@ def self_check():
             z.writestr("assets/examplemod/sounds.json", json.dumps({"boss_music": {}}))
             z.writestr("assets/examplemod/lang/en_us.json", json.dumps({
                 "entity.examplemod.boss": "Boss", "item.examplemod.blade": "Blade",
-                "subtitles.examplemod.boss_music": "Music plays", "examplemod.boss.line_1": "Hello"}))
+                "subtitles.examplemod.boss_music": "Music plays", "examplemod.boss.line_1": "Hello",
+                "effect.examplemod.doom": "Doom"}))
             z.writestr("data/examplemod/loot_table/entities/boss.json", "{}")
             z.writestr("assets/minecraft/lang/en_us.json", "{}")
         inv = inventory([jar])
         e = inv.get("examplemod", {})
         expect(list(inv) == ["examplemod"] and e["entities"] == ["boss"] and e["items"] == ["blade"]
-               and e["sounds"] == ["boss_music"] and "subtitles" in e["lang"] and "loot_table" in e["data"],
+               and e["sounds"] == ["boss_music"] and "subtitles" in e["lang"] and "loot_table" in e["data"]
+               and e["other_ids"] == ["doom"],
                f"inventory reads entities, items, sounds, lang groups and data, and skips minecraft: {inv}")
         q = parse("@intent x\nsummon examplemod:boss\ngive @s examplemod:blade\nsummon examplemod:bos\n"
-                  "@expect sound examplemod:boss_music\nsummon minecraft:zombie\n")
+                  "@expect sound examplemod:boss_music\nsummon minecraft:zombie\neffect give @s examplemod:doom\n")
         u = unknown_ids(q, inv)
         expect([n for n, _m in u] == [4], f"lint --jar flags only the misspelt id: {u}")
         f = forbidden(parse("@intent x\nsummon examplemod:test_entity\nsummon examplemod:test_entity_two\n"),
