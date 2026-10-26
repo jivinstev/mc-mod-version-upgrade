@@ -48,8 +48,11 @@ import net.neoforged.neoforge.server.ServerLifecycleHooks;
 
 /**
  * Resolves the data-driven registry entries 1.21 made into keys (NeoForge port).
- * Holders come from the registries of the CALLING thread: the integrated server and the client keep
- * separate copies, and a holder from the wrong one fails to encode when the client sends it.
+ * Holders come from the registries of the CALLING side: the integrated server and the client keep
+ * separate copies, and a holder from the wrong one fails to encode. Only the client's own thread
+ * gets the client's copy; every other thread -- the server thread AND the server's world-generation
+ * workers -- gets the server's (a client holder on a mob made during worldgen crashes the game when
+ * the chunk is saved: "Saving entity NBT ... is not valid in current registry set").
  */
 public final class ModHolders {{
     private ModHolders() {{}}
@@ -60,16 +63,23 @@ public final class ModHolders {{
 
     public static HolderLookup.Provider registries() {{
         MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
-        if (server != null && server.isSameThread()) return server.registryAccess();
-        if (FMLEnvironment.dist == Dist.CLIENT) {{
+        if (FMLEnvironment.dist == Dist.CLIENT && Client.onClientThread()) {{
             HolderLookup.Provider client = Client.registries();
             if (client != null) return client;
         }}
         if (server != null) return server.registryAccess();
+        if (FMLEnvironment.dist == Dist.CLIENT) {{
+            HolderLookup.Provider client = Client.registries();     // a multiplayer client: no server here
+            if (client != null) return client;
+        }}
         throw new IllegalStateException("no registries yet: called before a world was loaded");
     }}
 
     private static final class Client {{
+        static boolean onClientThread() {{
+            return net.minecraft.client.Minecraft.getInstance().isSameThread();
+        }}
+
         static HolderLookup.Provider registries() {{
             net.minecraft.client.multiplayer.ClientLevel level = net.minecraft.client.Minecraft.getInstance().level;
             return level == null ? null : level.registryAccess();
@@ -543,6 +553,13 @@ def main():
 
 
 def self_check():
+    # the registries rule: only the client's own thread gets the client's copy (worldgen workers are the server's)
+    reg = HELPER.split("registries() {{", 1)[1].split("private static final class Client", 1)[0]
+    if "server.isSameThread()" in reg or reg.find("Client.onClientThread()") < 0 or \
+            reg.find("Client.onClientThread()") > reg.find("if (server != null) return server.registryAccess()"):
+        print("self-check: FAIL the helper's registries() must give the client's copy to the client's own thread only, "
+              "and the server's to every other thread (worldgen workers included)")
+        return 1
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d) / "my"

@@ -618,20 +618,29 @@ public final class ItemNbt {{
         return stack.save(registries(), into) instanceof CompoundTag c ? c : into;
     }}
 
-    /** The registries for the CALLING thread (R24): a holder from the other side's copy cannot be sent. */
+    /** The registries for the CALLING side (R24): a holder from the other side's copy cannot be encoded. Only the
+     *  client's own thread gets the client's copy; the server thread and the server's worldgen workers get the server's
+     *  (a client holder on a worldgen mob crashes the chunk save: "is not valid in current registry set"). */
     static net.minecraft.core.HolderLookup.Provider registries() {{
         net.minecraft.server.MinecraftServer server = net.neoforged.neoforge.server.ServerLifecycleHooks.getCurrentServer();
-        if (server != null && server.isSameThread()) return server.registryAccess();
-        if (net.neoforged.fml.loading.FMLEnvironment.dist.isClient()) {{
+        if (net.neoforged.fml.loading.FMLEnvironment.dist.isClient() && Client.onClientThread()) {{
             net.minecraft.core.HolderLookup.Provider client = Client.registries();
             if (client != null) return client;
         }}
         if (server != null) return server.registryAccess();
+        if (net.neoforged.fml.loading.FMLEnvironment.dist.isClient()) {{
+            net.minecraft.core.HolderLookup.Provider client = Client.registries();     // a multiplayer client
+            if (client != null) return client;
+        }}
         return net.minecraft.core.RegistryAccess.fromRegistryOfRegistries(net.minecraft.core.registries.BuiltInRegistries.REGISTRY);
     }}
 
     /** Loaded only when called, so a dedicated server never resolves the client class. */
     private static final class Client {{
+        static boolean onClientThread() {{
+            return net.minecraft.client.Minecraft.getInstance().isSameThread();
+        }}
+
         static net.minecraft.core.HolderLookup.Provider registries() {{
             net.minecraft.client.multiplayer.ClientLevel level = net.minecraft.client.Minecraft.getInstance().level;
             return level == null ? null : level.registryAccess();
