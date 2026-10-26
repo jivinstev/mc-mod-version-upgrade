@@ -76,6 +76,26 @@ gamemode survival
 @assert execute if items entity @s hotbar.1 minecraft:netherite_sword
 gamemode creative
 
+@step repeat, for each entity, until it is gone
+# two held-still husks (they do not burn by day); each gets strikes until it is dead -- {it} is its UUID
+item replace entity @s weapon.mainhand with minecraft:netherite_sword
+summon minecraft:husk ~3 ~ ~ {NoAI:1b,Tags:["rep"]}
+summon minecraft:husk ~-3 ~ ~ {NoAI:1b,Tags:["rep"]}
+@repeat each @e[tag=rep] max 10 until execute unless entity {it}
+execute at @s rotated as @s run tp {it} ^ ^ ^2
+@wait 5t
+@aim entity {it}
+@key key.attack
+@wait 12t
+@end-repeat
+@assert execute unless entity @e[tag=rep]
+# a counted block that stops early once its condition holds
+scoreboard objectives add rep dummy
+@repeat 10 until execute if score @s rep matches 3..
+scoreboard players add @s rep 1
+@end-repeat
+@assert execute if score @s rep matches 3
+
 @step travel to a structure
 # the FLAT preset places villages: /locate finds one, and the player lands on the ground there
 @goto structure #minecraft:village

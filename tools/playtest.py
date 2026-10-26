@@ -162,8 +162,10 @@ def unknown_ids(parsed, inv):
     known = {}
     for ns, d in inv.items():
         known[ns] = set(d["entities"]) | set(d["items"]) | set(d["blocks"]) | set(d["sounds"]) | set(d["other_ids"])
-        for g in d["data"].values():
-            known[ns] |= set(g)
+        for g, files in d["data"].items():
+            known[ns] |= set(files)
+            if g == "worldgen":     # worldgen/structure/<id>: a jigsaw structure's own id (its templates live elsewhere)
+                known[ns] |= {f.split("/", 1)[1] for f in files if f.startswith(("structure/", "structure_set/"))}
     out = []
     for s in parsed["steps"]:
         for no, line in s["lines"]:
@@ -540,6 +542,8 @@ def self_check():
                 "subtitles.examplemod.boss_music": "Music plays", "examplemod.boss.line_1": "Hello",
                 "effect.examplemod.doom": "Doom"}))
             z.writestr("data/examplemod/loot_table/entities/boss.json", "{}")
+            z.writestr("data/examplemod/worldgen/structure/ruins.json", "{}")
+            z.writestr("data/examplemod/structure/ruins/houses/house.nbt", "")
             z.writestr("assets/minecraft/lang/en_us.json", "{}")
             for i, (a, par) in enumerate([("start", None), ("meet", "start"), ("trial", "meet"), ("end", "trial"), ("side", "start")]):
                 z.writestr(f"data/examplemod/advancement/{a}.json", json.dumps(
@@ -555,6 +559,8 @@ def self_check():
         expect(pg["story"] and [x["id"] for x in pg["chains"][0]] == ["examplemod:start", "examplemod:meet", "examplemod:trial", "examplemod:end"]
                and pg["granted_by_code"] == ["examplemod:meet", "examplemod:trial"],
                f"inventory reads the advancement tree: the longest chain first, code-granted stages marked: {pg}")
+        r = parse("@intent x\n@goto structure examplemod:ruins\n@goto structure examplemod:ruinz\n")
+        expect([n for n, _m in unknown_ids(r, inv)] == [3], f"a jigsaw structure's id is known from worldgen/structure: {unknown_ids(r, inv)}")
         q = parse("@intent x\nsummon examplemod:boss\ngive @s examplemod:blade\nsummon examplemod:bos\n"
                   "@expect sound examplemod:boss_music\nsummon minecraft:zombie\neffect give @s examplemod:doom\n")
         u = unknown_ids(q, inv)
