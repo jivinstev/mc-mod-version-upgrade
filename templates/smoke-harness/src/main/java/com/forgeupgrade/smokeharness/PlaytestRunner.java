@@ -458,7 +458,7 @@ final class PlaytestRunner {
                     // a real attack does, and say so -- the observation records which path was taken.
                     String on = r.pickDesc(mc);
                     mc.gameMode.attack(mc.player, r.aimed);
-                    mc.player.swing(InteractionHand.MAIN_HAND);
+                    R.call(mc.player, "swing", InteractionHand.MAIN_HAND);   // cosmetic; 26.3's swing takes more arguments
                     how = "direct gameMode.attack on " + typeId(r.aimed) + " #" + r.aimed.getId() + " (crosshair " + on + ")";
                     r.note("aim", "attack: " + how);
                     released = true;
@@ -1604,8 +1604,9 @@ final class PlaytestRunner {
                     staticSet(key, down);
                     return "mouse button " + key.getValue() + " via KeyMapping.set/click (no MouseHandler callback found)";
                 }
-                int code = key.getType() == InputConstants.Type.SCANCODE ? -1 : key.getValue();
-                int scan = key.getType() == InputConstants.Type.SCANCODE ? key.getValue() : 0;
+                boolean scancode = key.getType().name().equals("SCANCODE");   // 26.3 has no SCANCODE type
+                int code = scancode ? -1 : key.getValue();
+                int scan = scancode ? key.getValue() : 0;
                 if (keyboard(mc, win, code, scan, action)) return "key " + key.getName() + " via KeyboardHandler.keyPress";
                 staticSet(key, down);
                 return "key " + key.getName() + " via KeyMapping.set/click (no KeyboardHandler.keyPress found)";

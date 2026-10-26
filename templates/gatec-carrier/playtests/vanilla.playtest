@@ -4,7 +4,8 @@
 @world flat seed=1
 
 @step setup
-time set midnight
+# daylight: no hostile mob spawns on the flat world (a night run fills it with zombies)
+time set noon
 item replace entity @s weapon.mainhand with minecraft:netherite_sword
 @key key.hotbar.1
 @assert execute if items entity @s weapon.mainhand minecraft:netherite_sword
@@ -34,21 +35,23 @@ bossbar remove playtest:bar
 @expect bossbar playtest-boss gone within 5s
 
 @step zombie
-summon minecraft:zombie ~ ~ ~2.5 {NoAI:1b}
+summon minecraft:zombie ~ ~ ~2.5 {NoAI:1b,Tags:["playtest"]}
+# it would burn in the sun: fire resistance keeps every hurt sound ours
+effect give @e[tag=playtest] minecraft:fire_resistance infinite 0 true
 @wait 10t
 @aim entity minecraft:zombie
 @key key.attack
 @expect sound minecraft:entity.zombie.hurt within 3s
 @expect subtitle subtitles.entity.zombie.hurt within 3s
 @wait 15t
-@aim entity minecraft:zombie
+@aim entity @e[tag=playtest,limit=1]
 @key key.attack
 @wait 15t
 @aim entity minecraft:zombie
 @key key.attack
 @expect sound entity.zombie.death within 3s
 @wait 40t
-@assert execute unless entity @e[type=minecraft:zombie]
+@assert execute unless entity @e[tag=playtest]
 @expect sound entity.zombie.* gone within 5s
 
 @step inventory
