@@ -184,7 +184,7 @@ A command that fails fails its step. The directives are:
 - `@intent` and `@step <name>`;
 - checks: `@assert <command>`, and `@expect sound|subtitle|chat|title|actionbar|bossbar|screen|error <match> [gone]
   [within 10s]`;
-- player inputs: `@aim entity|pos|look`, `@key <key mapping> [hold 5t]`, `@click slot N | button "text" | at X% Y%`;
+- player inputs: `@aim entity|pos|look`, `@key <key mapping> [hold 5t]`, `@click slot N | button "text"`;
 - travel and loops: `@goto structure <id>`, and bounded `@repeat … @end-repeat` blocks (also once per entity, `{it}`);
 - control and evidence: `@wait`, `@allow error <regex>`, `@shot <name>`, `@continue-on-fail` and `@end`.
 - header only: `@world [flat|normal] [structures] [seed=<n>]` (default flat, seed 0; `structures` adds the flat world's villages and strongholds) and `@continue-on-fail`. An `@intent` inside a

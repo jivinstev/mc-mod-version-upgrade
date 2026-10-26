@@ -310,14 +310,7 @@ final class PlaytestRunner {
                     }
                 }
                 if (a.length == 2 && a[0].equals("button")) return new ClickOp(no, text, -1, unquote(a[1]));
-                if (a.length == 2 && a[0].equals("at")) {
-                    Matcher m = Pattern.compile("(\\d+(?:\\.\\d+)?)%\\s+(\\d+(?:\\.\\d+)?)%").matcher(a[1].trim());
-                    if (!m.matches()) throw new ScriptError(no, "@click at <x>% <y>% (of the screen, e.g. @click at 50% 72%)");
-                    double x = Double.parseDouble(m.group(1)), y = Double.parseDouble(m.group(2));
-                    if (x > 100 || y > 100) throw new ScriptError(no, "@click at: percentages are 0-100");
-                    return new ClickAtOp(no, text, x, y);
-                }
-                throw new ScriptError(no, "@click slot <N> | @click button \"<text>\" | @click at <x>% <y>%");
+                throw new ScriptError(no, "@click slot <N> | @click button \"<text>\"");
             }
             case "@expect":
                 return ExpectOp.parse(no, text, arg);
@@ -688,21 +681,6 @@ final class PlaytestRunner {
             return pass("clicked \"" + hit.getMessage().getString() + "\" at " + (int) x + "," + (int) y + " (" + how + ")");
         }
 
-        @Override Res tick(PlaytestRunner r, Minecraft mc) { return pass(""); }
-    }
-
-    /** @click at x% y%: a click at that point of the open screen (its GUI size), for screens that draw clickable
-     *  text instead of widgets -- an NPC's dialogue options, say. */
-    static final class ClickAtOp extends Op {
-        final double px, py;
-        ClickAtOp(int no, String text, double px, double py) { super(no, text); this.px = px; this.py = py; }
-        @Override Res start(PlaytestRunner r, Minecraft mc) throws Exception {
-            var screen = mc.screen;
-            if (screen == null) return fail("no screen is open to click");
-            double x = screen.width * px / 100.0, y = screen.height * py / 100.0;
-            String how = Input.clickScreen(screen, x, y);
-            return pass(String.format(Locale.ROOT, "clicked %s at %.0f,%.0f (%s)", screen.getClass().getSimpleName(), x, y, how));
-        }
         @Override Res tick(PlaytestRunner r, Minecraft mc) { return pass(""); }
     }
 

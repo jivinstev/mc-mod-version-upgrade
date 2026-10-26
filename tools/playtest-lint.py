@@ -25,7 +25,6 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
                                    the block for every entity the selector matched when it began, up to N times each
                                    (N is required: a condition never met FAILs after N runs, naming N);
                                    {it} in its lines (commands, @aim entity, until) is that entity's UUID
-    @click at <x>% <y>%            a click at that point of the open screen, for options drawn without widgets
     @allow error <regex>           ERROR log lines matching it do not fail a step (header: the whole run; in a step: that step)
     @world [flat|normal] [structures] [seed=<n>]   header only: the fresh world (default flat, seed 0;
                                    structures: the flat world's villages and strongholds, off by default)
@@ -153,10 +152,8 @@ def lint(text):
         elif d == "@click":
             k, _, rest = arg.partition(" ")
             rest = rest.strip()
-            pct = re.fullmatch(r"(\d+(?:\.\d+)?)%\s+(\d+(?:\.\d+)?)%", rest) if k == "at" else None
-            if not ((k == "slot" and re.fullmatch(r"\d+", rest)) or (k == "button" and rest)
-                    or (pct and float(pct.group(1)) <= 100 and float(pct.group(2)) <= 100)):
-                probs.append((no, '@click slot <N> | @click button "<text>" | @click at <x>% <y>%'))
+            if not ((k == "slot" and re.fullmatch(r"\d+", rest)) or (k == "button" and rest)):
+                probs.append((no, '@click slot <N> | @click button "<text>"'))
         elif d == "@expect":
             if not a or a[0].lower() not in KINDS:
                 probs.append((no, f"unknown @expect kind {a[0] if a else ''!r} (kinds: {' '.join(sorted(KINDS))})")); continue
@@ -200,18 +197,18 @@ def self_check():
         "# header", "@intent prove it", "@world flat structures seed=3", "@continue-on-fail", "@allow error Narrator",
         "@step one", "/say hi", "@expect chat hi within 5s", "@wait 10t", "@wait 1.5s",
         "@aim entity minecraft:zombie", "@aim entity @e[type=zombie,limit=1]", "@aim entity minecraft:zombie if-present", "@goto structure #minecraft:village", "@goto structure minecraft:fortress in minecraft:the_nether",
-        "@repeat each @e[tag=t] max 5 until execute unless entity {it}", "@aim entity {it}", "@end-repeat", "@click at 50% 40%", "@aim pos ~ ~1 10", "@aim look 90 -10",
+        "@repeat each @e[tag=t] max 5 until execute unless entity {it}", "@aim entity {it}", "@end-repeat", "@aim pos ~ ~1 10", "@aim look 90 -10",
         "@key key.attack", "@key key.forward hold 20t", "@click slot 36", '@click button "Done"',
         "@expect sound entity.zombie.* gone within 2s", "@expect subtitle /zombie (hurts|groans)/", "@expect error gone",
         "@expect screen none", "@shot after-fight", "@assert execute if entity @s", "@step two", "@allow error Foo.*", "@end",
         "@not-a-directive after end is ignored"])
     p, s = lint(good)
-    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 23, f"a script using every directive is clean: {p} {s}")
+    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 22, f"a script using every directive is clean: {p} {s}")
     for src, want in [("@step a\n@repeat each @e[tag=t] until execute unless entity {it}\n@wait 1t\n@end-repeat", "bound N"),
                       ("@step a\n@repeat until execute if entity @s\n@wait 1t\n@end-repeat", "bound N"),
                       ("@step a\n@repeat 3\n@wait 1t", "without @end-repeat"), ("@step a\n@end-repeat", "without @repeat"),
                       ("@step a\n@repeat 3\n@step b\n@end-repeat", "cannot be inside"),
-                      ("@step a\n@click at 150% 2%", "@click at")]:
+]:
         expect(any(want in m for _n, m in lint(src)[0]), f"{src!r} is refused naming {want!r}: {lint(src)[0]}")
     for bad, want in (("@step a\n@wait 10", "a duration"), ("@step a\n@expect smell roses", "unknown @expect kind"),
                       ("@step a\n@aim at zombie", "@aim entity|pos|look"), ("@step a\n@key key.use hold", "@key <key"),

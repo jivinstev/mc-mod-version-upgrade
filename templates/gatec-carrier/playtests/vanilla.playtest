@@ -96,14 +96,6 @@ scoreboard players add @s rep 1
 @end-repeat
 @assert execute if score @s rep matches 3
 
-@step click at a point of a screen
-# a click by position, for screens that draw their options without widgets (here: the middle of the inventory)
-@key key.inventory
-@expect screen InventoryScreen within 3s
-@click at 50% 40%
-@key key.keyboard.escape
-@expect screen none within 3s
-
 @step travel to a structure
 # the FLAT preset places villages: /locate finds one, and the player lands on the ground there
 @goto structure #minecraft:village
