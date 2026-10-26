@@ -284,8 +284,9 @@ re-merge here: git's own merge does it, with the rename rows applied as a tool.
    tools/fork-branches.py review-authors --repo DIR --range <old port commit>..<new port commit> --reviewer ...`).
 4. **Move each version's freeze in its PR, not after it**: on the version's checkout, once its code is in and before its
    work branch is pushed, `python3 tools/fork-branches.py freeze --repo DIR --target <v>` (and `--library owner/repo@TAG`
-   for a re-pinned library release, already published by then), and commit `.port/<v>/branch.properties` there, so the
-   PR carries it. The freeze keys are bookkeeping: no gate or review goes stale (fork-versions, "Done" item 2), so it
+   for a re-pinned library release, already published by then; a round that leaves the authors' code out passes
+   `--untaken-ok round/frozen.json`, so their drift does not refuse the freeze), and commit `.port/<v>/branch.properties`
+   there, so the PR carries it. The freeze keys are bookkeeping: no gate or review goes stale (fork-versions, "Done" item 2), so it
    needs no gate run of its own. Committed alone onto `neoforge-<v>` after the merge, it was one more full Port CI run
    per version (2026-10-19 round: five, 8-14 minutes each) -- a path filter sees only that `branch.properties`, a build
    input, changed, never which key. Only a version whose freeze could not move before the merge (an authors' commit

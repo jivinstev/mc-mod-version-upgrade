@@ -1017,14 +1017,16 @@ def write_props(path, updates):
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def freeze_upstream(repo, ref, libraries, accept_drift, props_file):
+def freeze_upstream(repo, ref, libraries, accept_drift, props_file, untaken=None):
     """Record the authors' commit the buildout starts from (the merge-base of HEAD and `ref`, default the recorded or
     detected `upstream` branch) and each `owner/repo@TAG` library release in props_file (a version branch's
     .port/<t>/branch.properties). -> (what was recorded, None) or (None, why not).
     Pinning a library only (libraries, no `ref`, an upstream already recorded) leaves the upstream record as it is, so a
     moved authors' branch never blocks a library pin (issue #133, gap 3); accept_drift records the merge-base although
     HEAD lacks commits of the branch (the run then stops with 19 until keep-current, or continues with
-    --accept-upstream-drift)."""
+    --accept-upstream-drift). untaken: the round's frozen input (as --untaken-ok; None reads round/frozen.json in the
+    working directory) -- a plan that leaves the authors' code out on purpose freezes at the merge-base too, as the
+    run's own guard (untaken_ok) lets that drift through."""
     repo = pathlib.Path(repo)
     bp = pathlib.Path(props_file)
     props = read_props(bp)
@@ -1038,7 +1040,10 @@ def freeze_upstream(repo, ref, libraries, accept_drift, props_file):
         if rc != 0 or not base:
             return None, f"no common commit between HEAD and {ref} (fetch it first: git fetch {ref.split('/', 1)[0]})"
         rc, n = _git(repo, "rev-list", "--count", f"HEAD..{ref}")
+        left_out = None
         if rc == 0 and n.isdigit() and int(n) and not accept_drift:
+            left_out, _ = untaken_ok(repo, argparse.Namespace(untaken_ok=untaken), {})
+        if rc == 0 and n.isdigit() and int(n) and not accept_drift and not left_out:
             return None, (f"HEAD lacks {n} commit(s) of {ref}: a buildout frozen there would stop at once (exit 19). Bring "
                           "them in with keep-current first (port-sync.py), or name the authors' branch the port actually "
                           "follows with --upstream <remote>/<branch>, or record it anyway with --accept-upstream-drift")
@@ -1135,7 +1140,8 @@ def drift_stop(repo, a, props_file, drift_file, fetch=True):
     props = read_props(bp)
     up = getattr(a, "upstream", None)
     if not props.get("upstream_commit") and up:
-        rec, why = freeze_upstream(repo, up, getattr(a, "port_release", []), False, props_file)
+        rec, why = freeze_upstream(repo, up, getattr(a, "port_release", []), False, props_file,
+                                   untaken=getattr(a, "untaken_ok", None))
         print(f"fork-port: upstream: " + (f"froze the buildout at {', '.join(f'{k}={v}' for k, v in rec.items())} "
                                           f"({bp.relative_to(repo).as_posix()})" if rec else f"NOT frozen: {why}"))
         props = read_props(bp)
@@ -3493,6 +3499,18 @@ def self_check_freeze():
                 st = drift_stop(fork, a_, fetch=True, props_file=rbp, drift_file=rdrift)
             expect((st is not None) == want_stop and "1 commit(s)" in (buf.getvalue() + (st or {}).get("stop", "")),
                    f"--untaken-ok against a real authors' branch, {case}: {st} {buf.getvalue()}")
+        # the freeze itself (fork-branches.py freeze, the round's freeze step) reads the same decision: a plan that
+        # leaves the authors' code out freezes at the merge-base; one that takes it still refuses until it is merged
+        fbp = fork / ".port/1.21.4/freeze-check.properties"
+        freeze_file(False)
+        rec, why = freeze_upstream(fork, "upstream/main", (), False, fbp, untaken=str(frozen))
+        expect(rec and rec.get("upstream_commit") == gf("merge-base", "HEAD", "upstream/main"),
+               f"freeze, take_authors false, the authors ahead: frozen at the merge-base: {rec} {why}")
+        fbp.unlink(missing_ok=True)
+        freeze_file(True, uc=gu("rev-parse", "HEAD"))
+        rec, why = freeze_upstream(fork, "upstream/main", (), False, fbp, untaken=str(frozen))
+        expect(rec is None and "keep-current" in (why or "") and not fbp.exists(),
+               f"freeze, take_authors true, their commits not merged: refused, nothing written: {rec} {why}")
         rbp.unlink(); rdrift.unlink(missing_ok=True); a_.untaken_ok = None
         freeze_file(False)
         # a library release other than the frozen one still stops, whatever the plan says about the authors

@@ -1339,12 +1339,26 @@ def base_of(st, it):
     return f"neoforge-{it['version']}" if is_vb(st, it) else st.fork(it["fork"])["head"]
 
 
+def log_size(log):
+    """A step's log is appended to across retries: where this run's output starts."""
+    p = pathlib.Path(log)
+    return p.stat().st_size if p.is_file() else 0
+
+
+def log_since(log, at):
+    """The log's text from byte `at` on: this run's output, not an earlier try's."""
+    with open(log, "rb") as fh:
+        fh.seek(at)
+        return fh.read().decode("utf-8", "replace")
+
+
 def t_ci_check(st, it, log):
     F = st.fork(it["fork"])
     if F["kind"] == "single":
         return sv_ci_check(st, it, log)
+    at = log_size(log)
     r = sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci-check", "--repo", F["dir"]], log)
-    warn = [ln for ln in pathlib.Path(log).read_text(encoding="utf-8").splitlines() if "WARNING" in ln]
+    warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
     if warn:
         raise StepError(f"{len(warn)} workflow warning(s): {warn[0][:300]}")
     return "workflows current", {}
@@ -1363,8 +1377,9 @@ def sv_ci_check(st, it, log):
     f_ = st.rdir / "round/work" / f"ci-check-{F['name']}.yml"
     f_.parent.mkdir(parents=True, exist_ok=True)
     f_.write_text(wf.stdout, encoding="utf-8")
+    at = log_size(log)
     sh(st, it, [sys.executable, TOOLS / "port-ci.py", "check", "--repo", d, "--file", f_], log)
-    warn = [ln for ln in pathlib.Path(log).read_text(encoding="utf-8").splitlines() if "WARNING" in ln]
+    warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
     if warn:
         return (f"WARNING (never blocks; setup regenerates the workflow on the work branch): {warn[0][:300]}",
                 {"stale_workflow": warn[0][:300]})
@@ -1527,7 +1542,7 @@ def sv_gate_cmds(d, upstream_commit=None, base_ref=None):
     out = []
     for env in ("full", "minimal"):
         out.append([sys.executable, TOOLS / "ci-gates.py", "--repo", d, "--modid", modid, *base, "--gatec", gatec,
-                    "--env", env, "--summary", f"build/round-gates-{env}.md"])
+                    "--env", env, "--summary", pathlib.Path(d) / "build" / f"round-gates-{env}.md"])
     return out
 
 
@@ -1886,6 +1901,9 @@ def t_freeze(st, it, log):
     v = it["version"]
     d = vco(st, it["fork"], v)
     cmd = [sys.executable, TOOLS / "fork-branches.py", "freeze", "--repo", d, "--target", v]
+    fz = st.rdir / "round/frozen.json"
+    if fz.is_file():                        # a plan that leaves the authors' code out freezes at the merge-base
+        cmd += ["--untaken-ok", fz]
     for lb in it["extra"]["libraries"]:
         tag = st.item(f"{st.fork(lb)['name']}@{v}:release")["result"].get("tag")
         if tag:
@@ -2870,6 +2888,11 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         note, r_ = step(sa2, "examplesvlib@1.21.1:ci-check")
         want(r_.get("stale_workflow") and "never blocks" in note and cmds[-1][0][2:4] == ["check", "--repo"]
              and "--file" in cmds[-1][0], f"the workflow check on origin's head: a warning, recorded: {note} {cmds[-1:]}")
+        # a retry reads only its own output: the log keeps the first run's warning, the second run is clean
+        sh = rec_sh("port-ci: check: workflow current\n")
+        note2, r2_ = step(sa2, "examplesvlib@1.21.1:ci-check")
+        want(note2 == "workflow current" and not r2_.get("stale_workflow"),
+             f"a re-run of the workflow check counts only its own output, not the earlier try's warning: {note2}")
         with State.tx(sa2) as st_:
             st_.item("examplesvlib@1.21.1:ci-check")["result"] = r_
 
@@ -2947,7 +2970,10 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             (sl / "build/libs/examplesvlib-1.1.jar").write_bytes(b"candidate")      # no jar named as the pin
             (sl / "build/libs/examplesvlib-1.1_cf.jar").write_bytes(b"cf-candidate")
             e_ = cmd[cmd.index("--env") + 1]
-            (sl / f"build/round-gates-{e_}.md").write_text(
+            # where ci-gates.py writes --summary: a relative path is the driver's working directory (the round's)
+            out_ = pathlib.Path(str(cmd[cmd.index("--summary") + 1]))
+            out_ = out_ if out_.is_absolute() else pathlib.Path(cwd or tmp / "svR") / out_
+            out_.write_text(
                 f"Gates for `examplesvlib` at `{head(sl)[:7]}` for Minecraft 1.21.1 ({e_} environment) -- run by CI:\n\n"
                 "| check | result | detail |\n|---|---|---|\n| Gate C -- real client, `launch` | PASS | ok |\n",
                 encoding="utf-8")
@@ -3910,6 +3936,53 @@ def self_check():
                    f"the owner's /grade S4 on a crash is applied (--owner): {note} {led}")
         except subprocess.CalledProcessError as e:
             expect(False, f"the owner's /grade S4 on a crash was refused: {e.stderr}")
+        finally:
+            G.update(kept)
+            sh = real_sh
+        # a version branch's workflow check counts only this run's warnings (the log keeps an earlier try's), and the
+        # freeze step hands the round's frozen input to fork-branches.py freeze (a plan without the authors' code)
+        kept = {k: G[k] for k in ("vco", "commit_paths")}
+        seen_cmds = []
+
+        def rec_out(text):
+            def f_(st_, it_, cmd, log, **k_):
+                seen_cmds.append([str(c) for c in cmd])
+                with open(log, "a", encoding="utf-8") as fh:
+                    fh.write(text)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return f_
+        rd_ = tmp / "vb-steps"
+        (rd_ / "round").mkdir(parents=True)
+
+        class _St2:
+            rdir = rd_
+            data = {"plan": {"issue": 9}}
+            def fork(self, _):
+                return {"dir": str(gd), "kind": "version", "name": "x"}
+            def item(self, _):
+                return {"result": {}}
+        log_ = str(tmp / "vb-ci-check.log")
+        try:
+            sh = rec_out("fork-branches: ci-check: WARNING neoforge-1.21.4: kit 41, older than 56\n")
+            try:
+                t_ci_check(_St2(), {"fork": "o/x"}, log_)
+                expect(False, "a workflow warning passed the version-branch check")
+            except StepError:
+                pass
+            sh = rec_out("fork-branches: ci-check: workflows current\n")
+            note, _r = t_ci_check(_St2(), {"fork": "o/x"}, log_)
+            expect(note == "workflows current", f"a re-run after the regeneration passes; the old warning is not counted: {note}")
+            G.update(vco=lambda st_, f_, v_: str(gd), commit_paths=lambda d_, p_, m_: None)
+            fz_ = rd_ / "round/frozen.json"
+            for present in (False, True):
+                if present:
+                    fz_.write_text("{}", encoding="utf-8")
+                seen_cmds.clear()
+                sh = rec_out("")
+                t_freeze(_St2(), {"fork": "o/x", "version": "1.21.4", "extra": {"libraries": []}}, log_)
+                c_ = seen_cmds[-1]
+                expect(("--untaken-ok" in c_ and c_[c_.index("--untaken-ok") + 1] == str(fz_)) == present,
+                       f"the freeze step passes --untaken-ok <round/frozen.json> exactly when the round has one: {c_}")
         finally:
             G.update(kept)
             sh = real_sh
