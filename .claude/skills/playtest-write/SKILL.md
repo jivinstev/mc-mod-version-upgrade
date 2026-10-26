@@ -98,6 +98,11 @@ Each of these failed a real run:
   the `tp` and the hit. `execute as @e[type=X] run data merge entity @s {NoAI:1b}` keeps it there.
 - **Wait out death animations.** A boss with a long death (a `getDeathAnimationDuration`, say 160 ticks) is "dying"
   until it ends. It is then invisible to `@e` and refuses interaction. Wait the remaining ticks before the next step.
+- **Poll for what the mod checks periodically.** A mod that grants its quest stages from a timer (every 40 ticks,
+  say) grants them a little after the trigger, so a fixed `@wait` is either too short or slow. Poll, bounded:
+  `@repeat 20 until execute if entity @s[advancements={ns:stage=true}]`, then `@wait 10t`, then `@end-repeat`.
+- **`@goto` lands inside the structure's start piece**, which can be enclosed: a village's start piece is its well.
+  Step out onto open ground when the next step fights or trades: `spreadplayers ~ ~ 0 10 false @s`.
 - **The inventory is a hint, not a promise.** It reads lang keys, and a mod names items there that it registers only
   when a companion mod is present. `Unknown item` at run time means picking another item, not a finding.
 - **Mods guard the player.** An inventory-protection item can make `/clear` find nothing, by design. Empty slots
