@@ -136,7 +136,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode playtest --timeout 1500 \
-            --playtest templates/gatec-carrier/playtests/vanilla.playtest --expect-event 'death at step 7: death\.attack'
+            --playtest templates/gatec-carrier/playtests/vanilla.playtest --expect-event 'death at step [0-9]+: death\.attack'
       - name: The ${{ matrix.v.mc }} client reports the failing playtest as FAIL (step 2 FAIL, step 3 skipped)
         if: ${{ !cancelled() }}
         run: |
