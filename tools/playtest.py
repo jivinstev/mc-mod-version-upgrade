@@ -17,21 +17,10 @@ The engine is the Gate C carrier (templates/smoke-harness, mod id smokeharness, 
 (`plan` + `install --with-carrier`): one game directory per Minecraft version, never the player's own. Each version
 runs alone, one after another, through real-install's launch (the Launcher's command, the version's Java).
 
-Script format (the carrier executes it; `lint` checks it):
-  # comment                         ignored
-  <minecraft command>               run as the player typing it (a leading / is optional); a failure FAILS the step
-  @intent <text>                    what the whole script proves (for playtest-debug)
-  @step <name>                      starts a step; its lines run until the next @step
-  @assert <command>                 the command must succeed (e.g. execute if entity @e[type=...])
-  @wait <N>t | <N>s                 ticks or seconds
-  @aim entity <type|selector> | pos <x y z> | look <yaw> <pitch>
-  @key <key mapping name> [hold <N>t|<N>s]     press a KeyMapping: key.attack, key.use, key.jump, ... and any mod's
-  @click slot <N> | button "<text>"            on the open screen
-  @expect <kind> <match> [gone] [within <N>t|<N>s]   kinds: sound subtitle chat title actionbar bossbar screen error
-  @allow error <regex>              an ERROR log line the step may contain
-  @shot <name>                      a key frame (each step also gets one at its end, and one where it fails)
-  @continue-on-fail                 header: run the remaining steps after a FAIL
-  @end                              stop here
+Script format: tools/playtest-lint.py's docstring is the grammar (the carrier runs it; `lint` here checks it with
+playtest-lint's checker, then adds what needs the mod: --jar ids, --forbid ids, a missing @intent). In short:
+Minecraft commands, one per line, plus @intent @step @assert @wait @aim @key @click @expect @shot @allow @world
+@continue-on-fail @end.
 Output per version: <report>/<mc>/ with stdout/stderr/latest.log, playtest-result.json and the frames; then
 <report>/report.md and report.html (frames embedded by relative path) for the run. Standard library only; macOS
 recordings use the system's `screencapture`.
@@ -40,10 +29,6 @@ import argparse, datetime, html, importlib.util, json, os, pathlib, re, shutil, 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RI_PATH = ROOT / "tools" / "real-install.py"
-DIRECTIVES = {"intent", "step", "assert", "wait", "aim", "key", "click", "expect", "allow", "shot",
-              "continue-on-fail", "end"}
-KINDS = {"sound", "subtitle", "chat", "title", "actionbar", "bossbar", "screen", "error"}
-DURATION = re.compile(r"^\d+(t|s)$")
 STEP_LINE = re.compile(r"PLAYTEST: STEP (\d+) (.*?): (PASS|FAIL|SKIPPED)\b(?:\s*--\s*(.*))?")
 VERDICT_LINE = re.compile(r"PLAYTEST: (PASS|FAIL)\b\s*--\s*(.*)")
 
@@ -56,76 +41,42 @@ def ri():
 
 
 # ── the script ───────────────────────────────────────────────────────────────────────────────────────────────────
+def grammar():
+    """tools/playtest-lint.py: the carrier's grammar, checked without Minecraft (one grammar, one checker)."""
+    spec = importlib.util.spec_from_file_location("playtest_lint", ROOT / "tools" / "playtest-lint.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def parse(text):
-    """-> {"intent", "steps": [{"n", "name", "lines": [(lineno, text)]}], "problems": [(lineno, msg)]}. A command before
-    the first @step belongs to step 0 ("setup")."""
-    out = {"intent": "", "steps": [], "problems": [], "continue_on_fail": False}
-    cur = {"n": 0, "name": "setup", "lines": []}
-    for no, raw in enumerate(text.splitlines(), 1):
+    """-> {"intent", "steps": [{"n", "name", "lines": [(lineno, text)]}], "problems": [(lineno, msg)]}, the steps
+    numbered as the carrier numbers them (1..n; lines before any @step form step "main"). The syntax problems are
+    playtest-lint's; a script with no @intent is a problem here too (playtest-debug judges a failure by it)."""
+    out = {"intent": "", "steps": [], "problems": list(grammar().lint(text)[0])}
+    cur = None
+    for no, raw in enumerate(text.lstrip("\ufeff").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if line.startswith("@"):
-            word, _, rest = line[1:].partition(" ")
-            rest = rest.strip()
-            if word not in DIRECTIVES:
-                near = sorted(d for d in DIRECTIVES if d[:2] == word[:2]) or sorted(DIRECTIVES)
-                out["problems"].append((no, f"unknown directive @{word} (directives: {', '.join(near)})"))
-            elif word == "intent":
-                out["intent"] = rest
-            elif word == "continue-on-fail":
-                out["continue_on_fail"] = True
-            elif word == "step":
-                if cur["lines"] or cur["n"]:
-                    out["steps"].append(cur)
-                cur = {"n": len(out["steps"]) + (0 if cur["n"] == 0 and not cur["lines"] else 1), "name": rest or "?",
-                       "lines": []}
-                if not rest:
-                    out["problems"].append((no, "@step needs a name"))
-            else:
-                out["problems"] += [(no, m) for m in check_directive(word, rest)]
-                cur["lines"].append((no, line))
+        word, _, rest = line[1:].partition(" ") if line.startswith("@") else ("", "", "")
+        if word == "intent" and cur is None:
+            out["intent"] = rest.strip()
+        elif word == "step":
+            cur = {"n": len(out["steps"]) + 1, "name": rest.strip(), "lines": []}
+            out["steps"].append(cur)
+        elif word == "end":
+            break
+        elif word in ("world", "continue-on-fail") or (word == "allow" and cur is None):
+            continue
         else:
+            if cur is None:
+                cur = {"n": len(out["steps"]) + 1, "name": "main", "lines": []}
+                out["steps"].append(cur)
             cur["lines"].append((no, line[1:] if line.startswith("/") else line))
-    if cur["lines"] or cur["n"]:
-        out["steps"].append(cur)
-    for i, s in enumerate(out["steps"]):            # numbered as the carrier reports them: 1..n for named steps
-        s["n"] = i + (0 if out["steps"][0]["name"] == "setup" else 1)
     if not out["intent"]:
         out["problems"].append((0, "no @intent: say what the script proves (playtest-debug judges a failure by it)"))
     return out
-
-
-def check_directive(word, rest):
-    p = []
-    toks = rest.split()
-    if word == "wait" and not (len(toks) == 1 and DURATION.match(toks[0])):
-        p.append("@wait <N>t | <N>s")
-    elif word == "assert" and not rest:
-        p.append("@assert <command>")
-    elif word == "aim" and not (toks and toks[0] in ("entity", "pos", "look") and len(toks) >= 2):
-        p.append("@aim entity <type|selector> | pos <x y z> | look <yaw> <pitch>")
-    elif word == "key":
-        if not toks:
-            p.append("@key <mapping name> [hold <N>t|<N>s]")
-        elif len(toks) > 1 and not (toks[1] == "hold" and len(toks) == 3 and DURATION.match(toks[2])):
-            p.append("@key <mapping name> [hold <N>t|<N>s]")
-    elif word == "click" and not (toks and toks[0] in ("slot", "button") and len(toks) >= 2):
-        p.append('@click slot <N> | button "<text>"')
-    elif word == "expect":
-        if not toks or toks[0] not in KINDS:
-            p.append(f"@expect <kind> ...: kinds are {', '.join(sorted(KINDS))}")
-        else:
-            m = re.search(r"\bwithin\s+(\S+)", rest)
-            if m and not DURATION.match(m.group(1)):
-                p.append("within <N>t | <N>s")
-            if toks[0] != "error" and len([t for t in toks[1:] if t not in ("gone", "within") and not DURATION.match(t)]) < 1:
-                p.append(f"@expect {toks[0]} needs something to match")
-    elif word == "allow" and not (toks and toks[0] == "error" and len(toks) > 1):
-        p.append("@allow error <regex>")
-    elif word == "shot" and not toks:
-        p.append("@shot <name>")
-    return p
 
 
 # ── what a mod registers (the vocabulary a script can name) ──────────────────────────────────────────────────────────
@@ -407,7 +358,7 @@ def load_plan(a):
 def cmd_run(a):
     script = pathlib.Path(a.script)
     parsed = parse(script.read_text(encoding="utf-8"))
-    bad = [(n, m) for n, m in parsed["problems"] if n]          # an empty @intent is a warning, not a stop
+    bad = [(n, m) for n, m in parsed["problems"] if not m.startswith("no @intent")]   # that one only warns
     for n, m in parsed["problems"]:
         print(f"{script}:{n}: {m}", file=sys.stderr)
     if bad:
@@ -451,10 +402,10 @@ def cmd_lint(a):
     parsed["problems"] += forbidden(parsed, a.forbid or [])
     for n, m in parsed["problems"]:
         print(f"{a.script}:{n}: {m}")
-    steps = [s for s in parsed["steps"] if s["name"] != "setup"]
-    print(f"playtest lint: {'FAIL' if any(n for n, _ in parsed['problems']) else 'PASS'} -- {len(steps)} step(s), "
+    steps = parsed["steps"]
+    print(f"playtest lint: {'FAIL' if parsed['problems'] else 'PASS'} -- {len(steps)} step(s), "
           f"intent: {parsed['intent'] or '(none)'}")
-    return 1 if any(n for n, _ in parsed["problems"]) else 0
+    return 1 if parsed["problems"] else 0
 
 
 def self_check():
@@ -466,12 +417,12 @@ def self_check():
               "@expect sound minecraft:entity.zombie.ambient within 10s\n@step kill\n@aim entity minecraft:zombie\n"
               "@key key.attack hold 5t\n@assert execute unless entity @e[type=minecraft:zombie]\n@shot dead\n")
     expect(p["intent"] == "the zombie dies" and not p["problems"], f"a valid script parses clean: {p['problems']}")
-    expect([s["name"] for s in p["steps"]] == ["setup", "summon", "kill"] and [s["n"] for s in p["steps"]] == [0, 1, 2],
-           f"steps numbered as the carrier reports them: {[(s['n'], s['name']) for s in p['steps']]}")
+    expect([s["name"] for s in p["steps"]] == ["main", "summon", "kill"] and [s["n"] for s in p["steps"]] == [1, 2, 3],
+           f"steps numbered as the carrier numbers them: {[(s['n'], s['name']) for s in p['steps']]}")
     expect(p["steps"][1]["lines"][0][1] == "summon minecraft:zombie ~ ~ ~3", "a leading / is dropped")
-    for src, want in [("@intent x\n@wiat 5s\n", "unknown directive"), ("@intent x\n@wait 5\n", "@wait <N>t"),
-                      ("@intent x\n@expect noise a\n", "kinds are"), ("@intent x\n@key key.use hold 5\n", "hold"),
-                      ("@intent x\n@aim at zombie\n", "@aim entity"), ("@intent x\n@expect sound\n", "needs something"),
+    for src, want in [("@intent x\n@wiat 5s\n", "unknown directive"), ("@intent x\n@wait 5\n", "a duration is"),
+                      ("@intent x\n@expect noise a\n", "unknown @expect kind"), ("@intent x\n@key key.use hold 5\n", "hold"),
+                      ("@intent x\n@aim at zombie\n", "@aim entity"), ("@intent x\n@expect sound\n", "needs a match"),
                       ("@step\n", "needs a name"), ("say hi\n", "no @intent")]:
         expect(any(want in m for _n, m in parse(src)["problems"]), f"{src!r} is refused naming {want!r}")
     t = ("x PLAYTEST: STEP 1 summon: PASS -- spawned\n[12:00] [Render thread/INFO] [smokeharness/]: PLAYTEST: STEP 2 kill: "

@@ -186,8 +186,15 @@ A command that fails fails its step. The directives are:
   [within 10s]`;
 - player inputs: `@aim entity|pos|look`, `@key <key mapping> [hold 5t]`, `@click slot N | button "text"`;
 - control and evidence: `@wait`, `@allow error <regex>`, `@shot <name>`, `@continue-on-fail` and `@end`.
+- header only: `@world [flat|normal] [seed=<n>]` (default flat, seed 0) and `@continue-on-fail`. An `@intent` inside a
+  step is that step's purpose.
 
-The carrier takes a frame at each step's end and wherever a step fails, and respawns the player after a death.
+The grammar and its checker are `tools/playtest-lint.py` (`python3 tools/playtest-lint.py FILE`); `playtest.py lint`
+runs the same checker and adds the mod checks. A `@shot` name is letters, digits, `.`, `_` and `-`. The carrier's CI
+runs the vanilla fixtures in `templates/gatec-carrier/playtests/` on every carrier version
+(`python3 tools/gatec-carrier.py client-smoke --mode playtest --playtest FILE`).
+
+The carrier takes a frame at each step's end and wherever a step fails, and respawns the player after a death. It turns subtitles on and raises any muted volume, so a quiet `options.txt` cannot hide a sound. Each step's end also checks the log: a new ERROR line, or a WARN carrying an exception, fails the step unless `@allow error` covers it.
 
 There are four skills, each driving `tools/playtest.py`:
 

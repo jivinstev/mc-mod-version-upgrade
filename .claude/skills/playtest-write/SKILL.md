@@ -9,14 +9,17 @@ description: Write a playtest script from a scenario in plain words -- Minecraft
 instances (test-installs), whichever branch the jars came from.
 
 The input is one scenario: from a playtest-plan `PLAN.md` row, or from the user in their own words. The output is
-one `.playtest` file (UTF-8). The format is in `tools/playtest.py`'s docstring. In short:
+one `.playtest` file (UTF-8). The grammar is `tools/playtest-lint.py`'s docstring (the carrier runs exactly that). In short:
 
 - **A line without `@`** is a Minecraft command, run as the player typing it (the `/` is optional). A command that
   fails fails its step.
 - **`@intent`** says what the whole script proves. **`@step <name>`** starts a step.
 - **Checks:** `@assert <command>`, `@expect <kind> <match> [gone] [within <N>t|<N>s]`, `@allow error <regex>`.
 - **Player inputs:** `@aim`, `@key`, `@click`.
-- **Flow and evidence:** `@wait`, `@shot`, `@continue-on-fail`, `@end`.
+- **Flow and evidence:** `@wait`, `@shot` (a name of letters, digits, `.`, `_` and `-`), `@end`.
+- **Header only:** `@world [flat|normal] [seed=<n>]` (default flat, seed 0) and `@continue-on-fail`.
+- **Automatic:** a new ERROR line in the log, or a WARN carrying an exception, fails the step unless `@allow error`
+  covers it. A step's own `@intent` records its purpose. Each step's lines run one per tick.
 
 ## How to write it
 
