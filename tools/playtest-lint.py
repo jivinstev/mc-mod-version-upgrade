@@ -21,7 +21,8 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
     @shot <name>                   a screenshot <out>/<NN>-<name>.png
     @goto structure <id | #tag> [in <dimension>]   travel to the nearest naturally generated one (/locate), on the ground
     @allow error <regex>           ERROR log lines matching it do not fail a step (header: the whole run; in a step: that step)
-    @world [flat|normal] [seed=<n>]   header only: the fresh world (default flat, seed 0)
+    @world [flat|normal] [structures] [seed=<n>]   header only: the fresh world (default flat, seed 0;
+                                   structures: the flat world's villages and strongholds, off by default)
     @continue-on-fail              header only: run the next step after a failed one
     @end                           stop reading here
 Standard library only.
@@ -75,8 +76,8 @@ def lint(text):
                 probs.append((no, f"{d} belongs in the header, before the first step"))
             if d == "@world":
                 for w in arg.split():
-                    if w not in ("flat", "normal", "default") and not re.fullmatch(r"seed=-?\d+", w):
-                        probs.append((no, f"@world takes flat|normal and seed=<n>, not {w!r}"))
+                    if w not in ("flat", "normal", "default", "structures") and not re.fullmatch(r"seed=-?\d+", w):
+                        probs.append((no, f"@world takes flat|normal, structures and seed=<n>, not {w!r}"))
             continue
         if d == "@intent":
             continue
@@ -160,7 +161,7 @@ def self_check():
             ok = False
 
     good = "\n".join([
-        "# header", "@intent prove it", "@world flat seed=3", "@continue-on-fail", "@allow error Narrator",
+        "# header", "@intent prove it", "@world flat structures seed=3", "@continue-on-fail", "@allow error Narrator",
         "@step one", "/say hi", "@expect chat hi within 5s", "@wait 10t", "@wait 1.5s",
         "@aim entity minecraft:zombie", "@aim entity @e[type=zombie,limit=1]", "@aim entity minecraft:zombie if-present", "@goto structure #minecraft:village", "@goto structure minecraft:fortress in minecraft:the_nether", "@aim pos ~ ~1 10", "@aim look 90 -10",
         "@key key.attack", "@key key.forward hold 20t", "@click slot 36", '@click button "Done"',

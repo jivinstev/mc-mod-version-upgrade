@@ -101,6 +101,8 @@ final class PlaytestRunner {
     String intent = "";
     boolean continueOnFail = false;
     boolean flat = true;
+    boolean structures = false;  // "@world flat structures": the flat preset's villages and strongholds (off by default:
+                                 // a clean field near spawn); a normal world always has them
     long seed = 0L;
     final List<Pattern> globalAllow = new ArrayList<>();
     final List<Step> steps = new ArrayList<>();
@@ -194,12 +196,13 @@ final class PlaytestRunner {
                     for (String w : arg.split("\\s+")) {
                         if (w.isEmpty()) continue;
                         if (w.equals("flat")) flat = true;
+                        else if (w.equals("structures")) structures = true;
                         else if (w.equals("normal") || w.equals("default")) flat = false;
                         else if (w.startsWith("seed=")) {
                             try { seed = Long.parseLong(w.substring(5)); } catch (NumberFormatException e) {
                                 throw new ScriptError(no, "@world seed=<integer>, not '" + w + "'");
                             }
-                        } else throw new ScriptError(no, "@world takes flat|normal and seed=<n>, not '" + w + "'");
+                        } else throw new ScriptError(no, "@world takes flat|normal, structures and seed=<n>, not '" + w + "'");
                     }
                 }
                 case "@step" -> {

@@ -238,7 +238,7 @@ public class ClientBootSmokeTest {
             say(TAG + ": [PLAYTEST] reached title — creating " + (playtest.flat ? "flat" : "normal") + " world '" + levelName
                 + "' (seed " + playtest.seed + ")…");
             if (playtest.flat) {
-                createFreshWorld(mc, levelName, new WorldOptions(playtest.seed, false, false), PlaytestRunner::flatDimensions);
+                createFreshWorld(mc, levelName, new WorldOptions(playtest.seed, playtest.structures, false), PlaytestRunner::flatDimensions);
             } else {
                 createFreshWorld(mc, levelName, new WorldOptions(playtest.seed, true, false), WorldPresets::createNormalWorldDimensions);
             }

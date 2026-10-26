@@ -1,7 +1,7 @@
 # The Gate C carrier's playtest fixture: vanilla content only, no model. CI runs it in every version's dev client
 # (tools/gatec-carrier.py client-smoke --mode playtest) and requires PASS: every directive and observation kind once.
 @intent every playtest directive and observation kind works on this Minecraft version
-@world flat seed=1
+@world flat structures seed=1
 
 @step setup
 # daylight: no hostile mob spawns on the flat world (a night run fills it with zombies)

@@ -95,7 +95,8 @@ progression from its first stage to its last?
      ground there); the stage's mechanic never is a command.
    - **`/place structure` does not do.** It builds the blocks but registers no structure, so a mod's "inside the
      structure" checks (and vanilla's location advancements) never fire there. Only a naturally generated one counts.
-   - The world: vanilla's superflat (the default `@world flat`) generates villages and strongholds in the overworld,
+   - The world: vanilla's superflat with `@world flat structures` (structures are off in the default flat world, for a
+     clean field) generates villages and strongholds in the overworld,
      and the Nether and the End generate normally, mods' structures included. A stage whose structure only the
      normal overworld generates needs `@world normal`, or is a named step saying why it is not reached.
    - A stage the script cannot reach is a `@step` that says why (`# needs a village: not scriptable here`), not a
