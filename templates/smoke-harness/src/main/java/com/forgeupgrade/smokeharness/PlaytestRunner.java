@@ -755,8 +755,13 @@ final class PlaytestRunner {
             return new RepeatOp(no, text, max, until, each, body);
         }
 
+        PlaytestRunner rref;
+        Minecraft mref;
+        int gone;
+
         @Override Res start(PlaytestRunner r, Minecraft mc) {
-            ti = 0; iter = 0; runs = 0; waited = 0; cur = null; res = null; found = null; serverError = null;
+            rref = r; mref = mc;
+            ti = 0; iter = 0; runs = 0; gone = 0; waited = 0; cur = null; res = null; found = null; serverError = null;
             if (each != null) {
                 phase = 0;
                 r.selectUuids(mc, each, l -> found = l, e -> serverError = e);
@@ -771,7 +776,18 @@ final class PlaytestRunner {
             return iterate();
         }
 
+        /** Before each run for an entity: is it still there? A target that is gone has nothing left to do (it died
+         *  between the until check and the next run, say) -- its loop is done, the next entity's begins. */
         private Res iterate() {
+            if (targets.get(ti) != null) {
+                phase = 3; waited = 0; res = null;
+                rref.runCommand(mref, "execute if entity " + targets.get(ti), y -> res = y);
+                return null;
+            }
+            return build();
+        }
+
+        private Res build() {
             String it = targets.get(ti);
             ops = new ArrayList<>();
             try {
@@ -787,12 +803,22 @@ final class PlaytestRunner {
             ti++;
             if (ti >= targets.size()) {
                 return pass((each == null ? "" : targets.size() + " entit(ies), ") + runs + " run(s) of the block"
-                    + (until == null ? "" : ", until met"));
+                    + (until == null ? "" : ", until met") + (gone == 0 ? "" : "; " + gone + " gone before a run (done)"));
             }
             return begin();
         }
 
         @Override Res tick(PlaytestRunner r, Minecraft mc) throws Exception {
+            rref = r; mref = mc;
+            if (phase == 3) {                      // the target's presence before a run
+                CmdResult x = res;
+                if (x == null) return ++waited > COMMAND_TIMEOUT_TICKS ? fail("is " + targets.get(ti) + " there: no answer from the server") : null;
+                if (!Boolean.TRUE.equals(x.success)) {
+                    gone++;
+                    return next(r, mc);
+                }
+                return build();
+            }
             if (phase == 0) {
                 if (serverError != null) return fail("selector " + each + ": " + serverError);
                 List<String> f = found;
