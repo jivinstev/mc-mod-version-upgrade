@@ -1,0 +1,79 @@
+# The Gate C carrier's playtest fixture: vanilla content only, no model. CI runs it in every version's dev client
+# (tools/gatec-carrier.py client-smoke --mode playtest) and requires PASS: every directive and observation kind once.
+@intent every playtest directive and observation kind works on this Minecraft version
+@world flat seed=1
+
+@step setup
+# daylight: no hostile mob spawns on the flat world (a night run fills it with zombies)
+time set noon
+item replace entity @s weapon.mainhand with minecraft:netherite_sword
+@key key.hotbar.1
+@assert execute if items entity @s weapon.mainhand minecraft:netherite_sword
+@wait 20t
+
+@step chat
+say playtest-hello
+@expect chat playtest-hello within 5s
+# a translatable message matches by its key as well as by its text
+tellraw @s {"translate":"gui.done"}
+@expect chat gui.done within 5s
+
+@step title and actionbar
+title @s title "playtest-title"
+@expect title playtest-title within 5s
+title @s actionbar "playtest-actionbar"
+@expect actionbar playtest-actionbar within 5s
+title @s clear
+@expect title playtest-title gone within 5s
+
+@step bossbar
+bossbar add playtest:bar "playtest-boss"
+bossbar set playtest:bar players @s
+@expect bossbar playtest-boss within 5s
+@shot bossbar
+bossbar remove playtest:bar
+@expect bossbar playtest-boss gone within 5s
+
+@step zombie
+summon minecraft:zombie ~ ~ ~2.5 {NoAI:1b,Tags:["playtest"]}
+# it would burn in the sun: fire resistance keeps every hurt sound ours
+effect give @e[tag=playtest] minecraft:fire_resistance infinite 0 true
+@wait 10t
+@aim entity minecraft:zombie
+@key key.attack
+@expect sound minecraft:entity.zombie.hurt within 3s
+@expect subtitle subtitles.entity.zombie.hurt within 3s
+@wait 15t
+@aim entity @e[tag=playtest,limit=1]
+@key key.attack
+@wait 15t
+@aim entity minecraft:zombie
+@key key.attack
+@expect sound entity.zombie.death within 3s
+@wait 40t
+@assert execute unless entity @e[tag=playtest]
+@expect sound entity.zombie.* gone within 5s
+
+@step inventory
+@key key.inventory
+@expect screen Inventory within 3s
+@shot inventory
+@key key.inventory
+@expect screen none within 3s
+gamemode survival
+@key key.inventory
+@expect screen InventoryScreen within 3s
+# hotbar slot 1 is slot 36 of the player's inventory menu: pick the sword up, put it down one slot over
+@click slot 36
+@click slot 37
+@key key.inventory
+@expect screen none within 3s
+@assert execute if items entity @s hotbar.1 minecraft:netherite_sword
+gamemode creative
+
+@step death
+kill @s
+@expect chat death.attack within 5s
+@wait 40t
+@expect screen none within 5s
+@assert execute if entity @s[gamemode=creative]

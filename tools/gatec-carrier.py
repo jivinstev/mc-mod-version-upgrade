@@ -11,6 +11,12 @@ player's real NeoForge install, and published by this repository's CI (.github/w
     python3 tools/gatec-carrier.py client-smoke --project DIR [--mode gauntlet] [--timeout 1200]
                                   run the carrier in that project's dev client (Xvfb + Mesa on headless Linux) and
                                   require SMOKEHARNESS_BOOT_TEST: PASS on stdout AND in run/client/logs/latest.log
+    python3 tools/gatec-carrier.py client-smoke --project DIR --mode playtest --playtest FILE [--expect pass|fail]
+                                  [--expect-steps PASS,FAIL,SKIPPED]
+                                  run a playtest script (tools/playtest-lint.py's grammar) in the dev client; pass: the
+                                  verdict PASS on stdout, in latest.log and in <project>/playtest-out/<script>/
+                                  playtest-result.json; fail: FAIL in all three, from the script's steps (each step's
+                                  verdict as --expect-steps lists), not from the harness
     python3 tools/gatec-carrier.py plan [--published MANIFEST.txt] --newest N
                                   publish=true|false and version=N+1 (GITHUB_OUTPUT lines): true when any version's
                                   sources digest, NeoForge or Java differs from the newest published release's
@@ -29,8 +35,9 @@ version tools/targets.py names; its neoforge.mods.toml ranges are the ones tools
 branch. SmokeGameTest (the smoke harness's server GameTest for install-mod) is not part of the carrier.
 
 The contract the runner relies on, identical on every version: -Dsmokeharness.boottest=true, -Dsmokeharness.testmode=
-launch|spawn|battle|gauntlet|census, -Dsmokeharness.namespaces=<mod ids>, optional -Dsmokeharness.battlecount /
-battleticks / jeirecipes / jeiverify; "SMOKEHARNESS_BOOT_TEST: PASS ..." or "... FAIL ..." printed to System.out (which
+launch|spawn|battle|gauntlet|census|playtest, -Dsmokeharness.namespaces=<mod ids>, optional -Dsmokeharness.battlecount /
+battleticks / jeirecipes / jeiverify, and for playtest -Dsmokeharness.playtest=<script> / playtest.out=<dir> /
+playtest.world=<save name> (PlaytestRunner: PLAYTEST: STEP/PASS/FAIL lines and <out>/playtest-result.json); "SMOKEHARNESS_BOOT_TEST: PASS ..." or "... FAIL ..." printed to System.out (which
 Minecraft's bootstrap routes into the log, so it is in latest.log too), then the client stops. Mod id smokeharness.
 
 Release: gatec-carrier-vN (immutable, never "latest"), assets gatec-carrier-<mc>.jar per version, SHA256SUMS and
@@ -42,11 +49,13 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 TPL = ROOT / "templates/gatec-carrier"
 HARNESS = ROOT / "templates/smoke-harness"
 PKG = "com/forgeupgrade/smokeharness"
-SOURCES = ("SmokeHarness.java", "ClientBootSmokeTest.java", "JeiRecipeProbe.java")
+SOURCES = ("SmokeHarness.java", "ClientBootSmokeTest.java", "JeiRecipeProbe.java", "PlaytestRunner.java")
 PREPARE = ROOT / "templates/multi-version/tools/prepare-sources.py"
 MODID = "smokeharness"
 MARKER = "SMOKEHARNESS_BOOT_TEST"
-PROPS = ("boottest", "testmode", "namespaces", "battlecount", "battleticks", "jeirecipes", "jeiverify")
+PROPS = ("boottest", "testmode", "namespaces", "battlecount", "battleticks", "jeirecipes", "jeiverify",
+         "playtest", "playtest.out", "playtest.world")
+MODES = ("launch", "spawn", "battle", "gauntlet", "census", "playtest")
 MOD_VERSION = "1.0.0"
 TAG = re.compile(r"^gatec-carrier-v([0-9]+)$")
 
@@ -271,7 +280,7 @@ def check_jar(jar, mc, neo, java):
                 probs.append(f"{dep} versionRange {d.get('versionRange')!r} does not accept {ver}")
             elif d.get("type", "required") != "required":
                 probs.append(f"{dep} dependency type {d.get('type')!r}, expected 'required'")
-        for cls in ("SmokeHarness", "ClientBootSmokeTest", "JeiRecipeProbe"):
+        for cls in ("SmokeHarness", "ClientBootSmokeTest", "JeiRecipeProbe", "PlaytestRunner"):
             if f"{PKG}/{cls}.class" not in names:
                 probs.append(f"{PKG}/{cls}.class missing")
         top = 44 + int(java)
@@ -296,17 +305,35 @@ def check_jar(jar, mc, neo, java):
 
 
 # --------------------------------------------------------------------------------------------- the client smoke
-def client_smoke(project, mode="gauntlet", timeout=1200, extra=(), runner=None):
-    """Run the carrier in the project's dev client; -> (ok, why). PASS must be on stdout and in latest.log."""
+def playtest_out(project, script):
+    """Where a client-smoke playtest run writes its results: <project>/playtest-out/<script name without suffix>."""
+    return pathlib.Path(project).resolve() / "playtest-out" / pathlib.Path(script).stem
+
+
+def client_smoke(project, mode="gauntlet", timeout=1200, extra=(), runner=None, playtest=None, expect="pass",
+                 expect_steps=None, expect_events=()):
+    """Run the carrier in the project's dev client; -> (ok, why). PASS must be on stdout and in latest.log (a playtest:
+    also in playtest-result.json; with expect="fail", FAIL from the script's own steps in all three)."""
     project = pathlib.Path(project).resolve()
     bash = _load("gitbash", "gitbash.py").BASH
     cmd = [bash, "gradlew", "--no-daemon", "--console=plain", "runClient", f"-P{MODID}.boottest=true",
            f"-P{MODID}.testmode={mode}"] + list(extra)
+    res = None
+    if mode == "playtest":
+        if not playtest:
+            return False, "--mode playtest needs --playtest FILE"
+        res = playtest_out(project, playtest)
+        if res.exists():
+            shutil.rmtree(res)
+        cmd += [f"-P{MODID}.playtest={pathlib.Path(playtest).resolve().as_posix()}", f"-P{MODID}.playtest.out={res.as_posix()}"]
     env = dict(os.environ)
     if sys.platform.startswith("linux") and not env.get("DISPLAY"):
         cmd = ["xvfb-run", "-a", "-s", "-screen 0 1280x720x24"] + cmd
         env["LIBGL_ALWAYS_SOFTWARE"] = "1"
         env.setdefault("SDL_VIDEO_FORCE_EGL", "1")      # 26.3+ opens its window with SDL (see tools/gate-loop.py)
+        if mode == "playtest":
+            # A runner has no sound card: OpenAL's null device lets the sound engine start, so sounds and subtitles play.
+            env.setdefault("ALSOFT_DRIVERS", "null")
     log = project / "client-smoke.log"
     latest = project / "run/client/logs/latest.log"
     if latest.is_file():
@@ -314,7 +341,54 @@ def client_smoke(project, mode="gauntlet", timeout=1200, extra=(), runner=None):
     (runner or _run_logged)(cmd, project, env, log, timeout)
     out = log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
     game = latest.read_text(encoding="utf-8", errors="replace") if latest.is_file() else ""
-    return judge(out, game)
+    if mode != "playtest":
+        return judge(out, game)
+    for src, name in ((log, "client-smoke"), (latest, "latest")):
+        if src.is_file():
+            res.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, res / f"{name}.log")
+    rj = res / "playtest-result.json"
+    return judge_playtest(out, game, rj.read_text(encoding="utf-8") if rj.is_file() else "", expect, expect_steps,
+                          expect_events)
+
+
+def judge_playtest(out, game, result_text, expect="pass", expect_steps=None, expect_events=()):
+    """-> (ok, why) for a playtest run: the marker on stdout and in latest.log, the PLAYTEST verdict line, and the JSON."""
+    rx = re.compile(MARKER + r": (PASS|FAIL)[^\n]*")
+    verdicts = [m.group(0) for m in rx.finditer(out)]
+    in_log = [m.group(0) for m in rx.finditer(game)]
+    pt = re.findall(r"PLAYTEST: (PASS|FAIL) -- ", out)
+    try:
+        res = json.loads(result_text) if result_text.strip() else None
+    except ValueError as e:
+        return False, f"playtest-result.json does not parse: {e}"
+    if not verdicts:
+        return False, "no " + MARKER + " verdict on stdout (the client never reached it: see client-smoke.log)"
+    if not in_log:
+        return False, f"{verdicts[-1]!r} on stdout but not in run/client/logs/latest.log"
+    if not pt:
+        return False, "no 'PLAYTEST: PASS|FAIL -- k/n steps' line on stdout"
+    if res is None:
+        return False, "no playtest-result.json was written"
+    steps = [s.get("verdict") for s in res.get("steps", [])]
+    want = expect.upper()
+    mark = lambda v: re.match(MARKER + r": (PASS|FAIL)", v).group(1)
+    got = (mark(verdicts[-1]), mark(in_log[-1]), pt[-1], res.get("verdict"))
+    if any(g != want for g in got):
+        fails = [f"step {s.get('n')} {s.get('name')}: {s.get('detail')}" for s in res.get("steps", []) if s.get("verdict") == "FAIL"]
+        return False, (f"expected {want}: marker {got[0]} (stdout) / {got[1]} (latest.log), PLAYTEST {got[2]}, JSON {got[3]}"
+                       + (f"; {fails[0]}" if fails else f"; {res.get('detail', verdicts[-1])}"))
+    if not res.get("finished"):
+        return False, "playtest-result.json says the run did not finish"
+    if want == "FAIL" and "FAIL" not in steps:
+        return False, f"the run FAILed but not in a step of the script ({res.get('detail', verdicts[-1])}): the harness failed"
+    if expect_steps and steps != list(expect_steps):
+        return False, f"step verdicts {steps}, expected {list(expect_steps)}"
+    events = [str(e.get("what", "")) for e in res.get("events", [])]
+    for want_ev in expect_events or ():
+        if not any(re.search(want_ev, e) for e in events):
+            return False, f"no event matching {want_ev!r} in playtest-result.json (events: {events})"
+    return True, f"{verdicts[-1]} (steps {steps})"
 
 
 def judge(out, game):
@@ -467,6 +541,10 @@ def self_check():
                "26.3: the harness tables' rows took on the smoke harness text")
         expect(all(f'"{p}"' in cb or f'+ "{p}"' in cb for p in ("boottest", "testmode", "namespaces")) and
                'TAG = "' + MARKER + '"' in cb, "26.3: the property names and the marker are unchanged")
+        pr = (d / "b/src/main/java" / PKG / "PlaytestRunner.java").read_text(encoding="utf-8")
+        expect("mc.gui.screen()" in pr and "mc.screen " not in pr and "mc.gameRenderer.mainRenderTarget(), 1, msg" in pr,
+               "26.3: the playtest runner took the harness rows (screen on Gui, the screenshot's downscale and render target)")
+        expect('+ "playtest"' in cb, "26.3: the playtest property is read by ClientBootSmokeTest")
         jp = (d / "b/src/main/java" / PKG / "JeiRecipeProbe.java").read_text(encoding="utf-8")
         expect("mezz.jei.api.recipe.types.IRecipeType" in jp and "ITEM.getValue(Identifier.parse(id))" in jp,
                "26.3: the JEI probe's rows")
@@ -500,7 +578,8 @@ def self_check():
         cls = lambda major, extra=b"": b"\xca\xfe\xba\xbe\x00\x00" + major.to_bytes(2, "big") + extra
         body = (MARKER + "".join(f" {MODID}.{p}" for p in PROPS)).encode("utf-8")
         good = {f"{PKG}/SmokeHarness.class": cls(69, b"Lnet/neoforged/fml/common/Mod;"),
-                f"{PKG}/ClientBootSmokeTest.class": cls(69, body), f"{PKG}/JeiRecipeProbe.class": cls(69)}
+                f"{PKG}/ClientBootSmokeTest.class": cls(69, body), f"{PKG}/JeiRecipeProbe.class": cls(69),
+                f"{PKG}/PlaytestRunner.class": cls(69)}
         expect(check_jar(jar(d / "g.jar", toml, good), "26.3", "26.3.0.76", 25) == [], "a good jar passes")
         expect(any("does not accept 26.2" in p for p in check_jar(d / "g.jar", "26.2", "26.2.0.90", 25)),
                "a jar for another version is refused")
@@ -570,6 +649,49 @@ def self_check():
             return 0
         res = client_smoke(proj, "launch", 5, runner=fake)
         expect(res[0] and "runClient" in seen[0] and f"-P{MODID}.testmode=launch" in seen[0], f"client_smoke: {res} {seen}")
+
+        # playtest: the verdict on stdout, in latest.log, the PLAYTEST line and playtest-result.json must agree
+        def pj(verdict, steps, finished=True):
+            return json.dumps({"script": "x.playtest", "intent": "", "verdict": verdict, "finished": finished,
+                               "steps": [{"n": i + 1, "name": f"s{i + 1}", "verdict": v, "detail": "d"} for i, v in enumerate(steps)],
+                               "events": []})
+        mp, mf = MARKER + ": PASS — playtest x: 2/2", MARKER + ": FAIL — playtest x: 1/3"
+        po, fo = f"PLAYTEST: PASS -- 2/2 steps\n{mp}\n", f"PLAYTEST: FAIL -- 1/3 steps\n{mf}\n"
+        expect(judge_playtest(po, mp, pj("PASS", ["PASS", "PASS"]))[0], "playtest PASS everywhere passes")
+        expect(not judge_playtest(po, mp, pj("FAIL", ["PASS", "FAIL"]))[0], "playtest: a JSON FAIL fails a PASS run")
+        expect(not judge_playtest(po, mp, "")[0], "playtest: no result JSON fails")
+        expect(not judge_playtest(mp + "\n", mp, pj("PASS", ["PASS"]))[0], "playtest: no PLAYTEST line fails")
+        expect(not judge_playtest(po, mp, pj("PASS", ["PASS"], finished=False))[0], "playtest: an unfinished run fails")
+        expect(judge_playtest(fo, mf, pj("FAIL", ["PASS", "FAIL", "SKIPPED"]), "fail", ["PASS", "FAIL", "SKIPPED"])[0],
+               "playtest --expect fail: FAIL from a step, the later step skipped, passes")
+        expect(not judge_playtest(fo, mf, pj("FAIL", []), "fail")[0], "playtest --expect fail: a FAIL outside the steps (harness) fails")
+        expect(not judge_playtest(fo, mf, pj("FAIL", ["FAIL", "SKIPPED", "SKIPPED"]), "fail", ["PASS", "FAIL", "SKIPPED"])[0],
+               "playtest --expect-steps: another step pattern fails")
+        expect(not judge_playtest(po, mp, pj("PASS", ["PASS", "PASS"]), "fail")[0], "playtest --expect fail: a PASS fails")
+        expect(not judge_playtest(po, mp, pj("PASS", ["PASS", "PASS"]), expect_events=["death at step"])[0],
+               "playtest --expect-event: a missing event fails")
+        withev = json.loads(pj("PASS", ["PASS", "PASS"]))
+        withev["events"] = [{"ms": 5, "what": "death at step 2: death.attack.genericKill"}]
+        expect(judge_playtest(po, mp, json.dumps(withev), expect_events=["death at step 2"])[0],
+               "playtest --expect-event: a matching event passes")
+        script = d / "x.playtest"
+        script.write_text("say hi\n", encoding="utf-8")
+
+        def fake_pt(cmd, cwd, env, log, timeout):
+            seen.append(cmd)
+            outp = playtest_out(cwd, script)
+            outp.mkdir(parents=True, exist_ok=True)
+            (outp / "playtest-result.json").write_text(pj("PASS", ["PASS", "PASS"]), encoding="utf-8")
+            log.write_text(po, encoding="utf-8")
+            (cwd / "run/client/logs/latest.log").write_text("[Render thread/INFO]: " + mp + "\n", encoding="utf-8")
+            return 0
+        res = client_smoke(proj, "playtest", 5, runner=fake_pt, playtest=script)
+        expect(res[0] and f"-P{MODID}.testmode=playtest" in seen[-1]
+               and any(a.startswith(f"-P{MODID}.playtest=") and a.endswith("x.playtest") for a in seen[-1])
+               and any(a.startswith(f"-P{MODID}.playtest.out=") for a in seen[-1])
+               and (playtest_out(proj, script) / "latest.log").is_file(),
+               f"client_smoke playtest: the script and out dir are passed, the logs kept beside the result: {res} {seen[-1]}")
+        expect(not client_smoke(proj, "playtest", 5, runner=fake_pt)[0], "--mode playtest without --playtest fails")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -584,8 +706,13 @@ def main():
     s = sub.add_parser("digest"); s.add_argument("--mc", nargs="*")
     s = sub.add_parser("check-jar"); s.add_argument("--mc", required=True); s.add_argument("--jar", required=True)
     s = sub.add_parser("client-smoke"); s.add_argument("--project", required=True)
-    s.add_argument("--mode", default="gauntlet", choices=["launch", "spawn", "battle", "gauntlet", "census"])
+    s.add_argument("--mode", default="gauntlet", choices=list(MODES))
     s.add_argument("--timeout", type=int, default=1200)
+    s.add_argument("--playtest", help="--mode playtest: the script")
+    s.add_argument("--expect", default="pass", choices=["pass", "fail"], help="--mode playtest: the verdict required")
+    s.add_argument("--expect-steps", help="--mode playtest: each step's verdict, comma-separated (PASS,FAIL,SKIPPED)")
+    s.add_argument("--expect-event", action="append", default=[],
+                   help="--mode playtest: a regex an entry of the result's events must match (repeatable)")
     s = sub.add_parser("plan"); s.add_argument("--published"); s.add_argument("--newest", type=int, required=True)
     s = sub.add_parser("release"); s.add_argument("--dist", required=True); s.add_argument("--tag", required=True)
     s.add_argument("--commit", required=True)
@@ -617,7 +744,9 @@ def main():
                   f"{v['neo']} (accepted by {v['neo_range']}), Java {v['java']} classes, entry class and contract present")
         return 1 if probs else 0
     if a.cmd == "client-smoke":
-        ok, why = client_smoke(a.project, a.mode, a.timeout)
+        steps = [x.strip() for x in a.expect_steps.split(",")] if a.expect_steps else None
+        ok, why = client_smoke(a.project, a.mode, a.timeout, playtest=a.playtest, expect=a.expect, expect_steps=steps,
+                               expect_events=a.expect_event)
         print(f"gatec-carrier: client smoke ({a.mode}) {'PASS' if ok else 'FAIL'}: {why}")
         return 0 if ok else 1
     if a.cmd == "plan":
