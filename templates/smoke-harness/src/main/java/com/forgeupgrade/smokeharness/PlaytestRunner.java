@@ -696,7 +696,7 @@ final class PlaytestRunner {
     static final class ClickAtOp extends Op {
         final double px, py;
         ClickAtOp(int no, String text, double px, double py) { super(no, text); this.px = px; this.py = py; }
-        @Override Res start(PlaytestRunner r, Minecraft mc) {
+        @Override Res start(PlaytestRunner r, Minecraft mc) throws Exception {
             var screen = mc.screen;
             if (screen == null) return fail("no screen is open to click");
             double x = screen.width * px / 100.0, y = screen.height * py / 100.0;
