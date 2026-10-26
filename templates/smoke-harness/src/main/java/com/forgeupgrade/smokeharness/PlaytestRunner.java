@@ -1608,8 +1608,13 @@ final class PlaytestRunner {
                 for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
                     if (!level.dimension().toString().contains(dim + "]")) continue;
                     net.minecraft.world.level.ChunkPos cp = new net.minecraft.world.level.ChunkPos(x >> 4, z >> 4);
-                    for (var start : level.structureManager().startsForStructure(cp, st -> true)) {
-                        if (start == null || !start.isValid() || start.getPieces().isEmpty()) continue;
+                    // by reflection: startsForStructure(ChunkPos, Predicate) is not there on every version (26.3)
+                    java.util.function.Predicate<Object> any = st -> true;
+                    Object starts = R.call(level.structureManager(), "startsForStructure", cp, any);
+                    if (!(starts instanceof List<?> list)) continue;
+                    for (Object o : list) {
+                        if (!(o instanceof net.minecraft.world.level.levelgen.structure.StructureStart start)
+                            || !start.isValid() || start.getPieces().isEmpty()) continue;
                         var box = start.getPieces().get(0).getBoundingBox();
                         out = new int[]{(box.minX() + box.maxX()) / 2, box.minY() + 1, (box.minZ() + box.maxZ()) / 2};
                         break;
