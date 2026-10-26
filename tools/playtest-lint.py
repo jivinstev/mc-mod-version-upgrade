@@ -12,7 +12,8 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
     @step <name>                   starts a step; lines before the first @step form step "main"
     @wait <N>t | <N>s              ticks or seconds (a second is 20 ticks)
     @aim entity <type id | selector> | @aim pos <x> <y> <z> (~ relative) | @aim look <yaw> <pitch>
-    @key <mapping name> [hold <duration>]   a key mapping by name (key.attack, key.hotbar.1, a mod's own); default hold 2t
+    @key <mapping name> [hold <duration>]   a key mapping by name (key.attack, key.hotbar.1, a mod's own), or a raw
+                                   key by its name (key.keyboard.escape, key.mouse.left); default hold 2t
     @click slot <N> | @click button "<text>"
     @expect <kind> [<match>] [gone] [within <duration>]   kinds: sound subtitle chat title actionbar bossbar screen error;
                                    match = case-insensitive substring of the text or of a translation key, or /regex/

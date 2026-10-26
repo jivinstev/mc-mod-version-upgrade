@@ -461,6 +461,7 @@ final class PlaytestRunner {
         final String name;
         final int hold;
         KeyMapping km;
+        InputConstants.Key raw;
         int t;
         boolean released;
         String how = "";
@@ -468,13 +469,21 @@ final class PlaytestRunner {
 
         @Override Res start(PlaytestRunner r, Minecraft mc) {
             t = 0; released = false; how = "";
-            km = null;
+            km = null; raw = null;
             List<String> names = new ArrayList<>();
             for (KeyMapping k : mc.options.keyMappings) {
                 names.add(k.getName());
                 if (k.getName().equals(name)) km = k;
             }
-            if (km == null) return fail("no key mapping named " + name + "; nearest: " + nearest(name, names));
+            if (km == null && (name.startsWith("key.keyboard.") || name.startsWith("key.mouse."))) {
+                // a raw key by its InputConstants name (key.keyboard.escape closes a screen): no mapping is bound to it
+                raw = InputConstants.getKey(name);
+                if (raw == null || raw.equals(InputConstants.UNKNOWN)) return fail("no key named " + name);
+                how = Input.pressKey(mc, raw, true);
+                return null;
+            }
+            if (km == null) return fail("no key mapping named " + name + " (a raw key is key.keyboard.<name>, e.g. "
+                    + "key.keyboard.escape); nearest: " + nearest(name, names));
             if (km == mc.options.keyAttack && r.aimed != null) {
                 r.pick(mc);
                 HitResult hr = mc.hitResult;
@@ -509,7 +518,7 @@ final class PlaytestRunner {
         @Override Res tick(PlaytestRunner r, Minecraft mc) {
             if (released) return pass(name + ": " + how);
             if (++t >= hold) {
-                Input.press(mc, km, false);
+                if (raw != null) Input.pressKey(mc, raw, false); else Input.press(mc, km, false);
                 released = true;
             }
             return null;
@@ -1674,6 +1683,22 @@ final class PlaytestRunner {
             } catch (Throwable t) {
                 direct(km, down);
                 return "mapping set directly (input path threw " + t + ")";
+            }
+        }
+
+        /** A raw key (no mapping) through the real input path. */
+        static String pressKey(Minecraft mc, InputConstants.Key key, boolean down) {
+            int action = down ? PRESS : RELEASE;
+            long win = window(mc);
+            try {
+                if (key.getType() == InputConstants.Type.MOUSE) {
+                    return mouseButton(mc, win, key.getValue(), action) ? "mouse button " + key.getValue() + " via MouseHandler"
+                            : "mouse button " + key.getValue() + ": no MouseHandler callback found";
+                }
+                return keyboard(mc, win, key.getValue(), 0, action) ? "key " + key.getName() + " via KeyboardHandler.keyPress"
+                        : "key " + key.getName() + ": no KeyboardHandler.keyPress found";
+            } catch (Throwable t) {
+                return "key " + key.getName() + ": input path threw " + t;
             }
         }
 

@@ -60,7 +60,8 @@ effect give @e[tag=playtest] minecraft:fire_resistance infinite 0 true
 @key key.inventory
 @expect screen Inventory within 3s
 @shot inventory
-@key key.inventory
+# a raw key by its InputConstants name: Escape closes a screen (no key mapping is bound to it)
+@key key.keyboard.escape
 @expect screen none within 3s
 gamemode survival
 @key key.inventory
