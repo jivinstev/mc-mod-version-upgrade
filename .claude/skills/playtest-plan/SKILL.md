@@ -91,8 +91,8 @@ progression from its first stage to its last?
    Write the map into `PLAN.md` as its own section, stage by stage.
 3. **One script, `NN-story.playtest`.** One step per stage, each gated on the stage's advancement:
    `@assert execute if entity @s[advancements={<ns>:<id>=true}]`.
-   - Travel to a structure is `@goto structure <id or #tag> [in <dimension>]` (vanilla `/locate`, then the player on the
-     ground there); the stage's mechanic never is a command.
+   - Travel to a structure is `@goto structure <id or #tag> [in <dimension>]` (vanilla `/locate`, then the player inside
+     its start piece, where the structure's \"inside\" checks count); the stage's mechanic never is a command.
    - **`/place structure` does not do.** It builds the blocks but registers no structure, so a mod's "inside the
      structure" checks (and vanilla's location advancements) never fire there. Only a naturally generated one counts.
    - The world: vanilla's superflat with `@world flat structures` (structures are off in the default flat world, for a

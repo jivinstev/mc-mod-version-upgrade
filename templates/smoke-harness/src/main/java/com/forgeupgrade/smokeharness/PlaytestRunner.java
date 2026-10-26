@@ -410,12 +410,13 @@ final class PlaytestRunner {
     static final class GotoOp extends Op {
         final String what, dim;
         volatile CmdResult res;
-        int phase, waited, settled;
-        String at = "";
+        int phase, waited, settled, pieceAsked;
+        volatile int[] piece;
+        String at = "", inside = "";
         static final Pattern COORDS = Pattern.compile("\\[(-?\\d+), ~, (-?\\d+)\\]");
         GotoOp(int no, String text, String what, String dim) { super(no, text); this.what = what; this.dim = dim; }
         @Override Res start(PlaytestRunner r, Minecraft mc) {
-            phase = 0; waited = 0; settled = 0; res = null;
+            phase = 0; waited = 0; settled = 0; pieceAsked = 0; piece = null; inside = ""; res = null;
             r.runCommand(mc, "execute in " + dim + " run locate structure " + what, x -> res = x);
             return null;
         }
@@ -435,6 +436,11 @@ final class PlaytestRunner {
                 r.runCommand(mc, "execute in " + dim + " run spreadplayers " + m.group(1) + " " + m.group(2) + " 0 1" + under + " false @s", y -> res = y);
                 return null;
             }
+            if (phase == 3) {                   // the tp into the structure's start piece
+                if (!Boolean.TRUE.equals(x.success)) return fail("could not enter " + what + " at " + inside + ": " + said);
+                if (++settled < 40) return null;
+                return pass("inside " + what + " (its start piece, " + inside + ") in " + dim);
+            }
             if (!Boolean.TRUE.equals(x.success)) {
                 if (phase == 1) {               // no ground right there (an End island's edge): drop in from above, slowly
                     phase = 2; waited = 0; res = null;
@@ -445,10 +451,30 @@ final class PlaytestRunner {
                 }
                 return fail("could not reach " + what + " at [" + at + "]: " + said);
             }
-            // arrived: give the chunks around a few seconds to load their entities (measured: a village's villagers are
-            // not there yet the tick after the teleport)
+            // arrived above it, its chunk loaded: now step INTO the structure -- a structure that is "discovered" by
+            // standing in it counts only inside one of its pieces (measured: a Nether cavern hold under the surface
+            // spreadplayers chose), so the player goes to the start piece's floor, the box the server itself records
+            if (phase != 3 && pieceAsked == 0) {
+                pieceAsked = 1;
+                String[] c = at.split(", ");
+                r.startPiece(mc, dim, Integer.parseInt(c[0]), Integer.parseInt(c[1]), b -> piece = b);
+                return null;
+            }
+            if (pieceAsked == 1) {
+                int[] b = piece;
+                if (b == null) return ++waited > 200 ? fail("no answer about " + what + "'s pieces") : null;
+                pieceAsked = 2;
+                if (b.length == 3) {
+                    inside = "[" + b[0] + ", " + b[1] + ", " + b[2] + "]";
+                    phase = 3; settled = 0; waited = 0; res = null;
+                    r.runCommand(mc, "execute in " + dim + " run tp @s " + b[0] + " " + b[1] + " " + b[2], y -> res = y);
+                    return null;
+                }
+            }
+            // no piece found (a structure the server keeps no start for at that chunk): stay on the ground above it
             if (++settled < 40) return null;
-            return pass("at " + what + " [" + at + "] in " + dim + (phase == 2 ? " (dropped in from y 120)" : ""));
+            return pass("at " + what + " [" + at + "] in " + dim + (phase == 2 ? " (dropped in from y 120)" : "")
+                + " (on the ground above it: no start piece found there)");
         }
     }
 
@@ -1571,6 +1597,31 @@ final class PlaytestRunner {
 
     // ═══════════════════════════════════════════════════════════════════════════════════ commands
     /** Run a command as the player on the integrated server (its own command source, so the result and failure text come back). */
+    /** The floor of the start piece of the structure whose start is in the chunk at block (x, z) in dimension dim:
+     *  {x, y, z} at the centre of its box, one block above its bottom; {} when that chunk records no start. */
+    void startPiece(Minecraft mc, String dim, int x, int z, Consumer<int[]> done) {
+        IntegratedServer server = mc.getSingleplayerServer();
+        if (server == null) { done.accept(new int[0]); return; }
+        server.execute(() -> {
+            int[] out = new int[0];
+            try {
+                for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
+                    if (!level.dimension().toString().contains(dim + "]")) continue;
+                    net.minecraft.world.level.ChunkPos cp = new net.minecraft.world.level.ChunkPos(x >> 4, z >> 4);
+                    for (var start : level.structureManager().startsForStructure(cp, st -> true)) {
+                        if (start == null || !start.isValid() || start.getPieces().isEmpty()) continue;
+                        var box = start.getPieces().get(0).getBoundingBox();
+                        out = new int[]{(box.minX() + box.maxX()) / 2, box.minY() + 1, (box.minZ() + box.maxZ()) / 2};
+                        break;
+                    }
+                }
+            } catch (Throwable t) {
+                LOG.warn("{}: start piece lookup failed: {}", TAG, t.toString());
+            }
+            done.accept(out);
+        });
+    }
+
     void runCommand(Minecraft mc, String cmd, Consumer<CmdResult> done) {
         IntegratedServer server = mc.getSingleplayerServer();
         CmdResult res = new CmdResult();

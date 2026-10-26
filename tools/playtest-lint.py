@@ -19,7 +19,7 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
     @expect <kind> [<match>] [gone] [within <duration>]   kinds: sound subtitle chat title actionbar bossbar screen error;
                                    match = case-insensitive substring of the text or of a translation key, or /regex/
     @shot <name>                   a screenshot <out>/<NN>-<name>.png
-    @goto structure <id | #tag> [in <dimension>]   travel to the nearest naturally generated one (/locate), on the ground
+    @goto structure <id | #tag> [in <dimension>]   travel to the nearest naturally generated one (/locate), inside its start piece
     @allow error <regex>           ERROR log lines matching it do not fail a step (header: the whole run; in a step: that step)
     @world [flat|normal] [structures] [seed=<n>]   header only: the fresh world (default flat, seed 0;
                                    structures: the flat world's villages and strongholds, off by default)
