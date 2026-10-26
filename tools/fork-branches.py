@@ -4236,14 +4236,16 @@ def sync_shared(repo, targets=None, say=print, ci_modid=None, check=False, json_
 # ---------------------------------------------------------------- freeze, library record, CI
 
 
-def freeze(repo, t, upstream=None, libraries=(), accept_drift=False, say=print):
+def freeze(repo, t, upstream=None, libraries=(), accept_drift=False, say=print, untaken=None):
     """The upstream freeze of version t's branch (tools/fork-port.py freeze_upstream into .port/<t>/branch.properties):
-    the checkout must be on that branch. A --library pin alone never re-checks the authors' branch (issue #133, gap 3)."""
+    the checkout must be on that branch. A --library pin alone never re-checks the authors' branch (issue #133, gap 3).
+    untaken: the round's frozen input (--untaken-ok; default round/frozen.json in the working directory): a plan that
+    leaves the authors' code out freezes at the merge-base, its drift left for a later round."""
     repo = pathlib.Path(repo).resolve()
     if checkout_version(repo) != t:
         say(f"fork-branches: freeze writes .port/{t}/{BRANCH_PROPS}: check out {branch_name(t)} first"); return 2
     rec, why = fp().freeze_upstream(repo, upstream, libraries, accept_drift=accept_drift,
-                                    props_file=rec_dir(repo, t) / BRANCH_PROPS)
+                                    props_file=rec_dir(repo, t) / BRANCH_PROPS, untaken=untaken)
     if not rec:
         say(f"fork-branches: freeze: {why}"); return 2
     say("fork-branches: freeze: " + ", ".join(f"{k}={v}" for k, v in rec.items()) + f" (.port/{t}/{BRANCH_PROPS}; commit it)")
@@ -4719,6 +4721,9 @@ def main():
     f = sub.add_parser("freeze"); f.add_argument("--repo", required=True); f.add_argument("--target", required=True)
     f.add_argument("--upstream"); f.add_argument("--library", action="append", default=[])
     f.add_argument("--accept-upstream-drift", action="store_true")
+    f.add_argument("--untaken-ok", metavar="FROZEN_JSON",
+                   help="the round's frozen input: the authors' commits it leaves out (take_authors false) do not refuse "
+                        "the freeze (default: round/frozen.json in the working directory)")
     lr = sub.add_parser("library-record"); lr.add_argument("--repo", required=True); lr.add_argument("--target", required=True)
     lr.add_argument("--dependent", required=True); lr.add_argument("--slug")
     ss = sub.add_parser("sync-shared"); ss.add_argument("--repo", required=True)
@@ -4762,7 +4767,7 @@ def main():
     if a.cmd == "add-target":
         return add_target(a.repo, a.target, a.parent, a.allow_undone_parent, a.port_branch)
     if a.cmd == "freeze":
-        return freeze(a.repo, a.target, a.upstream, a.library, a.accept_upstream_drift)
+        return freeze(a.repo, a.target, a.upstream, a.library, a.accept_upstream_drift, untaken=a.untaken_ok)
     if a.cmd == "library-record":
         return library_record(a.repo, a.target, a.dependent, a.slug)
     if a.cmd == "remake":
