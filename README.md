@@ -185,10 +185,7 @@ A command that fails fails its step. The directives are:
 - checks: `@assert <command>`, and `@expect sound|subtitle|chat|title|actionbar|bossbar|screen|error <match> [gone]
   [within 10s]`;
 - player inputs: `@aim entity|pos|look`, `@key <key mapping> [hold 5t]`, `@click slot N | button "text" | at X% Y%`;
-- travel: `@goto structure <id|#tag> [in <dimension>]`, into the nearest naturally generated one;
-- loops: `@repeat <N> [until <command>] … @end-repeat`, and `@repeat each <selector> max <N> [until <command>] …
-  @end-repeat`, which runs once per matching entity, with `{it}` standing for that entity's UUID. Every loop needs its
-  bound N, and an `until` that's never met fails after N runs, naming N;
+- travel and loops: `@goto structure <id>`, and bounded `@repeat … @end-repeat` blocks (also once per entity, `{it}`);
 - control and evidence: `@wait`, `@allow error <regex>`, `@shot <name>`, `@continue-on-fail` and `@end`.
 - header only: `@world [flat|normal] [structures] [seed=<n>]` (default flat, seed 0; `structures` adds the flat world's villages and strongholds) and `@continue-on-fail`. An `@intent` inside a
   step is that step's purpose.
