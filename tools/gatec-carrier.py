@@ -405,20 +405,37 @@ def judge(out, game):
     return True, verdicts[-1]
 
 
-def _run_logged(cmd, cwd, env, log, timeout):
+VERDICT_GRACE = 15        # seconds after the verdict for the client to exit (a crash right after it is still seen)
+
+
+def _run_logged(cmd, cwd, env, log, timeout, grace=VERDICT_GRACE):
+    """Run the client, its output to `log`, until it exits, or `grace` seconds after it printed its verdict, or the
+    timeout. The verdict, the result JSON and the logs are all written before the client stops, so a client that
+    hangs on its way out (measured: 1.21.1 stuck at "Saving worlds" for the whole 1500 s) costs `grace`, not the
+    timeout."""
+    rx = re.compile(MARKER + r": (PASS|FAIL)")
     with open(log, "w", encoding="utf-8") as fh:
         p = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdout=fh, stderr=subprocess.STDOUT,
                              start_new_session=hasattr(os, "killpg"))
-        t0 = time.time()
+        t0, seen = time.time(), None
         while p.poll() is None and time.time() - t0 < timeout:
-            time.sleep(2)
+            time.sleep(1 if seen else 2)
+            if seen is None:
+                fh.flush()
+                try:
+                    if rx.search(pathlib.Path(log).read_text(encoding="utf-8", errors="replace")):
+                        seen = time.time()
+                except OSError:
+                    pass
+            elif time.time() - seen > grace:
+                break
         if p.poll() is None:
             try:
                 os.killpg(p.pid, 9) if hasattr(os, "killpg") else p.kill()
             except OSError:
                 p.kill()
             p.wait()
-            fh.write(f"\n[gatec-carrier] killed after {timeout} s\n")
+            fh.write(f"\n[gatec-carrier] {'stopped ' + str(grace) + ' s after its verdict (it had not exited)' if seen else 'killed after ' + str(timeout) + ' s'}\n")
     return p.returncode
 
 
@@ -692,6 +709,17 @@ def self_check():
                and (playtest_out(proj, script) / "latest.log").is_file(),
                f"client_smoke playtest: the script and out dir are passed, the logs kept beside the result: {res} {seen[-1]}")
         expect(not client_smoke(proj, "playtest", 5, runner=fake_pt)[0], "--mode playtest without --playtest fails")
+    # a client that prints its verdict and then hangs on the way out is stopped after the grace, not the timeout
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as d:
+        log = pathlib.Path(d) / "c.log"
+        prog = "import time; print('" + MARKER + ": PASS -- x', flush=True); time.sleep(60)"
+        t0 = time.time()
+        _run_logged([sys.executable, "-c", prog], d, dict(os.environ), log, 120, grace=2)
+        took = time.time() - t0
+        text = log.read_text(encoding="utf-8")
+        expect(took < 20 and "after its verdict" in text and MARKER + ": PASS" in text,
+               f"a client hanging after its verdict is stopped after the grace ({took:.0f} s): {text[-120:]!r}")
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1
 
