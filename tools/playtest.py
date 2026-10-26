@@ -367,6 +367,7 @@ def cmd_run(a):
     plat = R.Plat.host()
     pf, plan = load_plan(a)
     rep = pathlib.Path(a.report) if a.report else pf.parent / "playtests" / f"{script.stem}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+    rep = rep.resolve()          # the game runs in the instance folder: a relative out dir would land there
     results = []
     for v in plan["versions"]:
         res = run_version(R, plan, v, script, rep / v["mc"], a, plat, print)

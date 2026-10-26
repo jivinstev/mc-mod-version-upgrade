@@ -457,6 +457,12 @@ final class PlaytestRunner {
                     // The crosshair is not on the aimed entity (moved, too far, behind something): hit it directly the way
                     // a real attack does, and say so -- the observation records which path was taken.
                     String on = r.pickDesc(mc);
+                    // The server drops an attack beyond the player's reach without a word (measured: two "hits" from 6
+                    // blocks, the target untouched) -- so say it here, where the script can be fixed.
+                    if (!mc.player.canInteractWithEntity(r.aimed.getBoundingBox(), 1.0)) {
+                        return fail(name + ": " + typeId(r.aimed) + " is out of reach (" + String.format("%.1f", mc.player.distanceTo(r.aimed))
+                                + " blocks; reach " + String.format("%.1f", mc.player.entityInteractionRange()) + "): summon it or tp the player closer");
+                    }
                     mc.gameMode.attack(mc.player, r.aimed);
                     R.call(mc.player, "swing", InteractionHand.MAIN_HAND);   // cosmetic; 26.3's swing takes more arguments
                     how = "direct gameMode.attack on " + typeId(r.aimed) + " #" + r.aimed.getId() + " (crosshair " + on + ")";
@@ -757,7 +763,9 @@ final class PlaytestRunner {
             for (Object[] g : got) {
                 if ((int) g[0] < tick) continue;
                 @SuppressWarnings("unchecked") List<String> t = (List<String>) g[1];
-                if (t.isEmpty() || !t.get(0).contains(player)) continue;
+                // the player is the VICTIM: a death message starts with its victim ("<player> was slain by ..."); one that
+                // only names the player as the killer ("<mob> was destroyed by <player>") is a mob's death
+                if (t.isEmpty() || !t.get(0).startsWith(player + " ")) continue;
                 for (String k : t.subList(1, t.size())) if (k.startsWith("death.")) return k + " " + g[2];
             }
             return null;
