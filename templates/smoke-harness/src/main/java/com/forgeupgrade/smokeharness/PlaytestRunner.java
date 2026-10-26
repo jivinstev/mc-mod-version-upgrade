@@ -339,14 +339,32 @@ final class PlaytestRunner {
         }
     }
 
+    /** Game rules 1.21.11 renamed (ids read from 26.3's GameRules): a script written with the old name runs on every
+     *  version -- the old name is tried first, and only when the server rejects it is the new id tried. */
+    static final Map<String, String> RENAMED_GAMERULES = Map.ofEntries(
+        Map.entry("doDaylightCycle", "advance_time"), Map.entry("doWeatherCycle", "advance_weather"),
+        Map.entry("doMobSpawning", "spawn_mobs"), Map.entry("doImmediateRespawn", "immediate_respawn"),
+        Map.entry("keepInventory", "keep_inventory"), Map.entry("mobGriefing", "mob_griefing"),
+        Map.entry("doMobLoot", "mob_drops"), Map.entry("doTileDrops", "block_drops"), Map.entry("doEntityDrops", "entity_drops"),
+        Map.entry("doPatrolSpawning", "spawn_patrols"), Map.entry("doInsomnia", "spawn_phantoms"),
+        Map.entry("doTraderSpawning", "spawn_wandering_traders"), Map.entry("doWardenSpawning", "spawn_wardens"));
+
+    /** The same gamerule command under the rule's newer id, or null when it names no renamed rule. */
+    static String renamedGamerule(String cmd) {
+        String[] t = cmd.trim().split("\\s+", 3);
+        if (t.length < 2 || !t[0].equals("gamerule") || !RENAMED_GAMERULES.containsKey(t[1])) return null;
+        return "gamerule minecraft:" + RENAMED_GAMERULES.get(t[1]) + (t.length > 2 ? " " + t[2] : "");
+    }
+
     static final class CommandOp extends Op {
-        final String cmd;
+        final String original;
+        String cmd;
         final boolean isAssert;
         volatile CmdResult res;
         int waited;
-        CommandOp(int no, String text, String cmd, boolean isAssert) { super(no, text); this.cmd = cmd; this.isAssert = isAssert; }
+        CommandOp(int no, String text, String cmd, boolean isAssert) { super(no, text); this.original = cmd; this.cmd = cmd; this.isAssert = isAssert; }
         @Override Res start(PlaytestRunner r, Minecraft mc) {
-            res = null; waited = 0;
+            res = null; waited = 0; cmd = original;
             r.runCommand(mc, cmd, x -> res = x);
             return null;
         }
@@ -357,6 +375,12 @@ final class PlaytestRunner {
                     + (COMMAND_TIMEOUT_TICKS / 20) + "s") : null;
             }
             String said = x.said();
+            String renamed = cmd.equals(original) && !Boolean.TRUE.equals(x.success) ? renamedGamerule(original) : null;
+            if (renamed != null) {                       // this version knows the rule by its newer id
+                cmd = renamed; res = null; waited = 0;
+                r.runCommand(mc, cmd, y -> res = y);
+                return null;
+            }
             if (x.success == null) {
                 if (isAssert || !said.isEmpty()) {
                     return fail("/" + cmd + (said.isEmpty() ? ": nothing ran (no result)" : ": " + said));
@@ -364,7 +388,8 @@ final class PlaytestRunner {
                 return pass("/" + cmd + " (no result reported)");
             }
             if (!x.success) return fail("/" + cmd + " failed" + (said.isEmpty() ? "" : ": " + said));
-            return pass("/" + cmd + " -> " + x.value + (said.isEmpty() ? "" : " (" + said + ")"));
+            return pass("/" + cmd + " -> " + x.value + (said.isEmpty() ? "" : " (" + said + ")")
+                + (cmd.equals(original) ? "" : " [renamed rule: /" + original + " is /" + cmd + " on this version]"));
         }
     }
 
@@ -459,9 +484,13 @@ final class PlaytestRunner {
                     String on = r.pickDesc(mc);
                     // The server drops an attack beyond the player's reach without a word (measured: two "hits" from 6
                     // blocks, the target untouched) -- so say it here, where the script can be fixed.
-                    if (!mc.player.canInteractWithEntity(r.aimed.getBoundingBox(), 1.0)) {
+                    // by reflection: the reach methods are not named alike on every version (absent: no check)
+                    Object inReach = R.call(mc.player, "canInteractWithEntity", r.aimed.getBoundingBox(), 1.0);
+                    if (Boolean.FALSE.equals(inReach)) {
+                        Object reach = R.call(mc.player, "entityInteractionRange");
                         return fail(name + ": " + typeId(r.aimed) + " is out of reach (" + String.format("%.1f", mc.player.distanceTo(r.aimed))
-                                + " blocks; reach " + String.format("%.1f", mc.player.entityInteractionRange()) + "): summon it or tp the player closer");
+                                + " blocks" + (reach instanceof Double d ? String.format("; reach %.1f", d) : "")
+                                + "): summon it or tp the player closer");
                     }
                     mc.gameMode.attack(mc.player, r.aimed);
                     R.call(mc.player, "swing", InteractionHand.MAIN_HAND);   // cosmetic; 26.3's swing takes more arguments

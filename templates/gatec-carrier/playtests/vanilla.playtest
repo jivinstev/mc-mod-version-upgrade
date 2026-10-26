@@ -6,6 +6,8 @@
 @step setup
 # daylight: no hostile mob spawns on the flat world (a night run fills it with zombies)
 time set noon
+# 1.21.11 renamed this rule (advance_time): the carrier retries a renamed rule under its new id
+gamerule doDaylightCycle false
 item replace entity @s weapon.mainhand with minecraft:netherite_sword
 @key key.hotbar.1
 @assert execute if items entity @s weapon.mainhand minecraft:netherite_sword

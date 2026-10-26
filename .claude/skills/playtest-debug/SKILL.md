@@ -42,13 +42,20 @@ Ask, in this order, and stop at the first yes:
 3. **Did it happen, but outside the window?** `observed` shows the sound, chat line or screen arriving after the
    `within`, or before the step started. **Script:** widen the window, or move the expectation to the step that
    caused it.
-4. **Did the input miss?** The frame shows the target off-centre, too far or behind a block, or `observed` has no hit.
-   **Script:** summon closer, `@aim` again right before the `@key`, clear the line of sight.
-5. **Was the world not as the script assumed?** Wrong game mode or difficulty, leftover mobs, night-time spawns, the
+4. **Did the mod do it on purpose?** A command refused or a target unharmed can be the mod guarding something: an
+   inventory-protection mixin blocking `/clear`, a boss that refuses damage until its spawn animation ends, a block
+   stance. Find it in the mod's source (`@Inject` on the vanilla method, a `hurt` override) before calling it either
+   the script's or the mod's. The usual verdict is **script**: work with the design.
+5. **Did the input miss?** The frame shows the target off-centre, too far or behind a block, or `observed` has no hit.
+   An `observed.aim` entry of `direct gameMode.attack` means the crosshair missed and the carrier hit the target
+   directly. An out-of-reach failure names the distance. **Script:** bring the target within reach
+   (`execute at @s rotated as @s run tp @e[...] ^ ^ ^2`), `@aim` again right before the `@key`, clear the line of
+   sight.
+6. **Was the world not as the script assumed?** Wrong game mode or difficulty, leftover mobs, night-time spawns, the
    player already dead. **Script:** set it up explicitly in the step.
-6. **Can the carrier not do what the step needs?** A directive refused as unknown, an input it cannot press, a screen
+7. **Can the carrier not do what the step needs?** A directive refused as unknown, an input it cannot press, a screen
    it cannot click. **Carrier:** name the change in `templates/smoke-harness`.
-7. **Otherwise** the mod did not do what the intent says it should: the music never played, the boss did not die to
+8. **Otherwise** the mod did not do what the intent says it should: the music never played, the boss did not die to
    the weapon that should one-shot it, the narration never appeared. **Mod.** Before saying so, check the mod's
    source for the behaviour (playtest-plan's grounding step) and say where it should have happened.
 

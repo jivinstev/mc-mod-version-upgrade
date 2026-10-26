@@ -49,6 +49,29 @@ one `.playtest` file (UTF-8). The grammar is `tools/playtest-lint.py`'s docstrin
 6. **Evidence.** Put a `@shot` at the moment a human would want to see: the boss on screen, the item in hand, the
    death screen. Every step's end and every failure is captured anyway.
 
+## Traps the live runs found
+
+Each of these failed a real run:
+
+- **A command that changes nothing fails.** `difficulty normal` on a Normal world, `gamemode creative` in Creative,
+  `clear` on an empty inventory and `kill @e[...]` with nothing to kill all fail their step. Make them change
+  something (`difficulty hard`, then `difficulty normal`), or wrap them: `execute if entity @e[type=X] run kill
+  @e[type=X]`.
+- **Melee needs reach**, 3 blocks for a survival player. Summon a boss further away so its entrance and music get room,
+  then bring it to the player before the hit: `execute at @s rotated as @s run tp @e[type=X,limit=1,sort=nearest] ^ ^
+  ^2`, `@aim entity X`, `@key key.attack`. The carrier fails an out-of-reach attack and gives the distance.
+- **Put the tool in hand.** `/give` fills the first free slot, and after a respawn picked-up loot can be in the
+  selected one (measured: a boss took a fist's damage from a "one-shot" sword run). Use `item replace entity @s
+  weapon.mainhand with X` right before the step that swings or uses it.
+- **Immediate respawn skips the death screen**, and the carrier turns it on. Expect the death message instead:
+  `@expect chat death.attack within 60s`. Protect the player before the step after a death (Resistance V,
+  `effect give @s minecraft:resistance 120 4 true`), or the same mobs kill it again on respawn.
+- **The inventory is a hint, not a promise.** It reads lang keys, and a mod names items there that it registers only
+  when a companion mod is present. `Unknown item` at run time means picking another item, not a finding.
+- **Mods guard the player.** An inventory-protection item can make `/clear` find nothing, by design. Empty slots
+  with `item replace entity @s hotbar.N with minecraft:air` instead, and check the mod's mixins before calling it a
+  bug.
+
 Then lint it:
 
 ```bash
