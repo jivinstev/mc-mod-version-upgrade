@@ -758,6 +758,7 @@ final class PlaytestRunner {
         PlaytestRunner rref;
         Minecraft mref;
         int gone;
+        volatile Boolean alive;
 
         @Override Res start(PlaytestRunner r, Minecraft mc) {
             rref = r; mref = mc;
@@ -776,12 +777,14 @@ final class PlaytestRunner {
             return iterate();
         }
 
-        /** Before each run for an entity: is it still there? A target that is gone has nothing left to do (it died
-         *  between the until check and the next run, say) -- its loop is done, the next entity's begins. */
+        /** Before each run for an entity: is it still ALIVE? A dying entity stays in the world for its death animation
+         *  and a UUID selector still finds it (measured: `execute if entity <uuid>` true, then gone by the @aim), so the
+         *  server is asked directly. A target that is gone or dying has nothing left to do: its loop is done, the next
+         *  entity's begins. */
         private Res iterate() {
             if (targets.get(ti) != null) {
-                phase = 3; waited = 0; res = null;
-                rref.runCommand(mref, "execute if entity " + targets.get(ti), y -> res = y);
+                phase = 3; waited = 0; alive = null;
+                rref.entityAlive(mref, targets.get(ti), b -> alive = b);
                 return null;
             }
             return build();
@@ -803,17 +806,17 @@ final class PlaytestRunner {
             ti++;
             if (ti >= targets.size()) {
                 return pass((each == null ? "" : targets.size() + " entit(ies), ") + runs + " run(s) of the block"
-                    + (until == null ? "" : ", until met") + (gone == 0 ? "" : "; " + gone + " gone before a run (done)"));
+                    + (until == null ? "" : ", until met") + (gone == 0 ? "" : "; " + gone + " dead or gone before a run (done)"));
             }
             return begin();
         }
 
         @Override Res tick(PlaytestRunner r, Minecraft mc) throws Exception {
             rref = r; mref = mc;
-            if (phase == 3) {                      // the target's presence before a run
-                CmdResult x = res;
-                if (x == null) return ++waited > COMMAND_TIMEOUT_TICKS ? fail("is " + targets.get(ti) + " there: no answer from the server") : null;
-                if (!Boolean.TRUE.equals(x.success)) {
+            if (phase == 3) {                      // the target's life before a run
+                Boolean a = alive;
+                if (a == null) return ++waited > COMMAND_TIMEOUT_TICKS ? fail("is " + targets.get(ti) + " alive: no answer from the server") : null;
+                if (!a) {
                     gone++;
                     return next(r, mc);
                 }
@@ -1904,6 +1907,25 @@ final class PlaytestRunner {
     }
 
     /** Resolve an entity selector on the server as the player; the AimOp gets {id, x, y, z} per entity. */
+    /** Is the entity with this UUID in some level and alive (not removed, not dying)? */
+    void entityAlive(Minecraft mc, String uuid, Consumer<Boolean> done) {
+        IntegratedServer server = mc.getSingleplayerServer();
+        if (server == null) { done.accept(false); return; }
+        server.execute(() -> {
+            boolean a = false;
+            try {
+                UUID u = UUID.fromString(uuid);
+                for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
+                    Entity e = level.getEntity(u);
+                    if (e != null) { a = e.isAlive(); break; }
+                }
+            } catch (Throwable t) {
+                LOG.warn("{}: alive check of {} failed: {}", TAG, uuid, t.toString());
+            }
+            done.accept(a);
+        });
+    }
+
     /** The UUIDs of the entities a selector matches now (on the server, as the player), in its own order. */
     void selectUuids(Minecraft mc, String selector, Consumer<List<String>> done, Consumer<String> failed) {
         IntegratedServer server = mc.getSingleplayerServer();
