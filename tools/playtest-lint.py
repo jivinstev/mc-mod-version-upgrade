@@ -19,6 +19,7 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
     @expect <kind> [<match>] [gone] [within <duration>]   kinds: sound subtitle chat title actionbar bossbar screen error;
                                    match = case-insensitive substring of the text or of a translation key, or /regex/
     @shot <name>                   a screenshot <out>/<NN>-<name>.png
+    @goto structure <id | #tag> [in <dimension>]   travel to the nearest naturally generated one (/locate), on the ground
     @allow error <regex>           ERROR log lines matching it do not fail a step (header: the whole run; in a step: that step)
     @world [flat|normal] [seed=<n>]   header only: the fresh world (default flat, seed 0)
     @continue-on-fail              header only: run the next step after a failed one
@@ -28,7 +29,7 @@ Standard library only.
 import pathlib, re, sys
 
 KINDS = ("sound", "subtitle", "chat", "title", "actionbar", "bossbar", "screen", "error")
-DIRECTIVES = ("@intent", "@step", "@assert", "@wait", "@aim", "@key", "@click", "@expect", "@shot", "@allow",
+DIRECTIVES = ("@intent", "@step", "@assert", "@wait", "@aim", "@key", "@click", "@expect", "@shot", "@goto", "@allow",
               "@world", "@continue-on-fail", "@end")
 DURATION = re.compile(r"\d+(?:\.\d+)?[ts]")
 NUM = re.compile(r"-?\d+(?:\.\d+)?")
@@ -141,6 +142,9 @@ def lint(text):
         elif d == "@shot":
             if not re.fullmatch(r"[A-Za-z0-9._-]+", arg):
                 probs.append((no, "@shot <name> (letters, digits, . _ -)"))
+        elif d == "@goto":
+            if not re.fullmatch(r"structure\s+#?[a-z0-9_.-]+:[a-z0-9_./-]+(\s+in\s+[a-z0-9_.-]+:[a-z0-9_./-]+)?", arg):
+                probs.append((no, "@goto structure <id or #tag> [in <dimension>]"))
     if not steps:
         probs.append((0, "the script has no steps"))
     return probs, {"steps": steps, "lines": n}
@@ -158,13 +162,13 @@ def self_check():
     good = "\n".join([
         "# header", "@intent prove it", "@world flat seed=3", "@continue-on-fail", "@allow error Narrator",
         "@step one", "/say hi", "@expect chat hi within 5s", "@wait 10t", "@wait 1.5s",
-        "@aim entity minecraft:zombie", "@aim entity @e[type=zombie,limit=1]", "@aim entity minecraft:zombie if-present", "@aim pos ~ ~1 10", "@aim look 90 -10",
+        "@aim entity minecraft:zombie", "@aim entity @e[type=zombie,limit=1]", "@aim entity minecraft:zombie if-present", "@goto structure #minecraft:village", "@goto structure minecraft:fortress in minecraft:the_nether", "@aim pos ~ ~1 10", "@aim look 90 -10",
         "@key key.attack", "@key key.forward hold 20t", "@click slot 36", '@click button "Done"',
         "@expect sound entity.zombie.* gone within 2s", "@expect subtitle /zombie (hurts|groans)/", "@expect error gone",
         "@expect screen none", "@shot after-fight", "@assert execute if entity @s", "@step two", "@allow error Foo.*", "@end",
         "@not-a-directive after end is ignored"])
     p, s = lint(good)
-    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 19, f"a script using every directive is clean: {p} {s}")
+    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 21, f"a script using every directive is clean: {p} {s}")
     for bad, want in (("@step a\n@wait 10", "a duration"), ("@step a\n@expect smell roses", "unknown @expect kind"),
                       ("@step a\n@aim at zombie", "@aim entity|pos|look"), ("@step a\n@key key.use hold", "@key <key"),
                       ("@step a\n@click 3", "@click slot"), ("@step a\n@world flat", "header"),

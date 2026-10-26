@@ -283,9 +283,14 @@ final class PlaytestRunner {
                 if (!arg.matches("[A-Za-z0-9._-]+")) throw new ScriptError(no, "@shot <name> (letters, digits, . _ -)");
                 return new ShotOp(no, text, arg);
             }
+            case "@goto": {
+                Matcher m = Pattern.compile("structure\\s+(#?[a-z0-9_.-]+:[a-z0-9_./-]+)(?:\\s+in\\s+([a-z0-9_.-]+:[a-z0-9_./-]+))?").matcher(arg);
+                if (!m.matches()) throw new ScriptError(no, "@goto structure <id or #tag> [in <dimension>]");
+                return new GotoOp(no, text, m.group(1), m.group(2) == null ? "minecraft:overworld" : m.group(2));
+            }
             default:
                 throw new ScriptError(no, "unknown directive " + dir + " (known: @intent @step @assert @wait @aim @key @click "
-                    + "@expect @shot @allow @world @continue-on-fail @end)");
+                    + "@expect @shot @goto @allow @world @continue-on-fail @end)");
         }
     }
 
@@ -393,6 +398,51 @@ final class PlaytestRunner {
             if (!x.success) return fail("/" + cmd + " failed" + (said.isEmpty() ? "" : ": " + said));
             return pass("/" + cmd + " -> " + x.value + (said.isEmpty() ? "" : " (" + said + ")")
                 + (cmd.equals(original) ? "" : " [renamed rule: /" + original + " is /" + cmd + " on this version]"));
+        }
+    }
+
+    /** @goto structure X [in D]: travel only. Vanilla /locate finds the nearest X (a naturally generated one: a /place'd
+     *  copy is never registered, so a mod's "inside the structure" checks would not fire there); the player is then put on
+     *  the ground at its centre (spreadplayers finds the surface; under 120 in the Nether, so not on its roof). */
+    static final class GotoOp extends Op {
+        final String what, dim;
+        volatile CmdResult res;
+        int phase, waited;
+        String at = "";
+        static final Pattern COORDS = Pattern.compile("\\[(-?\\d+), ~, (-?\\d+)\\]");
+        GotoOp(int no, String text, String what, String dim) { super(no, text); this.what = what; this.dim = dim; }
+        @Override Res start(PlaytestRunner r, Minecraft mc) {
+            phase = 0; waited = 0; res = null;
+            r.runCommand(mc, "execute in " + dim + " run locate structure " + what, x -> res = x);
+            return null;
+        }
+        @Override Res tick(PlaytestRunner r, Minecraft mc) {
+            CmdResult x = res;
+            if (x == null) return ++waited > 20 * 60 ? fail("locate " + what + ": no answer from the server within 60s") : null;
+            String said = x.said();
+            if (phase == 0) {
+                Matcher m = COORDS.matcher(said);
+                if (!Boolean.TRUE.equals(x.success) || !m.find()) {
+                    return fail("no " + what + " found in " + dim + (said.isEmpty() ? "" : ": " + said)
+                        + " (a structure only worldgen places: a superflat overworld has villages and strongholds only)");
+                }
+                at = m.group(1) + ", " + m.group(2);
+                String under = dim.endsWith("the_nether") ? " under 120" : "";
+                phase = 1; waited = 0; res = null;
+                r.runCommand(mc, "execute in " + dim + " run spreadplayers " + m.group(1) + " " + m.group(2) + " 0 1" + under + " false @s", y -> res = y);
+                return null;
+            }
+            if (!Boolean.TRUE.equals(x.success)) {
+                if (phase == 1) {               // no ground right there (an End island's edge): drop in from above, slowly
+                    phase = 2; waited = 0; res = null;
+                    String[] c = at.split(", ");
+                    r.runCommand(mc, "effect give @s minecraft:slow_falling 30 0 true", y -> { });
+                    r.runCommand(mc, "execute in " + dim + " run tp @s " + c[0] + " 120 " + c[1], y -> res = y);
+                    return null;
+                }
+                return fail("could not reach " + what + " at [" + at + "]: " + said);
+            }
+            return pass("at " + what + " [" + at + "] in " + dim + (phase == 2 ? " (dropped in from y 120)" : ""));
         }
     }
 

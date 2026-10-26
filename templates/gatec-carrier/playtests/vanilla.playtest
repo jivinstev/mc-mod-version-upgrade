@@ -76,6 +76,12 @@ gamemode survival
 @assert execute if items entity @s hotbar.1 minecraft:netherite_sword
 gamemode creative
 
+@step travel to a structure
+# the FLAT preset places villages: /locate finds one, and the player lands on the ground there
+@goto structure #minecraft:village
+@assert execute if entity @e[type=minecraft:villager,distance=..96]
+@shot village
+
 @step death
 kill @s
 @expect chat death.attack within 5s

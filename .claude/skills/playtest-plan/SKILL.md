@@ -91,8 +91,13 @@ progression from its first stage to its last?
    Write the map into `PLAN.md` as its own section, stage by stage.
 3. **One script, `NN-story.playtest`.** One step per stage, each gated on the stage's advancement:
    `@assert execute if entity @s[advancements={<ns>:<id>=true}]`.
-   - The world is `@world normal` when a stage needs worldgen.
-   - Travel is a teleport; the stage's mechanic never is.
+   - Travel to a structure is `@goto structure <id or #tag> [in <dimension>]` (vanilla `/locate`, then the player on the
+     ground there); the stage's mechanic never is a command.
+   - **`/place structure` does not do.** It builds the blocks but registers no structure, so a mod's "inside the
+     structure" checks (and vanilla's location advancements) never fire there. Only a naturally generated one counts.
+   - The world: vanilla's superflat (the default `@world flat`) generates villages and strongholds in the overworld,
+     and the Nether and the End generate normally, mods' structures included. A stage whose structure only the
+     normal overworld generates needs `@world normal`, or is a named step saying why it is not reached.
    - A stage the script cannot reach is a `@step` that says why (`# needs a village: not scriptable here`), not a
      silent skip.
    - Rank it alongside the technical scenarios: it counts as one of the N.
