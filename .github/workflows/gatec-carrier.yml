@@ -131,16 +131,16 @@ jobs:
             --mc "${{ matrix.v.mc }}" --neo "${{ matrix.v.neo }}" --expect-log "latest.log:smokeharness: loaded" \
             --work-dir "$RUNNER_TEMP/server" --cache-dir "$RUNNER_TEMP/server-cache"
       - name: The ${{ matrix.v.mc }} client runs the gauntlet (Xvfb)
-        run: python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode gauntlet --timeout 1500
+        run: python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode gauntlet --timeout 600
       - name: The ${{ matrix.v.mc }} client runs the vanilla playtest (PASS required)
         if: ${{ !cancelled() }}
         run: |
-          python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode playtest --timeout 1500 \
+          python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode playtest --timeout 300 \
             --playtest templates/gatec-carrier/playtests/vanilla.playtest --expect-event 'death at step [0-9]+: death\.attack'
       - name: The ${{ matrix.v.mc }} client reports the failing playtest as FAIL (step 2 FAIL, step 3 skipped)
         if: ${{ !cancelled() }}
         run: |
-          python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode playtest --timeout 1500 \
+          python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode playtest --timeout 300 \
             --playtest templates/gatec-carrier/playtests/vanilla-fail.playtest --expect fail --expect-steps PASS,FAIL,SKIPPED
       - uses: actions/upload-artifact@v4
         with:
