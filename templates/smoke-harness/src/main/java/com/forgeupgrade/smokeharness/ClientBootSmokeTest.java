@@ -7,7 +7,8 @@
 // validates client LOAD + world creation. There is deliberately NO OPEN_GUIS gauntlet step: we can't
 // know an arbitrary jar's Screen classes at compile time.
 //
-// Modes (via -Ptestmode / smokeharness.testmode): LAUNCH | SPAWN | BATTLE | GAUNTLET | CENSUS. Prints
+// Modes (via -Ptestmode / smokeharness.testmode): LAUNCH | SPAWN | BATTLE | GAUNTLET | CENSUS | PLAYTEST (a script of
+// commands and directives, -Dsmokeharness.playtest=<file>: PlaytestRunner). Prints
 // "SMOKEHARNESS_BOOT_TEST: PASS" and exits 0 on success (the marker tools/client-boot-loop.sh greps for), through the
 // game's logger: on the console and in logs/latest.log.
 package com.forgeupgrade.smokeharness;
@@ -83,7 +84,7 @@ public class ClientBootSmokeTest {
         LOG.info(line);
     }
 
-    private enum Mode { LAUNCH, SPAWN, BATTLE, GAUNTLET, CENSUS }
+    private enum Mode { LAUNCH, SPAWN, BATTLE, GAUNTLET, CENSUS, PLAYTEST }
 
     private static final boolean ENABLED = "true".equals(System.getProperty(P + "boottest"));
     private static final Mode MODE = resolveMode();
@@ -97,13 +98,19 @@ public class ClientBootSmokeTest {
         ? Math.max(60, Integer.getInteger(P + "battleticks", 600)) : 200;
     private static final int LOAD_TIMEOUT_TICKS = 20 * 180;
 
-    private enum Phase { WAIT_TITLE, WAIT_INGAME, SURVIVE, GAUNTLET, DONE }
+    private enum Phase { WAIT_TITLE, WAIT_INGAME, SURVIVE, GAUNTLET, PLAYTEST, DONE }
     private static Phase phase = Phase.WAIT_TITLE;
     private static int ticks = 0;
 
     private static int gauntletStep = 0;
     private static int gauntletStepTicks = 0;
     private static boolean gauntletEntered = false;
+
+    /** PLAYTEST: the script (-Dsmokeharness.playtest), where its results go (.out) and the world to load or make (.world). */
+    private static final String PLAYTEST_SCRIPT = System.getProperty(P + "playtest");
+    private static final String PLAYTEST_OUT = System.getProperty(P + "playtest.out");
+    private static final String PLAYTEST_WORLD = System.getProperty(P + "playtest.world");
+    private static PlaytestRunner playtest;
 
     private static final List<Mob> teamA = new ArrayList<>();
     private static final List<Mob> teamB = new ArrayList<>();
@@ -140,11 +147,13 @@ public class ClientBootSmokeTest {
                 case WAIT_INGAME -> waitIngame(mc);
                 case SURVIVE -> survive(mc);
                 case GAUNTLET -> gauntlet(mc);
+                case PLAYTEST -> playtestTick(mc);
                 default -> { }
             }
         } catch (Throwable t) {
             say(TAG + ": FAIL — smoke test threw in phase " + phase + ": " + t);
             t.printStackTrace();
+            if (playtest != null) playtest.abort("the harness threw in phase " + phase + ": " + t);
             finish(mc);
         }
     }
@@ -164,6 +173,10 @@ public class ClientBootSmokeTest {
             finish(mc);
             return;
         }
+        if (MODE == Mode.PLAYTEST) {
+            startPlaytest(mc);
+            return;
+        }
         String levelName = "smoke-" + System.currentTimeMillis();
         say(TAG + ": [" + MODE + "] reached title — creating world '" + levelName + "' (namespaces=" + NAMESPACES + ")…");
         createFreshWorld(mc, levelName);
@@ -171,6 +184,11 @@ public class ClientBootSmokeTest {
     }
 
     private static void createFreshWorld(Minecraft mc, String levelName) {
+        createFreshWorld(mc, levelName, WorldOptions.defaultWithRandomSeed(), WorldPresets::createNormalWorldDimensions);
+    }
+
+    private static void createFreshWorld(Minecraft mc, String levelName, WorldOptions options,
+                                         Function<RegistryAccess, WorldDimensions> dimensions) {
         // Laid out one argument per line, as in templates/neoforge-mod/test-templates/ClientBootSmokeTest.java.example:
         // the per-version harness rename tables (templates/upstream-harness/versions) anchor on this shape, and
         // tools/gatec-carrier.py applies them to this file to build the carrier for every Minecraft version.
@@ -183,10 +201,62 @@ public class ClientBootSmokeTest {
             new GameRules(),
             WorldDataConfiguration.DEFAULT
         );
-        Function<RegistryAccess, WorldDimensions> dimensions = WorldPresets::createNormalWorldDimensions;
         mc.createWorldOpenFlows().createFreshLevel(
-            levelName, settings, WorldOptions.defaultWithRandomSeed(), dimensions, new TitleScreen()
+            levelName, settings, options, dimensions, new TitleScreen()
         );
+    }
+
+    /** PLAYTEST at the title screen: read the script, then load the named world or make a fresh one (flat by default). */
+    private static void startPlaytest(Minecraft mc) {
+        java.nio.file.Path gameDir = mc.gameDirectory.toPath();
+        if (PLAYTEST_SCRIPT == null || PLAYTEST_SCRIPT.isBlank()) {
+            java.nio.file.Path res = PlaytestRunner.failEarly(null, PLAYTEST_OUT, gameDir, "no script: set -D" + P + "playtest=<file>");
+            say(TAG + ": FAIL — testmode=playtest needs -D" + P + "playtest=<absolute path to a .playtest file> (" + res + ")");
+            finish(mc);
+            return;
+        }
+        try {
+            playtest = PlaytestRunner.load(PLAYTEST_SCRIPT, PLAYTEST_OUT, gameDir);
+        } catch (Exception e) {
+            java.nio.file.Path res = PlaytestRunner.failEarly(PLAYTEST_SCRIPT, PLAYTEST_OUT, gameDir, "script: " + e.getMessage());
+            say(PlaytestRunner.TAG + ": FAIL -- 0/0 steps (script " + PLAYTEST_SCRIPT + ": " + e.getMessage() + ")");
+            say(TAG + ": FAIL — playtest script " + PLAYTEST_SCRIPT + ": " + e.getMessage() + " (" + res + ")");
+            finish(mc);
+            return;
+        }
+        String world = PLAYTEST_WORLD != null && !PLAYTEST_WORLD.isBlank() ? PLAYTEST_WORLD.trim() : null;
+        Object exists = world == null ? null : PlaytestRunner.R.call(mc.getLevelSource(), "levelExists", world);
+        if (Boolean.TRUE.equals(exists)) {
+            say(TAG + ": [PLAYTEST] reached title — loading world '" + world + "'…");
+            Runnable back = () -> mc.setScreen(new TitleScreen());
+            if (PlaytestRunner.R.call(mc.createWorldOpenFlows(), "openWorld", world, back) == null
+                && PlaytestRunner.R.method(mc.createWorldOpenFlows().getClass(), "openWorld", 2) == null) {
+                throw new IllegalStateException("cannot open world '" + world + "' on this version (no WorldOpenFlows.openWorld)");
+            }
+        } else {
+            String levelName = world != null ? world : "playtest-" + System.currentTimeMillis();
+            say(TAG + ": [PLAYTEST] reached title — creating " + (playtest.flat ? "flat" : "normal") + " world '" + levelName
+                + "' (seed " + playtest.seed + ")…");
+            if (playtest.flat) {
+                createFreshWorld(mc, levelName, new WorldOptions(playtest.seed, false, false), PlaytestRunner::flatDimensions);
+            } else {
+                createFreshWorld(mc, levelName, new WorldOptions(playtest.seed, true, false), WorldPresets::createNormalWorldDimensions);
+            }
+        }
+        transition(Phase.WAIT_INGAME);
+    }
+
+    private static void playtestTick(Minecraft mc) {
+        if (mc.player == null || mc.level == null || mc.getSingleplayerServer() == null) {
+            playtest.abort("the world or the player vanished mid-run (a crash or a disconnect: see the log above)");
+            say(TAG + ": FAIL — " + playtest.summary() + ": the world or the player vanished mid-run");
+            finish(mc);
+            return;
+        }
+        if (playtest.tick(mc)) {
+            say(TAG + ": " + (playtest.passed() ? "PASS" : "FAIL") + " — " + playtest.summary());
+            finish(mc);
+        }
     }
 
     private static void waitIngame(Minecraft mc) {
@@ -199,6 +269,12 @@ public class ClientBootSmokeTest {
             return;
         }
         if (++ticks < INGAME_SETTLE_TICKS) return;
+        if (MODE == Mode.PLAYTEST) {
+            say(TAG + ": [PLAYTEST] in-world — running the script one line per tick…");
+            playtest.begin(mc);
+            transition(Phase.PLAYTEST);
+            return;
+        }
         if (MODE == Mode.CENSUS) {
             // Deliberately NOT a gauntlet step here: the audit's whole value is the report, and running
             // it behind six unrelated stress steps means one crash in someone else's mod costs you the

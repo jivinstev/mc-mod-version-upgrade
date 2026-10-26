@@ -7,7 +7,10 @@
 # It builds every version (the targeted lines of templates/fork-layer/versions.json, each on its own Java: 21 for
 # 1.21.x, 25 for 26.x) and fails if any version does not: build, check the jar's metadata, boot it in a real NeoForge
 # dedicated server of its version (tools/shipped-gate.py) and run it in that version's dev client under Xvfb (the
-# gauntlet phase; PASS required on stdout and in latest.log). Each version's jar is uploaded as artifact gatec-carrier-<mc>.
+# gauntlet phase; PASS required on stdout and in latest.log), then run the vanilla playtest fixtures in that dev client
+# (templates/gatec-carrier/playtests: vanilla.playtest must PASS, vanilla-fail.playtest must FAIL at its second step and skip
+# its third). Each version's jar is uploaded as artifact gatec-carrier-<mc>; the playtests' results, screenshots and logs
+# go in logs-<mc> (playtest-out/).
 #
 # Release: on a push to main whose sources differ from the newest release, once every version built and passed,
 # gatec-carrier-vN (N one past the newest) is published with gatec-carrier-<mc>.jar per version, SHA256SUMS and
@@ -45,7 +48,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Self-check
-        run: python3 tools/gatec-carrier.py --self-check
+        run: |
+          python3 tools/gatec-carrier.py --self-check
+          python3 tools/playtest-lint.py --self-check
       - name: Versions
         id: versions
         run: |
@@ -72,7 +77,7 @@ jobs:
           elif [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch --no-tags origin "${{ github.base_ref }}"
             changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
-            if grep -qE '^(\.github/workflows/gatec-carrier\.yml|tools/gatec-carrier\.py|tools/shipped-gate\.py)$' <<<"$changed"; then
+            if grep -qE '^(\.github/workflows/gatec-carrier\.yml|tools/gatec-carrier\.py|tools/shipped-gate\.py|tools/playtest-lint\.py|templates/gatec-carrier/playtests/.*)$' <<<"$changed"; then
               build=true
             fi
           fi
@@ -127,6 +132,16 @@ jobs:
             --work-dir "$RUNNER_TEMP/server" --cache-dir "$RUNNER_TEMP/server-cache"
       - name: The ${{ matrix.v.mc }} client runs the gauntlet (Xvfb)
         run: python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode gauntlet --timeout 1500
+      - name: The ${{ matrix.v.mc }} client runs the vanilla playtest (PASS required)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode playtest --timeout 1500 \
+            --playtest templates/gatec-carrier/playtests/vanilla.playtest
+      - name: The ${{ matrix.v.mc }} client reports the failing playtest as FAIL (step 2 FAIL, step 3 skipped)
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tools/gatec-carrier.py client-smoke --project "$RUNNER_TEMP/carrier" --mode playtest --timeout 1500 \
+            --playtest templates/gatec-carrier/playtests/vanilla-fail.playtest --expect fail --expect-steps PASS,FAIL,SKIPPED
       - uses: actions/upload-artifact@v4
         with:
           name: gatec-carrier-${{ matrix.v.mc }}
@@ -140,6 +155,7 @@ jobs:
             ${{ runner.temp }}/carrier/client-smoke.log
             ${{ runner.temp }}/carrier/run/client/logs/latest.log
             ${{ runner.temp }}/carrier/run/client/crash-reports/
+            ${{ runner.temp }}/carrier/playtest-out/
             ${{ runner.temp }}/server/server/console.log
             ${{ runner.temp }}/server/server/logs/latest.log
             ${{ runner.temp }}/server/server-failure.log

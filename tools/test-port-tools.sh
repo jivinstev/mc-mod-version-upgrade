@@ -312,6 +312,9 @@ grep -q 'self-check: OK' <<<"$out" && ok "scaffold-gatec: the client harness tem
 out="$(python3 tools/gatec-carrier.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "gatec-carrier: one carrier per stable versions.json line (Java 21/25, JEI pin or the stand-in probe), the smoke harness renamed by the gate harness tables down the versions (1.21.1 verbatim), a jar refused for another version's ranges / newer class files / a lost entry class or contract name / a bundled class, MANIFEST + SHA256SUMS over exactly one jar per version, a release cut only when a version's sources, NeoForge or Java change, and the client verdict required on stdout and in latest.log" \
   || bad "gatec-carrier self-check: $out"
+out="$(python3 tools/playtest-lint.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "playtest-lint: a script using every directive is clean, each malformed line (duration, kind, aim, key, click, header-only directive, regex, shot name) is named with its line, lines before any @step form step main, and the carrier's fixtures lint clean" \
+  || bad "playtest-lint self-check: $out"
 
 for spec in "route.py|route planner: every hop finished before the next, a missing pack or row is said, never guessed" \
             "port.py|port front door: jar metadata, the hoisted-config-SPEC fix" \
