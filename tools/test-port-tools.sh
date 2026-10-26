@@ -21,6 +21,8 @@ echo "0. portable to macOS (bash 3.2, BSD tools, Python 3.9) and Windows -- tool
 # a bare "bash" argv on Windows...): the static check runs on every tracked .py and .sh.
 out="$(python3 tools/check-compat.py --self-check 2>&1)"
 grep -q 'self-check: OK' <<<"$out" && ok "check-compat: each rule fires on its pattern and not on the safe form" || bad "check-compat self-check: $out"
+out="$(python3 tools/playtest.py --self-check 2>&1)"
+grep -q 'self-check: OK' <<<"$out" && ok "playtest: script parse + lint (directives, --jar ids, --forbid), log verdicts, inventory, report and explain" || bad "playtest self-check: $out"
 out="$(python3 tools/check-compat.py 2>&1)"
 grep -q 'check-compat: PASS' <<<"$out" && ok "check-compat: every tracked .py parses as Python 3.9 and no script or tool uses a pattern that breaks macOS or Windows" \
   || bad "check-compat: $out"

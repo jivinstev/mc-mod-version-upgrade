@@ -1,0 +1,66 @@
+---
+name: playtest-write
+description: Write a playtest script from a scenario in plain words -- Minecraft commands for the setup and the world, `@` directives for what a player does (aim, press a key binding, click) and what must be seen or heard (sounds, subtitles, chat, titles, boss bars, screens, assertions), with the scenario's intent and each step's purpose written into the script so a failure can be judged against them. Lints it against the mod's jars and the plan's forbidden ids. With --until-pass it runs and debugs the script in a loop until it passes. Use when the user asks to write, fix or turn a scenario into a playtest script.
+---
+
+# Write a playtest script
+
+**Which fork:** the same for every fork. A script is about the game, not the build: it runs on the installed
+instances (test-installs), whichever branch the jars came from.
+
+The input is one scenario: from a playtest-plan `PLAN.md` row, or from the user in their own words. The output is
+one `.playtest` file (UTF-8). The format is in `tools/playtest.py`'s docstring. In short:
+
+- **A line without `@`** is a Minecraft command, run as the player typing it (the `/` is optional). A command that
+  fails fails its step.
+- **`@intent`** says what the whole script proves. **`@step <name>`** starts a step.
+- **Checks:** `@assert <command>`, `@expect <kind> <match> [gone] [within <N>t|<N>s]`, `@allow error <regex>`.
+- **Player inputs:** `@aim`, `@key`, `@click`.
+- **Flow and evidence:** `@wait`, `@shot`, `@continue-on-fail`, `@end`.
+
+## How to write it
+
+1. **Intent first.** `@intent` is one sentence: what a pass proves. Each `@step` name says what that step is for, in
+   the player's terms ("the wraith's music starts", not "expect 3"). Put a `#` comment above any step whose reason
+   is not obvious: why this wait, why this aim. playtest-debug judges a failure against these.
+2. **Only real ids.** Take every `<namespace>:<id>` from `python3 tools/playtest.py inventory --jar MOD.jar`.
+   - Entities, items and blocks come from their lang keys.
+   - Sounds come from `sounds.json`: a sound expectation matches the **sound event id** (`examplemod:boss_music`).
+   - Subtitles match the **lang key** or its English text.
+   - The plan's `forbid` ids are never named.
+3. **Set the world up with commands, and do the thing the way a player would.**
+   - Commands set the world up: `gamemode`, `difficulty`, `time set`, `weather clear`, `tp`, `summon`, `give`,
+     `effect`, `kill @e[type=...]`.
+   - The feature under test is driven through player input: `@aim entity <type>`, then `@key key.attack`. A
+     `/damage` or `/kill` on the boss proves nothing about the sword.
+   - Use `gamerule doImmediateRespawn true` before a death the script wants to survive (the carrier respawns the
+     player anyway).
+4. **Make each check observable and bounded.**
+   - Every `@expect` has a `within` sized to the behaviour: music within 10s of a summon, not 2s. `gone` checks that
+     something stopped.
+   - `@assert execute if entity @e[type=X]` (or `unless`) checks that something exists or died.
+   - For a player death, `@assert execute if entity @s[nbt={DeathTime:...}]` is fragile. Prefer
+     `@expect chat <death message key or text> within 10s`, or the respawn screen with `@expect screen`.
+5. **Contain the noise.** Summon near the player but not inside them (`~ ~ ~4`). Clear other mobs before a fight. Set
+   `difficulty` before it matters. Kill leftovers in the next step's setup, not by luck.
+6. **Evidence.** Put a `@shot` at the moment a human would want to see: the boss on screen, the item in hand, the
+   death screen. Every step's end and every failure is captured anyway.
+
+Then lint it:
+
+```bash
+python3 tools/playtest.py lint SCRIPT --jar MOD.jar [--jar DEP.jar ...] [--forbid NS:ID ...]
+```
+
+Fix until it says PASS. A misspelt id, a bad duration and an unknown directive each name their line.
+
+## `--until-pass`
+
+Run (`playtest-run` on one fast version, then the newest), and on a FAIL run `playtest-debug`. Apply its verdict:
+
+- **The script is wrong:** fix the line it names and run again.
+- **The mod is wrong:** stop and report it as a finding. The script stays as written, and the user decides.
+- **The carrier cannot do it** (a directive it lacks, an input it cannot drive): say so, and propose the carrier
+  change. Do not work around it with a command that bypasses the behaviour under test.
+
+Stop after 5 rounds without progress. Report each round's change and why.

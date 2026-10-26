@@ -151,6 +151,61 @@ it. To use it by hand, put the jar for your version in an instance's `mods/` and
 newest release by default, checked against SHA256SUMS. `--carrier-release TAG` picks another release,
 `--carrier-dir DIR` takes a folder of jars (such as a CI artifact), and `--carrier-jar [MC=]JAR` takes one jar.
 
+## Playtests: scripted play in the real game
+
+The boot test and the Gate C phases prove that a port loads and survives a fight. A **playtest** proves that the
+mod does what a player expects: the boss's music starts when it is summoned and stops when it dies, the signature
+sword kills it in one hit, a narration line appears. A playtest is a script that runs in the same real-client
+instances as test-installs, on every installed version, through the Gate C carrier's `playtest` mode
+(`-Dsmokeharness.testmode=playtest -Dsmokeharness.playtest=<script>`). Scripts belong to the mod, never to this
+repository. Keep them in `playtests/` at the root of the fork's port branch, or anywhere private.
+
+A script (`.playtest`, UTF-8) is Minecraft commands plus `@` directives:
+
+```
+@intent The boss's music plays while it lives and stops when the sword kills it
+@step setup
+gamemode survival
+difficulty normal
+@step summon the boss
+summon examplemod:boss ~ ~ ~5
+@expect sound examplemod:boss_music within 10s
+@step kill it with the sword
+give @s examplemod:blade
+@aim entity examplemod:boss
+@key key.attack
+@assert execute unless entity @e[type=examplemod:boss]
+@expect sound examplemod:boss_music gone within 10s
+@shot after the kill
+```
+
+A command that fails fails its step. The directives are:
+
+- `@intent` and `@step <name>`;
+- checks: `@assert <command>`, and `@expect sound|subtitle|chat|title|actionbar|bossbar|screen|error <match> [gone]
+  [within 10s]`;
+- player inputs: `@aim entity|pos|look`, `@key <key mapping> [hold 5t]`, `@click slot N | button "text"`;
+- control and evidence: `@wait`, `@allow error <regex>`, `@shot <name>`, `@continue-on-fail` and `@end`.
+
+The carrier takes a frame at each step's end and wherever a step fails, and respawns the player after a death.
+
+There are four skills, each driving `tools/playtest.py`:
+
+- **playtest-plan** reads what the mod's jars register (`playtest.py inventory`) and recommends the top N scenarios
+  (default 10) by distinct code paths reached. The user's own must-cover list comes first, and their never-touch ids
+  become a `--forbid` list. With `--build` it writes, runs and debugs each scenario in a loop until the script is
+  right or the failure is shown to be the mod's.
+- **playtest-write** turns one scenario into a script. It writes the intent and each step's purpose into the script,
+  and lints it against the jars and the forbid list (`playtest.py lint`). With `--until-pass` it runs and debugs the
+  script in a loop.
+- **playtest-run** runs a script on each installed version, one at a time, and grades every step. It writes
+  `report.md` and a self-contained `report.html` with the frames, to publish as a Claude Code artifact. `--video`
+  records the screen; on macOS the first recording asks for Screen Recording permission.
+- **playtest-debug** reads one failed run (`playtest.py explain`) against the script's intent and says whose failure
+  it is: the script's, the carrier's or the mod's. It gives the fix or the finding.
+
+On macOS the game window needs the user's session on the console with the screen unlocked.
+
 ## Skills: in Claude Code, or from the command line
 
 Each job is a Claude Code skill, so inside `claude` (started in this folder) you can either ask in plain words
@@ -179,6 +234,10 @@ In short -- what to ask, and the command it runs (the full detail is in the tabl
 | **keep-current** | `> Keep my forks current` / `> Set up the weekly round` | setup: `python3 tools/weekly-plan.py install --repo DIR --fork owner/repo@neoforge-1.21.1[=URL#BRANCH] --plan-owner LOGIN [--allow WHAT ...]` and `weekly-plan.py round-task --existing NAME ...`; the round: `python3 tools/known-issues.py read-plan --latest --slug owner/repo`, then, for every fork set (single-version, version-branch or mixed), its driver: `python3 tools/round.py init --frozen round/frozen.json --fork owner/repo=DIR ...` (it checks each selected fix below its version first, `python3 tools/known-issues.py lowest --repo DIR --ref origin/HEAD_BRANCH [ID ...]`; a pattern hit or a file present lower goes to one `lowest` agent job that confirms it, and a confirmed lower version moves the fix down only when that reopens no done version -- an S1, or versions with work this round anyway -- else it is recorded in the ledger for the next plan) and `python3 tools/round.py drive` until it prints `ROUND DONE` (each AGENT JOB it prints goes to a fresh subagent, then `round.py record ID --summary FILE`; `round.py status`, `round.py resume` after a restart; each ticked dependency update is applied once by it: `python3 tools/layer-deps.py resolve --repo DIR --target MC --bump DEP=VERSION`; each version behind this repository's shared library is synced by it: `python3 tools/fork-branches.py sync-shared --repo DIR --target V`, what it would change read first with `python3 tools/fork-branches.py sync-shared --repo DIR --check [--json FILE]`); a single-version fork's done list, its records in `.port/<mc>/`: `python3 tools/fork-branches.py check-done --repo DIR --target MC [--base REF]`; its lessons, harvested here afterwards: `python3 tools/propose-learnings.py --from-plan owner/repo#N` |
 | **publish-port** | `> Publish my fork on Modrinth and CurseForge` | `python3 tools/port-publish.py setup --repo DIR --permission URL`; CI: `port-publish.py publish --tag TAG [--platform mr\|cf]` |
 | **test-installs** | `> Test my forks' releases on real installs of every version` | `python3 tools/real-install.py plan --fork owner/Lib --fork owner/Mod --all-versions --prerelease`, then `real-install.py install [--profiles] [--with-carrier]` and `real-install.py test` |
+| **playtest-plan** | `> Plan playtests for my mod and build them` | `python3 tools/playtest.py inventory --jar MOD.jar`, then playtest-write, -run and -debug per scenario |
+| **playtest-write** | `> Write a playtest: summon the boss, kill it with the sword` | `python3 tools/playtest.py lint SCRIPT --jar MOD.jar [--forbid NS:ID]` |
+| **playtest-run** | `> Run the playtests on every installed version, with video` | `python3 tools/playtest.py run SCRIPT [--mc V] [--video]` |
+| **playtest-debug** | `> Why did that playtest fail?` | `python3 tools/playtest.py explain REPORT_DIR [--mc V]` |
 | **review-contribution** | `> Review PR 42` | `python3 tools/review-pr.py --base origin/main --head HEAD` |
 
 **The weekly cycle (keep-current).** Every Tuesday at 08:00 Pacific a GitHub Actions workflow on the fork
@@ -257,6 +316,10 @@ re-install rebuilds the config from its flags and warns, naming the flag, for ea
 | **install-mod**: install a mod and its dependencies from Modrinth or CurseForge | `> Install Sodium` or `/install-mod Sodium` | `python3 tools/guard-names.py ensure --jar JAR` for each jar it migrates, then `python3 tools/mod-registry/modreg.py search --query "Sodium"`, then `versions`, `deps` and `download` (`ports --name "Sodium"` finds a native port on another project when the mod's own has none) (see [tools/mod-registry/README.md](tools/mod-registry/README.md)) |
 | **install-mod**: install fork ports from GitHub, with their dependencies and NeoForge | `> Install these mods from owner/RepoA owner/RepoB` or `/install-mod owner/RepoA owner/RepoB` | `python3 tools/install-port.py owner/RepoA owner/RepoB [--with-optional | --with-untested] [--dry-run] [--replace] [--mods-dir DIR]` (installs the files each port's manifest names, which CI tested together; when a manifest names an older release than the fork's newest full Release, the output opens with `NOT THE NEWEST RELEASE` naming both); one version of a fork of version branches: `owner/repo@neoforge-<mc> --mc <mc>` (that branch's own manifest), then optionally `tools/boot-mods.sh DIR` to boot the folder headless first |
 | **test-installs**: test fork ports' released jars on real Launcher installs of every version they support -- NeoForge installed headless, one instance per version (optionally a Launcher profile each and the Gate C carrier), a boot test and the Gate C phases per version, no Gradle | `> Test my forks' releases on real installs of every version` or `/test-installs owner/Lib owner/Mod` | `python3 tools/real-install.py plan --fork owner/Lib --fork owner/Mod (--mc 1.21.1 ... \| --all-versions) [--prerelease] [--variant mr\|cf] [--prefer-pins] [--with-carrier [--carrier-release TAG \| --carrier-dir DIR \| --carrier-jar [MC=]JAR]] [--margin-gb 5]` (read-only; prints jars, sizes and the disk check), then `real-install.py install [--profiles] [--use-installed] [--dry-run]` and `real-install.py test [--phases launch,spawn,battle,gauntlet] [--boot-only] [--timeout 300] [--phase-timeout 900] [--report DIR]` (exit 0 only when every boot and phase passed) |
+| **playtest-plan**: recommend the top N (default 10) playtest scenarios by distinct code paths reached, grounded in what the mod's jars register, with the user's must-cover list first and their never-touch ids forbidden; `--build` writes, runs and debugs each one in a loop | `> Plan playtests for my mod and build them` or `/playtest-plan --build` | `python3 tools/playtest.py inventory --jar MOD.jar [--jar DEP.jar ...] [--json]` (entities, items, blocks, sound events, lang keys by kind, data files per namespace) |
+| **playtest-write**: turn a scenario into a `.playtest` script (Minecraft commands plus `@` directives) with its intent and each step's purpose; `--until-pass` runs and debugs it in a loop | `> Write a playtest: summon the boss, kill it with the sword` or `/playtest-write` | `python3 tools/playtest.py lint SCRIPT [--jar JAR ...] [--forbid NS:ID ...]` (directives and durations; with `--jar`, every id the mod's namespace names must be registered) |
+| **playtest-run**: run a playtest in the real client of each installed version (test-installs' instances, the Gate C carrier's `playtest` mode), grade each step, take key frames, optionally record the screen, and write an HTML report to publish as an artifact | `> Run the playtests on every installed version, with video` or `/playtest-run SCRIPT` | `python3 tools/playtest.py run SCRIPT [--plan PLAN] [--mc V ...] [--video] [--carrier-dir DIR \| --carrier-jar [MC=]JAR] [--timeout 900] [--report DIR]` (exit 0 only when every version passed) |
+| **playtest-debug**: explain a failed playtest against the script's intent -- the script's, the carrier's or the mod's failure, with the fix or the finding | `> Why did that playtest fail?` or `/playtest-debug REPORT_DIR` | `python3 tools/playtest.py explain REPORT_DIR [--mc V]` (the failed step's lines, observations, frames and log tails, as JSON) |
 | **migrate-mod**: port a mod from its jar | `> Migrate <mod name> to 26.2` or `/migrate-mod <mod name> to 26.2` | `python3 tools/guard-names.py ensure --mod-repo DIR` or `--jar JAR` first (the mod and every fork it depends on), then `python3 tools/port.py "<mod name or jar>" --to 26.2` (rerun to resume; `--from-port mods/<modid>` to continue a finished port) |
 | **port-fork**: port a mod in its own GitHub fork, with CI, releases and an offer | `> Port my fork <github url> to 1.21.1` or `/port-fork <github url>` | `python3 tools/guard-names.py ensure --mod-repo DIR` or `--jar JAR` first (the mod and every fork it depends on), then `python3 tools/port-upstream.py --repo DIR --modid ID` (the port; its build stage moves each dependency the authors pinned for another version to the target's build, and keeps one already pinned to a target build), `python3 tools/layer-deps.py resolve --repo DIR --target MC --bump DEP[=VERSION] [--bump-all]` (the only way a single-version fork's pinned CurseForge/Modrinth dependency moves: its build.gradle coordinate, or the gradle.properties key that coordinate's version reads, rewritten; `layer-deps.py updates --repo DIR` lists what a bump would take), `tools/ci-gates.py` (gates as CI runs them, `--env full` or `minimal`; `--shipped` adds the shipped-jar row, booting the jar `.port/<mc>/shipped-jar.txt` names, else the only one built; `--gatec none` skips Gate C), `tools/shipped-gate.py --repo DIR --jar BUILT.jar [--mc T --neo V] [--expect-log FILE:REGEX] [--variant cf] [--settle 10]` (boots the built jar in a real NeoForge server's `mods/`, as a player installs it, and checks the mod's own logs -- dev gates run from the class path and cannot see a subsystem that is inert when shipped; with no `--expect-file` the expectations come from `.port/<mc>/shipped-expect-<variant>.txt`, else `.port/<mc>/shipped-expect.txt`, on every kind of fork, none when there is no such file; the server runs `--settle` seconds after "Done" before `stop`, and a crash report, `crash-reports/` file or exit before `stop` fails it), `tools/port-ci.py` (adds the CI, triggered on the checked-out branch -- on a version branch, a checkout holding `.port/<mc>/` for its own version, on `neoforge-<mc>` whichever branch is checked out; `--branch NAME` names another; `--tag-suffix=-release` for a release branch; `--variant-jar GLOB` boots each platform jar the build ships; `--dep-jar-variant SPEC` adds a gates leg on a dependency's other platform jar; `port-ci.py args --repo DIR` prints the command an installed workflow was generated with; `port-ci.py check --repo DIR [--kit-version N]` warns, exit 0, when it pins an older kit or ignores no round records, and prints the command that regenerates it at the newest kit), `tools/port-offer.py` (the offer, install manifest and manual tests; `--release` adds the distance from release; `--push` commits the install manifest, `port-install.json` in the fork's `.github` folder, to the port branch), `tools/port-manifest.py refresh --repo DIR [--tag TAG] [--variant SUBSTRING] [--check] [--commit]` (points that manifest at the newest full Release -- the same platform jar -- and at the sibling jars the workflow pins, sha256 recomputed, every other entry untouched; prints `unchanged` when it is current; refuses, writing nothing, when there is no manifest or the jar cannot be chosen or fetched; run it after a re-pin, since only a promotion through Port CI refreshes it by itself), `tools/port-fleet.py --fleet FILE <step>` (every fork at once) |
 | **port-fork**: promote a played pre-release to a full Release | `> Promote my fork's release, I played it` | `python3 tools/port-ci.py promote --fork owner/repo --tag TAG --played-by LOGIN [--notes "..."] [--with-dependency owner/lib]` (best effort, read with `gh api` or from a local clone (`--repo DIR`), else a note: refuses while a dependency release the branch's workflow pins is still a pre-release -- a dependent may cut pre-releases on a dependency's pre-release, never be promoted ahead of it -- unless `--with-dependency` names each one promoted together with it; dispatches the fork's Port CI workflow; prints the dispatch when `gh` is not logged in; on the port branch, that run then refreshes the install manifest with `tools/port-manifest.py` in a `[skip ci]` commit when the branch has one) |
