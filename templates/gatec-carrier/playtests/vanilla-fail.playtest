@@ -1,0 +1,13 @@
+# The Gate C carrier's failing playtest fixture: CI requires the run to FAIL at step 2 naming line 10, and step 3
+# SKIPPED (no @continue-on-fail).
+@intent a failing @assert is reported as FAIL with its line, and the steps after it are skipped
+
+@step passes
+say playtest-ok
+@expect chat playtest-ok within 5s
+
+@step fails on purpose
+@assert execute if entity @e[type=minecraft:ender_dragon]
+
+@step never runs
+say playtest-unreachable

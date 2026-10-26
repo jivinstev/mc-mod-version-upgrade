@@ -7,6 +7,7 @@
 //
 //   ./gradlew build                                    -> build/libs/gatec-carrier-@MINECRAFT@.jar
 //   ./gradlew runClient -Psmokeharness.boottest=true -Psmokeharness.testmode=launch   (a dev client, for checking)
+//   ./gradlew runClient -Psmokeharness.boottest=true -Psmokeharness.testmode=playtest -Psmokeharness.playtest=/abs/x.playtest
 plugins {
     id 'java'
     id 'net.neoforged.moddev' version '@MDG@'
@@ -36,7 +37,8 @@ neoForge {
             client()
             gameDirectory = project.file('run/client')
             // -Psmokeharness.<key>=<value> -> -Dsmokeharness.<key>=<value>, the carrier's whole interface
-            ['boottest', 'testmode', 'namespaces', 'battlecount', 'battleticks', 'jeirecipes', 'jeiverify'].each { k ->
+            ['boottest', 'testmode', 'namespaces', 'battlecount', 'battleticks', 'jeirecipes', 'jeiverify',
+             'playtest', 'playtest.out', 'playtest.world'].each { k ->
                 if (project.hasProperty("smokeharness.${k}")) {
                     systemProperty "smokeharness.${k}", project.property("smokeharness.${k}").toString()
                 }
