@@ -55,6 +55,8 @@ effect give @e[tag=playtest] minecraft:fire_resistance infinite 0 true
 @wait 40t
 @assert execute unless entity @e[tag=playtest]
 @expect sound entity.zombie.* gone within 5s
+# the zombie is dead: a repeated strike passes as "nothing to aim at" instead of failing
+@aim entity @e[tag=playtest,limit=1] if-present
 
 @step inventory
 @key key.inventory

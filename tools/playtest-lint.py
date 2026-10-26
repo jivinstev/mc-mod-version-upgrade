@@ -11,7 +11,8 @@ The grammar (one line at a time; blank lines and '# comments' are ignored):
     @intent <text>                 the script's intent (in the header) or the step's (inside a step)
     @step <name>                   starts a step; lines before the first @step form step "main"
     @wait <N>t | <N>s              ticks or seconds (a second is 20 ticks)
-    @aim entity <type id | selector> | @aim pos <x> <y> <z> (~ relative) | @aim look <yaw> <pitch>
+    @aim entity <type id | selector> [if-present] | @aim pos <x> <y> <z> (~ relative) | @aim look <yaw> <pitch>
+                                   (if-present: no such entity passes -- a repeated strike after the kill)
     @key <mapping name> [hold <duration>]   a key mapping by name (key.attack, key.hotbar.1, a mod's own), or a raw
                                    key by its name (key.keyboard.escape, key.mouse.left); default hold 2t
     @click slot <N> | @click button "<text>"
@@ -157,13 +158,13 @@ def self_check():
     good = "\n".join([
         "# header", "@intent prove it", "@world flat seed=3", "@continue-on-fail", "@allow error Narrator",
         "@step one", "/say hi", "@expect chat hi within 5s", "@wait 10t", "@wait 1.5s",
-        "@aim entity minecraft:zombie", "@aim entity @e[type=zombie,limit=1]", "@aim pos ~ ~1 10", "@aim look 90 -10",
+        "@aim entity minecraft:zombie", "@aim entity @e[type=zombie,limit=1]", "@aim entity minecraft:zombie if-present", "@aim pos ~ ~1 10", "@aim look 90 -10",
         "@key key.attack", "@key key.forward hold 20t", "@click slot 36", '@click button "Done"',
         "@expect sound entity.zombie.* gone within 2s", "@expect subtitle /zombie (hurts|groans)/", "@expect error gone",
         "@expect screen none", "@shot after-fight", "@assert execute if entity @s", "@step two", "@allow error Foo.*", "@end",
         "@not-a-directive after end is ignored"])
     p, s = lint(good)
-    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 18, f"a script using every directive is clean: {p} {s}")
+    expect(p == [] and s["steps"] == ["one", "two"] and s["lines"] == 19, f"a script using every directive is clean: {p} {s}")
     for bad, want in (("@step a\n@wait 10", "a duration"), ("@step a\n@expect smell roses", "unknown @expect kind"),
                       ("@step a\n@aim at zombie", "@aim entity|pos|look"), ("@step a\n@key key.use hold", "@key <key"),
                       ("@step a\n@click 3", "@click slot"), ("@step a\n@world flat", "header"),

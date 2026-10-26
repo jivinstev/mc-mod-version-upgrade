@@ -238,8 +238,11 @@ final class PlaytestRunner {
                 String rest = a.length > 1 ? a[1].trim() : "";
                 switch (a[0]) {
                     case "entity":
-                        if (rest.isEmpty()) throw new ScriptError(no, "@aim entity <type id or selector>");
-                        return new AimOp(no, text, "entity", rest, null);
+                        if (rest.isEmpty()) throw new ScriptError(no, "@aim entity <type id or selector> [if-present]");
+                        boolean ifPresent = rest.endsWith(" if-present");
+                        AimOp op = new AimOp(no, text, "entity", ifPresent ? rest.substring(0, rest.length() - 11).trim() : rest, null);
+                        op.ifPresent = ifPresent;
+                        return op;
                     case "pos": {
                         String[] c = rest.split("\\s+");
                         if (c.length != 3) throw new ScriptError(no, "@aim pos <x> <y> <z>");
@@ -399,6 +402,7 @@ final class PlaytestRunner {
         volatile List<double[]> found;       // selector results from the server: {id, x, y, z}
         volatile String serverError;
         int waited;
+        boolean ifPresent;      // "@aim entity X if-present": no X is a pass (a repeated strike after the kill)
         AimOp(int no, String text, String how, String arg, String[] nums) { super(no, text); this.how = how; this.arg = arg; this.nums = nums; }
 
         @Override Res start(PlaytestRunner r, Minecraft mc) throws Exception {
@@ -435,6 +439,7 @@ final class PlaytestRunner {
                 if (near.size() < 6 && !near.contains(id)) near.add(id);
                 if (id.equals(want) && d < bestSq) { best = e; bestSq = d; }
             }
+            if (best == null && ifPresent) { r.aimed = null; return pass("no " + want + " within 64 blocks: nothing to aim at (if-present)"); }
             if (best == null) return fail("no " + want + " within 64 blocks (near: " + (near.isEmpty() ? "nothing" : String.join(", ", near)) + ")");
             return r.aimAt(mc, best);
         }
@@ -452,6 +457,7 @@ final class PlaytestRunner {
                 double d = ce.distanceToSqr(p);
                 if (d <= 64.0 * 64.0 && d < bestSq) { best = ce; bestSq = d; }
             }
+            if (best == null && ifPresent) { r.aimed = null; return pass("selector " + arg + ": nothing to aim at (if-present)"); }
             if (best == null) return fail("selector " + arg + " matched " + f.size() + " entit(ies), none within 64 blocks of the player");
             return r.aimAt(mc, best);
         }

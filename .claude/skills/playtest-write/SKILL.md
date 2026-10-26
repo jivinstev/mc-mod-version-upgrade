@@ -59,7 +59,8 @@ Each of these failed a real run:
   @e[type=X]`.
 - **Melee needs reach**, 3 blocks for a survival player. Summon a boss further away so its entrance and music get room,
   then bring it to the player before the hit: `execute at @s rotated as @s run tp @e[type=X,limit=1,sort=nearest] ^ ^
-  ^2`, `@aim entity X`, `@key key.attack`. The carrier fails an out-of-reach attack and gives the distance.
+  ^2`, `@wait 5t` (the client sees the move a few ticks after the server makes it, and `@aim` reads the client), `@aim
+  entity X`, `@key key.attack`. The carrier fails an out-of-reach attack and gives the distance.
 - **Put the tool in hand.** `/give` fills the first free slot, and after a respawn picked-up loot can be in the
   selected one (measured: a boss took a fist's damage from a "one-shot" sword run). Use `item replace entity @s
   weapon.mainhand with X` right before the step that swings or uses it.
@@ -77,6 +78,8 @@ Each of these failed a real run:
   nothing and fails its line.
 - **Bosses can shrug off `/kill`.** A mod that keeps its own health value can report "Killed" and leave the entity
   standing. Remove a boss through the mod's own path (its weapon), or move the player out of range.
+- **Freeze a mob before the kill step when its own fight is already proven.** A dashing mob leaves reach between
+  the `tp` and the hit. `execute as @e[type=X] run data merge entity @s {NoAI:1b}` keeps it there.
 - **Wait out death animations.** A boss with a long death (a `getDeathAnimationDuration`, say 160 ticks) is "dying"
   until it ends. It is then invisible to `@e` and refuses interaction. Wait the remaining ticks before the next step.
 - **The inventory is a hint, not a promise.** It reads lang keys, and a mod names items there that it registers only
