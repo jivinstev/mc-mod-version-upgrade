@@ -236,6 +236,10 @@ def run_version(R, plan, v, script, out, a, plat, log):
         res["verdict"], res["detail"] = m.group(1), m.group(2).strip()
     elif crash:
         res["detail"] = f"the game crashed ({crash}) before the playtest finished"
+    elif "glfwGetPrimaryMonitor failed" in text + err:
+        # measured: the display slept between two runs -- the game never opened a window; not the mod, not the script
+        res["detail"] = ("the display was asleep or the screen locked (glfwGetPrimaryMonitor failed): keep the screen "
+                         "awake and unlocked, and run it again")
     else:
         res["detail"] = (R.native_crash(err + "\n" + text) or
                          (f"no verdict within {a.timeout}s" if secs >= a.timeout else f"the game exited ({rc}) before a verdict"))

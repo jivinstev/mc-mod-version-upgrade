@@ -41,6 +41,11 @@ classes behind the ids a scenario relies on before promising a behaviour:
 - an item's `hurtEnemy` or `use` (a one-shot weapon, a right-click attack);
 - an entity's `tick`, `die` and `hurt` (boss music, a narration on death, an entity that refuses to die);
 - the client handlers that play music or subtitles.
+- **the registration itself:** an id with a lang key can still be registered only when a companion mod is present
+  (an `if (CompatCheck...)` around the `register` call). Plan only ids registered unconditionally, or say which
+  companion mod the scenario needs.
+- **what the scenario expects to see:** a boss bar needs a `ServerBossEvent` in the entity, and music needs the
+  handler that plays it. Do not promise either from the entity's name alone.
 
 ## 3. Choose the scenarios
 

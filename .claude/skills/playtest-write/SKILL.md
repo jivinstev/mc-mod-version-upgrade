@@ -66,6 +66,19 @@ Each of these failed a real run:
 - **Immediate respawn skips the death screen**, and the carrier turns it on. Expect the death message instead:
   `@expect chat death.attack within 60s`. Protect the player before the step after a death (Resistance V,
   `effect give @s minecraft:resistance 120 4 true`), or the same mobs kill it again on respawn.
+- **`@e` sees only living entities.** A boss revived as an NPC, or one the mod keeps in a death state, can stand
+  in plain view while `execute if entity @e[type=X]` says no. To show it is still there, aim by type id (`@aim entity
+  X` reads the client's world) and interact with it (`@key key.use`, then `@expect screen /./`).
+- **A raw key has a name too.** Close a screen with `@key key.keyboard.escape`. No key mapping is called
+  `key.escape`.
+- **Find where the message goes.** `displayClientMessage(msg, true)` is the action bar and `false` is chat.
+  `sendSystemMessage` is chat. Read the call before choosing `@expect chat` or `@expect actionbar`.
+- **Each target is hit once by the tp-then-attack pattern.** A second `tp @e[type=X]` after a one-shot kill finds
+  nothing and fails its line.
+- **Bosses can shrug off `/kill`.** A mod that keeps its own health value can report "Killed" and leave the entity
+  standing. Remove a boss through the mod's own path (its weapon), or move the player out of range.
+- **Wait out death animations.** A boss with a long death (a `getDeathAnimationDuration`, say 160 ticks) is "dying"
+  until it ends. It is then invisible to `@e` and refuses interaction. Wait the remaining ticks before the next step.
 - **The inventory is a hint, not a promise.** It reads lang keys, and a mod names items there that it registers only
   when a companion mod is present. `Unknown item` at run time means picking another item, not a finding.
 - **Mods guard the player.** An inventory-protection item can make `/clear` find nothing, by design. Empty slots

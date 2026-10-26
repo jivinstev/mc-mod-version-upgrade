@@ -45,7 +45,8 @@ A version fails when:
 - the game crashes or exits before a verdict;
 - no verdict arrives within the timeout.
 
-Each case is named in the report. The exit status is 0 only when every version passed.
+Each case is named in the report. The exit status is 0 only when every version passed. A version whose display slept or locked mid-run (`glfwGetPrimaryMonitor failed`) is
+reported as that, not as the mod's failure: keep the screen awake and run that version again.
 
 ## 3. The report
 
