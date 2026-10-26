@@ -1264,12 +1264,23 @@ final class PlaytestRunner {
         say(TAG + ": STEP " + s.n + " " + s.name + " -- started" + (s.intent.isEmpty() ? "" : " (" + s.intent + ")"));
     }
 
+    static final int SETTLE_TICKS = 10;
+    private int settle = 0;
+
     private void lines(Minecraft mc) {
         Step s = steps.get(stepIdx);
         // a few ops finish in start(): run up to 16 such in one tick, so header-ish lines cost nothing
         for (int guard = 0; guard < 16; guard++) {
             if (current == null) {
-                if (opIdx >= s.ops.size() || stopRequested) { endStep(mc); return; }
+                if (opIdx >= s.ops.size() || stopRequested) {
+                    // the end-of-step frame waits SETTLE_TICKS: an item just put in hand is still rising into view one
+                    // tick after its command (measured: a bare arm in every "get the sword" frame), and a chat line
+                    // or a mob's move needs a few ticks to show
+                    if (settle < SETTLE_TICKS && !stopRequested) { settle++; return; }
+                    settle = 0;
+                    endStep(mc);
+                    return;
+                }
                 current = s.ops.get(opIdx);
                 lineStartMs = worldMs();
                 say(TAG + ":   [" + current.no + "] " + current.text);

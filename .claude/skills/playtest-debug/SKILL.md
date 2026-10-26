@@ -45,7 +45,9 @@ Ask, in this order, and stop at the first yes:
 4. **Did the mod do it on purpose?** A command refused or a target unharmed can be the mod guarding something: an
    inventory-protection mixin blocking `/clear`, a boss that refuses damage until its spawn animation ends, a block
    stance. Find it in the mod's source (`@Inject` on the vanilla method, a `hurt` override) before calling it either
-   the script's or the mod's. The usual verdict is **script**: work with the design.
+   the script's or the mod's. The usual verdict is **script**: work with the design (the player's own means,
+   not a command), and record the behaviour in the mod's playtest plan as "by design", not in its known-issues
+   ledger. When it is unclear whether the behaviour is intended, ask the owner.
 5. **Did the input miss?** The frame shows the target off-centre, too far or behind a block, or `observed` has no hit.
    An `observed.aim` entry of `direct gameMode.attack` means the crosshair missed and the carrier hit the target
    directly. An out-of-reach failure names the distance. **Script:** bring the target within reach

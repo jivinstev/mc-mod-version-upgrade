@@ -51,6 +51,11 @@ one `.playtest` file (UTF-8). The grammar is `tools/playtest-lint.py`'s docstrin
 
 ## Traps the live runs found
 
+**Work with the mod's design, not around it.** When the mod deliberately changes how something works (its bosses
+ignore `/kill`, a weapon is consumed, a mob blocks), that is not a finding. Use the player's own means instead of
+commands: kill a boss with its weapon, re-arm before the next step. Do not assert what the mod chose to do
+differently. Ask the owner when in doubt; do not file it. Keep commands for setting the world up.
+
 Each of these failed a real run:
 
 - **A command that changes nothing fails.** `difficulty normal` on a Normal world, `gamemode creative` in Creative,
