@@ -51,7 +51,7 @@ Ask, in this order, and stop at the first yes:
 5. **Did the input miss?** The frame shows the target off-centre, too far or behind a block, or `observed` has no hit.
    An `observed.aim` entry of `direct gameMode.attack` means the crosshair missed and the carrier hit the target
    directly. An out-of-reach failure names the distance. **Script:** bring the target within reach
-   (`execute at @s rotated as @s run tp @e[...] ^ ^ ^2`), `@aim` again right before the `@key`, clear the line of
+   (`execute at @s rotated as @s rotated ~ 0 run tp @e[...] ^ ^ ^2`), `@aim` again right before the `@key`, clear the line of
    sight.
 6. **Was the world not as the script assumed?** Wrong game mode or difficulty, leftover mobs, night-time spawns, the
    player already dead. **Script:** set it up explicitly in the step.

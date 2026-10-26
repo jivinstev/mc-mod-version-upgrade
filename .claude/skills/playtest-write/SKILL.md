@@ -63,8 +63,10 @@ Each of these failed a real run:
   something (`difficulty hard`, then `difficulty normal`), or wrap them: `execute if entity @e[type=X] run kill
   @e[type=X]`.
 - **Melee needs reach**, 3 blocks for a survival player. Summon a boss further away so its entrance and music get room,
-  then bring it to the player before the hit: `execute at @s rotated as @s run tp @e[type=X,limit=1,sort=nearest] ^ ^
-  ^2`, `@wait 5t` (the client sees the move a few ticks after the server makes it, and `@aim` reads the client), `@aim
+  then bring it to the player before the hit: `execute at @s rotated as @s rotated ~ 0 run tp @e[type=X,limit=1,sort=nearest] ^ ^
+  ^2`, `@wait 5t` (the client sees the move a few ticks after the server makes it, and `@aim` reads the client). `rotated ~ 0` keeps the player's facing but not its pitch: after aiming down at a low target, a plain
+  `rotated as @s` puts "2 blocks ahead" into the floor, and the mob is struck through the ground (measured: weak hits
+  only, the step bounded out), `@aim
   entity X`, `@key key.attack`. The carrier fails an out-of-reach attack and gives the distance.
 - **Put the tool in hand.** `/give` fills the first free slot, and after a respawn picked-up loot can be in the
   selected one (measured: a boss took a fist's damage from a "one-shot" sword run). Use `item replace entity @s
@@ -82,7 +84,7 @@ Each of these failed a real run:
 - **Strike until it falls with a loop, not copies.** A mob that takes many capped hits, or every raider of a wave:
   ```
   @repeat each @e[type=X,distance=..48] max 40 until execute unless entity {it}
-  execute at @s rotated as @s run tp {it} ^ ^ ^2
+  execute at @s rotated as @s rotated ~ 0 run tp {it} ^ ^ ^2
   @wait 5t
   @aim entity {it}
   @key key.attack
