@@ -205,6 +205,28 @@ final class PlaytestRunner {
                         } else throw new ScriptError(no, "@world takes flat|normal, structures and seed=<n>, not '" + w + "'");
                     }
                 }
+                case "@repeat" -> {
+                    if (cur == null) { cur = new Step(steps.size() + 1, "main"); steps.add(cur); }
+                    List<String[]> body = new ArrayList<>();
+                    int j = i + 1;
+                    for (; j < lines.size(); j++) {
+                        String t = lines.get(j).trim();
+                        if (t.isEmpty() || t.startsWith("#")) continue;
+                        String d = t.split("\\s+", 2)[0].toLowerCase(Locale.ROOT);
+                        if (d.equals("@end-repeat")) break;
+                        if (d.equals("@repeat") || d.equals("@step") || d.equals("@end") || d.equals("@world")
+                                || d.equals("@continue-on-fail") || d.equals("@intent"))
+                            throw new ScriptError(j + 1, d + " cannot be inside an @repeat block (close it with @end-repeat first)");
+                        body.add(new String[]{String.valueOf(j + 1), t});
+                    }
+                    if (j >= lines.size()) throw new ScriptError(no, "@repeat without @end-repeat");
+                    if (body.isEmpty()) throw new ScriptError(no, "@repeat with an empty block");
+                    RepeatOp op = RepeatOp.parse(no, text, arg, body);
+                    for (String[] b : body) bodyOp(Integer.parseInt(b[0]), b[1].replace("{it}", "00000000-0000-0000-0000-000000000000"));
+                    cur.ops.add(op);
+                    i = j;
+                }
+                case "@end-repeat" -> throw new ScriptError(no, "@end-repeat without @repeat");
                 case "@step" -> {
                     if (arg.isEmpty()) throw new ScriptError(no, "@step needs a name");
                     cur = new Step(steps.size() + 1, arg);
@@ -226,6 +248,16 @@ final class PlaytestRunner {
                 }
             }
         }
+    }
+
+    /** One line of an @repeat block: a command, or a per-line directive. */
+    static Op bodyOp(int no, String text) throws ScriptError {
+        if (!text.startsWith("@")) return new CommandOp(no, text, text.startsWith("/") ? text.substring(1) : text, false);
+        int sp = text.indexOf(' ');
+        String dir = (sp < 0 ? text : text.substring(0, sp)).toLowerCase(Locale.ROOT);
+        String arg = sp < 0 ? "" : text.substring(sp + 1).trim();
+        if (dir.equals("@allow")) throw new ScriptError(no, "@allow cannot be inside an @repeat block (put it before)");
+        return parseOp(no, text, dir, arg);
     }
 
     private static Op parseOp(int no, String text, String dir, String arg) throws ScriptError {
@@ -278,7 +310,14 @@ final class PlaytestRunner {
                     }
                 }
                 if (a.length == 2 && a[0].equals("button")) return new ClickOp(no, text, -1, unquote(a[1]));
-                throw new ScriptError(no, "@click slot <N> | @click button \"<text>\"");
+                if (a.length == 2 && a[0].equals("at")) {
+                    Matcher m = Pattern.compile("(\\d+(?:\\.\\d+)?)%\\s+(\\d+(?:\\.\\d+)?)%").matcher(a[1].trim());
+                    if (!m.matches()) throw new ScriptError(no, "@click at <x>% <y>% (of the screen, e.g. @click at 50% 72%)");
+                    double x = Double.parseDouble(m.group(1)), y = Double.parseDouble(m.group(2));
+                    if (x > 100 || y > 100) throw new ScriptError(no, "@click at: percentages are 0-100");
+                    return new ClickAtOp(no, text, x, y);
+                }
+                throw new ScriptError(no, "@click slot <N> | @click button \"<text>\" | @click at <x>% <y>%");
             }
             case "@expect":
                 return ExpectOp.parse(no, text, arg);
@@ -293,7 +332,7 @@ final class PlaytestRunner {
             }
             default:
                 throw new ScriptError(no, "unknown directive " + dir + " (known: @intent @step @assert @wait @aim @key @click "
-                    + "@expect @shot @goto @allow @world @continue-on-fail @end)");
+                    + "@expect @shot @goto @repeat @allow @world @continue-on-fail @end)");
         }
     }
 
@@ -478,6 +517,8 @@ final class PlaytestRunner {
         }
     }
 
+    static final Pattern UUID_RX = Pattern.compile("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+
     static final class AimOp extends Op {
         final String how, arg;
         final String[] nums;
@@ -506,7 +547,7 @@ final class PlaytestRunner {
                 r.aimed = null;
                 return pass(String.format(Locale.ROOT, "looking at %.1f %.1f %.1f; crosshair %s", v[0], v[1], v[2], r.pickDesc(mc)));
             }
-            if (arg.startsWith("@")) {
+            if (arg.startsWith("@") || UUID_RX.matcher(arg).matches()) {      // a selector, or one entity's UUID ({it})
                 r.selectEntities(mc, arg, this);
                 return null;
             }
@@ -648,6 +689,168 @@ final class PlaytestRunner {
         }
 
         @Override Res tick(PlaytestRunner r, Minecraft mc) { return pass(""); }
+    }
+
+    /** @click at x% y%: a click at that point of the open screen (its GUI size), for screens that draw clickable
+     *  text instead of widgets -- an NPC's dialogue options, say. */
+    static final class ClickAtOp extends Op {
+        final double px, py;
+        ClickAtOp(int no, String text, double px, double py) { super(no, text); this.px = px; this.py = py; }
+        @Override Res start(PlaytestRunner r, Minecraft mc) {
+            var screen = mc.screen;
+            if (screen == null) return fail("no screen is open to click");
+            double x = screen.width * px / 100.0, y = screen.height * py / 100.0;
+            String how = Input.clickScreen(screen, x, y);
+            return pass(String.format(Locale.ROOT, "clicked %s at %.0f,%.0f (%s)", screen.getClass().getSimpleName(), x, y, how));
+        }
+        @Override Res tick(PlaytestRunner r, Minecraft mc) { return pass(""); }
+    }
+
+    /** @repeat N [until C] ... @end-repeat, and @repeat each <selector> max N [until C] ... @end-repeat.
+     *  The block runs up to N times (each: up to N times for every entity the selector matched when the block began,
+     *  `{it}` in its lines standing for that entity's UUID), stopping as soon as the command C succeeds (C may use
+     *  {it} too). A block line that fails fails the step; an `until` never met after N runs fails it, naming N. */
+    static final class RepeatOp extends Op {
+        static final String DUMMY = "00000000-0000-0000-0000-000000000000";
+        final int max;
+        final String until, each;
+        final List<String[]> body;
+        List<String> targets;
+        int ti, iter, oi, phase, waited, runs;
+        List<Op> ops;
+        Op cur;
+        volatile CmdResult res;
+        volatile List<String> found;
+        volatile String serverError;
+        RepeatOp(int no, String text, int max, String until, String each, List<String[]> body) {
+            super(no, text); this.max = max; this.until = until; this.each = each; this.body = body;
+        }
+
+        static RepeatOp parse(int no, String text, String arg, List<String[]> body) throws ScriptError {
+            // every block is bounded by an explicit N: a condition that never comes true ends in a FAIL naming N, never in
+            // a loop that only the run's timeout stops
+            String usage = "@repeat <N> [until <command>] | @repeat each <selector> max <N> [until <command>]";
+            String rest = arg.trim(), each = null, until = null;
+            int max = 1;
+            int u = (" " + rest).indexOf(" until ");
+            if (u >= 0) {
+                until = rest.substring(u + 5).trim();
+                rest = rest.substring(0, Math.max(0, u - 1)).trim();
+                if (until.isEmpty()) throw new ScriptError(no, usage);
+            }
+            String[] t = rest.isEmpty() ? new String[0] : rest.split("\\s+");
+            try {
+                if (t.length >= 2 && t[0].equals("each")) {
+                    each = t[1];
+                    if (t.length == 4 && t[2].equals("max")) max = Integer.parseInt(t[3]);
+                    else throw new ScriptError(no, "@repeat each <selector> needs max <N> (the most runs per entity): " + usage);
+                } else if (t.length == 1) {
+                    max = Integer.parseInt(t[0]);
+                } else throw new ScriptError(no, usage);
+            } catch (NumberFormatException e) {
+                throw new ScriptError(no, usage);
+            }
+            if (max < 1 || max > 1000) throw new ScriptError(no, "@repeat: N is 1-1000");
+            if (each == null && until == null && max < 2) throw new ScriptError(no, "@repeat " + max + " does nothing a block would not");
+            return new RepeatOp(no, text, max, until, each, body);
+        }
+
+        @Override Res start(PlaytestRunner r, Minecraft mc) {
+            ti = 0; iter = 0; runs = 0; waited = 0; cur = null; res = null; found = null; serverError = null;
+            if (each != null) {
+                phase = 0;
+                r.selectUuids(mc, each, l -> found = l, e -> serverError = e);
+                return null;
+            }
+            targets = new ArrayList<>(); targets.add(null);
+            return begin();
+        }
+
+        private Res begin() {
+            iter = 0;
+            return iterate();
+        }
+
+        private Res iterate() {
+            String it = targets.get(ti);
+            ops = new ArrayList<>();
+            try {
+                for (String[] b : body) ops.add(bodyOp(Integer.parseInt(b[0]), it == null ? b[1] : b[1].replace("{it}", it)));
+            } catch (ScriptError e) {
+                return fail("block line: " + e.getMessage());
+            }
+            oi = 0; cur = null; phase = 1; runs++;
+            return null;
+        }
+
+        private Res next(PlaytestRunner r, Minecraft mc) {
+            ti++;
+            if (ti >= targets.size()) {
+                return pass((each == null ? "" : targets.size() + " entit(ies), ") + runs + " run(s) of the block"
+                    + (until == null ? "" : ", until met"));
+            }
+            return begin();
+        }
+
+        @Override Res tick(PlaytestRunner r, Minecraft mc) throws Exception {
+            if (phase == 0) {
+                if (serverError != null) return fail("selector " + each + ": " + serverError);
+                List<String> f = found;
+                if (f == null) return ++waited > 100 ? fail("selector " + each + ": no answer from the server") : null;
+                if (f.isEmpty()) return pass("selector " + each + " matched nothing: the block did not run");
+                targets = f;
+                return begin();
+            }
+            if (phase == 2) {                      // the until command's answer
+                CmdResult x = res;
+                if (x == null) return ++waited > COMMAND_TIMEOUT_TICKS ? fail("until " + until + ": no result from the server") : null;
+                if (Boolean.TRUE.equals(x.success)) return next(r, mc);
+                if (iter >= max) {
+                    String who = targets.get(ti) == null ? "" : " for " + targets.get(ti);
+                    return fail("until " + sub(until) + " not met after " + max + " run(s)" + who + (x.said().isEmpty() ? "" : ": " + x.said()));
+                }
+                return iterate();
+            }
+            for (int guard = 0; guard < 16; guard++) {   // phase 1: the block's lines, like a step's
+                if (cur == null) {
+                    if (oi >= ops.size()) {
+                        iter++;
+                        if (until != null) {
+                            phase = 2; waited = 0; res = null;
+                            r.runCommand(mc, sub(until), y -> res = y);
+                            return null;
+                        }
+                        if (iter < max) return iterate();
+                        return next(r, mc);
+                    }
+                    cur = ops.get(oi);
+                    Res s0 = cur.start(r, mc);
+                    if (s0 == null) return null;
+                    Res d = done(r, s0);
+                    if (d != null) return d;
+                    continue;
+                }
+                Res s1 = cur.tick(r, mc);
+                if (s1 == null) return null;
+                Res d = done(r, s1);
+                if (d != null) return d;
+            }
+            return null;
+        }
+
+        private String sub(String c) {
+            String it = targets == null || ti >= targets.size() ? null : targets.get(ti);
+            return it == null ? c : c.replace("{it}", it);
+        }
+
+        /** A block line finished: null to go on, or the block's failure. */
+        private Res done(PlaytestRunner r, Res x) {
+            String who = targets.get(ti) == null ? "" : ", " + targets.get(ti);
+            r.say(TAG + ":     [" + cur.no + "] (run " + (iter + 1) + who + ") " + (x.ok ? "ok" : "FAIL") + (x.detail.isEmpty() ? "" : " -- " + x.detail));
+            if (!x.ok) return fail("run " + (iter + 1) + who + ", line " + cur.no + ": " + cur.text + " -- " + x.detail);
+            cur = null; oi++;
+            return null;
+        }
     }
 
     static final class ShotOp extends Op {
@@ -1675,6 +1878,23 @@ final class PlaytestRunner {
     }
 
     /** Resolve an entity selector on the server as the player; the AimOp gets {id, x, y, z} per entity. */
+    /** The UUIDs of the entities a selector matches now (on the server, as the player), in its own order. */
+    void selectUuids(Minecraft mc, String selector, Consumer<List<String>> done, Consumer<String> failed) {
+        IntegratedServer server = mc.getSingleplayerServer();
+        UUID id = mc.player.getUUID();
+        server.execute(() -> {
+            try {
+                ServerPlayer sp = server.getPlayerList().getPlayer(id);
+                var sel = EntityArgument.entities().parse(new StringReader(selector));
+                List<String> out = new ArrayList<>();
+                for (Entity e : sel.findEntities(sp.createCommandSourceStack())) out.add(e.getUUID().toString());
+                done.accept(out);
+            } catch (Throwable t) {
+                failed.accept(t.getMessage() != null ? t.getMessage() : t.toString());
+            }
+        });
+    }
+
     void selectEntities(Minecraft mc, String selector, AimOp op) {
         IntegratedServer server = mc.getSingleplayerServer();
         UUID id = mc.player.getUUID();

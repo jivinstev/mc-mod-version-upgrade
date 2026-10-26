@@ -79,8 +79,19 @@ Each of these failed a real run:
   `key.escape`.
 - **Find where the message goes.** `displayClientMessage(msg, true)` is the action bar and `false` is chat.
   `sendSystemMessage` is chat. Read the call before choosing `@expect chat` or `@expect actionbar`.
-- **Each target is hit once by the tp-then-attack pattern.** A second `tp @e[type=X]` after a one-shot kill finds
-  nothing and fails its line.
+- **Strike until it falls with a loop, not copies.** A mob that takes many capped hits, or every raider of a wave:
+  ```
+  @repeat each @e[type=X,distance=..48] max 40 until execute unless entity {it}
+  execute at @s rotated as @s run tp {it} ^ ^ ^2
+  @wait 5t
+  @aim entity {it}
+  @key key.attack
+  @wait 10t
+  @end-repeat
+  ```
+  `{it}` is one entity's UUID, so each gets its own strikes (no "nearest of a type" left standing), and the block stops
+  as soon as it's dead. The bound is required. Set it from the mob's health and the per-hit cap, with room to spare.
+  A bound that's reached means the mob outlasted the script, and the step fails naming it.
 - **Bosses can shrug off `/kill`.** A mod that keeps its own health value can report "Killed" and leave the entity
   standing. Remove a boss through the mod's own path (its weapon), or move the player out of range.
 - **Freeze a mob before the kill step when its own fight is already proven.** A dashing mob leaves reach between
