@@ -311,7 +311,7 @@ def playtest_out(project, script):
 
 
 def client_smoke(project, mode="gauntlet", timeout=1200, extra=(), runner=None, playtest=None, expect="pass",
-                 expect_steps=None):
+                 expect_steps=None, expect_events=()):
     """Run the carrier in the project's dev client; -> (ok, why). PASS must be on stdout and in latest.log (a playtest:
     also in playtest-result.json; with expect="fail", FAIL from the script's own steps in all three)."""
     project = pathlib.Path(project).resolve()
@@ -348,10 +348,11 @@ def client_smoke(project, mode="gauntlet", timeout=1200, extra=(), runner=None, 
             res.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, res / f"{name}.log")
     rj = res / "playtest-result.json"
-    return judge_playtest(out, game, rj.read_text(encoding="utf-8") if rj.is_file() else "", expect, expect_steps)
+    return judge_playtest(out, game, rj.read_text(encoding="utf-8") if rj.is_file() else "", expect, expect_steps,
+                          expect_events)
 
 
-def judge_playtest(out, game, result_text, expect="pass", expect_steps=None):
+def judge_playtest(out, game, result_text, expect="pass", expect_steps=None, expect_events=()):
     """-> (ok, why) for a playtest run: the marker on stdout and in latest.log, the PLAYTEST verdict line, and the JSON."""
     rx = re.compile(MARKER + r": (PASS|FAIL)[^\n]*")
     verdicts = [m.group(0) for m in rx.finditer(out)]
@@ -383,6 +384,10 @@ def judge_playtest(out, game, result_text, expect="pass", expect_steps=None):
         return False, f"the run FAILed but not in a step of the script ({res.get('detail', verdicts[-1])}): the harness failed"
     if expect_steps and steps != list(expect_steps):
         return False, f"step verdicts {steps}, expected {list(expect_steps)}"
+    events = [str(e.get("what", "")) for e in res.get("events", [])]
+    for want_ev in expect_events or ():
+        if not any(re.search(want_ev, e) for e in events):
+            return False, f"no event matching {want_ev!r} in playtest-result.json (events: {events})"
     return True, f"{verdicts[-1]} (steps {steps})"
 
 
@@ -663,6 +668,12 @@ def self_check():
         expect(not judge_playtest(fo, mf, pj("FAIL", ["FAIL", "SKIPPED", "SKIPPED"]), "fail", ["PASS", "FAIL", "SKIPPED"])[0],
                "playtest --expect-steps: another step pattern fails")
         expect(not judge_playtest(po, mp, pj("PASS", ["PASS", "PASS"]), "fail")[0], "playtest --expect fail: a PASS fails")
+        expect(not judge_playtest(po, mp, pj("PASS", ["PASS", "PASS"]), expect_events=["death at step"])[0],
+               "playtest --expect-event: a missing event fails")
+        withev = json.loads(pj("PASS", ["PASS", "PASS"]))
+        withev["events"] = [{"ms": 5, "what": "death at step 2: death.attack.genericKill"}]
+        expect(judge_playtest(po, mp, json.dumps(withev), expect_events=["death at step 2"])[0],
+               "playtest --expect-event: a matching event passes")
         script = d / "x.playtest"
         script.write_text("say hi\n", encoding="utf-8")
 
@@ -700,6 +711,8 @@ def main():
     s.add_argument("--playtest", help="--mode playtest: the script")
     s.add_argument("--expect", default="pass", choices=["pass", "fail"], help="--mode playtest: the verdict required")
     s.add_argument("--expect-steps", help="--mode playtest: each step's verdict, comma-separated (PASS,FAIL,SKIPPED)")
+    s.add_argument("--expect-event", action="append", default=[],
+                   help="--mode playtest: a regex an entry of the result's events must match (repeatable)")
     s = sub.add_parser("plan"); s.add_argument("--published"); s.add_argument("--newest", type=int, required=True)
     s = sub.add_parser("release"); s.add_argument("--dist", required=True); s.add_argument("--tag", required=True)
     s.add_argument("--commit", required=True)
@@ -732,7 +745,8 @@ def main():
         return 1 if probs else 0
     if a.cmd == "client-smoke":
         steps = [x.strip() for x in a.expect_steps.split(",")] if a.expect_steps else None
-        ok, why = client_smoke(a.project, a.mode, a.timeout, playtest=a.playtest, expect=a.expect, expect_steps=steps)
+        ok, why = client_smoke(a.project, a.mode, a.timeout, playtest=a.playtest, expect=a.expect, expect_steps=steps,
+                               expect_events=a.expect_event)
         print(f"gatec-carrier: client smoke ({a.mode}) {'PASS' if ok else 'FAIL'}: {why}")
         return 0 if ok else 1
     if a.cmd == "plan":

@@ -752,6 +752,17 @@ final class PlaytestRunner {
             }
             return null;
         }
+        /** The first message received since tick that carries a death.* key and names the player, or null. */
+        String deathOf(String player, int tick) {
+            for (Object[] g : got) {
+                if ((int) g[0] < tick) continue;
+                @SuppressWarnings("unchecked") List<String> t = (List<String>) g[1];
+                if (t.isEmpty() || !t.get(0).contains(player)) continue;
+                for (String k : t.subList(1, t.size())) if (k.startsWith("death.")) return k + " " + g[2];
+            }
+            return null;
+        }
+
         /** The newest message carrying a death.* key received since tick, or null. */
         String deathSince(int tick) {
             for (int i = got.size() - 1; i >= 0; i--) {
@@ -1382,12 +1393,23 @@ final class PlaytestRunner {
     private void handleDeath(Minecraft mc) {
         var p = mc.player;
         if (p == null) return;
+        // The death message about the player is the one sign every version gives: with immediate respawn the client can
+        // be handed its new player before it ever saw health 0 (measured on 1.21.4, 1.21.5 and 26.1.2).
+        String dm = ((ChatObs) observers.get("chat")).deathOf(p.getName().getString(), lastDeathScan);
+        lastDeathScan = tick;
+        if (dm != null && tick - lastDeathEvent > 40) {
+            lastDeathEvent = tick;
+            deathRecorded = true;
+            event("death at step " + currentStepNo() + ": " + dm);
+            note("death", dm);
+            say(TAG + ": event player died at step " + currentStepNo() + ": " + dm);
+        }
         if (p.isDeadOrDying() && p != deadPlayer) {
             deadPlayer = p;
             deathTick = tick;
             respawnPending = true;
-            deathRecorded = false;
-            say(TAG + ": event player died at step " + currentStepNo());
+            deathRecorded = tick - lastDeathEvent <= 40;
+            if (!deathRecorded) say(TAG + ": event player died at step " + currentStepNo());
             return;
         }
         if (!respawnPending) return;
@@ -1410,9 +1432,11 @@ final class PlaytestRunner {
     }
 
     private boolean deathRecorded = false;
+    private int lastDeathScan = 0, lastDeathEvent = -1000;
 
     private void recordDeath(Minecraft mc) {
         deathRecorded = true;
+        lastDeathEvent = tick;
         String cause = deathCause(mc);
         event("death at step " + currentStepNo() + ": " + cause);
         note("death", cause);
