@@ -207,11 +207,25 @@ There are four skills, each driving `tools/playtest.py`:
   script in a loop.
 - **playtest-run** runs a script on each installed version, one at a time, and grades every step. It writes
   `report.md` and a self-contained `report.html` with the frames, to publish as a Claude Code artifact. `--video`
-  records the screen; on macOS the first recording asks for Screen Recording permission.
+  also records the screen on macOS (see "Recording video on macOS" below).
 - **playtest-debug** reads one failed run (`playtest.py explain`) against the script's intent and says whose failure
   it is: the script's, the carrier's or the mod's. It gives the fix or the finding.
 
 On macOS the game window needs the user's session on the console with the screen unlocked.
+
+**Recording video on macOS.** The key frames need no permission; the carrier takes them inside the game. A screen
+recording (`--video`) does. macOS grants Screen Recording to the **app** you run the tool from (Terminal, iTerm,
+the Claude desktop app, your IDE), never to `python3`. A command run inside that app gets no prompt of its own: it is
+refused silently. Once per app:
+
+1. Open **System Settings > Privacy & Security > Screen & System Audio Recording**.
+2. Turn on the app you run the tool from. If it is not listed, add it with **+**.
+3. **Quit and reopen that app.** macOS applies the change only to a fresh start, so the session that asked does not
+   get it.
+
+Before the first game starts, `playtest.py run --video` takes one silent test still. If macOS refuses it, the runner
+names the app to allow (the outermost `.app` above the process, such as `Claude.app` or `Terminal.app`) and carries on
+with key frames only. Each version's report notes the same.
 
 ## Skills: in Claude Code, or from the command line
 

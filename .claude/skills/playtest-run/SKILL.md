@@ -18,8 +18,16 @@ made (test-installs). It never touches the player's own mods folder or profiles,
   - The user's session must be the one on the console, and the screen unlocked. The runner keeps the display awake,
     but it cannot unlock it.
   - Ask the user before a run that needs them away from the machine.
-  - `--video` records with macOS's `screencapture`. The first recording asks the user to allow Screen Recording for
-    the app running the tool. Without that permission the run goes on with key frames only, and the report says so.
+  - `--video` records with macOS's `screencapture`. macOS grants Screen Recording to the app the tool runs inside
+    (Terminal, iTerm, the Claude desktop app, an IDE), never to `python3`, and refuses a command run inside it
+    silently: no prompt appears. The runner checks first with one silent still. If it is refused, the runner prints
+    which app to allow and carries on with key frames only. Tell the user, in these words:
+    1. open System Settings > Privacy & Security > Screen & System Audio Recording;
+    2. turn on <that app>, adding it with + if it is not listed;
+    3. quit and reopen <that app>, because the change applies only to a fresh start.
+
+    The session that asked does not get the permission. If that app is the one running this conversation (the
+    Claude desktop app, a terminal), the run with video happens after the user restarts it, in a new session.
 - **Lint first:** `python3 tools/playtest.py lint SCRIPT --jar MOD.jar`.
 
 ## 2. Run

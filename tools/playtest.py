@@ -178,9 +178,45 @@ class Recorder:
                 self.proc.kill()
         err = (self.proc.stderr.read() or b"").decode("utf-8", "replace") if self.proc.stderr else ""
         if not self.path.is_file() or self.path.stat().st_size == 0:
-            self.note = ("no recording: macOS did not record the screen -- allow Screen Recording for the app running "
-                         "this (System Settings > Privacy & Security > Screen Recording)" + (f": {err.strip()[:160]}" if err.strip() else ""))
+            self.note = ("no recording: " + video_help(responsible_app()) + (f" ({err.strip()[:160]})" if err.strip() else ""))
         return False
+
+
+def responsible_app():
+    """The outermost .app bundle above this process (Terminal, iTerm, Claude, an IDE): macOS grants Screen Recording to
+    that app, not to python3 or screencapture, and a command-line child never gets a prompt of its own."""
+    app, pid = None, os.getpid()
+    for _ in range(30):
+        r = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True, encoding="utf-8")
+        parts = r.stdout.strip().split(None, 1)
+        if len(parts) < 2:
+            break
+        ppid, comm = parts
+        m = re.search(r"([^/]+\.app)/Contents/", comm)
+        if m:
+            app = m.group(1)
+        if ppid in ("0", "1") or ppid == str(pid):
+            break
+        pid = int(ppid)
+    return app
+
+
+def recording_allowed(scratch):
+    """Can this process capture the screen? One silent still (screencapture -x): without the permission it fails at
+    once with "could not create image from display" -- the same refusal a recording gets, measured."""
+    shot = pathlib.Path(scratch) / ".playtest-preflight.png"
+    r = subprocess.run(["screencapture", "-x", str(shot)], capture_output=True, text=True, encoding="utf-8")
+    ok = r.returncode == 0 and shot.is_file() and shot.stat().st_size > 0
+    if shot.is_file():
+        shot.unlink()
+    return ok
+
+
+def video_help(app):
+    who = app or "the app you run this from (Terminal, iTerm, Claude, your IDE)"
+    return (f"--video: macOS does not allow screen recording for {who}. Open System Settings > Privacy & Security > "
+            f"Screen & System Audio Recording, turn {who} on (add it with + if it is not listed), then quit and reopen "
+            f"{who} -- macOS applies the change only to a fresh start. Until then the run goes on with key frames only.")
 
 
 def run_version(R, plan, v, script, out, a, plat, log):
@@ -372,6 +408,11 @@ def cmd_run(a):
     pf, plan = load_plan(a)
     rep = pathlib.Path(a.report) if a.report else pf.parent / "playtests" / f"{script.stem}-{datetime.datetime.now():%Y%m%d-%H%M%S}"
     rep = rep.resolve()          # the game runs in the instance folder: a relative out dir would land there
+    if a.video and plat.os_name == "osx":
+        rep.mkdir(parents=True, exist_ok=True)
+        if not recording_allowed(rep):
+            print(video_help(responsible_app()), file=sys.stderr)
+            a.video = False
     results = []
     for v in plan["versions"]:
         res = run_version(R, plan, v, script, rep / v["mc"], a, plat, print)
@@ -474,6 +515,9 @@ def self_check():
         f = forbidden(parse("@intent x\nsummon examplemod:test_entity\nsummon examplemod:test_entity_two\n"),
                       ["examplemod:test_entity"])
         expect([n for n, _m in f] == [2], f"--forbid matches the whole id only: {f}")
+    h = video_help("Terminal.app")
+    expect("Screen & System Audio Recording" in h and "quit and reopen Terminal.app" in h,
+           f"--video's refusal names the app to allow and the restart: {h}")
     print("\n".join(bad) or "self-check: OK")
     return 1 if bad else 0
 
