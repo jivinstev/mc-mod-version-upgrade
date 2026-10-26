@@ -85,7 +85,7 @@ def inventory(jars):
     sound events (sounds.json), every other lang key grouped by its first segment (subtitles, boss lines, chat
     messages, ...) and the data files by folder (loot tables, advancements, recipes, ...)."""
     import zipfile
-    inv = {}
+    inv, adv, lang = {}, {}, {}
     for jar in jars:
         with zipfile.ZipFile(jar) as z:
             for n in z.namelist():
@@ -107,6 +107,7 @@ def inventory(jars):
                         keys = json.loads(z.read(n).decode("utf-8"))
                     except ValueError:
                         continue
+                    lang.update(keys)
                     for k in keys:
                         seg = k.split(".")
                         if len(seg) >= 3 and seg[1] == ns and seg[0] in ("entity", "item", "block"):
@@ -117,8 +118,40 @@ def inventory(jars):
                                 d["other_ids"].add(seg[2])      # /attribute, /effect and /enchant take these ids
                 elif parts[0] == "data" and len(parts) >= 4:
                     d["data"].setdefault(parts[2], []).append("/".join(parts[3:]).rsplit(".", 1)[0])
-    return {ns: {k: sorted(v) if isinstance(v, set) else {g: sorted(x) for g, x in sorted(v.items())}
-                 for k, v in d.items()} for ns, d in sorted(inv.items())}
+                    if parts[2] in ("advancement", "advancements") and n.endswith(".json"):
+                        try:
+                            a = json.loads(z.read(n).decode("utf-8"))
+                        except ValueError:
+                            continue
+                        title = ((a.get("display") or {}).get("title") or {})
+                        adv[f"{ns}:" + "/".join(parts[3:])[:-5]] = {
+                            "parent": a.get("parent"),
+                            "title": title.get("translate") if isinstance(title, dict) else title,
+                            "triggers": sorted({(c or {}).get("trigger", "?") for c in (a.get("criteria") or {}).values()})}
+    out = {ns: {k: sorted(v) if isinstance(v, set) else {g: sorted(x) for g, x in sorted(v.items())}
+                for k, v in d.items()} for ns, d in sorted(inv.items())}
+    for ns in out:
+        out[ns]["progression"] = progression({k: v for k, v in adv.items() if k.startswith(ns + ":")}, lang)
+    return out
+
+
+def progression(adv, lang):
+    """A mod's story, read from its advancement tree: each advancement's chain of parents, longest first. An advancement
+    the game cannot grant by itself (trigger minecraft:impossible) is granted by the mod's code -- a quest handler's
+    stage. A long chain of those is a story to play through; none means a mod of parts (items, mobs) with no journey."""
+    def chain(a):
+        seen, c = set(), [a]
+        while adv.get(c[-1], {}).get("parent") in adv and c[-1] not in seen:
+            seen.add(c[-1])
+            c.append(adv[c[-1]]["parent"])
+        return c[::-1]
+    leaves = [a for a in adv if not any(v.get("parent") == a for v in adv.values())]
+    chains = sorted((chain(a) for a in leaves), key=lambda c: (-len(c), c))
+    coded = sorted(a for a, v in adv.items() if "minecraft:impossible" in v["triggers"])
+    title = lambda a: lang.get(adv[a].get("title") or "", a.split(":", 1)[1])
+    return {"advancements": len(adv), "granted_by_code": coded,
+            "chains": [[{"id": a, "title": title(a), "by_code": a in coded} for a in c] for c in chains[:12]],
+            "story": bool(coded) and bool(chains) and len(chains[0]) >= 4}
 
 
 ID_REF = re.compile(r"\b([a-z0-9_.-]+):([a-z0-9_./-]+)")
@@ -438,6 +471,12 @@ def cmd_inventory(a):
             print(f"  lang {g} ({len(keys)}): {', '.join(keys[:12])}{' ...' if len(keys) > 12 else ''}")
         for g, files in d["data"].items():
             print(f"  data {g} ({len(files)}): {', '.join(files[:8])}{' ...' if len(files) > 8 else ''}")
+        pg = d.get("progression") or {}
+        if pg.get("advancements"):
+            print(f"  progression: {pg['advancements']} advancement(s), {len(pg['granted_by_code'])} granted by the mod's "
+                  f"code; {'a story to play through' if pg['story'] else 'no story chain'}")
+            for c in pg["chains"][:6]:
+                print("    " + " > ".join(("*" if x["by_code"] else "") + x["title"] for x in c))
     return 0
 
 
@@ -502,12 +541,20 @@ def self_check():
                 "effect.examplemod.doom": "Doom"}))
             z.writestr("data/examplemod/loot_table/entities/boss.json", "{}")
             z.writestr("assets/minecraft/lang/en_us.json", "{}")
+            for i, (a, par) in enumerate([("start", None), ("meet", "start"), ("trial", "meet"), ("end", "trial"), ("side", "start")]):
+                z.writestr(f"data/examplemod/advancement/{a}.json", json.dumps(
+                    {"parent": f"examplemod:{par}" if par else None, "display": {"title": {"translate": f"adv.{a}"}},
+                     "criteria": {"c": {"trigger": "minecraft:impossible" if a in ("meet", "trial") else "minecraft:inventory_changed"}}}))
         inv = inventory([jar])
         e = inv.get("examplemod", {})
         expect(list(inv) == ["examplemod"] and e["entities"] == ["boss"] and e["items"] == ["blade"]
                and e["sounds"] == ["boss_music"] and "subtitles" in e["lang"] and "loot_table" in e["data"]
                and e["other_ids"] == ["doom"],
                f"inventory reads entities, items, sounds, lang groups and data, and skips minecraft: {inv}")
+        pg = inv["examplemod"]["progression"]
+        expect(pg["story"] and [x["id"] for x in pg["chains"][0]] == ["examplemod:start", "examplemod:meet", "examplemod:trial", "examplemod:end"]
+               and pg["granted_by_code"] == ["examplemod:meet", "examplemod:trial"],
+               f"inventory reads the advancement tree: the longest chain first, code-granted stages marked: {pg}")
         q = parse("@intent x\nsummon examplemod:boss\ngive @s examplemod:blade\nsummon examplemod:bos\n"
                   "@expect sound examplemod:boss_music\nsummon minecraft:zombie\neffect give @s examplemod:doom\n")
         u = unknown_ids(q, inv)

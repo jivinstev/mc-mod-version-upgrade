@@ -1,6 +1,6 @@
 ---
 name: playtest-plan
-description: Plan playtests for a mod -- recommend the top N (default 10) scenarios that between them reach the most distinct code paths (each boss and its music or narration, each signature item's effect, each mob's attack on a survival player, death and respawn, GUIs and keybinds), grounded in what the mod's jars actually register, honouring the user's own must-cover list and never-touch list. With --build it then writes, runs and debugs each scenario in a loop (playtest-write, playtest-run, playtest-debug) until the script passes or the failure is proven to be the mod's. Use when the user asks what to playtest, for a smoke test or playtest list for a mod, or to build and get playtest scripts right.
+description: Plan playtests for a mod on two tracks by default -- technical coverage (the top N, default 10, scenarios that between them reach the most distinct code paths: each boss and its music or narration, each signature item's effect, each mob's attack on a survival player, death and respawn, GUIs and keybinds) and, when the mod has one, its story progression (one end-to-end script that plays the mod's quest line stage by stage, read from its advancement tree and quest code) -- grounded in what the mod's jars actually register, honouring the user's own must-cover list and never-touch list. With --build it then writes, runs and debugs each script in a loop (playtest-write, playtest-run, playtest-debug) until it passes or the failure is proven to be the mod's. Use when the user asks what to playtest, for a smoke test, a playtest list or a story playthrough for a mod, or to build and get playtest scripts right.
 ---
 
 # Plan playtests
@@ -23,6 +23,8 @@ changes a fork's build or branches.
    never dropped to make room. Things the user said never to touch (a debug entity, a test item) go in the plan's
    `forbid` list, and every script is linted against it.
 4. **`--build`?** Without it, the plan is the deliverable. With it, go on to step 4.
+5. **Which tracks?** Both by default: technical coverage and story progression. `--no-story` skips the story track;
+   `--story-only` plans just the story script.
 
 ## 2. Ground the plan in the jars
 
@@ -67,6 +69,33 @@ it reaches (ids and classes), and what would count as the mod's failure as again
 
 Save the plan as `playtests/PLAN.md` next to the scripts, with a front-matter-like header: the mod, the date, `N`, the
 `forbid` list, and the jars it was grounded in (names and versions). Show the user the table, scenario by row.
+
+## 3b. The story track (when the mod has one)
+
+Technical coverage tests the parts. The story track tests the journey: can a player walk the mod's intended
+progression from its first stage to its last?
+
+1. **Find it.** `playtest.py inventory` prints a `progression:` line per namespace: the advancement count, how many
+   are granted by the mod's own code (trigger `minecraft:impossible`, marked `*`), and the longest parent chains.
+   - "A story to play through" means a code-granted chain of four or more stages.
+   - "No story chain" means the mod is items and mobs. Say so in the plan and make no story script.
+2. **Map each stage from the source.** For each stage, find:
+   - the `grant(...)` call or criterion that awards it;
+   - what the player must do there: talk to an NPC, pick a dialogue option, enter a structure, win a raid, read a
+     note;
+   - which parts commands may set up (a structure's location through `locate` and a teleport, a summoned NPC) and
+     which must be player input (`@key key.use` on the NPC, `@click button "<option label>"`, a fight with the mod's
+     weapon).
+   - what would break the stage in a test world: a structure that only worldgen places, a village, another
+     dimension, a companion mod, a long timer.
+   Write the map into `PLAN.md` as its own section, stage by stage.
+3. **One script, `NN-story.playtest`.** One step per stage, each gated on the stage's advancement:
+   `@assert execute if entity @s[advancements={<ns>:<id>=true}]`.
+   - The world is `@world normal` when a stage needs worldgen.
+   - Travel is a teleport; the stage's mechanic never is.
+   - A stage the script cannot reach is a `@step` that says why (`# needs a village: not scriptable here`), not a
+     silent skip.
+   - Rank it alongside the technical scenarios: it counts as one of the N.
 
 ## 4. `--build`: write, run and debug until each script is right
 
