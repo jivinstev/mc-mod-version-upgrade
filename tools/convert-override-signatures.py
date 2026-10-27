@@ -48,7 +48,8 @@ WHICH ROWS RUN.  Without --crossing every row runs: the era route (tools/mechani
 shape or which do not exist yet.
 
 Matched by method name AND the exact old parameter types (annotations, `final` and package prefixes ignored), in
-a class that extends or implements something; an override already in the new shape does not match.  REFUSED and
+a class that extends or implements something; an override already in the new shape does not match, and an old-shape
+override in a file that already declares the hook in its new shape (a mergeup's twin) is left and NOTED.  REFUSED and
 named: a `super.hook(...)` used as a value where the new super returns void, and a body that is abstract.
 Idempotent (with or without --crossing).  Standard library only.
 """
@@ -200,6 +201,26 @@ def rewrite_supers(body, hook, refused):
     return "".join(out)
 
 
+def declares_new(text, hook):
+    """True when the file already declares `hook` in its new shape: the ported$ copy, or a same-named method with the
+    new return type and the new parameter types (a mergeup can bring an old-shape twin back beside it)."""
+    if re.search(r"\bported\$" + re.escape(hook["name"]) + r"\s*\(", text):
+        return True
+    want = [norm_type(x.rsplit(" ", 1)[0]) for x in hook["new"] if not x.startswith("{")]
+    fixed = [i for i, x in enumerate(hook["new"]) if not x.startswith("{")]
+    for m in HEADER.finditer(text):
+        if m.group("name") != hook["name"] or m.group("ret").replace(" ", "") != hook["new_ret"]:
+            continue
+        pc = matching(text, m.end() - 1)
+        params = split_top(text[m.end():pc]) if pc is not None else None
+        if params is None or len(params) != len(hook["new"]):
+            continue
+        types = [norm_type(re.sub(r"\s+\w+\s*$", "", p)) for p in params]
+        if [types[i] for i in fixed] == want and (hook["new_ret"] != hook["old_ret"] or want):
+            return True
+    return False
+
+
 def convert_text(text, hooks=None):
     """(new text, [converted hook names], [notes], [refused]); hooks: the rows to apply (default all)."""
     if not re.search(r"\b(extends|implements)\b", text):
@@ -210,6 +231,11 @@ def convert_text(text, hooks=None):
     for m in HEADER.finditer(text):
         hook = names.get(m.group("name"))
         if not hook or m.start() < pos or m.group("ret").replace(" ", "") != hook["old_ret"]:
+            continue
+        if declares_new(text, hook):
+            # converting again would declare the new override and ported$ twice: leave the old-shape twin, say so
+            notes.append((text.count("\n", 0, m.start()) + 1, f"{hook['name']}: the file already declares it in its "
+                          "new shape; this old-shape override was left as it is (merge it into that one by hand)"))
             continue
         po = m.end() - 1
         pc = matching(text, po)
@@ -355,6 +381,21 @@ def self_check():
     chk("@Override stays on the public method", "@Override\n    public void appendHoverText(" in new
         and "@Override\n    private" not in new)
     chk("idempotent", convert_text(new)[1] == [])
+    # a mergeup brought an old-shape twin back beside the converted hook: converting it again would declare it twice
+    twin = new.replace("\n}\n", "\n    @Override\n    public void releaseUsing(ItemStack s, Level level, LivingEntity u, "
+                       "int left) {\n        u.stopUsingItem();\n    }\n}\n")
+    tw = convert_text(twin)
+    chk("a hook already declared in its new shape: skipped and noted", tw[0] == twin and tw[1] == []
+        and any("already declares" in m for _, m in tw[2]))
+    hand = ("class H extends Mob {\n    public void customServerAiStep(ServerLevel level) {}\n"
+            "    public void customServerAiStep() { tick(); }\n}\n")
+    chk("a hand-written new shape (no ported$ copy) counts too", convert_text(hand)[1] == [])
+    bridge = ("class W extends Item {\n    @Override\n    public void appendHoverText(ItemStack s, TooltipContext c, "
+              "TooltipDisplay d, Consumer<Component> out, TooltipFlag f) {\n        List<Component> l = new ArrayList<>();\n"
+              "        appendHoverText(s, c, l, f);\n        l.forEach(out);\n    }\n\n    public void appendHoverText(ItemStack s, "
+              "TooltipContext c, List<Component> l, TooltipFlag f) {\n        l.add(Component.literal(\"x\"));\n    }\n}\n")
+    chk("a hand-written 1.21.5 Consumer bridge keeps its List helper (no duplicate)",
+        convert_text(bridge, hooks_crossing("1.21.4", "1.21.5"))[0] == bridge)
     chk("no extends: untouched", convert_text("class A { public void releaseUsing(ItemStack s, Level l, "
                                               "LivingEntity u, int t) {} }")[1] == [])
     bad = convert_text("class B extends Item { public boolean hurtEnemy(ItemStack s, LivingEntity t, LivingEntity a) "

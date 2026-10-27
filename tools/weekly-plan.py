@@ -800,6 +800,7 @@ def step_select(work):
         f["candidates"] = [{"id": e["id"], "severity": e["severity"], "lowest": e["lowest"], "title": e["title"],
                             "lowest_open": lo.get(e["id"])} for e in opened if e["id"] not in taken]
         f["ledger_ids"] = [e["id"] for e in every]
+        f["ledger_entries"] = [{k_: e.get(k_) for k_ in ("id", "severity", "title", "lowest", "status")} for e in every]
         if f.get("cascade") is not None:
             lowest_below(f, every)       # a version-branch fork only: a single-version fork has no branch below its one
         print(f"weekly-plan: {f['repo']}: {len(sel)} known issue(s) by default, {len(f['candidates'])} other open")
@@ -930,6 +931,11 @@ def step_previous(work, api=None, slug=None):
         frozen = k.read_plan(p, comments, k.owner_check(slug, owner, api), inp["now"])
         inp["previous"] = {"issue": p["number"], "frozen": frozen}
     inp["supersede"] = [i["number"] for i in older] if not same else []
+    try:                    # the ledger IDs the last plan listed: render-plan names what is new since (none: no change)
+        inp["last_plan"] = k.last_plan(slug, api)
+    except Exception as e:  # never stops the plan: without it the plan is rendered as before
+        print(f"weekly-plan: the last plan issue could not be read ({e}): no \"new since the last plan\" list")
+        inp["last_plan"] = None
     print(f"weekly-plan: owner {k.mention(owner)}; " + (f"this week's plan is already #{same[0]['number']}" if same else
           (f"carrying #{older[0]['number']} forward (no round closed it)" if older else "no earlier plan issue open")))
     save_input(work, inp)
@@ -1622,6 +1628,9 @@ def self_check():
         with contextlib.redirect_stdout(io.StringIO()):
             step_fetch(conf, lib, w, now=nxt, clone=lambda r: str(dep))
             step_cascade(w); step_select(w); step_previous(w, api, "o/lib")
+        lp_ = load_input(w).get("last_plan") or {}
+        expect(lp_.get("issue") == 11 and lp_["ids"].get("o/lib") == ["KI-1", "KI-2"],
+               f"the last plan's ledger IDs are read for render-plan's \"new since the last plan\": {lp_}")
         subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), "render-plan", "--input", str(w / "plan-input.json"),
                         "--out", str(w / "issue.json")], capture_output=True)
         with contextlib.redirect_stdout(io.StringIO()):
