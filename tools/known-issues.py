@@ -787,8 +787,20 @@ def render_plan(inp):
     escalated, data_forks = 0, []
     for f in forks:
         repo = f["repo"]
-        lines += [f"## {repo}" + (f" ({f['role']})" if f.get("role") else "") + f" -- head `{f['head']}`", "",
-                  "### The authors' new commits", ""]
+        lines += [f"## {repo}" + (f" ({f['role']})" if f.get("role") else "") + f" -- head `{f['head']}`", ""]
+        lp = inp.get("last_plan") or {}
+        if repo in lp.get("ids", {}):       # nothing new (or no earlier plan): the body is exactly as before
+            known = set(lp["ids"][repo])
+            fresh = [e for e in f.get("ledger_entries", []) if e["id"] not in known]
+            if fresh:
+                lines += [f"### New in the ledger since the last plan (#{lp['issue']})", "",
+                          "Added by the round (its findings, graded by the rubric) or by hand since then; each one open "
+                          "is in the lists below.", ""]
+                lines += [f"- `{e['id']}` **{e['severity']}** {md(e['title'])} (lowest {e['lowest']}; "
+                          + ", ".join(f"{v} {st}" for v, st in sorted(e.get("status", {}).items(), key=lambda x: mc_key(x[0])))
+                          + ")" for e in fresh]
+                lines.append("")
+        lines += ["### The authors' new commits", ""]
         n = f.get("new_count", 0)
         un = f.get("untaken") or []          # a version-branch fork's head: the authors' code no version has taken
         take = pauth.get(repo) if pauth.get(repo) is not None else True
@@ -1136,6 +1148,20 @@ def open_plan_issues(slug, api=gh_api):
     rows = gh_pages(f"/repos/{slug}/issues?state=open&creator=github-actions%5Bbot%5D", api)
     return sorted((i for i in rows if "pull_request" not in i and PLAN_MARK in (i.get("body") or "")),
                   key=lambda i: -i["number"])
+
+
+def last_plan(slug, api=gh_api):
+    """The newest plan issue of the repository, open or closed, as {"issue", "ids": {repo: [ledger IDs it listed]}}; None
+    when there is none or it carries no data block. render-plan's "New in the ledger since the last plan" reads it."""
+    rows = gh_pages(f"/repos/{slug}/issues?state=all&creator=github-actions%5Bbot%5D", api)
+    for i in sorted((i for i in rows if "pull_request" not in i and PLAN_MARK in (i.get("body") or "")),
+                    key=lambda i: -i["number"]):
+        try:
+            data = plan_data(i.get("body"))
+        except Invalid:
+            continue
+        return {"issue": i["number"], "ids": {f["repo"]: f.get("ids") or [] for f in data.get("forks", [])}}
+    return None
 
 
 def owner_check(slug, owner, api=gh_api):
@@ -2320,6 +2346,17 @@ def plan_check(expect, cli):
                       "selection": [], "candidates": [{"id": "KI-1", "severity": "S3", "lowest": "1.21.1", "title": "u"}]}]}
     res = render_plan(inp)
     b = res["body"]
+    # "New in the ledger since the last plan": a plan with nothing new is byte-identical; a new entry is listed
+    import copy
+    inp_n = copy.deepcopy(inp)
+    inp_n["forks"][0]["ledger_entries"] = [{"id": i, "severity": "S3", "title": f"t{i}", "lowest": "1.21.4",
+                                            "status": {"1.21.4": "open"}} for i in ("KI-1", "KI-2", "KI-3")]
+    inp_n["last_plan"] = {"issue": 5, "ids": {"o/lib": ["KI-1", "KI-2", "KI-3"], "o/dep": []}}
+    expect(render_plan(inp_n)["body"] == b, "a plan with no new ledger entry is byte-identical")
+    inp_n["last_plan"]["ids"]["o/lib"] = ["KI-1", "KI-2"]
+    bn = render_plan(inp_n)["body"]
+    expect("### New in the ledger since the last plan (#5)" in bn and "- `KI-3` **S3** tKI-3 (lowest 1.21.4; 1.21.4 open)"
+           in bn and bn.count("New in the ledger") == 1, f"a new ledger entry is listed under its fork: {bn}")
     expect(res["title"].startswith("[decision needed] Weekly plan 2026-10-20") and res["decision_needed"],
            f"an escalated decision: the title starts [decision needed]: {res['title']}")
     expect(b.split("\n")[1].startswith("**Deadline: the round starts Wednesday 2026-10-21") and "defaults below apply" in

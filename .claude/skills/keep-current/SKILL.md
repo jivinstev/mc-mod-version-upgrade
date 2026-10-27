@@ -676,7 +676,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      with the rubric's inputs (`known-issues.py grade`, the reason recorded; an owner's `/grade` from the plan counts;
      a crash, kick, data loss or hang is never re-graded below S2 but by the owner -- one nothing calls yet is S2 with
      `--reach latent`, and it blocks like any S2);
-     the versions above it wait too (they carry it by the cascade). An S3/S4 row is ledgered and does not block;
+     the versions above it wait too (they carry it by the cascade). An S3/S4 row is ledgered and does not block, and a
+     `not-ok` row that is an issue already in the ledger at S3/S4 that the plan left unticked is not the fixer's to fix
+     this round: only the round's selected fixes and an S1/S2 at the version block (the driver's fix job says so);
    - the merge of the version's PR (step 6's rule and "A fork with version branches" step 3), then its push run green
      (when it cuts a pre-release, awaited together with the release run: next item);
    - a pre-release through Port CI: dispatch the branch's workflow with `release=true` (never promote) -- only with
@@ -707,6 +709,15 @@ it small, so the orchestration is a tool, which replaces the four rules above:
    `--port-ref fix/<ID>` at the head's version when the plan does not take the authors' code); anything else stays in the
    ledger with its lowest version and the round goes on. At the version being worked: S2 fixed now, S3 only if cheap
    and local, S4 ledgered.
+   **On the driver (`tools/round.py`) the round ledgers every new finding itself:** the fixer and the re-checker write
+   one `finding: {...}` line per defect the ledger does not have (the rubric's inputs, its lowest version, the fix
+   commit when they fixed it), and the fork's ledger step adds each with `known-issues.py add` -- graded by the rubric,
+   open from its lowest version up to where it was found, `fixed@` where its fix reached -- and commits it with the
+   round's statuses on the head, the ledger file alone. Nothing is left uncommitted on a clone for the owner to find.
+   The ledger step sets `fixed@<commit>` only at the versions whose branch carries that commit (a backlog job's
+   `fixed:` line, a review or fix job's for a ledgered ID, or a commit of the round whose subject names the ID); a
+   version the fix did not reach stays open, and the note names it. The next plan lists the entries added since the
+   last plan issue under "New in the ledger since the last plan" (a plan with none is unchanged).
    **A round that stops** (a missing clone, a stop that needs the owner, no quota) **leaves the plan issue open**: say why in
    one comment; next Tuesday's plan carries its ticks and replies forward. Only step 6 closes it.
 6. **Close.** On the plan issue, one closing comment with the outcome -- per fork: the merged PRs, the pre-releases cut,

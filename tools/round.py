@@ -281,6 +281,30 @@ def full_gate_lock(who, say=print):
 
 # ---------------------------------------------------------------- init: the queue
 
+def fetch_version_branches(d):
+    """None, or why the clone cannot tell its kind: a shallow or single-branch clone (a cloud session's) has none of
+    origin's neoforge-<v> branches, so a version-branch fork would read as single-version. origin's neoforge-* branches
+    are fetched whole (and the clone made whole when it is shallow); a fetch that fails refuses."""
+    r = git(d, "ls-remote", "--heads", "origin", "refs/heads/neoforge-*")
+    if r.returncode:
+        return f"cannot list origin's branches ({(r.stderr or r.stdout).strip()[-200:]}): the fork's kind is read from them"
+    remote = sorted(ln.split("refs/heads/", 1)[1] for ln in r.stdout.splitlines() if "refs/heads/" in ln)
+    shallow = git(d, "rev-parse", "--is-shallow-repository").stdout.strip() == "true"
+    missing = [b for b in remote if git(d, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}").returncode]
+    if not missing and not shallow:
+        return None
+    r = git(d, "fetch", "-q", *(["--unshallow"] if shallow else []), "origin",
+            *[f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in remote])
+    if r.returncode:
+        return (f"a shallow or single-branch clone (missing {', '.join(missing) or 'its history'}), and fetching them "
+                f"failed: {(r.stderr or r.stdout).strip()[-200:]} -- clone the fork whole (no --depth/--single-branch)")
+    if missing and not any("*" in x for x in git(d, "config", "--get-all", "remote.origin.fetch").stdout.split()):
+        # a single-branch clone's fetch refspec names one branch: later `git fetch origin <b>` must update origin/<b>
+        git(d, "config", "--add", "remote.origin.fetch", "+refs/heads/neoforge-*:refs/remotes/origin/neoforge-*")
+    print(f"round: {d}: fetched origin's " + (", ".join(missing) if missing else "history (the clone was shallow)"))
+    return None
+
+
 def fork_kind(d):
     """'branches' (version branches: .port/<v>/branch.properties) or 'single' (tools/fork-kind.py; a legacy layer
     branch is history and ignored)."""
@@ -426,7 +450,13 @@ def build_queue(frozen, cfg, forks, date):
             prev = F["head"] if k == 0 else F["versions"][k - 1]
             if v in sync_v:      # first: its own commit, before the merge-up and long before the gates
                 q.add(slug, v, "sync", extra={"changes": sh_[v]["changes"]})
-            if k == 0 and not head_cascade:
+            if k == 0 and not head_cascade and at.get(base):
+                # a fix at the head's version with no head cascade: its fix/<ID> branch (cut from the lowest version's
+                # port_taken, so it holds none of the authors' untaken code) is carried up with --port-ref; the versions
+                # above take it by their own merge-ups (keep-current, "A fork with version branches" step 2)
+                q.add(slug, v, "mergeup", extra={"from": F["head"], "port_refs": [f"fix/{x['id']}" for x in at[base]],
+                                                 "why": "the head's fixes on their fix/<ID> branches (no authors' code)"})
+            elif k == 0 and not head_cascade:
                 q.add(slug, v, "mergeup", extra={"from": None, "why": "the plan does not take the authors' code: no "
                                                  "cascade from the head (only the selected fixes move)"})
             elif k == 0 and authors_up and any(d.get("choice") == "patch" for d in casc.get("decisions", [])):
@@ -695,6 +725,10 @@ def cmd_init(a):
         if why:
             print(f"round: {slug}: {why}")
             return 2
+        why = fetch_version_branches(d)
+        if why:
+            print(f"round: {slug}: {why}")
+            return 2
         kind = fork_kind(d)
         head = cf["head"]
         base = head[len("neoforge-"):] if head.startswith("neoforge-") else head
@@ -872,7 +906,11 @@ SUMMARY_FORMAT = (f"Write your summary, at most {SUMMARY_LINES} lines, to {{summ
                   "`RESULT: failed` (you could not finish; say where you stopped). Then, as they apply, one per line: "
                   "`not_ok: <n>` (a review or re-check: the not-ok rows left), `blocking: <ID> <S1|S2> <what>` (a "
                   "graded finding that blocks this version), `fixed: <ID> <sha>` (a selected known issue fixed, its fix "
-                  "commit), `lowest: <ID> <version>` (the lowest version a defect is at), `commit: <sha> <subject>`; then what changed, the gate verdicts and the open rows. Never "
+                  "commit), `lowest: <ID> <version>` (the lowest version a defect is at), `finding: {{\"title\": ..., "
+                  "\"failure\": ..., \"visibility\": ..., \"reach\": ..., \"workaround\": \"yes|no\", \"lowest\": \"<version>\"[, "
+                  "\"fixed\": \"<sha>\"][, \"files\": [...]]}}` (one JSON line per NEW defect -- not in the fork's "
+                  ".port/KNOWN-ISSUES.json -- with the rubric's values (known-issues.py add --help); the driver adds it to "
+                  "the ledger and commits it, `fixed` only when you fixed it here, its commit), `commit: <sha> <subject>`; then what changed, the gate verdicts and the open rows. Never "
                   "paste logs or diffs into it. Your final reply is only that file's path.")
 
 
@@ -1117,20 +1155,27 @@ def job_task(st, it):
                                                                       "committed (a version branch) or in the summary.")]
     if s == "fix":
         rev = st.rdir / "round/summaries" / (job_id(st.item(it["id"].rsplit(":", 1)[0] + ":review")) + ".md")
-        return [f"You are the FIXER of {it['fork']} {v}: fix every not-ok row of the review "
+        return [f"You are the FIXER of {it['fork']} {v}: fix the not-ok rows of the review "
                 + (f"(.port/{v}/REVIEW.md on {br})" if vb or sv else f"({rev})") + f" on {w}, one commit per fix, A/B kept "
-                "green. Never edit a verdict. Write `fixed:` lines only for selected known issues.",
-                f"Acceptance: each not-ok row fixed and committed on {br}, or RESULT: blocked with why."]
+                "green. Never edit a verdict. Write `fixed:` lines for the known issues you fix (their ledger IDs).",
+                f"Which rows block (keep-current step 4): a selected known issue of this round and an S1 or S2 at {v} -- "
+                "fix each, or RESULT: blocked with why. A row that is a known issue already in .port/KNOWN-ISSUES.json "
+                "at S3/S4 that the plan left unticked does not block and is not this round's to fix: leave it, name its "
+                "ID in the summary. A row the ledger does not have yet is a new finding: fix it when the fix is small "
+                "and local (its `finding:` line with \"fixed\"), else leave it -- the re-checker grades and ledgers what is left.",
+                f"Acceptance: each blocking row fixed and committed on {br} (the rest named), or RESULT: blocked with why."]
     if s == "recheck":
         return [f"You are a FRESH RE-CHECKER of {it['fork']} {v} (neither the reviewer nor the fixer): re-check only the "
                 "rows the fixes changed -- " + (f"the rows `python3 {T / 'fork-port.py'} --repo {co} --target {v} "
                 "--check-done` reports stale since the review" if vb else f"the rows `python3 {T / 'fork-branches.py'} "
                 f"check-done --repo {co} --target {v}` reports stale since the review" if sv
                 else "the files the fixer's commits changed") + ".",
-                "That is the stopping rule (keep-current step 4): no second full review. Each not-ok row left is a "
-                f"finding: grade it with `python3 {T / 'known-issues.py'} add` at its lowest affected version (step 5; "
-                "a WARNING that it may repeat an entry: read that entry first). An S1 or S2 at this version blocks its "
-                "merge: write its `blocking:` line and RESULT: blocked. S3/S4 are ledgered and do not block.",
+                "That is the stopping rule (keep-current step 4): no second full review. Each not-ok row left that the "
+                "ledger (.port/KNOWN-ISSUES.json) does not have is a finding: write its `finding:` line, graded by the "
+                f"rubric (`python3 {T / 'known-issues.py'} add --help`) at its lowest affected version (step 5; read the "
+                "entries first: a row the ledger has already is named by its ID, not added again). The driver adds each "
+                "one to the ledger and commits it. An S1 or S2 at this version blocks its merge: write its `blocking:` "
+                "line and RESULT: blocked. S3/S4 are ledgered and do not block.",
                 f"Acceptance: the changed rows have verdicts (committed on {br}); `not_ok: <n>` in the summary."]
     if s == "decisions":
         x = it["extra"]
@@ -1232,13 +1277,20 @@ def clean(d):
         raise StepError(f"the clone {d} has uncommitted changes: {r.stdout.strip().splitlines()[0]} ...")
 
 
+def worktree_of(d, branch):
+    """The path git prints for the worktree that has `branch` checked out, or None. The branch line must match exactly:
+    `branch refs/heads/neoforge-1.21.1` is a prefix of the 1.21.10 and 1.21.11 worktrees' lines."""
+    for block in git(d, "worktree", "list", "--porcelain").stdout.split("\n\n"):
+        if f"branch refs/heads/{branch}" in block.splitlines():
+            return block.split("\n", 1)[0].split(" ", 1)[1]
+    return None
+
+
 def holder(d, branch):
     """The worktree (the clone itself included) that has `branch` checked out, or None."""
-    for block in git(d, "worktree", "list", "--porcelain").stdout.split("\n\n"):
-        if f"branch refs/heads/{branch}" in block:
-            # git prints C:/... on Windows: the platform's own form, so it compares with the paths the driver builds
-            return str(pathlib.Path(block.split("\n", 1)[0].split(" ", 1)[1]))
-    return None
+    wt = worktree_of(d, branch)
+    # git prints C:/... on Windows: the platform's own form, so it compares with the paths the driver builds
+    return str(pathlib.Path(wt)) if wt else None
 
 
 def checkout(d, branch, create_from=None):
@@ -1273,10 +1325,7 @@ def vco(st, fork, v):
 def ff_local(d, branch):
     """The local branch fast-forwarded to origin's (after a merge), wherever it is checked out."""
     git(d, "fetch", "-q", "origin", branch, check=True)
-    wt = None
-    for block in git(d, "worktree", "list", "--porcelain").stdout.split("\n\n"):
-        if f"branch refs/heads/{branch}" in block:
-            wt = block.split("\n", 1)[0].split(" ", 1)[1]
+    wt = worktree_of(d, branch)
     if wt:
         git(wt, "merge", "-q", "--ff-only", f"origin/{branch}", check=True)
     elif git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
@@ -1295,6 +1344,21 @@ def push_ahead(d, branch):
             raise StepError(f"push {branch}: {(r.stderr or r.stdout).strip()[-300:]}")
         return True
     return False
+
+
+RECORD_FILES = ("DRIFT.md", "COST.md", "TEST-ITEMS.md")
+
+
+def commit_records(d, v):
+    """Records-only changes an earlier step left in the checkout (.port/<v>/DRIFT.md, COST.md, TEST-ITEMS.md), committed
+    BEFORE the gates so the gated head carries them and the tree is clean; any other change stays and is refused."""
+    lines = [x for x in git(d, "status", "--porcelain", "--untracked-files=all").stdout.splitlines() if x.strip()]
+    paths = [x[3:].strip().strip('"') for x in lines]
+    recs = [p for p in paths if p in {f".port/{v}/{f}" for f in RECORD_FILES}]
+    tracked_other = [p for x, p in zip(lines, paths) if not x.startswith("??") and p not in recs]
+    if not recs or tracked_other:
+        return None
+    return commit_paths(d, recs, f"Records for {v} before its gates (keep-current round)")
 
 
 def commit_paths(d, paths, message):
@@ -1361,7 +1425,35 @@ def t_ci_check(st, it, log):
     warn = [ln for ln in log_since(log, at).splitlines() if "WARNING" in ln]
     if warn:
         raise StepError(f"{len(warn)} workflow warning(s): {warn[0][:300]}")
-    return "workflows current", {}
+    pushed = push_ci_regen(st, it)
+    return "workflows current" + (f"; the regeneration pushed on {', '.join(pushed)}" if pushed else ""), {"pushed": pushed}
+
+
+def push_ci_regen(st, it):
+    """The ci-check fixer's workflow regeneration, pushed on each branch (the head included) that has no PR item this
+    round -- nothing else would push it, and the clone would diverge from origin. Only commits that change .github/
+    alone go out this way; anything else on such a branch stops here. -> the branches pushed."""
+    F, d, pushed = st.fork(it["fork"]), st.fork(it["fork"])["dir"], []
+    for v in [F["base"]] + F["versions"]:
+        br = F["head"] if v == F["base"] else f"neoforge-{v}"
+        if any(x["fork"] == it["fork"] and x["version"] == v and x["step"] == "pr" for x in st.items):
+            continue                        # its PR carries the regeneration
+        if git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}").returncode:
+            continue
+        git(d, "fetch", "-q", "origin", br, check=True)
+        if not git(d, "rev-list", f"origin/{br}..refs/heads/{br}").stdout.strip():
+            continue
+        other = [f for f in git(d, "diff", "--name-only", f"origin/{br}", f"refs/heads/{br}").stdout.splitlines()
+                 if not f.startswith(".github/")]
+        if other:
+            raise StepError(f"{br} holds local commits beyond the workflow regeneration ({', '.join(other[:5])}) and has "
+                            "no PR item this round: not pushed; push or drop them by hand")
+        if "push-version-branches" not in st.data["allow"]:
+            raise StepError(f"{br}'s regenerated workflow is committed locally, and the set does not allow "
+                            "push-version-branches: push it by hand (a fast-forward)")
+        push_ahead(d, br)
+        pushed.append(br)
+    return pushed
 
 
 def sv_ci_check(st, it, log):
@@ -1495,6 +1587,17 @@ def t_mergeup(st, it, log):
         cmd += ["--apply-decisions", dec]
     else:
         cmd += [f"{frm}..{v}"]
+    refs = x.get("port_refs") or []
+    if refs:
+        missing = [r for r in refs if git(d, "rev-parse", "--verify", "--quiet", f"{r}^{{commit}}").returncode]
+        if missing:
+            raise StepError(f"{', '.join(missing)}: no such branch -- the head's backlog job cuts fix/<ID> from the lowest "
+                            "version's port_taken, fixes the issue there and merges it into the head "
+                            "(\"A fork with version branches\" step 2); without it the fix never leaves the head")
+        for r in refs:
+            sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "cascade", "--repo", d, f"{frm}..{v}", "--port-ref", r,
+                        "--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
+        return f"{', '.join(refs)} carried into neoforge-{v} (--port-ref), A/B green", {}
     sh(st, it, cmd + ["--gates", "ab", "--untaken-ok", st.data["frozen"]], log)
     return f"{frm} merged into neoforge-{v}, A/B green", {}
 
@@ -1513,17 +1616,35 @@ def t_repin(st, it, log):
         sh(st, it, [sys.executable, TOOLS / "layer-deps.py", "resolve", "--repo", d, "--target", v,
                     "--port-release", f"{lb}@{tag}"], log)
         pins.append(f"{lb}@{tag}")
+    fb = mod("fb")
+    props = fb.parse_props(fb.read_file(pathlib.Path(d) / fb.REC / v / fb.BRANCH_PROPS))
+    released = {pin.split("@", 1)[0] for pin in pins}
+    lib_ga = {k[len("port_jar."):] for k, val in props.items() if k.startswith("port_jar.") and val
+              and (fb.PIN_URL.match(val.split()[0]) or [None, None])[1] in released}
+    skipped = []
     for b in it["extra"]["bumps"]:
+        if b.get("ga") in lib_ga:
+            # the plan's bump names the library's release as it was on Tuesday (its base tag); this round's own release
+            # (its -rN, just pinned above) supersedes it, and running it would pin the older cut again
+            skipped.append(b.get("id") or b["ga"])
+            continue
         cmd = shlex.split(b["command"].replace("mmvu/tools/", str(TOOLS) + "/"))
         cmd = [d if c.startswith("<checkout of neoforge-") else c for c in cmd]
         sh(st, it, [sys.executable if c == "python3" else c for c in cmd], log)
+    for lb, tag in [x.split("@", 1) for x in pins]:
+        got = sorted({m.group(2) for val in fb.parse_props(fb.read_file(pathlib.Path(d) / fb.REC / v / fb.BRANCH_PROPS)).values()
+                      for m in [fb.PIN_URL.match((val.split() or [""])[0])] if m and m.group(1) == lb})
+        if got and got != [tag]:
+            raise StepError(f"{lb} {v}: the re-pin left {', '.join(got)} pinned, not this round's release {tag}")
     if pins:
         modid = mod("fb").parse_props(mod("fb").read_file(pathlib.Path(d) / "gradle.properties")).get("mod_id")
         if not modid:
             raise StepError("no mod_id in gradle.properties: run fork-branches.py ci --target <v> --modid ID --run")
         sh(st, it, [sys.executable, TOOLS / "fork-branches.py", "ci", "--repo", d, "--target", v, "--modid", modid, "--run"], log)
     c = commit_paths(d, ["."], f"Re-pin {', '.join(pins) or 'dependencies'} at {v} (keep-current round)")
-    return ("re-pinned " + ", ".join(pins) if pins else f"{len(it['extra']['bumps'])} bump(s)") + (f", {c[:12]}" if c else ""), {"pins": pins}
+    return (("re-pinned " + ", ".join(pins) if pins else f"{len(it['extra']['bumps'])} bump(s)") + (f", {c[:12]}" if c else "")
+            + (f"; the plan's bump(s) {', '.join(skipped)} superseded by this round's release" if skipped else "")), {
+        "pins": pins, "superseded_bumps": skipped}
 
 
 def sv_gate_cmds(d, upstream_commit=None, base_ref=None):
@@ -1626,6 +1747,7 @@ def t_gates(st, it, log):
     F, v = st.fork(it["fork"]), it["version"]
     if is_vb(st, it):
         d = vco(st, it["fork"], v)
+        pre = commit_records(d, v)
         clean(d)
         for j in built_jars(d):
             j.unlink()
@@ -1638,9 +1760,10 @@ def t_gates(st, it, log):
         if why:
             raise StepError(f".port/{v}/GATES.md: {why}")
         c = commit_paths(d, [f".port/{v}"], f"Gate records for {v} (keep-current round)")
-        return "full gates green" + (f", records {c[:12]}" if c else ""), {"gated_head": gated, "gated_at": at,
+        return "full gates green" + (f", records {pre[:12]} before" if pre else "") + (f", records {c[:12]}" if c else ""), {"gated_head": gated, "gated_at": at,
                                                                             "head_after": head(d)}
     d = checkout(F["dir"], branch_of(st, it))
+    commit_records(d, v)
     if seg_ids(st, it, ("depgate",)):       # a library's candidate: only a jar this run builds counts (t_depgate)
         for j in built_jars(d):
             j.unlink()
@@ -2075,11 +2198,15 @@ def t_release(st, it, log):
     if not ok:
         raise StepError(f"the release run on {base}: {text}")
     rx = re.compile(TAG_RE.format(v=re.escape(v)))
+    # published_at is when the release was made; created_at is the tagged commit's time, which precedes the dispatch
     rel = [r for r in gh(f"repos/{slug}/releases?per_page=30") if rx.search(r.get("tag_name", ""))
-           and (r.get("created_at") or "") >= since[:19]]
+           and (r.get("published_at") or r.get("created_at") or "") >= since[:19]]
     if not rel:
         raise StepError(f"the release run is green but no release tagged *-mc{v} was created after {since}")
-    tag = rel[0]["tag_name"]
+    # the newest cut: the list is not in release order (and a base tag can still be listed first), so the release
+    # published last, and of those the highest -rN, is the one this run made -- the tag every re-pin uses
+    rn = lambda t: int((re.search(r"-r(\d+)$", t) or [0, 1])[1])
+    tag = max(rel, key=lambda r: ((r.get("published_at") or r.get("created_at") or ""), rn(r["tag_name"])))["tag_name"]
     P = st.data["plan"]
     pr = seg_item(st, it, "pr")["result"]
     with contextlib.suppress(Exception):
@@ -2114,7 +2241,7 @@ def t_ledger(st, it, log):
                 and x["status"] != "ok"]
     d = checkout(d, F["head"])
     ff_local(d, F["head"])
-    sets, refused = 0, []
+    sets, refused, found_new = 0, [], []
     if (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file():
         # LOWEST FIRST's findings: open at the lower versions, `lowest` moved down -- before the fixed@ statuses
         late = late_lowest(st, it["fork"])
@@ -2124,36 +2251,114 @@ def t_ledger(st, it, log):
             sh(st, it, [sys.executable, TOOLS / "known-issues.py", "status", ident, "--repo", d, "--set",
                         f"{','.join(vs)}=open", "--lowest", low], log)
             sets += 1
+        ki_ = mod("ki")
+        led_path = pathlib.Path(d) / ".port/KNOWN-ISSUES.json"
+        try:
+            ids = {e["id"] for e in ki_.read_ledger(led_path)["issues"]}
+        except ki_.Invalid:
+            ids = set()
+        done = set()
+        titles = set()
+        with contextlib.suppress(ki_.Invalid):
+            titles = {e["title"].strip().lower() for e in ki_.read_ledger(led_path)["issues"]}
+
+        def set_fixed(ident, sha, at, how):
+            """fixed@sha at every merged version from `at` up whose branch CARRIES sha -- never assumed from the merges
+            alone: a version a fix did not reach (no head cascade, a failed merge-up) stays open."""
+            nonlocal sets
+            br = f"neoforge-{at}" if at != F["base"] else F["head"]
+            git(d, "fetch", "-q", "origin", br)
+            if git(d, "merge-base", "--is-ancestor", sha, f"origin/{br}").returncode:
+                refused.append(f"{ident} ({sha[:12]} is not on the merged {br})")
+                return
+            reached = []
+            for v in order[order.index(at):]:
+                if v not in merged:
+                    break
+                vb_ = f"neoforge-{v}" if v != F["base"] else F["head"]
+                if v != at:
+                    git(d, "fetch", "-q", "origin", vb_)
+                    if git(d, "merge-base", "--is-ancestor", sha, f"origin/{vb_}").returncode:
+                        refused.append(f"{ident} ({sha[:12]} did not reach {vb_}: open there)")
+                        break
+                reached.append(v)
+            if not reached:
+                return
+            try:      # a fix made below the entry's `lowest` (moved down) moves `lowest` with it
+                below = ki_.mc_key(reached[0]) < ki_.mc_key(ki_.find(ki_.read_ledger(led_path), ident)["lowest"])
+            except ki_.Invalid:
+                below = False
+            sh(st, it, [sys.executable, TOOLS / "known-issues.py", "status", ident, "--repo", d, "--set",
+                        f"{','.join(reached)}=fixed@{sha}", *(["--lowest", reached[0]] if below else [])], log)
+            sets += 1
+            done.add(ident)
+        # the round's own findings: each new defect a job graded (its `finding:` line) is added to the ledger here,
+        # open from its lowest version up to where it was found, and fixed@ where its fix reached
+        for x in st.items:
+            if x["fork"] != it["fork"] or x["status"] != "ok" or x["version"] not in order:
+                continue
+            for fd in x["result"].get("findings", []):
+                title = str(fd.get("title") or "").strip()
+                if not title or "invalid" in fd:
+                    refused.append(f"a finding at {x['version']} ({fd.get('invalid') or 'no title'}): not added")
+                    continue
+                if title.lower() in titles:
+                    continue                # the fixer's and the re-checker's line for one defect, or one ledgered
+                low = str(fd.get("lowest") or x["version"])
+                try:
+                    vs = sorted({low} | {v for v in order if ki_.mc_key(low) <= ki_.mc_key(v) <= ki_.mc_key(x["version"])},
+                                key=ki_.mc_key)
+                except ValueError:
+                    refused.append(f"finding {title!r}: lowest {low!r} is not a version")
+                    continue
+                cmd = [sys.executable, TOOLS / "known-issues.py", "add", "--repo", d, "--title", title,
+                       "--lowest", low, "--notes", f"found by the round at {x['version']} ({x['step']})"]
+                for k_ in ("failure", "visibility", "reach", "workaround"):
+                    cmd += [f"--{k_}", str(fd.get(k_) or "")]
+                cmd += sum([["--status", f"{v}=open"] for v in vs], [])
+                cmd += sum([["--file", str(f_)] for f_ in fd.get("files") or [] if isinstance(f_, str)], [])
+                r = sh(st, it, cmd, log, ok=(0, 1, 2))
+                m = re.search(r"(?m)^(\S+): S[1-4] ", r.stdout or "")
+                if r.returncode or not m:
+                    refused.append(f"finding {title!r}: known-issues.py add refused it ({(r.stdout or '').strip()[-200:]})")
+                    continue
+                titles.add(title.lower())
+                ids.add(m.group(1))
+                found_new.append(m.group(1))
+                if fd.get("fixed"):
+                    set_fixed(m.group(1), str(fd["fixed"]), x["version"], "finding")
+        for x in st.items:
+            if x["fork"] != it["fork"] or x["status"] != "ok" or x["version"] not in order:
+                continue
+            given = {f_["id"] for f_ in x["extra"].get("fixes", [])} if x["step"] == "backlog" else ids
+            for ident, sha in x["result"].get("fixed", []):
+                if ident not in given:
+                    refused.append(f"{ident} (" + ("not one this job was given)" if x["step"] == "backlog"
+                                                   else "not an ID of the ledger)"))
+                    continue
+                set_fixed(ident, sha, x["version"], x["step"])
+        # a selected fix whose job wrote no `fixed:` line: its commit is found by the ID in a subject made this round
         for x in st.items:
             if x["fork"] != it["fork"] or x["step"] != "backlog" or x["status"] != "ok":
                 continue
-            given = {f_["id"] for f_ in x["extra"].get("fixes", [])}
             br = f"neoforge-{x['version']}" if x["version"] != F["base"] else F["head"]
-            for ident, sha in x["result"].get("fixed", []):
-                if ident not in given:
-                    refused.append(f"{ident} (not one this job was given)")
+            for f_ in x["extra"].get("fixes", []):
+                if f_["id"] in done:
                     continue
-                git(d, "fetch", "-q", "origin", br)
-                if git(d, "merge-base", "--is-ancestor", sha, f"origin/{br}").returncode:
-                    refused.append(f"{ident} ({sha[:12]} is not on the merged {br})")
-                    continue
-                k = order.index(x["version"])
-                reached = []
-                for v in order[k:]:            # carried up only as far as the merges reached, unbroken
-                    if v not in merged:
-                        break
-                    reached.append(v)
-                if reached:
-                    ki_ = mod("ki")
-                    try:      # a fix made below the entry's `lowest` (moved down) moves `lowest` with it
-                        below = ki_.mc_key(reached[0]) < ki_.mc_key(
-                            ki_.find(ki_.read_ledger(pathlib.Path(d) / ".port/KNOWN-ISSUES.json"), ident)["lowest"])
-                    except ki_.Invalid:
-                        below = False
-                    sh(st, it, [sys.executable, TOOLS / "known-issues.py", "status", ident, "--repo", d, "--set",
-                                f"{','.join(reached)}=fixed@{sha}", *(["--lowest", reached[0]] if below else [])], log)
-                    sets += 1
-        commit_paths(d, [".port/KNOWN-ISSUES.json"], "Known issues: the round's fixes (keep-current round)")
+                r = git(d, "log", "--format=%H", "--reverse", f"--since={st.data['round_start']}", "-E",
+                        f"--grep=(^|[^A-Za-z0-9-]){re.escape(f_['id'])}([^0-9]|$)", f"origin/{br}")
+                hit = r.stdout.split()
+                if hit:
+                    set_fixed(f_["id"], hit[0], x["version"], "subject")
+                else:
+                    refused.append(f"{f_['id']} (no `fixed:` line and no commit naming it on {br})")
+        commit_paths(d, [".port/KNOWN-ISSUES.json"], "Known issues: the round's fixes" + (
+            f" and new findings {', '.join(found_new)}" if found_new else "") + " (keep-current round)")
+    else:
+        lost = sum(len(x["result"].get("findings", [])) for x in st.items if x["fork"] == it["fork"] and x["status"] == "ok")
+        if lost:
+            refused.append(f"{lost} finding(s) not ledgered: the fork has no .port/KNOWN-ISSUES.json; they are in the "
+                           "jobs' summaries")
     # a single-version fork with no known-issues ledger gets no README Ports block (nothing for it to link)
     if merged and not (F["kind"] == "single" and not (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").is_file()):
         sh(st, it, [sys.executable, TOOLS / "known-issues.py", "render-ports", "--repo", d, "--head", F["head"],
@@ -2162,8 +2367,9 @@ def t_ledger(st, it, log):
     pushed = push_ahead(d, F["head"])
     note = (f"{sets} status update(s){'' if merged else ', no version merged'}" + (", pushed" if pushed else "")
             + (f"; NOT merged this round: {', '.join(unmerged)}" if unmerged else "")
+            + (f"; new in the ledger: {', '.join(found_new)}" if found_new else "")
             + (f"; refused: {'; '.join(refused)}" if refused else ""))
-    return note, {"unmerged": unmerged, "refused": refused}
+    return note, {"unmerged": unmerged, "refused": refused, "added": found_new}
 
 
 TOOL_IMPL = {"ci-check": t_ci_check, "grades": t_grades, "setup": t_setup, "upstream": t_upstream, "sync": t_sync,
@@ -2364,6 +2570,12 @@ def parse_summary(text):
             res["commits"].append(k.group(1))
         elif (k := re.match(r"^lowest:\s*(\S+)\s+(\d+(?:\.\d+){1,3})\s*$", ln)):
             res["lowest"].append([k.group(1), k.group(2)])
+        elif (k := re.match(r"^finding:\s*(.+?)\s*$", ln)):
+            try:
+                fd = json.loads(k.group(1))
+            except ValueError:
+                fd = None
+            res.setdefault("findings", []).append(fd if isinstance(fd, dict) else {"invalid": ln[:200]})
     return res
 
 
@@ -2435,6 +2647,8 @@ def cmd_record(a, out=print):
                "summary": str(a.summary or "")}
         if parsed["lowest"]:
             res["lowest"] = parsed["lowest"]
+        if parsed.get("findings"):
+            res["findings"] = parsed["findings"]
         if "not_ok" in parsed:
             res["not_ok"] = parsed["not_ok"]
         if fixing:
@@ -2759,7 +2973,9 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
              and f"examplevlib@1.21.4:depgate:{S4}" in by and f"examplevlib@1.21.5:depgate:{S4}" not in by
              and "examplevlib@1.21.4:release" in by["examplesv4@1.21.4:repin-head"]["deps"]
              and "examplevlib@1.21.1:release" in by["examplesvmod@1.21.1:repin-head"]["deps"]
-             and "examplevlib@1.21.4:mergeup" in by and "examplesvmod@1.21.1:upstream" in by,
+             and "examplevlib@1.21.4:mergeup" in by and "examplesvmod@1.21.1:upstream" in by
+             and by["examplevlib@1.21.4:mergeup"]["extra"].get("from") == "neoforge-1.21.1"
+             and by["examplevlib@1.21.4:mergeup"]["extra"].get("port_refs") == ["fix/VL-1"],
              f"a version-branch library, single-version dependents: its head keeps its order and gains the dependent's "
              f"gate; its 1.21.4 version gates the dependent at 1.21.4: {rc} {o} {ids_of(items, VL)}")
         calls, stat, resumed = drive_all(sb, kill="examplevlib@1.21.4:mergeup")
@@ -2854,7 +3070,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
             if path.endswith("/pulls/9/merge"):
                 return {"sha": prs.get("sha")}
             if "/releases" in path:
-                return [{"tag_name": "examplesvlib-1.0-mc1.21.1", "created_at": "2999-01-01T00:00:00Z"}]
+                return [{"tag_name": "examplesvlib-1.0-mc1.21.1", "created_at": "2000-01-01T00:00:00Z", "published_at": "2999-01-01T00:00:00Z"}]
             return {}
         gh = fake_gh
 
@@ -2940,6 +3156,9 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         mb_ = git(sl, "merge-base", "origin/neoforge-1.21.1", "HEAD").stdout.strip()
         want(f"fork-branches.py check-done --repo {sl} --target 1.21.1 --base {mb_}" in rv_ and "REVIEW.md on" in fx_,
              f"the single-version review job: the done list's REVIEW.md, against the round's base: {rv_} {fx_}")
+        # the fix job's blocking rule is the skill's: selected fixes and S1/S2 block; ledgered unticked S3/S4 rows do not
+        want("an S1 or S2 at 1.21.1 -- fix each, or RESULT: blocked" in fx_ and "S3/S4 that the plan left unticked does "
+             "not block" in fx_ and "fix every not-ok row" not in fx_, f"the fix job's blocking rule: {fx_}")
         note, r_ = step(sa2, "examplesvlib@1.21.1:records")
         rec_ = git(sl, "show", "--name-only", "--format=", "HEAD").stdout.split()
         want(sorted(rec_) == [".port/1.21.1/INVENTORY-CHECK.json", ".port/1.21.1/REVIEW.md", ".port/1.21.1/TEST-ITEMS.md"]
@@ -3278,6 +3497,19 @@ def self_check():
         fz_w = dict(fz_s, forks=[{"repo": "owner/examplewrong", "head": "neoforge-1.21.1", "take_authors": True}])
         rc, o, _ = init(fz_w, cf_w, [f"owner/examplewrong={wrong}"], str(tmp / "wr/round/STATE.json"))
         expect(rc == 2 and "someone/other" in o, f"a clone whose origin is not github.com/<owner/repo> is refused: {o}")
+        # a shallow single-branch clone (a cloud session's) of a version-branch fork: its version branches are fetched
+        # and it inits as version branches, never as single-version
+        shc = tmp / "shallow-lib"
+        git(tmp, "clone", "-q", "--depth", "1", "--single-branch", "--branch", "neoforge-1.21.1",
+            (tmp / "examplelib.git").resolve().as_uri(), str(shc), check=True)
+        git(shc, "remote", "set-url", "origin", "https://github.com/owner/examplelib.git")
+        git(shc, "config", f"url.{(tmp / 'examplelib.git').as_posix()}.insteadOf", "https://github.com/owner/examplelib.git")
+        fz_l = dict(fz_s, forks=[{"repo": LIB, "head": "neoforge-1.21.1", "take_authors": False, "selected": []}])
+        cf_l = {"forks": [{"repo": LIB, "head": "neoforge-1.21.1", "role": "library"}], "allow": []}
+        rc, o, _ = init(fz_l, cf_l, [f"{LIB}={shc}"], str(tmp / "sh/round/STATE.json"))
+        expect(rc == 0 and f"{LIB}: branches 1.21.1..1.21.8" in o
+               and git(shc, "rev-parse", "--is-shallow-repository").stdout.strip() == "false",
+               f"a shallow single-branch clone fetches origin's version branches and inits as version branches: {o}")
         # ---- the queue: only versions with work
         rc, o, items = init(fz(lib_sel=False, dep_take=False, bumps=False), cfg, both, str(tmp / "empty/round/STATE.json"))
         expect(rc == 0 and [it["id"] for it in items] == ["round:close"],
@@ -3678,7 +3910,9 @@ def self_check():
             if path.endswith("/pulls/5/merge"):
                 return {"sha": lsha.get("pr")}
             if "/releases" in path:
-                return [{"tag_name": "examplelib-1.0-mc1.21.4", "created_at": "2999-01-01T00:00:00Z"}]
+                # the base cut listed first (as GitHub may): this run's release is the -r2 published after it
+                return [{"tag_name": "examplelib-1.0-mc1.21.4", "created_at": "2000-01-01T00:00:00Z", "published_at": "2999-01-01T00:00:00Z"},
+                        {"tag_name": "examplelib-1.0-mc1.21.4-r2", "created_at": "2000-01-01T00:00:00Z", "published_at": "2999-01-01T00:00:05Z"}]
             return {}
         gh = fake_gh
         rs = str(tmp / "real/round/STATE.json")
@@ -3807,7 +4041,7 @@ def self_check():
         runs.update({"workflow_dispatch": "success", "push": "success"})
         api.clear()
         note, r_ = step("examplelib@1.21.4:release", dispatching_at="2026-10-21T16:00:00Z")
-        expect(r_.get("tag") == "examplelib-1.0-mc1.21.4" and not any("/dispatches" in p_ for m, p_, d_ in api),
+        expect(r_.get("tag") == "examplelib-1.0-mc1.21.4-r2" and not any("/dispatches" in p_ for m, p_, d_ in api),
                f"an earlier dispatch's run is found: no second dispatch: {note} {api}")
         api.clear()
         setres("examplelib@1.21.4:release")
@@ -3910,6 +4144,8 @@ def self_check():
                == {"status": "blocked", "blocking": ["X-1 S2 kick"], "fixed": [["X-2", "abc1234"]], "commits": [], "not_ok": 2,
                    "lowest": [["X-3", "1.21.4"]]},
                "the summary format")
+        expect(parse_summary('RESULT: ok\nfinding: {"title": "t", "lowest": "1.21.4"}\nfinding: {bad\n')["findings"]
+               == [{"title": "t", "lowest": "1.21.4"}, {"invalid": "finding: {bad"}], "a finding line: JSON, or marked invalid")
         # the plan's grade overrides are the owner's: t_grades applies a /grade below S2 on a crash (--owner), which
         # known-issues.py refuses from anyone else
         gd = tmp / "grades-fork"
@@ -3956,9 +4192,11 @@ def self_check():
 
         class _St2:
             rdir = rd_
-            data = {"plan": {"issue": 9}}
-            def fork(self, _):
-                return {"dir": str(gd), "kind": "version", "name": "x"}
+            data = {"plan": {"issue": 9}, "allow": []}
+            items = []
+            def fork(self, _):          # a head this clone has no branch of: no regeneration to push
+                return {"dir": str(gd), "kind": "version", "name": "x", "head": "neoforge-9.9", "base": "9.9",
+                        "versions": []}
             def item(self, _):
                 return {"result": {}}
         log_ = str(tmp / "vb-ci-check.log")
@@ -3983,6 +4221,185 @@ def self_check():
                 c_ = seen_cmds[-1]
                 expect(("--untaken-ok" in c_ and c_[c_.index("--untaken-ok") + 1] == str(fz_)) == present,
                        f"the freeze step passes --untaken-ok <round/frozen.json> exactly when the round has one: {c_}")
+            # a head fix with no head cascade goes up on its fix/<ID> branch (--port-ref); a missing branch is a stop
+            class _St3(_St2):
+                data = {"plan": {"issue": 9}, "frozen": str(fz_)}
+            subprocess.run(["git", "clone", "-q", "--bare", str(gd), str(tmp / "grades-origin.git")], check=True,
+                           capture_output=True)
+            git(gd, "remote", "add", "origin", str(tmp / "grades-origin.git"))
+            mu = {"fork": "o/x", "version": "1.21.4", "extra": {"from": "neoforge-1.21.1", "port_refs": ["fix/X-1"]}}
+            try:
+                t_mergeup(_St3(), mu, log_)
+                expect(False, "a missing fix/<ID> branch was carried")
+            except StepError as e:
+                expect("fix/X-1" in str(e), f"a missing fix branch stops the merge-up, named: {e}")
+            git(gd, "branch", "fix/X-1")
+            seen_cmds.clear()
+            note, _r = t_mergeup(_St3(), mu, log_)
+            c_ = seen_cmds[-1] if seen_cmds else []
+            expect("--port-ref" in c_ and c_[c_.index("--port-ref") + 1] == "fix/X-1" and "neoforge-1.21.1..1.21.4" in c_,
+                   f"the head's fix branch is cascaded into the first version with --port-ref: {note} {c_}")
+            # the ledger step sets fixed@ only where the branch carries the fix: a head fix with no head cascade stays
+            # open at 1.21.4 (it never reached it); a review job's `fixed:` line counts; a backlog job that wrote no
+            # `fixed:` line is found by the ID in a commit subject of the round
+            lr = tmp / "ledger-fork"
+            lr.mkdir()
+            git(lr, "init", "-q", "-b", "neoforge-1.21.1")
+            mk = lambda i, sts: ["add", "--repo", str(lr), "--id", i, "--title", f"{i} defect", "--failure", "functional",
+                                 "--visibility", "common", "--reach", "normal", "--workaround", "no", "--lowest",
+                                 sorted(sts)[0], *sum([["--status", f"{v_}=open"] for v_ in sts], [])]
+            for args_ in (mk("X-1", ["1.21.1", "1.21.4"]), mk("X-2", ["1.21.4"])):
+                subprocess.run([sys.executable, str(TOOLS / "known-issues.py"), *args_], capture_output=True, check=True)
+            git(lr, "add", "-A"); git(lr, "commit", "-qm", "ledger")
+            git(lr, "branch", "neoforge-1.21.4")
+            (lr / "a.txt").write_text("fix\n", encoding="utf-8")
+            git(lr, "add", "-A"); git(lr, "commit", "-qm", "X-1: the head's fix")
+            fa = git(lr, "rev-parse", "HEAD").stdout.strip()
+            git(lr, "checkout", "-q", "neoforge-1.21.4")
+            (lr / "b.txt").write_text("fix\n", encoding="utf-8")
+            git(lr, "add", "-A"); git(lr, "commit", "-qm", "review fix")
+            fb_ = git(lr, "rev-parse", "HEAD").stdout.strip()
+            git(lr, "checkout", "-q", "neoforge-1.21.1")
+            subprocess.run(["git", "clone", "-q", "--bare", str(lr), str(tmp / "ledger-origin.git")], check=True,
+                           capture_output=True)
+            git(lr, "remote", "add", "origin", str(tmp / "ledger-origin.git"))
+            git(lr, "fetch", "-q", "origin")
+
+            class _St4:
+                rdir = rd_
+                path = str(tmp / "ledger-state.json")
+                data = {"plan": {"issue": 9}, "round_start": "2000-01-01T00:00:00Z"}
+                items = [{"fork": "o/x", "version": "1.21.1", "step": "merge", "status": "ok", "result": {}, "extra": {}},
+                         {"fork": "o/x", "version": "1.21.4", "step": "merge", "status": "ok", "result": {}, "extra": {}},
+                         {"fork": "o/x", "version": "1.21.1", "step": "backlog", "status": "ok", "result": {},
+                          "extra": {"fixes": [{"id": "X-1", "at": "1.21.1"}]}},
+                         {"fork": "o/x", "version": "1.21.4", "step": "review", "status": "ok",
+                          "result": {"fixed": [["X-2", fb_]]}, "extra": {}},
+                         {"fork": "o/x", "version": "1.21.4", "step": "fix", "status": "ok", "extra": {}, "result": {
+                             "findings": [{"title": "Presets never load", "failure": "functional", "visibility": "common",
+                                           "reach": "feature", "workaround": "yes", "lowest": "1.21.1", "fixed": fb_},
+                                          {"invalid": "finding: {not json"}]}},
+                         {"fork": "o/x", "version": "1.21.4", "step": "recheck", "status": "ok", "extra": {}, "result": {
+                             "findings": [{"title": "presets never load", "failure": "functional", "visibility": "common",
+                                           "reach": "feature", "workaround": "yes", "lowest": "1.21.1"}]}}]
+                def fork(self, _):
+                    return {"dir": str(lr), "head": "neoforge-1.21.1", "base": "1.21.1", "versions": ["1.21.4"],
+                            "kind": "version", "name": "x"}
+            sh = lambda st_, it_, cmd, log, **k_: subprocess.run(
+                [str(c) for c in cmd], capture_output=True, text=True, encoding="utf-8",
+                check="render-ports" not in [str(c) for c in cmd])
+            G["commit_paths"] = kept["commit_paths"]
+            note, r_ = t_ledger(_St4(), {"fork": "o/x", "version": "1.21.1", "extra": {}, "result": {}}, log_)
+            st1 = {e["id"]: e["status"] for e in json.loads((lr / ".port/KNOWN-ISSUES.json").read_text(
+                encoding="utf-8"))["issues"]}
+            new_ = [e for e in json.loads((lr / ".port/KNOWN-ISSUES.json").read_text(encoding="utf-8"))["issues"]
+                    if e["title"] == "Presets never load"]
+            expect(len(new_) == 1 and new_[0]["status"] == {"1.21.1": "open", "1.21.4": f"fixed@{fb_}"}
+                   and new_[0]["severity"] == "S3" and r_["added"] == [new_[0]["id"]]
+                   and any("not json" in r for r in r_["refused"])
+                   and "new findings" in git(lr, "log", "-1", "--format=%s", "neoforge-1.21.1").stdout,
+                   f"the round's new finding is added to the ledger once, graded, fixed where its fix is, committed: "
+                   f"{new_} {r_}")
+            expect(st1.get("X-1") == {"1.21.1": f"fixed@{fa}", "1.21.4": "open"}
+                   and st1.get("X-2") == {"1.21.4": f"fixed@{fb_}"}
+                   and any("X-1" in r and "did not reach neoforge-1.21.4" in r for r in r_["refused"]),
+                   f"the ledger step: fixed only where the branch carries the fix, review fixes and subject-found fixes "
+                   f"counted: {note} {st1} {r_}")
+            # a worktree on neoforge-1.21.10 is not the one holding neoforge-1.21.1 (an exact branch line, not a prefix)
+            git(lr, "branch", "neoforge-1.21.10", "neoforge-1.21.4")
+            git(lr, "worktree", "add", "-q", str(tmp / "wt-1.21.10"), "neoforge-1.21.10")
+            git(lr, "checkout", "-q", "--detach")
+            expect(worktree_of(str(lr), "neoforge-1.21.1") is None and worktree_of(str(lr), "neoforge-1.21.10"),
+                   f"the worktree lookup matches the branch exactly: {worktree_of(str(lr), 'neoforge-1.21.1')}")
+            git(lr, "checkout", "-q", "neoforge-1.21.1")
+            # records-only changes an earlier step left (DRIFT.md changed, COST.md new) are committed before the gates;
+            # with any other tracked change nothing is committed and clean() refuses it
+            G["commit_paths"] = kept["commit_paths"]
+            (lr / ".port/1.21.1").mkdir(parents=True, exist_ok=True)
+            (lr / ".port/1.21.1/DRIFT.md").write_text("d\n", encoding="utf-8")
+            git(lr, "add", "-A"); git(lr, "commit", "-qm", "drift")
+            (lr / ".port/1.21.1/DRIFT.md").write_text("d2\n", encoding="utf-8")
+            (lr / ".port/1.21.1/COST.md").write_text("c\n", encoding="utf-8")
+            (lr / "a.txt").write_text("other\n", encoding="utf-8")
+            expect(commit_records(str(lr), "1.21.1") is None, "a tree with a non-record change had its records committed")
+            git(lr, "checkout", "--", "a.txt")
+            c_ = commit_records(str(lr), "1.21.1")
+            expect(c_ and not git(lr, "status", "--porcelain").stdout.strip()
+                   and git(lr, "show", "--stat", "--format=", "HEAD").stdout.count(".port/1.21.1/") == 2,
+                   f"records-only changes are committed before the gates: {c_}")
+            # a dependent's re-pin: the library's -rN cut this round, never the plan's bump of its base tag
+            rp_ = tmp / "repin-fork"
+            (rp_ / ".port/1.21.4").mkdir(parents=True)
+            git(rp_, "init", "-q")
+            (rp_ / "gradle.properties").write_text("mod_id=examplemod\n", encoding="utf-8")
+            pin_ = lambda t_: (rp_ / ".port/1.21.4/branch.properties").write_text(
+                f"port_jar.com.example\\:lib=https://github.com/o/lib/releases/download/{t_}/lib-{t_}.jar\n", encoding="utf-8")
+            pin_("lib-1.0-mc1.21.4")
+            git(rp_, "add", "-A"); git(rp_, "commit", "-qm", "pin")
+
+            class _St5:
+                data = {"plan": {"issue": 9}}
+                def fork(self, s_):
+                    return {"name": s_.split("/")[1], "dir": str(rp_)}
+                def item(self, _):
+                    return {"result": {"tag": "lib-1.0-mc1.21.4-r2"}}
+            G["vco"] = lambda st_, f_, v_: str(rp_)
+            rpi = {"fork": "o/dep", "version": "1.21.4", "extra": {"libraries": ["o/lib"], "bumps": [
+                {"id": "D1", "ga": "com.example:lib", "command": "python3 mmvu/tools/layer-deps.py resolve --bump x"},
+                {"id": "D2", "ga": "com.example:other", "command": "python3 mmvu/tools/layer-deps.py resolve --bump y"}]}}
+            seen_cmds.clear()
+            sh = rec_out("")
+            try:
+                t_repin(_St5(), rpi, log_)
+                expect(False, "a re-pin that left the base cut pinned passed")
+            except StepError as e:
+                expect("lib-1.0-mc1.21.4-r2" in str(e), f"a pin left on another cut than the release is a stop: {e}")
+            ran_ = [" ".join(map(str, c)) for c in seen_cmds]
+            expect(any("--port-release o/lib@lib-1.0-mc1.21.4-r2" in c for c in ran_)
+                   and not any(c.endswith("--bump x") for c in ran_) and any(c.endswith("--bump y") for c in ran_),
+                   f"the re-pin names the -r2 cut; the plan's bump of the library is superseded, others run: {ran_}")
+            pin_("lib-1.0-mc1.21.4-r2")
+            note, r_ = t_repin(_St5(), rpi, log_)
+            expect(r_["superseded_bumps"] == ["D1"] and r_["pins"] == ["o/lib@lib-1.0-mc1.21.4-r2"],
+                   f"the re-pin to the release's own tag passes: {note}")
+            # the ci-check fixer's regeneration on a branch with no PR item (the head) is pushed; a code commit is not
+            cr_ = tmp / "ci-fork"
+            cr_.mkdir()
+            git(cr_, "init", "-q", "-b", "neoforge-1.21.1")
+            (cr_ / "a.txt").write_text("a\n", encoding="utf-8")
+            git(cr_, "add", "-A"); git(cr_, "commit", "-qm", "base")
+            git(cr_, "branch", "neoforge-1.21.4")
+            subprocess.run(["git", "clone", "-q", "--bare", str(cr_), str(tmp / "ci-origin.git")], check=True,
+                           capture_output=True)
+            git(cr_, "remote", "add", "origin", str(tmp / "ci-origin.git"))
+            (cr_ / ".github/workflows").mkdir(parents=True)
+            (cr_ / ".github/workflows/port-ci.yml").write_text("kit 56\n", encoding="utf-8")
+            git(cr_, "add", "-A"); git(cr_, "commit", "-qm", "Port CI at kit 56")
+            git(cr_, "checkout", "-q", "neoforge-1.21.4")
+            (cr_ / "a.txt").write_text("code\n", encoding="utf-8")
+            git(cr_, "add", "-A"); git(cr_, "commit", "-qm", "code on a branch with a PR item")
+
+            class _St6:
+                data = {"allow": ["push-version-branches"]}
+                items = [{"fork": "o/x", "version": "1.21.4", "step": "pr"}]
+                def fork(self, _):
+                    return {"dir": str(cr_), "head": "neoforge-1.21.1", "base": "1.21.1", "versions": ["1.21.4"],
+                            "kind": "branches", "name": "x"}
+            sh = rec_out("fork-branches: ci-check: workflows current\n")
+            note, r_ = t_ci_check(_St6(), {"fork": "o/x"}, log_)
+            expect(r_["pushed"] == ["neoforge-1.21.1"] and git(tmp / "ci-origin.git", "log", "-1", "--format=%s",
+                   "neoforge-1.21.1").stdout.strip() == "Port CI at kit 56"
+                   and git(tmp / "ci-origin.git", "rev-parse", "neoforge-1.21.4").stdout.strip()
+                   != git(cr_, "rev-parse", "neoforge-1.21.4").stdout.strip(),
+                   f"the head's regenerated workflow is pushed; a branch with a PR item is left to its PR: {note}")
+            git(cr_, "checkout", "-q", "neoforge-1.21.1")
+            (cr_ / "a.txt").write_text("code\n", encoding="utf-8")
+            git(cr_, "add", "-A"); git(cr_, "commit", "-qm", "code")
+            try:
+                t_ci_check(_St6(), {"fork": "o/x"}, log_)
+                expect(False, "a code commit on the head went out with the workflow push")
+            except StepError as e:
+                expect("a.txt" in str(e), f"a code commit is not pushed by the ci-check: {e}")
         finally:
             G.update(kept)
             sh = real_sh
