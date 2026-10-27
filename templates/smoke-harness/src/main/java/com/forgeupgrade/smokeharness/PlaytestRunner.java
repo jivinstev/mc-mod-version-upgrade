@@ -1818,9 +1818,10 @@ final class PlaytestRunner {
                 for (net.minecraft.server.level.ServerLevel level : server.getAllLevels()) {
                     if (!level.dimension().toString().contains(dim + "]")) continue;
                     net.minecraft.world.level.ChunkPos cp = new net.minecraft.world.level.ChunkPos(x >> 4, z >> 4);
-                    // by reflection: startsForStructure(ChunkPos, Predicate) is not there on every version (26.3)
+                    // by reflection: startsForStructure(ChunkPos, Predicate) until 26.2, (int chunkX, int chunkZ, Predicate) on 26.3
                     java.util.function.Predicate<Object> any = st -> true;
                     Object starts = R.call(level.structureManager(), "startsForStructure", cp, any);
+                    if (starts == null) starts = R.call(level.structureManager(), "startsForStructure", x >> 4, z >> 4, any);
                     if (!(starts instanceof List<?> list)) continue;
                     for (Object o : list) {
                         if (!(o instanceof net.minecraft.world.level.levelgen.structure.StructureStart start)
