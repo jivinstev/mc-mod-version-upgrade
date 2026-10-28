@@ -87,7 +87,18 @@ version was set up). Some fixes, checks and savings still reach
   out to migrate such a fork to version branches (`fork-branches.py migrate`; fork-versions, "A fork still on the layer").
 - **A release** publishes the authors' own JARs as a pre-release, but only when every gate passes (a `release` run on
   an unchanged `mod_version` is cut as `-r2`, `-r3`, ...: a name whose release or tag already exists is skipped, and a
-  tag that points at another commit than the build stops the job, nothing released). Once a person
+  tag that points at another commit than the build stops the job, nothing released). Each pre-release also carries
+  every environment's gate summary as written by `ci-gates.py` (`gates-full.md`, `gates-minimal.md`,
+  `gates-<env>-<variant>.md`), the gate record of the commit it was built from. Port CI's `release = true` with
+  `from_run = <run id>` releases the jars and gate logs of an earlier successful push or pull_request run of the same
+  workflow instead of building again (no gates job runs): the release job checks that run's head commit and the tree
+  its gates recorded are this commit's tree, and releases nothing otherwise; each attached summary's first line
+  then names this commit and the one tested (a pull_request run tests GitHub's merge commit). `dep_override =
+  "owner/repo@tag/asset.jar=group:artifact:version@sha256"` (a release asset) or
+  `"owner/repo#RUN_ID/ARTIFACT/asset.jar=group:artifact:version@sha256"` (a jar in another repository's run artifact),
+  space-separated, is the dependent gate: every gates leg and the shipped-jar job build against that candidate in
+  place of the pinned jar with the same coordinates, and such a run never releases. A workflow rendered before these
+  two inputs is reported stale by `port-ci.py check` and `fork-branches.py ci-check`, like an older kit. Once a person
   has played it, `port-ci.py promote` makes it a full Release that records who played it; the newest full Release
   is the fork's official baseline.
 - **Defects the authors' original already has** are proved pre-existing (their branch, their commit), then

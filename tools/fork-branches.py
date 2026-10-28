@@ -4525,6 +4525,10 @@ def ci_check(repo, versions=None, kit_version=None):
                 # GATES.md, COST.md, ... is a full Port CI run (review of the cost PR)
                 why.append("its push trigger ignores none of the round's records (" + ", ".join(version_records())
                            + "), so a records-only push runs the full Port CI")
+            gone = load("port_ci_fb", "port-ci.py").missing_inputs(wf.stdout)
+            if newest is not False and gone:
+                why.append("it was rendered before the from_run/dep_override inputs (no " + ", ".join(gone)
+                           + "): it can neither release an earlier run's jars nor run the dependent gate")
             if miss:
                 why.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
                            + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
@@ -5227,6 +5231,13 @@ def _check_ci_check(expect):
         expect(len(w14) == 1 and "kit 7, older than kit 8" in w14[0] and "*_cf.jar" in w14[0]
                and "neoforge-1.21.3: no .github/workflows/port-ci.yml" in "\n".join(lines) and "--all" in lines[-1],
                f"ci-check names the outdated kit and the missing _cf job: {lines}")
+        expect(not [l for l in lines if "from_run/dep_override" in l], f"today's workflow has the reuse inputs: {lines}")
+        pre = wf[:wf.index("      from_run:\n")] + wf[wf.index("\npermissions:"):]   # rendered before from_run/dep_override
+        _hand(w4, {".github/workflows/port-ci.yml": pre}, "1.21.4: CI before the reuse inputs")
+        old = [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "neoforge-1.21.4" in l and "WARNING" in l]
+        expect(len(old) == 1 and "rendered before the from_run/dep_override inputs" in old[0] and "older than" not in old[0],
+               f"ci-check names a version branch's workflow rendered before the reuse inputs, on the newest kit: {old}")
+        _hand(w4, {".github/workflows/port-ci.yml": wf}, "1.21.4: CI again")
         # the release list refused (a 403 from api.github.com, downloads working; weekly round 2026-10-19): the newest kit
         # is probed from the highest one the branches pin (v7), and the fallback is said
         import urllib.error

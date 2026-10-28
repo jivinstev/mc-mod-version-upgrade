@@ -24,6 +24,21 @@
 # in the GitHub UI publishes too, and publish = <tag> publishes one by hand. publish_setup = true creates the
 # Modrinth draft project once. Publishing refuses a pre-release, a build with an open S1 in its fix ledger, and
 # a dependency not yet published; it never runs on a pull request.
+#
+# Every pre-release carries, beside the jars, the gate summary of each environment exactly as ci-gates.py wrote it
+# (gates-full.md, gates-minimal.md, gates-<env>-<variant>.md): the gate record of the commit it was built from.
+#
+# Reuse a run: release = true with from_run = <run id> releases the jars and gate logs of that earlier run -- a
+# successful push or pull_request run of this workflow that built the same tree as this commit -- instead of building
+# and gating again (no gates job runs). The release job checks the run (this repository, this workflow, completed,
+# success), that its head commit and the tree its gates recorded are this commit's tree, and releases nothing otherwise.
+# Each gate summary's first line then names this commit, adding the commit that was tested (a pull_request run tests
+# GitHub's merge commit, in no branch's history); the rest of it is unchanged.
+#
+# Dependent gate: dep_override = "owner/repo@tag/asset.jar=group:artifact:version@sha256 ..." (a release asset) or
+# "owner/repo#RUN_ID/ARTIFACT/asset.jar=group:artifact:version@sha256" (a jar in a workflow run's artifact) builds and
+# gates against a library's candidate jar in place of the pinned one with the same group:artifact:version, on every
+# gates leg and in the shipped-jar job. A run with dep_override never releases. Inputs reach scripts only through env.
 name: Port CI ({{TARGET}})
 
 on:
@@ -63,6 +78,14 @@ on:
         description: "Create the Modrinth draft project from .github/port-publish.json (once)"
         type: boolean
         default: false
+      from_run:
+        description: "With release: release the jars and gate logs of this earlier run (a pull_request run of the same tree) instead of building again"
+        type: string
+        default: ""
+      dep_override:
+        description: "Dependent gate (never released): owner/repo@tag/asset.jar=G:A:V@sha256 or owner/repo#RUN_ID/ARTIFACT/asset.jar=G:A:V@sha256 ... built and gated against in place of the pinned jar with those coordinates"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -78,9 +101,12 @@ jobs:
       matrix:
         env: [full, minimal]{{GATES_VARIANTS}}
     name: gates (${{ matrix.env }}{{GATES_VARIANT_NAME}})
-    if: ${{ github.event_name != 'release' && !inputs.promote && !inputs.publish && !inputs.publish_setup }}
+    if: ${{ github.event_name != 'release' && !inputs.promote && !inputs.publish && !inputs.publish_setup && !inputs.from_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read               # dep_override: a candidate jar in another repository's run artifact
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,9 +123,10 @@ jobs:
           java-version: "{{JAVA}}"
       - name: Software OpenGL for the client gate
         run: sudo apt-get update && sudo apt-get install -y xvfb mesa-utils libgl1-mesa-dri
-{{PRE_BUILD}}{{VARIANT_STEPS}}
+{{PRE_BUILD}}{{VARIANT_STEPS}}{{DEP_OVERRIDE_STEP}}
       - name: Build and gates
         run: |
+          git rev-parse "HEAD^{tree}" > "$RUNNER_TEMP/built-tree.txt"   # the tree this run built: a from_run release checks it
           git fetch --no-tags origin "{{BASE}}"
           python3 .port-tools/tools/ci-gates.py --repo . --modid "{{MODID}}" --base "origin/{{BASE}}" \
             --gatec "{{GATEC}}" --env "${{ matrix.env }}" --work-dir "$RUNNER_TEMP/port-ci" --summary "$RUNNER_TEMP/gates.md"
@@ -114,6 +141,7 @@ jobs:
             ${{ runner.temp }}/port-ci/*.log
             ${{ runner.temp }}/port-ci/*.jsonl
             ${{ runner.temp }}/gates.md
+            ${{ runner.temp }}/built-tree.txt
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: matrix.env == 'full'{{GATES_VARIANT_JARS_IF}}
@@ -124,27 +152,116 @@ jobs:
             !build/libs/*-sources.jar{{SHIPPED_JOB}}
 
   release:
+    # from_run: the gates (and shipped) jobs are skipped and their jars and gate logs come from that earlier run; a
+    # skipped job is accepted then only. A run with dep_override is refused below.
     needs: {{RELEASE_NEEDS}}
-    if: github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || inputs.release)
+    if: ${{ !cancelled() && github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || inputs.release || inputs.from_run) && (needs.gates.result == 'success' || (inputs.from_run && needs.gates.result == 'skipped')){{RELEASE_SHIPPED_IF}} }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read               # from_run: the earlier run and its artifacts
     steps:
+      - name: Refuse a dependent-gate run
+        if: ${{ inputs.dep_override }}
+        run: |
+          echo "::error::this run built against dep_override's candidate jars, not the pinned ones: it never publishes a release"
+          exit 1
       - uses: actions/checkout@v4
         with:
           sparse-checkout: gradle.properties
           sparse-checkout-cone-mode: false
+      - name: Check the earlier run (from_run) built this tree
+        if: ${{ inputs.from_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FROM_RUN: ${{ inputs.from_run }}
+          RELEASE: ${{ inputs.release && 'yes' || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE" ]; then echo "::error::from_run releases an earlier run's jars: dispatch it with release = true"; exit 1; fi
+          if ! printf '%s' "$FROM_RUN" | grep -Eq '^[0-9]{1,20}$'; then echo "::error::from_run must be a workflow run id (digits only)"; exit 1; fi
+          if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FROM_RUN" > "$RUNNER_TEMP/from-run.json"; then
+            echo "::error::no workflow run $FROM_RUN in $GITHUB_REPOSITORY: nothing released"; exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/this-run.json"
+          python3 - <<'PY'
+          import json, os, re, sys
+          t = os.environ["RUNNER_TEMP"]
+          r, me = (json.load(open(os.path.join(t, f), encoding="utf-8")) for f in ("from-run.json", "this-run.json"))
+          why = ("it is not a run of " + os.environ["GITHUB_REPOSITORY"]
+                 if (r.get("repository") or {}).get("full_name") != os.environ["GITHUB_REPOSITORY"] else
+                 "it is a run of another workflow" if r.get("workflow_id") != me.get("workflow_id") else
+                 "it has not completed" if r.get("status") != "completed" else
+                 "it did not succeed (" + str(r.get("conclusion")) + ")" if r.get("conclusion") != "success" else
+                 "it was a " + str(r.get("event")) + " run, not a push or pull_request run (which gate the pinned jars)"
+                 if r.get("event") not in ("push", "pull_request") else
+                 "it names no head commit" if not re.fullmatch(r"[0-9a-f]{40}", str(r.get("head_sha"))) else None)
+          if why:
+              sys.exit("::error::will not release run " + os.environ["FROM_RUN"] + ": " + why + "; nothing released")
+          open(os.path.join(t, "from-run-sha.txt"), "w", encoding="utf-8").write(r["head_sha"] + "\n")
+          open(os.path.join(t, "from-run-event.txt"), "w", encoding="utf-8").write(r["event"] + "\n")
+          PY
+          head=$(cat "$RUNNER_TEMP/from-run-sha.txt")
+          if ! git fetch --no-tags -q --depth=1 origin "$head" "$GITHUB_SHA"; then
+            echo "::error::cannot fetch run $FROM_RUN's head commit $head: nothing released"; exit 1
+          fi
+          had=$(git rev-parse "$head^{tree}"); want=$(git rev-parse "$GITHUB_SHA^{tree}")
+          if [ "$had" != "$want" ]; then
+            echo "::error::run $FROM_RUN tested $head (tree $had), not the tree of $GITHUB_SHA ($want): nothing released; release without from_run"
+            exit 1
+          fi
+          echo "Releasing the jars and gate logs of run $FROM_RUN ($head, the same tree as $GITHUB_SHA)" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/download-artifact@v4
         with:
           name: jars
           path: jars
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ inputs.from_run && github.token || '' }}
       - uses: actions/download-artifact@v4
         with:
           pattern: gate-logs-*
           path: logs
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ inputs.from_run && github.token || '' }}
+      - name: Check the earlier run's gate logs record this tree
+        if: ${{ inputs.from_run }}
+        env:
+          FROM_RUN: ${{ inputs.from_run }}
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse "$GITHUB_SHA^{tree}")
+          ls jars/*.jar > /dev/null 2>&1 || { echo "::error::the earlier run left no jars: nothing released"; exit 1; }
+          for e in full minimal; do
+            [ -f "logs/gate-logs-$e/gates.md" ] || { echo "::error::the earlier run has no gate summary for $e: nothing released"; exit 1; }
+          done
+          for d in logs/gate-logs-*/; do
+            had=$(cat "${d}built-tree.txt" 2>/dev/null || true)
+            if [ "$had" != "$want" ]; then
+              echo "::error::${d%/} records tree '$had', not this commit's ($want): its gates built something else; nothing released"
+              exit 1
+            fi
+          done
+          # the same tree: each summary's first line names this commit (a pull_request run tested GitHub's merge commit,
+          # in no branch's history) and says what was tested; every other byte stays as ci-gates.py wrote it
+          python3 - <<'PY'
+          import os, pathlib, re, sys
+          sha, run = os.environ["GITHUB_SHA"], os.environ["FROM_RUN"]
+          event = (pathlib.Path(os.environ["RUNNER_TEMP"]) / "from-run-event.txt").read_text(encoding="utf-8").strip()
+          for f in sorted(pathlib.Path("logs").glob("gate-logs-*/gates.md")):
+              first, nl, rest = f.read_bytes().partition(b"\n")
+              cr = b"\r" if first.endswith(b"\r") else b""
+              line = first[:len(first) - len(cr)].decode("utf-8")
+              m = re.search(r"at `([^`]*)`", line)
+              if not line.startswith("Gates for ") or not m:
+                  sys.exit("::error::" + f.parent.name + "/gates.md does not start with a gate summary header: nothing released")
+              line = (line[:m.start()] + "at `" + sha + "`" + line[m.end():]
+                      + " -- tested as " + m.group(1).split(" ")[0] + " (" + event + " run " + run + "), the same tree")
+              f.write_bytes(line.encode("utf-8") + cr + nl + rest)
+          PY
       - name: Publish pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FROM_RUN: ${{ inputs.from_run }}
         run: |
           # the commit a tag of this repository points at (an annotated tag peeled), empty when there is no such tag
           tag_commit() { git ls-remote origin "refs/tags/$1" "refs/tags/$1^{}" | awk '{c=$1} END {print c}'; }
@@ -172,9 +289,15 @@ jobs:
               echo
             done
             echo
-            echo "Built from \`${{ github.sha }}\` by the author's own Gradle build. Pre-release until played by a person."
+            echo "Built from \`${{ github.sha }}\` by the author's own Gradle build${FROM_RUN:+ (jars and gates of run $FROM_RUN, the same tree)}. Pre-release until played by a person."
           } > notes.md
-          gh release create "$TAG" jars/*.jar --repo "${{ github.repository }}" --prerelease \
+          # each environment's gate summary, exactly as ci-gates.py wrote it, as an asset: gate-logs-X/gates.md -> gates-X.md
+          mkdir -p gate-assets; gates=()
+          for d in logs/gate-logs-*/; do
+            [ -f "${d}gates.md" ] || continue
+            n=$(basename "$d"); cp "${d}gates.md" "gate-assets/gates-${n#gate-logs-}.md"; gates+=("gate-assets/gates-${n#gate-logs-}.md")
+          done
+          gh release create "$TAG" jars/*.jar ${gates[@]+"${gates[@]}"} --repo "${{ github.repository }}" --prerelease \
             --title "$TAG (unofficial {{TARGET}} port)" --notes-file notes.md --target "${{ github.sha }}"
 
   promote:
