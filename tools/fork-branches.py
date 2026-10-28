@@ -4525,10 +4525,13 @@ def ci_check(repo, versions=None, kit_version=None):
                 # GATES.md, COST.md, ... is a full Port CI run (review of the cost PR)
                 why.append("its push trigger ignores none of the round's records (" + ", ".join(version_records())
                            + "), so a records-only push runs the full Port CI")
-            gone = load("port_ci_fb", "port-ci.py").missing_inputs(wf.stdout)
+            pc = load("port_ci_fb", "port-ci.py")
+            gone = pc.missing_inputs(wf.stdout)
             if newest is not False and gone:
                 why.append("it was rendered before the from_run/dep_override inputs (no " + ", ".join(gone)
                            + "): it can neither release an earlier run's jars nor run the dependent gate")
+            elif newest is not False and pc.missing_digests(wf.stdout):
+                why.append(pc.DIGESTS_STALE)
             if miss:
                 why.append("its workflow boots no " + ", ".join(f"*_{v}.jar" for v in miss) + " although .port/" + t
                            + "/" + ", ".join(f"shipped-expect-{v}.txt" for v in miss) + " expects it (CI green, that jar unchecked)")
@@ -5237,6 +5240,11 @@ def _check_ci_check(expect):
         old = [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "neoforge-1.21.4" in l and "WARNING" in l]
         expect(len(old) == 1 and "rendered before the from_run/dep_override inputs" in old[0] and "older than" not in old[0],
                f"ci-check names a version branch's workflow rendered before the reuse inputs, on the newest kit: {old}")
+        nodig = wf[:wf.index("      - name: Jar digests")] + wf[wf.index("      - uses: actions/upload-artifact@v4\n        if: matrix.env == 'full'"):]
+        _hand(w4, {".github/workflows/port-ci.yml": nodig}, "1.21.4: CI before the jar digests")
+        old = [l for l in ci_check(r, ["1.21.4"], kit_version=7) if "neoforge-1.21.4" in l and "WARNING" in l]
+        expect(len(old) == 1 and "annotates no jar sha256" in old[0] and "from_run/dep_override" not in old[0],
+               f"ci-check names a version branch's workflow rendered before the jar digests: {old}")
         _hand(w4, {".github/workflows/port-ci.yml": wf}, "1.21.4: CI again")
         # the release list refused (a 403 from api.github.com, downloads working; weekly round 2026-10-19): the newest kit
         # is probed from the highest one the branches pin (v7), and the fallback is said
