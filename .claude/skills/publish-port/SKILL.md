@@ -111,8 +111,13 @@ Dispatch Port CI with `publish = <tag>`. The job refuses, and uploads nothing, u
   open in it -- `fix-ledger.py check`. A tag no column names is refused too: a check against nothing checks nothing;
 - a dependency that is another fork port already has its pinned release published on that platform (so publish
   the library first). "Pinned" means the dependency the release was promoted with, as the install manifest records
-  it when it describes this tag -- not the workflow's current pin, which keep-current moves to a newer pre-release
-  (so an overnight re-pin never blocks publishing a release that was played with the previous one).
+  it when it describes this tag, else the pin of the workflow AT THE TAG -- never the branch's current pin, which
+  keep-current moves to a newer pre-release (so an overnight re-pin never blocks publishing a release that was
+  played with the previous one);
+- a release built against a library pre-release that was not done when it was pinned (DEPS.md's "Library
+  pre-release (not done)" mark) goes out only with that exact library release: each library jar the tag's workflow
+  pins is now a promoted Release (a person played the pair), published on that platform, and still the asset the
+  tag's build checked by sha256. Whether the library's version is done is the round's question, not publishing's.
 It is idempotent: what is already published (a marker it appends to the release notes) is skipped. The notes
 uploaded say which version of the original it is based on, any `differences`, who played it, where to report
 problems (the fork, never the original author) and the permission link -- never the fixes it carries.
@@ -143,7 +148,10 @@ working, and the answer is to promote and publish the build that fixes it, not t
    ledger it is checked against (a column carried from the previous tag cites the diff between the two tags). Don't
    exceed your dependency: the port MAY cut pre-releases pinned to the library's pre-release -- the pair is what gets
    played -- but it is never promoted or published while a library release it pins is still a pre-release
-   (`port-ci.py promote` refuses unless `--with-dependency owner/lib` says the library is promoted alongside). When the person
+   (`port-ci.py promote` refuses unless `--with-dependency owner/lib` says the library is promoted alongside).
+   What counts as played: a person playing it by hand, or a playtest script they ran on the release jars
+   (playtest-run); Gate C alone never does. A pair played together (a library version not done yet, DEPS.md's
+   mark) is promoted together and publishes once the library release it pins is promoted and published. When the person
    played the port with a sibling's pre-release, that sibling is promoted too, with the same note -- otherwise the
    port's publish is refused because its dependency is not published.
 3. **CurseForge waits for approval.** A file on CurseForge cannot name a project that is not approved yet
@@ -184,8 +192,9 @@ version number `<ver>+<version>`. Dispatch Port CI **on that version's branch** 
 branch. A version's ledger column names its own tag; a port dependency must have published its release for the same
 Minecraft version first (the version branch's workflow pins that release, `fork-branches.py ci`). Promote only a version
 that is done (fork-versions "Done") and has been played: run `fork-port.py --check-done` on that branch yourself first, as
-neither `port-ci.py promote` nor publishing runs the done check; their only done-related refusal is a build pinned to a
-library pre-release that was not done.
+neither `port-ci.py promote` nor publishing runs the done check. A build pinned to a library pre-release that was not
+done is the exception that does not wait for done: promote notes it, and publishing needs that exact library release
+promoted and published (above), so the pair a person played goes out as it was played.
 
 ## After the first publish
 

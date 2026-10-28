@@ -1176,7 +1176,8 @@ rc, o = done(base=nb)
 rv = (rec / "REVIEW.md").read_text(encoding="utf-8")
 (f"- base: {nb}" in rv and "- reviewer: ?" in rv and "| ok |" not in rv) or bad.append(f"C2: a new base starts afresh: {rv}")
 G(sv, "checkout", "-q", "--", "."); G(sv, "clean", "-qfd", ".port")
-# C3: the library pre-release mark in .port/<mc>/DEPS.md at the tag refuses promotion and publishing, as on a version branch
+# C3: the library pre-release mark in .port/<mc>/DEPS.md at the tag keeps the version not done, promotion notes it, and
+# publishing waits for the exact library release the pair was played with, as on a version branch
 rec.mkdir(parents=True, exist_ok=True)
 (rec / "DEPS.md").write_text(f"{fb.LIBRARY_PRERELEASE_MARK} `owner/examplelib` is pinned to examplelib-1.0-mc1.21.1\n", encoding="utf-8")
 G(sv, "add", "-A"); G(sv, "commit", "-qm", "pin"); G(sv, "tag", "examplemod-1.0-mc1.21.1")
@@ -1185,9 +1186,26 @@ read = lambda p: subprocess.run(["git", "-C", str(sv), "show", f"examplemod-1.0-
 pp.gh = lambda *a, **k: {}
 pub = pp.gate(str(sv), {"permission": "https://example.invalid/agreed", "auto": True}, "examplemod-1.0-mc1.21.1",
               {"prerelease": False, "draft": False, "author": {"login": "github-actions[bot]"}})
-(fb.SV_PRERELEASE in why and len(pc.prerelease_pin_blockers("examplemod-1.0-mc1.21.1", read)) == 1
- and any("library pre-release" in w for w in pub)) \
-    or bad.append(f"C3: the mark: not done, promotion and publishing refuse the tag: {why} {pub}")
+(fb.SV_PRERELEASE in why and len(pc.prerelease_pin_notes("examplemod-1.0-mc1.21.1", read)) == 1
+ and any("pins no library release" in w for w in pub)) \
+    or bad.append(f"C3: the mark: not done, promotion notes it, publishing refuses a tag with no library pin: {why} {pub}")
+# the tag's workflow pins the library release jar it was played with: published once that release is promoted and published
+sha3 = "ab" * 32
+(sv / ".github/workflows").mkdir(parents=True, exist_ok=True)
+(sv / ".github/workflows/port-ci.yml").write_text(
+    '          curl -fsSL -o "$HOME/.m2/repository/com/example/lib/1/lib-1.jar" '
+    '"https://github.com/owner/examplelib/releases/download/examplelib-1.0-mc1.21.1/lib-1.jar"\n'
+    f'          echo "{sha3}  $HOME/.m2/repository/com/example/lib/1/lib-1.jar" | sha256sum -c -\n', encoding="utf-8")
+G(sv, "add", "-A"); G(sv, "commit", "-qm", "workflow"); G(sv, "tag", "examplemod-1.0-mc1.21.1-r2")
+cfg3 = {"permission": "https://example.invalid/agreed", "auto": True, "modrinth": {"slug": "m"}}
+good3 = {"prerelease": False, "draft": False, "author": {"login": "github-actions[bot]"}}
+lib3 = {"prerelease": False, "body": "<!-- port-publish:modrinth:V1 -->", "assets": [{"name": "lib-1.jar", "digest": f"sha256:{sha3}"}]}
+pp.gh = lambda m, path, *a, **k: lib3 if path.endswith("/releases/tags/examplelib-1.0-mc1.21.1") else {}
+pub = pp.gate(str(sv), cfg3, "examplemod-1.0-mc1.21.1-r2", good3)
+(pub == []) or bad.append(f"C3: the played pair publishes once the library release is promoted and published: {pub}")
+pp.gh = lambda m, path, *a, **k: {**lib3, "prerelease": True} if path.endswith("/releases/tags/examplelib-1.0-mc1.21.1") else {}
+pub = pp.gate(str(sv), cfg3, "examplemod-1.0-mc1.21.1-r2", good3)
+any("still a pre-release" in w for w in pub) or bad.append(f"C3: the library release still a pre-release refuses: {pub}")
 # B1: the library marker in .port/<mc>/port.properties: spawn and battle skipped
 (not cg.is_library(sv, None)) or bad.append("B1: unmarked")
 (rec / "port.properties").write_text("library=true\n", encoding="utf-8")
@@ -1203,7 +1221,7 @@ g("checkout", "-q", "neoforge-1.21.1")
 print("\n".join(bad) or "OK")
 PY
 out="$(python3 "$T/test-port-tools-heredoc-u5.py" "$T/u5" 2>&1)"
-[ "$out" = "OK" ] && ok "#161 U5 on a single-branch clone of the head (single-version) and the version-branch fixture: fork-branches.py check-done --base records the review base in .port/<mc>/REVIEW.md and writes a \`?\` row per changed or added file and an \`item\` row for a dropped listener, TEST-ITEMS.md and INVENTORY-CHECK.json; with GATES.md (ci-gates' header names the version) and the review filled the version is done, on the checkout and on an export of the commit; a later edit stales the gates and the review; a new base starts REVIEW.md afresh; DEPS.md's library pre-release mark makes it not done and promotion and publishing refuse the tag; .port/<mc>/port.properties library=true drops spawn and battle; --base is refused on a version branch, whose done lists are unchanged" \
+[ "$out" = "OK" ] && ok "#161 U5 on a single-branch clone of the head (single-version) and the version-branch fixture: fork-branches.py check-done --base records the review base in .port/<mc>/REVIEW.md and writes a \`?\` row per changed or added file and an \`item\` row for a dropped listener, TEST-ITEMS.md and INVENTORY-CHECK.json; with GATES.md (ci-gates' header names the version) and the review filled the version is done, on the checkout and on an export of the commit; a later edit stales the gates and the review; a new base starts REVIEW.md afresh; DEPS.md's library pre-release mark makes it not done, promotion notes it and publishing waits for the exact library release the tag's workflow pins (refused with no pin or while that release is a pre-release, published once it is promoted and published); .port/<mc>/port.properties library=true drops spawn and battle; --base is refused on a version branch, whose done lists are unchanged" \
   || bad "#161 U5: $out"
 # ---- #161 U6 (C5): the authors' data files merged in an older version's form are put in the version's forms after the
 # merge -- port-sync on a single-version fork (a single-branch clone of the fixture's head, made a 26.2 port), the

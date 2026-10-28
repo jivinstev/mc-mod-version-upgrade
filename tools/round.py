@@ -1987,8 +1987,9 @@ def t_records(st, it, log):
                 tag = st.item(f"{st.fork(lb)['name']}@{v}:release").get("result", {}).get("tag")
                 marks.append(f"{fb.LIBRARY_PRERELEASE_MARK} `{lb}` is pinned to its pre-release {tag}, whose Minecraft {v} "
                              "is not done. This fork may cut its own pre-release with it (the pair is what a person "
-                             "plays); it is neither promoted nor published until the library's version is done and the "
-                             "pin moves to that release.")
+                             "plays) and a person who played the pair may promote it; it publishes only once that exact "
+                             "library release is promoted and published, and is not done until the library's version "
+                             "is done and the pin moves to that release.")
         dp = pathlib.Path(d) / ".port" / v / "DEPS.md"
         if marks:
             dp.write_text(SV_DEPS_HEAD.format(v=v) + "\n".join(marks) + "\n", encoding="utf-8")
@@ -3722,14 +3723,14 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         pc_ = mod("pc")
         tagged = lambda path: git(sd, "show", f"HEAD:{path}").stdout or None
         want(r_.get("marks") == 1 and mod("fb").LIBRARY_PRERELEASE_MARK in dep_ and "examplesvlib-1.0-mc1.21.1" in dep_
-             and len(pc_.prerelease_pin_blockers("examplesvmod-1.0-mc1.21.1", tagged)) == 1,
-             f"C3: a single-version dependent pinned to an undone library pre-release is marked, and promotion refuses "
+             and len(pc_.prerelease_pin_notes("examplesvmod-1.0-mc1.21.1", tagged)) == 1,
+             f"C3: a single-version dependent pinned to an undone library pre-release is marked, and promotion notes "
              f"it: {note} {dep_}")
         with State.tx(sa2) as st_:
             st_.item("examplesvlib@1.21.1:done")["result"] = {}
         note, r_ = step(sa2, "examplesvmod@1.21.1:records")
         want(r_.get("marks") == 0 and git(sd, "cat-file", "-e", "HEAD:.port/1.21.1/DEPS.md").returncode != 0
-             and pc_.prerelease_pin_blockers("examplesvmod-1.0-mc1.21.1", tagged) == [],
+             and pc_.prerelease_pin_notes("examplesvmod-1.0-mc1.21.1", tagged) == [],
              f"C3: re-pinned to a done library release, the mark is gone: {note}")
         with State.tx(sa2, write=False) as st_:
             vbh = {"fork": SL, "version": "1.21.1"}

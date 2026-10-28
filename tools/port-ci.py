@@ -638,12 +638,13 @@ PRERELEASE_MARK = "**Library pre-release (not done):**"    # tools/layer-deps.py
 PRERELEASE_KEY = "port_jar_prerelease."                       # ... and beside the pin in its branch.properties
 
 
-def prerelease_pin_blockers(tag, read):
-    """Blockers for promoting `tag` of a version branch whose build is pinned to a library PRE-RELEASE that was not done
-    when it was pinned (tools/layer-deps.py: DEPS.md's "Library pre-release (not done)" mark, or port_jar_prerelease.
-    in .port/<mc>/branch.properties at the tag). read(path) -> the file at the tag, or None. --with-dependency does
-    not lift it: promoting the library alongside does not make its version done; re-resolve the pin once it is.
-    A tag without -mc<v>, or with neither file (a single-version fork), never waits."""
+def prerelease_pin_notes(tag, read):
+    """What the person promoting `tag` should know when its build is pinned to a library PRE-RELEASE that was not done
+    when it was pinned (tools/layer-deps.py / round.py: DEPS.md's "Library pre-release (not done)" mark, or
+    port_jar_prerelease. in .port/<mc>/branch.properties at the tag). read(path) -> the file at the tag, or None.
+    Not a refusal: a person who played the pair may promote it (the library release with it, or first --
+    dependency_blockers still refuses a pinned pre-release without --with-dependency), and port-publish.py publishes it
+    only with that exact library release promoted and published. Its version stays not done for the round."""
     m = TAG.fullmatch(tag)          # the release tag's own form: <mod>-<ver>-mc<mc>[-release][-r<N>]
     if not m:
         return []
@@ -651,8 +652,8 @@ def prerelease_pin_blockers(tag, read):
     deps, props = read(f".port/{mc}/DEPS.md") or "", read(f".port/{mc}/branch.properties") or ""
     if PRERELEASE_MARK in deps or re.search(r"(?m)^" + re.escape(PRERELEASE_KEY), props):
         return [f"{tag} is built against a library pre-release whose {mc} was not done (.port/{mc}/DEPS.md \"Library "
-                "pre-release (not done)\"): once the library's version is done, re-resolve the pin (layer-deps.py resolve "
-                "--port-release), cut a new pre-release and promote that one; --with-dependency does not lift this"]
+                "pre-release (not done)\"): promote it only if the person played this pair; it publishes once that "
+                "exact library release is promoted and published, and its version stays not done for the round"]
     return []
 
 
@@ -749,7 +750,7 @@ def promote(argv):
             return json.loads(_get(f"https://api.github.com/repos/{r_}/releases/tags/{t_}"))
         why, notes = dependency_blockers(wf, release_of, a.with_dependency, a.fork)
 
-        why = why + prerelease_pin_blockers(a.tag, lambda path: tag_file(a.repo or ".", a.fork, a.tag, path))
+        notes = notes + prerelease_pin_notes(a.tag, lambda path: tag_file(a.repo or ".", a.fork, a.tag, path))
         for n in notes:
             print("note: " + n)
         if why:
@@ -1697,18 +1698,19 @@ def self_check():
     ok &= pinned_releases(pre_pin) == [("o/lib", "lib-1.1-mc1.21.1")]
     ok &= dependency_blockers(pre_pin, look) == (["o/lib@lib-1.1-mc1.21.1 is still a pre-release"], [])
     ok &= dependency_blockers(pre_pin, look, ["o/lib"]) == ([], [])
-    # review of #147: a version built against a library pre-release that was not done is never promoted, even with
-    # --with-dependency; a single-version tag (no .port/) and a re-resolved pin never wait
+    # a version built against a library pre-release that was not done is noted to the person promoting (it publishes
+    # only with that exact library release promoted and published: port-publish.py); a tag with no -mc<v> and a
+    # re-resolved pin get no note
     tree = {".port/1.21.4/DEPS.md": "x\n**Library pre-release (not done):** `com.example:lib` ...\n"}
-    ok &= len(prerelease_pin_blockers("dep-1.0-mc1.21.4", tree.get)) == 1
-    ok &= len(prerelease_pin_blockers("dep-1.0-mc1.21.4",
+    ok &= len(prerelease_pin_notes("dep-1.0-mc1.21.4", tree.get)) == 1
+    ok &= len(prerelease_pin_notes("dep-1.0-mc1.21.4",
                                       {".port/1.21.4/branch.properties": "port_jar_prerelease.com.example\\:lib=x\n"}.get)) == 1
-    ok &= prerelease_pin_blockers("dep-1.0-mc1.21.1", {}.get) == [] and prerelease_pin_blockers("dep-1.0", tree.get) == []
-    ok &= prerelease_pin_blockers("dep-1.0-mc1.21.4", {".port/1.21.4/DEPS.md": "pinned to lib-1.0 (done)\n"}.get) == []
+    ok &= prerelease_pin_notes("dep-1.0-mc1.21.1", {}.get) == [] and prerelease_pin_notes("dep-1.0", tree.get) == []
+    ok &= prerelease_pin_notes("dep-1.0-mc1.21.4", {".port/1.21.4/DEPS.md": "pinned to lib-1.0 (done)\n"}.get) == []
     # the tag's suffixes the release workflow accepts (TAG): -r<N> and -release are judged too
-    ok &= all(len(prerelease_pin_blockers(t_, tree.get)) == 1 for t_ in ("dep-1.0-mc1.21.4-r2", "dep-1.0-mc1.21.4-release",
+    ok &= all(len(prerelease_pin_notes(t_, tree.get)) == 1 for t_ in ("dep-1.0-mc1.21.4-r2", "dep-1.0-mc1.21.4-release",
                                                                           "dep-1.0-mc1.21.4-release-r3"))
-    # wired into promote: it refuses before dispatching anything; and a tag the local clone has is read only there
+    # wired into promote: a note before the dispatch, not a refusal; and a tag the local clone has is read only there
     import contextlib, io
     saved = {k: globals()[k] for k in ("gh_logged_in", "fork_workflow", "tag_file", "_get")}
     asked = []
@@ -1716,15 +1718,17 @@ def self_check():
         globals().update(gh_logged_in=lambda: False, fork_workflow=lambda *a_: (fixture(deps=False), "a stub"),
                          tag_file=lambda repo, fork, tag, path: (asked.append(path), tree.get(path))[1],
                          _get=lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("no request expected")))
+        out_ = io.StringIO()
         try:
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(out_):
                 promote(["--fork", "o/dep", "--tag", "dep-1.0-mc1.21.4-r2", "--played-by", "someone", "--print"])
             refused = ""
         except SystemExit as e:
             refused = str(e)
     finally:
         globals().update(saved)
-    ok &= "library pre-release" in refused and ".port/1.21.4/DEPS.md" in asked
+    ok &= not refused and "note: dep-1.0-mc1.21.4-r2 is built against a library pre-release" in out_.getvalue() \
+        and ".port/1.21.4/DEPS.md" in asked
     with tempfile.TemporaryDirectory() as d_:
         g_ = lambda *a_: subprocess.run(["git", "-C", d_, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a_],
                                         capture_output=True, text=True, encoding="utf-8", check=True)
