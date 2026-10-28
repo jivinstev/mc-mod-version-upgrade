@@ -489,7 +489,7 @@ final class PlaytestRunner {
             if (phase != 3 && pieceAsked == 0) {
                 pieceAsked = 1;
                 String[] c = at.split(", ");
-                r.startPiece(mc, dim, Integer.parseInt(c[0]), Integer.parseInt(c[1]), b -> piece = b);
+                r.startPiece(mc, dim, what, Integer.parseInt(c[0]), Integer.parseInt(c[1]), b -> piece = b);
                 return null;
             }
             if (pieceAsked == 1) {
@@ -1807,9 +1807,12 @@ final class PlaytestRunner {
 
     // ═══════════════════════════════════════════════════════════════════════════════════ commands
     /** Run a command as the player on the integrated server (its own command source, so the result and failure text come back). */
-    /** The floor of the start piece of the structure whose start is in the chunk at block (x, z) in dimension dim:
-     *  {x, y, z} at the centre of its box, one block above its bottom; {} when that chunk records no start. */
-    void startPiece(Minecraft mc, String dim, int x, int z, Consumer<int[]> done) {
+    /** The floor of the start piece of structure `what` whose start is in the chunk at block (x, z) in dimension dim:
+     *  {x, y, z} at the centre of its box, one block above its bottom; {} when that chunk records no start of `what`.
+     *  Only `what`'s own start: the chunk can also hold another structure's (measured: a mineshaft's, underground,
+     *  outside the village asked for), and a tag (#...) names no one structure, so it finds none. */
+    void startPiece(Minecraft mc, String dim, String what, int x, int z, Consumer<int[]> done) {
+        String want = what.contains(":") ? what : "minecraft:" + what;
         IntegratedServer server = mc.getSingleplayerServer();
         if (server == null) { done.accept(new int[0]); return; }
         server.execute(() -> {
@@ -1819,9 +1822,9 @@ final class PlaytestRunner {
                     if (!level.dimension().toString().contains(dim + "]")) continue;
                     net.minecraft.world.level.ChunkPos cp = new net.minecraft.world.level.ChunkPos(x >> 4, z >> 4);
                     // by reflection: startsForStructure(ChunkPos, Predicate) until 26.2, (int chunkX, int chunkZ, Predicate) on 26.3
-                    java.util.function.Predicate<Object> any = st -> true;
-                    Object starts = R.call(level.structureManager(), "startsForStructure", cp, any);
-                    if (starts == null) starts = R.call(level.structureManager(), "startsForStructure", x >> 4, z >> 4, any);
+                    java.util.function.Predicate<Object> mine = st -> want.equals(structureId(level, st));
+                    Object starts = R.call(level.structureManager(), "startsForStructure", cp, mine);
+                    if (starts == null) starts = R.call(level.structureManager(), "startsForStructure", x >> 4, z >> 4, mine);
                     if (!(starts instanceof List<?> list)) continue;
                     for (Object o : list) {
                         if (!(o instanceof net.minecraft.world.level.levelgen.structure.StructureStart start)
@@ -1836,6 +1839,14 @@ final class PlaytestRunner {
             }
             done.accept(out);
         });
+    }
+
+    /** A structure's registry id ("ns:path"), or null. By reflection: the structure registry is lookupOrThrow's Registry
+     *  from 1.21.2, registryOrThrow's on 1.21.1 (where lookupOrThrow's lookup has no getKey). */
+    static String structureId(net.minecraft.server.level.ServerLevel level, Object structure) {
+        Object key = R.call(R.call(level.registryAccess(), "lookupOrThrow", Registries.STRUCTURE), "getKey", structure);
+        if (key == null) key = R.call(R.call(level.registryAccess(), "registryOrThrow", Registries.STRUCTURE), "getKey", structure);
+        return key == null ? null : key.toString();
     }
 
     void runCommand(Minecraft mc, String cmd, Consumer<CmdResult> done) {
