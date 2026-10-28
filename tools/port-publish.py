@@ -33,7 +33,11 @@ prints the fields to paste into CurseForge's create-project form (CurseForge has
   - every fix ledger the config lists has a column naming this tag and no S1 mode (crash, kick, hang, save
     damage, other mods broken) is open in it -- fix-ledger.py's own check;
   - each dependency that is another fork port already has the version this release was built against published
-    on that platform.
+    on that platform (the pin of the workflow AT THE TAG, or the install manifest when it describes the tag);
+  - a release built against a library pre-release that was not done when it was pinned (DEPS.md's "Library
+    pre-release (not done)" mark) goes out only with that exact library release: each library jar the tag's
+    workflow pins is now a promoted Release (a person played the pair), published on that platform, and still the
+    asset the tag's build checked by sha256. The library's done record is the round's question, not publishing's.
 PER PLATFORM: `--platform mr` (Modrinth) or `cf` (CurseForge) uploads to that one only; the default is both. Before
 uploading, each platform asked is judged against the fork's known-issues ledger (tools/known-issues.py
 blocks-publish: an open S1 at the release's Minecraft version that applies to that platform's jar), read from the
@@ -241,8 +245,8 @@ def ledger_errors(cfg, tag):
 def pinned_dependency_tag(repo, dep_repo, tag=None):
     """The release tag of dep_repo that release `tag` goes out with. The install manifest (.github/port-install.json,
     refreshed when a release is promoted) records it when it describes `tag`: the dependency the person played the
-    release with. Otherwise the workflow's --dep-jar pin -- which moves on when keep-current re-pins the dependency
-    to a newer pre-release, so a promoted release must not be judged by it."""
+    release with. Otherwise the --dep-jar pin of the workflow AT THE TAG -- the checked-out branch's moves on when
+    keep-current re-pins the dependency to a newer pre-release, so a promoted release must not be judged by it."""
     man = pathlib.Path(repo) / ".github/port-install.json"
     if tag and man.exists():
         try:
@@ -256,11 +260,68 @@ def pinned_dependency_tag(repo, dep_repo, tag=None):
                     hit = re.search(r"/releases/download/([^/]+)/", f.get("url", ""))
                     if hit:
                         return hit.group(1)
-    wf = (pathlib.Path(repo) / ".github/workflows/port-ci.yml")
-    if not wf.exists():
+    text = tag_workflow(repo, tag)
+    if text is None:
         return None
-    m = re.search(rf"github\.com/{re.escape(dep_repo)}/releases/download/([^/\"]+)/", wf.read_text(encoding="utf-8"), re.I)
+    m = re.search(rf"github\.com/{re.escape(dep_repo)}/releases/download/([^/\"]+)/", text, re.I)
     return m.group(1) if m else None
+
+
+def tag_workflow(repo, tag=None):
+    """port-ci.yml as release `tag` was built with it (the workflow at the tag), else the checked-out one. The
+    checked-out branch's pin moves on when keep-current re-pins a dependency; the jar was built against the tag's."""
+    if tag:
+        r = git(repo, "show", f"{tag}:.github/workflows/port-ci.yml")
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return r.stdout
+    wf = pathlib.Path(repo) / ".github/workflows/port-ci.yml"
+    return wf.read_text(encoding="utf-8") if wf.exists() else None
+
+
+PIN_URL = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/releases/download/([^/\"'\s]+)/([^\"'\s]+)")
+
+
+def library_pins(text):
+    """[(owner/repo, tag, asset, sha256 or None)]: the release jars a Port CI workflow installs into mavenLocal (its
+    --dep-jar and --dep-jar-variant pins, each line followed by its sha256 check). The kit's download is not one."""
+    lines, out = (text or "").splitlines(), set()
+    for i, ln in enumerate(lines):
+        if ".m2/repository" not in ln:
+            continue
+        for r, t, a in PIN_URL.findall(ln):
+            sha = next((m.group(0) for l2 in lines[i:i + 3] for m in [re.search(r"\b[0-9a-f]{64}\b", l2)] if m), None)
+            out.add((r, t, a, sha))
+    return sorted(out, key=lambda x: (x[0], x[1], x[2], x[3] or ""))
+
+
+def played_pair_errors(repo, cfg, tag):
+    """A release built against a library PRE-RELEASE that was not done when it was pinned (DEPS.md's mark) goes out
+    only with the exact library release it was played with: each library jar the workflow at the tag pins must be a
+    promoted (a person played it) Release, published on every platform this one goes to, and still the asset the
+    tag's build checked (its sha256). The library's own done record is the round's business, not publishing's."""
+    why = []
+    pins = library_pins(tag_workflow(repo, tag))
+    if not pins:
+        why.append(f"{tag} is built against a library pre-release (.port DEPS.md mark) but its port-ci.yml pins no "
+                   "library release jar to check")
+    for r, t, a, sha in pins:
+        try:
+            rel = gh("GET", f"/repos/{r}/releases/tags/{t}")
+        except SystemExit:
+            why.append(f"{r}@{t}: no such release -- {tag} was built against it"); continue
+        if rel.get("prerelease") or rel.get("draft"):
+            why.append(f"{r}@{t} is still a pre-release: {tag} was played with it, so promote that library release "
+                       "first (a person played the pair)")
+        for plat in platforms(cfg):
+            if plat not in published(rel.get("body")):
+                why.append(f"{r}@{t} is not published on {plat} yet -- publish the library release {tag} was played with first")
+        asset = next((x for x in rel.get("assets", []) if x.get("name") == a), None)
+        if asset is None:
+            why.append(f"{r}@{t} no longer has {a}, the jar {tag} was built against")
+        elif sha and asset.get("digest") and asset["digest"] != f"sha256:{sha}":
+            why.append(f"{r}@{t}/{a} is not the jar {tag} was built against (sha256 {sha[:12]}..., the release now has "
+                       f"{asset['digest'][7:19]}...)")
+    return list(dict.fromkeys(why))
 
 
 def published(body):
@@ -284,14 +345,13 @@ def gate(repo, cfg, tag, release, manual=False):
         why.append(f"{tag} is not an ancestor of the checked-out branch")
     why += ledger_errors(cfg, tag)
     m_ = re.search(r"-mc(\d[\d.]*?)(?:-r\d+)?$", tag)
-    if m_:   # a version branch built against a library pre-release that was not done (tools/layer-deps.py's mark)
+    if m_:   # built against a library pre-release that was not done (layer-deps.py's / round.py's mark): the pair
         mc_ = m_.group(1)
         deps_ = git(repo, "show", f"{tag}:.port/{mc_}/DEPS.md")
         props_ = git(repo, "show", f"{tag}:.port/{mc_}/branch.properties")
         if (deps_.returncode == 0 and "**Library pre-release (not done):**" in deps_.stdout) or \
                 (props_.returncode == 0 and re.search(r"(?m)^port_jar_prerelease\.", props_.stdout)):
-            why.append(f"{tag} is built against a library pre-release whose {mc_} was not done (.port/{mc_}/DEPS.md): "
-                       "re-resolve the pin once the library's version is done, and publish that release")
+            why += played_pair_errors(repo, cfg, tag)
     for d in cfg.get("dependencies", []):
         if d.get("port") and d.get("type") == "required":
             dtag = pinned_dependency_tag(repo, d["port"], tag)
@@ -841,13 +901,54 @@ def self_check():
         expect(any("pre-release" in w for w in gate(".", cfg, "m-2-mc1.21.1", {**good, "prerelease": True})), "pre-release refuses")
         class RS:
             def __init__(self, rc, out): self.returncode, self.stdout = rc, out
-        real_git = git
-        git = lambda repo, *a: RS(0, "**Library pre-release (not done):** `com.example:lib`\n") if a[:1] == ("show",) \
-            and a[1].endswith("/DEPS.md") else RS(0, "")
-        why_pre = gate(".", cfg, "m-2-mc1.21.1", good)
-        git = real_git
-        expect(any("library pre-release" in w for w in why_pre),
-               f"a release built against a library pre-release that was not done is not published: {why_pre}")
+        # a release built against a library pre-release that was not done (the mark at the tag) goes out with the exact
+        # library release the pair was played with: promoted, published on the platform, the asset the build checked
+        sha_ = "ab" * 32
+        wf_ = ('          curl -fsSL -o "$HOME/.m2/repository/com/example/lib/1/lib-1.jar" '
+               '"https://github.com/o/lib/releases/download/lib-1-mc1.21.1-r3/lib-1.jar"\n'
+               f'          echo "{sha_}  $HOME/.m2/repository/com/example/lib/1/lib-1.jar" | sha256sum -c -\n'
+               '          curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" "https://github.com/o/mmvu/releases/download/port-ci-kit-v9/k.tar.gz"\n')
+        def pair_git(mark="deps", workflow=wf_):
+            def g(repo, *a):
+                if a[:1] == ("show",) and a[1].endswith("/DEPS.md"):
+                    return RS(0, "**Library pre-release (not done):** `com.example:lib`\n") if mark == "deps" else RS(1, "")
+                if a[:1] == ("show",) and a[1].endswith("/branch.properties"):
+                    return RS(0, "port_jar_prerelease.com.example\\:lib=lib-1-mc1.21.1-r3 is a pre-release\n") \
+                        if mark == "props" else RS(1, "")
+                if a[:1] == ("show",) and a[1].endswith("/port-ci.yml"):
+                    return RS(0, workflow) if workflow else RS(128, "")
+                return RS(0, "")
+            return g
+        def lib_gh(lib):
+            def g(method, path, data=None, raw=False, accept=None):
+                return lib if path.endswith("/releases/tags/lib-1-mc1.21.1-r3") else fake_gh(method, path, data, raw, accept)
+            return g
+        promoted = {"prerelease": False, "body": "<!-- port-publish:modrinth:abc -->",
+                    "assets": [{"name": "lib-1.jar", "digest": f"sha256:{sha_}"}]}
+        expect(library_pins(wf_) == [("o/lib", "lib-1-mc1.21.1-r3", "lib-1.jar", sha_)],
+               f"the library pins are the mavenLocal jars with their sha256, not the kit: {library_pins(wf_)}")
+        def pair(mark="deps", lib=promoted, workflow=wf_):
+            global git, gh
+            saved_ = (git, gh)
+            git, gh = pair_git(mark, workflow), lib_gh(lib)
+            try:
+                return gate(".", cfg, "m-2-mc1.21.1", good)
+            finally:
+                git, gh = saved_
+        expect(pair() == [], f"the played pair goes out once the library release is promoted and published: {pair()}")
+        expect(pair("props") == [], "the branch.properties key alone is judged the same way")
+        why_pre = pair(lib={**promoted, "prerelease": True})
+        expect(any("still a pre-release" in w for w in why_pre), f"the library release still a pre-release refuses: {why_pre}")
+        why_pre = pair(lib={**promoted, "body": ""})
+        expect(any("not published on modrinth" in w for w in why_pre), f"the library release unpublished refuses: {why_pre}")
+        why_pre = pair(lib={**promoted, "assets": [{"name": "lib-1.jar", "digest": "sha256:" + "cd" * 32}]})
+        expect(any("not the jar" in w for w in why_pre), f"a library asset that is not the jar the build checked refuses: {why_pre}")
+        why_pre = pair(lib={**promoted, "assets": []})
+        expect(any("no longer has" in w for w in why_pre), f"a library asset gone refuses: {why_pre}")
+        why_pre = pair(workflow="")
+        expect(any("pins no library release" in w for w in why_pre), f"the mark with no pin to check refuses: {why_pre}")
+        expect(pair(mark=None, lib={**promoted, "prerelease": True}) == [],
+               "no mark: the pair check does not run (the port dependency check judges the dependency)")
         expect(any("not published by" in w for w in gate(".", cfg, "m-2-mc1.21.1", {**good, "author": {"login": "x"}})), "foreign author refuses")
         expect(any("permission" in w for w in gate(".", {**cfg, "permission": ""}, "m-2-mc1.21.1", good)), "no permission refuses")
         expect(any("auto is off" in w for w in gate(".", {**cfg, "auto": False}, "m-2-mc1.21.1", good)), "auto off refuses unattended")
@@ -862,6 +963,18 @@ def self_check():
             pinned_dependency_tag = real_pin
         git = lambda repo, *a: R(1)
         expect(any("not an ancestor" in w for w in gate(".", cfg, "m-2-mc1.21.1", good)), "foreign tag refuses")
+        # the dependency a release goes out with is the pin of the workflow AT THE TAG, not the branch's moved-on one
+        import tempfile
+        with tempfile.TemporaryDirectory() as d_:
+            (pathlib.Path(d_) / ".github/workflows").mkdir(parents=True)
+            (pathlib.Path(d_) / ".github/workflows/port-ci.yml").write_text(
+                "x https://github.com/o/lib/releases/download/lib-1-mc1.21.1-r4/lib-1.jar\n", encoding="utf-8")
+            git = lambda repo, *a: RS(0, "x https://github.com/o/lib/releases/download/lib-1-mc1.21.1-r3/lib-1.jar\n") \
+                if a[:2] == ("show", "m-2-mc1.21.1-r3:.github/workflows/port-ci.yml") else RS(128, "")
+            expect(pinned_dependency_tag(d_, "o/lib", "m-2-mc1.21.1-r3") == "lib-1-mc1.21.1-r3",
+                   "a release is judged by the pin it was built with, at its tag")
+            expect(pinned_dependency_tag(d_, "o/lib", "m-9-mc1.21.1") == "lib-1-mc1.21.1-r4"
+                   and pinned_dependency_tag(d_, "o/lib") == "lib-1-mc1.21.1-r4", "no such tag here: the checked-out workflow")
     finally:
         gh, git = real_gh, real_git
     seen, real_gh0 = [], gh

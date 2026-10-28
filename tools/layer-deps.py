@@ -76,8 +76,9 @@ LIBRARY FIRST
   A version-branch library's PRE-RELEASE whose version is not done is still taken when its gates are green at the tag
   (GATES.md: a green Gate C at a commit the tag carries): the library rule waits for a dependent's Gate C against the
   library's jar, so a dependent's pre-release may pin it ("Don't exceed your dependency"). DEPS.md marks it
-  ("Library pre-release (not done)") and the dependent's version is then not done -- no full Release, no promotion --
-  until the library's is and the pin is re-resolved. A full Release, or a pre-release with red gates, is refused.
+  ("Library pre-release (not done)") and the dependent's version is then not done until the library's is and the pin
+  is re-resolved; a person who played the pair may still promote it, and port-publish.py publishes it only once that
+  exact library release is promoted and published. A full Release, or a pre-release with red gates, is refused.
 
 ISOLATION. A dependent never builds a sibling's checkout: --port-checkout copies the jar the checkout built and pins it
 as `port_jar_dev.` -- development only, refused by the dependent's done check.
@@ -275,8 +276,9 @@ def render_md(target, rows, stop):
     for r in pre:
         out.append(f"{PRERELEASE_MARK} `{r['group']}:{r['module']}` is pinned to a library pre-release whose {target} is "
                    f"not done ({r['prerelease']}). This version may cut its own pre-release with it (the pair is what a "
-                   f"person plays); it is not done, and is neither promoted nor published, until the library's {target} "
-                   f"is done: then re-resolve with `--port-release`.")
+                   f"person plays) and a person who played the pair may promote it; it publishes only once that exact library "
+                   f"release is promoted and published, and it is not done until the library's {target} is done: then "
+                   f"re-resolve with `--port-release`.")
     return "\n".join(out) + "\n"
 
 
@@ -771,7 +773,7 @@ def resolve(repo, target, checkouts, lookups=None, dry_run=False, pins=None, all
                     row["undone"] = why
                 elif not done and pre[0]:
                     # a dependent's pre-release may pin the library's pre-release; DEPS.md marks it, and the dependent's
-                    # version is not done (no full Release, no promotion) until the library's is
+                    # version is not done until the library's is (it publishes only with that library release published)
                     row["prerelease"] = was if pre[1] is None else f"{pre[1]}; its {target} is not done: {why}"
                     row["library"] = f"{target} NOT done, pre-release pinned: {pre[1] or was}"
                 elif not done:
@@ -1012,8 +1014,9 @@ def cmd_resolve(a):
             print(f"layer-deps: {a.target} {r['group']}:{r['module']}: LIBRARY NOT DONE, used anyway "
                   f"(--allow-undone-library, recorded in DEPS.md): {r['undone']}")
         if r.get("prerelease"):
-            print(f"layer-deps: {a.target} {r['group']}:{r['module']}: LIBRARY PRE-RELEASE, not done: pinned for this "
-                  f"version's pre-release only (recorded in DEPS.md; not done until the library's {a.target} is): "
+            print(f"layer-deps: {a.target} {r['group']}:{r['module']}: LIBRARY PRE-RELEASE, not done: pinned for the "
+                  f"pair a person plays (recorded in DEPS.md; not done until the library's {a.target} is, published only "
+                  f"with that library release published): "
                   f"{r['prerelease']}")
     wrote = False if a.dry_run else write(repo, a.target, rows, stop)
     n_sub, n_drop = sum(1 for r in rows if r.get("to")), sum(1 for r in rows if r.get("drop"))

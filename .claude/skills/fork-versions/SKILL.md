@@ -218,8 +218,9 @@ rule's loop is broken: `layer-deps.py resolve --port-release owner/lib@<tag>` ta
 `--allow-undone-library` -- and marks it in the dependent's `DEPS.md` ("Library pre-release (not done)"). The dependent
 then gates and cuts its pre-release against it, `library-record` records its Gate C in the library (which makes the
 library's version done once the rest of its list holds), and the dependent re-resolves the same tag: its version is not
-done while the mark stands, and `port-ci.py promote` and `port-publish.py` refuse a tag built with it -- `--with-dependency`
-does not lift that (promoting the library does not make its version done). A full Release, or a pre-release with red
+done while the mark stands. A person who played the pair may still promote both (`port-ci.py promote` notes the mark,
+it does not refuse), and `port-publish.py` publishes the dependent's tag only once each library release its workflow pins
+at the tag is promoted and published and is still the jar its build checked (sha256). A full Release, or a pre-release with red
 gates, is still refused. The dependent's T must
 not be promoted to a full Release, nor published, while the library release it pins is still a pre-release; promote
 both together (`port-ci.py promote --with-dependency owner/lib`, the library promoted too), or the library first.
