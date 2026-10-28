@@ -62,11 +62,14 @@ forks already on the current shared library, builds nothing but the close):
       version) -> nochange (a version with no fix, sync, reconcile or adopt: nothing shipped changed -- its merge and
       records pushed, the push run awaited when the workflow changed, every step below skipped) -> reviewref (the
       review, fix and recheck skipped when REVIEW.md stays current through .port/CHANGE-REVIEWS.md) -> review ->
-      fix -> recheck -> gates (ONE full run: fork-port.py --from-stage measure --gates full, recording the gated commit)
-      -> depgate:<dependent> (a LIBRARY version: the dependent's Gate C against this candidate jar, before the merge)
+      fix -> recheck -> gates (ONE full run: fork-port.py --from-stage measure --gates full, recording the gated commit;
+      on a ci_record fork -- its workflow takes from_run and dep_override -- the build and Gate A/B only, no lock: the
+      PR's CI is the gate of record, its release's gates-<env>.md the record check-done reads)
       -> freeze (and, after a clean fresh review, its reviewed changes in .port/CHANGE-REVIEWS.md) -> pr (only what the gates certified: code after the gated commit sends the version back to its gates)
-      -> ci -> merge (its PR's CI asked again) -> release (dispatched right after the merge; the push run and the release
-      run awaited together) -> librecord:<library> (a dependent: fork-branches.py library-record once its Gate C passed
+      -> ci -> depgate:<dependent> (a LIBRARY version: the dependent's Gate C against this candidate jar, before the
+      merge; on a ci_record fork the dependent's CI dispatched with dep_override naming the PR run's jar) -> merge (its
+      PR's CI asked again) -> release (dispatched right after the merge, from_run reusing the PR run when the merge is its
+      tree; the push run and the release run awaited together, the push run only when .github/ changed on reuse) -> librecord:<library> (a dependent: fork-branches.py library-record once its Gate C passed
       on the released jar)
   LOWEST FIRST (init, before any fix): each selected fix is checked against the version branches below the version
   the plan fixes it at (known-issues.py lowest, git only, on the head's ledger). Nothing moves on that alone: a
@@ -100,7 +103,7 @@ version's merge (it is a finding on the library version, not a reopen later).
 Exit codes: 0 ok (drive: progress made or the round done); 3 nothing can run (blocked items listed); 2 bad input.
 Standard library only.
 """
-import argparse, concurrent.futures, contextlib, datetime, importlib.util, io, json, os, pathlib, re, shlex
+import argparse, concurrent.futures, contextlib, datetime, hashlib, importlib.util, io, json, os, pathlib, re, shlex
 import shutil, subprocess, sys, tempfile, threading, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -438,14 +441,17 @@ def build_queue(frozen, cfg, forks, date):
             else:
                 q.add(slug, base, "gates")
                 seg_review(q, slug, base)
+            if single:               # #161 U5 (C2): the done list before the PR (report only until the head has records)
+                q.add(slug, base, "done")
+            for s in ("pr", "ci"):
+                q.add(slug, base, s)
+            # the library's pre-merge dependent gate after its PR's CI: on a ci_record fork it is the dependent's CI
+            # against that run's candidate jar (depgate_ci); before the merge either way
             if F.get("library"):     # E4: a set of version-branch forks only keeps its head without this gate
                 for dep in dependents.get(slug, []):
                     if (single or forks[dep]["kind"] == "single") and base in [forks[dep]["base"], *forks[dep]["versions"]]:
                         q.add(slug, base, f"depgate:{dep}", dirs=[slug, dep], extra={"dependent": dep})
-            if single:               # #161 U5 (C2): the done list before the PR (report only until the head has records)
-                q.add(slug, base, "done")
-            for s in ("pr", "ci", "merge"):
-                q.add(slug, base, s)
+            q.add(slug, base, "merge")
             release_of[(slug, base)] = q.add(slug, base, "release")
         for v in segs:
             k = F["versions"].index(v)
@@ -484,13 +490,14 @@ def build_queue(frozen, cfg, forks, date):
                 # the version's only change is the shared library's own (reviewed in the migrator): a narrow review
                 q.items[-3]["extra"]["sync_only"] = True
             g = q.add(slug, v, "gates")
-            if F.get("library"):
+            q.add(slug, v, "freeze", extra={"libraries": rel})
+            for s in ("pr", "ci"):
+                q.add(slug, v, s)
+            if F.get("library"):     # after its PR's CI (depgate_ci takes that run's candidate jar), before the merge
                 for dep in dependents.get(slug, []):
                     if v in forks[dep]["versions"] or sv_dep(dep, v):
                         q.add(slug, v, f"depgate:{dep}", dirs=[slug, dep], extra={"dependent": dep})
-            q.add(slug, v, "freeze", extra={"libraries": rel})
-            for s in ("pr", "ci", "merge"):
-                q.add(slug, v, s)
+            q.add(slug, v, "merge")
             release_of[(slug, v)] = q.add(slug, v, "release")
             for lb in rel:
                 q.add(slug, v, f"librecord:{forks[lb]['name']}", deps=[g, release_of[(slug, v)]], dirs=[slug, lb],
@@ -1771,7 +1778,7 @@ def t_repin(st, it, log):
         "pins": pins, "superseded_bumps": skipped}
 
 
-def sv_gate_cmds(d, upstream_commit=None, base_ref=None):
+def sv_gate_cmds(d, upstream_commit=None, base_ref=None, gatec=None):
     wf = pathlib.Path(d) / ".github/workflows/port-ci.yml"
     if not wf.is_file():
         raise StepError("no .github/workflows/port-ci.yml on the work branch: the gates' --modid cannot be read")
@@ -1780,7 +1787,7 @@ def sv_gate_cmds(d, upstream_commit=None, base_ref=None):
     modid = args[args.index("--modid") + 1] if "--modid" in args else None
     if not modid:
         raise StepError("the Port CI workflow names no --modid")
-    gatec = (re.search(r'--gatec "?([\w,]+)"?', text) or [None, "launch,spawn,battle,gauntlet"])[1]
+    gatec = gatec if gatec is not None else (re.search(r'--gatec "?([\w,]+)"?', text) or [None, "launch,spawn,battle,gauntlet"])[1]
     base = ["--base", upstream_commit] if upstream_commit and git(d, "cat-file", "-e", f"{upstream_commit}^{{commit}}").returncode == 0 else []
     if not base and base_ref and git(d, "rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}").returncode == 0:
         base = ["--base", base_ref]         # a dependent gate's worktree: its workflow's own --base
@@ -1855,12 +1862,12 @@ def built_jars(co):
     return [j for j in (pathlib.Path(co) / "build/libs").glob("*.jar") if not j.name.endswith("-sources.jar")]
 
 
-def gate_run_cmd(d, v, stage, frozen, *extra):
+def gate_run_cmd(d, v, stage, frozen, *extra, gates="full"):
     """A full gate run of version v's checkout d through fork-port.py, from `stage`. A gate run fixes nothing: no compile
     loop budget (--budget 0 --max-errors 0), so a compile error stops it red with the tree as it was -- with the default
     budget a gate re-run that met an error started the file loop, whose workers (and its 0-error scan and probe rounds)
     rewrote files nothing had asked about (weekly round 2026-10-21). A red run goes back to the fixer."""
-    return [sys.executable, TOOLS / "fork-port.py", "--repo", d, "--target", v, "--from-stage", stage, "--gates", "full",
+    return [sys.executable, TOOLS / "fork-port.py", "--repo", d, "--target", v, "--from-stage", stage, "--gates", gates,
             "--budget", "0", "--max-errors", "0", *extra, "--untaken-ok", frozen]
 
 
@@ -1876,6 +1883,12 @@ def t_gates(st, it, log):
         for j in built_jars(d):
             j.unlink()
         gated, at = head(d), time.time()
+        if ci_record(d):            # the PR's CI is the gate of record: the build and Gate A/B here, no client, no lock
+            sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"], gates="ab"), log, ok=(0, 18))
+            c = commit_paths(d, [f".port/{v}"], f"Gate records for {v} (keep-current round)")
+            return ("build and Gate A/B green; Gate C is the PR's CI (the gate of record)"
+                    + (f", records {pre[:12]} before" if pre else "") + (f", records {c[:12]}" if c else "")), {
+                "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
         with full_gate_lock(it["id"], say_to(log)) as lk:
             sh(st, it, gate_run_cmd(d, v, "measure", st.data["frozen"]), log, ok=(0, 18), hold=lk)
         if (pathlib.Path(d) / ".port" / v / "GATES-RED.md").is_file():
@@ -1900,6 +1913,11 @@ def t_gates(st, it, log):
     au = seg_item(st, it, "authors")
     up = au["extra"].get("upstream_commit") if au else None
     gated, at = head(d), time.time()
+    if ci_record(d):                # the PR's CI is the gate of record (both kinds): build and Gate A/B here
+        for cmd in sv_gate_cmds(d, up, gatec=""):
+            sh(st, it, cmd, log)
+        return "ci-gates build and Gate A/B green (full and minimal); Gate C is the PR's CI (the gate of record)", {
+            "gated_head": gated, "gated_at": at, "head_after": head(d), "ci_record": True}
     with full_gate_lock(it["id"], say_to(log)) as lk:
         for cmd in sv_gate_cmds(d, up):
             sh(st, it, cmd, log, hold=lk)
@@ -1988,7 +2006,8 @@ def t_done(st, it, log):
     F, v = st.fork(it["fork"]), it["version"]
     d = checkout(F["dir"], branch_of(st, it))
     fb = mod("fb")
-    why = [w for w in fb.target_done(pathlib.Path(d), v) if w != fb.SV_PRERELEASE]
+    # a ci_record fork's Gate C comes from its PR's CI and the release built from it: not judged before the PR
+    why = [w for w in fb.target_done(pathlib.Path(d), v, gates=not ci_record(d)) if w != fb.SV_PRERELEASE]
     # the first round: origin's head carries no done record yet (a REVIEW.md with its `- base:` line)
     rollout = not fb.SV_BASE.search(git(F["dir"], "show", f"origin/{F['head']}:.port/{v}/REVIEW.md").stdout)
     if why and rollout:
@@ -2007,6 +2026,10 @@ def t_depgate(st, it, log):
     lib, dep = st.fork(it["fork"]), st.fork(it["extra"]["dependent"])
     v = it["version"]
     lco = vco(st, it["fork"], v) if is_vb(st, it) else checkout(lib["dir"], branch_of(st, it))
+    if ci_record(lco):
+        r = depgate_ci(st, it, dep, v, log)
+        if r:
+            return r
     g = seg_item(st, it, "gates")["result"]
     if not g.get("gated_head"):
         raise StepError(f"the library's gates at {v} recorded no gated commit: run them again")
@@ -2072,6 +2095,113 @@ def private_m2(dest, cands):
                                           f"<artifactId>{a}</artifactId><version>{ver}</version><packaging>jar"
                                           "</packaging></project>\n", encoding="utf-8")
     return dest
+
+
+CI_RECORD_INPUTS = ("from_run:", "dep_override:")
+
+
+def ci_record(d=None, text=None):
+    """The fork's Port CI workflow is the template with `from_run` and `dep_override` (port-ci.py): its PR run is the
+    version's gate of record (Gate C there, three environments in parallel; the release it builds carries the gate
+    summaries the done check reads), the library's dependent gate is the dependent's CI against the candidate jar, and
+    the release reuses the PR run's jars. A workflow rendered before that keeps the local full gates."""
+    if text is None:
+        f = pathlib.Path(d) / PORT_CI_WF
+        text = f.read_text(encoding="utf-8") if f.is_file() else ""
+    return all(x in text for x in CI_RECORD_INPUTS)
+
+
+def gh_bytes(url):
+    """A binary GitHub download (an artifact zip) with GITHUB_TOKEN / GH_TOKEN: api.github.com answers with a redirect
+    to storage that must be fetched WITHOUT the token. -> bytes."""
+    import urllib.error
+    import urllib.request
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if not tok:
+        raise StepError("an artifact download needs GITHUB_TOKEN or GH_TOKEN")
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    op = urllib.request.build_opener(_NoRedirect)
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json",
+                                               "User-Agent": "mmvu-round"})
+    try:
+        with op.open(req, timeout=120) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        if e.code not in (301, 302, 303, 307, 308) or not e.headers.get("Location"):
+            raise StepError(f"GET {url}: HTTP {e.code}")
+        with urllib.request.urlopen(e.headers["Location"], timeout=300) as r:
+            return r.read()
+
+
+def pr_ci_run(slug, sha):
+    """The Port CI pull_request run of a PR head: (id, run) or (None, None)."""
+    runs = [r for r in gh(f"repos/{slug}/actions/runs?head_sha={sha}&event=pull_request&per_page=50").get("workflow_runs", [])
+            if (r.get("path") or "").endswith(PORT_CI_WF) and r.get("conclusion") == "success"]
+    runs.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return (runs[0]["id"], runs[0]) if runs else (None, None)
+
+
+def run_jars(slug, run_id, into):
+    """The `jars` artifact of a Port CI run unpacked into `into`. -> the jar paths."""
+    import io
+    import zipfile
+    arts = gh(f"repos/{slug}/actions/runs/{run_id}/artifacts?per_page=100").get("artifacts", [])
+    art = next((a for a in arts if a.get("name") == "jars" and not a.get("expired")), None)
+    if not art:
+        raise StepError(f"{slug} run {run_id} has no `jars` artifact (expired, or the run built none)")
+    into = pathlib.Path(into)
+    shutil.rmtree(into, ignore_errors=True)
+    into.mkdir(parents=True)
+    with zipfile.ZipFile(io.BytesIO(gh_bytes(art["archive_download_url"]))) as z:
+        for n in z.namelist():
+            if n.endswith(".jar") and "/" not in n.strip("/"):
+                (into / n).write_bytes(z.read(n))
+    return sorted(into.glob("*.jar")), art["name"]
+
+
+def depgate_ci(st, it, dep, v, log):
+    """The library's pre-merge dependent gate on CI (ci_record forks): the dependent's Port CI dispatched on its own
+    branch for version v with `dep_override` naming the library PR run's candidate jar (the `jars` artifact, by run id
+    and sha256), its three environments with Gate C in parallel, no release. Green only when that run is."""
+    lib_slug, dep_slug = it["fork"], it["extra"]["dependent"]
+    br = f"neoforge-{v}" if dep["kind"] == "branches" and v in dep.get("versions", []) else dep["head"]
+    git(dep["dir"], "fetch", "-q", "origin", br, check=True)
+    wf = git(dep["dir"], "show", f"origin/{br}:{PORT_CI_WF}").stdout
+    if not ci_record(text=wf):
+        return None                         # the dependent's workflow predates dep_override: the local dependent gate
+    pins = {ga: p for ga, p in mod("ld").port_deps(wf).items() if p["repo"].lower() == lib_slug.lower()}
+    if not pins:
+        raise StepError(f"{br} of {dep_slug}: its Port CI workflow pins no release of {lib_slug}: nothing to gate "
+                        "against the candidate jar")
+    ci = seg_item(st, it, "ci")["result"]
+    run_id = ci.get("run_id")
+    if not run_id:
+        raise StepError(f"{lib_slug} {v}: its PR's Port CI run is not recorded (the ci step names it): run ci again")
+    jars, art = run_jars(lib_slug, run_id, st.rdir / "round/work" / f"candidate-{st.fork(lib_slug)['name']}-{v}")
+    entries = []
+    for ga, p in sorted(pins.items()):
+        jar, why = candidate_jar(jars, p["asset"], v)
+        if not jar:
+            raise StepError(f"{lib_slug} run {run_id}'s jars: {why} (the asset {dep_slug} pins): which is the candidate?")
+        sha = hashlib.sha256(jar.read_bytes()).hexdigest()
+        entries.append(f"{lib_slug}#{run_id}/{art}/{jar.name}={ga}:{p['version']}@{sha}")
+    dsha = gh(f"repos/{dep_slug}/branches/{br}")["commit"]["sha"]
+    since = it["result"].get("dispatched_at")
+    if not since:
+        since = now()
+        with State.tx(st.path) as s2:       # written before the POST: a restart waits for this run, never dispatches twice
+            s2.item(it["id"])["result"]["dispatched_at"] = since
+        gh(f"repos/{dep_slug}/actions/workflows/port-ci.yml/dispatches", "POST",
+           {"ref": br, "inputs": {"dep_override": " ".join(entries)}})
+    ok, text = wait_runs(dep_slug, dsha, log, event="workflow_dispatch", branch=br, since=since)
+    if not ok:
+        raise StepError(f"{dep_slug} {v}: its CI against {lib_slug}'s candidate jar (run {run_id}) is NOT green ({text}): "
+                        "a blocking finding on the library version, which does not merge")
+    return (f"{dep_slug} {v}: its CI green against {lib_slug}'s candidate jar (PR run {run_id})",
+            {"evidence": text[:600], "candidate_run": run_id})
 
 
 def candidate_jar(jars, asset, v):
@@ -2284,7 +2414,8 @@ def t_ci(st, it, log):
     ok, text = wait_runs(it["fork"], pr["sha"], log, event="pull_request")
     if not ok:
         raise StepError(f"PR #{pr['pr']} CI: {text}")
-    return f"PR #{pr['pr']} CI green", {}
+    rid, _r = pr_ci_run(it["fork"], pr["sha"])
+    return f"PR #{pr['pr']} CI green" + (f" (Port CI run {rid})" if rid else ""), {"run_id": rid}
 
 
 def pr_runs_green(slug, sha):
@@ -2326,6 +2457,35 @@ def t_merge(st, it, log):
     return f"#{pr['pr']} merged ({sha[:12]})", res
 
 
+def reuse_run(st, it):
+    """The PR's Port CI run whose jars and gate summaries the release can publish as they are (port-ci.yml from_run):
+    a ci_record workflow, and the merge commit's tree the very tree that run tested (the PR head's; the round's PRs
+    are cut from their base, so the merge adds no change). -> its run id, or None (the release builds again)."""
+    slug, mg = it["fork"], seg_item(st, it, "merge")["result"]
+    pr, ci = seg_item(st, it, "pr")["result"], (seg_item(st, it, "ci") or {}).get("result") or {}
+    rid = ci.get("run_id")
+    d = st.fork(slug)["dir"]
+    if not rid or not pr.get("sha") or not mg.get("merge_sha"):
+        return None
+    git(d, "fetch", "-q", "origin", base_of(st, it))
+    wf = git(d, "show", f"{mg['merge_sha']}:{PORT_CI_WF}").stdout
+    tree = lambda c: git(d, "rev-parse", f"{c}^{{tree}}").stdout.strip()
+    if not ci_record(text=wf) or not tree(pr["sha"]) or tree(pr["sha"]) != tree(mg["merge_sha"]):
+        return None
+    return rid
+
+
+def push_run_needed(st, it):
+    """Is the merge's push run awaited? Always, unless the release reuses the PR's run (reuse_run) and the merge changed
+    nothing under .github/: the push run then tests the tree the PR run already passed (it still runs; a changed
+    workflow is always awaited, so CI is seen to run on the branch)."""
+    if not it["result"].get("from_run"):
+        return True
+    d, mg = st.fork(it["fork"])["dir"], seg_item(st, it, "merge")["result"]
+    changed = git(d, "diff", "--name-only", f"{mg['merge_sha']}^1", mg["merge_sha"]).stdout.splitlines()
+    return any(f.startswith(".github/") for f in changed)
+
+
 def release_waits_push(st, it):
     """The release is dispatched right after the merge and the merge's push run awaited with it (keep-current step 4):
     a version branch, and a single-version fork's head; a version-branch fork's head waits for its push run at the
@@ -2354,11 +2514,18 @@ def t_release(st, it, log):
             since = now()
             with State.tx(st.path) as s2:   # written before the POST: a restart looks the run up first
                 s2.item(it["id"])["result"]["dispatching_at"] = since
-            gh(f"repos/{slug}/actions/workflows/port-ci.yml/dispatches", "POST", {"ref": base, "inputs": {"release": "true"}})
+            inputs = {"release": "true"}
+            reuse = reuse_run(st, it)
+            if reuse:
+                inputs["from_run"] = str(reuse)
+            gh(f"repos/{slug}/actions/workflows/port-ci.yml/dispatches", "POST", {"ref": base, "inputs": inputs})
+            with State.tx(st.path) as s2:
+                s2.item(it["id"])["result"]["from_run"] = reuse
+            it["result"]["from_run"] = reuse
         with State.tx(st.path) as s2:
             s2.item(it["id"])["result"]["dispatched_at"] = since
     ok, text = wait_runs(slug, mg["merge_sha"], log, event="workflow_dispatch", branch=base, since=since)
-    if release_waits_push(st, it):  # the merge's push run, awaited together with the release run
+    if release_waits_push(st, it) and push_run_needed(st, it):   # the merge's push run, awaited with the release run
         ok2, text2 = wait_runs(slug, mg["merge_sha"], log, event="push", branch=base)
         if not ok2:
             raise StepError(f"the merge's push run on {base} is red ({text2}): it blocks the pre-release's promotion")
@@ -3068,8 +3235,8 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         by = {x["id"]: x for x in items}
         dga = f"examplesvlib@1.21.1:depgate:{SD}"
         want(rc == 0 and "examplesvlib: single" in o and ids_of(items, SL) == [
-            "ci-check", "setup", "upstream", "authors", "review", "fix", "recheck", "records", "gates", f"depgate:{SD}",
-            "done", "pr", "ci", "merge", "release"], f"a single-version library: the single-version round's order, its dependent's gate "
+            "ci-check", "setup", "upstream", "authors", "review", "fix", "recheck", "records", "gates", "done", "pr", "ci",
+            f"depgate:{SD}", "merge", "release"], f"a single-version library: the single-version round's order, its dependent's gate "
                                  f"before its merge: {rc} {o} {ids_of(items, SL)}")
         want(ids_of(items, SD) == ["ci-check", "setup", "upstream", "authors", "repin-head", "backlog", "review", "fix",
                                    "recheck", "records", "gates", "done", "pr", "ci", "merge", "release"]
@@ -3139,7 +3306,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
                             [f"{VL}={vl}", f"{SD}={sd}", f"{S4}={s4}"], sb)
         by = {x["id"]: x for x in items}
         want(rc == 0 and ids_of(items, VL)[:10] == ["ci-check", "setup", "backlog", "gates", "review", "fix", "recheck",
-                                                    f"depgate:{SD}", "pr", "ci"]
+                                                    "pr", "ci", f"depgate:{SD}"]
              and f"examplevlib@1.21.4:depgate:{S4}" in by and f"examplevlib@1.21.5:depgate:{S4}" not in by
              and "examplevlib@1.21.4:release" in by["examplesv4@1.21.4:repin-head"]["deps"]
              and "examplevlib@1.21.1:release" in by["examplesvmod@1.21.1:repin-head"]["deps"]
@@ -3168,7 +3335,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
                                  {"repo": VD, "head": "neoforge-1.21.1", "role": "dependent", "depends_on": [SL]}),
                             [f"{SL}={sl}", f"{VD}={vd}"], sc)
         by = {x["id"]: x for x in items}
-        want(rc == 0 and ids_of(items, SL)[7:11] == ["records", "gates", f"depgate:{VD}", "done"]
+        want(rc == 0 and ids_of(items, SL)[7:13] == ["records", "gates", "done", "pr", "ci", f"depgate:{VD}"]
              and ids_of(items, VD)[:6] == ["ci-check", "setup", "repin-head", "backlog", "gates", "review"]
              and "examplesvlib@1.21.1:release" in by["examplevmod@1.21.1:repin-head"]["deps"],
              f"a single-version library gates its version-branch dependent's head before its merge: {rc} {o} {list(by)}")
@@ -3830,9 +3997,9 @@ def self_check():
         expect([it["version"] for it in items if it["fork"] == LIB and it["step"] == "mergeup"]
                == ["1.21.4", "1.21.5", "1.21.8"], f"the library's versions in ladder order: {ids}")
         dg = "examplelib@1.21.4:depgate:owner/examplemod"
-        expect(dg in by and pos["examplelib@1.21.4:review"] < pos["examplelib@1.21.4:gates"] < pos[dg]
-               < pos["examplelib@1.21.4:merge"] < pos["examplelib@1.21.4:release"]
-               and dg in by["examplelib@1.21.4:freeze"]["deps"] and set(by[dg]["dirs"]) == {LIB, DEP}
+        expect(dg in by and pos["examplelib@1.21.4:review"] < pos["examplelib@1.21.4:gates"] < pos["examplelib@1.21.4:ci"]
+               < pos[dg] < pos["examplelib@1.21.4:merge"] < pos["examplelib@1.21.4:release"]
+               and dg in by["examplelib@1.21.4:merge"]["deps"] and set(by[dg]["dirs"]) == {LIB, DEP}
                and by[dg]["lock"] and by["examplelib@1.21.4:gates"]["lock"],
                f"the library version's merge waits for the dependent's Gate C against its candidate jar: {ids}")
         expect("examplelib@1.21.8:depgate:owner/examplemod" not in by and "examplelib@1.21.5:depgate:owner/examplemod" in by,
@@ -4001,7 +4168,7 @@ def self_check():
         with State.tx(state, write=False) as st:
             expect(st.item("examplelib@1.21.4:fix")["status"] == "skipped" and st.item(dg)["status"] == "running"
                    and st.item("examplelib@1.21.4:merge")["status"] == "pending" and "examplelib@1.21.4:merge" not in calls
-                   and "examplelib@1.21.4:freeze" not in calls and len(js) == 1,
+                   and len(js) == 1,
                    f"a failed library pre-merge dependent gate blocks the merge and becomes a fixer job: {js}")
         ftext = job_file(js[0]) if js else ""
         fence = ftext.split(UNTRUSTED, 1)[-1] if UNTRUSTED in ftext else ""
@@ -4700,6 +4867,156 @@ def self_check():
                 _St7.items.pop()
             finally:
                 fbm.target_done = td_keep
+            # CI as the gate of record (a workflow with from_run and dep_override): the release reuses the PR's run when
+            # the merge is the PR head's tree; the push run is awaited only when the merge changed .github/; the
+            # library's dependent gate is the dependent's CI dispatched with the PR run's candidate jar
+            wf_new = "on:\n  workflow_dispatch:\n    inputs:\n      from_run:\n      dep_override:\n"
+            expect(ci_record(text=wf_new) and not ci_record(text="on:\n  workflow_dispatch:\n    inputs:\n      release:\n"),
+                   "ci_record: only a workflow with both inputs")
+            git(nc_, "fetch", "-q", "origin")
+            git(nc_, "reset", "-q", "--hard", "origin/neoforge-1.21.10")
+            commit(nc_, ".port/1.21.10/REVIEW.md", "r2\n", "before the workflow")
+            before_wf = head(nc_)
+            commit(nc_, ".github/workflows/port-ci.yml", wf_new, "the new template")
+            prh = head(nc_)
+            mk = lambda parent: git(nc_, "commit-tree", f"{prh}^{{tree}}", "-p", parent, "-m", "merge").stdout.strip()
+            m_same, m_wf = mk(prh), mk(before_wf)
+
+            class _St8(_St7):
+                pass
+            def seg_(merge_sha, from_run=None):
+                st_ = _St8()
+                st_.items = [{"id": "nc@1.21.10:merge", "fork": "o/nc", "version": "1.21.10", "step": "merge",
+                              "result": {"merge_sha": merge_sha}},
+                             {"id": "nc@1.21.10:pr", "fork": "o/nc", "version": "1.21.10", "step": "pr", "result": {"sha": prh}},
+                             {"id": "nc@1.21.10:ci", "fork": "o/nc", "version": "1.21.10", "step": "ci", "result": {"run_id": 4242}},
+                             {"id": "nc@1.21.10:release", "fork": "o/nc", "version": "1.21.10", "step": "release",
+                              "result": {"from_run": from_run}}]
+                return st_, st_.items[-1]
+            st_, rl_ = seg_(m_same)
+            expect(reuse_run(st_, rl_) == 4242, "the merge is the PR head's tree: the release reuses the PR run")
+            st_, rl_ = seg_(mk(before_wf).replace(prh, prh) if False else git(nc_, "commit-tree", f"{before_wf}^{{tree}}",
+                                                                              "-p", prh, "-m", "m").stdout.strip())
+            expect(reuse_run(st_, rl_) is None, "a merge with another tree: the release builds again")
+            st_, rl_ = seg_(m_same, 4242)
+            expect(not push_run_needed(st_, rl_), "the reused run's tree, .github/ unchanged by the merge: no push-run wait")
+            st_, rl_ = seg_(m_wf, 4242)
+            expect(push_run_needed(st_, rl_), "the merge changed .github/: the push run is awaited (CI runs on the branch)")
+            st_, rl_ = seg_(m_same, None)
+            expect(push_run_needed(st_, rl_), "no reuse: the push run is awaited as before")
+            # depgate_ci: the dependent's workflow pins the library; its CI is dispatched with the candidate jar
+            lib_wf = wf_new + ('      - name: lib 1.0 from the lib-1.0-mc1.21.10 release into mavenLocal (pinned by sha256)\n'
+                               '        run: |\n          mkdir -p "$HOME/.m2/repository/com/example/lib/1.0"\n'
+                               '          curl -fsSL -o "$HOME/.m2/repository/com/example/lib/1.0/lib-1.0.jar" '
+                               '"https://github.com/o/lib/releases/download/lib-1.0-mc1.21.10/lib-1.0.jar"\n')
+            commit(nc_, ".github/workflows/port-ci.yml", lib_wf, "the dependent pins o/lib")
+            git(nc_, "push", "-q", "origin", "HEAD:neoforge-1.21.10")
+            cand = tmp / "cand"
+            cand.mkdir(exist_ok=True)
+            (cand / "lib-1.0.jar").write_bytes(b"candidate-bytes")
+            dg_st = tmp / "dg-state"
+            dg_st.mkdir(exist_ok=True)
+            dgi = {"id": "lib@1.21.10:depgate:o/nc", "fork": "o/lib", "version": "1.21.10", "step": "depgate",
+                   "extra": {"dependent": "o/nc"}, "result": {}, "status": "running"}
+            (dg_st / "STATE.json").write_text(json.dumps({"items": [dgi], "round_dir": str(dg_st), "forks": {}}),
+                                              encoding="utf-8")
+
+            class _St9:
+                path = dg_st / "STATE.json"
+                rdir = dg_st
+                items = [dgi, {"id": "lib@1.21.10:ci", "fork": "o/lib", "version": "1.21.10", "step": "ci",
+                               "result": {"run_id": 99}}]
+                def fork(self, s_):
+                    return {"name": s_.split("/")[1], "dir": str(nc_), "kind": "branches", "head": "neoforge-1.21.1",
+                            "versions": ["1.21.10"]}
+                def item(self, i_):
+                    return next(x for x in self.items if x["id"] == i_)
+            posted = []
+            def gh_dg(path, method="GET", data=None):
+                if path.endswith("/branches/neoforge-1.21.10"):
+                    return {"commit": {"sha": head(nc_)}}
+                posted.append((method, path, data))
+                return {}
+            keep_ = {k: G[k] for k in ("gh", "run_jars", "wait_runs")}
+            G["gh"], G["wait_runs"] = gh_dg, (lambda *a_, **k_: (True, "Port CI workflow_dispatch success"))
+            G["run_jars"] = lambda slug_, rid_, into_: ([cand / "lib-1.0.jar"], "jars")
+            try:
+                note, r_ = depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_)
+                sha_ = hashlib.sha256(b"candidate-bytes").hexdigest()
+                want_ = f"o/lib#99/jars/lib-1.0.jar=com.example:lib:1.0@{sha_}"
+                expect(posted == [("POST", "repos/o/nc/actions/workflows/port-ci.yml/dispatches",
+                                   {"ref": "neoforge-1.21.10", "inputs": {"dep_override": want_}})]
+                       and r_["candidate_run"] == 99 and "green" in note,
+                       f"the dependent's CI is dispatched on its version branch with the candidate jar: {posted} {note}")
+                with State.tx(dg_st / "STATE.json", write=False) as s3_:
+                    expect(s3_.item(dgi["id"])["result"].get("dispatched_at"), "the dispatch is recorded before the POST")
+                G["wait_runs"] = lambda *a_, **k_: (False, "Port CI failure")
+                dgi["result"] = {"dispatched_at": "2026-10-28T00:00:00Z"}
+                posted.clear()
+                try:
+                    depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_)
+                    expect(False, "a red dependent CI passed the dependent gate")
+                except StepError as e:
+                    expect("NOT green" in str(e) and not posted,
+                           f"red: a blocking finding; a recorded dispatch is waited for, never sent twice: {e} {posted}")
+                commit(nc_, ".github/workflows/port-ci.yml", "on:\n  workflow_dispatch:\n", "an old template")
+                git(nc_, "push", "-q", "origin", "HEAD:neoforge-1.21.10")
+                expect(depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_) is None,
+                       "a dependent on the old template: the local dependent gate runs instead")
+            finally:
+                G.update(keep_)
+            # t_gates on a ci_record version branch: the build and Gate A/B only (fork-port --gates ab), no machine lock
+            commit(nc_, ".github/workflows/port-ci.yml", wf_new, "the new template again")
+            seen_cmds.clear()
+            sh = rec_out("")
+            lock_keep = G["full_gate_lock"]
+            G["full_gate_lock"] = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("the gate lock was taken"))
+            class _St10(_St7):
+                data = {"allow": ["push-version-branches"], "frozen": str(tmp / "frozen.json")}
+            try:
+                gi = {"id": "nc@1.21.10:gates", "fork": "o/nc", "version": "1.21.10", "step": "gates"}
+                note, r_ = t_gates(_St10(), gi, log_)
+                ran_ = [" ".join(map(str, c)) for c in seen_cmds]
+                expect(r_.get("ci_record") and r_["gated_head"] == head(nc_) and len(ran_) == 1
+                       and "--gates ab" in ran_[0] and "fork-port.py" in ran_[0],
+                       f"a ci_record version: build and Gate A/B here, Gate C the PR's CI: {note} {ran_}")
+            finally:
+                G["full_gate_lock"] = lock_keep
+                sh = real_sh
+            # the single-version head on a ci_record workflow: ci-gates build and Gate A/B (--gatec ""), no lock
+            sv_ = tmp / "sv-ci-record"
+            sv_.mkdir()
+            git(sv_, "init", "-q", "-b", "keep-current/2026-10-27")
+            for k_, v_ in (("user.email", "t@example.com"), ("user.name", "t")):
+                git(sv_, "config", k_, v_)
+            commit(sv_, PORT_CI_WF, wf_new + ('      - run: curl -fsSL -o "$RUNNER_TEMP/kit.tar.gz" .../port-ci-kit-v20.tar.gz '
+                                             '&& echo "' + "a" * 64 + '  $RUNNER_TEMP/kit.tar.gz" | sha256sum -c -\n'
+                                             '      - run: |\n          python3 .port-tools/tools/ci-gates.py --repo . '
+                                             '--modid "examplemod" --base "origin/main" \\\n            --gatec "launch,spawn"\n'),
+                   "the new template")
+            class _St11:
+                data = {"allow": [], "date": "2026-10-27", "frozen": ""}
+                items = []
+                def fork(self, _):
+                    return {"dir": str(sv_), "name": "examplemod", "kind": "single", "base": "1.21.1", "head": "neoforge-1.21.1"}
+                def item(self, i_):
+                    raise KeyError(i_)
+            ck_keep = G["checkout"]
+            G["checkout"] = lambda d__, b__, create_from=None: str(sv_)
+            G["full_gate_lock"] = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("the gate lock was taken"))
+            seen_cmds.clear()
+            sh = rec_out("")
+            try:
+                note, r_ = t_gates(_St11(), {"id": "examplemod@1.21.1:gates", "fork": "o/examplemod", "version": "1.21.1",
+                                             "step": "gates"}, log_)
+                ran_ = [c for c in seen_cmds]
+                expect(r_.get("ci_record") and len(ran_) == 2 and all("ci-gates.py" in " ".join(c) for c in ran_)
+                       and all(c[c.index("--gatec") + 1] == "" for c in ran_)
+                       and not (sv_ / ".port/1.21.1/GATES.md").exists(),
+                       f"a single-version ci_record head: build and Gate A/B in both environments, no GATES.md: {note} {ran_}")
+            finally:
+                G["checkout"], G["full_gate_lock"] = ck_keep, lock_keep
+                sh = real_sh
             # the driver applies the skips: only this version's pending steps, never another version's
             sd_ = tmp / "nc-state"
             sd_.mkdir()

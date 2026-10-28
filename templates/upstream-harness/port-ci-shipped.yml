@@ -7,11 +7,14 @@
     # variant when it has them (.port/<mc>/shipped-expect-<variant>.txt, else .port/<mc>/shipped-expect.txt; the
     # variant is the glob's suffix, cf for '*_cf.jar'). A failing variant
     # fails the job, and the release needs it as it needs the gates. The globs reach the script only through env,
-    # never spliced into it.
+    # never spliced into it. A dep_override candidate jar replaces its pinned one here too; from_run skips this job.
     name: shipped jars
-    if: ${{ github.event_name != 'release' && !inputs.promote && !inputs.publish && !inputs.publish_setup }}
+    if: ${{ github.event_name != 'release' && !inputs.promote && !inputs.publish && !inputs.publish_setup && !inputs.from_run }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read               # dep_override: a candidate jar in another repository's run artifact
     steps:
       - uses: actions/checkout@v4
       - name: Port CI kit v{{KIT_VERSION}} (pinned by sha256)
@@ -24,7 +27,7 @@
         with:
           distribution: temurin
           java-version: "{{JAVA}}"
-{{PRE_BUILD}}
+{{PRE_BUILD}}{{DEP_OVERRIDE_STEP}}
       - name: Author's build, then boot each shipped jar in a real server
         env:
           VARIANT_JARS: "{{VARIANT_JARS}}"

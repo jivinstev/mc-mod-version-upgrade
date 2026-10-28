@@ -23,8 +23,8 @@ Per-platform jars (both opt-in; without them the workflow is byte-for-byte what 
     python3 tools/port-ci.py check --repo <fork checkout> [--kit-version N]
 
 `check` warns -- never blocks, exit 0 -- when the checkout's installed workflow pins a Port CI kit older than the newest
-published (a fork only gets a new gate from the first kit that ships it) or its push trigger ignores none of the round's
-records, and prints the command that regenerates it at the newest kit with its own options read back (on a version-branch
+published (a fork only gets a new gate from the first kit that ships it), its push trigger ignores none of the round's
+records, or it was rendered before the from_run / dep_override workflow_dispatch inputs, and prints the command that regenerates it at the newest kit with its own options read back (on a version-branch
 fork, tools/fork-kind.py detect, `fork-branches.py ci --head --run` instead). It is the check
 tools/fork-branches.py ci-check makes for a version-branch fork's head branch (stale_workflow), for a single-version
 fork's port branch.
@@ -202,11 +202,22 @@ def ignores_records(wf, need=None):
     return all(f in ign for f in (need if need is not None else RECORD_PUSHES))
 
 
+REUSE_INPUTS = ("from_run", "dep_override")     # workflow_dispatch inputs every current workflow has
+
+
+def missing_inputs(wf):
+    """The REUSE_INPUTS the workflow's workflow_dispatch does not declare: a workflow rendered before them can neither
+    release an earlier run's jars (from_run) nor run the dependent gate (dep_override)."""
+    disp = wf.split("\n  workflow_dispatch:\n", 1)[1].split("\npermissions:", 1)[0] if "\n  workflow_dispatch:\n" in wf else ""
+    return [i for i in REUSE_INPUTS if f"\n      {i}:\n" not in disp]
+
+
 def stale_workflow(wf, newest):
     """Why a port branch's installed workflow is out of date -- the one check for a single-version fork's port branch
     (`port-ci.py check`) and a version-branch fork's head (tools/fork-branches.py ci-check): it pins a Port CI kit older
     than `newest` (None: not compared), or its push trigger ignores none of the round's records (every known-issues
-    ledger or README Ports-block commit is then a full Port CI run). -> [reasons], [] when current."""
+    ledger or README Ports-block commit is then a full Port CI run), or it lacks the from_run / dep_override
+    workflow_dispatch inputs (missing_inputs). -> [reasons], [] when current."""
     why = []
     kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf)]
     if newest is not None and (not kits or min(kits) < newest):
@@ -214,6 +225,9 @@ def stale_workflow(wf, newest):
     if not ignores_records(wf):
         why.append("its push trigger ignores no records, so every known-issues ledger or README Ports-block commit runs "
                    "the full Port CI there")
+    if missing_inputs(wf):
+        why.append("it was rendered before the from_run/dep_override inputs (no " + ", ".join(missing_inputs(wf))
+                   + "): it can neither release an earlier run's jars nor run the dependent gate")
     return why
 
 
@@ -398,6 +412,83 @@ def is_version_branch(repo, mc):
     return bool(mc) and (pathlib.Path(repo) / ".port" / mc / "branch.properties").is_file()
 
 
+# The dependent gate (workflow_dispatch input dep_override): a library's candidate jar built and gated against in place
+# of the pinned one with the same group:artifact:version -- after PRE_BUILD (dep_jars, pre_build) and the variant steps
+# (dep_jar_variants) put the pinned jars into mavenLocal, so it applies on every gates leg and in the shipped job. An
+# entry is either form, space-separated:
+#   owner/repo@tag/asset.jar=group:artifact:version@sha256          a release asset
+#   owner/repo#RUN_ID/ARTIFACT/asset.jar=group:artifact:version@sha256   a jar in an Actions artifact of a workflow run of
+#                                                                   that (public) repository, read with the run's token
+# Each is validated strictly, downloaded and sha256-checked; an entry whose coordinates no pinned jar has is an error.
+# Off (the step skipped) when the input is empty; a run with it never releases (the release job refuses, and a from_run
+# release takes no workflow_dispatch run). The input reaches the script only through env, and the download URL is
+# assembled from shell variables, so no tool that reads a workflow's pins (pinned_releases, port-offer.py,
+# port-manifest.py, real-install.py) mistakes it for one.
+DEP_OVERRIDE_STEP = r"""
+      - name: Dependent gate -- candidate dependency jars instead of the pinned ones (dep_override)
+        if: ${{ inputs.dep_override }}
+        env:
+          DEP_OVERRIDE: ${{ inputs.dep_override }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set -f                       # the entries are split on spaces, never globbed
+          id='[A-Za-z0-9][A-Za-z0-9_.-]*'
+          gav="=([A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*):(${id}):([A-Za-z0-9][A-Za-z0-9_.+-]*)@([0-9a-f]{64})$"
+          jar='([A-Za-z0-9][A-Za-z0-9._+-]*\.jar)'
+          rel="^(${id}/${id})@([A-Za-z0-9][A-Za-z0-9_.+-]*)/${jar}${gav}"
+          art="^(${id}/${id})#([0-9]{1,20})/([A-Za-z0-9._-]+)/${jar}${gav}"
+          tmp="$RUNNER_TEMP/dep-override"; mkdir -p "$tmp"
+          n=0
+          for e in $DEP_OVERRIDE; do
+            if [[ "$e" =~ $rel ]]; then
+              repo=${BASH_REMATCH[1]}; tag=${BASH_REMATCH[2]}; run=""; an=""; asset=${BASH_REMATCH[3]}
+              g=${BASH_REMATCH[4]}; a=${BASH_REMATCH[6]}; v=${BASH_REMATCH[7]}; sha=${BASH_REMATCH[8]}
+            elif [[ "$e" =~ $art ]]; then
+              repo=${BASH_REMATCH[1]}; tag=""; run=${BASH_REMATCH[2]}; an=${BASH_REMATCH[3]}; asset=${BASH_REMATCH[4]}
+              g=${BASH_REMATCH[5]}; a=${BASH_REMATCH[7]}; v=${BASH_REMATCH[8]}; sha=${BASH_REMATCH[9]}
+            else
+              echo "::error::dep_override: an entry is neither owner/repo@tag/asset.jar=group:artifact:version@sha256 nor owner/repo#RUN_ID/ARTIFACT/asset.jar=group:artifact:version@sha256 (64 lower-case hex)"; exit 1
+            fi
+            dir="$HOME/.m2/repository/${g//.//}/$a/$v"
+            if [ ! -f "$dir/$a-$v.jar" ]; then
+              echo "::error::dep_override $g:$a:$v: no pinned dependency jar has these coordinates (it replaces one, never adds one)"; exit 1
+            fi
+            rm -f "$tmp/candidate.jar"
+            if [ -z "$run" ]; then
+              url="https://github.com/${repo}/releases/download/${tag}/${asset}"
+              curl -fsSL "$url" -o "$tmp/candidate.jar"
+              from="$repo@$tag"
+            else
+              if ! gh api "repos/$repo/actions/runs/$run/artifacts" --paginate --jq '.artifacts[] | [.id, .name, .expired] | @tsv' > "$tmp/artifacts.tsv"; then
+                echo "::error::dep_override: the run's token could not read $repo's artifacts (run $run)"; exit 1
+              fi
+              aid=$(awk -F '\t' -v n="$an" '$2 == n && $3 == "false" { print $1; exit }' "$tmp/artifacts.tsv")
+              if [ -z "$aid" ]; then
+                echo "::error::dep_override: run $run of $repo has no unexpired artifact named $an"; exit 1
+              fi
+              if ! gh api "repos/$repo/actions/artifacts/$aid/zip" > "$tmp/artifact.zip"; then
+                echo "::error::dep_override: the run's token could not read $repo's artifacts (artifact $an of run $run)"; exit 1
+              fi
+              if ! python3 -c 'import shutil, sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1]); m = [i for i in z.infolist() if i.filename.rsplit("/", 1)[-1] == sys.argv[2]]
+          sys.exit(1) if len(m) != 1 else shutil.copyfileobj(z.open(m[0]), open(sys.argv[3], "wb"))' "$tmp/artifact.zip" "$asset" "$tmp/candidate.jar"; then
+                echo "::error::dep_override: artifact $an of $repo's run $run holds no single $asset"; exit 1
+              fi
+              from="$repo run $run artifact $an"
+            fi
+            echo "$sha  $tmp/candidate.jar" | sha256sum -c -
+            mv -f "$tmp/candidate.jar" "$dir/$a-$v.jar"
+            [ -f "$dir/$a-$v.pom" ] || echo "<project><modelVersion>4.0.0</modelVersion><groupId>$g</groupId><artifactId>$a</artifactId><version>$v</version><packaging>jar</packaging></project>" > "$dir/$a-$v.pom"
+            echo "Dependent gate: $g:$a:$v is $asset from $from (sha256 $sha), not the pinned jar" >> "$GITHUB_STEP_SUMMARY"
+            n=$((n+1))
+          done
+          [ "$n" -gt 0 ] || { echo "::error::dep_override names no entry"; exit 1; }""".rstrip("\n")
+
+# The release job's condition on the shipped job, with --variant-jar: it must succeed, or be skipped by from_run.
+RELEASE_SHIPPED_IF = " && (needs.shipped.result == 'success' || (inputs.from_run && needs.shipped.result == 'skipped'))"
+
+
 def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_of=None):
     """The placeholders of the two opt-in variant options. With neither, every one is empty (RELEASE_NEEDS stays
     `gates`) and the workflow is byte-for-byte the variant-free one (self-check: tools/golden/port-ci-*.yml).
@@ -405,7 +496,8 @@ def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_o
         jar as shipped; the release needs it.
       --dep-jar-variant SPEC: one more gates leg per alternate dependency asset, `gates (full, <label>)`."""
     v = dict(values, GATES_VARIANTS="", GATES_VARIANT_NAME="", GATES_VARIANT_ARTIFACT="", GATES_VARIANT_JARS_IF="",
-             VARIANT_STEPS="", SHIPPED_JOB="", RELEASE_NEEDS="gates")
+             VARIANT_STEPS="", SHIPPED_JOB="", RELEASE_NEEDS="gates", RELEASE_SHIPPED_IF="",
+             DEP_OVERRIDE_STEP=DEP_OVERRIDE_STEP)
     legs = dep_jar_variants(dep_variants, dep_specs, sha_of)
     if legs:
         v.update(GATES_VARIANTS='\n        variant: [""]\n        include:' + "".join(
@@ -424,7 +516,7 @@ def variant_values(values, variant_jars=(), dep_variants=(), dep_specs=(), sha_o
         deps = " ".join(_m2_jar(*DEP_JAR.fullmatch(d).groups()[3:]) for d in dep_specs if DEP_JAR.fullmatch(d))
         sv = dict(v, VARIANT_JARS=" ".join(variant_jars), SHIPPED_DEPS=deps)
         v.update(SHIPPED_JOB="\n\n" + render(SHIPPED_TEMPLATE.read_text(encoding="utf-8"), sv).rstrip("\n"),
-                 RELEASE_NEEDS="[gates, shipped]")
+                 RELEASE_NEEDS="[gates, shipped]", RELEASE_SHIPPED_IF=RELEASE_SHIPPED_IF)
     return v
 
 
@@ -928,7 +1020,7 @@ def variant_check():
     ok &= "${{" not in job.split("run: |\n          python3", 1)[1].split("\n      - name: Shipped-jar summary", 1)[0]
     ok &= s.replace(s[s.index("\n\n  shipped:\n"):s.index("\n\n  release:\n")], "").replace(
         "needs: [gates, shipped]", "needs: gates").replace(
-        " && needs.shipped.result == 'success'", "") == base        # nothing else moved
+        RELEASE_SHIPPED_IF, "") == base        # nothing else moved
     # --dep-jar-variant: one more leg, named; default legs keep their check and artifact names; sha256 pinned
     d = fixture(True, dep_variants=[cf])
     g = d.split("\n  gates:\n", 1)[1].split("\n  release:\n", 1)[0]
@@ -1043,16 +1135,31 @@ def release_script_check():
                 (repo / "jars").mkdir(); (repo / "jars/x.jar").write_bytes(b"")
                 # the stand-in gh is a shell function ahead of the script: no PATH lookup of an extension-less
                 # file, which Windows' Git Bash would not do the same way
+                # the gate summaries the gates legs uploaded: each becomes an asset gates-<suffix>.md, byte for byte
+                sums = {"full": b"| gate | full |\r\nPASS\n", "minimal": b"| gate | minimal |\n", "full-cf": b"cf leg\n"}
+                for sfx, body_ in sums.items():
+                    (repo / "logs" / f"gate-logs-{sfx}").mkdir(parents=True)
+                    (repo / "logs" / f"gate-logs-{sfx}" / "gates.md").write_bytes(body_)
+                    (repo / "logs" / f"gate-logs-{sfx}" / "x.log").write_bytes(b"log\n")
                 fake_gh = ('gh() { if [ "$1 $2" = "release view" ]; then for r in $RELEASES; do [ "$r" = "$3" ] && return 0; done; '
-                           'return 1; fi; if [ "$1 $2" = "release create" ]; then echo "$3" >> "$CREATED"; return 0; fi; return 3; }\n')
+                           'return 1; fi; if [ "$1 $2" = "release create" ]; then echo "$3" >> "$CREATED"; '
+                           'shift 3; echo "$*" >> "$ASSETS"; return 0; fi; return 3; }\n')
                 run = fake_gh + (script.replace("${{ github.ref_type }}", rtype).replace("${{ github.ref_name }}", rname)
                        .replace("${{ github.repository }}", "o/examplemod").replace("${{ github.sha }}", build))
-                env = dict(os.environ, RELEASES=" ".join(rels), CREATED=(d / "created.txt").as_posix(), PREVIEW="")
+                env = dict(os.environ, RELEASES=" ".join(rels), CREATED=(d / "created.txt").as_posix(), PREVIEW="",
+                           ASSETS=(d / "assets.txt").as_posix())
+                env.pop("FROM_RUN", None)
                 r = subprocess.run([BASH, "-c", run], cwd=repo, env=env, capture_output=True, text=True,
                                    encoding="utf-8", errors="replace")
                 made = (d / "created.txt").read_text(encoding="utf-8").split() if (d / "created.txt").exists() else []
                 good = r.returncode == want[0] and made == ([want[1]] if want[1] else [])
                 good &= want[0] == 0 or "already points at" in r.stdout + r.stderr
+                if want[1]:     # the jars, then gates-full-cf.md, gates-full.md, gates-minimal.md: the exact files
+                    sent = (d / "assets.txt").read_text(encoding="utf-8").split()
+                    names = ["gate-assets/gates-full-cf.md", "gate-assets/gates-full.md", "gate-assets/gates-minimal.md"]
+                    good &= sent[:4] == ["jars/x.jar", *names] and sent[4] == "--repo"
+                    good &= all((repo / n).read_bytes() == sums[n[len("gate-assets/gates-"):-3]] for n in names)
+                    good &= "(jars and gates of run" not in (repo / "notes.md").read_text(encoding="utf-8")
                 if not good:
                     print(f"release script check ({case}): exit {r.returncode}, "
                           f"created {made}, want {want}\n{(r.stdout + r.stderr)[-1500:]}")
@@ -1214,6 +1321,259 @@ def shipped_script_check():
         out = r.stdout + r.stderr                                              # _mr with no file: no expectations
         exp = {"x_cf.jar": str(pe / "shipped-expect-cf.txt"), "x_mr.jar": "none"}
         ok &= want("expect-file, no unsuffixed file (_mr: none)", expects(out) == exp, exp, expects(out) or out[-3000:])
+    return ok
+
+
+# The two option-free goldens as port-ci.py rendered them before the reuse inputs (gate-summary assets, from_run,
+# dep_override): with exactly what that change added taken out again (_without_reuse), the workflow is that text.
+PRE_REUSE_SHA256 = {"single-deps": "fd672caf828154562fa0f53da179caf6d5b444985a9e44b8d9b48e5a0dd782e4",
+                    "single-nodeps": "2360c97f5565ae81ddcfed6c2b94e0bd9e320eaaabedc2c16846bcf8d6a2fe71"}
+RELEASE_IF = ("    if: ${{{{ !cancelled() && github.event_name != 'release' && (startsWith(github.ref, 'refs/tags/') || "
+              "inputs.release || inputs.from_run) && (needs.gates.result == 'success' || (inputs.from_run && "
+              "needs.gates.result == 'skipped')){} }}}}\n")
+
+
+def _cut(text, start, end):
+    i = text.index(start)
+    return text[:i] + text[text.index(end, i):]
+
+
+def _without_reuse(wf):
+    """The workflow with every piece the reuse change added taken out and every line it changed put back."""
+    w = _cut(wf, "#\n# Every pre-release carries", "name: Port CI (")
+    w = _cut(w, "      from_run:\n", "\npermissions:")
+    w = w.replace(" && !inputs.from_run }}", " }}").replace(DEP_OVERRIDE_STEP, "")
+    w = w.replace(RELEASE_IF.format(""), "    if: github.event_name != 'release' && (startsWith(github.ref, "
+                  "'refs/tags/') || inputs.release)\n")
+    for gone in ('          git rev-parse "HEAD^{tree}" > "$RUNNER_TEMP/built-tree.txt"   # the tree this run built: a '
+                 'from_run release checks it\n', "            ${{ runner.temp }}/built-tree.txt\n",
+                 "      actions: read               # from_run: the earlier run and its artifacts\n",
+                 "    permissions:\n      contents: read\n      actions: read               # dep_override: a candidate "
+                 "jar in another repository's run artifact\n",
+                 "          run-id: ${{ inputs.from_run || github.run_id }}\n",
+                 "          github-token: ${{ inputs.from_run && github.token || '' }}\n",
+                 "          FROM_RUN: ${{ inputs.from_run }}\n", "${FROM_RUN:+ (jars and gates of run $FROM_RUN, the same tree)}",
+                 ' ${gates[@]+"${gates[@]}"}'):
+        w = w.replace(gone, "")
+    w = _cut(w, "    # from_run: the gates (and shipped) jobs", "    needs: ")
+    w = _cut(w, "      - name: Refuse a dependent-gate run\n", "      - uses: actions/checkout@v4\n        with:\n          sparse")
+    w = _cut(w, "      - name: Check the earlier run (from_run)", "      - uses: actions/download-artifact@v4")
+    w = _cut(w, "      - name: Check the earlier run's gate logs", "      - name: Publish pre-release")
+    return _cut(w, "          # each environment's gate summary", "          gh release create")
+
+
+def _step_script(wf, name):
+    """The run script of the step named `name`, dedented as the runner runs it."""
+    body = wf.split(f"      - name: {name}\n", 1)[1].split("        run: |\n", 1)[1]
+    lines = []
+    for ln in body.splitlines():
+        if ln.strip() and not ln.startswith("          "):
+            break
+        lines.append(ln[10:])
+    return "\n".join(lines) + "\n"
+
+
+def reuse_check():
+    """Gate summaries as release assets, from_run (release an earlier run's jars and gate logs) and dep_override (the
+    dependent gate): (a) without them the workflow is today's, byte for byte, but for what they add; (b) the release
+    attaches gates-*.md (release_script_check runs it); (c) from_run skips the gates and shipped jobs, the release accepts
+    a skipped one only then, downloads from that run, and its checks pass the same tree only; (d) dep_override is
+    validated, applied after PRE_BUILD and the variant steps (and in the shipped job), and blocks the release; (e) no
+    input reaches a script but through env; (f) a workflow without the new inputs is stale (stale_workflow)."""
+    import hashlib, os, tempfile
+    sys.path.insert(0, str(ROOT / "tools"))
+    from gitbash import BASH
+    py = f'"{pathlib.Path(sys.executable).as_posix()}" '
+    ok = True
+    for name, deps in GOLDEN_CASES:                                               # (a)
+        un = _without_reuse(fixture(deps))
+        ok &= want(f"reuse: {name} minus the reuse change is the old workflow",
+                   hashlib.sha256(un.encode("utf-8")).hexdigest() == PRE_REUSE_SHA256[name], PRE_REUSE_SHA256[name], un[-400:])
+    cf = FIX_DEP.replace("_mr.jar", "_cf.jar")
+    full = fixture(True, variant_jars=["*_mr.jar"], dep_variants=[cf])
+    plain = fixture(False)
+    job = lambda wf, j, nxt: ("\n" + wf.split("\njobs:\n", 1)[1]).split(f"\n  {j}:\n", 1)[1].split(f"\n  {nxt}:\n", 1)[0]
+    gates, shipped, rel = job(full, "gates", "shipped"), job(full, "shipped", "release"), job(full, "release", "promote")
+    # (c) from_run
+    for j in (gates, shipped):
+        ok &= want("reuse: from_run skips gates/shipped", "&& !inputs.publish_setup && !inputs.from_run }}" in j.split("steps:", 1)[0],
+                   "!inputs.from_run", j[:600])
+    ok &= want("reuse: release if (shipped)", RELEASE_IF.format(RELEASE_SHIPPED_IF) in rel and "needs: [gates, shipped]" in rel,
+               RELEASE_IF.format(RELEASE_SHIPPED_IF), rel[:900])
+    ok &= want("reuse: release if (no shipped)", RELEASE_IF.format("") in job(plain, "release", "promote")
+               and "needs.shipped" not in plain, RELEASE_IF.format(""), job(plain, "release", "promote")[:900])
+    ok &= rel.count("          run-id: ${{ inputs.from_run || github.run_id }}\n"
+                    "          github-token: ${{ inputs.from_run && github.token || '' }}\n") == 2
+    ok &= "    permissions:\n      contents: write\n      actions: read " in rel
+    order = ["- name: Refuse a dependent-gate run", "- uses: actions/checkout@v4", "- name: Check the earlier run (from_run)",
+             "name: jars", "pattern: gate-logs-*", "- name: Check the earlier run's gate logs", "- name: Publish pre-release"]
+    ok &= want("reuse: release step order", [rel.index(s) for s in order] == sorted(rel.index(s) for s in order), order, rel[:3000])
+    ok &= "if: ${{ inputs.dep_override }}\n        run: |\n" in rel.split("- uses: actions/checkout@v4", 1)[0] and "exit 1" in \
+        rel.split("- uses: actions/checkout@v4", 1)[0]                           # (d) the release refuses dep_override
+    ok &= 'git rev-parse "$head^{tree}"' in rel and 'git rev-parse "$GITHUB_SHA^{tree}"' in rel
+    # (d) the override after every pinned jar and variant step, before the build, in both jobs
+    for j, build, last in ((gates, "- name: Build and gates", "the lib-1.0_cf.jar variant"),
+                           (shipped, "- name: Author's build", "- name: Build other (neoforge-1.21.1) into mavenLocal")):
+        i = j.index("- name: Dependent gate")
+        ok &= want("reuse: dep_override after PRE_BUILD/variants", j.index(last) < i < j.index(build) and
+                   j.index("from the lib-1.0-mc1.21.1 release into mavenLocal") < i and "actions: read" in j.split("steps:", 1)[0],
+                   "after", j[:200])
+    # (e) inputs reach a script only through env: never in a run block, and on a line only as if:/env/with values
+    for wf in (full, plain, fixture(True)):
+        ok &= want("reuse: no input in a run script", not any("inputs." in b for b in run_blocks(wf)), "none",
+                   [b[:200] for b in run_blocks(wf) if "inputs." in b])
+        bad = [ln for ln in wf.splitlines() if re.search(r"inputs\.(from_run|dep_override)", ln) and not
+               re.match(r"\s*(if|needs|run-id|github-token|[A-Z_]+): ", ln)]
+        ok &= want("reuse: inputs only in if/env/with", bad == [], [], bad)
+    # (f) a workflow from before the new inputs is stale; today's is not
+    old = _cut(plain, "      from_run:\n", "\npermissions:")
+    ok &= want("reuse: stale without the inputs", missing_inputs(old) == ["from_run", "dep_override"] and missing_inputs(plain) == []
+               and any("rendered before the from_run/dep_override inputs" in w_ for w_ in stale_workflow(old, 7))
+               and stale_workflow(plain, 7) == [], "stale / current", (stale_workflow(old, 7), stale_workflow(plain, 7)))
+
+    def g(*a, cwd):
+        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    # (c) the from_run checks, run: a fake gh serving the two runs' JSON; origin has A and C with one tree, B another
+    check_run = _step_script(rel, "Check the earlier run (from_run) built this tree").replace("python3 ", py)
+    check_logs = _step_script(rel, "Check the earlier run's gate logs record this tree").replace("python3 ", py)
+    # the summaries' rewrite to this commit is that from_run-only step's, never the publish step's
+    ok &= want("reuse: the header rewrite only under from_run", "tested as" in check_logs and "tested as" not in
+               _step_script(rel, "Publish pre-release") and rel.split("- name: Check the earlier run's gate logs", 1)[1]
+               .startswith(" record this tree\n        if: ${{ inputs.from_run }}\n"), "from_run step", check_logs[-600:])
+    with tempfile.TemporaryDirectory() as d:
+        d = pathlib.Path(d)
+        origin, repo, tmp = d / "origin.git", d / "repo", d / "tmp"
+        tmp.mkdir()
+        g("init", "-q", "--bare", str(origin), cwd=d)
+        g("config", "uploadpack.allowAnySHA1InWant", "true", cwd=origin)
+        g("init", "-q", str(repo), cwd=d)
+        for k, v in (("user.email", "t@e"), ("user.name", "t"), ("core.autocrlf", "false")):
+            g("config", k, v, cwd=repo)
+        shas = []
+        for content in ("one\n", "two\n", "one\n"):
+            (repo / "gradle.properties").write_text(content, encoding="utf-8")
+            g("add", "-A", cwd=repo); g("commit", "-qm", content.strip(), "--allow-empty", cwd=repo)
+            shas.append(g("rev-parse", "HEAD", cwd=repo).stdout.strip())
+        g("remote", "add", "origin", str(origin), cwd=repo); g("push", "-q", "origin", "HEAD:refs/heads/neoforge-1.21.1", cwd=repo)
+        a_, b_, c_ = shas
+        tree = g("rev-parse", f"{c_}^{{tree}}", cwd=repo).stdout.strip()
+        fake_gh = ('gh() { echo "$*" >> "$GH_CALLS"; [ "$1" = api ] || return 3; case "$2" in '
+                   '"repos/o/examplemod/actions/runs/$GITHUB_RUN_ID") cat "$THIS_RUN" ;; '
+                   '"repos/o/examplemod/actions/runs/$FROM_RUN") [ -f "$FROM_JSON" ] && cat "$FROM_JSON" ;; *) return 1 ;; esac; }\n')
+        good_run = {"repository": {"full_name": "o/examplemod"}, "workflow_id": 5, "status": "completed",
+                    "conclusion": "success", "event": "pull_request", "head_sha": a_}
+        cases = {"the same tree": ({}, "12", "yes", 0), "another tree": ({"head_sha": b_}, "12", "yes", 1),
+                 "a failed run": ({"conclusion": "failure"}, "12", "yes", 1),
+                 "a dispatch run (maybe dep_override)": ({"event": "workflow_dispatch"}, "12", "yes", 1),
+                 "another workflow": ({"workflow_id": 6}, "12", "yes", 1),
+                 "another repository": ({"repository": {"full_name": "x/y"}}, "12", "yes", 1),
+                 "running": ({"status": "in_progress"}, "12", "yes", 1), "no such run": (None, "12", "yes", 1),
+                 "not digits": ({}, "12; touch pwned", "yes", 1), "without release": ({}, "12", "", 1)}
+        for case, (patch, fr, release, rc_want) in cases.items():
+            (tmp / "calls.txt").write_text("", encoding="utf-8")
+            fj = tmp / "from.json"
+            if fj.exists():
+                fj.unlink()
+            if patch is not None:
+                fj.write_text(json.dumps(dict(good_run, **patch)), encoding="utf-8")
+            (tmp / "this.json").write_text(json.dumps({"workflow_id": 5}), encoding="utf-8")
+            env = dict(os.environ, RUNNER_TEMP=tmp.as_posix(), GITHUB_STEP_SUMMARY=(tmp / "summary.md").as_posix(),
+                       GITHUB_REPOSITORY="o/examplemod", GITHUB_RUN_ID="99", GITHUB_SHA=c_, FROM_RUN=fr, RELEASE=release,
+                       THIS_RUN=(tmp / "this.json").as_posix(), FROM_JSON=fj.as_posix(), GH_CALLS=(tmp / "calls.txt").as_posix())
+            r = subprocess.run([BASH, "-c", fake_gh + check_run], cwd=repo, env=env, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+            calls = (tmp / "calls.txt").read_text(encoding="utf-8")
+            good = r.returncode == rc_want and not (repo / "pwned").exists() and (rc_want == 0 or "::error::" in r.stdout + r.stderr)
+            good &= case != "not digits" or calls == ""
+            if not good:
+                print(f"reuse: from_run check ({case}): exit {r.returncode}, want {rc_want}\n{(r.stdout + r.stderr)[-1200:]}")
+            ok &= good
+        # the gate logs must record this commit's tree, for every leg; jars and both environments must be there
+        for case, (legs, jars, rc_want) in {"recorded": ({"full": tree, "minimal": tree, "full-cf": tree}, True, 0),
+                                            "a leg built another tree": ({"full": tree, "minimal": tree, "full-cf": "0" * 40}, True, 1),
+                                            "no record (an older workflow)": ({"full": "", "minimal": tree}, True, 1),
+                                            "no minimal": ({"full": tree}, True, 1), "no jars": ({"full": tree, "minimal": tree}, False, 1)}.items():
+            import shutil
+            for x in ("logs", "jars"):
+                shutil.rmtree(repo / x, ignore_errors=True)
+            head_ = (b"Gates for `examplemod` at `abc1234` for Minecraft 1.21.1 (full environment) -- run by CI with no "
+                     b"model and no fixes applied:")
+            rest_ = b"\r\n| gate | result |\n| A | PASS |\n"
+            for leg, t_ in legs.items():
+                (repo / "logs" / f"gate-logs-{leg}").mkdir(parents=True)
+                (repo / "logs" / f"gate-logs-{leg}" / "gates.md").write_bytes(head_ + rest_)
+                if t_:
+                    (repo / "logs" / f"gate-logs-{leg}" / "built-tree.txt").write_text(t_ + "\n", encoding="utf-8")
+            if jars:
+                (repo / "jars").mkdir(); (repo / "jars/x.jar").write_bytes(b"")
+            (tmp / "from-run-event.txt").write_text("pull_request\n", encoding="utf-8")
+            r = subprocess.run([BASH, "-c", check_logs], cwd=repo, env=dict(os.environ, GITHUB_SHA=c_, FROM_RUN="12",
+                               RUNNER_TEMP=tmp.as_posix()), capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if rc_want == 0:      # first line: this commit (the reader's `at `<sha>`` and "for Minecraft"), what was tested
+                new_ = (f"Gates for `examplemod` at `{c_}` for Minecraft 1.21.1 (full environment) -- run by CI with no model "
+                        "and no fixes applied: -- tested as abc1234 (pull_request run 12), the same tree").encode("utf-8")
+                got_ = [(repo / "logs" / f"gate-logs-{leg}" / "gates.md").read_bytes() for leg in legs]
+                if got_ != [new_ + rest_] * len(legs):
+                    print(f"reuse: gate summary header rewrite: {got_[:1]!r}"); ok = False
+            if r.returncode != rc_want:
+                print(f"reuse: gate-log tree check ({case}): exit {r.returncode}, want {rc_want}\n{(r.stdout + r.stderr)[-800:]}")
+                ok = False
+    # (d) the dependent gate's step, run: a pinned jar in a fake mavenLocal, stand-in curl, gh and sha256sum
+    step = _step_script(gates, "Dependent gate -- candidate dependency jars instead of the pinned ones (dep_override)")
+    step = step.replace("python3 ", py)
+    import zipfile
+    cand = b"candidate jar"
+    sha = hashlib.sha256(cand).hexdigest()
+    prelude = ('curl() { echo "$2" >> "$CALLS"; cp "$SRC/${2##*/}" "$4"; }\n'
+               'gh() { echo "gh $*" >> "$CALLS"; case "$2" in '
+               'repos/o/lib/actions/runs/42/artifacts) printf "6\\tjars\\ttrue\\n7\\tjars\\tfalse\\n8\\tgate-logs-full\\tfalse\\n" ;; '
+               'repos/o/lib/actions/artifacts/7/zip) cat "$SRC/jars.zip" ;; *) return 1 ;; esac; }\n'
+               'sha256sum() { read -r s f; [ "$(' + py + '-c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], \'rb\')'
+               '.read()).hexdigest())" "$f")" = "$s" ] || { echo "$f: FAILED"; return 1; }; }\n')
+    rel_e = f"o/lib@lib-1.1-rc1/lib-1.1-rc1_mr.jar=com.example.lib:lib:1.0@{sha}"
+    art_e = f"o/lib#42/jars/lib-1.1-rc1_mr.jar=com.example.lib:lib:1.0@{sha}"
+    cases = {"a release asset": (rel_e, 0, ["https://github.com/o/lib/releases/download/lib-1.1-rc1/lib-1.1-rc1_mr.jar"]),
+             "a run artifact": (art_e, 0, ["gh api repos/o/lib/actions/runs/42/artifacts", "gh api repos/o/lib/actions/artifacts/7/zip"]),
+             "a wrong sha256": (rel_e[:-64] + "0" * 64, 1, None),
+             "an artifact the token cannot read": (art_e.replace("o/lib#42", "o/private#42"), 1, None),
+             "no such artifact": (art_e.replace("/jars/", "/other/"), 1, None),
+             "an asset the artifact lacks": (art_e.replace("lib-1.1-rc1_mr.jar", "lib-9_mr.jar"), 1, None),
+             "coordinates no pin has": (rel_e.replace(":1.0@", ":2.0@"), 1, []),
+             "no sha256": (rel_e.rsplit("@", 1)[0], 1, []), "an upper-case sha256": (rel_e.upper(), 1, []),
+             "shell in it": (rel_e.replace("lib-1.1-rc1_mr.jar=", "$(touch${IFS}pwned).jar="), 1, []),
+             "a path in the tag": (rel_e.replace("@lib-1.1-rc1/", "@../x/"), 1, []),
+             "a run id not digits": (art_e.replace("#42/", "#4x2/"), 1, []),
+             "only spaces": ("   ", 1, [])}
+    for case, (entry, rc_want, want_calls) in cases.items():
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            home, src, tmp = d / "home", d / "src", d / "tmp"
+            for x in (src, tmp):
+                x.mkdir()
+            m2 = home / ".m2/repository/com/example/lib/lib/1.0"
+            m2.mkdir(parents=True)
+            (m2 / "lib-1.0.jar").write_bytes(b"pinned")          # no .pom: the step writes one
+            (src / "lib-1.1-rc1_mr.jar").write_bytes(cand)
+            with zipfile.ZipFile(src / "jars.zip", "w") as z:
+                z.writestr("lib-1.1-rc1_mr.jar", cand); z.writestr("lib-1.1-rc1-sources.jar", b"x")
+            env = dict(os.environ, HOME=home.as_posix(), RUNNER_TEMP=tmp.as_posix(), SRC=src.as_posix(),
+                       CALLS=(d / "calls.txt").as_posix(), GITHUB_STEP_SUMMARY=(d / "summary.md").as_posix(), DEP_OVERRIDE=entry)
+            r = subprocess.run([BASH, "-c", prelude + step], cwd=d, env=env, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+            calls = (d / "calls.txt").read_text(encoding="utf-8").splitlines() if (d / "calls.txt").exists() else []
+            jar = (m2 / "lib-1.0.jar").read_bytes()
+            good = r.returncode == rc_want and not (d / "pwned").exists() and jar == (cand if rc_want == 0 else b"pinned")
+            good &= want_calls is None or [c.split(" --")[0] for c in calls] == want_calls
+            good &= rc_want == 0 or "::error::" in r.stdout + r.stderr or "FAILED" in r.stdout + r.stderr
+            if rc_want == 0:
+                good &= "<artifactId>lib</artifactId>" in (m2 / "lib-1.0.pom").read_text(encoding="utf-8")
+                good &= "Dependent gate: com.example.lib:lib:1.0" in (d / "summary.md").read_text(encoding="utf-8")
+            if case == "an artifact the token cannot read":
+                good &= "the run's token could not read o/private's artifacts" in r.stdout + r.stderr
+            if not good:
+                print(f"reuse: dep_override ({case}): exit {r.returncode}, want {rc_want}, calls {calls}\n"
+                      f"{(r.stdout + r.stderr)[-1200:]}")
+            ok &= good
     return ok
 
 
@@ -1426,6 +1786,7 @@ def self_check():
     ok &= records_check()
     ok &= kit_probe_check()
     ok &= workflow_check_check()
+    ok &= reuse_check()
     ok &= default_branch_check()
     print("self-check:", "OK" if ok else "FAIL")
     return 0 if ok else 1

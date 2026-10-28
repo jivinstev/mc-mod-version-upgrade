@@ -457,7 +457,14 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   most two; then it is blocked), and the close. A version branch whose merge-up (and re-pin) changed nothing it ships
   -- every file outside `.port/`, `.github/` and the docs, a Java source by its code with comments and layout aside,
   and its `port_jar` pins -- gets no job at all: the driver pushes the merge and records to the branch, waits for its
-  push run when the workflow changed, and skips its review, gates, dependent gates, PR, release and library records. **A worker MAY carry
+  push run when the workflow changed, and skips its review, gates, dependent gates, PR, release and library records.
+  **CI as the gate of record** (a fork whose Port CI workflow has the `from_run` and `dep_override` inputs, either
+  kind): the driver's `gates` step builds and runs Gate A/B only, without the machine lock; the PR's CI (Gate C in
+  three environments, in parallel) certifies the version; a library's dependent gate runs after that CI, as the
+  dependent's Port CI dispatched with `dep_override` naming the PR run's candidate jar; the release reuses the PR run
+  (`from_run`) when the merge is the PR head's tree and carries its `gates-<env>.md` summaries, which `check-done`
+  accepts as the Gate C record -- nothing is committed after the merge. A workflow rendered before those inputs keeps
+  the local full gates and the local dependent gate until `ci-check` regenerates it. **A worker MAY carry
   the same change across several versions** -- a re-pin, one fix cascaded up -- while its context stays modest
   (measured: one worker carrying one fix through five versions cost ~$4 per version); distinct porting work at each
   version (a cascade's decisions, a RESIDUE.md, a version's review fixes) gets a fresh worker per version (fork-versions,
