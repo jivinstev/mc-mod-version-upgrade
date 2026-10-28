@@ -451,7 +451,13 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   the drive output -- never a worker's transcript, its summary, a build log or a diff. The jobs are: the authors' code
   at the head (Run steps 2-5), each version's selected known-issue fixes, the head cascade's decisions when one needs a
   patch written, a reconcile of a hand-edited shared copy, an adopt the plan ticked, the fresh review, the fixer, the fresh re-check (the last two skipped when the review left no not-ok
-  row), a fixer for a mechanical step that failed (at most two; then it is blocked), and the close. **A worker MAY carry
+  row; all three skipped at a version branch whose `REVIEW.md` stays current because every reviewed input it changed
+  is a change a fresh review already passed at a version below, the same file before and after -- the driver records
+  each such change in `.port/CHANGE-REVIEWS.md` after a clean review), a fixer for a mechanical step that failed (at
+  most two; then it is blocked), and the close. A version branch whose merge-up (and re-pin) changed nothing it ships
+  -- every file outside `.port/`, `.github/` and the docs, a Java source by its code with comments and layout aside,
+  and its `port_jar` pins -- gets no job at all: the driver pushes the merge and records to the branch, waits for its
+  push run when the workflow changed, and skips its review, gates, dependent gates, PR, release and library records. **A worker MAY carry
   the same change across several versions** -- a re-pin, one fix cascaded up -- while its context stays modest
   (measured: one worker carrying one fix through five versions cost ~$4 per version); distinct porting work at each
   version (a cascade's decisions, a RESIDUE.md, a version's review fixes) gets a fresh worker per version (fork-versions,
