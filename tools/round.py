@@ -2225,7 +2225,7 @@ def depgate_ci(st, it, dep, v, log):
             s2.item(it["id"])["result"]["dispatched_at"] = since
         gh(f"repos/{dep_slug}/actions/workflows/port-ci.yml/dispatches", "POST",
            {"ref": br, "inputs": {"dep_override": " ".join(entries)}})
-    ok, text = wait_runs(dep_slug, dsha, log, event="workflow_dispatch", branch=br, since=since)
+    ok, text = wait_runs(dep_slug, dsha, log, event="workflow_dispatch", branch=br, since=since, first=True)
     if not ok:
         raise StepError(f"{dep_slug} {v}: its CI against {lib_slug}'s candidate jar (run {run_id}) is NOT green ({text}): "
                         "a blocking finding on the library version, which does not merge")
@@ -2414,15 +2414,19 @@ def t_pr(st, it, log):
     return f"#{n} ({work} -> {base})", {"pr": n, "sha": sha, "work": work}
 
 
-def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, limit=6 * 3600, want=1):
+def wait_runs(slug, sha, log, event=None, branch=None, since=None, appear=900, limit=6 * 3600, want=1, first=False):
     """ONE blocking wait for the Actions runs of a commit: until at least `want` (matching event/branch/created after
-    `since`) have appeared and all are completed. -> (ok, text)."""
+    `since`) have appeared and all are completed. first: only the earliest such run -- the one the round dispatched
+    itself, `since` being stamped just before its POST; a later dispatch on the same commit (the owner promoting or
+    publishing it, weekly round 2026-10-28) is someone else's and never decides the step. -> (ok, text)."""
     say = say_to(log)
     t0 = time.monotonic()
     while True:
         runs = gh(f"repos/{slug}/actions/runs?head_sha={sha}&per_page=50").get("workflow_runs", [])
         runs = [r for r in runs if (not event or r.get("event") == event) and (not branch or r.get("head_branch") == branch)
                 and (not since or (r.get("created_at") or "") >= since)]
+        if first:
+            runs = sorted(runs, key=lambda r: (r.get("created_at") or "", r.get("id") or 0))[:1]
         el = time.monotonic() - t0
         if len(runs) >= want and all(r.get("status") == "completed" for r in runs):
             bad = [r for r in runs if r.get("conclusion") not in ("success", "skipped", "neutral")]
@@ -2553,7 +2557,7 @@ def t_release(st, it, log):
             it["result"]["from_run"] = reuse
         with State.tx(st.path) as s2:
             s2.item(it["id"])["result"]["dispatched_at"] = since
-    ok, text = wait_runs(slug, mg["merge_sha"], log, event="workflow_dispatch", branch=base, since=since)
+    ok, text = wait_runs(slug, mg["merge_sha"], log, event="workflow_dispatch", branch=base, since=since, first=True)
     if release_waits_push(st, it) and push_run_needed(st, it):   # the merge's push run, awaited with the release run
         ok2, text2 = wait_runs(slug, mg["merge_sha"], log, event="push", branch=base)
         if not ok2:
@@ -5010,6 +5014,24 @@ def self_check():
                 git(nc_, "push", "-q", "origin", "HEAD:neoforge-1.21.10")
                 expect(depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_) is None,
                        "a dependent on the old template: the local dependent gate runs instead")
+            finally:
+                G.update(keep_)
+            # wait_runs(first=True): the round's own dispatch (the earliest after `since`) decides; the owner's later
+            # promote/publish dispatch on the same commit, red, does not (weekly round 2026-10-28)
+            runs_ = [{"id": 2, "event": "workflow_dispatch", "head_branch": "b", "created_at": "2026-10-28T16:02:30Z",
+                      "status": "completed", "conclusion": "failure", "name": "promote", "html_url": "u2"},
+                     {"id": 1, "event": "workflow_dispatch", "head_branch": "b", "created_at": "2026-10-28T16:00:46Z",
+                      "status": "completed", "conclusion": "success", "name": "release", "html_url": "u1"},
+                     {"id": 0, "event": "workflow_dispatch", "head_branch": "b", "created_at": "2026-10-28T15:00:00Z",
+                      "status": "completed", "conclusion": "failure", "name": "older", "html_url": "u0"}]
+            keep_ = {k: G[k] for k in ("gh",)}
+            G["gh"] = lambda path, method="GET", data=None: {"workflow_runs": runs_}
+            try:
+                ok1, t1 = wait_runs("o/r", "abc", log_, event="workflow_dispatch", branch="b", since="2026-10-28T16:00:44Z",
+                                    first=True)
+                ok2, _t2 = wait_runs("o/r", "abc", log_, event="workflow_dispatch", branch="b", since="2026-10-28T16:00:44Z")
+                expect(ok1 and "u1" in t1 and "u2" not in t1 and not ok2,
+                       f"first=True waits for the round's own run only; without it a later red dispatch decides: {t1}")
             finally:
                 G.update(keep_)
             # t_gates on a ci_record version branch: the build and Gate A/B only (fork-port --gates ab), no machine lock
