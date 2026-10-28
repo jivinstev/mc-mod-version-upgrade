@@ -320,7 +320,9 @@ changed; a version whose only changes are ones a fresh review already passed low
 record: the round builds and runs Gate A/B locally with no machine lock, Gate C runs in CI's three environments in
 parallel, the release reuses that PR run's jars and attaches its gate summaries (`gates-<env>.md`), which the done
 check (`check-done`) reads as the version's Gate C record when no committed `GATES.md` is current -- no commit after the
-merge; a library's pre-merge dependent gate is the dependent's CI dispatched with the PR run's candidate jar. At
+merge; a library's pre-merge dependent gate is the dependent's CI dispatched with the PR run's candidate jar, named
+by the sha256 the run's gates job annotates (read over api.github.com: a cloud session's proxy denies the artifact
+storage); a run without those annotations whose artifact cannot be downloaded falls back to the local dependent gate. At
 `init` it reads each fork against this repository's shared library (`sync-shared --check`, no checkout touched): a
 version a sync would change gets work this round even with nothing else -- first a `sync` step (`fork-branches.py
 sync-shared` as its own commit on the version branch), then its gates, PR, merge, release and the dependents' re-pin

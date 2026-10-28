@@ -143,6 +143,13 @@ jobs:
             ${{ runner.temp }}/gates.md
             ${{ runner.temp }}/built-tree.txt
           if-no-files-found: ignore
+      - name: Jar digests (a keep-current round's dependent gate reads them over the API)
+        if: matrix.env == 'full'{{GATES_VARIANT_JARS_IF}}
+        run: |
+          for j in build/libs/*.jar; do
+            case "$j" in *-sources.jar) continue ;; esac
+            if [ -f "$j" ]; then echo "::notice title=jar sha256::$(basename "$j") $(sha256sum "$j" | cut -d' ' -f1)"; fi
+          done
       - uses: actions/upload-artifact@v4
         if: matrix.env == 'full'{{GATES_VARIANT_JARS_IF}}
         with:
