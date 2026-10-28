@@ -1810,9 +1810,12 @@ final class PlaytestRunner {
     /** The floor of the start piece of structure `what` whose start is in the chunk at block (x, z) in dimension dim:
      *  {x, y, z} at the centre of its box, one block above its bottom; {} when that chunk records no start of `what`.
      *  Only `what`'s own start: the chunk can also hold another structure's (measured: a mineshaft's, underground,
-     *  outside the village asked for), and a tag (#...) names no one structure, so it finds none. */
+     *  outside the village asked for); a tag (#...) takes the start of any structure in that tag (#minecraft:village:
+     *  village_plains, village_desert, ...). */
     void startPiece(Minecraft mc, String dim, String what, int x, int z, Consumer<int[]> done) {
-        String want = what.contains(":") ? what : "minecraft:" + what;
+        boolean tag = what.startsWith("#");
+        String id = tag ? what.substring(1) : what;
+        String want = id.contains(":") ? id : "minecraft:" + id;
         IntegratedServer server = mc.getSingleplayerServer();
         if (server == null) { done.accept(new int[0]); return; }
         server.execute(() -> {
@@ -1822,7 +1825,8 @@ final class PlaytestRunner {
                     if (!level.dimension().toString().contains(dim + "]")) continue;
                     net.minecraft.world.level.ChunkPos cp = new net.minecraft.world.level.ChunkPos(x >> 4, z >> 4);
                     // by reflection: startsForStructure(ChunkPos, Predicate) until 26.2, (int chunkX, int chunkZ, Predicate) on 26.3
-                    java.util.function.Predicate<Object> mine = st -> want.equals(structureId(level, st));
+                    java.util.function.Predicate<Object> mine = st -> tag ? structureTags(level, st).contains(want)
+                                                                          : want.equals(structureId(level, st));
                     Object starts = R.call(level.structureManager(), "startsForStructure", cp, mine);
                     if (starts == null) starts = R.call(level.structureManager(), "startsForStructure", x >> 4, z >> 4, mine);
                     if (!(starts instanceof List<?> list)) continue;
@@ -1847,6 +1851,17 @@ final class PlaytestRunner {
         Object key = R.call(R.call(level.registryAccess(), "lookupOrThrow", Registries.STRUCTURE), "getKey", structure);
         if (key == null) key = R.call(R.call(level.registryAccess(), "registryOrThrow", Registries.STRUCTURE), "getKey", structure);
         return key == null ? null : key.toString();
+    }
+
+    /** The ids ("ns:path") of the tags a structure is in, or none. By reflection, as structureId: the registry's
+     *  wrapAsHolder(structure).tags(), each TagKey's location(). */
+    static Set<String> structureTags(net.minecraft.server.level.ServerLevel level, Object structure) {
+        Set<String> out = new java.util.HashSet<>();
+        Object holder = R.call(R.call(level.registryAccess(), "lookupOrThrow", Registries.STRUCTURE), "wrapAsHolder", structure);
+        if (holder == null) holder = R.call(R.call(level.registryAccess(), "registryOrThrow", Registries.STRUCTURE), "wrapAsHolder", structure);
+        if (holder != null && R.call(holder, "tags") instanceof java.util.stream.Stream<?> tags)
+            tags.forEach(t -> { Object loc = R.call(t, "location"); if (loc != null) out.add(loc.toString()); });
+        return out;
     }
 
     void runCommand(Minecraft mc, String cmd, Consumer<CmdResult> done) {
