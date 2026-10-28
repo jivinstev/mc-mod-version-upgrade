@@ -59,10 +59,12 @@ forks already on the current shared library, builds nothing but the close):
       version -- an agent when a decision needs a patch written) -> repin (a dependent: the library's release of this
       round; the plan's dependency bumps) -> reconcile (an agent: a hand-edited shared copy whose template moved, never
       overwritten) -> adopt (an agent: only the copies the plan ticked) -> backlog (the issues the plan fixes AT this
-      version) -> review ->
+      version) -> nochange (a version with no fix, sync, reconcile or adopt: nothing shipped changed -- its merge and
+      records pushed, the push run awaited when the workflow changed, every step below skipped) -> reviewref (the
+      review, fix and recheck skipped when REVIEW.md stays current through .port/CHANGE-REVIEWS.md) -> review ->
       fix -> recheck -> gates (ONE full run: fork-port.py --from-stage measure --gates full, recording the gated commit)
       -> depgate:<dependent> (a LIBRARY version: the dependent's Gate C against this candidate jar, before the merge)
-      -> freeze -> pr (only what the gates certified: code after the gated commit sends the version back to its gates)
+      -> freeze (and, after a clean fresh review, its reviewed changes in .port/CHANGE-REVIEWS.md) -> pr (only what the gates certified: code after the gated commit sends the version back to its gates)
       -> ci -> merge (its PR's CI asked again) -> release (dispatched right after the merge; the push run and the release
       run awaited together) -> librecord:<library> (a dependent: fork-branches.py library-record once its Gate C passed
       on the released jar)
@@ -468,12 +470,15 @@ def build_queue(frozen, cfg, forks, date):
             if rel or bumps.get(v):
                 q.add(slug, v, "repin", deps=[release_of[(lb, v)] for lb in rel],
                       extra={"bumps": bumps.get(v, []), "libraries": rel})
+            if not (v in sync_v or v in rec_v or v in adopt_v or at.get(v)):
+                q.add(slug, v, "nochange")       # the merge-up alone: nothing shipped may have changed (t_nochange)
             if v in rec_v:
                 q.add(slug, v, "reconcile", extra={"edited": [e for e in rec_v[v] if e.get("reconcile")]})
             if v in adopt_v:
                 q.add(slug, v, "adopt", extra={"adopt": adopt_v[v]})
             if at.get(v):
                 q.add(slug, v, "backlog", extra={"fixes": at[v]})
+            q.add(slug, v, "reviewref")          # a change already reviewed lower down, file for file: no fresh review
             seg_review(q, slug, v)
             if v in sync_v and not (other_work(v) or v in rec_v or v in adopt_v):
                 # the version's only change is the shared library's own (reviewed in the migrator): a narrow review
@@ -1626,6 +1631,97 @@ def t_mergeup(st, it, log):
     return f"{frm} merged into neoforge-{v}, A/B green", {}
 
 
+NOT_SHIPPED = (".port/", ".github/", "docs/")
+
+
+def java_code(text):
+    """A Java source with its comments removed and its whitespace collapsed (string, char and text-block literals kept
+    as written): two sources equal here compile to the same code, line numbers aside."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if text.startswith('"""', i):
+            j = text.find('"""', i + 3)
+            j = n if j < 0 else j + 3
+            out.append(text[i:j]); i = j
+        elif c in "\"'":
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i:j + 1]); i = j + 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            out.append(" ")
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+        else:
+            out.append(c); i += 1
+    return " ".join("".join(out).split())
+
+
+def pins_of(text):
+    return sorted(ln.strip() for ln in text.splitlines() if ln.strip().startswith("port_jar"))
+
+
+def shipped_changes(d, old, new, v):
+    """What between `old` and `new` changes what the version ships or builds against: every file outside the round's
+    records, the workflow and the docs (a Java source only when its code changed, its comments and layout aside), and
+    the version's dependency pins (.port/<v>/branch.properties port_jar.*). -> the paths."""
+    def show(ref, path):
+        r = git(d, "show", f"{ref}:{path}")
+        return None if r.returncode else r.stdout
+    out = []
+    for f in git(d, "diff", "--name-only", old, new).stdout.splitlines():
+        if f == f".port/{v}/branch.properties":
+            a, b = show(old, f), show(new, f)
+            if pins_of(a or "") != pins_of(b or ""):
+                out.append(f)
+            continue
+        if f.startswith(NOT_SHIPPED) or ("/" not in f and f.lower().endswith(".md")):
+            continue
+        if f.endswith(".java"):
+            a, b = show(old, f), show(new, f)
+            if a is not None and b is not None and java_code(a) == java_code(b):
+                continue
+        out.append(f)
+    return out
+
+
+SKIP_ON_NOCHANGE = ("review", "fix", "recheck", "gates", "depgate", "freeze", "pr", "ci", "merge", "release", "librecord")
+
+
+def t_nochange(st, it, log):
+    """A version whose merge-up (and re-pin) changed nothing it ships: its merge and records pushed straight to its
+    branch, and its review, gates, dependent gates, PR, release and library records skipped -- the jar would be the
+    same code (measured, weekly round 2026-10-27: five library versions that already had the fix spent ~30 min of the
+    gate lock each on a comment). A changed workflow still runs CI: the push run is awaited green. Anything shipped
+    changed: the full cycle."""
+    F, v, slug = st.fork(it["fork"]), it["version"], it["fork"]
+    d, base = vco(st, slug, v), f"neoforge-{v}"
+    git(d, "fetch", "-q", "origin", base, check=True)
+    changed = shipped_changes(d, f"origin/{base}", "HEAD", v)
+    if changed:
+        return f"shipped code changed ({len(changed)} file(s): {', '.join(changed[:4])}): the full cycle", {}
+    if "push-version-branches" not in st.data["allow"]:
+        return "nothing shipped changed, but the set does not allow push-version-branches: the full cycle", {}
+    commit_records(d, v)
+    if git(d, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        raise StepError(f"{d} has uncommitted changes after the merge-up: commit or discard them")
+    wf = any(f.startswith(".github/") for f in git(d, "diff", "--name-only", f"origin/{base}", "HEAD").stdout.splitlines())
+    sha = head(d)
+    pushed = push_ahead(F["dir"], base)
+    skip = [x["id"] for x in st.items if x["fork"] == slug and x["version"] == v and x["step"] in SKIP_ON_NOCHANGE]
+    if wf and pushed:
+        ok, text = wait_runs(slug, sha, log, event="push", branch=base)
+        if not ok:
+            raise StepError(f"nothing shipped changed, but the workflow did: the push run on {base} is red ({text})")
+    return (f"nothing shipped changed: {base} pushed at {sha[:12]}" + (", its push run green (the workflow changed)"
+            if wf and pushed else "") + f"; {len(skip)} step(s) skipped"), {"skip": skip, "pushed": sha, "workflow": wf}
+
+
 def t_repin(st, it, log):
     v = it["version"]
     d = vco(st, it["fork"], v)
@@ -2061,7 +2157,50 @@ def t_freeze(st, it, log):
             cmd += ["--library", f"{lb}@{tag}"]
     sh(st, it, cmd, log)
     c = commit_paths(d, [f".port/{v}/branch.properties"], f"Move the freeze of {v} (keep-current round)")
-    return "freeze moved" + (f", {c[:12]}" if c else " (unchanged)"), {}
+    n = record_change_reviews(st, it, d)
+    return "freeze moved" + (f", {c[:12]}" if c else " (unchanged)") + (f"; {n} reviewed change(s) recorded" if n else ""), {}
+
+
+def record_change_reviews(st, it, d):
+    """After a fresh review passed at this version (no not-ok row left, nothing blocking, its recheck green or not
+    needed), each reviewed input it changed this round -- file, content before, content after -- in
+    .port/CHANGE-REVIEWS.md, committed: a version above that takes the very same change through its merge-up keeps
+    its review (reviewref). -> rows added."""
+    v = it["version"]
+    rv, rc = seg_item(st, it, "review"), seg_item(st, it, "recheck")
+    r_rv, r_rc = (rv or {}).get("result") or {}, (rc or {}).get("result") or {}
+    if not rv or rv.get("status") != "ok" or r_rv.get("blocking") or r_rv.get("not_ok") not in (0, None):
+        return 0                            # a skipped review (nochange, reviewref) relied on rows already on record
+    if rc and (rc.get("status") not in ("ok", "skipped") or r_rc.get("blocking")):
+        return 0
+    fb = mod("fb")
+    base = f"origin/neoforge-{v}"
+    git(d, "fetch", "-q", "origin", f"neoforge-{v}")
+    ch = fb.changes_since(d, d, v, base, "HEAD", False)
+    if not ch or not ch[1]:
+        return 0
+    n = fb.add_change_reviews(d, d, ch[1], base, f"{it['fork']} {v}, round {st.data['date']}")
+    if n:
+        commit_paths(d, [f".port/{fb.CHANGE_REVIEWS}"], f"Reviewed changes at {v} recorded (keep-current round)")
+    return n
+
+
+def t_reviewref(st, it, log):
+    """The version's REVIEW.md still current after its merge-up because every reviewed input it changed is a change a
+    fresh review already passed at a version below, file for file (.port/CHANGE-REVIEWS.md; fork-branches.py
+    commit_current): its review, fix and recheck are skipped. Any other review problem, or a version with its own
+    work this round (a fix, a reconcile, an adoption, a shared-library sync): the fresh review runs."""
+    v = it["version"]
+    if any(seg_item(st, it, s) for s in ("backlog", "reconcile", "adopt", "sync")):
+        return "the version has its own work this round: a fresh review", {}
+    d = vco(st, it["fork"], v)
+    probs = [p for p in mod("fb").target_done(d, v)
+             if p.startswith(("REVIEW.md", "no REVIEW.md", "no verdict", "reviewer says"))]
+    if probs:
+        return f"a fresh review: {probs[0][:300]}", {}
+    skip = [x for x in seg_ids(st, it, ("review", "fix", "recheck"))]
+    return "REVIEW.md current: the change was reviewed at a version below, file for file", {"skip": skip,
+                                                                                          "by_reference": True}
 
 
 def pr_body(st, it):
@@ -2403,7 +2542,7 @@ def t_ledger(st, it, log):
 TOOL_IMPL = {"ci-check": t_ci_check, "grades": t_grades, "setup": t_setup, "upstream": t_upstream, "sync": t_sync,
              "records": t_records, "done": t_done,
              "mergeup": t_mergeup,
-             "repin": t_repin,
+             "repin": t_repin, "nochange": t_nochange, "reviewref": t_reviewref,
              "gates": t_gates, "depgate": t_depgate, "freeze": t_freeze, "pr": t_pr, "ci": t_ci, "merge": t_merge,
              "release": t_release, "librecord": t_librecord, "ledger": t_ledger}
 
@@ -2450,6 +2589,9 @@ def run_tool(state_path, iid):
     with State.tx(state_path) as st:
         x = st.item(iid)
         finish(st, x, status, note, res)
+        for y in (res.get("skip") or []) if status == "ok" else []:
+            if st.item(y)["status"] == "pending":
+                finish(st, st.item(y), "skipped", f"{iid}: {note}"[-1500:], {"skipped": True, "tag": None})
         if reset:
             x["resets"] = x.get("resets", 0) + 1
             if x["resets"] > 3:
@@ -2909,7 +3051,7 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         def conf(*rows):
             return {"forks": [dict(r, automerge=True) for r in rows], "allow": ALLOW}
         ids_of = lambda its, f_: [x["id"].split(":", 1)[1] for x in its if x["fork"] == f_ and not x.get("final")]
-        MV_STEPS = {"lowest", "sync", "mergeup", "decisions", "freeze", "librecord", "repin", "reconcile", "adopt"}
+        MV_STEPS = {"lowest", "sync", "mergeup", "decisions", "freeze", "librecord", "repin", "reconcile", "adopt", "nochange", "reviewref"}
         # ---- a set of single-version forks only: a library and its dependent
         reached = []
         lo_, sho_ = globals()["lowest_of"], globals()["shared_of"]
@@ -4205,7 +4347,7 @@ def self_check():
             sh = real_sh
         # a version branch's workflow check counts only this run's warnings (the log keeps an earlier try's), and the
         # freeze step hands the round's frozen input to fork-branches.py freeze (a plan without the authors' code)
-        kept = {k: G[k] for k in ("vco", "commit_paths")}
+        kept = {k: G[k] for k in ("vco", "commit_paths", "wait_runs")}
         seen_cmds = []
 
         def rec_out(text):
@@ -4465,6 +4607,116 @@ def self_check():
             git(cr_, "fetch", "-q", "origin", "neoforge-1.21.5")
             expect(not drop_regen_only(str(cr_), "neoforge-1.21.5") and head(cr_) == mine_,
                    "a local code commit is never dropped")
+            # a version whose merge-up changed nothing it ships (weekly round 2026-10-27: a comment carried up to
+            # five library versions that already had the fix): pushed, its review/gates/PR/release skipped; a code,
+            # pin or shipped-resource change, or no push permission, keeps the full cycle; a changed workflow runs CI
+            jc = java_code
+            expect(jc("class A { // x\n int a = 1; /* y */ }") == jc("class A {\n\n  int a = 1;\n}")
+                   and jc('class A { String s = "// not a comment"; }') != jc("class A { String s = ; }")
+                   and jc("class A { char c = '\\''; } // z") == jc("class A { char c = '\\''; }")
+                   and jc("class A { int a = 1; }") != jc("class A { int a = 2; }"),
+                   "java_code: comments and layout ignored, literals and code kept")
+            nc_ = tmp / "nc-fork"
+            nc_.mkdir()
+            git(nc_, "init", "-q", "-b", "neoforge-1.21.10")
+            for k_, v_ in (("user.email", "t@example.com"), ("user.name", "t")):
+                git(nc_, "config", k_, v_)
+            commit(nc_, "src/main/java/A.java", "class A { int a = 1; }\n", "base")
+            commit(nc_, ".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u1\nport_taken=a\n", "pins")
+            subprocess.run(["git", "clone", "-q", "--bare", str(nc_), str(tmp / "nc-origin.git")], check=True,
+                           capture_output=True)
+            git(nc_, "remote", "add", "origin", str(tmp / "nc-origin.git"))
+            git(nc_, "fetch", "-q", "origin")
+            commit(nc_, "src/main/java/A.java", "class A {\n  // carried from below\n  int a = 1;\n}\n", "merge-up")
+            commit(nc_, ".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u1\nport_taken=b\n", "taken")
+            commit(nc_, ".port/1.21.10/REVIEW.md", "r\n", "records")
+            expect(shipped_changes(str(nc_), "origin/neoforge-1.21.10", "HEAD", "1.21.10") == [],
+                   "a comment, a port_taken move and records change nothing shipped")
+
+            class _St7:
+                data = {"allow": ["push-version-branches"]}
+                items = [{"id": f"nc@1.21.10:{s_}", "fork": "o/nc", "version": "1.21.10", "step": s_}
+                         for s_ in ("mergeup", "nochange", "review", "fix", "recheck", "gates", "depgate", "freeze", "pr",
+                                    "ci", "merge", "release", "librecord")] + [
+                         {"id": "nc@1.21.11:gates", "fork": "o/nc", "version": "1.21.11", "step": "gates"}]
+                def fork(self, _):
+                    return {"dir": str(nc_), "name": "nc", "kind": "branches", "base": "1.21.1"}
+                def item(self, i_):
+                    return next(x for x in self.items if x["id"] == i_) if any(x["id"] == i_ for x in self.items) \
+                        else (_ for _ in ()).throw(KeyError(i_))
+            G["vco"] = lambda st_, f_, v_: str(nc_)
+            waited = []
+            G["wait_runs"] = lambda *a_, **k_: (waited.append(k_.get("event")), (True, "green"))[1]
+            nci = {"id": "nc@1.21.10:nochange", "fork": "o/nc", "version": "1.21.10", "step": "nochange"}
+            note, r_ = t_nochange(_St7(), nci, log_)
+            expect(sorted(r_["skip"]) == sorted(f"nc@1.21.10:{s_}" for s_ in SKIP_ON_NOCHANGE)
+                   and git(tmp / "nc-origin.git", "rev-parse", "neoforge-1.21.10").stdout.strip() == head(nc_)
+                   and not waited and not r_["workflow"],
+                   f"nothing shipped changed: pushed, the version's later steps skipped, no CI wait: {note}")
+            (nc_ / ".github/workflows").mkdir(parents=True)
+            commit(nc_, ".github/workflows/port-ci.yml", "kit 58\n", "Port CI at kit 58")
+            note, r_ = t_nochange(_St7(), nci, log_)
+            expect(r_.get("skip") and r_["workflow"] and waited == ["push"],
+                   f"a changed workflow with nothing shipped: pushed and its push run awaited green: {note}")
+            G["wait_runs"] = lambda *a_, **k_: (False, "Port CI failure")
+            commit(nc_, ".github/workflows/port-ci.yml", "kit 59\n", "Port CI at kit 59")
+            try:
+                t_nochange(_St7(), nci, log_)
+                expect(False, "a red push run after a workflow change passed")
+            except StepError as e:
+                expect("red" in str(e), f"a red push run stops the version: {e}")
+            G["wait_runs"] = kept["wait_runs"]
+            for f_, text_, why_ in (("src/main/java/A.java", "class A { int a = 2; }\n", "a code change"),
+                                    (".port/1.21.10/branch.properties", "port_jar.com.example\\:lib=u2\nport_taken=b\n",
+                                     "a dependency pin"),
+                                    ("src/main/resources/x.json", "{}\n", "a shipped resource")):
+                git(nc_, "fetch", "-q", "origin")
+                git(nc_, "reset", "-q", "--hard", "origin/neoforge-1.21.10")
+                commit(nc_, f_, text_, why_)
+                note, r_ = t_nochange(_St7(), nci, log_)
+                expect(not r_ and "full cycle" in note and f_ in note, f"{why_} keeps the full cycle: {note}")
+            git(nc_, "fetch", "-q", "origin")
+            git(nc_, "reset", "-q", "--hard", "origin/neoforge-1.21.10")
+            commit(nc_, "README.md", "r\n", "docs")
+            _St7.data = {"allow": []}
+            note, r_ = t_nochange(_St7(), nci, log_)
+            expect(not r_ and "does not allow" in note, f"no push permission: the full cycle: {note}")
+            # review by reference: a REVIEW.md still current (the change reviewed lower down, file for file) skips the
+            # fresh review; any review problem, or work of the version's own this round, keeps it
+            fbm, td_keep = mod("fb"), mod("fb").target_done
+            try:
+                rri = {"id": "nc@1.21.10:reviewref", "fork": "o/nc", "version": "1.21.10", "step": "reviewref"}
+                fbm.target_done = lambda d__, v__: ["GATES.md is stale", "its parent 1.21.8 is still not done"]
+                note, r_ = t_reviewref(_St7(), rri, log_)
+                expect(sorted(r_.get("skip") or []) == ["nc@1.21.10:fix", "nc@1.21.10:recheck", "nc@1.21.10:review"],
+                       f"a current REVIEW.md: review, fix and recheck skipped: {note}")
+                fbm.target_done = lambda d__, v__: ["REVIEW.md 1 file(s) changed since abc1234, e.g. A.java: re-review"]
+                note, r_ = t_reviewref(_St7(), rri, log_)
+                expect(not r_ and "fresh review" in note, f"a stale REVIEW.md: the fresh review runs: {note}")
+                fbm.target_done = lambda d__, v__: []
+                _St7.items.append({"id": "nc@1.21.10:backlog", "fork": "o/nc", "version": "1.21.10", "step": "backlog"})
+                note, r_ = t_reviewref(_St7(), rri, log_)
+                expect(not r_ and "own work" in note, f"a version with its own fix: the fresh review runs: {note}")
+                _St7.items.pop()
+            finally:
+                fbm.target_done = td_keep
+            # the driver applies the skips: only this version's pending steps, never another version's
+            sd_ = tmp / "nc-state"
+            sd_.mkdir()
+            items_ = [dict(x, status="pending", result={}, fixes=0, kind="tool", deps=[], dirs=["o/nc"], note="")
+                      for x in _St7.items]
+            (sd_ / "STATE.json").write_text(json.dumps({"items": items_, "round_dir": str(sd_), "forks": {}}),
+                                            encoding="utf-8")
+            TOOL_IMPL["nochange"] = lambda st_, it_, log__: ("nothing shipped changed", {"skip": [
+                "nc@1.21.10:gates", "nc@1.21.10:release"]})
+            run_tool(sd_ / "STATE.json", "nc@1.21.10:nochange")
+            TOOL_IMPL["nochange"] = t_nochange
+            with State.tx(sd_ / "STATE.json", write=False) as st_:
+                expect(st_.item("nc@1.21.10:gates")["status"] == "skipped"
+                       and st_.item("nc@1.21.10:release")["result"] == {"skipped": True, "tag": None}
+                       and st_.item("nc@1.21.11:gates")["status"] == "pending"
+                       and st_.item("nc@1.21.10:nochange")["status"] == "ok",
+                       "run_tool marks the named steps skipped (a release with no tag), nothing else")
         finally:
             G.update(kept)
             sh = real_sh

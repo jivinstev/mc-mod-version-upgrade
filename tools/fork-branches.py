@@ -813,6 +813,11 @@ def commit_current(repo, root, t, c, ref, work, kind, files=None, items=None):
             if rng:
                 return True, f"current at {c}: the {len(ch)} file(s) changed since are the authors' change {rng} through " \
                              f"the rows, reviewed once for every version (AUTHORS-REVIEWS.md)"
+        if ch and kind == "review":
+            where = change_reviewed(repo, root, ch, c, ref, work)
+            if where:
+                return True, f"current at {c}: the {len(ch)} file(s) changed since are a change already reviewed " \
+                             f"ok at {where}, file for file (CHANGE-REVIEWS.md)"
         if ch:
             return False, f"{len(ch)} file(s) changed since {c}, e.g. {ch[0]}"
         return True, f"current at {c}"
@@ -1474,7 +1479,7 @@ def head_only(path):
     return bool(LEDGER_PATH.match(path)) or path in HEAD_ONLY
 
 
-UNION_FILES = (f"{REC}/DECISIONS.md", f"{REC}/AUTHORS-REVIEWS.md")      # append-only records: a conflict is a union
+UNION_FILES = (f"{REC}/DECISIONS.md", f"{REC}/AUTHORS-REVIEWS.md", f"{REC}/CHANGE-REVIEWS.md")      # append-only records: a conflict is a union
 DEFAULT_BUDGET_LINES = 80
 CLASS_ORDER = ("escalate", "port-change", "authors-fix", "optional-integration")
 
@@ -3466,6 +3471,71 @@ def review_authors(repo, rng, reviewer, note, verdict="ok", say=print):
 
 def authors_digest(repo, a, b):
     return hashlib.sha256(git(repo, "diff", a, b, "--", "src", binary=True).stdout).hexdigest()[:24]
+
+
+CHANGE_REVIEWS = "CHANGE-REVIEWS.md"     # .port/CHANGE-REVIEWS.md: one reviewed change to one file, by content
+
+
+def blob_id(repo, ref, path, root=None):
+    """The blob id of `path` at `ref` (root: a checkout whose working file counts instead), "-" when absent."""
+    if root is not None:
+        f = pathlib.Path(root) / path
+        if not f.is_file():
+            return "-"
+        return git(repo, "hash-object", "--", str(f)).stdout.strip() or "?"
+    r = git(repo, "rev-parse", "--verify", "--quiet", f"{ref}:{path}")
+    return r.stdout.strip() if r.returncode == 0 else "-"
+
+
+def change_reviews(root):
+    """{(path, before, after): where} from .port/CHANGE-REVIEWS.md, its `ok` rows only."""
+    out = {}
+    for ln in read_file(pathlib.Path(root) / REC / CHANGE_REVIEWS).splitlines():
+        cells = [x.strip() for x in ln.strip().strip("|").split("|")]
+        if len(cells) >= 5 and cells[3] == "ok" and re.fullmatch(r"[0-9a-f]{40}|-", cells[1]) \
+                and re.fullmatch(r"[0-9a-f]{40}|-", cells[2]):
+            out[(cells[0].strip("`"), cells[1], cells[2])] = cells[4]
+    return out
+
+
+def change_reviewed(repo, root, ch, c, ref, work):
+    """Is every file in `ch` changed from commit c to ref exactly as a change a fresh review passed on another version
+    -- the same file before and the same file after (.port/CHANGE-REVIEWS.md)? The round's own fix carried up a
+    ladder is then reviewed once, where it was made (measured, weekly round 2026-10-27: eight dependent versions each
+    took a fresh review of the same file change). -> where it was reviewed, or None."""
+    rows = change_reviews(root)
+    if not rows:
+        return None
+    where = []
+    for f in ch:
+        key = (f, blob_id(repo, c, f), blob_id(repo, ref, f, root if work else None))
+        if key not in rows:
+            return None
+        where.append(rows[key])
+    return ", ".join(sorted(set(where)))
+
+
+def add_change_reviews(repo, root, files, before, where):
+    """Rows for `files` changed from `before` to the checkout at `root` (a review passed on them there), appended to
+    .port/CHANGE-REVIEWS.md (a union record across the ladder). -> rows added."""
+    f = pathlib.Path(root) / REC / CHANGE_REVIEWS
+    have = read_file(f)
+    rows = change_reviews(root)
+    add = []
+    for p in sorted(files):
+        key = (p, blob_id(repo, before, p), blob_id(repo, "HEAD", p, root))
+        if key not in rows and "?" not in key:
+            add.append(f"| `{p}` | {key[1]} | {key[2]} | ok | {where} |")
+    if not add:
+        return 0
+    head = "" if have.strip() else (
+        "# Changes reviewed once\n\nA change to one file a fresh review passed: a version branch whose reviewed inputs "
+        "changed only by these\nexact changes (the same file before, the same file after) keeps its REVIEW.md "
+        "(tools/fork-branches.py\ncommit_current). Written by the keep-current round driver; a union record.\n\n"
+        "| file | before | after | verdict | reviewed at |\n|---|---|---|---|---|\n")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text((have.rstrip("\n") + "\n" if have.strip() else head) + "\n".join(add) + "\n", encoding="utf-8")
+    return len(add)
 
 
 def authors_reviewed(repo, root, t, c, ref):
@@ -6187,6 +6257,44 @@ def _check_deferred_uses(expect):
                f"{ents} {out_b[-300:]} {out_g[-300:]}")
 
 
+def _check_change_reviews(expect):
+    """CHANGE-REVIEWS.md: a fix reviewed at 1.21.4 and carried, byte for byte, to 1.21.5 (the same file before, the same
+    file after) keeps 1.21.5's REVIEW.md current; the rows absent, or any other change, makes it stale."""
+    fx = "src/main/java/com/example/mod/Fixed.java"
+    with tempfile.TemporaryDirectory() as d:
+        r, _g, _run = _migrated_fixture(d)
+        ws = {}
+        for t in ("1.21.4", "1.21.5"):
+            w, _w = worktree_for(r, t)
+            ws[t] = w
+            _hand(w, {fx: "package com.example.mod;\nclass Fixed {\n int f() { return 0; }\n}\n"}, f"{t}: the file")
+            rv = w / f".port/{t}/REVIEW.md"
+            h = git(w, "rev-parse", "--short", "HEAD").stdout.strip()
+            rv.write_text(re.sub(r"(?m)^- commit: \S+", f"- commit: {h}", rv.read_text(encoding="utf-8")), encoding="utf-8")
+            git(w, "commit", "-qam", f"{t}: review at its branch commit", check=True)
+        w4, w5 = ws["1.21.4"], ws["1.21.5"]
+        before4 = git(w4, "rev-parse", "HEAD").stdout.strip()
+        fix = (" return 0;", " return 1; // the fix")
+        _hand(w4, {fx: fix}, "1.21.4: the fix")
+        n = add_change_reviews(r, w4, [fx], before4, "o/x 1.21.4, round 2026-10-27")
+        git(w4, "add", "-A", check=True); git(w4, "commit", "-qm", "1.21.4: reviewed change recorded", check=True)
+        expect(n == 1 and add_change_reviews(r, w4, [fx], before4, "again") == 0,
+               f"one row per reviewed change, never twice: {n}")
+        _hand(w5, {fx: fix}, "1.21.5: the same fix, merged up")
+        why = target_done(r, "1.21.5")
+        expect(any(w.startswith("REVIEW.md") and "changed since" in w for w in why),
+               f"control: the fix without its review record makes 1.21.5's review stale: {why}")
+        rows = (w4 / REC / CHANGE_REVIEWS).read_text(encoding="utf-8")
+        _hand(w5, {f"{REC}/{CHANGE_REVIEWS}": rows}, "1.21.5: the record, merged up")
+        why = target_done(r, "1.21.5")
+        expect(not any(w.startswith("REVIEW.md") for w in why),
+               f"the same change to the same file, reviewed at 1.21.4, keeps 1.21.5's review current: {why}")
+        _hand(w5, {fx: (" return 1;", " return 2;")}, "1.21.5: a change of its own")
+        why = target_done(r, "1.21.5")
+        expect(any(w.startswith("REVIEW.md") and "changed since" in w for w in why),
+               f"a change no review saw makes it stale again: {why}")
+
+
 def _check_cascade_plan(expect):
     """cascade --plan / --apply / --apply-decisions on a 4-version fixture: one conflict at two versions grouped into one
     decision, a mechanical one resolved, an optional integration absent at a version decided by default (logged), an
@@ -6922,6 +7030,7 @@ def self_check():
         _check_ungated_rerun(expect)
         _check_check_done_rows(expect)
         _check_ci_check(expect)
+        _check_change_reviews(expect)
         _check_push_advice(expect)
         _check_inventory_settles(expect)
         _check_stopped_worktree(expect)

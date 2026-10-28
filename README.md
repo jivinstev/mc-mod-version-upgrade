@@ -300,7 +300,11 @@ in the prompt; `--version-branches`, which older setups pass, changes nothing): 
 in ladder order, the library before its dependents) and runs every mechanical step itself -- merge-ups, re-pins, the one
 full gate run per version (one at a time on the machine), PRs, CI waits, merges, release dispatch, records, cost marks
 -- while the session only starts a fresh subagent for each job it prints (the authors' code, the selected fixes, the
-fresh review, the fixer, the re-check, a fixer for a step that failed, the close) and records its short summary. At
+fresh review, the fixer, the re-check, a fixer for a step that failed, the close) and records its short summary.
+On a version branch whose merge-up changed nothing it ships (only records, the workflow, docs, or Java comments), the
+driver pushes the merge and skips that version's review, gates, PR and release, still waiting for CI when the workflow
+changed; a version whose only changes are ones a fresh review already passed lower down, file for file
+(`.port/CHANGE-REVIEWS.md`), skips its fresh review. At
 `init` it reads each fork against this repository's shared library (`sync-shared --check`, no checkout touched): a
 version a sync would change gets work this round even with nothing else -- first a `sync` step (`fork-branches.py
 sync-shared` as its own commit on the version branch), then its gates, PR, merge, release and the dependents' re-pin
