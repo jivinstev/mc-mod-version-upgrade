@@ -461,7 +461,9 @@ it small, so the orchestration is a tool, which replaces the four rules above:
   **CI as the gate of record** (a fork whose Port CI workflow has the `from_run` and `dep_override` inputs, either
   kind): the driver's `gates` step builds and runs Gate A/B only, without the machine lock; the PR's CI (Gate C in
   three environments, in parallel) certifies the version; a library's dependent gate runs after that CI, as the
-  dependent's Port CI dispatched with `dep_override` naming the PR run's candidate jar; the release reuses the PR run
+  dependent's Port CI dispatched with `dep_override` naming the PR run's candidate jar (by the sha256 the run's gates
+  job annotates, read over the API: a cloud session cannot reach the artifact storage; without those annotations and
+  without that storage, the local dependent gate); the release reuses the PR run
   (`from_run`) when the merge is the PR head's tree and carries its `gates-<env>.md` summaries, which `check-done`
   accepts as the Gate C record -- nothing is committed after the merge. A workflow rendered before those inputs keeps
   the local full gates and the local dependent gate until `ci-check` regenerates it. **A worker MAY carry

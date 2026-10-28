@@ -212,12 +212,24 @@ def missing_inputs(wf):
     return [i for i in REUSE_INPUTS if f"\n      {i}:\n" not in disp]
 
 
+JAR_DIGESTS_MARK = "::notice title=jar sha256::"
+DIGESTS_STALE = ("it annotates no jar sha256 (rendered before the jar digests): a cloud round, whose proxy denies the "
+                 "artifact storage, cannot name the library's candidate jar to its dependent's CI")
+
+
+def missing_digests(wf):
+    """A workflow with the dispatch inputs but rendered before its gates job annotated each jar's sha256 (round.py
+    run_jar_digests reads them over the API; the artifact storage is unreachable from a cloud session)."""
+    return "\n  workflow_dispatch:\n" in wf and JAR_DIGESTS_MARK not in wf
+
+
 def stale_workflow(wf, newest):
     """Why a port branch's installed workflow is out of date -- the one check for a single-version fork's port branch
     (`port-ci.py check`) and a version-branch fork's head (tools/fork-branches.py ci-check): it pins a Port CI kit older
     than `newest` (None: not compared), or its push trigger ignores none of the round's records (every known-issues
     ledger or README Ports-block commit is then a full Port CI run), or it lacks the from_run / dep_override
-    workflow_dispatch inputs (missing_inputs). -> [reasons], [] when current."""
+    workflow_dispatch inputs (missing_inputs) or the jar digest annotations (missing_digests). -> [reasons], [] when
+    current."""
     why = []
     kits = [int(k) for k in re.findall(r"port-ci-kit-v(\d+)", wf)]
     if newest is not None and (not kits or min(kits) < newest):
@@ -228,6 +240,8 @@ def stale_workflow(wf, newest):
     if missing_inputs(wf):
         why.append("it was rendered before the from_run/dep_override inputs (no " + ", ".join(missing_inputs(wf))
                    + "): it can neither release an earlier run's jars nor run the dependent gate")
+    elif missing_digests(wf):
+        why.append(DIGESTS_STALE)
     return why
 
 
@@ -1356,6 +1370,7 @@ def _without_reuse(wf):
                  ' ${gates[@]+"${gates[@]}"}'):
         w = w.replace(gone, "")
     w = _cut(w, "    # from_run: the gates (and shipped) jobs", "    needs: ")
+    w = _cut(w, "      - name: Jar digests", "      - uses: actions/upload-artifact@v4\n        if: matrix.env == 'full'")
     w = _cut(w, "      - name: Refuse a dependent-gate run\n", "      - uses: actions/checkout@v4\n        with:\n          sparse")
     w = _cut(w, "      - name: Check the earlier run (from_run)", "      - uses: actions/download-artifact@v4")
     w = _cut(w, "      - name: Check the earlier run's gate logs", "      - name: Publish pre-release")
@@ -1379,7 +1394,8 @@ def reuse_check():
     attaches gates-*.md (release_script_check runs it); (c) from_run skips the gates and shipped jobs, the release accepts
     a skipped one only then, downloads from that run, and its checks pass the same tree only; (d) dep_override is
     validated, applied after PRE_BUILD and the variant steps (and in the shipped job), and blocks the release; (e) no
-    input reaches a script but through env; (f) a workflow without the new inputs is stale (stale_workflow)."""
+    input reaches a script but through env; (f) a workflow without the new inputs is stale (stale_workflow); (g) the
+    gates job annotates each uploaded jar's sha256."""
     import hashlib, os, tempfile
     sys.path.insert(0, str(ROOT / "tools"))
     from gitbash import BASH
@@ -1430,6 +1446,9 @@ def reuse_check():
     ok &= want("reuse: stale without the inputs", missing_inputs(old) == ["from_run", "dep_override"] and missing_inputs(plain) == []
                and any("rendered before the from_run/dep_override inputs" in w_ for w_ in stale_workflow(old, 7))
                and stale_workflow(plain, 7) == [], "stale / current", (stale_workflow(old, 7), stale_workflow(plain, 7)))
+    no_dig = _cut(plain, "      - name: Jar digests", "      - uses: actions/upload-artifact@v4\n        if: matrix.env == 'full'")
+    ok &= want("reuse: stale without the jar digests", missing_digests(no_dig) and not missing_digests(plain)
+               and stale_workflow(no_dig, 7) == [DIGESTS_STALE], "stale / current", stale_workflow(no_dig, 7))
 
     def g(*a, cwd):
         return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -1574,6 +1593,20 @@ def reuse_check():
                 print(f"reuse: dep_override ({case}): exit {r.returncode}, want {rc_want}, calls {calls}\n"
                       f"{(r.stdout + r.stderr)[-1200:]}")
             ok &= good
+    # (g) the jar digests a round's dependent gate reads over the API (round.py run_jar_digests), sources jar left out;
+    # an empty build/libs writes none and still exits 0
+    step = _step_script(gates, "Jar digests (a keep-current round's dependent gate reads them over the API)")
+    for jars_ in ({"lib-1.0_mr.jar": b"mr", "lib-1.0_cf.jar": b"cf", "lib-1.0-sources.jar": b"src"}, {}):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "build/libs").mkdir(parents=True)
+            for n_, b_ in jars_.items():
+                (d / "build/libs" / n_).write_bytes(b_)
+            r = subprocess.run([BASH, "-c", step], cwd=d, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            want_ = sorted(f"::notice title=jar sha256::{n_} {hashlib.sha256(b_).hexdigest()}" for n_, b_ in jars_.items()
+                           if not n_.endswith("-sources.jar"))
+            ok &= want(f"reuse: jar digests ({len(jars_)} jars)", (r.returncode, sorted(r.stdout.splitlines())),
+                       (0, want_), (r.returncode, r.stdout + r.stderr))
     return ok
 
 

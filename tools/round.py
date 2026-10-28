@@ -67,7 +67,8 @@ forks already on the current shared library, builds nothing but the close):
       PR's CI is the gate of record, its release's gates-<env>.md the record check-done reads)
       -> freeze (and, after a clean fresh review, its reviewed changes in .port/CHANGE-REVIEWS.md) -> pr (only what the gates certified: code after the gated commit sends the version back to its gates)
       -> ci -> depgate:<dependent> (a LIBRARY version: the dependent's Gate C against this candidate jar, before the
-      merge; on a ci_record fork the dependent's CI dispatched with dep_override naming the PR run's jar) -> merge (its
+      merge; on a ci_record fork the dependent's CI dispatched with dep_override naming the PR run's jar by its annotated
+      sha256) -> merge (its
       PR's CI asked again) -> release (dispatched right after the merge, from_run reusing the PR run when the merge is its
       tree; the push run and the release run awaited together, the push run only when .github/ changed on reuse) -> librecord:<library> (a dependent: fork-branches.py library-record once its Gate C passed
       on the released jar)
@@ -2144,6 +2145,25 @@ def pr_ci_run(slug, sha):
     return (runs[0]["id"], runs[0]) if runs else (None, None)
 
 
+JAR_DIGEST_TITLE = "jar sha256"
+
+
+def run_jar_digests(slug, run_id):
+    """The sha256 of every jar a Port CI run uploaded as `jars`, from the annotations its gates job writes
+    (`::notice title=jar sha256::<name> <sha256>`, port-ci.yml): read over api.github.com alone, so a session whose
+    network reaches no artifact storage (a cloud session's proxy denies it) still names the candidate.
+    -> {name: sha256}, {} for a run of a template before them."""
+    out = {}
+    for j in gh(f"repos/{slug}/actions/runs/{run_id}/jobs?per_page=100").get("jobs", []):
+        if j.get("conclusion") != "success":
+            continue
+        for a in gh(f"repos/{slug}/check-runs/{j['id']}/annotations?per_page=100") or []:
+            m = re.fullmatch(r"(\S+\.jar) ([0-9a-f]{64})", (a.get("message") or "").strip())
+            if a.get("title") == JAR_DIGEST_TITLE and m:
+                out[m.group(1)] = m.group(2)
+    return out
+
+
 def run_jars(slug, run_id, into):
     """The `jars` artifact of a Port CI run unpacked into `into`. -> the jar paths."""
     import io
@@ -2165,7 +2185,9 @@ def run_jars(slug, run_id, into):
 def depgate_ci(st, it, dep, v, log):
     """The library's pre-merge dependent gate on CI (ci_record forks): the dependent's Port CI dispatched on its own
     branch for version v with `dep_override` naming the library PR run's candidate jar (the `jars` artifact, by run id
-    and sha256), its three environments with Gate C in parallel, no release. Green only when that run is."""
+    and sha256: the digest the run annotated, run_jar_digests, else the downloaded jar's), its three environments with
+    Gate C in parallel, no release. Green only when that run is. None (the local dependent gate) for a dependent on an
+    older template, or for a run with no digest annotations whose artifact this session cannot download."""
     lib_slug, dep_slug = it["fork"], it["extra"]["dependent"]
     br = f"neoforge-{v}" if dep["kind"] == "branches" and v in dep.get("versions", []) else dep["head"]
     git(dep["dir"], "fetch", "-q", "origin", br, check=True)
@@ -2180,14 +2202,21 @@ def depgate_ci(st, it, dep, v, log):
     run_id = ci.get("run_id")
     if not run_id:
         raise StepError(f"{lib_slug} {v}: its PR's Port CI run is not recorded (the ci step names it): run ci again")
-    jars, art = run_jars(lib_slug, run_id, st.rdir / "round/work" / f"candidate-{st.fork(lib_slug)['name']}-{v}")
+    digests, art = run_jar_digests(lib_slug, run_id), "jars"
+    if not digests:                         # a run before the digest annotations: the jars themselves
+        try:
+            jars, art = run_jars(lib_slug, run_id, st.rdir / "round/work" / f"candidate-{st.fork(lib_slug)['name']}-{v}")
+        except OSError as e:                # URLError: this session cannot reach the artifact storage
+            say_to(log)(f"{lib_slug} run {run_id} names no jar digests and its `jars` artifact cannot be downloaded "
+                        f"here ({e}): the local dependent gate runs instead")
+            return None
+        digests = {j.name: hashlib.sha256(j.read_bytes()).hexdigest() for j in jars}
     entries = []
     for ga, p in sorted(pins.items()):
-        jar, why = candidate_jar(jars, p["asset"], v)
+        jar, why = candidate_jar([pathlib.Path(n) for n in sorted(digests)], p["asset"], v)
         if not jar:
             raise StepError(f"{lib_slug} run {run_id}'s jars: {why} (the asset {dep_slug} pins): which is the candidate?")
-        sha = hashlib.sha256(jar.read_bytes()).hexdigest()
-        entries.append(f"{lib_slug}#{run_id}/{art}/{jar.name}={ga}:{p['version']}@{sha}")
+        entries.append(f"{lib_slug}#{run_id}/{art}/{jar.name}={ga}:{p['version']}@{digests[jar.name]}")
     dsha = gh(f"repos/{dep_slug}/branches/{br}")["commit"]["sha"]
     since = it["result"].get("dispatched_at")
     if not since:
@@ -4937,9 +4966,10 @@ def self_check():
                     return {"commit": {"sha": head(nc_)}}
                 posted.append((method, path, data))
                 return {}
-            keep_ = {k: G[k] for k in ("gh", "run_jars", "wait_runs")}
+            keep_ = {k: G[k] for k in ("gh", "run_jars", "wait_runs", "run_jar_digests")}
             G["gh"], G["wait_runs"] = gh_dg, (lambda *a_, **k_: (True, "Port CI workflow_dispatch success"))
             G["run_jars"] = lambda slug_, rid_, into_: ([cand / "lib-1.0.jar"], "jars")
+            G["run_jar_digests"] = lambda slug_, rid_: {}
             try:
                 note, r_ = depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_)
                 sha_ = hashlib.sha256(b"candidate-bytes").hexdigest()
@@ -4950,6 +4980,23 @@ def self_check():
                        f"the dependent's CI is dispatched on its version branch with the candidate jar: {posted} {note}")
                 with State.tx(dg_st / "STATE.json", write=False) as s3_:
                     expect(s3_.item(dgi["id"])["result"].get("dispatched_at"), "the dispatch is recorded before the POST")
+                # the run's digest annotations name the candidate: nothing is downloaded (a cloud proxy denies storage)
+                G["run_jar_digests"] = lambda slug_, rid_: {"lib-1.0.jar": "ab" * 32, "lib-1.0-api.jar": "cd" * 32}
+                G["run_jars"] = lambda *a_: (_ for _ in ()).throw(AssertionError("the artifact was downloaded"))
+                dgi["result"], posted[:] = {}, []
+                depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_)
+                expect(posted and posted[0][2]["inputs"]["dep_override"]
+                       == f"o/lib#99/jars/lib-1.0.jar=com.example:lib:1.0@{'ab' * 32}",
+                       f"the annotated digest of the pinned asset's jar, no download: {posted}")
+                # no annotations and the artifact storage unreachable: the local dependent gate, nothing dispatched
+                import urllib.error
+                G["run_jar_digests"] = lambda slug_, rid_: {}
+                G["run_jars"] = lambda *a_: (_ for _ in ()).throw(urllib.error.URLError("Tunnel connection failed: 403"))
+                dgi["result"], posted[:] = {}, []
+                expect(depgate_ci(_St9(), dgi, _St9().fork("o/nc"), "1.21.10", log_) is None and not posted
+                       and not dgi["result"].get("dispatched_at"),
+                       f"an undownloadable run without digests falls back to the local dependent gate: {posted}")
+                G["run_jars"] = lambda slug_, rid_, into_: ([cand / "lib-1.0.jar"], "jars")
                 G["wait_runs"] = lambda *a_, **k_: (False, "Port CI failure")
                 dgi["result"] = {"dispatched_at": "2026-10-28T00:00:00Z"}
                 posted.clear()
