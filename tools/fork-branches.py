@@ -1089,6 +1089,8 @@ def review_problems(repo, root, t, ref, work, files, items):
     if not f.is_file():
         return [f"no REVIEW.md: {len(items)} item(s) need an independent reviewer's verdict (.port/{t}/REVIEW.md)"]
     fields, rows = f_.parse_review(read_file(f))
+    if any(v[0] == "not-ok" for v in rows.values()):
+        rows = accept_ledgered(rows, ledgered_minor(repo, t, root))
     out = [f"REVIEW.md has no {k}" for k in f_.REVIEW_FIELDS if fields.get(k, "?") in ("", "?")]
     if fields.get("date", "?") not in ("", "?") and not re.match(r"^\d{4}-\d\d-\d\d\b", fields["date"]):
         out.append(f"REVIEW.md date {fields['date']!r} is not YYYY-MM-DD")
@@ -1109,9 +1111,41 @@ def review_problems(repo, root, t, ref, work, files, items):
     return out
 
 
-def gate_text_problems(text, t, what="GATES.md"):
+def ledgered_minor(repo, t, root=None):
+    """{issue id: its files} of the known-issues ledger's S3/S4 issues open at version t -- the head branch's ledger on
+    a version-branch fork, the tree's own on a single-version one. A REVIEW.md not-ok row whose note names such an
+    issue, on one of its files, is a ledgered finding: keep-current's rule ("an S3/S4 row is ledgered and does not
+    block"), so it does not keep t from being done. {} when no ledger can be read."""
+    ki = load("ki_fb", "known-issues.py")
+    own = pathlib.Path(root) / ".port/KNOWN-ISSUES.json" if root is not None else None
+    try:
+        if own is not None and own.is_file():
+            led = ki.read_ledger(path=own)
+        else:
+            ref = fresh_branch(repo, head_branch(repo))
+            led = ki.read_ledger(repo=repo, ref=ref) if ref else {"issues": []}
+    except Exception:                       # noqa: BLE001 -- an unreadable ledger excuses nothing
+        return {}
+    return {i["id"]: set(i.get("files") or []) for i in led.get("issues", [])
+            if i.get("severity") in ("S3", "S4") and (i.get("status") or {}).get(t) == "open"}
+
+
+def accept_ledgered(rows, minor):
+    """REVIEW.md's rows with each not-ok row whose note names an S3/S4 issue open at the version (ledgered_minor) that
+    lists that file read as accepted: a ledgered finding, not a reason the version is not done."""
+    out = dict(rows)
+    for (kind, file), (verdict, note) in rows.items():
+        if verdict == "not-ok" and any(file in fs and re.search(rf"(?<![\w-]){re.escape(i)}(?!\d)", note)
+                                       for i, fs in minor.items()):
+            out[(kind, file)] = ("ok", f"ledgered: {note}")
+    return out
+
+
+def gate_text_problems(text, t, what="GATES.md", tag_version=False):
     """(commit, problems) of one gate summary -- the committed GATES.md, or a gates-<env>.md a Port CI pre-release
-    carries (the same ci-gates.py summary): green Gate C for Minecraft t at a named commit."""
+    carries (the same ci-gates.py summary): green Gate C for Minecraft t at a named commit. tag_version: the summary is
+    a release asset whose tag already names Minecraft t (-mc<t>), so a header without `for Minecraft` (CI on a version
+    branch writes none) is t's; one naming another version is still refused."""
     if not text:
         return None, [f"no green Gate C recorded in {what}"]
     head = text.splitlines()[0]
@@ -1121,7 +1155,7 @@ def gate_text_problems(text, t, what="GATES.md"):
         return None, [f"{what} names no commit it tested"]
     if "uncommitted" in m.group(1):
         return None, [f"{what} certifies an edited tree ({m.group(1)[:120]}), not a commit: commit, then re-run the full gates"]
-    if not mm or mm.group(1) != t:
+    if (not mm and not tag_version) or (mm and mm.group(1) != t):
         return None, [f"{what} is for Minecraft {mm.group(1) if mm else '?'}, not {t}"]
     rows = [ln for ln in text.splitlines() if ln.startswith("|")]
     if any(re.search(r"\|\s*FAIL\s*\|", ln) for ln in rows):
@@ -1177,7 +1211,7 @@ def release_gate_record(repo, root, t, ref, work, files, read=None):
             except OSError as e:
                 bad = f"{r['tag_name']}: {a['name']} could not be read ({str(e)[:80]})"
                 break
-            c, probs = gate_text_problems(text, t, f"{r['tag_name']}'s {a['name']}")
+            c, probs = gate_text_problems(text, t, f"{r['tag_name']}'s {a['name']}", tag_version=True)
             if probs:
                 bad = probs[0]
                 break
@@ -6407,6 +6441,16 @@ def _check_release_gate_record(expect):
             setup([rel(tag, ["examplemod-1.0.jar"])], {})
             why = gates_why()
             expect(any("carries gate summaries" in x for x in why), f"a release with no summary: not done: {why}")
+            ci_head = lambda c, env: summary(c, env).replace(" for Minecraft 1.21.5", "", 1)   # CI on a version branch
+            setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
+                  {u("gates-full.md"): ci_head(h, "full"), u("gates-minimal.md"): ci_head(h, "minimal")})
+            why = gates_why()
+            expect(not why, f"a release summary with no `for Minecraft` (CI's version-branch header): the tag's: {why}")
+            setup([rel(tag, ["gates-full.md"])], {u("gates-full.md"): summary(h, "full").replace("1.21.5", "1.21.4", 1)})
+            why = gates_why()
+            expect(any("for Minecraft 1.21.4, not 1.21.5" in x for x in why), f"a summary naming another version: {why}")
+            expect(gate_text_problems(ci_head(h, "full"), "1.21.5")[1] == [f"GATES.md is for Minecraft ?, not 1.21.5"],
+                   "a committed GATES.md still names its version")
             setup([rel(tag, ["gates-full.md"])], {u("gates-full.md"): summary(h, "full")})
             _hand(w, {"src/main/java/com/example/mod/Later.java": "package com.example.mod;\nclass Later {}\n"},
                   "1.21.5: a jar-relevant change after the release")
@@ -6415,6 +6459,36 @@ def _check_release_gate_record(expect):
         finally:
             gh_read = keep
             RELEASES.clear()
+
+
+def _check_ledgered_not_ok(expect):
+    """A REVIEW.md not-ok row is a ledgered finding (not a reason t is not done) only when its note names an S3/S4
+    issue open at t that lists that file: another file, an S2, an issue closed at t, an id it only prefixes, or a note
+    naming no issue still block."""
+    ki = load("ki_fb", "known-issues.py")
+    def issue(i, sev, files, st):
+        return {"id": i, "title": "x", "severity": sev, "lowest": min(v for v, x in st.items() if x != "n/a"),
+                "source": "review", "override": {"severity": sev, "reason": "fixture"},
+                "rubric": {"failure": "cosmetic", "reach": "feature", "visibility": "invisible", "workaround": False},
+                "status": st, "files": files}
+    led = {"schema": ki.SCHEMA, "issues": [issue("EX-7", "S4", ["src/A.java"], {"1.21.5": "open"}),
+                                         issue("EX-8", "S2", ["src/B.java"], {"1.21.5": "open"}),
+                                         issue("EX-9", "S3", ["src/C.java"], {"1.21.4": "open", "1.21.5": "n/a"})]}
+    with tempfile.TemporaryDirectory() as d:
+        (pathlib.Path(d) / ".port").mkdir()
+        (pathlib.Path(d) / ".port/KNOWN-ISSUES.json").write_text(json.dumps(led), encoding="utf-8")
+        minor = ledgered_minor(d, "1.21.5", d)
+    expect(minor == {"EX-7": {"src/A.java"}}, f"only the S3/S4 issue open at the version: {minor}")
+    rows = {("changed", "src/A.java"): ("not-ok", "stands; " + "x" * 300 + " ledgered as EX-7 (S4)"),
+            ("item", "src/A.java"): ("not-ok", "a new defect, not yet ledgered"),
+            ("changed", "src/D.java"): ("not-ok", "see EX-7"),
+            ("missing", "src/A.java"): ("not-ok", "see EX-70"),
+            ("changed", "src/B.java"): ("not-ok", "EX-8 (S2)"),
+            ("changed", "src/C.java"): ("ok", "fine")}
+    got = accept_ledgered(rows, minor)
+    expect(got[("changed", "src/A.java")][0] == "ok" and all(got[k] == v for k, v in rows.items() if k[1] != "src/A.java"
+                                                           or k[0] != "changed"),
+           f"only the row naming its ledgered S3/S4 issue (past any note length) is accepted: {got}")
 
 
 def _check_change_reviews(expect):
@@ -7192,6 +7266,7 @@ def self_check():
         _check_ci_check(expect)
         _check_change_reviews(expect)
         _check_release_gate_record(expect)
+        _check_ledgered_not_ok(expect)
         _check_push_advice(expect)
         _check_inventory_settles(expect)
         _check_stopped_worktree(expect)
