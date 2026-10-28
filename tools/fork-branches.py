@@ -1109,31 +1109,113 @@ def review_problems(repo, root, t, ref, work, files, items):
     return out
 
 
-def gates_problems(repo, root, t, ref, work, files):
-    """[] when .port/<t>/GATES.md records a green Gate C for Minecraft t at a commit this branch carries with nothing
-    jar-relevant changed since (or a layer commit MIGRATED.json maps to this tree)."""
-    if (rec_dir(root, t) / "GATES-RED.md").is_file():
-        return ["the last full gate run was red (GATES-RED.md); GATES.md's older green record does not count until a full "
-                "run is green again"]
-    text = read_file(rec_dir(root, t) / "GATES.md")
+def gate_text_problems(text, t, what="GATES.md"):
+    """(commit, problems) of one gate summary -- the committed GATES.md, or a gates-<env>.md a Port CI pre-release
+    carries (the same ci-gates.py summary): green Gate C for Minecraft t at a named commit."""
     if not text:
-        return ["no green Gate C recorded in GATES.md"]
+        return None, [f"no green Gate C recorded in {what}"]
     head = text.splitlines()[0]
     m = re.search(r"at `([^`]+)`", head)
     mm = re.search(r"for Minecraft (\S+)", head)
     if not m:
-        return ["GATES.md names no commit it tested"]
+        return None, [f"{what} names no commit it tested"]
     if "uncommitted" in m.group(1):
-        return [f"GATES.md certifies an edited tree ({m.group(1)[:120]}), not a commit: commit, then re-run the full gates"]
+        return None, [f"{what} certifies an edited tree ({m.group(1)[:120]}), not a commit: commit, then re-run the full gates"]
     if not mm or mm.group(1) != t:
-        return [f"GATES.md is for Minecraft {mm.group(1) if mm else '?'}, not {t}"]
+        return None, [f"{what} is for Minecraft {mm.group(1) if mm else '?'}, not {t}"]
     rows = [ln for ln in text.splitlines() if ln.startswith("|")]
     if any(re.search(r"\|\s*FAIL\s*\|", ln) for ln in rows):
-        return ["GATES.md has a FAIL row"]
+        return None, [f"{what} has a FAIL row"]
     if not any("Gate C" in ln and re.search(r"\|\s*PASS\s*\|", ln) for ln in rows):
-        return ["no green Gate C recorded in GATES.md (A/B green is not done)"]
-    good, why = commit_current(repo, root, t, m.group(1).split()[0], ref, work, "gates", files)
-    return [] if good else [f"GATES.md {why}"]
+        return None, [f"no green Gate C recorded in {what} (A/B green is not done)"]
+    return m.group(1).split()[0], []
+
+
+GATE_ASSET = re.compile(r"gates-[\w.+-]+\.md")
+RELEASES = {}            # slug -> the release list, read once per process (release_gate_record)
+
+
+def gh_read(url, accept="application/vnd.github+json"):
+    """GET url (api.github.com or a release download), with GITHUB_TOKEN / GH_TOKEN when set. -> bytes; raises OSError."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "mmvu-fork-branches"})
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if tok and url.startswith("https://api.github.com/"):
+        req.add_header("Authorization", f"Bearer {tok}")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read()
+
+
+def release_gate_record(repo, root, t, ref, work, files, read=None):
+    """The gate record of a Port CI pre-release: the newest release of this fork for Minecraft t that carries gate
+    summaries (gates-<env>.md assets, attached by the release job from the run that built its jars), every one green
+    with Gate C, for a commit this branch carries with nothing jar-relevant changed since. The release is built from
+    the commit the gates certified, so no commit records it in the branch (no second commit after a PR's merge).
+    -> (commit, where) or (None, why)."""
+    read = read or gh_read
+    slug = origin_slug(repo)
+    if not slug:
+        return None, "no GitHub origin to read releases from"
+    try:
+        if slug not in RELEASES:
+            RELEASES[slug] = json.loads(read(f"https://api.github.com/repos/{slug}/releases?per_page=50").decode("utf-8"))
+        rels = RELEASES[slug]
+    except (OSError, ValueError) as e:
+        return None, f"the releases of {slug} could not be read ({str(e)[:120]})"
+    rx = re.compile(rf"-mc{re.escape(t)}(?:-r\d+)?$")
+    rels = sorted((r for r in rels if rx.search(r.get("tag_name") or "")),
+                  key=lambda r: r.get("published_at") or r.get("created_at") or "", reverse=True)
+    why = f"no release of {slug} for {t} carries gate summaries"
+    for r in rels:
+        assets = [a for a in r.get("assets") or [] if GATE_ASSET.fullmatch(a.get("name") or "")]
+        if not assets:
+            continue
+        commits, bad = set(), None
+        for a in sorted(assets, key=lambda a: a["name"]):
+            try:
+                text = read(a["browser_download_url"], "application/octet-stream").decode("utf-8", "replace")
+            except OSError as e:
+                bad = f"{r['tag_name']}: {a['name']} could not be read ({str(e)[:80]})"
+                break
+            c, probs = gate_text_problems(text, t, f"{r['tag_name']}'s {a['name']}")
+            if probs:
+                bad = probs[0]
+                break
+            commits.add(c)
+        if bad or len(commits) != 1:
+            why = bad or f"{r['tag_name']}'s gate summaries name different commits"
+            continue
+        c = commits.pop()
+        good, w = commit_current(repo, root, t, c, ref, work, "gates", files)
+        if good:
+            return c, f"release {r['tag_name']} ({len(assets)} gate summaries)"
+        why = f"release {r['tag_name']}'s gate record {w}"
+    return None, why
+
+
+def gate_record(repo, root, t, ref, work, files):
+    """(commit, problems): the Gate C record version t's done check accepts -- .port/<t>/GATES.md certifying a commit
+    this branch carries with nothing jar-relevant changed since (a local full run), else a Port CI pre-release's gate
+    summaries for such a commit (release_gate_record). A red local run (GATES-RED.md) counts against both."""
+    if (rec_dir(root, t) / "GATES-RED.md").is_file():
+        return None, ["the last full gate run was red (GATES-RED.md); GATES.md's older green record does not count until a full "
+                      "run is green again"]
+    c, probs = gate_text_problems(read_file(rec_dir(root, t) / "GATES.md"), t)
+    if not probs:
+        good, why = commit_current(repo, root, t, c, ref, work, "gates", files)
+        if good:
+            return c, []
+        probs = [f"GATES.md {why}"]
+    rc, where = release_gate_record(repo, root, t, ref, work, files)
+    if rc:
+        return rc, []
+    return None, [f"{probs[0]}; and no release record either: {where}"]
+
+
+def gates_problems(repo, root, t, ref, work, files):
+    """[] when version t has a green Gate C record at a commit this branch carries with nothing jar-relevant changed
+    since: .port/<t>/GATES.md, or the gate summaries of the Port CI pre-release built from it (gate_record)."""
+    return gate_record(repo, root, t, ref, work, files)[1]
 
 
 def remerge_problems(repo, root, t, work, files=None):
@@ -1209,7 +1291,7 @@ def inventory_problems(repo, root, t, ref, work, files, write, mechanical, sv=No
     return out
 
 
-def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None):
+def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None, gates=True):
     """[] when version t is DONE (the list in this file's header); else every reason it is not. root: the tree to
     judge (default: the checkout when it is on t's branch, else an export of the branch); ref: its commit. A
     SINGLE-VERSION fork's tree at Minecraft t (sv_version) is judged by the same list (#161 U5, C2) -- its records in
@@ -1219,9 +1301,9 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None
     tmp = None
     try:
         if root is None and sv_version(repo, repo) == t:
-            return sv_done(repo, t, repo, ref or "HEAD", write, base)
+            return sv_done(repo, t, repo, ref or "HEAD", write, base, gates)
         if root is not None and sv_version(repo, root) == t:
-            return sv_done(repo, t, pathlib.Path(root), ref or "HEAD", False, base)
+            return sv_done(repo, t, pathlib.Path(root), ref or "HEAD", False, base, gates)
         if root is None:
             if checkout_version(repo) == t:
                 root, ref = repo, ref or "HEAD"
@@ -1239,7 +1321,7 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None
             return [f"{root} is not version branch {t} (no .port/{t}/{BRANCH_PROPS})"]
         files = root_files(repo, root, work)
         mech = mechanical_files(repo, root, t, ref, files)
-        out = gates_problems(repo, root, t, ref, work, files)
+        out = gates_problems(repo, root, t, ref, work, files) if gates else []
         n_open = len(fp().unreviewed_stubs(rec_dir(root, t)))
         if n_open:
             out.append(f"{n_open} unreviewed stub signal(s) in STUBS.json")
@@ -1288,7 +1370,7 @@ def target_done(repo, t, root=None, ref=None, write=False, _seen=None, base=None
 SV_NO_BASE = "no review base: run tools/fork-branches.py check-done --base <the commit the change started from>"
 
 
-def sv_done(repo, t, root, ref, write, base=None):
+def sv_done(repo, t, root, ref, write, base=None, gates=True):
     """target_done() for a single-version fork's tree: GATES.md certifying it, STUBS.json reviewed, REVIEW.md's rubric
     over every file changed since the review base, no merge left open, TEST-ITEMS.md, the base's behaviour inventory
     accounted for (INVENTORY-CHECK.json committed as a fresh check), and no pin to a library pre-release that is not
@@ -1297,7 +1379,7 @@ def sv_done(repo, t, root, ref, write, base=None):
     ref = git(repo, "rev-parse", ref).stdout.strip()
     base = base or sv_base(root, t)
     files = root_files(repo, root, work)
-    out = gates_problems(repo, root, t, ref, work, files)
+    out = gates_problems(repo, root, t, ref, work, files) if gates else []
     n_open = len(fp().unreviewed_stubs(rec_dir(root, t)))
     if n_open:
         out.append(f"{n_open} unreviewed stub signal(s) in STUBS.json")
@@ -4343,10 +4425,9 @@ def library_record(lib, t, dependent, slug=None, say=print):
         say("fork-branches: cannot read the library's GitHub repository from its origin: pass --slug owner/repo"); return 2
     files = root_files(dep, dep, True)
     head = git(dep, "rev-parse", "HEAD").stdout.strip()
-    g = gates_problems(dep, dep, t, head, True, files)
+    gates_commit, g = gate_record(dep, dep, t, head, True, files)
     if g:
         say(f"fork-branches: the dependent's Gate C is not green and current: {g[0]}"); return 2
-    gates_commit = re.search(r"at `([0-9a-f]{7,40})", read_file(rec_dir(dep, t) / "GATES.md")).group(1)
     pins = [(k, v) for k, v in info(dep, t).items() if k.startswith("port_jar.")]
     hit = None
     for k, v in pins:
@@ -6257,6 +6338,66 @@ def _check_deferred_uses(expect):
                f"{ents} {out_b[-300:]} {out_g[-300:]}")
 
 
+def _check_release_gate_record(expect):
+    """A Port CI pre-release's gate summaries are a version's Gate C record when the branch has no current GATES.md:
+    green and current -> done's gates item passes; a FAIL row, summaries naming two commits, a jar-relevant change
+    since, or no summary at all -> it does not."""
+    global gh_read
+    with tempfile.TemporaryDirectory() as d:
+        r, _g, _run = _migrated_fixture(d)
+        w, _w = worktree_for(r, "1.21.5")
+        gm = w / ".port/1.21.5/GATES.md"
+        if gm.is_file():
+            gm.unlink()
+            git(w, "commit", "-qam", "1.21.5: no committed gate record", check=True)
+        h = git(w, "rev-parse", "--short", "HEAD").stdout.strip()
+        git(r, "remote", "remove", "origin")
+        git(r, "remote", "add", "origin", "https://github.com/owner/examplemod.git")
+        def summary(c, env, gate="PASS"):
+            return (f"Gates for `examplemod` at `{c}` for Minecraft 1.21.5 ({env} environment) -- run by CI\n\n"
+                    "| check | result | detail |\n|---|---|---|\n| Gate A -- mixin-config integrity | PASS | 1 test(s) |\n"
+                    f"| Gate C -- real client, `launch` | {gate} | reached title screen |\n")
+        files_ = {}
+        def rel(tag, names):
+            return {"tag_name": tag, "published_at": "2026-10-28T00:00:00Z",
+                    "assets": [{"name": n, "browser_download_url": f"https://example.invalid/{tag}/{n}"} for n in names]}
+        keep = gh_read
+        gh_read = lambda url, accept=None: files_[url].encode("utf-8")
+        try:
+            def setup(rels, contents):
+                RELEASES.clear()
+                RELEASES["owner/examplemod"] = rels
+                files_.clear()
+                files_.update(contents)
+            def gates_why():
+                return [x for x in target_done(r, "1.21.5") if "Gate C" in x or "GATES" in x or "release" in x]
+            tag = "examplemod-1.0-mc1.21.5"
+            u = lambda n: f"https://example.invalid/{tag}/{n}"
+            setup([rel(tag, ["gates-full.md", "gates-minimal.md", "examplemod-1.0.jar"])],
+                  {u("gates-full.md"): summary(h, "full"), u("gates-minimal.md"): summary(h, "minimal")})
+            why = gates_why()
+            expect(not why, f"a green, current release record stands for GATES.md: {why}")
+            setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
+                  {u("gates-full.md"): summary(h, "full"), u("gates-minimal.md"): summary(h, "minimal", "FAIL")})
+            why = gates_why()
+            expect(any("FAIL" in x for x in why), f"a FAIL row in one summary: not done: {why}")
+            setup([rel(tag, ["gates-full.md", "gates-minimal.md"])],
+                  {u("gates-full.md"): summary(h, "full"), u("gates-minimal.md"): summary("0000000", "minimal")})
+            why = gates_why()
+            expect(any("different commits" in x for x in why), f"summaries naming two commits: not done: {why}")
+            setup([rel(tag, ["examplemod-1.0.jar"])], {})
+            why = gates_why()
+            expect(any("carries gate summaries" in x for x in why), f"a release with no summary: not done: {why}")
+            setup([rel(tag, ["gates-full.md"])], {u("gates-full.md"): summary(h, "full")})
+            _hand(w, {"src/main/java/com/example/mod/Later.java": "package com.example.mod;\nclass Later {}\n"},
+                  "1.21.5: a jar-relevant change after the release")
+            why = gates_why()
+            expect(any("changed since" in x for x in why), f"a jar-relevant change since the release: not done: {why}")
+        finally:
+            gh_read = keep
+            RELEASES.clear()
+
+
 def _check_change_reviews(expect):
     """CHANGE-REVIEWS.md: a fix reviewed at 1.21.4 and carried, byte for byte, to 1.21.5 (the same file before, the same
     file after) keeps 1.21.5's REVIEW.md current; the rows absent, or any other change, makes it stale."""
@@ -7031,6 +7172,7 @@ def self_check():
         _check_check_done_rows(expect)
         _check_ci_check(expect)
         _check_change_reviews(expect)
+        _check_release_gate_record(expect)
         _check_push_advice(expect)
         _check_inventory_settles(expect)
         _check_stopped_worktree(expect)

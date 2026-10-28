@@ -304,7 +304,12 @@ fresh review, the fixer, the re-check, a fixer for a step that failed, the close
 On a version branch whose merge-up changed nothing it ships (only records, the workflow, docs, or Java comments), the
 driver pushes the merge and skips that version's review, gates, PR and release, still waiting for CI when the workflow
 changed; a version whose only changes are ones a fresh review already passed lower down, file for file
-(`.port/CHANGE-REVIEWS.md`), skips its fresh review. At
+(`.port/CHANGE-REVIEWS.md`), skips its fresh review. On a fork whose Port CI workflow takes the `from_run` and
+`dep_override` inputs (both kinds of fork; `ci-check` regenerates an older workflow once), the PR's CI is the gate of
+record: the round builds and runs Gate A/B locally with no machine lock, Gate C runs in CI's three environments in
+parallel, the release reuses that PR run's jars and attaches its gate summaries (`gates-<env>.md`), which the done
+check (`check-done`) reads as the version's Gate C record when no committed `GATES.md` is current -- no commit after the
+merge; a library's pre-merge dependent gate is the dependent's CI dispatched with the PR run's candidate jar. At
 `init` it reads each fork against this repository's shared library (`sync-shared --check`, no checkout touched): a
 version a sync would change gets work this round even with nothing else -- first a `sync` step (`fork-branches.py
 sync-shared` as its own commit on the version branch), then its gates, PR, merge, release and the dependents' re-pin
