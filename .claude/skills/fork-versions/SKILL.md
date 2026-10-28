@@ -104,7 +104,9 @@ own commit and writes nothing; the parent branch is read from origin when the lo
    Plus `reviewer` (the reviewing agent, distinct from the fixer: `fresh agent <session id>, not the fixer`), `date`
    and `commit` (7-40 hex digits; `HEAD` or a branch name is refused), with nothing jar-relevant or reviewed (the version's
    rows, STUBS.json, REMERGE.json) changed since. Any row a reviewer marks `not-ok` -- of any kind, an `item` row too --
-   keeps it not done and is reported with its note; a reviewer may add `missing` (a file that should exist and does not:
+   keeps it not done and is reported with its note -- except one whose note names a known-issues ledger issue graded
+   S3/S4, open at that version, that lists that file (a ledgered finding: keep-current's "an S3/S4 row is ledgered and
+   does not block"); a reviewer may add `missing` (a file that should exist and does not:
    a repair tag, a model) and `shared` (a shared helper the version uses) rows, each then needing a verdict;
 5. no unresolved merge (a conflicted file, a merge in progress) and no `REMERGE.json` entry whose file is unedited;
 6. the version's manual-test items are generated (`TEST-ITEMS.md`; a run to the end writes it, `--write-test-items`
