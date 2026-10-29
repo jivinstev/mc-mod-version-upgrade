@@ -590,7 +590,11 @@ it small, so the orchestration is a tool, which replaces the four rules above:
      write the default decisions' `patch` diffs into `round/decisions/<owner>__<repo>.decisions.json` (its step 2), then
      `cascade --repo DIR --apply-decisions round/decisions/<owner>__<repo>.decisions.json --gates ab` -- the head cascade
      `<head>..<newest>`; with no earlier `--apply` it runs that `--apply` first, then the answers. A `patch` left without
-     a diff stays open (what `--apply` does with it) until you write it and run `--apply-decisions` again.
+     a diff stays open (what `--apply` does with it) until you write it and run `--apply-decisions` again. A version
+     the cascade leaves red (`cascade STOPPED at <v>: red after the merge`: the authors' new code meeting `<v>`'s API)
+     is the head cascade job's to port, not the owner's: it runs the fixer the cascade names there (`fork-port.py
+     --from-stage measure --budget 15 --gates ab`), commits, and runs the cascade again; it returns blocked only for a
+     version still red after two such passes.
    - **A version-branch fork with `head_cascade: false`** (the owner unticked the box while the head has authors' code
      no version took): **no cascade from the head, and no `--apply-decisions`** -- read-plan wrote no decisions file,
      since every decision of the plan is about the head cascade (`cascade.not_applied`). Only the selected fixes move.
