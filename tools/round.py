@@ -170,14 +170,28 @@ _NET_LOCKS, _NET_LOCKS_GUARD = {}, threading.Lock()
 LOCKED_REF = re.compile(r"cannot lock ref|index\.lock|Unable to create .*\.lock|shallow file has changed", re.I)
 
 
+_REPO_KEYS = {}
+
+
+def _repo_key(d):
+    """One key per repository: a worktree and its clone share their git directory (git rev-parse --git-common-dir)."""
+    k = str(pathlib.Path(d).resolve())
+    if k not in _REPO_KEYS:
+        r = subprocess.run(["git", "-C", k, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        _REPO_KEYS[k] = str(pathlib.Path(r.stdout.strip()).resolve()) if r.returncode == 0 and r.stdout.strip() else k
+    return _REPO_KEYS[k]
+
+
 def git(d, *a, check=False):
     """git -C d ...; a fetch or a push holds the clone's lock in this process (pipelined versions share one clone) and
     is retried a few times when another process holds a ref lock."""
     net = bool(a) and a[0] in ("fetch", "push")
     lk = None
     if net:
+        key = _repo_key(d)
         with _NET_LOCKS_GUARD:
-            lk = _NET_LOCKS.setdefault(str(pathlib.Path(d).resolve()), threading.Lock())
+            lk = _NET_LOCKS.setdefault(key, threading.Lock())
     for n in range(5 if net else 1):
         if lk:
             with lk:
@@ -516,9 +530,14 @@ def build_queue(frozen, cfg, forks, date):
             rel = [lb for lb in libs if rel_at(lb, v)]
             if rel or bumps.get(v):
                 addv("repin", deps=[release_of[(lb, v)] for lb in rel], extra={"bumps": bumps.get(v, []), "libraries": rel})
+            # the version directly below works this round: its merge comes up again before anything of v is pushed (a
+            # version the round skips is untouched, so v's merge-up from it is final)
+            below_works = prev_seg in merge_of and prev_seg == prev
+            resynced = False
             if not (v in sync_v or v in rec_v or v in adopt_v or at.get(v)):
-                if prev_seg in merge_of:   # nochange pushes this branch to origin: never with v-1's unmerged commits
+                if below_works:            # nochange pushes this branch to origin: never with v-1's unmerged commits
                     addv("resync", deps=[merge_of[prev_seg]], extra={"from": f"neoforge-{prev_seg}", "before": "nochange"})
+                    resynced = True
                 addv("nochange")       # the merge-up alone: nothing shipped may have changed (t_nochange)
             if v in rec_v:
                 addv("reconcile", extra={"edited": [e for e in rec_v[v] if e.get("reconcile")]})
@@ -535,7 +554,7 @@ def build_queue(frozen, cfg, forks, date):
                 q.items[-3]["extra"]["sync_only"] = True
             g = addv("gates")
             addv("freeze", extra={"libraries": rel})
-            if prev_seg in merge_of and not any(x["id"] == f"{F['name']}@{v}:resync" for x in q.items):
+            if below_works and not resynced:
                 # v-1 merged since v cascaded: its merge (a reviewer's fix included) comes up first
                 addv("resync", deps=[merge_of[prev_seg]], extra={"from": f"neoforge-{prev_seg}"})
             for s in ("pr", "ci"):
@@ -668,7 +687,10 @@ def replan(st):
     return len(new)
 
 
-GIT_STEPS = {"sync", "mergeup", "resync", "repin", "nochange", "pr", "merge", "release"}
+# the steps whose subprocess tools fetch and merge in the shared clone (one at a time per fork); the driver's own
+# fetches and pushes (pr, merge, nochange, release) take the clone's in-process git lock only for the call, never
+# across their CI waits
+GIT_STEPS = {"sync", "mergeup", "resync", "repin"}
 HEAVY_STEPS = {"sync", "mergeup", "resync", "repin", "gates"}      # local Gradle builds
 MAX_HEAVY = 2          # local builds at once on the machine (the cloud container's CPU and memory)
 MAX_AGENTS = 3         # agent jobs out at once (each a worker building and testing in its own worktree)
@@ -920,9 +942,14 @@ def runnable(st):
                     for x in st.items if x["fork"] == it["fork"] and x is not it):
                 take(it)
             continue
-        if is_agent_work(it) and it["status"] in ("pending", "failed") and agents >= MAX_AGENTS:
-            continue
-        if it["kind"] == "tool" and it["status"] == "pending" and it["step"] in HEAVY_STEPS and heavy >= MAX_HEAVY:
+        ready = it["status"] == "failed" or (it["status"] == "pending"
+                                              and all(st.item(d)["status"] in ("ok", "skipped") for d in it["deps"]))
+        capped = ((is_agent_work(it) and it["status"] in ("pending", "failed") and agents >= MAX_AGENTS)
+                  or (it["kind"] == "tool" and it["status"] == "pending" and it["step"] in HEAVY_STEPS
+                      and heavy >= MAX_HEAVY))
+        if capped:
+            if ready and free(it):      # waiting for a slot, it still holds its version: a later item of that
+                busy.append(held_dirs(it))      # version (a PR after its gates went back) never runs ahead of it
             continue
         if it["status"] == "failed" and it["kind"] == "tool" and free(it):
             take(it)                                            # its fixer job
@@ -1324,9 +1351,9 @@ def job_task(st, it):
         pending_ = [d_["id"] for d_ in x.get("decisions", []) if d_.get("choice") == "patch"]
         return [f"The head cascade of {it['fork']} with the plan's decisions: keep-current \"The weekly round\" step 3 "
                 f"(\"A version-branch fork with head_cascade: true\") and \"A fork with version branches\" step 2. This "
-                f"job WRITES THE ANSWERS ONLY: the diff of each decision chosen `patch` ({', '.join(pending_) or 'none'}) "
-                f"into {dec}, in the port branch's names, from CASCADE-PLAN.md (the plan's cascade files) -- one diff per "
-                "decision, or per version where the versions differ. Do not run the cascade: the driver runs it one "
+                f"job WRITES THE ANSWERS ONLY: in {dec} (read-plan wrote it: its range and every answer -- keep them), the "
+                f"diff of each decision chosen `patch` ({', '.join(pending_) or 'none'}), in the port branch's names, from "
+                "CASCADE-PLAN.md (the plan's cascade files) -- one diff per decision, or per version where the versions differ. Do not run the cascade: the driver runs it one "
                 f"version at a time ({x['from']}..{x['to']}, `cascade --apply-decisions --to <v>`), and a version it "
                 "leaves red is that version's own fixer job. Never resolve a decision by hand.",
                 f"Acceptance: {dec} is valid JSON with a `patch` for every decision listed (or take/keep/content where "
@@ -3031,18 +3058,30 @@ def cmd_run(a, out=print):
 
 
 FOLLOW_POLL = 20       # seconds between `drive --follow`'s looks at the jobs out
+FOLLOW_HEARTBEAT = 1800   # `drive --follow` names the jobs still out this often (a worker that ended without its summary)
+
+
+_SEEN_SUMMARY = {}
 
 
 def auto_record(state, out=print):
-    """`drive --follow`: record each agent job out whose summary has appeared (a summary from an earlier attempt was set
-    aside at dispatch, so whatever is there is this attempt's). -> how many were recorded."""
+    """`drive --follow`: record each agent job out whose summary has appeared and stayed the same over one look (a
+    summary still being written is not recorded before its `blocking:` lines are there; one from an earlier attempt
+    was set aside at dispatch, so whatever is there is this attempt's). -> how many were recorded."""
     with State.tx(state, write=False) as st:
         due = []
         for it in st.items:
             if it["status"] == "running" and is_agent_work(it):
                 jid = job_id(it, bool(it.get("fixing")))
                 sp = st.rdir / "round/summaries" / f"{jid}.md"
-                if sp.is_file() and parse_summary(sp.read_text(encoding="utf-8", errors="replace"))["status"]:
+                if not sp.is_file():
+                    continue
+                text = sp.read_text(encoding="utf-8", errors="replace")
+                stamp = (sp.stat().st_size, sp.stat().st_mtime, hash(text))
+                if _SEEN_SUMMARY.get(str(sp)) != stamp:
+                    _SEEN_SUMMARY[str(sp)] = stamp      # first look, or it changed: look again next time
+                    continue
+                if parse_summary(text)["status"]:
                     due.append((jid, sp))
     for jid, sp in due:
         cmd_record(argparse.Namespace(id=jid, status=None, summary=str(sp), state=state), out)
@@ -3061,6 +3100,7 @@ def cmd_drive(a, out=print):
         jobs, ran = [], []
         follow = bool(getattr(a, "follow", False))
         deadline = time.monotonic() + a.max_hours * 3600
+        beat = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             running = {}
             while True:
@@ -3087,6 +3127,15 @@ def cmd_drive(a, out=print):
                     n_rec = auto_record(a.state, out)
                     if n_rec:
                         continue                # a recorded job may free the next items: look again at once
+                    if out_ and time.monotonic() - beat > FOLLOW_HEARTBEAT:
+                        beat = time.monotonic()
+                        out("round: WAITING on " + ", ".join(job_id(x, bool(x.get("fixing"))) for x in out_)
+                            + ": a worker that ended without writing its summary gets its `record` line with --status failed")
+                        sys.stdout.flush()
+                    if not running and out_ and time.monotonic() >= deadline:
+                        out("round: deadline: jobs still out -- " + ", ".join(job_id(x, bool(x.get("fixing"))) for x in out_)
+                            + "; drive --follow again to go on")
+                        break
                 if not running and not out_:
                     break
                 if running:
@@ -3113,7 +3162,8 @@ def cmd_drive(a, out=print):
     with State.tx(a.state, write=False) as st:
         live = any(it["status"] == "running" for it in st.items)
         left = [it for it in st.items if it["status"] in ("pending", "failed")]
-        stuck = not live and left and (getattr(a, "follow", False) or (not jobs and not ran))
+        held = [x for x in runnable(st) if not x.get("close")]     # runnable now: only the deadline held them
+        stuck = not live and left and not held and (getattr(a, "follow", False) or (not jobs and not ran))
         if stuck:
             for it in st.items:
                 if it["status"] == "blocked":
@@ -4277,10 +4327,11 @@ def self_check():
                and by["examplelib@1.21.5:reviewref"]["deps"] == ["examplelib@1.21.5:nochange", "examplelib@1.21.4:recheck"]
                and rs5.get("extra", {}).get("from") == "neoforge-1.21.4"
                and by["examplelib@1.21.5:gates"]["dirs"] == [f"{LIB}#1.21.5"]
-               and by["examplelib@1.21.5:pr"]["dirs"] == [f"{LIB}#1.21.5", f"{LIB}!git"],
+               and by["examplelib@1.21.5:pr"]["dirs"] == [f"{LIB}#1.21.5"]
+               and by["examplelib@1.21.5:resync"]["dirs"] == [f"{LIB}#1.21.5", f"{LIB}!git"],
                f"pipelined (#206): a version starts once the one below has cascaded and brings that one's merge up "
                f"again before anything of it is pushed (here its nochange push); its review reuse waits for the "
-               f"review below; version locks, the fork's git lock on network steps: {rs5} "
+               f"review below; version locks, the fork's git lock on the git steps only: {rs5} "
                f"{by['examplelib@1.21.5:mergeup']['deps']}")
         expect(by["examplelib@1.21.4:mergeup"]["extra"]["from"] is None
                and "examplelib@1.21.1:authors" not in by and "examplelib@1.21.1:backlog" not in by
@@ -4436,6 +4487,12 @@ def self_check():
             got = [x["id"] for x in runnable(fake2)]
         expect(got == ["x6", "r7", "r8"],
                f"two builds at most, the git lock one at a time, a fixer without it, three agent jobs at most: {got}")
+        with State.tx(state, write=False) as st:
+            fake3 = State(st.path, {"items": [
+                mk2("gx", "gates", ["o/x#1"], "running"), mk2("my", "mergeup", ["o/y#2", "o/y!git"], "running"),
+                mk2("g3", "gates", ["o/f#3"]), mk2("p3", "pr", ["o/f#3"])]})
+            got3 = [x["id"] for x in runnable(fake3)]
+        expect(got3 == [], f"a build waiting for a slot still holds its version: its PR never runs ahead of it: {got3}")
         # #206: drive --follow prints a job the moment it is dispatched, records it when its summary appears, goes on
         with tempfile.TemporaryDirectory() as fd:
             fd = pathlib.Path(fd)
@@ -4455,7 +4512,8 @@ def self_check():
                 it_["status"], it_["started"] = "running", now()
                 return {"id": "o@1_job", "prompt": "p", "summary": str(fd / "round/summaries/o@1_job.md"), "record": "r"}
             G_["dispatch_agent"] = disp
-            G_["SLEEP"] = lambda n: (fd / "round/summaries/o@1_job.md").write_text("RESULT: ok\n", encoding="utf-8")
+            sj = fd / "round/summaries/o@1_job.md"       # the worker writes it once; it is recorded once it stays put
+            G_["SLEEP"] = lambda n: None if sj.exists() else sj.write_text("RESULT: ok\n", encoding="utf-8")
             TOOL_IMPL["after"] = lambda st_, it_, log_: ("after ran", {})
             try:
                 rc, o = q(cmd_drive, argparse.Namespace(state=str(fsp), max_hours=1.0, follow=True))

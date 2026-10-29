@@ -3456,8 +3456,10 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
             say(f"fork-branches: --apply-decisions --to {to}: not a version of the block's range {spec}"); return 2
         below = full[full.index(to) - 1]
         spec = f"{below or spec.partition('..')[0]}..{to}"
+    else:
+        below = None
     try:
-        port, nodes, _i, to = cascade_nodes(repo, spec)
+        port, nodes, _i, _end = cascade_nodes(repo, spec)
     except ValueError as e:
         say(f"fork-branches: --apply-decisions: {e}"); return 2
     answers = {d["id"]: d for d in data.get("decisions", []) if d.get("id") and d.get("choice")}
@@ -3473,7 +3475,12 @@ def apply_decisions(repo, path, gates="ab", say=print, budget=DEFAULT_BUDGET_LIN
     def held():
         return {c.get("id") for t in hops for c in remerge_entries(
             blob_at(repo, resolve_branch(repo, branch_name(t)) or "HEAD", f"{REC}/{t}/REMERGE.json"))}
-    if set(answers) - held():
+    if to:                                  # one hop: its --apply first only while the hop is not merged yet
+        lo, hi = resolve_branch(repo, branch_name(below) if below else port), resolve_branch(repo, branch_name(to))
+        first = not (lo and hi and git(repo, "merge-base", "--is-ancestor", lo, hi).returncode == 0)
+    else:
+        first = bool(set(answers) - held())
+    if first:
         say(f"fork-branches: --apply-decisions: {len(set(answers) - held())} answer(s) with no REMERGE.json entry yet "
             "(no earlier --apply): running cascade --apply first")
         rc0 = cascade(repo, spec, gates, say=say, mode="apply", budget=budget, out_dir=out_dir, runner=runner,
@@ -6020,6 +6027,21 @@ def _check_untaken_head(expect):
         expect(seen == [("1.21.3", 0, [True, False, False]), ("1.21.4", 0, [True, True, False]),
                         ("1.21.5", 0, [True, True, True])],
                f"--to V: each step carries the authors' change up to V only: {seen}")
+        # the full-range run (no --to) applies an answer a middle version holds (its `to` is no hop)
+        _authors(r, g, {em: ("Thing t;", "Thing t; int MID;")}, "authors 2")
+        w4_, _w = worktree_for(r, "1.21.4")
+        _hand(w4_, {em: ("Thing t;", "Thing t; int h4;")}, "1.21.4 hand change")
+        rc, out = _quiet(cascade, r, "neoforge-1.21.1..1.21.5", mode="plan", out_dir=pdir)
+        plan2 = json.loads((pdir / "CASCADE-PLAN.json").read_text(encoding="utf-8"))
+        mid = [x for x in plan2["decisions"] if x["file"] == em and "1.21.4" in (x.get("versions") or [])]
+        expect(bool(mid), f"the plan has a decision a middle version holds: {plan2['decisions']}")
+        if mid:
+            dec.write_text(json.dumps({"range": "neoforge-1.21.1..1.21.5", "decisions": [
+                {"id": mid[0]["id"], "choice": "take", "by": "fixer agent", "reason": "theirs"}]}), encoding="utf-8")
+            rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir)
+            f4 = ref_files(r, resolve_branch(r, "neoforge-1.21.4"))
+            expect(rc == 0 and b"MID" in f4[em] and "1.21.4: 1 decision(s) applied" in out,
+                   f"--apply-decisions over the range applies a middle version's answer: {out[-500:]}")
         rc, out = _quiet(apply_decisions, r, dec, "none", out_dir=pdir, to="1.21.9")
         expect(rc == 2 and "not a version of the block's range" in out, f"--to a version off the range: refused: {out[-200:]}")
     # a single-version fork: no version branches, nothing untaken to name
