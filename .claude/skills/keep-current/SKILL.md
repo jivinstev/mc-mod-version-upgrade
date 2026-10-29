@@ -130,7 +130,14 @@ run is green, and it is then gated against the dependency's NEW build.
       (`git worktree add -b ab/<what> <dir> <work branch>` -- never the work branch itself, which is checked out
       already and makes `worktree add` fail), stop on any setup failure (`|| exit 1`, never `;`), and before
       reading the result assert the reverted code really is absent (grep for the line the fix removed or added).
-   5. **Record it in the ledger** of each issue (`fix-ledger.py render --into`, posted with the GitHub connector):
+   5. **Record it in the ledger.** A fork whose config lists no `ledger_issues` keeps ONE ledger, the known-issues
+      file (`.port/KNOWN-ISSUES.json` on the head branch), committed with the work: each defect's status at each
+      version is `fixed@<sha>` of the fix that ships there -- ours, or the authors' commit taken -- and the decision,
+      the evidence and, for drop/accept/adjust, the A/B arms go in its `notes`. Nothing is written per release:
+      publishing proves from git that every S1 recorded fixed at a version has its fix commit in the release
+      (`port-publish.py`, `known-issues.py` `fixes_missing`), and `fix-ledger.py check` does not apply. A fork that
+      still lists `ledger_issues` records it in the ledger of each issue, as follows
+      (`fix-ledger.py render --into`, posted with the GitHub connector):
       per mode, per branch, `fixed` / `fixed-unconfirmed` (shipped, repro not re-run where it reproduced) /
       `open` / `not-affected`, by whom (`ours <sha>`, `upstream <repo>@<sha>`, `dependency <repo>@<tag>`), the
       decision, the evidence, and for drop/accept/adjust the A/B arms (`"ab": {"control", "treatment"}`, or
@@ -164,8 +171,9 @@ run is green, and it is then gated against the dependency's NEW build.
 6. **Push the work branch and open a PR into the port branch** -- the fork's versioned branch, e.g.
    `neoforge-1.21.1` -- with: the incoming commits, the reconcile table (mode, severity, decision, evidence), the
    gate tables, the ledger changes. Merge the port branch into the work branch first if it moved (a CI-only
-   commit, say), so the PR is current. Run `fix-ledger.py check --release keep-current/<date>` first: an S1 mode
-   open on a branch that ships blocks the PR, and the run stops and reports.
+   commit, say), so the PR is current. With `ledger_issues`, run `fix-ledger.py check --release keep-current/<date>`
+   first: an S1 mode open on a branch that ships blocks the PR, and the run stops and reports (with the known-issues
+   ledger alone, an open S1 at a shipped version blocks the same way: `known-issues.py blocks-publish`).
    **In the weekly round the merge and the release run wait for the round's step 4** for that version: its gates, its
    fresh review and the grading of the review's `not-ok` rows (an S1/S2 there blocks both). Green CI alone is never
    enough there. For a version-branch fork this holds for the head's PR too, which still merges before the cascade
@@ -195,7 +203,8 @@ run is green, and it is then gated against the dependency's NEW build.
    ledger-only push -- when its workflow is one port-ci.py rendered since the ledger exists; on a version-branch fork
    `fork-branches.py ci-check` names a head whose workflow does not), and take the release notes' known-issues section from it: `known-issues.py release-notes
    --repo <fork> --version <mc> --tag <tag>` (S1-S3; S4 omitted). A fork without the file keeps the fix ledgers
-   above, unchanged. In the weekly round these steps run inside "The weekly round" below, on its frozen input.
+   above, unchanged; a fork with the file may drop its fix-ledger issues (remove `ledger_issues` from both configs,
+   once each mode has its known-issues entry), and then this file is its only ledger (step 3.5). In the weekly round these steps run inside "The weekly round" below, on its frozen input.
 7. **Dependents next.** Gate each dependent locally against this build (its `_mr`-style jar put into mavenLocal
    the way its CI does). Its pin (`port-ci.py --dep-jar`, a release asset + sha256) can only move once this
    dependency's PR is merged and its CI has cut a pre-release: put the exact re-pin command in the dependent's
@@ -796,7 +805,8 @@ workflow or the round task by hand: a schedule change is a change to `tools/week
 - **`ledger_issues`:** the fork's open issues whose body has a `fix-ledger` block (`<!-- fix-ledger:begin -->` ...
   `<!-- fix-ledger:end -->`, which `fix-ledger.py parse --body FILE` reads back) -- the GitHub search
   `repo:<owner/repo> is:issue is:open "fix-ledger" in:body` (`search_issues`, or `gh search issues`). Pass their
-  numbers as `--ledger-issues <owner/repo>=N,N`; closed ones are left out. None found: no flag.
+  numbers as `--ledger-issues <owner/repo>=N,N`; closed ones are left out. None found: no flag (the known-issues
+  ledger is then the fork's only ledger, step 3.5).
 
 1. **The plan workflow** (with the user's go-ahead, stop 1), on a checkout of the first fork's head branch:
 

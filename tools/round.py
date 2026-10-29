@@ -748,7 +748,7 @@ def cmd_init(a):
         forks[slug] = {"dir": str(d), "kind": kind, "head": head, "base": base, "name": slug.split("/", 1)[1],
                        "versions": ladder(d, base),
                        "library": cf.get("role") == "library", "automerge": bool(cf.get("automerge")),
-                       "depends_on": cf.get("depends_on", [])}
+                       "depends_on": cf.get("depends_on", []), "ledger_issues": cf.get("ledger_issues", [])}
         fz_f = next((x for x in frozen["forks"] if x["repo"] == slug), {})
         fixes = fz_f.get("fixes") or [{"id": i, "at": base} for i in fz_f.get("selected", [])]
         if kind == "single":
@@ -1056,6 +1056,15 @@ def job_id(it, fixing=False):
     return re.sub(r"[^\w.@+-]", "_", it["id"] + ("+fix" if fixing else ""))
 
 
+def record_step(F, br):
+    """Where a reconcile decision is recorded (keep-current step 3.5): the fork's fix-ledger issues when its config
+    lists them, else its known-issues ledger, the one ledger (no per-release record: publishing checks the tag in git)."""
+    if F.get("ledger_issues"):
+        return f"Record each reconcile decision in the fix ledgers (step 3.5) and run fix-ledger.py check --release {br}."
+    return ("Record each reconcile decision in the known-issues ledger (step 3.5: the defect's fixed@<sha> at each "
+            "version, the decision, evidence and any A/B in its notes), committed on the head branch with the work.")
+
+
 def job_task(st, it):
     T, s, v = TOOLS, it["step"], it["version"]
     if s == "close":
@@ -1089,8 +1098,7 @@ def job_task(st, it):
                 "every fix the port carries (step 3: take theirs only when proven, keep or shrink ours), port the new "
                 "code (step 4) to a green compile and Gate A/B (`ci-gates.py --repo " + str(F["dir"]) + " --modid <ID> "
                 f"--base {x.get('upstream_commit')} --gatec none`). Do not run the full gates: the driver runs them "
-                "after the review. Record each reconcile decision in the fix ledgers (step 3.5) and run fix-ledger.py "
-                f"check --release {br}.",
+                f"after the review. {record_step(F, br)}",
                 f"Acceptance: {br} holds the merge and the port, A/B green, committed."]
     if s == "authors":
         x = it["extra"]
@@ -1099,8 +1107,7 @@ def job_task(st, it):
                 f"branch tip {x.get('upstream')} {x.get('upstream_branch')}; a merge commit, never a rebase), reconcile "
                 "every fix the port carries (step 3: take theirs only when proven, keep or shrink ours), port the new "
                 "code (step 4) to a green compile and Gate A/B (ci-gates.py with --gatec none). Do not run the full "
-                "gates: the driver runs them next. Record each reconcile decision in the fix ledgers (step 3.5) and "
-                f"run fix-ledger.py check --release {br}.",
+                f"gates: the driver runs them next. {record_step(F, br)}",
                 f"Acceptance: {br} holds the merge and the port, A/B green, committed."]
     if s == "lowest":
         rows = []
@@ -3185,6 +3192,14 @@ def self_check_single(tmp, repo, init, expect, q, job_file):
         expect(c, msg)
         if not c:
             bad.append(msg)
+    # where a reconcile is recorded: a single-version fork with no fix-ledger issues records it in its known-issues
+    # ledger (no per-release record, no fix-ledger check); one that lists them keeps the fix ledgers
+    sv_f = {"kind": "single", "base": "1.21.1"}
+    want("known-issues ledger" in record_step(sv_f, "keep-current/2026-10-28") and "fix-ledger.py" not in
+         record_step(sv_f, "keep-current/2026-10-28")
+         and "fix-ledger.py check --release keep-current/2026-10-28" in record_step({**sv_f, "ledger_issues": [3]},
+                                                                                 "keep-current/2026-10-28"),
+         "a single-version fork records reconcile decisions in its one ledger; listed fix ledgers keep theirs")
     home0 = os.environ.get("HOME"), os.environ.get("USERPROFILE")
     try:
         def sv_repo(name, mc="1.21.1", lib_dep=None, conflict=False):

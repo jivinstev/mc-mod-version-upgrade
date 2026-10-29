@@ -31,7 +31,10 @@ prints the fields to paste into CurseForge's create-project form (CurseForge has
   - the tag is a full Release (not a pre-release, not a draft) published by this fork's own CI, and the tag is
     an ancestor of the checked-out port branch;
   - every fix ledger the config lists has a column naming this tag and no S1 mode (crash, kick, hang, save
-    damage, other mods broken) is open in it -- fix-ledger.py's own check;
+    damage, other mods broken) is open in it -- fix-ledger.py's own check (a config listing none skips it: the
+    known-issues ledger is then the fork's one ledger);
+  - every S1 the known-issues ledger records fixed at this version (fixed@<commit>) has that commit in the tag
+    (git merge-base --is-ancestor; a missing fix holds every platform back, as an open S1 does);
   - each dependency that is another fork port already has the version this release was built against published
     on that platform (the pin of the workflow AT THE TAG, or the install manifest when it describes the tag);
   - a release built against a library pre-release that was not done when it was pinned (DEPS.md's "Library
@@ -206,8 +209,9 @@ def ledger_for(repo, mc):
         return None, f"the known-issues ledger {where} is not valid ({e})"
 
 
-def held_back(repo, mc, plats):
-    """{platform: why} for each platform of `plats` an open S1 in the ledger blocks (known-issues.py blocks-publish)."""
+def held_back(repo, mc, plats, tag=None):
+    """{platform: why} for each platform of `plats` the ledger blocks: an open S1 (known-issues.py blocks-publish), or,
+    with `tag`, an S1 recorded fixed at this version whose fix commit the tag does not carry (fixes_missing)."""
     data, err = ledger_for(repo, mc)
     if err:
         return {p: err for p in plats}
@@ -216,9 +220,16 @@ def held_back(repo, mc, plats):
     ki, out = _known_issues(), {}
     for p in plats:
         hit = ki.blocks_publish(data, mc, PLATFORM_KEY[p])
+        why = []
         if hit:
-            out[p] = (f"{len(hit)} open S1 at Minecraft {mc} against the {PLATFORM_KEY[p]} jar in the known-issues ledger: "
-                      + "; ".join(f"{e['id']} {e['title']}" for e in hit))
+            why.append(f"{len(hit)} open S1 at Minecraft {mc} against the {PLATFORM_KEY[p]} jar in the known-issues ledger: "
+                       + "; ".join(f"{e['id']} {e['title']}" for e in hit))
+        gone = ki.fixes_missing(data, mc, tag, repo, PLATFORM_KEY[p]) if tag else []
+        if gone:
+            why.append(f"{len(gone)} S1 recorded fixed at Minecraft {mc} without its fix in {tag}: "
+                       + "; ".join(f"{e['id']} ({w})" for e, w in gone))
+        if why:
+            out[p] = " -- ".join(why)
     return out
 
 
@@ -567,7 +578,7 @@ def publish(repo, tag, dry=False, manual=False, platform=None):
                   "not the original's defects (edit \"differences\" in the config)")
         return 1
     want = asked(platforms(cfg), platform)
-    held = held_back(repo, minecraft_of(tag), [p for p in want if p not in done])
+    held = held_back(repo, minecraft_of(tag), [p for p in want if p not in done], tag)
     for plat in ("modrinth", "curseforge"):
         if plat not in platforms(cfg):
             print(f"::notice::{plat}: no project configured yet -- skipped"); continue
@@ -878,6 +889,22 @@ def self_check():
                "m-2-mc1.21.1", {"body": "x\n\nPlayed by @someone on 2026-10-12."}, "o/f")
     expect(public_text_problems(nt, "https://example.invalid/ok") == [] and "Differences from the original" in nt and "Played by @someone" in nt,
            f"notes are neutral and carry differences: {public_text_problems(nt, 'https://example.invalid/ok')}")
+    # the gate holds a platform back when an S1 the ledger calls fixed at this version has its fix outside the tag
+    import tempfile as _tf, subprocess as _sp
+    with _tf.TemporaryDirectory() as gd:
+        g_ = lambda *a_: _sp.run(["git", "-C", gd, "-c", "user.name=t", "-c", "user.email=t@example.invalid", *a_],
+                                 capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+        g_("init", "-q"); pathlib.Path(gd, "x").write_text("x\n", encoding="utf-8"); g_("add", "-A"); g_("commit", "-qm", "base")
+        g_("tag", "m-1-mc1.21.1"); pathlib.Path(gd, "y").write_text("y\n", encoding="utf-8"); g_("add", "-A")
+        g_("commit", "-qm", "the fix"); fix_ = g_("rev-parse", "HEAD"); g_("tag", "m-2-mc1.21.1")
+        (pathlib.Path(gd) / ".port").mkdir()
+        (pathlib.Path(gd) / ".port/KNOWN-ISSUES.json").write_text(json.dumps({"schema": 1, "issues": [
+            {"id": "KI-1", "title": "a crash", "rubric": {"failure": "crash", "visibility": "common", "reach": "normal",
+             "workaround": False}, "severity": "S1", "override": None, "lowest": "1.21.1",
+             "status": {"1.21.1": f"fixed@{fix_}"}, "source": "player"}]}), encoding="utf-8")
+        h1, h2 = held_back(gd, "1.21.1", ["modrinth", "curseforge"], "m-1-mc1.21.1"), held_back(gd, "1.21.1", ["modrinth"], "m-2-mc1.21.1")
+        expect(set(h1) == {"modrinth", "curseforge"} and "without its fix in m-1-mc1.21.1" in h1["curseforge"] and h2 == {},
+               f"a release without a fixed S1's commit is held back; with it, it goes: {h1} {h2}")
     # the page's Known issues: the ledger's open S2 in its player words, S3 behind the link; neutral public text
     import tempfile
     with tempfile.TemporaryDirectory() as kd:
