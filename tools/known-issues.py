@@ -484,6 +484,23 @@ def fixed_in(repo, commit, tag):
     return {0: True, 1: False}.get(r.returncode)
 
 
+def fixes_missing(data, version, tag, repo, platform=None):
+    """The S1s recorded fixed at `version` (fixed@<commit>) whose fix the release `tag` does not carry: [(issue, why)].
+    git decides (merge-base --is-ancestor): a fix commit that is not in the tag, or that this clone cannot place, is
+    missing -- a release never ships an S1 the ledger calls fixed without proving the fix is in it. This is what the
+    fix-ledger issues' per-release columns asserted by hand; it needs nothing written per release."""
+    out = []
+    for e in sorted(data["issues"], key=order):
+        s = e["status"].get(version, "")
+        if e["severity"] != "S1" or not s.startswith("fixed@") or not applies(e, platform):
+            continue
+        inside = fixed_in(repo, s[6:], tag)
+        if inside is not True:
+            out.append((e, f"its fix {s[6:]} is not in {tag}" if inside is False else
+                           f"git cannot place its fix {s[6:]} against {tag} in this clone"))
+    return out
+
+
 def release_notes(data, version, tag, min_sev="S3", repo=None, platform=None):
     rows = []
     for e in sorted(data["issues"], key=order):
@@ -1953,6 +1970,31 @@ def self_check():
     expect("cosmetic seam" in page(pg, "o/fork", min_sev="S3") and "No major known issues" in
            page({"schema": 1, "issues": pg["issues"][1:]}, "o/fork", "https://example.invalid/k"),
            "page --min S3 lists S3s; with no S2 open it says so, linking --details-url")
+    # a release carries every S1 fix the ledger records at its version: git proves it, nothing is written per release
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as gd:
+        g = lambda *a_: subprocess.run(["git", "-C", gd, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                        "-c", "core.autocrlf=false", *a_], capture_output=True, text=True,
+                                       encoding="utf-8", check=True).stdout.strip()
+        g("init", "-q"); pathlib.Path(gd, "a").write_text("a\n", encoding="utf-8"); g("add", "-A"); g("commit", "-qm", "fix")
+        fix = g("rev-parse", "HEAD"); g("tag", "m-1-mc1.21.4")
+        g("checkout", "-qb", "later"); pathlib.Path(gd, "b").write_text("b\n", encoding="utf-8"); g("add", "-A")
+        g("commit", "-qm", "later fix"); late = g("rev-parse", "HEAD")
+        s1 = lambda st, pl=None: {"id": "KI-9", "title": "a crash", "rubric": R("crash"), "severity": "S1", "override": None,
+                                   "lowest": "1.21.4", "status": st, "source": "player", **({"platforms": pl} if pl else {})}
+        led = {"schema": 1, "issues": [s1({"1.21.4": f"fixed@{fix}"})]}
+        expect(fixes_missing(validate(led), "1.21.4", "m-1-mc1.21.4", gd) == [], "a fix in the tag passes")
+        led = {"schema": 1, "issues": [s1({"1.21.4": f"fixed@{late}"})]}
+        gone = fixes_missing(validate(led), "1.21.4", "m-1-mc1.21.4", gd)
+        expect(len(gone) == 1 and "is not in m-1-mc1.21.4" in gone[0][1], f"a fix made after the tag is missing: {gone}")
+        led = {"schema": 1, "issues": [s1({"1.21.4": "fixed@" + "ab" * 20})]}
+        expect("cannot place" in fixes_missing(validate(led), "1.21.4", "m-1-mc1.21.4", gd)[0][1], "an unknown commit is missing")
+        led = {"schema": 1, "issues": [s1({"1.21.4": f"fixed@{late}"}, ["mr"])]}
+        expect(fixes_missing(validate(led), "1.21.4", "m-1-mc1.21.4", gd, "cf") == []
+               and fixes_missing(validate(led), "1.21.5", "m-1-mc1.21.4", gd) == [],
+               "another platform's S1, or another version's, does not hold this one")
+        led = {"schema": 1, "issues": [{**s1({"1.21.4": f"fixed@{late}"}), "severity": "S2", "rubric": R("functional")}]}
+        expect(fixes_missing(validate(led), "1.21.4", "m-1-mc1.21.4", gd) == [], "only S1s are held to it")
     # the pinned Known issues issue: created (and pinned) once, then updated in place; the page links it
     calls, store = [], {}
     def fake(path, method="GET", data=None):

@@ -121,7 +121,11 @@ Dispatch Port CI with `publish = <tag>`. The job refuses, and uploads nothing, u
 - the config has a permission link;
 - the tag is a full Release published by the fork's own CI, built from the port branch;
 - every listed fix ledger has a column naming this tag (a column can be `<lib tag> + <mod tag>`) and no S1 mode is
-  open in it -- `fix-ledger.py check`. A tag no column names is refused too: a check against nothing checks nothing;
+  open in it -- `fix-ledger.py check`. A tag no column names is refused too: a check against nothing checks nothing.
+  A fork that lists no `ledger_issues` (its known-issues ledger is its only ledger) skips this check;
+- every S1 the known-issues ledger records fixed at this version (`fixed@<commit>`) has that commit in the tag --
+  git proves it (`merge-base --is-ancestor`), so nothing is written per release; a fix missing, or a commit the
+  clone cannot place, holds every platform back;
 - a dependency that is another fork port already has its pinned release published on that platform (so publish
   the library first). "Pinned" means the dependency the release was promoted with, as the install manifest records
   it when it describes this tag, else the pin of the workflow AT THE TAG -- never the branch's current pin, which
