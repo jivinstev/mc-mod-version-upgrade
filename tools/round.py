@@ -862,7 +862,7 @@ def cmd_init(a):
                 print(f"round: --through {slug}={t}: not one of its versions ({', '.join([base] + vs)})")
                 return 2
             forks[slug]["versions"] = vs[:vs.index(t) + 1] if t in vs else []
-            forks[slug]["through"] = t
+            forks[slug]["through"], forks[slug]["ladder"] = t, vs     # the whole ladder: what ci-check regenerates
         fz_f = next((x for x in frozen["forks"] if x["repo"] == slug), {})
         fixes = fz_f.get("fixes") or [{"id": i, "at": base} for i in fz_f.get("selected", [])]
         if kind == "single":
@@ -1658,7 +1658,7 @@ def push_ci_regen(st, it):
     round -- nothing else would push it, and the clone would diverge from origin. Only commits that change .github/
     alone go out this way; anything else on such a branch stops here. -> the branches pushed."""
     F, d, pushed = st.fork(it["fork"]), st.fork(it["fork"])["dir"], []
-    for v in [F["base"]] + F["versions"]:
+    for v in [F["base"]] + F.get("ladder", F["versions"]):     # a trial round's versions above --through too
         br = F["head"] if v == F["base"] else f"neoforge-{v}"
         if git(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{br}").returncode:
             continue
@@ -4342,6 +4342,10 @@ def self_check():
                f"--through: the ladder stops at the version, a fork left out has no item: {[it['id'] for it in items]}")
         rc, o, _ = init(fz(), cfg, both, state, through=[f"{LIB}=1.21.9"])
         expect(rc == 2 and "not one of its versions" in o, f"--through a version the fork has not: refused: {o}")
+        rc, o, _ = init(fz(), cfg, both, state, through=[f"{LIB}=1.21.4"])
+        F_t = json.loads(pathlib.Path(state).read_text(encoding="utf-8"))["forks"][LIB]
+        expect(rc == 0 and F_t["versions"] == ["1.21.4"] and F_t["ladder"][-1] == "1.21.8",
+               f"--through keeps the whole ladder for ci-check's regeneration pushes: {F_t.get('versions')} {F_t.get('ladder')}")
         rc, o, items = init(fz(), cfg, both, state)
         expect(rc == 0 and "owner/examplelib: branches 1.21.1..1.21.8" in o, f"init: {rc} {o}")
         ids = [it["id"] for it in items]
