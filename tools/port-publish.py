@@ -805,7 +805,9 @@ def setup(repo, permission, branch, out=None, ledgers=(), differences=()):
     credits = str(mod.get("credits", "")).strip()
     where = [*([f"[Modrinth](https://modrinth.com/mod/{orig['slug']})"] if orig else []),
              *([f"[CurseForge]({orig_cf})"] if orig_cf else []), *([f"[source]({up})"] if up else [])]
-    lines = [f"# {title}", "",
+    # The page heading names the loader, like the CurseForge project name: the same body is pasted on CurseForge,
+    # which refuses game version numbers in a name, and the Scope line below gives the versions.
+    lines = [f"# {curseforge_name(name)}", "",
              *([f"**The original:** {name} by {authors} -- {' · '.join(where)}", ""] if where else []),
              f"**Unofficial.** A community-maintained port of **{name}** by **{authors}** to NeoForge {mc}. "
              f"It is not made or supported by {authors}: please report problems with this port "
